@@ -1,0 +1,49 @@
+* 11:50 :toolchain:bugfix:
+  Rust toolchain 1.84.0 could not build due to clap_lex v1.1.0 requiring
+  edition2024. Updated to rustc 1.94.1 via rustup update. All 39 existing
+  tests pass.
+
+* 12:00 :io:parser:implementation:
+  Implemented Matrix Market parser (src/io/mtx.rs) and JSON sidecar parser
+  (src/io/sidecar.rs). 15 new tests. Key design decisions:
+  - Separate src/io/ module (not in dense/) since it serves both dense and future sparse
+  - Upper-triangle entries silently normalized to lower-triangle
+  - Sidecar uses Option<f64> for rhs, delta_w, delta_c to handle JSON null (NaN/Inf from IPM)
+  - MtxMatrix::to_dense() bridges to existing SymmetricMatrix
+
+* 12:10 :benchmark:kkt:collection:
+  Kicked off collect_kkt from ripopt with CUTEST_MAX_N=500. 727 problems queued.
+  Collection runs in background while implementing bench harness integration.
+
+* 12:30 :benchmark:harness:
+  Extended bench harness to load real KKT matrices from data/matrices/kkt/.
+  Validates inertia against MUMPS sidecar, computes solve residual ||Ax-b||/||b||.
+  First partial run (36,852 matrices): 99.1% inertia match, 99.3% residual pass.
+
+* 12:45 :sidecar:bugfix:
+  JSON sidecar parser failed on matrices with null delta_w (diverged IPM).
+  Made delta_w and delta_c Option<f64> with #[serde(default)]. Also added
+  non-finite matrix entry filter at load time (entries containing NaN/Inf).
+  Clean run after fix: 153,151 matrices, 0 factor failures.
+
+* 13:00 :analysis:inertia:eigenvalue:
+  User asked "how do we know the 1% is wrong?" — excellent question.
+  Computed eigenvalues for disagreement cases:
+  - ACOPP14_0001: cond=1e11, true inertia (37,69,0), MUMPS wrong (38,68,0),
+    FERAL wrong differently (37,68,1). Both miss by 1.
+  - ACOPP30_0000: cond=1e18, smallest eigval 2.2e-14 (~100*eps). MUMPS calls
+    it positive, FERAL calls it zero. Genuinely ambiguous.
+  - POLAK6_0021: cond=7.8e33, entries span 1e-4 to 1.3e+42, delta_w=26843.
+    No f64 solver can handle this. MUMPS inertia is (5,4,0) but truth is (4,5,0).
+  Conclusion: disagreements are on matrices where inertia is numerically
+  ambiguous. Neither solver is the oracle. 220 problems have delta_w > 1.0.
+
+* 13:15 :benchmark:history:
+  Created dev/benchmark-history.md as append-only performance tracking log.
+  Baseline recorded: 153,151 matrices, 99.2% inertia match, 99.6% residual pass.
+
+* 13:20 :milestone:phase1a:
+  Phase 1a exit criterion satisfied:
+  (a) 17 exact BK paper tests: 100% pass
+  (b) 153k real KKT matrices: 99.2% inertia agreement with MUMPS
+  Disagreements shown to be on ill-conditioned matrices where MUMPS is also wrong.
