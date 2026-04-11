@@ -41,6 +41,7 @@ impl Default for BunchKaufmanParams {
 }
 
 /// Factorization result: P·L·D_bk·Lᵀ·Pᵀ = D_eq·A·D_eq.
+#[derive(Debug)]
 pub struct Factors {
     pub n: usize,
     /// Unit lower triangular L in full n×n column-major storage.
