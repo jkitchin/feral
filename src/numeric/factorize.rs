@@ -1,4 +1,6 @@
-use crate::dense::factor::{factor, BunchKaufmanParams};
+use crate::dense::factor::{factor_frontal, BunchKaufmanParams, FrontalFactors};
+#[cfg(test)]
+use crate::dense::factor::factor;
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
 use crate::inertia::Inertia;
@@ -39,10 +41,9 @@ pub struct NodeFactors {
     pub nrow: usize,
     /// Row indices of the frontal (length nrow).
     pub row_indices: Vec<usize>,
-    /// The dense factors from BK factorization of this frontal.
-    /// Stored as the full factor output from the dense kernel.
-    pub dense_factors: crate::dense::factor::Factors,
-    /// Inertia of this node.
+    /// The frontal factors from partial BK factorization.
+    pub frontal_factors: FrontalFactors,
+    /// Inertia of this node's eliminated pivots.
     pub inertia: Inertia,
 }
 
@@ -67,6 +68,9 @@ pub fn factorize_multifrontal(
     // Permute the matrix values into the new ordering
     let permuted = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv);
 
+    // Full symmetric pattern for correct row index computation
+    let full_pattern = permuted.symmetric_pattern();
+
     // Storage for contribution blocks (one per supernode, freed after parent assembly)
     let mut contrib_blocks: Vec<Option<ContribBlock>> = (0..n_snodes).map(|_| None).collect();
 
@@ -90,14 +94,21 @@ pub fn factorize_multifrontal(
                 ncol: 0,
                 nrow: 0,
                 row_indices: Vec::new(),
-                dense_factors: empty_factors(),
+                frontal_factors: FrontalFactors {
+                    nrow: 0, ncol: 0, l: Vec::new(),
+                    d_diag: Vec::new(), d_subdiag: Vec::new(),
+                    perm: Vec::new(), perm_inv: Vec::new(),
+                    contrib: Vec::new(), contrib_dim: 0,
+                    inertia: Inertia { positive: 0, negative: 0, zero: 0 },
+                    needs_refinement: false,
+                },
                 inertia: Inertia { positive: 0, negative: 0, zero: 0 },
             });
             continue;
         }
 
         // Build the row indices for this frontal
-        let row_indices = build_row_indices(snode, &permuted, &symbolic.supernodes, &contrib_blocks);
+        let row_indices = build_row_indices(snode, &full_pattern, &contrib_blocks);
         let actual_nrow = row_indices.len();
 
         // Build a map from global row index to local frontal row index
@@ -106,9 +117,52 @@ pub fn factorize_multifrontal(
             row_map[global] = local;
         }
 
-        // Step 1: Assemble original matrix entries into frontal
+        // Step 1: Assemble original matrix entries into frontal.
+        // Each CSC entry (row, col) with row >= col represents A(row,col).
+        // This entry should be assembled at the frontal that eliminates
+        // column min(row,col) = col. We assemble it here if col is one of
+        // our eliminated columns.
+        //
+        // Additionally, entries where `row` is one of our eliminated columns
+        // (but `col` is not) represent A(col, row) by symmetry and should
+        // also be assembled here.
         let mut frontal = SymmetricMatrix::zeros(actual_nrow);
-        assemble_original(&permuted, &row_indices, &row_map, ncol, &mut frontal);
+
+        // Determine which global columns are eliminated at this supernode
+        let mut is_eliminated = vec![false; n];
+        for local_j in 0..ncol {
+            is_eliminated[row_indices[local_j]] = true;
+        }
+
+        // Scan all CSC entries
+        for col in 0..n {
+            for k in permuted.col_ptr[col]..permuted.col_ptr[col + 1] {
+                let row = permuted.row_idx[k];
+                // Assemble if col OR row is one of our eliminated columns
+                let col_elim = is_eliminated[col];
+                let row_elim = is_eliminated[row];
+                if !col_elim && !row_elim {
+                    continue;
+                }
+                let local_col = row_map[col];
+                let local_row = row_map[row];
+                if local_col == usize::MAX || local_row == usize::MAX {
+                    continue;
+                }
+                let val = permuted.values[k];
+                // Place in the frontal's lower triangle
+                if local_row >= local_col {
+                    frontal.set(local_row, local_col, frontal.get(local_row, local_col) + val);
+                } else {
+                    frontal.set(local_col, local_row, frontal.get(local_col, local_row) + val);
+                }
+            }
+        }
+
+        // Clean up
+        for local_j in 0..ncol {
+            is_eliminated[row_indices[local_j]] = false;
+        }
 
         // Step 2: Assemble child contribution blocks (extend-add)
         for &child_idx in &snode.children {
@@ -117,24 +171,30 @@ pub fn factorize_multifrontal(
             }
         }
 
-        // Step 3: Factor the frontal with the dense BK kernel
-        let (factors, _full_inertia) = factor(&frontal, params)?;
+        // Step 3: Factor the frontal, eliminating only ncol columns.
+        // Pivot search is restricted to the first ncol rows. Rows ncol..nrow
+        // are never swapped, preserving contribution block row ordering.
+        let ff = factor_frontal(&frontal, ncol, params)?;
 
-        // Step 4: Extract contribution block
-        if actual_nrow > ncol {
-            let contrib = extract_contribution(&factors, ncol, actual_nrow, &row_indices);
-            contrib_blocks[snode_idx] = Some(contrib);
+        // Extract what we need before moving ff
+        let node_inertia = ff.inertia.clone();
+        let node_needs_ref = ff.needs_refinement;
+
+        // Step 4: Store contribution block (Schur complement) for parent
+        if ff.contrib_dim > 0 {
+            contrib_blocks[snode_idx] = Some(ContribBlock {
+                row_indices: row_indices[ncol..].to_vec(),
+                data: ff.contrib.clone(),
+                dim: ff.contrib_dim,
+            });
         }
 
-        // Accumulate inertia from only the first ncol pivots
-        // (the remaining nrow-ncol are the contribution block,
-        // whose inertia will be counted when the parent factors them)
-        let node_inertia = count_inertia_partial(&factors, ncol);
+        // Accumulate inertia
         total_inertia.positive += node_inertia.positive;
         total_inertia.negative += node_inertia.negative;
         total_inertia.zero += node_inertia.zero;
 
-        if node_inertia.zero > 0 {
+        if node_needs_ref {
             needs_refinement = true;
         }
 
@@ -148,7 +208,7 @@ pub fn factorize_multifrontal(
             ncol,
             nrow: actual_nrow,
             row_indices,
-            dense_factors: factors,
+            frontal_factors: ff,
             inertia: node_inertia,
         });
     }
@@ -200,14 +260,13 @@ fn permute_csc_values(
         .expect("permute_csc_values: failed to build CSC")
 }
 
-/// Build row indices for a frontal matrix by combining:
-/// - The eliminated columns of this supernode
-/// - Row indices from the original matrix for those columns
-/// - Row indices from child contribution blocks
+/// Build row indices for a frontal matrix.
+///
+/// Uses the full symmetric pattern to find all rows connected to
+/// the eliminated columns, plus rows from child contribution blocks.
 fn build_row_indices(
     snode: &crate::symbolic::supernode::Supernode,
-    permuted: &CscMatrix,
-    all_snodes: &[crate::symbolic::supernode::Supernode],
+    full_pattern: &crate::sparse::csc::CscPattern,
     contrib_blocks: &[Option<ContribBlock>],
 ) -> Vec<usize> {
     let ncol = snode.ncol();
@@ -215,15 +274,11 @@ fn build_row_indices(
 
     let mut rows = std::collections::BTreeSet::new();
 
-    // The eliminated columns themselves
+    // All rows connected to eliminated columns via the full symmetric pattern
+    // (includes both lower and upper triangle connections)
     for j in first_col..first_col + ncol {
-        rows.insert(j);
-    }
-
-    // Row indices from the original matrix (lower triangle)
-    for j in first_col..first_col + ncol {
-        for k in permuted.col_ptr[j]..permuted.col_ptr[j + 1] {
-            rows.insert(permuted.row_idx[k]);
+        for k in full_pattern.col_ptr[j]..full_pattern.col_ptr[j + 1] {
+            rows.insert(full_pattern.row_idx[k]);
         }
     }
 
@@ -234,56 +289,9 @@ fn build_row_indices(
                 rows.insert(row);
             }
         }
-        // Also add rows from child supernodes' non-eliminated rows
-        let child = &all_snodes[child_idx];
-        for &row in &child.row_indices {
-            if row >= first_col + ncol || row < first_col {
-                // This row is outside our eliminated columns — it may
-                // need to be in our frontal
-            }
-        }
     }
-
 
     rows.into_iter().collect()
-}
-
-/// Assemble original matrix entries into the frontal matrix.
-///
-/// Scans the permuted CSC matrix for all entries where both row and column
-/// are in this frontal's row index set. Places each entry in the lower
-/// triangle of the frontal.
-fn assemble_original(
-    permuted: &CscMatrix,
-    _row_indices: &[usize],
-    row_map: &[usize],
-    _ncol: usize,
-    frontal: &mut SymmetricMatrix,
-) {
-    let n = permuted.n;
-
-    for col in 0..n {
-        let local_col = row_map[col];
-        if local_col == usize::MAX {
-            continue;
-        }
-        for k in permuted.col_ptr[col]..permuted.col_ptr[col + 1] {
-            let row = permuted.row_idx[k];
-            let local_row = row_map[row];
-            if local_row == usize::MAX {
-                continue;
-            }
-            let val = permuted.values[k];
-
-            // CSC entry is (row, col) with row >= col (lower triangle).
-            // Place in the frontal's lower triangle.
-            if local_row >= local_col {
-                frontal.set(local_row, local_col, frontal.get(local_row, local_col) + val);
-            } else {
-                frontal.set(local_col, local_row, frontal.get(local_col, local_row) + val);
-            }
-        }
-    }
 }
 
 /// Contribution block from a child supernode.
@@ -322,213 +330,6 @@ fn extend_add(contrib: &ContribBlock, parent_row_map: &[usize], frontal: &mut Sy
                 frontal.set(parent_j, parent_i, frontal.get(parent_j, parent_i) + val);
             }
         }
-    }
-}
-
-/// Extract the contribution block (Schur complement) from the factored frontal.
-///
-/// After BK factorization of an nrow×nrow frontal with ncol pivots,
-/// the contribution block is the (nrow-ncol)×(nrow-ncol) Schur complement
-/// in the lower-right corner.
-///
-/// The Schur complement S = A22 - A21 * D^{-1} * L^{-1} * ... but we can
-/// extract it more simply: the dense factor already computed the full
-/// factorization. The contribution block entries are:
-///   S(i,j) = frontal(ncol+i, ncol+j) - sum of updates from eliminated pivots
-///
-/// Actually, the simplest correct approach: reconstruct the Schur complement
-/// from the factored frontal. The L and D factors contain the full information.
-/// S = A22 - L21 * D * L21^T where L21 is the off-diagonal part of L.
-fn extract_contribution(
-    factors: &crate::dense::factor::Factors,
-    ncol: usize,
-    nrow: usize,
-    row_indices: &[usize],
-) -> ContribBlock {
-    let cdim = nrow - ncol;
-    let mut data = vec![0.0f64; cdim * cdim];
-
-    // The Schur complement is stored in the lower-right (nrow-ncol)×(nrow-ncol)
-    // block of the factored matrix. After LDL^T factorization of the full
-    // frontal, the trailing block contains A22 - L21*D*L21^T.
-    //
-    // In our dense factor, the work array contains the modified matrix.
-    // The Schur complement is the unfactored trailing block.
-    // We can access it through the factors' internal data.
-    //
-    // Since the dense factor works on the full matrix and we need the
-    // Schur complement, we reconstruct it: S_ij = original_A_ij - sum of
-    // updates from the first ncol pivots.
-    //
-    // Simpler approach: the dense BK kernel modifies the matrix in-place.
-    // After factoring ncol pivots, the remaining (nrow-ncol)×(nrow-ncol)
-    // block in the work array IS the Schur complement.
-    // Access it from factors.work_data (the modified matrix storage).
-
-    // The factors store L in the lower triangle and D on the diagonal.
-    // The Schur complement is in the unfactored trailing block of the
-    // work matrix. We can reconstruct it by looking at what's left.
-    //
-    // For now, compute S = A22 - L21 * D * L21^T explicitly.
-    // L21 is rows ncol..nrow, cols 0..ncol of the L factor.
-    // D is the block diagonal from the first ncol pivots.
-
-    // Get L21 and D from the factors
-    let l = &factors.l;
-    let d_diag = &factors.d_diag;
-    let d_subdiag = &factors.d_subdiag;
-    let n_full = factors.n;
-
-    // L21: rows ncol..nrow, cols 0..ncol (in permuted order)
-    // Compute L21 * D * L21^T
-    for cj in 0..cdim {
-        for ci in cj..cdim {
-            let mut s = 0.0;
-            let pi = ncol + ci;
-            let pj = ncol + cj;
-
-            // Walk through pivots
-            let mut k = 0;
-            while k < ncol {
-                if k + 1 < ncol && d_subdiag[k] != 0.0 {
-                    // 2×2 pivot at (k, k+1)
-                    let d11 = d_diag[k];
-                    let d21 = d_subdiag[k];
-                    let d22 = d_diag[k + 1];
-
-                    let l_i_k = l[k * n_full + pi];
-                    let l_i_k1 = l[(k + 1) * n_full + pi];
-                    let l_j_k = l[k * n_full + pj];
-                    let l_j_k1 = l[(k + 1) * n_full + pj];
-
-                    // (L21 * D)_ik = L_ik * D_kk + L_i(k+1) * D_(k+1)k
-                    let ld_i_k = l_i_k * d11 + l_i_k1 * d21;
-                    let ld_i_k1 = l_i_k * d21 + l_i_k1 * d22;
-
-                    s += ld_i_k * l_j_k + ld_i_k1 * l_j_k1;
-                    k += 2;
-                } else {
-                    // 1×1 pivot at k
-                    let d_k = d_diag[k];
-                    let l_ik = l[k * n_full + pi];
-                    let l_jk = l[k * n_full + pj];
-                    s += l_ik * d_k * l_jk;
-                    k += 1;
-                }
-            }
-
-            data[cj * cdim + ci] = -s; // Schur complement = A22 - L21*D*L21^T
-            // But we need to ADD the original A22 entries, which were already
-            // assembled in the frontal. The factored matrix's trailing block
-            // is A22 - L21*D*L21^T, which is exactly what we want.
-            // However, the dense factor overwrites the full matrix.
-            // We need to get the trailing block from the factor storage.
-        }
-    }
-
-    // Actually, the simplest correct approach: we factored the full nrow×nrow
-    // frontal. The trailing (nrow-ncol)×(nrow-ncol) block after the first
-    // ncol pivots IS the Schur complement. It's stored in the factors'
-    // internal L storage in the lower-right corner.
-    //
-    // In our dense BK implementation, after factoring, the work matrix
-    // contains: L in the strict lower triangle, D on diagonal/subdiagonal.
-    // The trailing block (rows/cols ncol..nrow) of the work matrix is the
-    // Schur complement — it was updated by all ncol rank-1/rank-2 updates.
-    //
-    // Access it directly from l (which stores the modified matrix).
-    for cj in 0..cdim {
-        for ci in cj..cdim {
-            let pi = ncol + ci;
-            let pj = ncol + cj;
-            // The trailing block of l contains the Schur complement
-            // (the updates from factoring the first ncol pivots have been
-            // applied to this region but it hasn't been factored itself)
-            data[cj * cdim + ci] = l[pj * n_full + pi];
-        }
-    }
-
-    ContribBlock {
-        row_indices: row_indices[ncol..].to_vec(),
-        data,
-        dim: cdim,
-    }
-}
-
-/// Count inertia from only the first `ncol` pivots of a dense factorization.
-fn count_inertia_partial(
-    factors: &crate::dense::factor::Factors,
-    ncol: usize,
-) -> Inertia {
-    let mut pos = 0usize;
-    let mut neg = 0usize;
-    let mut zero = 0usize;
-
-    let mut k = 0;
-    while k < ncol {
-        if k + 1 < ncol && factors.d_subdiag[k] != 0.0 {
-            // 2×2 block: eigenvalues from det and trace
-            let a = factors.d_diag[k];
-            let c = factors.d_diag[k + 1];
-            let b = factors.d_subdiag[k];
-            let det = a * c - b * b;
-            let trace = a + c;
-
-            if det > 0.0 {
-                // Both eigenvalues have the same sign = sign of trace
-                if trace > 0.0 {
-                    pos += 2;
-                } else {
-                    neg += 2;
-                }
-            } else if det < 0.0 {
-                // One positive, one negative
-                pos += 1;
-                neg += 1;
-            } else {
-                // det == 0: at least one zero eigenvalue
-                zero += 1;
-                if trace > 0.0 {
-                    pos += 1;
-                } else if trace < 0.0 {
-                    neg += 1;
-                } else {
-                    zero += 1;
-                }
-            }
-            k += 2;
-        } else {
-            // 1×1 block
-            let d = factors.d_diag[k];
-            if d > 0.0 {
-                pos += 1;
-            } else if d < 0.0 {
-                neg += 1;
-            } else {
-                zero += 1;
-            }
-            k += 1;
-        }
-    }
-
-    Inertia {
-        positive: pos,
-        negative: neg,
-        zero,
-    }
-}
-
-/// Create empty factors for a zero-size node.
-fn empty_factors() -> crate::dense::factor::Factors {
-    crate::dense::factor::Factors {
-        n: 0,
-        l: Vec::new(),
-        d_diag: Vec::new(),
-        d_subdiag: Vec::new(),
-        perm: Vec::new(),
-        perm_inv: Vec::new(),
-        d_eq: Vec::new(),
-        needs_refinement: false,
     }
 }
 

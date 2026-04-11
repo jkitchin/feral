@@ -28,32 +28,33 @@ impl EliminationTree {
     pub fn from_pattern(pattern: &CscPattern) -> Self {
         let n = pattern.n;
         let mut parent: Vec<Option<usize>> = vec![None; n];
-        let mut ancestor = vec![0usize; n]; // for path compression
+        let mut ancestor = vec![0usize; n]; // union-find forest
 
         for j in 0..n {
-            ancestor[j] = j;
+            ancestor[j] = j; // j is its own root initially
             for k in pattern.col_ptr[j]..pattern.col_ptr[j + 1] {
                 let i = pattern.row_idx[k];
                 if i >= j {
-                    continue; // only process upper triangle (i < j)
+                    continue; // only process entries with i < j
                 }
 
-                // Walk from i up the tree, compressing the path to j
+                // Find the root of i's subtree (with path compression)
+                let mut r = i;
+                while ancestor[r] != r {
+                    r = ancestor[r];
+                }
+                // Path compression: make all nodes on the path point to r
                 let mut node = i;
-                loop {
+                while node != r {
                     let next = ancestor[node];
-                    if next == j {
-                        break; // already connected to j
-                    }
-                    ancestor[node] = j; // path compression: point to j
-                    if next == node || parent[next].is_none() && next != j {
-                        // Reached a root — make j its parent
-                        if parent[next].is_none() || parent[next] == Some(next) {
-                            parent[next] = Some(j);
-                        }
-                        break;
-                    }
+                    ancestor[node] = r;
                     node = next;
+                }
+
+                // If r != j, make j the parent of r
+                if r != j {
+                    parent[r] = Some(j);
+                    ancestor[r] = j; // union: attach r's tree under j
                 }
             }
         }

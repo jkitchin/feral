@@ -68,6 +68,9 @@ impl Supernode {
 ///    (i.e., same row structure minus the eliminated columns)
 /// 2. Size-based: both parent AND child have < nemin columns.
 ///
+/// `col_row_indices` provides the actual row indices for each column of L
+/// (used to build correct frontal row index sets).
+///
 /// Returns supernodes in postorder (children before parents).
 pub fn find_supernodes(
     etree: &EliminationTree,
@@ -84,15 +87,27 @@ pub fn find_supernodes(
     let mut snode_id = vec![0usize; n];
     let mut snode_starts: Vec<usize> = Vec::new();
 
+    // Count how many children each node has in the etree
+    let mut n_children = vec![0usize; n];
+    for j in 0..n {
+        if let Some(p) = etree.parent[j] {
+            n_children[p] += 1;
+        }
+    }
+
     snode_starts.push(0);
     snode_id[0] = 0;
 
     for j in 1..n {
-        // Column j starts a new supernode unless:
-        // 1. parent[j-1] == j (j-1's only child is j in the chain)
-        // 2. col_counts[j] == col_counts[j-1] - 1 (same structure minus one row)
+        // Column j starts a new supernode unless ALL conditions hold:
+        // 1. parent[j-1] == j (j-1 is a child of j in the etree)
+        // 2. col_counts[j] == col_counts[j-1] - 1 (same row structure minus one row)
+        // 3. j has exactly one child in the etree (j-1 is its only child)
+        //    This prevents chaining across disconnected components where
+        //    col_count conditions happen to match spuriously.
         let same_snode = etree.parent[j - 1] == Some(j)
-            && col_counts[j] + 1 == col_counts[j - 1];
+            && col_counts[j] + 1 == col_counts[j - 1]
+            && n_children[j] == 1;
 
         if same_snode {
             snode_id[j] = snode_id[j - 1];
@@ -126,10 +141,11 @@ pub fn find_supernodes(
     // Track the actual first column of each supernode (may change during merging)
     let mut snode_first_col: Vec<usize> = snode_starts.clone();
 
-    for s in 0..n_snodes {
-        if let Some(p) = snode_parent[s] {
-            if merged_into[s].is_some() {
-                continue; // already merged
+    for (s, sp) in snode_parent.iter().enumerate() {
+        if let Some(p) = sp {
+            let p = *p;
+            if find_root(s, &merged_into) != s {
+                continue; // already merged into another node
             }
 
             let child_ncol = effective_ncol(s, &snode_ncols, &merged_into);
