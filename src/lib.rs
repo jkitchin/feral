@@ -4,6 +4,7 @@ pub mod inertia;
 pub mod io;
 pub mod ordering;
 pub mod sparse;
+pub mod symbolic;
 
 // Flat public API re-exported at crate root:
 pub use dense::factor::{factor, BunchKaufmanParams, Factors, ZeroPivotAction};

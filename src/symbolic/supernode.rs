@@ -1,0 +1,412 @@
+use crate::ordering::elimination_tree::EliminationTree;
+
+/// Parameters controlling supernode amalgamation.
+pub struct SupernodeParams {
+    /// Minimum number of eliminated columns in a supernode. Nodes with
+    /// fewer eliminations are candidates for merging with their parent.
+    /// Default: 32 (matching SSIDS). MUMPS uses 5.
+    /// Setting nemin=1 effectively disables amalgamation.
+    pub nemin: usize,
+}
+
+impl Default for SupernodeParams {
+    fn default() -> Self {
+        Self { nemin: 32 }
+    }
+}
+
+/// A supernode in the assembly tree.
+#[derive(Debug, Clone)]
+pub struct Supernode {
+    /// Range of columns eliminated in this supernode (in the postordered numbering).
+    /// The number of eliminated columns is `cols.end - cols.start`.
+    pub first_col: usize,
+    pub ncol: usize,
+    /// Total number of rows in the frontal matrix (nrow >= ncol).
+    pub nrow: usize,
+    /// Row indices of the frontal matrix (length nrow).
+    /// The first `ncol` entries are the eliminated columns themselves;
+    /// the remaining `nrow - ncol` are the non-eliminated rows that form
+    /// the contribution block.
+    pub row_indices: Vec<usize>,
+    /// Children supernode indices.
+    pub children: Vec<usize>,
+}
+
+impl Supernode {
+    /// Number of eliminated columns.
+    #[inline]
+    pub fn ncol(&self) -> usize {
+        self.ncol
+    }
+
+    /// Number of rows in the contribution block.
+    #[inline]
+    pub fn contrib_nrow(&self) -> usize {
+        self.nrow - self.ncol
+    }
+
+    /// Size of the contribution block in f64 entries.
+    #[inline]
+    pub fn contrib_size(&self) -> usize {
+        let cn = self.contrib_nrow();
+        cn * cn
+    }
+}
+
+/// Detect fundamental supernodes and apply amalgamation.
+///
+/// A fundamental supernode is a maximal set of consecutive columns j, j+1, ..., j+k
+/// where each column's row structure is identical (the same set of row indices,
+/// minus the column being eliminated). This is detected by checking that:
+/// 1. Column j+1 has exactly one more nonzero than column j (the new diagonal).
+/// 2. The parent of j in the elimination tree is j+1.
+///
+/// After detecting fundamental supernodes, amalgamation merges small nodes
+/// using the SSIDS merge rule:
+/// 1. Trivial chain: parent has exactly 1 column AND parent nrow == child nrow - child ncol + parent ncol.
+///    (i.e., same row structure minus the eliminated columns)
+/// 2. Size-based: both parent AND child have < nemin columns.
+///
+/// Returns supernodes in postorder (children before parents).
+pub fn find_supernodes(
+    etree: &EliminationTree,
+    col_counts: &[usize],
+    params: &SupernodeParams,
+) -> Vec<Supernode> {
+    let n = etree.n;
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // Step 1: Find fundamental supernodes
+    // snode_id[j] = which supernode column j belongs to
+    let mut snode_id = vec![0usize; n];
+    let mut snode_starts: Vec<usize> = Vec::new();
+
+    snode_starts.push(0);
+    snode_id[0] = 0;
+
+    for j in 1..n {
+        // Column j starts a new supernode unless:
+        // 1. parent[j-1] == j (j-1's only child is j in the chain)
+        // 2. col_counts[j] == col_counts[j-1] - 1 (same structure minus one row)
+        let same_snode = etree.parent[j - 1] == Some(j)
+            && col_counts[j] + 1 == col_counts[j - 1];
+
+        if same_snode {
+            snode_id[j] = snode_id[j - 1];
+        } else {
+            snode_id[j] = snode_starts.len();
+            snode_starts.push(j);
+        }
+    }
+
+    let n_snodes = snode_starts.len();
+
+    // Compute supernode sizes and parent relationships
+    let mut snode_ncols = vec![0usize; n_snodes];
+    let mut snode_parent: Vec<Option<usize>> = vec![None; n_snodes];
+
+    for j in 0..n {
+        snode_ncols[snode_id[j]] += 1;
+    }
+
+    // Parent of a supernode = supernode containing the parent of its last column
+    for s in 0..n_snodes {
+        let last_col = snode_starts[s] + snode_ncols[s] - 1;
+        if let Some(p) = etree.parent[last_col] {
+            snode_parent[s] = Some(snode_id[p]);
+        }
+    }
+
+    // Step 2: Amalgamation
+    // Track which supernodes are merged (absorbed into parent)
+    let mut merged_into = vec![None::<usize>; n_snodes];
+    // Track the actual first column of each supernode (may change during merging)
+    let mut snode_first_col: Vec<usize> = snode_starts.clone();
+
+    for s in 0..n_snodes {
+        if let Some(p) = snode_parent[s] {
+            if merged_into[s].is_some() {
+                continue; // already merged
+            }
+
+            let child_ncol = effective_ncol(s, &snode_ncols, &merged_into);
+            let parent_ncol = effective_ncol(p, &snode_ncols, &merged_into);
+
+            // SSIDS merge rule:
+            // 1. Trivial chain: parent has exactly 1 col AND parent's column
+            //    count == child's last column count - 1 (same row structure
+            //    minus one eliminated column)
+            let trivial_chain = parent_ncol == 1 && {
+                let root_s = find_root(s, &merged_into);
+                let child_last = snode_first_col[root_s] + snode_ncols[root_s] - 1;
+                let root_p = find_root(p, &merged_into);
+                let parent_first = snode_first_col[root_p];
+                col_counts[parent_first] + 1 == col_counts[child_last]
+            };
+
+            // 2. Size-based: both have < nemin columns
+            let size_based = child_ncol < params.nemin && parent_ncol < params.nemin;
+
+            if trivial_chain || size_based {
+                let root_p = find_root(p, &merged_into);
+                let root_s = find_root(s, &merged_into);
+                merged_into[root_s] = Some(root_p);
+                // Transfer columns to parent and update first column
+                snode_ncols[root_p] += child_ncol;
+                snode_first_col[root_p] = snode_first_col[root_p].min(snode_first_col[root_s]);
+            }
+        }
+    }
+
+    // Step 3: Build final supernode list
+    // Collect non-merged supernodes
+    let mut final_snodes: Vec<Supernode> = Vec::new();
+    let mut new_snode_id = vec![0usize; n_snodes]; // old → new supernode index
+
+    for s in 0..n_snodes {
+        if merged_into[s].is_some() {
+            continue;
+        }
+
+        let first_col = snode_first_col[s];
+        let ncol = snode_ncols[s];
+        // nrow = col_counts[first_col]: number of rows in L for the first
+        // column of this supernode, which gives the frontal matrix height
+        let nrow = col_counts[first_col].max(ncol);
+
+        // Row indices: the first_col..first_col+ncol are the eliminated columns,
+        // plus the remaining rows from col_counts
+        // For now, store just the column range — actual row indices are
+        // determined during symbolic factorization with the full pattern
+        let row_indices = (first_col..first_col + nrow).collect();
+
+        new_snode_id[s] = final_snodes.len();
+
+        final_snodes.push(Supernode {
+            first_col,
+            ncol,
+            nrow,
+            row_indices,
+            children: Vec::new(),
+        });
+
+        // Remap children absorbed into this node
+        for child_s in 0..n_snodes {
+            if find_root(child_s, &merged_into) == s && child_s != s {
+                // This child was merged into s — its columns are now part of s
+            }
+        }
+    }
+
+    // Set children relationships
+    for s in 0..n_snodes {
+        if merged_into[s].is_some() {
+            continue;
+        }
+        if let Some(p) = snode_parent[s] {
+            let root_p = find_root(p, &merged_into);
+            if root_p != s {
+                let new_child = new_snode_id[s];
+                let new_parent = new_snode_id[root_p];
+                final_snodes[new_parent].children.push(new_child);
+            }
+        }
+    }
+
+    final_snodes
+}
+
+/// Find the root of the merge chain for supernode s.
+fn find_root(s: usize, merged_into: &[Option<usize>]) -> usize {
+    let mut node = s;
+    while let Some(parent) = merged_into[node] {
+        node = parent;
+    }
+    node
+}
+
+/// Effective number of columns for a supernode (accounting for merges).
+fn effective_ncol(
+    s: usize,
+    snode_ncols: &[usize],
+    merged_into: &[Option<usize>],
+) -> usize {
+    snode_ncols[find_root(s, merged_into)]
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sparse::csc::CscMatrix;
+    use crate::symbolic::column_counts::column_counts;
+
+    #[test]
+    fn test_supernodes_tridiagonal() {
+        // Tridiagonal 4x4: col_counts = [2, 2, 2, 1]
+        // Columns 2,3 form a fundamental supernode (parent[2]=3, counts[3]+1=counts[2])
+        // Columns 0 and 1 are singletons
+        let m = CscMatrix::from_triplets(
+            4,
+            &[0, 1, 1, 2, 2, 3, 3],
+            &[0, 0, 1, 1, 2, 2, 3],
+            &[1.0; 7],
+        )
+        .unwrap();
+        let pat = m.symmetric_pattern();
+        let etree = EliminationTree::from_pattern(&pat);
+        let counts = column_counts(&pat, &etree);
+
+        // With nemin=1, we get 3 supernodes: {0}, {1}, {2,3}
+        let params = SupernodeParams { nemin: 1 };
+        let snodes = find_supernodes(&etree, &counts, &params);
+        assert_eq!(snodes.len(), 3);
+
+        let total_cols: usize = snodes.iter().map(|s| s.ncol()).sum();
+        assert_eq!(total_cols, 4);
+    }
+
+    #[test]
+    fn test_supernodes_tridiagonal_amalgamated() {
+        // With large nemin, all singletons should be amalgamated into one
+        let m = CscMatrix::from_triplets(
+            4,
+            &[0, 1, 1, 2, 2, 3, 3],
+            &[0, 0, 1, 1, 2, 2, 3],
+            &[1.0; 7],
+        )
+        .unwrap();
+        let pat = m.symmetric_pattern();
+        let etree = EliminationTree::from_pattern(&pat);
+        let counts = column_counts(&pat, &etree);
+
+        let params = SupernodeParams { nemin: 32 };
+        let snodes = find_supernodes(&etree, &counts, &params);
+
+        // All 4 columns should be amalgamated into 1 supernode
+        let total_cols: usize = snodes.iter().map(|s| s.ncol()).sum();
+        assert_eq!(total_cols, 4);
+        assert_eq!(snodes.len(), 1);
+    }
+
+    #[test]
+    fn test_supernodes_dense() {
+        // Dense 3x3: col_counts = [3, 2, 1]
+        // Fundamental: column 1 chains into column 0 (parent[0]=1, counts[1]=counts[0]-1)
+        // Column 2 chains into column 1 (parent[1]=2, counts[2]=counts[1]-1)
+        // So all 3 columns form one fundamental supernode
+        let m = CscMatrix::from_triplets(
+            3,
+            &[0, 1, 2, 1, 2, 2],
+            &[0, 0, 0, 1, 1, 2],
+            &[1.0; 6],
+        )
+        .unwrap();
+        let pat = m.symmetric_pattern();
+        let etree = EliminationTree::from_pattern(&pat);
+        let counts = column_counts(&pat, &etree);
+
+        let params = SupernodeParams { nemin: 1 };
+        let snodes = find_supernodes(&etree, &counts, &params);
+
+        // Should be 1 supernode with 3 columns (fundamental)
+        assert_eq!(snodes.len(), 1);
+        assert_eq!(snodes[0].ncol(), 3);
+        assert_eq!(snodes[0].nrow, 3);
+        assert_eq!(snodes[0].contrib_size(), 0); // no contribution block
+    }
+
+    #[test]
+    fn test_supernodes_block_diagonal() {
+        // Two 2x2 dense blocks: two independent supernodes
+        let m = CscMatrix::from_triplets(
+            4,
+            &[0, 1, 1, 2, 3, 3],
+            &[0, 0, 1, 2, 2, 3],
+            &[1.0; 6],
+        )
+        .unwrap();
+        let pat = m.symmetric_pattern();
+        let etree = EliminationTree::from_pattern(&pat);
+        let counts = column_counts(&pat, &etree);
+
+        let params = SupernodeParams { nemin: 1 };
+        let snodes = find_supernodes(&etree, &counts, &params);
+
+        // Two fundamental supernodes of size 2
+        assert_eq!(snodes.len(), 2);
+        assert_eq!(snodes[0].ncol(), 2);
+        assert_eq!(snodes[1].ncol(), 2);
+    }
+
+    #[test]
+    fn test_supernodes_diagonal_no_amalg() {
+        // Diagonal 4x4 with nemin=1: 4 singletons, no merging possible
+        let m = CscMatrix::from_triplets(
+            4,
+            &[0, 1, 2, 3],
+            &[0, 1, 2, 3],
+            &[1.0; 4],
+        )
+        .unwrap();
+        let pat = m.symmetric_pattern();
+        let etree = EliminationTree::from_pattern(&pat);
+        let counts = column_counts(&pat, &etree);
+
+        let params = SupernodeParams { nemin: 1 };
+        let snodes = find_supernodes(&etree, &counts, &params);
+
+        // Each column is independent (no parents), so 4 supernodes
+        assert_eq!(snodes.len(), 4);
+    }
+
+    #[test]
+    fn test_supernodes_total_columns() {
+        // For any matrix, the total columns across all supernodes should equal n
+        let m = CscMatrix::from_triplets(
+            5,
+            &[0, 1, 2, 3, 4, 1, 2, 3, 4],
+            &[0, 0, 0, 0, 0, 1, 2, 3, 4],
+            &[1.0; 9],
+        )
+        .unwrap();
+        let pat = m.symmetric_pattern();
+        let etree = EliminationTree::from_pattern(&pat);
+        let counts = column_counts(&pat, &etree);
+
+        for nemin in [1, 5, 32] {
+            let params = SupernodeParams { nemin };
+            let snodes = find_supernodes(&etree, &counts, &params);
+            let total: usize = snodes.iter().map(|s| s.ncol()).sum();
+            assert_eq!(total, 5, "nemin={}: total columns {} != 5", nemin, total);
+        }
+    }
+
+    #[test]
+    fn test_supernode_children_valid() {
+        // Verify all child indices are valid
+        let m = CscMatrix::from_triplets(
+            5,
+            &[0, 1, 2, 3, 4, 1, 2, 3, 4],
+            &[0, 0, 0, 0, 0, 1, 2, 3, 4],
+            &[1.0; 9],
+        )
+        .unwrap();
+        let pat = m.symmetric_pattern();
+        let etree = EliminationTree::from_pattern(&pat);
+        let counts = column_counts(&pat, &etree);
+
+        let params = SupernodeParams { nemin: 1 };
+        let snodes = find_supernodes(&etree, &counts, &params);
+
+        for (i, s) in snodes.iter().enumerate() {
+            for &child in &s.children {
+                assert!(child < snodes.len(), "invalid child index");
+                assert!(child < i, "child {} should come before parent {} in postorder", child, i);
+            }
+        }
+    }
+}
