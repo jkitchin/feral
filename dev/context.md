@@ -1,49 +1,43 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-11T14:31:45Z
+Generated: 2026-04-11T15:01:02Z
 
 ## Latest Session
-File: dev/sessions/2026-04-11-01.md
+File: dev/sessions/2026-04-11-02.md
 ```
-# Session 2026-04-11-01
+# Session 2026-04-11-02
 
 ## Goal
-Bootstrap Session 1: initialize project structure and implement the dense LDLᵀ
-factorization with Bunch-Kaufman pivoting per Section 13.2 of the spec.
+Harden Phase 1a: add property-based and stress tests, implement fused
+update+argmax optimization, wire benchmark harness with timing.
 
 ## Accomplished
-- Initialized Cargo project with full directory structure (Section 13.1)
-- Created all dev files, templates, LICENSE, CHANGELOG.md
-- Implemented core data structures: SymmetricMatrix, Inertia, Factors, FeralError,
-  BunchKaufmanParams, ZeroPivotAction — all matching Section 2.5
-- Implemented scalar (unblocked) dense LDLᵀ with full Bunch-Kaufman pivoting:
-  - LAPACK-style 3-way pivot selection (Tests 3, 5, 6, and 2×2 fallback)
-  - Full symmetric row search for γᵣ
-  - Normalized 2×2 computation (divide by |a₁₀|, faer approach)
-  - Correct inertia counting via determinant for 2×2 blocks
-  - ZeroPivotAction::ForceAccept and Fail
-- Implemented solve (7-step sequence) and solve_refined (iterative refinement)
-- Implemented iterative infinity-norm equilibration (Knight-Ruiz, max 10 iterations)
-- Wired lib.rs reexports per Section 13.2
-- Wrote 17 exact tests, all passing
-- Wrote benchmark harness skeleton (exact expected output verified)
-- Set up CI workflow (test, clippy, fmt, no-unwrap, commit-body advisory)
-- Wrote dev/assemble-context.sh and generated dev/context.md
-
-## Bugs Found and Fixed
-1. **2×2 rank-2 update ordering**: L column stores happened before Schur complement
-   inner loop, corrupting diagonal update when i==j. Fix: store after inner loop.
-2. **L extraction for 2×2 blocks**: included D block off-diagonal in L. Fix: skip
-   intra-block entries using subdiag discriminant.
-3. **Verify function**: computed L·D·L instead of L·D·Lᵀ (wrong transpose index).
+- 6 property-based tests: random SPD, indefinite, KKT, badly-scaled matrices
+  at sizes n=2..50, verifying inertia, reconstruction, solve, permutation,
+  L structure, D block consistency
+- 8 stress tests: LAPACK extension (Test 6), arrow matrix, all-2×2-pivots,
+  large SPD (n=50), large indefinite (n=100), extreme scaling (1e-8 to 1e8),
+  tridiagonal (n=30), KKT trajectory (δ from 1e-2 to 1e-10)
+- Fused update+argmax: rank-1 and rank-2 updates now compute the next column's
+  off-diagonal argmax during the update pass, eliminating the separate O(n) scan
+- Benchmark harness: 8 built-in matrices with timing (factor + solve in μs)
+- Test count: 17 exact + 6 property + 8 stress = 31 total, all passing
 
 ## Benchmark Results
 ```
-FERAL benchmark harness
-Loading matrices from data/benchmark-config.toml ... not found
-0 matrices benchmarked
+name                n   factor(μs)    solve(μs)        inertia
+--------------------------------------------------------------
+spd_10             10            8           17     (10, 0, 0)
+spd_50             50           80            5     (50, 0, 0)
+spd_100           100          308            8    (100, 0, 0)
+spd_200           200         1273           27    (200, 0, 0)
+kkt_10_3           13           10            1     (10, 3, 0)
+kkt_30_10          40           40            2    (30, 10, 0)
+kkt_50_15          65          101            4    (50, 15, 0)
+kkt_100_30        130          543           12   (100, 30, 0)
+
+8 matrices benchmarked
 ```
-(No matrices yet — harness skeleton confirmed working.)
 
 ## Decisions Made
 None requiring recording in decisions.md.
@@ -52,33 +46,37 @@ None requiring recording in decisions.md.
 None.
 
 ## Next Session Should
-1. Implement blocked BK LDLᵀ with W-panel technique (Section 3.3 step 2)
-2. Add property-based tests (randomized inertia invariant checks)
-3. Begin benchmark matrix collection (Section 13.4)
+1. Investigate KKT reconstruction error (0.22 relative for n=20 random KKT) —
+   may indicate growth factor issue in scalar BK for ill-conditioned matrices
+2. Begin Phase 1b planning (AMD ordering, elimination tree, sparse infrastructure)
+3. Consider blocked BK LDLᵀ with W-panel technique for larger dense matrices
+4. Profile fused vs non-fused update on n=500+ matrices to quantify improvement
 ```
 
 ## Git Status
 ```
-4023006 Add dense LDLt research note (mandatory pre-implementation)
-b31fbe2 Add ref/ to .gitignore and remove from tracking
-de46d32 Initial commit: project spec, CLAUDE.md agent protocol, and references
+e8b4eba Wire benchmark harness with dense matrix timing
+ad05ff4 Implement fused update+argmax optimization
+56631e8 Add property-based and stress tests (31 total)
+fbb4126 Session 2026-04-11-01 checkpoint
+40f6ff5 Add exact tests for dense BK factorization
 ```
 
 ## Test Status
 ```
-test test_force_accept_with_refinement ... ok
-test test_identity ... ok
-test test_kkt_5x2 ... ok
-test test_kkt_structure ... ok
-test test_mixed_pivots_4x4 ... ok
-test test_nan_rejected ... ok
-test test_negative_definite ... ok
-test test_solve_dimension_mismatch ... ok
-test test_zero_dimension_rejected ... ok
-test test_zero_pivot_fail ... ok
-test test_bench_harness_output ... ok
+     Running tests/stress_tests.rs (target/debug/deps/stress_tests-a5f908df781f8ee1)
 
-test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+running 8 tests
+test test_all_2x2_pivots ... ok
+test test_arrow_matrix ... ok
+test test_extreme_scaling ... ok
+test test_lapack_extension_branch ... ok
+test test_kkt_trajectory ... ok
+test test_tridiagonal ... ok
+test test_large_spd_50 ... ok
+test test_large_indefinite_100 ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
    Doc-tests feral
 
@@ -92,7 +90,19 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```
 FERAL benchmark harness
 Loading matrices from data/benchmark-config.toml ... not found
-0 matrices benchmarked
+
+name                n   factor(μs)    solve(μs)        inertia
+--------------------------------------------------------------
+spd_10             10           16            1     (10, 0, 0)
+spd_50             50           75            4     (50, 0, 0)
+spd_100           100          310            8    (100, 0, 0)
+spd_200           200         1263           25    (200, 0, 0)
+kkt_10_3           13           10            1     (10, 3, 0)
+kkt_30_10          40           40            2    (30, 10, 0)
+kkt_50_15          65           97            4    (50, 15, 0)
+kkt_100_30        130          618           12   (100, 30, 0)
+
+8 matrices benchmarked
 ```
 
 ## Recent Decisions
@@ -121,4 +131,6 @@ src/lib.rs
 ## Test Files
 ```
 tests/dense_ldlt.rs
+tests/property_tests.rs
+tests/stress_tests.rs
 ```

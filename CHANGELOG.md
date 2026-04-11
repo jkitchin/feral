@@ -11,3 +11,6 @@ All notable changes to FERAL will be documented in this file.
 - Iterative infinity-norm equilibration (Knight-Ruiz)
 - Benchmark harness skeleton
 - CI workflow (test, clippy, fmt, no-unwrap)
+- Property-based tests (6) and stress tests (8) — 31 total tests
+- Fused update+argmax optimization (halves memory traffic per pivot step)
+- Benchmark harness with built-in dense matrix timing
