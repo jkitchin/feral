@@ -1,0 +1,26 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy -- -D warnings
+      - name: test
+        run: cargo test
+      - name: no-unwrap
+        run: |
+          if grep -rn '\.unwrap()' src/; then
+            echo "ERROR: unwrap() found in src/ — use proper Result handling"
+            exit 1
+          fi
+      - name: commit-body
+        # Reject bare summary-only commits on PRs (advisory — does not block CI)
+        run: |
+          git log --format="%B" -1 | awk 'NR==2{found=1} END{if(!found){print "WARNING: commit has no body";}}'

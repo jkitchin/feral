@@ -1,3 +1,6 @@
+# Build artifacts
+/target
+
 # Reference codebases (local only, not part of this repo)
 ref/
 

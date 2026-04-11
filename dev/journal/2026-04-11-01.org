@@ -1,0 +1,62 @@
+* 14:15 :bootstrap:setup:
+  Session 1 bootstrap: initialized Cargo project structure per Section 13.1.
+  Created all directories, Cargo.toml, LICENSE, dev files and templates.
+  Evidence: cargo check passes, directory structure matches spec Section 11.
+
+* 14:20 :implementation:dense:types:
+  Implemented core data structures: SymmetricMatrix (full n×n column-major),
+  Inertia, Factors (with d_diag/d_subdiag/perm/perm_inv/d_eq/needs_refinement),
+  FeralError, BunchKaufmanParams, ZeroPivotAction.
+  All types match Section 2.5 of the spec exactly.
+  Evidence: cargo check passes with no warnings.
+
+* 14:22 :implementation:dense:factor:
+  Implemented scalar Bunch-Kaufman LDLᵀ factorization (factor.rs).
+  Covers all branches: Test 3 (1×1 no swap), Test 5 (1×1 with swap),
+  Test 6 (LAPACK extension), and 2×2 pivot. Uses normalized 2×2 computation
+  from faer (divide by |a₁₀| to avoid catastrophic cancellation).
+  Fused update not yet implemented — separate column search and update passes.
+  Evidence: compiles, clippy clean.
+
+* 14:24 :implementation:dense:solve:equilibrate:
+  Implemented solve (7-step sequence per Section 2.9), solve_refined
+  (iterative refinement per Section 2.10), and equilibrate (iterative
+  infinity-norm scaling per Section 2.8, max 10 iterations).
+  Evidence: compiles, clippy clean.
+
+* 14:28 :bugfix:factor:
+  Found and fixed bug in do_2x2_pivot: L column values (w0, w1) were stored
+  BEFORE the Schur complement inner loop, so when i==j the update read
+  w0 instead of the original column value. Fix: moved stores after inner loop.
+  Evidence: test_diagonal and test_identity passed before fix (no 2×2 blocks);
+  2×2 tests failed before fix, pass after.
+
+* 14:29 :bugfix:factor:extraction:
+  Found second bug in L extraction: for 2×2 pivot blocks at {k, k+1}, the
+  extraction loop included a[k*n+(k+1)] (the D block off-diagonal) in L[k+1,k].
+  This should be zero — row k+1 is part of the pivot block, not below it.
+  Fix: extraction now tracks 2×2 blocks via subdiag and skips intra-block entries.
+  Evidence: verify_factorization passes for all 2×2 tests.
+
+* 14:29 :bugfix:test:
+  Fixed bug in verify_factorization test helper: Lᵀ multiplication used
+  factors.l[j*n+p] = L[p,j] instead of factors.l[p*n+j] = L[j,p] = Lᵀ[p,j].
+  Was computing L·D·L instead of L·D·Lᵀ.
+  Evidence: identity and diagonal tests passed before fix (L is diagonal for these);
+  non-trivial tests failed before fix, pass after.
+
+* 14:30 :testing:
+  All 17 tests pass:
+  - 4 pivot branch tests (1×1 no swap, 1×1 with swap, 2×2, mixed)
+  - 2 inertia-critical tests (positive diags with negative det, KKT structure)
+  - 4 edge cases (identity, diagonal, negative definite, 1×1 matrix)
+  - 3 error handling tests (zero dim, NaN, dimension mismatch)
+  - 2 zero pivot tests (Fail action, ForceAccept with refinement)
+  - 1 larger KKT test (5 variables, 2 constraints)
+  - 1 benchmark harness output test
+  Evidence: cargo test output: "17 passed; 0 failed"
+
+* 14:30 :infrastructure:
+  Set up CI (.github/workflows/ci.yml), assemble-context.sh, and
+  dev/context.md. Bench harness outputs expected format.
+  Evidence: context.md generated successfully (72 lines).
