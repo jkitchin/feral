@@ -71,6 +71,10 @@ pub fn factorize_multifrontal(
     // Full symmetric pattern for correct row index computation
     let full_pattern = permuted.symmetric_pattern();
 
+    // Transpose is precomputed but currently unused — kept for future
+    // amap-based assembly optimization.
+    let _ = build_csc_transpose(&permuted);
+
     // Storage for contribution blocks (one per supernode, freed after parent assembly)
     let mut contrib_blocks: Vec<Option<ContribBlock>> = (0..n_snodes).map(|_| None).collect();
 
@@ -118,50 +122,19 @@ pub fn factorize_multifrontal(
         }
 
         // Step 1: Assemble original matrix entries into frontal.
-        // Each CSC entry (row, col) with row >= col represents A(row,col).
-        // This entry should be assembled at the frontal that eliminates
-        // column min(row,col) = col. We assemble it here if col is one of
-        // our eliminated columns.
-        //
-        // Additionally, entries where `row` is one of our eliminated columns
-        // (but `col` is not) represent A(col, row) by symmetry and should
-        // also be assembled here.
+        // Scan only our eliminated columns' CSC entries. The CSC stores
+        // lower-triangle entries (row >= col), so each entry A(row, col)
+        // is found by scanning column col. Entries where our columns appear
+        // as ROWS arrive via child contribution blocks.
         let mut frontal = SymmetricMatrix::zeros(actual_nrow);
-
-        // Determine which global columns are eliminated at this supernode
-        let mut is_eliminated = vec![false; n];
-        for local_j in 0..ncol {
-            is_eliminated[row_indices[local_j]] = true;
-        }
-
-        // Scan all CSC entries
-        for col in 0..n {
-            for k in permuted.col_ptr[col]..permuted.col_ptr[col + 1] {
-                let row = permuted.row_idx[k];
-                // Assemble if col OR row is one of our eliminated columns
-                let col_elim = is_eliminated[col];
-                let row_elim = is_eliminated[row];
-                if !col_elim && !row_elim {
-                    continue;
-                }
-                let local_col = row_map[col];
-                let local_row = row_map[row];
-                if local_col == usize::MAX || local_row == usize::MAX {
-                    continue;
-                }
-                let val = permuted.values[k];
-                // Place in the frontal's lower triangle
-                if local_row >= local_col {
-                    frontal.set(local_row, local_col, frontal.get(local_row, local_col) + val);
-                } else {
-                    frontal.set(local_col, local_row, frontal.get(local_col, local_row) + val);
+        for (local_j, &gj) in row_indices[..ncol].iter().enumerate() {
+            for k in permuted.col_ptr[gj]..permuted.col_ptr[gj + 1] {
+                let gi = permuted.row_idx[k];
+                let local_i = row_map[gi];
+                if local_i != usize::MAX {
+                    frontal.set(local_i, local_j, permuted.values[k]);
                 }
             }
-        }
-
-        // Clean up
-        for local_j in 0..ncol {
-            is_eliminated[row_indices[local_j]] = false;
         }
 
         // Step 2: Assemble child contribution blocks (extend-add)
@@ -262,8 +235,10 @@ fn permute_csc_values(
 
 /// Build row indices for a frontal matrix.
 ///
-/// Uses the full symmetric pattern to find all rows connected to
-/// the eliminated columns, plus rows from child contribution blocks.
+/// Returns indices with eliminated columns FIRST (positions 0..ncol),
+/// followed by non-eliminated rows sorted. This ordering is required
+/// because factor_frontal treats positions 0..ncol as fully-summed
+/// columns and ncol..nrow as the contribution block region.
 fn build_row_indices(
     snode: &crate::symbolic::supernode::Supernode,
     full_pattern: &crate::sparse::csc::CscPattern,
@@ -272,13 +247,12 @@ fn build_row_indices(
     let ncol = snode.ncol();
     let first_col = snode.first_col;
 
-    let mut rows = std::collections::BTreeSet::new();
+    let mut all_rows = std::collections::BTreeSet::new();
 
     // All rows connected to eliminated columns via the full symmetric pattern
-    // (includes both lower and upper triangle connections)
     for j in first_col..first_col + ncol {
         for k in full_pattern.col_ptr[j]..full_pattern.col_ptr[j + 1] {
-            rows.insert(full_pattern.row_idx[k]);
+            all_rows.insert(full_pattern.row_idx[k]);
         }
     }
 
@@ -286,12 +260,70 @@ fn build_row_indices(
     for &child_idx in &snode.children {
         if let Some(contrib) = &contrib_blocks[child_idx] {
             for &row in &contrib.row_indices {
-                rows.insert(row);
+                all_rows.insert(row);
             }
         }
     }
 
-    rows.into_iter().collect()
+    // Build result: eliminated columns first, then non-eliminated rows
+    let elim_cols: Vec<usize> = (first_col..first_col + ncol).collect();
+    let non_elim: Vec<usize> = all_rows.iter()
+        .copied()
+        .filter(|&r| r < first_col || r >= first_col + ncol)
+        .collect();
+
+    let mut result = elim_cols;
+    result.extend(non_elim);
+    result
+}
+
+/// Build the transpose of a lower-triangle CSC matrix (excluding diagonal).
+///
+/// For each off-diagonal entry (row, col) with row > col in the CSC,
+/// records that row `row` has an entry at column `col`.
+///
+/// Returns (trans_ptr, trans_col, trans_src) where:
+/// - trans_ptr[k]..trans_ptr[k+1] = range of entries for row k
+/// - trans_col[idx] = the column c < k
+/// - trans_src[idx] = position in the original CSC values array
+fn build_csc_transpose(csc: &CscMatrix) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+    let n = csc.n;
+
+    // Count entries per row (excluding diagonal)
+    let mut counts = vec![0usize; n];
+    for col in 0..n {
+        for k in csc.col_ptr[col]..csc.col_ptr[col + 1] {
+            let row = csc.row_idx[k];
+            if row > col {
+                counts[row] += 1;
+            }
+        }
+    }
+
+    // Build ptr
+    let mut trans_ptr = vec![0usize; n + 1];
+    for i in 0..n {
+        trans_ptr[i + 1] = trans_ptr[i] + counts[i];
+    }
+    let total = trans_ptr[n];
+    let mut trans_col = vec![0usize; total];
+    let mut trans_src = vec![0usize; total];
+
+    // Fill entries
+    let mut offsets = trans_ptr[..n].to_vec();
+    for col in 0..n {
+        for k in csc.col_ptr[col]..csc.col_ptr[col + 1] {
+            let row = csc.row_idx[k];
+            if row > col {
+                let pos = offsets[row];
+                trans_col[pos] = col;
+                trans_src[pos] = k;
+                offsets[row] += 1;
+            }
+        }
+    }
+
+    (trans_ptr, trans_col, trans_src)
 }
 
 /// Contribution block from a child supernode.
