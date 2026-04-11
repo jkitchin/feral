@@ -2,6 +2,7 @@ pub mod dense;
 pub mod error;
 pub mod inertia;
 pub mod io;
+pub mod sparse;
 
 // Flat public API re-exported at crate root:
 pub use dense::factor::{factor, BunchKaufmanParams, Factors, ZeroPivotAction};
@@ -11,3 +12,4 @@ pub use error::FeralError;
 pub use inertia::Inertia;
 pub use io::mtx::{parse_mtx, read_mtx, MtxMatrix};
 pub use io::sidecar::{read_sidecar, KktSidecar, SidecarInertia};
+pub use sparse::csc::{CscMatrix, CscPattern};

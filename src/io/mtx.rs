@@ -1,5 +1,6 @@
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
+use crate::sparse::csc::CscMatrix;
 use std::path::Path;
 
 /// A sparse symmetric matrix in coordinate (COO) format, as read from a Matrix Market file.
@@ -14,6 +15,14 @@ impl MtxMatrix {
     /// Convert to a dense symmetric matrix.
     pub fn to_dense(&self) -> SymmetricMatrix {
         SymmetricMatrix::from_lower_triangle(self.n, &self.entries)
+    }
+
+    /// Convert to a CSC sparse matrix (lower triangle).
+    pub fn to_csc(&self) -> Result<CscMatrix, FeralError> {
+        let rows: Vec<usize> = self.entries.iter().map(|&(r, _, _)| r).collect();
+        let cols: Vec<usize> = self.entries.iter().map(|&(_, c, _)| c).collect();
+        let vals: Vec<f64> = self.entries.iter().map(|&(_, _, v)| v).collect();
+        CscMatrix::from_triplets(self.n, &rows, &cols, &vals)
     }
 }
 
