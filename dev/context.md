@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-11T15:01:02Z
+Generated: 2026-04-11T15:07:47Z
 
 ## Latest Session
 File: dev/sessions/2026-04-11-02.md
@@ -55,11 +55,11 @@ None.
 
 ## Git Status
 ```
+7537160 Add KKT-specific hardening tests (8 tests, 39 total)
+c30a454 Session 2026-04-11-02 checkpoint
 e8b4eba Wire benchmark harness with dense matrix timing
 ad05ff4 Implement fused update+argmax optimization
 56631e8 Add property-based and stress tests (31 total)
-fbb4126 Session 2026-04-11-01 checkpoint
-40f6ff5 Add exact tests for dense BK factorization
 ```
 
 ## Test Status
@@ -93,14 +93,14 @@ Loading matrices from data/benchmark-config.toml ... not found
 
 name                n   factor(μs)    solve(μs)        inertia
 --------------------------------------------------------------
-spd_10             10           16            1     (10, 0, 0)
-spd_50             50           75            4     (50, 0, 0)
-spd_100           100          310            8    (100, 0, 0)
-spd_200           200         1263           25    (200, 0, 0)
-kkt_10_3           13           10            1     (10, 3, 0)
-kkt_30_10          40           40            2    (30, 10, 0)
-kkt_50_15          65           97            4    (50, 15, 0)
-kkt_100_30        130          618           12   (100, 30, 0)
+spd_10             10           10            0     (10, 0, 0)
+spd_50             50           72            4     (50, 0, 0)
+spd_100           100          284            8    (100, 0, 0)
+spd_200           200         1304           25    (200, 0, 0)
+kkt_10_3           13            9            1     (10, 3, 0)
+kkt_30_10          40           39            2    (30, 10, 0)
+kkt_50_15          65          130            6    (50, 15, 0)
+kkt_100_30        130          586           13   (100, 30, 0)
 
 8 matrices benchmarked
 ```
@@ -131,6 +131,7 @@ src/lib.rs
 ## Test Files
 ```
 tests/dense_ldlt.rs
+tests/kkt_hardening.rs
 tests/property_tests.rs
 tests/stress_tests.rs
 ```
