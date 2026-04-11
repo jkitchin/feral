@@ -1,0 +1,95 @@
+#+TITLE: Sparse Matrix Ordering
+#+FILETAGS: :concept:sparse-solver:ordering:amd:fill-reduction:
+
+* Sparse Matrix Ordering
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+Sparse matrix ordering is the process of finding a permutation of rows and
+columns that reduces fill-in during factorization. Fill-in refers to zero
+entries in the original matrix that become nonzero in the factors. Without a
+good ordering, a sparse matrix can produce dense factors, destroying both
+storage and computational efficiency. Ordering is the first step of the
+[[file:../concepts/multifrontal-method.org][multifrontal method]] and directly
+determines the shape of the elimination tree and the sizes of frontal matrices
+citep:feral2026.
+
+** Approximate Minimum Degree (AMD)
+
+The primary ordering algorithm used in FERAL is AMD, introduced by Amestoy,
+Davis, and Duff (1996). AMD is a graph-based heuristic that, at each elimination
+step, selects the vertex (column) with the smallest approximate degree in the
+elimination graph. The "approximate" qualifier refers to using upper bounds on
+the true degree, which avoids the expensive exact degree computation that would
+make the algorithm O(n^2) per step.
+
+AMD produces a permutation vector =perm: Vec<usize>= (not an elimination tree
+directly). The elimination tree is constructed as a separate step from the
+permuted sparsity pattern of P*A*P^T. This separation is important because
+FERAL may eventually support alternative orderings (e.g., METIS) that produce
+different permutations but feed into the same elimination tree construction.
+
+The reference implementation is SuiteSparse AMD, specifically =amd_2.c= for the
+core elimination loop and =amd_postorder.c= for postordering the resulting
+elimination tree.
+
+** Elimination Tree
+
+Given the permuted matrix P*A*P^T, the elimination tree encodes the dependency
+structure of the factorization. Each column j has a parent p(j) defined as the
+row index of the first subdiagonal nonzero in column j of the factor L. The tree
+has the property that column j depends only on its descendants in the tree, so
+any postorder traversal of the tree produces a valid elimination order.
+
+The elimination tree is constructed from the permuted sparsity pattern using a
+well-known O(nnz) algorithm (George and Liu, 1981). FERAL constructs it as a
+separate step after AMD ordering.
+
+** Postordering
+
+The elimination tree is postordered so that children of each node are numbered
+consecutively. This postordering is critical for two reasons. First, it enables
+the LIFO property of the
+[[file:../methods/two-arena-memory-model.org][ContribStack]]: in postorder
+traversal, a node's contribution block is always the most recently pushed item
+when the parent needs it. Second, it improves cache locality because related
+frontal matrices are processed in sequence.
+
+** Column Counts and Fill Estimation
+
+After the elimination tree is postordered, column counts (the number of nonzeros
+in each column of L) are computed using Liu's algorithm, as implemented in
+CHOLMOD's =cholmod_rowcolcounts.c=. These counts are exact for the Cholesky case
+and serve as lower bounds for the indefinite case (where delayed pivoting can
+increase fill). The column counts feed directly into the =MemoryPlan= that
+preallocates storage for the
+[[file:../methods/two-arena-memory-model.org][two-arena memory model]].
+
+** Supernode Detection
+
+Supernodes are sets of consecutive columns in the postordered elimination tree
+that have identical sparsity structure (same nonzero pattern below the diagonal
+block). Amalgamating supernodes into single nodes of the assembly tree converts
+many small operations into fewer large dense operations, enabling BLAS-3
+performance. FERAL supports two policies: =SupernodePolicy::None= for small
+problems (n < ~200) and =SupernodePolicy::Aggressive= for larger problems.
+
+** Alternative Orderings
+
+METIS is a graph partitioning-based ordering that can produce better fill
+reduction than AMD on some problem classes, particularly those with irregular
+sparsity patterns. FERAL plans to support METIS as an alternative ordering in
+Phase 2. The interface is the same: a permutation vector fed into elimination
+tree construction.
+
+** Ordering Quality and Benchmarking
+
+One of the Tier 3 benchmark categories in FERAL is matrices where AMD gives poor
+fill compared to METIS, specifically to test ordering sensitivity. The fill
+ratio metric (actual NNZ / predicted NNZ) in the benchmark harness tracks
+ordering quality. A fill ratio above 1.5 indicates either poor ordering or
+inaccurate fill prediction, both of which warrant investigation.

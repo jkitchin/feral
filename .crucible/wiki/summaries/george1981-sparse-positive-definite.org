@@ -1,0 +1,65 @@
+#+TITLE: George and Liu 1981 - Computer Solution of Large Sparse Positive Definite Systems
+#+FILETAGS: :summary:sparse-solver:elimination-tree:fill-reduction:graph-theory:
+
+* George and Liu 1981 - Computer Solution of Large Sparse Positive Definite Systems
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+George and Liu (1981) wrote the classic textbook on the graph-theoretic
+foundations of sparse direct methods citep:george1981computer. While focused on
+positive definite systems, the theoretical framework (elimination trees,
+fill-reducing orderings, and the relationship between graph structure and
+factorization) underlies all modern sparse direct solvers including FERAL.
+
+** Elimination Trees
+
+Chapters 4-6 establish the elimination tree as the fundamental data structure
+for sparse factorization. The elimination tree of a matrix encodes the
+dependency structure: column j depends on column i only if i is a descendant of
+j in the tree. This means any postorder traversal of the tree produces a valid
+elimination order, and independent subtrees can be processed in parallel.
+
+The book provides the O(nnz) algorithm for constructing the elimination tree
+from the sparsity pattern and proves key properties: postordering enables
+LIFO-based memory management (the basis for FERAL's
+[[file:../methods/two-arena-memory-model.org][ContribStack]]), and the tree
+structure determines the maximum parallelism available in the factorization.
+
+** Fill-Reducing Orderings
+
+The book develops the graph-theoretic framework for understanding fill-in:
+fill entries correspond to edges added to the elimination graph during Gaussian
+elimination. [[file:../concepts/sparse-matrix-ordering.org][Fill-reducing
+orderings]] are reorderings of the graph that minimize these added edges.
+The minimum degree heuristic (later refined into AMD by Amestoy, Davis, and
+Duff, 1996) and nested dissection are both developed from this graph-theoretic
+perspective.
+
+** Column Counts
+
+Liu's column count algorithm, which computes the number of nonzeros in each
+column of the factor L from the elimination tree without performing numeric
+factorization, is developed from the tree structure properties established in
+this book. FERAL uses column counts (as implemented in CHOLMOD's
+=cholmod_rowcolcounts.c=) to produce the =MemoryPlan= for factor storage
+preallocation.
+
+** Relevance to FERAL
+
+This book is the theoretical foundation for FERAL's Phase 1b sparse
+infrastructure: elimination tree construction, postordering, column count
+estimation, and the graph-theoretic understanding of fill-in that informs
+ordering quality assessment. While the book treats only the positive definite
+case, the tree structure and fill theory extend directly to the indefinite
+[[file:../concepts/multifrontal-method.org][multifrontal method]] (the
+additional complication of pivoting affects only the numeric phase, not the
+symbolic analysis).
+
+** Bibliographic Details
+
+George, A. and Liu, J.W.H. (1981). /Computer Solution of Large Sparse Positive
+Definite Systems/. Prentice-Hall, Englewood Cliffs, NJ. ISBN: 0-13-165274-5.

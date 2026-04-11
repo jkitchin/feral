@@ -1,0 +1,50 @@
+#+TITLE: Pacaud et al. 2023 - Accelerating Condensed Interior-Point Methods on GPU
+#+FILETAGS: :summary:interior-point:gpu:kkt:condensed:
+
+* Pacaud et al. 2023 - Accelerating Condensed Interior-Point Methods on GPU
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: pacaud2023condensed
+:STATUS: draft
+:CREATED: 2026-04-07
+:END:
+
+Pacaud, Shin, Schanen, Maldonado, and Anitescu (2023) present an approach to
+accelerating interior point methods on GPU architectures by condensing the KKT
+system into a dense matrix proportional to the degrees of freedom
+citep:pacaud2023condensed. This is a fundamentally different approach to KKT
+system solving than FERAL's sparse direct factorization.
+
+** Condensed Approach
+
+Instead of factoring the full sparse KKT matrix, the condensed approach
+eliminates variables algebraically to produce a smaller, dense system. For
+problems with structure (e.g., optimal power flow, where the number of control
+variables is much smaller than the total state dimension), the condensed system
+is small enough to factor as a dense matrix on a GPU.
+
+This trades the sparsity-exploiting advantages of
+[[file:../concepts/multifrontal-method.org][multifrontal factorization]] for
+the raw throughput of dense GPU kernels operating on a smaller system. The
+approach is effective when the condensed system is sufficiently small (typically
+when the problem has few degrees of freedom relative to constraints).
+
+** Relevance to FERAL
+
+This paper represents an alternative architectural direction that FERAL
+explicitly does not take. FERAL's design philosophy is "one engine" handling all
+size regimes through the multifrontal framework, while the condensed approach is
+specialized to problems with exploitable structure.
+
+However, the paper's analysis of GPU dense kernel performance on KKT-derived
+systems informs FERAL's Phase 4 GPU offload design. The threshold for GPU
+offload of individual frontal matrices (~128x128 in FERAL's spec) is related to
+the same crossover point where GPU throughput exceeds CPU throughput for dense
+factorization.
+
+** Bibliographic Details
+
+Pacaud, F., Shin, S., Schanen, M., Maldonado, D.A., and Anitescu, M. (2023).
+"Accelerating Condensed Interior-Point Methods on SIMD/GPU Architectures."
+/Journal of Optimization Theory and Applications/, 202:184-203.
+DOI: 10.1007/s10957-022-02129-5.

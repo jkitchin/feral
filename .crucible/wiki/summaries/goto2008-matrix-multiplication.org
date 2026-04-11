@@ -1,0 +1,47 @@
+#+TITLE: Goto and van de Geijn 2008 - Anatomy of High-Performance Matrix Multiplication
+#+FILETAGS: :summary:dense-kernel:blas:cache-blocking:micro-kernel:
+
+* Goto and van de Geijn 2008 - Anatomy of High-Performance Matrix Multiplication
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+This paper by Goto and van de Geijn (2008) explains why BLAS implementations
+achieve near-peak floating-point performance for matrix multiplication
+citep:goto2008anatomy. The central insight is the micro-kernel architecture: a
+small, highly optimized inner kernel (typically 4x4 to 8x8 elements) that is
+hand-tuned for specific hardware, surrounded by cache-blocking loops that tile
+the computation to keep data resident at each level of the memory hierarchy.
+
+** Cache Blocking Strategy
+
+The paper describes how GEMM (general matrix multiply) is decomposed into a
+hierarchy of blocking loops. The outermost loop tiles one dimension to fit in L3
+cache, the next tiles to fit in L2, and the innermost tiles to fit in L1. The
+micro-kernel operates on panels that are pre-packed into contiguous memory to
+eliminate TLB misses and enable prefetching. The key parameters are the block
+sizes m_c, k_c, and n_c, which must be tuned for each target architecture's
+cache sizes.
+
+** Relevance to FERAL
+
+This paper is required reading before implementing FERAL's Schur complement
+update kernel, which is the performance-critical inner loop of numeric
+factorization. The Schur complement update (A_22 -= A_21 * D_bk^{-1} * A_21^T)
+is a symmetric rank-k operation that maps to the same cache-blocking principles
+as GEMM. Understanding Goto's architecture is prerequisite to designing
+FERAL's Phase 2 blocked dense kernel and Phase 2+ SIMD micro-kernel.
+
+The BLIS framework citep:vanzee2015blis modernizes and clarifies the approach
+described here into a clean layered design explicitly intended for
+reimplementation. See
+[[file:./vanzee2015-blis-framework.org][Van Zee and van de Geijn 2015]].
+
+** Bibliographic Details
+
+Goto, K. and van de Geijn, R.A. (2008). "Anatomy of High-Performance Matrix
+Multiplication." /ACM Transactions on Mathematical Software/, 34(3):1-25.
+DOI: 10.1145/1356052.1356053.

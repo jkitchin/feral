@@ -1,0 +1,84 @@
+#+TITLE: Two-Arena Memory Model
+#+FILETAGS: :method:memory:sparse-solver:factorization:
+
+* Two-Arena Memory Model
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+The two-arena memory model is FERAL's approach to memory management during
+numeric factorization. All dynamic memory is preallocated into two contiguous
+arenas before any numeric work begins, eliminating per-allocation overhead and
+ensuring predictable memory usage. The model is driven by a =MemoryPlan=
+produced during symbolic factorization citep:feral2026.
+
+** MemoryPlan
+
+Symbolic factorization analyzes the sparsity structure and produces a
+=MemoryPlan= containing three quantities: the total number of nonzeros in the L
+factor across all supernodes (=factor_nnz=), the size of each node's
+contribution block in postorder (=contrib_sizes=), and the peak contribution
+stack depth (=peak_contrib_bytes=). These values are exact when there is no
+delayed pivoting and serve as lower bounds otherwise.
+
+** FactorArena
+
+The FactorArena is a single contiguous =Vec<f64>= preallocated to =factor_nnz=
+entries. Symbolic factorization assigns each supernode a fixed offset into this
+array. During numeric factorization, factor values (the L and D entries) are
+written in-place at their precomputed offsets. This array is permanent: it holds
+the factorization for the lifetime of the =Factors= struct and is read during
+the solve phase.
+
+Because offsets are precomputed and non-overlapping, the FactorArena can be
+shared across threads in the parallel case (FERAL Phase 2) without
+synchronization. Each thread writes to its assigned supernodes only.
+
+** ContribStack
+
+The ContribStack is a single contiguous =Vec<f64>= preallocated to
+=peak_contrib_bytes= entries, functioning as a LIFO stack. The elimination tree
+is traversed in postorder (leaves first), and at each node the contribution
+block from the dense kernel factorization is pushed onto the stack. When a
+parent node assembles its frontal matrix, it pops child contribution blocks from
+the stack top via the extend-add operation.
+
+The postorder traversal guarantees the LIFO property: a node's contribution
+block is always the most recent push when the parent needs to consume it. This
+means the stack requires only a =top= pointer, with no additional bookkeeping.
+
+** Handling Delayed Pivots
+
+When [[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman pivoting]]
+delays a pivot from node F to its parent, F's contribution block is larger than
+the =MemoryPlan= predicted (it includes the delayed variable). FERAL handles
+this with a slack factor: the ContribStack is preallocated at 1.5x
+=peak_contrib_bytes=. If a push would still overflow, the system falls back to
+heap allocation for that node's contribution and logs a warning. This fallback
+is rare on well-conditioned problems and is the correct behavior rather than a
+crash.
+
+** Parallel Extension
+
+In FERAL Phase 2 (shared-memory parallelism via Rayon), independent subtrees of
+the assembly tree are factored concurrently. The simple LIFO stack breaks in
+this context because threads working different subtrees interleave pushes. The
+solution, following the SSIDS model (Hogg, Ovtchinnikov, and Scott, 2016), is
+to replace the single ContribStack with task-local stacks per thread.
+Contribution blocks that cross thread boundaries (at merge points in the tree)
+use work-stealing. The FactorArena remains shared with precomputed
+non-overlapping offsets. The =MemoryPlan= interface is unchanged between
+sequential and parallel execution.
+
+** Design Rationale
+
+The two-arena model serves several goals. It eliminates allocator pressure
+during the compute-intensive numeric phase, provides predictable peak memory
+(visible before factorization starts), and aligns with the natural lifetime
+patterns of sparse factorization data: factor storage is long-lived (solve
+phase), while contribution blocks are short-lived (consumed by the parent in the
+next assembly step). The model is designed for the single-thread case in Phase 1
+and extends cleanly to parallel execution in Phase 2.

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(crucible *)",
+      "Bash(crucible)",
+      "Bash(pandoc*)",
+      "Bash(pdftotext*)",
+      "Bash(curl*)",
+      "Read(.crucible/**)",
+      "Write(.crucible/wiki/**)",
+      "Write(.crucible/sources/**)",
+      "Edit(.crucible/wiki/**)"
+    ]
+  }
+}

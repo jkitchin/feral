@@ -1,0 +1,46 @@
+#+TITLE: Davis, Rajamanickam, and Sid-Lakhdar 2016 - Survey of Direct Methods for Sparse Linear Systems
+#+FILETAGS: :summary:sparse-solver:survey:ordering:factorization:multifrontal:
+
+* Davis, Rajamanickam, and Sid-Lakhdar 2016 - Survey of Direct Methods for Sparse Linear Systems
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: davis2016survey
+:STATUS: draft
+:CREATED: 2026-04-07
+:END:
+
+This survey by Davis, Rajamanickam, and Sid-Lakhdar (2016) is the definitive
+modern reference covering the full landscape of sparse direct solvers
+citep:davis2016survey. Published in /Acta Numerica/, it spans ordering,
+symbolic analysis, numerical factorization, triangular solve, and software
+across all matrix symmetry classes.
+
+** Scope
+
+The survey covers the complete pipeline of sparse direct solution: reordering
+for fill reduction ([[file:../concepts/sparse-matrix-ordering.org][AMD]],
+nested dissection, constrained orderings), symbolic factorization (elimination
+trees, supernodes, column counts), numeric factorization (left-looking,
+right-looking, [[file:../concepts/multifrontal-method.org][multifrontal]]),
+and the solve phase. It treats LU, Cholesky, and LDLt factorizations, with
+specific attention to the symmetric indefinite case relevant to FERAL.
+
+** Key Insights for FERAL
+
+The survey provides a unified view of how modern solvers (MUMPS, PARDISO,
+CHOLMOD, SSIDS) make architectural decisions about supernode amalgamation,
+memory management, and parallelism. It clarifies the tradeoffs between
+left-looking and multifrontal approaches: left-looking has simpler memory
+patterns but less parallelism, while multifrontal (FERAL's chosen approach)
+enables tree-based parallelism and dense BLAS-3 kernels at the cost of the
+assembly overhead.
+
+The survey also covers the state of the art in fill-reducing orderings,
+comparing AMD, METIS, and nested dissection on practical problem classes. This
+context informs FERAL's decision to start with AMD and add METIS in Phase 2.
+
+** Bibliographic Details
+
+Davis, T.A., Rajamanickam, S., and Sid-Lakhdar, W.M. (2016). "A Survey of
+Direct Methods for Sparse Linear Systems." /Acta Numerica/, 25:383-566.
+DOI: 10.1017/S0962492916000076.

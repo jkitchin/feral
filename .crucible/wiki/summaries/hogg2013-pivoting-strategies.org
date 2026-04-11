@@ -1,0 +1,63 @@
+#+TITLE: Hogg and Scott 2013 - Pivoting Strategies for Tough Sparse Indefinite Systems
+#+FILETAGS: :summary:pivoting:multifrontal:threshold-pivoting:delayed-pivoting:
+
+* Hogg and Scott 2013 - Pivoting Strategies for Tough Sparse Indefinite Systems
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+Hogg and Scott (2013) address the problem of pivot selection within
+[[file:../concepts/multifrontal-method.org][multifrontal factorization]] of
+sparse symmetric indefinite matrices citep:hogg2013pivoting. The paper examines
+threshold pivoting and delayed pivot strategies that adapt
+[[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman-type pivoting]] to
+the sparse context.
+
+** Threshold Pivoting
+
+In the multifrontal context, strict Bunch-Kaufman pivoting can reject too many
+pivots within a frontal matrix, leading to excessive delayed pivots that inflate
+parent frontals and degrade performance. Threshold pivoting relaxes the
+acceptance criteria: a pivot is accepted if it satisfies a threshold condition
+relative to the current column or frontal, rather than the full BK growth bound.
+This produces more accepted pivots per frontal at the cost of potentially larger
+element growth.
+
+The paper distinguishes two modes implemented in SPRAL/SSIDS: TPP (Threshold
+Partial Pivoting), which uses a simple threshold test, and APP (Approximate
+Pivot Protocol), which uses a more sophisticated blocked strategy with delayed
+pivoting.
+
+** Delayed Pivot Architecture
+
+When a pivot is rejected within a frontal, the variable is delayed to the parent
+frontal. The child's contribution block grows to include the delayed variable,
+and the parent incorporates it during assembly. This gives the parent additional
+numerical context (entries from other children) that may make the delayed pivot
+acceptable. The paper analyzes the performance impact of delayed pivoting:
+excessive delays increase fill-in and reduce the effectiveness of supernode
+amalgamation.
+
+** Relevance to FERAL
+
+This paper is the bridge between FERAL's Stage 1 dense
+[[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman]] implementation
+and the Phase 2 multifrontal pivot strategy. The threshold pivoting modes (TPP
+and APP) are the algorithms implemented in SPRAL's =ldlt_tpp.cxx= and
+=ldlt_app.cxx=, which are FERAL's primary code inspection references for sparse
+pivoting.
+
+FERAL's Phase 1b uses =ZeroPivotAction::ForceAccept= as a simpler approach
+(accepting all pivots and flagging for iterative refinement), deferring the more
+sophisticated threshold pivoting to Phase 2 where delayed pivoting
+infrastructure exists. The =PivotStrategy= trait, when designed in Phase 2,
+will need to support both TPP-like and APP-like modes.
+
+** Bibliographic Details
+
+Hogg, J.D. and Scott, J.A. (2013). "Pivoting Strategies for Tough Sparse
+Indefinite Systems." /ACM Transactions on Mathematical Software/, 40(1):1-19.
+DOI: 10.1145/2513109.2513113.

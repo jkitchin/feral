@@ -1,0 +1,63 @@
+#+TITLE: Hogg, Ovtchinnikov, and Scott 2016 - SSIDS: Sparse Solver for GPU Architectures
+#+FILETAGS: :summary:sparse-solver:gpu:ssids:multifrontal:spral:
+
+* Hogg, Ovtchinnikov, and Scott 2016 - SSIDS: Sparse Solver for GPU Architectures
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+Hogg, Ovtchinnikov, and Scott (2016) present SSIDS, a sparse symmetric
+indefinite direct solver designed for GPU architectures, implemented as part of
+the SPRAL library citep:hogg2016ssids. SSIDS is the primary architectural
+reference for FERAL's sparse
+[[file:../concepts/multifrontal-method.org][multifrontal]] engine.
+
+** Architecture
+
+SSIDS implements a full multifrontal factorization with GPU offload for large
+frontal matrices. The architecture features delayed pivoting (variables rejected
+during frontal factorization are passed to the parent node), a two-level memory
+model (permanent factor storage and transient contribution blocks), and a
+task-based parallelism scheme where independent subtrees of the assembly tree
+are processed concurrently.
+
+The solver distinguishes between small frontals (processed on the CPU) and large
+frontals (offloaded to the GPU), with a size threshold (typically around
+128x128) determining the cutoff. This heterogeneous execution model is the
+basis for FERAL's Phase 4 GPU offload design.
+
+** Delayed Pivoting Implementation
+
+SSIDS implements delayed pivoting through the APP (Approximate Pivot Protocol)
+kernel. When a variable cannot be pivoted within its frontal, it is included in
+the contribution block and passed to the parent. The parent's frontal is
+assembled with the delayed variables included, giving them another chance at
+elimination with additional numerical context. The APP kernel in
+=ldlt_app.cxx= and the block LDLT in =block_ldlt.hxx= contain the
+implementation details.
+
+** Memory Model
+
+SSIDS uses a memory model that directly inspired FERAL's
+[[file:../methods/two-arena-memory-model.org][two-arena approach]]. Factor
+storage is permanent and contiguous. Contribution blocks use per-thread stacks
+in the parallel case, with work-stealing for cross-thread assembly. The symbolic
+factorization phase produces memory size estimates that drive preallocation.
+
+** Code References
+
+The SPRAL source (BSD-3-Clause, https://github.com/ralna/spral) is FERAL's
+primary code inspection reference for sparse architecture. Key files include
+=NumericSubtree.cxx= (multifrontal numeric driver), =SymbolicSubtree.hxx=
+(symbolic factorization and supernodes), =factor.hxx= (factor routine with
+pivot selection), =ldlt_tpp.cxx= and =ldlt_app.cxx= (threshold and approximate
+pivoting kernels), and =assemble.hxx= (extend-add assembly).
+
+** Bibliographic Details
+
+Hogg, J.D., Ovtchinnikov, E., and Scott, J.A. (2016). "A Sparse Symmetric
+Indefinite Direct Solver for GPU Architectures." /ACM Transactions on
+Mathematical Software/, 42(1):1-25. DOI: 10.1145/2756548.

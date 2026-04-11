@@ -1,0 +1,64 @@
+#+TITLE: Amestoy et al. 2017 - Block Low-Rank Multifrontal Factorization Complexity
+#+FILETAGS: :summary:multifrontal:low-rank:blr:memory:complexity:
+
+* Amestoy et al. 2017 - Block Low-Rank Multifrontal Factorization Complexity
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: amestoy2017blr
+:STATUS: draft
+:CREATED: 2026-04-07
+:END:
+
+Amestoy, Buttari, L'Excellent, and Mary (2017) provide the theoretical
+complexity analysis for Block Low-Rank (BLR) compression within
+[[file:../concepts/multifrontal-method.org][multifrontal factorization]]
+citep:amestoy2017blr. BLR is a flat (non-hierarchical) low-rank format that
+approximates dense frontal matrices by partitioning them into blocks and
+replacing off-diagonal blocks with low-rank approximations.
+
+** Complexity Results
+
+The key result is that BLR reduces the asymptotic complexity of multifrontal
+factorization. For 2D problems, complexity drops from O(n^2) to O(n^{4/3}). For
+3D problems, it drops from O(n^{4/3}) to O(n). These improvements apply to both
+time and memory. The analysis assumes that off-diagonal blocks of the frontal
+matrices are numerically low-rank, which holds for elliptic PDEs and many
+practical problems.
+
+** BLR vs Hierarchical Formats
+
+The paper positions BLR as a practical middle ground between full-rank
+multifrontal (no compression) and hierarchical formats (HSS, H-matrices). BLR
+is simpler to implement because it uses a flat partition of each frontal matrix
+into blocks of uniform size, avoiding the recursive subdivision and complex
+bookkeeping of hierarchical formats. The tradeoff is that BLR's complexity is
+not quite optimal (hierarchical formats achieve better asymptotic bounds), but
+the implementation simplicity and lower constant factors make BLR competitive in
+practice.
+
+** Relevance to FERAL
+
+BLR compression is a natural Phase 3/4 extension for FERAL. The multifrontal
+architecture already organizes computation around dense frontal matrices, and
+BLR compression operates within each frontal without changing the assembly tree
+structure or the [[file:../methods/two-arena-memory-model.org][memory model]].
+This means BLR can be added as an optimization layer without restructuring
+FERAL's core architecture.
+
+For FERAL's target domain (KKT matrices from interior point solvers), the
+low-rank property of off-diagonal blocks is problem-dependent. Well-structured
+problems (e.g., discretized PDEs) benefit significantly; problems with dense
+constraint Jacobians may not. The benchmark framework would need to measure
+both accuracy and compression ratio to evaluate BLR's effectiveness on the KKT
+benchmark set.
+
+The companion papers on BLR performance
+citep:amestoy2019blrperformance and multilevel BLR
+citep:amestoy2019multilevelblr provide the practical implementation details and
+the bridge to hierarchical complexity bounds.
+
+** Bibliographic Details
+
+Amestoy, P.R., Buttari, A., L'Excellent, J.-Y., and Mary, T. (2017). "On the
+Complexity of the Block Low-Rank Multifrontal Factorization." /SIAM Journal on
+Scientific Computing/, 39:A1710-A1740. DOI: 10.1137/16M1077192.

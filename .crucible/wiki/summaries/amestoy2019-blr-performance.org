@@ -1,0 +1,58 @@
+#+TITLE: Amestoy et al. 2019 - BLR Multifrontal Performance on Multicore
+#+FILETAGS: :summary:multifrontal:low-rank:blr:parallelism:mumps:
+
+* Amestoy et al. 2019 - BLR Multifrontal Performance on Multicore
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: amestoy2019blrperformance
+:STATUS: draft
+:CREATED: 2026-04-07
+:END:
+
+Amestoy, Buttari, L'Excellent, and Mary (2019) present the practical
+multithreaded implementation of Block Low-Rank (BLR) compression within the
+MUMPS multifrontal solver citep:amestoy2019blrperformance. This paper
+complements the theoretical complexity analysis in
+[[file:./amestoy2017-blr-complexity.org][Amestoy et al. (2017)]] with
+performance measurements on shared-memory multicore systems.
+
+** Implementation in MUMPS
+
+The BLR implementation operates within MUMPS's existing
+[[file:../concepts/multifrontal-method.org][multifrontal]] framework. Each
+frontal matrix is partitioned into blocks, and off-diagonal blocks are
+compressed using truncated SVD or rank-revealing QR. The compressed
+representation is used during the Schur complement update, which is the
+dominant cost of factorization.
+
+The paper identifies key algorithmic variants: when to compress (during assembly
+vs during factorization), how to perform the low-rank Schur update (LUAR vs
+UFCS variants), and how compression interacts with pivoting. For the indefinite
+case, BLR compression interacts with
+[[file:../concepts/bunch-kaufman-pivoting.org][pivot selection]] because
+compression introduces approximation error that can affect pivot quality.
+
+** Performance Results
+
+BLR achieves 2-5x memory reduction and 1.5-3x time reduction on large 3D
+problems compared to full-rank MUMPS. The speedup comes primarily from reduced
+memory traffic (compressed blocks fit in cache) rather than reduced operation
+count alone. On multicore systems, BLR's regular block structure parallelizes
+well.
+
+** Relevance to FERAL
+
+This paper provides practical guidance for a future BLR extension of FERAL.
+The key takeaway is that BLR can be implemented as a modification of the dense
+kernel (compressing frontal matrices before/during factorization) without
+changing the assembly tree or symbolic factorization. FERAL's
+[[file:../methods/two-arena-memory-model.org][two-arena memory model]] would
+need adaptation: compressed blocks have variable sizes, so the fixed-offset
+FactorArena model needs either over-allocation or dynamic offsets.
+
+** Bibliographic Details
+
+Amestoy, P.R., Buttari, A., L'Excellent, J.-Y., and Mary, T. (2019).
+"Performance and Scalability of the Block Low-Rank Multifrontal Factorization
+on Multicore Architectures." /ACM Transactions on Mathematical Software/,
+45(1):2:1-2:26. DOI: 10.1145/3242094.

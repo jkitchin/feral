@@ -1,0 +1,64 @@
+#+TITLE: Wachter and Biegler 2006 - Ipopt: Interior-Point Filter Line-Search Algorithm
+#+FILETAGS: :summary:interior-point:nlp:ipopt:inertia:kkt:
+
+* Wachter and Biegler 2006 - Ipopt: Interior-Point Filter Line-Search Algorithm
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: wachter2006ipopt
+:STATUS: draft
+:CREATED: 2026-04-07
+:END:
+
+Wachter and Biegler (2006) describe the implementation of Ipopt, the most
+widely used open-source interior point solver for large-scale nonlinear
+programming citep:wachter2006ipopt. This paper is essential reading for
+understanding why FERAL must return correct inertia counts and how the linear
+solver integrates with the NLP algorithm.
+
+** Inertia Correction
+
+The paper describes the inertia correction mechanism that is central to Ipopt's
+convergence theory. At each interior point iteration, Ipopt assembles a KKT
+matrix and factors it using a symmetric indefinite solver (MA27, MA57, or
+MUMPS). The solver must return the inertia (n_pos, n_neg, n_zero). If the
+inertia does not match the expected (n, m, 0), where n is the number of primal
+variables and m is the number of constraints, Ipopt adds regularization to the
+diagonal and refactors.
+
+This inertia check is not optional: without it, the search direction may not be
+a descent direction, and the algorithm can fail to converge or converge to a
+saddle point. The check detects three failure modes: indefinite Hessian (wrong
+positive count), linearly dependent constraints (nonzero zero count), and
+numerical issues (wrong negative count).
+
+** KKT System Structure
+
+The KKT system has the saddle-point structure described in
+[[file:../concepts/symmetric-indefinite-factorization.org][symmetric indefinite
+factorization]]. The paper details how the barrier parameter mu controls the
+conditioning of the system: at large mu (early iterations), the system is
+well-conditioned; as mu approaches zero (convergence), the constraint block
+diagonal grows as O(1/mu), creating extreme ill-conditioning that demands good
+[[file:../concepts/symmetric-indefinite-factorization.org][equilibration]].
+
+** Relevance to FERAL
+
+FERAL exists to serve POUNCE, which is an Ipopt-like solver. Understanding
+Ipopt's linear algebra requirements defines FERAL's specification:
+
+The hard constraint that inertia must be exactly correct (Section 10 of the
+FERAL spec) comes directly from Ipopt's inertia correction mechanism. The
+=ZeroPivotAction= enum mirrors the choices Ipopt faces when a pivot is
+near-zero: perturb (when full-rank is assumed), accept (for inertia detection),
+or fail (let the NLP handle it).
+
+The benchmark matrices (Tier 1 KKT systems from ripopt) exercise exactly the
+conditioning trajectory described in this paper: well-conditioned early
+iterations through severely ill-conditioned convergence iterations.
+
+** Bibliographic Details
+
+Wachter, A. and Biegler, L.T. (2006). "On the Implementation of an
+Interior-Point Filter Line-Search Algorithm for Large-Scale Nonlinear
+Programming." /Mathematical Programming/, 106:25-57.
+DOI: 10.1007/s10107-004-0559-y.

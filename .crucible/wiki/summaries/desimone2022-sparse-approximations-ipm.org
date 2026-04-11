@@ -1,0 +1,56 @@
+#+TITLE: De Simone et al. 2022 - Sparse Approximations with Interior Point Methods
+#+FILETAGS: :summary:interior-point:kkt:preconditioning:iterative-refinement:
+
+* De Simone et al. 2022 - Sparse Approximations with Interior Point Methods
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: desimone2022sparseapprox
+:STATUS: draft
+:CREATED: 2026-04-07
+:END:
+
+De Simone, di Serafino, Gondzio, Pougkakiotis, and Viola (2022) provide a
+comprehensive review in /SIAM Review/ of how interior point methods handle KKT
+systems for sparse optimization, including specialized preconditioning and
+iterative refinement strategies citep:desimone2022sparseapprox.
+
+** KKT System Solving Strategies
+
+The paper surveys the full range of approaches for solving the KKT systems that
+arise at each interior point iteration: direct factorization (the approach FERAL
+implements), iterative methods with preconditioning, and hybrid approaches that
+use an approximate factorization as a preconditioner for an iterative solver.
+
+For the direct approach, the paper discusses the challenges of ill-conditioning
+as the barrier parameter mu approaches zero: the constraint block diagonal
+grows as O(1/mu), creating condition numbers that can reach 10^12 or more. This
+motivates the [[file:../concepts/symmetric-indefinite-factorization.org][equilibration]]
+strategy used in FERAL.
+
+** Iterative Refinement
+
+The paper covers iterative refinement in depth, distinguishing between
+fixed-precision refinement (FERAL's approach: 3 steps of correction using the
+existing factors) and mixed-precision refinement (using lower precision for the
+factorization and higher precision for the residual computation). The analysis
+shows that for well-conditioned problems, fixed-precision refinement converges
+in 1-2 steps, matching FERAL's expectation.
+
+** Relevance to FERAL
+
+This paper provides the broader context for FERAL's role in the NLP solver
+stack. While FERAL implements direct factorization, understanding the
+alternatives (iterative methods, hybrid approaches) helps assess which problem
+classes FERAL's approach handles well and where future extensions might be
+needed.
+
+The paper's analysis of conditioning trajectories across interior point
+iterations directly informs FERAL's benchmark design: the Tier 1 KKT matrices
+span the full trajectory from well-conditioned (early iterations) to severely
+ill-conditioned (convergence).
+
+** Bibliographic Details
+
+De Simone, V., di Serafino, D., Gondzio, J., Pougkakiotis, S., and Viola, M.
+(2022). "Sparse Approximations with Interior Point Methods." /SIAM Review/,
+64(4):954-988. DOI: 10.1137/21M1401103.

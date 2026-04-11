@@ -1,0 +1,66 @@
+#+TITLE: Duff, Hogg, and Lopez 2020 - A Posteriori Threshold Pivoting for Sparse LDLt
+#+FILETAGS: :summary:pivoting:sparse-solver:threshold-pivoting:spral:
+
+* Duff, Hogg, and Lopez 2020 - A Posteriori Threshold Pivoting for Sparse LDLt
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: duff2020aptp
+:STATUS: draft
+:CREATED: 2026-04-07
+:END:
+
+Duff, Hogg, and Lopez (2020) introduce a posteriori threshold pivoting (APTP),
+a new pivoting strategy for sparse
+[[file:../concepts/symmetric-indefinite-factorization.org][symmetric indefinite
+factorization]] implemented in the SPRAL library citep:duff2020aptp. APTP
+represents a significant advance over the traditional a priori threshold
+pivoting used in earlier multifrontal solvers.
+
+** The APTP Strategy
+
+Traditional threshold pivoting (as in
+[[file:./hogg2013-pivoting-strategies.org][Hogg and Scott 2013]]) checks pivot
+acceptability before each elimination step. When a pivot is rejected, the
+variable is delayed to the parent frontal, disrupting the dense kernel's
+regularity and reducing parallelism.
+
+APTP takes a fundamentally different approach: it performs a speculative
+factorization of the entire frontal matrix assuming no pivots will be delayed
+(using a standard dense kernel without pivot checks), then checks stability a
+posteriori. If the factorization passes the stability check, it is accepted
+as-is. If it fails, a fallback strategy handles the problematic pivots.
+
+This "speculate then verify" approach has two major advantages. First, the
+speculative factorization uses a regular dense kernel (BLAS-3, SIMD-friendly)
+without the irregular control flow of pivot checking. Second, on multicore
+architectures, the regular kernel parallelizes much better than the
+pivot-checking variant.
+
+** Performance Results
+
+APTP achieves significant speedups over TPP (threshold partial pivoting) on
+multicore systems, particularly for well-conditioned problems where most
+speculative factorizations pass the stability check. For the difficult
+indefinite problems where speculation fails frequently, the overhead of the
+fallback is modest because those frontals would have had many delayed pivots
+under TPP anyway.
+
+** Relevance to FERAL
+
+APTP is highly relevant to FERAL's Phase 2 pivot strategy design. FERAL's
+Phase 1b uses =ZeroPivotAction::ForceAccept= (accept all pivots, flag for
+iterative refinement), which is conceptually similar to APTP's speculative
+approach but without the a posteriori stability check. When FERAL designs the
+=PivotStrategy= trait in Phase 2, APTP should be considered alongside
+traditional TPP and APP modes.
+
+The APTP approach aligns well with FERAL's design philosophy of using regular
+dense kernels: it keeps the [[file:../concepts/bunch-kaufman-pivoting.org][pivot
+decision]] separate from the dense factorization kernel, allowing the kernel to
+be optimized without pivot-checking branches in the inner loop.
+
+** Bibliographic Details
+
+Duff, I.S., Hogg, J.D., and Lopez, F. (2020). "A New Sparse LDLt Solver
+Using A Posteriori Threshold Pivoting." /SIAM Journal on Scientific Computing/,
+42(2). DOI: 10.1137/18M1225963.

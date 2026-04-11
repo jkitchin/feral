@@ -1,0 +1,370 @@
+% FERAL Project — Verified BibTeX References
+% All DOIs verified via CrossRef API (https://api.crossref.org)
+% Last verified: 2026-03-29
+
+% ============================================================
+% Dense Kernel: Micro-kernel Architecture
+% ============================================================
+
+@article{goto2008anatomy,
+  author    = {Goto, Kazushige and van de Geijn, Robert A.},
+  title     = {Anatomy of High-Performance Matrix Multiplication},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2008},
+  volume    = {34},
+  number    = {3},
+  pages     = {1--25},
+  doi       = {10.1145/1356052.1356053},
+  url       = {https://doi.org/10.1145/1356052.1356053},
+  note      = {Foundational explanation of the micro-kernel architecture and cache blocking
+               at L1/L2/L3 levels. Required reading before implementing the Schur complement
+               update kernel.}
+}
+
+@article{vanzee2015blis,
+  author    = {Van Zee, Field G. and van de Geijn, Robert A.},
+  title     = {{BLIS}: A Framework for Rapidly Instantiating {BLAS} Functionality},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2015},
+  volume    = {41},
+  number    = {3},
+  pages     = {1--33},
+  doi       = {10.1145/2764454},
+  url       = {https://doi.org/10.1145/2764454},
+  note      = {Modernizes Goto's approach with clean micro-kernel -> macro-kernel -> full
+               operation layering. Code: https://github.com/flame/blis}
+}
+
+% ============================================================
+% Dense Kernel: Pivot Theory (Bunch-Kaufman)
+% ============================================================
+
+@article{bunch1977stable,
+  author    = {Bunch, James R. and Kaufman, Linda},
+  title     = {Some Stable Methods for Calculating Inertia and Solving Symmetric
+               Linear Systems},
+  journal   = {Mathematics of Computation},
+  year      = {1977},
+  volume    = {31},
+  number    = {137},
+  pages     = {163--179},
+  doi       = {10.1090/S0025-5718-1977-0428694-0},
+  url       = {https://doi.org/10.1090/S0025-5718-1977-0428694-0},
+  note      = {THE pivot paper. Theorem 3 gives the BK algorithm; Section 4 establishes
+               alpha = (1+sqrt(17))/8. Proves 1x1 and 2x2 blocks are necessary and
+               sufficient. Read Sections 2-4 before implementing.}
+}
+
+@article{bunch1971direct,
+  author    = {Bunch, J. R. and Parlett, B. N.},
+  title     = {Direct Methods for Solving Symmetric Indefinite Systems of Linear Equations},
+  journal   = {{SIAM} Journal on Numerical Analysis},
+  year      = {1971},
+  volume    = {8},
+  number    = {4},
+  pages     = {639--655},
+  doi       = {10.1137/0708060},
+  url       = {https://doi.org/10.1137/0708060},
+  note      = {Complete pivoting for symmetric indefinite systems. Theoretical ceiling
+               for pivot stability — more expensive than BK but establishes correctness
+               bounds. Read for the existence theorem and inertia preservation proof.}
+}
+
+% ============================================================
+% Sparse: Multifrontal Method
+% ============================================================
+
+@article{duff1983multifrontal,
+  author    = {Duff, I. S. and Reid, J. K.},
+  title     = {The Multifrontal Solution of Indefinite Sparse Symmetric Linear Equations},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {1983},
+  volume    = {9},
+  number    = {3},
+  pages     = {302--325},
+  doi       = {10.1145/356044.356047},
+  url       = {https://doi.org/10.1145/356044.356047},
+  note      = {The foundational multifrontal paper for indefinite systems. Introduces
+               the frontal matrix concept, assembly tree, and extend-add operations.
+               Start here before reading SSIDS code.}
+}
+
+% ============================================================
+% Sparse: Modern SSIDS Implementation (Primary Code Reference)
+% ============================================================
+
+@article{hogg2013pivoting,
+  author    = {Hogg, Jonathan D. and Scott, Jennifer A.},
+  title     = {Pivoting Strategies for Tough Sparse Indefinite Systems},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2013},
+  volume    = {40},
+  number    = {1},
+  pages     = {1--19},
+  doi       = {10.1145/2513109.2513113},
+  url       = {https://doi.org/10.1145/2513109.2513113},
+  note      = {Threshold pivoting strategies, delayed pivot handling, and the APP/TPP
+               pivot modes in multifrontal factorization. Read alongside ldlt_app.cxx
+               and ldlt_tpp.cxx in SPRAL.}
+}
+
+@article{hogg2016sparse,
+  author    = {Hogg, Jonathan D. and Ovtchinnikov, Evgueni and Scott, Jennifer A.},
+  title     = {A Sparse Symmetric Indefinite Direct Solver for {GPU} Architectures},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2016},
+  volume    = {42},
+  number    = {1},
+  pages     = {1--25},
+  doi       = {10.1145/2756548},
+  url       = {https://doi.org/10.1145/2756548},
+  note      = {The SSIDS architecture paper. Describes the full multifrontal engine with
+               GPU offload, delayed pivoting, and the BSD-licensed SPRAL implementation.
+               Primary architecture reference for FERAL.
+               Code: https://github.com/ralna/spral}
+}
+
+% ============================================================
+% Sparse: Fill-Reducing Ordering (AMD)
+% ============================================================
+
+@article{amestoy1996approximate,
+  author    = {Amestoy, Patrick R. and Davis, Timothy A. and Duff, Iain S.},
+  title     = {An Approximate Minimum Degree Ordering Algorithm},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {1996},
+  volume    = {17},
+  number    = {4},
+  pages     = {886--905},
+  doi       = {10.1137/S0895479894278952},
+  url       = {https://doi.org/10.1137/S0895479894278952},
+  note      = {The AMD algorithm theory paper. Read before implementing ordering.
+               The degree approximation that makes AMD O(n) while nearly matching
+               minimum degree quality.}
+}
+
+@article{amestoy2004algorithm837,
+  author    = {Amestoy, Patrick R. and Davis, Timothy A. and Duff, Iain S.},
+  title     = {Algorithm 837: {AMD}, an Approximate Minimum Degree Ordering Algorithm},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2004},
+  volume    = {30},
+  number    = {3},
+  pages     = {381--388},
+  doi       = {10.1145/1024074.1024081},
+  url       = {https://doi.org/10.1145/1024074.1024081},
+  note      = {The C/Fortran implementation paper for AMD. Read alongside amd_2.c
+               in SuiteSparse for implementation details.
+               Code: https://github.com/DrTimothyAldenDavis/SuiteSparse/tree/main/AMD}
+}
+
+% ============================================================
+% Sparse: Supernode Theory
+% ============================================================
+
+@article{davis2009dynamic,
+  author    = {Davis, Timothy A. and Hager, William W.},
+  title     = {Dynamic Supernodes in Sparse {Cholesky} Update/Downdate and Triangular Solves},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2009},
+  volume    = {35},
+  number    = {4},
+  pages     = {1--23},
+  doi       = {10.1145/1462173.1462176},
+  url       = {https://doi.org/10.1145/1462173.1462176},
+  note      = {Dynamic supernode amalgamation strategy. Relevant for FERAL's
+               SupernodePolicy decisions and the threshold between None and Aggressive
+               amalgamation modes.}
+}
+
+% ============================================================
+% Foundations: Elimination Trees and Graph Theory of Sparsity
+% ============================================================
+
+@book{george1981computer,
+  author    = {George, Alan and Liu, Joseph W. H.},
+  title     = {Computer Solution of Large Sparse Positive Definite Systems},
+  publisher = {Prentice-Hall},
+  address   = {Englewood Cliffs, NJ},
+  year      = {1981},
+  isbn      = {0-13-165274-5},
+  note      = {The classic text on elimination trees, fill-reducing orderings, and
+               graph-theoretic foundations of sparse factorization. Read Chapters 4-6
+               for elimination tree construction and postordering.}
+}
+
+% ============================================================
+% Recent Literature (2015–2026)
+% DOIs verified via CrossRef API, 2026-04-07
+% ============================================================
+
+% --- Surveys ---
+
+@article{davis2016survey,
+  author    = {Davis, Timothy A. and Rajamanickam, Sivasankaran and Sid-Lakhdar, Wissam M.},
+  title     = {A Survey of Direct Methods for Sparse Linear Systems},
+  journal   = {Acta Numerica},
+  year      = {2016},
+  volume    = {25},
+  pages     = {383--566},
+  doi       = {10.1017/S0962492916000076},
+  url       = {https://doi.org/10.1017/S0962492916000076},
+  note      = {Definitive modern survey of sparse direct solvers: ordering, symbolic
+               analysis, numeric factorization, and solve across all symmetry classes.}
+}
+
+% --- Pivoting ---
+
+@article{duff2020aptp,
+  author    = {Duff, Iain S. and Hogg, Jonathan D. and Lopez, Florent},
+  title     = {A New Sparse {$LDL^T$} Solver Using A Posteriori Threshold Pivoting},
+  journal   = {{SIAM} Journal on Scientific Computing},
+  year      = {2020},
+  volume    = {42},
+  number    = {2},
+  doi       = {10.1137/18M1225963},
+  url       = {https://doi.org/10.1137/18M1225963},
+  note      = {A posteriori threshold pivoting (APTP) in SPRAL: speculative factorization
+               followed by stability check. Much better suited to multicore than
+               traditional a priori threshold pivoting.}
+}
+
+% --- Task-Based Parallelism ---
+
+@article{agullo2016taskbased,
+  author    = {Agullo, Emmanuel and Buttari, Alfredo and Guermouche, Abdou and Lopez, Florent},
+  title     = {Implementing Multifrontal Sparse Solvers for Multicore Architectures
+               with Sequential Task Flow Runtime Systems},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2016},
+  volume    = {43},
+  number    = {2},
+  doi       = {10.1145/2898348},
+  url       = {https://doi.org/10.1145/2898348},
+  note      = {Task-based parallelism for multifrontal factorization using StarPU.
+               Demonstrates that dynamic scheduling outperforms static tree partitioning.}
+}
+
+% --- Interior Point / NLP ---
+
+@article{wachter2006ipopt,
+  author    = {W{\"a}chter, Andreas and Biegler, Lorenz T.},
+  title     = {On the Implementation of an Interior-Point Filter Line-Search Algorithm
+               for Large-Scale Nonlinear Programming},
+  journal   = {Mathematical Programming},
+  year      = {2006},
+  volume    = {106},
+  pages     = {25--57},
+  doi       = {10.1007/s10107-004-0559-y},
+  url       = {https://doi.org/10.1007/s10107-004-0559-y},
+  note      = {The Ipopt paper. Sections on inertia correction explain why FERAL must
+               return exact inertia counts for KKT systems.}
+}
+
+@article{desimone2022sparseapprox,
+  author    = {De Simone, Valentina and di Serafino, Daniela and Gondzio, Jacek
+               and Pougkakiotis, Spyridon and Viola, Marco},
+  title     = {Sparse Approximations with Interior Point Methods},
+  journal   = {{SIAM} Review},
+  year      = {2022},
+  volume    = {64},
+  number    = {4},
+  pages     = {954--988},
+  doi       = {10.1137/21M1401103},
+  url       = {https://doi.org/10.1137/21M1401103},
+  note      = {Comprehensive review of KKT system solving strategies for IPMs:
+               direct, iterative, hybrid. Covers conditioning trajectories and
+               iterative refinement analysis.}
+}
+
+@article{pacaud2023condensed,
+  author    = {Pacaud, Fran\c{c}ois and Shin, Sungho and Schanen, Michel
+               and Maldonado, Daniel Adrian and Anitescu, Mihai},
+  title     = {Accelerating Condensed Interior-Point Methods on {SIMD/GPU} Architectures},
+  journal   = {Journal of Optimization Theory and Applications},
+  year      = {2023},
+  volume    = {202},
+  pages     = {184--203},
+  doi       = {10.1007/s10957-022-02129-5},
+  url       = {https://doi.org/10.1007/s10957-022-02129-5},
+  note      = {Condenses KKT into dense system for GPU factorization. Alternative
+               to sparse direct approach; informs GPU kernel threshold decisions.}
+}
+
+% --- Low-Rank Compression in Multifrontal ---
+
+@article{amestoy2017blr,
+  author    = {Amestoy, Patrick R. and Buttari, Alfredo and L'Excellent, Jean-Yves
+               and Mary, Theo},
+  title     = {On the Complexity of the Block Low-Rank Multifrontal Factorization},
+  journal   = {{SIAM} Journal on Scientific Computing},
+  year      = {2017},
+  volume    = {39},
+  pages     = {A1710--A1740},
+  doi       = {10.1137/16M1077192},
+  url       = {https://doi.org/10.1137/16M1077192},
+  note      = {Theoretical complexity of BLR multifrontal: O(n^{4/3}) for 2D,
+               O(n) for 3D. Simpler than hierarchical formats with competitive
+               practical performance.}
+}
+
+@article{amestoy2019blrperformance,
+  author    = {Amestoy, Patrick R. and Buttari, Alfredo and L'Excellent, Jean-Yves
+               and Mary, Theo},
+  title     = {Performance and Scalability of the Block Low-Rank Multifrontal
+               Factorization on Multicore Architectures},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2019},
+  volume    = {45},
+  number    = {1},
+  pages     = {2:1--2:26},
+  doi       = {10.1145/3242094},
+  url       = {https://doi.org/10.1145/3242094},
+  note      = {BLR implementation in MUMPS: 2--5x memory reduction, 1.5--3x speedup
+               on large 3D problems. Practical companion to the complexity paper.}
+}
+
+@article{amestoy2019multilevelblr,
+  author    = {Amestoy, Patrick R. and Buttari, Alfredo and L'Excellent, Jean-Yves
+               and Mary, Theo A.},
+  title     = {Bridging the Gap Between Flat and Hierarchical Low-Rank Matrix Formats:
+               The Multilevel Block Low-Rank Format},
+  journal   = {{SIAM} Journal on Scientific Computing},
+  year      = {2019},
+  volume    = {41},
+  number    = {3},
+  doi       = {10.1137/18M1182760},
+  url       = {https://doi.org/10.1137/18M1182760},
+  note      = {Multilevel BLR bridges flat BLR simplicity with hierarchical (HSS)
+               optimal complexity. Recursive BLR-within-BLR.}
+}
+
+@article{ghysels2016hss,
+  author    = {Ghysels, Pieter and Li, Xiaoye S. and Rouet, Fran\c{c}ois-Henry
+               and Williams, Samuel and Napov, Artem},
+  title     = {An Efficient Multicore Implementation of a Novel {HSS}-Structured
+               Multifrontal Solver Using Randomized Sampling},
+  journal   = {{SIAM} Journal on Scientific Computing},
+  year      = {2016},
+  volume    = {38},
+  pages     = {S358--S384},
+  doi       = {10.1137/15M1010117},
+  url       = {https://doi.org/10.1137/15M1010117},
+  note      = {STRUMPACK's HSS multifrontal solver with randomized sampling.
+               Up to 7x speedup over full-rank for elliptic PDEs.}
+}
+
+% --- Ordering ---
+
+@inproceedings{lasalle2015mtmetis,
+  author    = {LaSalle, Dominique and Karypis, George},
+  title     = {Efficient Nested Dissection for Multicore Architectures},
+  booktitle = {Euro-Par 2015: Parallel Processing},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {9233},
+  year      = {2015},
+  doi       = {10.1007/978-3-662-48096-0_36},
+  url       = {https://doi.org/10.1007/978-3-662-48096-0_36},
+  note      = {mt-Metis: 1.5x faster than ParMetis, 3.7\% fewer NNZ, up to 10x
+               parallel speedup on 16 cores with only 1\% fill increase.}
+}

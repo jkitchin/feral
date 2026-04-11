@@ -1,0 +1,53 @@
+#+TITLE: LaSalle and Karypis 2015 - Efficient Nested Dissection for Multicore (mt-Metis)
+#+FILETAGS: :summary:ordering:metis:nested-dissection:parallelism:fill-reduction:
+
+* LaSalle and Karypis 2015 - Efficient Nested Dissection for Multicore (mt-Metis)
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: lasalle2015mtmetis
+:STATUS: draft
+:CREATED: 2026-04-07
+:END:
+
+LaSalle and Karypis (2015) present mt-Metis, a multithreaded nested dissection
+framework for [[file:../concepts/sparse-matrix-ordering.org][fill-reducing
+orderings]] on multicore architectures citep:lasalle2015mtmetis.
+
+** Nested Dissection vs AMD
+
+While [[file:./amestoy1996-amd.org][AMD]] is a local heuristic (greedy minimum
+degree selection), nested dissection takes a global view: it recursively
+bisects the graph using small vertex separators, producing an ordering where the
+separator vertices are eliminated last. For regular 2D and 3D meshes, nested
+dissection provably achieves asymptotically optimal fill. For irregular graphs,
+the quality depends on the graph partitioner's ability to find balanced, small
+separators.
+
+** mt-Metis Results
+
+mt-Metis achieves 1.5x faster ordering computation than ParMetis while
+producing orderings with 3.7% fewer nonzeros and 14% fewer floating-point
+operations in the subsequent factorization. On 16 cores, mt-Metis achieves up
+to 10x speedup over serial Metis with only 1% increase in fill. The ordering
+quality is preserved because mt-Metis parallelizes the coarsening and
+refinement phases of the multilevel partitioning framework without sacrificing
+partition quality.
+
+** Relevance to FERAL
+
+FERAL plans to add METIS ordering as a Phase 2 alternative to AMD. This paper
+provides the state of the art in parallel METIS implementations. For FERAL's
+target problem sizes (n ~ 2k-50k for the core target, up to 500k for Phase 3),
+the ordering phase is typically a small fraction of total solve time, so the
+parallelism benefit is less critical than ordering quality.
+
+The key insight for FERAL is that METIS ordering can produce significantly
+better fill than AMD on irregular graphs (which arise from unstructured
+constraint Jacobians in NLP problems). FERAL's Tier 3 benchmark matrices
+include cases specifically designed to test AMD vs METIS ordering quality.
+
+** Bibliographic Details
+
+LaSalle, D. and Karypis, G. (2015). "Efficient Nested Dissection for Multicore
+Architectures." In /Euro-Par 2015: Parallel Processing/, LNCS 9233.
+DOI: 10.1007/978-3-662-48096-0_36.

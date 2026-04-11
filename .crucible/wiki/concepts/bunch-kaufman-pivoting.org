@@ -1,0 +1,104 @@
+#+TITLE: Bunch-Kaufman Pivoting
+#+FILETAGS: :concept:pivoting:linear-algebra:factorization:inertia:
+
+* Bunch-Kaufman Pivoting
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+Bunch-Kaufman (BK) pivoting is a symmetric pivoting strategy for the LDLt
+factorization of symmetric indefinite matrices. It produces a factorization
+P*L*D*L^T*P^T = A where P is a permutation, L is unit lower triangular, and D
+is block diagonal with 1x1 and 2x2 blocks. The algorithm was introduced by
+Bunch and Kaufman (1977) and provides a stable method for factoring matrices
+that are neither positive definite nor negative definite citep:feral2026.
+
+** The Pivot Selection Algorithm
+
+The BK algorithm is controlled by a single threshold parameter alpha. The
+standard value is alpha = (1 + sqrt(17)) / 8, approximately 0.6404. At each
+step of the factorization, the algorithm examines the current reduced matrix and
+makes a joint decision about whether to select a 1x1 or 2x2 pivot block. This
+is a single decision, not two independent accept/reject tests.
+
+The selection procedure (Theorem 3, Bunch and Kaufman 1977) searches the active
+column for the largest off-diagonal element and compares it against the diagonal
+using the alpha threshold. Smaller alpha values (e.g., 0.01, as used in
+MA57-like configurations) produce more 2x2 pivot blocks and better numerical
+stability at the cost of more fill. The choice of alpha trades off between
+growth factor bounds and the frequency of 2x2 blocks.
+
+** Why 1x1 and 2x2 Blocks Are Necessary
+
+For a general symmetric indefinite matrix, 1x1 pivots alone are insufficient
+because a zero or near-zero diagonal entry does not mean the matrix is singular.
+The off-diagonal entries carry the indefiniteness. A 2x2 block captures one
+positive and one negative eigenvalue together, allowing the factorization to
+proceed stably. The existence theorem guarantees that for any nonsingular
+symmetric matrix, either a suitable 1x1 pivot or a suitable 2x2 pivot exists at
+every step.
+
+** Inertia Counting from D Blocks
+
+The inertia of the original matrix A equals the inertia of the block diagonal D,
+by Sylvester's Law of Inertia. The counting rules differ by block size:
+
+For a 1x1 block [d]: it contributes +1 positive if d > 0, +1 negative if d < 0,
+or +1 zero if d = 0.
+
+For a 2x2 block [[a, b], [b, c]]: one must not count diagonal signs directly.
+Instead, compute det = a*c - b^2. If det > 0 and a > 0, both eigenvalues are
+positive, contributing (2, 0, 0). If det > 0 and a < 0, both are negative,
+contributing (0, 2, 0). If det < 0, one eigenvalue is positive and one
+negative, contributing (1, 1, 0). If det = 0, one eigenvalue is zero and the
+other has the sign of the trace.
+
+The naive approach of counting signs of diagonal entries of 2x2 blocks is wrong.
+A 2x2 block with a > 0, c > 0 but det < 0 is indefinite and must contribute
+(1, 1, 0), not (2, 0, 0). This case appears regularly in KKT matrices from
+interior point solvers.
+
+** Zero Pivot Handling
+
+When the selected pivot is numerically zero (below a tolerance), FERAL provides
+three actions through the =ZeroPivotAction= enum:
+
+=Perturb(epsilon)= adds epsilon to the diagonal and reuses the pivot. This is
+valid only when the matrix is known to be full-rank and the near-zero pivot is
+numerical noise. Using Perturb on a genuinely rank-deficient matrix produces
+wrong inertia because it converts a true zero eigenvalue to a positive
+contribution.
+
+=ForceAccept= accepts the tiny pivot and flags the factorization for iterative
+refinement. It reports inertia correctly, including zero counts. This is the
+appropriate action when the caller needs the true inertia of a potentially
+rank-deficient matrix.
+
+=Fail= returns an error to the caller, who decides what to do (e.g., POUNCE
+interprets this as linearly dependent constraints).
+
+** Relationship to Other Pivoting Strategies
+
+Bunch and Parlett (1971) described complete pivoting for symmetric indefinite
+systems, which searches the entire active submatrix for the best pivot. This is
+more expensive (O(n^2) per step vs O(n) for BK) but provides the theoretical
+ceiling for element growth bounds. Static pivoting (PARDISO-like) is a different
+algorithm entirely, with no BK selection at all: it simply perturbs tiny
+diagonals in place.
+
+In the [[file:../concepts/multifrontal-method.org][multifrontal method]], BK
+pivoting operates within each frontal matrix. Threshold pivoting (Hogg and
+Scott, 2013) adapts the acceptance criteria for the multifrontal context, where
+rejected pivots can be delayed to the parent frontal rather than causing failure.
+
+** Configuration Presets
+
+| Configuration | alpha | on_zero_pivot | Use case |
+|---------------+-------------------+---------------+--------------------------------------|
+| BK standard | (1+sqrt(17))/8 | Fail | Dense solver default |
+| MA57-like | 0.01 | Fail | More stability, more 2x2 blocks |
+| Tolerant | 0.1 | Perturb(1e-8) | Near-singular, full-rank NLP late iter |
+| Phase 1b | (1+sqrt(17))/8 | ForceAccept | Multifrontal default (correct inertia) |

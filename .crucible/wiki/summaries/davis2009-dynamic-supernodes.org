@@ -1,0 +1,55 @@
+#+TITLE: Davis and Hager 2009 - Dynamic Supernodes
+#+FILETAGS: :summary:supernodes:sparse-solver:factorization:cholmod:
+
+* Davis and Hager 2009 - Dynamic Supernodes
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+Davis and Hager (2009) present dynamic supernode amalgamation strategies for
+sparse Cholesky update/downdate and triangular solves citep:davis2009dynamic.
+While the paper focuses on the positive definite case (Cholesky), the supernode
+detection and amalgamation infrastructure applies directly to the indefinite
+[[file:../concepts/multifrontal-method.org][multifrontal method]] used in FERAL.
+
+** Supernodes
+
+A supernode is a set of consecutive columns in the elimination tree that share
+the same sparsity pattern below the diagonal block. Grouping these columns into
+a single node converts many small scalar operations into larger dense matrix
+operations (BLAS-3), dramatically improving cache utilization and floating-point
+throughput. The paper describes dynamic strategies that adapt supernode
+boundaries during factorization, rather than fixing them at symbolic analysis
+time.
+
+** Amalgamation
+
+Strict supernodes (columns with identical structure) are often small. Relaxed
+or amalgamated supernodes merge columns with nearly identical structure,
+accepting some extra fill (zeros stored as nonzeros within the supernode block)
+in exchange for larger dense operations. The tradeoff is between fill overhead
+and kernel efficiency. The paper provides heuristics for deciding when
+amalgamation is beneficial.
+
+** Relevance to FERAL
+
+FERAL's =SupernodePolicy= enum (=None= for n < ~200, =Aggressive= for larger
+problems) is informed by this work. The threshold between policies is tuned
+empirically against FERAL's benchmark suite. The reference implementation for
+supernode amalgamation is CHOLMOD's =cholmod_super_symbolic.c=, which
+implements the algorithms described in this paper within the SuiteSparse
+framework.
+
+For FERAL specifically, supernode amalgamation in the indefinite case interacts
+with [[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman pivoting]]:
+delayed pivots can break supernode boundaries, which is why FERAL defers
+aggressive amalgamation to Phase 2 when delayed pivoting infrastructure exists.
+
+** Bibliographic Details
+
+Davis, T.A. and Hager, W.W. (2009). "Dynamic Supernodes in Sparse Cholesky
+Update/Downdate and Triangular Solves." /ACM Transactions on Mathematical
+Software/, 35(4):1-23. DOI: 10.1145/1462173.1462176.

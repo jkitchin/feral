@@ -1,0 +1,8 @@
+# Crucible: external sources (copyrighted, not shareable)
+.crucible/sources/external/
+
+# Crucible: database (regenerable from wiki)
+.crucible/crucible.db
+
+# Crucible: publish output
+.crucible/wiki/_build/

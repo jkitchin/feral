@@ -1,0 +1,55 @@
+#+TITLE: Van Zee and van de Geijn 2015 - BLIS Framework
+#+FILETAGS: :summary:dense-kernel:blas:micro-kernel:blis:
+
+* Van Zee and van de Geijn 2015 - BLIS Framework
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+Van Zee and van de Geijn (2015) present BLIS (BLAS-like Library Instantiation
+Software), a framework that modernizes and systematizes the micro-kernel
+approach to dense linear algebra introduced by
+[[file:./goto2008-matrix-multiplication.org][Goto and van de Geijn (2008)]]
+citep:vanzee2015blis. BLIS is explicitly designed to be reimplemented: it
+provides a clean layering from micro-kernel to macro-kernel to full BLAS
+operation.
+
+** Architecture
+
+The BLIS framework decomposes each BLAS operation into five nested loops around
+a micro-kernel. The micro-kernel is the only architecture-specific piece
+(typically 50-200 lines of assembly or SIMD intrinsics). Everything above the
+micro-kernel is portable C that manages packing, loop tiling, and threading.
+This separation means porting BLIS to a new architecture requires writing only
+the micro-kernel, not the entire BLAS.
+
+The five-loop structure for GEMM is defined in =bli_gemm_ker_var2.c= in the
+BLIS source. Cache-level block size selection is handled in =bli_blksz.c=, and
+panel packing (which ensures data is contiguous in memory for the micro-kernel)
+is in =bli_l3_sup_packm_var.c=.
+
+** Relevance to FERAL
+
+BLIS is the primary architectural reference for FERAL's dense kernel design.
+When FERAL moves to Phase 2 (blocked dense kernels) and Phase 2+ (SIMD
+micro-kernels for the Schur complement update), the implementation follows the
+BLIS layering: a small, hand-optimized micro-kernel for the inner loop,
+surrounded by portable Rust code for cache blocking and panel management.
+
+FERAL's SIMD portability policy specifies x86-64 with AVX2 as the ISA baseline,
+with runtime CPU feature detection via =is_x86_feature_detected!("avx2")=. All
+SIMD code will be isolated in =src/dense/micro_kernel.rs=. The scalar path runs
+correctly on all targets. This follows the BLIS pattern of keeping the
+architecture-specific kernel separate from the portable blocking infrastructure.
+
+The BLIS source code (BSD-3-Clause, https://github.com/flame/blis) is a code
+inspection reference for FERAL's clean-room implementation.
+
+** Bibliographic Details
+
+Van Zee, F.G. and van de Geijn, R.A. (2015). "BLIS: A Framework for Rapidly
+Instantiating BLAS Functionality." /ACM Transactions on Mathematical Software/,
+41(3):1-33. DOI: 10.1145/2764454.

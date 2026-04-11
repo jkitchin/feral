@@ -1,0 +1,62 @@
+#+TITLE: Amestoy, Davis, and Duff 1996 - Approximate Minimum Degree Ordering
+#+FILETAGS: :summary:ordering:amd:fill-reduction:sparse-solver:
+
+* Amestoy, Davis, and Duff 1996 - Approximate Minimum Degree Ordering
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+Amestoy, Davis, and Duff (1996) present the AMD (Approximate Minimum Degree)
+ordering algorithm for
+[[file:../concepts/sparse-matrix-ordering.org][fill-reducing orderings]] of
+sparse matrices citep:amestoy1996approximate. AMD is the primary ordering
+algorithm used in FERAL.
+
+** The AMD Algorithm
+
+Minimum degree ordering is a greedy heuristic that, at each elimination step,
+selects the vertex with the smallest degree in the elimination graph. This tends
+to minimize fill-in because low-degree vertices create fewer new edges when
+eliminated. However, maintaining exact degrees after each elimination step is
+expensive (O(n^2) per step in the worst case).
+
+AMD resolves this by computing approximate degrees, specifically upper bounds on
+the true degree, using a technique called element absorption. The approximation
+is cheap to maintain (amortized O(nnz) over the full ordering) and produces
+orderings that are nearly as good as exact minimum degree in practice. The key
+insight is that the ordering quality is insensitive to small errors in degree
+computation, so the exact degree is not needed for good fill reduction.
+
+** Implementation
+
+The companion paper, Amestoy, Davis, and Duff (2004) citep:amestoy2004algorithm837,
+describes the C/Fortran implementation as Algorithm 837 in ACM TOMS. The
+SuiteSparse implementation (=amd_2.c=) contains the core AMD elimination loop,
+with =amd_postorder.c= providing the postordering of the resulting elimination
+tree.
+
+** Relevance to FERAL
+
+AMD ordering is FERAL's Phase 1b ordering algorithm. It produces a permutation
+vector that is fed into elimination tree construction, followed by postordering
+and column count estimation. The ordering quality directly determines frontal
+matrix sizes in the
+[[file:../concepts/multifrontal-method.org][multifrontal factorization]] and
+thus the overall computational cost.
+
+FERAL's Tier 3 benchmark matrices include cases where AMD gives poor fill
+compared to METIS, specifically to test ordering sensitivity and motivate the
+METIS ordering option planned for Phase 2.
+
+** Bibliographic Details
+
+Amestoy, P.R., Davis, T.A., and Duff, I.S. (1996). "An Approximate Minimum
+Degree Ordering Algorithm." /SIAM Journal on Matrix Analysis and Applications/,
+17(4):886-905. DOI: 10.1137/S0895479894278952.
+
+Amestoy, P.R., Davis, T.A., and Duff, I.S. (2004). "Algorithm 837: AMD, an
+Approximate Minimum Degree Ordering Algorithm." /ACM Transactions on
+Mathematical Software/, 30(3):381-388. DOI: 10.1145/1024074.1024081.

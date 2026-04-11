@@ -1,0 +1,102 @@
+#+TITLE: Multifrontal Method
+#+FILETAGS: :concept:sparse-solver:factorization:linear-algebra:
+
+* Multifrontal Method
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+The multifrontal method is a sparse direct factorization algorithm that
+organizes computation around an assembly tree (also called an elimination tree
+or supernode tree). Each node of the tree corresponds to a dense frontal matrix
+assembled from original matrix entries and contributions from child nodes. The
+method was introduced by Duff and Reid (1983) and is the algorithmic foundation
+for solvers such as MUMPS, MA57, and SSIDS citep:feral2026.
+
+** Core Idea
+
+Rather than operating on the sparse matrix directly, the multifrontal method
+converts the sparse factorization into a sequence of dense factorizations on
+frontal matrices. Each frontal matrix captures the local coupling between a set
+of pivot variables and their connections to the rest of the matrix. After
+partial factorization of a frontal, the uneliminated portion (the Schur
+complement, or "contribution block") is passed to the parent node in the tree
+for assembly.
+
+** Assembly Tree
+
+The assembly tree is derived from the elimination tree of the reordered matrix.
+[[file:../concepts/sparse-matrix-ordering.org][Fill-reducing orderings]] such as
+AMD produce a permutation that minimizes fill-in during factorization. From this
+permutation, the elimination tree is constructed, and supernodes (sets of
+columns with identical sparsity structure) are detected and amalgamated into
+larger nodes to enable BLAS-3 operations on bigger dense blocks.
+
+The tree is traversed in postorder (leaves first). At each node:
+1. Assemble the frontal matrix by scattering original matrix entries and
+   performing extend-add of child contribution blocks (popped from a stack).
+2. Factor the frontal with the dense kernel, producing accepted pivots and a
+   contribution block.
+3. Push the contribution block onto the stack for the parent to consume.
+
+** Extend-Add Operation
+
+The extend-add (or scatter-gather assembly) operation combines a child's
+contribution block into the parent's frontal matrix. The child's contribution
+block is indexed by a subset of the parent's variables. Each entry of the child
+is added to the corresponding position in the parent's frontal. This operation
+preserves the symmetry of the assembled frontal.
+
+** Frontal Matrix Layout
+
+In FERAL, frontal matrices use column-major, full symmetric (not packed)
+storage. This layout is required for efficient Schur complement updates, which
+follow the pattern A_22 -= A_21 * D_bk^{-1} * A_21^T, a symmetric rank-k
+update that maps directly to BLAS-3 operations in column-major format.
+
+** Delayed Pivoting
+
+When [[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman pivoting]]
+within a frontal matrix rejects a pivot (because no numerically stable 1x1 or
+2x2 block can be formed from the remaining active columns), that variable is
+"delayed" to the parent frontal. The contribution block grows to include the
+delayed variable, and the parent gets another chance to pivot on it with
+additional context from other children. This mechanism is central to numerical
+robustness in the multifrontal method.
+
+In FERAL's Phase 1b, delayed pivoting is not implemented. Instead,
+=ZeroPivotAction::ForceAccept= is used as the default, which correctly reports
+inertia (including zeros) and flags the factorization for iterative refinement.
+Delayed pivoting is added in Phase 2.
+
+** Memory Management
+
+The multifrontal method has a natural memory allocation pattern described by the
+[[file:../methods/two-arena-memory-model.org][two-arena memory model]]. Factor
+storage is permanent (the L and D values persist for the solve phase), while
+contribution blocks are transient (each is consumed by the parent shortly after
+being produced). The postorder traversal ensures contribution blocks follow a
+LIFO pattern, enabling stack-based allocation.
+
+** Parallelism
+
+Independent subtrees of the assembly tree can be factored concurrently. In
+shared-memory parallelism (FERAL Phase 2, using Rayon), each thread works on a
+separate subtree with its own contribution stack. The =FactorArena= is shared
+but uses precomputed non-overlapping offsets, so writes are race-free. In
+distributed-memory parallelism (FERAL Phase 4, using MPI), subtrees are
+assigned to different ranks, with communication at merge points where a parent
+node's children reside on different ranks.
+
+** Supernode Amalgamation
+
+Supernodes group columns with identical or nearly identical sparsity patterns
+into a single node of the assembly tree. This converts many small dense
+operations into fewer large ones, improving cache utilization and enabling
+BLAS-3 performance. FERAL uses a =SupernodePolicy= enum: =None= for small
+problems (n < ~200) and =Aggressive= for larger problems, with the threshold
+tuned empirically against the benchmark suite. The reference implementation for
+supernode amalgamation is CHOLMOD's =cholmod_super_symbolic.c=.

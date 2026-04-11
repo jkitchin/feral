@@ -1,0 +1,61 @@
+#+TITLE: Agullo et al. 2016 - Task-Based Multifrontal Solvers for Multicore Architectures
+#+FILETAGS: :summary:multifrontal:parallelism:task-based:runtime:
+
+* Agullo et al. 2016 - Task-Based Multifrontal Solvers for Multicore Architectures
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: agullo2016taskbased
+:STATUS: draft
+:CREATED: 2026-04-07
+:END:
+
+Agullo, Buttari, Guermouche, and Lopez (2016) evaluate runtime systems based on
+the Sequential Task Flow (STF) model for parallelizing sparse
+[[file:../concepts/multifrontal-method.org][multifrontal factorizations]] on
+multicore architectures citep:agullo2016taskbased. The work uses the StarPU
+runtime to manage the extremely irregular, heterogeneous workloads that arise in
+multifrontal methods.
+
+** Task-Based Approach
+
+Traditional parallelization of multifrontal solvers relies on static
+partitioning of the assembly tree: independent subtrees are assigned to threads,
+and the large root frontals use fork-join parallelism for the dense operations.
+This approach suffers from load imbalance (subtrees vary widely in size) and
+synchronization overhead at tree merge points.
+
+The task-based approach decomposes the factorization into fine-grained tasks
+(assembly operations, panel factorizations, Schur complement updates) and
+submits them to a runtime system that handles scheduling, data dependencies, and
+load balancing dynamically. The STF model is particularly natural for
+multifrontal factorization because the assembly tree already encodes the
+dependency structure.
+
+** Results
+
+The task-based approach achieves better scalability than static tree parallelism,
+particularly on high core counts (16+ cores) where load imbalance in static
+partitioning becomes the bottleneck. The runtime overhead is modest compared to
+the benefits of dynamic load balancing.
+
+** Relevance to FERAL
+
+FERAL's Phase 2 parallelism plan uses Rayon for shared-memory parallelism on the
+assembly tree. Rayon's work-stealing scheduler provides similar dynamic load
+balancing to StarPU's STF model, though with a simpler programming model. This
+paper provides evidence that task-based parallelism is the right approach for
+multifrontal solvers on multicore systems, validating FERAL's planned use of
+Rayon rather than static tree partitioning.
+
+The paper also highlights that the dense kernel granularity (how large a panel or
+Schur update becomes a separate task) is a critical tuning parameter. FERAL's
+supernode amalgamation policy (=SupernodePolicy::Aggressive=) directly affects
+task granularity: larger supernodes produce fewer, larger tasks with better
+BLAS-3 efficiency but less parallelism.
+
+** Bibliographic Details
+
+Agullo, E., Buttari, A., Guermouche, A., and Lopez, F. (2016). "Implementing
+Multifrontal Sparse Solvers for Multicore Architectures with Sequential Task
+Flow Runtime Systems." /ACM Transactions on Mathematical Software/, 43(2).
+DOI: 10.1145/2898348.

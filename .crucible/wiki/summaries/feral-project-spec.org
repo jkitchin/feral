@@ -1,0 +1,118 @@
+#+TITLE: FERAL Project Specification
+#+FILETAGS: :summary:feral:sparse-solver:rust:linear-algebra:
+
+* FERAL Project Specification
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+FERAL (Frontal Elimination for Robust Algebraic Linear Systems) is a sparse
+symmetric indefinite direct solver implemented in pure Rust, designed as the
+linear algebra foundation for POUNCE, an interior point NLP solver targeting
+chemical engineering nonlinear programming citep:feral2026. The project fills a
+gap in the existing landscape where solvers like MA57, MUMPS, and PARDISO are
+encumbered by restrictive licenses, heavyweight MPI infrastructure, or vendor
+lock-in. FERAL is MIT-licensed, self-contained, and requires zero non-Rust
+dependencies in the core solver.
+
+** Design Philosophy
+
+The core design principle is "one engine, not multiple solvers." Dense, small
+sparse, and large sparse cases are configurations of the same multifrontal
+engine, not separate codepaths. Dense kernels are implemented from the
+literature (following the BLIS micro-kernel architecture of
+[[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman Pivoting]]) rather
+than delegating to BLAS or LAPACK. Pivot strategy, ordering, supernode policy,
+and kernel selection are variation points within a single architecture. The
+solver is co-designed with POUNCE so that the outer NLP loop can adapt FERAL's
+behavior across interior point iterations, a capability no existing standalone
+solver offers.
+
+** Two-Stage Build Order
+
+FERAL is built in two explicit stages. Stage 1 produces a standalone dense
+solver with full
+[[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman pivoting]]:
+=factor(matrix) -> (Factors, Inertia)= and =solve(factors, rhs) -> solution=.
+The entire matrix is treated as a single dense system. Stage 2 embeds the dense
+kernel inside a [[file:../concepts/multifrontal-method.org][multifrontal engine]]
+with [[file:../concepts/sparse-matrix-ordering.org][AMD ordering]], elimination
+trees, symbolic factorization, supernode amalgamation, and assembly via
+extend-add.
+
+The size regimes targeted by the final solver span from dense (n < ~200, where
+the Stage 1 result applies unchanged) through small sparse (n ~ 200-2000),
+medium sparse (n ~ 2k-50k, the core target), large sparse (n ~ 50k-500k with
+Rayon parallelism), and very large sparse (n > 500k with distributed MPI in
+Phase 4).
+
+** Memory Model
+
+FERAL uses a [[file:../methods/two-arena-memory-model.org][two-arena memory
+model]] for all dynamic memory during numeric factorization. A =MemoryPlan=
+produced by symbolic factorization drives preallocation of a =FactorArena= (one
+contiguous =Vec<f64>= for permanent factor storage) and a =ContribStack= (a
+LIFO stack arena for transient contribution blocks consumed during postorder
+traversal of the assembly tree).
+
+** Pivot Configuration
+
+The Bunch-Kaufman algorithm is controlled by a =BunchKaufmanParams= struct
+containing the threshold alpha (default: (1 + sqrt(17)) / 8, approximately
+0.6404), zero-pivot tolerances for 1x1 and 2x2 blocks, and a =ZeroPivotAction=
+enum with three variants: =Perturb(epsilon)= for full-rank matrices with
+numerical noise, =ForceAccept= for correct inertia reporting on potentially
+rank-deficient matrices, and =Fail= which returns an error for the caller to
+handle. See [[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman
+Pivoting]] for the complete pivot selection algorithm and inertia counting rules.
+
+** Equilibration
+
+KKT matrices from interior point solvers have entries spanning many orders of
+magnitude. FERAL applies infinity-norm diagonal equilibration transparently
+before factoring: d[i] = 1 / sqrt(max_j |A[i,j]|), applied symmetrically as
+D*A*D. This is described further in
+[[file:../concepts/symmetric-indefinite-factorization.org][Symmetric Indefinite
+Factorization]].
+
+** Solve Sequence
+
+The full solve for A*x = b proceeds in seven steps: (1) apply equilibration to
+RHS, (2) apply BK permutation, (3) forward substitution through unit lower L,
+(4) solve each D_bk block (trivial for 1x1, 2x2 system solve for 2x2 blocks),
+(5) backward substitution through L^T, (6) undo BK permutation, (7) undo
+equilibration. An optional eighth step provides iterative refinement (at most 3
+steps of fixed-point correction) when =ForceAccept= fired during factorization.
+
+** Benchmark Framework
+
+The benchmark framework validates correctness via a self-contained contract:
+exact inertia match against sidecars, and residual norm below a
+condition-number-derived tolerance. Four tiers of benchmark matrices are
+defined: Tier 1 (KKT systems from ripopt CUTEst solves), Tier 2 (SuiteSparse
+symmetric indefinite matrices), Tier 3 (constructed stress tests), and Tier 4
+(scaling frontier at n > 100k).
+
+** Phase Roadmap
+
+Phase 1a delivers a correct dense solver (100% correct inertia and solution on
+hand-verified and KKT matrices). Phase 1b adds the multifrontal sparse solver
+(single-threaded, 100% correct on KKT benchmark set). Phase 2 optimizes with
+blocked dense kernels, SIMD, and shared-memory parallelism (target: within 2x
+of MUMPS). Phase 3 integrates with POUNCE to replace MUMPS in ripopt with no
+regression. Phase 4 adds distributed MPI and GPU offload for large-scale
+problems.
+
+** Literature Foundation
+
+The implementation draws from a carefully curated set of papers: Bunch and
+Kaufman (1977) for pivot theory, Goto and van de Geijn (2008) and Van Zee and
+van de Geijn (2015) for dense kernel architecture, Duff and Reid (1983) for
+multifrontal factorization, Amestoy, Davis, and Duff (1996) for AMD ordering,
+Hogg and Scott (2013) for threshold pivoting strategies, and Hogg,
+Ovtchinnikov, and Scott (2016) for the SSIDS GPU-enabled sparse architecture.
+Code inspection references (all BSD-licensed or more permissive) include
+SPRAL/SSIDS, BLIS, faer-rs, and SuiteSparse AMD/CHOLMOD.

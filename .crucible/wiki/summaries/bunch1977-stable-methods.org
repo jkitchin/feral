@@ -1,0 +1,63 @@
+#+TITLE: Bunch and Kaufman 1977 - Stable Methods for Inertia and Symmetric Solves
+#+FILETAGS: :summary:pivoting:factorization:inertia:bunch-kaufman:
+
+* Bunch and Kaufman 1977 - Stable Methods for Inertia and Symmetric Solves
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+This is the foundational paper for
+[[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman pivoting]]
+citep:bunch1977stable. Bunch and Kaufman (1977) present stable methods for
+calculating the inertia of symmetric matrices and for solving symmetric
+indefinite linear systems using LDLt factorization with 1x1 and 2x2 pivot
+blocks.
+
+** Key Contributions
+
+Theorem 3 gives the Bunch-Kaufman pivot selection algorithm. At each step of
+the factorization, the algorithm examines the active submatrix and selects
+either a 1x1 or a 2x2 pivot block. The selection compares the largest
+off-diagonal element in the pivot column against the diagonal using the
+threshold parameter alpha.
+
+Section 4 establishes the optimal threshold alpha = (1 + sqrt(17)) / 8,
+approximately 0.6404, which minimizes the element growth factor. This value
+balances numerical stability against the frequency of 2x2 blocks (smaller alpha
+produces more 2x2 blocks and tighter growth bounds, but at higher computational
+cost).
+
+The paper proves that 1x1 and 2x2 blocks are both necessary and sufficient for
+stable factorization of any nonsingular symmetric matrix. The existence theorem
+guarantees that at every step of the elimination, either an acceptable 1x1
+pivot or an acceptable 2x2 pivot can be found.
+
+** Inertia and Sylvester's Law
+
+The paper establishes the connection between the D blocks in the factorization
+P*L*D*L^T*P^T = A and the inertia of A via Sylvester's Law. The inertia
+(counts of positive, negative, and zero eigenvalues) can be read directly from
+the D blocks without computing actual eigenvalues. This property is central to
+FERAL's design, where exact inertia reporting is a hard constraint required by
+the NLP solver POUNCE for convergence monitoring.
+
+** Relevance to FERAL
+
+This paper is required reading before implementing the dense
+[[file:../concepts/symmetric-indefinite-factorization.org][LDLt factorization]].
+Sections 2-4 contain all the algorithmic details needed for FERAL's Stage 1
+scalar Bunch-Kaufman implementation. The exact test matrices for FERAL's test
+suite are derived from examples in this paper.
+
+FERAL's =BunchKaufmanParams= struct directly implements the parameters from this
+paper: the alpha threshold, zero-pivot tolerance, and the three-way
+=ZeroPivotAction= for handling numerically zero pivots.
+
+** Bibliographic Details
+
+Bunch, J.R. and Kaufman, L. (1977). "Some Stable Methods for Calculating
+Inertia and Solving Symmetric Linear Systems." /Mathematics of Computation/,
+31(137):163-179. DOI: 10.1090/S0025-5718-1977-0428694-0.

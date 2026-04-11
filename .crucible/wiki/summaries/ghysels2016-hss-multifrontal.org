@@ -1,0 +1,60 @@
+#+TITLE: Ghysels et al. 2016 - HSS-Structured Multifrontal Solver (STRUMPACK)
+#+FILETAGS: :summary:multifrontal:low-rank:hss:strumpack:randomized:
+
+* Ghysels et al. 2016 - HSS-Structured Multifrontal Solver (STRUMPACK)
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: ghysels2016hss
+:STATUS: draft
+:CREATED: 2026-04-07
+:END:
+
+Ghysels, Li, Rouet, Williams, and Napov (2016) describe STRUMPACK's
+HSS-structured [[file:../concepts/multifrontal-method.org][multifrontal]]
+solver, which uses Hierarchically Semi-Separable (HSS) compression with
+randomized sampling citep:ghysels2016hss. This represents the hierarchical
+counterpart to the flat BLR approach described in
+[[file:./amestoy2017-blr-complexity.org][Amestoy et al. (2017)]].
+
+** HSS Compression
+
+HSS is a hierarchical low-rank format that recursively subdivides a dense
+matrix and represents off-diagonal blocks at each level with low-rank
+factorizations. Unlike BLR (which uses a single level of block partitioning),
+HSS achieves asymptotically optimal complexity for matrices arising from
+elliptic PDEs: O(n) for both factorization and solve in 2D.
+
+The paper uses randomized sampling with interpolative decompositions to
+construct the HSS representation efficiently. Random vectors are multiplied
+against the frontal matrix, and the resulting samples reveal the rank structure
+of off-diagonal blocks without computing them explicitly.
+
+** Performance Results
+
+STRUMPACK achieves up to 7x speedup over standard multifrontal factorization
+for suitable problems (elliptic PDEs with smooth Green's functions). The
+speedup increases with problem size because the low-rank property becomes more
+pronounced for larger frontals. For problems without low-rank structure (e.g.,
+highly indefinite systems), HSS compression provides little benefit and may
+even slow down the factorization due to compression overhead.
+
+** Relevance to FERAL
+
+HSS compression is a potential Phase 4+ extension for FERAL, representing the
+"optimal complexity" end of the low-rank spectrum. For FERAL's primary target
+(KKT systems from NLP), the applicability of HSS depends on the structure of
+the Hessian and Jacobian: smooth problems (continuous PDE discretizations)
+benefit significantly, while combinatorial or highly nonlinear problems may not.
+
+The key architectural insight from STRUMPACK is that low-rank compression can
+be integrated into the multifrontal framework at the frontal matrix level,
+which is exactly the boundary where FERAL's =DenseKernel= trait operates.
+A future =CompressedDenseKernel= could implement BLR or HSS compression
+behind the same trait interface.
+
+** Bibliographic Details
+
+Ghysels, P., Li, X.S., Rouet, F.-H., Williams, S., and Napov, A. (2016).
+"An Efficient Multicore Implementation of a Novel HSS-Structured Multifrontal
+Solver Using Randomized Sampling." /SIAM Journal on Scientific Computing/,
+38:S358-S384. DOI: 10.1137/15M1010117.

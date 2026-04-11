@@ -1,0 +1,46 @@
+#+TITLE: Bunch and Parlett 1971 - Direct Methods for Symmetric Indefinite Systems
+#+FILETAGS: :summary:pivoting:factorization:complete-pivoting:
+
+* Bunch and Parlett 1971 - Direct Methods for Symmetric Indefinite Systems
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+Bunch and Parlett (1971) describe complete pivoting for symmetric indefinite
+systems of linear equations citep:bunch1971direct. This paper predates the
+Bunch-Kaufman algorithm and provides the theoretical ceiling for pivot stability
+in symmetric factorization.
+
+** Complete Pivoting
+
+Complete pivoting searches the entire active submatrix (not just a single column)
+for the best pivot element at each step. This produces the tightest element
+growth bounds but at O(n^2) cost per pivot step (vs O(n) for
+[[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman]]). The paper
+establishes the existence theorem: for any nonsingular symmetric matrix, a
+stable 1x1 or 2x2 pivot always exists.
+
+** Inertia Preservation
+
+The paper provides the foundational proof that congruence transformations
+(P*L*D*L^T*P^T = A) preserve inertia, which later became the basis for
+Sylvester's Law application in the Bunch-Kaufman algorithm. This proof is
+essential for FERAL's guarantee of exact inertia counting.
+
+** Relevance to FERAL
+
+While FERAL implements Bunch-Kaufman pivoting (partial pivoting) rather than
+Bunch-Parlett complete pivoting, this paper provides the theoretical ceiling
+against which BK's growth bounds are compared. It is also the source of the
+existence theorem cited in the FERAL project spec. The paper is referenced in
+FERAL's research notes as foundational theory, even though the algorithm itself
+is not directly implemented.
+
+** Bibliographic Details
+
+Bunch, J.R. and Parlett, B.N. (1971). "Direct Methods for Solving Symmetric
+Indefinite Systems of Linear Equations." /SIAM Journal on Numerical Analysis/,
+8(4):639-655. DOI: 10.1137/0708060.

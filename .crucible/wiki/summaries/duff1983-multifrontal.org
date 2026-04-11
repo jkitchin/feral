@@ -1,0 +1,61 @@
+#+TITLE: Duff and Reid 1983 - The Multifrontal Solution of Indefinite Sparse Symmetric Systems
+#+FILETAGS: :summary:multifrontal:sparse-solver:factorization:assembly-tree:
+
+* Duff and Reid 1983 - The Multifrontal Solution of Indefinite Sparse Symmetric Systems
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+Duff and Reid (1983) introduced the
+[[file:../concepts/multifrontal-method.org][multifrontal method]] for factoring
+sparse symmetric indefinite matrices citep:duff1983multifrontal. This is the
+foundational paper for the algorithmic framework that FERAL implements.
+
+** Key Concepts
+
+The paper introduces three central ideas. First, the frontal matrix: rather
+than operating on the sparse matrix directly, the factorization works on a
+sequence of dense submatrices (frontals) assembled from original entries and
+child contributions. Second, the assembly tree (or elimination tree): a tree
+structure that encodes dependencies between frontals, traversed in postorder.
+Third, the extend-add operation: the mechanism by which a child frontal's Schur
+complement (contribution block) is assembled into the parent's frontal matrix.
+
+The combination of these ideas converts a sparse factorization problem into a
+sequence of dense factorizations, allowing high-performance dense kernels to do
+the computational work. The sparsity is handled entirely in the symbolic phase
+(determining the tree structure, frontal sizes, and assembly maps) and the
+assembly phase (scatter-gather), not in the numeric factorization itself.
+
+** Indefinite Extension
+
+While earlier frontal methods focused on positive definite systems, Duff and
+Reid explicitly address the indefinite case. The key challenge is that pivot
+failure within a frontal requires either delayed pivoting (passing the failed
+variable to the parent) or relaxation of pivot criteria. The paper discusses
+both approaches, though the modern treatment of delayed pivoting was refined in
+later work by Hogg and Scott (2013) and the
+[[file:./hogg2016-ssids.org][SSIDS implementation (2016)]].
+
+** Relevance to FERAL
+
+This paper is the starting point for understanding FERAL's Phase 1b sparse
+architecture. The assembly tree construction, postorder traversal, extend-add
+operation, and the relationship between symbolic and numeric phases all
+originate here. The paper should be read before examining the SPRAL/SSIDS code,
+which is FERAL's primary code inspection reference.
+
+The [[file:../methods/two-arena-memory-model.org][two-arena memory model]] in
+FERAL (FactorArena for permanent factor storage, ContribStack for transient
+contribution blocks) directly reflects the memory lifetime patterns identified
+in this paper: factors persist for the solve phase, while contribution blocks
+are consumed by the parent and can be freed immediately.
+
+** Bibliographic Details
+
+Duff, I.S. and Reid, J.K. (1983). "The Multifrontal Solution of Indefinite
+Sparse Symmetric Linear Equations." /ACM Transactions on Mathematical Software/,
+9(3):302-325. DOI: 10.1145/356044.356047.

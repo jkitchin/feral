@@ -1,0 +1,308 @@
+#+TITLE: Crucible Wiki Index
+#+DATE: [2026-04-07 Tue]
+#+STARTUP: overview
+
+Auto-generated index of the Crucible knowledge base.
+27 articles, 50 concepts, 1 sources, 52 links.
+
+* Articles by Type
+
+** Concepts (5)
+
+- [[file:.crucible/wiki/concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman Pivoting]] /draft/
+- [[file:.crucible/wiki/index.org][Crucible Wiki Index]] /draft/
+- [[file:.crucible/wiki/concepts/multifrontal-method.org][Multifrontal Method]] /draft/
+- [[file:.crucible/wiki/concepts/sparse-matrix-ordering.org][Sparse Matrix Ordering]] /draft/
+- [[file:.crucible/wiki/concepts/symmetric-indefinite-factorization.org][Symmetric Indefinite Factorization]] /draft/
+
+** Source Summaries (21)
+
+- [[file:.crucible/wiki/summaries/agullo2016-task-based-multifrontal.org][Agullo et al. 2016 - Task-Based Multifrontal Solvers for Multicore Architectures]] /draft/
+- [[file:.crucible/wiki/summaries/amestoy2017-blr-complexity.org][Amestoy et al. 2017 - Block Low-Rank Multifrontal Factorization Complexity]] /draft/
+- [[file:.crucible/wiki/summaries/amestoy2019-blr-performance.org][Amestoy et al. 2019 - BLR Multifrontal Performance on Multicore]] /draft/
+- [[file:.crucible/wiki/summaries/amestoy1996-amd.org][Amestoy, Davis, and Duff 1996 - Approximate Minimum Degree Ordering]] /draft/
+- [[file:.crucible/wiki/summaries/bunch1977-stable-methods.org][Bunch and Kaufman 1977 - Stable Methods for Inertia and Symmetric Solves]] /draft/
+- [[file:.crucible/wiki/summaries/bunch1971-direct-methods.org][Bunch and Parlett 1971 - Direct Methods for Symmetric Indefinite Systems]] /draft/
+- [[file:.crucible/wiki/summaries/davis2009-dynamic-supernodes.org][Davis and Hager 2009 - Dynamic Supernodes]] /draft/
+- [[file:.crucible/wiki/summaries/davis2016-survey-sparse-direct.org][Davis, Rajamanickam, and Sid-Lakhdar 2016 - Survey of Direct Methods for Sparse Linear Systems]] /draft/
+- [[file:.crucible/wiki/summaries/desimone2022-sparse-approximations-ipm.org][De Simone et al. 2022 - Sparse Approximations with Interior Point Methods]] /draft/
+- [[file:.crucible/wiki/summaries/duff1983-multifrontal.org][Duff and Reid 1983 - The Multifrontal Solution of Indefinite Sparse Symmetric Systems]] /draft/
+- [[file:.crucible/wiki/summaries/duff2020-aptp-pivoting.org][Duff, Hogg, and Lopez 2020 - A Posteriori Threshold Pivoting for Sparse LDLt]] /draft/
+- [[file:.crucible/wiki/summaries/feral-project-spec.org][FERAL Project Specification]] /draft/
+- [[file:.crucible/wiki/summaries/george1981-sparse-positive-definite.org][George and Liu 1981 - Computer Solution of Large Sparse Positive Definite Systems]] /draft/
+- [[file:.crucible/wiki/summaries/ghysels2016-hss-multifrontal.org][Ghysels et al. 2016 - HSS-Structured Multifrontal Solver (STRUMPACK)]] /draft/
+- [[file:.crucible/wiki/summaries/goto2008-matrix-multiplication.org][Goto and van de Geijn 2008 - Anatomy of High-Performance Matrix Multiplication]] /draft/
+- [[file:.crucible/wiki/summaries/hogg2013-pivoting-strategies.org][Hogg and Scott 2013 - Pivoting Strategies for Tough Sparse Indefinite Systems]] /draft/
+- [[file:.crucible/wiki/summaries/hogg2016-ssids.org][Hogg, Ovtchinnikov, and Scott 2016 - SSIDS: Sparse Solver for GPU Architectures]] /draft/
+- [[file:.crucible/wiki/summaries/lasalle2015-mt-metis.org][LaSalle and Karypis 2015 - Efficient Nested Dissection for Multicore (mt-Metis)]] /draft/
+- [[file:.crucible/wiki/summaries/pacaud2023-condensed-ipm-gpu.org][Pacaud et al. 2023 - Accelerating Condensed Interior-Point Methods on GPU]] /draft/
+- [[file:.crucible/wiki/summaries/vanzee2015-blis-framework.org][Van Zee and van de Geijn 2015 - BLIS Framework]] /draft/
+- [[file:.crucible/wiki/summaries/wachter2006-ipopt.org][Wachter and Biegler 2006 - Ipopt: Interior-Point Filter Line-Search Algorithm]] /draft/
+
+** Methods (1)
+
+- [[file:.crucible/wiki/methods/two-arena-memory-model.org][Two-Arena Memory Model]] /draft/
+
+* Articles by Concept
+
+** Amd (2)
+
+- [[file:.crucible/wiki/summaries/amestoy1996-amd.org][Amestoy, Davis, and Duff 1996 - Approximate Minimum Degree Ordering]] [summary]
+- [[file:.crucible/wiki/concepts/sparse-matrix-ordering.org][Sparse Matrix Ordering]] [concept]
+
+** Assembly-Tree (1)
+
+- [[file:.crucible/wiki/summaries/duff1983-multifrontal.org][Duff and Reid 1983 - The Multifrontal Solution of Indefinite Sparse Symmetric Systems]] [summary]
+
+** Blas (2)
+
+- [[file:.crucible/wiki/summaries/goto2008-matrix-multiplication.org][Goto and van de Geijn 2008 - Anatomy of High-Performance Matrix Multiplication]] [summary]
+- [[file:.crucible/wiki/summaries/vanzee2015-blis-framework.org][Van Zee and van de Geijn 2015 - BLIS Framework]] [summary]
+
+** Blis (1)
+
+- [[file:.crucible/wiki/summaries/vanzee2015-blis-framework.org][Van Zee and van de Geijn 2015 - BLIS Framework]] [summary]
+
+** Blr (2)
+
+- [[file:.crucible/wiki/summaries/amestoy2017-blr-complexity.org][Amestoy et al. 2017 - Block Low-Rank Multifrontal Factorization Complexity]] [summary]
+- [[file:.crucible/wiki/summaries/amestoy2019-blr-performance.org][Amestoy et al. 2019 - BLR Multifrontal Performance on Multicore]] [summary]
+
+** Bunch-Kaufman (1)
+
+- [[file:.crucible/wiki/summaries/bunch1977-stable-methods.org][Bunch and Kaufman 1977 - Stable Methods for Inertia and Symmetric Solves]] [summary]
+
+** Cache-Blocking (1)
+
+- [[file:.crucible/wiki/summaries/goto2008-matrix-multiplication.org][Goto and van de Geijn 2008 - Anatomy of High-Performance Matrix Multiplication]] [summary]
+
+** Cholmod (1)
+
+- [[file:.crucible/wiki/summaries/davis2009-dynamic-supernodes.org][Davis and Hager 2009 - Dynamic Supernodes]] [summary]
+
+** Complete-Pivoting (1)
+
+- [[file:.crucible/wiki/summaries/bunch1971-direct-methods.org][Bunch and Parlett 1971 - Direct Methods for Symmetric Indefinite Systems]] [summary]
+
+** Complexity (1)
+
+- [[file:.crucible/wiki/summaries/amestoy2017-blr-complexity.org][Amestoy et al. 2017 - Block Low-Rank Multifrontal Factorization Complexity]] [summary]
+
+** Condensed (1)
+
+- [[file:.crucible/wiki/summaries/pacaud2023-condensed-ipm-gpu.org][Pacaud et al. 2023 - Accelerating Condensed Interior-Point Methods on GPU]] [summary]
+
+** Delayed-Pivoting (1)
+
+- [[file:.crucible/wiki/summaries/hogg2013-pivoting-strategies.org][Hogg and Scott 2013 - Pivoting Strategies for Tough Sparse Indefinite Systems]] [summary]
+
+** Dense-Kernel (2)
+
+- [[file:.crucible/wiki/summaries/goto2008-matrix-multiplication.org][Goto and van de Geijn 2008 - Anatomy of High-Performance Matrix Multiplication]] [summary]
+- [[file:.crucible/wiki/summaries/vanzee2015-blis-framework.org][Van Zee and van de Geijn 2015 - BLIS Framework]] [summary]
+
+** Elimination-Tree (1)
+
+- [[file:.crucible/wiki/summaries/george1981-sparse-positive-definite.org][George and Liu 1981 - Computer Solution of Large Sparse Positive Definite Systems]] [summary]
+
+** Equilibration (1)
+
+- [[file:.crucible/wiki/concepts/symmetric-indefinite-factorization.org][Symmetric Indefinite Factorization]] [concept]
+
+** Factorization (9)
+
+- [[file:.crucible/wiki/summaries/bunch1977-stable-methods.org][Bunch and Kaufman 1977 - Stable Methods for Inertia and Symmetric Solves]] [summary]
+- [[file:.crucible/wiki/summaries/bunch1971-direct-methods.org][Bunch and Parlett 1971 - Direct Methods for Symmetric Indefinite Systems]] [summary]
+- [[file:.crucible/wiki/concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman Pivoting]] [concept]
+- [[file:.crucible/wiki/summaries/davis2009-dynamic-supernodes.org][Davis and Hager 2009 - Dynamic Supernodes]] [summary]
+- [[file:.crucible/wiki/summaries/davis2016-survey-sparse-direct.org][Davis, Rajamanickam, and Sid-Lakhdar 2016 - Survey of Direct Methods for Sparse Linear Systems]] [summary]
+- [[file:.crucible/wiki/summaries/duff1983-multifrontal.org][Duff and Reid 1983 - The Multifrontal Solution of Indefinite Sparse Symmetric Systems]] [summary]
+- [[file:.crucible/wiki/concepts/multifrontal-method.org][Multifrontal Method]] [concept]
+- [[file:.crucible/wiki/concepts/symmetric-indefinite-factorization.org][Symmetric Indefinite Factorization]] [concept]
+- [[file:.crucible/wiki/methods/two-arena-memory-model.org][Two-Arena Memory Model]] [method]
+
+** Feral (1)
+
+- [[file:.crucible/wiki/summaries/feral-project-spec.org][FERAL Project Specification]] [summary]
+
+** Fill-Reduction (4)
+
+- [[file:.crucible/wiki/summaries/amestoy1996-amd.org][Amestoy, Davis, and Duff 1996 - Approximate Minimum Degree Ordering]] [summary]
+- [[file:.crucible/wiki/summaries/george1981-sparse-positive-definite.org][George and Liu 1981 - Computer Solution of Large Sparse Positive Definite Systems]] [summary]
+- [[file:.crucible/wiki/summaries/lasalle2015-mt-metis.org][LaSalle and Karypis 2015 - Efficient Nested Dissection for Multicore (mt-Metis)]] [summary]
+- [[file:.crucible/wiki/concepts/sparse-matrix-ordering.org][Sparse Matrix Ordering]] [concept]
+
+** Gpu (2)
+
+- [[file:.crucible/wiki/summaries/hogg2016-ssids.org][Hogg, Ovtchinnikov, and Scott 2016 - SSIDS: Sparse Solver for GPU Architectures]] [summary]
+- [[file:.crucible/wiki/summaries/pacaud2023-condensed-ipm-gpu.org][Pacaud et al. 2023 - Accelerating Condensed Interior-Point Methods on GPU]] [summary]
+
+** Graph-Theory (1)
+
+- [[file:.crucible/wiki/summaries/george1981-sparse-positive-definite.org][George and Liu 1981 - Computer Solution of Large Sparse Positive Definite Systems]] [summary]
+
+** Hss (1)
+
+- [[file:.crucible/wiki/summaries/ghysels2016-hss-multifrontal.org][Ghysels et al. 2016 - HSS-Structured Multifrontal Solver (STRUMPACK)]] [summary]
+
+** Inertia (3)
+
+- [[file:.crucible/wiki/summaries/bunch1977-stable-methods.org][Bunch and Kaufman 1977 - Stable Methods for Inertia and Symmetric Solves]] [summary]
+- [[file:.crucible/wiki/concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman Pivoting]] [concept]
+- [[file:.crucible/wiki/summaries/wachter2006-ipopt.org][Wachter and Biegler 2006 - Ipopt: Interior-Point Filter Line-Search Algorithm]] [summary]
+
+** Interior-Point (3)
+
+- [[file:.crucible/wiki/summaries/desimone2022-sparse-approximations-ipm.org][De Simone et al. 2022 - Sparse Approximations with Interior Point Methods]] [summary]
+- [[file:.crucible/wiki/summaries/pacaud2023-condensed-ipm-gpu.org][Pacaud et al. 2023 - Accelerating Condensed Interior-Point Methods on GPU]] [summary]
+- [[file:.crucible/wiki/summaries/wachter2006-ipopt.org][Wachter and Biegler 2006 - Ipopt: Interior-Point Filter Line-Search Algorithm]] [summary]
+
+** Ipopt (1)
+
+- [[file:.crucible/wiki/summaries/wachter2006-ipopt.org][Wachter and Biegler 2006 - Ipopt: Interior-Point Filter Line-Search Algorithm]] [summary]
+
+** Iterative-Refinement (1)
+
+- [[file:.crucible/wiki/summaries/desimone2022-sparse-approximations-ipm.org][De Simone et al. 2022 - Sparse Approximations with Interior Point Methods]] [summary]
+
+** Kkt (4)
+
+- [[file:.crucible/wiki/summaries/desimone2022-sparse-approximations-ipm.org][De Simone et al. 2022 - Sparse Approximations with Interior Point Methods]] [summary]
+- [[file:.crucible/wiki/summaries/pacaud2023-condensed-ipm-gpu.org][Pacaud et al. 2023 - Accelerating Condensed Interior-Point Methods on GPU]] [summary]
+- [[file:.crucible/wiki/concepts/symmetric-indefinite-factorization.org][Symmetric Indefinite Factorization]] [concept]
+- [[file:.crucible/wiki/summaries/wachter2006-ipopt.org][Wachter and Biegler 2006 - Ipopt: Interior-Point Filter Line-Search Algorithm]] [summary]
+
+** Linear-Algebra (4)
+
+- [[file:.crucible/wiki/concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman Pivoting]] [concept]
+- [[file:.crucible/wiki/summaries/feral-project-spec.org][FERAL Project Specification]] [summary]
+- [[file:.crucible/wiki/concepts/multifrontal-method.org][Multifrontal Method]] [concept]
+- [[file:.crucible/wiki/concepts/symmetric-indefinite-factorization.org][Symmetric Indefinite Factorization]] [concept]
+
+** Low-Rank (3)
+
+- [[file:.crucible/wiki/summaries/amestoy2017-blr-complexity.org][Amestoy et al. 2017 - Block Low-Rank Multifrontal Factorization Complexity]] [summary]
+- [[file:.crucible/wiki/summaries/amestoy2019-blr-performance.org][Amestoy et al. 2019 - BLR Multifrontal Performance on Multicore]] [summary]
+- [[file:.crucible/wiki/summaries/ghysels2016-hss-multifrontal.org][Ghysels et al. 2016 - HSS-Structured Multifrontal Solver (STRUMPACK)]] [summary]
+
+** Memory (2)
+
+- [[file:.crucible/wiki/summaries/amestoy2017-blr-complexity.org][Amestoy et al. 2017 - Block Low-Rank Multifrontal Factorization Complexity]] [summary]
+- [[file:.crucible/wiki/methods/two-arena-memory-model.org][Two-Arena Memory Model]] [method]
+
+** Metis (1)
+
+- [[file:.crucible/wiki/summaries/lasalle2015-mt-metis.org][LaSalle and Karypis 2015 - Efficient Nested Dissection for Multicore (mt-Metis)]] [summary]
+
+** Micro-Kernel (2)
+
+- [[file:.crucible/wiki/summaries/goto2008-matrix-multiplication.org][Goto and van de Geijn 2008 - Anatomy of High-Performance Matrix Multiplication]] [summary]
+- [[file:.crucible/wiki/summaries/vanzee2015-blis-framework.org][Van Zee and van de Geijn 2015 - BLIS Framework]] [summary]
+
+** Multifrontal (8)
+
+- [[file:.crucible/wiki/summaries/agullo2016-task-based-multifrontal.org][Agullo et al. 2016 - Task-Based Multifrontal Solvers for Multicore Architectures]] [summary]
+- [[file:.crucible/wiki/summaries/amestoy2017-blr-complexity.org][Amestoy et al. 2017 - Block Low-Rank Multifrontal Factorization Complexity]] [summary]
+- [[file:.crucible/wiki/summaries/amestoy2019-blr-performance.org][Amestoy et al. 2019 - BLR Multifrontal Performance on Multicore]] [summary]
+- [[file:.crucible/wiki/summaries/davis2016-survey-sparse-direct.org][Davis, Rajamanickam, and Sid-Lakhdar 2016 - Survey of Direct Methods for Sparse Linear Systems]] [summary]
+- [[file:.crucible/wiki/summaries/duff1983-multifrontal.org][Duff and Reid 1983 - The Multifrontal Solution of Indefinite Sparse Symmetric Systems]] [summary]
+- [[file:.crucible/wiki/summaries/ghysels2016-hss-multifrontal.org][Ghysels et al. 2016 - HSS-Structured Multifrontal Solver (STRUMPACK)]] [summary]
+- [[file:.crucible/wiki/summaries/hogg2013-pivoting-strategies.org][Hogg and Scott 2013 - Pivoting Strategies for Tough Sparse Indefinite Systems]] [summary]
+- [[file:.crucible/wiki/summaries/hogg2016-ssids.org][Hogg, Ovtchinnikov, and Scott 2016 - SSIDS: Sparse Solver for GPU Architectures]] [summary]
+
+** Mumps (1)
+
+- [[file:.crucible/wiki/summaries/amestoy2019-blr-performance.org][Amestoy et al. 2019 - BLR Multifrontal Performance on Multicore]] [summary]
+
+** Nested-Dissection (1)
+
+- [[file:.crucible/wiki/summaries/lasalle2015-mt-metis.org][LaSalle and Karypis 2015 - Efficient Nested Dissection for Multicore (mt-Metis)]] [summary]
+
+** Nlp (1)
+
+- [[file:.crucible/wiki/summaries/wachter2006-ipopt.org][Wachter and Biegler 2006 - Ipopt: Interior-Point Filter Line-Search Algorithm]] [summary]
+
+** Ordering (4)
+
+- [[file:.crucible/wiki/summaries/amestoy1996-amd.org][Amestoy, Davis, and Duff 1996 - Approximate Minimum Degree Ordering]] [summary]
+- [[file:.crucible/wiki/summaries/davis2016-survey-sparse-direct.org][Davis, Rajamanickam, and Sid-Lakhdar 2016 - Survey of Direct Methods for Sparse Linear Systems]] [summary]
+- [[file:.crucible/wiki/summaries/lasalle2015-mt-metis.org][LaSalle and Karypis 2015 - Efficient Nested Dissection for Multicore (mt-Metis)]] [summary]
+- [[file:.crucible/wiki/concepts/sparse-matrix-ordering.org][Sparse Matrix Ordering]] [concept]
+
+** Parallelism (3)
+
+- [[file:.crucible/wiki/summaries/agullo2016-task-based-multifrontal.org][Agullo et al. 2016 - Task-Based Multifrontal Solvers for Multicore Architectures]] [summary]
+- [[file:.crucible/wiki/summaries/amestoy2019-blr-performance.org][Amestoy et al. 2019 - BLR Multifrontal Performance on Multicore]] [summary]
+- [[file:.crucible/wiki/summaries/lasalle2015-mt-metis.org][LaSalle and Karypis 2015 - Efficient Nested Dissection for Multicore (mt-Metis)]] [summary]
+
+** Pivoting (5)
+
+- [[file:.crucible/wiki/summaries/bunch1977-stable-methods.org][Bunch and Kaufman 1977 - Stable Methods for Inertia and Symmetric Solves]] [summary]
+- [[file:.crucible/wiki/summaries/bunch1971-direct-methods.org][Bunch and Parlett 1971 - Direct Methods for Symmetric Indefinite Systems]] [summary]
+- [[file:.crucible/wiki/concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman Pivoting]] [concept]
+- [[file:.crucible/wiki/summaries/duff2020-aptp-pivoting.org][Duff, Hogg, and Lopez 2020 - A Posteriori Threshold Pivoting for Sparse LDLt]] [summary]
+- [[file:.crucible/wiki/summaries/hogg2013-pivoting-strategies.org][Hogg and Scott 2013 - Pivoting Strategies for Tough Sparse Indefinite Systems]] [summary]
+
+** Preconditioning (1)
+
+- [[file:.crucible/wiki/summaries/desimone2022-sparse-approximations-ipm.org][De Simone et al. 2022 - Sparse Approximations with Interior Point Methods]] [summary]
+
+** Randomized (1)
+
+- [[file:.crucible/wiki/summaries/ghysels2016-hss-multifrontal.org][Ghysels et al. 2016 - HSS-Structured Multifrontal Solver (STRUMPACK)]] [summary]
+
+** Runtime (1)
+
+- [[file:.crucible/wiki/summaries/agullo2016-task-based-multifrontal.org][Agullo et al. 2016 - Task-Based Multifrontal Solvers for Multicore Architectures]] [summary]
+
+** Rust (1)
+
+- [[file:.crucible/wiki/summaries/feral-project-spec.org][FERAL Project Specification]] [summary]
+
+** Sparse-Solver (11)
+
+- [[file:.crucible/wiki/summaries/amestoy1996-amd.org][Amestoy, Davis, and Duff 1996 - Approximate Minimum Degree Ordering]] [summary]
+- [[file:.crucible/wiki/summaries/davis2009-dynamic-supernodes.org][Davis and Hager 2009 - Dynamic Supernodes]] [summary]
+- [[file:.crucible/wiki/summaries/davis2016-survey-sparse-direct.org][Davis, Rajamanickam, and Sid-Lakhdar 2016 - Survey of Direct Methods for Sparse Linear Systems]] [summary]
+- [[file:.crucible/wiki/summaries/duff1983-multifrontal.org][Duff and Reid 1983 - The Multifrontal Solution of Indefinite Sparse Symmetric Systems]] [summary]
+- [[file:.crucible/wiki/summaries/duff2020-aptp-pivoting.org][Duff, Hogg, and Lopez 2020 - A Posteriori Threshold Pivoting for Sparse LDLt]] [summary]
+- [[file:.crucible/wiki/summaries/feral-project-spec.org][FERAL Project Specification]] [summary]
+- [[file:.crucible/wiki/summaries/george1981-sparse-positive-definite.org][George and Liu 1981 - Computer Solution of Large Sparse Positive Definite Systems]] [summary]
+- [[file:.crucible/wiki/summaries/hogg2016-ssids.org][Hogg, Ovtchinnikov, and Scott 2016 - SSIDS: Sparse Solver for GPU Architectures]] [summary]
+- [[file:.crucible/wiki/concepts/multifrontal-method.org][Multifrontal Method]] [concept]
+- [[file:.crucible/wiki/concepts/sparse-matrix-ordering.org][Sparse Matrix Ordering]] [concept]
+- [[file:.crucible/wiki/methods/two-arena-memory-model.org][Two-Arena Memory Model]] [method]
+
+** Spral (2)
+
+- [[file:.crucible/wiki/summaries/duff2020-aptp-pivoting.org][Duff, Hogg, and Lopez 2020 - A Posteriori Threshold Pivoting for Sparse LDLt]] [summary]
+- [[file:.crucible/wiki/summaries/hogg2016-ssids.org][Hogg, Ovtchinnikov, and Scott 2016 - SSIDS: Sparse Solver for GPU Architectures]] [summary]
+
+** Ssids (1)
+
+- [[file:.crucible/wiki/summaries/hogg2016-ssids.org][Hogg, Ovtchinnikov, and Scott 2016 - SSIDS: Sparse Solver for GPU Architectures]] [summary]
+
+** Strumpack (1)
+
+- [[file:.crucible/wiki/summaries/ghysels2016-hss-multifrontal.org][Ghysels et al. 2016 - HSS-Structured Multifrontal Solver (STRUMPACK)]] [summary]
+
+** Supernodes (1)
+
+- [[file:.crucible/wiki/summaries/davis2009-dynamic-supernodes.org][Davis and Hager 2009 - Dynamic Supernodes]] [summary]
+
+** Survey (1)
+
+- [[file:.crucible/wiki/summaries/davis2016-survey-sparse-direct.org][Davis, Rajamanickam, and Sid-Lakhdar 2016 - Survey of Direct Methods for Sparse Linear Systems]] [summary]
+
+** Task-Based (1)
+
+- [[file:.crucible/wiki/summaries/agullo2016-task-based-multifrontal.org][Agullo et al. 2016 - Task-Based Multifrontal Solvers for Multicore Architectures]] [summary]
+
+** Threshold-Pivoting (2)
+
+- [[file:.crucible/wiki/summaries/duff2020-aptp-pivoting.org][Duff, Hogg, and Lopez 2020 - A Posteriori Threshold Pivoting for Sparse LDLt]] [summary]
+- [[file:.crucible/wiki/summaries/hogg2013-pivoting-strategies.org][Hogg and Scott 2013 - Pivoting Strategies for Tough Sparse Indefinite Systems]] [summary]
+
+* Sources
+
+- [notebook] FERAL Project Specification (shareable)

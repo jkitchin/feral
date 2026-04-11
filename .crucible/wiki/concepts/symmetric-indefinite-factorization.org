@@ -1,0 +1,118 @@
+#+TITLE: Symmetric Indefinite Factorization
+#+FILETAGS: :concept:factorization:linear-algebra:kkt:equilibration:
+
+* Symmetric Indefinite Factorization
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: feral2026
+:STATUS: draft
+:CREATED: 2026-04-06
+:END:
+
+Symmetric indefinite factorization computes the decomposition P*L*D*L^T*P^T = A
+for a symmetric matrix A that is neither positive definite nor negative definite.
+Here P is a permutation matrix, L is unit lower triangular, and D is block
+diagonal with 1x1 and 2x2 blocks. This factorization is sometimes written as
+LDLt and is the symmetric analogue of LU factorization, exploiting symmetry to
+halve the storage and computation citep:feral2026.
+
+** Why Indefinite Matrices Arise
+
+The primary application driving FERAL is the solution of KKT (Karush-Kuhn-Tucker)
+systems arising in interior point methods for nonlinear programming. A KKT matrix
+has the saddle-point structure:
+
+#+BEGIN_EXAMPLE
+[ H + D_w    J^T  ]
+[ J         -D_c  ]
+#+END_EXAMPLE
+
+where H is the Hessian (possibly indefinite), J is the constraint Jacobian, D_w
+and D_c are diagonal regularization terms. The expected inertia for a
+well-posed KKT system is (n, m, 0), where n is the number of primal variables
+and m is the number of constraints. Correct inertia detection is critical
+because the NLP solver (POUNCE/Ipopt) uses it to detect ill-conditioning and
+trigger regularization.
+
+** Sylvester's Law of Inertia
+
+Sylvester's Law states that for any congruence transformation P*L*D*L^T*P^T = A,
+the inertia of D equals the inertia of A. This means the eigenvalue sign counts
+(positive, negative, zero) can be read directly from the D blocks without
+computing actual eigenvalues of A. The law applies because L is nonsingular (unit
+lower triangular) and congruence preserves inertia. See
+[[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman Pivoting]] for the
+specific counting rules for 1x1 and 2x2 D blocks.
+
+** Equilibration
+
+KKT matrices from interior point solvers have entries spanning many orders of
+magnitude. The Hessian block is O(1), the Jacobian block is O(1), but the
+constraint block diagonal grows as O(1/mu) at convergence, reaching up to 10^10
+for small barrier parameters. Without scaling,
+[[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman pivot selection]]
+degrades because the algorithm sees tiny pivots next to large off-diagonals.
+
+FERAL applies infinity-norm diagonal equilibration transparently before
+factoring. The scaling diagonal is d[i] = 1 / sqrt(max_j |A[i,j]|), applied
+symmetrically to produce a scaled matrix A_hat = D_eq * A * D_eq where each row
+has infinity-norm approximately 1. The factorization operates on A_hat, and the
+solve sequence applies and undoes the scaling at steps 1 and 7.
+
+For the degenerate case where a row is all zeros (singular row), d[i] = 1 (no
+scaling). A more sophisticated approach using MC64 (optimal matching-based
+scaling and ordering, Duff and Koster 1999/2001) is planned for Phase 2.
+
+** Solve Sequence
+
+The complete solve for A*x = b using the stored factorization P*L*D_bk*L^T*P^T =
+D_eq*A*D_eq proceeds in seven steps:
+
+1. Apply equilibration to RHS: b_hat = D_eq * b
+2. Apply BK permutation: y_hat = P^T * b_hat
+3. Forward substitution: z = L^{-1} * y_hat
+4. D-block solve: w = D_bk^{-1} * z (trivial for 1x1; 2x2 system solve for 2x2
+   blocks using det = a*c - b^2)
+5. Backward substitution: v = L^{-T} * w
+6. Undo BK permutation: x_hat = P * v
+7. Undo equilibration: x = D_eq * x_hat
+
+An important implementation detail is that D_eq (the equilibration diagonal) and
+D_bk (the BK factorization block diagonal) are entirely different objects. D_eq
+is always invertible (guarded during computation) and does not contribute to
+inertia. D_bk may contain near-zero blocks that triggered =ZeroPivotAction=
+during factorization, and all inertia information comes from D_bk.
+
+** Iterative Refinement
+
+When =ZeroPivotAction::ForceAccept= fires during factorization, the solve may
+be inaccurate due to near-zero pivots. FERAL provides =solve_refined()= which
+performs at most 3 steps of fixed-point iterative refinement: compute the
+residual r = b - A*x in f64 precision, solve the correction delta_x using the
+existing factors, and update x = x + delta_x. The stopping criterion is
+||delta_x||_2 / ||x||_2 < macheps * sqrt(n). For genuinely rank-deficient
+matrices, the refinement will not converge and exits after 3 steps. For
+near-zero pivots that are numerical noise, convergence typically occurs in 1-2
+steps.
+
+** Test Tolerance Formula
+
+Each test tolerance is derived from the matrix's estimated condition number
+using the backward error bound: tolerance = n * kappa(A) * macheps. For
+well-conditioned matrices (kappa ~ 1-100), tolerance is 1e-12. For KKT matrices
+with regularization delta_c = 1e-8, kappa ~ 1e8 and tolerance = n * 1e-8.
+Tolerances are set at plan time and never loosened without human approval.
+
+** Relationship to Other Factorizations
+
+Cholesky factorization (A = L*L^T) is the special case for positive definite
+matrices, requiring no pivoting and no D factor. LU factorization (P*A = L*U)
+handles general nonsymmetric matrices but does not exploit symmetry. The
+symmetric indefinite LDLt factorization sits between these: it exploits
+symmetry for efficiency but handles indefiniteness through the block diagonal D
+and [[file:../concepts/bunch-kaufman-pivoting.org][Bunch-Kaufman pivoting]].
+
+In the [[file:../concepts/multifrontal-method.org][multifrontal method]], the
+dense LDLt factorization is applied to each frontal matrix individually. The
+contribution block (Schur complement) from each frontal is assembled into the
+parent, building up the global factorization from local dense operations.
