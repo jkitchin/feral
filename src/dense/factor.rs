@@ -96,6 +96,14 @@ pub fn factor(
     let alpha = params.alpha;
     let mut k = 0;
 
+    // Fused update+argmax: the previous pivot's update computes γ₀ and r
+    // for the next column, avoiding a redundant O(n) scan. On the first
+    // iteration (or after a swap invalidates fused values), we fall back
+    // to column_offdiag_max.
+    let mut fused_gamma0 = 0.0f64;
+    let mut fused_r = 0usize;
+    let mut have_fused = false;
+
     while k < n {
         let remaining = n - k;
 
@@ -117,13 +125,18 @@ pub fn factor(
             } else {
                 neg += 1;
             }
-            // L column is trivially empty (diagonal only)
             k += 1;
             continue;
         }
 
         // Step 1: Find γ₀ = max off-diagonal magnitude in column k
-        let (gamma0, r) = column_offdiag_max(&a, n, k);
+        // Use fused values from previous update when available.
+        let (gamma0, r) = if have_fused {
+            have_fused = false;
+            (fused_gamma0, fused_r)
+        } else {
+            column_offdiag_max(&a, n, k)
+        };
 
         if gamma0 == 0.0 {
             // Column is zero off-diagonal: 1×1 pivot (matrix reducible)
@@ -137,6 +150,7 @@ pub fn factor(
                 &mut needs_refinement,
             )?;
             set_l_column_identity(&mut a, n, k);
+            // No fused values — next column wasn't updated
             k += 1;
             continue;
         }
@@ -144,8 +158,8 @@ pub fn factor(
         // Step 3: Test if A[k,k] is acceptable as 1×1 pivot
         let akk = a[k * n + k].abs();
         if akk >= alpha * gamma0 {
-            // Accept A[k,k] as 1×1 pivot, no swap
-            do_1x1_pivot(
+            // Accept A[k,k] as 1×1 pivot, no swap — fused values are valid
+            let (ng, nr) = do_1x1_pivot(
                 &mut a,
                 n,
                 k,
@@ -155,6 +169,9 @@ pub fn factor(
                 &mut zero,
                 &mut needs_refinement,
             )?;
+            fused_gamma0 = ng;
+            fused_r = nr;
+            have_fused = k + 1 < n;
             k += 1;
             continue;
         }
@@ -165,9 +182,9 @@ pub fn factor(
         // Step 5: Test if A[r,r] is acceptable as 1×1 pivot (swap k↔r)
         let arr = a[r * n + r].abs();
         if arr >= alpha * gamma_r {
-            // Swap rows/columns k↔r, then 1×1 pivot
+            // Swap invalidates any fused column — re-scan next iteration
             swap_rows_cols(&mut a, n, k, r, &mut perm);
-            do_1x1_pivot(
+            let (ng, nr) = do_1x1_pivot(
                 &mut a,
                 n,
                 k,
@@ -177,14 +194,17 @@ pub fn factor(
                 &mut zero,
                 &mut needs_refinement,
             )?;
+            fused_gamma0 = ng;
+            fused_r = nr;
+            have_fused = k + 1 < n;
             k += 1;
             continue;
         }
 
         // Step 6: LAPACK extension — test if A[k,k] still usable
         if akk * gamma_r >= alpha * gamma0 * gamma0 {
-            // Accept A[k,k] as 1×1 pivot, no swap
-            do_1x1_pivot(
+            // No swap — fused values are valid
+            let (ng, nr) = do_1x1_pivot(
                 &mut a,
                 n,
                 k,
@@ -194,16 +214,18 @@ pub fn factor(
                 &mut zero,
                 &mut needs_refinement,
             )?;
+            fused_gamma0 = ng;
+            fused_r = nr;
+            have_fused = k + 1 < n;
             k += 1;
             continue;
         }
 
         // Step 7: 2×2 pivot using rows/columns {k, r}
-        // Swap row/column (k+1) ↔ r so the 2×2 block occupies {k, k+1}
         if r != k + 1 {
             swap_rows_cols(&mut a, n, k + 1, r, &mut perm);
         }
-        do_2x2_pivot(
+        let (ng, nr) = do_2x2_pivot(
             &mut a,
             n,
             k,
@@ -214,6 +236,9 @@ pub fn factor(
             &mut zero,
             &mut needs_refinement,
         )?;
+        fused_gamma0 = ng;
+        fused_r = nr;
+        have_fused = k + 2 < n;
         k += 2;
     }
 
@@ -348,7 +373,9 @@ fn swap_rows_cols(a: &mut [f64], n: usize, p: usize, q: usize, perm: &mut [usize
     }
 }
 
-/// Perform a 1×1 pivot at position k: compute L column and rank-1 update.
+/// Perform a 1×1 pivot at position k: compute L column, rank-1 update,
+/// and fused argmax of the next column (Section 6 of research note).
+/// Returns (gamma0_next, r_next) for the next pivot step's column.
 #[allow(clippy::too_many_arguments)]
 fn do_1x1_pivot(
     a: &mut [f64],
@@ -359,7 +386,7 @@ fn do_1x1_pivot(
     neg: &mut usize,
     zero: &mut usize,
     needs_refinement: &mut bool,
-) -> Result<(), FeralError> {
+) -> Result<(f64, usize), FeralError> {
     let d = a[k * n + k];
     count_1x1_inertia(d, params, pos, neg, zero, needs_refinement)?;
 
@@ -368,24 +395,41 @@ fn do_1x1_pivot(
         for i in (k + 1)..n {
             a[k * n + i] = 0.0;
         }
-        return Ok(());
+        return Ok((0.0, k + 2));
     }
 
     let d_inv = 1.0 / d;
 
-    // Compute L column: L[i,k] = A[i,k] / d
-    // Then rank-1 update: A[i,j] -= L[i,k] * d * L[j,k] for i >= j > k
-    // We store L[i,k] in a[k*n + i] (overwriting the original column)
-    // First, save the column and compute L
-    // Actually, we can do this in-place with the fused approach:
-
-    // Compute L column entries
+    // Compute L column entries: L[i,k] = A[i,k] / d
     for i in (k + 1)..n {
         a[k * n + i] *= d_inv;
     }
 
-    // Rank-1 update of trailing submatrix (lower triangle only)
-    for j in (k + 1)..n {
+    let mut next_gamma0 = 0.0;
+    let mut next_r = k + 2;
+
+    // Fused rank-1 update + argmax of next column (k+1).
+    // Column k+1 is only updated in the j=k+1 iteration, so we handle it
+    // separately to track the argmax during the same memory pass.
+    if k + 1 < n {
+        let j = k + 1;
+        let l_jk = a[k * n + j];
+        let l_jk_d = l_jk * d;
+        // Update diagonal
+        a[j * n + j] -= a[k * n + j] * l_jk_d;
+        // Update off-diagonal and track argmax
+        for i in (j + 1)..n {
+            a[j * n + i] -= a[k * n + i] * l_jk_d;
+            let val = a[j * n + i].abs();
+            if val > next_gamma0 {
+                next_gamma0 = val;
+                next_r = i;
+            }
+        }
+    }
+
+    // Remaining columns: plain update (no argmax tracking)
+    for j in (k + 2)..n {
         let l_jk = a[k * n + j];
         let l_jk_d = l_jk * d;
         for i in j..n {
@@ -393,11 +437,12 @@ fn do_1x1_pivot(
         }
     }
 
-    Ok(())
+    Ok((next_gamma0, next_r))
 }
 
 /// Perform a 2×2 pivot at positions {k, k+1}.
 /// Uses the normalized computation from faer to avoid catastrophic cancellation.
+/// Returns (gamma0_next, r_next) for the next pivot step's column.
 #[allow(clippy::too_many_arguments)]
 fn do_2x2_pivot(
     a: &mut [f64],
@@ -409,7 +454,7 @@ fn do_2x2_pivot(
     neg: &mut usize,
     zero: &mut usize,
     needs_refinement: &mut bool,
-) -> Result<(), FeralError> {
+) -> Result<(f64, usize), FeralError> {
     let a00 = a[k * n + k];
     let a10 = a[k * n + (k + 1)];
     let a11 = a[(k + 1) * n + (k + 1)];
@@ -422,8 +467,8 @@ fn do_2x2_pivot(
     count_2x2_inertia(det, a00, params, pos, neg, zero, needs_refinement)?;
 
     if (k + 2) >= n {
-        // No trailing submatrix to update; set L columns to empty
-        return Ok(());
+        // No trailing submatrix to update
+        return Ok((0.0, 0));
     }
 
     // Normalized 2×2 computation (from faer, Section 4.3 of research note)
@@ -435,7 +480,7 @@ fn do_2x2_pivot(
             a[k * n + i] = 0.0;
             a[(k + 1) * n + i] = 0.0;
         }
-        return Ok(());
+        return Ok((0.0, k + 3));
     }
 
     let d00 = a00 / d10_abs;
@@ -444,26 +489,50 @@ fn do_2x2_pivot(
     let d10 = a10 / d10_abs; // sign only (±1 for reals)
     let d = t / d10_abs;
 
-    // Compute L columns and rank-2 update.
-    // Critical: the Schur complement update uses ORIGINAL column values a[k*n+i]
-    // and a[(k+1)*n+i], so L column stores must happen AFTER the inner loop.
-    for j in (k + 2)..n {
+    let mut next_gamma0 = 0.0;
+    let mut next_r = k + 3;
+
+    // Fused rank-2 update + argmax of next column (k+2).
+    // Column k+2 is only updated in the j=k+2 iteration, so handle separately.
+    if k + 2 < n {
+        let j = k + 2;
         let x0 = a[k * n + j];
         let x1 = a[(k + 1) * n + j];
-        let w0 = (x0 * d11 - x1 * d10) * d; // L[j, k]
-        let w1 = (x1 * d00 - x0 * d10) * d; // L[j, k+1]
+        let w0 = (x0 * d11 - x1 * d10) * d;
+        let w1 = (x1 * d00 - x0 * d10) * d;
 
-        // Rank-2 update of trailing submatrix (uses original column values)
-        for i in j..n {
+        // Update diagonal
+        a[j * n + j] -= a[k * n + j] * w0 + a[(k + 1) * n + j] * w1;
+        // Update off-diagonal and track argmax for column k+2
+        for i in (j + 1)..n {
             a[j * n + i] -= a[k * n + i] * w0 + a[(k + 1) * n + i] * w1;
+            let val = a[j * n + i].abs();
+            if val > next_gamma0 {
+                next_gamma0 = val;
+                next_r = i;
+            }
         }
 
-        // Store L columns AFTER the update to preserve original values for i == j
         a[k * n + j] = w0;
         a[(k + 1) * n + j] = w1;
     }
 
-    Ok(())
+    // Remaining columns: plain update (no argmax tracking)
+    for j in (k + 3)..n {
+        let x0 = a[k * n + j];
+        let x1 = a[(k + 1) * n + j];
+        let w0 = (x0 * d11 - x1 * d10) * d;
+        let w1 = (x1 * d00 - x0 * d10) * d;
+
+        for i in j..n {
+            a[j * n + i] -= a[k * n + i] * w0 + a[(k + 1) * n + i] * w1;
+        }
+
+        a[k * n + j] = w0;
+        a[(k + 1) * n + j] = w1;
+    }
+
+    Ok((next_gamma0, next_r))
 }
 
 /// Count inertia for a 1×1 pivot.
