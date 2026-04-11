@@ -118,7 +118,7 @@ pub fn factorize_multifrontal(
         }
 
         // Step 3: Factor the frontal with the dense BK kernel
-        let (factors, inertia) = factor(&frontal, params)?;
+        let (factors, _full_inertia) = factor(&frontal, params)?;
 
         // Step 4: Extract contribution block
         if actual_nrow > ncol {
@@ -126,12 +126,15 @@ pub fn factorize_multifrontal(
             contrib_blocks[snode_idx] = Some(contrib);
         }
 
-        // Accumulate inertia
-        total_inertia.positive += inertia.positive;
-        total_inertia.negative += inertia.negative;
-        total_inertia.zero += inertia.zero;
+        // Accumulate inertia from only the first ncol pivots
+        // (the remaining nrow-ncol are the contribution block,
+        // whose inertia will be counted when the parent factors them)
+        let node_inertia = count_inertia_partial(&factors, ncol);
+        total_inertia.positive += node_inertia.positive;
+        total_inertia.negative += node_inertia.negative;
+        total_inertia.zero += node_inertia.zero;
 
-        if inertia.zero > 0 {
+        if node_inertia.zero > 0 {
             needs_refinement = true;
         }
 
@@ -146,7 +149,7 @@ pub fn factorize_multifrontal(
             nrow: actual_nrow,
             row_indices,
             dense_factors: factors,
-            inertia,
+            inertia: node_inertia,
         });
     }
 
@@ -449,6 +452,69 @@ fn extract_contribution(
         row_indices: row_indices[ncol..].to_vec(),
         data,
         dim: cdim,
+    }
+}
+
+/// Count inertia from only the first `ncol` pivots of a dense factorization.
+fn count_inertia_partial(
+    factors: &crate::dense::factor::Factors,
+    ncol: usize,
+) -> Inertia {
+    let mut pos = 0usize;
+    let mut neg = 0usize;
+    let mut zero = 0usize;
+
+    let mut k = 0;
+    while k < ncol {
+        if k + 1 < ncol && factors.d_subdiag[k] != 0.0 {
+            // 2×2 block: eigenvalues from det and trace
+            let a = factors.d_diag[k];
+            let c = factors.d_diag[k + 1];
+            let b = factors.d_subdiag[k];
+            let det = a * c - b * b;
+            let trace = a + c;
+
+            if det > 0.0 {
+                // Both eigenvalues have the same sign = sign of trace
+                if trace > 0.0 {
+                    pos += 2;
+                } else {
+                    neg += 2;
+                }
+            } else if det < 0.0 {
+                // One positive, one negative
+                pos += 1;
+                neg += 1;
+            } else {
+                // det == 0: at least one zero eigenvalue
+                zero += 1;
+                if trace > 0.0 {
+                    pos += 1;
+                } else if trace < 0.0 {
+                    neg += 1;
+                } else {
+                    zero += 1;
+                }
+            }
+            k += 2;
+        } else {
+            // 1×1 block
+            let d = factors.d_diag[k];
+            if d > 0.0 {
+                pos += 1;
+            } else if d < 0.0 {
+                neg += 1;
+            } else {
+                zero += 1;
+            }
+            k += 1;
+        }
+    }
+
+    Inertia {
+        positive: pos,
+        negative: neg,
+        zero,
     }
 }
 

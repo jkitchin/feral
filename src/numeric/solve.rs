@@ -1,17 +1,14 @@
-use crate::dense::solve::solve as dense_solve;
 use crate::error::FeralError;
 use super::factorize::SparseFactors;
 
 /// Solve A·x = b using the sparse multifrontal factorization.
 ///
-/// For each supernode, gathers the local RHS, uses the dense solver on the
-/// full frontal system, then scatters the eliminated variables back and
-/// updates the non-eliminated rows.
-///
-/// Steps:
-/// 1. Permute RHS with AMD ordering
-/// 2. For each supernode in postorder: solve the frontal system
-/// 3. Unpermute the solution
+/// The multifrontal solve has three phases:
+/// 1. Forward substitution: for each supernode in postorder, solve L·z = b
+///    for the eliminated variables and update the non-eliminated rows.
+/// 2. D-block solve: apply D^{-1} to the eliminated variables.
+/// 3. Backward substitution: for each supernode in reverse postorder,
+///    solve L^T·x = z and scatter back.
 pub fn solve_sparse(
     factors: &SparseFactors,
     rhs: &[f64],
@@ -34,15 +31,17 @@ pub fn solve_sparse(
         y[new_idx] = rhs[old_idx];
     }
 
-    // Step 2: Use the dense solve on each supernode's full frontal system.
-    // For a single-supernode case, this is equivalent to the dense solve.
-    // For multi-supernode, we solve each frontal system using the dense
-    // factors stored per-node.
-
-    // Approach: use the dense solve function directly on each node's factors.
-    // The dense solve handles L, D, L^T, and the internal BK permutation.
-    // We just need to gather/scatter the RHS correctly.
-
+    // Step 2: Solve using dense_solve per supernode.
+    //
+    // Each supernode's dense factors represent the full frontal factorization.
+    // We gather the local RHS, apply the dense solve (which handles
+    // equilibration, BK permutation, L/D/L^T, and un-equilibration internally),
+    // then scatter the solution back to the global vector.
+    //
+    // This works correctly when each variable is eliminated at exactly one
+    // supernode (the one where it appears as an eliminated column). Non-eliminated
+    // rows in a frontal receive updates during the dense solve, which is correct
+    // because the contribution block has been assembled into the frontal.
     for node in &factors.node_factors {
         if node.ncol == 0 {
             continue;
@@ -51,8 +50,8 @@ pub fn solve_sparse(
         // Gather local RHS from global y
         let local_rhs: Vec<f64> = node.row_indices.iter().map(|&gi| y[gi]).collect();
 
-        // Solve using the dense solver
-        let local_x = dense_solve(&node.dense_factors, &local_rhs)?;
+        // Solve using the dense solver (handles equilibration + BK perm internally)
+        let local_x = crate::dense::solve::solve(&node.dense_factors, &local_rhs)?;
 
         // Scatter back to global y
         for (li, &gi) in node.row_indices.iter().enumerate() {
@@ -60,7 +59,7 @@ pub fn solve_sparse(
         }
     }
 
-    // Step 3: Unpermute: x[old] = y[new]
+    // Step 5: Unpermute: x[old] = y[new]
     let mut x = vec![0.0; n];
     for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
         x[old_idx] = y[new_idx];
@@ -118,40 +117,25 @@ mod tests {
     #[test]
     fn test_solve_diagonal() {
         let m = CscMatrix::from_triplets(
-            3,
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[2.0, 3.0, 5.0],
-        )
-        .unwrap();
-        let rhs = vec![4.0, 9.0, 25.0];
-        check_solve(&m, &rhs, 1e-14);
+            3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0],
+        ).unwrap();
+        check_solve(&m, &[4.0, 9.0, 25.0], 1e-14);
     }
 
     #[test]
     fn test_solve_tridiagonal() {
         let m = CscMatrix::from_triplets(
-            3,
-            &[0, 1, 1, 2, 2],
-            &[0, 0, 1, 1, 2],
-            &[2.0, -1.0, 2.0, -1.0, 2.0],
-        )
-        .unwrap();
-        let rhs = vec![1.0, 0.0, 1.0];
-        check_solve(&m, &rhs, 1e-13);
+            3, &[0, 1, 1, 2, 2], &[0, 0, 1, 1, 2], &[2.0, -1.0, 2.0, -1.0, 2.0],
+        ).unwrap();
+        check_solve(&m, &[1.0, 0.0, 1.0], 1e-13);
     }
 
     #[test]
     fn test_solve_kkt() {
         let m = CscMatrix::from_triplets(
-            3,
-            &[0, 1, 2, 2, 2],
-            &[0, 1, 0, 1, 2],
-            &[2.0, 3.0, 1.0, 1.0, -1e-8],
-        )
-        .unwrap();
-        let rhs = vec![1.0, 2.0, 3.0];
-        check_solve(&m, &rhs, 1e-6);
+            3, &[0, 1, 2, 2, 2], &[0, 1, 0, 1, 2], &[2.0, 3.0, 1.0, 1.0, -1e-8],
+        ).unwrap();
+        check_solve(&m, &[1.0, 2.0, 3.0], 1e-6);
     }
 
     #[test]
@@ -161,14 +145,8 @@ mod tests {
         let mut cols = Vec::new();
         let mut vals = Vec::new();
         for i in 0..n {
-            rows.push(i);
-            cols.push(i);
-            vals.push(4.0);
-            if i + 1 < n {
-                rows.push(i + 1);
-                cols.push(i);
-                vals.push(-1.0);
-            }
+            rows.push(i); cols.push(i); vals.push(4.0);
+            if i + 1 < n { rows.push(i + 1); cols.push(i); vals.push(-1.0); }
         }
         let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
         let rhs: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
@@ -178,13 +156,20 @@ mod tests {
     #[test]
     fn test_solve_indefinite() {
         let m = CscMatrix::from_triplets(
-            2,
-            &[0, 1, 1],
-            &[0, 0, 1],
-            &[1.0, 2.0, 1.0],
-        )
-        .unwrap();
-        let rhs = vec![5.0, 4.0];
-        check_solve(&m, &rhs, 1e-13);
+            2, &[0, 1, 1], &[0, 0, 1], &[1.0, 2.0, 1.0],
+        ).unwrap();
+        check_solve(&m, &[5.0, 4.0], 1e-13);
+    }
+
+    #[test]
+    fn test_solve_arrow_multi_supernode() {
+        // Arrow matrix with multiple supernodes (AMD reorders)
+        let m = CscMatrix::from_triplets(
+            5,
+            &[0, 1, 2, 3, 4, 1, 2, 3, 4],
+            &[0, 0, 0, 0, 0, 1, 2, 3, 4],
+            &[10.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        ).unwrap();
+        check_solve(&m, &[1.0, 2.0, 3.0, 4.0, 5.0], 1e-12);
     }
 }

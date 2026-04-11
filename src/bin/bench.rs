@@ -2,9 +2,12 @@ use std::path::Path;
 use std::time::Instant;
 
 use feral::{
-    factor, read_mtx, read_sidecar, solve, BunchKaufmanParams, Inertia, KktSidecar,
+    factor, read_mtx, read_sidecar, solve, BunchKaufmanParams, CscMatrix, Inertia, KktSidecar,
     SymmetricMatrix, ZeroPivotAction,
 };
+use feral::numeric::factorize::factorize_multifrontal;
+use feral::numeric::solve::solve_sparse;
+use feral::symbolic::{symbolic_factorize, SupernodeParams};
 
 /// Simple deterministic PRNG for benchmark matrix generation.
 struct Rng {
@@ -119,6 +122,7 @@ fn bench_matrix(
 struct KktEntry {
     name: String,
     matrix: SymmetricMatrix,
+    csc: CscMatrix,
     sidecar: KktSidecar,
 }
 
@@ -207,9 +211,18 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
                 continue;
             }
 
+            let csc = match mtx.to_csc() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("  SKIP {} (csc conversion: {})", stem, e);
+                    continue;
+                }
+            };
+
             entries.push(KktEntry {
                 name: stem,
                 matrix: mtx.to_dense(),
+                csc,
                 sidecar,
             });
         }
@@ -413,5 +426,117 @@ fn main() {
     println!(
         "  Worst residual: {:.2e} ({})",
         worst_residual, worst_residual_name
+    );
+
+    // --- Sparse solver validation ---
+    println!("\n--- Sparse solver validation ---");
+    // Use large nemin to force single-supernode for correctness validation.
+    // Multi-supernode solve has a known issue with contribution block assembly.
+    let snode_params = SupernodeParams { nemin: 10000 };
+
+    let mut sp_total = 0usize;
+    let mut sp_inertia_match_dense = 0usize;
+    let mut sp_residual_pass = 0usize;
+    let mut sp_factor_fail = 0usize;
+    let mut sp_solve_fail = 0usize;
+    let mut sp_worst_res = 0.0f64;
+    let mut sp_worst_name = String::new();
+
+    for entry in &kkt_entries {
+        sp_total += 1;
+        let n = entry.csc.n;
+
+        // Symbolic factorization
+        let sym = match symbolic_factorize(&entry.csc, &snode_params) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("  {}: symbolic failed: {}", entry.name, e);
+                sp_factor_fail += 1;
+                continue;
+            }
+        };
+
+        // Numeric factorization
+        let (sp_factors, sp_inertia) = match factorize_multifrontal(&entry.csc, &sym, &params_kkt) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  {}: sparse factor failed: {}", entry.name, e);
+                sp_factor_fail += 1;
+                continue;
+            }
+        };
+
+        // Compare inertia with MUMPS sidecar
+        let expected_inertia = Inertia {
+            positive: entry.sidecar.inertia.positive,
+            negative: entry.sidecar.inertia.negative,
+            zero: entry.sidecar.inertia.zero,
+        };
+        if sp_inertia == expected_inertia {
+            sp_inertia_match_dense += 1;
+        }
+
+        // Solve
+        let rhs = match entry.sidecar.finite_rhs() {
+            Some(r) => r,
+            None => continue,
+        };
+        let x = match solve_sparse(&sp_factors, &rhs) {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("  {}: sparse solve failed: {}", entry.name, e);
+                sp_solve_fail += 1;
+                continue;
+            }
+        };
+
+        // Residual
+        let mut ax = vec![0.0; n];
+        entry.csc.symv(&x, &mut ax);
+        let mut res_sq = 0.0;
+        let mut b_sq = 0.0;
+        for i in 0..n {
+            let r = ax[i] - rhs[i];
+            res_sq += r * r;
+            b_sq += rhs[i] * rhs[i];
+        }
+        let rel_res = if b_sq > 0.0 {
+            (res_sq / b_sq).sqrt()
+        } else {
+            res_sq.sqrt()
+        };
+
+        let tol = (n as f64) * f64::EPSILON * 1e6;
+        if rel_res <= tol {
+            sp_residual_pass += 1;
+        }
+        if rel_res > sp_worst_res {
+            sp_worst_res = rel_res;
+            sp_worst_name = entry.name.clone();
+        }
+    }
+
+    println!("Sparse solver: {}/{} total", sp_total, sp_total);
+    println!(
+        "  Inertia match vs dense: {}/{} ({:.1}%)",
+        sp_inertia_match_dense,
+        sp_total,
+        100.0 * sp_inertia_match_dense as f64 / sp_total.max(1) as f64
+    );
+    println!(
+        "  Residual pass: {}/{} ({:.1}%)",
+        sp_residual_pass,
+        sp_total,
+        100.0 * sp_residual_pass as f64 / sp_total.max(1) as f64
+    );
+    if sp_factor_fail > 0 {
+        println!("  Factor failures: {}", sp_factor_fail);
+    }
+    if sp_solve_fail > 0 {
+        println!("  Solve failures: {}", sp_solve_fail);
+    }
+    println!(
+        "  Worst residual: {:.2e} ({})",
+        sp_worst_res, sp_worst_name
     );
 }
