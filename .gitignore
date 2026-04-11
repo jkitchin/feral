@@ -1,3 +1,6 @@
+# Reference codebases (local only, not part of this repo)
+ref/
+
 # Crucible: external sources (copyrighted, not shareable)
 .crucible/sources/external/
 
