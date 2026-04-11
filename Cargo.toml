@@ -1,0 +1,27 @@
+[package]
+name = "feral"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Sparse symmetric indefinite direct solver in pure Rust"
+
+[lib]
+name = "feral"
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+approx = "0.5"
+criterion = { version = "0.5", features = ["html_reports"] }
+# rmumps used only for reference timing comparisons in benchmarks:
+# rmumps = { path = "../ripopt/rmumps" }  # uncomment when needed
+
+[[bench]]
+name = "dense_factor"
+harness = false
