@@ -11,6 +11,9 @@ pub enum FeralError {
 
     /// The RHS vector length does not match the factored matrix dimension.
     DimensionMismatch { expected: usize, got: usize },
+
+    /// An I/O or parse error occurred (e.g. reading a Matrix Market file).
+    IoError(String),
 }
 
 impl std::fmt::Display for FeralError {
@@ -23,6 +26,7 @@ impl std::fmt::Display for FeralError {
             FeralError::DimensionMismatch { expected, got } => {
                 write!(f, "dimension mismatch: expected {}, got {}", expected, got)
             }
+            FeralError::IoError(msg) => write!(f, "I/O error: {}", msg),
         }
     }
 }

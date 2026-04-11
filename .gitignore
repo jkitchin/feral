@@ -12,3 +12,6 @@ ref/
 
 # Crucible: publish output
 .crucible/wiki/_build/
+
+# KKT matrices (regenerated from ripopt CUTEst runs)
+data/matrices/
