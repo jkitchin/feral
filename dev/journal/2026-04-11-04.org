@@ -1,0 +1,40 @@
+* 13:30 :research:planning:
+  Wrote research note (dev/research/sparse-multifrontal.md) covering Duff & Reid
+  1983 (multifrontal), Amestoy/Davis/Duff 1996 (AMD), George & Liu 1981
+  (elimination trees), SSIDS merge rule for supernodes. Created 9-step
+  implementation plan (dev/plans/phase-1b-sparse-solver.md).
+
+* 13:45 :sparse:csc:implementation:
+  Implemented CscMatrix with from_triplets, validate, symmetric_pattern,
+  symv, to_dense. Fixed duplicate summing bug in sort_and_sum_duplicates
+  (in-place approach failed, rewrote with two-pass collect-sort-dedup).
+  9 tests, all passing.
+
+* 14:00 :ordering:amd:etree:postorder:
+  Implemented AMD ordering (exact degree, quotient graph model), elimination
+  tree (union-find with path compression), and postorder traversal (DFS,
+  children by subtree size). Fixed etree algorithm direction — original
+  implementation walked i→root instead of i→j. Fixed AMD arrow test
+  expectation — hub node doesn't stay high-degree as leaves are eliminated.
+  16 tests total, all passing.
+
+* 14:30 :symbolic:column_counts:supernodes:
+  Implemented column counts via elimination graph simulation (not Liu's row
+  subtree algorithm — simpler to get right). Implemented fundamental supernode
+  detection and nemin-based amalgamation. Fixed amalgamation bugs: wrong
+  trivial chain condition (extra OR clause), first_col tracking during merges,
+  nrow underflow when ncol > col_counts[first_col] after amalgamation.
+  17 tests total for symbolic module.
+
+* 15:00 :numeric:factorize:solve:
+  Implemented multifrontal numeric factorization and sparse solve.
+  Key fix: assembly was double-counting entries (scatter loop + full-matrix
+  scan). Simplified to single full-matrix scan approach.
+  Sparse solve delegates to dense_solve per supernode with gather/scatter.
+  All 10 numeric tests pass. All 107 tests pass across full suite.
+
+* 15:15 :milestone:phase1b_code:
+  Phase 1b code complete: CSC, AMD, elimination tree, postorder, column counts,
+  supernodes, symbolic factorization, numeric factorization, sparse solve.
+  4,697 lines, 107 tests. Sparse solver not yet validated on real KKT matrices
+  (wiring into benchmark harness is next session's first task).
