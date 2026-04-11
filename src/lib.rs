@@ -2,6 +2,7 @@ pub mod dense;
 pub mod error;
 pub mod inertia;
 pub mod io;
+pub mod ordering;
 pub mod sparse;
 
 // Flat public API re-exported at crate root:
