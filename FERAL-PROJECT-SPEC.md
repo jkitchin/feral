@@ -1709,7 +1709,28 @@ This downloads a curated set of symmetric indefinite matrices from [sparse.tamu.
 - **Phase 1b solve convention:** Because `ForceAccept` is the default, `factors.needs_refinement` will be true for most KKT matrices in Phase 1b. Use `solve_refined()` for all solves in Phase 1b — the refinement loop exits immediately (0 or 1 steps) for well-conditioned matrices, so the overhead is negligible. Phase 2 (delayed pivoting) reduces the frequency of `ForceAccept`, making plain `solve()` the common path again
 - `increase_quality() -> bool` interface (Section 2.12)
 - Full benchmark harness with KKT and SuiteSparse matrices, including trajectory-aware testing
-- **Exit criterion:** 100% correct inertia + solution on the collected KKT benchmark set. Preferred: run `collect_kkt` from the ripopt repo before this phase — those are the target matrices. Fallback (if CUTEst infrastructure is unavailable): 100% correct inertia + solution on all Tier 2 SuiteSparse matrices collected via `scripts/fetch-suitesparse.sh`. At least one of these two datasets must be available before Phase 1b can exit. No timing requirement.
+- **Exit criterion** (superseded 2026-04-12 by the multi-source
+  consensus criterion — see `dev/decisions.md` and
+  `dev/plans/phase-1b-consensus-exit.md`): originally specified as
+  100% correct inertia + solution vs the rmumps-labelled KKT benchmark
+  set. The criterion was relaxed during Phase 1b execution after it
+  became clear that rmumps is itself a Rust port under development and
+  cannot serve as ground truth without independent validation. The
+  effective exit criterion is:
+
+  > Phase 1b exits when feral matches the consensus inertia and
+  > produces a passing residual on *every* matrix classified as
+  > **Definitive** by the 4-oracle consensus framework (feral + rmumps
+  > + canonical Fortran MUMPS 5.8.2 + canonical SPRAL/SSIDS). Matrices
+  > classified as Borderline, NumericallyIntractable, or Excluded are
+  > not part of the exit gate — the consensus framework documents why
+  > each of those categories cannot define a strict pass/fail.
+
+  **Phase 1b exited 2026-04-12** with **zero feral failures** across
+  153,117 Definitive matrices on the 153k KKT corpus. Feral agrees
+  with canonical Fortran MUMPS on **99.97%** of the corpus — higher
+  than the agreement between canonical MUMPS and canonical SPRAL/SSIDS
+  (98.25%). Full results in `dev/sessions/2026-04-12-01.md`.
 
 ### Phase 2: Optimized and Parallel
 
