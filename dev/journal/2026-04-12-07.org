@@ -1,0 +1,159 @@
+#+TITLE: Session 2026-04-12-07 journal
+#+DATE: 2026-04-12
+
+* 18:00 :phase2-2-2:research:start:
+Opened Phase 2.2.2: scaling-aware pivot rejection. Task is the
+research note, not implementation. The diagnostic from session
+2026-04-12-06 (dev/debugging/2026-04-12-acopp30-regression.md)
+identified the MC64 × ForceAccept design mismatch: MC64 equilibrates
+A → D·A·D and pushes the worst pivots from 1e-8 to ~3.6e-10, still
+6 orders above f64::EPSILON. ForceAccept inverts them in the
+D-solve and cascades ~1e30 of amplification. The five offending
+pivots hide inside 2×2 blocks with |det| ≈ 0.084, so the 2×2
+acceptance path also has to tighten.
+
+Goal: write dev/research/scaling-aware-pivot-rejection.md with the
+mumps/ssids/faer survey, four design options, and a recommendation.
+No src/ changes.
+
+* 18:10 :phase2-2-2:mumps-survey:
+Read ref/mumps/src/dfac_front_aux.F:DMUMPS_FAC_I_LDLT (line 1147+).
+Found the exact 1×1 acceptance test at lines 1494-1495:
+
+    IF ( abs(PIVOT).GE.UULOC*max(RMAX,AMAX)
+  &     .AND. abs(PIVOT) .GT. max(SEUIL,tiny(RMAX)) ) THEN
+
+And the 2×2 at lines 1590-1606:
+
+    DETPIV = A(POSPV1)*A(POSPV2) - A(OFFDAG)**2
+    ...
+    IF ((abs(A(POSPV2))*RMAX+AMAX*TMAX)*UULOC.GT.ABSDETPIV ...)
+      GO TO 460
+    IF ((abs(A(POSPV1))*TMAX+AMAX*RMAX)*UULOC.GT.ABSDETPIV ...)
+      GO TO 460
+
+Both use UULOC = CNTL(1) = 0.01 by default (confirmed in
+dfac_driver.F:472-480: CNTL(1)<0 → 0.01 for symmetric indefinite,
+capped at 0.5). GOTO 460 is the delayed-pivot path. The 2×2 test
+is a Duff-Reid growth bound: reject when u·(|a22|·RMAX + |a21|·TMAX)
+> |det|. Feral has no analog — it tests only |det|·zero_tol_2x2.
+
+* 18:20 :phase2-2-2:ssids-survey:
+Read ref/spral/src/ssids/cpu/kernels/ldlt_tpp.cxx. The 1×1 test at
+line 226 is:
+
+    if( fabs(a[p*lda+p]) >= u*maxp ) { ... }
+
+where maxp is find_rc_abs_max_exclude(p, nelim, ..., t) — max of
+row/col p excluding the 2×2 partner. The 2×2 test in test_2x2 at
+lines 89-119 is more interesting than MUMPS's because SSIDS has
+THREE checks:
+  1. maxpiv >= small (abs floor)
+  2. |detpiv| >= max(small, |detpiv0|/2, |detpiv1|/2)
+     — cancellation guard, the SSIDS-specific elaboration
+  3. u·max(x1,x2) < 1 where x1 = |D^-1_11|·maxt + |D^-1_21|·maxp
+     and x2 = |D^-1_21|·maxt + |D^-1_22|·maxp
+     — Duff-Reid growth bound, same structure as MUMPS
+
+Check (2) catches catastrophic cancellation in the 2×2 determinant
+that (3) alone would let through. Neither MUMPS nor the BK77 paper
+include it. Feral should replicate because it's cheap and exactly
+addresses the 2×2 precision loss.
+
+Default thresholds at ref/spral/src/ssids/datatypes.f90:260-262:
+u = 0.01, small = 1e-20. Four orders tighter than f64::EPSILON.
+
+Delayed pivoting: SSIDS returns nelim <= n from ldlt_tpp_factor; the
+caller handles the remainder. Much simpler than MUMPS's INOPV/GOTO
+460 mechanism, but still requires the caller to resize the parent.
+
+* 18:30 :phase2-2-2:faer-confirmation:
+Read ref/faer-rs/faer/src/linalg/cholesky/bunch_kaufman/factor.rs.
+Textbook BK77 with alpha = (1+sqrt(17))/8, no user u threshold, no
+delayed pivoting (faer is dense — delayed pivoting has no meaning).
+Not directly relevant but confirms that feral's existing dense
+factor() is correct for the dense case. The bug is specifically at
+the sparse multifrontal frontal-kernel boundary.
+
+* 18:40 :phase2-2-2:design-options:
+Enumerated four options in the research note:
+  A. Column-relative zero_tol + 2×2 Duff-Reid bound, no delayed
+     pivoting (minimal)
+  B. Option A + rewrite the BK77 1×1-vs-2×2 decision tree to match
+     SSIDS literally (middle)
+  C. Full delayed pivoting (textbook, weeks of work)
+  D. Option A + MUMPS-style regularization on reject (hybrid)
+
+Recommended **Option A**. Rationale:
+  - It closes the ACOPP30 regression (rejected pivots get zeroed
+    via ForceAccept, exactly as the Identity path's 1e-8 pivots
+    do; the residual drops from 1e46 back to the Identity baseline
+    ~1e16).
+  - It leaves BK77 stability guarantees intact (new check is a
+    superset of the existing check, not a replacement).
+  - 1-2 days of work; fits the Phase 2.2.2 budget.
+  - Matches SSIDS line 226 (1×1) and lines 89-119 (2×2) literally.
+  - Does not diverge feral from the clean BK77 derivation the
+    existing dense validation tests depend on.
+
+Option C is the textbook-correct answer but belongs in Phase 2.3.
+
+* 18:55 :phase2-2-2:data-model:
+Designed minimal data model changes:
+  - BunchKaufmanParams gains `pivot_threshold: f64`, default 0.01
+    for SupernodeParams callers, default 0.0 for dense factor()
+    callers (backwards-compat for BK77 validation tests).
+  - No new ZeroPivotAction variant needed — ForceAccept semantics
+    remain.
+  - Factors / FrontalFactors gain `n_threshold_rejected: usize`
+    for diagnostics.
+  - SymbolicFactorization / ScalingInfo unchanged (Phase 2.2.1
+    already populates scaling_info which factorize_multifrontal
+    can read).
+
+* 19:05 :phase2-2-2:test-strategy:
+Three hand-computed tests:
+  1. 3×3 diagonal tiny-pivot (healthy-after-scaling, should accept)
+  2. 4×4 ACOPP30-style coupled tiny pivot (bad-after-scaling,
+     must reject)
+  3. Well-conditioned 5×5 BK77 example (must not regress)
+
+Oracle must be external (rmumps) per hard rule. Targets for
+mc64_regression.rs:
+  - ACOPP30: must drop from 2.27e46 at least to the Identity
+    baseline 2.84e16. Below that, anything in [1e-4, 1e-8] is
+    acceptable pre-Phase-2.3 (delayed pivoting).
+  - The existing test's `< 1e-8` target may need relaxation
+    based on measured numbers; if so, record in decisions.md and
+    session checkpoint with the actual numbers.
+
+* 19:15 :phase2-2-2:open-questions:
+  1. Default threshold: propose 0.01 (SSIDS/MUMPS) pending sanity
+     panel confirmation.
+  2. Threshold pivoting alone is unlikely to close the
+     (62,142,5) vs (71,137,1) inertia gap — that gap is about
+     delayed pivots successfully eliminated at the parent, which
+     Option A does not implement.
+  3. Column max scope: use column only (SSIDS style), not full
+     MUMPS RMAX+AMAX dual tracking.
+  4. Deferred 2×2 trace fix: keep separate from 2.2.2, fold into
+     a future Phase 2.2.3 sub-phase.
+
+* 19:25 :phase2-2-2:risk-register:
+Five risks documented. Most important:
+  - R4: sparse_solve_skips_zero_pivots_rank_deficient may break;
+    mitigation is to force the test to Identity scaling.
+  - R5: dense BK77 validation tests must not regress; default
+    `pivot_threshold = 0.0` in BunchKaufmanParams::default() for
+    the dense path; only the sparse path opts in.
+  - R3: 2×2 trace bug interaction — track explicitly in the
+    checkpoint.
+
+* 19:35 :phase2-2-2:note-written:
+Wrote dev/research/scaling-aware-pivot-rejection.md. 9 sections,
+~500 lines. Followed the style of dev/research/mc64-scaling.md.
+All four required citations (bunch1977stable, duff1983multifrontal,
+hogg2013pivoting, duff2001mc64) confirmed present in
+dev/references.bib.
+
+No src/ changes. cargo test running in background for sanity.
