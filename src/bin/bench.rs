@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -7,6 +8,105 @@ use feral::{
 };
 use feral::numeric::factorize::factorize_multifrontal;
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
+
+/// A KKT matrix that failed inertia or residual on a given solver path.
+#[derive(Clone)]
+struct Failure {
+    name: String,
+    n: usize,
+    expected: Inertia,
+    actual: Inertia,
+    inertia_ok: bool,
+    residual: f64,
+    residual_ok: bool,
+}
+
+/// Extract the problem family from a matrix name like "POLAK6_0021" → "POLAK6".
+/// Strips the trailing `_<digits>` if present.
+fn family_of(name: &str) -> &str {
+    if let Some(idx) = name.rfind('_') {
+        let suffix = &name[idx + 1..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            return &name[..idx];
+        }
+    }
+    name
+}
+
+fn print_failure_analysis(label: &str, failures: &[Failure]) {
+    if failures.is_empty() {
+        println!("\n{} failure analysis: no failures", label);
+        return;
+    }
+    println!("\n--- {} failure analysis ({} failures) ---", label, failures.len());
+
+    // Group by problem family
+    let mut by_family: HashMap<&str, (usize, usize, f64, usize)> = HashMap::new();
+    for f in failures {
+        let fam = family_of(&f.name);
+        let entry = by_family.entry(fam).or_insert((0, 0, 0.0, 0));
+        entry.3 += 1;
+        if !f.inertia_ok {
+            entry.0 += 1;
+        }
+        if !f.residual_ok {
+            entry.1 += 1;
+        }
+        if f.residual > entry.2 {
+            entry.2 = f.residual;
+        }
+    }
+
+    let mut families: Vec<_> = by_family.into_iter().collect();
+    families.sort_by_key(|(_, v)| std::cmp::Reverse(v.3));
+
+    println!(
+        "\n{:<22} {:>8} {:>10} {:>10} {:>14}",
+        "family", "total", "inertia", "residual", "worst_res"
+    );
+    for (fam, (ifail, rfail, worst, total)) in families.iter().take(25) {
+        println!(
+            "{:<22} {:>8} {:>10} {:>10} {:>14.2e}",
+            fam, total, ifail, rfail, worst
+        );
+    }
+    if families.len() > 25 {
+        println!("  ... and {} more families", families.len() - 25);
+    }
+
+    // Top 20 worst by residual
+    let mut by_residual: Vec<&Failure> = failures.iter().collect();
+    by_residual.sort_by(|a, b| b.residual.partial_cmp(&a.residual).unwrap_or(std::cmp::Ordering::Equal));
+
+    println!("\nTop 15 worst residuals:");
+    println!(
+        "{:<28} {:>5} {:>12} {:>14} {:>14}",
+        "name", "n", "residual", "expected", "actual"
+    );
+    for f in by_residual.iter().take(15) {
+        println!(
+            "{:<28} {:>5} {:>12.2e} {:>14} {:>14}",
+            f.name,
+            f.n,
+            f.residual,
+            format!("{}", f.expected),
+            format!("{}", f.actual),
+        );
+    }
+}
+
+fn print_cross_comparison(dense: &[Failure], sparse: &[Failure]) {
+    let dense_names: HashSet<&str> = dense.iter().map(|f| f.name.as_str()).collect();
+    let sparse_names: HashSet<&str> = sparse.iter().map(|f| f.name.as_str()).collect();
+    let both = dense_names.intersection(&sparse_names).count();
+    let dense_only = dense_names.len() - both;
+    let sparse_only = sparse_names.len() - both;
+
+    println!("\n--- Dense ∩ Sparse failure overlap ---");
+    println!("Failed in BOTH dense and sparse:  {}", both);
+    println!("Failed in dense only:             {}", dense_only);
+    println!("Failed in sparse only:            {}", sparse_only);
+}
 
 /// Simple deterministic PRNG for benchmark matrix generation.
 struct Rng {
@@ -296,29 +396,20 @@ fn main() {
     }
     println!("{} matrices loaded", kkt_entries.len());
 
-    println!(
-        "\n{:<30} {:>5} {:>10} {:>10} {:>14} {:>8} {:>12}",
-        "name", "n", "fac(μs)", "sol(μs)", "inertia", "inertia", "residual"
-    );
-    println!(
-        "{:<30} {:>5} {:>10} {:>10} {:>14} {:>8} {:>12}",
-        "", "", "", "", "", "match?", "||Ax-b||/||b||"
-    );
-    println!("{}", "-".repeat(95));
-
     let mut n_total = 0usize;
     let mut n_inertia_pass = 0usize;
     let mut n_residual_pass = 0usize;
     let mut n_factor_fail = 0usize;
     let mut worst_residual = 0.0f64;
     let mut worst_residual_name = String::new();
+    let mut dense_failures: Vec<Failure> = Vec::new();
 
     for entry in &kkt_entries {
         n_total += 1;
         let n = entry.matrix.n;
 
         // Factor
-        let t0 = Instant::now();
+        let _t0 = Instant::now();
         let (factors, inertia) = match factor(&entry.matrix, &params_kkt) {
             Ok(r) => r,
             Err(e) => {
@@ -327,7 +418,6 @@ fn main() {
                 continue;
             }
         };
-        let factor_us = t0.elapsed().as_micros();
 
         // Check inertia against sidecar
         let expected_inertia = Inertia {
@@ -342,7 +432,6 @@ fn main() {
 
         // Solve with sidecar RHS (guaranteed finite by load_kkt_dir filter)
         let rhs = entry.sidecar.finite_rhs().unwrap();
-        let t1 = Instant::now();
         // Phase 1b solve convention (FERAL-PROJECT-SPEC.md §1709): use
         // solve_refined for all KKT solves to recover machine precision on
         // matrices flagged with needs_refinement under ForceAccept.
@@ -350,20 +439,9 @@ fn main() {
             Ok(x) => x,
             Err(e) => {
                 eprintln!("  {}: solve failed: {}", entry.name, e);
-                println!(
-                    "{:<30} {:>5} {:>10} {:>10} {:>14} {:>8} {:>12}",
-                    entry.name,
-                    n,
-                    factor_us,
-                    "-",
-                    format!("{}", inertia),
-                    if inertia_ok { "PASS" } else { "FAIL" },
-                    "solve_err"
-                );
                 continue;
             }
         };
-        let solve_us = t1.elapsed().as_micros();
 
         // Compute residual: ||Ax - b|| / ||b||
         let mut ax = vec![0.0; n];
@@ -394,21 +472,20 @@ fn main() {
             worst_residual_name = entry.name.clone();
         }
 
-        let inertia_tag = if inertia_ok { "PASS" } else { "FAIL" };
-        let res_tag = if residual_ok {
-            format!("{:.2e}", relative_residual)
-        } else {
-            format!("{:.2e} FAIL", relative_residual)
-        };
-
-        println!(
-            "{:<30} {:>5} {:>10} {:>10} {:>14} {:>8} {:>12}",
-            entry.name, n, factor_us, solve_us, format!("{}", inertia), inertia_tag, res_tag
-        );
+        if !inertia_ok || !residual_ok {
+            dense_failures.push(Failure {
+                name: entry.name.clone(),
+                n,
+                expected: expected_inertia,
+                actual: inertia,
+                inertia_ok,
+                residual: relative_residual,
+                residual_ok,
+            });
+        }
     }
 
     // Summary
-    println!("{}", "-".repeat(95));
     println!("\nKKT summary: {}/{} total", n_total, n_total);
     println!(
         "  Inertia match: {}/{} ({:.1}%)",
@@ -437,16 +514,23 @@ fn main() {
     let snode_params = SupernodeParams { nemin: 10000 };
 
     let mut sp_total = 0usize;
-    let mut sp_inertia_match_dense = 0usize;
+    let mut sp_inertia_pass = 0usize;
     let mut sp_residual_pass = 0usize;
     let mut sp_factor_fail = 0usize;
     let mut sp_solve_fail = 0usize;
     let mut sp_worst_res = 0.0f64;
     let mut sp_worst_name = String::new();
+    let mut sparse_failures: Vec<Failure> = Vec::new();
 
     for entry in &kkt_entries {
         sp_total += 1;
         let n = entry.csc.n;
+
+        let expected_inertia = Inertia {
+            positive: entry.sidecar.inertia.positive,
+            negative: entry.sidecar.inertia.negative,
+            zero: entry.sidecar.inertia.zero,
+        };
 
         // Symbolic factorization
         let sym = match symbolic_factorize(&entry.csc, &snode_params) {
@@ -468,14 +552,9 @@ fn main() {
             }
         };
 
-        // Compare inertia with MUMPS sidecar
-        let expected_inertia = Inertia {
-            positive: entry.sidecar.inertia.positive,
-            negative: entry.sidecar.inertia.negative,
-            zero: entry.sidecar.inertia.zero,
-        };
-        if sp_inertia == expected_inertia {
-            sp_inertia_match_dense += 1;
+        let inertia_ok = sp_inertia == expected_inertia;
+        if inertia_ok {
+            sp_inertia_pass += 1;
         }
 
         // Solve
@@ -509,21 +588,34 @@ fn main() {
         };
 
         let tol = (n as f64) * f64::EPSILON * 1e6;
-        if rel_res <= tol {
+        let residual_ok = rel_res <= tol;
+        if residual_ok {
             sp_residual_pass += 1;
         }
         if rel_res > sp_worst_res {
             sp_worst_res = rel_res;
             sp_worst_name = entry.name.clone();
         }
+
+        if !inertia_ok || !residual_ok {
+            sparse_failures.push(Failure {
+                name: entry.name.clone(),
+                n,
+                expected: expected_inertia,
+                actual: sp_inertia,
+                inertia_ok,
+                residual: rel_res,
+                residual_ok,
+            });
+        }
     }
 
     println!("Sparse solver: {}/{} total", sp_total, sp_total);
     println!(
-        "  Inertia match vs dense: {}/{} ({:.1}%)",
-        sp_inertia_match_dense,
+        "  Inertia match vs MUMPS: {}/{} ({:.1}%)",
+        sp_inertia_pass,
         sp_total,
-        100.0 * sp_inertia_match_dense as f64 / sp_total.max(1) as f64
+        100.0 * sp_inertia_pass as f64 / sp_total.max(1) as f64
     );
     println!(
         "  Residual pass: {}/{} ({:.1}%)",
@@ -541,4 +633,9 @@ fn main() {
         "  Worst residual: {:.2e} ({})",
         sp_worst_res, sp_worst_name
     );
+
+    // ============ Failure analysis ============
+    print_failure_analysis("Dense", &dense_failures);
+    print_failure_analysis("Sparse", &sparse_failures);
+    print_cross_comparison(&dense_failures, &sparse_failures);
 }
