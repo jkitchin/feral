@@ -1,6 +1,7 @@
 #![allow(clippy::needless_range_loop)]
 use super::factorize::SparseFactors;
 use crate::error::FeralError;
+use crate::scaling::ScalingInfo;
 use crate::sparse::csc::CscMatrix;
 
 /// Solve A·x = b using the sparse multifrontal factorization.
@@ -9,6 +10,31 @@ use crate::sparse::csc::CscMatrix;
 /// 1. Forward substitution: L-solve through supernodes (postorder)
 /// 2. D-block solve: D^{-1} for eliminated pivots at each node
 /// 3. Backward substitution: L^T-solve through supernodes (reverse postorder)
+///
+/// # MC64 scaling (Phase 2.2.1 Step 7)
+///
+/// When `factors.scaling_info != ScalingInfo::NotApplied`, the
+/// factors represent `M = D · A · D` with `D = diag(factors.scaling)`,
+/// not the user's original `A`. To solve `A · x = b` the user actually
+/// wants, we bracket the core solve with a symmetric congruence:
+///
+/// ```text
+///     A · x = b
+///     (D^-1 · M · D^-1) · x = b
+///     M · (D^-1 · x) = D · b        // left-multiply by D
+///     M · y          = D · b        // let y = D^-1 · x
+///     y = core_solve(D · b)
+///     x = D · y                      // recover x
+/// ```
+///
+/// Note the **same** `D` vector is applied on both ends, not its
+/// inverse — the `D^-1` cancels out algebraically. Intuition:
+/// pre-scaling the RHS by `D` compensates for the pre-scaling that
+/// assembly-time baked into the factors, and post-scaling by `D`
+/// maps the intermediate `y` back into the user coordinate system.
+///
+/// When `ScalingInfo::NotApplied`, the scaling vector is all ones
+/// and the pre/post-scale passes are skipped as a fast path.
 pub fn solve_sparse(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
     let n = factors.n;
     if rhs.len() != n {
@@ -21,6 +47,43 @@ pub fn solve_sparse(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, Fe
     if n == 0 {
         return Ok(Vec::new());
     }
+
+    // Pre-scale the RHS (user-order) in preparation for the core
+    // solve. `NotApplied` ⇒ `scaling == [1.0; n]`, so the multiply
+    // would be a no-op; skip it for the happy path.
+    let needs_scaling = !matches!(factors.scaling_info, ScalingInfo::NotApplied);
+    let scaled_rhs_storage;
+    let rhs_for_core: &[f64] = if needs_scaling {
+        let mut buf = vec![0.0; n];
+        for i in 0..n {
+            buf[i] = rhs[i] * factors.scaling[i];
+        }
+        scaled_rhs_storage = buf;
+        &scaled_rhs_storage
+    } else {
+        rhs
+    };
+
+    let mut x = solve_sparse_core(factors, rhs_for_core)?;
+
+    // Post-scale the solution with the same vector (not its inverse;
+    // see the docstring math above).
+    if needs_scaling {
+        for i in 0..n {
+            x[i] *= factors.scaling[i];
+        }
+    }
+
+    Ok(x)
+}
+
+/// Core sparse solve: runs forward-sub, D-solve, backward-sub on an
+/// RHS that is assumed to already be in the pre-scaled coordinate
+/// system of `M = D · A · D`. Callers other than `solve_sparse` (e.g.,
+/// the refinement loop's correction solve) go through `solve_sparse`
+/// itself so the pre/post-scale wrapping stays in one place.
+fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
+    let n = factors.n;
 
     // Permute RHS with AMD ordering: y[new] = b[perm[new]]
     let mut y = vec![0.0; n];

@@ -1,0 +1,82 @@
+#+TITLE: Session 2026-04-12-04 journal
+#+DATE: 2026-04-12
+
+* 10:00 :mc64:solve:step7:
+Picked up Phase 2.2.1 Step 7. Working tree had Step 6 uncommitted:
+`src/numeric/factorize.rs` modified to (1) add `scaling: Vec<f64>`
+and `scaling_info: ScalingInfo` fields to `SparseFactors`, (2)
+multiply each scattered CSC entry by
+`symbolic.scaling_pivot_order[gi] * symbolic.scaling_pivot_order[gj]`
+during frontal assembly, and (3) populate the two fields on return
+from `factorize_multifrontal`. Read the diff; the assembly-time
+scaling is in pivot-order indexing (correct — the permuted CSC is
+already pivot-indexed) and the solve-facing `scaling` field is in
+user-order (correct — solve operates at the user API boundary).
+Confirmed no changes outside `factorize.rs`.
+
+* 10:05 :tests:baseline:
+Ran `cargo test --no-fail-fast` against Step 6 alone. Found 9
+failures, all of the form "relative residual O(1) exceeds
+tolerance 1e-12":
+  - `numeric::solve::tests::test_solve_{diagonal,tridiagonal,kkt,larger_spd,indefinite,arrow_multi_supernode}` (6)
+  - `sparse_refined::solve_sparse_refined_well_conditioned_no_change`
+  - `sparse_refined::solve_sparse_refined_improves_residual_on_ill_conditioned`
+  - `threshold_consistency::sparse_solve_skips_zero_pivots_rank_deficient`
+Pre-Step-6 test count was 139. Consistent with the prompt's
+"9 failing tests" prediction.
+
+* 10:15 :solve:refactor:
+Refactored `solve_sparse` in `src/numeric/solve.rs`. Extracted the
+existing body (AMD permute → forward sub → D-solve → backward sub
+→ un-permute) into a private `solve_sparse_core` helper. Made
+`solve_sparse` a thin wrapper that:
+  1. Checks `factors.scaling_info != ScalingInfo::NotApplied` to
+     decide whether scaling is needed (O(1) check, avoids the
+     all-ones multiply on Identity/External paths).
+  2. Pre-scales: `b_scaled[i] = rhs[i] * factors.scaling[i]`.
+  3. Calls `solve_sparse_core(factors, b_scaled)` → `y`.
+  4. Post-scales: `x[i] = y[i] * factors.scaling[i]`.
+Note: same vector on both ends, not its inverse. Math from the
+plan — `A·x = b` and `M = D·A·D` give `M·y = D·b` with `y = D^-1·x`,
+so `x = D·y` recovers the user-space solution.
+
+Did NOT touch `solve_sparse_refined`. Its correction solve loops
+through `solve_sparse(factors, &r)`, so it inherits the pre/post-
+scale wrapping transparently. Residual `r = rhs - matrix·x` still
+uses the original unscaled `matrix` — exactly what refinement
+needs. Read the code to confirm.
+
+* 10:22 :tests:green:
+Ran `cargo test --no-fail-fast`. All 139 originally-expected tests
+pass, plus the 2 new end-to-end tests I added:
+  test result: ok. 77 passed (lib)
+  test result: ok. 16 passed (dense_ldlt)
+  test result: ok. 8 passed (kkt_hardening)
+  test result: ok. 2 passed (mc64_end_to_end — new)
+  test result: ok. 10 passed (mc64_scaling)
+  test result: ok. 6 passed (property_tests)
+  test result: ok. 4 passed (sparse_postorder)
+  test result: ok. 5 passed (sparse_refined)
+  test result: ok. 8 passed (stress_tests)
+  test result: ok. 5 passed (threshold_consistency)
+  + doc/compile-only entries
+Total 141 passed / 0 failed / 7 ignored. The 9 failures from the
+baseline are all recovered.
+
+* 10:28 :tests:end2end:
+Added `tests/mc64_end_to_end.rs` with two hand-oracle cases:
+  1. `mc64_end_to_end_diagonal`: `A = diag(2,3,5)`, `b = [2,3,5]`,
+     expected `x = [1,1,1]`. Verifies the "same direction, not
+     inverse" invariant on a pure-diagonal case where the scaling
+     is `s = [1/sqrt(2), 1/sqrt(3), 1/sqrt(5)]`.
+  2. `mc64_end_to_end_2x2_spd_off_diagonal`: `A = [[4,2],[2,4]]`,
+     `b = [6,6]`, expected `x = [1,1]`. Exercises the off-diagonal
+     assembly path where Step 6's `s[gi] * s[gj]` multiply actually
+     fires on a non-trivial entry. Hand arithmetic: `det(A) = 12`,
+     `A^-1 · [6,6] = [1,1]`. Both tests green on first run, which
+     confirms the sign/direction is right.
+
+* 10:32 :fmt:clippy:
+`cargo fmt --all` reformatted the long `factorize_multifrontal`
+call in the end-to-end test. `cargo clippy --lib -- -D warnings`
+is clean. Ready to commit.

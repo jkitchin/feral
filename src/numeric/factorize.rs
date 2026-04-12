@@ -28,6 +28,19 @@ pub struct SparseFactors {
 
     /// Whether iterative refinement is recommended.
     pub needs_refinement: bool,
+
+    /// Global symmetric scaling vector in **user-order** indexing.
+    /// Length `n`. The matrix actually factored is `D · A · D` with
+    /// `D = diag(scaling)`, so solve must pre-scale the RHS and
+    /// post-scale the solution with the same vector. Cloned from
+    /// `SymbolicFactorization::scaling` at the end of
+    /// `factorize_multifrontal` so the solve path can reach it
+    /// without a back-pointer to the symbolic analysis.
+    pub scaling: Vec<f64>,
+
+    /// Diagnostic info about how `scaling` was produced. Mirrored
+    /// from `SymbolicFactorization::scaling_info` for telemetry.
+    pub scaling_info: crate::scaling::ScalingInfo,
 }
 
 /// Factor data for a single supernode.
@@ -141,13 +154,27 @@ pub fn factorize_multifrontal(
         // lower-triangle entries (row >= col), so each entry A(row, col)
         // is found by scanning column col. Entries where our columns appear
         // as ROWS arrive via child contribution blocks.
+        //
+        // Phase 2.2.1 Step 6: Apply MC64 symmetric scaling in-place
+        // as `D · A · D` where `D = diag(scaling_pivot_order)`. The
+        // permuted CSC produced above is indexed in pivot positions,
+        // and `scaling_pivot_order` is also in pivot indexing (see
+        // src/symbolic/mod.rs and the Step 5 commit 67954d9), so the
+        // lookup is direct — no indirection through `perm`. Diagonal
+        // entries receive `s[i]^2`; off-diagonal entries receive
+        // `s[i] * s[j]`. Identity strategy fills the vector with 1.0,
+        // so this multiply is a no-op when scaling is disabled.
+        debug_assert_eq!(symbolic.scaling_pivot_order.len(), symbolic.n);
+        let scaling = &symbolic.scaling_pivot_order;
         let mut frontal = SymmetricMatrix::zeros(actual_nrow);
         for (local_j, &gj) in row_indices[..ncol].iter().enumerate() {
+            let s_j = scaling[gj];
             for k in permuted.col_ptr[gj]..permuted.col_ptr[gj + 1] {
                 let gi = permuted.row_idx[k];
                 let local_i = row_map[gi];
                 if local_i != usize::MAX {
-                    frontal.set(local_i, local_j, permuted.values[k]);
+                    let val = permuted.values[k] * scaling[gi] * s_j;
+                    frontal.set(local_i, local_j, val);
                 }
             }
         }
@@ -208,6 +235,14 @@ pub fn factorize_multifrontal(
             perm_inv: symbolic.perm_inv.clone(),
             node_factors,
             needs_refinement,
+            // Phase 2.2.1 Step 6: propagate the user-order scaling
+            // vector into the numeric factors so Step 7 (solve-side
+            // pre/post-scaling) can reach it without a back-pointer
+            // to `SymbolicFactorization`. Solve operates at the
+            // user API boundary, so it needs user-order indexing,
+            // not the pivot-order cache used at assembly time.
+            scaling: symbolic.scaling.clone(),
+            scaling_info: symbolic.scaling_info.clone(),
         },
         total_inertia,
     ))
