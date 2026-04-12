@@ -14,7 +14,7 @@ echo ""
 
 # Latest session checkpoint
 echo "## Latest Session"
-LATEST_SESSION=$(find dev/sessions -name '*.md' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)
+LATEST_SESSION=$(ls -1 dev/sessions/*.md 2>/dev/null | sort | tail -1 || true)
 if [ -n "${LATEST_SESSION:-}" ]; then
     echo "File: $LATEST_SESSION"
     echo '```'
