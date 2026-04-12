@@ -499,3 +499,63 @@
   *only* matrices in the entire 153k corpus where feral demonstrably
   disagrees with the canonical literature consensus. Triaging one matrix
   from each family would likely close them with a single fix per family.
+
+* 18:00 :phase-7:triage-32:
+  Triaged CERI651DLS_0534 and FBRAIN3LS_0788 — representatives of the
+  two families containing all 32 Definitive feral failures. Same
+  pattern on both:
+
+  CERI651DLS_0534 (n=7, SPD):
+  - Consensus (MUMPS+SSIDS+rmumps): (7, 0, 0)
+  - Feral default:                   (6, 0, 1) — one positive → zero
+  - Problem: D[6] = +1.835e-14, which is below zero_tol = 100*eps = 2.22e-14
+  - With zero_tol = 1e-30: feral gets (7, 0, 0), residual improves 20x
+
+  FBRAIN3LS_0788 (n=6, SPD):
+  - Consensus: (6, 0, 0)
+  - Feral default: (5, 0, 1)
+  - Problem: D[5] = +7.392e-15, below zero_tol
+
+  Both matrices have tiny-but-legitimately-positive pivots flagged as
+  zero by the too-aggressive default. MUMPS/SSIDS/rmumps all classify
+  them correctly as positive.
+
+  The 100* safety margin in `zero_tol = 100 * f64::EPSILON` was
+  overaggressive. For well-equilibrated matrices with ||A|| ~ 1 the
+  rounding error floor is ~eps; any pivot more than eps above zero has
+  a reliable sign. Lowered the default to plain eps.
+
+* 18:10 :phase-7:CLOSED:
+  Full cargo test passes (121 tests). Clippy clean.
+
+  Ran FERAL_EMIT_SIDECARS=1 cargo run --release --bin bench to emit
+  new .feral.json sidecars with the fix applied.
+
+  Dense inertia match vs rmumps: 151,930 → 152,147 (+217).
+
+  Re-ran consensus on 169,585 matrices. Final numbers:
+
+  | Verdict                  | Count    | %      |
+  |--------------------------+----------+--------|
+  | Definitive               | 153,117  | 90.29% |
+  | Borderline               |     750  |  0.44% |
+  | Numerically intractable  |  13,377  |  7.89% |
+  | Excluded                 |   2,341  |  1.38% |
+
+  *Feral failures on Definitive matrices: 0*
+  *Feral failures on Borderline matrices: 0*
+
+  Pairwise inertia agreement:
+  | Pair                    | Match   | Total   | %      |
+  |-------------------------+---------+---------+--------|
+  | feral  vs mumps         | 152,094 | 152,145 | 99.97% |
+  | feral  vs ssids         | 152,779 | 153,151 | 99.76% |
+  | feral  vs rmumps        | 152,147 | 153,151 | 99.34% |
+  | mumps  vs ssids         | 153,172 | 155,899 | 98.25% |
+  | rmumps vs mumps         | 152,243 | 155,899 | 97.65% |
+  | rmumps vs ssids         | 152,709 | 156,927 | 97.31% |
+
+  Feral now agrees with canonical Fortran MUMPS on 99.97% of the corpus
+  — *higher* than MUMPS vs SSIDS agreement (98.25%). Phase 1b exits
+  with the strongest possible verdict: feral matches the consensus on
+  every single Definitive matrix.

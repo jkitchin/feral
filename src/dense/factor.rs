@@ -8,7 +8,16 @@ pub struct BunchKaufmanParams {
     pub alpha: f64,
 
     /// A 1×1 pivot |d| <= zero_tol is considered numerically zero.
-    /// Default: 100.0 * f64::EPSILON ≈ 2.2e-14.
+    /// Default: f64::EPSILON ≈ 2.22e-16.
+    ///
+    /// Rationale: for a well-equilibrated matrix with ||A|| ~ 1, the
+    /// rounding error floor is ~eps. Any pivot more than eps above zero
+    /// has a reliable sign and should be counted as positive/negative,
+    /// not zero. The previous default of 100*eps (2.22e-14) was too
+    /// aggressive and flagged legitimate small-positive pivots as zero
+    /// on SPD matrices — verified by triage against canonical MUMPS,
+    /// SSIDS, and rmumps on CERI651DLS_0534 and FBRAIN3LS_0788
+    /// (2026-04-12, dev/journal/2026-04-12-01.org).
     pub zero_tol: f64,
 
     /// A 2×2 pivot block is near-singular when |det| <= zero_tol_2x2.
@@ -30,7 +39,7 @@ pub enum ZeroPivotAction {
 
 impl Default for BunchKaufmanParams {
     fn default() -> Self {
-        let zero_tol = 100.0 * f64::EPSILON;
+        let zero_tol = f64::EPSILON;
         Self {
             alpha: (1.0 + 17f64.sqrt()) / 8.0, // ≈ 0.6404
             zero_tol,
