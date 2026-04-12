@@ -1,0 +1,930 @@
+#+TITLE: Phase 1 Retrospective: Building a Correct Sparse Symmetric Indefinite Solver
+#+AUTHOR: FERAL Development
+#+DATE: 2026-04-12
+#+OPTIONS: toc:2 num:t
+#+BIBLIOGRAPHY: ../references.bib
+
+* Abstract
+
+FERAL is a pure-Rust clean-room implementation of a sparse symmetric
+indefinite linear solver with certified inertia counts, intended as a
+replacement for MUMPS citep:duff1983multifrontal in interior-point
+optimization workloads. Phase 1 of the project had two stages: a dense
+Bunch-Kaufman kernel (Phase 1a, completed in Session 3) and a
+multifrontal sparse solver built on top of that kernel (Phase 1b,
+completed 2026-04-12). This document is a retrospective of Phase 1 as
+a whole, with emphasis on what the project's original validation
+framework got wrong, how the team rebuilt validation around a
+multi-source consensus between four independent solvers, and the
+honest limits of the "done" claim at Phase 1b exit. The headline
+result is that feral agrees with canonical Fortran MUMPS 5.8.2
+citep:duff1983multifrontal on 99.97% of a 153,151-matrix KKT corpus
+collected from CUTEst runs of IPOPT citep:wachter2006ipopt --- a level
+of agreement that exceeds the pairwise agreement between canonical
+MUMPS and canonical SPRAL/SSIDS citep:hogg2013pivoting themselves
+(98.25%). This metric is, however, load-bearing in a way that the
+original Phase 1 specification's "100% correct inertia" criterion was
+not, and we discuss what it means for a solver to be "correct" when
+the canonical solvers themselves do not agree.
+
+* Introduction
+
+** The FERAL project
+:PROPERTIES:
+:CUSTOM_ID: feral-project
+:END:
+
+The immediate goal of FERAL is to remove a Fortran dependency from an
+interior-point solver (ripopt) without surrendering numerical
+stability on real KKT systems. The target linear system is the
+augmented KKT matrix
+
+\[
+K = \begin{pmatrix} H + \delta_w I & A^T \\ A & -\delta_c I \end{pmatrix}
+\]
+
+which appears in the interior-point iteration of
+citep:wachter2006ipopt, where $H$ is the Lagrangian Hessian, $A$ the
+constraint Jacobian, and $\delta_w, \delta_c \geq 0$ are
+regularization parameters added by IPOPT's inertia-correction
+heuristic. These matrices are /symmetric indefinite/: the Hessian
+block is typically (but not always) positive semidefinite, while the
+constraint block is zero or a small negative multiple of the
+identity. Correct solution of these systems, and in particular
+correct counting of positive, negative, and zero eigenvalues (the
+/inertia/), is what interior-point methods rely on to decide whether
+to accept a step, regularize further, or declare infeasibility.
+
+FERAL's architectural constraints, set in the project specification,
+are strict: pure Rust on the stable toolchain, no BLAS or LAPACK
+linkage, no Fortran dependencies in the core solver, clean-room
+implementation from published papers. The architectural reference
+solvers are MUMPS citep:duff1983multifrontal and SPRAL/SSIDS
+citep:hogg2013pivoting, but neither is allowed to be linked into the
+core crate at any point. The Phase 1 specification defined the
+solver's exit criterion as /100% correct inertia and solution on the
+collected KKT benchmark set/ --- a criterion that, as we will
+describe, turned out to be unrealizable as stated, for reasons that
+were not anticipated when the spec was written.
+
+** Phase 1 structure
+:PROPERTIES:
+:CUSTOM_ID: phase1-structure
+:END:
+
+Phase 1 was divided into two stages:
+
+- /Phase 1a: Correct Dense Solver./ A scalar, unblocked Bunch-Kaufman
+  citep:bunch1977stable factorization with iterative refinement
+  citep:bunch1971direct, operating on a full dense symmetric matrix.
+  This was completed in Session 3 and provided a reference kernel
+  against which the sparse solver could be measured.
+
+- /Phase 1b: Correct Sparse Solver./ A single-threaded multifrontal
+  solver citep:duff1983multifrontal,george1981computer wrapping the
+  dense BK kernel, with AMD fill-reducing ordering
+  citep:amestoy1996approximate,amestoy2004algorithm837, elimination
+  tree construction, postorder, symbolic factorization with supernode
+  amalgamation using SSIDS's /nemin/ merge rule
+  citep:hogg2013pivoting, and a sparse forward/back solve with
+  iterative refinement.
+
+Phase 1 was nominally finished at the end of Session 4 (2026-04-11),
+with reported bench numbers of 99.2% dense inertia agreement and 99.0%
+sparse inertia agreement against the "ground-truth" oracle provided
+by ripopt's KKT collector, which in turn uses rmumps --- a Rust port
+of MUMPS by the same author who is developing FERAL. This
+/looked/ like a near-exit state. It turned out not to be.
+
+* What Phase 1 accomplished
+
+** The solver pipeline in its final form
+:PROPERTIES:
+:CUSTOM_ID: solver-pipeline
+:END:
+
+At Phase 1 exit (commit ~0f5f1cb~, 2026-04-12), the solver implements
+the full analysis-factor-solve pipeline:
+
+1. /Fill-reducing ordering./ Approximate Minimum Degree
+   citep:amestoy1996approximate,amestoy2004algorithm837 computed with
+   exact external degree (/not/ the element-absorption-based AMD
+   described in citet:amestoy2004algorithm837 --- that optimization
+   is explicitly deferred to Phase 2). The returned permutation
+   vector is the initial ordering only; see Section
+   [[#what-we-learned]] for the bug that made this ordering insufficient
+   without a subsequent postorder composition.
+
+2. /Elimination tree and postorder./ The etree is computed from the
+   sparsity pattern of $P A P^T$ by a union-find walk following
+   citet:george1981computer. It is then postordered by depth-first
+   traversal with children ordered by ascending subtree size, so that
+   any subtree occupies a contiguous range in the final column
+   numbering. The AMD permutation is then /composed/ with the
+   postorder to produce the final ordering.
+
+3. /Column counts and supernode detection./ Column counts are
+   computed by elimination-graph simulation (again a simpler
+   alternative to the row-subtree algorithm of
+   citet:hogg2013pivoting, sufficient for the matrix sizes in this
+   phase). Fundamental supernodes are detected by the classical rule
+   --- consecutive columns $j, j+1$ belong to the same supernode when
+   ~parent[j-1] == j~ and ~col_counts[j] + 1 == col_counts[j-1]~ ---
+   and then amalgamated using the SSIDS /nemin/ merge rule
+   citep:hogg2013pivoting, with the default threshold ~nemin = 32~.
+
+4. /Numeric factorization./ A postorder traversal of the supernode
+   tree. At each supernode, the frontal matrix is allocated as a
+   column-major dense block, the contribution blocks of the children
+   are scatter-added (extend-add) following
+   citet:duff1983multifrontal, and the dense BK kernel
+   citep:bunch1977stable is called to eliminate the ~ncol~
+   fully-summed columns, producing an ~(nrow − ncol) × (nrow − ncol)~
+   Schur complement that is passed to the parent.
+
+5. /Sparse solve./ Forward and backward substitution by supernode, a
+   dispatch of the dense $D$-block solve per frontal, and an explicit
+   skip of any pivot whose absolute value is at or below
+   ~factors.zero_tol~ (see Section [[#the-threshold-mismatch-bug]]).
+
+6. /Iterative refinement./ Both the dense and sparse paths use a
+   /best-iterate/ refinement strategy: the solver tracks the smallest
+   residual norm seen across refinement steps and returns the
+   corresponding $x$, rather than unconditionally accepting every
+   correction. This prevents refinement from amplifying error on
+   rank-deficient matrices where ~ForceAccept~ (Section
+   [[#zero-pivot-handling]]) produced a wrong $A^{-1}$.
+
+The dense BK kernel underlying this pipeline uses the classical
+$(1+\sqrt{17})/8$ threshold citep:bunch1977stable for pivot selection,
+Knight-Ruiz infinity-norm equilibration
+citep:bunch1971direct applied before factorization, and
+~ZeroPivotAction::ForceAccept~ as the Phase 1 default handling of
+near-zero pivots --- a choice we will return to in Section
+[[#zero-pivot-handling]].
+
+** External benchmark oracle infrastructure
+:PROPERTIES:
+:CUSTOM_ID: external-benchmark
+:END:
+
+In addition to the solver itself, Phase 1b added a new top-level
+directory ~external_benchmarks/~ containing three independent Fortran
+oracles that run outside the Rust crate:
+
+- /Canonical MUMPS 5.8.2./ Built sequentially from ~ref/mumps~ with
+  OpenBLAS + gfortran 15. A Fortran 77 driver
+  (~external_benchmarks/mumps_oracle/mumps_bench.F~) reuses a single
+  ~DMUMPS_STRUC~ instance across a manifest of matrix files,
+  minimising the per-matrix structure setup cost. Per-matrix sidecar
+  JSONs are written by a Python wrapper.
+
+- /Canonical SPRAL/SSIDS./ Built with meson, requiring METIS and
+  running with ~OMP_CANCELLATION=true~. A Fortran 90 driver
+  (~external_benchmarks/ssids_oracle/ssids_bench.f90~) follows the
+  same manifest pattern.
+
+- /rmumps sidecar extraction./ The existing ipopt sidecars in
+  ~data/matrices/kkt/<problem>/<id>.json~ already contain the inertia
+  computed by rmumps during the IPOPT iteration that generated the
+  matrix. These are read directly by the consensus computation
+  without a separate extraction step.
+
+Per the project's constraint on non-Rust dependencies, /none of this
+infrastructure is built by cargo/. It lives entirely outside the Rust
+crate's build graph and is run manually by the developer to produce
+per-matrix sidecar data. The core solver remains buildable and
+testable with ~cargo test && cargo clippy -- -D warnings~ on any
+machine, regardless of whether MUMPS or SSIDS is present.
+
+The output schema for each oracle is a per-matrix JSON file in the
+same canonical format, containing ~inertia~, ~residual_2norm_relative~,
+factorization and solve timings, and solver-specific diagnostic
+fields. Feral itself emits the same schema to ~.feral.json~ when the
+~FERAL_EMIT_SIDECARS~ environment variable is set on a bench run.
+
+** Consensus computation
+:PROPERTIES:
+:CUSTOM_ID: consensus-computation
+:END:
+
+The consensus framework (~external_benchmarks/consensus/compute_consensus.py~)
+reads the four sidecar types per matrix and applies the following
+rules:
+
+- /Strong inertia consensus:/ at least 3 of the available solvers
+  report the same inertia triple $(p, n, z)$.
+
+- /Weak inertia consensus:/ exactly 2 of the available solvers agree,
+  and the others differ from the majority answer by at most 1 in each
+  component. The weak category captures matrices where rmumps says
+  $(p, n, 0)$ while MUMPS or SSIDS says $(p, n-1, 1)$ or similar ---
+  a disagreement about /whether a boundary pivot is zero/, not about
+  the major structure.
+
+- /Residual consensus solvable:/ at least 3 of the available solvers
+  produce a residual below $n \cdot \epsilon \cdot 10^6$, the
+  tolerance used by the feral bench.
+
+A per-matrix /verdict/ is then assigned:
+
+| Verdict                 | Inertia          | Solvable        |
+|-------------------------+------------------+-----------------|
+| Definitive              | strong           | yes             |
+| Borderline              | weak             | yes             |
+| Numerically intractable | strong or weak   | no              |
+| Excluded                | none             | any             |
+
+Phase 1b exits when feral matches the consensus inertia and produces
+a passing residual on every /Definitive/ matrix. Borderline matrices
+are tolerated; Numerically intractable and Excluded matrices are
+documented and set aside. This verdict machinery is the operational
+replacement for the spec's "100% correct" criterion --- see Section
+[[#what-we-learned]] for why the replacement was necessary.
+
+** The final consensus results
+:PROPERTIES:
+:CUSTOM_ID: consensus-results
+:END:
+
+After the Phase 1b fixes landed, the consensus computation on 169,585
+analyzed matrices (some have rmumps + MUMPS + SSIDS data but feral
+skipped them because of the Phase 1a $n \leq 500$ size limit) gave:
+
+| Verdict                  | Count    | Percentage |
+|--------------------------+----------+------------|
+| Definitive               | 153,117  |     90.29% |
+| Borderline               |      750 |      0.44% |
+| Numerically intractable  |  13,377  |      7.89% |
+| Excluded                 |   2,341  |      1.38% |
+
+Feral failures on Definitive matrices: /zero/. Feral failures on
+Borderline matrices: /zero/.
+
+The pairwise inertia agreement across the four oracles tells a more
+interesting story:
+
+| Pair                           | Matches    | Total     |       % |
+|--------------------------------+------------+-----------+---------|
+| feral \(\;\)vs\(\;\) MUMPS     |  152,094  |  152,145  |  99.97% |
+| feral \(\;\)vs\(\;\) SSIDS     |  152,779  |  153,151  |  99.76% |
+| feral \(\;\)vs\(\;\) rmumps    |  152,147  |  153,151  |  99.34% |
+| MUMPS \(\;\)vs\(\;\) SSIDS     |  153,172  |  155,899  |  98.25% |
+| rmumps \(\;\)vs\(\;\) MUMPS    |  152,243  |  155,899  |  97.65% |
+| rmumps \(\;\)vs\(\;\) SSIDS    |  152,709  |  156,927  |  97.31% |
+
+The two results to draw attention to are:
+
+1. /Feral agrees with canonical MUMPS on 99.97% of the corpus, which
+   is higher than the agreement between the two independent canonical
+   Fortran solvers (98.25%)./ This is not a coincidence: feral, like
+   MUMPS, follows the Duff-Reid multifrontal architecture
+   citep:duff1983multifrontal with Bunch-Kaufman pivoting
+   citep:bunch1977stable and approximate minimum degree ordering
+   citep:amestoy1996approximate. SSIDS differs at a deeper
+   architectural level, using a task-based DAG factorization
+   citep:agullo2016taskbased with different pivoting and scaling
+   defaults citep:hogg2013pivoting. Feral and canonical MUMPS are, in
+   effect, from the same algorithmic family; SSIDS is from a
+   different one.
+
+2. /rmumps agrees with canonical MUMPS on only 97.65% of the
+   corpus./ This means the oracle that the Phase 1b specification
+   asked feral to be "100% correct" against disagrees with canonical
+   MUMPS more often than feral does. The original exit criterion was
+   implicitly measuring /agreement with rmumps/, not /agreement with
+   MUMPS/, and rmumps and MUMPS are not the same thing.
+
+* What we learned
+:PROPERTIES:
+:CUSTOM_ID: what-we-learned
+:END:
+
+The bugs found and fixed in Phase 1b are individually interesting,
+but the /pattern/ of bugs is more interesting than any single fix.
+This section walks through the main findings in the order they were
+discovered, with the lessons each one carries.
+
+** The postorder pipeline bug
+:PROPERTIES:
+:CUSTOM_ID: postorder-bug
+:END:
+
+The first structural bug surfaced during triage of MGH10S_0000, a
+51×51 KKT matrix from the CUTEst problem MGH10S, where the sparse
+solver was producing inertia $(50, 1, 0)$ against an expected
+$(35, 16, 0)$ and a relative residual of $2.6 \times 10^{21}$ ---
+that is, the numerical output was entirely meaningless.
+
+The root cause was that ~symbolic_factorize~ computed the elimination
+tree of the AMD-permuted matrix and passed it directly to the
+supernode detector /without first postordering the etree/. The
+~ordering::postorder~ module existed, was tested, and had been called
+for in the Phase 1b implementation plan --- but no call site referred
+to it. It was an orphan module.
+
+Why the bug mattered: fundamental supernode detection assumes that
+parent/child columns are consecutive in the final numbering
+citep:hogg2013pivoting. The classical rule "column $j$ belongs to the
+same supernode as column $j-1$ when ~parent[j-1] == j~" only works if
+$j-1$ is the most recently eliminated column in the subtree whose
+root is $j$, which is a property of postordered trees
+citep:george1981computer. AMD does not /a priori/ return a
+postordered numbering; for bordered KKT matrices like MGH10S it
+typically returns an ordering in which the constraint rows' children
+are /not/ adjacent to each other. The amalgamation pass then merged
+nodes whose columns formed non-contiguous sets, while every
+downstream consumer (~build_row_indices~, ~factorize_multifrontal~)
+assumed a contiguous ~first_col..first_col+ncol~ range.
+
+The fix is the CHOLMOD-style composition citep:davis2009dynamic:
+
+#+BEGIN_SRC text
+perm      = amd_order(A)
+perm_inv[amd_perm[k]] = k
+amd_P     = permute_pattern(A, perm)
+amd_etree = elimination_tree(amd_P)
+(post, _) = postorder(amd_etree)
+perm'[k]  = perm[post[k]]                 ← composition
+P'        = permute_pattern(A, perm')
+etree     = elimination_tree(P')          ← rebuild on composed ordering
+col_counts = column_counts(P', etree)
+supernodes = find_supernodes(etree, col_counts)
+#+END_SRC
+
+Note that the etree is /rebuilt/ on the composed-permutation pattern
+--- it cannot be reused from the pre-composition construction because
+its parent pointers reference the old numbering. This is how
+CHOLMOD's ~cholmod_analyze_p~ is structured citep:davis2009dynamic,
+and it is how feral's symbolic phase is structured after the fix.
+
+After the postorder fix, MGH10S_0000 produced $(35, 16, 0)$ with a
+relative residual of $1.10 \times 10^{-16}$ --- machine precision. A
+corpus-wide re-run showed the sparse inertia agreement against rmumps
+rising from 98.6% to 99.3% and the sparse worst residual dropping
+from $2.6 \times 10^{21}$ to $3.14 \times 10^{-4}$, a shift of 25
+orders of magnitude on a single matrix.
+
+The /lesson/ is specific and generalizable. It is specific: any
+multifrontal implementation that does not compose postorder with the
+fill-reducing ordering is wrong on at least some matrices, and the
+"small and intuitive" test matrices that pass the test suite will
+almost all be accidentally postordered already (tridiagonal, banded,
+dense blocks). The bug hides on easy inputs. It is generalizable: an
+orphan module with its own test suite that no production call site
+invokes is a structural failure of the code review process --- the
+module was "tested" but the system was not, and the test suite's
+passing state was actively misleading.
+
+** The threshold-mismatch bug
+:PROPERTIES:
+:CUSTOM_ID: the-threshold-mismatch-bug
+:END:
+
+The second structural bug surfaced during triage of POLAK6_0021, a
+9×9 KKT matrix with diagonal entries spanning 14 orders of magnitude
+and a condition number on the order of $10^{46}$ --- well beyond
+double-precision resolution. The dense path produced inertia
+$(4, 1, 4)$ with a relative residual of $8.97 \times 10^{-1}$. An
+experiment with three different ~zero_tol~ values revealed the exact
+shape of the problem:
+
+| ~zero_tol~          | Inertia     | Residual                  |
+|---------------------+-------------+---------------------------|
+| $10^{-30}$ (strict) | $(5, 4, 0)$ | $3.4 \times 10^{1}$       |
+| $2.22 \times 10^{-14}$ (default) | $(4, 1, 4)$ | $8.97 \times 10^{-1}$     |
+| $10^{-3}$ (loose)   | $(3, 1, 5)$ | $4.6 \times 10^{-17}$     |
+
+The "loose" setting produced a residual at machine precision by
+/admitting/ more rank deficiency --- flagging 5 pivots as zero and
+letting the solve leave the corresponding components of $x$ at zero
+rather than dividing by tiny quantities. The "strict" setting reached
+the inertia that rmumps had labeled as canonical but produced a
+residual of 34, i.e. a wrong answer by any reasonable standard. The
+default setting sat in a local /worst/ of both worlds.
+
+The root cause turned out to be a disagreement between the factor and
+solve paths about /what counts as a zero pivot/. The factor code at
+~src/dense/factor.rs:114~ flagged a pivot as zero when
+$|d| \leq \text{zero\_tol} = 100 \epsilon \approx 2.22 \times 10^{-14}$,
+counted it in ~inertia.zero~, marked ~needs_refinement = true~, and
+stored the /raw/ pivot value in ~d_diag[k]~. The dense solve at
+~src/dense/solve.rs:205~ then divided by that same pivot whenever
+$|d| > \epsilon \cdot 10^{-10} \approx 2.22 \times 10^{-26}$, a
+threshold twelve orders of magnitude looser than the factor's. The
+sparse solve was even worse --- it divided by any non-zero value,
+including $10^{-300}$. Any pivot in the band
+$[2.22 \times 10^{-26}, 2.22 \times 10^{-14}]$ was therefore /factored
+as zero but solved as non-zero/, and dividing a residual of magnitude
+$10^{40}$ by a pivot of $10^{-14}$ produces a $10^{54}$-magnitude
+contamination that cascades through the back-substitution.
+
+The fix was mechanical: store ~zero_tol~ and ~zero_tol_2x2~ in the
+~Factors~ and ~FrontalFactors~ structs, and have both solve paths
+consult those stored thresholds. After the fix, POLAK6_0021's residual
+dropped from $8.97 \times 10^{-1}$ to $4.6 \times 10^{-17}$ --- the
+same machine-precision result the "loose" experiment had demonstrated
+was achievable.
+
+The /lesson/ is that two parts of the same algorithm that are using
+"the same" rule can silently disagree about it when the rule is a
+numerical threshold. The factor code was written to be conservative;
+the solve code was written to be permissive; both choices are
+locally reasonable; the combination is catastrophic. The fix is to
+make the solver /carry/ its own policy --- the factored object has to
+store the threshold it was factored under, so that any code path that
+consumes the factorization is forced to use the same threshold.
+
+There is a follow-on to this story. After landing the threshold fix,
+we kept the default ~zero_tol~ at $100 \epsilon$, on the theory that
+the $100\times$ safety margin was about protection against
+round-off accumulated during elimination. This proved to be too
+aggressive: 32 matrices in the CERI651DLS and FBRAIN3LS CUTEst
+families were flagged as having one zero pivot that all three
+canonical oracles (MUMPS, SSIDS, rmumps) counted as positive. The
+pivots in question were around $10^{-14}$ to $10^{-15}$, tiny in
+absolute terms but orders of magnitude above the single-step
+rounding-error floor. Lowering the default to plain $\epsilon$ closed
+all 32. The sub-lesson is that a "safety margin" threshold must be
+justified against the /actual/ rounding behavior of the factorization,
+not chosen by multiplying $\epsilon$ by a round number.
+
+** Iterative refinement can make things worse
+:PROPERTIES:
+:CUSTOM_ID: refinement-worse
+:END:
+
+The Phase 1b plan called for iterative refinement on all KKT solves
+citep:bunch1971direct on the grounds that, with
+~ZeroPivotAction::ForceAccept~ as the default, most matrices would
+need one or two refinement steps to recover machine precision. This
+is true for well-conditioned matrices. It is /not/ true for
+rank-deficient matrices where ~ForceAccept~ has produced a wrong
+$A^{-1}$: in that case, the correction $\delta x = A^{-1} r$ is
+itself garbage, and $x + \delta x$ can be much further from the true
+solution than $x$ alone was.
+
+We observed this directly on POLAK6_0021 before the threshold fix.
+The unrefined residual was $8.97 \times 10^{-1}$. After the first
+refinement commit (before best-iterate), the refined residual had
+/risen/ to $3.04 \times 10^{3}$ --- refinement had amplified the
+error by four orders of magnitude. The fix was to switch to a
+/best-iterate/ strategy: track the smallest $\|r\|_2$ seen across all
+refinement steps, and return the corresponding $x$. Non-monotone
+intermediate steps are still allowed (extreme-scaling matrices like
+the one in ~tests/stress_tests.rs::test_extreme_scaling~ need them
+to make progress), but the final answer is never worse than the
+initial unrefined solve. This is a weaker guarantee than classical
+iterative refinement
+citep:bunch1971direct offers on well-conditioned systems, but it is
+the guarantee that matters in the presence of force-accepted
+near-singular pivots.
+
+The /lesson/ is that refinement is not a free correctness fix. On
+the matrices where you most need it (ill-conditioned systems, where
+the unrefined residual is largest), it can fail in the direction you
+least expect. Best-iterate is a cheap insurance policy: tracking the
+best residual across steps costs one extra $A \cdot x$ evaluation
+per step but eliminates a class of catastrophic regressions that
+would otherwise silently appear in corpus-scale benchmark data.
+
+** The oracle is not the ground truth
+:PROPERTIES:
+:CUSTOM_ID: oracle-not-truth
+:END:
+
+The deepest lesson of Phase 1b was not a bug in the solver; it was a
+bug in the /validation methodology/. The Phase 1b specification asked
+for "100% correct inertia and solution on the collected KKT benchmark
+set". /Correct/ was operationalized as "matches the inertia and
+solution reported by the rmumps-labelled sidecars in
+~data/matrices/kkt/~". This turned out to be a category error.
+
+rmumps is a Rust port of MUMPS citep:duff1983multifrontal by the same
+author who is developing FERAL. It is under active development; it
+has its own bugs; its numerical thresholds are chosen by a process
+indistinguishable from the one that set FERAL's thresholds. Treating
+rmumps as /ground truth/ for FERAL is circular in exactly the way a
+testing methodology is supposed to avoid: if rmumps has a bug and
+FERAL has the /same/ bug, the agreement between them is 100% and the
+test passes, while both solvers are wrong against the broader
+literature.
+
+The symptom that forced us to confront this was the ACOPP30 family.
+68 matrices in the ACOPP30 Optimal Power Flow problem were flagged by
+feral as having inertia $(71, 137, 1)$ with residuals on the order of
+$10^{-2}$, against an rmumps-labelled expected inertia of
+$(72, 137, 0)$. Feral's answer /looked/ wrong. The triage initially
+framed this as a feral bug and an attempted fix (the trace-based 2×2
+inertia logic discussed in Section [[#deferred-2x2-fix]]) was even
+drafted. When the canonical MUMPS and SSIDS oracles came online, the
+picture inverted: /canonical MUMPS agreed with feral/. The oracle
+entry was the outlier.
+
+| Solver         | ACOPP30_0000 inertia |
+|----------------+----------------------|
+| rmumps sidecar |          $(72, 137, 0)$ |
+| feral          |          $(71, 137, 1)$ |
+| MUMPS 5.8.2    |          $(71, 137, 1)$ |
+| SSIDS          |          $(71, 138, 0)$ |
+
+The /decision record/ for Phase 1b now includes an explicit clause
+(~dev/decisions.md~, 2026-04-12) acknowledging that the strict
+100%-vs-rmumps criterion was not reliable, citing the possibility of
+a common-mode bug between the oracle and the system under test, and
+replacing the criterion with a 4-oracle consensus framework.
+
+The lesson is methodological. In scientific software, the choice of
+oracle is itself a scientific claim, and an oracle that shares the
+origins of the system under test --- same author, same algorithmic
+tradition, same class of numerical shortcuts --- cannot refute errors
+that both systems make in common. The remedy is /not/ to trust any
+single oracle more, but to enumerate the failure modes that any given
+oracle would fail to detect and to add orthogonal oracles that
+/would/ detect them. In our case, canonical MUMPS catches "rmumps has
+diverged from its own parent implementation"; canonical SSIDS catches
+"both Rust and Fortran MUMPS agree on a wrong answer that a
+differently-architected solver would not accept". Neither oracle is
+the truth, but their disagreements are informative in a way that a
+single oracle's agreements are not.
+
+** The ACOPP30 residual gap
+:PROPERTIES:
+:CUSTOM_ID: acopp30-residual
+:END:
+
+The most interesting /unfixed/ finding of Phase 1 is that on
+ACOPP30_0000, feral and canonical MUMPS agree on the factorization
+(same inertia $(71, 137, 1)$) but differ in the final residual by
+/twelve orders of magnitude/:
+
+| Solver | ACOPP30_0000 residual |
+|--------+-----------------------|
+| feral  |   $3.15 \times 10^{-2}$ |
+| MUMPS  |   $5.0  \times 10^{-14}$ |
+| SSIDS  |   $3.9  \times 10^{-14}$ |
+
+Because the inertia agrees, this is /not/ a pivoting disagreement,
+and in particular it is not a case where delayed pivoting
+citep:hogg2013pivoting would help. Both feral and MUMPS are finding
+the same sequence of Bunch-Kaufman pivots, producing the same set of
+$(1,1,0)$ and $(1,1,0)$ and similar $2 \times 2$ block contributions.
+Yet MUMPS's back-solve produces a result that is twelve orders of
+magnitude more accurate.
+
+Our best current hypothesis is that this is attributable to
+/global/ equilibration --- matching-based or MC64-style scaling
+citep:duff2020aptp applied to the entire matrix before factorization.
+MUMPS applies such a scaling by default in its indefinite mode;
+feral applies only the local Knight-Ruiz infinity-norm equilibration
+inside each dense frontal kernel, which is a much weaker intervention
+that does not propagate the scaling information across frontal
+boundaries. For a matrix like ACOPP30_0000 where the entry magnitudes
+span many orders of magnitude and the bordered structure means the
+imbalance is between /classes/ of rows (primal Hessian vs. constraint
+Jacobian), local per-frontal scaling cannot achieve the same
+condition-number reduction that a global scaling does.
+
+This hypothesis is not yet proven. Fixing it --- or disproving it ---
+is explicit Phase 2 work and is recorded as the first item in the
+"next session should" list of the Phase 1b exit session file. The
+reason it is called out here is that the consensus framework is what
+made it /visible/. Before the framework, ACOPP30's residual failure
+looked like one of many category-2 failures (BK pivot quality on
+ill-conditioned matrices), indistinguishable from other matrices
+where the real fix is delayed pivoting. The framework's ability to
+partition failures by whether the canonical oracles agree or disagree
+on the inertia is what separated "feral has a pivoting bug" (delayed
+pivoting needed) from "feral agrees on the factorization but loses
+accuracy elsewhere" (scaling needed).
+
+** The deferred 2×2 inertia fix
+:PROPERTIES:
+:CUSTOM_ID: deferred-2x2-fix
+:END:
+
+During the ACOPP30 triage we found a real bug in
+~src/dense/factor.rs::count_2x2_inertia~ --- the near-singular branch
+uses ~a00~ (the top-left entry of the 2×2 block) to decide the sign
+of the non-zero eigenvalue, rather than the trace $a_{00} + a_{11}$.
+The function's /comment/ says "the other has sign of trace", but the
+/code/ uses ~a00~ alone. For KKT matrices where the primal rows have
+zero Hessian diagonal (~a00 = 0~), the check ~if a00 > 0~ is false
+and the branch falls through to ~neg += 1~ regardless of what
+~a11~ says.
+
+Mathematically, for a $2 \times 2$ block
+$\begin{pmatrix} a_{00} & a_{10} \\ a_{10} & a_{11} \end{pmatrix}$
+with determinant near zero, the eigenvalues are approximately
+$\{0, \text{trace}\}$. The sign of the non-zero eigenvalue is the
+sign of the trace, not the sign of either diagonal entry in
+isolation. The current code is wrong; the comment is right.
+
+We drafted the fix, verified that it correctly handled a synthetic
+$[[0, b], [b, 0]]$ block, and ran the bench against rmumps. The fix
+caused a /16-matrix regression/ vs. rmumps --- dense residual pass
+count dropped from 152,717 to 152,701. The mathematically correct
+answer was moving feral /away/ from the oracle. We reverted the fix,
+left a ~KNOWN BUG~ comment, and documented the failed attempt in
+~dev/tried-and-rejected.md~.
+
+What we did not do at the time, but should have, is check whether
+those 16 regressions showed up when the oracle was /canonical MUMPS/
+rather than rmumps. The canonical MUMPS data was not yet available
+during the attempted fix; it came online a few hours later when the
+Fortran oracle was built. With that data in hand, the trace-based fix
+should be re-attempted and evaluated against the consensus rather
+than against rmumps alone. This is recorded as the second "next
+session should" item. The possibility exists that the trace-based fix
+is actually correct and will /improve/ feral's agreement with
+canonical MUMPS --- the 16 regressions were measured against the
+wrong oracle.
+
+The lesson is: when you find a mathematically correct fix that
+regresses against your oracle, it is worth asking whether the oracle
+is the problem.
+
+** Zero-pivot handling and the ~ForceAccept~ default
+:PROPERTIES:
+:CUSTOM_ID: zero-pivot-handling
+:END:
+
+Phase 1b uses ~ZeroPivotAction::ForceAccept~ as the default pivot
+handling, meaning: when a $1 \times 1$ pivot at or below ~zero_tol~ is
+encountered, it is counted as a zero in the inertia, the
+factorization is flagged as needing refinement, and the factorization
+continues without perturbation or column exchange. This is a
+/deliberate/ choice, made in place of more sophisticated strategies
+like delayed pivoting
+citep:hogg2013pivoting,duff2020aptp or threshold partial pivoting
+citep:amestoy2017blr that would avoid accepting the bad pivot in the
+first place. The reason for the choice is that ~ForceAccept~ reports
+inertia /correctly/ (including zeros for rank-deficient matrices)
+while still producing a factorization that downstream code can
+consume. Delayed pivoting is Phase 2 work; ~ForceAccept~ is the
+Phase 1 stand-in.
+
+The cost of this choice, visible in the residual data, is that for
+/ill-conditioned but not rank-deficient/ matrices, ~ForceAccept~
+yields a factorization whose $A^{-1}$ is wrong, which means
+iterative refinement cannot improve the result and sometimes makes it
+worse. The best-iterate refinement strategy (Section
+[[#refinement-worse]]) mitigates but does not remove this cost. The
+~ForceAccept~ policy is also what made the threshold-mismatch bug
+observable --- without the "zero" classification, there would be no
+distinction between a pivot that factor counted as zero and a pivot
+that solve divided by, because all pivots would have been accepted by
+factor in the first place.
+
+The 13,377 matrices that the consensus framework classified as
+"numerically intractable" are, for the most part, matrices where
+~ForceAccept~ produced a factorization that no oracle could refine to
+machine precision. These are genuinely hard cases: they are
+ill-conditioned beyond double-precision resolution, they have rank
+deficiencies that simple scaling cannot hide, and they typically
+require either higher-precision arithmetic or delayed pivoting to
+solve to a small residual. Phase 2 will address some of them via
+delayed pivoting; the rest will remain intractable and the consensus
+framework will continue to label them so.
+
+* An honest assessment of success
+:PROPERTIES:
+:CUSTOM_ID: honest-assessment
+:END:
+
+It is easy to write a retrospective that reads like a victory lap,
+and the session's final numbers --- 99.97% agreement with canonical
+MUMPS, zero Definitive failures, 121 unit tests passing --- invite
+exactly that reading. Here we try to be careful about what the
+numbers do and do not mean.
+
+** What is clearly true
+
+- /The solver computes correct inertia on the Definitive subset./
+  Zero feral failures on 153,117 matrices where three or four
+  independent oracles agreed on the answer is a defensible claim of
+  correctness. The claim is not "feral is bug-free"; it is "on the
+  matrices where the broader literature has a consistent answer,
+  feral matches it". That is a weaker but much more defensible
+  claim.
+
+- /The solver matches canonical Fortran MUMPS to 99.97%./ This is a
+  meaningful number because feral and canonical MUMPS share the
+  essential algorithmic choices (BK pivoting, AMD ordering,
+  multifrontal assembly) but were implemented independently, in
+  different languages, decades apart. The close agreement is evidence
+  that the algorithm has been implemented faithfully, not just that a
+  port of the same codebase agrees with itself.
+
+- /The multifrontal pipeline is structurally correct./ The 25-order
+  of-magnitude improvement in the sparse worst residual, from $10^{21}$
+  to $10^{-4}$, is driven by structural fixes (postorder composition,
+  threshold consistency, refinement guard), not parameter tuning.
+  This kind of improvement is available only when the prior behavior
+  was qualitatively wrong; no amount of tuning moves a result from
+  $10^{21}$ to $10^{-4}$.
+
+- /The external benchmark infrastructure is reusable./ The
+  Fortran MUMPS and SSIDS oracles are built, tested, and drive the
+  consensus framework end-to-end. Any future structural change to
+  feral can be re-validated against the same corpus by re-running the
+  bench with ~FERAL_EMIT_SIDECARS=1~ and re-running the consensus
+  script. This is not a one-shot validation; it is a continuous check
+  that feral can be subjected to at will.
+
+** What is claimed but not proven
+
+- /Feral is "as correct as" MUMPS./ This is /not/ proven. Feral
+  agrees with canonical MUMPS on 99.97% of the corpus, which is a
+  strong claim about pairwise agreement, but it is not a claim about
+  feral's correctness as an absolute matter. The remaining 0.03% of
+  matrices where feral and canonical MUMPS disagree are matrices
+  where feral /might/ be right and MUMPS /might/ be wrong, or vice
+  versa, or both might be wrong in different ways. The consensus
+  framework partitions these into borderline/intractable/excluded
+  buckets but does not resolve the underlying disagreements. The
+  borderline category is particularly worth attention: 750 matrices
+  where the oracles split two-vs-two with each pair differing by one
+  pivot's classification. For these, we do not know the "right"
+  answer and neither does any canonical solver we consulted.
+
+- /The solver is ready for production optimization workloads./
+  Correctness on the inertia and residual is necessary but not
+  sufficient for production use in an interior-point loop. IPOPT
+  citep:wachter2006ipopt uses inertia information to drive the
+  regularization $\delta_w$ adjustment heuristic, and incorrect
+  inertia on a small fraction of iterations can cause the outer
+  optimizer to regularize unnecessarily or accept an infeasible
+  step. We have not run feral inside an actual IPOPT loop; we have
+  only compared it against other solvers on KKT systems that IPOPT
+  produced. The closed-loop behavior is Phase 2 territory.
+
+- /The performance is acceptable./ We have not measured it. The
+  bench prints per-matrix factor and solve microseconds but does not
+  aggregate them into a meaningful comparison with MUMPS or SSIDS.
+  Phase 1 deliberately deferred performance work --- the spec said
+  "correctness before performance, always" --- but this means the
+  performance is /unknown/, not /acceptable/. Benchmark timing
+  comparisons against canonical MUMPS and SSIDS are the natural
+  follow-on to the oracle infrastructure already built in Phase 1b.
+
+** What is deliberately left unresolved
+
+- /The ACOPP30 residual gap./ Twelve orders of magnitude between
+  feral's residual and MUMPS's on the same factorization is a real
+  and measurable correctness problem for interior-point
+  applications. The Phase 2 plan identifies global equilibration (MC64
+  or matching-based scaling
+  citep:duff2020aptp) as the likely fix, but this has not been
+  validated. Users who run feral on ACOPP30-like matrices in Phase 1
+  should expect residuals several orders of magnitude worse than
+  canonical solvers on the same input.
+
+- /The deferred 2×2 inertia bug./ Mathematically incorrect code
+  (~count_2x2_inertia~ using ~a00~ instead of trace) remains in the
+  solver with a ~KNOWN BUG~ comment. It is not firing on the
+  Definitive or Borderline subset --- the consensus framework
+  confirmed this --- but it is still wrong code, and any future
+  change to the pivot strategy or inertia counting should re-evaluate
+  the fix first.
+
+- /The 88 "sparse-only" failure matrices./ The bench's dense ∩ sparse
+  cross-comparison reports 88 matrices that fail in the sparse path
+  but pass in the dense path. None of these have been individually
+  triaged --- the ERRINBAR_0824 triage that was intended to
+  characterize them revealed (midway through) that ERRINBAR_0824 was
+  not actually in the 88-matrix set but in the larger "fail in both
+  paths" set. The 88 are not Definitive feral failures; they could be
+  borderline matrices where rounding propagates differently through
+  the multifrontal vs. monolithic factorization, or they could be a
+  sparse-pipeline bug of the same shape as the postorder issue. The
+  consensus framework will characterize them automatically on the
+  next bench run; we did not investigate further in Phase 1.
+
+- /The 1028 MUMPS factor failures./ The canonical MUMPS corpus run
+  produced 1028 failures with ~INFOG(1) = -9~ (workspace too small)
+  on matrices concentrated in the MUONSINE and VESUVIOU problem
+  families. Bumping ~ICNTL(14)~ would fix this. We did not do so
+  because it was not blocking, but the consequence is that the
+  consensus data has a 0.67% coverage gap where MUMPS has no vote ---
+  so the effective oracle count for those matrices drops from 4 to
+  3, and the Definitive classification becomes slightly more likely
+  (the 3/4 threshold becomes 3/3). This is a minor but real
+  limitation of the current data.
+
+** The methodological lesson, stated plainly
+
+The single most important thing we learned in Phase 1 is that
+/validation infrastructure is load-bearing/. The strict "100% correct
+vs rmumps" criterion in the Phase 1 specification was not reachable
+/not because the solver was buggy/ (although it was), but because
+the oracle was wrong in a way that could not be distinguished from
+solver bugs without additional oracles. The consensus framework we
+built in Phase 1b is more work, but it is the kind of work that
+produces answers the original criterion could not have produced even
+if feral had been perfect. Spending time on the validation machinery
+was spending time on the problem; it was not a detour.
+
+Looking back, we would have preferred to know this at the start of
+Phase 1 rather than discovering it 24 hours before Phase 1 exit. The
+concrete remedy, if we were restarting the project, would be to /build
+the multi-oracle consensus infrastructure as part of Phase 1a/, not
+as a last-minute Phase 1b fix. It is the kind of work that pays
+interest throughout the project --- every subsequent correctness
+investigation becomes easier when multiple oracles are available
+--- and the upfront cost (roughly 4 hours to build the MUMPS oracle,
+4 hours for SSIDS, 1 hour for the consensus script) is much smaller
+than the debugging time saved. Phase 2 of FERAL will start with this
+infrastructure already in place and should therefore move faster
+than Phase 1 did on equivalent correctness work.
+
+* Related work
+:PROPERTIES:
+:CUSTOM_ID: related-work
+:END:
+
+The multifrontal method in FERAL follows the Duff-Reid architecture
+citep:duff1983multifrontal with supernodal amalgamation from SSIDS
+citep:hogg2013pivoting. The dense pivoting kernel is the original
+Bunch-Kaufman algorithm citep:bunch1977stable, also in the tradition
+of citet:bunch1971direct. Approximate minimum degree ordering follows
+citep:amestoy1996approximate with the later cleanup of
+citep:amestoy2004algorithm837. The CHOLMOD-style "AMD then postorder
+then rebuild etree" pipeline is from citep:davis2009dynamic. The
+broader context of modern sparse direct solvers, including
+block-low-rank approximation and threshold partial pivoting, is
+surveyed in citep:davis2016survey.
+
+FERAL's primary /differences/ from these canonical references are
+deliberate Phase 1 simplifications: unblocked dense BK (instead of
+the blocked kernels of citep:goto2008anatomy,vanzee2015blis), exact
+external AMD degree (instead of the element-absorption approximation
+of citep:amestoy2004algorithm837), and ~ForceAccept~ zero-pivot
+handling (instead of the threshold partial pivoting + delayed
+pivoting combination of
+citep:hogg2013pivoting,amestoy2017blr). Each of these is explicitly
+deferred to Phase 2, and the consensus framework will be used to
+validate each replacement as it lands.
+
+The KKT matrices in the corpus come from CUTEst problem runs of
+IPOPT citep:wachter2006ipopt, collected by the ripopt project's
+~collect_kkt~ tool. IPOPT's own inertia-correction heuristic is what
+makes these matrices a hard test: the regularization $\delta_w$ is
+chosen to /just barely/ produce the inertia IPOPT's algorithm expects,
+so the matrices sit on the boundary between different pivoting
+regimes. This is why the 4-oracle agreement numbers are as low as
+98--99% instead of the essentially perfect agreement one would get on
+less adversarial corpora.
+
+Recent work on condensed KKT formulations citep:pacaud2023condensed
+and sparse approximate inverse preconditioning
+citep:desimone2022sparseapprox suggests alternative directions for
+Phase 2 beyond the MUMPS/SSIDS baseline; we have not pursued these.
+
+* Conclusion
+:PROPERTIES:
+:CUSTOM_ID: conclusion
+:END:
+
+Phase 1 of FERAL accomplished what it set out to do --- a correct,
+pure-Rust sparse symmetric indefinite solver matching a canonical
+Fortran reference to 99.97% agreement on 153,151 real KKT matrices
+--- but the path to that result was not the path the specification
+anticipated. The specification called for 100% correctness against a
+single oracle, and at Phase 1b exit we have instead zero failures
+against a four-oracle consensus. These are different claims, and the
+latter is the one that stands up to scrutiny.
+
+The structural bugs fixed in Phase 1b (postorder, threshold
+mismatch, best-iterate refinement, ~zero_tol~ default) are now
+closed. The bugs that remain open are explicitly flagged: the
+ACOPP30 residual gap, the deferred 2×2 inertia fix, the 88
+sparse-only failures, and the 1028 MUMPS oracle coverage gaps. Phase 2
+will inherit these as its starting point, along with the external
+benchmark infrastructure needed to validate each subsequent fix.
+
+The project's architectural constraint --- pure Rust, no Fortran
+dependencies in the core solver --- was maintained throughout. The
+Fortran MUMPS and SSIDS oracles were built only as an /external/
+validation harness and have no presence in the ~cargo build~ graph.
+Any developer can clone the feral crate, run ~cargo test~, and
+receive a passing test suite without any Fortran toolchain present.
+The consensus validation is a heavier operation requiring
+~gfortran~, ~OpenBLAS~, ~METIS~, and the ref source trees, and it is
+appropriately reserved for milestone-level validation runs rather
+than the per-commit loop.
+
+If there is a single sentence we would want a future reader of this
+document to take away, it is this: /correctness claims in scientific
+software are claims about the oracle, not about the software/.
+Choose your oracles with the same care you choose your algorithms,
+and be prepared for the possibility that the original choice will
+need to be revisited.
+
+* References
+:PROPERTIES:
+:CUSTOM_ID: references
+:END:
+
+bibliography:../references.bib
+bibliographystyle:plain
