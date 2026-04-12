@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
-"""Run the native MUMPS oracle on a directory of KKT matrices.
+"""Run the native SPRAL/SSIDS oracle on a directory of KKT matrices.
 
-For each <id>.mtx in the input tree:
-  1. Read the matching <id>.json sidecar to get the RHS.
-  2. Write a temp <id>.rhs.txt with one f64 per line.
-  3. Add the matrix to a manifest passed to mumps_bench.
-After mumps_bench finishes, parse each output text file and write
-a canonical <id>.mumps.json sidecar next to the .mtx.
-
-Usage:
-    python3 run_mumps.py data/matrices/kkt
-    python3 run_mumps.py data/matrices/kkt --limit 10
-    python3 run_mumps.py data/matrices/kkt --skip-existing
+Mirror of run_mumps.py for the SSIDS oracle. Writes <id>.ssids.json
+sidecars in the same canonical schema. SSIDS requires
+OMP_CANCELLATION=true to be set in the environment.
 """
 from __future__ import annotations
 
@@ -25,7 +17,9 @@ import tempfile
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-MUMPS_BENCH = SCRIPT_DIR / "mumps_bench"
+SSIDS_BENCH = SCRIPT_DIR / "ssids_bench"
+SOLVER_NAME = "ssids"
+CANONICAL_SUFFIX = ".ssids.json"
 
 
 def find_matrices(root: Path) -> list[Path]:
@@ -78,19 +72,19 @@ def parse_output(path: Path) -> dict:
 
 
 def write_canonical(out_path: Path, name: str, raw: dict) -> None:
-    """Translate the mumps_bench plain-text output into the canonical
+    """Translate the ssids_bench plain-text output into the canonical
     JSON schema agreed in dev/plans/phase-1b-consensus-exit.md."""
     if raw.get("status") != "ok":
         canonical = {
-            "solver": "mumps-5.8.2",
-            "version": "5.8.2",
+            "solver": "ssids",
+            "version": "spral-2025.09.18",
             "matrix": name,
             "factorization_status": raw.get("status", "fail"),
         }
     else:
         canonical = {
-            "solver": "mumps-5.8.2",
-            "version": "5.8.2",
+            "solver": "ssids",
+            "version": "spral-2025.09.18",
             "matrix": name,
             "n": int(raw.get("n", 0)),
             "nnz": int(raw.get("nnz", 0)),
@@ -105,8 +99,9 @@ def write_canonical(out_path: Path, name: str, raw: dict) -> None:
             "residual_2norm_relative": float(raw.get("residual", "nan")),
             "factorization_status": "ok",
             "solver_info": {
-                "infog_1": int(raw.get("infog1", 0)),
-                "infog_28": int(raw.get("infog28", 0)),
+                "ssids_flag": int(raw.get("ssids_flag", 0)),
+                "matrix_rank": int(raw.get("matrix_rank", 0)),
+                "num_delay": int(raw.get("num_delay", 0)),
             },
         }
     out_path.write_text(json.dumps(canonical) + "\n")
@@ -119,12 +114,12 @@ def main() -> int:
                     help="process at most N matrices (for sanity checks)")
     ap.add_argument("--skip-existing", action="store_true",
                     help="skip matrices where .mumps.json already exists")
-    ap.add_argument("--mumps-bench", type=Path, default=MUMPS_BENCH,
-                    help="path to the mumps_bench binary")
+    ap.add_argument("--ssids-bench", type=Path, default=SSIDS_BENCH,
+                    help="path to the ssids_bench binary")
     args = ap.parse_args()
 
-    if not args.mumps_bench.exists():
-        print(f"error: {args.mumps_bench} not built. Run `make` in this directory.",
+    if not args.ssids_bench.exists():
+        print(f"error: {args.ssids_bench} not built. Run `make` in this directory.",
               file=sys.stderr)
         return 1
 
@@ -137,7 +132,7 @@ def main() -> int:
 
     print(f"found {len(matrices)} matrices", file=sys.stderr)
 
-    workdir = Path(tempfile.mkdtemp(prefix="mumps_bench_"))
+    workdir = Path(tempfile.mkdtemp(prefix="ssids_bench_"))
     manifest_path = workdir / "manifest.txt"
     rhs_paths: list[Path] = []
     out_paths: list[Path] = []
@@ -149,7 +144,7 @@ def main() -> int:
     with manifest_path.open("w") as manifest:
         for mtx in matrices:
             json_path = mtx.with_suffix(".json")
-            canon_path = mtx.with_suffix(".mumps.json")
+            canon_path = mtx.with_suffix(CANONICAL_SUFFIX)
             if args.skip_existing and canon_path.exists():
                 skipped += 1
                 continue
@@ -172,11 +167,14 @@ def main() -> int:
     if n_runs == 0:
         return 0
 
-    cmd = [str(args.mumps_bench), str(manifest_path)]
+    cmd = [str(args.ssids_bench), str(manifest_path)]
     print(f"running: {' '.join(cmd)}", file=sys.stderr)
-    rc = subprocess.call(cmd)
+    env = os.environ.copy()
+    env["OMP_CANCELLATION"] = "true"
+    env.setdefault("OMP_PROC_BIND", "false")
+    rc = subprocess.call(cmd, env=env)
     if rc != 0:
-        print(f"mumps_bench exited with {rc}", file=sys.stderr)
+        print(f"ssids_bench exited with {rc}", file=sys.stderr)
 
     n_ok = 0
     n_fail = 0

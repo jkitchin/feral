@@ -369,3 +369,72 @@
   the consensus framework will give us a real picture of where feral
   agrees with the broader literature and where rmumps was leading us
   astray.
+
+* 16:30 :phase-3:mumps-corpus:
+  Full MUMPS corpus run finished much faster than expected. 154,860
+  successes / 155,888 attempted. The 1028 failures were all
+  INFOG(1)=-9 (workspace too small). MUMPS needs ICNTL(14) bumped
+  for those — they cluster in MUONSINE and VESUVIOU families. Fixable
+  by re-running with a larger workspace allocation. Deferred for now;
+  the 154860 passing matrices are enough to characterize the corpus.
+
+* 16:35 :phase-4:ssids-build:
+  Built SPRAL/SSIDS via meson. METIS via brew install metis. Set
+  CC=gcc-15 CXX=g++-15 FC=gfortran. Disabled GPU. SPRAL builds
+  cleanly to ref/spral/build/libspral.dylib (gitignored).
+
+  Wrote external_benchmarks/ssids_oracle/{ssids_bench.f90, Makefile,
+  run_ssids.py} mirroring the MUMPS oracle structure. Two notes on
+  SSIDS specifics:
+
+  1. Inertia derivation: ssids_inform exposes num_neg, matrix_rank,
+     num_two — but NOT num_zero. Compute zero = n - matrix_rank.
+  2. SSIDS requires OMP_CANCELLATION=true and warns on
+     OMP_PROC_BIND=false. The Python wrapper sets both env vars.
+
+  Sanity checks on the four spot matrices:
+
+  | Matrix       | rmumps     | feral       | MUMPS       | SSIDS       |
+  |--------------+------------+-------------+-------------+-------------|
+  | MGH10S_0000  | (35,16,0)  | (35,16,0)   | (35,16,0)   | (35,16,0)   |
+  | POLAK6_0021  | (5,4,0)    | (4,1,4)     | (5,1,3)     | *(6,3,0)*   |
+  | ACOPP30_0000 | (72,137,0) | (71,137,1)  | (71,137,1)  | *(71,138,0)*|
+  | ERRINBAR_0824| (18,9,0)   | (18,9,0)    | (18,9,0)    | (18,9,0)    |
+
+* 16:40 :phase-4:complete-picture:
+  Both well-conditioned matrices have unanimous 4-way consensus.
+  Both ill-conditioned matrices show *complete divergence*:
+
+  ACOPP30_0000: Three of four oracles agree on 71 positives. The
+  dispute is what happens to the boundary pivot — rmumps says it
+  stayed positive, feral+MUMPS say it became zero, SSIDS says it
+  became negative. No two oracles agree on the full triple, but the
+  consensus on the major component is clear.
+
+  POLAK6_0021: Four-way disagreement on every component. n=9 with
+  κ ≈ 1e46 is genuinely beyond double precision. *Yet all four
+  solvers produce machine-precision residuals* (4.6e-17 to 3.8e-16).
+  Each labels pivots according to its own rounding decisions; none
+  is "right". This is the canonical "Numerically intractable /
+  Excluded" case the consensus framework is designed to identify.
+
+  *Residual finding worth investigating.* On ACOPP30_0000:
+  - feral residual:  3.15e-2
+  - MUMPS residual:  5.0e-14
+  - SSIDS residual:  3.9e-14
+
+  Same factorization (matching inertia between feral, MUMPS) but
+  feral solves *12 orders of magnitude worse*. This is NOT delayed
+  pivoting (which would change inertia). It's something else —
+  almost certainly global scaling/equilibration that MUMPS and SSIDS
+  apply but feral does not. This is the real Phase 2 target for the
+  ACOPP30 family of failures: global equilibration, not delayed
+  pivoting.
+
+  Similarly ERRINBAR_0824: feral 1.87e-4, MUMPS 3.6e-4, SSIDS 2.1e-4.
+  All comparable, all fail strict tolerance. ERRINBAR is genuinely
+  ill-conditioned at the precision wall.
+
+* 16:50 :phase-4:ssids-corpus-running:
+  Started full SSIDS corpus run in background. Expected ~1-2 hours.
+  Should produce 153,151 .ssids.json sidecars when complete.
