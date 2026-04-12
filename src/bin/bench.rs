@@ -2,11 +2,10 @@ use std::path::Path;
 use std::time::Instant;
 
 use feral::{
-    factor, read_mtx, read_sidecar, solve, BunchKaufmanParams, CscMatrix, Inertia, KktSidecar,
-    SymmetricMatrix, ZeroPivotAction,
+    factor, read_mtx, read_sidecar, solve, solve_refined, solve_sparse_refined, BunchKaufmanParams,
+    CscMatrix, Inertia, KktSidecar, SymmetricMatrix, ZeroPivotAction,
 };
 use feral::numeric::factorize::factorize_multifrontal;
-use feral::numeric::solve::solve_sparse;
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 
 /// Simple deterministic PRNG for benchmark matrix generation.
@@ -344,7 +343,10 @@ fn main() {
         // Solve with sidecar RHS (guaranteed finite by load_kkt_dir filter)
         let rhs = entry.sidecar.finite_rhs().unwrap();
         let t1 = Instant::now();
-        let x = match solve(&factors, &rhs) {
+        // Phase 1b solve convention (FERAL-PROJECT-SPEC.md §1709): use
+        // solve_refined for all KKT solves to recover machine precision on
+        // matrices flagged with needs_refinement under ForceAccept.
+        let x = match solve_refined(&entry.matrix, &factors, &rhs) {
             Ok(x) => x,
             Err(e) => {
                 eprintln!("  {}: solve failed: {}", entry.name, e);
@@ -481,7 +483,7 @@ fn main() {
             Some(r) => r,
             None => continue,
         };
-        let x = match solve_sparse(&sp_factors, &rhs) {
+        let x = match solve_sparse_refined(&entry.csc, &sp_factors, &rhs) {
             Ok(x) => x,
             Err(e) => {
                 eprintln!("  {}: sparse solve failed: {}", entry.name, e);

@@ -1,5 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 use crate::error::FeralError;
+use crate::sparse::csc::CscMatrix;
 use super::factorize::SparseFactors;
 
 /// Solve A·x = b using the sparse multifrontal factorization.
@@ -145,6 +146,69 @@ pub fn solve_sparse(
     }
 
     Ok(x)
+}
+
+/// Solve A·x = rhs using the sparse factorization with iterative refinement.
+///
+/// Mirrors `crate::dense::solve::solve_refined` for the multifrontal path.
+/// Per FERAL-PROJECT-SPEC.md §1709, this is the Phase 1b solve convention:
+/// because `ZeroPivotAction::ForceAccept` is the default, an unrefined solve
+/// can leave a non-trivial residual on near-singular pivots, and refinement
+/// recovers machine precision in 0–3 steps for well-conditioned matrices.
+///
+/// Convergence test: stop when `||δx||₂ / ||x||₂ < ε·√n` or after 3 steps.
+pub fn solve_sparse_refined(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+) -> Result<Vec<f64>, FeralError> {
+    let n = factors.n;
+    if rhs.len() != n {
+        return Err(FeralError::DimensionMismatch {
+            expected: n,
+            got: rhs.len(),
+        });
+    }
+
+    let mut x = solve_sparse(factors, rhs)?;
+
+    let max_steps = 3;
+    let n_sqrt = (n as f64).sqrt();
+    let threshold = f64::EPSILON * n_sqrt;
+
+    for _ in 0..max_steps {
+        // Residual: r = b - A·x
+        let mut ax = vec![0.0; n];
+        matrix.symv(&x, &mut ax);
+        let mut r = vec![0.0; n];
+        for i in 0..n {
+            r[i] = rhs[i] - ax[i];
+        }
+
+        // Correction: δx = A⁻¹·r
+        let dx = solve_sparse(factors, &r)?;
+
+        let dx_norm = norm2(&dx);
+        let x_norm = norm2(&x);
+
+        for i in 0..n {
+            x[i] += dx[i];
+        }
+
+        if x_norm > 0.0 {
+            if dx_norm / x_norm < threshold {
+                break;
+            }
+        } else if dx_norm < threshold {
+            break;
+        }
+    }
+
+    Ok(x)
+}
+
+fn norm2(v: &[f64]) -> f64 {
+    v.iter().map(|x| x * x).sum::<f64>().sqrt()
 }
 
 #[cfg(test)]

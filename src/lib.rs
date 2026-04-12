@@ -15,4 +15,5 @@ pub use error::FeralError;
 pub use inertia::Inertia;
 pub use io::mtx::{parse_mtx, read_mtx, MtxMatrix};
 pub use io::sidecar::{read_sidecar, KktSidecar, SidecarInertia};
+pub use numeric::solve::solve_sparse_refined;
 pub use sparse::csc::{CscMatrix, CscPattern};
