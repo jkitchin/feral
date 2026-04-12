@@ -327,10 +327,14 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
                 }
             };
 
-            // Skip matrices too large for the dense solver (Phase 1a)
-            if mtx.n > 500 {
-                continue;
-            }
+            // Phase 1a hard-coded a `mtx.n > 500` skip here. Phase 2
+            // lifts it: the sparse multifrontal path has no reason to
+            // skip larger matrices, and the Phase 1b validation that
+            // never ran on n > 500 is the #1 known scope gap
+            // (see dev/plans/phase-2-planning.md §2.1.1). Dense BK is
+            // still O(n^3) and painful above a few thousand, so the
+            // dense loop below has its own inline cutoff — but this
+            // load-time filter is gone.
 
             let sidecar = match read_sidecar(&json_path) {
                 Ok(s) => s,
@@ -453,10 +457,24 @@ fn main() {
 
     let emit_sidecars = std::env::var("FERAL_EMIT_SIDECARS").is_ok();
 
+    // Dense BK is O(n^3). Above ~1000 it starts to dominate bench runtime
+    // (a single n=5314 problem is ~150 GFLOPs scalar-unblocked). The sparse
+    // loop below has no such cutoff. FERAL_DENSE_MAX overrides the default.
+    let dense_max: usize = std::env::var("FERAL_DENSE_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+    let mut n_dense_skipped_large = 0usize;
+
     for entry in &kkt_entries {
         n_total += 1;
         let n = entry.matrix.n;
         let nnz = entry.csc.values.len();
+
+        if n > dense_max {
+            n_dense_skipped_large += 1;
+            continue;
+        }
 
         // Factor
         let t0 = Instant::now();
@@ -554,18 +572,22 @@ fn main() {
     }
 
     // Summary
-    println!("\nKKT summary: {}/{} total", n_total, n_total);
+    let n_dense_ran = n_total - n_dense_skipped_large;
+    println!(
+        "\nKKT summary: {} matrices ({} dense-eligible n <= {}, {} skipped n > {})",
+        n_total, n_dense_ran, dense_max, n_dense_skipped_large, dense_max
+    );
     println!(
         "  Inertia match: {}/{} ({:.1}%)",
         n_inertia_pass,
-        n_total,
-        100.0 * n_inertia_pass as f64 / n_total.max(1) as f64
+        n_dense_ran,
+        100.0 * n_inertia_pass as f64 / n_dense_ran.max(1) as f64
     );
     println!(
         "  Residual pass: {}/{} ({:.1}%)",
         n_residual_pass,
-        n_total,
-        100.0 * n_residual_pass as f64 / n_total.max(1) as f64
+        n_dense_ran,
+        100.0 * n_residual_pass as f64 / n_dense_ran.max(1) as f64
     );
     if n_factor_fail > 0 {
         println!("  Factor failures: {}", n_factor_fail);
