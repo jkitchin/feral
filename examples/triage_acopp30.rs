@@ -90,7 +90,11 @@ fn main() {
     println!(
         "inertia: {} ({})",
         dinertia,
-        if dinertia == expected { "MATCH" } else { "MISMATCH" }
+        if dinertia == expected {
+            "MATCH"
+        } else {
+            "MISMATCH"
+        }
     );
     println!("needs_refinement: {}", dfac.needs_refinement);
     println!("zero_tol: {:.3e}", dfac.zero_tol);
@@ -118,7 +122,10 @@ fn main() {
         .map(|d| d.abs())
         .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .unwrap();
-    println!("\nD pivot magnitude range: [{:.3e}, {:.3e}]", smallest, largest);
+    println!(
+        "\nD pivot magnitude range: [{:.3e}, {:.3e}]",
+        smallest, largest
+    );
 
     let dxr = solve_refined(&dense_mat, &dfac, &rhs).expect("dense solve_refined");
     println!("refined rel_res = {:.3e}", rel_residual(&csc, &dxr, &rhs));
@@ -134,7 +141,15 @@ fn main() {
         ..BunchKaufmanParams::default()
     };
     let (sfac, sinertia) = factor(&dense_mat, &strict).expect("strict factor");
-    println!("inertia: {} ({})", sinertia, if sinertia == expected { "MATCH" } else { "MISMATCH" });
+    println!(
+        "inertia: {} ({})",
+        sinertia,
+        if sinertia == expected {
+            "MATCH"
+        } else {
+            "MISMATCH"
+        }
+    );
     let sxr = solve_refined(&dense_mat, &sfac, &rhs).expect("strict solve");
     println!("refined rel_res = {:.3e}", rel_residual(&csc, &sxr, &rhs));
 
@@ -145,7 +160,15 @@ fn main() {
         ..BunchKaufmanParams::default()
     };
     let (lfac, linertia) = factor(&dense_mat, &loose).expect("loose factor");
-    println!("inertia: {} ({})", linertia, if linertia == expected { "MATCH" } else { "MISMATCH" });
+    println!(
+        "inertia: {} ({})",
+        linertia,
+        if linertia == expected {
+            "MATCH"
+        } else {
+            "MISMATCH"
+        }
+    );
     let lxr = solve_refined(&dense_mat, &lfac, &rhs).expect("loose solve");
     println!("refined rel_res = {:.3e}", rel_residual(&csc, &lxr, &rhs));
 
@@ -156,7 +179,15 @@ fn main() {
         ..BunchKaufmanParams::default()
     };
     let (afac, ainertia) = factor(&dense_mat, &alphalow).expect("alpha factor");
-    println!("inertia: {} ({})", ainertia, if ainertia == expected { "MATCH" } else { "MISMATCH" });
+    println!(
+        "inertia: {} ({})",
+        ainertia,
+        if ainertia == expected {
+            "MATCH"
+        } else {
+            "MISMATCH"
+        }
+    );
     let axr = solve_refined(&dense_mat, &afac, &rhs).expect("alpha solve");
     println!("refined rel_res = {:.3e}", rel_residual(&csc, &axr, &rhs));
 }

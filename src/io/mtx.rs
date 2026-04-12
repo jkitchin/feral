@@ -64,8 +64,8 @@ pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix, FeralError> 
         break;
     }
 
-    let (size_line_no, size_text) = size_line
-        .ok_or_else(|| FeralError::IoError(format!("{}: missing size line", source)))?;
+    let (size_line_no, size_text) =
+        size_line.ok_or_else(|| FeralError::IoError(format!("{}: missing size line", source)))?;
 
     // Parse "rows cols nnz"
     let parts: Vec<&str> = size_text.split_whitespace().collect();

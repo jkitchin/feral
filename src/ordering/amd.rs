@@ -120,7 +120,11 @@ pub fn permute_pattern(pattern: &CscPattern, perm: &[usize]) -> CscPattern {
     }
     let row_idx: Vec<usize> = entries.into_iter().flatten().collect();
 
-    CscPattern { n, col_ptr, row_idx }
+    CscPattern {
+        n,
+        col_ptr,
+        row_idx,
+    }
 }
 
 #[cfg(test)]
@@ -183,13 +187,7 @@ mod tests {
     #[test]
     fn test_amd_diagonal_matrix() {
         // Diagonal matrix: all degrees are 0, any ordering is optimal
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 2, 3],
-            &[0, 1, 2, 3],
-            &[1.0; 4],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(4, &[0, 1, 2, 3], &[0, 1, 2, 3], &[1.0; 4]).unwrap();
         let pat = m.symmetric_pattern();
         let perm = amd_order(&pat);
         assert_eq!(perm.len(), 4);
@@ -293,11 +291,8 @@ mod tests {
 
         for j in 0..n {
             eliminated[j] = true;
-            let neighbors: Vec<usize> = adj[j]
-                .iter()
-                .copied()
-                .filter(|&i| !eliminated[i])
-                .collect();
+            let neighbors: Vec<usize> =
+                adj[j].iter().copied().filter(|&i| !eliminated[i]).collect();
 
             for a in 0..neighbors.len() {
                 for b in (a + 1)..neighbors.len() {

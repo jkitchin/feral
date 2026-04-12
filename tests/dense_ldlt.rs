@@ -489,4 +489,3 @@ fn test_kkt_5x2() {
     let x = solve(&factors, &rhs).ok().expect("solve failed");
     verify_solve(&mat, &x, &rhs, 1e-4);
 }
-

@@ -65,13 +65,9 @@ mod tests {
     #[test]
     fn test_postorder_tridiagonal() {
         // Chain: 0→1→2→3. Postorder should be [0, 1, 2, 3].
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 1, 2, 2, 3, 3],
-            &[0, 0, 1, 1, 2, 2, 3],
-            &[1.0; 7],
-        )
-        .unwrap();
+        let m =
+            CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
+                .unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let (order, inv) = postorder(&etree);
@@ -120,13 +116,7 @@ mod tests {
     #[test]
     fn test_postorder_diagonal() {
         // Forest of singletons: any order is a valid postorder
-        let m = CscMatrix::from_triplets(
-            3,
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[1.0; 3],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0; 3]).unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let (order, _) = postorder(&etree);
@@ -139,13 +129,9 @@ mod tests {
 
     #[test]
     fn test_postorder_inverse_roundtrip() {
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 1, 2, 2, 3, 3],
-            &[0, 0, 1, 1, 2, 2, 3],
-            &[1.0; 7],
-        )
-        .unwrap();
+        let m =
+            CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
+                .unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let (order, inv) = postorder(&etree);

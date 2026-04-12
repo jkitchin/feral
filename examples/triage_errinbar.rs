@@ -88,7 +88,11 @@ fn main() {
     println!(
         "inertia: {} ({})",
         dinertia,
-        if dinertia == expected { "MATCH" } else { "MISMATCH" }
+        if dinertia == expected {
+            "MATCH"
+        } else {
+            "MISMATCH"
+        }
     );
     println!("needs_refinement: {}", dfac.needs_refinement);
     let dxr = solve_refined(&dense_mat, &dfac, &rhs).expect("dense solve_refined");
@@ -106,7 +110,11 @@ fn main() {
         "n_supernodes = {}, inertia = {} ({})",
         sym_d.supernodes.len(),
         sinertia_d,
-        if sinertia_d == expected { "MATCH" } else { "MISMATCH" }
+        if sinertia_d == expected {
+            "MATCH"
+        } else {
+            "MISMATCH"
+        }
     );
     println!("supernodes:");
     for (i, snode) in sym_d.supernodes.iter().enumerate() {
@@ -130,7 +138,11 @@ fn main() {
         "n_supernodes = {}, inertia = {} ({})",
         sym_o.supernodes.len(),
         sinertia_o,
-        if sinertia_o == expected { "MATCH" } else { "MISMATCH" }
+        if sinertia_o == expected {
+            "MATCH"
+        } else {
+            "MISMATCH"
+        }
     );
     let sx_o = solve_sparse(&sfac_o, &rhs).expect("solve_sparse");
     let sxr_o = solve_sparse_refined(&csc, &sfac_o, &rhs).expect("solve_sparse_refined");
@@ -147,7 +159,11 @@ fn main() {
         "n_supernodes = {}, inertia = {} ({})",
         sym_n.supernodes.len(),
         sinertia_n,
-        if sinertia_n == expected { "MATCH" } else { "MISMATCH" }
+        if sinertia_n == expected {
+            "MATCH"
+        } else {
+            "MISMATCH"
+        }
     );
     let sx_n = solve_sparse(&sfac_n, &rhs).expect("solve_sparse");
     let sxr_n = solve_sparse_refined(&csc, &sfac_n, &rhs).expect("solve_sparse_refined");
@@ -173,13 +189,7 @@ fn main() {
         "max |x_dense - x_sparse| = {:.3e} at idx {}",
         max_diff, max_diff_idx
     );
-    println!(
-        "  x_dense[{}] = {:.6e}",
-        max_diff_idx, dxr[max_diff_idx]
-    );
-    println!(
-        "  x_sparse[{}] = {:.6e}",
-        max_diff_idx, sxr_o[max_diff_idx]
-    );
+    println!("  x_dense[{}] = {:.6e}", max_diff_idx, dxr[max_diff_idx]);
+    println!("  x_sparse[{}] = {:.6e}", max_diff_idx, sxr_o[max_diff_idx]);
     println!("  rel diff = {:.3e}", max_diff / max_dense.max(1e-300));
 }

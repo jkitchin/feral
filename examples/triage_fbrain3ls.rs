@@ -25,9 +25,16 @@ fn main() {
         ..BunchKaufmanParams::default()
     };
     let (dfac, dinertia) = factor(&dense_mat, &params).expect("factor");
-    println!("\nDefault: inertia = {} zero_tol = {:.3e}", dinertia, dfac.zero_tol);
+    println!(
+        "\nDefault: inertia = {} zero_tol = {:.3e}",
+        dinertia, dfac.zero_tol
+    );
     for i in 0..n {
-        let m = if dfac.d_subdiag[i] != 0.0 { "2x2" } else { "1x1" };
+        let m = if dfac.d_subdiag[i] != 0.0 {
+            "2x2"
+        } else {
+            "1x1"
+        };
         println!(
             "  D[{}] = {:+.6e}  subdiag={:+.3e}  [{}]",
             i, dfac.d_diag[i], dfac.d_subdiag[i], m
@@ -41,6 +48,13 @@ fn main() {
         ..BunchKaufmanParams::default()
     };
     let (_, sinertia) = factor(&dense_mat, &strict).expect("strict");
-    println!("\nWith zero_tol = eps: {} ({})",
-        sinertia, if sinertia == expected { "MATCH" } else { "MISMATCH" });
+    println!(
+        "\nWith zero_tol = eps: {} ({})",
+        sinertia,
+        if sinertia == expected {
+            "MATCH"
+        } else {
+            "MISMATCH"
+        }
+    );
 }

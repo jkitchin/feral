@@ -155,9 +155,7 @@ impl CscMatrix {
             ));
         }
         if self.col_ptr[self.n] != self.row_idx.len() {
-            return Err(FeralError::InvalidInput(
-                "col_ptr[n] != nnz".to_string(),
-            ));
+            return Err(FeralError::InvalidInput("col_ptr[n] != nnz".to_string()));
         }
         for j in 0..self.n {
             let start = self.col_ptr[j];
@@ -298,13 +296,7 @@ mod tests {
 
     #[test]
     fn test_from_triplets_duplicate_summing() {
-        let m = CscMatrix::from_triplets(
-            2,
-            &[0, 0, 1],
-            &[0, 0, 1],
-            &[1.0, 2.0, 3.0],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(2, &[0, 0, 1], &[0, 0, 1], &[1.0, 2.0, 3.0]).unwrap();
         assert_eq!(m.nnz(), 2);
         assert_eq!(m.values[0], 3.0); // 1.0 + 2.0
         assert_eq!(m.values[1], 3.0);
@@ -362,13 +354,7 @@ mod tests {
 
     #[test]
     fn test_diagonal_matrix() {
-        let m = CscMatrix::from_triplets(
-            3,
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[1.0, 2.0, 3.0],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 2.0, 3.0]).unwrap();
         assert_eq!(m.nnz(), 3);
         let pat = m.symmetric_pattern();
         assert_eq!(pat.col_ptr[3], 3); // no off-diagonal, so 3 entries total

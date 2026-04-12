@@ -7,9 +7,7 @@
 use feral::numeric::factorize::factorize_multifrontal;
 use feral::numeric::solve::{solve_sparse, solve_sparse_refined};
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{
-    factor, solve_refined, BunchKaufmanParams, CscMatrix, ZeroPivotAction,
-};
+use feral::{factor, solve_refined, BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 
 fn ldlt_params() -> BunchKaufmanParams {
     BunchKaufmanParams {
@@ -84,7 +82,9 @@ fn solve_sparse_refined_improves_residual_on_ill_conditioned() {
         6,
         &[0, 4, 1, 5, 2, 4, 3, 5, 4, 5],
         &[0, 0, 1, 1, 2, 2, 3, 3, 4, 5],
-        &[100.0, -1.0, 100.0, -1.0, 1e-12, 1.0, 1e-12, 1.0, -1e-10, -1e-10],
+        &[
+            100.0, -1.0, 100.0, -1.0, 1e-12, 1.0, 1e-12, 1.0, -1e-10, -1e-10,
+        ],
     )
     .unwrap();
     let rhs = vec![1.0, 2.0, 0.0, 0.0, -50.0, -75.0];
@@ -119,13 +119,7 @@ fn solve_sparse_refined_improves_residual_on_ill_conditioned() {
 fn solve_sparse_refined_well_conditioned_no_change() {
     // SPD diagonal: refinement should converge in 0 steps and the answer
     // should equal the unrefined solve to machine precision.
-    let csc = CscMatrix::from_triplets(
-        3,
-        &[0, 1, 2],
-        &[0, 1, 2],
-        &[2.0, 3.0, 5.0],
-    )
-    .unwrap();
+    let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
     let rhs = vec![4.0, 9.0, 25.0];
 
     let sym = symbolic_factorize(&csc, &SupernodeParams::default()).expect("symbolic");
@@ -163,13 +157,8 @@ fn solve_sparse_refined_residual_monotone_on_singular_matrix() {
     //
     // The (0,0) pivot is essentially zero. ForceAccept ignores it; the
     // resulting "factorization" is unable to faithfully represent A⁻¹.
-    let csc = CscMatrix::from_triplets(
-        3,
-        &[0, 2, 1, 2],
-        &[0, 0, 1, 2],
-        &[1e-16, 1.0, 1.0, 0.0],
-    )
-    .unwrap();
+    let csc =
+        CscMatrix::from_triplets(3, &[0, 2, 1, 2], &[0, 0, 1, 2], &[1e-16, 1.0, 1.0, 0.0]).unwrap();
     let rhs = vec![1.0, 2.0, 3.0];
 
     let sym = symbolic_factorize(&csc, &SupernodeParams::default()).expect("symbolic");
@@ -194,13 +183,7 @@ fn solve_sparse_refined_residual_monotone_on_singular_matrix() {
 
 #[test]
 fn solve_sparse_refined_dimension_mismatch_returns_error() {
-    let csc = CscMatrix::from_triplets(
-        3,
-        &[0, 1, 2],
-        &[0, 1, 2],
-        &[1.0, 1.0, 1.0],
-    )
-    .unwrap();
+    let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0]).unwrap();
     let sym = symbolic_factorize(&csc, &SupernodeParams::default()).unwrap();
     let (sfac, _) = factorize_multifrontal(&csc, &sym, &ldlt_params()).unwrap();
     let rhs = vec![1.0, 2.0]; // wrong length

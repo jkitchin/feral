@@ -2,12 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
+use feral::numeric::factorize::factorize_multifrontal;
+use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{
     factor, read_mtx, read_sidecar, solve, solve_refined, solve_sparse_refined, BunchKaufmanParams,
     CscMatrix, Inertia, KktSidecar, SymmetricMatrix, ZeroPivotAction,
 };
-use feral::numeric::factorize::factorize_multifrontal;
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
 
 /// A KKT matrix that failed inertia or residual on a given solver path.
 #[derive(Clone)]
@@ -38,7 +38,11 @@ fn print_failure_analysis(label: &str, failures: &[Failure]) {
         println!("\n{} failure analysis: no failures", label);
         return;
     }
-    println!("\n--- {} failure analysis ({} failures) ---", label, failures.len());
+    println!(
+        "\n--- {} failure analysis ({} failures) ---",
+        label,
+        failures.len()
+    );
 
     // Group by problem family
     let mut by_family: HashMap<&str, (usize, usize, f64, usize)> = HashMap::new();
@@ -76,7 +80,11 @@ fn print_failure_analysis(label: &str, failures: &[Failure]) {
 
     // Top 20 worst by residual
     let mut by_residual: Vec<&Failure> = failures.iter().collect();
-    by_residual.sort_by(|a, b| b.residual.partial_cmp(&a.residual).unwrap_or(std::cmp::Ordering::Equal));
+    by_residual.sort_by(|a, b| {
+        b.residual
+            .partial_cmp(&a.residual)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     println!("\nTop 15 worst residuals:");
     println!(
@@ -295,11 +303,7 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
         let mut mtx_files: Vec<_> = match std::fs::read_dir(&subdir_path) {
             Ok(d) => d
                 .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .is_some_and(|ext| ext == "mtx")
-                })
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "mtx"))
                 .collect(),
             Err(_) => continue,
         };
@@ -434,9 +438,7 @@ fn main() {
 
     let kkt_entries = load_kkt_dir(kkt_dir);
     if kkt_entries.is_empty() {
-        println!(
-            "not found (run collect_kkt from ripopt to generate)"
-        );
+        println!("not found (run collect_kkt from ripopt to generate)");
         return;
     }
     println!("{} matrices loaded", kkt_entries.len());
@@ -695,10 +697,7 @@ fn main() {
     if sp_solve_fail > 0 {
         println!("  Solve failures: {}", sp_solve_fail);
     }
-    println!(
-        "  Worst residual: {:.2e} ({})",
-        sp_worst_res, sp_worst_name
-    );
+    println!("  Worst residual: {:.2e} ({})", sp_worst_res, sp_worst_name);
 
     // ============ Failure analysis ============
     print_failure_analysis("Dense", &dense_failures);

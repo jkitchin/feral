@@ -1,12 +1,12 @@
 use std::path::Path;
 
+use feral::numeric::factorize::factorize_multifrontal;
+use feral::numeric::solve::solve_sparse;
+use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{
     factor, read_mtx, read_sidecar, solve, solve_refined, BunchKaufmanParams, Inertia,
     ZeroPivotAction,
 };
-use feral::numeric::factorize::factorize_multifrontal;
-use feral::numeric::solve::solve_sparse;
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
 
 fn rel_residual(a: &feral::CscMatrix, x: &[f64], b: &[f64]) -> f64 {
     let n = a.n;
@@ -66,7 +66,10 @@ fn main() {
     );
     println!("dense needs_refinement = {}", dfac.needs_refinement);
     let dx = solve(&dfac, &rhs).expect("dense solve");
-    println!("dense solve  rel_res = {:.3e}", rel_residual(&csc, &dx, &rhs));
+    println!(
+        "dense solve  rel_res = {:.3e}",
+        rel_residual(&csc, &dx, &rhs)
+    );
     let dxr = solve_refined(&dense_mat, &dfac, &rhs).expect("dense solve_refined");
     println!(
         "dense refined rel_res = {:.3e}",
@@ -101,7 +104,10 @@ fn main() {
         );
     }
     let sx = solve_sparse(&sfac, &rhs).expect("sparse solve");
-    println!("sparse solve rel_res = {:.3e}", rel_residual(&csc, &sx, &rhs));
+    println!(
+        "sparse solve rel_res = {:.3e}",
+        rel_residual(&csc, &sx, &rhs)
+    );
 
     // Component-wise comparison of dense and sparse solutions
     let mut max_diff = 0.0f64;

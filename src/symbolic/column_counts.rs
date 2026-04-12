@@ -81,13 +81,7 @@ mod tests {
     #[test]
     fn test_column_counts_diagonal() {
         // Diagonal matrix: each column of L has exactly 1 nonzero (the diagonal)
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 2, 3],
-            &[0, 1, 2, 3],
-            &[1.0; 4],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(4, &[0, 1, 2, 3], &[0, 1, 2, 3], &[1.0; 4]).unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
@@ -103,13 +97,9 @@ mod tests {
         // Column 1: rows 1, 2 → count = 2
         // Column 2: rows 2, 3 → count = 2
         // Column 3: row 3      → count = 1
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 1, 2, 2, 3, 3],
-            &[0, 0, 1, 1, 2, 2, 3],
-            &[1.0; 7],
-        )
-        .unwrap();
+        let m =
+            CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
+                .unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
@@ -124,13 +114,8 @@ mod tests {
         // Column 0: rows 0, 1, 2 → count = 3
         // Column 1: rows 1, 2    → count = 2
         // Column 2: row 2        → count = 1
-        let m = CscMatrix::from_triplets(
-            3,
-            &[0, 1, 2, 1, 2, 2],
-            &[0, 0, 0, 1, 1, 2],
-            &[1.0; 6],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(3, &[0, 1, 2, 1, 2, 2], &[0, 0, 0, 1, 1, 2], &[1.0; 6])
+            .unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
@@ -170,13 +155,8 @@ mod tests {
         // [b c 0 0]
         // [0 0 d e]
         // [0 0 e f]
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 1, 2, 3, 3],
-            &[0, 0, 1, 2, 2, 3],
-            &[1.0; 6],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(4, &[0, 1, 1, 2, 3, 3], &[0, 0, 1, 2, 2, 3], &[1.0; 6])
+            .unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);

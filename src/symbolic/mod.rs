@@ -8,7 +8,7 @@ use crate::ordering::postorder::postorder;
 use crate::sparse::csc::{CscMatrix, CscPattern};
 
 pub use column_counts::{column_counts, total_factor_nnz};
-pub use supernode::{Supernode, SupernodeParams, find_supernodes};
+pub use supernode::{find_supernodes, Supernode, SupernodeParams};
 
 /// The complete output of symbolic factorization.
 ///
@@ -107,10 +107,7 @@ pub fn symbolic_factorize(
     let supernodes = find_supernodes(&etree, &col_counts, snode_params);
 
     // Step 5: Compute contribution sizes and peak memory
-    let contrib_sizes: Vec<usize> = supernodes
-        .iter()
-        .map(|s| s.contrib_size())
-        .collect();
+    let contrib_sizes: Vec<usize> = supernodes.iter().map(|s| s.contrib_size()).collect();
 
     let peak_contrib_bytes = compute_peak_contrib(&supernodes, &contrib_sizes);
 
@@ -178,13 +175,9 @@ mod tests {
     #[test]
     fn test_symbolic_factorize_basic() {
         // Simple tridiagonal
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 1, 2, 2, 3, 3],
-            &[0, 0, 1, 1, 2, 2, 3],
-            &[1.0; 7],
-        )
-        .unwrap();
+        let m =
+            CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
+                .unwrap();
 
         let params = SupernodeParams { nemin: 32 };
         let sym = symbolic_factorize(&m, &params).unwrap();
@@ -208,13 +201,8 @@ mod tests {
 
     #[test]
     fn test_symbolic_factorize_dense() {
-        let m = CscMatrix::from_triplets(
-            3,
-            &[0, 1, 2, 1, 2, 2],
-            &[0, 0, 0, 1, 1, 2],
-            &[1.0; 6],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(3, &[0, 1, 2, 1, 2, 2], &[0, 0, 0, 1, 1, 2], &[1.0; 6])
+            .unwrap();
 
         let params = SupernodeParams { nemin: 1 };
         let sym = symbolic_factorize(&m, &params).unwrap();
@@ -283,7 +271,11 @@ mod tests {
 
         // Root supernode should have 0 contribution block
         if let Some(last) = sym.supernodes.last() {
-            assert_eq!(last.contrib_size(), 0, "root should have no contribution block");
+            assert_eq!(
+                last.contrib_size(),
+                0,
+                "root should have no contribution block"
+            );
         }
     }
 }

@@ -5,9 +5,7 @@
 //!
 //!     cargo test -- --ignored
 
-use feral::{
-    factor, read_mtx, read_sidecar, solve, BunchKaufmanParams, Inertia, ZeroPivotAction,
-};
+use feral::{factor, read_mtx, read_sidecar, solve, BunchKaufmanParams, Inertia, ZeroPivotAction};
 use std::path::Path;
 
 #[test]
@@ -49,11 +47,7 @@ fn test_kkt_matrices_inertia_and_solve() {
 
         for mtx_entry in mtx_files {
             let mtx_path = mtx_entry.path();
-            let stem = mtx_path
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
+            let stem = mtx_path.file_stem().unwrap().to_string_lossy().to_string();
             let json_path = mtx_path.with_extension("json");
 
             if !json_path.exists() {

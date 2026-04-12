@@ -371,16 +371,26 @@ pub fn factor_frontal(
 
     if ncol > nrow {
         return Err(FeralError::InvalidInput(format!(
-            "ncol {} > nrow {}", ncol, nrow
+            "ncol {} > nrow {}",
+            ncol, nrow
         )));
     }
     if ncol == 0 {
         return Ok(FrontalFactors {
-            nrow, ncol: 0,
-            l: Vec::new(), d_diag: Vec::new(), d_subdiag: Vec::new(),
-            perm: (0..nrow).collect(), perm_inv: (0..nrow).collect(),
-            contrib: matrix.data.clone(), contrib_dim: nrow,
-            inertia: Inertia { positive: 0, negative: 0, zero: 0 },
+            nrow,
+            ncol: 0,
+            l: Vec::new(),
+            d_diag: Vec::new(),
+            d_subdiag: Vec::new(),
+            perm: (0..nrow).collect(),
+            perm_inv: (0..nrow).collect(),
+            contrib: matrix.data.clone(),
+            contrib_dim: nrow,
+            inertia: Inertia {
+                positive: 0,
+                negative: 0,
+                zero: 0,
+            },
             needs_refinement: false,
             zero_tol: params.zero_tol,
             zero_tol_2x2: params.zero_tol_2x2,
@@ -413,7 +423,12 @@ pub fn factor_frontal(
             // Last eliminated pivot: always 1×1
             let d = a[k * nrow + k];
             count_1x1_inertia(
-                d, params, &mut pos, &mut neg, &mut zero, &mut needs_refinement,
+                d,
+                params,
+                &mut pos,
+                &mut neg,
+                &mut zero,
+                &mut needs_refinement,
             )?;
             // Scale column k below diagonal (including rows ncol..nrow)
             if d.abs() > 0.0 {
@@ -442,13 +457,19 @@ pub fn factor_frontal(
             // Search within fully-summed rows first
             for i in (k + 1)..ncol {
                 let v = a[k * nrow + i].abs();
-                if v > max_val { max_val = v; max_row = i; }
+                if v > max_val {
+                    max_val = v;
+                    max_row = i;
+                }
             }
             // Also check sub-diagonal rows (they contribute to gamma0 for
             // the BK pivot test, but are never swapped into pivot position)
             for i in ncol..nrow {
                 let v = a[k * nrow + i].abs();
-                if v > max_val { max_val = v; max_row = i; }
+                if v > max_val {
+                    max_val = v;
+                    max_row = i;
+                }
             }
             (max_val, max_row)
         };
@@ -456,7 +477,12 @@ pub fn factor_frontal(
         if gamma0 == 0.0 {
             let d = a[k * nrow + k];
             count_1x1_inertia(
-                d, params, &mut pos, &mut neg, &mut zero, &mut needs_refinement,
+                d,
+                params,
+                &mut pos,
+                &mut neg,
+                &mut zero,
+                &mut needs_refinement,
             )?;
             set_l_column_identity(&mut a, nrow, k);
             k += 1;
@@ -469,7 +495,12 @@ pub fn factor_frontal(
             // 1×1 pivot at k, no swap
             let d = a[k * nrow + k];
             count_1x1_inertia(
-                d, params, &mut pos, &mut neg, &mut zero, &mut needs_refinement,
+                d,
+                params,
+                &mut pos,
+                &mut neg,
+                &mut zero,
+                &mut needs_refinement,
             )?;
             do_1x1_update(&mut a, nrow, k);
             k += 1;
@@ -488,7 +519,12 @@ pub fn factor_frontal(
             swap_rows_cols(&mut a, nrow, k, r, &mut perm);
             let d = a[k * nrow + k];
             count_1x1_inertia(
-                d, params, &mut pos, &mut neg, &mut zero, &mut needs_refinement,
+                d,
+                params,
+                &mut pos,
+                &mut neg,
+                &mut zero,
+                &mut needs_refinement,
             )?;
             do_1x1_update(&mut a, nrow, k);
             k += 1;
@@ -499,7 +535,12 @@ pub fn factor_frontal(
             // 1×1 pivot at k (LAPACK extension), no swap
             let d = a[k * nrow + k];
             count_1x1_inertia(
-                d, params, &mut pos, &mut neg, &mut zero, &mut needs_refinement,
+                d,
+                params,
+                &mut pos,
+                &mut neg,
+                &mut zero,
+                &mut needs_refinement,
             )?;
             do_1x1_update(&mut a, nrow, k);
             k += 1;
@@ -519,7 +560,9 @@ pub fn factor_frontal(
             if det.abs() <= params.zero_tol_2x2 {
                 match params.on_zero_pivot {
                     ZeroPivotAction::Fail => return Err(FeralError::NumericallyRankDeficient),
-                    ZeroPivotAction::ForceAccept => { needs_refinement = true; }
+                    ZeroPivotAction::ForceAccept => {
+                        needs_refinement = true;
+                    }
                 }
             }
 
@@ -537,7 +580,12 @@ pub fn factor_frontal(
             // Fall back to 1×1 with ForceAccept
             let d = a[k * nrow + k];
             count_1x1_inertia(
-                d, params, &mut pos, &mut neg, &mut zero, &mut needs_refinement,
+                d,
+                params,
+                &mut pos,
+                &mut neg,
+                &mut zero,
+                &mut needs_refinement,
             )?;
             do_1x1_update(&mut a, nrow, k);
             k += 1;
@@ -604,7 +652,9 @@ pub fn factor_frontal(
 /// 1×1 rank-1 update: update columns k+1..nrow after eliminating column k.
 fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
     let d = a[k * n + k];
-    if d.abs() == 0.0 { return; }
+    if d.abs() == 0.0 {
+        return;
+    }
     let inv_d = 1.0 / d;
     // Scale L column
     for i in (k + 1)..n {
@@ -622,7 +672,9 @@ fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
 /// 2×2 rank-2 update: update columns k+2..nrow after eliminating columns k, k+1.
 fn do_2x2_update(a: &mut [f64], n: usize, k: usize, d11: f64, d21: f64, d22: f64) {
     let det = d11 * d22 - d21 * d21;
-    if det.abs() == 0.0 { return; }
+    if det.abs() == 0.0 {
+        return;
+    }
     let inv_det = 1.0 / det;
 
     // Compute L columns k and k+1: L = A * D^{-1}
@@ -653,8 +705,11 @@ fn count_2x2_inertia_val(d11: f64, d21: f64, d22: f64) -> Inertia {
     let det = d11 * d22 - d21 * d21;
     let trace = d11 + d22;
     if det > 0.0 {
-        if trace > 0.0 { Inertia::new(2, 0, 0) }
-        else { Inertia::new(0, 2, 0) }
+        if trace > 0.0 {
+            Inertia::new(2, 0, 0)
+        } else {
+            Inertia::new(0, 2, 0)
+        }
     } else if det < 0.0 {
         Inertia::new(1, 1, 0)
     } else if trace > 0.0 {

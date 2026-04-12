@@ -75,9 +75,7 @@ impl EliminationTree {
 
     /// Return root nodes (nodes with no parent).
     pub fn roots(&self) -> Vec<usize> {
-        (0..self.n)
-            .filter(|&j| self.parent[j].is_none())
-            .collect()
+        (0..self.n).filter(|&j| self.parent[j].is_none()).collect()
     }
 
     /// Compute subtree sizes (number of nodes in each subtree, including self).
@@ -152,13 +150,7 @@ mod tests {
     #[test]
     fn test_etree_diagonal() {
         // Diagonal: no off-diagonal entries → forest of singletons
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 2, 3],
-            &[0, 1, 2, 3],
-            &[1.0; 4],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(4, &[0, 1, 2, 3], &[0, 1, 2, 3], &[1.0; 4]).unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
 
@@ -171,13 +163,9 @@ mod tests {
     #[test]
     fn test_etree_children() {
         // Tridiagonal: children of node k = [k-1] (except 0)
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 1, 2, 2, 3, 3],
-            &[0, 0, 1, 1, 2, 2, 3],
-            &[1.0; 7],
-        )
-        .unwrap();
+        let m =
+            CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
+                .unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let ch = etree.children();
@@ -191,13 +179,9 @@ mod tests {
     #[test]
     fn test_subtree_sizes() {
         // Tridiagonal 4x4: chain 0→1→2→3
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 1, 2, 2, 3, 3],
-            &[0, 0, 1, 1, 2, 2, 3],
-            &[1.0; 7],
-        )
-        .unwrap();
+        let m =
+            CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
+                .unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let sizes = etree.subtree_sizes();

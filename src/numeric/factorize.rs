@@ -1,6 +1,6 @@
-use crate::dense::factor::{factor_frontal, BunchKaufmanParams, FrontalFactors};
 #[cfg(test)]
 use crate::dense::factor::factor;
+use crate::dense::factor::{factor_frontal, BunchKaufmanParams, FrontalFactors};
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
 use crate::inertia::Inertia;
@@ -99,16 +99,29 @@ pub fn factorize_multifrontal(
                 nrow: 0,
                 row_indices: Vec::new(),
                 frontal_factors: FrontalFactors {
-                    nrow: 0, ncol: 0, l: Vec::new(),
-                    d_diag: Vec::new(), d_subdiag: Vec::new(),
-                    perm: Vec::new(), perm_inv: Vec::new(),
-                    contrib: Vec::new(), contrib_dim: 0,
-                    inertia: Inertia { positive: 0, negative: 0, zero: 0 },
+                    nrow: 0,
+                    ncol: 0,
+                    l: Vec::new(),
+                    d_diag: Vec::new(),
+                    d_subdiag: Vec::new(),
+                    perm: Vec::new(),
+                    perm_inv: Vec::new(),
+                    contrib: Vec::new(),
+                    contrib_dim: 0,
+                    inertia: Inertia {
+                        positive: 0,
+                        negative: 0,
+                        zero: 0,
+                    },
                     needs_refinement: false,
                     zero_tol: params.zero_tol,
                     zero_tol_2x2: params.zero_tol_2x2,
                 },
-                inertia: Inertia { positive: 0, negative: 0, zero: 0 },
+                inertia: Inertia {
+                    positive: 0,
+                    negative: 0,
+                    zero: 0,
+                },
             });
             continue;
         }
@@ -201,11 +214,7 @@ pub fn factorize_multifrontal(
 }
 
 /// Permute a CSC matrix: compute the lower triangle of P·A·Pᵀ.
-fn permute_csc_values(
-    matrix: &CscMatrix,
-    _perm: &[usize],
-    perm_inv: &[usize],
-) -> CscMatrix {
+fn permute_csc_values(matrix: &CscMatrix, _perm: &[usize], perm_inv: &[usize]) -> CscMatrix {
     let n = matrix.n;
 
     // Collect permuted entries in lower triangle
@@ -269,7 +278,8 @@ fn build_row_indices(
 
     // Build result: eliminated columns first, then non-eliminated rows
     let elim_cols: Vec<usize> = (first_col..first_col + ncol).collect();
-    let non_elim: Vec<usize> = all_rows.iter()
+    let non_elim: Vec<usize> = all_rows
+        .iter()
         .copied()
         .filter(|&r| r < first_col || r >= first_col + ncol)
         .collect();
@@ -382,13 +392,7 @@ mod tests {
 
     #[test]
     fn test_factorize_diagonal() {
-        let m = CscMatrix::from_triplets(
-            3,
-            &[0, 1, 2],
-            &[0, 1, 2],
-            &[2.0, 3.0, 5.0],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
 
         let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
         let (factors, inertia) = factorize_multifrontal(&m, &sym, &make_params()).unwrap();
@@ -473,13 +477,7 @@ mod tests {
     #[test]
     fn test_factorize_indefinite() {
         // Indefinite: [[1,2],[2,1]]
-        let m = CscMatrix::from_triplets(
-            2,
-            &[0, 1, 1],
-            &[0, 0, 1],
-            &[1.0, 2.0, 1.0],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(2, &[0, 1, 1], &[0, 0, 1], &[1.0, 2.0, 1.0]).unwrap();
 
         let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
         let params = make_params();

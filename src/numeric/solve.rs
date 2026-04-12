@@ -1,7 +1,7 @@
 #![allow(clippy::needless_range_loop)]
+use super::factorize::SparseFactors;
 use crate::error::FeralError;
 use crate::sparse::csc::CscMatrix;
-use super::factorize::SparseFactors;
 
 /// Solve A·x = b using the sparse multifrontal factorization.
 ///
@@ -9,10 +9,7 @@ use super::factorize::SparseFactors;
 /// 1. Forward substitution: L-solve through supernodes (postorder)
 /// 2. D-block solve: D^{-1} for eliminated pivots at each node
 /// 3. Backward substitution: L^T-solve through supernodes (reverse postorder)
-pub fn solve_sparse(
-    factors: &SparseFactors,
-    rhs: &[f64],
-) -> Result<Vec<f64>, FeralError> {
+pub fn solve_sparse(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
     let n = factors.n;
     if rhs.len() != n {
         return Err(FeralError::DimensionMismatch {
@@ -36,7 +33,9 @@ pub fn solve_sparse(
         let ff = &node.frontal_factors;
         let ncol = ff.ncol;
         let nrow = ff.nrow;
-        if ncol == 0 { continue; }
+        if ncol == 0 {
+            continue;
+        }
 
         // Gather and apply BK permutation
         let mut w = vec![0.0; nrow];
@@ -63,7 +62,9 @@ pub fn solve_sparse(
         let ff = &node.frontal_factors;
         let ncol = ff.ncol;
         let nrow = ff.nrow;
-        if ncol == 0 { continue; }
+        if ncol == 0 {
+            continue;
+        }
 
         // Gather and apply BK permutation
         let mut w = vec![0.0; nrow];
@@ -120,7 +121,9 @@ pub fn solve_sparse(
         let ff = &node.frontal_factors;
         let ncol = ff.ncol;
         let nrow = ff.nrow;
-        if ncol == 0 { continue; }
+        if ncol == 0 {
+            continue;
+        }
 
         // Gather and apply BK permutation
         let mut w = vec![0.0; nrow];
@@ -274,53 +277,92 @@ mod tests {
 
         let mut res_sq = 0.0;
         let mut b_sq = 0.0;
-        for i in 0..n { res_sq += (ax[i] - rhs[i]).powi(2); b_sq += rhs[i].powi(2); }
-        let rel_res = if b_sq > 0.0 { (res_sq / b_sq).sqrt() } else { res_sq.sqrt() };
-        assert!(rel_res < tol, "relative residual {:.2e} exceeds tolerance {:.2e}", rel_res, tol);
+        for i in 0..n {
+            res_sq += (ax[i] - rhs[i]).powi(2);
+            b_sq += rhs[i].powi(2);
+        }
+        let rel_res = if b_sq > 0.0 {
+            (res_sq / b_sq).sqrt()
+        } else {
+            res_sq.sqrt()
+        };
+        assert!(
+            rel_res < tol,
+            "relative residual {:.2e} exceeds tolerance {:.2e}",
+            rel_res,
+            tol
+        );
     }
 
     #[test]
     fn test_solve_diagonal() {
-        let m = CscMatrix::from_triplets(3, &[0,1,2], &[0,1,2], &[2.0,3.0,5.0]).unwrap();
+        let m = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
         check_solve(&m, &[4.0, 9.0, 25.0], 1e-14);
     }
 
     #[test]
     fn test_solve_tridiagonal() {
-        let m = CscMatrix::from_triplets(3, &[0,1,1,2,2], &[0,0,1,1,2], &[2.0,-1.0,2.0,-1.0,2.0]).unwrap();
+        let m = CscMatrix::from_triplets(
+            3,
+            &[0, 1, 1, 2, 2],
+            &[0, 0, 1, 1, 2],
+            &[2.0, -1.0, 2.0, -1.0, 2.0],
+        )
+        .unwrap();
         check_solve(&m, &[1.0, 0.0, 1.0], 1e-13);
     }
 
     #[test]
     fn test_solve_kkt() {
-        let m = CscMatrix::from_triplets(3, &[0,1,2,2,2], &[0,1,0,1,2], &[2.0,3.0,1.0,1.0,-1e-8]).unwrap();
+        let m = CscMatrix::from_triplets(
+            3,
+            &[0, 1, 2, 2, 2],
+            &[0, 1, 0, 1, 2],
+            &[2.0, 3.0, 1.0, 1.0, -1e-8],
+        )
+        .unwrap();
         check_solve(&m, &[1.0, 2.0, 3.0], 1e-6);
     }
 
     #[test]
     fn test_solve_larger_spd() {
         let n = 5;
-        let mut rows = Vec::new(); let mut cols = Vec::new(); let mut vals = Vec::new();
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
         for i in 0..n {
-            rows.push(i); cols.push(i); vals.push(4.0);
-            if i+1 < n { rows.push(i+1); cols.push(i); vals.push(-1.0); }
+            rows.push(i);
+            cols.push(i);
+            vals.push(4.0);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
         }
         let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
-        check_solve(&m, &(0..n).map(|i| (i+1) as f64).collect::<Vec<_>>(), 1e-13);
+        check_solve(
+            &m,
+            &(0..n).map(|i| (i + 1) as f64).collect::<Vec<_>>(),
+            1e-13,
+        );
     }
 
     #[test]
     fn test_solve_indefinite() {
-        let m = CscMatrix::from_triplets(2, &[0,1,1], &[0,0,1], &[1.0,2.0,1.0]).unwrap();
+        let m = CscMatrix::from_triplets(2, &[0, 1, 1], &[0, 0, 1], &[1.0, 2.0, 1.0]).unwrap();
         check_solve(&m, &[5.0, 4.0], 1e-13);
     }
 
     #[test]
     fn test_solve_arrow_multi_supernode() {
         let m = CscMatrix::from_triplets(
-            5, &[0,1,2,3,4,1,2,3,4], &[0,0,0,0,0,1,2,3,4],
-            &[10.0,1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0],
-        ).unwrap();
-        check_solve(&m, &[1.0,2.0,3.0,4.0,5.0], 1e-12);
+            5,
+            &[0, 1, 2, 3, 4, 1, 2, 3, 4],
+            &[0, 0, 0, 0, 0, 1, 2, 3, 4],
+            &[10.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        )
+        .unwrap();
+        check_solve(&m, &[1.0, 2.0, 3.0, 4.0, 5.0], 1e-12);
     }
 }

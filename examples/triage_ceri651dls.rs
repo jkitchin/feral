@@ -73,14 +73,22 @@ fn main() {
     println!(
         "inertia: {} ({})",
         dinertia,
-        if dinertia == expected { "MATCH" } else { "MISMATCH" }
+        if dinertia == expected {
+            "MATCH"
+        } else {
+            "MISMATCH"
+        }
     );
     println!("zero_tol = {:.3e}", dfac.zero_tol);
     println!("zero_tol_2x2 = {:.3e}", dfac.zero_tol_2x2);
 
     println!("\nD diagonal:");
     for i in 0..n {
-        let marker = if dfac.d_subdiag[i] != 0.0 { "2x2" } else { "1x1" };
+        let marker = if dfac.d_subdiag[i] != 0.0 {
+            "2x2"
+        } else {
+            "1x1"
+        };
         println!(
             "  D[{}] = {:+.6e}  subdiag={:+.3e}  [{}]",
             i, dfac.d_diag[i], dfac.d_subdiag[i], marker
@@ -107,11 +115,19 @@ fn main() {
     println!(
         "inertia: {} ({})",
         sinertia,
-        if sinertia == expected { "MATCH" } else { "MISMATCH" }
+        if sinertia == expected {
+            "MATCH"
+        } else {
+            "MISMATCH"
+        }
     );
     println!("\nStrict D diagonal:");
     for i in 0..n {
-        let marker = if sfac.d_subdiag[i] != 0.0 { "2x2" } else { "1x1" };
+        let marker = if sfac.d_subdiag[i] != 0.0 {
+            "2x2"
+        } else {
+            "1x1"
+        };
         println!(
             "  D[{}] = {:+.6e}  subdiag={:+.3e}  [{}]",
             i, sfac.d_diag[i], sfac.d_subdiag[i], marker

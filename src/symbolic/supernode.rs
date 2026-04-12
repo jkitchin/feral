@@ -245,14 +245,9 @@ fn find_root(s: usize, merged_into: &[Option<usize>]) -> usize {
 }
 
 /// Effective number of columns for a supernode (accounting for merges).
-fn effective_ncol(
-    s: usize,
-    snode_ncols: &[usize],
-    merged_into: &[Option<usize>],
-) -> usize {
+fn effective_ncol(s: usize, snode_ncols: &[usize], merged_into: &[Option<usize>]) -> usize {
     snode_ncols[find_root(s, merged_into)]
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -265,13 +260,9 @@ mod tests {
         // Tridiagonal 4x4: col_counts = [2, 2, 2, 1]
         // Columns 2,3 form a fundamental supernode (parent[2]=3, counts[3]+1=counts[2])
         // Columns 0 and 1 are singletons
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 1, 2, 2, 3, 3],
-            &[0, 0, 1, 1, 2, 2, 3],
-            &[1.0; 7],
-        )
-        .unwrap();
+        let m =
+            CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
+                .unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
@@ -288,13 +279,9 @@ mod tests {
     #[test]
     fn test_supernodes_tridiagonal_amalgamated() {
         // With large nemin, all singletons should be amalgamated into one
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 1, 2, 2, 3, 3],
-            &[0, 0, 1, 1, 2, 2, 3],
-            &[1.0; 7],
-        )
-        .unwrap();
+        let m =
+            CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
+                .unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
@@ -314,13 +301,8 @@ mod tests {
         // Fundamental: column 1 chains into column 0 (parent[0]=1, counts[1]=counts[0]-1)
         // Column 2 chains into column 1 (parent[1]=2, counts[2]=counts[1]-1)
         // So all 3 columns form one fundamental supernode
-        let m = CscMatrix::from_triplets(
-            3,
-            &[0, 1, 2, 1, 2, 2],
-            &[0, 0, 0, 1, 1, 2],
-            &[1.0; 6],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(3, &[0, 1, 2, 1, 2, 2], &[0, 0, 0, 1, 1, 2], &[1.0; 6])
+            .unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
@@ -338,13 +320,8 @@ mod tests {
     #[test]
     fn test_supernodes_block_diagonal() {
         // Two 2x2 dense blocks: two independent supernodes
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 1, 2, 3, 3],
-            &[0, 0, 1, 2, 2, 3],
-            &[1.0; 6],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(4, &[0, 1, 1, 2, 3, 3], &[0, 0, 1, 2, 2, 3], &[1.0; 6])
+            .unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
@@ -361,13 +338,7 @@ mod tests {
     #[test]
     fn test_supernodes_diagonal_no_amalg() {
         // Diagonal 4x4 with nemin=1: 4 singletons, no merging possible
-        let m = CscMatrix::from_triplets(
-            4,
-            &[0, 1, 2, 3],
-            &[0, 1, 2, 3],
-            &[1.0; 4],
-        )
-        .unwrap();
+        let m = CscMatrix::from_triplets(4, &[0, 1, 2, 3], &[0, 1, 2, 3], &[1.0; 4]).unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
@@ -421,7 +392,12 @@ mod tests {
         for (i, s) in snodes.iter().enumerate() {
             for &child in &s.children {
                 assert!(child < snodes.len(), "invalid child index");
-                assert!(child < i, "child {} should come before parent {} in postorder", child, i);
+                assert!(
+                    child < i,
+                    "child {} should come before parent {} in postorder",
+                    child,
+                    i
+                );
             }
         }
     }
