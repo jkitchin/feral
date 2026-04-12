@@ -11,6 +11,7 @@ pub mod inertia;
 pub mod io;
 pub mod numeric;
 pub mod ordering;
+pub mod scaling;
 pub mod sparse;
 pub mod symbolic;
 
