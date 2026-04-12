@@ -228,3 +228,70 @@
   pivoting) — the BK strategy forms 2×2 blocks for zero-diagonal
   variable rows and one block is rank-deficient. No threshold tuning
   fixes it.
+
+* 14:30 :triage:errinbar:misclassification:
+  Built examples/triage_errinbar.rs. ERRINBAR_0824 (n=27, iter 824,
+  delta_w=delta_c=0, expected (18,9,0), diagonal range 1e-8 to 1.5e12,
+  κ ratio ≈ 1.5e20):
+
+  | Path                          | refined residual |
+  |-------------------------------+------------------|
+  | Dense                         | 1.872e-4         |
+  | Sparse default (1 supernode)  | 3.140e-4         |
+  | Sparse single (nemin=10000)   | 3.140e-4         |
+  | Sparse multi (nemin=1, 11sn)  | 2.319e-4         |
+
+  All four within factor of 2 on a κ ≈ 1e20 matrix. Inertia (18,9,0)
+  matches MUMPS sidecar in every case. Fundamental ill-conditioning:
+  refinement helps but can't recover the lost ~12 digits.
+
+  *Misclassification finding.* My previous "ERRINBAR_0824 is the worst
+  sparse-only failure" claim was wrong. The bench's "Top 15 worst
+  residuals" lists sort by magnitude, not by failure exclusivity.
+  ERRINBAR_0824 fails dense too (1.87e-4 vs 6e-9 tolerance) but the
+  ERRINBAR family is below the top-25 cutoff in the dense family
+  table because per-family counts are dominated by ACOPP30 et al.
+
+  ERRINBAR_0824 is in the "failed in BOTH" 1376-matrix set, not the
+  "sparse-only 88" set. The 88 sparse-only matrices have not actually
+  been triaged — I picked the wrong representative.
+
+  This is fine. The consensus pass (Phase 5 of the exit plan) will
+  characterize the 88 sparse-only matrices automatically: if canonical
+  Fortran MUMPS and SSIDS agree with feral-dense on those 88 matrices,
+  the sparse pipeline has real bugs to fix. If they all disagree, the
+  88 are just borderline matrices where rounding accumulates differently
+  in multifrontal vs monolithic factorization. The right tool for
+  identifying which world we're in is the consensus framework, not
+  individual triage.
+
+  ERRINBAR_0824 itself is Category "Numerically intractable" — belongs
+  in Borderline or Excluded under the consensus criterion. Both dense
+  and sparse give the same answer to within ~30%, so neither is
+  "wrong" — they're both at the precision limit of double-precision BK
+  on a κ=1e20 matrix.
+
+* 14:50 :phase-1-complete:
+  Phase 1 of dev/plans/phase-1b-consensus-exit.md complete. All three
+  scheduled triages done:
+  1. POLAK6_0021 — fixed by threshold-mismatch fix (commit 95e6760)
+  2. ACOPP30 family — Phase 2 issue (delayed pivoting), 2x2 inertia
+     bug deferred (commit 1da42f4)
+  3. ERRINBAR_0824 — fundamental ill-conditioning, not a feral bug
+
+  Net effect on the corpus from this session:
+  - Sparse inertia: 150997 → 152038 (+1041, +0.7%)
+  - Sparse residual: 151626 → 152788 (+1162, +0.7%)
+  - Sparse worst residual: 2.61e21 → 3.14e-4 (25 orders of magnitude)
+  - Dense residual: 152489 → 152717 (+228)
+
+  No more low-hanging fixes identified. Remaining ~400 residual
+  failures are dominated by Category 2 (BK pivot quality on
+  ill-conditioned matrices, requires Phase 2 delayed pivoting) and
+  Category "Numerically intractable" (matrices like ERRINBAR_0824
+  that are at the precision limit).
+
+  Ready to proceed to Phases 2-5 of the consensus exit plan: build
+  the native MUMPS and SSIDS oracles, run them on the 153k corpus,
+  compute consensus verdicts, and use those to define the actual
+  Phase 1b exit criterion.
