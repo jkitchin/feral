@@ -1,0 +1,101 @@
+#+TITLE: Journal 2026-04-12-02
+#+FILETAGS: :feral:phase-2-2-1:mc64:
+
+Phase 2.2.1 Step 4 — MC64 wrapper (mc64.rs). Hungarian kernel (Step 3)
+already landed. Job: input preprocessing, call kernel, unwind normalization,
+symmetric average, safety guards, return ScalingInfo.
+
+* 12:00 :orient:plan:
+Read dev/research/mc64-scaling.md, dev/plans/mc64-scaling.md §Step 4,
+src/scaling/mc64.rs stub, src/scaling/hungarian.rs CostGraph+Matching
+interface, tests/mc64_scaling.rs (3 #[ignore]'d tests to unblock),
+ref/spral/src/scaling.f90:597-801 (hungarian_wrapper) and :134-170
+(hungarian_scale_sym_int64).
+
+Plan mirrors SPRAL exactly for the non-singular path:
+  1. Build full symmetric CSC with values (not reuse symmetric_pattern
+     which doesn't carry values).
+  2. Drop explicit zeros, take log|val|.
+  3. Per column: cmax[j]=max, then entry ← cmax - entry.
+  4. Call hungarian_match.
+  5. rscaling[i]=u[i]; cscaling[j]=v[j]-cmax[j].
+  6. s[i]=exp((rscaling[i]+cscaling[i])/2).
+  7. Safety: clamp exp overflow, rewrite 0/NaN→1, unmatched→1.
+
+For the partial-singular path, deviate from SPRAL: caller decided that
+unmatched → s[i]=1.0 fallback is sufficient. Not implementing SPRAL's
+reduced-matrix re-matching plus Duff-Pralet correction.
+
+* 12:40 :impl:mc64:wrapper:
+Wrote src/scaling/mc64.rs::compute_symmetric and helper
+build_cost_graph. 2-pass expansion (count non-zero entries per
+column in the full symmetric pattern, then fill).  Sorting rows per
+column after expansion for deterministic order. cmax initialized to
+NEG_INFINITY; columns with no nonzero entries keep that sentinel and
+the caller short-circuits to identity scaling. Unwinding follows
+SPRAL scaling.f90:681-682; exp-average per :169. Clamp the exponent
+to ±709 via f64::clamp (avoids clippy::manual_clamp). Zero or
+non-finite s[i] → 1.0. Unmatched perm[i]==usize::MAX → 1.0.
+
+* 12:55 :tests:green:
+Unignored the 3 previously-#[ignore]'d tests in tests/mc64_scaling.rs
+(mc64_diagonal_matrix_unit_scaled_diagonal, mc64_wide_dynamic_range_unit_bound,
+mc64_2x2_spd_off_diagonal_bounded). Results:
+
+  cargo test --test mc64_scaling:
+    running 7 tests
+    test identity_strategy_returns_ones ... ok
+    test mc64_diagonal_matrix_unit_scaled_diagonal ... ok
+    test external_strategy_wrong_length_errors ... ok
+    test external_strategy_passes_through ... ok
+    test mc64_identity_matrix_identity_scaling ... ok
+    test mc64_wide_dynamic_range_unit_bound ... ok
+    test mc64_2x2_spd_off_diagonal_bounded ... ok
+    test result: ok. 7 passed; 0 failed
+
+  cargo test --lib scaling:
+    8 passed (6 hungarian + 2 new mc64 unit tests:
+     diagonal_matrix_produces_inverse_sqrt_scaling,
+     empty_matrix_returns_empty_scaling)
+
+  cargo test (whole suite):
+    passed: 136  failed: 0  ignored: 7
+    (mc64_regression.rs tests stay #[ignore]'d — Step 8 work.)
+
+  pre-commit run --all-files:
+    cargo fmt --check ... Passed
+    cargo clippy -- -D warnings ... Passed
+
+Confirms SPRAL sign convention by construction on diag(2,3,5):
+  cmax=[log2,log3,log5]; u=v=0; s[i]=exp(-log A_ii/2)=1/sqrt(A_ii).
+  Scaled diag = 1, exact to tolerance 1e-12.
+
+* 13:00 :friction:clippy-drift:
+Local rustc 1.94.1 fires `excessive_precision` and `needless_range_loop`
+lints on pre-existing src/io/sidecar.rs and src/ordering/amd.rs under
+`clippy --all-targets`. CI/pre-commit both run `cargo clippy -- -D warnings`
+(library only), which does NOT trip those lints. My code sits under
+library-only clippy so it passes pre-commit clean. Leaving the drift
+untouched; it is not in scope for Phase 2.2.1 Step 4.
+
+* 13:05 :rough-edges:step5:
+Rough edges for Step 5 (integration into symbolic_factorize):
+
+  1. `ScalingStrategy::Identity` is still the module default (#[default]
+     on the enum). The research note says Mc64Symmetric should become
+     the default when Step 5 wires it in. The flip must not break the
+     regression tests that don't yet know about scaling.
+  2. compute_symmetric returns scaling in user-order. Step 5 must
+     permute into pivot order BEFORE handing to factorize.
+  3. The structurally singular path is identity fallback only. If
+     Step 5's corpus sanity panel uncovers matrices where this is
+     insufficient (residual still bad), that is a signal to port
+     SPRAL's Duff-Pralet correction (scaling.f90:688-800) as a
+     future tightening, not a Step 5 blocker.
+  4. Zero-handling: build_cost_graph drops explicit-zero entries
+     before taking the log, so CSCs with structurally stored zeros
+     (e.g. 2×2 pivot padding) are handled automatically. But a column
+     whose ONLY entries are all zero will have cmax = NEG_INFINITY
+     and fall back to identity for that index — this differs from
+     "matched but with very small values" and is flagged in the code
+     comments.

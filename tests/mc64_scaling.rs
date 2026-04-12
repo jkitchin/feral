@@ -47,7 +47,6 @@ fn scaled_entry(csc: &CscMatrix, scaling: &[f64], i: usize, j: usize) -> f64 {
 /// 2, 3, 5 — so this test fails on the stub and passes after
 /// Step 4.
 #[test]
-#[ignore = "Step 4 of dev/plans/mc64-scaling.md — fails on stub"]
 fn mc64_diagonal_matrix_unit_scaled_diagonal() {
     let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
 
@@ -96,7 +95,6 @@ fn mc64_identity_matrix_identity_scaling() {
 /// leaving the diagonal at `[1e-8, 1, 1e8]` — max entry 1e8,
 /// fails the ≤ 1 bound by 8 orders of magnitude.
 #[test]
-#[ignore = "Step 4 of dev/plans/mc64-scaling.md — fails on stub"]
 fn mc64_wide_dynamic_range_unit_bound() {
     let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1e-8, 1.0, 1e8]).unwrap();
 
@@ -176,7 +174,6 @@ fn external_strategy_wrong_length_errors() {
 /// Scaled A[1,0] = (1/2) * 2 * (1/2) = 1/2, bounded by 1 ✓
 /// Good. Now the test:
 #[test]
-#[ignore = "Step 4 of dev/plans/mc64-scaling.md — fails on stub"]
 fn mc64_2x2_spd_off_diagonal_bounded() {
     // A = [[4, 2], [2, 4]], stored lower triangle
     let csc = CscMatrix::from_triplets(2, &[0, 1, 1], &[0, 0, 1], &[4.0, 2.0, 4.0]).unwrap();
