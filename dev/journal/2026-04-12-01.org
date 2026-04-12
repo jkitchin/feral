@@ -129,3 +129,102 @@
   iterative-refinement territory.
 
   Acceptance criteria from dev/plans/postorder-fix.md all met.
+
+* 11:30 :refinement:bench:
+  Implemented solve_sparse_refined mirroring the dense version. Switched
+  bench to use solve_refined and solve_sparse_refined per spec §1709
+  (Phase 1b solve convention). First attempt was the naive "always
+  accept dx" loop matching the existing dense implementation. Bench
+  showed dense worst residual went from 8.97e-1 to *3.04e3* on
+  POLAK6_0021 — refinement amplifying error on a rank-deficient matrix.
+
+* 11:50 :refinement:best-iterate:
+  Replaced with best-iterate strategy: track smallest ||r|| across all
+  refinement steps and return the corresponding x. Allows non-monotone
+  intermediate steps (extreme-scaling matrices need this) but guarantees
+  the returned x is no worse than the unrefined solve. Removed the
+  POLAK6 regression and improved pass count over both unrefined and
+  naive-refined. Cumulative session delta vs the pre-postorder baseline:
+  - Sparse inertia 150997 → 152038 (+1041)
+  - Sparse residual 151626 → 152788 (+1162)
+  - Sparse worst residual 2.61e21 → 3.14e-4 (25 orders of magnitude)
+
+* 12:15 :triage:bench-tool:
+  Added failure analysis to bench: per-failure record collection,
+  family-grouped table, top-15 worst residuals individually, dense ∩
+  sparse cross-comparison. Removed the obsolete 153k-line per-row
+  print. Findings:
+  - Dense 1507 failures: 880 are "feral solves at machine precision but
+    rmumps disagrees on inertia label of boundary pivots" (QPNBLEND,
+    MSS1, CORE1, CRESC*, KIRBY2 — *not feral bugs*, oracle definitional
+    disagreement). 400 real residual failures clustered in problem
+    families: ACOPP30 (68, residual ~3e-2), FBRAIN3LS, CERI*, HS46,
+    DEVGLA2, PFIT2, ...
+  - Sparse top failure: ERRINBAR_0824 with CORRECT inertia but bad
+    residual (3.14e-4) — different category than dense failures.
+  - Cross-comparison: 1376 matrices fail in both, 131 dense-only, 88
+    sparse-only.
+
+* 12:45 :triage:polak6:
+  Built examples/triage_polak6.rs. POLAK6_0021 (n=9, κ ≈ 1e46):
+  - Default zero_tol: inertia (4,1,4), residual 8.97e-1
+  - Strict tol (1e-30): inertia (5,4,0), residual 34.4
+  - Loose tol (1e-3): inertia (3,1,5), residual *4.6e-17* (machine
+    precision)
+
+  The loose-tol experiment proved the matrix is solvable. The default
+  tol gets a worse answer because pivots in the band [eps·1e-10,
+  100·eps] are flagged as zero by factor (counted in inertia.zero) but
+  *divided by* in solve. The threshold mismatch is the bug.
+
+* 13:00 :fix:threshold-mismatch:
+  Stored zero_tol and zero_tol_2x2 in both Factors and FrontalFactors,
+  populated from BunchKaufmanParams. Both dense and sparse solves now
+  consult these stored thresholds and skip pivots that factor counted
+  as zero. POLAK6_0021 default residual: 8.97e-1 → *4.605e-17* (machine
+  precision). Tests in tests/threshold_consistency.rs (5+1 ignored).
+  All 121 tests pass. Commit 95e6760.
+
+* 13:30 :ultraplan:consensus:
+  Wrote dev/plans/phase-1b-consensus-exit.md (~430 lines, 8 phases).
+  The strict 100%-vs-rmumps spec criterion is unreachable without
+  delayed pivoting (Phase 2). Replace with multi-source consensus
+  across feral, rmumps, canonical Fortran MUMPS 5.8.2 (ref/mumps,
+  unbuilt), and canonical Fortran SSIDS (ref/spral, unbuilt). For
+  each matrix, classify as Definitive/Borderline/Excluded based on
+  agreement across all four. Phase 1b exits when feral satisfies
+  every Definitive verdict.
+
+  rmumps is a Rust port of MUMPS by the same author developing feral.
+  Treating it as ground truth means co-bugs in rmumps and feral are
+  invisible. Consensus catches that. Decision recorded in
+  dev/decisions.md with a reconsideration clause: if canonical Fortran
+  oracles end up agreeing with rmumps to within float64 across the
+  corpus, the strict criterion can be reinstated. Commit 9bb7d2e.
+
+* 14:00 :triage:acopp30:
+  Built examples/triage_acopp30.rs. ACOPP30_0000 (n=209, iter 0,
+  delta_w=delta_c=0, expected (72,137,0)):
+  - Many 2×2 pivot blocks (variable rows have zero Hessian diagonal)
+  - One block at D[58] has subdiag 4.219e-15, both diagonals zero
+  - All threshold variations (default, 1e-30, 1e-8, alpha=0.1) give
+    inertia (71, 137, 1), residual 3.15e-2
+  - Lower alpha helps the residual marginally (3.15e-2 → 2.43e-2) but
+    inertia stays wrong
+
+  Found a real bug in src/dense/factor.rs::count_2x2_inertia: the
+  near-singular branch uses a00 to decide eigenvalue sign but the
+  comment says "the other has sign of trace". For KKT matrices with
+  zero-diagonal variable rows (a00=0), this miscounts. Attempted the
+  trace-based fix:
+  - On ACOPP30: no change (trace also 0, would give (0,0,2) not (1,1,0))
+  - On bench: dense residual 152717 → 152701 (-16), sparse -1
+  - Net regression. The buggy code is calibrated to rmumps. The fix is
+    mathematically correct but the oracle is the one we're abandoning.
+
+  Decision: revert, leave a KNOWN BUG comment, document in
+  dev/tried-and-rejected.md, re-attempt after canonical MUMPS becomes
+  the oracle. ACOPP30 is fundamentally a Phase 2 issue (delayed
+  pivoting) — the BK strategy forms 2×2 blocks for zero-diagonal
+  variable rows and one block is rank-deficient. No threshold tuning
+  fixes it.

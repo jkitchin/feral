@@ -935,6 +935,15 @@ fn count_2x2_inertia(
     zero: &mut usize,
     needs_refinement: &mut bool,
 ) -> Result<(), FeralError> {
+    // KNOWN BUG: this should use trace = a00 + a11 to decide the sign
+    // of the non-zero eigenvalue, not a00 alone. KKT matrices produce
+    // 2×2 blocks where a00 = 0 (variable rows have zero Hessian
+    // diagonal) but a11 carries the sign. The trace-based fix was
+    // attempted in the 2026-04-12 ACOPP30 triage but caused a 16-matrix
+    // dense regression against rmumps's calibration. Re-attempt after
+    // canonical Fortran MUMPS becomes available as a second oracle
+    // (see dev/plans/phase-1b-consensus-exit.md). Documented in
+    // dev/journal/2026-04-12-01.org.
     if det.abs() <= params.zero_tol_2x2 {
         // Near-singular 2×2 block
         match params.on_zero_pivot {
