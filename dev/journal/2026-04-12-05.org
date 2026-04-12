@@ -1,0 +1,152 @@
+#+TITLE: Session 2026-04-12-05 journal
+#+DATE: 2026-04-12
+
+* 14:00 :mc64:step8:start:
+Picked up Phase 2.2.1 Step 8 (validation sweep). Head commit
+`0a13515` has Steps 1–7 complete: scaling computed in symbolic,
+applied in factorize assembly, pre/post-scaling at solve
+boundary. Task: un-ignore the 4 regression tests in
+`tests/mc64_regression.rs`, run them and the sanity panel, and
+determine whether Phase 2.2.1 closes.
+
+Data file inventory:
+  - data/matrices/kkt/ACOPP30/ACOPP30_0000.{mtx,json,mumps.json,ssids.json}  PRESENT
+  - data/matrices/kkt/CRESC132/CRESC132_0000.{mtx,json,mumps.json,ssids.json}  PRESENT
+  - data/matrices/kkt/CHWIRUT1/CHWIRUT1_0000.{mtx,json,mumps.json,ssids.json}  PRESENT
+  - data/matrices/kkt/CRESC100/CRESC100_0000.{mtx,json,mumps.json,ssids.json}  PRESENT
+  - HAHN1, GAUSS2, MUONSINE, VESUVIO (for sanity panel)  ALL PRESENT
+
+* 14:10 :mc64:regression:unignore:
+Temporarily removed `#[ignore]` from all 4 tests in
+`tests/mc64_regression.rs`. Ran
+`cargo test --test mc64_regression --release -- --test-threads=1
+ --nocapture`. Log: /tmp/mc64_regression_step8.log.
+
+Results:
+  - ACOPP30_0000:  2.274e46  (target < 1e-8)  FAIL
+  - CHWIRUT1_0000: 8.497e2   (target < 1e-8)  FAIL
+  - CRESC100_0000: 1.426e2   (target < 1e-8)  FAIL
+  - CRESC132_0000: 1.370e5   (target < 1e-6)  FAIL
+
+All 4 regression tests fail. Three of the four show residual
+improvement vs their pre-fix baselines but plateau in the 10² – 10⁵
+range — MC64 is doing real work but insufficient on its own.
+
+ACOPP30_0000 is an outlier: 2.27e+46 is dramatically WORSE than
+the pre-fix baseline. This is unexpected and needs triage.
+
+* 14:25 :mc64:sanity:panel:
+Ran `cargo run --release --example triage_large_cresc132` on
+current HEAD. Log: /tmp/triage_step8.log.
+
+Then stashed working tree, checked out c01235f, and re-ran the
+same command to capture the pre-fix baseline. Log:
+/tmp/triage_pre_mc64.log.
+
+Pre-fix vs post-MC64 residuals (same code path,
+`solve_sparse_refined`, same panel):
+
+  | Matrix       |      pre |     post |    Δord | MUMPS res |
+  |--------------+----------+----------+---------+-----------|
+  | CHWIRUT1     | 1.407e9  | 8.497e2  |    -6.2 |  9.51e-13 |
+  | HAHN1        | 1.438e14 | 3.758e4  |    -9.6 |  3.19e-14 |
+  | GAUSS2       | 1.341e9  | 1.843e3  |    -5.9 |  3.32e-14 |
+  | CRESC100     | 2.542e4  | 1.426e2  |    -2.3 |  6.15e-15 |
+  | MUONSINE     | 3.519e3  | 2.349e-2 |    -5.2 |  2.25e-15 |
+  | VESUVIO      | 5.613e14 | 1.815e5  |    -9.5 |  1.10e-12 |
+  | CRESC132     | 2.390e8  | 1.370e5  |    -3.2 |  2.48e-11 |
+
+Good news: every matrix improved, 6 of 7 by 2–10 orders.
+Bad news: nothing is within 10 orders of the canonical MUMPS
+residual on its row. No matrix meets the plan's "within 3 orders
+of magnitude" aspirational criterion.
+
+Inertia ±1 on HAHN1 / GAUSS2 / MUONSINE / VESUVIO and ±2 on
+CRESC132. That is the deferred `count_2x2_inertia` trace-vs-a00
+bug (Phase 2.2.2). Inertia is invariant under congruence so MC64
+scaling cannot fix this; the signature is stable pre vs post.
+
+* 14:40 :mc64:acopp30:regression:
+ACOPP30_0000 on pre-fix (c01235f) reports:
+  sparse feral inertia = (62, 142, 5), residual 2.842e16
+  canonical MUMPS     = (71, 137, 1), residual 5.008e-14
+  canonical SSIDS     = (71, 138, 0), residual 3.892e-14
+
+ACOPP30_0000 on post-MC64 (0a13515) reports:
+  sparse feral inertia = (62, 142, 5), residual 2.274e46
+  (same inertia, residual 30 orders worse)
+
+Same inertia means the factorization produced the same structure;
+the difference is entirely in the solve. The `2.274e46` magnitude
+suggests MC64's post-solve rescaling step `x[i] *= s[i]` is
+multiplying by a near-`f64::MAX` scale factor. This is consistent
+with either (a) a dual clamp leak, (b) a sign-convention bug on
+the unwinding (research note R2), or (c) the identity-fallback
+for unmatched rows not actually writing s[i]=1.
+
+NOT diagnosing further — Step 8 is evaluation-only. Flagging for
+Phase 2.2.2.
+
+Note: the `3.15e-2` "pre-fix baseline" quoted in the test
+docstring and the plan refers to `triage_acopp30` / a non-refined
+path, not `solve_sparse_refined`. The fresh
+`solve_sparse_refined` pre-fix number on c01235f is 2.84e16. The
+test docstrings should be reconciled in Phase 2.2.2.
+
+* 14:55 :tests:full:
+Ran `cargo test --release --no-fail-fast` to check for regressions
+outside the MC64 tests. Log: /tmp/full_test_step8_nff.log.
+Aggregate (grepping `test result:` lines):
+
+  Total passed:  141
+  Total failed:    4   (all 4 are the temporarily-unignored
+                        mc64_regression tests)
+  Total ignored:   3
+
+After restoring `#[ignore]` and rerunning:
+
+  Total passed:  141
+  Total failed:    0
+  Total ignored:   7
+
+No tests in `src/` or any other integration suite regressed. The
+MC64 plumbing does not break existing assertions. This is
+consistent with scaling being a congruence transform — it should
+not change inertia on the matrices the suite already covers.
+
+* 15:05 :mc64:step8:ignore-restore:
+Restored `#[ignore]` on all 4 regression tests in
+`tests/mc64_regression.rs`. Added a per-test docstring block
+describing Step 8 status and pointing at
+`dev/validation/phase-2.2.1-mc64-sweep.md`. This preserves the
+`#[ignore]` gating per Step 8 §6 "if some fail, restore ignores"
+and does not change any tolerance or target.
+
+Re-ran `cargo test --release --test mc64_regression`: all 4 tests
+now ignore cleanly (0 pass, 0 fail, 4 ignore).
+
+* 15:15 :mc64:step8:report:
+Wrote `dev/validation/phase-2.2.1-mc64-sweep.md` with the full
+summary, per-matrix tables, root-cause hypotheses for the
+ACOPP30 regression, and open questions for Phase 2.2.2.
+
+Key verdict: **Phase 2.2.1 cannot close on these numbers.** MC64
+scaling is doing real work (6 of 7 matrices improved by 2–10
+orders of magnitude) but is not sufficient on its own. The four
+regression targets all remain unmet and one regressed
+catastrophically. Step 9 (README/CHANGELOG/decisions update)
+should NOT run today; Phase 2.2.2 needs to triage at least the
+ACOPP30 catastrophe before 2.2.1 can be declared complete.
+
+Not running the full `cargo run --bin bench --release` corpus sweep
+since the regression tests already disprove the Step 8 success
+criterion — the corpus number would only confirm that most of the
+previously-hidden failures are still failing, just at a different
+magnitude. If the handler decides Phase 2.2.1 should still be
+partially merged, the full corpus run can happen as part of
+Phase 2.2.2 triage.
+
+* 15:20 :mc64:step8:next:
+Reporting findings up the chain. Not proceeding to Step 9
+autonomously per the Step 8 prompt's explicit "Stop at Step 8 and
+wait for my decision" instruction.

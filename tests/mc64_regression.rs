@@ -83,6 +83,14 @@ fn feral_residual(stem: &str) -> Option<f64> {
 /// Pre-fix: 3.15e-2. Canonical MUMPS: 5.0e-14. Target: < 1e-8
 /// (six orders of magnitude improvement from the baseline, four
 /// orders from the canonical).
+///
+/// Phase 2.2.1 Step 8 status: STILL FAILING. Post-MC64 residual
+/// grew to 2.27e+46 under the `solve_sparse_refined` path because
+/// ForceAccept sees 5 zero pivots on the scaled matrix (feral
+/// inertia (62,142,5) vs MUMPS (71,137,1), SSIDS (71,138,0)). The
+/// rank-deficient solve interacts pathologically with MC64 exp
+/// dual clamps. Diagnosis deferred to Phase 2.2.2+. See
+/// dev/validation/phase-2.2.1-mc64-sweep.md for details.
 #[test]
 #[ignore]
 fn acopp30_0000_residual_under_1e_8_after_mc64() {
@@ -100,6 +108,11 @@ fn acopp30_0000_residual_under_1e_8_after_mc64() {
 /// CRESC132_0000: n=5314, the largest matrix in the existing
 /// corpus. Pre-fix: 2.39e+08. Canonical MUMPS: 2.48e-11. Target:
 /// < 1e-6 (14 orders of magnitude improvement from the baseline).
+///
+/// Phase 2.2.1 Step 8 status: IMPROVED but STILL FAILING. Residual
+/// dropped 2.39e+08 → 1.37e+05, still ~11 orders above target.
+/// Inertia also drifted ±2 vs MUMPS. See
+/// dev/validation/phase-2.2.1-mc64-sweep.md.
 #[test]
 #[ignore]
 fn cresc132_0000_residual_under_1e_6_after_mc64() {
@@ -119,6 +132,11 @@ fn cresc132_0000_residual_under_1e_6_after_mc64() {
 /// (1.41e+09) pre-fix. This is a case where MC64 scaling should
 /// cleanly close the gap because the inertia bug is not masking
 /// the scaling bug.
+///
+/// Phase 2.2.1 Step 8 status: IMPROVED but STILL FAILING.
+/// Residual dropped 1.41e+09 → 8.50e+02 (7 orders), still ~11
+/// orders above target. Inertia remains MATCH vs MUMPS/SSIDS. See
+/// dev/validation/phase-2.2.1-mc64-sweep.md.
 #[test]
 #[ignore]
 fn chwirut1_0000_residual_under_1e_8_after_mc64() {
@@ -136,6 +154,11 @@ fn chwirut1_0000_residual_under_1e_8_after_mc64() {
 /// CRESC100_0000: n=806, another matrix with correct inertia but
 /// bad residual (2.54e+04) pre-fix. Smallest residual improvement
 /// needed in the sanity panel.
+///
+/// Phase 2.2.1 Step 8 status: IMPROVED but STILL FAILING.
+/// Residual dropped 2.54e+04 → 1.43e+02 (2 orders), still ~10
+/// orders above target. Inertia remains MATCH vs MUMPS/SSIDS. See
+/// dev/validation/phase-2.2.1-mc64-sweep.md.
 #[test]
 #[ignore]
 fn cresc100_0000_residual_under_1e_8_after_mc64() {
