@@ -14,29 +14,26 @@ wild and exact.
 
 ## Status
 
-Phase 1 is complete (2026-04-12). On the 153,151-matrix KKT corpus
-collected from CUTEst runs of IPOPT, feral's inertia matches **canonical
-Fortran MUMPS 5.8.2** on **99.97%** of matrices, and matches SPRAL/SSIDS
-on 99.76%. Under a 3-oracle consensus framework (feral vs MUMPS vs SSIDS),
-there are **zero feral failures on the Definitive subset**.
+**Phase 1 is complete on the tested subset (matrices with n ≤ 500).
+Feral is NOT yet correct on larger matrices.** The Phase 1 validation
+ran through a benchmark harness that skipped matrices with more than
+500 rows — a hold-over from the dense-only Phase 1a. When that filter
+was lifted in Phase 2's first task and the sparse path was finally run
+on larger matrices (up to n = 5314) already present in the corpus, it
+produced residuals between **10⁴ and 10¹⁴** — 10 to 26 orders of
+magnitude worse than canonical MUMPS and SSIDS on the same inputs.
+The root cause is almost certainly missing global MC64 matching-based
+scaling, which MUMPS and SSIDS apply by default for symmetric
+indefinite matrices and feral does not. **Phase 2.2.1 (MC64 scaling)
+is the current work in progress.** Until it lands, feral should not
+be used on any matrix the dense path cannot handle.
 
-**Important scope caveat.** Every matrix in the validation corpus has
-dimension **n ≤ 500**. The benchmark harness enforces this with a
-hold-over filter from Phase 1a (`if mtx.n > 500 { continue; }` in
-`src/bin/bench.rs`) that was never removed when the sparse solver came
-online. As a consequence, the **sparse multifrontal path — the main
-deliverable of Phase 1b — has in fact only been exercised on matrices
-where the dense path is also applicable**. Correctness on small matrices
-is established; scaling to the `n = 10³ – 10⁵` range that drives real
-IPOPT workloads, performance against canonical solvers, and handling
-of large adversarial inputs are all explicit **Phase 2** questions.
-Lifting this filter and adding the larger benchmarks from `ripopt`
-(`large_scale`, `grid`, `gas`, `water`) is the first Phase 2 task.
+### What Phase 1 did establish
 
-Full retrospective: [`dev/phase1-retrospective.org`](dev/phase1-retrospective.org).
-Phase 1 exit session: [`dev/sessions/2026-04-12-01.md`](dev/sessions/2026-04-12-01.md).
-
-Detailed numbers (all on n ≤ 500 matrices):
+On matrices with **n ≤ 500**, under a 3-oracle consensus framework
+(feral vs canonical Fortran MUMPS 5.8.2 vs SPRAL/SSIDS), feral is
+correct: zero Definitive failures on 153,117 consensus matrices, and
+the following pairwise inertia agreement:
 
 | Pair                | Match rate | Matches / Total   |
 |---------------------|------------|-------------------|
@@ -44,12 +41,34 @@ Detailed numbers (all on n ≤ 500 matrices):
 | feral vs SSIDS      | 99.76%     | 152,779 / 153,151 |
 | MUMPS vs SSIDS      | 98.25%     | 153,172 / 155,899 |
 
-Feral agrees with canonical MUMPS *more* often than canonical MUMPS and
-SSIDS agree with each other on this corpus. The two Fortran solvers
-disagree on boundary-pivot classifications that feral happens to match
-MUMPS's reading of. Note that this agreement statistic is /for matrices
-where feral could be tested/ — it says nothing about the sparse path's
-behavior at scale.
+Feral agrees with canonical MUMPS *more* often than canonical MUMPS
+and SSIDS agree with each other on this subset. This is real, and it
+validates the pivot strategy and multifrontal structure. It does **not**
+generalize beyond n ≤ 500. The bench tolerance on Phase 1 residual
+checks (`n · ε · 10⁶ ≈ 10⁻⁷` on small matrices) was loose enough to
+accept feral residuals that were already 6–8 orders of magnitude worse
+than canonical solvers — the absolute bar was small, so the underlying
+scaling bug hid in the noise. At larger n the same bug produces
+residuals no reasonable tolerance can accept.
+
+### What Phase 1 did NOT establish (and Phase 2 is fixing)
+
+- Feral's sparse path has never produced a correct residual on a
+  matrix where the dense path was not also applicable. The sparse
+  multifrontal pipeline — the main deliverable of Phase 1b — is
+  numerically broken at scale in a specific, understood way: no
+  global scaling is applied before factorization.
+- Performance against canonical solvers has never been measured
+  (unknown, assumed slower).
+- METIS ordering, delayed pivoting, blocked dense kernels, and SIMD
+  are all Phase 2 work.
+
+The Phase 2 plan ([`dev/plans/phase-2-planning.md`](dev/plans/phase-2-planning.md))
+opens with measurement infrastructure and then proceeds directly to
+MC64 global scaling as the first and most urgent correctness fix.
+The scope caveat above is discussed in full in the
+[Phase 1 retrospective](dev/phase1-retrospective.org) and the
+decision records in [`dev/decisions.md`](dev/decisions.md).
 
 ## What's in the box (Phase 1)
 

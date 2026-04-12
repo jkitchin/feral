@@ -116,3 +116,95 @@ Definitive regardless of rmumps. Matrices where the 4-vote
 classification depended on rmumps's tiebreaking vote drop to
 Borderline or Numerically intractable — they were never really
 Definitive, and this re-classification is a correction.
+
+---
+
+## 2026-04-12 — Phase 1 exit numbers do not generalize beyond n ≤ 500
+
+**Decision.** Phase 1 is not re-opened procedurally. The Phase 1b
+exit session file (`dev/sessions/2026-04-12-01.md`) stands as an
+accurate record of what was measured under the criterion in effect
+at the time. However, the Phase 1 exit numbers are recorded here
+as explicitly **not predictive** of feral's behavior on matrices
+with n > 500, and the work that closes that gap is treated as
+Phase 2 correctness work (not Phase 2 performance work) per the
+ordering in `dev/plans/phase-2-planning.md` §2.2.1.
+
+**Why.** The Phase 2.1.2 sanity check, run on the morning of
+2026-04-12 immediately after the Phase 1 exit, lifted the
+`if mtx.n > 500 { continue; }` filter in `src/bin/bench.rs` and
+ran feral's sparse multifrontal pipeline on seven representative
+large matrices already present in the existing KKT corpus
+(CHWIRUT1 n=645 through CRESC132 n=5314). The pipeline ran to
+completion without crashing on any of them and produced:
+
+| Matrix      |    n | consensus inertia | feral inertia    | feral residual | canonical residual |
+|-------------|-----:|-------------------|------------------|---------------:|-------------------:|
+| CHWIRUT1    |  645 | (431, 214, 0)     | (431, 214, 0)    |        1.4e+09 |            ~1e−13  |
+| HAHN1       |  715 | (479, 236, 0)     | (478, 237, 0)    |        1.4e+14 |            ~3e−14  |
+| GAUSS2      |  758 | (508, 250, 0)     | (507, 251, 0)    |        1.3e+09 |            ~5e−16  |
+| CRESC100    |  806 | (606, 200, 0)     | (606, 200, 0)    |        2.5e+04 |            ~6e−15  |
+| MUONSINE    | 1537 | (1025, 512, 0)    | (1026, 511, 0)   |        3.5e+03 |            ~1e−15  |
+| VESUVIO     | 3083 | (2058, 1025, 0)   | (2057, 1026, 0)  |        5.6e+14 |            ~1e−12  |
+| CRESC132    | 5314 | (2660, 2654, 0)   | (2658, 2656, 0)  |        2.4e+08 |            ~1e−11  |
+
+Two separate defects visible in this data:
+
+1. *Residual bug.* Independent of the inertia bug. CHWIRUT1 and
+   CRESC100 have correct inertia but still produce residuals many
+   orders of magnitude worse than canonical solvers. Cause:
+   feral's sparse path applies no global scaling before
+   factorization, while canonical MUMPS and SPRAL/SSIDS both
+   apply MC64 matching-based scaling by default for symmetric
+   indefinite matrices. Phase 1 saw a weaker version of this on
+   ACOPP30 (12 orders of magnitude worse than MUMPS; see
+   `dev/phase1-retrospective.org` §"The ACOPP30 residual gap").
+   At larger n the defect produces results no reasonable residual
+   tolerance can accept. This is the primary Phase 2.2.1 work
+   item.
+
+2. *Inertia bug.* ±1 error in positive and negative counts on 5
+   of 7 test matrices — classic signature of the deferred
+   `count_2x2_inertia` trace-vs-a00 fix firing on near-singular
+   2×2 blocks. At n ≤ 500 this bug mostly showed up on ACOPP30
+   (Borderline under the consensus); at larger n it fires on
+   most KKT matrices with near-singular blocks. This is
+   Phase 2.2.2 work, re-evaluated against canonical MUMPS
+   rather than the rmumps oracle that regressed it in
+   Phase 1b.
+
+**Re-reading Phase 1's residual pass rate.** The Phase 1 bench
+tolerance was `n · ε · 10⁶`, which at n = 500 evaluates to
+≈ 1.1 × 10⁻⁷. On small matrices, feral was producing residuals
+around 10⁻⁷ to 10⁻⁸ while canonical solvers produced 10⁻¹³ to
+10⁻¹⁶ on the same inputs — 5 to 9 orders of magnitude worse, but
+within the loose absolute tolerance. The Phase 1 "99.7% sparse
+residual pass rate" was therefore a measurement of *whether feral
+met an absolute tolerance*, not a measurement of *whether feral
+was producing answers comparable to canonical solvers*. The
+former claim is accurate as stated. The latter is what a casual
+reader of the exit summary would assume, and that assumption does
+not hold.
+
+**What this changes.** Nothing about the Phase 1b exit commit or
+session file is undone. The retrospective
+(`dev/phase1-retrospective.org`) already documents the scope caveat
+in its "honest assessment of success" section; that caveat is now
+a concrete failure mode with measurements attached, and the README
+and CHANGELOG have been updated to reflect the revised
+interpretation. The Phase 2 plan ordering (`dev/plans/phase-2-planning.md`)
+remains correct: Phase 2 opens with measurement infrastructure
+(which surfaced the bug in its first hour), followed by the
+deferred correctness fixes (MC64 scaling as Phase 2.2.1 and the
+trace fix as Phase 2.2.2), followed by pivoting and performance
+work. The sanity check the plan called for in §2.1.2 did exactly
+what a gate is supposed to do, which was to stop us from
+proceeding with corpus expansion on top of a broken sparse path.
+
+**Commitment.** Feral's README will not advertise scale-related
+correctness (n > 500 matrices, production KKT workloads, or
+performance parity with canonical solvers) until Phase 2.2.1 is
+complete and the sanity check panel is re-run with residuals
+within 2–3 orders of magnitude of canonical solvers. This is not
+a target to aspire to after Phase 2; it is a precondition for
+advertising feral as a working sparse solver at all.

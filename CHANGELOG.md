@@ -4,12 +4,37 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Known issues (Phase 2 in progress)
+
+- **The sparse path produces catastrophically wrong residuals on
+  matrices with n > 500.** Phase 1 validation only measured
+  matrices with n ≤ 500 (the bench harness enforced this via a
+  Phase 1a hold-over filter that was not removed until Phase 2).
+  When the filter was lifted in Phase 2.1.2, the sparse path
+  produced residuals 10⁴ to 10¹⁴ on larger matrices already
+  present in the corpus (CHWIRUT1 through CRESC132 at n=5314),
+  while canonical MUMPS and SPRAL/SSIDS produced residuals at
+  machine precision. Root cause: missing global MC64
+  matching-based scaling. Fix in progress as Phase 2.2.1. Until
+  it lands, do not use feral on matrices the dense path cannot
+  handle.
+- **Phase 1 residual pass rate is not a numerical quality
+  measurement**, it is a measurement against the bench tolerance
+  `n · ε · 10⁶`. On small matrices this tolerance is loose enough
+  (≈ 10⁻⁷ at n=500) to accept feral residuals that are already
+  6–8 orders of magnitude worse than canonical solvers. Phase 1's
+  99.7% sparse residual pass rate survives this re-reading; what
+  does not survive is any implicit claim that feral is numerically
+  comparable to canonical solvers at those residual levels.
+
 ### Phase 1b Exit (2026-04-12)
 
-Phase 1b closed under the multi-source consensus exit criterion. Feral
-matches canonical Fortran MUMPS 5.8.2 on **99.97%** of the 153k KKT
-corpus — higher than the agreement between canonical MUMPS and
-canonical SPRAL/SSIDS (98.25%). See `dev/sessions/2026-04-12-01.md`.
+Phase 1b closed under the multi-source consensus exit criterion on
+the n ≤ 500 subset of the KKT corpus. Feral matches canonical
+Fortran MUMPS 5.8.2 on **99.97%** of that subset's inertia — higher
+than the agreement between canonical MUMPS and canonical SPRAL/SSIDS
+(98.25%). See `dev/sessions/2026-04-12-01.md` and the Known issues
+above for the limits of this claim.
 
 ### Added
 - Sparse multifrontal LDLᵀ solver (`factorize_multifrontal`,
