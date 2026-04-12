@@ -1,0 +1,191 @@
+#+TITLE: Session 2026-04-12-06 journal
+#+DATE: 2026-04-12
+
+* 16:00 :mc64:step8:triage:start:
+Phase 2.2.1 Step 8 left one blocker: ACOPP30_0000 residual
+regressed from 2.84e+16 (pre-fix) to 2.27e+46 (post-MC64). Every
+other sanity-panel matrix improved 2–10 orders under MC64, so this
+regression is ACOPP30-specific. Task (diagnostic only): root-cause
+the failure and report. No src/ edits; no fix. See
+dev/validation/phase-2.2.1-mc64-sweep.md for the Step 8 numbers.
+
+Hypotheses to knock out, per triage brief:
+  1. non-finite scaling entries
+  2. extreme scaling ratios (>1e10)
+  3. PartialSingular identity fallback not firing
+  4. ForceAccept × MC64 interaction
+  5. refinement divergence / best-iterate broken
+  6. solve pre/post-scale direction wrong
+
+* 16:05 :mc64:debug-binary:
+Wrote examples/debug_acopp30_mc64.rs. It:
+  - loads ACOPP30_0000.mtx + the IPOPT sidecar JSON
+  - runs compute_scaling(Mc64Symmetric) directly and summarizes
+    the output vector (min, max, ratio, geomean, non-finite count,
+    zero count, neg count, 5 smallest/largest with indices)
+  - factors via three paths (Identity, Mc64Symmetric, External
+    all-ones) and for each prints inertia, the whole set of
+    accepted |D| values + quantiles, solve ||x||_inf/||Ax||_inf
+    /rel_res, refined rel_res
+  - manually traces refinement steps 0..5 on the MC64 path so we
+    can see whether solve_sparse_refined is returning the best
+    iterate or the final iterate
+  - an MC64-capped probe rewriting |s|>1e6 or <1e-6 to 1.0
+  - a loosened-zero_tol experiment (zero_tol = 1e-8) on both
+    scaling paths
+
+Compiles and runs in ~1s via `cargo run --release --example
+debug_acopp30_mc64`. Retained as future regression probe.
+
+* 16:15 :mc64:finding:scaling-clean:
+First run of the debug binary. The scaling vector itself is CLEAN:
+
+  info = Applied
+  scaling: n=209  min=5.289e-2  max=4.870e0  ratio=9.208e1
+           geomean=4.897e-1  nonfin=0  zero=0  neg=0
+
+Five smallest entries are 0.053–0.062 at indices 23,49,53,55,66.
+Five largest are 4.87,3.20,3.16,3.16,3.16 at indices 127,97,206,
+205,204. No infinity, no NaN, no zero. LOG_HUGE=709 never fires
+(the exponent range is [-2.94, +1.58]).
+
+**Hypothesis 1 ruled out.** (non-finite scaling)
+**Hypothesis 2 ruled out.** (extreme magnitudes)
+**Hypothesis 3 ruled out.** (ScalingInfo::Applied means n_matched==n)
+
+* 16:20 :mc64:finding:same-inertia:
+Both Identity and Mc64Symmetric paths produce EXACTLY the same
+feral inertia: (62, 142, 5). The 5 force-accepted zero pivots are
+present in both cases. MC64 does not create new zero pivots.
+
+MUMPS inertia is (71, 137, 1). SSIDS is (71, 138, 0). IPOPT's own
+record in ACOPP30_0000.json is (72, 137, 0) with delta_w=delta_c=0
+at iteration 0 — meaning this KKT is not regularized and should
+factor cleanly. Feral's 5 zero pivots are a pre-existing Phase 1
+issue, not caused by MC64.
+
+* 16:25 :mc64:smoking-gun:D-values:
+Dumped the full |D| distribution across all supernodes for both
+paths:
+
+  Identity:  min=1.000e-08  p5=1.000e-08  p50=1.78   p95=80.0   max=261.0
+             5 smallest accepted |D|: all 1e-8 (the KKT delta_c)
+  Mc64:      min=3.635e-10  p5=2.100e-09  p50=1.00   p95=1.55   max=23.4
+             5 smallest accepted |D|:
+               3.635e-10, 5.537e-10, 6.214e-10, 6.481e-10, 8.470e-10
+
+This is the smoking gun. MC64 equilibrates the matrix perfectly
+(median D → 1.0, p95 drops from 80 to 1.55, max drops from 261 to
+23 — just as designed) but the WORST pivots get ~28× smaller,
+dropping from 1e-8 to 3.6e-10. They are still above
+zero_tol = f64::EPSILON = 2.2e-16, so ForceAccept does NOT zero
+them. The solve then divides by 3.6e-10 in the D-solve, amplifying
+rounding error by ~2.8e9 per affected position. With 5 such
+positions compounding through forward L-solve + D-solve + backward
+L^T-solve, total amplification is in the 1e30 range — exactly the
+observed 30-order regression.
+
+**Hypothesis 4 CONFIRMED.** ForceAccept × MC64 interaction.
+
+* 16:30 :mc64:refinement-working:
+Manual refinement trace on the MC64 path shows:
+
+  step 0: ||r||_2=4.54e48  rel_res=2.27e46
+  step 1: ||r||_2=2.30e82  rel_res=1.15e80  (diverging ×e32)
+  step 2: ||r||_2=1.05e116 rel_res=5.25e113
+  step 3: ||r||_2=2.68e149 rel_res=1.34e147
+  step 4: ||r||_2=inf, rel_res=inf
+  step 5: inf
+
+`solve_sparse_refined` returns 2.27e46 — identical to step 0.
+Best-iterate tracking is working correctly: every subsequent step
+is much worse, so best = step 0. Confirmed the refinement loop
+tracks ||r||_2 of the unscaled A, not ||dx||.
+
+**Hypothesis 5 ruled out.** Best-iterate refinement is fine.
+
+* 16:35 :mc64:solve-wrapper-ok:
+External([1.0; n]) path gives EXACTLY the same residual
+(2.842e+16) as Identity (2.842e+16). That confirms the
+solve_sparse pre/post-scale wrapper is a proper no-op when s≡1.
+Re-derived `c = D·b; y = M^-1 c; x = D·y`; code matches; both
+ends multiply by D, not D^-1. No sign or direction bug.
+
+**Hypothesis 6 ruled out.** Solve wrapper is correct.
+
+* 16:40 :mc64:2x2-det-healthy:
+Checked 2×2 block determinants (suspected they might be near
+zero_tol_2x2 on the MC64 path):
+
+  Identity 2×2 |det|: [3.37, 2711]  (21 blocks)
+  MC64     2×2 |det|: [0.084, 1.59] (22 blocks)
+
+MC64 brings 2×2 dets to O(1) as expected. Not the amplifier.
+The amplifier is specifically the 1×1 pivots at 3.6e-10.
+
+Note: the MC64 path has ONE more 2×2 block (22 vs 21). MC64's
+pivot rearrangement is essentially identical to unscaled here.
+
+* 16:45 :mc64:loose-zero-tol-still-bad:
+Probed: what if I loosen zero_tol to 1e-8 on the MC64 path, so
+the 3.6e-10 pivots get flushed to zero?
+
+  MC64 + zero_tol=1e-8: rel_res = 2.27e46  (unchanged)
+  inertia:              (62, 140, 7)  — 2 more zero pivots
+
+Still 2.27e46. Why? Because the 5 smallest D entries are
+3.63e-10, 6.21e-10, 6.48e-10, 1.07e-9, 1.23e-9 — all below 1e-8
+but they're inside 2×2 pivot blocks whose |det| ≈ 0.084 is
+*above* zero_tol_2x2 = 1e-16. So the 2×2 inversion goes through
+and the (small) entries get inverted via the 2×2 formula. This
+is an important wrinkle for the fix: ANY Phase 2.2.2 fix that
+raises the 1×1 threshold must also tighten the 2×2 threshold
+or equivalent, else the same small magnitudes leak through the
+2×2 path.
+
+* 16:50 :mc64:root-cause:
+Root cause in one sentence: MC64 equilibrates A → D·A·D so pivots
+cluster around 1, but in doing so it pushes the WORST pivots from
+1e-8 (feral's existing Phase 1 "force-accept-below-eps" floor) to
+3.6e-10 (still above EPS but catastrophically small for
+inversion). Feral's zero_tol=EPSILON is way below MC64's "expected
+reject threshold" (~0.01 under threshold pivoting).
+
+This is a design mismatch between MC64 (which expects threshold
+pivoting with u=0.01 to downstream-reject the small pivots it
+exposes) and feral's Phase 1 ForceAccept (which only rejects
+exactly-zero pivots). The MC64 wrapper is correct; the solve
+wrapper is correct; the symbolic plumbing is correct. The bug is
+at the meeting point.
+
+* 16:55 :mc64:proposed-fix:
+Preferred fix (Phase 2.2.2): threshold partial pivoting with
+delayed pivots (textbook solution, what MUMPS/SSIDS do).
+
+Minimal fix for Phase 2.2.2 Step 1: scaling-aware zero_tol.
+When ScalingInfo != NotApplied, raise zero_tol to ~1e-12 (or
+make it a column-relative threshold u·max_col). This flushes the
+3.6e-10 pivots to zero, matching the Identity path's behavior on
+its 1e-8 pivots. Expected result: ACOPP30 drops from 1e46 to
+~1e16 (Identity baseline) while the other 6 sanity-panel matrices
+retain their 2–10 order improvements.
+
+MUST also address the 2×2 block path: fixing only 1×1 zero_tol
+leaves a loophole (see 16:45). Option: tighten zero_tol_2x2 to
+(zero_tol)² with the new zero_tol.
+
+DO NOT touch MC64 itself — compute_symmetric is correct as
+written.
+
+* 17:00 :mc64:deliverables:
+Writing dev/debugging/2026-04-12-acopp30-regression.md with the
+hypothesis table, numbers, root cause, proposed fix, and
+uncovered bugs. Committing the diagnostic binary
+examples/debug_acopp30_mc64.rs and this journal entry.
+
+* 17:05 :mc64:src-check:
+grepped src/ for recent modifications from this session:
+  $ git diff --name-only
+  (nothing in src/)
+Confirmed no src/ edits. No tolerance loosening. No
+un-ignoring of regression tests. This was a pure diagnostic.
