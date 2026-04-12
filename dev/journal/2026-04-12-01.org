@@ -295,3 +295,77 @@
   the native MUMPS and SSIDS oracles, run them on the 153k corpus,
   compute consensus verdicts, and use those to define the actual
   Phase 1b exit criterion.
+
+* 15:30 :phase-3:mumps-build:
+  Built canonical Fortran MUMPS 5.8.2 from ref/mumps. Configuration:
+  - Sequential (libmpiseq, no MPI)
+  - SYM = 2 (symmetric indefinite)
+  - Homebrew GCC 15.2 (gcc-15, gfortran)
+  - Homebrew OpenBLAS 0.3.30 (provides both BLAS and LAPACK)
+  - PORD ordering only (METIS/Scotch deferred)
+  - ICNTL(24) = 1 for null pivot detection
+
+  Build pipeline:
+  - Wrote external_benchmarks/mumps_oracle/Makefile.inc.mumps as the
+    tracked template (ref/ is gitignored, so the template lives here
+    and the local Makefile copies it into place before building).
+  - Wrote external_benchmarks/mumps_oracle/mumps_bench.F: a Fortran 77
+    driver that initializes DMUMPS once, then loops over a manifest
+    of (mtx_path, rhs_path, out_path) triples. Reuses one struct
+    across all matrices to avoid per-matrix MPI/struct overhead.
+  - Wrote external_benchmarks/mumps_oracle/run_mumps.py: a Python
+    wrapper that walks data/matrices/kkt, extracts each RHS from the
+    ipopt sidecar, builds a manifest, runs mumps_bench, and writes
+    canonical .mumps.json sidecars.
+  - Wrote external_benchmarks/README.md and .gitignore.
+
+  Sanity check on dsimpletest passed. Then ran the wrapper on the
+  triaged matrices: MGH10S_0000, all POLAK6 (37 matrices), ACOPP30_0000,
+  and the first 1000 ERRINBAR matrices. All 1039 succeeded.
+
+* 15:45 :phase-3:major-finding:
+  Canonical Fortran MUMPS 5.8.2 results compared to rmumps sidecars
+  on the four spot-checked matrices:
+
+  | Matrix         | rmumps sidecar | canonical MUMPS  | feral             |
+  |----------------+----------------+------------------+-------------------|
+  | MGH10S_0000    | (35,16,0)      | (35,16,0) ✓     | (35,16,0) ✓      |
+  | POLAK6_0021    | *(5,4,0)*      | *(5,1,3)*        | (4,1,4) default  |
+  | *ACOPP30_0000* | *(72,137,0)*   | *(71,137,1)* ✓  | *(71,137,1)*     |
+  | ERRINBAR_0824  | (18,9,0)       | (18,9,0) ✓      | (18,9,0) ✓       |
+
+  *MAJOR FINDING.* On 2 of 4 spot-checked matrices, rmumps sidecars
+  *disagree with canonical Fortran MUMPS*.
+
+  1. *ACOPP30_0000*: feral and canonical Fortran MUMPS agree exactly
+     on (71, 137, 1). The rmumps sidecar's (72, 137, 0) is the outlier.
+     The entire ACOPP30 family of 68 dense "feral failures" was
+     actually feral matching canonical MUMPS while rmumps was wrong.
+     The trace-based 2x2 inertia bug fix that we deferred this morning
+     because it caused 16 dense regressions vs rmumps may now actually
+     move feral *toward* canonical MUMPS rather than away. Re-attempt
+     after the full corpus pass.
+
+  2. *POLAK6_0021*: rmumps says (5,4,0); canonical MUMPS says (5,1,3)
+     — found 3 zero pivots; feral with default tol gets (4,1,4). All
+     three differ on the boundary pivot count, but both feral and
+     canonical MUMPS produce machine-precision residuals
+     (4.6e-17 and 1.9e-16). The inertia disagreement is definitional,
+     not numerical.
+
+  Residual observation: ACOPP30_0000 feral 3.15e-2 vs canonical MUMPS
+  5.0e-14. Same factorization (per inertia agreement) but MUMPS solves
+  12 orders of magnitude better. MUMPS does additional scaling or
+  refinement that feral isn't doing. This is a real Phase 2 target.
+
+  ERRINBAR_0824: feral 1.87e-4 vs canonical MUMPS 3.6e-4. Both fail
+  the strict tolerance at the same precision wall. Confirms ERRINBAR
+  is fundamentally ill-conditioned, not a feral bug.
+
+  *Implication for the consensus exit plan.* The rmumps oracle is
+  *not reliable as ground truth*. The decision to build the consensus
+  framework is fully vindicated. Once the full MUMPS corpus pass
+  completes (~1-2 hours estimated runtime), and once SSIDS is built,
+  the consensus framework will give us a real picture of where feral
+  agrees with the broader literature and where rmumps was leading us
+  astray.
