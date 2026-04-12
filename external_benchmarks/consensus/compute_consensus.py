@@ -124,13 +124,29 @@ def residual_passes(n: int, residual: float | None) -> bool:
     return residual <= tol
 
 
-def inertia_consensus(results: list[SolverResult]) -> tuple[tuple[int, int, int] | None, str, list[str]]:
+# Voting oracles: these are the solvers whose inertia and residual count
+# toward the Definitive / Borderline / NumericallyIntractable / Excluded
+# classification. rmumps is deliberately NOT in this set — see
+# dev/decisions.md (2026-04-12, "rmumps deprecated as a validation oracle").
+VOTING_ORACLES = {"feral", "mumps", "ssids"}
+
+
+def inertia_consensus(
+    results: list[SolverResult],
+) -> tuple[tuple[int, int, int] | None, str, list[str]]:
     """Return (consensus_inertia, agreement_level, dissenters).
+
+    Only oracles in VOTING_ORACLES participate. rmumps is ignored here
+    and reported separately as informational metadata.
 
     agreement_level ∈ {"strong", "weak", "none"}.
     dissenters lists solver names whose inertia disagrees with the consensus.
     """
-    inertias = [(r.name, r.inertia) for r in results if r.available and r.inertia is not None]
+    inertias = [
+        (r.name, r.inertia)
+        for r in results
+        if r.available and r.inertia is not None and r.name in VOTING_ORACLES
+    ]
     if not inertias:
         return None, "none", []
 
@@ -138,13 +154,18 @@ def inertia_consensus(results: list[SolverResult]) -> tuple[tuple[int, int, int]
     most_common, most_count = counts.most_common(1)[0]
     n_total = len(inertias)
 
-    if most_count >= 3 or (n_total <= 2 and most_count == n_total):
+    # Strong: unanimous agreement among available voting oracles.
+    # (With three voting oracles, unanimous is 3/3; with fewer — e.g.
+    # MUMPS failed the workspace check — we require whatever is
+    # available to all agree.)
+    if most_count == n_total:
         consensus = most_common
-        dissenters = [name for name, inert in inertias if inert != consensus]
-        return consensus, "strong", dissenters
+        return consensus, "strong", []
 
-    # Weak: 2 of 4 agree AND the others differ by small perturbation
-    if most_count == 2 and n_total >= 3:
+    # Weak: majority agrees AND every dissenter is within ±1 per component.
+    # For N=3 this is 2/3 with the third differing by ≤1. For N=2 there is
+    # no "weak" state — either unanimous or no consensus.
+    if most_count >= 2 and n_total >= 3:
         consensus = most_common
         ok = True
         dissenters = []
@@ -152,7 +173,6 @@ def inertia_consensus(results: list[SolverResult]) -> tuple[tuple[int, int, int]
             if inert == consensus:
                 continue
             diff = tuple(abs(a - b) for a, b in zip(inert, consensus))
-            # Allow each component to differ by at most 1 — boundary pivot
             if all(d <= 1 for d in diff):
                 dissenters.append(name)
             else:
@@ -166,14 +186,29 @@ def inertia_consensus(results: list[SolverResult]) -> tuple[tuple[int, int, int]
 
 
 def residual_consensus(results: list[SolverResult]) -> tuple[bool, list[str]]:
-    """Return (consensus_solvable, residual_dissenters)."""
-    have_residual = [r for r in results if r.available and r.residual is not None and r.n is not None]
+    """Return (consensus_solvable, residual_dissenters).
+
+    Only VOTING_ORACLES count toward the solvable verdict. A matrix is
+    "consensus solvable" when a majority of the available voting oracles
+    produce a residual below the feral bench tolerance. For N=3 this is
+    ≥2/3, consistent with the prior 3-of-4 rule's spirit (most oracles
+    can solve it, not all of them).
+    """
+    have_residual = [
+        r
+        for r in results
+        if r.available
+        and r.residual is not None
+        and r.n is not None
+        and r.name in VOTING_ORACLES
+    ]
     if not have_residual:
         return False, []
     passes = [residual_passes(r.n, r.residual) for r in have_residual]
     n_pass = sum(passes)
     n_total = len(have_residual)
-    solvable = n_pass >= 3 or (n_total <= 2 and n_pass == n_total)
+    # Strict majority for N≥3 (e.g. 2/3), unanimous for N≤2.
+    solvable = n_pass > n_total // 2 if n_total >= 3 else n_pass == n_total
     dissenters = [r.name for r, p in zip(have_residual, passes) if not p]
     return solvable, dissenters
 
@@ -343,6 +378,8 @@ def main() -> int:
     out_lines = []
     out_lines.append("=== Consensus summary ===")
     out_lines.append(f"matrices analyzed: {summary['n_total']}")
+    out_lines.append("voting oracles:    feral, mumps, ssids")
+    out_lines.append("informational:     rmumps (reported but not counted)")
     out_lines.append("")
     out_lines.append("Verdict counts:")
     for verdict in ["definitive", "borderline", "numerically_intractable", "excluded"]:
@@ -359,8 +396,25 @@ def main() -> int:
     out_lines.append("Feral failures on Borderline matrices:")
     out_lines.append(f"  {len(summary['feral_fail_borderline'])} matrices")
     out_lines.append("")
-    out_lines.append("Pairwise inertia agreement:")
+    out_lines.append("Pairwise inertia agreement (voting oracles):")
+    voting_pairs = [("feral", "mumps"), ("feral", "ssids"), ("mumps", "ssids")]
     for pair, stats in summary["pairwise_inertia_agreement"].items():
+        pair_tuple = tuple(pair.split(" vs "))
+        if pair_tuple not in voting_pairs:
+            continue
+        if stats["total"] == 0:
+            out_lines.append(f"  {pair:20s} no overlap")
+        else:
+            out_lines.append(
+                f"  {pair:20s} {stats['matches']:6d} / {stats['total']:6d}  "
+                f"({stats['pct']:.2f}%)"
+            )
+    out_lines.append("")
+    out_lines.append("Pairwise inertia agreement (rmumps — informational only):")
+    for pair, stats in summary["pairwise_inertia_agreement"].items():
+        pair_tuple = tuple(pair.split(" vs "))
+        if "rmumps" not in pair_tuple:
+            continue
         if stats["total"] == 0:
             out_lines.append(f"  {pair:20s} no overlap")
         else:
