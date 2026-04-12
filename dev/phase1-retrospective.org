@@ -27,6 +27,20 @@ original Phase 1 specification's "100% correct inertia" criterion was
 not, and we discuss what it means for a solver to be "correct" when
 the canonical solvers themselves do not agree.
 
+*Scope caveat.* Every matrix in the 153,151-matrix corpus has
+dimension \(n \leq 500\). This is a Phase 1a vestige: the benchmark
+harness enforces `if mtx.n > 500 { continue; }` as a hold-over from
+the dense-only validation phase, and it was never removed when the
+sparse multifrontal solver came online in Phase 1b. As a
+consequence, the /sparse/ factorization pipeline --- the whole
+point of Phase 1b --- has in fact only been exercised on matrices
+where the dense path is also applicable. Correctness at
+\(n \leq 500\) is established; scaling behavior, performance
+relative to canonical solvers, and correctness on large adversarial
+inputs are all Phase 2 questions. See Section [[#honest-assessment]]
+for the full scope caveat and the Phase 2 plan for the corpus
+expansion that will lift this limit.
+
 * Introduction
 
 ** The FERAL project
@@ -62,8 +76,8 @@ implementation from published papers. The architectural reference
 solvers are MUMPS citep:duff1983multifrontal and SPRAL/SSIDS
 citep:hogg2013pivoting, but neither is allowed to be linked into the
 core crate at any point. The Phase 1 specification defined the
-solver's exit criterion as /100% correct inertia and solution on the
-collected KKT benchmark set/ --- a criterion that, as we will
+solver's exit criterion as 100% correct inertia and solution on the
+collected KKT benchmark set --- a criterion that, as we will
 describe, turned out to be unrealizable as stated, for reasons that
 were not anticipated when the spec was written.
 
@@ -768,7 +782,48 @@ numbers do and do not mean.
   comparisons against canonical MUMPS and SSIDS are the natural
   follow-on to the oracle infrastructure already built in Phase 1b.
 
+- /The sparse multifrontal path scales beyond \(n = 500\)./ This
+  is the most important claim feral implicitly makes and it is the
+  least supported. The architecture (Duff-Reid multifrontal
+  citep:duff1983multifrontal with SSIDS-style amalgamation
+  citep:hogg2013pivoting) is known to scale to millions of
+  unknowns in canonical implementations, but feral's specific Rust
+  implementation has been run on zero matrices with \(n > 500\). We
+  do not know whether ~column_counts~ has a latent \(O(n^2)\) that
+  only manifests at larger sizes (the Phase 1b plan explicitly
+  noted "O(n^2) worst case but fine for dim <= 500"), whether the
+  frontal matrix allocation pattern holds up under deep assembly
+  trees, whether the sparse solve's vec-allocation-per-supernode
+  hot loops become dominant at large n, or whether the MTX reader
+  even terminates on a 100K-line file. These are empirical
+  questions with unknown answers, and the Phase 1 exit numbers do
+  not constrain any of them. Phase 2 begins by answering these
+  questions with direct measurement on moderate-scale problems
+  \((n = 10^3 - 10^4)\), then escalates from there.
+
 ** What is deliberately left unresolved
+
+- /The \(n \leq 500\) scope limit./ The benchmark harness in
+  ~src/bin/bench.rs~ contains the line ~if mtx.n > 500 { continue; }~,
+  a hold-over from Phase 1a when the dense Bunch-Kaufman path was
+  the only factorization available. This line was never removed
+  when the sparse multifrontal solver came online in Phase 1b. The
+  consequence is substantial: /every one of the 153,151 KKT
+  matrices in the corpus, and every one of the 169,585 matrices in
+  the consensus, has \(n \leq 500\)/. The sparse multifrontal
+  pipeline --- which is the main deliverable of Phase 1b --- has
+  therefore never been exercised on a matrix where the dense path
+  would not also have been applicable. This is a major gap between
+  what the solver /claims/ to do (sparse KKT systems at production
+  scale) and what has /actually/ been tested. Nothing in the Phase
+  1 exit numbers establishes that feral handles even moderate-scale
+  problems, let alone the \(n = 10^4 - 10^5\) problems that drive
+  real IPOPT workloads. The corpus expansion --- pulling large
+  problems from ~../ripopt/benchmarks/{large_scale, grid, gas,
+  water}~ and lifting the \(n > 500\) bench filter --- is the first
+  explicit Phase 2 task. Until that measurement exists, the
+  correctness claims here are "correct on the subset we tested on",
+  not "correct in general".
 
 - /The ACOPP30 residual gap./ Twelve orders of magnitude between
   feral's residual and MUMPS's on the same factorization is a real

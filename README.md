@@ -20,10 +20,23 @@ Fortran MUMPS 5.8.2** on **99.97%** of matrices, and matches SPRAL/SSIDS
 on 99.76%. Under a 3-oracle consensus framework (feral vs MUMPS vs SSIDS),
 there are **zero feral failures on the Definitive subset**.
 
+**Important scope caveat.** Every matrix in the validation corpus has
+dimension **n ≤ 500**. The benchmark harness enforces this with a
+hold-over filter from Phase 1a (`if mtx.n > 500 { continue; }` in
+`src/bin/bench.rs`) that was never removed when the sparse solver came
+online. As a consequence, the **sparse multifrontal path — the main
+deliverable of Phase 1b — has in fact only been exercised on matrices
+where the dense path is also applicable**. Correctness on small matrices
+is established; scaling to the `n = 10³ – 10⁵` range that drives real
+IPOPT workloads, performance against canonical solvers, and handling
+of large adversarial inputs are all explicit **Phase 2** questions.
+Lifting this filter and adding the larger benchmarks from `ripopt`
+(`large_scale`, `grid`, `gas`, `water`) is the first Phase 2 task.
+
 Full retrospective: [`dev/phase1-retrospective.org`](dev/phase1-retrospective.org).
 Phase 1 exit session: [`dev/sessions/2026-04-12-01.md`](dev/sessions/2026-04-12-01.md).
 
-Detailed numbers:
+Detailed numbers (all on n ≤ 500 matrices):
 
 | Pair                | Match rate | Matches / Total   |
 |---------------------|------------|-------------------|
@@ -34,7 +47,9 @@ Detailed numbers:
 Feral agrees with canonical MUMPS *more* often than canonical MUMPS and
 SSIDS agree with each other on this corpus. The two Fortran solvers
 disagree on boundary-pivot classifications that feral happens to match
-MUMPS's reading of.
+MUMPS's reading of. Note that this agreement statistic is /for matrices
+where feral could be tested/ — it says nothing about the sparse path's
+behavior at scale.
 
 ## What's in the box (Phase 1)
 
@@ -172,10 +187,19 @@ story of how and why it was built.
   is the Phase 1 default. For matrices with genuinely rank-deficient
   blocks, this produces a wrong `A⁻¹` that iterative refinement cannot
   recover. Delayed pivoting (SSIDS-style) is Phase 2.
-- **Corpus is mostly small**: the KKT corpus used for Phase 1 validation
-  is dominated by CUTEst test problems with n < 500. Larger and more
-  adversarial problems from AC optimal power flow, PDE-constrained
-  optimization, and gas/water network design will be added in Phase 2.
+- **The sparse path has never run at scale.** Every matrix in the
+  Phase 1 validation corpus has n ≤ 500 because the bench enforces a
+  Phase 1a hold-over filter. The sparse multifrontal pipeline, which
+  is the point of Phase 1b, has literally never been run on a matrix
+  where the dense path wasn't also applicable. We do not know whether
+  `column_counts` has a latent O(n²) that manifests at larger sizes
+  (the Phase 1b plan explicitly noted "O(n²) worst case but fine for
+  dim ≤ 500"), whether the frontal allocation pattern holds up under
+  deep assembly trees, or whether the per-supernode vec allocations in
+  the sparse solve become dominant at large n. The first Phase 2 task
+  is lifting this limit and measuring feral against canonical MUMPS
+  and SSIDS on moderate-scale (n = 10³ – 10⁴) problems from
+  `ripopt/benchmarks/{large_scale, grid, gas, water}`.
 
 ## References
 
