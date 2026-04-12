@@ -156,6 +156,12 @@ pub fn solve_sparse(
 /// can leave a non-trivial residual on near-singular pivots, and refinement
 /// recovers machine precision in 0–3 steps for well-conditioned matrices.
 ///
+/// **Best-iterate:** tracks the smallest `||r||₂` seen across all
+/// refinement steps and returns the corresponding `x`. On rank-deficient
+/// matrices where ForceAccept produced a wrong `A⁻¹`, the correction
+/// `dx = A⁻¹·r` can amplify error; tracking the best iterate guarantees
+/// the returned `x` is no worse than the unrefined `solve_sparse()` output.
+///
 /// Convergence test: stop when `||δx||₂ / ||x||₂ < ε·√n` or after 3 steps.
 pub fn solve_sparse_refined(
     matrix: &CscMatrix,
@@ -172,28 +178,50 @@ pub fn solve_sparse_refined(
 
     let mut x = solve_sparse(factors, rhs)?;
 
+    // Initial residual
+    let mut r = vec![0.0; n];
+    let mut ax = vec![0.0; n];
+    matrix.symv(&x, &mut ax);
+    for i in 0..n {
+        r[i] = rhs[i] - ax[i];
+    }
+    let mut r_norm = norm2(&r);
+
+    let mut best_x = x.clone();
+    let mut best_r_norm = r_norm;
+
     let max_steps = 3;
     let n_sqrt = (n as f64).sqrt();
     let threshold = f64::EPSILON * n_sqrt;
+    let divergence_factor = 100.0;
 
     for _ in 0..max_steps {
-        // Residual: r = b - A·x
-        let mut ax = vec![0.0; n];
-        matrix.symv(&x, &mut ax);
-        let mut r = vec![0.0; n];
-        for i in 0..n {
-            r[i] = rhs[i] - ax[i];
-        }
-
-        // Correction: δx = A⁻¹·r
         let dx = solve_sparse(factors, &r)?;
 
-        let dx_norm = norm2(&dx);
-        let x_norm = norm2(&x);
-
+        let mut x_new = x.clone();
         for i in 0..n {
-            x[i] += dx[i];
+            x_new[i] += dx[i];
         }
+
+        let mut r_new = vec![0.0; n];
+        let mut ax_new = vec![0.0; n];
+        matrix.symv(&x_new, &mut ax_new);
+        for i in 0..n {
+            r_new[i] = rhs[i] - ax_new[i];
+        }
+        let r_new_norm = norm2(&r_new);
+
+        if r_new_norm < best_r_norm {
+            best_r_norm = r_new_norm;
+            best_x = x_new.clone();
+        }
+
+        let dx_norm = norm2(&dx);
+        let x_norm = norm2(&x_new);
+
+        x = x_new;
+        r = r_new;
+        r_norm = r_new_norm;
 
         if x_norm > 0.0 {
             if dx_norm / x_norm < threshold {
@@ -202,9 +230,13 @@ pub fn solve_sparse_refined(
         } else if dx_norm < threshold {
             break;
         }
+
+        if r_norm > best_r_norm * divergence_factor {
+            break;
+        }
     }
 
-    Ok(x)
+    Ok(best_x)
 }
 
 fn norm2(v: &[f64]) -> f64 {

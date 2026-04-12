@@ -150,6 +150,49 @@ fn solve_sparse_refined_well_conditioned_no_change() {
 }
 
 #[test]
+fn solve_sparse_refined_residual_monotone_on_singular_matrix() {
+    // Singular 3x3 matrix that triggers ForceAccept on a zero pivot.
+    // Without the residual-monotone guard, refinement would amplify the
+    // error in dx = A⁻¹·r and leave the result worse than the unrefined
+    // solve. With the guard, the refined residual must be no worse than
+    // the unrefined residual.
+    //
+    //   [ 1e-16  0   1 ]
+    //   [   0    1   0 ]
+    //   [   1    0   0 ]
+    //
+    // The (0,0) pivot is essentially zero. ForceAccept ignores it; the
+    // resulting "factorization" is unable to faithfully represent A⁻¹.
+    let csc = CscMatrix::from_triplets(
+        3,
+        &[0, 2, 1, 2],
+        &[0, 0, 1, 2],
+        &[1e-16, 1.0, 1.0, 0.0],
+    )
+    .unwrap();
+    let rhs = vec![1.0, 2.0, 3.0];
+
+    let sym = symbolic_factorize(&csc, &SupernodeParams::default()).expect("symbolic");
+    let (sfac, _) = factorize_multifrontal(&csc, &sym, &ldlt_params()).expect("sparse factor");
+
+    let x_un = solve_sparse(&sfac, &rhs).expect("solve_sparse");
+    let res_un = rel_residual(&csc, &x_un, &rhs);
+
+    let x_ref = solve_sparse_refined(&csc, &sfac, &rhs).expect("solve_sparse_refined");
+    let res_ref = rel_residual(&csc, &x_ref, &rhs);
+
+    // Guard property: refined residual must be ≤ unrefined residual.
+    // Without the guard this would fail spectacularly on this kind of
+    // matrix.
+    assert!(
+        res_ref <= res_un + 1e-15,
+        "residual-monotone guard failed: unrefined {:.3e}, refined {:.3e}",
+        res_un,
+        res_ref
+    );
+}
+
+#[test]
 fn solve_sparse_refined_dimension_mismatch_returns_error() {
     let csc = CscMatrix::from_triplets(
         3,

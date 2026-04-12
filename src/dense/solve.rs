@@ -57,6 +57,15 @@ pub fn solve(factors: &Factors, rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
 
 /// Solve A·x = rhs with iterative refinement (Section 2.10).
 /// Requires the original matrix to compute residuals.
+///
+/// **Best-iterate:** tracks the smallest `||r||₂` seen across all
+/// refinement steps and returns the corresponding `x`. On rank-deficient
+/// matrices where ForceAccept produced a wrong `A⁻¹`, the correction
+/// `dx = A⁻¹·r` can amplify error; tracking the best iterate guarantees
+/// the returned `x` is no worse than the unrefined `solve()` output.
+/// Intermediate steps are still allowed to be non-monotone — extreme
+/// scaling cases sometimes need a transient bump before subsequent steps
+/// reduce the residual below the unrefined baseline.
 pub fn solve_refined(
     matrix: &SymmetricMatrix,
     factors: &Factors,
@@ -73,32 +82,59 @@ pub fn solve_refined(
     // Initial solve
     let mut x = solve(factors, rhs)?;
 
+    // Initial residual
+    let mut r = vec![0.0; n];
+    let mut ax = vec![0.0; n];
+    matrix.symv(&x, &mut ax);
+    for i in 0..n {
+        r[i] = rhs[i] - ax[i];
+    }
+    let mut r_norm = norm2(&r);
+
+    // Track the best iterate seen so far
+    let mut best_x = x.clone();
+    let mut best_r_norm = r_norm;
+
     let max_steps = 3;
     let n_sqrt = (n as f64).sqrt();
+    let threshold = f64::EPSILON * n_sqrt;
+    // Bail out if the residual blows up far beyond the best seen
+    let divergence_factor = 100.0;
 
     for _ in 0..max_steps {
-        // Compute residual: r = b - A·x
-        let mut ax = vec![0.0; n];
-        matrix.symv(&x, &mut ax);
-
-        let mut r = vec![0.0; n];
-        for i in 0..n {
-            r[i] = rhs[i] - ax[i];
-        }
-
         // Solve correction: δx = A⁻¹ r
         let dx = solve(factors, &r)?;
 
-        // Check convergence: ||δx||₂ / ||x||₂ < macheps * sqrt(n)
-        let dx_norm = norm2(&dx);
-        let x_norm = norm2(&x);
-
-        // Update: x = x + δx
+        // Candidate x_new = x + δx
+        let mut x_new = x.clone();
         for i in 0..n {
-            x[i] += dx[i];
+            x_new[i] += dx[i];
         }
 
-        let threshold = f64::EPSILON * n_sqrt;
+        // Candidate residual
+        let mut r_new = vec![0.0; n];
+        let mut ax_new = vec![0.0; n];
+        matrix.symv(&x_new, &mut ax_new);
+        for i in 0..n {
+            r_new[i] = rhs[i] - ax_new[i];
+        }
+        let r_new_norm = norm2(&r_new);
+
+        // Track best
+        if r_new_norm < best_r_norm {
+            best_r_norm = r_new_norm;
+            best_x = x_new.clone();
+        }
+
+        // Convergence check on δx, before stepping
+        let dx_norm = norm2(&dx);
+        let x_norm = norm2(&x_new);
+
+        // Step
+        x = x_new;
+        r = r_new;
+        r_norm = r_new_norm;
+
         if x_norm > 0.0 {
             if dx_norm / x_norm < threshold {
                 break;
@@ -106,9 +142,14 @@ pub fn solve_refined(
         } else if dx_norm < threshold {
             break;
         }
+
+        // Diverging hard? Stop trying.
+        if r_norm > best_r_norm * divergence_factor {
+            break;
+        }
     }
 
-    Ok(x)
+    Ok(best_x)
 }
 
 /// Forward substitution: solve L·z = y where L is unit lower triangular.
