@@ -601,7 +601,10 @@ fn main() {
     println!("\n--- Sparse solver validation ---");
     // Use large nemin to force single-supernode for correctness validation.
     // Multi-supernode solve has a known issue with contribution block assembly.
-    let snode_params = SupernodeParams { nemin: 10000 };
+    let snode_params = SupernodeParams {
+        nemin: 10000,
+        ..Default::default()
+    };
 
     let mut sp_total = 0usize;
     let mut sp_inertia_pass = 0usize;

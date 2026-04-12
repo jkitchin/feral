@@ -42,20 +42,20 @@ mod mc64;
 
 /// User-facing scaling strategy selector.
 ///
-/// Default is `Identity` during Phase 2.2.1 bring-up so the existing
-/// test suite's behavior does not change while the Hungarian kernel
-/// is still a stub. Step 5 of the implementation plan
-/// (`dev/plans/mc64-scaling.md`) flips the default to
-/// `Mc64Symmetric` once the kernel is real.
+/// Default is `Mc64Symmetric` — the canonical matching-based scaling
+/// that matches MUMPS (SYM=2) and SSIDS (options%scaling=1). Tests
+/// that want scaling-independent behavior must construct
+/// `SupernodeParams { scaling_strategy: ScalingStrategy::Identity,
+/// ..Default::default() }` explicitly.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ScalingStrategy {
     /// MC64-style symmetric matching-based scaling. This is the
     /// canonical choice and matches the default behavior of MUMPS
     /// (SYM=2) and SSIDS (options%scaling=1).
+    #[default]
     Mc64Symmetric,
     /// Identity scaling (no-op). Use for regression testing and for
     /// inputs where matching is not appropriate.
-    #[default]
     Identity,
     /// User-supplied pre-computed scaling vector in user-order
     /// indexing. Length must equal the matrix dimension.

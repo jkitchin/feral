@@ -1,0 +1,96 @@
+#+TITLE: Journal 2026-04-12-03
+#+STARTUP: showall
+
+Phase 2.2.1 Step 5: integrate MC64 scaling into symbolic_factorize.
+
+* 09:00 :plan:scaling:
+Starting Step 5. Steps 1-4 complete: src/scaling/ has compute_scaling,
+Hungarian kernel, MC64 wrapper. Step 5 wires the scaling vector into
+SymbolicFactorization and threads a ScalingStrategy through
+SupernodeParams so downstream factorize/solve can consume it.
+Blast radius: only one SymbolicFactorization construction site
+(src/symbolic/mod.rs), but 10+ SupernodeParams { nemin: X } literal
+constructions across src/ and examples/ that will break once we add
+a field. Will use ..Default::default() to update.
+
+* 09:30 :scaling:default-flip:
+Flipped `#[default]` on ScalingStrategy from Identity to Mc64Symmetric.
+Ran `cargo test` before adding the new SupernodeParams field to see
+if the flip alone broke any test assertion. Result: all 136 tests
+still pass. This is the expected outcome — SymbolicFactorization
+does not yet consume the scaling vector, so the default flip is
+a no-op at runtime. The rest of the wiring in Step 5 makes the
+scaling vector reachable to Step 6 (factorize) and Step 7 (solve).
+
+* 10:00 :scaling:convention:
+Picked the pivot-order cache convention by reading
+src/numeric/factorize.rs:69 and src/numeric/factorize.rs:217-248:
+
+    let permuted = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv)?;
+    fn permute_csc_values(matrix, _perm, perm_inv) {
+        for old_j in 0..n {
+            let new_j = perm_inv[old_j];
+            for k in matrix.col_ptr[old_j]..matrix.col_ptr[old_j+1] {
+                let new_i = perm_inv[matrix.row_idx[k]];
+                ... store at (new_i, new_j) ...
+
+So after permute_csc_values, the permuted CSC is indexed in pivot
+(new) positions. During assembly in factorize.rs Step 6, the
+scattering loop will walk permuted.col_ptr[col] for col in pivot
+space and read permuted.row_idx[k] in pivot space too. For each
+such scatter we want:
+    val * s_user[user_row] * s_user[user_col]
+  = val * s_user[perm[new_row]] * s_user[perm[new_col]]
+  = val * scaling_pivot_order[new_row] * scaling_pivot_order[new_col]
+where scaling_pivot_order[k] := scaling_user[perm[k]].
+
+`perm` in feral is new-to-old: perm[new_idx] = old_idx, which we
+confirmed by reading the perm/perm_inv construction in
+src/symbolic/mod.rs:88-92. So the cache is
+    scaling_pivot_order: perm.iter().map(|&old| scaling_user[old]).collect()
+which matches the direction in the plan exactly.
+
+* 10:30 :scaling:tests:
+Added three integration tests to tests/mc64_scaling.rs:
+
+  - symbolic_factorize_default_populates_mc64_scaling: diag(2,3,5),
+    asserts ScalingInfo::Applied and s == [1/sqrt(2), 1/sqrt(3),
+    1/sqrt(5)]. Oracle is hand-derived, consistent with Step 4's
+    mc64_diagonal_matrix_unit_scaled_diagonal test.
+
+  - symbolic_factorize_identity_strategy_disables_scaling:
+    SupernodeParams { scaling_strategy: Identity, .. } round-trips
+    to [1.0; n] and NotApplied. Covers the explicit escape hatch.
+
+  - symbolic_factorize_scaling_pivot_order_matches_user_order_through_perm:
+    arrow matrix (non-trivial AMD perm), asserts the permutation
+    invariant scaling_pivot_order[k] == scaling[perm[k]].
+
+cargo test output:
+  test result: ok. 10 passed; 0 failed; 0 ignored  (tests/mc64_scaling.rs)
+  test result: ok. 77 passed; 0 failed  (unit tests)
+Total across all suites: 139 tests, 0 failures, 7 ignored
+(regression tests and sidecar tests were already ignored).
+No test needed an Identity override because of the default flip —
+all existing tests either use SupernodeParams::default() without
+asserting on exact matrix values (postorder, refined, threshold,
+inertia tests work on relative properties) or they were already
+computing scaling via the Mc64Symmetric stub in Steps 1-4.
+
+cargo clippy -- -D warnings: clean.
+cargo build --all-targets: clean.
+
+* 11:00 :scaling:done:
+Step 5 complete. Ready for Step 6 (factorize_multifrontal scaling
+application). Rough edges flagged for Step 6:
+  - Assembly loop in factorize.rs needs to multiply val by
+    scaling_pivot_order[pivot_row] * scaling_pivot_order[pivot_col]
+    at scatter time.
+  - SparseFactors needs a `scaling` field (user-order) for the
+    Step 7 solve pre/post-scaling. The research note recommends
+    cloning symbolic.scaling into SparseFactors rather than
+    threading a lifetime.
+  - No current ignored test depends on Identity; if Step 6 starts
+    breaking inertia assertions under MC64 on test-suite matrices,
+    investigate before loosening — per CLAUDE.md, tolerance
+    loosening requires human approval.
