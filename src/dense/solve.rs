@@ -179,6 +179,12 @@ fn backward_substitute(factors: &Factors, v: &mut [f64]) {
 
 /// D-block solve: solve D_bk · w = z.
 /// Handles both 1×1 and 2×2 blocks using the normalized formulation.
+///
+/// Pivots that were force-accepted as numerically zero during factorization
+/// (`|d| <= factors.zero_tol` for 1×1, `|det| <= factors.zero_tol_2x2` for
+/// 2×2) are skipped — `w[k]` is left untouched, producing a least-squares-
+/// like solution where the corresponding row was rank-deficient. Dividing by
+/// such pivots produces catastrophic error; see dev/plans/threshold-mismatch-fix.md.
 fn d_block_solve(factors: &Factors, w: &mut [f64]) {
     let n = factors.n;
     let mut k = 0;
@@ -188,25 +194,28 @@ fn d_block_solve(factors: &Factors, w: &mut [f64]) {
             let a = factors.d_diag[k];
             let b = factors.d_subdiag[k];
             let c = factors.d_diag[k + 1];
+            let det = a * c - b * b;
 
-            // Normalized formulation (faer's approach, Section 8.1 of research note)
-            let b_inv = 1.0 / b;
-            let ak = a * b_inv;
-            let ck = c * b_inv;
-            let denom = 1.0 / (ak * ck - 1.0);
-            let z0k = w[k] * b_inv;
-            let z1k = w[k + 1] * b_inv;
-            w[k] = (ck * z0k - z1k) * denom;
-            w[k + 1] = (ak * z1k - z0k) * denom;
+            if det.abs() > factors.zero_tol_2x2 {
+                // Normalized formulation (faer's approach)
+                let b_inv = 1.0 / b;
+                let ak = a * b_inv;
+                let ck = c * b_inv;
+                let denom = 1.0 / (ak * ck - 1.0);
+                let z0k = w[k] * b_inv;
+                let z1k = w[k + 1] * b_inv;
+                w[k] = (ck * z0k - z1k) * denom;
+                w[k + 1] = (ak * z1k - z0k) * denom;
+            }
+            // else: 2×2 block was force-accepted as singular; leave w[k], w[k+1] alone
             k += 2;
         } else {
             // 1×1 block
             let d = factors.d_diag[k];
-            if d.abs() > f64::EPSILON * 1e-10 {
+            if d.abs() > factors.zero_tol {
                 w[k] /= d;
             }
-            // If d is near-zero (ForceAccept case), leave w[k] as-is
-            // (will be corrected by iterative refinement)
+            // else: pivot was force-accepted as zero; leave w[k] alone
             k += 1;
         }
     }

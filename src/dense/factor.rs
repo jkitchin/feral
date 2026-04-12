@@ -60,6 +60,15 @@ pub struct Factors {
     pub d_eq: Vec<f64>,
     /// True when ZeroPivotAction::ForceAccept fired during factorization.
     pub needs_refinement: bool,
+    /// 1×1 pivot threshold copied from BunchKaufmanParams at factor time.
+    /// `solve` consults this to decide whether to divide by `d_diag[k]`:
+    /// pivots `|d| <= zero_tol` were force-accepted as numerically zero
+    /// during factorization and must be skipped (left as-is) by the
+    /// D-block solve. Otherwise dividing by a tiny pivot produces
+    /// catastrophic error. See dev/plans/threshold-mismatch-fix.md.
+    pub zero_tol: f64,
+    /// 2×2 pivot block threshold (matches BunchKaufmanParams::zero_tol_2x2).
+    pub zero_tol_2x2: f64,
 }
 
 /// Factor a symmetric indefinite matrix using Bunch-Kaufman pivoting.
@@ -291,6 +300,8 @@ pub fn factor(
             perm_inv,
             d_eq,
             needs_refinement,
+            zero_tol: params.zero_tol,
+            zero_tol_2x2: params.zero_tol_2x2,
         },
         inertia,
     ))
@@ -326,6 +337,10 @@ pub struct FrontalFactors {
     pub inertia: Inertia,
     /// Whether ForceAccept fired during factorization.
     pub needs_refinement: bool,
+    /// 1×1 pivot threshold from BunchKaufmanParams (see Factors::zero_tol).
+    pub zero_tol: f64,
+    /// 2×2 pivot threshold from BunchKaufmanParams.
+    pub zero_tol_2x2: f64,
 }
 
 /// Factor a frontal matrix, eliminating only the first `ncol` columns.
@@ -358,6 +373,8 @@ pub fn factor_frontal(
             contrib: matrix.data.clone(), contrib_dim: nrow,
             inertia: Inertia { positive: 0, negative: 0, zero: 0 },
             needs_refinement: false,
+            zero_tol: params.zero_tol,
+            zero_tol_2x2: params.zero_tol_2x2,
         });
     }
 
@@ -570,6 +587,8 @@ pub fn factor_frontal(
         contrib_dim: cdim,
         inertia: Inertia::new(pos, neg, zero),
         needs_refinement,
+        zero_tol: params.zero_tol,
+        zero_tol_2x2: params.zero_tol_2x2,
     })
 }
 

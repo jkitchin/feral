@@ -105,6 +105,8 @@ pub fn factorize_multifrontal(
                     contrib: Vec::new(), contrib_dim: 0,
                     inertia: Inertia { positive: 0, negative: 0, zero: 0 },
                     needs_refinement: false,
+                    zero_tol: params.zero_tol,
+                    zero_tol_2x2: params.zero_tol_2x2,
                 },
                 inertia: Inertia { positive: 0, negative: 0, zero: 0 },
             });

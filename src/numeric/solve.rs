@@ -71,36 +71,40 @@ pub fn solve_sparse(
             w[i] = y[node.row_indices[ff.perm[i]]];
         }
 
-        // D-block solve (first ncol entries only)
+        // D-block solve (first ncol entries only).
+        // Pivots that were force-accepted as zero during factorization
+        // are skipped — see dev/plans/threshold-mismatch-fix.md.
         let mut k = 0;
         while k < ncol {
             if k + 1 < ncol && ff.d_subdiag[k] != 0.0 {
                 let a = ff.d_diag[k];
                 let b = ff.d_subdiag[k];
                 let c = ff.d_diag[k + 1];
-                let z1 = w[k];
-                let z2 = w[k + 1];
+                let det = a * c - b * b;
 
-                if b.abs() > f64::EPSILON * (a.abs() + c.abs()).max(1.0) {
-                    let ak = a / b;
-                    let ck = c / b;
-                    let denom = 1.0 / (ak * ck - 1.0);
-                    let z1k = z1 / b;
-                    let z2k = z2 / b;
-                    w[k] = (ck * z1k - z2k) * denom;
-                    w[k + 1] = (ak * z2k - z1k) * denom;
-                } else {
-                    let det = a * c - b * b;
-                    if det.abs() > 0.0 {
+                if det.abs() > ff.zero_tol_2x2 {
+                    let z1 = w[k];
+                    let z2 = w[k + 1];
+                    if b.abs() > f64::EPSILON * (a.abs() + c.abs()).max(1.0) {
+                        let ak = a / b;
+                        let ck = c / b;
+                        let denom = 1.0 / (ak * ck - 1.0);
+                        let z1k = z1 / b;
+                        let z2k = z2 / b;
+                        w[k] = (ck * z1k - z2k) * denom;
+                        w[k + 1] = (ak * z2k - z1k) * denom;
+                    } else {
                         w[k] = (c * z1 - b * z2) / det;
                         w[k + 1] = (a * z2 - b * z1) / det;
                     }
                 }
+                // else: 2×2 block force-accepted as singular; leave w[k], w[k+1]
                 k += 2;
             } else {
-                if ff.d_diag[k].abs() > 0.0 {
+                if ff.d_diag[k].abs() > ff.zero_tol {
                     w[k] /= ff.d_diag[k];
                 }
+                // else: pivot force-accepted as zero; leave w[k] alone
                 k += 1;
             }
         }
