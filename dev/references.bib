@@ -354,6 +354,72 @@
                Up to 7x speedup over full-rank for elliptic PDEs.}
 }
 
+% ============================================================
+% Matching-based scaling (MC64)
+% ============================================================
+
+@article{duff2001mc64,
+  author    = {Duff, Iain S. and Koster, Jacko},
+  title     = {On Algorithms for Permuting Large Entries to the Diagonal
+               of a Sparse Matrix},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {2001},
+  volume    = {22},
+  number    = {4},
+  pages     = {973--996},
+  doi       = {10.1137/S0895479899358443},
+  url       = {https://doi.org/10.1137/S0895479899358443},
+  note      = {The canonical MC64 paper. Six algorithms (strategies 1-6) for
+               computing permutations and scalings that place large entries on
+               the diagonal of a sparse matrix. Strategy 5 (maximum product of
+               diagonal entries) yields the scaling used by MUMPS and SSIDS as
+               their default for symmetric indefinite matrices. The scaling
+               comes from the dual variables u, v of a weighted bipartite
+               matching on the log-transformed magnitude graph, with
+               D_r = diag(exp u), D_c = diag(exp v). HSL implementation is
+               routine MC64. Read sections 3 and 4 before implementing.}
+}
+
+@article{duff1999permuting,
+  author    = {Duff, Iain S. and Koster, Jacko},
+  title     = {The Design and Use of Algorithms for Permuting Large Entries
+               to the Diagonal of Sparse Matrices},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {1999},
+  volume    = {20},
+  number    = {4},
+  pages     = {889--901},
+  doi       = {10.1137/S0895479897317661},
+  url       = {https://doi.org/10.1137/S0895479897317661},
+  note      = {The earlier Duff-Koster paper. Motivates matching-based
+               preprocessing as a way to improve numerical stability of
+               sparse direct solvers, including symmetric indefinite factors.
+               Companion to Duff \& Koster 2001 which gives the full
+               algorithm catalog.}
+}
+
+@article{duff2005symmetric,
+  author    = {Duff, Iain S. and Pralet, St\'ephane},
+  title     = {Strategies for Scaling and Pivoting for Sparse Symmetric
+               Indefinite Problems},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {2005},
+  volume    = {27},
+  number    = {2},
+  pages     = {313--340},
+  doi       = {10.1137/04061043X},
+  url       = {https://doi.org/10.1137/04061043X},
+  note      = {Symmetrizes the inherently asymmetric MC64 matching for LDLT
+               factorization. Introduces the symmetric average
+               s_i = exp((u_i + v_i) / 2) that both MUMPS and SSIDS use as
+               their per-variable scaling for symmetric indefinite matrices.
+               Also describes 2x2 pivot pair detection from the matching
+               cycle structure, which MUMPS implements in DMUMPS_SYM_MWM.
+               For a minimal port, the symmetric scaling can be applied
+               without the 2x2 pair detection — the pairing is an additional
+               pivoting optimization, not a correctness requirement.}
+}
+
 % --- Ordering ---
 
 @inproceedings{lasalle2015mtmetis,
