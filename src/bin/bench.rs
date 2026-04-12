@@ -220,9 +220,53 @@ fn bench_matrix(
 /// A loaded KKT matrix with its sidecar metadata.
 struct KktEntry {
     name: String,
+    /// Path to the .mtx file. Used to write `.feral.json` sidecars next to it.
+    mtx_path: std::path::PathBuf,
     matrix: SymmetricMatrix,
     csc: CscMatrix,
     sidecar: KktSidecar,
+}
+
+/// Write a canonical `.feral.json` sidecar next to the matrix file.
+/// Schema matches dev/plans/phase-1b-consensus-exit.md and the MUMPS/SSIDS
+/// oracle outputs in external_benchmarks/.
+#[allow(clippy::too_many_arguments)]
+fn write_feral_sidecar(
+    mtx_path: &Path,
+    name: &str,
+    n: usize,
+    nnz: usize,
+    factor_us: u128,
+    solve_us: u128,
+    inertia: &Inertia,
+    residual: f64,
+    needs_refinement: bool,
+    path_label: &str,
+) -> Result<(), std::io::Error> {
+    let suffix = format!("{}.json", path_label);
+    let mut canonical = mtx_path.to_path_buf();
+    canonical.set_extension(suffix);
+
+    let json = format!(
+        "{{\"solver\":\"{}\",\"version\":\"0.1.0\",\"matrix\":\"{}\",\
+         \"n\":{},\"nnz\":{},\"factor_us\":{},\"solve_us\":{},\
+         \"inertia\":{{\"positive\":{},\"negative\":{},\"zero\":{}}},\
+         \"rhs_source\":\"sidecar\",\"residual_2norm_relative\":{:.17e},\
+         \"factorization_status\":\"ok\",\
+         \"solver_info\":{{\"needs_refinement\":{}}}}}\n",
+        path_label,
+        name,
+        n,
+        nnz,
+        factor_us,
+        solve_us,
+        inertia.positive,
+        inertia.negative,
+        inertia.zero,
+        residual,
+        needs_refinement,
+    );
+    std::fs::write(canonical, json)
 }
 
 /// Load all KKT matrices from `dir`, returning them sorted by name.
@@ -320,6 +364,7 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
 
             entries.push(KktEntry {
                 name: stem,
+                mtx_path: mtx_path.clone(),
                 matrix: mtx.to_dense(),
                 csc,
                 sidecar,
@@ -404,12 +449,15 @@ fn main() {
     let mut worst_residual_name = String::new();
     let mut dense_failures: Vec<Failure> = Vec::new();
 
+    let emit_sidecars = std::env::var("FERAL_EMIT_SIDECARS").is_ok();
+
     for entry in &kkt_entries {
         n_total += 1;
         let n = entry.matrix.n;
+        let nnz = entry.csc.values.len();
 
         // Factor
-        let _t0 = Instant::now();
+        let t0 = Instant::now();
         let (factors, inertia) = match factor(&entry.matrix, &params_kkt) {
             Ok(r) => r,
             Err(e) => {
@@ -418,6 +466,7 @@ fn main() {
                 continue;
             }
         };
+        let factor_us = t0.elapsed().as_micros();
 
         // Check inertia against sidecar
         let expected_inertia = Inertia {
@@ -435,6 +484,7 @@ fn main() {
         // Phase 1b solve convention (FERAL-PROJECT-SPEC.md §1709): use
         // solve_refined for all KKT solves to recover machine precision on
         // matrices flagged with needs_refinement under ForceAccept.
+        let t1 = Instant::now();
         let x = match solve_refined(&entry.matrix, &factors, &rhs) {
             Ok(x) => x,
             Err(e) => {
@@ -442,6 +492,7 @@ fn main() {
                 continue;
             }
         };
+        let solve_us = t1.elapsed().as_micros();
 
         // Compute residual: ||Ax - b|| / ||b||
         let mut ax = vec![0.0; n];
@@ -465,6 +516,21 @@ fn main() {
         let residual_ok = relative_residual <= residual_tol;
         if residual_ok {
             n_residual_pass += 1;
+        }
+
+        if emit_sidecars {
+            let _ = write_feral_sidecar(
+                &entry.mtx_path,
+                &entry.name,
+                n,
+                nnz,
+                factor_us,
+                solve_us,
+                &inertia,
+                relative_residual,
+                factors.needs_refinement,
+                "feral",
+            );
         }
 
         if relative_residual > worst_residual {
