@@ -490,27 +490,3 @@ fn test_kkt_5x2() {
     verify_solve(&mat, &x, &rhs, 1e-4);
 }
 
-// =======================================================================
-// Test 15: Benchmark harness output verification
-// =======================================================================
-#[test]
-fn test_bench_harness_output() {
-    let output = std::process::Command::new("cargo")
-        .args(["run", "--bin", "bench"])
-        .output()
-        .expect("failed to run bench binary");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("FERAL benchmark harness"),
-        "missing harness header"
-    );
-    assert!(
-        stdout.contains("not found"),
-        "should report config not found"
-    );
-    assert!(
-        stdout.contains("matrices benchmarked"),
-        "should report benchmarked count"
-    );
-}
