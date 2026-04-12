@@ -1,0 +1,29 @@
+# pre-commit hooks for feral
+#
+# Install once per clone:    pre-commit install
+# Run manually on all files: pre-commit run --all-files
+#
+# The hooks here are the *exact same checks* run by .github/workflows/ci.yml.
+# CI runs `pre-commit run --all-files` so any local pre-commit pass implies
+# the CI static checks will pass too. The heavier `cargo test` still runs
+# as a separate step — it is too slow for a pre-commit hook but is
+# orchestrated alongside pre-commit in CI.
+
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --check --
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy -- -D warnings
+        # Note: the no-unwrap / no-expect policy is enforced by the
+        # `#![cfg_attr(not(test), deny(clippy::unwrap_used))]` directive
+        # at the top of src/lib.rs. Clippy catches it below.
+        entry: cargo clippy -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false

@@ -1,3 +1,10 @@
+// Deny `.unwrap()` and `.expect()` in production code, but allow them in
+// test modules (inside `#[cfg(test)]` blocks) where panics are acceptable.
+// This is a structural enforcement of the CLAUDE.md hard rule against
+// unwrap in `src/`, replacing the ad-hoc grep check in CI.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+
 pub mod dense;
 pub mod error;
 pub mod inertia;

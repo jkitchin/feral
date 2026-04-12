@@ -66,7 +66,7 @@ pub fn factorize_multifrontal(
     let n_snodes = symbolic.supernodes.len();
 
     // Permute the matrix values into the new ordering
-    let permuted = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv);
+    let permuted = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv)?;
 
     // Full symmetric pattern for correct row index computation
     let full_pattern = permuted.symmetric_pattern();
@@ -214,7 +214,11 @@ pub fn factorize_multifrontal(
 }
 
 /// Permute a CSC matrix: compute the lower triangle of P·A·Pᵀ.
-fn permute_csc_values(matrix: &CscMatrix, _perm: &[usize], perm_inv: &[usize]) -> CscMatrix {
+fn permute_csc_values(
+    matrix: &CscMatrix,
+    _perm: &[usize],
+    perm_inv: &[usize],
+) -> Result<CscMatrix, FeralError> {
     let n = matrix.n;
 
     // Collect permuted entries in lower triangle
@@ -241,7 +245,6 @@ fn permute_csc_values(matrix: &CscMatrix, _perm: &[usize], perm_inv: &[usize]) -
     let vals: Vec<f64> = triplets.iter().map(|t| t.2).collect();
 
     CscMatrix::from_triplets(n, &rows, &cols, &vals)
-        .expect("permute_csc_values: failed to build CSC")
 }
 
 /// Build row indices for a frontal matrix.

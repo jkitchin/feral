@@ -55,6 +55,11 @@ without the research note first.
 - Commit frequently and atomically — one commit per logical change
 - Every commit message must have a body (what, why, evidence). No body = reject.
 - Run `cargo test` before every commit
+- **Install `pre-commit` once per clone: `pre-commit install`**. After that
+  `cargo fmt --check` and `cargo clippy -- -D warnings` run automatically
+  on every `git commit` and CI uses the identical hooks via
+  `pre-commit/action`. Skip/override is not allowed; fix the offending
+  code instead. See `.pre-commit-config.yaml`.
 - If you try something and abandon it, record it in `dev/tried-and-rejected.md`
   immediately — do not wait for the checkpoint
 
