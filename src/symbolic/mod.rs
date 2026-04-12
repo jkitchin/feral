@@ -4,6 +4,7 @@ pub mod supernode;
 use crate::error::FeralError;
 use crate::ordering::amd::{amd_order, permute_pattern};
 use crate::ordering::elimination_tree::EliminationTree;
+use crate::ordering::postorder::postorder;
 use crate::sparse::csc::{CscMatrix, CscPattern};
 
 pub use column_counts::{column_counts, total_factor_nnz};
@@ -65,27 +66,44 @@ pub fn symbolic_factorize(
 ) -> Result<SymbolicFactorization, FeralError> {
     let n = matrix.n;
 
-    // Step 1: Fill-reducing ordering
+    // Step 1: Fill-reducing ordering (AMD)
     let full_pattern = matrix.symmetric_pattern();
     let amd_perm = amd_order(&full_pattern);
 
-    // Apply AMD permutation to get the permuted pattern
-    let permuted_pattern = permute_pattern(&full_pattern, &amd_perm);
+    // Step 2: Build the etree on the AMD-permuted pattern. This etree is
+    // intermediate — we use it to compute the postorder and then discard it.
+    let amd_pattern = permute_pattern(&full_pattern, &amd_perm);
+    let amd_etree = EliminationTree::from_pattern(&amd_pattern);
 
-    // Compute inverse permutation
+    // Step 3: Postorder the etree (CHOLMOD-style composition).
+    // Without this step, supernode amalgamation merges columns whose indices
+    // are not consecutive in the column numbering, and downstream code that
+    // assumes `first_col..first_col+ncol` is the eliminated set silently
+    // factors the wrong columns. See dev/research/postorder-pipeline.md.
+    let (post, _post_inv) = postorder(&amd_etree);
+
+    // Step 4: Compose AMD perm with the postorder.
+    //   final_perm[k] = amd_perm[post[k]]
+    // The composition maps postorder position k to the original column.
+    let perm: Vec<usize> = post.iter().map(|&p| amd_perm[p]).collect();
     let mut perm_inv = vec![0usize; n];
-    for (new, &old) in amd_perm.iter().enumerate() {
+    for (new, &old) in perm.iter().enumerate() {
         perm_inv[old] = new;
     }
 
-    // Step 2: Elimination tree
+    // Step 5: Re-permute the matrix on the composed permutation and rebuild
+    // the elimination tree in the final (postordered) numbering. This second
+    // etree is the one used for the rest of the pipeline; its parent pointers
+    // reference indices in the postordered numbering, where children of any
+    // subtree are guaranteed to be contiguous.
+    let permuted_pattern = permute_pattern(&full_pattern, &perm);
     let etree = EliminationTree::from_pattern(&permuted_pattern);
 
-    // Step 3: Column counts
+    // Step 6: Column counts on the final pattern + etree
     let col_counts = column_counts(&permuted_pattern, &etree);
     let factor_nnz = total_factor_nnz(&col_counts);
 
-    // Step 4: Supernode detection and amalgamation
+    // Step 7: Supernode detection on the postordered etree
     let supernodes = find_supernodes(&etree, &col_counts, snode_params);
 
     // Step 5: Compute contribution sizes and peak memory
@@ -100,7 +118,7 @@ pub fn symbolic_factorize(
 
     Ok(SymbolicFactorization {
         n,
-        perm: amd_perm,
+        perm,
         perm_inv,
         supernodes,
         factor_nnz_estimate: (factor_nnz as f64 * factor_slack) as usize,

@@ -1,0 +1,131 @@
+#+TITLE: FERAL Journal — 2026-04-12 Session 01
+
+* 08:15 :orientation:bench:
+  Resumed Phase 1b. Fixed assemble-context.sh BSD-find incompatibility
+  (find -printf is GNU-only, replaced with ls -1 | sort | tail -1).
+  Confirmed cargo test was hanging at tests/dense_ldlt.rs:497
+  test_bench_harness_output, which spawns =cargo run --bin bench= as a
+  subprocess and now blocks for 13+ minutes on the 153k matrix corpus.
+  Test was a Session-1 skeleton check; deleted with user approval.
+  Two atomic commits: 87b9d1d, 79aa8c5.
+
+* 08:35 :bench:phase-1b-exit:
+  Re-ran cargo run --release --bin bench. Numbers:
+  - Dense: 99.2% inertia (1221 miss), 99.6% residual (662 miss),
+    worst residual 8.97e-1 (POLAK6_0021)
+  - Sparse: 98.6% inertia (2154 miss), 99.0% residual (1525 miss),
+    worst residual *2.61e21* (MGH10S_0000)
+
+  Phase 1b exit criterion (FERAL-PROJECT-SPEC.md §1712) requires 100%
+  inertia + solution. Neither path meets it. The sparse worst residual
+  of 2.61e21 is *not* ill-conditioning — refinement cannot fix garbage
+  output from a wrong factorization. Ordered triage of MGH10S before
+  any other Phase 1b work.
+
+* 08:50 :triage:mgh10s:
+  Built examples/triage_mgh10s.rs to load MGH10S_0000 (51x51 KKT) and
+  run dense + sparse paths side by side. Output:
+  - Dense: inertia (35, 16, 0) MATCH, residual 2.014e-16
+  - Sparse: inertia (50, 1, 0) MISMATCH, residual 2.613e21
+
+  Dense handles the matrix cleanly. The sparse path computes inertia
+  finding 15 extra positives and missing 15 negatives. Conclusion: this
+  is a structural factorization bug in the sparse path, not numerical.
+  Commit 895d4f3.
+
+* 09:10 :diagnosis:supernodes:
+  Read src/symbolic/{mod.rs, supernode.rs} and src/numeric/factorize.rs.
+
+  MGH10S has bordered structure: AMD perm is identity. Etree has roots
+  {0,1,2, 35..50}; constraint row 35+i has children {3+i, 19+i} (each
+  variable column couples to one constraint). The two children of any
+  constraint subtree are *non-adjacent* in column index — separated by
+  15 columns.
+
+  find_supernodes amalgamates child-into-parent under size-based merging
+  (all ncol < nemin=32). The merge tracks first_col = min(child, parent)
+  in supernode.rs:175. After merging, "supernode 35" reports first_col=3,
+  ncol=3 but its actual column SET is {3, 19, 35} — non-contiguous.
+
+  Every downstream consumer treats first_col..first_col+ncol as the
+  eliminated set:
+  - supernode.rs:200: =row_indices = (first_col..first_col+nrow).collect()=
+  - factorize.rs:130: =for (local_j, &gj) in row_indices[..ncol].iter()=
+  - factorize.rs:253: =for j in first_col..first_col+ncol=
+
+  So the frontal *meant* to eliminate {3, 19, 35} actually eliminates
+  {3, 4, 5}, and the negative constraint diagonals at cols 35..50 are
+  mostly never reached. By coincidence the snode lengths still sum to
+  51 across the matrix, so column-coverage *looks* correct.
+
+* 09:25 :root-cause:postorder:
+  Found the orphan: src/ordering/postorder.rs exists with a working
+  =postorder()= function and 5 tests, but is *never called* from
+  symbolic_factorize. The original Phase 1b plan
+  (dev/plans/phase-1b-sparse-solver.md:96) explicitly called for
+  "Composing AMD perm with postorder perm gives the final ordering"
+  but the implementation regressed against the plan.
+
+  Without postorder, AMD-permuted etrees on KKT matrices with bordered
+  structure have non-contiguous parent-child column relationships.
+  Supernode amalgamation requires a postordered tree as a precondition;
+  CHOLMOD's cholmod_analyze_p does
+    Perm = AMD(A); Parent = etree(A(Perm,Perm)); Post = postorder(Parent);
+    Perm = Perm[Post]; rebuild Parent and ColCount on the composed perm.
+
+  Wrote dev/research/postorder-pipeline.md (~190 lines, with worked
+  MGH10S example, CHOLMOD pseudocode, SSIDS reference, correctness
+  invariants) and dev/plans/postorder-fix.md (12 steps, three
+  regression tests, acceptance criteria). Commit 429507f.
+
+* 09:55 :test:reproducer:
+  Wrote tests/sparse_postorder.rs. First attempt: 4x4 single-constraint
+  bordered KKT — passed on main, doesn't trigger the bug (only one
+  supernode, trivially contiguous).
+
+  Built smaller two-constraint reproducer:
+  - 6x6 with 2 vars + 2 slacks + 2 constraints
+  - Each constraint couples one var + one slack
+  - Etree has 2 disjoint subtrees, both amalgamated
+  - Expected (4, 2, 0); main gives (5, 1, 0)
+
+  Same shape failure as MGH10S (one extra positive, one missing
+  negative) at minimum size. Test red as expected.
+
+* 10:05 :fix:postorder:
+  Implemented CHOLMOD-style composition in src/symbolic/mod.rs::symbolic_factorize:
+  1. AMD perm
+  2. Build etree on AMD-permuted pattern (intermediate)
+  3. Postorder the etree
+  4. Compose: =perm[k] = amd_perm[post[k]]=
+  5. Re-permute on the composed perm and rebuild etree
+  6. Column counts on final pattern + etree
+  7. Supernode detection on the postordered etree
+
+  Change is ~15 lines (lines 66-104), one new import. The struct field
+  =perm= is now the composed permutation rather than just AMD perm.
+
+* 10:15 :verify:bench:
+  Ran cargo test, cargo clippy, triage, bench:
+
+  - cargo test: 111/111 pass (107 existing + 4 new sparse_postorder).
+    No regressions.
+  - cargo clippy -- -D warnings: clean
+  - cargo test --test sparse_postorder mgh10s -- --ignored: PASS
+  - cargo run --release --example triage_mgh10s:
+      sparse inertia (35, 16, 0) MATCH, residual 1.106e-16
+      (was MISMATCH (50, 1, 0), residual 2.613e21)
+  - cargo run --release --bin bench (153k matrices):
+      | Metric                | Before     | After      |
+      |-----------------------+------------+------------|
+      | Sparse inertia match  | 98.6%      | *99.3%*    |
+      | Sparse residual pass  | 99.0%      | *99.7%*    |
+      | Sparse worst residual | 2.61e21    | *3.14e-4*  |
+
+  Sparse now slightly *exceeds* dense (99.3 vs 99.2 inertia, 99.7 vs
+  99.6 residual). The remaining ~0.3% gap is constrained by the dense
+  BK kernel on ill-conditioned matrices, not the sparse pipeline.
+  Worst sparse residual dropped 25 orders of magnitude — now in
+  iterative-refinement territory.
+
+  Acceptance criteria from dev/plans/postorder-fix.md all met.
