@@ -1,1 +1,0 @@
-{"solver": "mumps-5.8.2", "version": "5.8.2", "matrix": "VESUVIOU_0015", "n": 3083, "nnz": 12810, "factor_us": 2408, "solve_us": 320, "inertia": {"positive": 2058, "negative": 1025, "zero": 0}, "rhs_source": "sidecar", "residual_2norm_relative": 2.5666083925840465e-14, "factorization_status": "ok", "solver_info": {"infog_1": 0, "infog_28": 0}}

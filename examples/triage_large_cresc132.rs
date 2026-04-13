@@ -136,12 +136,10 @@ fn triage_one(stem: &str) {
         println!("  canonical SSIDS          = NOT AVAILABLE");
     }
 
+    // Post-Phase-2.2.3: pivot_threshold stays at default 0.0 until
+    // delayed pivoting lands. See parity_config_sweep for evidence.
     let params = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
-        // Phase 2.2.2: MC64 callers opt in to column-relative
-        // threshold partial pivoting (MUMPS CNTL(1), SSIDS options%u
-        // default 0.01).
-        pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
     };
 

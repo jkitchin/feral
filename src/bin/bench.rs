@@ -400,12 +400,18 @@ fn main() {
     let params_spd = BunchKaufmanParams::default();
     let params_kkt = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
-        // Phase 2.2.2: the sparse KKT path runs MC64 scaling by
-        // default (ScalingStrategy::Mc64Symmetric), which places the
-        // worst pivots just below the absolute zero_tol floor. The
-        // column-relative u=0.01 threshold (MUMPS CNTL(1), SSIDS
-        // options%u default) rejects them cleanly via ForceAccept.
-        pivot_threshold: 0.01,
+        // Phase 2.2.3 follow-up: pivot_threshold stays at the
+        // default 0.0 until delayed pivoting lands (Phase 2.3). The
+        // Phase 2.2.2 default of 0.01 (MUMPS CNTL(1), SSIDS options%u)
+        // was correct only in the presence of delayed pivoting, which
+        // feral does not yet have — without a path to delay rejected
+        // pivots, u=0.01 sends every rejected pivot through
+        // ForceAccept and zeros out structural pivots on matrices
+        // like HYDCAR20, METHANL8, HATFLDG, HATFLDBNE, ACOPR30,
+        // VESUVIOU. The parity panel sweep (examples/parity_config_sweep.rs)
+        // showed Mc64/0.0 is a strict improvement over Mc64/0.01 on
+        // the curated 31-matrix panel (17 vs 11 passing, no
+        // regressions).
         ..BunchKaufmanParams::default()
     };
 
