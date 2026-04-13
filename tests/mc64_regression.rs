@@ -98,6 +98,16 @@ fn feral_residual(stem: &str) -> Option<f64> {
 /// rank-deficient solve interacts pathologically with MC64 exp
 /// dual clamps. Diagnosis deferred to Phase 2.2.2+. See
 /// dev/validation/phase-2.2.1-mc64-sweep.md for details.
+///
+/// Phase 2.2.2 Step 7 status: RECOVERED 47 ORDERS, STILL FAILING
+/// TARGET. Enabling `pivot_threshold = 0.01` (MUMPS CNTL(1) /
+/// SSIDS options%u) in `ldlt_params()` drops the residual from
+/// 2.27e+46 to 1.076e-1. The 30-order post-MC64 regression is
+/// closed; the matrix now solves ~17 orders better than the
+/// Identity baseline (2.84e+16). Residual is ~7 orders above
+/// target but the regression no longer blocks Phase 2.2. Full
+/// closure of the 1e-1 → 1e-14 gap requires delayed pivoting
+/// (Phase 2.3). See dev/validation/phase-2.2.2-pivot-rejection.md.
 #[test]
 #[ignore]
 fn acopp30_0000_residual_under_1e_8_after_mc64() {
@@ -120,6 +130,13 @@ fn acopp30_0000_residual_under_1e_8_after_mc64() {
 /// dropped 2.39e+08 → 1.37e+05, still ~11 orders above target.
 /// Inertia also drifted ±2 vs MUMPS. See
 /// dev/validation/phase-2.2.1-mc64-sweep.md.
+///
+/// Phase 2.2.2 Step 7 status: UNCHANGED. Residual is 1.370e+05
+/// with `pivot_threshold = 0.01`, essentially identical to
+/// Post-2.2.1. The column-relative rejection does not fire on
+/// CRESC132's pivot stream; the residual floor is dominated by
+/// the ±2 inertia mismatch and the need for delayed pivoting.
+/// See dev/validation/phase-2.2.2-pivot-rejection.md.
 #[test]
 #[ignore]
 fn cresc132_0000_residual_under_1e_6_after_mc64() {
@@ -144,6 +161,13 @@ fn cresc132_0000_residual_under_1e_6_after_mc64() {
 /// Residual dropped 1.41e+09 → 8.50e+02 (7 orders), still ~11
 /// orders above target. Inertia remains MATCH vs MUMPS/SSIDS. See
 /// dev/validation/phase-2.2.1-mc64-sweep.md.
+///
+/// Phase 2.2.2 Step 7 status: UNCHANGED. Residual is 8.497e+02
+/// with `pivot_threshold = 0.01`, matching Post-2.2.1 to 3
+/// significant figures. Inertia is exact, so the bottleneck is
+/// not pivot rejection; it is likely solve-side rounding
+/// accumulation or iterative refinement that refuses to converge.
+/// See dev/validation/phase-2.2.2-pivot-rejection.md.
 #[test]
 #[ignore]
 fn chwirut1_0000_residual_under_1e_8_after_mc64() {
@@ -166,6 +190,12 @@ fn chwirut1_0000_residual_under_1e_8_after_mc64() {
 /// Residual dropped 2.54e+04 → 1.43e+02 (2 orders), still ~10
 /// orders above target. Inertia remains MATCH vs MUMPS/SSIDS. See
 /// dev/validation/phase-2.2.1-mc64-sweep.md.
+///
+/// Phase 2.2.2 Step 7 status: UNCHANGED. Residual is 1.426e+02
+/// with `pivot_threshold = 0.01`. Same diagnosis as CHWIRUT1:
+/// exact inertia, so pivot rejection has nothing to fire on.
+/// Plateau likely sits on solve-side rounding / refinement
+/// stagnation. See dev/validation/phase-2.2.2-pivot-rejection.md.
 #[test]
 #[ignore]
 fn cresc100_0000_residual_under_1e_8_after_mc64() {

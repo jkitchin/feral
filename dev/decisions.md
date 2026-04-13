@@ -208,3 +208,62 @@ complete and the sanity check panel is re-run with residuals
 within 2–3 orders of magnitude of canonical solvers. This is not
 a target to aspire to after Phase 2; it is a precondition for
 advertising feral as a working sparse solver at all.
+
+## 2026-04-12 — Phase 2.2.2: `pivot_threshold = 0.01` default for MC64 callers
+
+**Decision.** `BunchKaufmanParams::pivot_threshold` defaults to
+`0.0` (disabled) for backward compatibility with the dense BK77
+tests and the Phase 1 threshold-consistency suite. All MC64
+callers opt in explicitly at `u = 0.01`:
+
+- `tests/mc64_regression.rs::ldlt_params`
+- `src/bin/bench.rs::params_kkt`
+- `examples/triage_large_cresc132.rs`
+
+This mirrors MUMPS `CNTL(1)` default `0.01` and SSIDS `options%u`
+default `0.01`, both of which are cited in the Phase 2.2.2
+research note (`dev/research/scaling-aware-pivot-rejection.md`
+§2). The value is not tuned — we inherit the canonical default on
+the reasoning that both Fortran MUMPS and SSIDS have empirical
+evidence on much larger corpora than feral has, and reproducing
+their setting is a sounder starting point than picking our own.
+
+**Rationale.** MC64 scaling (Phase 2.2.1) equilibrates row and
+column norms to `O(1)`, which intentionally shrinks the worst
+pivots to be close to the `zero_tol` absolute floor. The original
+`BunchKaufmanParams` had no column-relative check, so any pivot
+above `zero_tol` was accepted, including pivots that were
+`O(10⁻⁴⁷)` relative to their column maximum. On ACOPP30_0000 this
+produced 5 effectively-zero forced pivots under `ForceAccept` and
+a `2.27e+46` residual — a 30-order regression vs the unscaled
+baseline. Phase 2.2.2's column-relative clause (`|a_kk| ≥ u ·
+col_max`) rejects these pivots before they reach `ForceAccept`,
+and the solve then sees a proper rank-deficient factor rather
+than 5 forced zeros interacting with the exp-scaled rescale.
+ACOPP30_0000 residual drops `2.27e+46 → 1.076e-1` (47 orders).
+
+The 6 other sanity-panel matrices show no change, because their
+pivot streams are already well-conditioned at the absolute
+`zero_tol` — the column-relative rejection has nothing to fire
+on. This is evidence that Phase 2.2.2 is a *correctness fix*
+rather than a general-purpose improvement.
+
+**Explicit deferral: delayed pivoting → Phase 2.3.** Phase 2.2.2
+implements MUMPS-style column-relative rejection only. It does
+*not* implement SPRAL SSIDS's delayed-pivot mechanism
+(`ldlt_tpp.cxx`, where a rejected pivot is carried forward to the
+parent front rather than forced-accepted). Three of the four
+`tests/mc64_regression.rs` targets (CRESC132, CHWIRUT1, CRESC100)
+did not improve under `u = 0.01` and plateau at `1e+02 – 1e+05`;
+full closure of their residual gap is expected to require delayed
+pivoting in Phase 2.3 plus a separate investigation of
+solve-side rounding / refinement convergence on large KKT
+systems. The 4 regression tests remain `#[ignore]`'d with updated
+Post-2.2.2 status comments. No test tolerances were loosened.
+
+**Commitment.** The README sparse-status section is *not* updated
+by Phase 2.2.2. The broader MC64 residual gap remains open. Phase
+2.2.2 closes the ACOPP30 correctness regression but does not
+promote feral to "competitive on KKT matrices"; that claim still
+waits on Phase 2.3. Validation evidence:
+`dev/validation/phase-2.2.2-pivot-rejection.md`.

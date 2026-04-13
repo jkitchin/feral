@@ -66,6 +66,25 @@ above for the limits of this claim.
 - Fused update+argmax optimization (halves memory traffic per pivot step)
 
 ### Fixed
+- **Phase 2.2.2 — ACOPP30 MC64 regression**: Phase 2.2.1 MC64
+  scaling improved 6 of 7 sanity-panel matrices but pushed
+  ACOPP30_0000 from a pre-MC64 residual of `2.84e+16` to
+  `2.27e+46` — a 30-order-of-magnitude regression caused by 5
+  forced-zero pivots in the `ForceAccept` branch interacting with
+  the unscaled residual recompose. Phase 2.2.2 adds
+  `BunchKaufmanParams::pivot_threshold` (a column-relative 1×1
+  rejection clause matching MUMPS CNTL(1) / SSIDS `options%u`,
+  default `0.01`) plus the Duff-Reid 2×2 growth bound. MC64
+  callers (`tests/mc64_regression.rs::ldlt_params`,
+  `src/bin/bench.rs::params_kkt`,
+  `examples/triage_large_cresc132.rs`) opt in at `u = 0.01`.
+  ACOPP30_0000 residual drops `2.27e+46 → 1.076e-1` (47 orders),
+  now ~17 orders better than the pre-MC64 Identity baseline. The
+  remaining 3 regression targets (CHWIRUT1, CRESC100, CRESC132)
+  are unchanged — their inertia is already exact or ±2, so the
+  column-relative rejection has nothing to fire on. Full closure
+  of the MC64 residual gap requires delayed pivoting (Phase 2.3).
+  Validation: `dev/validation/phase-2.2.2-pivot-rejection.md`.
 - **Postorder pipeline bug**: `symbolic_factorize` did not apply
   postorder to the elimination tree before supernode amalgamation,
   causing merged supernodes to have non-contiguous columns while

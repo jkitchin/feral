@@ -1,0 +1,119 @@
+#+TITLE: Phase 2.2.2 Steps 7-9 — Validation sweep + narrative update
+#+DATE: 2026-04-12
+
+* 14:10 :phase-2.2.2:step7:setup:
+Starting Steps 7-9 at head commit =09955c2= (Phase 2.2.2 Steps 5-6
+complete). Verified:
+- =tests/mc64_regression.rs::ldlt_params= sets =pivot_threshold:
+  0.01= (line 41).
+- =src/bin/bench.rs::params_kkt= sets =pivot_threshold: 0.01=
+  (line 408).
+Matrix files present under =data/matrices/kkt/ACOPP30/= etc, so
+the un-ignored test run will actually execute rather than skip.
+
+* 14:15 :phase-2.2.2:step7:measurement:
+Un-ignored all 4 tests in =tests/mc64_regression.rs= (sed the
+=#[ignore]= lines to =//#[ignore]=) and ran:
+
+#+begin_src sh
+cargo test --release --test mc64_regression -- --test-threads=1 --nocapture
+#+end_src
+
+Log at =/tmp/phase-2.2.2-step7.log=. Results (all 4 still failing
+their targets, but the big story is ACOPP30):
+
+| Matrix        | Post-2.2.1 | Post-2.2.2 | Target  |
+|---------------+------------+------------+---------|
+| ACOPP30_0000  | 2.27e+46   | 1.076e-1   | < 1e-8  |
+| CHWIRUT1_0000 | 8.50e+02   | 8.497e+02  | < 1e-8  |
+| CRESC100_0000 | 1.43e+02   | 1.426e+02  | < 1e-8  |
+| CRESC132_0000 | 1.37e+05   | 1.370e+05  | < 1e-6  |
+
+ACOPP30 recovered 47 orders. Nothing else budged because their
+inertia is already exact/±1, so =u=0.01= has no tiny pivots to
+reject.
+
+Restored =#[ignore]= on all 4 and appended Post-2.2.2 status
+comments inline pointing at
+=dev/validation/phase-2.2.2-pivot-rejection.md=. Outcome: **C**.
+
+* 14:35 :phase-2.2.2:step8:sanity-panel:
+Updated =examples/triage_large_cresc132.rs= to set
+=pivot_threshold: 0.01= (mirroring the new KKT default in
+=params_kkt=), then ran:
+
+#+begin_src sh
+cargo run --release --example triage_large_cresc132
+#+end_src
+
+Log at =/tmp/phase-2.2.2-step8.log=. All 7 panel residuals match
+Post-2.2.1 to 3 significant figures:
+
+| Matrix         | Post-2.2.1 | Post-2.2.2 |
+|----------------+------------+------------|
+| CHWIRUT1_0000  | 8.50e+02   | 8.497e+02  |
+| HAHN1_0000     | 3.76e+04   | 3.758e+04  |
+| GAUSS2_0000    | 1.84e+03   | 1.843e+03  |
+| CRESC100_0000  | 1.43e+02   | 1.426e+02  |
+| MUONSINE_0000  | 2.35e-02   | 2.349e-02  |
+| VESUVIO_0000   | 1.82e+05   | 1.815e+05  |
+| CRESC132_0000  | 1.37e+05   | 1.370e+05  |
+
+No regressions, no improvements on the panel. Exactly what you'd
+expect: the column-relative rejection fires only on matrices
+where there are tiny-relative-to-column-max pivots, and these 7
+don't have any.
+
+* 14:45 :phase-2.2.2:step8:full-suite:
+=cargo test --release=. Log at
+=/tmp/phase-2.2.2-full-suite.log=. Totals:
+
+#+begin_example
+Total passed:  146
+Total failed:    0
+Total ignored:   7   (4 mc64_regression + 1 threshold_consistency
+                      + 1 refinement + 1 misc)
+#+end_example
+
+Identical to the pre-Step-7 baseline. No existing test regressed
+from the =pivot_threshold = 0.01= flip in the MC64 callers.
+
+=cargo run --release --bin bench= sparse summary:
+
+#+begin_example
+Sparse solver: 154588/154588 total
+  Inertia match vs MUMPS: 152968/154588 (99.0%)
+  Residual pass:          154202/154588 (99.8%)
+#+end_example
+
+Post-2.2.1 was 152788/153151 (99.76%), Post-2.2.2 is 154202/154588
+(99.75%). Within rounding, unchanged. Corpus grew by ~1.4k.
+
+* 14:55 :phase-2.2.2:step9:narrative:
+Writing =dev/validation/phase-2.2.2-pivot-rejection.md= with the
+same structure as the Phase 2.2.1 sweep doc. Key sections: the
+regression table (showing ACOPP30's 47-order recovery), the
+sanity panel flat-line, the open questions for Phase 2.3.
+
+Appending to =CHANGELOG.md= =### Fixed= with honest framing:
+"Phase 2.2.2 — ACOPP30 MC64 regression" — specifying that 1 of 4
+regression targets recovered and the other 3 are unchanged,
+pending Phase 2.3.
+
+Appending to =dev/decisions.md= a Phase 2.2.2 entry covering:
+1. =pivot_threshold = 0.01= default choice, rationale (MUMPS /
+   SSIDS canonical value, not tuned)
+2. Explicit deferral of delayed pivoting to Phase 2.3
+3. Commitment that README sparse-status is NOT updated by 2.2.2
+
+Not touching README — the numbers don't support it. CHWIRUT1 at
+1e+02 and CRESC132 at 1e+05 are still embarrassing next to
+canonical MUMPS at 1e-11 to 1e-14.
+
+* 15:10 :phase-2.2.2:step9:verdict:
+Phase 2.2.2 verdict: OUTCOME C. ACOPP30 recovered (47 orders
+better than Post-2.2.1, 17 orders better than the pre-MC64
+Identity baseline). 3 of 4 regression targets unchanged. No
+sanity-panel regressions. Tests at 146/0/7. Closing Phase 2.2.2
+as a correctness fix for ACOPP30; full MC64 gap closure deferred
+to Phase 2.3 (delayed pivoting).

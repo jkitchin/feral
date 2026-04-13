@@ -138,6 +138,10 @@ fn triage_one(stem: &str) {
 
     let params = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
+        // Phase 2.2.2: MC64 callers opt in to column-relative
+        // threshold partial pivoting (MUMPS CNTL(1), SSIDS options%u
+        // default 0.01).
+        pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
     };
 
