@@ -38,24 +38,40 @@ use crate::sparse::csc::CscMatrix;
 
 #[allow(dead_code)] // Real uses arrive in Step 3 of the implementation plan.
 mod hungarian;
+mod infnorm;
 mod mc64;
 
 /// User-facing scaling strategy selector.
 ///
-/// Default is `Mc64Symmetric` — the canonical matching-based scaling
-/// that matches MUMPS (SYM=2) and SSIDS (options%scaling=1). Tests
-/// that want scaling-independent behavior must construct
-/// `SupernodeParams { scaling_strategy: ScalingStrategy::Identity,
-/// ..Default::default() }` explicitly.
+/// Default is `InfNorm` — Knight-Ruiz iterative ∞-norm equilibration,
+/// the same algorithm used by feral's dense BK path (see
+/// `src/dense/equilibrate.rs`). This was moved to default after the
+/// Phase 2.2.3 follow-up diagnostic showed MC64 was a silent no-op on
+/// matrices like HYDCAR20, METHANL8, SWOPF, and HATFLDG — matrices
+/// whose raw row norms span 4+ orders of magnitude but whose MC64
+/// matching-based scaling came out near-identity. Knight-Ruiz
+/// equilibration scales those matrices successfully and the sparse
+/// path then matches the MUMPS oracle (see
+/// `examples/dense_vs_sparse.rs` and
+/// `examples/parity_config_sweep.rs` for the evidence).
+///
+/// `Mc64Symmetric` is still available as an opt-in; it is useful on
+/// matrices where matching provides better conditioning than ∞-norm
+/// balancing (e.g. SSINE_2529, VESUVIA_0000 in the parity panel).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ScalingStrategy {
-    /// MC64-style symmetric matching-based scaling. This is the
-    /// canonical choice and matches the default behavior of MUMPS
-    /// (SYM=2) and SSIDS (options%scaling=1).
+    /// Knight-Ruiz ∞-norm iterative equilibration. Default since the
+    /// Phase 2.2.3 follow-up. Matches the scaling algorithm used by
+    /// the dense BK path.
     #[default]
+    InfNorm,
+    /// MC64-style symmetric matching-based scaling. Matches the
+    /// default behavior of MUMPS (SYM=2) and SSIDS
+    /// (options%scaling=1). Useful on matrices where matching
+    /// provides better conditioning than ∞-norm balancing.
     Mc64Symmetric,
     /// Identity scaling (no-op). Use for regression testing and for
-    /// inputs where matching is not appropriate.
+    /// inputs where any scaling is inappropriate.
     Identity,
     /// User-supplied pre-computed scaling vector in user-order
     /// indexing. Length must equal the matrix dimension.
@@ -105,6 +121,7 @@ pub fn compute_scaling(
             }
             Ok((s.clone(), ScalingInfo::NotApplied))
         }
+        ScalingStrategy::InfNorm => Ok(infnorm::compute_infnorm(matrix)),
         ScalingStrategy::Mc64Symmetric => mc64::compute_symmetric(matrix),
     }
 }

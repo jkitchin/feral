@@ -106,30 +106,21 @@ fn parity_argauss_0000() {
     run_parity("argauss", "ARGAUSS_0000");
 }
 
-// Panel time: residual ratio 2.85e3 > K=10 (feral=7.53e-13, mumps=2.65e-16)
 #[test]
-#[ignore]
-fn parity_batch_0094() {
-    run_parity("batch", "BATCH_0094");
+fn parity_avion2_0251() {
+    run_parity("avion2", "AVION2_0251");
 }
 
-// Panel time: residual ratio 3.07e3 > K=10 (feral=8.09e-13, mumps=2.64e-16)
+// Panel time: residual ratio 4.35e3 > K=10 (feral=9.64e-13, mumps=2.22e-16)
 #[test]
 #[ignore]
-fn parity_batch_1048() {
-    run_parity("batch", "BATCH_1048");
+fn parity_batch_0574() {
+    run_parity("batch", "BATCH_0574");
 }
 
 #[test]
 fn parity_bqpgasim_0012() {
     run_parity("bqpgasim", "BQPGASIM_0012");
-}
-
-// Panel time: residual ratio 9.52e2 > K=10 (feral=1.03e-12, mumps=1.09e-15)
-#[test]
-#[ignore]
-fn parity_ceri651als_1527() {
-    run_parity("ceri651als", "CERI651ALS_1527");
 }
 
 #[test]
@@ -147,21 +138,28 @@ fn parity_cresc132_0000() {
     run_parity("cresc132", "CRESC132_0000");
 }
 
-// Panel time: residual ratio 2.38e1 > K=10 (feral=7.58e-14, mumps=3.18e-15)
+// Panel time: residual ratio 2.16e4 > K=10 (feral=8.62e-13, mumps=4.00e-17)
 #[test]
 #[ignore]
-fn parity_hahn1_0154() {
-    run_parity("hahn1", "HAHN1_0154");
+fn parity_dallass_0026() {
+    run_parity("dallass", "DALLASS_0026");
+}
+
+// Panel time: residual ratio 1.08e1 > K=10 (feral=3.23e-13, mumps=2.99e-14)
+#[test]
+#[ignore]
+fn parity_hahn1_0004() {
+    run_parity("hahn1", "HAHN1_0004");
 }
 
 #[test]
-fn parity_hahn1_0209() {
-    run_parity("hahn1", "HAHN1_0209");
+fn parity_hahn1_0006() {
+    run_parity("hahn1", "HAHN1_0006");
 }
 
 #[test]
-fn parity_hahn1_0222() {
-    run_parity("hahn1", "HAHN1_0222");
+fn parity_hahn1_0023() {
+    run_parity("hahn1", "HAHN1_0023");
 }
 
 // Panel time: inertia mismatch (feral=(3, 4, 1) mumps=(4, 4, 0))
@@ -220,16 +218,23 @@ fn parity_hatfldg_0006() {
     run_parity("hatfldg", "HATFLDG_0006");
 }
 
-// Panel time: residual ratio 8.78e2 > K=10 (feral=2.88e-13, mumps=3.28e-16)
+// Panel time: residual ratio 4.22e3 > K=10 (feral=3.41e-13, mumps=8.07e-17)
 #[test]
 #[ignore]
-fn parity_hs102_0000() {
-    run_parity("hs102", "HS102_0000");
+fn parity_hs103_0000() {
+    run_parity("hs103", "HS103_0000");
+}
+
+// Panel time: residual ratio 1.73e3 > K=10 (feral=6.69e-13, mumps=3.87e-16)
+#[test]
+#[ignore]
+fn parity_hs109_0009() {
+    run_parity("hs109", "HS109_0009");
 }
 
 #[test]
-fn parity_hs85_0081() {
-    run_parity("hs85", "HS85_0081");
+fn parity_hs85_0176() {
+    run_parity("hs85", "HS85_0176");
 }
 
 // Panel time: inertia mismatch (feral=(98, 99, 1) mumps=(99, 99, 0))
@@ -240,23 +245,18 @@ fn parity_hydcar20_0000() {
 }
 
 #[test]
-fn parity_roszman1_0336() {
-    run_parity("roszman1", "ROSZMAN1_0336");
+fn parity_ssine_1329() {
+    run_parity("ssine", "SSINE_1329");
 }
 
-#[test]
-fn parity_ssine_2529() {
-    run_parity("ssine", "SSINE_2529");
-}
-
-// Panel time: residual ratio 2.53e3 > K=10 (feral=2.91e-13, mumps=1.15e-16)
+// Panel time: residual ratio 1.56e3 > K=10 (feral=1.80e-13, mumps=1.15e-16)
 #[test]
 #[ignore]
 fn parity_ssi_2597() {
     run_parity("ssi", "SSI_2597");
 }
 
-// Panel time: inertia mismatch (feral=(53, 92, 30) mumps=(83, 92, 0))
+// Panel time: inertia mismatch (feral=(47, 92, 36) mumps=(83, 92, 0))
 #[test]
 #[ignore]
 fn parity_swopf_0000() {

@@ -113,8 +113,19 @@ fn compare(stem: &str) {
         Err(e) => println!("  DENSE: factor failed: {}", e),
     }
 
-    // Sparse path (no equilibration, MC64 only if enabled)
+    // Sparse path with whatever scaling is the current default.
     let sym = symbolic_factorize(&csc, &SupernodeParams::default()).expect("sym");
+    let scale_range = {
+        let mut lo = f64::INFINITY;
+        let mut hi = 0.0f64;
+        for &v in &sym.scaling {
+            if v > 0.0 {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+        (lo, hi)
+    };
     let (sparse_fac, sparse_inertia) = factorize_multifrontal(&csc, &sym, &p).expect("factorize");
     let sparse_x = solve_sparse_refined(&csc, &sparse_fac, &rhs).expect("solve");
     let sparse_res = rel_residual(&csc, &sparse_x, &rhs);
@@ -123,9 +134,11 @@ fn compare(stem: &str) {
         .map(|(i, _)| &sparse_inertia == i)
         .unwrap_or(false);
     println!(
-        "  SPARSE (MC64 + BK frontal):  inertia={}  residual={:.3e}  match={}",
+        "  SPARSE (default scaling):  inertia={}  residual={:.3e}  scale=[{:.2e}, {:.2e}]  match={}",
         sparse_inertia,
         sparse_res,
+        scale_range.0,
+        scale_range.1,
         if matches { "YES" } else { "no" },
     );
 }

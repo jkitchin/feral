@@ -131,13 +131,9 @@ fn main() {
 
     let configs: &[(&str, ScalingStrategy, f64)] = &[
         ("Id / 0.0 ", ScalingStrategy::Identity, 0.0),
-        ("Id / 0.01", ScalingStrategy::Identity, 0.01),
         ("Mc64 / 0.0 ", ScalingStrategy::Mc64Symmetric, 0.0),
-        (
-            "Mc64 / 0.01 (current default)",
-            ScalingStrategy::Mc64Symmetric,
-            0.01,
-        ),
+        ("InfNorm / 0.0 (new default)", ScalingStrategy::InfNorm, 0.0),
+        ("InfNorm / 0.01", ScalingStrategy::InfNorm, 0.01),
     ];
 
     print!("{:<32}", "Matrix");
@@ -173,9 +169,10 @@ fn main() {
         }
         println!();
 
-        // Track regressions relative to config 3 (the current default).
+        // Track regressions relative to config 2 (the new default,
+        // InfNorm / 0.0).
         for ci in 0..4 {
-            if row_status[3] && !row_status[ci] {
+            if row_status[2] && !row_status[ci] {
                 regressions[ci].push(entry.name.clone());
             }
         }
@@ -186,9 +183,9 @@ fn main() {
         println!("  {:<32} {:>3} / {}", label, pass_count[ci], panel.len());
     }
 
-    println!("\nRegressions vs Mc64/0.01 (current default):");
+    println!("\nRegressions vs InfNorm/0.0 (new default):");
     for (ci, (label, _, _)) in configs.iter().enumerate() {
-        if ci == 3 {
+        if ci == 2 {
             continue;
         }
         print!("  {}: ", label);

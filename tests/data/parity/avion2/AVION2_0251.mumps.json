@@ -1,0 +1,1 @@
+{"solver": "mumps-5.8.2", "version": "5.8.2", "matrix": "AVION2_0251", "n": 64, "nnz": 193, "factor_us": 26, "solve_us": 7, "inertia": {"positive": 49, "negative": 15, "zero": 0}, "rhs_source": "sidecar", "residual_2norm_relative": 8.742314201695587e-20, "factorization_status": "ok", "solver_info": {"infog_1": 0, "infog_28": 0}}

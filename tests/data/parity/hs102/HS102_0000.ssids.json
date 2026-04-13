@@ -1,1 +1,0 @@
-{"solver": "ssids", "version": "spral-2025.09.18", "matrix": "HS102_0000", "n": 12, "nnz": 64, "factor_us": 249, "solve_us": 1, "inertia": {"positive": 7, "negative": 5, "zero": 0}, "rhs_source": "sidecar", "residual_2norm_relative": 8.207521073539128e-16, "factorization_status": "ok", "solver_info": {"ssids_flag": 50, "matrix_rank": 12, "num_delay": 0}}
