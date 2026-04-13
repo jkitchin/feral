@@ -92,11 +92,17 @@ fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, F
     }
 
     // Phase 1: Forward substitution (postorder)
+    //
+    // Phase 2.3 Step 6: iterate over the `nelim` actually-eliminated
+    // pivots, not `ncol` (which is the *attempted* count and may be
+    // larger when the kernel delayed pivots to an ancestor). `ff.l` is
+    // sized `nrow × nelim`, so bounding the outer loop by `ncol` would
+    // read past the end of L on any node that delayed columns.
     for node in &factors.node_factors {
         let ff = &node.frontal_factors;
-        let ncol = ff.ncol;
+        let nelim = ff.nelim;
         let nrow = ff.nrow;
-        if ncol == 0 {
+        if nelim == 0 {
             continue;
         }
 
@@ -107,7 +113,7 @@ fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, F
         }
 
         // L-solve: for each eliminated column j, update rows below
-        for j in 0..ncol {
+        for j in 0..nelim {
             let w_j = w[j];
             for i in (j + 1)..nrow {
                 w[i] -= ff.l[j * nrow + i] * w_j;
@@ -123,9 +129,9 @@ fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, F
     // Phase 2: D-block solve
     for node in &factors.node_factors {
         let ff = &node.frontal_factors;
-        let ncol = ff.ncol;
+        let nelim = ff.nelim;
         let nrow = ff.nrow;
-        if ncol == 0 {
+        if nelim == 0 {
             continue;
         }
 
@@ -135,12 +141,14 @@ fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, F
             w[i] = y[node.row_indices[ff.perm[i]]];
         }
 
-        // D-block solve (first ncol entries only).
+        // D-block solve over the `nelim` eliminated pivots. `d_diag`
+        // and `d_subdiag` are sized `nelim`, so bounding by `ncol`
+        // would run off the end on any node that delayed columns.
         // Pivots that were force-accepted as zero during factorization
         // are skipped — see dev/plans/threshold-mismatch-fix.md.
         let mut k = 0;
-        while k < ncol {
-            if k + 1 < ncol && ff.d_subdiag[k] != 0.0 {
+        while k < nelim {
+            if k + 1 < nelim && ff.d_subdiag[k] != 0.0 {
                 let a = ff.d_diag[k];
                 let b = ff.d_subdiag[k];
                 let c = ff.d_diag[k + 1];
@@ -179,12 +187,15 @@ fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, F
         }
     }
 
-    // Phase 3: Backward substitution (reverse postorder)
+    // Phase 3: Backward substitution (reverse postorder). Bounded by
+    // `nelim` for the same reason as the forward sweep: L has `nelim`
+    // columns and indexing by `ncol` would walk past the end on nodes
+    // that delayed pivots.
     for node in factors.node_factors.iter().rev() {
         let ff = &node.frontal_factors;
-        let ncol = ff.ncol;
+        let nelim = ff.nelim;
         let nrow = ff.nrow;
-        if ncol == 0 {
+        if nelim == 0 {
             continue;
         }
 
@@ -195,7 +206,7 @@ fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, F
         }
 
         // L^T-solve: for each eliminated column j (reverse order)
-        for j in (0..ncol).rev() {
+        for j in (0..nelim).rev() {
             let mut sum = 0.0;
             for i in (j + 1)..nrow {
                 sum += ff.l[j * nrow + i] * w[i];

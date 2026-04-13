@@ -26,11 +26,26 @@
 //! an independent oracle — it does not depend on any internal
 //! book-keeping the implementation might change.
 //!
-//! Integration-level tests (delayed pivots propagating to the parent
-//! supernode) arrive with Step 4 of the Phase 2.3 plan.
+//! Integration-level tests — Phase 2.3 Step 5:
+//!
+//!   4. `factorize_multifrontal_delays_propagate_to_parent` — a 4×4
+//!      arrow KKT-like matrix with AMD ordering producing multiple
+//!      supernodes under `nemin = 1`. Column 0 has a tiny diagonal
+//!      (1e-3) and a dominant off-diagonal (1.0) in row 3, so the
+//!      column-relative test at threshold 0.01 rejects it. With
+//!      delays enabled, column 0 is left un-eliminated at its leaf
+//!      supernode and must re-enter pivot search at the arrow-apex
+//!      supernode (which is the parent via the elimination tree).
+//!      The test pins `n_delayed_in == 1` at the root.
+//!   5. `factorize_multifrontal_delayed_pivot_succeeds_at_parent` —
+//!      the same matrix, with an additional end-to-end inertia check
+//!      against a dense LDLᵀ oracle to prove the delayed pivot path
+//!      reaches the same factorization as the dense path.
 
-use feral::dense::factor::factor_frontal;
-use feral::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
+use feral::dense::factor::{factor, factor_frontal};
+use feral::numeric::factorize::factorize_multifrontal;
+use feral::symbolic::{symbolic_factorize, SupernodeParams};
+use feral::{BunchKaufmanParams, CscMatrix, SymmetricMatrix, ZeroPivotAction};
 
 fn delay_params() -> BunchKaufmanParams {
     BunchKaufmanParams {
@@ -212,4 +227,145 @@ fn factor_frontal_partial_elim_with_delay() {
     assert_eq!(get(2, 0), 100.0, "cross-block (4,2)");
     assert_eq!(get(2, 1), 100.0, "cross-block (4,3)");
     assert_eq!(get(2, 2), 1e6, "trailing diag col 4");
+}
+
+// ---------------------------------------------------------------------
+// Integration tests — Phase 2.3 Step 5 (parent-side delay assembly).
+// ---------------------------------------------------------------------
+
+/// Assemble a 4×4 arrow-apex matrix where column 0 has a tiny diagonal
+/// and a dominant off-diagonal in the arrow apex row. The nemin=1 setup
+/// ensures every column becomes its own supernode, giving a 3-leaves /
+/// 1-root elimination tree. With `pivot_threshold = 0.01`:
+///
+///   * column 0's relative test (|1e-3| vs 0.01 · 1.0 = 0.01) fails,
+///     so a non-root leaf supernode must delay it;
+///   * columns 1 and 2 pass cleanly;
+///   * the parent (column 3) inherits column 0 as a delayed fully-
+///     summed column in its frontal.
+///
+///     A = [ 1e-3   0     0     1   ]
+///         [ 0     10     0     1   ]
+///         [ 0      0    10     1   ]
+///         [ 1      1     1     2   ]
+fn arrow_apex_matrix() -> CscMatrix {
+    CscMatrix::from_triplets(
+        4,
+        // (row, col) lower-triangle entries only
+        &[0, 3, 1, 3, 2, 3, 3],
+        &[0, 0, 1, 1, 2, 2, 3],
+        &[1e-3, 1.0, 10.0, 1.0, 10.0, 1.0, 2.0],
+    )
+    .expect("build arrow matrix")
+}
+
+fn delay_sparse_params() -> SupernodeParams {
+    SupernodeParams {
+        nemin: 1,
+        scaling_strategy: feral::scaling::ScalingStrategy::Identity,
+    }
+}
+
+fn delay_numeric_params() -> BunchKaufmanParams {
+    BunchKaufmanParams {
+        on_zero_pivot: ZeroPivotAction::ForceAccept,
+        pivot_threshold: 0.01,
+        ..BunchKaufmanParams::default()
+    }
+}
+
+#[test]
+fn factorize_multifrontal_delays_propagate_to_parent() {
+    let m = arrow_apex_matrix();
+    let sym = symbolic_factorize(&m, &delay_sparse_params()).expect("symbolic");
+    let params = delay_numeric_params();
+    let (factors, _inertia) = factorize_multifrontal(&m, &sym, &params).expect("factor");
+
+    // Need at least 2 supernodes for a delay to propagate parent-ward.
+    // Fundamental-supernode detection in the symbolic phase can still
+    // merge adjacent columns that share a row structure, so we don't
+    // pin the exact count — only that delays have somewhere to go.
+    assert!(
+        factors.node_factors.len() >= 2,
+        "need at least 2 supernodes for parent-ward delay propagation, got {}",
+        factors.node_factors.len()
+    );
+
+    // Find the supernode that corresponds to the arrow apex (the unique
+    // root — the supernode with no parent in the forest). With AMD on a
+    // star-shaped pattern the apex ends up ordered last, and is the last
+    // postordered node. Assert it as the root by checking that it is the
+    // only node whose `n_delayed_in > 0` — every other node has no
+    // delayed children to absorb.
+    let parent = factors
+        .node_factors
+        .iter()
+        .find(|n| n.n_delayed_in > 0)
+        .expect("expected one parent absorbing a delayed column");
+
+    // Exactly one delayed column propagated up (from the tiny-pivot
+    // leaf). The parent's attempted column count (`ncol`) is therefore
+    // `own native ncol + 1`, its row_indices list is longer than the
+    // old non-delayed layout would have produced, and its fully-summed
+    // region includes the delayed global index.
+    assert_eq!(parent.n_delayed_in, 1, "one column delayed into parent");
+    assert!(
+        parent.ncol >= 1 + parent.n_delayed_in,
+        "ncol should include native + delayed"
+    );
+    assert!(
+        parent.nrow >= parent.ncol,
+        "nrow must be ≥ ncol after absorbing delays"
+    );
+
+    // Exactly one supernode must have reported a delay out (nelim < ncol).
+    let leaves_that_delayed = factors
+        .node_factors
+        .iter()
+        .filter(|n| n.frontal_factors.n_delayed > 0)
+        .count();
+    assert_eq!(
+        leaves_that_delayed, 1,
+        "exactly one leaf should have delayed a column"
+    );
+}
+
+#[test]
+fn factorize_multifrontal_delayed_pivot_succeeds_at_parent() {
+    let m = arrow_apex_matrix();
+
+    // Dense oracle: factor the full matrix with the same BK params
+    // (may_delay is always false in the dense path). This matrix is
+    // small enough that dense LDLᵀ with ForceAccept produces the
+    // "true" inertia signature we want the sparse path to match once
+    // the delayed pivot has been re-tried at the parent.
+    let dense = m.to_dense();
+    let params = delay_numeric_params();
+    let (_, dense_inertia) = factor(&dense, &params).expect("dense factor");
+
+    let sym = symbolic_factorize(&m, &delay_sparse_params()).expect("symbolic");
+    let (factors, sparse_inertia) =
+        factorize_multifrontal(&m, &sym, &params).expect("sparse factor");
+
+    assert_eq!(
+        sparse_inertia, dense_inertia,
+        "sparse delayed-pivot path must match dense LDLᵀ inertia"
+    );
+    assert_eq!(
+        sparse_inertia.positive + sparse_inertia.negative + sparse_inertia.zero,
+        4,
+        "all 4 pivots must be accounted for after delays resolve at the parent"
+    );
+
+    // The delay actually fired somewhere in the tree (this is what
+    // distinguishes the test from a pass on the non-delay path).
+    let delays_in_tree: usize = factors
+        .node_factors
+        .iter()
+        .map(|n| n.frontal_factors.n_delayed)
+        .sum();
+    assert!(
+        delays_in_tree > 0,
+        "expected at least one delayed pivot to prove the delay path fired"
+    );
 }
