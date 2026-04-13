@@ -1,0 +1,1 @@
+{"solver": "mumps-5.8.2", "version": "5.8.2", "matrix": "DEGENLPB_0045", "n": 35, "nnz": 117, "factor_us": 16, "solve_us": 5, "inertia": {"positive": 20, "negative": 15, "zero": 0}, "rhs_source": "sidecar", "residual_2norm_relative": 8.086152037737032e-13, "factorization_status": "ok", "solver_info": {"infog_1": 0, "infog_28": 0}}

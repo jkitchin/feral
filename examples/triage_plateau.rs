@@ -216,10 +216,12 @@ fn solve_refined_verbose(
 }
 
 fn params() -> BunchKaufmanParams {
-    // Post-Phase-2.2.3: pivot_threshold stays at default 0.0 until
-    // delayed pivoting lands. See parity_config_sweep for evidence.
+    // Phase 2.3: restored pivot_threshold = 0.01 now that delayed
+    // pivoting is in place. Matches bench::params_kkt and the
+    // parity panel template in select_parity_panel.rs.
     BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
+        pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
     }
 }

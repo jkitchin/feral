@@ -136,10 +136,11 @@ fn triage_one(stem: &str) {
         println!("  canonical SSIDS          = NOT AVAILABLE");
     }
 
-    // Post-Phase-2.2.3: pivot_threshold stays at default 0.0 until
-    // delayed pivoting lands. See parity_config_sweep for evidence.
+    // Phase 2.3: restored pivot_threshold = 0.01 now that delayed
+    // pivoting is in place. Matches bench::params_kkt.
     let params = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
+        pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
     };
 

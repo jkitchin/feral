@@ -398,20 +398,24 @@ fn main() {
     // Built-in dense benchmarks
     let mut rng = Rng::new(42);
     let params_spd = BunchKaufmanParams::default();
-    let params_kkt = BunchKaufmanParams {
+    // Dense KKT path: pivot_threshold = 0.0 because the dense
+    // kernel does not implement delayed pivoting — a non-zero
+    // threshold here sends rejected pivots through ForceAccept
+    // and zeros out structural pivots on e.g. HYDCAR20, METHANL8,
+    // DEGENLPA, HS118.
+    let params_kkt_dense = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
-        // Phase 2.2.3 follow-up: pivot_threshold stays at the
-        // default 0.0 until delayed pivoting lands (Phase 2.3). The
-        // Phase 2.2.2 default of 0.01 (MUMPS CNTL(1), SSIDS options%u)
-        // was correct only in the presence of delayed pivoting, which
-        // feral does not yet have — without a path to delay rejected
-        // pivots, u=0.01 sends every rejected pivot through
-        // ForceAccept and zeros out structural pivots on matrices
-        // like HYDCAR20, METHANL8, HATFLDG, HATFLDBNE, ACOPR30,
-        // VESUVIOU. The parity panel sweep (examples/parity_config_sweep.rs)
-        // showed Mc64/0.0 is a strict improvement over Mc64/0.01 on
-        // the curated 31-matrix panel (17 vs 11 passing, no
-        // regressions).
+        ..BunchKaufmanParams::default()
+    };
+    // Sparse KKT path (Phase 2.3): pivot_threshold = 0.01
+    // (SSIDS/MUMPS default) because delayed pivoting
+    // (may_delay=true at non-roots) gives rejected pivots a
+    // landing zone at the parent supernode. The column-relative
+    // test |d| >= u*col_max bounds the L growth factor by
+    // 1/u = 100.
+    let params_kkt_sparse = BunchKaufmanParams {
+        on_zero_pivot: ZeroPivotAction::ForceAccept,
+        pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
     };
 
@@ -420,10 +424,14 @@ fn main() {
         ("spd_50", random_spd(50, &mut rng), &params_spd),
         ("spd_100", random_spd(100, &mut rng), &params_spd),
         ("spd_200", random_spd(200, &mut rng), &params_spd),
-        ("kkt_10_3", random_kkt(10, 3, &mut rng), &params_kkt),
-        ("kkt_30_10", random_kkt(30, 10, &mut rng), &params_kkt),
-        ("kkt_50_15", random_kkt(50, 15, &mut rng), &params_kkt),
-        ("kkt_100_30", random_kkt(100, 30, &mut rng), &params_kkt),
+        ("kkt_10_3", random_kkt(10, 3, &mut rng), &params_kkt_dense),
+        ("kkt_30_10", random_kkt(30, 10, &mut rng), &params_kkt_dense),
+        ("kkt_50_15", random_kkt(50, 15, &mut rng), &params_kkt_dense),
+        (
+            "kkt_100_30",
+            random_kkt(100, 30, &mut rng),
+            &params_kkt_dense,
+        ),
     ];
 
     println!(
@@ -490,7 +498,7 @@ fn main() {
 
         // Factor
         let t0 = Instant::now();
-        let (factors, inertia) = match factor(&entry.matrix, &params_kkt) {
+        let (factors, inertia) = match factor(&entry.matrix, &params_kkt_dense) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  {}: factor failed: {}", entry.name, e);
@@ -651,14 +659,15 @@ fn main() {
         };
 
         // Numeric factorization
-        let (sp_factors, sp_inertia) = match factorize_multifrontal(&entry.csc, &sym, &params_kkt) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("  {}: sparse factor failed: {}", entry.name, e);
-                sp_factor_fail += 1;
-                continue;
-            }
-        };
+        let (sp_factors, sp_inertia) =
+            match factorize_multifrontal(&entry.csc, &sym, &params_kkt_sparse) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("  {}: sparse factor failed: {}", entry.name, e);
+                    sp_factor_fail += 1;
+                    continue;
+                }
+            };
 
         let inertia_ok = sp_inertia == expected_inertia;
         if inertia_ok {

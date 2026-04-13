@@ -1,0 +1,1 @@
+{"solver": "ssids", "version": "spral-2025.09.18", "matrix": "CERI651A_0000", "n": 190, "nnz": 739, "factor_us": 554, "solve_us": 10, "inertia": {"positive": 129, "negative": 61, "zero": 0}, "rhs_source": "sidecar", "residual_2norm_relative": 1.4023034035330298e-14, "factorization_status": "ok", "solver_info": {"ssids_flag": 50, "matrix_rank": 190, "num_delay": 50}}

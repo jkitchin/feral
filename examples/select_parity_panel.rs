@@ -110,12 +110,13 @@ fn read_oracle(path: &Path) -> Option<(Inertia, f64)> {
 }
 
 fn params() -> BunchKaufmanParams {
-    // Phase 2.2.3 follow-up: pivot_threshold stays at the default 0.0
-    // until delayed pivoting lands (Phase 2.3). See parity_config_sweep
-    // results — Mc64/0.0 dominates Mc64/0.01 on the panel. Keep this in
-    // sync with the test-file template below and with bench::params_kkt.
+    // Phase 2.3: restored pivot_threshold = 0.01 (SSIDS/MUMPS default)
+    // now that delayed pivoting gives rejected pivots a landing zone
+    // at the parent supernode. Keep in sync with the test-file
+    // template below and with bench::params_kkt.
     BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
+        pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
     }
 }
@@ -491,6 +492,7 @@ fn main() {
     test_body.push_str("fn ldlt_params() -> BunchKaufmanParams {\n");
     test_body.push_str("    BunchKaufmanParams {\n");
     test_body.push_str("        on_zero_pivot: ZeroPivotAction::ForceAccept,\n");
+    test_body.push_str("        pivot_threshold: 0.01,\n");
     test_body.push_str("        ..BunchKaufmanParams::default()\n");
     test_body.push_str("    }\n");
     test_body.push_str("}\n\n");

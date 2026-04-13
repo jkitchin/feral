@@ -1,18 +1,17 @@
-//! Phase 2.2.3 follow-up: compare the dense BK path against the
-//! sparse multifrontal path on matrices that fail the parity panel,
-//! holding BunchKaufmanParams identical between them.
+//! Compare the dense BK path against the sparse multifrontal path
+//! on matrices that fail the parity panel, using each path's
+//! production BunchKaufmanParams config.
 //!
-//! Hypothesis: the dense path applies Knight-Ruiz ∞-norm
-//! equilibration before BK (src/dense/equilibrate.rs), while
-//! the sparse path does not. On matrices where MC64 is a no-op
-//! (HYDCAR20, METHANL8, ...) this means dense factors an
-//! equilibrated matrix and sparse factors a raw matrix, which is
-//! enough to change the inertia.
+//! Post-Phase-2.3 the two paths no longer use identical params:
+//!   - Dense:  pivot_threshold = 0.0 (no delays in dense kernel)
+//!   - Sparse: pivot_threshold = 0.01 (delays enabled at non-roots)
 //!
-//! If the dense path gets the correct inertia on matrices where
-//! the sparse path doesn't, then Knight-Ruiz equilibration is the
-//! missing piece in the sparse kernel and should be added to the
-//! frontal factorization pipeline.
+//! Historical hypothesis (still relevant on matrices that remain
+//! failing after Phase 2.3): the dense path applies Knight-Ruiz
+//! ∞-norm equilibration before BK (src/dense/equilibrate.rs)
+//! while the sparse path does not. On matrices where MC64 is a
+//! no-op this means dense factors an equilibrated matrix and
+//! sparse factors a raw matrix.
 //!
 //! Run with:  cargo run --release --example dense_vs_sparse
 
@@ -26,9 +25,22 @@ use feral::{
     ZeroPivotAction,
 };
 
-fn params() -> BunchKaufmanParams {
+fn dense_params() -> BunchKaufmanParams {
+    // Dense production path: pivot_threshold = 0.0 because the
+    // dense kernel does not implement delayed pivoting.
     BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
+        ..BunchKaufmanParams::default()
+    }
+}
+
+fn sparse_params() -> BunchKaufmanParams {
+    // Sparse production path (Phase 2.3): pivot_threshold = 0.01
+    // because delayed pivoting gives rejected pivots a landing zone
+    // at the parent supernode. Matches bench::params_kkt.
+    BunchKaufmanParams {
+        on_zero_pivot: ZeroPivotAction::ForceAccept,
+        pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
     }
 }
@@ -81,8 +93,8 @@ fn compare(stem: &str) {
     }
 
     // Dense path (with Knight-Ruiz equilibration)
-    let p = params();
-    match factor(&dense, &p) {
+    let dense_p = dense_params();
+    match factor(&dense, &dense_p) {
         Ok((factors, dense_inertia)) => {
             let x = solve_refined(&dense, &factors, &rhs).expect("dense solve");
             let res = rel_residual(&csc, &x, &rhs);
@@ -126,7 +138,9 @@ fn compare(stem: &str) {
         }
         (lo, hi)
     };
-    let (sparse_fac, sparse_inertia) = factorize_multifrontal(&csc, &sym, &p).expect("factorize");
+    let sparse_p = sparse_params();
+    let (sparse_fac, sparse_inertia) =
+        factorize_multifrontal(&csc, &sym, &sparse_p).expect("factorize");
     let sparse_x = solve_sparse_refined(&csc, &sparse_fac, &rhs).expect("solve");
     let sparse_res = rel_residual(&csc, &sparse_x, &rhs);
     let matches = mumps
