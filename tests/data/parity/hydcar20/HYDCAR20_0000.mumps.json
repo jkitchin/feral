@@ -1,0 +1,1 @@
+{"solver": "mumps-5.8.2", "version": "5.8.2", "matrix": "HYDCAR20_0000", "n": 198, "nnz": 833, "factor_us": 174, "solve_us": 16, "inertia": {"positive": 99, "negative": 99, "zero": 0}, "rhs_source": "sidecar", "residual_2norm_relative": 6.583664385736177e-16, "factorization_status": "ok", "solver_info": {"infog_1": 0, "infog_28": 0}}

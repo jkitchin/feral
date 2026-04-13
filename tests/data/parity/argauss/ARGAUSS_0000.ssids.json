@@ -1,0 +1,1 @@
+{"solver": "ssids", "version": "spral-2025.09.18", "matrix": "ARGAUSS_0000", "n": 3, "nnz": 6, "factor_us": 343, "solve_us": 2, "inertia": {"positive": 3, "negative": 0, "zero": 0}, "rhs_source": "sidecar", "residual_2norm_relative": 1.1730629908900314e-16, "factorization_status": "ok", "solver_info": {"ssids_flag": 50, "matrix_rank": 3, "num_delay": 0}}

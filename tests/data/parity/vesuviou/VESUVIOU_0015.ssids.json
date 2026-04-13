@@ -1,0 +1,1 @@
+{"solver": "ssids", "version": "spral-2025.09.18", "matrix": "VESUVIOU_0015", "n": 3083, "nnz": 12810, "factor_us": 13266, "solve_us": 182, "inertia": {"positive": 2058, "negative": 1025, "zero": 0}, "rhs_source": "sidecar", "residual_2norm_relative": 1.5598121668628894e-13, "factorization_status": "ok", "solver_info": {"ssids_flag": 50, "matrix_rank": 3083, "num_delay": 882}}

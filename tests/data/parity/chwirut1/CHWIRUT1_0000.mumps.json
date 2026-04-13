@@ -1,0 +1,1 @@
+{"solver": "mumps-5.8.2", "version": "5.8.2", "matrix": "CHWIRUT1_0000", "n": 645, "nnz": 1715, "factor_us": 258, "solve_us": 67, "inertia": {"positive": 431, "negative": 214, "zero": 0}, "rhs_source": "sidecar", "residual_2norm_relative": 9.50781455013036e-13, "factorization_status": "ok", "solver_info": {"infog_1": 0, "infog_28": 0}}
