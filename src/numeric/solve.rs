@@ -243,7 +243,19 @@ fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, F
 /// `dx = A⁻¹·r` can amplify error; tracking the best iterate guarantees
 /// the returned `x` is no worse than the unrefined `solve_sparse()` output.
 ///
-/// Convergence test: stop when `||δx||₂ / ||x||₂ < ε·√n` or after 3 steps.
+/// Convergence test: stop when `||r||₂ / ||b||₂ < ε·√n` (we've reached
+/// machine precision) or after 10 steps. 10 is MUMPS's ICNTL(10)
+/// default; below that some near-rank-deficient KKT matrices
+/// (CERI651C/ELS, HAHN1, MEYER3NE) bounce in and out of the machine-
+/// precision basin before settling, and the best-iterate tracker below
+/// guarantees no regression from the extra steps.
+///
+/// A prior version of this routine used a `||δx||/||x|| < ε·√n`
+/// convergence test, but that fires prematurely on matrices where
+/// ForceAccept produced a non-contractive correction — the iterate
+/// stops updating (tiny δx) without the residual having actually
+/// dropped into the target basin. Residual-based termination is
+/// honest about "are we done yet."
 pub fn solve_sparse_refined(
     matrix: &CscMatrix,
     factors: &SparseFactors,
@@ -271,12 +283,27 @@ pub fn solve_sparse_refined(
     let mut best_x = x.clone();
     let mut best_r_norm = r_norm;
 
-    let max_steps = 3;
+    let max_steps = 10;
     let n_sqrt = (n as f64).sqrt();
     let threshold = f64::EPSILON * n_sqrt;
     let divergence_factor = 100.0;
+    let b_norm = norm2(rhs);
+    // Target is a RELATIVE residual: ||r||/||b|| < ε·√n. When ||b|| = 0
+    // the true answer is x = 0 and r = -A·x; we target ||r|| < threshold
+    // directly in that case.
+    let relative_reached = |r_norm: f64| -> bool {
+        if b_norm > 0.0 {
+            r_norm < threshold * b_norm
+        } else {
+            r_norm < threshold
+        }
+    };
 
-    for _ in 0..max_steps {
+    for _step in 0..max_steps {
+        if relative_reached(best_r_norm) {
+            break;
+        }
+
         let dx = solve_sparse(factors, &r)?;
 
         let mut x_new = x.clone();
@@ -297,20 +324,9 @@ pub fn solve_sparse_refined(
             best_x = x_new.clone();
         }
 
-        let dx_norm = norm2(&dx);
-        let x_norm = norm2(&x_new);
-
         x = x_new;
         r = r_new;
         r_norm = r_new_norm;
-
-        if x_norm > 0.0 {
-            if dx_norm / x_norm < threshold {
-                break;
-            }
-        } else if dx_norm < threshold {
-            break;
-        }
 
         if r_norm > best_r_norm * divergence_factor {
             break;

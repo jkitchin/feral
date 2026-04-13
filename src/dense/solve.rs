@@ -95,13 +95,20 @@ pub fn solve_refined(
     let mut best_x = x.clone();
     let mut best_r_norm = r_norm;
 
-    let max_steps = 3;
+    let max_steps = 10;
     let n_sqrt = (n as f64).sqrt();
     let threshold = f64::EPSILON * n_sqrt;
     // Bail out if the residual blows up far beyond the best seen
     let divergence_factor = 100.0;
+    let b_norm = norm2(rhs).max(1.0);
+    let target_r = threshold * b_norm;
 
     for _ in 0..max_steps {
+        // Already at machine precision? Stop.
+        if best_r_norm < target_r {
+            break;
+        }
+
         // Solve correction: δx = A⁻¹ r
         let dx = solve(factors, &r)?;
 
@@ -126,22 +133,10 @@ pub fn solve_refined(
             best_x = x_new.clone();
         }
 
-        // Convergence check on δx, before stepping
-        let dx_norm = norm2(&dx);
-        let x_norm = norm2(&x_new);
-
         // Step
         x = x_new;
         r = r_new;
         r_norm = r_new_norm;
-
-        if x_norm > 0.0 {
-            if dx_norm / x_norm < threshold {
-                break;
-            }
-        } else if dx_norm < threshold {
-            break;
-        }
 
         // Diverging hard? Stop trying.
         if r_norm > best_r_norm * divergence_factor {

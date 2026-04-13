@@ -88,13 +88,14 @@ fn run_parity(fam: &str, stem: &str) {
     );
 }
 
-// Panel snapshot: 22/28 matrices pass MUMPS parity (14 panel-time +
-// 8 un-ignored after the Phase 2.3 sign-preservation fix).
-// Failing matrices are `#[ignore]`'d with the panel-time failure
-// mode in the attribute comment. Passing matrices run as regular
-// tests and protect against regression. As fixes land, rerun
-// `cargo run --release --example select_parity_panel` to refresh
-// the panel and un-ignore the now-passing matrices.
+// Panel snapshot: 27/28 matrices pass MUMPS parity (14 panel-time +
+// 8 un-ignored after the Phase 2.3 sign-preservation fix + 5
+// un-ignored after the Phase 2.3 refinement-termination fix).
+// Only SSI_2597 remains ignored (factorization-level limitation,
+// not a refinement issue — see Phase 2.4). Passing matrices run
+// as regular tests and protect against regression. As fixes land,
+// rerun `cargo run --release --example select_parity_panel` to
+// refresh the panel and un-ignore the now-passing matrices.
 
 #[test]
 fn parity_acopp30_0000() {
@@ -102,8 +103,9 @@ fn parity_acopp30_0000() {
 }
 
 // Panel time: residual ratio 1.52e1 > K=10 (feral=3.86e-14, mumps=2.54e-15)
+// Phase 2.3: closed by refinement-termination fix (residual-based,
+// max 10 steps).
 #[test]
-#[ignore]
 fn parity_avion2_0510() {
     run_parity("avion2", "AVION2_0510");
 }
@@ -135,15 +137,18 @@ fn parity_ceri651a_0166() {
 }
 
 // Panel time: residual ratio 5.10e2 > K=10 (feral=4.29e-13, mumps=8.40e-16)
+// Phase 2.3: closed by refinement-termination fix. The plain 3-step
+// refinement was exiting before the trajectory hit the machine-
+// precision basin at step ~4.
 #[test]
-#[ignore]
 fn parity_ceri651c_0746() {
     run_parity("ceri651c", "CERI651C_0746");
 }
 
 // Panel time: residual ratio 5.12e2 > K=10 (feral=1.28e-12, mumps=2.50e-15)
+// Phase 2.3: closed by refinement-termination fix (same cause as
+// CERI651C_0746 — trajectory settles after ~5 steps).
 #[test]
-#[ignore]
 fn parity_ceri651els_1482() {
     run_parity("ceri651els", "CERI651ELS_1482");
 }
@@ -192,8 +197,8 @@ fn parity_degenlpb_0047() {
 }
 
 // Panel time: residual ratio 1.08e1 > K=10 (feral=3.23e-13, mumps=2.99e-14)
+// Phase 2.3: closed by refinement-termination fix.
 #[test]
-#[ignore]
 fn parity_hahn1_0004() {
     run_parity("hahn1", "HAHN1_0004");
 }
@@ -229,8 +234,8 @@ fn parity_hydcar20_0000() {
 }
 
 // Panel time: residual ratio 1.25e1 > K=10 (feral=2.50e-14, mumps=1.99e-15)
+// Phase 2.3: closed by refinement-termination fix.
 #[test]
-#[ignore]
 fn parity_meyer3ne_0253() {
     run_parity("meyer3ne", "MEYER3NE_0253");
 }
