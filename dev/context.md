@@ -1,83 +1,83 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-13T16:51:37Z
+Generated: 2026-04-13T20:50:00Z
 
 ## Latest Session
-File: dev/sessions/2026-04-13-01.md
+File: dev/sessions/2026-04-13-02.md
 ```
-# Session 2026-04-13-01 — Phase 2.2.3 supernode adjacency fix
+# Session 2026-04-13-02 — Phase 2.3 Steps 1-4: delayed-pivoting kernel + plumbing
 
 ## Goal
 
-Debug the CHWIRUT1 / CRESC100 / CRESC132 plateau (Phase 2.2.3 per
-the prior session's "Next Session Should" list). Three matrices
-that remained `#[ignore]`'d in `tests/mc64_regression.rs` with
-residuals 8 to 16 orders above both target and canonical MUMPS
-oracle, attributed in Phase 2.2.2 to "solve-side rounding" or
-"iterative refinement stagnation". Strategy agreed with the user:
-build a minimal repro first, then use expert agents for
-independent references on the canonical supernodal solve.
+Start implementing Phase 2.3 delayed pivoting per the committed
+plan at `dev/plans/phase-2.3-delayed-pivoting.md`. Target: make
+`factor_frontal` able to leave `nelim < ncol` columns
+un-eliminated when the BK pivot tests fail, and lay the
+data-model plumbing that the multifrontal driver (Steps 4-5)
+will use to carry delayed columns up to the parent. Unblock
+HYDCAR20 / METHANL8 / SWOPF / HATFLDG / HATFLDBNE / HATFLDF in
+the parity panel once Steps 5+7 land.
 
 ## Accomplished
 
-**Important context:** this session's bench stats are not directly
-comparable to last session's. The old numbers were an artifact of
-a `nemin=10000` override in `bench.rs` that accidentally masked
-the bug being fixed today. See §"Benchmark Results" below.
+**Phase 2.3 Steps 1-3 — kernel (commit `29ccf83`).** Combined
+the plan's TDD red phase with the API implementation because
+the failing tests cannot compile without the API shape change —
+a pure red commit would break `cargo test` across revisions.
 
-### Phase 2.2.3 Steps 1–2: research + diagnostic (`cccd640`)
-
-1. **Research note** `dev/research/phase-2.2.3-plateau.md` — five
-   hypotheses: H1 refinement best-iterate lock-in, H2 residual at
-   arithmetic noise floor, H3 scaling frame error, H4
-   multi-supernode solve bug, H5 CRESC132 ±2 inertia. Covers
-   `solve_sparse_refined`, Arioli ω₁ stop criterion, and the
-   SSIDS/MUMPS iterative-refinement conventions.
-
-2. **Diagnostic binary** `examples/triage_plateau.rs` — instruments
-   each matrix under both `nemin=32` and `nemin=10000`, logs
-   per-iteration `||r||₂`, `||dx||₂/||x||₂`, Arioli ω₁,
-   `||A||₁·||x||∞/||b||∞`, refinement break reason. Immediate
-   finding: **all four matrices converge under `nemin=10000` and
-   diverge under `nemin=32`**, including ACOPP30 and CRESC132.
-
-   Under `nemin=10000` (single-supernode-forcing):
-   ```
-   ACOPP30_0000   residual 1.02e-14 (was 1.08e-1)  INERTIA MATCH
-   CHWIRUT1_0000  residual 8.69e-14 (was 8.50e+2)  INERTIA MATCH
-   CRESC100_0000  residual 2.15e-16 (was 1.43e+2)  INERTIA MATCH
-   CRESC132_0000  residual 3.65e-15 (was 1.37e+5)  INERTIA MATCH
-   ```
-
-   Three matrices **beat the canonical MUMPS oracle**. CRESC132's
-   ±2 inertia mismatch also disappears. The plateau was a single
-   root cause, not three; the "solve-side stagnation" and
-   "trace-rule inertia" diagnoses from Phase 2.2.2 were wrong.
-
-### Phase 2.2.3 Step 3: minimal repro + expert consultation
+- Added `PivotOutcome { Accepted, Rejected, Delayed }` enum in
+  `src/dense/factor.rs`.
+- Added `nelim` and `n_delayed` fields to `FrontalFactors` with
+  expanded doc comments distinguishing the classic
+  (`nelim == ncol`) contrib from the new delayed
+  (`nelim < ncol`) case.
+- Added `may_delay: bool` parameter to `factor_frontal`
+  (position 3).
+- Converted all 6 `try_reject_1x1_frontal` call sites to match
+  on `PivotOutcome`, with `Delayed => break`.
+- 2×2 rejection branch short-circuits to `break` when
+  `may_delay = true`, bypassing the `needs_refinement` mutation
+  and the 1×1 fallback.
+- Post-loop L/D/contrib extraction uses `nelim = k`. L is
+  sized `nrow × nelim`, D\_diag is sized `nelim`, contrib is
+  `(nrow - nelim)²` covering both delayed fully-summed columns
+  and trailing rows.
+- `try_reject_1x1_frontal` returns `PivotOutcome` and takes
+  `may_delay`. On `Delayed` it performs **zero state mutation**
+  — no zeroing of the L column, no `needs_refinement` flag,
+  no zero-pivot count. The column data stays intact for the
+  parent to re-attempt.
+- Callers updated (all pass `may_delay = false` to preserve
+  behavior): `src/numeric/factorize.rs`, `tests/pivot_rejection.rs`
+  (4 call sites).
+- New test file `tests/delayed_pivoting.rs` with **3 passing
+  kernel tests** — independent oracles, contrib values compared
+  against raw input entries, not self-verified internal state:
+  1. `factor_frontal_delays_first_pivot_when_may_delay` — 4×4
+     `ncol=2` with tiny fully-summed block and strong trailing
 ```
 
 ## Git Status
 ```
+bd5e0e2 Session 2026-04-13-02 checkpoint: Phase 2.3 Steps 1-4 landed
 c84b7c9 Phase 2.3 Step 4 fixup: revert may_delay flag flip
 7fb3779 Phase 2.3 Step 4: wire may_delay through factorize_multifrontal
 29ccf83 Phase 2.3 Steps 1-3: delayed-pivoting kernel plumbing
 bd1c6e4 Phase 2.3 setup: research note + implementation plan
-b87bff1 Add InfNorm scaling strategy; make it the new default
 ```
 
 ## Test Status
 ```
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
 
      Running tests/threshold_consistency.rs (target/debug/deps/threshold_consistency-c660296127e8afca)
 
 running 6 tests
 test polak6_0021_residual_after_threshold_fix ... ignored
-test factor_inertia_force_accept_implies_solve_skip_invariant ... ok
 test factors_carry_zero_tol_from_params ... ok
-test refinement_does_not_amplify_error_on_rank_deficient_matrix ... ok
+test factor_inertia_force_accept_implies_solve_skip_invariant ... ok
 test dense_solve_skips_zero_pivots_rank_deficient ... ok
+test refinement_does_not_amplify_error_on_rank_deficient_matrix ... ok
 test sparse_solve_skips_zero_pivots_rank_deficient ... ok
 
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -97,14 +97,14 @@ Loading matrices from data/benchmark-config.toml ... not found
 
 name                n   factor(μs)    solve(μs)        inertia
 --------------------------------------------------------------
-spd_10             10           53            1     (10, 0, 0)
-spd_50             50           46            5     (50, 0, 0)
-spd_100           100          144            9    (100, 0, 0)
-spd_200           200          747           33    (200, 0, 0)
-kkt_10_3           13            6            1     (10, 3, 0)
-kkt_30_10          40           37            2    (30, 10, 0)
-kkt_50_15          65           82            2    (50, 15, 0)
-kkt_100_30        130          293           10   (100, 30, 0)
+spd_10             10           76            1     (10, 0, 0)
+spd_50             50           66            8     (50, 0, 0)
+spd_100           100          272           13    (100, 0, 0)
+spd_200           200         2265           55    (200, 0, 0)
+kkt_10_3           13           11            1     (10, 3, 0)
+kkt_30_10          40           75            2    (30, 10, 0)
+kkt_50_15          65          331            6    (50, 15, 0)
+kkt_100_30        130          899           21   (100, 30, 0)
 
 8 matrices benchmarked
 
@@ -134,20 +134,20 @@ FBRAIN3LS                    59          6         57        4.11e-7
 CERI651DLS                   51          3         48        1.69e-7
 HS46                         42          0         42        7.51e-8
 PFIT4                        38         38          0       3.27e-14
-CERI651A                     37         37          0       9.15e-14
 DEVGLA2                      37          0         37        2.77e-6
+CERI651A                     37         37          0       9.15e-14
 CERI651ALS                   24          2         22        1.79e-7
 PFIT2                        24          0         24        8.14e-6
-PALMER1ENE                   23          0         23        1.79e-8
 CERI651CLS                   23          1         22        2.78e-7
+PALMER1ENE                   23          0         23        1.79e-8
 CRESC100                     19         19          0       9.89e-16
-MISTAKE                      12          0         12        1.83e-6
-HATFLDFL                     12          0         12        2.49e-9
 KIRBY2                       12         12          0       1.76e-13
+HATFLDFL                     12          0         12        2.49e-9
+MISTAKE                      12          0         12        1.83e-6
 ALLINITA                      9          2          7        5.43e-7
 SNAKE                         9          0          9        6.99e-9
-DISCS                         8          8          0       6.31e-16
 BENNETT5                      8          8          0       1.70e-13
+DISCS                         8          8          0       6.31e-16
 DJTL                          7          0          7        1.01e-6
   ... and 44 more families
 
@@ -186,17 +186,17 @@ HAIFAM                       59          3         59         1.19e0
 CERI651DLS                   51          3         48        1.94e-7
 HS46                         44          0         44        9.97e-8
 PFIT4                        38         38          0       5.84e-14
-BATCH                        37         36          1        2.64e-7
 CERI651A                     37         37          0        2.34e-8
+BATCH                        37         36          1        2.64e-7
 POLAK5                       28         28         28        1.57e-1
 DEVGLA2                      26          0         26        1.58e-6
 CERI651CLS                   25          1         24        3.20e-7
-PFIT2                        24          0         24        1.22e-5
 CERI651ALS                   24          2         22        1.45e-7
+PFIT2                        24          0         24        1.22e-5
 PALMER1ENE                   23          0         23        1.79e-8
 DENSCHNDNE                   23         23         23         5.91e9
-CONGIGMZ                     19         19         17         5.28e6
-SPIRAL                       19         19         19         6.73e3
+CRESC100                     19         19          0       1.00e-15
+HS49                         19         19         19         1.92e0
   ... and 109 more families
 
 Top 15 worst residuals:

@@ -1,0 +1,135 @@
+* 15:00 :phase-2.3:delayed-pivoting:step-5:step-6:orient:
+Resumed Phase 2.3 work at Step 5 (parent-side delay assembly) per
+dev/plans/phase-2.3-delayed-pivoting.md and the hand-off in
+dev/sessions/2026-04-13-02.md. Previous session left the kernel
+plumbing in place (commits bd1c6e4 → bd5e0e2) with a deliberate
+debug_assert(n_delayed == 0) trip-wire at the contrib store site
+and may_delay hard-coded to false — because the 2×2 Duff-Reid and
+det-floor rejections can return PivotOutcome::Delayed independently
+of pivot_threshold, so flipping the flag atomically with the
+parent-side assembly is mandatory. That atomic landing is this
+session's work.
+
+Baseline from the previous session's bench (commit bd5e0e2):
+  Inertia match vs MUMPS: 149820/154588 (96.9%)
+  Residual pass: 152453/154588 (98.6%)
+  Worst residual: 2.31e11 (SWOPF_0827)
+
+* 15:30 :phase-2.3:step-5:build_row_indices:
+Rewrote build_row_indices in src/numeric/factorize.rs to produce the
+three-region layout [own_cols | delayed_cols | trailing_sorted]:
+- Walks each child's ContribBlock.row_indices[..n_delayed] to harvest
+  delayed-column global indices in child-iteration order.
+- Builds an is_fully_summed lookup (indexed by matrix column) so the
+  trailing-row BTreeSet can filter out any delayed column that also
+  shows up as a pattern row of a parent column. Necessary because
+  the full symmetric pattern includes transposed entries, so a
+  delayed column can appear as a row of an unrelated parent column.
+- Trailing set is the union of (own cols' pattern rows) and
+  (each child's non-delayed contrib rows), minus fs_set.
+
+When every child has n_delayed == 0 this code is point-wise
+equivalent to the old implementation: delayed_cols is empty, fs_set
+equals own_cols, and the BTreeSet filter reduces to the old
+"not in [first_col..first_col+ncol)" predicate.
+
+* 15:45 :phase-2.3:step-5:contrib-store:perm:
+Replaced the `row_indices[ncol..].to_vec()` contrib store with a
+perm-unpermuted form:
+
+    for cj in 0..cdim {
+        contrib_rows.push(row_indices[ff.perm[nelim + cj]]);
+    }
+
+Reasoning: BK pivot search only swaps within [0..expanded_ncol), so
+ff.perm[i] = i for all i >= expanded_ncol. That means for the
+trailing-row slice of the contrib block (positions n_delayed..cdim),
+the formula reduces to row_indices[nelim + cj] = row_indices[ncol + cj]
+for cj >= n_delayed — the same as the old straight-slice form. For
+the delayed slice (positions 0..n_delayed), ff.perm[nelim + cj] is
+the post-swap original position of that column in [0..ncol), and
+row_indices[..ncol] is the ordering we fed the kernel, so the
+lookup recovers the global index correctly.
+
+Verified by running factorize_multifrontal_delayed_pivot_succeeds_at_parent
+(test 1.5) which builds a 4×4 arrow matrix whose column 0 fails the
+column-relative test at threshold 0.01 and must be delayed to the
+root. Sparse inertia matches dense LDLᵀ inertia exactly.
+
+* 16:00 :phase-2.3:step-5:may_delay-flag-flip:is_root:
+Computed is_root[snode_idx] once at the top of factorize_multifrontal
+by walking symbolic.supernodes[*].children — a node is a root iff no
+other supernode claims it as a child. Handles disconnected matrices
+(multiple roots) uniformly. Flipped the factor_frontal call to
+`may_delay = !is_root[snode_idx]`. Non-roots get the delay path;
+roots stay on ForceAccept.
+
+* 16:15 :phase-2.3:step-6:solve.rs:nelim:
+Switched src/numeric/solve.rs lines 97, 126, 185 from ff.ncol to
+ff.nelim across all three phases (forward-sub, D-solve, backward-
+sub). Required because ff.l is sized (nrow × nelim) and
+ff.d_diag / ff.d_subdiag are sized nelim: bounding the solve loops
+by ncol would walk past the end on any node that delayed columns.
+Also changed the ncol==0 skip test to nelim==0 so nodes where
+everything was delayed exit cleanly without touching L or D.
+
+* 16:30 :phase-2.3:tests:integration:
+Added two integration tests to tests/delayed_pivoting.rs:
+
+- factorize_multifrontal_delays_propagate_to_parent: 4×4 arrow matrix
+  A = [[1e-3,0,0,1],[0,10,0,1],[0,0,10,1],[1,1,1,2]] with
+  SupernodeParams { nemin: 1, scaling_strategy: Identity } and
+  BunchKaufmanParams { pivot_threshold: 0.01, ForceAccept, .. }.
+  Column 0's column-relative test (|1e-3| vs 0.01*1.0) fails, so its
+  leaf supernode must delay. Verifies n_delayed_in > 0 at the
+  supernode that absorbed the delay, and that exactly one supernode
+  in the tree reports n_delayed > 0.
+
+- factorize_multifrontal_delayed_pivot_succeeds_at_parent: same
+  matrix, end-to-end inertia check — factor with dense LDLᵀ (which
+  uses may_delay=false, so the delayed pivot falls through to
+  ForceAccept) and with the sparse multifrontal path, and require
+  sparse_inertia == dense_inertia. This is the real correctness
+  oracle for the parent-side delay assembly.
+
+Both tests pass. The first test originally hard-coded "expected 4
+supernodes with nemin=1" but symbolic's fundamental-supernode
+detection merges two adjacent columns under the arrow pattern, so
+the assertion was relaxed to "at least 2 supernodes" — the
+n_delayed_in > 0 requirement still pins the delay propagation.
+
+* 16:45 :phase-2.3:bench:results:swopf-closed:
+cargo run --bin bench --release shows a massive improvement on the
+sparse residual frontier — without even restoring
+pivot_threshold = 0.01 (Step 7 is still pending).
+
+  Inertia match vs MUMPS: 152987/154588 (99.0%)    (+2.1 pts)
+  Residual pass:          154113/154588 (99.7%)    (+1.1 pts)
+  Worst residual:         1.19e0 (HAIFAM_0080)     (10^11 → O(1))
+
+The SWOPF_0827 2.31e11 catastrophe is completely gone. That family
+was failing because the 2×2 Duff-Reid det-floor rejection fires
+independently of pivot_threshold; previously the kernel fell back
+to a 1×1 ForceAccept at the leaf supernode, which lost the
+structural coupling between the two rejected columns. With
+may_delay=true at non-roots, the det-floor rejection now delays
+the whole pair up to the parent, where the additional rows make
+the 2×2 block pivot cleanly. This confirms the research note's
+prediction that the det-floor path is a legitimate delay trigger
+and is in fact the dominant one at pivot_threshold=0.
+
+Dense path numbers are unchanged (99.0% / 99.7% / worst ACOPP30
+3.99e-2), which is the expected invariant: dense path always runs
+may_delay=false.
+
+Step 7 (restore threshold=0.01 for sparse callers) should now
+unlock additional improvements on the parity panel — the matrices
+that the 2×2 det-floor path doesn't reach but the column-relative
+path does (HYDCAR20, METHANL8, HATFLDG, ...).
+
+* 17:00 :phase-2.3:step-5:suite:green:
+cargo test: all 163+ tests pass, including the 5 delayed_pivoting
+tests (3 kernel + 2 integration). cargo clippy -- -D warnings
+clean. cargo fmt clean. Parity suite still 11/28 passing / 17
+ignored — unchanged because pivot_threshold is still 0.0 for the
+parity harness (Step 7 restores it).
