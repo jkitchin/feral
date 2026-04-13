@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-13T11:19:00Z
+Generated: 2026-04-13T16:51:37Z
 
 ## Latest Session
 File: dev/sessions/2026-04-13-01.md
@@ -59,11 +59,11 @@ the bug being fixed today. See §"Benchmark Results" below.
 
 ## Git Status
 ```
-d4f5c9c Phase 2.2.3: validation report
-fcf3c57 Phase 2.2.3 Step 3: update mc64_regression comments; drop bench nemin override
-91e808b Phase 2.2.3: add adjacency check to supernode amalgamation
-cccd640 Phase 2.2.3 Step 1-2: plateau research note + diagnostic
-c7664cb Session 2026-04-12-02 checkpoint: Phase 2.2.1 + Phase 2.2.2
+c84b7c9 Phase 2.3 Step 4 fixup: revert may_delay flag flip
+7fb3779 Phase 2.3 Step 4: wire may_delay through factorize_multifrontal
+29ccf83 Phase 2.3 Steps 1-3: delayed-pivoting kernel plumbing
+bd1c6e4 Phase 2.3 setup: research note + implementation plan
+b87bff1 Add InfNorm scaling strategy; make it the new default
 ```
 
 ## Test Status
@@ -74,10 +74,10 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 6 tests
 test polak6_0021_residual_after_threshold_fix ... ignored
-test factors_carry_zero_tol_from_params ... ok
 test factor_inertia_force_accept_implies_solve_skip_invariant ... ok
-test dense_solve_skips_zero_pivots_rank_deficient ... ok
+test factors_carry_zero_tol_from_params ... ok
 test refinement_does_not_amplify_error_on_rank_deficient_matrix ... ok
+test dense_solve_skips_zero_pivots_rank_deficient ... ok
 test sparse_solve_skips_zero_pivots_rank_deficient ... ok
 
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -97,130 +97,130 @@ Loading matrices from data/benchmark-config.toml ... not found
 
 name                n   factor(μs)    solve(μs)        inertia
 --------------------------------------------------------------
-spd_10             10           59            1     (10, 0, 0)
-spd_50             50           74            9     (50, 0, 0)
-spd_100           100          248           11    (100, 0, 0)
-spd_200           200         1332           38    (200, 0, 0)
-kkt_10_3           13            9            1     (10, 3, 0)
-kkt_30_10          40           66            2    (30, 10, 0)
-kkt_50_15          65          138            4    (50, 15, 0)
-kkt_100_30        130          694           18   (100, 30, 0)
+spd_10             10           53            1     (10, 0, 0)
+spd_50             50           46            5     (50, 0, 0)
+spd_100           100          144            9    (100, 0, 0)
+spd_200           200          747           33    (200, 0, 0)
+kkt_10_3           13            6            1     (10, 3, 0)
+kkt_30_10          40           37            2    (30, 10, 0)
+kkt_50_15          65           82            2    (50, 15, 0)
+kkt_100_30        130          293           10   (100, 30, 0)
 
 8 matrices benchmarked
 
 Loading KKT matrices from data/matrices/kkt ... 154588 matrices loaded
 
 KKT summary: 154588 matrices (154481 dense-eligible n <= 1000, 107 skipped n > 1000)
-  Inertia match: 150094/154481 (97.2%)
-  Residual pass: 151212/154481 (97.9%)
-  Worst residual: 1.57e7 (DEGENLPA_0061)
+  Inertia match: 152979/154481 (99.0%)
+  Residual pass: 154051/154481 (99.7%)
+  Worst residual: 3.99e-2 (ACOPP30_0002)
 
 --- Sparse solver validation ---
 Sparse solver: 154588/154588 total
-  Inertia match vs MUMPS: 114695/154588 (74.2%)
-  Residual pass: 120465/154588 (77.9%)
-  Worst residual: 2.32e12 (HYDCAR20_0000)
+  Inertia match vs MUMPS: 149820/154588 (96.9%)
+  Residual pass: 152453/154588 (98.6%)
+  Worst residual: 2.31e11 (SWOPF_0827)
 
---- Dense failure analysis (4742 failures) ---
+--- Dense failure analysis (1928 failures) ---
 
 family                    total    inertia   residual      worst_res
-BATCH                      1589       1589       1588         2.34e1
-SWOPF                      1185       1185       1185         1.19e1
-HAHN1                       498        498         24         6.26e0
+HAHN1                       498        498          0       1.76e-12
 QPNBLEND                    362        362          0       7.56e-16
 MSS1                        240        240          0       1.40e-15
 CORE1                       141        141          0       3.56e-16
 CRESC50                      97         97          0       2.08e-16
-ACOPP30                      68         68         68         1.14e5
+ACOPP30                      68          0         68        3.99e-2
 FBRAIN3LS                    59          6         57        4.11e-7
 CERI651DLS                   51          3         48        1.69e-7
-CERI651A                     42         42          7         8.72e0
 HS46                         42          0         42        7.51e-8
 PFIT4                        38         38          0       3.27e-14
+CERI651A                     37         37          0       9.15e-14
 DEVGLA2                      37          0         37        2.77e-6
-PFIT2                        24          0         24        8.14e-6
 CERI651ALS                   24          2         22        1.79e-7
+PFIT2                        24          0         24        8.14e-6
 PALMER1ENE                   23          0         23        1.79e-8
 CERI651CLS                   23          1         22        2.78e-7
 CRESC100                     19         19          0       9.89e-16
-MISTAKE                      16          6         16         5.58e5
-ALLINITA                     15          8         13        8.10e-4
-KIRBY2                       12         12          0       1.76e-13
+MISTAKE                      12          0         12        1.83e-6
 HATFLDFL                     12          0         12        2.49e-9
+KIRBY2                       12         12          0       1.76e-13
+ALLINITA                      9          2          7        5.43e-7
 SNAKE                         9          0          9        6.99e-9
-HS114                         9          7          9        7.21e-1
-  ... and 52 more families
+DISCS                         8          8          0       6.31e-16
+BENNETT5                      8          8          0       1.70e-13
+DJTL                          7          0          7        1.01e-6
+  ... and 44 more families
 
 Top 15 worst residuals:
 name                             n     residual       expected         actual
-DEGENLPA_0061                   35       1.57e7    (20, 15, 0)    (18, 15, 2)
-MISTAKE_0101                    22       5.58e5     (9, 13, 0)     (8, 13, 1)
-MISTAKE_0102                    22       4.81e5     (9, 13, 0)     (8, 13, 1)
-DEGENLPB_0045                   35       2.15e5    (20, 15, 0)    (19, 15, 1)
-ACOPP30_0001                   209       1.14e5   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0000                   209       1.08e5   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0002                   209       3.36e4   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0067                   209       6.84e2   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0066                   209       6.74e2   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0065                   209       6.64e2   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0064                   209       6.53e2   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0063                   209       6.43e2   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0062                   209       6.33e2   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0061                   209       6.22e2   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0060                   209       6.12e2   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0002                   209      3.99e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0037                   209      2.92e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0026                   209      2.80e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0018                   209      2.76e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0045                   209      2.76e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0000                   209      2.74e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0012                   209      2.69e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0065                   209      2.64e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0046                   209      2.64e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0036                   209      2.63e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0051                   209      2.58e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0024                   209      2.54e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0057                   209      2.53e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0055                   209      2.49e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0013                   209      2.46e-2   (72, 137, 0)   (72, 137, 0)
 
---- Sparse failure analysis (40210 failures) ---
+--- Sparse failure analysis (5197 failures) ---
 
 family                    total    inertia   residual      worst_res
-HATFLDBNE                  2504       2504       1004        5.33e-1
-HS118                      2472       2471       2472         1.80e3
-AVION2                     2453       2453       1330         5.58e3
-PFIT4                      2278       2278       2240         5.51e1
-CONCON                     2217       2217       2217         6.91e0
-MCONCON                    2113       2113       2113         6.91e0
-ALLINITA                   2085       2077         67         1.52e1
-BATCH                      2059       2059       2059         3.97e0
-HS99EXP                    1880       1880       1880         4.00e8
-SWOPF                      1190       1190       1190        2.40e11
-DISCS                       619        619        618         3.61e2
-HIMMELBI                    605        605        601         3.96e5
-HS73                        503        503        503         2.80e2
-PALMER3ENE                  500        500        500        3.11e-1
-PALMER7ANE                  500        500        499         2.46e3
-PALMER5BNE                  500        500        500         7.11e1
-HAHN1                       498        498         64        1.84e-5
-NELSON                      498        498        498         1.66e0
-HIMMELBFNE                  495        495        495         1.27e3
-CORE1                       493        493        352         7.95e5
-HS2NE                       492        492        492         2.01e0
-MISRA1C                     490        490        490         1.91e0
-CHWIRUT2                    485        485        484        5.51e-1
-LEWISPOL                    484        484         26         3.17e3
-PALMER2NE                   477        477        476        1.67e-1
-  ... and 227 more families
+HATFLDBNE                  1500       1500          0       4.02e-10
+SWOPF                      1190       1190       1190        2.31e11
+HAHN1                       498        498          0       3.23e-13
+QPNBLEND                    362        362          0       5.01e-16
+MSS1                        240        240          0       1.38e-15
+CORE1                       141        141          0       3.52e-16
+HATFLDF                     126        126        126         1.55e9
+CRESC50                      97         97          0       1.77e-16
+ACOPP30                      68         68         68         5.14e6
+FBRAIN3LS                    61          3         59        2.79e-7
+HAIFAM                       59          3         59         1.19e0
+CERI651DLS                   51          3         48        1.94e-7
+HS46                         44          0         44        9.97e-8
+PFIT4                        38         38          0       5.84e-14
+BATCH                        37         36          1        2.64e-7
+CERI651A                     37         37          0        2.34e-8
+POLAK5                       28         28         28        1.57e-1
+DEVGLA2                      26          0         26        1.58e-6
+CERI651CLS                   25          1         24        3.20e-7
+PFIT2                        24          0         24        1.22e-5
+CERI651ALS                   24          2         22        1.45e-7
+PALMER1ENE                   23          0         23        1.79e-8
+DENSCHNDNE                   23         23         23         5.91e9
+CONGIGMZ                     19         19         17         5.28e6
+SPIRAL                       19         19         19         6.73e3
+  ... and 109 more families
 
 Top 15 worst residuals:
 name                             n     residual       expected         actual
-HYDCAR20_0000                  198      2.32e12    (99, 99, 0)  (23, 23, 152)
-SWOPF_0005                     175      2.40e11    (83, 92, 0)   (63, 68, 44)
-SWOPF_0004                     175      2.22e11    (83, 92, 0)   (63, 68, 44)
-SWOPF_0006                     175      1.67e11    (83, 92, 0)   (63, 68, 44)
-SWOPF_0007                     175      1.22e11    (83, 92, 0)   (63, 68, 44)
-SWOPF_0003                     175      7.83e10    (83, 92, 0)   (63, 68, 44)
-SWOPF_0009                     175      7.41e10    (83, 92, 0)   (63, 68, 44)
-SWOPF_0008                     175      6.94e10    (83, 92, 0)   (63, 68, 44)
-SWOPF_0010                     175      6.00e10    (83, 92, 0)   (64, 69, 42)
-SWOPF_0011                     175      4.96e10    (83, 92, 0)   (63, 68, 44)
-SWOPF_0002                     175      4.59e10    (83, 92, 0)   (63, 68, 44)
-SWOPF_0012                     175      3.08e10    (83, 92, 0)   (64, 68, 43)
-POWELLBS_0005                    4      2.74e10      (2, 2, 0)      (1, 2, 1)
-SWOPF_0015                     175      2.67e10    (83, 92, 0)   (63, 68, 44)
-SWOPF_0013                     175      2.63e10    (83, 92, 0)   (64, 69, 42)
+SWOPF_0827                     175      2.31e11    (83, 92, 0)   (68, 90, 17)
+SWOPF_0941                     175      2.28e11    (83, 92, 0)   (68, 90, 17)
+SWOPF_0880                     175      5.28e10    (83, 92, 0)   (66, 92, 17)
+SWOPF_0685                     175      5.14e10    (83, 92, 0)   (66, 92, 17)
+SWOPF_1044                     175      5.13e10    (83, 92, 0)   (66, 92, 17)
+SWOPF_1018                     175      5.04e10    (83, 92, 0)   (66, 92, 17)
+SWOPF_0682                     175      5.01e10    (83, 92, 0)   (66, 92, 17)
+SWOPF_0867                     175      5.00e10    (83, 92, 0)   (66, 92, 17)
+SWOPF_0838                     175      5.00e10    (83, 92, 0)   (66, 92, 17)
+SWOPF_0785                     175      5.00e10    (83, 92, 0)   (66, 92, 17)
+SWOPF_0814                     175      5.00e10    (83, 92, 0)   (66, 92, 17)
+SWOPF_0817                     175      4.99e10    (83, 92, 0)   (66, 92, 17)
+SWOPF_0759                     175      4.99e10    (83, 92, 0)   (66, 92, 17)
+SWOPF_0728                     175      4.99e10    (83, 92, 0)   (66, 92, 17)
+SWOPF_0673                     175      4.99e10    (83, 92, 0)   (66, 92, 17)
 
 --- Dense ∩ Sparse failure overlap ---
-Failed in BOTH dense and sparse:  4667
-Failed in dense only:             75
-Failed in sparse only:            35543
+Failed in BOTH dense and sparse:  1869
+Failed in dense only:             59
+Failed in sparse only:            3328
 ```
 
 ## Recent Decisions
@@ -299,6 +299,7 @@ src/ordering/elimination_tree.rs
 src/ordering/mod.rs
 src/ordering/postorder.rs
 src/scaling/hungarian.rs
+src/scaling/infnorm.rs
 src/scaling/mc64.rs
 src/scaling/mod.rs
 src/sparse/csc.rs
@@ -310,12 +311,13 @@ src/symbolic/supernode.rs
 
 ## Test Files
 ```
+tests/delayed_pivoting.rs
 tests/dense_ldlt.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/mc64_end_to_end.rs
-tests/mc64_regression.rs
 tests/mc64_scaling.rs
+tests/parity.rs
 tests/pivot_rejection.rs
 tests/property_tests.rs
 tests/sparse_postorder.rs
