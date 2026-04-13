@@ -1,83 +1,83 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-13T20:50:00Z
+Generated: 2026-04-13T22:16:21Z
 
 ## Latest Session
-File: dev/sessions/2026-04-13-02.md
+File: dev/sessions/2026-04-13-03.md
 ```
-# Session 2026-04-13-02 — Phase 2.3 Steps 1-4: delayed-pivoting kernel + plumbing
+# Session 2026-04-13-03 — Phase 2.3 Steps 5+6: parent-side delay assembly + solve
 
 ## Goal
 
-Start implementing Phase 2.3 delayed pivoting per the committed
-plan at `dev/plans/phase-2.3-delayed-pivoting.md`. Target: make
-`factor_frontal` able to leave `nelim < ncol` columns
-un-eliminated when the BK pivot tests fail, and lay the
-data-model plumbing that the multifrontal driver (Steps 4-5)
-will use to carry delayed columns up to the parent. Unblock
-HYDCAR20 / METHANL8 / SWOPF / HATFLDG / HATFLDBNE / HATFLDF in
-the parity panel once Steps 5+7 land.
+Land Phase 2.3 Step 5 (parent-side delay assembly) and Step 6
+(solve-side nelim fix) per `dev/plans/phase-2.3-delayed-pivoting.md`.
+Steps 1-4 (kernel plumbing, `PivotOutcome::Delayed`, `n_delayed`
+field, `NodeFactors.n_delayed_in`) landed in session 2026-04-13-02
+(commits `bd1c6e4` → `bd5e0e2`). That session explicitly deferred
+the `may_delay = !is_root` flag flip to Step 5 because the 2×2
+Duff-Reid det-floor rejection fires independently of
+`pivot_threshold` and would otherwise trip the
+`debug_assert(n_delayed == 0)` trip-wire on SWOPF / HAIFAM et al.
+
+Target for this session:
+
+- `build_row_indices` learns to expand the fully-summed column count
+  by `sum(child.n_delayed)` and place each child's delayed columns
+  in the parent's fully-summed region.
+- Contrib store site unpermutes through `ff.perm` to recover each
+  delayed column's global index.
+- `is_root` is computed once at the top of the loop, and the
+  factor_frontal call uses `may_delay = !is_root[snode_idx]`.
+- `src/numeric/solve.rs` switches from `ff.ncol` to `ff.nelim` in
+  all three phases so the solve bounds match `L.cols()`.
+- Two new integration tests (plan Steps 1.4 and 1.5) pin the
+  parent-ward delay propagation and an end-to-end inertia match
+  against a dense LDLᵀ oracle.
 
 ## Accomplished
 
-**Phase 2.3 Steps 1-3 — kernel (commit `29ccf83`).** Combined
-the plan's TDD red phase with the API implementation because
-the failing tests cannot compile without the API shape change —
-a pure red commit would break `cargo test` across revisions.
+**Phase 2.3 Steps 5+6 landed atomically** (one feature commit for
+the kernel+assembly+solve changes; a second commit for the integration
+tests). No regressions on any existing test; massive improvement in
+the sparse residual tail.
 
-- Added `PivotOutcome { Accepted, Rejected, Delayed }` enum in
-  `src/dense/factor.rs`.
-- Added `nelim` and `n_delayed` fields to `FrontalFactors` with
-  expanded doc comments distinguishing the classic
-  (`nelim == ncol`) contrib from the new delayed
-  (`nelim < ncol`) case.
-- Added `may_delay: bool` parameter to `factor_frontal`
-  (position 3).
-- Converted all 6 `try_reject_1x1_frontal` call sites to match
-  on `PivotOutcome`, with `Delayed => break`.
-- 2×2 rejection branch short-circuits to `break` when
-  `may_delay = true`, bypassing the `needs_refinement` mutation
-  and the 1×1 fallback.
-- Post-loop L/D/contrib extraction uses `nelim = k`. L is
-  sized `nrow × nelim`, D\_diag is sized `nelim`, contrib is
-  `(nrow - nelim)²` covering both delayed fully-summed columns
-  and trailing rows.
-- `try_reject_1x1_frontal` returns `PivotOutcome` and takes
-  `may_delay`. On `Delayed` it performs **zero state mutation**
-  — no zeroing of the L column, no `needs_refinement` flag,
-  no zero-pivot count. The column data stays intact for the
-  parent to re-attempt.
-- Callers updated (all pass `may_delay = false` to preserve
-  behavior): `src/numeric/factorize.rs`, `tests/pivot_rejection.rs`
-  (4 call sites).
-- New test file `tests/delayed_pivoting.rs` with **3 passing
-  kernel tests** — independent oracles, contrib values compared
-  against raw input entries, not self-verified internal state:
-  1. `factor_frontal_delays_first_pivot_when_may_delay` — 4×4
-     `ncol=2` with tiny fully-summed block and strong trailing
+### Code changes
+
+- `src/numeric/factorize.rs`:
+  - Added `is_root: Vec<bool>` computed once at the top of
+    `factorize_multifrontal` by walking
+    `symbolic.supernodes[*].children`. Handles disconnected matrices
+    (multi-root forests) uniformly.
+  - Renamed the loop-local `ncol` binding to `own_ncol = snode.ncol()`
+    to distinguish the supernode's native column count from the
+    expanded fully-summed count after absorbing delayed children.
+  - Computed `n_delayed_in` and `expanded_ncol = own_ncol + n_delayed_in`
+    from the children's live `ContribBlock`s before the row-indices
+    build.
+  - Step 1 assembly still iterates `row_indices[..own_ncol]` — only
 ```
 
 ## Git Status
 ```
+a630977 Phase 2.3 sign-preservation fix: preserve pivot sign at root fallback
+6245952 Phase 2.3 Step 7: restore pivot_threshold = 0.01 for sparse callers
+28ff3b1 Session 2026-04-13-03 checkpoint: Phase 2.3 Steps 5+6 landed
+0364e6d Phase 2.3 Steps 5+6: parent-side delay assembly + solve nelim fix
 bd5e0e2 Session 2026-04-13-02 checkpoint: Phase 2.3 Steps 1-4 landed
-c84b7c9 Phase 2.3 Step 4 fixup: revert may_delay flag flip
-7fb3779 Phase 2.3 Step 4: wire may_delay through factorize_multifrontal
-29ccf83 Phase 2.3 Steps 1-3: delayed-pivoting kernel plumbing
-bd1c6e4 Phase 2.3 setup: research note + implementation plan
 ```
 
 ## Test Status
 ```
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
      Running tests/threshold_consistency.rs (target/debug/deps/threshold_consistency-c660296127e8afca)
 
 running 6 tests
 test polak6_0021_residual_after_threshold_fix ... ignored
-test factors_carry_zero_tol_from_params ... ok
 test factor_inertia_force_accept_implies_solve_skip_invariant ... ok
-test dense_solve_skips_zero_pivots_rank_deficient ... ok
+test factors_carry_zero_tol_from_params ... ok
 test refinement_does_not_amplify_error_on_rank_deficient_matrix ... ok
+test dense_solve_skips_zero_pivots_rank_deficient ... ok
 test sparse_solve_skips_zero_pivots_rank_deficient ... ok
 
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -97,14 +97,14 @@ Loading matrices from data/benchmark-config.toml ... not found
 
 name                n   factor(μs)    solve(μs)        inertia
 --------------------------------------------------------------
-spd_10             10           76            1     (10, 0, 0)
-spd_50             50           66            8     (50, 0, 0)
-spd_100           100          272           13    (100, 0, 0)
-spd_200           200         2265           55    (200, 0, 0)
-kkt_10_3           13           11            1     (10, 3, 0)
-kkt_30_10          40           75            2    (30, 10, 0)
-kkt_50_15          65          331            6    (50, 15, 0)
-kkt_100_30        130          899           21   (100, 30, 0)
+spd_10             10           19            0     (10, 0, 0)
+spd_50             50           20            3     (50, 0, 0)
+spd_100           100           76            5    (100, 0, 0)
+spd_200           200          393           16    (200, 0, 0)
+kkt_10_3           13            2            0     (10, 3, 0)
+kkt_30_10          40           20            1    (30, 10, 0)
+kkt_50_15          65           49            2    (50, 15, 0)
+kkt_100_30        130          199            7   (100, 30, 0)
 
 8 matrices benchmarked
 
@@ -117,9 +117,9 @@ KKT summary: 154588 matrices (154481 dense-eligible n <= 1000, 107 skipped n > 1
 
 --- Sparse solver validation ---
 Sparse solver: 154588/154588 total
-  Inertia match vs MUMPS: 149820/154588 (96.9%)
-  Residual pass: 152453/154588 (98.6%)
-  Worst residual: 2.31e11 (SWOPF_0827)
+  Inertia match vs MUMPS: 153009/154588 (99.0%)
+  Residual pass: 154237/154588 (99.8%)
+  Worst residual: 3.22e-4 (ERRINBAR_0824)
 
 --- Dense failure analysis (1928 failures) ---
 
@@ -141,9 +141,9 @@ PFIT2                        24          0         24        8.14e-6
 CERI651CLS                   23          1         22        2.78e-7
 PALMER1ENE                   23          0         23        1.79e-8
 CRESC100                     19         19          0       9.89e-16
-KIRBY2                       12         12          0       1.76e-13
 HATFLDFL                     12          0         12        2.49e-9
 MISTAKE                      12          0         12        1.83e-6
+KIRBY2                       12         12          0       1.76e-13
 ALLINITA                      9          2          7        5.43e-7
 SNAKE                         9          0          9        6.99e-9
 BENNETT5                      8          8          0       1.70e-13
@@ -169,58 +169,58 @@ ACOPP30_0057                   209      2.53e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0055                   209      2.49e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0013                   209      2.46e-2   (72, 137, 0)   (72, 137, 0)
 
---- Sparse failure analysis (5197 failures) ---
+--- Sparse failure analysis (1929 failures) ---
 
 family                    total    inertia   residual      worst_res
-HATFLDBNE                  1500       1500          0       4.02e-10
-SWOPF                      1190       1190       1190        2.31e11
-HAHN1                       498        498          0       3.23e-13
-QPNBLEND                    362        362          0       5.01e-16
-MSS1                        240        240          0       1.38e-15
+HAHN1                       498        498          0       8.06e-13
+QPNBLEND                    362        362          0       6.78e-16
+MSS1                        240        240          0       1.32e-15
 CORE1                       141        141          0       3.52e-16
-HATFLDF                     126        126        126         1.55e9
 CRESC50                      97         97          0       1.77e-16
-ACOPP30                      68         68         68         5.14e6
+ACOPP30                      67         67          0       2.80e-14
 FBRAIN3LS                    61          3         59        2.79e-7
-HAIFAM                       59          3         59         1.19e0
 CERI651DLS                   51          3         48        1.94e-7
-HS46                         44          0         44        9.97e-8
+HS46                         40          0         40        7.91e-8
 PFIT4                        38         38          0       5.84e-14
-CERI651A                     37         37          0        2.34e-8
-BATCH                        37         36          1        2.64e-7
-POLAK5                       28         28         28        1.57e-1
+CERI651A                     37         37          0       1.01e-13
 DEVGLA2                      26          0         26        1.58e-6
 CERI651CLS                   25          1         24        3.20e-7
 CERI651ALS                   24          2         22        1.45e-7
-PFIT2                        24          0         24        1.22e-5
+PFIT2                        24          0         24        8.16e-6
 PALMER1ENE                   23          0         23        1.79e-8
-DENSCHNDNE                   23         23         23         5.91e9
-CRESC100                     19         19          0       1.00e-15
-HS49                         19         19         19         1.92e0
-  ... and 109 more families
+CRESC100                     19         19          0       8.49e-16
+SNAKE                        12          0         12        3.34e-9
+HATFLDFL                     12          0         12        2.97e-9
+KIRBY2                       12         12          0       1.68e-13
+MISTAKE                      11          0         11        1.50e-6
+ALLINITA                     10          2          8        9.30e-7
+VESUVIO                      10         10          0       1.84e-13
+DISCS                         8          8          0       7.33e-16
+BENNETT5                      8          8          0       8.69e-14
+  ... and 48 more families
 
 Top 15 worst residuals:
 name                             n     residual       expected         actual
-SWOPF_0827                     175      2.31e11    (83, 92, 0)   (68, 90, 17)
-SWOPF_0941                     175      2.28e11    (83, 92, 0)   (68, 90, 17)
-SWOPF_0880                     175      5.28e10    (83, 92, 0)   (66, 92, 17)
-SWOPF_0685                     175      5.14e10    (83, 92, 0)   (66, 92, 17)
-SWOPF_1044                     175      5.13e10    (83, 92, 0)   (66, 92, 17)
-SWOPF_1018                     175      5.04e10    (83, 92, 0)   (66, 92, 17)
-SWOPF_0682                     175      5.01e10    (83, 92, 0)   (66, 92, 17)
-SWOPF_0867                     175      5.00e10    (83, 92, 0)   (66, 92, 17)
-SWOPF_0838                     175      5.00e10    (83, 92, 0)   (66, 92, 17)
-SWOPF_0785                     175      5.00e10    (83, 92, 0)   (66, 92, 17)
-SWOPF_0814                     175      5.00e10    (83, 92, 0)   (66, 92, 17)
-SWOPF_0817                     175      4.99e10    (83, 92, 0)   (66, 92, 17)
-SWOPF_0759                     175      4.99e10    (83, 92, 0)   (66, 92, 17)
-SWOPF_0728                     175      4.99e10    (83, 92, 0)   (66, 92, 17)
-SWOPF_0673                     175      4.99e10    (83, 92, 0)   (66, 92, 17)
+ERRINBAR_0824                   27      3.22e-4     (18, 9, 0)     (18, 9, 0)
+PFIT2_0590                       6      8.16e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0588                       6      8.16e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0589                       6      8.16e-6      (3, 3, 0)      (3, 3, 0)
+PRICE4_0002                      2      7.74e-6      (2, 0, 0)      (2, 0, 0)
+PFIT2_0341                       6      7.17e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0329                       6      4.07e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0327                       6      4.07e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0328                       6      4.07e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0547                       6      4.06e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0545                       6      4.06e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0546                       6      4.06e-6      (3, 3, 0)      (3, 3, 0)
+FLETCHER_0002                   16      3.63e-6     (12, 4, 0)     (12, 4, 0)
+PFIT2_0300                       6      3.55e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0390                       6      2.42e-6      (3, 3, 0)      (3, 3, 0)
 
 --- Dense ∩ Sparse failure overlap ---
-Failed in BOTH dense and sparse:  1869
-Failed in dense only:             59
-Failed in sparse only:            3328
+Failed in BOTH dense and sparse:  1865
+Failed in dense only:             63
+Failed in sparse only:            64
 ```
 
 ## Recent Decisions

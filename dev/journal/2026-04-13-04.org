@@ -1,0 +1,174 @@
+#+TITLE: Feral Journal 2026-04-13-04
+#+STARTUP: overview
+
+* 10:00 :phase2.3:step7:threshold:
+Restored =pivot_threshold = 0.01= for sparse callers per plan
+Step 7. Split =bench.rs::params_kkt= into =params_kkt_dense= (0.0)
+and =params_kkt_sparse= (0.01) so the dense KKT sweep stays
+pinned. Updated =select_parity_panel.rs= (helper and template),
+=triage_plateau.rs=, =triage_large_cresc132.rs=,
+=dense_vs_sparse.rs= (split into dense/sparse params).
+Regenerated =tests/parity.rs= via =select_parity_panel=.
+=BunchKaufmanParams::default()= stays at 0.0.
+
+Committed as =6245952=.
+
+* 10:20 :phase2.3:step7:result:mixed:
+Step 7 landed but the result is mixed. Parity: 11/28 → 14/28,
+below the plan target of 18/28. Sparse bench:
+- Inertia match: 152987 → 152774 (−213)
+- Residual pass: 154113 → 154186 (+73)
+- Worst residual: 1.19e0 → 7.06e2 (on DEGENLPA_0065)
+- Sparse-only failures: 203 → 296 (+93)
+
+Dense KKT unchanged (99.0% / 99.7%), confirming the invariant
+after the params split.
+
+DEGENLPA_0065 reports =(20, 14, 1)= vs MUMPS =(20, 15, 0)= — one
+extra zero pivot, one missing negative. Suggests a column-relative
+rejection at a root supernode falling back to ForceAccept-zero
+instead of preserving the sign of the rejected pivot.
+
+* 10:45 :phase2.3:experts:consultation:
+Spawned =spral-expert= and =mumps-expert= in parallel to trace
+the regression.
+
+- =spral-expert= (SPRAL SSIDS): SSIDS's =ldlt_tpp_factor= handles
+  unstable pivots by breaking out of the main elimination loop and
+  leaving the remaining columns un-eliminated — the outer
+  multifrontal driver then reassembles them into the parent. No
+  zero-pivot-at-root fallback. The closest analog in feral would
+  be to return Rejected with =nelim < ncol= at the root, which
+  requires changes to inertia accounting and solve-side
+  un-eliminated column handling.
+
+- =mumps-expert= (MUMPS 5.8.2): MUMPS's =INFOG(28)= (number of null
+  pivots detected) is only computed when =ICNTL(24) = 1= (null
+  pivot detection). In the default configuration MUMPS hardwires
+  =n0 = 0= regardless of what the matrix actually contains. So
+  our oracle comparison saying "MUMPS detects 0 zero pivots on
+  DEGENLPA and feral detects 1" is partly a measurement artifact
+  — MUMPS isn't detecting zero, it's refusing to report any.
+  MUMPS also has STATICMODE / CNTL(4)/CNTL(5) that perturbs tiny
+  pivots to ±SEUIL and continues — OFF by default.
+
+Conclusion: two root causes. (1) feral's ForceAccept-zero branch
+converts small-nonzero pivots into zeros, losing sign. (2) MUMPS's
+oracle is partly a lower bound, not ground truth, on zero-pivot
+counts.
+
+* 11:10 :phase2.3:fix:sign-preservation:
+Applied the minimal fix at
+=src/dense/factor.rs::try_reject_1x1_frontal=. Split the
+=ForceAccept= branch into two cases:
+- =|d| <= zero_tol=: truly zero. Count as zero_pivot, zero the L
+  column, return Rejected. (Unchanged behavior.)
+- =|d| > zero_tol=: small but nonzero. Accept with correct sign
+  (=d > 0 → pos += 1=, else =neg += 1=), set
+  =needs_refinement = true=, return Accepted so the caller runs
+  the normal rank-1 update. Iterative refinement cleans up the
+  small-pivot noise.
+
+The 2×2 fallback routes through =try_reject_1x1_frontal=, so the
+one fix covers both paths. =do_1x1_pivot= (dense-only) has no
+=may_delay= parameter and is not reached from the frontal kernel
+— not modified.
+
+* 11:35 :phase2.3:tests:broken-by-fix:
+Three unit tests broke on the fix because they encoded the old
+buggy behavior.
+
+- =tests/delayed_pivoting.rs::factor_frontal_root_force_accepts_without_delay=:
+  used a matrix with =d = 1e-14= (above zero_tol). New code
+  accepts with sign instead of counting as zero. Added helper
+  =trailing_dominated_zero_frontal()= with =d = 0= exactly, and
+  switched the test to it. Added new test
+  =factor_frontal_root_accepts_small_pivot_with_sign= covering
+  the sign-preservation branch with a clearly-negative pivot.
+- =tests/pivot_rejection.rs::threshold_rejects_tiny_1x1_pivot=:
+  asserted =n_zero_thresholded > n_zero_baseline=. Under the new
+  path both sides produce the same zero count. Rewrote with a
+  cleaner 2×2 ncol=1 matrix =tiny_relative_pivot_frontal= where
+  u=0.0 produces no rejection (=needs_refinement = false=) and
+  u=0.01 rejects and flags refinement.
+- =tests/pivot_rejection.rs::duff_reid_2x2_growth_bound=:
+  same old assertion mechanism. Rewrote to compare the D-diagonal
+  between u=0.01 and u=0.9 — they differ because u=0.9 triggers
+  additional rejections that u=0.01 does not.
+
+Removed now-unused =n_zero_pivots_frontal= helper and
+=FrontalFactors= import.
+
+* 12:10 :phase2.3:validation:all-green:
+Full validation sweep after the sign-preservation fix:
+
+- =cargo test --release=: all passing, 0 failures.
+- =cargo test --test parity --release=: 14 passed, 14 ignored.
+- =cargo test --test parity --release -- --ignored=: 8 passed, 6
+  failed. Now un-ignorable:
+  =CERI651A_0000/0165/0166=, =DEGENLPA_0065=,
+  =DEGENLPB_0045/0046/0047=, =PALMER2ANE_0000=. Still failing:
+  =AVION2_0510=, =CERI651C_0746=, =CERI651ELS_1482=,
+  =HAHN1_0004=, =MEYER3NE_0253=, =SSI_2597= — all residual-margin
+  failures (no inertia mismatches).
+- =cargo clippy --release -- -D warnings= (src only): clean.
+- =cargo fmt --check=: clean after the fmt auto-fix on
+  pivot_rejection.rs.
+
+Un-ignored the 8 passing tests in =tests/parity.rs= with a
+=Phase 2.3 sign-preservation fix: passes.= comment. Panel
+snapshot comment updated to 22/28.
+
+Committed as =a630977=.
+
+* 12:30 :phase2.3:bench:headline:
+=cargo run --bin bench --release=:
+
+Sparse KKT:
+- Inertia match: 153009/154588 (99.0%)
+- Residual pass: 154237/154588 (99.8%)
+- Worst residual: 3.22e-4 (ERRINBAR_0824)
+- Sparse-only failures: 64
+
+Dense KKT (unchanged):
+- Inertia match: 152979/154481 (99.0%)
+- Residual pass: 154051/154481 (99.7%)
+- Worst residual: 3.99e-2 (ACOPP30_0002)
+
+Deltas vs Session 03 baseline:
+- Sparse inertia match: 152987 → 153009 (+22)
+- Sparse residual pass: 154113 → 154237 (+124)
+- Sparse worst: 1.19e0 → 3.22e-4 (4 orders of magnitude)
+- Sparse-only failures: 203 → 64 (−139)
+
+Deltas vs Step 7 regression:
+- Sparse inertia match: 152774 → 153009 (+235, recovered +22 net)
+- Sparse worst: 7.06e2 → 3.22e-4 (6 orders of magnitude)
+- Sparse-only failures: 296 → 64 (−232)
+
+Net outcome: the sign-preservation fix recovers Step 7's
+regression, amplifies the wins, and delivers the cleanest single
+improvement in Phase 2.3.
+
+* 13:00 :phase2.3:remaining-failures:triage:
+Six parity tests still failing after the sign fix. All are
+residual-margin, none are inertia mismatches. Ratios
+(feral / mumps):
+
+- AVION2_0510:      3.86e-14 / 2.54e-15 = 1.5×
+- HAHN1_0004:       3.23e-13 / 2.99e-14 = 10.8×
+- MEYER3NE_0253:    2.50e-14 / 1.99e-15 = 12.5×
+- CERI651C_0746:    4.29e-13 / 8.40e-16 = 510×
+- CERI651ELS_1482:  1.28e-12 / 2.50e-15 = 512×
+- SSI_2597:         1.80e-13 / 1.15e-16 = 1560×
+
+CERI651C, CERI651ELS, SSI are all deep in the residual floor
+(MUMPS residual at 1e-15/1e-16). That suggests feral's iterative
+refinement is stopping before MUMPS's — either the termination
+criterion or the iteration count differs. First check for the
+next session: compare =solve_sparse_refined= against MUMPS
+=ICNTL(10)= / =CNTL(2)= defaults.
+
+HAHN1, MEYER3NE, AVION2 are at more reasonable ratios (1–13×)
+and may be margin failures where a slightly-more-aggressive
+refinement round or tighter column scaling would close them.

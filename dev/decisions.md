@@ -321,3 +321,77 @@ should cite the post-Phase-2.2.3 numbers, not the historical
 is expected to help ACOPP30; the SSIDS-style renumbering is
 logged as Phase 2.2.4 or as prerequisite work for Phase 2.3. No
 test tolerances were loosened. All 146 non-ignored tests pass.
+
+## 2026-04-13 — Phase 2.3: pivot-threshold split between dense and sparse callers
+
+**Decision.** Sparse multifrontal callers use
+`BunchKaufmanParams::pivot_threshold = 0.01` (SSIDS / MUMPS default
+`u`). The dense `factor()` path and all dense benchmarks use
+`pivot_threshold = 0.0` via an explicit override.
+`BunchKaufmanParams::default()` stays at `0.0`.
+
+**Why.** The column-relative threshold test `|d| >= u*col_max` only
+pays off when rejected pivots have somewhere to go — delayed
+pivoting at non-root supernodes gives them a landing zone at the
+parent. The dense BK kernel has no delayed-pivoting machinery
+and runs under Knight-Ruiz ∞-norm equilibration, which handles
+column scaling at preprocess time. Using `u = 0.01` in the dense
+kernel would trade equilibration-handled cases for a hard
+column-relative rejection with nowhere to go, regressing the
+99.0% dense KKT rate. Sparse, by contrast, has delayed pivoting
+(Phase 2.3 Steps 5+6) and MC64 scaling that do not equilibrate
+to the dense kernel's precision, so the threshold earns its
+keep.
+
+**Scope.** `src/bin/bench.rs` carries two configs:
+`params_kkt_dense` (0.0) for the dense sweep, `params_kkt_sparse`
+(0.01) for the sparse sweep. `examples/*.rs` that exercise both
+paths similarly carry two configs. Library clients constructing
+`BunchKaufmanParams::default()` get `0.0` and are unchanged by
+Phase 2.3 — they must explicitly opt into `0.01` if they want
+the sparse-path behavior.
+
+**Evidence.** Dense KKT rate: 152979/154481 (99.0%) unchanged
+before and after. Sparse KKT rate: 152987 → 153009 inertia match,
+154113 → 154237 residual pass, 1.19e0 → 3.22e-4 worst residual,
+203 → 64 sparse-only failures. Full measurements in
+`dev/sessions/2026-04-13-04.md`.
+
+## 2026-04-13 — Phase 2.3: preserve pivot sign at root-supernode fallback
+
+**Decision.** When the column-relative threshold test rejects a
+1×1 pivot at a root supernode (`may_delay = false`), and the
+`ForceAccept` zero-pivot policy is in effect,
+`src/dense/factor.rs::try_reject_1x1_frontal` accepts the pivot
+with its correct sign (`d > 0 → pos += 1`, else `neg += 1`) and
+flags `needs_refinement = true` — only `|d| <= zero_tol ≈ eps`
+is counted as a zero pivot. The 2×2 fallback routes through the
+same path.
+
+**Why.** Converting a small-but-clearly-nonzero pivot into a
+zero loses inertia information and produces residuals that
+iterative refinement cannot recover, because the pivot is driven
+to exactly 0 instead of being preserved with its noisy-but-
+nonzero value. This is exactly the DEGENLPA_0065 failure mode:
+the reference reports `(20, 15, 0)` and feral reported
+`(20, 14, 1)` with a 7.06e2 residual. MUMPS always reports
+`n0 = 0` in the default configuration (INFOG(28) is only
+computed when ICNTL(24)=1), so the reference oracle never
+reports zero pivots — the comparison is partly a measurement
+artifact on top of the real sign-loss bug. SSIDS handles the
+same case by breaking at the root and leaving the pivot
+un-eliminated (the outer multifrontal driver reassembles it);
+sign preservation is a strictly smaller change that captures
+the correctness gain without touching the root-break logic.
+
+**Evidence.** Parity 14/28 → 22/28 (flipped CERI651A×3,
+DEGENLPA_0065, DEGENLPB_0045/0046/0047, PALMER2ANE_0000).
+Sparse worst residual 7.06e2 → 3.22e-4 (six orders of
+magnitude). Full measurements in
+`dev/sessions/2026-04-13-04.md`. No test tolerances were
+loosened. The `factor_frontal_root_force_accepts_without_delay`
+unit test was updated to use `d = 0` exactly (matching the
+absolute-zero branch), and
+`factor_frontal_root_accepts_small_pivot_with_sign` was added to
+cover the new sign-preserving branch with a clearly-negative
+pivot.

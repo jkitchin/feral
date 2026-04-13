@@ -66,6 +66,25 @@ above for the limits of this claim.
 - Fused update+argmax optimization (halves memory traffic per pivot step)
 
 ### Fixed
+- **Phase 2.3 — delayed pivoting + sign-preservation fix**: the
+  sparse multifrontal path now delays rejected pivots (both 1×1
+  column-relative and 2×2 Duff-Reid growth-bound) from non-root
+  supernodes to their parent, giving them a landing zone where
+  child contributions have been assembled and the block is more
+  likely to pivot cleanly. At root supernodes where no further
+  delay is possible, `try_reject_1x1_frontal` preserves the
+  pivot's sign in the `ForceAccept` fallback: small-but-nonzero
+  pivots are accepted with `inertia.positive`/`negative` (not
+  counted as zero) and flagged for iterative refinement. Only
+  `|d| <= zero_tol ≈ eps` counts as a zero pivot. Evidence:
+  sparse KKT sweep worst residual `2.31e+11 → 3.22e-4` (15 orders
+  of magnitude across Phase 2.3), sparse-only failure count
+  `3328 → 64`, parity panel `11/28 → 22/28`. Dense KKT numbers
+  unchanged (99.0% inertia, 99.7% residual pass, 3.99e-2 worst
+  on ACOPP30_0002) because the sparse-only `pivot_threshold =
+  0.01` config is scoped to `params_kkt_sparse` and
+  `BunchKaufmanParams::default()` stays at `0.0`. See
+  `dev/sessions/2026-04-13-02.md`, `03.md`, and `04.md`.
 - **Phase 2.2.2 — ACOPP30 MC64 regression**: Phase 2.2.1 MC64
   scaling improved 6 of 7 sanity-panel matrices but pushed
   ACOPP30_0000 from a pre-MC64 residual of `2.84e+16` to
