@@ -88,7 +88,8 @@ fn run_parity(fam: &str, stem: &str) {
     );
 }
 
-// Panel snapshot: 14/28 matrices pass MUMPS parity at panel time.
+// Panel snapshot: 22/28 matrices pass MUMPS parity (14 panel-time +
+// 8 un-ignored after the Phase 2.3 sign-preservation fix).
 // Failing matrices are `#[ignore]`'d with the panel-time failure
 // mode in the attribute comment. Passing matrices run as regular
 // tests and protect against regression. As fixes land, rerun
@@ -113,22 +114,22 @@ fn parity_bqpgasim_0012() {
 }
 
 // Panel time: inertia mismatch (feral=(129, 60, 1) mumps=(129, 61, 0))
+// Phase 2.3 sign-preservation fix: passes.
 #[test]
-#[ignore]
 fn parity_ceri651a_0000() {
     run_parity("ceri651a", "CERI651A_0000");
 }
 
 // Panel time: inertia mismatch (feral=(128, 61, 1) mumps=(129, 61, 0))
+// Phase 2.3 sign-preservation fix: passes.
 #[test]
-#[ignore]
 fn parity_ceri651a_0165() {
     run_parity("ceri651a", "CERI651A_0165");
 }
 
 // Panel time: inertia mismatch (feral=(128, 61, 1) mumps=(129, 61, 0))
+// Phase 2.3 sign-preservation fix: passes.
 #[test]
-#[ignore]
 fn parity_ceri651a_0166() {
     run_parity("ceri651a", "CERI651A_0166");
 }
@@ -163,29 +164,29 @@ fn parity_cresc132_0000() {
 }
 
 // Panel time: inertia mismatch (feral=(20, 14, 1) mumps=(20, 15, 0))
+// Phase 2.3 sign-preservation fix: passes.
 #[test]
-#[ignore]
 fn parity_degenlpa_0065() {
     run_parity("degenlpa", "DEGENLPA_0065");
 }
 
 // Panel time: inertia mismatch (feral=(20, 14, 1) mumps=(20, 15, 0))
+// Phase 2.3 sign-preservation fix: passes.
 #[test]
-#[ignore]
 fn parity_degenlpb_0045() {
     run_parity("degenlpb", "DEGENLPB_0045");
 }
 
 // Panel time: inertia mismatch (feral=(20, 14, 1) mumps=(20, 15, 0))
+// Phase 2.3 sign-preservation fix: passes.
 #[test]
-#[ignore]
 fn parity_degenlpb_0046() {
     run_parity("degenlpb", "DEGENLPB_0046");
 }
 
 // Panel time: inertia mismatch (feral=(20, 14, 1) mumps=(20, 15, 0))
+// Phase 2.3 sign-preservation fix: passes.
 #[test]
-#[ignore]
 fn parity_degenlpb_0047() {
     run_parity("degenlpb", "DEGENLPB_0047");
 }
@@ -235,8 +236,8 @@ fn parity_meyer3ne_0253() {
 }
 
 // Panel time: inertia mismatch (feral=(52, 22, 1) mumps=(52, 23, 0))
+// Phase 2.3 sign-preservation fix: passes.
 #[test]
-#[ignore]
 fn parity_palmer2ane_0000() {
     run_parity("palmer2ane", "PALMER2ANE_0000");
 }

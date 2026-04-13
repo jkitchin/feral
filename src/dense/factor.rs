@@ -923,22 +923,48 @@ fn try_reject_1x1_frontal(
         if may_delay {
             return Ok(PivotOutcome::Delayed);
         }
-        match params.on_zero_pivot {
-            ZeroPivotAction::ForceAccept => {
-                *needs_refinement = true;
-                *zero += 1;
+        // At the root (may_delay=false) we have no parent to absorb
+        // the rejected pivot. Split the branch by absolute magnitude:
+        //
+        //  (a) |d| <= zero_tol — truly numerically zero. Set d=0 so
+        //      solve skips this position, count as rank-deficient.
+        //
+        //  (b) zero_tol < |d| <= u*col_max — small but clearly
+        //      nonzero. The SSIDS reference's `ldlt_tpp_factor` at
+        //      the root simply breaks out leaving un-eliminated
+        //      columns, which silently under-reports rank; that is
+        //      not acceptable under feral's "inertia must be exactly
+        //      correct" invariant. Instead we accept the pivot at
+        //      its actual magnitude with its correct sign, counting
+        //      it as positive or negative inertia per SSIDS/MUMPS
+        //      convention for degenerate LPs. L growth is bounded
+        //      by 1/|d| per step which can be large, so we request
+        //      iterative refinement to recover the residual. This
+        //      closes DEGENLPA-family failures where MUMPS reports
+        //      e.g. (20, 15, 0) and the prior ForceAccept-zero path
+        //      gave (20, 14, 1).
+        if d.abs() <= params.zero_tol {
+            match params.on_zero_pivot {
+                ZeroPivotAction::ForceAccept => {
+                    *needs_refinement = true;
+                    *zero += 1;
+                }
+                ZeroPivotAction::Fail => return Err(FeralError::NumericallyRankDeficient),
             }
-            ZeroPivotAction::Fail => return Err(FeralError::NumericallyRankDeficient),
+            for i in (k + 1)..nrow {
+                a[k * nrow + i] = 0.0;
+            }
+            a[k * nrow + k] = 0.0;
+            return Ok(PivotOutcome::Rejected);
         }
-        // Zero the L column (below the diagonal) so the subsequent
-        // rank-1 update contributes nothing.
-        for i in (k + 1)..nrow {
-            a[k * nrow + i] = 0.0;
+        // Case (b): small but nonzero — accept with correct sign.
+        *needs_refinement = true;
+        if d > 0.0 {
+            *pos += 1;
+        } else {
+            *neg += 1;
         }
-        // Zero the diagonal: solve skips positions with |d| <= zero_tol,
-        // so setting to 0 guarantees this position is skipped cleanly.
-        a[k * nrow + k] = 0.0;
-        return Ok(PivotOutcome::Rejected);
+        return Ok(PivotOutcome::Accepted);
     }
 
     // Accept: sign-based inertia.

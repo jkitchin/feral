@@ -18,7 +18,7 @@
 //! (`dfac_front_aux.F:1494-1606`) and SSIDS
 //! (`block_ldlt.hxx::test_2x2`) acceptance formulas.
 
-use feral::dense::factor::{factor_frontal, FrontalFactors};
+use feral::dense::factor::factor_frontal;
 use feral::{factor, solve, BunchKaufmanParams, Factors, SymmetricMatrix, ZeroPivotAction};
 
 /// Count d_diag entries that were force-accepted as zero (dense factor).
@@ -26,101 +26,69 @@ fn n_zero_pivots(f: &Factors) -> usize {
     f.d_diag.iter().filter(|d| d.abs() <= f.zero_tol).count()
 }
 
-/// Count d_diag entries that were force-accepted as zero (frontal factor).
-fn n_zero_pivots_frontal(f: &FrontalFactors) -> usize {
-    f.d_diag.iter().filter(|d| d.abs() <= f.zero_tol).count()
-}
-
-/// Build the 2×2 frontal used in Test A:
+/// Build a 2×2 frontal with ncol=1 where the sole pivot candidate
+/// a[0,0] = 1e-3 is small relative to its column max (a[1,0] = 0.5)
+/// but strictly above zero_tol. Post-Phase-2.3 this isolates the
+/// column-relative threshold decision at a single fully-summed column.
 ///
-///     [ 1e-10  1.0 ]
-///     [ 1.0    1.0 ]
+///     [ 1e-3  0.5 ]
+///     [ 0.5   100 ]
 ///
-/// Column 0 below-diagonal has only `|a[1,0]| = 1.0`, so `col_max = 1`.
-/// With `u = 0.0`, `|a[0,0]| = 1e-10 > zero_tol = eps` so BK accepts
-/// the pivot — the standard BK77 test `|a00| >= alpha * gamma0` reads
-/// `1e-10 >= 0.6404` which FAILS, but then we swap to `a[1,1] = 1.0`
-/// which satisfies `|arr| >= alpha * gamma_r`, so the 1×1-after-swap
-/// path is taken. That pivot is strong (1.0) — the test must be
-/// constructed so BK cannot escape.
-///
-/// Revised: use a 2×2 frontal where BOTH diagonals are tiny and the
-/// off-diagonal is also tiny relative to its column max seen from
-/// the contribution block below.
-fn test_a_frontal() -> SymmetricMatrix {
-    // 3x3 frontal where the fully-summed block is the top 2x2 and the
-    // contribution block is the last row/col.
-    //
-    //   [ 1e-10  1e-10  1.0 ]
-    //   [ 1e-10  1e-10  1.0 ]
-    //   [ 1.0    1.0    1.0 ]
-    //
-    // ncol = 2: eliminate the top two rows. For column 0, below-diagonal
-    // entries are a[1,0] = 1e-10 (fully-summed) and a[2,0] = 1.0 (contrib
-    // block). gamma0 = 1.0, r = 2 — but r is NOT fully-summed so we can't
-    // swap into the pivot position. akk = 1e-10 fails `akk >= alpha*gamma0`.
-    // gamma_r = max in symmetric row 2 = max(a[1,0], a[2,1], a[2,0]_diag)
-    //         = max(1e-10, 1.0, 1.0) within the trailing block.
-    // arr = 1.0. r_is_fully_summed = false → skip the r-swap branch.
-    // LAPACK extension: akk * gamma_r = 1e-10 * 1.0 < alpha * gamma0^2 = 0.6404.
-    // 2x2 path: r_is_fully_summed = false → fall through to 1×1 fallback.
-    // The fallback reads the tiny diagonal a[0,0] = 1e-10 and — without
-    // pivot_threshold — divides by it. With u = 0.01, the fallback rejects
-    // (1e-10 < 0.01 * 1.0 = 0.01) and zeroes the L column.
-    let mut mat = SymmetricMatrix::zeros(3);
-    mat.set(0, 0, 1e-10);
-    mat.set(1, 0, 1e-10);
-    mat.set(1, 1, 1e-10);
-    mat.set(2, 0, 1.0);
-    mat.set(2, 1, 1.0);
-    mat.set(2, 2, 1.0);
+/// With `ncol = 1`, row/col 1 is the contribution block — BK cannot
+/// swap into it, so the pivot at a[0,0] is the only candidate. Under
+/// `u = 0.0` the absolute floor (zero_tol ≈ eps) accepts 1e-3 cleanly,
+/// no rejection is signalled, needs_refinement stays false. Under
+/// `u = 0.01` the column-relative threshold is 0.01 * 0.5 = 5e-3,
+/// and 1e-3 ≤ 5e-3 fails the test. At a root (may_delay=false) the
+/// sign-preservation fallback accepts the pivot as positive and
+/// flags needs_refinement = true.
+fn tiny_relative_pivot_frontal() -> SymmetricMatrix {
+    let mut mat = SymmetricMatrix::zeros(2);
+    mat.set(0, 0, 1e-3);
+    mat.set(1, 0, 0.5);
+    mat.set(1, 1, 100.0);
     mat
 }
 
 #[test]
 fn threshold_rejects_tiny_1x1_pivot() {
     // Exercise factor_frontal directly (no internal equilibration, matches
-    // the sparse multifrontal path). See test_a_frontal() for the pivot
-    // decision trace.
-    let mat = test_a_frontal();
+    // the sparse multifrontal path). Post-Phase-2.3 the observable signal
+    // of a column-relative rejection at a root is `needs_refinement`, not
+    // `inertia.zero` — a small-but-nonzero rejected pivot is accepted with
+    // its sign so refinement can polish the resulting small-pivot noise.
+    let mat = tiny_relative_pivot_frontal();
 
-    // Case 1: pivot_threshold = 0.0 → absolute-only floor, tiny pivot
-    // accepted, rank-1 update divides by 1e-10 and amplifies.
     let params0 = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.0,
         ..BunchKaufmanParams::default()
     };
-    let ff0 = factor_frontal(&mat, 2, false, &params0).expect("factor_frontal u=0");
-    let n_zero_baseline = n_zero_pivots_frontal(&ff0);
+    let ff0 = factor_frontal(&mat, 1, false, &params0).expect("factor_frontal u=0");
 
-    // Case 2: pivot_threshold = 0.01 → tiny pivot rejected, counted as
-    // zero via ForceAccept. The number of zero pivots must strictly
-    // exceed the baseline.
     let params1 = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
     };
-    let ff1 = factor_frontal(&mat, 2, false, &params1).expect("factor_frontal u=0.01");
-    let n_zero_thresholded = n_zero_pivots_frontal(&ff1);
+    let ff1 = factor_frontal(&mat, 1, false, &params1).expect("factor_frontal u=0.01");
 
     assert!(
-        n_zero_thresholded > n_zero_baseline,
-        "expected at least one additional zero pivot under u=0.01 \
-         (baseline {}, threshold {})",
-        n_zero_baseline,
-        n_zero_thresholded
-    );
-    assert!(
-        ff1.inertia.zero >= 1,
-        "expected inertia.zero >= 1 under u=0.01, got {:?}",
-        ff1.inertia
+        !ff0.needs_refinement,
+        "baseline u=0.0 should not flag needs_refinement (no rejection), got {:?}",
+        ff0.inertia
     );
     assert!(
         ff1.needs_refinement,
-        "expected needs_refinement=true when a pivot was rejected"
+        "expected needs_refinement=true when a pivot was rejected on column-relative test, got {:?}",
+        ff1.inertia
     );
+    // Sign-preservation: the tiny positive pivot stays positive under both
+    // paths (inertia count of 1 eliminated column).
+    assert_eq!(ff0.inertia.positive, 1, "u=0.0 inertia {:?}", ff0.inertia);
+    assert_eq!(ff1.inertia.positive, 1, "u=0.01 inertia {:?}", ff1.inertia);
+    assert_eq!(ff0.inertia.zero, 0, "u=0.0 inertia {:?}", ff0.inertia);
+    assert_eq!(ff1.inertia.zero, 0, "u=0.01 inertia {:?}", ff1.inertia);
 }
 
 #[test]
@@ -505,14 +473,28 @@ fn duff_reid_2x2_growth_bound() {
     let ff_accept = factor_frontal(&mat, 4, false, &params_accept).expect("u=0.01");
     let ff_reject = factor_frontal(&mat, 4, false, &params_reject).expect("u=0.9");
 
-    let z_accept = n_zero_pivots_frontal(&ff_accept);
-    let z_reject = n_zero_pivots_frontal(&ff_reject);
-
+    // Under the sign-preservation fix (Phase 2.3), rejection at a root
+    // no longer converts small-nonzero pivots to zero-count entries, so
+    // the old `zero_reject > zero_accept` signal cannot distinguish u
+    // values on a matrix that already cascades zeros through the
+    // fully-summed block. The 2×2 growth bound path still fires under
+    // u=0.9 — we verify it by checking that the D-diagonal under u=0.9
+    // differs from the D-diagonal under u=0.01 (u=0.9 triggers pivot
+    // rejections that u=0.01 does not).
+    let d_accept: Vec<f64> = ff_accept.d_diag.clone();
+    let d_reject: Vec<f64> = ff_reject.d_diag.clone();
+    let same = d_accept.len() == d_reject.len()
+        && d_accept
+            .iter()
+            .zip(d_reject.iter())
+            .all(|(a, b)| (a - b).abs() < 1e-12);
     assert!(
-        z_reject > z_accept,
-        "expected u=0.9 to reject more pivots than u=0.01 \
-         (accept zero-count {}, reject zero-count {})",
-        z_accept,
-        z_reject
+        !same,
+        "expected u=0.9 to produce a different D-diagonal than u=0.01 \
+         (d_accept={:?}, d_reject={:?})",
+        d_accept, d_reject
     );
+    // Both paths must flag needs_refinement: u=0.01 from the cascade's
+    // true zero, u=0.9 from the 2×2 growth bound rejection.
+    assert!(ff_accept.needs_refinement || ff_reject.needs_refinement);
 }

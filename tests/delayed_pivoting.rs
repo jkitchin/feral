@@ -8,10 +8,13 @@
 //!      rows has no valid BK pivot inside the fully-summed block. With
 //!      `may_delay = true`, the kernel breaks on the very first column
 //!      and returns `nelim = 0` with the full trailing block preserved.
-//!   2. `factor_frontal_root_force_accepts_without_delay` — the same
-//!      frontal with `may_delay = false` falls through to the existing
-//!      `ZeroPivotAction::ForceAccept` path and returns `nelim == ncol`
-//!      with `inertia.zero == ncol`. This is the root-supernode contract.
+//!   2. `factor_frontal_root_force_accepts_without_delay` — a frontal
+//!      whose fully-summed diagonal is exactly zero (rank-deficient),
+//!      factored with `may_delay = false`, must fall through to the
+//!      `ZeroPivotAction::ForceAccept` path and return `nelim == ncol`
+//!      with `inertia.zero == ncol`. For small-but-nonzero pivots the
+//!      root path accepts them with their correct sign instead (see
+//!      test 2b). This is the root-supernode contract.
 //!   3. `factor_frontal_partial_elim_with_delay` — a 5×5 block-diagonal
 //!      frontal where columns 0 and 1 factor cleanly but columns 2 and 3
 //!      cannot pivot without swapping in a trailing row. With
@@ -129,24 +132,85 @@ fn factor_frontal_delays_first_pivot_when_may_delay() {
     assert_eq!(get(3, 3), 10.0);
 }
 
+/// Variant of `trailing_dominated_frontal` where the fully-summed
+/// diagonal is *exactly* zero. At the root (may_delay=false) these
+/// pivots are below `zero_tol = f64::EPSILON` and must go through the
+/// ForceAccept-zero path, producing `inertia.zero == 2`.
+fn trailing_dominated_zero_frontal() -> SymmetricMatrix {
+    let mut mat = SymmetricMatrix::zeros(4);
+    // Fully-summed block is exactly zero — rank-deficient by construction.
+    mat.set(2, 0, 1.0);
+    mat.set(2, 1, 1.0);
+    mat.set(3, 0, 1.0);
+    mat.set(3, 1, 1.0);
+    mat.set(2, 2, 10.0);
+    mat.set(3, 3, 10.0);
+    mat
+}
+
 #[test]
 fn factor_frontal_root_force_accepts_without_delay() {
-    let mat = trailing_dominated_frontal();
+    let mat = trailing_dominated_zero_frontal();
     let params = delay_params();
 
-    // may_delay = false is the root-supernode contract. ForceAccept
-    // must fire, flushing both tiny pivots as zeros.
+    // may_delay = false is the root-supernode contract. With a
+    // genuinely zero diagonal (below zero_tol), ForceAccept fires
+    // and both pivots are counted as zero.
     let ff = factor_frontal(&mat, 2, false, &params).expect("factor_frontal");
 
     assert_eq!(ff.nelim, 2, "root eliminates all attempted columns");
     assert_eq!(ff.ncol, 2);
     assert_eq!(ff.n_delayed, 0, "no delay path taken");
     assert_eq!(ff.contrib_dim, 2, "contrib is the 2×2 trailing block");
-    assert_eq!(ff.inertia.zero, 2, "both pivots counted as zero");
+    assert_eq!(
+        ff.inertia.zero, 2,
+        "both genuinely-zero pivots count as zero"
+    );
     assert_eq!(ff.inertia.positive, 0);
     assert_eq!(ff.inertia.negative, 0);
     assert!(ff.needs_refinement, "ForceAccept must flag refinement");
     assert_eq!(ff.d_diag.len(), 2);
+}
+
+#[test]
+fn factor_frontal_root_accepts_small_pivot_with_sign() {
+    // Same structure as trailing_dominated_frontal but the first
+    // fully-summed diagonal is -1e-8 (small and *negative*). At the
+    // root, the column-relative test |d| >= u*col_max fails
+    // (|−1e-8| < 0.01 · 1.0), but −1e-8 is well above
+    // zero_tol = f64::EPSILON ≈ 2.2e-16, so the pivot is accepted
+    // with its correct sign. This is the SSIDS/MUMPS convention:
+    // a small-but-clearly-nonzero pivot contributes to the negative
+    // inertia, not the zero count. Without this fix a DEGENLPA-
+    // style KKT would mis-report (n+, n−, n0) = (20, 14, 1) instead
+    // of the true (20, 15, 0).
+    let mut mat = SymmetricMatrix::zeros(4);
+    mat.set(0, 0, -1e-8);
+    mat.set(1, 1, 5.0);
+    mat.set(2, 0, 1.0);
+    mat.set(3, 0, 1.0);
+    mat.set(2, 2, 10.0);
+    mat.set(3, 3, 10.0);
+    let params = delay_params();
+
+    let ff = factor_frontal(&mat, 2, false, &params).expect("factor_frontal");
+
+    assert_eq!(ff.nelim, 2, "root eliminates all attempted columns");
+    assert_eq!(ff.ncol, 2);
+    assert_eq!(ff.n_delayed, 0, "no delay path taken");
+    assert_eq!(
+        ff.inertia.negative, 1,
+        "small negative pivot counted as negative, not zero"
+    );
+    assert_eq!(
+        ff.inertia.positive, 1,
+        "clean positive pivot counted correctly"
+    );
+    assert_eq!(ff.inertia.zero, 0, "no zero pivots — both above zero_tol");
+    assert!(
+        ff.needs_refinement,
+        "small-but-accepted pivot still requires iterative refinement"
+    );
 }
 
 /// 5×5 frontal with ncol=4 and a block-diagonal split between the first
