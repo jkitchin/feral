@@ -266,6 +266,53 @@ pub fn factor(
         if r != k + 1 {
             swap_rows_cols(&mut a, n, k + 1, r, &mut perm);
         }
+
+        // Duff-Reid 2×2 growth bound (MUMPS dfac_front_aux.F:1599-1606).
+        // See the corresponding comment in factor_frontal().
+        let d11_v = a[k * n + k];
+        let d21_v = a[k * n + (k + 1)];
+        let d22_v = a[(k + 1) * n + (k + 1)];
+        let det_v = d11_v * d22_v - d21_v * d21_v;
+        let absdet = det_v.abs();
+        let mut rmax = 0.0f64;
+        let mut tmax = 0.0f64;
+        for i in (k + 2)..n {
+            let v0 = a[k * n + i].abs();
+            if v0 > rmax {
+                rmax = v0;
+            }
+            let v1 = a[(k + 1) * n + i].abs();
+            if v1 > tmax {
+                tmax = v1;
+            }
+        }
+        let amax = d21_v.abs();
+        let u = params.pivot_threshold;
+        let growth_fail = (d22_v.abs() * rmax + amax * tmax) * u > absdet
+            || (d11_v.abs() * tmax + amax * rmax) * u > absdet;
+
+        if growth_fail {
+            // 2×2 rejected by the Duff-Reid growth bound. Fall back to a
+            // single 1×1 at k with the column-relative threshold. The
+            // second position (k+1) is revisited on the next iteration.
+            let (ng, nr) = do_1x1_pivot(
+                &mut a,
+                n,
+                k,
+                gamma0,
+                params,
+                &mut pos,
+                &mut neg,
+                &mut zero,
+                &mut needs_refinement,
+            )?;
+            fused_gamma0 = ng;
+            fused_r = nr;
+            have_fused = k + 1 < n;
+            k += 1;
+            continue;
+        }
+
         let (ng, nr) = do_2x2_pivot(
             &mut a,
             n,
@@ -602,13 +649,73 @@ pub fn factor_frontal(
             let d22 = a[(k + 1) * nrow + (k + 1)];
             let det = d11 * d22 - d21 * d21;
 
-            if det.abs() <= params.zero_tol_2x2 {
-                match params.on_zero_pivot {
-                    ZeroPivotAction::Fail => return Err(FeralError::NumericallyRankDeficient),
-                    ZeroPivotAction::ForceAccept => {
-                        needs_refinement = true;
+            // Duff-Reid 2×2 growth bound (MUMPS dfac_front_aux.F:1599-1606):
+            //
+            //   reject iff  (|a22|*RMAX + AMAX*TMAX) * u  >  |det|
+            //        OR     (|a11|*TMAX + AMAX*RMAX) * u  >  |det|
+            //
+            // where RMAX = max |a[i, k]| for i > k+1
+            //       TMAX = max |a[i, k+1]| for i > k+1
+            //       AMAX = |a[k+1, k]| = |d21|
+            // (i.e., RMAX and TMAX are the column maxes of the two pivot
+            // columns *beyond* the 2×2 block; AMAX is the cross term.)
+            //
+            // When pivot_threshold == 0.0 the growth bound is always
+            // satisfied (0 <= |det|), preserving Phase 1 behavior.
+            let mut rmax = 0.0f64;
+            let mut tmax = 0.0f64;
+            for i in (k + 2)..nrow {
+                let v0 = a[k * nrow + i].abs();
+                if v0 > rmax {
+                    rmax = v0;
+                }
+                let v1 = a[(k + 1) * nrow + i].abs();
+                if v1 > tmax {
+                    tmax = v1;
+                }
+            }
+            let amax = d21.abs();
+            let absdet = det.abs();
+            let u = params.pivot_threshold;
+            let growth_fail = (d22.abs() * rmax + amax * tmax) * u > absdet
+                || (d11.abs() * tmax + amax * rmax) * u > absdet;
+
+            let det_floor_fail = absdet <= params.zero_tol_2x2;
+
+            if growth_fail || det_floor_fail {
+                // 2×2 rejected. Fall back to a single 1×1 at k with the
+                // column-relative threshold. The second position (k+1)
+                // is left for the next iteration, which may accept it
+                // as 1×1 or fall into this branch again. Without full
+                // delayed pivoting we cannot push rejected pivots to a
+                // parent node; the 1×1 fallback's ForceAccept path is
+                // the only available option.
+                if det_floor_fail {
+                    match params.on_zero_pivot {
+                        ZeroPivotAction::Fail => {
+                            return Err(FeralError::NumericallyRankDeficient);
+                        }
+                        ZeroPivotAction::ForceAccept => {
+                            needs_refinement = true;
+                        }
                     }
                 }
+                let rejected = try_reject_1x1_frontal(
+                    &mut a,
+                    nrow,
+                    k,
+                    gamma0,
+                    params,
+                    &mut pos,
+                    &mut neg,
+                    &mut zero,
+                    &mut needs_refinement,
+                )?;
+                if !rejected {
+                    do_1x1_update(&mut a, nrow, k);
+                }
+                k += 1;
+                continue;
             }
 
             let pivot_inertia = count_2x2_inertia_val(d11, d21, d22);

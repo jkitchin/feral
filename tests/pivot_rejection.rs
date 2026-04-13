@@ -476,6 +476,19 @@ fn duff_reid_2x2_growth_bound() {
     mat.set(3, 2, 0.05);
     mat.set(3, 3, 0.05);
 
+    // Hand-traced decision for this matrix at k=0:
+    //   gamma0 = 0.3 (col 0 row 2), akk = 0.1, BK77 1x1 fails.
+    //   gamma_r = 0.3 (row 2), arr = 0.05, swap-1x1 fails.
+    //   LAPACK extension: 0.03 vs 0.0576, fails.
+    //   2x2 with r=2 → swap positions {1,2}, 2x2 block becomes
+    //     d11=0.1, d21=0.3, d22=0.05, |det|=0.085
+    //   RMAX = 0.3 (col 0 after swap, rows 2,3)
+    //   TMAX = 0.3 (col 1 after swap, rows 2,3)
+    //   AMAX = 0.3 (|d21|)
+    //   LHS1 = (|d22|*RMAX + AMAX*TMAX)*u = (0.015 + 0.09)*u = 0.105*u
+    //   LHS2 = (|d11|*TMAX + AMAX*RMAX)*u = (0.03 + 0.09)*u = 0.12*u
+    //   reject iff 0.12*u > 0.085, iff u > 0.708
+    // So u=0.01 accepts, u=0.9 rejects.
     let params_accept = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.01,
@@ -483,20 +496,20 @@ fn duff_reid_2x2_growth_bound() {
     };
     let params_reject = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
-        pivot_threshold: 0.5,
+        pivot_threshold: 0.9,
         ..BunchKaufmanParams::default()
     };
 
     // Use factor_frontal with ncol=4 to avoid internal equilibration.
     let ff_accept = factor_frontal(&mat, 4, &params_accept).expect("u=0.01");
-    let ff_reject = factor_frontal(&mat, 4, &params_reject).expect("u=0.5");
+    let ff_reject = factor_frontal(&mat, 4, &params_reject).expect("u=0.9");
 
     let z_accept = n_zero_pivots_frontal(&ff_accept);
     let z_reject = n_zero_pivots_frontal(&ff_reject);
 
     assert!(
         z_reject > z_accept,
-        "expected u=0.5 to reject more pivots than u=0.01 \
+        "expected u=0.9 to reject more pivots than u=0.01 \
          (accept zero-count {}, reject zero-count {})",
         z_accept,
         z_reject
