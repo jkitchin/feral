@@ -1,0 +1,78 @@
+* 10:00 :phase-2.3:delayed-pivoting:kernel:tdd:
+Started Phase 2.3 Steps 1-3 implementation: delayed-pivoting kernel
+plumbing in factor_frontal. Combined the plan's Steps 1 (red tests),
+2 (PivotOutcome enum), and 3 (break-on-delay) into a single commit
+because the failing tests cannot compile without the API shape
+changes — attempting a pure red-phase commit would leave cargo test
+broken across revisions, which the rest of the repo depends on.
+
+Changes to src/dense/factor.rs:
+- Added PivotOutcome { Accepted, Rejected, Delayed } enum.
+- Added nelim and n_delayed fields to FrontalFactors with doc comments
+  distinguishing the classic (nelim==ncol) contrib from the delayed
+  (nelim<ncol) case where contrib is the (nrow-nelim)×(nrow-nelim)
+  trailing block including the un-eliminated delayed columns.
+- Added may_delay: bool parameter to factor_frontal (position 3).
+- Converted all 6 try_reject_1x1_frontal call sites from the old
+  `if !rejected` flag pattern to `match outcome` dispatch, with
+  PivotOutcome::Delayed => break.
+- 2x2 rejection branch: early break when may_delay=true, before the
+  det_floor_fail + needs_refinement mutation and the 1x1 fallback.
+- Post-loop extraction uses nelim=k rather than ncol. L, D_diag,
+  D_subdiag are all sized to nelim. Contrib is extracted from
+  a[(nelim+cj)*nrow + (nelim+ci)] over cdim = nrow - nelim.
+- try_reject_1x1_frontal signature: returns Result<PivotOutcome,_>
+  and takes may_delay. When |d| ≤ threshold and may_delay, returns
+  Delayed with NO state mutation (no zeroing, no needs_refinement,
+  no zero count).
+
+Callers updated (all pass may_delay=false to preserve behavior):
+- src/numeric/factorize.rs:192 with comment noting Step 4 will
+  compute is_root and pass !is_root.
+- tests/pivot_rejection.rs: 4 call sites.
+
+New tests in tests/delayed_pivoting.rs (all pass):
+1. factor_frontal_delays_first_pivot_when_may_delay: 4×4 frontal
+   with ncol=2, tiny fully-summed block (1e-14) and strong trailing
+   entries. Traced BK decisions by hand: gamma0=1.0 at r=2, but
+   r>=ncol means r is not fully-summed, so the r-swap path is
+   skipped; LAPACK extension akk*gamma_r fails; 2×2 needs r fully
+   summed. Falls through to last-resort 1×1 which rejects the 1e-14
+   diag. With may_delay=true the kernel breaks on column 0:
+   nelim=0, n_delayed=2, contrib_dim=4, inertia=(0,0,0),
+   !needs_refinement, and contrib matches the raw 4×4 input.
+2. factor_frontal_root_force_accepts_without_delay: same frontal
+   with may_delay=false falls into ForceAccept, producing
+   nelim=2, n_delayed=0, inertia.zero=2, needs_refinement=true.
+   This is the root-supernode contract.
+3. factor_frontal_partial_elim_with_delay: 5×5 ncol=4 block-
+   diagonal split. Columns 0,1 (diag 2.0, 3.0) have gamma0=0 so
+   BK accepts as positive 1×1 without touching try_reject. Column 2
+   fails (gamma0=100 in row 4, not fully-summed). nelim=2,
+   n_delayed=2, inertia.positive=2, contrib_dim=3. Because cols 0,1
+   are block-diagonal wrt cols 2..=4, no rank-1 update touches the
+   trailing 3×3, so contrib equals the raw bottom-right submatrix —
+   this is an independent oracle, not a self-check.
+
+Clippy wrinkle: tried to index L via `ff.l[0 * 5 + 0]` literal form,
+hit identity_op / erasing_op lints. Replaced with a helper closure
+`let l_at = |i, j| ff.l[j * nrow + i]` which reads more naturally
+and dodges the constant folding.
+
+Suite: cargo test all green (163+), cargo check --tests clean,
+cargo clippy -- -D warnings (lib only) clean, cargo fmt --check
+clean. Parity panel still 11/28 passing / 17 ignored — unchanged,
+as expected since may_delay is still false everywhere. Unlocking
+will happen in Step 4 when the multifrontal driver flips
+may_delay=!is_root and Step 5 wires up parent-side delay
+assembly.
+
+Solve-side impact deferred to Step 6: src/numeric/solve.rs still
+reads ff.ncol at lines 97,126,185. Safe today because every caller
+passes may_delay=false (nelim==ncol), but Step 6 must switch solve
+to use ff.nelim before Step 4's flag flip.
+
+Next: Step 4 — wire may_delay through factorize_multifrontal,
+compute is_root per supernode, add n_delayed to ContribBlock and
+NodeFactors so Step 5's parent-side assembly can find delayed
+columns.

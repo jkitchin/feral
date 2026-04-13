@@ -114,6 +114,7 @@ pub fn factorize_multifrontal(
                 frontal_factors: FrontalFactors {
                     nrow: 0,
                     ncol: 0,
+                    nelim: 0,
                     l: Vec::new(),
                     d_diag: Vec::new(),
                     d_subdiag: Vec::new(),
@@ -121,6 +122,7 @@ pub fn factorize_multifrontal(
                     perm_inv: Vec::new(),
                     contrib: Vec::new(),
                     contrib_dim: 0,
+                    n_delayed: 0,
                     inertia: Inertia {
                         positive: 0,
                         negative: 0,
@@ -189,7 +191,10 @@ pub fn factorize_multifrontal(
         // Step 3: Factor the frontal, eliminating only ncol columns.
         // Pivot search is restricted to the first ncol rows. Rows ncol..nrow
         // are never swapped, preserving contribution block row ordering.
-        let ff = factor_frontal(&frontal, ncol, params)?;
+        //
+        // `may_delay = false` in this commit: delayed pivoting through the
+        // parent supernode is wired up in Step 4 of Phase 2.3.
+        let ff = factor_frontal(&frontal, ncol, false, params)?;
 
         // Extract what we need before moving ff
         let node_inertia = ff.inertia.clone();

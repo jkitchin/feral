@@ -390,28 +390,43 @@ pub fn factor(
 pub struct FrontalFactors {
     /// Number of rows in the frontal (nrow).
     pub nrow: usize,
-    /// Number of eliminated columns (ncol <= nrow).
+    /// Attempted column count (the `ncol` argument passed to `factor_frontal`).
+    /// When `may_delay = true` and a pivot is rejected, the kernel may stop
+    /// early with `nelim < ncol`; the leftover `ncol - nelim` columns are
+    /// carried in the contribution block as delayed pivots. For the root
+    /// supernode (`may_delay = false`) this always equals `nelim`.
     pub ncol: usize,
-    /// L factor: nrow × ncol column-major. Unit diagonal (implicit).
-    /// L[j*nrow + i] for i in [0, nrow), j in [0, ncol).
+    /// Actually eliminated column count (`nelim ≤ ncol`). Solve loops use
+    /// `nelim` as the upper bound of the D-block sweep.
+    pub nelim: usize,
+    /// L factor: nrow × nelim column-major. Unit diagonal (implicit).
+    /// L[j*nrow + i] for i in [0, nrow), j in [0, nelim).
     pub l: Vec<f64>,
-    /// D block diagonal (length ncol).
+    /// D block diagonal (length nelim).
     pub d_diag: Vec<f64>,
-    /// D block subdiagonal for 2×2 pivots (length ncol).
+    /// D block subdiagonal for 2×2 pivots (length nelim).
     pub d_subdiag: Vec<f64>,
-    /// BK pivot permutation within the first ncol rows.
+    /// BK pivot permutation within the first nelim rows.
     /// perm[i] = j means original row j was moved to pivot position i.
-    /// Only indices 0..ncol are permuted; ncol..nrow are identity.
+    /// Only indices 0..nelim are permuted; nelim..nrow are identity.
     pub perm: Vec<usize>,
     /// Inverse permutation.
     pub perm_inv: Vec<usize>,
-    /// Schur complement (contribution block): cdim × cdim column-major
-    /// where cdim = nrow - ncol. Lower triangle only.
-    /// S = A22 - L21 * D * L21^T
+    /// Schur complement / delayed-pivot block: cdim × cdim column-major
+    /// where cdim = nrow - nelim. Lower triangle only. For the first
+    /// `ncol - nelim` positions this holds the un-eliminated (delayed)
+    /// fully-summed columns; the remaining `nrow - ncol` positions hold
+    /// the non-fully-summed trailing rows. When `nelim == ncol` the whole
+    /// block is the classic Schur complement S = A22 - L21 * D * L21^T.
     pub contrib: Vec<f64>,
-    /// Dimension of the contribution block.
+    /// Dimension of the contribution block (`nrow - nelim`).
     pub contrib_dim: usize,
-    /// Inertia of the ncol eliminated pivots.
+    /// Number of delayed fully-summed columns in the contribution block,
+    /// i.e. `ncol - nelim`. These occupy positions `0..n_delayed` of the
+    /// contrib block; positions `n_delayed..contrib_dim` are the
+    /// non-fully-summed trailing rows.
+    pub n_delayed: usize,
+    /// Inertia of the `nelim` eliminated pivots.
     pub inertia: Inertia,
     /// Whether ForceAccept fired during factorization.
     pub needs_refinement: bool,
@@ -421,6 +436,24 @@ pub struct FrontalFactors {
     pub zero_tol_2x2: f64,
 }
 
+/// Outcome of an attempt to accept a 1×1 pivot via `try_reject_1x1_frontal`.
+/// The caller uses this to decide whether to continue, force-accept, or
+/// break out of the BK loop (SSIDS-style delayed pivoting).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PivotOutcome {
+    /// Pivot clears the column-relative threshold; do the rank-1 update.
+    Accepted,
+    /// Pivot is below threshold; L column has been zeroed and the zero
+    /// has been counted. Caller increments k and continues. Only produced
+    /// when `may_delay == false`.
+    Rejected,
+    /// Pivot is below threshold; caller should `break` the BK loop and
+    /// let the parent supernode retry this column. Only produced when
+    /// `may_delay == true`. The kernel has not mutated any state for
+    /// the failed pivot.
+    Delayed,
+}
+
 /// Factor a frontal matrix, eliminating only the first `ncol` columns.
 ///
 /// This is the key dense kernel for the multifrontal solver. Unlike `factor()`,
@@ -428,11 +461,27 @@ pub struct FrontalFactors {
 /// are never swapped into pivot positions, preserving their ordering for the
 /// contribution block.
 ///
-/// After eliminating ncol pivots, the Schur complement S = A22 - L21*D*L21^T
-/// is computed and returned. No equilibration is applied.
+/// When `may_delay == true`, the first pivot that fails the column-relative
+/// threshold (or the 2×2 Duff-Reid growth bound) causes the kernel to stop
+/// early: the leftover `(ncol - nelim)` columns are carried forward in the
+/// contribution block as delayed fully-summed columns. The SSIDS `ldlt_tpp`
+/// kernel uses this "break on first failure" model — see
+/// `dev/research/phase-2.3-delayed-pivoting.md` for the reference.
+///
+/// When `may_delay == false` (the root supernode), the existing
+/// `ZeroPivotAction::ForceAccept` path handles failed pivots by zeroing the
+/// L column and counting a zero pivot, exactly as before.
+///
+/// After eliminating `nelim` pivots, the `(nrow - nelim) × (nrow - nelim)`
+/// trailing block of the working matrix is extracted as the contribution
+/// block. When `nelim == ncol` this is the classic Schur complement
+/// `S = A22 - L21 * D * L21^T`. When `nelim < ncol` the first
+/// `(ncol - nelim)` rows/columns of that block are delayed fully-summed
+/// columns. No equilibration is applied.
 pub fn factor_frontal(
     matrix: &crate::dense::matrix::SymmetricMatrix,
     ncol: usize,
+    may_delay: bool,
     params: &BunchKaufmanParams,
 ) -> Result<FrontalFactors, FeralError> {
     matrix.validate()?;
@@ -448,6 +497,7 @@ pub fn factor_frontal(
         return Ok(FrontalFactors {
             nrow,
             ncol: 0,
+            nelim: 0,
             l: Vec::new(),
             d_diag: Vec::new(),
             d_subdiag: Vec::new(),
@@ -455,6 +505,7 @@ pub fn factor_frontal(
             perm_inv: (0..nrow).collect(),
             contrib: matrix.data.clone(),
             contrib_dim: nrow,
+            n_delayed: 0,
             inertia: Inertia {
                 positive: 0,
                 negative: 0,
@@ -498,33 +549,38 @@ pub fn factor_frontal(
                     col_max = v;
                 }
             }
-            let rejected = try_reject_1x1_frontal(
+            let outcome = try_reject_1x1_frontal(
                 &mut a,
                 nrow,
                 k,
                 col_max,
+                may_delay,
                 params,
                 &mut pos,
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
             )?;
-            if !rejected {
-                let d = a[k * nrow + k];
-                // Scale column k below diagonal (including rows ncol..nrow)
-                let inv_d = 1.0 / d;
-                for i in (k + 1)..nrow {
-                    a[k * nrow + i] *= inv_d;
-                }
-                // Rank-1 update on trailing matrix
-                for j in (k + 1)..nrow {
-                    let l_jk = a[k * nrow + j];
-                    for i in j..nrow {
-                        a[j * nrow + i] -= l_jk * d * a[k * nrow + i];
+            match outcome {
+                PivotOutcome::Accepted => {
+                    let d = a[k * nrow + k];
+                    // Scale column k below diagonal (including rows ncol..nrow)
+                    let inv_d = 1.0 / d;
+                    for i in (k + 1)..nrow {
+                        a[k * nrow + i] *= inv_d;
                     }
+                    // Rank-1 update on trailing matrix
+                    for j in (k + 1)..nrow {
+                        let l_jk = a[k * nrow + j];
+                        for i in j..nrow {
+                            a[j * nrow + i] -= l_jk * d * a[k * nrow + i];
+                        }
+                    }
+                    // Keep D on diagonal
+                    a[k * nrow + k] = d;
                 }
-                // Keep D on diagonal
-                a[k * nrow + k] = d;
+                PivotOutcome::Rejected => {}
+                PivotOutcome::Delayed => break,
             }
             k += 1;
             continue;
@@ -573,19 +629,22 @@ pub fn factor_frontal(
 
         if akk >= alpha * gamma0 {
             // 1×1 pivot at k, no swap
-            let rejected = try_reject_1x1_frontal(
+            let outcome = try_reject_1x1_frontal(
                 &mut a,
                 nrow,
                 k,
                 gamma0,
+                may_delay,
                 params,
                 &mut pos,
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
             )?;
-            if !rejected {
-                do_1x1_update(&mut a, nrow, k);
+            match outcome {
+                PivotOutcome::Accepted => do_1x1_update(&mut a, nrow, k),
+                PivotOutcome::Rejected => {}
+                PivotOutcome::Delayed => break,
             }
             k += 1;
             continue;
@@ -601,19 +660,22 @@ pub fn factor_frontal(
         if r_is_fully_summed && arr >= alpha * gamma_r {
             // 1×1 pivot at r, swap r↔k
             swap_rows_cols(&mut a, nrow, k, r, &mut perm);
-            let rejected = try_reject_1x1_frontal(
+            let outcome = try_reject_1x1_frontal(
                 &mut a,
                 nrow,
                 k,
                 gamma_r,
+                may_delay,
                 params,
                 &mut pos,
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
             )?;
-            if !rejected {
-                do_1x1_update(&mut a, nrow, k);
+            match outcome {
+                PivotOutcome::Accepted => do_1x1_update(&mut a, nrow, k),
+                PivotOutcome::Rejected => {}
+                PivotOutcome::Delayed => break,
             }
             k += 1;
             continue;
@@ -621,19 +683,22 @@ pub fn factor_frontal(
 
         if akk * gamma_r >= alpha * gamma0 * gamma0 {
             // 1×1 pivot at k (LAPACK extension), no swap
-            let rejected = try_reject_1x1_frontal(
+            let outcome = try_reject_1x1_frontal(
                 &mut a,
                 nrow,
                 k,
                 gamma0,
+                may_delay,
                 params,
                 &mut pos,
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
             )?;
-            if !rejected {
-                do_1x1_update(&mut a, nrow, k);
+            match outcome {
+                PivotOutcome::Accepted => do_1x1_update(&mut a, nrow, k),
+                PivotOutcome::Rejected => {}
+                PivotOutcome::Delayed => break,
             }
             k += 1;
             continue;
@@ -683,13 +748,15 @@ pub fn factor_frontal(
             let det_floor_fail = absdet <= params.zero_tol_2x2;
 
             if growth_fail || det_floor_fail {
-                // 2×2 rejected. Fall back to a single 1×1 at k with the
-                // column-relative threshold. The second position (k+1)
-                // is left for the next iteration, which may accept it
-                // as 1×1 or fall into this branch again. Without full
-                // delayed pivoting we cannot push rejected pivots to a
-                // parent node; the 1×1 fallback's ForceAccept path is
-                // the only available option.
+                // 2×2 rejected. SSIDS-style delayed pivoting: when
+                // `may_delay == true`, break out immediately so the parent
+                // supernode can retry this pivot with a larger pivot search
+                // window. Otherwise fall back to a single 1×1 at k with the
+                // column-relative threshold, which triggers the existing
+                // ForceAccept path.
+                if may_delay {
+                    break;
+                }
                 if det_floor_fail {
                     match params.on_zero_pivot {
                         ZeroPivotAction::Fail => {
@@ -700,19 +767,22 @@ pub fn factor_frontal(
                         }
                     }
                 }
-                let rejected = try_reject_1x1_frontal(
+                let outcome = try_reject_1x1_frontal(
                     &mut a,
                     nrow,
                     k,
                     gamma0,
+                    may_delay,
                     params,
                     &mut pos,
                     &mut neg,
                     &mut zero,
                     &mut needs_refinement,
                 )?;
-                if !rejected {
-                    do_1x1_update(&mut a, nrow, k);
+                match outcome {
+                    PivotOutcome::Accepted => do_1x1_update(&mut a, nrow, k),
+                    PivotOutcome::Rejected => {}
+                    PivotOutcome::Delayed => break,
                 }
                 k += 1;
                 continue;
@@ -730,34 +800,43 @@ pub fn factor_frontal(
         } else {
             // Can't do 2×2 (r is not fully summed or only 1 column left).
             // Last-resort 1×1 at k with column-relative rejection.
-            let rejected = try_reject_1x1_frontal(
+            let outcome = try_reject_1x1_frontal(
                 &mut a,
                 nrow,
                 k,
                 gamma0,
+                may_delay,
                 params,
                 &mut pos,
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
             )?;
-            if !rejected {
-                do_1x1_update(&mut a, nrow, k);
+            match outcome {
+                PivotOutcome::Accepted => do_1x1_update(&mut a, nrow, k),
+                PivotOutcome::Rejected => {}
+                PivotOutcome::Delayed => break,
             }
             k += 1;
         }
     }
 
-    // Extract L (nrow × ncol), D diagonal, and contribution block
-    let mut l = vec![0.0; nrow * ncol];
-    let mut d_diag = vec![0.0; ncol];
+    // At the break point, `k` is the number of successfully eliminated
+    // pivots. When `may_delay == false` this equals `ncol`; when
+    // `may_delay == true` and a pivot was delayed, `nelim < ncol`.
+    let nelim = k;
+    let n_delayed = ncol - nelim;
+
+    // Extract L (nrow × nelim), D diagonal, and contribution block
+    let mut l = vec![0.0; nrow * nelim];
+    let mut d_diag = vec![0.0; nelim];
 
     let mut j = 0;
-    while j < ncol {
+    while j < nelim {
         d_diag[j] = a[j * nrow + j];
         l[j * nrow + j] = 1.0; // unit diagonal
 
-        if j + 1 < ncol && subdiag[j] != 0.0 {
+        if j + 1 < nelim && subdiag[j] != 0.0 {
             // 2×2 block
             d_diag[j + 1] = a[(j + 1) * nrow + (j + 1)];
             l[(j + 1) * nrow + (j + 1)] = 1.0;
@@ -774,12 +853,15 @@ pub fn factor_frontal(
         }
     }
 
-    // Extract contribution block: trailing (nrow-ncol) × (nrow-ncol) of a
-    let cdim = nrow - ncol;
+    // Extract contribution block: trailing (nrow-nelim) × (nrow-nelim) of a.
+    // When `nelim < ncol` the first `n_delayed` rows/columns of this block
+    // are delayed fully-summed columns; the remaining positions hold the
+    // non-fully-summed trailing rows exactly as before.
+    let cdim = nrow - nelim;
     let mut contrib = vec![0.0; cdim * cdim];
     for cj in 0..cdim {
         for ci in cj..cdim {
-            contrib[cj * cdim + ci] = a[(ncol + cj) * nrow + (ncol + ci)];
+            contrib[cj * cdim + ci] = a[(nelim + cj) * nrow + (nelim + ci)];
         }
     }
 
@@ -791,13 +873,15 @@ pub fn factor_frontal(
     Ok(FrontalFactors {
         nrow,
         ncol,
+        nelim,
         l,
         d_diag,
-        d_subdiag: subdiag[..ncol].to_vec(),
+        d_subdiag: subdiag[..nelim].to_vec(),
         perm,
         perm_inv,
         contrib,
         contrib_dim: cdim,
+        n_delayed,
         inertia: Inertia::new(pos, neg, zero),
         needs_refinement,
         zero_tol: params.zero_tol,
@@ -805,28 +889,40 @@ pub fn factor_frontal(
     })
 }
 
-/// Apply column-relative pivot threshold for a frontal 1×1 candidate at
-/// position `k` with column max `col_max`. Returns `true` when the pivot
-/// is rejected (counted as zero via ForceAccept and the L column zeroed
-/// so the caller's rank-1 update is a no-op), `false` when the pivot is
-/// accepted and the caller should proceed with `do_1x1_update`. Returns
-/// `Err(NumericallyRankDeficient)` under `ZeroPivotAction::Fail`.
+/// Apply the column-relative pivot threshold to a frontal 1×1 candidate at
+/// position `k` with column max `col_max`. Returns:
+///
+/// - `Accepted` — pivot clears the threshold; caller should apply the
+///   rank-1 update.
+/// - `Rejected` — pivot is below threshold AND `may_delay == false`; the
+///   L column has been zeroed and a zero pivot has been counted via
+///   `ZeroPivotAction::ForceAccept`. Caller increments `k` and continues.
+/// - `Delayed` — pivot is below threshold AND `may_delay == true`; no
+///   state has been mutated. Caller should break the BK loop so the parent
+///   supernode can retry this column.
+///
+/// `ZeroPivotAction::Fail` short-circuits to `Err(NumericallyRankDeficient)`
+/// regardless of `may_delay`.
 #[allow(clippy::too_many_arguments)]
 fn try_reject_1x1_frontal(
     a: &mut [f64],
     nrow: usize,
     k: usize,
     col_max: f64,
+    may_delay: bool,
     params: &BunchKaufmanParams,
     pos: &mut usize,
     neg: &mut usize,
     zero: &mut usize,
     needs_refinement: &mut bool,
-) -> Result<bool, FeralError> {
+) -> Result<PivotOutcome, FeralError> {
     let d = a[k * nrow + k];
     let threshold = (params.pivot_threshold * col_max).max(params.zero_tol);
 
     if d.abs() <= threshold {
+        if may_delay {
+            return Ok(PivotOutcome::Delayed);
+        }
         match params.on_zero_pivot {
             ZeroPivotAction::ForceAccept => {
                 *needs_refinement = true;
@@ -842,7 +938,7 @@ fn try_reject_1x1_frontal(
         // Zero the diagonal: solve skips positions with |d| <= zero_tol,
         // so setting to 0 guarantees this position is skipped cleanly.
         a[k * nrow + k] = 0.0;
-        return Ok(true);
+        return Ok(PivotOutcome::Rejected);
     }
 
     // Accept: sign-based inertia.
@@ -851,7 +947,7 @@ fn try_reject_1x1_frontal(
     } else {
         *neg += 1;
     }
-    Ok(false)
+    Ok(PivotOutcome::Accepted)
 }
 
 /// 1×1 rank-1 update: update columns k+1..nrow after eliminating column k.

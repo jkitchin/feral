@@ -91,7 +91,7 @@ fn threshold_rejects_tiny_1x1_pivot() {
         pivot_threshold: 0.0,
         ..BunchKaufmanParams::default()
     };
-    let ff0 = factor_frontal(&mat, 2, &params0).expect("factor_frontal u=0");
+    let ff0 = factor_frontal(&mat, 2, false, &params0).expect("factor_frontal u=0");
     let n_zero_baseline = n_zero_pivots_frontal(&ff0);
 
     // Case 2: pivot_threshold = 0.01 → tiny pivot rejected, counted as
@@ -102,7 +102,7 @@ fn threshold_rejects_tiny_1x1_pivot() {
         pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
     };
-    let ff1 = factor_frontal(&mat, 2, &params1).expect("factor_frontal u=0.01");
+    let ff1 = factor_frontal(&mat, 2, false, &params1).expect("factor_frontal u=0.01");
     let n_zero_thresholded = n_zero_pivots_frontal(&ff1);
 
     assert!(
@@ -501,8 +501,9 @@ fn duff_reid_2x2_growth_bound() {
     };
 
     // Use factor_frontal with ncol=4 to avoid internal equilibration.
-    let ff_accept = factor_frontal(&mat, 4, &params_accept).expect("u=0.01");
-    let ff_reject = factor_frontal(&mat, 4, &params_reject).expect("u=0.9");
+    // may_delay=false so ForceAccept still fires on rejected pivots.
+    let ff_accept = factor_frontal(&mat, 4, false, &params_accept).expect("u=0.01");
+    let ff_reject = factor_frontal(&mat, 4, false, &params_reject).expect("u=0.9");
 
     let z_accept = n_zero_pivots_frontal(&ff_accept);
     let z_reject = n_zero_pivots_frontal(&ff_reject);
