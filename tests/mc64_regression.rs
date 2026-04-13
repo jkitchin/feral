@@ -32,6 +32,13 @@ use feral::{read_mtx, read_sidecar, BunchKaufmanParams, CscMatrix, ZeroPivotActi
 fn ldlt_params() -> BunchKaufmanParams {
     BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
+        // Phase 2.2.2: MC64 scales A to D*A*D with unit row/col norms,
+        // which shrinks the worst pivots below the absolute zero_tol
+        // floor. The column-relative MUMPS/SSIDS default u=0.01
+        // rejects pivots that are >100x smaller than their column max
+        // and flushes them through ForceAccept, which is the designed
+        // interaction with the equilibrated matrix.
+        pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
     }
 }

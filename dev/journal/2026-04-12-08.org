@@ -1,0 +1,120 @@
+* 14:00 :phase-2.2.2:pivot-rejection:
+  Started Phase 2.2.2 Steps 1-6: column-relative pivot threshold for
+  the ACOPP30 MC64 regression. Read the plan
+  (dev/plans/scaling-aware-pivot-rejection.md) and the research note
+  (dev/research/scaling-aware-pivot-rejection.md). Verified the
+  MUMPS 2×2 growth bound at ref/mumps/src/dfac_front_aux.F
+  lines 1599-1606:
+    (|a22|*RMAX + AMAX*TMAX)*UULOC > |det| → reject
+    (|a11|*TMAX + AMAX*RMAX)*UULOC > |det| → reject
+  where RMAX, TMAX are col k and col k+1 maxes *beyond* the 2×2
+  block rows, AMAX = |d21| is the cross term, UULOC = u = 0.01
+  default. Both inequalities must pass for the 2×2 to be accepted.
+
+* 14:30 :phase-2.2.2:step-1:
+  Step 1 complete. Added pivot_threshold: f64 to BunchKaufmanParams
+  with default 0.0 (Phase 1 compat). All 27 existing construction
+  sites use ..default() spread syntax so nothing else changed.
+  Evidence: cargo check --tests --examples clean.
+
+* 14:45 :phase-2.2.2:step-2:
+  Step 2 complete. Wrote tests/pivot_rejection.rs with 4 initial
+  tests. Red gate confirmed: 2 pass (threshold_inactive_on_*,
+  threshold_zero_reproduces_default) and 2 fail as expected
+  (threshold_rejects_tiny_1x1_pivot, duff_reid_2x2_growth_bound).
+
+  First surprise: the dense `factor` path applies internal
+  infinity-norm equilibration BEFORE BK, which rescales the test-A
+  matrix so the tiny pivot never survives to the 1×1 decision.
+  Hand-traced the equilibrated matrix: the scaled 3×3 has pivots
+  [1.0, -0.999, 1.36], inertia (2,1,0), no zero pivots. So the
+  dense `factor` path doesn't exercise the threshold on my original
+  test-A matrix.
+
+  Fix: rewrite the test to call factor_frontal() directly with a
+  3×3 frontal where ncol=2 forces the fall-back 1×1 path. Design
+  a matrix where
+    - col 0 gamma0 = 1.0 (row 2 in contribution block)
+    - a[0,0] = 1e-10, a[1,0] = 1e-10 (both in fully-summed block)
+    - r = 2 NOT fully-summed, so the r-swap 1×1 is skipped
+    - akk*gamma_r = 1e-10 < alpha*gamma0^2 = 0.6404 → LAPACK fails
+    - 2×2 path: r_is_fully_summed=false → fall-back 1×1 fires
+  This reaches the new try_reject_1x1_frontal helper cleanly.
+
+* 15:00 :phase-2.2.2:step-3:
+  Step 3 complete. Implemented the column-relative 1×1 threshold:
+  - Added try_reject_1x1_frontal() helper: on rejection, zeros
+    both the L column (below diagonal) AND the diagonal so the
+    subsequent rank-1 update is a no-op and the solve sees
+    |d| <= zero_tol and skips the division.
+  - Modified do_1x1_pivot() to take a col_max parameter and apply
+    the same threshold (for the dense factor() path).
+  - Updated the 5 factor_frontal sites (remaining==1, 494, 517,
+    534, and 597 fall-back) and the 3 factor sites (179, 203, 224).
+
+  Second surprise: my first implementation only zeroed the L column
+  but left the diagonal unchanged. That caused the solve to still
+  divide by the tiny pivot because `|d_diag[k]| > zero_tol` was
+  still true. Fix: also set a[k*n+k] = 0 on rejection. This makes
+  solve's existing skip-zero-pivots check catch the rejected pivot.
+
+  Evidence:
+  - cargo test --no-fail-fast: 145 pass, 1 fail (duff_reid, Step 4)
+  - pivot_rejection.rs: 4/5 pass (Tests A, A-dense, B, C)
+  - threshold_consistency.rs all 5 pass (no regression on the
+    factor_inertia_force_accept_implies_solve_skip_invariant)
+
+* 15:45 :phase-2.2.2:step-4:
+  Step 4 complete. Added the Duff-Reid 2×2 growth bound inline at
+  both factor_frontal and factor 2×2 acceptance sites. Computes
+  RMAX, TMAX by scanning rows k+2..nrow of columns k, k+1, with
+  AMAX = |d21|. On rejection, falls back to a single 1×1 at k;
+  the k+1 position is revisited on the next iteration.
+
+  Third surprise: my first Test D (u_accept=0.01, u_reject=0.1)
+  had a matrix where the post-swap 2×2 had |det|=0.085 and LHS2 =
+  0.12*u, so the rejection equality was u* = 0.708 — far above
+  0.1. Had to bump u_reject to 0.9 to cross the threshold. The
+  hand-trace:
+    k=0: col 0 gamma0=0.3 at row 2, akk=0.1, BK 1×1 fails.
+    r=2, gamma_r=0.3, arr=0.05, swap-1×1 fails.
+    LAPACK: 0.1*0.3=0.03 < 0.6404*0.09=0.0576 → fails.
+    2×2 with r=2, swap positions {1,2}. New 2×2 block:
+      d11=0.1, d21=0.3, d22=0.05, |det|=0.085
+    RMAX=0.3, TMAX=0.3, AMAX=0.3.
+    LHS2 = (0.1*0.3 + 0.3*0.3)*u = 0.12*u > 0.085 iff u > 0.708.
+
+  Evidence:
+  - cargo test --test pivot_rejection: 5/5 pass
+  - cargo test --no-fail-fast: 146 pass, 0 fail, 7 ignored
+
+* 16:15 :phase-2.2.2:step-5:
+  Step 5 complete. Opted into pivot_threshold = 0.01 at the two
+  MC64 callers:
+  - tests/mc64_regression.rs::ldlt_params()
+  - src/bin/bench.rs::params_kkt (used by both dense and sparse
+    KKT benchmarks — dense is fine because internal equilibration
+    still produces unit-norm columns where u=0.01 is the designed
+    rejection level)
+
+  BunchKaufmanParams::default() stays at pivot_threshold = 0.0 per
+  the plan's conservative choice — every test that currently relies
+  on forced acceptance continues to work unchanged.
+
+  Evidence:
+  - cargo test --no-fail-fast: 146 pass, 0 fail, 7 ignored
+    (no change from Step 4 because mc64_regression tests are
+    #[ignore]d and bench is not part of the test suite)
+  - cargo clippy -- -D warnings clean
+  - cargo fmt --check clean
+
+* 16:30 :phase-2.2.2:step-6:
+  Step 6 complete (sweep). Final numbers:
+    141 pre-phase-2.2.2 tests: unchanged (all pass)
+      5 new pivot_rejection tests: all pass
+    ---
+    146 pass, 0 fail, 7 ignored
+
+  Ready for Steps 7-9 (un-ignore mc64_regression and validation
+  sweep) — those are handled by a separate agent per the task
+  brief. Stopping here.

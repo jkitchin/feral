@@ -400,6 +400,12 @@ fn main() {
     let params_spd = BunchKaufmanParams::default();
     let params_kkt = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
+        // Phase 2.2.2: the sparse KKT path runs MC64 scaling by
+        // default (ScalingStrategy::Mc64Symmetric), which places the
+        // worst pivots just below the absolute zero_tol floor. The
+        // column-relative u=0.01 threshold (MUMPS CNTL(1), SSIDS
+        // options%u default) rejects them cleanly via ForceAccept.
+        pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
     };
 
