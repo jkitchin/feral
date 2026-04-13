@@ -201,6 +201,7 @@ pub fn factor(
                 &mut a,
                 n,
                 k,
+                gamma0,
                 params,
                 &mut pos,
                 &mut neg,
@@ -226,6 +227,7 @@ pub fn factor(
                 &mut a,
                 n,
                 k,
+                gamma_r,
                 params,
                 &mut pos,
                 &mut neg,
@@ -246,6 +248,7 @@ pub fn factor(
                 &mut a,
                 n,
                 k,
+                gamma0,
                 params,
                 &mut pos,
                 &mut neg,
@@ -439,32 +442,43 @@ pub fn factor_frontal(
         let remaining = ncol - k;
 
         if remaining == 1 {
-            // Last eliminated pivot: always 1×1
-            let d = a[k * nrow + k];
-            count_1x1_inertia(
-                d,
+            // Last eliminated pivot: always 1×1. Compute the column max
+            // over rows (k+1..nrow) for the column-relative threshold.
+            let mut col_max = 0.0f64;
+            for i in (k + 1)..nrow {
+                let v = a[k * nrow + i].abs();
+                if v > col_max {
+                    col_max = v;
+                }
+            }
+            let rejected = try_reject_1x1_frontal(
+                &mut a,
+                nrow,
+                k,
+                col_max,
                 params,
                 &mut pos,
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
             )?;
-            // Scale column k below diagonal (including rows ncol..nrow)
-            if d.abs() > 0.0 {
+            if !rejected {
+                let d = a[k * nrow + k];
+                // Scale column k below diagonal (including rows ncol..nrow)
                 let inv_d = 1.0 / d;
                 for i in (k + 1)..nrow {
                     a[k * nrow + i] *= inv_d;
                 }
-            }
-            // Rank-1 update on trailing matrix
-            for j in (k + 1)..nrow {
-                let l_jk = a[k * nrow + j];
-                for i in j..nrow {
-                    a[j * nrow + i] -= l_jk * d * a[k * nrow + i];
+                // Rank-1 update on trailing matrix
+                for j in (k + 1)..nrow {
+                    let l_jk = a[k * nrow + j];
+                    for i in j..nrow {
+                        a[j * nrow + i] -= l_jk * d * a[k * nrow + i];
+                    }
                 }
+                // Keep D on diagonal
+                a[k * nrow + k] = d;
             }
-            // Set L column: diagonal = 1, above diagonal = 0
-            a[k * nrow + k] = d; // keep D on diagonal
             k += 1;
             continue;
         }
@@ -512,16 +526,20 @@ pub fn factor_frontal(
 
         if akk >= alpha * gamma0 {
             // 1×1 pivot at k, no swap
-            let d = a[k * nrow + k];
-            count_1x1_inertia(
-                d,
+            let rejected = try_reject_1x1_frontal(
+                &mut a,
+                nrow,
+                k,
+                gamma0,
                 params,
                 &mut pos,
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
             )?;
-            do_1x1_update(&mut a, nrow, k);
+            if !rejected {
+                do_1x1_update(&mut a, nrow, k);
+            }
             k += 1;
             continue;
         }
@@ -536,32 +554,40 @@ pub fn factor_frontal(
         if r_is_fully_summed && arr >= alpha * gamma_r {
             // 1×1 pivot at r, swap r↔k
             swap_rows_cols(&mut a, nrow, k, r, &mut perm);
-            let d = a[k * nrow + k];
-            count_1x1_inertia(
-                d,
+            let rejected = try_reject_1x1_frontal(
+                &mut a,
+                nrow,
+                k,
+                gamma_r,
                 params,
                 &mut pos,
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
             )?;
-            do_1x1_update(&mut a, nrow, k);
+            if !rejected {
+                do_1x1_update(&mut a, nrow, k);
+            }
             k += 1;
             continue;
         }
 
         if akk * gamma_r >= alpha * gamma0 * gamma0 {
             // 1×1 pivot at k (LAPACK extension), no swap
-            let d = a[k * nrow + k];
-            count_1x1_inertia(
-                d,
+            let rejected = try_reject_1x1_frontal(
+                &mut a,
+                nrow,
+                k,
+                gamma0,
                 params,
                 &mut pos,
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
             )?;
-            do_1x1_update(&mut a, nrow, k);
+            if !rejected {
+                do_1x1_update(&mut a, nrow, k);
+            }
             k += 1;
             continue;
         }
@@ -595,18 +621,22 @@ pub fn factor_frontal(
             do_2x2_update(&mut a, nrow, k, d11, d21, d22);
             k += 2;
         } else {
-            // Can't do 2×2 (r is not fully summed or only 1 column left)
-            // Fall back to 1×1 with ForceAccept
-            let d = a[k * nrow + k];
-            count_1x1_inertia(
-                d,
+            // Can't do 2×2 (r is not fully summed or only 1 column left).
+            // Last-resort 1×1 at k with column-relative rejection.
+            let rejected = try_reject_1x1_frontal(
+                &mut a,
+                nrow,
+                k,
+                gamma0,
                 params,
                 &mut pos,
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
             )?;
-            do_1x1_update(&mut a, nrow, k);
+            if !rejected {
+                do_1x1_update(&mut a, nrow, k);
+            }
             k += 1;
         }
     }
@@ -666,6 +696,55 @@ pub fn factor_frontal(
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
     })
+}
+
+/// Apply column-relative pivot threshold for a frontal 1×1 candidate at
+/// position `k` with column max `col_max`. Returns `true` when the pivot
+/// is rejected (counted as zero via ForceAccept and the L column zeroed
+/// so the caller's rank-1 update is a no-op), `false` when the pivot is
+/// accepted and the caller should proceed with `do_1x1_update`. Returns
+/// `Err(NumericallyRankDeficient)` under `ZeroPivotAction::Fail`.
+#[allow(clippy::too_many_arguments)]
+fn try_reject_1x1_frontal(
+    a: &mut [f64],
+    nrow: usize,
+    k: usize,
+    col_max: f64,
+    params: &BunchKaufmanParams,
+    pos: &mut usize,
+    neg: &mut usize,
+    zero: &mut usize,
+    needs_refinement: &mut bool,
+) -> Result<bool, FeralError> {
+    let d = a[k * nrow + k];
+    let threshold = (params.pivot_threshold * col_max).max(params.zero_tol);
+
+    if d.abs() <= threshold {
+        match params.on_zero_pivot {
+            ZeroPivotAction::ForceAccept => {
+                *needs_refinement = true;
+                *zero += 1;
+            }
+            ZeroPivotAction::Fail => return Err(FeralError::NumericallyRankDeficient),
+        }
+        // Zero the L column (below the diagonal) so the subsequent
+        // rank-1 update contributes nothing.
+        for i in (k + 1)..nrow {
+            a[k * nrow + i] = 0.0;
+        }
+        // Zero the diagonal: solve skips positions with |d| <= zero_tol,
+        // so setting to 0 guarantees this position is skipped cleanly.
+        a[k * nrow + k] = 0.0;
+        return Ok(true);
+    }
+
+    // Accept: sign-based inertia.
+    if d > 0.0 {
+        *pos += 1;
+    } else {
+        *neg += 1;
+    }
+    Ok(false)
 }
 
 /// 1×1 rank-1 update: update columns k+1..nrow after eliminating column k.
@@ -821,11 +900,20 @@ fn swap_rows_cols(a: &mut [f64], n: usize, p: usize, q: usize, perm: &mut [usize
 /// Perform a 1×1 pivot at position k: compute L column, rank-1 update,
 /// and fused argmax of the next column (Section 6 of research note).
 /// Returns (gamma0_next, r_next) for the next pivot step's column.
+///
+/// `col_max` is the maximum off-diagonal magnitude in the column being
+/// used as pivot (gamma0 for k-no-swap, gamma_r for k↔r swap). The pivot
+/// is rejected via the ForceAccept path whenever
+/// `|d| < max(zero_tol, pivot_threshold * col_max)`. This matches
+/// MUMPS dfac_front_aux.F:1494-1495 and SSIDS options%u semantics:
+/// the pivot must dominate its column by at least 1/u, otherwise the
+/// rank-1 update would amplify rounding by ~1/|d| per position.
 #[allow(clippy::too_many_arguments)]
 fn do_1x1_pivot(
     a: &mut [f64],
     n: usize,
     k: usize,
+    col_max: f64,
     params: &BunchKaufmanParams,
     pos: &mut usize,
     neg: &mut usize,
@@ -833,14 +921,38 @@ fn do_1x1_pivot(
     needs_refinement: &mut bool,
 ) -> Result<(f64, usize), FeralError> {
     let d = a[k * n + k];
-    count_1x1_inertia(d, params, pos, neg, zero, needs_refinement)?;
+    let threshold = (params.pivot_threshold * col_max).max(params.zero_tol);
 
-    if d.abs() <= params.zero_tol {
-        // Near-zero pivot accepted (ForceAccept) — set L column to zero
+    if d.abs() <= threshold {
+        // Pivot rejected (either absolute floor or column-relative
+        // Duff-Reid/MUMPS threshold). Route through the existing
+        // ForceAccept/Fail zero-pivot path so the inertia count is
+        // consistent, then zero the L column so the rank-1 update
+        // below contributes nothing.
+        match params.on_zero_pivot {
+            ZeroPivotAction::ForceAccept => {
+                *needs_refinement = true;
+                *zero += 1;
+            }
+            ZeroPivotAction::Fail => return Err(FeralError::NumericallyRankDeficient),
+        }
+        // Zero the L column
         for i in (k + 1)..n {
             a[k * n + i] = 0.0;
         }
+        // Also zero the diagonal so solve's `|d| > zero_tol` check skips
+        // this position. Preserving the tiny original would otherwise
+        // leave `|d| > zero_tol` true for pivots just above the absolute
+        // floor but below u*col_max, causing solve to divide by them.
+        a[k * n + k] = 0.0;
         return Ok((0.0, k + 2));
+    }
+
+    // Accept: count inertia by sign.
+    if d > 0.0 {
+        *pos += 1;
+    } else {
+        *neg += 1;
     }
 
     let d_inv = 1.0 / d;
