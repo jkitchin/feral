@@ -104,27 +104,6 @@ pub fn factorize_multifrontal(
     // Storage for contribution blocks (one per supernode, freed after parent assembly)
     let mut contrib_blocks: Vec<Option<ContribBlock>> = (0..n_snodes).map(|_| None).collect();
 
-    // Phase 2.3 Step 4: compute `is_root[k]` once. A supernode is a
-    // root iff no other supernode lists it as a child. The etree may
-    // have multiple roots on disconnected matrices, so this is a set,
-    // not a single index. Delays propagate to a parent — a root has
-    // no parent, so the root must force-accept unstable pivots rather
-    // than delay them (there is nowhere to delay to). This matches
-    // the SSIDS / MUMPS root-node contract.
-    let is_root = {
-        let mut has_parent = vec![false; n_snodes];
-        for snode in &symbolic.supernodes {
-            for &child in &snode.children {
-                has_parent[child] = true;
-            }
-        }
-        let mut v = vec![false; n_snodes];
-        for k in 0..n_snodes {
-            v[k] = !has_parent[k];
-        }
-        v
-    };
-
     let mut node_factors: Vec<NodeFactors> = Vec::with_capacity(n_snodes);
     let mut total_inertia = Inertia {
         positive: 0,
@@ -228,14 +207,20 @@ pub fn factorize_multifrontal(
         // Pivot search is restricted to the first ncol rows. Rows ncol..nrow
         // are never swapped, preserving contribution block row ordering.
         //
-        // Phase 2.3 Step 4: non-root supernodes may delay unstable pivots
-        // up to their parent. Roots have nowhere to delay to and must
-        // force-accept. With `pivot_threshold = 0.0` (the current default),
-        // the delay path is unreachable anyway because no column-relative
-        // test ever fails — this plumbing only starts firing once Step 7
-        // restores `pivot_threshold = 0.01` for sparse callers.
-        let may_delay = !is_root[snode_idx];
-        let ff = factor_frontal(&frontal, ncol, may_delay, params)?;
+        // Phase 2.3 Step 4: `may_delay` stays `false` at this step.
+        // The original plan's assumption — "only `pivot_threshold > 0`
+        // can trigger delays" — was wrong: the 2×2 Duff-Reid growth
+        // bound and the det-floor stability checks reject pivots
+        // independently of the column-relative threshold and DO
+        // produce the `Delayed` outcome under `may_delay = true`.
+        // Enabling delays before Step 5's parent-side assembly lands
+        // causes bench sparse validation (SWOPF et al) to hit the
+        // `debug_assert(n_delayed == 0)` on a legitimate growth-bound
+        // rejection. The `is_root` computation and flag flip to
+        // `!is_root[snode_idx]` are deferred to Step 5's commit,
+        // which will also correctly unpermute and scatter the
+        // delayed columns via `ContribBlock::n_delayed`.
+        let ff = factor_frontal(&frontal, ncol, false, params)?;
 
         // Extract what we need before moving ff
         let node_inertia = ff.inertia.clone();
