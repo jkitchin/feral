@@ -267,3 +267,57 @@ by Phase 2.2.2. The broader MC64 residual gap remains open. Phase
 promote feral to "competitive on KKT matrices"; that claim still
 waits on Phase 2.3. Validation evidence:
 `dev/validation/phase-2.2.2-pivot-rejection.md`.
+
+---
+
+## 2026-04-13 — Phase 2.2.3 adjacency fix; drop bench nemin override
+
+**Decision.** In `src/symbolic/supernode.rs::find_supernodes`, the
+step-2 amalgamation loop now refuses to merge a child supernode
+into its parent unless the child's effective column range is
+immediately followed by the parent's column range in the postorder
+column numbering (`snode_first_col[root_s] + snode_ncols[root_s] ==
+snode_first_col[root_p]`). This is the minimal correctness fix
+for a bug where the loop updated `snode_first_col[root_p] = min(...)`
+without checking contiguity, producing merged supernodes that
+claimed a contiguous column range but actually owned
+non-contiguous columns. Variables were eliminated multiple times
+with inconsistent state in the downstream code paths
+(`build_row_indices`, the A-scan, `elim_cols` construction).
+
+Full analysis: `dev/research/phase-2.2.3-plateau.md`,
+`dev/validation/phase-2.2.3-supernode-adjacency.md`.
+
+**Second decision: drop the `nemin=10000` override from
+`src/bin/bench.rs`.** That override (commit `81e686c`, "Multi-
+supernode solve has a known issue") used `nemin=10000` to force
+so much amalgamation under the buggy loop that the claimed column
+range became `[0, n)` — trivially contiguous — producing a
+degenerate configuration where the sparse path reduced to a
+dense LDLᵀ wrapped in sparse plumbing. That configuration is what
+produced the historical 99.8% sparse residual pass rate on the
+153k–154k KKT corpus. **The 99.8% rate is obsolete and should
+never be cited again.** The honest Phase 2.2.3 rate under the
+default `nemin=32` is 74.2% inertia match / 77.9% residual pass,
+with a worst residual of 2.32e+12 on HYDCAR20_0000. The 22-point
+drop reveals the real surface area of the multi-supernode code
+path and defines the correctness-closing work for Phases 2.3–2.4.
+
+**Why the minimal fix over the SSIDS-style renumbering.** SSIDS
+handles non-adjacent sibling merging by emitting a permutation
+`sperm` that renumbers columns so every amalgamated supernode is
+contiguous by construction (`src/core_analyse.f90:644-685`). This
+is strictly better for fill and flops on arrow-like trees and
+would probably close the ACOPP30 regression this session
+introduced. But it is a substantially larger refactor touching
+the symbolic analysis pipeline end-to-end, and shipping a
+correct-but-slower supernode amalgamation today unblocks three
+plateau matrices (CHWIRUT1, CRESC100, CRESC132) that now all
+beat the canonical MUMPS oracle. Logged as follow-up.
+
+**Commitment.** The README and any future user-facing documents
+should cite the post-Phase-2.2.3 numbers, not the historical
+99.8%. Phase 2.3 (delayed pivoting) remains on the roadmap and
+is expected to help ACOPP30; the SSIDS-style renumbering is
+logged as Phase 2.2.4 or as prerequisite work for Phase 2.3. No
+test tolerances were loosened. All 146 non-ignored tests pass.
