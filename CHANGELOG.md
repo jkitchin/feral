@@ -85,6 +85,22 @@ above for the limits of this claim.
   0.01` config is scoped to `params_kkt_sparse` and
   `BunchKaufmanParams::default()` stays at `0.0`. See
   `dev/sessions/2026-04-13-02.md`, `03.md`, and `04.md`.
+- **Phase 2.3 — refinement termination fix**: `solve_sparse_refined`
+  (and `dense::solve_refined`) now iterate up to 10 steps (was 3)
+  and terminate on a residual-based criterion `||r|| <
+  eps*sqrt(n)*||b||` instead of the old `|dx|/|x|` threshold.
+  Under `ForceAccept` factorizations the trajectory is non-
+  monotone — corrections produce small `dx` without reducing `r`,
+  so `dx` is a false convergence signal and the old loop exited
+  before reaching the machine-precision basin. The `||b|| = 0`
+  case is handled with an absolute threshold; `||b||` is NOT
+  clamped to a floor, which would defeat the relative criterion
+  on small-RHS matrices (e.g. CERI651C with `||b|| = 3.238e-5`).
+  Evidence: parity panel `22/28 → 27/28` (un-ignored AVION2_0510,
+  CERI651C_0746, CERI651ELS_1482, HAHN1_0004, MEYER3NE_0253),
+  sparse residual pass `154237 → 154329`, worst sparse residual
+  `3.22e-4 → 2.50e-4`. Only SSI_2597 remains ignored as a
+  pathological factorization-level case deferred to Phase 2.4.
 - **Phase 2.2.2 — ACOPP30 MC64 regression**: Phase 2.2.1 MC64
   scaling improved 6 of 7 sanity-panel matrices but pushed
   ACOPP30_0000 from a pre-MC64 residual of `2.84e+16` to

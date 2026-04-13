@@ -172,3 +172,52 @@ next session: compare =solve_sparse_refined= against MUMPS
 HAHN1, MEYER3NE, AVION2 are at more reasonable ratios (1–13×)
 and may be margin failures where a slightly-more-aggressive
 refinement round or tighter column scaling would close them.
+
+* 17:40 :phase-2.3:refinement:triage:
+Triaged the 6 residual-margin failures with a new
+=examples/triage_residual_margin.rs= that runs a 10-step manual
+refinement loop and prints the per-step residual trajectory.
+Shared cause: feral exits at step 3 on the dx-based threshold
+=|dx|/|x| < eps*sqrt(n)=, but the trajectory is non-monotone
+under ForceAccept and the machine-precision basin is at step
+~4–6. Evidence — CERI651C_0746 trajectory:
+  4.29e-13  4.29e-13  4.29e-13  *2.67e-17*  8.57e-13 ...
+Step 3 looks converged by dx (since x barely changes) but the
+residual drops by 4 orders of magnitude at step 4. Best-iterate
+tracking captures it; dx-based stop throws it away. Conclusion:
+the convergence criterion is wrong, not the iteration count
+alone.
+
+* 17:52 :phase-2.3:refinement:fix:
+Rewrote =solve_sparse_refined= termination. Bumped =max_steps=
+3→10 (matches MUMPS ICNTL(10) default). Replaced dx-based stop
+with residual-based stop: =||r|| < eps*sqrt(n)*||b||=, divergence
+guard intact. First attempt clamped =||b||= to floor 1.0 for the
+zero-=b= case, which broke CERI651C: its =||b|| = 3.238e-5=, the
+clamp made the target absolute (5.87e-16), the initial
+=r_norm = 1.388e-17= satisfied it at step 0, loop exited without
+iterating. Fixed by handling =||b|| = 0= as a separate absolute
+threshold in a closure, preserving the relative criterion for
+=||b|| > 0=. Same fix applied to =src/dense/solve.rs=.
+
+* 18:05 :phase-2.3:parity:validation:
+Full parity sweep with refinement fix: 5/6 triage cases close.
+AVION2_0510, HAHN1_0004, MEYER3NE_0253, CERI651C_0746,
+CERI651ELS_1482 all un-ignored. SSI_2597 stays ignored — its
+extended trajectory is stuck at 1.80e-13 regardless of step
+count (factorization-limited, not refinement-limited). SSI is
+pathological: n=3, contains a denormal =-2.96e-322=, dynamic
+range ~10^331. Deferred to Phase 2.4.
+
+Parity count: 22/28 → 27/28.
+
+* 18:14 :phase-2.3:bench:numbers:
+Full bench with refinement fix. Deltas vs earlier Session 04:
+- Sparse residual pass: 154237 → 154329 (+92)
+- Worst sparse residual: 3.22e-4 → 2.50e-4
+- Sparse inertia match: 153009 (unchanged, refinement is
+  orthogonal to inertia)
+- Dense worst (ACOPP30_0026 = 2.80e-2) unchanged — dense tail
+  is scaling-limited, not refinement-limited.
+
+Commit =ed07ee3=: Phase 2.3 refinement-termination fix.
