@@ -159,31 +159,68 @@ pub fn find_supernodes(
                 continue; // already merged into another node
             }
 
-            let child_ncol = effective_ncol(s, &snode_ncols, &merged_into);
-            let parent_ncol = effective_ncol(p, &snode_ncols, &merged_into);
+            let root_s = find_root(s, &merged_into);
+            let root_p = find_root(p, &merged_into);
+            if root_s == root_p {
+                continue;
+            }
+
+            // Adjacency check: merging is only valid when the child's
+            // effective column range [s_first, s_first+s_ncol) is
+            // immediately followed by the parent's column range
+            // [p_first, p_first+p_ncol). Otherwise the merged
+            // supernode's `first_col..first_col+ncol` would no longer
+            // be a contiguous block of the column numbering, and
+            // downstream code (row-index construction, A-assembly, L
+            // storage, solve gather/scatter) would silently claim
+            // columns that belong to *other* supernodes.
+            //
+            // In a postorder-column-numbered elimination tree every
+            // parent's columns come after all its descendants', so in
+            // a multi-child parent at most one child is adjacent —
+            // the one whose last column is parent_first - 1. Merging
+            // any other child breaks contiguity. The arrow matrix
+            // (variables 0..n-2 all parented by variable n-1) is the
+            // archetype: only child n-2 is adjacent to parent n-1.
+            //
+            // SSIDS side-steps this by emitting a permutation that
+            // renumbers columns so merged supernodes are contiguous
+            // by construction (`core_analyse.f90:644-685`). That's a
+            // strictly better amalgamation policy (merges more
+            // children, reduces fill on arrow-like trees) but is a
+            // larger refactor. For now the adjacency check is the
+            // minimal correctness fix; see
+            // `dev/research/phase-2.2.3-plateau.md` for the full
+            // analysis.
+            let s_first = snode_first_col[root_s];
+            let s_ncol = snode_ncols[root_s];
+            let p_first = snode_first_col[root_p];
+            if s_first + s_ncol != p_first {
+                continue;
+            }
+
+            let child_ncol = snode_ncols[root_s];
+            let parent_ncol = snode_ncols[root_p];
 
             // SSIDS merge rule:
             // 1. Trivial chain: parent has exactly 1 col AND parent's column
             //    count == child's last column count - 1 (same row structure
             //    minus one eliminated column)
             let trivial_chain = parent_ncol == 1 && {
-                let root_s = find_root(s, &merged_into);
-                let child_last = snode_first_col[root_s] + snode_ncols[root_s] - 1;
-                let root_p = find_root(p, &merged_into);
-                let parent_first = snode_first_col[root_p];
-                col_counts[parent_first] + 1 == col_counts[child_last]
+                let child_last = s_first + s_ncol - 1;
+                col_counts[p_first] + 1 == col_counts[child_last]
             };
 
             // 2. Size-based: both have < nemin columns
             let size_based = child_ncol < params.nemin && parent_ncol < params.nemin;
 
             if trivial_chain || size_based {
-                let root_p = find_root(p, &merged_into);
-                let root_s = find_root(s, &merged_into);
                 merged_into[root_s] = Some(root_p);
-                // Transfer columns to parent and update first column
-                snode_ncols[root_p] += child_ncol;
-                snode_first_col[root_p] = snode_first_col[root_p].min(snode_first_col[root_s]);
+                // Transfer columns to parent and update first column.
+                // Adjacency invariant guarantees s_first < p_first,
+                // so the merged range is [s_first, p_first+p_ncol).
+                snode_ncols[root_p] = child_ncol + parent_ncol;
+                snode_first_col[root_p] = s_first;
             }
         }
     }
@@ -253,11 +290,6 @@ fn find_root(s: usize, merged_into: &[Option<usize>]) -> usize {
         node = parent;
     }
     node
-}
-
-/// Effective number of columns for a supernode (accounting for merges).
-fn effective_ncol(s: usize, snode_ncols: &[usize], merged_into: &[Option<usize>]) -> usize {
-    snode_ncols[find_root(s, merged_into)]
 }
 
 #[cfg(test)]
