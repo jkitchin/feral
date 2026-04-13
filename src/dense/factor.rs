@@ -26,6 +26,24 @@ pub struct BunchKaufmanParams {
 
     /// What to do when the selected pivot is numerically zero.
     pub on_zero_pivot: ZeroPivotAction,
+
+    /// Column-relative pivot threshold `u` (MUMPS `CNTL(1)`, SSIDS `options%u`).
+    /// A 1×1 candidate pivot `a_kk` is accepted only if
+    /// `|a_kk| >= u * max_{i>k}(|a_ik|)`, i.e. the pivot must dominate its
+    /// column by at least a factor of `1/u`. Additionally, a 2×2 pivot block
+    /// is accepted only if the Duff-Reid growth bound
+    /// `(|a22|*RMAX + AMAX*TMAX)*u <= |det|` (and its symmetric partner)
+    /// holds, where RMAX/TMAX are column maxes of the two pivot columns
+    /// *beyond* the 2×2 block and AMAX is the cross term.
+    ///
+    /// Default `0.0` preserves Phase 1 behavior (no threshold check — every
+    /// non-zero pivot is accepted). Callers opting into MC64 scaling should
+    /// set this to `0.01` (MUMPS/SSIDS default) so that after symmetric
+    /// equilibration, candidate pivots that are more than 100× smaller than
+    /// their column max are rejected and flushed through the existing
+    /// `ForceAccept` path. See dev/plans/scaling-aware-pivot-rejection.md
+    /// and MUMPS `dfac_front_aux.F:1494-1606` for the reference formulas.
+    pub pivot_threshold: f64,
 }
 
 /// Action to take when a near-zero pivot is encountered.
@@ -45,6 +63,7 @@ impl Default for BunchKaufmanParams {
             zero_tol,
             zero_tol_2x2: zero_tol * zero_tol,
             on_zero_pivot: ZeroPivotAction::Fail,
+            pivot_threshold: 0.0,
         }
     }
 }
