@@ -102,12 +102,23 @@ fn feral_residual(stem: &str) -> Option<f64> {
 /// Phase 2.2.2 Step 7 status: RECOVERED 47 ORDERS, STILL FAILING
 /// TARGET. Enabling `pivot_threshold = 0.01` (MUMPS CNTL(1) /
 /// SSIDS options%u) in `ldlt_params()` drops the residual from
-/// 2.27e+46 to 1.076e-1. The 30-order post-MC64 regression is
-/// closed; the matrix now solves ~17 orders better than the
-/// Identity baseline (2.84e+16). Residual is ~7 orders above
-/// target but the regression no longer blocks Phase 2.2. Full
-/// closure of the 1e-1 → 1e-14 gap requires delayed pivoting
-/// (Phase 2.3). See dev/validation/phase-2.2.2-pivot-rejection.md.
+/// 2.27e+46 to 1.076e-1.
+///
+/// Phase 2.2.3 status: SECONDARY REGRESSION, STILL FAILING. The
+/// supernode amalgamation adjacency fix that cleared the
+/// CHWIRUT1/CRESC100/CRESC132 plateau produces 117 fine-grained
+/// supernodes for ACOPP30 where the pre-fix amalgamation bug
+/// had accidentally fused 16 of them. With 1-2 columns per
+/// supernode the BK kernel has no room to pivot and 14-31
+/// pivots get ForceAccept'd as zero (inertia ~(58,137,14) to
+/// (56,122,31) vs MUMPS (71,137,1)). Residual is now 1.659e+5.
+/// Full recovery of this matrix requires either (a) SSIDS-style
+/// column renumbering to build coarser supernodes (logged as
+/// follow-up in dev/research/phase-2.2.3-plateau.md) or (b)
+/// delayed pivoting (Phase 2.3). The plateau work on
+/// CHWIRUT1/CRESC100/CRESC132 is a strict win and is what moved
+/// the three companion tests in this file to PASS under
+/// `--ignored`.
 #[test]
 #[ignore]
 fn acopp30_0000_residual_under_1e_8_after_mc64() {
@@ -127,16 +138,18 @@ fn acopp30_0000_residual_under_1e_8_after_mc64() {
 /// < 1e-6 (14 orders of magnitude improvement from the baseline).
 ///
 /// Phase 2.2.1 Step 8 status: IMPROVED but STILL FAILING. Residual
-/// dropped 2.39e+08 → 1.37e+05, still ~11 orders above target.
-/// Inertia also drifted ±2 vs MUMPS. See
-/// dev/validation/phase-2.2.1-mc64-sweep.md.
+/// dropped 2.39e+08 → 1.37e+05.
 ///
-/// Phase 2.2.2 Step 7 status: UNCHANGED. Residual is 1.370e+05
-/// with `pivot_threshold = 0.01`, essentially identical to
-/// Post-2.2.1. The column-relative rejection does not fire on
-/// CRESC132's pivot stream; the residual floor is dominated by
-/// the ±2 inertia mismatch and the need for delayed pivoting.
-/// See dev/validation/phase-2.2.2-pivot-rejection.md.
+/// Phase 2.2.2 Step 7 status: UNCHANGED at 1.370e+05.
+///
+/// Phase 2.2.3 status: PASSING. The supernode amalgamation
+/// adjacency fix (commit 91e808b) drops the residual to
+/// 4.43e-15 — **4 orders better than canonical MUMPS** —
+/// and resolves the previously-observed ±2 inertia mismatch.
+/// The inertia now matches MUMPS exactly: (2660, 2654, 0).
+/// The "inertia mismatch" previously attributed to a
+/// count_2x2_inertia trace-rule issue was in fact a symptom of
+/// the same supernode amalgamation bug.
 #[test]
 #[ignore]
 fn cresc132_0000_residual_under_1e_6_after_mc64() {
@@ -151,23 +164,15 @@ fn cresc132_0000_residual_under_1e_6_after_mc64() {
     );
 }
 
-/// CHWIRUT1_0000: n=645, one of the smaller matrices in the
-/// sanity check panel. Had correct inertia but bad residual
-/// (1.41e+09) pre-fix. This is a case where MC64 scaling should
-/// cleanly close the gap because the inertia bug is not masking
-/// the scaling bug.
+/// CHWIRUT1_0000: n=645. Pre-fix: 1.41e+09. Canonical MUMPS:
+/// 9.51e-13. Target: < 1e-8.
 ///
-/// Phase 2.2.1 Step 8 status: IMPROVED but STILL FAILING.
-/// Residual dropped 1.41e+09 → 8.50e+02 (7 orders), still ~11
-/// orders above target. Inertia remains MATCH vs MUMPS/SSIDS. See
-/// dev/validation/phase-2.2.1-mc64-sweep.md.
-///
-/// Phase 2.2.2 Step 7 status: UNCHANGED. Residual is 8.497e+02
-/// with `pivot_threshold = 0.01`, matching Post-2.2.1 to 3
-/// significant figures. Inertia is exact, so the bottleneck is
-/// not pivot rejection; it is likely solve-side rounding
-/// accumulation or iterative refinement that refuses to converge.
-/// See dev/validation/phase-2.2.2-pivot-rejection.md.
+/// Phase 2.2.1 Step 8: 1.41e+09 → 8.50e+02.
+/// Phase 2.2.2 Step 7: UNCHANGED at 8.497e+02.
+/// Phase 2.2.3 status: PASSING. The supernode adjacency fix
+/// drops the residual to 8.69e-14 — **beats canonical MUMPS
+/// by half an order** — with iterative refinement converging in
+/// 2 steps. Inertia matches MUMPS (431, 214, 0) exactly.
 #[test]
 #[ignore]
 fn chwirut1_0000_residual_under_1e_8_after_mc64() {
@@ -182,20 +187,15 @@ fn chwirut1_0000_residual_under_1e_8_after_mc64() {
     );
 }
 
-/// CRESC100_0000: n=806, another matrix with correct inertia but
-/// bad residual (2.54e+04) pre-fix. Smallest residual improvement
-/// needed in the sanity panel.
+/// CRESC100_0000: n=806. Pre-fix: 2.54e+04. Canonical MUMPS:
+/// 6.15e-15. Target: < 1e-8.
 ///
-/// Phase 2.2.1 Step 8 status: IMPROVED but STILL FAILING.
-/// Residual dropped 2.54e+04 → 1.43e+02 (2 orders), still ~10
-/// orders above target. Inertia remains MATCH vs MUMPS/SSIDS. See
-/// dev/validation/phase-2.2.1-mc64-sweep.md.
-///
-/// Phase 2.2.2 Step 7 status: UNCHANGED. Residual is 1.426e+02
-/// with `pivot_threshold = 0.01`. Same diagnosis as CHWIRUT1:
-/// exact inertia, so pivot rejection has nothing to fire on.
-/// Plateau likely sits on solve-side rounding / refinement
-/// stagnation. See dev/validation/phase-2.2.2-pivot-rejection.md.
+/// Phase 2.2.1 Step 8: 2.54e+04 → 1.43e+02.
+/// Phase 2.2.2 Step 7: UNCHANGED at 1.426e+02.
+/// Phase 2.2.3 status: PASSING. The supernode adjacency fix
+/// drops the residual to 1.75e-16 — **beats canonical MUMPS
+/// by 2 orders of magnitude**. Inertia matches MUMPS
+/// (606, 200, 0) exactly.
 #[test]
 #[ignore]
 fn cresc100_0000_residual_under_1e_8_after_mc64() {

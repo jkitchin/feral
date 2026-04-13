@@ -605,12 +605,15 @@ fn main() {
 
     // --- Sparse solver validation ---
     println!("\n--- Sparse solver validation ---");
-    // Use large nemin to force single-supernode for correctness validation.
-    // Multi-supernode solve has a known issue with contribution block assembly.
-    let snode_params = SupernodeParams {
-        nemin: 10000,
-        ..Default::default()
-    };
+    // Phase 2.2.3: the previous nemin=10000 override was added to
+    // mask an amalgamation bug that claimed non-contiguous column
+    // ranges as if they were contiguous supernodes. That bug is
+    // fixed in commit 91e808b (adjacency check in find_supernodes),
+    // so the bench now runs with the default multi-supernode
+    // configuration and reports the true rate. Expect a large drop
+    // from the historical 99.8% number — that number was an
+    // artifact of the single-supernode override, not a real rate.
+    let snode_params = SupernodeParams::default();
 
     let mut sp_total = 0usize;
     let mut sp_inertia_pass = 0usize;
