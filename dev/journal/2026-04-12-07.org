@@ -157,3 +157,34 @@ hogg2013pivoting, duff2001mc64) confirmed present in
 dev/references.bib.
 
 No src/ changes. cargo test running in background for sanity.
+
+* 20:05 :phase2-2-2:plan-written:
+Wrote dev/plans/scaling-aware-pivot-rejection.md, mirroring the
+shape of dev/plans/mc64-scaling.md. 10 steps, ~10 hour budget.
+Key structural decisions:
+  - pivot_threshold default 0.0 (disabled) to preserve dense BK77
+    tests; sparse caller opts in via ldlt_params() at 0.01.
+  - 1×1 rejection clauses inserted at src/dense/factor.rs lines
+    494, 517, 534 (factor_frontal) and 179, 203, 224 (factor).
+  - 2×2 Duff-Reid bound added alongside the existing
+    det.abs() <= zero_tol_2x2 check at line 560, using a new
+    col_max_below helper next to column_offdiag_max at line 726.
+  - col_max = gamma0 (max below diagonal, excluding the pivot
+    itself), matching SSIDS ldlt_tpp.cxx:226 exactly. NOT
+    max(d.abs(), gamma0) — that was a first-pass mistake in the
+    plan sketch; corrected in place.
+  - Test oracles: hand-computed 5×5 (Test A), well-conditioned SPD
+    (Test B), 2×2 boundary construction with algebraic derivation
+    against the MUMPS formula (Test C), plumbing smoke test (D).
+  - Risk register has 7 items; R4 (inertia regression in
+    kkt_*.rs) and R3 (2×2 formula transcription) are the two
+    leading threats.
+
+Confirmed pre-plan state: cargo test reports 141 passed, 0 failed,
+7 ignored. All 4 mc64_regression.rs tests are currently ignored
+(the ACOPP30 blowup situation). Plan acceptance bar: recover at
+least 2 of 4 with residuals under 1e-4. Stretch: all 4 with
+residuals under the original 1e-8 target (unlikely without
+delayed pivoting).
+
+No src/ changes.
