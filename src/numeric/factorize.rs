@@ -48,8 +48,21 @@ pub struct SparseFactors {
 pub struct NodeFactors {
     /// First column index (in permuted numbering).
     pub first_col: usize,
-    /// Number of eliminated columns.
+    /// Attempted column count (`snode.ncol() + n_delayed_in`). This is
+    /// the `ncol` argument that was passed to `factor_frontal` and may
+    /// exceed the supernode's native column count when children delayed
+    /// pivots up into this node. Solve paths that iterate over
+    /// eliminated columns must use `frontal_factors.nelim`, not `ncol`.
     pub ncol: usize,
+    /// Number of pivots actually eliminated at this node
+    /// (`ncol - n_delayed_out`). Mirror of `frontal_factors.nelim` for
+    /// convenience in the solve path.
+    pub nelim: usize,
+    /// Number of delayed columns that entered this node from its
+    /// children during parent assembly. Populated by Step 5 (currently
+    /// always zero because `build_row_indices` has not yet been
+    /// taught to expand the fully-summed count).
+    pub n_delayed_in: usize,
     /// Total number of rows in the frontal.
     pub nrow: usize,
     /// Row indices of the frontal (length nrow).
@@ -91,6 +104,27 @@ pub fn factorize_multifrontal(
     // Storage for contribution blocks (one per supernode, freed after parent assembly)
     let mut contrib_blocks: Vec<Option<ContribBlock>> = (0..n_snodes).map(|_| None).collect();
 
+    // Phase 2.3 Step 4: compute `is_root[k]` once. A supernode is a
+    // root iff no other supernode lists it as a child. The etree may
+    // have multiple roots on disconnected matrices, so this is a set,
+    // not a single index. Delays propagate to a parent — a root has
+    // no parent, so the root must force-accept unstable pivots rather
+    // than delay them (there is nowhere to delay to). This matches
+    // the SSIDS / MUMPS root-node contract.
+    let is_root = {
+        let mut has_parent = vec![false; n_snodes];
+        for snode in &symbolic.supernodes {
+            for &child in &snode.children {
+                has_parent[child] = true;
+            }
+        }
+        let mut v = vec![false; n_snodes];
+        for k in 0..n_snodes {
+            v[k] = !has_parent[k];
+        }
+        v
+    };
+
     let mut node_factors: Vec<NodeFactors> = Vec::with_capacity(n_snodes);
     let mut total_inertia = Inertia {
         positive: 0,
@@ -109,6 +143,8 @@ pub fn factorize_multifrontal(
             node_factors.push(NodeFactors {
                 first_col: snode.first_col,
                 ncol: 0,
+                nelim: 0,
+                n_delayed_in: 0,
                 nrow: 0,
                 row_indices: Vec::new(),
                 frontal_factors: FrontalFactors {
@@ -192,20 +228,44 @@ pub fn factorize_multifrontal(
         // Pivot search is restricted to the first ncol rows. Rows ncol..nrow
         // are never swapped, preserving contribution block row ordering.
         //
-        // `may_delay = false` in this commit: delayed pivoting through the
-        // parent supernode is wired up in Step 4 of Phase 2.3.
-        let ff = factor_frontal(&frontal, ncol, false, params)?;
+        // Phase 2.3 Step 4: non-root supernodes may delay unstable pivots
+        // up to their parent. Roots have nowhere to delay to and must
+        // force-accept. With `pivot_threshold = 0.0` (the current default),
+        // the delay path is unreachable anyway because no column-relative
+        // test ever fails — this plumbing only starts firing once Step 7
+        // restores `pivot_threshold = 0.01` for sparse callers.
+        let may_delay = !is_root[snode_idx];
+        let ff = factor_frontal(&frontal, ncol, may_delay, params)?;
 
         // Extract what we need before moving ff
         let node_inertia = ff.inertia.clone();
         let node_needs_ref = ff.needs_refinement;
+        let node_nelim = ff.nelim;
+        let node_n_delayed = ff.n_delayed;
 
-        // Step 4: Store contribution block (Schur complement) for parent
+        // Step 4: Store contribution block for parent.
+        //
+        // Phase 2.3 invariant (Step 4 level): with `pivot_threshold = 0.0`
+        // the column-relative test never fails, so `n_delayed == 0` and
+        // the contrib block is the pure Schur complement over trailing
+        // rows — the pre-Phase-2.3 layout. Step 5 replaces this branch
+        // with a delayed-column-aware scatter that (a) unpermutes the
+        // kernel's internal BK swaps within 0..ncol to recover each
+        // delayed column's original global index and (b) lays the
+        // delayed fully-summed columns at the head of `row_indices`.
+        // Fail loudly if a delay sneaks through before Step 5 is in
+        // place — a silent misassembly would be much worse than a
+        // debug assert.
+        debug_assert_eq!(
+            node_n_delayed, 0,
+            "Step 5 (parent-side delay assembly) must land before delays can fire"
+        );
         if ff.contrib_dim > 0 {
             contrib_blocks[snode_idx] = Some(ContribBlock {
                 row_indices: row_indices[ncol..].to_vec(),
                 data: ff.contrib.clone(),
                 dim: ff.contrib_dim,
+                n_delayed: node_n_delayed,
             });
         }
 
@@ -226,6 +286,11 @@ pub fn factorize_multifrontal(
         node_factors.push(NodeFactors {
             first_col: snode.first_col,
             ncol,
+            nelim: node_nelim,
+            // Step 5 will populate this once `build_row_indices`
+            // incorporates each child's `n_delayed` into the
+            // expanded fully-summed column count.
+            n_delayed_in: 0,
             nrow: actual_nrow,
             row_indices,
             frontal_factors: ff,
@@ -382,15 +447,34 @@ fn build_csc_transpose(csc: &CscMatrix) -> (Vec<usize>, Vec<usize>, Vec<usize>) 
 }
 
 /// Contribution block from a child supernode.
+///
+/// Under delayed pivoting the top-left `n_delayed × n_delayed` block
+/// holds the child's un-eliminated fully-summed columns (which must
+/// re-enter pivot search at the parent as additional fully-summed
+/// columns), and the bottom-right `(dim - n_delayed) × (dim - n_delayed)`
+/// block is the classic Schur complement over the non-fully-summed
+/// trailing rows. The cross block (rows = trailing, cols = delayed)
+/// carries the mixed interactions. `row_indices[..n_delayed]` are
+/// the global row indices of the delayed columns in the parent's
+/// numbering; `row_indices[n_delayed..]` are the trailing rows.
 #[derive(Debug)]
 struct ContribBlock {
-    /// Row indices of the contribution block (global, sorted).
+    /// Row indices of the contribution block (global).
+    /// First `n_delayed` entries are delayed fully-summed columns;
+    /// the remainder are the trailing non-fully-summed rows (sorted).
     row_indices: Vec<usize>,
     /// Dense symmetric matrix data (lower triangle, column-major).
     /// Dimension: row_indices.len() × row_indices.len()
     data: Vec<f64>,
     /// Dimension of the contribution block.
     dim: usize,
+    /// Number of delayed fully-summed columns carried in this block
+    /// (top-left `n_delayed × n_delayed` sub-matrix). Zero for nodes
+    /// whose BK sweep succeeded on every attempted column. Consumed
+    /// by Step 5's parent-side delay-aware assembly; until that lands
+    /// no reader touches the field, hence the allow.
+    #[allow(dead_code)]
+    n_delayed: usize,
 }
 
 /// Extend-add: assemble a child's contribution block into the parent frontal.

@@ -76,3 +76,56 @@ Next: Step 4 — wire may_delay through factorize_multifrontal,
 compute is_root per supernode, add n_delayed to ContribBlock and
 NodeFactors so Step 5's parent-side assembly can find delayed
 columns.
+
+* 11:15 :phase-2.3:delayed-pivoting:multifrontal:plumbing:
+Phase 2.3 Step 4 landed: wired may_delay through the multifrontal
+driver. Scope is strictly plumbing — with pivot_threshold=0.0
+(the current default after the 2026-04-13 follow-up) the column-
+relative test never fails, so n_delayed is always 0 and runtime
+behavior is byte-identical to pre-Step-4.
+
+Changes to src/numeric/factorize.rs:
+- NodeFactors gained nelim: usize and n_delayed_in: usize fields.
+  `ncol` now means "attempted column count" (= snode.ncol() +
+  n_delayed_in once Step 5 lands), and `nelim` mirrors
+  frontal_factors.nelim for the solve path.
+- ContribBlock gained n_delayed: usize with a #[allow(dead_code)]
+  until Step 5 consumes it. Documented the dual-semantics
+  layout: row_indices[..n_delayed] are delayed fully-summed
+  columns, row_indices[n_delayed..] are trailing rows.
+- Added is_root computation at the top of factorize_multifrontal:
+  walk symbolic.supernodes, mark children as has_parent, then
+  invert. Handles multi-root etrees (disconnected matrices)
+  correctly — every node with no parent is a root.
+- factor_frontal call site: may_delay = !is_root[snode_idx].
+- Added a hard debug_assert that ff.n_delayed == 0 at the contrib-
+  block store site. Today pivot_threshold=0.0 makes delays
+  unreachable; Step 5 replaces the assert with the actual
+  delay-aware scatter. Failing loudly if a delay sneaks through
+  before Step 5 is much safer than silent misassembly via the
+  old ncol-based row_indices[ncol..] slice, which does NOT
+  account for the kernel's BK swaps within 0..ncol.
+
+Why the assert matters: the kernel's perm array within 0..nelim
+records the BK swaps, but the kernel's swaps can also touch
+nelim..ncol (the delayed region) before it breaks. So taking
+row_indices[nelim..ncol] as the delayed global indices would be
+wrong — Step 5 must walk ff.perm to unpermute. For Step 4 the
+assert makes this impossible to forget.
+
+Suite (all preserved):
+- cargo clippy -- -D warnings clean (allow(dead_code) on
+  ContribBlock::n_delayed, scoped to the field).
+- cargo test full suite: all binaries green.
+- Parity: 11/28 passing / 17 ignored — unchanged baseline as
+  expected. The flips will arrive after Step 7 restores
+  pivot_threshold=0.01 for sparse callers AND Step 5's parent
+  assembly is in place.
+
+Next: Step 5 — parent assembly with delayed columns. The plan
+calls for (a) build_row_indices expanding the fully-summed count
+by sum(child.n_delayed), (b) splitting extend_add into a
+delayed-columns phase and a trailing-rows phase, (c) unpermuting
+child contrib row indices via child's perm. Most error-prone
+step of the phase per the plan's risk analysis.
+
