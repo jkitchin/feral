@@ -1,83 +1,83 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-13T22:16:21Z
+Generated: 2026-04-14T02:20:16Z
 
 ## Latest Session
-File: dev/sessions/2026-04-13-03.md
+File: dev/sessions/2026-04-13-05.md
 ```
-# Session 2026-04-13-03 — Phase 2.3 Steps 5+6: parent-side delay assembly + solve
+# Session 2026-04-13-05 — Dense ACOPP30 fix attempt (rejected)
 
 ## Goal
 
-Land Phase 2.3 Step 5 (parent-side delay assembly) and Step 6
-(solve-side nelim fix) per `dev/plans/phase-2.3-delayed-pivoting.md`.
-Steps 1-4 (kernel plumbing, `PivotOutcome::Delayed`, `n_delayed`
-field, `NodeFactors.n_delayed_in`) landed in session 2026-04-13-02
-(commits `bd1c6e4` → `bd5e0e2`). That session explicitly deferred
-the `may_delay = !is_root` flag flip to Step 5 because the 2×2
-Duff-Reid det-floor rejection fires independently of
-`pivot_threshold` and would otherwise trip the
-`debug_assert(n_delayed == 0)` trip-wire on SWOPF / HAIFAM et al.
-
-Target for this session:
-
-- `build_row_indices` learns to expand the fully-summed column count
-  by `sum(child.n_delayed)` and place each child's delayed columns
-  in the parent's fully-summed region.
-- Contrib store site unpermutes through `ff.perm` to recover each
-  delayed column's global index.
-- `is_root` is computed once at the top of the loop, and the
-  factor_frontal call uses `may_delay = !is_root[snode_idx]`.
-- `src/numeric/solve.rs` switches from `ff.ncol` to `ff.nelim` in
-  all three phases so the solve bounds match `L.cols()`.
-- Two new integration tests (plan Steps 1.4 and 1.5) pin the
-  parent-ward delay propagation and an end-to-end inertia match
-  against a dense LDLᵀ oracle.
+Continue Task #19 from the 2026-04-13-04 checkpoint: close the dense
+ACOPP30 residual gap. 67 ACOPP30 variants produce inertia `(72, 137, 0)`
+with residual ~2.8e-2 on the dense path while sparse (and MUMPS/SSIDS)
+produce `(71, 137, 1)` with residual ~1e-14. The goal was to land a
+dense factor.rs fix, commit the in-flight triage harness and research
+note, and re-validate the full bench.
 
 ## Accomplished
 
-**Phase 2.3 Steps 5+6 landed atomically** (one feature commit for
-the kernel+assembly+solve changes; a second commit for the integration
-tests). No regressions on any existing test; massive improvement in
-the sparse residual tail.
+### Committed in-flight harness/research (c55bacf, 555b579)
 
-### Code changes
+- `c55bacf` — Shared bench-failure triage tooling + research note.
+  Extends `src/bin/bench.rs::print_cross_comparison` to join dense and
+  sparse failure records by name and bucket the intersection by failure
+  mode (inertia/residual/mixed), size class, top families, and top-15
+  worst shared residuals. Adds `dev/research/shared-failure-triage.md`
+  which documents the 1809 shared dense+sparse failures in the full KKT
+  bench — headline: 1499/1809 (83%) are corpus data-quality artifacts
+  where the sidecar disagrees with both MUMPS 5.8.2 and SPRAL SSIDS.
+- `555b579` — Dense ACOPP30 triage example.
+  `examples/triage_dense_acopp30.rs` runs three ACOPP30 cases under four
+  parameter configs (A/A' threshold=0 plain/refined, B/C threshold=0.01
+  plain/refined) and prints inertia + relative residual + ||b|| alongside
+  the MUMPS oracle residual from `.mumps.json`.
 
-- `src/numeric/factorize.rs`:
-  - Added `is_root: Vec<bool>` computed once at the top of
-    `factorize_multifrontal` by walking
-    `symbolic.supernodes[*].children`. Handles disconnected matrices
-    (multi-root forests) uniformly.
-  - Renamed the loop-local `ncol` binding to `own_ncol = snode.ncol()`
-    to distinguish the supernode's native column count from the
-    expanded fully-summed count after absorbing delayed children.
-  - Computed `n_delayed_in` and `expanded_ncol = own_ncol + n_delayed_in`
-    from the children's live `ContribBlock`s before the row-indices
-    build.
-  - Step 1 assembly still iterates `row_indices[..own_ncol]` — only
+Both commits caught `cargo fmt --check` failures in pre-commit and were
+re-committed after running `cargo fmt`. No test or clippy warnings.
+
+### Dense factor.rs root-cause tracing
+
+Added `FERAL_DENSE_TRACE=1` env-gated prints to `src/dense/factor.rs`
+and ran against ACOPP30_0026. Smoking gun at k=58: the 2×2 block
+
+```
+[[ 0       , -4.16e-15 ],
+ [ -4.16e-15, -6.08e-9 ]]
+```
+
+has `|det| = 1.73e-29`, which passes `count_2x2_inertia`'s `eps²` floor
+(4.93e-32) by 350×. At `u = params.pivot_threshold = 0.0` (the dense
+default), the Duff-Reid growth bound `(|a22|*rmax + |amax|*tmax)*u ≤ |det|`
+collapses to `0 ≤ |det|` and is trivially satisfied. L21 = A21·inv(D)
+then scales by ≈10²⁹ and destroys the trailing submatrix. Residual 2.7e-2.
+
+Verified via `grep` that `factor()` is only used by `numeric/factorize.rs`
+in a test; the production sparse path uses `factor_frontal()`, so fixing
 ```
 
 ## Git Status
 ```
-a630977 Phase 2.3 sign-preservation fix: preserve pivot sign at root fallback
-6245952 Phase 2.3 Step 7: restore pivot_threshold = 0.01 for sparse callers
-28ff3b1 Session 2026-04-13-03 checkpoint: Phase 2.3 Steps 5+6 landed
-0364e6d Phase 2.3 Steps 5+6: parent-side delay assembly + solve nelim fix
-bd5e0e2 Session 2026-04-13-02 checkpoint: Phase 2.3 Steps 1-4 landed
+555b579 Add dense ACOPP30 triage example for task #19
+c55bacf Shared bench-failure triage tooling + research note
+ce09aa6 Phase 2.3 Step 9: delayed pivoting validation report
+8f3fce0 Session 2026-04-13-04 addendum: refinement-termination fix
+ed07ee3 Phase 2.3 refinement-termination fix: max_steps 3->10 + residual stop
 ```
 
 ## Test Status
 ```
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
      Running tests/threshold_consistency.rs (target/debug/deps/threshold_consistency-c660296127e8afca)
 
 running 6 tests
 test polak6_0021_residual_after_threshold_fix ... ignored
-test factor_inertia_force_accept_implies_solve_skip_invariant ... ok
 test factors_carry_zero_tol_from_params ... ok
-test refinement_does_not_amplify_error_on_rank_deficient_matrix ... ok
+test factor_inertia_force_accept_implies_solve_skip_invariant ... ok
 test dense_solve_skips_zero_pivots_rank_deficient ... ok
+test refinement_does_not_amplify_error_on_rank_deficient_matrix ... ok
 test sparse_solve_skips_zero_pivots_rank_deficient ... ok
 
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -97,14 +97,14 @@ Loading matrices from data/benchmark-config.toml ... not found
 
 name                n   factor(μs)    solve(μs)        inertia
 --------------------------------------------------------------
-spd_10             10           19            0     (10, 0, 0)
-spd_50             50           20            3     (50, 0, 0)
-spd_100           100           76            5    (100, 0, 0)
-spd_200           200          393           16    (200, 0, 0)
+spd_10             10           31            0     (10, 0, 0)
+spd_50             50           21            2     (50, 0, 0)
+spd_100           100           77            6    (100, 0, 0)
+spd_200           200          399           16    (200, 0, 0)
 kkt_10_3           13            2            0     (10, 3, 0)
-kkt_30_10          40           20            1    (30, 10, 0)
-kkt_50_15          65           49            2    (50, 15, 0)
-kkt_100_30        130          199            7   (100, 30, 0)
+kkt_30_10          40           19            1    (30, 10, 0)
+kkt_50_15          65           47            2    (50, 15, 0)
+kkt_100_30        130          203            7   (100, 30, 0)
 
 8 matrices benchmarked
 
@@ -112,170 +112,227 @@ Loading KKT matrices from data/matrices/kkt ... 154588 matrices loaded
 
 KKT summary: 154588 matrices (154481 dense-eligible n <= 1000, 107 skipped n > 1000)
   Inertia match: 152979/154481 (99.0%)
-  Residual pass: 154051/154481 (99.7%)
-  Worst residual: 3.99e-2 (ACOPP30_0002)
+  Residual pass: 154141/154481 (99.8%)
+  Worst residual: 2.80e-2 (ACOPP30_0026)
 
 --- Sparse solver validation ---
 Sparse solver: 154588/154588 total
   Inertia match vs MUMPS: 153009/154588 (99.0%)
-  Residual pass: 154237/154588 (99.8%)
-  Worst residual: 3.22e-4 (ERRINBAR_0824)
+  Residual pass: 154329/154588 (99.8%)
+  Worst residual: 2.50e-4 (ERRINBAR_0824)
 
---- Dense failure analysis (1928 failures) ---
+--- Dense failure analysis (1838 failures) ---
 
 family                    total    inertia   residual      worst_res
-HAHN1                       498        498          0       1.76e-12
-QPNBLEND                    362        362          0       7.56e-16
-MSS1                        240        240          0       1.40e-15
-CORE1                       141        141          0       3.56e-16
-CRESC50                      97         97          0       2.08e-16
-ACOPP30                      68          0         68        3.99e-2
-FBRAIN3LS                    59          6         57        4.11e-7
-CERI651DLS                   51          3         48        1.69e-7
-HS46                         42          0         42        7.51e-8
-PFIT4                        38         38          0       3.27e-14
-DEVGLA2                      37          0         37        2.77e-6
-CERI651A                     37         37          0       9.15e-14
-CERI651ALS                   24          2         22        1.79e-7
-PFIT2                        24          0         24        8.14e-6
-CERI651CLS                   23          1         22        2.78e-7
-PALMER1ENE                   23          0         23        1.79e-8
-CRESC100                     19         19          0       9.89e-16
-HATFLDFL                     12          0         12        2.49e-9
-MISTAKE                      12          0         12        1.83e-6
-KIRBY2                       12         12          0       1.76e-13
+HAHN1                       498        498          0       2.71e-13
+QPNBLEND                    362        362          0       2.78e-15
+MSS1                        240        240          0       2.78e-15
+CORE1                       141        141          0       1.07e-15
+CRESC50                      97         97          0       3.50e-15
+ACOPP30                      68          0         68        2.80e-2
+FBRAIN3LS                    50          6         48        2.82e-7
+CERI651DLS                   42          3         39        7.06e-8
+PFIT4                        38         38          0       9.22e-15
+CERI651A                     37         37          0       7.69e-14
+HS46                         27          0         27        7.51e-8
+PFIT2                        23          0         23        5.39e-6
+CERI651CLS                   21          1         20        2.06e-7
+CRESC100                     19         19          0       4.65e-15
+PALMER1ENE                   17          0         17        1.22e-8
+CERI651ALS                   17          2         15        4.31e-8
+DEVGLA2                      15          0         15        1.50e-7
+KIRBY2                       12         12          0       1.28e-13
+MISTAKE                      10          0         10        1.33e-6
 ALLINITA                      9          2          7        5.43e-7
-SNAKE                         9          0          9        6.99e-9
-BENNETT5                      8          8          0       1.70e-13
-DISCS                         8          8          0       6.31e-16
-DJTL                          7          0          7        1.01e-6
-  ... and 44 more families
+DISCS                         8          8          0       1.35e-15
+BENNETT5                      8          8          0       1.29e-13
+DJTL                          7          0          7        5.33e-7
+SNAKE                         6          0          6        1.83e-9
+LSC2LS                        5          0          5        1.95e-8
+  ... and 45 more families
 
 Top 15 worst residuals:
 name                             n     residual       expected         actual
-ACOPP30_0002                   209      3.99e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0037                   209      2.92e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0026                   209      2.80e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0018                   209      2.76e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0045                   209      2.76e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0000                   209      2.74e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0037                   209      2.69e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0012                   209      2.69e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0065                   209      2.64e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0046                   209      2.64e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0036                   209      2.63e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0051                   209      2.58e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0002                   209      2.55e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0024                   209      2.54e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0057                   209      2.53e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0055                   209      2.49e-2   (72, 137, 0)   (72, 137, 0)
 ACOPP30_0013                   209      2.46e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0045                   209      2.45e-2   (72, 137, 0)   (72, 137, 0)
+ACOPP30_0010                   209      2.43e-2   (72, 137, 0)   (72, 137, 0)
 
---- Sparse failure analysis (1929 failures) ---
+--- Sparse failure analysis (1837 failures) ---
 
 family                    total    inertia   residual      worst_res
-HAHN1                       498        498          0       8.06e-13
-QPNBLEND                    362        362          0       6.78e-16
-MSS1                        240        240          0       1.32e-15
-CORE1                       141        141          0       3.52e-16
-CRESC50                      97         97          0       1.77e-16
-ACOPP30                      67         67          0       2.80e-14
-FBRAIN3LS                    61          3         59        2.79e-7
-CERI651DLS                   51          3         48        1.94e-7
-HS46                         40          0         40        7.91e-8
-PFIT4                        38         38          0       5.84e-14
-CERI651A                     37         37          0       1.01e-13
-DEVGLA2                      26          0         26        1.58e-6
-CERI651CLS                   25          1         24        3.20e-7
-CERI651ALS                   24          2         22        1.45e-7
-PFIT2                        24          0         24        8.16e-6
-PALMER1ENE                   23          0         23        1.79e-8
-CRESC100                     19         19          0       8.49e-16
-SNAKE                        12          0         12        3.34e-9
-HATFLDFL                     12          0         12        2.97e-9
-KIRBY2                       12         12          0       1.68e-13
-MISTAKE                      11          0         11        1.50e-6
-ALLINITA                     10          2          8        9.30e-7
-VESUVIO                      10         10          0       1.84e-13
-DISCS                         8          8          0       7.33e-16
+HAHN1                       498        498          0       2.22e-13
+QPNBLEND                    362        362          0       2.78e-15
+MSS1                        240        240          0       1.68e-15
+CORE1                       141        141          0       8.83e-16
+CRESC50                      97         97          0       5.12e-16
+ACOPP30                      67         67          0       1.63e-14
+FBRAIN3LS                    52          3         50        2.79e-7
+CERI651DLS                   39          3         36        1.93e-7
+PFIT4                        38         38          0       1.69e-14
+CERI651A                     37         37          0       7.97e-14
+HS46                         29          0         29        3.56e-8
+PFIT2                        23          0         23        2.42e-6
+CERI651CLS                   21          1         20        2.53e-7
+CRESC100                     19         19          0       2.40e-15
+PALMER1ENE                   16          0         16        1.22e-8
+DEVGLA2                      15          0         15        7.78e-7
+CERI651ALS                   15          2         13        1.28e-7
+KIRBY2                       12         12          0       1.52e-13
+VESUVIO                      10         10          0       1.40e-13
+MISTAKE                      10          0         10        1.17e-6
+ALLINITA                      9          2          7        4.84e-7
 BENNETT5                      8          8          0       8.69e-14
-  ... and 48 more families
+DISCS                         8          8          0       2.09e-15
+DJTL                          7          0          7        5.33e-7
+SNAKE                         5          0          5        2.42e-9
+  ... and 44 more families
 
 Top 15 worst residuals:
 name                             n     residual       expected         actual
-ERRINBAR_0824                   27      3.22e-4     (18, 9, 0)     (18, 9, 0)
-PFIT2_0590                       6      8.16e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0588                       6      8.16e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0589                       6      8.16e-6      (3, 3, 0)      (3, 3, 0)
+ERRINBAR_0824                   27      2.50e-4     (18, 9, 0)     (18, 9, 0)
 PRICE4_0002                      2      7.74e-6      (2, 0, 0)      (2, 0, 0)
-PFIT2_0341                       6      7.17e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0329                       6      4.07e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0327                       6      4.07e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0328                       6      4.07e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0547                       6      4.06e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0545                       6      4.06e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0546                       6      4.06e-6      (3, 3, 0)      (3, 3, 0)
 FLETCHER_0002                   16      3.63e-6     (12, 4, 0)     (12, 4, 0)
-PFIT2_0300                       6      3.55e-6      (3, 3, 0)      (3, 3, 0)
 PFIT2_0390                       6      2.42e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0591                       6      1.70e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0329                       6      1.36e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0327                       6      1.36e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0328                       6      1.36e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0547                       6      1.35e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0545                       6      1.35e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0546                       6      1.35e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0248                       6      1.22e-6      (3, 3, 0)      (3, 3, 0)
+MISTAKE_0100                    22      1.17e-6     (9, 13, 0)     (9, 13, 0)
+TRO3X3_0637                     43      9.18e-7    (30, 13, 0)    (30, 13, 0)
+DEVGLA2_0417                     5      7.78e-7      (5, 0, 0)      (5, 0, 0)
 
 --- Dense ∩ Sparse failure overlap ---
-Failed in BOTH dense and sparse:  1865
-Failed in dense only:             63
-Failed in sparse only:            64
+Failed in BOTH dense and sparse:  1809
+Failed in dense only:             29
+Failed in sparse only:            28
+
+Shared failure mode breakdown:
+  Inertia mismatch on BOTH paths:          1499
+  Residual-only fail on BOTH paths:         240
+  Mixed (one inertia, other residual):       70
+
+Shared failure size class breakdown:
+  n <=  100:     315
+  n <= 1000:    1494
+  n >  1000:       0
+
+Top 25 families in shared failures:
+family                    total    inertia   residual      worst_res
+HAHN1                       498        498          0       2.71e-13
+QPNBLEND                    362        362          0       2.78e-15
+MSS1                        240        240          0       2.78e-15
+CORE1                       141        141          0       1.07e-15
+CRESC50                      97         97          0       3.50e-15
+ACOPP30                      67          0          0        2.80e-2
+FBRAIN3LS                    48          3         42        2.82e-7
+CERI651DLS                   38          3         35        1.93e-7
+PFIT4                        38         38          0       1.69e-14
+CERI651A                     37         37          0       7.97e-14
+HS46                         24          0         24        7.51e-8
+PFIT2                        22          0         22        5.39e-6
+CERI651CLS                   21          1         20        2.53e-7
+CRESC100                     19         19          0       4.65e-15
+PALMER1ENE                   16          0         16        1.22e-8
+DEVGLA2                      15          0         15        7.78e-7
+CERI651ALS                   14          2         12        1.28e-7
+KIRBY2                       12         12          0       1.52e-13
+MISTAKE                      10          0         10        1.33e-6
+ALLINITA                      9          2          7        5.43e-7
+BENNETT5                      8          8          0       1.29e-13
+DISCS                         8          8          0       2.09e-15
+DJTL                          7          0          7        5.33e-7
+LSC2LS                        4          0          4        1.95e-8
+HS118                         3          0          3        9.68e-8
+  ... and 40 more families
+
+Top 15 worst shared residuals:
+name                             n    dense_res   sparse_res       expected     actual(sp)
+ACOPP30_0026                   209      2.80e-2     8.64e-15   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0018                   209      2.76e-2     6.75e-15   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0000                   209      2.74e-2     4.27e-15   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0037                   209      2.69e-2     6.74e-15   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0012                   209      2.69e-2     8.34e-15   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0046                   209      2.64e-2     7.82e-15   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0036                   209      2.63e-2     1.02e-14   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0051                   209      2.58e-2     8.78e-15   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0002                   209      2.55e-2     1.63e-14   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0024                   209      2.54e-2     7.73e-15   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0057                   209      2.53e-2     8.20e-15   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0055                   209      2.49e-2     1.07e-14   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0013                   209      2.46e-2     7.91e-15   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0045                   209      2.45e-2     9.38e-15   (72, 137, 0)   (71, 137, 1)
+ACOPP30_0010                   209      2.43e-2     9.45e-15   (72, 137, 0)   (71, 137, 1)
 ```
 
 ## Recent Decisions
-so much amalgamation under the buggy loop that the claimed column
-range became `[0, n)` — trivially contiguous — producing a
-degenerate configuration where the sparse path reduced to a
-dense LDLᵀ wrapped in sparse plumbing. That configuration is what
-produced the historical 99.8% sparse residual pass rate on the
-153k–154k KKT corpus. **The 99.8% rate is obsolete and should
-never be cited again.** The honest Phase 2.2.3 rate under the
-default `nemin=32` is 74.2% inertia match / 77.9% residual pass,
-with a worst residual of 2.32e+12 on HYDCAR20_0000. The 22-point
-drop reveals the real surface area of the multi-supernode code
-path and defines the correctness-closing work for Phases 2.3–2.4.
+is counted as a zero pivot. The 2×2 fallback routes through the
+same path.
 
-**Why the minimal fix over the SSIDS-style renumbering.** SSIDS
-handles non-adjacent sibling merging by emitting a permutation
-`sperm` that renumbers columns so every amalgamated supernode is
-contiguous by construction (`src/core_analyse.f90:644-685`). This
-is strictly better for fill and flops on arrow-like trees and
-would probably close the ACOPP30 regression this session
-introduced. But it is a substantially larger refactor touching
-the symbolic analysis pipeline end-to-end, and shipping a
-correct-but-slower supernode amalgamation today unblocks three
-plateau matrices (CHWIRUT1, CRESC100, CRESC132) that now all
-beat the canonical MUMPS oracle. Logged as follow-up.
+**Why.** Converting a small-but-clearly-nonzero pivot into a
+zero loses inertia information and produces residuals that
+iterative refinement cannot recover, because the pivot is driven
+to exactly 0 instead of being preserved with its noisy-but-
+nonzero value. This is exactly the DEGENLPA_0065 failure mode:
+the reference reports `(20, 15, 0)` and feral reported
+`(20, 14, 1)` with a 7.06e2 residual. MUMPS always reports
+`n0 = 0` in the default configuration (INFOG(28) is only
+computed when ICNTL(24)=1), so the reference oracle never
+reports zero pivots — the comparison is partly a measurement
+artifact on top of the real sign-loss bug. SSIDS handles the
+same case by breaking at the root and leaving the pivot
+un-eliminated (the outer multifrontal driver reassembles it);
+sign preservation is a strictly smaller change that captures
+the correctness gain without touching the root-break logic.
 
-**Commitment.** The README and any future user-facing documents
-should cite the post-Phase-2.2.3 numbers, not the historical
-99.8%. Phase 2.3 (delayed pivoting) remains on the roadmap and
-is expected to help ACOPP30; the SSIDS-style renumbering is
-logged as Phase 2.2.4 or as prerequisite work for Phase 2.3. No
-test tolerances were loosened. All 146 non-ignored tests pass.
+**Evidence.** Parity 14/28 → 22/28 (flipped CERI651A×3,
+DEGENLPA_0065, DEGENLPB_0045/0046/0047, PALMER2ANE_0000).
+Sparse worst residual 7.06e2 → 3.22e-4 (six orders of
+magnitude). Full measurements in
+`dev/sessions/2026-04-13-04.md`. No test tolerances were
+loosened. The `factor_frontal_root_force_accepts_without_delay`
+unit test was updated to use `d = 0` exactly (matching the
+absolute-zero branch), and
+`factor_frontal_root_accepts_small_pivot_with_sign` was added to
+cover the new sign-preserving branch with a clearly-negative
+pivot.
 
 ## Recent Tried-and-Rejected
-   trace fix is more correct in absolute terms but moves feral
-   away from the current oracle.
+  sqrt(eps) threshold.
 
-**Decision.** Revert and re-attempt after canonical Fortran MUMPS becomes
-available as a second oracle (per `dev/plans/phase-1b-consensus-exit.md`).
-At that point we can verify whether canonical MUMPS uses trace-based or
-a00-based inertia counting on the 16 regressed matrices and reapply the
-fix in the direction that the canonical solver agrees with.
+The triage harness (`examples/triage_dense_acopp30.rs` — committed
+as 555b579) and bench cross-comparison metrics (committed as c55bacf)
+remain valid infrastructure for the next attempt.
 
-**Code state.** A `KNOWN BUG` comment is left in
-`src/dense/factor.rs::count_2x2_inertia` documenting the issue and
-linking back here. The function signature remains unchanged so we don't
-need `#[allow(clippy::too_many_arguments)]` for code that we know will
-need to change again.
+**Evidence.**
+- `cargo run --release --example triage_dense_acopp30` after both
+  fixes: ACOPP30_{0026,0018,0000} all produce residuals 1e-13..1e-14.
+- `cargo run --release --bin bench` after both fixes:
+  - Dense inertia match 146037/154481 (94.5%)
+  - Dense residual pass 149390/154481 (96.7%)
+  - Dense worst residual 1.85e0 on MISTAKE_0101 (expected `(9,13,0)`,
+    got `(8,13,1)`)
+  - 8836 total dense failures vs baseline 1838
+- `cargo run --release --example triage_dense_acopp30` after revert:
+  back to baseline 2.8e-2 with inertia `(72,137,0)`.
 
-**Symptoms.** Inertia error pattern `(p+1, n+1, 0) → (p, n, +1)` on
-matrices with zero-diagonal Hessian rows. The "lost positive" appears
-as a "gained zero" in feral's output. Most visible on the ACOPP30
-family (68 matrices, all with the same `(72,137,0) → (71,137,1)`
-mismatch).
+**Code state.** `src/dense/factor.rs` fully reverted to HEAD
+(555b579). The attempted fix is not present in the tree.
 
 ## Source Files
 ```
@@ -291,37 +348,5 @@ src/io/mod.rs
 src/io/mtx.rs
 src/io/sidecar.rs
 src/lib.rs
-src/numeric/factorize.rs
-src/numeric/mod.rs
-src/numeric/solve.rs
-src/ordering/amd.rs
-src/ordering/elimination_tree.rs
-src/ordering/mod.rs
-src/ordering/postorder.rs
-src/scaling/hungarian.rs
-src/scaling/infnorm.rs
-src/scaling/mc64.rs
-src/scaling/mod.rs
-src/sparse/csc.rs
-src/sparse/mod.rs
-src/symbolic/column_counts.rs
-src/symbolic/mod.rs
-src/symbolic/supernode.rs
-```
 
-## Test Files
-```
-tests/delayed_pivoting.rs
-tests/dense_ldlt.rs
-tests/kkt_hardening.rs
-tests/kkt_matrices.rs
-tests/mc64_end_to_end.rs
-tests/mc64_scaling.rs
-tests/parity.rs
-tests/pivot_rejection.rs
-tests/property_tests.rs
-tests/sparse_postorder.rs
-tests/sparse_refined.rs
-tests/stress_tests.rs
-tests/threshold_consistency.rs
-```
+(truncated from      384 lines to 350 line budget)

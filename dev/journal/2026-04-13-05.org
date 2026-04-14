@@ -1,0 +1,155 @@
+#+TITLE: Feral Journal 2026-04-13-05
+#+STARTUP: overview
+
+* resume :session:context:
+Resuming from 2026-04-13-04 checkpoint. Task #19 in flight: dense
+ACOPP30 residual gap (67 matrices, dense rel_res ~2.8e-2 vs sparse
+~1e-14). Three uncommitted items from the prior session already in
+the tree: =src/bin/bench.rs= shared-failure cross-comparison,
+=dev/research/shared-failure-triage.md=, and
+=examples/triage_dense_acopp30.rs=.
+
+* commit in-flight :harness:commit:
+Committed the harness/research trio as two atomic commits:
+- =c55bacf= — shared bench-failure triage tooling + research note
+  (bench.rs cross-comparison + shared-failure-triage.md)
+- =555b579= — dense ACOPP30 triage example
+
+Pre-commit hook caught =cargo fmt --check= failures on bench.rs and
+the triage example; ran =cargo fmt= and re-committed cleanly. Used
+commit message files (=/tmp/feral_commit_msg_{a,b}.txt=) via =-F=
+because heredoc-in-bash-tool kept tripping a parse error.
+
+* triage instrumentation :dense:trace:
+Added a =FERAL_DENSE_TRACE=1= env-var gated eprintln in
+=src/dense/factor.rs::factor()= to dump the 2×2 block and growth
+check at each iteration. Ran against ACOPP30_0026. Smoking gun at
+k=58:
+#+begin_example
+[dense] k=58 2x2: d11=0 d21=-4.16e-15 d22=-6.08e-9 det=1.73e-29
+[dense] Duff-Reid rmax=... tmax=... u=0 growth_fail=false (trivially)
+#+end_example
+|det| = 1.73e-29 passes =count_2x2_inertia='s =eps²= floor (4.93e-32)
+by 350× but is absurdly small relative to the block entries. At u=0,
+the Duff-Reid growth bound =(|a22|*rmax + |a10|*tmax)*u ≤ |det|=
+collapses to =0 ≤ |det|=, trivially satisfied. L21 = A21·inv(D) then
+scales by ≈10^29 and destroys the trailing submatrix.
+
+Reverted the trace prints after diagnosis.
+
+* proposed fixes :dense:factor:hypothesis:
+Two candidate fixes discussed with the user:
+- *(a) Duff-Reid u backstop*: =let u = params.pivot_threshold.max(sqrt(eps))=.
+  Stops the 2×2 from being accepted even at u=0, bounds element
+  growth at ≈ 1/sqrt(eps).
+- *(b) Reducible-column floor*: extend =if gamma0 == 0.0= to
+  =if gamma0 ≤ sqrt(eps)=, and floor the diagonal the same way, so
+  columns with couplings below sqrt(eps) get force-zeroed.
+
+User authorized implementing both. Verified that =factor()= is used
+only by =numeric/factorize.rs= (a test harness) — the production
+sparse path uses =factor_frontal()=, so fixing =factor()= should not
+regress the sparse bench.
+
+* fix implementation :dense:attempt:
+Applied fix (a) at =src/dense/factor.rs:301= (in the dense
+BK main loop's step 7, the 2×2 growth check).
+
+Applied fix (b) at =src/dense/factor.rs:170..216= by replacing the
+=if gamma0 == 0.0= branch with =if gamma0 <= reducible_floor= where
+=reducible_floor = sqrt(eps)=, plus an inner check on =|a[k,k]|=
+that force-zeros the diagonal and bumps the zero count.
+
+Also dealt with an unused_assignments warning at line 173 by removing
+the now-redundant =have_fused = false= inside the =if have_fused=
+branch (every other code path unconditionally reassigns
+=have_fused=).
+
+Build clean, clippy clean.
+
+* triage verification :dense:result:positive:
+Re-ran =cargo run --release --example triage_dense_acopp30= with
+both fixes. Massive improvement:
+| matrix        | before (A)  | after (A)   | after (A') refined |
+|---------------+-------------+-------------+--------------------|
+| ACOPP30_0026  | 2.80e-2     | 1.04e-13    | 1.22e-14           |
+| ACOPP30_0018  | 2.77e-2     | 1.05e-13    | 1.31e-14           |
+| ACOPP30_0000  | 2.74e-2     | 6.02e-13    | 6.23e-15           |
+
+Inertia flipped from sidecar =(72, 137, 0)= to =(71, 137, 1)=. Per
+the shared-failure-triage note, this matches MUMPS/SSIDS and is
+correct — the sidecar is wrong for these matrices. Test suite
+passes (80 + 6 + 16 + 8 + 27 + ... + all green).
+
+Looked promising. Ran the full bench.
+
+* full bench regression :dense:regression:critical:
+Full =cargo run --release --bin bench= collapsed. Side by side:
+| metric                   | baseline    | after fix     | delta    |
+|--------------------------+-------------+---------------+----------|
+| dense inertia match      | 99.0%       | 94.5%         | −4.5pp   |
+| dense residual pass      | 99.8%       | 96.7%         | −3.1pp   |
+| dense worst residual     | 2.80e-2     | 1.85e0        | worse    |
+| dense failures (total)   | 1838        | 8836          | +6998    |
+| worst residual matrix    | ACOPP30_26  | MISTAKE_0101  | new      |
+
+The new worst, MISTAKE_0101 n=22: expected =(9, 13, 0)=, got
+=(8, 13, 1)= — i.e. a positive pivot became a zero pivot. Root cause:
+the absolute =sqrt(eps)= floor in fix (b) assumes an equilibrated
+matrix (||A||∞ ~ 1). The bench corpus is not equilibrated. For
+matrices where ||A||∞ >> 1, legitimate columns with off-diagonal
+couplings ~1e-10..1e-8 get flagged as reducible and their diagonals
+force-zeroed.
+
+* revert experiment :dense:revert:
+Reverted fix (b) first, kept fix (a), re-ran triage. Result was
+*even worse* than the original baseline:
+#+begin_example
+ACOPP30_0026: rel_res = 2.625e2  (was 2.8e-2)
+ACOPP30_0018: rel_res = 1.804e2
+ACOPP30_0000: rel_res = 1.083e5
+#+end_example
+
+Why: when the growth bound rejects the 2×2 at k=58, fix (a) falls
+back to =do_1x1_pivot(&mut a, n, k, gamma0, ...)= with the *same*
+=a[k,k] = 0= diagonal. The 1×1 pivot divides by ~0, producing
+gigantic L entries.
+
+Fix (a) cannot stand alone — when the 2×2 is rejected in this
+scenario there is no safe 1×1 fallback at position k. The correct
+handling is either delayed pivoting (swap column k with some
+downstream column that has a usable diagonal) or treating the
+column as rank-deficient and moving on — but neither is the current
+fallback.
+
+Reverted fix (a) too via =git checkout src/dense/factor.rs=. Tests
+pass. Tree back to HEAD (555b579). Worst dense residual back to
+2.80e-2 on ACOPP30_0026.
+
+* failure recorded :tried-and-rejected:
+Appended entry to =dev/tried-and-rejected.md= documenting both
+fixes, evidence of the regression, and the explanation of why the
+sqrt(eps) floor is wrong for non-equilibrated matrices. Next attempt
+should either implement delayed pivoting for the dense path or scale
+the reducible-column floor by the running max diagonal magnitude
+(or matrix inf-norm).
+
+* takeaways :lesson:
+1. *Absolute numeric floors are dangerous without equilibration.*
+   sqrt(eps) ~ 1.49e-8 is only meaningful when ||A||∞ is close to 1.
+   The bench corpus spans many orders of magnitude, so any absolute
+   cutoff is a regression waiting to happen.
+2. *A triage example that clears on 3 matrices is necessary but not
+   sufficient.* The 3 ACOPP30 cases proved the hypothesis about the
+   root cause (2×2 with |det|~eps² + unequilibrated column) and
+   proved the fix *reached* that code path. They did not protect
+   against the same code path being activated spuriously on 7000
+   other matrices.
+3. *Fix (a) exposed that our 2×2 rejection fallback is broken.*
+   The dense path can't safely decline a 2×2 when a[k,k]=0. This
+   is a latent bug that future delayed-pivoting work will need to
+   handle regardless of the ACOPP30 issue.
+4. *The harness and triage infrastructure committed in c55bacf and
+   555b579 are still valuable* — they remain the starting point for
+   the next attempt. Commit them early so a failed factor fix doesn't
+   lose them.
