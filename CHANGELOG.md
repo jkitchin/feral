@@ -51,6 +51,37 @@ All notable changes to FERAL will be documented in this file.
   replaced with the bit-exact non-FMA variant. See
   `dev/tried-and-rejected.md` and `dev/decisions.md` Phase 2.4.3.
 
+### Phase 2.8.1 exit partition check (2026-04-14)
+
+**Correction to the "both exit criteria met" claim above.** The
+Phase 2.4 entry measures against the overall `factor/MUMPS` p90
+aggregate. The spec exit criterion in `FERAL-PROJECT-SPEC.md` §1747
+and `dev/plans/phase-2-planning.md` §2.8.1 is stricter: it asks
+"within 2× of MUMPS on small-frontal KKT set, within 3× on medium
+set", with explicit bucket definitions (small-frontal: max frontal
+dim < 200 AND n ≤ 10³; medium: max frontal dim < 500 AND n ≤ 10⁴).
+
+Applying the partition:
+
+| bucket              |  count | p90  | target | verdict |
+|---------------------|-------:|-----:|-------:|:-------:|
+| Dense small-frontal | 147982 | 1.39 | ≤ 2.0  | PASS    |
+| Dense medium        | 152145 | 1.74 | ≤ 3.0  | PASS    |
+| Sparse small-frontal| 153455 | 2.81 | ≤ 2.0  | **FAIL**|
+| Sparse medium       | 153560 | 2.81 | ≤ 3.0  | PASS    |
+
+Dense meets both bars cleanly. **Sparse small-frontal fails** the
+strict partition with p90 = 2.81 (target ≤ 2.0). Phase 2 cannot
+exit formally until this is resolved.
+
+Profile evidence (`examples/profile_sparse_smallfront.rs`, 152128
+small-frontal matrices) locates the bottleneck at `amd_order`:
+39.8% of total time with a fat tail of ~9 ms on n=234 matrices
+(DISCS family). The plan's Phase 2.5.1 target (Liu row-subtree
+column counts) is only 2.6% of the budget and is demoted. The new
+Phase 2.5.1 priority is diagnosing and fixing AMD. See
+`dev/decisions.md` 2026-04-14 "Phase 2.5 priority reordered".
+
 ### Phase 1b Exit (2026-04-12)
 
 Phase 1b closed under the multi-source consensus exit criterion on
