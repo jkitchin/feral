@@ -5,8 +5,9 @@ use std::time::Instant;
 use feral::numeric::factorize::factorize_multifrontal;
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{
-    factor, read_mtx, read_sidecar, solve, solve_refined, solve_sparse_refined, BunchKaufmanParams,
-    CscMatrix, Inertia, KktSidecar, SymmetricMatrix, ZeroPivotAction,
+    factor, factor_single_front, read_mtx, read_sidecar, solve, solve_refined,
+    solve_sparse_refined, BunchKaufmanParams, CscMatrix, Inertia, KktSidecar, SymmetricMatrix,
+    ZeroPivotAction,
 };
 
 /// A KKT matrix that failed inertia or residual on a given solver path.
@@ -629,7 +630,7 @@ fn main() {
 
         // Factor
         let t0 = Instant::now();
-        let (factors, inertia) = match factor(&entry.matrix, &params_kkt_dense) {
+        let (factors, inertia) = match factor_single_front(&entry.matrix, &params_kkt_sparse) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  {}: factor failed: {}", entry.name, e);

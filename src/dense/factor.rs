@@ -385,6 +385,70 @@ pub fn factor(
     ))
 }
 
+/// Factor a dense symmetric indefinite matrix by treating it as a single
+/// fully-summed front and delegating to `factor_frontal(may_delay=false)`.
+///
+/// Unlike `factor()`, this entry point inherits `factor_frontal`'s safe
+/// rejection fallback (via `try_reject_1x1_frontal`): when the 2×2
+/// Duff-Reid growth bound fails, the kernel does not divide by a zero
+/// pivot, and pivots below the column-relative threshold are either
+/// accepted with their correct sign or force-zeroed, with iterative
+/// refinement flagged.
+///
+/// Knight-Ruiz equilibration is applied before the factorization
+/// (matching `factor()`'s preprocessing) and `d_eq` is carried on the
+/// returned `Factors` for the solve to un-equilibrate.
+///
+/// Rationale: per `dev/research/task-19-dense-acopp30-expert-consultation.md`,
+/// the dense `factor()` entry point is under-constrained for pathological
+/// KKT matrices (natural order + u=0 + no `|det|==0` rejection). MUMPS
+/// 5.8.2, SPRAL SSIDS, and faer all route such matrices through a single
+/// multifrontal / frontal code path. This wrapper gives the bench and
+/// other dense callers access to the same safe kernel the sparse path
+/// uses, without needing a full symbolic analysis (no AMD/METIS).
+pub fn factor_single_front(
+    matrix: &crate::dense::matrix::SymmetricMatrix,
+    params: &BunchKaufmanParams,
+) -> Result<(Factors, Inertia), FeralError> {
+    matrix.validate()?;
+    let n = matrix.n;
+
+    let d_eq = crate::dense::equilibrate::equilibrate_scaling(matrix);
+
+    // Build an equilibrated scratch SymmetricMatrix for factor_frontal.
+    let mut eq_data = vec![0.0; n * n];
+    for j in 0..n {
+        for i in j..n {
+            eq_data[j * n + i] = d_eq[i] * matrix.data[j * n + i] * d_eq[j];
+        }
+    }
+    let eq_matrix = crate::dense::matrix::SymmetricMatrix { n, data: eq_data };
+
+    let front = factor_frontal(&eq_matrix, n, false, params)?;
+
+    // With may_delay=false and ncol=n, nelim==n, contrib is empty, and
+    // the FrontalFactors fields map 1:1 to Factors plus d_eq.
+    debug_assert_eq!(front.nelim, n);
+    debug_assert_eq!(front.n_delayed, 0);
+    debug_assert_eq!(front.contrib_dim, 0);
+
+    let inertia = front.inertia;
+    let factors = Factors {
+        n,
+        l: front.l,
+        d_diag: front.d_diag,
+        d_subdiag: front.d_subdiag,
+        perm: front.perm,
+        perm_inv: front.perm_inv,
+        d_eq,
+        needs_refinement: front.needs_refinement,
+        zero_tol: front.zero_tol,
+        zero_tol_2x2: front.zero_tol_2x2,
+    };
+
+    Ok((factors, inertia))
+}
+
 /// Result of partial frontal factorization for the multifrontal solver.
 #[derive(Debug)]
 pub struct FrontalFactors {

@@ -16,7 +16,9 @@ pub mod sparse;
 pub mod symbolic;
 
 // Flat public API re-exported at crate root:
-pub use dense::factor::{factor, BunchKaufmanParams, Factors, ZeroPivotAction};
+pub use dense::factor::{
+    factor, factor_single_front, BunchKaufmanParams, Factors, ZeroPivotAction,
+};
 pub use dense::matrix::SymmetricMatrix;
 pub use dense::solve::{solve, solve_refined};
 pub use error::FeralError;
