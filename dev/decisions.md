@@ -395,3 +395,68 @@ absolute-zero branch), and
 `factor_frontal_root_accepts_small_pivot_with_sign` was added to
 cover the new sign-preserving branch with a clearly-negative
 pivot.
+
+---
+
+## 2026-04-14 — Accepted pulp 0.22.2 as the SIMD backbone for Phase 2.4.2
+
+**What.** Added `pulp = { version = "0.22.2", default-features = false,
+features = ["x86-v3"] }` as a runtime dependency in `Cargo.toml`. pulp is
+a pure-Rust portable SIMD abstraction crate (MIT/Apache-2.0, authored by
+sarah-quinones, the author of faer) that wraps `core::arch::x86_64::*` and
+`core::arch::aarch64::*` intrinsics behind a safe trait-based interface
+(`pulp::WithSimd`, `pulp::Simd`, `pulp::Arch::dispatch`). It does
+CPU-feature detection at runtime and dispatches to the best monomorphized
+variant (AVX-512 / AVX2 / SSE2 / NEON / wasm SIMD / scalar fallback).
+The pinned version exactly matches faer's `0.22.2`.
+
+**Why.** The Phase 2.4.1a null result established empirically that scalar
+loop reordering cannot produce a Schur-update speedup; faer-expert
+confirmed that faer's entire blocked Bunch-Kaufman advantage lives in a
+pulp-dispatched register-blocked SIMD GEMM at `bunch_kaufman/factor.rs:684`.
+The Phase 2 exit criterion (dense factor p90 ≤ 2× MUMPS) therefore
+requires a vectorized inner kernel. Options evaluated in
+`dev/research/phase-2.4.2-simd-schur-kernel.md`:
+
+1. **Hand-rolled `core::arch::x86_64` AVX2/FMA + `core::arch::aarch64`
+   NEON intrinsics**, gated by `#[cfg(target_arch)]` and
+   `#[target_feature]`, dispatched via `is_x86_feature_detected!`. This
+   keeps zero new deps but introduces `unsafe` blocks into `src/`, two
+   separate kernels to maintain, and no path to AVX-512 without a third
+   kernel. Estimated time well beyond the Phase 2.4.2 budget.
+2. **pulp.** One kernel, cross-arch for free, no `unsafe` in feral source,
+   AVX-512 scaling automatic, ~10× less code, already audited at scale
+   inside faer.
+
+pulp wins on every practical axis. The only cost is one more crate in
+the dependency graph and one more external project we trust — both
+acceptable since pulp is pure Rust, widely deployed, and does not
+violate the CLAUDE.md "zero non-Rust deps in the core solver" rule
+(which exists to rule out BLAS, LAPACK, and Fortran, not pure-Rust
+utility crates).
+
+**Interface boundary.** The entire pulp dependency is confined to
+`src/dense/schur_kernel.rs`, which exposes two `pub(crate)` functions:
+
+- `axpy_minus(dst: &mut [f64], src: &[f64], alpha: f64)`
+- `axpy2_minus(dst: &mut [f64], src0: &[f64], alpha0: f64, src1: &[f64], alpha1: f64)`
+
+No other file in `src/` references `pulp`. Callers use only these two
+functions. This keeps the dep swappable.
+
+**Replacement trigger (future work).** If feral ever needs to ship as a
+zero-external-dep crate — e.g., embedded, hardened, or compliance
+environments that restrict supply-chain surface — replace pulp with
+hand-rolled AVX2/FMA and NEON kernels at that time. The swap is
+mechanical because of the interface boundary above: rewrite the two
+functions in `src/dense/schur_kernel.rs` using `core::arch` intrinsics
+with `#[target_feature]` + `is_x86_feature_detected!`, and delete the
+pulp line from `Cargo.toml`. No call sites change. Tracked as a future
+activity but not scheduled.
+
+**Evidence.** Full research note at
+`dev/research/phase-2.4.2-simd-schur-kernel.md`; implementation plan
+at `dev/plans/phase-2.4.2-simd-schur-kernel.md`. Phase 2.4.1a
+post-mortem establishing the necessity of a SIMD kernel is in
+`dev/tried-and-rejected.md`. Commit introducing the dep: see Phase
+2.4.2 Step 1 commit message.
