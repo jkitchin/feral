@@ -1,82 +1,82 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-14T10:44:12Z
+Generated: 2026-04-14T15:37:19Z
 
 ## Latest Session
-File: dev/sessions/2026-04-13-05.md
+File: dev/sessions/phase-2-baseline.md
 ```
-# Session 2026-04-13-05 — Dense ACOPP30 fix attempt (rejected)
+# Phase 2 Performance Baseline Report
 
-## Goal
+**Date:** 2026-04-14
+**Head commit under test:** `e08c7a1` (Triage: ERRINBAR_0824 and ACOPP30_0004)
+**Corpus:** 154588 KKT matrices in `data/matrices/kkt/` (dense-eligible: 154481
+at `n <= 1000`; 107 skipped at `n > 1000`)
+**Oracles:** canonical Fortran MUMPS 5.8.2 and SPRAL SSIDS (via
+`external_benchmarks/{mumps,ssids}_oracle`), per-matrix `factor_us` /
+`solve_us` in `*.mumps.json` / `*.ssids.json` sidecars.
 
-Continue Task #19 from the 2026-04-13-04 checkpoint: close the dense
-ACOPP30 residual gap. 67 ACOPP30 variants produce inertia `(72, 137, 0)`
-with residual ~2.8e-2 on the dense path while sparse (and MUMPS/SSIDS)
-produce `(71, 137, 1)` with residual ~1e-14. The goal was to land a
-dense factor.rs fix, commit the in-flight triage harness and research
-note, and re-validate the full bench.
+This is the Phase 2.1.8 baseline required by
+`dev/plans/phase-2-planning.md` §2.1.8. Every later optimization in Phase
+2.4 (dense perf) and Phase 2.5 (sparse perf) is measured against these
+numbers.
 
-## Accomplished
+## Harness additions (Phase 2.1.7)
 
-### Committed in-flight harness/research (c55bacf, 555b579)
+`src/bin/bench.rs` gained:
 
-- `c55bacf` — Shared bench-failure triage tooling + research note.
-  Extends `src/bin/bench.rs::print_cross_comparison` to join dense and
-  sparse failure records by name and bucket the intersection by failure
-  mode (inertia/residual/mixed), size class, top families, and top-15
-  worst shared residuals. Adds `dev/research/shared-failure-triage.md`
-  which documents the 1809 shared dense+sparse failures in the full KKT
-  bench — headline: 1499/1809 (83%) are corpus data-quality artifacts
-  where the sidecar disagrees with both MUMPS 5.8.2 and SPRAL SSIDS.
-- `555b579` — Dense ACOPP30 triage example.
-  `examples/triage_dense_acopp30.rs` runs three ACOPP30 cases under four
-  parameter configs (A/A' threshold=0 plain/refined, B/C threshold=0.01
-  plain/refined) and prints inertia + relative residual + ||b|| alongside
-  the MUMPS oracle residual from `.mumps.json`.
+- `OracleTiming` + `read_oracle_timing` — parses the `factor_us` /
+  `solve_us` fields out of oracle JSON sidecars.
+- `KktEntry::{mumps_timing, ssids_timing}` — populated in `load_kkt_dir`
+  by `with_extension("mumps.json")` / `with_extension("ssids.json")`;
+  missing files leave the fields as `None`.
+- `MatrixTiming` — per-matrix feral factor+solve μs, collected in both
+  the dense and sparse loops.
+- Sparse-loop `Instant::now()` calls — the old sparse loop reported
+  inertia and residual but not timings; now records `sp_factor_us`
+  (symbolic + numeric combined, matching the semantics of MUMPS's and
+  SSIDS's single `factor_us` field) and `sp_solve_us`.
+- `print_perf_comparison` — joins feral timings against
+  `{mumps,ssids}_timing`, emits overall ratio distribution
+  (geomean, p50, p90, p99, max), per-family geomean, and top-10 worst
+  factor-ratio matrices vs MUMPS.
 
-Both commits caught `cargo fmt --check` failures in pre-commit and were
-re-committed after running `cargo fmt`. No test or clippy warnings.
+Ratio clamp: both sides use `.max(1) μs` so that sub-microsecond
+matrices at the clock-resolution floor produce ratio = 1.0 rather than
+collapsing the log-space geomean.
 
-### Dense factor.rs root-cause tracing
+## Overall results — ratio = feral_μs / oracle_μs
 
-Added `FERAL_DENSE_TRACE=1` env-gated prints to `src/dense/factor.rs`
-and ran against ACOPP30_0026. Smoking gun at k=58: the 2×2 block
+Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
-```
-[[ 0       , -4.16e-15 ],
- [ -4.16e-15, -6.08e-9 ]]
-```
+### Dense path (`factor_single_front` + `solve_refined`), 154481 matrices
 
-has `|det| = 1.73e-29`, which passes `count_2x2_inertia`'s `eps²` floor
-(4.93e-32) by 350×. At `u = params.pivot_threshold = 0.0` (the dense
-default), the Duff-Reid growth bound `(|a22|*rmax + |amax|*tmax)*u ≤ |det|`
-collapses to `0 ≤ |det|` and is trivially satisfied. L21 = A21·inv(D)
-then scales by ≈10²⁹ and destroys the trailing submatrix. Residual 2.7e-2.
-
-Verified via `grep` that `factor()` is only used by `numeric/factorize.rs`
-in a test; the production sparse path uses `factor_frontal()`, so fixing
+| metric        | count  | geomean |   p50 |   p90 |   p99 |      max |
+|---------------|-------:|--------:|------:|------:|------:|---------:|
+| factor/MUMPS  | 153472 |    0.23 |  0.11 |  2.27 | 28.99 |   296.45 |
+| solve/MUMPS   | 153472 |    0.37 |  0.25 |  2.00 | 23.40 |   523.76 |
+| factor/SSIDS  | 154393 |    0.01 |  0.00 |  0.34 |  8.04 |    48.23 |
 ```
 
 ## Git Status
 ```
-c619fda Task #19: reroute dense KKT bench through factor_single_front
-934c8f4 Session 2026-04-13-05: dense ACOPP30 fix attempt (rejected)
-555b579 Add dense ACOPP30 triage example for task #19
-c55bacf Shared bench-failure triage tooling + research note
-ce09aa6 Phase 2.3 Step 9: delayed pivoting validation report
+4696e13 Phase 2.4.2 Step 3: pulp-dispatched SIMD kernels for axpy_minus and axpy2_minus
+a174ec1 Phase 2.4.2 Step 2: schur_kernel module with scalar kernels + test harness
+bf97ae6 Phase 2.4.2 Step 1: add pulp 0.22.2 dep for SIMD kernel
+ff72c53 Phase 2.4.2 planning: SIMD Schur kernel via pulp
+6ca8832 Phase 2.4.1a null result: contribution-block deferral reverted
 ```
 
 ## Test Status
 ```
 test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
-     Running tests/threshold_consistency.rs (target/debug/deps/threshold_consistency-c660296127e8afca)
+     Running tests/threshold_consistency.rs (target/debug/deps/threshold_consistency-804225430b8dfbb6)
 
 running 6 tests
 test polak6_0021_residual_after_threshold_fix ... ignored
 test factors_carry_zero_tol_from_params ... ok
-test factor_inertia_force_accept_implies_solve_skip_invariant ... ok
 test dense_solve_skips_zero_pivots_rank_deficient ... ok
+test factor_inertia_force_accept_implies_solve_skip_invariant ... ok
 test refinement_does_not_amplify_error_on_rank_deficient_matrix ... ok
 test sparse_solve_skips_zero_pivots_rank_deficient ... ok
 
@@ -97,14 +97,14 @@ Loading matrices from data/benchmark-config.toml ... not found
 
 name                n   factor(μs)    solve(μs)        inertia
 --------------------------------------------------------------
-spd_10             10           45            0     (10, 0, 0)
-spd_50             50           21            3     (50, 0, 0)
-spd_100           100           93            5    (100, 0, 0)
-spd_200           200          444           18    (200, 0, 0)
+spd_10             10           20            0     (10, 0, 0)
+spd_50             50           20            3     (50, 0, 0)
+spd_100           100           82            5    (100, 0, 0)
+spd_200           200          400           21    (200, 0, 0)
 kkt_10_3           13            3            0     (10, 3, 0)
-kkt_30_10          40           33            1    (30, 10, 0)
-kkt_50_15          65           55            2    (50, 15, 0)
-kkt_100_30        130          234            7   (100, 30, 0)
+kkt_30_10          40           19            1    (30, 10, 0)
+kkt_50_15          65           46            2    (50, 15, 0)
+kkt_100_30        130          214            8   (100, 30, 0)
 
 8 matrices benchmarked
 
@@ -138,14 +138,14 @@ HS46                         27          0         27        7.51e-8
 PFIT2                        23          0         23        5.39e-6
 CERI651CLS                   21          1         20        2.06e-7
 CRESC100                     19         19          0       4.76e-15
-PALMER1ENE                   17          0         17        1.22e-8
 CERI651ALS                   17          2         15        4.31e-8
+PALMER1ENE                   17          0         17        1.22e-8
 DEVGLA2                      15          0         15        1.50e-7
 KIRBY2                       12         12          0       1.30e-13
 MISTAKE                      11          0         11        1.33e-6
 ALLINITA                      9          2          7        5.43e-7
-BENNETT5                      8          8          0       4.75e-14
 DISCS                         8          8          0       1.98e-15
+BENNETT5                      8          8          0       4.75e-14
 DJTL                          7          0          7        5.33e-7
 SNAKE                         6          0          6        1.83e-9
 LSC2LS                        5          0          5        1.95e-8
@@ -190,8 +190,8 @@ PALMER1ENE                   16          0         16        1.22e-8
 CERI651ALS                   15          2         13        1.28e-7
 DEVGLA2                      15          0         15        7.78e-7
 KIRBY2                       12         12          0       1.52e-13
-VESUVIO                      10         10          0       1.40e-13
 MISTAKE                      10          0         10        1.17e-6
+VESUVIO                      10         10          0       1.40e-13
 ALLINITA                      9          2          7        4.84e-7
 BENNETT5                      8          8          0       8.69e-14
 DISCS                         8          8          0       2.09e-15
@@ -254,11 +254,11 @@ CERI651ALS                   14          2         12        1.28e-7
 KIRBY2                       12         12          0       1.52e-13
 MISTAKE                      10          0         10        1.33e-6
 ALLINITA                      9          2          7        5.43e-7
-DISCS                         8          8          0       2.09e-15
 BENNETT5                      8          8          0       8.69e-14
+DISCS                         8          8          0       2.09e-15
 DJTL                          7          0          7        5.33e-7
 LSC2LS                        4          0          4        1.95e-8
-EQC                           3          0          3        1.21e-7
+CONGIGMZ                      3          2          1        9.85e-9
   ... and 40 more families
 
 Top 15 worst shared residuals:
@@ -277,76 +277,76 @@ PFIT2_0299                       6      1.37e-6      6.12e-8      (3, 3, 0)     
 PFIT2_0297                       6      1.37e-6      6.12e-8      (3, 3, 0)      (3, 3, 0)
 PFIT2_0298                       6      1.37e-6      6.12e-8      (3, 3, 0)      (3, 3, 0)
 PFIT2_0329                       6      1.64e-7      1.36e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0328                       6      4.15e-8      1.36e-6      (3, 3, 0)      (3, 3, 0)
-```
+PFIT2_0327                       6      4.15e-8      1.36e-6      (3, 3, 0)      (3, 3, 0)
 
-## Recent Decisions
-is counted as a zero pivot. The 2×2 fallback routes through the
-same path.
+=== Dense perf vs canonical oracles (154481 matrices with oracle timings) ===
 
-**Why.** Converting a small-but-clearly-nonzero pivot into a
-zero loses inertia information and produces residuals that
-iterative refinement cannot recover, because the pivot is driven
-to exactly 0 instead of being preserved with its noisy-but-
-nonzero value. This is exactly the DEGENLPA_0065 failure mode:
-the reference reports `(20, 15, 0)` and feral reported
-`(20, 14, 1)` with a 7.06e2 residual. MUMPS always reports
-`n0 = 0` in the default configuration (INFOG(28) is only
-computed when ICNTL(24)=1), so the reference oracle never
-reports zero pivots — the comparison is partly a measurement
-artifact on top of the real sign-loss bug. SSIDS handles the
-same case by breaking at the root and leaving the pivot
-un-eliminated (the outer multifrontal driver reassembles it);
-sign preservation is a strictly smaller change that captures
-the correctness gain without touching the root-break logic.
+ratio               count    geomean        p50        p90        p99        max
+factor/MUMPS       153472       0.22       0.11       2.00      24.96     101.66
+solve/MUMPS        153472       0.37       0.25       1.89      22.31     141.03
+factor/SSIDS       154393       0.01       0.00       0.31       7.38      22.71
+solve/SSIDS        154393       1.47       1.00       8.00      76.33     272.43
 
-**Evidence.** Parity 14/28 → 22/28 (flipped CERI651A×3,
-DEGENLPA_0065, DEGENLPB_0045/0046/0047, PALMER2ANE_0000).
-Sparse worst residual 7.06e2 → 3.22e-4 (six orders of
-magnitude). Full measurements in
-`dev/sessions/2026-04-13-04.md`. No test tolerances were
-loosened. The `factor_frontal_root_force_accepts_without_delay`
-unit test was updated to use `d = 0` exactly (matching the
-absolute-zero branch), and
-`factor_frontal_root_accepts_small_pivot_with_sign` was added to
-cover the new sign-preserving branch with a clearly-negative
-pivot.
+Per-family factor geomean vs MUMPS (top 25 families by count):
+family                  count    geomean        p50        max
+SSINE                    3000       0.07       0.08       0.41
+SSI                      3000       0.09       0.10       0.67
+HS90                     3000       0.10       0.10       7.20
+HATFLDH                  3000       0.09       0.09       0.23
+HS89                     3000       0.10       0.10       0.22
+BIGGSC4                  3000       0.08       0.08       0.89
+HS118                    3000       0.33       0.31       7.40
+CONCON                   3000       0.45       0.44       7.38
+MCONCON                  3000       0.39       0.40       8.53
+HATFLDBNE                3000       0.10       0.10       0.45
+ALLINITC                 3000       0.09       0.08       0.20
+ALLINITA                 3000       0.09       0.08       0.58
+MGH10LS                  3000       0.11       0.11       0.25
+HS91                     3000       0.10       0.10       0.91
+HS92                     3000       0.09       0.10       1.08
+PALMER5A                 3000       0.09       0.09       7.69
+HS13                     3000       0.11       0.11       1.11
+DJTL                     3000       0.11       0.11       1.14
+PALMER7A                 3000       0.09       0.10      14.11
+AVION2                   2682       1.68       1.76       2.40
+CERI651ALS               2331       0.08       0.08       0.23
+PFIT4                    2286       0.08       0.08       0.62
+CERI651C                 2233       0.08       0.08       0.33
+CERI651CLS               2227       0.08       0.08       0.42
+BATCH                    2054       3.13       3.19       6.88
 
-## Recent Tried-and-Rejected
-  sqrt(eps) threshold.
+Top 10 worst factor-ratio vs MUMPS:
+name                             n    feral(μs)    mumps(μs)      ratio
+CRESC100_0000                  806        20332          200     101.66
+HAHN1_0461                     715        14774          178      83.00
+HAHN1_0371                     715        15006          186      80.68
+HAHN1_0471                     715        14788          184      80.37
+HAHN1_0497                     715        14938          186      80.31
+HAHN1_0017                     715        14929          187      79.83
+HAHN1_0152                     715        15195          191      79.55
+HAHN1_0484                     715        14943          188      79.48
+HAHN1_0258                     715        14701          186      79.04
+HAHN1_0485                     715        14854          188      79.01
 
-The triage harness (`examples/triage_dense_acopp30.rs` — committed
-as 555b579) and bench cross-comparison metrics (committed as c55bacf)
-remain valid infrastructure for the next attempt.
+=== Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
 
-**Evidence.**
-- `cargo run --release --example triage_dense_acopp30` after both
-  fixes: ACOPP30_{0026,0018,0000} all produce residuals 1e-13..1e-14.
-- `cargo run --release --bin bench` after both fixes:
-  - Dense inertia match 146037/154481 (94.5%)
-  - Dense residual pass 149390/154481 (96.7%)
-  - Dense worst residual 1.85e0 on MISTAKE_0101 (expected `(9,13,0)`,
-    got `(8,13,1)`)
-  - 8836 total dense failures vs baseline 1838
-- `cargo run --release --example triage_dense_acopp30` after revert:
-  back to baseline 2.8e-2 with inertia `(72,137,0)`.
+ratio               count    geomean        p50        p90        p99        max
+factor/MUMPS       153560       0.64       0.50       2.90      10.29      92.59
+solve/MUMPS        153560       0.46       0.36       2.60      13.82      59.54
+factor/SSIDS       154500       0.03       0.02       0.44       2.59      21.45
+solve/SSIDS        154500       1.83       1.40      12.00      38.67     127.71
 
-**Code state.** `src/dense/factor.rs` fully reverted to HEAD
-(555b579). The attempted fix is not present in the tree.
+Per-family factor geomean vs MUMPS (top 25 families by count):
+family                  count    geomean        p50        max
+CONCON                   3000       1.09       1.00       5.07
+PALMER5A                 3000       0.48       0.50       5.10
+PALMER7A                 3000       0.36       0.40       1.44
+ALLINITA                 3000       0.51       0.50       7.24
+HS89                     3000       0.21       0.20       2.50
+MGH10LS                  3000       0.21       0.22       0.89
+HS91                     3000       0.40       0.40       1.30
+SSINE                    3000       0.22       0.25       1.00
+HS118                    3000       1.29       1.31       4.00
+HS13                     3000       0.23       0.22      12.50
 
-## Source Files
-```
-src/bin/bench.rs
-src/dense/equilibrate.rs
-src/dense/factor.rs
-src/dense/matrix.rs
-src/dense/mod.rs
-src/dense/solve.rs
-src/error.rs
-src/inertia.rs
-src/io/mod.rs
-src/io/mtx.rs
-src/io/sidecar.rs
-src/lib.rs
-
-(truncated from      384 lines to 350 line budget)
+(truncated from      483 lines to 350 line budget)
