@@ -256,13 +256,6 @@ pub fn find_supernodes(
             row_indices,
             children: Vec::new(),
         });
-
-        // Remap children absorbed into this node
-        for child_s in 0..n_snodes {
-            if find_root(child_s, &merged_into) == s && child_s != s {
-                // This child was merged into s — its columns are now part of s
-            }
-        }
     }
 
     // Set children relationships

@@ -99,10 +99,6 @@ pub fn factorize_multifrontal(
     // Full symmetric pattern for correct row index computation
     let full_pattern = permuted.symmetric_pattern();
 
-    // Transpose is precomputed but currently unused — kept for future
-    // amap-based assembly optimization.
-    let _ = build_csc_transpose(&permuted);
-
     // Phase 2.3 Step 5: identify root supernodes (no parent in the etree
     // forest). A node is a root iff no other supernode lists it as a
     // child. Roots must run with `may_delay = false` so
@@ -449,55 +445,6 @@ fn build_row_indices(
     result.extend(delayed_cols);
     result.extend(trailing);
     result
-}
-
-/// Build the transpose of a lower-triangle CSC matrix (excluding diagonal).
-///
-/// For each off-diagonal entry (row, col) with row > col in the CSC,
-/// records that row `row` has an entry at column `col`.
-///
-/// Returns (trans_ptr, trans_col, trans_src) where:
-/// - trans_ptr[k]..trans_ptr[k+1] = range of entries for row k
-/// - trans_col[idx] = the column c < k
-/// - trans_src[idx] = position in the original CSC values array
-fn build_csc_transpose(csc: &CscMatrix) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
-    let n = csc.n;
-
-    // Count entries per row (excluding diagonal)
-    let mut counts = vec![0usize; n];
-    for col in 0..n {
-        for k in csc.col_ptr[col]..csc.col_ptr[col + 1] {
-            let row = csc.row_idx[k];
-            if row > col {
-                counts[row] += 1;
-            }
-        }
-    }
-
-    // Build ptr
-    let mut trans_ptr = vec![0usize; n + 1];
-    for i in 0..n {
-        trans_ptr[i + 1] = trans_ptr[i] + counts[i];
-    }
-    let total = trans_ptr[n];
-    let mut trans_col = vec![0usize; total];
-    let mut trans_src = vec![0usize; total];
-
-    // Fill entries
-    let mut offsets = trans_ptr[..n].to_vec();
-    for col in 0..n {
-        for k in csc.col_ptr[col]..csc.col_ptr[col + 1] {
-            let row = csc.row_idx[k];
-            if row > col {
-                let pos = offsets[row];
-                trans_col[pos] = col;
-                trans_src[pos] = k;
-                offsets[row] += 1;
-            }
-        }
-    }
-
-    (trans_ptr, trans_col, trans_src)
 }
 
 /// Contribution block from a child supernode.
