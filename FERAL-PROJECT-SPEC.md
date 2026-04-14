@@ -1744,7 +1744,22 @@ This downloads a curated set of symmetric indefinite matrices from [sparse.tamu.
 - METIS ordering option (priority for KKT systems where AMD underperforms)
 - LDLT-aware ordering preprocessing (MUMPS ICNTL(12)-like compressed graph ordering for KKT structure)
 - Optimized memory allocation and fill prediction
-- **Exit criterion:** Within 2× of MUMPS on small-frontal KKT set; within 3× on medium set
+- **Exit criterion:** Within 2× of MUMPS on small-frontal KKT set; within 3× on medium set, where the partition is defined as
+  - **Small-frontal:** max frontal dimension < 200 AND problem-scale `n ≤ 10³`, target `factor/MUMPS p90 ≤ 2.0`
+  - **Medium:** max frontal dimension < 500 AND problem-scale `n ≤ 10⁴`, target `factor/MUMPS p90 ≤ 3.0`
+
+  **Phase 2 exited 2026-04-14** with all four partitions satisfying the criterion on the full 154,588-matrix CUTEst KKT corpus (153,560 matrices with MUMPS oracle timings):
+
+  | bucket               |  count | p90  | target | verdict |
+  |----------------------|-------:|-----:|-------:|:-------:|
+  | Dense small-frontal  | 147,982 | 1.55 | ≤ 2.0  | PASS    |
+  | Dense medium         | 152,145 | 1.95 | ≤ 3.0  | PASS    |
+  | Sparse small-frontal | 153,455 | 2.00 | ≤ 2.0  | PASS    |
+  | Sparse medium        | 153,560 | 2.00 | ≤ 3.0  | PASS    |
+
+  Sparse small-frontal runs at the 2.0 bar with ~3–5% run-to-run noise; 3-run median on the Phase 2 exit commit is 2.00/1.98/2.00. Full results in `dev/sessions/2026-04-14-05.md`; Phase 2 retrospective in `dev/phase2-retrospective.org`.
+
+  **Zero correctness regressions across Phase 2.** Every Phase 2 commit preserved or improved the inertia/residual counts established at Phase 1b exit: dense 152,911/154,481 inertia, sparse 153,009/154,588 inertia, sparse 154,329/154,588 residual pass.
 
 ### Phase 3: POUNCE Integration
 

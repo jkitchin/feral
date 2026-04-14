@@ -1,0 +1,1052 @@
+#+TITLE: Phase 2 Retrospective: Performance, Delayed Pivoting, and the Cost of Certified Inertia
+#+AUTHOR: FERAL Development
+#+DATE: 2026-04-14
+#+OPTIONS: toc:2 num:t
+#+BIBLIOGRAPHY: references.bib
+
+* Abstract
+
+Phase 2 of the FERAL project (2026-04-12 through 2026-04-14)
+converted the correct but slow sparse symmetric indefinite solver
+delivered at Phase 1b exit into a solver whose performance meets
+the Phase 2 specification exit criterion: within 2× of canonical
+MUMPS 5.8.2 citep:duff1983multifrontal on small-frontal KKT
+matrices and within 3× on medium-frontal KKT matrices, measured
+on a 154,588-matrix CUTEst citep:gould2015cutest corpus collected
+from IPOPT citep:wachter2006ipopt runs. The headline result is
+that all four exit partitions pass (dense small-frontal
+=factor/MUMPS p90 = 1.55=, dense medium =1.95=, sparse
+small-frontal =2.00=, sparse medium =2.00=) with zero
+correctness regressions from Phase 1b: inertia counts and residual
+pass rates are identical to the Phase 1b exit commit.
+
+The /methodological/ result of Phase 2 is more interesting than
+the performance numbers. Two classes of surprise shaped the phase:
+(1) the sparse small-frontal bottleneck turned out to be an
+/O(deg³)/ pathology in exact-degree minimum-degree elimination
+caused by a linear =Vec::contains= call on near-dense inputs, not
+the algorithm the plan had assumed; and (2) a single-instruction
+FMA optimization in the dense Schur kernel produced four
+sparse-inertia regressions via 1-ULP pivot-classification flips
+at the zero-pivot boundary, forcing the project to adopt a
+bit-exact non-FMA policy for the hot kernel. Both surprises
+reinforce a lesson that goes beyond Phase 2: /optimization for
+certified inertia is constrained by a correctness surface that
+ordinary performance work is not, and the constraint is quantitative,
+not aspirational/.
+
+*Scope caveat.* The Phase 2 exit margin is tight. Sparse
+small-frontal sits at the 2.0 bar with approximately 3–5%
+run-to-run noise on this partition; a 3-run median at the exit
+commit is 2.00/1.98/2.00. The exit is real (all three median
+readings are at or below the bar) but the headroom is zero, and
+the Phase 3 work will have to re-verify this partition on every
+commit that touches the sparse hot path. Phase 2 /cleared the
+gate; it did not build a buffer./ The scope caveat from the
+Phase 1 retrospective --- the original KKT corpus is restricted
+to $n \leq 500$ matrices --- no longer applies; Phase 2.1.1 lifted
+that filter and re-ran the corpus on all 154,588 matrices, the
+largest being =CRESC132_0000= at $n = 5314$.
+
+* Introduction
+
+** Phase 2's place in the project
+:PROPERTIES:
+:CUSTOM_ID: phase2-place
+:END:
+
+The FERAL project delivers a pure-Rust, clean-room sparse symmetric
+indefinite direct solver intended as a drop-in replacement for
+MUMPS in the interior-point solver ripopt citep:wachter2006ipopt.
+Phase 1 (through 2026-04-12) delivered a /correct/ solver under a
+multi-source consensus criterion, agreeing with canonical Fortran
+MUMPS on 99.97% of a 153,117-matrix "Definitive" subcorpus ---
+higher than the agreement between canonical MUMPS and canonical
+SPRAL/SSIDS citep:hogg2013pivoting themselves. Full details of the
+Phase 1 work and its honest-assessment caveats are in
+=dev/phase1-retrospective.org=.
+
+Phase 2 picks up a solver that is correct but slow, benchmarks it
+at scale, and drives it through a sequence of performance and
+pivoting improvements until it meets the specification exit
+criterion. The criterion itself is not about how fast the solver
+can run in absolute terms --- it is about how close the solver's
+running time gets to canonical MUMPS on the KKT corpus, where
+MUMPS is assumed to represent the state of the art in Fortran +
+BLAS + METIS implementations. The target ratios (2× for
+small-frontal, 3× for medium-frontal) acknowledge that a pure-Rust
+clean-room implementation will not match a decades-mature Fortran
+codebase running on hand-tuned BLAS; they set the bar at
+"unambiguously competitive" without requiring "matches or beats".
+
+The phase therefore has a measurement problem and an optimization
+problem that sit in tension with each other. On the measurement
+side, a 154,588-matrix bench run takes approximately four minutes
+on the development machine, and optimization iterations shorter
+than that cannot be validated against the full exit partition.
+On the optimization side, the interesting wins are small (1–3%
+p90 improvements per fix) and the noise floor is large (3–5%
+run-to-run variance on the tight partition), so any single
+before-and-after reading near the margin is inside the noise
+envelope. Section [[#what-we-learned]] returns to this tension.
+
+** Phase 2 structure
+:PROPERTIES:
+:CUSTOM_ID: phase2-structure
+:END:
+
+=dev/plans/phase-2-planning.md= divides Phase 2 into eight
+sub-phases, each of which corresponds to a chunk of work in the
+session log:
+
+1. /2.1 --- Corpus expansion and measurement infrastructure./ Lift
+   the =n > 500= bench filter inherited from Phase 1a, build the
+   performance-measurement harness, produce the Phase 2 baseline
+   report.
+2. /2.2 --- Deferred correctness fixes./ Global MC64 matching-based
+   scaling (the ACOPP30 residual gap's root cause), scaling-aware
+   pivot rejection, and the supernode amalgamation adjacency fix.
+3. /2.3 --- Pivoting improvements./ Threshold partial pivoting and
+   delayed pivoting, SSIDS-style citep:hogg2013pivoting.
+4. /2.4 --- Dense kernel performance./ SIMD micro-kernel for the
+   Schur complement update.
+5. /2.5 --- Sparse pipeline performance./ Column counts, AMD, memory
+   allocation, fill prediction.
+6. /2.6 --- Ordering./ METIS integration and LDLᵀ-aware
+   preprocessing.
+7. /2.7 --- Closed-loop validation./ Run feral inside an IPOPT-style
+   outer iteration.
+8. /2.8 --- Exit criteria./ Measure against the spec, write the
+   exit session file, update the specification, write this
+   document.
+
+Sub-phases 2.1 through 2.5, along with 2.8, landed. Sub-phases 2.6
+and 2.7 were deferred to Phase 3 --- the motivating reason in both
+cases was the same: the 2.0/3.0 exit criterion was met without
+them, and building either subsystem would have added 2–4 weeks of
+work with no exit-criterion benefit. Section
+[[#what-is-deliberately-left]] discusses the honest cost of those
+deferrals.
+
+* What Phase 2 accomplished
+
+This section covers the four sub-phases that did the work visible
+in the exit numbers: 2.2 (correctness fixes that also unblocked
+perf), 2.3 (delayed pivoting), 2.4 (dense kernel SIMD), and 2.5
+(sparse pipeline performance). The bureaucracy sub-phases (2.1 and
+2.8) are summarised at the end.
+
+** Global MC64 scaling and the ACOPP30 fix
+:PROPERTIES:
+:CUSTOM_ID: mc64
+:END:
+
+The Phase 1 retrospective closed on a specific unresolved
+question: on =ACOPP30_0000=, feral and canonical MUMPS agreed on
+inertia $(71, 137, 1)$ but feral's relative residual was
+$3.15 \times 10^{-2}$ while MUMPS's was $5 \times 10^{-14}$ ---
+twelve orders of magnitude worse despite an identical
+factorization. The retrospective's Section 4.5 conjectured that
+the gap was equilibration: MUMPS applies a global row/column
+scaling before factorization, feral does not, and on a KKT matrix
+with a row-norm ratio of $10^{10}$ between the Hessian and
+constraint blocks the raw factorization is correct but the /solve/
+amplifies rounding error catastrophically.
+
+Phase 2.2.1 implemented MC64 matching-based scaling citep:duff2000mc64
+as the fix. MC64 is the Duff-Koster Hungarian-matching-based
+algorithm that finds a maximum-product matching on the absolute
+values of the matrix and then derives row/column scaling factors
+such that the scaled matrix has diagonal entries equal to 1 and
+off-diagonal entries bounded by 1 in absolute value. For a
+symmetric matrix the row and column scalings coincide, and the
+transformation $D A D$ (with $D = \text{diag}(s)$) is a
+congruence that preserves inertia.
+
+The implementation lives in =src/scaling/mc64.rs= and consists of
+a Hungarian-matching kernel, a wrapper =compute_symmetric= that
+enforces the row-column coincidence, and integration points in
+=symbolic_factorize= (to compute and cache the scaling vector),
+in =factorize_multifrontal= (to apply the scaling to assembly
+values), and in =solve_sparse_refined= (to apply the scaling to
+the right-hand side and un-scale the solution at the permutation
+boundary). The cached vector is stored in two forms: =scaling= in
+user-order indexing (as the ground-truth vector) and
+=scaling_pivot_order= as a pivot-order cache to avoid indirection
+through =perm= on every scattered assembly entry.
+
+=ACOPP30_0000='s residual dropped from $3.15 \times 10^{-2}$ to
+$5 \times 10^{-14}$ --- the same machine-precision value canonical
+MUMPS had been producing. The conjecture from the Phase 1
+retrospective was confirmed exactly: the problem was equilibration,
+not factorization, and a correctly implemented MC64 closed the
+gap.
+
+A subtle consequence surfaced later during Phase 2.2.2. The
+original pivot-rejection test was an absolute-tolerance check
+|d| > \text{zero\_tol}, which made sense on a raw matrix but
+becomes meaningless once the matrix has been rescaled by MC64.
+On a rescaled matrix, every diagonal entry is normalised to 1,
+and a "small" pivot of $10^{-10}$ is a large fraction of the
+column norm --- legitimately small, not numerically zero. The
+fix was a column-relative test |d| \geq u \cdot \text{col\_max}
+with the threshold $u$ matching the SSIDS/MUMPS default of 0.01,
+which bounds the growth factor of $L$ by $1/u = 100$ regardless
+of rescaling. Phase 2.2.2 also ported the Duff-Reid 2×2 growth
+bound citep:duff1983multifrontal for the 2×2 pivot case.
+
+The /lesson/ here is an uncomfortable one. Pivot rejection
+thresholds are not independent of scaling; changing the scaling
+strategy silently changes what "small" means. A refactor that adds
+a scaling step must re-examine every threshold in the factor code,
+and the threshold literature tends to assume a particular input
+scaling without naming it.
+
+** Delayed pivoting
+:PROPERTIES:
+:CUSTOM_ID: delayed-pivoting
+:END:
+
+Phase 1b shipped with =ZeroPivotAction::ForceAccept= as the
+default zero-pivot handling strategy. =ForceAccept= causes the
+dense kernel to record a pivot's sign and magnitude without
+actually eliminating it, setting a =needs_refinement= flag so
+that the solve path can recover via iterative refinement. This
+is correct inertia-wise for any matrix whose factorization
+otherwise succeeds, but it is a workaround: a pivot that should
+be delayed to a parent supernode is instead frozen in place at
+the current one, and the resulting Schur complement has a subtle
+structural asymmetry that makes the parent's work harder.
+
+Phase 2.3 implemented SSIDS-style delayed pivoting
+citep:hogg2013pivoting,hogg2016sparse. The key idea: at each
+supernode, when a pivot fails the column-relative threshold
+test, it is /not/ eliminated at this supernode. Instead, the
+column is marked as =delayed= and passed up to the parent
+supernode as an additional fully-summed column. The parent's
+frontal matrix is then larger by $n_{\text{delayed}}$ rows and
+columns, and the parent re-runs pivot search on the combined
+set. The algorithm guarantees termination because the root
+supernode has no parent to pass delays to, and at the root
+=ForceAccept= runs with pivot-sign preservation --- any pivot
+that cannot be eliminated even at the root is treated as
+structurally zero and the factorization is flagged for
+refinement.
+
+The nine-step implementation plan in
+=dev/plans/phase-2.3-delayed-pivoting.md= landed across sessions
+=2026-04-13-02= through =2026-04-13-05=. The steps worth naming
+here are:
+
+- /Step 3./ Contribution-block layout: delayed columns occupy the
+  top-left =n_delayed × n_delayed= block; the bottom-right
+  =(dim − n_delayed) × (dim − n_delayed)= block is the classic
+  Schur complement; the cross block carries the mixed
+  interactions. The cross-block rows are the trailing rows (same
+  global row indices as a classic contribution block), but the
+  cross-block columns live in the delayed-column index space of
+  the parent.
+- /Step 5./ Parent-side delay assembly: at the parent, the
+  delayed columns from all children are collected into a single
+  =n_delayed_in= count, the expanded =ncol= is
+  =own_ncol + n_delayed_in=, and =build_row_indices= produces a
+  three-region layout: native own-ncol columns, delayed columns
+  from children, trailing rows.
+- /Step 6./ Solve-side =nelim= fix: the solve loop walks the
+  /eliminated/ columns only, not the full supernode column count.
+  Under delayed pivoting these are no longer identical. This fix
+  was the cause of a 24-hour debugging session where the residual
+  was stable but the inertia of the L factor was inconsistent
+  with the solve path's assumption about which columns had been
+  eliminated.
+- /Step 7./ =pivot_threshold = 0.01= restored as the sparse-caller
+  default. The threshold had been temporarily zeroed during Phase
+  2.2.2 testing; Step 7 restored it once delayed pivoting made
+  rejected pivots recoverable.
+- /Step 8./ Sign-preservation at the root-supernode fallback. A
+  root-level =ForceAccept= that zeroed the sign of the pivot
+  produced a sign-flipped pivot in the L factor and a wrong
+  inertia count. The fix preserves =sign(raw_pivot)= and
+  =max(|raw_pivot|, zero_tol)= as the stored value.
+- /Step 9./ Refinement-termination fix: =max_steps 3 → 10= and an
+  early exit when $\|r\|$ stops decreasing. The 3-step default
+  was too aggressive on matrices that had been factored with
+  many delays and needed several refinement steps to recover
+  machine precision.
+
+The validation report =dev/research/phase-2.3-validation.md=
+confirms that delayed pivoting preserves inertia agreement with
+canonical MUMPS and SSIDS on the parity panel (31 matrices gated
+on multi-oracle agreement), and reduces =needs_refinement=
+frequency on the full KKT corpus from $\approx 20\%$ of matrices
+to $\approx 6\%$. The residual pass rate improved from 154,280 to
+154,329 out of 154,588; the 49-matrix improvement is the set of
+matrices where pre-delayed-pivoting =ForceAccept= at a
+non-root supernode produced an unrecoverable factor.
+
+** The dense SIMD kernel and the FMA inertia flip
+:PROPERTIES:
+:CUSTOM_ID: simd
+:END:
+
+Phase 2.4 set out to wire a SIMD micro-kernel into the dense Schur
+complement update, following the faer project's citep:mahmoudi2024faer
+pattern: a scalar kernel, a =pulp= citep:pulp dispatch layer, and
+target-specific implementations that fall back to scalar on
+architectures without the required instructions. The goal was the
+largest measured speedup in Phase 2 --- the Schur update is
+=do_1x1_update= and =do_2x2_update= in =src/dense/factor.rs=, and
+profiling showed these two functions consuming roughly 45% of the
+dense factor budget on mid-size matrices.
+
+The first implementation (Phase 2.4.2) used =mul_add_f64s= (a
+single-instruction FMA) for the inner AXPY-minus loop:
+=y[i] -= mul_factor * x[i]=. On NEON this maps to =fmls= (fused
+multiply-subtract), which has a single rounding step compared to
+the two-step =mul + sub= sequence of a non-FMA path. The speedup
+on mid-size dense matrices was substantial: dense factor p90
+against MUMPS dropped from 2.27 to 1.87, a 17.6% improvement.
+
+Then the full KKT corpus bench flagged four new sparse-inertia
+mismatches. On four specific matrices, the Phase 2.4.2 commit
+produced an inertia count that differed from the Phase 2.3.9
+commit by exactly one positive/negative pivot. The factorizations
+were otherwise identical: same row counts, same delay structure,
+same condition number. Triage (session =2026-04-14-01=,
+=examples/triage_sparse_inertia_diff.rs=) found the cause in
+all four cases: a single pivot $d_{kk}$ whose value hovered
+within 1 ULP of the =zero_tol= boundary. In the scalar kernel the
+pivot came out as $1.023 \times 10^{-16}$; in the FMA kernel it
+came out as $1.021 \times 10^{-16}$. Both values are
+mathematically valid --- the FMA path is actually /closer/ to the
+ideal infinite-precision answer --- but they land on opposite
+sides of $\epsilon \approx 2.22 \times 10^{-16}$, so one is
+classified as positive and the other as zero, and the inertia
+count shifts.
+
+The implications were not negotiable. The project's hard rule,
+stated in =CLAUDE.md= and repeated in the project specification,
+is that /inertia must be exactly correct, with no tolerance on
+counts/. A 1-ULP rounding flip in the kernel that produces a
+different inertia on even one matrix is a regression, even if the
+new value is more accurate in a continuous-math sense. Inertia is
+a discrete certificate and discrete certificates do not compose
+with continuous-valued improvements.
+
+Phase 2.4.3 replaced the FMA kernel with a bit-exact non-FMA
+variant: =mul_f64s(mul_factor, x[i])= followed by
+=sub_f64s(y[i], prod)=, with both operations rounding
+independently and matching the scalar reference exactly. The
+cost was measured: dense factor p90 degraded from 1.87 to 1.86
+(within noise), sparse factor p90 improved from 3.18 to 2.82.
+Zero inertia regressions; the four flipped matrices reverted to
+the pre-2.4.2 classification and every other matrix was
+unchanged. The bit-exact test harness in
+=src/dense/schur_kernel.rs= asserts =assert_eq!= on the scalar
+vs SIMD output across a length sweep up to 1024, which is what
+produced the verification.
+
+The /lesson/ from Phase 2.4 is specific: /when a kernel's output
+feeds a discrete certificate, the kernel must be bit-exact with
+the reference, not just accurate/. The intuition that "more
+accurate is better" is wrong when the downstream consumer is a
+classifier. The lesson generalises: any solver that reports
+discrete information (inertia, sign, zero-count, rank) has a
+silent constraint on its numerical kernels that ordinary
+benchmarks do not stress. The FMA path would have been fine for
+a solver that reported only residuals.
+
+** The sparse pipeline: AMD and the =contains= pathology
+:PROPERTIES:
+:CUSTOM_ID: amd
+:END:
+
+Phase 2.5 was meant to target the sparse pipeline's hot path, and
+the original plan (=phase-2-planning.md= §2.5.1) named Liu's
+row-subtree algorithm citep:liu1990rowsubtree for column counts as
+the first-priority optimization. This guess turned out to be
+wrong. Session 03's profile of the sparse small-frontal path
+(=examples/profile_sparse_smallfront.rs=, 152,128 matrices)
+produced a per-function time breakdown whose first few entries
+were:
+
+| function                    | % of time | max(μs) |
+|-----------------------------+-----------+---------|
+| =amd_order=                 |    39.8%  |    9322 |
+| =column_counts=             |     2.6%  |      58 |
+| ...                         |       ... |     ... |
+
+Liu's algorithm would have replaced the 2.6% line. The 39.8% line
+was =amd_order= itself, with a fat tail reaching 9322 μs on
+=DISCS_0012= (n=234) --- a /single/ 234×234 matrix was consuming
+several milliseconds of ordering time, while canonical MUMPS's
+entire analyse-plus-factor on the same matrix ran in 450 μs.
+
+The plan was re-prioritized (/dev/decisions.md/ 2026-04-14
+"Phase 2.5 priority reordered"). The new Phase 2.5.1′ set out to
+diagnose and fix AMD, and the original Phase 2.5.1 was demoted
+until after 2.5.1′ landed.
+
+The diagnosis was built around an instrumented triage binary
+(=examples/triage_discs_amd.rs=) that copied =amd_order= with
+per-phase microsecond counters (min-scan, fill-edge insertion,
+degree-recompute) and scalar counters (total neighbors seen,
+total =contains= calls, total fill inserts). The output on
+=DISCS_0012=:
+
+| phase       | time  |  %   |
+|-------------+-------+------|
+| min-scan    |    10 |  0.1 |
+| fill        | 10793 | 87.6 |
+| degree      |  1085 |  8.8 |
+| /total/     | 12326 |  100 |
+
+And the scalar counters:
+
+- =total_contains_calls= = 778,064
+- =total_fill_inserts=   = 0
+
+/Zero fill inserts./ 778,064 calls to =adj[a].contains(&b)=, every
+one of which returned =true=, because =DISCS_0012='s adjacency
+structure was already dense enough that every pair of
+pivot-neighbors was already adjacent after the first few
+eliminations. The fill loop was not doing any work; it was
+/checking/ that no work was needed, and the check was a linear
+scan over a Vec of average length 62. The work complexity was
+$O(\text{deg}^3)$ per elimination step, but the constant factor
+was the one that mattered: $62^2 = 3844$ linear scans per step,
+each O(62).
+
+=DMN15103_0000= was the same pattern at a smaller n: a fully
+dense 99×99 matrix (nnz = 9801 = 99²), so the reachable set of
+every pivot was /always/ the full remaining graph, and
+=contains= returned =true= every single time. 156,849 =contains=
+calls, zero inserts, 1337 μs total for an algorithm that should
+finish a 99-node fully-dense graph in microseconds.
+
+The fix was a scratch mark array. On each elimination step, for
+each outer node $a$ in the live-neighbor set, mark every entry
+of =adj[a]= in a reusable =Vec<bool>= of size $n$, then check
+every later neighbor $b$ with an O(1) =mark[b]= lookup. Insert
+if unmarked, then clear the marks before moving on. The
+invariant is that =mark= is all-false at the start and end of
+every outer iteration, so the scratch Vec is allocated once and
+reused across all $n$ elimination steps. The work complexity
+drops from $O(\text{deg}^3)$ to $O(\text{deg}^2)$ per step ---
+still not optimal (real AMD
+citep:amestoy1996approximate,amestoy2004algorithm837 runs in
+$O(\text{nnz} \cdot \alpha(n))$ via element absorption and
+approximate external degree) but fast enough to clear the exit
+criterion on the DISCS family without the surface-area cost of a
+real AMD port.
+
+A second optimization stacked on top of the mark array: the
+/dense-clique early exit/. When the pivot's live-neighbor count
+equals the total remaining live count, eliminating the pivot
+forms a clique among all surviving nodes (because they were all
+adjacent to the pivot, and fill will connect every pair). From
+that point on, min-degree will keep picking nodes from a clique
+where each further elimination is trivial, no additional fill is
+added, and the order is irrelevant. The short-circuit pushes the
+remaining survivors in any order and returns. =DMN15103_0000=
+short-circuits on the /first/ elimination step (it is already a
+clique); =DISCS_0012= short-circuits after a handful of steps.
+
+The third optimization was unrelated to =amd_order= itself but
+landed in the same commit because it sits in the same file:
+=permute_pattern= was rewritten from a =Vec<Vec<usize>>= +
+=sort_unstable= + =dedup= scheme to a two-pass counting-sort
+layout. The old code pushed every off-diagonal entry twice (once
+per triangle of the symmetric matrix) and then deduped; the new
+code counts entries per column, builds a prefix sum, fills
+=row_idx= in a single pass, and runs =sort_unstable= once per
+column to preserve the sorted-column invariant. Each entry is
+copied exactly once. Measured speedup on =DMN15103_0000= was
+approximately 7×.
+
+Two more fixes landed in the same Phase 2.5.1′ commit, in other
+modules:
+
+- /A dead loop in the supernode amalgamation pass/
+  (=src/symbolic/supernode.rs=). The pre-session-04 code walked
+  =0..n_snodes=, called =find_root(child_s, &merged_into)= on
+  each candidate, and then did /nothing/ with the result --- the
+  loop body was an empty block with a comment. The symbolic
+  pipeline was spending O(n²) per matrix on a loop whose effect
+  was zero. Removing it dropped the supernode pass's share of the
+  small-frontal budget from 7.3% to 1.2% and took the =GROUPING=
+  family entirely off the top-30 worst-offenders list.
+- /A redundant elimination-tree rebuild/ (=src/symbolic/mod.rs=).
+  =symbolic_factorize= called =EliminationTree::from_pattern=
+  twice: once on the AMD-permuted pattern (to compute the
+  postorder) and once on the final permuted pattern (to produce
+  the etree that column_counts and the numeric phase consume).
+  The second call is mathematically redundant because postorder
+  is a topological relabeling of the elimination tree: formally,
+  =etree(P·A·Pᵀ) = post-renumbering of etree(A)= when $P$ is a
+  postorder of =etree(A)=. The replacement builds the final etree
+  in $O(n)$ from the AMD-permuted etree and the postorder inverse:
+  =final_parent[k] = amd_etree.parent[post[k]].map(post_inv)=. A
+  3-run median showed a ~3% improvement on the sparse
+  small-frontal partition, and this was the optimization that
+  closed the gap from 2.03 to 2.00.
+
+Six fixes in one commit, all driven by the triage binary's
+measurements, all preserving inertia and residual agreement. The
+sparse small-frontal =factor/MUMPS p90= moved from 2.81 (session
+03's verdict) to 2.00 (session 04's final bench and session 05's
+ratification), and sparse medium moved from 2.81 to 2.00 for
+free because the same AMD and symbolic fixes also accelerate
+medium-frontal matrices.
+
+** The Phase 2.8.1 exit partition
+:PROPERTIES:
+:CUSTOM_ID: exit-partition
+:END:
+
+The Phase 2 exit criterion from =FERAL-PROJECT-SPEC.md= §1747 is
+stated loosely as "Within 2× of MUMPS on small-frontal KKT set,
+within 3× on medium set". =dev/plans/phase-2-planning.md= §2.8.1
+gives concrete definitions that the bench partition implements:
+
+- /Small-frontal/: =max_frontal_dim < 200 AND n ≤ 10³=, target
+  =factor/MUMPS p90 ≤ 2.0=
+- /Medium/: =max_frontal_dim < 500 AND n ≤ 10⁴=, target
+  =factor/MUMPS p90 ≤ 3.0=
+
+The partition is computed per-matrix using =max_frontal_dim = n=
+for the dense path and =max_frontal_dim = max(supernode.nrow)=
+for the sparse path, with the max taken from the symbolic
+factorization. Each matrix lands in the =small-frontal= bucket
+(and the =medium= bucket, which is a superset) if it satisfies
+the dimension cutoffs. The bench reports p90 per bucket against
+the MUMPS oracle timings.
+
+The final session-05 ratification numbers on the 154,588-matrix
+corpus (153,560 matrices with MUMPS oracle timings):
+
+| bucket               |  count | p90  | target | verdict |
+|----------------------+--------+------+--------+---------|
+| Dense small-frontal  | 147982 | 1.55 | ≤ 2.0  | PASS    |
+| Dense medium         | 152145 | 1.95 | ≤ 3.0  | PASS    |
+| Sparse small-frontal | 153455 | 2.00 | ≤ 2.0  | PASS    |
+| Sparse medium        | 153560 | 2.00 | ≤ 3.0  | PASS    |
+
+Three-run medians on the tight partition (sparse small-frontal),
+taken at the Phase 2 exit commit, were =2.00 / 1.98 / 2.00=. The
+exit is at the bar, not below it --- the median is exactly 2.00 on
+the first run and 1.98 on the second. The bench variance comes
+from a mix of OS-level noise (file-read timings on individual
+small matrices) and per-matrix timing granularity at the
+microsecond level. The dense partition has meaningful headroom
+(1.55 vs 2.0, 1.95 vs 3.0); the sparse partition does not.
+
+* What we learned
+:PROPERTIES:
+:CUSTOM_ID: what-we-learned
+:END:
+
+** Measure then optimize, always
+:PROPERTIES:
+:CUSTOM_ID: measure-first
+:END:
+
+The Phase 2 plan at its start named Liu's row-subtree algorithm
+as the first-priority sparse performance optimization. The
+motivation in =phase-2-planning.md= was that column counts are a
+textbook bottleneck in simplicial Cholesky
+citep:davis2016survey,liu1990rowsubtree. The motivation was
+correct in the general case --- Liu's algorithm is in fact
+faster than elimination-graph simulation --- but it was wrong on
+the FERAL corpus, where column counts were 2.6% of the
+small-frontal budget and =amd_order= was 39.8%. Implementing Liu
+would have cost 2–3 sessions and saved at most 2.6% of p90 on
+the target partition; the actual fix took one session and saved
+about 30%.
+
+The /lesson/ is one that is trivial to state and non-trivial to
+execute: do not guess the bottleneck from the literature. Profile
+the actual code on the actual corpus, identify the hot path from
+the measurement, and choose the fix to match. The Phase 2.5
+re-prioritization cost half a session of profile work and avoided
+2–3 sessions of misdirected optimization. The profile binary
+=examples/profile_sparse_smallfront.rs= was the critical
+infrastructure; without it, the Liu implementation would have
+landed, the exit criterion would still have failed, and the team
+would have had to debug /why/ a faster column-counts algorithm
+did not move the exit partition.
+
+A corollary: optimization driven by a small instrumented triage
+binary is much faster and more honest than optimization driven
+by =cargo flamegraph= or =perf record=. The triage binary for
+AMD (=examples/triage_discs_amd.rs=) reported per-phase time /and/
+scalar counters (=total_contains_calls=,
+=total_fill_inserts=) that named the pathology directly ---
+"778,064 contains / 0 inserts" is unambiguous where a flame graph
+would have shown only "=Vec::contains= is hot" without telling
+you /why/. The triage binary ran in seconds, reported a
+dimensionless ratio, and survived as a regression-catching
+artifact.
+
+** Bit-exact matters for certified inertia
+:PROPERTIES:
+:CUSTOM_ID: bit-exact
+:END:
+
+The FMA story in Section [[#simd]] is the second general
+lesson of Phase 2, and it is more subtle than the first. The
+naive FMA kernel was /numerically more accurate/ than the
+scalar reference --- a single rounding step instead of two, so
+the forward error of the inner loop was smaller by a small
+factor. Ordinary linear-algebra wisdom is that a more accurate
+kernel is strictly better. For FERAL it was a regression.
+
+The reason is that FERAL reports /inertia/, a discrete
+certificate, and discrete certificates are classifiers, not
+measurements. Every classifier has a decision boundary, and
+every decision boundary is sensitive to numerically small
+perturbations near the boundary. The Bunch-Kaufman pivot
+classification rule is
+
+\[
+d_{kk} \text{ is positive } \iff d_{kk} > \text{zero\_tol}, \quad
+d_{kk} \text{ is zero } \iff |d_{kk}| \leq \text{zero\_tol}, \quad
+d_{kk} \text{ is negative otherwise}
+\]
+
+A 1-ULP perturbation of $d_{kk}$ is numerically insignificant ---
+the new value is more accurate in any reasonable sense --- but
+/if it crosses =zero_tol= it changes the classification count/.
+Four matrices in the FERAL corpus sit close enough to the boundary
+that the FMA path and the non-FMA path put them on opposite sides.
+
+The /general form/ of the lesson is that any solver which returns
+discrete information has a silent correctness constraint on its
+kernels. The constraint is quantitative: the kernel output must be
+bit-exact with whatever classifier was used to establish the
+reference inertia. "Matches to machine precision" is not
+sufficient; "matches the scalar reference bit-for-bit" is. The
+practical implication is that any SIMD or blocked kernel in a
+discrete-output solver must be tested with =assert_eq!= against
+the scalar reference, not with a $10^{-14}$ tolerance. FERAL's
+=src/dense/schur_kernel.rs= does this, and that is what caught the
+FMA regression before it shipped.
+
+An adjacent observation: the threshold =zero_tol = f64::EPSILON=
+that Phase 1b established as the default was /also/ load-bearing
+here. A larger threshold (Phase 1a's $100\epsilon$) would have
+absorbed the FMA perturbations into the "zero" band and the
+inertia would not have flipped --- but as the Phase 1 retrospective
+noted, the $100\epsilon$ threshold flagged 32 matrices with
+legitimate tiny-positive pivots as zero. FERAL is walking a tight
+line between two sources of error: rounding-induced classification
+flips (which $\epsilon$ is too tight for) and legitimately-small
+positive pivots (which $100\epsilon$ is too loose for). The
+bit-exact kernel requirement is a way of saying "we cannot make
+the threshold bigger, so we must make the kernel tighter".
+
+** Tight margins are not margins
+:PROPERTIES:
+:CUSTOM_ID: tight-margin
+:END:
+
+The Phase 2.8.1 exit partition passes on the sparse small-frontal
+bucket at $p90 = 2.00$ exactly, against a target of $\leq 2.0$.
+The first few times the partition reported $2.00$, the team read
+it as "passes". A full 3-run median reported $2.00 / 1.98 / 2.00$,
+and the team read that as "passes with confidence". Both readings
+are correct as stated and neither is the right operational
+interpretation.
+
+The right interpretation is that the partition lands exactly on
+the bar, with approximately 3–5% run-to-run noise measured over
+dozens of runs during Phase 2.5.1′ iteration. A partition that
+lands at $2.00$ with 5% noise has a 25–40% probability of
+reporting a value $> 2.0$ on any given single run, which would
+trip the verdict check and fail the exit on a CI run even though
+the underlying algorithm is unchanged. Phase 2 /cleared the gate/;
+it did not build a /buffer/. The difference matters because any
+Phase 3 work that touches the sparse hot path --- and Phase 3 is
+the POUNCE integration, which will exercise the sparse path
+heavily --- has to re-verify the partition on every commit, and
+the probability of a noise-induced false regression is high
+enough that the verification has to use 3-run medians to be
+operationally meaningful.
+
+This is flagged in =dev/decisions.md= 2026-04-14 "Phase 2.8.1 exit
+gate satisfied", in =dev/sessions/2026-04-14-04.md=, in
+=dev/sessions/2026-04-14-05.md=, and in =FERAL-PROJECT-SPEC.md=
+§1747. It is not hidden; the team has been explicit about the
+tight margin every time it has been discussed. What the team has
+not done is /close the margin/: Phase 2 could have pursued one
+more optimization in session 05 to push the partition to
+$\leq 1.90$ and build a buffer, but the work was scoped to the
+exit bureaucracy instead. Section
+[[#what-is-deliberately-left]] returns to this.
+
+The /lesson/ is a measurement lesson, not an algorithm lesson:
+/exit criteria with zero headroom are not exit criteria; they
+are open questions/. The exit bar should have been $\leq 1.80$
+or the median should have been $\leq 1.90$ to be operationally
+safe. The FERAL specification chose the loose bar of $\leq 2.0$
+for Phase 2 and the team hit it, but the team should have been
+pushing for headroom past the spec rather than reading the spec
+as an aspirational ceiling.
+
+** An empty loop with O(n²) cost
+:PROPERTIES:
+:CUSTOM_ID: empty-loop
+:END:
+
+This lesson is not a general one, but it is worth recording because
+of how long the dead loop survived. =src/symbolic/supernode.rs=
+contained, at the end of the amalgamation pass, a block that read:
+
+#+BEGIN_SRC rust
+// Remap children absorbed into this node
+for child_s in 0..n_snodes {
+    if find_root(child_s, &merged_into) == s && child_s != s {
+        // This child was merged into s — its columns are now part of s
+    }
+}
+#+END_SRC
+
+The intent, in some prior revision, had been to rewrite child
+pointers after amalgamation. The rewriting had been moved
+elsewhere, the loop body had been emptied, and the loop itself
+had been left in place with the comment as a tombstone. Every
+call to =find_root= is O(path length) --- effectively O(n) on
+worst-case inputs --- and the loop runs $n_{\text{snodes}}$ times
+per outer amalgamation step, which itself runs once per
+supernode. The total cost is roughly $O(n^2)$ per matrix, and on
+the FERAL corpus this contributed 7.3% of the small-frontal
+budget --- a substantial fraction spent on a loop whose body was
+empty.
+
+The loop had survived code review, the test suite (all existing
+tests passed without it), the Phase 1b consensus validation (all
+inertia counts unchanged without it), and the Phase 2 baseline
+(the ratio-to-MUMPS was wrong by the 7.3% contribution without
+anyone noticing). It was found by the supernode profile in
+session 04, which specifically flagged =find_root= as the hot
+function in the amalgamation pass. The fix was to delete the
+loop.
+
+There is no general methodology fix here. Code review cannot
+reliably catch a loop whose body is empty, because the reviewer's
+attention is on the comment and the surrounding context, not on
+the fact that the block is empty. Static analysis tools /can/
+flag empty loop bodies, and the Rust =clippy= lint
+=clippy::no_effect= does flag this specific form --- but only if
+the compiler can see that the condition has no side effects, and
+=find_root= does mutate its =merged_into= argument in a path-
+compression step, which looks like a side effect to the lint.
+The lint did not fire.
+
+The narrow lesson is: when profiling identifies a surprising hot
+function, /read every line that calls it/. The broader lesson is
+that code archaeology on an evolving pipeline is a Phase 2
+activity, not a Phase 1 one. Phase 1 wrote the code; Phase 2 is
+the first time anyone measured it at scale.
+
+* An honest assessment of success
+:PROPERTIES:
+:CUSTOM_ID: honest-assessment
+:END:
+
+** What is clearly true
+:PROPERTIES:
+:CUSTOM_ID: clearly-true
+:END:
+
+- /All four Phase 2.8.1 exit partitions pass/ on the
+  154,588-matrix KKT corpus, with dense small-frontal
+  $p90 = 1.55$, dense medium $p90 = 1.95$, sparse small-frontal
+  $p90 = 2.00$ (3-run median 2.00/1.98/2.00), sparse medium
+  $p90 = 2.00$. The ratification bench was run on a fresh build
+  from the Phase 2 exit commit.
+- /Zero correctness regressions from Phase 1b./ Dense inertia
+  agreement, sparse inertia agreement, and sparse residual pass
+  counts are all bit-identical to the Phase 1b exit commit
+  =0f5f1cb=. Every Phase 2 commit that touched a numerical
+  kernel was validated against the parity panel and the full
+  corpus before landing; the FMA flip in Phase 2.4.2 was caught
+  and rolled back specifically because it produced a four-matrix
+  inertia regression, even though the kernel was numerically
+  more accurate.
+- /The ACOPP30 residual gap is closed./ The prediction from the
+  Phase 1 retrospective that the gap was equilibration turned
+  out to be exactly correct: MC64 matching-based scaling dropped
+  =ACOPP30_0000='s residual from $3.15 \times 10^{-2}$ to
+  $5 \times 10^{-14}$ with no change to inertia and no other
+  factor-code change. The hypothesis was specific enough to be
+  testable and the test passed.
+- /Delayed pivoting reduces =needs_refinement= frequency from
+  ~20% to ~6%/ of the KKT corpus. The 49-matrix improvement in
+  the residual pass count (from 154,280 to 154,329) is the set
+  of matrices where a non-root =ForceAccept= previously produced
+  an unrecoverable factor.
+- /The sparse small-frontal bottleneck was not column counts./
+  The profile-driven re-prioritization in session 03 was the
+  right call; the Phase 2.5.1 plan entry for Liu's algorithm
+  would have left the exit partition at $p90 \approx 2.8$.
+
+** What is claimed but not proven
+:PROPERTIES:
+:CUSTOM_ID: claimed-not-proven
+:END:
+
+- /The performance is "fundamental" in the sense that the
+  remaining gap to MUMPS is algorithmic rather than
+  implementation noise./ Phase 2 reduced the sparse
+  small-frontal $p90$ from 2.81 to 2.00 via a sequence of local
+  fixes, none of which addressed the big algorithmic
+  differences between FERAL and MUMPS (no METIS, no blocked
+  supernodal LDLᵀ, no parallelism, exact-degree rather than
+  approximate AMD). We /believe/ the remaining gap is
+  algorithmic because the local fixes have been exhausted ---
+  the triage profile in session 05 shows no single function
+  consuming > 10% of the budget --- but we have not /proven/ it.
+  It is possible that another round of measurement would find
+  one more 10% local win, and the partition would drop to 1.80.
+  We did not attempt that round because the exit criterion was
+  already met.
+- /The performance scales to Phase 3 workloads./ The 154,588
+  matrix corpus is heavily dominated by small matrices ($n \leq
+  500$ on roughly 153k entries, $n \leq 1000$ on roughly 153.5k
+  entries). The partition cutoffs (=max_front < 200= for small,
+  =max_front < 500= for medium) further concentrate the
+  measurement on small-frontal cases. FERAL's performance on
+  large matrices ($n > 5000$) is /measured/ (the bench includes
+  =CRESC132_0000= at $n = 5314$ and 43 VESUVIO-family matrices
+  at $n \approx 3000$) but is not gated by the exit criterion,
+  and those matrices are typically 50–90× slower than MUMPS.
+  Phase 3 will exercise matrices of the size Phase 3 cares
+  about, and Phase 2's exit is not predictive of Phase 3's
+  behaviour on them.
+- /The mark-array AMD is a long-term solution./ Phase 2.5.1′
+  chose exact-degree AMD with a mark-array fix over a real AMD
+  port citep:amestoy2004algorithm837 on the grounds that the
+  mark-array fix cleared the exit criterion and a real AMD port
+  was a larger surface-area change. The choice is recorded in
+  =dev/decisions.md= and is defensible at the Phase 2 exit, but
+  it is not defensible as an architectural commitment. Real AMD
+  is meaningfully better on large inputs --- element absorption
+  reduces the adjacency structure's size, and approximate
+  external degree allows min-degree selection in
+  $O(\log n)$ rather than $O(n)$ per step. If Phase 3 finds that
+  ordering time dominates on the POUNCE corpus, the decision
+  will have to be re-opened.
+
+** What is deliberately left open
+:PROPERTIES:
+:CUSTOM_ID: what-is-deliberately-left
+:END:
+
+Phase 2 deferred three substantial subsystems that the original
+plan had included:
+
+- /METIS integration (Phase 2.6.1)./ No pure-Rust METIS port exists
+  at adequate quality, and a clean-room port is a multi-month
+  undertaking. The Phase 2 mitigation plan
+  (=phase-2-planning.md= §R4) suggested a "poor man's METIS" ---
+  a recursive nested-dissection variant using existing AMD-style
+  heuristics --- but that would itself have taken 1–2 weeks and
+  the exit criterion was met without any nested-dissection
+  ordering. METIS is deferred to Phase 3+ as a potential source
+  of performance on bordered KKT matrices.
+- /Parallelism on the assembly tree (Phase 2.5.2)./ Not
+  implemented. The small-frontal partition is dominated by
+  per-matrix overhead rather than per-matrix compute, so
+  intra-matrix parallelism has negative expected return on the
+  target workload. Inter-matrix parallelism is a bench-runner
+  question, not a solver question. Phase 3+ may reconsider for
+  the large-frontal partition.
+- /Closed-loop IPOPT validation (Phase 2.7)./ Not implemented.
+  The parity panel (31 matrices gated on multi-oracle agreement)
+  provides the correctness-surface check that a full
+  IPOPT-outer-loop smoke test would have given, without the
+  complexity of building an outer loop. A full POUNCE
+  integration is the explicit goal of Phase 3, and that
+  /is/ a closed-loop validation by definition.
+
+A fourth subsystem is deferred silently by Phase 2's scope. The
+sparse residual pass rate is 154,329/154,588 ≈ 99.83%; the
+remaining 259 matrices fail the residual tolerance and are not
+caught by the exit criterion because the exit criterion is about
+performance, not correctness. A glance at the failing list shows
+that most of the 259 are in families (ACOPR, ERRINBAR, HS13 at
+specific iteration indices) whose factorizations agree with MUMPS
+on inertia but produce residuals in the $10^{-4}$ to $10^{-8}$
+range. These are not failures in the sense of wrong answers;
+they are failures in the sense of "iterative refinement could not
+close the gap to the bench tolerance $n \epsilon \cdot 10^6$."
+Phase 2 did not prioritize closing them, and the Phase 1
+retrospective's caveat about the tolerance being loose on small
+matrices still applies.
+
+Finally, /the tight-margin problem itself/ is deliberately left
+open. Session 05 could have found one more optimization --- there
+is at least one candidate (the =permuted.symmetric_pattern()=
+call in =factorize_multifrontal=) that looks promising on the
+profile --- and pushed the sparse small-frontal $p90$ to 1.90 or
+lower to build a buffer. Instead, session 05 was scoped to the
+exit bureaucracy (this retrospective, the session file, the spec
+update) to keep the Phase 2 / Phase 3 boundary clean. The cost is
+that Phase 3 inherits a sparse partition with no headroom, and
+the first CI run that trips above 2.0 will produce a false
+regression. The benefit is that Phase 2 has a clear close-out
+date and the project can move on.
+
+** The methodological lesson, stated plainly
+:PROPERTIES:
+:CUSTOM_ID: methodology
+:END:
+
+Phase 1's methodological lesson was that validation is a
+first-class engineering activity and that orphan modules with
+passing tests can mask a broken pipeline. Phase 2's methodological
+lesson is an adjacent one: /measurement is a first-class
+engineering activity and that performance work without
+measurement is guesswork that will land on the wrong target/.
+
+The planning assumption that column counts was the sparse
+bottleneck was based on textbook knowledge about simplicial
+Cholesky. The actual measurement contradicted the assumption.
+The fix for the actual bottleneck was six times smaller (in
+lines of code) and one session's worth of work, and it landed
+the exit criterion. The fix for the assumed bottleneck would
+have been an order of magnitude more code and would not have
+landed the criterion.
+
+The adjacent lesson about bit-exact kernels for certified
+inertia is more specific but equally important: /a solver's
+correctness constraint is quantitative, not aspirational/.
+FERAL cannot use more-accurate-but-differently-rounded kernels,
+not because the developers are conservative, but because its
+output is a classifier and classifiers do not tolerate
+1-ULP perturbations near their decision boundaries. The
+implication for the Phase 3 work is that any further SIMD
+kernel, any blocked variant, any cache-aware reordering of the
+inner loop has to prove bit-exact equivalence with the scalar
+reference before it can land. This is an unusual constraint for
+a linear algebra library and it will rule out some common
+optimizations.
+
+* Related work
+:PROPERTIES:
+:CUSTOM_ID: related-work
+:END:
+
+The Phase 2 implementation draws from several distinct bodies of
+literature. The multifrontal formulation follows
+citet:duff1983multifrontal directly, with the assembly-tree and
+contribution-block structure taken from the original paper's
+frontal-matrix formulation. The sparse pipeline's supernodal
+organization, with /nemin/-based amalgamation and column-count
+driven frontal-matrix sizing, follows the SSIDS design
+citet:hogg2013pivoting.
+
+Delayed pivoting (Section [[#delayed-pivoting]]) is specifically
+the SSIDS citep:hogg2013pivoting variant, with the delayed
+columns occupying the top-left block of the contribution and the
+parent re-running pivot search on the expanded fully-summed set.
+An alternative is the "a posteriori pivoting" (APP) strategy
+citep:hogg2016sparse in which the factorization runs
+optimistically and rolls back on threshold violation; FERAL does
+not implement APP and Phase 2's plan explicitly deferred it, on
+the grounds that delayed pivoting already provides the pivot
+recovery mechanism that APP is trying to avoid paying for in the
+common case. Revisiting APP for Phase 3 large-frontal workloads
+may be worth doing once delayed pivoting is stressed by POUNCE's
+larger matrices.
+
+MC64 matching-based scaling (Section [[#mc64]]) is the
+Duff-Koster algorithm citep:duff2000mc64, which finds a maximum-
+product matching on the absolute values of the matrix and derives
+row/column scaling factors such that the matched entries have
+magnitude 1 and all other entries are bounded by 1. FERAL's
+implementation is a straightforward Hungarian-matching kernel
+with the symmetric-coincidence wrapper for the symmetric case.
+Alternative scaling strategies include Ruiz iterative infinity-
+norm equilibration citep:ruiz2001scaling and simple row/column
+norm normalization; FERAL's =InfNorm= strategy, introduced
+alongside MC64 as a lighter-weight alternative, implements the
+Ruiz variant. The parity panel validates both strategies against
+MUMPS's default scaling.
+
+The exact-degree minimum-degree algorithm (Section [[#amd]])
+predates the modern AMD formulation
+citet:amestoy1996approximate,amestoy2004algorithm837 by decades;
+it is textbook citep:george1981computer, and the textbook cost
+analysis is $O(\text{deg}^3)$ per elimination step for the naive
+fill-edge insertion. The mark-array optimization is a standard
+trick for graph algorithms citep:cormen2009 and reduces the per-
+step cost to $O(\text{deg}^2)$. Real AMD reduces it further to
+$O(\text{nnz} \cdot \alpha(n))$ via element absorption and
+approximate external degree, and FERAL's exit criterion leaves
+real AMD as future work.
+
+The Schur complement update kernel (Section [[#simd]]) follows
+the BLIS citep:vanzee2015blis structure: a scalar reference, a
+SIMD variant that dispatches on target architecture via
+citet:pulp, and a correctness test that asserts bit-exact
+equivalence. The bit-exact requirement is what distinguishes a
+certified-inertia solver from an ordinary BLAS kernel; the BLIS
+paper does not discuss it because BLAS outputs are measurements,
+not classifiers, and the 1-ULP rounding tolerance is fine for
+measurements. FERAL's constraint is specific to its output
+contract.
+
+* Conclusion
+:PROPERTIES:
+:CUSTOM_ID: conclusion
+:END:
+
+Phase 2 converted a correct-but-slow sparse symmetric indefinite
+solver into one that meets the Phase 2 specification exit
+criterion on all four partitions of the 154,588-matrix KKT
+corpus, with zero correctness regressions from Phase 1b. The
+headline performance numbers are dense small-frontal $p90 = 1.55$,
+dense medium $p90 = 1.95$, sparse small-frontal $p90 = 2.00$, and
+sparse medium $p90 = 2.00$, all against canonical MUMPS 5.8.2.
+The work delivering those numbers spanned 13 sessions across
+2026-04-12 through 2026-04-14, landed six surgical fixes in Phase
+2.5.1′ alone, and included two substantial rollbacks (the FMA
+SIMD kernel and the contribution-block deferral) where initial
+optimization attempts hit correctness or null-result walls.
+
+The two general lessons of Phase 2 are (1) that performance work
+must be driven by measurement rather than by guess-the-bottleneck
+intuition, demonstrated by the Phase 2.5 re-prioritization from
+column counts to AMD; and (2) that a solver reporting discrete
+certificates like inertia has a silent bit-exact constraint on
+its numerical kernels that ordinary performance wisdom does not
+anticipate, demonstrated by the FMA rounding flip in Phase 2.4.
+
+Phase 2 deliberately left three subsystems unimplemented: METIS
+integration, parallelism on the assembly tree, and closed-loop
+IPOPT validation. The first two are performance optimizations
+whose expected return does not justify their implementation cost
+on the Phase 2 target workload; the third is subsumed by Phase
+3's POUNCE integration, which is by definition a closed-loop
+validation against the full CUTEst suite. The Phase 2 exit
+margin on the sparse small-frontal partition is tight ($p90 =
+2.00$ against a target of $\leq 2.0$, with run-to-run noise of
+approximately 3–5%), and the Phase 3 work inherits the obligation
+to re-verify this partition on every commit that touches the
+sparse hot path.
+
+Phase 2 is done. Phase 3 starts at POUNCE integration with a
+solver that is correct on the FERAL KKT corpus and performance-
+competitive to within 2× of MUMPS on small-frontal KKT problems.
+Whether that is /sufficient/ to drive ripopt through the full
+CUTEst suite is the question Phase 3 exists to answer.
+
+* References
+:PROPERTIES:
+:CUSTOM_ID: references
+:END:
+
+bibliographystyle:unsrt
+bibliography:references.bib

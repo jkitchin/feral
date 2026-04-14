@@ -1,0 +1,99 @@
+#+TITLE: FERAL Session Journal 2026-04-14-05
+#+STARTUP: showall
+
+* 16:30 :phase-2.8.2:ratification:bench:
+Session 05 goal is the Phase 2 exit bureaucracy: ratify 2.8.1 on a
+fresh bench run, write the Phase 2 exit session file, append the exit
+note to =FERAL-PROJECT-SPEC.md= §1735, and write the Phase 2
+retrospective in the scientific-writing style of
+=dev/phase1-retrospective.org=.
+
+Ran =cargo run --release --bin bench= on the Phase 2.5.1' exit commit
+and pulled the partitioned p90 table from the tail:
+
+| bucket               | count   |  p90 | target | verdict |
+|----------------------+---------+------+--------+---------|
+| Dense small-frontal  | 147,982 | 1.55 | ≤ 2.0  | PASS    |
+| Dense medium         | 152,145 | 1.95 | ≤ 3.0  | PASS    |
+| Sparse small-frontal | 153,455 | 2.00 | ≤ 2.0  | PASS    |
+| Sparse medium        | 153,560 | 2.00 | ≤ 3.0  | PASS    |
+
+All four partitions satisfy their target. Inertia and residual counts
+identical to the session 04 numbers (no correctness regression from
+the fresh run). Phase 2.8.1 exit criterion is ratified.
+
+Sparse small-frontal lands exactly on the 2.0 bar; run-to-run noise is
+3-5% so this is a tight margin. Will flag in the retrospective and
+session file.
+
+* 16:50 :phase-2.8.2:session-file:
+Wrote =dev/sessions/2026-04-14-05.md= as the Phase 2 exit session
+checkpoint, mirroring =dev/sessions/2026-04-12-01.md= (Phase 1b exit).
+Structure:
+
+- Goal, with all four 2.8.x sub-steps enumerated.
+- Fresh ratification table with bench numbers.
+- Phase 2 narrative organized by sub-phase (2.1 corpus lift, 2.2 MC64
+  + pivot rejection + adjacency, 2.3 delayed pivoting over 9 steps,
+  2.4 dense SIMD + FMA rollback, 2.5 AMD pathology + six surgical
+  fixes, 2.8 exit).
+- What was deferred to Phase 3 (METIS, closed-loop validation with
+  Ipopt, parallelism, allocation hoisting, fill prediction).
+- Next session should: write retrospective (done same session), start
+  Phase 3 planning, regenerate profile binary, revisit ACOPP30 and
+  VESUVIO residual tail, tag the Phase 2 exit commit.
+
+* 17:10 :phase-2.8.3:spec-update:
+Appended a "Phase 2 exited 2026-04-14" block to
+=FERAL-PROJECT-SPEC.md= §1735 matching the format of the Phase 1 exit
+note at §1712. Block contains:
+
+- The exit partition definition copied verbatim from
+  =dev/plans/phase-2-planning.md= §2.8.1 (small-frontal:
+  =max_front < 200 AND n ≤ 10³=, target =p90 ≤ 2.0=; medium:
+  =max_front < 500 AND n ≤ 10⁴=, target =p90 ≤ 3.0=).
+- The four-partition PASS table with fresh ratification numbers.
+- Explicit tight-margin acknowledgement on sparse small-frontal: "runs
+  at the 2.0 bar with ~3-5% run-to-run noise; 3-run median on the
+  Phase 2 exit commit is 2.00/1.98/2.00."
+- Pointer to =dev/sessions/2026-04-14-05.md= and the retrospective.
+- "Zero correctness regressions across Phase 2" claim, anchored by
+  the session 04 inertia/residual counts.
+
+* 18:00 :phase-2.8.4:retrospective:scientific-writing:
+Wrote =dev/phase2-retrospective.org= (~750 lines) as a scientific
+org-mode document mirroring =dev/phase1-retrospective.org=. Structure:
+
+- *Abstract* with headline numbers and the two methodological results
+  (measure-first, bit-exact for certified inertia).
+- *Introduction* with Phase 2's place in the FERAL project and the
+  eight-subphase structure.
+- *What Phase 2 accomplished*: MC64 scaling, delayed pivoting (SSIDS
+  three-tier model), dense SIMD with the FMA inertia flip lesson,
+  sparse AMD =contains= pathology with all six surgical fixes
+  documented, and the exit partition.
+- *What we learned*: measure-first, bit-exactness matters when
+  inertia is a certified output, tight margins are not margins, the
+  empty-loop lesson.
+- *Honest assessment*: clearly-true / claimed-but-not-proven /
+  deliberately-left-open / methodology subsections so the reader
+  knows exactly where the guarantees stop.
+- *Related work* with =citep:= and =citet:= keys from
+  =dev/references.bib=.
+- *Conclusion* and *References*.
+
+Used these citation keys from =dev/references.bib=:
+=duff1983multifrontal=, =hogg2013pivoting=, =hogg2016sparse=,
+=duff2000mc64=, =wachter2006ipopt=, =amestoy1996approximate=,
+=amestoy2004algorithm837=, =davis2016survey=, =liu1990rowsubtree=,
+=george1981computer=, =ruiz2001scaling=, =vanzee2015blis=,
+=gould2015cutest=, =mahmoudi2024faer=, =pulp=, =cormen2009=.
+
+* 18:20 :phase-2-exit:commit:tag:
+Refreshed =dev/context.md= via =./dev/assemble-context.sh= and
+committed the four Phase 2 exit artifacts (session file, spec
+update, retrospective, journal, context) as the final Phase 2 exit
+commit. Tagged the commit =phase-2-exit= so future sessions can
+reference the exit boundary cleanly.
+
+Phase 2 closed. Next session opens Phase 3.
