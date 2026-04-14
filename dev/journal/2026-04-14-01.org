@@ -1,0 +1,69 @@
+#+TITLE: Session 2026-04-14-01 journal
+#+STARTUP: content
+
+* 05:30 :task19:expert-consultation:
+After session 2026-04-13-05's rejected in-kernel fixes, questioned
+whether pursuing the ACOPP30 dense gap at all is the right move.
+Spawned three expert agents in parallel: mumps-expert, spral-expert,
+faer-expert. Asked each: does your solver have a separate dense
+code path, what does it do on the specific 2x2 block feral hits
+at ACOPP30_0026 k=58, is closing this gap worth pursuing?
+
+All three independently converged. None have a separate dense
+path. MUMPS always multifrontal (dfac_front_LDLT_type1.F single
+entry; AVOID_DELAYED + STATICMODE + SEUIL_LOC static pivoting at
+root). SSIDS ldlt_tpp.cxx header literally says "Simple LDL^T ...
+Intended for finishing off small matrices, not for performance"
+with a scale-invariant |detpiv| < max(small, detpiv0/2, detpiv1/2)
+guard. faer's dense BK has no guards at all — survives KKTs
+purely via AMD preordering in the sparse driver.
+
+Verdict: feral's factor() combines four things the references
+never combine (natural order, u=0, no |det|==0 rejection, no
+SEUIL floor) and should not be used as a KKT validation oracle.
+
+Write-up in dev/research/task-19-dense-acopp30-expert-consultation.md
+
+* 06:10 :task19:step1:implementation:
+Implemented step 1 of the action plan. Added
+factor_single_front in src/dense/factor.rs:388-451: Knight-Ruiz
+equilibration then factor_frontal(may_delay=false) with ncol=n,
+repacks FrontalFactors into Factors + d_eq. Inherits the frontal
+kernel's try_reject_1x1_frontal safe-rejection fallback so the
+2x2 rejection no longer divides by zero on the 1x1 fallback path.
+
+Exported via src/lib.rs. Updated src/bin/bench.rs line 633 to
+call factor_single_front(..., &params_kkt_sparse) for the KKT
+validation loop. Kept plain factor() for spd_N / kkt_N_M
+synthetic timing benchmarks (those measure the leaf BK kernel).
+
+First compile had a cargo-fmt hook failure on a SymmetricMatrix
+struct-init block spanning 4 lines instead of inlined. Fixed via
+cargo fmt and committed.
+
+* 06:30 :task19:bench:evidence:
+Full bench (154588 matrices) post-rerouting:
+
+| metric                 | before                | after                      |
+|------------------------+-----------------------+----------------------------|
+| dense inertia match    | 152910/154481 (99.0%) | 152911/154481 (99.0%) +1   |
+| dense residual pass    | 154207/154481 (99.8%) | 154207/154481 (99.8%) flat |
+| dense worst residual   | 2.80e-2 ACOPP30_0026  | *1.87e-4 ERRINBAR_0824*    |
+| ACOPP30 worst residual | ~2.7e-2               | *4.24e-14*                 |
+| ACOPP30 residual fails | 67                    | *0*                        |
+| total dense failures   | 1838                  | 1840 (+2)                  |
+
+The 67-matrix ACOPP30 residual pathology is gone (12 orders of
+magnitude improvement). Net failure delta +2: one extra ACOPP30
+matrix where factor_single_front diverges from multifrontal by
+1 inertia unit (flagged as future follow-up), plus one other.
+
+Committed as c619fda.
+
+* 06:45 :session-end:
+Wrote dev/sessions/2026-04-14-01.md checkpoint. Queued next-
+session priorities: (1) port SSIDS's scale-invariant 2x2 det
+floor into factor_frontal; (2) investigate +1 ACOPP30 dense/
+sparse divergence; (3) triage ERRINBAR_0824 (worst shared
+residual on both paths, same-sign inertia, pure refinement
+issue). MC64 scaling deferred to Phase 2.4.

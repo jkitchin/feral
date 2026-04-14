@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-14T02:20:16Z
+Generated: 2026-04-14T10:44:12Z
 
 ## Latest Session
 File: dev/sessions/2026-04-13-05.md
@@ -59,16 +59,16 @@ in a test; the production sparse path uses `factor_frontal()`, so fixing
 
 ## Git Status
 ```
+c619fda Task #19: reroute dense KKT bench through factor_single_front
+934c8f4 Session 2026-04-13-05: dense ACOPP30 fix attempt (rejected)
 555b579 Add dense ACOPP30 triage example for task #19
 c55bacf Shared bench-failure triage tooling + research note
 ce09aa6 Phase 2.3 Step 9: delayed pivoting validation report
-8f3fce0 Session 2026-04-13-04 addendum: refinement-termination fix
-ed07ee3 Phase 2.3 refinement-termination fix: max_steps 3->10 + residual stop
 ```
 
 ## Test Status
 ```
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
      Running tests/threshold_consistency.rs (target/debug/deps/threshold_consistency-c660296127e8afca)
 
@@ -97,23 +97,23 @@ Loading matrices from data/benchmark-config.toml ... not found
 
 name                n   factor(μs)    solve(μs)        inertia
 --------------------------------------------------------------
-spd_10             10           31            0     (10, 0, 0)
-spd_50             50           21            2     (50, 0, 0)
-spd_100           100           77            6    (100, 0, 0)
-spd_200           200          399           16    (200, 0, 0)
-kkt_10_3           13            2            0     (10, 3, 0)
-kkt_30_10          40           19            1    (30, 10, 0)
-kkt_50_15          65           47            2    (50, 15, 0)
-kkt_100_30        130          203            7   (100, 30, 0)
+spd_10             10           45            0     (10, 0, 0)
+spd_50             50           21            3     (50, 0, 0)
+spd_100           100           93            5    (100, 0, 0)
+spd_200           200          444           18    (200, 0, 0)
+kkt_10_3           13            3            0     (10, 3, 0)
+kkt_30_10          40           33            1    (30, 10, 0)
+kkt_50_15          65           55            2    (50, 15, 0)
+kkt_100_30        130          234            7   (100, 30, 0)
 
 8 matrices benchmarked
 
 Loading KKT matrices from data/matrices/kkt ... 154588 matrices loaded
 
 KKT summary: 154588 matrices (154481 dense-eligible n <= 1000, 107 skipped n > 1000)
-  Inertia match: 152979/154481 (99.0%)
-  Residual pass: 154141/154481 (99.8%)
-  Worst residual: 2.80e-2 (ACOPP30_0026)
+  Inertia match: 152911/154481 (99.0%)
+  Residual pass: 154207/154481 (99.8%)
+  Worst residual: 1.87e-4 (ERRINBAR_0824)
 
 --- Sparse solver validation ---
 Sparse solver: 154588/154588 total
@@ -121,31 +121,31 @@ Sparse solver: 154588/154588 total
   Residual pass: 154329/154588 (99.8%)
   Worst residual: 2.50e-4 (ERRINBAR_0824)
 
---- Dense failure analysis (1838 failures) ---
+--- Dense failure analysis (1840 failures) ---
 
 family                    total    inertia   residual      worst_res
-HAHN1                       498        498          0       2.71e-13
-QPNBLEND                    362        362          0       2.78e-15
-MSS1                        240        240          0       2.78e-15
+HAHN1                       498        498          0       2.78e-13
+QPNBLEND                    362        362          0       2.77e-15
+MSS1                        240        240          0       2.80e-15
 CORE1                       141        141          0       1.07e-15
-CRESC50                      97         97          0       3.50e-15
-ACOPP30                      68          0         68        2.80e-2
+CRESC50                      97         97          0       2.71e-15
+ACOPP30                      68         68          0       4.24e-14
 FBRAIN3LS                    50          6         48        2.82e-7
 CERI651DLS                   42          3         39        7.06e-8
-PFIT4                        38         38          0       9.22e-15
-CERI651A                     37         37          0       7.69e-14
+PFIT4                        38         38          0       2.53e-14
+CERI651A                     37         37          0       8.64e-14
 HS46                         27          0         27        7.51e-8
 PFIT2                        23          0         23        5.39e-6
 CERI651CLS                   21          1         20        2.06e-7
-CRESC100                     19         19          0       4.65e-15
+CRESC100                     19         19          0       4.76e-15
 PALMER1ENE                   17          0         17        1.22e-8
 CERI651ALS                   17          2         15        4.31e-8
 DEVGLA2                      15          0         15        1.50e-7
-KIRBY2                       12         12          0       1.28e-13
-MISTAKE                      10          0         10        1.33e-6
+KIRBY2                       12         12          0       1.30e-13
+MISTAKE                      11          0         11        1.33e-6
 ALLINITA                      9          2          7        5.43e-7
-DISCS                         8          8          0       1.35e-15
-BENNETT5                      8          8          0       1.29e-13
+BENNETT5                      8          8          0       4.75e-14
+DISCS                         8          8          0       1.98e-15
 DJTL                          7          0          7        5.33e-7
 SNAKE                         6          0          6        1.83e-9
 LSC2LS                        5          0          5        1.95e-8
@@ -153,21 +153,21 @@ LSC2LS                        5          0          5        1.95e-8
 
 Top 15 worst residuals:
 name                             n     residual       expected         actual
-ACOPP30_0026                   209      2.80e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0018                   209      2.76e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0000                   209      2.74e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0037                   209      2.69e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0012                   209      2.69e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0046                   209      2.64e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0036                   209      2.63e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0051                   209      2.58e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0002                   209      2.55e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0024                   209      2.54e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0057                   209      2.53e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0055                   209      2.49e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0013                   209      2.46e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0045                   209      2.45e-2   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0010                   209      2.43e-2   (72, 137, 0)   (72, 137, 0)
+ERRINBAR_0824                   27      1.87e-4     (18, 9, 0)     (18, 9, 0)
+PRICE4_0002                      2      7.74e-6      (2, 0, 0)      (2, 0, 0)
+PFIT2_0248                       6      5.39e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0548                       6      3.66e-6      (3, 3, 0)      (3, 3, 0)
+FLETCHER_0002                   16      3.63e-6     (12, 4, 0)     (12, 4, 0)
+PFIT2_0340                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0338                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0339                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0299                       6      1.37e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0297                       6      1.37e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0298                       6      1.37e-6      (3, 3, 0)      (3, 3, 0)
+MISTAKE_0100                    22      1.33e-6     (9, 13, 0)     (9, 13, 0)
+TRO3X3_0637                     43      9.07e-7    (30, 13, 0)    (30, 13, 0)
+PFIT2_0390                       6      6.86e-7      (3, 3, 0)      (3, 3, 0)
+PFIT2_0545                       6      6.76e-7      (3, 3, 0)      (3, 3, 0)
 
 --- Sparse failure analysis (1837 failures) ---
 
@@ -187,8 +187,8 @@ PFIT2                        23          0         23        2.42e-6
 CERI651CLS                   21          1         20        2.53e-7
 CRESC100                     19         19          0       2.40e-15
 PALMER1ENE                   16          0         16        1.22e-8
-DEVGLA2                      15          0         15        7.78e-7
 CERI651ALS                   15          2         13        1.28e-7
+DEVGLA2                      15          0         15        7.78e-7
 KIRBY2                       12         12          0       1.52e-13
 VESUVIO                      10         10          0       1.40e-13
 MISTAKE                      10          0         10        1.17e-6
@@ -218,66 +218,66 @@ TRO3X3_0637                     43      9.18e-7    (30, 13, 0)    (30, 13, 0)
 DEVGLA2_0417                     5      7.78e-7      (5, 0, 0)      (5, 0, 0)
 
 --- Dense ∩ Sparse failure overlap ---
-Failed in BOTH dense and sparse:  1809
-Failed in dense only:             29
-Failed in sparse only:            28
+Failed in BOTH dense and sparse:  1808
+Failed in dense only:             32
+Failed in sparse only:            29
 
 Shared failure mode breakdown:
-  Inertia mismatch on BOTH paths:          1499
-  Residual-only fail on BOTH paths:         240
-  Mixed (one inertia, other residual):       70
+  Inertia mismatch on BOTH paths:          1566
+  Residual-only fail on BOTH paths:         239
+  Mixed (one inertia, other residual):        3
 
 Shared failure size class breakdown:
-  n <=  100:     315
+  n <=  100:     314
   n <= 1000:    1494
   n >  1000:       0
 
 Top 25 families in shared failures:
 family                    total    inertia   residual      worst_res
-HAHN1                       498        498          0       2.71e-13
+HAHN1                       498        498          0       2.78e-13
 QPNBLEND                    362        362          0       2.78e-15
-MSS1                        240        240          0       2.78e-15
+MSS1                        240        240          0       2.80e-15
 CORE1                       141        141          0       1.07e-15
-CRESC50                      97         97          0       3.50e-15
-ACOPP30                      67          0          0        2.80e-2
+CRESC50                      97         97          0       2.71e-15
+ACOPP30                      67         67          0       4.24e-14
 FBRAIN3LS                    48          3         42        2.82e-7
+PFIT4                        38         38          0       2.53e-14
 CERI651DLS                   38          3         35        1.93e-7
-PFIT4                        38         38          0       1.69e-14
-CERI651A                     37         37          0       7.97e-14
-HS46                         24          0         24        7.51e-8
+CERI651A                     37         37          0       8.64e-14
+HS46                         23          0         23        7.51e-8
 PFIT2                        22          0         22        5.39e-6
 CERI651CLS                   21          1         20        2.53e-7
-CRESC100                     19         19          0       4.65e-15
+CRESC100                     19         19          0       4.76e-15
 PALMER1ENE                   16          0         16        1.22e-8
 DEVGLA2                      15          0         15        7.78e-7
 CERI651ALS                   14          2         12        1.28e-7
 KIRBY2                       12         12          0       1.52e-13
 MISTAKE                      10          0         10        1.33e-6
 ALLINITA                      9          2          7        5.43e-7
-BENNETT5                      8          8          0       1.29e-13
 DISCS                         8          8          0       2.09e-15
+BENNETT5                      8          8          0       8.69e-14
 DJTL                          7          0          7        5.33e-7
 LSC2LS                        4          0          4        1.95e-8
-HS118                         3          0          3        9.68e-8
+EQC                           3          0          3        1.21e-7
   ... and 40 more families
 
 Top 15 worst shared residuals:
 name                             n    dense_res   sparse_res       expected     actual(sp)
-ACOPP30_0026                   209      2.80e-2     8.64e-15   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0018                   209      2.76e-2     6.75e-15   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0000                   209      2.74e-2     4.27e-15   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0037                   209      2.69e-2     6.74e-15   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0012                   209      2.69e-2     8.34e-15   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0046                   209      2.64e-2     7.82e-15   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0036                   209      2.63e-2     1.02e-14   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0051                   209      2.58e-2     8.78e-15   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0002                   209      2.55e-2     1.63e-14   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0024                   209      2.54e-2     7.73e-15   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0057                   209      2.53e-2     8.20e-15   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0055                   209      2.49e-2     1.07e-14   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0013                   209      2.46e-2     7.91e-15   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0045                   209      2.45e-2     9.38e-15   (72, 137, 0)   (71, 137, 1)
-ACOPP30_0010                   209      2.43e-2     9.45e-15   (72, 137, 0)   (71, 137, 1)
+ERRINBAR_0824                   27      1.87e-4      2.50e-4     (18, 9, 0)     (18, 9, 0)
+PRICE4_0002                      2      7.74e-6      7.74e-6      (2, 0, 0)      (2, 0, 0)
+PFIT2_0248                       6      5.39e-6      1.22e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0548                       6      3.66e-6      1.43e-8      (3, 3, 0)      (3, 3, 0)
+FLETCHER_0002                   16      3.63e-6      3.63e-6     (12, 4, 0)     (12, 4, 0)
+PFIT2_0340                       6      2.71e-6      5.92e-8      (3, 3, 0)      (3, 3, 0)
+PFIT2_0338                       6      2.71e-6      5.92e-8      (3, 3, 0)      (3, 3, 0)
+PFIT2_0339                       6      2.71e-6      5.92e-8      (3, 3, 0)      (3, 3, 0)
+PFIT2_0390                       6      6.86e-7      2.42e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0591                       6      3.07e-7      1.70e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0299                       6      1.37e-6      6.12e-8      (3, 3, 0)      (3, 3, 0)
+PFIT2_0297                       6      1.37e-6      6.12e-8      (3, 3, 0)      (3, 3, 0)
+PFIT2_0298                       6      1.37e-6      6.12e-8      (3, 3, 0)      (3, 3, 0)
+PFIT2_0329                       6      1.64e-7      1.36e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0328                       6      4.15e-8      1.36e-6      (3, 3, 0)      (3, 3, 0)
 ```
 
 ## Recent Decisions
