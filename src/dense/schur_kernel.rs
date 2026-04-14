@@ -14,14 +14,21 @@
 //! loops in `factor.rs` guarantee this because `dst` is a trailing
 //! column strictly later than `src`.
 //!
-//! **Step 2 note (this file):** the function bodies are scalar
-//! placeholders. The test harness below compares them against an
-//! in-module `naive_*` reference. At Phase 2.4.2 Step 3 the bodies
-//! will be replaced with pulp kernels (`pulp::Arch::dispatch` over
-//! a `pulp::WithSimd` impl using `simd.f64s_mul_add`). The tests do
-//! not change; they become meaningful the moment the SIMD kernel
-//! diverges from the naive reference (delta must remain ≤ 1 ULP per
-//! the Phase 2.4.2 correctness gate).
+//! **Implementation (Step 3):** each function builds a local
+//! `pulp::WithSimd` impl that splats `-alpha` once, iterates the
+//! full SIMD body with `simd.mul_add_f64s(neg_alpha, src, dst)`
+//! (one fused multiply-add per lane), and finishes the trailing
+//! scalar tail with `simd.partial_load_f64s` / `partial_store_f64s`
+//! (masked loads on AVX-512, sequential on NEON/SSE). The kernel
+//! is dispatched through `pulp::Arch::new().dispatch(...)` which
+//! picks the best monomorphized variant based on runtime CPU
+//! feature detection — AVX-512 / AVX2+FMA / SSE2 / NEON / scalar
+//! fallback — at the cost of one dispatch branch per top-level call
+//! (not per inner iteration).
+//!
+//! The scalar fallback path inside pulp guarantees that feral
+//! continues to work on architectures without SIMD; no explicit
+//! `#[cfg(target_arch)]` gates are needed in this module.
 
 /// `dst[i] -= alpha * src[i]` for `i in 0..dst.len()`.
 ///
@@ -31,8 +38,8 @@
 ///   the caller; the Rust borrow checker guarantees this at the call
 ///   sites in `factor.rs` because `dst` is obtained from
 ///   `split_at_mut`).
-// Phase 2.4.2 Step 2: function exists and is tested but not yet wired
-// into `do_1x1_update`. The `dead_code` allow is removed at Step 5.
+// Phase 2.4.2 Step 3: pulp-dispatched SIMD kernel. The `dead_code`
+// allow stays until Step 5 wires this into `do_1x1_update`.
 #[allow(dead_code)]
 pub(crate) fn axpy_minus(dst: &mut [f64], src: &[f64], alpha: f64) {
     assert_eq!(
@@ -40,11 +47,46 @@ pub(crate) fn axpy_minus(dst: &mut [f64], src: &[f64], alpha: f64) {
         src.len(),
         "axpy_minus: dst and src length mismatch"
     );
-    // Step 2 placeholder: scalar implementation. Replaced by a
-    // pulp-dispatched SIMD kernel in Step 3.
-    for i in 0..dst.len() {
-        dst[i] -= alpha * src[i];
+
+    struct K<'a> {
+        neg_alpha: f64,
+        src: &'a [f64],
+        dst: &'a mut [f64],
     }
+
+    impl pulp::WithSimd for K<'_> {
+        type Output = ();
+
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) {
+            let Self {
+                neg_alpha,
+                src,
+                dst,
+            } = self;
+            let neg_a = simd.splat_f64s(neg_alpha);
+
+            let (src_body, src_tail) = S::as_simd_f64s(src);
+            let (dst_body, dst_tail) = S::as_mut_simd_f64s(dst);
+
+            for (d, s) in dst_body.iter_mut().zip(src_body) {
+                // d <- (-alpha) * s + d  =  d - alpha * s
+                *d = simd.mul_add_f64s(neg_a, *s, *d);
+            }
+
+            if !src_tail.is_empty() {
+                let s = simd.partial_load_f64s(src_tail);
+                let d = simd.partial_load_f64s(dst_tail);
+                simd.partial_store_f64s(dst_tail, simd.mul_add_f64s(neg_a, s, d));
+            }
+        }
+    }
+
+    pulp::Arch::new().dispatch(K {
+        neg_alpha: -alpha,
+        src,
+        dst,
+    });
 }
 
 /// `dst[i] -= alpha0 * src0[i] + alpha1 * src1[i]` for `i in 0..dst.len()`.
@@ -52,7 +94,10 @@ pub(crate) fn axpy_minus(dst: &mut [f64], src: &[f64], alpha: f64) {
 /// The rank-2 twin of [`axpy_minus`], used inside the 2×2 pivot update
 /// in [`super::factor::do_2x2_update`]. Same aliasing precondition:
 /// `dst`, `src0`, `src1` must be pairwise disjoint.
-// Phase 2.4.2 Step 2: wired in at Step 5 — see `axpy_minus` above.
+// Phase 2.4.2 Step 3: pulp-dispatched SIMD kernel. Same structure as
+// `axpy_minus` but with two source columns and two FMAs per lane
+// (one for each `-alphaN * srcN` contribution, accumulating into the
+// same destination lane). Wired in at Step 5.
 #[allow(dead_code)]
 pub(crate) fn axpy2_minus(dst: &mut [f64], src0: &[f64], alpha0: f64, src1: &[f64], alpha1: f64) {
     assert_eq!(
@@ -65,11 +110,59 @@ pub(crate) fn axpy2_minus(dst: &mut [f64], src0: &[f64], alpha0: f64, src1: &[f6
         src1.len(),
         "axpy2_minus: dst and src1 length mismatch"
     );
-    // Step 2 placeholder: scalar implementation. Replaced by a
-    // pulp-dispatched SIMD kernel in Step 3.
-    for i in 0..dst.len() {
-        dst[i] -= alpha0 * src0[i] + alpha1 * src1[i];
+
+    struct K<'a> {
+        neg_alpha0: f64,
+        neg_alpha1: f64,
+        src0: &'a [f64],
+        src1: &'a [f64],
+        dst: &'a mut [f64],
     }
+
+    impl pulp::WithSimd for K<'_> {
+        type Output = ();
+
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) {
+            let Self {
+                neg_alpha0,
+                neg_alpha1,
+                src0,
+                src1,
+                dst,
+            } = self;
+            let na0 = simd.splat_f64s(neg_alpha0);
+            let na1 = simd.splat_f64s(neg_alpha1);
+
+            let (s0_body, s0_tail) = S::as_simd_f64s(src0);
+            let (s1_body, s1_tail) = S::as_simd_f64s(src1);
+            let (d_body, d_tail) = S::as_mut_simd_f64s(dst);
+
+            for ((d, s0), s1) in d_body.iter_mut().zip(s0_body).zip(s1_body) {
+                // d <- (-alpha0)*s0 + d
+                // d <- (-alpha1)*s1 + d
+                let tmp = simd.mul_add_f64s(na0, *s0, *d);
+                *d = simd.mul_add_f64s(na1, *s1, tmp);
+            }
+
+            if !s0_tail.is_empty() {
+                let s0v = simd.partial_load_f64s(s0_tail);
+                let s1v = simd.partial_load_f64s(s1_tail);
+                let dv = simd.partial_load_f64s(d_tail);
+                let tmp = simd.mul_add_f64s(na0, s0v, dv);
+                let r = simd.mul_add_f64s(na1, s1v, tmp);
+                simd.partial_store_f64s(d_tail, r);
+            }
+        }
+    }
+
+    pulp::Arch::new().dispatch(K {
+        neg_alpha0: -alpha0,
+        neg_alpha1: -alpha1,
+        src0,
+        src1,
+        dst,
+    });
 }
 
 #[cfg(test)]
