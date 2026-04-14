@@ -248,6 +248,198 @@ fn print_cross_comparison(dense: &[Failure], sparse: &[Failure]) {
     }
 }
 
+/// Phase 2.1.7 — emit feral-vs-oracle timing comparisons for a single path.
+///
+/// Joins per-matrix feral timings against the MUMPS and SSIDS timings that
+/// `load_kkt_dir` pulled out of the `*.mumps.json` / `*.ssids.json` sidecars,
+/// computes ratio = feral_time / oracle_time, and reports:
+///
+///   1. Overall distribution of factor and solve ratios (geomean, p50, p90,
+///      p99, max) per oracle.
+///   2. Per-family geomean factor ratio against MUMPS, sorted by matrix count,
+///      so families with many matrices dominate the summary in proportion to
+///      their representation in the corpus.
+///   3. Top 10 worst factor-ratio matrices versus MUMPS, as a triage hook for
+///      Phase 2.4/2.5 optimization work.
+///
+/// `label` is printed in the section header ("Dense" or "Sparse"). Matrices
+/// with no oracle sidecar are counted but excluded from ratio stats — they
+/// simply cannot contribute to the comparison.
+fn print_perf_comparison(label: &str, timings: &[MatrixTiming], entries: &[KktEntry]) {
+    let entry_by_name: HashMap<&str, &KktEntry> =
+        entries.iter().map(|e| (e.name.as_str(), e)).collect();
+
+    // Build the joined row set. We only keep rows where feral has a timing
+    // AND at least one oracle sidecar has a timing — otherwise there is
+    // nothing to compare against. mumps_factor_ratio and friends are
+    // per-matrix, per-(factor/solve), per-oracle.
+    struct Row<'a> {
+        family: String,
+        timing: &'a MatrixTiming,
+        mumps: Option<OracleTiming>,
+        ssids: Option<OracleTiming>,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    for t in timings {
+        let Some(entry) = entry_by_name.get(t.name.as_str()) else {
+            continue;
+        };
+        if entry.mumps_timing.is_none() && entry.ssids_timing.is_none() {
+            continue;
+        }
+        rows.push(Row {
+            family: family_of(&t.name).to_string(),
+            timing: t,
+            mumps: entry.mumps_timing,
+            ssids: entry.ssids_timing,
+        });
+    }
+
+    if rows.is_empty() {
+        println!(
+            "\n--- {} perf vs oracles: no matrices have oracle timings ---",
+            label
+        );
+        return;
+    }
+
+    // Ratio helper. Both feral and oracle microsecond counts are clamped to
+    // `>= 1` so that sub-microsecond matrices (which hit the clock-resolution
+    // floor on both sides) produce a meaningful ratio of 1.0 rather than
+    // collapsing the geometric mean in log space. The clamp is symmetric by
+    // design: ratios at the noise floor are uninformative but must not poison
+    // the aggregate statistic.
+    let ratio = |feral: u128, oracle: u64| -> f64 {
+        let num = feral.max(1) as f64;
+        let denom = oracle.max(1) as f64;
+        num / denom
+    };
+
+    // Pull out per-row ratio vectors. A matrix with no MUMPS sidecar is
+    // skipped for the MUMPS lists but still contributes to the SSIDS lists
+    // (and vice versa).
+    let mut mumps_factor: Vec<f64> = Vec::new();
+    let mut mumps_solve: Vec<f64> = Vec::new();
+    let mut ssids_factor: Vec<f64> = Vec::new();
+    let mut ssids_solve: Vec<f64> = Vec::new();
+    for r in &rows {
+        if let Some(m) = r.mumps {
+            mumps_factor.push(ratio(r.timing.factor_us, m.factor_us));
+            mumps_solve.push(ratio(r.timing.solve_us, m.solve_us));
+        }
+        if let Some(s) = r.ssids {
+            ssids_factor.push(ratio(r.timing.factor_us, s.factor_us));
+            ssids_solve.push(ratio(r.timing.solve_us, s.solve_us));
+        }
+    }
+
+    // Distribution summary: geomean is the right central tendency for
+    // multiplicative quantities like speed ratios. Arithmetic mean would
+    // overweight slow matrices. Percentiles use linear interpolation-free
+    // nearest-rank to keep the output integer-stable across reruns.
+    fn quantiles(vals: &mut [f64]) -> Option<(f64, f64, f64, f64, f64)> {
+        if vals.is_empty() {
+            return None;
+        }
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = vals.len();
+        // Geometric mean in log space: avoids overflow on large ratios.
+        let log_sum: f64 = vals.iter().map(|v| v.max(1e-300).ln()).sum();
+        let geomean = (log_sum / n as f64).exp();
+        let idx = |q: f64| -> usize {
+            ((n as f64 * q).ceil() as usize)
+                .saturating_sub(1)
+                .min(n - 1)
+        };
+        let p50 = vals[idx(0.50)];
+        let p90 = vals[idx(0.90)];
+        let p99 = vals[idx(0.99)];
+        let max = vals[n - 1];
+        Some((geomean, p50, p90, p99, max))
+    }
+
+    println!(
+        "\n=== {} perf vs canonical oracles ({} matrices with oracle timings) ===",
+        label,
+        rows.len()
+    );
+    println!(
+        "\n{:<18} {:>6} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "ratio", "count", "geomean", "p50", "p90", "p99", "max"
+    );
+    let emit = |name: &str, vals: &mut Vec<f64>| {
+        if let Some((g, p50, p90, p99, mx)) = quantiles(vals) {
+            println!(
+                "{:<18} {:>6} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.2}",
+                name,
+                vals.len(),
+                g,
+                p50,
+                p90,
+                p99,
+                mx,
+            );
+        }
+    };
+    emit("factor/MUMPS", &mut mumps_factor);
+    emit("solve/MUMPS", &mut mumps_solve);
+    emit("factor/SSIDS", &mut ssids_factor);
+    emit("solve/SSIDS", &mut ssids_solve);
+
+    // Per-family factor geomean vs MUMPS. Families with <3 MUMPS-ratio
+    // samples are still shown — small families are often the most
+    // informative for ACOPP-style outliers — but flagged via count.
+    let mut by_family: HashMap<&str, Vec<f64>> = HashMap::new();
+    for r in &rows {
+        if let Some(m) = r.mumps {
+            by_family
+                .entry(r.family.as_str())
+                .or_default()
+                .push(ratio(r.timing.factor_us, m.factor_us));
+        }
+    }
+    let mut fam_rows: Vec<(&str, Vec<f64>)> = by_family.into_iter().collect();
+    fam_rows.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    println!("\nPer-family factor geomean vs MUMPS (top 25 families by count):");
+    println!(
+        "{:<22} {:>6} {:>10} {:>10} {:>10}",
+        "family", "count", "geomean", "p50", "max"
+    );
+    for (fam, mut vals) in fam_rows.into_iter().take(25) {
+        if let Some((g, p50, _, _, mx)) = quantiles(&mut vals) {
+            println!(
+                "{:<22} {:>6} {:>10.2} {:>10.2} {:>10.2}",
+                fam,
+                vals.len(),
+                g,
+                p50,
+                mx,
+            );
+        }
+    }
+
+    // Top 10 worst factor-time slowdowns vs MUMPS. These are the matrices
+    // to triage when a Phase 2.4/2.5 optimization lands and we want to
+    // check whether it moved the tail.
+    let mut worst: Vec<(f64, &Row)> = rows
+        .iter()
+        .filter_map(|r| r.mumps.map(|m| (ratio(r.timing.factor_us, m.factor_us), r)))
+        .collect();
+    worst.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    println!("\nTop 10 worst factor-ratio vs MUMPS:");
+    println!(
+        "{:<28} {:>5} {:>12} {:>12} {:>10}",
+        "name", "n", "feral(μs)", "mumps(μs)", "ratio"
+    );
+    for (r, row) in worst.iter().take(10) {
+        let m = row.mumps.unwrap();
+        println!(
+            "{:<28} {:>5} {:>12} {:>12} {:>10.2}",
+            row.timing.name, row.timing.n, row.timing.factor_us, m.factor_us, r
+        );
+    }
+}
+
 /// Simple deterministic PRNG for benchmark matrix generation.
 struct Rng {
     state: u64,
@@ -365,6 +557,51 @@ struct KktEntry {
     matrix: SymmetricMatrix,
     csc: CscMatrix,
     sidecar: KktSidecar,
+    /// Canonical Fortran MUMPS 5.8.2 oracle timing from `*.mumps.json` if present.
+    mumps_timing: Option<OracleTiming>,
+    /// Canonical SPRAL SSIDS oracle timing from `*.ssids.json` if present.
+    ssids_timing: Option<OracleTiming>,
+}
+
+/// Factor and solve microseconds from a canonical oracle sidecar.
+///
+/// Populated from `*.mumps.json` / `*.ssids.json` written by the oracle runners
+/// in `external_benchmarks/`. Used by `print_perf_comparison` to compute
+/// feral/oracle ratios for the Phase 2.1.7 baseline report.
+#[derive(Clone, Copy)]
+struct OracleTiming {
+    factor_us: u64,
+    solve_us: u64,
+}
+
+/// Per-matrix feral factor and solve timing on a single path.
+///
+/// Phase 2.1.7 perf harness collects these alongside the existing pass/fail
+/// tallies so that `print_perf_comparison` can join them against the oracle
+/// timings stored in `KktEntry::{mumps_timing, ssids_timing}` and emit
+/// feral/MUMPS and feral/SSIDS ratios grouped by problem family.
+#[derive(Clone)]
+struct MatrixTiming {
+    name: String,
+    n: usize,
+    factor_us: u128,
+    solve_us: u128,
+}
+
+/// Parse `factor_us` and `solve_us` from a canonical-oracle JSON sidecar.
+///
+/// Returns `None` if the file does not exist, cannot be parsed, or is missing
+/// either timing field. Matches the schema written by MUMPS and SSIDS runners
+/// (see `data/matrices/kkt/ACOPP30/ACOPP30_0000.mumps.json` for an example).
+fn read_oracle_timing(path: &Path) -> Option<OracleTiming> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    let factor_us = v.get("factor_us")?.as_u64()?;
+    let solve_us = v.get("solve_us")?.as_u64()?;
+    Some(OracleTiming {
+        factor_us,
+        solve_us,
+    })
 }
 
 /// Write a canonical `.feral.json` sidecar next to the matrix file.
@@ -502,12 +739,20 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
                 }
             };
 
+            // Oracle timing sidecars written by external_benchmarks/{mumps,ssids}_oracle.
+            // Schema: see OracleTiming and read_oracle_timing above. Missing files are OK
+            // and simply leave the timing fields as None.
+            let mumps_timing = read_oracle_timing(&mtx_path.with_extension("mumps.json"));
+            let ssids_timing = read_oracle_timing(&mtx_path.with_extension("ssids.json"));
+
             entries.push(KktEntry {
                 name: stem,
                 mtx_path: mtx_path.clone(),
                 matrix: mtx.to_dense(),
                 csc,
                 sidecar,
+                mumps_timing,
+                ssids_timing,
             });
         }
     }
@@ -606,6 +851,10 @@ fn main() {
     let mut worst_residual = 0.0f64;
     let mut worst_residual_name = String::new();
     let mut dense_failures: Vec<Failure> = Vec::new();
+    // Phase 2.1.7 perf harness: collect per-matrix dense timings so
+    // print_perf_comparison can cross-reference against the canonical
+    // MUMPS and SSIDS oracle timings loaded into KktEntry.
+    let mut dense_timings: Vec<MatrixTiming> = Vec::new();
 
     let emit_sidecars = std::env::var("FERAL_EMIT_SIDECARS").is_ok();
 
@@ -665,6 +914,12 @@ fn main() {
             }
         };
         let solve_us = t1.elapsed().as_micros();
+        dense_timings.push(MatrixTiming {
+            name: entry.name.clone(),
+            n,
+            factor_us,
+            solve_us,
+        });
 
         // Compute residual: ||Ax - b|| / ||b||
         let mut ax = vec![0.0; n];
@@ -769,6 +1024,12 @@ fn main() {
     let mut sp_worst_res = 0.0f64;
     let mut sp_worst_name = String::new();
     let mut sparse_failures: Vec<Failure> = Vec::new();
+    // Phase 2.1.7 perf harness: sparse-side per-matrix timings. The sparse
+    // factor timing is the sum of symbolic + numeric because both are part
+    // of the work feral has to do for a one-shot factor call. MUMPS/SSIDS
+    // oracle JSONs report a single `factor_us` that covers their equivalent
+    // phases, so this matches the comparison semantics.
+    let mut sparse_timings: Vec<MatrixTiming> = Vec::new();
 
     for entry in &kkt_entries {
         sp_total += 1;
@@ -780,7 +1041,10 @@ fn main() {
             zero: entry.sidecar.inertia.zero,
         };
 
-        // Symbolic factorization
+        // Symbolic factorization. Timed together with the numeric phase so
+        // the reported `factor_us` is apples-to-apples with the single
+        // `factor_us` field MUMPS and SSIDS emit for their equivalent work.
+        let tf = Instant::now();
         let sym = match symbolic_factorize(&entry.csc, &snode_params) {
             Ok(s) => s,
             Err(e) => {
@@ -800,6 +1064,7 @@ fn main() {
                     continue;
                 }
             };
+        let sp_factor_us = tf.elapsed().as_micros();
 
         let inertia_ok = sp_inertia == expected_inertia;
         if inertia_ok {
@@ -811,6 +1076,7 @@ fn main() {
             Some(r) => r,
             None => continue,
         };
+        let ts = Instant::now();
         let x = match solve_sparse_refined(&entry.csc, &sp_factors, &rhs) {
             Ok(x) => x,
             Err(e) => {
@@ -819,6 +1085,13 @@ fn main() {
                 continue;
             }
         };
+        let sp_solve_us = ts.elapsed().as_micros();
+        sparse_timings.push(MatrixTiming {
+            name: entry.name.clone(),
+            n,
+            factor_us: sp_factor_us,
+            solve_us: sp_solve_us,
+        });
 
         // Residual
         let mut ax = vec![0.0; n];
@@ -884,4 +1157,8 @@ fn main() {
     print_failure_analysis("Dense", &dense_failures);
     print_failure_analysis("Sparse", &sparse_failures);
     print_cross_comparison(&dense_failures, &sparse_failures);
+
+    // ============ Phase 2.1.7 perf vs oracles ============
+    print_perf_comparison("Dense", &dense_timings, &kkt_entries);
+    print_perf_comparison("Sparse", &sparse_timings, &kkt_entries);
 }
