@@ -104,9 +104,15 @@ fn print_failure_analysis(label: &str, failures: &[Failure]) {
 }
 
 fn print_cross_comparison(dense: &[Failure], sparse: &[Failure]) {
-    let dense_names: HashSet<&str> = dense.iter().map(|f| f.name.as_str()).collect();
-    let sparse_names: HashSet<&str> = sparse.iter().map(|f| f.name.as_str()).collect();
-    let both = dense_names.intersection(&sparse_names).count();
+    let dense_by_name: HashMap<&str, &Failure> =
+        dense.iter().map(|f| (f.name.as_str(), f)).collect();
+    let sparse_by_name: HashMap<&str, &Failure> =
+        sparse.iter().map(|f| (f.name.as_str(), f)).collect();
+
+    let dense_names: HashSet<&str> = dense_by_name.keys().copied().collect();
+    let sparse_names: HashSet<&str> = sparse_by_name.keys().copied().collect();
+    let shared_names: Vec<&str> = dense_names.intersection(&sparse_names).copied().collect();
+    let both = shared_names.len();
     let dense_only = dense_names.len() - both;
     let sparse_only = sparse_names.len() - both;
 
@@ -114,6 +120,131 @@ fn print_cross_comparison(dense: &[Failure], sparse: &[Failure]) {
     println!("Failed in BOTH dense and sparse:  {}", both);
     println!("Failed in dense only:             {}", dense_only);
     println!("Failed in sparse only:            {}", sparse_only);
+
+    if shared_names.is_empty() {
+        return;
+    }
+
+    // Build the joined shared records so we can bucket by failure mode.
+    struct Shared<'a> {
+        d: &'a Failure,
+        s: &'a Failure,
+    }
+    let shared: Vec<Shared> = shared_names
+        .iter()
+        .map(|name| Shared {
+            d: dense_by_name[name],
+            s: sparse_by_name[name],
+        })
+        .collect();
+
+    // Bucket 1: by failure mode. A "mode" is the pair (dense inertia ok?,
+    // dense residual ok?, sparse inertia ok?, sparse residual ok?).
+    // Simplified to 3 buckets that are easy to interpret:
+    //   INERTIA_BOTH   — both paths disagree with MUMPS on inertia
+    //   RESIDUAL_BOTH  — both paths match inertia but have bad residual
+    //   MIXED          — one path has inertia issue, the other residual-only
+    let mut inertia_both = 0usize;
+    let mut residual_both = 0usize;
+    let mut mixed = 0usize;
+    for Shared { d, s } in &shared {
+        let d_ine = !d.inertia_ok;
+        let s_ine = !s.inertia_ok;
+        let d_res = !d.residual_ok;
+        let s_res = !s.residual_ok;
+        if d_ine && s_ine {
+            inertia_both += 1;
+        } else if d_res && s_res && !d_ine && !s_ine {
+            residual_both += 1;
+        } else {
+            mixed += 1;
+        }
+    }
+    println!("\nShared failure mode breakdown:");
+    println!(
+        "  Inertia mismatch on BOTH paths:        {:>6}",
+        inertia_both
+    );
+    println!(
+        "  Residual-only fail on BOTH paths:      {:>6}",
+        residual_both
+    );
+    println!("  Mixed (one inertia, other residual):   {:>6}", mixed);
+
+    // Bucket 2: by size class.
+    let mut small = 0usize; // n <= 100
+    let mut med = 0usize; // 100 < n <= 1000
+    let mut large = 0usize; // n > 1000
+    for Shared { d, .. } in &shared {
+        match d.n {
+            0..=100 => small += 1,
+            101..=1000 => med += 1,
+            _ => large += 1,
+        }
+    }
+    println!("\nShared failure size class breakdown:");
+    println!("  n <=  100:  {:>6}", small);
+    println!("  n <= 1000:  {:>6}", med);
+    println!("  n >  1000:  {:>6}", large);
+
+    // Bucket 3: top families among shared failures.
+    let mut fam_counts: HashMap<&str, (usize, usize, usize, f64)> = HashMap::new();
+    // value: (total, inertia-both count, residual-both count, worst dense+sparse max residual)
+    for Shared { d, s } in &shared {
+        let fam = family_of(&d.name);
+        let entry = fam_counts.entry(fam).or_insert((0, 0, 0, 0.0));
+        entry.0 += 1;
+        if !d.inertia_ok && !s.inertia_ok {
+            entry.1 += 1;
+        }
+        if !d.residual_ok && !s.residual_ok && d.inertia_ok && s.inertia_ok {
+            entry.2 += 1;
+        }
+        let worst = d.residual.max(s.residual);
+        if worst > entry.3 {
+            entry.3 = worst;
+        }
+    }
+    let mut fams: Vec<_> = fam_counts.into_iter().collect();
+    fams.sort_by_key(|(_, v)| std::cmp::Reverse(v.0));
+    println!("\nTop 25 families in shared failures:");
+    println!(
+        "{:<22} {:>8} {:>10} {:>10} {:>14}",
+        "family", "total", "inertia", "residual", "worst_res"
+    );
+    for (fam, (total, ine, res, worst)) in fams.iter().take(25) {
+        println!(
+            "{:<22} {:>8} {:>10} {:>10} {:>14.2e}",
+            fam, total, ine, res, worst
+        );
+    }
+    if fams.len() > 25 {
+        println!("  ... and {} more families", fams.len() - 25);
+    }
+
+    // Bucket 4: top 15 worst shared residuals (max of dense/sparse).
+    let mut by_worst: Vec<&Shared> = shared.iter().collect();
+    by_worst.sort_by(|a, b| {
+        let aw = a.d.residual.max(a.s.residual);
+        let bw = b.d.residual.max(b.s.residual);
+        bw.partial_cmp(&aw).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    println!("\nTop 15 worst shared residuals:");
+    println!(
+        "{:<28} {:>5} {:>12} {:>12} {:>14} {:>14}",
+        "name", "n", "dense_res", "sparse_res", "expected", "actual(sp)"
+    );
+    for sh in by_worst.iter().take(15) {
+        println!(
+            "{:<28} {:>5} {:>12.2e} {:>12.2e} {:>14} {:>14}",
+            sh.d.name,
+            sh.d.n,
+            sh.d.residual,
+            sh.s.residual,
+            format!("{}", sh.d.expected),
+            format!("{}", sh.s.actual),
+        );
+    }
 }
 
 /// Simple deterministic PRNG for benchmark matrix generation.
