@@ -545,3 +545,92 @@ near `zero_tol`), revisit. Not scheduled.
 2 bit-exact unit tests pass under `cargo test --lib schur_kernel`;
 Phase 2.4.2 Step 5 triage (the failed FMA wiring) documented in
 `dev/tried-and-rejected.md` 2026-04-14 Phase 2.4.2 entry.
+
+---
+
+## 2026-04-14 — Phase 2.5 priority reordered: AMD is the sparse-small bottleneck, not column counts
+
+**Context.** `dev/plans/phase-2-planning.md` §2.5.1 names Liu's
+row-subtree column counts as "probably the highest-leverage Phase 2.5
+item because it affects every call to `symbolic_factorize` and the
+current implementation is the documented scaling weak point". The
+Phase 2.8.1 partition verdict (session 2026-04-14-02) showed sparse
+small-frontal p90 = 2.81 vs the 2.0 target — a clear fail that demands
+a Phase 2.5 answer.
+
+**Decision.** Before committing to any Phase 2.5.1 (column counts)
+implementation, profile the sparse symbolic pipeline end-to-end on the
+small-frontal bucket and spend the 2.5 hours on whatever phase
+*actually* carries the cost. The profile binary
+`examples/profile_sparse_smallfront.rs` replicates the
+`symbolic_factorize` pipeline inline with per-phase `Instant::now()`
+timing and runs over all 152128 small-frontal (max_front < 200, n ≤
+500) matrices with a MUMPS oracle sidecar.
+
+**Evidence — phase share across 152128 small-frontal matrices:**
+
+| phase         |    sum (μs)   | share |
+|---------------|--------------:|------:|
+| total         |    9,376,324  | 100.0%|
+| symbolic      |    6,714,929  |  71.6%|
+| ├─ mc64       |      288,039  |   3.1%|
+| ├─ **amd**    |  **3,733,092**|**39.8%**|
+| ├─ etree      |    1,794,829  |  19.1%|
+| ├─ colcnt     |      242,495  |   2.6%|
+| └─ snode      |      410,403  |   4.4%|
+| numeric       |    2,661,395  |  28.4%|
+
+**Per-phase percentile tails (μs):**
+
+| phase   | p50 | p90 | p99 |  max |
+|---------|----:|----:|----:|-----:|
+| mc64    |   0 |   5 |  23 |  109 |
+| **amd** | **0**|**28**|**554**|**9322**|
+| etree   |   2 |  29 | 127 |  880 |
+| colcnt  |   0 |   5 |  31 |  157 |
+| snode   |   0 |   3 |  49 |  502 |
+| numeric |   1 |  55 | 253 | 1451 |
+
+**Top offenders:**
+- DISCS family (n=234, max_front=138, 20 matrices): AMD alone =
+  9000–9300 μs, feral total = 11000 μs, MUMPS total = 440 μs.
+  **AMD alone is 20× slower than MUMPS's entire analyse+factor**
+  on this n=234 family.
+- DMN15103 (n=99): AMD 1500–1800 μs, feral total ~2100 μs, MUMPS 120
+  μs. AMD is ~75% of feral work; MUMPS is ~15× faster on n=99.
+- LAKES (n=324): AMD 8200–8600 μs, feral total ~11000 μs, MUMPS 600
+  μs. AMD is again ~75% of feral work.
+- GROUPING (n=225): different pattern — AMD only 750–810 μs, but
+  snode 450+ μs and numeric 360+ μs (unusually large for n=225),
+  ratio ~16. Snode overhead here is anomalous.
+
+**Implication.** The Phase 2.5.1 plan-item priority is wrong. Column
+counts is 2.6% of the total small-frontal budget; Liu's row-subtree
+would improve it but could at most remove 2.6 percentage points off
+the sparse ratio. **The dominant cost is AMD** at 39.8%, with a
+fat-tail of ~9ms on n=234 geometric families. Etree is second at
+19.1% with its own smaller fat tail.
+
+Reorder Phase 2.5:
+
+1. **New Phase 2.5.1** — diagnose and fix the AMD implementation.
+   The fat-tail pattern (p50=0, max=9322 for n≤300) suggests a
+   pathological case in our AMD (likely dense-row handling, quotient
+   graph updates, or degree approximation) rather than a constant
+   factor. The fix may be a single bug, not a full rewrite. Action:
+   (a) pick DISCS_0012 as the minimal repro, (b) profile `amd_order`
+   with `cargo flamegraph` or manual sub-phase timing, (c) compare
+   against AMD from SuiteSparse or our reference paper citation
+   trail.
+2. **New Phase 2.5.2** — follow-up on etree if it still dominates.
+   Lower priority; 19.1% share with a narrower tail.
+3. **Demoted — old 2.5.1 (Liu row-subtree column counts)** — defer
+   until after AMD and etree are fixed and measured. Not an exit-gate
+   item; revisit only if the small-frontal p90 still misses the bar
+   after 2.5.1′ and 2.5.2′ land.
+4. Phase 2.5.2 (parallelism), 2.5.3 (allocation), 2.5.4 (fill
+   prediction) remain in their original positions in the plan.
+
+**Evidence.** Profile output `/tmp/profile_smallfront.txt`; profile
+binary `examples/profile_sparse_smallfront.rs`. Journal:
+`dev/journal/2026-04-14-02.org` Phase 2.5 triage entry.

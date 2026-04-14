@@ -60,3 +60,64 @@ the documented scaling weak point". For small-matrix sparse where
 symbolic dominates, that matches the profile evidence exactly — the
 hypothesis is that the O(n²) column-counts implementation is the
 biggest contributor to the fixed per-matrix overhead.
+
+* 12:00 :phase-2.5:profile:amd-bottleneck:hypothesis-overturned:
+Wrote =examples/profile_sparse_smallfront.rs= that inlines the
+=symbolic_factorize= pipeline with per-phase =Instant::now()= timing
+and runs over every KKT matrix with n ≤ 500 and a MUMPS oracle
+sidecar, filtering to the small-frontal bucket (max_front < 200). The
+goal is to verify the plan-hypothesized bottleneck (column counts)
+before committing to Phase 2.5.1.
+
+Result across 152128 small-frontal matrices:
+
+| phase    |    sum (μs) | share  |
+|----------+-------------+--------|
+| total    |   9,376,324 | 100.0% |
+| symbolic |   6,714,929 |  71.6% |
+|   mc64   |     288,039 |   3.1% |
+|   *amd*  | *3,733,092* |*39.8%* |
+|   etree  |   1,794,829 |  19.1% |
+|   colcnt |     242,495 |   2.6% |
+|   snode  |     410,403 |   4.4% |
+| numeric  |   2,661,395 |  28.4% |
+
+Per-phase p50 / p90 / p99 / max (μs):
+
+| phase   | p50 | p90 | p99 |  max |
+|---------+-----+-----+-----+------|
+| mc64    |   0 |   5 |  23 |  109 |
+| *amd*   | *0* |*28* |*554*|*9322*|
+| etree   |   2 |  29 | 127 |  880 |
+| colcnt  |   0 |   5 |  31 |  157 |
+| snode   |   0 |   3 |  49 |  502 |
+| numeric |   1 |  55 | 253 | 1451 |
+
+*The column-counts hypothesis is wrong.* Column counts is only 2.6%
+of the total small-frontal budget; even a perfect Liu row-subtree
+rewrite would shave at most 2.6 percentage points off the sparse
+ratio. The real dominant phase is =amd_order= at 39.8%, with a
+catastrophic fat tail (p50 = 0, max = 9322 μs on n = 234 matrices
+from the DISCS family).
+
+Top-30 worst offenders are dominated by three families:
+
+- *DISCS* (n=234, max_front=138, 20 matrices in top 30): AMD alone
+  consumes 9000–9300 μs, feral total ≈ 11000 μs, MUMPS total = 440
+  μs. AMD alone is 20× slower than MUMPS's entire analyse+factor on
+  this single family. Feral/MUMPS ratio ≈ 25.
+- *DMN15103* (n=99): AMD 1500–1800 μs, feral ~2100 μs, MUMPS 120 μs.
+  AMD is ~75% of feral work; ratio ≈ 17.
+- *LAKES* (n=324): AMD 8200–8600 μs, feral ~11000 μs, MUMPS 600 μs.
+  Ratio ≈ 18.
+- *GROUPING* (n=225): different pattern — AMD only 750–810 μs, but
+  snode 450+ μs (unusually large) and numeric 360+ μs. Ratio ≈ 16 here
+  is driven by snode, not amd. Worth a separate look.
+
+*Implication for next steps.* The plan's Phase 2.5.1 (Liu row-subtree
+column counts) is the *wrong* target. A one-hour profile just saved
+us from spending 4–6 hours on the wrong optimization. The new
+priority order is: (1) diagnose and fix AMD (DISCS_0012 is the
+minimal repro), (2) follow up on etree if it still dominates,
+(3) keep column counts as a later item. Recorded in =dev/decisions.md=
+as the 2026-04-14 Phase 2.5 priority-reorder decision.
