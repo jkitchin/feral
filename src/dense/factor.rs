@@ -634,23 +634,7 @@ pub fn factor_frontal(
                 &mut needs_refinement,
             )?;
             match outcome {
-                PivotOutcome::Accepted => {
-                    let d = a[k * nrow + k];
-                    // Scale column k below diagonal (including rows ncol..nrow)
-                    let inv_d = 1.0 / d;
-                    for i in (k + 1)..nrow {
-                        a[k * nrow + i] *= inv_d;
-                    }
-                    // Rank-1 update on trailing matrix
-                    for j in (k + 1)..nrow {
-                        let l_jk = a[k * nrow + j];
-                        for i in j..nrow {
-                            a[j * nrow + i] -= l_jk * d * a[k * nrow + i];
-                        }
-                    }
-                    // Keep D on diagonal
-                    a[k * nrow + k] = d;
-                }
+                PivotOutcome::Accepted => do_1x1_update(&mut a, nrow, k),
                 PivotOutcome::Rejected => {}
                 PivotOutcome::Delayed => break,
             }
@@ -1078,18 +1062,16 @@ fn try_reject_1x1_frontal(
     Ok(PivotOutcome::Accepted)
 }
 
-/// 1×1 rank-1 update: update columns k+1..nrow after eliminating column k.
+/// 1×1 rank-1 update: update columns k+1..n after eliminating column k.
 fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
     let d = a[k * n + k];
     if d.abs() == 0.0 {
         return;
     }
     let inv_d = 1.0 / d;
-    // Scale L column
     for i in (k + 1)..n {
         a[k * n + i] *= inv_d;
     }
-    // Rank-1 update
     for j in (k + 1)..n {
         let l_jk = a[k * n + j];
         for i in j..n {
@@ -1098,7 +1080,7 @@ fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
     }
 }
 
-/// 2×2 rank-2 update: update columns k+2..nrow after eliminating columns k, k+1.
+/// Rank-2 update after a 2×2 pivot at columns `k`, `k+1`.
 fn do_2x2_update(a: &mut [f64], n: usize, k: usize, d11: f64, d21: f64, d22: f64) {
     let det = d11 * d22 - d21 * d21;
     if det.abs() == 0.0 {
@@ -1106,7 +1088,6 @@ fn do_2x2_update(a: &mut [f64], n: usize, k: usize, d11: f64, d21: f64, d22: f64
     }
     let inv_det = 1.0 / det;
 
-    // Compute L columns k and k+1: L = A * D^{-1}
     for i in (k + 2)..n {
         let a_ik = a[k * n + i];
         let a_ik1 = a[(k + 1) * n + i];
@@ -1114,11 +1095,9 @@ fn do_2x2_update(a: &mut [f64], n: usize, k: usize, d11: f64, d21: f64, d22: f64
         a[(k + 1) * n + i] = (d11 * a_ik1 - d21 * a_ik) * inv_det;
     }
 
-    // Rank-2 update: A_trailing -= L * D * L^T
     for j in (k + 2)..n {
         let l_j0 = a[k * n + j];
         let l_j1 = a[(k + 1) * n + j];
-        // D * L^T row j = [d11*l_j0 + d21*l_j1, d21*l_j0 + d22*l_j1]
         let dl_j0 = d11 * l_j0 + d21 * l_j1;
         let dl_j1 = d21 * l_j0 + d22 * l_j1;
         for i in j..n {

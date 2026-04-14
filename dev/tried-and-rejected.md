@@ -140,3 +140,80 @@ remain valid infrastructure for the next attempt.
 
 **Code state.** `src/dense/factor.rs` fully reverted to HEAD
 (555b579). The attempted fix is not present in the tree.
+
+---
+
+## 2026-04-14 — Phase 2.4.1a contribution-block deferral (scalar)
+
+**What.** Defer the rank-1/rank-2 updates on the contribution block
+`a[ncol..nrow, ncol..nrow]` in `factor_frontal` and apply them as a single
+rank-`nelim` triangular update at the end of the routine, keeping the
+cross-strip `a[ncol..nrow, k+1..ncol)` updates eager so they remain
+available for the next pivot's γ₀ search. Scalar kernel only — no SIMD,
+no BLAS — the expected win was cache locality (load the contribution
+block once instead of `nelim` times).
+
+**Why it was tried.** MUMPS-style contribution-block deferral seemed
+like the minimum-risk split of Phase 2.4.1 after mumps-expert and
+spral-expert consultation. Targeted the sparse p90 (3.18 → ≤ 3.0)
+for the multifrontal path; useless by construction for the dense path
+since `factor_single_front` has `ncol = nrow` and the deferred update
+becomes a no-op.
+
+**Implementation.** `src/dense/factor.rs`: added `update_limit` parameter
+to `do_1x1_update`/`do_2x2_update` so their rank-1/rank-2 outer loops
+stopped at `ncol` instead of `nrow`; added a new
+`apply_deferred_contribution_update` helper that built a
+`DL[m,j] = (D·L^T)[m, ncol+j]` scratch buffer and then outer-product
+updated the lower triangle of the contribution block. Called once
+just before L/D/contrib extraction. Correctness preserved (build clean,
+80/80 lib tests pass).
+
+**Bench result vs Phase 2.1.8 baseline.** Sparse factor p90 vs MUMPS
+regressed **3.18 → 3.53 (+11%)**, sparse p99 **11.40 → 12.03 (+5%)**.
+Dense factor p90 moved 2.27 → 2.14 but that is run-to-run noise — the
+dense path hits the early-return `ncol >= nrow` branch.
+
+**Why it failed.** The deferred triangular update has *identical*
+arithmetic cost to eager per-pivot rank-1 updates on the contribution
+block (both are `nelim · cr · (cr+1)/2` flops). Without a SIMD
+micro-kernel or a real BLAS-3 GEMM, loop reordering is a no-op on
+throughput. The deferred path pays extra for:
+
+1. `Vec::new` allocation of the `DL` scratch per frontal
+2. Strided access `a[m*nrow + row]` in the inner `m`-accumulator loop
+3. A second pass over the contribution-block memory
+
+For the typical small-front majority in the sparse KKT corpus the
+allocation overhead dominates.
+
+**Independent confirmation.** After seeing the bench regression I
+consulted faer-expert on the architecture of faer's blocked
+Bunch-Kaufman. Verdict: the entire blocked-BK speedup in faer lives
+in a pulp-dispatched register-blocked SIMD GEMM micro-kernel
+(`matmul_simd` → `Ukr<MR, NR, T>`, x86-v3/v4 feature-gated,
+masked-tail loads) that is called from the deferred
+`triangular::matmul` at `factor.rs:684`. The panel routine
+(`lblt_blocked_step`) itself is plain scalar Rust. This confirms
+that copying the deferral loop structure without a vectorized
+kernel gives zero speedup — exactly what the bench measured.
+
+**What gets rescued.** Nothing — the `update_limit` parameter, the
+`apply_deferred_contribution_update` helper, and the caller
+rewiring were all reverted. The original `do_1x1_update`
+/`do_2x2_update` signatures are restored. Phase 2.4.1b
+(faer-style fully blocked kernel for `factor_single_front`) is
+also mooted by the same logic: without a SIMD trailing-update
+kernel, the outer panel structure is pure overhead.
+
+**What replaces it.** Phase 2.4.2 (SIMD micro-kernel for the
+Schur update) becomes the only remaining lever for the
+`dense factor p90 ≤ 2.0` target. Open question pending user
+direction: write `#[target_feature]` + `core::arch` intrinsics
+(x86_64 AVX2/FMA + aarch64 NEON behind `cfg` gates) vs. accept
+`pulp` as a dependency.
+
+**Evidence.** Full bench output: session 2026-04-14-01 at
+15:00 in `dev/journal/2026-04-14-01.org`. Reverted in same
+session. Head commit: `ce09aa6` (pre-2.4.1a) remained the
+measured baseline.

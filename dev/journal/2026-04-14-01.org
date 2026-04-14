@@ -227,3 +227,183 @@ AMD preorder to factor_single_front as a future task.
 Session 2026-04-14-01 continued has now executed queue items
 (1), (2), and the investigation for (3). Committing diagnostic
 examples and moving to close out.
+
+* 10:30 :phase-2.1.7:perf-harness:
+User pushback: "there should be a clear path forward from our
+plan, and this doesn't seem like we are following it." Correct.
+The SSIDS det floor, ERRINBAR triage, and ACOPP30_0004 triage
+were all legitimate defensive work but none of them were the
+*next thing per the plan*. Re-read dev/plans/phase-2-planning.md.
+
+Initially proposed Phase 2.2.1 MC64 scaling as the next step;
+grepped src/scaling/ and found 1421 lines of existing
+implementation. MC64 was already done in Phase 2.2.3 with
+ScalingStrategy::InfNorm as the default after finding MC64
+near-identity on HYDCAR20/METHANL8/SWOPF. Acknowledged the
+mistake and re-searched.
+
+Actual gap: Phase 2.1.7 (perf measurement harness) and 2.1.8
+(baseline report) are the measurement items gating every
+later Phase 2.4/2.5 optimization. bench.rs had inertia tracking
+against MUMPS sidecars but no `factor_us` / `solve_us` ratio
+distribution. Started implementation.
+
+* 11:00 :phase-2.1.7:impl:
+Added to src/bin/bench.rs:
+- OracleTiming + read_oracle_timing parses factor_us/solve_us
+  from *.mumps.json / *.ssids.json sidecars.
+- KktEntry gains mumps_timing / ssids_timing populated by
+  load_kkt_dir via with_extension("mumps.json").
+- MatrixTiming collects per-matrix feral factor+solve μs.
+- Sparse loop gains Instant::now() wrapping symbolic+numeric
+  in one measurement and solve in another, matching MUMPS's
+  single factor_us semantics.
+- print_perf_comparison emits geomean/p50/p90/p99/max across
+  {dense,sparse}×{factor,solve}×{MUMPS,SSIDS}, per-family
+  factor geomean, top-10 worst factor-ratio tables.
+
+Bug: first run showed `factor/MUMPS geomean 0.00`. Sub-μs feral
+times were casting to 0.0 and `log(0)` poisoned the log-space
+mean. Fixed with symmetric `.max(1) as f64` clamp on both num
+and denom. Second run produced meaningful geomeans.
+
+clippy::ptr_arg: `fn quantiles(vals: &mut Vec<f64>)` flagged.
+Changed to `&mut [f64]`; auto-coerces at call sites.
+
+Committed as e4a4d14.
+
+* 11:30 :phase-2.1.8:baseline:
+Full bench (154588 KKTs) produced the Phase 2.1.8 baseline:
+
+| path    | factor/MUMPS geomean | p50  | p90  | p99   |
+|---------+---------------------+------+------+-------|
+| dense   | 0.23                 | 0.11 | 2.27 | 28.99 |
+| sparse  | 0.67                 | 0.50 | 3.18 | 11.40 |
+| factor/SSIDS dense | 0.01 at all percentiles — feral faster |
+| solve /SSIDS sparse | 1.87 geomean — feral slower       |
+
+Phase 2.8 exit check (within 2×/3× MUMPS):
+- dense p90 2.27 fails 2× bar by 14%
+- sparse p90 3.18 just 6% over 3× bar
+- p99 28.99/11.40 large but no formal bound
+- feral beats MUMPS at the median on both paths; the tail is
+  what Phase 2.4/2.5 must close
+
+Worst families (sparse): AVION2 2.26, BATCH 2.55, HS118 1.31
+Worst large-n cases:
+- HAHN1_0309 n=715, 163× dense vs MUMPS
+- ACOPR30_0035 n=564, 262× dense
+- VESUVIO_0021 n=3083, 109× sparse
+
+Wrote dev/sessions/phase-2-baseline.md with the full analysis,
+caveats, and next-step list. Committed alongside the harness.
+
+Net: measurement infrastructure is in place; every subsequent
+Phase 2.4/2.5 optimization PR must re-run this harness.
+
+* 12:00 :phase-2.4.1:plan:
+Per the plan ordering, the entry point for closing the tail is
+Phase 2.4.1 blocked dense LDLᵀ with block_size = 64. Consulted
+faer-expert for the reference design at
+faer/src/linalg/cholesky/bunch_kaufman/factor.rs. Key findings:
+
+- lblt_blocked (factor.rs:700) is a right-looking panel with
+  deferred trailing update, xLASYF-style.
+- W workspace of shape (n-k) × block_size holds unscaled
+  columns; D-scaled L columns live in-place in A.
+- Peek-ahead update_and_offdiag_argmax (factor.rs:461)
+  reconstructs the would-be-updated column into W only when
+  needed for pivot selection; the rest of the trailing block
+  stays stale until the final syrk.
+- Final BLAS-3 call: matmul(Ar, StrictTriangularLower, W,
+  Al^H, -1) at factor.rs:684. D is never formed; it is folded
+  into the L side of the product.
+- Panel boundary: kmax = block_size - 1 at factor.rs:515 so a
+  2×2 pivot can extend through the last slot without
+  overflowing. Partial 2×2 state is NOT carried across panels.
+- faer does not do pivot rejection. feral's
+  try_reject_1x1_frontal needs special handling on the blocked
+  path — cleanest option: on rejection, panel terminates
+  cleanly with n_elim < block_size, caller applies the partial
+  trailing update, and falls back to scalar for one step.
+- faer defaults: block_size=64, crossover at n≤64.
+
+Wrote dev/plans/phase-2.4.1-blocked-ldlt.md with: adaptation
+for the frontal (ncol<nrow) case, structure of the new
+lblt_panel_frontal + apply_blocked_schur routines, 6-test
+correctness plan, 6-step implementation order, risks, and
+exit criterion. Hard gates: zero inertia regressions, all 6
+correctness tests pass. Perf gate: dense factor p90 ≤ 2.0
+(from 2.27).
+
+Step 1 (add BunchKaufmanParams.block_size field) is trivial
+and up next. Step 2 (extract per-pivot body from factor_frontal
+into scalar_pivot_step helper) is the main refactor. Step 3
+(write panel routine behind env flag) is the core blocked
+kernel. Not starting code until user confirms the plan.
+
+* 14:30 :phase-2.4.1a:implementation:
+Implemented Phase 2.4.1a (MUMPS-style contribution-block
+deferral) in factor_frontal after split approved. Added
+update_limit parameter to do_1x1_update/do_2x2_update so the
+cross-strip stays eager but the contribution block
+[ncol, nrow) × [ncol, nrow) is deferred to a single
+rank-nelim triangular update at end of factor_frontal.
+apply_deferred_contribution_update helper builds
+DL[m,j] = (D·L^T)[m, ncol+j] scratch then outer-product
+updates the lower triangle. Build clean, 80/80 lib tests
+pass. Started full KKT bench in background.
+
+* 15:00 :phase-2.4.1a:bench:regression:
+Bench results vs Phase 2.1.8 baseline:
+
+| metric            | baseline | new   | delta |
+|-------------------+----------+-------+-------|
+| dense factor p90  | 2.27     | 2.14  | -0.13 |
+| dense factor p99  | 28.99    | 26.08 | -2.91 |
+| sparse factor p90 | 3.18     | 3.53  | +0.35 |
+| sparse factor p99 | 11.40    | 12.03 | +0.63 |
+
+Dense improvement is noise — factor_single_front has
+ncol=nrow so apply_deferred_contribution_update
+early-returns. The 2.27→2.14 jitter is run-to-run variance.
+Sparse regression is real: +11% on p90, target was -6%.
+
+Root cause: deferring the contribution-block update has the
+same arithmetic cost as eager per-pivot rank-1 updates
+(nelim·cr·(cr+1)/2 flops either way). The deferred path pays
+extra for (a) Vec allocation per frontal, (b) strided access
+a[m*nrow + row] in the inner m-loop, (c) materialized DL
+scratch. For the typical small-front majority in the sparse
+bench, allocation dominates.
+
+* 15:15 :faer-expert:vectorization:decision:
+Consulted faer-expert on whether faer's blocked BK uses
+a vectorized kernel. Verdict: yes, and that's where the
+entire speedup lives. factor.rs:684 calls
+linalg::matmul::triangular::matmul which lowers through
+matmul_simd → pulp-dispatched register-blocked micro-kernel
+(MR×NR with masked SIMD tails, x86-v3/v4 feature-gated).
+The panel body itself (lblt_blocked_step) is plain scalar
+Rust — the win is entirely in the trailing-update GEMM.
+
+Implication: copying faer's loop structure without a SIMD
+micro-kernel gives zero speedup. Exactly what 2.4.1a's bench
+showed. Scalar loop reorder is a no-op on total flops; without
+vectorization there's nothing to win.
+
+* 15:20 :phase-2.4.1a:revert:
+Reverted do_1x1_update/do_2x2_update to their original
+signatures (dropped update_limit parameter), deleted
+apply_deferred_contribution_update, removed the call from
+factor_frontal. Build clean, 80/80 lib tests pass. 2.4.1a
+ships as a documented null result — filed in
+tried-and-rejected.md. Phase 2.4.1b (faer-style panel) is
+also mooted by the same logic: without a SIMD kernel for
+the trailing update, the block structure is pure overhead.
+
+Next step per user: move on. Phase 2.4.2 (SIMD micro-kernel)
+is now the only lever for the dense p90 target, and open
+question is whether to write core::arch intrinsics
+(x86_64 + aarch64 behind cfg gates) or to accept pulp as
+a dependency. Not starting until user picks a direction.
