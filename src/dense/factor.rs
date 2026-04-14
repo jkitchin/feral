@@ -1,6 +1,19 @@
 use crate::error::FeralError;
 use crate::inertia::Inertia;
 
+// Phase 2.4.3: on aarch64 the rank-1 / rank-2 Schur-update inner loops
+// dispatch to the 4-way unrolled non-FMA pulp kernels in
+// `crate::dense::schur_kernel`. The non-FMA variants reproduce the
+// scalar loop's rounding bit-for-bit (two IEEE 754 roundings per
+// element) so inertia counts are identical to the scalar path —
+// verified by bit-exact unit tests across a length sweep and by the
+// full KKT bench. The ILP win comes from 4 independent accumulators
+// exposing parallelism to the M-series NEON pipes that the single-
+// accumulator autovectorized scalar loop could not. On other arches
+// the unchanged scalar fallback runs.
+#[cfg(target_arch = "aarch64")]
+use crate::dense::schur_kernel;
+
 /// Dead-zero absolute floor for the 2×2 pivot cancellation test.
 /// Matches SPRAL SSIDS `datatypes.f90:260` default (`small = 1e-20`),
 /// used by `ldlt_tpp.cxx:98,106`. This is a true zero-detection floor
@@ -1074,8 +1087,17 @@ fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
     }
     for j in (k + 1)..n {
         let l_jk = a[k * n + j];
-        for i in j..n {
-            a[j * n + i] -= l_jk * d * a[k * n + i];
+        let alpha = l_jk * d;
+        // src = column k rows j..n (already scaled by inv_d above);
+        // dst = column j rows j..n. Disjoint because k < j.
+        let (before, rest) = a.split_at_mut(j * n);
+        let src = &before[k * n + j..k * n + n];
+        let dst = &mut rest[j..n];
+        #[cfg(target_arch = "aarch64")]
+        schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+        #[cfg(not(target_arch = "aarch64"))]
+        for i in 0..dst.len() {
+            dst[i] -= alpha * src[i];
         }
     }
 }
@@ -1100,10 +1122,18 @@ fn do_2x2_update(a: &mut [f64], n: usize, k: usize, d11: f64, d21: f64, d22: f64
         let l_j1 = a[(k + 1) * n + j];
         let dl_j0 = d11 * l_j0 + d21 * l_j1;
         let dl_j1 = d21 * l_j0 + d22 * l_j1;
-        for i in j..n {
-            let l_i0 = a[k * n + i];
-            let l_i1 = a[(k + 1) * n + i];
-            a[j * n + i] -= l_i0 * dl_j0 + l_i1 * dl_j1;
+        // src0, src1 = columns k, k+1 rows j..n (scaled by the
+        // rank-1 block of the 2×2 update above); dst = column j
+        // rows j..n. Pairwise disjoint because k < k+1 < j.
+        let (before, rest) = a.split_at_mut(j * n);
+        let src0 = &before[k * n + j..k * n + n];
+        let src1 = &before[(k + 1) * n + j..(k + 1) * n + n];
+        let dst = &mut rest[j..n];
+        #[cfg(target_arch = "aarch64")]
+        schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_j0, src1, dl_j1);
+        #[cfg(not(target_arch = "aarch64"))]
+        for i in 0..dst.len() {
+            dst[i] -= src0[i] * dl_j0 + src1[i] * dl_j1;
         }
     }
 }

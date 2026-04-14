@@ -460,3 +460,88 @@ at `dev/plans/phase-2.4.2-simd-schur-kernel.md`. Phase 2.4.1a
 post-mortem establishing the necessity of a SIMD kernel is in
 `dev/tried-and-rejected.md`. Commit introducing the dep: see Phase
 2.4.2 Step 1 commit message.
+
+## 2026-04-14 — Phase 2.4.3: Schur SIMD kernel must use separate mul + sub, not FMA
+
+**Decision.** The production `do_1x1_update` / `do_2x2_update` hot-path
+wiring uses `axpy_minus_unroll4_nofma` / `axpy2_minus_unroll4_nofma`,
+the 4-way-unrolled pulp kernels whose inner body issues separate
+`simd.mul_f64s` + `simd.sub_f64s` instead of a fused
+`simd.mul_add_f64s`. FMA variants (`axpy*_minus_unroll4`) remain in
+`schur_kernel.rs` and the microbench but are not called from
+production code.
+
+**Why.** Phase 2.4.2 wired the FMA variants into factor.rs and hit both
+Phase 2.8 exit targets (dense p90 2.27 → 1.87, sparse p90 3.18 → 2.82)
+but regressed sparse inertia from 153009 → 153005 and sparse residual
+pass from 154329 → 154303 on 154588 KKT matrices. Per-matrix triage
+identified the 4 inertia regressions as single-pivot boundary flips
+on ACOPP14_0001, ACOPP30_0004, FBRAIN3LS_0848, FBRAIN3LS_0851 — all
+caused by the well-known 1-ULP difference between one-rounding FMA
+and two-rounding mul+add at pivots whose Schur-updated value lies
+within a ULP of 0 or `zero_tol`. Full writeup in
+`dev/tried-and-rejected.md` 2026-04-14 Phase 2.4.2 entry.
+
+Non-FMA unroll4 fixes the root cause by reproducing the scalar loop's
+rounding exactly:
+
+| loop form                      | effective expression                           |
+|--------------------------------|------------------------------------------------|
+| scalar `d[i] -= α*s[i]`        | `round(d − round(α·s))` (two roundings)        |
+| FMA `mul_add_f64s(−α, s, d)`   | `round(−α·s + d)` (one rounding)               |
+| nofma `sub(d, mul(α, s))`      | `round(d − round(α·s))` (two roundings)        |
+
+The nofma lane-wise operation is bit-identical to the scalar loop, so
+any number of independent unrolled accumulators produce bit-identical
+results across the length sweep. Verified by `assert_eq!` bit-exact
+tests at `src/dense/schur_kernel.rs`
+`axpy{,2}_minus_unroll4_nofma_is_bit_exact_vs_scalar` over lengths
+{0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127,
+128, 129, 255, 256, 257, 511, 512, 513, 1023, 1024} — the length
+sweep crosses every plausible SIMD register boundary (SSE2 f64x2,
+NEON f64x2, AVX2 f64x4, AVX-512 f64x8) plus one-past-boundary sizes.
+
+**Measured end-to-end result.** Full KKT bench (154588 sparse, 154481
+dense, M-series aarch64), baseline commit `ce09aa6`:
+
+| metric                  | baseline | nofma   |      Δ   |
+|-------------------------|---------:|--------:|---------:|
+| dense factor/MUMPS p90  |     2.27 |    1.86 |  −18.1%  |
+| sparse factor/MUMPS p90 |     3.18 |    2.82 |  −11.3%  |
+| dense factor geomean    |     0.23 |    0.22 |   −4.3%  |
+| sparse factor geomean   |     0.67 |    0.63 |   −6.0%  |
+| dense inertia match     |   152911 |  152911 |    0     |
+| sparse inertia match    |   153009 |  153009 |    0     |
+| dense residual pass     |   154207 |  154207 |    0     |
+| sparse residual pass    |   154329 |  154329 |    0     |
+
+Both Phase 2.8 exit targets (dense ≤ 2.0, sparse ≤ 3.0) hit. Zero
+correctness regressions — every match and pass count is bit-identical
+to the pre-kernel scalar baseline at commit `ce09aa6`. The bit-exact
+rounding guarantee at the unit-test level translates to bit-exact
+pivot classification at the factorization level.
+
+**Cost in perf vs FMA.** Dense p90 moved 1.87 → 1.86 (FMA → nofma),
+sparse p90 stayed at 2.82. Nofma is not measurably slower than FMA
+end-to-end on the M-series NEON pipe — two operations (mul, sub) can
+issue in parallel with the 4 independent accumulators, so the
+apparent 2× instruction-count penalty is absorbed by ILP. On an
+AVX-512 x86 machine the FMA-vs-nofma gap may be larger and the
+decision may need to be revisited; for now the Apple Silicon
+development target shows zero performance cost from the correctness
+fix.
+
+**Interface boundary.** The pulp boundary established in the
+2026-04-14 Phase 2.4.2 decision is unchanged. `src/dense/schur_kernel.rs`
+still exposes only the axpy-style functions; factor.rs calls them via
+the `schur_kernel::` path with no direct pulp reference.
+
+**Open question.** If a future target shows a material FMA-vs-nofma
+gap and a way to preserve bit-exact rounding is found (e.g., a
+correction term for the second rounding, or a detect-and-fall-back
+near `zero_tol`), revisit. Not scheduled.
+
+**Evidence.** Bench output `/tmp/feral_bench_nofma.txt`; 4 ULP4 +
+2 bit-exact unit tests pass under `cargo test --lib schur_kernel`;
+Phase 2.4.2 Step 5 triage (the failed FMA wiring) documented in
+`dev/tried-and-rejected.md` 2026-04-14 Phase 2.4.2 entry.

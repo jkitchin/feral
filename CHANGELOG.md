@@ -27,6 +27,30 @@ All notable changes to FERAL will be documented in this file.
   does not survive is any implicit claim that feral is numerically
   comparable to canonical solvers at those residual levels.
 
+### Phase 2.4 performance (2026-04-14)
+
+- Dense Schur update now uses a pulp-dispatched NEON SIMD kernel
+  with 4-way loop unrolling and independent accumulators
+  (`src/dense/schur_kernel.rs`). The kernel uses separate
+  `mul_f64s` + `sub_f64s` (no FMA) so per-lane rounding is
+  bit-identical to the scalar reference; this is verified by
+  `assert_eq!` unit tests across a length sweep up to 1024. The
+  kernel is wired into `do_1x1_update` and `do_2x2_update` in
+  `src/dense/factor.rs` with no runtime A/B flag.
+- KKT corpus bench vs MUMPS oracle (n ≤ 500 dense, full sparse
+  corpus): dense factor p90 **2.27 → 1.86** (−18.1%); sparse
+  factor p90 **3.18 → 2.82** (−11.3%). Both Phase 2.8 exit
+  criteria (dense ≤ 2.0, sparse ≤ 3.0) now met.
+- Inertia and residual-pass counts are bit-identical to the
+  pre-SIMD scalar baseline: dense 152911/154481 inertia, sparse
+  153009/154588 inertia, sparse 154329/154588 residual pass. Zero
+  correctness regressions.
+- An earlier attempt (Phase 2.4.2) wired an FMA-based unroll4
+  kernel and caused 4 sparse inertia mismatches from 1-ULP pivot
+  classification flips at the `zero_tol` boundary; reverted and
+  replaced with the bit-exact non-FMA variant. See
+  `dev/tried-and-rejected.md` and `dev/decisions.md` Phase 2.4.3.
+
 ### Phase 1b Exit (2026-04-12)
 
 Phase 1b closed under the multi-source consensus exit criterion on

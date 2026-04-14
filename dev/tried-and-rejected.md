@@ -217,3 +217,98 @@ direction: write `#[target_feature]` + `core::arch` intrinsics
 15:00 in `dev/journal/2026-04-14-01.org`. Reverted in same
 session. Head commit: `ce09aa6` (pre-2.4.1a) remained the
 measured baseline.
+
+## 2026-04-14 — Phase 2.4.2 unroll4 FMA Schur-kernel wired into do_1x1_update/do_2x2_update (reverted)
+
+**What.** Wire `schur_kernel::axpy_minus_unroll4` and
+`axpy2_minus_unroll4` — the pulp-dispatched 4-way-unrolled NEON
+kernels with independent FMA accumulators — into the rank-1 and
+rank-2 Schur-update inner loops at `src/dense/factor.rs`
+`do_1x1_update` and `do_2x2_update`, replacing the scalar loops that
+had been autovectorized by rustc.
+
+**Why it seemed to work.** The full KKT bench hit both Phase 2.8
+exit targets simultaneously on the first run with unroll4 wired in:
+
+| metric                  | baseline 2.1.8 | unroll4 | target |
+|-------------------------|---------------:|--------:|-------:|
+| dense factor/MUMPS p90  |           2.27 |    1.87 |  ≤ 2.0 |
+| sparse factor/MUMPS p90 |           3.18 |    2.82 |  ≤ 3.0 |
+
+Dense inertia match was byte-identical (152911/154481). Gains of
+−18% on dense p90 and −11% on sparse p90 from hand-unrolling with 4
+independent FMA accumulators, exposing extra ILP to the M-series
+dual FMA pipes that the single-accumulator autovectorized scalar
+loop could not.
+
+**Why it was reverted.** Sparse inertia match dropped from
+153009/154588 to 153005/154588 (−4 matrices) and sparse residual
+pass dropped from 154329 to 154303 (−26 matrices). Per the
+`USE_SIMD_SCHUR_KERNEL` runtime-flag triage (example
+`triage_sparse_inertia_diff.rs`, deleted on revert), all four
+inertia regressions are FMA rounding boundary flips:
+
+| matrix          | expected      | scalar match  | unroll4        |
+|-----------------|---------------|---------------|----------------|
+| ACOPP14_0001    | (38, 68, 0)   | (38, 68, 0) ✓ | (37, 69, 0)    |
+| ACOPP30_0004    | (72, 137, 0)  | (72,137, 0) ✓ | (71,138, 0)    |
+| FBRAIN3LS_0848  | ( 6,  0, 0)   | ( 6,  0, 0) ✓ | ( 5,  0, 1)    |
+| FBRAIN3LS_0851  | ( 6,  0, 0)   | ( 6,  0, 0) ✓ | ( 5,  0, 1)    |
+
+The ACOPP cases are single-pivot sign flips (positive pivot crossed
+zero to negative). The FBRAIN cases are single-pivot magnitude
+drops below `zero_tol` (positive pivot classified as zero). Both
+patterns are the classic FMA-vs-scalar 1-ULP rounding difference:
+
+- scalar path: `d[i] -= α·s[i]` → `round(d − round(α·s))`, two roundings
+- FMA  path: `mul_add_f64s(−α, s, d)` → `round(−α·s + d)`, one rounding
+
+When a final pivot lands within 1 ULP of 0 or `zero_tol`, the
+one-vs-two rounding delta flips the Bunch-Kaufman classification
+from accept → zero-rank, or positive → negative. **Zero SIMD
+improvements** (simd-only-match count was 0), confirming the math is
+the same in both paths — only the rounding differs. The 0-delta
+`both_match = 153005` + 4 regressions adds up to the exact scalar
+baseline of 153009, confirming no genuine correctness changes.
+
+**Assessment.** −30 matrices total regression on a 154588-matrix
+corpus (0.019%) is statistical noise at the population level, but
+CLAUDE.md's hard rule is *"Correctness before performance, always"*.
+The regressions are per-matrix deterministic, not flaky — a user
+running FERAL on one of those four ACOPP/FBRAIN KKT systems would
+get the wrong inertia on every call. The Phase 2.8 exit criterion
+wins do not justify shipping a known inertia regression without
+mitigation.
+
+**What gets rescued.** The `factor.rs` scalar Schur-update loops
+were reverted to the exact HEAD form (`git diff src/dense/factor.rs`
+is empty after revert). The `USE_SIMD_SCHUR_KERNEL` runtime flag
+and the `examples/triage_sparse_inertia_diff.rs` triage binary were
+deleted. What remains in-tree for a possible Phase 2.4.3 retry:
+
+- `src/dense/schur_kernel.rs` — the pulp kernels and 11 ULP4 unit tests
+- `benches/schur_kernel.rs` — the scalar/pulp/direct_neon/unroll4 microbench
+- `pulp = 0.22.2` dev-dependency in `Cargo.toml`
+
+**What replaces it (open question).** Two candidate mitigations for
+Phase 2.4.3:
+
+1. **Non-FMA unroll.** Replace `mul_add_f64s` with separate
+   `mul_f64s` + `sub_f64s` in `axpy_minus_unroll4`/`axpy2_minus_unroll4`.
+   Reproduces scalar rounding exactly → byte-identical inertia. Costs
+   the single-cycle FMA → 2-op latency; unclear how much of the ILP
+   gain from 4 independent accumulators survives.
+2. **Pivot-boundary scalar fallback.** Detect pivots where the
+   Schur-updated diagonal would be within `k·eps` of 0 or `zero_tol`
+   and run the tail of the update loop scalar. Complex to implement
+   correctly and may not catch all flips.
+
+Option 1 is the cheaper experiment. Requires a second full KKT bench
+to confirm zero inertia regressions and to measure how much of the
+2.27→1.87 and 3.18→2.82 p90 gains are preserved without FMA.
+
+**Evidence.** Full bench output with unroll4 wired in:
+`/tmp/feral_bench_unroll4.txt` (session 2026-04-14-01). Triage
+output: `/tmp/feral_inertia_triage2.txt`. Triage binary source:
+preserved in git log of deleted `examples/triage_sparse_inertia_diff.rs`.
+Session: `dev/sessions/2026-04-14-02.md` (to be written at session end).

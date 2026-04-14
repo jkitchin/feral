@@ -407,3 +407,223 @@ is now the only lever for the dense p90 target, and open
 question is whether to write core::arch intrinsics
 (x86_64 + aarch64 behind cfg gates) or to accept pulp as
 a dependency. Not starting until user picks a direction.
+
+* 16:00 :phase-2.4.2:step2:step3:pulp:
+Phase 2.4.2 Steps 1-3 landed. Step 1 (bf97ae6): pulp 0.22.2
+added to Cargo.toml with x86-v3 feature, 80/80 tests pass,
+pulp + 8 transitive deps (paste, reborrow, raw-cpuid,
+num-traits, num-complex, bytemuck, libm, version_check,
+pulp-wasm-simd-flag) all pure-Rust.
+
+Step 2 (a174ec1): new module src/dense/schur_kernel.rs with
+scalar placeholders for axpy_minus and axpy2_minus plus 9
+tests — zero-length, length-one, alpha=0 no-op, length mismatch
+panic, and full length-sweep {0..1024} comparison against an
+in-module naive reference at ULP4 = 8*EPSILON ~ 1.78e-15
+tolerance. Local Xorshift64 for reproducible randomness, no
+rand crate. 89/89 total tests pass.
+
+Step 3 (4696e13): real pulp::WithSimd kernels replace the
+placeholders. API recipe from faer-expert agent consultation:
+as_simd_f64s/as_mut_simd_f64s are ASSOCIATED fns on S (not
+methods on simd); splat_f64s + mul_add_f64s(a,b,c) = a*b+c;
+partial_load_f64s/partial_store_f64s for the tail. Encoded
+dst -= alpha*src as mul_add_f64s(-alpha, src, dst) so the whole
+inner loop is one FMA per lane. Rank-2 twin is two FMAs
+accumulating into the same register.
+
+All 9 length-sweep tests pass on Apple Silicon (NEON path) on
+first build — no API mistakes, no tail-handling bugs. Diff
+against naive reference is within ULP4; in practice the NEON
+fmla instruction matches scalar mul_add bit-for-bit so the
+observed diff is 0, but we keep 8*EPSILON headroom for AVX-512
+masked-store paths and future compiler reordering.
+
+Dead-code allows kept on both pub fns — they are not yet
+wired into factor.rs. Step 4 (microbench) next, then Step 5
+(wire into do_1x1_update/do_2x2_update) with a length-threshold
+scalar fallback for very short tails.
+
+* 10:00 :phase-2.4.2:step-4:microbench:regression:
+Step 4 criterion microbench (benches/schur_kernel.rs) built and
+run. Scalar reference autovectorizes surprisingly well on
+aarch64: for axpy_minus at L=256 scalar median 30.07 ns,
+pulp-dispatched SIMD 40 ns (+33% slower). At L=1024 the gap
+widened further. The 2x gate from Step 4's plan does not hold
+on this machine.
+
+Hypothesis from faer-expert consultation: pulp's
+Arch::new().dispatch() routes through a #[target_feature]
+trampoline; on NEON (baseline on ARMv8-A) this is pure
+overhead. Added axpy_minus_direct / axpy2_minus_direct variants
+using const NEON = unsafe { Neon::new_unchecked() }; — this
+recovered short-L performance but L>=128 still lost to scalar.
+Root cause shifted: the rustc autovectorizer generates 4-way
+unrolled NEON with independent accumulators, while
+Simd::vectorize writes a single-accumulator loop with loop-
+carried dependency through fmla.
+
+* 10:20 :phase-2.4.2:step-4:unroll4:
+User chose Option 2 (hand-unroll the pulp kernel). Added
+axpy_minus_unroll4 / axpy2_minus_unroll4 with
+chunks_exact_mut(4) + 4 independent FMA accumulators per chunk
++ partial_load/store tail. All 11 length-sweep tests pass at
+ULP4. Final microbench median ns: L=16 scalar 5.28 / unroll4
+3.83 (28% faster), L=256 30.07 / 27.18 (10% faster), L=64 10%
+SLOWER, L=1024 5% slower. Kernel-in-isolation improvement is
+marginal and length-dependent.
+
+* 10:35 :phase-2.4.2:step-5:wire-in:
+Per user "lets do the revised recommendation" — wire into
+factor.rs temporarily, run full KKT bench, ship/revert on
+measured evidence. Added runtime AtomicBool flag
+USE_SIMD_SCHUR_KERNEL (pub static, default=true) so both paths
+coexist in one binary. do_1x1_update / do_2x2_update use
+split_at_mut(j*n) to get disjoint src/dst slices (relies on
+k<j invariant) and dispatch through the flag.
+
+* 10:45 :phase-2.4.2:step-6:kkt-bench:
+Full KKT bench with unroll4 wired in
+(/tmp/feral_bench_unroll4.txt):
+
+| metric                  | baseline | unroll4 | target |
+|-------------------------+---------+---------+--------|
+| dense factor/MUMPS p90  |    2.27 |    1.87 |  ≤ 2.0 |
+| sparse factor/MUMPS p90 |    3.18 |    2.82 |  ≤ 3.0 |
+
+Both Phase 2.8 exit targets hit simultaneously. Dense inertia
+byte-identical (152911/154481). BUT: sparse inertia dropped
+153009 → 153005 (−4) and sparse residual pass 154329 → 154303
+(−26). Per CLAUDE.md rule to report unfavorable numbers
+explicitly, this is a correctness regression that must be
+addressed before ship.
+
+* 10:55 :phase-2.4.2:step-7:triage:diagnosis:
+Per user "Take option 1. Just diagnose for now". Wrote
+examples/triage_sparse_inertia_diff.rs using
+USE_SIMD_SCHUR_KERNEL to factor each of the 154588 KKT
+matrices twice back-to-back (scalar path, SIMD path), classify
+against sidecar expected inertia. The 4 SIMD-regressed
+matrices:
+
+| matrix         | expected    | scalar (match) | simd         |
+|----------------+------------+---------------+--------------|
+| ACOPP14_0001   | (38,68,0)  | (38,68,0) ✓   | (37,69,0)    |
+| ACOPP30_0004   | (72,137,0) | (72,137,0) ✓  | (71,138,0)   |
+| FBRAIN3LS_0848 | (6,0,0)    | (6,0,0) ✓     | (5,0,1)      |
+| FBRAIN3LS_0851 | (6,0,0)    | (6,0,0) ✓     | (5,0,1)      |
+
+Counts: both_match=153005, scalar_only=4, simd_only=0,
+neither=1579 (unchanged between paths). 153005+4=153009 =
+scalar baseline exactly. Confirms zero genuine correctness
+changes — all 4 regressions are FMA rounding boundary flips.
+
+Two patterns: ACOPP cases are pivot sign flips (positive →
+negative crossing zero), FBRAIN cases are magnitude drops
+below zero_tol (positive → zero-rank). Both are the canonical
+scalar-mul-add (2 roundings) vs FMA (1 rounding) 1-ULP delta
+biting at the pivot classification boundary:
+
+  scalar: round(d − round(α·s))    — two roundings
+  FMA   : round(−α·s + d)           — one rounding
+
+Per-matrix deterministic, not flaky. A user factoring one of
+those four systems gets wrong inertia on every call.
+
+* 11:15 :phase-2.4.2:revert:decision:
+"Correctness before performance, always" (CLAUDE.md hard
+rule). Reverted factor.rs to HEAD form (git diff
+src/dense/factor.rs is empty post-revert). Removed
+USE_SIMD_SCHUR_KERNEL flag and its imports. Deleted
+examples/triage_sparse_inertia_diff.rs. cargo test: 91 lib +
+6 other test binaries all pass.
+
+Kept in-tree for a possible Phase 2.4.3 retry:
+- src/dense/schur_kernel.rs (pulp kernels + 11 ULP4 tests)
+- benches/schur_kernel.rs (scalar vs pulp vs direct_neon vs
+  unroll4 microbench)
+- pulp 0.22.2 dev-dependency
+- #[doc(hidden)] pub mod schur_kernel; in src/dense/mod.rs
+
+Full tried-and-rejected entry appended to
+dev/tried-and-rejected.md. Candidate mitigations for 2.4.3:
+(1) swap mul_add_f64s for separate mul_f64s + sub_f64s to
+reproduce scalar rounding exactly — cheap experiment, unclear
+how much ILP gain survives without FMA latency; (2)
+pivot-boundary scalar fallback detection — complex, may miss
+some flips.
+
+* 11:30 :phase-2.4.3:nofma:implementation:
+Per user "do the next step" — implemented candidate mitigation
+(1) from the 2.4.2 revert entry. Added
+axpy_minus_unroll4_nofma and axpy2_minus_unroll4_nofma to
+src/dense/schur_kernel.rs. Same 4-way unrolled structure as
+axpy*_minus_unroll4 but inner body uses separate simd.mul_f64s
++ simd.sub_f64s instead of simd.mul_add_f64s, so each element
+gets exactly two IEEE 754 roundings — matching the scalar loop
+dst[i] -= alpha * src[i] bit-for-bit.
+
+Rationale: scalar is round(d − round(α·s)) (two roundings);
+FMA is round(−α·s + d) (one rounding); nofma is round(d −
+round(α·s)) — matches scalar exactly. Bit-identical output
+regardless of lane count or unroll factor, so inertia must be
+identical at the factorization level.
+
+* 11:35 :phase-2.4.3:bit-exact-test:
+Added axpy_minus_unroll4_nofma_is_bit_exact_vs_scalar and
+axpy2_minus_unroll4_nofma_is_bit_exact_vs_scalar tests. These
+use assert_eq!(dst_kernel, dst_ref) across the full LENGTH_SWEEP
+= {0..1024 crossing every SIMD register boundary}. Both pass
+on first run with zero ULP delta, confirming the non-FMA path
+is truly bit-identical to scalar on NEON — not just
+ULP4-close. 13/13 schur_kernel tests pass.
+
+* 11:40 :phase-2.4.3:wire-in:
+Wired axpy*_minus_unroll4_nofma into do_1x1_update and
+do_2x2_update via #[cfg(target_arch = "aarch64")] + split_at_mut
+for disjoint src/dst slices. Non-aarch64 arches keep the
+unchanged scalar fallback (x86 builds get rustc autovectorizer,
+no production call to schur_kernel).
+
+No runtime flag, no A/B switch — just direct dispatch. Since
+the non-FMA kernel is bit-exact with scalar, there's nothing
+to A/B and nothing to revert from.
+
+* 11:50 :phase-2.4.3:kkt-bench:ship:
+Full KKT bench (/tmp/feral_bench_nofma.txt):
+
+| metric                  | baseline | unroll4-FMA | nofma   | target |
+|-------------------------+----------+-------------+---------+--------|
+| dense factor/MUMPS p90  |     2.27 |        1.87 |    1.86 | ≤ 2.0  |
+| sparse factor/MUMPS p90 |     3.18 |        2.82 |    2.82 | ≤ 3.0  |
+| dense inertia match     |   152911 |      152911 |  152911 |        |
+| sparse inertia match    |   153009 |      153005 |  153009 |        |
+| dense residual pass     |   154207 |      154207 |  154207 |        |
+| sparse residual pass    |   154329 |      154303 |  154329 |        |
+
+Both Phase 2.8 exit targets hit. Zero correctness regressions
+— every count bit-identical to the ce09aa6 scalar baseline.
+The 4 inertia flips (ACOPP14_0001, ACOPP30_0004,
+FBRAIN3LS_0848, FBRAIN3LS_0851) and 26 residual-pass drops
+that wrecked 2.4.2 are all GONE. Bit-exact rounding at the
+unit-test level translates directly to bit-exact pivot
+classification at the factorization level.
+
+Surprise: non-FMA is marginally faster than FMA on dense
+(1.86 vs 1.87 p90). The 4 independent accumulators absorb
+the mul+sub instruction-count overhead through ILP on the
+M-series NEON pipes, so there is no measurable perf cost to
+the correctness fix on this target. The FMA fusion matters
+less than the 4-way parallelism.
+
+Shipping: factor.rs wire-in is permanent, no USE_SIMD flag.
+cargo test: 93 lib + all downstream bins pass. cargo fmt
+--check: clean. cargo clippy --lib -D warnings: clean.
+
+* 11:55 :phase-2.4.3:docs:
+Appended Phase 2.4.3 entry to dev/decisions.md documenting
+the FMA-vs-nofma rounding issue and the bit-exact solution,
+including the end-to-end bench table. Phase 2.8 exit criterion
+(dense factor p90 ≤ 2.0, sparse factor p90 ≤ 3.0) is now
+met on the M-series baseline. Next: session checkpoint and
+CHANGELOG.md Unreleased entry.
