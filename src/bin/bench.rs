@@ -440,6 +440,96 @@ fn print_perf_comparison(label: &str, timings: &[MatrixTiming], entries: &[KktEn
     }
 }
 
+/// Phase 2.8.1 spec exit partition against the canonical MUMPS factor ratio.
+///
+/// The Phase 2 exit criterion in `FERAL-PROJECT-SPEC.md` §1747 asks
+/// "within 2× of MUMPS on the small-frontal KKT set; within 3× on the
+/// medium set". Concrete bucket definitions come from
+/// `dev/plans/phase-2-planning.md` §2.8.1:
+///
+/// - **small-frontal:** max frontal dim < 200 AND problem n <= 10^3,
+///   target `factor/MUMPS p90 <= 2.0`
+/// - **medium:** max frontal dim < 500 AND problem n <= 10^4,
+///   target `factor/MUMPS p90 <= 3.0`
+///
+/// "Max frontal dim" is `n` for the dense single-front path and
+/// `max(supernode.nrow)` from the symbolic factorization for the
+/// sparse multifrontal path; both are stored on `MatrixTiming` at
+/// push time. Matrices without a MUMPS oracle sidecar are excluded —
+/// they cannot contribute to a ratio statistic.
+fn print_phase28_partition(label: &str, timings: &[MatrixTiming], entries: &[KktEntry]) {
+    let entry_by_name: HashMap<&str, &KktEntry> =
+        entries.iter().map(|e| (e.name.as_str(), e)).collect();
+
+    let ratio = |feral: u128, oracle: u64| -> f64 {
+        let num = feral.max(1) as f64;
+        let denom = oracle.max(1) as f64;
+        num / denom
+    };
+
+    let mut small: Vec<f64> = Vec::new();
+    let mut medium: Vec<f64> = Vec::new();
+    for t in timings {
+        let Some(entry) = entry_by_name.get(t.name.as_str()) else {
+            continue;
+        };
+        let Some(m) = entry.mumps_timing else {
+            continue;
+        };
+        let r = ratio(t.factor_us, m.factor_us);
+        if t.max_front < 200 && t.n <= 1_000 {
+            small.push(r);
+        }
+        if t.max_front < 500 && t.n <= 10_000 {
+            medium.push(r);
+        }
+    }
+
+    fn p90(vals: &mut [f64]) -> Option<f64> {
+        if vals.is_empty() {
+            return None;
+        }
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = ((vals.len() as f64 * 0.90).ceil() as usize)
+            .saturating_sub(1)
+            .min(vals.len() - 1);
+        Some(vals[idx])
+    }
+
+    println!(
+        "\n--- {} Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---",
+        label
+    );
+    println!(
+        "{:<24} {:>6} {:>8} {:>10} {:>8}",
+        "bucket", "count", "p90", "target", "verdict"
+    );
+    let emit = |name: &str, target: f64, vals: &mut Vec<f64>| {
+        if let Some(p) = p90(vals) {
+            let verdict = if p <= target { "PASS" } else { "FAIL" };
+            println!(
+                "{:<24} {:>6} {:>8.2} {:>10} {:>8}",
+                name,
+                vals.len(),
+                p,
+                format!("<= {:.1}", target),
+                verdict,
+            );
+        } else {
+            println!(
+                "{:<24} {:>6} {:>8} {:>10} {:>8}",
+                name,
+                0,
+                "-",
+                format!("<= {:.1}", target),
+                "N/A",
+            );
+        }
+    };
+    emit("small-frontal (<200)", 2.0, &mut small);
+    emit("medium (<500)", 3.0, &mut medium);
+}
+
 /// Simple deterministic PRNG for benchmark matrix generation.
 struct Rng {
     state: u64,
@@ -584,6 +674,13 @@ struct OracleTiming {
 struct MatrixTiming {
     name: String,
     n: usize,
+    /// Maximum frontal-matrix dimension used by the path that produced this
+    /// timing. For the dense single-front path this equals `n`. For the
+    /// sparse multifrontal path it is the maximum `supernode.nrow` across
+    /// all supernodes in the symbolic factorization. Used by Phase 2.8.1
+    /// to partition the corpus into "small-frontal" and "medium" sets
+    /// against the spec exit criterion.
+    max_front: usize,
     factor_us: u128,
     solve_us: u128,
 }
@@ -917,6 +1014,7 @@ fn main() {
         dense_timings.push(MatrixTiming {
             name: entry.name.clone(),
             n,
+            max_front: n,
             factor_us,
             solve_us,
         });
@@ -1053,6 +1151,10 @@ fn main() {
                 continue;
             }
         };
+        // Phase 2.8.1 partition key: the largest dense block factored by
+        // the multifrontal path. Falls back to `n` if the symbolic phase
+        // produced no supernodes (degenerate n=0 case).
+        let sp_max_front = sym.supernodes.iter().map(|s| s.nrow).max().unwrap_or(n);
 
         // Numeric factorization
         let (sp_factors, sp_inertia) =
@@ -1089,6 +1191,7 @@ fn main() {
         sparse_timings.push(MatrixTiming {
             name: entry.name.clone(),
             n,
+            max_front: sp_max_front,
             factor_us: sp_factor_us,
             solve_us: sp_solve_us,
         });
@@ -1161,4 +1264,8 @@ fn main() {
     // ============ Phase 2.1.7 perf vs oracles ============
     print_perf_comparison("Dense", &dense_timings, &kkt_entries);
     print_perf_comparison("Sparse", &sparse_timings, &kkt_entries);
+
+    // ============ Phase 2.8.1 spec exit partition ============
+    print_phase28_partition("Dense", &dense_timings, &kkt_entries);
+    print_phase28_partition("Sparse", &sparse_timings, &kkt_entries);
 }

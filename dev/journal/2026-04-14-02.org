@@ -1,0 +1,62 @@
+#+TITLE: FERAL Session Journal 2026-04-14-02
+#+STARTUP: showall
+
+* 11:45 :phase-2.8.1:bench:partition:
+Added =print_phase28_partition= to =src/bin/bench.rs= (+107 LOC) that
+partitions the per-matrix factor/MUMPS ratios by the spec exit bucket
+definitions from =dev/plans/phase-2-planning.md= §2.8.1:
+
+- small-frontal: max frontal dim < 200 AND n ≤ 10^3, target p90 ≤ 2.0
+- medium:       max frontal dim < 500 AND n ≤ 10^4, target p90 ≤ 3.0
+
+"Max frontal dimension" is now stored on =MatrixTiming.max_front=: set
+to =n= in the dense loop (single front = full matrix) and to
+=max(supernode.nrow)= from the symbolic factorization in the sparse
+loop. No correctness or algorithm changes — purely measurement.
+
+* 11:52 :phase-2.8.1:verdict:sparse-fail:
+Full KKT bench (154588 matrices, 154481 dense-eligible) with the
+partition wired in:
+
+| bucket                 | count  |  p90 | target | verdict |
+|------------------------+--------+------+--------+---------|
+| Dense small-frontal    | 147982 | 1.39 |  ≤ 2.0 |    PASS |
+| Dense medium           | 152145 | 1.74 |  ≤ 3.0 |    PASS |
+| Sparse small-frontal   | 153455 | 2.81 |  ≤ 2.0 |    FAIL |
+| Sparse medium          | 153560 | 2.81 |  ≤ 3.0 |    PASS |
+
+Dense passes both bars cleanly — small-frontal 1.39 vs the 2.0 bar is
+a 30% margin. Medium 1.74 vs 3.0 is a 42% margin.
+
+Sparse passes the medium bar (2.81 ≤ 3.0) but *fails* the
+small-frontal bar (2.81 > 2.0). The dense path's big overall-p90
+improvement from Phase 2.4.3 came predominantly from the tail of
+large fronts (HAHN1, CRESC100 families with n=715..806); on the
+small-front tail where fixed costs dominate, dense already met the
+target. The sparse path shows the opposite pattern: the small-frontal
+and overall p90 are effectively identical (2.81 vs 2.81) because
+153455 of 153560 ratio samples are already in the small-frontal
+bucket. In other words, the sparse slowness is *not* concentrated in
+a big-front tail — it is evenly distributed across the whole
+small-matrix regime, which is exactly the signature of a fixed
+per-matrix overhead (symbolic phase, allocation, assembly
+bookkeeping).
+
+Correctness counts bit-identical to Phase 2.4.3 baseline:
+- Dense inertia: 152911/154481
+- Sparse inertia: 153009/154588
+- Dense residual pass: 154207/154481
+- Sparse residual pass: 154329/154588
+
+Implication: session 02 checkpoint's "both Phase 2.8 exit criteria
+met" claim was true against the overall p90 but *not* against the
+spec's partitioned criterion. The sparse path needs more work before
+Phase 2 can exit formally. The plan-specified next item is Phase 2.5
+(sparse pipeline performance), with §2.5.1 (Liu's row subtree
+column-counts, replacing the current O(n²) algorithm) called out as
+"probably the highest-leverage Phase 2.5 item because it affects
+every call to =symbolic_factorize= and the current implementation is
+the documented scaling weak point". For small-matrix sparse where
+symbolic dominates, that matches the profile evidence exactly — the
+hypothesis is that the O(n²) column-counts implementation is the
+biggest contributor to the fixed per-matrix overhead.
