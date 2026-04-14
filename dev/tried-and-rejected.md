@@ -312,3 +312,41 @@ to confirm zero inertia regressions and to measure how much of the
 output: `/tmp/feral_inertia_triage2.txt`. Triage binary source:
 preserved in git log of deleted `examples/triage_sparse_inertia_diff.rs`.
 Session: `dev/sessions/2026-04-14-02.md` (to be written at session end).
+
+---
+
+## 2026-04-14 — Single-run p90 readings as primary signal during Phase 2.5.1′ iteration
+
+**Approach.** During session 04 I judged optimization patches by
+comparing before/after single-run `cargo run --release --bin bench`
+p90 readings. The etree-renumbering fix in `src/symbolic/mod.rs` was
+applied, measured as 2.08 vs a prior single-run 2.02, flagged as a
+regression, and reverted. A subsequent 3-run sanity check showed
+the actual without-fix baseline was 2.12/2.12/2.14 and with-fix was
+2.03/2.06/2.08 — a real ~3% improvement. The fix was re-applied.
+
+**Why it failed.** The sparse small-frontal p90 on the full 153455
+matrix bucket has ~3–5% run-to-run noise, larger than the typical
+single-fix improvement at this stage of optimization (~1–3%).
+Single-run deltas inside that window are indistinguishable from
+noise. Treating a single reading as ground truth led to reverting
+a correct optimization and wasted a full iteration.
+
+**Why the underlying fix was still correct.** Postorder is a
+topological relabeling of the elimination tree, so
+`etree(P·A·Pᵀ) = post-renumbering of etree(A)` when P is a
+postorder of `etree(A)`. The second `from_pattern` call was
+genuinely redundant; the measured improvement is real, it just had
+to be measured as a 3-run median.
+
+**Lesson.** Any decision based on a sparse-bench p90 delta smaller
+than ~5% must be confirmed with at least a 3-run median. Single-run
+readings are fine for sanity-checking that a change didn't cause a
+catastrophic regression (e.g., 2.00 → 5.00), but not for judging
+sub-noise-level optimizations. Specific to the sparse-bucket p90 on
+the small-frontal partition; other metrics (max, geomean) have
+different noise floors.
+
+**Evidence.** Session journal `dev/journal/2026-04-14-04.org` entry
+14:55 (etree renumbering); session checkpoint
+`dev/sessions/2026-04-14-04.md` "Abandoned Approaches" section.

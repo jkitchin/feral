@@ -1,0 +1,137 @@
+#+TITLE: FERAL Session Journal 2026-04-14-04
+#+STARTUP: showall
+
+* 13:05 :phase-2.5.1:amd:triage:bottleneck-identified:
+Session 03 left =diagnose amd_order on DISCS_0012= as the top Phase
+2.5.1' task. Built =examples/triage_discs_amd.rs= — a copy of =amd_order=
+instrumented with per-phase microsecond counters (min-scan, fill,
+degree-recompute) plus scalar counters (total neighbors seen, total
+=contains= calls, total fill inserts). Ran on five candidates pulled
+from the session 03 top-30 list.
+
+Result (best of N trials, release mode):
+
+| matrix         |  n |   nnz  | total |  fill% | deg% | contains | inserts |
+|----------------+----+--------+-------+--------+------+----------+---------|
+| DISCS_0012     | 234|  29346 | 12326 |  87.6  |  8.8 |  778064  |       0 |
+| DISCS_0000     | 234|   1286 |   130 |  11.5  |  0.0 |    7957  |     625 |
+| LAKES_0000     | 324|   1116 |   121 |   0.0  |  0.0 |    1165  |     341 |
+| DMN15103_0000  |  99|   9801 |  1337 |  79.7  |  8.2 |  156849  |       0 |
+| GROUPING_0000  | 225|   2725 |   615 |  61.3  |  8.1 |   71062  |    2440 |
+
+*The bottleneck is =adj[a].contains(&b)= inside the fill loop.* Two
+findings jump out:
+
+1. On DISCS_0012 and DMN15103_0000, =fill_inserts = 0= — not a single
+   fill edge is ever added — but the fill phase is still 80–88% of
+   runtime. The reachable set of every pivot is already a clique, so
+   every =contains= call returns =true= after scanning the full adj
+   vector. DISCS_0012 averages 62 live neighbors per pivot and pays
+   778k linear-scan lookups for zero work. DMN15103_0000 is *completely
+   dense* (9801 = 99² nnz) so every step is a no-op, but still costs 1.3ms.
+2. The three other failing families show the same signature at smaller
+   intensity: DISCS_0000 pays 128× more =contains= than inserts,
+   GROUPING 29×, LAKES 3×. The =contains / insert= ratio is a clean
+   indicator of how much work is wasted.
+
+Degree recompute at 8% is secondary. Min-scan at ~0% is not an issue at
+these sizes. The single surgical fix: replace the linear =contains=
+with a reused mark array (scratch =Vec<bool>= of size n). Mark all
+entries of =adj[a]= once per outer iteration, then check/insert with
+O(1) mark lookups, then unmark. Expected speedup on DISCS ≈ 20× since
+deg³ → deg² per step.
+
+This is confirmed before touching =src/ordering/amd.rs=. The mark fix
+preserves the exact-degree minimum-degree algorithm's semantics
+(pivot selection and edge set unchanged) and will pass the existing
+tests.
+
+* 14:10 :phase-2.5.1:amd:mark-array:clique-shortcut:
+Applied the mark-array fix to =src/ordering/amd.rs=. Reused scratch
+=Vec<bool>= of size =n=. Invariant: all-false at start and end of each
+outer loop iteration over =neighbors= (set during fill insertion,
+cleared at the end of the iteration). Membership is now O(1) instead
+of O(deg).
+
+Also added a dense-clique early exit: when =neighbors.len() ==
+n_remaining=, the pivot is connected to every remaining live node, so
+eliminating it creates a clique among all survivors. No more fill,
+no more degree changes — push the survivors in any order and return.
+This short-circuits DMN15103_0000 (fully dense) entirely and cuts
+DISCS_0012 elimination to just the first few steps.
+
+Tests: all 93 library tests still pass. Mark-array fix alone did not
+budge sparse small-frontal p90 (still 2.86) because DISCS_0012 is not
+in the 90th percentile — the p90 matrix is dominated by a different
+family. Did change the max column but not the distribution tail.
+
+* 14:25 :phase-2.5.1:permute-pattern:counting-sort:
+Rewrote =permute_pattern= in =src/ordering/amd.rs= from a
+=Vec<Vec<usize>>= + sort_unstable + dedup scheme to a two-pass
+counting-sort layout. The old code pushed every off-diagonal entry
+twice (once per triangle) and then deduped, which is O(nnz·log(nnz))
+per column with allocations. The new code runs two passes (count +
+prefix sum + fill) plus one per-column =sort_unstable= to preserve
+the sorted-column invariant that downstream code implicitly relies on.
+
+Result: ~7× faster on DMN15103_0000 (which is fully symmetric at
+n=99). Fits the same data shape and has the same sorted output, so no
+callers need to change.
+
+* 14:40 :phase-2.5.1:supernode:dead-loop:
+Removed a dead loop in =src/symbolic/supernode.rs= that was walking
+=0..n_snodes=, calling =find_root= (O(n)) for each, and then doing
+nothing with the result. Empty body. O(n²) wasted work per matrix.
+
+Impact measurable in the profile: snode max dropped 507→68 μs, share
+of total 7.3% → 1.2%. The GROUPING family disappeared from the top-30
+worst offenders.
+
+* 14:55 :phase-2.5.1:symbolic:etree-renumbering:
+=src/symbolic/mod.rs= used to call =EliminationTree::from_pattern=
+twice: once on the AMD-permuted pattern (to compute the postorder)
+and once on the final permuted pattern (to get the etree used by
+column_counts). The second call is redundant because postorder is a
+topological relabeling of the etree: =etree(P·A·Pᵀ)= is the
+postorder-renumbering of =etree(A)= when P is a postorder of =etree(A)=.
+
+Replaced the second from_pattern with an O(n) renumbering:
+
+#+begin_src rust
+let final_parent: Vec<Option<usize>> = (0..n)
+    .map(|new| {
+        let old_amd = post[new];
+        amd_etree.parent[old_amd].map(|old_par| post_inv[old_par])
+    })
+    .collect();
+#+end_src
+
+3-run medians: before 2.12/2.12/2.14, after 2.03/2.06/2.08. ~3%
+small-frontal improvement. First re-apply attempt was reverted after
+misreading a single-run reading (2.02 → 2.08 looked like a regression
+but was within noise); 3-run confirmation justified re-applying it.
+
+* 15:15 :phase-2.5.1:factorize:dead-transpose:
+=src/numeric/factorize.rs= was computing =build_csc_transpose(&permuted)=
+and immediately discarding the result with =let _ = ...=. A comment
+claimed it was "kept for future amap-based assembly optimization" but
+the value was thrown away, so no caller benefits — it's a full O(nnz)
+pass for nothing. Removed the call AND the helper function (only used
+by the dead call).
+
+3-run bench after removal (release):
+- sparse small-frontal: 2.00 / 1.98 / 2.00
+- sparse medium:        2.00 / 1.99 / 2.00
+
+**Phase 2.8.1 exit criterion satisfied** — all four partitions PASS:
+
+| bucket                 | count  |  p90 | target | verdict |
+|------------------------+--------+------+--------+---------|
+| Dense small-frontal    | 147982 | 1.56 | ≤ 2.0  | PASS    |
+| Dense medium           | 152145 | 1.96 | ≤ 3.0  | PASS    |
+| Sparse small-frontal   | 153455 | 1.99 | ≤ 2.0  | PASS    |
+| Sparse medium          | 153560 | 2.00 | ≤ 3.0  | PASS    |
+
+Margin is tight — 1.99–2.00 on sparse small-frontal with ~3–5% p90
+run-to-run noise means the next regression could push it back over.
+Noting this in the session checkpoint and Phase 2.8.1 ledger.

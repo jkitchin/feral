@@ -634,3 +634,143 @@ Reorder Phase 2.5:
 **Evidence.** Profile output `/tmp/profile_smallfront.txt`; profile
 binary `examples/profile_sparse_smallfront.rs`. Journal:
 `dev/journal/2026-04-14-02.org` Phase 2.5 triage entry.
+
+---
+
+## 2026-04-14 — Phase 2.5.1′: AMD stays exact minimum-degree (mark-array, not real AMD)
+
+**Context.** Session 04 diagnosis showed `adj[a].contains(&b)` inside
+the fill loop was the sole source of AMD's pathology. On near-dense
+inputs (DISCS_0012 n=234, DMN15103_0000 n=99 fully dense) the fill
+set is already a clique, so every `contains` returns `true` after
+scanning the full adjacency vector — 778k lookups for zero inserts on
+DISCS_0012. Fill phase was 80–88% of AMD runtime on the top offenders.
+
+**Decision.** Keep the exact minimum-degree algorithm, fix the hot
+loop with a mark array. Do **not** port real AMD (approximate
+external degree + element absorption + quotient graph).
+
+**Rationale.**
+1. The mark-array fix brings fill phase from O(deg³) to O(deg²) per
+   step — one Vec<bool> of size n reused across steps, set/cleared
+   within each outer iteration.
+2. Combined with a dense-clique early exit (when pivot's live
+   neighbors equal all remaining live nodes, push survivors and
+   return), DMN15103_0000 short-circuits entirely and DISCS_0012
+   terminates after its first few steps.
+3. This brings sparse small-frontal p90 to 1.99 (target ≤ 2.0) on
+   a 3-run median — meets the Phase 2.8.1 exit criterion.
+4. Real AMD is a larger surface-area change (quotient graph, element
+   absorption, degree approximation) whose correctness surface would
+   need its own research note and test matrix. Not worth taking on
+   now when the minimal fix clears the gate.
+
+**When to revisit.** If a future partition (e.g., Phase 3 sparse
+medium or large-frontal) needs AMD to be significantly faster on
+large n, or if we find an input where exact min-degree produces
+meaningfully worse fill than real AMD.
+
+**Evidence.** Triage binary `examples/triage_discs_amd.rs`;
+`dev/sessions/2026-04-14-04.md`; journal
+`dev/journal/2026-04-14-04.org` 13:05/14:10 entries.
+
+---
+
+## 2026-04-14 — Phase 2.5.1′: `permute_pattern` preserves sorted-column invariant
+
+**Context.** Session 04 rewrote `permute_pattern` in
+`src/ordering/amd.rs` from a `Vec<Vec<usize>>` + sort_unstable +
+dedup scheme to a two-pass counting-sort layout (count → prefix sum
+→ fill). The counting-sort is ~7× faster on DMN15103_0000 because
+each entry is copied exactly once (the input is a full symmetric
+pattern so we just re-bucket) instead of being pushed twice and
+deduped.
+
+**Decision.** The new implementation runs one additional
+`sort_unstable` pass per column at the end to keep row indices
+sorted, preserving the invariant the old implementation produced.
+
+**Rationale.** Downstream code (column_counts, frontal assembly)
+does not strictly require sorted columns, but:
+1. The previous impl produced sorted output; some callers may
+   implicitly rely on it through debug_assert or iteration order.
+2. The sort is O(nnz/col · log(nnz/col)) per column which is cheap
+   compared to the assembly work the sorted output enables.
+3. Removing the invariant is a cross-cutting audit we do not need
+   to take on now.
+
+**When to revisit.** If profiling shows the per-column sort is
+measurable (it should not be for small frontals) and we can prove
+no caller relies on sorted columns.
+
+**Evidence.** `src/ordering/amd.rs` `permute_pattern`;
+`dev/sessions/2026-04-14-04.md`.
+
+---
+
+## 2026-04-14 — Phase 2.5.1′: symbolic factorization builds final etree by renumbering, not re-parsing
+
+**Context.** `src/symbolic/mod.rs` used to call
+`EliminationTree::from_pattern` twice: once on the AMD-permuted
+pattern (to compute the postorder) and once on the final permuted
+pattern (to get the etree used by column_counts and the numeric
+phase). The second call is O(nnz · α(n)) and redundant.
+
+**Decision.** Compute the final etree by renumbering the
+AMD-permuted etree's parent array through the postorder, in O(n):
+
+```rust
+let final_parent: Vec<Option<usize>> = (0..n)
+    .map(|new| {
+        let old_amd = post[new];
+        amd_etree.parent[old_amd].map(|old_par| post_inv[old_par])
+    })
+    .collect();
+```
+
+**Rationale.** Postorder is a topological relabeling of the
+elimination tree: `etree(P·A·Pᵀ) = post-renumbering of etree(A)`
+when P is a postorder of `etree(A)`. The tree structure is
+preserved and only the node labels change. This makes the second
+from_pattern call mathematically redundant.
+
+**Evidence.** 3-run median sparse small-frontal p90:
+- Before renumbering: 2.12 / 2.12 / 2.14
+- After renumbering:  2.03 / 2.06 / 2.08
+- ~3% improvement at p90, stable across runs.
+
+`src/symbolic/mod.rs` lines around the `final_parent` construction;
+`dev/sessions/2026-04-14-04.md`; journal entry
+`dev/journal/2026-04-14-04.org` 14:55.
+
+---
+
+## 2026-04-14 — Phase 2.8.1 exit gate satisfied (all four partitions PASS)
+
+**Context.** Session 03 reported sparse small-frontal `factor/MUMPS`
+p90 = 2.81 (FAIL). Session 04 applied six fixes (AMD mark array,
+AMD clique shortcut, counting-sort `permute_pattern`, dead loop in
+`supernode.rs`, etree renumbering, dead transpose call in
+`factorize.rs`).
+
+**Decision.** **Phase 2 exits on sessions 04 / 05 boundary.** All
+four Phase 2.8.1 exit partitions PASS on the full KKT bench:
+
+| bucket                 | count  |  p90 | target | verdict |
+|------------------------|-------:|-----:|-------:|:-------:|
+| Dense small-frontal    | 147982 | 1.56 | ≤ 2.0  | PASS    |
+| Dense medium           | 152145 | 1.96 | ≤ 3.0  | PASS    |
+| Sparse small-frontal   | 153455 | 1.99 | ≤ 2.0  | PASS    |
+| Sparse medium          | 153560 | 2.00 | ≤ 3.0  | PASS    |
+
+3-run medians on sparse small-frontal: 2.00 / 1.98 / 2.00.
+
+**Tight-margin acknowledgement.** Sparse small-frontal lands at
+1.98–2.00 with measured run-to-run noise ~3–5%. The next
+regression in this band could push it back over the gate. Phase 3+
+work must re-verify this partition on commit. Recorded as a Phase
+2.8.1 follow-up risk for session 05.
+
+**Evidence.** `/tmp/feral_bench_session04_final.txt`; 3-run medians
+in `dev/sessions/2026-04-14-04.md` "Benchmark Results" section.
+`FERAL-PROJECT-SPEC.md` §1747 for the exit criterion.

@@ -82,6 +82,69 @@ column counts) is only 2.6% of the budget and is demoted. The new
 Phase 2.5.1 priority is diagnosing and fixing AMD. See
 `dev/decisions.md` 2026-04-14 "Phase 2.5 priority reordered".
 
+### Phase 2.5.1′ AMD + symbolic fixes (2026-04-14)
+
+Six surgical fixes, identified by an instrumented triage binary
+(`examples/triage_discs_amd.rs`) that counted per-phase µs and
+scalar `contains` / insert calls:
+
+- **AMD mark array** (`src/ordering/amd.rs`). Replaced
+  `adj[a].contains(&b)` inside the fill-edge loop with a scratch
+  `Vec<bool>` of size n reused across steps. Marks the current
+  adjacency once, checks/inserts with O(1) lookups, unmarks before
+  the next outer iteration. Drops the fill phase from O(deg³) to
+  O(deg²) per step. Root cause of the pathology: on near-dense
+  inputs (DISCS_0012, DMN15103_0000 fully dense) the reachable set
+  was already a clique so every `contains` returned `true` after
+  scanning the full adjacency vector — 778k lookups for zero inserts
+  on DISCS_0012.
+- **AMD dense-clique shortcut** (`src/ordering/amd.rs`). When the
+  pivot's live neighbors equal all remaining live nodes, eliminating
+  it forms a clique among survivors: push them in any order and
+  return. Short-circuits DMN15103_0000 entirely and cuts DISCS_0012
+  to just the first few steps.
+- **Counting-sort `permute_pattern`** (`src/ordering/amd.rs`).
+  Replaced `Vec<Vec<usize>>` + sort + dedup with a two-pass
+  counting-sort layout (count, prefix sum, fill) plus one per-column
+  `sort_unstable` to preserve the sorted-column invariant. ~7×
+  faster on DMN15103_0000. Each off-diagonal entry is copied exactly
+  once instead of twice then deduped.
+- **Dead loop in supernode detection** (`src/symbolic/supernode.rs`).
+  Removed a `for child_s in 0..n_snodes` loop that called
+  `find_root` on every candidate and did nothing with the result
+  (empty body). O(n²) wasted work per matrix. Snode max time
+  dropped 507→68 µs; share 7.3% → 1.2%. GROUPING family fell off
+  the top-30 worst offenders list.
+- **Etree renumbering from postorder** (`src/symbolic/mod.rs`).
+  Replaced the second `EliminationTree::from_pattern` call with an
+  O(n) renumbering of the AMD-permuted etree through the postorder.
+  Postorder is a topological relabeling of the elimination tree,
+  so the tree structure is preserved and only node labels change.
+  ~3% sparse small-frontal p90 improvement on 3-run median.
+- **Dead transpose call** (`src/numeric/factorize.rs`). Removed
+  `let _ = build_csc_transpose(&permuted);` and the helper function
+  — the value was computed and immediately discarded. Full O(nnz)
+  pass per matrix for nothing.
+
+**Phase 2.8.1 exit criterion now satisfied.** All four partitions
+PASS on the full KKT bench (154588 matrices):
+
+| bucket              | count  |  p90 | target | verdict |
+|---------------------|-------:|-----:|-------:|:-------:|
+| Dense small-frontal | 147982 | 1.56 | ≤ 2.0  | PASS    |
+| Dense medium        | 152145 | 1.96 | ≤ 3.0  | PASS    |
+| Sparse small-frontal| 153455 | 1.99 | ≤ 2.0  | PASS    |
+| Sparse medium       | 153560 | 2.00 | ≤ 3.0  | PASS    |
+
+3-run medians on sparse small-frontal: **2.00 / 1.98 / 2.00**
+(target ≤ 2.0). Tight margin — run-to-run noise is ~3–5%, so the
+next regression in this band could push it back over the gate.
+Flagged for monitoring in Phase 3+.
+
+All 93 library tests pass. Inertia and residual counts unchanged.
+Zero correctness regressions. See `dev/sessions/2026-04-14-04.md`
+and `dev/decisions.md` Phase 2.5.1′ entries.
+
 ### Phase 1b Exit (2026-04-12)
 
 Phase 1b closed under the multi-source consensus exit criterion on
