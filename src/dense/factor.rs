@@ -1,6 +1,14 @@
 use crate::error::FeralError;
 use crate::inertia::Inertia;
 
+/// Dead-zero absolute floor for the 2×2 pivot cancellation test.
+/// Matches SPRAL SSIDS `datatypes.f90:260` default (`small = 1e-20`),
+/// used by `ldlt_tpp.cxx:98,106`. This is a true zero-detection floor
+/// (near the underflow boundary), **not** a stability threshold — the
+/// scale-invariant cancellation test at `factor_frontal`'s 2×2 gate
+/// handles stability via ratios against the local block max.
+const SSIDS_DET_SMALL: f64 = 1e-20;
+
 /// Parameters controlling Bunch-Kaufman factorization behavior.
 #[derive(Debug, Clone)]
 pub struct BunchKaufmanParams {
@@ -809,7 +817,37 @@ pub fn factor_frontal(
             let growth_fail = (d22.abs() * rmax + amax * tmax) * u > absdet
                 || (d11.abs() * tmax + amax * rmax) * u > absdet;
 
-            let det_floor_fail = absdet <= params.zero_tol_2x2;
+            // Scale-invariant cancellation-aware determinant floor, ported
+            // from SSIDS `src/ssids/cpu/kernels/ldlt_tpp.cxx:98-106`:
+            //
+            //   maxpiv    = max(|a11|, |a21|, |a22|)
+            //   detscale  = 1 / maxpiv
+            //   detpiv0   = (a11 * detscale) * a22
+            //   detpiv1   = (a21 * detscale) * a21
+            //   detpiv    = detpiv0 - detpiv1      (== det / maxpiv)
+            //   reject iff maxpiv < small
+            //           OR |detpiv| < max(small, |detpiv0|/2, |detpiv1|/2)
+            //
+            // This replaces the prior absolute `|det| <= zero_tol_2x2` floor,
+            // which was only meaningful on equilibrated matrices. The test
+            // is scale-invariant by construction: the ratio `|detpiv|` vs
+            // fractions of `|detpiv0|`, `|detpiv1|` does not depend on
+            // the absolute magnitude of the block. `SSIDS_DET_SMALL = 1e-20`
+            // is a dead-zero underflow floor, NOT a stability threshold.
+            // See dev/research/ssids-scale-invariant-det-floor.md.
+            let max_piv = d11.abs().max(d21.abs()).max(d22.abs());
+            let det_floor_fail = if max_piv < SSIDS_DET_SMALL {
+                true
+            } else {
+                let det_scale = 1.0 / max_piv;
+                let detpiv0 = (d11 * det_scale) * d22;
+                let detpiv1 = (d21 * det_scale) * d21;
+                let detpiv = detpiv0 - detpiv1;
+                let cancel_floor = SSIDS_DET_SMALL
+                    .max(detpiv0.abs() * 0.5)
+                    .max(detpiv1.abs() * 0.5);
+                detpiv.abs() < cancel_floor
+            };
 
             if growth_fail || det_floor_fail {
                 // 2×2 rejected. SSIDS-style delayed pivoting: when
