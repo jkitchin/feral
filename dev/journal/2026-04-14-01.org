@@ -67,3 +67,163 @@ floor into factor_frontal; (2) investigate +1 ACOPP30 dense/
 sparse divergence; (3) triage ERRINBAR_0824 (worst shared
 residual on both paths, same-sign inertia, pure refinement
 issue). MC64 scaling deferred to Phase 2.4.
+
+* 07:15 :step2:ssids-det-floor:research:
+Continuing session after user said "get started". First queued
+item is the SSIDS scale-invariant 2x2 det floor port. Consulted
+spral-expert for exact test_2x2 source at ldlt_tpp.cxx:88-119
+and its relationship to the Duff-Reid growth bound.
+
+Key findings:
+- SSIDS's ldlt_tpp.cxx:101-106 computes detscale = 1/maxpiv
+  and tests |detpiv| < max(small, |detpiv0|/2, |detpiv1|/2)
+  against the *scaled* determinant.
+- This is scale-invariant by construction: all three quantities
+  rescale by |c| when the block is scaled by c.
+- The classical cancellation rule: |a - b| < |a|/2 means more
+  than one bit of significance is lost. max/2 (not min/2)
+  protects against the case where the larger summand cancels
+  catastrophically.
+- small = 1e-20 (SSIDS datatypes.f90:260), NOT sqrt(eps). Near
+  the underflow boundary, dead-zero detection only. Using
+  sqrt(eps) was the regression trap in 2026-04-13-05.
+- feral's existing Duff-Reid growth bound
+  (|a22|*rmax + amax*tmax)*u > |det| is *algebraically
+  identical* to SSIDS's u*max(x1,x2) < 1 at lines 115-118 after
+  multiplying through by |det|. So feral already has that
+  guard; the missing piece was the scaled cancellation floor.
+
+Research note: dev/research/ssids-scale-invariant-det-floor.md.
+
+* 07:30 :step2:implementation:
+Ported into src/dense/factor.rs at the 2x2 test around line 812.
+Replaced the absolute `det_floor_fail = absdet <= zero_tol_2x2`
+(~4e-32) with the scale-invariant SSIDS test. Growth bound
+retained unchanged. SSIDS_DET_SMALL = 1e-20 hardcoded as a
+module-level constant (not promoted to BunchKaufmanParams to
+avoid churning 38 call sites; revisit if tuning is needed).
+
+Build clean. All tests pass (cargo test --release).
+
+* 07:45 :step2:bench:
+Full bench (154588 KKTs): every metric byte-identical to the
+step 1 baseline. Dense 152911/154207/1.87e-4. Sparse
+153009/154329/2.50e-4. 1840 dense failures / 1837 sparse
+failures / 1808 shared. Zero regressions.
+
+This is the expected outcome: on the current corpus, every 2x2
+rejected by the scaled test is already rejected by the growth
+bound, so the new code is additive, not behavior-changing. The
+value is defensive: catches cancellation modes the growth bound
+alone would not.
+
+Committed as 8110f1c.
+
+* 08:00 :errinbar:triage:
+Moved to queue item (3): triage ERRINBAR_0824, the worst shared
+residual on both paths. n=27, expected inertia (18,9,0),
+delta_w=delta_c=0.0, Ipopt iteration 824.
+
+Ran examples/triage_errinbar which already exists. Results:
+- Diagonal range [1.00e-8, 1.52e12] — 20 orders of magnitude
+- Max |off-diagonal| = 1.21e12
+- Both dense and sparse produce inertia (18,9,0) MATCH
+- Dense plain 5.65e-4 -> refined 1.87e-4 (3x improvement)
+- Sparse plain 3.54e-4 -> refined 2.50e-4 (1.4x improvement)
+- needs_refinement = false (no pivot force-accepted)
+- max |x_dense - x_sparse| = 9.1e-2 at idx 21, but
+  |x_dense[21]| = 3.3e10, so rel diff = 1.75e-12 — solvers
+  AGREE on the solution to 12 digits of precision
+
+Conclusion: this is not a feral bug. The 20-decade diagonal
+spread puts cond(A) near 5e11+; with eps ~ 2e-16, the classical
+bound ||Ax - b|| ~ eps*cond(A) gives ~1e-4 as the floor. The
+solvers are already at that floor.
+
+Two legitimate future improvements:
+1. MC64 matching-based scaling (Phase 2.4) — could reduce
+   cond(A_scaled) by orders of magnitude for KKT matrices with
+   this structure, closing the dense/sparse gap and bringing
+   residuals below 1e-8.
+2. Mixed-precision iterative refinement — compute the residual
+   r = b - Ax in quad precision, solve A*dx = r in double,
+   update x. Standard technique for cond-limited systems.
+
+Neither is within scope of a single-session triage. Documenting
+the finding here and moving on to item (2): +1 ACOPP30 dense/
+sparse divergence. That one may be a real bug.
+
+* 08:30 :acopp30-0004:scan:
+Wrote examples/scan_acopp30_divergence.rs to loop through all
+105 ACOPP30 matrices and find the one where factor_single_front
+and factorize_multifrontal disagree on inertia.
+
+Result: exactly one matrix — ACOPP30_0004.
+- dense  = (71, 137, 1), residual 9.95e-15
+- sparse = (72, 137, 0), residual 1.16e-14
+- expected = (72, 137, 0)    — sparse matches sidecar
+
+Both residuals are 1e-14 class, so both are producing valid
+solutions. The disagreement is on whether to count one near-
+zero pivot as zero vs positive.
+
+* 09:00 :acopp30-0004:deep-triage:
+Wrote examples/triage_acopp30_0004.rs to determine whether the
+(71,137,1) result was caused by (A) Knight-Ruiz equilibration,
+(B) zero_tol being too strict, or (C) natural-order pivot
+sequence picking a rank-deficient pivot that AMD ordering
+avoids.
+
+Experiments:
+- factor_single_front (eq + natural)    : (71, 137, 1)
+- factor_frontal (no eq + natural)      : (71, 137, 1)
+- factorize_multifrontal (AMD)          : (72, 137, 0) MATCH
+- factor_frontal (no eq + nat + zt=0)   : (71, 137, 1)
+
+Equilibration is NOT the cause (no-eq gives same result).
+zero_tol is NOT the cause (zt=0 gives same result). **Ordering
+is the cause**: AMD reorders the pivot sequence so no column
+becomes implicitly rank-deficient during elimination.
+
+Walking the dense kernel's D block-by-block confirmed the
+structural pattern: positions k=0..56 are all 2x2 blocks of the
+form
+  [[+0        , h_i],
+   [h_i       , -eps]]
+each contributing (1,1,0) to inertia. Then at **k=58, 1x1 pivot
+d=+0.000e0 exact**. This is the (0,0,1) that pushes inertia
+from (72,137,0) to (71,137,1).
+
+Interpretation: by the time the natural-order elimination
+reaches k=58, the previous 29 2x2 blocks have implicitly
+consumed that column's rank, leaving a literally-zero column.
+needs_refinement kicks in and the solution still achieves
+1e-14 residual via iterative refinement (which uses A, not D,
+for the residual). So the SOLUTION is correct; only the
+reported inertia is off by one.
+
+In exact arithmetic, inertia is a matrix invariant (Sylvester).
+In finite precision, it depends on how pivoting interacts with
+rank-deficiency-in-intermediate-Schur-complements. AMD avoids
+the bad intermediate ordering; natural order hits it.
+
+Decision: accept this as an architectural limitation of the
+"no symbolic analysis" design of factor_single_front. Fixing
+it would require adding AMD preorder, which negates the step 1
+wrapper's design (cheap dense-kernel access without symbolic).
+
+Net: factor_single_front improved 67 ACOPP30 matrices vs
+baseline factor(), at the cost of 1 ACOPP30 matrix where
+natural-order differs from AMD-order. Net +66 improvement.
+The remaining ACOPP30_0004 discrepancy is a fundamental limit
+of natural-order processing on KKTs where 29 successive zero-
+diagonal 2x2 pivots implicitly consume rank; it cannot be
+closed at the kernel level, only by preordering. Closing
+the last 1-matrix gap requires rerouting the bench's
+ACOPP30_0004 case through factorize_multifrontal OR adding
+AMD preorder to factor_single_front as a future task.
+
+* 09:30 :session-checkpoint:
+Session 2026-04-14-01 continued has now executed queue items
+(1), (2), and the investigation for (3). Committing diagnostic
+examples and moving to close out.
