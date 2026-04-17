@@ -245,3 +245,44 @@ Replace the =IndexOverflow= bail inside =create_element=. Promote
 the grid_7x7 test to assert clean termination post-GC. Oracle
 match (T4) becomes tractable after Commit 7 (postorder/expand)
 emits a permutation.
+
+* 02:30 :amd:gc:commit-6:
+Commit 6 lands inline GC. Replaced the =IndexOverflow= bail at
+=algo.rs:189-192= with the six-step save→mark→compact→restore
+dance from faer =amd.rs:289-338=:
+ 1. Save partial state: =pe[me]=p=, =len[me] -= knt1=, =pe[e]=pj=,
+    =len[e] = ln - knt2= (both NONE'd if len hits 0). Bump
+    =ws.ncmpa=.
+ 2. Mark each live list's head for every j with =pe[j] >= 0=:
+    save =iw[pe[j]]= into =pe[j]=, write =flip(j)= at
+    =iw[pe[j]]=.
+ 3. Sweep =[0, pme1)=: each =flip(j)= marker triggers an in-place
+    reconstruction of j's list at =pdst= via =iw.copy_within=,
+    updating =pe[j]= to the new start.
+ 4. Slide the new-element prefix =[pme1, pfree)= down to
+    =pdst=; update =pme1=, =pfree=.
+ 5. Restore local cursors =pj = pe[e]=, =p = pe[me]=.
+
+Refactored =pme1= to a local =pme1_rw: usize= inside the
+out-of-place branch so GC can reassign it. Changed the inner
+loop from 0-indexed =for _knt2 in 0..ln= to 1-indexed
+=for knt2 in 1..=ln= to match faer's =len[e] = ln - knt2=
+arithmetic exactly.
+
+Evidence: =cargo test -p feral-amd= → 29/29. =grid_7x7= test
+(was =bails_at_gc_until_commit_6=) now asserts clean
+termination. =band_20_3= test (was =hits_gc_placeholder=)
+now asserts =nel == n= and =ncmpa >= 1= (faer oracle ncmpa=1;
+Slice A's extra iw pressure may bump it higher — we accept
+any positive value). =cargo clippy -p feral-amd --all-targets
+-- -D warnings= → clean.
+
+Invariant check: len=0 variables have =pe= either NONE or
+=flip(parent)=, both negative; the mark loop skips them, so
+the compact sweep's =if lenj > 0= is defensive but inactive
+in practice. Similarly absorbed elements (=pe[e] = flip(me)=)
+are negative and skipped by the mark loop.
+
+Next: Commit 7 — path-compression + postorder + expand
+(=amd.rs:567-633=). Produces the public-facing permutation
+vector. Then Commit 8 wires the public API.

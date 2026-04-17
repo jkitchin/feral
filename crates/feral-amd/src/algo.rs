@@ -11,16 +11,16 @@
 //!   and the final bookkeeping write-back to `pe[me]/len[me]/elen[me]`
 //!   with the post-step `clear_flag` call.
 //!
-//! Garbage collection (triggered when `pfree >= iwlen` inside the
-//! out-of-place branch) is deferred to Commit 6. Until then,
-//! [`create_element`] returns [`AmdError::IndexOverflow`] on that
-//! path. Fixtures whose oracle `ncmpa == 0` do not hit it.
+//! Inline garbage collection (faer `amd.rs:289-338`) fires inside
+//! the out-of-place branch when `pfree >= iwlen`. See
+//! [`create_element`] for the full save → mark → compact → restore
+//! dance.
 //!
 //! Pass-1 `w[e]` seeding (`amd.rs:366-385`), Pass-2 approximate
 //! degree (`amd.rs:386-465`), aggressive absorption, monotone
 //! degree cap, and re-insertion into degree lists (`amd.rs:516-546`)
-//! land in Commit 5 ([`finalize_step`]). Mass elimination and
-//! supervariable detection are Slice B (Commits 9-10).
+//! live in [`finalize_step`]. Mass elimination and supervariable
+//! detection are Slice B (Commits 9-10).
 
 #![allow(dead_code)]
 
@@ -110,11 +110,7 @@ pub(crate) fn select_pivot(ws: &mut AmdWorkspace) -> Option<usize> {
 /// - `ws.wflg` bumped via `clear_flag`.
 /// - `ws.nel` incremented by `nvpiv`.
 ///
-/// Reference: faer `amd.rs:236-366`.
-///
-/// Errors: [`AmdError::IndexOverflow`] if the out-of-place branch
-/// would write past `iw` — this is the point where Commit 6 will
-/// install the inline GC compaction.
+/// Reference: faer `amd.rs:236-366` (incl. inline GC at 289-338).
 pub(crate) fn create_element(
     ws: &mut AmdWorkspace,
     me: usize,
@@ -124,17 +120,18 @@ pub(crate) fn create_element(
     ws.nel += nvpiv as usize;
     ws.nv[me] = -nvpiv;
     let mut degme: usize = 0;
-    let pme1: i32;
+    let pme1: usize;
     let pme2: i32;
 
     if elenme == 0 {
         // In-place: me has no elements in its list — just variables.
         // Compact them at pe[me]: advance pme2 to the final position,
         // overwriting absorbed entries in-place.
-        pme1 = ws.pe[me];
-        let list_start = pme1 as usize;
+        let pme1_s = ws.pe[me];
+        pme1 = pme1_s as usize;
+        let list_start = pme1;
         let list_end = list_start + ws.len[me] as usize;
-        let mut pme2_s = pme1 - 1;
+        let mut pme2_s = pme1_s - 1;
         for p in list_start..list_end {
             let i = ws.iw[p] as usize;
             let nvi = ws.nv[i];
@@ -163,7 +160,7 @@ pub(crate) fn create_element(
         // adjacency), then walk the variable tail (remaining
         // `slenme` entries) with `knt1 = elenme + 1` as the flag.
         let mut p = ws.pe[me] as usize;
-        pme1 = ws.pfree as i32;
+        let mut pme1_rw: usize = ws.pfree;
         let slenme = (ws.len[me] - elenme) as usize;
         let elenme_u = elenme as usize;
         for knt1 in 1..=elenme_u + 1 {
@@ -181,14 +178,71 @@ pub(crate) fn create_element(
                 pj = ws.pe[e] as usize;
                 ln = ws.len[e] as usize;
             }
-            for _knt2 in 0..ln {
+            for knt2 in 1..=ln {
                 let i = ws.iw[pj] as usize;
                 pj += 1;
                 let nvi = ws.nv[i];
                 if nvi > 0 {
                     if ws.pfree >= ws.iwlen {
-                        // Commit 6 replaces this with inline GC.
-                        return Err(AmdError::IndexOverflow);
+                        // Inline garbage collection (faer
+                        // amd.rs:289-338). Save partial state so
+                        // the surviving elements can be compacted
+                        // down, then restore local cursors.
+                        ws.pe[me] = p as i32;
+                        ws.len[me] -= knt1 as i32;
+                        if ws.len[me] == 0 {
+                            ws.pe[me] = NONE;
+                        }
+                        ws.pe[e] = pj as i32;
+                        ws.len[e] = (ln - knt2) as i32;
+                        if ws.len[e] == 0 {
+                            ws.pe[e] = NONE;
+                        }
+                        ws.ncmpa += 1;
+                        // Mark each live list's head: save iw[pe[j]]
+                        // into pe[j] and write flip(j) at the old
+                        // head position so the compact sweep can
+                        // recognise list starts.
+                        for j in 0..ws.n {
+                            let pn = ws.pe[j];
+                            if pn >= 0 {
+                                let pn_u = pn as usize;
+                                ws.pe[j] = ws.iw[pn_u];
+                                ws.iw[pn_u] = flip(j as i32);
+                            }
+                        }
+                        // Sweep [0, pme1_rw), reconstructing every
+                        // marked list contiguously at pdst.
+                        let mut psrc = 0usize;
+                        let mut pdst = 0usize;
+                        let pend = pme1_rw;
+                        while psrc < pend {
+                            let j_marker = flip(ws.iw[psrc]);
+                            psrc += 1;
+                            if j_marker >= 0 {
+                                let j = j_marker as usize;
+                                ws.iw[pdst] = ws.pe[j];
+                                ws.pe[j] = pdst as i32;
+                                pdst += 1;
+                                let lenj = ws.len[j] as usize;
+                                if lenj > 0 {
+                                    ws.iw.copy_within(psrc..psrc + lenj - 1, pdst);
+                                    psrc += lenj - 1;
+                                    pdst += lenj - 1;
+                                }
+                            }
+                        }
+                        // Slide the new element's accumulated prefix
+                        // [pme1_rw, pfree) down to the new pdst.
+                        let p1 = pdst;
+                        ws.iw.copy_within(pme1_rw..ws.pfree, pdst);
+                        pdst += ws.pfree - pme1_rw;
+                        pme1_rw = p1;
+                        ws.pfree = pdst;
+                        // Restore local cursors from the relocated
+                        // heads of e's and me's lists.
+                        pj = ws.pe[e] as usize;
+                        p = ws.pe[me] as usize;
                     }
                     degme += nvi as usize;
                     ws.nv[i] = -nvi;
@@ -214,16 +268,17 @@ pub(crate) fn create_element(
                 ws.w[e] = 0;
             }
         }
+        pme1 = pme1_rw;
         pme2 = (ws.pfree - 1) as i32;
     }
 
     ws.degree[me] = degme as i32;
-    ws.pe[me] = pme1;
-    ws.len[me] = pme2 - pme1 + 1;
+    ws.pe[me] = pme1 as i32;
+    ws.len[me] = pme2 - pme1 as i32 + 1;
     ws.elen[me] = flip(nvpiv + degme as i32);
     ws.wflg = clear_flag(ws.wflg, ws.wbig, &mut ws.w);
 
-    Ok((pme1 as usize, pme2 as usize, nvpiv, degme))
+    Ok((pme1, pme2 as usize, nvpiv, degme))
 }
 
 /// Finish the elimination step whose create-element phase produced
@@ -436,9 +491,9 @@ pub(crate) fn finalize_step(
 /// accumulated flop counts.
 ///
 /// Mass elimination and supervariable detection are absent (Slice
-/// B). Garbage collection is absent (Commit 6). On fixtures where
-/// `create_element` would trigger GC the driver surfaces
-/// [`AmdError::IndexOverflow`].
+/// B). Inline garbage collection is live; fixtures whose working
+/// set transiently exceeds `iwlen` recover via in-place compaction
+/// and bump `ws.ncmpa`.
 ///
 /// At exit: `ws.nel == ws.n`, every `pe[i]` either points to a
 /// live parent (to be path-compressed by the postorder phase) or
@@ -631,11 +686,10 @@ mod tests {
     /// Grid 7x7: five-point stencil. Faer's oracle reports
     /// `ncmpa == 0`, but Slice A lacks mass elimination and
     /// supervariable detection, so it consumes more `iw` space and
-    /// hits the GC placeholder. After Commit 6 installs inline GC
-    /// the loop will run to completion; promoted to a terminate-
-    /// cleanly assertion at that point.
+    /// may trip the inline GC. With Commit 6 the loop terminates
+    /// cleanly regardless of how many compactions are needed.
     #[test]
-    fn run_elimination_grid_7x7_bails_at_gc_until_commit_6() {
+    fn run_elimination_grid_7x7() {
         let m = 7usize;
         let n = 7usize;
         let total = m * n;
@@ -667,20 +721,15 @@ mod tests {
         }
         let p = CscPattern::new(total, &cp, &ri).unwrap();
         let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
-        match run_elimination(&mut ws, true) {
-            Ok(_) => assert_eq!(ws.nel, total),
-            Err(AmdError::IndexOverflow) => {
-                // Expected until Commit 6.
-            }
-            Err(e) => panic!("unexpected error: {:?}", e),
-        }
+        run_elimination(&mut ws, true).unwrap();
+        assert_eq!(ws.nel, total);
     }
 
     /// Band(20,3) triggers garbage collection in faer (oracle
-    /// ncmpa=1). Until Commit 6 installs the inline GC,
-    /// `create_element` surfaces IndexOverflow on this fixture.
+    /// ncmpa=1). Commit 6 must run the compaction and finish the
+    /// elimination; verify both.
     #[test]
-    fn band_20_3_hits_gc_placeholder() {
+    fn run_elimination_band_20_3_triggers_gc() {
         let n = 20usize;
         let b = 3usize;
         let mut cp: Vec<usize> = vec![0];
@@ -695,13 +744,13 @@ mod tests {
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
-        match run_elimination(&mut ws, true) {
-            Err(AmdError::IndexOverflow) => {}
-            other => panic!(
-                "expected IndexOverflow from GC placeholder, got {:?}",
-                other
-            ),
-        }
+        run_elimination(&mut ws, true).unwrap();
+        assert_eq!(ws.nel, n);
+        assert!(
+            ws.ncmpa >= 1,
+            "expected at least one compaction on band(20,3), got ncmpa={}",
+            ws.ncmpa
+        );
     }
 
     /// Arrow 200: hub dense-deferred in init; spokes get pivoted
