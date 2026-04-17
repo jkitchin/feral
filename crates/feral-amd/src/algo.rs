@@ -24,8 +24,8 @@
 
 #![allow(dead_code)]
 
-use crate::error::AmdError;
 use crate::workspace::{clear_flag, flip, AmdWorkspace, NONE};
+use feral_ordering_core::OrderingError;
 
 /// Flop-counter deltas produced by a single elimination step.
 /// Matches faer's `amd.rs:547-557` accounting so `AmdStats` can
@@ -114,7 +114,7 @@ pub(crate) fn select_pivot(ws: &mut AmdWorkspace) -> Option<usize> {
 pub(crate) fn create_element(
     ws: &mut AmdWorkspace,
     me: usize,
-) -> Result<(usize, usize, i32, usize), AmdError> {
+) -> Result<(usize, usize, i32, usize), OrderingError> {
     let elenme = ws.elen[me];
     let nvpiv = ws.nv[me];
     ws.nel += nvpiv as usize;
@@ -623,7 +623,7 @@ pub(crate) fn finalize_step(
 pub(crate) fn run_elimination(
     ws: &mut AmdWorkspace,
     aggressive: bool,
-) -> Result<StepFlops, AmdError> {
+) -> Result<StepFlops, OrderingError> {
     let mut flops = StepFlops::default();
     while ws.nel < ws.n {
         let me = match select_pivot(ws) {
@@ -673,7 +673,7 @@ pub(crate) fn run_elimination(
 ///
 /// Returns a permutation `perm` of length `n` where `perm[k]` is the
 /// column of the original matrix to be eliminated at step `k`.
-pub(crate) fn finalize_permutation(ws: &mut AmdWorkspace) -> Vec<usize> {
+pub(crate) fn finalize_permutation(ws: &mut AmdWorkspace) -> Vec<i32> {
     let n = ws.n;
     if n == 0 {
         return Vec::new();
@@ -752,9 +752,9 @@ pub(crate) fn finalize_permutation(ws: &mut AmdWorkspace) -> Vec<usize> {
     }
 
     // Step 7: emit perm.
-    let mut perm = vec![0usize; n];
+    let mut perm = vec![0i32; n];
     for i in 0..n {
-        perm[ws.next[i] as usize] = i;
+        perm[ws.next[i] as usize] = i as i32;
     }
     perm
 }
@@ -877,10 +877,10 @@ fn post_tree_dfs(ws: &mut AmdWorkspace, root: usize, k_start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pattern::CscPattern;
     use crate::AmdOptions;
+    use feral_ordering_core::CscPattern;
 
-    fn ws_for<'a>(n: usize, cp: &'a [usize], ri: &'a [usize]) -> AmdWorkspace {
+    fn ws_for<'a>(n: usize, cp: &'a [i32], ri: &'a [i32]) -> AmdWorkspace {
         let p = CscPattern::new(n, cp, ri).unwrap();
         AmdWorkspace::new(&p, &AmdOptions::default()).unwrap()
     }
@@ -1015,17 +1015,17 @@ mod tests {
     #[test]
     fn run_elimination_tridiag_10() {
         let n = 10usize;
-        let mut cp: Vec<usize> = vec![0];
-        let mut ri: Vec<usize> = Vec::new();
+        let mut cp: Vec<i32> = vec![0];
+        let mut ri: Vec<i32> = Vec::new();
         for j in 0..n {
             if j > 0 {
-                ri.push(j - 1);
+                ri.push((j - 1) as i32);
             }
-            ri.push(j);
+            ri.push(j as i32);
             if j + 1 < n {
-                ri.push(j + 1);
+                ri.push((j + 1) as i32);
             }
-            cp.push(ri.len());
+            cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
@@ -1043,8 +1043,8 @@ mod tests {
         let m = 7usize;
         let n = 7usize;
         let total = m * n;
-        let mut cp: Vec<usize> = vec![0];
-        let mut ri: Vec<usize> = Vec::new();
+        let mut cp: Vec<i32> = vec![0];
+        let mut ri: Vec<i32> = Vec::new();
         use std::collections::BTreeSet;
         let idx = |r: usize, c: usize| r * n + c;
         for c in 0..total {
@@ -1065,9 +1065,9 @@ mod tests {
                 neigh.insert(idx(r0, c0 + 1));
             }
             for &r in &neigh {
-                ri.push(r);
+                ri.push(r as i32);
             }
-            cp.push(ri.len());
+            cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(total, &cp, &ri).unwrap();
         let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
@@ -1082,15 +1082,15 @@ mod tests {
     fn run_elimination_band_20_3_triggers_gc() {
         let n = 20usize;
         let b = 3usize;
-        let mut cp: Vec<usize> = vec![0];
-        let mut ri: Vec<usize> = Vec::new();
+        let mut cp: Vec<i32> = vec![0];
+        let mut ri: Vec<i32> = Vec::new();
         for j in 0..n {
             let lo = j.saturating_sub(b);
             let hi = (j + b + 1).min(n);
             for r in lo..hi {
-                ri.push(r);
+                ri.push(r as i32);
             }
-            cp.push(ri.len());
+            cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
@@ -1108,17 +1108,17 @@ mod tests {
     #[test]
     fn run_elimination_arrow_200() {
         let n = 200usize;
-        let mut cp: Vec<usize> = vec![0];
-        let mut ri: Vec<usize> = Vec::new();
+        let mut cp: Vec<i32> = vec![0];
+        let mut ri: Vec<i32> = Vec::new();
         ri.push(0);
         for r in 1..n {
-            ri.push(r);
+            ri.push(r as i32);
         }
-        cp.push(ri.len());
+        cp.push(ri.len() as i32);
         for j in 1..n {
             ri.push(0);
-            ri.push(j);
-            cp.push(ri.len());
+            ri.push(j as i32);
+            cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
@@ -1134,17 +1134,17 @@ mod tests {
     #[test]
     fn arrow_200_first_pivot_smoke() {
         let n = 200usize;
-        let mut cp: Vec<usize> = vec![0];
-        let mut ri: Vec<usize> = Vec::new();
+        let mut cp: Vec<i32> = vec![0];
+        let mut ri: Vec<i32> = Vec::new();
         ri.push(0);
         for r in 1..n {
-            ri.push(r);
+            ri.push(r as i32);
         }
-        cp.push(ri.len());
+        cp.push(ri.len() as i32);
         for j in 1..n {
             ri.push(0);
-            ri.push(j);
-            cp.push(ri.len());
+            ri.push(j as i32);
+            cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
@@ -1159,14 +1159,18 @@ mod tests {
         assert_eq!(ws.nel, 2, "1 deferred hub + 1 pivot");
     }
 
-    fn is_permutation(perm: &[usize]) -> bool {
+    fn is_permutation(perm: &[i32]) -> bool {
         let n = perm.len();
         let mut seen = vec![false; n];
         for &p in perm {
-            if p >= n || seen[p] {
+            if p < 0 {
                 return false;
             }
-            seen[p] = true;
+            let pu = p as usize;
+            if pu >= n || seen[pu] {
+                return false;
+            }
+            seen[pu] = true;
         }
         true
     }
@@ -1206,17 +1210,17 @@ mod tests {
     #[test]
     fn permutation_tridiag_10() {
         let n = 10usize;
-        let mut cp: Vec<usize> = vec![0];
-        let mut ri: Vec<usize> = Vec::new();
+        let mut cp: Vec<i32> = vec![0];
+        let mut ri: Vec<i32> = Vec::new();
         for j in 0..n {
             if j > 0 {
-                ri.push(j - 1);
+                ri.push((j - 1) as i32);
             }
-            ri.push(j);
+            ri.push(j as i32);
             if j + 1 < n {
-                ri.push(j + 1);
+                ri.push((j + 1) as i32);
             }
-            cp.push(ri.len());
+            cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
@@ -1232,17 +1236,17 @@ mod tests {
     #[test]
     fn permutation_arrow_200_hub_deferred() {
         let n = 200usize;
-        let mut cp: Vec<usize> = vec![0];
-        let mut ri: Vec<usize> = Vec::new();
+        let mut cp: Vec<i32> = vec![0];
+        let mut ri: Vec<i32> = Vec::new();
         ri.push(0);
         for r in 1..n {
-            ri.push(r);
+            ri.push(r as i32);
         }
-        cp.push(ri.len());
+        cp.push(ri.len() as i32);
         for j in 1..n {
             ri.push(0);
-            ri.push(j);
-            cp.push(ri.len());
+            ri.push(j as i32);
+            cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
@@ -1263,8 +1267,8 @@ mod tests {
         let m = 7usize;
         let n = 7usize;
         let total = m * n;
-        let mut cp: Vec<usize> = vec![0];
-        let mut ri: Vec<usize> = Vec::new();
+        let mut cp: Vec<i32> = vec![0];
+        let mut ri: Vec<i32> = Vec::new();
         use std::collections::BTreeSet;
         let idx = |r: usize, c: usize| r * n + c;
         for c in 0..total {
@@ -1285,9 +1289,9 @@ mod tests {
                 neigh.insert(idx(r0, c0 + 1));
             }
             for &r in &neigh {
-                ri.push(r);
+                ri.push(r as i32);
             }
-            cp.push(ri.len());
+            cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(total, &cp, &ri).unwrap();
         let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
@@ -1303,15 +1307,15 @@ mod tests {
     fn permutation_band_20_3() {
         let n = 20usize;
         let b = 3usize;
-        let mut cp: Vec<usize> = vec![0];
-        let mut ri: Vec<usize> = Vec::new();
+        let mut cp: Vec<i32> = vec![0];
+        let mut ri: Vec<i32> = Vec::new();
         for j in 0..n {
             let lo = j.saturating_sub(b);
             let hi = (j + b + 1).min(n);
             for r in lo..hi {
-                ri.push(r);
+                ri.push(r as i32);
             }
-            cp.push(ri.len());
+            cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
         let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
@@ -1324,8 +1328,8 @@ mod tests {
     /// Empty pattern (n == 0) round-trips to an empty permutation.
     #[test]
     fn permutation_empty() {
-        let cp = [0];
-        let ri: [usize; 0] = [];
+        let cp = [0i32];
+        let ri: [i32; 0] = [];
         let p = CscPattern::new(0, &cp, &ri).unwrap();
         let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
         run_elimination(&mut ws, true).unwrap();

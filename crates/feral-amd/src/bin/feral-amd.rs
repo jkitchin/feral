@@ -15,13 +15,13 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::ExitCode;
 
-use feral_amd::{amd_order_with_stats, AmdError, CscPattern};
+use feral_amd::{amd_order_with_stats, CscPattern, OrderingError};
 
-fn read_triplet(path: &Path) -> std::io::Result<(usize, Vec<usize>, Vec<usize>)> {
+fn read_triplet(path: &Path) -> std::io::Result<(usize, Vec<i32>, Vec<i32>)> {
     let f = File::open(path)?;
     let reader = BufReader::new(f);
-    let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
-    let mut max_idx = 0usize;
+    let mut set: BTreeSet<(i32, i32)> = BTreeSet::new();
+    let mut max_idx = 0i32;
     for line in reader.lines() {
         let line = line?;
         let line = line.trim();
@@ -32,32 +32,42 @@ fn read_triplet(path: &Path) -> std::io::Result<(usize, Vec<usize>, Vec<usize>)>
         if parts.len() < 2 {
             continue;
         }
-        let r: usize = parts[0].parse().map_err(|e| {
+        let r: i32 = parts[0].parse().map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad row: {}", e))
         })?;
-        let c: usize = parts[1].parse().map_err(|e| {
+        let c: i32 = parts[1].parse().map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad col: {}", e))
         })?;
+        if r < 0 || c < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "negative index in triplet",
+            ));
+        }
         max_idx = max_idx.max(r).max(c);
         set.insert((r, c));
         set.insert((c, r));
     }
-    let n = if set.is_empty() { 0 } else { max_idx + 1 };
-    let mut cols: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let n = if set.is_empty() {
+        0
+    } else {
+        (max_idx as usize) + 1
+    };
+    let mut cols: Vec<Vec<i32>> = vec![Vec::new(); n];
     for &(r, c) in &set {
-        cols[c].push(r);
+        cols[c as usize].push(r);
     }
     for col in &mut cols {
         col.sort();
     }
-    let mut col_ptr: Vec<usize> = Vec::with_capacity(n + 1);
+    let mut col_ptr: Vec<i32> = Vec::with_capacity(n + 1);
     col_ptr.push(0);
-    let mut row_idx: Vec<usize> = Vec::new();
+    let mut row_idx: Vec<i32> = Vec::new();
     for col in &cols {
         for &r in col {
             row_idx.push(r);
         }
-        col_ptr.push(row_idx.len());
+        col_ptr.push(row_idx.len() as i32);
     }
     Ok((n, col_ptr, row_idx))
 }
@@ -99,7 +109,7 @@ fn main() -> ExitCode {
             println!();
             ExitCode::SUCCESS
         }
-        Err(AmdError::IndexOverflow) => {
+        Err(OrderingError::IndexOverflow) => {
             eprintln!("amd: workspace exceeded i32::MAX");
             ExitCode::from(1)
         }

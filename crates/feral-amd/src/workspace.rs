@@ -2,7 +2,9 @@
 //!
 //! All arrays follow the faer / SuiteSparse naming convention and use
 //! signed `i32` so we can reserve negative values for sentinels via
-//! [`flip`]: `flip(x) = -2 - x`. API boundaries convert to `usize`.
+//! [`flip`]: `flip(x) = -2 - x`. The input pattern is also `i32`-
+//! indexed (per the ordering-crate contract), so workspace ingestion
+//! converts to `usize` only for Rust slice addressing.
 //!
 //! This module lands in Commit 3 of the Slice A plan
 //! (`dev/plans/ordering-amd-upgrade.md`). It builds the workspace
@@ -18,9 +20,8 @@
 // intentionally unused.
 #![allow(dead_code)]
 
-use crate::error::AmdError;
-use crate::pattern::CscPattern;
 use crate::AmdOptions;
+use feral_ordering_core::{CscPattern, OrderingError};
 
 /// Sentinel for "no index" in the `i32` arrays.
 pub(crate) const NONE: i32 = -1;
@@ -115,13 +116,13 @@ impl AmdWorkspace {
     pub(crate) fn new(
         pattern: &CscPattern<'_>,
         opts: &AmdOptions,
-    ) -> Result<AmdWorkspace, AmdError> {
+    ) -> Result<AmdWorkspace, OrderingError> {
         let n = pattern.n;
 
         // i32 addressing requires n < i32::MAX. The algorithm also
         // stores `pfree` as i32 via `pe[i]`, so iwlen must fit.
         if n >= i32::MAX as usize {
-            return Err(AmdError::IndexOverflow);
+            return Err(OrderingError::IndexOverflow);
         }
 
         // Count off-diagonal entries per column.
@@ -129,11 +130,12 @@ impl AmdWorkspace {
         let mut nzaat: usize = 0;
         #[allow(clippy::needless_range_loop)]
         for j in 0..n {
-            let start = pattern.col_ptr[j];
-            let end = pattern.col_ptr[j + 1];
+            let j_i32 = j as i32;
+            let start = pattern.col_ptr[j] as usize;
+            let end = pattern.col_ptr[j + 1] as usize;
             let mut cnt: usize = 0;
             for &r in &pattern.row_idx[start..end] {
-                if r != j {
+                if r != j_i32 {
                     cnt += 1;
                 }
             }
@@ -145,9 +147,9 @@ impl AmdWorkspace {
         let iwlen = nzaat
             .checked_add(nzaat / 5)
             .and_then(|s| s.checked_add(n))
-            .ok_or(AmdError::IndexOverflow)?;
+            .ok_or(OrderingError::IndexOverflow)?;
         if iwlen > i32::MAX as usize {
-            return Err(AmdError::IndexOverflow);
+            return Err(OrderingError::IndexOverflow);
         }
         // iw needs at least one slot even when n==0 so `pfree` is
         // addressable; we allocate exactly iwlen.
@@ -160,11 +162,12 @@ impl AmdWorkspace {
         #[allow(clippy::needless_range_loop)]
         for j in 0..n {
             pe[j] = pfree as i32;
-            let start = pattern.col_ptr[j];
-            let end = pattern.col_ptr[j + 1];
+            let j_i32 = j as i32;
+            let start = pattern.col_ptr[j] as usize;
+            let end = pattern.col_ptr[j + 1] as usize;
             for &r in &pattern.row_idx[start..end] {
-                if r != j {
-                    iw[pfree] = r as i32;
+                if r != j_i32 {
+                    iw[pfree] = r;
                     pfree += 1;
                 }
             }
@@ -252,7 +255,7 @@ impl AmdWorkspace {
 mod tests {
     use super::*;
 
-    fn pat<'a>(n: usize, cp: &'a [usize], ri: &'a [usize]) -> CscPattern<'a> {
+    fn pat<'a>(n: usize, cp: &'a [i32], ri: &'a [i32]) -> CscPattern<'a> {
         CscPattern::new(n, cp, ri).expect("valid test pattern")
     }
 
@@ -368,20 +371,20 @@ mod tests {
     #[test]
     fn arrow_200_hub_deferred() {
         let n = 200usize;
-        let mut cp: Vec<usize> = Vec::with_capacity(n + 1);
-        let mut ri: Vec<usize> = Vec::new();
+        let mut cp: Vec<i32> = Vec::with_capacity(n + 1);
+        let mut ri: Vec<i32> = Vec::new();
         cp.push(0);
         // col 0: diagonal + all spokes 1..n
         ri.push(0);
         for r in 1..n {
-            ri.push(r);
+            ri.push(r as i32);
         }
-        cp.push(ri.len());
+        cp.push(ri.len() as i32);
         // cols 1..n: diagonal + hub
         for j in 1..n {
             ri.push(0);
-            ri.push(j);
-            cp.push(ri.len());
+            ri.push(j as i32);
+            cp.push(ri.len() as i32);
         }
         let p = pat(n, &cp, &ri);
         let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
@@ -405,15 +408,15 @@ mod tests {
         // Band(20, 5): max degree = 10, well under n - 2 = 18.
         let n = 20usize;
         let b = 5usize;
-        let mut cp: Vec<usize> = vec![0];
-        let mut ri: Vec<usize> = Vec::new();
+        let mut cp: Vec<i32> = vec![0];
+        let mut ri: Vec<i32> = Vec::new();
         for j in 0..n {
             let lo = j.saturating_sub(b);
             let hi = (j + b + 1).min(n);
             for r in lo..hi {
-                ri.push(r);
+                ri.push(r as i32);
             }
-            cp.push(ri.len());
+            cp.push(ri.len() as i32);
         }
         let p = pat(n, &cp, &ri);
         let opts = AmdOptions {
@@ -427,8 +430,8 @@ mod tests {
 
     #[test]
     fn empty_pattern_ok() {
-        let cp = [0];
-        let ri: [usize; 0] = [];
+        let cp = [0i32];
+        let ri: [i32; 0] = [];
         let p = pat(0, &cp, &ri);
         let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
         assert_eq!(ws.n, 0);

@@ -9,19 +9,23 @@
 //! supervariable detection (Commit 10) are both live, so the
 //! ordering matches SuiteSparse / faer on the full oracle
 //! fixture suite.
+//!
+//! The public surface conforms to the FERAL ordering-crate
+//! contract (`dev/plans/ordering-crate-contract.md`). `CscPattern`,
+//! `OrderingStats`, `OrderingError`, and `CONTRACT_VERSION` are
+//! re-exported from `feral-ordering-core`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod algo;
-mod error;
-mod pattern;
 mod stats;
 mod workspace;
 
-pub use error::AmdError;
-pub use pattern::CscPattern;
+pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 pub use stats::AmdStats;
+
+use std::time::Instant;
 
 /// Tunable parameters for AMD ordering.
 ///
@@ -56,24 +60,51 @@ impl Default for AmdOptions {
 /// `P·A·Pᵀ` with `P[k] = perm[k]` produces less fill than the
 /// natural ordering. The input must be the full symmetric pattern
 /// (both halves present).
-pub fn amd_order(pattern: &CscPattern<'_>) -> Result<Vec<usize>, AmdError> {
+pub fn amd_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError> {
     amd_order_opts(pattern, &AmdOptions::default()).map(|(perm, _)| perm)
 }
 
-/// Compute an AMD ordering and return diagnostic counters.
+/// Compute an AMD ordering and return the crate-specific diagnostic
+/// counters.
 ///
-/// See [`amd_order`] and [`AmdStats`].
-pub fn amd_order_with_stats(pattern: &CscPattern<'_>) -> Result<(Vec<usize>, AmdStats), AmdError> {
+/// See [`amd_order`] and [`AmdStats`]. Callers that also need the
+/// shared [`OrderingStats`] (wall time, fill estimate) should use
+/// [`amd_order_full`] instead.
+pub fn amd_order_with_stats(
+    pattern: &CscPattern<'_>,
+) -> Result<(Vec<i32>, AmdStats), OrderingError> {
     amd_order_opts(pattern, &AmdOptions::default())
 }
 
 /// Compute an AMD ordering with explicit options.
 ///
-/// Returns `(perm, stats)`. See [`amd_order`] and [`AmdStats`].
+/// Returns `(perm, amd_stats)`. See [`amd_order_full`] for the
+/// contract-conforming three-tuple return.
 pub fn amd_order_opts(
     pattern: &CscPattern<'_>,
     opts: &AmdOptions,
-) -> Result<(Vec<usize>, AmdStats), AmdError> {
+) -> Result<(Vec<i32>, AmdStats), OrderingError> {
+    amd_order_full(pattern, opts).map(|(perm, _, amd_stats)| (perm, amd_stats))
+}
+
+/// Contract-conforming ordering producer.
+///
+/// Signature matches the shape every FERAL ordering crate must
+/// expose per `dev/plans/ordering-crate-contract.md`: input is a
+/// full-symmetric [`CscPattern`] and options; output is a
+/// three-tuple of `(perm, OrderingStats, crate-stats)`, with
+/// errors in [`OrderingError`].
+///
+/// `OrderingStats.time_us` is the wall-clock time of this call.
+/// `fill_estimate` and `flop_estimate` are left as `None` for AMD —
+/// the per-crate [`AmdStats`] carries `ndiv` / `nms_lu` / `nms_ldl`
+/// flop counters that may be surfaced here in a future revision
+/// without bumping the contract.
+pub fn amd_order_full(
+    pattern: &CscPattern<'_>,
+    opts: &AmdOptions,
+) -> Result<(Vec<i32>, OrderingStats, AmdStats), OrderingError> {
+    let t0 = Instant::now();
     let mut ws = workspace::AmdWorkspace::new(pattern, opts)?;
     let ndense = ws.ndense;
     let flops = algo::run_elimination(&mut ws, opts.aggressive)?;
@@ -81,7 +112,7 @@ pub fn amd_order_opts(
     let n_mass_elim = ws.n_mass_elim;
     let n_supervar_merge = ws.n_supervar_merge;
     let perm = algo::finalize_permutation(&mut ws);
-    let stats = AmdStats {
+    let amd_stats = AmdStats {
         ncmpa,
         n_clear_flag: 0,
         n_mass_elim,
@@ -91,5 +122,10 @@ pub fn amd_order_opts(
         nms_lu: flops.nms_lu.max(0.0) as u64,
         nms_ldl: flops.nms_ldl.max(0.0) as u64,
     };
-    Ok((perm, stats))
+    let ordering_stats = OrderingStats {
+        time_us: t0.elapsed().as_micros() as u64,
+        fill_estimate: None,
+        flop_estimate: None,
+    };
+    Ok((perm, ordering_stats, amd_stats))
 }

@@ -22,32 +22,32 @@ use feral_amd::{amd_order_with_stats, CscPattern};
 
 // ---- pattern generators (mirror the oracle harness) --------------
 
-fn csc_from_triples(n: usize, triples: &[(usize, usize)]) -> (Vec<usize>, Vec<usize>) {
+fn csc_from_triples(n: usize, triples: &[(usize, usize)]) -> (Vec<i32>, Vec<i32>) {
     let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
     for &(i, j) in triples {
         set.insert((i, j));
         set.insert((j, i));
     }
-    let mut cols: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut cols: Vec<Vec<i32>> = vec![Vec::new(); n];
     for &(r, c) in &set {
-        cols[c].push(r);
+        cols[c].push(r as i32);
     }
     for col in &mut cols {
         col.sort();
     }
-    let mut col_ptr: Vec<usize> = Vec::with_capacity(n + 1);
+    let mut col_ptr: Vec<i32> = Vec::with_capacity(n + 1);
     col_ptr.push(0);
-    let mut row_idx: Vec<usize> = Vec::new();
+    let mut row_idx: Vec<i32> = Vec::new();
     for col in &cols {
         for &r in col {
             row_idx.push(r);
         }
-        col_ptr.push(row_idx.len());
+        col_ptr.push(row_idx.len() as i32);
     }
     (col_ptr, row_idx)
 }
 
-fn arrow(n: usize) -> (Vec<usize>, Vec<usize>) {
+fn arrow(n: usize) -> (Vec<i32>, Vec<i32>) {
     let mut t = Vec::new();
     for i in 0..n {
         t.push((i, i));
@@ -58,7 +58,7 @@ fn arrow(n: usize) -> (Vec<usize>, Vec<usize>) {
     csc_from_triples(n, &t)
 }
 
-fn band(n: usize, b: usize) -> (Vec<usize>, Vec<usize>) {
+fn band(n: usize, b: usize) -> (Vec<i32>, Vec<i32>) {
     let mut t = Vec::new();
     for i in 0..n {
         t.push((i, i));
@@ -71,7 +71,7 @@ fn band(n: usize, b: usize) -> (Vec<usize>, Vec<usize>) {
     csc_from_triples(n, &t)
 }
 
-fn grid_2d(m: usize, n: usize) -> (Vec<usize>, Vec<usize>) {
+fn grid_2d(m: usize, n: usize) -> (Vec<i32>, Vec<i32>) {
     let idx = |r: usize, c: usize| r * n + c;
     let total = m * n;
     let mut t = Vec::new();
@@ -99,7 +99,7 @@ struct Oracle {
     ndiv: u64,
     nms_ldl: u64,
     nms_lu: u64,
-    perm: Vec<usize>,
+    perm: Vec<i32>,
 }
 
 fn parse_oracle(path: &Path) -> Oracle {
@@ -121,7 +121,7 @@ fn parse_oracle(path: &Path) -> Oracle {
     let ndiv: u64 = map["ndiv"].parse().expect("parse ndiv");
     let nms_ldl: u64 = map["nms_ldl"].parse().expect("parse nms_ldl");
     let nms_lu: u64 = map["nms_lu"].parse().expect("parse nms_lu");
-    let perm: Vec<usize> = map["perm"]
+    let perm: Vec<i32> = map["perm"]
         .split_whitespace()
         .map(|s| s.parse().expect("parse perm entry"))
         .collect();
@@ -143,7 +143,7 @@ fn oracle_path(name: &str) -> PathBuf {
         .join(format!("{}.txt", name))
 }
 
-fn run_fixture(name: &str, cp: &[usize], ri: &[usize]) {
+fn run_fixture(name: &str, cp: &[i32], ri: &[i32]) {
     let oracle = parse_oracle(&oracle_path(name));
     let pattern = CscPattern::new(oracle.n, cp, ri).expect("valid CSC");
     let (perm, stats) = amd_order_with_stats(&pattern).expect("amd_order");

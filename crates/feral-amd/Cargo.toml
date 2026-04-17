@@ -16,5 +16,6 @@ name = "feral_amd"
 # Commit 8. They live under `src/bin/` when added.
 
 [dependencies]
+feral-ordering-core = { path = "../feral-ordering-core", version = "0.1" }
 
 [dev-dependencies]

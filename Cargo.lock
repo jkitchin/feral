@@ -207,6 +207,9 @@ dependencies = [
 [[package]]
 name = "feral-amd"
 version = "0.1.0"
+dependencies = [
+ "feral-ordering-core",
+]
 
 [[package]]
 name = "feral-ordering-core"
