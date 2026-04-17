@@ -197,3 +197,45 @@ fn oracle_amd_demo_24() {
     let (cp, ri) = grid_2d(6, 4);
     run_fixture("amd_demo_24", &cp, &ri);
 }
+
+// ---- Slice B: mass elimination firing checks ---------------------
+// These assert that Commit 9's mass-elim branch is actually taken on
+// the patterns that exercise it. Tridiag + arrow variables repeatedly
+// see elen[i]==1 after their one elem == me absorbs them, so
+// n_mass_elim must be positive.
+
+#[test]
+fn mass_elim_fires_on_tridiag_10() {
+    let (cp, ri) = band(10, 1);
+    let pattern = CscPattern::new(10, &cp, &ri).unwrap();
+    let (_perm, stats) = amd_order_with_stats(&pattern).unwrap();
+    assert!(
+        stats.n_mass_elim > 0,
+        "tridiag_10 must trigger mass elimination (got {})",
+        stats.n_mass_elim
+    );
+}
+
+#[test]
+fn mass_elim_fires_on_band_20_3() {
+    let (cp, ri) = band(20, 3);
+    let pattern = CscPattern::new(20, &cp, &ri).unwrap();
+    let (_perm, stats) = amd_order_with_stats(&pattern).unwrap();
+    assert!(
+        stats.n_mass_elim > 0,
+        "band_20_3 must trigger mass elimination (got {})",
+        stats.n_mass_elim
+    );
+}
+
+#[test]
+fn mass_elim_fires_on_grid_7x7() {
+    let (cp, ri) = grid_2d(7, 7);
+    let pattern = CscPattern::new(49, &cp, &ri).unwrap();
+    let (_perm, stats) = amd_order_with_stats(&pattern).unwrap();
+    assert!(
+        stats.n_mass_elim > 0,
+        "grid_7x7 must trigger mass elimination (got {})",
+        stats.n_mass_elim
+    );
+}

@@ -91,6 +91,11 @@ pub(crate) struct AmdWorkspace {
     pub(crate) nel: usize,
     /// Dense-deferred supervariable count.
     pub(crate) ndense: i32,
+    /// Variables folded into a concurrent pivot by mass elimination.
+    pub(crate) n_mass_elim: u32,
+    /// Supervariable merges detected during indistinguishable-variable
+    /// consolidation.
+    pub(crate) n_supervar_merge: u32,
 }
 
 impl AmdWorkspace {
@@ -237,6 +242,8 @@ impl AmdWorkspace {
             ncmpa: 0,
             nel,
             ndense,
+            n_mass_elim: 0,
+            n_supervar_merge: 0,
         })
     }
 }

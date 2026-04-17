@@ -298,18 +298,21 @@ pub(crate) fn create_element(
 ///    updated degree is clamped by `min(degree[i], deg)`
 ///    ("monotone cap"). The element list is re-ordered so `me` sits
 ///    at position `p1`.
-/// 3. Bump `degree[me] = degme`, `lemax = max(lemax, degme)`,
+/// 3. **Mass elimination** (`amd.rs:436-444`). A member `i` whose
+///    only remaining element is `me` (`elen[i] == 1`) and whose
+///    surviving variable neighbourhood is empty (`p3 == pn`) will
+///    pivot concurrently with `me`. Fold its supervariable count
+///    into `nvpiv` / `nel` and deduct from `degme`.
+/// 4. Bump `degree[me] = degme`, `lemax = max(lemax, degme)`,
 ///    `wflg += lemax`, `wflg = clear_flag(...)`.
-/// 4. **Re-insert** (`amd.rs:516-537`): each surviving variable's
+/// 5. **Re-insert** (`amd.rs:516-537`): each surviving variable's
 ///    updated degree is pushed back onto `head[deg]` LIFO and
 ///    `mindeg` is lowered if needed.
-/// 5. **Me bookkeeping** (`amd.rs:538-546`): restore `nv[me] =
+/// 6. **Me bookkeeping** (`amd.rs:538-546`): restore `nv[me] =
 ///    nvpiv`, compact `me`'s var list to `[pme1, p)`, trim `pfree`.
-/// 6. **Flop counters** (`amd.rs:547-557`).
+/// 7. **Flop counters** (`amd.rs:547-557`).
 ///
-/// Mass elimination and supervariable detection are Slice B —
-/// until those land, the "mass elim" shortcut at `amd.rs:436-444`
-/// is not taken (we always fall into the else branch).
+/// Supervariable detection is Slice B — Commit 10.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_step(
     ws: &mut AmdWorkspace,
@@ -321,6 +324,9 @@ pub(crate) fn finalize_step(
     elenme: i32,
     aggressive: bool,
 ) -> StepFlops {
+    let mut degme = degme;
+    let mut nvpiv = nvpiv;
+
     // Pass 1: seed w[e] for every element in each member's list.
     for pme in pme1..=pme2_incl {
         let i = ws.iw[pme] as usize;
@@ -342,10 +348,10 @@ pub(crate) fn finalize_step(
         }
     }
 
-    // Pass 2: approximate degree + (optionally) aggressive absorption.
-    // Mass elimination would decrement degme here; Slice A leaves it
-    // unchanged because we never take the mass-elim branch.
-    let degme_i32 = degme as i32;
+    // Pass 2: approximate degree, (optionally) aggressive absorption,
+    // and mass elimination (faer amd.rs:436-444). `degme` and `nvpiv`
+    // are mutated when mass-elim fires; the post-loop degree/flop
+    // bookkeeping uses the updated values.
     for pme in pme1..=pme2_incl {
         let i = ws.iw[pme] as usize;
         let p1 = ws.pe[i] as usize;
@@ -401,28 +407,37 @@ pub(crate) fn finalize_step(
             }
         }
 
-        // Mass elimination (Slice B) — the `elen[i] == 1 && p3 == pn`
-        // branch at amd.rs:436-444 would fold i into me here. Until
-        // that lands we always take the general path below, which
-        // remains correct.
-        ws.degree[i] = ws.degree[i].min(deg as i32);
-        // Swap-dance to put `me` at the head of i's element list.
-        if p1 != pn {
-            ws.iw[pn] = ws.iw[p3];
+        if ws.elen[i] == 1 && p3 == pn {
+            // Mass elimination: i's only element is `me` and it has
+            // no surviving outside variables, so it will pivot
+            // concurrently with me. Fold its supervariable count
+            // into nvpiv / nel and drop it from degme.
+            ws.pe[i] = flip(me as i32);
+            let nvi = -ws.nv[i];
+            debug_assert!(nvi >= 0);
+            degme -= nvi as usize;
+            nvpiv += nvi;
+            ws.nel += nvi as usize;
+            ws.nv[i] = 0;
+            ws.elen[i] = NONE;
+            ws.n_mass_elim += 1;
         } else {
-            // p1 == pn means i's list is empty after pruning and the
-            // variable pass. The swap positions collapse onto p1.
-            // iw[pn] = iw[p3] would be a self-assign; skip it and
-            // fall through to set iw[p1] = me.
+            ws.degree[i] = ws.degree[i].min(deg as i32);
+            // Swap-dance to put `me` at the head of i's element list.
+            if p1 != pn {
+                ws.iw[pn] = ws.iw[p3];
+            }
+            if p3 != p1 {
+                ws.iw[p3] = ws.iw[p1];
+            }
+            ws.iw[p1] = me as i32;
+            ws.len[i] = (pn - p1 + 1) as i32;
         }
-        if p3 != p1 {
-            ws.iw[p3] = ws.iw[p1];
-        }
-        ws.iw[p1] = me as i32;
-        ws.len[i] = (pn - p1 + 1) as i32;
     }
 
-    // Step bookkeeping (amd.rs:463-466).
+    // Step bookkeeping (amd.rs:463-466). degme may have been reduced
+    // by mass elimination above.
+    let degme_i32 = degme as i32;
     ws.degree[me] = degme_i32;
     if degme_i32 > ws.lemax {
         ws.lemax = degme_i32;

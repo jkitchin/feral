@@ -5,12 +5,9 @@
 //! README and `dev/plans/ordering-amd-upgrade.md` for scope and
 //! references.
 //!
-//! Slice A is complete: the public API runs the full pipeline
-//! (workspace init → elimination loop with inline GC → assembly-
-//! tree postorder → supervariable expansion). Mass elimination and
-//! supervariable detection (Slice B) are not yet active; orderings
-//! remain correct bijections and match faer's output on fixtures
-//! where Slice A-only choices coincide with the full algorithm.
+//! Slice A is complete and mass elimination (Commit 9 of Slice B)
+//! is active. Supervariable detection (Commit 10) is the final
+//! piece before exact-match against the SuiteSparse oracle.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -80,12 +77,14 @@ pub fn amd_order_opts(
     let ndense = ws.ndense;
     let flops = algo::run_elimination(&mut ws, opts.aggressive)?;
     let ncmpa = ws.ncmpa;
+    let n_mass_elim = ws.n_mass_elim;
+    let n_supervar_merge = ws.n_supervar_merge;
     let perm = algo::finalize_permutation(&mut ws);
     let stats = AmdStats {
         ncmpa,
         n_clear_flag: 0,
-        n_mass_elim: 0,
-        n_supervar_merge: 0,
+        n_mass_elim,
+        n_supervar_merge,
         n_dense_deferred: ndense.max(0) as u32,
         ndiv: flops.ndiv.max(0.0) as u64,
         nms_lu: flops.nms_lu.max(0.0) as u64,
