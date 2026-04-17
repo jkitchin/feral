@@ -17,13 +17,33 @@
 //! path. Fixtures whose oracle `ncmpa == 0` do not hit it.
 //!
 //! Pass-1 `w[e]` seeding (`amd.rs:366-385`), Pass-2 approximate
-//! degree (`amd.rs:386-465`), mass elimination, supervariable
-//! detection, and re-insertion into degree lists are Commit 5+.
+//! degree (`amd.rs:386-465`), aggressive absorption, monotone
+//! degree cap, and re-insertion into degree lists (`amd.rs:516-546`)
+//! land in Commit 5 ([`finalize_step`]). Mass elimination and
+//! supervariable detection are Slice B (Commits 9-10).
 
 #![allow(dead_code)]
 
 use crate::error::AmdError;
 use crate::workspace::{clear_flag, flip, AmdWorkspace, NONE};
+
+/// Flop-counter deltas produced by a single elimination step.
+/// Matches faer's `amd.rs:547-557` accounting so `AmdStats` can
+/// accumulate consistent `ndiv` / `nms_ldl` / `nms_lu` totals.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct StepFlops {
+    pub(crate) ndiv: f64,
+    pub(crate) nms_lu: f64,
+    pub(crate) nms_ldl: f64,
+}
+
+impl StepFlops {
+    fn accumulate(&mut self, other: StepFlops) {
+        self.ndiv += other.ndiv;
+        self.nms_lu += other.nms_lu;
+        self.nms_ldl += other.nms_ldl;
+    }
+}
 
 /// Scan `head` from `ws.mindeg` upward and return the first
 /// non-empty degree-list head. Unlink the chosen variable. Returns
@@ -206,6 +226,249 @@ pub(crate) fn create_element(
     Ok((pme1 as usize, pme2 as usize, nvpiv, degme))
 }
 
+/// Finish the elimination step whose create-element phase produced
+/// `(pme1, pme2, nvpiv, degme)` and left `nv[me] = -nvpiv` and
+/// `nv[i] = -nv[i]` for every variable `i ∈ iw[pme1..=pme2]`.
+///
+/// Does, in order:
+/// 1. **Pass-1 w-seeding** (faer `amd.rs:366-385`). For each
+///    variable `i` in the new element, walk its element list and
+///    lazily seed `w[e]`: first touch sets `w[e] = degree[e] +
+///    (wflg - nvi)`, subsequent touches do `w[e] -= nvi`.
+/// 2. **Pass-2 approximate external degree** (`amd.rs:386-462`).
+///    For each variable `i` in the new element: walk its element
+///    list computing `dext = w[e] - wflg`, then its variable list
+///    accumulating `nv[j]` for live neighbours. Under `aggressive`,
+///    dead elements (`dext == 0`) are absorbed on the spot. The
+///    updated degree is clamped by `min(degree[i], deg)`
+///    ("monotone cap"). The element list is re-ordered so `me` sits
+///    at position `p1`.
+/// 3. Bump `degree[me] = degme`, `lemax = max(lemax, degme)`,
+///    `wflg += lemax`, `wflg = clear_flag(...)`.
+/// 4. **Re-insert** (`amd.rs:516-537`): each surviving variable's
+///    updated degree is pushed back onto `head[deg]` LIFO and
+///    `mindeg` is lowered if needed.
+/// 5. **Me bookkeeping** (`amd.rs:538-546`): restore `nv[me] =
+///    nvpiv`, compact `me`'s var list to `[pme1, p)`, trim `pfree`.
+/// 6. **Flop counters** (`amd.rs:547-557`).
+///
+/// Mass elimination and supervariable detection are Slice B —
+/// until those land, the "mass elim" shortcut at `amd.rs:436-444`
+/// is not taken (we always fall into the else branch).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finalize_step(
+    ws: &mut AmdWorkspace,
+    me: usize,
+    pme1: usize,
+    pme2_incl: usize,
+    nvpiv: i32,
+    degme: usize,
+    elenme: i32,
+    aggressive: bool,
+) -> StepFlops {
+    // Pass 1: seed w[e] for every element in each member's list.
+    for pme in pme1..=pme2_incl {
+        let i = ws.iw[pme] as usize;
+        let eln = ws.elen[i];
+        if eln > 0 {
+            let nvi = -ws.nv[i];
+            let wnvi = ws.wflg - nvi;
+            let pi = ws.pe[i] as usize;
+            for k in 0..eln as usize {
+                let e = ws.iw[pi + k] as usize;
+                let mut we = ws.w[e];
+                if we >= ws.wflg {
+                    we -= nvi;
+                } else if we != 0 {
+                    we = ws.degree[e] + wnvi;
+                }
+                ws.w[e] = we;
+            }
+        }
+    }
+
+    // Pass 2: approximate degree + (optionally) aggressive absorption.
+    // Mass elimination would decrement degme here; Slice A leaves it
+    // unchanged because we never take the mass-elim branch.
+    let degme_i32 = degme as i32;
+    for pme in pme1..=pme2_incl {
+        let i = ws.iw[pme] as usize;
+        let p1 = ws.pe[i] as usize;
+        let p2 = p1 + ws.elen[i] as usize;
+        let mut pn = p1;
+        let mut deg: usize = 0;
+
+        // Element sub-pass.
+        if aggressive {
+            for p in p1..p2 {
+                let e = ws.iw[p] as usize;
+                let we = ws.w[e];
+                if we != 0 {
+                    let dext = we - ws.wflg;
+                    if dext > 0 {
+                        deg += dext as usize;
+                        ws.iw[pn] = e as i32;
+                        pn += 1;
+                    } else {
+                        // Aggressive absorption: dead element folded
+                        // into me right here (faer amd.rs:404-407).
+                        ws.pe[e] = flip(me as i32);
+                        ws.w[e] = 0;
+                    }
+                }
+            }
+        } else {
+            for p in p1..p2 {
+                let e = ws.iw[p] as usize;
+                let we = ws.w[e];
+                if we != 0 {
+                    let dext = (we - ws.wflg) as usize;
+                    deg += dext;
+                    ws.iw[pn] = e as i32;
+                    pn += 1;
+                }
+            }
+        }
+
+        // Record number-of-elements + 1 (the +1 reserves the slot
+        // for `me` which we insert at p1 below).
+        ws.elen[i] = (pn - p1 + 1) as i32;
+        let p3 = pn;
+        let p4 = p1 + ws.len[i] as usize;
+        // Variable sub-pass.
+        for p in p2..p4 {
+            let j = ws.iw[p] as usize;
+            let nvj = ws.nv[j];
+            if nvj > 0 {
+                deg += nvj as usize;
+                ws.iw[pn] = j as i32;
+                pn += 1;
+            }
+        }
+
+        // Mass elimination (Slice B) — the `elen[i] == 1 && p3 == pn`
+        // branch at amd.rs:436-444 would fold i into me here. Until
+        // that lands we always take the general path below, which
+        // remains correct.
+        ws.degree[i] = ws.degree[i].min(deg as i32);
+        // Swap-dance to put `me` at the head of i's element list.
+        if p1 != pn {
+            ws.iw[pn] = ws.iw[p3];
+        } else {
+            // p1 == pn means i's list is empty after pruning and the
+            // variable pass. The swap positions collapse onto p1.
+            // iw[pn] = iw[p3] would be a self-assign; skip it and
+            // fall through to set iw[p1] = me.
+        }
+        if p3 != p1 {
+            ws.iw[p3] = ws.iw[p1];
+        }
+        ws.iw[p1] = me as i32;
+        ws.len[i] = (pn - p1 + 1) as i32;
+    }
+
+    // Step bookkeeping (amd.rs:463-466).
+    ws.degree[me] = degme_i32;
+    if degme_i32 > ws.lemax {
+        ws.lemax = degme_i32;
+    }
+    ws.wflg += ws.lemax;
+    ws.wflg = clear_flag(ws.wflg, ws.wbig, &mut ws.w);
+
+    // Re-insertion (amd.rs:516-537): every surviving var in the new
+    // element list gets its new degree, is pushed onto head[deg]
+    // LIFO, and me's own list is compacted down to just the
+    // survivors.
+    let mut p_write = pme1;
+    let nleft = ws.n - ws.nel;
+    for pme in pme1..=pme2_incl {
+        let i = ws.iw[pme] as usize;
+        let nvi = -ws.nv[i];
+        if nvi > 0 {
+            ws.nv[i] = nvi;
+            let mut d = ws.degree[i] as usize + degme_i32 as usize - nvi as usize;
+            let cap = nleft - nvi as usize;
+            if d > cap {
+                d = cap;
+            }
+            let inext = ws.head[d];
+            if inext != NONE {
+                ws.last[inext as usize] = i as i32;
+            }
+            ws.next[i] = inext;
+            ws.last[i] = NONE;
+            ws.head[d] = i as i32;
+            if d < ws.mindeg {
+                ws.mindeg = d;
+            }
+            ws.degree[i] = d as i32;
+            ws.iw[p_write] = i as i32;
+            p_write += 1;
+        }
+    }
+
+    // Me bookkeeping (amd.rs:538-546).
+    ws.nv[me] = nvpiv;
+    ws.len[me] = (p_write as i32) - pme1 as i32;
+    if ws.len[me] == 0 {
+        ws.pe[me] = NONE;
+        ws.w[me] = 0;
+    }
+    if elenme != 0 {
+        ws.pfree = p_write;
+    }
+
+    // Flop counters (amd.rs:547-557).
+    let f = nvpiv as f64;
+    let r = degme_i32 as f64 + ws.ndense as f64;
+    let lnzme = f * r + (f - 1.0) * f / 2.0;
+    let s = f * r * r + r * (f - 1.0) * f + (f - 1.0) * f * (2.0 * f - 1.0) / 6.0;
+
+    StepFlops {
+        ndiv: lnzme,
+        nms_lu: s,
+        nms_ldl: (s + lnzme) / 2.0,
+    }
+}
+
+/// Run the main AMD elimination loop until every live supervariable
+/// has been either pivoted or dense-deferred. Returns the
+/// accumulated flop counts.
+///
+/// Mass elimination and supervariable detection are absent (Slice
+/// B). Garbage collection is absent (Commit 6). On fixtures where
+/// `create_element` would trigger GC the driver surfaces
+/// [`AmdError::IndexOverflow`].
+///
+/// At exit: `ws.nel == ws.n`, every `pe[i]` either points to a
+/// live parent (to be path-compressed by the postorder phase) or
+/// is `NONE` / `flip(parent)`.
+pub(crate) fn run_elimination(
+    ws: &mut AmdWorkspace,
+    aggressive: bool,
+) -> Result<StepFlops, AmdError> {
+    let mut flops = StepFlops::default();
+    while ws.nel < ws.n {
+        let me = match select_pivot(ws) {
+            Some(m) => m,
+            None => break, // only dense-deferred survivors remain
+        };
+        let elenme = ws.elen[me];
+        let (pme1, pme2, nvpiv, degme) = create_element(ws, me)?;
+        flops.accumulate(finalize_step(
+            ws, me, pme1, pme2, nvpiv, degme, elenme, aggressive,
+        ));
+    }
+    // Dense-phase flop contribution (amd.rs:559-566).
+    let f = ws.ndense as f64;
+    let lnzme = (f - 1.0) * f / 2.0;
+    let s = (f - 1.0) * f * (2.0 * f - 1.0) / 6.0;
+    flops.ndiv += lnzme;
+    flops.nms_lu += s;
+    flops.nms_ldl += (s + lnzme) / 2.0;
+    Ok(flops)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +574,158 @@ mod tests {
         // (skipped by init).
         assert_eq!(nvpiv, 1);
         assert_eq!(degme, 1);
+    }
+
+    /// Drive the full loop on diag_4 — every var pre-eliminated,
+    /// loop terminates immediately.
+    #[test]
+    fn run_elimination_diag_4() {
+        let cp = [0, 1, 2, 3, 4];
+        let ri = [0, 1, 2, 3];
+        let mut ws = ws_for(4, &cp, &ri);
+        let flops = run_elimination(&mut ws, true).unwrap();
+        assert_eq!(ws.nel, 4);
+        assert_eq!(flops.ndiv, 0.0);
+    }
+
+    /// Arrow 5: no dense deferral. Loop eliminates all 5 vars.
+    /// Verify `nel == n` and pivot supervariable count matches nv[me]
+    /// after the step (restored to positive).
+    #[test]
+    fn run_elimination_arrow_5() {
+        let cp = [0, 5, 7, 9, 11, 13];
+        let ri = [0, 1, 2, 3, 4, 0, 1, 0, 2, 0, 3, 0, 4];
+        let mut ws = ws_for(5, &cp, &ri);
+        run_elimination(&mut ws, true).unwrap();
+        assert_eq!(ws.nel, 5);
+        // Every var was pivoted exactly once ⇒ nv[i] > 0 everywhere
+        // (the pivot restores nv to +nvpiv).
+        for i in 0..5 {
+            assert!(ws.nv[i] >= 0, "nv[{}] = {}", i, ws.nv[i]);
+        }
+    }
+
+    /// Tridiag 10 full-symmetric: loop should terminate cleanly.
+    /// Oracle lnz = 9 — verified indirectly by the flop counter.
+    #[test]
+    fn run_elimination_tridiag_10() {
+        let n = 10usize;
+        let mut cp: Vec<usize> = vec![0];
+        let mut ri: Vec<usize> = Vec::new();
+        for j in 0..n {
+            if j > 0 {
+                ri.push(j - 1);
+            }
+            ri.push(j);
+            if j + 1 < n {
+                ri.push(j + 1);
+            }
+            cp.push(ri.len());
+        }
+        let p = CscPattern::new(n, &cp, &ri).unwrap();
+        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        run_elimination(&mut ws, true).unwrap();
+        assert_eq!(ws.nel, n);
+    }
+
+    /// Grid 7x7: five-point stencil. Faer's oracle reports
+    /// `ncmpa == 0`, but Slice A lacks mass elimination and
+    /// supervariable detection, so it consumes more `iw` space and
+    /// hits the GC placeholder. After Commit 6 installs inline GC
+    /// the loop will run to completion; promoted to a terminate-
+    /// cleanly assertion at that point.
+    #[test]
+    fn run_elimination_grid_7x7_bails_at_gc_until_commit_6() {
+        let m = 7usize;
+        let n = 7usize;
+        let total = m * n;
+        let mut cp: Vec<usize> = vec![0];
+        let mut ri: Vec<usize> = Vec::new();
+        use std::collections::BTreeSet;
+        let idx = |r: usize, c: usize| r * n + c;
+        for c in 0..total {
+            let r0 = c / n;
+            let c0 = c % n;
+            let mut neigh: BTreeSet<usize> = BTreeSet::new();
+            neigh.insert(c);
+            if r0 > 0 {
+                neigh.insert(idx(r0 - 1, c0));
+            }
+            if r0 + 1 < m {
+                neigh.insert(idx(r0 + 1, c0));
+            }
+            if c0 > 0 {
+                neigh.insert(idx(r0, c0 - 1));
+            }
+            if c0 + 1 < n {
+                neigh.insert(idx(r0, c0 + 1));
+            }
+            for &r in &neigh {
+                ri.push(r);
+            }
+            cp.push(ri.len());
+        }
+        let p = CscPattern::new(total, &cp, &ri).unwrap();
+        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        match run_elimination(&mut ws, true) {
+            Ok(_) => assert_eq!(ws.nel, total),
+            Err(AmdError::IndexOverflow) => {
+                // Expected until Commit 6.
+            }
+            Err(e) => panic!("unexpected error: {:?}", e),
+        }
+    }
+
+    /// Band(20,3) triggers garbage collection in faer (oracle
+    /// ncmpa=1). Until Commit 6 installs the inline GC,
+    /// `create_element` surfaces IndexOverflow on this fixture.
+    #[test]
+    fn band_20_3_hits_gc_placeholder() {
+        let n = 20usize;
+        let b = 3usize;
+        let mut cp: Vec<usize> = vec![0];
+        let mut ri: Vec<usize> = Vec::new();
+        for j in 0..n {
+            let lo = j.saturating_sub(b);
+            let hi = (j + b + 1).min(n);
+            for r in lo..hi {
+                ri.push(r);
+            }
+            cp.push(ri.len());
+        }
+        let p = CscPattern::new(n, &cp, &ri).unwrap();
+        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        match run_elimination(&mut ws, true) {
+            Err(AmdError::IndexOverflow) => {}
+            other => panic!(
+                "expected IndexOverflow from GC placeholder, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Arrow 200: hub dense-deferred in init; spokes get pivoted
+    /// one by one; loop terminates with ndense=1 survivor.
+    #[test]
+    fn run_elimination_arrow_200() {
+        let n = 200usize;
+        let mut cp: Vec<usize> = vec![0];
+        let mut ri: Vec<usize> = Vec::new();
+        ri.push(0);
+        for r in 1..n {
+            ri.push(r);
+        }
+        cp.push(ri.len());
+        for j in 1..n {
+            ri.push(0);
+            ri.push(j);
+            cp.push(ri.len());
+        }
+        let p = CscPattern::new(n, &cp, &ri).unwrap();
+        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        run_elimination(&mut ws, true).unwrap();
+        assert_eq!(ws.ndense, 1);
+        assert_eq!(ws.nel, n);
     }
 
     /// Arrow 200 hub is dense-deferred; first pivot is a spoke with

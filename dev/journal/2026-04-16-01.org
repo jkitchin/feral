@@ -190,3 +190,58 @@ Deferred to Commit 5 (next):
   lists (=amd.rs:516-546=).
 - After Commit 5 the outer loop terminates on fixtures that don't
   trigger GC.
+
+* 01:50 :commit-5:pass-1:pass-2:aggressive-absorption:re-insertion:
+Landed Commit 5. Extends =algo.rs= with:
+
+- =StepFlops= struct (ndiv / nms_lu / nms_ldl, f64) and
+  =accumulate= helper.
+- =finalize_step(&mut ws, me, pme1, pme2_incl, nvpiv, degme,
+  elenme, aggressive)= — the full post-element-construction body
+  (=amd.rs:366-557=):
+  1. Pass-1 =w[e]= lazy seeding per variable/element touch.
+  2. Pass-2 approximate external degree with two sub-passes
+     (element list then variable list). Aggressive variant absorbs
+     dead elements (=dext == 0=) on the spot (=amd.rs:404-407=);
+     non-aggressive variant just accumulates. Both end with
+     =degree[i] = min(degree[i], deg)= (monotone cap) and the
+     =me=-to-front swap dance at =iw[p1]=.
+  3. Step bookkeeping: =degree[me] = degme=, =lemax= update,
+     =wflg += lemax=, =clear_flag=.
+  4. Re-insertion (=amd.rs:516-537=): survivor vars pushed onto
+     =head[d]= LIFO with =d = min(degree[i] + degme - nvi, nleft -
+     nvi)=; =mindeg= lowered if needed.
+  5. Me bookkeeping (=amd.rs:538-546=): =nv[me] = nvpiv= restored,
+     =len[me]= compacted, =pfree= trimmed when =elenme != 0=.
+  6. Flop counters via faer's =lnzme= / =s= formulas.
+  Mass elimination's degme decrement is inert here (never fires;
+  Slice B).
+- =run_elimination(&mut ws, aggressive) -> Result<StepFlops>= —
+  driver loop: select_pivot → create_element → finalize_step until
+  =nel == n= or all survivors are dense-deferred. Accumulates
+  step flops plus the dense-phase contribution (=amd.rs:559-566=).
+
+Evidence:
+- =cargo test -p feral-amd= → 29 passed, 0 failed. Five new
+  end-to-end tests in =algo::tests=:
+  * =run_elimination_diag_4= — every var pre-eliminated, zero
+    flops.
+  * =run_elimination_arrow_5= — all 5 eliminated, nv[i] ≥ 0 post.
+  * =run_elimination_tridiag_10= — clean termination at n=10.
+  * =run_elimination_arrow_200= — ndense=1, nel=200 post.
+  * =run_elimination_grid_7x7_bails_at_gc_until_commit_6= — faer
+    oracle says ncmpa=0, but Slice A (no mass elim / no supervar)
+    consumes more iw space and hits the GC placeholder. Test
+    tolerates either outcome; Commit 6 tightens to Ok branch.
+  * =band_20_3_hits_gc_placeholder= — oracle ncmpa=1, confirms the
+    IndexOverflow bail fires.
+- =cargo clippy -p feral-amd --all-targets -- -D warnings= clean
+  (one scoped =#[allow(clippy::too_many_arguments)]= on
+  =finalize_step=, which takes 8 args directly mirroring faer's
+  locals; splitting would hide the structure).
+
+Next: Commit 6 — inline garbage collection (=amd.rs:289-338=).
+Replace the =IndexOverflow= bail inside =create_element=. Promote
+the grid_7x7 test to assert clean termination post-GC. Oracle
+match (T4) becomes tractable after Commit 7 (postorder/expand)
+emits a permutation.
