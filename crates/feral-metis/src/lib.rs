@@ -23,6 +23,12 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+// `graph` is unused by the stub `metis_order_full` but tested
+// directly; M2 (coarsening) will consume it. Dead-code lint is
+// suppressed at the module root until then.
+#[allow(dead_code)]
+mod graph;
+
 pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 
 /// Tunable parameters for METIS nested-dissection ordering.
