@@ -29,6 +29,8 @@
 #[allow(dead_code)]
 mod coarsen;
 #[allow(dead_code)]
+mod fm_refine;
+#[allow(dead_code)]
 mod graph;
 #[allow(dead_code)]
 mod initial_partition;
