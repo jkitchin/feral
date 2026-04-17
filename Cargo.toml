@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/feral-amd"]
+resolver = "2"
+
 [package]
 name = "feral"
 version = "0.1.0"

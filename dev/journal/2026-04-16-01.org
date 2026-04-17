@@ -1,0 +1,46 @@
+#+TITLE: Session Journal 2026-04-16-01
+#+STARTUP: overview
+
+* 00:00 :plan:amd:ordering:
+Revised =dev/plans/ordering-amd-upgrade.md= twice under
+expert-panel review (faer-expert, spral-expert, Explore, Plan).
+Round 1 closed 13 algorithmic corrections against faer's in-tree
+AMD port (iwlen formula, dense threshold, mark overflow, mass
+elimination, two-pass w[e], hash contents, absorption placement,
+postorder, supervariable expansion, error type, LIFO tie-break).
+Round 2 added 14 more items covering API-break mitigation,
+oracle precondition, slice split, rollback rule, property +
+differential testing, telemetry struct, and i32 boundary assert.
+Panel re-review: READY WITH MINOR CAVEATS.
+
+Third revision pivoted scope: this is no longer a replacement for
+feral's =src/ordering/amd.rs=. It is a standalone workspace-member
+crate =crates/feral-amd= with its own input type, CLI, and bench
+harness. Feral is untouched. Integration into feral is deferred to
+a future =ordering-integration.md= once sibling crates (METIS,
+SCOTCH, KaHIP) exist.
+
+* 00:10 :commit-1:scaffolding:
+Landed Commit 1 scaffolding:
+- Root =Cargo.toml= gains =[workspace]= with members =[".",
+  "crates/feral-amd"]= and resolver 2.
+- New crate at =crates/feral-amd/= with README, Cargo.toml, and
+  src/ split into =lib.rs= (public API stubs returning
+  =AmdError::NotImplemented=), =pattern.rs= (slice-borrowed
+  =CscPattern= with validated constructor), =error.rs= (=AmdError=
+  enum), =stats.rs= (=AmdStats= counters).
+- No runtime dependencies; =#![forbid(unsafe_code)]=,
+  =#![deny(missing_docs)]=.
+
+Evidence:
+- =cargo build -p feral-amd= clean.
+- =cargo test -p feral-amd=: 7 passed (pattern validation).
+- =cargo clippy -p feral-amd -- -D warnings=: clean.
+- =cargo test --lib -p feral=: 93 passed (feral unchanged).
+
+Deferred to later commits:
+- Bin targets (Commit 8).
+- AAT preprocessing (input is required full-symmetric; no aat
+  path lands until a caller needs it).
+- Oracle fixtures under =tests/data/amd_oracle/= (Commit 2,
+  blocker before algorithm code).
