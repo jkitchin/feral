@@ -4,6 +4,25 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-17) — feral-amd standalone crate
+
+- New workspace member `crates/feral-amd`: clean-room Approximate
+  Minimum Degree (AMD) fill-reducing ordering, Amestoy-Davis-Duff
+  quotient graph variant. Full Slice A (correctness) and Slice B
+  (mass elimination + supervariable detection) landed under
+  `dev/plans/ordering-amd-upgrade.md`.
+- Public API: `amd_order`, `amd_order_with_stats`, `amd_order_opts`;
+  `CscPattern`, `AmdOptions`, `AmdStats`, `AmdError`.
+- Binaries: `feral-amd` (triplet-file CLI) and `feral-amd-bench`
+  (arrow/band/grid fixture suite).
+- External-oracle match: byte-for-byte agreement with the
+  SuiteSparse AMD Rust crate (`amd` 0.2.2) on the pinned
+  `tests/data/amd_oracle/*.txt` fixtures
+  (diag_4, tridiag_10, arrow_5, arrow_200, band_20_3, grid_7x7,
+  amd_demo_24), covering permutation and flop counters.
+- Not yet integrated into `feral`. Integration is deferred to
+  `dev/plans/ordering-integration.md`.
+
 ### Known issues (Phase 2 in progress)
 
 - **The sparse path produces catastrophically wrong residuals on
