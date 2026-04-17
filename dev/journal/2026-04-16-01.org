@@ -139,3 +139,54 @@ Next: Commit 4 — element construction + standard absorption
 (~300 lines). Pass-1 of approximate degree initializes w[e]
 lazily per element touch; standard absorption fires at the end
 of each knt1 iter (=amd.rs:355-358=).
+
+* 01:05 :commit-4:create-element:standard-absorption:
+Landed Commit 4. New module =crates/feral-amd/src/algo.rs= (~280
+lines incl. 6 unit tests):
+
+- =select_pivot(&mut ws)= — faer =amd.rs:220-235=. Linear scan
+  from =ws.mindeg= upward, return LIFO head of first non-empty
+  bucket, unlink. Returns =None= when all remaining vars were
+  dense-deferred in init and the outer loop should stop.
+- =create_element(&mut ws, me) -> Result<(pme1, pme2, nvpiv, degme)>=
+  — faer =amd.rs:236-366=.
+  * =elenme == 0= branch: in-place compaction at =pe[me]= with
+    =pme2= starting at =pme1 - 1= and advancing per live neighbor.
+  * =elenme > 0= branch: out-of-place build at =ws.pfree=, walking
+    every element =e= in =me='s list, then the variable tail
+    (=knt1 = elenme + 1= sentinel). Standard absorption fires at
+    the end of each =knt1= iter: =pe[e] = flip(me); w[e] = 0= for
+    =e != me= (=amd.rs:355-358=).
+  * Unlinks every newly-absorbed supervariable from its degree
+    list via =last/next/head[degree[i]]=.
+  * Final bookkeeping: =degree[me] = degme=, =pe[me] = pme1=,
+    =len[me] = pme2 - pme1 + 1=, =elen[me] = flip(nvpiv + degme)=,
+    =wflg = clear_flag(wflg, wbig, w)=.
+  * Garbage collection (=pfree >= iwlen=) is deferred to Commit 6.
+    For now the function returns =AmdError::IndexOverflow= on that
+    path. Fixtures whose oracle =ncmpa == 0= do not hit it.
+
+Evidence:
+- =cargo test -p feral-amd= → 23 passed, 0 failed. New tests:
+  =select_pivot_empty= (diag_4 — all pre-eliminated),
+  =select_pivot_lifo_on_tridiag= (traces head/last after two
+  pivots),
+  =create_element_elenme_zero_on_arrow_5_hub= (verifies
+  =(pme1..=pme2) = {0}=, =nvpiv = 1=, =degme = 1=, =elen[4] =
+  flip(2)=, hub unlinked from =head[4]=),
+  =create_element_elenme_zero_unlinks_from_degree_list= (tridiag 5:
+  after pivoting var 4, =head[2]= chain becomes =3 → 2= minus 3),
+  =create_element_skips_absorbed_neighbors= (=nv[0] = 0= excludes
+  the hub),
+  =arrow_200_first_pivot_smoke= (exercises n=200 path, verifies
+  =degme = 0= since hub is dense-deferred).
+- =cargo clippy -p feral-amd --all-targets -- -D warnings= clean.
+
+Deferred to Commit 5 (next):
+- Pass-1 =w[e]= seeding (=amd.rs:366-385=).
+- Pass-2 approximate external degree + aggressive absorption +
+  monotone cap (=amd.rs:386-465=).
+- Re-insertion of freshly-updated variables into =head[deg]=
+  lists (=amd.rs:516-546=).
+- After Commit 5 the outer loop terminates on fixtures that don't
+  trigger GC.

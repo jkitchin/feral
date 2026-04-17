@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod algo;
 mod error;
 mod pattern;
 mod stats;
