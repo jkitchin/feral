@@ -532,31 +532,81 @@ adjusting dynamically.
 
 ## Phase 2.6 — Ordering
 
-**Duration:** 4–8 hours.
+**Duration:** 30–60 hours across four sibling crates.
 
-### 2.6.1 — METIS integration
+**Revised 2026-04-17:** Build all four clean-room ordering crates
+before integrating any of them. Integration (`ordering-integration.md`)
+is deferred until all four ship and the boundary API has been
+exercised by every algorithm. See `dev/plans/ordering-crate-contract.md`
+for the locked API; see `dev/decisions.md` for the rationale.
+
+### 2.6.0 — Lock the ordering-crate contract (prerequisite)
 
 **Estimated effort:** 2–4 hours.
+**Plan:** `dev/plans/ordering-crate-contract.md`.
 
-AMD is known to be weak for bordered KKT matrices like ACOPF. METIS
-nested dissection handles them much better. Add a `OrderingKind`
-enum with `Amd` and `Metis` variants, defaulting to METIS for
-`SymbolicFactorization` called with KKT-shaped inputs (detect by
-structural heuristic or explicit flag).
+Create `crates/feral-ordering-core` holding the shared `CscPattern`
+/ `OrderingStats` / `OrderingError` types and the `CONTRACT_VERSION`
+constant. Retrofit `feral-amd` to the contract (index width
+`usize → i32`; `CscPattern` moves to `feral-ordering-core`; new
+`amd_order_full` returns `OrderingStats` alongside `AmdStats`). All
+existing AMD oracle tests must reproduce their permutations
+bit-for-bit after the retrofit.
 
-METIS is a non-Rust library, so this cannot ship in the core crate.
-Two options:
+This is the **gate** for §2.6.1–2.6.3: no METIS/Scotch/KaHIP work
+starts until the contract is locked in `decisions.md` and the
+retrofit is on `main`.
 
-- **A.** Use METIS via FFI, gate behind a `metis` feature flag.
-  Breaks the "zero non-Rust dependencies in the core solver" rule.
-- **B.** Port the relevant parts of METIS to Rust. Significant
-  effort, but compatible with the architectural constraint.
-- **C.** Use an existing Rust port (if one exists).
+### 2.6.1 — feral-metis (nested dissection)
 
-**Recommendation:** start with (C); fall back to (B). (A) is not
-acceptable per the architecture constraint.
+**Estimated effort:** 16–24 hours.
+**Plan:** `dev/plans/ordering-metis.md` (audited 2026-04-16).
 
-### 2.6.2 — LDLᵀ-aware ordering preprocessing
+Clean-room Rust port of METIS 5.2.0's multilevel nested dissection,
+implemented from Karypis & Kumar 1998 plus the in-tree audit notes.
+Sibling crate `crates/feral-metis`, implementing `metis_order`
+against the contract. AMD is weak for bordered KKT matrices like
+ACOPF; METIS handles them much better and will be the default once
+all four crates are available.
+
+Option (A) FFI is still forbidden per the zero-non-Rust-deps rule.
+Option (C) "use an existing Rust port" is forbidden per the
+clean-room rule enforced for every ordering crate in this project.
+
+### 2.6.2 — feral-scotch (nested dissection, flow-based refinement)
+
+**Estimated effort:** 12–20 hours.
+**Plan:** `dev/plans/ordering-scotch.md` (audited 2026-04-16).
+
+Clean-room Rust implementation of SCOTCH-style nested dissection
+with two-sided FM refinement, derived from Pellegrini 1996 §3 only
+(not from `libscotch/` sources). Sibling crate
+`crates/feral-scotch` implementing `scotch_order`.
+
+### 2.6.3 — feral-kahip (flow-based nested dissection)
+
+**Estimated effort:** 12–20 hours.
+**Plan:** `dev/plans/ordering-kahip.md` (audited 2026-04-16).
+
+Clean-room Rust implementation of KaHIP-style flow-based nested
+dissection with data-reduction preprocessing, derived from
+Sanders & Schulz 2011 and Ost, Schulz & Strash 2021. Sibling crate
+`crates/feral-kahip` implementing `kahip_order`.
+
+### 2.6.4 — Ordering integration (deferred)
+
+**Estimated effort:** 4–8 hours.
+**Plan:** `dev/plans/ordering-integration.md` (not yet written).
+
+After §2.6.0–2.6.3 ship, write the integration plan: surface an
+`OrderingKind { Amd, Metis, Scotch, KaHIP }` enum in feral's
+symbolic-factorization config, wire each crate's producer function
+through the feral-internal dispatch, and decide the default per
+problem family using fill-quality numbers collected on the 153k
+corpus. The existing `src/ordering/amd.rs` is retired at this
+step.
+
+### 2.6.5 — LDLᵀ-aware ordering preprocessing
 
 **Estimated effort:** 2–4 hours.
 
