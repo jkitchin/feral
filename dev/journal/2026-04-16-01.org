@@ -388,3 +388,108 @@ pinned oracle regression. Next is Slice B — mass elimination
 supervariable detection (Commit 10, ~140 lines at
 =amd.rs:467-515=). Those will tighten the oracle tests to
 exact-perm assertions as a built-in verification step.
+
+* 23:45 :amd:mass-elim:commit-9:
+Landed Commit 9 — mass elimination. Inside =finalize_step=,
+pass 2's variable sub-pass now checks =elen[i] == 1 && p3
+== pn= and folds the member =i= into the current pivot:
+=pe[i] = flip(me)=, subtract =nvi= from =degme=, add to
+=nvpiv= and =nel=, set =nv[i] = 0= and =elen[i] = NONE=,
+bump =ws.n_mass_elim=. Else branch keeps the existing
+monotone-cap + swap-dance. Refactor: =degme= / =nvpiv=
+become locally mutable; =degme_i32= is bound AFTER the
+pass-2 loop so step-bookkeeping and flop counters use the
+updated value.
+
+Workspace grows =n_mass_elim= + =n_supervar_merge= =u32=
+fields so =AmdStats= can report both without extra
+plumbing. Lib.rs wires =n_mass_elim= through; Commit 10
+will wire =n_supervar_merge=.
+
+Evidence: =cargo test -p feral-amd= → 36 unit + 10
+integration, all passing. Three new firing tests assert
+=n_mass_elim > 0= on tridiag_10, band_20_3, grid_7x7.
+=cargo clippy -p feral-amd --all-targets -- -D warnings=
+→ clean.
+
+Oracle match test still soft (bijection + n_dense_deferred
+match). Exact-perm gate requires Commit 10 because faer's
+perm depends on supervariable merges reshaping elim tree
+children.
+
+* 00:15 :amd:supervar:commit-10:slice-b-exit:
+Landed Commit 10 — supervariable detection. Slice B is
+complete.
+
+Changes inside =finalize_step='s pass 2:
+1. Declare =let mut hash: usize = 0;= per-member iteration.
+2. Element sub-pass: =hash = hash.wrapping_add(e)= for every
+   kept =e= (both aggressive and non-aggressive branches).
+3. Variable sub-pass: =hash = hash.wrapping_add(j)= for every
+   kept variable neighbour =j=.
+4. In the else branch of mass elim, after swap-dance, insert
+   =i= into hash bucket:
+   #+begin_src rust
+   let h = hash % ws.n;
+   let j = ws.head[h];
+   if j <= NONE {
+       ws.next[i] = flip(j);
+       ws.head[h] = flip(i as i32);
+   } else {
+       ws.next[i] = ws.last[j as usize];
+       ws.last[j as usize] = i as i32;
+   }
+   ws.last[i] = h as i32;
+   #+end_src
+
+Post-pass-2 supervariable merge loop (after =wflg += lemax;
+clear_flag(...)=, before degree re-insertion):
+- For each =i_anchor= in =pme1..=pme2_incl= with =nv <
+  0=, resolve the chain head from =head[h]=:
+  - =head[h] == NONE= → empty, skip.
+  - =head[h] < NONE= → flip-encoded, =chain_head =
+    flip(head[h])=, clear =head[h]=.
+  - =head[h] >= 0= → hijacked =last[head[h]]=, chain_head =
+    =last[head[h]]=, restore =last[head[h]] = NONE=.
+- Walk chain via =next[]= while =next[i] != NONE=. For
+  each head =i= mark all variable neighbours with
+  =w[x] = wflg=, then compare each follower =j=:
+  ok iff =len[j] == ln && elen[j] == eln= AND every
+  neighbour of =j= is marked. If ok: merge (=pe[j] =
+  flip(i)=, =nv[i] += nv[j]=, =nv[j] = 0=, =elen[j] =
+  NONE=, unlink from chain via =next[jlast] = next[j]=),
+  bump =n_supervar_merge=.
+- =wflg += 1= after each chain head to reset the mark
+  without a =clear_flag= call.
+
+Oracle-match test tightened: the soft bijection /
+n_dense_deferred check is replaced with exact perm match
+PLUS exact =ncmpa=, =ndiv=, =nms_ldl=, =nms_lu=. Added
+two supervar-firing tests (=grid_7x7= → 6 merges,
+=band_20_3= → 1 merge).
+
+Evidence: =cargo test -p feral-amd= → 36 unit + 12
+integration, all passing. Exact perm + stat match on
+every one of the 7 oracle fixtures (diag_4, tridiag_10,
+arrow_5, arrow_200, band_20_3, grid_7x7, amd_demo_24).
+
+Bench release run (prev → now):
+  arrow(200)     0.012ms → 0.005ms   ncmpa 0 → 0
+  band(100, 5)   0.026ms → 0.017ms   ncmpa 1 → 1
+  band(500, 10)  0.195ms → 0.120ms   ncmpa 1 → 1
+  grid(30x30)    0.356ms → 0.163ms   ncmpa 2 → 1
+  grid(60x60)    1.026ms → 0.513ms   ncmpa 3 → 1
+
+Roughly 2× speedup on the larger grids, and GC pressure
+drops from 3 compactions to 1 on grid(60x60) because mass
+elimination reduces per-step working-set size. Smaller
+fixtures also benefit but the wall-clock delta is close
+to noise.
+
+CLI test: =feral-amd /tmp/tridiag5.txt= produces perm
+=[4, 3, 2, 0, 1]= with ndiv=4, matching the expected
+tridiagonal-5 behaviour.
+
+Slice B exit: all commits in =dev/plans/ordering-amd-upgrade.md=
+are landed. Crate is correctness-complete, oracle-exact,
+clippy-clean, and performance-improved vs Slice A.

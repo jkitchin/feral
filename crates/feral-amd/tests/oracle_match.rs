@@ -1,14 +1,18 @@
 //! T4 oracle-match: compare `feral-amd` output against the pinned
 //! SuiteSparse AMD fixtures under `tests/data/amd_oracle/`.
 //!
-//! Slice A (commits 1-8) lacks mass elimination and supervariable
-//! detection, so the permutation on dense fixtures legitimately
-//! diverges from SuiteSparse. We assert:
+//! With Slice B (mass elimination + supervariable detection) active,
+//! feral-amd's output now matches the SuiteSparse AMD reference
+//! byte-for-byte. We assert:
 //!
-//! - bijection on `0..n` for every fixture;
-//! - exact perm match for trivially-ordered fixtures (`diag_4`);
-//! - `n_dense_deferred` matches the oracle on every fixture;
-//! - dense-deferred vars land at the tail of the perm (`arrow_200`).
+//! - permutation exactly matches the oracle;
+//! - `ncmpa`, `ndiv`, `nms_ldl`, `nms_lu`, `n_dense_deferred`
+//!   exactly match the oracle.
+//!
+//! A few focused tests additionally exercise the `n_mass_elim` and
+//! `n_supervar_merge` counters so a regression that silently
+//! disables either Slice B branch would surface even if the perm
+//! happened to still line up.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -90,7 +94,11 @@ fn grid_2d(m: usize, n: usize) -> (Vec<usize>, Vec<usize>) {
 
 struct Oracle {
     n: usize,
+    ncmpa: u32,
     n_dense: u32,
+    ndiv: u64,
+    nms_ldl: u64,
+    nms_lu: u64,
     perm: Vec<usize>,
 }
 
@@ -108,13 +116,25 @@ fn parse_oracle(path: &Path) -> Oracle {
         map.insert(k.trim().to_string(), v.trim().to_string());
     }
     let n: usize = map["n"].parse().expect("parse n");
+    let ncmpa: u32 = map["ncmpa"].parse().expect("parse ncmpa");
     let n_dense: u32 = map["n_dense"].parse().expect("parse n_dense");
+    let ndiv: u64 = map["ndiv"].parse().expect("parse ndiv");
+    let nms_ldl: u64 = map["nms_ldl"].parse().expect("parse nms_ldl");
+    let nms_lu: u64 = map["nms_lu"].parse().expect("parse nms_lu");
     let perm: Vec<usize> = map["perm"]
         .split_whitespace()
         .map(|s| s.parse().expect("parse perm entry"))
         .collect();
     assert_eq!(perm.len(), n, "oracle perm length mismatch in {:?}", path);
-    Oracle { n, n_dense, perm }
+    Oracle {
+        n,
+        ncmpa,
+        n_dense,
+        ndiv,
+        nms_ldl,
+        nms_lu,
+        perm,
+    }
 }
 
 fn oracle_path(name: &str) -> PathBuf {
@@ -123,27 +143,20 @@ fn oracle_path(name: &str) -> PathBuf {
         .join(format!("{}.txt", name))
 }
 
-fn assert_bijection(perm: &[usize], n: usize) {
-    assert_eq!(perm.len(), n);
-    let mut seen = vec![false; n];
-    for &p in perm {
-        assert!(p < n, "perm entry {} out of range", p);
-        assert!(!seen[p], "perm entry {} repeated", p);
-        seen[p] = true;
-    }
-}
-
-fn run_fixture(name: &str, cp: &[usize], ri: &[usize]) -> (Vec<usize>, u32) {
+fn run_fixture(name: &str, cp: &[usize], ri: &[usize]) {
     let oracle = parse_oracle(&oracle_path(name));
     let pattern = CscPattern::new(oracle.n, cp, ri).expect("valid CSC");
     let (perm, stats) = amd_order_with_stats(&pattern).expect("amd_order");
-    assert_bijection(&perm, oracle.n);
+    assert_eq!(perm, oracle.perm, "{}: permutation mismatch", name);
+    assert_eq!(stats.ncmpa, oracle.ncmpa, "{}: ncmpa mismatch", name);
     assert_eq!(
         stats.n_dense_deferred, oracle.n_dense,
-        "{}: n_dense_deferred mismatch (got {}, oracle {})",
-        name, stats.n_dense_deferred, oracle.n_dense
+        "{}: n_dense_deferred mismatch",
+        name
     );
-    (perm, oracle.n_dense)
+    assert_eq!(stats.ndiv, oracle.ndiv, "{}: ndiv mismatch", name);
+    assert_eq!(stats.nms_ldl, oracle.nms_ldl, "{}: nms_ldl mismatch", name);
+    assert_eq!(stats.nms_lu, oracle.nms_lu, "{}: nms_lu mismatch", name);
 }
 
 // ---- tests -------------------------------------------------------
@@ -151,10 +164,7 @@ fn run_fixture(name: &str, cp: &[usize], ri: &[usize]) -> (Vec<usize>, u32) {
 #[test]
 fn oracle_diag_4() {
     let (cp, ri) = band(4, 0);
-    let oracle = parse_oracle(&oracle_path("diag_4"));
-    let pattern = CscPattern::new(oracle.n, &cp, &ri).unwrap();
-    let (perm, _stats) = amd_order_with_stats(&pattern).unwrap();
-    assert_eq!(perm, oracle.perm, "diag_4 is trivially ordered");
+    run_fixture("diag_4", &cp, &ri);
 }
 
 #[test]
@@ -170,14 +180,9 @@ fn oracle_arrow_5() {
 }
 
 #[test]
-fn oracle_arrow_200_hub_last() {
+fn oracle_arrow_200() {
     let (cp, ri) = arrow(200);
-    let (perm, n_dense) = run_fixture("arrow_200", &cp, &ri);
-    assert_eq!(n_dense, 1, "arrow_200 has one dense hub");
-    assert_eq!(
-        perm[199], 0,
-        "arrow_200 hub (var 0) must be dense-deferred to the tail"
-    );
+    run_fixture("arrow_200", &cp, &ri);
 }
 
 #[test]
@@ -198,11 +203,10 @@ fn oracle_amd_demo_24() {
     run_fixture("amd_demo_24", &cp, &ri);
 }
 
-// ---- Slice B: mass elimination firing checks ---------------------
-// These assert that Commit 9's mass-elim branch is actually taken on
-// the patterns that exercise it. Tridiag + arrow variables repeatedly
-// see elen[i]==1 after their one elem == me absorbs them, so
-// n_mass_elim must be positive.
+// ---- Slice B: counter firing checks ------------------------------
+// Oracle files don't record n_mass_elim / n_supervar_merge (the
+// external `amd` crate does not expose them), so we assert
+// positivity on patterns known to exercise both branches.
 
 #[test]
 fn mass_elim_fires_on_tridiag_10() {
@@ -237,5 +241,29 @@ fn mass_elim_fires_on_grid_7x7() {
         stats.n_mass_elim > 0,
         "grid_7x7 must trigger mass elimination (got {})",
         stats.n_mass_elim
+    );
+}
+
+#[test]
+fn supervar_merge_fires_on_grid_7x7() {
+    let (cp, ri) = grid_2d(7, 7);
+    let pattern = CscPattern::new(49, &cp, &ri).unwrap();
+    let (_perm, stats) = amd_order_with_stats(&pattern).unwrap();
+    assert!(
+        stats.n_supervar_merge > 0,
+        "grid_7x7 must trigger at least one supervariable merge (got {})",
+        stats.n_supervar_merge
+    );
+}
+
+#[test]
+fn supervar_merge_fires_on_band_20_3() {
+    let (cp, ri) = band(20, 3);
+    let pattern = CscPattern::new(20, &cp, &ri).unwrap();
+    let (_perm, stats) = amd_order_with_stats(&pattern).unwrap();
+    assert!(
+        stats.n_supervar_merge > 0,
+        "band_20_3 must trigger at least one supervariable merge (got {})",
+        stats.n_supervar_merge
     );
 }

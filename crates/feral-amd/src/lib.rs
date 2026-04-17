@@ -5,9 +5,10 @@
 //! README and `dev/plans/ordering-amd-upgrade.md` for scope and
 //! references.
 //!
-//! Slice A is complete and mass elimination (Commit 9 of Slice B)
-//! is active. Supervariable detection (Commit 10) is the final
-//! piece before exact-match against the SuiteSparse oracle.
+//! Slice B is complete: mass elimination (Commit 9) and
+//! supervariable detection (Commit 10) are both live, so the
+//! ordering matches SuiteSparse / faer on the full oracle
+//! fixture suite.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

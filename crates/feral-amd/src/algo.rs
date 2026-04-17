@@ -303,16 +303,20 @@ pub(crate) fn create_element(
 ///    surviving variable neighbourhood is empty (`p3 == pn`) will
 ///    pivot concurrently with `me`. Fold its supervariable count
 ///    into `nvpiv` / `nel` and deduct from `degme`.
-/// 4. Bump `degree[me] = degme`, `lemax = max(lemax, degme)`,
+/// 4. **Hash-bucket insertion** (`amd.rs:452-460`): each still-
+///    marked member is placed into a hash bucket threaded through
+///    `head`/`next`/`last` via sign-bit encoding.
+/// 5. Bump `degree[me] = degme`, `lemax = max(lemax, degme)`,
 ///    `wflg += lemax`, `wflg = clear_flag(...)`.
-/// 5. **Re-insert** (`amd.rs:516-537`): each surviving variable's
+/// 6. **Supervariable detection** (`amd.rs:467-515`): for each
+///    hash chain whose anchor is still marked, walk the chain and
+///    merge indistinguishable followers into the head.
+/// 7. **Re-insert** (`amd.rs:516-537`): each surviving variable's
 ///    updated degree is pushed back onto `head[deg]` LIFO and
 ///    `mindeg` is lowered if needed.
-/// 6. **Me bookkeeping** (`amd.rs:538-546`): restore `nv[me] =
+/// 8. **Me bookkeeping** (`amd.rs:538-546`): restore `nv[me] =
 ///    nvpiv`, compact `me`'s var list to `[pme1, p)`, trim `pfree`.
-/// 7. **Flop counters** (`amd.rs:547-557`).
-///
-/// Supervariable detection is Slice B — Commit 10.
+/// 9. **Flop counters** (`amd.rs:547-557`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_step(
     ws: &mut AmdWorkspace,
@@ -349,15 +353,20 @@ pub(crate) fn finalize_step(
     }
 
     // Pass 2: approximate degree, (optionally) aggressive absorption,
-    // and mass elimination (faer amd.rs:436-444). `degme` and `nvpiv`
-    // are mutated when mass-elim fires; the post-loop degree/flop
-    // bookkeeping uses the updated values.
+    // mass elimination (faer amd.rs:436-444), and hash-bucket
+    // insertion for supervariable detection (amd.rs:451-460). `degme`
+    // and `nvpiv` are mutated when mass-elim fires; the post-loop
+    // degree/flop bookkeeping uses the updated values.
     for pme in pme1..=pme2_incl {
         let i = ws.iw[pme] as usize;
         let p1 = ws.pe[i] as usize;
         let p2 = p1 + ws.elen[i] as usize;
         let mut pn = p1;
         let mut deg: usize = 0;
+        // Hash accumulator for supervariable detection (faer
+        // amd.rs:419,433). Both elements AND variables in the kept
+        // neighbourhood contribute.
+        let mut hash: usize = 0;
 
         // Element sub-pass.
         if aggressive {
@@ -370,6 +379,7 @@ pub(crate) fn finalize_step(
                         deg += dext as usize;
                         ws.iw[pn] = e as i32;
                         pn += 1;
+                        hash = hash.wrapping_add(e);
                     } else {
                         // Aggressive absorption: dead element folded
                         // into me right here (faer amd.rs:404-407).
@@ -387,6 +397,7 @@ pub(crate) fn finalize_step(
                     deg += dext;
                     ws.iw[pn] = e as i32;
                     pn += 1;
+                    hash = hash.wrapping_add(e);
                 }
             }
         }
@@ -404,6 +415,7 @@ pub(crate) fn finalize_step(
                 deg += nvj as usize;
                 ws.iw[pn] = j as i32;
                 pn += 1;
+                hash = hash.wrapping_add(j);
             }
         }
 
@@ -432,6 +444,28 @@ pub(crate) fn finalize_step(
             }
             ws.iw[p1] = me as i32;
             ws.len[i] = (pn - p1 + 1) as i32;
+
+            // Insert i into a hash bucket threaded through
+            // head/next/last via sign-bit encoding (faer
+            // amd.rs:452-460). `head[hash] <= NONE` distinguishes
+            // two cases:
+            //  * NONE (-1) or flip(prev_head)<=-2 mean the bucket
+            //    is either empty or already a flip-encoded bucket
+            //    chain: next[i]=flip(old), head[hash]=flip(i).
+            //  * j>=0 means head[hash] still holds an unrelated
+            //    degree-list head. Hijack last[j] to chain
+            //    bucket members (last[j] is NONE for a list head,
+            //    so no information is destroyed).
+            let h = hash % ws.n;
+            let j = ws.head[h];
+            if j <= NONE {
+                ws.next[i] = flip(j);
+                ws.head[h] = flip(i as i32);
+            } else {
+                ws.next[i] = ws.last[j as usize];
+                ws.last[j as usize] = i as i32;
+            }
+            ws.last[i] = h as i32;
         }
     }
 
@@ -444,6 +478,79 @@ pub(crate) fn finalize_step(
     }
     ws.wflg += ws.lemax;
     ws.wflg = clear_flag(ws.wflg, ws.wbig, &mut ws.w);
+
+    // Supervariable detection (faer amd.rs:467-515). For each hash
+    // chain anchored at a still-marked member (nv[i] < 0), walk the
+    // chain marking i's variable neighbourhood with `wflg`, then
+    // compare each follower j to i: if len/elen agree AND every
+    // variable neighbour of j is also marked, merge j into i.
+    //
+    // head / next / last are being reused here as hash-bucket
+    // storage; they are restored to NONE at the heads involved so
+    // the subsequent degree-list re-insertion pass can rebuild the
+    // degree buckets cleanly.
+    for pme in pme1..=pme2_incl {
+        let i_anchor = ws.iw[pme] as usize;
+        if ws.nv[i_anchor] >= 0 {
+            continue; // already restored / mass-elim'd
+        }
+        let h = ws.last[i_anchor] as usize;
+        let j_head = ws.head[h];
+        let mut i: i32 = if j_head == NONE {
+            NONE
+        } else if j_head < NONE {
+            // Bucket was flip-encoded: flip(j_head) is the head.
+            ws.head[h] = NONE;
+            flip(j_head)
+        } else {
+            // Bucket chained via last[j_head]; restore last[j_head].
+            let chain_start = ws.last[j_head as usize];
+            ws.last[j_head as usize] = NONE;
+            chain_start
+        };
+        while i != NONE && ws.next[i as usize] != NONE {
+            let i_u = i as usize;
+            let ln = ws.len[i_u];
+            let eln = ws.elen[i_u];
+            let pi = ws.pe[i_u];
+            // Mark i's neighbourhood (everything past slot pe[i]=me).
+            for p in (pi + 1) as usize..(pi + ln) as usize {
+                ws.w[ws.iw[p] as usize] = ws.wflg;
+            }
+            let mut jlast = i_u;
+            let mut jp = ws.next[i_u];
+            while jp != NONE {
+                let jj = jp as usize;
+                let mut ok = ws.len[jj] == ln && ws.elen[jj] == eln;
+                if ok {
+                    let pj = ws.pe[jj];
+                    for p in (pj + 1) as usize..(pj + ln) as usize {
+                        if ws.w[ws.iw[p] as usize] != ws.wflg {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    // Merge j into i: j becomes a degree-0 ghost
+                    // pointing at i via pe[j] = flip(i).
+                    ws.pe[jj] = flip(i);
+                    ws.nv[i_u] += ws.nv[jj];
+                    ws.nv[jj] = 0;
+                    ws.elen[jj] = NONE;
+                    jp = ws.next[jj];
+                    ws.next[jlast] = jp;
+                    ws.n_supervar_merge += 1;
+                } else {
+                    jlast = jj;
+                    jp = ws.next[jj];
+                }
+            }
+            // Bump wflg to reset marks for the next chain head.
+            ws.wflg += 1;
+            i = ws.next[i_u];
+        }
+    }
 
     // Re-insertion (amd.rs:516-537): every surviving var in the new
     // element list gets its new degree, is pushed onto head[deg]
