@@ -1,0 +1,111 @@
+//! `feral-amd` CLI: read a CSC pattern from a whitespace-separated
+//! triplet file (one `row col` pair per line, 0-indexed) and print the
+//! AMD permutation plus diagnostic counters.
+//!
+//! Usage: `feral-amd <triplet.txt>`
+//!
+//! Triplet format: `#` and `%` comments allowed. The tool
+//! symmetrizes the input (unions both halves) and drops duplicates,
+//! since AMD requires a full symmetric pattern.
+
+use std::collections::BTreeSet;
+use std::env;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
+use std::process::ExitCode;
+
+use feral_amd::{amd_order_with_stats, AmdError, CscPattern};
+
+fn read_triplet(path: &Path) -> std::io::Result<(usize, Vec<usize>, Vec<usize>)> {
+    let f = File::open(path)?;
+    let reader = BufReader::new(f);
+    let mut set: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut max_idx = 0usize;
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('%') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let r: usize = parts[0].parse().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad row: {}", e))
+        })?;
+        let c: usize = parts[1].parse().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("bad col: {}", e))
+        })?;
+        max_idx = max_idx.max(r).max(c);
+        set.insert((r, c));
+        set.insert((c, r));
+    }
+    let n = if set.is_empty() { 0 } else { max_idx + 1 };
+    let mut cols: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &(r, c) in &set {
+        cols[c].push(r);
+    }
+    for col in &mut cols {
+        col.sort();
+    }
+    let mut col_ptr: Vec<usize> = Vec::with_capacity(n + 1);
+    col_ptr.push(0);
+    let mut row_idx: Vec<usize> = Vec::new();
+    for col in &cols {
+        for &r in col {
+            row_idx.push(r);
+        }
+        col_ptr.push(row_idx.len());
+    }
+    Ok((n, col_ptr, row_idx))
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 2 {
+        eprintln!("usage: feral-amd <triplet.txt>");
+        return ExitCode::from(2);
+    }
+    let path = Path::new(&args[1]);
+    let (n, col_ptr, row_idx) = match read_triplet(path) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("read error: {}", e);
+            return ExitCode::from(2);
+        }
+    };
+    let pattern = match CscPattern::new(n, &col_ptr, &row_idx) {
+        Some(p) => p,
+        None => {
+            eprintln!("pattern failed CSC validation");
+            return ExitCode::from(2);
+        }
+    };
+    match amd_order_with_stats(&pattern) {
+        Ok((perm, stats)) => {
+            println!("n: {}", n);
+            println!("nnz: {}", pattern.nnz());
+            println!("ncmpa: {}", stats.ncmpa);
+            println!("n_dense_deferred: {}", stats.n_dense_deferred);
+            println!("ndiv: {}", stats.ndiv);
+            println!("nms_ldl: {}", stats.nms_ldl);
+            println!("nms_lu: {}", stats.nms_lu);
+            print!("perm:");
+            for &p in &perm {
+                print!(" {}", p);
+            }
+            println!();
+            ExitCode::SUCCESS
+        }
+        Err(AmdError::IndexOverflow) => {
+            eprintln!("amd: workspace exceeded i32::MAX");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("amd: {}", e);
+            ExitCode::from(1)
+        }
+    }
+}

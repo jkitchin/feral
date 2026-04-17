@@ -5,8 +5,12 @@
 //! README and `dev/plans/ordering-amd-upgrade.md` for scope and
 //! references.
 //!
-//! This module currently contains the scaffolding types only. The
-//! core algorithm lands in subsequent commits (see Slice A plan).
+//! Slice A is complete: the public API runs the full pipeline
+//! (workspace init → elimination loop with inline GC → assembly-
+//! tree postorder → supervariable expansion). Mass elimination and
+//! supervariable detection (Slice B) are not yet active; orderings
+//! remain correct bijections and match faer's output on fixtures
+//! where Slice A-only choices coincide with the full algorithm.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -51,28 +55,41 @@ impl Default for AmdOptions {
 /// Compute a fill-reducing AMD ordering.
 ///
 /// Returns a permutation `perm` (new-to-old) such that factoring
-/// `P·A·Pᵀ` with `P = perm` is expected to produce less fill than
-/// the natural ordering.
-///
-/// The input must be the full symmetric pattern (both halves).
-///
-/// Not yet implemented; all commits past scaffolding will be added
-/// in Slice A.
-pub fn amd_order(_pattern: &CscPattern<'_>) -> Result<Vec<usize>, AmdError> {
-    Err(AmdError::NotImplemented)
+/// `P·A·Pᵀ` with `P[k] = perm[k]` produces less fill than the
+/// natural ordering. The input must be the full symmetric pattern
+/// (both halves present).
+pub fn amd_order(pattern: &CscPattern<'_>) -> Result<Vec<usize>, AmdError> {
+    amd_order_opts(pattern, &AmdOptions::default()).map(|(perm, _)| perm)
 }
 
 /// Compute an AMD ordering and return diagnostic counters.
 ///
-/// See [`amd_order`].
-pub fn amd_order_with_stats(_pattern: &CscPattern<'_>) -> Result<(Vec<usize>, AmdStats), AmdError> {
-    Err(AmdError::NotImplemented)
+/// See [`amd_order`] and [`AmdStats`].
+pub fn amd_order_with_stats(pattern: &CscPattern<'_>) -> Result<(Vec<usize>, AmdStats), AmdError> {
+    amd_order_opts(pattern, &AmdOptions::default())
 }
 
 /// Compute an AMD ordering with explicit options.
+///
+/// Returns `(perm, stats)`. See [`amd_order`] and [`AmdStats`].
 pub fn amd_order_opts(
-    _pattern: &CscPattern<'_>,
-    _opts: &AmdOptions,
+    pattern: &CscPattern<'_>,
+    opts: &AmdOptions,
 ) -> Result<(Vec<usize>, AmdStats), AmdError> {
-    Err(AmdError::NotImplemented)
+    let mut ws = workspace::AmdWorkspace::new(pattern, opts)?;
+    let ndense = ws.ndense;
+    let flops = algo::run_elimination(&mut ws, opts.aggressive)?;
+    let ncmpa = ws.ncmpa;
+    let perm = algo::finalize_permutation(&mut ws);
+    let stats = AmdStats {
+        ncmpa,
+        n_clear_flag: 0,
+        n_mass_elim: 0,
+        n_supervar_merge: 0,
+        n_dense_deferred: ndense.max(0) as u32,
+        ndiv: flops.ndiv.max(0.0) as u64,
+        nms_lu: flops.nms_lu.max(0.0) as u64,
+        nms_ldl: flops.nms_ldl.max(0.0) as u64,
+    };
+    Ok((perm, stats))
 }

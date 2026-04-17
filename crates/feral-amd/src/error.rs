@@ -15,9 +15,6 @@ pub enum AmdError {
     /// `col_ptr.len() != n+1`, `row_idx.len() != col_ptr[n]`, or a
     /// row index was out of bounds.
     MalformedInput,
-    /// Placeholder returned by the scaffolding entry points before
-    /// the core algorithm is implemented. Will be removed in Slice A.
-    NotImplemented,
 }
 
 impl fmt::Display for AmdError {
@@ -26,9 +23,6 @@ impl fmt::Display for AmdError {
             Self::IndexOverflow => f.write_str("AMD workspace exceeded i32::MAX"),
             Self::NonSymmetric => f.write_str("AMD input pattern was not structurally symmetric"),
             Self::MalformedInput => f.write_str("AMD input pattern failed structural validation"),
-            Self::NotImplemented => {
-                f.write_str("AMD algorithm not yet implemented (scaffolding only)")
-            }
         }
     }
 }

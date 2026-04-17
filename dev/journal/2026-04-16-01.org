@@ -328,3 +328,63 @@ Next: Commit 8 — wire =amd_order= / =amd_order_with_stats= /
 =amd_order_opts= in lib.rs, plus CLI + bench skeleton. Then
 the T4 oracle-match test compares our perm against the =amd=
 crate's reference output across the fixture suite.
+
+* 04:45 :amd:public-api:cli:bench:t4:commit-8:
+Landed Commit 8 — Slice A exit. Wired =amd_order=,
+=amd_order_with_stats=, =amd_order_opts= in =lib.rs=: build
+workspace, capture =ndense=, run elimination (grabbing
+=ncmpa= + =StepFlops=), finalize the permutation, populate
+=AmdStats=. Slice B counters (=n_clear_flag=,
+=n_mass_elim=, =n_supervar_merge=) stay zero until
+Commits 9-10.
+
+Dropped =AmdError::NotImplemented= — no remaining call site.
+
+Added two binaries:
+- =src/bin/feral-amd.rs= — triplet-file CLI. Reads
+  whitespace-separated =row col= pairs (0-indexed, =#= / =%=
+  comments), symmetrizes via =BTreeSet=, builds CSC, prints
+  n, nnz, ncmpa, n_dense_deferred, ndiv, nms_ldl, nms_lu,
+  perm.
+- =src/bin/feral-amd-bench.rs= — in-crate bench skeleton.
+  Runs arrow(200), band(100,5), band(500,10), grid(30x30),
+  grid(60x60). Reports wall-clock + stats. Sample release
+  run:
+    arrow(200)           time=0.012ms ncmpa=0 ndense=1
+    band(100, 5)         time=0.026ms ncmpa=1
+    band(500, 10)        time=0.195ms ncmpa=1
+    grid(30x30)          time=0.356ms ncmpa=2
+    grid(60x60)          time=1.026ms ncmpa=3
+  The nonzero =ncmpa= on band / grid confirms inline GC is
+  exercised in production use, not just tests.
+
+T4 oracle-match test at =tests/oracle_match.rs=: mirrors the
+fixture generators from the throwaway harness (arrow, band,
+grid_2d), parses each pinned =tests/data/amd_oracle/*.txt=
+for =n=, =n_dense=, =perm=, runs =amd_order_with_stats=,
+and asserts:
+- bijection of 0..n (every fixture);
+- =stats.n_dense_deferred == oracle.n_dense= (every
+  fixture);
+- exact perm match for =diag_4= (trivially ordered);
+- =perm[n-1] == 0= on =arrow_200= (hub must be deferred to
+  the tail).
+
+Deliberately does NOT assert exact perm match on band /
+grid / arrow_5 / amd_demo_24. Slice A lacks mass elimination
+and supervariable detection, so legitimate divergences from
+the SuiteSparse oracle are expected. Exact-match tightening
+is deferred to Slice B (Commits 9-10).
+
+Evidence: =cargo test -p feral-amd= → 36 unit + 7 integration
+tests, all passing. =cargo clippy -p feral-amd --all-targets
+-- -D warnings= → clean. =cargo build -p feral-amd
+--all-targets= → clean. Bench binary runs under 1.1 ms on the
+largest fixture (3600-var 60x60 grid).
+
+Slice A is now complete end-to-end: public API, CLI, bench,
+pinned oracle regression. Next is Slice B — mass elimination
+(Commit 9, ~30 lines at faer =amd.rs:436-444=) and
+supervariable detection (Commit 10, ~140 lines at
+=amd.rs:467-515=). Those will tighten the oracle tests to
+exact-perm assertions as a built-in verification step.
