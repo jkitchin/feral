@@ -36,6 +36,8 @@ mod graph;
 mod initial_partition;
 #[allow(dead_code)]
 mod rng;
+#[allow(dead_code)]
+mod separator;
 
 pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 
