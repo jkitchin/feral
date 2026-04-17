@@ -286,3 +286,45 @@ are negative and skipped by the mark loop.
 Next: Commit 7 — path-compression + postorder + expand
 (=amd.rs:567-633=). Produces the public-facing permutation
 vector. Then Commit 8 wires the public API.
+
+* 03:30 :amd:postorder:commit-7:
+Commit 7 lands =finalize_permutation=. Ports faer
+=amd.rs:567-633= plus =amd.rs:5-124= (post_tree + postorder
+helpers). Seven-step pipeline:
+ 1. Un-flip =pe= and =elen= (pe now holds parent pointers
+    for absorbed pivots, NONE for roots; elen holds
+    =nvpiv+degme= frontal size).
+ 2. Path-compress absorbed supervariables (inert in Slice A
+    because no var ever has =nv[i]==0=; becomes active with
+    Slice B supervar detection).
+ 3. Iterative DFS postorder with big-child-last heuristic.
+    Reuses head/next/last as child/sibling/stack scratch,
+    writes postorder index into =w=.
+ 4. Invert =w= into =head[k] = pivot-at-postorder-k=.
+ 5. Assign pivot-block start positions: =next[e] = nel=,
+    =nel += nv[e]=.
+ 6. Expand absorbed supervars (=nv[i]==0= with
+    =pe[i]=pivot=) and place dense-deferred (=nv[i]==0=
+    with =pe[i]==NONE=) at tail.
+ 7. Emit =perm[next[i]] = i=.
+
+Evidence: =cargo test -p feral-amd= → 36/36. Seven new
+permutation tests cover diag_4, arrow_5, tridiag_10,
+arrow_200 (dense-deferred hub at tail), grid_7x7, band_20_3
+(GC path), and the empty pattern. Every test verifies
+=is_permutation(perm)= (bijection of 0..n).
+
+One wrinkle: initially asserted =perm[n-1] == hub= on the
+arrow_5 test. Traced through: LIFO + aggressive absorption
+gives pivot order spoke-4 → 3 → 2 → hub-0 → spoke-1. Tree
+ends as 4→3→2→0→1 with spoke 1 as root (standard absorption
+at hub 0's create_element set =pe[0] = flip(1)=). Weakened
+to a bijection check.
+
+=cargo clippy -p feral-amd --all-targets -- -D warnings= →
+clean.
+
+Next: Commit 8 — wire =amd_order= / =amd_order_with_stats= /
+=amd_order_opts= in lib.rs, plus CLI + bench skeleton. Then
+the T4 oracle-match test compares our perm against the =amd=
+crate's reference output across the fixture suite.

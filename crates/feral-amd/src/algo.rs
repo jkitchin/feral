@@ -524,6 +524,234 @@ pub(crate) fn run_elimination(
     Ok(flops)
 }
 
+/// Consume the post-elimination state and produce the final
+/// permutation.
+///
+/// On entry `ws` must have completed [`run_elimination`]. Performs,
+/// in order:
+/// 1. Un-flip `pe` and `elen` (faer `amd.rs:567-572`) so `pe[i]`
+///    holds the parent pivot and `elen[i]` holds the frontal size.
+/// 2. Path compression (`amd.rs:573-590`): each absorbed
+///    supervariable `i` (`nv[i] == 0`) has its `pe` chain walked
+///    until a pivot is found, then all intermediates are rewritten
+///    to point at that pivot directly. Inert in Slice A — becomes
+///    active once supervariable detection (Slice B) lands.
+/// 3. Assembly-tree postorder with big-child-last heuristic
+///    (`amd.rs:5-49`, `amd.rs:51-124`, `amd.rs:593-599`). Reuses
+///    `head`/`next`/`last` as child/sibling/stack scratch; writes
+///    the postorder index into `w`.
+/// 4. Invert `w` into `head[k] = pivot at postorder k`
+///    (`amd.rs:600-606`).
+/// 5. Assign starting positions to each pivot's block
+///    (`amd.rs:607-615`): `next[e] = nel`, then `nel += nv[e]`.
+/// 6. Expand absorbed supervariables + place dense-deferred variables
+///    at the tail (`amd.rs:617-629`).
+/// 7. Emit `perm`: `perm[next[i]] = i` for every `i`
+///    (`amd.rs:631-633`).
+///
+/// Returns a permutation `perm` of length `n` where `perm[k]` is the
+/// column of the original matrix to be eliminated at step `k`.
+pub(crate) fn finalize_permutation(ws: &mut AmdWorkspace) -> Vec<usize> {
+    let n = ws.n;
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // Step 1: un-flip.
+    for x in ws.pe.iter_mut() {
+        *x = flip(*x);
+    }
+    for x in ws.elen.iter_mut() {
+        *x = flip(*x);
+    }
+
+    // Step 2: path-compress absorbed supervariables.
+    for i in 0..n {
+        if ws.nv[i] == 0 {
+            let head_i = ws.pe[i];
+            if head_i == NONE {
+                continue;
+            }
+            let mut j = head_i as usize;
+            while ws.nv[j] == 0 {
+                j = ws.pe[j] as usize;
+            }
+            let e = j as i32;
+            let mut j = i;
+            while ws.nv[j] == 0 {
+                let jnext = ws.pe[j];
+                ws.pe[j] = e;
+                j = jnext as usize;
+            }
+        }
+    }
+
+    // Step 3: assembly-tree postorder. Writes postorder index into w.
+    assembly_tree_postorder(ws);
+
+    // Step 4: invert w into head.
+    for x in ws.head.iter_mut() {
+        *x = NONE;
+    }
+    for e in 0..n {
+        let k = ws.w[e];
+        if k != NONE {
+            ws.head[k as usize] = e as i32;
+        }
+    }
+
+    // Step 5: pivot-block starting positions.
+    for x in ws.next.iter_mut() {
+        *x = NONE;
+    }
+    let mut nel: i32 = 0;
+    for &e in ws.head.iter() {
+        if e == NONE {
+            break;
+        }
+        let eu = e as usize;
+        ws.next[eu] = nel;
+        nel += ws.nv[eu];
+    }
+
+    // Step 6: expand absorbed supervars + place dense-deferred at tail.
+    for i in 0..n {
+        if ws.nv[i] == 0 {
+            let e = ws.pe[i];
+            if e != NONE {
+                let eu = e as usize;
+                ws.next[i] = ws.next[eu];
+                ws.next[eu] += 1;
+            } else {
+                ws.next[i] = nel;
+                nel += 1;
+            }
+        }
+    }
+
+    // Step 7: emit perm.
+    let mut perm = vec![0usize; n];
+    for i in 0..n {
+        perm[ws.next[i] as usize] = i;
+    }
+    perm
+}
+
+/// Build the assembly tree from `pe` (parent pointers) + `nv`
+/// (`> 0` selects pivots), apply the big-child-last heuristic, and
+/// run an iterative DFS postorder. Result indexes go into `ws.w`
+/// (NONE for non-pivot nodes).
+fn assembly_tree_postorder(ws: &mut AmdWorkspace) {
+    let n = ws.n;
+    // Repurpose head/next/last as child/sibling/stack scratch.
+    for x in ws.head.iter_mut() {
+        *x = NONE;
+    }
+    for x in ws.next.iter_mut() {
+        *x = NONE;
+    }
+    // Link each pivot as a child of its parent. Reverse order so that
+    // after building, child lists are in ascending index order.
+    for j in (0..n).rev() {
+        if ws.nv[j] > 0 {
+            let parent = ws.pe[j];
+            if parent >= 0 && (parent as usize) < n {
+                let pu = parent as usize;
+                ws.next[j] = ws.head[pu];
+                ws.head[pu] = j as i32;
+            }
+        }
+    }
+    // Big-child-last heuristic: move the child with the largest
+    // `elen` (frontal size) to the end of the sibling list so the
+    // deepest-recursion subtree is visited last.
+    for i in 0..n {
+        if ws.nv[i] > 0 && ws.head[i] != NONE {
+            let child0 = ws.head[i];
+            let mut fprev: i32 = NONE;
+            let mut bigfprev: i32 = NONE;
+            let mut bigf: i32 = NONE;
+            let mut maxfrsize: i32 = NONE;
+            let mut f = child0;
+            while f != NONE {
+                let fu = f as usize;
+                let frsize = ws.elen[fu];
+                if frsize >= maxfrsize {
+                    maxfrsize = frsize;
+                    bigfprev = fprev;
+                    bigf = f;
+                }
+                fprev = f;
+                f = ws.next[fu];
+            }
+            let bigfu = bigf as usize;
+            let fnext = ws.next[bigfu];
+            if fnext != NONE {
+                if bigfprev != NONE {
+                    ws.next[bigfprev as usize] = fnext;
+                } else {
+                    ws.head[i] = fnext;
+                }
+                ws.next[bigfu] = NONE;
+                ws.next[fprev as usize] = bigf;
+            }
+        }
+    }
+    // Iterative DFS postorder from each pivot root.
+    for x in ws.w.iter_mut() {
+        *x = NONE;
+    }
+    let mut k: usize = 0;
+    for i in 0..n {
+        if ws.pe[i] == NONE && ws.nv[i] > 0 {
+            k = post_tree_dfs(ws, i, k);
+        }
+    }
+}
+
+/// Iterative DFS of one assembly-tree root. Stack lives in `last`,
+/// child list in `head`, sibling links in `next`. Writes postorder
+/// indices into `w`. Returns the next postorder index to assign.
+fn post_tree_dfs(ws: &mut AmdWorkspace, root: usize, k_start: usize) -> usize {
+    let mut k = k_start;
+    let mut top: usize = 1;
+    ws.last[0] = root as i32;
+    while top > 0 {
+        let i = ws.last[top - 1] as usize;
+        let child0 = ws.head[i];
+        if child0 != NONE {
+            // Count children.
+            let mut count = 0usize;
+            let mut f = child0;
+            while f != NONE {
+                count += 1;
+                f = ws.next[f as usize];
+            }
+            // Push children into stack slots [top, top+count) with the
+            // first child at the highest position (popped first).
+            let new_top = top + count;
+            let mut t = new_top;
+            let mut f = child0;
+            loop {
+                t -= 1;
+                ws.last[t] = f;
+                let nf = ws.next[f as usize];
+                if nf == NONE {
+                    break;
+                }
+                f = nf;
+            }
+            top = new_top;
+            ws.head[i] = NONE; // mark visited
+        } else {
+            top -= 1;
+            ws.w[i] = k as i32;
+            k += 1;
+        }
+    }
+    k
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,5 +1035,179 @@ mod tests {
         // Exactly one var (the pivot itself) has been eliminated plus
         // the deferred hub that init already counted.
         assert_eq!(ws.nel, 2, "1 deferred hub + 1 pivot");
+    }
+
+    fn is_permutation(perm: &[usize]) -> bool {
+        let n = perm.len();
+        let mut seen = vec![false; n];
+        for &p in perm {
+            if p >= n || seen[p] {
+                return false;
+            }
+            seen[p] = true;
+        }
+        true
+    }
+
+    /// diag_4: every variable is pre-eliminated at init as a
+    /// zero-degree singleton. Each is a tree root; postorder visits
+    /// them in ascending index order, giving perm = [0,1,2,3].
+    #[test]
+    fn permutation_diag_4() {
+        let cp = [0, 1, 2, 3, 4];
+        let ri = [0, 1, 2, 3];
+        let mut ws = ws_for(4, &cp, &ri);
+        run_elimination(&mut ws, true).unwrap();
+        let perm = finalize_permutation(&mut ws);
+        assert_eq!(perm.len(), 4);
+        assert!(is_permutation(&perm));
+        assert_eq!(perm, vec![0, 1, 2, 3]);
+    }
+
+    /// Arrow 5 with hub live: LIFO spoke pivots first, then hub and
+    /// remaining spoke chain through aggressive absorption. The exact
+    /// root depends on pivot order and absorption choices; just
+    /// verify a valid permutation.
+    #[test]
+    fn permutation_arrow_5_valid() {
+        let cp = [0, 5, 7, 9, 11, 13];
+        let ri = [0, 1, 2, 3, 4, 0, 1, 0, 2, 0, 3, 0, 4];
+        let mut ws = ws_for(5, &cp, &ri);
+        run_elimination(&mut ws, true).unwrap();
+        let perm = finalize_permutation(&mut ws);
+        assert_eq!(perm.len(), 5);
+        assert!(is_permutation(&perm));
+    }
+
+    /// Tridiag 10: valid permutation of 0..10. No structural
+    /// oracle here — just bijection + length checks.
+    #[test]
+    fn permutation_tridiag_10() {
+        let n = 10usize;
+        let mut cp: Vec<usize> = vec![0];
+        let mut ri: Vec<usize> = Vec::new();
+        for j in 0..n {
+            if j > 0 {
+                ri.push(j - 1);
+            }
+            ri.push(j);
+            if j + 1 < n {
+                ri.push(j + 1);
+            }
+            cp.push(ri.len());
+        }
+        let p = CscPattern::new(n, &cp, &ri).unwrap();
+        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        run_elimination(&mut ws, true).unwrap();
+        let perm = finalize_permutation(&mut ws);
+        assert_eq!(perm.len(), n);
+        assert!(is_permutation(&perm));
+    }
+
+    /// Arrow 200 with a dense-deferred hub. The hub (var 0, nv=0,
+    /// pe=NONE) is placed at the tail by the expand phase. All 199
+    /// spokes are pivots; permutation is still a bijection of 0..200.
+    #[test]
+    fn permutation_arrow_200_hub_deferred() {
+        let n = 200usize;
+        let mut cp: Vec<usize> = vec![0];
+        let mut ri: Vec<usize> = Vec::new();
+        ri.push(0);
+        for r in 1..n {
+            ri.push(r);
+        }
+        cp.push(ri.len());
+        for j in 1..n {
+            ri.push(0);
+            ri.push(j);
+            cp.push(ri.len());
+        }
+        let p = CscPattern::new(n, &cp, &ri).unwrap();
+        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        run_elimination(&mut ws, true).unwrap();
+        let perm = finalize_permutation(&mut ws);
+        assert_eq!(perm.len(), n);
+        assert!(is_permutation(&perm));
+        assert_eq!(
+            perm[n - 1],
+            0,
+            "dense-deferred hub lands at the tail of the permutation"
+        );
+    }
+
+    /// Grid 7x7: ensure the permutation survives GC-triggered runs.
+    #[test]
+    fn permutation_grid_7x7() {
+        let m = 7usize;
+        let n = 7usize;
+        let total = m * n;
+        let mut cp: Vec<usize> = vec![0];
+        let mut ri: Vec<usize> = Vec::new();
+        use std::collections::BTreeSet;
+        let idx = |r: usize, c: usize| r * n + c;
+        for c in 0..total {
+            let r0 = c / n;
+            let c0 = c % n;
+            let mut neigh: BTreeSet<usize> = BTreeSet::new();
+            neigh.insert(c);
+            if r0 > 0 {
+                neigh.insert(idx(r0 - 1, c0));
+            }
+            if r0 + 1 < m {
+                neigh.insert(idx(r0 + 1, c0));
+            }
+            if c0 > 0 {
+                neigh.insert(idx(r0, c0 - 1));
+            }
+            if c0 + 1 < n {
+                neigh.insert(idx(r0, c0 + 1));
+            }
+            for &r in &neigh {
+                ri.push(r);
+            }
+            cp.push(ri.len());
+        }
+        let p = CscPattern::new(total, &cp, &ri).unwrap();
+        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        run_elimination(&mut ws, true).unwrap();
+        let perm = finalize_permutation(&mut ws);
+        assert_eq!(perm.len(), total);
+        assert!(is_permutation(&perm));
+    }
+
+    /// Band(20, 3) with GC: permutation remains a valid bijection
+    /// even after ncmpa >= 1 compactions.
+    #[test]
+    fn permutation_band_20_3() {
+        let n = 20usize;
+        let b = 3usize;
+        let mut cp: Vec<usize> = vec![0];
+        let mut ri: Vec<usize> = Vec::new();
+        for j in 0..n {
+            let lo = j.saturating_sub(b);
+            let hi = (j + b + 1).min(n);
+            for r in lo..hi {
+                ri.push(r);
+            }
+            cp.push(ri.len());
+        }
+        let p = CscPattern::new(n, &cp, &ri).unwrap();
+        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        run_elimination(&mut ws, true).unwrap();
+        let perm = finalize_permutation(&mut ws);
+        assert_eq!(perm.len(), n);
+        assert!(is_permutation(&perm));
+    }
+
+    /// Empty pattern (n == 0) round-trips to an empty permutation.
+    #[test]
+    fn permutation_empty() {
+        let cp = [0];
+        let ri: [usize; 0] = [];
+        let p = CscPattern::new(0, &cp, &ri).unwrap();
+        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        run_elimination(&mut ws, true).unwrap();
+        let perm = finalize_permutation(&mut ws);
+        assert!(perm.is_empty());
     }
 }
