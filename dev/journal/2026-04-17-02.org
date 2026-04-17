@@ -1,0 +1,113 @@
+#+title: FERAL journal — 2026-04-17-02
+#+startup: showall
+
+* 08:00 :resume:metis:
+Session continuation from 2026-04-17-01. Prior session had closed
+the 2.6.0 ordering-contract gate and begun feral-metis M1–M3
+(graph infra, SHEM coarsening, GGP+BFS initial bisection). This
+session picks up at M4+M5 (FM refinement) as the fm_refine.rs
+module had been written but not yet tested/committed.
+
+* 08:15 :metis:m4-m5:fm:
+Wired fm_refine.rs into lib.rs module list. cargo test
+-p feral-metis -> 31 passed (5 new: refine_bisection cut never
+increases, balance respected, adversarial bad-init improves,
+separator_weight accounting, refine_separator does not grow
+weight). Clippy flagged needless_range_loop in the initial heap
+fill; swapped to gain.iter().enumerate().take(n). Commit 12194d7.
+
+Design notes: lazy BinaryHeap<(gain, Reverse(v), stamp)> instead
+of METIS bucket PQ; stale entries detected by stamp != gain[v].
+No-improvement-50-moves termination matches Karypis 5.2.0 default
+(CTRL_CABORT). Greedy node-separator refinement is positive-gain
+only — two-sided FM deferred until a concrete quality gap.
+
+* 09:00 :metis:m6:separator:
+Wrote separator.rs implementing min-vertex-cover via Kuhn's
+augmenting-path matching + Koenig complement. Kuhn is O(V*E);
+at coarsest-level sizes (n<=120) this is adequate. Hopcroft-Karp
+promotable later if boundaries grow.
+
+Tests (4 new): disconnects A/B on 6x6 grid, empty when no cut,
+leaves both sides non-empty on 4x4 hand-built cut, |cover| bounded
+by min boundary size per Koenig. cargo test -p feral-metis -> 35
+passed, clippy clean. Commit 97d18b4.
+
+First commit attempt failed because the heredoc body contained
+apostrophes (Kuhn's / Koenig's) — same trap as earlier in the
+session. Reworded to avoid apostrophes and re-committed.
+
+* 10:00 :metis:m7:nd-driver:
+Implemented node_nd.rs — the recursive ND driver. Key pieces:
+- nd_order: top-level entry. Graph::from_csc_pattern, split into
+  CCs, invoke recurse on each, invert iperm -> perm.
+- recurse: handles base cases (n==0, n==1), CC split within
+  subgraph, AMD leaf when n <= nd_to_amd_switch, else multilevel
+  node bisection; separator numbered last, then recurse on
+  A-side and B-side with local->original index chaining.
+- multilevel_node_bisection: coarsen -> niparts trials (alternating
+  GGP/BFS) scored on post-FM cut -> uncoarsen level by level with
+  FM at each step -> construct_separator -> refine_separator.
+- amd_leaf: builds full-symmetric CSC pattern from internal Graph
+  (reinserts dropped diagonal in sorted order), calls
+  feral_amd::amd_order.
+- connected_components / extract_by_label / extract_by_list /
+  build_induced: standard subgraph utilities.
+
+Added feral-amd path dep in feral-metis/Cargo.toml — no cycle
+since feral-amd only depends on feral-ordering-core.
+
+Wired into lib.rs::metis_order_full, replacing the stub. time_us
+populated from Instant::now(); fill/flop remain None per plan.
+Updated the stale "K1 scaffold / not yet implemented" docstrings.
+
+Tests (6 new, 41 total in crate):
+- nd_order_small_grid_is_permutation (10x10 -> AMD leaf path).
+- nd_order_large_grid_uses_multilevel (20x20=400 vertices, above
+  nd_to_amd_switch=200; stats.n_separator_vertices > 0 verifies
+  real multilevel bisection ran).
+- nd_order_deterministic (seed determinism).
+- nd_order_handles_disconnected_graph (two 6x6 blocks;
+  stats.n_components == 2).
+- cc_disconnected_blocks (unit test on connected_components).
+- extract_induced_preserves_edges (subgraph extraction unit).
+- Replaced lib.rs stub tests with
+  diagonal_pattern_yields_permutation and
+  convenience_wrapper_returns_permutation.
+
+cargo test -p feral-metis -> 41 passed, cargo clippy -p feral-metis
+--all-targets -D warnings clean, cargo test --workspace all green.
+Commit d1619ed.
+
+* 11:30 :bench:unchanged:
+cargo run --bin bench --release — METIS is a standalone crate and
+not yet integrated into feral's symbolic pipeline (M8), so bench
+numbers are identical to the previous session's end-state:
+
+  Phase 2.8.1 dense exit: small-frontal p90 1.59 (<= 2.0 PASS),
+  medium p90 2.04 (<= 3.0 PASS).
+  Phase 2.8.1 sparse exit: small-frontal p90 2.08 (FAIL target
+  2.0), medium p90 2.09 (<= 3.0 PASS).
+
+The sparse-small-frontal FAIL is pre-existing (carried from
+2026-04-17-01 and earlier). METIS M7 completion does not change
+it; that failure is a feral core solver concern, not an ordering
+concern. Recording for the record.
+
+* 11:45 :exit:metis-m1-m7-done:
+State of feral-metis at session close:
+- 41 tests pass, clippy clean, fmt clean.
+- metis_order / metis_order_full produce valid permutations on
+  grids of 3x3 through 20x20, on disconnected graphs (2+ CCs),
+  and are deterministic under a fixed seed.
+- AMD leaf fallback exercised (stats.n_amd_leaf_calls > 0 at
+  n=100).
+- Real multilevel bisection exercised (stats.n_separator_vertices
+  > 0 at n=400).
+- M8 (integration into feral's symbolic pipeline behind an
+  OrderingMethod enum) remains deferred per the 2.6.4 gate.
+
+Next session has two reasonable next moves: (a) integration (M8)
+to actually exercise METIS ordering on the phase-2.8 benchmark
+matrices and compare fill vs AMD, or (b) a quality sweep to
+validate ND quality on KKT matrices before integration.
