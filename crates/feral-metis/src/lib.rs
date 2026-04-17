@@ -31,6 +31,8 @@ mod coarsen;
 #[allow(dead_code)]
 mod graph;
 #[allow(dead_code)]
+mod initial_partition;
+#[allow(dead_code)]
 mod rng;
 
 pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
