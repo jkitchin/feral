@@ -4,6 +4,33 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-17) — Ordering crate boundary locked (2.6.0)
+
+- New workspace crate `feral-ordering-core`: defines the shared
+  contract (`CscPattern<'a>`, `OrderingStats`, `OrderingError`,
+  `CONTRACT_VERSION = 1`) that all four ordering crates will
+  implement. Zero deps beyond `std`.
+- **Breaking:** `feral-amd`'s public surface is retrofitted onto the
+  contract.
+  - `CscPattern` and error type now re-exported from
+    `feral-ordering-core`; `AmdError` removed (use `OrderingError`).
+  - `CscPattern` borrows `&[i32]` (was `&[usize]`);
+    `amd_order*` returns `Vec<i32>` (was `Vec<usize>`).
+  - All public entry points now return
+    `Result<_, OrderingError>`.
+  - New `amd_order_full(pattern, opts) -> (perm, OrderingStats,
+    AmdStats)` — the contract-conforming three-tuple variant;
+    `OrderingStats.time_us` is populated, fill/flop estimates are
+    `None` pending analysis-phase work.
+- Rationale: lock the boundary before implementing METIS, SCOTCH,
+  KaHIP so all four backends plug into Ipopt against the same
+  surface. See `dev/plans/ordering-crate-contract.md` and
+  `dev/decisions.md` entry of 2026-04-17.
+- Evidence: all 12 SuiteSparse AMD oracle fixtures still reproduce
+  bit-for-bit after the retrofit (perm, ncmpa, ndiv, nms_ldl,
+  nms_lu, n_dense_deferred); 29 lib tests pass; clippy clean;
+  clean-room check still passes.
+
 ### Added (2026-04-17) — feral-amd standalone crate
 
 - New workspace member `crates/feral-amd`: clean-room Approximate

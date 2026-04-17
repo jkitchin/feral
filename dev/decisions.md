@@ -796,3 +796,21 @@ in `dev/sessions/2026-04-14-04.md` "Benchmark Results" section.
 **Why.** feral's MIT-license / pure-Rust / zero-non-Rust-deps posture requires that feral-amd be a clean-room implementation derived from published papers and faer's BSD-licensed in-tree port, not from SuiteSparse. A mechanical check prevents the oracle from accidentally leaking into the runtime graph.
 
 **Evidence.** `scripts/check-amd-cleanroom.sh` reports "clean-room OK: 'amd' crate absent from feral workspace"; `.github/workflows/ci.yml` `amd-cleanroom` step; harness `.txt` files under `crates/feral-amd/tests/data/amd_oracle/harness/` with SHA-256s pinned in the oracle README.
+
+---
+
+## 2026-04-17 — Ordering crate boundary: `i32` index width, free function, no etree
+
+**Decision.** The four ordering crates (`feral-amd`, `feral-metis`, `feral-scotch`, `feral-kahip`) share a minimal contract exposed by a new `feral-ordering-core` workspace crate and adhere to three specific choices:
+
+1. **Index width is `i32`.** `CscPattern` borrows `&[i32]` slices for `col_ptr` and `row_idx`, and ordering routines return `Vec<i32>` permutations. Ipopt consumes ordering output as plain indices and never needs 64-bit counts at this boundary; this matches the Fortran MUMPS / SSIDS convention and the MA27 Ipopt interface.
+2. **No trait, one free function per crate.** Each crate exposes `fn {amd,metis,scotch,kahip}_order_full(&CscPattern, &Opts) -> Result<(Vec<i32>, OrderingStats, CrateStats), OrderingError>`. Ipopt / feral pick the backend by name-dispatching, not by a generic `Orderer` trait. Crate-specific options and crate-specific stats stay in the crate.
+3. **No elimination tree in the contract.** Ordering crates return a permutation and a small shared `OrderingStats` (time, optional fill/flop estimates). Etree construction, symbolic factor, and postorder belong in the downstream analysis phase, not in the ordering boundary. METIS/SCOTCH/KaHIP give node separators, not etrees; forcing an etree across the boundary would shape-distort three of the four backends.
+
+**Why.** Locks API drift before three more crates are written. After verifying with the ipopt-expert agent that Ipopt's ordering consumers require only a permutation array across the boundary, the minimal-surface design falls out: the ordering crate returns perm + counters, downstream code (eventually feral's symbolic analysis, later Ipopt's `MA27TSolverInterface`-style wrapper) turns that into an etree on demand. A trait was considered and rejected — generic dispatch gains nothing when we have exactly four backends and the per-crate options diverge (METIS has `ufactor`, `seed`; SCOTCH has strategy strings; AMD has `dense_row_thresh`).
+
+**Alternatives considered.** `usize` index width (rejected: Ipopt column-index pipeline is `int`, casts at every interop boundary would just move the problem); `trait Orderer` with associated types (rejected: zero-benefit indirection given the four-backends-forever count); etree construction inside the ordering crates (rejected: see above — three of four backends would need to synthesize a fake etree from a separator tree, defeating the simplicity).
+
+**Reconsideration clause.** If a fifth ordering backend is ever added and it turns out to share options with an existing one, revisit the trait choice. If feral ever needs >2^31 rows (unrealistic for KKT matrices in NLP), revisit the `i32` choice.
+
+**Evidence.** `dev/plans/ordering-crate-contract.md` (full spec, including acceptance checklist); `crates/feral-ordering-core/src/lib.rs` (45 LOC contract module, 12 passing unit tests); `crates/feral-amd` retrofit passes 29 lib tests + 12 SuiteSparse oracle tests bit-for-bit after the switch to `i32`.
