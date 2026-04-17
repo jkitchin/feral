@@ -11,14 +11,14 @@
 //! `OrderingStats`, `OrderingError`, and `CONTRACT_VERSION` are
 //! re-exported from `feral-ordering-core`.
 //!
-//! **Status: K1 scaffold.** The public signatures are locked to the
-//! contract shape. The core algorithm (graph coarsening, initial
-//! bisection, FM refinement, node-separator construction, recursive
-//! nested dissection) is not yet implemented; `metis_order_full`
-//! currently returns [`OrderingError::Internal`] with the message
-//! `"not yet implemented"`. See `dev/plans/ordering-metis.md` for
-//! the implementation milestones (M1 graph infra, M2 coarsening, ...
-//! M7 ND driver, M8 integration).
+//! **Status: M1–M7 complete.** `metis_order_full` coarsens the graph
+//! (SHEM + 2-hop), picks the best of `niparts` initial bisections
+//! scored on their post-FM cut, uncoarsens with FM refinement, turns
+//! the final edge bisection into a node separator via min vertex
+//! cover (König's theorem), and recursively orders the two sides —
+//! handing off to AMD on subgraphs no larger than
+//! `nd_to_amd_switch`. M8 (integration into the main solver) is
+//! tracked separately in `dev/plans/ordering-metis.md`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -34,6 +34,7 @@ mod fm_refine;
 mod graph;
 #[allow(dead_code)]
 mod initial_partition;
+mod node_nd;
 #[allow(dead_code)]
 mod rng;
 #[allow(dead_code)]
@@ -91,10 +92,10 @@ impl Default for MetisOptions {
 
 /// Crate-specific diagnostic counters for METIS nested dissection.
 ///
-/// Populated incrementally as the implementation milestones land.
-/// Callers that only need the permutation should use
-/// [`metis_order`]; callers that need the shared [`OrderingStats`]
-/// (wall time, fill estimate) should use [`metis_order_full`].
+/// Populated per call to [`metis_order_full`]. Callers that only need
+/// the permutation should use [`metis_order`]; callers that need the
+/// shared [`OrderingStats`] (wall time) should use
+/// [`metis_order_full`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MetisStats {
     /// Number of coarsening levels built.
@@ -133,20 +134,25 @@ pub fn metis_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError> 
 /// produce them at the ordering boundary; they belong to a downstream
 /// symbolic analysis.
 ///
-/// **Currently a stub.** Returns
-/// `Err(OrderingError::Internal("not yet implemented"))` until the
-/// M1-M7 milestones in `dev/plans/ordering-metis.md` land.
+/// Runs the M1–M7 pipeline: coarsen, initial bisection, FM, separator
+/// construction, and recursive nested dissection with an AMD leaf
+/// fallback for subgraphs of at most `nd_to_amd_switch` vertices.
 pub fn metis_order_full(
     pattern: &CscPattern<'_>,
-    _opts: &MetisOptions,
+    opts: &MetisOptions,
 ) -> Result<(Vec<i32>, OrderingStats, MetisStats), OrderingError> {
-    // Pattern must already be valid (CscPattern::new enforces that),
-    // but we accept the borrowed view here and assume it. A length
-    // sanity check keeps the stub honest against zero-width input.
     if pattern.col_ptr.len() != pattern.n + 1 {
         return Err(OrderingError::MalformedInput);
     }
-    Err(OrderingError::Internal("not yet implemented"))
+    let t0 = std::time::Instant::now();
+    let mut stats = MetisStats::default();
+    let perm = node_nd::nd_order(pattern, opts, &mut stats)?;
+    let ordering_stats = OrderingStats {
+        time_us: t0.elapsed().as_micros() as u64,
+        fill_estimate: None,
+        flop_estimate: None,
+    };
+    Ok((perm, ordering_stats, stats))
 }
 
 #[cfg(test)]
@@ -179,19 +185,28 @@ mod tests {
     }
 
     #[test]
-    fn stub_returns_internal_not_yet_implemented() {
+    fn diagonal_pattern_yields_permutation() {
         let (cp, ri) = trivial_pattern();
         let pat = CscPattern::new(3, &cp, &ri).unwrap();
-        let err = metis_order_full(&pat, &MetisOptions::default()).unwrap_err();
-        assert_eq!(err, OrderingError::Internal("not yet implemented"));
+        let (perm, ostats, _mstats) = metis_order_full(&pat, &MetisOptions::default()).expect("ok");
+        assert_eq!(perm.len(), 3);
+        let mut seen = [false; 3];
+        for &p in &perm {
+            assert!((0..3).contains(&p));
+            seen[p as usize] = true;
+        }
+        assert!(seen.iter().all(|&s| s));
+        // time_us is populated; fill/flop remain None.
+        assert!(ostats.fill_estimate.is_none());
+        assert!(ostats.flop_estimate.is_none());
     }
 
     #[test]
-    fn stub_convenience_wrapper_propagates_error() {
+    fn convenience_wrapper_returns_permutation() {
         let (cp, ri) = trivial_pattern();
         let pat = CscPattern::new(3, &cp, &ri).unwrap();
-        let err = metis_order(&pat).unwrap_err();
-        assert_eq!(err, OrderingError::Internal("not yet implemented"));
+        let perm = metis_order(&pat).expect("ok");
+        assert_eq!(perm.len(), 3);
     }
 
     #[test]

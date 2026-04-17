@@ -13,5 +13,6 @@ name = "feral_metis"
 
 [dependencies]
 feral-ordering-core = { path = "../feral-ordering-core", version = "0.1" }
+feral-amd = { path = "../feral-amd", version = "0.1" }
 
 [dev-dependencies]

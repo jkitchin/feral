@@ -215,6 +215,7 @@ dependencies = [
 name = "feral-metis"
 version = "0.1.0"
 dependencies = [
+ "feral-amd",
  "feral-ordering-core",
 ]
 
