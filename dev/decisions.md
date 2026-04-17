@@ -774,3 +774,25 @@ work must re-verify this partition on commit. Recorded as a Phase
 **Evidence.** `/tmp/feral_bench_session04_final.txt`; 3-run medians
 in `dev/sessions/2026-04-14-04.md` "Benchmark Results" section.
 `FERAL-PROJECT-SPEC.md` §1747 for the exit criterion.
+
+---
+
+## 2026-04-16 — Ordering backends live in sibling workspace crates, not src/ordering
+
+**Decision.** Pluggable fill-reducing ordering backends (AMD, METIS, SCOTCH, KaHIP) are each implemented as their own Cargo workspace-member crate under `crates/*`, accepting a slice-based full-symmetric CSC pattern and returning a permutation. The feral package itself is untouched by these additions. Integration into feral's symbolic factorization is deferred to a future `dev/plans/ordering-integration.md` that will land after at least two backends exist and can be compared side-by-side.
+
+**Why.** (1) Keeps each backend testable in isolation against its own oracle (e.g. SuiteSparse AMD for feral-amd). (2) Avoids committing to one ordering strategy before we have comparative fill-quality numbers on feral's 153k corpus. (3) Slice-based input means no ordering crate depends on feral's `CscPattern` / `FeralError`, and third parties could adopt any one of them. (4) Each crate gets its own CLI + bench, mirroring how SuiteSparse ships each algorithm as a standalone artifact.
+
+**Alternatives considered.** In-place replacement of `src/ordering/amd.rs` (rejected: couples integration to correctness, and a subtle ordering bug would regress the 153k corpus before we can roll back); feature-gated alternatives inside feral (rejected: still couples lifecycle).
+
+**Evidence.** `dev/plans/ordering-amd-upgrade.md` (third revision, Architecture section); `Cargo.toml` root now has `[workspace] members = [".", "crates/feral-amd"]`; sibling plans `dev/plans/ordering-metis.md`, `ordering-scotch.md`, `ordering-kahip.md` on disk as placeholders.
+
+---
+
+## 2026-04-16 — Clean-room invariant for feral-amd enforced in CI
+
+**Decision.** The external SuiteSparse AMD port (`amd` crate v0.2.2) is used **only** as an external oracle, inside a throwaway Cargo project preserved at `crates/feral-amd/tests/data/amd_oracle/harness/` as `.txt` files (extension-stripped so Cargo never compiles them). The feral workspace dependency graph must never contain an `amd` crate dependency. `scripts/check-amd-cleanroom.sh` greps every `Cargo.toml`, every feral / feral-amd `*.rs` file, and `Cargo.lock` for violations; CI runs it as the `amd-cleanroom` step.
+
+**Why.** feral's MIT-license / pure-Rust / zero-non-Rust-deps posture requires that feral-amd be a clean-room implementation derived from published papers and faer's BSD-licensed in-tree port, not from SuiteSparse. A mechanical check prevents the oracle from accidentally leaking into the runtime graph.
+
+**Evidence.** `scripts/check-amd-cleanroom.sh` reports "clean-room OK: 'amd' crate absent from feral workspace"; `.github/workflows/ci.yml` `amd-cleanroom` step; harness `.txt` files under `crates/feral-amd/tests/data/amd_oracle/harness/` with SHA-256s pinned in the oracle README.

@@ -1,0 +1,114 @@
+#+TITLE: Pellegrini and Roman 1996 - SCOTCH: Static Mapping by Dual Recursive Bipartitioning
+#+FILETAGS: :summary:ordering:scotch:graph-partitioning:sparse-solver:
+
+* Pellegrini and Roman 1996 - SCOTCH: Static Mapping by Dual Recursive Bipartitioning
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: pellegrini1996scotch
+:STATUS: draft
+:CREATED: 2026-04-16
+:END:
+
+Pellegrini and Roman (1996) introduce SCOTCH, a software package for graph
+partitioning, static mapping, and sparse matrix ordering based on dual
+recursive bipartitioning citep:pellegrini1996scotch. This paper establishes the
+design philosophy that distinguishes SCOTCH from
+[[file:./karypis1998-metis.org][METIS]].
+
+** Dual Recursive Bipartitioning
+
+SCOTCH's central idea is /dual/ recursive bipartitioning: simultaneously
+partitioning both the /source graph/ (the computation graph or sparse matrix
+graph) and the /target architecture/ (the processor topology). This enables
+architecture-aware mapping where communication costs reflect the actual
+interconnect topology, not just abstract partition balance.
+
+For sparse matrix ordering (SCOTCH's =SCOTCH_graphOrder= API), the "target
+architecture" is a complete binary tree — matching the elimination tree
+structure. Each recursive bisection of the source graph maps to a split in
+the architecture tree, producing a nested dissection ordering.
+
+** Strategy Strings
+
+SCOTCH's most distinctive feature is its composable strategy string system.
+Users specify the partitioning method as a text string that encodes:
+
+- Which bipartitioning method to use (Fiduccia-Mattheyses, band graph,
+  multilevel, greedy, exact)
+- Switching conditions (e.g., "if graph has fewer than 120 vertices, use method
+  X; otherwise use method Y")
+- Composition operators for fallback chains
+
+Example: the default ordering strategy is approximately:
+#+BEGIN_EXAMPLE
+c{rat=0.7,cpr=n{sep=/(<vert>120)?m{...}|m{...};,ole=s,ose=s}}
+#+END_EXAMPLE
+
+This encodes: compress the graph (if compression ratio > 0.7), then apply
+nested dissection with multilevel FM-based separator computation, falling back
+to different parameters at different graph sizes. Leaf subproblems (< 120
+vertices) are ordered with a simpler method.
+
+Strategy strings are parsed at runtime, so the ordering method can be tuned
+without recompilation. This is powerful for solver developers who want to
+experiment with method combinations but adds implementation complexity.
+
+** Separation of Concerns
+
+SCOTCH separates three capabilities into a unified framework:
+1. *Graph partitioning* — splitting a graph into balanced parts with minimum
+   edge cut
+2. *Static mapping* — assigning computation to processors respecting topology
+3. *Sparse matrix ordering* — fill-reducing permutations via nested dissection
+
+All three use the same recursive bipartitioning core, with different objective
+functions and termination criteria. The ordering mode uses /vertex separators/
+(vertices whose removal disconnects the graph) rather than /edge cuts/
+(edges between partitions).
+
+** Vertex Separator Computation
+
+For ordering, SCOTCH computes vertex separators directly using a two-sided
+FM approach: after edge-bipartitioning, it identifies the vertex set whose
+removal disconnects the two parts. This differs from METIS, which first
+computes an edge bisection and then converts it to a vertex separator by
+selecting vertices on the "narrow" side of the cut.
+
+SCOTCH's direct vertex separator computation can produce tighter separators
+for nested dissection because it optimizes the separator size directly
+rather than as a secondary objective.
+
+** Graph Compression
+
+Before partitioning, SCOTCH can compress the graph by merging
+/indistinguishable vertices/ — vertices with identical adjacency structure.
+This is the same concept as AMD's supervariable detection. Compression
+reduces the effective graph size, often dramatically for structured problems,
+and is controlled by the =c{rat=R}= strategy parameter (compress if the
+ratio of compressed to original vertices exceeds R).
+
+** Relevance to FERAL
+
+SCOTCH is a lower-priority ordering option for FERAL compared to METIS. The
+key considerations:
+
+- *Fill quality*: Comparable to METIS on most problem classes, sometimes
+  slightly better on structured meshes due to direct vertex separator
+  computation
+- *Ordering time*: Typically slower than METIS due to more complex method
+  composition overhead
+- *Flexibility*: Strategy strings enable rapid experimentation with ordering
+  parameters
+- *Licensing*: CeCILL-C (LGPL-equivalent), which is problematic for static
+  linking into an MIT binary. A clean-room Rust implementation from papers
+  would be MIT-compatible but substantially more complex than METIS due to
+  the strategy string parser
+- *Distributed memory*: [[file:./chevalier2008-ptscotch.org][PT-SCOTCH]] has
+  more mature MPI support than ParMETIS, relevant for FERAL Phase 4
+
+** Bibliographic Details
+
+Pellegrini, F. and Roman, J. (1996). "Scotch: A Software Package for Static
+Mapping by Dual Recursive Bipartitioning of Process and Architecture Graphs."
+In /High-Performance Computing and Networking/, LNCS 1067, pp. 493-498.
+DOI: 10.1007/3-540-61142-8_588.

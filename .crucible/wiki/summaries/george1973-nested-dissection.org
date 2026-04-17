@@ -1,0 +1,109 @@
+#+TITLE: George 1973 - Nested Dissection of a Regular Finite Element Mesh
+#+FILETAGS: :summary:ordering:nested-dissection:fill-reduction:sparse-solver:graph-theory:
+
+* George 1973 - Nested Dissection of a Regular Finite Element Mesh
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: george1973nested
+:STATUS: draft
+:CREATED: 2026-04-16
+:END:
+
+Alan George (1973) introduces nested dissection as a fill-reducing ordering
+strategy for sparse symmetric positive definite systems arising from regular
+finite element meshes citep:george1973nested. This paper establishes the
+theoretical foundation for all graph-partitioning-based orderings, including
+[[file:./karypis1998-metis.org][METIS]] and
+[[file:./pellegrini1996-scotch.org][SCOTCH]].
+
+** The Nested Dissection Idea
+
+Consider the symmetric positive definite system Ax = b where A arises from
+discretization on an n x n grid (N = n^2 unknowns). The key observation: if a
+set of vertices S (a /separator/) is removed from the graph G(A), the remaining
+graph splits into two disconnected subgraphs G_1 and G_2. If the separator
+vertices are numbered /last/, then in the reordered matrix:
+
+- The diagonal blocks corresponding to G_1 and G_2 are independent
+- Fill during factorization of each block cannot cross into the other
+- Only the separator block (numbered last) couples the two halves
+
+This is applied recursively: each half G_1, G_2 is itself bisected by a
+separator, and so on until the subproblems are small enough to order by any
+method (e.g., minimum degree).
+
+** The Separator for Regular Meshes
+
+For an n x n grid, a natural separator is a horizontal or vertical line of n
+vertices that divides the grid into two (n/2) x n halves. This separator has
+exactly n vertices. More generally, for a k-dimensional regular mesh, a
+(k-1)-dimensional cross-section serves as the separator.
+
+The recursion depth is O(log n), and at each level the separators collectively
+contain O(n) vertices per level for 2D, giving O(n log n) total separator
+vertices across all levels.
+
+** Complexity Results
+
+For an n x n 2D grid (N = n^2 unknowns):
+
+| Ordering Method      | Fill (nnz in L) | Operations (flops) |
+|----------------------+-----------------+--------------------|
+| Natural (row-by-row) | O(N^{3/2})      | O(N^2)             |
+| Band (RCM)           | O(N^{3/2})      | O(N^2)             |
+| Nested dissection    | O(N log N)      | O(N^{3/2})         |
+
+The improvement is dramatic for large meshes. For 3D grids (N = n^3), the
+results are:
+
+| Ordering Method   | Fill         | Operations   |
+|-------------------+--------------+--------------|
+| Natural           | O(N^{5/3})   | O(N^{7/3})   |
+| Nested dissection | O(N^{4/3})   | O(N^2)       |
+
+** The Gap: Regular vs Irregular Graphs
+
+George's analysis depends on the existence of small, balanced separators that
+are easy to find. For regular meshes, these are geometrically obvious. For
+irregular graphs (unstructured meshes, constraint Jacobians, social networks),
+finding small balanced separators is NP-hard in general.
+
+This gap motivated two decades of research:
+- Lipton, Rose & Tarjan (1979) citep:lipton1979generalized proved that planar
+  graphs have O(sqrt(n)) separators, extending nested dissection to a broader
+  class
+- Karypis & Kumar (1998) citep:karypis1998fast developed the multilevel
+  framework (METIS) to find good separators heuristically on arbitrary graphs
+- Pellegrini & Roman (1996) citep:pellegrini1996scotch developed SCOTCH with
+  composable strategy strings for flexible separator computation
+
+** The Elimination Tree Perspective
+
+In modern sparse solver terminology, nested dissection produces a specific
+elimination tree shape: a balanced binary tree where each internal node
+corresponds to a separator and each leaf corresponds to a base-case subproblem.
+This balanced tree shape enables parallelism (siblings can be factored
+independently) and limits the maximum frontal matrix size (bounded by the
+separator size at each level).
+
+By contrast, minimum degree orderings tend to produce "tall and skinny"
+elimination trees that are harder to parallelize. This structural difference
+is one reason nested dissection (METIS/SCOTCH) is preferred for parallel
+sparse solvers, even when the total fill is comparable to minimum degree.
+
+** Relevance to FERAL
+
+Nested dissection theory establishes why METIS ordering should produce better
+fill than AMD on 3D problems and irregular graphs (FERAL's KKT target
+matrices). The O(N^{4/3}) vs O(N^{5/3}) fill gap for 3D problems is the
+primary motivation for adding METIS ordering in Phase 3.
+
+The balanced elimination tree structure is also relevant for FERAL's future
+parallelism work (Phase 4): nested dissection orderings expose more tree-level
+parallelism than minimum degree orderings.
+
+** Bibliographic Details
+
+George, A. (1973). "Nested Dissection of a Regular Finite Element Mesh."
+/SIAM Journal on Numerical Analysis/, 10(2):345-363.
+DOI: 10.1137/0710032.

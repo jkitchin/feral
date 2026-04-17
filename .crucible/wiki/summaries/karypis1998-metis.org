@@ -1,0 +1,158 @@
+#+TITLE: Karypis and Kumar 1998 - Multilevel Graph Partitioning (METIS)
+#+FILETAGS: :summary:ordering:metis:graph-partitioning:nested-dissection:fill-reduction:sparse-solver:
+
+* Karypis and Kumar 1998 - Multilevel Graph Partitioning (METIS)
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: karypis1998fast
+:STATUS: draft
+:CREATED: 2026-04-16
+:END:
+
+Karypis and Kumar (1998) present the multilevel graph partitioning framework
+that forms the core of METIS citep:karypis1998fast. This is the primary
+reference for implementing fill-reducing
+[[file:../concepts/sparse-matrix-ordering.org][nested dissection ordering]] via
+graph partitioning.
+
+** The Multilevel Framework
+
+The algorithm partitions a graph G = (V, E) into two balanced parts with
+minimum edge cut through three phases:
+
+*** Phase 1: Coarsening
+
+Repeatedly contract the graph by matching pairs of vertices and merging them.
+Each level halves the vertex count. The coarsening continues until the graph
+has O(100) vertices.
+
+*Heavy-Edge Matching (HEM):* The key heuristic. For each unmatched vertex v
+(visited in random order, biased toward low-degree vertices), match v with the
+unmatched neighbor u that maximizes edge weight w(v,u). This preserves heavy
+edges through coarsening, which tends to keep them internal to partitions
+rather than on the cut.
+
+*Sorted Heavy-Edge Matching (SHEM):* Same as HEM but vertices are visited
+sorted by the heaviest incident edge weight. Slightly better quality, slightly
+more expensive.
+
+The METIS implementation uses bucket-sort by sqrt(degree) to bias traversal
+toward low-degree vertices. A 2-hop fallback matches vertices that find no
+direct match.
+
+Coarsening terminates when vertex count drops below =CoarsenTo= (~100) or the
+reduction ratio per level falls below a threshold (~0.75).
+
+*** Phase 2: Initial Partition
+
+At the coarsest level (O(100) vertices), multiple initial partitions are
+computed and the best is kept. Methods include:
+
+- *Greedy Graph Growing (GGP):* Start from a random vertex, greedily grow one
+  partition by adding vertices that minimize the edge cut increase
+- *Random partition + FM refinement:* Random balanced partition refined with
+  Fiduccia-Mattheyses
+
+Multiple restarts (controlled by =METIS_OPTION_NSEPS=) improve robustness.
+
+*** Phase 3: Uncoarsening and Refinement
+
+The partition is projected back through the coarsening hierarchy. At each
+level, Fiduccia-Mattheyses citep:fiduccia1982linear refinement improves the
+partition:
+
+1. For each boundary vertex v, compute gain = (edges to other part) - (edges
+   to own part)
+2. Select the vertex with highest positive gain and move it
+3. Continue making moves (even negative-gain ones), recording the best cut
+   seen
+4. Roll back to the best state
+
+The boundary restriction (only boundary vertices are candidates) makes each
+pass O(|boundary edges|). Typically 2-4 passes suffice.
+
+** Nested Dissection for Fill-Reducing Ordering
+
+Section 6 of the paper applies the multilevel framework to sparse matrix
+ordering via nested dissection. The =METIS_NodeND= API implements this:
+
+1. *Find node separator:* Convert the edge bisection to a vertex separator
+   (vertices whose removal disconnects the graph into two parts). METIS does
+   this by selecting boundary vertices and computing a minimum vertex cover
+   of the bipartite boundary graph, then refining with node-separator FM.
+
+2. *Number separator last:* Separator vertices receive the highest indices in
+   the permutation. This ensures they are eliminated last, confining fill to
+   the two independent subgraphs.
+
+3. *Recurse:* Split the graph along the separator into left and right
+   subgraphs. Recurse on each half. Below a threshold (~120 vertices), fall
+   back to multiple minimum degree (MMD) for the base case.
+
+4. *Output:* The permutation vector =perm[i]= maps original vertex i to its
+   position in the nested dissection ordering.
+
+** Node Separator FM Refinement
+
+Node-separator refinement differs from edge-bisection FM:
+
+- Two priority queues (one per side of the separator)
+- Moving a separator vertex v to side =to= pulls v's neighbors on the
+  /other/ side into the separator
+- Gain for vertex v on the separator: =vwgt[v] - edegrees[other_side]=
+  (weight saved minus weight gained)
+- Both two-sided (refine both sides simultaneously) and one-sided
+  (alternate sides across passes) variants are implemented
+
+** Key Results
+
+On the benchmark suite (graphs from finite element meshes and irregular
+structures):
+
+- 10-50x faster than spectral bisection with equal or better partition quality
+- Fill reduction for nested dissection: 2-5x less fill than minimum degree on
+  large 3D problems
+- Ordering time scales as O(|E| log n), competitive with AMD's O(nnz)
+
+** Data Structures
+
+METIS uses CSR (Compressed Sparse Row) representation:
+- =xadj[nvtxs+1]=: row pointers (vertex adjacency offsets)
+- =adjncy[]=: column indices (neighbor lists)
+- =vwgt[]=: vertex weights
+- =adjwgt[]=: edge weights
+- =where[nvtxs]=: partition assignment (0, 1, or 2 for separator)
+- =label[]=: maps coarse vertices back to original numbering
+
+These map directly to Rust =Vec<usize>= / =Vec<i32>= arrays.
+
+** Implementation Reference
+
+METIS v5.2.0 (Apache 2.0 license) key source files:
+- =ometis.c=: =METIS_NodeND= driver, =MlevelNestedDissection= recursion
+- =coarsen.c=: =CoarsenGraph=, =Match_RM=, =Match_SHEM= matching
+- =separator.c=: =ConstructSeparator=, =ConstructMinCoverSeparator=
+- =sfm.c=: =FM_2WayNodeRefine2Sided=, node-separator FM refinement
+- =fm.c=: edge-bisection FM refinement (shared primitive)
+
+Code: https://github.com/KarypisLab/METIS
+
+** Relevance to FERAL
+
+This paper is the primary algorithmic reference for implementing
+[[file:../concepts/metis-graph-partitioning.org][METIS ordering]] in FERAL.
+The multilevel framework maps cleanly to Rust: CSR arrays become =Vec<usize>=,
+matching uses a =Vec<Option<usize>>= match array, and FM refinement uses a
+bucket priority queue. The =METIS_NodeND= output is a permutation vector that
+plugs directly into FERAL's existing elimination tree → postorder → column
+counts pipeline.
+
+FERAL's target matrices (KKT systems from NLP, n ~ 2k-50k) are exactly the
+class where METIS ordering produces significantly better fill than AMD, making
+this the highest-priority ordering upgrade for Phase 3.
+
+** Bibliographic Details
+
+Karypis, G. and Kumar, V. (1998). "A Fast and High Quality Multilevel Scheme
+for Partitioning Irregular Graphs." /SIAM Journal on Scientific Computing/,
+20(1):359-392. DOI: 10.1137/S1064827595287997.

@@ -1,0 +1,221 @@
+#+TITLE: Ordering Algorithm Comparison: AMD, METIS, SCOTCH, and KaHIP
+#+FILETAGS: :concept:ordering:amd:metis:scotch:kahip:fill-reduction:benchmarking:sparse-solver:
+
+* Ordering Algorithm Comparison: AMD, METIS, SCOTCH, and KaHIP
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: davis2016survey, karypis1998fast, amestoy1996approximate, sanders2011engineering
+:STATUS: draft
+:CREATED: 2026-04-16
+:UPDATED: 2026-04-16
+:END:
+
+This article compares the four fill-reducing
+[[file:./sparse-matrix-ordering.org][ordering algorithms]] relevant to FERAL:
+[[file:./approximate-minimum-degree.org][AMD]],
+[[file:./metis-graph-partitioning.org][METIS]],
+[[file:./scotch-graph-ordering.org][SCOTCH]], and
+[[file:./kahip-graph-partitioning.org][KaHIP]]. The comparison covers theoretical
+fill complexity, empirical performance, and practical recommendations for
+FERAL's KKT-focused workload.
+
+** Taxonomy
+
+| Property          | AMD                      | METIS                   | SCOTCH                   | KaHIP                    |
+|-------------------+--------------------------+-------------------------+--------------------------+--------------------------|
+| Approach          | Local greedy heuristic   | Global graph partitioning | Global graph partitioning | Global graph partitioning |
+| Strategy          | Minimum degree           | Nested dissection        | Nested dissection         | Nested dissection         |
+| Refinement        | N/A (greedy degree)      | FM (greedy moves)        | FM + vertex separator     | Max-flow (exact local)    |
+| Graph model       | Quotient graph           | CSR with coarsening      | CSR with coarsening       | CSR with coarsening       |
+| Parallelism       | Inherently sequential    | mt-METIS (shared memory) | PT-SCOTCH (distributed)   | Shared memory (KaFFPaE)   |
+| Configurability   | Dense threshold only     | ~6 tunable parameters    | Strategy strings           | Fast/Eco/Strong modes     |
+| Complexity        | O(nnz) amortized         | O(\vert E\vert log n)          | O(\vert E\vert log n)           | O(\vert E\vert log n) × cycles  |
+| License           | BSD-3                    | Apache 2.0               | CeCILL-C (LGPL)           | MIT                       |
+
+** Theoretical Fill Complexity
+
+Asymptotic fill (nnz in L) for structured problems:
+
+| Matrix Class           | AMD               | Nested Dissection (METIS/SCOTCH) |
+|------------------------+-------------------+----------------------------------|
+| 2D regular mesh (N=n^2) | O(N log N)        | O(N log N) — comparable          |
+| 3D regular mesh (N=n^3) | O(N^{5/3})        | O(N^{4/3}) — significantly better |
+| Band matrix (bw = b)  | O(Nb)             | O(Nb) — comparable               |
+| Arrow/star (hub + N-1) | O(N) — optimal    | O(N) — also optimal              |
+| Planar graph           | O(N log N)        | O(N log N) — comparable          |
+
+The critical gap is 3D problems: nested dissection achieves O(N^{4/3}) vs
+AMD's O(N^{5/3}). For N = 100,000 this is the difference between ~2.1M and
+~8.5M fill entries — a 4x factor.
+
+** Empirical Comparison on Representative Matrix Classes
+
+Based on Davis (2016) citep:davis2016survey survey data and SuiteSparse Matrix
+Collection benchmarks:
+
+*** Structured FE Meshes (2D)
+
+AMD and METIS produce comparable fill (within 10%). AMD is typically 2-5x
+faster in ordering time. /Recommendation: AMD./
+
+*** Structured FE Meshes (3D)
+
+METIS produces 2-5x less fill than AMD on large 3D problems (n > 10,000).
+The gap grows with problem size. /Recommendation: METIS./
+
+*** KKT Matrices from Interior-Point Methods
+
+These have a 2x2 block structure [[H, J^T], [J, -D]] with irregular coupling
+between primal (H) and constraint (J) blocks. AMD's local heuristic performs
+poorly because:
+1. The constraint block creates long-range connections
+2. Dense columns in J inflate AMD's degree estimates
+3. The saddle-point structure has no natural bandwidth
+
+METIS's global view handles this much better: it finds separators that respect
+the block structure. Empirically, METIS produces 2-5x less fill on KKT
+matrices. /Recommendation: METIS for all KKT systems./
+
+*** Bordered Block Diagonal (from Decomposition-Based NLP)
+
+A block diagonal with a coupling border. AMD handles this well if the border is
+narrow. METIS can find the border as a separator. Performance is similar.
+/Recommendation: Either, depending on problem size./
+
+*** Very Small Problems (n < 500)
+
+Ordering overhead is a significant fraction of total solve time. AMD's
+simplicity wins. METIS's multilevel overhead is not justified.
+/Recommendation: AMD./
+
+** Ordering Time vs Fill Quality Tradeoff
+
+| Problem Size | AMD Time | METIS Time | KaHIP-Eco Time | Fill (METIS/AMD) | Fill (KaHIP/AMD) |
+|--------------+----------+------------+----------------+------------------+------------------|
+| n = 100      | ~5 us    | ~50 us     | ~100 us        | ~0.95-1.05       | ~0.90-1.00       |
+| n = 1,000    | ~50 us   | ~200 us    | ~500 us        | ~0.80-1.00       | ~0.75-0.95       |
+| n = 10,000   | ~1 ms    | ~5 ms      | ~12 ms         | ~0.50-0.90       | ~0.45-0.85       |
+| n = 100,000  | ~50 ms   | ~100 ms    | ~250 ms        | ~0.30-0.70       | ~0.25-0.65       |
+
+For small problems, AMD is faster and produces comparable fill. For large
+problems, nested dissection's superior fill reduction more than compensates
+for ordering overhead — the factorization savings dwarf the ordering cost.
+
+The crossover point (where METIS fill savings justify its overhead in total
+solve time) is typically n ~ 1,000-5,000. For KaHIP-Eco vs METIS, the
+crossover is when the matrix is factored ≥ 2-5 times with the same pattern
+(common in IPM iterations).
+
+** SCOTCH vs METIS
+
+On most benchmarks, SCOTCH and METIS produce comparable fill (within 5%).
+Key differences:
+
+- SCOTCH's direct vertex separator computation sometimes produces 5-10%
+  smaller separators on structured meshes
+- METIS is typically 10-30% faster due to simpler method dispatch
+- SCOTCH's strategy strings enable fine-grained tuning without recompilation
+- PT-SCOTCH scales better than ParMETIS on high core counts (>64 MPI ranks)
+
+For serial use (FERAL Phases 2-3), METIS is preferred for simplicity and speed.
+For distributed memory (Phase 4), PT-SCOTCH may be preferred for scaling.
+
+** KaHIP vs METIS
+
+KaHIP citep:sanders2011engineering consistently outperforms METIS on partition
+quality across diverse graph classes:
+
+- *Separator quality*: KaHIP-Eco produces 10-15% smaller separators than METIS;
+  KaHIP-Strong produces 15-30% smaller separators
+- *Fill reduction*: 5-20% less fill than METIS on irregular graphs and KKT
+  matrices, as a direct consequence of better separators
+- *Ordering time*: KaHIP-Eco is 2-3× slower than METIS; KaHIP-Strong is 5-10×
+- *Data reduction*: KaHIP's preprocessing rules citep:ost2021datareduction can
+  achieve 6× speedup over METIS with better fill on structured problems
+
+The quality advantage comes from flow-based refinement (exact local min-cut vs
+FM's greedy approximation) and iterated V/F-cycles (multigrid-style iteration
+vs METIS's single pass). The "Fast" mode uses FM-only refinement with no
+cycling, making it comparable to METIS in both speed and quality.
+
+For FERAL's KKT workload (matrices factored repeatedly during IPM iterations),
+KaHIP-Eco is the recommended default: the 2-3× ordering overhead is amortized
+over multiple factorizations, and the fill improvement directly reduces each
+factorization's cost.
+
+** FERAL-Specific Benchmarking Methodology
+
+*** Metrics
+
+1. *Fill ratio*: nnz(L) / nnz(A) — primary quality metric
+2. *Operation count*: sum of supernode flop counts — accounts for supernode
+   amalgamation effects
+3. *Ordering time fraction*: ordering_time / total_solve_time — determines
+   whether ordering quality matters or overhead dominates
+4. *Factor time*: wall-clock factorization time with each ordering — the
+   bottom-line metric
+
+*** Matrix Sources
+
+1. *SuiteSparse Matrix Collection*: Symmetric indefinite subset, provides
+   standard benchmarks with known properties
+2. *CUTEst KKT corpus*: The POUNCE matrices from CUTEst — FERAL's primary
+   target workload
+3. *Constructed stress tests*: Arrow matrices, bordered diagonal, random
+   irregular graphs — tests edge cases
+
+*** Comparison Baselines
+
+- *SuiteSparse AMD + CHOLMOD column counts*: For fill comparison
+- *MUMPS with METIS (ICNTL(7)=5)*: For end-to-end factorization time
+- *FERAL's current exact minimum degree*: For FERAL-internal regression
+  testing
+
+*** Reporting Protocol
+
+Per FERAL project rules:
+- When benchmark numbers are worse than the previous session, report
+  explicitly at the top of the checkpoint
+- Use 3-run medians to reduce noise (single-run p90 readings were
+  found unreliable with 3-5% variation)
+- Report both absolute numbers and ratios against baselines
+
+** Recommendations for FERAL
+
+*** Phase 3 (Current Priority)
+
+1. Implement true AMD (replacing exact minimum degree) using the quotient
+   graph model from [[file:./approximate-minimum-degree.org][the AMD concept
+   article]]. This is lower-risk, builds on existing code, and improves
+   performance on the existing corpus.
+
+2. Implement METIS NodeND using the multilevel framework from
+   [[file:./metis-graph-partitioning.org][the METIS concept article]]. This
+   addresses the primary fill quality gap on KKT matrices.
+
+3. Benchmark both orderings on the POUNCE corpus and SuiteSparse symmetric
+   indefinite matrices. The comparison should confirm METIS's superiority
+   on KKT systems while quantifying the ordering time tradeoff.
+
+*** Phase 4 (Future)
+
+Consider SCOTCH only if:
+- Distributed memory support requires PT-SCOTCH's scaling
+- Specific problem classes show >10% fill improvement over METIS
+
+*** Default Ordering Selection
+
+A practical heuristic used by MUMPS and other solvers:
+- n < 1000: Use AMD (lower overhead, comparable fill)
+- n >= 1000: Use METIS (better fill, overhead amortized by factorization)
+- User override: Always allow explicit selection
+
+** References
+
+- citep:davis2016survey — Survey Tables 7.1-7.3: comprehensive ordering
+  comparison across matrix classes
+- citep:amestoy1996approximate — AMD theory and quality analysis
+- citep:karypis1998fast — METIS: nested dissection results (Section 6)
+- citep:pellegrini1996scotch — SCOTCH: strategy-based ordering
+- citep:george1973nested — Nested dissection: theoretical fill bounds
+- citep:lipton1979generalized — Generalized separator theorems

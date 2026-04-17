@@ -1,0 +1,148 @@
+#+TITLE: Amestoy, Davis, and Duff 2004 - Algorithm 837: AMD Implementation
+#+FILETAGS: :summary:ordering:amd:fill-reduction:quotient-graph:sparse-solver:
+
+* Amestoy, Davis, and Duff 2004 - Algorithm 837: AMD Implementation
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: amestoy2004algorithm837
+:STATUS: draft
+:CREATED: 2026-04-16
+:END:
+
+Amestoy, Davis, and Duff (2004) describe the C/Fortran implementation of the
+AMD algorithm as ACM TOMS Algorithm 837 citep:amestoy2004algorithm837. This
+is the companion implementation paper to
+[[file:./amestoy1996-amd.org][Amestoy et al. 1996]] and the primary reference
+for implementing true AMD in FERAL.
+
+** Implementation Architecture
+
+The SuiteSparse AMD implementation consists of:
+
+- =amd_order.c=: Driver that validates input, calls preprocessing, then the
+  core algorithm
+- =amd_1.c=: Preprocessing — removes dense rows/columns, computes the
+  symmetrized pattern A + A^T, performs initial compression
+- =amd_2.c=: Core elimination loop (~500 lines) — the quotient graph
+  algorithm
+- =amd_postorder.c=: Postorders the resulting elimination tree
+- =amd_aat.c=: Computes the column counts of A + A^T without forming it
+
+** The In-Place Quotient Graph
+
+The key implementation technique: the quotient graph is maintained /in place/
+on the input adjacency arrays. As variables are eliminated, their adjacency
+lists are repurposed to store element information. This avoids auxiliary
+storage and keeps memory usage at 2*nnz + O(n).
+
+The =Iw= workspace (integer workspace, length =iwlen >= nnz + n=) stores
+all adjacency lists. As the algorithm proceeds:
+
+- *Live variables* have their adjacency lists in =Iw=. The list for variable
+  i starts at =Pe[i]= and has length =Len[i]=. Entries are a mix of other
+  variables and elements.
+- *Elements* (eliminated supervariables) reuse the eliminated variable's
+  adjacency list storage. The element's list contains the variables adjacent
+  to it in the quotient graph.
+- *Dead variables* (merged into supervariables) have =Nv[i] = 0= and
+  =Pe[i]= pointing to the representative.
+
+** Key Arrays
+
+| Array    | Length | Purpose                                        |
+|----------+--------+------------------------------------------------|
+| =Pe[n]=  | n      | Pointer into Iw for variable/element i's list  |
+| =Len[n]= | n     | Length of variable/element i's adjacency list   |
+| =Nv[n]=  | n      | Number of variables represented by supervariable i (0 = dead) |
+| =Elen[n]= | n    | During ordering: degree (for degree lists). After: element status |
+| =Last[n]= | n    | Previous variable in degree list (doubly linked) |
+| =Next[n]= | n    | Next variable in degree list (doubly linked)   |
+| =Head[n]= | n    | Head of degree list d (Head[d] = first variable with degree d) |
+| =W[n]=   | n      | Mark array for O(1) set membership tests        |
+
+Total workspace: =Iw[iwlen]= + 8 arrays of length n = O(nnz + n) integers.
+
+** The Elimination Loop (amd_2.c)
+
+Each iteration selects and eliminates the variable with minimum approximate
+degree:
+
+1. *Select pivot:* Take the first variable from the lowest non-empty degree
+   list (=Head[mindeg]=). This is O(1) amortized since =mindeg= only
+   increases.
+
+2. *Element absorption:* For each element e in the pivot's adjacency list,
+   scan e's variable list. If element e is a subset of another element e',
+   absorb e into e' (set =Nv[e] = 0=, redirect =Pe[e]=). Aggressive
+   absorption extends this: absorb e if the external degree of e's variables
+   (relative to e) is zero, meaning all of e's variables are in the current
+   front.
+
+3. *Supervariable detection:* After updating the adjacency of the new
+   element, hash each remaining variable's adjacency pattern. Variables with
+   the same hash are candidates for supervariable merging. Verified by exact
+   comparison — if two variables have identical adjacency, merge them
+   (=Nv[rep] += Nv[dup]=, =Nv[dup] = 0=).
+
+4. *Approximate degree computation:* For each variable v adjacent to the new
+   element, compute the approximate external degree:
+   #+BEGIN_EXAMPLE
+   d(v) <= |A_v| + sum_{e in adj(v)} |L_e| - |L_e intersect A_v|
+   #+END_EXAMPLE
+   where =A_v= is v's variable neighbors and =L_e= is element e's variable
+   list. The upper bound avoids the expensive exact set-union computation.
+   The mark array =W= provides O(1) membership tests for the
+   intersection term.
+
+5. *Update degree lists:* Move each updated variable to its new degree list.
+   This is O(1) per variable using the doubly-linked list pointers.
+
+6. *Garbage collection:* When =Iw= fills up, compress by removing dead
+   entries and reclaiming space. This happens rarely — amortized O(nnz)
+   over the full algorithm.
+
+** Complexity
+
+Amortized O(nnz * alpha(n)) where alpha is the inverse Ackermann function
+(effectively O(nnz) in practice). The amortization arises from element
+absorption and supervariable detection, which keep the quotient graph
+compact.
+
+** Aggressive Absorption
+
+The =AMD_AGGRESSIVE= parameter controls a stronger absorption heuristic:
+absorb element e if /all/ of e's variables are adjacent to the current
+front (their external degree through e is zero). This aggressively compresses
+the quotient graph, reducing memory and computation at the cost of a slightly
+looser degree approximation. In practice, aggressive absorption produces
+orderings within 1-2% of non-aggressive AMD while being 20-40% faster.
+
+SuiteSparse AMD enables aggressive absorption by default.
+
+** Relevance to FERAL
+
+FERAL's current ordering (=src/ordering/amd.rs=) uses /exact/ minimum degree,
+not true AMD. The key differences from Algorithm 837:
+
+1. No quotient graph — FERAL maintains explicit adjacency lists and adds fill
+   edges at each elimination step
+2. No element absorption — the graph grows as fill is inserted
+3. No supervariable detection — each variable is tracked individually
+4. No approximate degree — exact degree computed by set-size after fill
+   insertion
+
+Upgrading to true AMD requires implementing the in-place quotient graph on
+FERAL's CSC arrays, using the mark array for O(1) membership (which FERAL
+already has for the fill-edge optimization), adding element absorption and
+supervariable detection, and replacing exact degree with the approximate
+degree formula. The data structure mapping is: CSC =col_ptr/row_idx= →
+=Pe/Len= pointers into a flat =Iw= workspace.
+
+** Bibliographic Details
+
+Amestoy, P.R., Davis, T.A., and Duff, I.S. (2004). "Algorithm 837: AMD, an
+Approximate Minimum Degree Ordering Algorithm." /ACM Transactions on
+Mathematical Software/, 30(3):381-388. DOI: 10.1145/1024074.1024081.
+
+Code: https://github.com/DrTimothyAldenDavis/SuiteSparse/tree/main/AMD
+License: BSD-3-Clause (since SuiteSparse v7.0, 2023).

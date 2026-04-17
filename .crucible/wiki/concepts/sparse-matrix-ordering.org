@@ -1,5 +1,5 @@
 #+TITLE: Sparse Matrix Ordering
-#+FILETAGS: :concept:sparse-solver:ordering:amd:fill-reduction:
+#+FILETAGS: :concept:sparse-solver:ordering:amd:metis:scotch:fill-reduction:nested-dissection:
 
 * Sparse Matrix Ordering
 :PROPERTIES:
@@ -7,6 +7,7 @@
 :SOURCE_KEYS: feral2026
 :STATUS: draft
 :CREATED: 2026-04-06
+:UPDATED: 2026-04-16
 :END:
 
 Sparse matrix ordering is the process of finding a permutation of rows and
@@ -18,24 +19,69 @@ storage and computational efficiency. Ordering is the first step of the
 determines the shape of the elimination tree and the sizes of frontal matrices
 citep:feral2026.
 
-** Approximate Minimum Degree (AMD)
+** Taxonomy of Ordering Algorithms
 
-The primary ordering algorithm used in FERAL is AMD, introduced by Amestoy,
-Davis, and Duff (1996). AMD is a graph-based heuristic that, at each elimination
-step, selects the vertex (column) with the smallest approximate degree in the
-elimination graph. The "approximate" qualifier refers to using upper bounds on
-the true degree, which avoids the expensive exact degree computation that would
-make the algorithm O(n^2) per step.
+Fill-reducing orderings fall into two broad categories:
 
-AMD produces a permutation vector =perm: Vec<usize>= (not an elimination tree
-directly). The elimination tree is constructed as a separate step from the
-permuted sparsity pattern of P*A*P^T. This separation is important because
-FERAL may eventually support alternative orderings (e.g., METIS) that produce
-different permutations but feed into the same elimination tree construction.
+*** Local Heuristics (Minimum Degree Family)
 
-The reference implementation is SuiteSparse AMD, specifically =amd_2.c= for the
-core elimination loop and =amd_postorder.c= for postordering the resulting
-elimination tree.
+Greedy algorithms that make locally optimal pivot selections at each step.
+At each elimination step, select the vertex with the smallest degree
+(number of neighbors) in the current elimination graph.
+
+- *Exact Minimum Degree (MMD)*: Maintains exact degrees. O(n * nnz)
+  worst case.
+- *Approximate Minimum Degree (AMD)*: Uses degree upper bounds via the
+  quotient graph model. Amortized O(nnz). See
+  [[file:./approximate-minimum-degree.org][AMD concept article]].
+- *Strengths*: Fast (especially for small/medium problems), low overhead,
+  simple interface
+- *Weaknesses*: Myopic — cannot exploit global structure, produces
+  suboptimal fill on irregular and 3D problems
+
+*** Global Partitioning (Nested Dissection Family)
+
+Recursive algorithms that exploit graph structure by finding vertex
+separators. The separator vertices are eliminated last, confining fill to
+the two disconnected subgraphs.
+
+- *METIS*: Multilevel graph partitioning with FM refinement
+  citep:karypis1998fast. See
+  [[file:./metis-graph-partitioning.org][METIS concept article]].
+- *KaHIP*: Multilevel graph partitioning with max-flow-based refinement
+  citep:sanders2011engineering. See
+  [[file:./kahip-graph-partitioning.org][KaHIP concept article]].
+- *SCOTCH*: Composable strategy-string-based partitioning
+  citep:pellegrini1996scotch. See
+  [[file:./scotch-graph-ordering.org][SCOTCH concept article]].
+- *Strengths*: Provably optimal fill on regular meshes, much better fill
+  on 3D and irregular problems, produces balanced elimination trees
+  favorable for parallelism
+- *Weaknesses*: Higher constant factors, more complex implementation,
+  less effective on small problems
+
+For a detailed comparison, see
+[[file:./ordering-algorithm-comparison.org][Ordering Algorithm Comparison]].
+
+** FERAL's Ordering Pipeline
+
+All ordering algorithms produce the same output: a permutation vector
+=perm: Vec<usize>= mapping new indices to old. This feeds into a common
+downstream pipeline:
+
+1. *Ordering*: AMD, METIS, or other → =perm[n]=
+2. *Permute pattern*: Apply perm to get P*A*P^T sparsity pattern
+3. *Elimination tree*: Construct from permuted pattern
+   (George & Liu 1981, O(nnz * alpha(n)))
+4. *Postorder*: Reorder elimination tree so children are contiguous
+   (enables LIFO assembly and cache locality)
+5. *Compose permutation*: =final_perm[k] = amd_perm[postorder[k]]=
+6. *Column counts*: Liu's algorithm on the postordered tree
+7. *Supernode detection*: Merge columns with identical structure
+8. *Memory plan*: Preallocate factor storage
+
+This separation of concerns means any new ordering algorithm only needs to
+produce a permutation vector — the rest of the pipeline is shared.
 
 ** Elimination Tree
 
@@ -46,8 +92,8 @@ has the property that column j depends only on its descendants in the tree, so
 any postorder traversal of the tree produces a valid elimination order.
 
 The elimination tree is constructed from the permuted sparsity pattern using a
-well-known O(nnz) algorithm (George and Liu, 1981). FERAL constructs it as a
-separate step after AMD ordering.
+well-known O(nnz) algorithm (George and Liu, 1981) citep:george1981computer.
+FERAL constructs it as a separate step after ordering.
 
 ** Postordering
 
@@ -78,18 +124,22 @@ many small operations into fewer large dense operations, enabling BLAS-3
 performance. FERAL supports two policies: =SupernodePolicy::None= for small
 problems (n < ~200) and =SupernodePolicy::Aggressive= for larger problems.
 
-** Alternative Orderings
-
-METIS is a graph partitioning-based ordering that can produce better fill
-reduction than AMD on some problem classes, particularly those with irregular
-sparsity patterns. FERAL plans to support METIS as an alternative ordering in
-Phase 2. The interface is the same: a permutation vector fed into elimination
-tree construction.
-
 ** Ordering Quality and Benchmarking
 
-One of the Tier 3 benchmark categories in FERAL is matrices where AMD gives poor
-fill compared to METIS, specifically to test ordering sensitivity. The fill
-ratio metric (actual NNZ / predicted NNZ) in the benchmark harness tracks
-ordering quality. A fill ratio above 1.5 indicates either poor ordering or
-inaccurate fill prediction, both of which warrant investigation.
+Key metrics for evaluating ordering quality:
+
+1. *Fill ratio*: nnz(L) / nnz(A) — lower is better. A ratio above 1.5
+   warrants investigation.
+2. *Operation count*: Total flops for factorization — determined by frontal
+   matrix sizes, which are set by the ordering.
+3. *Ordering time fraction*: Time spent ordering / total solve time. For
+   small matrices ordering can dominate; for large matrices factorization
+   dominates.
+4. *Elimination tree shape*: Balanced trees (from nested dissection) expose
+   more parallelism than tall/skinny trees (from minimum degree).
+
+FERAL's Tier 3 benchmark matrices include cases where AMD gives poor fill
+compared to METIS, specifically to test ordering sensitivity. Matrix sources
+for evaluation: SuiteSparse Matrix Collection (symmetric indefinite subset),
+CUTEst KKT corpus, and constructed stress tests (arrow, bordered diagonal,
+random irregular).

@@ -1,0 +1,281 @@
+#+TITLE: KaHIP: Flow-Based Graph Partitioning for Nested Dissection
+#+FILETAGS: :concept:ordering:kahip:graph-partitioning:max-flow:nested-dissection:fill-reduction:sparse-solver:
+
+* KaHIP: Flow-Based Graph Partitioning for Nested Dissection
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: sanders2011engineering, sanders2013think, ost2021datareduction
+:STATUS: draft
+:CREATED: 2026-04-16
+:END:
+
+KaHIP (Karlsruhe High Quality Partitioning) is a graph partitioning framework
+that computes fill-reducing [[file:./sparse-matrix-ordering.org][orderings]] via
+nested dissection, using max-flow-based refinement instead of the
+Fiduccia-Mattheyses (FM) refinement used by
+[[file:./metis-graph-partitioning.org][METIS]] and
+[[file:./scotch-graph-ordering.org][SCOTCH]] citep:sanders2011engineering. KaHIP
+consistently produces higher-quality partitions — and therefore smaller vertex
+separators and less fill — than METIS across diverse graph classes.
+
+** What Makes KaHIP Different
+
+KaHIP shares the multilevel paradigm with METIS (coarsen → partition → refine),
+but differs in three fundamental ways:
+
+1. *Flow-based refinement* — Solves local max-flow/min-cut problems instead of
+   greedy FM moves. Finds locally optimal cuts that FM misses.
+2. *Iterated V/F-cycles* — Re-coarsens and re-refines multiple times, borrowed
+   from multigrid methods. Each cycle can only improve quality.
+3. *Data reduction preprocessing* — Exhaustive graph simplification rules
+   before nested dissection citep:ost2021datareduction.
+
+** Flow-Based Local Improvement
+
+The core algorithmic innovation citep:sanders2011engineering. Given a current
+partition with boundary B:
+
+*** Algorithm
+
+1. *Grow area:* Starting from boundary vertices, BFS outward to distance d.
+   This defines a local area A around the boundary.
+
+2. *Construct flow network:* Within A, designate:
+   - Source S = vertices at distance d in part 0 (firmly in part 0)
+   - Sink T = vertices at distance d in part 1 (firmly in part 1)
+   - Internal vertices = all other vertices in A
+
+3. *Solve max-flow:* Compute the maximum flow from S to T in the subgraph
+   induced by A. By the max-flow/min-cut theorem, the minimum cut gives the
+   optimal partition of A that separates S from T.
+
+4. *Apply cut:* Vertices on the source side of the min-cut go to part 0;
+   sink side to part 1. This is guaranteed to be at least as good as the
+   current partition within A.
+
+5. *Balance check:* If the new partition violates the balance constraint,
+   adjust by moving boundary vertices or reject the improvement.
+
+*** Why This Beats FM
+
+FM refinement is a greedy hill-climbing algorithm: it moves one vertex at a
+time, accepts the move if it improves the cut (or records it for later
+roll-back), and stops after exploring all moves. FM can get stuck in local
+optima because:
+
+- It cannot move two vertices simultaneously whose joint move would improve
+  the cut but whose individual moves would worsen it
+- The roll-back heuristic only recovers the single best point in the sequence
+  of moves, missing better points reachable via different move orders
+
+Max-flow finds the /exact/ minimum cut in the local region. It can "move"
+arbitrary sets of vertices simultaneously, finding improvements invisible to
+FM's one-at-a-time search.
+
+*** Complexity
+
+Max-flow on the local area A using push-relabel: O(|V_A|^2 · sqrt(|E_A|)).
+Since A is a narrow band around the boundary:
+- |V_A| ≈ 2d · |boundary|
+- |E_A| ≈ 2d · |boundary edges|
+
+For d = 3-5 (typical), this is much smaller than the full graph. Total cost
+per refinement level is comparable to FM when d is small.
+
+*** Implementation
+
+```rust
+fn flow_refine(
+    graph: &Graph,
+    where_: &mut [u8],
+    bnd_distance: usize,   // d: area radius
+    max_imbalance: f64,
+) {
+    // 1. BFS from boundary to distance d
+    let area = bfs_band(graph, where_, bnd_distance);
+    // 2. Build flow network on area
+    let (source, sink, flow_graph) = build_flow_network(&area, where_);
+    // 3. Solve max-flow via push-relabel
+    let min_cut = push_relabel(&flow_graph, source, sink);
+    // 4. Apply cut if it improves and maintains balance
+    if cut_weight(&min_cut) < current_cut && is_balanced(min_cut, max_imbalance) {
+        apply_partition(where_, &area, &min_cut);
+    }
+}
+```
+
+** V-Cycle and F-Cycle Strategies
+
+After a full multilevel pass (coarsen → partition → refine) produces a
+partition:
+
+*** V-Cycle
+
+1. Re-coarsen the graph, but do NOT contract edges that cross the partition
+   boundary (this preserves the partition as a constraint)
+2. Uncoarsen with flow-based refinement at each level
+
+One additional pass. Cost: ~2× the initial multilevel pass. Quality
+improvement: typically 5-15% better cut.
+
+*** F-Cycle
+
+1. At each coarsening level, make two recursive calls with different random
+   seeds (different matching choices during coarsening)
+2. Keep the better result at each level
+3. Do not contract cut edges (monotone improvement)
+
+Multiple passes. Cost: 3-5× the initial pass. Quality improvement: 10-30%
+better cut. This is KaHIP's "Strong" mode.
+
+** Data Reduction Preprocessing
+
+Before the multilevel pipeline, apply exhaustive graph simplification rules
+citep:ost2021datareduction:
+
+*** Rules
+
+1. *Degree-1 elimination:* Leaves can be eliminated with zero fill. Remove
+   and recurse.
+2. *Degree-2 path compression:* Interior vertices of paths (both neighbors
+   non-adjacent) can be eliminated with one fill edge. Compress paths.
+3. *Twin detection:* Vertices with identical neighborhoods are merged
+   (same as AMD's supervariable detection).
+4. *Indistinguishable neighborhood reduction:* If N(v) ⊆ N(u), then v can
+   be eliminated before u without additional fill.
+
+*** Application
+
+Apply all rules in a fixed-point loop until no further reduction. Each pass
+is O(|V| + |E|). Typically 3-5 passes suffice. After ordering the reduced
+graph, expand the permutation by inserting reduced vertices in their optimal
+positions.
+
+*** Impact
+
+- 30-80% vertex reduction on structured meshes
+- 10-30% on irregular graphs
+- 6× faster than METIS on road networks with less fill
+- Applicable as preprocessing for ANY nested dissection algorithm
+
+** Node Separator for Nested Dissection
+
+KaHIP computes node separators for nested dissection using flow-based methods:
+
+1. Compute edge bisection using multilevel + flow-based refinement
+2. Convert to vertex separator using max-flow on the boundary bipartite
+   graph (tighter than METIS's minimum vertex cover approach)
+3. Refine with localized flow-based improvement on the separator
+
+The node separator is directly used in the nested dissection recursion,
+identical to [[file:./metis-graph-partitioning.org][METIS's NodeND]]: separator
+vertices are numbered last, recurse on each disconnected half.
+
+** Quality Comparison
+
+Based on published benchmarks and the DIMACS10 challenge:
+
+| Metric                          | METIS     | KaHIP-Eco | KaHIP-Strong |
+|---------------------------------+-----------+-----------+--------------|
+| Edge cut (normalized)           | 1.00      | 0.85-0.95 | 0.70-0.85    |
+| Node separator weight           | 1.00      | 0.85-0.90 | 0.75-0.85    |
+| Fill (nnz in L)                 | 1.00      | 0.90-0.95 | 0.80-0.90    |
+| Ordering time                   | 1.00      | 2-3×      | 5-10×        |
+
+"METIS is ranked last by a large margin" in separator quality comparisons
+across standard benchmarks. The fill improvement is the direct consequence of
+smaller separators: in nested dissection, separator size determines fill.
+
+** Three Quality Modes
+
+| Mode   | Refinement          | Cycles  | Use Case                         |
+|--------+---------------------+---------+----------------------------------|
+| Fast   | Multi-try FM only   | None    | Quick ordering, METIS-comparable |
+| Eco    | FM + flow (d=3)     | V-cycle | Default for solvers              |
+| Strong | FM + flow (d=5)     | F-cycle | Best quality, expensive           |
+
+For FERAL: "Eco" is the recommended default. "Fast" for small problems or
+when ordering time matters. "Strong" for one-shot ordering of matrices that
+will be factored many times (e.g., fixed sparsity pattern in IPM iterations).
+
+** When KaHIP Excels
+
+- *KKT matrices:* Irregular coupling benefits from flow-based separator
+  computation. Expect 10-20% less fill than METIS.
+- *3D problems:* Better separators → more fill reduction at each nesting level
+- *Structured meshes:* Data reduction dramatically shrinks the graph, and
+  flow-based refinement exploits the remaining structure
+- *Problems solved repeatedly:* The extra ordering time is amortized over
+  many factorizations with the same sparsity pattern (common in IPM)
+
+** When KaHIP Is Overkill
+
+- *Small problems (n < 500):* AMD is faster with comparable fill
+- *One-shot solves:* If the matrix is factored once, METIS's faster ordering
+  may be preferable even with slightly worse fill
+- *Problems where ordering time dominates:* If symbolic + numeric < 10×
+  ordering time, the fill savings don't compensate
+
+** Implementation Strategy for FERAL
+
+A clean-room Rust implementation from Sanders & Schulz 2011:
+
+*** Shared with METIS (reuse existing modules)
+
+- CSR graph representation (`metis::graph::Graph`)
+- Heavy-edge matching coarsening (`metis::coarsen`)
+- Initial partition (`metis::initial_partition`)
+- Bucket priority queue (`metis::fm_refine::BucketPQ`)
+
+*** KaHIP-Specific Modules (~1500-2000 lines)
+
+1. *Push-relabel max-flow* (~300 lines): Standard push-relabel on a local
+   subgraph. Only needed for refinement areas, not the full graph.
+2. *Flow-based refinement* (~250 lines): BFS band extraction, flow network
+   construction, min-cut application with balance check.
+3. *V-cycle/F-cycle controller* (~150 lines): Iterated multilevel with
+   cut-edge preservation.
+4. *Data reduction* (~250 lines): Degree-1/2 elimination, twin detection
+   (hash-based), neighborhood subset reduction, fixed-point loop.
+5. *Flow-based node separator* (~200 lines): Edge bisection → flow-based
+   node separator conversion.
+6. *Nested dissection driver* (~200 lines): Recursive ordering with AMD
+   base case (reuses METIS's recursion structure).
+7. *Quality mode dispatch* (~50 lines): Fast/Eco/Strong parameter selection.
+
+*** Public API
+
+#+BEGIN_SRC rust
+pub fn kahip_node_nd(
+    pattern: &CscPattern,
+    mode: KaHIPMode,
+) -> Vec<usize>
+
+pub enum KaHIPMode {
+    Fast,   // FM-only, single pass (METIS-comparable)
+    Eco,    // FM + flow, V-cycle (default)
+    Strong, // FM + flow, F-cycle (best quality)
+}
+#+END_SRC
+
+Output is =perm: Vec<usize>= (new-to-old mapping), identical interface to
+=amd_order= and =metis_node_nd=. Plugs into FERAL's existing symbolic
+pipeline with zero downstream changes.
+
+** Open-Source References
+
+- KaHIP (C++, MIT license): https://github.com/KaHIP/KaHIP
+  Key files: =lib/partition/uncoarsening/refinement/kway_graph_refinement/=,
+  =app/node_separator.cpp=, =app/node_ordering.cpp=
+- Data reduction: integrated into KaHIP since v3.00
+- The MIT license is ideal for FERAL's clean-room Rust implementation
+
+** References
+
+- citep:sanders2011engineering — KaFFPa: flow-based refinement, V/F-cycles
+- citep:sanders2013think — Perfectly balanced partitioning via negative
+  cycle detection
+- citep:ost2021datareduction — Data reduction rules for nested dissection
+- citep:karypis1998fast — METIS (comparison baseline)
+- citep:george1973nested — Nested dissection foundations
+- citep:davis2016survey — Sparse direct solver survey

@@ -1,0 +1,205 @@
+#+TITLE: SCOTCH Graph Ordering and Partitioning
+#+FILETAGS: :concept:ordering:scotch:nested-dissection:graph-partitioning:fill-reduction:sparse-solver:
+
+* SCOTCH Graph Ordering and Partitioning
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: pellegrini1996scotch, chevalier2008ptscotch
+:STATUS: draft
+:CREATED: 2026-04-16
+:END:
+
+SCOTCH is a graph partitioning and [[file:./sparse-matrix-ordering.org][ordering]]
+software package that uses dual recursive bipartitioning with composable strategy
+strings citep:pellegrini1996scotch. Like
+[[file:./metis-graph-partitioning.org][METIS]], SCOTCH computes fill-reducing
+orderings via nested dissection, but differs in its architecture-aware design and
+runtime-configurable method composition.
+
+** Architecture and Design Philosophy
+
+SCOTCH separates three capabilities into a unified framework:
+
+1. *Graph partitioning* — splitting a graph into balanced parts with minimum
+   edge cut
+2. *Static mapping* — assigning computation to processors respecting physical
+   interconnect topology
+3. *Sparse matrix ordering* — fill-reducing permutations via nested dissection
+
+All three use the same recursive bipartitioning core, with different objective
+functions. The /dual/ in "dual recursive bipartitioning" refers to
+simultaneously partitioning both the source graph and the target architecture
+graph.
+
+For sparse matrix ordering (=SCOTCH_graphOrder= API), the "target architecture"
+is implicitly a complete binary tree, matching the elimination tree structure.
+
+** Strategy Strings
+
+SCOTCH's most distinctive feature. The partitioning/ordering method is specified
+as a text string parsed at runtime:
+
+#+BEGIN_EXAMPLE
+c{rat=0.7,cpr=n{sep=/(<vert>120)?m{type=h,vert=120,...}|m{...};,ole=s,ose=s}}
+#+END_EXAMPLE
+
+This encodes a decision tree:
+- =c{rat=0.7,...}=: Compress graph first (if compression ratio > 0.7)
+- =n{sep=...}=: Nested dissection
+- =/(<vert>120)?...=: Conditional — if vertex count > 120, use multilevel FM;
+  otherwise use a simpler method
+- =m{type=h,...}=: Multilevel with Halo FM refinement
+- =ole=s,ose=s=: Order leaf and separator subgraphs with Scotch
+
+*** Advantages of Strategy Strings
+
+- Runtime-configurable without recompilation
+- Users can encode domain knowledge (e.g., "use AMD for leaves under 200
+  vertices, nested dissection above")
+- Enables rapid experimentation with method combinations
+- Fallback chains: if one method fails quality targets, try another
+
+*** Disadvantage for Clean-Room Implementation
+
+The strategy string parser and method dispatch system add substantial
+implementation complexity (~1000-2000 lines) beyond the core algorithms. For
+a clean-room Rust implementation, a simpler fixed-strategy approach (matching
+METIS's design) would be more practical.
+
+** Vertex Separator Computation
+
+For ordering, SCOTCH computes vertex separators directly using a two-sided
+Fiduccia-Mattheyses approach. This differs from METIS's approach:
+
+| Step              | METIS                                 | SCOTCH                              |
+|-------------------+---------------------------------------+-------------------------------------|
+| 1. Bisect         | Compute edge bisection                | Compute edge bisection              |
+| 2. Convert        | Boundary → min vertex cover → separator | Direct vertex separator via 2-sided FM |
+| 3. Refine         | Node-separator FM                     | Vertex-separator FM                 |
+
+SCOTCH's direct vertex separator computation can produce tighter separators
+because it optimizes separator size as the primary objective rather than as a
+derived quantity from the edge cut. On some structured meshes, this produces
+5-10% smaller separators than METIS.
+
+** Graph Compression
+
+Before partitioning, SCOTCH can compress the graph by merging /indistinguishable
+vertices/ — vertices with identical adjacency structure. This is the same
+concept as [[file:./approximate-minimum-degree.org][AMD's supervariable
+detection]].
+
+Compression is controlled by the strategy parameter =c{rat=R}=: compress only
+if the ratio of compressed to original vertices exceeds R. The default
+threshold (0.7) means compression is applied when it reduces vertex count by
+at least 30%.
+
+On structured meshes (regular grids, FE meshes), compression can reduce
+vertex count by 5-10x, dramatically speeding up the subsequent partitioning.
+
+** Multilevel Partitioning in SCOTCH
+
+SCOTCH's multilevel framework follows the same coarsen → partition → refine
+paradigm as METIS citep:hendrickson1995multilevel, with some differences:
+
+*** Coarsening
+
+Heavy-edge matching similar to METIS. SCOTCH additionally supports:
+- /Band graph coarsening/: restrict the coarsened graph to a narrow band around
+  the partition boundary, reducing graph size for refinement
+- /Greedy coarsening/: match vertices greedily by adjacency without sorting
+
+*** Refinement
+
+FM refinement with several variants:
+- Standard FM: Fiduccia-Mattheyses with bucket sort by gain
+- Halo FM: Extends the FM neighborhood to include a "halo" of vertices one
+  step beyond the boundary, improving move quality at modest cost
+- Band FM: Restrict refinement to a band of width w around the separator,
+  reducing refinement cost from O(|E|) to O(w * |boundary|)
+
+** PT-SCOTCH: Distributed Memory
+
+Chevalier and Pellegrini (2008) citep:chevalier2008ptscotch extend SCOTCH to
+distributed memory via MPI. Key features:
+
+- Distributed graph representation across MPI ranks
+- Parallel coarsening with local + boundary matching
+- Parallel FM refinement with global communication for gain synchronization
+- Graph folding: as coarsened graph shrinks, redistribute to fewer processes
+- Sequential fallback when subgraph fits on one process
+
+PT-SCOTCH shows better strong scaling than ParMETIS beyond 64 processes,
+attributed to band-graph optimization reducing communication volume.
+
+Relevant for FERAL Phase 4 (distributed-memory multifrontal factorization).
+
+** Comparison with METIS
+
+| Criterion          | METIS                   | SCOTCH                      |
+|--------------------+-------------------------+-----------------------------|
+| Fill quality       | Very good               | Comparable (sometimes better on structured meshes) |
+| Ordering time      | Generally faster         | 10-30% slower due to strategy overhead |
+| Separator quality  | Edge bisection → convert | Direct vertex separator (sometimes tighter) |
+| Configurability    | Fixed algorithm, tunable parameters | Strategy strings (full method composition) |
+| Distributed memory | ParMETIS                 | PT-SCOTCH (better scaling on many cores) |
+| License            | Apache 2.0 (v5.2.0+)    | CeCILL-C (LGPL equivalent)  |
+| Implementation     | ~15k lines C            | ~50k lines C (strategy parser adds bulk) |
+
+For most practical purposes, METIS and SCOTCH produce comparable orderings.
+The choice is often driven by licensing, ecosystem integration, or specific
+needs (strategy customization, distributed memory).
+
+** Implementation Considerations for FERAL
+
+*** Priority
+
+SCOTCH is lower priority than METIS for FERAL. The project spec lists SCOTCH
+as a future option, while METIS is a Phase 3 deliverable.
+
+*** Licensing Challenge
+
+SCOTCH is licensed under CeCILL-C, which is roughly equivalent to LGPL:
+- Dynamic linking: OK for MIT binaries
+- Static linking: Problematic for MIT distribution
+- FERAL's constraint: "zero non-Rust dependencies" means FFI to libscotch
+  violates the architecture, and a clean-room Rust implementation must
+  be MIT-licensed
+
+A clean-room Rust implementation of SCOTCH's core algorithms (without the
+strategy string system) from the papers is MIT-compatible. The strategy
+string system could be replaced with a simpler Rust enum-based configuration.
+
+*** Estimated Effort
+
+A full SCOTCH port (~4000-6000 lines Rust) is substantially more complex than
+METIS (~2000-3000 lines) due to the strategy system and additional refinement
+variants. A simplified version (fixed strategy, multilevel FM only) would be
+comparable to METIS effort.
+
+*** Recommendation
+
+Implement METIS first. Consider SCOTCH only if:
+1. METIS fill quality is insufficient on specific problem classes
+2. Distributed memory support (Phase 4) requires PT-SCOTCH's superior scaling
+3. Strategy string flexibility is needed for production tuning
+
+** Open-Source References
+
+- SCOTCH 7.0 (CeCILL-C license):
+  https://gitlab.inria.fr/scotch/scotch
+  Key files: =libscotch/graph_order.c= (ordering driver),
+  =libscotch/vgraph_separate_fm.c= (vertex separator FM),
+  =libscotch/bgraph_bipart_fm.c= (bipartitioning FM),
+  =libscotch/library_graph_order.c= (public API)
+- Pellegrini 2012 User's Guide: comprehensive parameter documentation
+
+** References
+
+- citep:pellegrini1996scotch — Original SCOTCH paper: dual recursive
+  bipartitioning, strategy strings
+- citep:chevalier2008ptscotch — PT-SCOTCH: distributed-memory parallel ordering
+- citep:karypis1998fast — METIS (primary comparison point)
+- citep:hendrickson1995multilevel — Chaco: established multilevel paradigm
+- citep:fiduccia1982linear — FM refinement (core primitive)
+- citep:davis2016survey — Section 7.3: SCOTCH in context

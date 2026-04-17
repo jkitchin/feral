@@ -15,28 +15,88 @@ ordering algorithm for
 sparse matrices citep:amestoy1996approximate. AMD is the primary ordering
 algorithm used in FERAL.
 
-** The AMD Algorithm
+** Background: The Minimum Degree Heuristic
 
 Minimum degree ordering is a greedy heuristic that, at each elimination step,
 selects the vertex with the smallest degree in the elimination graph. This tends
 to minimize fill-in because low-degree vertices create fewer new edges when
 eliminated. However, maintaining exact degrees after each elimination step is
-expensive (O(n^2) per step in the worst case).
+expensive: eliminating a vertex of degree d creates up to d(d-1)/2 new edges,
+and updating the degrees of all affected vertices requires computing the
+reachable set through the elimination graph — a set-union operation that is
+O(nnz) per step in the worst case.
 
-AMD resolves this by computing approximate degrees, specifically upper bounds on
-the true degree, using a technique called element absorption. The approximation
-is cheap to maintain (amortized O(nnz) over the full ordering) and produces
-orderings that are nearly as good as exact minimum degree in practice. The key
-insight is that the ordering quality is insensitive to small errors in degree
-computation, so the exact degree is not needed for good fill reduction.
+The total cost of exact minimum degree is therefore O(n * nnz) in the worst
+case, though typically much better in practice.
+
+** The Quotient Graph Model
+
+The central algorithmic contribution. Instead of maintaining the /elimination
+graph/ explicitly (which grows as fill edges are added), AMD maintains a
+/quotient graph/ that is always a subset of the original graph's storage.
+
+When a variable p is eliminated, it becomes an /element/ e = p. The element's
+/variable list/ records which uneliminated variables were adjacent to p. Two
+uneliminated variables u and v are adjacent in the elimination graph if and only
+if they share a common element (were both neighbors of some previously
+eliminated variable) or are directly connected by an original edge.
+
+Key property: the quotient graph never grows. At each step, one variable is
+converted to an element, and element absorption can further shrink it. This
+means the entire algorithm runs in the original graph's storage — no fill edges
+are ever explicitly represented.
+
+** Approximate Degree Computation
+
+The true degree of variable i in the elimination graph is |adj_G(i)| — the
+number of distinct uneliminated variables reachable from i through elements.
+Computing this exactly requires forming the union of all adjacent element
+variable-sets, which is an expensive set operation.
+
+AMD instead computes an /upper bound/ on the true degree:
+
+#+BEGIN_EXAMPLE
+d_approx(i) <= |A_i| + sum_{e in E_i} |L_e| - |L_e intersect A_i|
+#+END_EXAMPLE
+
+where A_i is i's direct variable neighbors and E_i are elements adjacent to i,
+each with variable list L_e. This over-counts because it does not remove
+duplicates across elements, but the key insight is: ordering quality is
+insensitive to small degree errors. The approximate degree produces orderings
+within 1-5% of exact minimum degree fill quality while reducing the amortized
+cost to O(nnz).
+
+** Element Absorption
+
+When element e's variable list is a subset of a newer element e', then e is
+redundant — it provides no adjacency information not already captured by e'.
+Absorbing e (marking it dead, removing it from variable adjacency lists) keeps
+the quotient graph compact.
+
+/Aggressive absorption/ goes further: absorb e whenever all of e's variables
+appear in the current pivot's front, even if the subset test is approximate.
+This produces slightly looser degree bounds but empirically identical ordering
+quality, with 20-40% faster execution. SuiteSparse AMD enables aggressive
+absorption by default.
+
+** Supervariable Detection
+
+Variables with identical adjacency structure (same elements and variable
+neighbors) are /indistinguishable/ — they will appear consecutively in any
+minimum-degree ordering. AMD detects these using a hash of each variable's
+adjacency list. Variables with the same hash are candidates; exact comparison
+confirms the match. Merged supervariables are represented by a single
+representative, dramatically reducing effective graph size on structured
+problems.
 
 ** Implementation
 
 The companion paper, Amestoy, Davis, and Duff (2004) citep:amestoy2004algorithm837,
-describes the C/Fortran implementation as Algorithm 837 in ACM TOMS. The
-SuiteSparse implementation (=amd_2.c=) contains the core AMD elimination loop,
-with =amd_postorder.c= providing the postordering of the resulting elimination
-tree.
+describes the C/Fortran implementation as Algorithm 837 in ACM TOMS. See
+[[file:./amestoy2004-amd-implementation.org][the implementation summary]] for
+detailed data structures and the =amd_2.c= elimination loop. The
+implementation runs in O(nnz + 9n) integers of workspace with no dynamic
+allocation.
 
 ** Relevance to FERAL
 
@@ -47,9 +107,16 @@ matrix sizes in the
 [[file:../concepts/multifrontal-method.org][multifrontal factorization]] and
 thus the overall computational cost.
 
+FERAL currently implements /exact/ minimum degree (not true AMD): it maintains
+explicit adjacency lists with fill-edge insertion rather than the quotient graph
+model. Upgrading to true AMD using the quotient graph is a planned optimization.
+See [[file:../concepts/approximate-minimum-degree.org][the AMD concept article]]
+for the full implementation roadmap.
+
 FERAL's Tier 3 benchmark matrices include cases where AMD gives poor fill
-compared to METIS, specifically to test ordering sensitivity and motivate the
-METIS ordering option planned for Phase 2.
+compared to [[file:../concepts/metis-graph-partitioning.org][METIS]], specifically
+to test ordering sensitivity and motivate the METIS ordering option planned
+for Phase 3.
 
 ** Bibliographic Details
 

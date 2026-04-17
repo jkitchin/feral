@@ -1,0 +1,90 @@
+#+TITLE: Karypis and Kumar 1998 - Multilevel k-way Partitioning
+#+FILETAGS: :summary:ordering:metis:graph-partitioning:sparse-solver:
+
+* Karypis and Kumar 1998 - Multilevel k-way Partitioning
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: karypis1998kway
+:STATUS: draft
+:CREATED: 2026-04-16
+:END:
+
+Karypis and Kumar (1998) present a multilevel k-way partitioning algorithm
+that directly partitions graphs into k parts rather than using recursive
+bisection citep:karypis1998kway. This paper complements
+[[file:./karypis1998-metis.org][the core METIS paper]] and is implemented in
+METIS's =kmetis.c= driver.
+
+** Motivation: Recursive Bisection Limitations
+
+Recursive bisection partitions a graph into k parts by applying multilevel
+bisection log_2(k) times. This has two drawbacks:
+
+1. Each bisection optimizes a local cut without considering the global k-way
+   objective. A locally optimal bisection may not lead to a globally optimal
+   k-way partition.
+2. The edges cut in early bisections are "frozen" — later bisections cannot
+   undo poor early decisions.
+
+Direct k-way partitioning addresses both issues by considering all k parts
+simultaneously during refinement.
+
+** The Multilevel k-way Framework
+
+The algorithm follows the same three-phase multilevel structure as METIS
+bisection:
+
+*** Coarsening
+
+Identical to the bisection coarsening: heavy-edge matching (HEM) or sorted
+heavy-edge matching (SHEM) repeatedly contracts matched vertex pairs until
+the coarsest graph has O(k) vertices. Each coarsening level halves the vertex
+count.
+
+*** Initial k-way Partition
+
+At the coarsest level, the graph is small enough (O(100·k) vertices) to
+partition directly. METIS uses recursive bisection at this stage to produce
+the initial k-way partition, then switches to k-way refinement during
+uncoarsening.
+
+*** k-way Refinement
+
+The key contribution. During uncoarsening, each projected partition is refined
+using a k-way variant of FM refinement:
+
+For each boundary vertex v in part p:
+1. Compute the /gain/ of moving v to each adjacent part q:
+   gain(v, p → q) = (edges to q) - (edges to p \ {v})
+2. The vertex with the highest positive gain is moved
+3. Moves continue greedily, with a rollback to the best state seen
+
+The boundary restriction (only considering vertices adjacent to other parts)
+makes each refinement pass O(|boundary edges|) rather than O(|E|).
+
+** Comparison with Recursive Bisection
+
+On standard benchmarks (METIS test suite):
+- For k = 2 to 8: recursive bisection and k-way produce similar quality
+- For k = 16 to 256: k-way produces 10-30% smaller edge cuts
+- k-way is also faster for large k because it avoids log_2(k) bisection levels
+
+** Relevance to FERAL
+
+For [[file:../concepts/sparse-matrix-ordering.org][fill-reducing ordering]],
+nested dissection uses /recursive bisection/ (not k-way), because the recursion
+naturally produces the separator hierarchy needed for the elimination tree.
+k-way partitioning is more relevant for domain decomposition and parallel load
+balancing than for fill-reducing ordering.
+
+However, understanding k-way partitioning is important for reading the METIS
+codebase: the =kmetis.c= (k-way driver) and =ometis.c= (nested dissection
+driver) share coarsening and refinement primitives. The k-way refinement data
+structures (boundary lists, gain arrays) are also used in separator
+refinement.
+
+** Bibliographic Details
+
+Karypis, G. and Kumar, V. (1998). "Multilevel k-way Partitioning Scheme for
+Irregular Graphs." /Journal of Parallel and Distributed Computing/,
+48(1):96-129. DOI: 10.1006/jpdc.1997.1404.

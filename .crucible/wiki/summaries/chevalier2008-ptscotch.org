@@ -1,0 +1,83 @@
+#+TITLE: Chevalier and Pellegrini 2008 - PT-SCOTCH: Parallel Graph Ordering
+#+FILETAGS: :summary:ordering:scotch:parallelism:graph-partitioning:sparse-solver:
+
+* Chevalier and Pellegrini 2008 - PT-SCOTCH: Parallel Graph Ordering
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: chevalier2008ptscotch
+:STATUS: draft
+:CREATED: 2026-04-16
+:END:
+
+Chevalier and Pellegrini (2008) present PT-SCOTCH, a distributed-memory
+parallel extension of [[file:./pellegrini1996-scotch.org][SCOTCH]] for graph
+ordering and partitioning via MPI citep:chevalier2008ptscotch.
+
+** Parallel Nested Dissection
+
+PT-SCOTCH parallelizes the nested dissection framework by distributing the
+graph across MPI processes. The key insight: at the top levels of the nested
+dissection recursion, the graph is large enough to benefit from distributed
+computation. At deeper levels (smaller subgraphs), the work is switched to
+sequential SCOTCH on a single process.
+
+The parallel/sequential switchover point is a parameter that balances
+communication overhead (favoring sequential) against parallelism (favoring
+distributed). Typical switchover: when the subgraph fits on a single process
+(fewer than N/P vertices, where N is total and P is process count).
+
+** Parallel Coarsening
+
+Distributed coarsening uses a two-phase matching protocol:
+1. *Local matching*: each process matches vertices within its local partition
+   using SCOTCH's standard heavy-edge matching
+2. *Boundary matching*: vertices on partition boundaries are matched across
+   processes using a distributed protocol that ensures no vertex is matched
+   twice
+
+The folding step distributes the coarsened graph to fewer processes as it
+shrinks, maintaining load balance. When the graph is small enough, it is
+centralized on a single process for the initial partition.
+
+** Parallel Refinement
+
+Distributed FM refinement operates on the partition boundary:
+1. Each process computes gains for its local boundary vertices
+2. A global communication phase identifies the best moves
+3. Moves are applied and partition state is synchronized
+
+The communication cost per refinement pass is O(|boundary|), making it
+efficient when the boundary-to-interior ratio is small. Band graph
+optimization restricts refinement to a narrow band around the separator,
+further reducing communication.
+
+** Comparison with ParMETIS
+
+On the test matrices from the paper (regular and irregular meshes up to
+10M vertices, 16--128 MPI processes):
+
+- *Ordering quality*: PT-SCOTCH produces fill within 5% of sequential SCOTCH,
+  which is competitive with METIS
+- *Scaling*: PT-SCOTCH shows better strong scaling than ParMETIS beyond 64
+  processes, attributed to SCOTCH's band-graph optimization reducing
+  communication
+- *Ordering time*: Comparable to ParMETIS on moderate core counts (16--64),
+  faster on high core counts (>64)
+
+** Relevance to FERAL
+
+PT-SCOTCH is relevant for FERAL Phase 4 (distributed-memory multifrontal
+factorization). When the matrix is distributed across MPI ranks, the ordering
+must also be computed in parallel to avoid a serial bottleneck. PT-SCOTCH
+provides a proven distributed ordering that integrates with SCOTCH's strategy
+string system.
+
+For Phase 3 (shared-memory parallelism), sequential SCOTCH or
+[[file:./lasalle2015-mt-metis.org][mt-METIS]] are more appropriate because
+they avoid MPI overhead.
+
+** Bibliographic Details
+
+Chevalier, C. and Pellegrini, F. (2008). "PT-Scotch: A Tool for Efficient
+Parallel Graph Ordering." /Parallel Computing/, 34(6-8):318-331.
+DOI: 10.1016/j.parco.2007.12.001.

@@ -1,0 +1,106 @@
+#+TITLE: Ost, Schulz, and Strash 2021 - Engineering Data Reduction for Nested Dissection
+#+FILETAGS: :summary:ordering:kahip:nested-dissection:fill-reduction:data-reduction:sparse-solver:
+
+* Ost, Schulz, and Strash 2021 - Engineering Data Reduction for Nested Dissection
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: ost2021datareduction
+:STATUS: draft
+:CREATED: 2026-04-16
+:END:
+
+Ost, Schulz, and Strash (2021) present data reduction rules for the minimum
+fill-in problem that are applied exhaustively before nested dissection
+citep:ost2021datareduction. These rules dramatically reduce graph size while
+preserving (or nearly preserving) fill optimality.
+
+** The Minimum Fill-In Problem
+
+Given a graph G, the minimum fill-in is the smallest set of edges that must be
+added to make G chordal (every cycle of length ≥ 4 has a chord). Fill-reducing
+orderings approximate this NP-hard problem. Data reduction makes the
+approximation easier by shrinking the graph first.
+
+** Data Reduction Rules
+
+Four classes of rules, applied exhaustively until no further reduction:
+
+*** Rule 1: Degree-1 Elimination
+
+A degree-1 vertex (leaf) can be eliminated first with zero fill. Remove it and
+recurse. This is trivially optimal: eliminating a leaf never creates fill edges.
+
+*** Rule 2: Degree-2 Path Compression
+
+If vertex v has exactly two neighbors u and w that are not adjacent to each
+other, then v can be eliminated with exactly one fill edge (u,w). More
+generally, a path of degree-2 vertices can be compressed: the interior
+vertices are eliminated, creating fill edges only between the path endpoints.
+
+Conversely, if u and w /are/ adjacent, then v can be eliminated with zero fill
+(it is a simplicial vertex — its neighborhood is already a clique).
+
+*** Rule 3: Indistinguishable (Twin) Vertices
+
+Vertices with identical neighborhoods (open twins) or identical closed
+neighborhoods (closed twins) can be merged. This is the same as AMD's
+supervariable detection, but applied before any elimination. On structured
+meshes, this alone can reduce vertex count by 5-10x.
+
+*** Rule 4: Indistinguishable Neighborhood Reduction
+
+A generalization of twins: if vertex v has a neighborhood N(v) that is a
+subset of vertex u's neighborhood N(u), then v can be eliminated before u
+without increasing fill beyond what u's elimination would cause. This is
+more powerful than simple twin detection.
+
+** Exhaustive Application
+
+The rules are applied in a fixed-point loop: apply all applicable rules,
+check if any new reductions became possible, repeat until no further
+reduction. This can trigger cascading simplifications (eliminating a degree-1
+vertex may expose a new degree-2 path, whose compression may create new
+twins).
+
+** Results
+
+On the SuiteSparse Matrix Collection and road network graphs:
+
+- **Fill quality:** Ordering the reduced graph with nested dissection, then
+  expanding, produces fill within 1-3% of ordering the full graph — often
+  /less/ fill because the reduced graph exposes structure better
+- **Speed vs METIS:** 6x faster than METIS on road networks while producing
+  orderings with less fill
+- **Reduction ratios:** 30-80% vertex reduction on structured meshes,
+  10-30% on irregular graphs
+
+** Implementation Cost
+
+The reduction rules are simple and linear-time per pass:
+- Degree-1/2: scan vertices by degree, O(|V|)
+- Twins: hash neighborhoods, compare within buckets, O(|V| + |E|)
+- Neighborhood subset: for each vertex, check if N(v) ⊂ N(u) for some
+  neighbor u, O(Σ deg(v)²) worst case but fast in practice
+
+Total: O(|E|) per fixed-point pass, typically 3-5 passes.
+
+** Relevance to FERAL
+
+Data reduction is a preprocessing step that can be applied before /any/
+nested dissection algorithm (METIS, SCOTCH, or
+[[file:../concepts/kahip-graph-partitioning.org][KaHIP]]). For FERAL:
+
+1. Rules 1-3 are straightforward to implement in Rust (~200 lines)
+2. Rule 4 (neighborhood subset) adds ~100 lines for significant gain
+3. The reduction can be combined with any ordering backend
+4. On FERAL's KKT matrices, twin detection alone may provide substantial
+   reduction because KKT structure creates many indistinguishable variables
+
+This is a high-value, low-risk addition: it makes any ordering faster and
+often better, with minimal implementation complexity.
+
+** Bibliographic Details
+
+Ost, W., Schulz, C., and Strash, D. (2021). "Engineering Data Reduction
+for Nested Dissection." In /Proceedings of ALENEX 2021/, pp. 113-127.
+DOI: 10.1137/1.9781611976472.9.

@@ -420,7 +420,213 @@
                pivoting optimization, not a correctness requirement.}
 }
 
-% --- Ordering ---
+% --- Ordering: Foundations ---
+
+@article{george1973nested,
+  author    = {George, Alan},
+  title     = {Nested Dissection of a Regular Finite Element Mesh},
+  journal   = {{SIAM} Journal on Numerical Analysis},
+  year      = {1973},
+  volume    = {10},
+  number    = {2},
+  pages     = {345--363},
+  doi       = {10.1137/0710032},
+  url       = {https://doi.org/10.1137/0710032},
+  note      = {Foundational nested dissection paper. Proves O(n log n) fill and
+               O(n^{3/2}) operations for 2D regular mesh factorization. Establishes
+               that recursively bisecting via vertex separators and numbering
+               separator vertices last minimizes fill. The gap between regular
+               meshes and irregular graphs motivates METIS/SCOTCH.}
+}
+
+@article{lipton1979generalized,
+  author    = {Lipton, Richard J. and Rose, Donald J. and Tarjan, Robert Endre},
+  title     = {Generalized Nested Dissection},
+  journal   = {{SIAM} Journal on Numerical Analysis},
+  year      = {1979},
+  volume    = {16},
+  number    = {2},
+  pages     = {346--358},
+  doi       = {10.1137/0716027},
+  url       = {https://doi.org/10.1137/0716027},
+  note      = {Extends George 1973 to irregular graphs via planar separator
+               theorems. Proves O(n log n) fill for planar graphs and
+               O(n^{4/3}) for 3D. The separator theorem is the theoretical
+               foundation for METIS and SCOTCH partitioning quality.}
+}
+
+% --- Ordering: Graph Partitioning Refinement ---
+
+@article{kernighan1970partitioning,
+  author    = {Kernighan, B. W. and Lin, S.},
+  title     = {An Efficient Heuristic Procedure for Partitioning Graphs},
+  journal   = {Bell System Technical Journal},
+  year      = {1970},
+  volume    = {49},
+  number    = {2},
+  pages     = {291--307},
+  doi       = {10.1002/j.1538-7305.1970.tb01770.x},
+  url       = {https://doi.org/10.1002/j.1538-7305.1970.tb01770.x},
+  note      = {The KL algorithm: iteratively swap vertex pairs between
+               partitions to reduce edge cut. O(n^2 log n) per pass.
+               Foundation for all modern graph partitioning refinement;
+               superseded in practice by Fiduccia-Mattheyses (1982).}
+}
+
+@inproceedings{fiduccia1982linear,
+  author    = {Fiduccia, C. M. and Mattheyses, R. M.},
+  title     = {A Linear-Time Heuristic for Improving Network Partitions},
+  booktitle = {Proceedings of the 19th Design Automation Conference},
+  year      = {1982},
+  pages     = {175--181},
+  doi       = {10.1109/DAC.1982.1585498},
+  url       = {https://doi.org/10.1109/DAC.1982.1585498},
+  note      = {The FM algorithm: single-vertex moves with bucket data
+               structure reduce KL's O(n^2) per pass to O(|E|). Used by
+               both METIS and SCOTCH as the core refinement primitive.
+               Boundary-restricted FM further reduces cost to O(boundary).}
+}
+
+% --- Ordering: METIS ---
+
+@article{karypis1998fast,
+  author    = {Karypis, George and Kumar, Vipin},
+  title     = {A Fast and High Quality Multilevel Scheme for Partitioning
+               Irregular Graphs},
+  journal   = {{SIAM} Journal on Scientific Computing},
+  year      = {1998},
+  volume    = {20},
+  number    = {1},
+  pages     = {359--392},
+  doi       = {10.1137/S1064827595287997},
+  url       = {https://doi.org/10.1137/S1064827595287997},
+  note      = {The core METIS paper. Introduces the multilevel framework:
+               coarsening via heavy-edge matching, initial partition at
+               coarsest level, FM refinement during uncoarsening. Section 6
+               covers nested dissection for fill-reducing ordering.
+               10--50x faster than spectral with equal or better quality.}
+}
+
+@article{karypis1998kway,
+  author    = {Karypis, George and Kumar, Vipin},
+  title     = {Multilevel k-way Partitioning Scheme for Irregular Graphs},
+  journal   = {Journal of Parallel and Distributed Computing},
+  year      = {1998},
+  volume    = {48},
+  number    = {1},
+  pages     = {96--129},
+  doi       = {10.1006/jpdc.1997.1404},
+  url       = {https://doi.org/10.1006/jpdc.1997.1404},
+  note      = {Direct k-way partitioning at coarsest level, refined with
+               greedy k-way refinement. Produces better partitions than
+               recursive bisection for k > 8. Less relevant for nested
+               dissection ordering (which uses recursive bisection) but
+               clarifies METIS codebase structure.}
+}
+
+% --- Ordering: KaHIP ---
+
+@inproceedings{sanders2011engineering,
+  author    = {Sanders, Peter and Schulz, Christian},
+  title     = {Engineering Multilevel Graph Partitioning Algorithms},
+  booktitle = {Algorithms -- ESA 2011},
+  series    = {Lecture Notes in Computer Science},
+  year      = {2011},
+  pages     = {469--480},
+  doi       = {10.1007/978-3-642-23719-5_40},
+  url       = {https://doi.org/10.1007/978-3-642-23719-5_40},
+  note      = {The core KaFFPa paper. Introduces max-flow-based local
+               improvement as an alternative to FM refinement in multilevel
+               graph partitioning. Also introduces iterated V-cycle and
+               F-cycle global search strategies from multigrid methods.
+               Produces significantly better partitions than METIS.
+               Code: https://github.com/KaHIP/KaHIP (MIT license).}
+}
+
+@inproceedings{sanders2013think,
+  author    = {Sanders, Peter and Schulz, Christian},
+  title     = {Think Locally, Act Globally: Highly Balanced Graph
+               Partitioning},
+  booktitle = {Experimental Algorithms (SEA 2013)},
+  series    = {Lecture Notes in Computer Science},
+  year      = {2013},
+  pages     = {164--175},
+  doi       = {10.1007/978-3-642-38527-8_16},
+  url       = {https://doi.org/10.1007/978-3-642-38527-8_16},
+  note      = {Extends KaFFPa with perfectly balanced partitioning via
+               negative cycle detection on a model of local moves.
+               Achieves or improves most best-known balanced partition
+               results in the literature.}
+}
+
+@inproceedings{ost2021datareduction,
+  author    = {Ost, Wolfgang and Schulz, Christian and Strash, Darren},
+  title     = {Engineering Data Reduction for Nested Dissection},
+  booktitle = {Proceedings of the Workshop on Algorithm Engineering and
+               Experiments (ALENEX 2021)},
+  year      = {2021},
+  pages     = {113--127},
+  doi       = {10.1137/1.9781611976472.9},
+  url       = {https://doi.org/10.1137/1.9781611976472.9},
+  note      = {Data reduction rules for minimum fill-in: degree-1
+               elimination, degree-2 path compression, twin detection,
+               indistinguishable neighborhood reduction. Applied
+               exhaustively before nested dissection, yields 6x faster
+               ordering than METIS with less fill on road networks.
+               Integrated into KaHIP.}
+}
+
+% --- Ordering: SCOTCH ---
+
+@inproceedings{pellegrini1996scotch,
+  author    = {Pellegrini, Fran\c{c}ois and Roman, Jean},
+  title     = {Scotch: A Software Package for Static Mapping by Dual Recursive
+               Bipartitioning of Process and Architecture Graphs},
+  booktitle = {High-Performance Computing and Networking},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {1067},
+  year      = {1996},
+  pages     = {493--498},
+  doi       = {10.1007/3-540-61142-8_588},
+  url       = {https://doi.org/10.1007/3-540-61142-8_588},
+  note      = {Original SCOTCH paper. Introduces dual recursive bipartitioning
+               for both process mapping and graph ordering. Key design:
+               composable strategy strings for runtime-configurable method
+               selection. Architecture-aware mapping distinguishes SCOTCH
+               from METIS.}
+}
+
+@article{chevalier2008ptscotch,
+  author    = {Chevalier, C\'edric and Pellegrini, Fran\c{c}ois},
+  title     = {{PT-Scotch}: A Tool for Efficient Parallel Graph Ordering},
+  journal   = {Parallel Computing},
+  year      = {2008},
+  volume    = {34},
+  number    = {6--8},
+  pages     = {318--331},
+  doi       = {10.1016/j.parco.2007.12.001},
+  url       = {https://doi.org/10.1016/j.parco.2007.12.001},
+  note      = {Distributed-memory parallel nested dissection via MPI.
+               Parallel coarsening and FM refinement on distributed graphs.
+               Better scaling than ParMETIS on large core counts. Relevant
+               for FERAL Phase 4 (distributed multifrontal).}
+}
+
+@inproceedings{hendrickson1995multilevel,
+  author    = {Hendrickson, Bruce and Leland, Robert},
+  title     = {A Multilevel Algorithm for Partitioning Graphs},
+  booktitle = {Proceedings of the 1995 ACM/IEEE Conference on Supercomputing},
+  year      = {1995},
+  pages     = {28},
+  doi       = {10.1145/224170.224228},
+  url       = {https://doi.org/10.1145/224170.224228},
+  note      = {Chaco: the first multilevel graph partitioner. Established
+               the coarsen-partition-refine paradigm that METIS and SCOTCH
+               both adopt. Showed multilevel approach is 10--100x faster
+               than spectral bisection with comparable quality.}
+}
+
+% --- Ordering: Parallel ---
 
 @inproceedings{lasalle2015mtmetis,
   author    = {LaSalle, Dominique and Karypis, George},

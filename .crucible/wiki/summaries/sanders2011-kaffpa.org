@@ -1,0 +1,98 @@
+#+TITLE: Sanders and Schulz 2011 - Engineering Multilevel Graph Partitioning (KaFFPa)
+#+FILETAGS: :summary:ordering:kahip:graph-partitioning:max-flow:fill-reduction:sparse-solver:
+
+* Sanders and Schulz 2011 - Engineering Multilevel Graph Partitioning (KaFFPa)
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: sanders2011engineering
+:STATUS: draft
+:CREATED: 2026-04-16
+:END:
+
+Sanders and Schulz (2011) present KaFFPa (Karlsruhe Fast Flow Partitioner), a
+multilevel graph partitioning algorithm that replaces FM refinement with
+max-flow-based local improvement citep:sanders2011engineering. This is the
+foundational paper for the [[file:../concepts/kahip-graph-partitioning.org][KaHIP]]
+framework.
+
+** Max-Flow-Based Local Improvement
+
+The defining algorithmic innovation. Instead of Fiduccia-Mattheyses (FM)
+refinement citep:fiduccia1982linear — which makes greedy single-vertex moves
+with roll-back — KaFFPa constructs and solves a local max-flow/min-cut problem:
+
+1. Given a partition with boundary B between parts 0 and 1, grow an /area/ A
+   around B by including vertices within distance d of B
+2. Construct a flow network on A: source = vertices firmly in part 0 (distance
+   d from boundary), sink = vertices firmly in part 1
+3. Compute the max-flow/min-cut in this network
+4. The min-cut gives the optimal partition of A respecting the source/sink
+   assignment, within the balance constraint
+5. Apply this improved local partition to the graph
+
+This finds the true minimum cut in the local region. FM can miss this because
+it is greedy and can get trapped in local optima — it moves one vertex at a
+time and relies on the roll-back heuristic to escape. Max-flow solves the local
+problem exactly.
+
+*** Complexity
+
+Max-flow on a subgraph of size |A| costs O(|A|^2 · sqrt(|E_A|)) with
+Goldberg-Tarjan push-relabel, or O(|E_A| · |V_A|^{2/3}) with
+Dinic's algorithm. The area A is typically a narrow band around the
+boundary, so |A| << |V|. Total refinement cost per level is comparable
+to FM when A is kept small.
+
+** V-Cycle and F-Cycle Global Search
+
+Borrowed from multigrid methods. After one multilevel pass produces a
+partition:
+
+1. Re-coarsen the graph, but /do not contract edges on the cut/
+   (this preserves the existing partition as a constraint)
+2. Re-refine with flow-based improvement at each uncoarsening level
+
+This "iterates" the multilevel framework. Each cycle can only maintain or
+improve partition quality because refinement is monotone. Two strategies:
+
+- *V-cycle:* One recursive call per level (linear in levels)
+- *F-cycle:* Two recursive calls with different random seeds per level
+  (exponential in levels, but truncated early; stronger quality guarantee)
+
+METIS makes a single pass. KaHIP's cycling typically adds 2-5x to ordering
+time but produces substantially better partitions.
+
+** Three Quality Modes
+
+| Mode   | Coarsening          | Refinement          | Cycles | Speed | Quality |
+|--------+---------------------+---------------------+--------+-------+---------|
+| Fast   | Random matching     | Multi-try FM        | None   | ~METIS | ~METIS  |
+| Eco    | Heavy-edge matching | FM + flow (small d) | V-cycle | 2-3x  | Better  |
+| Strong | Heavy-edge matching | FM + flow (large d) | F-cycle | 5-10x | Best    |
+
+The "Fast" mode uses FM refinement only (similar to METIS). "Eco" and "Strong"
+progressively add flow-based refinement and iterated cycling.
+
+** Results
+
+On the Walshaw benchmark and DIMACS10 challenge graphs:
+- KaFFPa-Strong produces edge cuts 10-30% smaller than METIS
+- KaFFPa-Eco matches or beats METIS quality in 2-3x the time
+- KaFFPa-Fast is competitive with METIS in both time and quality
+
+** Relevance to FERAL
+
+KaFFPa's flow-based refinement is the key algorithmic innovation that
+distinguishes [[file:../concepts/kahip-graph-partitioning.org][KaHIP]] from
+[[file:../concepts/metis-graph-partitioning.org][METIS]]. For FERAL's KKT
+matrices, the tighter partitions translate to smaller vertex separators and
+less fill during nested dissection factorization.
+
+The "Eco" mode is the sweet spot for sparse solver ordering: meaningfully
+better quality than METIS with manageable overhead (2-3x).
+
+** Bibliographic Details
+
+Sanders, P. and Schulz, C. (2011). "Engineering Multilevel Graph
+Partitioning Algorithms." In /Algorithms — ESA 2011/, LNCS, pp. 469-480.
+DOI: 10.1007/978-3-642-23719-5_40.

@@ -1,0 +1,263 @@
+#+TITLE: Approximate Minimum Degree (AMD) Ordering
+#+FILETAGS: :concept:ordering:amd:fill-reduction:quotient-graph:sparse-solver:
+
+* Approximate Minimum Degree (AMD) Ordering
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: amestoy1996approximate, amestoy2004algorithm837
+:STATUS: draft
+:CREATED: 2026-04-16
+:END:
+
+AMD is a fill-reducing [[file:./sparse-matrix-ordering.org][ordering algorithm]]
+for sparse matrices. It is a local (greedy) heuristic from the minimum degree
+family that selects the vertex with the smallest approximate degree at each
+elimination step. The key innovation over exact minimum degree is the /quotient
+graph/ data structure, which enables amortized O(nnz) complexity without
+explicitly tracking fill edges citep:amestoy1996approximate.
+
+** The Minimum Degree Heuristic
+
+Given a symmetric sparse matrix A, its /elimination graph/ G(A) has an edge
+(i,j) whenever A(i,j) is nonzero. When variable p is eliminated, all of p's
+neighbors become pairwise adjacent (fill edges are added), and p is removed.
+The minimum degree heuristic selects the vertex with the fewest neighbors in
+the current elimination graph at each step.
+
+This greedy choice tends to minimize fill because: eliminating a vertex of
+degree d creates at most d(d-1)/2 fill edges, so low-degree vertices generate
+less fill. While optimal fill-reducing ordering is NP-hard, minimum degree is
+remarkably effective in practice.
+
+The problem: maintaining the elimination graph is expensive. Each elimination
+can add O(d^2) fill edges, and updating the degrees of all affected neighbors
+requires expensive set-union operations. Total cost of exact minimum degree:
+O(n * nnz) worst case.
+
+** The Quotient Graph Model
+
+The central idea of AMD. Instead of maintaining the elimination graph (which
+grows with fill), maintain a /quotient graph/ that fits within the original
+graph's storage.
+
+*** Variables and Elements
+
+The quotient graph has two types of nodes:
+- *Variables*: Uneliminated vertices (still to be ordered)
+- *Elements*: Eliminated vertices that represent clique structure
+
+When variable p is eliminated, it becomes element e = p. The element's
+/variable list/ L_e contains all uneliminated variables that were adjacent to p.
+Two variables u and v are adjacent in the elimination graph if and only if:
+1. They share a common element (both in some L_e), OR
+2. They are directly connected by an original edge
+
+*** Key Property: No Growth
+
+The quotient graph never grows beyond the original graph size. At each step:
+- One variable is converted to an element (net zero storage change)
+- Element absorption can shrink the graph further
+- Fill edges are /never/ explicitly represented
+
+This means the entire AMD algorithm runs in the original matrix's storage —
+approximately nnz + 9n integers total workspace.
+
+*** Adjacency Through Elements
+
+Each variable v has an adjacency list containing:
+- Direct variable neighbors (original edges still present)
+- Adjacent elements (representing indirect connections through eliminated
+  vertices)
+
+The /true degree/ of v in the elimination graph is the number of distinct
+variables reachable from v through its element and variable neighbors:
+
+#+BEGIN_EXAMPLE
+true_deg(v) = |union_{e in E_v} L_e  union  A_v| - 1
+#+END_EXAMPLE
+
+where E_v are elements adjacent to v and A_v are variable neighbors.
+
+** Approximate Degree Computation
+
+Computing the true degree requires a set-union operation — expensive because
+element variable lists can overlap. AMD instead uses a cheap upper bound:
+
+#+BEGIN_EXAMPLE
+d_approx(v) <= |A_v| + sum_{e in E_v} (|L_e| - |L_e intersect A_v|)
+#+END_EXAMPLE
+
+This sums the sizes of adjacent element variable lists without removing
+cross-element duplicates. The over-count is bounded and, critically, does not
+affect ordering quality: experiments show AMD fill is within 1-5% of exact
+minimum degree.
+
+The intersection term |L_e intersect A_v| is computed efficiently using a
+/mark array/ W[n] with a generation counter. Marking all of A_v's members
+takes O(|A_v|), then scanning each L_e and checking marks gives the
+intersection size in O(|L_e|). The generation counter avoids O(n) clearing
+per step.
+
+** Element Absorption
+
+When element e's variable list is a subset of element e' (L_e subset L_{e'}),
+then e provides no adjacency information not already captured by e'. Absorbing
+e (marking it dead, removing from variable adjacency lists) keeps the quotient
+graph compact and prevents degree over-estimation.
+
+*** Standard Absorption
+
+After eliminating pivot p (creating new element), check each prior element e
+adjacent to p: if L_e subset L_p, absorb e.
+
+*** Aggressive Absorption
+
+The default in SuiteSparse AMD. Absorb element e if /all/ of e's variables
+are in the current pivot's front — checked approximately using the mark array.
+This is more aggressive: it may absorb elements slightly early, producing a
+marginally looser degree bound. In practice, ordering quality is
+indistinguishable, and execution is 20-40% faster because element lists stay
+shorter.
+
+** Supervariable Detection
+
+Variables with identical adjacency structure (same element and variable
+neighbors) are /indistinguishable/ — they will be ordered consecutively
+regardless of which is chosen first. Detecting and merging them into
+/supervariables/ reduces the effective graph size, often dramatically on
+structured problems.
+
+Detection uses hashing:
+1. After each elimination step, hash each affected variable's adjacency list
+2. Variables with the same hash are candidates — placed in a hash bucket
+3. Within each bucket, compare adjacency lists exactly (using mark array)
+4. Confirmed matches: merge =Nv[rep] += Nv[dup]=, mark dup as dead
+
+On regular meshes, supervariable detection can reduce the effective graph size
+by 5-10x.
+
+** The AMD Elimination Loop (Pseudocode)
+
+#+BEGIN_EXAMPLE
+initialize: all variables live, degree lists populated
+
+for step = 0 to n-1:
+    1. SELECT: p = variable with minimum approximate degree
+       (O(1) from degree list bucket Head[mindeg])
+
+    2. ELIMINATE: convert p to element e_p
+       - variable list L_{e_p} = all variables adjacent to p
+       - store L_{e_p} in Iw at Pe[p]
+
+    3. ABSORB ELEMENTS: for each element e in p's adjacency:
+       - if L_e subset L_{e_p} (or aggressive condition): absorb e
+       - remove e from all variable adjacency lists
+
+    4. DETECT SUPERVARIABLES: hash adjacency of each variable in L_{e_p}
+       - merge indistinguishable variables
+
+    5. UPDATE DEGREES: for each variable v in L_{e_p}:
+       - compute d_approx(v) using mark array
+       - move v to degree list Head[d_approx(v)]
+
+    6. GARBAGE COLLECT: if Iw is full, compact live entries
+       (amortized O(nnz) over all steps)
+#+END_EXAMPLE
+
+** Complexity
+
+- *Time*: Amortized O(nnz * alpha(n)) where alpha is the inverse Ackermann
+  function. Effectively O(nnz) in practice.
+- *Space*: Iw[iwlen] where iwlen ~= 1.2 * nnz + n, plus 8 arrays of size n.
+  Total: approximately 9n + 1.2 * nnz integers.
+- *Dense row handling*: Variables with degree > alpha * sqrt(n) (alpha ~= 10)
+  are flagged dense and placed at the end, preventing O(n^2) pathology.
+
+** Data Structures
+
+| Array      | Size | Purpose                                         |
+|------------+------+-------------------------------------------------|
+| =Iw[iwlen]= | ~nnz+n | Monolithic workspace: all adjacency lists    |
+| =Pe[n]=    | n    | Pointer into Iw for variable/element i          |
+| =Len[n]=   | n    | Length of i's adjacency list in Iw               |
+| =Nv[n]=    | n    | Number of variables in supervariable i (0=dead)  |
+| =Elen[n]=  | n    | Element count in adj list / ordering position    |
+| =Degree[n]= | n  | Approximate external degree                      |
+| =W[n]=     | n    | Mark array with generation counter               |
+| =Head[n]=  | n    | Degree list bucket heads                         |
+| =Next[n]=  | n    | Doubly-linked degree list (forward)              |
+| =Last[n]=  | n    | Doubly-linked degree list (backward)             |
+
+The in-place quotient graph reuses Iw: live variables store their adjacency
+lists, elements store their variable lists, and dead variables point to their
+representative. Garbage collection compacts when Iw fills.
+
+** When AMD Excels
+
+- Small to medium problems (n < ~5000): AMD overhead is minimal, ordering
+  quality is good on most structures
+- Regular meshes (2D FE): AMD and nested dissection produce comparable fill
+- Band/profile matrices: AMD naturally exploits bandwidth
+- Arrow/bordered diagonal: AMD is optimal (star vertex has degree n-1, chosen
+  last)
+
+** When AMD Struggles
+
+- Large 3D problems: AMD produces O(n^{5/3}) fill vs O(n^{4/3}) for nested
+  dissection — a fundamental gap
+- KKT matrices from NLP: irregular coupling between primal and dual blocks
+  defeats AMD's local heuristic. METIS produces 2-5x less fill.
+- Highly irregular graphs: AMD's myopic degree selection misses global
+  structure that nested dissection exploits
+
+** FERAL's Current State and Upgrade Path
+
+FERAL (=src/ordering/amd.rs=) implements /exact minimum degree/ with a mark
+array optimization, not true AMD. Key differences:
+
+| Feature              | FERAL (current)         | True AMD (Algorithm 837)     |
+|----------------------+-------------------------+------------------------------|
+| Graph model          | Explicit + fill edges   | In-place quotient graph       |
+| Degree computation   | Exact (set size)        | Approximate upper bound       |
+| Element absorption   | None                    | Standard + aggressive         |
+| Supervariable detect | None                    | Hash-based                    |
+| Cost per step        | O(deg^2) fill insertion | Amortized O(1) via quotient   |
+| Total cost           | O(n * deg^2) worst case | Amortized O(nnz)              |
+
+The mark array fix (Phase 2.5.1') brought the p90 ratio to 1.99 (target <= 2.0),
+adequate for the Phase 2 corpus (n <= 5314). For larger problems, the upgrade
+to true AMD is necessary.
+
+*** Implementation Roadmap
+
+1. Replace explicit adjacency lists with Iw monolithic workspace
+2. Map CSC =col_ptr/row_idx= to =Pe/Len= pointers (FERAL already uses similar
+   flat arrays)
+3. Add element creation: eliminated variables become elements in-place
+4. Add element absorption with aggressive mode
+5. Add hash-based supervariable detection
+6. Replace exact degree with approximate degree formula + mark array (already
+   present for the current fill-edge optimization)
+7. Add degree list buckets for O(1) minimum selection (replacing current
+   linear scan)
+
+Estimated: ~800-1200 lines of Rust, replacing the current ~300-line
+=amd_order= function.
+
+** Open-Source References
+
+- SuiteSparse AMD (BSD-3-Clause since v7.0, 2023):
+  https://github.com/DrTimothyAldenDavis/SuiteSparse/tree/main/AMD
+  Key files: =amd_2.c= (elimination loop), =amd_order.c= (driver),
+  =amd_postorder.c= (postordering)
+- Clean-room implementation from the two Amestoy papers is safe for FERAL's
+  MIT license
+
+** References
+
+- citep:amestoy1996approximate — AMD theory: quotient graph, degree
+  approximation, complexity analysis
+- citep:amestoy2004algorithm837 — Algorithm 837: C/Fortran implementation
+  details, workspace layout
+- citep:george1981computer — Elimination tree construction, postordering
+- citep:davis2016survey — Section 7.2: AMD in context of other methods
