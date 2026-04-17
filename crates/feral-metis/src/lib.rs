@@ -23,11 +23,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-// `graph` is unused by the stub `metis_order_full` but tested
-// directly; M2 (coarsening) will consume it. Dead-code lint is
-// suppressed at the module root until then.
+// Modules are exercised only by `metis_order_full` once all
+// milestones land; until then, dead-code lint is suppressed at the
+// module root for internal helpers.
+#[allow(dead_code)]
+mod coarsen;
 #[allow(dead_code)]
 mod graph;
+#[allow(dead_code)]
+mod rng;
 
 pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 
