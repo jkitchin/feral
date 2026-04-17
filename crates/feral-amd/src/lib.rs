@@ -14,6 +14,7 @@
 mod error;
 mod pattern;
 mod stats;
+mod workspace;
 
 pub use error::AmdError;
 pub use pattern::CscPattern;
@@ -30,8 +31,10 @@ pub struct AmdOptions {
     pub aggressive: bool,
     /// Dense-row threshold multiplier. A variable with initial
     /// degree exceeding `max(16, min(n, dense_alpha * sqrt(n)))` is
-    /// deferred to the end of the ordering. A negative value
-    /// disables dense deferral entirely.
+    /// deferred to the end of the ordering. A negative value sets
+    /// the threshold to `n - 2` (faer `amd.rs:173-177`), which in
+    /// practice suppresses deferral for all but true hubs of degree
+    /// `n - 1`.
     pub dense_alpha: f64,
 }
 

@@ -1,0 +1,446 @@
+//! AMD quotient-graph workspace and initialization.
+//!
+//! All arrays follow the faer / SuiteSparse naming convention and use
+//! signed `i32` so we can reserve negative values for sentinels via
+//! [`flip`]: `flip(x) = -2 - x`. API boundaries convert to `usize`.
+//!
+//! This module lands in Commit 3 of the Slice A plan
+//! (`dev/plans/ordering-amd-upgrade.md`). It builds the workspace
+//! arrays from a full-symmetric CSC pattern, runs the two
+//! initialization fast paths (zero-degree pre-elimination and
+//! dense-deferred bucket), and seats the remaining variables into
+//! degree-indexed linked lists ready for the elimination loop.
+//!
+//! Reference: `ref/faer-rs/faer/src/sparse/linalg/amd.rs:186-219`.
+//
+// Items are consumed by the elimination loop in subsequent commits
+// (Commit 4 onwards). Until then several fields and helpers are
+// intentionally unused.
+#![allow(dead_code)]
+
+use crate::error::AmdError;
+use crate::pattern::CscPattern;
+use crate::AmdOptions;
+
+/// Sentinel for "no index" in the `i32` arrays.
+pub(crate) const NONE: i32 = -1;
+
+/// Sentinel encoding used by the quotient graph: `flip(x) = -2 - x`.
+/// Used to mark absorbed elements (`pe[e] < 0` ⇒ `flip(parent)`) and
+/// as a tag on `elen` for freshly eliminated zero-degree variables.
+#[inline(always)]
+pub(crate) fn flip(x: i32) -> i32 {
+    -2 - x
+}
+
+/// Reset the generation counter `wflg` without visiting `iw`.
+///
+/// Called when `wflg` would overflow the `wbig` ceiling, or when it
+/// drops below 2 (which should not happen in practice, but matches
+/// SuiteSparse AMD's defensive check). All nonzero entries in `w`
+/// are clamped to `1`, and `2` is returned as the fresh counter.
+///
+/// Reference: `amd.rs:130-143`.
+#[inline]
+pub(crate) fn clear_flag(wflg: i32, wbig: i32, w: &mut [i32]) -> i32 {
+    if wflg < 2 || wflg >= wbig {
+        for x in w.iter_mut() {
+            if *x != 0 {
+                *x = 1;
+            }
+        }
+        return 2;
+    }
+    wflg
+}
+
+/// In-memory workspace for one AMD run.
+///
+/// The fields mirror faer's `amd_2` locals. Ownership of every buffer
+/// is held here so the elimination loop can borrow them concurrently
+/// through split borrows without reallocation.
+#[derive(Debug)]
+pub(crate) struct AmdWorkspace {
+    pub(crate) n: usize,
+    pub(crate) iwlen: usize,
+    pub(crate) pfree: usize,
+    pub(crate) iw: Vec<i32>,
+
+    pub(crate) pe: Vec<i32>,
+    pub(crate) len: Vec<i32>,
+    pub(crate) nv: Vec<i32>,
+    pub(crate) elen: Vec<i32>,
+    pub(crate) degree: Vec<i32>,
+    pub(crate) w: Vec<i32>,
+    pub(crate) head: Vec<i32>,
+    pub(crate) next: Vec<i32>,
+    pub(crate) last: Vec<i32>,
+
+    /// Generation counter for the mark array `w`.
+    pub(crate) wflg: i32,
+    /// Overflow ceiling for `wflg`: `i32::MAX - n`.
+    pub(crate) wbig: i32,
+    /// Largest element size encountered so far — used by supervariable
+    /// detection (Slice B) to bump `wflg` safely.
+    pub(crate) lemax: i32,
+    /// Lower bound on the next pivot's degree. Monotone non-decreasing.
+    pub(crate) mindeg: usize,
+    /// Number of garbage-collection compactions so far.
+    pub(crate) ncmpa: u32,
+    /// Supervariables eliminated so far (pivoted OR dense-deferred).
+    pub(crate) nel: usize,
+    /// Dense-deferred supervariable count.
+    pub(crate) ndense: i32,
+}
+
+impl AmdWorkspace {
+    /// Build a workspace from a full-symmetric CSC pattern and run
+    /// initialization. On return, all variables have been classified
+    /// into one of three buckets:
+    ///
+    /// 1. **Zero-degree** (`deg == 0`) — pre-eliminated. `pe[i] = NONE`,
+    ///    `elen[i] = flip(1)`, `w[i] = 0`, `nel` incremented.
+    /// 2. **Dense-deferred** (`deg > dense`) — moved to the dense tail.
+    ///    `pe[i] = NONE`, `nv[i] = 0`, `elen[i] = NONE`, `nel` incremented.
+    /// 3. **Live** — inserted LIFO into the degree-indexed linked list
+    ///    headed by `head[deg]`, threaded through `next`/`last`.
+    ///
+    /// `pattern` must be the full-symmetric graph (both halves). The
+    /// diagonal is ignored if present.
+    pub(crate) fn new(
+        pattern: &CscPattern<'_>,
+        opts: &AmdOptions,
+    ) -> Result<AmdWorkspace, AmdError> {
+        let n = pattern.n;
+
+        // i32 addressing requires n < i32::MAX. The algorithm also
+        // stores `pfree` as i32 via `pe[i]`, so iwlen must fit.
+        if n >= i32::MAX as usize {
+            return Err(AmdError::IndexOverflow);
+        }
+
+        // Count off-diagonal entries per column.
+        let mut len: Vec<i32> = vec![0; n];
+        let mut nzaat: usize = 0;
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..n {
+            let start = pattern.col_ptr[j];
+            let end = pattern.col_ptr[j + 1];
+            let mut cnt: usize = 0;
+            for &r in &pattern.row_idx[start..end] {
+                if r != j {
+                    cnt += 1;
+                }
+            }
+            len[j] = cnt as i32;
+            nzaat += cnt;
+        }
+
+        // iwlen = nzaat + nzaat/5 + n  (plan A1 / faer amd.rs:921-924).
+        let iwlen = nzaat
+            .checked_add(nzaat / 5)
+            .and_then(|s| s.checked_add(n))
+            .ok_or(AmdError::IndexOverflow)?;
+        if iwlen > i32::MAX as usize {
+            return Err(AmdError::IndexOverflow);
+        }
+        // iw needs at least one slot even when n==0 so `pfree` is
+        // addressable; we allocate exactly iwlen.
+        let mut iw: Vec<i32> = vec![0; iwlen];
+
+        // pe[j] = start of j's adjacency list in iw; fill iw with
+        // off-diagonals, in the order they appear in the CSC pattern.
+        let mut pe: Vec<i32> = vec![0; n];
+        let mut pfree: usize = 0;
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..n {
+            pe[j] = pfree as i32;
+            let start = pattern.col_ptr[j];
+            let end = pattern.col_ptr[j + 1];
+            for &r in &pattern.row_idx[start..end] {
+                if r != j {
+                    iw[pfree] = r as i32;
+                    pfree += 1;
+                }
+            }
+        }
+        debug_assert_eq!(pfree, nzaat);
+
+        // Dense threshold. alpha < 0 disables dense deferral.
+        let dense = if opts.dense_alpha < 0.0 {
+            n.saturating_sub(2)
+        } else {
+            (opts.dense_alpha * (n as f64).sqrt()) as usize
+        };
+        let dense = dense.max(16).min(n);
+
+        // Fixed-value arrays.
+        let mut nv: Vec<i32> = vec![1; n];
+        let mut elen: Vec<i32> = vec![0; n];
+        let mut w: Vec<i32> = vec![1; n];
+        let degree: Vec<i32> = len.clone();
+        let mut head: Vec<i32> = vec![NONE; n];
+        let mut next: Vec<i32> = vec![NONE; n];
+        let mut last: Vec<i32> = vec![NONE; n];
+
+        let wbig = i32::MAX - n as i32;
+        let wflg = 0; // clear_flag will lift to 2 on first use.
+
+        let mut nel: usize = 0;
+        let mut ndense: i32 = 0;
+
+        // Classify each variable.
+        for i in 0..n {
+            let deg = degree[i] as usize;
+            if deg == 0 {
+                // Zero-degree fast path — pre-eliminated.
+                elen[i] = flip(1);
+                nel += 1;
+                pe[i] = NONE;
+                w[i] = 0;
+            } else if deg > dense {
+                // Dense-deferred fast path.
+                ndense += 1;
+                nv[i] = 0;
+                elen[i] = NONE;
+                pe[i] = NONE;
+                nel += 1;
+            } else {
+                // LIFO head-insert at head[deg].
+                let inext = head[deg];
+                if inext != NONE {
+                    last[inext as usize] = i as i32;
+                }
+                next[i] = inext;
+                head[deg] = i as i32;
+            }
+        }
+
+        Ok(AmdWorkspace {
+            n,
+            iwlen,
+            pfree,
+            iw,
+            pe,
+            len,
+            nv,
+            elen,
+            degree,
+            w,
+            head,
+            next,
+            last,
+            wflg,
+            wbig,
+            lemax: 0,
+            mindeg: 0,
+            ncmpa: 0,
+            nel,
+            ndense,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pat<'a>(n: usize, cp: &'a [usize], ri: &'a [usize]) -> CscPattern<'a> {
+        CscPattern::new(n, cp, ri).expect("valid test pattern")
+    }
+
+    #[test]
+    fn flip_involution() {
+        for x in [-100i32, -1, 0, 1, 17, 1000] {
+            assert_eq!(flip(flip(x)), x);
+        }
+    }
+
+    #[test]
+    fn clear_flag_resets_on_overflow() {
+        let mut w = [0, 3, 5, 7, 0];
+        // wflg >= wbig triggers reset.
+        let wflg = clear_flag(100, 100, &mut w);
+        assert_eq!(wflg, 2);
+        assert_eq!(w, [0, 1, 1, 1, 0]);
+    }
+
+    #[test]
+    fn clear_flag_passthrough() {
+        let mut w = [1, 2, 3];
+        let wflg = clear_flag(5, 100, &mut w);
+        assert_eq!(wflg, 5);
+        assert_eq!(w, [1, 2, 3]);
+    }
+
+    /// Diagonal 4x4: every variable has degree 0. All four are
+    /// pre-eliminated by the zero-degree fast path; none are
+    /// inserted into any degree list.
+    #[test]
+    fn diag_4_zero_degree_fast_path() {
+        let cp = [0, 1, 2, 3, 4];
+        let ri = [0, 1, 2, 3];
+        let p = pat(4, &cp, &ri);
+        let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+
+        assert_eq!(ws.n, 4);
+        assert_eq!(ws.nel, 4, "all four pre-eliminated");
+        assert_eq!(ws.ndense, 0, "no dense deferral");
+        for i in 0..4 {
+            assert_eq!(ws.elen[i], flip(1));
+            assert_eq!(ws.pe[i], NONE);
+            assert_eq!(ws.w[i], 0);
+            assert_eq!(ws.degree[i], 0);
+        }
+        for d in 0..4 {
+            assert_eq!(ws.head[d], NONE, "degree {d} bucket empty");
+        }
+    }
+
+    /// Tridiagonal 5x5 full-symmetric: var 0 has deg 1, 4 has deg 1,
+    /// interior vars have deg 2. No dense deferral (max deg 2 < 16).
+    /// All five enter degree lists.
+    #[test]
+    fn tridiag_5_populates_degree_lists() {
+        // Full-symmetric tridiag of size 5.
+        // column j contains diagonal + off-diagonals j-1 and j+1.
+        let cp = [0, 2, 5, 8, 11, 13];
+        let ri = [0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4];
+        let p = pat(5, &cp, &ri);
+        let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+
+        assert_eq!(ws.n, 5);
+        assert_eq!(ws.nel, 0, "no fast-path eliminations");
+        assert_eq!(ws.ndense, 0);
+        assert_eq!(ws.degree, vec![1, 2, 2, 2, 1]);
+        assert_eq!(ws.len, vec![1, 2, 2, 2, 1]);
+
+        // LIFO insertion: the last variable inserted into deg list d
+        // is at head[d]. For deg=1, vars 0 and 4 hit the bucket;
+        // last in is 4. For deg=2, vars 1,2,3; last in is 3.
+        assert_eq!(ws.head[1], 4);
+        assert_eq!(ws.next[4], 0);
+        assert_eq!(ws.next[0], NONE);
+        assert_eq!(ws.last[0], 4);
+
+        assert_eq!(ws.head[2], 3);
+        assert_eq!(ws.next[3], 2);
+        assert_eq!(ws.next[2], 1);
+        assert_eq!(ws.next[1], NONE);
+        assert_eq!(ws.last[1], 2);
+        assert_eq!(ws.last[2], 3);
+        assert_eq!(ws.last[3], NONE);
+
+        // iwlen = nzaat + nzaat/5 + n.
+        // nzaat = sum(len) = 1+2+2+2+1 = 8.
+        // iwlen = 8 + 1 + 5 = 14.
+        assert_eq!(ws.iwlen, 14);
+        assert_eq!(ws.pfree, 8);
+    }
+
+    /// Arrow(5): hub at 0 has deg 4, spokes have deg 1. Dense
+    /// threshold for n=5 is min(n, max(16, 10*sqrt(5))) = 5; deg 4
+    /// < 5, so nothing is deferred. Hub enters head[4].
+    #[test]
+    fn arrow_5_all_live() {
+        let cp = [0, 5, 7, 9, 11, 13];
+        let ri = [0, 1, 2, 3, 4, 0, 1, 0, 2, 0, 3, 0, 4];
+        let p = pat(5, &cp, &ri);
+        let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+
+        assert_eq!(ws.degree, vec![4, 1, 1, 1, 1]);
+        assert_eq!(ws.nel, 0);
+        assert_eq!(ws.ndense, 0);
+        assert_eq!(ws.head[4], 0, "hub at deg-4 bucket");
+        assert_eq!(ws.head[1], 4, "last spoke inserted");
+    }
+
+    /// Arrow(200): hub has deg 199. Dense threshold = max(16,
+    /// floor(10*sqrt(200))) = max(16, 141) = 141, min(141, 200) =
+    /// 141. 199 > 141 so the hub is deferred. Spokes (deg 1) live.
+    #[test]
+    fn arrow_200_hub_deferred() {
+        let n = 200usize;
+        let mut cp: Vec<usize> = Vec::with_capacity(n + 1);
+        let mut ri: Vec<usize> = Vec::new();
+        cp.push(0);
+        // col 0: diagonal + all spokes 1..n
+        ri.push(0);
+        for r in 1..n {
+            ri.push(r);
+        }
+        cp.push(ri.len());
+        // cols 1..n: diagonal + hub
+        for j in 1..n {
+            ri.push(0);
+            ri.push(j);
+            cp.push(ri.len());
+        }
+        let p = pat(n, &cp, &ri);
+        let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+
+        assert_eq!(ws.degree[0], (n - 1) as i32);
+        assert_eq!(ws.nel, 1, "hub only");
+        assert_eq!(ws.ndense, 1);
+        assert_eq!(ws.nv[0], 0, "hub marked deferred");
+        assert_eq!(ws.pe[0], NONE);
+        assert_eq!(ws.elen[0], NONE);
+        // Spokes all land in head[1] — LIFO, last in is n-1.
+        assert_eq!(ws.head[1], (n - 1) as i32);
+    }
+
+    /// With `dense_alpha < 0`, the threshold is set to `n - 2`
+    /// (faer amd.rs:173-177). A variable with degree `n - 1` (only
+    /// possible for a true hub) is still deferred; everything else
+    /// stays live. This matches SuiteSparse AMD semantics exactly.
+    #[test]
+    fn dense_alpha_negative_uses_n_minus_2() {
+        // Band(20, 5): max degree = 10, well under n - 2 = 18.
+        let n = 20usize;
+        let b = 5usize;
+        let mut cp: Vec<usize> = vec![0];
+        let mut ri: Vec<usize> = Vec::new();
+        for j in 0..n {
+            let lo = j.saturating_sub(b);
+            let hi = (j + b + 1).min(n);
+            for r in lo..hi {
+                ri.push(r);
+            }
+            cp.push(ri.len());
+        }
+        let p = pat(n, &cp, &ri);
+        let opts = AmdOptions {
+            aggressive: true,
+            dense_alpha: -1.0,
+        };
+        let ws = AmdWorkspace::new(&p, &opts).unwrap();
+        assert_eq!(ws.ndense, 0, "nothing deferred below n - 2");
+        assert_eq!(ws.nel, 0);
+    }
+
+    #[test]
+    fn empty_pattern_ok() {
+        let cp = [0];
+        let ri: [usize; 0] = [];
+        let p = pat(0, &cp, &ri);
+        let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        assert_eq!(ws.n, 0);
+        assert_eq!(ws.nel, 0);
+        assert_eq!(ws.iwlen, 0);
+    }
+
+    /// Diagonal entries in the input are ignored when computing
+    /// adjacency lists — only off-diagonal neighbors contribute to
+    /// `len`, `degree`, and `iw`.
+    #[test]
+    fn diagonal_entries_skipped() {
+        // 3x3 with diagonal only.
+        let cp = [0, 1, 2, 3];
+        let ri = [0, 1, 2];
+        let p = pat(3, &cp, &ri);
+        let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        assert_eq!(ws.len, vec![0, 0, 0]);
+        assert_eq!(ws.pfree, 0);
+        assert_eq!(ws.nel, 3);
+    }
+}

@@ -83,3 +83,59 @@ Spot-check against plan expectations:
 Next commit (Commit 3) starts Slice A: =AmdWorkspace= internal
 struct + initialization with zero-degree and dense-deferred fast
 paths (=amd.rs:198-219= in faer's in-tree port is the reference).
+
+* 00:35 :commit-3:workspace-init:
+Landed Commit 3, the AMD quotient-graph workspace plus
+initialization. New module =crates/feral-amd/src/workspace.rs=
+(~280 lines incl. 10 unit tests):
+
+- =const NONE: i32 = -1=, =flip(x) = -2 - x=, =clear_flag= helper
+  (faer =amd.rs:126-143=). Signed =i32= throughout.
+- =AmdWorkspace= struct: the 9 primary =i32= arrays (pe, len, nv,
+  elen, degree, w, head, next, last) + =iw= + scalars (wflg, wbig,
+  lemax, mindeg, ncmpa, nel, ndense, pfree, iwlen). All pub(crate),
+  consumed by the elimination loop from Commit 4 onward.
+- =AmdWorkspace::new(pattern, opts)= — one-pass construction:
+  1. Count off-diagonals per column → =len[j]=, =nzaat=.
+  2. =iwlen = nzaat + nzaat/5 + n=, allocate =iw=; fill via CSC
+     second pass with =pe[j]= pointing to each list's start.
+  3. =dense = max(16, min(n, alpha*sqrt(n)))=; =alpha < 0= sets
+     =dense = n - 2= (faer =amd.rs:173-177=).
+  4. Classify each var into zero-degree pre-eliminated / dense
+     deferred / LIFO head-insert at =head[deg]=.
+- Overflow guards: =n >= i32::MAX as usize=, =iwlen > i32::MAX=
+  both map to =AmdError::IndexOverflow=.
+- =#![allow(dead_code)]= scoped to the workspace module — every
+  field will be consumed in Commits 4-7. No warning leak outside
+  this module.
+
+Fixed misleading docstring on =AmdOptions::dense_alpha= in
+=lib.rs=: "A negative value disables dense deferral entirely" →
+"sets the threshold to =n - 2=" (since faer caps at =n - 2=, true
+hubs of degree =n - 1= still get deferred).
+
+Evidence:
+- =cargo test -p feral-amd= → 17 passed, 0 failed. New cases:
+  =flip_involution=, =clear_flag_resets_on_overflow=,
+  =clear_flag_passthrough=, =diag_4_zero_degree_fast_path=
+  (all four vars pre-eliminated, all degree buckets empty),
+  =tridiag_5_populates_degree_lists= (LIFO head-insert order
+  verified: head[1]=4,next[4]=0; head[2]=3,next[3]=2,next[2]=1),
+  =arrow_5_all_live= (hub at head[4], no dense deferral),
+  =arrow_200_hub_deferred= (hub deg 199 > dense 141, ndense=1,
+  nel=1), =dense_alpha_negative_uses_n_minus_2= (band graph below
+  n-2 stays live), =empty_pattern_ok=, =diagonal_entries_skipped=.
+- =cargo clippy -p feral-amd --all-targets -- -D warnings= clean.
+- =cargo test --lib -p feral= → 93 passed (feral unchanged).
+
+Two bumps along the way: the diag_4 test originally iterated
+=0..=n=, one index past =head=-vector length; fixed to =0..n=.
+The "alpha<0 disables" test misread faer's semantics (threshold
+becomes n-2, not infinity); renamed and restructured to a
+band(20, 5) case where every degree is under n-2 and genuinely
+stays live.
+
+Next: Commit 4 — element construction + standard absorption
+(~300 lines). Pass-1 of approximate degree initializes w[e]
+lazily per element touch; standard absorption fires at the end
+of each knt1 iter (=amd.rs:355-358=).
