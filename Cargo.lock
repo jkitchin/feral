@@ -209,6 +209,10 @@ name = "feral-amd"
 version = "0.1.0"
 
 [[package]]
+name = "feral-ordering-core"
+version = "0.1.0"
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

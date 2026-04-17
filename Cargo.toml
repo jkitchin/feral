@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/feral-amd"]
+members = [".", "crates/feral-ordering-core", "crates/feral-amd"]
 resolver = "2"
 
 [package]
