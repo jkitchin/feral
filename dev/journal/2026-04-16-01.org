@@ -44,3 +44,42 @@ Deferred to later commits:
   path lands until a caller needs it).
 - Oracle fixtures under =tests/data/amd_oracle/= (Commit 2,
   blocker before algorithm code).
+
+* 00:20 :commit-2:amd-oracle:clean-room:
+Landed Commit 2 oracle precondition. An external, throwaway Cargo
+project at =/tmp/feral-amd-oracle/= depends on =amd = "0.2.2"= (Rust
+port of SuiteSparse AMD, BSD-3-Clause) and emits plain-text
+(perm, lnz, ncmpa, d_max, ndiv, nms_*) records for eight fixtures
+checked in under =crates/feral-amd/tests/data/amd_oracle/=:
+
+- Programmatic: =arrow_5=, =arrow_200=, =band_20_3=, =diag_4=,
+  =tridiag_10=, =grid_7x7=.
+- =amd_demo_24= — SYNTHETIC SUBSTITUTE (6x4 grid stand-in for
+  =AMD/Demo/can_24.mtx=, which needs a network fetch deferred to a
+  follow-up commit). Flagged in the fixture header and README.
+- =gh_258= — 52-variable faer regression matrix, source file
+  SHA-256 =9f70a3cfb1b068984cf76b8b11da1a786a39c8701a1cc48a909fd25aca282c40=.
+
+Harness source preserved under
+=crates/feral-amd/tests/data/amd_oracle/harness/= as =main.rs.txt=
+and =Cargo.toml.txt= (extensionless .txt so Cargo never tries to
+build them). SHA-256s recorded in the README for audit.
+
+Clean-room invariant guarded by =scripts/check-amd-cleanroom.sh=
+and wired into CI as the =amd-cleanroom= step between =test= and
+=commit-body=. The script excludes =target/=, =ref/= (vendored
+reference copies — faer-rs's Cargo.toml legitimately depends on
+=amd= but is not a feral workspace member), and the harness
+subdirectory. Exit 0 on clean workspace; exit 1 with offending
+paths otherwise. Currently: =clean-room OK: 'amd' crate absent
+from feral workspace=.
+
+Spot-check against plan expectations:
+- =arrow_5.txt=: =perm: 4 3 2 1 0=, =lnz: 4=. Matches the plan's
+  predicted degenerate-hub outcome.
+- =tridiag_10.txt=: =lnz: 9=.
+- =diag_4.txt=: =lnz: 0=.
+
+Next commit (Commit 3) starts Slice A: =AmdWorkspace= internal
+struct + initialization with zero-degree and dense-deferred fast
+paths (=amd.rs:198-219= in faer's in-tree port is the reference).

@@ -23,6 +23,13 @@ jobs:
       # separate grep rule needed.
       - name: test
         run: cargo test
+      - name: amd-cleanroom
+        # feral-amd is a clean-room implementation of AMD. The external
+        # `amd` crate (SuiteSparse port) must never enter the feral
+        # workspace dependency graph — it lives ONLY inside the oracle
+        # harness under crates/feral-amd/tests/data/amd_oracle/harness/
+        # as *.txt files (so Cargo never compiles it).
+        run: scripts/check-amd-cleanroom.sh
       - name: commit-body
         # Reject bare summary-only commits on PRs (advisory — does not block CI)
         run: |
