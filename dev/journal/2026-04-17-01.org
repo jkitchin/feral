@@ -1,0 +1,98 @@
+#+TITLE: Journal 2026-04-17-01
+#+STARTUP: overview
+
+* 09:00 :plan:ordering:
+User pivoted the phase-2 plan: implement the four fill-reducing
+ordering crates (AMD done; METIS, SCOTCH, KaHIP to come) before any
+ripopt integration. Rationale: avoid API drift as multiple ordering
+backends land. Next action: lock the crate-boundary contract before
+writing METIS.
+
+* 09:15 :ipopt:contract:
+Spawned the ipopt-expert agent to verify what Ipopt actually needs
+from an ordering crate. Answer: very little. The MA27 / MA57 / MUMPS
+/ Pardiso interfaces all consume a permutation array (int indices)
+and write it into the factorizer's scratch. No etree, no symbolic
+factor, no fill estimate required to cross the boundary. This
+justifies keeping the contract minimal.
+
+* 10:00 :contract:design:
+Authored dev/plans/ordering-crate-contract.md. Three choices locked:
+- i32 index width (matches Fortran/Ipopt convention, no 64-bit needs
+  at this boundary).
+- Free function per crate, no trait (four backends, diverging option
+  types, zero-benefit indirection).
+- No etree in the contract (three of four backends return a node
+  separator tree, not an etree — forcing etree would shape-distort
+  them).
+
+* 10:30 :crate:feral-ordering-core:
+Created crates/feral-ordering-core (zero deps beyond std).
+45-LOC lib.rs. CscPattern<'a>, OrderingStats, OrderingError,
+CONTRACT_VERSION = 1. 12 unit tests covering every validation
+branch of CscPattern::new. All green.
+
+First commit attempt blocked by cargo fmt --check: Display impl for
+OrderingError had =Self::NonSymmetric => f.write_str(...)= that went
+over the 100-col line limit. Fixed via =cargo fmt -p
+feral-ordering-core= (auto-reformatted to block form). Second
+attempt clean.
+
+* 11:30 :refactor:feral-amd:retrofit:
+Refactored feral-amd to consume feral-ordering-core. Changes:
+- Cargo.toml: add dep on feral-ordering-core = { path = "..." }
+- Deleted src/pattern.rs and src/error.rs.
+- Rewrote src/lib.rs to re-export the contract types and add
+  amd_order_full (the three-tuple contract-conforming variant).
+- Converted CscPattern slices from usize to i32 throughout
+  workspace.rs and algo.rs.
+- Permutation return type: Vec<usize> → Vec<i32> (built as
+  =let mut perm = vec![0i32; n]; perm[ws.next[i] as usize] = i as i32;=).
+- Bin targets (feral-amd CLI, feral-amd-bench) and oracle_match.rs
+  all retargeted onto the new types.
+
+Used replace_all for =AmdError → OrderingError= across algo.rs to
+keep the diff tight.
+
+Tests:
+- cargo test -p feral-amd --lib → 29 passed.
+- cargo test -p feral-amd → 29 lib + 12 oracle passed.
+- **All 12 SuiteSparse AMD oracle fixtures still match
+  bit-for-bit**: perm, ncmpa, ndiv, nms_ldl, nms_lu,
+  n_dense_deferred on diag_4 / tridiag_10 / arrow_5 / arrow_200 /
+  band_20_3 / grid_7x7 / amd_demo_24.
+- cargo clippy -p feral-amd --all-targets -- -D warnings → clean.
+- scripts/check-amd-cleanroom.sh → "clean-room OK".
+
+Retrofit commit (456708a) initially blocked by cargo fmt check (test
+module import order). Fixed via =cargo fmt -p feral-amd=; second
+attempt clean.
+
+* 12:00 :docs:decisions:changelog:
+Appended the three boundary decisions to dev/decisions.md
+(2026-04-17 entry) with rationale, alternatives considered, and
+reconsideration clause. CHANGELOG.md Unreleased section got a new
+"Changed" block calling out the breaking change to feral-amd's
+public surface (i32, OrderingError, amd_order_full). Commit ad3a0cd.
+
+* 12:30 :discipline:plan-pacing:
+When user said "ok, lets get started on the metis" earlier in the
+session, I pushed back: the 2.6.0 gate (contract lock + retrofit +
+docs) had not landed yet, so starting METIS would immediately risk
+the API drift we explicitly scoped this gate to prevent. User
+agreed: "ok, do the gate". Note for future sessions: resist the
+temptation to skip an explicit gate even when all downstream work
+looks "unblocked" — the gate is the thing that locks the upstream.
+
+* 13:00 :exit:gate-2.6.0-closed:
+2.6.0 acceptance checklist all ticked:
+- [x] feral-ordering-core crate exists with contract types.
+- [x] feral-amd retrofitted; all 12 SuiteSparse oracle tests pass
+  bit-for-bit.
+- [x] CHANGELOG.md records the breaking change to feral-amd under
+  Unreleased.
+- [x] dev/decisions.md records the three architectural choices.
+
+Next session can begin METIS (ordering-metis.md K1) against the
+frozen contract. No further changes to feral-ordering-core are
+expected.
