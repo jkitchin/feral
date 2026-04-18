@@ -4,6 +4,40 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-18) — `feral-kahip` phase K3 (flow-based edge refinement)
+
+- New shared module `crates/feral-kahip/src/graph.rs`:
+  `UndirectedGraph` CSR type (n, xadj, adjncy, eweight) with
+  `cut_weight`, `neighbors`, `eweights`, and `from_csc_unit_weights`.
+  Infrastructure shared by K3/K4/K5/K6.
+- New module `crates/feral-kahip/src/flow_refine.rs` (internal to
+  the crate until K5/K6 consume it) implementing one iteration of
+  flow-based bisection refinement per Sanders-Schulz 2011 §4:
+  - Boundary detection, BFS band extraction with configurable
+    `bnd_distance` (plan audit item 12).
+  - Undirected edges modeled as anti-parallel directed pairs with
+    the full edge weight as capacity on each direction (audit
+    item 10).
+  - Fixed-node pinning at `pin_depth = min(max_dist_in_part,
+    bnd_distance)` per side — pins all band vertices at that
+    depth to super-source (part 0) or super-sink (part 1) with
+    INF_CAP = `(sum_band_edge_weight / 2) + 1` (audit item 2;
+    fallback covers small parts inside the BFS ball).
+  - Two-cut most-balanced-min-cut v1: solve max-flow normally +
+    reversed; pick the candidate with lower cut weight satisfying
+    the balance tolerance. Full MBMC (residual-flow manipulation)
+    deferred to K5/K6 (audit item 3).
+  - Strict improvement acceptance only.
+- 40/40 tests pass (`cargo test -p feral-kahip`); clippy clean.
+  Coverage: empty/degenerate inputs, pre-optimal path-midpoint
+  cut, suboptimal 7x7 diagonal improvement (cut 12 → 8 with
+  bnd_distance=2, ε=0.4), determinism across repeated calls,
+  balance-constraint rejection, non-worsening on a random 40-node
+  graph, fixed-node pinning invariant on a path graph.
+- Research note `dev/research/ordering-kahip-k3.md` with the
+  formal algorithm, band/fixed-node definitions, two-cut MBMC v1
+  scope, and the 8-item test-oracle construction.
+
 ### Added (2026-04-18) — `feral-kahip` phase K2 (push-relabel max-flow)
 
 - Implemented push-relabel max-flow / min-cut in
