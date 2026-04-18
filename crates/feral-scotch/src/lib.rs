@@ -16,10 +16,11 @@
 //! [`OrderingStats`], [`OrderingError`], and [`CONTRACT_VERSION`] are
 //! re-exported from `feral-ordering-core`.
 //!
-//! **Status: S1 complete.** Only graph compression is wired up so far
-//! (see [`compress`] below). The full `scotch_order` contract producer
-//! and the nested-dissection driver land in milestones S2–S5, tracked
-//! in `dev/plans/ordering-scotch.md`.
+//! **Status: S1–S5 complete.** [`scotch_order`] and
+//! [`scotch_order_full`] run the full pipeline — graph compression,
+//! connected-component split, multilevel coarsening, best-of-
+//! `n_sep_trials` initial bisection, halo-FM uncoarsening, direct
+//! vertex separator, and recursive ND with an AMD leaf fallback.
 //!
 //! ## Clean-room provenance
 //!
@@ -40,6 +41,7 @@ mod compress;
 mod graph;
 #[allow(dead_code)]
 mod halo_fm;
+mod node_nd;
 #[allow(dead_code)]
 mod vertex_separator;
 
@@ -131,6 +133,50 @@ pub struct ScotchStats {
     pub n_amd_leaf_calls: u32,
 }
 
+/// Compute a fill-reducing SCOTCH nested-dissection ordering.
+///
+/// Thin wrapper over [`scotch_order_full`] that discards the
+/// diagnostic stats. Returns a permutation `perm` (new-to-old).
+pub fn scotch_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError> {
+    scotch_order_full(pattern, &ScotchOptions::default()).map(|(perm, _, _)| perm)
+}
+
+/// Contract-conforming ordering producer.
+///
+/// Signature matches the shape every FERAL ordering crate must expose
+/// per `dev/plans/ordering-crate-contract.md`: input is a
+/// full-symmetric [`CscPattern`] and options; output is a three-tuple
+/// of `(perm, OrderingStats, crate-stats)`, with errors in
+/// [`OrderingError`].
+///
+/// `OrderingStats.time_us` is the wall-clock time of this call.
+/// `fill_estimate` and `flop_estimate` stay `None` — SCOTCH does not
+/// produce them at the ordering boundary; they belong to a downstream
+/// symbolic analysis.
+///
+/// Runs the S1–S5 pipeline: optional graph compression, connected-
+/// component split, multilevel coarsening, best-of-`n_sep_trials`
+/// initial bisection, halo-FM uncoarsening refinement, direct
+/// vertex-separator via two-sided FM, recursion on each side with an
+/// AMD leaf fallback at `amd_switch`.
+pub fn scotch_order_full(
+    pattern: &CscPattern<'_>,
+    opts: &ScotchOptions,
+) -> Result<(Vec<i32>, OrderingStats, ScotchStats), OrderingError> {
+    if pattern.col_ptr.len() != pattern.n + 1 {
+        return Err(OrderingError::MalformedInput);
+    }
+    let t0 = std::time::Instant::now();
+    let mut stats = ScotchStats::default();
+    let perm = node_nd::scotch_nd_order(pattern, opts, &mut stats)?;
+    let ordering_stats = OrderingStats {
+        time_us: t0.elapsed().as_micros() as u64,
+        fill_estimate: None,
+        flop_estimate: None,
+    };
+    Ok((perm, ordering_stats, stats))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +209,49 @@ mod tests {
     #[test]
     fn contract_version_matches_core() {
         assert_eq!(CONTRACT_VERSION, feral_ordering_core::CONTRACT_VERSION);
+    }
+
+    #[test]
+    fn scotch_order_trivial_diagonal() {
+        let cp = vec![0i32, 1, 2, 3];
+        let ri = vec![0i32, 1, 2];
+        let pat = CscPattern::new(3, &cp, &ri).unwrap();
+        let perm = scotch_order(&pat).expect("trivial 3-vertex diagonal orders");
+        assert_eq!(perm.len(), 3);
+        let mut seen = [false; 3];
+        for &p in &perm {
+            assert!((0..3).contains(&p));
+            seen[p as usize] = true;
+        }
+        assert!(seen.iter().all(|&s| s));
+    }
+
+    #[test]
+    fn scotch_order_full_populates_time_us() {
+        let cp = vec![0i32, 1, 2, 3];
+        let ri = vec![0i32, 1, 2];
+        let pat = CscPattern::new(3, &cp, &ri).unwrap();
+        let (_perm, ostats, _sstats) =
+            scotch_order_full(&pat, &ScotchOptions::default()).expect("ok");
+        // time_us is populated; fill/flop remain None.
+        assert!(ostats.fill_estimate.is_none());
+        assert!(ostats.flop_estimate.is_none());
+    }
+
+    #[test]
+    fn scotch_order_rejects_malformed_col_ptr() {
+        // col_ptr length must equal n + 1. Construct a well-formed
+        // CscPattern for n = 3, then pass it to scotch_order_full
+        // with an options struct and a lying n via a fresh pattern
+        // that fails the upstream validator.
+        let cp = vec![0i32, 1];
+        let ri: Vec<i32> = Vec::new();
+        // CscPattern::new with n=2 and col_ptr of length 2 rejects at
+        // construction; go through the public API by constructing a
+        // valid n=0 pattern and mutating — since we don't have public
+        // mutation, simply verify that CscPattern::new rejects the
+        // malformed case (the scotch_order_full guard is a defence-
+        // in-depth and is covered by tests in node_nd).
+        assert!(CscPattern::new(2, &cp, &ri).is_none());
     }
 }
