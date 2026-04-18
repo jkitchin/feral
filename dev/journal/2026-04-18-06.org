@@ -85,3 +85,28 @@ Deferred per plan:
 - Full MBMC (residual-flow manipulation) — K5/K6 follow-up.
 - Adaptive bnd_distance — K6 tuning.
 - Vertex weights — K4 will introduce.
+
+* 19:00 :kahip:k4:research:
+User: "then K4-K6 first. start mongoose with a subagent."
+Spawned Mongoose research subagent (general-purpose,
+background) to produce dev/research/ordering-mongoose.md
+(algorithm + license check). Main thread proceeds with K4.
+
+K4 research note written at
+dev/research/ordering-kahip-k4.md. Core idea: given a refined
+edge bisection from K3, build a node separator by reducing to
+minimum weighted vertex cover on the boundary-bipartite cut-edge
+graph. Directed s → B_0 → B_1 → t flow network:
+  - source arcs to every B_0 vertex, cap = vweight(v)
+  - sink arcs from every B_1 vertex, cap = vweight(v)
+  - cross-edge arcs B_0 → B_1, cap = INF
+The min-cut saturates only source/sink arcs; saturated arcs
+correspond exactly to the min-weight vertex cover by König's
+theorem. Simpler and more direct than generic node-splitting;
+matches Sanders-Schulz 2011 §4.4 literally.
+
+v1 scope: unit vertex weights, single call, no internal balance
+enforcement. 8 test oracles: empty boundary, path (sep=1),
+7x7 grid horizontal (sep=7), K_{3,3} (sep=3), determinism,
+separator validity invariant, weighted picking, no-interior-
+vertex invariant.

@@ -61,6 +61,13 @@ mod flow_refine;
 #[allow(dead_code)]
 mod graph;
 
+// Phase K4: flow-based node separator via boundary-bipartite vertex
+// cover (König's theorem reduction). Internal until K5/K6 consume
+// it; see `dev/plans/ordering-kahip.md` and
+// `dev/research/ordering-kahip-k4.md`.
+#[allow(dead_code)]
+mod node_separator;
+
 /// Crate-specific diagnostic statistics.
 ///
 /// Populated by [`kahip_order_full`] once the implementation lands;
