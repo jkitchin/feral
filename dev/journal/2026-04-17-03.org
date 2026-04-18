@@ -1,0 +1,79 @@
+#+title: FERAL journal — 2026-04-17-03
+#+startup: showall
+
+* 20:30 :resume:scotch:plan:
+Session start. Prior session (2026-04-17-02) closed feral-metis
+through M7 (recursive ND driver). Goal this session: begin SCOTCH
+implementation per dev/plans/ordering-scotch.md. Discussed scope
+with user; agreed on (1) new sibling crate crates/feral-scotch
+mirroring feral-metis layout, (2) plan to expose feral-metis
+internals as pub mod for sharing later, (3) tackle plan phase S1
+(graph compression) only this session.
+
+* 20:35 :scotch:research:s1:
+Wrote dev/research/scotch-graph-compression.md before any code,
+per CLAUDE.md "no implementation without research note first."
+Documented closed-vs-open neighborhood semantics: u, v are
+indistinguishable iff N(u)\{v} == N(v)\{u}; case 2 (adjacent
+indistinguishables) is captured by closed-neighborhood hash, case
+1 (non-adjacent with N(u)==N(v)) is not. Decided to ship case-2
+only for S1 — case 1 is rare in target workloads (FE meshes,
+KKT) and would require either two hash passes or a per-pair fix-up.
+Documented the limitation.
+
+Also nailed down hash determinism: std::collections::hash_map::
+DefaultHasher is SipHash-1-3 with fixed seeds — deterministic
+across runs and platforms. RandomState (HashMap default) is NOT
+deterministic, so we don't use it for hashing the closed-nbhd.
+
+* 20:50 :scotch:scaffold:
+Created crates/feral-scotch with Cargo.toml, src/lib.rs (defines
+ScotchOptions and ScotchStats following the 5-trial / 100-vertex-
+floor / 0.05-imbalance defaults from the audit; full-pipeline
+scotch_order producer NOT yet exposed — lands in S5).
+Registered in workspace Cargo.toml. Mirror of feral-metis pattern.
+
+* 21:05 :scotch:s1:compress:
+Implemented graph.rs (Graph CSR + from_csc_pattern; near-mirror of
+feral-metis's, intentionally duplicated for S1 standalone-ness;
+to be unified or shared via feral-metis::internals at S5) and
+compress.rs. Algorithm: (1) closed-nbhd hash via SipHash, (2)
+hash buckets, (3) exact-compare equivalence classes, (4) build
+compressed CSR with summed vertex weights AND summed edge
+weights (the audit's finding 5).
+
+Wrote 11 compress tests covering:
+- Negative: 4x4 grid, P_8 (no merges); high-threshold rejection.
+- Positive: K_4 ⊕ K_4 ⊕ K_4 → 3 supervariables of weight 4 each;
+  K_6 → 1 supervariable of weight 6.
+- Edge-weight summing: bridged-K_3 graph; verified the {0,1}↔{2}
+  compressed edge carries weight 2 (not 1) — the bug the audit
+  warned about.
+- Bijection of expansion: vertex_map flattened sorts to 0..n.
+- Conservation: sum(vwgt) preserved; external adjwgt sum matches
+  expected total after self-loop drops.
+
+Plus 2 graph tests + 3 lib stub tests = 14 in-crate tests.
+
+cargo test -p feral-scotch -> 14 passed.
+cargo test --workspace -> 93 passed in feral lib (no regressions),
+all sibling crates unchanged. cargo clippy -p feral-scotch
+--all-targets -- -D warnings -> clean. cargo fmt --check -> clean.
+
+* 21:30 :scotch:s1:edge-weight-test-fix:
+Initial draft of the edge-weight conservation test had wrong
+arithmetic — claimed 14-12=2. Re-derived: only 2 of the 3 K_3
+edges per block are intra-class (the (0,2),(1,2) edges in block 1
+are inter-class because vertex 2 is its own supervariable). Real
+intra-class loss = 4 directed entries (1 edge per block, both
+directions), surviving = 14-4 = 10. Updated the in-test comment
+walkthrough; assert passes.
+
+* 21:40 :scotch:next:
+S1 done. Next: S2 direct vertex-separator FM (~350 lines), the
+algorithmic core. That requires the shared METIS infrastructure
+(Graph + coarsen + initial_bisect + BucketPQ), so the first task
+in S2 will be the feral-metis pub mod internals exposure. Then
+the two-sided FM with the corrected gain formula
+gain(v→side) = vwgt[v] - Σ_{u ∈ N(v) ∩ opposite_side} vwgt[u]
+plus incremental frontier-load maintenance (audit finding 1).
