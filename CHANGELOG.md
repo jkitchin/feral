@@ -4,6 +4,32 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-18) — `feral-kahip` phase K1 (data reduction)
+
+- Implemented Ost-Schulz-Strash 2021 data reduction rules in
+  `crates/feral-kahip/src/data_reduction.rs` (internal to the crate
+  until the K2–K6 pipeline lands):
+  - Degree-1 elimination with cascading and order-preserving op stack.
+  - Degree-2 path compression handling both simplicial (endpoints
+    adjacent — zero fill) and non-simplicial (one fill edge added)
+    sub-cases. Skips pure-cycle chains with a per-pass `skip` array
+    so subsequent seeds find other chains.
+  - Open and closed twin detection using canonical sorted
+    signatures; closed twins (common in KKT diagonal blocks) are
+    processed before open twins.
+  - Subset elimination (mark-array) as a conservative capstone rule.
+  - Path-compressed anchor union-find for permutation expansion.
+- Crate-public surface is unchanged: `kahip_order` and
+  `kahip_order_full` still return `OrderingError::Internal` because
+  the full K1–K6 pipeline is not yet wired. `OrderingMethod::KahipND`
+  is not introduced; dispatch wiring lands with phase K6 per
+  `dev/plans/ordering-kahip.md`.
+- 15/15 tests pass (`cargo test -p feral-kahip`); clippy clean.
+  Coverage includes bijection, CSC invariants, cascading, closed
+  twins on K4, open-twin-via-degree-2 on K_{2,3}, and a Rule 2
+  firing test between two distinct hubs.
+- Research note: `dev/research/ordering-kahip-k1.md`.
+
 ### Changed (2026-04-18) — `OrderingMethod::Amd` now routes through `feral-amd`
 
 - Default AMD is now the full Amestoy/Davis/Duff AMD in the `feral-amd`

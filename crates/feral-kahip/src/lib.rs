@@ -37,6 +37,14 @@
 
 pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 
+// Phase K1: data reduction (Ost-Schulz-Strash 2021). Internal to the
+// crate until the full K1-K6 pipeline is wired; see
+// `dev/plans/ordering-kahip.md` and `dev/research/ordering-kahip-k1.md`.
+// Items are unused outside the module's own tests until later phases
+// consume them — suppress dead-code warnings until then.
+#[allow(dead_code)]
+mod data_reduction;
+
 /// Crate-specific diagnostic statistics.
 ///
 /// Populated by [`kahip_order_full`] once the implementation lands;
