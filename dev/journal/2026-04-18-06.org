@@ -240,3 +240,35 @@ Implementation is ~30 lines in src/symbolic/mod.rs: new enum variant,
 choose_adaptive helper, unreachable! arm in run_external_ordering.
 Tests: symbolic_factorize_auto_produces_valid_perm + unit test of
 choose_adaptive branches. All 23 symbolic tests pass.
+
+* 22:55 :ordering:auto:bench:regression:
+Closed the loop on Auto by running the full 154k IPM KKT bench
+twice via FERAL_ORDERING={amd,auto} env var added to bench.rs.
+
+Result: Auto regresses end-to-end despite the shape-bakeoff fill
+win.
+
+  metric                       AMD    Auto
+  sparse factor/MUMPS geomean  0.44   0.58  (+32%)
+  sparse factor/SSIDS geomean  0.02   0.03  (+50%)
+  solve/MUMPS geomean          0.46   0.46    0%
+
+Root cause: the heuristic n < 10000 && nnz/n < 15 -> KaHIP routes
+thousands of small (n=5..500) IPM iteration dumps to KaHIP. Per-call
+K1 + multilevel setup is 2-3x the AMD cost on small matrices and
+crushes the fill win on this corpus. The 41-matrix shape bakeoff
+missed this -- one matrix per family, mostly n > 200, and only
+cresc132 (n=5314) was a real KaHIP win.
+
+Per-call data from the shape bakeoff already showed it: at n~700
+KaHIP took 520-760us symbolic vs AMD 250-450us. Total time only
+netted out because cresc132's 0.607x dominates.
+
+Resolution per user (option 3): keep Auto as opt-in only via
+symbolic_factorize_with_method. symbolic_factorize stays Amd by
+default. Doc comment on OrderingMethod::Auto updated to warn.
+tried-and-rejected.md entry added with evidence pointers.
+
+Logs: /tmp/bench_amd.log, /tmp/bench_auto.log.
+Bench harness change (FERAL_ORDERING env var) stays as
+infrastructure for future ordering experiments.

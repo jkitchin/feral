@@ -4,6 +4,24 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Notes (2026-04-18) — `OrderingMethod::Auto` is opt-in only
+
+Closed-loop end-to-end bench (154,588 IPM KKT matrices) showed `Auto`
+regresses sparse factor/MUMPS geomean from 0.44 (AMD) to 0.58. Root
+cause: thousands of small (n<500) iteration dumps get routed to KaHIP
+where K1 + multilevel setup costs 2-3× per call vs AMD. The 0.988
+fill geomean from the 41-matrix shape bakeoff is real but does not
+amortize on workloads dominated by tiny matrices.
+
+Resolution: `symbolic_factorize` keeps the `Amd` default; `Auto`
+remains available via `symbolic_factorize_with_method` for callers
+whose workloads are dominated by large or `cresc132`-class matrices.
+The doc comment on `OrderingMethod::Auto` warns callers. Full
+evidence in `dev/tried-and-rejected.md`.
+
+The `FERAL_ORDERING={amd,auto,metis,scotch,kahip}` env var added to
+`src/bin/bench.rs` stays as harness for future ordering experiments.
+
 ### Added (2026-04-18) — `OrderingMethod::Auto` adaptive ordering dispatcher
 
 - `src/symbolic/mod.rs`: new `OrderingMethod::Auto` variant. Picks a

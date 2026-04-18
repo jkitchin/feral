@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use feral::numeric::factorize::factorize_multifrontal;
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
+use feral::symbolic::{symbolic_factorize_with_method, OrderingMethod, SupernodeParams};
 use feral::{
     factor, factor_single_front, read_mtx, read_sidecar, solve, solve_refined,
     solve_sparse_refined, BunchKaufmanParams, CscMatrix, Inertia, KktSidecar, SymmetricMatrix,
@@ -857,8 +857,29 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
     entries
 }
 
+fn ordering_method_from_env() -> OrderingMethod {
+    // Selects the fill-reducing ordering used by the sparse KKT bench.
+    // Default `Amd` preserves the historical baseline; `Auto` runs the
+    // adaptive dispatcher from `src/symbolic/mod.rs`. Used by the
+    // end-to-end ordering comparison driven by
+    // `FERAL_ORDERING={amd,auto,metis,scotch,kahip}`.
+    match std::env::var("FERAL_ORDERING")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "auto" => OrderingMethod::Auto,
+        "metis" => OrderingMethod::MetisND,
+        "scotch" => OrderingMethod::ScotchND,
+        "kahip" => OrderingMethod::KahipND,
+        _ => OrderingMethod::Amd,
+    }
+}
+
 fn main() {
     println!("FERAL benchmark harness");
+    let ordering_method = ordering_method_from_env();
+    println!("  ordering: {:?}", ordering_method);
 
     let config_path = Path::new("data/benchmark-config.toml");
     print!("Loading matrices from {} ... ", config_path.display());
@@ -1143,7 +1164,7 @@ fn main() {
         // the reported `factor_us` is apples-to-apples with the single
         // `factor_us` field MUMPS and SSIDS emit for their equivalent work.
         let tf = Instant::now();
-        let sym = match symbolic_factorize(&entry.csc, &snode_params) {
+        let sym = match symbolic_factorize_with_method(&entry.csc, &snode_params, ordering_method) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("  {}: symbolic failed: {}", entry.name, e);

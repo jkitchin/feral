@@ -473,3 +473,50 @@ production ordering driver.
 
 **Evidence.** Session 2026-04-18-06 bakeoff runs; commits subsequent
 to `023913c symbolic: wire OrderingMethod::KahipND into bakeoff`.
+
+---
+
+## 2026-04-18 — `OrderingMethod::Auto` as the default for `symbolic_factorize`
+
+**What.** Flip `symbolic_factorize`'s default from `Amd` to `Auto`,
+where `Auto` picks per-matrix from cheap features (n, nnz/n) — small
+& sparse → KaHIP, large & sparse → SCOTCH, otherwise AMD. Motivated
+by a 41-matrix shape bakeoff in which Auto won 41/41 on min-fill and
+posted the best geomean (0.988× AMD).
+
+**Why it failed.** The full 154,588-matrix IPM KKT bench showed Auto
+*regresses* end-to-end:
+
+| metric                      | AMD baseline | Auto |
+|-----------------------------|-------------:|-----:|
+| sparse factor/MUMPS geomean |        0.44  | 0.58 |
+| sparse factor/SSIDS geomean |        0.02  | 0.03 |
+| solve/MUMPS geomean         |        0.46  | 0.46 |
+
+The shape bakeoff had one matrix per family, mostly n > 200. The IPM
+corpus has thousands of small (n=5, n=8, n=157, …) iteration dumps
+per family. Auto's `n < 10_000 && nnz/n < 15` rule routes all of them
+to KaHIP, where the K1 + multilevel setup costs 2-3× per call vs AMD.
+Per-call symbolic cost from the shape bakeoff already showed the
+warning sign: at n~700 KaHIP took 520-760μs vs AMD's 250-450μs;
+total time only netted out because cresc132 (n=5314, KaHIP 0.607×)
+dominates the small corpus.
+
+The fill geomean (0.988) is real but does not translate to numeric
+factor speedup when the workload is dominated by tiny matrices —
+`factorize_multifrontal` time on n=5 is dominated by symbolic-phase
+overhead that AMD's O(n) inner loop wins by an order of magnitude.
+
+**Resolution.** `Auto` stays in the public API as opt-in via
+`symbolic_factorize_with_method`. `symbolic_factorize` keeps the
+`Amd` default. The doc comment on `OrderingMethod::Auto` warns
+callers about the per-call overhead and points here.
+
+**What would change the calculus.** A heuristic that requires
+n ≥ 5000 (or detects K1-fireable structure cheaply) before routing
+to KaHIP could recover the cresc132-class wins without paying the
+per-call tax on small matrices. Not pursued now — the IPM workload
+profile makes the upside small.
+
+**Evidence.** `/tmp/bench_amd.log` and `/tmp/bench_auto.log` from
+2026-04-18 session continuation; commit `bc6ec82`.

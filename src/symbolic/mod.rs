@@ -40,13 +40,25 @@ pub enum OrderingMethod {
     /// Adaptive dispatcher: picks a concrete method per-matrix from
     /// cheap pattern features (n and average degree nnz/n).
     ///
-    /// The heuristic is derived from the 34-matrix bakeoff at
-    /// `dev/journal/2026-04-18-07.org`:
+    /// The heuristic is derived from the 41-matrix shape bakeoff:
     ///   - large-and-sparse (n > 100_000, nnz/n < 5) → `ScotchND`
     ///     (SCOTCH dominates c-big-class arrow / KKT matrices).
     ///   - small-and-sparse (n < 10_000, nnz/n < 15)   → `KahipND`
     ///     (K1 reductions find short cycles AMD misses).
     ///   - everything else                             → `Amd`.
+    ///
+    /// **Opt-in only.** The 154k-matrix IPM bench (2026-04-18) showed
+    /// `Auto` regresses sparse factor/MUMPS geomean from 0.44 (AMD)
+    /// to 0.58 because the small-and-sparse branch routes thousands
+    /// of n<500 IPM iteration dumps to KaHIP, where K1 + multilevel
+    /// setup costs 2-3× per call vs AMD. The 0.988 fill geomean from
+    /// the shape bakeoff is real but does not translate to numeric
+    /// speedup when the corpus is dominated by tiny matrices.
+    ///
+    /// Use `Auto` only when the workload is known to be dominated by
+    /// large or `cresc132`-class matrices where the per-call setup
+    /// cost amortizes. The default `symbolic_factorize` keeps `Amd`.
+    /// See `dev/tried-and-rejected.md` for the full evidence.
     ///
     /// Applying `Auto` to `Auto` loops once through the dispatcher and
     /// then runs the chosen concrete method.
