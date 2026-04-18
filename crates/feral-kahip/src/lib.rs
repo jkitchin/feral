@@ -1,11 +1,12 @@
 //! KaHIP-style flow-based nested-dissection fill-reducing ordering.
 //!
-//! **Status: pre-implementation scaffold.** This crate currently
-//! exposes only the contract-conforming signatures; [`kahip_order`]
-//! always returns [`OrderingError::Internal`] with the message
-//! `"KaHIP: phases K1-K6 not yet implemented"`. Consumers that need a
-//! working ordering should use `feral-metis` or `feral-scotch` for
-//! nested dissection, or `feral-amd` for minimum-degree.
+//! **Status: phases K2-K6 complete; K1 (data reduction) deferred.**
+//! [`kahip_order`] produces a contract-conforming permutation via a
+//! multilevel flow-based nested-dissection pipeline (coarsen → initial
+//! bisect → uncoarsen with K3 flow refinement → K4 boundary-bipartite
+//! node separator → recurse). K1's Ost-Schulz-Strash data reduction
+//! is deferred; it wraps the current driver without altering output
+//! correctness and is tracked separately.
 //!
 //! **Plan.** `dev/plans/ordering-kahip.md` tracks the six
 //! implementation phases:
@@ -67,6 +68,14 @@ mod graph;
 // `dev/research/ordering-kahip-k4.md`.
 #[allow(dead_code)]
 mod node_separator;
+
+// Phase K5 (multilevel bisection controller) and K6 (recursive ND
+// driver). K5 reuses feral-metis's coarsening / initial-partition / FM
+// plumbing and plugs in K3 flow refinement at each uncoarsening level.
+// K6 walks connected components, recurses on each, and layers K4 on top
+// of K5 to produce a node separator at every internal level.
+mod cycle;
+mod node_nd;
 
 /// Crate-specific diagnostic statistics.
 ///
@@ -131,9 +140,8 @@ impl Default for KahipOptions {
 /// Thin wrapper over [`kahip_order_full`] that discards the
 /// diagnostic stats. Returns a permutation `perm` (new-to-old).
 ///
-/// **Currently returns [`OrderingError::Internal`] unconditionally.**
-/// The implementation of phases K1-K6 is tracked in
-/// `dev/plans/ordering-kahip.md`.
+/// Runs the K2-K6 pipeline with default options; see
+/// [`kahip_order_full`] for the tunable entry point.
 pub fn kahip_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError> {
     kahip_order_full(pattern, &KahipOptions::default()).map(|(perm, _, _)| perm)
 }
@@ -146,18 +154,32 @@ pub fn kahip_order(pattern: &CscPattern<'_>) -> Result<Vec<i32>, OrderingError> 
 /// of `(perm, OrderingStats, crate-stats)`, with errors in
 /// [`OrderingError`].
 ///
-/// **Currently returns [`OrderingError::Internal`] unconditionally.**
-/// See module-level docs for the phase-by-phase implementation plan.
+/// Runs the K2-K6 pipeline: K5 multilevel edge bisection (coarsen,
+/// initial bisect, uncoarsen with K3 flow refinement at each level),
+/// K4 boundary-bipartite vertex cover to lift the bisection to a node
+/// separator, and recursive nested dissection with an AMD leaf
+/// fallback for subgraphs below the mode-dependent switch.
+///
+/// `OrderingStats.time_us` is the wall-clock time of this call.
+/// `fill_estimate` and `flop_estimate` stay `None` — KaHIP does not
+/// produce them at the ordering boundary; they belong to a downstream
+/// symbolic analysis.
 pub fn kahip_order_full(
     pattern: &CscPattern<'_>,
-    _opts: &KahipOptions,
+    opts: &KahipOptions,
 ) -> Result<(Vec<i32>, OrderingStats, KahipStats), OrderingError> {
     if pattern.col_ptr.len() != pattern.n + 1 {
         return Err(OrderingError::MalformedInput);
     }
-    Err(OrderingError::Internal(
-        "KaHIP: phases K1-K6 not yet implemented",
-    ))
+    let t0 = std::time::Instant::now();
+    let mut stats = KahipStats::default();
+    let perm = node_nd::kahip_nd_order(pattern, opts, &mut stats)?;
+    let ordering_stats = OrderingStats {
+        time_us: t0.elapsed().as_micros() as u64,
+        fill_estimate: None,
+        flop_estimate: None,
+    };
+    Ok((perm, ordering_stats, stats))
 }
 
 #[cfg(test)]
@@ -173,12 +195,18 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_returns_not_implemented_on_valid_input() {
+    fn diagonal_pattern_yields_valid_permutation() {
         let col_ptr = [0i32, 1, 2, 3];
         let row_idx = [0i32, 1, 2];
         let pattern = CscPattern::new(3, &col_ptr, &row_idx).expect("valid pattern");
-        let err = kahip_order(&pattern).expect_err("scaffold must refuse to order");
-        assert!(matches!(err, OrderingError::Internal(_)));
+        let perm = kahip_order(&pattern).expect("ordering ok");
+        assert_eq!(perm.len(), 3);
+        let mut seen = [false; 3];
+        for &p in &perm {
+            assert!((0..3).contains(&p));
+            seen[p as usize] = true;
+        }
+        assert!(seen.iter().all(|&s| s));
     }
 
     #[test]

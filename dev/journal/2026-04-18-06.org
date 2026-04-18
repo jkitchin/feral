@@ -138,3 +138,39 @@ Mongoose research subagent returned. Key findings:
     before committing to follow-up plan.
 
 Full note: dev/research/ordering-mongoose.md (330 lines).
+
+* 20:30 :kahip:k5:k6:done:
+K5 + K6 complete. User: "finish K5 and K6". Research note
+(dev/research/ordering-kahip-k5-k6.md) set architecture: reuse
+feral_metis::internals (coarsen, fm_refine, initial_partition,
+graph, rng) like feral-scotch does, plug K3 flow_refine at each
+uncoarsening level, K4 flow_node_separator to lift bisection to
+separator, AMD leaf via feral_amd::amd_order.
+
+Implementation:
+- crates/feral-kahip/src/cycle.rs: K5 multilevel_bisection +
+  graph_to_undirected bridge. Mode tuning (Fast/Eco/Strong)
+  controls n_sep_trials, coarsen_floor, amd_switch, fm_pass_cap,
+  bnd_distance, and flow-refinement aggressiveness.
+- crates/feral-kahip/src/node_nd.rs: K6 kahip_nd_order recursive
+  driver. Patterned on feral-scotch/src/node_nd.rs; swaps halo FM
+  for K3 and direct vertex-separator FM for K4.
+- crates/feral-kahip/src/lib.rs: kahip_order_full now wired to
+  node_nd::kahip_nd_order; status-line doc updated from "scaffold"
+  to "K2-K6 complete".
+- Cargo.toml: added feral-amd and feral-metis path deps.
+
+Tests: 61/61 feral-kahip tests pass (+12 new: 5 cycle, 7 node_nd).
+Coverage: trivial 10-vertex graph, determinism across repeats,
+balance within slack, all three modes on 12x12 grid, graph bridge
+preserves edges; diagonal pattern, 10x10 grid → AMD leaf,
+16x16 grid → multilevel (cycles > 0), determinism, disconnected
+components, Fast/Eco/Strong end-to-end, empty graph.
+
+Clippy -D warnings clean on first try.
+
+Out of scope v1 per research note:
+- OrderingMethod::KahipND dispatch in symbolic_factorize — deferred
+  pending benchmarking.
+- K1 data reduction integration.
+- Full V/F-cycle re-coarsening (Sanders-Schulz §4.3).

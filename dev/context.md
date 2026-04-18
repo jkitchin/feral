@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-18T18:26:24Z
+Generated: 2026-04-18T19:19:15Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,36 +59,12 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+38b925a Mongoose research note: GPL-3.0, cherry-pick ideas not dedicated crate
+36e400d feral-kahip K4: flow-based node separator
+68d55bc Session 2026-04-18-06: feral-kahip K3 complete
 7651ba7 feral-kahip K3: flow-based edge refinement
 cb14eea Session 2026-04-18-05: feral-kahip K2 complete
-c3b43da feral-kahip K2: push-relabel max-flow with gap relabeling
-fada4f2 Session 2026-04-18-04: feral-kahip K1 complete
-b7e89b6 feral-kahip K1: Ost-Schulz-Strash 2021 data reduction
 ```
 
 ## Test Status
-```
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
-
-     Running tests/threshold_consistency.rs (target/debug/deps/threshold_consistency-5816576ec7052023)
-
-running 6 tests
-test polak6_0021_residual_after_threshold_fix ... ignored
-test factors_carry_zero_tol_from_params ... ok
-test factor_inertia_force_accept_implies_solve_skip_invariant ... ok
-test refinement_does_not_amplify_error_on_rank_deficient_matrix ... ok
-test dense_solve_skips_zero_pivots_rank_deficient ... ok
-test sparse_solve_skips_zero_pivots_rank_deficient ... ok
-
-test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-   Doc-tests feral
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-```
-
-## Benchmark
 ```

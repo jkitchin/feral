@@ -4,6 +4,41 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-18) — `feral-kahip` phases K5+K6 (multilevel controller + ND driver)
+
+- New module `crates/feral-kahip/src/cycle.rs` implementing K5
+  multilevel edge bisection: reuses `feral_metis::internals`
+  (coarsen, fm_refine, initial_partition, rng) for the multilevel
+  plumbing, swaps METIS's FM-only refinement for a FM bootstrap +
+  K3 flow refinement at each uncoarsening level. Mode tuning
+  (Fast/Eco/Strong) controls `n_sep_trials`, `coarsen_floor`,
+  `amd_switch`, `fm_pass_cap`, `bnd_distance`, and how many K3
+  iterations run at each level.
+- `graph_to_undirected` bridge from `feral_metis::internals::Graph`
+  (i32-indexed CSR) to `UndirectedGraph` (usize-indexed CSR) so K3
+  and K4 can consume subgraphs produced by the multilevel pipeline.
+- New module `crates/feral-kahip/src/node_nd.rs` implementing K6
+  recursive nested-dissection driver: connected-components walk,
+  per-component recursion, AMD leaf fallback
+  (`feral_amd::amd_order`) for subgraphs ≤ `amd_switch`, K5
+  bisection + K4 `flow_node_separator` lift + separator-last
+  numbering for larger subgraphs.
+- `kahip_order_full` wired end-to-end; returns contract-conforming
+  `(perm, OrderingStats, KahipStats)`. Status updated from
+  "pre-implementation scaffold" to "K2-K6 complete".
+- `feral-kahip/Cargo.toml`: added `feral-amd` and `feral-metis` path
+  deps (same pattern as `feral-scotch`).
+- 61/61 feral-kahip tests pass (+12 new: 5 K5, 7 K6). Coverage:
+  trivial 10-vertex graph, determinism, balance within slack,
+  Fast/Eco/Strong on 12x12 grid, graph bridge preservation,
+  diagonal pattern, 10x10 grid → AMD leaf path, 16x16 grid →
+  multilevel path, disconnected components, empty graph. Clippy
+  clean under `-D warnings`.
+- Research note `dev/research/ordering-kahip-k5-k6.md` with the
+  combined K5/K6 architecture, mode-parameter mapping, and out-of-
+  scope items (full V/F-cycle re-coarsening, K1 integration,
+  `OrderingMethod::KahipND` solver dispatch).
+
 ### Added (2026-04-18) — `feral-kahip` phase K3 (flow-based edge refinement)
 
 - New shared module `crates/feral-kahip/src/graph.rs`:
