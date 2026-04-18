@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-18T17:23:30Z
+Generated: 2026-04-18T17:56:29Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,11 +59,11 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+c3b43da feral-kahip K2: push-relabel max-flow with gap relabeling
+fada4f2 Session 2026-04-18-04: feral-kahip K1 complete
 b7e89b6 feral-kahip K1: Ost-Schulz-Strash 2021 data reduction
 7ebc018 Session 2026-04-18-03: AMD retirement + feral-kahip scaffold
 8d42f12 feral-kahip: workspace scaffold for KaHIP-style nested dissection
-1bfe941 retire in-tree AMD; route OrderingMethod::Amd through feral-amd
-02acb3c docs(bakeoff): re-measure large corpus after FM rebalance fix
 ```
 
 ## Test Status
