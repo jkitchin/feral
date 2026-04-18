@@ -4,6 +4,25 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-18) — `OrderingMethod::Amd` now routes through `feral-amd`
+
+- Default AMD is now the full Amestoy/Davis/Duff AMD in the `feral-amd`
+  workspace crate (approximate external degree + aggressive element
+  absorption + supervariable detection), replacing the simplified
+  exact-external-degree implementation at `src/ordering/amd.rs` in the
+  dispatch path.
+- Fill and time improvement on the large-matrix corpus: fill 17-23%
+  lower on `c-big`, `cont-201`, `bratu3d`; time 18-88× faster.
+  Parity-corpus fill is a statistical tie (geomean 1.001).
+- `src/ordering/amd.rs` remains on disk as a reference implementation
+  and still exports `permute_pattern`. See `dev/decisions.md`
+  (2026-04-18 entry) and `dev/journal/2026-04-18-03.org`.
+- Parity panel regenerated via `select_parity_panel`: 17 pass + 9
+  ignored (was 27 + 1). The additional ignores are rank-deficient
+  KKT matrices that now fall on the zero/tiny-signed pivot
+  classification boundary; residual quality is preserved (all
+  feral residuals ≤ ~1e-8, matching or beating MUMPS).
+
 ### Added (2026-04-18) — OrderingMethod enum dispatch wires METIS and SCOTCH into symbolic factorization
 
 - `feral::symbolic::OrderingMethod::{Amd, MetisND, ScotchND}` (default

@@ -298,27 +298,39 @@ fn factor_frontal_partial_elim_with_delay() {
 // ---------------------------------------------------------------------
 
 /// Assemble a 4×4 arrow-apex matrix where column 0 has a tiny diagonal
-/// and a dominant off-diagonal in the arrow apex row. The nemin=1 setup
-/// ensures every column becomes its own supernode, giving a 3-leaves /
-/// 1-root elimination tree. With `pivot_threshold = 0.01`:
+/// and a dominant off-diagonal in the arrow apex row. The extra
+/// off-diagonal `(2,1) = 0.5` breaks the leaf degree tie so column 0
+/// is *uniquely* the minimum-degree column (degree 1) — every AMD
+/// tie-breaking rule selects it first, making pivot 0 the tiny-pivot
+/// leaf. With `pivot_threshold = 0.01`:
 ///
 ///   * column 0's relative test (|1e-3| vs 0.01 · 1.0 = 0.01) fails,
-///     so a non-root leaf supernode must delay it;
-///   * columns 1 and 2 pass cleanly;
-///   * the parent (column 3) inherits column 0 as a delayed fully-
+///     so the leaf supernode at pivot 0 must delay its column;
+///   * pivots 1, 2, 3 pass cleanly and amalgamate into one root
+///     supernode (fundamental-supernode detection + SSIDS
+///     trivial-chain merge with `nemin=1`);
+///   * the root supernode inherits column 0 as a delayed fully-
 ///     summed column in its frontal.
 ///
+/// Historical note: the original fixture had `(2,1) = 0` (three
+/// equal-degree leaves). That worked with the in-tree AMD's
+/// ascending-index tie-breaker — column 0 ended up at pivot 0 — but
+/// feral-amd (the current default) uses a different tie-breaker and
+/// ordered column 0 at pivot 2, which then merged into the root
+/// supernode under SSIDS trivial-chain amalgamation. See
+/// `dev/journal/2026-04-18-03.org` 10:30 entry.
+///
 ///     A = [ 1e-3   0     0     1   ]
-///         [ 0     10     0     1   ]
-///         [ 0      0    10     1   ]
-///         [ 1      1     1     2   ]
+///         [ 0     10    0.5    1   ]
+///         [ 0    0.5   10     1   ]
+///         [ 1     1     1     2   ]
 fn arrow_apex_matrix() -> CscMatrix {
     CscMatrix::from_triplets(
         4,
         // (row, col) lower-triangle entries only
-        &[0, 3, 1, 3, 2, 3, 3],
-        &[0, 0, 1, 1, 2, 2, 3],
-        &[1e-3, 1.0, 10.0, 1.0, 10.0, 1.0, 2.0],
+        &[0, 3, 1, 2, 3, 2, 3, 3],
+        &[0, 0, 1, 1, 1, 2, 2, 3],
+        &[1e-3, 1.0, 10.0, 0.5, 1.0, 10.0, 1.0, 2.0],
     )
     .expect("build arrow matrix")
 }

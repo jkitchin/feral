@@ -1,0 +1,1 @@
+{"solver": "mumps-5.8.2", "version": "5.8.2", "matrix": "ACOPP30_0001", "n": 209, "nnz": 765, "factor_us": 208, "solve_us": 18, "inertia": {"positive": 72, "negative": 137, "zero": 0}, "rhs_source": "sidecar", "residual_2norm_relative": 1.951103720480699e-13, "factorization_status": "ok", "solver_info": {"infog_1": 0, "infog_28": 0}}

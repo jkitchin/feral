@@ -199,6 +199,7 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "criterion",
+ "feral-amd",
  "feral-metis",
  "feral-ordering-core",
  "feral-scotch",

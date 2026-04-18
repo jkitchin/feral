@@ -33,6 +33,7 @@ pulp = { version = "0.22.2", default-features = false, features = ["x86-v3"] }
 # src/ordering/amd.rs is still the default (OrderingMethod::Amd)
 # pending retirement per dev/decisions.md.
 feral-ordering-core = { path = "crates/feral-ordering-core" }
+feral-amd = { path = "crates/feral-amd" }
 feral-metis = { path = "crates/feral-metis" }
 feral-scotch = { path = "crates/feral-scotch" }
 

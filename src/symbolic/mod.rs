@@ -2,7 +2,7 @@ pub mod column_counts;
 pub mod supernode;
 
 use crate::error::FeralError;
-use crate::ordering::amd::{amd_order, permute_pattern};
+use crate::ordering::amd::permute_pattern;
 use crate::ordering::elimination_tree::EliminationTree;
 use crate::ordering::postorder::postorder;
 use crate::sparse::csc::{CscMatrix, CscPattern};
@@ -12,20 +12,23 @@ pub use supernode::{find_supernodes, Supernode, SupernodeParams};
 
 /// Which fill-reducing ordering to use in [`symbolic_factorize_with_method`].
 ///
-/// Dispatches at the single call site in `symbolic_factorize_with_method`
-/// that today hardwires `amd_order`. All methods produce a permutation;
-/// the downstream postorder composition, etree construction, column
-/// counts, supernode detection, and memory planning are identical
-/// regardless of method.
-///
-/// `Amd` uses the in-tree implementation at `src/ordering/amd.rs`.
-/// The workspace `feral-amd` crate is not yet routed here; retiring
-/// the in-tree AMD is a separate decision (see
-/// `dev/plans/ordering-scotch.md` §"Public API and Integration" and
-/// the session 2026-04-18 checkpoint).
+/// All methods produce a permutation; the downstream postorder
+/// composition, etree construction, column counts, supernode detection,
+/// and memory planning are identical regardless of method.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum OrderingMethod {
-    /// In-tree AMD (`src/ordering/amd.rs`). Default.
+    /// Approximate Minimum Degree (`feral-amd` crate: approximate
+    /// external degree with aggressive element absorption and
+    /// supervariable detection, per Amestoy/Davis/Duff 1996+2004).
+    /// Default. Matches SuiteSparse/faer on the oracle fixture suite.
+    ///
+    /// The simplified exact-external-degree implementation at
+    /// `src/ordering/amd.rs` remains on disk as a reference for the
+    /// algorithm's skeleton but is no longer reachable from the
+    /// symbolic pipeline. See
+    /// `dev/journal/2026-04-18-03.org` for the retirement evidence
+    /// (34-matrix bakeoff: geomean fill tied on parity, crate
+    /// 17-23% better and 18-88× faster on large).
     #[default]
     Amd,
     /// feral-metis multilevel nested dissection.
@@ -139,16 +142,9 @@ fn run_external_ordering(
     let pat = feral_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
         .ok_or_else(|| FeralError::InvalidInput("malformed CSC pattern".to_string()))?;
     let perm_i32 = match method {
+        OrderingMethod::Amd => feral_amd::amd_order(&pat),
         OrderingMethod::MetisND => feral_metis::metis_order(&pat),
         OrderingMethod::ScotchND => feral_scotch::scotch_order(&pat),
-        OrderingMethod::Amd => {
-            // Unreachable: the caller handles Amd via the in-tree
-            // amd_order path. Included so this function can stay
-            // total without a panic.
-            return Err(FeralError::InvalidInput(
-                "run_external_ordering called with Amd variant".to_string(),
-            ));
-        }
     };
     let perm_i32 = perm_i32
         .map_err(|e| FeralError::InvalidInput(format!("external ordering failed: {}", e)))?;
@@ -215,12 +211,7 @@ pub fn symbolic_factorize_with_method(
     // supernode amalgamation, memory plan) is identical regardless of
     // which ordering produced `initial_perm`.
     let full_pattern = matrix.symmetric_pattern();
-    let amd_perm: Vec<usize> = match method {
-        OrderingMethod::Amd => amd_order(&full_pattern),
-        OrderingMethod::MetisND | OrderingMethod::ScotchND => {
-            run_external_ordering(&full_pattern, method)?
-        }
-    };
+    let amd_perm: Vec<usize> = run_external_ordering(&full_pattern, method)?;
 
     // Step 2: Build the etree on the permuted pattern. This etree is
     // intermediate — we use it to compute the postorder and then discard it.

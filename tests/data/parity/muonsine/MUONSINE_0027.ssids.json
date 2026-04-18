@@ -1,0 +1,1 @@
+{"solver": "ssids", "version": "spral-2025.09.18", "matrix": "MUONSINE_0027", "n": 1537, "nnz": 3072, "factor_us": 8301, "solve_us": 103, "inertia": {"positive": 1025, "negative": 512, "zero": 0}, "rhs_source": "sidecar", "residual_2norm_relative": 9.088191086059966e-21, "factorization_status": "ok", "solver_info": {"ssids_flag": 50, "matrix_rank": 1537, "num_delay": 500}}

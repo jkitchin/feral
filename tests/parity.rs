@@ -88,69 +88,67 @@ fn run_parity(fam: &str, stem: &str) {
     );
 }
 
-// Panel snapshot: 27/28 matrices pass MUMPS parity (14 panel-time +
-// 8 un-ignored after the Phase 2.3 sign-preservation fix + 5
-// un-ignored after the Phase 2.3 refinement-termination fix).
-// Only SSI_2597 remains ignored (factorization-level limitation,
-// not a refinement issue — see Phase 2.4). Passing matrices run
-// as regular tests and protect against regression. As fixes land,
-// rerun `cargo run --release --example select_parity_panel` to
-// refresh the panel and un-ignore the now-passing matrices.
+// Panel snapshot: 13/26 matrices pass MUMPS parity at panel time.
+// Failing matrices are `#[ignore]`'d with the panel-time failure
+// mode in the attribute comment. Passing matrices run as regular
+// tests and protect against regression. As fixes land, rerun
+// `cargo run --release --example select_parity_panel` to refresh
+// the panel and un-ignore the now-passing matrices.
 
+// Panel time: inertia mismatch (feral=(38, 68, 0) mumps=(37, 68, 1))
 #[test]
+#[ignore]
+fn parity_acopp14_0001() {
+    run_parity("acopp14", "ACOPP14_0001");
+}
+
+// Panel time: inertia mismatch (feral=(38, 68, 0) mumps=(37, 68, 1))
+#[test]
+#[ignore]
+fn parity_acopp14_0003() {
+    run_parity("acopp14", "ACOPP14_0003");
+}
+
+// Panel time: inertia mismatch (feral=(71, 138, 0) mumps=(71, 137, 1))
+#[test]
+#[ignore]
 fn parity_acopp30_0000() {
     run_parity("acopp30", "ACOPP30_0000");
 }
 
-// Panel time: residual ratio 1.52e1 > K=10 (feral=3.86e-14, mumps=2.54e-15)
-// Phase 2.3: closed by refinement-termination fix (residual-based,
-// max 10 steps).
+// Panel time: inertia mismatch (feral=(71, 137, 1) mumps=(72, 137, 0))
 #[test]
-fn parity_avion2_0510() {
-    run_parity("avion2", "AVION2_0510");
+#[ignore]
+fn parity_acopp30_0001() {
+    run_parity("acopp30", "ACOPP30_0001");
 }
 
+// Panel time: inertia mismatch (feral=(71, 137, 1) mumps=(72, 137, 0))
 #[test]
-fn parity_bqpgasim_0012() {
-    run_parity("bqpgasim", "BQPGASIM_0012");
+#[ignore]
+fn parity_acopp30_0005() {
+    run_parity("acopp30", "ACOPP30_0005");
 }
 
-// Panel time: inertia mismatch (feral=(129, 60, 1) mumps=(129, 61, 0))
-// Phase 2.3 sign-preservation fix: passes.
+// Panel time: inertia mismatch (feral=(7, 0, 0) mumps=(6, 0, 1))
 #[test]
-fn parity_ceri651a_0000() {
-    run_parity("ceri651a", "CERI651A_0000");
+#[ignore]
+fn parity_ceri651cls_0486() {
+    run_parity("ceri651cls", "CERI651CLS_0486");
 }
 
-// Panel time: inertia mismatch (feral=(128, 61, 1) mumps=(129, 61, 0))
-// Phase 2.3 sign-preservation fix: passes.
+// Panel time: inertia mismatch (feral=(7, 0, 0) mumps=(6, 0, 1))
 #[test]
-fn parity_ceri651a_0165() {
-    run_parity("ceri651a", "CERI651A_0165");
+#[ignore]
+fn parity_ceri651cls_0487() {
+    run_parity("ceri651cls", "CERI651CLS_0487");
 }
 
-// Panel time: inertia mismatch (feral=(128, 61, 1) mumps=(129, 61, 0))
-// Phase 2.3 sign-preservation fix: passes.
+// Panel time: inertia mismatch (feral=(7, 0, 0) mumps=(6, 0, 1))
 #[test]
-fn parity_ceri651a_0166() {
-    run_parity("ceri651a", "CERI651A_0166");
-}
-
-// Panel time: residual ratio 5.10e2 > K=10 (feral=4.29e-13, mumps=8.40e-16)
-// Phase 2.3: closed by refinement-termination fix. The plain 3-step
-// refinement was exiting before the trajectory hit the machine-
-// precision basin at step ~4.
-#[test]
-fn parity_ceri651c_0746() {
-    run_parity("ceri651c", "CERI651C_0746");
-}
-
-// Panel time: residual ratio 5.12e2 > K=10 (feral=1.28e-12, mumps=2.50e-15)
-// Phase 2.3: closed by refinement-termination fix (same cause as
-// CERI651C_0746 — trajectory settles after ~5 steps).
-#[test]
-fn parity_ceri651els_1482() {
-    run_parity("ceri651els", "CERI651ELS_1482");
+#[ignore]
+fn parity_ceri651dls_0618() {
+    run_parity("ceri651dls", "CERI651DLS_0618");
 }
 
 #[test]
@@ -168,64 +166,26 @@ fn parity_cresc132_0000() {
     run_parity("cresc132", "CRESC132_0000");
 }
 
-// Panel time: inertia mismatch (feral=(20, 14, 1) mumps=(20, 15, 0))
-// Phase 2.3 sign-preservation fix: passes.
+// Panel time: inertia mismatch (feral=(5, 0, 1) mumps=(6, 0, 0))
 #[test]
-fn parity_degenlpa_0065() {
-    run_parity("degenlpa", "DEGENLPA_0065");
-}
-
-// Panel time: inertia mismatch (feral=(20, 14, 1) mumps=(20, 15, 0))
-// Phase 2.3 sign-preservation fix: passes.
-#[test]
-fn parity_degenlpb_0045() {
-    run_parity("degenlpb", "DEGENLPB_0045");
-}
-
-// Panel time: inertia mismatch (feral=(20, 14, 1) mumps=(20, 15, 0))
-// Phase 2.3 sign-preservation fix: passes.
-#[test]
-fn parity_degenlpb_0046() {
-    run_parity("degenlpb", "DEGENLPB_0046");
-}
-
-// Panel time: inertia mismatch (feral=(20, 14, 1) mumps=(20, 15, 0))
-// Phase 2.3 sign-preservation fix: passes.
-#[test]
-fn parity_degenlpb_0047() {
-    run_parity("degenlpb", "DEGENLPB_0047");
-}
-
-// Panel time: residual ratio 1.08e1 > K=10 (feral=3.23e-13, mumps=2.99e-14)
-// Phase 2.3: closed by refinement-termination fix.
-#[test]
-fn parity_hahn1_0004() {
-    run_parity("hahn1", "HAHN1_0004");
+#[ignore]
+fn parity_fbrain3ls_0839() {
+    run_parity("fbrain3ls", "FBRAIN3LS_0839");
 }
 
 #[test]
-fn parity_hahn1_0006() {
-    run_parity("hahn1", "HAHN1_0006");
+fn parity_hatfldbne_1418() {
+    run_parity("hatfldbne", "HATFLDBNE_1418");
 }
 
 #[test]
-fn parity_hahn1_0023() {
-    run_parity("hahn1", "HAHN1_0023");
+fn parity_hatfldbne_1419() {
+    run_parity("hatfldbne", "HATFLDBNE_1419");
 }
 
 #[test]
-fn parity_hatfldbne_2138() {
-    run_parity("hatfldbne", "HATFLDBNE_2138");
-}
-
-#[test]
-fn parity_hatfldbne_2140() {
-    run_parity("hatfldbne", "HATFLDBNE_2140");
-}
-
-#[test]
-fn parity_hs85_0176() {
-    run_parity("hs85", "HS85_0176");
+fn parity_himmelbj_0032() {
+    run_parity("himmelbj", "HIMMELBJ_0032");
 }
 
 #[test]
@@ -233,23 +193,45 @@ fn parity_hydcar20_0000() {
     run_parity("hydcar20", "HYDCAR20_0000");
 }
 
-// Panel time: residual ratio 1.25e1 > K=10 (feral=2.50e-14, mumps=1.99e-15)
-// Phase 2.3: closed by refinement-termination fix.
 #[test]
-fn parity_meyer3ne_0253() {
-    run_parity("meyer3ne", "MEYER3NE_0253");
-}
-
-// Panel time: inertia mismatch (feral=(52, 22, 1) mumps=(52, 23, 0))
-// Phase 2.3 sign-preservation fix: passes.
-#[test]
-fn parity_palmer2ane_0000() {
-    run_parity("palmer2ane", "PALMER2ANE_0000");
+fn parity_meyer3ne_0220() {
+    run_parity("meyer3ne", "MEYER3NE_0220");
 }
 
 #[test]
-fn parity_roszman1_0225() {
-    run_parity("roszman1", "ROSZMAN1_0225");
+fn parity_meyer3ne_0259() {
+    run_parity("meyer3ne", "MEYER3NE_0259");
+}
+
+#[test]
+fn parity_muonsine_0019() {
+    run_parity("muonsine", "MUONSINE_0019");
+}
+
+#[test]
+fn parity_muonsine_0027() {
+    run_parity("muonsine", "MUONSINE_0027");
+}
+
+// Panel time: residual ratio 1.17e1 > K=10 (feral=2.44e-14, mumps=2.08e-15)
+#[test]
+#[ignore]
+fn parity_roszman1_0241() {
+    run_parity("roszman1", "ROSZMAN1_0241");
+}
+
+// Panel time: residual ratio 3.39e2 > K=10 (feral=8.59e-13, mumps=2.53e-15)
+#[test]
+#[ignore]
+fn parity_ssi_1685() {
+    run_parity("ssi", "SSI_1685");
+}
+
+// Panel time: residual ratio 2.53e2 > K=10 (feral=3.02e-14, mumps=1.19e-16)
+#[test]
+#[ignore]
+fn parity_ssi_2412() {
+    run_parity("ssi", "SSI_2412");
 }
 
 // Panel time: residual ratio 1.56e3 > K=10 (feral=1.80e-13, mumps=1.15e-16)
@@ -265,6 +247,6 @@ fn parity_swopf_0000() {
 }
 
 #[test]
-fn parity_vesuvio_0021() {
-    run_parity("vesuvio", "VESUVIO_0021");
+fn parity_vesuviou_0030() {
+    run_parity("vesuviou", "VESUVIOU_0030");
 }

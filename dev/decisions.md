@@ -966,3 +966,36 @@ not remove the module. `Cargo.toml` depends on `feral-amd`
 transitively through `feral-metis`, `feral-scotch`, and
 `feral-ordering-core` but does not itself consume it directly
 yet.
+
+---
+
+## 2026-04-18 — Retire in-tree AMD; route `OrderingMethod::Amd` through `feral-amd`
+
+**Decision.** `OrderingMethod::Amd` is now the default and routes through the
+`feral-amd` workspace crate (full AMD with approximate external degree,
+aggressive element absorption, supervariable detection — Amestoy/Davis/Duff
+1996+2004). The in-tree simplified AMD at `src/ordering/amd.rs` is kept on disk
+as a reference implementation of the exact-external-degree variant and for the
+`permute_pattern` helper, but is no longer reachable from the symbolic pipeline.
+
+**Evidence.** 34-matrix bakeoff (30 parity + 4 large) via `amd_compare`:
+
+- Parity corpus: geomean `fill_crate / fill_intree` = 1.001 (tied).
+  In-tree wins on 18 matrices, crate on 6, 10 ties. Differences are 1-6%.
+- Large corpus: crate strictly better on every matrix.
+  - `bcsstk38`: fill 0.941, time 18×
+  - `bratu3d`:  fill 0.840, time 46×
+  - `c-big`:    fill 0.776, time 36×
+  - `cont-201`: fill 0.769, time 88×
+
+**Tradeoff.** The new default produces different permutations than the old
+in-tree AMD, which causes inertia classification to flip at the zero/tiny-
+signed-pivot boundary on some rank-deficient KKT matrices (e.g.
+ACOPP30_0000). This is a property of ordering choice on rank-deficient
+systems, not an AMD regression — `feral-metis` exhibits the same flip on
+the same matrices. Residual quality is preserved (feral residuals ~1e-15,
+better than MUMPS). The parity panel was regenerated via
+`select_parity_panel` (its documented purpose on solver behavior change),
+moving 8 additional boundary-case matrices into the `#[ignore]` bucket.
+
+**Journal.** `dev/journal/2026-04-18-03.org` 10:00-10:40 entries.

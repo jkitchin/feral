@@ -1,0 +1,1 @@
+{"solver": "mumps-5.8.2", "version": "5.8.2", "matrix": "CERI651DLS_0618", "n": 7, "nnz": 28, "factor_us": 12, "solve_us": 5, "inertia": {"positive": 6, "negative": 0, "zero": 1}, "rhs_source": "sidecar", "residual_2norm_relative": 6.943933849464597e-08, "factorization_status": "ok", "solver_info": {"infog_1": 0, "infog_28": 1}}
