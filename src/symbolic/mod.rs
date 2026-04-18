@@ -10,6 +10,30 @@ use crate::sparse::csc::{CscMatrix, CscPattern};
 pub use column_counts::{column_counts, total_factor_nnz};
 pub use supernode::{find_supernodes, Supernode, SupernodeParams};
 
+/// Which fill-reducing ordering to use in [`symbolic_factorize_with_method`].
+///
+/// Dispatches at the single call site in `symbolic_factorize_with_method`
+/// that today hardwires `amd_order`. All methods produce a permutation;
+/// the downstream postorder composition, etree construction, column
+/// counts, supernode detection, and memory planning are identical
+/// regardless of method.
+///
+/// `Amd` uses the in-tree implementation at `src/ordering/amd.rs`.
+/// The workspace `feral-amd` crate is not yet routed here; retiring
+/// the in-tree AMD is a separate decision (see
+/// `dev/plans/ordering-scotch.md` §"Public API and Integration" and
+/// the session 2026-04-18 checkpoint).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum OrderingMethod {
+    /// In-tree AMD (`src/ordering/amd.rs`). Default.
+    #[default]
+    Amd,
+    /// feral-metis multilevel nested dissection.
+    MetisND,
+    /// feral-scotch nested dissection.
+    ScotchND,
+}
+
 /// The complete output of symbolic factorization.
 ///
 /// Produced before any numeric work begins. Contains everything needed
@@ -86,6 +110,80 @@ pub fn symbolic_factorize(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
 ) -> Result<SymbolicFactorization, FeralError> {
+    symbolic_factorize_with_method(matrix, snode_params, OrderingMethod::Amd)
+}
+
+/// Convert an owned-`usize` `CscPattern` into the contract's borrowed-`i32`
+/// shape used by `feral-metis` / `feral-scotch`. Returns buffers the
+/// caller must keep alive for the lifetime of the produced `CscPattern<'_>`.
+fn to_contract_pattern_bufs(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>), FeralError> {
+    let col_ptr: Result<Vec<i32>, _> = pattern.col_ptr.iter().map(|&x| i32::try_from(x)).collect();
+    let col_ptr = col_ptr.map_err(|_| {
+        FeralError::InvalidInput("matrix too large for i32-indexed ordering crates".to_string())
+    })?;
+    let row_idx: Result<Vec<i32>, _> = pattern.row_idx.iter().map(|&x| i32::try_from(x)).collect();
+    let row_idx = row_idx.map_err(|_| {
+        FeralError::InvalidInput("matrix too large for i32-indexed ordering crates".to_string())
+    })?;
+    Ok((col_ptr, row_idx))
+}
+
+/// Run an external (contract-conforming) ordering crate on `pattern` and
+/// return the permutation as `Vec<usize>` in the in-tree convention
+/// (new-to-old: `perm[k]` is the original column that became column `k`).
+fn run_external_ordering(
+    pattern: &CscPattern,
+    method: OrderingMethod,
+) -> Result<Vec<usize>, FeralError> {
+    let (col_buf, row_buf) = to_contract_pattern_bufs(pattern)?;
+    let pat = feral_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
+        .ok_or_else(|| FeralError::InvalidInput("malformed CSC pattern".to_string()))?;
+    let perm_i32 = match method {
+        OrderingMethod::MetisND => feral_metis::metis_order(&pat),
+        OrderingMethod::ScotchND => feral_scotch::scotch_order(&pat),
+        OrderingMethod::Amd => {
+            // Unreachable: the caller handles Amd via the in-tree
+            // amd_order path. Included so this function can stay
+            // total without a panic.
+            return Err(FeralError::InvalidInput(
+                "run_external_ordering called with Amd variant".to_string(),
+            ));
+        }
+    };
+    let perm_i32 = perm_i32
+        .map_err(|e| FeralError::InvalidInput(format!("external ordering failed: {}", e)))?;
+    if perm_i32.len() != pattern.n {
+        return Err(FeralError::InvalidInput(format!(
+            "external ordering returned {} entries for n={}",
+            perm_i32.len(),
+            pattern.n
+        )));
+    }
+    let mut out: Vec<usize> = Vec::with_capacity(perm_i32.len());
+    for x in perm_i32 {
+        let u = usize::try_from(x).map_err(|_| {
+            FeralError::InvalidInput("external ordering returned negative index".to_string())
+        })?;
+        if u >= pattern.n {
+            return Err(FeralError::InvalidInput(
+                "external ordering returned out-of-range index".to_string(),
+            ));
+        }
+        out.push(u);
+    }
+    Ok(out)
+}
+
+/// Like [`symbolic_factorize`] but lets the caller pick the
+/// fill-reducing ordering via [`OrderingMethod`].
+///
+/// `symbolic_factorize(m, p) == symbolic_factorize_with_method(m, p,
+/// OrderingMethod::Amd)`.
+pub fn symbolic_factorize_with_method(
+    matrix: &CscMatrix,
+    snode_params: &SupernodeParams,
+    method: OrderingMethod,
+) -> Result<SymbolicFactorization, FeralError> {
     let n = matrix.n;
 
     // Phase 2.2.1 Step 5: compute global symmetric scaling before ordering.
@@ -112,12 +210,23 @@ pub fn symbolic_factorize(
         );
     }
 
-    // Step 1: Fill-reducing ordering (AMD)
+    // Step 1: Fill-reducing ordering. Dispatch on `method`. The
+    // downstream pipeline (postorder composition, etree, column counts,
+    // supernode amalgamation, memory plan) is identical regardless of
+    // which ordering produced `initial_perm`.
     let full_pattern = matrix.symmetric_pattern();
-    let amd_perm = amd_order(&full_pattern);
+    let amd_perm: Vec<usize> = match method {
+        OrderingMethod::Amd => amd_order(&full_pattern),
+        OrderingMethod::MetisND | OrderingMethod::ScotchND => {
+            run_external_ordering(&full_pattern, method)?
+        }
+    };
 
-    // Step 2: Build the etree on the AMD-permuted pattern. This etree is
+    // Step 2: Build the etree on the permuted pattern. This etree is
     // intermediate — we use it to compute the postorder and then discard it.
+    // The local name `amd_*` is kept from the AMD-only era to minimise the
+    // diff; semantically these are now "ordering output" and "permuted
+    // pattern from that ordering", regardless of method.
     let amd_pattern = permute_pattern(&full_pattern, &amd_perm);
     let amd_etree = EliminationTree::from_pattern(&amd_pattern);
 
@@ -359,5 +468,78 @@ mod tests {
                 "root should have no contribution block"
             );
         }
+    }
+
+    fn small_grid_5x5() -> CscMatrix {
+        // 5x5 grid graph stored as CscMatrix (full symmetric, lower
+        // triangle only). Used as a structurally non-trivial test
+        // case where AMD, METIS, and SCOTCH all produce permutations
+        // and the downstream pipeline must accept any of them.
+        let m = 5;
+        let n = 5;
+        let idx = |r: usize, c: usize| r * n + c;
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for r in 0..m {
+            for c in 0..n {
+                let k = idx(r, c);
+                rows.push(k);
+                cols.push(k);
+                vals.push(4.0);
+                if r + 1 < m {
+                    rows.push(idx(r + 1, c));
+                    cols.push(k);
+                    vals.push(-1.0);
+                }
+                if c + 1 < n {
+                    rows.push(idx(r, c + 1));
+                    cols.push(k);
+                    vals.push(-1.0);
+                }
+            }
+        }
+        CscMatrix::from_triplets(m * n, &rows, &cols, &vals).unwrap()
+    }
+
+    #[test]
+    fn symbolic_factorize_metis_produces_valid_perm() {
+        let m = small_grid_5x5();
+        let params = SupernodeParams::default();
+        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::MetisND).unwrap();
+        assert_eq!(sym.n, 25);
+        let mut sorted = sym.perm.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0..25).collect::<Vec<_>>(), "perm is a bijection");
+        for i in 0..25 {
+            assert_eq!(sym.perm[sym.perm_inv[i]], i);
+        }
+    }
+
+    #[test]
+    fn symbolic_factorize_scotch_produces_valid_perm() {
+        let m = small_grid_5x5();
+        let params = SupernodeParams::default();
+        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::ScotchND).unwrap();
+        assert_eq!(sym.n, 25);
+        let mut sorted = sym.perm.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0..25).collect::<Vec<_>>(), "perm is a bijection");
+        for i in 0..25 {
+            assert_eq!(sym.perm[sym.perm_inv[i]], i);
+        }
+    }
+
+    #[test]
+    fn symbolic_factorize_default_matches_amd() {
+        let m = small_grid_5x5();
+        let params = SupernodeParams::default();
+        let a = symbolic_factorize(&m, &params).unwrap();
+        let b = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd).unwrap();
+        assert_eq!(
+            a.perm, b.perm,
+            "symbolic_factorize must equal symbolic_factorize_with_method(Amd)"
+        );
+        assert_eq!(a.factor_nnz_estimate, b.factor_nnz_estimate);
     }
 }

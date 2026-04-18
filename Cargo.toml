@@ -24,6 +24,13 @@ serde_json = "1"
 # src/dense/schur_kernel.rs; see dev/decisions.md for the
 # replacement trigger and interface boundary.
 pulp = { version = "0.22.2", default-features = false, features = ["x86-v3"] }
+# Ordering crates are consumed by `symbolic_factorize_with_method`
+# via the OrderingMethod enum in src/symbolic/mod.rs. The in-tree
+# src/ordering/amd.rs is still the default (OrderingMethod::Amd)
+# pending retirement per dev/decisions.md.
+feral-ordering-core = { path = "crates/feral-ordering-core" }
+feral-metis = { path = "crates/feral-metis" }
+feral-scotch = { path = "crates/feral-scotch" }
 
 [dev-dependencies]
 approx = "0.5"
