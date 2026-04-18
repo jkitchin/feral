@@ -174,3 +174,43 @@ Out of scope v1 per research note:
   pending benchmarking.
 - K1 data reduction integration.
 - Full V/F-cycle re-coarsening (Sanders-Schulz §4.3).
+
+* 21:15 :kahip:k1:fill:regression:
+Wired K1 data reduction into kahip_nd_order, hoping to fix c-big's
+3.29x KaHIP/AMD fill blow-up. Three discoveries, in order:
+
+1) Initial wiring (all four rules enabled, max_ratio=0.99): fill got
+   WORSE across the board. Geomean KaHIP/AMD went 1.032 -> 2.094.
+   c-big went 3.29x -> 3.92x. Three matrices blew up catastrophically:
+   vesuvia 25.8x, vesuvio 51.6x, vesuviou 41.9x, cresc132 95.3x.
+
+2) Found a real bug in expand_permutation: Rule-2 path interiors
+   were anchored to endpoint u only, but fill-preservation requires
+   the path to be eliminated before BOTH endpoints. When pos(w) <
+   pos(u), the path stays alive when w is eliminated and produces
+   extra fill. Fixed by choosing whichever of the two anchors has
+   lower reduced-perm position. Geomean 2.094 -> 1.876. vesuvia
+   recovered (393k -> 49k fill). vesuvio/vesuviou/cresc132 did NOT
+   recover, so there are more bugs.
+
+3) Rolled back Rules 2-4 entirely; kept Rule 1 (degree-1 cascade).
+   Geomean KaHIP/AMD = 1.023 — KaHIP is now THE BEST on-average
+   ordering (AMD 1.000, METIS 1.024, SCOTCH 1.038, KaHIP 1.023).
+   Min-fill wins: KaHIP 37, tied with AMD. c-big 2.59x (better than
+   METIS's 2.69x and closer to SCOTCH's 1.00x). Total KaHIP time
+   dropped from 147s to 84s because Rule-1 cascade shrinks the
+   graph fed to the expensive flow refinement.
+
+Root cause for Rules 2-4 blow-ups is not understood. Claims in
+Ost-Schulz-Strash 2021 that these rules are "fill-preserving" are
+clearly true only under implicit constraints on the downstream
+ordering, not for any ordering on the reduced graph. Documented in
+dev/tried-and-rejected.md with hypotheses to investigate.
+
+Changes: data_reduction.rs gets ReduceOptions{degree2_simplicial,
+degree2_nonsimplicial, twins, subset} with ::conservative() (Rule 1
+only) and ::full() (all rules, test-only). Expansion fix is
+permanent. node_nd.rs uses ::conservative().
+
+All 61 feral-kahip tests pass. 97 workspace lib/bin tests pass.
+Clippy clean.

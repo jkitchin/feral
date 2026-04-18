@@ -142,6 +142,48 @@ impl MutAdj {
     }
 }
 
+/// Which K1 rules the driver is allowed to apply.
+///
+/// Empirically on the FERAL parity + large-matrix corpus, Rules 2-4
+/// hurt fill dramatically on several matrices (vesuvio/vesuviou/
+/// cresc132 blow up 40-50× when Rules 2-4 are enabled, even with a
+/// correct expansion). Rule 1 alone is safe: pure degree-1 cascading
+/// has no fill interaction with the downstream multilevel partitioner.
+/// The higher rules remain implemented so that unit tests continue to
+/// validate them, but the driver's default preset enables only Rule 1.
+/// The reason for the Rule 2-4 regressions is an open question tracked
+/// in `dev/tried-and-rejected.md` — see the K1 rollout entry.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReduceOptions {
+    pub degree2_simplicial: bool,
+    pub degree2_nonsimplicial: bool,
+    pub twins: bool,
+    pub subset: bool,
+}
+
+impl ReduceOptions {
+    /// Rule 1 only — the driver's empirical safe choice.
+    pub(crate) const fn conservative() -> Self {
+        Self {
+            degree2_simplicial: false,
+            degree2_nonsimplicial: false,
+            twins: false,
+            subset: false,
+        }
+    }
+
+    /// All four rules — used by unit tests.
+    #[cfg(test)]
+    pub(crate) const fn full() -> Self {
+        Self {
+            degree2_simplicial: true,
+            degree2_nonsimplicial: true,
+            twins: true,
+            subset: true,
+        }
+    }
+}
+
 /// Apply the K1 fixed-point data reduction.
 ///
 /// Returns `Some(ReducedGraph)` if the reduction shrank the graph
@@ -150,9 +192,11 @@ impl MutAdj {
 ///
 /// `max_ratio` in `(0, 1]`: e.g. 0.7 accepts reductions of 30% or more.
 /// `max_ratio >= 1.0` accepts any reduction including the empty case.
+/// `opts` selects which reduction rules fire — see [`ReduceOptions`].
 pub(crate) fn reduce_graph(
     pattern: &CscPattern<'_>,
     max_ratio: f64,
+    opts: ReduceOptions,
 ) -> Result<Option<ReducedGraph>, OrderingError> {
     let n_original = pattern.n;
     if n_original == 0 {
@@ -171,9 +215,15 @@ pub(crate) fn reduce_graph(
     loop {
         let mut progress = 0usize;
         progress += apply_degree1(&mut g, &mut ops);
-        progress += apply_degree2(&mut g, &mut ops);
-        progress += apply_twins(&mut g, &mut ops);
-        progress += apply_subset(&mut g, &mut ops);
+        if opts.degree2_simplicial || opts.degree2_nonsimplicial {
+            progress += apply_degree2(&mut g, &mut ops, opts.degree2_nonsimplicial);
+        }
+        if opts.twins {
+            progress += apply_twins(&mut g, &mut ops);
+        }
+        if opts.subset {
+            progress += apply_subset(&mut g, &mut ops);
+        }
         if progress == 0 {
             break;
         }
@@ -246,7 +296,7 @@ fn apply_degree1(g: &mut MutAdj, ops: &mut Vec<ReductionOp>) -> usize {
 /// (could be 1 after cascading, or ≥3). We walk from each endpoint
 /// along every degree-2 neighbor to discover the full path, then
 /// collapse the interior.
-fn apply_degree2(g: &mut MutAdj, ops: &mut Vec<ReductionOp>) -> usize {
+fn apply_degree2(g: &mut MutAdj, ops: &mut Vec<ReductionOp>, allow_nonsimplicial: bool) -> usize {
     let mut removed = 0usize;
     let n = g.adj.len();
     // `skip[v]` marks vertices that belong to a degree-2 chain whose
@@ -335,6 +385,17 @@ fn apply_degree2(g: &mut MutAdj, ops: &mut Vec<ReductionOp>) -> usize {
         }
 
         let simplicial = g.adjacent(u, w);
+        if !simplicial && !allow_nonsimplicial {
+            // Non-simplicial Rule 2 adds a fill edge (u, w) to the reduced
+            // graph. Empirically this harms fill on our corpus: the
+            // extra edge perturbs the multilevel partitioner's cut
+            // choices. Mark the chain as skipped for the remainder
+            // of this pass and move on.
+            for &v in &path {
+                skip[v] = true;
+            }
+            continue 'outer;
+        }
         for &v in &path {
             g.remove_vertex(v);
             removed += 1;
@@ -587,11 +648,32 @@ pub(crate) fn expand_permutation(
         anchor[v] = cur;
     }
 
+    // Build a reverse map pos_of_old[v] = reduced-perm position of
+    // surviving vertex v, for non-surviving vertices pos = i32::MAX.
+    // Used below to choose the earlier endpoint for Rule 2 paths.
+    let mut pos_of_old: Vec<i32> = vec![i32::MAX; n_original];
+    for (new_pos, &new_idx) in reduced_perm.iter().enumerate() {
+        if new_idx < 0 || (new_idx as usize) >= reduced.n {
+            return Err(OrderingError::MalformedInput);
+        }
+        let old = reduced.old_of_new[new_idx as usize];
+        pos_of_old[old] = new_pos as i32;
+    }
+
     // Group eliminated vertices by their ultimate anchor, preserving
     // op-stack order (newer ops inserted later → appear later in the
     // group, which means they are eliminated later in the expanded
     // perm but still before the anchor). For path interiors, we want
     // the path's order preserved.
+    //
+    // For Rule 2 (non-simplicial) path compression, the fill-preservation
+    // invariant requires the path to be eliminated before BOTH of the
+    // compressed endpoints u and w, not just before u. If the reduced
+    // permutation places w earlier than u, anchoring the path at u
+    // alone causes the expanded graph to still contain the path when w
+    // is eliminated, producing extra fill through the path-interior
+    // neighbors. Fix: anchor the path to whichever of the two endpoints'
+    // ultimate anchors has the lower reduced-perm position.
     //
     // Implementation: walk the op stack in forward order and append
     // eliminated vertices to their group. Each group's vertex list
@@ -605,14 +687,22 @@ pub(crate) fn expand_permutation(
             ReductionOp::Twin { dup, .. } => {
                 group.entry(anchor[*dup]).or_default().push(*dup);
             }
-            ReductionOp::Degree2Path { path, .. } => {
-                // path vertices already all share the same anchor.
-                if let Some(&first) = path.first() {
-                    let a = anchor[first];
-                    let bucket = group.entry(a).or_default();
-                    for &v in path {
-                        bucket.push(v);
-                    }
+            ReductionOp::Degree2Path { u, w, path, .. } => {
+                if path.is_empty() {
+                    continue;
+                }
+                let au = anchor[*u];
+                let aw = anchor[*w];
+                // Pick the anchor whose reduced-perm position is lower.
+                // Ties: prefer au for determinism.
+                let chosen = if pos_of_old[aw] < pos_of_old[au] {
+                    aw
+                } else {
+                    au
+                };
+                let bucket = group.entry(chosen).or_default();
+                for &v in path {
+                    bucket.push(v);
                 }
             }
         }
@@ -620,11 +710,9 @@ pub(crate) fn expand_permutation(
 
     // Emit the final permutation: for each reduced-perm vertex, emit
     // its group (pre-anchor eliminations) followed by the anchor itself.
+    // `new_idx` already validated while building `pos_of_old` above.
     let mut out: Vec<i32> = Vec::with_capacity(n_original);
     for &new_idx in reduced_perm {
-        if new_idx < 0 || (new_idx as usize) >= reduced.n {
-            return Err(OrderingError::MalformedInput);
-        }
         let old = reduced.old_of_new[new_idx as usize];
         if let Some(pre) = group.remove(&old) {
             for v in pre {
@@ -731,7 +819,9 @@ mod tests {
         let n = 10;
         let (cp, ri) = make_pattern(n, &star_edges(n));
         let pat = CscPattern::new(n, &cp, &ri).expect("valid");
-        let reduced = reduce_graph(&pat, 1.0).unwrap().expect("reduces");
+        let reduced = reduce_graph(&pat, 1.0, ReduceOptions::full())
+            .unwrap()
+            .expect("reduces");
         assert_eq!(reduced.n, 1, "exactly one vertex survives");
         assert_eq!(reduced.ops.len(), 9, "9 vertices removed");
         for op in &reduced.ops {
@@ -758,7 +848,9 @@ mod tests {
         let n = 5;
         let (cp, ri) = make_pattern(n, &path_edges(n));
         let pat = CscPattern::new(n, &cp, &ri).expect("valid");
-        let reduced = reduce_graph(&pat, 1.0).unwrap().expect("reduces");
+        let reduced = reduce_graph(&pat, 1.0, ReduceOptions::full())
+            .unwrap()
+            .expect("reduces");
         assert_eq!(reduced.n, 1, "path collapses to a single vertex");
         let expanded = expand_permutation(&reduced, &[0], n).unwrap();
         assert!(is_permutation(&expanded, n));
@@ -777,7 +869,9 @@ mod tests {
         edges.sort();
         let (cp, ri) = make_pattern(n, &edges);
         let pat = CscPattern::new(n, &cp, &ri).expect("valid");
-        let reduced = reduce_graph(&pat, 1.0).unwrap().expect("reduces");
+        let reduced = reduce_graph(&pat, 1.0, ReduceOptions::full())
+            .unwrap()
+            .expect("reduces");
         assert_eq!(reduced.n, 1, "triangle collapses via closed twins");
         let d1_count = reduced
             .ops
@@ -831,7 +925,9 @@ mod tests {
         edges.sort();
         let (cp, ri) = make_pattern(n, &edges);
         let pat = CscPattern::new(n, &cp, &ri).expect("valid");
-        let reduced = reduce_graph(&pat, 1.0).unwrap().expect("reduces");
+        let reduced = reduce_graph(&pat, 1.0, ReduceOptions::full())
+            .unwrap()
+            .expect("reduces");
         let path_ops: Vec<&ReductionOp> = reduced
             .ops
             .iter()
@@ -867,7 +963,9 @@ mod tests {
         let n = 4;
         let (cp, ri) = make_pattern(n, &complete_edges(n));
         let pat = CscPattern::new(n, &cp, &ri).expect("valid");
-        let reduced = reduce_graph(&pat, 1.0).unwrap().expect("reduces");
+        let reduced = reduce_graph(&pat, 1.0, ReduceOptions::full())
+            .unwrap()
+            .expect("reduces");
         assert_eq!(reduced.n, 1);
         assert_eq!(reduced.old_of_new[0], 0);
         let twin_count = reduced
@@ -892,7 +990,9 @@ mod tests {
         let n = 5;
         let (cp, ri) = make_pattern(n, &bipartite_edges(2, 3));
         let pat = CscPattern::new(n, &cp, &ri).expect("valid");
-        let reduced = reduce_graph(&pat, 1.0).unwrap().expect("reduces");
+        let reduced = reduce_graph(&pat, 1.0, ReduceOptions::full())
+            .unwrap()
+            .expect("reduces");
         assert_eq!(reduced.n, 1, "K_2_3 collapses to a single vertex");
         let path_count = reduced
             .ops
@@ -924,7 +1024,9 @@ mod tests {
         edges.sort();
         let (cp, ri) = make_pattern(n, &edges);
         let pat = CscPattern::new(n, &cp, &ri).expect("valid");
-        let reduced = reduce_graph(&pat, 1.0).unwrap().expect("reduces");
+        let reduced = reduce_graph(&pat, 1.0, ReduceOptions::full())
+            .unwrap()
+            .expect("reduces");
         // Identity perm on reduced graph.
         let red_perm: Vec<i32> = (0..reduced.n as i32).collect();
         let expanded = expand_permutation(&reduced, &red_perm, n).unwrap();
@@ -937,7 +1039,9 @@ mod tests {
         let n = 3;
         let (cp, ri) = make_pattern(n, &[]);
         let pat = CscPattern::new(n, &cp, &ri).expect("valid");
-        let reduced = reduce_graph(&pat, 1.0).unwrap().expect("reduces");
+        let reduced = reduce_graph(&pat, 1.0, ReduceOptions::full())
+            .unwrap()
+            .expect("reduces");
         assert_eq!(reduced.n, 3);
         assert!(reduced.ops.is_empty());
         let expanded = expand_permutation(&reduced, &[0, 1, 2], n).unwrap();
@@ -949,7 +1053,9 @@ mod tests {
         let cp: Vec<i32> = vec![0];
         let ri: Vec<i32> = vec![];
         let pat = CscPattern::new(0, &cp, &ri).expect("valid");
-        let reduced = reduce_graph(&pat, 1.0).unwrap().expect("reduces");
+        let reduced = reduce_graph(&pat, 1.0, ReduceOptions::full())
+            .unwrap()
+            .expect("reduces");
         assert_eq!(reduced.n, 0);
         assert!(reduced.ops.is_empty());
         let expanded = expand_permutation(&reduced, &[], 0).unwrap();
@@ -965,7 +1071,7 @@ mod tests {
         let n = 3;
         let (cp, ri) = make_pattern(n, &[]);
         let pat = CscPattern::new(n, &cp, &ri).expect("valid");
-        let outcome = reduce_graph(&pat, 0.5).unwrap();
+        let outcome = reduce_graph(&pat, 0.5, ReduceOptions::full()).unwrap();
         assert!(outcome.is_none(), "no reduction, must report None");
     }
 
@@ -976,7 +1082,7 @@ mod tests {
         let n = 10;
         let (cp, ri) = make_pattern(n, &star_edges(n));
         let pat = CscPattern::new(n, &cp, &ri).expect("valid");
-        let outcome = reduce_graph(&pat, 0.5).unwrap();
+        let outcome = reduce_graph(&pat, 0.5, ReduceOptions::full()).unwrap();
         assert!(outcome.is_some(), "90% reduction must pass");
     }
 
@@ -1003,7 +1109,9 @@ mod tests {
         edges.sort();
         let (cp, ri) = make_pattern(n, &edges);
         let pat = CscPattern::new(n, &cp, &ri).expect("valid");
-        let reduced = reduce_graph(&pat, 1.0).unwrap().expect("reduces");
+        let reduced = reduce_graph(&pat, 1.0, ReduceOptions::full())
+            .unwrap()
+            .expect("reduces");
         let nr = reduced.n;
         assert_eq!(reduced.col_ptr.len(), nr + 1);
         // No diagonal, sorted within column.

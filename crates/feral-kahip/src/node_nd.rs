@@ -18,21 +18,51 @@ use feral_metis::internals::rng::SplitMix;
 use feral_ordering_core::{CscPattern, OrderingError};
 
 use crate::cycle::{graph_to_undirected, multilevel_bisection};
+use crate::data_reduction::{expand_permutation, reduce_graph, ReduceOptions};
 use crate::node_separator::flow_node_separator;
 use crate::{KahipMode, KahipOptions, KahipStats};
 
 const PART_SEP: u8 = 2;
 
-/// Entry point for KaHIP nested dissection. `stats` accumulates
-/// crate-specific diagnostics across the recursion.
+/// Entry point for KaHIP nested dissection.
+///
+/// Pipeline: K1 data reduction → K2-K6 nested dissection on the
+/// reduced graph → expand the reduced-graph permutation back to
+/// original indices. `stats` accumulates crate-specific diagnostics
+/// across the recursion.
 pub(crate) fn kahip_nd_order(
+    pattern: &CscPattern<'_>,
+    opts: &KahipOptions,
+    stats: &mut KahipStats,
+) -> Result<Vec<i32>, OrderingError> {
+    // K1: Ost-Schulz-Strash data reduction. We apply only Rule 1
+    // (degree-1 cascading) — Rules 2-4 hurt fill empirically on our
+    // corpus even with a corrected expansion; see `ReduceOptions`.
+    // Rule 1 alone cleanly strips the leaf-heavy parts of arrow-
+    // structured KKTs before we hand the core to multilevel
+    // partitioning, and its elimination order (leaves before their
+    // owners) matches what AMD would do for the leaves anyway.
+    if let Some(reduced) = reduce_graph(pattern, 0.99, ReduceOptions::conservative())? {
+        if reduced.n < pattern.n {
+            stats.reduced_n = reduced.n;
+            let reduced_pat = CscPattern::new(reduced.n, &reduced.col_ptr, &reduced.row_idx)
+                .ok_or(OrderingError::MalformedInput)?;
+            let reduced_perm = kahip_nd_inner(&reduced_pat, opts, stats)?;
+            return expand_permutation(&reduced, &reduced_perm, pattern.n);
+        }
+    }
+
+    stats.reduced_n = pattern.n;
+    kahip_nd_inner(pattern, opts, stats)
+}
+
+fn kahip_nd_inner(
     pattern: &CscPattern<'_>,
     opts: &KahipOptions,
     stats: &mut KahipStats,
 ) -> Result<Vec<i32>, OrderingError> {
     let graph = Graph::from_csc_pattern(pattern)?;
     let n = graph.nvtxs as usize;
-    stats.reduced_n = n;
 
     let mut iperm: Vec<i32> = vec![-1; n];
     let mut rng = SplitMix::new(opts.seed);

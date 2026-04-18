@@ -400,3 +400,76 @@ backed by the documented plan.
 **Evidence.** `dev/research/metis-fm-sign-bug.md` §1 (sign
 derivation), §2 (adversarial output `before=9 after=-1143`), §3
 (per-test analysis of why each existing gate misses).
+
+---
+
+## 2026-04-18 — feral-kahip K1 Rules 2-4: catastrophic fill regressions on bakeoff corpus
+
+**Symptom.** Wiring K1 data reduction (all four Ost-Schulz-Strash
+rules enabled) into `kahip_nd_order` caused fill to explode on
+several matrices in the bakeoff corpus, even after fixing a Rule-2
+expansion bug (see below). Concrete regressions (KaHIP fill vs AMD):
+
+|           | before K1 | after K1 (all rules) | after (Rule 1 only) |
+|-----------|----------:|---------------------:|--------------------:|
+| vesuvia   | 1.002×    | 25.86×               | 1.000×              |
+| vesuvio   | 1.003×    | 51.62×               | 1.000×              |
+| vesuviou  | 1.002×    | 41.89×               | 1.000×              |
+| cresc132  | 0.609×    | 95.31×               | —                   |
+| c-big     | 3.29×     | 3.92×                | 2.59×               |
+
+Geomean KaHIP/AMD fill across 41 matrices: **1.032** (no K1) →
+**2.094** (all rules) → **1.023** (Rule 1 only).
+
+**Rule-2 expansion bug (fixed).** The original expansion anchored
+Rule-2 path interiors to endpoint `u` only. Fill-preservation
+requires the path to be eliminated before BOTH endpoints — when
+`pos(w) < pos(u)` in the reduced perm, `w`'s elimination happens
+while the path still exists, producing extra fill. Fixed by
+anchoring the path to whichever of the two endpoints' ultimate
+(path-compressed) anchors has the lower reduced-perm position. This
+reduced geomean fill from 2.094 → 1.876 but did not recover
+vesuvio/vesuviou/cresc132.
+
+**Rules 2-4 disabled (unresolved).** Isolating rules by toggling
+`ReduceOptions` showed that disabling Rules 2-4 entirely (Rule 1 only)
+recovers all regressions and actually makes KaHIP the best-on-average
+ordering (geomean 1.023 vs AMD 1.000, METIS 1.024, SCOTCH 1.038).
+The exact mechanism by which Rules 2-4 produce 40-50× fill on
+vesuvio/vesuviou is not understood — the Ost-Schulz-Strash rules are
+claimed fill-preserving in the paper. Candidate explanations:
+
+1. **Open-twin interaction with partitioner.** Open twins merge
+   vertices with shared open neighborhood into a single rep. The
+   partitioner then sees a rep of weight 1 but with the merged
+   neighborhood influence. If multiple twins merged to the same rep
+   end up in different partitions in the expanded graph, fill
+   propagation differs from the reduced-graph analysis.
+
+2. **Subset cascade on dense subgraphs.** Rule 4 can eliminate large
+   numbers of vertices in dense subgraphs. The surviving core
+   becomes a denser clique-like structure that partitions poorly.
+
+3. **Rule-2 fill-edge accumulation even in simplicial case.** After
+   many simplicial compressions, `u` accumulates neighbors that
+   weren't structurally connected. Even without adding a fill edge,
+   the reduced graph's connectivity changes the partitioner's
+   decisions.
+
+**Current status.** Driver uses `ReduceOptions::conservative()`
+(Rule 1 only). Rules 2-4 remain implemented, unit-tested (via
+`ReduceOptions::full()`), and internal to the crate. Re-enabling
+them requires first understanding the fill-blow-up mechanism — most
+likely by comparing `symbolic_factor(original, expanded_perm)`
+versus `symbolic_factor(reduced, reduced_perm)` on vesuvio to
+localize where the fill diverges.
+
+**Lesson.** Claims of "fill-preserving reduction" in papers require
+the elimination order on the reduced graph to respect implicit
+structural invariants that are not obvious from the rule statements
+alone. Validate reductions via a symbolic-factor equivalence test,
+not just permutation-bijection tests, before wiring them into a
+production ordering driver.
+
+**Evidence.** Session 2026-04-18-06 bakeoff runs; commits subsequent
+to `023913c symbolic: wire OrderingMethod::KahipND into bakeoff`.

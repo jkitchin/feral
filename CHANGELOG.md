@@ -4,6 +4,44 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-18) — `feral-kahip` K1 wired into driver; Rule-1-only preset
+
+- `crates/feral-kahip/src/node_nd.rs`: `kahip_nd_order` now runs K1
+  data reduction as a pre-pass (via `reduce_graph`) and expands the
+  reduced-graph permutation back to original indices via
+  `expand_permutation`. The inner nested-dissection pipeline is
+  factored into `kahip_nd_inner`.
+- `crates/feral-kahip/src/data_reduction.rs`: added `ReduceOptions`
+  struct with per-rule toggles (`degree2_simplicial`,
+  `degree2_nonsimplicial`, `twins`, `subset`). `::conservative()`
+  enables only Rule 1 (degree-1 cascading); `::full()` enables all
+  rules. The driver uses `::conservative()`; unit tests use
+  `::full()` so all four rules remain covered.
+- Fixed a Rule-2 expansion bug: path interiors were anchored only to
+  endpoint `u`, but fill-preservation requires them to be eliminated
+  before BOTH endpoints. When `pos(w) < pos(u)` in the reduced perm,
+  the old expansion produced extra fill through the still-alive path.
+  Fix: at expansion time, anchor the path to whichever of the two
+  endpoints' ultimate (path-compressed) anchors has the lower
+  reduced-perm position. This fix alone improved geomean fill from
+  2.094 to 1.876 but did not recover three regressions (vesuvio /
+  vesuviou / cresc132) that were 40-50× AMD.
+- Rules 2-4 remain implemented and unit-tested but are disabled in
+  the driver. Empirically they cause 40-50× fill regressions on the
+  bench corpus; root cause is unresolved. See
+  `dev/tried-and-rejected.md` for details.
+- Bakeoff over the full parity + large corpus (41 matrices):
+  - geomean fill: AMD 1.000, METIS 1.024, SCOTCH 1.038, **KaHIP 1.023**
+    (was 1.032 pre-K1; KaHIP is now the best on average)
+  - min-fill wins: AMD 37, METIS 31, SCOTCH 28, **KaHIP 37** (tied
+    with AMD, up from 30)
+  - total symbolic time (us): AMD 15.1M, METIS 71.4M, SCOTCH 16.0M,
+    KaHIP 84.0M — KaHIP time dropped from 147.6M to 84.0M because
+    Rule-1 cascading shrinks the graph fed to the flow refinement.
+  - `c-big` (n=345241) KaHIP fill 3.29× → 2.59× (improved but still
+    not competitive with SCOTCH's 1.00×; adaptive dispatch or further
+    tuning are open follow-ups).
+
 ### Added (2026-04-18) — `OrderingMethod::KahipND` solver-side dispatch
 
 - `src/symbolic/mod.rs`: added `OrderingMethod::KahipND` variant;

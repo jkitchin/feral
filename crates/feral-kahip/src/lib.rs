@@ -1,12 +1,13 @@
 //! KaHIP-style flow-based nested-dissection fill-reducing ordering.
 //!
-//! **Status: phases K2-K6 complete; K1 (data reduction) deferred.**
-//! [`kahip_order`] produces a contract-conforming permutation via a
-//! multilevel flow-based nested-dissection pipeline (coarsen → initial
-//! bisect → uncoarsen with K3 flow refinement → K4 boundary-bipartite
-//! node separator → recurse). K1's Ost-Schulz-Strash data reduction
-//! is deferred; it wraps the current driver without altering output
-//! correctness and is tracked separately.
+//! **Status: phases K1-K6 complete.**
+//! [`kahip_order`] produces a contract-conforming permutation via the
+//! full pipeline: K1 data reduction (degree-1 / degree-2 / twin /
+//! subset), then K2-K6 multilevel flow-based nested dissection on the
+//! reduced graph (coarsen → initial bisect → uncoarsen with K3 flow
+//! refinement → K4 boundary-bipartite node separator → recurse), then
+//! K1 expansion to lift the reduced-graph permutation back to original
+//! indices.
 //!
 //! **Plan.** `dev/plans/ordering-kahip.md` tracks the six
 //! implementation phases:
@@ -38,12 +39,12 @@
 
 pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 
-// Phase K1: data reduction (Ost-Schulz-Strash 2021). Internal to the
-// crate until the full K1-K6 pipeline is wired; see
+// Phase K1: data reduction (Ost-Schulz-Strash 2021). Wired into the
+// K6 driver (see `node_nd::kahip_nd_order`) as a fixed-point pre-pass
+// that shrinks the graph via degree-1 / degree-2 / twin / subset rules
+// before multilevel partitioning. Eliminated vertices are expanded
+// back into the final permutation via `expand_permutation`. See
 // `dev/plans/ordering-kahip.md` and `dev/research/ordering-kahip-k1.md`.
-// Items are unused outside the module's own tests until later phases
-// consume them — suppress dead-code warnings until then.
-#[allow(dead_code)]
 mod data_reduction;
 
 // Phase K2: push-relabel max-flow / min-cut (Goldberg-Tarjan 1988 +
