@@ -4,6 +4,27 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-18) — `OrderingMethod::KahipND` solver-side dispatch
+
+- `src/symbolic/mod.rs`: added `OrderingMethod::KahipND` variant;
+  `run_external_ordering` dispatches to `feral_kahip::kahip_order`.
+  Test `symbolic_factorize_kahip_produces_valid_perm` mirrors the
+  existing METIS/SCOTCH perm-bijection checks on the 5×5 grid.
+- `src/bin/bench_orderings.rs`: extended the 4-way bakeoff
+  (AMD / METIS / SCOTCH / KaHIP), including per-row fill and time
+  columns plus a KaHIP win-count / geomean / total-time summary.
+- `Cargo.toml`: added `feral-kahip` as a workspace path dep.
+- Bakeoff over the full parity + large corpus (41 matrices):
+  - geomean fill: AMD 1.000, METIS 1.024, SCOTCH 1.038, KaHIP 1.032
+  - min-fill wins: AMD 40, METIS 32, SCOTCH 28, KaHIP 30 (ties count
+    for all at min)
+  - total symbolic time (us): AMD 14.8M, METIS 77.9M, SCOTCH 16.6M,
+    KaHIP 147.6M — KaHIP is the slowest (flow-based refinement at
+    every level carries ~10× the per-ordering overhead of AMD/SCOTCH).
+  - Notable: `c-big` (n=345241) KaHIP fill is 3.29× AMD — worse than
+    METIS 2.69× and SCOTCH 1.00× (tied with AMD). Data point for the
+    adaptive dispatcher follow-up.
+
 ### Added (2026-04-18) — `feral-kahip` phases K5+K6 (multilevel controller + ND driver)
 
 - New module `crates/feral-kahip/src/cycle.rs` implementing K5

@@ -36,6 +36,7 @@ feral-ordering-core = { path = "crates/feral-ordering-core" }
 feral-amd = { path = "crates/feral-amd" }
 feral-metis = { path = "crates/feral-metis" }
 feral-scotch = { path = "crates/feral-scotch" }
+feral-kahip = { path = "crates/feral-kahip" }
 
 [dev-dependencies]
 approx = "0.5"

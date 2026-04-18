@@ -1,9 +1,9 @@
 //! Comparative fill-reducing-ordering benchmark.
 //!
 //! For each matrix in `tests/data/parity/<family>/*.mtx`, runs
-//! `symbolic_factorize_with_method` three times (AMD / METIS / SCOTCH),
-//! records `factor_nnz_estimate` and wall-clock symbolic time, and
-//! prints a per-matrix row plus geomean-ratio summary.
+//! `symbolic_factorize_with_method` four times (AMD / METIS / SCOTCH /
+//! KaHIP), records `factor_nnz_estimate` and wall-clock symbolic
+//! time, and prints a per-matrix row plus geomean-ratio summary.
 //!
 //! Usage:
 //!   cargo run --release --bin bench_orderings
@@ -27,9 +27,11 @@ struct Row {
     fill_amd: u64,
     fill_metis: u64,
     fill_scotch: u64,
+    fill_kahip: u64,
     time_amd_us: u128,
     time_metis_us: u128,
     time_scotch_us: u128,
+    time_kahip_us: u128,
 }
 
 fn measure(
@@ -128,20 +130,23 @@ fn main() {
     let mut skipped = 0usize;
 
     println!(
-        "{:<18} {:>8} {:>10} {:>12} {:>12} {:>12} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "{:<18} {:>8} {:>10} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
         "matrix",
         "n",
         "nnz",
         "fill_amd",
         "fill_metis",
         "fill_scotch",
+        "fill_kahip",
         "t_amd",
         "t_metis",
         "t_scot",
+        "t_kahip",
         "m/amd",
         "s/amd",
+        "k/amd",
     );
-    println!("{}", "-".repeat(130));
+    println!("{}", "-".repeat(160));
 
     for path in &mtx_files {
         // For per-family parity layout the parent dir name is the
@@ -184,9 +189,14 @@ fn main() {
         let a = measure(&csc, &params, OrderingMethod::Amd);
         let m = measure(&csc, &params, OrderingMethod::MetisND);
         let s = measure(&csc, &params, OrderingMethod::ScotchND);
+        let k = measure(&csc, &params, OrderingMethod::KahipND);
 
-        let (Some((fill_amd, t_amd)), Some((fill_metis, t_metis)), Some((fill_scotch, t_scot))) =
-            (a, m, s)
+        let (
+            Some((fill_amd, t_amd)),
+            Some((fill_metis, t_metis)),
+            Some((fill_scotch, t_scot)),
+            Some((fill_kahip, t_kahip)),
+        ) = (a, m, s, k)
         else {
             eprintln!("SKIP {}: one or more orderings failed", family);
             skipped += 1;
@@ -195,19 +205,35 @@ fn main() {
 
         let r_m = fill_metis as f64 / fill_amd.max(1) as f64;
         let r_s = fill_scotch as f64 / fill_amd.max(1) as f64;
+        let r_k = fill_kahip as f64 / fill_amd.max(1) as f64;
 
         println!(
-            "{:<18} {:>8} {:>10} {:>12} {:>12} {:>12} {:>8} {:>8} {:>8} {:>8.3} {:>8.3}",
-            family, n, nnz, fill_amd, fill_metis, fill_scotch, t_amd, t_metis, t_scot, r_m, r_s,
+            "{:<18} {:>8} {:>10} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8} {:>8} {:>8} {:>8.3} {:>8.3} {:>8.3}",
+            family,
+            n,
+            nnz,
+            fill_amd,
+            fill_metis,
+            fill_scotch,
+            fill_kahip,
+            t_amd,
+            t_metis,
+            t_scot,
+            t_kahip,
+            r_m,
+            r_s,
+            r_k,
         );
 
         rows.push(Row {
             fill_amd,
             fill_metis,
             fill_scotch,
+            fill_kahip,
             time_amd_us: t_amd,
             time_metis_us: t_metis,
             time_scotch_us: t_scot,
+            time_kahip_us: t_kahip,
         });
     }
 
@@ -220,27 +246,40 @@ fn main() {
         .iter()
         .map(|r| r.fill_scotch as f64 / r.fill_amd.max(1) as f64)
         .collect();
-    let (wins_amd, wins_metis, wins_scotch) = rows.iter().fold((0, 0, 0), |(a, m, s), r| {
-        let best = r.fill_amd.min(r.fill_metis).min(r.fill_scotch);
-        let mut aa = a;
-        let mut mm = m;
-        let mut ss = s;
-        if r.fill_amd == best {
-            aa += 1;
-        }
-        if r.fill_metis == best {
-            mm += 1;
-        }
-        if r.fill_scotch == best {
-            ss += 1;
-        }
-        (aa, mm, ss)
-    });
+    let ratios_k: Vec<f64> = rows
+        .iter()
+        .map(|r| r.fill_kahip as f64 / r.fill_amd.max(1) as f64)
+        .collect();
+    let (wins_amd, wins_metis, wins_scotch, wins_kahip) =
+        rows.iter().fold((0, 0, 0, 0), |(a, m, s, k), r| {
+            let best = r
+                .fill_amd
+                .min(r.fill_metis)
+                .min(r.fill_scotch)
+                .min(r.fill_kahip);
+            let mut aa = a;
+            let mut mm = m;
+            let mut ss = s;
+            let mut kk = k;
+            if r.fill_amd == best {
+                aa += 1;
+            }
+            if r.fill_metis == best {
+                mm += 1;
+            }
+            if r.fill_scotch == best {
+                ss += 1;
+            }
+            if r.fill_kahip == best {
+                kk += 1;
+            }
+            (aa, mm, ss, kk)
+        });
 
     println!();
     println!("summary ({} matrices, {} skipped):", rows.len(), skipped);
     println!(
-        "  geomean fill_metis / fill_amd  = {:.3}",
+        "  geomean fill_metis  / fill_amd = {:.3}",
         geomean(&ratios_m)
     );
     println!(
@@ -248,13 +287,18 @@ fn main() {
         geomean(&ratios_s)
     );
     println!(
-        "  minimum-fill wins: AMD = {}, METIS = {}, SCOTCH = {} (ties count for all at min)",
-        wins_amd, wins_metis, wins_scotch,
+        "  geomean fill_kahip  / fill_amd = {:.3}",
+        geomean(&ratios_k)
     );
     println!(
-        "  total symbolic time (us): AMD = {}, METIS = {}, SCOTCH = {}",
+        "  minimum-fill wins: AMD = {}, METIS = {}, SCOTCH = {}, KaHIP = {} (ties count for all at min)",
+        wins_amd, wins_metis, wins_scotch, wins_kahip,
+    );
+    println!(
+        "  total symbolic time (us): AMD = {}, METIS = {}, SCOTCH = {}, KaHIP = {}",
         rows.iter().map(|r| r.time_amd_us).sum::<u128>(),
         rows.iter().map(|r| r.time_metis_us).sum::<u128>(),
         rows.iter().map(|r| r.time_scotch_us).sum::<u128>(),
+        rows.iter().map(|r| r.time_kahip_us).sum::<u128>(),
     );
 }

@@ -35,6 +35,8 @@ pub enum OrderingMethod {
     MetisND,
     /// feral-scotch nested dissection.
     ScotchND,
+    /// feral-kahip flow-based nested dissection.
+    KahipND,
 }
 
 /// The complete output of symbolic factorization.
@@ -145,6 +147,7 @@ fn run_external_ordering(
         OrderingMethod::Amd => feral_amd::amd_order(&pat),
         OrderingMethod::MetisND => feral_metis::metis_order(&pat),
         OrderingMethod::ScotchND => feral_scotch::scotch_order(&pat),
+        OrderingMethod::KahipND => feral_kahip::kahip_order(&pat),
     };
     let perm_i32 = perm_i32
         .map_err(|e| FeralError::InvalidInput(format!("external ordering failed: {}", e)))?;
@@ -512,6 +515,20 @@ mod tests {
         let m = small_grid_5x5();
         let params = SupernodeParams::default();
         let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::ScotchND).unwrap();
+        assert_eq!(sym.n, 25);
+        let mut sorted = sym.perm.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0..25).collect::<Vec<_>>(), "perm is a bijection");
+        for i in 0..25 {
+            assert_eq!(sym.perm[sym.perm_inv[i]], i);
+        }
+    }
+
+    #[test]
+    fn symbolic_factorize_kahip_produces_valid_perm() {
+        let m = small_grid_5x5();
+        let params = SupernodeParams::default();
+        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::KahipND).unwrap();
         assert_eq!(sym.n, 25);
         let mut sorted = sym.perm.clone();
         sorted.sort();
