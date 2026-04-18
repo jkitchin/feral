@@ -36,6 +36,8 @@
 mod compress;
 #[allow(dead_code)]
 mod graph;
+#[allow(dead_code)]
+mod vertex_separator;
 
 #[cfg(test)]
 mod test_util;
