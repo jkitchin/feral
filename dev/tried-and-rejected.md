@@ -350,3 +350,53 @@ different noise floors.
 **Evidence.** Session journal `dev/journal/2026-04-14-04.org` entry
 14:55 (etree renumbering); session checkpoint
 `dev/sessions/2026-04-14-04.md` "Abandoned Approaches" section.
+
+---
+
+## 2026-04-17 — feral-metis FM neighbour-update sign bug (test gate)
+
+**What.** `crates/feral-metis/src/fm_refine.rs:115/117` updates
+neighbour gains with the wrong sign for the `gain = ed − id`
+convention used by `compute_gains` and the cut update
+`cur_cut -= gain[v]`. Discovered while implementing feral-scotch
+halo FM (S3) — the corrected signs landed in
+`feral-scotch/src/halo_fm.rs` and `band_fm.rs`.
+
+**Why it slipped through.** All four FM tests in fm_refine.rs miss
+the bug for structural reasons:
+
+1. `refine_bisection_does_not_increase_cut`: `initial_bisect_ggp(grid(8,8))`
+   already returns the optimal cut of 8, so FM is a trivial no-op
+   (`initial=8 returned=8 actual=8`). The `final ≤ initial`
+   assertion holds vacuously.
+2. `refine_bisection_bad_init_improves`: `max_imbalance = 0.20` on
+   n = 9 makes every candidate move violate the balance guard, so
+   `best_prefix` stays 0 and the function returns the input cut.
+3. `refine_bisection_balance_respected`: checks weights only.
+4. `nd_order_*`: validate permutation bijectivity, not cut quality.
+
+None of the tests assert the bookkeeping invariant
+`returned_cut == cut_size(graph, labels)`. Adversarial input P_10
+with alternating ABAB labels (cut = 9) produces `returned = -1143`
+with labels unchanged — impossible negative cut, but the test would
+pass `after < before` (because -1143 < 9).
+
+**Lesson.** Two structural test-design failures combined: (a) using
+oracle inputs (optimal-cut graphs and balance-blocked configurations)
+that don't exercise the code under test, and (b) checking the
+return value against itself rather than against an independent
+re-derivation (`cut_size(labels)`). Any solver that maintains
+incremental state must assert that incremental state matches a
+from-scratch recomputation, at least once per test.
+
+**Status.** Bug + comprehensive test plan (invariants I1–I7,
+adversarial cases A1–A10) documented in
+`dev/research/metis-fm-sign-bug.md`. Fix and test hardening are
+listed there as actions 1–4. Not done in this session because the
+session goal was feral-scotch S2–S5; deferring to keep the metis
+fix and its regression tests as a single self-contained commit
+backed by the documented plan.
+
+**Evidence.** `dev/research/metis-fm-sign-bug.md` §1 (sign
+derivation), §2 (adversarial output `before=9 after=-1143`), §3
+(per-test analysis of why each existing gate misses).
