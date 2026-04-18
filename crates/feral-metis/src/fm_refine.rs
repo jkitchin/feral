@@ -62,10 +62,16 @@ pub fn refine_bisection(
 
         let mut cur_cut = pass_cut;
         let mut moves: Vec<i32> = Vec::new();
-        let mut best_cut = pass_cut;
-        let mut best_prefix: usize = 0;
         let mut a_w = part_weight(graph, labels, PART_A);
         let mut b_w = total - a_w;
+        // If the pass starts imbalanced, best_prefix = None means
+        // "no balanced state seen yet" — rollback to prefix 0 would
+        // keep the imbalanced start, which defeats the purpose of
+        // FM on imbalanced input. The first balanced state the
+        // trajectory reaches is unconditionally recorded.
+        let starts_balanced = a_w.max(b_w) <= max_side;
+        let mut best_prefix: Option<usize> = if starts_balanced { Some(0) } else { None };
+        let mut best_cut = pass_cut;
         let mut best_a_w = a_w;
         let mut best_b_w = b_w;
         let mut no_improve: u32 = 0;
@@ -121,9 +127,13 @@ pub fn refine_bisection(
             }
 
             if side_max <= max_side {
-                if cur_cut < best_cut {
+                // Record as best iff (a) this is the first balanced
+                // state seen this pass, or (b) it improves on the
+                // previous best balanced cut.
+                let is_first_balanced = best_prefix.is_none();
+                if is_first_balanced || cur_cut < best_cut {
                     best_cut = cur_cut;
-                    best_prefix = moves.len();
+                    best_prefix = Some(moves.len());
                     best_a_w = a_w;
                     best_b_w = b_w;
                     no_improve = 0;
@@ -138,15 +148,28 @@ pub fn refine_bisection(
             }
         }
 
-        // Roll back moves after best_prefix.
-        for &v in moves.iter().skip(best_prefix) {
-            let vu = v as usize;
-            labels[vu] = if labels[vu] == PART_A { PART_B } else { PART_A };
+        // Roll back moves after best_prefix. If the pass started
+        // imbalanced and never reached a balanced state, best_prefix
+        // is None — keep the full move sequence (labels at the
+        // post-last-move state) so the next pass starts from the
+        // closest-to-balance configuration FM found, rather than
+        // rolling all the way back to the imbalanced start.
+        match best_prefix {
+            Some(prefix) => {
+                for &v in moves.iter().skip(prefix) {
+                    let vu = v as usize;
+                    labels[vu] = if labels[vu] == PART_A { PART_B } else { PART_A };
+                }
+                a_w = best_a_w;
+                b_w = best_b_w;
+                pass_cut = best_cut;
+            }
+            None => {
+                // Labels already at post-last-move state; keep them.
+                pass_cut = cur_cut;
+            }
         }
-        a_w = best_a_w;
-        b_w = best_b_w;
         let _ = (a_w, b_w); // kept for post-pass debug assertions
-        pass_cut = best_cut;
         if pass_cut == before_pass {
             break;
         }
@@ -435,19 +458,26 @@ mod tests {
     #[test]
     fn refine_bisection_bad_init_improves() {
         // Start from an adversarial labeling (all on one side, one
-        // vertex on the other) — FM should move toward balance.
+        // vertex on the other) — FM must rebalance. I2 (cut never
+        // grows) does not apply across the imbalanced → balanced
+        // transition: the starting cut of 2 is achievable only
+        // because 15 vertices are on one side.
         let g = grid(4, 4);
         let mut labels = vec![PART_A; 16];
         labels[0] = PART_B;
-        let before = cut_size(&g, &labels);
         let returned = refine_bisection(&g, &mut labels, 0.20, 10);
         let after = cut_size(&g, &labels);
         assert_eq!(returned, after, "I1: bookkeeping");
+        let total: i64 = g.vwgt.iter().map(|&w| w as i64).sum();
+        let a = part_weight(&g, &labels, PART_A);
+        let b = total - a;
+        let max_side = ((1.20_f64) * total as f64 / 2.0).ceil() as i64;
         assert!(
-            after <= before,
-            "FM should not worsen cut (before={}, after={})",
-            before,
-            after
+            a.max(b) <= max_side,
+            "I4: FM rebalanced from imbalanced start (a={}, b={}, max={})",
+            a,
+            b,
+            max_side
         );
     }
 
@@ -607,32 +637,36 @@ mod tests {
     }
 
     #[test]
-    fn a6_k44_unbalanced_init_bookkeeps() {
+    fn a6_k44_unbalanced_init_rebalances() {
         // K_{4,4}, labels = [A, B, B, B, B, B, B, B]. Structure is
         // bipartite between {0..4} and {4..8}, so vertex 0 connects
-        // to 4,5,6,7 → cut 4.
+        // to 4,5,6,7 → starting cut 4 with a=1, b=7.
         //
-        // Classic FM's rollback picks the best cut seen *along the
-        // move sequence that was also balanced*. When the starting
-        // state is already imbalanced (a=1, b=7) and no *improving*
-        // balanced state is reached during the pass, rollback
-        // returns to the imbalanced start. The research note flagged
-        // this as a place where bookkeeping (I1) would show through
-        // cleanly post-fix; I4 rebalancing is an FM design-level
-        // property not covered by this kernel. We therefore assert
-        // I1 and I2 only.
+        // max_imbalance=0.50, total=8 → max_side=6. The 1-7 start
+        // violates balance. Post-fix, refine_bisection treats an
+        // imbalanced pass-start as "no valid rollback target" via a
+        // None sentinel on best_prefix and unconditionally records
+        // the first balanced state the FM trajectory reaches.
+        //
+        // The I2 (cut never grows) property does not apply across
+        // the imbalanced→balanced transition: the starting cut of 4
+        // is cheap only because the partition is violating.
         let g = complete_bipartite(4, 4);
         let mut labels: Vec<u8> = vec![PART_B; 8];
         labels[0] = PART_A;
-        let before = cut_size(&g, &labels);
-        assert_eq!(before, 4, "construction: K_{{4,4}} 1-7");
+        assert_eq!(cut_size(&g, &labels), 4, "construction: K_{{4,4}} 1-7");
         let returned = refine_bisection(&g, &mut labels, 0.50, 32);
         assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
+        let total: i64 = g.vwgt.iter().map(|&w| w as i64).sum();
+        let a = part_weight(&g, &labels, PART_A);
+        let b = total - a;
+        let max_side = ((1.50_f64) * total as f64 / 2.0).ceil() as i64;
         assert!(
-            returned <= before,
-            "I2: cut never grows (before={}, after={})",
-            before,
-            returned
+            a.max(b) <= max_side,
+            "I4: FM rebalanced (a={}, b={}, max={})",
+            a,
+            b,
+            max_side
         );
     }
 

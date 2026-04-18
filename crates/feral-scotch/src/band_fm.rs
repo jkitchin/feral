@@ -298,10 +298,14 @@ fn refine_band(
 
         let mut cur_cut = pass_cut;
         let mut moves: Vec<i32> = Vec::new();
-        let mut best_cut = pass_cut;
-        let mut best_prefix: usize = 0;
         let mut a_w = part_weight(sub, labels, PART_A);
         let mut b_w = total - a_w;
+        // See feral_metis::fm_refine::refine_bisection for rationale:
+        // best_prefix=None is the "no balanced state seen yet"
+        // sentinel for imbalanced pass-starts.
+        let starts_balanced = a_w.max(b_w) <= max_side;
+        let mut best_prefix: Option<usize> = if starts_balanced { Some(0) } else { None };
+        let mut best_cut = pass_cut;
         let mut best_a_w = a_w;
         let mut best_b_w = b_w;
         let mut no_improve: u32 = 0;
@@ -349,9 +353,10 @@ fn refine_band(
             }
 
             if side_max <= max_side {
-                if cur_cut < best_cut {
+                let is_first_balanced = best_prefix.is_none();
+                if is_first_balanced || cur_cut < best_cut {
                     best_cut = cur_cut;
-                    best_prefix = moves.len();
+                    best_prefix = Some(moves.len());
                     best_a_w = a_w;
                     best_b_w = b_w;
                     no_improve = 0;
@@ -366,16 +371,23 @@ fn refine_band(
             }
         }
 
-        // Roll back.
-        for &v in moves.iter().skip(best_prefix) {
-            let vu = v as usize;
-            labels[vu] = if labels[vu] == PART_A { PART_B } else { PART_A };
+        match best_prefix {
+            Some(prefix) => {
+                for &v in moves.iter().skip(prefix) {
+                    let vu = v as usize;
+                    labels[vu] = if labels[vu] == PART_A { PART_B } else { PART_A };
+                }
+                pass_cut = best_cut;
+            }
+            None => {
+                // No balanced state reached; keep the move sequence.
+                pass_cut = cur_cut;
+            }
         }
         let _ = (best_a_w, best_b_w);
         a_w = part_weight(sub, labels, PART_A);
         b_w = total - a_w;
         let _ = (a_w, b_w);
-        pass_cut = best_cut;
         if pass_cut == before_pass {
             break;
         }
