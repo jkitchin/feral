@@ -224,6 +224,13 @@ name = "feral-ordering-core"
 version = "0.1.0"
 
 [[package]]
+name = "feral-scotch"
+version = "0.1.0"
+dependencies = [
+ "feral-ordering-core",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

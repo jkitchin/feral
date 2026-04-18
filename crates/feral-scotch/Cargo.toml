@@ -1,0 +1,17 @@
+[package]
+name = "feral-scotch"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "SCOTCH-style nested-dissection fill-reducing ordering (Pellegrini 1996). Pure Rust, clean-room, standalone. Implements the FERAL ordering-crate contract."
+repository = "https://github.com/jkitchin/feral"
+keywords = ["sparse", "ordering", "scotch", "nested-dissection", "linear-algebra"]
+categories = ["mathematics", "science"]
+
+[lib]
+name = "feral_scotch"
+
+[dependencies]
+feral-ordering-core = { path = "../feral-ordering-core", version = "0.1" }
+
+[dev-dependencies]
