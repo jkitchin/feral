@@ -28,10 +28,12 @@ struct Row {
     fill_metis: u64,
     fill_scotch: u64,
     fill_kahip: u64,
+    fill_auto: u64,
     time_amd_us: u128,
     time_metis_us: u128,
     time_scotch_us: u128,
     time_kahip_us: u128,
+    time_auto_us: u128,
 }
 
 fn measure(
@@ -130,7 +132,7 @@ fn main() {
     let mut skipped = 0usize;
 
     println!(
-        "{:<18} {:>8} {:>10} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "{:<18} {:>8} {:>10} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
         "matrix",
         "n",
         "nnz",
@@ -138,15 +140,18 @@ fn main() {
         "fill_metis",
         "fill_scotch",
         "fill_kahip",
+        "fill_auto",
         "t_amd",
         "t_metis",
         "t_scot",
         "t_kahip",
+        "t_auto",
         "m/amd",
         "s/amd",
         "k/amd",
+        "a/amd",
     );
-    println!("{}", "-".repeat(160));
+    println!("{}", "-".repeat(180));
 
     for path in &mtx_files {
         // For per-family parity layout the parent dir name is the
@@ -190,13 +195,15 @@ fn main() {
         let m = measure(&csc, &params, OrderingMethod::MetisND);
         let s = measure(&csc, &params, OrderingMethod::ScotchND);
         let k = measure(&csc, &params, OrderingMethod::KahipND);
+        let au = measure(&csc, &params, OrderingMethod::Auto);
 
         let (
             Some((fill_amd, t_amd)),
             Some((fill_metis, t_metis)),
             Some((fill_scotch, t_scot)),
             Some((fill_kahip, t_kahip)),
-        ) = (a, m, s, k)
+            Some((fill_auto, t_auto)),
+        ) = (a, m, s, k, au)
         else {
             eprintln!("SKIP {}: one or more orderings failed", family);
             skipped += 1;
@@ -206,9 +213,10 @@ fn main() {
         let r_m = fill_metis as f64 / fill_amd.max(1) as f64;
         let r_s = fill_scotch as f64 / fill_amd.max(1) as f64;
         let r_k = fill_kahip as f64 / fill_amd.max(1) as f64;
+        let r_a = fill_auto as f64 / fill_amd.max(1) as f64;
 
         println!(
-            "{:<18} {:>8} {:>10} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8} {:>8} {:>8} {:>8.3} {:>8.3} {:>8.3}",
+            "{:<18} {:>8} {:>10} {:>12} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8.3} {:>8.3} {:>8.3} {:>8.3}",
             family,
             n,
             nnz,
@@ -216,13 +224,16 @@ fn main() {
             fill_metis,
             fill_scotch,
             fill_kahip,
+            fill_auto,
             t_amd,
             t_metis,
             t_scot,
             t_kahip,
+            t_auto,
             r_m,
             r_s,
             r_k,
+            r_a,
         );
 
         rows.push(Row {
@@ -230,10 +241,12 @@ fn main() {
             fill_metis,
             fill_scotch,
             fill_kahip,
+            fill_auto,
             time_amd_us: t_amd,
             time_metis_us: t_metis,
             time_scotch_us: t_scot,
             time_kahip_us: t_kahip,
+            time_auto_us: t_auto,
         });
     }
 
@@ -250,17 +263,23 @@ fn main() {
         .iter()
         .map(|r| r.fill_kahip as f64 / r.fill_amd.max(1) as f64)
         .collect();
-    let (wins_amd, wins_metis, wins_scotch, wins_kahip) =
-        rows.iter().fold((0, 0, 0, 0), |(a, m, s, k), r| {
+    let ratios_a: Vec<f64> = rows
+        .iter()
+        .map(|r| r.fill_auto as f64 / r.fill_amd.max(1) as f64)
+        .collect();
+    let (wins_amd, wins_metis, wins_scotch, wins_kahip, wins_auto) =
+        rows.iter().fold((0, 0, 0, 0, 0), |(a, m, s, k, au), r| {
             let best = r
                 .fill_amd
                 .min(r.fill_metis)
                 .min(r.fill_scotch)
-                .min(r.fill_kahip);
+                .min(r.fill_kahip)
+                .min(r.fill_auto);
             let mut aa = a;
             let mut mm = m;
             let mut ss = s;
             let mut kk = k;
+            let mut uu = au;
             if r.fill_amd == best {
                 aa += 1;
             }
@@ -273,7 +292,10 @@ fn main() {
             if r.fill_kahip == best {
                 kk += 1;
             }
-            (aa, mm, ss, kk)
+            if r.fill_auto == best {
+                uu += 1;
+            }
+            (aa, mm, ss, kk, uu)
         });
 
     println!();
@@ -291,14 +313,19 @@ fn main() {
         geomean(&ratios_k)
     );
     println!(
-        "  minimum-fill wins: AMD = {}, METIS = {}, SCOTCH = {}, KaHIP = {} (ties count for all at min)",
-        wins_amd, wins_metis, wins_scotch, wins_kahip,
+        "  geomean fill_auto   / fill_amd = {:.3}",
+        geomean(&ratios_a)
     );
     println!(
-        "  total symbolic time (us): AMD = {}, METIS = {}, SCOTCH = {}, KaHIP = {}",
+        "  minimum-fill wins: AMD = {}, METIS = {}, SCOTCH = {}, KaHIP = {}, Auto = {} (ties count for all at min)",
+        wins_amd, wins_metis, wins_scotch, wins_kahip, wins_auto,
+    );
+    println!(
+        "  total symbolic time (us): AMD = {}, METIS = {}, SCOTCH = {}, KaHIP = {}, Auto = {}",
         rows.iter().map(|r| r.time_amd_us).sum::<u128>(),
         rows.iter().map(|r| r.time_metis_us).sum::<u128>(),
         rows.iter().map(|r| r.time_scotch_us).sum::<u128>(),
         rows.iter().map(|r| r.time_kahip_us).sum::<u128>(),
+        rows.iter().map(|r| r.time_auto_us).sum::<u128>(),
     );
 }

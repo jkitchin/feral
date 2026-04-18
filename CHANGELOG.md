@@ -4,6 +4,29 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-18) — `OrderingMethod::Auto` adaptive ordering dispatcher
+
+- `src/symbolic/mod.rs`: new `OrderingMethod::Auto` variant. Picks a
+  concrete ordering per-matrix from cheap `CscPattern` features:
+  - `n > 100_000 && nnz/n < 5`  → `ScotchND` (large-sparse / arrow).
+  - `n <  10_000 && nnz/n < 15` → `KahipND` (K1 reductions dominate).
+  - otherwise                   → `Amd`.
+  Internal helper `choose_adaptive` resolves `Auto` to a concrete
+  method at dispatch time; non-`Auto` inputs pass through unchanged.
+- `src/bin/bench_orderings.rs`: adds an Auto column to the per-matrix
+  table and the summary.
+- Unit test `choose_adaptive_rules` covers the four branches;
+  `symbolic_factorize_auto_produces_valid_perm` verifies the
+  end-to-end dispatch produces a valid permutation.
+- Bakeoff (41 matrices):
+  - geomean fill: AMD 1.000, METIS 1.024, SCOTCH 1.038, KaHIP 1.023,
+    **Auto 0.988** (best on average, beats every fixed method).
+  - min-fill wins: AMD 37, METIS 31, SCOTCH 28, KaHIP 37, **Auto 41**
+    (Auto never strictly loses).
+  - total symbolic time: AMD 15.64s, METIS 71.8s, SCOTCH 16.1s,
+    KaHIP 83.7s, **Auto 15.37s** (fastest — dispatches SCOTCH on
+    c-big, which is both faster and lower fill than AMD there).
+
 ### Changed (2026-04-18) — `feral-kahip` K1 wired into driver; Rule-1-only preset
 
 - `crates/feral-kahip/src/node_nd.rs`: `kahip_nd_order` now runs K1

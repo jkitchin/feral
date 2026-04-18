@@ -37,6 +37,45 @@ pub enum OrderingMethod {
     ScotchND,
     /// feral-kahip flow-based nested dissection.
     KahipND,
+    /// Adaptive dispatcher: picks a concrete method per-matrix from
+    /// cheap pattern features (n and average degree nnz/n).
+    ///
+    /// The heuristic is derived from the 34-matrix bakeoff at
+    /// `dev/journal/2026-04-18-07.org`:
+    ///   - large-and-sparse (n > 100_000, nnz/n < 5) → `ScotchND`
+    ///     (SCOTCH dominates c-big-class arrow / KKT matrices).
+    ///   - small-and-sparse (n < 10_000, nnz/n < 15)   → `KahipND`
+    ///     (K1 reductions find short cycles AMD misses).
+    ///   - everything else                             → `Amd`.
+    ///
+    /// Applying `Auto` to `Auto` loops once through the dispatcher and
+    /// then runs the chosen concrete method.
+    Auto,
+}
+
+/// Resolve an `Auto` ordering to a concrete method from cheap pattern
+/// features. Non-`Auto` inputs pass through unchanged.
+///
+/// The rule set is intentionally small and has a break-even fallback
+/// to `Amd`, so a pattern that matches no branch still gets a valid
+/// ordering. See `OrderingMethod::Auto` for the rationale.
+fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMethod {
+    if method != OrderingMethod::Auto {
+        return method;
+    }
+    let n = pattern.n;
+    let nnz = pattern.row_idx.len();
+    if n == 0 {
+        return OrderingMethod::Amd;
+    }
+    let avg_deg = nnz as f64 / n as f64;
+    if n > 100_000 && avg_deg < 5.0 {
+        OrderingMethod::ScotchND
+    } else if n < 10_000 && avg_deg < 15.0 {
+        OrderingMethod::KahipND
+    } else {
+        OrderingMethod::Amd
+    }
 }
 
 /// The complete output of symbolic factorization.
@@ -143,11 +182,13 @@ fn run_external_ordering(
     let (col_buf, row_buf) = to_contract_pattern_bufs(pattern)?;
     let pat = feral_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
         .ok_or_else(|| FeralError::InvalidInput("malformed CSC pattern".to_string()))?;
-    let perm_i32 = match method {
+    let resolved = choose_adaptive(pattern, method);
+    let perm_i32 = match resolved {
         OrderingMethod::Amd => feral_amd::amd_order(&pat),
         OrderingMethod::MetisND => feral_metis::metis_order(&pat),
         OrderingMethod::ScotchND => feral_scotch::scotch_order(&pat),
         OrderingMethod::KahipND => feral_kahip::kahip_order(&pat),
+        OrderingMethod::Auto => unreachable!("choose_adaptive resolves Auto"),
     };
     let perm_i32 = perm_i32
         .map_err(|e| FeralError::InvalidInput(format!("external ordering failed: {}", e)))?;
@@ -536,6 +577,83 @@ mod tests {
         for i in 0..25 {
             assert_eq!(sym.perm[sym.perm_inv[i]], i);
         }
+    }
+
+    #[test]
+    fn symbolic_factorize_auto_produces_valid_perm() {
+        let m = small_grid_5x5();
+        let params = SupernodeParams::default();
+        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::Auto).unwrap();
+        assert_eq!(sym.n, 25);
+        let mut sorted = sym.perm.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0..25).collect::<Vec<_>>(), "perm is a bijection");
+        for i in 0..25 {
+            assert_eq!(sym.perm[sym.perm_inv[i]], i);
+        }
+    }
+
+    #[test]
+    fn choose_adaptive_rules() {
+        // Pattern helper: diagonal pattern with n cols, nnz = density*n.
+        fn pat_bufs(n: usize, avg_deg: usize) -> (Vec<usize>, Vec<usize>) {
+            let total = n * avg_deg.max(1);
+            let mut col_ptr = Vec::with_capacity(n + 1);
+            let mut row_idx = Vec::with_capacity(total);
+            let per = avg_deg.max(1);
+            for j in 0..n {
+                col_ptr.push(row_idx.len());
+                for t in 0..per {
+                    row_idx.push((j + t) % n.max(1));
+                }
+            }
+            col_ptr.push(row_idx.len());
+            (col_ptr, row_idx)
+        }
+        // Large-and-sparse → SCOTCH.
+        let (cp, ri) = pat_bufs(200_000, 3);
+        let p = CscPattern {
+            n: 200_000,
+            col_ptr: cp,
+            row_idx: ri,
+        };
+        assert_eq!(
+            choose_adaptive(&p, OrderingMethod::Auto),
+            OrderingMethod::ScotchND
+        );
+        // Small-and-sparse → KaHIP.
+        let (cp, ri) = pat_bufs(500, 6);
+        let p = CscPattern {
+            n: 500,
+            col_ptr: cp,
+            row_idx: ri,
+        };
+        assert_eq!(
+            choose_adaptive(&p, OrderingMethod::Auto),
+            OrderingMethod::KahipND
+        );
+        // Everything else → AMD.
+        let (cp, ri) = pat_bufs(50_000, 20);
+        let p = CscPattern {
+            n: 50_000,
+            col_ptr: cp,
+            row_idx: ri,
+        };
+        assert_eq!(
+            choose_adaptive(&p, OrderingMethod::Auto),
+            OrderingMethod::Amd
+        );
+        // Non-Auto passes through.
+        let (cp, ri) = pat_bufs(500, 6);
+        let p = CscPattern {
+            n: 500,
+            col_ptr: cp,
+            row_idx: ri,
+        };
+        assert_eq!(
+            choose_adaptive(&p, OrderingMethod::MetisND),
+            OrderingMethod::MetisND
+        );
     }
 
     #[test]
