@@ -12,8 +12,22 @@ and others. I think we might try to build standalone rust libraries for each of 
     couples a ND-style outer separator recursion with AMD on the leaves.
     Could give another data point alongside feral-amd/metis/scotch for
     the large-KKT bakeoff.
-  - No plan file exists yet. Start with dev/research/ordering-mongoose.md
-    (algorithm + licensing) → dev/plans/ordering-mongoose.md.
+  - Research note completed 2026-04-18-06: dev/research/ordering-mongoose.md.
+    Findings:
+    + License GPL-3.0-only (blocks source reuse; clean-room from paper
+      is fine per FERAL protocol).
+    + Paper: Davis/Hager/Kolodziej/Yeralan 2020, ACM TOMS 46(1) Art 7,
+      DOI 10.1145/3337792.
+    + Published Mongoose is edge-partitioning ONLY; the ND-outer +
+      AMD-inner pipeline described here is the paper's future-work
+      section, NOT shipped code.
+    + Recommendation (b): cherry-pick HEMSR coarsening + 2-phase hybrid
+      refinement into feral-metis / feral-kahip behind feature flags.
+      A dedicated feral-mongoose crate would be ~70% duplicated plumbing.
+  - Open question: has a vertex-separator extension shipped since 2020?
+    Quick check of SuiteSparse dev branch before scheduling any plan.
+  - Next step if pursued: dev/plans/feral-metis-hemsr-coarsening.md
+    (or similar) — NOT a dedicated crate plan.
 
 * TODO follow-up: adaptive ordering dispatcher
   - User request 2026-04-18-03 (session priority-list item 5).

@@ -110,3 +110,31 @@ enforcement. 8 test oracles: empty boundary, path (sep=1),
 7x7 grid horizontal (sep=7), K_{3,3} (sep=3), determinism,
 separator validity invariant, weighted picking, no-interior-
 vertex invariant.
+
+* 19:30 :kahip:k4:done:
+K4 implemented at crates/feral-kahip/src/node_separator.rs.
+flow_node_separator(graph, where_, vweight) → Option<NodeSeparator>.
+Boundary extraction, directed bipartite network, push_relabel
+call, separator extraction via saturated source/sink arcs.
+9/9 new K4 tests pass on first run (no debugging needed). 49/49
+feral-kahip tests total pass; clippy clean. Committed as 36e400d.
+
+* 19:45 :mongoose:research:subagent:
+Mongoose research subagent returned. Key findings:
+  - License: GPL-3.0-only (confirmed from SuiteSparse stable
+    README SPDX identifier). Blocks source reuse but not
+    clean-room from paper (FERAL protocol anyway).
+  - Paper: Davis/Hager/Kolodziej/Yeralan 2020, ACM TOMS 46(1)
+    Article 7, DOI 10.1145/3337792.
+  - Published Mongoose is edge-partitioning-only — the ND-outer
+    + AMD-inner pipeline in tasks.org is the paper's future-work
+    section, NOT shipped code. This materially changes the scope.
+  - Recommendation: option (b), adopt HEMSR coarsening +
+    2-phase hybrid refinement into feral-metis/feral-kahip
+    behind feature flags, rather than build a dedicated
+    feral-mongoose crate.
+  - Open question: has a vertex-separator extension shipped
+    since 2020? Worth a quick check of SuiteSparse `dev`
+    before committing to follow-up plan.
+
+Full note: dev/research/ordering-mongoose.md (330 lines).
