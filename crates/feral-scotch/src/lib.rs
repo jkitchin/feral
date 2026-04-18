@@ -33,6 +33,8 @@
 #![deny(missing_docs)]
 
 #[allow(dead_code)]
+mod band_fm;
+#[allow(dead_code)]
 mod compress;
 #[allow(dead_code)]
 mod graph;
