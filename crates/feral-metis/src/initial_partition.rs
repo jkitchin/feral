@@ -16,11 +16,11 @@
 use crate::graph::Graph;
 use crate::rng::SplitMix;
 
-pub(crate) const PART_A: u8 = 0;
-pub(crate) const PART_B: u8 = 1;
+pub const PART_A: u8 = 0;
+pub const PART_B: u8 = 1;
 
 /// Compute the edge-cut of a bisection.
-pub(crate) fn cut_size(graph: &Graph, labels: &[u8]) -> i32 {
+pub fn cut_size(graph: &Graph, labels: &[u8]) -> i32 {
     debug_assert_eq!(labels.len(), graph.nvtxs as usize);
     let mut cut: i64 = 0;
     for v in 0..graph.nvtxs as usize {
@@ -38,7 +38,7 @@ pub(crate) fn cut_size(graph: &Graph, labels: &[u8]) -> i32 {
 }
 
 /// Total vertex weight of part `p`.
-pub(crate) fn part_weight(graph: &Graph, labels: &[u8], p: u8) -> i64 {
+pub fn part_weight(graph: &Graph, labels: &[u8], p: u8) -> i64 {
     let mut s: i64 = 0;
     for (v, &l) in labels.iter().enumerate() {
         if l == p {
@@ -50,7 +50,7 @@ pub(crate) fn part_weight(graph: &Graph, labels: &[u8], p: u8) -> i64 {
 
 /// GGP trial. Grows part 0 from a random seed until its weight
 /// reaches `target_a`. All unvisited vertices go to part 1.
-pub(crate) fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> Vec<u8> {
+pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> Vec<u8> {
     let n = graph.nvtxs as usize;
     let mut labels: Vec<u8> = vec![PART_B; n];
     if n == 0 {
@@ -145,7 +145,7 @@ pub(crate) fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i6
 
 /// Random BFS trial. Grows part 0 in BFS order from a random seed
 /// until its weight reaches `target_a`.
-pub(crate) fn initial_bisect_bfs(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> Vec<u8> {
+pub fn initial_bisect_bfs(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> Vec<u8> {
     let n = graph.nvtxs as usize;
     let mut labels: Vec<u8> = vec![PART_B; n];
     if n == 0 {

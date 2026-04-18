@@ -26,13 +26,13 @@ use std::collections::BinaryHeap;
 use crate::graph::Graph;
 use crate::initial_partition::{cut_size, part_weight, PART_A, PART_B};
 
-pub(crate) const PART_SEP: u8 = 2;
+pub const PART_SEP: u8 = 2;
 
 /// Refine an edge bisection with FM, tracking the best balanced cut.
 ///
 /// `labels[v] ∈ {PART_A, PART_B}`. Modifies `labels` in place.
 /// Returns the final edge cut.
-pub(crate) fn refine_bisection(
+pub fn refine_bisection(
     graph: &Graph,
     labels: &mut [u8],
     max_imbalance: f64,
@@ -175,7 +175,7 @@ fn compute_gains(graph: &Graph, labels: &[u8], gain: &mut [i32]) {
 
 /// Greedy node-separator refinement. Accepts positive-gain moves that
 /// respect the balance constraint. Returns the final separator weight.
-pub(crate) fn refine_separator(
+pub fn refine_separator(
     graph: &Graph,
     labels: &mut [u8],
     max_imbalance: f64,
@@ -272,7 +272,7 @@ fn separator_pull_costs(graph: &Graph, labels: &[u8], v: usize) -> (i64, i64) {
 }
 
 /// Total vertex weight of `PART_SEP` vertices.
-pub(crate) fn separator_weight(graph: &Graph, labels: &[u8]) -> i64 {
+pub fn separator_weight(graph: &Graph, labels: &[u8]) -> i64 {
     let mut s: i64 = 0;
     for (v, &l) in labels.iter().enumerate() {
         if l == PART_SEP {

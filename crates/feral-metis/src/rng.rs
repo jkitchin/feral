@@ -6,18 +6,18 @@
 //! would be overkill.
 
 #[derive(Debug, Clone)]
-pub(crate) struct SplitMix {
+pub struct SplitMix {
     state: u64,
 }
 
 impl SplitMix {
-    pub(crate) fn new(seed: u64) -> Self {
+    pub fn new(seed: u64) -> Self {
         Self {
             state: seed.wrapping_add(0x9E37_79B9_7F4A_7C15),
         }
     }
 
-    pub(crate) fn next_u64(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -28,7 +28,7 @@ impl SplitMix {
     /// Uniform integer in `[0, n)`. `n == 0` is undefined; callers
     /// must guard. Uses rejection sampling to avoid modulo bias for
     /// small `n`.
-    pub(crate) fn gen_range(&mut self, n: u64) -> u64 {
+    pub fn gen_range(&mut self, n: u64) -> u64 {
         debug_assert!(n > 0);
         let zone = u64::MAX - (u64::MAX % n);
         loop {
@@ -40,7 +40,7 @@ impl SplitMix {
     }
 
     /// Fisher-Yates shuffle in place. Deterministic given the seed.
-    pub(crate) fn shuffle<T>(&mut self, slice: &mut [T]) {
+    pub fn shuffle<T>(&mut self, slice: &mut [T]) {
         let n = slice.len();
         if n < 2 {
             return;

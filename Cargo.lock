@@ -227,6 +227,8 @@ version = "0.1.0"
 name = "feral-scotch"
 version = "0.1.0"
 dependencies = [
+ "feral-amd",
+ "feral-metis",
  "feral-ordering-core",
 ]
 

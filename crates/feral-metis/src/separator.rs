@@ -30,7 +30,7 @@ use crate::initial_partition::{PART_A, PART_B};
 /// separator (labels ∈ {PART_A, PART_B, PART_SEP}) in place.
 ///
 /// Returns the number of separator vertices.
-pub(crate) fn construct_separator(graph: &Graph, labels: &mut [u8]) -> usize {
+pub fn construct_separator(graph: &Graph, labels: &mut [u8]) -> usize {
     let n = graph.nvtxs as usize;
     debug_assert_eq!(labels.len(), n);
 
@@ -184,7 +184,7 @@ fn try_augment(
 /// Verify that labels form a valid node separator: no edge connects a
 /// PART_A vertex directly to a PART_B vertex.
 #[cfg(test)]
-pub(crate) fn is_valid_separator(graph: &Graph, labels: &[u8]) -> bool {
+pub fn is_valid_separator(graph: &Graph, labels: &[u8]) -> bool {
     for v in 0..graph.nvtxs as usize {
         let lv = labels[v];
         if lv != PART_A && lv != PART_B {

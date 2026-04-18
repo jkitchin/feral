@@ -26,19 +26,43 @@
 // Modules are exercised only by `metis_order_full` once all
 // milestones land; until then, dead-code lint is suppressed at the
 // module root for internal helpers.
-#[allow(dead_code)]
-mod coarsen;
-#[allow(dead_code)]
-mod fm_refine;
-#[allow(dead_code)]
-mod graph;
-#[allow(dead_code)]
-mod initial_partition;
+#[doc(hidden)]
+#[allow(dead_code, missing_docs)]
+pub mod coarsen;
+#[doc(hidden)]
+#[allow(dead_code, missing_docs)]
+pub mod fm_refine;
+#[doc(hidden)]
+#[allow(dead_code, missing_docs)]
+pub mod graph;
+#[doc(hidden)]
+#[allow(dead_code, missing_docs)]
+pub mod initial_partition;
 mod node_nd;
-#[allow(dead_code)]
-mod rng;
-#[allow(dead_code)]
-mod separator;
+#[doc(hidden)]
+#[allow(dead_code, missing_docs)]
+pub mod rng;
+#[doc(hidden)]
+#[allow(dead_code, missing_docs)]
+pub mod separator;
+
+/// Crate-internal infrastructure exposed for sibling ordering
+/// crates (notably `feral-scotch`) that share the multilevel
+/// coarsening, initial-bisection, and FM-refinement plumbing.
+///
+/// **Not part of the stable public API.** No semver guarantees on
+/// signatures inside `internals`; consumers re-export it at their
+/// own risk. This module exists solely so feral-scotch does not
+/// have to clone the multilevel framework.
+#[doc(hidden)]
+pub mod internals {
+    pub use crate::coarsen;
+    pub use crate::fm_refine;
+    pub use crate::graph;
+    pub use crate::initial_partition;
+    pub use crate::rng;
+    pub use crate::separator;
+}
 
 pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 

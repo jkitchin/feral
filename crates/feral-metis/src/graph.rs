@@ -22,7 +22,7 @@ use feral_ordering_core::{CscPattern, OrderingError};
 /// reads a CSC with sorted row indices, but callers must not rely
 /// on this after coarsening.
 #[derive(Debug, Clone)]
-pub(crate) struct Graph {
+pub struct Graph {
     /// Number of vertices. Must equal `xadj.len() - 1` and fit in `i32`.
     pub nvtxs: i32,
     /// Adjacency offsets, length `nvtxs + 1`. `xadj[0] == 0`,
@@ -49,7 +49,7 @@ impl Graph {
     /// via a running "last seen" check rather than a hash.
     ///
     /// Complexity: `O(nnz)` time, `O(nnz + n)` space.
-    pub(crate) fn from_csc_pattern(pattern: &CscPattern<'_>) -> Result<Self, OrderingError> {
+    pub fn from_csc_pattern(pattern: &CscPattern<'_>) -> Result<Self, OrderingError> {
         let n = pattern.n;
         if n > i32::MAX as usize {
             return Err(OrderingError::IndexOverflow);
@@ -98,22 +98,27 @@ impl Graph {
     }
 
     /// Number of undirected edges (each stored twice in `adjncy`).
-    pub(crate) fn nedges(&self) -> usize {
+    pub fn nedges(&self) -> usize {
         self.adjncy.len() / 2
     }
 
     /// Degree of vertex `v`.
-    #[cfg(test)]
-    pub(crate) fn degree(&self, v: i32) -> i32 {
+    pub fn degree(&self, v: i32) -> i32 {
         self.xadj[(v + 1) as usize] - self.xadj[v as usize]
     }
 
     /// Borrow the adjacency slice of vertex `v`.
-    #[cfg(test)]
-    pub(crate) fn neighbors(&self, v: i32) -> &[i32] {
+    pub fn neighbors(&self, v: i32) -> &[i32] {
         let lo = self.xadj[v as usize] as usize;
         let hi = self.xadj[(v + 1) as usize] as usize;
         &self.adjncy[lo..hi]
+    }
+
+    /// Borrow the edge-weight slice aligned with [`Self::neighbors`].
+    pub fn edge_weights(&self, v: i32) -> &[i32] {
+        let lo = self.xadj[v as usize] as usize;
+        let hi = self.xadj[(v + 1) as usize] as usize;
+        &self.adjwgt[lo..hi]
     }
 }
 

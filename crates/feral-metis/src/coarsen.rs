@@ -28,7 +28,7 @@ const UNMATCHED: i32 = -1;
 
 /// Output of one coarsening level.
 #[derive(Debug)]
-pub(crate) struct CoarseGraph {
+pub struct CoarseGraph {
     /// Coarser graph.
     pub graph: Graph,
     /// Map from fine vertex index to coarse vertex index. Length
@@ -38,7 +38,7 @@ pub(crate) struct CoarseGraph {
 
 /// Coarsening-pass diagnostics (accumulated into `MetisStats`).
 #[derive(Debug, Default)]
-pub(crate) struct CoarsenCounters {
+pub struct CoarsenCounters {
     pub n_two_hop_fallbacks: u32,
 }
 
@@ -46,7 +46,7 @@ pub(crate) struct CoarsenCounters {
 /// coarse vertex map. Always produces a valid result; when matching
 /// is sparse the coarse graph can be nearly as large as the fine
 /// graph (caller is responsible for detecting stalled coarsening).
-pub(crate) fn coarsen_level(
+pub fn coarsen_level(
     fine: &Graph,
     rng: &mut SplitMix,
     two_hop_threshold: f64,
@@ -112,7 +112,7 @@ pub(crate) fn coarsen_level(
 /// Run `coarsen_level` in a loop until the graph is small enough or
 /// coarsening stalls (reduction ratio < 5%). Returns the hierarchy
 /// of coarse graphs, finest first.
-pub(crate) fn coarsen(
+pub fn coarsen(
     fine: &Graph,
     opts: &MetisOptions,
     rng: &mut SplitMix,
