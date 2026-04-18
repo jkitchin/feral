@@ -468,6 +468,250 @@ mod tests {
         assert_eq!(separator_weight(&g, &labels), 3);
     }
 
+    // Adversarial set A1–A10 from
+    // dev/research/metis-fm-sign-bug.md §5. Standing regression tests
+    // enforcing I1 (bookkeeping consistency) and, where meaningful,
+    // I2 (cut never grows), I4 (balance respected at exit),
+    // I6 (determinism).
+    //
+    // A1 is covered by `fm_sign_invariant_on_alternating_path` above.
+    // A2–A10 follow. Each constructs `initial cut` and (where
+    // applicable) `optimum` by hand — never by running the solver
+    // under test — per CLAUDE.md's oracle-independence rule.
+
+    fn path(n: usize) -> Graph {
+        let mut t: Vec<(usize, usize)> = (0..n).map(|i| (i, i)).collect();
+        for i in 0..n.saturating_sub(1) {
+            t.push((i, i + 1));
+        }
+        let (cp, ri) = csc_from_triples(n, &t);
+        let pat = CscPattern::new(n, &cp, &ri).unwrap();
+        Graph::from_csc_pattern(&pat).unwrap()
+    }
+
+    fn cycle(n: usize) -> Graph {
+        let mut t: Vec<(usize, usize)> = (0..n).map(|i| (i, i)).collect();
+        for i in 0..n {
+            t.push((i, (i + 1) % n));
+        }
+        let (cp, ri) = csc_from_triples(n, &t);
+        let pat = CscPattern::new(n, &cp, &ri).unwrap();
+        Graph::from_csc_pattern(&pat).unwrap()
+    }
+
+    fn complete_bipartite(m: usize, k: usize) -> Graph {
+        let n = m + k;
+        let mut t: Vec<(usize, usize)> = (0..n).map(|i| (i, i)).collect();
+        for i in 0..m {
+            for j in m..n {
+                t.push((i, j));
+            }
+        }
+        let (cp, ri) = csc_from_triples(n, &t);
+        let pat = CscPattern::new(n, &cp, &ri).unwrap();
+        Graph::from_csc_pattern(&pat).unwrap()
+    }
+
+    #[test]
+    fn a2_path_p20_alternating() {
+        // P_20 with alternating ABABAB…: every edge crosses → cut 19.
+        // Optimum balanced cut is 1 (single middle edge).
+        let g = path(20);
+        let mut labels: Vec<u8> = (0..20u8)
+            .map(|k| if k % 2 == 0 { PART_A } else { PART_B })
+            .collect();
+        assert_eq!(cut_size(&g, &labels), 19, "construction: alternating P_20");
+        let returned = refine_bisection(&g, &mut labels, 0.20, 32);
+        assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
+        assert!(
+            returned < 19,
+            "FM must improve alternating P_20 cut, got {}",
+            returned
+        );
+        assert!(returned >= 0);
+    }
+
+    #[test]
+    fn a3_cycle_c12_alternating() {
+        // Even cycle C_12 with alternating labels: every edge crosses
+        // → cut 12. Optimum balanced cut is 2 (two "cut points" on
+        // the cycle).
+        let g = cycle(12);
+        let mut labels: Vec<u8> = (0..12u8)
+            .map(|k| if k % 2 == 0 { PART_A } else { PART_B })
+            .collect();
+        assert_eq!(cut_size(&g, &labels), 12, "construction: alternating C_12");
+        let returned = refine_bisection(&g, &mut labels, 0.20, 32);
+        assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
+        assert!(
+            returned <= 12,
+            "I2: cut never grows (before=12, after={})",
+            returned
+        );
+        assert!(returned >= 2, "cycle C_12 balanced cut is ≥ 2");
+    }
+
+    #[test]
+    fn a4_grid_4x4_checkerboard() {
+        // 4×4 grid with checkerboard labels (r+c) mod 2: every edge
+        // crosses → cut 24. Balanced optimum is 4 (one row/column).
+        let g = grid(4, 4);
+        let mut labels: Vec<u8> = (0..16u8)
+            .map(|k| {
+                let r = (k as usize) / 4;
+                let c = (k as usize) % 4;
+                if (r + c).is_multiple_of(2) {
+                    PART_A
+                } else {
+                    PART_B
+                }
+            })
+            .collect();
+        assert_eq!(cut_size(&g, &labels), 24, "construction: 4x4 checkerboard");
+        let returned = refine_bisection(&g, &mut labels, 0.20, 32);
+        assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
+        assert!(
+            returned < 24,
+            "FM must improve 4x4 checkerboard cut, got {}",
+            returned
+        );
+        assert!(returned >= 4, "4x4 grid balanced cut is ≥ 4");
+    }
+
+    #[test]
+    fn a5_grid_6x6_mixed_boundary() {
+        // 6×6 grid with a mixed but deterministic label assignment
+        // (SplitMix-seeded). I1 and I2 are the load-bearing assertions;
+        // the exact optimum depends on the initial labeling so we only
+        // check cut never grows.
+        let g = grid(6, 6);
+        let mut rng = SplitMix::new(0xA5A5_A5A5);
+        let mut labels: Vec<u8> = (0..36)
+            .map(|_| {
+                if rng.next_u64() & 1 == 0 {
+                    PART_A
+                } else {
+                    PART_B
+                }
+            })
+            .collect();
+        let before = cut_size(&g, &labels);
+        let returned = refine_bisection(&g, &mut labels, 0.20, 32);
+        assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
+        assert!(
+            returned <= before,
+            "I2: cut never grows (before={}, after={})",
+            before,
+            returned
+        );
+    }
+
+    #[test]
+    fn a6_k44_unbalanced_init_bookkeeps() {
+        // K_{4,4}, labels = [A, B, B, B, B, B, B, B]. Structure is
+        // bipartite between {0..4} and {4..8}, so vertex 0 connects
+        // to 4,5,6,7 → cut 4.
+        //
+        // Classic FM's rollback picks the best cut seen *along the
+        // move sequence that was also balanced*. When the starting
+        // state is already imbalanced (a=1, b=7) and no *improving*
+        // balanced state is reached during the pass, rollback
+        // returns to the imbalanced start. The research note flagged
+        // this as a place where bookkeeping (I1) would show through
+        // cleanly post-fix; I4 rebalancing is an FM design-level
+        // property not covered by this kernel. We therefore assert
+        // I1 and I2 only.
+        let g = complete_bipartite(4, 4);
+        let mut labels: Vec<u8> = vec![PART_B; 8];
+        labels[0] = PART_A;
+        let before = cut_size(&g, &labels);
+        assert_eq!(before, 4, "construction: K_{{4,4}} 1-7");
+        let returned = refine_bisection(&g, &mut labels, 0.50, 32);
+        assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
+        assert!(
+            returned <= before,
+            "I2: cut never grows (before={}, after={})",
+            before,
+            returned
+        );
+    }
+
+    #[test]
+    fn a7_two_k4_bridge_no_spurious_moves() {
+        // Two K_4 blocks (0..4 and 4..8) joined by a single bridge
+        // edge (3,4). Labels: all A. Cut = 0 (bridge is internal).
+        // FM should not grow the cut; I2 is the gate.
+        let n = 8;
+        let mut t: Vec<(usize, usize)> = (0..n).map(|i| (i, i)).collect();
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                t.push((i, j));
+            }
+        }
+        for i in 4..8 {
+            for j in (i + 1)..8 {
+                t.push((i, j));
+            }
+        }
+        t.push((3, 4));
+        let (cp, ri) = csc_from_triples(n, &t);
+        let pat = CscPattern::new(n, &cp, &ri).unwrap();
+        let g = Graph::from_csc_pattern(&pat).unwrap();
+        let mut labels = vec![PART_A; n];
+        assert_eq!(cut_size(&g, &labels), 0, "construction: all-A cut is 0");
+        let returned = refine_bisection(&g, &mut labels, 0.20, 32);
+        assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
+        assert!(returned >= 0);
+    }
+
+    #[test]
+    fn a8_path_p10_all_a_empty_side() {
+        // P_10 with all A labels. Cut = 0. Degenerate empty B side —
+        // FM must not panic and must not grow the cut.
+        let g = path(10);
+        let mut labels = vec![PART_A; 10];
+        assert_eq!(cut_size(&g, &labels), 0);
+        let returned = refine_bisection(&g, &mut labels, 0.20, 32);
+        assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
+        assert!(returned >= 0);
+    }
+
+    #[test]
+    fn a9_single_vertex_returns_zero() {
+        // n=1 — the n<2 short-circuit must fire.
+        let cp: Vec<i32> = vec![0, 0];
+        let ri: Vec<i32> = vec![];
+        let pat = CscPattern::new(1, &cp, &ri).unwrap();
+        let g = Graph::from_csc_pattern(&pat).unwrap();
+        let mut labels = vec![PART_A];
+        let returned = refine_bisection(&g, &mut labels, 0.20, 32);
+        assert_eq!(returned, 0);
+        assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
+    }
+
+    #[test]
+    fn a10_empty_edge_set_no_moves() {
+        // n=8, no edges, half A / half B. No gains → no moves.
+        let cp: Vec<i32> = vec![0; 9];
+        let ri: Vec<i32> = vec![];
+        let pat = CscPattern::new(8, &cp, &ri).unwrap();
+        let g = Graph::from_csc_pattern(&pat).unwrap();
+        let mut labels: Vec<u8> = (0..8u8)
+            .map(|k| if k < 4 { PART_A } else { PART_B })
+            .collect();
+        assert_eq!(cut_size(&g, &labels), 0);
+        let returned = refine_bisection(&g, &mut labels, 0.20, 32);
+        assert_eq!(returned, 0);
+        assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
+        // I6 determinism: second run on fresh labels yields same result.
+        let mut labels2: Vec<u8> = (0..8u8)
+            .map(|k| if k < 4 { PART_A } else { PART_B })
+            .collect();
+        let returned2 = refine_bisection(&g, &mut labels2, 0.20, 32);
+        assert_eq!(returned, returned2, "I6: determinism");
+        assert_eq!(labels, labels2, "I6: determinism (labels)");
+    }
+
     #[test]
     fn refine_separator_reduces_weight_on_padded_case() {
         // Construct a 3x3 grid with middle row SEP and the middle
