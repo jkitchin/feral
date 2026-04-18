@@ -1,0 +1,27 @@
+* TODO create detailed crucibles for ordering strategies
+DEADLINE: <2026-04-27 Mon>
+
+- [ ] AMD
+- [ ] METIS
+- [ ] SCOTCH
+
+and others. I think we might try to build standalone rust libraries for each of these, so we can use them later. These will be highly focused efforts on just the ordering, with dedicated efforts to testing.
+* TODO follow-up: evaluate Mongoose (SuiteSparse edge separator + AMD hybrid)
+  - User request 2026-04-18-03.
+  - SuiteSparse Mongoose is an edge-separator-driven hybrid ordering that
+    couples a ND-style outer separator recursion with AMD on the leaves.
+    Could give another data point alongside feral-amd/metis/scotch for
+    the large-KKT bakeoff.
+  - No plan file exists yet. Start with dev/research/ordering-mongoose.md
+    (algorithm + licensing) → dev/plans/ordering-mongoose.md.
+
+* TODO follow-up: adaptive ordering dispatcher
+  - User request 2026-04-18-03 (session priority-list item 5).
+  - Observation from dev/research/ordering-bakeoff-2026-04-18.md:
+    AMD wins on small matrices (parity corpus), SCOTCH or METIS win
+    on large (≥10k) KKT arrow structures. No single default is best.
+  - Idea: pick ordering based on cheap pre-analysis (n, nnz, average
+    row degree, maybe density of the arrow "apex" column). Budget: a
+    function-call-time decision, not a full factor-and-measure.
+  - Precondition: the post-FM-rebalance, post-AMD-retirement bakeoff
+    numbers are stable. Both are in place as of 2026-04-18-03.
