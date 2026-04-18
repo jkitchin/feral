@@ -117,9 +117,85 @@ total symbolic time (us): AMD=74479, METIS=18943, SCOTCH=32837
 - Adding KaHIP (per `dev/plans/ordering-kahip.md`) requires a
   larger, more diverse corpus before it can be meaningfully scored.
 
+## Large-matrix extension (SuiteSparse)
+
+**Corpus.** Four matrices pinned via `dev/scripts/large_matrices.txt`,
+fetched by `dev/scripts/fetch_large_matrices.sh` into
+`tests/data/large/`. Selected to span the medium-to-large symmetric-
+indefinite / KKT regime that the parity corpus does not reach.
+
+```
+matrix                    n        nnz     fill_amd   fill_metis  fill_scotch    t_amd  t_metis   t_scot    m/amd    s/amd
+----------------------------------------------------------------------------------------------------------------------------------
+bcsstk38               8032     181746       939409      1052352      1209772   376798    80365    59308    1.120    1.288
+bratu3d               27792      88627     10009287      8768952      7850391 14942304   360016   365587    0.876    0.784
+c-big                345241    1343126    112023043    234614041    546116658 532412405 72012752 237797986    2.094    4.875
+cont-201              80595     239596      5708424      5636772      5539936  5818747   371885   489567    0.987    0.970
+```
+
+```
+geomean fill_metis / fill_amd  = 1.194
+geomean fill_scotch / fill_amd = 1.479
+minimum-fill wins: AMD=2, METIS=0, SCOTCH=2 (ties count for all)
+total symbolic time (us): AMD=553550254, METIS=72825018, SCOTCH=238712448
+```
+
+### Observations (large corpus)
+
+6. **ND wins where 3D mesh structure dominates.** On `bratu3d` (a 3-D
+   Bratu PDE Jacobian), METIS is 12.4% tighter than AMD and SCOTCH is
+   21.6% tighter. This is the textbook ND-favoring regime — nearly-
+   regular 3D connectivity where a geometric separator is close to
+   optimal and AMD's local heuristic gets stuck in a locally-greedy
+   cycle.
+
+7. **AMD wins decisively on block-arrow KKTs.** On `c-big` (an
+   IBM-NA KKT matrix, n=345k), METIS is 2.09× worse than AMD and
+   SCOTCH is 4.88× worse. KKT matrices with a dense Hessian block
+   and many border rows do not admit good ND cuts — the separator
+   ends up large relative to the subdomains. AMD's minimum-degree
+   strategy handles the dense block + border rows pattern correctly.
+
+8. **Ordering time scales strongly with AMD.** On `c-big`, AMD takes
+   ~532s vs METIS 72s (7.4× faster) and SCOTCH 238s (2.2× faster).
+   Total large-corpus symbolic time: AMD 553s, METIS 73s, SCOTCH 239s.
+   This replicates the parity-corpus timing finding at the regime
+   where it matters — n > 10k.
+
+9. **cont-201 is essentially tied.** All three orderings come within
+   3% on fill. On this 80k-row indef matrix the dominant structure
+   is balanced between dense Hessian and mesh connectivity.
+
+10. **SCOTCH's 2D niche is narrow on this set.** SCOTCH wins only on
+    `bratu3d` (where it beats METIS by 10.5% on fill) and `cont-201`
+    (marginally). On the block-structured `c-big` SCOTCH is much
+    worse than METIS — its band-FM refinement appears to commit to
+    a poor initial cut on highly-heterogeneous connectivity.
+
+### Revised decision implications
+
+- **AMD remains the fill-quality default.** Geomean fill ratio across
+  all 34 matrices (parity + large) is METIS 1.03× AMD, SCOTCH 1.11×
+  AMD. AMD wins or ties on 30/34.
+- **METIS is the right default when n > ~10k.** Its 7.4× time advantage
+  on c-big is decisive; fill degradation is a factor of 2× on the
+  worst KKT case but parity for most other shapes.
+- **SCOTCH's niche is 3D PDE Jacobians** (bratu3d-like). Not currently
+  represented in the parity corpus. Worth keeping available but not
+  suitable as default.
+- **Open question: adaptive dispatch.** The decision surface
+  AMD-vs-METIS-vs-SCOTCH clearly depends on matrix structure (block-
+  arrow vs mesh). A structure-detection heuristic (e.g., check the
+  ratio of maximum-degree to average-degree, or detect a heavy
+  diagonal block) could pick automatically. Deferred — needs a
+  larger corpus before tuning.
+
 ## Reproducing
 
 ```
 cargo run --release --bin bench_orderings
 cargo run --release --bin bench_orderings -- tests/data/parity
+cargo run --release --bin bench_orderings -- tests/data/large
+# Fetch large matrices first:
+bash dev/scripts/fetch_large_matrices.sh
 ```

@@ -15,3 +15,6 @@ ref/
 
 # KKT matrices (regenerated from ripopt CUTEst runs)
 data/matrices/
+
+# Large SuiteSparse matrices (fetched via dev/scripts/fetch_large_matrices.sh)
+tests/data/large/

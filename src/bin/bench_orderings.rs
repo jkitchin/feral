@@ -43,14 +43,23 @@ fn measure(
     Some((sym.factor_nnz_estimate as u64, us))
 }
 
-fn parity_dir_from_args() -> PathBuf {
-    if let Some(arg) = std::env::args().nth(1) {
-        PathBuf::from(arg)
+fn roots_from_args() -> Vec<PathBuf> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        let mut out = vec![PathBuf::from("tests/data/parity")];
+        let large = PathBuf::from("tests/data/large");
+        if large.is_dir() {
+            out.push(large);
+        }
+        out
     } else {
-        PathBuf::from("tests/data/parity")
+        args.into_iter().map(PathBuf::from).collect()
     }
 }
 
+// Per-family parity layout: <root>/<family>/<*.mtx>, one representative
+// matrix per family. Flat layout: <root>/<*.mtx>, each file used as-is.
+// The detection is simply: does the root contain any .mtx files directly?
 fn collect_mtx_files(root: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     let rd = match std::fs::read_dir(root) {
@@ -60,11 +69,17 @@ fn collect_mtx_files(root: &Path) -> Vec<PathBuf> {
             return out;
         }
     };
-    let mut subs: Vec<PathBuf> = rd
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
+    let entries: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    let mut flat_mtxs: Vec<PathBuf> = entries
+        .iter()
+        .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("mtx"))
+        .cloned()
         .collect();
+    if !flat_mtxs.is_empty() {
+        flat_mtxs.sort();
+        return flat_mtxs;
+    }
+    let mut subs: Vec<PathBuf> = entries.into_iter().filter(|p| p.is_dir()).collect();
     subs.sort();
     for sub in subs {
         let inner = match std::fs::read_dir(&sub) {
@@ -97,10 +112,14 @@ fn geomean(vals: &[f64]) -> f64 {
 }
 
 fn main() {
-    let root = parity_dir_from_args();
-    let mtx_files = collect_mtx_files(&root);
+    let roots = roots_from_args();
+    let mut mtx_files: Vec<PathBuf> = Vec::new();
+    for root in &roots {
+        eprintln!("scanning {}", root.display());
+        mtx_files.extend(collect_mtx_files(root));
+    }
     if mtx_files.is_empty() {
-        eprintln!("no .mtx files found under {}", root.display());
+        eprintln!("no .mtx files found");
         std::process::exit(1);
     }
 
@@ -125,12 +144,20 @@ fn main() {
     println!("{}", "-".repeat(130));
 
     for path in &mtx_files {
-        let family = path
+        // For per-family parity layout the parent dir name is the
+        // family; for a flat large-matrix dir the file stem is the
+        // matrix name.
+        let parent_name = path
             .parent()
             .and_then(|p| p.file_name())
             .and_then(|s| s.to_str())
-            .unwrap_or("?")
-            .to_string();
+            .unwrap_or("?");
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+        let family = if parent_name == "large" {
+            stem.to_string()
+        } else {
+            parent_name.to_string()
+        };
         let mtx = match read_mtx(path) {
             Ok(m) => m,
             Err(e) => {

@@ -1,0 +1,15 @@
+# SuiteSparse Matrix Collection large-matrix manifest
+# -----------------------------------------------------
+# Source: https://sparse.tamu.edu (Davis & Hu 2011)
+# Format: <group>/<name>
+# Fetched into tests/data/large/<name>.mtx (extracted from tar.gz).
+# Mirror root: https://suitesparse-collection-website.herokuapp.com/MM/<group>/<name>.tar.gz
+#
+# Selected for the ordering bake-off to cover the medium-to-large
+# symmetric-indefinite / KKT regime that the parity corpus (median n=77)
+# does not reach. Each is public and redistributable under the
+# SuiteSparse Matrix Collection license.
+Boeing/bcsstk38
+GHS_indef/bratu3d
+GHS_indef/cont-201
+Schenk_IBMNA/c-big
