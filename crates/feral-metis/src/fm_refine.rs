@@ -106,15 +106,16 @@ pub fn refine_bisection(
                 if locked[u] {
                     continue;
                 }
-                // If neighbor u had label == from (same as v's old label),
-                // v's flip means one more edge now crosses for u → gain -= 2*w.
-                // If neighbor u had label == to (same as v's new label),
-                // one less edge now crosses for u → gain += 2*w.
+                // gain = ed - id. If neighbour u shared v's old side
+                // (`from`): edge (u,v) was internal, now crosses →
+                // u's ed +w, id -w → Δgain = +2w. If u shares v's
+                // new side (`to`): edge was crossing, now internal
+                // → Δgain = -2w.
                 let w = graph.adjwgt[k];
                 if labels[u] == from {
-                    gain[u] -= 2 * w;
-                } else {
                     gain[u] += 2 * w;
+                } else {
+                    gain[u] -= 2 * w;
                 }
                 heap.push((gain[u], Reverse(u as i32), gain[u]));
             }
@@ -333,6 +334,64 @@ mod tests {
         let (cp, ri) = csc_from_triples(total, &t);
         let pat = CscPattern::new(total, &cp, &ri).unwrap();
         Graph::from_csc_pattern(&pat).unwrap()
+    }
+
+    /// Regression test for the FM neighbour-update sign bug fixed
+    /// alongside this test (see `dev/research/metis-fm-sign-bug.md`).
+    ///
+    /// The bug flipped the signs at the `gain[u] ± 2w` neighbour
+    /// update, so on a graph where FM actually had to move vertices,
+    /// `cur_cut` drifted into negative impossible territory and FM
+    /// rolled every move back. Existing tests missed it because they
+    /// either started from already-optimal cuts (`initial_bisect_ggp`
+    /// on grid is at the optimum), let the balance guard block every
+    /// move, or only checked permutation validity.
+    ///
+    /// Two assertions matter here:
+    ///
+    /// 1. **I1 (bookkeeping consistency).** `returned_cut` must equal
+    ///    `cut_size(graph, labels)` recomputed from scratch. This is
+    ///    the assertion the bug *cannot* survive.
+    /// 2. **Cut actually drops.** Path P_10 with alternating ABAB
+    ///    labels has cut = 9 and balanced optimum cut = 1. FM with
+    ///    correct bookkeeping must reduce the cut.
+    #[test]
+    fn fm_sign_invariant_on_alternating_path() {
+        // Path 0-1-...-9.
+        let mut t = Vec::new();
+        for i in 0..10 {
+            t.push((i, i));
+        }
+        for i in 0..9 {
+            t.push((i, i + 1));
+        }
+        let (cp, ri) = csc_from_triples(10, &t);
+        let pat = CscPattern::new(10, &cp, &ri).unwrap();
+        let g = Graph::from_csc_pattern(&pat).unwrap();
+
+        let mut labels: Vec<u8> = (0..10u8)
+            .map(|k| if k % 2 == 0 { PART_A } else { PART_B })
+            .collect();
+        let before = cut_size(&g, &labels);
+        assert_eq!(before, 9, "alternating path P_10 has cut 9");
+
+        let after = refine_bisection(&g, &mut labels, 0.20, 32);
+
+        // I1 — the assertion that catches the sign bug directly.
+        assert_eq!(
+            after,
+            cut_size(&g, &labels),
+            "returned cut must equal cut_size(labels) recomputed from scratch"
+        );
+        // Quality — FM must actually move at least one vertex on this
+        // adversarial input.
+        assert!(
+            after < before,
+            "FM must reduce cut from {} on alternating P_10, got {}",
+            before,
+            after
+        );
+        assert!(after >= 0, "cut size is non-negative, got {}", after);
     }
 
     #[test]
