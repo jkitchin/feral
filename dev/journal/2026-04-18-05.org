@@ -1,0 +1,124 @@
+#+TITLE: Session 2026-04-18-05 Journal
+#+STARTUP: showall
+
+* 14:00 :orientation:kahip:k2:
+User: "start the next session". Per checkpoint 2026-04-18-04, priority
+1 is KaHIP phase K2: push-relabel max-flow with gap relabeling.
+Standalone module `flow.rs` or `push_relabel.rs` in feral-kahip, no
+solver wiring. Reference: Cherkassky & Goldberg 1995, Sanders &
+Schulz 2011. Write dev/research/ordering-kahip-k2.md first.
+
+Read dev/plans/ordering-kahip.md §K2 (lines 294-326, 558-564) and
+the audit items that touch K2:
+  - Audit item 6 (lines 72-74): "Gap relabeling is REQUIRED, not
+    optional" — for bands d=5 with thousands of vertices, plain
+    push-relabel is 10x slower. Ship gap relabeling from day one.
+  - Audit item 16 (lines 109-111): deterministic tie-breaking —
+    pick lowest-index admissible neighbor so tests are reproducible.
+
+No prior K2 attempts (grep of tried-and-rejected.md is empty).
+
+Scope:
+  - `flow.rs` with `push_relabel(n, edges, source, sink) -> (i64, Vec<bool>)`.
+  - Highest-label selection, FIFO within the same height level.
+  - Gap relabeling (track height histogram; when a gap opens,
+    disconnect all vertices above it).
+  - Deterministic: lowest-index admissible neighbor.
+  - BFS on residual graph for the final min-cut partition.
+  - Unit tests: unit-capacity path, k×k grid horizontal cut,
+    diamond, a few textbook instances (Cormen et al. Figure 26.1),
+    max-flow = min-cut invariant on a random graph.
+
+* 14:30 :kahip:k2:research:
+Wrote dev/research/ordering-kahip-k2.md (~270 lines):
+  - Formal max-flow / min-cut definitions.
+  - Goldberg-Tarjan push-relabel with heights, pushes, relabels.
+  - Gap relabeling proof sketch and implementation notes.
+  - Highest-label + deterministic (FIFO-within-bucket, lowest-index
+    admissible) tie-breaking.
+  - Data structures: CSR-like edge list with paired forward/reverse
+    entries (rev-index linked).
+  - Min-cut extraction via residual BFS from source.
+  - 10-item test oracle list with hand-computable answers.
+  - Termination + correctness argument, design decisions, and
+    explicit out-of-scope items (global relabeling, most-balanced
+    min-cut — K3 concern).
+
+* 15:00 :kahip:k2:impl:gap-bugs:
+Implemented `crates/feral-kahip/src/flow.rs` (~600 LOC). First pass
+compiled; ran tests with 6/29 failing:
+  1. unit_capacity_path: f=0 expected 1.
+  2. diamond_bottleneck: f=1 expected 2.
+  3. grid_horizontal_cut_equals_k: f=1 expected 2.
+  4. clrs_figure_26_1: f=12 expected 23.
+  5. bipartite_matching_k_3_3: f=? expected 3.
+  6. cut_saturation_invariant_on_random_graph: f=0 expected 42.
+
+Bug 1 — gap detection at height 0. When the last non-source,
+non-sink vertex at height 0 relabeled upward, height_count[0]
+hit zero and my code triggered a "gap" — but height 0 is where
+the sink lives, so "gap at 0" falsely disconnects the entire
+source side. Fix: gate gap detection on `old_h > 0 && old_h < n`.
+After this fix, 5/6 failures resolved; only the random-graph
+cut-saturation test remained.
+
+Bug 2 — stranded flow after gap lift. For the random 30-node
+graph, excess trace at termination showed: source pushed 42,
+vertices 21 and 22 ended at height 31 (= n+1, lifted by gap) with
+excess 22 and 20 respectively; sink had excess 0. The algorithm
+pushed flow into intermediate vertices, gap-lifted them, but then
+stopped — they weren't re-inserted into the bucket system, so
+their excess never got pushed back to source via reverse edges.
+
+Fix: after gap-lift, re-add every lifted vertex `w` with
+`excess[w] > 0` to `bucket[n+1]`, and bump `max_active` so the
+main discharge loop picks them up. They then relabel higher and
+cascade flow back to source via the reverse edges created by the
+original preflow saturation.
+
+After this fix the random graph returns f=0 with source side =
+29 vertices (everyone except the disconnected sink), matching the
+min-cut = 0 theorem. Added a connected hand-laid network test
+(`cut_saturation_invariant_on_connected_graph`, f=10) to verify
+saturated forward-cut invariant on a graph that actually has a
+positive max-flow.
+
+* 15:30 :kahip:k2:tests:done:
+Final test list (12 flow tests + 3 scaffold tests in lib.rs, 29
+pass total):
+  - rejects_malformed_inputs (source == sink, OOB, negative cap)
+  - empty_graph_zero_flow, single_edge_saturates, parallel_edges_sum
+  - unit_capacity_path (n=5, chain of cap-1 edges → f=1)
+  - self_loops_ignored
+  - diamond_bottleneck (two paths, min = 1+1 = 2)
+  - clrs_figure_26_1 (textbook instance → f=23)
+  - grid_horizontal_cut_equals_k (k∈{2,3,4,5})
+  - bipartite_matching_k_3_3 (f=3)
+  - cut_saturation_invariant_on_random_graph (LCG seed, f matches
+    forward-cut capacity; this graph happens to have no s-t path)
+  - cut_saturation_invariant_on_connected_graph (hand-laid, f=10)
+  - disconnected_sink_zero_flow
+  - deterministic_under_adjacency_order
+
+cargo clippy -p feral-kahip --all-targets -- -D warnings: clean.
+cargo test --all: green across workspace (96+ tests in main feral
+crate).
+
+* 15:45 :kahip:k2:status:
+K2 complete in isolation. Module is `pub(crate) mod flow` with
+`#[allow(dead_code)]` until K3 consumes it. Public surface
+(`kahip_order`, `kahip_order_full`) unchanged; still returns
+`OrderingError::Internal`. No `OrderingMethod::KahipND` wiring.
+
+Design notes for future phases:
+- Bucket array sized 2n+1 is sufficient. Heights can reach 2n in
+  pathological cases (classical bound).
+- Gap relabeling is essential for correctness here, not just
+  performance: without proper handling of lifted vertices, flow
+  gets stranded.
+- Deterministic order is guaranteed by (a) stable adjacency-list
+  iteration order (set at edge-insert time) and (b) FIFO within
+  a bucket. Tested via `deterministic_under_adjacency_order`.
+- The algorithm is NOT currently global-relabeling optimized.
+  Cherkassky-Goldberg report 2-5x additional speedup from periodic
+  BFS-from-sink resets; deferred to K6 bench.

@@ -4,6 +4,41 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-18) — `feral-kahip` phase K2 (push-relabel max-flow)
+
+- Implemented push-relabel max-flow / min-cut in
+  `crates/feral-kahip/src/flow.rs` (internal to the crate until phase
+  K3 consumes it):
+  - Goldberg-Tarjan 1988 preflow algorithm with highest-label active-
+    vertex selection (buckets indexed by height, FIFO within a bucket).
+  - Gap relabeling per Cherkassky-Goldberg 1995, required by the
+    K3 band refinement budget. Gap detection is gated on
+    `0 < g < n` (a gap at height 0 would falsely disconnect the
+    sink); lifted vertices with residual excess are re-inserted into
+    `bucket[n+1]` so stranded flow drains back to source via reverse
+    edges.
+  - Deterministic tie-breaking (lowest-index admissible neighbor,
+    FIFO within same-height bucket) satisfying audit item 16 of
+    `dev/plans/ordering-kahip.md`.
+  - Min-cut extraction via residual BFS from source.
+  - Rejects `MalformedInput` on `source == sink`, out-of-bounds
+    endpoints, or negative capacities. Self-loops are ignored.
+    Parallel edges are preserved (residual capacity stacks correctly).
+- Crate-public surface unchanged: `kahip_order` / `kahip_order_full`
+  still return `OrderingError::Internal`. No `OrderingMethod::KahipND`
+  yet — dispatch lands with K6.
+- 29/29 tests pass (`cargo test -p feral-kahip`); clippy clean.
+  Coverage includes malformed-input rejection, unit-capacity path,
+  parallel edges, self-loop ignore, diamond bottleneck, CLRS 3e
+  Figure 26.1 (max-flow = 23), k×k grid horizontal cut (f = k for
+  k ∈ {2, 3, 4, 5}), K_{3,3} bipartite matching (f = 3), cut-
+  saturation invariant on a random 30-node graph (disconnected case,
+  f = 0) and a hand-laid connected 6-node network (f = 10),
+  disconnected-sink zero-flow, and determinism across repeated runs.
+- Research note `dev/research/ordering-kahip-k2.md` with the formal
+  algorithm, gap-relabeling proof sketch, data-structure layout, and
+  the full test-oracle construction.
+
 ### Added (2026-04-18) — `feral-kahip` phase K1 (data reduction)
 
 - Implemented Ost-Schulz-Strash 2021 data reduction rules in

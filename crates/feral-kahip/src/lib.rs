@@ -45,6 +45,13 @@ pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT
 #[allow(dead_code)]
 mod data_reduction;
 
+// Phase K2: push-relabel max-flow / min-cut (Goldberg-Tarjan 1988 +
+// Cherkassky-Goldberg 1995 gap relabeling). Internal until K3 (flow-
+// based edge refinement) consumes it; see
+// `dev/plans/ordering-kahip.md` and `dev/research/ordering-kahip-k2.md`.
+#[allow(dead_code)]
+mod flow;
+
 /// Crate-specific diagnostic statistics.
 ///
 /// Populated by [`kahip_order_full`] once the implementation lands;
