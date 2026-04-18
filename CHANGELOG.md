@@ -4,6 +4,43 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-18) — feral-scotch SCOTCH-style nested dissection (S1-S5 complete)
+
+- `feral-scotch::scotch_order(pattern)` and
+  `feral-scotch::scotch_order_full(pattern, opts)` ship as the
+  contract-conforming public API (matches `feral-amd::amd_order*` /
+  `feral-metis::metis_order*` shape under
+  `dev/plans/ordering-crate-contract.md`).
+- Pipeline: optional graph compression (S1) at the top level →
+  connected-component split → multilevel coarsening (shared with
+  feral-metis through `internals`) → best-of-`n_sep_trials` initial
+  bisection scored on post-FM cut → halo-FM uncoarsening at every
+  projected level (S3) → direct vertex separator via two-sided FM
+  (S2, instead of König's min vertex cover) → recursion with AMD
+  leaf at `amd_switch`. Band FM (S4) is available as
+  `band_fm::band_fm_refine` for callers that want frontier-only FM
+  with anchor-supervertex balance accounting.
+- 43 unit tests in feral-scotch; clippy clean; deterministic for a
+  given `ScotchOptions::seed`.
+
+### Fixed (2026-04-18) — feral-metis FM neighbour-update sign
+
+- `feral_metis::internals::fm_refine::refine_bisection` had flipped
+  signs at the `gain[u] ± 2w` neighbour update vs. the
+  `gain = ed - id` convention used by `compute_gains` and
+  `cur_cut -= gain[v]`. Corrupted `cur_cut` made FM effectively a
+  no-op on graphs requiring real moves; the bug was hidden by all
+  four existing tests starting from already-optimal cuts or
+  blocked-by-balance configurations.
+- Added `fm_sign_invariant_on_alternating_path` regression test
+  enforcing the I1 invariant `returned_cut == cut_size(graph,
+  labels)` (the assertion the bug cannot survive). Pre-fix
+  produced `-1143` on P_10 with alternating ABAB labels (cut = 9);
+  post-fix returns a small non-negative cut consistent with the
+  new labels.
+- Full analysis and follow-up adversarial set in
+  `dev/research/metis-fm-sign-bug.md`.
+
 ### Changed (2026-04-17) — Ordering crate boundary locked (2.6.0)
 
 - New workspace crate `feral-ordering-core`: defines the shared

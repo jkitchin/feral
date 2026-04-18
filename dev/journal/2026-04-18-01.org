@@ -1,0 +1,90 @@
+#+TITLE: FERAL Session Journal 2026-04-18-01
+#+STARTUP: showall
+
+* 12:00 :scotch:s4:band-fm:
+Committed feral-scotch S4 (band FM with anchor supervertices) as
+8fbf80c. 6 unit tests green: boundary-only band on 5x5 grid, anchor
+weight sums match out-of-band totals, cut never grows on 6x6 grid,
+out-of-band labels preserved, no_boundary fast-path no-op,
+determinism. cargo clippy -D warnings clean after refactoring the
+last needless_range_loop in the CSR compaction.
+
+Key correctness point: anchors carry the full out-of-band weight
+per side and stay locked across the FM pass, so the global balance
+constraint sees them and FM cannot empty an apparently-overweight
+side.
+
+* 12:05 :metis:fm:bug:test-design:
+Documented the feral-metis FM neighbour-update sign inconsistency
+in dev/research/metis-fm-sign-bug.md and dev/tried-and-rejected.md
+(commit 7534d48). Adversarial witness: P_10 with alternating ABAB
+labels (cut = 9) produces returned_cut = -1143 with labels
+unchanged. Two structural test-design failures hid it: oracle-
+shaped inputs (initial_bisect_ggp on a grid is already optimal so
+FM is a no-op) and no test asserts the bookkeeping invariant
+returned_cut == cut_size(labels). Recorded I1-I7 invariants and
+A1-A10 adversarial cases.
+
+* 12:25 :scotch:s5:driver:contract:
+Committed feral-scotch S5 (nested-dissection driver +
+scotch_order/scotch_order_full public API) as e62999d. 7 driver
+tests green: trivial diagonal, small-grid AMD-leaf, 16x16-grid
+multilevel triggers separator, determinism for fixed seed, two
+disjoint 8x8 components, K_7 compression collapses to 1
+supervariable, compression-disabled path. Plus 3 lib-level public-
+API tests. Pipeline: top-level compression -> CC split -> coarsen
+(shared metis framework) -> best-of-n_sep_trials initial bisection
+-> halo-FM uncoarsening at every level -> direct vertex separator
+-> recursion with AMD leaf at amd_switch.
+
+Reused MetisOptions internally to drive coarsen() since the shared
+framework already takes that struct; SCOTCH-specific knobs map
+cleanly (n_sep_trials -> niparts, fm_pass_cap -> fm_passes,
+amd_switch -> nd_to_amd_switch).
+
+* 12:35 :metis:fm:fix:
+User correction: "we should not commit known bugs. fix it."
+
+Applied the documented fix to crates/feral-metis/src/fm_refine.rs:
+swapped the signs at lines 115/117 so the neighbour gain update
+matches gain = ed - id, and rewrote the comment block to state the
+correct delta-derivation. Added regression test
+fm_sign_invariant_on_alternating_path which asserts both the I1
+bookkeeping invariant (returned_cut == cut_size(labels)) and the
+quality requirement (cut must drop from 9). Pre-fix the test
+returned -1143 and would have failed I1; post-fix returns a small
+non-negative cut consistent with the new labels.
+
+Evidence: cargo test -p feral-metis: 42 passed (was 41). cargo
+test --workspace: all green across 21 crate-test runs. cargo
+clippy --all-targets -D warnings clean. Committed as ba31609.
+
+The metis pipeline (multilevel ND with FM uncoarsening) was
+running structurally-correct results in spite of the bug because
+all four existing FM tests trip on configurations where FM is
+either a no-op or rolled back by balance — but on adversarial /
+non-near-optimal initial labels the bug actively suppressed FM's
+work. Fill quality on real KKT graphs may improve as a side
+effect of this fix; not measured this session.
+
+* 12:50 :bench:phase-2.8.1:
+Pre-checkpoint benchmark (cargo run --bin bench --release):
+
+  Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS):
+    small-frontal (<200): n=147982, p90=1.55, target<=2.0  PASS
+    medium (<500):        n=152145, p90=1.96, target<=3.0  PASS
+
+  Sparse Phase 2.8.1 exit partition:
+    small-frontal (<200): n=153455, p90=2.00, target<=2.0  PASS
+    medium (<500):        n=153560, p90=2.00, target<=3.0  PASS
+
+No regressions vs prior session. The metis FM fix is not on the
+benchmark hot path (the solver still uses AMD by default) so no
+bench delta expected.
+
+* 13:00 :session:checkpoint:
+Wrote session checkpoint dev/sessions/2026-04-18-01.md. Final
+state: feral-scotch S1-S5 complete and shipped under the FERAL
+ordering-crate contract, feral-metis FM sign bug fixed with a
+regression test that enforces the bookkeeping invariant. Next
+session candidates documented at the end of the checkpoint.
