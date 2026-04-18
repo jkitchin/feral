@@ -37,6 +37,8 @@ mod compress;
 #[allow(dead_code)]
 mod graph;
 #[allow(dead_code)]
+mod halo_fm;
+#[allow(dead_code)]
 mod vertex_separator;
 
 #[cfg(test)]

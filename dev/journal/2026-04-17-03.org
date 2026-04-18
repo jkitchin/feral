@@ -77,3 +77,38 @@ in S2 will be the feral-metis pub mod internals exposure. Then
 the two-sided FM with the corrected gain formula
 gain(v→side) = vwgt[v] - Σ_{u ∈ N(v) ∩ opposite_side} vwgt[u]
 plus incremental frontier-load maintenance (audit finding 1).
+
+* 22:00 :scotch:s2:done:
+S2 complete (commit c5ba081). vertex_separator.rs (~530 lines)
+implements compute_vertex_separator with corrected gain formula,
+incremental load_a/load_b, lighter-side initial separator,
+per-move and final-prefix imbalance, deterministic rollback.
+8 new tests covering P_11, C_8, K_{3,3}, disjoint K_4 pair,
+5x5 grid, determinism, empty, weight accounting. Total scotch
+tests: 20 passed. K_{3,3} test rationale was wrong on first pass
+(implementation enforces only upper balance bound; FM is allowed
+to collapse one side to empty when imbalance tolerance permits).
+Test reframed.
+
+* 22:30 :scotch:s3:done :feral-metis:bug:
+S3 (halo_fm.rs) complete. ~340 lines + 6 tests. Uses dynamic
+halo (audit finding 3): boundary_cnt and halo_cnt tracked
+incrementally, halo recomputed for neighbours of any vertex
+whose boundary status flipped on each move.
+
+While debugging (cur_cut went to -199 on a path graph), I
+re-derived the FM gain-update sign rules for `gain = ed - id`:
+when v moves from->to, neighbour u on `from` side gets
+`gain[u] += 2w` (NOT -=). feral-metis fm_refine.rs:115 has the
+opposite sign:
+   if labels[u] == from {
+       gain[u] -= 2 * w;   // BUG: should be +=
+   }
+This is internally inconsistent with `gain[v] = ed - id` and
+`cur_cut -= gain[v]`. Symptom: best_prefix never advances past 0,
+all moves get rolled back, FM is a no-op. Tests pass because
+they only check `final_cut <= initial_cut` (trivially holds when
+nothing moves) and `pass_cut == cut_size(labels)` (also holds
+when initial state is preserved). Halo FM uses the corrected
+signs; recording here for follow-up fix in feral-metis (tracked
+in tried-and-rejected.md after this session).
