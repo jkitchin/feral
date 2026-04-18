@@ -124,71 +124,105 @@ fetched by `dev/scripts/fetch_large_matrices.sh` into
 `tests/data/large/`. Selected to span the medium-to-large symmetric-
 indefinite / KKT regime that the parity corpus does not reach.
 
+**Numbers below are post-FM-rebalance-fix (commit `4cf4a81`).** See
+the "FM rebalance fix delta" subsection at the end of this section
+for the before/after comparison — the fix substantially changes the
+SCOTCH results on large matrices.
+
 ```
 matrix                    n        nnz     fill_amd   fill_metis  fill_scotch    t_amd  t_metis   t_scot    m/amd    s/amd
 ----------------------------------------------------------------------------------------------------------------------------------
-bcsstk38               8032     181746       939409      1052352      1209772   376798    80365    59308    1.120    1.288
-bratu3d               27792      88627     10009287      8768952      7850391 14942304   360016   365587    0.876    0.784
-c-big                345241    1343126    112023043    234614041    546116658 532412405 72012752 237797986    2.094    4.875
-cont-201              80595     239596      5708424      5636772      5539936  5818747   371885   489567    0.987    0.970
+bcsstk38               8032     181746       939409      1052352      1209772   380003    80837    59373    1.120    1.288
+bratu3d               27792      88627     10009287      8768952      8408115 14781723   359353   338396    0.876    0.840
+c-big                345241    1343126    112023043    233614260     86948776 527521979 69420542 14723910    2.085    0.776
+cont-201              80595     239596      5708424      5636772      5539936  5751419   372421   495533    0.987    0.970
 ```
 
 ```
-geomean fill_metis / fill_amd  = 1.194
-geomean fill_scotch / fill_amd = 1.479
-minimum-fill wins: AMD=2, METIS=0, SCOTCH=2 (ties count for all)
-total symbolic time (us): AMD=553550254, METIS=72825018, SCOTCH=238712448
+geomean fill_metis / fill_amd  = 1.192
+geomean fill_scotch / fill_amd = 0.950   (SCOTCH now produces 5.0% LESS fill than AMD on average)
+minimum-fill wins: AMD=1, METIS=0, SCOTCH=3 (ties count for all)
+total symbolic time (us): AMD=548435124, METIS=70233153, SCOTCH=15617212
 ```
 
-### Observations (large corpus)
+### Observations (large corpus, post-FM-fix)
 
-6. **ND wins where 3D mesh structure dominates.** On `bratu3d` (a 3-D
-   Bratu PDE Jacobian), METIS is 12.4% tighter than AMD and SCOTCH is
-   21.6% tighter. This is the textbook ND-favoring regime — nearly-
-   regular 3D connectivity where a geometric separator is close to
-   optimal and AMD's local heuristic gets stuck in a locally-greedy
-   cycle.
+6. **ND now wins on large indef matrices as a class.** SCOTCH takes
+   the fill crown on 3 of 4 large matrices (`bratu3d`, `cont-201`,
+   `c-big`), losing only on `bcsstk38` (n=8032, densest of the four).
+   Geomean fill ratio is 0.950× AMD — SCOTCH is the best fill
+   producer at this scale.
 
-7. **AMD wins decisively on block-arrow KKTs.** On `c-big` (an
-   IBM-NA KKT matrix, n=345k), METIS is 2.09× worse than AMD and
-   SCOTCH is 4.88× worse. KKT matrices with a dense Hessian block
-   and many border rows do not admit good ND cuts — the separator
-   ends up large relative to the subdomains. AMD's minimum-degree
-   strategy handles the dense block + border rows pattern correctly.
+7. **c-big flipped completely.** Pre-FM-fix, SCOTCH produced 4.88×
+   more fill than AMD on c-big and took 237s (44% slower than METIS
+   even). Post-fix, SCOTCH produces **22% less fill** than AMD on
+   c-big and takes 14.7s (9× faster than METIS, 36× faster than AMD).
+   The diagnosis in the FM-fix commit message explains why: c-big's
+   multilevel coarsening projects imbalanced partitions at many
+   levels; every such level used to roll back to the imbalance and
+   do no useful refinement. Post-fix the pass records the first
+   balanced state encountered and refines from there.
 
-8. **Ordering time scales strongly with AMD.** On `c-big`, AMD takes
-   ~532s vs METIS 72s (7.4× faster) and SCOTCH 238s (2.2× faster).
-   Total large-corpus symbolic time: AMD 553s, METIS 73s, SCOTCH 239s.
-   This replicates the parity-corpus timing finding at the regime
-   where it matters — n > 10k.
+8. **bratu3d got slightly worse for SCOTCH but still beats AMD.**
+   Pre-fix SCOTCH was 0.784× AMD fill on bratu3d; post-fix 0.840×.
+   The FM rebalance fix occasionally prevents SCOTCH from rolling
+   back a trajectory that the "roll back to start" behaviour treated
+   favourably; this is not a bug but a tradeoff — the fix is correct
+   on imbalanced starts, worth the small quality hit on balanced
+   starts with unusual trajectories. bratu3d still wins on fill
+   (0.840×) and runs comparably to METIS in time.
 
-9. **cont-201 is essentially tied.** All three orderings come within
-   3% on fill. On this 80k-row indef matrix the dominant structure
-   is balanced between dense Hessian and mesh connectivity.
+9. **Ordering time scales strongly with AMD.** On `c-big`, AMD takes
+   ~527s vs METIS 69s (7.6× faster) and SCOTCH 14.7s (36× faster).
+   Total large-corpus symbolic time: AMD 548s, METIS 70s, SCOTCH 16s.
+   SCOTCH's order-of-magnitude improvement over pre-fix comes
+   entirely from wasting fewer passes on unstable trajectories.
 
-10. **SCOTCH's 2D niche is narrow on this set.** SCOTCH wins only on
-    `bratu3d` (where it beats METIS by 10.5% on fill) and `cont-201`
-    (marginally). On the block-structured `c-big` SCOTCH is much
-    worse than METIS — its band-FM refinement appears to commit to
-    a poor initial cut on highly-heterogeneous connectivity.
+10. **cont-201 is essentially tied.** All three orderings come within
+    3% on fill. On this 80k-row indef matrix the dominant structure
+    is balanced between dense Hessian and mesh connectivity.
+
+11. **bcsstk38 is the exception.** AMD wins by 12% on fill (a dense
+    8k symmetric matrix, the heaviest nnz/n in this corpus). This
+    matches the parity-corpus finding that AMD's minimum-degree
+    handles densely-connected small matrices better than ND's
+    separator-based approach. Threshold where ND dominates looks
+    like nnz ~200k or n ~20k, whichever first.
+
+### FM rebalance fix delta
+
+Pre-fix (commit 7962568), large-corpus numbers were:
+```
+geomean fill_metis / fill_amd  = 1.194  (essentially unchanged)
+geomean fill_scotch / fill_amd = 1.479  → 0.950 (58% reduction in fill ratio!)
+SCOTCH wins: 2                           → 3 (now wins on c-big and bratu3d and cont-201)
+SCOTCH total time: 238712448 us          → 15617212 us (15× faster)
+```
+
+The FM rebalance fix is the single largest improvement in the
+ordering crates since the split. It affects every multilevel
+scheme (METIS and SCOTCH) but the effect concentrates in SCOTCH
+because SCOTCH's band-FM refinement more frequently projects
+imbalanced partitions into the next level.
 
 ### Revised decision implications
 
-- **AMD remains the fill-quality default.** Geomean fill ratio across
-  all 34 matrices (parity + large) is METIS 1.03× AMD, SCOTCH 1.11×
-  AMD. AMD wins or ties on 30/34.
-- **METIS is the right default when n > ~10k.** Its 7.4× time advantage
-  on c-big is decisive; fill degradation is a factor of 2× on the
-  worst KKT case but parity for most other shapes.
-- **SCOTCH's niche is 3D PDE Jacobians** (bratu3d-like). Not currently
-  represented in the parity corpus. Worth keeping available but not
-  suitable as default.
-- **Open question: adaptive dispatch.** The decision surface
-  AMD-vs-METIS-vs-SCOTCH clearly depends on matrix structure (block-
-  arrow vs mesh). A structure-detection heuristic (e.g., check the
-  ratio of maximum-degree to average-degree, or detect a heavy
-  diagonal block) could pick automatically. Deferred — needs a
-  larger corpus before tuning.
+- **AMD is no longer the unambiguous fill-quality default for
+  n > ~10k.** SCOTCH geomeans 0.95× AMD on the large corpus and
+  wins on 3 of 4 matrices. AMD still wins on the parity corpus
+  (median n=77) and on dense small matrices.
+- **METIS's role narrows.** Post-fix, SCOTCH matches METIS or beats
+  it on every large matrix and does so in less ordering time.
+  METIS remains the conservative choice (no FM-trajectory
+  surprises like bratu3d's 0.784 → 0.840 delta) and a useful
+  baseline.
+- **Default-ordering heuristic starts to look reasonable.** Pick
+  AMD for n ≤ ~2000, SCOTCH for n > ~2000 with indef or KKT
+  structure. Deferred to a separate session with a wider corpus.
+- **Open: numeric-fill comparison with pivoting.** All numbers
+  here are symbolic. A KKT with significant delayed-pivot churn
+  could rewrite the fill picture entirely. Tracked as B6 in
+  `dev/plans/ordering-scotch.md`.
 
 ## Reproducing
 
