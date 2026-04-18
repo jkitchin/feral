@@ -272,3 +272,46 @@ tried-and-rejected.md entry added with evidence pointers.
 Logs: /tmp/bench_amd.log, /tmp/bench_auto.log.
 Bench harness change (FERAL_ORDERING env var) stays as
 infrastructure for future ordering experiments.
+
+* 18:30 :refinement:tuning:bug:bench:
+The 5+ refinement variants I ran (cap=2, cap=3, two-tier, two-tier
+no-stagnation, no-improvement-only) all gave identical 154144
+residual passes and 4.79e-4 worst residual. Found the bug by
+diff'ing src/numeric/solve.rs against HEAD:
+
+  if r_new_norm < best_r_norm {
+      best_r_norm = r_new_norm;       // <-- updates first
+      best_x = x_new.clone();
+  }
+  let improved = r_new_norm < best_r_norm;  // <-- always false now
+
+Order-of-operations: `improved` is computed AFTER best_r_norm gets
+updated, so it is always false when there was actually improvement.
+The plateau exit `if !improved { break; }` triggered after iter 1
+on every call, effectively pinning max_steps to 1 regardless of the
+declared cap or strategy. Every variant was the same code.
+
+Fix: compute `improved` BEFORE the best-update.
+
+Re-bench after fix (max_steps=10, 1-strike plateau exit):
+  residual pass:  154196 / 154588 (was 154327 baseline, 154144 broken)
+  worst residual: 3.12e-4         (was 2.69e-4 baseline)
+  solve/SSIDS:    1.23 geomean    (was 1.82 baseline)
+  factor/MUMPS:   0.45 geomean    (was 0.44 baseline)
+
+1-strike loses 131 marginal matrices vs baseline because some KKT
+matrices oscillate -- they take a step that does not improve the
+best residual, then the next step lands in a better basin. 1-strike
+kills that. profile_sparse showed BATCH (n=121) as one such case.
+
+Switched to 2-strike rule (`stagnant_count >= 2`):
+  residual pass:  154241 / 154588  (recovered 45 of the 131)
+  worst residual: 2.69e-4           (matches baseline exactly)
+  solve/SSIDS:    1.33 geomean      (vs baseline 1.82, 1-strike 1.23)
+  factor/MUMPS:   0.45 geomean
+
+Sweet spot. Still 99.8% pass, worst residual matches baseline,
+solve time drops 27% against SSIDS. Shipping 2-strike.
+
+Logs: /tmp/bench_no_improve_fixed.log (1-strike),
+      /tmp/bench_2strike.log         (2-strike, shipped).

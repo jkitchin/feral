@@ -282,8 +282,23 @@ pub fn solve_sparse_refined(
 
     let mut best_x = x.clone();
     let mut best_r_norm = r_norm;
+    let mut stagnant_count: usize = 0;
 
+    // Phase 2.5 (2026-04-18) tuning: profile_sparse showed refinement
+    // was running 10 iterations on most KKT matrices because the
+    // `ε·√n` relative target is below double-precision floor noise.
+    // The 10x multiplier on top of the bare solve drove the 1.82×
+    // SSIDS solve-time gap on the 154k-matrix bench.
+    //
+    // Strategy: keep `max_steps = 10` for the worst-case ill-conditioned
+    // matrices, but exit after `max_stagnant_steps` consecutive steps
+    // fail to improve the best residual. A 2-strike rule preserves the
+    // bouncing-into-basin behavior on borderline KKT matrices (which a
+    // single-strike exit kills) while still capping the easy-case cost.
+    // Bench evidence (cap=2 / cap=3 / two-tier / 1-strike / 2-strike)
+    // is in `dev/journal/2026-04-18-06.org`.
     let max_steps = 10;
+    let max_stagnant_steps = 2;
     let n_sqrt = (n as f64).sqrt();
     let threshold = f64::EPSILON * n_sqrt;
     let divergence_factor = 100.0;
@@ -319,9 +334,13 @@ pub fn solve_sparse_refined(
         }
         let r_new_norm = norm2(&r_new);
 
-        if r_new_norm < best_r_norm {
+        let improved = r_new_norm < best_r_norm;
+        if improved {
             best_r_norm = r_new_norm;
             best_x = x_new.clone();
+            stagnant_count = 0;
+        } else {
+            stagnant_count += 1;
         }
 
         x = x_new;
@@ -329,6 +348,14 @@ pub fn solve_sparse_refined(
         r_norm = r_new_norm;
 
         if r_norm > best_r_norm * divergence_factor {
+            break;
+        }
+        // Plateau: `max_stagnant_steps` consecutive non-improving
+        // steps means refinement has bottomed out (floor noise or
+        // ill-conditioning) — further iterations will not help.
+        // A single non-improving step is allowed because some KKT
+        // matrices oscillate into a better basin on the next step.
+        if stagnant_count >= max_stagnant_steps {
             break;
         }
     }

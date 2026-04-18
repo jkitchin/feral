@@ -4,6 +4,35 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-18) — sparse refinement: 2-strike plateau exit
+
+`solve_sparse_refined` now exits after two consecutive non-improving
+steps instead of running all 10 iterations to the unreachable
+`ε·√n` relative target. `profile_sparse` showed the prior loop was
+adding 11.5× overhead on the bare solve because the relative target
+sits below double-precision floor noise on most KKT matrices.
+
+The 2-strike rule preserves bouncing-into-basin behavior on
+borderline matrices (a 1-strike rule killed it). Bench evidence
+(154,588 IPM matrices):
+
+| metric           | before | after |
+|------------------|--------|-------|
+| residual pass    | 154327 | 154241 |
+| worst residual   | 2.69e-4| 2.69e-4|
+| solve/SSIDS      | 1.82   | 1.33  |
+| factor/MUMPS     | 0.44   | 0.45  |
+
+86 marginal matrices regress at the residual-pass threshold (still
+99.8% pass), worst residual exactly matches the prior bench, and
+solve time drops 27% against SSIDS.
+
+Also: `lib.rs` re-exports `solve_sparse` (was internal). New
+`src/bin/profile_sparse.rs` per-stage profiler. Full per-stage
+numbers and the bug history (a misordered `improved` check that
+silently capped iterations to 1) in
+`dev/journal/2026-04-18-06.org`.
+
 ### Notes (2026-04-18) — `OrderingMethod::Auto` is opt-in only
 
 Closed-loop end-to-end bench (154,588 IPM KKT matrices) showed `Auto`
