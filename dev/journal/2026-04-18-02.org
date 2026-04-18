@@ -1,0 +1,141 @@
+#+TITLE: Session 2026-04-18-02 — ordering ecosystem wiring
+#+STARTUP: overview
+
+* 09:00 :orient:
+Session 2026-04-18-01 finished with feral-scotch S1-S5 complete, the
+metis FM sign bug fixed in ba31609, and four follow-ups queued:
+ 1. I1 bookkeeping-invariant sweep on existing FM tests
+ 2. wire SCOTCH into the solver via OrderingMethod enum
+ 3. re-measure metis fill on parity corpus
+ 4. adversarial set A1-A10 as standing regressions
+
+User direction: "do 1, then the rest of them".
+
+* 09:10 :i1-sweep:refine:
+Finished the I1 sweep across FM-style refiner tests. 4 files,
+21 test functions touched:
+ - feral-metis fm_refine.rs (3 tests)
+ - feral-scotch halo_fm.rs (6 tests)
+ - feral-scotch band_fm.rs (5 tests)
+ - feral-scotch vertex_separator.rs (7 tests)
+
+Evidence: =cargo test --workspace= all green; clippy on touched
+crates clean; main feral crate pre-clippy errors are pre-existing
+(62 errors on HEAD w/o my changes — unrelated).
+
+Committed as 0592df2.
+
+* 09:30 :clarification:
+User interrupted with "what solver? we are just doing orderings
+right". Re-scoped: tasks 2 and 3 both explicitly touch
+src/symbolic/mod.rs. User agreed to defer those, proceed with
+task 4 first (adversarial set = pure ordering-crate work).
+
+* 09:45 :adversarial:metis:
+Wrote A1-A10 from dev/research/metis-fm-sign-bug.md §5 as standing
+regression tests in feral-metis fm_refine.rs. A1 was already
+covered by fm_sign_invariant_on_alternating_path (ba31609).
+
+A2: P_20 alternating.           FM improves from 19.
+A3: C_12 alternating.           FM improves from 12, floor 2.
+A4: 4x4 checkerboard.           FM improves from 24, floor 4.
+A5: 6x6 SplitMix-seeded.        I1 + I2 only (no specific optimum).
+A6: K_{4,4} 1-7 imbalanced.     I1 + I2 only — see surprise below.
+A7: two K_4 + bridge, all A.    I1 (no spurious moves).
+A8: P_10 all A (empty side).    I1 (no panic).
+A9: single vertex.              n<2 short-circuit.
+A10: empty edge set.            No moves; I6 determinism.
+
+:surprise: A6 originally asserted I4 (balance after FM) with
+max_imbalance=0.5 starting from 1-7 (side_max=7 > max_side=6).
+Test failed: FM returned with labels still 1-7.
+
+Reading refine_bisection: =best_cut= initialises to the pass input
+cut, =best_prefix=0=. When starting imbalanced, the first-ever
+balanced state reached during the move sequence must have
+=cur_cut < best_cut= to record itself. If it doesn't, rollback
+returns to =best_prefix=0= = the imbalanced start.
+
+This is NOT a bookkeeping bug — it is a FM-design choice. Classic
+FM assumes balanced initialisation. The note in §5 already flagged
+this: "This is one place where the current code's bookkeeping
+inconsistency would show even after the sign fix — worth recording
+the expected post-fix value here once the fix lands."
+
+Conclusion: the expected post-fix value is "FM does not rebalance
+an imbalanced start". Softened A6 to I1+I2 only with an explanatory
+comment. Recorded as a genuine follow-up candidate (not a
+regression).
+
+Committed as 32bbb3b (51 tests passing, +9 new).
+
+* 10:30 :clarify:architecture:
+User: "clarify what wired into the solver means. are all the
+orderings wired in by some trait so you can choose between them?"
+
+Current state: no. src/symbolic/mod.rs:117 calls =amd_order=
+directly; Cargo.toml does not depend on feral-amd, feral-metis,
+or feral-scotch. The main crate has its *own* AMD at
+src/ordering/amd.rs (pre-dates the ordering-crate split).
+
+Explained two options (enum vs trait) and the three larger
+follow-ups looming: (a) retire in-tree AMD in favour of feral-amd,
+(b) build a comparative ordering harness, (c) KKT-aware ordering
+research. User agreed to proceed with the enum.
+
+* 10:45 :wiring:dispatch:
+Added =OrderingMethod::{Amd, MetisND, ScotchND}= and
+=symbolic_factorize_with_method= in src/symbolic/mod.rs.
+=symbolic_factorize= delegates to Amd variant — all callers
+unchanged.
+
+Conversion helpers:
+ - =to_contract_pattern_bufs= — owned-usize → borrowed-i32 with
+   i32::try_from overflow check.
+ - =run_external_ordering= — calls metis_order / scotch_order,
+   maps OrderingError → FeralError::InvalidInput, validates
+   perm length + non-negative + bounded.
+
+In-tree src/ordering/amd.rs is *not* retired. Retirement requires
+API changes at the FeralError↔OrderingError and usize↔i32 boundaries
+— recording as a deferred decision.
+
+Tests added:
+ - =symbolic_factorize_metis_produces_valid_perm=
+ - =symbolic_factorize_scotch_produces_valid_perm=
+ - =symbolic_factorize_default_matches_amd=
+
+Evidence: 20 symbolic:: tests pass; cargo clippy clean (after fixing
+a =#[default]= derive hint). Committed as d4e5eda.
+
+* 11:30 :bench:data:
+Built src/bin/bench_orderings.rs — a release-only binary that
+runs symbolic_factorize_with_method three ways per matrix and
+prints per-matrix fill + time + summary.
+
+Ran on tests/data/parity/ (30 families):
+
+#+BEGIN_EXAMPLE
+geomean fill_metis  / fill_amd  = 1.011
+geomean fill_scotch / fill_amd  = 1.060
+minimum-fill wins: AMD=28, METIS=12, SCOTCH=10 (ties count for all)
+total symbolic time (us): AMD=74479, METIS=18943, SCOTCH=32837
+#+END_EXAMPLE
+
+AMD wins on fill but METIS is 4x faster and SCOTCH 2x faster in
+total symbolic time. On the three largest matrices (cresc132 n=5314,
+vesuvia/vesuvio n=3083), AMD's O(deg^2) update dominates —
+cresc132: AMD 52.8ms, METIS 9.5ms.
+
+SCOTCH never strictly beats AMD on this corpus. Its structural
+niche (compression-heavy or heavy-separator graphs) is not
+represented. Need a wider corpus before adding KaHIP.
+
+Committed as 938daf4 (binary) + 99f712f (results note at
+dev/research/ordering-bakeoff-2026-04-18.md).
+
+* 12:00 :checkpoint:
+User: "i think we can checkpoint now". Proceeding to CLAUDE.md
+end-of-session protocol: main bench run, context refresh, session
+checkpoint, changelog entry, decision entry for the ordering
+wiring.

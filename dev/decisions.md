@@ -814,3 +814,155 @@ in `dev/sessions/2026-04-14-04.md` "Benchmark Results" section.
 **Reconsideration clause.** If a fifth ordering backend is ever added and it turns out to share options with an existing one, revisit the trait choice. If feral ever needs >2^31 rows (unrealistic for KKT matrices in NLP), revisit the `i32` choice.
 
 **Evidence.** `dev/plans/ordering-crate-contract.md` (full spec, including acceptance checklist); `crates/feral-ordering-core/src/lib.rs` (45 LOC contract module, 12 passing unit tests); `crates/feral-amd` retrofit passes 29 lib tests + 12 SuiteSparse oracle tests bit-for-bit after the switch to `i32`.
+
+---
+
+## 2026-04-18 — OrderingMethod enum dispatch (not trait) in src/symbolic/mod.rs
+
+**Decision.** `src/symbolic/mod.rs` wires the three ordering crates
+(feral-amd, feral-metis, feral-scotch) through an
+`enum OrderingMethod { Amd, MetisND, ScotchND }` dispatched by a
+single `match` inside `symbolic_factorize_with_method`. No
+`OrderingBackend` trait, no generic parameter on the caller. The
+in-tree `src/ordering/amd.rs` remains the `OrderingMethod::Amd`
+implementation pending separate retirement work.
+
+**Why.**
+- Only three ordering implementations exist today (AMD, METIS,
+  SCOTCH). A fourth (KaHIP per `dev/plans/ordering-kahip.md`) is
+  planned but would drop into the same enum.
+- The ergonomic call-site is `symbolic_factorize_with_method(
+  &matrix, &params, method)`. A trait-based dispatch would either
+  require a type parameter on the caller (propagates through
+  Solver, Factorization, etc.) or a `Box<dyn OrderingBackend>`
+  with heap allocation and dynamic dispatch for what is a
+  ~microsecond operation.
+- Each ordering crate exposes the shared `feral-ordering-core`
+  contract (`fn _order(&CscPattern<'_>) -> Result<Vec<i32>,
+  OrderingError>`) using i32 indices and borrowed patterns. The
+  main feral crate uses owned-usize patterns and `FeralError`.
+  Conversion must happen somewhere. Putting it behind a trait
+  means every crate's `impl OrderingBackend for Amd {}` does the
+  same conversion; putting it behind an enum means one
+  `run_external_ordering` adapter in `src/symbolic/mod.rs` does
+  it once. The enum path is shorter and keeps conversion
+  concerns centralized.
+- Dynamic selection (strategy autotuning) is easier with an enum:
+  pattern-match on the method, swap variants based on runtime
+  heuristics, without constructing trait objects.
+
+**Scope.** `symbolic_factorize` (the legacy one-arg entry) is
+preserved as a thin delegate to
+`symbolic_factorize_with_method(.., OrderingMethod::Amd)` so no
+caller breaks. 3 symbolic-level tests enforce
+`MetisND`/`ScotchND` produce valid perms and the default matches
+AMD.
+
+**Reconsideration clause.** If a fifth backend arrives and it
+carries its own configuration type incompatible with a simple
+enum variant (e.g., KaHIP's preconfiguration struct), revisit
+the trait choice. Also if some caller needs to accept an
+arbitrary user-supplied ordering at runtime (plugin-like), a
+trait object is better suited; not needed for current FERAL
+users.
+
+**Evidence.** Commit `d4e5eda` (enum + dispatch + 3 tests);
+`dev/research/ordering-bakeoff-2026-04-18.md` covers the
+comparative behaviour of the three enum variants on the parity
+and large-matrix corpora.
+
+---
+
+## 2026-04-18 — Large-matrix bake-off corpus via SuiteSparse, not synthesis or IPM dumps
+
+**Decision.** `dev/scripts/large_matrices.txt` pins four matrices
+from the SuiteSparse Matrix Collection (bcsstk38, bratu3d,
+cont-201, c-big) to extend the ordering bake-off into the
+n=8k–345k regime the parity corpus does not reach.
+`dev/scripts/fetch_large_matrices.sh` downloads them into
+`tests/data/large/`, which is gitignored.
+
+**Why.**
+- The parity corpus (`tests/data/parity/`) has median n=77 and
+  only 3 matrices > 1000. The bench-orderings result geomean of
+  1.011× for METIS/AMD is not a credible estimate of ordering
+  quality at the scales where fill-reducing ordering actually
+  matters (LU/LDL^T dominated by factorization cost, not
+  ordering cost). The n > 10k regime must be in the corpus.
+- Three options were considered:
+  - (a) **Synthetic matrices** (5-point Laplacian, random
+    sparse, planted-structure). Rejected: we'd debate whether
+    synthetic structure is representative of real KKT / mesh /
+    indef workloads; the debate costs more than the fetch.
+  - (b) **SuiteSparse pinned set** (chosen). Public, citable,
+    reproducible, covers symmetric-indefinite and KKT regimes.
+    License permits redistribution but matrices are large
+    (~45 MB), so keep outside git.
+  - (c) **Mine IPM dumps from `../ripopt` or CUTEst runs.**
+    Rejected: adding more dumps of the same shape as the parity
+    corpus does not close the size gap. The largest IPM KKTs we
+    have are n ≈ 5k.
+- Pinning is via a text manifest (`large_matrices.txt`) rather
+  than burning the URLs into a shell script, so future
+  additions (KaHIP-appropriate graphs, direct solver stress
+  tests) are a one-line edit.
+
+**Scope.** `bench_orderings` auto-detects `tests/data/large/`
+if present and adds those matrices to the report.
+`tests/data/large/` is gitignored; the fetch script is the
+reproduction path. Matrix selection criteria: symmetric or
+symmetric-indefinite, n spanning 10³ to 10⁵, including at
+least one KKT (c-big) and one 3D-PDE Jacobian (bratu3d).
+
+**Reconsideration clause.** If the corpus-regeneration time
+becomes painful (fetch + bench on c-big currently 10+ minutes)
+we could cache `factor_nnz_estimate` per `(matrix, method,
+ordering-version)` triple in a checked-in JSON. Not warranted
+yet — the bake-off reruns are rare.
+
+**Evidence.** Commit `7962568` (script + manifest + bench
+extension + results table);
+`dev/research/ordering-bakeoff-2026-04-18.md` "Large-matrix
+extension" section.
+
+---
+
+## 2026-04-18 — In-tree AMD (src/ordering/amd.rs) retirement deferred
+
+**Decision.** The in-tree `src/ordering/amd.rs` is retained as the
+`OrderingMethod::Amd` implementation in `src/symbolic/mod.rs`
+even though `feral-amd` now exposes the same algorithm through
+the ordering-crate contract. Retirement is filed as a deferred
+follow-up.
+
+**Why.** Retirement requires:
+- Adapting every call site in `src/symbolic/mod.rs` to the
+  borrowed-i32 `CscPattern` used by the ordering crates
+  (currently the main crate uses owned-usize patterns).
+- Mapping `OrderingError` (from `feral-ordering-core`) onto
+  `FeralError` at all entry points, not just the
+  `run_external_ordering` adapter.
+- Verifying that the output permutation is bit-for-bit
+  identical across the two AMD implementations on the entire
+  Phase 1b parity corpus (otherwise the bench regression
+  partition shifts under us).
+
+None of that is hard, but it is cross-cutting and the current
+session's scope is ordering-dispatch wiring + comparative
+bake-off, not a full symbolic refactor. Deferring keeps the
+two AMDs coexisting cleanly — the dispatch enum already makes
+either one selectable — until a dedicated cleanup session.
+
+**Reconsideration clause.** Retire when one of: (a)
+`src/ordering/amd.rs` develops a bug that `feral-amd` does not
+have (or vice versa), (b) the cost of maintaining two AMDs
+exceeds the migration cost, (c) `feral-amd` grows a feature
+(e.g., a different pivot strategy) that would be useful in the
+default path.
+
+**Evidence.** `src/symbolic/mod.rs` still imports `amd_order`
+from `crate::ordering::amd`; commit `d4e5eda` deliberately does
+not remove the module. `Cargo.toml` depends on `feral-amd`
+transitively through `feral-metis`, `feral-scotch`, and
+`feral-ordering-core` but does not itself consume it directly
+yet.

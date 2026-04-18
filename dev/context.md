@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-18T11:43:49Z
+Generated: 2026-04-18T13:08:01Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,28 +59,28 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
-ba31609 fix(feral-metis): correct FM neighbour-update signs (gain = ed - id)
-e62999d feral-scotch S5: nested-dissection driver and scotch_order API
-7534d48 docs: feral-metis FM neighbour-update sign bug + test plan
-8fbf80c feral-scotch S4: band FM refinement with anchor supervertices
-84b4f83 feral-scotch S3: dynamic halo FM refinement
+7962568 feat(bench): large-matrix extension for ordering bake-off
+99f712f docs: ordering-bakeoff results (AMD/METIS/SCOTCH on parity corpus)
+938daf4 feat(bench): comparative AMD/METIS/SCOTCH ordering harness
+d4e5eda feat(symbolic): OrderingMethod enum wires METIS/SCOTCH into the solver
+32bbb3b test(feral-metis): add A1-A10 adversarial set as standing regressions
 ```
 
 ## Test Status
 ```
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
 
-     Running tests/threshold_consistency.rs (target/debug/deps/threshold_consistency-804225430b8dfbb6)
+     Running tests/threshold_consistency.rs (target/debug/deps/threshold_consistency-e8a921e25f768bdd)
 
 running 6 tests
 test polak6_0021_residual_after_threshold_fix ... ignored
 test factors_carry_zero_tol_from_params ... ok
-test factor_inertia_force_accept_implies_solve_skip_invariant ... ok
 test dense_solve_skips_zero_pivots_rank_deficient ... ok
+test factor_inertia_force_accept_implies_solve_skip_invariant ... ok
 test refinement_does_not_amplify_error_on_rank_deficient_matrix ... ok
 test sparse_solve_skips_zero_pivots_rank_deficient ... ok
 
-test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
    Doc-tests feral
 
@@ -97,14 +97,14 @@ Loading matrices from data/benchmark-config.toml ... not found
 
 name                n   factor(μs)    solve(μs)        inertia
 --------------------------------------------------------------
-spd_10             10           34            0     (10, 0, 0)
-spd_50             50           31            3     (50, 0, 0)
-spd_100           100           87            5    (100, 0, 0)
-spd_200           200          566           44    (200, 0, 0)
-kkt_10_3           13            9            1     (10, 3, 0)
-kkt_30_10          40           67            4    (30, 10, 0)
-kkt_50_15          65          140            6    (50, 15, 0)
-kkt_100_30        130          581           19   (100, 30, 0)
+spd_10             10           32           10     (10, 0, 0)
+spd_50             50           20            2     (50, 0, 0)
+spd_100           100           77            5    (100, 0, 0)
+spd_200           200          390           16    (200, 0, 0)
+kkt_10_3           13            3            0     (10, 3, 0)
+kkt_30_10          40           19            1    (30, 10, 0)
+kkt_50_15          65           48            2    (50, 15, 0)
+kkt_100_30        130          204            7   (100, 30, 0)
 
 8 matrices benchmarked
 
@@ -144,8 +144,8 @@ DEVGLA2                      15          0         15        1.50e-7
 KIRBY2                       12         12          0       1.30e-13
 MISTAKE                      11          0         11        1.33e-6
 ALLINITA                      9          2          7        5.43e-7
-DISCS                         8          8          0       1.98e-15
 BENNETT5                      8          8          0       4.75e-14
+DISCS                         8          8          0       1.98e-15
 DJTL                          7          0          7        5.33e-7
 SNAKE                         6          0          6        1.83e-9
 LSC2LS                        5          0          5        1.95e-8
@@ -258,7 +258,7 @@ DISCS                         8          8          0       1.98e-15
 BENNETT5                      8          8          0       8.69e-14
 DJTL                          7          0          7        5.33e-7
 LSC2LS                        4          0          4        1.95e-8
-HS118                         3          0          3        9.68e-8
+SPANHYD                       3          3          0       7.32e-16
   ... and 40 more families
 
 Top 15 worst shared residuals:
@@ -277,76 +277,76 @@ PFIT2_0299                       6      1.37e-6      6.12e-8      (3, 3, 0)     
 PFIT2_0297                       6      1.37e-6      6.12e-8      (3, 3, 0)      (3, 3, 0)
 PFIT2_0298                       6      1.37e-6      6.12e-8      (3, 3, 0)      (3, 3, 0)
 PFIT2_0329                       6      1.64e-7      1.36e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0328                       6      4.15e-8      1.36e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0327                       6      4.15e-8      1.36e-6      (3, 3, 0)      (3, 3, 0)
 
 === Dense perf vs canonical oracles (154481 matrices with oracle timings) ===
 
 ratio               count    geomean        p50        p90        p99        max
-factor/MUMPS       153472       0.22       0.11       2.10      25.56     225.62
-solve/MUMPS        153472       0.37       0.25       1.83      21.27     232.18
-factor/SSIDS       154393       0.01       0.00       0.32       7.62      37.01
-solve/SSIDS        154393       1.45       1.00       8.00      74.00     326.29
+factor/MUMPS       153472       0.22       0.11       2.06      24.72      96.97
+solve/MUMPS        153472       0.37       0.25       1.88      22.18     134.88
+factor/SSIDS       154393       0.01       0.00       0.31       7.26      23.29
+solve/SSIDS        154393       1.46       1.00       8.00      75.33     307.86
 
 Per-family factor geomean vs MUMPS (top 25 families by count):
 family                  count    geomean        p50        max
-HS91                     3000       0.10       0.10       0.40
-HS89                     3000       0.10       0.10       0.14
-MGH10LS                  3000       0.11       0.11       0.22
-HATFLDBNE                3000       0.10       0.10      11.50
-HS90                     3000       0.10       0.10       1.10
-DJTL                     3000       0.11       0.11       0.14
-BIGGSC4                  3000       0.08       0.08       0.62
-HS92                     3000       0.09       0.10       0.27
-SSINE                    3000       0.07       0.08       0.11
-MCONCON                  3000       0.37       0.39       0.80
-HS118                    3000       0.35       0.33       8.20
-CONCON                   3000       0.44       0.44       1.82
-HATFLDH                  3000       0.09       0.09       0.36
-ALLINITA                 3000       0.09       0.08       0.53
-SSI                      3000       0.09       0.10       0.22
-HS13                     3000       0.11       0.11       0.62
-PALMER7A                 3000       0.09       0.10       1.56
-ALLINITC                 3000       0.09       0.08       0.12
-PALMER5A                 3000       0.08       0.09       0.30
-AVION2                   2682       1.77       1.88       2.39
-CERI651ALS               2331       0.08       0.08       0.36
+HATFLDBNE                3000       0.10       0.10       0.42
+ALLINITC                 3000       0.09       0.08       0.17
+SSI                      3000       0.09       0.10       0.50
+SSINE                    3000       0.07       0.08       0.27
+MCONCON                  3000       0.39       0.41       1.60
+ALLINITA                 3000       0.09       0.08       0.33
+MGH10LS                  3000       0.11       0.11       0.14
+HS90                     3000       0.10       0.10       0.12
+CONCON                   3000       0.43       0.44       1.23
+HS13                     3000       0.11       0.11       0.14
+HS118                    3000       0.33       0.31       8.73
+DJTL                     3000       0.11       0.11       0.25
+HATFLDH                  3000       0.09       0.09       0.33
+HS92                     3000       0.09       0.10       1.44
+HS91                     3000       0.10       0.10       1.11
+PALMER5A                 3000       0.08       0.09       0.83
+HS89                     3000       0.10       0.10       0.91
+PALMER7A                 3000       0.09       0.10       1.30
+BIGGSC4                  3000       0.08       0.08       0.50
+AVION2                   2682       1.65       1.71       4.72
+CERI651ALS               2331       0.08       0.08       0.46
 PFIT4                    2286       0.08       0.08       0.11
-CERI651C                 2233       0.08       0.08       0.40
+CERI651C                 2233       0.08       0.08       3.45
 CERI651CLS               2227       0.08       0.08       0.12
-BATCH                    2054       3.24       3.33       4.25
+BATCH                    2054       3.03       3.08       7.68
 
 Top 10 worst factor-ratio vs MUMPS:
 name                             n    feral(μs)    mumps(μs)      ratio
-ACOPR14_0391                   284        18501           82     225.62
-HAHN1_0171                     715        31162          193     161.46
-CRESC100_0000                  806        20737          200     103.69
-HAHN1_0400                     715        17002          188      90.44
-HAHN1_0180                     715        17225          192      89.71
-HAHN1_0492                     715        17155          195      87.97
-HAHN1_0172                     715        16856          193      87.34
-HAHN1_0383                     715        16587          190      87.30
-HAHN1_0178                     715        17042          197      86.51
-HAHN1_0490                     715        16436          190      86.51
+CRESC100_0000                  806        19394          200      96.97
+HAHN1_0461                     715        15132          178      85.01
+HAHN1_0397                     715        15890          190      83.63
+HAHN1_0221                     715        15966          194      82.30
+HAHN1_0462                     715        15821          193      81.97
+HAHN1_0445                     715        15329          188      81.54
+HAHN1_0400                     715        15294          188      81.35
+HAHN1_0403                     715        15587          192      81.18
+HAHN1_0122                     715        15505          191      81.18
+HAHN1_0477                     715        15297          189      80.94
 
 === Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
 
 ratio               count    geomean        p50        p90        p99        max
-factor/MUMPS       153560       0.42       0.33       2.02       4.53      92.10
-solve/MUMPS        153560       0.46       0.33       2.57      13.90      59.58
-factor/SSIDS       154500       0.02       0.01       0.31       1.16      20.46
-solve/SSIDS        154500       1.81       1.00      12.00      38.67      96.00
+factor/MUMPS       153560       0.42       0.33       2.05       4.69      94.94
+solve/MUMPS        153560       0.46       0.33       2.44      13.12      58.56
+factor/SSIDS       154500       0.02       0.01       0.31       1.19      20.72
+solve/SSIDS        154500       1.80       1.17      11.67      36.22     172.00
 
 Per-family factor geomean vs MUMPS (top 25 families by count):
 family                  count    geomean        p50        max
-HS13                     3000       0.11       0.11       5.56
-PALMER5A                 3000       0.28       0.30       0.73
-PALMER7A                 3000       0.21       0.20       0.50
-BIGGSC4                  3000       0.41       0.38       3.22
-HS92                     3000       0.27       0.30       1.10
-MGH10LS                  3000       0.11       0.11       0.89
-HS91                     3000       0.23       0.22       1.33
-MCONCON                  3000       0.64       0.67       2.33
-SSINE                    3000       0.15       0.17       1.10
-SSI                      3000       0.09       0.10       0.45
+PALMER5A                 3000       0.28       0.30       0.80
+SSI                      3000       0.09       0.10       0.33
+CONCON                   3000       0.77       0.77       4.53
+ALLINITA                 3000       0.34       0.33       2.25
+DJTL                     3000       0.11       0.11       1.00
+HS92                     3000       0.28       0.30       1.40
+HATFLDH                  3000       0.46       0.45       1.36
+HS90                     3000       0.20       0.20       0.50
+HS91                     3000       0.23       0.22       0.62
+ALLINITC                 3000       0.17       0.17       1.17
 
-(truncated from      493 lines to 350 line budget)
+(truncated from      494 lines to 350 line budget)

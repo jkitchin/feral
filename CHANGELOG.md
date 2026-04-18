@@ -4,6 +4,56 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-18) — OrderingMethod enum dispatch wires METIS and SCOTCH into symbolic factorization
+
+- `feral::symbolic::OrderingMethod::{Amd, MetisND, ScotchND}` (default
+  `Amd`) selects which fill-reducing ordering
+  `symbolic_factorize_with_method` uses.
+- `symbolic_factorize` is preserved as a thin delegate that passes
+  `OrderingMethod::Amd`, so existing callers are unchanged.
+- Cross-crate adapter converts the main crate's owned-usize
+  `CscPattern` to the ordering-contract's borrowed-i32 view
+  (`i32::try_from` overflow-checks the matrix size) and maps
+  `OrderingError → FeralError::InvalidInput` with perm validation
+  (length, non-negative, bounded).
+- `Cargo.toml` now depends on `feral-metis` and `feral-scotch`
+  directly (previously only transitively through
+  `feral-ordering-core`).
+- The in-tree `src/ordering/amd.rs` is retained as the `Amd`
+  implementation pending separate retirement work per
+  `dev/decisions.md`.
+
+### Added (2026-04-18) — Comparative ordering bake-off binary and corpora
+
+- New binary `cargo run --release --bin bench_orderings` runs
+  `symbolic_factorize_with_method` three times per matrix (AMD /
+  METIS / SCOTCH) and reports per-matrix fill + symbolic time
+  plus geomean ratios and win counts. Walks `tests/data/parity/`
+  (one representative per family) and `tests/data/large/` (flat
+  layout) when present.
+- Large-matrix corpus: pinned SuiteSparse manifest in
+  `dev/scripts/large_matrices.txt` + fetch script
+  `dev/scripts/fetch_large_matrices.sh`; four matrices spanning
+  n=8k–345k covering symmetric indefinite and KKT regimes.
+  `tests/data/large/` gitignored.
+- Results and analysis: `dev/research/ordering-bakeoff-2026-04-18.md`.
+
+### Added (2026-04-18) — Adversarial A1-A10 regression tests for FM refinement
+
+- 9 new tests in `crates/feral-metis/src/fm_refine.rs` cover the
+  edge cases enumerated in `dev/research/metis-fm-sign-bug.md` §5:
+  paths, cycles, checkerboards, K_{m,k} imbalance, bridges,
+  empty-side and singleton/empty inputs. Every test enforces the
+  I1 bookkeeping invariant `returned_cut == cut_size(labels)`.
+
+### Added (2026-04-18) — I1 bookkeeping-invariant sweep on existing FM tests
+
+- 21 existing FM-style tests across `feral-metis` (fm_refine),
+  `feral-scotch` (halo_fm, band_fm, vertex_separator) now enforce
+  the I1 invariant `returned_cut == cut_size(labels)` after the
+  FM pass. This is the assertion the metis sign bug (fixed in
+  `ba31609`) cannot survive.
+
 ### Added (2026-04-18) — feral-scotch SCOTCH-style nested dissection (S1-S5 complete)
 
 - `feral-scotch::scotch_order(pattern)` and
