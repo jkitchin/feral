@@ -463,6 +463,8 @@ mod tests {
             .collect();
         let cut_before = cut_size(&g, &labels);
         let cut_after = band_fm_refine(&g, &mut labels, 2, 0.10, 16);
+        // I1 (bookkeeping consistency).
+        assert_eq!(cut_after, cut_size(&g, &labels), "I1: bookkeeping");
         assert!(
             cut_after <= cut_before,
             "band FM grew the cut: {} -> {}",
@@ -479,7 +481,9 @@ mod tests {
             .collect();
         let mut labels = labels_init.clone();
         // Width 1 — band stays close to the row 2/3 boundary.
-        band_fm_refine(&g, &mut labels, 1, 0.10, 8);
+        let returned = band_fm_refine(&g, &mut labels, 1, 0.10, 8);
+        // I1 — band FM also reports a cut; it must match.
+        assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
         // Out-of-band: rows 5 and 6 (and row 0). With width=1, band
         // is rows 1, 2, 3, 4. Verify rows 0, 5, 6 unchanged.
         for r in [0usize, 5, 6] {
@@ -506,6 +510,8 @@ mod tests {
         let cb = band_fm_refine(&g, &mut b, 2, 0.05, 8);
         assert_eq!(a, b);
         assert_eq!(ca, cb);
+        assert_eq!(ca, cut_size(&g, &a), "I1: bookkeeping (run a)");
+        assert_eq!(cb, cut_size(&g, &b), "I1: bookkeeping (run b)");
     }
 
     #[test]
@@ -517,6 +523,7 @@ mod tests {
         let mut labels: Vec<u8> = vec![];
         let c = band_fm_refine(&g, &mut labels, 3, 0.10, 8);
         assert_eq!(c, 0);
+        assert_eq!(c, cut_size(&g, &labels), "I1: bookkeeping");
     }
 
     #[test]
@@ -528,6 +535,7 @@ mod tests {
         let mut labels: Vec<u8> = vec![PART_A, PART_A, PART_A, PART_B, PART_B, PART_B];
         let c = band_fm_refine(&g, &mut labels, 3, 0.10, 8);
         assert_eq!(c, 0);
+        assert_eq!(c, cut_size(&g, &labels), "I1: bookkeeping");
         assert_eq!(labels, vec![PART_A, PART_A, PART_A, PART_B, PART_B, PART_B]);
     }
 }

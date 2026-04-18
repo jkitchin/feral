@@ -351,6 +351,8 @@ mod tests {
             .collect();
         let cut_before = cut_size(&g, &labels);
         let cut_after = halo_fm_refine(&g, &mut labels, 0.05, 32);
+        // I1 (bookkeeping consistency): returned cut matches labels.
+        assert_eq!(cut_after, cut_size(&g, &labels), "I1: bookkeeping");
         assert!(
             cut_after <= cut_before,
             "halo FM grew the cut: {} -> {}",
@@ -368,6 +370,7 @@ mod tests {
             .map(|k| if (k as usize % 4) < 2 { PART_A } else { PART_B })
             .collect();
         let cut = halo_fm_refine(&g, &mut labels, 0.05, 32);
+        assert_eq!(cut, cut_size(&g, &labels), "I1: bookkeeping");
         assert!(cut <= 4, "expected cut <= 4 on 4x4, got {}", cut);
     }
 
@@ -383,6 +386,9 @@ mod tests {
         let cb = halo_fm_refine(&g, &mut b, 0.10, 16);
         assert_eq!(a, b);
         assert_eq!(ca, cb);
+        // I1 on both runs.
+        assert_eq!(ca, cut_size(&g, &a), "I1: bookkeeping (run a)");
+        assert_eq!(cb, cut_size(&g, &b), "I1: bookkeeping (run b)");
     }
 
     #[test]
@@ -394,6 +400,7 @@ mod tests {
         let mut labels: Vec<u8> = vec![];
         let c = halo_fm_refine(&g, &mut labels, 0.05, 8);
         assert_eq!(c, 0);
+        assert_eq!(c, cut_size(&g, &labels), "I1: bookkeeping");
     }
 
     #[test]
@@ -406,6 +413,7 @@ mod tests {
         let mut labels: Vec<u8> = vec![PART_A, PART_A, PART_A, PART_B, PART_B, PART_B];
         let c = halo_fm_refine(&g, &mut labels, 0.05, 8);
         assert_eq!(c, 0);
+        assert_eq!(c, cut_size(&g, &labels), "I1: bookkeeping");
         // Verify partition wasn't shuffled.
         assert_eq!(labels, vec![PART_A, PART_A, PART_A, PART_B, PART_B, PART_B]);
     }
@@ -419,6 +427,7 @@ mod tests {
             .map(|k| if k < 5 { PART_A } else { PART_B })
             .collect();
         let c = halo_fm_refine(&g, &mut labels, 0.05, 8);
+        assert_eq!(c, cut_size(&g, &labels), "I1: bookkeeping");
         assert_eq!(c, 1, "path with balanced split has cut 1");
     }
 }

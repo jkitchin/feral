@@ -421,7 +421,10 @@ mod tests {
         let total: i64 = g.vwgt.iter().map(|&w| w as i64).sum();
         let mut rng = SplitMix::new(9);
         let mut labels = initial_bisect_ggp(&g, &mut rng, total / 2);
-        refine_bisection(&g, &mut labels, 0.20, 5);
+        let returned = refine_bisection(&g, &mut labels, 0.20, 5);
+        // I1 (bookkeeping consistency): returned cut equals cut
+        // recomputed from labels.
+        assert_eq!(returned, cut_size(&g, &labels), "I1: bookkeeping");
         let a = part_weight(&g, &labels, PART_A);
         let b = part_weight(&g, &labels, PART_B);
         let max_allowed = ((1.20_f64) * total as f64 / 2.0).ceil() as i64;
@@ -437,8 +440,9 @@ mod tests {
         let mut labels = vec![PART_A; 16];
         labels[0] = PART_B;
         let before = cut_size(&g, &labels);
-        refine_bisection(&g, &mut labels, 0.20, 10);
+        let returned = refine_bisection(&g, &mut labels, 0.20, 10);
         let after = cut_size(&g, &labels);
+        assert_eq!(returned, after, "I1: bookkeeping");
         assert!(
             after <= before,
             "FM should not worsen cut (before={}, after={})",
@@ -485,6 +489,9 @@ mod tests {
         labels[6] = PART_SEP;
         let before = separator_weight(&g, &labels);
         let after = refine_separator(&g, &mut labels, 0.50, 10);
+        // I1 (bookkeeping consistency): returned separator weight
+        // matches separator_weight(labels) recomputed from scratch.
+        assert_eq!(after, separator_weight(&g, &labels), "I1: bookkeeping");
         assert!(
             after <= before,
             "separator weight must not grow (before={}, after={})",

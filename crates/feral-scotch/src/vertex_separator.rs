@@ -549,6 +549,7 @@ mod tests {
             .collect();
         let s = compute_vertex_separator(&g, &mut labels, 0.20, 200, 32);
         assert_valid_separator(&g, &labels);
+        assert_eq!(s, sep_w(&g, &labels), "I1: bookkeeping");
         assert!(s >= 1, "non-trivial separator");
         assert!(s <= 1, "expected singleton separator on a path, got {}", s);
         assert!(balanced(&g, &labels, 0.20));
@@ -565,6 +566,7 @@ mod tests {
             .collect();
         let s = compute_vertex_separator(&g, &mut labels, 0.20, 200, 32);
         assert_valid_separator(&g, &labels);
+        assert_eq!(s, sep_w(&g, &labels), "I1: bookkeeping");
         assert!(s <= 2, "cycle min-separator is 2, got {}", s);
         assert!(s >= 2, "cycle requires at least 2 separator vertices");
     }
@@ -589,6 +591,7 @@ mod tests {
             .collect();
         let s = compute_vertex_separator(&g, &mut labels, 0.50, 200, 32);
         assert_valid_separator(&g, &labels);
+        assert_eq!(s, sep_w(&g, &labels), "I1: bookkeeping");
         assert!(
             (1..=3).contains(&s),
             "K_{{3,3}} separator must be in [1,3], got {}",
@@ -616,6 +619,7 @@ mod tests {
             .collect();
         let s = compute_vertex_separator(&g, &mut labels, 0.20, 200, 32);
         assert_valid_separator(&g, &labels);
+        assert_eq!(s, sep_w(&g, &labels), "I1: bookkeeping");
         assert_eq!(s, 0, "no crossing edges → no separator");
     }
 
@@ -650,6 +654,7 @@ mod tests {
             .collect();
         let s = compute_vertex_separator(&g, &mut labels, 0.30, 200, 32);
         assert_valid_separator(&g, &labels);
+        assert_eq!(s, sep_w(&g, &labels), "I1: bookkeeping");
         // Expected: one row of 5 vertices is enough to separate.
         // Allow some slack for FM not finding the true optimum.
         assert!(s <= 7, "grid 5x5 separator should be <= 7, got {}", s);
@@ -679,8 +684,10 @@ mod tests {
             .collect();
         let mut l1 = init.clone();
         let mut l2 = init.clone();
-        compute_vertex_separator(&g, &mut l1, 0.20, 200, 32);
-        compute_vertex_separator(&g, &mut l2, 0.20, 200, 32);
+        let s1 = compute_vertex_separator(&g, &mut l1, 0.20, 200, 32);
+        let s2 = compute_vertex_separator(&g, &mut l2, 0.20, 200, 32);
+        assert_eq!(s1, sep_w(&g, &l1), "I1: bookkeeping (run a)");
+        assert_eq!(s2, sep_w(&g, &l2), "I1: bookkeeping (run b)");
         assert_eq!(l1, l2, "FM must be deterministic");
     }
 
@@ -693,6 +700,7 @@ mod tests {
         let g = Graph::from_csc_pattern(&pat).unwrap();
         let mut labels: Vec<u8> = vec![];
         let s = compute_vertex_separator(&g, &mut labels, 0.20, 200, 32);
+        assert_eq!(s, sep_w(&g, &labels), "I1: bookkeeping");
         assert_eq!(s, 0);
     }
 
