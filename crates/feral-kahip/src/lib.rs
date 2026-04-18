@@ -52,6 +52,15 @@ mod data_reduction;
 #[allow(dead_code)]
 mod flow;
 
+// Phase K3 scaffolding: shared undirected-graph type (CSR) used by
+// K3/K4/K5/K6, and flow-based edge refinement of a bisection.
+// Internal until K5/K6 consume them; see
+// `dev/plans/ordering-kahip.md` and `dev/research/ordering-kahip-k3.md`.
+#[allow(dead_code)]
+mod flow_refine;
+#[allow(dead_code)]
+mod graph;
+
 /// Crate-specific diagnostic statistics.
 ///
 /// Populated by [`kahip_order_full`] once the implementation lands;
