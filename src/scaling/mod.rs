@@ -142,8 +142,153 @@ pub fn compute_scaling(
         }
         ScalingStrategy::InfNorm => Ok(infnorm::compute_infnorm(matrix)),
         ScalingStrategy::Mc64Symmetric => mc64::compute_symmetric(matrix),
-        ScalingStrategy::Auto => compute_scaling(matrix, &pick_scaling_strategy(matrix)),
+        ScalingStrategy::Auto => compute_scaling_auto(matrix),
     }
+}
+
+/// Resolve `ScalingStrategy::Auto` with a Policy 4 fallback rule:
+/// when `pick_scaling_strategy` would pick `Mc64Symmetric`, check
+/// whether MC64 has produced a scaling that is catastrophically
+/// worse than InfNorm on a matrix where InfNorm would have done
+/// fine. If so, fall back to InfNorm.
+///
+/// Rule (all three must fire):
+/// 1. `raw_diag_range < RAW_GUARD` — the raw matrix's diagonal
+///    spans only a few orders of magnitude. MC64 has nothing
+///    to recover from raw ill-conditioning here, so any huge
+///    scaled off/diag ratio it produces is pure artifact, not
+///    reflection of inherent matrix difficulty.
+/// 2. `mc_off > MC_OFF_GUARD` — MC64's scaled `max(|off|/|diag|)`
+///    is large in absolute terms.
+/// 3. `mc_off / in_off > RATIO_GUARD` — and is much larger
+///    than what InfNorm produces.
+///
+/// The first guard is the critical one: it lets matrices like
+/// MEYER3NE_0220 (raw_drng=4.77e19, but MC64 actually works) keep
+/// MC64, while still catching MSS1_0009 (raw_drng=51, where MC64
+/// produces noise).
+///
+/// Validated on a 17-matrix panel: MSS1_0009 falls back (recovers
+/// the 6e-12 InfNorm residual instead of the 1e-6 MC64 residual);
+/// VESUVIA / VESUVIO / VESUVIOU / MUONSINE / CRESC132 / HS75 /
+/// MEYER3NE all keep MC64 (preserving the 84× → 9.4× factor
+/// speedup, the 4-order HS75 residual win, and the MEYER3NE parity
+/// tests). See `dev/research/policy-4-scaling-fallback.md`.
+fn compute_scaling_auto(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+    const RAW_GUARD: f64 = 1e6;
+    const MC_OFF_GUARD: f64 = 1e6;
+    const RATIO_GUARD: f64 = 1e5;
+
+    let picked = pick_scaling_strategy(matrix);
+    if !matches!(picked, ScalingStrategy::Mc64Symmetric) {
+        // Auto picked InfNorm-class — no fallback needed.
+        return compute_scaling(matrix, &picked);
+    }
+
+    // Cheap pre-filter: a wide raw |diag| range means MC64 has
+    // genuine work to do. Skip the diagnostic and use MC64.
+    if raw_diag_range(matrix) >= RAW_GUARD {
+        return mc64::compute_symmetric(matrix);
+    }
+
+    let (mc_vec, mc_info) = mc64::compute_symmetric(matrix)?;
+    let mc_off = max_off_diag_ratio(matrix, &mc_vec);
+    if mc_off <= MC_OFF_GUARD {
+        // MC64 produced a well-conditioned scaled matrix.
+        return Ok((mc_vec, mc_info));
+    }
+    let (in_vec, in_info) = infnorm::compute_infnorm(matrix);
+    let in_off = max_off_diag_ratio(matrix, &in_vec);
+    let ratio = if in_off > 0.0 {
+        mc_off / in_off
+    } else {
+        f64::INFINITY
+    };
+    if ratio > RATIO_GUARD {
+        // MC64 is catastrophically worse than InfNorm AND the raw
+        // matrix is already well-behaved — fall back to InfNorm.
+        // Forward `in_info` (`ScalingInfo::Applied`) so the solve
+        // path actually uses the scaling vector instead of treating
+        // it as identity.
+        Ok((in_vec, in_info))
+    } else {
+        Ok((mc_vec, mc_info))
+    }
+}
+
+/// Compute `max |A_{j,j}| / min(|A_{j,j}|)` over diagonal entries
+/// that are present and nonzero. Returns `+∞` if no nonzero
+/// diagonal is present. O(nnz), no allocations.
+fn raw_diag_range(matrix: &CscMatrix) -> f64 {
+    let n = matrix.n;
+    if n == 0 {
+        return 0.0;
+    }
+    let mut lo = f64::INFINITY;
+    let mut hi = 0.0_f64;
+    for j in 0..n {
+        for k in matrix.col_ptr[j]..matrix.col_ptr[j + 1] {
+            if matrix.row_idx[k] == j {
+                let a = matrix.values[k].abs();
+                if a > 0.0 {
+                    if a < lo {
+                        lo = a;
+                    }
+                    if a > hi {
+                        hi = a;
+                    }
+                }
+            }
+        }
+    }
+    if lo.is_finite() && lo > 0.0 {
+        hi / lo
+    } else {
+        f64::INFINITY
+    }
+}
+
+/// Compute `max_j (max_{i ≠ j} |s_i · A_{i,j} · s_j|) / |s_j · A_{j,j} · s_j|`
+/// over all columns of the symmetrically-scaled matrix `D · A · D`.
+/// Diagonal columns with zero diagonal contribute `+∞` to the max.
+/// O(nnz), no allocations.
+fn max_off_diag_ratio(matrix: &CscMatrix, scaling: &[f64]) -> f64 {
+    let n = matrix.n;
+    if n == 0 {
+        return 0.0;
+    }
+    let mut diag_abs = vec![0.0_f64; n];
+    let mut max_off = vec![0.0_f64; n];
+    for j in 0..n {
+        for k in matrix.col_ptr[j]..matrix.col_ptr[j + 1] {
+            let i = matrix.row_idx[k];
+            let v = (matrix.values[k] * scaling[i] * scaling[j]).abs();
+            if i == j {
+                diag_abs[j] = v;
+            } else {
+                if v > max_off[i] {
+                    max_off[i] = v;
+                }
+                if v > max_off[j] {
+                    max_off[j] = v;
+                }
+            }
+        }
+    }
+    let mut worst = 0.0_f64;
+    for j in 0..n {
+        let r = if diag_abs[j] > 0.0 {
+            max_off[j] / diag_abs[j]
+        } else if max_off[j] > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+        if r > worst {
+            worst = r;
+        }
+    }
+    worst
 }
 
 /// Resolve `ScalingStrategy::Auto` to a concrete strategy based on
@@ -292,11 +437,140 @@ mod tests {
             values,
         };
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
-        // Auto and explicit Mc64Symmetric must produce the same vector.
+        // Auto and explicit Mc64Symmetric must produce the same vector
+        // here — this is a well-conditioned shape, so the Policy 4
+        // fallback rule (mc_off > 1e6 ∧ mc_off/in_off > 1e5) never fires.
         let (auto_s, _) =
             compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto routing should succeed");
         let (mc64_s, _) =
             compute_scaling(&csc, &ScalingStrategy::Mc64Symmetric).expect("MC64 should succeed");
         assert_eq!(auto_s, mc64_s);
+    }
+
+    #[test]
+    fn max_off_diag_ratio_basic_well_conditioned() {
+        // 3x3 well-conditioned matrix:
+        //   [ 4  1  0 ]
+        //   [ 1  3  1 ]
+        //   [ 0  1  2 ]
+        // With identity scaling, max ratio = 1/2 = 0.5.
+        let csc = CscMatrix {
+            n: 3,
+            col_ptr: vec![0, 2, 4, 5],
+            row_idx: vec![0, 1, 1, 2, 2],
+            values: vec![4.0, 1.0, 3.0, 1.0, 2.0],
+        };
+        let s = vec![1.0; 3];
+        let r = max_off_diag_ratio(&csc, &s);
+        assert!((r - 0.5).abs() < 1e-12, "got {r}");
+    }
+
+    #[test]
+    fn max_off_diag_ratio_zero_diag_gives_infinity() {
+        // 2x2 with zero diagonal on column 0:
+        //   [ 0  1 ]
+        //   [ 1  1 ]
+        // Column 0 has off=1, diag=0 → +inf. Column 1 has off=1,
+        // diag=1 → 1.0. max = +inf.
+        let csc = CscMatrix {
+            n: 2,
+            col_ptr: vec![0, 2, 3],
+            row_idx: vec![0, 1, 1],
+            values: vec![0.0, 1.0, 1.0],
+        };
+        let s = vec![1.0; 2];
+        let r = max_off_diag_ratio(&csc, &s);
+        assert!(r.is_infinite(), "got {r}");
+    }
+
+    /// Policy 4 fallback regression test — MSS1_0009 should resolve
+    /// to InfNorm under Auto despite the diag_only/n=0.45 ratio
+    /// triggering the MC64 routing rule. The fallback fires because
+    /// MC64 produces a scaled `max(|off|/|diag|) ≈ 7.8e14` while
+    /// InfNorm gets ≈ 2.0e8 — ratio 3.9e6 is well above the
+    /// 1e5 RATIO_GUARD. See `dev/research/policy-4-scaling-fallback.md`
+    /// table for the full numbers.
+    #[test]
+    fn auto_falls_back_to_infnorm_on_mss1_0009() {
+        let path = std::path::Path::new("data/matrices/kkt/MSS1/MSS1_0009.mtx");
+        let mtx = match crate::io::mtx::read_mtx(path) {
+            Ok(m) => m,
+            Err(_) => return, // fixture not present — skip
+        };
+        let csc = mtx.to_csc().expect("MSS1_0009 CSC build");
+
+        // pick_scaling_strategy still picks MC64 — the routing rule
+        // hasn't changed.
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
+
+        // But Auto should resolve to the InfNorm scaling because of
+        // the Policy 4 fallback.
+        let (auto_s, _) = compute_scaling(&csc, &ScalingStrategy::Auto)
+            .expect("Auto on MSS1_0009 should succeed");
+        let (in_s, _) = compute_scaling(&csc, &ScalingStrategy::InfNorm)
+            .expect("InfNorm on MSS1_0009 should succeed");
+        let (mc_s, _) = compute_scaling(&csc, &ScalingStrategy::Mc64Symmetric)
+            .expect("MC64 on MSS1_0009 should succeed");
+        assert_eq!(auto_s, in_s, "Auto must fall back to InfNorm on MSS1_0009");
+        assert_ne!(
+            auto_s, mc_s,
+            "Auto must NOT use MC64 on MSS1_0009 (would regress residual to 1e-6)"
+        );
+    }
+
+    /// Policy 4 fallback must NOT fire on the VESUVIO/CRESC class —
+    /// these are the matrices the lever-C win is built on. MC64
+    /// produces a scaled `mc_off ≈ 4.84e12` for VESUVIA_0000 with
+    /// `mc/in ≈ 40` — well below the 1e5 RATIO_GUARD.
+    #[test]
+    fn auto_keeps_mc64_on_vesuvia_0000() {
+        let path = std::path::Path::new("data/matrices/kkt/VESUVIA/VESUVIA_0000.mtx");
+        let mtx = match crate::io::mtx::read_mtx(path) {
+            Ok(m) => m,
+            Err(_) => return, // fixture not present — skip
+        };
+        let csc = mtx.to_csc().expect("VESUVIA_0000 CSC build");
+        let (auto_s, _) =
+            compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto on VESUVIA_0000");
+        let (mc_s, _) =
+            compute_scaling(&csc, &ScalingStrategy::Mc64Symmetric).expect("MC64 on VESUVIA_0000");
+        assert_eq!(auto_s, mc_s, "Auto must keep MC64 on VESUVIA_0000");
+    }
+
+    /// Same shape as `auto_keeps_mc64_on_vesuvia_0000` for the
+    /// VESUVIOU subfamily — the highest mc/in ratio in the
+    /// validation panel (1.05e4) is on this matrix; the threshold
+    /// has 10× margin.
+    #[test]
+    fn auto_keeps_mc64_on_vesuviou_0000() {
+        let path = std::path::Path::new("data/matrices/kkt/VESUVIOU/VESUVIOU_0000.mtx");
+        let mtx = match crate::io::mtx::read_mtx(path) {
+            Ok(m) => m,
+            Err(_) => return, // fixture not present — skip
+        };
+        let csc = mtx.to_csc().expect("VESUVIOU_0000 CSC build");
+        let (auto_s, _) =
+            compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto on VESUVIOU_0000");
+        let (mc_s, _) =
+            compute_scaling(&csc, &ScalingStrategy::Mc64Symmetric).expect("MC64 on VESUVIOU_0000");
+        assert_eq!(auto_s, mc_s, "Auto must keep MC64 on VESUVIOU_0000");
+    }
+
+    /// HS75_0000 is one of the two "material wins" — MC64 scaling
+    /// gives a 4-order residual improvement. The fallback rule
+    /// must not fire here. mc_off=1.08e9, in_off=1e10, ratio=0.108
+    /// — well below 1.0, far from the 1e5 RATIO_GUARD.
+    #[test]
+    fn auto_keeps_mc64_on_hs75_0000() {
+        let path = std::path::Path::new("data/matrices/kkt/HS75/HS75_0000.mtx");
+        let mtx = match crate::io::mtx::read_mtx(path) {
+            Ok(m) => m,
+            Err(_) => return, // fixture not present — skip
+        };
+        let csc = mtx.to_csc().expect("HS75_0000 CSC build");
+        let (auto_s, _) = compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto on HS75_0000");
+        let (mc_s, _) =
+            compute_scaling(&csc, &ScalingStrategy::Mc64Symmetric).expect("MC64 on HS75_0000");
+        assert_eq!(auto_s, mc_s, "Auto must keep MC64 on HS75_0000 (the win)");
     }
 }

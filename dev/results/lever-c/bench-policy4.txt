@@ -1,0 +1,297 @@
+FERAL benchmark harness
+  ordering: default (symbolic_factorize heuristic)
+  scaling: default (SupernodeParams::default)
+  dump:    /tmp/dump-policy4-fixed.csv
+Loading matrices from data/benchmark-config.toml ... not found
+
+name                n   factor(μs)    solve(μs)        inertia
+--------------------------------------------------------------
+spd_10             10           34           10     (10, 0, 0)
+spd_50             50           19            2     (50, 0, 0)
+spd_100           100           78            5    (100, 0, 0)
+spd_200           200          381           17    (200, 0, 0)
+kkt_10_3           13            3            0     (10, 3, 0)
+kkt_30_10          40           21            1    (30, 10, 0)
+kkt_50_15          65           46            2    (50, 15, 0)
+kkt_100_30        130          197            7   (100, 30, 0)
+
+8 matrices benchmarked
+
+Loading KKT matrices from data/matrices/kkt ... 154588 matrices loaded
+
+KKT summary: 154588 matrices (154481 dense-eligible n <= 1000, 107 skipped n > 1000)
+  Inertia match: 152911/154481 (99.0%)
+  Residual pass: 154207/154481 (99.8%)
+  Worst residual: 1.87e-4 (ERRINBAR_0824)
+
+--- Sparse solver validation ---
+Sparse solver: 154588/154588 total
+  Inertia match vs MUMPS: 153009/154588 (99.0%)
+  Residual pass: 154233/154588 (99.8%)
+  Worst residual: 1.31e13 (POLAK6_0021)
+
+--- Dense failure analysis (1840 failures) ---
+
+family                    total    inertia   residual      worst_res
+HAHN1                       498        498          0       2.78e-13
+QPNBLEND                    362        362          0       2.77e-15
+MSS1                        240        240          0       2.80e-15
+CORE1                       141        141          0       1.07e-15
+CRESC50                      97         97          0       2.71e-15
+ACOPP30                      68         68          0       4.24e-14
+FBRAIN3LS                    50          6         48        2.82e-7
+CERI651DLS                   42          3         39        7.06e-8
+PFIT4                        38         38          0       2.53e-14
+CERI651A                     37         37          0       8.64e-14
+HS46                         27          0         27        7.51e-8
+PFIT2                        23          0         23        5.39e-6
+CERI651CLS                   21          1         20        2.06e-7
+CRESC100                     19         19          0       4.76e-15
+PALMER1ENE                   17          0         17        1.22e-8
+CERI651ALS                   17          2         15        4.31e-8
+DEVGLA2                      15          0         15        1.50e-7
+KIRBY2                       12         12          0       1.30e-13
+MISTAKE                      11          0         11        1.33e-6
+ALLINITA                      9          2          7        5.43e-7
+BENNETT5                      8          8          0       4.75e-14
+DISCS                         8          8          0       1.98e-15
+DJTL                          7          0          7        5.33e-7
+SNAKE                         6          0          6        1.83e-9
+LSC2LS                        5          0          5        1.95e-8
+  ... and 45 more families
+
+Top 15 worst residuals:
+name                             n     residual       expected         actual
+ERRINBAR_0824                   27      1.87e-4     (18, 9, 0)     (18, 9, 0)
+PRICE4_0002                      2      7.74e-6      (2, 0, 0)      (2, 0, 0)
+PFIT2_0248                       6      5.39e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0548                       6      3.66e-6      (3, 3, 0)      (3, 3, 0)
+FLETCHER_0002                   16      3.63e-6     (12, 4, 0)     (12, 4, 0)
+PFIT2_0340                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0338                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0339                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0299                       6      1.37e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0297                       6      1.37e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0298                       6      1.37e-6      (3, 3, 0)      (3, 3, 0)
+MISTAKE_0100                    22      1.33e-6     (9, 13, 0)     (9, 13, 0)
+TRO3X3_0637                     43      9.07e-7    (30, 13, 0)    (30, 13, 0)
+PFIT2_0390                       6      6.86e-7      (3, 3, 0)      (3, 3, 0)
+PFIT2_0545                       6      6.76e-7      (3, 3, 0)      (3, 3, 0)
+
+--- Sparse failure analysis (1932 failures) ---
+
+family                    total    inertia   residual      worst_res
+HAHN1                       498        498          0       2.10e-12
+QPNBLEND                    362        362          0       1.19e-15
+MSS1                        240        240          0       1.76e-15
+CORE1                       141        141          0       8.00e-16
+CRESC50                      97         97          0       4.52e-16
+ACOPP30                      66         66          0       1.45e-14
+FBRAIN3LS                    60          3         58        2.79e-7
+CERI651DLS                   48          3         45        1.94e-7
+HS46                         43          0         43        1.11e-7
+PFIT4                        38         38          0       2.51e-14
+CERI651A                     37         37          0       8.74e-14
+DEVGLA2                      26          0         26        1.58e-6
+CERI651CLS                   26          1         25        3.20e-7
+PFIT2                        24          0         24        7.84e-6
+PALMER1ENE                   22          0         22        1.87e-8
+CERI651ALS                   21          2         19        1.45e-7
+CRESC100                     19         19          0       2.57e-15
+SNAKE                        15          0         15        6.57e-9
+HATFLDFL                     14          0         14        2.77e-9
+KIRBY2                       12         12          0       1.68e-13
+ALLINITA                     11          2          9        5.50e-7
+MISTAKE                      11          0         11        7.13e-7
+VESUVIO                      10         10          0       2.52e-13
+BENNETT5                      8          8          0       1.48e-13
+DISCS                         8          8          0       2.20e-15
+  ... and 48 more families
+
+Top 15 worst residuals:
+name                             n     residual       expected         actual
+POLAK6_0021                      9      1.31e13      (5, 4, 0)      (3, 4, 2)
+ERRINBAR_0824                   27      2.74e-4     (18, 9, 0)     (18, 9, 0)
+PFIT2_0390                       6      7.84e-6      (3, 3, 0)      (3, 3, 0)
+PRICE4_0002                      2      7.74e-6      (2, 0, 0)      (2, 0, 0)
+PFIT2_0297                       6      5.43e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0298                       6      5.43e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0299                       6      5.43e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0590                       6      4.08e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0588                       6      4.08e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0589                       6      4.08e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0548                       6      3.66e-6      (3, 3, 0)      (3, 3, 0)
+FLETCHER_0002                   16      3.63e-6     (12, 4, 0)     (12, 4, 0)
+PFIT2_0341                       6      3.59e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0327                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0328                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
+
+--- Dense ∩ Sparse failure overlap ---
+Failed in BOTH dense and sparse:  1822
+Failed in dense only:             18
+Failed in sparse only:            110
+
+Shared failure mode breakdown:
+  Inertia mismatch on BOTH paths:          1565
+  Residual-only fail on BOTH paths:         254
+  Mixed (one inertia, other residual):        3
+
+Shared failure size class breakdown:
+  n <=  100:     329
+  n <= 1000:    1493
+  n >  1000:       0
+
+Top 25 families in shared failures:
+family                    total    inertia   residual      worst_res
+HAHN1                       498        498          0       2.10e-12
+QPNBLEND                    362        362          0       2.77e-15
+MSS1                        240        240          0       2.80e-15
+CORE1                       141        141          0       1.07e-15
+CRESC50                      97         97          0       2.71e-15
+ACOPP30                      66         66          0       4.24e-14
+FBRAIN3LS                    49          3         43        2.82e-7
+CERI651DLS                   40          3         37        1.94e-7
+PFIT4                        38         38          0       2.53e-14
+CERI651A                     37         37          0       8.74e-14
+HS46                         25          0         25        1.11e-7
+PFIT2                        23          0         23        7.84e-6
+CERI651CLS                   21          1         20        3.20e-7
+CRESC100                     19         19          0       4.76e-15
+PALMER1ENE                   17          0         17        1.87e-8
+DEVGLA2                      15          0         15        1.58e-6
+CERI651ALS                   14          2         12        1.45e-7
+KIRBY2                       12         12          0       1.68e-13
+MISTAKE                      10          0         10        1.33e-6
+ALLINITA                      9          2          7        5.50e-7
+DISCS                         8          8          0       2.20e-15
+BENNETT5                      8          8          0       1.48e-13
+DJTL                          7          0          7        1.80e-6
+SNAKE                         6          0          6        6.57e-9
+LSC2LS                        5          0          5        1.95e-8
+  ... and 42 more families
+
+Top 15 worst shared residuals:
+name                             n    dense_res   sparse_res       expected     actual(sp)
+POLAK6_0021                      9     9.21e-17      1.31e13      (5, 4, 0)      (3, 4, 2)
+ERRINBAR_0824                   27      1.87e-4      2.74e-4     (18, 9, 0)     (18, 9, 0)
+PFIT2_0390                       6      6.86e-7      7.84e-6      (3, 3, 0)      (3, 3, 0)
+PRICE4_0002                      2      7.74e-6      7.74e-6      (2, 0, 0)      (2, 0, 0)
+PFIT2_0298                       6      1.37e-6      5.43e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0297                       6      1.37e-6      5.43e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0299                       6      1.37e-6      5.43e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0248                       6      5.39e-6      7.57e-7      (3, 3, 0)      (3, 3, 0)
+PFIT2_0590                       6      1.06e-8      4.08e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0588                       6      2.13e-8      4.08e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0589                       6      2.13e-8      4.08e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0548                       6      3.66e-6      3.66e-6      (3, 3, 0)      (3, 3, 0)
+FLETCHER_0002                   16      3.63e-6      3.63e-6     (12, 4, 0)     (12, 4, 0)
+PFIT2_0341                       6      1.40e-8      3.59e-6      (3, 3, 0)      (3, 3, 0)
+PFIT2_0328                       6      4.15e-8      2.71e-6      (3, 3, 0)      (3, 3, 0)
+
+=== Dense perf vs canonical oracles (154481 matrices with oracle timings) ===
+
+ratio               count    geomean        p50        p90        p99        max
+factor/MUMPS       153472       0.23       0.11       2.11      25.19     144.97
+solve/MUMPS        153472       0.37       0.25       1.91      22.18     133.42
+factor/SSIDS       154393       0.01       0.00       0.32       7.48      27.35
+solve/SSIDS        154393       1.48       1.00       8.00      76.00     280.00
+
+Per-family factor geomean vs MUMPS (top 25 families by count):
+family                  count    geomean        p50        max
+HATFLDBNE                3000       0.10       0.10       1.10
+HS91                     3000       0.10       0.10       1.40
+PALMER5A                 3000       0.09       0.09       1.08
+ALLINITC                 3000       0.09       0.08       0.67
+HS92                     3000       0.09       0.10       0.90
+MGH10LS                  3000       0.11       0.11       0.22
+HS13                     3000       0.11       0.11       0.38
+ALLINITA                 3000       0.09       0.08       0.40
+SSINE                    3000       0.07       0.08       0.20
+HS90                     3000       0.10       0.10       0.20
+HATFLDH                  3000       0.09       0.09       0.89
+HS118                    3000       0.36       0.36       1.27
+SSI                      3000       0.09       0.10       0.80
+DJTL                     3000       0.11       0.11       0.14
+MCONCON                  3000       0.39       0.41       0.80
+BIGGSC4                  3000       0.08       0.08       1.00
+PALMER7A                 3000       0.09       0.10       5.80
+HS89                     3000       0.10       0.10       0.22
+CONCON                   3000       0.46       0.47       5.89
+AVION2                   2682       1.76       1.83       2.65
+CERI651ALS               2331       0.08       0.08       1.44
+PFIT4                    2286       0.08       0.08       0.30
+CERI651C                 2233       0.08       0.08       0.12
+CERI651CLS               2227       0.08       0.08       0.25
+BATCH                    2054       3.22       3.29       6.12
+
+Top 10 worst factor-ratio vs MUMPS:
+name                             n    feral(μs)    mumps(μs)      ratio
+CRESC50_0103                   306        13482           93     144.97
+CRESC100_0000                  806        20254          200     101.27
+HAHN1_0217                     715        19662          199      98.80
+HAHN1_0497                     715        15494          186      83.30
+HAHN1_0471                     715        15187          184      82.54
+HAHN1_0493                     715        15630          190      82.26
+HAHN1_0485                     715        15449          188      82.18
+HAHN1_0498                     715        15446          189      81.72
+HAHN1_0266                     715        15117          185      81.71
+HAHN1_0499                     715        15439          189      81.69
+
+=== Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
+
+ratio               count    geomean        p50        p90        p99        max
+factor/MUMPS       153560       0.48       0.36       1.96       3.94     101.58
+solve/MUMPS        153560       0.30       0.20       1.20       5.62      19.33
+factor/SSIDS       154500       0.02       0.01       0.29       0.92      13.56
+solve/SSIDS        154500       1.19       1.00       4.12      15.50      67.00
+
+Per-family factor geomean vs MUMPS (top 25 families by count):
+family                  count    geomean        p50        max
+ALLINITC                 3000       0.23       0.25       1.10
+HS91                     3000       0.29       0.30       0.89
+HATFLDH                  3000       0.56       0.55       4.70
+PALMER7A                 3000       0.27       0.30       1.13
+HATFLDBNE                3000       0.40       0.40       1.64
+HS90                     3000       0.20       0.20       0.60
+HS118                    3000       1.05       1.07       4.56
+MCONCON                  3000       0.71       0.73       7.06
+MGH10LS                  3000       0.21       0.22       0.70
+SSINE                    3000       0.22       0.25       0.83
+CONCON                   3000       0.82       0.85       2.24
+HS89                     3000       0.21       0.20       1.62
+HS13                     3000       0.22       0.22       0.62
+HS92                     3000       0.29       0.30       0.90
+DJTL                     3000       0.12       0.11       0.88
+PALMER5A                 3000       0.31       0.33       1.25
+SSI                      3000       0.18       0.20       1.55
+ALLINITA                 3000       0.42       0.42       1.17
+BIGGSC4                  3000       0.50       0.50       1.69
+AVION2                   2682       1.61       1.62       3.30
+CERI651ALS               2331       0.25       0.25       0.89
+PFIT4                    2286       0.24       0.25       0.82
+CERI651C                 2233       0.25       0.25       2.33
+CERI651CLS               2227       0.25       0.25       1.00
+BATCH                    2054       1.85       1.88       2.96
+
+Top 10 worst factor-ratio vs MUMPS:
+name                             n    feral(μs)    mumps(μs)      ratio
+LAKES_1199                     168         5587           55     101.58
+TRO3X3_0013                     69         5417           68      79.66
+CHWIRUT1_0009                  645         6373          234      27.24
+HAHN1LS_0429                     7          121            9      13.44
+CHWIRUT2LS_0184                  3          113           10      11.30
+FBRAIN3LS_0003                   6          125           12      10.42
+KIRBY2_0007                    458         1270          122      10.41
+PALMER5B_0049                    9          108           11       9.82
+MUONSINE_0000                 1537         3611          369       9.79
+KIRBY2_0006                    458         1227          130       9.44
+
+--- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     147982     1.53     <= 2.0     PASS
+medium (<500)            152145     1.93     <= 3.0     PASS
+
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.96     <= 2.0     PASS
+medium (<500)            153560     1.96     <= 3.0     PASS
