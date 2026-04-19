@@ -148,6 +148,19 @@ pub struct FactorWorkspace {
     /// and across calls. Left empty when ownership is temporarily
     /// borrowed by an in-flight `SymmetricMatrix`.
     frontal_values: Vec<f64>,
+    /// Scratch for `build_row_indices`: delayed-column globals
+    /// accumulated from children of the current supernode.
+    build_delayed: Vec<usize>,
+    /// Scratch for `build_row_indices`: trailing (non-fully-summed)
+    /// row globals for the current supernode, collected via a
+    /// `build_seen`-based dedup and sorted at the end to match the
+    /// pre-pool BTreeSet traversal order.
+    build_trailing: Vec<usize>,
+    /// Scratch for `build_row_indices`: global→`bool` membership
+    /// marker. Length grows to `matrix.n`; entries are maintained
+    /// in the all-`false` state outside the call (touched indices
+    /// are cleared before return).
+    build_seen: Vec<bool>,
 }
 
 impl FactorWorkspace {
@@ -331,7 +344,14 @@ pub fn factorize_multifrontal_with_workspace(
 
         // Build the row indices for this frontal. With delays the layout is
         // [own native cols (own_ncol) | delayed cols from children (n_delayed_in) | trailing rows].
-        let row_indices = build_row_indices(snode, &full_pattern, &contrib_blocks);
+        let row_indices = build_row_indices(
+            snode,
+            &full_pattern,
+            &contrib_blocks,
+            &mut ws.build_delayed,
+            &mut ws.build_trailing,
+            &mut ws.build_seen,
+        );
         let actual_nrow = row_indices.len();
         debug_assert!(
             actual_nrow >= expanded_ncol,
@@ -570,51 +590,86 @@ fn build_row_indices(
     snode: &crate::symbolic::supernode::Supernode,
     full_pattern: &crate::sparse::csc::CscPattern,
     contrib_blocks: &[Option<ContribBlock>],
+    build_delayed: &mut Vec<usize>,
+    build_trailing: &mut Vec<usize>,
+    build_seen: &mut Vec<bool>,
 ) -> Vec<usize> {
     let own_ncol = snode.ncol();
     let first_col = snode.first_col;
+    let n = full_pattern.n;
 
-    // Own native fully-summed columns.
-    let own_cols: Vec<usize> = (first_col..first_col + own_ncol).collect();
+    // Grow `build_seen` on demand; caller maintains the all-`false`
+    // invariant outside this function.
+    if build_seen.len() < n {
+        build_seen.resize(n, false);
+    }
 
-    // Delayed columns from each child, preserving child-iteration order.
-    let mut delayed_cols: Vec<usize> = Vec::new();
+    // Collect delayed columns from each child, preserving child-iteration
+    // order. Bit-for-bit equivalent to the old `Vec::new() + extend` path;
+    // the Vec is pooled across supernodes so only its capacity growth
+    // allocates.
+    build_delayed.clear();
     for &child_idx in &snode.children {
         if let Some(contrib) = &contrib_blocks[child_idx] {
-            delayed_cols.extend(&contrib.row_indices[..contrib.n_delayed]);
+            build_delayed.extend_from_slice(&contrib.row_indices[..contrib.n_delayed]);
         }
     }
 
-    // Fully-summed lookup for filtering the trailing set.
-    let mut is_fully_summed = vec![false; full_pattern.n];
-    for &c in own_cols.iter().chain(delayed_cols.iter()) {
-        is_fully_summed[c] = true;
+    // Mark own native + delayed columns as "fully summed" in the seen
+    // bitmap so the trailing scan skips them. Duplicates across children
+    // cannot arise (each matrix column belongs to exactly one supernode).
+    for seen in build_seen.iter_mut().skip(first_col).take(own_ncol) {
+        *seen = true;
+    }
+    for &c in build_delayed.iter() {
+        build_seen[c] = true;
     }
 
-    // Trailing row set: union of (pattern rows of own cols) and
-    // (each child's non-delayed contrib rows), minus fully-summed cols.
-    let mut trailing = std::collections::BTreeSet::new();
+    // Trailing row set via seen-based dedup. Same role as the previous
+    // BTreeSet<usize> but with O(1) insert and a single O(m log m) sort
+    // at the end to match the BTreeSet iteration order that callers
+    // (and the parity tests) depend on.
+    build_trailing.clear();
     for j in first_col..first_col + own_ncol {
         for k in full_pattern.col_ptr[j]..full_pattern.col_ptr[j + 1] {
             let r = full_pattern.row_idx[k];
-            if !is_fully_summed[r] {
-                trailing.insert(r);
+            if !build_seen[r] {
+                build_seen[r] = true;
+                build_trailing.push(r);
             }
         }
     }
     for &child_idx in &snode.children {
         if let Some(contrib) = &contrib_blocks[child_idx] {
             for &r in &contrib.row_indices[contrib.n_delayed..] {
-                if !is_fully_summed[r] {
-                    trailing.insert(r);
+                if !build_seen[r] {
+                    build_seen[r] = true;
+                    build_trailing.push(r);
                 }
             }
         }
     }
+    build_trailing.sort_unstable();
 
-    let mut result = own_cols;
-    result.extend(delayed_cols);
-    result.extend(trailing);
+    let total = own_ncol + build_delayed.len() + build_trailing.len();
+    let mut result = Vec::with_capacity(total);
+    result.extend(first_col..first_col + own_ncol);
+    result.extend_from_slice(build_delayed);
+    result.extend_from_slice(build_trailing);
+
+    // Restore the all-`false` invariant on `build_seen` by clearing
+    // only the entries we touched. Cheaper than a full `resize` and
+    // keeps the invariant auditable.
+    for seen in build_seen.iter_mut().skip(first_col).take(own_ncol) {
+        *seen = false;
+    }
+    for &c in build_delayed.iter() {
+        build_seen[c] = false;
+    }
+    for &r in build_trailing.iter() {
+        build_seen[r] = false;
+    }
+
     result
 }
 
