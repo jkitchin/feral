@@ -182,6 +182,10 @@ fn main() {
         ("VESUVIO", "_0000"),
         ("VESUVIO", "_0021"),
         ("VESUVIA", "_0000"),
+        // MUONSINE: next factor outlier after VESUVIO. n=1537, 60.9× MUMPS
+        // in the session-08 bench. Same diagnostic to rule in/out a dense-
+        // kernel pathology vs an ordering-fixable one.
+        ("MUONSINE", "_0000"),
         // Reference: CRESC132 numbers after the METIS heuristic, for
         // sanity.
         ("CRESC132", "_0000"),

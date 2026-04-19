@@ -155,3 +155,34 @@ Tests: lib pick_default_method_rules + new test both pass; full
 C deferred to "next session should" with explicit trigger criteria
 (measured workload demonstrating leaf-heavy AMD pathology that K1
 fixes; the IPM corpus does not exhibit one).
+
+* 16:05 :muonsine:diag:dense-kernel:
+Quick autonomous tick: ran vesuvio_diag with MUONSINE_0000 added
+to check whether the dense-kernel pathology generalizes beyond
+VESUVIO. Bench had MUONSINE at 60.9× MUMPS, n=1537 (different
+size class).
+
+  shape: n=1537 stored_nnz=3072 avg_deg=2.00 max_col_nnz=512 diag_only=512
+  Amd:     fac=21555us  root=1024x315(67% of n)  delays=312
+  MetisND: fac=21323us  root=1024x315(67% of n)  delays=312
+  identical factor time, identical root size, identical delays
+
+Same single-dense-link arrow pattern as VESUVIO (max_col_nnz =
+diag_only + 1 ≈ half of n). Same 67%-of-n root frontal regardless
+of ordering. Same dense-kernel limit.
+
+Cost: 315^2 × 1024 ≈ 100 MFLOPs at ~8 GFLOP/s scalar ≈ 13ms;
+observed 21.5ms is ballpark right with overhead. MUMPS oracle was
+369us (from bench), so 50× kernel gap matches the 60× factor
+ratio.
+
+Conclusion: dense-kernel attribution from journal entry 2 is the
+correct lens for the entire IPM bench tail (VESUVIOU, VESUVIO,
+VESUVIA, MUONSINE all behave the same). All four are arrow-KKT
+matrices where any reasonable ordering pushes the linking
+column to the root, and that root is dense and our BK kernel
+is scalar.
+
+No action this tick: same fix path (blocked BK + SIMD in
+src/dense/factor.rs) catches all of them. The session-08
+checkpoint's "Next Session #1" priority covers this.
