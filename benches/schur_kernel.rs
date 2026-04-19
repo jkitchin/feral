@@ -17,7 +17,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use feral::dense::schur_kernel::{axpy2_minus, axpy_minus};
 #[cfg(target_arch = "aarch64")]
 use feral::dense::schur_kernel::{
-    axpy2_minus_direct, axpy2_minus_unroll4, axpy_minus_direct, axpy_minus_unroll4,
+    axpy2_minus_direct, axpy2_minus_unroll4, axpy2_minus_unroll4_nofma, axpy_minus_direct,
+    axpy_minus_unroll4, axpy_minus_unroll4_nofma,
 };
 
 /// Minimal xorshift64 for reproducible bench inputs.
@@ -71,7 +72,7 @@ fn scalar_axpy2_minus(dst: &mut [f64], src0: &[f64], alpha0: f64, src1: &[f64], 
     }
 }
 
-const LENGTHS: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024];
+const LENGTHS: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
 fn make_vec(rng: &mut Xorshift64, len: usize) -> Vec<f64> {
     (0..len).map(|_| rng.next_f64()).collect()
@@ -138,6 +139,21 @@ fn bench_axpy_minus(c: &mut Criterion) {
                     let mut d = d.clone();
                     b.iter(|| {
                         axpy_minus_unroll4(black_box(&mut d), black_box(&s), black_box(*a));
+                    });
+                },
+            );
+
+            // Wired-in production kernel: unroll4 with separate mul+sub
+            // (no FMA) so results are bit-identical to scalar.
+            let dst_n = dst_init.clone();
+            group.bench_with_input(
+                BenchmarkId::new("unroll4_nofma_neon", len),
+                &(src.clone(), dst_n, alpha),
+                |b, (s, d, a)| {
+                    let s = s.clone();
+                    let mut d = d.clone();
+                    b.iter(|| {
+                        axpy_minus_unroll4_nofma(black_box(&mut d), black_box(&s), black_box(*a));
                     });
                 },
             );
@@ -232,6 +248,26 @@ fn bench_axpy2_minus(c: &mut Criterion) {
                     let mut d = d.clone();
                     b.iter(|| {
                         axpy2_minus_unroll4(
+                            black_box(&mut d),
+                            black_box(&s0),
+                            black_box(*a0),
+                            black_box(&s1),
+                            black_box(*a1),
+                        );
+                    });
+                },
+            );
+
+            let dst_n = dst_init.clone();
+            group.bench_with_input(
+                BenchmarkId::new("unroll4_nofma_neon", len),
+                &(src0.clone(), src1.clone(), dst_n, alpha0, alpha1),
+                |b, (s0, s1, d, a0, a1)| {
+                    let s0 = s0.clone();
+                    let s1 = s1.clone();
+                    let mut d = d.clone();
+                    b.iter(|| {
+                        axpy2_minus_unroll4_nofma(
                             black_box(&mut d),
                             black_box(&s0),
                             black_box(*a0),

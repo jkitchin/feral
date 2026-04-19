@@ -42,3 +42,70 @@ preprocessor, HEMSR, vendor BLAS) so a future session reading it
 cold understands the scope boundary.
 
 No code changed; no behavior change; no benchmark needed.
+
+* 18:30 :measurement:dense-kernel:vesuvio:lever-a:lever-b:
+Executed the §4 measurement pass authorized by yesterday's
+research note.
+
+** Step 1 — schur_kernel microbench
+
+Extended benches/schur_kernel.rs with the wired-in
+unroll4_nofma variants (the kernels actually called by
+do_1x1_update / do_2x2_update on aarch64) and added L=2048.
+
+Headline at L=1024 axpy_minus (each elem = 1 FMA = 2 FLOPs):
+  - scalar (autovec):       10.0 Gelem/s = 20 GFLOPS
+  - unroll4 FMA:            10.2 Gelem/s
+  - unroll4 nofma (wired):  10.1 Gelem/s
+
+The wired nofma kernel is at peak BLAS-2 bandwidth — within
+1% of FMA, within 1% of autovec scalar at long length. Lever
+A (wider SIMD / FMA-fixed / x86 port) has no headroom on
+M-series. Residual ~10-20% would close VESUVIO 84x → ~70x at
+best.
+
+** Step 3 — lever-B prototype on 1024×1024 trailing block
+
+New throwaway binary src/bin/blas3_prototype.rs comparing
+three implementations of "apply 64 panel columns to a
+1024-wide lower-triangular trailing block":
+  - rank-1 cascade (current production path):     5.30 ms (12.7 GFLOPS)
+  - naive deferred (triple loop):                 34.96 ms ( 1.9 GFLOPS, 6.5× SLOWER)
+  - 4-way ILP-tiled deferred:                     12.49 ms ( 5.4 GFLOPS, 2.4× SLOWER)
+
+Sanity: all three produce results identical to within 2.0e-12.
+Math is the same; only the inner kernel SIMD-quality differs.
+
+The decision rule (parent note §4: ≥3× → commit to 2.4.1b)
+fires "no" by a large margin. Same lesson as the 2026-04-14
+2.4.1a tried-and-rejected entry: BLAS-3 reformulation
+without a vectorized inner kernel is pure overhead. The
+"BLAS-3 advantage" only materializes if the rank-bs kernel
+is itself register-tiled SIMD (faer's Ukr<MR, NR, T> pattern).
+
+** Updated lever ranking
+
+| lever | ratio ceiling | cost     | feasibility on M-series |
+|-------|---------------|----------|--------------------------|
+| A     | 84x → ~70x    | 1 sess   | exhausted                |
+| B     | 84x → ~5x     | 3-5 sess | needs register-tiled NEON GEMM |
+| C     | 84x → ~1x     | 2-3 sess | structural, not dense-kernel |
+
+** Recommendation
+
+Pursue lever C (arrow-KKT structural fix in symbolic) before
+lever B. The pattern (max_col_nnz ≈ n/2 with diag_only ≈ n/2)
+is exactly what vesuvio_diag prints, the IPM corpus has 4+
+matrices with this signature, and the eliminate-slacks-first
+approach shrinks the root frontal from ~2000×1000 to ~50×50,
+making the dense-kernel question moot for this workload class.
+
+Lever B stays on the shelf. The 2.4.1b plan remains a valid
+reference but its real prerequisite is now clearly "register-
+tiled NEON GEMM micro-kernel", not "blocked outer driver".
+
+x86_64 SIMD port is low-risk hygiene (lifts non-aarch64 users
+from autovec scalar to NEON-equivalent). Half-session;
+unrelated to VESUVIO.
+
+Full report at dev/research/dense-kernel-vesuvio-measurements-2026-04-19.md.
