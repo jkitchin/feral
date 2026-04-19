@@ -1,0 +1,61 @@
+#+title: Session 2026-04-19-01 journal
+
+* 09:00 :scaling:refactor:beta:
+β refactor: moved scaling from symbolic to numeric phase.
+
+Architectural goal: SymbolicFactorization must be cacheable across IPM
+iterations of structurally identical KKTs. Before this change, MC64
+scaling lived inside symbolic_factorize so every numeric refactor with
+new values forced a re-symbolic pass. After: SymbolicFactorization is
+purely structural; NumericParams { bk, scaling } is the per-numeric
+bundle.
+
+Removed from SymbolicFactorization: scaling, scaling_pivot_order,
+scaling_info. Removed from SupernodeParams: scaling_strategy. Added
+SparseFactors.scaling and .scaling_info on the numeric side.
+
+New convenience constructor NumericParams::with_bk(bk) for callsites
+that want default scaling. Default derived (caught by clippy).
+
+* 09:30 :callsites:cleanup:
+Updated ~30 callsites across src/, tests/, examples/, bins.
+
+Pattern A (just BK params, default scaling): wrap with
+NumericParams::with_bk(bk) at call site, or change helper return type
+to NumericParams.
+
+Pattern B (per-iteration scaling override): build NumericParams { bk,
+scaling: strategy } explicitly. Used in bench.rs, parity_config_sweep,
+debug_acopp30_mc64, triage_swopf_hydcar20.
+
+Pattern C (dense factor still wants BK): switch to
+factor(&dense, &params.bk).
+
+profile_sparse_smallfront.rs: removed Phase 1 (MC64) timing — scaling
+no longer happens at symbolic time. Removed scaling_pivot_order build
+from Phase 5.
+
+debug_acopp30_mc64.rs: switched from sym.scaling* reads to
+factors.scaling* reads (post-numeric).
+
+* 09:45 :tests:structural:
+Added structural test
+factorize_multifrontal_with_two_strategies_on_one_symbolic in
+src/numeric/factorize.rs that proves the goal: same SymbolicFactorization
+factored twice with different ScalingStrategy values (InfNorm and
+Identity), both return inertia (2, 1, 0). This is the cache-reuse
+invariant in test form.
+
+Removed 3 obsolete tests from tests/mc64_scaling.rs that probed the
+removed sym.scaling* fields. Replaced with a comment redirecting to
+the parity panel and the new structural test.
+
+* 10:00 :validate:green:
+cargo test --release: 192 passed, 0 failed.
+cargo fmt --check: clean (after auto-fix on examples/triage_errinbar.rs).
+cargo clippy -- -D warnings: clean on lib.
+pre-commit run --all-files: both hooks pass.
+
+Pre-existing clippy errors elsewhere on main (digit_groups,
+excessive_precision, manual_is_multiple_of, etc.) are unrelated to this
+refactor — confirmed by stash + clippy on clean main.

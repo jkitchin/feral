@@ -5,17 +5,20 @@
 //!
 //! Prints symbolic structure + factor dump to pin the bug.
 
-use feral::numeric::factorize::factorize_multifrontal;
+use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
 use feral::numeric::solve::solve_sparse;
 use feral::scaling::ScalingStrategy;
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 
-fn params() -> BunchKaufmanParams {
-    BunchKaufmanParams {
-        on_zero_pivot: ZeroPivotAction::ForceAccept,
-        pivot_threshold: 0.0,
-        ..BunchKaufmanParams::default()
+fn params() -> NumericParams {
+    NumericParams {
+        bk: BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            pivot_threshold: 0.0,
+            ..BunchKaufmanParams::default()
+        },
+        scaling: ScalingStrategy::Identity,
     }
 }
 
@@ -46,11 +49,7 @@ fn arrow_6x6() -> (CscMatrix, Vec<f64>) {
 
 fn dump_run(m: &CscMatrix, rhs: &[f64], nemin: usize) {
     println!("\n=== nemin = {} ===", nemin);
-    let snp = SupernodeParams {
-        nemin,
-        scaling_strategy: ScalingStrategy::Identity,
-        ..Default::default()
-    };
+    let snp = SupernodeParams { nemin };
     let sym = symbolic_factorize(m, &snp).unwrap();
 
     println!("perm        = {:?}", sym.perm);

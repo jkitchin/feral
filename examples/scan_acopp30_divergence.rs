@@ -91,10 +91,11 @@ fn main() {
 
         let dense = factor_single_front(&dense_mat, &params);
         let sym = symbolic_factorize(&csc, &SupernodeParams::default());
+        let np = feral::numeric::factorize::NumericParams::with_bk(params.clone());
         let sparse = sym
             .as_ref()
             .ok()
-            .and_then(|s| factorize_multifrontal(&csc, s, &params).ok());
+            .and_then(|s| factorize_multifrontal(&csc, s, &np).ok());
 
         match (dense, sparse) {
             (Ok((df, di)), Some((sf, si))) => {

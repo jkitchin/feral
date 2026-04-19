@@ -4,16 +4,16 @@
 //! and tests/dense_ldlt.rs. See FERAL-PROJECT-SPEC.md §1709 for the
 //! Phase 1b solve convention requiring refinement on all KKT solves.
 
-use feral::numeric::factorize::factorize_multifrontal;
+use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
 use feral::numeric::solve::{solve_sparse, solve_sparse_refined};
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{factor, solve_refined, BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 
-fn ldlt_params() -> BunchKaufmanParams {
-    BunchKaufmanParams {
+fn ldlt_params() -> NumericParams {
+    NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         ..BunchKaufmanParams::default()
-    }
+    })
 }
 
 fn rel_residual(a: &CscMatrix, x: &[f64], b: &[f64]) -> f64 {
@@ -50,7 +50,7 @@ fn solve_sparse_refined_matches_dense_refined_bordered_kkt() {
 
     // Dense refined
     let dense = csc.to_dense();
-    let (dfac, _) = factor(&dense, &ldlt_params()).expect("dense factor");
+    let (dfac, _) = factor(&dense, &ldlt_params().bk).expect("dense factor");
     let xd = solve_refined(&dense, &dfac, &rhs).expect("dense solve_refined");
 
     // Sparse refined

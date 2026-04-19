@@ -115,14 +115,14 @@ fn shape_features(csc: &CscMatrix) {
 }
 
 fn run_one_method(csc: &CscMatrix, method: OrderingMethod, scaling: ScalingStrategy) {
-    let snode_params = SupernodeParams {
-        scaling_strategy: scaling.clone(),
-        ..SupernodeParams::default()
-    };
-    let factor_params = BunchKaufmanParams {
-        on_zero_pivot: ZeroPivotAction::ForceAccept,
-        pivot_threshold: 0.01,
-        ..BunchKaufmanParams::default()
+    let snode_params = SupernodeParams::default();
+    let factor_params = feral::numeric::factorize::NumericParams {
+        bk: BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            pivot_threshold: 0.01,
+            ..BunchKaufmanParams::default()
+        },
+        scaling: scaling.clone(),
     };
     let scale_tag = match scaling {
         ScalingStrategy::InfNorm => "infnorm",

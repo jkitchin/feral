@@ -433,11 +433,11 @@ mod tests {
     use crate::sparse::csc::CscMatrix;
     use crate::symbolic::{symbolic_factorize, SupernodeParams};
 
-    fn make_params() -> BunchKaufmanParams {
-        BunchKaufmanParams {
+    fn make_params() -> crate::numeric::factorize::NumericParams {
+        crate::numeric::factorize::NumericParams::with_bk(BunchKaufmanParams {
             on_zero_pivot: ZeroPivotAction::ForceAccept,
             ..BunchKaufmanParams::default()
-        }
+        })
     }
 
     fn check_solve(m: &CscMatrix, rhs: &[f64], tol: f64) {

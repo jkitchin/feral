@@ -4,8 +4,42 @@ use crate::dense::factor::{factor_frontal, BunchKaufmanParams, FrontalFactors};
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
 use crate::inertia::Inertia;
+use crate::scaling::{compute_scaling, ScalingStrategy};
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::SymbolicFactorization;
+
+/// Numeric-phase parameters bundle.
+///
+/// Groups the dense Bunch-Kaufman pivot configuration with the
+/// global symmetric scaling strategy. Both are numeric-time
+/// choices — they depend on the matrix values, not the sparsity
+/// pattern. Keeping them together at the numeric entry point
+/// (rather than splitting `bk` into the BK call and `scaling`
+/// into the symbolic call) lets the symbolic factorization stay
+/// value-agnostic and therefore reusable across multiple numeric
+/// factorizations of structurally identical KKTs (the IPM use
+/// case). See `dev/research/pounce-integration-interface.md` and
+/// `dev/plans/scaling-in-numeric.md` (β refactor).
+#[derive(Debug, Clone, Default)]
+pub struct NumericParams {
+    /// Dense BK kernel parameters.
+    pub bk: BunchKaufmanParams,
+    /// Global symmetric scaling strategy applied at the start of
+    /// numeric factorization.
+    pub scaling: ScalingStrategy,
+}
+
+impl NumericParams {
+    /// Construct a `NumericParams` from a `BunchKaufmanParams`,
+    /// using the default scaling strategy. Convenience for
+    /// callers that only customize BK behavior.
+    pub fn with_bk(bk: BunchKaufmanParams) -> Self {
+        Self {
+            bk,
+            scaling: ScalingStrategy::default(),
+        }
+    }
+}
 
 /// Stored factors from a sparse multifrontal LDL^T factorization.
 #[derive(Debug)]
@@ -88,10 +122,36 @@ pub struct NodeFactors {
 pub fn factorize_multifrontal(
     matrix: &CscMatrix,
     symbolic: &SymbolicFactorization,
-    params: &BunchKaufmanParams,
+    params: &NumericParams,
 ) -> Result<(SparseFactors, Inertia), FeralError> {
     let n = symbolic.n;
     let n_snodes = symbolic.supernodes.len();
+
+    // β refactor: scaling is a numeric-phase concern, computed
+    // here against the live matrix values, not cached on the
+    // value-agnostic `SymbolicFactorization`. Returns the user-
+    // order scaling vector and a diagnostic info enum.
+    let (scaling_user, scaling_info) = compute_scaling(matrix, &params.scaling)?;
+    if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
+        // No project-wide logging framework yet; mirror the Phase 1
+        // convention of eprintln! for unusual diagnostics so this is
+        // visible in bench output without being a hard failure.
+        // Structurally singular matrices are allowed to proceed —
+        // they typically surface the issue as a zero pivot during
+        // numeric factorization, the right layer to reject.
+        eprintln!(
+            "warning: MC64 matching left {} of {} variables unmatched; \
+             scaling is identity on those rows/columns",
+            n_unmatched, n
+        );
+    }
+    // Pivot-order cache of `scaling_user`: for each pivot index k,
+    // `scaling_pivot_order[k] == scaling_user[symbolic.perm[k]]`.
+    // This matches the assembly-time lookup pattern below where the
+    // permuted CSC is indexed in pivot positions.
+    let scaling_pivot_order: Vec<f64> =
+        symbolic.perm.iter().map(|&old| scaling_user[old]).collect();
+    debug_assert_eq!(scaling_pivot_order.len(), n);
 
     // Permute the matrix values into the new ordering
     let permuted = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv)?;
@@ -158,8 +218,8 @@ pub fn factorize_multifrontal(
                         zero: 0,
                     },
                     needs_refinement: false,
-                    zero_tol: params.zero_tol,
-                    zero_tol_2x2: params.zero_tol_2x2,
+                    zero_tol: params.bk.zero_tol,
+                    zero_tol_2x2: params.bk.zero_tol_2x2,
                 },
                 inertia: Inertia {
                     positive: 0,
@@ -220,8 +280,7 @@ pub fn factorize_multifrontal(
         // entries receive `s[i]^2`; off-diagonal entries receive
         // `s[i] * s[j]`. Identity strategy fills the vector with 1.0,
         // so this multiply is a no-op when scaling is disabled.
-        debug_assert_eq!(symbolic.scaling_pivot_order.len(), symbolic.n);
-        let scaling = &symbolic.scaling_pivot_order;
+        let scaling = &scaling_pivot_order;
         let mut frontal = SymmetricMatrix::zeros(actual_nrow);
         for (local_j, &gj) in row_indices[..own_ncol].iter().enumerate() {
             let s_j = scaling[gj];
@@ -259,7 +318,7 @@ pub fn factorize_multifrontal(
         // Root supernodes force-accept (via `ZeroPivotAction::ForceAccept`)
         // because they have no ancestor to absorb a delay.
         let may_delay = !is_root[snode_idx];
-        let ff = factor_frontal(&frontal, expanded_ncol, may_delay, params)?;
+        let ff = factor_frontal(&frontal, expanded_ncol, may_delay, &params.bk)?;
 
         // Extract what we need before moving ff
         let node_inertia = ff.inertia.clone();
@@ -330,14 +389,14 @@ pub fn factorize_multifrontal(
             perm_inv: symbolic.perm_inv.clone(),
             node_factors,
             needs_refinement,
-            // Phase 2.2.1 Step 6: propagate the user-order scaling
-            // vector into the numeric factors so Step 7 (solve-side
-            // pre/post-scaling) can reach it without a back-pointer
-            // to `SymbolicFactorization`. Solve operates at the
-            // user API boundary, so it needs user-order indexing,
-            // not the pivot-order cache used at assembly time.
-            scaling: symbolic.scaling.clone(),
-            scaling_info: symbolic.scaling_info.clone(),
+            // β refactor: scaling vector + diagnostic info are
+            // produced by `compute_scaling` at the top of this
+            // function (no longer cached on `SymbolicFactorization`).
+            // Solve operates at the user API boundary so it needs
+            // user-order indexing, not the pivot-order cache used
+            // at assembly time.
+            scaling: scaling_user,
+            scaling_info,
         },
         total_inertia,
     ))
@@ -510,11 +569,11 @@ mod tests {
     use crate::dense::factor::ZeroPivotAction;
     use crate::symbolic::{symbolic_factorize, SupernodeParams};
 
-    fn make_params() -> BunchKaufmanParams {
-        BunchKaufmanParams {
+    fn make_params() -> NumericParams {
+        NumericParams::with_bk(BunchKaufmanParams {
             on_zero_pivot: ZeroPivotAction::ForceAccept,
             ..BunchKaufmanParams::default()
-        }
+        })
     }
 
     #[test]
@@ -570,7 +629,7 @@ mod tests {
         // Dense factorization
         let dense_mat = m.to_dense();
         let params = make_params();
-        let (_, dense_inertia) = factor(&dense_mat, &params).unwrap();
+        let (_, dense_inertia) = factor(&dense_mat, &params.bk).unwrap();
 
         // Sparse factorization
         let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
@@ -614,5 +673,49 @@ mod tests {
         assert_eq!(inertia.positive, 1);
         assert_eq!(inertia.negative, 1);
         assert_eq!(inertia.zero, 0);
+    }
+
+    /// Structural goal of the β refactor: a single SymbolicFactorization
+    /// is reusable across NumericParams that select different scaling
+    /// strategies. The same `sym` factors twice — once with InfNorm,
+    /// once with Identity — and both calls succeed and produce the
+    /// expected inertia (1 positive, 2 negative for a saddle-point
+    /// system with one constraint).
+    #[test]
+    fn factorize_multifrontal_with_two_strategies_on_one_symbolic() {
+        use crate::scaling::ScalingStrategy;
+
+        // Saddle-point KKT: [[2 0 -1], [0 2 -1], [-1 -1 0]].
+        // Inertia: H = 2I_2 contributes 2 positive; constraint Schur
+        // is -[-1 -1]·(I/2)·[-1 -1]^T = -1, so 1 negative.
+        let m = CscMatrix::from_triplets(
+            3,
+            &[0, 2, 1, 2, 2],
+            &[0, 0, 1, 1, 2],
+            &[2.0, -1.0, 2.0, -1.0, 0.0],
+        )
+        .unwrap();
+
+        let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
+
+        let infnorm = NumericParams {
+            bk: BunchKaufmanParams {
+                on_zero_pivot: ZeroPivotAction::ForceAccept,
+                ..BunchKaufmanParams::default()
+            },
+            scaling: ScalingStrategy::InfNorm,
+        };
+        let identity = NumericParams {
+            bk: infnorm.bk.clone(),
+            scaling: ScalingStrategy::Identity,
+        };
+
+        let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
+        let (_, i_id) = factorize_multifrontal(&m, &sym, &identity).unwrap();
+
+        assert_eq!(i_inf.positive, 2);
+        assert_eq!(i_inf.negative, 1);
+        assert_eq!(i_id.positive, 2);
+        assert_eq!(i_id.negative, 1);
     }
 }

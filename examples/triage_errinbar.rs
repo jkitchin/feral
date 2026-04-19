@@ -81,6 +81,7 @@ fn main() {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         ..BunchKaufmanParams::default()
     };
+    let np = feral::numeric::factorize::NumericParams::with_bk(params.clone());
 
     // ---- Dense path ----
     println!("\n--- DENSE ---");
@@ -104,8 +105,7 @@ fn main() {
     println!("\n--- SPARSE (default nemin=32) ---");
     let snode_default = SupernodeParams::default();
     let sym_d = symbolic_factorize(&csc, &snode_default).expect("symbolic");
-    let (sfac_d, sinertia_d) =
-        factorize_multifrontal(&csc, &sym_d, &params).expect("sparse factor");
+    let (sfac_d, sinertia_d) = factorize_multifrontal(&csc, &sym_d, &np).expect("sparse factor");
     println!(
         "n_supernodes = {}, inertia = {} ({})",
         sym_d.supernodes.len(),
@@ -130,13 +130,9 @@ fn main() {
 
     // ---- Sparse path with nemin=10000 (single supernode, matches bench) ----
     println!("\n--- SPARSE (nemin=10000, single supernode) ---");
-    let snode_one = SupernodeParams {
-        nemin: 10000,
-        ..Default::default()
-    };
+    let snode_one = SupernodeParams { nemin: 10000 };
     let sym_o = symbolic_factorize(&csc, &snode_one).expect("symbolic");
-    let (sfac_o, sinertia_o) =
-        factorize_multifrontal(&csc, &sym_o, &params).expect("sparse factor");
+    let (sfac_o, sinertia_o) = factorize_multifrontal(&csc, &sym_o, &np).expect("sparse factor");
     println!(
         "n_supernodes = {}, inertia = {} ({})",
         sym_o.supernodes.len(),
@@ -154,13 +150,9 @@ fn main() {
 
     // ---- Sparse path with nemin=1 (no amalgamation) ----
     println!("\n--- SPARSE (nemin=1, no amalgamation) ---");
-    let snode_none = SupernodeParams {
-        nemin: 1,
-        ..Default::default()
-    };
+    let snode_none = SupernodeParams { nemin: 1 };
     let sym_n = symbolic_factorize(&csc, &snode_none).expect("symbolic");
-    let (sfac_n, sinertia_n) =
-        factorize_multifrontal(&csc, &sym_n, &params).expect("sparse factor");
+    let (sfac_n, sinertia_n) = factorize_multifrontal(&csc, &sym_n, &np).expect("sparse factor");
     println!(
         "n_supernodes = {}, inertia = {} ({})",
         sym_n.supernodes.len(),

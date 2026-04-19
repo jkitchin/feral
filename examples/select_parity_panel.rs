@@ -109,16 +109,16 @@ fn read_oracle(path: &Path) -> Option<(Inertia, f64)> {
     Some((Inertia::new(pos, neg, zero), residual))
 }
 
-fn params() -> BunchKaufmanParams {
+fn params() -> feral::numeric::factorize::NumericParams {
     // Phase 2.3: restored pivot_threshold = 0.01 (SSIDS/MUMPS default)
     // now that delayed pivoting gives rejected pivots a landing zone
     // at the parent supernode. Keep in sync with the test-file
     // template below and with bench::params_kkt.
-    BunchKaufmanParams {
+    feral::numeric::factorize::NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
-    }
+    })
 }
 
 fn rel_residual(a: &CscMatrix, x: &[f64], b: &[f64]) -> f64 {

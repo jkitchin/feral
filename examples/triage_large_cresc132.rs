@@ -138,11 +138,11 @@ fn triage_one(stem: &str) {
 
     // Phase 2.3: restored pivot_threshold = 0.01 now that delayed
     // pivoting is in place. Matches bench::params_kkt.
-    let params = BunchKaufmanParams {
+    let params = feral::numeric::factorize::NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
-    };
+    });
 
     println!();
     println!("--- symbolic_factorize ---");

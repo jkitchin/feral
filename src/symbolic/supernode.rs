@@ -1,28 +1,23 @@
 use crate::ordering::elimination_tree::EliminationTree;
-use crate::scaling::ScalingStrategy;
 
-/// Parameters controlling supernode amalgamation and pre-factorization
-/// global scaling.
+/// Parameters controlling supernode amalgamation.
+///
+/// β refactor (`dev/plans/scaling-in-numeric.md`): the
+/// `scaling_strategy` field used to live here, but scaling is a
+/// numeric-time concern and now lives on
+/// [`crate::numeric::factorize::NumericParams`]. This struct
+/// covers only the symbolic phase.
 pub struct SupernodeParams {
     /// Minimum number of eliminated columns in a supernode. Nodes with
     /// fewer eliminations are candidates for merging with their parent.
     /// Default: 32 (matching SSIDS). MUMPS uses 5.
     /// Setting nemin=1 effectively disables amalgamation.
     pub nemin: usize,
-
-    /// Global scaling strategy applied during `symbolic_factorize`.
-    /// Default is `Mc64Symmetric` (matches MUMPS SYM=2 / SSIDS
-    /// scaling=1). Use `ScalingStrategy::Identity` for tests that
-    /// need to assert scaling-independent properties.
-    pub scaling_strategy: ScalingStrategy,
 }
 
 impl Default for SupernodeParams {
     fn default() -> Self {
-        Self {
-            nemin: 32,
-            scaling_strategy: ScalingStrategy::default(),
-        }
+        Self { nemin: 32 }
     }
 }
 
@@ -304,10 +299,7 @@ mod tests {
         let counts = column_counts(&pat, &etree);
 
         // With nemin=1, we get 3 supernodes: {0}, {1}, {2,3}
-        let params = SupernodeParams {
-            nemin: 1,
-            ..Default::default()
-        };
+        let params = SupernodeParams { nemin: 1 };
         let snodes = find_supernodes(&etree, &counts, &params);
         assert_eq!(snodes.len(), 3);
 
@@ -325,10 +317,7 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams {
-            nemin: 32,
-            ..Default::default()
-        };
+        let params = SupernodeParams { nemin: 32 };
         let snodes = find_supernodes(&etree, &counts, &params);
 
         // All 4 columns should be amalgamated into 1 supernode
@@ -349,10 +338,7 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams {
-            nemin: 1,
-            ..Default::default()
-        };
+        let params = SupernodeParams { nemin: 1 };
         let snodes = find_supernodes(&etree, &counts, &params);
 
         // Should be 1 supernode with 3 columns (fundamental)
@@ -371,10 +357,7 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams {
-            nemin: 1,
-            ..Default::default()
-        };
+        let params = SupernodeParams { nemin: 1 };
         let snodes = find_supernodes(&etree, &counts, &params);
 
         // Two fundamental supernodes of size 2
@@ -391,10 +374,7 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams {
-            nemin: 1,
-            ..Default::default()
-        };
+        let params = SupernodeParams { nemin: 1 };
         let snodes = find_supernodes(&etree, &counts, &params);
 
         // Each column is independent (no parents), so 4 supernodes
@@ -416,10 +396,7 @@ mod tests {
         let counts = column_counts(&pat, &etree);
 
         for nemin in [1, 5, 32] {
-            let params = SupernodeParams {
-                nemin,
-                ..Default::default()
-            };
+            let params = SupernodeParams { nemin };
             let snodes = find_supernodes(&etree, &counts, &params);
             let total: usize = snodes.iter().map(|s| s.ncol()).sum();
             assert_eq!(total, 5, "nemin={}: total columns {} != 5", nemin, total);
@@ -440,10 +417,7 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams {
-            nemin: 1,
-            ..Default::default()
-        };
+        let params = SupernodeParams { nemin: 1 };
         let snodes = find_supernodes(&etree, &counts, &params);
 
         for (i, s) in snodes.iter().enumerate() {

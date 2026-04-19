@@ -336,17 +336,17 @@ fn arrow_apex_matrix() -> CscMatrix {
 }
 
 fn delay_sparse_params() -> SupernodeParams {
-    SupernodeParams {
-        nemin: 1,
-        scaling_strategy: feral::scaling::ScalingStrategy::Identity,
-    }
+    SupernodeParams { nemin: 1 }
 }
 
-fn delay_numeric_params() -> BunchKaufmanParams {
-    BunchKaufmanParams {
-        on_zero_pivot: ZeroPivotAction::ForceAccept,
-        pivot_threshold: 0.01,
-        ..BunchKaufmanParams::default()
+fn delay_numeric_params() -> feral::numeric::factorize::NumericParams {
+    feral::numeric::factorize::NumericParams {
+        bk: BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            pivot_threshold: 0.01,
+            ..BunchKaufmanParams::default()
+        },
+        scaling: feral::scaling::ScalingStrategy::Identity,
     }
 }
 
@@ -417,7 +417,7 @@ fn factorize_multifrontal_delayed_pivot_succeeds_at_parent() {
     // the delayed pivot has been re-tried at the parent.
     let dense = m.to_dense();
     let params = delay_numeric_params();
-    let (_, dense_inertia) = factor(&dense, &params).expect("dense factor");
+    let (_, dense_inertia) = factor(&dense, &params.bk).expect("dense factor");
 
     let sym = symbolic_factorize(&m, &delay_sparse_params()).expect("symbolic");
     let (factors, sparse_inertia) =

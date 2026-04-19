@@ -99,15 +99,15 @@ fn run_matrix(
     let rhs = sc.finite_rhs()?;
     let (mumps_inertia, mumps_residual) = read_oracle(&entry.mumps_json)?;
 
-    let snp = SupernodeParams {
-        scaling_strategy: strategy,
-        ..Default::default()
-    };
+    let snp = SupernodeParams::default();
     let sym = symbolic_factorize(&csc, &snp).ok()?;
-    let params = BunchKaufmanParams {
-        on_zero_pivot: ZeroPivotAction::ForceAccept,
-        pivot_threshold: threshold,
-        ..BunchKaufmanParams::default()
+    let params = feral::numeric::factorize::NumericParams {
+        bk: BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            pivot_threshold: threshold,
+            ..BunchKaufmanParams::default()
+        },
+        scaling: strategy,
     };
     let (fac, feral_inertia) = factorize_multifrontal(&csc, &sym, &params).ok()?;
     let x = solve_sparse_refined(&csc, &fac, &rhs).ok()?;

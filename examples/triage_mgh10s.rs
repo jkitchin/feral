@@ -85,7 +85,8 @@ fn main() {
         sym.supernodes.len(),
         &sym.perm[..10.min(sym.perm.len())]
     );
-    let (sfac, sinertia) = factorize_multifrontal(&csc, &sym, &params).expect("sparse factor");
+    let np = feral::numeric::factorize::NumericParams::with_bk(params.clone());
+    let (sfac, sinertia) = factorize_multifrontal(&csc, &sym, &np).expect("sparse factor");
     println!(
         "sparse inertia = {} ({})",
         sinertia,

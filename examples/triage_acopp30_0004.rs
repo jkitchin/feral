@@ -97,7 +97,8 @@ fn main() {
     // --- Path 3: factorize_multifrontal (AMD order via sparse)
     println!("\n--- factorize_multifrontal (AMD via sparse) ---");
     let sym = symbolic_factorize(&csc, &SupernodeParams::default()).expect("symbolic");
-    let (f3, i3) = factorize_multifrontal(&csc, &sym, &params).expect("factorize");
+    let np = feral::numeric::factorize::NumericParams::with_bk(params.clone());
+    let (f3, i3) = factorize_multifrontal(&csc, &sym, &np).expect("factorize");
     println!(
         "inertia = {} ({})",
         i3,

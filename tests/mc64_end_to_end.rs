@@ -12,16 +12,16 @@
 //! applied on both ends — not its inverse — by constructing cases
 //! where the expected answer can be written down exactly.
 
-use feral::numeric::factorize::factorize_multifrontal;
+use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
 use feral::numeric::solve::solve_sparse;
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 
-fn ldlt_params() -> BunchKaufmanParams {
-    BunchKaufmanParams {
+fn ldlt_params() -> NumericParams {
+    NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         ..BunchKaufmanParams::default()
-    }
+    })
 }
 
 /// `A = diag(2, 3, 5)`, `b = [2, 3, 5]` ⇒ `x = [1, 1, 1]`.

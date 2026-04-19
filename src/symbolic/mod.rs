@@ -144,28 +144,6 @@ pub struct SymbolicFactorization {
 
     /// Column counts of L.
     pub col_counts: Vec<usize>,
-
-    /// Global symmetric scaling vector in **user-order** indexing.
-    /// Length `n`. Applied symmetrically as `D · A · D` where
-    /// `D = diag(scaling)`. This is the ground-truth vector — the
-    /// pivot-order cache `scaling_pivot_order` is derived from it.
-    ///
-    /// Solve time uses this user-order vector to pre-scale the RHS
-    /// and post-scale the solution at the permutation boundary.
-    pub scaling: Vec<f64>,
-
-    /// Pivot-order cache of `scaling`: for each pivot index `k`,
-    /// `scaling_pivot_order[k] == scaling[perm[k]]`. Length `n`.
-    ///
-    /// Used during frontal assembly, where the assembly loop walks
-    /// rows and columns in pivot-order indexing and needs an O(1)
-    /// per-entry lookup of the scaling factor. Without this cache
-    /// the loop would have to indirect through `perm` on every
-    /// scattered entry.
-    pub scaling_pivot_order: Vec<f64>,
-
-    /// Diagnostic info about how `scaling` was produced.
-    pub scaling_info: crate::scaling::ScalingInfo,
 }
 
 /// Pick a default ordering for `symbolic_factorize` from cheap matrix
@@ -292,29 +270,12 @@ pub fn symbolic_factorize_with_method(
 ) -> Result<SymbolicFactorization, FeralError> {
     let n = matrix.n;
 
-    // Phase 2.2.1 Step 5: compute global symmetric scaling before ordering.
-    // Scaling is a congruence transform and is independent of any
-    // downstream symbolic work, so it can run as early as we like. We
-    // run it first and cache the result for the whole pipeline.
-    //
-    // Returns a vector in user-order indexing; we permute it into
-    // pivot-order at the end of the function so the numeric phase can
-    // consume it by direct pivot index.
-    let (scaling_user, scaling_info) =
-        crate::scaling::compute_scaling(matrix, &snode_params.scaling_strategy)?;
-    if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
-        // No project-wide logging framework yet; mirror the Phase 1
-        // convention of eprintln! for unusual diagnostics so this is
-        // visible in bench output without being a hard failure.
-        // Structurally singular matrices are allowed to proceed — they
-        // will typically surface the issue as a zero pivot during
-        // numeric factorization, which is the right layer to reject.
-        eprintln!(
-            "warning: MC64 matching left {} of {} variables unmatched; \
-             scaling is identity on those rows/columns",
-            n_unmatched, n
-        );
-    }
+    // β refactor: scaling is no longer computed here. It moved to
+    // `factorize_multifrontal` so that `SymbolicFactorization`
+    // depends only on the matrix pattern (not its values) and can
+    // be reused across multiple numeric factorizations of
+    // structurally identical KKTs. See
+    // `dev/plans/scaling-in-numeric.md`.
 
     // Step 1: Fill-reducing ordering. Dispatch on `method`. The
     // downstream pipeline (postorder composition, etree, column counts,
@@ -383,16 +344,6 @@ pub fn symbolic_factorize_with_method(
 
     let factor_slack = 1.2;
 
-    // Phase 2.2.1 Step 5: build the pivot-order cache of the scaling
-    // vector. `perm` is new-to-old: perm[k] is the user column that
-    // became pivot column k. So
-    //     scaling_pivot_order[k] = scaling_user[perm[k]]
-    // matches the assembly-time lookup pattern in factorize.rs where
-    // `permute_csc_values` produces a matrix indexed by pivot positions
-    // and we want `scaling[pivot_row] * scaling[pivot_col]` on each
-    // scattered entry. (See dev/plans/mc64-scaling.md §"Step 5".)
-    let scaling_pivot_order: Vec<f64> = perm.iter().map(|&old| scaling_user[old]).collect();
-
     Ok(SymbolicFactorization {
         n,
         perm,
@@ -405,9 +356,6 @@ pub fn symbolic_factorize_with_method(
         etree,
         permuted_pattern,
         col_counts,
-        scaling: scaling_user,
-        scaling_pivot_order,
-        scaling_info,
     })
 }
 
@@ -462,10 +410,7 @@ mod tests {
             CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
                 .unwrap();
 
-        let params = SupernodeParams {
-            nemin: 32,
-            ..Default::default()
-        };
+        let params = SupernodeParams { nemin: 32 };
         let sym = symbolic_factorize(&m, &params).unwrap();
 
         assert_eq!(sym.n, 4);
@@ -490,10 +435,7 @@ mod tests {
         let m = CscMatrix::from_triplets(3, &[0, 1, 2, 1, 2, 2], &[0, 0, 0, 1, 1, 2], &[1.0; 6])
             .unwrap();
 
-        let params = SupernodeParams {
-            nemin: 1,
-            ..Default::default()
-        };
+        let params = SupernodeParams { nemin: 1 };
         let sym = symbolic_factorize(&m, &params).unwrap();
 
         // For a dense matrix, factor NNZ = n*(n+1)/2 = 6
@@ -549,10 +491,7 @@ mod tests {
         )
         .unwrap();
 
-        let params = SupernodeParams {
-            nemin: 1,
-            ..Default::default()
-        };
+        let params = SupernodeParams { nemin: 1 };
         let sym = symbolic_factorize(&m, &params).unwrap();
 
         for &cs in &sym.contrib_sizes {

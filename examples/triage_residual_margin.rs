@@ -19,12 +19,12 @@ use feral::numeric::solve::{solve_sparse, solve_sparse_refined};
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{read_mtx, read_sidecar, BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 
-fn sparse_params() -> BunchKaufmanParams {
-    BunchKaufmanParams {
+fn sparse_params() -> feral::numeric::factorize::NumericParams {
+    feral::numeric::factorize::NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
-    }
+    })
 }
 
 fn norm2(v: &[f64]) -> f64 {

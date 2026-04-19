@@ -1217,12 +1217,13 @@ fn main() {
     // configuration and reports the true rate. Expect a large drop
     // from the historical 99.8% number — that number was an
     // artifact of the single-supernode override, not a real rate.
-    let snode_params = {
-        let mut p = SupernodeParams::default();
+    let snode_params = SupernodeParams::default();
+    let sparse_numeric_params = {
+        let mut np = feral::numeric::factorize::NumericParams::with_bk(params_kkt_sparse.clone());
         if let Some(s) = scaling_override.clone() {
-            p.scaling_strategy = s;
+            np.scaling = s;
         }
-        p
+        np
     };
 
     let mut sp_total = 0usize;
@@ -1273,7 +1274,7 @@ fn main() {
 
         // Numeric factorization
         let (sp_factors, sp_inertia) =
-            match factorize_multifrontal(&entry.csc, &sym, &params_kkt_sparse) {
+            match factorize_multifrontal(&entry.csc, &sym, &sparse_numeric_params) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("  {}: sparse factor failed: {}", entry.name, e);

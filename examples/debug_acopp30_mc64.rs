@@ -99,25 +99,25 @@ fn run_one_path(
     strategy: ScalingStrategy,
 ) {
     println!("\n=== path: {} ===", label);
-    let snode = SupernodeParams {
-        scaling_strategy: strategy,
-        ..SupernodeParams::default()
-    };
+    let snode = SupernodeParams::default();
     let sym = symbolic_factorize(csc, &snode).expect("symbolic");
+    let np = feral::numeric::factorize::NumericParams {
+        bk: params.clone(),
+        scaling: strategy,
+    };
 
-    println!("  scaling_info: {:?}", sym.scaling_info);
-    summarize_vec("scaling (user-order)", &sym.scaling);
+    let (factors, inertia) = factorize_multifrontal(csc, &sym, &np).expect("factor");
+    println!("  scaling_info: {:?}", factors.scaling_info);
+    summarize_vec("scaling (user-order)", &factors.scaling);
 
     // Print first 10 entries
-    let head: Vec<String> = sym
+    let head: Vec<String> = factors
         .scaling
         .iter()
         .take(10)
         .map(|x| format!("{:.3e}", x))
         .collect();
     println!("  scaling[0..10] = [{}]", head.join(", "));
-
-    let (factors, inertia) = factorize_multifrontal(csc, &sym, params).expect("factor");
     println!(
         "  feral inertia = {}, needs_refinement={}",
         inertia, factors.needs_refinement
@@ -368,12 +368,13 @@ fn main() {
     // the best iterate on the MC64 path.
     {
         println!("\n--- manual refinement trace (MC64 path) ---");
-        let snode = SupernodeParams {
-            scaling_strategy: ScalingStrategy::Mc64Symmetric,
-            ..SupernodeParams::default()
-        };
+        let snode = SupernodeParams::default();
         let sym = symbolic_factorize(&csc, &snode).expect("symbolic");
-        let (factors, _) = factorize_multifrontal(&csc, &sym, &params).expect("factor");
+        let np = feral::numeric::factorize::NumericParams {
+            bk: params.clone(),
+            scaling: ScalingStrategy::Mc64Symmetric,
+        };
+        let (factors, _) = factorize_multifrontal(&csc, &sym, &np).expect("factor");
 
         let mut x = solve_sparse(&factors, &rhs).expect("solve");
         let mut r = vec![0.0; n];

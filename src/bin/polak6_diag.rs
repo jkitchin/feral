@@ -90,14 +90,14 @@ fn try_factor_and_solve(
     expected_inertia: (usize, usize, usize),
 ) {
     println!("--- factor under {} ---", label);
-    let snode_params = SupernodeParams {
-        scaling_strategy: scaling.clone(),
-        ..SupernodeParams::default()
-    };
-    let factor_params = BunchKaufmanParams {
-        on_zero_pivot: ZeroPivotAction::ForceAccept,
-        pivot_threshold: 0.01,
-        ..BunchKaufmanParams::default()
+    let snode_params = SupernodeParams::default();
+    let factor_params = feral::numeric::factorize::NumericParams {
+        bk: BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            pivot_threshold: 0.01,
+            ..BunchKaufmanParams::default()
+        },
+        scaling: scaling.clone(),
     };
     let sym = match symbolic_factorize_with_method(csc, &snode_params, OrderingMethod::Amd) {
         Ok(s) => s,

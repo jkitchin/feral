@@ -23,7 +23,6 @@
 //!     was partial (`PartialSingular { n_unmatched }`).
 
 use feral::scaling::{compute_scaling, ScalingInfo, ScalingStrategy};
-use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::CscMatrix;
 
 /// Helper: scaled matrix entry value `s[i] * A_{ij} * s[j]`.
@@ -204,89 +203,11 @@ fn mc64_2x2_spd_off_diagonal_bounded() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2.2.1 Step 5: `symbolic_factorize` integration tests.
-//
-// These assert that `SupernodeParams::default()` produces an MC64
-// scaling on a non-trivial input, that explicit `Identity` scaling
-// round-trips as `NotApplied` with a vector of ones, and that the
-// `scaling_pivot_order` cache is a consistent permutation of the
-// user-order scaling vector.
+// Symbolic-side integration tests for the scaling cache used to live
+// here. Scaling now lives on the numeric path — see the parity panel
+// in tests/parity.rs and the structural test
+// `factorize_multifrontal_with_two_strategies_on_one_symbolic` in
+// src/numeric/factorize.rs for end-to-end coverage. The
+// `compute_scaling` API tests above remain the unit tests for the
+// scaling primitives themselves.
 // ---------------------------------------------------------------------------
-
-/// Default `SupernodeParams` should route through MC64 symmetric
-/// scaling. On diag(2,3,5) the hand oracle is
-/// `s = [1/sqrt(2), 1/sqrt(3), 1/sqrt(5)]` with `Applied` info,
-/// re-using the oracle established in Step 4's
-/// `mc64_diagonal_matrix_unit_scaled_diagonal`.
-#[test]
-fn symbolic_factorize_default_populates_mc64_scaling() {
-    let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
-    let sym = symbolic_factorize(&csc, &SupernodeParams::default()).unwrap();
-
-    assert_eq!(sym.scaling_info, ScalingInfo::Applied);
-    assert_eq!(sym.scaling.len(), 3);
-    assert_eq!(sym.scaling_pivot_order.len(), 3);
-
-    // s_user is in user-order: index i refers to the user-numbered
-    // diagonal A[i,i]. For diag(2,3,5), s = 1/sqrt(A_ii).
-    let expected = [
-        1.0 / 2.0_f64.sqrt(),
-        1.0 / 3.0_f64.sqrt(),
-        1.0 / 5.0_f64.sqrt(),
-    ];
-    for i in 0..3 {
-        assert!(
-            (sym.scaling[i] - expected[i]).abs() < 1e-12,
-            "scaling[{}] = {}, expected {}",
-            i,
-            sym.scaling[i],
-            expected[i]
-        );
-    }
-}
-
-/// Explicit `Identity` scaling must short-circuit to ones and
-/// `NotApplied`, independent of the matrix content. This is the
-/// escape hatch for tests that need scaling-independent behavior.
-#[test]
-fn symbolic_factorize_identity_strategy_disables_scaling() {
-    let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
-    let params = SupernodeParams {
-        scaling_strategy: ScalingStrategy::Identity,
-        ..Default::default()
-    };
-    let sym = symbolic_factorize(&csc, &params).unwrap();
-
-    assert_eq!(sym.scaling, vec![1.0; 3]);
-    assert_eq!(sym.scaling_pivot_order, vec![1.0; 3]);
-    assert_eq!(sym.scaling_info, ScalingInfo::NotApplied);
-}
-
-/// `scaling_pivot_order[k] == scaling[perm[k]]` for every pivot
-/// index. This is the cache invariant that
-/// `factorize_multifrontal` (Step 6) will rely on.
-#[test]
-fn symbolic_factorize_scaling_pivot_order_matches_user_order_through_perm() {
-    // A 5-variable arrow matrix: non-trivial AMD permutation, so
-    // `perm` is not the identity.
-    let csc = CscMatrix::from_triplets(
-        5,
-        &[0, 1, 2, 3, 4, 1, 2, 3, 4],
-        &[0, 0, 0, 0, 0, 1, 2, 3, 4],
-        &[5.0, 1.0, 2.0, 3.0, 4.0, 6.0, 7.0, 8.0, 9.0],
-    )
-    .unwrap();
-
-    let sym = symbolic_factorize(&csc, &SupernodeParams::default()).unwrap();
-
-    assert_eq!(sym.scaling.len(), sym.n);
-    assert_eq!(sym.scaling_pivot_order.len(), sym.n);
-    for k in 0..sym.n {
-        let user_col = sym.perm[k];
-        assert_eq!(
-            sym.scaling_pivot_order[k], sym.scaling[user_col],
-            "scaling_pivot_order[{}] should equal scaling[perm[{}]={}]",
-            k, k, user_col
-        );
-    }
-}

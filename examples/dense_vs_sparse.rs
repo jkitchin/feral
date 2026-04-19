@@ -34,15 +34,15 @@ fn dense_params() -> BunchKaufmanParams {
     }
 }
 
-fn sparse_params() -> BunchKaufmanParams {
+fn sparse_params() -> feral::numeric::factorize::NumericParams {
     // Sparse production path (Phase 2.3): pivot_threshold = 0.01
     // because delayed pivoting gives rejected pivots a landing zone
     // at the parent supernode. Matches bench::params_kkt.
-    BunchKaufmanParams {
+    feral::numeric::factorize::NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
-    }
+    })
 }
 
 fn rel_residual(a: &CscMatrix, x: &[f64], b: &[f64]) -> f64 {
@@ -127,10 +127,13 @@ fn compare(stem: &str) {
 
     // Sparse path with whatever scaling is the current default.
     let sym = symbolic_factorize(&csc, &SupernodeParams::default()).expect("sym");
+    let sparse_p = sparse_params();
+    let (sparse_fac, sparse_inertia) =
+        factorize_multifrontal(&csc, &sym, &sparse_p).expect("factorize");
     let scale_range = {
         let mut lo = f64::INFINITY;
         let mut hi = 0.0f64;
-        for &v in &sym.scaling {
+        for &v in &sparse_fac.scaling {
             if v > 0.0 {
                 lo = lo.min(v);
                 hi = hi.max(v);
@@ -138,9 +141,6 @@ fn compare(stem: &str) {
         }
         (lo, hi)
     };
-    let sparse_p = sparse_params();
-    let (sparse_fac, sparse_inertia) =
-        factorize_multifrontal(&csc, &sym, &sparse_p).expect("factorize");
     let sparse_x = solve_sparse_refined(&csc, &sparse_fac, &rhs).expect("solve");
     let sparse_res = rel_residual(&csc, &sparse_x, &rhs);
     let matches = mumps

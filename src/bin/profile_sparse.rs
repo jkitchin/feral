@@ -81,11 +81,11 @@ fn run_one(family: &str, sample: &str, base: &str) {
     let n = csc.n;
     let nnz = csc.row_idx.len();
     let snode_params = SupernodeParams::default();
-    let factor_params = BunchKaufmanParams {
+    let factor_params = feral::numeric::factorize::NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
-    };
+    });
 
     // Stage timings. For symbolic + factor, use few iters since they
     // mutate global allocator state and we mostly care about ratios.

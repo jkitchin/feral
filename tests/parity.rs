@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use feral::numeric::factorize::factorize_multifrontal;
+use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
 use feral::numeric::solve::solve_sparse_refined;
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{read_mtx, read_sidecar, BunchKaufmanParams, CscMatrix, Inertia, ZeroPivotAction};
@@ -18,12 +18,12 @@ use feral::{read_mtx, read_sidecar, BunchKaufmanParams, CscMatrix, Inertia, Zero
 const K_RESIDUAL: f64 = 10.0;
 const ABS_FLOOR: f64 = 1e-14;
 
-fn ldlt_params() -> BunchKaufmanParams {
-    BunchKaufmanParams {
+fn ldlt_params() -> NumericParams {
+    NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
-    }
+    })
 }
 
 fn rel_residual(a: &CscMatrix, x: &[f64], b: &[f64]) -> f64 {

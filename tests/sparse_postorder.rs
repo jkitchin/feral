@@ -7,18 +7,18 @@
 //!
 //! See dev/research/postorder-pipeline.md for the full explanation.
 
-use feral::numeric::factorize::factorize_multifrontal;
+use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{
     factor, read_mtx, read_sidecar, BunchKaufmanParams, CscMatrix, Inertia, ZeroPivotAction,
 };
 use std::path::Path;
 
-fn ldlt_params() -> BunchKaufmanParams {
-    BunchKaufmanParams {
+fn ldlt_params() -> NumericParams {
+    NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         ..BunchKaufmanParams::default()
-    }
+    })
 }
 
 /// Hand-built bordered KKT:
@@ -66,7 +66,7 @@ fn bordered_kkt_4x4_dense_oracle() {
     // If this fails, the test oracle is wrong, not the sparse code.
     let (csc, expected) = bordered_kkt_4x4();
     let dense = csc.to_dense();
-    let (_, inertia) = factor(&dense, &ldlt_params()).expect("dense factor");
+    let (_, inertia) = factor(&dense, &ldlt_params().bk).expect("dense factor");
     assert_eq!(
         inertia, expected,
         "dense oracle is wrong: got {} expected {}",
@@ -155,7 +155,7 @@ fn two_constraint_bordered_kkt() -> (CscMatrix, Inertia) {
 fn two_constraint_bordered_dense_oracle() {
     let (csc, expected) = two_constraint_bordered_kkt();
     let dense = csc.to_dense();
-    let (_, inertia) = factor(&dense, &ldlt_params()).expect("dense factor");
+    let (_, inertia) = factor(&dense, &ldlt_params().bk).expect("dense factor");
     assert_eq!(inertia, expected, "dense oracle wrong: got {}", inertia);
 }
 
@@ -207,7 +207,7 @@ fn mgh10s_sparse_inertia_matches_sidecar() {
 
     // Dense oracle should already match
     let dense = mtx.to_dense();
-    let (_, dense_inertia) = factor(&dense, &ldlt_params()).expect("dense factor");
+    let (_, dense_inertia) = factor(&dense, &ldlt_params().bk).expect("dense factor");
     assert_eq!(
         dense_inertia, expected,
         "dense path is broken on MGH10S_0000 — investigate before postorder claims"

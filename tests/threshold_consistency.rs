@@ -11,7 +11,7 @@
 //!
 //! See dev/plans/threshold-mismatch-fix.md.
 
-use feral::numeric::factorize::factorize_multifrontal;
+use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
 use feral::numeric::solve::{solve_sparse, solve_sparse_refined};
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{
@@ -25,6 +25,10 @@ fn ldlt_params() -> BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         ..BunchKaufmanParams::default()
     }
+}
+
+fn sparse_params() -> NumericParams {
+    NumericParams::with_bk(ldlt_params())
 }
 
 fn rel_residual_dense(a: &SymmetricMatrix, x: &[f64], b: &[f64]) -> f64 {
@@ -140,7 +144,7 @@ fn sparse_solve_skips_zero_pivots_rank_deficient() {
     .unwrap();
     let sym = symbolic_factorize(&csc, &SupernodeParams::default()).expect("symbolic");
     let (factors, inertia) =
-        factorize_multifrontal(&csc, &sym, &ldlt_params()).expect("sparse factor");
+        factorize_multifrontal(&csc, &sym, &sparse_params()).expect("sparse factor");
     assert!(
         inertia.zero <= 1 && inertia.positive >= 2,
         "unexpected sparse inertia {}",
@@ -231,7 +235,7 @@ fn polak6_0021_residual_after_threshold_fix() {
 
     // Sparse path
     let sym = symbolic_factorize(&csc, &SupernodeParams::default()).expect("symbolic");
-    let (sfac, _) = factorize_multifrontal(&csc, &sym, &ldlt_params()).expect("sparse factor");
+    let (sfac, _) = factorize_multifrontal(&csc, &sym, &sparse_params()).expect("sparse factor");
     let xs = solve_sparse_refined(&csc, &sfac, &rhs).expect("solve_sparse_refined");
     let rs = rel_residual_csc(&csc, &xs, &rhs);
     assert!(

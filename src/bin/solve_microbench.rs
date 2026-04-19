@@ -24,11 +24,11 @@ fn run(family: &str, sample: &str) {
     let n = csc.n;
 
     let snode_params = SupernodeParams::default();
-    let factor_params = BunchKaufmanParams {
+    let factor_params = feral::numeric::factorize::NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
-    };
+    });
     let sym = symbolic_factorize(&csc, &snode_params).expect("sym");
     let (factors, _) = factorize_multifrontal(&csc, &sym, &factor_params).expect("fac");
     let rhs = vec![1.0_f64; n];

@@ -19,12 +19,11 @@
 use std::path::Path;
 use std::time::Instant;
 
-use feral::numeric::factorize::factorize_multifrontal;
+use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
 use feral::ordering::amd::{amd_order, permute_pattern};
 use feral::ordering::elimination_tree::EliminationTree;
 use feral::ordering::postorder::postorder;
 use feral::read_mtx;
-use feral::scaling;
 use feral::sparse::csc::CscMatrix;
 use feral::symbolic::column_counts::{column_counts, total_factor_nnz};
 use feral::symbolic::supernode::{find_supernodes, SupernodeParams};
@@ -65,14 +64,10 @@ fn timed_symbolic(
 
     let t_total = Instant::now();
 
-    // Phase 1: MC64 scaling
-    let t0 = Instant::now();
-    let (scaling_user, scaling_info) =
-        match scaling::compute_scaling(matrix, &snode_params.scaling_strategy) {
-            Ok(pair) => pair,
-            Err(_) => return None,
-        };
-    let mc64_us = t0.elapsed().as_micros();
+    // Phase 1: MC64 scaling now lives in the numeric phase (β refactor);
+    // this column is preserved as zero so the report layout is stable.
+    let _ = snode_params;
+    let mc64_us = 0u128;
 
     // Phase 2: AMD ordering (symmetric_pattern + amd_order)
     let t0 = Instant::now();
@@ -102,12 +97,11 @@ fn timed_symbolic(
     let factor_nnz = total_factor_nnz(&col_counts);
     let colcnt_us = t0.elapsed().as_micros();
 
-    // Phase 5: supernode detection + peak contrib + scaling_pivot_order
+    // Phase 5: supernode detection + peak contrib
     let t0 = Instant::now();
     let supernodes = find_supernodes(&etree, &col_counts, snode_params);
     let contrib_sizes: Vec<usize> = supernodes.iter().map(|s| s.contrib_size()).collect();
     let peak_contrib_bytes = compute_peak_contrib(&supernodes, &contrib_sizes);
-    let scaling_pivot_order: Vec<f64> = perm.iter().map(|&old| scaling_user[old]).collect();
     let snode_us = t0.elapsed().as_micros();
 
     let sym_total_us = t_total.elapsed().as_micros();
@@ -125,9 +119,6 @@ fn timed_symbolic(
         etree,
         permuted_pattern,
         col_counts,
-        scaling: scaling_user,
-        scaling_pivot_order,
-        scaling_info,
     };
 
     let times = PhaseTimes {
@@ -186,11 +177,11 @@ fn main() {
     }
 
     let snode_params = SupernodeParams::default();
-    let params = BunchKaufmanParams {
+    let params = NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
-    };
+    });
 
     let mut rows: Vec<Row> = Vec::new();
     let mut n_considered = 0usize;

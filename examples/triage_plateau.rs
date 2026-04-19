@@ -215,15 +215,15 @@ fn solve_refined_verbose(
     best_x
 }
 
-fn params() -> BunchKaufmanParams {
+fn params() -> feral::numeric::factorize::NumericParams {
     // Phase 2.3: restored pivot_threshold = 0.01 now that delayed
     // pivoting is in place. Matches bench::params_kkt and the
     // parity panel template in select_parity_panel.rs.
-    BunchKaufmanParams {
+    feral::numeric::factorize::NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
-    }
+    })
 }
 
 fn read_oracle(path: &Path) -> Option<(Inertia, f64)> {
@@ -279,10 +279,7 @@ fn triage(stem: &str) {
 
     for nemin in [32usize, 10000] {
         println!("\n  --- nemin={} ---", nemin);
-        let snp = SupernodeParams {
-            nemin,
-            ..Default::default()
-        };
+        let snp = SupernodeParams { nemin };
         let t = Instant::now();
         let sym = symbolic_factorize(&csc, &snp).expect("symbolic");
         println!(

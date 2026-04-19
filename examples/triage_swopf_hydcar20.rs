@@ -95,13 +95,13 @@ fn run(stem: &str) {
     ];
 
     for (label, strategy, threshold) in configs {
-        let snp = SupernodeParams {
-            scaling_strategy: strategy,
-            ..Default::default()
-        };
+        let snp = SupernodeParams::default();
         let sym = symbolic_factorize(&csc, &snp).expect("symbolic");
-        let (fac, inertia) =
-            factorize_multifrontal(&csc, &sym, &params(threshold)).expect("factor");
+        let np = feral::numeric::factorize::NumericParams {
+            bk: params(threshold),
+            scaling: strategy,
+        };
+        let (fac, inertia) = factorize_multifrontal(&csc, &sym, &np).expect("factor");
         let x = solve_sparse_refined(&csc, &fac, &rhs).expect("solve");
         let res = rel_residual(&csc, &x, &rhs);
         let zero_frac = inertia.zero as f64 / csc.n as f64;
