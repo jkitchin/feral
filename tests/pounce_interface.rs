@@ -5,7 +5,7 @@
 //! Solver grows: this file lands the Step-2 set (I1, I5, I6) and
 //! grows in subsequent commits.
 
-use feral::{CscMatrix, FactorStatus, Solver};
+use feral::{CscMatrix, FactorStatus, Inertia, Solver};
 
 /// I1 — baseline factor without inertia check.
 ///
@@ -95,4 +95,57 @@ fn i6_same_pattern_reuses_symbolic() {
     // Sanity: the second factor's diagonal matches B (not A).
     let factors = solver.factors().expect("factors stored");
     assert_eq!(factors.n, 3);
+}
+
+/// I2 — `factor` with the correct inertia returns `Success`.
+#[test]
+fn i2_factor_with_correct_inertia_returns_success() {
+    // diag(2, 3, 5): all positive, inertia (3, 0, 0).
+    let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
+    let expected = Inertia {
+        positive: 3,
+        negative: 0,
+        zero: 0,
+    };
+
+    let mut solver = Solver::new();
+    let status = solver.factor(&csc, Some(expected));
+    assert!(matches!(status, FactorStatus::Success), "got {:?}", status);
+    assert_eq!(solver.num_negative_eigenvalues(), 0);
+}
+
+/// I3 — `factor` with the wrong inertia returns `WrongInertia`
+/// AND keeps the factor stored (Ipopt SYMSOLVER_WRONG_INERTIA
+/// semantics).
+#[test]
+fn i3_factor_with_wrong_inertia_returns_wronginertia_keeps_factor() {
+    // diag(2, 3, 5): actual inertia (3, 0, 0).
+    let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
+    let wrong = Inertia {
+        positive: 2,
+        negative: 1,
+        zero: 0,
+    };
+
+    let mut solver = Solver::new();
+    let status = solver.factor(&csc, Some(wrong.clone()));
+
+    match status {
+        FactorStatus::WrongInertia { actual, expected } => {
+            assert_eq!(
+                actual,
+                Inertia {
+                    positive: 3,
+                    negative: 0,
+                    zero: 0
+                }
+            );
+            assert_eq!(expected, wrong);
+        }
+        other => panic!("expected WrongInertia, got {:?}", other),
+    }
+
+    // Factor still stored — caller may inspect / solve against it.
+    assert!(solver.factors().is_some());
+    assert_eq!(solver.num_negative_eigenvalues(), 0);
 }

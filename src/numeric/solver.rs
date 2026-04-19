@@ -119,7 +119,7 @@ impl Solver {
     /// returns `WrongInertia { actual, expected }` on mismatch
     /// without invalidating the stored factor (caller may still
     /// `solve` against it). See plan §`factor()` flow.
-    pub fn factor(&mut self, matrix: &CscMatrix, _check_inertia: Option<Inertia>) -> FactorStatus {
+    pub fn factor(&mut self, matrix: &CscMatrix, check_inertia: Option<Inertia>) -> FactorStatus {
         // Step 1: pattern fingerprint.
         let fp = PatternFingerprint::of(matrix);
 
@@ -157,9 +157,21 @@ impl Solver {
                     crate::scaling::ScalingInfo::PartialSingular { .. }
                 );
                 self.last_factors = Some(factors);
-                self.last_inertia = Some(inertia);
+                self.last_inertia = Some(inertia.clone());
                 if partial_singular {
                     FactorStatus::Singular
+                } else if let Some(expected) = check_inertia {
+                    if inertia == expected {
+                        FactorStatus::Success
+                    } else {
+                        // Keep the factor stored — caller may
+                        // still solve() against it. Mirrors Ipopt
+                        // SYMSOLVER_WRONG_INERTIA semantics.
+                        FactorStatus::WrongInertia {
+                            actual: inertia,
+                            expected,
+                        }
+                    }
                 } else {
                     FactorStatus::Success
                 }
