@@ -327,3 +327,100 @@ defensible answer.
 
 No production code change. cargo test --release --lib still 106
 passing. clippy + fmt clean.
+
+* 23:30 :measurement:lever-c:scaling:bench:dump:diff:verdict-cross-ref:
+Built the per-matrix dump infrastructure the POLAK6 note flagged
+as the prerequisite for the lever-C policy decision, ran it under
+all three scaling policies, and cross-referenced every regression
+against its .verdict.json.
+
+** Implementation
+
+- src/bin/bench.rs: added FERAL_BENCH_DUMP env var. When set,
+  writes one CSV row per matrix with columns name, n, factor_us,
+  solve_us, exp_(p,n,z), act_(p,n,z), inertia_ok, rel_res,
+  residual_ok. Row write happens after residual computation but
+  before sparse_failures.push (the latter moves sp_inertia).
+
+- src/bin/dump_diff.rs (new): loads three CSVs (baseline, mc64,
+  adaptive), enumerates regressions (residual_ok 1→0 and
+  inertia_ok 1→0) for Policies 2 and 3, parses each matrix's
+  .verdict.json for inertia_agreement and verdict via a small
+  substring scan (no serde dep). Prints a per-matrix table plus
+  histograms by inertia_agreement and verdict.
+
+** Bench runs (FERAL_SCALING={infnorm,mc64,adaptive})
+
+154 588 matrices each. Per-policy summary:
+
+|                          | base   | Pol 2 | Pol 3 |
+|--------------------------+--------+-------+-------|
+| residual passes          | 154241 |154225 |154232 |
+| inertia passes           | 153008 |153007 |153009 |
+| net residual delta       |   0    |  −16  |   −9  |
+| net inertia delta        |   0    |   −1  |   +1  |
+| unique regressed matrices|   —    |   80  |   22  |
+
+** Diff cross-reference findings
+
+Policy 2 (blanket MC64): 80 unique regressed matrices.
+  by inertia_agreement: strong=77 weak=2 none=1
+  by verdict.verdict:   numerically_intractable=46 definitive=32
+                        excluded=1 borderline=1
+  Of the 32 'definitive' regressions, 31 are tiny CUTEst residuals
+  (n ∈ {3, 5, 6, 7, 8}) where baseline rel_res ∈ [3.10e-10,
+  1.53e-9] and policy rel_res ∈ [8.62e-10, 4.42e-9] — the
+  pass-threshold for these tiny n is ~1e-9, so this is threshold
+  jiggle, not real digit loss. The 32nd is MSS1_0009.
+
+Policy 3 (adaptive): 22 unique regressed matrices.
+  by inertia_agreement: strong=20 weak=1 none=1
+  by verdict.verdict:   numerically_intractable=14 definitive=6
+                        excluded=1 borderline=1
+  5 of the 6 'definitive' are tiny threshold jiggle. The 6th is
+  MSS1_0009 again (n=163, baseline 6.31e-12 → policy 9.96e-7).
+  POLAK6_0021 is the 'excluded' (already characterized).
+
+** The MSS1_0009 question
+
+It's a strongly-agreeing definitive matrix (oracles consensus
+inertia (90, 73, 0)) with feral_match_inertia=true and
+feral_residual_pass=true at baseline. Policy 3 jumps it to 9.96e-7.
+
+Per the user's call, NOT a deep bug indicator: the bench harness
+runs no iterative refinement, and a 1e-7 LDLᵀ residual is well
+within what refinement (or an outer Ipopt step) recovers to ~1e-14
+in practice. Almost certainly the same family as POLAK6 (matched-
+but-bad MC64) but on a matrix the corpus oracles all agree on.
+
+Decision: keep InfNorm as the production default; ship Auto as
+opt-in (FERAL_SCALING=adaptive + ScalingStrategy::Auto public
+variant). Defer MSS1_0009 triage until we have an integration
+consumer (Ipopt or similar) that exercises refinement end-to-end.
+Recorded in tasks.org as a follow-up item.
+
+** Why this reframes the corpus-bench note
+
+The earlier note's 'do NOT flip default' was based on raw
+pass-count deltas + the POLAK6 anomaly. The diff data shows the
+−9 Policy 3 residual delta is dominated by:
+  - 14 numerically_intractable (corpus oracles agree the matrix
+    is hard to solve well; threshold jiggle is expected)
+  - 5 'definitive' threshold-jigglers on n ≤ 8
+  - 1 'excluded' (POLAK6 — oracles disagree)
+  - 1 real consensus regression (MSS1_0009)
+Net inertia is +1 (better than baseline). The recommendation
+'wait for Policy 4' was over-cautious given the actual regression
+shape.
+
+** Files
+
+- src/bin/bench.rs (FERAL_BENCH_DUMP env var)
+- src/bin/dump_diff.rs (new)
+- dev/results/lever-c/dump-{baseline,mc64,adaptive}.csv (raw data)
+- dev/research/lever-c-policy-diff-2026-04-19.md (analysis)
+- tasks.org (MSS1_0009 backlog entry)
+- this journal append
+
+No production code change. cargo test --release --lib: 106 passing.
+clippy + fmt clean.

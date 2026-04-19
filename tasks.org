@@ -29,6 +29,29 @@ and others. I think we might try to build standalone rust libraries for each of 
   - Next step if pursued: dev/plans/feral-metis-hemsr-coarsening.md
     (or similar) — NOT a dedicated crate plan.
 
+* TODO follow-up: MSS1_0009 MC64-pathology triage (defer until after integration)
+  - Context: dev/research/lever-c-policy-diff-2026-04-19.md.
+  - Single non-jiggle non-excluded regression in Policy 3 (adaptive
+    scaling): MSS1_0009 (n=163), baseline rel_res 6.31e-12 →
+    Policy 3 rel_res 9.96e-7. All four oracles agree on inertia
+    (90, 73, 0); verdict: definitive; agreement: strong.
+  - Likely "matched-but-bad" MC64 of the POLAK6 family but on a
+    larger, more interesting matrix.
+  - NOT a deep bug. Iterative refinement in a real outer solve
+    loop (Ipopt, our own solve_sparse_refined) almost certainly
+    recovers 9.96e-7 to acceptable. The bench just doesn't refine.
+  - Defer until: (a) we have integration with an outer-iteration
+    consumer that exercises refinement end-to-end, OR (b) we ship
+    the lever-C scaling-default flip and MSS1_0009 actually
+    surfaces in a downstream consumer.
+  - When picked up: clone src/bin/polak6_diag.rs against
+    data/matrices/kkt/MSS1/MSS1_0009.mtx; check raw |diag| range,
+    scaled |diag| range under InfNorm vs MC64, and per-column
+    max(|off|/|diag|).
+  - Decision deferred: lever-C scaling-default flip (Auto vs
+    InfNorm). Current: keep InfNorm. Revisit alongside the
+    triage above.
+
 * TODO follow-up: adaptive ordering dispatcher
   - User request 2026-04-18-03 (session priority-list item 5).
   - Observation from dev/research/ordering-bakeoff-2026-04-18.md:

@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use feral::numeric::factorize::factorize_multifrontal;
@@ -882,6 +884,21 @@ fn ordering_method_from_env() -> Option<OrderingMethod> {
     }
 }
 
+/// Reads `FERAL_BENCH_DUMP=path.csv` and returns the path if set.
+/// When set, the sparse loop writes one CSV row per matrix
+/// containing the policy-evaluated metrics (factor_us, inertia,
+/// rel_res, residual_ok, inertia_ok) needed to diff regressions
+/// across policies. See
+/// `dev/research/lever-c-corpus-bench-2026-04-19.md` §4 follow-up.
+fn bench_dump_path_from_env() -> Option<PathBuf> {
+    let v = std::env::var("FERAL_BENCH_DUMP").unwrap_or_default();
+    if v.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(v))
+    }
+}
+
 /// Reads `FERAL_SCALING={infnorm,mc64,adaptive}` and returns an
 /// override for `SupernodeParams::scaling_strategy`. Unset → `None`,
 /// which preserves the current production default exactly. The
@@ -922,6 +939,31 @@ fn main() {
         Some(s) => println!("  scaling: {:?} (forced via FERAL_SCALING)", s),
         None => println!("  scaling: default (SupernodeParams::default)"),
     }
+    let dump_path = bench_dump_path_from_env();
+    let mut dump_writer = if let Some(p) = &dump_path {
+        match File::create(p).map(BufWriter::new) {
+            Ok(mut w) => {
+                if let Err(e) = writeln!(
+                    w,
+                    "name,n,factor_us,solve_us,exp_p,exp_n,exp_z,act_p,act_n,act_z,inertia_ok,rel_res,residual_ok"
+                ) {
+                    eprintln!("warning: failed to write CSV header: {}", e);
+                }
+                println!("  dump:    {}", p.display());
+                Some(w)
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to open FERAL_BENCH_DUMP path {}: {}",
+                    p.display(),
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let config_path = Path::new("data/benchmark-config.toml");
     print!("Loading matrices from {} ... ", config_path.display());
@@ -1295,6 +1337,31 @@ fn main() {
             sp_worst_name = entry.name.clone();
         }
 
+        if let Some(w) = dump_writer.as_mut() {
+            // CSV row schema matches the header written at file open.
+            // Errors here are logged once, not aborted — the bench
+            // should still complete its summary tables.
+            if let Err(e) = writeln!(
+                w,
+                "{},{},{},{},{},{},{},{},{},{},{},{:.6e},{}",
+                entry.name,
+                n,
+                sp_factor_us,
+                sp_solve_us,
+                expected_inertia.positive,
+                expected_inertia.negative,
+                expected_inertia.zero,
+                sp_inertia.positive,
+                sp_inertia.negative,
+                sp_inertia.zero,
+                if inertia_ok { 1 } else { 0 },
+                rel_res,
+                if residual_ok { 1 } else { 0 },
+            ) {
+                eprintln!("warning: CSV write failed for {}: {}", entry.name, e);
+            }
+        }
+
         if !inertia_ok || !residual_ok {
             sparse_failures.push(Failure {
                 name: entry.name.clone(),
@@ -1305,6 +1372,11 @@ fn main() {
                 residual: rel_res,
                 residual_ok,
             });
+        }
+    }
+    if let Some(mut w) = dump_writer.take() {
+        if let Err(e) = w.flush() {
+            eprintln!("warning: CSV flush failed: {}", e);
         }
     }
 
