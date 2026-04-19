@@ -14,6 +14,10 @@ pub enum FeralError {
 
     /// An I/O or parse error occurred (e.g. reading a Matrix Market file).
     IoError(String),
+
+    /// `Solver::solve` (or `solve_refined`) was called before any
+    /// successful factorization. Call `factor()` first.
+    NoFactor,
 }
 
 impl std::fmt::Display for FeralError {
@@ -27,6 +31,9 @@ impl std::fmt::Display for FeralError {
                 write!(f, "dimension mismatch: expected {}, got {}", expected, got)
             }
             FeralError::IoError(msg) => write!(f, "I/O error: {}", msg),
+            FeralError::NoFactor => {
+                write!(f, "no factorization available; call Solver::factor() first")
+            }
         }
     }
 }

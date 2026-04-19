@@ -27,4 +27,5 @@ pub use io::mtx::{parse_mtx, read_mtx, MtxMatrix};
 pub use io::sidecar::{read_sidecar, KktSidecar, SidecarInertia};
 pub use numeric::factorize::NumericParams;
 pub use numeric::solve::{solve_sparse, solve_sparse_refined};
+pub use numeric::solver::{FactorStatus, QualityLevel, Solver};
 pub use sparse::csc::{CscMatrix, CscPattern};
