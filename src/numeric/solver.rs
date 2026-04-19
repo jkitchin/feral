@@ -13,6 +13,7 @@
 use crate::error::FeralError;
 use crate::inertia::Inertia;
 use crate::numeric::factorize::{factorize_multifrontal, NumericParams, SparseFactors};
+use crate::numeric::solve::{solve_sparse, solve_sparse_refined};
 use crate::scaling::ScalingStrategy;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::supernode::SupernodeParams;
@@ -189,16 +190,25 @@ impl Solver {
         }
     }
 
-    /// Solve `A x = b` against the most recent successful factor.
+    /// Solve `A x = b` against the most recent stored factor.
     /// Returns `FeralError::NoFactor` if no factor is stored.
-    pub fn solve(&self, _rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
-        unimplemented!("Solver::solve — implemented in Step 6")
+    /// `WrongInertia` does *not* clear the factor, so this remains
+    /// callable in that state (caller's choice).
+    pub fn solve(&self, rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
+        match &self.last_factors {
+            Some(f) => solve_sparse(f, rhs),
+            None => Err(FeralError::NoFactor),
+        }
     }
 
-    /// Solve with iterative refinement against the original matrix.
-    /// Returns `FeralError::NoFactor` if no factor is stored.
-    pub fn solve_refined(&self, _matrix: &CscMatrix, _rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
-        unimplemented!("Solver::solve_refined — implemented in Step 6")
+    /// Solve with iterative refinement against the original matrix
+    /// and the stored factor. Returns `FeralError::NoFactor` if no
+    /// factor is stored.
+    pub fn solve_refined(&self, matrix: &CscMatrix, rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
+        match &self.last_factors {
+            Some(f) => solve_sparse_refined(matrix, f, rhs),
+            None => Err(FeralError::NoFactor),
+        }
     }
 
     /// Two-stage quality escalation. Persistent across `factor()`
