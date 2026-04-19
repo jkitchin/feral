@@ -64,3 +64,43 @@ Top factor outliers from this run:
   VESUVIO_0021   81.4x
   CRESC132_0000  43.6x        (down from 521x in session 07)
   MUONSINE_0000  60.9x        (n=1537, may be next investigation)
+
+* 15:10 :vesuvio:diag:ordering:dense-kernel:
+Picked priority #2 from session 07: VESUVIOU factor outlier. Built
+`src/bin/vesuvio_diag.rs` mirroring the cresc_diag pattern. Ran on
+5 VESUVIO samples + CRESC132 as reference.
+
+Results (AMD vs METIS factor time, root frontal size, delays):
+  VESUVIOU_0000 n=3083  AMD 236ms  METIS 224ms (-5%)  root 67% (both)
+  VESUVIOU_0005 n=3083  AMD 179ms  METIS 165ms (-8%)  root 67%
+  VESUVIO_0000  n=3083  AMD  60ms  METIS  67ms (SLOWER) root 67%
+  VESUVIO_0021  n=3083  AMD 193ms  METIS 203ms (SLOWER) root 67%
+  VESUVIA_0000  n=3083  AMD  91ms  METIS 104ms (SLOWER) root 67%
+  (reference)
+  CRESC132_0000 n=5314  AMD 5540ms METIS 463ms (-92%)  root 96%→50%
+
+Unlike CRESC, METIS does NOT help VESUVIO. Both orderings produce
+the same 67%-of-n root frontal. The shape:
+  max_col_nnz=1026, diag_only=1025 (trivial slack constraints)
+  => single dense linking column connecting ~1026 variables. AMD
+     and METIS both correctly push it to the root; the resulting
+     dense 2059×959 frontal is unavoidable.
+
+Delays can't explain it either: VESUVIO_0000 has only 142 delays
+out of 3225 attempted pivots, yet still takes 60ms. The cost is
+the dense root BK factorization itself.
+
+Bottleneck is src/dense/factor.rs: scalar rank-1 updates, no
+blocking, no SIMD. Root is O(nrow * ncol^2). On 2059×959:
+  ~1.9 GFLOPs at ~8 GFLOP/s scalar ≈ 240ms  ✓ matches observed
+  MUMPS DGETRF at ~400 GFLOP/s (Accelerate) ≈ 5ms  ✓ matches 2.5ms oracle
+The 50× kernel gap explains the 84× factor ratio (rest is overhead).
+
+Not actionable this session. Closing to MUMPS on dense-root cases
+requires blocked BK + SIMD micro-kernel — multi-session engineering.
+The corpus geomean (0.42) and Phase 2.8.1 partitions are unaffected;
+VESUVIO is tail pathology.
+
+Decision: document in CHANGELOG-alternative ("known limitation"
+line) if a CHANGELOG is warranted, otherwise leave findings in
+the journal and move to priority #3 (KaHIP K1 integration).
