@@ -261,3 +261,69 @@ Files touched this entry:
 - this journal append
 
 Production default unchanged.
+
+* 22:30 :triage:polak6:scaling:mc64:lever-c:
+Triaged POLAK6_0021 per the previous entry's recommendation that
+Policy 4 needs a "matched but bad" diagnostic. Result: POLAK6_0021
+is the wrong test case — it is an oracle-disagreement matrix, not
+a Policy-4 target.
+
+** What was found
+
+src/bin/polak6_diag.rs (new, throwaway) loads POLAK6_0021,
+computes both InfNorm and MC64 scalings, prints scaled-diagonal
+and off/diag ratio statistics, then factors and solves under each.
+
+Raw matrix has |diag| range = 1.32e46 (1e-4 to 1e42). All four
+canonical oracles disagree on inertia:
+  rmumps: (5, 4, 0)   — the sidecar value bench treats as "expected"
+  feral:  (5, 1, 3)   — InfNorm baseline
+  MUMPS:  (5, 1, 3)   — same as feral, residual 1.90e-16
+  SSIDS:  (6, 3, 0)   — different again
+
+Verdict file says inertia_agreement: "none", verdict: "excluded".
+The session-04-19 corpus-bench note's framing of POLAK6 as a
+Policy-4 target was based on the wrong assumption that rmumps =
+ground truth. It is not — feral InfNorm matches MUMPS exactly.
+
+** Why the heuristics fail
+
+Three candidate H1/H2/H3 thresholds (min |scaled diag| < 1e-12,
+range > 1e8, max(|off|/|diag|) > 1e3): all THREE fire under both
+InfNorm AND MC64 on POLAK6. Cannot distinguish "good" from "bad"
+scaling on a matrix whose raw range is 1e46.
+
+| heuristic                    | InfNorm | MC64    | distinguishes? |
+|------------------------------|---------|---------|----------------|
+| min |scaled diag|            | 5.1e-46 | 3.4e-42 | no             |
+| range scaled |diag|          | 1.9e45  | 2.9e41  | no             |
+| max scaled |off|/|diag|      | 1.9e45  | 2.9e41  | no             |
+
+** What this means for Policy 4
+
+The viable Policy-4 designs reduce to:
+  A. Trial factor + retry — empirical, doubled cost on retry set.
+  B. Raw |diag| range pre-filter — skip MC64 if range > 1e10.
+  C. Accept the loss — Policy 3's −9 residual passes are likely
+     all on excluded oracle-disagreement matrices anyway.
+
+Cannot decide between A/B/C without first **enumerating the
+−16 / −9 regression sets** from the lever-C corpus bench and
+cross-referencing each entry against its .verdict.json
+inertia_agreement field. That requires a bench-harness flag to
+dump per-matrix residuals to a file, which doesn't exist yet.
+
+Recommendation in the note: do NOT implement Policy 4 yet. The
+prerequisite is the per-matrix residual dump + cross-reference.
+If the regression set is dominated by 'excluded' matrices,
+Option C (accept the loss, flip default to Auto) becomes the
+defensible answer.
+
+** Files
+
+- src/bin/polak6_diag.rs (new, diagnostic only)
+- dev/research/polak6-triage-2026-04-19.md (the note)
+- this journal append
+
+No production code change. cargo test --release --lib still 106
+passing. clippy + fmt clean.
