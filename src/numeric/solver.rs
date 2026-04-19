@@ -13,6 +13,7 @@
 use crate::error::FeralError;
 use crate::inertia::Inertia;
 use crate::numeric::factorize::{factorize_multifrontal, NumericParams, SparseFactors};
+use crate::scaling::ScalingStrategy;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::supernode::SupernodeParams;
 use crate::symbolic::{symbolic_factorize, SymbolicFactorization};
@@ -80,7 +81,6 @@ impl PatternFingerprint {
 pub struct Solver {
     numeric_params: NumericParams,
     snode_params: SupernodeParams,
-    #[allow(dead_code)] // populated in Step 5 (`increase_quality`)
     pivtol_max: f64,
     quality_level: QualityLevel,
     last_symbolic: Option<SymbolicFactorization>,
@@ -204,8 +204,67 @@ impl Solver {
     /// Two-stage quality escalation. Persistent across `factor()`
     /// calls. Returns `false` when both stages are exhausted.
     /// Mirrors `IpTSymLinearSolver::IncreaseQuality`.
+    ///
+    /// Stage 1 (`Baseline → ScalingEnabled`): if scaling strategy
+    /// is `Identity`, flip to `InfNorm` (FERAL default). Skipped
+    /// if scaling is already non-`Identity`.
+    ///
+    /// Stage 2 (`* → PivotRaised → Exhausted`): bump
+    /// `bk.pivot_threshold`. From 0.0 jump to 0.01 (W5 special
+    /// case); else `min(pivtol_max, threshold^0.75)`. When the
+    /// new threshold reaches `pivtol_max`, transition to
+    /// `Exhausted` for the *next* call.
     pub fn increase_quality(&mut self) -> bool {
-        unimplemented!("Solver::increase_quality — implemented in Step 5")
+        const FIRST_PIVOT_THRESHOLD: f64 = 0.01;
+        const PIVOT_EXPONENT: f64 = 0.75;
+        const EPS_CAP: f64 = 1e-12;
+
+        match self.quality_level {
+            QualityLevel::Exhausted => false,
+            QualityLevel::Baseline => {
+                // Stage 1: flip Identity → InfNorm if applicable.
+                if matches!(self.numeric_params.scaling, ScalingStrategy::Identity) {
+                    self.numeric_params.scaling = ScalingStrategy::InfNorm;
+                    self.quality_level = QualityLevel::ScalingEnabled;
+                    true
+                } else {
+                    // Stage 1 is a no-op; fall through to stage 2.
+                    self.bump_pivot_threshold(FIRST_PIVOT_THRESHOLD, PIVOT_EXPONENT, EPS_CAP);
+                    true
+                }
+            }
+            QualityLevel::ScalingEnabled | QualityLevel::PivotRaised => {
+                self.bump_pivot_threshold(FIRST_PIVOT_THRESHOLD, PIVOT_EXPONENT, EPS_CAP);
+                true
+            }
+        }
+    }
+
+    /// Apply the stage-2 pivot rule and update `quality_level`.
+    /// Caller has already decided that stage 2 should fire and
+    /// that `Exhausted` is not the current state.
+    fn bump_pivot_threshold(&mut self, first_jump: f64, exponent: f64, eps_cap: f64) {
+        let pivtol = &mut self.numeric_params.bk.pivot_threshold;
+        if *pivtol == 0.0 {
+            *pivtol = first_jump;
+        } else {
+            *pivtol = pivtol.powf(exponent).min(self.pivtol_max);
+        }
+        self.quality_level = if *pivtol >= self.pivtol_max - eps_cap {
+            QualityLevel::Exhausted
+        } else {
+            QualityLevel::PivotRaised
+        };
+    }
+
+    /// Test/diagnostic accessor for the current pivot threshold.
+    pub fn pivot_threshold(&self) -> f64 {
+        self.numeric_params.bk.pivot_threshold
+    }
+
+    /// Test/diagnostic accessor for the current scaling strategy.
+    pub fn scaling_strategy(&self) -> &ScalingStrategy {
+        &self.numeric_params.scaling
     }
 
     /// Number of negative eigenvalues from the last factor.
@@ -247,5 +306,94 @@ impl Solver {
 impl Default for Solver {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dense::factor::BunchKaufmanParams;
+
+    fn solver_with_scaling(scaling: ScalingStrategy) -> Solver {
+        let np = NumericParams {
+            bk: BunchKaufmanParams::default(),
+            scaling,
+        };
+        Solver::with_params(np, SupernodeParams::default())
+    }
+
+    /// U1 — Baseline + Identity scaling: stage 1 fires.
+    #[test]
+    fn u1_increase_quality_baseline_identity_to_scaling_enabled() {
+        let mut s = solver_with_scaling(ScalingStrategy::Identity);
+        assert_eq!(s.quality_level(), QualityLevel::Baseline);
+        assert_eq!(s.pivot_threshold(), 0.0);
+
+        assert!(s.increase_quality());
+
+        assert!(matches!(s.scaling_strategy(), ScalingStrategy::InfNorm));
+        assert_eq!(s.pivot_threshold(), 0.0, "stage 1 must not touch pivot");
+        assert_eq!(s.quality_level(), QualityLevel::ScalingEnabled);
+    }
+
+    /// U2 — Baseline + non-Identity scaling: stage 1 is a no-op,
+    /// fall through to stage 2.
+    #[test]
+    fn u2_increase_quality_baseline_nonidentity_skips_to_pivot_raised() {
+        let mut s = solver_with_scaling(ScalingStrategy::InfNorm);
+        assert_eq!(s.quality_level(), QualityLevel::Baseline);
+
+        assert!(s.increase_quality());
+
+        assert_eq!(s.pivot_threshold(), 0.01, "first jump rule");
+        assert_eq!(s.quality_level(), QualityLevel::PivotRaised);
+    }
+
+    /// U3 — Subsequent pivot bumps follow the geometric rule.
+    #[test]
+    fn u3_increase_quality_pivot_geometric_rule() {
+        let mut s = solver_with_scaling(ScalingStrategy::InfNorm);
+        s.numeric_params.bk.pivot_threshold = 0.01;
+        s.quality_level = QualityLevel::PivotRaised;
+
+        assert!(s.increase_quality());
+        let want = 0.01_f64.powf(0.75);
+        assert!(
+            (s.pivot_threshold() - want).abs() < 1e-15,
+            "got {}",
+            s.pivot_threshold()
+        );
+        assert_eq!(s.quality_level(), QualityLevel::PivotRaised);
+    }
+
+    /// U4 — Pivot bump caps at `pivtol_max` and transitions to
+    /// `Exhausted`; the next call returns `false`.
+    #[test]
+    fn u4_increase_quality_caps_at_pivtol_max_then_exhausts() {
+        let mut s = solver_with_scaling(ScalingStrategy::InfNorm);
+        s.numeric_params.bk.pivot_threshold = 0.49;
+        s.quality_level = QualityLevel::PivotRaised;
+
+        // 0.49^0.75 ≈ 0.585, capped to pivtol_max = 0.5.
+        assert!(s.increase_quality());
+        assert_eq!(s.pivot_threshold(), 0.5);
+        assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+
+        assert!(!s.increase_quality());
+        assert_eq!(s.pivot_threshold(), 0.5);
+        assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+    }
+
+    /// U5 — Repeated calls always terminate at `Exhausted` in
+    /// finitely many steps.
+    #[test]
+    fn u5_increase_quality_exhausted_returns_false() {
+        let mut s = solver_with_scaling(ScalingStrategy::Identity);
+        let mut steps = 0;
+        while s.increase_quality() {
+            steps += 1;
+            assert!(steps < 20, "did not exhaust within 20 steps");
+        }
+        assert_eq!(s.quality_level(), QualityLevel::Exhausted);
     }
 }
