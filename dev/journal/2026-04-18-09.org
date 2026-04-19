@@ -1,0 +1,44 @@
+#+TITLE: FERAL session 2026-04-18-09
+#+DATE: <2026-04-18>
+
+* 17:10 :research:dense-kernel:vesuvio:planning:
+Authored dev/research/dense-kernel-vesuvio-tail.md per the
+session-08 checkpoint "Next Session Should" #1 (blocked BK +
+SIMD micro-kernel for src/dense/factor.rs, multi-session, plan
+first).
+
+Note pulls together:
+- Stale state of the existing 2.4.1 / 2.4.2 plans (drafted
+  2026-04-14, before NEON unroll4_nofma was wired into
+  do_1x1_update / do_2x2_update on aarch64).
+- The 2.4.1a tried-and-rejected verdict ("loop reordering
+  without a SIMD kernel is overhead") was correct at the time
+  but predates the NEON kernel; it should be re-examined.
+- VESUVIO-class workload measurements from session 08 (4
+  matrices, all 67%-of-n root, 60-84x MUMPS factor ratio).
+- Cost model: M-series at ~12-14 GF/s on the rank-1 cascade
+  vs Accelerate-DGEMM at ~400 GF/s = ~50x kernel-throughput
+  gap, which is exactly the factor ratio.
+
+Three candidate levers identified:
+- A: wider/FMA-fixed SIMD (no blocking) — bounded by AXPY
+  bandwidth, ceiling ~2x.
+- B: blocked outer driver (faer-style 2.4.1b) — BLAS-2 to
+  BLAS-3 reformulation, ceiling ~10x with register tiling.
+- C: arrow-KKT structural fix in symbolic — out-of-scope for
+  dense kernel work, flagged for separate note if A+B stall.
+
+Recommended next step is *not* code: a 1-2 hour measurement
+pass (existing schur_kernel microbench + a per-section breakdown
+of factor cost in vesuvio_diag + a throwaway lever-B prototype
+on a 1024x1024 trailing block). If the prototype wins ≥3x in
+isolation, commit to the full 2.4.1b plan; otherwise pursue
+lever A only via the existing 2.4.2 plan with an unroll8 / x86_64
+addendum.
+
+The note explicitly defers writing a fresh plan until measurement
+data exists. It also documents what the note does NOT cover (K1
+preprocessor, HEMSR, vendor BLAS) so a future session reading it
+cold understands the scope boundary.
+
+No code changed; no behavior change; no benchmark needed.
