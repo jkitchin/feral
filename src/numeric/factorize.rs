@@ -109,6 +109,54 @@ pub struct NodeFactors {
     pub inertia: Inertia,
 }
 
+/// Caller-owned scratch pool for sparse numeric factorization.
+///
+/// Reusing a single workspace across multiple calls of
+/// [`factorize_multifrontal_with_workspace`] amortises per-call
+/// allocation — the alloc-probe evidence in
+/// `dev/research/sparse-tail-perf-2026-04-19.md` §9 shows 17–23
+/// allocations per supernode, many of which are scratch buffers
+/// that can be pooled.
+///
+/// Each field grows monotonically: the first call sizes the field
+/// to what the matrix needs; subsequent calls on larger matrices
+/// grow via `resize`, and subsequent calls on smaller matrices
+/// reuse the existing capacity without shrinking.
+///
+/// The scratch buffers are NOT populated across calls — every call
+/// clears them to a well-defined initial state on entry. The
+/// workspace exists purely to retain heap capacity between calls,
+/// not to carry data.
+///
+/// Invariant for `row_map`: at function entry every entry is
+/// `usize::MAX`. The per-supernode loop in
+/// `factorize_multifrontal_with_workspace` writes and then clears
+/// exactly `row_indices.len()` entries per iteration, preserving
+/// the invariant between iterations. At call entry the invariant
+/// is re-established unconditionally by clearing and re-filling
+/// `row_map` so prior error paths (which skip the clear) cannot
+/// corrupt subsequent calls.
+#[derive(Debug, Default)]
+pub struct FactorWorkspace {
+    /// Global→local row-index map. Length grows to `matrix.n`;
+    /// entries are maintained in the all-`usize::MAX` state outside
+    /// the per-supernode critical section.
+    row_map: Vec<usize>,
+    /// Pooled storage for the per-supernode frontal
+    /// `SymmetricMatrix::data` buffer. Length resized per supernode
+    /// to `nrow * nrow`; the allocation is reused across supernodes
+    /// and across calls. Left empty when ownership is temporarily
+    /// borrowed by an in-flight `SymmetricMatrix`.
+    frontal_values: Vec<f64>,
+}
+
+impl FactorWorkspace {
+    /// Construct an empty workspace. Equivalent to `default()`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// Perform multifrontal numeric factorization.
 ///
 /// Takes the original sparse matrix and the symbolic factorization,
@@ -119,13 +167,50 @@ pub struct NodeFactors {
 /// 3. Factor the frontal with the dense BK kernel
 /// 4. Extract the contribution block (Schur complement)
 /// 5. Accumulate inertia
+///
+/// This entry point allocates a fresh `FactorWorkspace` on every
+/// call. Callers amortising factorization across multiple
+/// invocations (e.g. IPM iterations) should use
+/// [`factorize_multifrontal_with_workspace`] instead and retain
+/// the workspace between calls.
 pub fn factorize_multifrontal(
     matrix: &CscMatrix,
     symbolic: &SymbolicFactorization,
     params: &NumericParams,
 ) -> Result<(SparseFactors, Inertia), FeralError> {
+    let mut ws = FactorWorkspace::new();
+    factorize_multifrontal_with_workspace(matrix, symbolic, params, &mut ws)
+}
+
+/// Workspace-reusing variant of [`factorize_multifrontal`].
+///
+/// Semantics are byte-identical to `factorize_multifrontal`: the
+/// returned `SparseFactors` and `Inertia` are the same for the
+/// same inputs. The only difference is that scratch allocations
+/// are drawn from (and returned to) `ws` instead of the global
+/// allocator, so repeated calls with different matrices amortise
+/// heap traffic.
+///
+/// See `dev/plans/factor-workspace.md` for the rollout plan and
+/// `tests/factor_workspace_parity.rs` for the guardrail tests
+/// enforcing bit-level equivalence with the no-workspace path.
+pub fn factorize_multifrontal_with_workspace(
+    matrix: &CscMatrix,
+    symbolic: &SymbolicFactorization,
+    params: &NumericParams,
+    ws: &mut FactorWorkspace,
+) -> Result<(SparseFactors, Inertia), FeralError> {
     let n = symbolic.n;
     let n_snodes = symbolic.supernodes.len();
+
+    // Re-establish the `row_map` invariant (all entries `usize::MAX`,
+    // length >= n) unconditionally, so a prior error-exit that
+    // skipped the per-supernode clear cannot leak state into this
+    // call. `clear()` keeps capacity; `resize` rewrites entries —
+    // cost is O(n), not O(n_snodes * n) as the pre-workspace code
+    // paid.
+    ws.row_map.clear();
+    ws.row_map.resize(n, usize::MAX);
 
     // β refactor: scaling is a numeric-phase concern, computed
     // here against the live matrix values, not cached on the
@@ -255,10 +340,14 @@ pub fn factorize_multifrontal(
             expanded_ncol
         );
 
-        // Build a map from global row index to local frontal row index
-        let mut row_map = vec![usize::MAX; n];
+        // Populate the pooled `ws.row_map`. Invariant on entry to
+        // this block: every entry is `usize::MAX` (either from the
+        // top-of-function reset or from the end-of-loop clear of the
+        // previous iteration). We write exactly `row_indices.len()`
+        // entries here; the mirror-clear at the end of the iteration
+        // restores the invariant.
         for (local, &global) in row_indices.iter().enumerate() {
-            row_map[global] = local;
+            ws.row_map[global] = local;
         }
 
         // Step 1: Assemble original matrix entries into frontal.
@@ -281,12 +370,26 @@ pub fn factorize_multifrontal(
         // `s[i] * s[j]`. Identity strategy fills the vector with 1.0,
         // so this multiply is a no-op when scaling is disabled.
         let scaling = &scaling_pivot_order;
-        let mut frontal = SymmetricMatrix::zeros(actual_nrow);
+        // Pool the frontal's `data` Vec via the workspace. `std::mem::take`
+        // hands the Vec to us (leaving `ws.frontal_values` empty); we
+        // clear-then-resize to `actual_nrow * actual_nrow` zeros, wrap
+        // it in a `SymmetricMatrix`, use it, and return the buffer to
+        // the workspace before falling out of the iteration. If
+        // `factor_frontal` errors out the buffer is dropped along with
+        // the `frontal` local — acceptable because an error aborts the
+        // whole call anyway.
+        let mut frontal_buf = std::mem::take(&mut ws.frontal_values);
+        frontal_buf.clear();
+        frontal_buf.resize(actual_nrow * actual_nrow, 0.0);
+        let mut frontal = SymmetricMatrix {
+            n: actual_nrow,
+            data: frontal_buf,
+        };
         for (local_j, &gj) in row_indices[..own_ncol].iter().enumerate() {
             let s_j = scaling[gj];
             for k in permuted.col_ptr[gj]..permuted.col_ptr[gj + 1] {
                 let gi = permuted.row_idx[k];
-                let local_i = row_map[gi];
+                let local_i = ws.row_map[gi];
                 if local_i != usize::MAX {
                     let val = permuted.values[k] * scaling[gi] * s_j;
                     frontal.set(local_i, local_j, val);
@@ -302,7 +405,7 @@ pub fn factorize_multifrontal(
         // in `[expanded_ncol..actual_nrow)`.
         for &child_idx in &snode.children {
             if let Some(contrib) = contrib_blocks[child_idx].take() {
-                extend_add(&contrib, &row_map, &mut frontal);
+                extend_add(&contrib, &ws.row_map, &mut frontal);
             }
         }
 
@@ -319,6 +422,12 @@ pub fn factorize_multifrontal(
         // because they have no ancestor to absorb a delay.
         let may_delay = !is_root[snode_idx];
         let ff = factor_frontal(&frontal, expanded_ncol, may_delay, &params.bk)?;
+
+        // Return the frontal's data buffer to the pool. `factor_frontal`
+        // takes its input by `&SymmetricMatrix` and copies into a local
+        // work array, so `frontal.data` is still the zeroed buffer we
+        // allocated above. Reclaim it for the next supernode's frontal.
+        ws.frontal_values = frontal.data;
 
         // Extract what we need before moving ff
         let node_inertia = ff.inertia.clone();
@@ -365,9 +474,12 @@ pub fn factorize_multifrontal(
             needs_refinement = true;
         }
 
-        // Clear the row map
+        // Clear the pooled row map. This restores the
+        // all-`usize::MAX` invariant for the next iteration (and, via
+        // the last iteration, for the next `factorize_multifrontal*`
+        // call that shares this workspace).
         for &global in &row_indices {
-            row_map[global] = usize::MAX;
+            ws.row_map[global] = usize::MAX;
         }
 
         node_factors.push(NodeFactors {
