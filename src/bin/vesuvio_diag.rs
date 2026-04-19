@@ -23,6 +23,7 @@
 //! Usage: `cargo run --release --bin vesuvio_diag`
 
 use feral::numeric::factorize::factorize_multifrontal;
+use feral::scaling::ScalingStrategy;
 use feral::symbolic::{symbolic_factorize_with_method, OrderingMethod, SupernodeParams};
 use feral::{read_mtx, BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 use std::path::Path;
@@ -69,14 +70,65 @@ fn shape_features(csc: &CscMatrix) {
         zero_diag,
         diag_only_rows,
     );
+
+    // Column-degree distribution — buckets to expose arrow-KKT shape.
+    // For lever-C analysis we want to know:
+    //   - how many "trivial" columns (degree 1, just diagonal)
+    //   - how many "thin" columns (degree 2-4, typical IPM Jacobian rows)
+    //   - how many "medium" columns (degree 5-32, IPM Hessian rows)
+    //   - how many "dense" columns (degree > 32 or > sqrt(n))
+    //   - top-5 largest columns and their indices
+    let mut bucket_1 = 0usize; // degree 1 (diagonal only)
+    let mut bucket_2_4 = 0usize;
+    let mut bucket_5_32 = 0usize;
+    let mut bucket_dense = 0usize;
+    let dense_threshold = (10.0 * (n as f64).sqrt()) as usize;
+    let mut top5: Vec<(usize, usize)> = Vec::with_capacity(5);
+    for j in 0..n {
+        let nnz = csc.col_ptr[j + 1] - csc.col_ptr[j];
+        if nnz <= 1 {
+            bucket_1 += 1;
+        } else if nnz <= 4 {
+            bucket_2_4 += 1;
+        } else if nnz <= 32 {
+            bucket_5_32 += 1;
+        } else {
+            bucket_dense += 1;
+        }
+        if top5.len() < 5 {
+            top5.push((nnz, j));
+            top5.sort_by(|a, b| b.0.cmp(&a.0));
+        } else if nnz > top5[4].0 {
+            top5[4] = (nnz, j);
+            top5.sort_by(|a, b| b.0.cmp(&a.0));
+        }
+    }
+    println!(
+        "  col_deg: deg=1: {}  deg=2-4: {}  deg=5-32: {}  deg>32: {} (dense_thresh={})",
+        bucket_1, bucket_2_4, bucket_5_32, bucket_dense, dense_threshold,
+    );
+    print!("  top5_cols:");
+    for (deg, col) in &top5 {
+        print!(" col{}({})", col, deg);
+    }
+    println!();
 }
 
-fn run_one_method(csc: &CscMatrix, method: OrderingMethod) {
-    let snode_params = SupernodeParams::default();
+fn run_one_method(csc: &CscMatrix, method: OrderingMethod, scaling: ScalingStrategy) {
+    let snode_params = SupernodeParams {
+        scaling_strategy: scaling.clone(),
+        ..SupernodeParams::default()
+    };
     let factor_params = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         pivot_threshold: 0.01,
         ..BunchKaufmanParams::default()
+    };
+    let scale_tag = match scaling {
+        ScalingStrategy::InfNorm => "infnorm",
+        ScalingStrategy::Mc64Symmetric => "mc64",
+        ScalingStrategy::Identity => "ident",
+        ScalingStrategy::External(_) => "ext",
     };
 
     let t_sym = Instant::now();
@@ -126,9 +178,10 @@ fn run_one_method(csc: &CscMatrix, method: OrderingMethod) {
 
     let avg_deg = csc.row_idx.len() as f64 / csc.n as f64;
     println!(
-        "  {:<8?}: sym={}us fac={}us snodes={} sym_max_nrow={} actual_max_nrow={} total_delays={} \
+        "  {:<8?}/{:<8}: sym={}us fac={}us snodes={} sym_max_nrow={} actual_max_nrow={} total_delays={} \
          (attempted={}, elim={})  root={}x{}(nelim={}, {:.0}% of n)  inertia=({}/{}/{}) avg_deg={:.1}",
         method,
+        scale_tag,
         sym_us,
         fac_us,
         n_snodes,
@@ -168,8 +221,14 @@ fn run(family: &str, sample: &str) {
 
     println!("== {}{} ==", family, sample);
     shape_features(&csc);
-    run_one_method(&csc, OrderingMethod::Amd);
-    run_one_method(&csc, OrderingMethod::MetisND);
+    run_one_method(&csc, OrderingMethod::Amd, ScalingStrategy::InfNorm);
+    run_one_method(&csc, OrderingMethod::Amd, ScalingStrategy::Mc64Symmetric);
+    run_one_method(&csc, OrderingMethod::MetisND, ScalingStrategy::InfNorm);
+    run_one_method(
+        &csc,
+        OrderingMethod::MetisND,
+        ScalingStrategy::Mc64Symmetric,
+    );
     println!();
 }
 

@@ -109,3 +109,74 @@ from autovec scalar to NEON-equivalent). Half-session;
 unrelated to VESUVIO.
 
 Full report at dev/research/dense-kernel-vesuvio-measurements-2026-04-19.md.
+
+* 19:45 :research:lever-c:scaling:mc64:vesuvio:cresc:
+Started writing the lever-C research note. While extending
+vesuvio_diag with column-degree distribution and an
+InfNorm-vs-MC64 cross-product, found that the original lever-C
+characterization in dense-kernel-vesuvio-tail.md was wrong.
+
+** The mistake
+
+I had been describing the VESUVIO root frontal as "structurally
+unavoidable due to a single dense linking column." Today's
+diagnostic shows:
+
+  shape:       n=3083 max_col_nnz=1026 diag_only=1025
+  col_deg:     deg=1: 1025  deg=2-4: 2050  deg>32: 8
+  Amd/infnorm: sym_max_nrow=10 actual_max_nrow=2059
+               total_delays=949 root=2059x959 fac=234.7ms
+
+Symbolic predicts max_nrow=10. Actual is 200× larger. The
+"dense root" exists because 949 pivots got delayed up the
+etree and accumulated at the root.
+
+** What works
+
+Same matrix, same ordering, same kernel — switch scaling
+from InfNorm (default) to MC64Symmetric:
+
+| matrix       | InfNorm fac | MC64 fac | speedup | InfNorm delays | MC64 delays |
+|--------------|-------------|----------|---------|----------------|-------------|
+| VESUVIOU_0000| 234.7 ms    | 10.4 ms  | 23x     | 949            | 0           |
+| VESUVIOU_0005| 150.1 ms    |  9.4 ms  | 16x     | 580            | 0           |
+| VESUVIO_0000 |  54.0 ms    |  9.6 ms  | 5.6x    | 142            | 0           |
+| VESUVIO_0021 | 179.1 ms    | 10.5 ms  | 17x     | 697            | 0           |
+| VESUVIA_0000 |  84.0 ms    |  8.6 ms  | 9.8x    | 264            | 0           |
+| MUONSINE_0000|  20.0 ms    |  1.6 ms  | 12.5x   | 312            | 0           |
+| CRESC132_0000| 5316.3 ms   | 23.2 ms  | 229x    | 4846           | 0           |
+
+Inertia matches in every case. Delays drop to ZERO with MC64.
+For VESUVIOU the new ratio against MUMPS is 4x (down from 84x).
+
+** Why InfNorm is the current default
+
+Per src/scaling/mod.rs:44-60, the 2026-04-13 Phase 2.2.3 follow-
+up flipped default from MC64 → InfNorm because MC64 was a
+silent no-op on HYDCAR20, METHANL8, SWOPF, HATFLDG. The choice
+was symmetric — InfNorm helps a different class than MC64.
+
+So the policy question is "make scaling adaptive based on a
+cheap matrix feature" rather than "blanket switch to MC64".
+The signature for the VESUVIO/CRESC class is exactly what
+vesuvio_diag prints: diag_only ≥ 0.3·n.
+
+** Note authored
+
+dev/research/lever-c-adaptive-scaling.md. Three policies
+proposed: blanket-MC64, adaptive shape-based routing,
+try-MC64-fallback-to-InfNorm. Recommendation: full corpus
+bench across all three before authoring the plan.
+
+Estimated cost: one session for policies 1+2 + bench;
+one more for policy 3 if 1+2 are inconclusive.
+
+** Files touched
+
+- src/bin/vesuvio_diag.rs: added column-degree distribution
+  + (ordering × scaling) cross-product.
+- dev/research/lever-c-adaptive-scaling.md (new)
+- this journal append
+
+No production code change. The scaling toggle is in
+diagnostic code only.
