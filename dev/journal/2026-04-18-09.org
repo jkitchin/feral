@@ -180,3 +180,84 @@ one more for policy 3 if 1+2 are inconclusive.
 
 No production code change. The scaling toggle is in
 diagnostic code only.
+
+* 21:30 :implementation:lever-c:scaling:auto:bench:
+Implemented Policies 1+2+3 from the lever-C plan
+(dev/plans/lever-c-adaptive-scaling.md) and ran the corpus bench
+across all three. Result: do NOT flip default. Measurement note at
+dev/research/lever-c-corpus-bench-2026-04-19.md.
+
+** Code (commit be1e3ec)
+
+- src/scaling/mod.rs: new ScalingStrategy::Auto variant + pub fn
+  pick_scaling_strategy(csc) returning Mc64Symmetric when
+  diag_only/n >= 0.30, else InfNorm. 5 unit tests
+  (boundary at 0.29/0.30, empty matrix, end-to-end Auto-vs-MC64
+  vector equality).
+- src/bin/bench.rs: FERAL_SCALING={infnorm,mc64,adaptive,identity}
+  env override mirroring FERAL_ORDERING. Banner echo. Unset
+  preserves baseline.
+- src/bin/vesuvio_diag.rs: added Auto arm to scale_tag match.
+
+cargo test --release --lib: 106 passed (was 101). clippy + fmt clean.
+
+** Bench data (3 runs, 154588 matrices each, ~5 min/run)
+
+Output saved to dev/results/lever-c/bench-{baseline,mc64,adaptive}.txt.
+
+| metric                | Policy 1 | Policy 2 | Policy 3 |
+|-----------------------|---------:|---------:|---------:|
+| factor/MUMPS geomean  |     0.42 |     0.49 |     0.47 |
+| factor/MUMPS p99      |     3.51 |     3.94 |     3.73 |
+| factor/MUMPS *max*    |   *83.21*|   *10.10*|    *9.98*|
+| inertia match         |  153 008 |  153 007 |  153 009 |
+| residual pass         |  154 241 |  154 225 |  154 232 |
+| *worst residual*      | *2.69e-4*| *1.31e13*| *1.31e13*|
+| worst-residual matrix | ERRINBAR | POLAK6   | POLAK6   |
+
+Tail compression is real (8x, 83x -> 10x). Geomean regression is
+real (small matrices pay MC64 symbolic overhead).
+
+** The deciding finding: POLAK6_0021
+
+n=9 KKT. Under InfNorm: inertia (5,4,0), residual 9.21e-17. Under
+both MC64 and adaptive: inertia (3,4,2) — TWO ZERO PIVOTS,
+residual 1.31e13. MC64 produces a scaling that puts the matrix
+into a singular-looking shape; BK completes but with wrong inertia
+and the back-solve produces 13-digit-too-large residual.
+
+CLAUDE.md hard rule "Inertia must be exactly correct" applies.
+A 1+ inertia regression on a previously-correct matrix is a
+default-blocker regardless of geomean or tail wins.
+
+The adaptive policy doesn't dodge this because POLAK6_0021 must
+have diag_only/n >= 0.3 (n=9, presumably 3+ diag-only rows) and
+gets routed to MC64.
+
+** Decision
+
+Per plan §"Validation procedure":
+- Recommendation: do NOT flip default. Keep InfNorm.
+- Auto + Mc64Symmetric remain opt-in via the user API and
+  FERAL_SCALING bench env.
+- Lever C ships as opt-in with this measurement as documentation.
+
+** Next-session menu
+
+Policy 4 (try-MC64-fallback-to-InfNorm) is the natural next step,
+but only after a separate POLAK6 triage. Hypothesis: MC64 matching
+can succeed but yield a worse-conditioned scaling than InfNorm;
+ScalingInfo::PartialSingular doesn't catch the "matched but bad"
+case. A robust Policy 4 needs a post-scaling condition check (e.g.
+min-abs-diagonal of the scaled matrix or a sample κ proxy).
+
+Files touched this entry:
+- src/scaling/mod.rs (production code)
+- src/bin/bench.rs (bench harness)
+- src/bin/vesuvio_diag.rs (compile fix)
+- dev/plans/lever-c-adaptive-scaling.md
+- dev/research/lever-c-corpus-bench-2026-04-19.md
+- dev/results/lever-c/bench-*.txt (bench raw output)
+- this journal append
+
+Production default unchanged.
