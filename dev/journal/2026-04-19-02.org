@@ -1,0 +1,37 @@
+#+title: Session 2026-04-19-02 journal
+
+* 14:00 :pounce:bench:cache-reuse:
+Added src/bin/bench_solver_reuse.rs that demonstrates the β +
+Solver win the per-matrix bench cannot show. For each of 4 KKT
+families with N IPM iterates (capped at 64), runs two scenarios:
+A) one persistent Solver, factor() each iterate; B) free-function
+loop calling symbolic_factorize + factorize_multifrontal each
+iteration. Reports symbolic_call_count, wall time, speedup.
+
+Added warmup pass for both scenarios — first run was cold-cache
+slow on the small ACOPP14 case (0.77x) and skewed the comparison.
+With warmup:
+
+| family   |   n |  nnz | iter | solver(us) | syms | freefn(us) | syms | speedup |
+|----------+-----+------+------+------------+------+------------+------+---------|
+| ACOPP14  | 106 |  492 |   21 |       1863 |    2 |       2569 |   21 |   1.38x |
+| ACOPP30  | 209 |  765 |   64 |      11831 |    1 |      16553 |   64 |   1.40x |
+| ACOPR30  | 400 | 1574 |   64 |      52500 |    2 |      58040 |   64 |   1.11x |
+| AIRPORT  | 126 | 1928 |   64 |      11409 |    2 |      17516 |   64 |   1.54x |
+| TOTAL    |     |      |      |      77603 |      |      94678 |      |   1.22x |
+
+Observations:
+- ACOPP14 / ACOPR30 / AIRPORT show 2 sym calls instead of 1: the
+  pattern fingerprint (n, col_ptr_len, row_idx_len) catches an
+  nnz change between iterates 0 and N. Acceptable — POUNCE will
+  see structurally identical KKTs once warm-start kicks in.
+- ACOPR30 shows only 1.11x speedup: numeric factor cost dominates
+  (n=400, nnz=1574 vs. 209/765 for ACOPP30). Symbolic amortization
+  matters less when each numeric factor is already large.
+- Total 1.22x corpus-wide. Real value lands once we pair this with
+  larger matrices in IPM mode where every saved symbolic is a
+  meaningful fraction of total cost.
+
+Bin registered in Cargo.toml. cargo fmt + clippy clean.
+
+Commit pending.

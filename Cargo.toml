@@ -20,6 +20,10 @@ path = "src/bin/bench.rs"
 name = "bench_orderings"
 path = "src/bin/bench_orderings.rs"
 
+[[bin]]
+name = "bench_solver_reuse"
+path = "src/bin/bench_solver_reuse.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
