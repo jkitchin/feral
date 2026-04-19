@@ -149,3 +149,28 @@ fn i3_factor_with_wrong_inertia_returns_wronginertia_keeps_factor() {
     assert!(solver.factors().is_some());
     assert_eq!(solver.num_negative_eigenvalues(), 0);
 }
+
+/// I4 — singular under default `Fail` mode returns `Singular` and
+/// clears the stored factor.
+///
+/// `diag(1, 0, 1)` has a structural zero pivot at position 1 with
+/// no symmetric off-diagonal coupling that BK could pivot around,
+/// so default `ZeroPivotAction::Fail` should fire and the factor
+/// should be discarded.
+#[test]
+fn i4_singular_under_fail_returns_singular_clears_factor() {
+    let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 0.0, 1.0]).unwrap();
+
+    let mut solver = Solver::new();
+    let status = solver.factor(&csc, None);
+
+    assert!(
+        matches!(status, FactorStatus::Singular),
+        "expected Singular, got {:?}",
+        status
+    );
+    assert!(
+        solver.factors().is_none(),
+        "factors should be cleared on Singular"
+    );
+}
