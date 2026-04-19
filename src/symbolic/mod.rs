@@ -154,10 +154,49 @@ pub struct SymbolicFactorization {
     pub scaling_info: crate::scaling::ScalingInfo,
 }
 
+/// Pick a default ordering for `symbolic_factorize` from cheap matrix
+/// dimensions (no pattern walk). Narrow on purpose — see comment on
+/// `Auto` for why a broad dispatcher regressed the IPM bench.
+///
+/// Current rule:
+///   - `n >= 5000 && nnz/n < 6` → `MetisND` (catches bordered KKT
+///     structures like CUTEst CRESC132 where AMD orders the constraint
+///     block into a near-dense root frontal that swallows ~96% of n
+///     and drives a ~5000-column delay cascade. CRESC132_0000 with AMD
+///     factors in 5.4 s; with METIS it factors in 480 ms — 11× win.)
+///   - everything else                                 → `Amd`
+///
+/// `nnz` here is the matrix's *stored* nnz (lower triangle for
+/// symmetric matrices), not the symmetric pattern's. The threshold is
+/// calibrated to that convention; using the symmetric pattern would
+/// roughly double the ratio and shift the rule.
+///
+/// All entries in the IPM corpus's top families have `n < 5000` (the
+/// largest are HAHN1 n=715 and VESUVIO n=3083), so the bordered rule
+/// only fires on a handful of large matrices and pays its small extra
+/// symbolic cost on those alone.
+fn pick_default_method(n: usize, stored_nnz: usize) -> OrderingMethod {
+    if n == 0 {
+        return OrderingMethod::Amd;
+    }
+    let avg_deg = stored_nnz as f64 / n as f64;
+    if n >= 5000 && avg_deg < 6.0 {
+        OrderingMethod::MetisND
+    } else {
+        OrderingMethod::Amd
+    }
+}
+
 /// Perform symbolic factorization of a sparse symmetric matrix.
 ///
+/// Defaults to AMD, but applies a narrow bordered-KKT fallback rule to
+/// catch the AMD-bad structures (see [`pick_default_method`]). Callers
+/// who want a literal AMD ordering with no dispatcher should call
+/// `symbolic_factorize_with_method(matrix, params, OrderingMethod::Amd)`
+/// explicitly.
+///
 /// Steps:
-/// 1. Compute fill-reducing ordering (AMD)
+/// 1. Pick fill-reducing ordering (AMD or MetisND depending on pattern)
 /// 2. Build elimination tree of the permuted matrix
 /// 3. Compute column counts (fill prediction)
 /// 4. Detect and amalgamate supernodes
@@ -166,7 +205,8 @@ pub fn symbolic_factorize(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
 ) -> Result<SymbolicFactorization, FeralError> {
-    symbolic_factorize_with_method(matrix, snode_params, OrderingMethod::Amd)
+    let method = pick_default_method(matrix.n, matrix.row_idx.len());
+    symbolic_factorize_with_method(matrix, snode_params, method)
 }
 
 /// Convert an owned-`usize` `CscPattern` into the contract's borrowed-`i32`
@@ -669,15 +709,32 @@ mod tests {
     }
 
     #[test]
-    fn symbolic_factorize_default_matches_amd() {
+    fn symbolic_factorize_default_uses_amd_for_small_matrices() {
+        // Below the bordered-fallback threshold (n < 5000), the default
+        // entry point must dispatch to AMD.
         let m = small_grid_5x5();
         let params = SupernodeParams::default();
         let a = symbolic_factorize(&m, &params).unwrap();
         let b = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd).unwrap();
         assert_eq!(
             a.perm, b.perm,
-            "symbolic_factorize must equal symbolic_factorize_with_method(Amd)"
+            "symbolic_factorize on n<5000 must equal symbolic_factorize_with_method(Amd)"
         );
         assert_eq!(a.factor_nnz_estimate, b.factor_nnz_estimate);
+    }
+
+    #[test]
+    fn pick_default_method_rules() {
+        // CRESC132-shaped: n=5314, stored_nnz=22566 → avg_deg=4.25.
+        // Triggers the bordered-KKT fallback.
+        assert_eq!(pick_default_method(5314, 22566), OrderingMethod::MetisND);
+        // VESUVIO-shaped: n=3083 < 5000 → AMD even though avg_deg<6.
+        assert_eq!(pick_default_method(3083, 9484), OrderingMethod::Amd);
+        // Large but dense (avg_deg≥6): keep AMD.
+        assert_eq!(pick_default_method(10_000, 100_000), OrderingMethod::Amd);
+        // Boundary at n=5000: triggers (>=).
+        assert_eq!(pick_default_method(5000, 20_000), OrderingMethod::MetisND);
+        // Empty matrix: AMD (avoids /0 and external-crate weirdness).
+        assert_eq!(pick_default_method(0, 0), OrderingMethod::Amd);
     }
 }

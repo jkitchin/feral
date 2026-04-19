@@ -315,3 +315,47 @@ solve time drops 27% against SSIDS. Shipping 2-strike.
 
 Logs: /tmp/bench_no_improve_fixed.log (1-strike),
       /tmp/bench_2strike.log         (2-strike, shipped).
+
+* 19:45 :ordering:cresc132:bordered:bench:
+Diagnosed CRESC132 factor outlier (521x MUMPS, the worst sparse
+factor ratio in the bench).
+
+cresc_diag.rs (now removed) revealed:
+  AMD:    fac=5679 ms  delays=4846  actual_max_nrow=5084  (96% of n=5314)
+  METIS:  fac=480 ms   delays=1333  actual_max_nrow=2661  (50%)
+  SCOTCH: fac=479 ms   delays=1336  actual_max_nrow=2667  (50%)
+
+Symbolic prediction lies: sym_max_nrow=8 for both AMD and METIS on
+CRESC132. The 5084 is entirely a delay-cascade artifact that
+symbolic doesn't model. So a "posteriori on symbolic" check has no
+signal -- can't pick the right ordering by inspecting either AMD's
+or METIS's symbolic output.
+
+Zero-diagonal hypothesis was wrong: CRESC132 has only 2 zero
+diagonals (the (2,2) constraint block has been regularized in the
+CUTEst dump). VESUVIO and other AMD-fine matrices also have 0 zero
+diagonals. Not a discriminator.
+
+Per user (option C): static rule
+  n >= 5000 && stored_nnz/n < 6  ->  MetisND
+in pick_default_method. Threshold calibrated to fit CRESC132
+(n=5314, avg_deg=4.25) without sweeping in any IPM family
+(largest is HAHN1 n=715, then VESUVIO n=3083). This is narrower
+than the rejected OrderingMethod::Auto, which routed thousands of
+n<500 matrices to KaHIP and ate per-call overhead.
+
+bench.rs FERAL_ORDERING dispatch updated: Option<OrderingMethod>
+where None = use default heuristic, Some(method) = force-override.
+The previous "amd unset-default" was bypassing the new heuristic.
+
+Bench (154588 IPM matrices, /tmp/bench_default_metis_rule.log):
+                       AMD-only    heuristic
+  factor/MUMPS geomean   0.45        0.42
+  factor/MUMPS max       521         85    <- 6x reduction
+  solve/SSIDS geomean    1.33        1.30
+  residual pass        154241      154241  <- unchanged
+  worst residual       2.69e-4     2.69e-4 <- unchanged
+  CRESC132_0000 fac    5749 ms     477 ms  <- 12x speedup
+
+Net: max-ratio outlier fixed, geomeans nudged better, no residual
+regression. Shipping.

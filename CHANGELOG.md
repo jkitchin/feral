@@ -4,6 +4,46 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-18) — `symbolic_factorize` default: bordered-KKT fallback to MetisND
+
+`symbolic_factorize` (the default entry point) now applies a narrow
+heuristic before dispatching:
+
+  - `n >= 5000 && stored_nnz/n < 6` → `MetisND`
+  - everything else                  → `Amd`
+
+The rule catches bordered-KKT structures like CUTEst CRESC132 where
+AMD orders the constraint block into a near-dense root frontal that
+swallows ~96% of n and drives a ~5000-column delay cascade.
+
+Diagnosis: `cresc_diag` showed CRESC132_0000 with AMD produced a
+5084×4854 root frontal (96% of n=5314) and 4846 cumulative delays;
+the same matrix with MetisND produced a 2661×2200 root and 1333
+delays. Factor time 5.4 s → 480 ms (11× win on that one matrix).
+Symbolic max-frontal-width does NOT predict actual width because
+delays are a numeric artifact, so a posteriori check on symbolic
+alone has no signal — see `dev/journal/2026-04-18-06.org`.
+
+`OrderingMethod::Auto` was rejected previously (bench regression
+from per-call KaHIP overhead on n<500 matrices). The new rule is
+narrow enough that no IPM-corpus family with n<5000 is affected.
+
+Bench evidence (154,588 IPM matrices):
+
+| metric                  | AMD-only | heuristic |
+|-------------------------|----------|-----------|
+| factor/MUMPS geomean    | 0.45     | 0.42      |
+| factor/MUMPS max ratio  | 521      | 85        |
+| solve/SSIDS geomean     | 1.33     | 1.30      |
+| residual pass           | 154241   | 154241    |
+| worst residual          | 2.69e-4  | 2.69e-4   |
+
+Callers wanting literal AMD with no dispatcher should call
+`symbolic_factorize_with_method(matrix, params, OrderingMethod::Amd)`
+explicitly. `src/bin/bench.rs` honors that escape hatch via
+`FERAL_ORDERING=amd`; with the env var unset, the bench routes
+through the new heuristic.
+
 ### Changed (2026-04-18) — sparse refinement: 2-strike plateau exit
 
 `solve_sparse_refined` now exits after two consecutive non-improving
