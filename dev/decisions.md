@@ -1057,3 +1057,64 @@ BK + SIMD in `src/dense/factor.rs`. Multi-session engineering;
 deferred to a future planning pass.
 
 **Journal.** `dev/journal/2026-04-18-08.org` second entry.
+
+## 2026-04-19 — Policy 4: 3-condition Auto fallback to InfNorm
+
+`ScalingStrategy::Auto` (the default since the lever-C flip
+earlier this day) now runs a post-scaling diagnostic when
+`pick_scaling_strategy` would route a matrix to MC64. If
+ALL three conditions fire, it falls back to InfNorm:
+
+1. `raw_diag_range(matrix) < 1e6` — raw matrix's diagonal
+   already spans a narrow range, so MC64 has nothing to
+   recover; any huge scaled `mc_off` it produces is artifact.
+2. `mc_off > 1e6` — MC64's scaled `max(|off|/|diag|)` is
+   large in absolute terms.
+3. `mc_off / in_off > 1e5` — and is much larger than what
+   InfNorm produces.
+
+The first guard (raw_diag_range) is critical: it lets
+matrices like MEYER3NE_0220 (raw_drng = 4.77e19, MC64 is
+genuinely needed) keep MC64, while still catching MSS1_0009
+(raw_drng = 51, MC64 produces noise).
+
+**Validation.** 17-matrix panel: rule fires only on
+MSS1_0009. Corpus residual_pass: 154 233 / 154 588 (was
+154 232; +1 matches prediction). MSS1 family residuals:
+0 fail (was 1). Inertia hard rule preserved on every
+regression.
+
+**Research / plan.**
+`dev/research/policy-4-scaling-fallback.md`,
+`dev/plans/policy-4-scaling-fallback.md`.
+
+**Journal.** `dev/journal/2026-04-19-02.org`.
+**Commit.** `af9315d`.
+
+## 2026-04-19 — `ScalingInfo::Applied` is load-bearing
+
+`numeric::solve` keys off `factors.scaling_info` to decide
+whether to apply pre/post-scaling. `NotApplied` makes solve
+skip the scaling step entirely (treat as identity);
+`Applied` and `PartialSingular { .. }` invoke the pre/post
+multiply.
+
+**Convention.** Any `compute_scaling` path that returns a
+non-trivial scaling vector MUST return
+`ScalingInfo::Applied` (or `PartialSingular` for MC64's
+partial case). `NotApplied` is reserved for paths where the
+returned vector itself should not be applied — currently
+`Identity` (vector of 1.0s) and `External` (caller-supplied
+vector that the caller is responsible for tracking).
+
+**Trigger.** Policy 4's initial implementation returned
+`NotApplied` for the InfNorm fallback path ("matches the
+InfNorm convention" — but the convention was misread;
+InfNorm returns `Applied`). The bug regressed
+MSS1_0007–0013 to residual ≈ 2.4e-3 in the bench until
+fixed by forwarding `infnorm::compute_infnorm`'s actual
+return value. Verified by a corpus re-bench showing the
+predicted +1 residual_pass (154 233 / 154 588).
+
+**Journal.** `dev/journal/2026-04-19-02.org`.
+**Commit.** `af9315d`.

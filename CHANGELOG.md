@@ -4,6 +4,40 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-19) — `ScalingStrategy::Auto` is the default; Policy 4 fallback
+
+`ScalingStrategy::default()` now returns `Auto` (was `InfNorm`).
+`Auto` routes matrices with the arrow-KKT signature
+(`diag_only / n >= 0.30`) to `Mc64Symmetric` and everything
+else to `InfNorm`. The trade landed an 8× tail compression on
+the IPM corpus (worst factor/MUMPS 83× → 10×) at a net change
+of -9 in residual_pass count out of 154 588 matrices; 14 of
+the 21 regressions are oracle-`numerically_intractable` and 5
+are tolerance-edge (residuals 1e-10 → 1e-9).
+
+`Auto` includes a Policy 4 post-scaling diagnostic that falls
+back to `InfNorm` when MC64 has demonstrably misfired on a
+matrix where InfNorm would do fine. Three conditions must all
+fire:
+
+1. `raw_diag_range(matrix) < 1e6` — raw matrix already
+   well-conditioned (so MC64 has nothing to recover).
+2. `mc_off > 1e6` — MC64's scaled `max(|off|/|diag|)` is
+   large.
+3. `mc_off / in_off > 1e5` — and is much larger than InfNorm's.
+
+This recovers the MSS1_0009 residual regression (6e-12 →
+1e-6 → 6e-12) without sacrificing the VESUVIO/CRESC factor
+wins or the MEYER3NE parity tests. Final corpus residual_pass
+post-Policy 4: 154 233 / 154 588.
+
+`InfNorm` and `Mc64Symmetric` remain available as opt-in.
+Caller code that explicitly passed `&ScalingStrategy::InfNorm`
+sees no change.
+
+See `dev/decisions.md` (2026-04-19 entries) and
+`dev/research/policy-4-scaling-fallback.md`.
+
 ### Added (2026-04-19) — POUNCE integration interface (`Solver`)
 
 A stateful `Solver` handle that mirrors Ipopt's `SymLinearSolver`

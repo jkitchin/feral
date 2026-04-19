@@ -573,3 +573,61 @@ Pinned by `pick_default_method_never_returns_kahip` test.
 
 **Evidence.** `dev/research/ordering-kahip-driver-integration.md`,
 commit `b5c67cb`.
+
+## 2026-04-19 — 2-condition Policy 4 rule (no raw_diag_range guard)
+
+**Hypothesis.** Catching the MSS1_0009 fallback case needs
+only `mc_off > 1e6 ∧ mc_off / in_off > 1e5`. The
+`policy4_diag` 14-matrix panel showed 2.5 orders of
+magnitude separation between MSS1 (mc/in ratio 3.9e6) and
+the nearest "keep MC64" matrix (VESUVIOU at 1.05e4); a
+1e5 threshold sits comfortably in the gap.
+
+**Test.** Implemented in `compute_scaling_auto`, ran
+`cargo test --release`.
+
+**Result.** False-positives on MEYER3NE_{0220, 0259, 0253}
+parity tests. MEYER3NE_0220 has mc_off = 8.56e13, in_off =
+9.40e6, ratio 9.1e6 — well above the 1e5 threshold. But
+unlike MSS1_0009, MEYER3NE has raw_diag_range = 4.77e19
+(ill-conditioned raw matrix where MC64 is the only scaling
+that produces a usable factor). Falling back to InfNorm on
+MEYER3NE drove residuals to 4.77e15.
+
+**Verdict.** Replaced with 3-condition rule adding
+`raw_diag_range < 1e6` as a first-line guard. The shape-only
+diagnostic works ONLY when combined with a measure of the
+raw matrix's conditioning. See `dev/decisions.md`
+(2026-04-19 Policy 4 entry).
+
+**Evidence.** `dev/research/policy-4-scaling-fallback.md`
+§5.1, commit `af9315d`.
+
+## 2026-04-19 — `nemin` tuning to fix AVION2/BATCH families
+
+**Hypothesis.** AVION2 (geomean 1.61, 2682 matrices) and
+BATCH (1.85, 2054 matrices) lose to MUMPS on average.
+Possibly the default `nemin=32` (matching SSIDS) is too
+aggressive for these small-n matrices; MUMPS uses `nemin=5`.
+Smaller nemin → smaller, more focused supernodes → less
+zero-padding in frontal matrices.
+
+**Test.** Added `FERAL_NEMIN` env-var override to
+`profile_sparse`. Ran on AVION2_{0000, 0500, 1500} and
+BATCH_{0000, 0500, 1500} at `nemin ∈ {1, 5, 32}`.
+
+**Result.** `nemin=32` (current default) is at the optimum.
+`nemin=5` is roughly tied or slightly worse;
+`nemin=1` (no amalgamation) regresses by 30-40%:
+
+| matrix       | n   | fac µs nemin=32 | nemin=5 | nemin=1 |
+|--------------|----:|----------------:|--------:|--------:|
+| AVION2_0000  |  94 |              35 |      33 |      48 |
+| BATCH_0000   | 121 |              80 |      82 |      92 |
+
+**Verdict.** The AVION2/BATCH gap is structural multifrontal
+scaffolding overhead at small n, not amalgamation policy.
+Lever D.1 (FactorWorkspace arena) is the right next attempt.
+
+**Evidence.** `dev/research/sparse-tail-perf-2026-04-19.md`
+§5b, commit `8e68482`.

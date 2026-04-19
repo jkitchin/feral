@@ -1,0 +1,152 @@
+#+TITLE: Session journal 2026-04-19-03
+#+OPTIONS: toc:nil
+
+* 14:00 :policy4:scaling:auto:
+Continued from session 02 (lever-C/Auto default flip, commit
+0c39e27). Goal: recover MSS1_0009 residual regression (6e-12 ->
+1e-6 under MC64) without sacrificing VESUVIO/CRESC factor wins.
+
+Approach: post-scaling diagnostic inside compute_scaling_auto.
+Plan at dev/plans/policy-4-scaling-fallback.md, research at
+dev/research/policy-4-scaling-fallback.md (Option A.1 from the
+polak6-triage note).
+
+Initial 2-condition rule (mc_off > 1e6 AND mc_off/in_off > 1e5)
+implemented + 4 fixture tests added in scaling::tests. cargo
+test --release: scaling tests pass. But running the broader
+parity suite revealed MEYER3NE_0220 and MEYER3NE_0259 residuals
+4.77e15 and 5.03e16 -- false-positive on the new rule.
+
+* 14:30 :meyer3ne:debug:
+MEYER3NE_0220 features (from policy4_diag panel):
+  raw_drng = 4.77e19 (ill-conditioned raw matrix)
+  in_off   = 9.40e6
+  mc_off   = 8.56e13
+  ratio    = 9.1e6 -- triggers the 2-condition rule
+
+But MC64 IS the right scaling here (raw drng 4.77e19 means
+the matrix is desperately ill-conditioned and InfNorm's
+equilibration produces in_off 9.4e6 which is also bad).
+
+Insight: the shape-only diagnostic must be combined with raw
+matrix conditioning. Added third condition: raw_diag_range <
+1e6 (matrix where MC64 has nothing to recover). All three
+must fire to fall back.
+
+Re-validated mentally on the 17-matrix expanded panel:
+- MSS1_0009 (raw=51): falls back -- good
+- MEYER3NE_* (raw=1e19-1e20): keep MC64 -- good
+- VESUVIA/VESUVIO/MUONSINE (raw 1e10-1e14): keep MC64 -- good
+- HS75/POLAK6/HATFLDFL/SNAKE/ALLINITA: keep MC64 -- good
+
+* 15:00 :policy4:bench:bug:
+Implemented the 3-condition rule. cargo test --release: all
+22 scaling tests pass including 4 new fixture tests. Full
+release suite: 118 lib tests + integration tests + parity
+tests all green.
+
+Ran corpus bench. Sparse residual_pass: 154 225 / 154 588 --
+SEVEN WORSE than the predicted 154 233 (+1) and 7 worse than
+the 154 232 baseline. MSS1_0009 residual showed 2.35e-3 in
+the worst-residuals table, far worse than the 9.96e-7 it had
+under MC64.
+
+Per-matrix dump showed MSS1_0007 through MSS1_0013 (7
+matrices) all at residual ~2.4e-3. But the unit test
+asserts that compute_scaling(&Auto) returns InfNorm scaling
+for MSS1_0009, and an explicit FERAL_SCALING=infnorm bench
+gives MSS1_0009 = 6.31e-12.
+
+Same scaling vector, different residual. The difference must
+be in ScalingInfo. Checked numeric/solve.rs:112: solve uses
+`!matches!(factors.scaling_info, ScalingInfo::NotApplied)` to
+decide whether to apply pre/post-scaling. My Policy 4
+fallback returned ScalingInfo::NotApplied -- so solve was
+SKIPPING the scaling step entirely.
+
+The plan file even said "ScalingInfo::NotApplied for the
+fallback path matches the InfNorm convention (InfNorm doesn't
+report Applied)". This was wrong. InfNorm returns
+ScalingInfo::Applied (verified in src/scaling/infnorm.rs:93).
+
+Fix: forward the actual in_info from infnorm::compute_infnorm
+(which is Applied). Re-bench: sparse residual_pass = 154 233
+EXACTLY the prediction. MSS1_0007-0013 back to 6e-12.
+
+Lesson recorded as a load-bearing invariant in
+dev/decisions.md: any non-trivial scaling vector MUST return
+ScalingInfo::Applied. NotApplied is reserved for paths where
+the vector itself shouldn't be applied (Identity / External).
+
+* 15:30 :policy4:commit:
+Committed Policy 4 as af9315d. Commit body documents the
+3-condition rule, the two bugs caught during landing
+(MEYER3NE false-positive, NotApplied bug), and the corpus
+evidence. cargo test + clippy + fmt all clean via pre-commit.
+
+Final perf state:
+- sparse residual_pass: 154 233 / 154 588 (+1 from predicted)
+- sparse inertia_match: 153 009 / 154 588 (unchanged)
+- VESUVIA_0000 ratio: 8.22x (lever-C win preserved)
+- MUONSINE_0000 ratio: 9.79x (lever-C win preserved)
+- HS75_0000 residual: 8.65e-13 (4-order MC64 win preserved)
+- MEYER3NE parity tests: pass
+- Phase 2.8.1 small-frontal/medium p90 thresholds: PASS
+
+* 16:00 :perf:tail:survey:
+User asked what's next. Two options: (1) close session per
+CLAUDE.md, (2) investigate the next perf lever. User chose
+(2).
+
+Surveyed sparse top-10 worst factor-ratio outliers:
+- 4 tiny (n<=9, ~100us flat)
+- 2 dense-ish small (TRO3X3, LAKES)
+- 2 KIRBY2
+- 1 CHWIRUT1
+- 1 MUONSINE (already at lever-C floor)
+
+Per-family geomeans: AVION2 (1.61, 2682 mat) and BATCH
+(1.85, 2054 mat) lose to MUMPS on average. ~7700 matrices
+where geomean > 1 -- bigger blast radius than the top-10
+tail.
+
+Picked Lever D.2 (per-family analysis on AVION2/BATCH) as
+the broadest-impact bet.
+
+* 16:30 :nemin:abandoned:
+Tested nemin tuning on AVION2 + BATCH via FERAL_NEMIN env-var
+override added to profile_sparse:
+
+  AVION2_0000: nemin=32 fac=35us, nemin=5 fac=33us, nemin=1 fac=48us
+  BATCH_0000:  nemin=32 fac=80us, nemin=5 fac=82us, nemin=1 fac=92us
+
+Default nemin=32 already optimal. Smaller values regress.
+The AVION2/BATCH gap is structural multifrontal scaffolding,
+not amalgamation policy.
+
+Discrepancy noted: profile_sparse warm best-of-5 gives much
+lower numbers than bench cold-call. E.g. LAKES_1199 bench
+5587us vs cold 528us vs warm 276us. Suggests allocator churn
+across the 154 588-matrix bench loop. KIRBY2 goes the OTHER
+way (cold > bench), so the picture is muddier than pure
+"cold = slow".
+
+Updated recommendation in research note: Lever D.1 (FactorWorkspace
+arena) is the next bet. Concrete next step: alloc instrumentation
+on AVION2_0000/BATCH_0000 to confirm the alloc hypothesis BEFORE
+designing the API.
+
+D.2 nemin attempt recorded in dev/tried-and-rejected.md.
+Research note committed as 8e68482.
+
+* 17:30 :session:close:
+Closing session. Three commits this session:
+- 0c39e27 (default flip from InfNorm to Auto, lever-C closure
+  -- actually committed in session 02 transition)
+- af9315d (Policy 4 fallback)
+- 8e68482 (sparse-tail survey research note)
+
+Plus session checkpoint, decisions.md (2 entries: Policy 4 +
+ScalingInfo::Applied invariant), tried-and-rejected.md (2
+entries: 2-condition rule + nemin tuning), CHANGELOG.md
+(Auto default + Policy 4 entry under Unreleased).
