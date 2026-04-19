@@ -170,6 +170,92 @@ impl FactorWorkspace {
     }
 }
 
+/// Gate predicate for the D.3 dense fast-path.
+///
+/// Returns `true` when the input satisfies `n ≤ N_MAX` and
+/// `nnz_lower / (n * (n + 1) / 2) ≥ ρ_MIN`. The density threshold
+/// is expressed as the integer inequality
+/// `nnz_lower * ρ_DEN ≥ n * (n + 1) / 2 * ρ_NUM` so the check costs
+/// a handful of integer ops with no division or FP.
+///
+/// Authoritative entry point for the gate; callers must not
+/// roll their own. Thresholds may be tuned post-measurement
+/// (see `dev/plans/sparse-tail-d3.md` stage 2).
+///
+/// STUB: returns `false` unconditionally. The RED commit ships
+/// the API so tests can reference it; the GREEN commit wires
+/// the real predicate and the call site in
+/// `factorize_multifrontal_with_workspace`.
+#[inline]
+pub fn should_use_dense_fast_path(n: usize, nnz_lower: usize) -> bool {
+    let _ = (n, nnz_lower);
+    false
+}
+
+/// Fast-path factorization for small-and-dense matrices.
+///
+/// Skips symbolic analysis entirely: densifies the CSC into a
+/// `SymmetricMatrix`, applies the usual global symmetric scaling,
+/// runs the dense BK kernel on all `n` columns, and wraps the
+/// `FrontalFactors` in a single-supernode `SparseFactors` that is
+/// shape-compatible with `solve_sparse`.
+///
+/// Should only be called on matrices for which
+/// [`should_use_dense_fast_path`] returns `true`. The production
+/// dispatch path in `factorize_multifrontal_with_workspace` enforces
+/// this; direct callers (tests, benches) must observe it themselves.
+///
+/// STUB: returns
+/// `Err(FeralError::InvalidInput("dense_fast_factor: not implemented"))`.
+/// The RED commit ships the signature so tests can reference it;
+/// the GREEN commit implements the densify → scale → factor →
+/// synthesize pipeline.
+pub fn dense_fast_factor(
+    matrix: &CscMatrix,
+    params: &NumericParams,
+) -> Result<(SparseFactors, Inertia), FeralError> {
+    let _ = (matrix, params);
+    Err(FeralError::InvalidInput(
+        "dense_fast_factor: not implemented (RED commit, see dev/plans/sparse-tail-d3.md)"
+            .to_string(),
+    ))
+}
+
+/// Forced-supernodal variant of [`factorize_multifrontal`].
+///
+/// Bypasses the D.3 dense fast-path gate and runs the multifrontal
+/// supernodal path regardless of input shape. Intended for test
+/// oracles (the solve-parity suite in `tests/dense_fast_path.rs`)
+/// that need to compare the dense-path factor against the
+/// multifrontal factor on an in-gate matrix.
+///
+/// In the RED commit this delegates to
+/// [`factorize_multifrontal`]; when the GREEN commit wires the
+/// gate, the delegation flips — `factorize_multifrontal` becomes
+/// the gated dispatcher and this function retains the supernodal
+/// body.
+pub fn factorize_multifrontal_supernodal(
+    matrix: &CscMatrix,
+    symbolic: &SymbolicFactorization,
+    params: &NumericParams,
+) -> Result<(SparseFactors, Inertia), FeralError> {
+    factorize_multifrontal(matrix, symbolic, params)
+}
+
+/// Workspace-reusing forced-supernodal variant.
+///
+/// See [`factorize_multifrontal_supernodal`] for the role of this
+/// entry point. This is the workspace-aware form used by tests
+/// that exercise workspace parity *and* gate bypass together.
+pub fn factorize_multifrontal_supernodal_with_workspace(
+    matrix: &CscMatrix,
+    symbolic: &SymbolicFactorization,
+    params: &NumericParams,
+    ws: &mut FactorWorkspace,
+) -> Result<(SparseFactors, Inertia), FeralError> {
+    factorize_multifrontal_with_workspace(matrix, symbolic, params, ws)
+}
+
 /// Perform multifrontal numeric factorization.
 ///
 /// Takes the original sparse matrix and the symbolic factorization,
