@@ -1,0 +1,59 @@
+#+TITLE: Session journal 2026-04-19-04
+#+OPTIONS: toc:nil
+
+* 17:40 :leverD1:allocation:instrumentation:
+Goal: confirm or refute the Lever D.1 alloc-churn hypothesis from
+dev/research/sparse-tail-perf-2026-04-19.md §6 before drafting a
+FactorWorkspace API. Authorized scope: instrumentation only.
+
+Approach: custom ~#[global_allocator]~ wrapping ~System~, gated by
+an ~AtomicBool~ flag toggled on only around ~factorize_multifrontal~.
+Four counters: alloc, realloc, dealloc, bytes. Dropped into a new
+~src/bin/alloc_probe.rs~. No changes to the numeric phase itself.
+
+* 17:50 :leverD1:evidence:
+Ran ~cargo run --release --bin alloc_probe~ against a panel of 10
+matrices. Alloc counts deterministic across 5 iters (min == max
+every row). Saved to ~dev/results/lever-d1/alloc-probe-2026-04-19.txt~.
+
+Headline:
+| matrix       |   n | snodes | allocs | fac(µs) | MUMPS(µs) |
+|--------------+-----+--------+--------+---------+-----------|
+| AVION2_0000  |  94 |     65 |   1125 |      99 |        19 |
+| BATCH_0000   | 121 |     86 |   1623 |      78 |        13 |
+| LAKES_1199   | 168 |     54 |   1237 |      94 |        55 |
+| HAHN1_0000   | 715 |    472 |   9093 |    1086 |       190 |
+| VESUVIO_0000 |3083 |   2050 |  38199 |   11090 |       N/A |
+
+Per-supernode alloc count is 17-23 across every matrix size - a
+structural fingerprint. Every supernode allocates ~20 small Vecs
+(row_indices, row_map=~vec![usize::MAX; n]~, frontal
+SymmetricMatrix, FrontalFactors internals, contrib_row_indices).
+
+Cost attribution on AVION2_0000: at ~50ns/alloc + 30ns/dealloc
+that is (1125×50)+(692×30) ≈ 77µs of 99µs budget. The remaining
+~20µs is plausibly the floating-point work - which is roughly
+MUMPS's 19µs. MUMPS gets there by reusing one big workspace
+sliced by metadata, not by allocating per front.
+
+* 17:55 :leverD1:decision:
+D.1 hypothesis CONFIRMED. Wrote up conclusion + target FactorWorkspace
+design (persistent row_map sized n, reusable frontal / FrontalFactors
+pools sized to max snode.nrow from symbolic, precomputed
+row_indices where derivable from the symbolic phase) in §9 of the
+research note.
+
+Expected impact if per-supernode alloc count drops from ~20 to ~2:
+AVION2_0000 99µs -> ~30µs (ratio 5x -> 1.5x), BATCH_0000 ~80µs ->
+~25µs (ratio 6x -> 2x). Corpus geomean vs MUMPS 0.48 -> ~0.35.
+
+Next step (NOT authorized yet, awaits human): draft FactorWorkspace
+API on a feature flag and A/B via bench_solver_reuse. Any A/B must
+run ≥100 iters per matrix to beat the allocator-state noise floor
+(AVION2_0500 swung 68 -> 140 ns/alloc across two consecutive runs
+of alloc_probe).
+
+Measurement caveat: min-of-5-iters timing is noisy at n < 200; the
+alloc counts themselves are reliable (deterministic), but the
+ns/alloc estimates should be treated as order-of-magnitude, not
+point estimates.

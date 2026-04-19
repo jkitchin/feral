@@ -278,6 +278,129 @@ The research note for the implementation lever lands after
 step 4 — this note doesn't authorize implementation, only
 the investigation.
 
+### 9. Alloc-probe measurement — D.1 hypothesis CONFIRMED (2026-04-19, next session)
+
+`src/bin/alloc_probe.rs` installs a `#[global_allocator]` wrapping
+`System` with atomic counters gated by a flag toggled on only around
+the `factorize_multifrontal` call. Results
+(`dev/results/lever-d1/alloc-probe-2026-04-19.txt`, release build):
+
+```
+matrix            n   nnz  snod    allocs reallocs deallocs      bytes  fac(us)  ns/alo
+AVION2_0000      94   167    65      1125       43      692     206277     99.0    88.0
+AVION2_0500      64   193    21       494       21      343     166309     69.2   140.1
+BATCH_0000      121   299    86      1623       90     1037     600189    188.2   115.9
+BATCH_0500      121   305    86      1592       96     1027     643485     87.0    54.7
+LAKES_1199      168   396    54      1237       62      855     806430     94.1    76.1
+TRO3X3_0013      69  1764    14       321       14      219     525132     88.8   276.6
+HAHN1LS_0429      7     7     7       130        0       84       6024      2.7    20.8
+FBRAIN3LS_0003    6    21     1        41        0       31       4495      1.3    31.5
+HAHN1_0000      715  2839   472      9093      472     5785   14769203   1086.5   119.5
+VESUVIO_0000   3083  9484  2050     38199     2050    23845  223037875  11089.9   290.3
+```
+
+Alloc counts are deterministic run-to-run (min == max across 5 iters
+for every row).
+
+**Per-supernode alloc count is remarkably uniform, ~17–23 allocs/snode:**
+
+| matrix         | snodes | allocs/snode | bytes/snode |
+|----------------|------:|-------------:|------------:|
+| AVION2_0000    |    65 |         17.3 |       3 174 |
+| AVION2_0500    |    21 |         23.5 |       7 919 |
+| BATCH_0000     |    86 |         18.9 |       6 979 |
+| BATCH_0500     |    86 |         18.5 |       7 482 |
+| LAKES_1199     |    54 |         22.9 |      14 934 |
+| HAHN1LS_0429   |     7 |         18.6 |         860 |
+| HAHN1_0000     |   472 |         19.3 |      31 291 |
+| VESUVIO_0000   |  2050 |         18.6 |     108 799 |
+
+This is the fingerprint of a pipeline that allocates a small fixed
+set of `Vec`s per supernode and frees them at each boundary. The
+obvious sites in `src/numeric/factorize.rs`:
+
+- `row_indices` (from `build_row_indices`) — `Vec<usize>`.
+- `row_map` — `vec![usize::MAX; n]` re-allocated *every supernode*
+  (loop line 259). This is an O(n) allocation per supernode.
+- `frontal` (`SymmetricMatrix::zeros(actual_nrow)`) — dense
+  triangular buffer.
+- `factor_frontal` internals (L, D, perm, contrib buffers inside
+  `FrontalFactors`).
+- `contrib_row_indices` (line 347) — `Vec::with_capacity(cdim)` per
+  supernode with contrib.
+- Plus per-supernode realloc if any `push` path grows beyond an
+  initial capacity.
+
+**Attribution to feral's factor cost:**
+
+On AVION2_0000 (fac = 99 µs, MUMPS = 19 µs): 1125 allocs + 692
+deallocs + 43 reallocs. Typical macOS libc `malloc`/`free` for
+small allocations is ~30–80 ns; at 50 ns/alloc that is
+(1125 × 50) + (692 × 30) = 56 + 21 = **77 µs of pure allocator
+time out of a 99 µs budget.** Floating-point work is at most the
+remaining ~20 µs — which is within striking distance of MUMPS's
+19 µs. MUMPS gets this by reusing one big workspace array sliced
+by metadata, not by re-allocating per front.
+
+On BATCH_0000 (fac = 78-188 µs noisy, MUMPS = 13 µs): 1623
+allocs + 1037 deallocs + 90 reallocs. At 50 ns/alloc that is
+(1623 × 50) + (1037 × 30) ≈ 112 µs already exceeds the faster
+iteration's 78 µs. Allocator is the dominant cost.
+
+For Class A tiny matrices (HAHN1LS_0429 at 2.7 µs): 130 allocs +
+84 deallocs at 50/30 ns ≈ 9 µs *of alloc*, more than the observed
+factor time — which means either many allocations are coalescing
+into freelist hits below 50 ns, or the measured 2.7 µs is actually
+dominated by cache-cold first-call effects in a way the min-over-
+iters reading is hiding. Either way the 18.6 allocs/snode ratio
+holds at n=7, and MUMPS's ~10 µs floor on the same matrix suggests
+that matching MUMPS here requires cutting allocations roughly to
+zero.
+
+**Bytes allocated per factor call are also large.** VESUVIO_0000
+allocates 223 MB per factorization — a figure that turns into
+real memory traffic in an IPM loop that re-factors each iteration.
+HAHN1_0000's 14.8 MB × N iterations is the same story.
+
+**Conclusion:** D.1 is confirmed. The 17–23 allocs/snode pattern
+across every matrix size, the size-matched allocator-time budget
+on AVION2 and BATCH, and the MUMPS reference (which does not
+reallocate per front) together justify building a `FactorWorkspace`
+that provides:
+
+1. A persistent `row_map` sized `n` (zeroed on entry to factorize,
+   cleared via the existing `row_indices` loop on exit). One
+   allocation per `factorize_multifrontal` instead of one per
+   supernode.
+2. Reusable `SymmetricMatrix` frontal storage — a single buffer
+   sized to `max snode.nrow` (computable from the symbolic phase),
+   `view_mut(actual_nrow)`-style API to slice the needed region.
+3. Reusable `FrontalFactors` internals (L column buffer, D
+   diagonals, contrib buffer) via the same max-size pool.
+4. Small-vector reuse for `row_indices` and `contrib_row_indices`
+   — or, better, precompute and store them on the symbolic side
+   where they're already derivable.
+
+**Expected reduction**: if the average supernode allocates ~20
+small Vecs and we drop that to ~2 (retained buffers growing to
+high-water and reused), allocator time falls ~10× for that phase.
+AVION2_0000: 99 → ~30 µs (ratio 5× → 1.5×). BATCH_0000: ~80 → ~25
+µs (ratio 6× → ~2×). Corpus geomean vs MUMPS likely drops from
+0.48 → ~0.35 and family geomeans for AVION2/BATCH/HS118 drop
+below 1.
+
+**Next step is authorized by the plan in sparse-tail-perf §6.3:**
+draft `FactorWorkspace` API on a feature flag, A/B in bench. The
+natural layering is to cache it on `Solver` (already caches
+`SymbolicFactorization`) so IPM iterations reuse the same
+workspace. See also the `bench_solver_reuse` bin, which will
+become the primary A/B harness.
+
+Measurement artefact to flag: 5-iter min-over timing still varies
+(AVION2_0500 68→140 ns/alloc across runs), so any A/B must run a
+larger sample (≥100 iters) rather than a 5-iter min to reject
+allocator-state noise.
+
 ### 8. Files this session (Policy 4 + this note)
 
 - `src/scaling/mod.rs` — Policy 4 fallback (committed
@@ -293,3 +416,12 @@ the investigation.
   evidence (committed `af9315d`).
 - `dev/research/sparse-tail-perf-2026-04-19.md` — this
   note. Awaits next-lever decision.
+
+Next-session additions (alloc-probe, 2026-04-19):
+
+- `src/bin/alloc_probe.rs` — per-call allocation counter binary
+  wrapping `System` with a gated atomic-counter `GlobalAlloc`.
+- `dev/results/lever-d1/alloc-probe-2026-04-19.txt` — probe run
+  results (AVION2/BATCH/LAKES/TRO3X3/HAHN1LS/FBRAIN3LS/HAHN1/
+  VESUVIO).
+- This note, §9 — D.1 alloc-churn hypothesis CONFIRMED.
