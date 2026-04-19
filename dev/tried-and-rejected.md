@@ -520,3 +520,56 @@ profile makes the upside small.
 
 **Evidence.** `/tmp/bench_amd.log` and `/tmp/bench_auto.log` from
 2026-04-18 session continuation; commit `bc6ec82`.
+
+---
+
+## 2026-04-18-08 — Routing VESUVIO to MetisND
+
+**Hypothesis.** VESUVIO's 84× factor ratio vs MUMPS could be a
+bordered-KKT pathology like CRESC132, where AMD orders the
+constraints into a near-dense root frontal that MetisND breaks up.
+
+**Test.** `src/bin/vesuvio_diag.rs` ran symbolic + numeric
+factorization under both AMD and MetisND on 5 VESUVIO samples
+(VESUVIOU_0000, VESUVIOU_0005, VESUVIO_0000, VESUVIO_0021,
+VESUVIA_0000), with CRESC132 as the positive-control reference.
+
+**Result.** MetisND helps marginally on two samples (-5%, -8%)
+and is slower on the other three. Both orderings produce the
+same 67%-of-n root frontal because VESUVIO has a single dense
+linking column (max_col_nnz=1026, diag_only=1025); any reasonable
+ordering pushes it to the root. The factor cost is dense-kernel
+limited, not ordering-limited. CRESC132 by contrast drops 96%→50%
+under MetisND because it has thousands of dense constraint
+columns that AMD bunches into one mega-supernode.
+
+**Verdict.** No new dispatcher rule for VESUVIO. The remaining
+factor-tail gap is `src/dense/factor.rs` work (blocked BK + SIMD).
+
+**Evidence.** `dev/journal/2026-04-18-08.org` second entry, commit
+`86cf1e8`.
+
+## 2026-04-18-08 — Adding a narrow KaHIP rule to `pick_default_method`
+
+**Hypothesis.** A narrow rule (e.g. by stored_nnz/n class or
+specific arrow-pattern detector) could route some IPM family
+where K1 + multilevel ND beats AMD or METIS.
+
+**Test.** Re-ran `bench_orderings` (41 matrices, parity ∪ large)
+including KahipND for the first time at corpus scale. Compared
+fill counts and per-call symbolic time vs AMD/MetisND/ScotchND.
+
+**Result.** KaHIP-with-K1 ties METIS on fill (geomean 1.023 vs
+1.024 relative to AMD) at 1.2× METIS's per-call cost. Strict-fill
+wins of KaHIP over AMD on only 4/41 matrices, and in every case
+KaHIP merely ties the best other ordering rather than beating it.
+On the IPM corpus the existing `n>=5000 && nnz/n<6 → MetisND`
+rule already captures the fill wins KaHIP could provide; the
+extra per-call setup cost is unrecouped.
+
+**Verdict.** Status quo. KaHIP remains opt-in via
+`symbolic_factorize_with_method` and `OrderingMethod::Auto`.
+Pinned by `pick_default_method_never_returns_kahip` test.
+
+**Evidence.** `dev/research/ordering-kahip-driver-integration.md`,
+commit `b5c67cb`.

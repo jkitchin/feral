@@ -999,3 +999,61 @@ better than MUMPS). The parity panel was regenerated via
 moving 8 additional boundary-case matrices into the `#[ignore]` bucket.
 
 **Journal.** `dev/journal/2026-04-18-03.org` 10:00-10:40 entries.
+
+---
+
+## 2026-04-18-08 — `pick_default_method` will not route to KahipND
+
+The default ordering dispatcher (`src/symbolic/mod.rs:178
+pick_default_method`) returns either `Amd` or `MetisND`. It will
+not return `KahipND` on its own. KaHIP remains reachable through
+two explicit channels:
+
+- `symbolic_factorize_with_method(.., OrderingMethod::KahipND)`
+- `symbolic_factorize_with_method(.., OrderingMethod::Auto)` whose
+  decision tree includes KaHIP for narrow shape branches
+
+**Evidence.** 41-matrix `bench_orderings` bake-off at session 08:
+KaHIP-with-K1 ties METIS on fill (geomean 1.023 vs 1.024 relative
+to AMD) at 4-6× the per-call symbolic-time cost (81s vs 68s vs
+AMD 14s, total). Strict-fill wins of KaHIP over AMD on only 4/41
+matrices, in every case merely tying the best other ordering.
+On the 154 588-matrix IPM bench KaHIP would only match METIS
+where the existing `n>=5000 && nnz/n<6 → MetisND` rule already
+fires (e.g. CRESC132).
+
+**Pinning.** Test `pick_default_method_never_returns_kahip` covers
+8 representative shapes (CRESC132, VESUVIOU, c-big, etc.) and
+asserts none route to KahipND. A future opt-in change must
+consciously update the test and the cross-referenced research
+note.
+
+**Research / plan.**
+`dev/research/ordering-kahip-driver-integration.md` and
+`dev/plans/ordering-kahip-driver-integration.md`.
+
+**Journal.** `dev/journal/2026-04-18-08.org` third entry.
+
+## 2026-04-18-08 — VESUVIO factor-time gap is dense-kernel limited
+
+The factor/MUMPS max ratio of ~85× on the VESUVIOU/VESUVIO/VESUVIA
+families is a property of `src/dense/factor.rs` (scalar rank-1 BK
+updates, no blocking, no SIMD), not of fill-reducing ordering.
+Both AMD and MetisND produce the same ~67%-of-n root frontal on
+every VESUVIO sample because the matrix has a single dense linking
+column with 1026 nnz that any reasonable ordering pushes to the
+root.
+
+**Evidence.** `src/bin/vesuvio_diag.rs` (commit 86cf1e8) measured
+factor times under both orderings across 5 VESUVIO samples plus
+CRESC132 as a positive-control. MetisND saves ≤8% on two VESUVIO
+samples and is slower on three. Cost analysis: 2059×959 BK ≈
+1.9 GFLOPs at our scalar ~8 GFLOP/s ≈ 240ms (matches 236ms
+observed); MUMPS DGETRF on Accelerate ≈ 400 GFLOP/s ≈ 5ms (matches
+2.5ms oracle). The 50× kernel gap explains the 84× factor ratio.
+
+**Implication.** Closing the VESUVIO-class tail requires blocked
+BK + SIMD in `src/dense/factor.rs`. Multi-session engineering;
+deferred to a future planning pass.
+
+**Journal.** `dev/journal/2026-04-18-08.org` second entry.
