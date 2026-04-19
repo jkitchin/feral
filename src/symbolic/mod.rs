@@ -36,6 +36,20 @@ pub enum OrderingMethod {
     /// feral-scotch nested dissection.
     ScotchND,
     /// feral-kahip flow-based nested dissection.
+    ///
+    /// Includes K1 (Ost-Schulz-Strash 2021 Rule 1, conservative
+    /// termination) preprocessing inside the KaHIP pipeline. Wired
+    /// at `crates/feral-kahip/src/node_nd.rs`.
+    ///
+    /// **Not selected by `pick_default_method`.** The session 08
+    /// 41-matrix bake-off (`dev/research/ordering-kahip-driver-
+    /// integration.md`) showed `KahipND` ties `MetisND` on fill
+    /// geomean (1.023 vs 1.024 relative to AMD) at 4-6× the per-call
+    /// symbolic-time cost (81s vs 68s vs AMD 14s, total). On the
+    /// 154 588-matrix IPM bench KaHIP would only match METIS where
+    /// the existing narrow `n>=5000 && nnz/n<6 → MetisND` rule
+    /// already fires (e.g. CRESC132). Reachable explicitly via
+    /// `symbolic_factorize_with_method` for callers who want it.
     KahipND,
     /// Adaptive dispatcher: picks a concrete method per-matrix from
     /// cheap pattern features (n and average degree nnz/n).
@@ -736,5 +750,38 @@ mod tests {
         assert_eq!(pick_default_method(5000, 20_000), OrderingMethod::MetisND);
         // Empty matrix: AMD (avoids /0 and external-crate weirdness).
         assert_eq!(pick_default_method(0, 0), OrderingMethod::Amd);
+    }
+
+    #[test]
+    fn pick_default_method_never_returns_kahip() {
+        // Pins the session-08 driver-integration decision: KaHIP is
+        // reachable only via explicit `with_method` or `Auto`. The
+        // dispatcher must never return it on its own. See
+        // `dev/research/ordering-kahip-driver-integration.md` for
+        // the bake-off evidence (KaHIP ties METIS on fill at 4-6×
+        // the per-call cost on 41 matrices). If a future change wants
+        // to route some pattern to KaHIP by default, the maintainer
+        // must consciously update this test and the research note.
+        let shapes: &[(usize, usize)] = &[
+            (0, 0),
+            (10, 30),
+            (500, 1500),
+            (3083, 13333), // VESUVIOU
+            (5314, 22566), // CRESC132
+            (10_000, 50_000),
+            (100_000, 500_000),
+            (345_241, 1_343_126), // c-big from the shape bake-off
+        ];
+        for &(n, nnz) in shapes {
+            let m = pick_default_method(n, nnz);
+            assert_ne!(
+                m,
+                OrderingMethod::KahipND,
+                "pick_default_method({}, {}) returned KahipND; \
+                 see dev/research/ordering-kahip-driver-integration.md",
+                n,
+                nnz
+            );
+        }
     }
 }

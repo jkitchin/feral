@@ -4,6 +4,40 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Documentation (2026-04-18) — KaHIP driver-integration decision pinned
+
+A planning pass against the deferred priority "KaHIP K1 data
+reduction integration into driver" (sessions 04, 06, 07) ran the
+41-matrix shape bake-off with `KahipND` included and decided
+**not** to add a dispatcher rule for KaHIP.
+
+Bake-off evidence (`bench_orderings`):
+
+| ordering | fill / AMD geomean | total symbolic time |
+|----------|--------------------|---------------------|
+| AMD      | 1.000              | 14.4 s              |
+| METIS    | 1.024              | 68.2 s              |
+| SCOTCH   | 1.038              | 15.3 s              |
+| KaHIP    | 1.023              | 81.1 s              |
+| Auto     | 0.988              | 14.7 s (mostly AMD) |
+
+KaHIP-with-K1 ties METIS on fill but at 4-6× the per-call setup
+cost, and never strictly beats METIS on any of the 41 matrices.
+On the 154 588-matrix IPM bench it would only match METIS where
+the existing `n>=5000 && nnz/n<6 → MetisND` rule already fires.
+
+Changes:
+- `OrderingMethod::KahipND` docstring documents why the dispatcher
+  does not select it and where it is reachable.
+- New unit test `pick_default_method_never_returns_kahip` pins the
+  decision so a future opt-in change must be conscious.
+- Research note: `dev/research/ordering-kahip-driver-integration.md`.
+- Plan: `dev/plans/ordering-kahip-driver-integration.md`.
+
+No code paths or default behavior change. KaHIP remains reachable
+via `symbolic_factorize_with_method(.., KahipND)` and via
+`OrderingMethod::Auto`.
+
 ### Changed (2026-04-18) — sparse solve: workspace reuse across refinement steps
 
 `solve_sparse` now drives a private `solve_sparse_core_into` that

@@ -104,3 +104,54 @@ VESUVIO is tail pathology.
 Decision: document in CHANGELOG-alternative ("known limitation"
 line) if a CHANGELOG is warranted, otherwise leave findings in
 the journal and move to priority #3 (KaHIP K1 integration).
+
+* 15:35 :ordering:kahip:driver:planning:
+Picked priority #3 from session 07: KaHIP K1 driver integration.
+Per CLAUDE.md feature-lifecycle: planning pass first.
+
+Re-ran bench_orderings (41 matrices) to get current KaHIP fill +
+timing numbers (KaHIP wasn't in the original session-04 bake-off):
+
+  geomean fill_kahip / fill_amd  = 1.023
+  geomean fill_metis / fill_amd  = 1.024
+  total symbolic time (us):
+    AMD     14_396_571      baseline
+    METIS   68_157_794      4.74×
+    KaHIP   81_121_482      5.64×
+    Auto    14_747_890      1.02×
+
+KaHIP-with-K1 ties METIS on fill (1.023 vs 1.024) but at 1.2×
+METIS's setup cost and 5.6× AMD's. Strict-fill wins over AMD on
+only 4/41 (cresc132 -39%, hahn1/cresc100/chwirut1 each <1%) and in
+every case KaHIP merely ties the best other ordering rather than
+beating it.
+
+K1 IS already wired -- inside KaHIP, at
+`crates/feral-kahip/src/node_nd.rs:45`. The "K1 not wired" line in
+session 07 checkpoint was stale. The remaining question was whether
+to route any pattern to KahipND in the dispatcher. Bake-off says:
+no measurable win available.
+
+Wrote:
+- `dev/research/ordering-kahip-driver-integration.md` (decision
+  matrix: A=status quo, B=narrow rule for KaHIP, C=K1 as generic
+  preprocessor; recommended A)
+- `dev/plans/ordering-kahip-driver-integration.md` (4-step impl
+  plan: docstring + regression test + CHANGELOG + next-session list)
+
+Implemented option A:
+- `OrderingMethod::KahipND` docstring now documents why dispatcher
+  doesn't select it (4-6× per-call cost vs METIS, no fill win) and
+  cross-references the research note
+- New test `pick_default_method_never_returns_kahip` covers 8
+  representative shapes (incl CRESC132, VESUVIOU, c-big) and asserts
+  none route to KahipND. Pins the decision -- any future opt-in
+  change must consciously update the test.
+- CHANGELOG Unreleased entry under "Documentation"
+
+Tests: lib pick_default_method_rules + new test both pass; full
+`cargo test --release` clean (no behavior change).
+
+C deferred to "next session should" with explicit trigger criteria
+(measured workload demonstrating leaf-heavy AMD pathology that K1
+fixes; the IPM corpus does not exhibit one).
