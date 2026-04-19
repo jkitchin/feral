@@ -35,3 +35,29 @@ Observations:
 Bin registered in Cargo.toml. cargo fmt + clippy clean.
 
 Commit pending.
+
+* 14:30 :bench:noise:beta:regression-investigation:
+Investigated the 1.76 → 1.78 sparse-bucket p90 regression noted
+in session 2026-04-19-02.
+
+Setup analysis: bench.rs measures `sp_factor_us` as the wall time
+across BOTH symbolic_factorize and factorize_multifrontal (line
+1257-1285, single Instant). The β refactor moved compute_scaling
+from symbolic → numeric, but both phases are inside that timer,
+so total work should be unchanged.
+
+Verified by 3 fresh release runs of `cargo run --release --bin
+bench`:
+
+| run | dense small | dense med | sparse small | sparse med |
+|-----+-------------+-----------+--------------+------------|
+|   1 |        1.52 |      1.91 |         1.89 |       1.90 |
+|   2 |        1.48 |      1.83 |         1.83 |       1.83 |
+|   3 |        1.47 |      1.86 |         1.86 |       1.86 |
+
+Sparse p90 spread: 1.83 ↔ 1.89 = ±0.03 / 3%. The reported "1.76
+→ 1.78 regression" is 1% — well inside the noise floor.
+
+Conclusion: not a real regression. Closing the investigation.
+Future bench reporting should average ≥3 runs (or report the
+median + range) to avoid chasing single-run noise.
