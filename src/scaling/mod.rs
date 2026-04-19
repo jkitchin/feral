@@ -43,27 +43,38 @@ mod mc64;
 
 /// User-facing scaling strategy selector.
 ///
-/// Default is `InfNorm` — Knight-Ruiz iterative ∞-norm equilibration,
-/// the same algorithm used by feral's dense BK path (see
-/// `src/dense/equilibrate.rs`). This was moved to default after the
-/// Phase 2.2.3 follow-up diagnostic showed MC64 was a silent no-op on
-/// matrices like HYDCAR20, METHANL8, SWOPF, and HATFLDG — matrices
-/// whose raw row norms span 4+ orders of magnitude but whose MC64
-/// matching-based scaling came out near-identity. Knight-Ruiz
-/// equilibration scales those matrices successfully and the sparse
-/// path then matches the MUMPS oracle (see
-/// `examples/dense_vs_sparse.rs` and
-/// `examples/parity_config_sweep.rs` for the evidence).
+/// Default is `Auto` — adaptive shape-based routing that picks
+/// `Mc64Symmetric` for matrices with the arrow-KKT signature
+/// (`diag_only / n >= 0.30`) and `InfNorm` everywhere else. Flipped
+/// from the prior `InfNorm` default on 2026-04-19 after the
+/// per-matrix residual-set diff confirmed the trade: 8× tail
+/// compression on factor/MUMPS (worst case 83× → 10×) and material
+/// wins on the VESUVIO/CRESC IPM corpus, against a net −9 change
+/// in the residual_pass count out of 154 588. Of the 21 regressions,
+/// 14 are oracle-`numerically_intractable` and 1 is `excluded`
+/// (boundary flicker on already-hard matrices); 5 of the remaining
+/// 6 `definitive` regressions are tolerance-edge effects (residuals
+/// 1e-10 → 1e-9 around the `n·ε·1e6` threshold). The lone material
+/// residual regression is MSS1_0009 (6e-12 → 1e-6, inertia preserved).
+/// Inertia hard rule is satisfied on every regression. See
+/// `dev/research/lever-c-residual-diff-2026-04-19.md`.
 ///
-/// `Mc64Symmetric` is still available as an opt-in; it is useful on
-/// matrices where matching provides better conditioning than ∞-norm
-/// balancing (e.g. SSINE_2529, VESUVIA_0000 in the parity panel).
+/// `InfNorm` (Knight-Ruiz iterative ∞-norm equilibration) is still
+/// available as an opt-in; it is the only choice that solves
+/// MSS1_0009 to working precision today and is the right pick for
+/// pipelines that cannot tolerate the MSS1-class residual loss
+/// pending Policy 4 (post-scaling trial-residual diagnostic).
+///
+/// `Mc64Symmetric` is also opt-in; it is useful on matrices where
+/// matching provides better conditioning than ∞-norm balancing
+/// (e.g. SSINE_2529, VESUVIA_0000 in the parity panel) but pays the
+/// MC64 symbolic overhead unconditionally.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ScalingStrategy {
-    /// Knight-Ruiz ∞-norm iterative equilibration. Default since the
-    /// Phase 2.2.3 follow-up. Matches the scaling algorithm used by
-    /// the dense BK path.
-    #[default]
+    /// Knight-Ruiz ∞-norm iterative equilibration. Matches the
+    /// scaling algorithm used by the dense BK path. Was the default
+    /// from Phase 2.2.3 through the 2026-04-19 lever-C residual diff
+    /// (now opt-in).
     InfNorm,
     /// MC64-style symmetric matching-based scaling. Matches the
     /// default behavior of MUMPS (SYM=2) and SSIDS
@@ -80,9 +91,9 @@ pub enum ScalingStrategy {
     /// has the arrow-KKT signature (many degree-1 "constraint slack"
     /// columns), else `InfNorm`. The routing rule is documented at
     /// [`pick_scaling_strategy`]; threshold is `diag_only / n >= 0.3`.
-    /// This is opt-in only and never the default of
-    /// `ScalingStrategy::default`. See
-    /// `dev/research/lever-c-adaptive-scaling.md`.
+    /// Default since 2026-04-19. See
+    /// `dev/research/lever-c-residual-diff-2026-04-19.md`.
+    #[default]
     Auto,
 }
 

@@ -61,3 +61,58 @@ Sparse p90 spread: 1.83 ↔ 1.89 = ±0.03 / 3%. The reported "1.76
 Conclusion: not a real regression. Closing the investigation.
 Future bench reporting should average ≥3 runs (or report the
 median + range) to avoid chasing single-run noise.
+
+* 17:30 :lever-c:scaling:default-flip:correctness:
+Resumed VESUVIO/CRESC tail work from the user request "we need to
+solve VESUVIO/CRESC arrow-KKTs factor ~84× slower than MUMPS
+next." The summary framing implied the dense-kernel was the
+bottleneck (lever B). It's not — MC64 scaling already collapses
+the cascade (see vesuvio-cresc-mc64-finding work, sessions 04-18
+through 04-19 lever-c suite). What was pending was the §4.1
+follow-up from polak6-triage: per-matrix residual diff between
+Policy 1 (InfNorm baseline) and Policy 3 (Auto adaptive).
+
+Computed it directly from existing dump-baseline.csv vs
+dump-adaptive.csv (no new bench needed). Joined on matrix name:
+
+| state                              | count |
+|------------------------------------+-------|
+| both pass                          | 154220 |
+| both fail                          |    335 |
+| baseline pass, adaptive regresses  |     21 |
+| adaptive pass, baseline regresses  |     12 |
+| net                                |     -9 |
+
+Cross-referenced the 21 regressions against .verdict.json:
+- 14 numerically_intractable (boundary flicker on hard matrices)
+- 1 excluded (POLAK6_0021, info-free)
+- 6 definitive (strong oracle agreement)
+
+Of the 6 definitive: 5 are tolerance-edge effects (residuals
+1e-10 → 1e-9 around the n·ε·1e6 threshold). MSS1_0009 is the
+only material residual regression (6e-12 → 1e-6, inertia
+preserved, n=163).
+
+Decision: flip default ScalingStrategy from InfNorm to Auto.
+Note at dev/research/lever-c-residual-diff-2026-04-19.md.
+Plan at dev/plans/scaling-default-flip-to-auto.md.
+
+Implementation: one diff in src/scaling/mod.rs moving #[default]
+from InfNorm to Auto + doc-comment updates. cargo test 208/208
+green. cargo clippy --lib --bins clean.
+
+Corpus re-bench confirmed prediction exactly:
+
+| metric                | baseline (InfNorm) | new default (Auto) |
+|-----------------------+--------------------+--------------------|
+| sparse residual_pass  | 154241 / 154588    | 154232 / 154588    |
+| sparse inertia_match  | 153008 / 154588    | 153009 / 154588    |
+| VESUVIA_0000 ratio    | 84×                | 9.41×              |
+| MUONSINE_0000 ratio   | 59×                | 10.26×             |
+| worst residual matrix | ERRINBAR_0824      | POLAK6_0021 (excluded) |
+
+Tail compression landed: 8× on the IPM corpus, exactly as the
+residual-diff note predicted. Hard rule check: inertia preserved
+on every regression (CLAUDE.md).
+
+Commit pending.
