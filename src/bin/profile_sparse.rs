@@ -185,6 +185,23 @@ fn main() {
         ("AVION2", "_0000"),
         ("VESUVIO", "_0000"),
         ("CRESC132", "_0000"),
+        // Sparse top-10 worst factor-ratio outliers (post-Policy 4)
+        ("LAKES", "_1199"),
+        ("TRO3X3", "_0013"),
+        ("CHWIRUT1", "_0009"),
+        ("HAHN1LS", "_0429"),
+        ("CHWIRUT2LS", "_0184"),
+        ("FBRAIN3LS", "_0003"),
+        ("KIRBY2", "_0007"),
+        ("PALMER5B", "_0049"),
+        // Lever D.2 candidates: families where geomean factor/MUMPS > 1
+        ("AVION2", "_0000"),
+        ("AVION2", "_0500"),
+        ("AVION2", "_1500"),
+        ("BATCH", "_0000"),
+        ("BATCH", "_0500"),
+        ("BATCH", "_1500"),
+        ("HS118", "_0500"),
     ];
     for (family, sample) in cases {
         run_one(family, sample, "");
