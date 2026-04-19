@@ -5,7 +5,7 @@
 //! Solver grows: this file lands the Step-2 set (I1, I5, I6) and
 //! grows in subsequent commits.
 
-use feral::{CscMatrix, FactorStatus, FeralError, Inertia, Solver};
+use feral::{CscMatrix, FactorStatus, FeralError, Inertia, QualityLevel, Solver};
 
 /// I1 — baseline factor + solve without inertia check.
 ///
@@ -222,4 +222,85 @@ fn i4_singular_under_fail_returns_singular_clears_factor() {
         solver.factors().is_none(),
         "factors should be cleared on Singular"
     );
+}
+
+/// I7 — IPM-style escalation loop terminates with `Success`.
+///
+/// Demonstrates the canonical caller pattern from the plan:
+/// factor → check → bump quality → re-factor. Uses a bordered
+/// KKT (3 positive variables, 1 constraint, expected inertia
+/// (3, 1, 0)) where the first factor with default params already
+/// gives the correct inertia, so the loop terminates in 1
+/// iteration. The structural assertion is that the loop runs
+/// to `Success` within a small budget regardless of how many
+/// quality bumps it takes.
+#[test]
+fn i7_quality_escalation_loop_terminates_with_correct_inertia() {
+    // Bordered KKT from tests/sparse_postorder.rs.
+    let csc = CscMatrix::from_triplets(
+        4,
+        &[0, 3, 1, 3, 2, 3, 3],
+        &[0, 0, 1, 1, 2, 2, 3],
+        &[1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 0.0],
+    )
+    .unwrap();
+    let expected = Inertia {
+        positive: 3,
+        negative: 1,
+        zero: 0,
+    };
+
+    let mut solver = Solver::new();
+    let mut iters = 0usize;
+    let final_status = loop {
+        iters += 1;
+        assert!(iters <= 6, "loop budget exceeded");
+        match solver.factor(&csc, Some(expected.clone())) {
+            FactorStatus::Success => break FactorStatus::Success,
+            FactorStatus::WrongInertia { .. } => {
+                if !solver.increase_quality() {
+                    panic!("quality exhausted before Success");
+                }
+            }
+            FactorStatus::Singular => panic!("unexpected Singular on a non-singular bordered KKT"),
+            FactorStatus::FatalError(e) => panic!("fatal: {}", e),
+        }
+    };
+    assert!(matches!(final_status, FactorStatus::Success));
+    assert_eq!(solver.num_negative_eigenvalues(), expected.negative);
+}
+
+/// I8 — solver lifetime: state persists across `factor()` calls.
+///
+/// Factor once, then call `increase_quality()` twice. The second
+/// `factor()` should observe the bumped pivot threshold via
+/// `solver.pivot_threshold()`, and the new factorization should
+/// still succeed.
+#[test]
+fn i8_solver_lifetime_state_persists() {
+    let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
+
+    let mut solver = Solver::new();
+    let _ = solver.factor(&csc, None);
+    assert_eq!(solver.quality_level(), QualityLevel::Baseline);
+
+    // First bump on default (InfNorm) scaling: stage 1 is no-op,
+    // pivot jumps to 0.01.
+    assert!(solver.increase_quality());
+    assert_eq!(solver.quality_level(), QualityLevel::PivotRaised);
+    assert_eq!(solver.pivot_threshold(), 0.01);
+
+    // Second bump: 0.01^0.75 ≈ 0.0316.
+    assert!(solver.increase_quality());
+    let want = 0.01_f64.powf(0.75);
+    assert!((solver.pivot_threshold() - want).abs() < 1e-15);
+
+    // Re-factor: state persists, factor still succeeds, symbolic
+    // cache reused (same pattern).
+    let n_sym_before = solver.symbolic_call_count();
+    let status = solver.factor(&csc, None);
+    assert!(matches!(status, FactorStatus::Success));
+    assert_eq!(solver.symbolic_call_count(), n_sym_before);
+    // Pivot threshold did not get reset by factor().
+    assert!((solver.pivot_threshold() - want).abs() < 1e-15);
 }
