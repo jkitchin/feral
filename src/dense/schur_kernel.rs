@@ -495,7 +495,48 @@ pub fn axpy2_minus_unroll4(dst: &mut [f64], src0: &[f64], alpha0: f64, src1: &[f
 // autovectorized scalar is large enough to be worth wiring in is
 // the open Phase 2.4.3 question.
 
-#[cfg(target_arch = "aarch64")]
+// Direct-token dispatch helper for the wired `_nofma` kernels.
+//
+// On aarch64 we always use the baseline NEON token (NEON is ARMv8
+// mandatory, so `Neon::new_unchecked()` is sound).
+//
+// On x86_64 we runtime-detect AVX2+FMA via `pulp::x86::V3::try_new()`
+// — pulp caches the CPUID result in a static AtomicU8, so per-call
+// overhead is one relaxed atomic load + one branch (i.e. cheap
+// enough to keep the per-update dispatch model). When V3 is not
+// available (older x86_64 without AVX2/FMA) we fall back to
+// `pulp::Arch::new().dispatch(...)`, which selects the best Simd
+// flavor pulp can produce on the live machine (V2/SSE2/scalar).
+//
+// On other architectures we go straight to `pulp::Arch::new().dispatch`
+// so the code path is universally available — only the wired-token
+// performance story is arch-specific.
+//
+// Bit-exactness vs the scalar Rust loop is preserved on every
+// architecture because the kernel bodies use explicit `mul + sub`
+// (or `mul + add + sub` for the rank-2 form) and never `mul_add`,
+// matching `naive_axpy_minus` / `naive_axpy2_minus`.
+#[inline(always)]
+fn dispatch_nofma<K: pulp::WithSimd>(k: K) -> K::Output {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is a baseline feature on aarch64/ARMv8.
+        const NEON: pulp::aarch64::Neon = unsafe { pulp::aarch64::Neon::new_unchecked() };
+        k.with_simd(NEON)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        match pulp::x86::V3::try_new() {
+            Some(v3) => k.with_simd(v3),
+            None => pulp::Arch::new().dispatch(k),
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        pulp::Arch::new().dispatch(k)
+    }
+}
+
 #[allow(dead_code)]
 pub fn axpy_minus_unroll4_nofma(dst: &mut [f64], src: &[f64], alpha: f64) {
     assert_eq!(
@@ -552,12 +593,9 @@ pub fn axpy_minus_unroll4_nofma(dst: &mut [f64], src: &[f64], alpha: f64) {
         }
     }
 
-    const NEON: pulp::aarch64::Neon = unsafe { pulp::aarch64::Neon::new_unchecked() };
-    use pulp::WithSimd;
-    K { alpha, src, dst }.with_simd(NEON);
+    dispatch_nofma(K { alpha, src, dst });
 }
 
-#[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
 pub fn axpy2_minus_unroll4_nofma(
     dst: &mut [f64],
@@ -650,16 +688,13 @@ pub fn axpy2_minus_unroll4_nofma(
         }
     }
 
-    const NEON: pulp::aarch64::Neon = unsafe { pulp::aarch64::Neon::new_unchecked() };
-    use pulp::WithSimd;
-    K {
+    dispatch_nofma(K {
         alpha0,
         alpha1,
         src0,
         src1,
         dst,
-    }
-    .with_simd(NEON);
+    });
 }
 
 #[cfg(test)]
@@ -895,7 +930,6 @@ mod tests {
     // regressed under FMA unroll4. `assert_eq!` on f64 slices checks
     // every bit pattern, which is the correct assertion here.
 
-    #[cfg(target_arch = "aarch64")]
     #[test]
     fn axpy_minus_unroll4_nofma_is_bit_exact_vs_scalar() {
         let mut rng = Xorshift64::new(0xB17_EAC70_0042_F00Du64);
@@ -916,7 +950,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_arch = "aarch64")]
     #[test]
     fn axpy2_minus_unroll4_nofma_is_bit_exact_vs_scalar() {
         let mut rng = Xorshift64::new(0xB17_EAC70_BAAD_F00Du64);

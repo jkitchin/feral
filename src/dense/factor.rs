@@ -1093,12 +1093,7 @@ fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
         let (before, rest) = a.split_at_mut(j * n);
         let src = &before[k * n + j..k * n + n];
         let dst = &mut rest[j..n];
-        #[cfg(target_arch = "aarch64")]
         schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
-        #[cfg(not(target_arch = "aarch64"))]
-        for i in 0..dst.len() {
-            dst[i] -= alpha * src[i];
-        }
     }
 }
 
@@ -1129,12 +1124,7 @@ fn do_2x2_update(a: &mut [f64], n: usize, k: usize, d11: f64, d21: f64, d22: f64
         let src0 = &before[k * n + j..k * n + n];
         let src1 = &before[(k + 1) * n + j..(k + 1) * n + n];
         let dst = &mut rest[j..n];
-        #[cfg(target_arch = "aarch64")]
         schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_j0, src1, dl_j1);
-        #[cfg(not(target_arch = "aarch64"))]
-        for i in 0..dst.len() {
-            dst[i] -= src0[i] * dl_j0 + src1[i] * dl_j1;
-        }
     }
 }
 
