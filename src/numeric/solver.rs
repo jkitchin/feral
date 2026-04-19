@@ -12,7 +12,9 @@
 
 use crate::error::FeralError;
 use crate::inertia::Inertia;
-use crate::numeric::factorize::{factorize_multifrontal, NumericParams, SparseFactors};
+use crate::numeric::factorize::{
+    factorize_multifrontal_with_workspace, FactorWorkspace, NumericParams, SparseFactors,
+};
 use crate::numeric::solve::{solve_sparse, solve_sparse_refined};
 use crate::scaling::ScalingStrategy;
 use crate::sparse::csc::CscMatrix;
@@ -92,6 +94,14 @@ pub struct Solver {
     /// called from this `Solver`. Used by integration tests to
     /// verify the cache-reuse property and by future telemetry.
     symbolic_call_count: usize,
+    /// Pooled scratch for the numeric phase. Retained across
+    /// `factor` calls so IPM-style re-factorizations (same
+    /// pattern, new values; or bumped pivot threshold) do not
+    /// re-allocate per-supernode buffers. Cleared to a
+    /// well-defined initial state on every
+    /// `factorize_multifrontal_with_workspace` entry, so stale
+    /// data cannot leak between factor attempts.
+    workspace: FactorWorkspace,
 }
 
 impl Solver {
@@ -113,6 +123,7 @@ impl Solver {
             last_inertia: None,
             last_pattern_fingerprint: None,
             symbolic_call_count: 0,
+            workspace: FactorWorkspace::new(),
         }
     }
 
@@ -149,8 +160,13 @@ impl Solver {
             None => unreachable!("symbolic just populated"),
         };
 
-        // Step 4: numeric factor; map errors.
-        match factorize_multifrontal(matrix, symbolic, &self.numeric_params) {
+        // Step 4: numeric factor via the pooled workspace; map errors.
+        match factorize_multifrontal_with_workspace(
+            matrix,
+            symbolic,
+            &self.numeric_params,
+            &mut self.workspace,
+        ) {
             Ok((factors, inertia)) => {
                 // Step 5: stash; PartialSingular maps to Singular.
                 let partial_singular = matches!(
