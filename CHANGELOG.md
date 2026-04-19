@@ -4,6 +4,46 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-19) — POUNCE integration interface (`Solver`)
+
+A stateful `Solver` handle that mirrors Ipopt's `SymLinearSolver`
+contract: factor → check inertia → escalate quality → re-factor.
+Built on the just-shipped β refactor so the cached
+`SymbolicFactorization` is reusable across every quality level
+without invalidation.
+
+Public API additions:
+- `Solver`, `FactorStatus`, `QualityLevel` (re-exported from crate
+  root).
+- `Solver::new() / with_params / factor / solve / solve_refined /
+  increase_quality / num_negative_eigenvalues / provides_inertia /
+  factors / quality_level / pivot_threshold / scaling_strategy /
+  symbolic_call_count`.
+- `FactorStatus::{Success, Singular, WrongInertia { actual, expected
+  }, FatalError}` — `WrongInertia` does NOT clear the stored factor,
+  matching Ipopt `SYMSOLVER_WRONG_INERTIA` semantics.
+- `QualityLevel::{Baseline, ScalingEnabled, PivotRaised, Exhausted}`.
+- `FeralError::NoFactor` for `solve()` / `solve_refined()` called
+  before a successful factor.
+
+Two-stage quality escalation (MA27-style defaults: `pivtol_max =
+0.5`, `exponent = 0.75`):
+- Stage 1: flip `Identity` scaling to `InfNorm` (skipped if scaling
+  is already non-Identity).
+- Stage 2: pivot threshold from 0.0 jumps to 0.01, then geometric
+  `min(pivtol_max, t^0.75)` until cap; transitions to `Exhausted`.
+
+Cache reuse: `Solver::factor` caches the `SymbolicFactorization` and
+re-runs `symbolic_factorize` only when the matrix's
+`(n, col_ptr.len(), row_idx.len())` fingerprint changes. The IPM
+caller pattern (refactor on the same pattern with new values) pays
+the symbolic cost exactly once.
+
+Test coverage: `tests/pounce_interface.rs` (11 integration tests
+including the canonical IPM loop pattern) plus 5 unit tests
+`U1`-`U5` in `src/numeric/solver.rs` for the escalation state
+machine. All 208 tests pass.
+
 ### Refactor (2026-04-19) — scaling moved from symbolic to numeric phase (β)
 
 `SymbolicFactorization` is now purely structural and cacheable across

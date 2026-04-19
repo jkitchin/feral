@@ -59,3 +59,92 @@ pre-commit run --all-files: both hooks pass.
 Pre-existing clippy errors elsewhere on main (digit_groups,
 excessive_precision, manual_is_multiple_of, etc.) are unrelated to this
 refactor — confirmed by stash + clippy on clean main.
+
+* 11:00 :pounce:plan:
+Wrote dev/plans/pounce-integration-interface.md based on the
+research note from earlier in the session. The β refactor resolved
+W1 (scaling-change forces symbolic recomputation) in favor of
+option β, so the cached SymbolicFactorization is reusable across
+every quality level — no symbolic invalidation on stage-1
+escalation. Plan covers struct field-by-field, escalation state
+machine table, factor()/solve() flow, 5 unit + 8 integration
+tests, and a 7-step incremental implementation sequence with one
+commit per step.
+
+Commit eb98902.
+
+* 11:30 :pounce:step1:
+Implemented Solver/FactorStatus/QualityLevel skeleton in
+src/numeric/solver.rs. Re-exported from src/lib.rs. Added
+FeralError::NoFactor for solve()/solve_refined() called before
+factor(). All public methods stubbed with unimplemented!() pending
+later steps. dead_code allows on the struct and
+PatternFingerprint::of are removed in Step 2.
+
+Commit b6bafb8.
+
+* 12:00 :pounce:step2:
+Implemented Solver::factor happy path with pattern-fingerprint
+cache reuse. Symbolic_factorize fires only on cache miss
+(fingerprint = (n, col_ptr_len, row_idx_len)). factorize_multifrontal
+runs every call. NumericallyRankDeficient → Singular,
+ScalingInfo::PartialSingular → Singular, others → FatalError. Added
+diagnostic Solver::symbolic_call_count() so integration tests can
+verify the cache-reuse property without internal access.
+
+Tests I1, I5, I6 pass (3 new). I6 directly demonstrates the
+β-refactor win: factor diag(2,3,5) then diag(7,11,13) on the same
+Solver, symbolic_call_count() == 1.
+
+Commit eadb016.
+
+* 12:20 :pounce:step3:
+Wired check_inertia parameter through Solver::factor. On
+mismatch, return WrongInertia { actual, expected } without
+clearing the stored factor (Ipopt SYMSOLVER_WRONG_INERTIA
+semantics — caller may still solve() against the bad-inertia
+factor). Tests I2, I3 pass (2 new).
+
+Commit c883de5.
+
+* 12:30 :pounce:step4:
+Singular dispatch was already wired in Step 2; Step 4 added
+test I4 (diag(1, 0, 1) under default ZeroPivotAction::Fail
+produces FactorStatus::Singular and clears factors()). 1 new
+test.
+
+Commit d586da7.
+
+* 12:55 :pounce:step5:
+Implemented increase_quality two-stage state machine. Stage 1
+(Baseline → ScalingEnabled): Identity → InfNorm flip; skipped if
+scaling already non-Identity. Stage 2 (* → PivotRaised →
+Exhausted): pivot_threshold from 0.0 jumps to 0.01, else
+min(pivtol_max, threshold^0.75). Defaults: pivtol_max = 0.5
+(MA27), exponent = 0.75 (MA27), eps_cap = 1e-12.
+
+Added pivot_threshold() and scaling_strategy() diagnostic
+accessors. Unit tests U1-U5 in src/numeric/solver.rs (5 new).
+
+Commit f383e11.
+
+* 13:15 :pounce:step6:
+Implemented Solver::solve and Solver::solve_refined. Both
+delegate to the existing free functions and return
+FeralError::NoFactor when no factor is stored.
+
+Extended I1 to actually solve and verify, plus 3 new edge-case
+tests: solve_before_factor, solve_after_singular,
+solve_after_wrong_inertia (factor preserved under WrongInertia,
+solve still works).
+
+Commit 6b046aa.
+
+* 13:30 :pounce:step7:
+Implemented I7 (canonical IPM caller pattern: factor → check →
+bump quality → re-factor with budget = 6) and I8 (state
+persists across factor calls, pivot threshold not reset by
+factor). 2 new integration tests.
+
+Commit 828615c. Plan complete: 7 commits, 208 total tests
+passing, 16 new (5 U + 11 I).
