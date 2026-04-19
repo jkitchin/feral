@@ -12,10 +12,10 @@
 
 use crate::error::FeralError;
 use crate::inertia::Inertia;
-use crate::numeric::factorize::{NumericParams, SparseFactors};
+use crate::numeric::factorize::{factorize_multifrontal, NumericParams, SparseFactors};
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::supernode::SupernodeParams;
-use crate::symbolic::SymbolicFactorization;
+use crate::symbolic::{symbolic_factorize, SymbolicFactorization};
 
 /// Result of a single `Solver::factor` attempt.
 #[derive(Debug)]
@@ -61,8 +61,6 @@ struct PatternFingerprint {
 }
 
 impl PatternFingerprint {
-    // Step-1 skeleton: called from `factor()` in Step 2.
-    #[allow(dead_code)]
     fn of(matrix: &CscMatrix) -> Self {
         Self {
             n: matrix.n,
@@ -79,17 +77,20 @@ impl PatternFingerprint {
 /// reuse the symbolic analysis. The β refactor (scaling moved from
 /// symbolic to numeric phase) makes this cache reuse correct even
 /// across stage-1 quality escalation.
-// Step-1 skeleton: most fields are populated/read in Steps 2-6.
-#[allow(dead_code)]
 pub struct Solver {
     numeric_params: NumericParams,
     snode_params: SupernodeParams,
+    #[allow(dead_code)] // populated in Step 5 (`increase_quality`)
     pivtol_max: f64,
     quality_level: QualityLevel,
     last_symbolic: Option<SymbolicFactorization>,
     last_factors: Option<SparseFactors>,
     last_inertia: Option<Inertia>,
     last_pattern_fingerprint: Option<PatternFingerprint>,
+    /// Diagnostic counter: number of times `symbolic_factorize` was
+    /// called from this `Solver`. Used by integration tests to
+    /// verify the cache-reuse property and by future telemetry.
+    symbolic_call_count: usize,
 }
 
 impl Solver {
@@ -110,6 +111,7 @@ impl Solver {
             last_factors: None,
             last_inertia: None,
             last_pattern_fingerprint: None,
+            symbolic_call_count: 0,
         }
     }
 
@@ -117,8 +119,62 @@ impl Solver {
     /// returns `WrongInertia { actual, expected }` on mismatch
     /// without invalidating the stored factor (caller may still
     /// `solve` against it). See plan §`factor()` flow.
-    pub fn factor(&mut self, _matrix: &CscMatrix, _check_inertia: Option<Inertia>) -> FactorStatus {
-        unimplemented!("Solver::factor — implemented in Step 2")
+    pub fn factor(&mut self, matrix: &CscMatrix, _check_inertia: Option<Inertia>) -> FactorStatus {
+        // Step 1: pattern fingerprint.
+        let fp = PatternFingerprint::of(matrix);
+
+        // Step 2: invalidate cache on pattern change.
+        if self.last_pattern_fingerprint != Some(fp) {
+            self.last_symbolic = None;
+            self.last_factors = None;
+            self.last_inertia = None;
+            self.last_pattern_fingerprint = None;
+        }
+
+        // Step 3: ensure symbolic is cached.
+        if self.last_symbolic.is_none() {
+            match symbolic_factorize(matrix, &self.snode_params) {
+                Ok(sym) => {
+                    self.symbolic_call_count += 1;
+                    self.last_symbolic = Some(sym);
+                    self.last_pattern_fingerprint = Some(fp);
+                }
+                Err(e) => return FactorStatus::FatalError(e),
+            }
+        }
+        // Safe: just-set above or already Some.
+        let symbolic = match &self.last_symbolic {
+            Some(s) => s,
+            None => unreachable!("symbolic just populated"),
+        };
+
+        // Step 4: numeric factor; map errors.
+        match factorize_multifrontal(matrix, symbolic, &self.numeric_params) {
+            Ok((factors, inertia)) => {
+                // Step 5: stash; PartialSingular maps to Singular.
+                let partial_singular = matches!(
+                    factors.scaling_info,
+                    crate::scaling::ScalingInfo::PartialSingular { .. }
+                );
+                self.last_factors = Some(factors);
+                self.last_inertia = Some(inertia);
+                if partial_singular {
+                    FactorStatus::Singular
+                } else {
+                    FactorStatus::Success
+                }
+            }
+            Err(FeralError::NumericallyRankDeficient) => {
+                self.last_factors = None;
+                self.last_inertia = None;
+                FactorStatus::Singular
+            }
+            Err(e) => {
+                self.last_factors = None;
+                self.last_inertia = None;
+                FactorStatus::FatalError(e)
+            }
+        }
     }
 
     /// Solve `A x = b` against the most recent successful factor.
@@ -164,6 +220,15 @@ impl Solver {
     /// Current quality-escalation level.
     pub fn quality_level(&self) -> QualityLevel {
         self.quality_level
+    }
+
+    /// Number of times `symbolic_factorize` has been invoked from
+    /// this `Solver`. Increments on the first `factor()` call after
+    /// `Solver::new()` and on any subsequent `factor()` whose
+    /// matrix pattern differs from the cached one. Diagnostic /
+    /// test-facing counter.
+    pub fn symbolic_call_count(&self) -> usize {
+        self.symbolic_call_count
     }
 }
 
