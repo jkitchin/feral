@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use feral::numeric::factorize::factorize_multifrontal;
+use feral::scaling::ScalingStrategy;
 use feral::symbolic::{
     symbolic_factorize, symbolic_factorize_with_method, OrderingMethod, SupernodeParams,
 };
@@ -881,12 +882,45 @@ fn ordering_method_from_env() -> Option<OrderingMethod> {
     }
 }
 
+/// Reads `FERAL_SCALING={infnorm,mc64,adaptive}` and returns an
+/// override for `SupernodeParams::scaling_strategy`. Unset → `None`,
+/// which preserves the current production default exactly. The
+/// `adaptive` value selects `ScalingStrategy::Auto`, which routes
+/// per matrix at `compute_scaling` time. See
+/// `dev/research/lever-c-adaptive-scaling.md` and
+/// `dev/plans/lever-c-adaptive-scaling.md`.
+fn scaling_strategy_from_env() -> Option<ScalingStrategy> {
+    match std::env::var("FERAL_SCALING")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "" => None,
+        "infnorm" => Some(ScalingStrategy::InfNorm),
+        "mc64" => Some(ScalingStrategy::Mc64Symmetric),
+        "adaptive" => Some(ScalingStrategy::Auto),
+        "identity" => Some(ScalingStrategy::Identity),
+        other => {
+            eprintln!(
+                "warning: FERAL_SCALING=\"{}\" not recognized; falling back to default",
+                other
+            );
+            None
+        }
+    }
+}
+
 fn main() {
     println!("FERAL benchmark harness");
     let ordering_override = ordering_method_from_env();
     match ordering_override {
         Some(m) => println!("  ordering: {:?} (forced via FERAL_ORDERING)", m),
         None => println!("  ordering: default (symbolic_factorize heuristic)"),
+    }
+    let scaling_override = scaling_strategy_from_env();
+    match &scaling_override {
+        Some(s) => println!("  scaling: {:?} (forced via FERAL_SCALING)", s),
+        None => println!("  scaling: default (SupernodeParams::default)"),
     }
 
     let config_path = Path::new("data/benchmark-config.toml");
@@ -1141,7 +1175,13 @@ fn main() {
     // configuration and reports the true rate. Expect a large drop
     // from the historical 99.8% number — that number was an
     // artifact of the single-supernode override, not a real rate.
-    let snode_params = SupernodeParams::default();
+    let snode_params = {
+        let mut p = SupernodeParams::default();
+        if let Some(s) = scaling_override.clone() {
+            p.scaling_strategy = s;
+        }
+        p
+    };
 
     let mut sp_total = 0usize;
     let mut sp_inertia_pass = 0usize;

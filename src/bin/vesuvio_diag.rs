@@ -129,6 +129,7 @@ fn run_one_method(csc: &CscMatrix, method: OrderingMethod, scaling: ScalingStrat
         ScalingStrategy::Mc64Symmetric => "mc64",
         ScalingStrategy::Identity => "ident",
         ScalingStrategy::External(_) => "ext",
+        ScalingStrategy::Auto => "auto",
     };
 
     let t_sym = Instant::now();

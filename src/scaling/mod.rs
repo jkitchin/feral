@@ -76,6 +76,14 @@ pub enum ScalingStrategy {
     /// User-supplied pre-computed scaling vector in user-order
     /// indexing. Length must equal the matrix dimension.
     External(Vec<f64>),
+    /// Adaptive shape-based routing: `Mc64Symmetric` when the matrix
+    /// has the arrow-KKT signature (many degree-1 "constraint slack"
+    /// columns), else `InfNorm`. The routing rule is documented at
+    /// [`pick_scaling_strategy`]; threshold is `diag_only / n >= 0.3`.
+    /// This is opt-in only and never the default of
+    /// `ScalingStrategy::default`. See
+    /// `dev/research/lever-c-adaptive-scaling.md`.
+    Auto,
 }
 
 /// Diagnostic information about how the scaling was computed.
@@ -123,6 +131,46 @@ pub fn compute_scaling(
         }
         ScalingStrategy::InfNorm => Ok(infnorm::compute_infnorm(matrix)),
         ScalingStrategy::Mc64Symmetric => mc64::compute_symmetric(matrix),
+        ScalingStrategy::Auto => compute_scaling(matrix, &pick_scaling_strategy(matrix)),
+    }
+}
+
+/// Resolve `ScalingStrategy::Auto` to a concrete strategy based on
+/// matrix shape.
+///
+/// Routes to `Mc64Symmetric` when the matrix has the arrow-KKT
+/// signature — many degree-1 "constraint slack" columns whose only
+/// stored row is the diagonal. Else routes to `InfNorm`.
+///
+/// Threshold: `diag_only / n >= 0.3`. Selected from the `vesuvio_diag`
+/// shape distribution: VESUVIOU/VESUVIO/VESUVIA/MUONSINE/CRESC132 all
+/// have ratios above 0.3 and benefit from MC64 (delays drop to zero,
+/// 6×–229× factor speedup); HYDCAR20/METHANL8/SWOPF/HATFLDG (the
+/// matrices that motivated the InfNorm default) have ratios below
+/// 0.3. See `dev/research/lever-c-adaptive-scaling.md`.
+///
+/// One O(n) pass over the column pointers and one O(nnz) pass over
+/// the row indices. No allocations.
+pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
+    let n = matrix.n;
+    if n == 0 {
+        return ScalingStrategy::InfNorm;
+    }
+    let mut diag_only = 0usize;
+    for j in 0..n {
+        let start = matrix.col_ptr[j];
+        let end = matrix.col_ptr[j + 1];
+        if end - start != 1 {
+            continue;
+        }
+        if matrix.row_idx[start] == j {
+            diag_only += 1;
+        }
+    }
+    if diag_only as f64 / n as f64 >= 0.3 {
+        ScalingStrategy::Mc64Symmetric
+    } else {
+        ScalingStrategy::InfNorm
     }
 }
 
@@ -130,3 +178,114 @@ pub fn compute_scaling(
 // Not part of the public API.
 #[allow(unused_imports)]
 pub(crate) use hungarian::{hungarian_match, CostGraph, Matching};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sparse::csc::CscMatrix;
+
+    /// Build a CSC with `n` columns where the first `diag_only`
+    /// columns are degree-1 (just the diagonal), and the remaining
+    /// `n - diag_only` columns each store the diagonal plus one
+    /// off-diagonal row at column 0. Lower-triangular only — no
+    /// validity beyond the column-degree pattern is required for
+    /// `pick_scaling_strategy`, which only inspects col_ptr and
+    /// row_idx.
+    fn shape_csc(n: usize, diag_only: usize) -> CscMatrix {
+        assert!(diag_only <= n);
+        let mut col_ptr = Vec::with_capacity(n + 1);
+        let mut row_idx: Vec<usize> = Vec::new();
+        let mut values: Vec<f64> = Vec::new();
+        col_ptr.push(0);
+        for j in 0..n {
+            row_idx.push(j);
+            values.push(1.0);
+            if j >= diag_only && j != 0 {
+                row_idx.push(j.max(1) - 1);
+                values.push(0.1);
+            }
+            col_ptr.push(row_idx.len());
+        }
+        CscMatrix {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        }
+    }
+
+    #[test]
+    fn pick_scaling_strategy_picks_mc64_for_arrow_kkt() {
+        // 10 of 20 columns are diag-only → ratio = 0.5 ≥ 0.3.
+        let csc = shape_csc(20, 10);
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
+    }
+
+    #[test]
+    fn pick_scaling_strategy_picks_infnorm_for_dense() {
+        // 0 of 20 columns are diag-only → ratio = 0.0 < 0.3.
+        let csc = shape_csc(20, 0);
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::InfNorm);
+    }
+
+    #[test]
+    fn pick_scaling_strategy_threshold_boundary() {
+        // 29 of 100 → 0.29 < 0.30 → InfNorm.
+        let below = shape_csc(100, 29);
+        assert_eq!(pick_scaling_strategy(&below), ScalingStrategy::InfNorm);
+        // 30 of 100 → 0.30 ≥ 0.30 → MC64.
+        let at = shape_csc(100, 30);
+        assert_eq!(pick_scaling_strategy(&at), ScalingStrategy::Mc64Symmetric);
+    }
+
+    #[test]
+    fn pick_scaling_strategy_empty_matrix_picks_infnorm() {
+        let csc = CscMatrix {
+            n: 0,
+            col_ptr: vec![0],
+            row_idx: vec![],
+            values: vec![],
+        };
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::InfNorm);
+    }
+
+    #[test]
+    fn compute_scaling_auto_routes_to_mc64_on_arrow_kkt() {
+        // Build a small symmetric arrow KKT: 4 diag-only "slack"
+        // columns + 2 dense "linking" columns. Lower-triangular CSC.
+        // Ratio diag_only / n = 4/6 = 0.67 → Auto resolves to MC64.
+        let n = 6;
+        let mut col_ptr = vec![0usize];
+        let mut row_idx = Vec::new();
+        let mut values = Vec::new();
+        // 4 diag-only columns.
+        for j in 0..4 {
+            row_idx.push(j);
+            values.push(2.0);
+            col_ptr.push(row_idx.len());
+        }
+        // 2 dense columns (diagonal + all earlier rows).
+        for j in 4..n {
+            row_idx.push(j);
+            values.push(2.0);
+            for i in (j + 1)..n {
+                row_idx.push(i);
+                values.push(0.1);
+            }
+            col_ptr.push(row_idx.len());
+        }
+        let csc = CscMatrix {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        };
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
+        // Auto and explicit Mc64Symmetric must produce the same vector.
+        let (auto_s, _) =
+            compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto routing should succeed");
+        let (mc64_s, _) =
+            compute_scaling(&csc, &ScalingStrategy::Mc64Symmetric).expect("MC64 should succeed");
+        assert_eq!(auto_s, mc64_s);
+    }
+}
