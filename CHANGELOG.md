@@ -4,6 +4,34 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Refactor (2026-04-19) — scaling moved from symbolic to numeric phase (β)
+
+`SymbolicFactorization` is now purely structural and cacheable across
+IPM iterations of structurally identical KKTs. MC64/InfNorm scaling
+has moved from `symbolic_factorize` to `factorize_multifrontal`.
+
+Public API changes:
+- `SupernodeParams` no longer has a `scaling_strategy` field.
+- `SymbolicFactorization` no longer carries `scaling`,
+  `scaling_pivot_order`, or `scaling_info`.
+- New `NumericParams { bk: BunchKaufmanParams, scaling: ScalingStrategy }`
+  bundle is the per-numeric input to `factorize_multifrontal`.
+- New `NumericParams::with_bk(bk)` constructor for default scaling.
+- New `SparseFactors.scaling` and `SparseFactors.scaling_info` fields.
+
+Migration: callsites that previously passed a `BunchKaufmanParams` to
+`factorize_multifrontal` now pass `NumericParams::with_bk(bk)`. Sites
+that wired per-iteration scaling via `SupernodeParams::scaling_strategy`
+now build `NumericParams { bk, scaling }` and pass it on the numeric
+side; the symbolic call uses default `SupernodeParams`.
+
+Why: the IPM driver re-factorizes the same sparsity pattern many times
+with new values. Tying scaling to the symbolic phase forced a
+re-symbolic pass per numeric refactor, defeating cache reuse. New
+structural test
+`factorize_multifrontal_with_two_strategies_on_one_symbolic` proves
+one `SymbolicFactorization` can drive two `ScalingStrategy` values.
+
 ### Documentation (2026-04-18) — KaHIP driver-integration decision pinned
 
 A planning pass against the deferred priority "KaHIP K1 data
