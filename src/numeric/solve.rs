@@ -37,44 +37,99 @@ use crate::sparse::csc::CscMatrix;
 /// and the pre/post-scale passes are skipped as a fast path.
 pub fn solve_sparse(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
     let n = factors.n;
+    if n == 0 && rhs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut x = vec![0.0; n];
+    let mut ws = SolveWorkspace::for_factors(factors);
+    solve_sparse_into_ws(factors, rhs, &mut x, &mut ws)?;
+    Ok(x)
+}
+
+/// Workspace holding the per-call scratch buffers used by the sparse
+/// solve. Allowing the caller to own this lets us amortize the
+/// allocations across many solves — see `solve_sparse_refined`, which
+/// performs up to 11 solves per call (1 initial + 10 refinement steps)
+/// against the same factors.
+struct SolveWorkspace {
+    /// Permuted RHS / working solution vector, length `n`.
+    y: Vec<f64>,
+    /// Per-supernode gather/scatter buffer, length `max_nrow`.
+    w: Vec<f64>,
+    /// Scaled RHS storage when MC64 scaling is active, length `n`.
+    /// Empty when no scaling is applied (the `solve_sparse` fast path).
+    scaled_rhs: Vec<f64>,
+}
+
+impl SolveWorkspace {
+    fn for_factors(factors: &SparseFactors) -> Self {
+        let n = factors.n;
+        let max_nrow = factors
+            .node_factors
+            .iter()
+            .map(|node| node.frontal_factors.nrow)
+            .max()
+            .unwrap_or(0);
+        let scaled_rhs_len = if matches!(factors.scaling_info, ScalingInfo::NotApplied) {
+            0
+        } else {
+            n
+        };
+        Self {
+            y: vec![0.0; n],
+            w: vec![0.0; max_nrow],
+            scaled_rhs: vec![0.0; scaled_rhs_len],
+        }
+    }
+}
+
+fn solve_sparse_into_ws(
+    factors: &SparseFactors,
+    rhs: &[f64],
+    x_out: &mut [f64],
+    ws: &mut SolveWorkspace,
+) -> Result<(), FeralError> {
+    let n = factors.n;
     if rhs.len() != n {
         return Err(FeralError::DimensionMismatch {
             expected: n,
             got: rhs.len(),
         });
     }
-
+    if x_out.len() != n {
+        return Err(FeralError::DimensionMismatch {
+            expected: n,
+            got: x_out.len(),
+        });
+    }
     if n == 0 {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     // Pre-scale the RHS (user-order) in preparation for the core
     // solve. `NotApplied` ⇒ `scaling == [1.0; n]`, so the multiply
     // would be a no-op; skip it for the happy path.
     let needs_scaling = !matches!(factors.scaling_info, ScalingInfo::NotApplied);
-    let scaled_rhs_storage;
     let rhs_for_core: &[f64] = if needs_scaling {
-        let mut buf = vec![0.0; n];
         for i in 0..n {
-            buf[i] = rhs[i] * factors.scaling[i];
+            ws.scaled_rhs[i] = rhs[i] * factors.scaling[i];
         }
-        scaled_rhs_storage = buf;
-        &scaled_rhs_storage
+        &ws.scaled_rhs
     } else {
         rhs
     };
 
-    let mut x = solve_sparse_core(factors, rhs_for_core)?;
+    solve_sparse_core_into(factors, rhs_for_core, x_out, &mut ws.y, &mut ws.w);
 
     // Post-scale the solution with the same vector (not its inverse;
     // see the docstring math above).
     if needs_scaling {
         for i in 0..n {
-            x[i] *= factors.scaling[i];
+            x_out[i] *= factors.scaling[i];
         }
     }
 
-    Ok(x)
+    Ok(())
 }
 
 /// Core sparse solve: runs forward-sub, D-solve, backward-sub on an
@@ -82,11 +137,20 @@ pub fn solve_sparse(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, Fe
 /// system of `M = D · A · D`. Callers other than `solve_sparse` (e.g.,
 /// the refinement loop's correction solve) go through `solve_sparse`
 /// itself so the pre/post-scale wrapping stays in one place.
-fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
+///
+/// `y_buf` (length `n`) and `w_buf` (length `max_nrow`) are caller-
+/// owned scratch so refinement can amortize them across iterations.
+fn solve_sparse_core_into(
+    factors: &SparseFactors,
+    rhs: &[f64],
+    x_out: &mut [f64],
+    y_buf: &mut [f64],
+    w_buf: &mut [f64],
+) {
     let n = factors.n;
+    let y = &mut y_buf[..n];
 
     // Permute RHS with AMD ordering: y[new] = b[perm[new]]
-    let mut y = vec![0.0; n];
     for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
         y[new_idx] = rhs[old_idx];
     }
@@ -106,8 +170,10 @@ fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, F
             continue;
         }
 
-        // Gather and apply BK permutation
-        let mut w = vec![0.0; nrow];
+        // Gather and apply BK permutation. The gather overwrites every
+        // entry in `[0..nrow)`, so no zeroing is needed despite the
+        // shared buffer.
+        let w = &mut w_buf[..nrow];
         for i in 0..nrow {
             w[i] = y[node.row_indices[ff.perm[i]]];
         }
@@ -136,7 +202,7 @@ fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, F
         }
 
         // Gather and apply BK permutation
-        let mut w = vec![0.0; nrow];
+        let w = &mut w_buf[..nrow];
         for i in 0..nrow {
             w[i] = y[node.row_indices[ff.perm[i]]];
         }
@@ -200,7 +266,7 @@ fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, F
         }
 
         // Gather and apply BK permutation
-        let mut w = vec![0.0; nrow];
+        let w = &mut w_buf[..nrow];
         for i in 0..nrow {
             w[i] = y[node.row_indices[ff.perm[i]]];
         }
@@ -221,12 +287,9 @@ fn solve_sparse_core(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, F
     }
 
     // Unpermute: x[old] = y[new]
-    let mut x = vec![0.0; n];
     for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
-        x[old_idx] = y[new_idx];
+        x_out[old_idx] = y[new_idx];
     }
-
-    Ok(x)
 }
 
 /// Solve A·x = rhs using the sparse factorization with iterative refinement.
@@ -269,20 +332,22 @@ pub fn solve_sparse_refined(
         });
     }
 
-    let mut x = solve_sparse(factors, rhs)?;
+    let mut ws = SolveWorkspace::for_factors(factors);
+    let mut x = vec![0.0; n];
+    solve_sparse_into_ws(factors, rhs, &mut x, &mut ws)?;
 
-    // Initial residual
+    // Initial residual: compute A·x directly into r, then negate-add.
     let mut r = vec![0.0; n];
-    let mut ax = vec![0.0; n];
-    matrix.symv(&x, &mut ax);
+    matrix.symv(&x, &mut r);
     for i in 0..n {
-        r[i] = rhs[i] - ax[i];
+        r[i] = rhs[i] - r[i];
     }
     let mut r_norm = norm2(&r);
 
     let mut best_x = x.clone();
     let mut best_r_norm = r_norm;
     let mut stagnant_count: usize = 0;
+    let mut dx = vec![0.0; n];
 
     // Phase 2.5 (2026-04-18) tuning: profile_sparse showed refinement
     // was running 10 iterations on most KKT matrices because the
@@ -319,33 +384,26 @@ pub fn solve_sparse_refined(
             break;
         }
 
-        let dx = solve_sparse(factors, &r)?;
-
-        let mut x_new = x.clone();
+        solve_sparse_into_ws(factors, &r, &mut dx, &mut ws)?;
         for i in 0..n {
-            x_new[i] += dx[i];
+            x[i] += dx[i];
         }
 
-        let mut r_new = vec![0.0; n];
-        let mut ax_new = vec![0.0; n];
-        matrix.symv(&x_new, &mut ax_new);
+        // Recompute residual in place: r = b - A·x.
+        matrix.symv(&x, &mut r);
         for i in 0..n {
-            r_new[i] = rhs[i] - ax_new[i];
+            r[i] = rhs[i] - r[i];
         }
-        let r_new_norm = norm2(&r_new);
+        r_norm = norm2(&r);
 
-        let improved = r_new_norm < best_r_norm;
+        let improved = r_norm < best_r_norm;
         if improved {
-            best_r_norm = r_new_norm;
-            best_x = x_new.clone();
+            best_r_norm = r_norm;
+            best_x.copy_from_slice(&x);
             stagnant_count = 0;
         } else {
             stagnant_count += 1;
         }
-
-        x = x_new;
-        r = r_new;
-        r_norm = r_new_norm;
 
         if r_norm > best_r_norm * divergence_factor {
             break;

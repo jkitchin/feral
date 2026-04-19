@@ -1,0 +1,66 @@
+#+TITLE: Journal 2026-04-18-08
+
+* 14:30 :solve:perf:refinement:workspace:
+Picked next-session priority #1 from session 07 checkpoint:
+"Investigate solve/SSIDS=1.30 hotspot." profile_sparse showed BATCH
+(n=121) refined 92.7us vs SSIDS 5us; ALLINITC (n=7) refined 8.3us vs
+SSIDS 2us. Hypothesis: per-call vec allocations dominate on tiny
+matrices.
+
+Built `src/bin/solve_microbench.rs` for tight-loop ns/call
+measurement (10000 iters per case). Baseline (before any work):
+  ALLINITC n=7    bare=1341ns  refined= 8300ns
+  HS118    n=32   bare=1707ns  refined= 1700ns
+  MCONCON  n=48   bare=2400ns  refined= 4200ns
+  AVION2   n=94   bare=3800ns  refined=15500ns
+  BATCH    n=121  bare=7671ns  refined=85700ns
+  HAHN1    n=715  bare=113us   refined=487us
+
+Two rounds of refactor:
+
+Round 1: solve_sparse_core. Per-supernode `let mut w = vec![0.0;
+nrow]` was hit 3x per node (forward, D, backward). Pre-allocated a
+single `w_buf = vec![0.0; max_nrow]` per call and sliced it into the
+three sweeps. Tests pass (100/100). Microbench:
+  ALLINITC bare 1341 -> 329 ns  (4.1x)
+  BATCH    bare 7671 -> 5520 ns (1.4x)
+  HAHN1    bare  113 -> 98 us   (1.15x)
+
+Round 2: solve_sparse_refined. Pre-allocate r, dx, best_x once
+before the loop; extract solve_sparse_core_into taking caller-owned
+y_buf and w_buf via a private SolveWorkspace struct; reuse the
+workspace across the (up to) 11 internal solves; update x in place
+rather than constructing x_new each step; drop the separate ax/r_new
+buffers (compute A*x directly into r and negate-add). Tests pass.
+Microbench:
+  ALLINITC refined 2226 -> 1845 ns (-17%)
+  MCONCON  refined 2961 -> 2746 ns (-7%)
+  AVION2   refined 10654 -> 9251 ns (-13%)
+  BATCH    refined 67275 -> 55253 ns (-18%)
+  HAHN1    refined 410527 -> 336387 ns (-18%)
+
+* 14:55 :bench:solve-ratio:
+Full bench (154588 matrices, /tmp/bench_solve_optimized.log):
+  factor/MUMPS geomean      0.42 (unchanged)
+  solve/SSIDS  geomean      1.15 (was 1.30; 12% improvement)
+  solve/MUMPS  geomean      0.29 (was 0.30)
+  residual pass             154241/154588 (unchanged)
+  worst residual            2.69e-4 (unchanged exact match)
+  Phase 2.8.1 small-frontal p90  1.81 (PASS, was 1.86)
+  Phase 2.8.1 medium       p90  1.82 (PASS, was 1.78)
+
+The solve/SSIDS=1.15 result is below the session 07 next-session
+target ("from 1.30 to ~1.0"). Diminishing returns from here will
+need either supernode-loop SIMD or skipping the refinement entirely
+on well-conditioned matrices (a posteriori check). Deferring.
+
+Note: refinement saw bigger absolute gains on larger n (HAHN1 -74us,
+BATCH -12us) because the per-iteration `vec![0.0; n]` allocs scale
+linearly with n; the 11-solve reuse saves 11 such allocs.
+
+Top factor outliers from this run:
+  VESUVIOU_0000  84.6x MUMPS  (still the leftover top outlier;
+                                next-session #2 from chk 07)
+  VESUVIO_0021   81.4x
+  CRESC132_0000  43.6x        (down from 521x in session 07)
+  MUONSINE_0000  60.9x        (n=1537, may be next investigation)

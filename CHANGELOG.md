@@ -4,6 +4,33 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-18) — sparse solve: workspace reuse across refinement steps
+
+`solve_sparse` now drives a private `solve_sparse_core_into` that
+takes caller-owned scratch (`y_buf` length `n`, `w_buf` length
+`max_nrow`). `solve_sparse_refined` builds one `SolveWorkspace`
+per call and reuses it across the (up to) 11 internal solves, plus
+reuses `r`, `dx`, and `best_x` buffers across iterations and updates
+`x` in place rather than constructing `x_new` per step.
+
+Behavior is unchanged — same residuals, same convergence, same best-
+iterate semantics. The win is purely allocator pressure on tiny KKT
+matrices where per-call `vec![0.0; n]` calls dominated the solve
+phase. Microbench (10 000 iters, ns/call) before → after the refined
+refactor (which sits on top of the earlier `solve_sparse_core`
+workspace fix):
+
+| matrix     |   n |  refined before | refined after |
+|------------|-----|-----------------|---------------|
+| ALLINITC   |   7 |          2226ns |        1845ns |
+| MCONCON    |  48 |          2961ns |        2746ns |
+| AVION2     |  94 |         10654ns |        9251ns |
+| BATCH      | 121 |         67275ns |       55253ns |
+| HAHN1      | 715 |        410527ns |      336387ns |
+
+Corpus impact (154 588 IPM matrices): solve/SSIDS geomean 1.30 →
+1.15. Residual pass and worst residual unchanged.
+
 ### Changed (2026-04-18) — `symbolic_factorize` default: bordered-KKT fallback to MetisND
 
 `symbolic_factorize` (the default entry point) now applies a narrow
