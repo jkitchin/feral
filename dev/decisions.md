@@ -1184,3 +1184,53 @@ it without consulting `should_use_dense_fast_path`.
 
 **Commits.** `71f5692` (plan), `7c9e07d` (RED), `32dd65a` (GREEN),
 `70f077e` (stage 1/2), `e0db169` (stage 3).
+
+
+---
+
+## 2026-04-20 — D.4 tiny-n disjunct in dense fast-path gate
+
+**Decision.** `should_use_dense_fast_path` now accepts any
+`n ≤ N_TINY = 16` unconditionally, in addition to the D.3
+`n ≤ 128 ∧ ρ ≥ 0.25` disjunct. The implementation of
+`dense_fast_factor` is unchanged; only the gate predicate is
+broadened. `FactorWorkspace` semantics are unchanged — a gate-hit
+call bypasses the workspace regardless of which disjunct fired.
+
+**Rationale.** Pre-existing CLAUDE.md-era finding
+(`dev/tried-and-rejected.md`) that at n ≤ 10 `factorize_multifrontal`
+is dominated by symbolic-phase overhead rather than floating-point
+work. HS85_0022 diagnosis this session confirmed the pattern at
+n=68: symbolic is 36 % of the pipeline, fraction rises as n shrinks.
+`dense_fast_factor` skips symbolic entirely, so the D.4 disjunct
+captures tiny matrices that D.3's density gate rejected.
+
+**Stage-1 evidence.**
+`dev/results/lever-d4/stage1.md`: the six observed top-10 tiny-n
+rows (HS73_0308, PALMER1E_0484, HATFLDH_0083, PALMER1A_0034,
+KIRBY2LS_0274, HEART6LS_0418) all showed 1.17–1.53× p50 speedup,
+and all six beat MUMPS by 2–4× post-D.4.
+
+**Stage-2 evidence.**
+`dev/results/lever-d4/stage2-corpus.md`: corpus geomean stable at
+0.38–0.39 across three bench runs (pre-D.4 was 0.37, within noise),
+all six target rows drop out of the top-10 in every run. Phase
+2.8.1 exit partitions remain PASS.
+
+**Corpus coverage.** Smaller than the research note implied. Every
+observed top-10 tiny-n row was already D.3-eligible at ρ ≥ 0.50;
+D.4's unique class (n ≤ 16 ∧ ρ < 0.25) appears empty or near-empty
+on the current IPM corpus. D.4 is the correct primitive to have
+but its observable corpus impact is small. The rollout is complete;
+stack-buffer densify and dense-scratch pooling remain named
+follow-ups but are not authorized as of this decision.
+
+**Threshold choice.** `N_TINY = 16` covers every top-10 tiny-n row
+(max observed n = 11) with 30 % headroom and matches the
+research-note recommendation. `n*n ≤ 256` cells — ≈ 2 KB dense
+workspace — cheap even without a stack buffer.
+
+**Commits.** `2fe8836` (plan+diag), `d570960` (RED),
+`ddefc2f` (GREEN), `16fdd77` (stage 1/2).
+
+

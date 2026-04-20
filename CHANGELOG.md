@@ -4,6 +4,28 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-20) — D.4 tiny-n disjunct in dense fast-path gate
+
+`should_use_dense_fast_path` now accepts any matrix with
+`n ≤ N_TINY = 16` regardless of density, in addition to the
+existing D.3 density-gated disjunct. The `dense_fast_factor`
+implementation is unchanged — only the gate predicate is broadened.
+Motivated by the finding that at tiny `n` the multifrontal path is
+dominated by symbolic-phase overhead, not floating-point work;
+D.4 lets tiny matrices skip symbolic entirely.
+
+**Per-call evidence:** six observed top-10 tiny-n rows (HS73,
+PALMER1E, HATFLDH, PALMER1A, KIRBY2LS, HEART6LS) show 1.17–1.53×
+p50 speedup over forced multifrontal and beat MUMPS by 2–4×.
+**Corpus evidence:** sparse factor/MUMPS geomean stable at
+0.38–0.39 across three runs (pre-D.4 reference 0.37, within noise).
+D.4's unique class (`n ≤ 16 ∧ ρ < 0.25`) appears empty on the
+current IPM corpus — observable corpus impact is small, but the
+gate is now a correct primitive for any such matrices that arise.
+
+See `dev/decisions.md` (2026-04-20 D.4 entry) and
+`dev/plans/sparse-tail-d4.md`.
+
 ### Added (2026-04-19) — D.3 dense fast-path for small-dense matrices
 
 `factorize_multifrontal_with_workspace` now routes matrices with
