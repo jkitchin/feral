@@ -1437,3 +1437,60 @@ is deferred until Step 5 lands.
 `cargo test --release --lib` → 118/118 PASS. `cargo run --bin bench
 --release` → 4/4 Phase 2.8.1 partitions PASS (dense small 1.59,
 dense medium 2.00, sparse small 1.79, sparse medium 1.80).
+
+---
+
+## 2026-04-20 — Phase 2.4.1b Step 5 (may_delay wiring, blocked path)
+
+**Decision.** Remove the `may_delay` short-circuit from
+`factor_frontal_blocked` and plumb the SSIDS delayed-pivot contract
+through the panel. Two supporting decisions:
+
+1. **`PanelStatus` grows a third variant `Delayed`.** Produced when
+   `try_reject_1x1_frontal` returns `PivotOutcome::Delayed` inside the
+   panel. The panel returns `(c, PanelStatus::Delayed)` without
+   mutating state for the failing column; the caller applies the
+   deferred Schur to columns `[k+c+1, nrow)` and breaks the outer
+   loop. Semantically analogous to `ScalarFallback`, but the caller
+   breaks instead of running a scalar step.
+2. **`j_start` rule unified:** `k + n_elim + 1` for BOTH
+   `ScalarFallback` and `Delayed`. Both leave column `k+n_elim`
+   peek-ahead'd-but-unpivoted; skipping it in
+   `apply_blocked_schur` avoids the same double-update bug that
+   Step 4b fixed for `ScalarFallback`.
+
+**Why.** Phase 2.4.1b plan §Implementation order item 5 requires the
+blocked path to be usable from the multifrontal supernodal driver,
+which always passes `may_delay=true` for non-root supernodes.
+Without this step the blocked kernel is unreachable on the sparse
+hot path (arrow-KKT tail).
+
+**Parity evidence.** 3 new `tests/blocked_ldlt.rs` tests under
+`may_delay=true` (SPD size sweep, ncol<nrow supernode shape,
+forced-rejection at col 32) pass bit-exact via `f64::to_bits`
+comparison. Total 9/9 blocked parity tests GREEN; 118/118 lib tests
+and 31/31 dense/pivoting tests PASS.
+
+**Correctness argument.** `try_reject_1x1_frontal` leaves state
+unmutated on the Delayed branch, so column `k+c` retains only the
+peek-ahead update (pivots 0..c-1 applied). In scalar's semantics at
+break time the same column has pivots 0..c-1 applied via eager
+`do_1x1_update` calls. Both paths traverse the rank-1 updates in
+ascending pivot order with `axpy_minus_unroll4_nofma`, so IEEE 754
+rounding matches element-for-element.
+
+**Performance.** Bench p90 dense 1.35/1.74, sparse 1.62/1.62 — all
+partitions PASS, reversing session-5's p90 uptick (1.59/2.00/1.79/
+1.80). Confirms session-5's regression was run-to-run variance and
+not an algorithmic shift; `factor_frontal_blocked` is not yet on the
+bench hot path.
+
+**Scope.** Binding for 2026-04-20-06. Does NOT wire the blocked kernel
+into `src/sparse/multifrontal/` — that's a follow-up session. Step 5
+only unlocks the capability.
+
+**Evidence.** `src/dense/factor.rs:575` (PanelStatus::Delayed),
+`:822` (gate change), `:995` (lblt_panel_frontal may_delay arg),
+`:1086` (Delayed arm). `cargo test --release --test blocked_ldlt`
+-> 9/9 PASS bit-exact. `cargo run --bin bench --release` -> 4/4
+Phase 2.8.1 partitions PASS.

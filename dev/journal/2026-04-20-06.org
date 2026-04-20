@@ -1,0 +1,94 @@
+#+TITLE: FERAL Journal 2026-04-20-06
+#+DATE: 2026-04-20
+
+* 22:55 :phase-2.4.1b:step-5:planning:
+  Read dev/plans/phase-2.4.1-blocked-ldlt.md §Implementation order
+  item 5 and src/dense/factor.rs around the blocked entry.
+
+  Current state: `factor_frontal_blocked` delegates to `factor_frontal`
+  when `may_delay || bs < 2 || ncol <= bs`. That `may_delay` disjunct
+  means the blocked kernel is unreachable from the supernodal driver
+  (non-root supernodes always pass may_delay=true). Step 5 removes
+  that disjunct.
+
+  Plan:
+  1. Add `PanelStatus::Delayed` variant.
+  2. Pass `may_delay` through lblt_panel_frontal.
+  3. Wire the `PivotOutcome::Delayed` arm (currently an unreachable
+     error) to return `(c, PanelStatus::Delayed)`.
+  4. Outer loop: on Delayed, apply_blocked_schur with j_start =
+     k+n_elim+1 (same as ScalarFallback), then break.
+  5. Remove the `may_delay ||` disjunct from the gate.
+
+  Correctness argument (same as Step 4b replay-order argument):
+  try_reject_1x1_frontal returns Delayed WITHOUT mutating state, so
+  column k+c has just the peek-ahead (pivots 0..c-1 applied), which
+  matches scalar's state at break time. apply_blocked_schur with
+  j_start=k+c+1 fills in columns [k+c+1, nrow) to match scalar too.
+
+* 23:05 :phase-2.4.1b:step-5:tests:
+  Tests first, added to tests/blocked_ldlt.rs:
+
+  - test_may_delay_spd_parity_size_sweep — SPD at n∈{32,64,100,128,
+    200,300}, may_delay=true. Happy path (SPD never rejects).
+  - test_may_delay_ncol_lt_nrow_parity — nrow=200, ncol=128,
+    may_delay=true. Non-root supernode shape.
+  - test_may_delay_rejection_parity — n=128, dominant off-diag at
+    col 32, pivot_threshold=0.01. Forces Delayed outcome; scalar
+    breaks at k=32 with nelim=32, n_delayed=96.
+
+  Ran `cargo test --release --test blocked_ldlt` before removing the
+  short-circuit: 9/9 PASS (trivially via delegation).
+
+* 23:15 :phase-2.4.1b:step-5:implementation:
+  src/dense/factor.rs edits:
+
+  - Added PanelStatus::Delayed variant with doc comment explaining
+    its emission condition.
+  - factor_frontal_blocked gate: `may_delay ||` removed from the
+    fallback condition.
+  - Outer loop match on PanelStatus is now 3-way:
+      Full            -> continue
+      ScalarFallback  -> scalar_pivot_step, possibly break
+      Delayed         -> break
+    j_start = k+n_elim+1 for both ScalarFallback and Delayed.
+  - lblt_panel_frontal: added may_delay: bool parameter; passes it to
+    try_reject_1x1_frontal instead of hardcoded false.
+  - PivotOutcome::Delayed arm: was `return Err(InvalidInput("…
+    unexpected Delayed"))`; now `return Ok((c, PanelStatus::Delayed))`.
+
+* 23:25 :phase-2.4.1b:step-5:test-sweep:
+  Test sweep after edit:
+
+    cargo test --release --test blocked_ldlt       -> 9/9 PASS bit-exact
+    cargo test --release --lib                      -> 118/118 PASS
+    cargo test --release --test delayed_pivoting \
+                        --test dense_ldlt \
+                        --test pivot_rejection \
+                        --test dense_fast_path      -> 31/31 PASS
+    cargo clippy --lib --test blocked_ldlt -- -D warnings  (clean)
+
+  Zero regressions. All 3 new may_delay tests pass via the real
+  blocked Delayed path (verified by the bit-identical `(nelim,
+  n_delayed, L, D, contrib)` comparison in
+  assert_frontals_byte_identical).
+
+* 23:35 :phase-2.4.1b:step-5:bench:
+  `cargo run --bin bench --release`:
+
+    Dense  small   p90=1.35  (05: 1.59)  Δ=-0.24
+    Dense  medium  p90=1.74  (05: 2.00)  Δ=-0.26
+    Sparse small   p90=1.62  (05: 1.79)  Δ=-0.17
+    Sparse medium  p90=1.62  (05: 1.80)  Δ=-0.18
+
+  All 4 partitions PASS. The p90s reversed session-5's regression
+  nearly exactly, confirming that was run-to-run variance and not an
+  algorithmic shift (factor_frontal_blocked is still not on the bench
+  hot path).
+
+  Numbers are back in the 2026-04-20-04 range (dense medium 1.70,
+  sparse 1.59). The real Step 5 win is unlocking the supernodal wire-
+  up for the next session.
+
+* 23:45 :phase-2.4.1b:step-5:checkpoint:
+  Wrote dev/sessions/2026-04-20-06.md. Committing.

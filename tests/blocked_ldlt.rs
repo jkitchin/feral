@@ -311,3 +311,58 @@ fn test_kkt_regression_spot_checks() {
         assert_frontals_byte_identical(&scalar, &blocked, "kkt_acopp30_like");
     }
 }
+
+/// Phase 2.4.1b Step 5 — `may_delay == true` parity on SPD across the
+/// same size sweep. SPD → no rejection → panel runs to completion; the
+/// blocked and scalar paths should produce byte-identical output.
+#[test]
+fn test_may_delay_spd_parity_size_sweep() {
+    let params = default_params();
+    for &n in &[32usize, 64, 100, 128, 200, 300] {
+        let mat = random_spd(n, 0xDEAD_BEEF ^ n as u64);
+        let scalar = factor_frontal(&mat, n, true, &params).unwrap();
+        let blocked = factor_frontal_blocked(&mat, n, true, &params).unwrap();
+        assert_frontals_byte_identical(&scalar, &blocked, &format!("may_delay spd n={}", n));
+    }
+}
+
+/// Step 5 — `may_delay == true` with `ncol < nrow` (non-root supernode
+/// case). The blocked path must handle partial elimination with
+/// delayed-pivot semantics.
+#[test]
+fn test_may_delay_ncol_lt_nrow_parity() {
+    let params = default_params();
+    let nrow = 200;
+    let ncol = 128;
+    let mat = random_spd(nrow, 0x5555_3333);
+    let scalar = factor_frontal(&mat, ncol, true, &params).unwrap();
+    let blocked = factor_frontal_blocked(&mat, ncol, true, &params).unwrap();
+    assert_frontals_byte_identical(&scalar, &blocked, "may_delay ncol_lt_nrow");
+}
+
+/// Step 5 — forced rejection under `may_delay == true` triggers the
+/// SSIDS "break on first failure" path. The blocked panel must stop
+/// cleanly at the delayed column, apply the deferred Schur to trailing
+/// columns, and hand back `nelim < ncol` with the remaining columns
+/// reported as `n_delayed`.
+#[test]
+fn test_may_delay_rejection_parity() {
+    let params = default_params();
+    let n = 128;
+    let mut data = vec![0.0f64; n * n];
+    for j in 0..n {
+        data[j * n + j] = 1.0 + j as f64 * 0.001;
+    }
+    // Dominant off-diagonal at column 32, row 50 — same shape as
+    // test_rejection_fallback but under may_delay=true. With
+    // pivot_threshold=0.01 this column is rejected; under may_delay
+    // that produces a Delayed outcome, so scalar breaks at k=32 with
+    // nelim=32 and n_delayed=n-32. The blocked path must produce the
+    // same (L, D, perm, inertia, contrib, nelim, n_delayed) byte-for
+    // byte.
+    data[32 * n + 50] = 1000.0;
+    let mat = SymmetricMatrix { n, data };
+    let scalar = factor_frontal(&mat, n, true, &params).unwrap();
+    let blocked = factor_frontal_blocked(&mat, n, true, &params).unwrap();
+    assert_frontals_byte_identical(&scalar, &blocked, "may_delay rejection");
+}

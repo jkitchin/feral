@@ -572,6 +572,13 @@ enum PanelStatus {
     /// the panel doesn't support (2×2 or swap). Caller runs one scalar
     /// pivot step and may re-enter the panel afterwards.
     ScalarFallback,
+    /// Panel terminated early because the next 1×1 pivot was rejected
+    /// under the SSIDS `may_delay == true` contract — the parent
+    /// supernode will absorb the delayed columns. Caller applies the
+    /// deferred Schur update to trailing columns and breaks out of the
+    /// outer loop (no further pivots in this supernode). Only produced
+    /// when the caller passed `may_delay == true`.
+    Delayed,
 }
 
 /// Factor a frontal matrix, eliminating only the first `ncol` columns.
@@ -816,10 +823,10 @@ pub fn factor_frontal_blocked(
         });
     }
 
-    // Fallback conditions: for these, the panel offers no advantage or
-    // would need Step 5 machinery. Delegation preserves parity trivially.
+    // Fallback conditions where the panel offers no advantage.
+    // Delegation preserves parity trivially.
     let bs = params.block_size;
-    if may_delay || bs < 2 || ncol <= bs {
+    if bs < 2 || ncol <= bs {
         return factor_frontal(matrix, ncol, may_delay, params);
     }
 
@@ -869,6 +876,7 @@ pub fn factor_frontal_blocked(
             nrow,
             k,
             bs,
+            may_delay,
             params,
             &mut pos,
             &mut neg,
@@ -876,42 +884,46 @@ pub fn factor_frontal_blocked(
             &mut needs_refinement,
             &mut d_panel,
         )?;
-        // On ScalarFallback the panel peeked-ahead the column at
-        // `k+n_elim` (applied pivots 0..n_elim-1 to it) but could not
-        // pivot it. That column is already in scalar's state at pivot
-        // `k+n_elim` firing time, so `apply_blocked_schur` must skip it
-        // to avoid a double rank-1 update. On Full the column at
-        // `k+n_elim` was not peek-ahead'd, so the deferred update
-        // starts there normally.
+        // On ScalarFallback and Delayed the panel peek-ahead'd column
+        // `k+n_elim` (applied pivots 0..n_elim-1 to it) before deciding
+        // it could not pivot. In scalar semantics that column's state at
+        // break time already matches what pivots 0..n_elim-1 produce via
+        // eager updates, so `apply_blocked_schur` must skip it to avoid
+        // a double rank-1 update. On Full the column at `k+n_elim` was
+        // not peek-ahead'd, so the deferred update starts there normally.
         let j_start = match status {
             PanelStatus::Full => k + n_elim,
-            PanelStatus::ScalarFallback => k + n_elim + 1,
+            PanelStatus::ScalarFallback | PanelStatus::Delayed => k + n_elim + 1,
         };
         apply_blocked_schur(&mut a, nrow, k, n_elim, j_start, &d_panel);
         k += n_elim;
 
-        if let PanelStatus::ScalarFallback = status {
-            // One scalar step to handle the 2×2/swap case the panel declined.
-            if k >= ncol {
-                break;
+        match status {
+            PanelStatus::Full => {}
+            PanelStatus::ScalarFallback => {
+                // One scalar step to handle the 2×2/swap case the panel declined.
+                if k >= ncol {
+                    break;
+                }
+                match scalar_pivot_step(
+                    &mut a,
+                    nrow,
+                    ncol,
+                    k,
+                    may_delay,
+                    params,
+                    &mut perm,
+                    &mut subdiag,
+                    &mut pos,
+                    &mut neg,
+                    &mut zero,
+                    &mut needs_refinement,
+                )? {
+                    PivotStepResult::Advanced(n) => k += n,
+                    PivotStepResult::Delayed => break,
+                }
             }
-            match scalar_pivot_step(
-                &mut a,
-                nrow,
-                ncol,
-                k,
-                may_delay,
-                params,
-                &mut perm,
-                &mut subdiag,
-                &mut pos,
-                &mut neg,
-                &mut zero,
-                &mut needs_refinement,
-            )? {
-                PivotStepResult::Advanced(n) => k += n,
-                PivotStepResult::Delayed => break,
-            }
+            PanelStatus::Delayed => break,
         }
     }
 
@@ -980,8 +992,8 @@ pub fn factor_frontal_blocked(
 /// rank-1 updates from prior panel pivots) before each pivot search so
 /// the BK test sees the same column state scalar would. Terminates early
 /// on any condition the panel cannot handle without a full-state view
-/// (2×2 candidate, swap candidate, delayed pivot — the last is excluded
-/// at the caller via `may_delay == false`).
+/// (2×2 candidate, swap candidate, or — when `may_delay == true` — a
+/// delayed pivot from the SSIDS threshold test).
 ///
 /// On return, `a[k..k+n_elim]` columns hold scaled L columns (or zeroed
 /// L columns for rejected pivots), `d_panel[0..n_elim]` holds the
@@ -995,6 +1007,7 @@ fn lblt_panel_frontal(
     nrow: usize,
     k: usize,
     bs: usize,
+    may_delay: bool,
     params: &BunchKaufmanParams,
     pos: &mut usize,
     neg: &mut usize,
@@ -1048,7 +1061,7 @@ fn lblt_panel_frontal(
             nrow,
             col,
             gamma0,
-            /* may_delay = */ false,
+            may_delay,
             params,
             pos,
             neg,
@@ -1075,10 +1088,15 @@ fn lblt_panel_frontal(
                 d_panel[c] = 0.0;
             }
             PivotOutcome::Delayed => {
-                // Unreachable: panel runs only when may_delay == false.
-                return Err(FeralError::InvalidInput(
-                    "lblt_panel_frontal: unexpected Delayed outcome".to_string(),
-                ));
+                // SSIDS break-on-first-failure contract: the pivot was
+                // below threshold and `may_delay == true`. The rejection
+                // routine did NOT mutate state for this column, so we
+                // return with `n_elim = c` and let the caller apply the
+                // deferred Schur to columns `[k+c+1, nrow)`, then break
+                // out of the outer loop. Column `k+c` retains its
+                // peek-ahead state (pivots 0..c-1 applied), which
+                // matches scalar's column state at break time exactly.
+                return Ok((c, PanelStatus::Delayed));
             }
         }
 
