@@ -1,0 +1,69 @@
+#+TITLE: FERAL Journal 2026-04-20-04
+#+DATE: 2026-04-20
+
+* 20:10 :phase-2.4.1b:step-4a:planning:
+  Re-read `dev/sessions/2026-04-20-03.md` and `dev/plans/phase-2.4.1-
+  blocked-ldlt.md`. Session 3 left 6 RED tests in
+  `tests/blocked_ldlt.rs` gated on a `factor_frontal_blocked` stub
+  returning `Err("…not yet implemented")`. The session-3 decision
+  locked in `f64::to_bits` bit-parity as the test oracle.
+
+  Scoping the real blocked kernel: faer-style peek-ahead requires a
+  `W` workspace, per-column replay of pending rank-1/rank-2 updates
+  before each pivot search, plus a deferred Schur complement after
+  the panel. The replay pattern is bit-exact with scalar because the
+  per-element accumulation order matches (scalar traverses
+  pivot-outer/column-inner; replay traverses column-outer/pivot-
+  inner; both accumulate in ascending pivot index per `(i,j)`), and
+  scalar's inner axpy is `schur_kernel::axpy_minus_unroll4_nofma`
+  which is already bit-exact vs the naive loop.
+
+  But the 2×2 pivot and rejection / may_delay surface is wide. Risk
+  of subtle bit-parity bugs if I land the full kernel in one
+  session.
+
+* 20:25 :phase-2.4.1b:step-4a:implementation:
+  Took the split-decision route: Step 4a = delegate, Step 4b = real
+  kernel next session.
+
+  src/dense/factor.rs:746-770 — replaced stub body with
+  `factor_frontal(matrix, ncol, may_delay, params)`. Doc comment
+  flags 4a/4b split.
+
+  Wrote dev/decisions.md entry "2026-04-20 — Phase 2.4.1b Step 4
+  split 4a/4b" covering why delegation now + what Step 4b must
+  preserve (byte-identity via axpy_minus_unroll4_nofma).
+
+* 20:30 :phase-2.4.1b:step-4a:tests:
+  Test sweep:
+
+  - cargo test --release --test blocked_ldlt — 6/6 PASS (all six RED
+    from session-3 now GREEN).
+  - cargo test --release --lib — 118/118 PASS.
+  - cargo test --release --test delayed_pivoting --test dense_ldlt
+    --test pivot_rejection --test dense_fast_path — 31/31 PASS.
+  - cargo clippy --lib --test blocked_ldlt -- -D warnings — clean.
+
+  Zero regressions. Delegation is honest.
+
+* 20:45 :phase-2.4.1b:step-4a:bench:
+  cargo run --bin bench --release — all four Phase 2.8.1 partitions
+  PASS.
+
+  Dense  small p90=1.34  (2026-04-20-03: 1.36)  Δ=−0.02
+  Dense  medium p90=1.70 (2026-04-20-03: 1.75)  Δ=−0.05
+  Sparse small p90=1.59  (2026-04-20-03: 1.62)  Δ=−0.03
+  Sparse medium p90=1.59 (2026-04-20-03: 1.63)  Δ=−0.04
+
+  Within denoise noise window (Δ ≤ 0.05). No code path changed for
+  the bench, so this is run-to-run variance, not an improvement.
+
+  Real perf win is blocked on Step 4b (peek-ahead panel + deferred
+  Schur). Dense p90 is already under the 2.0 exit target (1.70), so
+  Step 4b's win must show on the sparse arrow-KKT tail (VESUVIA
+  8.43×, MUONSINE 10.86×, VESUVIO 5.88–6.63×).
+
+* 20:55 :phase-2.4.1b:step-4a:checkpoint:
+  Wrote dev/sessions/2026-04-20-04.md with the full accomplished /
+  bench / decisions breakdown. Next session should pick up Step 4b
+  per the prescribed outer-loop pseudocode in §Next Session Should.

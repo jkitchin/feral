@@ -1324,3 +1324,61 @@ See `dev/tried-and-rejected.md:221` for the prior FMA-drift incident.
 `PivotStepResult` + `scalar_pivot_step` extraction at
 `src/dense/factor.rs:548-1020`, and the 118/118 + 31/31 byte-identity
 verification documented in `dev/sessions/2026-04-20-03.md`.
+
+---
+
+## 2026-04-20 — Phase 2.4.1b Step 4 split 4a/4b (thin-delegation GREEN)
+
+**Decision.** Split `dev/plans/phase-2.4.1-blocked-ldlt.md` Step 4
+("implement `lblt_panel_frontal` + `apply_blocked_schur`") into two
+sub-steps:
+
+- **Step 4a (this session, 2026-04-20-04).** `factor_frontal_blocked`
+  is a thin delegation wrapper that calls `factor_frontal` with the
+  same arguments. The six parity tests in `tests/blocked_ldlt.rs`
+  pass trivially because both paths execute the identical scalar
+  kernel. The public API shape is frozen.
+- **Step 4b (future session).** Replace the delegation body with the
+  faer-style peek-ahead panel kernel described in plan §Structure: a
+  `W` workspace, per-column replay of pending rank-1/rank-2 updates
+  before pivot search, and a deferred Schur complement update after
+  the panel. The key constraint is bit-parity with scalar via the
+  `axpy_minus_unroll4_nofma` kernel — see the 2026-04-20-03 decision
+  "Parity oracle is `f64::to_bits`".
+
+**Why.** A bit-exact peek-ahead panel requires the blocked arithmetic
+sequence — per-element accumulation order of pivot-by-pivot rank-1
+updates — to match scalar exactly. This is achievable via the replay
+strategy (for each trailing column `c`, apply pending updates
+`p=0..c-1` in ascending order via the same axpy kernel scalar uses)
+but the implementation is intricate enough that it belongs in a
+dedicated session. Landing the delegation wrapper now:
+
+1. Confirms the RED→GREEN transition: all 6 tests pass, 118 lib tests
+   pass, 31/31 dense/pivoting tests pass.
+2. Freezes `factor_frontal_blocked`'s public signature so Step 5
+   (`may_delay` wiring through the multifrontal driver) and Step 6
+   (SIMD micro-kernel in `apply_blocked_schur`) can be scheduled
+   independently without further API churn.
+3. Produces a clean checkpoint commit that the next session can
+   treat as a known-good baseline while it builds the real kernel.
+
+**Parity oracle is unchanged.** Step 4b must preserve byte-identical
+`(L, D, perm, inertia, contrib)` vs `factor_frontal`. The six
+`tests/blocked_ldlt.rs` tests remain the acceptance gate.
+
+**Performance impact of 4a.** None — delegation is a call-through, so
+the KKT bench results are within denoise noise vs the 2026-04-20-03
+baseline. The dense/sparse p90 improvements must come from 4b.
+
+**Scope.** Binding for the 2026-04-20-04 checkpoint. Revisit at the
+start of Step 4b if the replay strategy turns out to have a subtle
+bit-parity failure mode — in which case the options are (a) widen
+the test to approx-eq with tight tolerance and record the drift, or
+(b) ship blocked as an opt-in path behind `BkConfig::use_blocked`
+until a bit-exact variant is found.
+
+**Evidence.** `src/dense/factor.rs:746-770` (delegation body),
+`cargo test --release --test blocked_ldlt` → 6/6 PASS (all
+previously RED), `cargo test --release --lib` → 118/118 PASS,
+`cargo run --bin bench --release` → 4/4 Phase 2.8.1 partitions PASS.

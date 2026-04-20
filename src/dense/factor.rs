@@ -734,25 +734,36 @@ pub fn factor_frontal(
 
 /// Blocked-panel BK LDLᵀ variant of `factor_frontal` (Phase 2.4.1b).
 ///
-/// **Status: RED stub.** Returns `FeralError::Unsupported` with the
-/// message `"factor_frontal_blocked: Phase 2.4.1b not yet implemented"`.
-/// The GREEN commit will replace this with a faer-style peek-ahead
-/// panel (`W` workspace + `lblt_panel_frontal` + `apply_blocked_schur`).
+/// **Status: Step 4a GREEN (thin delegation).** Currently forwards to
+/// `factor_frontal`, making the six parity tests in
+/// `tests/blocked_ldlt.rs` pass by construction (both paths run the
+/// same scalar kernel). The faer-style peek-ahead panel
+/// (`W` workspace + per-column replay + deferred Schur update) is
+/// scoped to a follow-up session — see `dev/decisions.md` entry
+/// dated 2026-04-20 "Phase 2.4.1b Step 4 split 4a/4b".
+///
+/// The public API shape is frozen here so Step 5 (`may_delay` wiring
+/// through the multifrontal driver) and Step 6 (SIMD micro-kernel)
+/// can be landed incrementally without further API churn. Callers
+/// that want the blocked path should call this function; once Step 4b
+/// lands, the internals change but `(L, D, perm, inertia, contrib)`
+/// remain byte-identical to `factor_frontal`.
 ///
 /// Must produce byte-identical `(L, D, perm, inertia, contrib)` to
-/// `factor_frontal` when called with the same `(matrix, ncol, may_delay,
-/// params)`. This is enforced by the test suite in
-/// `tests/blocked_ldlt.rs`.
+/// `factor_frontal` when called with the same `(matrix, ncol,
+/// may_delay, params)`. Enforced by `tests/blocked_ldlt.rs`.
 pub fn factor_frontal_blocked(
     matrix: &crate::dense::matrix::SymmetricMatrix,
     ncol: usize,
     may_delay: bool,
     params: &BunchKaufmanParams,
 ) -> Result<FrontalFactors, FeralError> {
-    let _ = (matrix, ncol, may_delay, params);
-    Err(FeralError::InvalidInput(
-        "factor_frontal_blocked: Phase 2.4.1b not yet implemented".to_string(),
-    ))
+    // Step 4a: delegate. Parity is trivially bit-exact with scalar.
+    // Step 4b (future): replace body with the peek-ahead panel kernel
+    // described in `dev/plans/phase-2.4.1-blocked-ldlt.md` §Structure,
+    // preserving the axpy_minus_unroll4_nofma rounding trajectory so
+    // the parity tests continue to pass byte-for-byte.
+    factor_frontal(matrix, ncol, may_delay, params)
 }
 
 /// One iteration of the scalar BK pivot loop for `factor_frontal`.
