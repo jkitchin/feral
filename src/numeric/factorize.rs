@@ -172,28 +172,43 @@ impl FactorWorkspace {
 
 /// Gate predicate for the D.3 dense fast-path.
 ///
-/// Returns `true` when the input satisfies `n ≤ N_MAX` and
-/// `nnz_lower / (n * (n + 1) / 2) ≥ ρ_MIN`. The density threshold
-/// is expressed as the integer inequality
-/// `nnz_lower * ρ_DEN ≥ n * (n + 1) / 2 * ρ_NUM` so the check costs
-/// a handful of integer ops with no division or FP.
+/// Returns `true` when the input qualifies for the dense fast-path.
+///
+/// Two disjuncts:
+///   1. **D.4 tiny-n** — `n ≤ N_TINY` unconditionally (density is
+///      irrelevant; the multifrontal scaffolding cost dominates at
+///      these sizes).
+///   2. **D.3 small-dense** — `n ≤ N_MAX` and
+///      `nnz_lower / (n * (n + 1) / 2) ≥ ρ_MIN`. The density threshold
+///      is expressed as the integer inequality
+///      `nnz_lower * ρ_DEN ≥ n * (n + 1) / 2 * ρ_NUM` so the check
+///      costs a handful of integer ops with no division or FP.
 ///
 /// Authoritative entry point for the gate; callers must not
 /// roll their own. Thresholds may be tuned post-measurement
-/// (see `dev/plans/sparse-tail-d3.md` stage 2).
+/// (see `dev/plans/sparse-tail-d3.md` stage 2 for D.3 and
+/// `dev/plans/sparse-tail-d4.md` stage 2 for D.4).
 ///
-/// Thresholds (`N_MAX = 128`, `ρ_MIN = 1/4`) are initial values from
-/// the research note `dev/research/sparse-tail-d3-d4-2026-04-19.md`.
-/// The stage-2 measurement sweep in `dev/plans/sparse-tail-d3.md` may
-/// tune them; update both `N_MAX` and the numerator/denominator pair
-/// together if tuned.
+/// Thresholds (`N_TINY = 16`, `N_MAX = 128`, `ρ_MIN = 1/4`) are
+/// initial values from the research note
+/// `dev/research/sparse-tail-d3-d4-2026-04-19.md`. Update all three
+/// together if a future sweep tunes them.
 #[inline]
 pub fn should_use_dense_fast_path(n: usize, nnz_lower: usize) -> bool {
+    // D.4 tiny-n: unconditional.
+    const N_TINY: usize = 16;
+    // D.3 small-dense: density-gated.
     const N_MAX: usize = 128;
     // ρ_MIN = ρ_NUM / ρ_DEN = 1/4 = 0.25
     const RHO_NUM: usize = 1;
     const RHO_DEN: usize = 4;
-    if n == 0 || n > N_MAX {
+    if n == 0 {
+        return false;
+    }
+    if n <= N_TINY {
+        return true;
+    }
+    if n > N_MAX {
         return false;
     }
     let lower_cells = n * (n + 1) / 2;
