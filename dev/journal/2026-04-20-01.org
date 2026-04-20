@@ -1,0 +1,107 @@
+#+TITLE: FERAL session journal 2026-04-20-01
+
+* 07:25 :session-start:orient:
+Previous checkpoint (2026-04-19-04) closed D.1 FactorWorkspace +
+D.3 dense fast-path. Sparse factor/MUMPS corpus geomean 0.48 → 0.37.
+Top-10 post-D.3 still contains small-n outliers; HS85_0022 at n=68
+reported at 1845 μs vs MUMPS 23 μs (80×) in
+=dev/results/lever-d3/bench-post-d3-2026-04-19.txt=. Goal this
+session: diagnose HS85_0022 to decide whether option 2
+(small-n =compute_scaling= fast path) addresses it or whether a
+different lever is indicated.
+
+* 07:28 :hs85:gate:
+Quick inspection of =should_use_dense_fast_path=
+(=src/numeric/factorize.rs:191=) vs HS85_0022 sidecar:
+- n = 68, nnz (from =HS85_0022.feral.json=) = 186
+- Gate requires =nnz_lower * 4 ≥ n*(n+1)/2=, i.e.
+  =nnz_lower ≥ n*(n+1)/8 = 68*69/8 = 586.5= → 587.
+- 186 ≪ 587 → gate REJECTS. Density ρ ≈ 186/2346 ≈ 0.079.
+
+Implication: HS85_0022 runs the multifrontal path, not the dense
+fast-path. The TRO3X3-class =compute_scaling= lever (option 2 in
+the checkpoint) was scoped against the dense fast-path input; its
+relevance to HS85_0022 depends on whether =compute_scaling= also
+dominates the multifrontal path at this size. Next step: build a
+phase-timing probe for the multifrontal path on HS85_0022.
+
+Sidecar anomaly noted: =HS85_0022.feral.json= reports factor_us=57,
+not 1845. Bench harness wall-time is a single cold call and likely
+includes allocator/TLB cost that the tight-loop sidecar generator
+amortises; the probe should record both cold and warm timings so
+the magnitude of the 80× single-call result is not lost.
+
+* 07:55 :hs85:diag:finding:
+Built =src/bin/hs85_diag.rs=: gate decision + symbolic structure +
+phase breakdown + cold single-shot statistics. Output:
+
+#+begin_example
+Input shape
+  n=68, nnz_lower=186, ρ=0.0793, threshold=587  (GATE REJECTS, MULTIFRONTAL)
+
+Symbolic structure
+  supernodes=42, etree height=10, factor_nnz_est=230, peak_contrib=0.1 KiB
+
+Multifrontal phase timings (warm, median of 2000)
+  symbolic                   =  13.25 μs  (35.6%)
+  compute_scaling            =   5.12 μs  (13.8%)
+  numeric (cold workspace)   =  25.29 μs  (67.9%)
+  numeric (warm workspace)   =  24.04 μs
+  full cold (sym + numeric)  =  37.25 μs
+
+Cold single-shot wall time (full pipeline, 50 reps)
+  min=36.25 μs  p50=36.67 μs  p90=37.88 μs  max=42.83 μs
+
+Recorded bench.rs result: 1845 μs feral vs 23 μs MUMPS (80×).
+#+end_example
+
+The probe cannot reproduce the 1845 μs reading under any condition.
+50 independent cold-call reps from the same process land in
+[36, 43] μs. MUMPS sidecar = 23 μs, so the real ratio is ~1.6×.
+The 80× entry in =bench-post-d3-2026-04-19.txt= was a single-shot
+noise excursion, not a workload regression.
+
+* 08:02 :bench:harness:noise:
+Re-ran =cargo run --release --bin bench= twice. HS85_0022 did not
+appear in the top-10 worst factor-ratio-vs-MUMPS in either run.
+Run 1 dense top-10 was arrow-KKT only (n=715 HAHN1, n=806 CRESC100).
+Run 1 sparse top-10:
+
+#+begin_example
+HYDCAR20_0012    n=198   2040/140   14.57×
+HS73_0308        n=7      118/9     13.11×
+PALMER1E_0484    n=8      129/10    12.90×
+HYDCAR20_0013    n=198   1587/140   11.34×
+HATFLDH_0083     n=11     106/10    10.60×
+PALMER1A_0034    n=6      130/13    10.00×
+KIRBY2LS_0274    n=5       99/10     9.90×
+CRESC100_0000    n=806   1975/200    9.88×
+HEART6LS_0418    n=6       96/10     9.60×
+KIRBY2_0007      n=458   1167/122    9.57×
+#+end_example
+
+Conclusion: bench harness's per-matrix single-shot timings are
+inherently noisy at the tens-of-μs scale, and isolated worst-N
+rows should be treated as candidates-for-probe, not as confirmed
+regressions. Real post-D.3 tail structure: (i) arrow-KKT dense
+class at n ≥ 715 — Phase 2.4 target, (ii) tiny-n (n ≤ 11) — D.4
+target, now the cleanest named outlier cluster in the sparse top-10.
+
+* 08:10 :decision:next-lever:
+D.4 tiny-n fast-path (checkpoint option 1) is the correct next
+lever. Rationale:
+
+- The HS85_0022 diagnosis invalidated option 4 (the lever it was
+  meant to justify); =compute_scaling= small-n optimisation was
+  contingent on HS85-class multifrontal paths being dominated by
+  scaling. They aren't — HS85-class is already ≈1.6× MUMPS.
+- Five of the top-10 sparse worst-ratio rows have n ≤ 11; the
+  observed wall times (96–130 μs) sit clearly in the range where
+  the D.3 synthesis (densify → scale → factor_frontal → wrap) can
+  plausibly halve them, and the gate predicate already distinguishes
+  this class.
+- Prerequisite (the =dense_fast_factor= synthesis path) is landed.
+
+Session scope: diagnosis only. D.4 rollout lands next session.
+Tests still green (13 pass, 1 ignored).
+
