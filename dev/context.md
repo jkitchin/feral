@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-20T13:40:23Z
+Generated: 2026-04-20T14:25:16Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,36 +59,32 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+26b5e01 session: 2026-04-20-02 — bench harness multi-sample denoise
 df540ab session: 2026-04-20-01 — HS85 diagnosis + D.4 tiny-n fast-path
 16fdd77 d4: stage-1 probe + stage-2 corpus bench — close D.4
 ddefc2f d4: GREEN — add N_TINY=16 disjunct to dense-fast-path gate
 d570960 d4: RED — tiny_fast_path tests against planned predicate
-2fe8836 d4: research/diag commit — HS85 diagnosis + D.4 plan
 ```
 
 ## Test Status
 ```
+thread 'test_kkt_regression_spot_checks' (18037843) panicked at tests/blocked_ldlt.rs:266:71:
+called `Result::unwrap()` on an `Err` value: InvalidInput("factor_frontal_blocked: Phase 2.4.1b not yet implemented")
 
-test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+---- test_2x2_at_block_boundary stdout ----
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-47e687b76ffbe0b0)
+thread 'test_2x2_at_block_boundary' (18037840) panicked at tests/blocked_ldlt.rs:203:67:
+called `Result::unwrap()` on an `Err` value: InvalidInput("factor_frontal_blocked: Phase 2.4.1b not yet implemented")
 
-running 5 tests
-test test_gate_just_outside_n_tiny ... ok
-test test_gate_tiny_sparse_in ... ok
-test test_determinism_tiny ... ok
-test test_gate_boundary_n_16 ... ok
-test test_solve_parity_tiny_real_matrix ... ok
 
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+failures:
+    test_2x2_at_block_boundary
+    test_frontal_ncol_lt_nrow_parity
+    test_indefinite_bk77_parity
+    test_kkt_regression_spot_checks
+    test_rejection_fallback
+    test_spd_scalar_blocked_parity_size_sweep
 
-   Doc-tests feral
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-```
-
-## Benchmark
-```
+error: test failed, to rerun pass `--test blocked_ldlt`

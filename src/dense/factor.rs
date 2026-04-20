@@ -65,6 +65,13 @@ pub struct BunchKaufmanParams {
     /// `ForceAccept` path. See dev/plans/scaling-aware-pivot-rejection.md
     /// and MUMPS `dfac_front_aux.F:1494-1606` for the reference formulas.
     pub pivot_threshold: f64,
+
+    /// Panel width for the blocked dense Schur update. Consulted by the
+    /// Phase 2.4.1b blocked-panel path in `factor_frontal`; ignored when
+    /// `remaining <= block_size` or when `may_delay == true` routes the
+    /// factor through the scalar path. Default 64 matches faer's
+    /// `factor.rs:722` crossover. See `dev/plans/phase-2.4.1-blocked-ldlt.md`.
+    pub block_size: usize,
 }
 
 /// Action to take when a near-zero pivot is encountered.
@@ -85,6 +92,7 @@ impl Default for BunchKaufmanParams {
             zero_tol_2x2: zero_tol * zero_tol,
             on_zero_pivot: ZeroPivotAction::Fail,
             pivot_threshold: 0.0,
+            block_size: 64,
         }
     }
 }
@@ -539,6 +547,18 @@ enum PivotOutcome {
     Delayed,
 }
 
+/// Result of one iteration of the scalar BK pivot loop in
+/// `factor_frontal`. `scalar_pivot_step` is the extracted per-step body;
+/// the caller translates `Advanced(n)` into `k += n` and `Delayed` into
+/// a `break` to keep the pre-extraction control flow byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PivotStepResult {
+    /// Eliminated `n` columns (1 for a 1×1 pivot, 2 for a 2×2 block).
+    Advanced(usize),
+    /// Pivot was delayed (SSIDS-style); caller breaks the loop.
+    Delayed,
+}
+
 /// Factor a frontal matrix, eliminating only the first `ncol` columns.
 ///
 /// This is the key dense kernel for the multifrontal solver. Unlike `factor()`,
@@ -617,306 +637,30 @@ pub fn factor_frontal(
     let mut zero = 0usize;
     let mut needs_refinement = false;
 
-    let alpha = params.alpha;
     let mut k = 0;
 
     // Factor only the first ncol columns. Pivot search restricted to [k, ncol).
+    // Per-step body is extracted as `scalar_pivot_step` so the Phase 2.4.1b
+    // blocked-panel path can share the rejection/delay fallback with the
+    // unblocked driver. This loop is behavior-preserving byte-for-byte vs
+    // the pre-extraction body.
     while k < ncol {
-        let remaining = ncol - k;
-
-        if remaining == 1 {
-            // Last eliminated pivot: always 1×1. Compute the column max
-            // over rows (k+1..nrow) for the column-relative threshold.
-            let mut col_max = 0.0f64;
-            for i in (k + 1)..nrow {
-                let v = a[k * nrow + i].abs();
-                if v > col_max {
-                    col_max = v;
-                }
-            }
-            let outcome = try_reject_1x1_frontal(
-                &mut a,
-                nrow,
-                k,
-                col_max,
-                may_delay,
-                params,
-                &mut pos,
-                &mut neg,
-                &mut zero,
-                &mut needs_refinement,
-            )?;
-            match outcome {
-                PivotOutcome::Accepted => do_1x1_update(&mut a, nrow, k),
-                PivotOutcome::Rejected => {}
-                PivotOutcome::Delayed => break,
-            }
-            k += 1;
-            continue;
-        }
-
-        // Find max |A[i,k]| for i in (k, ncol) — restricted to fully-summed rows
-        let (gamma0, r) = {
-            let mut max_val = 0.0f64;
-            let mut max_row = k + 1;
-            // Search within fully-summed rows first
-            for i in (k + 1)..ncol {
-                let v = a[k * nrow + i].abs();
-                if v > max_val {
-                    max_val = v;
-                    max_row = i;
-                }
-            }
-            // Also check sub-diagonal rows (they contribute to gamma0 for
-            // the BK pivot test, but are never swapped into pivot position)
-            for i in ncol..nrow {
-                let v = a[k * nrow + i].abs();
-                if v > max_val {
-                    max_val = v;
-                    max_row = i;
-                }
-            }
-            (max_val, max_row)
-        };
-
-        if gamma0 == 0.0 {
-            let d = a[k * nrow + k];
-            count_1x1_inertia(
-                d,
-                params,
-                &mut pos,
-                &mut neg,
-                &mut zero,
-                &mut needs_refinement,
-            )?;
-            set_l_column_identity(&mut a, nrow, k);
-            k += 1;
-            continue;
-        }
-
-        let akk = a[k * nrow + k].abs();
-
-        if akk >= alpha * gamma0 {
-            // 1×1 pivot at k, no swap
-            let outcome = try_reject_1x1_frontal(
-                &mut a,
-                nrow,
-                k,
-                gamma0,
-                may_delay,
-                params,
-                &mut pos,
-                &mut neg,
-                &mut zero,
-                &mut needs_refinement,
-            )?;
-            match outcome {
-                PivotOutcome::Accepted => do_1x1_update(&mut a, nrow, k),
-                PivotOutcome::Rejected => {}
-                PivotOutcome::Delayed => break,
-            }
-            k += 1;
-            continue;
-        }
-
-        // gamma_r: max off-diagonal in symmetric row r
-        let gamma_r = symmetric_row_offdiag_max(&a, nrow, k, r);
-        let arr = a[r * nrow + r].abs();
-
-        // Can we swap r into pivot position? Only if r < ncol (fully summed)
-        let r_is_fully_summed = r < ncol;
-
-        if r_is_fully_summed && arr >= alpha * gamma_r {
-            // 1×1 pivot at r, swap r↔k
-            swap_rows_cols(&mut a, nrow, k, r, &mut perm);
-            let outcome = try_reject_1x1_frontal(
-                &mut a,
-                nrow,
-                k,
-                gamma_r,
-                may_delay,
-                params,
-                &mut pos,
-                &mut neg,
-                &mut zero,
-                &mut needs_refinement,
-            )?;
-            match outcome {
-                PivotOutcome::Accepted => do_1x1_update(&mut a, nrow, k),
-                PivotOutcome::Rejected => {}
-                PivotOutcome::Delayed => break,
-            }
-            k += 1;
-            continue;
-        }
-
-        if akk * gamma_r >= alpha * gamma0 * gamma0 {
-            // 1×1 pivot at k (LAPACK extension), no swap
-            let outcome = try_reject_1x1_frontal(
-                &mut a,
-                nrow,
-                k,
-                gamma0,
-                may_delay,
-                params,
-                &mut pos,
-                &mut neg,
-                &mut zero,
-                &mut needs_refinement,
-            )?;
-            match outcome {
-                PivotOutcome::Accepted => do_1x1_update(&mut a, nrow, k),
-                PivotOutcome::Rejected => {}
-                PivotOutcome::Delayed => break,
-            }
-            k += 1;
-            continue;
-        }
-
-        if r_is_fully_summed && k + 1 < ncol {
-            // 2×2 pivot using {k, r}, both fully summed
-            if r != k + 1 {
-                swap_rows_cols(&mut a, nrow, k + 1, r, &mut perm);
-            }
-            let d11 = a[k * nrow + k];
-            let d21 = a[k * nrow + (k + 1)];
-            let d22 = a[(k + 1) * nrow + (k + 1)];
-            let det = d11 * d22 - d21 * d21;
-
-            // Duff-Reid 2×2 growth bound (MUMPS dfac_front_aux.F:1599-1606):
-            //
-            //   reject iff  (|a22|*RMAX + AMAX*TMAX) * u  >  |det|
-            //        OR     (|a11|*TMAX + AMAX*RMAX) * u  >  |det|
-            //
-            // where RMAX = max |a[i, k]| for i > k+1
-            //       TMAX = max |a[i, k+1]| for i > k+1
-            //       AMAX = |a[k+1, k]| = |d21|
-            // (i.e., RMAX and TMAX are the column maxes of the two pivot
-            // columns *beyond* the 2×2 block; AMAX is the cross term.)
-            //
-            // When pivot_threshold == 0.0 the growth bound is always
-            // satisfied (0 <= |det|), preserving Phase 1 behavior.
-            let mut rmax = 0.0f64;
-            let mut tmax = 0.0f64;
-            for i in (k + 2)..nrow {
-                let v0 = a[k * nrow + i].abs();
-                if v0 > rmax {
-                    rmax = v0;
-                }
-                let v1 = a[(k + 1) * nrow + i].abs();
-                if v1 > tmax {
-                    tmax = v1;
-                }
-            }
-            let amax = d21.abs();
-            let absdet = det.abs();
-            let u = params.pivot_threshold;
-            let growth_fail = (d22.abs() * rmax + amax * tmax) * u > absdet
-                || (d11.abs() * tmax + amax * rmax) * u > absdet;
-
-            // Scale-invariant cancellation-aware determinant floor, ported
-            // from SSIDS `src/ssids/cpu/kernels/ldlt_tpp.cxx:98-106`:
-            //
-            //   maxpiv    = max(|a11|, |a21|, |a22|)
-            //   detscale  = 1 / maxpiv
-            //   detpiv0   = (a11 * detscale) * a22
-            //   detpiv1   = (a21 * detscale) * a21
-            //   detpiv    = detpiv0 - detpiv1      (== det / maxpiv)
-            //   reject iff maxpiv < small
-            //           OR |detpiv| < max(small, |detpiv0|/2, |detpiv1|/2)
-            //
-            // This replaces the prior absolute `|det| <= zero_tol_2x2` floor,
-            // which was only meaningful on equilibrated matrices. The test
-            // is scale-invariant by construction: the ratio `|detpiv|` vs
-            // fractions of `|detpiv0|`, `|detpiv1|` does not depend on
-            // the absolute magnitude of the block. `SSIDS_DET_SMALL = 1e-20`
-            // is a dead-zero underflow floor, NOT a stability threshold.
-            // See dev/research/ssids-scale-invariant-det-floor.md.
-            let max_piv = d11.abs().max(d21.abs()).max(d22.abs());
-            let det_floor_fail = if max_piv < SSIDS_DET_SMALL {
-                true
-            } else {
-                let det_scale = 1.0 / max_piv;
-                let detpiv0 = (d11 * det_scale) * d22;
-                let detpiv1 = (d21 * det_scale) * d21;
-                let detpiv = detpiv0 - detpiv1;
-                let cancel_floor = SSIDS_DET_SMALL
-                    .max(detpiv0.abs() * 0.5)
-                    .max(detpiv1.abs() * 0.5);
-                detpiv.abs() < cancel_floor
-            };
-
-            if growth_fail || det_floor_fail {
-                // 2×2 rejected. SSIDS-style delayed pivoting: when
-                // `may_delay == true`, break out immediately so the parent
-                // supernode can retry this pivot with a larger pivot search
-                // window. Otherwise fall back to a single 1×1 at k with the
-                // column-relative threshold, which triggers the existing
-                // ForceAccept path.
-                if may_delay {
-                    break;
-                }
-                if det_floor_fail {
-                    match params.on_zero_pivot {
-                        ZeroPivotAction::Fail => {
-                            return Err(FeralError::NumericallyRankDeficient);
-                        }
-                        ZeroPivotAction::ForceAccept => {
-                            needs_refinement = true;
-                        }
-                    }
-                }
-                let outcome = try_reject_1x1_frontal(
-                    &mut a,
-                    nrow,
-                    k,
-                    gamma0,
-                    may_delay,
-                    params,
-                    &mut pos,
-                    &mut neg,
-                    &mut zero,
-                    &mut needs_refinement,
-                )?;
-                match outcome {
-                    PivotOutcome::Accepted => do_1x1_update(&mut a, nrow, k),
-                    PivotOutcome::Rejected => {}
-                    PivotOutcome::Delayed => break,
-                }
-                k += 1;
-                continue;
-            }
-
-            let pivot_inertia = count_2x2_inertia_val(d11, d21, d22);
-            pos += pivot_inertia.positive;
-            neg += pivot_inertia.negative;
-            zero += pivot_inertia.zero;
-
-            subdiag[k] = d21;
-            // 2×2 update
-            do_2x2_update(&mut a, nrow, k, d11, d21, d22);
-            k += 2;
-        } else {
-            // Can't do 2×2 (r is not fully summed or only 1 column left).
-            // Last-resort 1×1 at k with column-relative rejection.
-            let outcome = try_reject_1x1_frontal(
-                &mut a,
-                nrow,
-                k,
-                gamma0,
-                may_delay,
-                params,
-                &mut pos,
-                &mut neg,
-                &mut zero,
-                &mut needs_refinement,
-            )?;
-            match outcome {
-                PivotOutcome::Accepted => do_1x1_update(&mut a, nrow, k),
-                PivotOutcome::Rejected => {}
-                PivotOutcome::Delayed => break,
-            }
-            k += 1;
+        match scalar_pivot_step(
+            &mut a,
+            nrow,
+            ncol,
+            k,
+            may_delay,
+            params,
+            &mut perm,
+            &mut subdiag,
+            &mut pos,
+            &mut neg,
+            &mut zero,
+            &mut needs_refinement,
+        )? {
+            PivotStepResult::Advanced(n) => k += n,
+            PivotStepResult::Delayed => break,
         }
     }
 
@@ -986,6 +730,339 @@ pub fn factor_frontal(
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
     })
+}
+
+/// Blocked-panel BK LDLᵀ variant of `factor_frontal` (Phase 2.4.1b).
+///
+/// **Status: RED stub.** Returns `FeralError::Unsupported` with the
+/// message `"factor_frontal_blocked: Phase 2.4.1b not yet implemented"`.
+/// The GREEN commit will replace this with a faer-style peek-ahead
+/// panel (`W` workspace + `lblt_panel_frontal` + `apply_blocked_schur`).
+///
+/// Must produce byte-identical `(L, D, perm, inertia, contrib)` to
+/// `factor_frontal` when called with the same `(matrix, ncol, may_delay,
+/// params)`. This is enforced by the test suite in
+/// `tests/blocked_ldlt.rs`.
+pub fn factor_frontal_blocked(
+    matrix: &crate::dense::matrix::SymmetricMatrix,
+    ncol: usize,
+    may_delay: bool,
+    params: &BunchKaufmanParams,
+) -> Result<FrontalFactors, FeralError> {
+    let _ = (matrix, ncol, may_delay, params);
+    Err(FeralError::InvalidInput(
+        "factor_frontal_blocked: Phase 2.4.1b not yet implemented".to_string(),
+    ))
+}
+
+/// One iteration of the scalar BK pivot loop for `factor_frontal`.
+///
+/// Extracted verbatim from the pre-extraction in-line loop body so the
+/// Phase 2.4.1b blocked-panel path can share the rejection/delay fallback
+/// with the unblocked driver. Byte-identical behavior with the original
+/// body is required — see `dev/plans/phase-2.4.1-blocked-ldlt.md` §2.
+///
+/// Returns `Advanced(1)` or `Advanced(2)` on success; `Delayed` when the
+/// SSIDS-style delay path fires (only possible when `may_delay == true`).
+#[allow(clippy::too_many_arguments)]
+fn scalar_pivot_step(
+    a: &mut [f64],
+    nrow: usize,
+    ncol: usize,
+    k: usize,
+    may_delay: bool,
+    params: &BunchKaufmanParams,
+    perm: &mut [usize],
+    subdiag: &mut [f64],
+    pos: &mut usize,
+    neg: &mut usize,
+    zero: &mut usize,
+    needs_refinement: &mut bool,
+) -> Result<PivotStepResult, FeralError> {
+    let alpha = params.alpha;
+    let remaining = ncol - k;
+
+    if remaining == 1 {
+        // Last eliminated pivot: always 1×1. Compute the column max
+        // over rows (k+1..nrow) for the column-relative threshold.
+        let mut col_max = 0.0f64;
+        for i in (k + 1)..nrow {
+            let v = a[k * nrow + i].abs();
+            if v > col_max {
+                col_max = v;
+            }
+        }
+        let outcome = try_reject_1x1_frontal(
+            a,
+            nrow,
+            k,
+            col_max,
+            may_delay,
+            params,
+            pos,
+            neg,
+            zero,
+            needs_refinement,
+        )?;
+        match outcome {
+            PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
+            PivotOutcome::Rejected => {}
+            PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
+        }
+        return Ok(PivotStepResult::Advanced(1));
+    }
+
+    // Find max |A[i,k]| for i in (k, ncol) — restricted to fully-summed rows
+    let (gamma0, r) = {
+        let mut max_val = 0.0f64;
+        let mut max_row = k + 1;
+        // Search within fully-summed rows first
+        for i in (k + 1)..ncol {
+            let v = a[k * nrow + i].abs();
+            if v > max_val {
+                max_val = v;
+                max_row = i;
+            }
+        }
+        // Also check sub-diagonal rows (they contribute to gamma0 for
+        // the BK pivot test, but are never swapped into pivot position)
+        for i in ncol..nrow {
+            let v = a[k * nrow + i].abs();
+            if v > max_val {
+                max_val = v;
+                max_row = i;
+            }
+        }
+        (max_val, max_row)
+    };
+
+    if gamma0 == 0.0 {
+        let d = a[k * nrow + k];
+        count_1x1_inertia(d, params, pos, neg, zero, needs_refinement)?;
+        set_l_column_identity(a, nrow, k);
+        return Ok(PivotStepResult::Advanced(1));
+    }
+
+    let akk = a[k * nrow + k].abs();
+
+    if akk >= alpha * gamma0 {
+        // 1×1 pivot at k, no swap
+        let outcome = try_reject_1x1_frontal(
+            a,
+            nrow,
+            k,
+            gamma0,
+            may_delay,
+            params,
+            pos,
+            neg,
+            zero,
+            needs_refinement,
+        )?;
+        match outcome {
+            PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
+            PivotOutcome::Rejected => {}
+            PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
+        }
+        return Ok(PivotStepResult::Advanced(1));
+    }
+
+    // gamma_r: max off-diagonal in symmetric row r
+    let gamma_r = symmetric_row_offdiag_max(a, nrow, k, r);
+    let arr = a[r * nrow + r].abs();
+
+    // Can we swap r into pivot position? Only if r < ncol (fully summed)
+    let r_is_fully_summed = r < ncol;
+
+    if r_is_fully_summed && arr >= alpha * gamma_r {
+        // 1×1 pivot at r, swap r↔k
+        swap_rows_cols(a, nrow, k, r, perm);
+        let outcome = try_reject_1x1_frontal(
+            a,
+            nrow,
+            k,
+            gamma_r,
+            may_delay,
+            params,
+            pos,
+            neg,
+            zero,
+            needs_refinement,
+        )?;
+        match outcome {
+            PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
+            PivotOutcome::Rejected => {}
+            PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
+        }
+        return Ok(PivotStepResult::Advanced(1));
+    }
+
+    if akk * gamma_r >= alpha * gamma0 * gamma0 {
+        // 1×1 pivot at k (LAPACK extension), no swap
+        let outcome = try_reject_1x1_frontal(
+            a,
+            nrow,
+            k,
+            gamma0,
+            may_delay,
+            params,
+            pos,
+            neg,
+            zero,
+            needs_refinement,
+        )?;
+        match outcome {
+            PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
+            PivotOutcome::Rejected => {}
+            PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
+        }
+        return Ok(PivotStepResult::Advanced(1));
+    }
+
+    if r_is_fully_summed && k + 1 < ncol {
+        // 2×2 pivot using {k, r}, both fully summed
+        if r != k + 1 {
+            swap_rows_cols(a, nrow, k + 1, r, perm);
+        }
+        let d11 = a[k * nrow + k];
+        let d21 = a[k * nrow + (k + 1)];
+        let d22 = a[(k + 1) * nrow + (k + 1)];
+        let det = d11 * d22 - d21 * d21;
+
+        // Duff-Reid 2×2 growth bound (MUMPS dfac_front_aux.F:1599-1606):
+        //
+        //   reject iff  (|a22|*RMAX + AMAX*TMAX) * u  >  |det|
+        //        OR     (|a11|*TMAX + AMAX*RMAX) * u  >  |det|
+        //
+        // where RMAX = max |a[i, k]| for i > k+1
+        //       TMAX = max |a[i, k+1]| for i > k+1
+        //       AMAX = |a[k+1, k]| = |d21|
+        // (i.e., RMAX and TMAX are the column maxes of the two pivot
+        // columns *beyond* the 2×2 block; AMAX is the cross term.)
+        //
+        // When pivot_threshold == 0.0 the growth bound is always
+        // satisfied (0 <= |det|), preserving Phase 1 behavior.
+        let mut rmax = 0.0f64;
+        let mut tmax = 0.0f64;
+        for i in (k + 2)..nrow {
+            let v0 = a[k * nrow + i].abs();
+            if v0 > rmax {
+                rmax = v0;
+            }
+            let v1 = a[(k + 1) * nrow + i].abs();
+            if v1 > tmax {
+                tmax = v1;
+            }
+        }
+        let amax = d21.abs();
+        let absdet = det.abs();
+        let u = params.pivot_threshold;
+        let growth_fail = (d22.abs() * rmax + amax * tmax) * u > absdet
+            || (d11.abs() * tmax + amax * rmax) * u > absdet;
+
+        // Scale-invariant cancellation-aware determinant floor, ported
+        // from SSIDS `src/ssids/cpu/kernels/ldlt_tpp.cxx:98-106`:
+        //
+        //   maxpiv    = max(|a11|, |a21|, |a22|)
+        //   detscale  = 1 / maxpiv
+        //   detpiv0   = (a11 * detscale) * a22
+        //   detpiv1   = (a21 * detscale) * a21
+        //   detpiv    = detpiv0 - detpiv1      (== det / maxpiv)
+        //   reject iff maxpiv < small
+        //           OR |detpiv| < max(small, |detpiv0|/2, |detpiv1|/2)
+        //
+        // This replaces the prior absolute `|det| <= zero_tol_2x2` floor,
+        // which was only meaningful on equilibrated matrices. The test
+        // is scale-invariant by construction: the ratio `|detpiv|` vs
+        // fractions of `|detpiv0|`, `|detpiv1|` does not depend on
+        // the absolute magnitude of the block. `SSIDS_DET_SMALL = 1e-20`
+        // is a dead-zero underflow floor, NOT a stability threshold.
+        // See dev/research/ssids-scale-invariant-det-floor.md.
+        let max_piv = d11.abs().max(d21.abs()).max(d22.abs());
+        let det_floor_fail = if max_piv < SSIDS_DET_SMALL {
+            true
+        } else {
+            let det_scale = 1.0 / max_piv;
+            let detpiv0 = (d11 * det_scale) * d22;
+            let detpiv1 = (d21 * det_scale) * d21;
+            let detpiv = detpiv0 - detpiv1;
+            let cancel_floor = SSIDS_DET_SMALL
+                .max(detpiv0.abs() * 0.5)
+                .max(detpiv1.abs() * 0.5);
+            detpiv.abs() < cancel_floor
+        };
+
+        if growth_fail || det_floor_fail {
+            // 2×2 rejected. SSIDS-style delayed pivoting: when
+            // `may_delay == true`, break out immediately so the parent
+            // supernode can retry this pivot with a larger pivot search
+            // window. Otherwise fall back to a single 1×1 at k with the
+            // column-relative threshold, which triggers the existing
+            // ForceAccept path.
+            if may_delay {
+                return Ok(PivotStepResult::Delayed);
+            }
+            if det_floor_fail {
+                match params.on_zero_pivot {
+                    ZeroPivotAction::Fail => {
+                        return Err(FeralError::NumericallyRankDeficient);
+                    }
+                    ZeroPivotAction::ForceAccept => {
+                        *needs_refinement = true;
+                    }
+                }
+            }
+            let outcome = try_reject_1x1_frontal(
+                a,
+                nrow,
+                k,
+                gamma0,
+                may_delay,
+                params,
+                pos,
+                neg,
+                zero,
+                needs_refinement,
+            )?;
+            match outcome {
+                PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
+                PivotOutcome::Rejected => {}
+                PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
+            }
+            return Ok(PivotStepResult::Advanced(1));
+        }
+
+        let pivot_inertia = count_2x2_inertia_val(d11, d21, d22);
+        *pos += pivot_inertia.positive;
+        *neg += pivot_inertia.negative;
+        *zero += pivot_inertia.zero;
+
+        subdiag[k] = d21;
+        // 2×2 update
+        do_2x2_update(a, nrow, k, d11, d21, d22);
+        Ok(PivotStepResult::Advanced(2))
+    } else {
+        // Can't do 2×2 (r is not fully summed or only 1 column left).
+        // Last-resort 1×1 at k with column-relative rejection.
+        let outcome = try_reject_1x1_frontal(
+            a,
+            nrow,
+            k,
+            gamma0,
+            may_delay,
+            params,
+            pos,
+            neg,
+            zero,
+            needs_refinement,
+        )?;
+        match outcome {
+            PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
+            PivotOutcome::Rejected => {}
+            PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
+        }
+        Ok(PivotStepResult::Advanced(1))
+    }
 }
 
 /// Apply the column-relative pivot threshold to a frontal 1×1 candidate at

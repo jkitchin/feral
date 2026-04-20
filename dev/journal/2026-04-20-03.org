@@ -1,0 +1,85 @@
+#+TITLE: Session 2026-04-20-03 Journal
+
+* 08:30 :orient:phase-2.4.1b:
+Orient from 2026-04-20-02 checkpoint. Bench denoise is in; top-10 is
+now stable arrow-KKT (HAHN1 n=715, CRESC100 n=806, KIRBY2 n=458,
+MUONSINE n=1537, VESUVIO n=3083, GAUSS2 n=758, ACOPR30 n=564).
+=dev/plans/phase-2.4.1-blocked-ldlt.md= §2.4.1b is now well-targeted.
+User authorized scope: Steps 1+2 (low-risk mechanical: plumb
+=block_size= field + extract =scalar_pivot_step= helper) + Step 3
+RED (6 correctness tests against a stub).
+
+* 08:45 :implement:step-1:
+Added =pub block_size: usize= field to =BunchKaufmanParams= at
+=src/dense/factor.rs:69-74=; Default = 64 (faer crossover,
+=factor.rs:722=). No call site breakage — every construction uses
+=..Default::default()= or =with_bk=. Build green.
+
+* 09:10 :refactor:step-2:
+Extracted the 303-line per-pivot body of =factor_frontal= into
+=scalar_pivot_step= at =src/dense/factor.rs:730-1020=. Added
+=PivotStepResult::{Advanced(n), Delayed}= enum. Control-flow
+translation: ~k += 1; continue;~ → ~return Ok(Advanced(1));~;
+~k += 2;~ (fallthrough) → ~return Ok(Advanced(2));~;
+~break;~ → ~return Ok(Delayed);~. Caller loop replaced with a
+match dispatching on the step result.
+
+Byte-identical behavior verified: =cargo test --release --lib=
+passes 118/118 unchanged. =cargo test --release --test
+delayed_pivoting --test dense_ldlt --test pivot_rejection --test
+dense_fast_path= passes 31/31 (6+4+16+5) — these are the tests that
+most directly exercise =factor_frontal= via =factor_single_front=
+and the sparse multifrontal driver.
+
+* 10:00 :red:step-3:
+Added stub =pub fn factor_frontal_blocked= at
+=src/dense/factor.rs:723-733= returning
+=FeralError::InvalidInput("factor_frontal_blocked: Phase 2.4.1b not
+yet implemented")=. Wrote =tests/blocked_ldlt.rs= with 6 parity
+tests matching =dev/plans/phase-2.4.1-blocked-ldlt.md= §Test plan:
+
+1. =test_spd_scalar_blocked_parity_size_sweep= — SPD at
+   {32, 64, 65, 100, 128, 129, 200, 256, 300} covering scalar
+   fallback, single-column leftover, clean 2-panel, and deep
+   multi-panel.
+2. =test_indefinite_bk77_parity= — BK77 Example 1 (3×3) +
+   random-indefinite 70×70 with shrunk diagonal to force 2×2
+   pivots across the panel boundary.
+3. =test_frontal_ncol_lt_nrow_parity= — =nrow=80, ncol=48=
+   (partial front, no boundary crossing): the contribution block
+   parity is the interesting bit.
+4. =test_2x2_at_block_boundary= — 128×128 SPD noise with zeroed
+   diagonals at {63, 64} and a unit cross term to force a 2×2
+   pivot straddling block boundary bs-1=63..64.
+5. =test_rejection_fallback= — 128×128 where column 32 has a
+   1000× off-diagonal at row 50, forcing rejection under
+   =pivot_threshold = 0.01=.
+6. =test_kkt_regression_spot_checks= — two arrow-KKT synthetics
+   (96×96 ERRINBAR-like, 150×150 ACOPP30-like spanning multiple
+   panels).
+
+All tests use =assert_frontals_byte_identical= which compares
+=(nrow, ncol, nelim, n_delayed, contrib_dim, inertia,
+needs_refinement, perm, perm_inv)= as =Eq= and
+=(l, d_diag, d_subdiag, contrib)= as =f64::to_bits= — no
+tolerance. This is the strictest oracle the scalar kernel will
+ever hand to the blocked kernel.
+
+Verified: =cargo test --release --test blocked_ldlt= produces
+=test result: FAILED. 0 passed; 6 failed= with all six failures
+at the =.unwrap()= call on =factor_frontal_blocked(..)= returning
+the expected "not yet implemented" error. Clippy on the new test
+and library both clean. Pre-existing clippy errors in unrelated
+tests (9 errors before my changes, 9 after) are not touched.
+
+* 10:20 :status:
+Steps 1+2+3-RED complete. Next session owns Step 4 GREEN: write
+=lblt_panel_frontal= + =apply_blocked_schur= so the 6 tests flip
+to PASS. Plan §4 specifies faer's peek-ahead design
+(=factor.rs:490, :700=) with a =W= workspace of shape
+=(n-k) × bs=; on a 2×2 pivot boundary the panel returns
+=n_elim = bs - 1=, caller re-enters with =k = bs - 1=. Plan
+§Risks §1 suggests restricting panel to 1×1 pivots when
+peek-ahead would require a symmetric-row search through stale W
+data; this is the primary implementation decision for the GREEN
+commit.

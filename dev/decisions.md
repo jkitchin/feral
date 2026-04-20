@@ -1274,3 +1274,53 @@ used in the stage-1 probes `src/bin/d4_probe.rs` (`p50`) and
 
 **Evidence.** `dev/results/bench-denoise/summary.md` +
 `run{1..6}*.txt` raw bench outputs.
+
+---
+
+## 2026-04-20 — Phase 2.4.1b: blocked dense LDLᵀ is a separate public function
+
+**Decision.** The blocked-panel BK LDLᵀ kernel (Phase 2.4.1b) is exposed
+as a *new* public function `factor_frontal_blocked` in
+`src/dense/factor.rs`, alongside the existing `factor_frontal`.
+Dispatch from `factor_single_front` / the multifrontal driver to the
+blocked variant will be gated on `remaining > params.block_size &&
+!may_delay` once Step 4 lands. Both entry points stay public.
+
+**Why.**
+- Parity testing wants to call both kernels side-by-side on the same
+  `SymmetricMatrix` with the same `BunchKaufmanParams` and
+  `assert_eq!` their returned `FrontalFactors`. A `use_blocked: bool`
+  flag on `BunchKaufmanParams` or an env-var dispatch inside
+  `factor_frontal` would force every test to clone + mutate the
+  params struct, which is noisier and hides what's being compared.
+- The scalar path remains the oracle. Rejection-heavy sparse matrices
+  with `may_delay = true` keep using `factor_frontal` indefinitely;
+  the blocked path is only for the root supernode and for dense
+  fronts where `may_delay = false`. Keeping them as distinct
+  functions makes "which kernel ran" a static fact, not a
+  runtime-configured dispatch table.
+- Matches the existing `factor` vs `factor_single_front` pattern:
+  different code paths for different call-site shapes, shared via the
+  common `scalar_pivot_step` helper.
+
+**Parity oracle is `f64::to_bits`, not `approx_eq`.** The 2026-04-14
+Phase 2.4.2 FMA-unroll4 reversion showed that a 1-ULP rounding drift
+(from one fused-multiply-add replacing two roundings) flipped inertia
+on ACOPP14_0001, ACOPP30_0004, FBRAIN3LS_0848, FBRAIN3LS_0851. The
+scalar path produces a specific IEEE-754 rounding trajectory that the
+blocked path must reproduce. The six RED tests in
+`tests/blocked_ldlt.rs` all assert bit-parity on
+`(l, d_diag, d_subdiag, contrib)`, making drift a compile-time-
+visible test failure rather than a weeks-later inertia regression.
+
+**Scope of this decision.** Binding for Step 4 (GREEN) through Step 6
+(SIMD micro-kernel). Can be revisited at Step 4 completion if the
+bit-parity oracle proves impossible under faer's peek-ahead FMA
+pattern — in which case Step 4 ships with a scalar inner kernel
+(like Phase 2.4.3's `axpy_minus_unroll4_nofma`) to preserve rounding.
+See `dev/tried-and-rejected.md:221` for the prior FMA-drift incident.
+
+**Evidence.** `tests/blocked_ldlt.rs` (6 RED tests), the
+`PivotStepResult` + `scalar_pivot_step` extraction at
+`src/dense/factor.rs:548-1020`, and the 118/118 + 31/31 byte-identity
+verification documented in `dev/sessions/2026-04-20-03.md`.

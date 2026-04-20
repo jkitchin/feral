@@ -4,6 +4,25 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-20) — Phase 2.4.1b scaffolding (RED)
+
+- `BunchKaufmanParams::block_size: usize` (default `64`). Consulted
+  only by the forthcoming Phase 2.4.1b blocked-panel path; the
+  scalar `factor_frontal` ignores it.
+- `pub fn factor_frontal_blocked(..)` — stub that currently returns
+  `FeralError::InvalidInput("…Phase 2.4.1b not yet implemented")`.
+  Will be implemented in Step 4 (faer-style peek-ahead panel) and
+  must produce byte-identical `(L, D, perm, inertia, contrib)` to
+  `factor_frontal`, enforced by the six tests in
+  `tests/blocked_ldlt.rs` (currently RED by design).
+
+No runtime behavior change: all existing call sites use
+`factor_frontal`; the scalar pivot body was extracted into an
+internal `scalar_pivot_step` helper, verified byte-identical by the
+118/118 lib tests and the 31 integration tests that exercise
+`factor_frontal` (`delayed_pivoting`, `dense_ldlt`,
+`pivot_rejection`, `dense_fast_path`).
+
 ### Changed (2026-04-20) — Bench harness multi-sample denoise
 
 `cargo run --release --bin bench` now resamples per-matrix
