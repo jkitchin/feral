@@ -46,7 +46,7 @@
 //!      reaches the same factorization as the dense path.
 
 use feral::dense::factor::{factor, factor_frontal};
-use feral::numeric::factorize::factorize_multifrontal;
+use feral::numeric::factorize::factorize_multifrontal_supernodal;
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{BunchKaufmanParams, CscMatrix, SymmetricMatrix, ZeroPivotAction};
 
@@ -355,7 +355,7 @@ fn factorize_multifrontal_delays_propagate_to_parent() {
     let m = arrow_apex_matrix();
     let sym = symbolic_factorize(&m, &delay_sparse_params()).expect("symbolic");
     let params = delay_numeric_params();
-    let (factors, _inertia) = factorize_multifrontal(&m, &sym, &params).expect("factor");
+    let (factors, _inertia) = factorize_multifrontal_supernodal(&m, &sym, &params).expect("factor");
 
     // Need at least 2 supernodes for a delay to propagate parent-ward.
     // Fundamental-supernode detection in the symbolic phase can still
@@ -421,7 +421,7 @@ fn factorize_multifrontal_delayed_pivot_succeeds_at_parent() {
 
     let sym = symbolic_factorize(&m, &delay_sparse_params()).expect("symbolic");
     let (factors, sparse_inertia) =
-        factorize_multifrontal(&m, &sym, &params).expect("sparse factor");
+        factorize_multifrontal_supernodal(&m, &sym, &params).expect("sparse factor");
 
     assert_eq!(
         sparse_inertia, dense_inertia,
