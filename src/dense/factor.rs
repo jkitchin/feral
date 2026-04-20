@@ -453,7 +453,7 @@ pub fn factor_single_front(
     }
     let eq_matrix = crate::dense::matrix::SymmetricMatrix { n, data: eq_data };
 
-    let front = factor_frontal(&eq_matrix, n, false, params)?;
+    let front = factor_frontal_blocked(&eq_matrix, n, false, params)?;
 
     // With may_delay=false and ncol=n, nelim==n, contrib is empty, and
     // the FrontalFactors fields map 1:1 to Factors plus d_eq.

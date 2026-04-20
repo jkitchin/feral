@@ -1,6 +1,6 @@
 #[cfg(test)]
 use crate::dense::factor::factor;
-use crate::dense::factor::{factor_frontal, BunchKaufmanParams, FrontalFactors};
+use crate::dense::factor::{factor_frontal_blocked, BunchKaufmanParams, FrontalFactors};
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
 use crate::inertia::Inertia;
@@ -266,7 +266,7 @@ pub fn dense_fast_factor(
     // multifrontal root-supernode behavior: ForceAccept absorbs any
     // unstable pivot instead of carrying it forward (there is no
     // ancestor in a single-node factorization).
-    let ff = factor_frontal(&sym, n, false, &params.bk)?;
+    let ff = factor_frontal_blocked(&sym, n, false, &params.bk)?;
 
     let inertia = ff.inertia.clone();
     let needs_refinement = ff.needs_refinement;
@@ -614,7 +614,10 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
         // Root supernodes force-accept (via `ZeroPivotAction::ForceAccept`)
         // because they have no ancestor to absorb a delay.
         let may_delay = !is_root[snode_idx];
-        let ff = factor_frontal(&frontal, expanded_ncol, may_delay, &params.bk)?;
+        // Phase 2.4.1b Step 5+wire-up: call the blocked kernel; it falls
+        // back to `factor_frontal` internally for `ncol <= block_size`
+        // so small supernodes are unaffected.
+        let ff = factor_frontal_blocked(&frontal, expanded_ncol, may_delay, &params.bk)?;
 
         // Return the frontal's data buffer to the pool. `factor_frontal`
         // takes its input by `&SymmetricMatrix` and copies into a local

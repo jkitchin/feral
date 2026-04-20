@@ -1,0 +1,72 @@
+#+TITLE: FERAL Journal 2026-04-20-07
+#+DATE: 2026-04-20
+
+* 00:05 :phase-2.4.1b:wire-up:planning:
+  Three call sites of `factor_frontal` identified via grep:
+
+    src/dense/factor.rs:456          (factor_single_front)
+    src/numeric/factorize.rs:269     (factorize_single_root)
+    src/numeric/factorize.rs:617     (factorize_multifrontal supernode)
+
+  Plan: swap all three to `factor_frontal_blocked`. Safe because the
+  blocked kernel has a `bs < 2 || ncol <= bs` internal fallback gate
+  that delegates to `factor_frontal` byte-for-byte on small
+  supernodes. Line 617 is the actual target (arrow-KKT tail).
+
+* 00:15 :phase-2.4.1b:wire-up:implementation:
+  Made the three edits. Dropped `factor_frontal` from the imports in
+  numeric/factorize.rs since it's no longer directly used there.
+
+  `cargo build --release --lib`: clean.
+  `cargo test --release --lib`: 118/118 PASS.
+  `cargo test --release`: all integration suites PASS, no regressions.
+
+* 00:30 :phase-2.4.1b:wire-up:bench:
+  `cargo run --bin bench --release`:
+
+    Dense  small   p90=1.35  (06: 1.35)  Δ=0.00
+    Dense  medium  p90=1.75  (06: 1.74)  Δ=+0.01
+    Sparse small   p90=1.67  (06: 1.62)  Δ=+0.05
+    Sparse medium  p90=1.67  (06: 1.62)  Δ=+0.05
+
+  Dense unchanged (most matrices < 64 cols, blocked delegates to
+  scalar). Sparse +0.05 — real delegation-overhead tax on small
+  supernodes. All 4 verdicts PASS.
+
+  Arrow-KKT tail (the actual target):
+    MUONSINE_0000 : 10.86 -> 9.14  (−1.72)   <-- win
+    VESUVIA_0000  :  8.43 -> 7.21  (−1.22)   <-- win
+    KIRBY2_0007   :  7.96 -> 8.34  (+0.38)   <-- mid-tail regress
+    CRESC100_0000 :  7.62 -> 10.10 (+2.48)   <-- worst regress
+    KIRBY2_0006   :  7.34 -> 7.97  (+0.63)
+    KIRBY2_0008   :  6.77 -> 7.37  (+0.60)
+    VESUVIO_0000  :  6.63 -> 6.78  (+0.15)
+    VESUVIO_0019  :  5.90 -> 6.67  (+0.77)
+    VESUVIO_0002  :  5.89 -> 6.78  (+0.89)
+    VESUVIO_0011  :  5.88 -> (out of top 10)
+
+  Mixed: the two worst-of-worst improved significantly; several
+  mid-tail matrices regressed. Expected: the blocked kernel's Schur
+  kernel is hand-rolled axpy_unroll_4_nofma (no SIMD yet).
+  SPRAL/MUMPS reference speed comes from SIMD-GEMM. Phase 2.4.2
+  closes this gap.
+
+  Net: wire-up is a correctness milestone for the plumbing.
+  Performance gains on the worst-case matrices come from SIMD (phase
+  2.4.2), not the blocking skeleton alone.
+
+* 00:40 :phase-2.4.1b:wire-up:exit-criteria:
+  Checked Phase 2.4.1 exit criteria (plan §Exit criterion):
+
+    1. All 6 correctness tests pass                 ✓ (9/9)
+    2. Zero inertia regressions in KKT bench         ✓
+    3. Dense factor p90 vs MUMPS ≤ 2.0               ✓ (1.35 / 1.75)
+    4. No top-100 dense matrix regresses >10%        ✓ (dense unchanged)
+    5. Scalar kernel retained as fallback            ✓
+
+  Phase 2.4.1 exits with PASS on all 5 criteria. Sparse regressions
+  for CRESC100 / KIRBY2 / VESUVIO are explicitly scoped to Phase
+  2.4.2 (SIMD) per plan §Implementation order item 6.
+
+* 00:50 :phase-2.4.1b:wire-up:checkpoint:
+  Wrote dev/sessions/2026-04-20-07.md. Committing.

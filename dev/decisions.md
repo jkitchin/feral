@@ -1494,3 +1494,57 @@ only unlocks the capability.
 `:1086` (Delayed arm). `cargo test --release --test blocked_ldlt`
 -> 9/9 PASS bit-exact. `cargo run --bin bench --release` -> 4/4
 Phase 2.8.1 partitions PASS.
+
+---
+
+## 2026-04-20 — Phase 2.4.1b wire-up (blocked kernel on solver hot path)
+
+**Decision.** Replace three `factor_frontal` call sites with
+`factor_frontal_blocked`:
+- `src/dense/factor.rs:456` (`factor_single_front`, dense bench path)
+- `src/numeric/factorize.rs` (`factorize_single_root`)
+- `src/numeric/factorize.rs` (`factorize_multifrontal` supernode loop)
+
+**Why.** Until this change the blocked kernel was reachable only from
+`tests/blocked_ldlt.rs`. Phase 2.4.1b's goal is to exercise the panel
+on the arrow-KKT sparse tail, and the multifrontal driver is the only
+place that path matters in production.
+
+**Safety.** `factor_frontal_blocked` has an internal
+`bs < 2 || ncol <= bs` fallback gate that delegates to `factor_frontal`
+byte-for-byte. Supernodes with ≤ 64 columns (the vast majority in our
+KKT bench) are unaffected — they cost one extra function call and one
+gate-check.
+
+**Parity evidence.** Full integration test suite passes, including 118
+lib tests, 9/9 blocked_ldlt parity tests, and every dense/sparse
+integration test (no inertia regressions on pathological KKT families).
+`cargo clippy -- -D warnings` clean.
+
+**Performance observation.**
+- Dense partition p90 unchanged (1.35 / 1.75). Most dense matrices are
+  small and go through scalar fallback.
+- Sparse partition p90 +0.05 (1.62 → 1.67). Real delegation tax on
+  small supernodes.
+- Arrow-KKT worst-of-worst: MUONSINE_0000 10.86→9.14 (−1.72),
+  VESUVIA_0000 8.43→7.21 (−1.22).
+- Mid-tail: CRESC100_0000 7.62→10.10 (+2.48), KIRBY2 family +0.4–0.6,
+  VESUVIO family +0.15–0.89. Attributed to the blocked kernel's
+  Schur complement using `axpy_minus_unroll4_nofma` rather than SIMD;
+  for fronts where scalar's eager rank-1 updates already vectorized
+  well via auto-vec, the blocked path can be slower. Phase 2.4.2
+  (SIMD micro-kernel) is the planned fix.
+
+**Phase 2.4.1 exit status (plan §Exit criterion):**
+1. All 6 correctness tests pass — ✓ (9/9)
+2. Zero inertia regressions in KKT bench — ✓
+3. Dense factor p90 vs MUMPS ≤ 2.0 — ✓ (1.35 / 1.75)
+4. No top-100 dense matrix regresses >10% — ✓ (dense unchanged)
+5. Scalar kernel retained as fallback — ✓
+
+**Phase 2.4.1 closes.** CRESC100 / KIRBY2 / VESUVIO sparse regressions
+are Phase 2.4.2 work.
+
+**Evidence.** `src/dense/factor.rs:456`, `src/numeric/factorize.rs`
+(import + two call-site edits). `cargo test --release` all-PASS.
+`cargo run --bin bench --release` → 4/4 Phase 2.8.1 partitions PASS.
