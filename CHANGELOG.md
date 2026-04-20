@@ -4,6 +4,47 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-19) — D.3 dense fast-path for small-dense matrices
+
+`factorize_multifrontal_with_workspace` now routes matrices with
+`n ≤ 128` and lower-triangle density `≥ 0.25` to a new
+`dense_fast_factor` entry point that skips symbolic analysis +
+supernodal assembly entirely: densifies to a `SymmetricMatrix`,
+applies global symmetric scaling in place, runs the dense BK kernel
+on all `n` columns, and wraps the result in a single-supernode
+`SparseFactors` shape-compatible with `solve_sparse`. Out-of-gate
+matrices follow a bit-identical multifrontal path — no regression.
+
+Two new public API entry points —
+`factorize_multifrontal_supernodal` and
+`factorize_multifrontal_supernodal_with_workspace` — provide
+explicit gate-bypass for tests and callers that need to force the
+multifrontal body on an in-gate matrix.
+
+**Corpus:** sparse factor/MUMPS geomean 0.46 → 0.37 (−20 %),
+max ratio 128.34 → 80.22 (−37 %). Ex-ante target was ≤ 0.44,
+exceeded with 0.07 margin. Phase 2.8.1 exit partitions still PASS.
+
+See `dev/decisions.md` (2026-04-19 D.3 entry) and
+`dev/plans/sparse-tail-d3.md`.
+
+### Added (2026-04-19) — `FactorWorkspace` caller-owned scratch pool
+
+New `FactorWorkspace` struct pools scratch allocations across
+`factorize_multifrontal_with_workspace` calls and across supernodes
+within a call: `row_map`, the per-supernode frontal matrix
+`data` Vec, and the `build_row_indices` scratch buffers.
+`Solver::factor` retains one workspace so IPM-style consumers
+amortise heap traffic across iterations.
+
+`factorize_multifrontal` still exists and allocates a fresh
+workspace per call — callers that don't need amortisation see no
+API change.
+
+**Corpus:** sparse factor/MUMPS geomean 0.48 → 0.46. VESUVIO
+reallocs collapsed 99 % (2053 → 13). See `dev/decisions.md`
+(2026-04-19 D.1 entry) and `dev/plans/factor-workspace.md`.
+
 ### Changed (2026-04-19) — `ScalingStrategy::Auto` is the default; Policy 4 fallback
 
 `ScalingStrategy::default()` now returns `Auto` (was `InfNorm`).

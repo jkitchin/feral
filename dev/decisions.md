@@ -1118,3 +1118,69 @@ predicted +1 residual_pass (154 233 / 154 588).
 
 **Journal.** `dev/journal/2026-04-19-02.org`.
 **Commit.** `af9315d`.
+
+---
+
+## 2026-04-19 — D.1 `FactorWorkspace` landed; D.3 dense fast-path gate adopted
+
+**Decision 1.** Introduce `FactorWorkspace`, a caller-owned scratch
+pool for `factorize_multifrontal_with_workspace`. Pools `row_map`,
+the per-supernode frontal `SymmetricMatrix::data`, and the scratch
+buffers used by `build_row_indices` (`build_delayed`,
+`build_trailing`, `build_seen`). `Solver` retains one across calls.
+
+**Rationale.** The Lever D.1 alloc-probe evidence
+(`dev/results/lever-d1/alloc-probe-2026-04-19.txt`) showed the
+sparse factor was paying 17–23 allocations per supernode, 99 % of
+which were scratch reallocs across supernodes and across factor
+calls. Pooling collapsed VESUVIO reallocs from 2053 to 13 and
+drove corpus geomean factor/MUMPS from 0.48 → 0.46.
+
+**Non-decision.** We intentionally did not widen the workspace to
+pool the dense-path `sym.data` buffer at this time; that's a
+follow-up now that D.3 has landed and can use it.
+
+**Commits.** `9c0419b` (plan) → `b1016cc`, `f102d56`, `dedb3f3`
+(rollout). Guardrails in `tests/factor_workspace_parity.rs` assert
+byte-identical factors vs the allocator-per-call path.
+
+---
+
+## 2026-04-19 — D.3 dense fast-path gate thresholds
+
+**Decision.** `factorize_multifrontal_with_workspace` routes
+matrices satisfying `n ≤ 128 ∧ density ≥ 0.25` (lower-triangle
+nnz / n·(n+1)/2) to `dense_fast_factor`, a thin wrapper that
+densifies the CSC, applies `D · A · D` symmetric scaling, calls
+the existing dense BK kernel on the full matrix, and synthesizes a
+single-supernode `SparseFactors` shape-compatible with
+`solve_sparse`. Matrices outside the gate continue through the
+multifrontal path byte-identically.
+
+**Rationale.** Stage-2 synthetic sweep
+(`dev/results/lever-d3/stage1-stage2-2026-04-19.md`) showed that at
+ρ = 0.25 the dense path beats the multifrontal path for every
+tested n up to 192 (ratio 0.49–0.66×); at ρ = 0.10 it ties at
+n = 128 and regresses at n ≥ 160. The 0.25 floor gives a 2-fold
+safety margin over the tied-case, absorbing the 1.5–2× variance
+real IPM matrices exhibit vs the best-case diagonally-dominant
+synthetics. `N_MAX = 128` keeps the dense workspace at ≤ 128 KB
+(fits L1/L2 comfortably); widening to 192 is tempting but deferred
+until corpus evidence demands it.
+
+**Corpus evidence.**
+`dev/results/lever-d3/stage3-corpus-2026-04-19.md`. Sparse
+factor/MUMPS geomean 0.46 → 0.37 (-20 %), p50 0.33 → 0.29, max
+ratio 128.34 → 80.22. Ex-ante acceptance target (≤ 0.44) met with
+0.07 margin.
+
+**Entry-point convention.**
+`factorize_multifrontal_supernodal` and
+`factorize_multifrontal_supernodal_with_workspace` are the
+documented bypass entry points for tests and callers that need to
+force the multifrontal path on an in-gate matrix. They share the
+supernodal body with the gated dispatcher; only the bypass reaches
+it without consulting `should_use_dense_fast_path`.
+
+**Commits.** `71f5692` (plan), `7c9e07d` (RED), `32dd65a` (GREEN),
+`70f077e` (stage 1/2), `e0db169` (stage 3).

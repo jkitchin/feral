@@ -1,3 +1,61 @@
+* DONE D.1 FactorWorkspace — pool scratch across factor calls
+  - Context: dev/research/sparse-tail-perf-2026-04-19.md §6-§9,
+    dev/plans/factor-workspace.md.
+  - Landed 2026-04-19 (session 04). Sparse factor/MUMPS geomean
+    0.48 -> 0.46; VESUVIO reallocs 2053 -> 13 (-99%).
+  - Commits: 9c0419b (plan), b1016cc + f102d56 + dedb3f3
+    (rollout + Solver wiring).
+  - Exited at 0.46 (short of ≤0.40 ex-ante target) per the plan's
+    exit clause — remaining tail was structural, not alloc churn.
+
+* DONE D.3 dense fast-path for small-and-dense matrices
+  - Context: dev/research/sparse-tail-d3-d4-2026-04-19.md,
+    dev/plans/sparse-tail-d3.md.
+  - Landed 2026-04-19 (session 04). Sparse factor/MUMPS geomean
+    0.46 -> 0.37 (-20%); max ratio 128.34 -> 80.22 (-37%).
+    Ex-ante target ≤0.44 met with 0.07 margin.
+  - Commits: ef4a626 (research), 71f5692 (plan),
+    7c9e07d (RED), 32dd65a (GREEN), 70f077e (stage 1/2),
+    e0db169 (stage 3).
+
+* TODO follow-up: D.4 tiny-n fast path (n <= 16)
+  - Context: dev/research/sparse-tail-d3-d4-2026-04-19.md §3.
+  - D.3's `dense_fast_factor` synthesis path is a prerequisite and
+    is now landed — D.4 reuses the same SparseFactors shape with a
+    tighter gate (`N_TINY <= 16`) and a stack-buffer densify.
+  - Target: PFIT4_2178 (n=6), GAUSS1_0002 (n=8), HATFLDH_2515
+    (n=11) and similar in the post-D.3 top-10.
+  - Needs its own plan before code. Start at
+    dev/plans/sparse-tail-d4.md.
+
+* TODO follow-up: small-n `compute_scaling` fast path
+  - Context: dev/results/lever-d3/stage1-stage2-2026-04-19.md §1
+    (phase breakdown). `compute_scaling` is 82% of dense-path wall
+    time on TRO3X3_0013 (34 of 41 us at n=69).
+  - Idea: when `should_use_dense_fast_path` fires, bypass MC64's
+    Hungarian matching and use `infnorm::compute_infnorm` directly
+    against the dense buffer we're about to create. MC64's win
+    over InfNorm is marginal on small-dense matrices and the
+    matching overhead dominates.
+  - Estimated win: TRO3X3_0013 41 us -> ~20 us (halving).
+
+* TODO follow-up: pool `CscMatrix::to_dense` buffer via FactorWorkspace
+  - Context: dev/plans/sparse-tail-d3.md §"Interaction with
+    FactorWorkspace" (explicitly listed as a follow-up there).
+  - 9 us per call on TRO3X3_0013 (22% of dense-path wall time).
+    Widen FactorWorkspace with a `dense_buf: Vec<f64>` field;
+    `dense_fast_factor` takes it via `std::mem::take` + clear +
+    resize, then hands it back.
+
+* TODO follow-up: diagnose post-D.3 top-10 worst ratios
+  - Context: dev/results/lever-d3/stage3-corpus-2026-04-19.md.
+    New top-10 is led by HS85_0022 (n=68, 80x) and DECONVC_0105
+    (n=52, 55x). 9/10 are in the D.3 gate's size range.
+  - Question: are these in-gate and the dense path pathological,
+    or out-of-gate (density < 0.25) and the multifrontal path is
+    slow? Decides whether the lever is "widen the gate" or
+    "attack the remaining multifrontal overhead".
+
 * TODO create detailed crucibles for ordering strategies
 DEADLINE: <2026-04-27 Mon>
 
@@ -28,6 +86,32 @@ and others. I think we might try to build standalone rust libraries for each of 
     Quick check of SuiteSparse dev branch before scheduling any plan.
   - Next step if pursued: dev/plans/feral-metis-hemsr-coarsening.md
     (or similar) — NOT a dedicated crate plan.
+
+* TODO performance: blocked BK + SIMD micro-kernel for src/dense/factor.rs
+  - Context: dev/sessions/2026-04-18-08.md "Next Session Should #1";
+    dev/journal/2026-04-18-08.org VESUVIO entry.
+  - Pure performance issue, NOT correctness. VESUVIO matrices factor
+    correctly under both AMD and MetisND (inertia matches oracle,
+    residuals pass). They just take 84x longer than MUMPS.
+  - Bottleneck: scalar rank-1 BK updates in src/dense/factor.rs
+    on the dense root frontal (~2059x959 for VESUVIO). Measured
+    ~8 GFLOP/s vs MUMPS DGETRF on Accelerate ~400 GFLOP/s, exact
+    50x kernel gap explains the 84x factor ratio.
+  - Both AMD and MetisND produce the same ~67%-of-n root frontal
+    (single dense linking column with 1026 nnz). Not an ordering
+    fix; needs blocked BK + SIMD.
+  - Existing prerequisite plans:
+    + dev/plans/phase-2.4.1-blocked-ldlt.md
+    + dev/plans/phase-2.4.2-simd-schur-kernel.md
+  - Estimated: 4-6 sessions to first measurable win. Risk:
+    BK pivoting interleaves with the trailing update, so naive
+    blocking is unsafe; SIMD on stable Rust means hand-written
+    core::arch with runtime dispatch.
+  - Corpus geomean factor/MUMPS already 0.42 (we win on average);
+    this addresses the long tail (VESUVIO/CRESC arrow-KKTs only).
+  - Defer until: a downstream consumer or benchmark target makes
+    the VESUVIO tail a blocker, OR the current substantial-feature
+    queue is empty.
 
 * TODO follow-up: MSS1_0009 MC64-pathology triage (defer until after integration)
   - Context: dev/research/lever-c-policy-diff-2026-04-19.md.
