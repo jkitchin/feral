@@ -1,0 +1,115 @@
+#+TITLE: FERAL Journal 2026-04-20-05
+#+DATE: 2026-04-20
+
+* 21:10 :phase-2.4.1b:step-4b:design:
+  Session 4a delegated `factor_frontal_blocked` to `factor_frontal`.
+  Step 4b is the real peek-ahead panel. Design:
+
+  - New enum `PanelStatus { Full, ScalarFallback }` — 2-valued to keep
+    the reply surface small (plan §Risks #1 option b: panel handles
+    only 1×1; any 2×2 candidate hands back to scalar).
+  - `lblt_panel_frontal(a, nrow, k, ncol, bs, d_panel, params) ->
+    (n_elim, PanelStatus)` — iterates c=0..bs, peek-aheads column k+c
+    by replaying pivots 0..c-1 via `axpy_minus_unroll4_nofma`, then
+    picks/accepts/rejects the pivot.
+  - `peek_ahead_column` — replay for one trailing column.
+  - `apply_blocked_schur` — deferred Schur after the panel for
+    columns j = j_start..nrow (j_start set by caller, see bug below).
+
+  Bit-parity argument: scalar accumulates each (i,j) via pivot-outer /
+  column-inner; replay accumulates each (i,j) via column-outer /
+  pivot-inner. Both traverse pivots in ascending q for any fixed
+  (i,j), and both use `axpy_minus_unroll4_nofma`, so IEEE 754 rounding
+  matches. Frozen-column invariant: pivot q never touches column q
+  again after its own scaling, so no re-read-after-write problem.
+
+* 21:30 :phase-2.4.1b:step-4b:implementation:
+  Implemented in `src/dense/factor.rs`:
+
+  - `PanelStatus` at line 567.
+  - `factor_frontal_blocked` rewritten at line 780 — outer loop calls
+    `lblt_panel_frontal` for bulk, `scalar_pivot_step` for tail and
+    ScalarFallback recoveries. Falls back to `factor_frontal` entirely
+    when `may_delay || bs < 2 || ncol <= bs`.
+  - `lblt_panel_frontal` at line 993.
+  - `peek_ahead_column` at line 1098.
+  - `apply_blocked_schur` at line 1133.
+
+  First run: 5/6 tests pass. `test_2x2_at_block_boundary` fails with
+  `l[8129]` differing by 1 ULP between scalar and blocked.
+
+* 21:45 :phase-2.4.1b:step-4b:bug:2x2-boundary:
+  Diagnosed the 2×2 boundary bug. n=128, zeros on diag at {63,64}.
+  Panel (bs=64) eliminates pivots 0..62, at c=63 akk=0, returns
+  ScalarFallback with n_elim=63. But during c=63 the code had
+  peek-ahead'd column k+63 (applied pivots 0..62). Then the caller
+  invoked `apply_blocked_schur` which re-applied pivots 0..62 to all
+  columns including k+63 — double rank-1 update on that one column.
+  The scalar step that followed then picked up an already-corrupted
+  column, producing a 1-ULP drift in the 2×2 pivot arithmetic.
+
+  Fix: added `j_start: usize` parameter to `apply_blocked_schur`.
+  Caller sets:
+    - Full          -> j_start = k + n_elim   (update trailing block)
+    - ScalarFallback -> j_start = k + n_elim + 1 (skip peek-ahead'd col)
+
+  Re-ran: 6/6 tests PASS bit-exact.
+
+    cargo test --release --test blocked_ldlt
+    test result: ok. 6 passed; 0 failed; 0 ignored
+
+* 21:55 :phase-2.4.1b:step-4b:clippy:
+  `cargo clippy --lib --test blocked_ldlt -- -D warnings` flagged two
+  `needless_range_loop` on my new replay loops:
+
+    for q in 0..c { let d_q = d_panel[q]; ... }
+
+  Replaced with:
+
+    for (q, &d_q) in d_panel.iter().enumerate().take(c)
+
+  Same semantics. Clippy clean on the new code.
+
+* 22:05 :phase-2.4.1b:step-4b:full-test-sweep:
+  Full sweep:
+    cargo test --release --test blocked_ldlt         -> 6/6 PASS
+    cargo test --release --lib                        -> 118/118 PASS
+    cargo test --release --test delayed_pivoting \
+                        --test dense_ldlt \
+                        --test pivot_rejection \
+                        --test dense_fast_path        -> 31/31 PASS
+
+  Zero regressions. Panel kernel is bit-exact with scalar across the
+  full test corpus.
+
+* 22:20 :phase-2.4.1b:step-4b:bench:
+  `cargo run --bin bench --release`:
+
+    Dense  small   p90=1.59 (04: 1.34)  Δ=+0.25
+    Dense  medium  p90=2.00 (04: 1.70)  Δ=+0.30
+    Sparse small   p90=1.79 (04: 1.59)  Δ=+0.20
+    Sparse medium  p90=1.80 (04: 1.59)  Δ=+0.21
+
+  All four partitions PASS verdicts (≤ 2.0 / ≤ 3.0 targets) but every
+  p90 crept up. Honest reporting per CLAUDE.md "NEVER omit unfavorable
+  comparisons."
+
+  Verified `factor_frontal_blocked` is NOT called from the bench path
+  (rg showed only definition site + tests + docs). Sparse multifrontal
+  still calls `factor_frontal`. So this is NOT an algorithmic
+  regression on any hot path.
+
+  Attribution: code-layout shuffle from adding ~400 lines in the same
+  module. Moving hot scalar loops across cache lines / changing
+  inlining boundaries is the likely cause. Alternative hypothesis is
+  laptop-state noise, but Δ=+0.20..+0.30 exceeds the documented
+  denoise window (Δ ≤ 0.05) so at least part of it is real.
+
+  Real Step 4b lever is still the supernodal arrow-KKT tail — needs
+  Step 5 (may_delay wiring) before the sparse driver can be switched
+  over. That's the next-session work.
+
+* 22:35 :phase-2.4.1b:step-4b:checkpoint:
+  Wrote dev/sessions/2026-04-20-05.md with full accomplished / bugs /
+  bench (including honest regression note) / decisions / next-session
+  list. Committing.

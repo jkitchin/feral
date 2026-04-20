@@ -559,6 +559,21 @@ enum PivotStepResult {
     Delayed,
 }
 
+/// Outcome of one `lblt_panel_frontal` invocation. The panel processes a
+/// run of pure 1×1 pivots (no row/column swap, no 2×2) using faer-style
+/// peek-ahead; any deviation from that path (2×2 candidate, swap
+/// candidate, scalar-force condition) terminates the panel and asks the
+/// caller to run `scalar_pivot_step` once before re-entering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelStatus {
+    /// Panel eliminated `bs` 1×1 pivots cleanly.
+    Full,
+    /// Panel terminated early because the next pivot needed capabilities
+    /// the panel doesn't support (2×2 or swap). Caller runs one scalar
+    /// pivot step and may re-enter the panel afterwards.
+    ScalarFallback,
+}
+
 /// Factor a frontal matrix, eliminating only the first `ncol` columns.
 ///
 /// This is the key dense kernel for the multifrontal solver. Unlike `factor()`,
@@ -734,36 +749,412 @@ pub fn factor_frontal(
 
 /// Blocked-panel BK LDLᵀ variant of `factor_frontal` (Phase 2.4.1b).
 ///
-/// **Status: Step 4a GREEN (thin delegation).** Currently forwards to
-/// `factor_frontal`, making the six parity tests in
-/// `tests/blocked_ldlt.rs` pass by construction (both paths run the
-/// same scalar kernel). The faer-style peek-ahead panel
-/// (`W` workspace + per-column replay + deferred Schur update) is
-/// scoped to a follow-up session — see `dev/decisions.md` entry
-/// dated 2026-04-20 "Phase 2.4.1b Step 4 split 4a/4b".
+/// **Status: Step 4b GREEN (peek-ahead panel + deferred Schur).**
+/// Implements the faer-style blocked kernel described in
+/// `dev/plans/phase-2.4.1-blocked-ldlt.md`: a panel processes up to
+/// `params.block_size` 1×1 pivots. Before each pivot search, the
+/// current column is updated via **replay** — pending rank-1 updates
+/// from prior panel pivots are applied in ascending pivot index using
+/// the same `schur_kernel::axpy_minus_unroll4_nofma` kernel scalar
+/// uses, which makes the per-element accumulation order identical to
+/// `factor_frontal`. After the panel, the deferred rank-1 updates are
+/// applied to the remaining trailing columns in the same pivot-outer
+/// order, again via the bit-exact axpy kernel.
 ///
-/// The public API shape is frozen here so Step 5 (`may_delay` wiring
-/// through the multifrontal driver) and Step 6 (SIMD micro-kernel)
-/// can be landed incrementally without further API churn. Callers
-/// that want the blocked path should call this function; once Step 4b
-/// lands, the internals change but `(L, D, perm, inertia, contrib)`
-/// remain byte-identical to `factor_frontal`.
+/// **Bit-parity guarantee.** Since (i) replay traverses `(i, j)` with
+/// updates applied in ascending pivot index — identical to scalar's
+/// pivot-outer/column-inner loop — and (ii) both paths use the same
+/// axpy kernel, scalar and blocked produce byte-identical
+/// `(L, D, perm, inertia, contrib)`. Enforced by `tests/blocked_ldlt.rs`.
 ///
-/// Must produce byte-identical `(L, D, perm, inertia, contrib)` to
-/// `factor_frontal` when called with the same `(matrix, ncol,
-/// may_delay, params)`. Enforced by `tests/blocked_ldlt.rs`.
+/// **Fallbacks.** Any of the following routes through `scalar_pivot_step`
+/// instead of the panel:
+/// - `may_delay == true` (SSIDS-style delayed pivoting — Step 5 target).
+/// - `ncol <= params.block_size` (small-front scalar fast path).
+/// - Panel encounters a 2×2 candidate (`akk < alpha * gamma0`) or any
+///   other non-trivial BK branch — panel returns `ScalarFallback`,
+///   caller runs one `scalar_pivot_step` then re-enters the panel.
+///
+/// The scalar oracle (`factor_frontal`) is retained for correctness
+/// and serves as the bit-parity reference.
 pub fn factor_frontal_blocked(
     matrix: &crate::dense::matrix::SymmetricMatrix,
     ncol: usize,
     may_delay: bool,
     params: &BunchKaufmanParams,
 ) -> Result<FrontalFactors, FeralError> {
-    // Step 4a: delegate. Parity is trivially bit-exact with scalar.
-    // Step 4b (future): replace body with the peek-ahead panel kernel
-    // described in `dev/plans/phase-2.4.1-blocked-ldlt.md` §Structure,
-    // preserving the axpy_minus_unroll4_nofma rounding trajectory so
-    // the parity tests continue to pass byte-for-byte.
-    factor_frontal(matrix, ncol, may_delay, params)
+    matrix.validate()?;
+    let nrow = matrix.n;
+
+    if ncol > nrow {
+        return Err(FeralError::InvalidInput(format!(
+            "ncol {} > nrow {}",
+            ncol, nrow
+        )));
+    }
+    if ncol == 0 {
+        return Ok(FrontalFactors {
+            nrow,
+            ncol: 0,
+            nelim: 0,
+            l: Vec::new(),
+            d_diag: Vec::new(),
+            d_subdiag: Vec::new(),
+            perm: (0..nrow).collect(),
+            perm_inv: (0..nrow).collect(),
+            contrib: matrix.data.clone(),
+            contrib_dim: nrow,
+            n_delayed: 0,
+            inertia: Inertia {
+                positive: 0,
+                negative: 0,
+                zero: 0,
+            },
+            needs_refinement: false,
+            zero_tol: params.zero_tol,
+            zero_tol_2x2: params.zero_tol_2x2,
+        });
+    }
+
+    // Fallback conditions: for these, the panel offers no advantage or
+    // would need Step 5 machinery. Delegation preserves parity trivially.
+    let bs = params.block_size;
+    if may_delay || bs < 2 || ncol <= bs {
+        return factor_frontal(matrix, ncol, may_delay, params);
+    }
+
+    // Copy lower triangle into the working array, same as `factor_frontal`.
+    let mut a = vec![0.0; nrow * nrow];
+    for j in 0..nrow {
+        for i in j..nrow {
+            a[j * nrow + i] = matrix.data[j * nrow + i];
+        }
+    }
+
+    let mut perm: Vec<usize> = (0..nrow).collect();
+    let mut subdiag = vec![0.0; nrow];
+    let mut pos = 0usize;
+    let mut neg = 0usize;
+    let mut zero = 0usize;
+    let mut needs_refinement = false;
+    let mut d_panel = vec![0.0f64; bs];
+
+    let mut k = 0;
+    while k < ncol {
+        let remaining = ncol - k;
+        if remaining <= bs {
+            // Scalar tail: process remaining pivots one at a time.
+            match scalar_pivot_step(
+                &mut a,
+                nrow,
+                ncol,
+                k,
+                may_delay,
+                params,
+                &mut perm,
+                &mut subdiag,
+                &mut pos,
+                &mut neg,
+                &mut zero,
+                &mut needs_refinement,
+            )? {
+                PivotStepResult::Advanced(n) => k += n,
+                PivotStepResult::Delayed => break,
+            }
+            continue;
+        }
+
+        let (n_elim, status) = lblt_panel_frontal(
+            &mut a,
+            nrow,
+            k,
+            bs,
+            params,
+            &mut pos,
+            &mut neg,
+            &mut zero,
+            &mut needs_refinement,
+            &mut d_panel,
+        )?;
+        // On ScalarFallback the panel peeked-ahead the column at
+        // `k+n_elim` (applied pivots 0..n_elim-1 to it) but could not
+        // pivot it. That column is already in scalar's state at pivot
+        // `k+n_elim` firing time, so `apply_blocked_schur` must skip it
+        // to avoid a double rank-1 update. On Full the column at
+        // `k+n_elim` was not peek-ahead'd, so the deferred update
+        // starts there normally.
+        let j_start = match status {
+            PanelStatus::Full => k + n_elim,
+            PanelStatus::ScalarFallback => k + n_elim + 1,
+        };
+        apply_blocked_schur(&mut a, nrow, k, n_elim, j_start, &d_panel);
+        k += n_elim;
+
+        if let PanelStatus::ScalarFallback = status {
+            // One scalar step to handle the 2×2/swap case the panel declined.
+            if k >= ncol {
+                break;
+            }
+            match scalar_pivot_step(
+                &mut a,
+                nrow,
+                ncol,
+                k,
+                may_delay,
+                params,
+                &mut perm,
+                &mut subdiag,
+                &mut pos,
+                &mut neg,
+                &mut zero,
+                &mut needs_refinement,
+            )? {
+                PivotStepResult::Advanced(n) => k += n,
+                PivotStepResult::Delayed => break,
+            }
+        }
+    }
+
+    let nelim = k;
+    let n_delayed = ncol - nelim;
+
+    // Extract L, D, contrib — identical logic to `factor_frontal`.
+    let mut l = vec![0.0; nrow * nelim];
+    let mut d_diag = vec![0.0; nelim];
+
+    let mut j = 0;
+    while j < nelim {
+        d_diag[j] = a[j * nrow + j];
+        l[j * nrow + j] = 1.0;
+
+        if j + 1 < nelim && subdiag[j] != 0.0 {
+            d_diag[j + 1] = a[(j + 1) * nrow + (j + 1)];
+            l[(j + 1) * nrow + (j + 1)] = 1.0;
+            for i in (j + 2)..nrow {
+                l[j * nrow + i] = a[j * nrow + i];
+                l[(j + 1) * nrow + i] = a[(j + 1) * nrow + i];
+            }
+            j += 2;
+        } else {
+            for i in (j + 1)..nrow {
+                l[j * nrow + i] = a[j * nrow + i];
+            }
+            j += 1;
+        }
+    }
+
+    let cdim = nrow - nelim;
+    let mut contrib = vec![0.0; cdim * cdim];
+    for cj in 0..cdim {
+        for ci in cj..cdim {
+            contrib[cj * cdim + ci] = a[(nelim + cj) * nrow + (nelim + ci)];
+        }
+    }
+
+    let mut perm_inv = vec![0usize; nrow];
+    for (i, &p) in perm.iter().enumerate() {
+        perm_inv[p] = i;
+    }
+
+    Ok(FrontalFactors {
+        nrow,
+        ncol,
+        nelim,
+        l,
+        d_diag,
+        d_subdiag: subdiag[..nelim].to_vec(),
+        perm,
+        perm_inv,
+        contrib,
+        contrib_dim: cdim,
+        n_delayed,
+        inertia: Inertia::new(pos, neg, zero),
+        needs_refinement,
+        zero_tol: params.zero_tol,
+        zero_tol_2x2: params.zero_tol_2x2,
+    })
+}
+
+/// Process one blocked panel of up to `bs` pure 1×1 pivots starting at
+/// global column `k`. Applies per-column peek-ahead (replay of pending
+/// rank-1 updates from prior panel pivots) before each pivot search so
+/// the BK test sees the same column state scalar would. Terminates early
+/// on any condition the panel cannot handle without a full-state view
+/// (2×2 candidate, swap candidate, delayed pivot — the last is excluded
+/// at the caller via `may_delay == false`).
+///
+/// On return, `a[k..k+n_elim]` columns hold scaled L columns (or zeroed
+/// L columns for rejected pivots), `d_panel[0..n_elim]` holds the
+/// pre-scaling diagonals (or 0 for rejected/zero-gamma0 pivots).
+/// Columns `[k+n_elim, nrow)` are stale — the caller must apply
+/// `apply_blocked_schur` before running further pivot searches or
+/// extracting the contribution block.
+#[allow(clippy::too_many_arguments)]
+fn lblt_panel_frontal(
+    a: &mut [f64],
+    nrow: usize,
+    k: usize,
+    bs: usize,
+    params: &BunchKaufmanParams,
+    pos: &mut usize,
+    neg: &mut usize,
+    zero: &mut usize,
+    needs_refinement: &mut bool,
+    d_panel: &mut [f64],
+) -> Result<(usize, PanelStatus), FeralError> {
+    let alpha_bk = params.alpha;
+    let cap = bs;
+    let mut c = 0usize;
+    while c < cap {
+        let col = k + c;
+
+        // Peek-ahead: apply pending rank-1 updates from pivots 0..c.
+        peek_ahead_column(a, nrow, k, c, d_panel);
+
+        // Compute gamma0 over rows (col+1)..nrow (unrestricted — matches
+        // scalar's gamma0 search, which includes rows ncol..nrow for the
+        // BK test even in frontal mode).
+        let mut gamma0 = 0.0f64;
+        for i in (col + 1)..nrow {
+            let v = a[col * nrow + i].abs();
+            if v > gamma0 {
+                gamma0 = v;
+            }
+        }
+
+        if gamma0 == 0.0 {
+            // Zero-column: matches scalar's gamma0==0 branch exactly.
+            let d = a[col * nrow + col];
+            count_1x1_inertia(d, params, pos, neg, zero, needs_refinement)?;
+            set_l_column_identity(a, nrow, col);
+            // The L column is all zeros (below diagonal); the diagonal is
+            // unchanged. Store the diagonal as d_panel[c] — subsequent
+            // replay with alpha = (0 * d) = 0 is a no-op, matching scalar.
+            d_panel[c] = d;
+            c += 1;
+            continue;
+        }
+
+        let akk = a[col * nrow + col].abs();
+        if akk < alpha_bk * gamma0 {
+            // 2×2 or swap needed. Panel cannot handle without full-state
+            // access; terminate and let scalar_pivot_step run one step.
+            return Ok((c, PanelStatus::ScalarFallback));
+        }
+
+        // 1×1 pivot at col, no swap. Try the column-relative threshold.
+        let outcome = try_reject_1x1_frontal(
+            a,
+            nrow,
+            col,
+            gamma0,
+            /* may_delay = */ false,
+            params,
+            pos,
+            neg,
+            zero,
+            needs_refinement,
+        )?;
+        match outcome {
+            PivotOutcome::Accepted => {
+                // Scale L column and record d. Matches `do_1x1_update`'s
+                // scale-then-update; rank-1 is deferred to replay.
+                let d = a[col * nrow + col];
+                if d.abs() != 0.0 {
+                    let inv_d = 1.0 / d;
+                    for i in (col + 1)..nrow {
+                        a[col * nrow + i] *= inv_d;
+                    }
+                }
+                d_panel[c] = d;
+            }
+            PivotOutcome::Rejected => {
+                // `try_reject_1x1_frontal` has zeroed the L column and
+                // diagonal. d = 0 → replay alpha = 0 → no-op, matching
+                // scalar's `do_1x1_update` early-return on d == 0.
+                d_panel[c] = 0.0;
+            }
+            PivotOutcome::Delayed => {
+                // Unreachable: panel runs only when may_delay == false.
+                return Err(FeralError::InvalidInput(
+                    "lblt_panel_frontal: unexpected Delayed outcome".to_string(),
+                ));
+            }
+        }
+
+        c += 1;
+    }
+
+    Ok((c, PanelStatus::Full))
+}
+
+/// Apply pivot `q`'s deferred rank-1 update to a single trailing column.
+/// This is the **replay** primitive that makes the blocked path
+/// bit-exact with scalar: for each (i, j) with j = `col`, `i >= j`,
+/// scalar applies rank-1 updates in ascending pivot index; replay does
+/// the same via repeated calls to this helper in order `q = 0..c-1`.
+/// The inner axpy uses `schur_kernel::axpy_minus_unroll4_nofma` — the
+/// same kernel as `do_1x1_update` — so the per-lane rounding matches.
+fn peek_ahead_column(a: &mut [f64], nrow: usize, k: usize, c: usize, d_panel: &[f64]) {
+    let col = k + c;
+    for (q, &d_q) in d_panel.iter().enumerate().take(c) {
+        // Scalar's `do_1x1_update` returns early when d == 0; skipping
+        // here preserves that no-op behavior bit-exactly.
+        if d_q.abs() == 0.0 {
+            continue;
+        }
+        let q_col = k + q;
+        // l_jk = scaled L value at row `col` of column q_col (frozen after
+        // pivot q's scaling). `alpha = l_jk * d_q` reproduces scalar's
+        // `do_1x1_update` rank-1 alpha exactly.
+        let l_jk = a[q_col * nrow + col];
+        let alpha = l_jk * d_q;
+        if alpha == 0.0 {
+            continue;
+        }
+        // dst = column `col` rows `col..nrow`; src = column `q_col` rows
+        // `col..nrow`. Disjoint because q_col < col.
+        let (before, rest) = a.split_at_mut(col * nrow);
+        let src = &before[q_col * nrow + col..q_col * nrow + nrow];
+        let dst = &mut rest[col..nrow];
+        schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+    }
+}
+
+/// Apply the `n_elim` panel pivots' deferred rank-1 updates to the
+/// trailing columns `[j_start, nrow)`. Outer loop is pivot index
+/// (matching scalar's pivot-outer/column-inner traversal), inner loop
+/// is the axpy kernel — so per-element accumulation order is identical
+/// to `do_1x1_update` fired `n_elim` times.
+///
+/// `j_start` is typically `k + n_elim`, except when the caller had the
+/// panel peek-ahead one extra column (`ScalarFallback`), in which case
+/// `j_start = k + n_elim + 1` to avoid double-updating the peeked column.
+fn apply_blocked_schur(
+    a: &mut [f64],
+    nrow: usize,
+    k: usize,
+    n_elim: usize,
+    j_start: usize,
+    d_panel: &[f64],
+) {
+    for (q, &d_q) in d_panel.iter().enumerate().take(n_elim) {
+        if d_q.abs() == 0.0 {
+            continue;
+        }
+        let q_col = k + q;
+        for j in j_start..nrow {
+            let l_jk = a[q_col * nrow + j];
+            let alpha = l_jk * d_q;
+            if alpha == 0.0 {
+                continue;
+            }
+            let (before, rest) = a.split_at_mut(j * nrow);
+            let src = &before[q_col * nrow + j..q_col * nrow + nrow];
+            let dst = &mut rest[j..nrow];
+            schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+        }
+    }
 }
 
 /// One iteration of the scalar BK pivot loop for `factor_frontal`.

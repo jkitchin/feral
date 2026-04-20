@@ -1382,3 +1382,58 @@ until a bit-exact variant is found.
 `cargo test --release --test blocked_ldlt` → 6/6 PASS (all
 previously RED), `cargo test --release --lib` → 118/118 PASS,
 `cargo run --bin bench --release` → 4/4 Phase 2.8.1 partitions PASS.
+
+---
+
+## 2026-04-20 — Phase 2.4.1b Step 4b (peek-ahead panel, bit-exact)
+
+**Decision.** Replace the Step 4a delegation in `factor_frontal_blocked`
+with a real faer-style peek-ahead panel. Two supporting decisions:
+
+1. **Panel handles only 1×1 pivots; 2×2 candidates trigger
+   `PanelStatus::ScalarFallback`.** Caller runs one `scalar_pivot_step`
+   and may re-enter. Chosen per plan §Risks #1 option b — keeps the
+   replay logic simple and bit-exact at the cost of one scalar step
+   per 2×2 block.
+2. **`apply_blocked_schur` takes a `j_start` parameter.** On
+   `PanelStatus::Full` caller passes `j_start = k + n_elim`; on
+   `ScalarFallback` caller passes `j_start = k + n_elim + 1`. Required
+   to avoid double-updating the peek-ahead'd fallback column.
+   Discovered via the `test_2x2_at_block_boundary` 1-ULP failure; see
+   session 2026-04-20-05 journal for the diagnosis.
+
+**Why.** The replay strategy is byte-exact with scalar because both
+paths accumulate each `(i,j)` with the same axpy kernel
+(`schur_kernel::axpy_minus_unroll4_nofma`) and the same pivot-index
+order (ascending q). The per-element traversal differs (pivot-outer /
+column-inner in scalar vs column-outer / pivot-inner in replay), but
+commutativity of the update sequence for any single `(i,j)` is
+preserved by the frozen-column invariant — pivot q never touches
+column q again after its own scaling.
+
+**Parity evidence.** All 6 tests in `tests/blocked_ldlt.rs` pass
+bit-exact via `f64::to_bits` comparison (SPD size sweep, BK77 Example
+1, ncol<nrow, 2×2 at block boundary, rejection fallback, KKT regression
+spot-checks at n=96 and n=150).
+
+**Performance observation.** Dense/sparse bench p90 all shifted up by
+0.20–0.30 vs the 2026-04-20-04 delegation baseline. All verdicts still
+PASS. `factor_frontal_blocked` is not on the bench path
+(supernodal driver still calls `factor_frontal` directly), so the
+regression is not algorithmic on any hot path. Most likely cause:
+code-layout shuffle from adding ~400 lines in the same module. The
+real Step 4b perf lever is wiring the blocked kernel into
+`src/sparse/multifrontal/` for arrow-KKT fronts, which depends on
+Step 5 (`may_delay` wiring).
+
+**Scope.** Binding for the 2026-04-20-05 checkpoint. Step 5 (`may_delay`
+wiring) and Step 6 (SIMD) remain open. Supernodal driver switch-over
+is deferred until Step 5 lands.
+
+**Evidence.** `src/dense/factor.rs:567` (PanelStatus), `:780`
+(factor_frontal_blocked rewrite), `:993` (lblt_panel_frontal), `:1098`
+(peek_ahead_column), `:1133` (apply_blocked_schur with j_start).
+`cargo test --release --test blocked_ldlt` → 6/6 PASS bit-exact.
+`cargo test --release --lib` → 118/118 PASS. `cargo run --bin bench
+--release` → 4/4 Phase 2.8.1 partitions PASS (dense small 1.59,
+dense medium 2.00, sparse small 1.79, sparse medium 1.80).
