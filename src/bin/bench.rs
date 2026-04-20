@@ -690,6 +690,25 @@ struct MatrixTiming {
     solve_us: u128,
 }
 
+/// Multi-sample denoise parameters. Matrices whose MUMPS oracle time is
+/// below `RESAMPLE_MUMPS_US_THRESHOLD` run `RESAMPLE_COLD_REPS` extra
+/// factor+solve reps; the recorded `MatrixTiming::factor_us` is the
+/// minimum and `solve_us` is the median across those reps.
+///
+/// Rationale in `dev/plans/bench-denoise.md`. Diagnosed in session
+/// 2026-04-20-01 via `src/bin/hs85_diag.rs`: single-shot wall time at
+/// the tens-of-µs scale produces 10–100× noise excursions.
+const RESAMPLE_MUMPS_US_THRESHOLD: u128 = 200;
+const RESAMPLE_COLD_REPS: usize = 5;
+
+fn should_resample(entry: &KktEntry) -> bool {
+    entry
+        .mumps_timing
+        .as_ref()
+        .map(|t| (t.factor_us as u128) < RESAMPLE_MUMPS_US_THRESHOLD)
+        .unwrap_or(false)
+}
+
 /// Parse `factor_us` and `solve_us` from a canonical-oracle JSON sidecar.
 ///
 /// Returns `None` if the file does not exist, cannot be parsed, or is missing
@@ -1116,12 +1135,36 @@ fn main() {
             }
         };
         let solve_us = t1.elapsed().as_micros();
+
+        // Multi-sample denoise for fast matrices — see dev/plans/bench-denoise.md.
+        // Runs only when the MUMPS oracle time says the workload is below the
+        // single-shot noise floor; otherwise the first reading already dominates
+        // whatever cold-cache jitter we would see.
+        let (factor_us_final, solve_us_final) = if should_resample(entry) {
+            let mut fs: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
+            let mut ss: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
+            for _ in 0..RESAMPLE_COLD_REPS {
+                let t0 = Instant::now();
+                let (rs_factors, _) = factor_single_front(&entry.matrix, &params_kkt_sparse)
+                    .expect("resample: factor_single_front (single-shot already succeeded)");
+                fs.push(t0.elapsed().as_micros());
+                let t1 = Instant::now();
+                let _ = solve_refined(&entry.matrix, &rs_factors, &rhs)
+                    .expect("resample: solve_refined (single-shot already succeeded)");
+                ss.push(t1.elapsed().as_micros());
+            }
+            fs.sort_unstable();
+            ss.sort_unstable();
+            (fs[0], ss[RESAMPLE_COLD_REPS / 2])
+        } else {
+            (factor_us, solve_us)
+        };
         dense_timings.push(MatrixTiming {
             name: entry.name.clone(),
             n,
             max_front: n,
-            factor_us,
-            solve_us,
+            factor_us: factor_us_final,
+            solve_us: solve_us_final,
         });
 
         // Compute residual: ||Ax - b|| / ||b||
@@ -1154,8 +1197,8 @@ fn main() {
                 &entry.name,
                 n,
                 nnz,
-                factor_us,
-                solve_us,
+                factor_us_final,
+                solve_us_final,
                 &inertia,
                 relative_residual,
                 factors.needs_refinement,
@@ -1304,12 +1347,42 @@ fn main() {
             }
         };
         let sp_solve_us = ts.elapsed().as_micros();
+
+        // Multi-sample denoise for fast matrices — see dev/plans/bench-denoise.md.
+        // Symbolic + numeric factor are re-run inside the same timed block as the
+        // single-shot pass so the semantics of `factor_us` (sym + numeric) match
+        // MUMPS/SSIDS.
+        let (sp_factor_us_final, sp_solve_us_final) = if should_resample(entry) {
+            let mut fs: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
+            let mut ss: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
+            for _ in 0..RESAMPLE_COLD_REPS {
+                let tf = Instant::now();
+                let rs_sym = match ordering_override {
+                    Some(m) => symbolic_factorize_with_method(&entry.csc, &snode_params, m),
+                    None => symbolic_factorize(&entry.csc, &snode_params),
+                }
+                .expect("resample: symbolic_factorize (single-shot already succeeded)");
+                let (rs_factors, _) =
+                    factorize_multifrontal(&entry.csc, &rs_sym, &sparse_numeric_params)
+                        .expect("resample: factorize_multifrontal (single-shot already succeeded)");
+                fs.push(tf.elapsed().as_micros());
+                let ts = Instant::now();
+                let _ = solve_sparse_refined(&entry.csc, &rs_factors, &rhs)
+                    .expect("resample: solve_sparse_refined (single-shot already succeeded)");
+                ss.push(ts.elapsed().as_micros());
+            }
+            fs.sort_unstable();
+            ss.sort_unstable();
+            (fs[0], ss[RESAMPLE_COLD_REPS / 2])
+        } else {
+            (sp_factor_us, sp_solve_us)
+        };
         sparse_timings.push(MatrixTiming {
             name: entry.name.clone(),
             n,
             max_front: sp_max_front,
-            factor_us: sp_factor_us,
-            solve_us: sp_solve_us,
+            factor_us: sp_factor_us_final,
+            solve_us: sp_solve_us_final,
         });
 
         // Residual
@@ -1347,8 +1420,8 @@ fn main() {
                 "{},{},{},{},{},{},{},{},{},{},{},{:.6e},{}",
                 entry.name,
                 n,
-                sp_factor_us,
-                sp_solve_us,
+                sp_factor_us_final,
+                sp_solve_us_final,
                 expected_inertia.positive,
                 expected_inertia.negative,
                 expected_inertia.zero,

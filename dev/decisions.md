@@ -1234,3 +1234,43 @@ workspace — cheap even without a stack buffer.
 `ddefc2f` (GREEN), `16fdd77` (stage 1/2).
 
 
+
+---
+
+## 2026-04-20 — Bench harness multi-sample denoise
+
+**Decision.** `src/bin/bench.rs` resamples per-matrix factor+solve
+timings `K = 5` cold reps for any matrix whose MUMPS oracle sidecar
+reports `factor_us < 200`. Recorded `MatrixTiming::factor_us` is the
+minimum across reps; `solve_us` is the median. Dense and sparse
+loops are patched symmetrically. No env flag — denoise is always on.
+
+**Why.** Single-shot per-matrix wall time at the tens-of-µs scale
+produces 10–100× noise excursions that dominate the top-N worst
+factor-ratio report. Session 2026-04-20-01 diagnosed HS85_0022 as a
+false 80× regression (probe p50 = 37 µs; single-shot bench reading
+1845 µs). Pre-denoise three-run max: 11.81 / 102.07 / 285.80 (24×
+spread). Post-denoise three-run max: 13.38 / 11.36 / 27.09 (2.4×
+spread). All entries in the new top-10 are n ≥ 458 — the real
+arrow-KKT regression class that Phase 2.4.1b would target.
+
+**Cost.** Wall-time +~1:45 per bench run (2:15 → 4:00) — failed my
+≤ 20% ex-ante but accepted because the signal improvement is 10×
+and a bench runs once per session.
+
+**Threshold choice.** 100 µs was the initial target (session 2026-04-20-01
+checkpoint named "say 100 µs"), but run 2 at 100 µs still hit
+NELSON_0414 at 37× (MUMPS=142 µs, above threshold). Raising to 200 µs
+covers the NELSON/SWOPF/CRESC100 boundary cases observed pre-denoise
+at MUMPS times 98–167 µs. Residual noise at threshold=200 µs:
+HAIFAM_0709 (MUMPS=234 µs) spiked once in 3 runs to 27×. Acceptable;
+500 µs threshold would remove it at ~+60 s but is not warranted.
+
+**Reduction choice.** `min` for factor (robust against single
+cold-cache outliers, the observed noise mode). `median` for solve
+(smaller numeric phase, less outlier-prone). Matches the convention
+used in the stage-1 probes `src/bin/d4_probe.rs` (`p50`) and
+`hs85_diag.rs` (`min`, `p50`).
+
+**Evidence.** `dev/results/bench-denoise/summary.md` +
+`run{1..6}*.txt` raw bench outputs.

@@ -1,0 +1,64 @@
+#+TITLE: Session 2026-04-20-02 Journal
+
+* 08:45 :orient:phase-2.4:
+Orient from 2026-04-20-01 checkpoint. User asked for Phase 2.4
+(blocked BK + SIMD). Discovery before writing code:
+- Phase 2.4.2 FMA unroll4 tried + reverted 2026-04-14 (4 inertia
+  regressions: ACOPP14, ACOPP30, FBRAIN3LS×2, per
+  =tried-and-rejected.md:221=).
+- Phase 2.4.1a scalar contribution-block deferral tried + reverted
+  same day (sparse p90 3.18→3.53, per =tried-and-rejected.md:146=).
+- Phase 2.4.3 (non-FMA unroll4 SIMD) already shipped in commit
+  =d9887a9= on 2026-04-14, six days ago. =src/dense/factor.rs:1096=
+  and =:1127= already call =axpy_minus_unroll4_nofma= and
+  =axpy2_minus_unroll4_nofma=. All four Phase 2.8.1 exit
+  partitions PASS in the 2026-04-20-01 stage2-corpus bench.
+
+Conclusion: the checkpoint's "Phase 2.4" framing was stale. Before
+committing 4–6 sessions to a blocked-panel kernel, the correct next
+move is the cheap 1-session bench denoise (checkpoint item 2) so we
+know which top-10 entries are real vs single-shot noise. User
+agreed. Pivoting.
+
+* 08:48 :plan:denoise:
+Wrote =dev/plans/bench-denoise.md=. Gate: MUMPS factor_us < 100µs,
+K=5 cold reps, min for factor, median for solve. Applied to both
+dense and sparse loops. No env flag. Ex-ante acceptance: sparse max
+≤ 30× on three consecutive runs (pre-denoise swung 11→286→102×),
+geomean/p90/p99 within noise, dense p90 partitions still PASS,
+wall-time ≤ 20% increase.
+
+* 09:15 :implement:denoise:
+Patched =src/bin/bench.rs=. Added module-scope constants
+=RESAMPLE_MUMPS_US_THRESHOLD= and =RESAMPLE_COLD_REPS= plus
+=should_resample()= helper. Both dense (around :1123) and sparse
+(around :1356) loop sites now wrap the initial single-shot factor+solve
+with a K=5 resample conditional on =should_resample(entry)=, take min
+factor / median solve, feed to =MatrixTiming=. Sidecar writes use
+denoised values. Build + clippy + cargo test all green (118+5+other).
+
+* 09:35 :bench:denoise:
+Three bench runs at threshold=100µs, K=5:
+- run1: sparse max 13.68 (HAHN1)
+- run2: sparse max 37.54 (NELSON_0414, MUMPS=142µs, ABOVE threshold)
+- run3: sparse max 11.24 (MUONSINE)
+NELSON_0414 slipped through. Raised threshold to 200µs.
+
+* 10:00 :bench:denoise:threshold-200:
+Three runs at threshold=200µs, K=5:
+- run4: sparse max 13.38 (GAUSS2_0000, n=758 — real)
+- run5: sparse max 11.36 (CRESC100_0000 n=806 — real)
+- run6: sparse max 27.09 (HAIFAM_0709 n=249, MUMPS=234µs — boundary noise)
+Max spread 2.4×, vs 24× pre-denoise. p90/p99/geomean all stable to
+≤0.02. Exit partitions all PASS (Dense 1.38/1.78; Sparse 1.65/1.65).
+Wall time 4:00, +78% vs ~2:15 baseline — blew the ≤20% ex-ante. Accepted
+because the signal improvement (top-10 now all n≥458, real arrow-KKT)
+substantially exceeds what reducing K would recover.
+
+* 10:15 :signal:arrow-kkt:
+Post-denoise top-10 populations are all n ≥ 458 and consistent across
+runs: HAHN1 n=715, CRESC100 n=806, KIRBY2 n=458, MUONSINE n=1537,
+VESUVIO n=3083, GAUSS2 n=758, ACOPR30 n=564. Matches the arrow-KKT
+class Phase 2.4.1b targets. Pre-denoise spurious entries (CERI651BLS
+n=7, PALMER2ANE n=45, HIMMELBFNE n=25) all removed. Signal is now
+trustworthy. Phase 2.4.1b is well-targeted for a future session.

@@ -4,6 +4,33 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-20) — Bench harness multi-sample denoise
+
+`cargo run --release --bin bench` now resamples per-matrix
+factor+solve timings K=5 cold reps for any matrix whose MUMPS oracle
+sidecar reports `factor_us < 200 µs`. Reduction: `min` across reps
+for factor, `median` for solve. No library behavior change — this
+is a test-harness change only. Inertia and residual validation still
+run once on the first factor.
+
+**Motivation.** Single-shot wall time at tens-of-µs produced 10–100×
+noise excursions that dominated the top-N worst-ratio report (HS85
+80×, CERI651BLS 57×, PALMER2ANE 202× — all diagnosed as noise in
+session 2026-04-20-01).
+
+**Effect.** Three-run sparse max across `cargo run --bin bench`:
+
+| | pre-denoise | post-denoise |
+|-|-----------:|-------------:|
+| max spread over 3 runs | 11.81 / 102.07 / 285.80 (24×) | 13.38 / 11.36 / 27.09 (2.4×) |
+| sparse p90 | 1.77 | 1.65 |
+| sparse p99 | 3.76 | 3.52 |
+
+**Cost.** Bench wall-time 2:15 → 4:00 (+78%), bench runs once per
+session.
+
+See `dev/decisions.md` and `dev/results/bench-denoise/summary.md`.
+
 ### Added (2026-04-20) — D.4 tiny-n disjunct in dense fast-path gate
 
 `should_use_dense_fast_path` now accepts any matrix with
