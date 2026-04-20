@@ -1,12 +1,38 @@
 # Phase 2.4.2 — SIMD Micro-Kernel for the Schur Update
 
-**Status:** Pre-implementation plan
-**Date:** 2026-04-14
+**Status:** Pre-implementation plan (updated 2026-04-20 after Phase 2.4.1b close)
+**Date:** 2026-04-14 (updated 2026-04-20)
 **Research note:** `dev/research/phase-2.4.2-simd-schur-kernel.md`
-**Related:** `dev/plans/phase-2-planning.md` §2.4.2
-**Baseline:** `dev/sessions/phase-2-baseline.md`
-**Targets:** dense factor p90 ≤ 2.0 (currently 2.27),
-sparse factor p90 ≤ 3.0 (currently 3.18).
+**Related:** `dev/plans/phase-2-planning.md` §2.4.2,
+`dev/plans/phase-2.4.1-blocked-ldlt.md`
+**Baseline:** `dev/sessions/2026-04-20-07.md`
+**Targets:** close the mid-tail sparse regressions observed after Phase
+2.4.1b wire-up (CRESC100 7.62→10.10, KIRBY2 +0.4–0.6, VESUVIO
++0.15–0.89) while preserving arrow-KKT wins (MUONSINE 10.86→9.14,
+VESUVIA 8.43→7.21).
+
+## Addendum 2026-04-20 — Updated kernel surface
+
+Phase 2.4.1b added two new hot-path kernels:
+
+- `schur_kernel::axpy_minus_unroll4_nofma` — 4-way unrolled scalar
+  AXPY used by both `do_1x1_update` (scalar kernel) and the new
+  `peek_ahead_column` / `apply_blocked_schur` (blocked kernel) in
+  `src/dense/factor.rs`.
+- `apply_blocked_schur` — deferred rank-k update after a panel. Hot
+  inner loop calls `axpy_minus_unroll4_nofma` in a column-outer /
+  pivot-inner traversal.
+
+Both call paths must switch together. If SIMD lands only for the
+blocked `apply_blocked_schur` and not for scalar `do_1x1_update`, the
+bit-parity tests in `tests/blocked_ldlt.rs` break. The cleanest move is
+to replace `axpy_minus_unroll4_nofma` itself with the pulp-dispatched
+version — all callers (both blocked and scalar) get SIMD simultaneously
+and parity is preserved by construction.
+
+This means Step 5 below ("wire into factor.rs") becomes: update the
+single `axpy_minus_unroll4_nofma` definition in `schur_kernel.rs`.
+No call-site changes required at factor.rs.
 
 ## Goal
 
