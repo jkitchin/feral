@@ -259,13 +259,36 @@ impl CscMatrix {
 
     /// Convert to dense symmetric matrix.
     pub fn to_dense(&self) -> crate::dense::matrix::SymmetricMatrix {
-        let entries: Vec<(usize, usize, f64)> = (0..self.n)
-            .flat_map(|j| {
-                (self.col_ptr[j]..self.col_ptr[j + 1])
-                    .map(move |k| (self.row_idx[k], j, self.values[k]))
-            })
-            .collect();
-        crate::dense::matrix::SymmetricMatrix::from_lower_triangle(self.n, &entries)
+        self.to_dense_into(Vec::new())
+    }
+
+    /// Densify into a caller-provided buffer (reused to avoid the
+    /// `n * n` allocation on every call). The buffer is cleared and
+    /// resized to `n * n` zeros before the lower triangle is
+    /// scattered in; pass `Vec::new()` for a fresh allocation.
+    ///
+    /// Byte-exact equivalent to `to_dense()` for the same input.
+    /// Used by `FactorWorkspace` to pool the dense-fast-path buffer
+    /// across calls — see
+    /// `dev/research/phase-2.5.x-to-dense-pooling.md`.
+    pub fn to_dense_into(&self, mut buf: Vec<f64>) -> crate::dense::matrix::SymmetricMatrix {
+        let nn = self.n * self.n;
+        buf.clear();
+        buf.resize(nn, 0.0);
+        // `from_triplets` guarantees all stored entries are lower-
+        // triangle (row >= col), so every `(i, j)` lands at
+        // `data[j*n + i]`.
+        for j in 0..self.n {
+            let col = j * self.n;
+            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
+                let i = self.row_idx[k];
+                buf[col + i] = self.values[k];
+            }
+        }
+        crate::dense::matrix::SymmetricMatrix {
+            n: self.n,
+            data: buf,
+        }
     }
 }
 

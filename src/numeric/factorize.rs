@@ -161,6 +161,13 @@ pub struct FactorWorkspace {
     /// in the all-`false` state outside the call (touched indices
     /// are cleared before return).
     build_seen: Vec<bool>,
+    /// Pooled `n * n` f64 storage for the D.3/D.4 dense fast-path
+    /// densify of the input `CscMatrix`. Reused across calls via
+    /// `std::mem::take` + `CscMatrix::to_dense_into` so the
+    /// fast-path no longer reallocates `n * n` doubles per call.
+    /// Left empty when ownership is temporarily borrowed by an
+    /// in-flight `SymmetricMatrix`.
+    dense_values: Vec<f64>,
 }
 
 impl FactorWorkspace {
@@ -234,6 +241,21 @@ pub fn dense_fast_factor(
     matrix: &CscMatrix,
     params: &NumericParams,
 ) -> Result<(SparseFactors, Inertia), FeralError> {
+    let mut ws = FactorWorkspace::new();
+    dense_fast_factor_with_workspace(matrix, params, &mut ws)
+}
+
+/// Pooled-buffer variant of [`dense_fast_factor`].
+///
+/// The `n * n` dense-densify buffer is drawn from (and returned
+/// to) `ws.dense_values`, so repeated calls across a single
+/// `FactorWorkspace` lifetime amortise the `n * n` f64 allocation.
+/// See `dev/research/phase-2.5.x-to-dense-pooling.md`.
+pub fn dense_fast_factor_with_workspace(
+    matrix: &CscMatrix,
+    params: &NumericParams,
+    ws: &mut FactorWorkspace,
+) -> Result<(SparseFactors, Inertia), FeralError> {
     let n = matrix.n;
     if n == 0 {
         return Err(FeralError::InvalidInput(
@@ -254,7 +276,11 @@ pub fn dense_fast_factor(
 
     // Densify the CSC into a SymmetricMatrix (lower-triangle populated
     // at data[j*n + i] for i >= j) then apply D · A · D in place.
-    let mut sym = matrix.to_dense();
+    // Pool the `n * n` buffer: hand the caller-owned Vec to
+    // `to_dense_into`, use it, then return it to `ws.dense_values`
+    // before falling out of the function.
+    let dense_buf = std::mem::take(&mut ws.dense_values);
+    let mut sym = matrix.to_dense_into(dense_buf);
     for (j, &s_j) in scaling.iter().enumerate() {
         let col = j * n;
         for (i, &s_i) in scaling.iter().enumerate().skip(j) {
@@ -267,6 +293,10 @@ pub fn dense_fast_factor(
     // unstable pivot instead of carrying it forward (there is no
     // ancestor in a single-node factorization).
     let ff = factor_frontal_blocked(&sym, n, false, &params.bk)?;
+    // `factor_frontal_blocked` takes `&SymmetricMatrix` and copies
+    // into its own workspace, so `sym.data` is still the allocated
+    // buffer we took from the pool. Return it.
+    ws.dense_values = sym.data;
 
     let inertia = ff.inertia.clone();
     let needs_refinement = ff.needs_refinement;
@@ -356,9 +386,9 @@ pub fn factorize_multifrontal(
 /// to) `ws` instead of the global allocator, so repeated calls
 /// with different matrices amortise heap traffic.
 ///
-/// On a gate hit `ws` is pass-through — the dense path allocates
-/// its own dense buffer (pooling it is a follow-up; see
-/// `dev/plans/sparse-tail-d3.md`).
+/// On a gate hit the dense path draws its `n * n` densify buffer
+/// from `ws.dense_values` (pooled via `to_dense_into`) — see
+/// `dev/research/phase-2.5.x-to-dense-pooling.md`.
 pub fn factorize_multifrontal_with_workspace(
     matrix: &CscMatrix,
     symbolic: &SymbolicFactorization,
@@ -366,7 +396,7 @@ pub fn factorize_multifrontal_with_workspace(
     ws: &mut FactorWorkspace,
 ) -> Result<(SparseFactors, Inertia), FeralError> {
     if should_use_dense_fast_path(matrix.n, matrix.row_idx.len()) {
-        return dense_fast_factor(matrix, params);
+        return dense_fast_factor_with_workspace(matrix, params, ws);
     }
     factorize_multifrontal_supernodal_with_workspace(matrix, symbolic, params, ws)
 }
