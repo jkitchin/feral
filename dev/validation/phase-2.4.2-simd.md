@@ -24,7 +24,7 @@ missing step 6: the formal before/after validation against the Phase
 | 2. Kernel bit-exact vs scalar                     |    ≤1 ULP | 0 ULP    |    ✓   |
 | 3. `cargo test --release` lib + integration       |   pass | 118/118 lib, all integration |    ✓   |
 | 4. Microbench `axpy_minus` @ L=256                |    ≥2× |    2.73× |    ✓   |
-| 5. KKT inertia/residual exactly matches baseline  |  exact | −1 sparse inertia, −67 sparse residual |  ⚠     |
+| 5. KKT inertia/residual exactly matches baseline  |  exact | −1 sparse inertia, −67 sparse residual (see §Drift Analysis; **not from blocked kernel** — blocked ≡ scalar on 169585 matrices) |  ⚠     |
 | 6. Dense factor p90 vs MUMPS (soft)               |   ≤2.0 |     2.10 |  ⚠     |
 | 7. Sparse factor p90 vs MUMPS (soft)              |   ≤3.0 |     1.75 |    ✓   |
 
@@ -221,6 +221,47 @@ run the `examples/triage_sparse_inertia_diff` pattern with scalar
 the 1 lost inertia and 67 residual failures, then decide whether
 they're acceptable (within the existing FMA-vs-separate rounding
 noise class) or require a fix.
+
+### 2026-04-20 update — Phase 2.4.1c triage result
+
+The triage binary `examples/triage_sparse_kernel_diff.rs` factors
+every KKT matrix twice, once with `factor_frontal_blocked` and once
+with `factor_frontal` (forced via the new `FORCE_SCALAR_FRONTAL`
+atomic in `dense::factor`), and compares the per-matrix
+(inertia_match, residual_pass, residual_value) tuples.
+
+Result on 169585 matrices (the full `data/matrices/kkt/` corpus,
+sparse-KKT BK config matching `src/bin/bench.rs:1014`:
+`on_zero_pivot = ForceAccept`, `pivot_threshold = 0.01`):
+
+```
+blocked: inertia=153492/169585  residual=154571/169585
+scalar:  inertia=153492/169585  residual=154571/169585
+delta (blocked - scalar):  inertia=0  residual=0
+
+Total matrices with any diff: 0
+```
+
+**The blocked and scalar kernels produce bit-identical aggregate
+counts and bit-identical per-matrix outcomes.** The Phase 2.4.1b
+wire-up is cleared.
+
+That leaves the −1 sparse inertia / −67 sparse residual delta
+(vs phase-2.1.8 baseline, same corpus filtering by `bench.rs`)
+attributable to **something else changed between 2026-04-14 and
+2026-04-20**, not the blocked kernel. Candidates worth auditing if
+the delta is ever worth chasing:
+
+- Scaling-path changes (MC64 fallback behavior, Auto heuristic).
+- Symbolic-ordering changes (AMD/METIS/KaHIP tiebreaking).
+- Supernode packing or amalgamation changes.
+- Minor numeric refactors (e.g. `refine.rs` IR tweaks, residual
+  computation order).
+
+The drift is small (1 inertia out of 154588 = 6×10⁻⁶, 67 residual
+out of 154588 = 4×10⁻⁴) and does not affect any Phase 2.8 exit
+criterion. Closing Phase 2.4.1c as "kernel cleared; upstream drift
+minor, deprioritized".
 
 ## Decisions recorded
 

@@ -85,3 +85,50 @@
        n ∈ [400, 800]: HAHN1 family (39 matrices at >70× factor
        ratio), KOEBHELBNE_0463 (577×), GAUSS2_0011 (148×),
        LAKES_0015 (117×).
+
+* 20:40 :phase-2.4.1c:triage:implementation:
+  Added `FORCE_SCALAR_FRONTAL: AtomicBool` to `src/dense/factor.rs`
+  right above `factor_frontal_blocked`'s small-matrix fallback gate.
+  When set, the blocked entry delegates to `factor_frontal`
+  unconditionally — all call sites see the scalar kernel without
+  needing to patch callers. Default false; diagnostic only.
+
+  Wrote `examples/triage_sparse_kernel_diff.rs` that:
+    1. Loads every KKT matrix from data/matrices/kkt
+    2. Factors each with FORCE_SCALAR=false (blocked), records
+       (inertia_ok, residual_ok, residual_value)
+    3. Factors each with FORCE_SCALAR=true (scalar), records same
+    4. Emits per-matrix diff + aggregate class counts
+
+* 20:45 :phase-2.4.1c:triage:results:
+  Triage v2 (bench-matching BK params: on_zero_pivot=ForceAccept,
+  pivot_threshold=0.01, ScalingStrategy::Auto) complete.
+
+    Loaded 169585 KKT matrices
+    blocked: inertia=153492/169585  residual=154571/169585
+    scalar:  inertia=153492/169585  residual=154571/169585
+    delta (blocked - scalar):  inertia=0  residual=0
+    Total matrices with any diff: 0
+
+  Blocked ≡ scalar bit-exactly at the (inertia_match, residual_pass)
+  level across the full corpus.
+
+  Implication: the Phase 2.4.1b blocked wire-up does NOT introduce
+  any correctness drift. The −1 inertia / −67 residual vs
+  phase-2.1.8 baseline that I saw in this morning's bench run (and
+  attributed to the blocked wire-up in session 07's validation
+  report) is misattributed. The real source is some OTHER change
+  between 2026-04-14 and 2026-04-20 — scaling, ordering, or a minor
+  numeric refactor. Deprioritized as:
+    - Magnitude: 1 inertia + 67 residual out of 154588 matrices
+      (6e-6 and 4e-4 rates).
+    - Doesn't affect any Phase 2.8 exit criterion.
+
+  Updated validation/phase-2.4.2-simd.md §Drift Analysis with
+  "2026-04-20 update — Phase 2.4.1c triage result" subsection
+  recording the cleared status and deprioritization.
+
+* 20:50 :phase-2.4.1c:close:
+  Phase 2.4.1c closes. Blocked kernel cleared; upstream-drift
+  follow-up deprioritized. Next session can pick up Phase 2.5.x
+  (dense p90 tail) without correctness concerns on 2.4.1b.

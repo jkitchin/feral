@@ -14,6 +14,14 @@ use crate::inertia::Inertia;
 #[cfg(target_arch = "aarch64")]
 use crate::dense::schur_kernel;
 
+/// Phase 2.4.1c triage flag. When set to `true`, `factor_frontal_blocked`
+/// delegates to the scalar `factor_frontal` unconditionally. Used by
+/// `examples/triage_sparse_kernel_diff.rs` to A/B-compare the two
+/// kernels across the full KKT corpus. Default `false` preserves
+/// production dispatch; setting this is a diagnostic affordance only.
+pub static FORCE_SCALAR_FRONTAL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Dead-zero absolute floor for the 2×2 pivot cancellation test.
 /// Matches SPRAL SSIDS `datatypes.f90:260` default (`small = 1e-20`),
 /// used by `ldlt_tpp.cxx:98,106`. This is a true zero-detection floor
@@ -821,6 +829,15 @@ pub fn factor_frontal_blocked(
             zero_tol: params.zero_tol,
             zero_tol_2x2: params.zero_tol_2x2,
         });
+    }
+
+    // Phase 2.4.1c triage hook. When `FORCE_SCALAR_FRONTAL` is set,
+    // delegate to `factor_frontal` unconditionally so a binary can
+    // run the multifrontal driver with either kernel without
+    // patching call sites. This is a diagnostic flag only — the
+    // default (false) preserves the production dispatch.
+    if FORCE_SCALAR_FRONTAL.load(std::sync::atomic::Ordering::Relaxed) {
+        return factor_frontal(matrix, ncol, may_delay, params);
     }
 
     // Fallback conditions where the panel offers no advantage.
