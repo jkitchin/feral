@@ -28,6 +28,14 @@ path = "src/bin/bench_solver_reuse.rs"
 name = "policy4_diag"
 path = "src/bin/policy4_diag.rs"
 
+[[bin]]
+name = "parallel_corpus_parity"
+path = "src/bin/parallel_corpus_parity.rs"
+
+[[bin]]
+name = "diag_acopr"
+path = "src/bin/diag_acopr.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -716,6 +716,413 @@ fn factor_one_supernode(
     })
 }
 
+/// Minimum supernode count below which the parallel driver falls
+/// through to sequential. Phase 2.5.2 Step D. Tentative value
+/// (conservative): reassess after the corpus bench in Step E shows
+/// where per-task overhead breaks even.
+pub const N_PAR_MIN: usize = 32;
+
+/// Predicate: does the symbolic factorization present enough structure
+/// for the parallel driver to win?
+///
+/// Two conditions:
+/// 1. `n_snodes >= N_PAR_MIN` — enough tasks to amortise thread-pool
+///    overhead.
+/// 2. At least one supernode has ≥ 2 children — a pure postorder
+///    chain has zero sibling parallelism, so the parallel driver
+///    would add only overhead.
+///
+/// **Known bug (2026-04-20)**: the parallel driver has a ~1-2%
+/// non-deterministic inertia mismatch on the multi-thread path
+/// (0/169 585 on `RAYON_NUM_THREADS=1`, ~2 % on default threading).
+/// The mismatch survives both per-thread workspaces and a single
+/// global workspace mutex, and survives the scalar dense kernel —
+/// so it is not workspace lifecycle and not SIMD nondeterminism.
+/// Root cause TBD. Until fixed, this predicate is intentionally
+/// disabled at the dispatcher so `factorize_multifrontal_parallel*`
+/// always falls through to the sequential path. See diag binary
+/// `src/bin/diag_acopr.rs` and session checkpoint 2026-04-20-11
+/// for the reproducer and rule-outs.
+pub fn should_parallelize_assembly(symbolic: &SymbolicFactorization) -> bool {
+    if symbolic.supernodes.len() < N_PAR_MIN {
+        return false;
+    }
+    symbolic.supernodes.iter().any(|s| s.children.len() >= 2)
+}
+
+/// Gated parallel entry point. Phase 2.5.2 Step D.
+///
+/// Dispatch order:
+/// 1. [`should_use_dense_fast_path`] — dense fast-path takes precedence.
+/// 2. Sequential multifrontal (same as
+///    [`factorize_multifrontal_with_workspace`]).
+///
+/// The parallel driver ([`factorize_multifrontal_supernodal_parallel`])
+/// is **temporarily disabled** at this dispatcher due to the
+/// known multi-thread inertia-mismatch bug documented on
+/// [`should_parallelize_assembly`]. Callers who want to exercise it
+/// for debugging / bench must call the parallel function directly.
+///
+/// The workspace `ws` is used by the dense fast-path and the
+/// sequential fall-through.
+pub fn factorize_multifrontal_parallel_with_workspace(
+    matrix: &CscMatrix,
+    symbolic: &SymbolicFactorization,
+    params: &NumericParams,
+    ws: &mut FactorWorkspace,
+) -> Result<(SparseFactors, Inertia), FeralError> {
+    if should_use_dense_fast_path(matrix.n, matrix.row_idx.len()) {
+        return dense_fast_factor_with_workspace(matrix, params, ws);
+    }
+    // KNOWN BUG: parallel dispatch disabled — see
+    // `should_parallelize_assembly` doc comment.
+    let _ = should_parallelize_assembly(symbolic);
+    factorize_multifrontal_supernodal_with_workspace(matrix, symbolic, params, ws)
+}
+
+/// Fresh-workspace variant of [`factorize_multifrontal_parallel_with_workspace`].
+pub fn factorize_multifrontal_parallel(
+    matrix: &CscMatrix,
+    symbolic: &SymbolicFactorization,
+    params: &NumericParams,
+) -> Result<(SparseFactors, Inertia), FeralError> {
+    let mut ws = FactorWorkspace::new();
+    factorize_multifrontal_parallel_with_workspace(matrix, symbolic, params, &mut ws)
+}
+
+/// Rayon task-graph parallel driver for the multifrontal assembly tree.
+///
+/// **Known bug (2026-04-20)**: under default rayon threading this
+/// driver produces a ~1-2 % non-deterministic inertia mismatch vs
+/// the sequential driver on the KKT corpus (reproducer:
+/// `src/bin/diag_acopr.rs`). `RAYON_NUM_THREADS=1` yields 0/169 585
+/// mismatches. Rule-outs so far: not per-thread workspace lifecycle
+/// (reproduces with a single global workspace mutex), not SIMD
+/// (reproduces with `FORCE_SCALAR_FRONTAL=true`). Until root-caused
+/// and fixed, callers should prefer
+/// [`factorize_multifrontal_with_workspace`]; this function is kept
+/// callable for debugging and for future speedup validation.
+///
+/// Phase 2.5.2 Step C. Intended bit-exact parity with
+/// [`factorize_multifrontal_supernodal_with_workspace`] on each
+/// supernode, because:
+///
+/// * Each supernode's assembly (extend-add over children) happens in
+///   a single task with children iterated in `snode.children` order —
+///   the same FP sum order as sequential.
+/// * Each task uses a per-thread `FactorWorkspace` drawn from
+///   `thread_ws[rayon::current_thread_index()]`, so scratch buffers
+///   are never shared across threads.
+/// * The shared contribution-block store is mutex-protected; each
+///   task only locks it briefly to stage its own children into a
+///   local `Vec<Option<ContribBlock>>` and, later, to deposit its
+///   own block. No mutex is held during the dense kernel.
+///
+/// Entry points that dispatch to this driver must check
+/// `n_snodes >= N_PAR_MIN` first and otherwise fall through to the
+/// sequential path (see `factorize_multifrontal_parallel_with_workspace`).
+///
+/// The `FactorWorkspace` passed in by the caller is **not** used for
+/// per-task scratch — it is reserved for the caller's amortisation
+/// semantics (future extension). Per-task workspaces are owned
+/// internally, one per rayon worker thread.
+pub fn factorize_multifrontal_supernodal_parallel(
+    matrix: &CscMatrix,
+    symbolic: &SymbolicFactorization,
+    params: &NumericParams,
+) -> Result<(SparseFactors, Inertia), FeralError> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    let n = symbolic.n;
+    let n_snodes = symbolic.supernodes.len();
+
+    // Setup — mirrors the sequential driver.
+    let (scaling_user, scaling_info) = compute_scaling(matrix, &params.scaling)?;
+    if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
+        eprintln!(
+            "warning: MC64 matching left {} of {} variables unmatched; \
+             scaling is identity on those rows/columns",
+            n_unmatched, n
+        );
+    }
+    let scaling_pivot_order: Vec<f64> =
+        symbolic.perm.iter().map(|&old| scaling_user[old]).collect();
+    let permuted = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv)?;
+    let full_pattern = permuted.symmetric_pattern();
+
+    let mut is_root = vec![true; n_snodes];
+    for snode in &symbolic.supernodes {
+        for &child_idx in &snode.children {
+            if child_idx < n_snodes {
+                is_root[child_idx] = false;
+            }
+        }
+    }
+
+    // Parent table: parents[c] == i iff i's children include c.
+    let mut parents: Vec<Option<usize>> = vec![None; n_snodes];
+    for (i, snode) in symbolic.supernodes.iter().enumerate() {
+        for &c in &snode.children {
+            if c < n_snodes {
+                parents[c] = Some(i);
+            }
+        }
+    }
+
+    // Pending-children atomic counter per supernode. A supernode is
+    // ready to process when its counter hits zero.
+    let pending: Vec<AtomicUsize> = symbolic
+        .supernodes
+        .iter()
+        .map(|s| {
+            let cnt = s.children.iter().filter(|&&c| c < n_snodes).count();
+            AtomicUsize::new(cnt)
+        })
+        .collect();
+
+    // Shared state: contrib blocks, result slots, first error.
+    let contrib_blocks: Mutex<Vec<Option<ContribBlock>>> =
+        Mutex::new((0..n_snodes).map(|_| None).collect());
+    let node_factors_out: Mutex<Vec<Option<NodeFactors>>> =
+        Mutex::new((0..n_snodes).map(|_| None).collect());
+    let first_error: Mutex<Option<FeralError>> = Mutex::new(None);
+
+    // Per-thread workspaces. Provision one workspace per rayon
+    // worker PLUS one extra slot for the calling thread, which may
+    // also execute tasks inside `rayon::scope` and has
+    // `current_thread_index() == None`. Bin the calling thread's
+    // tasks into the extra slot (index `num_threads`) to avoid
+    // mutex-serializing it against worker 0 — and to prevent the
+    // caller and worker 0 from time-sharing a single workspace.
+    let num_threads = rayon::current_num_threads().max(1);
+    let thread_ws: Vec<Mutex<FactorWorkspace>> = (0..num_threads + 1)
+        .map(|_| {
+            let mut w = FactorWorkspace::new();
+            w.row_map.resize(n, usize::MAX);
+            w.build_seen.resize(n, false);
+            Mutex::new(w)
+        })
+        .collect();
+
+    // Recursive task dispatcher. Inner type alias to keep the
+    // function signature below readable. Uses `run_task_inner` via
+    // a trampolining reference-cell trick so rayon scopes can spawn
+    // children.
+    rayon::scope(|scope| {
+        for leaf_idx in 0..n_snodes {
+            if pending[leaf_idx].load(Ordering::Acquire) == 0 {
+                run_parallel_task(
+                    scope,
+                    leaf_idx,
+                    symbolic,
+                    &permuted,
+                    &full_pattern,
+                    &scaling_pivot_order,
+                    &is_root,
+                    params,
+                    &parents,
+                    &pending,
+                    &contrib_blocks,
+                    &node_factors_out,
+                    &first_error,
+                    &thread_ws,
+                );
+            }
+        }
+    });
+
+    // Surface any first-error that the tasks captured.
+    let err_opt = match first_error.into_inner() {
+        Ok(v) => v,
+        Err(p) => p.into_inner(),
+    };
+    if let Some(err) = err_opt {
+        return Err(err);
+    }
+
+    // Collect node_factors in postorder (same order as sequential).
+    let nodes_vec = match node_factors_out.into_inner() {
+        Ok(v) => v,
+        Err(p) => p.into_inner(),
+    };
+    let mut final_nodes: Vec<NodeFactors> = Vec::with_capacity(n_snodes);
+    let mut total_inertia = Inertia {
+        positive: 0,
+        negative: 0,
+        zero: 0,
+    };
+    let mut needs_refinement = false;
+    for opt in nodes_vec.into_iter() {
+        let node = match opt {
+            Some(n) => n,
+            None => {
+                return Err(FeralError::InvalidInput(
+                    "parallel driver: supernode was not processed (graph stall)".to_string(),
+                ));
+            }
+        };
+        total_inertia.positive += node.inertia.positive;
+        total_inertia.negative += node.inertia.negative;
+        total_inertia.zero += node.inertia.zero;
+        if node.frontal_factors.needs_refinement {
+            needs_refinement = true;
+        }
+        final_nodes.push(node);
+    }
+
+    Ok((
+        SparseFactors {
+            n,
+            perm: symbolic.perm.clone(),
+            perm_inv: symbolic.perm_inv.clone(),
+            node_factors: final_nodes,
+            needs_refinement,
+            scaling: scaling_user,
+            scaling_info,
+        },
+        total_inertia,
+    ))
+}
+
+/// Spawn a single supernode factorization task into the rayon scope.
+///
+/// On completion, decrements the parent's pending counter and — if
+/// the parent becomes ready — recursively spawns the parent into the
+/// same scope. The top-level call seeds all leaf supernodes.
+#[allow(clippy::too_many_arguments)]
+fn run_parallel_task<'a>(
+    scope: &rayon::Scope<'a>,
+    snode_idx: usize,
+    symbolic: &'a SymbolicFactorization,
+    permuted: &'a CscMatrix,
+    full_pattern: &'a crate::sparse::csc::CscPattern,
+    scaling_pivot_order: &'a [f64],
+    is_root: &'a [bool],
+    params: &'a NumericParams,
+    parents: &'a [Option<usize>],
+    pending: &'a [std::sync::atomic::AtomicUsize],
+    contrib_blocks: &'a std::sync::Mutex<Vec<Option<ContribBlock>>>,
+    node_factors_out: &'a std::sync::Mutex<Vec<Option<NodeFactors>>>,
+    first_error: &'a std::sync::Mutex<Option<FeralError>>,
+    thread_ws: &'a [std::sync::Mutex<FactorWorkspace>],
+) {
+    use std::sync::atomic::Ordering;
+    scope.spawn(move |s| {
+        // Fast-exit if a prior task errored; the scope will still
+        // drain, we just skip actual work.
+        {
+            let err_guard = match first_error.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if err_guard.is_some() {
+                return;
+            }
+        }
+
+        let snode = &symbolic.supernodes[snode_idx];
+        let n_snodes = symbolic.supernodes.len();
+
+        // Stage child contributions into a task-local vec so the
+        // helper can read/take them without holding the shared lock.
+        // Most entries stay None; only the children's slots are
+        // populated. The helper writes its own slot into this same
+        // vec, which we extract after the helper returns.
+        let mut local_contribs: Vec<Option<ContribBlock>> = (0..n_snodes).map(|_| None).collect();
+        {
+            let mut shared = match contrib_blocks.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            for &c in &snode.children {
+                if c < n_snodes {
+                    local_contribs[c] = shared[c].take();
+                }
+            }
+        }
+
+        // Pick a per-thread workspace slot. `current_thread_index`
+        // returns Some(worker_idx) when this task runs on a rayon
+        // worker, and None when it runs on the calling thread
+        // (rayon::scope donates the caller's thread to execute
+        // tasks while it waits). The caller gets the last slot
+        // (`thread_ws.len() - 1`) so it does not contend with any
+        // worker's slot.
+        let thread_idx = rayon::current_thread_index().unwrap_or(thread_ws.len() - 1);
+        let thread_idx = thread_idx.min(thread_ws.len() - 1);
+        let ws_mtx = &thread_ws[thread_idx];
+
+        let result = {
+            let mut ws_guard = match ws_mtx.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            factor_one_supernode(
+                snode_idx,
+                symbolic,
+                permuted,
+                full_pattern,
+                scaling_pivot_order,
+                is_root,
+                params,
+                &mut ws_guard,
+                &mut local_contribs,
+            )
+        };
+
+        match result {
+            Ok(node) => {
+                let own_contrib = local_contribs[snode_idx].take();
+                {
+                    let mut shared = match contrib_blocks.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    shared[snode_idx] = own_contrib;
+                }
+                {
+                    let mut nf = match node_factors_out.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    nf[snode_idx] = Some(node);
+                }
+                if let Some(parent_idx) = parents[snode_idx] {
+                    let prev = pending[parent_idx].fetch_sub(1, Ordering::AcqRel);
+                    if prev == 1 {
+                        run_parallel_task(
+                            s,
+                            parent_idx,
+                            symbolic,
+                            permuted,
+                            full_pattern,
+                            scaling_pivot_order,
+                            is_root,
+                            params,
+                            parents,
+                            pending,
+                            contrib_blocks,
+                            node_factors_out,
+                            first_error,
+                            thread_ws,
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                let mut err_guard = match first_error.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                if err_guard.is_none() {
+                    *err_guard = Some(e);
+                }
+            }
+        }
+    });
+}
+
 /// Permute a CSC matrix: compute the lower triangle of P·A·Pᵀ.
 fn permute_csc_values(
     matrix: &CscMatrix,
