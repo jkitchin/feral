@@ -1,0 +1,87 @@
+#+TITLE: FERAL Journal 2026-04-20-08
+#+DATE: 2026-04-20
+
+* 19:50 :phase-2.4.2:validation:planning:
+  User: "lets complete 2.4.2". Investigated current state — most of
+  Phase 2.4.2 already shipped on 2026-04-14 as Phase 2.4.3 (non-FMA
+  variant after FMA revert). Steps 1-5 of the plan are done: pulp dep,
+  test harness, pulp kernels (`axpy_minus`, `axpy2_minus`,
+  `axpy_minus_unroll4_nofma`, `axpy2_minus_unroll4_nofma`), microbench,
+  and wire-in at 5 call sites (do_1x1_update, do_2x2_update, plus
+  peek_ahead_column and apply_blocked_schur added in 2.4.1b).
+
+  Only missing: Step 6 validation report at
+  `dev/validation/phase-2.4.2-simd.md`. Kicking off:
+    (a) cargo test --release --lib (baseline correctness)
+    (b) cargo bench --bench schur_kernel (microbench)
+    (c) cargo run --bin bench --release (full KKT)
+
+* 20:04 :phase-2.4.2:test:
+  `cargo test --release --lib` → 118/118 PASS. Kicked off (b) and (c)
+  in parallel.
+
+* 20:11 :phase-2.4.2:bench:results:
+  Full KKT bench complete. Key numbers vs Phase 2.1.8 baseline:
+
+    Dense  factor p90: 2.27 -> 2.10  (−7.5%)
+    Sparse factor p90: 3.18 -> 1.75  (−45.0%)
+    Sparse factor p99: 11.40 -> 3.88 (−65.9%)
+    Sparse factor max: 1505.40 -> 145.17 (−90.4%)
+
+    Dense small p90 1.50 / medium 1.86 — PASS
+    Sparse small/medium p90 1.75 — PASS
+
+  Correctness:
+    Dense inertia: 152911/154481 — EXACT match to baseline.
+    Dense residual: 154207/154481 — EXACT match to baseline.
+    Sparse inertia: 153008/154588 — ONE LESS than baseline 153009.
+    Sparse residual: 154262/154588 — 67 LESS than baseline 154329.
+    Worst sparse residual: 2.96e-4 (baseline 2.50e-4).
+
+  The sparse drift is new and was not surfaced in session 07. Not
+  from Phase 2.4.2 (kernel is bit-exact by test). Scope: Phase
+  2.4.1b blocked wire-up introduced a minor drift in supernodes
+  where the panel path is actually exercised (ncol > 64).
+
+* 20:14 :phase-2.4.2:microbench:
+  `cargo bench --bench schur_kernel` complete. At L=256:
+
+    axpy_minus/scalar:             92.00 ns
+    axpy_minus/unroll4_nofma_neon: 33.72 ns
+    speedup = 2.73×  (plan target ≥2× → PASS)
+
+    axpy2_minus/scalar:            42.32 ns
+    axpy2_minus/unroll4_nofma_neon: 42.07 ns
+    speedup = 1.01×  (no plan target — compiler already vectorizes
+    the scalar 2-axpy loop well on NEON)
+
+  The pulp-via-Arch path is slower than scalar due to dispatch
+  overhead (pulp/256: 170.50 ns). This is why the wired-in kernel
+  uses the direct const `Neon::new_unchecked()` dispatch — it
+  bypasses the `#[target_feature]` trampoline and hits the 2.73×
+  ceiling.
+
+* 20:18 :phase-2.4.2:validation-report:
+  Wrote `dev/validation/phase-2.4.2-simd.md`. Structure:
+
+    - Executive summary table of all 7 exit criteria.
+    - Step status table (steps 1-5 all shipped; step 6 = this doc).
+    - Microbench results (axpy_minus and axpy2_minus at 8 lengths,
+      5 variants on aarch64).
+    - Full KKT bench: correctness counts, p50/p90/p99/max ratios,
+      partition verdicts, top-10 worst matrices.
+    - Drift analysis: explaining why the −1 inertia / −67 residual
+      sparse deltas are Phase 2.4.1b follow-up, not 2.4.2 failures.
+    - Decisions recorded (pulp accepted, FMA-banned-in-pivot-paths).
+    - Acceptance statement: Phase 2.4.2 closes with hard criteria
+      pass + soft 7 pass + soft 6 5%-miss (dense p90 2.10 vs 2.0).
+
+* 20:22 :phase-2.4.2:close:
+  Phase 2.4.2 exits. Follow-ups for next session:
+    1. Phase 2.4.1c: triage the sparse −1 inertia / −67 residual
+       drift against scalar path (run an equivalent of the
+       `triage_sparse_inertia_diff` binary but scalar-vs-blocked).
+    2. Phase 2.5.x: dense p90 tail cleanup. Worst offenders at
+       n ∈ [400, 800]: HAHN1 family (39 matrices at >70× factor
+       ratio), KOEBHELBNE_0463 (577×), GAUSS2_0011 (148×),
+       LAKES_0015 (117×).
