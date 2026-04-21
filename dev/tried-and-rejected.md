@@ -631,3 +631,29 @@ Lever D.1 (FactorWorkspace arena) is the right next attempt.
 
 **Evidence.** `dev/research/sparse-tail-perf-2026-04-19.md`
 §5b, commit `8e68482`.
+
+## 2026-04-20: Phase 2.5.2 parallel driver root-cause — per-thread workspace theory
+
+**Context.** Multi-thread rayon driver has ~1-2 % inertia mismatch
+vs sequential on the KKT corpus; single-thread rayon gives 0 /
+38 878 mismatches. First hypothesis: per-thread FactorWorkspace is
+handing off dirty state (e.g. row_map invariant not restored) across
+tasks scheduled on the same worker.
+
+**Tried.** Replaced `Vec<Mutex<FactorWorkspace>>` (one per worker +
+one for caller) with a single global `Mutex<FactorWorkspace>` so
+every `factor_one_supernode` call serialises. Also tried
+`FORCE_SCALAR_FRONTAL=true` to bypass pulp SIMD dispatch. Both
+experiments still reproduced the race:
+
+- Single global workspace: 5 / 364 matrices (~1.4 %).
+- Scalar dense kernel: 5 / 279 matrices (~1.8 %).
+
+**Why rejected.** Neither rule-out fixed the race, so the root cause
+is neither workspace lifecycle nor SIMD nondeterminism. The race
+must live in a non-obvious part of the parallel orchestration
+(atomic ordering, rayon::scope happens-before subtleties, or shared
+data read outside mutex protection that I haven't spotted).
+
+**Evidence.** `src/bin/diag_acopr.rs`; `dev/journal/2026-04-20-11.org`
+entries 00:20 and 00:30.

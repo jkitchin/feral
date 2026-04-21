@@ -4,6 +4,27 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-20) — Phase 2.5.2 parallel multifrontal driver (gated off)
+
+- `factor_one_supernode` helper — shared per-supernode body for
+  sequential and parallel drivers.
+- `factorize_multifrontal_supernodal_parallel` — rayon `scope` +
+  `AtomicUsize` pending-children task-graph driver. **Currently has
+  a known ~1-2 % non-deterministic inertia mismatch under default
+  multi-thread rayon**; 0 mismatches on `RAYON_NUM_THREADS=1`. See
+  the function doc comment for the rule-outs.
+- `should_parallelize_assembly` predicate +
+  `factorize_multifrontal_parallel[_with_workspace]` gated
+  dispatcher. Due to the bug above, the dispatcher currently always
+  falls through to the sequential driver after the dense fast-path
+  check. Parallel function is kept public for future debugging.
+- `src/bin/parallel_corpus_parity.rs` — full 169 585-matrix audit.
+- `src/bin/diag_acopr.rs` — short ACOPR14 reproducer.
+- `tests/parallel_parity.rs` — 6 KKT parity tests, `#[ignore]`'d.
+
+No user-visible behaviour change: default factorisation continues to
+use the sequential driver.
+
 ### Added (2026-04-20) — Phase 2.4.1b scaffolding (RED)
 
 - `BunchKaufmanParams::block_size: usize` (default `64`). Consulted

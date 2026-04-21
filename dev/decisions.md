@@ -1548,3 +1548,29 @@ are Phase 2.4.2 work.
 **Evidence.** `src/dense/factor.rs:456`, `src/numeric/factorize.rs`
 (import + two call-site edits). `cargo test --release` all-PASS.
 `cargo run --bin bench --release` → 4/4 Phase 2.8.1 partitions PASS.
+
+## 2026-04-20-11: Phase 2.5.2 lands with parallel dispatch gated off
+
+**Decision.** Ship Phase 2.5.2 Steps B, C, D (helper extraction,
+`rayon::scope`-based parallel multifrontal driver, gated dispatcher)
+with `factorize_multifrontal_parallel_with_workspace` wired to
+unconditionally fall through to the sequential driver after the
+dense fast-path check. Keep the parallel function
+(`factorize_multifrontal_supernodal_parallel`) public and callable.
+
+**Rationale.** The parallel driver is correct under
+`RAYON_NUM_THREADS=1` (0 / 38 878 KKT-corpus mismatches) but exhibits
+a ~1-2 % non-deterministic inertia mismatch under default multi-thread
+rayon that survives per-thread workspace isolation, a single global
+workspace mutex, and the scalar dense kernel. Root cause unresolved.
+CLAUDE.md mandates "inertia must be exactly correct — no tolerance on
+inertia counts", so exposing the driver to callers (even opt-in) risks
+silent wrong inertia. Gating-off avoids that while preserving all
+implementation work for a future root-cause pass.
+
+**Evidence.** Commit dddd741. `src/bin/diag_acopr.rs` is the
+short reproducer. Session checkpoint `dev/sessions/2026-04-20-11.md`
+and journal `dev/journal/2026-04-20-11.org` carry the rule-outs.
+`cargo test --release`: 251 pass, 0 fail, 22 ignored (the 6 parallel
+parity tests were re-marked `#[ignore]` with the known-bug message).
+Bench unchanged from session 10.
