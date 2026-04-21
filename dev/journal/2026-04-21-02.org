@@ -1,0 +1,140 @@
+#+TITLE: Session 2026-04-21-02 journal
+#+STARTUP: overview
+
+* 09:00 :phase-2.6.5:start:
+Continuing from 2026-04-21-01 where the research note +
+implementation plan were landed. Survey evidence from the
+prior session:
+- 47% of KKT corpus has some compression leverage
+- 26% has significant leverage (compRat ≤ 0.7)
+- Top-10 worst-ratio matrices all sit in compRat 0.66-0.75
+Goal: execute Steps 2-8 of the plan.
+
+* 09:20 :step2:build_supermap:
+Wrote =src/symbolic/ldlt_compress.rs= with =SuperMap=,
+=build_supermap=, =compress_pattern=, =expand_permutation=.
+Cycle decomposition matches =DMUMPS_SYM_MWM=:
+1-cycle→singleton, 2-cycle→pair, k≥3→⌊k/2⌋ pairs + odd
+singleton, unmatched→singleton.
+
+Pattern compression uses a =Vec<u32>= tag-reset mark array so
+we don't re-zero ncmp entries per column — same trick AMD
+uses. Output is row-sorted per column (a stable
+=sort_unstable= inside each super-column).
+
+* 09:45 :step7:unit-tests:
+9 unit tests, all pass first try. Coverage:
+- all-singletons (identity perm)
+- two 2-cycles (simple pair extraction)
+- 3-cycle + fixed points (k≥3 decomposition)
+- unmatched → singleton
+- expand round-trip
+- compress contracts + drops self-loops
+- compress dedups parallel edges
+- compress preserves full-symmetric structure + sorted rows
+
+Evidence:
+#+begin_example
+test result: ok. 9 passed; 0 failed
+#+end_example
+
+* 10:00 :step6:wiring:SupernodeParams:
+Added =preprocess: OrderingPreprocess= field with =Default =
+None=. This broke 14 existing =SupernodeParams { nemin: N }=
+struct-literal sites across src/ + examples/ + tests/.
+
+Fix: add =..Default::default()= everywhere. =replace_all= on
+the two most common literal forms landed clean; the rest got
+individual edits. cargo fmt reformatted the long literals
+onto multi-line blocks — accepted the reformat.
+
+* 10:15 :step6:symbolic-wiring:
+Integrated into =symbolic_factorize_with_method=. The
+preprocess branch:
+#+begin_src rust
+OrderingPreprocess::LdltCompress => {
+    let (matching, _n_matched) = crate::scaling::mc64_matching(matrix)?;
+    let map = build_supermap(&matching);
+    if map.ncmp() == n {
+        run_external_ordering(&full_pattern, method)?
+    } else {
+        let cpat = compress_pattern(&full_pattern, &map);
+        let super_perm = run_external_ordering(&cpat, method)?;
+        expand_permutation(&super_perm, &map)
+    }
+}
+#+end_src
+
+The =ncmp == n= fast-path short-circuits the ~53% of the
+corpus where MC64 matches on-diagonal — no graph rebuild, no
+ordering retry. Otherwise order the compressed graph and
+expand the super-permutation back to length n.
+
+* 10:30 :step7:integration-tests:
+3 integration tests in =tests/ldlt_compress.rs=:
+- =compress_produces_valid_permutation_on_block_antidiag=:
+  4×4 with zero diagonals at rows/cols 2,3 and large
+  off-diagonal blocks. Verify perm is a bijection.
+- =compress_matches_baseline_inertia_tiny_kkt=: 3×3 KKT
+  with zero (2,2) block. Inertia must match base-vs-compress
+  bit-exactly.
+- =compress_on_diagonal_matrix_is_noop_equivalent=: diagonal
+  matrix. MC64 matches on-diagonal so ncmp==n triggers the
+  fast-path. Inertia 3 positive + 2 negative confirmed.
+
+Evidence: 3 passed. Fixed one typo — =Inertia= fields are
+=positive/negative=, not =pos/neg=.
+
+* 10:45 :step8:bench:
+New bin =diag_compression_bench=. Runs the worst-10
+high-leverage matrices + stride-5000 random sample (~33
+matrices).
+
+Headline numbers on 40 matrices:
+#+begin_example
+inertia mismatches: 0
+geomean cmp/base: sym=2.082 nnz=1.077 fac=0.604
+#+end_example
+
+Factor time *down 40%* geomean, zero inertia regressions.
+Symbolic time up 2× (expected — adds MC64 Hungarian call).
+
+Per-matrix standouts on the high-leverage tail:
+- MUONSINE_0000: fac Δ -57.1%
+- VESUVIO_0011/0019/0013: fac Δ -47 to -59%
+- HAHN1_0259: fac Δ -55.0%
+- GAUSS2_0000: fac Δ -56.5%
+
+* 11:00 :analysis:
+Interesting: =factor_nnz_estimate= goes *up* on the
+high-leverage tail (+41-58% on VESUVIO/GAUSS2/HAHN1) even
+though factor time goes *down* 50-60%. That's not
+fill-reduction — that's cache and locality. Paired columns
+adjacent in the pivot order means:
+1. The 2×2 BK pivot test succeeds more often (both partners
+   available without delay).
+2. Schur updates hit sequential memory.
+3. Fewer delayed pivots cascading to parents.
+
+Matches Duff-Pralet 2005 §5 observations. The "fill" metric
+is misleading — runtime is the real oracle.
+
+* 11:15 :decision:keep-opt-in:
+Per the plan, keep as opt-in in this session. Flip the
+default in a follow-up session with larger bench (stride
+200+) and residual parity tracking. Double-Hungarian-call
+when both Mc64 scaling and LdltCompress preprocess are on is
+a known out-of-scope micro-opt for later.
+
+* 11:30 :tests:final:
+Full test suite: 269 passed, 0 failed, 16 ignored. Clippy
+(=cargo clippy -- -D warnings=) clean on lib. fmt applied.
+Corpus bench p90 targets still PASS (no regression, because
+preprocess defaults to None).
+
+* 11:45 :wrap:
+Ready to commit. Files:
+- new: src/symbolic/ldlt_compress.rs, tests/ldlt_compress.rs,
+  src/bin/diag_compression_bench.rs
+- mod: src/symbolic/mod.rs, src/symbolic/supernode.rs,
+  Cargo.toml, 14 SupernodeParams call sites

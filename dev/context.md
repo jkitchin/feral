@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-21T10:51:12Z
+Generated: 2026-04-21T12:07:17Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,11 +59,11 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+f1391b0 parallel: fix seeding race, re-enable multifrontal parallel dispatch
 d60875b session: 2026-04-20-11 — Phase 2.5.2 B+C+D landed gated off
 dddd741 phase-2.5.2-B+C+D: parallel multifrontal driver (gated off due to race)
 b603b97 phase-2.5.2-B: extract factor_one_supernode helper
 47fdaab session: 2026-04-20-10 -- Phase 2.5 close (2.5.x done, 2.5.2 deferred)
-08a8803 phase-2.5.x: pool CscMatrix::to_dense via FactorWorkspace
 ```
 
 ## Test Status
@@ -71,7 +71,7 @@ b603b97 phase-2.5.2-B: extract factor_one_supernode helper
 
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-ff134c90cdad2715)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-007c4bcf70c203d3)
 
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok

@@ -336,7 +336,10 @@ fn arrow_apex_matrix() -> CscMatrix {
 }
 
 fn delay_sparse_params() -> SupernodeParams {
-    SupernodeParams { nemin: 1 }
+    SupernodeParams {
+        nemin: 1,
+        ..Default::default()
+    }
 }
 
 fn delay_numeric_params() -> feral::numeric::factorize::NumericParams {

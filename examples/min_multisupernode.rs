@@ -49,7 +49,10 @@ fn arrow_6x6() -> (CscMatrix, Vec<f64>) {
 
 fn dump_run(m: &CscMatrix, rhs: &[f64], nemin: usize) {
     println!("\n=== nemin = {} ===", nemin);
-    let snp = SupernodeParams { nemin };
+    let snp = SupernodeParams {
+        nemin,
+        ..Default::default()
+    };
     let sym = symbolic_factorize(m, &snp).unwrap();
 
     println!("perm        = {:?}", sym.perm);

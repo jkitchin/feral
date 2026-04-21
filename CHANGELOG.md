@@ -4,6 +4,29 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-21) — Phase 2.6.5 LDLᵀ-aware ordering (opt-in)
+
+- `src/symbolic/ldlt_compress.rs` — port of MUMPS `ICNTL(12) = 2`
+  (Duff-Pralet symmetric matching + quotient-graph compression).
+  Public API: `SuperMap`, `build_supermap`, `compress_pattern`,
+  `expand_permutation`.
+- `SupernodeParams::preprocess: OrderingPreprocess` field — new
+  opt-in enum. Default `None`; `LdltCompress` runs MC64 matching,
+  contracts each matched pair into one super-variable, orders the
+  compressed graph, and expands the super-permutation before handing
+  it to the rest of the symbolic pipeline.
+- `src/bin/diag_compression_bench.rs` — corpus bench. On the
+  worst-10 high-leverage matrices + stride-5000 sample (40 total):
+  factor-time geomean `cmp/base = 0.604` (40% faster), 0 inertia
+  mismatches. MUONSINE / VESUVIO / HAHN1 / GAUSS2 family factor
+  47-60% faster with compression on.
+- `tests/ldlt_compress.rs` — 3 integration tests; 9 unit tests in
+  the module.
+
+Default stays `OrderingPreprocess::None`. Flip is deferred to a
+follow-up session with a larger-scale residual-parity-tracking
+bench (plan: `dev/plans/phase-2.6.5-ldlt-compressed-graph.md`).
+
 ### Added (2026-04-21) — Phase 2.5.2 parallel multifrontal driver (live)
 
 - `factor_one_supernode` helper — shared per-supernode body for

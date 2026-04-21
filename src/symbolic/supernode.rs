@@ -13,11 +13,35 @@ pub struct SupernodeParams {
     /// Default: 32 (matching SSIDS). MUMPS uses 5.
     /// Setting nemin=1 effectively disables amalgamation.
     pub nemin: usize,
+
+    /// Opt-in ordering preprocessing. Default `None`.
+    ///
+    /// Set to `OrderingPreprocess::LdltCompress` to run MC64 symmetric
+    /// matching and collapse each matched pair into one super-variable
+    /// before handing the graph to AMD/METIS/SCOTCH. Matches MUMPS's
+    /// `ICNTL(12) = 2` for SYM=2. Opt-in while the corpus bench is
+    /// collected; see `dev/plans/phase-2.6.5-ldlt-compressed-graph.md`.
+    pub preprocess: OrderingPreprocess,
+}
+
+/// Ordering-stage preprocessing flag.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum OrderingPreprocess {
+    /// No preprocessing. The fill-reducing ordering runs directly on
+    /// the symmetric pattern.
+    #[default]
+    None,
+    /// Duff-Pralet symmetric matching + quotient-graph compression.
+    /// See `crate::symbolic::ldlt_compress`.
+    LdltCompress,
 }
 
 impl Default for SupernodeParams {
     fn default() -> Self {
-        Self { nemin: 32 }
+        Self {
+            nemin: 32,
+            preprocess: OrderingPreprocess::None,
+        }
     }
 }
 
@@ -299,7 +323,10 @@ mod tests {
         let counts = column_counts(&pat, &etree);
 
         // With nemin=1, we get 3 supernodes: {0}, {1}, {2,3}
-        let params = SupernodeParams { nemin: 1 };
+        let params = SupernodeParams {
+            nemin: 1,
+            ..Default::default()
+        };
         let snodes = find_supernodes(&etree, &counts, &params);
         assert_eq!(snodes.len(), 3);
 
@@ -317,7 +344,10 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams { nemin: 32 };
+        let params = SupernodeParams {
+            nemin: 32,
+            ..Default::default()
+        };
         let snodes = find_supernodes(&etree, &counts, &params);
 
         // All 4 columns should be amalgamated into 1 supernode
@@ -338,7 +368,10 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams { nemin: 1 };
+        let params = SupernodeParams {
+            nemin: 1,
+            ..Default::default()
+        };
         let snodes = find_supernodes(&etree, &counts, &params);
 
         // Should be 1 supernode with 3 columns (fundamental)
@@ -357,7 +390,10 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams { nemin: 1 };
+        let params = SupernodeParams {
+            nemin: 1,
+            ..Default::default()
+        };
         let snodes = find_supernodes(&etree, &counts, &params);
 
         // Two fundamental supernodes of size 2
@@ -374,7 +410,10 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams { nemin: 1 };
+        let params = SupernodeParams {
+            nemin: 1,
+            ..Default::default()
+        };
         let snodes = find_supernodes(&etree, &counts, &params);
 
         // Each column is independent (no parents), so 4 supernodes
@@ -396,7 +435,10 @@ mod tests {
         let counts = column_counts(&pat, &etree);
 
         for nemin in [1, 5, 32] {
-            let params = SupernodeParams { nemin };
+            let params = SupernodeParams {
+                nemin,
+                ..Default::default()
+            };
             let snodes = find_supernodes(&etree, &counts, &params);
             let total: usize = snodes.iter().map(|s| s.ncol()).sum();
             assert_eq!(total, 5, "nemin={}: total columns {} != 5", nemin, total);
@@ -417,7 +459,10 @@ mod tests {
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams { nemin: 1 };
+        let params = SupernodeParams {
+            nemin: 1,
+            ..Default::default()
+        };
         let snodes = find_supernodes(&etree, &counts, &params);
 
         for (i, s) in snodes.iter().enumerate() {

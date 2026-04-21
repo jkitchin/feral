@@ -279,7 +279,10 @@ fn triage(stem: &str) {
 
     for nemin in [32usize, 10000] {
         println!("\n  --- nemin={} ---", nemin);
-        let snp = SupernodeParams { nemin };
+        let snp = SupernodeParams {
+            nemin,
+            ..Default::default()
+        };
         let t = Instant::now();
         let sym = symbolic_factorize(&csc, &snp).expect("symbolic");
         println!(

@@ -130,7 +130,10 @@ fn main() {
 
     // ---- Sparse path with nemin=10000 (single supernode, matches bench) ----
     println!("\n--- SPARSE (nemin=10000, single supernode) ---");
-    let snode_one = SupernodeParams { nemin: 10000 };
+    let snode_one = SupernodeParams {
+        nemin: 10000,
+        ..Default::default()
+    };
     let sym_o = symbolic_factorize(&csc, &snode_one).expect("symbolic");
     let (sfac_o, sinertia_o) = factorize_multifrontal(&csc, &sym_o, &np).expect("sparse factor");
     println!(
@@ -150,7 +153,10 @@ fn main() {
 
     // ---- Sparse path with nemin=1 (no amalgamation) ----
     println!("\n--- SPARSE (nemin=1, no amalgamation) ---");
-    let snode_none = SupernodeParams { nemin: 1 };
+    let snode_none = SupernodeParams {
+        nemin: 1,
+        ..Default::default()
+    };
     let sym_n = symbolic_factorize(&csc, &snode_none).expect("symbolic");
     let (sfac_n, sinertia_n) = factorize_multifrontal(&csc, &sym_n, &np).expect("sparse factor");
     println!(

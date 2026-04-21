@@ -59,6 +59,21 @@ const LOG_HUGE: f64 = 709.0;
 /// `ScalingInfo::PartialSingular { n_unmatched }` and the
 /// unmatched positions are filled with `1.0` as an identity
 /// fallback.
+/// Compute only the MC64 matching, returning `(perm, n_matched)`.
+/// Diagnostic helper for Phase 2.6.5; skips the scaling-vector
+/// post-processing that `compute_symmetric` does.
+pub(crate) fn matching_perm(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), FeralError> {
+    let n = matrix.n;
+    if n == 0 {
+        return Ok((Vec::new(), 0));
+    }
+    let (cost_graph, _cmax) = build_cost_graph(matrix)?;
+    let Matching {
+        perm, n_matched, ..
+    } = hungarian_match(&cost_graph);
+    Ok((perm, n_matched))
+}
+
 pub(crate) fn compute_symmetric(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
     let n = matrix.n;
 

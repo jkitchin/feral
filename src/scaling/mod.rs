@@ -41,6 +41,19 @@ mod hungarian;
 mod infnorm;
 mod mc64;
 
+/// Compute the MC64 symmetric matching on the lower-triangle CSC
+/// matrix and return the column-to-row permutation (`perm[j]` is the
+/// row matched to column `j`; `usize::MAX` marks unmatched columns).
+///
+/// Exposed for Phase 2.6.5 ordering-compression diagnostic work —
+/// the matching cycle structure drives the MUMPS-style
+/// `ICNTL(12)=2` quotient-graph compression. Internally this is
+/// the same Hungarian call that `Mc64Symmetric` scaling uses, minus
+/// the symmetric-average post-processing.
+pub fn mc64_matching(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), FeralError> {
+    mc64::matching_perm(matrix)
+}
+
 /// User-facing scaling strategy selector.
 ///
 /// Default is `Auto` — adaptive shape-based routing that picks

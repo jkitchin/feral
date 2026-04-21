@@ -1,4 +1,5 @@
 pub mod column_counts;
+pub mod ldlt_compress;
 pub mod supernode;
 
 use crate::error::FeralError;
@@ -8,7 +9,8 @@ use crate::ordering::postorder::postorder;
 use crate::sparse::csc::{CscMatrix, CscPattern};
 
 pub use column_counts::{column_counts, column_counts_gnp, total_factor_nnz};
-pub use supernode::{find_supernodes, Supernode, SupernodeParams};
+pub use ldlt_compress::{build_supermap, compress_pattern, expand_permutation, SuperMap};
+pub use supernode::{find_supernodes, OrderingPreprocess, Supernode, SupernodeParams};
 
 /// Which fill-reducing ordering to use in [`symbolic_factorize_with_method`].
 ///
@@ -281,8 +283,31 @@ pub fn symbolic_factorize_with_method(
     // downstream pipeline (postorder composition, etree, column counts,
     // supernode amalgamation, memory plan) is identical regardless of
     // which ordering produced `initial_perm`.
+    //
+    // If `snode_params.preprocess == LdltCompress`, run MC64 symmetric
+    // matching, build the super-variable map, order the compressed
+    // graph, and expand the resulting super-permutation back to
+    // length `n` before handing it to the rest of the pipeline. See
+    // `src/symbolic/ldlt_compress.rs` and
+    // `dev/plans/phase-2.6.5-ldlt-compressed-graph.md`.
     let full_pattern = matrix.symmetric_pattern();
-    let amd_perm: Vec<usize> = run_external_ordering(&full_pattern, method)?;
+    let amd_perm: Vec<usize> = match snode_params.preprocess {
+        OrderingPreprocess::None => run_external_ordering(&full_pattern, method)?,
+        OrderingPreprocess::LdltCompress => {
+            let (matching, _n_matched) = crate::scaling::mc64_matching(matrix)?;
+            let map = build_supermap(&matching);
+            if map.ncmp() == n {
+                // Matching gives no compression leverage; fall through
+                // to the uncompressed path rather than build and walk
+                // an identical-size graph.
+                run_external_ordering(&full_pattern, method)?
+            } else {
+                let cpat = compress_pattern(&full_pattern, &map);
+                let super_perm = run_external_ordering(&cpat, method)?;
+                expand_permutation(&super_perm, &map)
+            }
+        }
+    };
 
     // Step 2: Build the etree on the permuted pattern. This etree is
     // intermediate — we use it to compute the postorder and then discard it.
@@ -414,7 +439,10 @@ mod tests {
             CscMatrix::from_triplets(4, &[0, 1, 1, 2, 2, 3, 3], &[0, 0, 1, 1, 2, 2, 3], &[1.0; 7])
                 .unwrap();
 
-        let params = SupernodeParams { nemin: 32 };
+        let params = SupernodeParams {
+            nemin: 32,
+            ..Default::default()
+        };
         let sym = symbolic_factorize(&m, &params).unwrap();
 
         assert_eq!(sym.n, 4);
@@ -439,7 +467,10 @@ mod tests {
         let m = CscMatrix::from_triplets(3, &[0, 1, 2, 1, 2, 2], &[0, 0, 0, 1, 1, 2], &[1.0; 6])
             .unwrap();
 
-        let params = SupernodeParams { nemin: 1 };
+        let params = SupernodeParams {
+            nemin: 1,
+            ..Default::default()
+        };
         let sym = symbolic_factorize(&m, &params).unwrap();
 
         // For a dense matrix, factor NNZ = n*(n+1)/2 = 6
@@ -495,7 +526,10 @@ mod tests {
         )
         .unwrap();
 
-        let params = SupernodeParams { nemin: 1 };
+        let params = SupernodeParams {
+            nemin: 1,
+            ..Default::default()
+        };
         let sym = symbolic_factorize(&m, &params).unwrap();
 
         for &cs in &sym.contrib_sizes {
