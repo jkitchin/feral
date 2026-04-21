@@ -731,18 +731,6 @@ pub const N_PAR_MIN: usize = 32;
 /// 2. At least one supernode has ≥ 2 children — a pure postorder
 ///    chain has zero sibling parallelism, so the parallel driver
 ///    would add only overhead.
-///
-/// **Known bug (2026-04-20)**: the parallel driver has a ~1-2%
-/// non-deterministic inertia mismatch on the multi-thread path
-/// (0/169 585 on `RAYON_NUM_THREADS=1`, ~2 % on default threading).
-/// The mismatch survives both per-thread workspaces and a single
-/// global workspace mutex, and survives the scalar dense kernel —
-/// so it is not workspace lifecycle and not SIMD nondeterminism.
-/// Root cause TBD. Until fixed, this predicate is intentionally
-/// disabled at the dispatcher so `factorize_multifrontal_parallel*`
-/// always falls through to the sequential path. See diag binary
-/// `src/bin/diag_acopr.rs` and session checkpoint 2026-04-20-11
-/// for the reproducer and rule-outs.
 pub fn should_parallelize_assembly(symbolic: &SymbolicFactorization) -> bool {
     if symbolic.supernodes.len() < N_PAR_MIN {
         return false;
@@ -754,17 +742,13 @@ pub fn should_parallelize_assembly(symbolic: &SymbolicFactorization) -> bool {
 ///
 /// Dispatch order:
 /// 1. [`should_use_dense_fast_path`] — dense fast-path takes precedence.
-/// 2. Sequential multifrontal (same as
-///    [`factorize_multifrontal_with_workspace`]).
-///
-/// The parallel driver ([`factorize_multifrontal_supernodal_parallel`])
-/// is **temporarily disabled** at this dispatcher due to the
-/// known multi-thread inertia-mismatch bug documented on
-/// [`should_parallelize_assembly`]. Callers who want to exercise it
-/// for debugging / bench must call the parallel function directly.
+/// 2. If [`should_parallelize_assembly`] returns true, dispatch to
+///    the rayon driver ([`factorize_multifrontal_supernodal_parallel`]).
+/// 3. Otherwise, sequential multifrontal.
 ///
 /// The workspace `ws` is used by the dense fast-path and the
-/// sequential fall-through.
+/// sequential fall-through; the parallel driver owns its own
+/// per-thread scratch internally.
 pub fn factorize_multifrontal_parallel_with_workspace(
     matrix: &CscMatrix,
     symbolic: &SymbolicFactorization,
@@ -774,9 +758,9 @@ pub fn factorize_multifrontal_parallel_with_workspace(
     if should_use_dense_fast_path(matrix.n, matrix.row_idx.len()) {
         return dense_fast_factor_with_workspace(matrix, params, ws);
     }
-    // KNOWN BUG: parallel dispatch disabled — see
-    // `should_parallelize_assembly` doc comment.
-    let _ = should_parallelize_assembly(symbolic);
+    if should_parallelize_assembly(symbolic) {
+        return factorize_multifrontal_supernodal_parallel(matrix, symbolic, params);
+    }
     factorize_multifrontal_supernodal_with_workspace(matrix, symbolic, params, ws)
 }
 
@@ -792,18 +776,7 @@ pub fn factorize_multifrontal_parallel(
 
 /// Rayon task-graph parallel driver for the multifrontal assembly tree.
 ///
-/// **Known bug (2026-04-20)**: under default rayon threading this
-/// driver produces a ~1-2 % non-deterministic inertia mismatch vs
-/// the sequential driver on the KKT corpus (reproducer:
-/// `src/bin/diag_acopr.rs`). `RAYON_NUM_THREADS=1` yields 0/169 585
-/// mismatches. Rule-outs so far: not per-thread workspace lifecycle
-/// (reproduces with a single global workspace mutex), not SIMD
-/// (reproduces with `FORCE_SCALAR_FRONTAL=true`). Until root-caused
-/// and fixed, callers should prefer
-/// [`factorize_multifrontal_with_workspace`]; this function is kept
-/// callable for debugging and for future speedup validation.
-///
-/// Phase 2.5.2 Step C. Intended bit-exact parity with
+/// Phase 2.5.2 Step C. Bit-exact parity with
 /// [`factorize_multifrontal_supernodal_with_workspace`] on each
 /// supernode, because:
 ///
@@ -831,7 +804,7 @@ pub fn factorize_multifrontal_supernodal_parallel(
     symbolic: &SymbolicFactorization,
     params: &NumericParams,
 ) -> Result<(SparseFactors, Inertia), FeralError> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
 
     let n = symbolic.n;
@@ -905,30 +878,45 @@ pub fn factorize_multifrontal_supernodal_parallel(
         })
         .collect();
 
-    // Recursive task dispatcher. Inner type alias to keep the
-    // function signature below readable. Uses `run_task_inner` via
-    // a trampolining reference-cell trick so rayon scopes can spawn
-    // children.
-    rayon::scope(|scope| {
-        for leaf_idx in 0..n_snodes {
-            if pending[leaf_idx].load(Ordering::Acquire) == 0 {
-                run_parallel_task(
-                    scope,
-                    leaf_idx,
-                    symbolic,
-                    &permuted,
-                    &full_pattern,
-                    &scaling_pivot_order,
-                    &is_root,
-                    params,
-                    &parents,
-                    &pending,
-                    &contrib_blocks,
-                    &node_factors_out,
-                    &first_error,
-                    &thread_ws,
-                );
+    // Collect the true leaves (supernodes with no children) BEFORE
+    // entering the scope. Using `pending[i].load() == 0` as the
+    // seeding predicate is unsound: once the scope is live, workers
+    // execute previously-spawned tasks concurrently with this loop
+    // and decrement parents' counters. A non-leaf whose pending
+    // counter just hit zero would then be spawned twice — once here
+    // by the caller, and again by the final child via the
+    // fetch_sub==1 trampoline in `run_parallel_task`.
+    let leaves: Vec<usize> = symbolic
+        .supernodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            if s.children.iter().all(|&c| c >= n_snodes) {
+                Some(i)
+            } else {
+                None
             }
+        })
+        .collect();
+
+    rayon::scope(|scope| {
+        for &leaf_idx in &leaves {
+            run_parallel_task(
+                scope,
+                leaf_idx,
+                symbolic,
+                &permuted,
+                &full_pattern,
+                &scaling_pivot_order,
+                &is_root,
+                params,
+                &parents,
+                &pending,
+                &contrib_blocks,
+                &node_factors_out,
+                &first_error,
+                &thread_ws,
+            );
         }
     });
 

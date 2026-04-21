@@ -36,6 +36,22 @@ path = "src/bin/parallel_corpus_parity.rs"
 name = "diag_acopr"
 path = "src/bin/diag_acopr.rs"
 
+[[bin]]
+name = "diag_par_repeat"
+path = "src/bin/diag_par_repeat.rs"
+
+[[bin]]
+name = "diag_parent_unique"
+path = "src/bin/diag_parent_unique.rs"
+
+[[bin]]
+name = "diag_par_firstdiff"
+path = "src/bin/diag_par_firstdiff.rs"
+
+[[bin]]
+name = "diag_par_frontal_hash"
+path = "src/bin/diag_par_frontal_hash.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

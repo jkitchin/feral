@@ -1,0 +1,82 @@
+#+TITLE: Journal 2026-04-21-01
+#+AUTHOR: Claude (Opus 4.7)
+
+* 06:00 :parallel:race:diag:
+Picked up from session 11's unresolved race. Hypothesis at
+entry: either (a) assembly produces different frontal values
+between back-to-back parallel runs, or (b) factor_frontal_blocked
+is non-deterministic on identical input. Plan: instrument
+factor_one_supernode with a pre-factor frontal hash gated by
+FERAL_HASH_FRONTAL env var, run twice on a matrix known to
+diverge, diff the hash streams.
+
+* 06:15 :parallel:diag:
+First instrumentation attempt targeted ACOPP14_0006 (name from
+session 11 summary). 200 attempts → no divergence. Re-ran
+diag_par_repeat to confirm which matrices actually diverge:
+ACOPR14_0003, ACOPR14_0013, ACOPR14_0015 (ACOP"R"14 not
+ACOP"P"14 — the summary had a typo). Re-pointed
+diag_par_frontal_hash to ACOPR14_0003.
+
+* 06:25 :parallel:race:root-cause:
+Divergence hit at attempt 68. Diff of sorted hash streams:
+: 84d83
+: < FRONTAL_HASH snode=173 nrow=177 ncol=27 hash=3a222...
+: 164a164
+: > FRONTAL_HASH snode=9 nrow=5 ncol=2 hash=b7237...
+Run A: 174 hashes including snode 9 once and snode 173 once
+(root). Run B: 174 hashes including snode 9 TWICE and snode
+173 ZERO times. This is a task-graph dispatch bug, not a
+dense-kernel nondeterminism bug. A supernode is being factored
+twice and another is being skipped.
+
+Traced the dispatch: factorize_multifrontal_supernodal_parallel
+seeds leaves via ~pending[i].load() == 0~ inside rayon::scope.
+While the seed loop runs on the caller, workers execute
+spawned leaves and decrement parents' pending counters. Any
+non-leaf whose final child completes during seeding becomes
+pending==0 and gets spawned by the caller — AND the last
+child's trampoline via ~fetch_sub==1~ also spawns it. Double
+dispatch.
+
+* 06:35 :parallel:fix:
+Replaced the dynamic predicate with a static filter: collect
+leaves before entering the scope as ~s.children.all(|&c| c >=
+n_snodes)~ — supernodes with no children. This set is
+unambiguous and can be captured before any worker runs. Code:
+src/numeric/factorize.rs:929-961.
+
+* 06:42 :parallel:validate:
+Ran diag_par_frontal_hash 200 attempts on ACOPR14_0003 →
+0 divergence. Ran diag_par_repeat across the full corpus →
+38 878 runs, par-vs-par-nondet = 0, par-vs-seq-mismatch = 0.
+Fix is correct.
+
+* 06:50 :parallel:reenable:
+Removed FERAL_HASH_FRONTAL instrumentation. Removed the "KNOWN
+BUG" doc blocks from should_parallelize_assembly,
+factorize_multifrontal_supernodal_parallel, and
+factorize_multifrontal_parallel_with_workspace. Changed the
+dispatcher body to route to the parallel driver when
+should_parallelize_assembly is true. Removed ~#[ignore]~ from
+all 6 parallel_parity tests.
+
+Verified:
+- ~cargo test --release --test parallel_parity~: 6/6 pass.
+- ~cargo test --release~: 251 passed, 1 unrelated ignored.
+- ~cargo clippy -- -D warnings~: clean (after removing unused
+  CscMatrix imports from diag_parent_unique and diag_par_repeat).
+- ~cargo fmt --check~: pass after fmt.
+
+* 07:00 :bench:
+~cargo run --bin bench --release~ post-reenable:
+- Dense small-frontal p90: 1.35 (unchanged — dense fast-path
+  dispatches before parallel)
+- Dense medium p90: 1.75 (unchanged)
+- Sparse small-frontal p90: 1.59
+- Sparse medium p90: 1.59
+No regressions on either dense bucket. The parallel path is now
+active for matrices meeting ~should_parallelize_assembly~
+(~n_snodes >= 32~ AND at least one supernode with ≥ 2 children).
+
+Phase 2.5.2 complete.

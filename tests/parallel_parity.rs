@@ -140,37 +140,31 @@ fn assert_parity(path: &str) {
 }
 
 #[test]
-#[ignore = "parallel driver has a known ~1-2% non-deterministic inertia mismatch under multi-thread rayon (session 2026-04-20-11); run with `cargo test --ignored` for debugging"]
 fn parallel_parity_avion2_0000() {
     assert_parity("data/matrices/kkt/AVION2/AVION2_0000.mtx");
 }
 
 #[test]
-#[ignore = "parallel driver has a known ~1-2% non-deterministic inertia mismatch under multi-thread rayon (session 2026-04-20-11); run with `cargo test --ignored` for debugging"]
 fn parallel_parity_batch_0000() {
     assert_parity("data/matrices/kkt/BATCH/BATCH_0000.mtx");
 }
 
 #[test]
-#[ignore = "parallel driver has a known ~1-2% non-deterministic inertia mismatch under multi-thread rayon (session 2026-04-20-11); run with `cargo test --ignored` for debugging"]
 fn parallel_parity_vesuvio_0000() {
     assert_parity("data/matrices/kkt/VESUVIO/VESUVIO_0000.mtx");
 }
 
 #[test]
-#[ignore = "parallel driver has a known ~1-2% non-deterministic inertia mismatch under multi-thread rayon (session 2026-04-20-11); run with `cargo test --ignored` for debugging"]
 fn parallel_parity_hahn1_0000() {
     assert_parity("data/matrices/kkt/HAHN1/HAHN1_0000.mtx");
 }
 
 #[test]
-#[ignore = "parallel driver has a known ~1-2% non-deterministic inertia mismatch under multi-thread rayon (session 2026-04-20-11); run with `cargo test --ignored` for debugging"]
 fn parallel_parity_lakes_1199() {
     assert_parity("data/matrices/kkt/LAKES/LAKES_1199.mtx");
 }
 
 #[test]
-#[ignore = "parallel driver has a known ~1-2% non-deterministic inertia mismatch under multi-thread rayon (session 2026-04-20-11); run with `cargo test --ignored` for debugging"]
 fn parallel_parity_mss1_0009_delayed_pivots() {
     assert_parity("data/matrices/kkt/MSS1/MSS1_0009.mtx");
 }

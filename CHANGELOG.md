@@ -4,26 +4,36 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
-### Added (2026-04-20) — Phase 2.5.2 parallel multifrontal driver (gated off)
+### Added (2026-04-21) — Phase 2.5.2 parallel multifrontal driver (live)
 
 - `factor_one_supernode` helper — shared per-supernode body for
   sequential and parallel drivers.
 - `factorize_multifrontal_supernodal_parallel` — rayon `scope` +
-  `AtomicUsize` pending-children task-graph driver. **Currently has
-  a known ~1-2 % non-deterministic inertia mismatch under default
-  multi-thread rayon**; 0 mismatches on `RAYON_NUM_THREADS=1`. See
-  the function doc comment for the rule-outs.
-- `should_parallelize_assembly` predicate +
-  `factorize_multifrontal_parallel[_with_workspace]` gated
-  dispatcher. Due to the bug above, the dispatcher currently always
-  falls through to the sequential driver after the dense fast-path
-  check. Parallel function is kept public for future debugging.
+  `AtomicUsize` pending-children task-graph driver. Bit-exact parity
+  with the sequential driver (0 / 38 878 KKT-corpus mismatches in
+  `diag_par_repeat`). Dispatcher
+  `factorize_multifrontal_parallel[_with_workspace]` routes to this
+  driver when `should_parallelize_assembly` returns true.
+- `should_parallelize_assembly` predicate — true when
+  `n_snodes >= N_PAR_MIN (32)` and at least one supernode has ≥ 2
+  children.
 - `src/bin/parallel_corpus_parity.rs` — full 169 585-matrix audit.
-- `src/bin/diag_acopr.rs` — short ACOPR14 reproducer.
-- `tests/parallel_parity.rs` — 6 KKT parity tests, `#[ignore]`'d.
+- `src/bin/diag_acopr.rs` / `diag_par_repeat` / `diag_par_firstdiff`
+  / `diag_par_frontal_hash` / `diag_parent_unique` — diagnostic
+  binaries retained for future debugging.
+- `tests/parallel_parity.rs` — 6 KKT parity tests (all pass).
 
-No user-visible behaviour change: default factorisation continues to
-use the sequential driver.
+### Fixed (2026-04-21) — Parallel driver seeding race
+
+- Seed loop in `factorize_multifrontal_supernodal_parallel` used a
+  dynamic `pending[i].load() == 0` predicate inside `rayon::scope`.
+  Workers running spawned leaves decrement parents' counters
+  concurrently with the seed loop; a non-leaf whose final child
+  completed mid-seed could be spawned twice (once by the caller,
+  once by the last child's `fetch_sub==1` trampoline). Replaced
+  with a static "no children" filter captured before the scope.
+  Root cause found via `FERAL_HASH_FRONTAL` instrumentation on
+  ACOPR14_0003.
 
 ### Added (2026-04-20) — Phase 2.4.1b scaffolding (RED)
 

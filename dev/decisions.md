@@ -1574,3 +1574,30 @@ and journal `dev/journal/2026-04-20-11.org` carry the rule-outs.
 `cargo test --release`: 251 pass, 0 fail, 22 ignored (the 6 parallel
 parity tests were re-marked `#[ignore]` with the known-bug message).
 Bench unchanged from session 10.
+
+## 2026-04-21-01: Phase 2.5.2 parallel dispatch re-enabled (race root-caused)
+
+**Decision.** Reverse the gating from session 2026-04-20-11. The
+dispatcher `factorize_multifrontal_parallel_with_workspace` now
+routes to `factorize_multifrontal_supernodal_parallel` when
+`should_parallelize_assembly` is true (after the dense fast-path).
+All `#[ignore]` tags on `tests/parallel_parity.rs` are removed.
+
+**Rationale.** Root cause of the ~1-2 % non-deterministic inertia
+mismatch: the seed loop used `pending[i].load() == 0` inside
+`rayon::scope`. Workers execute spawned leaves concurrently and
+decrement parents' counters during seeding, so a non-leaf whose
+final child completed mid-seed would be spawned twice — once by
+the caller (seeing the newly-zeroed pending) and again by the
+last child via the `fetch_sub==1` trampoline. Replaced with a
+static "no children" filter captured before the scope.
+
+**Evidence.** `src/numeric/factorize.rs:929-961` (the seed
+filter). `diag_par_frontal_hash` on ACOPR14_0003: caught an
+attempt-68 divergence with run B factoring snode 9 twice and
+skipping snode 173 (root). Post-fix: 200 attempts → 0 divergence.
+`diag_par_repeat` on full corpus: 38 878 runs, par-vs-par-nondet
+= 0, par-vs-seq-mismatch = 0. `cargo test --release --test
+parallel_parity`: 6/6 pass. `cargo test --release`: 251 pass,
+0 fail. `cargo clippy -- -D warnings`: clean. Bench: dense p90
+unchanged (1.35, 1.75); sparse p90 1.59/1.59.
