@@ -36,6 +36,11 @@ serde_json = "1"
 # src/dense/schur_kernel.rs; see dev/decisions.md for the
 # replacement trigger and interface boundary.
 pulp = { version = "0.22.2", default-features = false, features = ["x86-v3"] }
+# Data-parallelism for the multifrontal assembly tree (Phase 2.5.2).
+# Pure-Rust, fits the zero-non-Rust-dep constraint. Used only by
+# the opt-in parallel driver in src/numeric/factorize.rs; the
+# sequential path remains the default and reference implementation.
+rayon = "1.10"
 # Ordering crates are consumed by `symbolic_factorize_with_method`
 # via the OrderingMethod enum in src/symbolic/mod.rs. The in-tree
 # src/ordering/amd.rs is still the default (OrderingMethod::Amd)

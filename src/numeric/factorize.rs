@@ -487,237 +487,32 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     };
     let mut needs_refinement = false;
 
-    // Process supernodes in postorder (children before parents)
+    // Process supernodes in postorder (children before parents).
+    // Phase 2.5.2 Step B: per-supernode body extracted into
+    // `factor_one_supernode` so a parallel task-graph driver (Step C)
+    // can invoke it independently per-supernode. Sequential behaviour
+    // is bit-exact against the pre-extraction loop — the helper is a
+    // direct lift of the original loop body.
     for snode_idx in 0..n_snodes {
-        let snode = &symbolic.supernodes[snode_idx];
-        let own_ncol = snode.ncol();
-        let nrow = snode.nrow;
-
-        if nrow == 0 || own_ncol == 0 {
-            node_factors.push(NodeFactors {
-                first_col: snode.first_col,
-                ncol: 0,
-                nelim: 0,
-                n_delayed_in: 0,
-                nrow: 0,
-                row_indices: Vec::new(),
-                frontal_factors: FrontalFactors {
-                    nrow: 0,
-                    ncol: 0,
-                    nelim: 0,
-                    l: Vec::new(),
-                    d_diag: Vec::new(),
-                    d_subdiag: Vec::new(),
-                    perm: Vec::new(),
-                    perm_inv: Vec::new(),
-                    contrib: Vec::new(),
-                    contrib_dim: 0,
-                    n_delayed: 0,
-                    inertia: Inertia {
-                        positive: 0,
-                        negative: 0,
-                        zero: 0,
-                    },
-                    needs_refinement: false,
-                    zero_tol: params.bk.zero_tol,
-                    zero_tol_2x2: params.bk.zero_tol_2x2,
-                },
-                inertia: Inertia {
-                    positive: 0,
-                    negative: 0,
-                    zero: 0,
-                },
-            });
-            continue;
-        }
-
-        // Phase 2.3 Step 5: count delayed columns arriving from each
-        // child. Children that were processed under `may_delay = true`
-        // may have left `n_delayed` fully-summed columns un-eliminated
-        // in the top-left of their contribution block; these re-enter
-        // pivot search at this node as additional fully-summed columns
-        // on top of `snode.ncol()`.
-        let n_delayed_in: usize = snode
-            .children
-            .iter()
-            .filter_map(|&c| contrib_blocks[c].as_ref())
-            .map(|c| c.n_delayed)
-            .sum();
-        let expanded_ncol = own_ncol + n_delayed_in;
-
-        // Build the row indices for this frontal. With delays the layout is
-        // [own native cols (own_ncol) | delayed cols from children (n_delayed_in) | trailing rows].
-        let row_indices = build_row_indices(
-            snode,
+        let node = factor_one_supernode(
+            snode_idx,
+            symbolic,
+            &permuted,
             &full_pattern,
-            &contrib_blocks,
-            &mut ws.build_delayed,
-            &mut ws.build_trailing,
-            &mut ws.build_seen,
-        );
-        let actual_nrow = row_indices.len();
-        debug_assert!(
-            actual_nrow >= expanded_ncol,
-            "row_indices ({}) must cover the expanded fully-summed block ({})",
-            actual_nrow,
-            expanded_ncol
-        );
+            &scaling_pivot_order,
+            &is_root,
+            params,
+            ws,
+            &mut contrib_blocks,
+        )?;
 
-        // Populate the pooled `ws.row_map`. Invariant on entry to
-        // this block: every entry is `usize::MAX` (either from the
-        // top-of-function reset or from the end-of-loop clear of the
-        // previous iteration). We write exactly `row_indices.len()`
-        // entries here; the mirror-clear at the end of the iteration
-        // restores the invariant.
-        for (local, &global) in row_indices.iter().enumerate() {
-            ws.row_map[global] = local;
-        }
-
-        // Step 1: Assemble original matrix entries into frontal.
-        // Scan only the supernode's own native columns' CSC entries. The
-        // delayed columns at positions `[own_ncol..expanded_ncol)` have
-        // already had their raw A values baked into each child's contrib
-        // block during the child's own Step 1; scanning them here would
-        // double-count. The CSC stores lower-triangle entries (row >= col),
-        // so each entry A(row, col) is found by scanning column col.
-        // Entries where our columns appear as ROWS arrive via child
-        // contribution blocks.
-        //
-        // Phase 2.2.1 Step 6: Apply MC64 symmetric scaling in-place
-        // as `D · A · D` where `D = diag(scaling_pivot_order)`. The
-        // permuted CSC produced above is indexed in pivot positions,
-        // and `scaling_pivot_order` is also in pivot indexing (see
-        // src/symbolic/mod.rs and the Step 5 commit 67954d9), so the
-        // lookup is direct — no indirection through `perm`. Diagonal
-        // entries receive `s[i]^2`; off-diagonal entries receive
-        // `s[i] * s[j]`. Identity strategy fills the vector with 1.0,
-        // so this multiply is a no-op when scaling is disabled.
-        let scaling = &scaling_pivot_order;
-        // Pool the frontal's `data` Vec via the workspace. `std::mem::take`
-        // hands the Vec to us (leaving `ws.frontal_values` empty); we
-        // clear-then-resize to `actual_nrow * actual_nrow` zeros, wrap
-        // it in a `SymmetricMatrix`, use it, and return the buffer to
-        // the workspace before falling out of the iteration. If
-        // `factor_frontal` errors out the buffer is dropped along with
-        // the `frontal` local — acceptable because an error aborts the
-        // whole call anyway.
-        let mut frontal_buf = std::mem::take(&mut ws.frontal_values);
-        frontal_buf.clear();
-        frontal_buf.resize(actual_nrow * actual_nrow, 0.0);
-        let mut frontal = SymmetricMatrix {
-            n: actual_nrow,
-            data: frontal_buf,
-        };
-        for (local_j, &gj) in row_indices[..own_ncol].iter().enumerate() {
-            let s_j = scaling[gj];
-            for k in permuted.col_ptr[gj]..permuted.col_ptr[gj + 1] {
-                let gi = permuted.row_idx[k];
-                let local_i = ws.row_map[gi];
-                if local_i != usize::MAX {
-                    let val = permuted.values[k] * scaling[gi] * s_j;
-                    frontal.set(local_i, local_j, val);
-                }
-            }
-        }
-
-        // Step 2: Assemble child contribution blocks (extend-add). The
-        // child's `row_indices` cover both its delayed columns (top) and
-        // its trailing rows (bottom); `row_map` maps both classes to
-        // their new positions in the parent frontal — delayed cols land
-        // in `[own_ncol..expanded_ncol)` and trailing rows land
-        // in `[expanded_ncol..actual_nrow)`.
-        for &child_idx in &snode.children {
-            if let Some(contrib) = contrib_blocks[child_idx].take() {
-                extend_add(&contrib, &ws.row_map, &mut frontal);
-            }
-        }
-
-        // Step 3: Factor the frontal, eliminating up to `expanded_ncol`
-        // fully-summed columns. Pivot search is restricted to the first
-        // `expanded_ncol` rows. Rows `expanded_ncol..actual_nrow` are
-        // never swapped, preserving contribution block row ordering.
-        //
-        // Phase 2.3 Step 5: non-root supernodes pass `may_delay = true`
-        // so the BK kernel can break on the first un-pivotable column
-        // and carry the leftover fully-summed columns forward as
-        // delayed pivots in the contribution block's top-left region.
-        // Root supernodes force-accept (via `ZeroPivotAction::ForceAccept`)
-        // because they have no ancestor to absorb a delay.
-        let may_delay = !is_root[snode_idx];
-        // Phase 2.4.1b Step 5+wire-up: call the blocked kernel; it falls
-        // back to `factor_frontal` internally for `ncol <= block_size`
-        // so small supernodes are unaffected.
-        let ff = factor_frontal_blocked(&frontal, expanded_ncol, may_delay, &params.bk)?;
-
-        // Return the frontal's data buffer to the pool. `factor_frontal`
-        // takes its input by `&SymmetricMatrix` and copies into a local
-        // work array, so `frontal.data` is still the zeroed buffer we
-        // allocated above. Reclaim it for the next supernode's frontal.
-        ws.frontal_values = frontal.data;
-
-        // Extract what we need before moving ff
-        let node_inertia = ff.inertia.clone();
-        let node_needs_ref = ff.needs_refinement;
-        let node_nelim = ff.nelim;
-        let node_n_delayed = ff.n_delayed;
-
-        // Step 4: Store contribution block for parent.
-        //
-        // The kernel's contrib block rows `0..cdim` correspond to
-        // kernel positions `[nelim..nrow)`. The first `n_delayed`
-        // of those are the un-eliminated fully-summed columns
-        // (post-BK-swap ordering); the remainder are the unchanged
-        // trailing rows. Unpermute with `ff.perm` to recover each
-        // contrib row's global index:
-        //
-        //     contrib_row_indices[cj] = row_indices[ff.perm[nelim + cj]]
-        //
-        // Kernel swaps only touch positions `[0..expanded_ncol)`, so
-        // `ff.perm[i] = i` for `i >= expanded_ncol` — the formula is
-        // uniformly correct for delayed and trailing positions. When
-        // `n_delayed == 0` it reduces to the pre-Phase-2.3 slice
-        // `row_indices[expanded_ncol..]`.
-        if ff.contrib_dim > 0 {
-            let cdim = ff.contrib_dim;
-            let mut contrib_row_indices = Vec::with_capacity(cdim);
-            for cj in 0..cdim {
-                contrib_row_indices.push(row_indices[ff.perm[node_nelim + cj]]);
-            }
-            contrib_blocks[snode_idx] = Some(ContribBlock {
-                row_indices: contrib_row_indices,
-                data: ff.contrib.clone(),
-                dim: cdim,
-                n_delayed: node_n_delayed,
-            });
-        }
-
-        // Accumulate inertia
-        total_inertia.positive += node_inertia.positive;
-        total_inertia.negative += node_inertia.negative;
-        total_inertia.zero += node_inertia.zero;
-
-        if node_needs_ref {
+        total_inertia.positive += node.inertia.positive;
+        total_inertia.negative += node.inertia.negative;
+        total_inertia.zero += node.inertia.zero;
+        if node.frontal_factors.needs_refinement {
             needs_refinement = true;
         }
-
-        // Clear the pooled row map. This restores the
-        // all-`usize::MAX` invariant for the next iteration (and, via
-        // the last iteration, for the next `factorize_multifrontal*`
-        // call that shares this workspace).
-        for &global in &row_indices {
-            ws.row_map[global] = usize::MAX;
-        }
-
-        node_factors.push(NodeFactors {
-            first_col: snode.first_col,
-            ncol: expanded_ncol,
-            nelim: node_nelim,
-            n_delayed_in,
-            nrow: actual_nrow,
-            row_indices,
-            frontal_factors: ff,
-            inertia: node_inertia,
-        });
+        node_factors.push(node);
     }
 
     Ok((
@@ -738,6 +533,187 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
         },
         total_inertia,
     ))
+}
+
+/// Factor a single supernode in isolation.
+///
+/// Phase 2.5.2 Step B: extracted from
+/// [`factorize_multifrontal_supernodal_with_workspace`]'s per-supernode
+/// loop body so the same code path can be reused by a future parallel
+/// task-graph driver (Step C). Preserves the exact semantics of the
+/// original loop iteration:
+///
+/// * Takes child contribution blocks out of `contrib_blocks` (via
+///   `Option::take`) — children must have been produced by a prior
+///   call for this same `contrib_blocks`.
+/// * Writes the produced contribution block (if any) into
+///   `contrib_blocks[snode_idx]`.
+/// * Uses `ws.row_map`, `ws.frontal_values`, `ws.build_delayed`,
+///   `ws.build_trailing`, `ws.build_seen` as scratch; respects the
+///   same entry/exit invariants (row_map all `usize::MAX`, build_seen
+///   all `false`).
+///
+/// Returns the `NodeFactors` for the supernode. The caller accumulates
+/// inertia / `needs_refinement` from it.
+#[allow(clippy::too_many_arguments)]
+fn factor_one_supernode(
+    snode_idx: usize,
+    symbolic: &SymbolicFactorization,
+    permuted: &CscMatrix,
+    full_pattern: &crate::sparse::csc::CscPattern,
+    scaling_pivot_order: &[f64],
+    is_root: &[bool],
+    params: &NumericParams,
+    ws: &mut FactorWorkspace,
+    contrib_blocks: &mut [Option<ContribBlock>],
+) -> Result<NodeFactors, FeralError> {
+    let snode = &symbolic.supernodes[snode_idx];
+    let own_ncol = snode.ncol();
+    let nrow = snode.nrow;
+
+    if nrow == 0 || own_ncol == 0 {
+        return Ok(NodeFactors {
+            first_col: snode.first_col,
+            ncol: 0,
+            nelim: 0,
+            n_delayed_in: 0,
+            nrow: 0,
+            row_indices: Vec::new(),
+            frontal_factors: FrontalFactors {
+                nrow: 0,
+                ncol: 0,
+                nelim: 0,
+                l: Vec::new(),
+                d_diag: Vec::new(),
+                d_subdiag: Vec::new(),
+                perm: Vec::new(),
+                perm_inv: Vec::new(),
+                contrib: Vec::new(),
+                contrib_dim: 0,
+                n_delayed: 0,
+                inertia: Inertia {
+                    positive: 0,
+                    negative: 0,
+                    zero: 0,
+                },
+                needs_refinement: false,
+                zero_tol: params.bk.zero_tol,
+                zero_tol_2x2: params.bk.zero_tol_2x2,
+            },
+            inertia: Inertia {
+                positive: 0,
+                negative: 0,
+                zero: 0,
+            },
+        });
+    }
+
+    // Phase 2.3 Step 5: count delayed columns arriving from each
+    // child. Children that were processed under `may_delay = true`
+    // may have left `n_delayed` fully-summed columns un-eliminated
+    // in the top-left of their contribution block; these re-enter
+    // pivot search at this node as additional fully-summed columns
+    // on top of `snode.ncol()`.
+    let n_delayed_in: usize = snode
+        .children
+        .iter()
+        .filter_map(|&c| contrib_blocks[c].as_ref())
+        .map(|c| c.n_delayed)
+        .sum();
+    let expanded_ncol = own_ncol + n_delayed_in;
+
+    // Build the row indices for this frontal. With delays the layout is
+    // [own native cols (own_ncol) | delayed cols from children (n_delayed_in) | trailing rows].
+    let row_indices = build_row_indices(
+        snode,
+        full_pattern,
+        contrib_blocks,
+        &mut ws.build_delayed,
+        &mut ws.build_trailing,
+        &mut ws.build_seen,
+    );
+    let actual_nrow = row_indices.len();
+    debug_assert!(
+        actual_nrow >= expanded_ncol,
+        "row_indices ({}) must cover the expanded fully-summed block ({})",
+        actual_nrow,
+        expanded_ncol
+    );
+
+    // Populate the pooled `ws.row_map`. Invariant on entry: every entry
+    // is `usize::MAX`. Mirror-clear at the end restores it.
+    for (local, &global) in row_indices.iter().enumerate() {
+        ws.row_map[global] = local;
+    }
+
+    // Step 1: Assemble original matrix entries into frontal, applying
+    // symmetric scaling D·A·D in place.
+    let scaling = scaling_pivot_order;
+    let mut frontal_buf = std::mem::take(&mut ws.frontal_values);
+    frontal_buf.clear();
+    frontal_buf.resize(actual_nrow * actual_nrow, 0.0);
+    let mut frontal = SymmetricMatrix {
+        n: actual_nrow,
+        data: frontal_buf,
+    };
+    for (local_j, &gj) in row_indices[..own_ncol].iter().enumerate() {
+        let s_j = scaling[gj];
+        for k in permuted.col_ptr[gj]..permuted.col_ptr[gj + 1] {
+            let gi = permuted.row_idx[k];
+            let local_i = ws.row_map[gi];
+            if local_i != usize::MAX {
+                let val = permuted.values[k] * scaling[gi] * s_j;
+                frontal.set(local_i, local_j, val);
+            }
+        }
+    }
+
+    // Step 2: Assemble child contribution blocks (extend-add).
+    for &child_idx in &snode.children {
+        if let Some(contrib) = contrib_blocks[child_idx].take() {
+            extend_add(&contrib, &ws.row_map, &mut frontal);
+        }
+    }
+
+    // Step 3: Factor the frontal.
+    let may_delay = !is_root[snode_idx];
+    let ff = factor_frontal_blocked(&frontal, expanded_ncol, may_delay, &params.bk)?;
+    ws.frontal_values = frontal.data;
+
+    let node_inertia = ff.inertia.clone();
+    let node_nelim = ff.nelim;
+    let node_n_delayed = ff.n_delayed;
+
+    // Step 4: Store contribution block for parent.
+    if ff.contrib_dim > 0 {
+        let cdim = ff.contrib_dim;
+        let mut contrib_row_indices = Vec::with_capacity(cdim);
+        for cj in 0..cdim {
+            contrib_row_indices.push(row_indices[ff.perm[node_nelim + cj]]);
+        }
+        contrib_blocks[snode_idx] = Some(ContribBlock {
+            row_indices: contrib_row_indices,
+            data: ff.contrib.clone(),
+            dim: cdim,
+            n_delayed: node_n_delayed,
+        });
+    }
+
+    // Restore the `row_map` invariant.
+    for &global in &row_indices {
+        ws.row_map[global] = usize::MAX;
+    }
+
+    Ok(NodeFactors {
+        first_col: snode.first_col,
+        ncol: expanded_ncol,
+        nelim: node_nelim,
+        n_delayed_in,
+        nrow: actual_nrow,
+        row_indices,
+        frontal_factors: ff,
+        inertia: node_inertia,
+    })
 }
 
 /// Permute a CSC matrix: compute the lower triangle of P·A·Pᵀ.
