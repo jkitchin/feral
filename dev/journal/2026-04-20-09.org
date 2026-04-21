@@ -1,0 +1,104 @@
+#+TITLE: FERAL Journal 2026-04-20-09
+#+DATE: 2026-04-20
+
+* 20:58 :session:start:
+  Session 09 opened continuing from 08 ("we are trying to finish here").
+  Session 08 closed Phase 2.4.2 (SIMD Schur validation) and 2.4.1c
+  (sparse drift triage cleared the blocked kernel). Handoff list
+  offered Phase 2.5.x (dense p90 tail) as next, but the Phase 2
+  planning doc defines Phase 2.5.x as sparse pipeline performance —
+  so taking the documented highest-leverage item: Phase 2.5.1, Liu
+  row-subtree column counts replacing current O(n²).
+
+* 21:02 :phase-2.5.1:bench:baseline:
+  Fresh `cargo run --bin bench --release` grounded the session:
+
+    Dense  factor/MUMPS p90 = 1.79  (session-08 run showed 2.10)
+    Sparse factor/MUMPS p90 = 1.65
+
+  Both below their Phase-2.4 soft targets (2.0 and 3.0). Session
+  08's 2.10 was run-to-run variance. Dense p90 "tail cleanup" is
+  therefore moot; Phase 2.5.1 proceeds for the scaling win regardless.
+
+* 21:08 :phase-2.5.1:research:
+  Wrote `dev/research/phase-2.5.1-liu-column-counts.md`. Algorithm
+  from Gilbert-Ng-Peyton 1994 via Liu 1990; structural reference
+  CSparse `cs_counts.c`. Key sub-invariants:
+    - first[i]: smallest postorder number across subtree(i).
+    - maxfirst[partner] + prevleaf[partner]: track the row-subtree
+      leaf history per partner row.
+    - DSU path-compressed find for LCA lookup.
+
+* 21:10 :phase-2.5.1:plan:
+  Wrote `dev/plans/phase-2.5.1-liu-column-counts.md`. 6-step plan:
+  (0) gate-check symbolic-vs-numeric share [deferred — proceeded
+      directly, since GNP is a correctness-preserving refactor],
+  (1) postorder+first_descendants on EliminationTree,
+  (2) column_counts_gnp implementation,
+  (3) corpus cross-check,
+  (4) switch production call site,
+  (5) validation report + bench,
+  (6) session close.
+
+* 21:18 :phase-2.5.1:step1:green:
+  Added EliminationTree::postorder() (iterative DFS with explicit
+  stack) and EliminationTree::first_descendants(&post). 5 new unit
+  tests (chain, star, two-roots, first-chain, first-leaves). All
+  pass:
+
+    test result: ok. 10 passed; 0 failed; ... 113 filtered out
+
+  (Etree module went from 5 → 10 tests.)
+
+* 21:25 :phase-2.5.1:step2:red:
+  First draft of column_counts_gnp failed 5/6 parity tests against
+  the reference. Evidence:
+    tridiagonal: expected [2, 2, 2, 1], got [1, 2, 3, 4]
+    block_diag : expected [2, 1, 2, 1], got [1, 2, 1, 2]
+  Tracing through the tridiagonal case showed my delta
+  accumulation along the chain was monotonically summing leaf-=1s
+  up the chain.
+
+* 21:30 :phase-2.5.1:step2:diagnosis:
+  Re-examined CSparse cs_counts.c control flow. Three corrections:
+    (a) I had partner/current variable roles swapped — the
+        condition is `first[current] > maxfirst[partner]` and
+        we need `partner > current` (lower-triangle rows).
+    (b) I was missing the head-of-loop `delta[parent[j]] -= 1`
+        for every non-root j — this cancels the double-count
+        introduced by the accumulation merge at the end.
+    (c) Delta increments target the CURRENT postorder node
+        (column j in CSparse terms), not the partner row.
+
+* 21:34 :phase-2.5.1:step2:green:
+  After corrections, all 6 parity tests pass bit-exact plus all
+  existing unit tests:
+
+    test result: ok. 11 passed; 0 failed; ... 118 filtered out
+
+  Full lib tests: 129/129 PASS (118 original + 5 etree + 6 gnp).
+
+* 21:40 :phase-2.5.1:step3:verify:
+  Wrote `examples/verify_column_counts.rs`: walks every KKT
+  matrix, computes column counts via both functions, reports any
+  disagreement. Run result:
+
+    Loaded 169585 KKT matrices
+    === column_counts_gnp vs column_counts ===
+    Matched   : 169585/169585
+    Mismatches: 0
+
+  Bit-exact parity across the full corpus.
+
+* 21:45 :phase-2.5.1:step4:switch:
+  Switched production call in `src/symbolic/mod.rs:334` from
+  `column_counts` to `column_counts_gnp`. Re-exported the new
+  function in `src/symbolic/mod.rs:10`. Old `column_counts` kept
+  public as a reference oracle for the 7 supernode unit tests.
+
+    Full cargo test --release --lib: 129/129 PASS.
+
+* 21:46 :phase-2.5.1:bench:post-switch:
+  Kicked off `cargo run --bin bench --release` to confirm no
+  downstream regression. Also drafted validation report
+  `dev/validation/phase-2.5.1-liu-column-counts.md` (partial).

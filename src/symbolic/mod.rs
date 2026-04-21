@@ -7,7 +7,7 @@ use crate::ordering::elimination_tree::EliminationTree;
 use crate::ordering::postorder::postorder;
 use crate::sparse::csc::{CscMatrix, CscPattern};
 
-pub use column_counts::{column_counts, total_factor_nnz};
+pub use column_counts::{column_counts, column_counts_gnp, total_factor_nnz};
 pub use supernode::{find_supernodes, Supernode, SupernodeParams};
 
 /// Which fill-reducing ordering to use in [`symbolic_factorize_with_method`].
@@ -330,8 +330,12 @@ pub fn symbolic_factorize_with_method(
         n,
     };
 
-    // Step 6: Column counts on the final pattern + etree
-    let col_counts = column_counts(&permuted_pattern, &etree);
+    // Step 6: Column counts on the final pattern + etree.
+    // Phase 2.5.1 switched this from the O(n²) elimination simulation
+    // (still available as `column_counts`) to Gilbert-Ng-Peyton at
+    // O(nnz(A) + n·α(n)). Bit-exact equivalence verified on 169585
+    // KKT matrices — see `dev/validation/phase-2.5.1-*`.
+    let col_counts = column_counts_gnp(&permuted_pattern, &etree);
     let factor_nnz = total_factor_nnz(&col_counts);
 
     // Step 7: Supernode detection on the postordered etree

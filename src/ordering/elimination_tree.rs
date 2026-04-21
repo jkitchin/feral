@@ -91,6 +91,63 @@ impl EliminationTree {
         }
         sizes
     }
+
+    /// Postorder traversal of the etree forest. Returns a Vec of
+    /// node indices in postorder (each subtree's children listed
+    /// before the subtree's root; roots of the forest come last).
+    ///
+    /// Iterative DFS using an explicit stack so deep trees don't
+    /// blow the call stack.
+    pub fn postorder(&self) -> Vec<usize> {
+        let n = self.n;
+        let mut out = Vec::with_capacity(n);
+        let children = self.children();
+        let mut next_child = vec![0usize; n];
+        let mut stack: Vec<usize> = Vec::with_capacity(n);
+
+        for root in self.roots() {
+            stack.push(root);
+            while let Some(&node) = stack.last() {
+                let k = next_child[node];
+                if k < children[node].len() {
+                    next_child[node] = k + 1;
+                    stack.push(children[node][k]);
+                } else {
+                    out.push(node);
+                    stack.pop();
+                }
+            }
+        }
+        out
+    }
+
+    /// First-descendant numbering used by the Gilbert-Ng-Peyton
+    /// column-count algorithm.
+    ///
+    /// Given a postorder `post` (as returned by [`postorder`]), the
+    /// result `first[i]` is the smallest postorder number taken by
+    /// any descendant of node i (including i itself). Leaves have
+    /// `first[i]` equal to their own postorder index.
+    pub fn first_descendants(&self, post: &[usize]) -> Vec<usize> {
+        let n = self.n;
+        debug_assert_eq!(post.len(), n);
+        let mut post_of = vec![0usize; n];
+        for (pnum, &node) in post.iter().enumerate() {
+            post_of[node] = pnum;
+        }
+        // Initialize first[i] = its own postorder index. Walking
+        // the tree in postorder guarantees every child finalizes
+        // before its parent, so parent's `first` folds in children.
+        let mut first = post_of.clone();
+        for &node in post {
+            if let Some(p) = self.parent[node] {
+                if first[node] < first[p] {
+                    first[p] = first[node];
+                }
+            }
+        }
+        first
+    }
 }
 
 #[cfg(test)]
@@ -145,6 +202,78 @@ mod tests {
         // etc. So etree is a chain 0→1→2→3→4, root = 4
         assert_eq!(etree.parent[4], None);
         assert_eq!(etree.roots(), vec![4]);
+    }
+
+    fn chain_etree(n: usize) -> EliminationTree {
+        // Build a chain 0→1→2→...→(n-1) directly.
+        let mut parent = vec![None; n];
+        for j in 0..n.saturating_sub(1) {
+            parent[j] = Some(j + 1);
+        }
+        EliminationTree { parent, n }
+    }
+
+    #[test]
+    fn test_postorder_chain() {
+        let et = chain_etree(5);
+        let post = et.postorder();
+        assert_eq!(post, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_postorder_star() {
+        // 4 leaves (0, 1, 2, 3) all parented to root 4.
+        let parent = vec![Some(4), Some(4), Some(4), Some(4), None];
+        let et = EliminationTree { parent, n: 5 };
+        let post = et.postorder();
+        // Root must come last; leaves visited before root.
+        assert_eq!(*post.last().unwrap(), 4);
+        assert_eq!(post.len(), 5);
+        let mut leaves: Vec<_> = post[..4].to_vec();
+        leaves.sort_unstable();
+        assert_eq!(leaves, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_postorder_two_roots() {
+        // Two disjoint chains: 0→1 (root 1) and 2→3 (root 3).
+        let parent = vec![Some(1), None, Some(3), None];
+        let et = EliminationTree { parent, n: 4 };
+        let post = et.postorder();
+        assert_eq!(post.len(), 4);
+        // Each child precedes its root. Both roots come at positions 1 and 3.
+        let p0 = post.iter().position(|&x| x == 0).unwrap();
+        let p1 = post.iter().position(|&x| x == 1).unwrap();
+        let p2 = post.iter().position(|&x| x == 2).unwrap();
+        let p3 = post.iter().position(|&x| x == 3).unwrap();
+        assert!(p0 < p1);
+        assert!(p2 < p3);
+    }
+
+    #[test]
+    fn test_first_descendants_chain() {
+        // Chain 0→1→2→3→4. Postorder is [0,1,2,3,4].
+        // Subtree of i is {0, 1, ..., i}. First descendant is 0 for all.
+        let et = chain_etree(5);
+        let post = et.postorder();
+        let first = et.first_descendants(&post);
+        assert_eq!(first, vec![0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_first_descendants_leaves() {
+        // For a leaf, first[leaf] = its own postorder number.
+        let parent = vec![Some(4), Some(4), Some(4), Some(4), None];
+        let et = EliminationTree { parent, n: 5 };
+        let post = et.postorder();
+        let first = et.first_descendants(&post);
+        // Each leaf's first is its own postorder index.
+        for leaf in 0..4 {
+            let ppos = post.iter().position(|&x| x == leaf).unwrap();
+            assert_eq!(first[leaf], ppos);
+        }
+        // Root's first = min of the 4 leaf postorder numbers = 0.
+        assert_eq!(first[4], 0);
     }
 
     #[test]
