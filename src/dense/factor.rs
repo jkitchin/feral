@@ -1,3 +1,4 @@
+use crate::dense::rook::{rook_rescue, RookKind};
 use crate::error::FeralError;
 use crate::inertia::Inertia;
 
@@ -545,7 +546,7 @@ pub struct FrontalFactors {
 /// Outcome of an attempt to accept a 1×1 pivot via `try_reject_1x1_frontal`.
 /// The caller uses this to decide whether to continue, force-accept, or
 /// break out of the BK loop (SSIDS-style delayed pivoting).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum PivotOutcome {
     /// Pivot clears the column-relative threshold; do the rank-1 update.
     Accepted,
@@ -558,6 +559,13 @@ enum PivotOutcome {
     /// `may_delay == true`. The kernel has not mutated any state for
     /// the failed pivot.
     Delayed,
+    /// Rook rescue (Phase 2.4.3) found a 2×2 block pivot at `{k, k+1}`
+    /// after applying symmetric swaps. The gates (SSIDS det floor,
+    /// Duff-Reid growth bound) were checked inside `rook_rescue`. The
+    /// caller must count 2×2 inertia, record `subdiag[k] = d21`, apply
+    /// `do_2x2_update`, and advance `k` by 2. Emitted only by
+    /// `try_reject_1x1_with_rook_rescue`; panel path never sees this.
+    AcceptedRook2x2 { d11: f64, d21: f64, d22: f64 },
 }
 
 /// Result of one iteration of the scalar BK pivot loop in
@@ -672,6 +680,7 @@ pub fn factor_frontal(
     let mut neg = 0usize;
     let mut zero = 0usize;
     let mut needs_refinement = false;
+    let mut n_rook_rescues = 0usize;
 
     let mut k = 0;
 
@@ -694,6 +703,7 @@ pub fn factor_frontal(
             &mut neg,
             &mut zero,
             &mut needs_refinement,
+            &mut n_rook_rescues,
         )? {
             PivotStepResult::Advanced(n) => k += n,
             PivotStepResult::Delayed => break,
@@ -763,7 +773,7 @@ pub fn factor_frontal(
         n_delayed,
         inertia: Inertia::new(pos, neg, zero),
         needs_refinement,
-        n_rook_rescues: 0,
+        n_rook_rescues,
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
     })
@@ -869,6 +879,7 @@ pub fn factor_frontal_blocked(
     let mut neg = 0usize;
     let mut zero = 0usize;
     let mut needs_refinement = false;
+    let mut n_rook_rescues = 0usize;
     let mut d_panel = vec![0.0f64; bs];
 
     let mut k = 0;
@@ -889,6 +900,7 @@ pub fn factor_frontal_blocked(
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
+                &mut n_rook_rescues,
             )? {
                 PivotStepResult::Advanced(n) => k += n,
                 PivotStepResult::Delayed => break,
@@ -943,6 +955,7 @@ pub fn factor_frontal_blocked(
                     &mut neg,
                     &mut zero,
                     &mut needs_refinement,
+                    &mut n_rook_rescues,
                 )? {
                     PivotStepResult::Advanced(n) => k += n,
                     PivotStepResult::Delayed => break,
@@ -1007,7 +1020,7 @@ pub fn factor_frontal_blocked(
         n_delayed,
         inertia: Inertia::new(pos, neg, zero),
         needs_refinement,
-        n_rook_rescues: 0,
+        n_rook_rescues,
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
     })
@@ -1124,6 +1137,9 @@ fn lblt_panel_frontal(
                 // matches scalar's column state at break time exactly.
                 return Ok((c, PanelStatus::Delayed));
             }
+            PivotOutcome::AcceptedRook2x2 { .. } => {
+                unreachable!("panel path never enables rook rescue")
+            }
         }
 
         c += 1;
@@ -1201,6 +1217,41 @@ fn apply_blocked_schur(
     }
 }
 
+/// Translate a `PivotOutcome` from `try_reject_1x1_with_rook_rescue`
+/// (or plain `try_reject_1x1_frontal`) into a `PivotStepResult` and
+/// perform the required trailing-update. Used at every scalar BK
+/// 1×1 call site to centralize the `AcceptedRook2x2` dispatch.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn finish_1x1_outcome(
+    outcome: PivotOutcome,
+    a: &mut [f64],
+    nrow: usize,
+    k: usize,
+    subdiag: &mut [f64],
+    pos: &mut usize,
+    neg: &mut usize,
+    zero: &mut usize,
+) -> PivotStepResult {
+    match outcome {
+        PivotOutcome::Accepted => {
+            do_1x1_update(a, nrow, k);
+            PivotStepResult::Advanced(1)
+        }
+        PivotOutcome::Rejected => PivotStepResult::Advanced(1),
+        PivotOutcome::Delayed => PivotStepResult::Delayed,
+        PivotOutcome::AcceptedRook2x2 { d11, d21, d22 } => {
+            let inertia = count_2x2_inertia_val(d11, d21, d22);
+            *pos += inertia.positive;
+            *neg += inertia.negative;
+            *zero += inertia.zero;
+            subdiag[k] = d21;
+            do_2x2_update(a, nrow, k, d11, d21, d22);
+            PivotStepResult::Advanced(2)
+        }
+    }
+}
+
 /// One iteration of the scalar BK pivot loop for `factor_frontal`.
 ///
 /// Extracted verbatim from the pre-extraction in-line loop body so the
@@ -1224,6 +1275,7 @@ fn scalar_pivot_step(
     neg: &mut usize,
     zero: &mut usize,
     needs_refinement: &mut bool,
+    n_rook_rescues: &mut usize,
 ) -> Result<PivotStepResult, FeralError> {
     let alpha = params.alpha;
     let remaining = ncol - k;
@@ -1231,6 +1283,8 @@ fn scalar_pivot_step(
     if remaining == 1 {
         // Last eliminated pivot: always 1×1. Compute the column max
         // over rows (k+1..nrow) for the column-relative threshold.
+        // Rook rescue cannot fire here (needs ncol-k >= 2), so call
+        // the rejection routine directly.
         let mut col_max = 0.0f64;
         for i in (k + 1)..nrow {
             let v = a[k * nrow + i].abs();
@@ -1254,6 +1308,9 @@ fn scalar_pivot_step(
             PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
             PivotOutcome::Rejected => {}
             PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
+            PivotOutcome::AcceptedRook2x2 { .. } => {
+                unreachable!("remaining==1 never triggers rook rescue")
+            }
         }
         return Ok(PivotStepResult::Advanced(1));
     }
@@ -1293,24 +1350,24 @@ fn scalar_pivot_step(
 
     if akk >= alpha * gamma0 {
         // 1×1 pivot at k, no swap
-        let outcome = try_reject_1x1_frontal(
+        let outcome = try_reject_1x1_with_rook_rescue(
             a,
             nrow,
+            ncol,
             k,
             gamma0,
             may_delay,
             params,
+            perm,
             pos,
             neg,
             zero,
             needs_refinement,
+            n_rook_rescues,
         )?;
-        match outcome {
-            PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
-            PivotOutcome::Rejected => {}
-            PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
-        }
-        return Ok(PivotStepResult::Advanced(1));
+        return Ok(finish_1x1_outcome(
+            outcome, a, nrow, k, subdiag, pos, neg, zero,
+        ));
     }
 
     // gamma_r: max off-diagonal in symmetric row r
@@ -1323,46 +1380,46 @@ fn scalar_pivot_step(
     if r_is_fully_summed && arr >= alpha * gamma_r {
         // 1×1 pivot at r, swap r↔k
         swap_rows_cols(a, nrow, k, r, perm);
-        let outcome = try_reject_1x1_frontal(
+        let outcome = try_reject_1x1_with_rook_rescue(
             a,
             nrow,
+            ncol,
             k,
             gamma_r,
             may_delay,
             params,
+            perm,
             pos,
             neg,
             zero,
             needs_refinement,
+            n_rook_rescues,
         )?;
-        match outcome {
-            PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
-            PivotOutcome::Rejected => {}
-            PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
-        }
-        return Ok(PivotStepResult::Advanced(1));
+        return Ok(finish_1x1_outcome(
+            outcome, a, nrow, k, subdiag, pos, neg, zero,
+        ));
     }
 
     if akk * gamma_r >= alpha * gamma0 * gamma0 {
         // 1×1 pivot at k (LAPACK extension), no swap
-        let outcome = try_reject_1x1_frontal(
+        let outcome = try_reject_1x1_with_rook_rescue(
             a,
             nrow,
+            ncol,
             k,
             gamma0,
             may_delay,
             params,
+            perm,
             pos,
             neg,
             zero,
             needs_refinement,
+            n_rook_rescues,
         )?;
-        match outcome {
-            PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
-            PivotOutcome::Rejected => {}
-            PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
-        }
-        return Ok(PivotStepResult::Advanced(1));
+        return Ok(finish_1x1_outcome(
+            outcome, a, nrow, k, subdiag, pos, neg, zero,
+        ));
     }
 
     if r_is_fully_summed && k + 1 < ncol {
@@ -1458,24 +1515,24 @@ fn scalar_pivot_step(
                     }
                 }
             }
-            let outcome = try_reject_1x1_frontal(
+            let outcome = try_reject_1x1_with_rook_rescue(
                 a,
                 nrow,
+                ncol,
                 k,
                 gamma0,
                 may_delay,
                 params,
+                perm,
                 pos,
                 neg,
                 zero,
                 needs_refinement,
+                n_rook_rescues,
             )?;
-            match outcome {
-                PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
-                PivotOutcome::Rejected => {}
-                PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
-            }
-            return Ok(PivotStepResult::Advanced(1));
+            return Ok(finish_1x1_outcome(
+                outcome, a, nrow, k, subdiag, pos, neg, zero,
+            ));
         }
 
         let pivot_inertia = count_2x2_inertia_val(d11, d21, d22);
@@ -1490,24 +1547,24 @@ fn scalar_pivot_step(
     } else {
         // Can't do 2×2 (r is not fully summed or only 1 column left).
         // Last-resort 1×1 at k with column-relative rejection.
-        let outcome = try_reject_1x1_frontal(
+        let outcome = try_reject_1x1_with_rook_rescue(
             a,
             nrow,
+            ncol,
             k,
             gamma0,
             may_delay,
             params,
+            perm,
             pos,
             neg,
             zero,
             needs_refinement,
+            n_rook_rescues,
         )?;
-        match outcome {
-            PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
-            PivotOutcome::Rejected => {}
-            PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
-        }
-        Ok(PivotStepResult::Advanced(1))
+        Ok(finish_1x1_outcome(
+            outcome, a, nrow, k, subdiag, pos, neg, zero,
+        ))
     }
 }
 
@@ -1596,6 +1653,101 @@ fn try_reject_1x1_frontal(
         *neg += 1;
     }
     Ok(PivotOutcome::Accepted)
+}
+
+/// Phase 2.4.3 splice: attempt a 1×1 pivot with rook rescue on rejection.
+///
+/// Fast path: if `|d| > threshold`, delegate to `try_reject_1x1_frontal`
+/// unchanged (well-conditioned matrices pay zero rook cost, matching the
+/// plan's "rescue, not top-level" design).
+///
+/// Slow path: if the column-relative threshold rejects the pivot at `k`,
+/// call `rook_rescue` before falling through to delay / force-accept.
+/// On rook success, apply the symmetric swap sequence via
+/// `swap_rows_cols` (updating `perm`), increment `n_rook_rescues`, and
+/// return either `Accepted` (1×1 rescue — caller runs `do_1x1_update`)
+/// or `AcceptedRook2x2` (2×2 rescue — caller runs the 2×2 update path).
+///
+/// Panel path (`lblt_panel_frontal`) cannot safely apply mid-panel
+/// swaps (they would invalidate `d_panel` replay state), so it keeps
+/// calling the original `try_reject_1x1_frontal` directly and never
+/// enters this wrapper. See plan §"Blocked-panel interaction".
+#[allow(clippy::too_many_arguments)]
+fn try_reject_1x1_with_rook_rescue(
+    a: &mut [f64],
+    nrow: usize,
+    ncol: usize,
+    k: usize,
+    col_max: f64,
+    may_delay: bool,
+    params: &BunchKaufmanParams,
+    perm: &mut [usize],
+    pos: &mut usize,
+    neg: &mut usize,
+    zero: &mut usize,
+    needs_refinement: &mut bool,
+    n_rook_rescues: &mut usize,
+) -> Result<PivotOutcome, FeralError> {
+    let d = a[k * nrow + k];
+    let threshold = (params.pivot_threshold * col_max).max(params.zero_tol);
+
+    // Well-conditioned fast path: pivot clears the threshold. Delegate
+    // verbatim so accounting stays byte-identical to the pre-rook path.
+    if d.abs() > threshold {
+        return try_reject_1x1_frontal(
+            a,
+            nrow,
+            k,
+            col_max,
+            may_delay,
+            params,
+            pos,
+            neg,
+            zero,
+            needs_refinement,
+        );
+    }
+
+    // Threshold failed — try rook rescue before delay/force-accept.
+    if let Some(pivot) = rook_rescue(a, nrow, ncol, k, params) {
+        *n_rook_rescues += 1;
+        for idx in 0..pivot.n_swaps {
+            let (p, q) = pivot.swaps[idx];
+            swap_rows_cols(a, nrow, p, q, perm);
+        }
+        match pivot.kind {
+            RookKind::Pivot1x1 => {
+                let d_new = a[k * nrow + k];
+                if d_new > 0.0 {
+                    *pos += 1;
+                } else {
+                    *neg += 1;
+                }
+                return Ok(PivotOutcome::Accepted);
+            }
+            RookKind::Pivot2x2 => {
+                let d11 = a[k * nrow + k];
+                let d21 = a[k * nrow + (k + 1)];
+                let d22 = a[(k + 1) * nrow + (k + 1)];
+                return Ok(PivotOutcome::AcceptedRook2x2 { d11, d21, d22 });
+            }
+        }
+    }
+
+    // Rook could not rescue — delegate to the existing delay /
+    // force-accept logic.
+    try_reject_1x1_frontal(
+        a,
+        nrow,
+        k,
+        col_max,
+        may_delay,
+        params,
+        pos,
+        neg,
+        zero,
+        needs_refinement,
+    )
 }
 
 /// 1×1 rank-1 update: update columns k+1..n after eliminating column k.

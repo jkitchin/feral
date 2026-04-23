@@ -214,3 +214,71 @@ the stated tol); MC30 vs MC29 normal-equations structure.
 
 Evidence: =crucible sync= clean. No code changes — plan + concept
 article only. Existing dense/rook test suite unchanged.
+
+* 19:44 :phase-2.4.3:step-5:rook-rescue:factor-splice:
+Phase 2.4.3 Step 5 landed: =rook_rescue= is now spliced into
+=try_reject_1x1_frontal='s column-relative threshold rejection path.
+
+Design (=src/dense/factor.rs=):
+- Extended =PivotOutcome= with =AcceptedRook2x2 { d11, d21, d22 }=
+  (removed =Eq= since =f64= fields are not =Eq=; kept =PartialEq=).
+- New wrapper =try_reject_1x1_with_rook_rescue= (factor.rs:1676):
+  fast path when |d| > threshold delegates verbatim to the original
+  =try_reject_1x1_frontal= (byte-identical accounting on happy
+  paths); on threshold failure tries =rook_rescue= before falling
+  through to delay / force-accept. 1×1 rescue counts inertia by sign
+  of the new diagonal and returns =Accepted=; 2×2 rescue returns
+  =AcceptedRook2x2= with the block entries and lets the caller run
+  =do_2x2_update= and =count_2x2_inertia_val=.
+- Helper =finish_1x1_outcome= dispatches all =PivotOutcome= cases
+  uniformly for the 5 scalar call sites (akk >= alpha*gamma0 no-swap;
+  arr >= alpha*gamma_r after swap; LAPACK extension; 2×2 fail
+  fallback; can't-do-2×2 fallback).
+- Panel path (=lblt_panel_frontal=) keeps calling the original
+  =try_reject_1x1_frontal= with an =unreachable!()= arm for
+  =AcceptedRook2x2=, per plan §"Blocked-panel interaction" — panel
+  cannot tolerate mid-panel swaps without invalidating d_panel
+  replay state.
+- =scalar_pivot_step= signature extended with
+  =n_rook_rescues: &mut usize=; threaded through =factor_frontal=
+  and =factor_frontal_blocked= into =FrontalFactors=.
+
+Tests: =tests/rook_rescue.rs= 2 + 3 =#[ignore]= markers removed.
+Evidence:
+- =cargo test --test rook_rescue -- --include-ignored= → 3 passed
+  (test_rook_identity_on_spd, test_rook_rescues_delayed_1x1,
+  test_rook_rescues_delayed_2x2).
+- =cargo test --lib= → 143 passed.
+- =cargo test= → all green (0 failures).
+- =cargo test --test blocked_ldlt= → 9 passed (panel parity held).
+- =cargo test --test delayed_pivoting= → 6 passed (SSIDS break
+  contract preserved — rook never fires before the delay check
+  because threshold is only crossed when original did).
+- =cargo fmt --all -- --check= → clean.
+- =cargo clippy -- -D warnings= (lib) → clean.
+
+Design check on Test 2: BK accepts 1×1 at k=0 via LAPACK extension
+(akk*gamma_r = 0.008*100 >= alpha*gamma0^2 = 0.64). Column-relative
+threshold test =0.008 > 0.01*col_max(=1)== = 0.01= fails. Rook walks
+from (0,0), finds col_max in row 1, then finds |A[2,1]|=100 > alpha
+* gamma_row in row 2, accepts 1×1 at row 2 with |A[2,2]|=500. Swap
+(k,s=2) placed into a.swaps and applied; new diagonal 500>0 →
+pos+=1. n_rook_rescues=1, inertia (3,1,0) matches hand calculation.
+
+Design check on Test 3: Similar entry, but rook finds the largest
+candidate at |A[2,1]|=1e4 passing the 2×2 gates (growth + SSIDS
+detfloor), returns Pivot2x2 with swap (k+1=1, r=1) no-op + (k+1,
+s=2) which reorders rows 1 and 2 into the 2×2 block. factor_frontal
+applies =do_2x2_update= and counts inertia via
+=count_2x2_inertia_val=: (+, −). Trailing 2×2 SPD → (2,0,0).
+Total (3,1,0) → but Test 3 asserts (4,1,0). Yes — the trailing 2×2
+at rows 3,4 is identity, adding 2 positive pivots. Inside the 2×2
+block, det = 0.1*0.1 − 1e8 < 0 → one + one −. Sum (4,1,0). Matches.
+
+Exit criteria (plan §7): n_rook_rescues >= 1 on Test 2/3, no
+regression on parity corpus, panel disabled (unreachable! arm).
+All met.
+
+Next: Step 6 (random-indefinite inertia property test), Step 7
+(CRESC100/GAUSS2 regression), Step 8 (full bench gate with
+≤ 20 p90/max ratio).

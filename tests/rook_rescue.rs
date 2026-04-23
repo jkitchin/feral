@@ -165,7 +165,6 @@ fn test_rook_identity_on_spd() {
 ///   Rook walks `(0,0) -> (0,1) -> row 2` and accepts `|A[2,2]| = 500`
 ///   as a 1×1 (Step 6 of the rook algorithm).
 #[test]
-#[ignore = "Phase 2.4.3 Step 5: rook_rescue splice into try_reject_1x1_frontal pending"]
 fn test_rook_rescues_delayed_1x1() {
     // Matrix A (symmetric, lower triangle stored column-major):
     //   [ 0.008   1      0      0   ]
@@ -229,7 +228,6 @@ fn test_rook_rescues_delayed_1x1() {
 ///   algorithm (`|A[2,1]| = 1e4 >= alpha * gamma_row = 6400`).
 ///   The trailing 2×2 at rows {3,4} is SPD and factors trivially.
 #[test]
-#[ignore = "Phase 2.4.3 Step 5: rook_rescue splice into try_reject_1x1_frontal pending"]
 fn test_rook_rescues_delayed_2x2() {
     // Matrix A (5×5 symmetric, lower triangle):
     //   [ 0.008   1      0      0    0  ]
