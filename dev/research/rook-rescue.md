@@ -227,24 +227,43 @@ Oracle sources for the new tests:
   complementary — scaling reduces how often rook fires, rook handles
   the residual cases scaling cannot.
 
-## 11. Open Questions
+## 11. Open Questions — Resolved 2026-04-23 (pre-Step-4)
 
-1. Should rook 2×2 rescue compete with BK-partial's 2×2 criterion, or
-   strictly replace it? Proposed: strictly replace — if BK-partial
-   decided to do a 2×2 it wouldn't call `try_reject_1x1_frontal` in
-   the first place. Rook rescue fires only on 1×1 rejection and may
-   upgrade to 2×2 via its own criterion.
-2. What is the right `pivot_threshold` default once rook is live?
-   Current 0.01 (MUMPS default) was chosen for BK-partial. Rook is
-   stricter; `0.1` or `0.2` may be preferable for cleaner delay
-   semantics. Decide during Step 7 of the plan based on regression
-   data. Do not change in the same commit as rook itself — separate
-   decision, separate benchmark.
-3. Does rook rescue interact with the scale-invariant 2×2 det floor
-   (SSIDS heuristic, added 2026-04-14)? Likely no — the det floor
-   gates 2×2 acceptance on a separate criterion, and rook rescue
-   operates upstream at the 1×1 rejection point. Needs confirmation
-   during Step 5.
+1. **Rook 2×2 vs BK-partial's 2×2 criterion — strictly replace.**
+   Confirmed by tracing `scalar_pivot_step` at `src/dense/factor.rs`:
+   BK-partial's 2×2 decision tree (steps §3.Case-3 / §3.Case-2 /
+   §3.Case-2×2 at lines 232–307) is taken *before* any 1×1 rejection
+   test. Once `scalar_pivot_step` has called `do_2x2_pivot` successfully,
+   `try_reject_1x1_frontal` never runs for that column pair — so rook
+   rescue is never invoked on 2×2 candidates BK-partial accepted. The
+   only path into rook rescue is: BK-partial chose 1×1, the column-
+   relative threshold rejected it, `try_reject_1x1_frontal` returned
+   `Delayed`/`Rejected`. At that point BK-partial's 2×2 criterion is
+   irrelevant; rook applies its own Duff-Reid criterion (plan §"Rook
+   Search Algorithm" step 7).
+
+2. **`pivot_threshold` default — keep 0.01 through Step 5.** Deferred
+   to Step 7 per plan §"Implementation Order". Changing the threshold
+   in the same commit as rook rescue would couple two independent
+   decisions and complicate the regression attribution. Step 7 of the
+   plan measures CRESC100/GAUSS2 with the unchanged 0.01 threshold;
+   if rook alone doesn't close the tail, a separate decision-log entry
+   raises the threshold to 0.1 and re-measures. Record in
+   `dev/decisions.md` at Step 5.
+
+3. **SSIDS 2×2 det floor — rook must apply the same floor to its 2×2
+   candidates.** The cancellation-aware det floor at
+   `src/dense/factor.rs:1409-1440` (SSIDS `ldlt_tpp.cxx:98-106` port)
+   protects BK-partial's 2×2 path from accepting near-singular blocks
+   where `|a11*a22| ≈ |a21^2|`. Rook's step-7 acceptance criterion
+   (`|A[i', j_prev]| >= alpha * gamma_row`) bounds the off-diagonal
+   magnitude but not the determinant — rook can accept a 2×2 whose
+   determinant cancels catastrophically. The kernel at Step 4 must
+   apply the same `max_piv`/`detpiv0`/`detpiv1` test to any 2×2 it
+   proposes. If rook's 2×2 fails the det floor, rook falls through to
+   step-8 (iterate) just as if step-7 had failed. This is an
+   implementation requirement, not an open question. Cross-check
+   against MA57 Fortran source during Step 4 review.
 
 ## 12. References (added)
 
