@@ -1601,3 +1601,45 @@ skipping snode 173 (root). Post-fix: 200 attempts → 0 divergence.
 parallel_parity`: 6/6 pass. `cargo test --release`: 251 pass,
 0 fail. `cargo clippy -- -D warnings`: clean. Bench: dense p90
 unchanged (1.35, 1.75); sparse p90 1.59/1.59.
+
+---
+
+## 2026-04-23 — Rook pivoting as rescue, not top-level strategy
+
+**Decision.** Rook pivoting will be added to the dense frontal kernel
+as a per-pivot rescue path spliced into `try_reject_1x1_frontal`
+(`src/dense/factor.rs:1520`), not as a top-level pivoting strategy
+selected by a `BunchKaufmanParams` flag. Rook fires only when BK-partial's
+column-relative threshold test would delay or reject a pivot; on
+matrices that never reject (~99% of the corpus), rook is a no-op and
+adds zero cost. On ill-conditioned KKTs (CRESC100/GAUSS2 at 40–45×),
+rook rescues delayed pivots in place and breaks the "delay → inflate
+parent supernode → corrupt fill prediction" cascade.
+
+**Why.** Three reasons:
+1. Auto-selects by construction — no dispatch policy or user flag.
+2. Cost is paid exactly where benefit accrues (ill-conditioned case).
+3. Matches HSL MA57's "partial pivoting with rook fallback" behavior,
+   which is what Ipopt consumers expect. Behavioral parity with MA57
+   matters for the Phase 2.7 closed-loop validation.
+
+Full plan: `dev/plans/phase-2.4.3-rook-rescue.md`. Research note:
+`dev/research/rook-rescue.md`.
+
+## 2026-04-23 — Blocked BK stays deferred-axpy, not BLAS-3 GEMM
+
+**Decision.** `factor_frontal_blocked` will retain its current
+deferred-scalar-axpy design (using `schur_kernel::axpy_minus_unroll4_nofma`)
+rather than being upgraded to a rank-k GEMM. The deferred-axpy design
+is bit-exact with the scalar `factor_frontal`, which 9 parity tests
+in `tests/blocked_ldlt.rs` enforce; a real GEMM would change
+accumulation order and break bit-parity.
+
+**Why.** Phase 2.4.1 perf target (dense factor/MUMPS p90 ≤ 2.0) is
+already met at p90 = 1.83 (bench 2026-04-23). Remaining tail
+(CRESC100/GAUSS2 at 40–45×, VESUVIO at 6–9×) is family-specific and
+rook-amenable, not kernel-speed-limited. The bit-parity guarantee is
+a real debugging asset and should not be traded away until a specific
+perf regression demands it. Revisit if CRESC100/GAUSS2 remain
+outliers after rook lands (Phase 2.4.3).
+
