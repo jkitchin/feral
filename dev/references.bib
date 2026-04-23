@@ -640,3 +640,89 @@
   note      = {mt-Metis: 1.5x faster than ParMetis, 3.7\% fewer NNZ, up to 10x
                parallel speedup on 16 cores with only 1\% fill increase.}
 }
+
+% --- Pivoting: Rook / Refined Bunch-Kaufman ---
+
+@article{duffreid1996zeros,
+  author    = {Duff, Iain S. and Reid, John K.},
+  title     = {Exploiting Zeros on the Diagonal in the Direct Solution of
+               Indefinite Sparse Symmetric Linear Systems},
+  journal   = {{ACM} Transactions on Mathematical Software},
+  year      = {1996},
+  volume    = {22},
+  number    = {2},
+  pages     = {227--257},
+  doi       = {10.1145/229473.229480},
+  url       = {https://doi.org/10.1145/229473.229480},
+  note      = {Original publication of rook-style pivoting in the sparse-
+               direct context. Introduces the alternating column/row scan
+               that searches for a local-max pivot within the fully-summed
+               submatrix of a frontal. Establishes the two-pass termination
+               criterion used by MA57 and the ghost-row restriction for
+               frontal-matrix adaptation. The algorithmic foundation of
+               FERAL's Phase 2.4.3 rook-rescue path.}
+}
+
+@article{ashcraft1998accurate,
+  author    = {Ashcraft, Cleve and Grimes, Roger G. and Lewis, John G.},
+  title     = {Accurate Symmetric Indefinite Linear Equation Solvers},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {1998},
+  volume    = {20},
+  number    = {2},
+  pages     = {513--561},
+  doi       = {10.1137/S0895479896296921},
+  url       = {https://doi.org/10.1137/S0895479896296921},
+  note      = {Termination analysis for rook pivoting: the magnitude
+               sequence |A[i_k, j_k]| is strictly increasing so the
+               alternating-scan loop terminates in O(n) worst case, with
+               empirical mean ~1.5 iterations on symmetric indefinite
+               problems including KKT systems. Also discusses the 8-
+               iteration safeguard used to guard against constant-valued
+               degenerate blocks where strict increase fails. Cited from
+               the research note's §11 open questions and §3 algorithm
+               description.}
+}
+
+@article{duff2004ma57,
+  author    = {Duff, Iain S.},
+  title     = {{MA57}---A Code for the Solution of Sparse Symmetric
+               Definite and Indefinite Systems},
+  journal   = {{ACM} Transactions on Mathematical Software},
+  year      = {2004},
+  volume    = {30},
+  number    = {2},
+  pages     = {118--144},
+  doi       = {10.1145/992200.992202},
+  url       = {https://doi.org/10.1145/992200.992202},
+  note      = {Reference implementation of rook pivoting in a production
+               multifrontal solver. MA57 uses BK-partial as its primary
+               strategy and falls through to a rook search only when the
+               column-relative threshold rejects the BK candidate --- the
+               same rescue-path design FERAL adopts. Notes the frontal
+               ghost-row handling (pivot candidates restricted to fully-
+               summed rows, threshold computed over all trailing rows) and
+               documents the default threshold u = 0.01 rationale.}
+}
+
+@article{foster1997rook,
+  author    = {Foster, Leslie V.},
+  title     = {The Growth Factor and Efficiency of {Gaussian} Elimination
+               with Rook Pivoting},
+  journal   = {Journal of Computational and Applied Mathematics},
+  year      = {1997},
+  volume    = {86},
+  number    = {1},
+  pages     = {177--194},
+  doi       = {10.1016/S0377-0427(97)00154-4},
+  url       = {https://doi.org/10.1016/S0377-0427(97)00154-4},
+  note      = {Growth-factor bound for rook pivoting: O(n^{0.5 \log n})
+               versus O(2^{n-1}) for partial pivoting. Shows that despite
+               the weaker theoretical bound vs complete pivoting, rook's
+               growth is indistinguishable from complete pivoting in
+               practice, while requiring only O(n^2) comparisons per
+               pivot (vs complete's O(n^2)). Supports the FERAL design
+               claim that rook rescue cannot regress inertia: tighter
+               growth means the sign pattern of D is strictly more
+               stable than under BK-partial.}
+}

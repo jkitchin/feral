@@ -1,0 +1,31 @@
+#+TITLE: Session Journal 2026-04-23-02
+#+STARTUP: showeverything
+
+* 18:28 :rook-rescue:plan:
+Starting Phase 2.4.3 (rook pivoting as rescue path) per the plan at
+=dev/plans/phase-2.4.3-rook-rescue.md= and the queued "next session
+should" list in =dev/sessions/2026-04-23-01.md=. Queued steps:
+
+1. Add bib entries for Duff-Reid 1996, Ashcraft-Grimes-Lewis 1998,
+   Duff 2004 MA57, Foster 1997.
+2. Step 2 of the plan: add =n_rook_rescues: usize= to =FrontalFactors=,
+   verify byte-parity tests still pass with field = 0.
+3. Step 3 of the plan: write Tests 1–3 against a stubbed =rook_rescue=.
+4. Gate: resolve 3 open questions in research note §11 before
+   touching kernel.
+
+Implementation proceeds tests-first. Exit criteria (from plan §Exit
+Criterion): max ≤ 20, p90 ≤ 1.90, geomean within 2% of 0.21, zero
+inertia regressions vs MUMPS.
+
+* 18:30 :rook-rescue:bib:
+Added 4 bibtex entries to =dev/references.bib= under new section
+"Pivoting: Rook / Refined Bunch-Kaufman":
+- =duffreid1996zeros= (ACM TOMS 22(2), 1996)
+- =ashcraft1998accurate= (SIMAX 20(2), 1998)
+- =duff2004ma57= (ACM TOMS 30(2), 2004)
+- =foster1997rook= (JCAM 86(1), 1997)
+
+Updated =dev/research/rook-rescue.md= header to cite the new bibkeys
+and marked §12 as "References (added)". Prereq for Step 1 of the
+plan complete per CLAUDE.md mandate.

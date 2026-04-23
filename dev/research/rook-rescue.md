@@ -6,10 +6,11 @@
 **Key references:** citep:bunch1977stable (baseline BK-partial),
 citep:bunch1971direct (Bunch-Parlett complete pivoting),
 citep:duff2020aptp (APTP pivoting analysis),
-citep:duff2005symmetric (symmetric pivoting for indefinite systems).
-Missing and to be added before implementation:
-Duff-Reid 1996 rook original, Ashcraft-Grimes-Lewis 1998 termination
-analysis, Duff 2004 MA57 reference.
+citep:duff2005symmetric (symmetric pivoting for indefinite systems),
+citep:duffreid1996zeros (rook original),
+citep:ashcraft1998accurate (termination analysis),
+citep:duff2004ma57 (MA57 reference implementation),
+citep:foster1997rook (O(n^{0.5 log n}) growth bound).
 
 ## 1. Scope
 
@@ -245,20 +246,23 @@ Oracle sources for the new tests:
    operates upstream at the 1×1 rejection point. Needs confirmation
    during Step 5.
 
-## 12. References to Add
+## 12. References (added)
 
-Before Step 1 of the implementation (kernel writing) these entries
-must be added to `dev/references.bib`:
+Added to `dev/references.bib` 2026-04-23 as prereq to Step 1:
 
-- **Duff-Reid 1996.** "Exploiting zeros on the diagonal in the direct
-  solution of indefinite sparse symmetric linear systems." ACM TOMS.
-  The original rook publication in the sparse-direct context.
-- **Ashcraft-Grimes-Lewis 1998.** "Accurate symmetric indefinite
-  linear equation solvers." SIAM J. Matrix Anal. Appl. 20(2).
-  Termination proof and empirical iteration counts.
-- **Duff 2004.** "MA57 — a code for the solution of sparse symmetric
-  definite and indefinite systems." ACM TOMS 30(2). Reference
-  implementation of rook in a production solver.
-- **Foster 1997.** "The growth factor and efficiency of Gaussian
-  elimination with rook pivoting." JCAM 86(1). The O(1) growth bound
-  under rook.
+- `duffreid1996zeros` — Duff & Reid, "Exploiting zeros on the
+  diagonal in the direct solution of indefinite sparse symmetric
+  linear systems." ACM TOMS 22(2), 1996. The original rook
+  publication in the sparse-direct context.
+- `ashcraft1998accurate` — Ashcraft, Grimes & Lewis, "Accurate
+  symmetric indefinite linear equation solvers." SIAM J. Matrix
+  Anal. Appl. 20(2), 1998. Termination proof and empirical
+  iteration counts (mean ~1.5); 8-iteration safeguard.
+- `duff2004ma57` — Duff, "MA57 — a code for the solution of
+  sparse symmetric definite and indefinite systems." ACM TOMS
+  30(2), 2004. Reference implementation of rook-as-rescue in a
+  production solver; documents frontal ghost-row handling.
+- `foster1997rook` — Foster, "The growth factor and efficiency of
+  Gaussian elimination with rook pivoting." JCAM 86(1), 1997.
+  O(n^{0.5 log n}) growth bound; empirical equivalence to complete
+  pivoting.
