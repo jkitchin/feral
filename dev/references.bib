@@ -420,6 +420,135 @@
                pivoting optimization, not a correctness requirement.}
 }
 
+% ============================================================
+% Norm-balancing scaling (Ruiz / MC77 family, Curtis-Reid / MC29,
+% Sinkhorn-Knopp, Bertsekas auction)
+% ============================================================
+
+@techreport{ruiz2001equilibrate,
+  author      = {Ruiz, Daniel},
+  title       = {A Scaling Algorithm to Equilibrate Both Rows and
+                 Columns Norms in Matrices},
+  institution = {Rutherford Appleton Laboratory},
+  number      = {RAL-TR-2001-034},
+  year        = {2001},
+  month       = sep,
+  url         = {https://www.numerical.rl.ac.uk/media/reports/drRAL2001034.pdf},
+  note        = {Basis of HSL routine MC77. Iterative procedure that
+                 simultaneously scales infinity-norm of both rows and
+                 columns to 1 via D_R = diag(sqrt(||r_i||_inf)),
+                 D_C = diag(sqrt(||c_j||_inf)) updates. Preserves
+                 symmetry (D_R == D_C when A symmetric) unlike
+                 alternating-axis Sinkhorn-Knopp. Fast linear
+                 convergence with asymptotic rate 1/2 (Section 3).
+                 Extensions to 1-norm and 2-norm in Section 5. For
+                 FERAL, this is the "simple and safe" scaling
+                 candidate — 5-10 MVPs to converge, no matching
+                 required, symmetry preserved automatically.}
+}
+
+@article{knight2014symmetry,
+  author    = {Knight, Philip A. and Ruiz, Daniel and U\c{c}ar, Bora},
+  title     = {A Symmetry Preserving Algorithm for Matrix Scaling},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {2014},
+  volume    = {35},
+  number    = {3},
+  pages     = {931--955},
+  doi       = {10.1137/110825753},
+  url       = {https://epubs.siam.org/doi/10.1137/110825753},
+  note      = {Refined version of Ruiz 2001. Extends the inf-norm
+                 equilibration to 1-norm / 2-norm variants with proved
+                 linear convergence on symmetric matrices. For
+                 symmetric indefinite input, the 1-norm variant
+                 produces scalings close to MC64's diagonal-matching
+                 scaling at a fraction of the cost (no matching solve).
+                 Recommended reference for FERAL's MC77-family
+                 implementation.}
+}
+
+@article{curtis1972automatic,
+  author    = {Curtis, A. R. and Reid, J. K.},
+  title     = {On the Automatic Scaling of Matrices for
+                 {G}aussian Elimination},
+  journal   = {{IMA} Journal of Applied Mathematics},
+  year      = {1972},
+  volume    = {10},
+  number    = {1},
+  pages     = {118--124},
+  doi       = {10.1093/imamat/10.1.118},
+  note      = {Basis of HSL routines MC29 (unsymmetric) and MC30
+                 (symmetric). Chooses scaling factors r_i, c_j to
+                 minimize Phi = sum_{ij: a_ij != 0} (log|a_ij| + r_i
+                 + c_j)^2 — a least-squares problem in log-space
+                 solved via a few conjugate-gradient iterations
+                 (typically 3-5 mat-vec products). Per-entry gradient
+                 is linear in structure; converges in O(nnz) per
+                 iteration. Produces better-conditioned scalings than
+                 simple row/column-norm equilibration on sparse
+                 matrices, per the paper's numerical experiments.
+                 Classical "safe" baseline.}
+}
+
+@article{bertsekas1988auction,
+  author    = {Bertsekas, Dimitri P.},
+  title     = {The Auction Algorithm: A Distributed Relaxation
+                 Method for the Assignment Problem},
+  journal   = {Annals of Operations Research},
+  year      = {1988},
+  volume    = {14},
+  number    = {1},
+  pages     = {105--123},
+  doi       = {10.1007/BF02186476},
+  note      = {The auction algorithm for linear assignment.
+                 Alternative to Hungarian / Jonker-Volgenant for
+                 MC64-style matching. Works by iterative bidding with
+                 epsilon-complementary slackness; complexity
+                 O(N^3 log(NC)) with epsilon-scaling (N = dim,
+                 C = max |a_ij|). Strongly parallelizable — bids can
+                 be computed synchronously per-person or totally
+                 asynchronously. For sparse assignment, scaling is
+                 "almost universally helpful" (quote). Relevant to
+                 FERAL as a parallel-friendly replacement for the
+                 current Hungarian MC64 solver on multi-threaded
+                 hardware.}
+}
+
+@misc{bertsekas2001auctionencycl,
+  author = {Bertsekas, Dimitri P.},
+  title  = {Auction Algorithms},
+  year   = {2001},
+  note   = {Encyclopedia article summarizing the auction algorithm
+                 family. Covers the bidding mechanism, epsilon-
+                 scaling, parallel / asynchronous implementations,
+                 and extensions to transportation and min-cost-flow.
+                 Useful implementation-oriented overview that
+                 complements the original 1988 Annals of OR paper.},
+  url    = {https://www.mit.edu/~dimitrib/Auction_Encycl.pdf}
+}
+
+@article{sinkhorn1967doubly,
+  author    = {Sinkhorn, Richard and Knopp, Paul},
+  title     = {Concerning Nonnegative Matrices and Doubly
+                 Stochastic Matrices},
+  journal   = {Pacific Journal of Mathematics},
+  year      = {1967},
+  volume    = {21},
+  number    = {2},
+  pages     = {343--348},
+  doi       = {10.2140/pjm.1967.21.343},
+  note      = {Classical iterative row/column 1-norm balancing. For
+                 any nonnegative matrix with support, alternately
+                 normalizing rows and columns converges to a doubly-
+                 stochastic scaled matrix. Inf-norm variant converges
+                 in one step per axis. Ruiz 2001 (above) generalizes
+                 this to preserve symmetry by scaling both axes
+                 simultaneously. Referenced here as the algorithmic
+                 ancestor; not recommended for direct use on symmetric
+                 indefinite matrices because alternating axes breaks
+                 symmetry between iterations.}
+}
+
 % --- Ordering: Foundations ---
 
 @article{george1973nested,

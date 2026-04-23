@@ -159,3 +159,58 @@ hits (r=1, s=2) first because iter 1 does NOT accept the 2×2 at
 iter 2 accepts at gamma_s==gamma_r==1e4 with s=2. This gives
 n_swaps=2: (0,1) then (1,2). Updated test to match observed (and
 correct) behavior; re-verified by hand.
+
+* 19:35 :scaling:crucible:plan:
+User pivot mid-session: "we need to add scaling algorithms to the
+crucible. find papers on the ones you mentioned above and add them to
+the crucible. then add to our plan to implement the ones that have
+the known highest performance, and one safe one."
+
+Rook-rescue Step 5 deferred. Executed the scaling-algorithms request:
+
+1. Ingested 3 primary sources into Crucible via =crucible ingest=:
+   - Ruiz 2001 RAL-TR-2001-034 (=ruiz2001=)
+   - Bertsekas 2001 auction encyclopedia (=bertsekas2001=)
+   - HSL MC29 package specification (=reid2023=)
+   Knight-Ruiz-Uçar 2014 attempted from 3 mirrors (Inria HAL,
+   Strathprints, CORE), all returned 403/404/522. Added as bib-only
+   entry; defer download.
+
+2. Added 6 entries to =dev/references.bib= in new section
+   "Norm-balancing scaling (Ruiz / MC77 family, Curtis-Reid / MC29,
+   Sinkhorn-Knopp, Bertsekas auction)":
+   =ruiz2001equilibrate=, =knight2014symmetry=, =curtis1972automatic=,
+   =bertsekas1988auction=, =bertsekas2001auctionencycl=,
+   =sinkhorn1967doubly=.
+
+3. Wrote Crucible concept article
+   =.crucible/wiki/concepts/matrix-scaling-algorithms.org= covering
+   Ruiz (∞-norm, rate 1/2, symmetry-preserving), Curtis-Reid / MC29
+   (least-log-squares, the "safe" choice per the HSL spec quote),
+   MC64 matching + Bertsekas auction, and Sinkhorn-Knopp (rejected).
+   Includes decision matrix and relationship to =ScalingStrategy=.
+   =crucible sync= → 14 added, 27 updated, 190 concept links. Manifest
+   regenerated: 41 articles (11 concept).
+
+4. Wrote plan =dev/plans/scaling-algorithms-expansion.md= recommending:
+   - Highest-performance candidate: Ruiz 2001 ∞-norm (asymptotic rate
+     1/2, symmetry-preserving). Already in the codebase as
+     =infnorm.rs=; plan is to rename + document with paper-matching
+     notation and add =ScalingStrategy::Ruiz=.
+   - Safe candidate: Curtis-Reid 1972 / MC29 (least-log-squares, CG
+     on normal equations, bounded iterations). New =curtis_reid.rs=
+     with =ScalingStrategy::CurtisReid=. Motivated by MSS1_0009 where
+     the current Policy 4 fallback is a diagnostic workaround rather
+     than a principled scaling.
+   - Deferred: Knight-Ruiz-Uçar (1-norm extension), Bertsekas auction
+     (parallelism upgrade for MC64), Sinkhorn-Knopp (breaks symmetry).
+
+Research-note gate: plan §3 Step 1 requires
+=dev/research/scaling-ruiz-curtis-reid.md= BEFORE the rename in Step
+2 or the new kernel in Step 3. Three open questions (§6): Jacobi vs
+sequential equivalence for symmetric input; =max_iter=10 + tol=1e-8=
+arithmetic in the current =infnorm.rs= (likely under-iterating for
+the stated tol); MC30 vs MC29 normal-equations structure.
+
+Evidence: =crucible sync= clean. No code changes — plan + concept
+article only. Existing dense/rook test suite unchanged.

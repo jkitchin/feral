@@ -1,0 +1,177 @@
+#+TITLE: Matrix Scaling Algorithms for Sparse Direct Solvers
+#+FILETAGS: :concept:scaling:equilibration:sparse-solver:mc64:mc29:ruiz:
+
+* Matrix Scaling Algorithms for Sparse Direct Solvers
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: ruiz2001, bertsekas2001, reid2023
+:STATUS: draft
+:CREATED: 2026-04-23
+:END:
+
+Scaling or /equilibration/ of a matrix A replaces A with a congruent matrix
+$\tilde A = D_1 A D_2$ whose nonzeros are closer to unit magnitude. For
+symmetric indefinite direct solvers (Bunch-Kaufman, rook, multifrontal
+LDL^T), scaling is a pre-processing step that can dramatically reduce
+delayed pivots, improve residual accuracy, and sometimes change the
+numerical inertia question from intractable to well-conditioned
+citep:ruiz2001.
+
+Two orthogonal design axes matter for our use case in FERAL's
+[[file:./symmetric-indefinite-factorization.org][symmetric indefinite
+factorization]]:
+
+1. *Symmetry preservation.* Since we apply scaling as a congruence
+   $D A D$, the scaling vector must be identical on both sides.
+   Algorithms that alternate row-then-column normalization (e.g.
+   Sinkhorn-Knopp) break symmetry at each half-step and cannot be
+   used directly.
+2. *Target norm.* The ∞-norm (Ruiz 2001), 1-norm (Knight-Ruiz-Uçar
+   2014 variant), and sum-of-log-squares objective (Curtis-Reid 1972)
+   each produce different fixed points with different conditioning
+   properties.
+
+** Ruiz 2001: simultaneous row and column ∞-norm equilibration
+
+The Ruiz 2001 algorithm iterates the step
+
+$$A^{(k+1)} = D_R^{-1/2}\, A^{(k)}\, D_C^{-1/2}$$
+
+where $D_R$ and $D_C$ are the diagonals of row/column ∞-norms of
+$A^{(k)}$ citep:ruiz2001. On symmetric input $D_R = D_C$, so the
+iterate preserves symmetry at every step — this is explicitly
+called out in the paper §3 as the principal reason to prefer it over
+Sinkhorn-Knopp for symmetric matrices.
+
+Key properties (Ruiz 2001 §3):
+
+- *Asymptotic linear convergence with rate 1/2.* Each iteration
+  halves the distance to the fixed point of unit row/column ∞-norms.
+- *After iteration 1, all entries satisfy $|\tilde a_{ij}| \le 1$.*
+- *Single-iteration convergence on diagonally dominant matrices.*
+  If $|a_{ii}| \ge |a_{ij}|$ and $|a_{ii}| \ge |a_{ji}|$ for all
+  $j \ne i$, one sweep produces $\tilde a_{ii} = 1$.
+- *Optimal conditioning.* By Bauer (1963) / van der Sluis (1969),
+  equilibrated ∞-norms imply a bounded-above relationship for the
+  condition number relative to the best possible diagonal scaling.
+
+The FERAL implementation at ~src/scaling/infnorm.rs~ is labelled
+"Knight-Ruiz" but is structurally Ruiz Algorithm 2.1 adapted to
+Jacobi sweeps over CSC lower-triangle storage. A rename + research
+note is scheduled (see ~dev/plans/scaling-algorithms-expansion.md~).
+
+** Curtis-Reid 1972 / MC29: least-log-squares scaling
+
+The Curtis-Reid scaling is the other classical "safe" choice. It
+finds diagonal vectors $r$ and $c$ that minimize
+
+$$\sum_{a_{ij} \ne 0} (\log|a_{ij}| + r_i + c_j)^2$$
+
+by solving the associated least-squares normal equations with a
+small number of conjugate gradient iterations citep:reid2023. The
+resulting scaling makes the /logarithms/ of nonzeros as close to zero
+as possible in a least-squares sense — a global objective, not a
+per-row or per-column one.
+
+From the HSL MC29 specification citep:reid2023:
+
+#+BEGIN_QUOTE
+To compute scaling factors $R$ and $C$ for a real sparse rectangular
+matrix $A$ such that the scaled matrix $R^{-1} A C^{-1}$ has its
+nonzeros near unity in the sense that the sum of the squares of the
+logarithms of the moduli of the nonzeros is minimized.  Use of this
+method gives far better results on sparse matrices than scaling to
+equilibrate row norms.
+#+END_QUOTE
+
+MC30 is the symmetric variant (referenced in Ruiz 2001 §1) and is the
+correct target for FERAL, where scaling is applied as a congruence.
+
+Why "safe": Curtis-Reid has been in production at HSL since 1972.
+It has no iteration-bound surprises (CG converges in ≤ rank steps
+on the normal equations), preserves symmetry by construction in the
+MC30 form, and tends to behave well precisely on matrices where
+norm-balancing fails — such as FERAL's problem case MSS1_0009,
+where the Ruiz infinity-norm iteration produces a matrix whose
+scaled $\max|{\rm off}|/|{\rm diag}|$ ratio explodes to $\sim 10^{14}$
+and motivates the Policy 4 fallback in ~src/scaling/mod.rs~.
+
+** Matching-based: Duff-Koster 2001 / MC64
+
+MC64 is a separate family: first find a permutation that maximizes
+the product of absolute values on the diagonal (a maximum-weight
+bipartite matching problem), then scale so those diagonal entries
+are 1 and off-diagonals are ≤ 1. Already implemented in FERAL as
+~src/scaling/mc64.rs~ via a pure-Rust Hungarian algorithm. See
+also [[file:./symmetric-indefinite-factorization.org][symmetric
+indefinite factorization]] for how the matching interacts with
+pivoting and the arrow-KKT shape heuristic that routes FERAL's
+~Auto~ strategy.
+
+*** Bertsekas auction: a parallel alternative to Hungarian
+
+The Hungarian algorithm has an O(n³) worst case and is serial. The
+Bertsekas auction algorithm solves the same assignment problem via
+ε-complementary-slackness bidding citep:bertsekas2001. Key features:
+
+- *Polynomial complexity* with ε-scaling (geometric reduction of ε
+  across outer iterations).
+- *Massively parallelizable* — each "person" can bid
+  independently in a round (Bertsekas 2001, §on "Parallel and
+  Asynchronous Implementation").
+- *Same optimal assignment* as Hungarian (within ε-CS tolerance);
+  the final ε is driven small enough that the result is
+  integer-optimal for integer-weight problems.
+
+FERAL does not currently need auction — the Hungarian is not on
+the critical path of any bench matrix — but the ingested paper is
+available for future parallelization of MC64.
+
+** Sinkhorn-Knopp 1967: rejected for symmetric solvers
+
+Sinkhorn and Knopp's iteration alternately normalizes row-sums
+then column-sums to produce a doubly stochastic matrix. Ruiz 2001
+§3 argues explicitly against it for symmetric inputs: alternating
+row/column sweeps break symmetry at each half-step, and the
+resulting scaling depends on whether A or A^T was the input.
+For general unsymmetric scaling, Sinkhorn-Knopp is a reasonable
+choice; for FERAL's symmetric indefinite context, it is not.
+
+** Decision matrix for FERAL
+
+| Algorithm            | Symmetric-preserving | Target norm   | Convergence rate            | Status in FERAL |
+|----------------------+----------------------+---------------+-----------------------------+-----------------|
+| Ruiz 2001 ∞-norm     | yes                  | ∞-norm        | linear, rate 1/2            | implemented (as ~infnorm.rs~); rename scheduled |
+| Knight-Ruiz-Uçar 2014| yes                  | 1-norm        | linear (proved)             | deferred |
+| Curtis-Reid 1972     | yes (MC30 variant)   | log-sum-sq    | CG, ≤ rank iters            | planned (safe candidate) |
+| MC64 matching        | via symmetric-avg    | matching      | O(n³) worst case Hungarian  | implemented |
+| Bertsekas auction    | n/a (matching-level) | matching      | polynomial with ε-scaling   | deferred |
+| Sinkhorn-Knopp       | *no*                 | 1-norm        | geometric                   | rejected |
+
+** Relationship to FERAL's ~ScalingStrategy~
+
+The ~ScalingStrategy~ enum at ~src/scaling/mod.rs:86~ currently
+exposes ~InfNorm~, ~Mc64Symmetric~, ~Identity~, ~External~, and
+~Auto~. The expansion plan (~dev/plans/scaling-algorithms-expansion.md~)
+will add ~Ruiz~ (renamed ~InfNorm~) and ~CurtisReid~, turning the
+enum into the full decision matrix above.
+
+** References
+
+Primary sources:
+
+- Ruiz (2001), /A Scaling Algorithm to Equilibrate Both Rows and
+  Columns Norms in Matrices/, RAL-TR-2001-034. Cite key ~ruiz2001~.
+  The foundational algorithm for FERAL's norm-balancing path.
+- Bertsekas (2001), /Auction Algorithms/ (encyclopedia article).
+  Cite key ~bertsekas2001~. Background for future MC64
+  parallelization.
+- Reid / STFC, /HSL MC29 Package Specification/. Cite key
+  ~reid2023~. The production reference for Curtis-Reid scaling.
+
+Secondary references (bib-only):
+
+- ~curtis1972automatic~ — Curtis and Reid (1972), original paper.
+- ~knight2014symmetry~ — Knight, Ruiz, Uçar (2014), 1-norm extension.
+- ~bertsekas1988auction~ — Bertsekas (1988), original auction paper.
+- ~sinkhorn1967doubly~ — Sinkhorn and Knopp (1967), doubly stochastic.
