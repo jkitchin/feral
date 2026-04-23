@@ -29,3 +29,64 @@ Added 4 bibtex entries to =dev/references.bib= under new section
 Updated =dev/research/rook-rescue.md= header to cite the new bibkeys
 and marked §12 as "References (added)". Prereq for Step 1 of the
 plan complete per CLAUDE.md mandate.
+
+* 18:38 :rook-rescue:step-2:telemetry:
+Step 2 of the plan: added =pub n_rook_rescues: usize= to
+=FrontalFactors= in =src/dense/factor.rs:530-ish= and initialized
+to 0 at all four constructor sites (ncol==0 early returns and
+end-of-function Ok in both =factor_frontal= and
+=factor_frontal_blocked=), plus the empty-front constructor in
+=src/numeric/factorize.rs= line 582-ish. Extended
+=assert_frontals_byte_identical= in =tests/blocked_ldlt.rs= to
+cover the new field so scalar-vs-blocked parity keeps equivalent
+surface area.
+
+Evidence: =cargo test --lib= 138 passed, blocked_ldlt 9 passed,
+delayed_pivoting 6 passed. =cargo fmt --check= and =cargo clippy
+-- -D warnings= clean.
+
+* 18:40 :rook-rescue:step-3:tests:
+Step 3 of the plan: wrote =tests/rook_rescue.rs= with three tests
+and created =src/dense/rook.rs= with a stubbed =rook_rescue=
+returning =None= plus =RookPivot= / =RookKind= types for the
+eventual kernel.
+
+Test 1 (=test_rook_identity_on_spd=): GREEN. Factor SPD matrices
+of sizes {4, 8, 16, 32, 64} via both scalar and blocked paths,
+assert =n_rook_rescues == 0=. This is the "zero cost on easy
+matrices" gate.
+
+Tests 2 & 3 (=test_rook_rescues_delayed_1x1= and =_delayed_2x2=):
+=#[ignore]='d with reason "Phase 2.4.3 Step 5: rook_rescue splice
+into try_reject_1x1_frontal pending". Written against the
+post-splice contract:
+- assert =n_rook_rescues >= 1=
+- assert =!needs_refinement= (rook must succeed without force-accept)
+- assert =nelim == n= (full elimination)
+- assert LDLᵀ reconstruction residual small
+- assert inertia matches hand-computed oracle
+
+Hand-traced the 4×4 and 5×5 matrices through both BK and rook:
+BK takes 1×1 at k=0 via the LAPACK-extension case
+(=a_kk * gamma_r >= alpha * gamma_0^2=) with =d=0.008= and
+=col_max=1=, so =|d|=0.008 < 0.01 = pivot_threshold * col_max=
+triggers the rejection that rook rescues.
+
+Caught an error in the hand-computed inertia before committing:
+ran an ad-hoc diagnostic that factored both matrices with current
+(pre-splice) BK + =ForceAccept= to observe the true sign pattern.
+By Sylvester's law, inertia is pivot-order invariant, so the
+force-accept baseline gives the oracle the rook path must match.
+Original claims (2,2,0) and (3,2,0) were wrong; corrected to
+(3,1,0) and (4,1,0) based on principal-minor analysis of the
+block structures:
+- Test 2: 3×3 block {0,1,2} has det=-578 < 0, trace=500 > 0
+  → exactly one negative eigenvalue. Plus +1 from block {3}
+  → (3, 1, 0).
+- Test 3: 3×3 block {0,1,2} dominated by ±1e4 off-diagonal in
+  {1,2} subblock → (2, 1, 0). Plus +1 each from {3}, {4}
+  → (4, 1, 0).
+
+Evidence: =cargo test --test rook_rescue= → 1 passed, 0 failed,
+2 ignored. =cargo fmt --check= and =cargo clippy -- -D warnings=
+clean.
