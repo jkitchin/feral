@@ -597,6 +597,7 @@ fn factor_one_supernode(
                     zero: 0,
                 },
                 needs_refinement: false,
+                n_rook_rescues: 0,
                 zero_tol: params.bk.zero_tol,
                 zero_tol_2x2: params.bk.zero_tol_2x2,
             },

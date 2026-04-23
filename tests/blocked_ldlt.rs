@@ -70,6 +70,11 @@ fn assert_frontals_byte_identical(scalar: &FrontalFactors, blocked: &FrontalFact
         "{} needs_refinement",
         tag
     );
+    assert_eq!(
+        scalar.n_rook_rescues, blocked.n_rook_rescues,
+        "{} n_rook_rescues",
+        tag
+    );
     assert_eq!(scalar.perm, blocked.perm, "{} perm", tag);
     assert_eq!(scalar.perm_inv, blocked.perm_inv, "{} perm_inv", tag);
     assert_eq!(

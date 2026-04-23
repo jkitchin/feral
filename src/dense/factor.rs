@@ -531,6 +531,11 @@ pub struct FrontalFactors {
     pub inertia: Inertia,
     /// Whether ForceAccept fired during factorization.
     pub needs_refinement: bool,
+    /// Number of pivots rescued by rook search after BK-partial's column-
+    /// relative threshold test rejected them (Phase 2.4.3). Zero on
+    /// well-conditioned matrices. Aggregated per-front; the multifrontal
+    /// driver sums across supernodes.
+    pub n_rook_rescues: usize,
     /// 1×1 pivot threshold from BunchKaufmanParams (see Factors::zero_tol).
     pub zero_tol: f64,
     /// 2×2 pivot threshold from BunchKaufmanParams.
@@ -647,6 +652,7 @@ pub fn factor_frontal(
                 zero: 0,
             },
             needs_refinement: false,
+            n_rook_rescues: 0,
             zero_tol: params.zero_tol,
             zero_tol_2x2: params.zero_tol_2x2,
         });
@@ -757,6 +763,7 @@ pub fn factor_frontal(
         n_delayed,
         inertia: Inertia::new(pos, neg, zero),
         needs_refinement,
+        n_rook_rescues: 0,
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
     })
@@ -826,6 +833,7 @@ pub fn factor_frontal_blocked(
                 zero: 0,
             },
             needs_refinement: false,
+            n_rook_rescues: 0,
             zero_tol: params.zero_tol,
             zero_tol_2x2: params.zero_tol_2x2,
         });
@@ -999,6 +1007,7 @@ pub fn factor_frontal_blocked(
         n_delayed,
         inertia: Inertia::new(pos, neg, zero),
         needs_refinement,
+        n_rook_rescues: 0,
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
     })
