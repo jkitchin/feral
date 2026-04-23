@@ -90,3 +90,72 @@ block structures:
 Evidence: =cargo test --test rook_rescue= → 1 passed, 0 failed,
 2 ignored. =cargo fmt --check= and =cargo clippy -- -D warnings=
 clean.
+
+* 18:55 :rook-rescue:step-4:kernel:
+Step 4 of the plan: replaced the =rook_rescue= stub in
+=src/dense/rook.rs= with a full symmetric threshold-gated rook
+alternating-scan kernel. Signature unchanged:
+=fn rook_rescue(a, nrow, ncol, k, params) -> Option<RookPivot>=.
+
+Algorithm (matches plan §3 and research note §3):
+
+1. Init =r := k=, compute =(gamma_r, s) = sym_row_argmax(r)= over
+   =[k, nrow)=.
+2. Loop up to =MAX_ROOK_ITER = 8= (Ashcraft-Grimes-Lewis 1998
+   safeguard):
+   a. If =r < ncol= and =|A[r,r]| >= u * gamma_r=: accept 1×1 at r.
+   b. Compute =(gamma_s, t) = sym_row_argmax(s)=.
+   c. If =s < ncol= and =|A[s,s]| >= u * gamma_s=: accept 1×1 at s.
+   d. If both r,s fully-summed and =gamma_s <= gamma_r= (i.e.,
+      =|A[s,r]|= dominates both rows): try 2×2 at {r,s} subject to
+      SSIDS det floor + Duff-Reid growth bound (both ported from
+      =factor_frontal=:1409-1439).
+   e. Advance =(r, gamma_r, s) := (s, gamma_s, t)=.
+3. Return =None= on iteration exhaustion → caller falls through to
+   delay/force-accept.
+
+Gate choice: rook uses =params.pivot_threshold= (u, typically 0.01)
+as the 1×1 accept threshold, NOT =alpha=. Research note §11 Q2
+resolved this — splice-site semantics require the rescued pivot pass
+the same u-threshold that rejected the original candidate.
+
+Swap placement: =RookPivot::pair(k, r, s)= produces up to 2 symmetric
+swaps that bring {r, s} to positions {k, k+1}, handling the special
+case =r == k+1 && s == k= (single swap suffices) and tracking index
+drift when the first swap relocates s.
+
+Unit tests (5/5 pass in =cargo test --lib dense::rook=):
+- =rook_accepts_1x1_at_row_2=: hand-traced Test 2 matrix; rook walks
+  (0,0)→(0,1)→(2,1), then iter-2's gamma_s=100 <= gamma_r=100 at
+  s=2 with =|A[2,2]|=500 >= u*100=1=, accepts 1×1 at row 2 via
+  swap (0,2). Note the scan FIRST checks 1×1 at s BEFORE the 2×2
+  termination test; this is the key design decision and is why Test
+  2 produces a 1×1 rescue rather than the 2×2 that would fire if
+  the order were reversed.
+- =rook_accepts_2x2_at_rows_1_2=: hand-traced Test 3 matrix; rook
+  reaches iter-2 at r=1,s=2 with gamma_s==gamma_r==1e4 and both
+  diagonals (0.1) too small for 1×1; 2×2 gates pass and algorithm
+  returns =Pivot2x2= with swaps [(0,1), (1,2)].
+- =rook_accepts_1x1_at_k_when_diagonally_dominant=: SPD with
+  |A[0,0]|=10 >> u*max_offdiag; returns 1×1 at k with n_swaps=0.
+- =rook_declines_when_threshold_zero=: u=0 → early return None.
+- =rook_declines_when_only_ghost_has_good_pivot=: 3×3 with ncol=2
+  and the only strong pivot sitting at ghost row 2; rook cycles
+  between fully-summed rows with tiny diagonals and exhausts the
+  8-iter safeguard, returning None. Exercises the r>=ncol branch.
+
+Evidence: =cargo test --lib dense::rook= → 5 passed. Full test
+suite =cargo test --lib= → 143 passed. =cargo fmt --check= and
+=cargo clippy -- -D warnings= clean.
+
+Two minor clippy/fmt fixes during Step 4: the =growth_ok= local
+in =passes_2x2_gates= triggered =let_and_return= and was inlined;
+the flattened conditional was rewrapped by rustfmt onto one line.
+
+Test 3 expectation in the unit test was initially wrong: I traced
+the scan terminating at (r=2, s=1), giving n_swaps=1. Actual scan
+hits (r=1, s=2) first because iter 1 does NOT accept the 2×2 at
+{0, 1} (gamma_s=1e4 > gamma_r=1 → advance). After advance to r=1,
+iter 2 accepts at gamma_s==gamma_r==1e4 with s=2. This gives
+n_swaps=2: (0,1) then (1,2). Updated test to match observed (and
+correct) behavior; re-verified by hand.
