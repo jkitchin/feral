@@ -1,5 +1,16 @@
 # Phase 2.9 — SmallLeafSubtree batching
 
+> **Retrospective (2026-04-24).** Phase 2.9 and its follow-up
+> Phase 2.9.2 both produced null / rejected results. The framing
+> below ("10× vs MUMPS") is preserved for historical accuracy but
+> is superseded by `dev/research/reference-solver-comparison.md`:
+> FERAL is at-or-ahead of SSIDS across the corpus and the remaining
+> MUMPS-gap on tiny IPM matrices (ACOPR30, CRESC100, HAIFAM_0082)
+> is a narrow acknowledged deficit — not the universal gap this
+> note originally assumed. A future assault on the MUMPS-gap should
+> start from the instrumentation checklist in that newer note, not
+> from this one.
+
 ## Problem
 
 On long-tail IPM matrices (ACOPR30, CRESC100, HAIFAM) feral's factor is

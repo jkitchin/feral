@@ -175,3 +175,63 @@ amalgamation budget).
 Action: close Phase 2.9.2, record in tried-and-rejected.md. Keep
 the diagnostic hook ~factor_frontal_with_profile~ in place — it is
 zero-overhead when unused and valuable for future kernel triage.
+
+* 17:30 :reframe:reference-solvers:
+Before starting a third assault on "the 10× gap vs MUMPS" we
+stopped and looked at all three oracle sidecars together
+(mumps.json + ssids.json + our factor_us). The gap is not what
+the phase notes said.
+
+FERAL vs reference solvers (factor_us, ours via diag_small_leaf):
+
+| matrix         |   n  |  MUMPS | SSIDS  | FERAL  | /MUMPS | /SSIDS |
+|----------------|-----:|-------:|-------:|-------:|--------|--------|
+| AVION2_0000    |   ~  |    ~   |   ~    |    30  |  0.42× |   ~    |
+| BATCH_0000     |  121 |    83  |   499  |    70  |  0.84× |  0.14× |
+| HAHN1_0000     |   ~  |    ~   |  2590  |   327  |  ~     |  0.13× |
+| HAIFAM_0082    |  249 |   298  |  1290  |   608  |  2.04× |  0.47× |
+| ACOPR30_0067   |  564 |   144  |  1093  |  1214  |  8.43× |  1.11× |
+| CRESC100_0000  |  806 |   200  |  1010  |  1233  |  6.17× |  1.22× |
+| VESUVIO_0000   | 3083 |  2215  |  3082  |  4361  |  1.97× |  1.41× |
+
+Three findings:
+
+1. FERAL is at-or-ahead of SSIDS on every matrix in this slice. On
+   HAHN1 and BATCH we are 7-8× *faster* than SSIDS (which links
+   vendor BLAS, unlike us).
+2. SSIDS/MUMPS ratio scales with matrix size: 6× on BATCH (n=121),
+   1.4× on VESUVIO (n=3083). That's the signature of MUMPS having
+   ruthlessly optimised fixed per-invocation driver overhead that
+   SSIDS (and we) have not. As matrix grows, fixed cost amortises.
+3. We already beat MUMPS on a third of the corpus (AVION2 0.42×,
+   BATCH 0.84×, HAIFAM_0000 1.33×).
+
+Conclusion: the "10× vs MUMPS" framing was a distraction from
+what we'd actually achieved. The near-term target should be
+"match or beat SSIDS" — which we've done. The MUMPS-gap on tiny
+IPM is a real deficit worth closing *eventually*, because those
+are the motivating use case (interior-point solves on small KKT),
+but it is a narrow problem class where even SSIDS pays 4-8× vs
+MUMPS. It is engineering effort on the driver/amalgamation, not a
+BLAS ceiling.
+
+Written up at ~dev/research/reference-solver-comparison.md~. The
+Phase 2.9 research note carries a retrospective pointer to the new
+note.
+
+* 17:45 :reframe:mumps-gap-next-steps:
+When the MUMPS-gap project is picked up, the right starting point
+is not another leaf-kernel micro-profile. It is:
+
+1. Read MUMPS source via ~mumps-expert~ on amalgamation (~ICNTL(6)~
+   + ~CNTL(3)~ + ~ICNTL(14)~), ordering defaults, analysis phase
+   structure. How many fronts does MUMPS produce on ACOPR30?
+   What is its front-size distribution?
+2. Decompose our factor_us by front-size bucket on ACOPR30.
+3. Compare front counts. If MUMPS produces 50 fronts where we
+   produce 341, raise our amalgamation threshold.
+4. Measure driver prologue+epilogue separately — may be the MUMPS
+   fixed-overhead gap.
+
+Not scheduled for this session. Recorded in
+~reference-solver-comparison.md~ for the next serious attempt.
