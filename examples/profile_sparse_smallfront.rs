@@ -27,7 +27,7 @@ use feral::read_mtx;
 use feral::sparse::csc::CscMatrix;
 use feral::symbolic::column_counts::{column_counts, total_factor_nnz};
 use feral::symbolic::supernode::{find_supernodes, SupernodeParams};
-use feral::symbolic::SymbolicFactorization;
+use feral::symbolic::{symbolic_factorize, SymbolicFactorization};
 use feral::{BunchKaufmanParams, ZeroPivotAction};
 
 #[derive(Debug, Clone)]
@@ -106,20 +106,24 @@ fn timed_symbolic(
 
     let sym_total_us = t_total.elapsed().as_micros();
 
-    let factor_slack = 1.2;
-    let sym = SymbolicFactorization {
-        n,
+    // Discard the locally-rebuilt symbolic pieces; the per-phase timings
+    // above are what this profiler needs. For the numeric factorization
+    // we obtain a real SymbolicFactorization via the library entry point,
+    // so new private fields (e.g. cached_mc64, small_leaf_groups) stay
+    // opaque to the example.
+    let _ = (
         perm,
         perm_inv,
         supernodes,
-        factor_nnz_estimate: (factor_nnz as f64 * factor_slack) as usize,
-        factor_slack,
+        factor_nnz,
         contrib_sizes,
         peak_contrib_bytes,
         etree,
         permuted_pattern,
         col_counts,
-    };
+        n,
+    );
+    let sym = symbolic_factorize(matrix, snode_params).ok()?;
 
     let times = PhaseTimes {
         mc64_us,

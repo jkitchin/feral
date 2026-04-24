@@ -54,7 +54,7 @@ fn compress_produces_valid_permutation_on_block_antidiag() {
     let params = SupernodeParams {
         nemin: 1,
         preprocess: OrderingPreprocess::LdltCompress,
-        small_leaf: Default::default(),
+        ..SupernodeParams::default()
     };
     let sym = symbolic_factorize(&m, &params).unwrap();
     assert_eq!(sym.n, 4);
@@ -78,12 +78,12 @@ fn compress_matches_baseline_inertia_tiny_kkt() {
     let base_params = SupernodeParams {
         nemin: 1,
         preprocess: OrderingPreprocess::None,
-        small_leaf: Default::default(),
+        ..SupernodeParams::default()
     };
     let compress_params = SupernodeParams {
         nemin: 1,
         preprocess: OrderingPreprocess::LdltCompress,
-        small_leaf: Default::default(),
+        ..SupernodeParams::default()
     };
 
     let sym_base = symbolic_factorize(&m, &base_params).unwrap();
@@ -112,12 +112,12 @@ fn compress_on_diagonal_matrix_is_noop_equivalent() {
     let base = SupernodeParams {
         nemin: 1,
         preprocess: OrderingPreprocess::None,
-        small_leaf: Default::default(),
+        ..SupernodeParams::default()
     };
     let cmp = SupernodeParams {
         nemin: 1,
         preprocess: OrderingPreprocess::LdltCompress,
-        small_leaf: Default::default(),
+        ..SupernodeParams::default()
     };
     let sb = symbolic_factorize(&m, &base).unwrap();
     let sc = symbolic_factorize(&m, &cmp).unwrap();
