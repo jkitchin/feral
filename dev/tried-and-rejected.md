@@ -714,3 +714,51 @@ flip existed only in working tree.
    `SupernodeParams` changes have zero effect on it — the 53×
    "Dense max" is measuring feral's dense kernel vs MUMPS's sparse
    multifrontal and is not apples-to-apples.
+
+## 2026-04-23-02: flip `LdltCompress` default after MC64 cache refactor — still rejected, geomean regresses
+
+**What was tried.** Implemented the "speed up `ldlt_compress`
+symbolic" path flagged in the 2026-04-23 entry above:
+`SymbolicFactorization::cached_mc64` holds the full MC64 matching;
+numeric's `compute_scaling_with_cache` reuses it instead of rerunning
+Hungarian. Then flipped `SupernodeParams::default().preprocess` to
+`LdltCompress` and re-ran the 154,588-matrix bench.
+
+**Result.** Compared against the prior no-cache flip:
+
+    metric   pre (None)   flip no-cache   flip with cache
+    geomean        0.36           0.49             0.48
+    p90            1.61           1.91             1.75
+    max            9.40          12.93            10.42
+
+Cache recovered ~71% of the `max` gap and ~55% of `p90` but only ~8%
+of `geomean`.
+
+**Why still rejected.** The cache only helps matrices where
+`ScalingStrategy::Auto` resolves to `Mc64Symmetric`. On the
+arrow-KKT families (VESUVIO/VESUVIOU/CRESC132/MUONSINE) it does,
+and max + p90 improve. On the ACOPR30 family — 9 of the top-10
+worst post-flip at ~9.5× — `diag_only/n < 0.3` routes Auto to
+`InfNorm` and the compression MC64 has no sharing partner. The
+structural compression overhead (supermap + compress_pattern +
+ordering-on-compressed-graph) is still unamortized on small and
+medium matrices, and the bulk of the corpus lives there.
+
+**Disposition.**
+
+- The cache refactor itself is *kept* — it's correct, it's a
+  legitimate speedup on opt-in compression + MC64 scaling, and it
+  has no downside. Committed as eea9f19.
+- The default flip is *reverted* in the same commit — geomean 0.36
+  → 0.48 is not acceptable as a blanket default.
+
+**Proper next step.** Shape-based auto-dispatch for compression,
+parallel to `pick_scaling_strategy`. Only run compression when
+predicted to pay off: large-n + `Auto` picks `Mc64Symmetric` +
+cheap heuristic says `ncmp < 0.9*n`. This isolates the tail wins
+from the small-matrix geomean penalty. Flagged for a future
+session, not this one.
+
+**Evidence.** `dev/journal/2026-04-23-02.org` entry 22:50. Full
+bench output kept locally at `/tmp/feral-bench-cache-flip.txt`.
+143 tests pass after the revert.

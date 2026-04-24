@@ -1643,3 +1643,47 @@ a real debugging asset and should not be traded away until a specific
 perf regression demands it. Revisit if CRESC100/GAUSS2 remain
 outliers after rook lands (Phase 2.4.3).
 
+
+## 2026-04-23-02: MC64 matching cache between symbolic compression and numeric scaling
+
+**Context.** The opt-in `OrderingPreprocess::LdltCompress` preprocessor
+runs an MC64 Hungarian matching to build the super-variable map. When
+`ScalingStrategy::Mc64Symmetric` (or `Auto` resolving to it) also runs
+in the numeric phase, the same Hungarian is rerun from scratch — a
+clean duplication. Profiling (`src/bin/diag_compress_profile.rs`)
+showed MC64 is 70–97% of compression symbolic overhead on our tail
+matrices, so this is a meaningful share of the per-matrix cost when
+both paths are active.
+
+**Decision.** `SymbolicFactorization` gains a `cached_mc64:
+Option<Mc64Cache>` field (pub(crate)). The `LdltCompress` branch of
+`symbolic_factorize` runs `compute_mc64_cache`, uses the `perm` for
+super-variable map construction, and stashes the full cache (perm, u,
+v, cmax, n_matched) on the symbolic factorization. Numeric-phase code
+paths (sequential and parallel `factorize_multifrontal`) call
+`compute_scaling_with_cache` with `symbolic.cached_mc64.as_ref()`.
+When the resolved strategy is `Mc64Symmetric`, scaling is derived
+from the cache in O(n) instead of rerunning Hungarian.
+
+**Why.** It is the only way to make `LdltCompress` approximately
+free on the MC64-scaling path. Full bench (2026-04-23-02) with cache
++ flip vs. flip without cache:
+
+    metric   flip no-cache   flip with cache   delta
+    p90             1.91             1.75      -0.16 (-8.4%)
+    max            12.93            10.42      -2.51 (-19.4%)
+    geomean         0.49             0.48      -0.01 (-2.0%)
+
+The `max` and `p90` wins are entirely from matrices where scaling
+runs MC64. Geomean barely moved because on the bulk of the corpus
+`Auto` picks InfNorm. That does *not* justify running the
+compression anyway — which is why the default flip is still
+rejected (tried-and-rejected, 2026-04-23, second entry) — but on
+any user-opted-in LdltCompress + MC64 scaling pipeline, this cache
+is a correctness-preserving speedup.
+
+**Invariant.** `Mc64Cache.perm` must match what
+`compute_mc64_cache(matrix)` would produce against the *identical*
+matrix passed to numeric factorization. The matrix values are not
+mutated between symbolic and numeric phases in any code path today;
+if that ever changes, `cached_mc64` must be invalidated.
