@@ -805,3 +805,56 @@ refactor.
 
 **Evidence.** `src/bin/diag_small_leaf` output in journal
 `2026-04-24-01.org`; `tests/small_leaf_parity.rs` (7/7 pass).
+
+## 2026-04-24 — Phase 2.9.2: `factor_frontal` arena refactor (REJECTED at Step A gate)
+
+**What we tried.** Step A of `dev/plans/phase-2.9.2-factor-frontal-arena.md`:
+instrument `factor_frontal` with a `FrontalProfile` sink (added as
+`factor_frontal_with_profile(..., Option<&mut FrontalProfile>)` in
+`src/dense/factor.rs`; existing `factor_frontal` is a None-passing
+wrapper) to measure the removable fraction before committing to
+the arena refactor.
+
+**Result (1832 leaves × 50 repeats across ACOPR30/CRESC100/HAIFAM/VESUVIO).**
+
+| sub-phase       | %bk_total | %inner |
+|-----------------|-----------|--------|
+| alloc+copy      |      9.7% |  17.7% |
+| setup           |      7.8% |  14.2% |
+| pivot_loop      |     17.6% |  32.0% |
+| extract         |     19.9% |  36.1% |
+| meas overhead   |     ~45%  |   —    |
+
+Removable by the plan (alloc+copy + setup) = 17.6% of bk_total,
+below the 25% gate. Best-case per-leaf speedup from eliminating
+all of it: 1.22× × 52% bk-share = ~1.12× overall. Target was 1.5×.
+
+**Why rejected.** The arena refactor targets only the caller-supplied
+scratch (`a`, `perm`, `subdiag`, `d_panel`). It does not address
+the `extract` phase (5 owned Vecs in `FrontalFactors`: `l`, `d_diag`,
+`d_subdiag`, `contrib`, `perm_inv`) which is the largest allocation
+phase at 19.9% of bk_total. It does not address `pivot_loop` (32%
+of inner) which is actual arithmetic. The 10× gap vs MUMPS on
+ACOPR30 is not sitting inside `factor_frontal`.
+
+**Disposition.**
+
+- The diagnostic hook `factor_frontal_with_profile` + `FrontalProfile`
+  struct is *kept* in the source tree. Zero runtime overhead when
+  unused (production `factor_frontal` passes None), valuable for
+  future kernel triage.
+- No `FrontalScratch` / `factor_frontal_into` are added. The plan
+  in `dev/plans/phase-2.9.2-factor-frontal-arena.md` is closed.
+- The Phase 2.9 small-leaf gate remains Off.
+
+**Proper next direction.** The per-front gap is not in the dense
+kernel. Investigate:
+1. Scatter indirection / outer multifrontal driver bookkeeping
+   (per-child loop, build_seen, etc.).
+2. Supernodal amalgamation budget — MUMPS/SSIDS amalgamate more
+   aggressively to produce fewer, larger fronts that shift cost
+   from the long-tail leaf population into the BLAS-friendly bulk.
+3. Nested-dissection vs AMD ordering choice on these matrices.
+
+**Evidence.** `dev/journal/2026-04-24-01.org` entry 16:45,
+`src/bin/diag_leaf_profile` output with sub-phase section.

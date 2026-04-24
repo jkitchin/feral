@@ -136,3 +136,42 @@ returns. Deferring until an isolated benchmark confirms this is where
 the savings actually live (i.e. a standalone diag that calls
 factor_frontal_blocked on a batch of tiny fronts vs a hypothetical
 arena version).
+
+* 16:45 :phase-2.9.2:step-a:gate-fail:
+Step A sub-profile of factor_frontal (commit TBD) rejects the arena
+refactor. Added ~factor_frontal_with_profile~ with optional
+~FrontalProfile~ sink; production ~factor_frontal~ stays branchless
+(wrapper passing None). Called through ~diag_leaf_profile~ on 1832
+leaves × 50 repeats across ACOPR30_0067 / CRESC100_0000 / HAIFAM_0082
+/ VESUVIO_0000. Headline sub-phase breakdown (%bk_total / %inner):
+
+  alloc+copy   9.7% /  17.7%   <-- target of arena refactor
+  setup        7.8% /  14.2%   <-- target of arena refactor
+  pivot_loop  17.6% /  32.0%   <-- actual BK arithmetic
+  extract     19.9% /  36.1%   <-- return-struct allocs (L, D, contrib, perm_inv)
+  meas overhead ~45%            <-- Instant::now() cost
+
+Removable by arena refactor (alloc+copy + setup) = 17.6% of bk_total,
+below the 25% gate in the plan. Best-case per-leaf speedup from
+eliminating all of it: 1.22× on bk_kernel × 52% bk-share-of-total =
+~1.12× overall. Target was 1.5×.
+
+The ~extract~ phase (19.9% of bk_total) is actually larger than the
+refactor target. It owns five Vec allocations — ~l~, ~d_diag~,
+~d_subdiag~, ~contrib~, ~perm_inv~ — that FrontalFactors requires.
+Eliminating those would mean redesigning FrontalFactors to borrow
+from scratch, which is a much bigger architectural change with
+ripple through every call site.
+
+Conclusion: the per-leaf dense kernel is dominated by actual BK
+arithmetic + owned-return allocation, not by the internal work
+array / perm / subdiag allocs. The 10× gap vs MUMPS on ACOPR30 is
+not sitting inside ~factor_frontal~. It is somewhere else — maybe
+scatter indirection cost, outer multifrontal driver bookkeeping,
+or (more likely) a fundamentally different algorithmic setup
+(nested-dissection ordering, delayed-pivot strategy, supernodal
+amalgamation budget).
+
+Action: close Phase 2.9.2, record in tried-and-rejected.md. Keep
+the diagnostic hook ~factor_frontal_with_profile~ in place — it is
+zero-overhead when unused and valuable for future kernel triage.

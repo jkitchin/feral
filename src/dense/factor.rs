@@ -626,11 +626,37 @@ enum PanelStatus {
 /// `S = A22 - L21 * D * L21^T`. When `nelim < ncol` the first
 /// `(ncol - nelim)` rows/columns of that block are delayed fully-summed
 /// columns. No equilibration is applied.
+/// Diagnostic per-phase timing sink for `factor_frontal_with_profile`.
+/// Populated only when a caller opts in; the `factor_frontal` wrapper
+/// passes `None` so production paths are branchless. Used by
+/// `src/bin/diag_leaf_profile.rs` (Phase 2.9.2 Step A) to sub-time
+/// the kernel and decide whether the arena refactor is worthwhile.
+#[doc(hidden)]
+#[derive(Default, Debug, Clone, Copy)]
+pub struct FrontalProfile {
+    pub alloc_copy_ns: u128,
+    pub setup_ns: u128,
+    pub pivot_loop_ns: u128,
+    pub extract_ns: u128,
+    pub n_calls: u64,
+}
+
 pub fn factor_frontal(
     matrix: &crate::dense::matrix::SymmetricMatrix,
     ncol: usize,
     may_delay: bool,
     params: &BunchKaufmanParams,
+) -> Result<FrontalFactors, FeralError> {
+    factor_frontal_with_profile(matrix, ncol, may_delay, params, None)
+}
+
+#[doc(hidden)]
+pub fn factor_frontal_with_profile(
+    matrix: &crate::dense::matrix::SymmetricMatrix,
+    ncol: usize,
+    may_delay: bool,
+    params: &BunchKaufmanParams,
+    mut profile: Option<&mut FrontalProfile>,
 ) -> Result<FrontalFactors, FeralError> {
     matrix.validate()?;
     let nrow = matrix.n;
@@ -666,14 +692,20 @@ pub fn factor_frontal(
         });
     }
 
-    // Copy lower triangle into work array (no equilibration)
+    // Phase: alloc + copy
+    let t0 = profile.as_ref().map(|_| std::time::Instant::now());
     let mut a = vec![0.0; nrow * nrow];
     for j in 0..nrow {
         for i in j..nrow {
             a[j * nrow + i] = matrix.data[j * nrow + i];
         }
     }
+    if let (Some(p), Some(t)) = (profile.as_deref_mut(), t0) {
+        p.alloc_copy_ns += t.elapsed().as_nanos();
+    }
 
+    // Phase: setup (perm, subdiag, counters)
+    let t0 = profile.as_ref().map(|_| std::time::Instant::now());
     let mut perm: Vec<usize> = (0..nrow).collect();
     let mut subdiag = vec![0.0; nrow];
     let mut pos = 0usize;
@@ -681,7 +713,11 @@ pub fn factor_frontal(
     let mut zero = 0usize;
     let mut needs_refinement = false;
     let mut n_rook_rescues = 0usize;
+    if let (Some(p), Some(t)) = (profile.as_deref_mut(), t0) {
+        p.setup_ns += t.elapsed().as_nanos();
+    }
 
+    let t_pivot = profile.as_ref().map(|_| std::time::Instant::now());
     let mut k = 0;
 
     // Factor only the first ncol columns. Pivot search restricted to [k, ncol).
@@ -709,6 +745,11 @@ pub fn factor_frontal(
             PivotStepResult::Delayed => break,
         }
     }
+
+    if let (Some(p), Some(t)) = (profile.as_deref_mut(), t_pivot) {
+        p.pivot_loop_ns += t.elapsed().as_nanos();
+    }
+    let t_extract = profile.as_ref().map(|_| std::time::Instant::now());
 
     // At the break point, `k` is the number of successfully eliminated
     // pivots. When `may_delay == false` this equals `ncol`; when
@@ -759,7 +800,7 @@ pub fn factor_frontal(
         perm_inv[p] = i;
     }
 
-    Ok(FrontalFactors {
+    let result = FrontalFactors {
         nrow,
         ncol,
         nelim,
@@ -776,7 +817,12 @@ pub fn factor_frontal(
         n_rook_rescues,
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
-    })
+    };
+    if let (Some(p), Some(t)) = (profile, t_extract) {
+        p.extract_ns += t.elapsed().as_nanos();
+        p.n_calls += 1;
+    }
+    Ok(result)
 }
 
 /// Blocked-panel BK LDLᵀ variant of `factor_frontal` (Phase 2.4.1b).

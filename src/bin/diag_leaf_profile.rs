@@ -19,7 +19,7 @@
 //!
 //! Usage: `cargo run --release --bin diag_leaf_profile`
 
-use feral::dense::factor::{factor_frontal_blocked, BunchKaufmanParams};
+use feral::dense::factor::{factor_frontal_with_profile, BunchKaufmanParams, FrontalProfile};
 use feral::dense::matrix::SymmetricMatrix;
 use feral::sparse::csc::CscMatrix;
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
@@ -60,6 +60,10 @@ struct Profile {
     bk: PhaseAcc,
     contrib: PhaseAcc,
     total: PhaseAcc,
+    // Phase 2.9.2 Step A: sub-timing of `factor_frontal` internals.
+    // Aggregates across the whole run as totals (not per-leaf means);
+    // one call contributes to all four fields.
+    kernel_profile: FrontalProfile,
 }
 
 /// Reimplementation of permute_csc_values that stays within public API.
@@ -181,10 +185,16 @@ fn profile_matrix(label: &str, mtx_path: &str, prof: &mut Profile) {
                 }
                 prof.scatter.push(t0.elapsed().as_nanos());
 
-                // Phase: BK kernel
+                // Phase: BK kernel (with sub-phase profiling)
                 let t0 = Instant::now();
-                let ff = factor_frontal_blocked(&frontal, own_ncol, true, &bk_params)
-                    .expect("factor_frontal_blocked");
+                let ff = factor_frontal_with_profile(
+                    &frontal,
+                    own_ncol,
+                    true,
+                    &bk_params,
+                    Some(&mut prof.kernel_profile),
+                )
+                .expect("factor_frontal_with_profile");
                 prof.bk.push(t0.elapsed().as_nanos());
 
                 frontal_buf = frontal.data;
@@ -269,6 +279,68 @@ fn report(prof: &Profile) {
             0.0
         }
     );
+
+    // Phase 2.9.2 Step A sub-profile of factor_frontal internals.
+    let kp = &prof.kernel_profile;
+    let bk_total: u128 = prof.bk.samples.iter().sum();
+    let inner_total = kp.alloc_copy_ns + kp.setup_ns + kp.pivot_loop_ns + kp.extract_ns;
+    println!(
+        "\n=== factor_frontal sub-phase totals (n_calls={}) ===",
+        kp.n_calls
+    );
+    println!(
+        "{:18} {:>14} {:>6} {:>6}",
+        "sub-phase", "total_ns", "%bk", "%inner"
+    );
+    let row = |name: &str, ns: u128| {
+        let pct_bk = if bk_total > 0 {
+            100.0 * ns as f64 / bk_total as f64
+        } else {
+            0.0
+        };
+        let pct_inner = if inner_total > 0 {
+            100.0 * ns as f64 / inner_total as f64
+        } else {
+            0.0
+        };
+        println!(
+            "{:18} {:>14} {:>5.1}% {:>5.1}%",
+            name, ns, pct_bk, pct_inner
+        );
+    };
+    row("alloc+copy", kp.alloc_copy_ns);
+    row("setup", kp.setup_ns);
+    row("pivot_loop", kp.pivot_loop_ns);
+    row("extract", kp.extract_ns);
+    row("INNER_TOTAL", inner_total);
+    row("BK_TOTAL (outer)", bk_total);
+
+    // Step A rejection gate: the refactor targets alloc+copy + setup
+    // (the removable Vec allocations). extract is also allocation-heavy
+    // but requires a separate return-struct rework. If alloc_copy+setup
+    // is less than 25% of bk_total the arena refactor won't clear the
+    // 1.5× leaf speedup target.
+    let removable = kp.alloc_copy_ns + kp.setup_ns;
+    let pct_removable = if bk_total > 0 {
+        100.0 * removable as f64 / bk_total as f64
+    } else {
+        0.0
+    };
+    println!(
+        "\nalloc+copy + setup = {} ns ({:.1}% of bk_total)",
+        removable, pct_removable
+    );
+    if pct_removable < 25.0 {
+        println!(
+            "!!! GATE FAIL: removable fraction {:.1}% < 25% — arena refactor unlikely to pay",
+            pct_removable
+        );
+    } else {
+        println!(
+            "GATE PASS: removable fraction {:.1}% >= 25% — proceed with Step B+C",
+            pct_removable
+        );
+    }
 }
 
 fn main() {
