@@ -494,3 +494,70 @@ Next: propose flipping =SupernodeParams::default().preprocess= from
 =None= to =LdltCompress=, run the full 154k-matrix bench, and see
 whether the dense factor/MUMPS max drops from 53.05 to < 20 (the
 target rook rescue couldn't hit).
+
+* 22:05 :phase-2.4.4:flip-default:reverted:symbolic-cost-kills-geomean:
+Flipped =SupernodeParams::default().preprocess= from =None= to
+=LdltCompress= (commit NOT LANDED — reverted in working tree).
+Full 154k-matrix bench:
+
+|                      | pre-flip | post-flip | delta |
+|----------------------+----------+-----------+-------|
+| sparse factor/MUMPS  |          |           |       |
+|   geomean            | 0.36     | 0.49      | +36%  |
+|   p90                | 1.61     | 1.91      | +19%  |
+|   max                | 9.40     | 12.93     | +38%  |
+
+All three metrics went the WRONG direction. =diag_compression_bench=
+had claimed geomean 0.758 (24% faster), which looked decisive.
+That number was misleading because it times symbolic and numeric
+SEPARATELY and reports only the numeric ratio. The real bench
+harness (=bench.rs= lines 1281–1284, comment:
+"The sparse factor timing is the sum of symbolic + numeric
+because both are part of the work feral has to do for a
+one-shot factor call") combines them for apples-to-apples vs the
+MUMPS oracle's single =factor_us= field that covers analysis +
+numeric together.
+
+Compression roughly doubles symbolic time per matrix (confirmed
+in diag_dense_tail: HAHN1_0153 sym 616→798, GAUSS2_0035 sym
+211→285 etc.). On tail matrices where numeric is ~1-6 ms this is
+noise. But on the bulk of the corpus where numeric is sub-ms, the
+extra ~100-400 μs of symbolic per matrix dominates — geomean
+penalty propagates through the whole 154k sample.
+
+The headline tail wins remain real per-matrix (HAHN1_0153 total
+sym+fac: 6483→1846μs is a 3.5× win), but "bench tail" and "bench
+geomean" pull opposite directions. Flipping the default trades
+geomean for max. That's not a trade we can make lightly.
+
+Dense bench separately: the "Dense" column uses
+=factor_single_front= (src/dense/factor.rs:447), a
+whole-matrix-as-one-dense-frontal kernel — NO symbolic, NO
+supernodes. My flip has zero effect on that path. The 53× dense
+max is comparing feral's dense n^3 kernel against MUMPS's sparse
+multifrontal on the same matrix — not apples-to-apples and not a
+meaningful metric for the rook/ordering investigation. Probably
+should be retired or relabeled in the bench output.
+
+Corrected disposition (replaces 21:40):
+
+1. Compression is a real win on the tail matrices (2–5×) but
+   only when you don't charge it for the symbolic cost. This
+   matches the Phase 2.6.5 plan's opt-in disposition — it's
+   opt-in for a reason, and the reason is the geomean penalty
+   on small matrices.
+2. The path forward is NOT flipping the global default. It is
+   (a) making symbolic compression *faster* so the geomean hit
+   disappears, or (b) auto-dispatching compression only when
+   heuristics predict a tail matrix (large-n + nontrivial MC64
+   cycles, per the existing =ScalingStrategy::Auto= pattern).
+3. Separately, the "Dense" bench column should be reconsidered
+   — it's measuring an orthogonal kernel.
+
+Next session queue:
+- Profile =ldlt_compress= to find the expensive step. If it's
+  MC64, the matching is already cached for MC64 scaling — reuse.
+  If it's the graph contraction, optimize that.
+- Consider adding auto-dispatch: `compress-if-compRat<=0.7`.
+- Reassess whether the "Dense" bench column tells us anything
+  actionable or should be suppressed.

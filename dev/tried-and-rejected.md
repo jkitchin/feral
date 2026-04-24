@@ -657,3 +657,60 @@ data read outside mutex protection that I haven't spotted).
 
 **Evidence.** `src/bin/diag_acopr.rs`; `dev/journal/2026-04-20-11.org`
 entries 00:20 and 00:30.
+
+---
+
+## 2026-04-23 — Flipping `SupernodeParams::default().preprocess` to `LdltCompress`
+
+**Context.** Phase 2.4.4 dense-tail diagnostic (commit 332f23a) showed
+`OrderingPreprocess::LdltCompress` produces 2–5× factor-time wins on
+the worst matrices (HAHN1, CRESC100, GAUSS2, MUONSINE, VESUVIO).
+`diag_compression_bench` across a 321-matrix stratified sample
+reported factor geomean cmp/base = 0.758 — apparently clearing the
+Phase 2.6.5 plan's ≤ 0.95 flip-default threshold.
+
+**Tried.** Changed `SupernodeParams::default()` to use
+`OrderingPreprocess::LdltCompress`. Ran the full 154,481-matrix
+bench.
+
+**Result (bench, sparse factor/MUMPS):**
+
+| metric  | pre-flip | post-flip | delta   |
+|---------|---------:|----------:|--------:|
+| geomean | 0.36     | 0.49      | +36%    |
+| p90     | 1.61     | 1.91      | +19%    |
+| max     | 9.40     | 12.93     | +38%    |
+
+All three metrics moved the wrong direction. Regression across the
+board.
+
+**Why rejected.** The `diag_compression_bench` 0.758 number was
+misleading. It times symbolic and numeric *separately* and reports
+only the numeric ratio. The real bench harness (`bench.rs` line
+1281–1284) combines symbolic + numeric in `factor_us` to match
+MUMPS's oracle JSON (single `factor_us` covers analysis + numeric).
+
+Compression roughly doubles symbolic time (diag evidence: HAHN1_0153
+sym 616→798 μs, GAUSS2_0035 211→285 μs, KIRBY2_0007 added ~17×
+symbolic per compression_bench). On tail matrices (ms-range numeric)
+this is noise. On bulk matrices (sub-ms numeric) the ~100-400 μs
+symbolic overhead is the whole thing, and geomean over 154k matrices
+propagates the penalty.
+
+**Evidence.** `dev/journal/2026-04-23-02.org` entries 21:40 (initial
+claim) and 22:05 (bench refutation). Commit was never made — the
+flip existed only in working tree.
+
+**Corrected path forward (not pursued yet).**
+
+1. Make `ldlt_compress` symbolic work faster (the MC64 matching
+   piece is already cached inside `compute_symmetric` scaling and
+   could be plumbed through to avoid the double-Hungarian).
+2. Auto-dispatch: enable compression only when heuristics predict a
+   tail matrix (large-n + nontrivial MC64 compRat ≤ 0.7), same
+   pattern as `ScalingStrategy::Auto`.
+3. Separately: the "Dense" bench column uses `factor_single_front`
+   (whole-matrix dense LDLT, no symbolic at all), so
+   `SupernodeParams` changes have zero effect on it — the 53×
+   "Dense max" is measuring feral's dense kernel vs MUMPS's sparse
+   multifrontal and is not apples-to-apples.
