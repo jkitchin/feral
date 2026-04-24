@@ -392,3 +392,45 @@ GAUSS2: 9/9 + 43 rescues).
 Next: Step 8 (full bench gate — =cargo run --release --bin bench=,
 evaluate exit criteria max ≤ 20, p90 ≤ 1.90, geomean ≈ 0.21, write
 =dev/research/phase-2.4.3-rook-validation.md=).
+
+* 21:05 :phase-2.4.3:step-8:validation-report:exit-criteria-partial:
+Phase 2.4.3 Step 8: ran full bench and wrote the validation report
+at =dev/research/phase-2.4.3-rook-validation.md=.
+
+Bench headline (release, 154481 dense-eligible matrices):
+
+| metric   | pre-rook | post-rook | target | verdict |
+|----------+----------+-----------+--------+---------|
+| geomean  | 0.21     | 0.21      | within 2% of 0.21 | ✓ |
+| p90      | 1.83     | 1.83      | ≤ 1.90            | ✓ |
+| max      | 45.14    | *53.05*   | *≤ 20*            | *✗* |
+
+Exit criteria scorecard (plan §"Exit Criterion"):
+  #1 Tests 1–6 pass                           ✓
+  #2 Zero inertia regressions vs MUMPS        ✓
+  #3 Dense max ≤ 20 (PRIMARY PERF HARD GATE)  ✗ (53.05)
+  #4 Dense p90 ≤ 1.90                         ✓ (1.83)
+  #5 Dense geomean within 2% of 0.21          ✓ (0.21)
+  #6 Research note + validation report        ✓
+
+Item #3 fails. The plan's theoretical model — that CRESC100 /
+GAUSS2 tail came from BK-rejection delayed-pivot cascades — is
+wrong at default parameters. Step 7 test evidence: 0 rescues on
+CRESC100/GAUSS2 at u=0.01, 0 at u=0.5, 260+43 only at u=0.99. So
+rook rescue is dormant on the bench-hot matrices. The tail is a
+dense-kernel / ordering problem, not a pivoting problem.
+
+Top-10 worst post-rook is essentially the same families as
+pre-rook (HAHN1, CRESC100, GAUSS2). HAHN1_0153 took the #1 spot at
+53.05 — plausibly single-run variance on tiny =mumps_us=224=.
+=feral_us= is 8–12 ms on n=715–806 dense frontals vs MUMPS
+200–270 μs: the dense kernel itself (GEMM / panel update) is ~40×
+slower than MUMPS on these sizes.
+
+Disposition: ship rook rescue as correctness (Sylvester
+invariance under heavy pivot thresholds, dormant at default
+params, sub-noise overhead). Open a new plan for the dense tail
+(dense kernel profiling, ordering bias on HAHN1/CRESC100/GAUSS2,
+scaling diagnostic for these families) — not Phase 2.4.3 scope.
+
+Evidence captured in =dev/research/phase-2.4.3-rook-validation.md=.
