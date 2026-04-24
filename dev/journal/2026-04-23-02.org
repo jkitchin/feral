@@ -282,3 +282,56 @@ All met.
 Next: Step 6 (random-indefinite inertia property test), Step 7
 (CRESC100/GAUSS2 regression), Step 8 (full bench gate with
 ≤ 20 p90/max ratio).
+
+* 20:09 :phase-2.4.3:step-6:rook-rescue:property-test:sylvester:
+Phase 2.4.3 Step 6 landed: Test 4 (Sylvester inertia preservation
+under rook rescue) added to =tests/rook_rescue.rs=.
+
+Property: for a random symmetric indefinite matrix, inertia is
+invariant under pivot-sequence changes (Sylvester's law). Rook
+rescue alters the pivot sequence on ill-conditioned matrices; the
+test verifies it does not alter the inertia.
+
+Design:
+- Self-contained xorshift64 PRNG (identical to
+  =tests/property_tests.rs=).
+- =random_indefinite(n, rng)= constructs A = MMᵀ − mean(diag(A))·I
+  then scales ~1/3 of diagonals by 1e-3 to drive their magnitude
+  below =u * col_max=, forcing BK rejection. Off-diagonals preserved
+  so rook can find rescue candidates along rows.
+- Reference factor: =pivot_threshold = 0.0= (degrades threshold to
+  =zero_tol=, never rejects) → BK-partial reference inertia.
+- Rescue factor: =pivot_threshold = 0.1= (heavy; forces rescues).
+- Sizes {6, 10, 16, 24, 32} × 5 trials = 25 matrices.
+- Asserts: inertia equality; full elimination; no force-accept
+  (=needs_refinement == false=); reconstruction residual
+  =≤ 1e-10 × ||A||_F=; =total_rook_rescues > 0= across the sweep.
+
+Initial attempt with unmodified =random_indefinite= did not trigger
+any rook rescues at u=0.1 — the MMᵀ construction yields diagonals
+that are comparable to row-max, so BK's swap + threshold test
+accepts naturally. The 1e-3 diagonal-scaling step forces the
+pathology that makes rook rescue meaningful.
+
+=test_may_delay_rejection_parity= (plan §"Parity Impact" flagged as
+likely to break) still passes. The splice design put rook inside
+=scalar_pivot_step= only, so both =factor_frontal= and
+=factor_frontal_blocked= share the rescue logic through
+=PanelStatus::ScalarFallback= and byte-identity is preserved. No
+test replacement needed.
+
+Evidence:
+- =cargo test --test rook_rescue= → 4 passed (3 prior + new Test 4).
+- =cargo test --test blocked_ldlt test_may_delay_rejection_parity=
+  → 1 passed (no regression).
+- =cargo test= → all green (0 failures across the suite).
+- =cargo fmt --all= (applied).
+- =cargo clippy -- -D warnings= (lib) → clean.
+
+Exit criteria (plan §7 Test 4): inertia match across 25 random
+indefinite matrices, =n_rook_rescues > 0= in aggregate, no
+force-accept fallback, reconstruction residual within tolerance.
+All met.
+
+Next: Step 7 (CRESC100 / GAUSS2 regression — requires pre/post
+factor-time comparison on the KKT matrices from =data/matrices/kkt/=).

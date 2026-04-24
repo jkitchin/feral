@@ -281,3 +281,203 @@ fn test_rook_rescues_delayed_2x2() {
     assert_eq!(ff.inertia.negative, 1, "expected 1 negative pivot");
     assert_eq!(ff.inertia.zero, 0, "expected 0 zero pivots");
 }
+
+// ---------------------------------------------------------------------------
+// Test 4 — Sylvester inertia preservation under rook rescue (Phase 2.4.3
+// plan §"Test 4").
+//
+// Property: Sylvester's law of inertia says the inertia of a symmetric
+// matrix is invariant under congruence P·A·Pᵀ, regardless of the pivot
+// sequence. Rook rescue changes the pivot sequence on ill-conditioned
+// matrices but must not change the inertia. We verify this as a
+// property test: for each random indefinite matrix, factor with a
+// permissive threshold (u = 1e-14, never rejects) and a heavy threshold
+// (u = 0.1, forces many rescues), then compare inertia.
+//
+// Secondary checks:
+//   - LDLᵀ reconstruction holds for the heavy-threshold factor
+//     (rook rescue must produce correct L and D, not just correct signs).
+//   - `needs_refinement == false` across the panel (rook should rescue
+//     cleanly without falling through to force-accept).
+//   - At least one rescue fires across the whole panel (otherwise we
+//     are not exercising the rescue path at all).
+// ---------------------------------------------------------------------------
+
+/// Xorshift64 PRNG, identical to the one in tests/property_tests.rs.
+/// Inlined here so the test file stays self-contained.
+struct Rng {
+    state: u64,
+}
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed.max(1) }
+    }
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+    fn uniform(&mut self, lo: f64, hi: f64) -> f64 {
+        let t = (self.next_u64() as f64) / (u64::MAX as f64);
+        lo + t * (hi - lo)
+    }
+}
+
+/// Random symmetric indefinite matrix with a pathological small-diagonal
+/// pattern designed to exercise BK-partial's column-relative threshold
+/// rejection path. Construction:
+///
+///   1. Generate lower-triangular M with entries in [−5, 5].
+///   2. A = M·Mᵀ.
+///   3. Shift diagonal by −mean(diag(A)) to produce indefinite inertia.
+///   4. Scale ~1/3 of diagonals by 1e-3 — their magnitude now falls below
+///      `pivot_threshold * col_max` for u ≥ 0.01, forcing the BK kernel
+///      to reject or delay those pivots. Off-diagonals stay untouched,
+///      so the column-max is preserved and rook can find a valid pivot
+///      by walking the row.
+///
+/// The resulting matrices are genuinely indefinite (step 3) and force
+/// the rescue path (step 4), so inertia matches between the reference
+/// and rescue factorizations, and `n_rook_rescues > 0` across the panel.
+fn random_indefinite(n: usize, rng: &mut Rng) -> SymmetricMatrix {
+    let mut m = vec![0.0f64; n * n];
+    for j in 0..n {
+        for i in j..n {
+            m[j * n + i] = rng.uniform(-5.0, 5.0);
+        }
+    }
+    let mut data = vec![0.0f64; n * n];
+    for j in 0..n {
+        for i in j..n {
+            let mut s = 0.0;
+            for k in 0..n {
+                s += m[k * n + i] * m[k * n + j];
+            }
+            data[j * n + i] = s + if i == j { 0.01 } else { 0.0 };
+        }
+    }
+    let mean_diag: f64 = (0..n).map(|i| data[i * n + i]).sum::<f64>() / (n as f64);
+    for i in 0..n {
+        data[i * n + i] -= mean_diag;
+    }
+    // Scale ~1/3 of diagonals down by 1e-3 to force BK rejection on
+    // those pivots. Seed-deterministic via the rng.
+    for i in 0..n {
+        if rng.uniform(0.0, 1.0) < 0.33 {
+            data[i * n + i] *= 1e-3;
+        }
+    }
+    SymmetricMatrix { n, data }
+}
+
+/// Frobenius norm of a SymmetricMatrix's lower triangle stored at `data`.
+/// Used only to scale the reconstruction tolerance.
+fn fro_norm(data: &[f64], n: usize) -> f64 {
+    let mut s = 0.0f64;
+    for j in 0..n {
+        s += data[j * n + j] * data[j * n + j];
+        for i in (j + 1)..n {
+            let v = data[j * n + i];
+            s += 2.0 * v * v;
+        }
+    }
+    s.sqrt()
+}
+
+#[test]
+fn test_rook_preserves_inertia_random_indefinite() {
+    let mut rng = Rng::new(0xC0FF_EE42);
+
+    // Reference params: permissive threshold; the column-relative test
+    // is `(u * col_max).max(zero_tol)` so u ≈ 0 degenerates to zero_tol.
+    // Well-conditioned pivots clear that trivially and the rook path is
+    // never entered — inertia here is the BK-partial reference.
+    let ref_params = BunchKaufmanParams {
+        on_zero_pivot: ZeroPivotAction::ForceAccept,
+        pivot_threshold: 0.0,
+        ..BunchKaufmanParams::default()
+    };
+    // Rescue params: heavy threshold forces many BK rejections, which
+    // drives the rook rescue path.
+    let rescue_params = BunchKaufmanParams {
+        on_zero_pivot: ZeroPivotAction::ForceAccept,
+        pivot_threshold: 0.1,
+        ..BunchKaufmanParams::default()
+    };
+
+    let sizes = [6usize, 10, 16, 24, 32];
+    let trials = 5;
+    let mut total_rescues = 0usize;
+
+    for &n in &sizes {
+        for trial in 0..trials {
+            let matrix = random_indefinite(n, &mut rng);
+            let orig_lower = matrix.data.clone();
+            let scale = fro_norm(&orig_lower, n).max(1.0);
+
+            let ff_ref = factor_frontal(&matrix, n, false, &ref_params)
+                .unwrap_or_else(|e| panic!("ref n={} trial={}: factor failed: {}", n, trial, e));
+            let ff_rook = factor_frontal(&matrix, n, false, &rescue_params)
+                .unwrap_or_else(|e| panic!("rook n={} trial={}: factor failed: {}", n, trial, e));
+
+            assert_eq!(
+                ff_ref.nelim, n,
+                "ref n={} trial={}: expected full elimination",
+                n, trial
+            );
+            assert_eq!(
+                ff_rook.nelim, n,
+                "rook n={} trial={}: expected full elimination (rescue should fire in place of delay)",
+                n, trial
+            );
+
+            // Sylvester: inertia must match regardless of pivot sequence.
+            assert_eq!(
+                ff_rook.inertia, ff_ref.inertia,
+                "n={} trial={}: inertia mismatch — rook={}, ref={}",
+                n, trial, ff_rook.inertia, ff_ref.inertia
+            );
+
+            // Rook rescue must not fall through to force-accept on well-
+            // formed random matrices; force-accept means rook gave up.
+            assert!(
+                !ff_rook.needs_refinement,
+                "n={} trial={}: rook rescue fell through to force-accept \
+                 (needs_refinement = true)",
+                n, trial
+            );
+
+            // L·D·Lᵀ reconstruction under the heavy-threshold factor.
+            // Tolerance scales with matrix norm; 1e-10 × ||A||_F is well
+            // inside double-precision BK accuracy for n ≤ 32.
+            let err = reconstruct_residual(&ff_rook, &orig_lower);
+            assert!(
+                err <= 1e-10 * scale,
+                "n={} trial={}: reconstruction residual {:.3e} exceeds 1e-10 * ||A||_F = {:.3e}",
+                n,
+                trial,
+                err,
+                1e-10 * scale
+            );
+
+            total_rescues += ff_rook.n_rook_rescues;
+        }
+    }
+
+    // Cross-panel exercise gate: if rook never fires across the whole
+    // sweep we have not tested the feature. Heavy threshold on random
+    // indefinite matrices should trigger many rescues; assert at least
+    // one to keep the test meaningful if the matrix distribution
+    // changes.
+    assert!(
+        total_rescues > 0,
+        "rook rescue never fired across {} trials × {} sizes — test is not \
+         exercising the rescue path",
+        trials,
+        sizes.len()
+    );
+}
