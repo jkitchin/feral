@@ -63,36 +63,79 @@ const LOG_HUGE: f64 = 709.0;
 /// Diagnostic helper for Phase 2.6.5; skips the scaling-vector
 /// post-processing that `compute_symmetric` does.
 pub(crate) fn matching_perm(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), FeralError> {
-    let n = matrix.n;
-    if n == 0 {
-        return Ok((Vec::new(), 0));
-    }
-    let (cost_graph, _cmax) = build_cost_graph(matrix)?;
-    let Matching {
-        perm, n_matched, ..
-    } = hungarian_match(&cost_graph);
-    Ok((perm, n_matched))
+    let cache = compute_matching(matrix)?;
+    Ok((cache.perm, cache.n_matched))
 }
 
-pub(crate) fn compute_symmetric(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+/// Cached MC64 output: the full Hungarian matching plus the
+/// column-max normalization, from which the scaling vector can be
+/// recovered without rerunning the expensive Hungarian kernel.
+///
+/// Populated by [`compute_matching`] when `LdltCompress` preprocessing
+/// runs; consumed by [`scaling_from_cache`] in the numeric phase when
+/// the caller's scaling strategy resolves to `Mc64Symmetric`. Moves
+/// the ~70% of symbolic overhead (Hungarian + cost graph build) off
+/// the critical path for matrices where both compression and MC64
+/// scaling run.
+#[derive(Debug, Clone)]
+pub(crate) struct Mc64Cache {
+    pub perm: Vec<usize>,
+    pub u: Vec<f64>,
+    pub v: Vec<f64>,
+    pub cmax: Vec<f64>,
+    pub n_matched: usize,
+}
+
+/// Run the expensive MC64 pipeline — build the cost graph and run
+/// the Hungarian kernel — and return the full output. The cheap
+/// scaling-vector post-processing is in [`scaling_from_cache`].
+pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, FeralError> {
     let n = matrix.n;
-
-    // Trivial 0-dimensional case: nothing to scale.
     if n == 0 {
-        return Ok((Vec::new(), ScalingInfo::Applied));
+        return Ok(Mc64Cache {
+            perm: Vec::new(),
+            u: Vec::new(),
+            v: Vec::new(),
+            cmax: Vec::new(),
+            n_matched: 0,
+        });
     }
-
-    // Step 1-4: build the non-negative cost graph on the full
-    // symmetric pattern, together with `cmax[j]` per column.
     let (cost_graph, cmax) = build_cost_graph(matrix)?;
-
-    // Step 5: run the Hungarian kernel.
     let Matching {
         perm,
         u,
         v,
         n_matched,
     } = hungarian_match(&cost_graph);
+    Ok(Mc64Cache {
+        perm,
+        u,
+        v,
+        cmax,
+        n_matched,
+    })
+}
+
+pub(crate) fn compute_symmetric(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+    let cache = compute_matching(matrix)?;
+    Ok(scaling_from_cache(&cache))
+}
+
+/// Cheap O(n) post-processing that turns a cached MC64 matching into
+/// the symmetric scaling vector. Mirrors the body of
+/// [`compute_symmetric`] from step 6 onward.
+pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
+    let n = cache.perm.len();
+    if n == 0 {
+        return (Vec::new(), ScalingInfo::Applied);
+    }
+    let Mc64Cache {
+        perm,
+        u,
+        v,
+        cmax,
+        n_matched,
+    } = cache;
 
     // Step 6-7: unwind normalization and form the symmetric average.
     //
@@ -149,15 +192,15 @@ pub(crate) fn compute_symmetric(matrix: &CscMatrix) -> Result<(Vec<f64>, Scaling
         }
     }
 
-    let info = if n_matched == n {
+    let info = if *n_matched == n {
         ScalingInfo::Applied
     } else {
         ScalingInfo::PartialSingular {
-            n_unmatched: n - n_matched,
+            n_unmatched: n - *n_matched,
         }
     };
 
-    Ok((scaling, info))
+    (scaling, info)
 }
 
 /// Build the Hungarian cost graph and per-column maximum (`cmax`).

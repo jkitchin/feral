@@ -54,6 +54,22 @@ pub fn mc64_matching(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), FeralErr
     mc64::matching_perm(matrix)
 }
 
+/// Cached MC64 output: everything needed to both drive ordering
+/// compression (`perm`) and derive the symmetric scaling vector
+/// (`u`, `v`, `cmax`) without rerunning the expensive Hungarian
+/// kernel. Produced by [`compute_mc64_cache`], consumed by
+/// [`compute_scaling_with_cache`]. See Phase 2.4.4 compression
+/// symbolic-speedup work.
+pub(crate) use mc64::Mc64Cache;
+
+/// Run the full MC64 pipeline once and return the cached output.
+/// Used by the symbolic `LdltCompress` preprocessor so the numeric
+/// phase can reuse the matching if its scaling strategy also
+/// resolves to `Mc64Symmetric`.
+pub(crate) fn compute_mc64_cache(matrix: &CscMatrix) -> Result<Mc64Cache, FeralError> {
+    mc64::compute_matching(matrix)
+}
+
 /// User-facing scaling strategy selector.
 ///
 /// Default is `Auto` — adaptive shape-based routing that picks
@@ -141,6 +157,23 @@ pub fn compute_scaling(
     matrix: &CscMatrix,
     strategy: &ScalingStrategy,
 ) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+    compute_scaling_with_cache(matrix, strategy, None)
+}
+
+/// Variant of [`compute_scaling`] that accepts a precomputed MC64
+/// cache. When the strategy resolves to `Mc64Symmetric` (including
+/// via `Auto` routing), the cache is consumed in O(n) — no Hungarian
+/// rerun. When the strategy does not end up running MC64 (Identity,
+/// External, InfNorm, or Auto resolving to InfNorm with Policy 4
+/// fallback), the cache is ignored and the regular path runs.
+///
+/// `cache` must be `compute_mc64_cache(matrix)` on the same matrix,
+/// else the produced scaling is wrong.
+pub(crate) fn compute_scaling_with_cache(
+    matrix: &CscMatrix,
+    strategy: &ScalingStrategy,
+    cache: Option<&Mc64Cache>,
+) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
     match strategy {
         ScalingStrategy::Identity => Ok((vec![1.0; matrix.n], ScalingInfo::NotApplied)),
         ScalingStrategy::External(s) => {
@@ -154,8 +187,11 @@ pub fn compute_scaling(
             Ok((s.clone(), ScalingInfo::NotApplied))
         }
         ScalingStrategy::InfNorm => Ok(infnorm::compute_infnorm(matrix)),
-        ScalingStrategy::Mc64Symmetric => mc64::compute_symmetric(matrix),
-        ScalingStrategy::Auto => compute_scaling_auto(matrix),
+        ScalingStrategy::Mc64Symmetric => match cache {
+            Some(c) => Ok(mc64::scaling_from_cache(c)),
+            None => mc64::compute_symmetric(matrix),
+        },
+        ScalingStrategy::Auto => compute_scaling_auto_with_cache(matrix, cache),
     }
 }
 
@@ -187,24 +223,36 @@ pub fn compute_scaling(
 /// MEYER3NE all keep MC64 (preserving the 84× → 9.4× factor
 /// speedup, the 4-order HS75 residual win, and the MEYER3NE parity
 /// tests). See `dev/research/policy-4-scaling-fallback.md`.
-fn compute_scaling_auto(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+fn compute_scaling_auto_with_cache(
+    matrix: &CscMatrix,
+    cache: Option<&Mc64Cache>,
+) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
     const RAW_GUARD: f64 = 1e6;
     const MC_OFF_GUARD: f64 = 1e6;
     const RATIO_GUARD: f64 = 1e5;
 
     let picked = pick_scaling_strategy(matrix);
     if !matches!(picked, ScalingStrategy::Mc64Symmetric) {
-        // Auto picked InfNorm-class — no fallback needed.
+        // Auto picked InfNorm-class — no fallback needed. Cache is
+        // unused; MC64 was speculative work for compression and has
+        // no payoff on this branch.
         return compute_scaling(matrix, &picked);
     }
+
+    let mc64_from_cache = |matrix: &CscMatrix| -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+        match cache {
+            Some(c) => Ok(mc64::scaling_from_cache(c)),
+            None => mc64::compute_symmetric(matrix),
+        }
+    };
 
     // Cheap pre-filter: a wide raw |diag| range means MC64 has
     // genuine work to do. Skip the diagnostic and use MC64.
     if raw_diag_range(matrix) >= RAW_GUARD {
-        return mc64::compute_symmetric(matrix);
+        return mc64_from_cache(matrix);
     }
 
-    let (mc_vec, mc_info) = mc64::compute_symmetric(matrix)?;
+    let (mc_vec, mc_info) = mc64_from_cache(matrix)?;
     let mc_off = max_off_diag_ratio(matrix, &mc_vec);
     if mc_off <= MC_OFF_GUARD {
         // MC64 produced a well-conditioned scaled matrix.

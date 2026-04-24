@@ -561,3 +561,82 @@ Next session queue:
 - Consider adding auto-dispatch: `compress-if-compRat<=0.7`.
 - Reassess whether the "Dense" bench column tells us anything
   actionable or should be suppressed.
+
+* 22:50 :ldlt-compress:mc64:cache:perf:
+Phase 2.4.4 continued: implemented MC64 sharing between symbolic
+compression and numeric scaling to speed up the =LdltCompress=
+path, then re-attempted the default flip.
+
+Profiling via =src/bin/diag_compress_profile.rs= on 15 matrices
+(tail/medium/small) showed MC64 is 70–97% of compression
+symbolic overhead — on HAHN1_0153 (n=715): mc64=283μs of 402μs
+total; on KIRBY2_0007 (n=458): 679μs of 698μs. The other steps
+(supermap, compress_pattern, expand_permutation) are cheap
+individually.
+
+Refactor landed:
+1. Split =mc64::compute_symmetric= into =compute_matching= (the
+   expensive Hungarian + cost-graph build) and
+   =scaling_from_cache= (O(n) post-processing). Added a new
+   =Mc64Cache= struct holding perm, u, v, cmax, n_matched.
+2. Added =cached_mc64: Option<Mc64Cache>= on
+   =SymbolicFactorization=, populated only when =LdltCompress=
+   runs.
+3. New =compute_scaling_with_cache(matrix, strategy, cache)=
+   in =src/scaling/mod.rs=. When strategy resolves to
+   =Mc64Symmetric= (directly or via =Auto=) and a cache is
+   passed, it uses =scaling_from_cache= instead of rerunning
+   Hungarian. Policy 4 fallback still fires unchanged.
+4. Both =factorize_multifrontal= (sequential) and the parallel
+   driver pass =symbolic.cached_mc64.as_ref()= through.
+
+All 143 library tests still pass; no correctness changes.
+
+Re-flip and re-bench (full 154,588-matrix panel):
+
+| metric  | pre (None) | flip no-cache | flip with cache |
+|---------+-----------+---------------+-----------------|
+| geomean |      0.36 |          0.49 |            0.48 |
+| p90     |      1.61 |          1.91 |            1.75 |
+| max     |      9.40 |         12.93 |           10.42 |
+
+The cache recovered:
+- ~71% of the =max= gap (12.93 → 10.42, was 9.40 baseline)
+- ~55% of the =p90= gap (1.91 → 1.75)
+- ~8% of the =geomean= gap (0.49 → 0.48)
+
+Geomean barely moved because the cache only helps matrices
+where *both* compression and MC64 scaling run. =ScalingStrategy::Auto=
+routes to =InfNorm= on matrices with =diag_only/n < 0.3= — which
+is a big slice of the corpus (ACOPR30 family, many IPM-style KKT
+shapes). On those the compression MC64 is pure overhead with no
+sharing partner. The top-10 worst post-flip is 9× ACOPR30 at
+~9.5×, driven by a ~80μs MC64 that has nowhere to amortize.
+
+Disposition:
+
+1. Keep the cache refactor — it is correct, it is a legitimate
+   perf improvement on the matrices where it applies, and it
+   makes the opt-in =LdltCompress= cheaper. Any user who
+   explicitly turns compression on gets it essentially free if
+   they're also using MC64 scaling.
+2. Revert the default flip. The flip still regresses geomean
+   0.36 → 0.48 which is not acceptable as a blanket default.
+3. The remaining overhead is structural: even with MC64
+   shared, =LdltCompress= still pays for =build_supermap=,
+   =compress_pattern=, and =run_external_ordering= on the
+   compressed graph + the =matching_perm= call has to know
+   it's caching for MC64 which it does unconditionally here.
+   On matrices where compression gives no leverage (ncmp == n
+   or scaling is InfNorm), the work is wasted.
+4. Proper next step: shape-based auto-dispatch for compression,
+   parallel to =pick_scaling_strategy=. Only run compression
+   when predicted to pay off (large-n + arrow-KKT shape + MC64
+   scaling). That's a research item for a separate session.
+
+Evidence:
+- Full bench output: /tmp/feral-bench-cache-flip.txt (kept
+  local, not committed).
+- =cargo test --release --lib= → 143 passed after revert.
+- =cargo clippy --lib --release -- -D warnings= → clean.
+- =cargo fmt --all= applied.

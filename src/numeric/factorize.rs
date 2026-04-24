@@ -4,7 +4,7 @@ use crate::dense::factor::{factor_frontal_blocked, BunchKaufmanParams, FrontalFa
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
 use crate::inertia::Inertia;
-use crate::scaling::{compute_scaling, ScalingStrategy};
+use crate::scaling::{compute_scaling, compute_scaling_with_cache, ScalingStrategy};
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::SymbolicFactorization;
 
@@ -432,7 +432,13 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // here against the live matrix values, not cached on the
     // value-agnostic `SymbolicFactorization`. Returns the user-
     // order scaling vector and a diagnostic info enum.
-    let (scaling_user, scaling_info) = compute_scaling(matrix, &params.scaling)?;
+    //
+    // Phase 2.4.4: if the symbolic phase ran `LdltCompress`, it
+    // already produced an `Mc64Cache` that we reuse here when the
+    // scaling strategy also resolves to MC64 — O(n) post-processing
+    // instead of a second Hungarian.
+    let (scaling_user, scaling_info) =
+        compute_scaling_with_cache(matrix, &params.scaling, symbolic.cached_mc64.as_ref())?;
     if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
         // No project-wide logging framework yet; mirror the Phase 1
         // convention of eprintln! for unusual diagnostics so this is
@@ -811,8 +817,10 @@ pub fn factorize_multifrontal_supernodal_parallel(
     let n = symbolic.n;
     let n_snodes = symbolic.supernodes.len();
 
-    // Setup — mirrors the sequential driver.
-    let (scaling_user, scaling_info) = compute_scaling(matrix, &params.scaling)?;
+    // Setup — mirrors the sequential driver. Reuse the symbolic-phase
+    // MC64 cache if present (see the sequential driver for details).
+    let (scaling_user, scaling_info) =
+        compute_scaling_with_cache(matrix, &params.scaling, symbolic.cached_mc64.as_ref())?;
     if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
         eprintln!(
             "warning: MC64 matching left {} of {} variables unmatched; \

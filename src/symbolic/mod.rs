@@ -146,6 +146,13 @@ pub struct SymbolicFactorization {
 
     /// Column counts of L.
     pub col_counts: Vec<usize>,
+
+    /// Cached MC64 matching produced by the `LdltCompress`
+    /// preprocessor. When `Some`, the numeric phase reuses it to
+    /// derive the `Mc64Symmetric` scaling vector in O(n) instead of
+    /// rerunning the Hungarian kernel. `None` when no MC64 matching
+    /// was computed during symbolic factorization.
+    pub(crate) cached_mc64: Option<crate::scaling::Mc64Cache>,
 }
 
 /// Pick a default ordering for `symbolic_factorize` from cheap matrix
@@ -291,12 +298,17 @@ pub fn symbolic_factorize_with_method(
     // `src/symbolic/ldlt_compress.rs` and
     // `dev/plans/phase-2.6.5-ldlt-compressed-graph.md`.
     let full_pattern = matrix.symmetric_pattern();
+    let mut cached_mc64: Option<crate::scaling::Mc64Cache> = None;
     let amd_perm: Vec<usize> = match snode_params.preprocess {
         OrderingPreprocess::None => run_external_ordering(&full_pattern, method)?,
         OrderingPreprocess::LdltCompress => {
-            let (matching, _n_matched) = crate::scaling::mc64_matching(matrix)?;
-            let map = build_supermap(&matching);
-            if map.ncmp() == n {
+            // Run the full MC64 pipeline once and keep the cache so the
+            // numeric phase can reuse it for `Mc64Symmetric` scaling
+            // (Phase 2.4.4: eliminates ~70% of compression symbolic
+            // overhead on matrices where scaling also runs MC64).
+            let cache = crate::scaling::compute_mc64_cache(matrix)?;
+            let map = build_supermap(&cache.perm);
+            let perm = if map.ncmp() == n {
                 // Matching gives no compression leverage; fall through
                 // to the uncompressed path rather than build and walk
                 // an identical-size graph.
@@ -305,7 +317,9 @@ pub fn symbolic_factorize_with_method(
                 let cpat = compress_pattern(&full_pattern, &map);
                 let super_perm = run_external_ordering(&cpat, method)?;
                 expand_permutation(&super_perm, &map)
-            }
+            };
+            cached_mc64 = Some(cache);
+            perm
         }
     };
 
@@ -385,6 +399,7 @@ pub fn symbolic_factorize_with_method(
         etree,
         permuted_pattern,
         col_counts,
+        cached_mc64,
     })
 }
 
