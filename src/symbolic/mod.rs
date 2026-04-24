@@ -188,6 +188,60 @@ fn pick_default_method(n: usize, stored_nnz: usize) -> OrderingMethod {
     }
 }
 
+/// Resolve [`OrderingPreprocess::Auto`] to a concrete preprocessor
+/// choice based on cheap O(nnz) shape predicates.
+///
+/// Returns [`OrderingPreprocess::LdltCompress`] when two conditions hold:
+///
+/// 1. `n >= MIN_N_FOR_COMPRESSION` (size floor). Below this, numeric
+///    factor time is in the sub-ms range and the ~100-400μs compression
+///    symbolic overhead dominates. Calibrated from the 154 588-matrix
+///    bench: geomean regressed 0.36 → 0.48 with unconditional
+///    compression, driven by small-matrix symbolic overhead.
+///
+/// 2. `low_degree_cols / n >= LOW_DEGREE_THRESHOLD` (arrow-KKT
+///    signature). Columns with stored degree ≤ 2 (the diagonal plus at
+///    most one off-diagonal) are the structural fingerprint of IPM KKT
+///    slack blocks (`IpStdAugSystemSolver.cpp:250-305`: `Σ_s + δ_s I`
+///    coupled to the d-row by a single identity off-diagonal). Many
+///    such columns means the MC64 matching has abundant 2-cycle
+///    structure for compression to exploit. This broadens the
+///    `diag_only / n` predicate from `pick_scaling_strategy` because
+///    Ipopt slack columns are degree-2, not degree-1.
+///
+/// Otherwise returns [`OrderingPreprocess::None`].
+///
+/// Parallels [`crate::scaling::pick_scaling_strategy`] in spirit.
+/// Both predicates are O(nnz) and allocation-free.
+///
+/// No published compression-benefit predictor exists in the MUMPS /
+/// SPRAL literature (see consult of 2026-04-23). These thresholds are
+/// calibrated against the feral corpus and documented in
+/// `dev/journal/2026-04-23-02.org`.
+pub fn pick_ordering_preprocess(matrix: &CscMatrix) -> OrderingPreprocess {
+    const MIN_N_FOR_COMPRESSION: usize = 128;
+    const LOW_DEGREE_THRESHOLD: f64 = 0.30;
+
+    let n = matrix.n;
+    if n < MIN_N_FOR_COMPRESSION {
+        return OrderingPreprocess::None;
+    }
+
+    let mut low_degree = 0usize;
+    for j in 0..n {
+        let nnz_col = matrix.col_ptr[j + 1] - matrix.col_ptr[j];
+        if nnz_col <= 2 {
+            low_degree += 1;
+        }
+    }
+
+    if low_degree as f64 / n as f64 >= LOW_DEGREE_THRESHOLD {
+        OrderingPreprocess::LdltCompress
+    } else {
+        OrderingPreprocess::None
+    }
+}
+
 /// Perform symbolic factorization of a sparse symmetric matrix.
 ///
 /// Defaults to AMD, but applies a narrow bordered-KKT fallback rule to
@@ -299,8 +353,16 @@ pub fn symbolic_factorize_with_method(
     // `dev/plans/phase-2.6.5-ldlt-compressed-graph.md`.
     let full_pattern = matrix.symmetric_pattern();
     let mut cached_mc64: Option<crate::scaling::Mc64Cache> = None;
-    let amd_perm: Vec<usize> = match snode_params.preprocess {
+    // Resolve `Auto` to `None` or `LdltCompress` before entering the
+    // dispatch. Keeps the match below exhaustive on the two concrete
+    // variants and keeps the dispatcher logic in one testable place.
+    let resolved_preprocess = match snode_params.preprocess {
+        OrderingPreprocess::Auto => pick_ordering_preprocess(matrix),
+        other => other,
+    };
+    let amd_perm: Vec<usize> = match resolved_preprocess {
         OrderingPreprocess::None => run_external_ordering(&full_pattern, method)?,
+        OrderingPreprocess::Auto => unreachable!("resolved above"),
         OrderingPreprocess::LdltCompress => {
             // Run the full MC64 pipeline once and keep the cache so the
             // numeric phase can reuse it for `Mc64Symmetric` scaling

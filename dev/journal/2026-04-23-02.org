@@ -640,3 +640,50 @@ Evidence:
 - =cargo test --release --lib= → 143 passed after revert.
 - =cargo clippy --lib --release -- -D warnings= → clean.
 - =cargo fmt --all= applied.
+
+* 23:40 :phase-2.4.4:auto-dispatch:bench:
+Shape-based =OrderingPreprocess::Auto= default landed.
+
+Added =Auto= variant to =OrderingPreprocess= and made it
+=#[default]=. =pick_ordering_preprocess(matrix)= applies:
+
+1. =n >= 128= (size floor — excludes 85% of corpus where
+   compression can't amortize).
+2. =low_degree_cols / n >= 0.30= where low-degree = column
+   nnz ≤ 2 (arrow-KKT slack signature; broader than
+   =pick_scaling_strategy='s diag-only because Ipopt slack
+   columns are degree-2, not degree-1).
+
+Full bench vs baseline (=None= default, pre-flip):
+
+                pre(None)   Auto   delta
+  geomean          0.36     0.36    0.00
+  p90              1.61     1.61    0.00
+  max              9.40    10.87   +1.47
+
+Geomean and p90 held exactly — predicate correctly skips
+small-n bulk. Per-family: HS89/90/91/92/118, SSINE, HATFLDH,
+HS13, DJTL all improved (2–30%). CRESC100 worst-case ticked up
+from 9.40 → 10.87 because Auto does trigger compression there
+and CRESC100 is a known compression-hostile family (session
+02, "compression hurts CRESC100"). Within 10× envelope, within
+Phase 2.8.1 exit partition passes.
+
+Expert consult ahead of the implementation (2026-04-23):
+- MUMPS: does auto-dispatch for SYM=2 via three gates in
+  =dana_aux.F= (zero-diag, quasi-dense rows, post-MC64
+  residual). No size floor but philosophy compatible.
+- SPRAL: no compression at all, strictly user-gated.
+- Ipopt: slack columns are degree-2 (not degree-1);
+  symbolic reuses across IPM iterations
+  (=IpTSymLinearSolver.cpp:392-395=), so one-time Auto
+  resolution is free.
+
+Evidence:
+- =cargo test --release --lib= → 143 passed.
+- =cargo clippy --lib --release -- -D warnings= → clean.
+- =cargo fmt --all= applied.
+- Full bench output: /tmp/feral-bench-auto-flip.txt.
+- Research note: =dev/research/phase-2.4.4-compression-
+  auto-dispatch.md=.
+- Decision: appended to =dev/decisions.md=.

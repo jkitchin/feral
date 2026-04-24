@@ -29,18 +29,24 @@ pub struct SupernodeParams {
 pub enum OrderingPreprocess {
     /// No preprocessing. The fill-reducing ordering runs directly on
     /// the symmetric pattern.
-    #[default]
     None,
     /// Duff-Pralet symmetric matching + quotient-graph compression.
     /// See `crate::symbolic::ldlt_compress`.
     LdltCompress,
+    /// Shape-dispatched: run `LdltCompress` when cheap shape predicates
+    /// predict a benefit, else run `None`. See
+    /// `crate::symbolic::pick_ordering_preprocess` for the rule.
+    ///
+    /// Parallels `ScalingStrategy::Auto`. Default since Phase 2.4.4.
+    #[default]
+    Auto,
 }
 
 impl Default for SupernodeParams {
     fn default() -> Self {
         Self {
             nemin: 32,
-            preprocess: OrderingPreprocess::None,
+            preprocess: OrderingPreprocess::Auto,
         }
     }
 }

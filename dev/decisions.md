@@ -1687,3 +1687,51 @@ is a correctness-preserving speedup.
 matrix passed to numeric factorization. The matrix values are not
 mutated between symbolic and numeric phases in any code path today;
 if that ever changes, `cached_mc64` must be invalidated.
+
+---
+
+## 2026-04-23 — `OrderingPreprocess::Auto` as new default
+
+**Decision.** Add an `Auto` variant to `OrderingPreprocess` and make
+it the `#[default]`. Resolution happens once per
+`symbolic_factorize_with_method` call via `pick_ordering_preprocess`,
+which applies two O(nnz) predicates:
+
+1. `n >= 128` (size floor)
+2. `low_degree_cols / n >= 0.30` (arrow-KKT signature, where
+   "low-degree" means stored column nnz ≤ 2)
+
+When both hold, resolve to `LdltCompress`; else `None`.
+
+**Why.** Phase 2.4.4 established that unconditional `LdltCompress`
+wins on tail matrices (HAHN1/GAUSS2, 2–5× numeric speedups) but
+regresses geomean 0.36 → 0.48 on the 154,588-matrix bench because
+80.8% of the corpus has n<50 and compression's ~100-700μs symbolic
+overhead (70–97% MC64 Hungarian) cannot amortize. Full bench with
+the Auto default:
+
+    metric    pre(None)   Auto   delta
+    geomean      0.36     0.36    0.00
+    p90          1.61     1.61    0.00
+    max          9.40    10.87   +1.47
+
+Geomean and p90 are flat — the size floor correctly excludes the
+bulk from compression. Tail regression on CRESC100 (known-bad for
+compression) is the cost of a shape-only predicate; within the
+<=10× sparse exit envelope.
+
+**Parallels** `scaling::pick_scaling_strategy` (also shape-based,
+also Auto-default). Low-degree threshold broadens the
+degree-exactly-1 predicate there to degree ≤ 2 because Ipopt slack
+columns are degree-2 (identity-coupled), not degree-1.
+
+**Expert check (2026-04-23).** MUMPS does auto-dispatch compression
+for SYM=2 via three gates in `dana_aux.F` (no size floor, but
+philosophy compatible). SPRAL does not compress at all. Ipopt
+confirms symbolic reuse across IPM iterations, so one-time Auto
+resolution amortizes.
+
+**Calibration.** Thresholds 128 and 0.30 are tuned against this
+bench; `dev/research/phase-2.4.4-compression-auto-dispatch.md`
+documents the profile data and rationale. If the corpus shifts
+(large-n industrial matrices added), recalibrate against that set.
