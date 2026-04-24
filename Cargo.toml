@@ -60,6 +60,10 @@ path = "src/bin/diag_mc64_cycles.rs"
 name = "diag_compression_bench"
 path = "src/bin/diag_compression_bench.rs"
 
+[[bin]]
+name = "diag_dense_tail"
+path = "src/bin/diag_dense_tail.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

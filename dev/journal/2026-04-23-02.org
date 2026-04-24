@@ -434,3 +434,63 @@ params, sub-noise overhead). Open a new plan for the dense tail
 scaling diagnostic for these families) — not Phase 2.4.3 scope.
 
 Evidence captured in =dev/research/phase-2.4.3-rook-validation.md=.
+
+* 21:40 :phase-2.4.4:dense-tail-diag:ldlt-compress-wins:
+Started Phase 2.4.4 (dense tail) investigation per Step 8
+disposition. Added =src/bin/diag_dense_tail.rs= to decide between
+three hypotheses for the 40-53× ratio: ordering-packed-giant-
+frontal, dense-kernel-throughput, scaling.
+
+First finding: the giant-frontal hypothesis is WRONG. Largest
+supernode on the worst matrices at default params:
+  - HAHN1_0153 (n=715): max_ncol=16, max_nrow=16
+  - CRESC100_0000 (n=806): max_ncol=14, max_nrow=14
+  - GAUSS2_0029 (n=758): max_ncol=18, max_nrow=18
+
+These matrices produce hundreds of tiny supernodes, not one huge
+dense frontal. The tail cost is many-tiny-frontals × per-frontal
+overhead.
+
+Second finding: =OrderingPreprocess::LdltCompress= is a huge lever.
+Per-matrix wins from the diag:
+
+| matrix       | default | +compress | speedup |
+|--------------|--------:|----------:|--------:|
+| HAHN1_0153   |  5867μs |   1048μs  |  5.6×   |
+| HAHN1_0154   |  1983μs |    502μs  |  4.0×   |
+| HAHN1_0454   |  1530μs |    543μs  |  2.8×   |
+| GAUSS2_0025  |   961μs |    424μs  |  2.3×   |
+| GAUSS2_0029  |   905μs |    416μs  |  2.2×   |
+| GAUSS2_0035  |   893μs |    414μs  |  2.2×   |
+
+Compression drops supernode count HAHN1 472→238, GAUSS2 500→258.
+CRESC100 is the odd one out (compression doesn't help; =sum_nc2*nr=
+goes from 5100 to 9185). Needs separate investigation.
+
+Third finding: existing =diag_compression_bench= (2.6.5 Step 8
+harness) on a 321-matrix sample reports:
+
+  factor geomean cmp/base = 0.758  (24.2% avg speedup)
+  inertia mismatches: 0
+
+Worst-10 tail (MUONSINE, CRESC100, KIRBY2, HAHN1, GAUSS2, VESUVIO):
+ALL improve 8-65%. MUONSINE_0000 -65.4%; HAHN1_0259 -57.7%;
+GAUSS2_0000 -52.9%; VESUVIO_0011 -64.8%.
+
+Regressions exist but are modest: ~14 matrices regress visibly,
+top-10 regressions are +8.5% to +22.4% on small matrices where
+absolute factor time is microseconds (noise floor).
+
+Decision criterion from plan §8 ("factor geomean ≤ 0.95 on
+compRat ≤ 0.7 bucket") is decisively cleared: **0.758 ≤ 0.95**.
+
+Fourth finding (incidental): =nemin=5= (MUMPS default) is SLOWER
+than =nemin=32= on feral — feral's per-frontal overhead is high
+enough that smaller frontals hurt more than they help. =nemin=1=
+(no amalgamation) is 2-3× slower everywhere. So the amalgamation
+default is well-tuned; compression is orthogonal and additive.
+
+Next: propose flipping =SupernodeParams::default().preprocess= from
+=None= to =LdltCompress=, run the full 154k-matrix bench, and see
+whether the dense factor/MUMPS max drops from 53.05 to < 20 (the
+target rook rescue couldn't hit).
