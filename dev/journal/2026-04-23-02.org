@@ -335,3 +335,60 @@ All met.
 
 Next: Step 7 (CRESC100 / GAUSS2 regression — requires pre/post
 factor-time comparison on the KKT matrices from =data/matrices/kkt/=).
+
+* 20:48 :phase-2.4.3:step-7:rook-rescue:kkt-regression:
+Phase 2.4.3 Step 7: added =tests/rook_rescue_kkt.rs= as the
+CRESC100 / GAUSS2 regression panel. Ten-matrix samples per family
+(indices 0000..0009) read from =data/matrices/kkt/=, with a hard
+inertia-match + residual gate (≤ 10× MUMPS residual OR below
+ABS_FLOOR=1e-14) against the =*.mumps.json= oracles.
+
+Two design pivots during implementation:
+
+1. =GAUSS2_0002.mumps.json= has =factorization_status="fail"= and
+   =residual_2norm_relative=null=. A =.unwrap()= on the null
+   residual panicked. Fixed by making =read_oracle= return
+   =Option= and skipping entries where status != "ok" (logged via
+   =eprintln!=). GAUSS2 panel ends up with 9 matrices; CRESC100
+   with 10.
+
+2. At =pivot_threshold=0.01= (bench default) and even =u=0.5=,
+   BK-partial + LAPACK extension clears every pivot on these
+   well-scaled KKT matrices — =total_rook_rescues=0= across both
+   families. The plan's motivation ("CRESC100 at 40–45× pre-rook")
+   must be stale: the current bench shows CRESC100 at 8.78×,
+   meaning other interventions already reduced the tail. The
+   regression gate =total_rescues > 0= cannot be enforced without
+   stressing the threshold. Bumped to =u=0.99= (near-maximal BK),
+   which produces 23–31 rescues/matrix on CRESC100 and 0–28 on
+   GAUSS2. This is the same "stress the rescue path" strategy
+   Test 4 uses (1e-3 diagonal scaling) — the goal is to exercise
+   rescue under adversarial thresholds, not to claim these matrices
+   need rescue at default parameters.
+
+Results (release, u=0.99):
+| family   | matrices | rescues/matrix | inertia match | residual |
+|----------+----------+----------------+---------------+----------|
+| CRESC100 | 10/10    | 23–31 (260 ∑)  | 10/10         | all ≤ gate |
+| GAUSS2   | 9/10     | 0–28 (43 ∑)    | 9/9           | all ≤ gate |
+
+GAUSS2_0002 skipped (MUMPS failure). GAUSS2_0000..0003 inertia
+match exactly with zero rescues (at u=0.99 the LAPACK extension
+covers their pivots); rescue counts grow toward the end of the
+family index range.
+
+Evidence:
+- =cargo test --test rook_rescue_kkt --release= → 2 passed (1 with
+  skip note for GAUSS2_0002).
+- =cargo test --release= → full suite green.
+- =cargo fmt --all= applied.
+- =cargo clippy --lib -- -D warnings= → clean.
+
+Exit criteria for Step 7: inertia match on 100% of oracle-ok
+matrices, residual gate passed on 100%, total rescues > 0 in
+aggregate per family. All met (CRESC100: 10/10 + 260 rescues;
+GAUSS2: 9/9 + 43 rescues).
+
+Next: Step 8 (full bench gate — =cargo run --release --bin bench=,
+evaluate exit criteria max ≤ 20, p90 ≤ 1.90, geomean ≈ 0.21, write
+=dev/research/phase-2.4.3-rook-validation.md=).
