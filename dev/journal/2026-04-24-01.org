@@ -96,3 +96,43 @@ Phase 2.9.2 sketch: true stack-arena for the whole supernode
 postorder, MUMPS-style. Members of a leaf group share one allocation;
 members share ~ws.row_map~ write/restore across the group. Non-leaf
 supernodes bump-allocate from the same arena.
+
+* 16:10 :phase-2.9.1:profile:
+Per-leaf phase profiler (~src/bin/diag_leaf_profile.rs~) run on
+ACOPR30_0067 / CRESC100_0000 / HAIFAM_0082 / VESUVIO_0000 (1832 leaves
+total, 50 repeats each). Results (aggregated %tot of per-leaf total):
+
+| phase            | mean ns | %tot  |
+|------------------+---------+-------|
+| row_map_setup    |      15 |  3.8% |
+| memset           |      16 |  3.8% |
+| scatter          |      18 |  4.3% |
+| bk_kernel        |     177 | 42.6% |
+| contrib          |      23 |  5.7% |
+| row_map_teardown |      15 |  3.8% |
+| total            |     417 |  100% |
+
+~Instant::now()~ measurement overhead is 35.9% of total (expected —
+each phase is ~15-20 ns, same order as the timer call itself), so
+absolute numbers are inflated but *ratios* are the signal.
+
+Key finding: the outer-memset hypothesis from 2026-04-24 15:40 was
+*wrong*. The ~frontal_buf.resize(n*n, 0.0)~ memset is only 3.8% of
+per-leaf time. The dominant cost (42.6%) is *inside*
+~factor_frontal_blocked~ itself — its internal ~vec![0.0; nrow*nrow]~
+allocation-and-copy, perm/perm_inv Vec allocation, pivot-search
+setup. Any Phase 2.9.2 refactor must target the dense kernel
+internals, not the outer buffer management.
+
+* 16:15 :phase-2.9.2:plan:
+Next refactor target: ~factor_frontal_blocked~ accepts an external
+~&mut [f64]~ for its working array ~a~ and reuses caller-provided
+perm / perm_inv / d_diag / d_subdiag Vecs via ~Vec::clear()~ +
+~Vec::extend_from_slice~. The leaf-batch loop would then make a
+single arena-sized allocation per group. This is a substantial
+kernel surgery — factor_frontal and factor_frontal_blocked both
+allocate, and their callers (sparse/dense/tests) all assume owning
+returns. Deferring until an isolated benchmark confirms this is where
+the savings actually live (i.e. a standalone diag that calls
+factor_frontal_blocked on a batch of tiny fronts vs a hypothetical
+arena version).

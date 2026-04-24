@@ -84,6 +84,10 @@ path = "src/bin/diag_supernode_cost.rs"
 name = "diag_small_leaf"
 path = "src/bin/diag_small_leaf.rs"
 
+[[bin]]
+name = "diag_leaf_profile"
+path = "src/bin/diag_leaf_profile.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
