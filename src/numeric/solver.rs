@@ -344,6 +344,7 @@ mod tests {
         let np = NumericParams {
             bk: BunchKaufmanParams::default(),
             scaling,
+            small_leaf: Default::default(),
         };
         Solver::with_params(np, SupernodeParams::default())
     }

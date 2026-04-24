@@ -54,10 +54,12 @@ fn bench_one(name: &str, csc: &CscMatrix) -> Option<Row> {
 
     let base_params = SupernodeParams {
         preprocess: OrderingPreprocess::None,
+        small_leaf: Default::default(),
         ..Default::default()
     };
     let cmp_params = SupernodeParams {
         preprocess: OrderingPreprocess::LdltCompress,
+        small_leaf: Default::default(),
         ..Default::default()
     };
 

@@ -123,6 +123,7 @@ fn run_one_method(csc: &CscMatrix, method: OrderingMethod, scaling: ScalingStrat
             ..BunchKaufmanParams::default()
         },
         scaling: scaling.clone(),
+        small_leaf: Default::default(),
     };
     let scale_tag = match scaling {
         ScalingStrategy::InfNorm => "infnorm",

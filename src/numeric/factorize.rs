@@ -27,6 +27,31 @@ pub struct NumericParams {
     /// Global symmetric scaling strategy applied at the start of
     /// numeric factorization.
     pub scaling: ScalingStrategy,
+    /// Phase 2.9 small-leaf-subtree batching gate. Default `Off`
+    /// preserves the reference per-supernode driver. When `On` the
+    /// driver processes `SymbolicFactorization::small_leaf_groups`
+    /// via `factor_one_small_leaf` instead of the generic
+    /// `factor_one_supernode`, skipping the per-leaf
+    /// `build_row_indices` call. See
+    /// `dev/plans/phase-2.9-small-leaf-subtree.md`.
+    pub small_leaf: SmallLeafBatch,
+}
+
+/// Gate for Phase 2.9 small-leaf-subtree batching.
+///
+/// When `Off` (default), `factorize_multifrontal_supernodal_with_
+/// workspace` runs the generic per-supernode body on every
+/// supernode. When `On`, leaf supernodes that were grouped at
+/// symbolic time are routed through the batched path.
+///
+/// Default is `Off` while parity is being verified. Flip in
+/// `dev/decisions.md` once the bench shows the expected long-tail
+/// win with no bulk regression.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SmallLeafBatch {
+    #[default]
+    Off,
+    On,
 }
 
 impl NumericParams {
@@ -37,6 +62,7 @@ impl NumericParams {
         Self {
             bk,
             scaling: ScalingStrategy::default(),
+            small_leaf: SmallLeafBatch::default(),
         }
     }
 }
@@ -499,7 +525,52 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // can invoke it independently per-supernode. Sequential behaviour
     // is bit-exact against the pre-extraction loop — the helper is a
     // direct lift of the original loop body.
-    for snode_idx in 0..n_snodes {
+    //
+    // Phase 2.9 (`dev/plans/phase-2.9-small-leaf-subtree.md`): when
+    // `params.small_leaf == On`, leaf supernodes that were grouped
+    // at symbolic time are dispatched to `factor_one_small_leaf` in
+    // a single batched sweep per group. Group members are
+    // postorder-consecutive indices, so we advance `snode_idx` past
+    // the whole group after processing it; non-grouped supernodes
+    // take the generic path exactly as before. The gate is `Off`
+    // by default.
+    let use_small_leaf =
+        params.small_leaf == SmallLeafBatch::On && !symbolic.small_leaf_groups.is_empty();
+    let mut snode_idx = 0usize;
+    while snode_idx < n_snodes {
+        if use_small_leaf {
+            if let Some(gid) = symbolic.snode_group[snode_idx] {
+                let group = &symbolic.small_leaf_groups[gid];
+                debug_assert_eq!(
+                    group.members.first(),
+                    Some(&snode_idx),
+                    "group members must start at current snode_idx"
+                );
+                for (i, &m) in group.members.iter().enumerate() {
+                    let node = factor_one_small_leaf(
+                        m,
+                        &group.member_rows[i],
+                        symbolic,
+                        &permuted,
+                        &scaling_pivot_order,
+                        &is_root,
+                        params,
+                        ws,
+                        &mut contrib_blocks,
+                    )?;
+                    total_inertia.positive += node.inertia.positive;
+                    total_inertia.negative += node.inertia.negative;
+                    total_inertia.zero += node.inertia.zero;
+                    if node.frontal_factors.needs_refinement {
+                        needs_refinement = true;
+                    }
+                    node_factors.push(node);
+                }
+                snode_idx += group.members.len();
+                continue;
+            }
+        }
+
         let node = factor_one_supernode(
             snode_idx,
             symbolic,
@@ -519,6 +590,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
             needs_refinement = true;
         }
         node_factors.push(node);
+        snode_idx += 1;
     }
 
     Ok((
@@ -716,6 +788,152 @@ fn factor_one_supernode(
         ncol: expanded_ncol,
         nelim: node_nelim,
         n_delayed_in,
+        nrow: actual_nrow,
+        row_indices,
+        frontal_factors: ff,
+        inertia: node_inertia,
+    })
+}
+
+/// Factor a single true-leaf supernode that was pre-qualified for the
+/// SmallLeafSubtree batched path (phase 2.9).
+///
+/// This is a leaf specialisation of `factor_one_supernode` — true leaves
+/// have no children, so:
+///
+/// * `n_delayed_in == 0`, `expanded_ncol == own_ncol`.
+/// * No extend-add pass (the children loop is empty anyway).
+/// * `row_indices` is passed in pre-computed at symbolic time
+///   (`SmallLeafGroup::member_rows`), saving the per-front
+///   `build_row_indices` call and its `build_delayed`/`build_seen`
+///   scratch churn on every leaf.
+///
+/// All other semantics — scaling, `factor_frontal_blocked`, contribution
+/// block deposit, `row_map` write/restore — match the generic path
+/// byte-for-byte, which is what the parity tests in
+/// `tests/small_leaf_parity.rs` verify.
+#[allow(clippy::too_many_arguments)]
+fn factor_one_small_leaf(
+    snode_idx: usize,
+    precomputed_rows: &[usize],
+    symbolic: &SymbolicFactorization,
+    permuted: &CscMatrix,
+    scaling_pivot_order: &[f64],
+    is_root: &[bool],
+    params: &NumericParams,
+    ws: &mut FactorWorkspace,
+    contrib_blocks: &mut [Option<ContribBlock>],
+) -> Result<NodeFactors, FeralError> {
+    let snode = &symbolic.supernodes[snode_idx];
+    debug_assert!(
+        snode.children.is_empty(),
+        "factor_one_small_leaf called on non-leaf supernode {}",
+        snode_idx
+    );
+
+    let own_ncol = snode.ncol();
+    let nrow = snode.nrow;
+
+    if nrow == 0 || own_ncol == 0 {
+        return Ok(NodeFactors {
+            first_col: snode.first_col,
+            ncol: 0,
+            nelim: 0,
+            n_delayed_in: 0,
+            nrow: 0,
+            row_indices: Vec::new(),
+            frontal_factors: FrontalFactors {
+                nrow: 0,
+                ncol: 0,
+                nelim: 0,
+                l: Vec::new(),
+                d_diag: Vec::new(),
+                d_subdiag: Vec::new(),
+                perm: Vec::new(),
+                perm_inv: Vec::new(),
+                contrib: Vec::new(),
+                contrib_dim: 0,
+                n_delayed: 0,
+                inertia: Inertia {
+                    positive: 0,
+                    negative: 0,
+                    zero: 0,
+                },
+                needs_refinement: false,
+                n_rook_rescues: 0,
+                zero_tol: params.bk.zero_tol,
+                zero_tol_2x2: params.bk.zero_tol_2x2,
+            },
+            inertia: Inertia {
+                positive: 0,
+                negative: 0,
+                zero: 0,
+            },
+        });
+    }
+
+    let row_indices = precomputed_rows.to_vec();
+    let actual_nrow = row_indices.len();
+    let expanded_ncol = own_ncol;
+    debug_assert!(actual_nrow >= expanded_ncol);
+
+    for (local, &global) in row_indices.iter().enumerate() {
+        ws.row_map[global] = local;
+    }
+
+    let scaling = scaling_pivot_order;
+    let mut frontal_buf = std::mem::take(&mut ws.frontal_values);
+    frontal_buf.clear();
+    frontal_buf.resize(actual_nrow * actual_nrow, 0.0);
+    let mut frontal = SymmetricMatrix {
+        n: actual_nrow,
+        data: frontal_buf,
+    };
+    for (local_j, &gj) in row_indices[..own_ncol].iter().enumerate() {
+        let s_j = scaling[gj];
+        for k in permuted.col_ptr[gj]..permuted.col_ptr[gj + 1] {
+            let gi = permuted.row_idx[k];
+            let local_i = ws.row_map[gi];
+            if local_i != usize::MAX {
+                let val = permuted.values[k] * scaling[gi] * s_j;
+                frontal.set(local_i, local_j, val);
+            }
+        }
+    }
+
+    // No extend-add: leaves have no children.
+
+    let may_delay = !is_root[snode_idx];
+    let ff = factor_frontal_blocked(&frontal, expanded_ncol, may_delay, &params.bk)?;
+    ws.frontal_values = frontal.data;
+
+    let node_inertia = ff.inertia.clone();
+    let node_nelim = ff.nelim;
+    let node_n_delayed = ff.n_delayed;
+
+    if ff.contrib_dim > 0 {
+        let cdim = ff.contrib_dim;
+        let mut contrib_row_indices = Vec::with_capacity(cdim);
+        for cj in 0..cdim {
+            contrib_row_indices.push(row_indices[ff.perm[node_nelim + cj]]);
+        }
+        contrib_blocks[snode_idx] = Some(ContribBlock {
+            row_indices: contrib_row_indices,
+            data: ff.contrib.clone(),
+            dim: cdim,
+            n_delayed: node_n_delayed,
+        });
+    }
+
+    for &global in &row_indices {
+        ws.row_map[global] = usize::MAX;
+    }
+
+    Ok(NodeFactors {
+        first_col: snode.first_col,
+        ncol: expanded_ncol,
+        nelim: node_nelim,
+        n_delayed_in: 0,
         nrow: actual_nrow,
         row_indices,
         frontal_factors: ff,
@@ -1457,10 +1675,12 @@ mod tests {
                 ..BunchKaufmanParams::default()
             },
             scaling: ScalingStrategy::InfNorm,
+            small_leaf: Default::default(),
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
             scaling: ScalingStrategy::Identity,
+            small_leaf: Default::default(),
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();

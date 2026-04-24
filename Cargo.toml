@@ -68,6 +68,22 @@ path = "src/bin/diag_dense_tail.rs"
 name = "diag_compress_profile"
 path = "src/bin/diag_compress_profile.rs"
 
+[[bin]]
+name = "diag_fill_tail"
+path = "src/bin/diag_fill_tail.rs"
+
+[[bin]]
+name = "diag_split_tail"
+path = "src/bin/diag_split_tail.rs"
+
+[[bin]]
+name = "diag_supernode_cost"
+path = "src/bin/diag_supernode_cost.rs"
+
+[[bin]]
+name = "diag_small_leaf"
+path = "src/bin/diag_small_leaf.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

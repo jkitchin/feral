@@ -762,3 +762,46 @@ session, not this one.
 **Evidence.** `dev/journal/2026-04-23-02.org` entry 22:50. Full
 bench output kept locally at `/tmp/feral-bench-cache-flip.txt`.
 143 tests pass after the revert.
+
+
+## 2026-04-24 — Phase 2.9 SmallLeafSubtree batching (naive specialisation)
+
+**Approach.** Precompute true-leaf supernode row-indices at symbolic
+time; at numeric time, dispatch grouped leaves to a specialised
+`factor_one_small_leaf` that skips `build_row_indices` and the
+empty children loop. Corresponds to Steps A–E of
+`dev/plans/phase-2.9-small-leaf-subtree.md` (minus the arena
+allocator in the original research sketch).
+
+**Outcome.** Correct (bit-exact parity on ACOPR30, CRESC100, HAIFAM,
+VESUVIO plus block-diagonal fixtures) but **essentially no speedup**.
+Geomean across 9 archetype matrices: ~1.00×. Worst case
+VESUVIO_0000 at 0.95× (below noise). Step F bar was 3×; we are at 1×.
+
+**Why rejected.** The per-front overhead on tiny fronts is *not*
+in `build_row_indices` or the children-loop dispatch. It is in:
+the `frontal_buf.resize(n*n, 0.0)` memset (separate call per
+member, not amortised across a group); the `factor_frontal_blocked`
+blocked kernel itself on ncol ≤ 8; and per-front BK bookkeeping.
+The naive "precompute rows + skip no-op loop" specialisation touches
+none of these. See `dev/journal/2026-04-24-01.org`.
+
+**Disposition.**
+
+- The gate and the specialised numeric path are *kept* in the source
+  tree, gated `Off` by default. They carry zero runtime cost when
+  disabled and will serve as scaffolding for Phase 2.9.2 (true
+  stack arena / shared allocation across group members).
+- The default flip (Step F of the plan) is *not performed*. Flipping
+  it now would cost nothing but gain nothing; keep the simpler
+  scalar path as the default.
+
+**Proper next step.** Phase 2.9.2: implement a shared-arena
+allocation strategy where all members of a leaf group write into
+one contiguous slice that is memset once per group. This requires
+`factor_frontal_blocked` to accept a backing `&mut [f64]`
+instead of owning a `SymmetricMatrix`. Non-trivial kernel
+refactor.
+
+**Evidence.** `src/bin/diag_small_leaf` output in journal
+`2026-04-24-01.org`; `tests/small_leaf_parity.rs` (7/7 pass).

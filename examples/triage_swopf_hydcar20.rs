@@ -100,6 +100,7 @@ fn run(stem: &str) {
         let np = feral::numeric::factorize::NumericParams {
             bk: params(threshold),
             scaling: strategy,
+            small_leaf: Default::default(),
         };
         let (fac, inertia) = factorize_multifrontal(&csc, &sym, &np).expect("factor");
         let x = solve_sparse_refined(&csc, &fac, &rhs).expect("solve");

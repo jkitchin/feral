@@ -1,5 +1,6 @@
 pub mod column_counts;
 pub mod ldlt_compress;
+pub mod small_leaf;
 pub mod supernode;
 
 use crate::error::FeralError;
@@ -10,6 +11,7 @@ use crate::sparse::csc::{CscMatrix, CscPattern};
 
 pub use column_counts::{column_counts, column_counts_gnp, total_factor_nnz};
 pub use ldlt_compress::{build_supermap, compress_pattern, expand_permutation, SuperMap};
+pub use small_leaf::{find_small_leaf_groups, SmallLeafGroup, SmallLeafParams};
 pub use supernode::{find_supernodes, OrderingPreprocess, Supernode, SupernodeParams};
 
 /// Which fill-reducing ordering to use in [`symbolic_factorize_with_method`].
@@ -146,6 +148,17 @@ pub struct SymbolicFactorization {
 
     /// Column counts of L.
     pub col_counts: Vec<usize>,
+
+    /// Phase 2.9 small-leaf-subtree groups (`dev/plans/phase-2.9-
+    /// small-leaf-subtree.md`). Populated unconditionally at
+    /// symbolic time; used at numeric time only when
+    /// `NumericParams::small_leaf == SmallLeafBatch::On`.
+    pub small_leaf_groups: Vec<SmallLeafGroup>,
+
+    /// For each supernode index, `Some(g)` if the supernode is a
+    /// member of `small_leaf_groups[g]`, else `None`. Length
+    /// `supernodes.len()`.
+    pub snode_group: Vec<Option<usize>>,
 
     /// Cached MC64 matching produced by the `LdltCompress`
     /// preprocessor. When `Some`, the numeric phase reuses it to
@@ -442,6 +455,13 @@ pub fn symbolic_factorize_with_method(
     // Step 7: Supernode detection on the postordered etree
     let supernodes = find_supernodes(&etree, &col_counts, snode_params);
 
+    // Step 7b: Phase 2.9 small-leaf grouping. Runs unconditionally;
+    // the groups are consumed at numeric time only when the
+    // `small_leaf` gate is `On`. O(n_snodes), no allocations beyond
+    // the groups themselves.
+    let (small_leaf_groups, snode_group) =
+        find_small_leaf_groups(&supernodes, &permuted_pattern, &snode_params.small_leaf);
+
     // Step 5: Compute contribution sizes and peak memory
     let contrib_sizes: Vec<usize> = supernodes.iter().map(|s| s.contrib_size()).collect();
 
@@ -461,6 +481,8 @@ pub fn symbolic_factorize_with_method(
         etree,
         permuted_pattern,
         col_counts,
+        small_leaf_groups,
+        snode_group,
         cached_mc64,
     })
 }

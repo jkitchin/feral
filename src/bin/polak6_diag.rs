@@ -98,6 +98,7 @@ fn try_factor_and_solve(
             ..BunchKaufmanParams::default()
         },
         scaling: scaling.clone(),
+        small_leaf: Default::default(),
     };
     let sym = match symbolic_factorize_with_method(csc, &snode_params, OrderingMethod::Amd) {
         Ok(s) => s,

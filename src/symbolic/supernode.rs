@@ -1,4 +1,5 @@
 use crate::ordering::elimination_tree::EliminationTree;
+use crate::symbolic::small_leaf::SmallLeafParams;
 
 /// Parameters controlling supernode amalgamation.
 ///
@@ -22,6 +23,15 @@ pub struct SupernodeParams {
     /// `ICNTL(12) = 2` for SYM=2. Opt-in while the corpus bench is
     /// collected; see `dev/plans/phase-2.6.5-ldlt-compressed-graph.md`.
     pub preprocess: OrderingPreprocess,
+
+    /// Small-leaf-subtree grouping parameters (Phase 2.9). Controls
+    /// which true-leaf supernodes are packed into batch groups for
+    /// the numeric small-leaf fast path. The detection runs
+    /// unconditionally at symbolic time; whether the numeric phase
+    /// uses the groups is gated by
+    /// [`crate::numeric::factorize::NumericParams::small_leaf`].
+    /// See `dev/research/phase-2.9-small-leaf-subtree.md`.
+    pub small_leaf: SmallLeafParams,
 }
 
 /// Ordering-stage preprocessing flag.
@@ -47,6 +57,7 @@ impl Default for SupernodeParams {
         Self {
             nemin: 32,
             preprocess: OrderingPreprocess::Auto,
+            small_leaf: SmallLeafParams::default(),
         }
     }
 }

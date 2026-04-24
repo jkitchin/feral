@@ -1,0 +1,98 @@
+#+TITLE: 2026-04-24-01 — Phase 2.9 SmallLeafSubtree implementation & negative result
+
+* 14:30 :phase-2.9:small-leaf:implementation:
+Landed Phase 2.9 SmallLeafSubtree batching behind a gate. Symbolic
+side: new ~SmallLeafGroup~ struct and ~find_small_leaf_groups~ pass
+qualifies true-leaf supernodes ~(children.is_empty() && ncol <= 8 &&
+nrow <= 16)~ and packs them into postorder-consecutive groups under a
+4096-f64 arena budget. Populated unconditionally on
+~SymbolicFactorization~; costs ~O(n)~ at symbolic time.
+
+Numeric side: ~factor_one_small_leaf~ — a leaf specialisation of
+~factor_one_supernode~ — takes pre-computed row indices from the
+group and skips ~build_row_indices~, ~build_seen~ scratch, and the
+(empty for leaves) extend-add loop. Everything else is byte-identical
+to the scalar path.
+
+Gate: ~NumericParams::small_leaf: SmallLeafBatch~ enum. Default ~Off~.
+
+* 14:55 :phase-2.9:parity:test:
+~tests/small_leaf_parity.rs~ (7 tests): bit-exact parity between Off
+and On across block-diagonal SPD fixtures plus ACOPR30_0067,
+CRESC100_0000, HAIFAM_0082, VESUVIO_0000. Plus a sanity assert
+that grouping actually kicks in on the archetype matrices
+(small_leaf_groups_nonempty_on_archetypes).
+
+All 7 pass. Full library test suite: 151 passed, 0 failed.
+
+* 15:10 :phase-2.9:bench:negative-result:
+~src/bin/diag_small_leaf~ (Step E) on the archetype corpus. Release
+build, min-of-5 per config, warm-up not counted.
+
+| matrix         | snodes | groups | grouped | off_us | on_us | speedup |
+|----------------+--------+--------+---------+--------+-------+---------|
+| ACOPR30_0067   |    341 |    105 |     235 |   1220 |  1221 |   1.00x |
+| ACOPR30_0000   |    177 |     12 |     164 |    479 |   457 |   1.05x |
+| CRESC100_0000  |    600 |    189 |     411 |   1237 |  1224 |   1.01x |
+| HAIFAM_0082    |    153 |      2 |     150 |    623 |   634 |   0.98x |
+| HAIFAM_0000    |    126 |     17 |     109 |    253 |   244 |   1.04x |
+| VESUVIO_0000   |   1123 |     98 |    1036 |   4046 |  4265 |   0.95x |
+| HAHN1_0000     |    243 |      6 |     242 |    338 |   334 |   1.01x |
+| BATCH_0000     |     86 |     12 |      74 |     67 |    67 |   1.00x |
+| AVION2_0000    |     65 |      7 |      58 |     28 |    28 |   1.00x |
+
+**Essentially neutral on every matrix.** Geomean speedup ≈ 1.00×,
+against Step F's 3× gate. Default stays Off.
+
+* 15:25 :phase-2.9:analysis:why-neutral:
+Hypothesis from the research note was that ~build_row_indices~ and
+per-front scratch allocation were the bottleneck on tiny fronts. The
+implemented specialisation:
+
+1. Replaces ~build_row_indices~ with symbolic-time precomputed rows —
+   saves the ~build_seen~ scan and sort.
+2. Skips the already-empty children loop.
+
+But both of these costs are trivial for true leaves. The dominant
+per-front costs are still present in ~factor_one_small_leaf~:
+
+- ~frontal_buf.clear() + resize(nrow^2, 0.0)~ per member — writes zeros
+  to the pooled ~ws.frontal_values~ each time. Separate memset per
+  member, not amortised across a group.
+- ~factor_frontal_blocked~ itself — the dense BK kernel. This is the
+  actual work; calling it N times on N tiny fronts has the same
+  cost whether or not they're "grouped" at this level.
+- ~row_map~ write/restore — already ~O(nrow)~ per member, unchanged.
+
+The plan's original sketch (leaf arena, members sharing a single
+backing allocation) is *not* what got implemented. Implementing that
+would require ~factor_frontal_blocked~ to accept a ~&mut [f64]~
+backing slice instead of owning a ~SymmetricMatrix~ — a non-trivial
+kernel refactor. Deferred.
+
+* 15:35 :phase-2.9:decision:
+Keep the gate. The symbolic pass and the specialised numeric path are
+correct, gated Off, and carry no runtime cost when disabled. They are
+a prerequisite for Phase 2.9.2/2.9.3 (the actual arena + in-place CB
+reuse). The negative result on speedup is the finding; it will be
+recorded in ~dev/tried-and-rejected.md~ so future work knows the naive
+"just precompute row indices" specialisation is not the bottleneck.
+
+* 15:40 :phase-2.9:next:
+The per-front overhead diagnosed in 2026-04-23 is *not* in
+~build_row_indices~. Candidates for the real bottleneck (to investigate
+in a follow-up phase):
+
+- The ~frontal_buf.resize(n*n, 0.0)~ memset cost on tiny fronts.
+  10× 32×32 memset ~= 10× 8KB = 80KB of zeroing per group; one group-
+  wide memset of 80KB is cache-friendlier.
+- The ~factor_frontal_blocked~ blocked kernel itself may be
+  sub-optimal at ncol ≤ 8 — the blocked path adds bookkeeping that a
+  straight-line unblocked path on ≤ 8 columns can skip.
+- Dispatch overhead into ~factor_frontal_blocked~ (BK pivot search
+  setup, inertia accumulator init, perm vector allocation).
+
+Phase 2.9.2 sketch: true stack-arena for the whole supernode
+postorder, MUMPS-style. Members of a leaf group share one allocation;
+members share ~ws.row_map~ write/restore across the group. Non-leaf
+supernodes bump-allocate from the same arena.

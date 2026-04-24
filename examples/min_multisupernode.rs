@@ -19,6 +19,7 @@ fn params() -> NumericParams {
             ..BunchKaufmanParams::default()
         },
         scaling: ScalingStrategy::Identity,
+        small_leaf: Default::default(),
     }
 }
 

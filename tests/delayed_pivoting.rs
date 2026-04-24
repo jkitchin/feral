@@ -350,6 +350,7 @@ fn delay_numeric_params() -> feral::numeric::factorize::NumericParams {
             ..BunchKaufmanParams::default()
         },
         scaling: feral::scaling::ScalingStrategy::Identity,
+        small_leaf: Default::default(),
     }
 }
 

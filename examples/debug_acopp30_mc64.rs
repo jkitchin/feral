@@ -104,6 +104,7 @@ fn run_one_path(
     let np = feral::numeric::factorize::NumericParams {
         bk: params.clone(),
         scaling: strategy,
+        small_leaf: Default::default(),
     };
 
     let (factors, inertia) = factorize_multifrontal(csc, &sym, &np).expect("factor");
@@ -373,6 +374,7 @@ fn main() {
         let np = feral::numeric::factorize::NumericParams {
             bk: params.clone(),
             scaling: ScalingStrategy::Mc64Symmetric,
+            small_leaf: Default::default(),
         };
         let (factors, _) = factorize_multifrontal(&csc, &sym, &np).expect("factor");
 

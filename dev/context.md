@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-24T01:24:28Z
+Generated: 2026-04-24T11:38:28Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,15 +59,16 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+2f482d7 phase-2.4.4: shape-based OrderingPreprocess::Auto default
+954f9e3 session 2026-04-23-02: rook closure + compression cache refactor
 eea9f19 phase-2.4.4: cache MC64 matching between symbolic compression and scaling
 d0a4c0b session: flip ldlt-compress default — rejected, geomean regresses
 332f23a diag: dense-tail investigation — LdltCompress is the lever
-7d3eed3 phase-2.4.3 step 8: validation report — rook ships as correctness, not perf
-28451b9 phase-2.4.3 step 7: CRESC100/GAUSS2 rook rescue KKT regression panel
 ```
 
 ## Test Status
 ```
+  --> examples/parity_config_sweep.rs:48:5
    |
 46 | struct PanelEntry {
    |        ---------- field in this struct
@@ -87,4 +88,3 @@ error: cannot construct `SymbolicFactorization` with struct literal syntax due t
     = note: ...and other private field `cached_mc64` that was not provided
 
 error: could not compile `feral` (example "profile_sparse_smallfront") due to 1 previous error
-warning: build failed, waiting for other jobs to finish...

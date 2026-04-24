@@ -57,6 +57,7 @@ fn configs() -> Vec<ConfigSpec> {
             params: SupernodeParams {
                 nemin: 32,
                 preprocess: OrderingPreprocess::None,
+                small_leaf: Default::default(),
             },
         },
         ConfigSpec {
@@ -64,6 +65,7 @@ fn configs() -> Vec<ConfigSpec> {
             params: SupernodeParams {
                 nemin: 5,
                 preprocess: OrderingPreprocess::None,
+                small_leaf: Default::default(),
             },
         },
         ConfigSpec {
@@ -71,6 +73,7 @@ fn configs() -> Vec<ConfigSpec> {
             params: SupernodeParams {
                 nemin: 1,
                 preprocess: OrderingPreprocess::None,
+                small_leaf: Default::default(),
             },
         },
         ConfigSpec {
@@ -78,6 +81,7 @@ fn configs() -> Vec<ConfigSpec> {
             params: SupernodeParams {
                 nemin: 32,
                 preprocess: OrderingPreprocess::LdltCompress,
+                small_leaf: Default::default(),
             },
         },
         ConfigSpec {
@@ -85,6 +89,7 @@ fn configs() -> Vec<ConfigSpec> {
             params: SupernodeParams {
                 nemin: 5,
                 preprocess: OrderingPreprocess::LdltCompress,
+                small_leaf: Default::default(),
             },
         },
     ]
