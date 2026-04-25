@@ -63,7 +63,7 @@ fn print_report(label: &str, n: usize, r: &SymbolicProfileReport) {
     );
     println!("{:<22}  {:>8}  {:>6}", "stage", "us", "%");
     let mut sorted: Vec<_> = r.stages.iter().collect();
-    sorted.sort_by(|a, b| b.us.cmp(&a.us));
+    sorted.sort_by_key(|s| std::cmp::Reverse(s.us));
     for s in sorted {
         println!("{:<22}  {:>8}  {:>5.1}%", s.name, s.us, s.pct_of_total);
     }
