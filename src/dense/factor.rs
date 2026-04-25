@@ -2,17 +2,16 @@ use crate::dense::rook::{rook_rescue, RookKind};
 use crate::error::FeralError;
 use crate::inertia::Inertia;
 
-// Phase 2.4.3: on aarch64 the rank-1 / rank-2 Schur-update inner loops
-// dispatch to the 4-way unrolled non-FMA pulp kernels in
-// `crate::dense::schur_kernel`. The non-FMA variants reproduce the
-// scalar loop's rounding bit-for-bit (two IEEE 754 roundings per
-// element) so inertia counts are identical to the scalar path —
-// verified by bit-exact unit tests across a length sweep and by the
-// full KKT bench. The ILP win comes from 4 independent accumulators
-// exposing parallelism to the M-series NEON pipes that the single-
-// accumulator autovectorized scalar loop could not. On other arches
-// the unchanged scalar fallback runs.
-#[cfg(target_arch = "aarch64")]
+// Phase 2.4.3: the rank-1 / rank-2 Schur-update inner loops dispatch to
+// the 4-way unrolled non-FMA pulp kernels in `crate::dense::schur_kernel`.
+// The non-FMA variants reproduce the scalar loop's rounding bit-for-bit
+// (two IEEE 754 roundings per element) so inertia counts are identical
+// to the scalar path — verified by bit-exact unit tests across a length
+// sweep and by the full KKT bench. The ILP win comes from 4 independent
+// accumulators exposing parallelism that the single-accumulator
+// autovectorized scalar loop could not. The kernel itself dispatches
+// per-arch (NEON on aarch64, AVX2 on x86_64-v3, scalar fallback
+// elsewhere); see commit 18194807.
 use crate::dense::schur_kernel;
 
 /// Phase 2.4.1c triage flag. When set to `true`, `factor_frontal_blocked`
