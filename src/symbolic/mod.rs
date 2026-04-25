@@ -1,5 +1,6 @@
 pub mod column_counts;
 pub mod ldlt_compress;
+pub mod profiler;
 pub mod small_leaf;
 pub mod supernode;
 
@@ -11,6 +12,7 @@ use crate::sparse::csc::{CscMatrix, CscPattern};
 
 pub use column_counts::{column_counts, column_counts_gnp, total_factor_nnz};
 pub use ldlt_compress::{build_supermap, compress_pattern, expand_permutation, SuperMap};
+pub use profiler::{record_stage, StagePct, StageTiming, SymbolicProfileReport, SymbolicProfiler};
 pub use small_leaf::{find_small_leaf_groups, SmallLeafGroup, SmallLeafParams};
 pub use supernode::{
     find_supernodes, AmalgamationStrategy, OrderingPreprocess, Supernode, SupernodeParams,
@@ -348,6 +350,13 @@ pub fn symbolic_factorize_with_method(
 ) -> Result<SymbolicFactorization, FeralError> {
     let n = matrix.n;
 
+    // Phase 2.13b per-stage profiler. Every timer is `Some` only when
+    // `snode_params.symbolic_profiler.is_some()`; the `None` path
+    // does no `Instant::now()` calls. See
+    // `dev/research/phase-2.13b-symbolic-profiler.md`.
+    let prof = snode_params.symbolic_profiler.as_ref();
+    let t_total = prof.map(|_| std::time::Instant::now());
+
     // β refactor: scaling is no longer computed here. It moved to
     // `factorize_multifrontal` so that `SymbolicFactorization`
     // depends only on the matrix pattern (not its values) and can
@@ -366,15 +375,25 @@ pub fn symbolic_factorize_with_method(
     // length `n` before handing it to the rest of the pipeline. See
     // `src/symbolic/ldlt_compress.rs` and
     // `dev/plans/phase-2.6.5-ldlt-compressed-graph.md`.
+    let t_sym = prof.map(|_| std::time::Instant::now());
     let full_pattern = matrix.symmetric_pattern();
+    if let Some(t) = t_sym {
+        record_stage(prof, "symmetric_pattern", t);
+    }
+
     let mut cached_mc64: Option<crate::scaling::Mc64Cache> = None;
     // Resolve `Auto` to `None` or `LdltCompress` before entering the
     // dispatch. Keeps the match below exhaustive on the two concrete
     // variants and keeps the dispatcher logic in one testable place.
+    let t_pick = prof.map(|_| std::time::Instant::now());
     let resolved_preprocess = match snode_params.preprocess {
         OrderingPreprocess::Auto => pick_ordering_preprocess(matrix),
         other => other,
     };
+    if let Some(t) = t_pick {
+        record_stage(prof, "pick_preprocess", t);
+    }
+    let t_ord = prof.map(|_| std::time::Instant::now());
     let amd_perm: Vec<usize> = match resolved_preprocess {
         OrderingPreprocess::None => run_external_ordering(&full_pattern, method)?,
         OrderingPreprocess::Auto => unreachable!("resolved above"),
@@ -399,33 +418,56 @@ pub fn symbolic_factorize_with_method(
             perm
         }
     };
+    if let Some(t) = t_ord {
+        record_stage(prof, "ordering", t);
+    }
 
     // Step 2: Build the etree on the permuted pattern. This etree is
     // intermediate — we use it to compute the postorder and then discard it.
     // The local name `amd_*` is kept from the AMD-only era to minimise the
     // diff; semantically these are now "ordering output" and "permuted
     // pattern from that ordering", regardless of method.
+    let t_perm1 = prof.map(|_| std::time::Instant::now());
     let amd_pattern = permute_pattern(&full_pattern, &amd_perm);
+    if let Some(t) = t_perm1 {
+        record_stage(prof, "permute1", t);
+    }
+    let t_etree0 = prof.map(|_| std::time::Instant::now());
     let amd_etree = EliminationTree::from_pattern(&amd_pattern);
+    if let Some(t) = t_etree0 {
+        record_stage(prof, "etree_initial", t);
+    }
 
     // Step 3: Postorder the etree (CHOLMOD-style composition).
     // Without this step, supernode amalgamation merges columns whose indices
     // are not consecutive in the column numbering, and downstream code that
     // assumes `first_col..first_col+ncol` is the eliminated set silently
     // factors the wrong columns. See dev/research/postorder-pipeline.md.
+    let t_post = prof.map(|_| std::time::Instant::now());
     let (post, post_inv) = postorder(&amd_etree);
+    if let Some(t) = t_post {
+        record_stage(prof, "postorder", t);
+    }
 
     // Step 4: Compose AMD perm with the postorder.
     //   final_perm[k] = amd_perm[post[k]]
     // The composition maps postorder position k to the original column.
+    let t_compose = prof.map(|_| std::time::Instant::now());
     let perm: Vec<usize> = post.iter().map(|&p| amd_perm[p]).collect();
     let mut perm_inv = vec![0usize; n];
     for (new, &old) in perm.iter().enumerate() {
         perm_inv[old] = new;
     }
+    if let Some(t) = t_compose {
+        record_stage(prof, "perm_compose", t);
+    }
 
     // Step 5: Re-permute the matrix on the composed permutation.
+    let t_perm2 = prof.map(|_| std::time::Instant::now());
     let permuted_pattern = permute_pattern(&full_pattern, &perm);
+    if let Some(t) = t_perm2 {
+        record_stage(prof, "permute2", t);
+    }
 
     // Step 5b: Build the final elimination tree by renumbering `amd_etree`
     // through the postorder. Postorder is a topological relabeling of the
@@ -435,6 +477,7 @@ pub fn symbolic_factorize_with_method(
     // final etree in O(n) instead of re-running `from_pattern` at
     // O(nnz · α(n)). A 3-run bench shows ~3% small-frontal p90 improvement
     // over the old two-from_pattern approach.
+    let t_relabel = prof.map(|_| std::time::Instant::now());
     let final_parent: Vec<Option<usize>> = (0..n)
         .map(|new| {
             let old_amd = post[new];
@@ -445,13 +488,20 @@ pub fn symbolic_factorize_with_method(
         parent: final_parent,
         n,
     };
+    if let Some(t) = t_relabel {
+        record_stage(prof, "etree_relabel", t);
+    }
 
     // Step 6: Column counts on the final pattern + etree.
     // Phase 2.5.1 switched this from the O(n²) elimination simulation
     // (still available as `column_counts`) to Gilbert-Ng-Peyton at
     // O(nnz(A) + n·α(n)). Bit-exact equivalence verified on 169585
     // KKT matrices — see `dev/validation/phase-2.5.1-*`.
+    let t_cc = prof.map(|_| std::time::Instant::now());
     let mut col_counts = column_counts_gnp(&permuted_pattern, &etree);
+    if let Some(t) = t_cc {
+        record_stage(prof, "col_counts", t);
+    }
 
     // Phase 2.12: optional SSIDS-style merge-biased postorder.
     // Predict desired merges using only the etree + column counts,
@@ -472,6 +522,7 @@ pub fn symbolic_factorize_with_method(
     let mut permuted_pattern = permuted_pattern;
     let mut perm = perm;
     let mut etree = etree;
+    let t_renumber = prof.map(|_| std::time::Instant::now());
     if matches!(
         snode_params.amalgamation_strategy,
         supernode::AmalgamationStrategy::Renumber
@@ -505,24 +556,45 @@ pub fn symbolic_factorize_with_method(
             col_counts = new_col_counts;
         }
     }
+    if let Some(t) = t_renumber {
+        record_stage(prof, "renumber", t);
+    }
     let factor_nnz = total_factor_nnz(&col_counts);
 
     // Step 7: Supernode detection on the postordered etree
+    let t_find = prof.map(|_| std::time::Instant::now());
     let supernodes = find_supernodes(&etree, &col_counts, snode_params);
+    if let Some(t) = t_find {
+        record_stage(prof, "find_supernodes", t);
+    }
 
     // Step 7b: Phase 2.9 small-leaf grouping. Runs unconditionally;
     // the groups are consumed at numeric time only when the
     // `small_leaf` gate is `On`. O(n_snodes), no allocations beyond
     // the groups themselves.
+    let t_slg = prof.map(|_| std::time::Instant::now());
     let (small_leaf_groups, snode_group) =
         find_small_leaf_groups(&supernodes, &permuted_pattern, &snode_params.small_leaf);
+    if let Some(t) = t_slg {
+        record_stage(prof, "small_leaf_groups", t);
+    }
 
     // Step 5: Compute contribution sizes and peak memory
+    let t_pk = prof.map(|_| std::time::Instant::now());
     let contrib_sizes: Vec<usize> = supernodes.iter().map(|s| s.contrib_size()).collect();
 
     let peak_contrib_bytes = compute_peak_contrib(&supernodes, &contrib_sizes);
+    if let Some(t) = t_pk {
+        record_stage(prof, "peak_contrib", t);
+    }
 
     let factor_slack = 1.2;
+
+    if let (Some(arc), Some(t)) = (prof, t_total) {
+        if let Ok(mut p) = arc.lock() {
+            p.set_total(t.elapsed().as_micros() as u64);
+        }
+    }
 
     Ok(SymbolicFactorization {
         n,

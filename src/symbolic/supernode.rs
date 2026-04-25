@@ -1,5 +1,7 @@
 use crate::ordering::elimination_tree::EliminationTree;
+use crate::symbolic::profiler::SymbolicProfiler;
 use crate::symbolic::small_leaf::SmallLeafParams;
+use std::sync::{Arc, Mutex};
 
 /// Parameters controlling supernode amalgamation.
 ///
@@ -50,6 +52,14 @@ pub struct SupernodeParams {
     /// then succeeds naturally for every desired merge. SSIDS
     /// `core_analyse.f90:644-685` is the reference.
     pub amalgamation_strategy: AmalgamationStrategy,
+
+    /// Phase 2.13b per-stage symbolic profiler. When `Some`, the
+    /// `symbolic_factorize_with_method` driver records elapsed time
+    /// per stage (ordering, etree, postorder, col_counts, renumber,
+    /// find_supernodes, etc.). When `None`, every timer is bypassed
+    /// — zero overhead. See
+    /// `dev/research/phase-2.13b-symbolic-profiler.md`.
+    pub symbolic_profiler: Option<Arc<Mutex<SymbolicProfiler>>>,
 }
 
 /// Phase 2.12 amalgamation strategy selector. See
@@ -98,6 +108,7 @@ impl Default for SupernodeParams {
             preprocess: OrderingPreprocess::Auto,
             small_leaf: SmallLeafParams::default(),
             amalgamation_strategy: AmalgamationStrategy::default(),
+            symbolic_profiler: None,
         }
     }
 }

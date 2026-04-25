@@ -59,6 +59,7 @@ fn configs() -> Vec<ConfigSpec> {
                 preprocess: OrderingPreprocess::None,
                 small_leaf: Default::default(),
                 amalgamation_strategy: Default::default(),
+                symbolic_profiler: None,
             },
         },
         ConfigSpec {
@@ -68,6 +69,7 @@ fn configs() -> Vec<ConfigSpec> {
                 preprocess: OrderingPreprocess::None,
                 small_leaf: Default::default(),
                 amalgamation_strategy: Default::default(),
+                symbolic_profiler: None,
             },
         },
         ConfigSpec {
@@ -77,6 +79,7 @@ fn configs() -> Vec<ConfigSpec> {
                 preprocess: OrderingPreprocess::None,
                 small_leaf: Default::default(),
                 amalgamation_strategy: Default::default(),
+                symbolic_profiler: None,
             },
         },
         ConfigSpec {
@@ -86,6 +89,7 @@ fn configs() -> Vec<ConfigSpec> {
                 preprocess: OrderingPreprocess::LdltCompress,
                 small_leaf: Default::default(),
                 amalgamation_strategy: Default::default(),
+                symbolic_profiler: None,
             },
         },
         ConfigSpec {
@@ -95,6 +99,7 @@ fn configs() -> Vec<ConfigSpec> {
                 preprocess: OrderingPreprocess::LdltCompress,
                 small_leaf: Default::default(),
                 amalgamation_strategy: Default::default(),
+                symbolic_profiler: None,
             },
         },
     ]

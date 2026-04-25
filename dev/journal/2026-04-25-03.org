@@ -239,3 +239,77 @@ to make this measurable directly.
 Throwaway diag binary at =src/bin/diag_kirby_muonsine.rs= (broken,
 not committed) was deleted after the agent finished — it had four
 type errors that the agent didn't catch before reporting.
+
+* 21:00 :phase-2.13b:profiler:symbolic:kirby2:amd:
+Phase 2.13b step 1: per-stage symbolic profiler implemented and
+ran on KIRBY2_0007 + MUONSINE_0000.
+
+New code:
+- =src/symbolic/profiler.rs= (SymbolicProfiler / StageTiming /
+  SymbolicProfileReport, parallel structure to numeric Profiler).
+- =SupernodeParams::symbolic_profiler: Option<Arc<Mutex<...>>>=
+  (zero overhead when None, identical pattern to NumericParams).
+- 14-stage instrumentation in =symbolic_factorize_with_method=:
+  symmetric_pattern, pick_preprocess, ordering, permute1,
+  etree_initial, postorder, perm_compose, permute2, etree_relabel,
+  col_counts, renumber, find_supernodes, small_leaf_groups,
+  peak_contrib.
+- 4-test smoke suite at =tests/symbolic_profiler.rs= (all pass).
+- Probe binary =src/bin/diag_symbolic_stages.rs= (5-run median).
+
+5-run median per-stage breakdown:
+
+#+begin_example
+KIRBY2_0007 (n=458): total=904µs, accounted=897µs (overhead 0.8%)
+  ordering          773µs  85.5%
+  renumber           46µs   5.1%
+  postorder          31µs   3.4%
+  col_counts         14µs   1.5%
+  permute1            7µs   0.8%
+  permute2            7µs   0.8%
+  find_supernodes     7µs   0.8%
+  small_leaf_groups   6µs   0.7%
+  symmetric_pattern   4µs   0.4%
+  etree_initial       2µs   0.2%
+  ...everything else  <1µs each
+
+MUONSINE_0000 (n=1537): total=939µs, accounted=932µs (overhead 0.7%)
+  ordering          440µs  46.9%
+  postorder         206µs  21.9%
+  renumber          159µs  16.9%
+  col_counts         57µs   6.1%
+  find_supernodes    19µs   2.0%
+  small_leaf_groups  14µs   1.5%
+  permute2           12µs   1.3%
+  permute1           11µs   1.2%
+  symmetric_pattern   9µs   1.0%
+  ...everything else  <4µs each
+#+end_example
+
+Conclusion: *AMD ordering is the dominant symbolic-phase cost on
+small-n KIRBY2 (85.5%) and the largest contributor on MUONSINE
+(46.9%).* The 924µs symbolic finding from the earlier diagnostic
+is roughly 770µs AMD + 130µs everything else.
+
+This refines Phase 2.13b's fix space considerably:
+- (i) symbolic caching across same-pattern factorizations remains
+  the biggest win — IPM iterations re-pay all 14 stages on every
+  call when only numeric values change.
+- (ii) "skip-on-small-n" cannot skip AMD; correctness depends on
+  the ordering. The targets for skip-style optimization are tiny
+  stages (postorder, find_supernodes) that aren't where the cost
+  is.
+- (iii) shrinking AMD's per-call constant is the realistic single-
+  stage win. =feral-amd= per-call setup (allocations, hash table
+  sizing for n=458) is the suspect; it deserves its own probe.
+
+Bench fairness question stays open: MUMPS's reported factor_us
+likely includes its own analyze. If MUMPS's AMD on n=458 is
+microseconds rather than 770µs, that's a feral-amd quality issue,
+not a fairness issue.
+
+Plan adjustment: Phase 2.13b step 2 ("confirm hypothesis") is
+done — the hypothesis is confirmed and refined to "AMD per-call
+setup cost dominates on small-n". Step 3 (bench methodology
+verification) and the fix decision (caching vs AMD constant
+shrink) remain.
