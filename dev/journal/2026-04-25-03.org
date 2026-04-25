@@ -86,3 +86,69 @@ Verification before commit:
 - =cargo fmt --check= : clean after fmt.
 
 Ready to commit.
+
+* 17:00 :phase-2.11:plan:
+Followed up Phase 2.10 by writing
+=dev/research/phase-2.11-small-front-amalgamation.md= and
+=dev/plans/phase-2.11-small-front-amalgamation.md=. Plan committed to
+Option B (flip =SmallLeafBatch::Off= → =On= as default) on the basis
+of a single comparison run of =diag_small_leaf_gate= showing
+24-27% reduction in =total_us= on ACOPR30_0067 and CRESC100_0000.
+
+* 17:30 :phase-2.11:diagnostic:
+Wrote =src/bin/diag_amalgamation.rs= to characterize the supernode
+tree shape on the tail. Result: every tail matrix is bushy. NELSON
+has *one* parent with 129 children and 0 other multi-child nodes;
+CRESC100 has 189 multi-child internal nodes (100% of internal
+nodes); ACOPR30 has 14 (13%); LAKES has 34 (97%); SWOPF has 6
+(85%). The "estimated sibling-merges blocked by the adjacency
+check at =supernode.rs:204-236=" equals leaf count on every tail
+matrix.
+
+Step A added counters to identify which =find_small_leaf_groups=
+breaker dominates: arena overflow vs nrow_max rejection vs
+non-qualifying snode. Result: every tail matrix flushes 100% of
+its groups due to *non-qualifying snodes interleaved between
+leaves in postorder*. arena_budget never fires (nrow_actual p95 is
+2-10 across tail). nrow_max rejection never fires (qualifying ==
+leaves on every matrix).
+
+* 18:00 :phase-2.11:rejected:
+Re-ran =diag_small_leaf_gate= 5× back-to-back to validate the
+24-27% gain before committing the default flip. Run-1 ratios match
+the original measurement (ACOPR30 = 0.755), but runs 2-5 show:
+
+| matrix       | run1  | run2  | run3  | run4  | run5  | mean  |
+|--------------+-------+-------+-------+-------+-------+-------|
+| ACOPR30_0067 | 0.755 | 1.052 | 0.920 | 0.959 | 0.983 | 0.94  |
+| CRESC100     | 0.964 | 1.031 | 1.025 | 1.007 | 0.998 | 1.005 |
+| NELSON       | 1.005 | 1.005 | 0.995 | 1.011 | 1.016 | 1.006 |
+
+Run 1 was a cold-cache outlier. The actual On-vs-Off effect is
+within ±5% noise, with mean ~1.00 on every matrix except a
+slightly favorable -6% on ACOPR30 (still within 1σ). CLAUDE.md
+hard rule: "When benchmark numbers are worse than the previous
+session: report this explicitly... Do not omit unfavorable
+comparisons."
+
+Reverted the default flip in =src/numeric/factorize.rs=. Recorded
+the rejection in =dev/tried-and-rejected.md=. Updated the
+=SmallLeafBatch= doc-comment to point future agents at the
+rejection record so this measurement is not repeated.
+
+* 18:15 :phase-2.11:disposition:
+Phase 2.11 lands as a *diagnostic + null result* phase:
+- Diagnostic binaries kept (=diag_amalgamation=,
+  =diag_small_leaf_gate=). They will be the noise-floor probes
+  for any future amalgamation work.
+- Research note + plan kept; they document the bushy-tree shape
+  and the rejection criterion.
+- =SmallLeafBatch= default unchanged; doc-comment now records the
+  null result.
+
+The actionable next step is =Phase 2.12= (Option A from the
+research note): SSIDS-style column renumbering during
+=find_supernodes= amalgamation. The diagnostic shows this is the
+right lever: 128-410 sibling-merges per tail matrix are blocked by
+the adjacency check, and that's a structural fix the Phase 2.9
+small_leaf path cannot reach.

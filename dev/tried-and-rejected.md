@@ -858,3 +858,71 @@ kernel. Investigate:
 
 **Evidence.** `dev/journal/2026-04-24-01.org` entry 16:45,
 `src/bin/diag_leaf_profile` output with sub-phase section.
+
+## 2026-04-25 — Phase 2.11 Option B: SmallLeafBatch default flip
+(false-positive single-run measurement)
+
+**What we tried.** Phase 2.11 plan
+(`dev/plans/phase-2.11-small-front-amalgamation.md`) — Option B:
+flip the default of `SmallLeafBatch::Off` → `On`. The Phase 2.10
+profiler (`src/bin/profile_supernode_distribution.rs`) had been
+measuring the `Off` path; comparing `Off` vs `On` on tail
+matrices on a *single 5-iteration warmup-then-median run* of
+`src/bin/diag_small_leaf_gate.rs` showed:
+
+| matrix         | Off total | On total | ratio |
+|----------------|----------:|---------:|-------|
+| ACOPR30_0067   |      2045 |     1547 | 0.756 |
+| CRESC100_0000  |      1945 |     1422 | 0.731 |
+| LAKES_0000     |       493 |      437 | 0.886 |
+| NELSON_0000    |       199 |      189 | 0.950 |
+
+I flipped the default and ran the full test suite (158 tests
+passed; no parity regression). About to commit.
+
+**Result.** Re-ran `diag_small_leaf_gate` 5 times back-to-back:
+
+| matrix         | run-1 | run-2 | run-3 | run-4 | run-5 | mean  |
+|----------------|------:|------:|------:|------:|------:|------:|
+| ACOPR30_0067   | 0.755 | 1.052 | 0.920 | 0.959 | 0.983 | 0.94  |
+| CRESC100_0000  | 0.964 | 1.031 | 1.025 | 1.007 | 0.998 | 1.005 |
+| NELSON_0000    | 1.005 | 1.005 | 0.995 | 1.011 | 1.016 | 1.006 |
+
+Run 1's apparent 25-27% gain was a cold-cache outlier; CRESC100
+and NELSON show no effect at all; ACOPR30 fluctuates by ±5% with
+mean 0.94 — within noise.
+
+**Why rejected.** The Phase 2.9 small-leaf fast path delivers a
+real per-leaf saving (skips `build_row_indices`, no extend-add),
+but on the tiny-IPM tail it does not measurably move `total_us`
+because the per-leaf savings are dwarfed by the per-front
+allocator/setup overhead the path *cannot* avoid (frontal
+allocation, scaling pivot order, contribution-block deposit). The
+gate flip moves the noise floor by ~1% mean, not by the 30% bar
+set in `dev/plans/phase-2.11-small-front-amalgamation.md` §8.
+
+**Disposition.**
+
+- `SmallLeafBatch::Off` remains the default. Doc-comment updated
+  to record this rejection so a future agent does not re-run the
+  same measurement and reach the same false-positive conclusion.
+- The diagnostics produced this session are *kept* in tree:
+  - `src/bin/diag_amalgamation.rs` — supernode-tree shape +
+    small_leaf-group breakdown counters. Reusable for any future
+    amalgamation work.
+  - `src/bin/diag_small_leaf_gate.rs` — Off/On A/B harness.
+    Useful as a noise-floor probe before any future gate flip.
+- Phase 2.11 plan and research note remain in tree for context.
+
+**Proper next direction.** The diagnostic data is unambiguous:
+the bushy elimination tree on tiny-IPM KKTs (NELSON: 1 parent
+with 129 children; CRESC100: 100% multi-child internal nodes)
+blocks 128-410 sibling-merges per matrix via the adjacency check
+at `src/symbolic/supernode.rs:204-236`. The fix is Option A from
+the Phase 2.11 research note — SSIDS-style column renumbering
+during amalgamation (`core_analyse.f90:644-685`). This is a real
+refactor (touches the symbolic pipeline's perm composition) and
+is not Phase 2.11 scope.
+
+**Evidence.** `dev/journal/2026-04-25-03.org` Phase 2.11
+section, `src/bin/diag_small_leaf_gate.rs` 5-run output above.

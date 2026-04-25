@@ -52,9 +52,13 @@ pub struct NumericParams {
 /// supernode. When `On`, leaf supernodes that were grouped at
 /// symbolic time are routed through the batched path.
 ///
-/// Default is `Off` while parity is being verified. Flip in
-/// `dev/decisions.md` once the bench shows the expected long-tail
-/// win with no bulk regression.
+/// Default is `Off`. Phase 2.11 attempted a default flip after a
+/// single-run measurement appeared to show 24-27% reduction on the
+/// tiny-IPM tail; a 5-run repeat showed the effect was within
+/// ~5% measurement noise (see `dev/tried-and-rejected.md` Phase
+/// 2.11). The flip was reverted; the tail gap is structural
+/// (bushy elimination tree) and needs a column-renumbering
+/// refactor (see `dev/plans/phase-2.12-*` once written).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SmallLeafBatch {
     #[default]
