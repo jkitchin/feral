@@ -133,18 +133,65 @@ either:
    small-n matrices do not pay the ~830 µs MC64 cost when AMD on
    the uncompressed pattern would only have cost ~25 µs.
 
-## 2.13c — Tighten LdltCompress gate (open)
+## 2.13c — Tighten LdltCompress gate (paused — data overturns the framing)
 
-Open follow-up:
+**Status:** paused 2026-04-25. The cost/benefit probe
+(`src/bin/diag_compress_costbenefit.rs`) shows the proposed change
+would regress the matrices it was meant to fix.
 
-- (a) Probe ordering-stage cost on the no-compress path for the
-  same 4 matrices to measure the AMD-only cost being avoided
-  vs the MC64 cost being paid.
-- (b) Sweep a wider slice (KIRBY2 + small CUTEst Hessians) to
-  identify the n threshold below which `LdltCompress` is net
-  negative.
-- (c) Raise `MIN_N_FOR_COMPRESSION` from 128 to a calibrated
-  value, or replace the size floor with an MC64 cost cap.
+5-run-median total wall-time (symbolic + numeric), in microseconds:
+
+| matrix         |   n  | None | Compress | delta | verdict |
+|----------------|-----:|-----:|---------:|------:|---------|
+| KIRBY2_0007    |  458 | 1209 |     1045 |  -164 | compress wins |
+| MUONSINE_0000  | 1537 | 2093 |     1354 |  -739 | compress wins |
+| ACOPR30_0067   |  564 |  594 |      810 |  +216 | None wins |
+| CRESC100_0000  |  806 |  642 |      851 |  +209 | None wins |
+| LAKES_0000     |  324 |  247 |      258 |   +11 | neutral |
+| NELSON_0000    |  387 |  294 |      298 |    +4 | neutral |
+| SWOPF_0000     |  175 |  157 |      155 |    -2 | compress |
+
+The step-5 sub-stage probe correctly identified that 800 µs of the
+KIRBY2 `ordering` stage is MC64. What it missed is that the
+*numeric* stage on the non-compressed ordering balloons by an
+amount that cancels the MC64 cost: 1028 µs → 245 µs on KIRBY2,
+1612 µs → 619 µs on MUONSINE. Compression is *already* the
+better choice for those matrices; the 9.5× MUMPS headline reflects
+that.
+
+The actual gate flaw is a different shape:
+
+- Current predicate (`n >= 128 && low_degree_cols/n >= 0.30`) is
+  *necessary* — catches KIRBY2, MUONSINE, SWOPF wins.
+- Not *sufficient* — mis-fires on ACOPR30, CRESC100 where
+  compression triggers but does not pay back in numeric savings.
+- Tightening on `n` is wrong (would lose KIRBY2 and MUONSINE).
+
+The right discriminator is something the current predicate does
+not compute (probably `ncmp/n` after the compression, or a finer
+structural test). But:
+
+- ACOPR30/CRESC100 are *not* in the corpus Top-10 worst-ratio
+  under the current Phase-2.12+2.13a defaults. Phase 2.12 already
+  cut their factor 60-67% via Renumber.
+- The absolute saving from fixing the mis-fire is ~200 µs per
+  matrix.
+
+The honest conclusion: Phase 2.13c as framed is rejected. The
+corpus tail is not a gate-design problem. KIRBY2 will continue to
+show ~8-9× MUMPS per single factor; the workload-realistic answer
+is **symbolic caching** so MC64's 800 µs amortizes to ~25 µs per
+IPM iteration. That is now the recommended next direction.
+
+If a future session wants to revisit a finer gate, the open
+follow-up is:
+
+- (a) Extend the cost/benefit probe to print `ncmp/n` for each
+  matrix so the structural difference between compress-wins and
+  compress-loses cases is visible.
+- (b) Find a cheap predicate that gates ACOPR30/CRESC100 out
+  without losing KIRBY2/MUONSINE.
+- (c) Only then change `pick_ordering_preprocess`.
 
 ## Out of scope
 

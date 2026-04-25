@@ -964,3 +964,66 @@ dispatched `Auto` strategy that picks per matrix.
 **Evidence.** `/tmp/feral_bench_adjacency.txt`,
 `/tmp/feral_bench_renumber.txt` (corpus bench full output);
 `dev/journal/2026-04-25-03.org` Phase 2.12 entries.
+
+---
+
+## 2026-04-25 — Tightening LdltCompress gate by raising `MIN_N_FOR_COMPRESSION`
+
+**Phase.** 2.13c (gate-tightening attempt to fix the corpus tail).
+
+**What was tried.** Phase 2.13b's symbolic profiler showed the
+`ordering` stage was 85.5% of symbolic time on KIRBY2_0007 (770 µs out
+of 924 µs). Phase 2.13b step 5 (`src/bin/diag_amd_substages.rs`)
+attributed that 770 µs almost entirely to MC64 inside the
+`OrderingPreprocess::LdltCompress` branch — *not* to AMD itself, which
+is only 20 µs on n=458. The proposed fix was to bump
+`MIN_N_FOR_COMPRESSION` (currently 128) so KIRBY2-class small-n
+matrices skip MC64 and pay the cheaper no-compress AMD path instead,
+projected to collapse KIRBY2's ordering stage from 878 µs to ~25 µs.
+
+Before changing the gate, ran the cost/benefit probe
+(`src/bin/diag_compress_costbenefit.rs`) to verify the MC64 savings
+weren't offset elsewhere.
+
+**Why rejected.** The probe revealed that compression's MC64 cost is
+*paid back* in the numeric phase. 5-run-median wall-clock total
+(symbolic + numeric), in microseconds:
+
+| matrix         |   n  | None | Compress | delta | verdict |
+|----------------|-----:|-----:|---------:|------:|---------|
+| KIRBY2_0007    |  458 | 1209 |     1045 |  -164 | compress wins |
+| MUONSINE_0000  | 1537 | 2093 |     1354 |  -739 | compress wins |
+| ACOPR30_0067   |  564 |  594 |      810 |  +216 | None wins |
+| CRESC100_0000  |  806 |  642 |      851 |  +209 | None wins |
+| LAKES_0000     |  324 |  247 |      258 |   +11 | neutral |
+| NELSON_0000    |  387 |  294 |      298 |    +4 | neutral |
+| SWOPF_0000     |  175 |  157 |      155 |    -2 | compress |
+
+KIRBY2's numeric stage drops 1028 µs → 245 µs under compression, and
+MUONSINE's drops 1612 µs → 619 µs. The MC64 cost is essentially
+covered by numeric savings on those matrices. The 9.5× MUMPS headline
+on KIRBY2 already reflects the better of the two preprocesses.
+
+The actual gate failures are ACOPR30/CRESC100 (compression triggers
+but does not pay back numerically). Tightening on `n` would *regress*
+KIRBY2 and MUONSINE while marginally fixing ACOPR30/CRESC100 — and
+ACOPR30/CRESC100 are no longer in the corpus Top-10 worst-ratio
+(Phase 2.12 already cut their factor 60-67% via Renumber). Net
+negative.
+
+**Disposition.** Do not raise `MIN_N_FOR_COMPRESSION`. Do not gate
+LdltCompress on `n` alone. Plan section 2.13c paused. The right
+discriminator (if any) needs to identify the
+ACOPR30/CRESC100-vs-KIRBY2/MUONSINE structural difference, not size.
+Probe extension `(a)`–`(c)` recorded in
+`dev/plans/phase-2.13-tail-diagnostic.md` for whoever revisits.
+
+**Lesson.** The Phase 2.13b sub-stage probe correctly identified MC64
+as the dominant *symbolic* sub-stage but did not look at the *numeric*
+phase. Conclusions from a per-stage profile should be cross-checked
+against an end-to-end cost/benefit measurement before touching a gate.
+
+**Evidence.** `dev/journal/2026-04-25-03.org` 24:30 entry;
+`src/bin/diag_amd_substages.rs` and
+`src/bin/diag_compress_costbenefit.rs` outputs.
+
