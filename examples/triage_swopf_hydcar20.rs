@@ -101,6 +101,7 @@ fn run(stem: &str) {
             bk: params(threshold),
             scaling: strategy,
             small_leaf: Default::default(),
+            profiler: None,
         };
         let (fac, inertia) = factorize_multifrontal(&csc, &sym, &np).expect("factor");
         let x = solve_sparse_refined(&csc, &fac, &rhs).expect("solve");

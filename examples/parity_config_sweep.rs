@@ -109,6 +109,7 @@ fn run_matrix(
         },
         scaling: strategy,
         small_leaf: Default::default(),
+        profiler: None,
     };
     let (fac, feral_inertia) = factorize_multifrontal(&csc, &sym, &params).ok()?;
     let x = solve_sparse_refined(&csc, &fac, &rhs).ok()?;

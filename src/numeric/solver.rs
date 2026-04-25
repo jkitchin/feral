@@ -345,6 +345,7 @@ mod tests {
             bk: BunchKaufmanParams::default(),
             scaling,
             small_leaf: Default::default(),
+            profiler: None,
         };
         Solver::with_params(np, SupernodeParams::default())
     }

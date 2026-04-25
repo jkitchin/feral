@@ -20,6 +20,7 @@ fn params() -> NumericParams {
         },
         scaling: ScalingStrategy::Identity,
         small_leaf: Default::default(),
+        profiler: None,
     }
 }
 

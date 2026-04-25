@@ -351,6 +351,7 @@ fn delay_numeric_params() -> feral::numeric::factorize::NumericParams {
         },
         scaling: feral::scaling::ScalingStrategy::Identity,
         small_leaf: feral::numeric::factorize::SmallLeafBatch::default(),
+        profiler: None,
     }
 }
 

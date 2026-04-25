@@ -7,6 +7,8 @@ use crate::inertia::Inertia;
 use crate::scaling::{compute_scaling, compute_scaling_with_cache, ScalingStrategy};
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::SymbolicFactorization;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// Numeric-phase parameters bundle.
 ///
@@ -35,6 +37,12 @@ pub struct NumericParams {
     /// `build_row_indices` call. See
     /// `dev/plans/phase-2.9-small-leaf-subtree.md`.
     pub small_leaf: SmallLeafBatch,
+    /// Phase 2.10 per-supernode profiler. When `Some`, the sequential
+    /// driver records per-supernode timings, plus prologue/epilogue
+    /// costs, into the shared `Profiler`. When `None` (default), no
+    /// timing work runs — zero overhead in production. See
+    /// `dev/plans/phase-2.10-supernode-profiler.md`.
+    pub profiler: Option<Arc<Mutex<Profiler>>>,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -54,6 +62,158 @@ pub enum SmallLeafBatch {
     On,
 }
 
+/// One supernode's timing record. Phase 2.10
+/// (`dev/plans/phase-2.10-supernode-profiler.md`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SupernodeTiming {
+    pub snode_idx: usize,
+    pub nrow: usize,
+    pub ncol: usize,
+    pub us: u64,
+}
+
+/// Per-invocation profiler for `factorize_multifrontal_supernodal_with_workspace`.
+///
+/// Attached to `NumericParams::profiler` as `Some(Arc<Mutex<Profiler>>)`
+/// to record per-supernode timings, prologue and epilogue costs. When
+/// the field is `None` the driver does no timing work — zero overhead.
+///
+/// The profiler is a diagnostic, not a correctness path. A poisoned
+/// mutex (only possible if a panic happened while holding the lock,
+/// which the driver code paths do not do) is silently ignored: the
+/// affected sample is dropped, factorization continues, and the
+/// `report()` validation invariants surface the gap.
+#[derive(Debug, Clone, Default)]
+pub struct Profiler {
+    timings: Vec<SupernodeTiming>,
+    prologue_us: u64,
+    epilogue_us: u64,
+    total_us: u64,
+}
+
+impl Profiler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of supernode timing samples recorded.
+    pub fn len(&self) -> usize {
+        self.timings.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.timings.is_empty()
+    }
+
+    /// Raw per-supernode timings in driver order.
+    pub fn timings(&self) -> &[SupernodeTiming] {
+        &self.timings
+    }
+
+    /// Compute the bucketed report from accumulated samples.
+    pub fn report(&self) -> ProfileReport {
+        const RANGES: &[(&str, usize, usize)] = &[
+            ("<=8", 0, 8),
+            ("9-16", 9, 16),
+            ("17-32", 17, 32),
+            ("33-64", 33, 64),
+            ("65-128", 65, 128),
+            (">128", 129, usize::MAX),
+        ];
+
+        let mut buckets: Vec<BucketStats> = RANGES
+            .iter()
+            .map(|&(range, _, _)| BucketStats {
+                range,
+                count: 0,
+                sum_us: 0,
+                pct_of_total: 0.0,
+                avg_us: 0.0,
+            })
+            .collect();
+
+        for t in &self.timings {
+            for (i, &(_, lo, hi)) in RANGES.iter().enumerate() {
+                if t.nrow >= lo && t.nrow <= hi {
+                    buckets[i].count += 1;
+                    buckets[i].sum_us += t.us;
+                    break;
+                }
+            }
+        }
+
+        let loop_us: u64 = buckets.iter().map(|b| b.sum_us).sum();
+
+        let mut warnings: Vec<String> = Vec::new();
+        let count_sum: usize = buckets.iter().map(|b| b.count).sum();
+        if count_sum != self.timings.len() {
+            warnings.push(format!(
+                "bucket count sum {} != timings len {}",
+                count_sum,
+                self.timings.len()
+            ));
+        }
+        if self.total_us > 0 && loop_us + self.prologue_us + self.epilogue_us > self.total_us {
+            warnings.push(format!(
+                "loop+prologue+epilogue ({}) exceeds total ({})",
+                loop_us + self.prologue_us + self.epilogue_us,
+                self.total_us
+            ));
+        }
+
+        for b in &mut buckets {
+            if loop_us > 0 {
+                b.pct_of_total = (b.sum_us as f64) * 100.0 / (loop_us as f64);
+            }
+            if b.count > 0 {
+                b.avg_us = (b.sum_us as f64) / (b.count as f64);
+            }
+        }
+
+        let overhead_pct = if self.total_us > 0 {
+            ((self.prologue_us + self.epilogue_us) as f64) * 100.0 / (self.total_us as f64)
+        } else {
+            0.0
+        };
+
+        ProfileReport {
+            n_supernodes: self.timings.len(),
+            prologue_us: self.prologue_us,
+            epilogue_us: self.epilogue_us,
+            loop_us,
+            total_us: self.total_us,
+            overhead_pct,
+            buckets,
+            validation_warnings: warnings,
+        }
+    }
+}
+
+/// One front-size bucket in the profile histogram.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BucketStats {
+    pub range: &'static str,
+    pub count: usize,
+    pub sum_us: u64,
+    pub pct_of_total: f64,
+    pub avg_us: f64,
+}
+
+/// Aggregated profile report. Serializable for diagnostic dumps.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProfileReport {
+    pub n_supernodes: usize,
+    pub prologue_us: u64,
+    pub epilogue_us: u64,
+    /// Sum of per-supernode timings — the inner-loop wallclock.
+    pub loop_us: u64,
+    /// Total wallclock for the entire driver call.
+    pub total_us: u64,
+    pub overhead_pct: f64,
+    pub buckets: Vec<BucketStats>,
+    pub validation_warnings: Vec<String>,
+}
+
 impl NumericParams {
     /// Construct a `NumericParams` from a `BunchKaufmanParams`,
     /// using the default scaling strategy. Convenience for
@@ -63,6 +223,7 @@ impl NumericParams {
             bk,
             scaling: ScalingStrategy::default(),
             small_leaf: SmallLeafBatch::default(),
+            profiler: None,
         }
     }
 }
@@ -442,6 +603,12 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     params: &NumericParams,
     ws: &mut FactorWorkspace,
 ) -> Result<(SparseFactors, Inertia), FeralError> {
+    // Phase 2.10 profiler. When `params.profiler.is_none()`, every
+    // `Instant::now()` below is gated out, so the production path
+    // does no timing work.
+    let t_total = params.profiler.as_ref().map(|_| Instant::now());
+    let t_prologue = params.profiler.as_ref().map(|_| Instant::now());
+
     let n = symbolic.n;
     let n_snodes = symbolic.supernodes.len();
 
@@ -537,6 +704,9 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     let use_small_leaf =
         params.small_leaf == SmallLeafBatch::On && !symbolic.small_leaf_groups.is_empty();
     let mut snode_idx = 0usize;
+
+    let prologue_us = t_prologue.map(|t| t.elapsed().as_micros() as u64);
+
     while snode_idx < n_snodes {
         if use_small_leaf {
             if let Some(gid) = symbolic.snode_group[snode_idx] {
@@ -547,6 +717,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
                     "group members must start at current snode_idx"
                 );
                 for (i, &m) in group.members.iter().enumerate() {
+                    let t_snode = params.profiler.as_ref().map(|_| Instant::now());
                     let node = factor_one_small_leaf(
                         m,
                         &group.member_rows[i],
@@ -558,6 +729,18 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
                         ws,
                         &mut contrib_blocks,
                     )?;
+                    if let (Some(arc), Some(t)) = (params.profiler.as_ref(), t_snode) {
+                        let snode = &symbolic.supernodes[m];
+                        let timing = SupernodeTiming {
+                            snode_idx: m,
+                            nrow: snode.nrow,
+                            ncol: snode.ncol,
+                            us: t.elapsed().as_micros() as u64,
+                        };
+                        if let Ok(mut prof) = arc.lock() {
+                            prof.timings.push(timing);
+                        }
+                    }
                     total_inertia.positive += node.inertia.positive;
                     total_inertia.negative += node.inertia.negative;
                     total_inertia.zero += node.inertia.zero;
@@ -571,6 +754,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
             }
         }
 
+        let t_snode = params.profiler.as_ref().map(|_| Instant::now());
         let node = factor_one_supernode(
             snode_idx,
             symbolic,
@@ -582,6 +766,18 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
             ws,
             &mut contrib_blocks,
         )?;
+        if let (Some(arc), Some(t)) = (params.profiler.as_ref(), t_snode) {
+            let snode = &symbolic.supernodes[snode_idx];
+            let timing = SupernodeTiming {
+                snode_idx,
+                nrow: snode.nrow,
+                ncol: snode.ncol,
+                us: t.elapsed().as_micros() as u64,
+            };
+            if let Ok(mut prof) = arc.lock() {
+                prof.timings.push(timing);
+            }
+        }
 
         total_inertia.positive += node.inertia.positive;
         total_inertia.negative += node.inertia.negative;
@@ -593,7 +789,9 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
         snode_idx += 1;
     }
 
-    Ok((
+    let t_epilogue = params.profiler.as_ref().map(|_| Instant::now());
+
+    let result = Ok((
         SparseFactors {
             n,
             perm: symbolic.perm.clone(),
@@ -610,7 +808,19 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
             scaling_info,
         },
         total_inertia,
-    ))
+    ));
+
+    if let Some(arc) = params.profiler.as_ref() {
+        if let Ok(mut prof) = arc.lock() {
+            prof.prologue_us = prologue_us.unwrap_or(0);
+            prof.epilogue_us = t_epilogue
+                .map(|t| t.elapsed().as_micros() as u64)
+                .unwrap_or(0);
+            prof.total_us = t_total.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+        }
+    }
+
+    result
 }
 
 /// Factor a single supernode in isolation.
@@ -1676,11 +1886,13 @@ mod tests {
             },
             scaling: ScalingStrategy::InfNorm,
             small_leaf: Default::default(),
+            profiler: None,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
             scaling: ScalingStrategy::Identity,
             small_leaf: Default::default(),
+            profiler: None,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();

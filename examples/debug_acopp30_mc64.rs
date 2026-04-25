@@ -105,6 +105,7 @@ fn run_one_path(
         bk: params.clone(),
         scaling: strategy,
         small_leaf: Default::default(),
+        profiler: None,
     };
 
     let (factors, inertia) = factorize_multifrontal(csc, &sym, &np).expect("factor");
@@ -375,6 +376,7 @@ fn main() {
             bk: params.clone(),
             scaling: ScalingStrategy::Mc64Symmetric,
             small_leaf: Default::default(),
+            profiler: None,
         };
         let (factors, _) = factorize_multifrontal(&csc, &sym, &np).expect("factor");
 

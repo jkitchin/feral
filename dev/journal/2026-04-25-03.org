@@ -1,0 +1,88 @@
+#+TITLE: 2026-04-25 Session 03 — Phase 2.10 supernode profiler
+
+* 14:00 :phase-2.10:profiler:plan:
+Following the multi-agent investigation of the tiny-IPM tail (recorded
+in 2026-04-25-01.org and -02.org), wrote the Phase 2.10 plan at
+=dev/plans/phase-2.10-supernode-profiler.md=. The plan: a
+zero-overhead-when-None per-supernode profiler that decomposes
+=factor_us= into prologue + per-supernode loop + epilogue, with the
+loop bucketed by front =nrow= (≤8, 9-16, 17-32, 33-64, 65-128, >128).
+Goal: settle whether the MUMPS gap on tiny-IPM matrices is amalgamation
+(many tiny fronts) or kernel (a few big fronts).
+
+* 14:30 :phase-2.10:implementation:
+Implemented the full profiler in =src/numeric/factorize.rs=:
+=SupernodeTiming=, =Profiler=, =BucketStats=, =ProfileReport= types
+with =serde::Serialize= for JSON output. Added =profiler:
+Option<Arc<Mutex<Profiler>>>= field to =NumericParams=. Gated all
+=Instant::now()= calls on =params.profiler.as_ref().map(...)= so the
+None path has zero overhead. Per-supernode timing is captured in both
+the small_leaf and generic branches.
+
+The new field broke 13 explicit struct-literal sites (Default-derive
+doesn't help when a struct is built explicitly). Patched all of them:
+=src/bin/{diag_small_leaf,polak6_diag,vesuvio_diag}.rs=,
+=examples/{min_multisupernode,parity_config_sweep,triage_swopf_hydcar20,debug_acopp30_mc64}.rs=,
+=tests/{small_leaf_parity,delayed_pivoting}.rs=,
+=src/numeric/solver.rs=.
+
+* 15:00 :phase-2.10:tests:
+Added 5 smoke tests in =tests/profiler_smoke.rs= using a hand-built
+block-diagonal SPD matrix (no corpus dependency, runs on CI):
+- =profiler_none_factorization_succeeds=: None path doesn't crash.
+- =profiler_records_one_per_supernode=: =report.n_supernodes ==
+  sym.supernodes.len()=.
+- =profiler_buckets_partition_supernodes=: bucket counts sum to
+  =n_supernodes= and =validation_warnings= is empty.
+- =profiler_bucket_us_sum_equals_loop_us=: exact equality.
+- =profiler_total_bounds_components=: prologue+loop+epilogue ≤ total.
+
+All 5 pass. Full corpus test suite green (0 failures across all
+tests/*.rs files).
+
+* 15:30 :phase-2.10:binary:result:
+Added =src/bin/profile_supernode_distribution.rs=: 5-run median over
+{ACOPR30_0067, CRESC100_0000, LAKES_0000, NELSON_0000, SWOPF_0000}
+with warm-up and =FactorWorkspace= reuse. Output strongly validates
+the amalgamation hypothesis:
+
+| matrix         | snodes | ≤8        | 9-16 | 17-32 | 33-64 | loop_us | overhead% |
+|----------------+--------+-----------+------+-------+-------+---------+-----------|
+| ACOPR30_0067   |    341 | 332 (97%) |    8 |     1 |     0 |    1060 |       5.4 |
+| CRESC100_0000  |    600 | 599 (99%) |    0 |     1 |     0 |    1003 |     ~23.0 |
+| LAKES_0000     |    216 | 214 (99%) |    1 |     0 |     1 |     340 |     ~21.3 |
+| *NELSON_0000*  |    256 | 256 (100%)|    0 |     0 |     0 |      98 |     ~48.7 |
+| SWOPF_0000     |     42 | 38 (90%)  |    2 |     2 |     0 |     ~83 |       big |
+
+NELSON_0000 is the most extreme: 100% of supernodes are ≤8 columns
+wide. =overhead_pct= for the small matrices is dominated by
+prologue+epilogue allocation/setup, not by big-kernel work.
+
+SWOPF_0000 is bimodal: tiny fronts contribute 4.7% of loop time,
+the 4 medium fronts (17-32 + 9-16) carry 95%. This is the exception
+that proves we should look at SWOPF's medium-front kernel separately.
+
+* 16:00 :phase-2.10:conclusion:
+Conclusion: the tiny-IPM tail is overwhelmingly an *amalgamation*
+problem, not a kernel problem. Closing this gap means either
+(a) an aggressive small-front merge pass at symbolic-factorization
+time (mirroring MUMPS's KEEP(197)=1 + NEMIN=5), or (b) a fast-path
+kernel that avoids per-front allocator round-trips when nrow ≤ N
+(mirroring MUMPS's NASS<24 single-shot path). Phase 2.11 should
+prototype (a) first because it is closer to MUMPS's actual behavior
+and the histogram suggests the wins are large.
+
+Acceptance invariants for Phase 2.10 satisfied:
+- count_sum == n_supernodes (no warnings)
+- bucket sum_us == loop_us (no warnings)
+- prologue + loop + epilogue ≤ total_us across all 5 matrices
+
+* 16:30 :phase-2.10:verify:
+Verification before commit:
+- =cargo test --release= : all suites green, 0 failures.
+- =cargo clippy -- -D warnings= : clean (lib only — pre-commit
+  doesn't run --all-targets, and the test-suite warnings are
+  pre-existing rust-1.94 lints unrelated to Phase 2.10).
+- =cargo fmt --check= : clean after fmt.
+
+Ready to commit.

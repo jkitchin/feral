@@ -99,6 +99,7 @@ fn try_factor_and_solve(
         },
         scaling: scaling.clone(),
         small_leaf: Default::default(),
+        profiler: None,
     };
     let sym = match symbolic_factorize_with_method(csc, &snode_params, OrderingMethod::Amd) {
         Ok(s) => s,
