@@ -2,6 +2,8 @@
 
 ![FERAL banner](assets/feral-banner.png)
 
+[![CI](https://github.com/jkitchin/feral/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/feral/actions/workflows/ci.yml)
+
 **F**actored **E**rror-**R**esistant **A**lgebra **L**ibrary — a pure-Rust
 sparse symmetric indefinite linear solver with certified inertia counts,
 built as a clean-room replacement for MUMPS in interior-point
@@ -14,63 +16,52 @@ wild and exact.
 
 ## Status
 
-**Phase 1 is complete on the tested subset (matrices with n ≤ 500).
-Feral is NOT yet correct on larger matrices.** The Phase 1 validation
-ran through a benchmark harness that skipped matrices with more than
-500 rows — a hold-over from the dense-only Phase 1a. When that filter
-was lifted in Phase 2's first task and the sparse path was finally run
-on larger matrices (up to n = 5314) already present in the corpus, it
-produced residuals between **10⁴ and 10¹⁴** — 10 to 26 orders of
-magnitude worse than canonical MUMPS and SSIDS on the same inputs.
-The root cause is almost certainly missing global MC64 matching-based
-scaling, which MUMPS and SSIDS apply by default for symmetric
-indefinite matrices and feral does not. **Phase 2.2.1 (MC64 scaling)
-is the current work in progress.** Until it lands, feral should not
-be used on any matrix the dense path cannot handle.
+Feral is research-grade, pre-1.0. **Phase 1 closed via a multi-source
+consensus oracle (feral + rmumps + canonical Fortran MUMPS 5.8.2 +
+SPRAL/SSIDS); Phase 2 is the current work.** The corpus-wide sidecar
+migration to MUMPS+SSIDS consensus inertia
+(`consensus_mumps_ssids_feralsparse_2026-04-25`, see
+[`dev/decisions.md`](dev/decisions.md)) replaced the prior rmumps-only
+ground truth and is the basis for the numbers below.
 
-### What Phase 1 did establish
+The sparse multifrontal path now runs end-to-end on the **full
+~153k-matrix KKT corpus** with no n-size filter (matrices up to
+n = 5314 are present and produce residuals at machine precision on
+the well-conditioned majority). The Phase 1 "broken at scale" picture
+no longer applies: MC64 matching-based scaling shipped in Phase 2.2.1,
+and subsequent phases have layered on:
 
-On matrices with **n ≤ 500**, under a 3-oracle consensus framework
-(feral vs canonical Fortran MUMPS 5.8.2 vs SPRAL/SSIDS), feral is
-correct: zero Definitive failures on 153,117 consensus matrices, and
-the following pairwise inertia agreement:
+- **Phase 2.6.5** — LDLᵀ-aware ordering (Duff–Pralet symmetric matching
+  + quotient-graph compression, port of MUMPS `ICNTL(12) = 2`). Opt-in
+  via `SupernodeParams::preprocess = OrderingPreprocess::LdltCompress`.
+- **Phase 2.9** — small-leaf supernode grouping (default-on).
+- **Phase 2.10** — per-supernode profiler that surfaced the tiny-IPM
+  amalgamation gap in the long tail.
+- **Phase 2.12 (just landed)** — SSIDS-style column renumbering
+  (`AmalgamationStrategy::Renumber`) is now the **default**
+  amalgamation strategy. Cuts factor time 30–67% on IPM-KKT tail
+  matrices (ACOPR30 / CRESC100 / LAKES / NELSON / SWOPF) at the cost
+  of ~10% on the corpus median for small CUTEst-Hessian matrices.
+  Net win for feral's spec-stated mission. Revert per-call with
+  `AmalgamationStrategy::Adjacency`.
 
-| Pair                | Match rate | Matches / Total   |
-|---------------------|------------|-------------------|
-| feral vs MUMPS      | **99.97%** | 152,094 / 152,145 |
-| feral vs SSIDS      | 99.76%     | 152,779 / 153,151 |
-| MUMPS vs SSIDS      | 98.25%     | 153,172 / 155,899 |
+Sparse factor-time ratio vs canonical MUMPS 5.8.2 on the corpus
+worst-10 tail is now ~10× max (down from substantially worse), with
+**KIRBY2_*** and **MUONSINE_*** the dominant remaining offenders.
+That tail is the active work item; the headline is "much closer, not
+done." Performance work continues in subsequent phases.
 
-Feral agrees with canonical MUMPS *more* often than canonical MUMPS
-and SSIDS agree with each other on this subset. This is real, and it
-validates the pivot strategy and multifrontal structure. It does **not**
-generalize beyond n ≤ 500. The bench tolerance on Phase 1 residual
-checks (`n · ε · 10⁶ ≈ 10⁻⁷` on small matrices) was loose enough to
-accept feral residuals that were already 6–8 orders of magnitude worse
-than canonical solvers — the absolute bar was small, so the underlying
-scaling bug hid in the noise. At larger n the same bug produces
-residuals no reasonable tolerance can accept.
+The full test suite is **315 tests passing, 0 failed** across lib +
+integration; CI runs the same `pre-commit` hook set used locally so
+local and CI cannot drift.
 
-### What Phase 1 did NOT establish (and Phase 2 is fixing)
+The full Phase 2 plan lives in
+[`dev/plans/phase-2-planning.md`](dev/plans/phase-2-planning.md);
+phase-by-phase decisions are in
+[`dev/decisions.md`](dev/decisions.md); the Phase 1 story is in the
+[Phase 1 retrospective](dev/phase1-retrospective.org).
 
-- Feral's sparse path has never produced a correct residual on a
-  matrix where the dense path was not also applicable. The sparse
-  multifrontal pipeline — the main deliverable of Phase 1b — is
-  numerically broken at scale in a specific, understood way: no
-  global scaling is applied before factorization.
-- Performance against canonical solvers has never been measured
-  (unknown, assumed slower).
-- METIS ordering, delayed pivoting, blocked dense kernels, and SIMD
-  are all Phase 2 work.
-
-The Phase 2 plan ([`dev/plans/phase-2-planning.md`](dev/plans/phase-2-planning.md))
-opens with measurement infrastructure and then proceeds directly to
-MC64 global scaling as the first and most urgent correctness fix.
-The scope caveat above is discussed in full in the
-[Phase 1 retrospective](dev/phase1-retrospective.org) and the
-decision records in [`dev/decisions.md`](dev/decisions.md).
-
-## What's in the box (Phase 1)
+## What's in the box
 
 - **Dense Bunch-Kaufman kernel** (`src/dense/factor.rs`,
   `src/dense/solve.rs`): scalar unblocked LDL^T with the classical
