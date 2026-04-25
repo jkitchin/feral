@@ -251,6 +251,154 @@ fn print_cross_comparison(dense: &[Failure], sparse: &[Failure]) {
             format!("{}", sh.s.actual),
         );
     }
+
+    // Phase 2.2.3 — sparse-only failures: matrices where the sparse path
+    // fails but the dense path passes. These are the most actionable triage
+    // candidates because the dense passing matches MUMPS's verdict, isolating
+    // the bug to the sparse pipeline.
+    let dense_only_set: HashSet<&str> = dense_names.difference(&sparse_names).copied().collect();
+    let sparse_only_set: HashSet<&str> = sparse_names.difference(&dense_names).copied().collect();
+    let sparse_only_failures: Vec<&Failure> = sparse_by_name
+        .iter()
+        .filter(|(name, _)| sparse_only_set.contains(*name))
+        .map(|(_, f)| *f)
+        .collect();
+    let dense_only_failures: Vec<&Failure> = dense_by_name
+        .iter()
+        .filter(|(name, _)| dense_only_set.contains(*name))
+        .map(|(_, f)| *f)
+        .collect();
+
+    if !sparse_only_failures.is_empty() {
+        println!(
+            "\n--- Sparse-only failures ({} matrices: sparse fail, dense pass) ---",
+            sparse_only_failures.len()
+        );
+
+        // Family breakdown.
+        let mut so_fam: HashMap<&str, (usize, usize, usize, f64)> = HashMap::new();
+        for f in &sparse_only_failures {
+            let fam = family_of(&f.name);
+            let entry = so_fam.entry(fam).or_insert((0, 0, 0, 0.0));
+            entry.0 += 1;
+            if !f.inertia_ok {
+                entry.1 += 1;
+            }
+            if !f.residual_ok {
+                entry.2 += 1;
+            }
+            if f.residual > entry.3 {
+                entry.3 = f.residual;
+            }
+        }
+        let mut so_fams: Vec<_> = so_fam.into_iter().collect();
+        so_fams.sort_by_key(|(_, v)| std::cmp::Reverse(v.0));
+        println!(
+            "\n{:<22} {:>8} {:>10} {:>10} {:>14}",
+            "family", "total", "inertia", "residual", "worst_res"
+        );
+        for (fam, (total, ine, res, worst)) in so_fams.iter().take(25) {
+            println!(
+                "{:<22} {:>8} {:>10} {:>10} {:>14.2e}",
+                fam, total, ine, res, worst
+            );
+        }
+        if so_fams.len() > 25 {
+            println!("  ... and {} more families", so_fams.len() - 25);
+        }
+
+        // Top 25 worst-residual sparse-only failures — the triage list.
+        let mut so_by_res: Vec<&&Failure> = sparse_only_failures.iter().collect();
+        so_by_res.sort_by(|a, b| {
+            b.residual
+                .partial_cmp(&a.residual)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        println!("\nTop 25 worst sparse-only residuals (triage candidates):");
+        println!(
+            "{:<28} {:>5} {:>12} {:>14} {:>14} {:>5} {:>5}",
+            "name", "n", "sp_res", "expected", "actual(sp)", "i_ok", "r_ok"
+        );
+        for f in so_by_res.iter().take(25) {
+            println!(
+                "{:<28} {:>5} {:>12.2e} {:>14} {:>14} {:>5} {:>5}",
+                f.name,
+                f.n,
+                f.residual,
+                format!("{}", f.expected),
+                format!("{}", f.actual),
+                f.inertia_ok,
+                f.residual_ok,
+            );
+        }
+
+        // Optional CSV dump for offline analysis.
+        if let Ok(p) = std::env::var("FERAL_SPARSE_ONLY_DUMP") {
+            match File::create(&p).map(BufWriter::new) {
+                Ok(mut w) => {
+                    let _ = writeln!(
+                        w,
+                        "name,family,n,exp_p,exp_n,exp_z,act_p,act_n,act_z,inertia_ok,residual,residual_ok"
+                    );
+                    let mut sorted = sparse_only_failures.clone();
+                    sorted.sort_by(|a, b| {
+                        b.residual
+                            .partial_cmp(&a.residual)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    for f in sorted {
+                        let _ = writeln!(
+                            w,
+                            "{},{},{},{},{},{},{},{},{},{},{:.6e},{}",
+                            f.name,
+                            family_of(&f.name),
+                            f.n,
+                            f.expected.positive,
+                            f.expected.negative,
+                            f.expected.zero,
+                            f.actual.positive,
+                            f.actual.negative,
+                            f.actual.zero,
+                            f.inertia_ok,
+                            f.residual,
+                            f.residual_ok,
+                        );
+                    }
+                    println!("\n  sparse-only dump written to {}", p);
+                }
+                Err(e) => {
+                    eprintln!("warning: FERAL_SPARSE_ONLY_DUMP create failed: {}", e);
+                }
+            }
+        }
+    }
+
+    if !dense_only_failures.is_empty() {
+        println!(
+            "\n--- Dense-only failures ({} matrices: dense fail, sparse pass) ---",
+            dense_only_failures.len()
+        );
+        let mut do_by_res: Vec<&&Failure> = dense_only_failures.iter().collect();
+        do_by_res.sort_by(|a, b| {
+            b.residual
+                .partial_cmp(&a.residual)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        println!(
+            "{:<28} {:>5} {:>12} {:>14} {:>14}",
+            "name", "n", "d_res", "expected", "actual(d)"
+        );
+        for f in do_by_res.iter().take(10) {
+            println!(
+                "{:<28} {:>5} {:>12.2e} {:>14} {:>14}",
+                f.name,
+                f.n,
+                f.residual,
+                format!("{}", f.expected),
+                format!("{}", f.actual),
+            );
+        }
+    }
 }
 
 /// Phase 2.1.7 — emit feral-vs-oracle timing comparisons for a single path.
