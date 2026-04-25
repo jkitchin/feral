@@ -291,7 +291,7 @@ fn build_cost_graph(matrix: &CscMatrix) -> Result<(CostGraph, Vec<f64>), FeralEr
         let end = col_ptr[j + 1];
         let mut pairs: Vec<(usize, f64)> = (start..end).map(|k| (row_idx[k], cost[k])).collect();
         pairs.sort_by_key(|&(r, _)| r);
-        for (k, (r, c)) in (start..end).zip(pairs.into_iter()) {
+        for (k, (r, c)) in (start..end).zip(pairs) {
             row_idx[k] = r;
             cost[k] = c;
         }
