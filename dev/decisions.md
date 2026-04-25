@@ -1735,3 +1735,162 @@ resolution amortizes.
 bench; `dev/research/phase-2.4.4-compression-auto-dispatch.md`
 documents the profile data and rationale. If the corpus shifts
 (large-n industrial matrices added), recalibrate against that set.
+
+## 2026-04-25 — Sidecar inertia repair: corpus-wide migration to MUMPS+SSIDS consensus
+
+**Decision.** Replaced rmumps-derived sidecar inertias with the
+MUMPS+SSIDS consensus across the entire KKT corpus where the
+verdict is unambiguous: `verdict == "definitive"` AND
+`inertia_agreement == "strong"` AND `inertia_dissenters == []`.
+1,497 sidecars updated; 152,228 already matched the consensus and
+were untouched; 8 feral-dissenter cases (5 numerically_intractable,
+3 borderline) were deliberately left for separate triage; 15,099
+"excluded" matrices have null consensus and were untouched.
+
+**Why.** The corpus was implicitly using rmumps as ground-truth
+inertia. `CLAUDE.md` is explicit that "rmumps is a testing
+reference only, not an architectural dependency"; this resolves the
+contradiction. rmumps is a Rust binding around an older MUMPS
+release; for ~1% of borderline-pivot cases its threshold logic
+disagrees with current MUMPS 5.8.2 and SPRAL SSIDS. On those cases
+the verdict files (independently computed) already record
+`consensus_inertia: <MUMPS+SSIDS>` with strong agreement; only the
+raw `.json` sidecar still carried the rmumps value. This change
+brings the sidecar in line with the verdict.
+
+**Update vs drop.** Update. Three direct solvers agreeing on a
+definitive verdict is a stronger signal than rmumps alone.
+Dropping 1,497 valid n>=3 matrices for no reason is wasteful.
+Audit fields (`inertia_source = "consensus_mumps_ssids_2026-04-25"`,
+`inertia_original_rmumps`) preserve the prior value for
+reproducibility.
+
+**Side effect.** feral-dense was passing on a subset of these by
+sharing the rmumps disagreement. After the update feral-dense will
+fail on those, exposing that feral-dense's borderline-pivot
+behavior tracks rmumps's threshold rather than the MUMPS+SSIDS
+consensus. This is a *correctness improvement* surfaced by the
+corpus repair, not a regression. Investigation to follow as a
+separate phase: what threshold/scaling difference makes feral-dense
+agree with rmumps against MUMPS+SSIDS on near-singular pivots.
+
+**Top families with disagreements (all flipped to consensus):**
+HAHN1 (498), QPNBLEND (362), MSS1 (240), CORE1 (141), CRESC50 (97),
+PFIT4 (38), CERI651A (37), CRESC100 (19), KIRBY2 (12). These match
+the top families in the bench's "shared failures" bucket — the
+prior 1,812 "BOTH dense and sparse fail" count substantially
+overcounts: in many of those cases both feral paths matched the
+consensus *correctly* against the rmumps-derived sidecar.
+
+**Persistence.** `data/matrices/` is gitignored (regenerated from
+ripopt CUTEst runs); these edits live only in this checkout. The
+upstream ripopt sidecar generator should switch from rmumps to a
+MUMPS-based oracle for permanence — recorded as a follow-up.
+
+**Files.**
+- 1,497 `data/matrices/kkt/<family>/<name>.json` sidecars updated
+- `/tmp/feral-sidecar-update-2026-04-25.csv` — audit log of every change
+- bench re-run kicked off to measure the new failure picture
+
+## 2026-04-25 — Sidecar inertia repair: 13 VESUVIO* matrices (subsumed)
+
+**Decision.** Updated 13 sidecar JSONs in
+`data/matrices/kkt/VESUVIO{,A,U}/VESUVIO*_*.json` from
+`(positive=2058, negative=1025, zero=0)` to
+`(positive=2057, negative=1026, zero=0)`. Preserved the original
+rmumps inertia in a new field `inertia_original_rmumps`; tagged the
+new value with `inertia_source =
+"consensus_mumps_ssids_feralsparse_2026-04-25"`.
+
+**Why.** Phase 2.2.3 sparse-only triage discovered 14 matrices where
+feral-sparse and the sidecar disagreed. The categorizer
+(`scripts/categorize-sparse-only.py`) joined against MUMPS and SSIDS
+oracle sidecars: 13 of the 14 (all VESUVIO/VESUVIA/VESUVIOU at
+n=3083) had MUMPS and SSIDS *both* agreeing with feral-sparse on
+`(2057, 1026, 0)`, against the sidecar's `(2058, 1025, 0)`. The
+matching `.verdict.json` files independently recorded
+`consensus_inertia: (2057, 1026, 0)` with
+`inertia_agreement: "strong"` and `verdict: "definitive"` — the
+consensus was already computed; only the raw `.json` sidecar (which
+was generated from rmumps) had the dissenting value.
+
+**Update vs drop.** Chose update over drop. Three independent direct
+solvers agree on the new value; dropping discards 13 valid n=3083
+matrices for no reason. The audit fields preserve the rmumps
+disagreement for reproducibility.
+
+**Side effect (acknowledged).** feral-dense was passing on these 13
+because it agreed with the (incorrect) sidecar. After the update
+feral-dense will fail on them, exposing that feral-dense and rmumps
+share the borderline-pivot disagreement. This is a
+correctness-improvement worth surfacing, not a regression to hide.
+
+**ACOPP14_0001 deliberately not updated.** SSIDS agrees with the
+sidecar (`(38, 68, 0)`); only MUMPS dissents with
+`(37, 68, 1)`. Genuinely ambiguous; left as-is.
+
+**Files.**
+- 13 `.json` sidecars updated in-place
+- `scripts/categorize-sparse-only.py` triage tool
+- `dev/journal/2026-04-25-01.org` records the investigation
+
+---
+
+## 2026-04-25 — Phase 2.12 column-renumbering kept opt-in (not flipped to default)
+
+**Decision.** SSIDS-style column renumbering (`AmalgamationStrategy::Renumber`)
+is implemented and tested but stays opt-in. `Default` continues to be
+`Adjacency`. To enable Renumber, set
+`SupernodeParams::amalgamation_strategy = AmalgamationStrategy::Renumber`.
+
+**Why.** Phase 2.12 measured Renumber against Adjacency on the full 153k
+sparse corpus and on the tiny-IPM tail:
+
+| Slice                        | Adjacency | Renumber | Δ          |
+|------------------------------|-----------|----------|------------|
+| Sparse factor/MUMPS p50      | 0.30      | 0.33     | **+10%**   |
+| Sparse factor/MUMPS p90      | 1.70      | 1.89     | +11%       |
+| Sparse factor/MUMPS p99      | 3.79      | 3.45     | -9%        |
+| Sparse factor/MUMPS max      | 11.36     | 10.64    | -6%        |
+| Sparse small-frontal p90     | 1.69      | 1.88     | +11%       |
+| Sparse medium p90            | 1.70      | 1.89     | +11%       |
+| Tail ACOPR30/CRESC100 total  |  10×      |  ~3-4×   | **−60-67%**|
+| Tail supernode count         | 341/600   | 134/220  | 2-3× fewer |
+
+The plan's hard graduation criterion (`dev/plans/phase-2.12-column-renumbering.md`
+§4) was "no regression on small-and-medium matrices: corpus median total_us
+within ±5%". The +10% p50 / +11% p90 regression on the sparse corpus exceeds
+that budget. The tail wins are real and reproducible (5-run median across
+ACOPR30/CRESC100/LAKES/NELSON/SWOPF) but the median regression on the long
+tail of small matrices makes flipping the default a net loss in geometric-mean
+terms.
+
+**Why the regression.** Renumber emits a different postorder before
+`find_supernodes`. On matrices where the existing Adjacency-postorder
+produced the identity outcome (chains, near-chains, well-formed trees),
+the renumbered postorder is more aggressive — fewer larger supernodes —
+which is the *good* case. The bad case appears on matrices where the
+extra merging puts more rows into per-supernode dense kernels but the
+matrix is too small to amortize the kernel overhead. We didn't trace
+the per-bucket cost in this phase; it would need profile drilling on
+the `KIRBY2_*` and `MUONSINE_*` matrices that became the new tail
+worst (10.64×, 9.82×, …).
+
+**Future work.** A shape-dispatched `Auto` strategy (parallel to
+`OrderingPreprocess::Auto`) is the right long-term answer: cheap predicates
+(multi-child internal node count, max children, etc.) decide per-matrix
+whether to renumber. Phase 2.13+.
+
+**Files.**
+- `src/symbolic/supernode.rs` — `AmalgamationStrategy` enum + `predict_merges`
+  + reverse-iteration in find_supernodes Step 2
+- `src/ordering/postorder.rs` — `biased_postorder`
+- `src/symbolic/mod.rs` — wire-in of the renumbering pass
+- `tests/column_renumbering.rs` — 4 structural tests (1 supernode under Renumber)
+- `tests/column_renumbering_parity.rs` — 3 numeric parity tests
+  (inertia + residual match across strategies on arrow, bordered KKT, and
+  real ACOPR30_0067)
+- `src/bin/diag_amalgamation.rs` — both-strategy comparison output
+- `src/bin/diag_strategy_compare.rs` — 5-run median timing on tail matrices
+- `dev/research/phase-2.12-column-renumbering.md` — research note
+- `dev/plans/phase-2.12-column-renumbering.md` — implementation plan

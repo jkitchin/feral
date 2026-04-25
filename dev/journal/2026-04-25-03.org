@@ -152,3 +152,41 @@ research note): SSIDS-style column renumbering during
 right lever: 128-410 sibling-merges per tail matrix are blocked by
 the adjacency check, and that's a structural fix the Phase 2.9
 small_leaf path cannot reach.
+
+* 19:00 :phase-2.12:decision:
+Phase 2.12 decision gate run. Reproducibly measured 60-67% factor-time
+reduction on tail matrices (ACOPR30/CRESC100/LAKES) and 2-3× supernode
+reduction on every tiny-IPM tail matrix. But the corpus bench
+(=cargo run --release --bin bench=) showed:
+
+| ratio                       | Adjacency | Renumber | Δ     |
+|-----------------------------+-----------+----------+-------|
+| sparse factor/MUMPS p50     | 0.30      | 0.33     | +10%  |
+| sparse factor/MUMPS p90     | 1.70      | 1.89     | +11%  |
+| sparse factor/MUMPS p99     | 3.79      | 3.45     | -9%   |
+| sparse factor/MUMPS max     | 11.36     | 10.64    | -6%   |
+| sparse small-frontal p90    | 1.69      | 1.88     | +11%  |
+| sparse medium p90           | 1.70      | 1.89     | +11%  |
+
+Plan's hard graduation criterion #4: corpus median total_us within ±5%.
+The +10% p50 / +11% p90 regression on the long tail of small matrices
+exceeds that budget. Per the plan branch-on-failure: keep =Renumber=
+opt-in, do not flip default. Adjacency stays default.
+
+Top-10 worst sparse factor ratios under Adjacency (ACOPR30 ≈ 11×,
+CRESC100 ≈ 10×) move out of the worst bucket entirely under Renumber
+— now KIRBY2_*/MUONSINE_* dominate the new top-10 (max 10.64×). The
+Renumber tail is genuinely shorter; the median just gets slightly
+heavier per matrix, presumably because the wider supernodes feed
+denser kernels that don't amortize on tiny matrices.
+
+Phase 2.12 lands as an opt-in feature with a decision-log entry. The
+follow-up is a shape-dispatched =AmalgamationStrategy::Auto= (parallel
+to =OrderingPreprocess::Auto=) — Phase 2.13+.
+
+* 19:15 :phase-2.12:disposition:
+Phase 2.12 disposition: Renumber landed as opt-in. All tests pass
+(315 passed, 0 failed). Decision recorded in =dev/decisions.md= with
+the full ratio table. Tail-matrix wins are real and reproducible;
+the median-regression cost is the reason it doesn't graduate to
+default.

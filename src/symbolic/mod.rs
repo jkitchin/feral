@@ -6,13 +6,15 @@ pub mod supernode;
 use crate::error::FeralError;
 use crate::ordering::amd::permute_pattern;
 use crate::ordering::elimination_tree::EliminationTree;
-use crate::ordering::postorder::postorder;
+use crate::ordering::postorder::{biased_postorder, postorder};
 use crate::sparse::csc::{CscMatrix, CscPattern};
 
 pub use column_counts::{column_counts, column_counts_gnp, total_factor_nnz};
 pub use ldlt_compress::{build_supermap, compress_pattern, expand_permutation, SuperMap};
 pub use small_leaf::{find_small_leaf_groups, SmallLeafGroup, SmallLeafParams};
-pub use supernode::{find_supernodes, OrderingPreprocess, Supernode, SupernodeParams};
+pub use supernode::{
+    find_supernodes, AmalgamationStrategy, OrderingPreprocess, Supernode, SupernodeParams,
+};
 
 /// Which fill-reducing ordering to use in [`symbolic_factorize_with_method`].
 ///
@@ -449,7 +451,60 @@ pub fn symbolic_factorize_with_method(
     // (still available as `column_counts`) to Gilbert-Ng-Peyton at
     // O(nnz(A) + n·α(n)). Bit-exact equivalence verified on 169585
     // KKT matrices — see `dev/validation/phase-2.5.1-*`.
-    let col_counts = column_counts_gnp(&permuted_pattern, &etree);
+    let mut col_counts = column_counts_gnp(&permuted_pattern, &etree);
+
+    // Phase 2.12: optional SSIDS-style merge-biased postorder.
+    // Predict desired merges using only the etree + column counts,
+    // then re-postorder the etree so desired-merge children are
+    // emitted adjacent to their parents. The downstream
+    // `find_supernodes` adjacency check then succeeds for those
+    // merges naturally.
+    //
+    // Rebuild path: compose perm with the bias-driven post2,
+    // re-permute the matrix, rebuild etree and col_counts. The
+    // structural properties are invariant under within-subtree
+    // relabeling (CHOLMOD/SSIDS observation, see
+    // `dev/research/phase-2.12-column-renumbering.md` §5.1).
+    //
+    // Fast-path: when no bias is requested (no desired merges, OR
+    // the strategy is `Adjacency`), the second pass is skipped and
+    // the pipeline behaves identically to pre-Phase-2.12.
+    let mut permuted_pattern = permuted_pattern;
+    let mut perm = perm;
+    let mut etree = etree;
+    if matches!(
+        snode_params.amalgamation_strategy,
+        supernode::AmalgamationStrategy::Renumber
+    ) {
+        let bias = supernode::predict_merges(&etree, &col_counts, snode_params);
+        if bias.iter().any(|&b| b) {
+            let (post2, _post2_inv) = biased_postorder(&etree, &bias);
+            // Compose: perm₂[k] = perm[post2[k]]; the existing
+            // `perm` already encodes AMD ∘ post1.
+            let new_perm: Vec<usize> = post2.iter().map(|&p| perm[p]).collect();
+            let mut new_perm_inv = vec![0usize; n];
+            for (new, &old) in new_perm.iter().enumerate() {
+                new_perm_inv[old] = new;
+            }
+            let new_permuted_pattern = permute_pattern(&full_pattern, &new_perm);
+            // Rebuild the etree on the renumbered pattern. We could
+            // relabel the existing etree through post2 in O(n) (as
+            // Step 5b does for the postorder), but since the
+            // permutation invariant is critical and post2 is a
+            // postorder of `etree`, the relabeled tree is equivalent
+            // by construction. Re-derive from scratch as a defense
+            // against the etree-invariance claim being subtly wrong;
+            // O(nnz · α(n)) is small for the matrices we target.
+            let new_etree = EliminationTree::from_pattern(&new_permuted_pattern);
+            let new_col_counts = column_counts_gnp(&new_permuted_pattern, &new_etree);
+
+            perm = new_perm;
+            perm_inv = new_perm_inv;
+            permuted_pattern = new_permuted_pattern;
+            etree = new_etree;
+            col_counts = new_col_counts;
+        }
+    }
     let factor_nnz = total_factor_nnz(&col_counts);
 
     // Step 7: Supernode detection on the postordered etree

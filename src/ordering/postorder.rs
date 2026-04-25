@@ -57,6 +57,87 @@ pub fn postorder(etree: &EliminationTree) -> (Vec<usize>, Vec<usize>) {
     (order, inv)
 }
 
+/// Phase 2.12 merge-biased postorder.
+///
+/// Like [`postorder`], but when descending into a parent's children
+/// it partitions them into `bias[child] == false` (emit *first*) and
+/// `bias[child] == true` (emit *last*). Within each partition,
+/// children are still ordered by ascending subtree size (peak-memory
+/// minimization, same as [`postorder`]).
+///
+/// Effect: children whose `bias[child]` is `true` have their subtrees
+/// emitted adjacent to (immediately before) the parent's column in
+/// the resulting numbering. When the bias matches the SSIDS desired
+/// merges (per [`crate::symbolic::supernode::predict_merges`]), the
+/// returned ordering makes every desired merge adjacent in the
+/// column numbering, so the standard adjacency check in
+/// `find_supernodes` succeeds for it.
+///
+/// Invariant: `biased_postorder(etree, &vec![false; n]) ==
+/// postorder(etree)`.
+pub fn biased_postorder(etree: &EliminationTree, bias: &[bool]) -> (Vec<usize>, Vec<usize>) {
+    let n = etree.n;
+    debug_assert_eq!(
+        bias.len(),
+        n,
+        "biased_postorder bias length must equal etree.n"
+    );
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
+
+    let children = etree.children();
+    let sizes = etree.subtree_sizes();
+    let roots = etree.roots();
+
+    let mut order = Vec::with_capacity(n);
+    let mut stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
+
+    // Roots are not biased (no parent to be adjacent to). Use the
+    // unbiased subtree-size order.
+    let mut sorted_roots = roots;
+    sorted_roots.sort_unstable_by_key(|&r| sizes[r]);
+
+    for &root in &sorted_roots {
+        let merged = merge_bias_partition(&children[root], &sizes, bias);
+        stack.push((root, merged, 0));
+
+        while let Some((node, sorted_children, child_idx)) = stack.last_mut() {
+            let node_id = *node;
+            if *child_idx < sorted_children.len() {
+                let child = sorted_children[*child_idx];
+                *child_idx += 1;
+                let next_children = merge_bias_partition(&children[child], &sizes, bias);
+                stack.push((child, next_children, 0));
+            } else {
+                order.push(node_id);
+                stack.pop();
+            }
+        }
+    }
+
+    let mut inv = vec![0usize; n];
+    for (k, &node) in order.iter().enumerate() {
+        inv[node] = k;
+    }
+    (order, inv)
+}
+
+/// Order a parent's children for the merge-biased postorder.
+///
+/// Partition: `bias[child] == false` first (emit early), then
+/// `bias[child] == true` (emit late, adjacent to the parent). Within
+/// each partition, ascending subtree size — the same heuristic as
+/// the unbiased postorder, applied independently to each partition.
+fn merge_bias_partition(children: &[usize], sizes: &[usize], bias: &[bool]) -> Vec<usize> {
+    let mut early: Vec<usize> = children.iter().copied().filter(|&c| !bias[c]).collect();
+    let mut late: Vec<usize> = children.iter().copied().filter(|&c| bias[c]).collect();
+    early.sort_unstable_by_key(|&c| sizes[c]);
+    late.sort_unstable_by_key(|&c| sizes[c]);
+    early.extend(late);
+    early
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

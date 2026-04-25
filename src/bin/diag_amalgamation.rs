@@ -22,7 +22,10 @@
 use std::path::Path;
 
 use feral::sparse::csc::CscPattern;
-use feral::symbolic::{symbolic_factorize, SmallLeafParams, Supernode, SupernodeParams};
+use feral::symbolic::{
+    symbolic_factorize_with_method, AmalgamationStrategy, OrderingMethod, SmallLeafParams,
+    Supernode, SupernodeParams,
+};
 use feral::{read_mtx, CscMatrix};
 
 /// Replicates `find_small_leaf_groups` while counting the
@@ -176,7 +179,21 @@ fn load_csc(path: &str) -> Option<CscMatrix> {
 }
 
 fn analyze(label: &str, csc: &CscMatrix) {
-    let sym = match symbolic_factorize(csc, &SupernodeParams::default()) {
+    println!("=== {} ===", label);
+    for strategy in [
+        AmalgamationStrategy::Adjacency,
+        AmalgamationStrategy::Renumber,
+    ] {
+        analyze_one(label, csc, strategy);
+    }
+}
+
+fn analyze_one(label: &str, csc: &CscMatrix, strategy: AmalgamationStrategy) {
+    let params = SupernodeParams {
+        amalgamation_strategy: strategy,
+        ..Default::default()
+    };
+    let sym = match symbolic_factorize_with_method(csc, &params, OrderingMethod::Amd) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{}: symbolic_factorize failed: {}", label, e);
@@ -214,7 +231,7 @@ fn analyze(label: &str, csc: &CscMatrix) {
     let leaf_snodes = child_counts.iter().filter(|&&c| c == 0).count();
     let max_children = child_counts.iter().copied().max().unwrap_or(0);
 
-    println!("=== {} (n={}) ===", label, csc.n);
+    println!("--- {} strategy={:?} (n={}) ---", label, strategy, csc.n);
     println!("  n_supernodes_final  = {}", n_final);
     println!(
         "  width buckets       : ≤8={}, 9-16={}, 17-32={}, 33-64={}, >64={}",

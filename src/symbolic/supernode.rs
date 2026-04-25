@@ -32,6 +32,48 @@ pub struct SupernodeParams {
     /// [`crate::numeric::factorize::NumericParams::small_leaf`].
     /// See `dev/research/phase-2.9-small-leaf-subtree.md`.
     pub small_leaf: SmallLeafParams,
+
+    /// Phase 2.12 amalgamation strategy: controls whether
+    /// `find_supernodes`'s adjacency check is enforced naturally by
+    /// the existing postorder (`Adjacency`, default) or by an
+    /// SSIDS-style column renumbering that emits a merge-biased
+    /// postorder (`Renumber`).
+    ///
+    /// `Adjacency` rejects all sibling-merges that would require the
+    /// merged supernode to span non-adjacent columns. On bushy
+    /// IPM-KKT trees this leaves dozens of small leaves un-amalgamated
+    /// (see `dev/research/phase-2.12-column-renumbering.md`).
+    ///
+    /// `Renumber` runs a merge prediction pass, then re-postorders
+    /// the etree to place desired-merge children adjacent to their
+    /// parents. The downstream `find_supernodes` adjacency check
+    /// then succeeds naturally for every desired merge. SSIDS
+    /// `core_analyse.f90:644-685` is the reference.
+    pub amalgamation_strategy: AmalgamationStrategy,
+}
+
+/// Phase 2.12 amalgamation strategy selector. See
+/// [`SupernodeParams::amalgamation_strategy`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum AmalgamationStrategy {
+    /// Reject merges whose merged supernode would span non-adjacent
+    /// columns. Default. Matches every release.
+    ///
+    /// Phase 2.12 evaluated `Renumber` as a default and rejected it:
+    /// while it cuts tail-matrix factor time 60-67% on ACOPR30 and
+    /// CRESC100, it adds ~10% on the corpus median (sparse factor
+    /// p50 0.30 → 0.33 vs MUMPS) — outside the ±5% budget. See
+    /// `dev/decisions.md` (Phase 2.12 entry) and
+    /// `dev/research/phase-2.12-column-renumbering.md`.
+    #[default]
+    Adjacency,
+    /// Re-postorder the etree to place desired-merge children
+    /// adjacent to their parents, then run the standard
+    /// adjacency-checked merge. SSIDS-style column renumbering.
+    /// Opt-in since Phase 2.12. Use on workloads dominated by bushy
+    /// IPM-KKT trees (ACOPR30, CRESC100, LAKES) where the small-leaf
+    /// fast path under-merges and amalgamation is the bottleneck.
+    Renumber,
 }
 
 /// Ordering-stage preprocessing flag.
@@ -58,6 +100,7 @@ impl Default for SupernodeParams {
             nemin: 32,
             preprocess: OrderingPreprocess::Auto,
             small_leaf: SmallLeafParams::default(),
+            amalgamation_strategy: AmalgamationStrategy::default(),
         }
     }
 }
@@ -129,58 +172,12 @@ pub fn find_supernodes(
         return Vec::new();
     }
 
-    // Step 1: Find fundamental supernodes
-    // snode_id[j] = which supernode column j belongs to
-    let mut snode_id = vec![0usize; n];
-    let mut snode_starts: Vec<usize> = Vec::new();
-
-    // Count how many children each node has in the etree
-    let mut n_children = vec![0usize; n];
-    for j in 0..n {
-        if let Some(p) = etree.parent[j] {
-            n_children[p] += 1;
-        }
-    }
-
-    snode_starts.push(0);
-    snode_id[0] = 0;
-
-    for j in 1..n {
-        // Column j starts a new supernode unless ALL conditions hold:
-        // 1. parent[j-1] == j (j-1 is a child of j in the etree)
-        // 2. col_counts[j] == col_counts[j-1] - 1 (same row structure minus one row)
-        // 3. j has exactly one child in the etree (j-1 is its only child)
-        //    This prevents chaining across disconnected components where
-        //    col_count conditions happen to match spuriously.
-        let same_snode = etree.parent[j - 1] == Some(j)
-            && col_counts[j] + 1 == col_counts[j - 1]
-            && n_children[j] == 1;
-
-        if same_snode {
-            snode_id[j] = snode_id[j - 1];
-        } else {
-            snode_id[j] = snode_starts.len();
-            snode_starts.push(j);
-        }
-    }
-
+    // Step 1: Find fundamental supernodes (shared with predict_merges)
+    let fund = find_fundamental_supernodes(etree, col_counts);
+    let snode_starts = fund.snode_starts;
+    let mut snode_ncols = fund.snode_ncols;
+    let snode_parent = fund.snode_parent;
     let n_snodes = snode_starts.len();
-
-    // Compute supernode sizes and parent relationships
-    let mut snode_ncols = vec![0usize; n_snodes];
-    let mut snode_parent: Vec<Option<usize>> = vec![None; n_snodes];
-
-    for j in 0..n {
-        snode_ncols[snode_id[j]] += 1;
-    }
-
-    // Parent of a supernode = supernode containing the parent of its last column
-    for s in 0..n_snodes {
-        let last_col = snode_starts[s] + snode_ncols[s] - 1;
-        if let Some(p) = etree.parent[last_col] {
-            snode_parent[s] = Some(snode_id[p]);
-        }
-    }
 
     // Step 2: Amalgamation
     // Track which supernodes are merged (absorbed into parent)
@@ -188,9 +185,31 @@ pub fn find_supernodes(
     // Track the actual first column of each supernode (may change during merging)
     let mut snode_first_col: Vec<usize> = snode_starts.clone();
 
-    for (s, sp) in snode_parent.iter().enumerate() {
+    // Iteration order: forward (legacy / `Adjacency` strategy) is the
+    // historical behavior — children processed in increasing postorder
+    // index. On a multi-child parent only the highest-index child is
+    // adjacent to the parent, so only one child merges per multi-child
+    // parent (this is what `dev/research/phase-2.12-column-renumbering.md`
+    // §2 documents).
+    //
+    // Reverse iteration (`Renumber` strategy) processes the parent
+    // first, then descends to children in decreasing index order.
+    // Each merge shrinks the parent's effective `first_col` to the
+    // newly-merged child's first_col, opening adjacency for the
+    // next-lower-index child. Combined with the merge-biased
+    // postorder (which places desired-merge children adjacent to
+    // their parent in the column numbering), every desired merge
+    // succeeds.
+    let reverse = matches!(params.amalgamation_strategy, AmalgamationStrategy::Renumber);
+    let order: Box<dyn Iterator<Item = usize>> = if reverse {
+        Box::new((0..n_snodes).rev())
+    } else {
+        Box::new(0..n_snodes)
+    };
+
+    for s in order {
+        let sp = snode_parent[s];
         if let Some(p) = sp {
-            let p = *p;
             if find_root(s, &merged_into) != s {
                 continue; // already merged into another node
             }
@@ -319,6 +338,147 @@ fn find_root(s: usize, merged_into: &[Option<usize>]) -> usize {
         node = parent;
     }
     node
+}
+
+/// Output of `find_fundamental_supernodes`.
+pub(crate) struct FundamentalSupernodes {
+    /// First column of each fundamental supernode.
+    pub(crate) snode_starts: Vec<usize>,
+    /// Number of columns in each fundamental supernode.
+    pub(crate) snode_ncols: Vec<usize>,
+    /// Parent fundamental supernode of each fundamental supernode
+    /// (the supernode containing the etree-parent of its last column),
+    /// or `None` for roots.
+    pub(crate) snode_parent: Vec<Option<usize>>,
+}
+
+/// Detect *fundamental* supernodes only (no amalgamation, no merging).
+///
+/// A fundamental supernode is a maximal set of consecutive columns
+/// j, j+1, ..., j+k where each column has the same row structure
+/// minus the eliminated columns. This is the structural Step 1 of
+/// `find_supernodes`, factored out so `predict_merges` can reuse it.
+///
+/// Conditions for `j` to extend the supernode of `j-1`:
+///   1. `parent[j-1] == j` in the etree
+///   2. `col_counts[j] + 1 == col_counts[j-1]`
+///   3. `j` has exactly one child in the etree (= `j-1`)
+pub(crate) fn find_fundamental_supernodes(
+    etree: &EliminationTree,
+    col_counts: &[usize],
+) -> FundamentalSupernodes {
+    let n = etree.n;
+    if n == 0 {
+        return FundamentalSupernodes {
+            snode_starts: Vec::new(),
+            snode_ncols: Vec::new(),
+            snode_parent: Vec::new(),
+        };
+    }
+
+    let mut snode_id = vec![0usize; n];
+    let mut snode_starts: Vec<usize> = Vec::new();
+
+    let mut n_children = vec![0usize; n];
+    for j in 0..n {
+        if let Some(p) = etree.parent[j] {
+            n_children[p] += 1;
+        }
+    }
+
+    snode_starts.push(0);
+    snode_id[0] = 0;
+    for j in 1..n {
+        let same_snode = etree.parent[j - 1] == Some(j)
+            && col_counts[j] + 1 == col_counts[j - 1]
+            && n_children[j] == 1;
+        if same_snode {
+            snode_id[j] = snode_id[j - 1];
+        } else {
+            snode_id[j] = snode_starts.len();
+            snode_starts.push(j);
+        }
+    }
+
+    let n_snodes = snode_starts.len();
+    let mut snode_ncols = vec![0usize; n_snodes];
+    let mut snode_parent: Vec<Option<usize>> = vec![None; n_snodes];
+    for j in 0..n {
+        snode_ncols[snode_id[j]] += 1;
+    }
+    for s in 0..n_snodes {
+        let last_col = snode_starts[s] + snode_ncols[s] - 1;
+        if let Some(p) = etree.parent[last_col] {
+            snode_parent[s] = Some(snode_id[p]);
+        }
+    }
+
+    FundamentalSupernodes {
+        snode_starts,
+        snode_ncols,
+        snode_parent,
+    }
+}
+
+/// Predict desired merges (Phase 2.12) for the SSIDS-style column
+/// renumbering. Runs the same fundamental-supernode detection and
+/// SSIDS size rule as `find_supernodes`, but **does not enforce
+/// adjacency** — the caller uses the merge predictions to drive a
+/// merge-biased postorder that *makes* the merges adjacent in the
+/// re-postordered numbering.
+///
+/// Returns a vector `desired_merges` of length `n` where, for each
+/// column `c`, `desired_merges[c] = Some(parent_first_col)` indicates
+/// that the fundamental supernode containing `c` should be merged
+/// into its parent fundamental supernode (whose first column is
+/// `parent_first_col`). Columns belonging to non-merging
+/// supernodes — and the parent supernode of every merge — get `None`.
+///
+/// The encoding is per-column (not per-supernode) so the caller can
+/// drive a per-node bias on the etree directly.
+pub(crate) fn predict_merges(
+    etree: &EliminationTree,
+    col_counts: &[usize],
+    params: &SupernodeParams,
+) -> Vec<bool> {
+    let n = etree.n;
+    let mut bias = vec![false; n];
+    if n == 0 {
+        return bias;
+    }
+    let fund = find_fundamental_supernodes(etree, col_counts);
+    let n_snodes = fund.snode_starts.len();
+
+    // For each fundamental supernode, decide whether it would merge
+    // into its parent under the SSIDS size rule.
+    for s in 0..n_snodes {
+        let p = match fund.snode_parent[s] {
+            Some(p) => p,
+            None => continue,
+        };
+        let child_ncol = fund.snode_ncols[s];
+        let parent_ncol = fund.snode_ncols[p];
+
+        // SSIDS rule (mirrors find_supernodes Step 2):
+        // 1. Trivial chain: parent has 1 col, parent.col_count + 1 == child.last_col_count
+        let s_first = fund.snode_starts[s];
+        let p_first = fund.snode_starts[p];
+        let child_last = s_first + child_ncol - 1;
+        let trivial_chain = parent_ncol == 1 && col_counts[p_first] + 1 == col_counts[child_last];
+        // 2. Size-based: both < nemin
+        let size_based = child_ncol < params.nemin && parent_ncol < params.nemin;
+
+        if trivial_chain || size_based {
+            // Mark every column of this child supernode as "biased
+            // late" — its subtree should be emitted adjacent to its
+            // parent in the merge-biased postorder.
+            for b in bias.iter_mut().skip(s_first).take(child_ncol) {
+                *b = true;
+            }
+        }
+    }
+
+    bias
 }
 
 #[cfg(test)]
