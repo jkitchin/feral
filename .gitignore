@@ -18,3 +18,7 @@ data/matrices/
 
 # Large SuiteSparse matrices (fetched via dev/scripts/fetch_large_matrices.sh)
 tests/data/large/
+
+# OS / editor / agent runtime junk
+.DS_Store
+.claude/
