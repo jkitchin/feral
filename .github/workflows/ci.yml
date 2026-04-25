@@ -1,5 +1,12 @@
 name: CI
 on: [push, pull_request]
+# Opt the whole workflow into Node 24 for all JavaScript actions. This
+# silences the "Node.js 20 actions are deprecated" warning emitted by
+# pre-commit/action@v3.0.1 (whose pinned actions/cache@v4 still ships
+# Node 20). Becomes the default on 2026-06-02; this line can be
+# removed once pre-commit/action updates its cache pin to v5+.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   check:
     runs-on: ubuntu-latest
