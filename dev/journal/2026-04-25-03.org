@@ -456,3 +456,59 @@ and was the main +10% culprit.
 
 Test count: 329 passed (was 322; +7 from auto_strategy tests),
 0 failed.
+
+* 23:30 :phase-2.13b:amd:mc64:ldlt-compress:probe:surprise:
+AMD per-call sub-stage probe (=src/bin/diag_amd_substages.rs=)
+attributed the small-n =ordering= stage cost. The result inverts
+the working hypothesis: AMD is *not* the bottleneck. MC64 is.
+
+5-run median, all µs:
+
+#+begin_example
+matrix          n   branch         mc64 smap compr prep ws_new run_el fin_p expand post total
+KIRBY2_0007    458 LdltCompress    827  12   15    0   2     16     2    0      0    878
+MUONSINE_0000 1537 LdltCompress    329  25   32    0   4      6     4    0      0    407
+ACOPR30_0067   564 LdltCompress    100  11   17    0   3     18     3    0      0    155
+CRESC100_0000  806 LdltCompress    139  13   22    0   3     30     3    0      0    215
+#+end_example
+
+KIRBY2_0007 = 878 µs total ≈ matches the 773 µs earlier measured
+for the =ordering= stage. The breakdown:
+  - mc64    = 827 µs (94.2% of stage)
+  - smap+compr = 27 µs (3.1%)
+  - all of AMD (prep+ws_new+run_el+fin_p+post) = 20 µs (2.3%)
+  - expand  = 0 µs (≤1 µs, below resolution)
+
+The 770 µs that the Phase 2.13b symbolic profiler attributed to
+=ordering= is almost entirely =compute_mc64_cache=. AMD itself
+is only 20 µs on n=458, even with allocation included.
+
+Implications for Phase 2.13 step 5:
+1. *AMD per-call shrink is rejected.* Even halving AMD saves
+   ≤10 µs out of an 878 µs stage. Not worth chasing.
+2. *Symbolic caching is still attractive for IPM workloads* (one
+   matrix factored 30+ times reuses analyze), but it does not
+   help the corpus bench (1 factor per matrix).
+3. *The cheapest single fix is gating LdltCompress on n.* Current
+   gate (`n >= 128 && low_degree_cols/n >= 0.30`) admits KIRBY2
+   at n=458 where MC64's 827 µs cost dwarfs any AMD savings the
+   compression buys. Bumping =MIN_N_FOR_COMPRESSION= or adding a
+   cost-benefit predicate would collapse KIRBY2's ordering stage
+   from 878 µs to ~25 µs (the no-compress AMD path).
+
+This is Phase 2.13c work: tighten LdltCompress gate. The
+recommendation is to:
+  (a) probe ordering stage on the no-compress path for the same
+      4 matrices to measure the AMD-only cost we'd be paying
+      instead of MC64;
+  (b) probe a wider corpus slice to find the n threshold below
+      which =LdltCompress= net-loses;
+  (c) raise =MIN_N_FOR_COMPRESSION= or add a low-n MC64 cost
+      cap.
+
+The earlier hypothesis "AMD per-call setup cost dominates
+symbolic on small-n" (Phase 2.13b step 2 finding) was misleading
+because we labeled the stage =ordering= without dissecting it.
+The corrected attribution is: *MC64 per-call cost dominates the
+=ordering= stage for small-n matrices that hit the LdltCompress
+branch*.

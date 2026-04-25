@@ -109,13 +109,42 @@ either:
    from the diagnostic, dispatch between Renumber and Adjacency.
    Test with parity tests + corpus bench. Success criteria above.
 
-5. **Decide between symbolic caching vs AMD per-call shrink.**
-   Both target the dominant stage on small-n; caching also targets
-   IPM-iteration economics broadly. Recommend a 5-call AMD
-   sub-stage profiler probe before committing to the fix path —
-   if AMD's 770µs is dominated by allocations and hash sizing,
-   per-call shrink is the cheap win; if it's dominated by O(n α n)
-   work, symbolic caching is the only meaningful lever.
+5. ~~**Decide between symbolic caching vs AMD per-call shrink.**~~
+   **Done 2026-04-25.** Sub-stage probe
+   (`src/bin/diag_amd_substages.rs`) overturned the framing.
+   The 770 µs `ordering` stage on KIRBY2_0007 is **MC64**, not
+   AMD. 5-run median attribution:
+
+   - mc64                    : 827 µs (94.2%)
+   - build_supermap          :  12 µs (1.4%)
+   - compress_pattern        :  15 µs (1.7%)
+   - AMD entire (prep + ws_new + run_el + fin_p + post): 20 µs (2.3%)
+   - expand_permutation      :   0 µs
+
+   AMD itself takes ~20 µs on n=458; the AMD `run_elimination`
+   inner loop is 16 µs of that. Per-call shrink targets a slice
+   that is at most 2-3% of the bottleneck — rejected on those
+   grounds. Symbolic caching is still attractive for IPM workloads
+   (one analyze amortized across 30+ iterations) but does not
+   help the corpus bench (1 factor per matrix).
+
+   The cheapest single fix is **Phase 2.13c — tighten
+   `pick_ordering_preprocess`'s LdltCompress gate** so KIRBY2-class
+   small-n matrices do not pay the ~830 µs MC64 cost when AMD on
+   the uncompressed pattern would only have cost ~25 µs.
+
+## 2.13c — Tighten LdltCompress gate (open)
+
+Open follow-up:
+
+- (a) Probe ordering-stage cost on the no-compress path for the
+  same 4 matrices to measure the AMD-only cost being avoided
+  vs the MC64 cost being paid.
+- (b) Sweep a wider slice (KIRBY2 + small CUTEst Hessians) to
+  identify the n threshold below which `LdltCompress` is net
+  negative.
+- (c) Raise `MIN_N_FOR_COMPRESSION` from 128 to a calibrated
+  value, or replace the size floor with an MC64 cost cap.
 
 ## Out of scope
 

@@ -129,3 +129,66 @@ pub fn amd_order_full(
     };
     Ok((perm, ordering_stats, amd_stats))
 }
+
+/// Per-sub-stage wall-clock breakdown of one AMD call.
+///
+/// Returned by [`amd_order_substages`] alongside the permutation.
+/// All fields are wall-clock microseconds for that single call.
+/// Sum is approximately equal to the total time reported by
+/// [`amd_order_full`]'s [`OrderingStats::time_us`], modulo a few
+/// hundred ns of `Instant::now()` overhead.
+///
+/// Used by the small-n diagnostic probe
+/// `feral::bin::diag_amd_substages` to attribute the per-call AMD
+/// cost between workspace allocation, the main elimination loop,
+/// and permutation finalisation. See
+/// `dev/plans/phase-2.13-tail-diagnostic.md` step 5.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AmdSubstages {
+    /// Time spent in `AmdWorkspace::new`: input ingest, vector
+    /// allocations, initial degree lists, dense-row deferral.
+    pub workspace_new_us: u64,
+    /// Time spent in the main pivot/eliminate/finalize loop
+    /// (`select_pivot` + `create_element` + `finalize_step`).
+    pub run_elimination_us: u64,
+    /// Time spent in the assembly-tree postorder and final
+    /// permutation emission.
+    pub finalize_permutation_us: u64,
+}
+
+/// Compute an AMD ordering and report a per-sub-stage timing
+/// breakdown.
+///
+/// Behaves identically to [`amd_order_full`] but additionally
+/// returns an [`AmdSubstages`] split of the wall-clock time across
+/// `workspace::new`, `run_elimination`, and `finalize_permutation`.
+/// Diagnostic-only — production callers should keep using
+/// [`amd_order`] / [`amd_order_full`]. The `Instant::now()` calls
+/// add at most ~100 ns vs the un-profiled path, but the API surface
+/// is intentionally separate to avoid polluting the stable
+/// contract-conforming function.
+pub fn amd_order_substages(
+    pattern: &CscPattern<'_>,
+    opts: &AmdOptions,
+) -> Result<(Vec<i32>, AmdSubstages), OrderingError> {
+    let t = Instant::now();
+    let mut ws = workspace::AmdWorkspace::new(pattern, opts)?;
+    let workspace_new_us = t.elapsed().as_micros() as u64;
+
+    let t = Instant::now();
+    let _flops = algo::run_elimination(&mut ws, opts.aggressive)?;
+    let run_elimination_us = t.elapsed().as_micros() as u64;
+
+    let t = Instant::now();
+    let perm = algo::finalize_permutation(&mut ws);
+    let finalize_permutation_us = t.elapsed().as_micros() as u64;
+
+    Ok((
+        perm,
+        AmdSubstages {
+            workspace_new_us,
+            run_elimination_us,
+            finalize_permutation_us,
+        },
+    ))
+}
