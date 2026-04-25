@@ -1,0 +1,113 @@
+#+TITLE: 2026-04-25 large-matrix smoke test + bratu3d plain-solve finding
+#+STARTUP: showall
+
+* 11:00 :smoke-test:large-matrix:n100k:
+Hardened =tests/large_matrix_smoke.rs= (gated =#[ignore]=) so the
+SuiteSparse large-matrix corpus runs end-to-end without OOM-killing
+the host.
+
+Four changes:
+  1. Sort smallest-first by file size. A SIGKILL on a large matrix
+     no longer suppresses output for the smaller ones — they print
+     first and survive.
+  2. Pre-flight memory estimate from =sym.factor_nnz_estimate= ×
+     16 bytes (8 data + 8 index). Skip with a clear "SKIP: est XX GB
+     > budget YY GB (raise FERAL_SMOKE_MEM_GB)" message if it
+     exceeds =FERAL_SMOKE_MEM_GB= (default 16). User can raise it
+     via env var.
+  3. Split into two =#[ignore]= tests: =large_matrix_full_pipeline_smoke=
+     for =n <= 100_000= (default smoke), =xl_matrix_full_pipeline_smoke=
+     for =n > 100_000= (c-big-class). Bucket selection is by =n=
+     after read_mtx so it is robust to fetch script changes.
+  4. =stderr.flush()= after every =writeln!= via an =emit()= helper
+     so partial output survives jetsam.
+
+Run command unchanged:
+  =cargo test --release --test large_matrix_smoke -- --ignored --nocapture=
+
+The XL bucket can be skipped with
+  =cargo test --release --test large_matrix_smoke large_matrix_full_pipeline_smoke -- --ignored --nocapture=
+
+Build + clippy clean on the new file. Pre-existing clippy errors in
+unrelated files (=tests/sparse_postorder.rs=, =src/symbolic/small_leaf.rs=)
+are not from this change.
+
+* 11:10 :bratu3d:plain-solve:numerical-bug:
+The user's manual smoke run on Boeing/bcsstk38, GHS_indef/bratu3d,
+GHS_indef/cont-201, Schenk_IBMNA/c-big surfaced a real bug on
+**bratu3d** (GHS_indef collection):
+
+  - matrix:           bratu3d.mtx
+  - n:                27,792
+  - nnz:              88,627
+  - factor:           Solver::new() with defaults (ScalingStrategy::Identity,
+                      default Bunch-Kaufman pivot threshold)
+  - factor wall:      118.7 s on M-series
+  - FactorStatus:     Success (no Singular, no WrongInertia)
+  - rel residual:     ||A x - b|| / ||b|| = **4.66e6** for plain
+                      =Solver::solve(&rhs)= where =rhs = A * 1=
+  - rel residual_r:   2.46e-9 after =solve_refined=
+
+Plain =solve= returns garbage with NO programmatic signal. Any
+caller using =solve()= directly (notably ripopt early in its
+IPM-alignment refactor) silently produces wrong answers on
+bratu3d-class matrices.
+
+Hypotheses to investigate (separate PR per user instruction —
+"Do not change Solver defaults in the same PR"):
+
+  1. Is the factor itself wrong (huge entries in L, NaN/Inf), or
+     is forward-substitution losing accuracy on a well-conditioned
+     factor? Print =max |L|=, =max |D|=, =min |D|= post-factor.
+  2. Does =NumericParams { scaling: InfNorm, .. }= fix the plain
+     solve, or only the refined solve?
+  3. Does raising =bk.pivot_threshold= from 0.0 above some floor
+     fix it?
+  4. Is the symptom dimension-dependent (try smaller GHS_indef
+     indefinite matrices), or specific to bratu3d's structure
+     (3D Bratu PDE)?
+
+Decision pending after (1)-(4):
+  - (a) change defaults (scaling and/or pivot threshold), or
+  - (b) Solver detects the condition post-factor and returns a
+        =Quality::EscalateRefinement= signal automatically, or
+  - (c) document + assert "always use solve_refined for indefinite"
+        and have plain =solve= panic-or-warn on indefinite factors.
+
+Repro:
+#+begin_src sh
+  cargo test --release --test large_matrix_smoke -- --ignored \
+      large_matrix_full_pipeline_smoke --nocapture
+#+end_src
+
+Expect a row of the form
+  =bratu3d        27792      88627      ...      4.66e6    2.46e-9=
+
+* 11:15 :c-big:oom-jetsam:scotch-fill:
+=c-big.mtx= (Schenk_IBMNA, n=345,241, nnz=1,343,126) was killed by
+macOS jetsam (SIGKILL) on a 64 GB system after RSS hit 35 GB. The
+auto-dispatched ordering on this matrix produces enough fill to
+exceed the memory budget; =dev/research/ordering-bakeoff-2026-04-18.org=
+reports SCOTCH yields ~70 M nnz in L for c-big specifically.
+
+The new pre-flight memory estimator catches this without ever
+allocating the L workspace: =16 * factor_nnz_estimate= for c-big
+is well above the 16 GB default budget. Smoke now reports SKIP
+and continues to other matrices instead of OOM-killing.
+
+To actually test c-big the user can run:
+  =FERAL_SMOKE_MEM_GB=64 cargo test --release --test large_matrix_smoke \
+       -- --ignored xl_matrix_full_pipeline_smoke --nocapture=
+on a 96 GB-or-larger host.
+
+* 11:20 :followups:
+Out of scope for this PR but on the radar:
+  - Investigate bratu3d plain-solve in a separate PR (hypotheses 1-4
+    above).
+  - Add =data/matrices/kkt-expansion/= (BDRY2 n=501k, PDE2 n=451k,
+    PDE1 n=361k, QUADCOPTER n=280k, YATP* n=246k, RDW2D5*U n=195k,
+    OSCIGRAD n=100k) as a Phase 5 confidence target; analogous
+    =kkt_expansion_smoke= test, gitignored data, gated the same way.
+  - Once Phase 5 lands, consider a =Quality::EscalateRefinement=
+    return path so callers know to use =solve_refined= on
+    indefinite-with-large-||L|| factors.
