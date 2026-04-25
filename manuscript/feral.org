@@ -263,6 +263,22 @@ cite:pellegrini1996scotch) sometimes win on grid-structured Hessians but
 require external graph-partitioning libraries; FERAL ships pure-Rust
 ports of AMD that match the canonical Fortran reference within tolerance.
 
+The pedagogical reason fill-reducing orderings matter is shown in
+Figure ref:fig-fill. The same KKT matrix (KIRBY2_0007, $n = 458$) is
+factorized symbolically under two orderings. Under the natural
+(unpermuted) ordering the trailing zero block of the KKT system fills
+catastrophically: $\mathrm{nnz}(L) = 12{,}389$, an $11.6\times$ blow-up
+over the original $\mathrm{nnz}(A) = 1{,}064$ in the strict lower
+triangle. Under reverse Cuthill-McKee --- a simple bandwidth-minimizing
+ordering --- $\mathrm{nnz}(L) = 1{,}067$, no fill at all. AMD typically
+matches or beats RCM on KKT systems, but the contrast with the natural
+ordering already illustrates the order-of-magnitude leverage that
+ordering provides over the rest of the pipeline.
+
+#+name: fig-fill
+#+caption: Symbolic LDL\(^T\) fill-in on KIRBY2_0007 ($n = 458$). Left: the original KKT matrix in its natural ordering, showing the characteristic block structure (Hessian + Jacobian + zero block). Center: the lower-triangular factor $L$ under the natural (unpermuted) ordering, $\mathrm{nnz}(L) = 12{,}389$, an $11.6\times$ blow-up driven by fill in the trailing zero block. Right: $L$ under reverse Cuthill-McKee, $\mathrm{nnz}(L) = 1{,}067$, essentially no fill. The same matrix; the only difference is the row/column permutation. AMD on this matrix produces a comparable result to RCM; both demonstrate the order-of-magnitude leverage of fill-reducing orderings on multifrontal cost.
+[[file:figures/fill-comparison.png]]
+
 ** Inertia and the IPM correctness invariant
 :PROPERTIES:
 :CUSTOM_ID: sec:inertia
