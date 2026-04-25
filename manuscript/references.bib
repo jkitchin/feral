@@ -1,0 +1,371 @@
+% FERAL manuscript bibliography
+% All entries copied verbatim from dev/references.bib (DOI-validated via CrossRef).
+% Curated to the keys actually cited by manuscript/feral.org.
+
+% ============================================================
+% Dense kernel: micro-kernel architecture
+% ============================================================
+
+@article{goto2008anatomy,
+  author    = {Goto, Kazushige and van de Geijn, Robert A.},
+  title     = {Anatomy of High-Performance Matrix Multiplication},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2008},
+  volume    = {34},
+  number    = {3},
+  pages     = {1--25},
+  doi       = {10.1145/1356052.1356053},
+  url       = {https://doi.org/10.1145/1356052.1356053}
+}
+
+@article{vanzee2015blis,
+  author    = {Van Zee, Field G. and van de Geijn, Robert A.},
+  title     = {{BLIS}: A Framework for Rapidly Instantiating {BLAS} Functionality},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2015},
+  volume    = {41},
+  number    = {3},
+  pages     = {1--33},
+  doi       = {10.1145/2764454},
+  url       = {https://doi.org/10.1145/2764454}
+}
+
+% ============================================================
+% Dense kernel: Bunch-Kaufman pivoting and indefinite factorization
+% ============================================================
+
+@article{bunch1977stable,
+  author    = {Bunch, James R. and Kaufman, Linda},
+  title     = {Some Stable Methods for Calculating Inertia and Solving Symmetric
+               Linear Systems},
+  journal   = {Mathematics of Computation},
+  year      = {1977},
+  volume    = {31},
+  number    = {137},
+  pages     = {163--179},
+  doi       = {10.1090/S0025-5718-1977-0428694-0},
+  url       = {https://doi.org/10.1090/S0025-5718-1977-0428694-0}
+}
+
+@article{bunch1971direct,
+  author    = {Bunch, J. R. and Parlett, B. N.},
+  title     = {Direct Methods for Solving Symmetric Indefinite Systems of Linear Equations},
+  journal   = {{SIAM} Journal on Numerical Analysis},
+  year      = {1971},
+  volume    = {8},
+  number    = {4},
+  pages     = {639--655},
+  doi       = {10.1137/0708060},
+  url       = {https://doi.org/10.1137/0708060}
+}
+
+% ============================================================
+% Sparse: multifrontal method
+% ============================================================
+
+@article{duff1983multifrontal,
+  author    = {Duff, I. S. and Reid, J. K.},
+  title     = {The Multifrontal Solution of Indefinite Sparse Symmetric Linear Equations},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {1983},
+  volume    = {9},
+  number    = {3},
+  pages     = {302--325},
+  doi       = {10.1145/356044.356047},
+  url       = {https://doi.org/10.1145/356044.356047}
+}
+
+% ============================================================
+% Sparse: SSIDS / pivoting in production multifrontal codes
+% ============================================================
+
+@article{hogg2013pivoting,
+  author    = {Hogg, Jonathan D. and Scott, Jennifer A.},
+  title     = {Pivoting Strategies for Tough Sparse Indefinite Systems},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2013},
+  volume    = {40},
+  number    = {1},
+  pages     = {1--19},
+  doi       = {10.1145/2513109.2513113},
+  url       = {https://doi.org/10.1145/2513109.2513113}
+}
+
+@article{hogg2016sparse,
+  author    = {Hogg, Jonathan D. and Ovtchinnikov, Evgueni and Scott, Jennifer A.},
+  title     = {A Sparse Symmetric Indefinite Direct Solver for {GPU} Architectures},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2016},
+  volume    = {42},
+  number    = {1},
+  pages     = {1--25},
+  doi       = {10.1145/2756548},
+  url       = {https://doi.org/10.1145/2756548}
+}
+
+@article{duff2004ma57,
+  author    = {Duff, Iain S.},
+  title     = {{MA57}---A Code for the Solution of Sparse Symmetric
+               Definite and Indefinite Systems},
+  journal   = {{ACM} Transactions on Mathematical Software},
+  year      = {2004},
+  volume    = {30},
+  number    = {2},
+  pages     = {118--144},
+  doi       = {10.1145/992200.992202},
+  url       = {https://doi.org/10.1145/992200.992202}
+}
+
+% ============================================================
+% Sparse: fill-reducing ordering (AMD)
+% ============================================================
+
+@article{amestoy1996approximate,
+  author    = {Amestoy, Patrick R. and Davis, Timothy A. and Duff, Iain S.},
+  title     = {An Approximate Minimum Degree Ordering Algorithm},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {1996},
+  volume    = {17},
+  number    = {4},
+  pages     = {886--905},
+  doi       = {10.1137/S0895479894278952},
+  url       = {https://doi.org/10.1137/S0895479894278952}
+}
+
+@article{amestoy2004algorithm837,
+  author    = {Amestoy, Patrick R. and Davis, Timothy A. and Duff, Iain S.},
+  title     = {Algorithm 837: {AMD}, an Approximate Minimum Degree Ordering Algorithm},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2004},
+  volume    = {30},
+  number    = {3},
+  pages     = {381--388},
+  doi       = {10.1145/1024074.1024081},
+  url       = {https://doi.org/10.1145/1024074.1024081}
+}
+
+% ============================================================
+% Sparse: supernode amalgamation
+% ============================================================
+
+@article{davis2009dynamic,
+  author    = {Davis, Timothy A. and Hager, William W.},
+  title     = {Dynamic Supernodes in Sparse {Cholesky} Update/Downdate and Triangular Solves},
+  journal   = {ACM Transactions on Mathematical Software},
+  year      = {2009},
+  volume    = {35},
+  number    = {4},
+  pages     = {1--23},
+  doi       = {10.1145/1462173.1462176},
+  url       = {https://doi.org/10.1145/1462173.1462176}
+}
+
+% ============================================================
+% Foundations: elimination trees and graph theory of sparsity
+% ============================================================
+
+@book{george1981computer,
+  author    = {George, Alan and Liu, Joseph W. H.},
+  title     = {Computer Solution of Large Sparse Positive Definite Systems},
+  publisher = {Prentice-Hall},
+  address   = {Englewood Cliffs, NJ},
+  year      = {1981},
+  isbn      = {0-13-165274-5}
+}
+
+% ============================================================
+% Interior point / NLP context
+% ============================================================
+
+@article{wachter2006ipopt,
+  author    = {W{\"a}chter, Andreas and Biegler, Lorenz T.},
+  title     = {On the Implementation of an Interior-Point Filter Line-Search Algorithm
+               for Large-Scale Nonlinear Programming},
+  journal   = {Mathematical Programming},
+  year      = {2006},
+  volume    = {106},
+  pages     = {25--57},
+  doi       = {10.1007/s10107-004-0559-y},
+  url       = {https://doi.org/10.1007/s10107-004-0559-y}
+}
+
+% ============================================================
+% Matching-based scaling (MC64 family)
+% ============================================================
+
+@article{duff2001mc64,
+  author    = {Duff, Iain S. and Koster, Jacko},
+  title     = {On Algorithms for Permuting Large Entries to the Diagonal
+               of a Sparse Matrix},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {2001},
+  volume    = {22},
+  number    = {4},
+  pages     = {973--996},
+  doi       = {10.1137/S0895479899358443},
+  url       = {https://doi.org/10.1137/S0895479899358443}
+}
+
+@article{duff1999permuting,
+  author    = {Duff, Iain S. and Koster, Jacko},
+  title     = {The Design and Use of Algorithms for Permuting Large Entries
+               to the Diagonal of Sparse Matrices},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {1999},
+  volume    = {20},
+  number    = {4},
+  pages     = {889--901},
+  doi       = {10.1137/S0895479897317661},
+  url       = {https://doi.org/10.1137/S0895479897317661}
+}
+
+@article{duff2005symmetric,
+  author    = {Duff, Iain S. and Pralet, St\'ephane},
+  title     = {Strategies for Scaling and Pivoting for Sparse Symmetric
+               Indefinite Problems},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {2005},
+  volume    = {27},
+  number    = {2},
+  pages     = {313--340},
+  doi       = {10.1137/04061043X},
+  url       = {https://doi.org/10.1137/04061043X}
+}
+
+% ============================================================
+% Norm-balancing scaling and matching alternatives
+% ============================================================
+
+@article{knight2014symmetry,
+  author    = {Knight, Philip A. and Ruiz, Daniel and U\c{c}ar, Bora},
+  title     = {A Symmetry Preserving Algorithm for Matrix Scaling},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {2014},
+  volume    = {35},
+  number    = {3},
+  pages     = {931--955},
+  doi       = {10.1137/110825753},
+  url       = {https://epubs.siam.org/doi/10.1137/110825753}
+}
+
+@article{curtis1972automatic,
+  author    = {Curtis, A. R. and Reid, J. K.},
+  title     = {On the Automatic Scaling of Matrices for {G}aussian Elimination},
+  journal   = {{IMA} Journal of Applied Mathematics},
+  year      = {1972},
+  volume    = {10},
+  number    = {1},
+  pages     = {118--124},
+  doi       = {10.1093/imamat/10.1.118}
+}
+
+@article{bertsekas1988auction,
+  author    = {Bertsekas, Dimitri P.},
+  title     = {The Auction Algorithm: A Distributed Relaxation
+               Method for the Assignment Problem},
+  journal   = {Annals of Operations Research},
+  year      = {1988},
+  volume    = {14},
+  number    = {1},
+  pages     = {105--123},
+  doi       = {10.1007/BF02186476}
+}
+
+% ============================================================
+% Ordering: METIS
+% ============================================================
+
+@article{karypis1998fast,
+  author    = {Karypis, George and Kumar, Vipin},
+  title     = {A Fast and High Quality Multilevel Scheme for Partitioning
+               Irregular Graphs},
+  journal   = {{SIAM} Journal on Scientific Computing},
+  year      = {1998},
+  volume    = {20},
+  number    = {1},
+  pages     = {359--392},
+  doi       = {10.1137/S1064827595287997},
+  url       = {https://doi.org/10.1137/S1064827595287997}
+}
+
+@article{karypis1998kway,
+  author    = {Karypis, George and Kumar, Vipin},
+  title     = {Multilevel k-way Partitioning Scheme for Irregular Graphs},
+  journal   = {Journal of Parallel and Distributed Computing},
+  year      = {1998},
+  volume    = {48},
+  number    = {1},
+  pages     = {96--129},
+  doi       = {10.1006/jpdc.1997.1404},
+  url       = {https://doi.org/10.1006/jpdc.1997.1404}
+}
+
+% ============================================================
+% Ordering: KaHIP / SCOTCH
+% ============================================================
+
+@inproceedings{sanders2011engineering,
+  author    = {Sanders, Peter and Schulz, Christian},
+  title     = {Engineering Multilevel Graph Partitioning Algorithms},
+  booktitle = {Algorithms -- ESA 2011},
+  series    = {Lecture Notes in Computer Science},
+  year      = {2011},
+  pages     = {469--480},
+  doi       = {10.1007/978-3-642-23719-5_40},
+  url       = {https://doi.org/10.1007/978-3-642-23719-5_40}
+}
+
+@inproceedings{pellegrini1996scotch,
+  author    = {Pellegrini, Fran\c{c}ois and Roman, Jean},
+  title     = {Scotch: A Software Package for Static Mapping by Dual Recursive
+               Bipartitioning of Process and Architecture Graphs},
+  booktitle = {High-Performance Computing and Networking},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {1067},
+  year      = {1996},
+  pages     = {493--498},
+  doi       = {10.1007/3-540-61142-8_588},
+  url       = {https://doi.org/10.1007/3-540-61142-8_588}
+}
+
+% ============================================================
+% Pivoting: rook / refined Bunch-Kaufman
+% ============================================================
+
+@article{duffreid1996zeros,
+  author    = {Duff, Iain S. and Reid, John K.},
+  title     = {Exploiting Zeros on the Diagonal in the Direct Solution of
+               Indefinite Sparse Symmetric Linear Systems},
+  journal   = {{ACM} Transactions on Mathematical Software},
+  year      = {1996},
+  volume    = {22},
+  number    = {2},
+  pages     = {227--257},
+  doi       = {10.1145/229473.229480},
+  url       = {https://doi.org/10.1145/229473.229480}
+}
+
+@article{ashcraft1998accurate,
+  author    = {Ashcraft, Cleve and Grimes, Roger G. and Lewis, John G.},
+  title     = {Accurate Symmetric Indefinite Linear Equation Solvers},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {1998},
+  volume    = {20},
+  number    = {2},
+  pages     = {513--561},
+  doi       = {10.1137/S0895479896296921},
+  url       = {https://doi.org/10.1137/S0895479896296921}
+}
+
+@article{foster1997rook,
+  author    = {Foster, Leslie V.},
+  title     = {The Growth Factor and Efficiency of {Gaussian} Elimination
+               with Rook Pivoting},
+  journal   = {Journal of Computational and Applied Mathematics},
+  year      = {1997},
+  volume    = {86},
+  number    = {1},
+  pages     = {177--194},
+  doi       = {10.1016/S0377-0427(97)00154-4},
+  url       = {https://doi.org/10.1016/S0377-0427(97)00154-4}
+}

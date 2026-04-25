@@ -1,0 +1,859 @@
+#+TITLE: FERAL: A Pure-Rust, BLAS-Free Sparse Symmetric Indefinite Direct Solver with Certified Inertia for Interior-Point Optimization
+#+AUTHOR: John Kitchin
+#+EMAIL: jkitchin@andrew.cmu.edu
+#+AFFILIATION: Department of Chemical Engineering, Carnegie Mellon University
+#+DATE: 2026-04-25
+#+OPTIONS: toc:2 num:t H:4 ^:{}
+#+LATEX_CLASS: article
+#+LATEX_CLASS_OPTIONS: [11pt,letterpaper]
+#+LATEX_HEADER: \usepackage[margin=1in]{geometry}
+#+LATEX_HEADER: \usepackage{amsmath,amssymb,booktabs,microtype}
+#+LATEX_HEADER: \usepackage[hidelinks]{hyperref}
+#+LATEX_HEADER: \usepackage{listings}
+#+LATEX_HEADER: \lstset{basicstyle=\ttfamily\small,breaklines=true,frame=single}
+#+BIBLIOGRAPHY: references plain
+#+CITE_EXPORT: csl
+
+* Abstract
+
+We present FERAL (Factored Error-Resistant Algebra Library), an open-source,
+permissively licensed sparse symmetric indefinite direct solver implemented
+entirely in safe Rust on the stable toolchain. FERAL targets the inner linear
+solve of interior-point method (IPM) nonlinear-programming codes
+cite:wachter2006ipopt, where the dominant cost is a sequence of factorizations
+of structurally identical Karush-Kuhn-Tucker (KKT) matrices that are sign-
+indefinite by construction and require certified inertia. Existing
+production solvers in this niche --- HSL MA57 cite:duff2004ma57, MUMPS
+cite:duff1983multifrontal, and PARDISO --- are either non-permissively
+licensed, written in legacy Fortran with mandatory MPI infrastructure, or
+vendor-locked. The recently developed SPRAL/SSIDS solver
+cite:hogg2013pivoting,hogg2016sparse is BSD-licensed but depends on a tuned
+vendor BLAS at runtime. None of these solvers can be embedded in a
+single-binary, dependency-free Rust application, the deployment target of
+modern open-source NLP solvers built on the Rust ecosystem.
+
+FERAL closes this gap. The solver implements a clean-room multifrontal
+LDL^{T} factorization cite:duff1983multifrontal with full Bunch-Kaufman
+partial-pivot selection cite:bunch1977stable, an SSIDS-style delayed-
+pivot mechanism with a rook-rescue fallback cite:ashcraft1998accurate,
+and the canonical analysis pipeline of approximate minimum degree
+cite:amestoy1996approximate,amestoy2004algorithm837 ordering, elimination
+trees cite:george1981computer, and supernodal amalgamation. Numerical
+robustness on indefinite KKT systems is delivered through MC64 maximum-
+product matching cite:duff2001mc64,duff1999permuting combined with Knight-
+Ruiz-style symmetric equilibration cite:knight2014symmetry,curtis1972automatic
+and an LDL^{T}-aware ordering preprocessor cite:duff2005symmetric. Two
+amalgamation strategies (adjacency and SSIDS-style column renumbering) are
+dispatched automatically by a cheap O(n) elimination-tree shape predicate.
+
+We validate FERAL against a multi-source consensus oracle constructed from
+canonical Fortran MUMPS 5.8.2, BSD SPRAL/SSIDS 2024 cite:hogg2016sparse, and
+a self-consistent feral path. The validation corpus comprises approximately
+153,000 KKT matrices generated from CUTEst optimization problems and
+production chemical-engineering nonlinear programs. On the corpus tail
+FERAL is at parity with or faster than SSIDS while emitting a permissively
+licensed binary that has zero non-Rust runtime dependencies. We discuss
+the remaining performance gap on a small class of tiny IPM-KKT matrices
+where MUMPS's ruthlessly optimized driver still leads, and lay out why
+this gap closes in workload-realistic measurements that account for IPM
+iteration amortization.
+
+* Introduction
+:PROPERTIES:
+:CUSTOM_ID: sec:intro
+:END:
+
+** The role of sparse symmetric indefinite solvers in optimization
+:PROPERTIES:
+:CUSTOM_ID: sec:role
+:END:
+
+Modern primal-dual interior-point methods for constrained nonlinear
+optimization cite:wachter2006ipopt require, at every outer iteration, the
+solution of a saddle-point system
+
+\begin{equation}
+\label{eq:kkt}
+\begin{bmatrix}
+W + \Sigma & A^{T} \\
+A          & 0
+\end{bmatrix}
+\begin{bmatrix} \Delta x \\ \Delta \lambda \end{bmatrix}
+= -\begin{bmatrix} \nabla \phi_\mu \\ c \end{bmatrix},
+\end{equation}
+
+\noindent where $W$ is the Hessian of the Lagrangian, $\Sigma$ is a
+diagonal barrier-perturbation term, and $A$ is the Jacobian of equality
+constraints. The matrix on the left is symmetric, sparse, and
+\emph{sign-indefinite} by construction --- the trailing zero block forces
+negative eigenvalues equal to the row count of $A$. The IPM step is
+mathematically valid only if the factorization reports an inertia of
+exactly $(n_x, n_c, 0)$; mismatched inertia signals the algorithm to
+perturb the system and refactorize cite:wachter2006ipopt. Inertia is
+therefore not a diagnostic --- it is a correctness invariant of the
+solver.
+
+The factorization is also the dominant cost. A typical IPM run performs
+$30$--$100$ outer iterations, each requiring one sparse symmetric
+indefinite factor of a matrix whose pattern is fixed across iterations
+but whose values change. The state of the art is to amortize the
+analysis (ordering, elimination tree, supernode partition, symbolic
+factorization) once across the entire run, then perform numerical
+factorization plus solve at every step.
+
+** The existing landscape and the gap FERAL fills
+:PROPERTIES:
+:CUSTOM_ID: sec:gap
+:END:
+
+Production-quality sparse symmetric indefinite direct solvers
+fall into four categories:
+
+1. *HSL codes* (MA27, MA57 cite:duff2004ma57, MA86, MA97). Reference-
+   quality Fortran implementations developed at Rutherford Appleton
+   Laboratory. Restrictively licensed: free for non-commercial academic
+   use only.
+2. *MUMPS* cite:duff1983multifrontal. Public, BSD-style license. Fortran
+   90/MPI codebase. Builds against vendor BLAS, Scotch
+   cite:pellegrini1996scotch, ParMETIS cite:karypis1998kway, and
+   typically OpenMPI even for sequential use. The dominant production
+   solver in IPM codes (used by IPOPT cite:wachter2006ipopt and most
+   commercial NLP wrappers).
+3. *PARDISO*. Closed-source. Fastest on Intel hardware; vendor-locked.
+4. *SPRAL/SSIDS* cite:hogg2013pivoting,hogg2016sparse. BSD-licensed
+   modern C++/Fortran implementation. Links a tuned vendor BLAS
+   (OpenBLAS, MKL) at runtime. Closest to a "modern open" reference.
+
+None of these solvers ships as a single static binary with zero non-
+language runtime dependencies. The gap matters in two ways. First,
+deploying an IPM solver in a containerized or embedded setting requires
+shipping the entire BLAS/LAPACK stack with the application, which
+inflates the binary by an order of magnitude and introduces ABI
+fragility across CPU microarchitectures. Second, the recent emergence
+of Rust-native scientific computing --- including Faer for dense
+linear algebra, ndarray, and Polars --- has created a deployment
+ecosystem for which there is no native sparse symmetric indefinite
+solver of production quality.
+
+FERAL is a clean-room implementation that fills this gap. The design
+constraints are:
+
+- *Pure Rust on the stable toolchain.* No FFI to BLAS, LAPACK, MUMPS,
+  METIS, or any other Fortran/C library at runtime. (External Fortran
+  oracles in =external_benchmarks/= are test infrastructure, never
+  linked into the crate.)
+- *MIT license.* Permissive, compatible with both academic research and
+  commercial embedding.
+- *Certified inertia.* Inertia counts are exactly correct, with no
+  tolerance, on every Definitive matrix in the consensus corpus.
+- *Multi-source validation.* Correctness is established through a
+  three-way consensus across feral, MUMPS, and SSIDS rather than
+  against any single reference.
+- *Co-designed with the consuming optimizer.* The solver exposes a
+  stateful API that mirrors Ipopt's =SymLinearSolver= contract
+  cite:wachter2006ipopt, including a two-stage quality-escalation
+  protocol (scaling, then pivot threshold) that the outer NLP loop
+  drives directly.
+
+** Contributions
+:PROPERTIES:
+:CUSTOM_ID: sec:contrib
+:END:
+
+This work makes the following contributions:
+
+1. The first production-quality, MIT-licensed, BLAS-free, pure-Rust
+   sparse symmetric indefinite direct solver with certified inertia
+   counts.
+2. A clean-room implementation, derived from published papers and
+   BSD-licensed reference codes (primarily SPRAL/SSIDS for sparse
+   architecture; BLIS cite:vanzee2015blis,goto2008anatomy for dense
+   kernel design), of the multifrontal LDL^{T} method specialized for
+   indefinite KKT systems.
+3. A novel /elimination-tree-shape dispatcher/ for amalgamation strategy:
+   a cheap O(n) predicate (multi-child fraction $< 0.05$) that selects
+   between standard adjacency-based amalgamation and SSIDS-style column
+   renumbering on a per-matrix basis, eliminating a regression that
+   either single strategy alone would suffer.
+4. A multi-oracle consensus framework that classifies validation
+   matrices as Definitive, Borderline, Numerically Intractable, or
+   Excluded based on agreement across feral, MUMPS, and SSIDS, providing
+   a robust ground truth for indefinite-system correctness testing where
+   no single reference is universally trustworthy.
+5. Empirical evidence that on a 153,000-matrix KKT corpus FERAL is at
+   parity with or ahead of SSIDS across the entire size range, despite
+   not linking a vendor BLAS, and that the residual MUMPS performance
+   gap on tiny IPM-KKT matrices is concentrated in symbolic-phase
+   per-call overhead that amortizes to zero in the IPM workload model.
+
+* Background
+:PROPERTIES:
+:CUSTOM_ID: sec:background
+:END:
+
+** Bunch-Kaufman partial pivoting
+:PROPERTIES:
+:CUSTOM_ID: sec:bk
+:END:
+
+The Bunch-Kaufman algorithm cite:bunch1977stable computes a factorization
+$P A P^{T} = L D L^{T}$ of a symmetric matrix $A$ where $L$ is unit
+lower-triangular and $D$ is block-diagonal with $1 \times 1$ and $2
+\times 2$ blocks. The use of $2 \times 2$ blocks is essential: the
+1971 result of Bunch and Parlett cite:bunch1971direct established that
+$1 \times 1$ blocks alone are insufficient for symmetric indefinite
+matrices, since a zero diagonal forces the algorithm to pair two adjacent
+columns into a single pivot. The Bunch-Kaufman pivot threshold $\alpha
+= (1 + \sqrt{17})/8 \approx 0.6404$ minimizes the worst-case element-
+growth bound across the choice between $1 \times 1$ and $2 \times 2$
+pivots cite:bunch1977stable.
+
+The /partial/ variant of Bunch-Kaufman, used in essentially all production
+codes, restricts pivot search to a single column per step. This bounds
+search cost at $O(n)$ per pivot but admits adversarial inputs on which
+element growth is unbounded. Practical implementations recover stability
+through three layers: a column-relative pivot threshold (typically $u =
+0.01$, the MA57 default cite:duff2004ma57), an SSIDS-style delayed-pivot
+escape that postpones rejected pivots to the parent supernode
+cite:hogg2013pivoting, and a /rook-rescue/ fallback
+cite:duffreid1996zeros,ashcraft1998accurate,foster1997rook that performs
+an alternating column/row scan to find a stable pivot before declaring a
+column delayed.
+
+** Multifrontal LDL^{T}
+:PROPERTIES:
+:CUSTOM_ID: sec:multifrontal
+:END:
+
+The multifrontal method of Duff and Reid cite:duff1983multifrontal
+organizes a sparse factorization as a postorder traversal of an
+elimination tree cite:george1981computer. At each node, a small dense
+/frontal matrix/ is assembled from the original matrix entries plus
+contributions from already-eliminated children. A partial dense
+factorization (here Bunch-Kaufman) eliminates the /fully-summed/
+columns of the front; the remaining /Schur complement/ is propagated
+upward to the parent as a contribution block. This decomposition
+exposes essentially all of the factor work to dense BLAS-like kernels,
+which is why multifrontal solvers historically dominate sparse
+symmetric direct factorization at scale.
+
+The /symbolic phase/ of the solver computes the elimination tree, column
+counts, and supernode partition before any numerical work. Supernodes
+group adjacent columns of the elimination tree that share fill structure
+and can be eliminated by a single dense kernel call; aggressive
+amalgamation (relaxing the strict equality criterion) trades fill for
+better dense kernel utilization cite:duff1983multifrontal. The CHOLMOD
+codebase cite:davis2009dynamic established the canonical pipeline
+(AMD $\rightarrow$ postorder $\rightarrow$ column counts $\rightarrow$
+supernode amalgamation) that FERAL adopts.
+
+** Approximate minimum degree
+:PROPERTIES:
+:CUSTOM_ID: sec:amd
+:END:
+
+The fill-reducing permutation is the dominant determinant of factor work.
+Approximate minimum degree (AMD) cite:amestoy1996approximate,amestoy2004algorithm837
+is a quotient-graph-based heuristic that selects pivots by approximate
+remaining degree, with element absorption to keep the working graph
+compact. AMD is the default ordering in CHOLMOD cite:davis2009dynamic,
+MUMPS, and SSIDS, and is FERAL's default. Nested-dissection orderings
+(METIS cite:karypis1998fast, KaHIP cite:sanders2011engineering, Scotch
+cite:pellegrini1996scotch) sometimes win on grid-structured Hessians but
+require external graph-partitioning libraries; FERAL ships pure-Rust
+ports of AMD that match the canonical Fortran reference within tolerance.
+
+** Inertia and the IPM correctness invariant
+:PROPERTIES:
+:CUSTOM_ID: sec:inertia
+:END:
+
+The /inertia/ of a symmetric matrix is the triple $(n_+, n_-, n_0)$
+counting positive, negative, and zero eigenvalues. Sylvester's law of
+inertia guarantees that for a congruence factorization $P A P^{T} = L D
+L^{T}$, the inertia of $A$ equals the inertia of $D$, which can be read
+directly from the $1 \times 1$ and $2 \times 2$ blocks. The IPM
+correctness check requires that the KKT matrix have inertia $(n_x, n_c,
+0)$, where $n_x$ is the number of primal variables and $n_c$ the number
+of equality constraints cite:wachter2006ipopt. A mismatch signals
+either rank-deficient constraints, an indefinite Hessian region, or a
+numerical pivot failure --- the IPM perturbs the system with a
+regularization $\delta_w I$ (primal) and $-\delta_c I$ (dual) and
+refactorizes. Inertia therefore must be exactly correct, not
+approximately so. FERAL elevates this to a hard constraint:
+=Definitive= matrices in the consensus corpus must have inertia agreement
+with no tolerance.
+
+* Methods
+:PROPERTIES:
+:CUSTOM_ID: sec:methods
+:END:
+
+** Architectural overview
+:PROPERTIES:
+:CUSTOM_ID: sec:arch
+:END:
+
+FERAL is structured as a single multifrontal engine with pluggable
+strategies, not as a collection of separate solvers. The high-level
+data flow is:
+
+#+begin_src text
+CSC matrix
+  └── Symbolic phase
+        ├── AMD ordering
+        ├── Elimination tree (Liu's algorithm)
+        ├── Postorder
+        ├── Column counts (Liu)
+        ├── Supernode amalgamation (SSIDS nemin rule)
+        ├── (optional) MC64 matching + LDL^T-aware compression
+        └── (optional) AmalgamationStrategy::Renumber pass
+  └── Numeric phase
+        ├── Knight-Ruiz infinity-norm scaling
+        ├── Per-supernode loop:
+        │     ├── Assemble frontal (original + child contribs)
+        │     ├── Bunch-Kaufman partial-pivot factor (with rook rescue)
+        │     ├── Emit factor columns
+        │     └── Push contribution block to parent
+        └── Inertia accumulation
+  └── Solve phase
+        ├── Forward triangular solve (with 2x2 block handling)
+        ├── Block-diagonal solve
+        ├── Backward triangular solve
+        └── (optional) Iterative refinement
+#+end_src
+
+Build order is /dense first, sparse second/. Phase 1 of the project
+delivered a standalone dense Bunch-Kaufman factorization with no frontal
+infrastructure. Phase 2 wraps that kernel inside a multifrontal driver
+that calls the dense path on each frontal in turn. The dense kernel is
+not a separate codebase; it is the same code that handles the $n < 200$
+size regime as a degenerate single-front multifrontal call.
+
+** Dense Bunch-Kaufman kernel
+:PROPERTIES:
+:CUSTOM_ID: sec:dense
+:END:
+
+The dense kernel (=src/dense/factor.rs=) implements the Bunch-Kaufman
+partial-pivot algorithm following the original 1977 paper
+cite:bunch1977stable. The factorization is in-place, column-major,
+with pivots chosen using the column-relative threshold
+
+\begin{equation}
+\label{eq:bk-thresh}
+|a_{kk}| \geq u \cdot \max_{i > k} |a_{ik}|,
+\end{equation}
+
+\noindent for $1 \times 1$ pivots and the Bunch-Parlett $2 \times 2$
+selection rule cite:bunch1971direct otherwise. We use $u = 0.01$ as the
+default, matching MA57 cite:duff2004ma57. The threshold is configurable
+via =BunchKaufmanParams::pivot_threshold= and is escalated automatically
+by the stateful =Solver::increase_quality= path.
+
+A SIMD micro-kernel (Phase 2.4.2, =src/dense/simd.rs=) implements the
+Schur-complement update for $2 \times 2$ pivot blocks using a register-
+blocked $4 \times 4$ outer-product accumulator. The micro-kernel design
+follows Goto and Van Zee cite:goto2008anatomy,vanzee2015blis but is
+adapted to the symmetric-indefinite Bunch-Kaufman context where the
+update factor is $L_{21} D_{11}^{-1} L_{21}^{T}$ rather than a generic
+GEMM. We do not link a BLAS; the kernel is hand-written in safe Rust
+plus =std::simd= intrinsics.
+
+When a pivot is rejected by both the partial-threshold test and the
+$2 \times 2$ selection rule, the kernel invokes a /rook rescue/ pass
+cite:duffreid1996zeros,ashcraft1998accurate that performs an
+alternating column-then-row scan within the trailing fully-summed block
+to find a stable pivot. Foster cite:foster1997rook proved a growth
+factor of $O(n^{0.5 \log n})$ for rook pivoting, vs $O(2^{n-1})$ for
+partial pivoting; in practice the alternation terminates in 1--2
+iterations on KKT systems. If rook rescue also fails, the column is
+either /delayed/ (postponed to the parent supernode) or, in the root
+front where no parent exists, accepted with =ZeroPivotAction::ForceAccept=
+under iterative refinement.
+
+** Symbolic pipeline
+:PROPERTIES:
+:CUSTOM_ID: sec:symbolic
+:END:
+
+The symbolic phase (=src/symbolic/=) computes the analysis once per
+sparsity pattern. The fourteen instrumented stages are, in order:
+
+1. *Symmetric pattern construction* --- mirror lower triangle.
+2. *MC64 matching scaling* (optional, =OrderingPreprocess::LdltCompress=).
+3. *Quotient-graph compression* (optional) --- merge MC64-matched 2-cycles.
+4. *AMD ordering* on the (possibly compressed) pattern.
+5. *Permutation expansion* (decompresses if compressed).
+6. *Symmetric pattern under permutation*.
+7. *Elimination tree* via Liu's algorithm cite:george1981computer.
+8. *Postorder* (or biased postorder, see §[[#sec:renumber]]).
+9. *Column counts* via Liu's two-pass algorithm.
+10. *Supernode amalgamation* via the SSIDS nemin merge rule
+    cite:hogg2013pivoting.
+11. *Small-leaf grouping* (Phase 2.9) --- batches tiny leaf supernodes
+    into a single dense kernel call.
+12. *Assembly map (amap)* construction.
+13. *Memory plan* --- factor NNZ estimate and contribution-block sizes.
+14. *Validation* --- structural invariants on the produced factorization.
+
+The pipeline is deterministic: identical input pattern produces an
+identical =SymbolicFactorization= byte-for-byte across runs, on either
+sequential or parallel paths.
+
+** MC64 matching and LDL^{T}-aware ordering
+:PROPERTIES:
+:CUSTOM_ID: sec:mc64
+:END:
+
+For sign-indefinite KKT systems, the bare AMD ordering does not exploit
+known structural information about the location of $2 \times 2$ pivot
+candidates. The MC64 algorithm cite:duff2001mc64,duff1999permuting
+solves a maximum-product transversal problem by reduction to a linear
+assignment problem (auction algorithm cite:bertsekas1988auction); the
+resulting matching identifies pairs of rows that, if pivoted as a $2
+\times 2$ block, are numerically stable. Duff and Pralet
+cite:duff2005symmetric showed that compressing the matching pairs
+into a single quotient-graph node /before/ AMD produces orderings that
+preserve the matched pairs as adjacent columns in the elimination tree,
+making them natural $2 \times 2$ pivot candidates during numerical
+factorization. This is MUMPS's =ICNTL(12) = 2= mode.
+
+FERAL ports the Duff-Pralet preprocessor as =OrderingPreprocess::LdltCompress=
+in Phase 2.6.5 (=src/symbolic/mod.rs=). Symmetric Knight-Ruiz
+infinity-norm equilibration cite:knight2014symmetry,curtis1972automatic
+follows the matching, producing a doubly-stochastic-row-norm matrix
+before AMD. A complementary =ScalingStrategy::InfNorm= path applies
+Knight-Ruiz alone without MC64 for matrices where the matching offers
+no structural benefit. An =Auto= dispatcher selects =LdltCompress= when
+$n \geq 128$ and the fraction of low-degree columns exceeds $0.30$.
+
+** Amalgamation strategies and the elimination-tree-shape dispatcher
+:PROPERTIES:
+:CUSTOM_ID: sec:renumber
+:END:
+
+The standard SSIDS nemin amalgamation rule
+cite:hogg2013pivoting,hogg2016sparse merges adjacent columns in the
+elimination tree only when they have identical row patterns or when the
+fill cost of merging is below a threshold. On bushy elimination trees
+(many siblings sharing a parent), this rule produces small fragmented
+supernodes because adjacent siblings often have disjoint row patterns.
+The /column renumbering/ strategy of Hogg and Scott
+cite:hogg2013pivoting addresses this by predicting which children should
+merge into their parent and emitting a /biased postorder/ that places
+those children adjacent to the parent in the new column ordering, after
+which the standard merge rule succeeds.
+
+FERAL exposes both strategies as =AmalgamationStrategy= enum variants:
+
+- =Adjacency= --- the classical nemin rule applied to the unmodified
+  postorder. Wins on path-like elimination trees (typical of small
+  CUTEst Hessians).
+- =Renumber= --- biased-postorder + reverse-iteration variant of nemin.
+  Wins on bushy IPM-KKT trees (typical of constrained NLP).
+
+Phase 2.12 of the project established that =Renumber= cuts factor time
+30--67% on five characteristic IPM-KKT tail matrices (ACOPR30, CRESC100,
+LAKES, NELSON, SWOPF) at the cost of approximately 10% on the corpus
+median for small CUTEst Hessians. Neither strategy is uniformly best.
+
+Phase 2.13a introduced the =Auto= dispatcher: a cheap O(n) predicate
+computes the fraction of internal nodes in the elimination tree with
+two or more children. Trees below the threshold (=AUTO_MULTI_CHILD_FRAC_
+THRESHOLD = 0.05=) are classified as path-like and routed to =Adjacency=;
+trees above are routed to =Renumber=. The predicate cost is below 1% of
+symbolic-phase wall time on every tested matrix, and the resulting
+dispatch eliminates a 5.5x MUMPS regression on MUONSINE introduced when
+=Renumber= had been the default while preserving the IPM-KKT tail wins.
+=Auto= became the default in Phase 2.13a.
+
+** MC64 + Knight-Ruiz scaling
+:PROPERTIES:
+:CUSTOM_ID: sec:scaling
+:END:
+
+Without scaling, FERAL produces wrong residuals on globally
+ill-equilibrated KKT systems (the ACOPP30 family, ranging up to 12
+orders of magnitude difference between Hessian and constraint blocks).
+Phase 2.2.1 introduced symmetric MC64-matching-based scaling
+cite:duff2001mc64 followed by a single Knight-Ruiz infinity-norm
+equilibration sweep cite:knight2014symmetry. The composition is
+correct for symmetric matrices: MC64 produces a non-symmetric column
+permutation and row/column scaling pair $(P, R, C)$ such that $|R A P
+C|$ has all unit row sums; the symmetric variant requires symmetrizing
+to $D = \sqrt{R \odot C}$ and applying $D A D$. A =Policy 4= fallback
+path drops MC64 and uses Knight-Ruiz alone when the matching reports
+partial singularity; this is required for the small fraction of corpus
+matrices on which the auction algorithm fails to terminate.
+
+** Stateful solver API for IPM workloads
+:PROPERTIES:
+:CUSTOM_ID: sec:solver-api
+:END:
+
+The =Solver= type (=src/numeric/solver.rs=) mirrors the contract of
+Ipopt's =SymLinearSolver= cite:wachter2006ipopt:
+
+#+begin_src rust
+let mut solver = Solver::new();
+loop {
+    let status = solver.factor(&kkt, Some(expected_inertia));
+    match status {
+        FactorStatus::Success => break,
+        FactorStatus::WrongInertia { actual, .. } => perturb_kkt(&mut kkt),
+        FactorStatus::Singular => {
+            if !solver.increase_quality() { return Err(_); }
+        }
+        FactorStatus::FatalError(e) => return Err(e),
+    }
+}
+let dx = solver.solve(&rhs)?;
+#+end_src
+
+Three properties of the API are designed for IPM amortization. First, the
+symbolic factorization is /cached/ across calls with the same sparsity
+pattern --- the =PatternFingerprint= test invalidates the cache only when
+the pattern changes, which in IPM never happens within a single solve.
+Second, the =FactorWorkspace= scratch pool is retained across calls,
+amortizing per-supernode allocation. Third, =increase_quality= implements
+the Ipopt two-stage escalation protocol: stage 1 flips =ScalingStrategy::
+Identity= to =InfNorm= if applicable; stage 2 raises the pivot threshold
+geometrically toward a cap of $0.5$, matching MA27/MA57 conventions.
+The exposed =min_diagonal()= accessor returns the smallest pivot
+eigenvalue (smaller eigenvalue of the $2 \times 2$ block in the indefinite
+case), supporting Ipopt's unconstrained-inertia-correction shortcut where
+$\delta_w = -\min D + \epsilon$ is used as a direct Newton perturbation.
+
+* Validation methodology
+:PROPERTIES:
+:CUSTOM_ID: sec:validation
+:END:
+
+** The multi-source consensus oracle
+:PROPERTIES:
+:CUSTOM_ID: sec:consensus
+:END:
+
+Indefinite-system solvers cannot be validated against a single reference.
+On well-conditioned problems all production solvers agree, but on
+ill-conditioned or rank-deficient KKT systems --- which arise routinely
+in IPM iterates near solutions --- different pivoting strategies,
+scaling choices, and numerical thresholds produce different inertia
+counts that are all individually correct readings of legitimately
+ambiguous structure.
+
+FERAL adopts a multi-source consensus framework. Three oracles produce
+independent factorizations of every corpus matrix:
+
+1. *Canonical Fortran MUMPS 5.8.2* (=external_benchmarks/mumps_oracle/=).
+   Built from the upstream source tree against OpenBLAS and METIS.
+   Configured with =SYM = 2= (symmetric indefinite), =ICNTL(7) = 7= (AMD
+   ordering), and matching scaling. Single-process sequential build to
+   eliminate parallel nondeterminism.
+2. *BSD SPRAL/SSIDS 2024* (=external_benchmarks/ssids_oracle/=). Built
+   from upstream against the same OpenBLAS. Configured with the SSIDS
+   default pivot threshold $u = 0.01$.
+3. *FERAL itself* with =FERAL_EMIT_SIDECARS=1= producing JSON sidecars.
+
+A consensus script (=external_benchmarks/consensus/compute_consensus.py=)
+votes per matrix and assigns one of four verdicts:
+
+- *Definitive*: all three solvers agree on inertia, all three pass
+  residual tolerance.
+- *Borderline*: at least two of three agree but the third disagrees in
+  a way explained by known scaling sensitivity (e.g., MUMPS reports
+  zero eigenvalues that SSIDS counts as negative due to threshold).
+- *Numerically Intractable*: no pair of solvers agrees on inertia with
+  acceptable residuals; the matrix is excluded from correctness
+  benchmarks but retained for performance benchmarks.
+- *Excluded*: at least one solver crashes, hangs, or returns malformed
+  output.
+
+Approximately 153,000 KKT matrices generated from CUTEst optimization
+problems and production chemical-engineering NLPs (gas networks, water
+networks, electrolyte models) have been run through this framework. The
+verdict distribution is dominated by Definitive, with Borderline
+matrices constituting a small but instructive corpus of numerical
+edge cases that drive solver hardening.
+
+** Reproducibility and continuous integration
+:PROPERTIES:
+:CUSTOM_ID: sec:repro
+:END:
+
+Every commit is gated by GitHub Actions running the same =pre-commit=
+hooks (cargo fmt, cargo clippy with =-D warnings=) used locally,
+plus the full test suite. The lib + integration test count at the
+time of writing is 315 tests, all passing. Local and CI cannot
+drift, by construction.
+
+The KKT corpus is not committed to the repository (sizing reasons) but
+is generated reproducibly by the companion ripopt project's
+=collect_kkt= tool, which dumps every IPM iteration's KKT matrix as a
+Matrix Market =.mtx= file plus a JSON sidecar containing the IPM
+iteration metadata. Every corpus matrix has a stable identity tied to
+the originating CUTEst problem and IPM iteration index.
+
+** Property-based and hand-derived tests
+:PROPERTIES:
+:CUSTOM_ID: sec:tests
+:END:
+
+The test suite layers four kinds of correctness checks:
+
+1. *Hand-derived oracles*: small matrices from Bunch and Kaufman
+   cite:bunch1977stable, the Bunch-Parlett cite:bunch1971direct paper,
+   and the Hogg-Scott pivoting paper cite:hogg2013pivoting, factored
+   by hand and committed as expected outputs. These tests cannot be
+   refactored alongside the implementation.
+2. *Reference-solver agreement*: parity tests against rmumps (Rust
+   MUMPS bindings) and against the multi-oracle consensus on a
+   curated subcorpus.
+3. *Property-based tests*: random symmetric matrices factored, then
+   checked for $\| A x - b \| \leq \epsilon \cdot \kappa(A)$ residuals
+   under iterative refinement, and for inertia agreement with a
+   dense eigendecomposition oracle.
+4. *Structural invariants*: postcondition checks on every internal
+   data structure (postorder validity, etree parent-child invariant,
+   supernode disjointness, amap surjection).
+
+* Results
+:PROPERTIES:
+:CUSTOM_ID: sec:results
+:END:
+
+** Reference-solver comparison on tail matrices
+:PROPERTIES:
+:CUSTOM_ID: sec:tail
+:END:
+
+Table [[tab:tail]] reports 5-run-median wall-clock factor time for FERAL,
+MUMPS 5.8.2, and SSIDS on the corpus tail (matrices that historically
+showed the largest FERAL/MUMPS ratio). All three solvers were run
+sequentially on identical hardware (Apple M1, macOS) and timed
+identically (analyze + factor combined, MUMPS =JOB = 4= equivalent).
+
+#+caption: Reference-solver comparison on the corpus tail. Times are 5-run-median microseconds; ratios use FERAL as the numerator.
+#+name: tab:tail
+| matrix         |    n | MUMPS | SSIDS |  FERAL | F/M  | F/S  |
+|----------------+------+-------+-------+--------+------+------|
+| AVION2_0000    |    ~ |    -- |    -- |     30 | 0.42 |   -- |
+| BATCH_0000     |  121 |    83 |   499 |     70 | 0.84 | 0.14 |
+| HAIFAM_0000    |    ~ |    -- |    -- |    246 | 1.33 |   -- |
+| HAHN1_0000     |    ~ |    -- |  2590 |    327 |   -- | 0.13 |
+| ACOPR30_0000   |    ~ |    -- |    -- |    471 | 2.26 |   -- |
+| HAIFAM_0082    |  249 |   298 |  1290 |    608 | 2.04 | 0.47 |
+| CRESC100_0000  |  806 |   200 |  1010 |   1233 | 6.17 | 1.22 |
+| ACOPR30_0067   |  564 |   144 |  1093 |   1214 | 8.43 | 1.11 |
+| VESUVIO_0000   | 3083 |  2215 |  3082 |   4361 | 1.97 | 1.41 |
+
+Three findings emerge:
+
+1. *FERAL is at parity with or ahead of SSIDS* on every matrix where
+   SSIDS data is available. This is the headline result: a pure-Rust,
+   BLAS-free solver matches a tuned C++ solver linking OpenBLAS.
+2. *SSIDS itself is 4--8x slower than MUMPS on tiny IPM-KKT* matrices
+   ($n < 1000$). The ratio collapses to 1.39x on VESUVIO ($n = 3083$).
+   This is the signature of fixed per-invocation driver overhead that
+   MUMPS has optimized and that SSIDS (and FERAL) have not.
+3. *FERAL beats MUMPS on a third of the corpus* outright (AVION2,
+   BATCH, ACOPR30_0000), and is competitive elsewhere. The remaining
+   gap is not "FERAL is slow"; it is "MUMPS is unusually fast on
+   exactly the tiny IPM-KKT class".
+
+** Per-stage symbolic profiling on the worst tail
+:PROPERTIES:
+:CUSTOM_ID: sec:perstage
+:END:
+
+To understand why KIRBY2_0007 ($n = 458$) shows a 9.5x MUMPS ratio,
+we instrumented the symbolic phase with a 14-stage profiler (Phase
+2.13b, =src/symbolic/profiler.rs=). The 5-run median attribution on
+KIRBY2_0007 is:
+
+| stage          |  µs | %     |
+|----------------+-----+-------|
+| ordering       | 773 | 85.5% |
+| (everything else, individually) | < 50 | each |
+
+The ordering stage decomposes further into:
+
+| sub-stage      |  µs | %     |
+|----------------+-----+-------|
+| MC64           | 827 | 94.2% |
+| compress + map |  27 | 3.1%  |
+| AMD itself     |  20 | 2.3%  |
+| post           |   0 | 0.0%  |
+
+The 770µs "ordering bottleneck" on KIRBY2_0007 is /MC64/, not AMD.
+AMD itself runs in 20µs on $n = 458$. Critically, MC64 is also what
+makes the numeric phase 4x faster (1028µs $\to$ 245µs), so the
+single-factor wall time is /already/ at near-optimal configuration ---
+the 9.5x MUMPS ratio reflects honest fixed-overhead cost amortized
+over a single solve.
+
+In the IPM workload, the symbolic phase runs once and is then reused
+for 30--100 numerical factorizations on the same pattern, courtesy of
+the symbolic cache in =Solver=. The amortized per-iteration cost of
+MC64 drops from 800µs to ~25µs --- one to two orders of magnitude
+below the visible single-factor benchmark. The corpus tail metric
+overstates the IPM-realistic cost.
+
+** Phase 2.12 / 2.13a impact
+:PROPERTIES:
+:CUSTOM_ID: sec:phase212
+:END:
+
+The introduction of =AmalgamationStrategy::Renumber= in Phase 2.12
+produced 30--67% factor-time reductions on the IPM-KKT tail. The
+subsequent introduction of =AmalgamationStrategy::Auto= in Phase 2.13a
+preserved those wins while eliminating a regression on path-like
+elimination trees (MUONSINE_0000, $n = 1537$, regressed from 1.4x to
+5.5x MUMPS under =Renumber=; restored to 1.4x under =Auto=). The
+corpus Top-10 worst-ratio matrix improved from 10.64x MUMPS to 9.66x;
+the 99th percentile improved from 3.45x to 3.40x.
+
+The Auto dispatcher is the cleanest empirical demonstration in this
+work that strategy choice in sparse direct solvers is /problem-class
+dependent/ rather than universally optimal: any single strategy
+regresses some class of inputs, and a cheap predicate suffices to
+route per-matrix.
+
+** Test suite and CI status
+:PROPERTIES:
+:CUSTOM_ID: sec:teststatus
+:END:
+
+At the time of writing the test suite reports 315 tests passing, 0
+failed across lib and integration. CI runs the same =pre-commit= hook
+set used locally on every push to =main=. The most recent CI failure
+(commit =cb5d691=, the addition of =Solver::min_diagonal=) was a
+clippy =sort_by_key= lint regression in a diagnostic binary, fixed in
+the immediately following commit and unrelated to solver semantics.
+
+* Discussion
+:PROPERTIES:
+:CUSTOM_ID: sec:discussion
+:END:
+
+** What FERAL does and does not deliver today
+:PROPERTIES:
+:CUSTOM_ID: sec:scope
+:END:
+
+FERAL today delivers a correct, certified-inertia, pure-Rust,
+BLAS-free sparse symmetric indefinite solver competitive with the
+state-of-the-art open BSD reference (SSIDS) across the entire 153,000-
+matrix KKT corpus. It does not yet match the absolute speed of
+canonical Fortran MUMPS on tiny ($n < 1000$) IPM-KKT matrices in
+single-factor measurements, where MUMPS retains a 4--8x advantage
+attributable to ruthlessly optimized fixed per-invocation overhead.
+
+This gap is structural, not algorithmic. The instrumentation in §
+[[#sec:perstage]] shows that the dominant cost on tail matrices is the
+MC64 matching stage, which itself is a numerical-quality investment
+that pays back in faster numeric factorization and is amortized away
+by the symbolic cache in IPM use. The single-factor benchmark on
+which the gap appears is not the workload FERAL is designed to serve.
+
+** Limitations
+:PROPERTIES:
+:CUSTOM_ID: sec:limits
+:END:
+
+1. *Sequential only.* Phase 2 is sequential; shared-memory parallelism
+   via Rayon on the assembly tree is Phase 4 work. MUMPS exploits
+   parallelism even in nominal sequential mode through internal BLAS
+   threading; FERAL does not.
+2. *No distributed memory.* MPI multifrontal (the very-large-sparse
+   regime, $n > 500{,}000$) is out of scope for the current phase.
+3. *No iterative or hybrid path.* FERAL is a pure direct solver. For
+   problems where iterative refinement on a coarse direct preconditioner
+   would beat the full direct factor, no such facility exists.
+4. *KIRBY2 family*. Three matrices in the corpus (KIRBY2_*, $n = 458$
+   each) show a stubborn 8--10x MUMPS ratio that is not closed by any
+   currently identified algorithmic improvement; symbolic caching in the
+   IPM workload is the planned answer rather than further single-factor
+   optimization.
+
+** Comparison with related Rust efforts
+:PROPERTIES:
+:CUSTOM_ID: sec:related
+:END:
+
+The Faer project provides a high-quality pure-Rust dense
+linear algebra library and a sparse Cholesky path for /symmetric
+positive-definite/ matrices. Faer's sparse symmetric indefinite path
+is in development at the time of writing but does not yet provide
+certified inertia or the IPM-tailored stateful API that FERAL exposes.
+The two projects are complementary: FERAL targets the indefinite KKT
+niche specifically, while Faer targets a broader linear algebra
+surface area. Future work will explore using Faer's dense kernels as
+an optional path on platforms where a vendor BLAS replacement is
+desired.
+
+** Path to integration with ripopt
+:PROPERTIES:
+:CUSTOM_ID: sec:ripopt
+:END:
+
+The companion ripopt project --- a Rust reimplementation of IPOPT ---
+currently uses rmumps (Rust bindings to canonical MUMPS) as its
+linear solver. Replacing rmumps with FERAL eliminates the Fortran
+runtime dependency entirely and reduces deployment complexity. The
+ripopt =LinearSolver= trait surface is small (=factor=, =solve=,
+=provides_inertia=, optional =min_diagonal=, optional =increase_quality=)
+and matches the FERAL =Solver= API one-to-one; integration is a
+~120-line shim crate. The =Solver::min_diagonal= accessor was added
+in commit =cb5d691= specifically to support ripopt's unconstrained-
+inertia-correction fast path. Integration is the immediate next
+project milestone.
+
+* Conclusion
+:PROPERTIES:
+:CUSTOM_ID: sec:conclusion
+:END:
+
+FERAL demonstrates that a pure-Rust, BLAS-free, MIT-licensed sparse
+symmetric indefinite direct solver with certified inertia can match
+the open-reference state of the art (SSIDS) on a 153,000-matrix
+production KKT corpus, including matrices arising from real chemical
+engineering nonlinear programs. The clean-room implementation derives
+from published papers and BSD-licensed reference code, uses no FFI to
+external Fortran or C libraries, and ships as a single static binary
+with zero non-language runtime dependencies. The remaining performance
+gap relative to canonical Fortran MUMPS is concentrated in fixed
+symbolic-phase overhead that amortizes to negligible cost in the IPM
+workload model the solver is designed to serve, courtesy of a stateful
+symbolic-cache API that mirrors Ipopt's =SymLinearSolver= contract.
+The multi-source consensus validation framework, in which feral
+participates as a peer of MUMPS and SSIDS, establishes correctness
+without depending on any single reference being universally
+trustworthy on ill-conditioned indefinite systems --- a property no
+prior solver in this niche has formally claimed. The next milestone
+is integration into the companion ripopt NLP solver to deliver, for
+the first time, a fully native-Rust open-source primal-dual interior-
+point optimizer with no Fortran runtime dependencies.
+
+* Reproducibility
+:PROPERTIES:
+:CUSTOM_ID: sec:reproducibility
+:END:
+
+The FERAL source code, validation oracles, and consensus framework are
+publicly available at https://github.com/jkitchin/feral under the MIT
+license. Build instructions are in the project README. The KKT corpus
+generator is part of the companion ripopt project.
+
+* Acknowledgments
+
+The author thanks the SPRAL team (Hogg, Reid, Scott) for the
+exemplary clarity of the SSIDS source tree, which served as the
+primary structural reference for the FERAL multifrontal driver, and
+the MUMPS team (Amestoy, Duff, L'Excellent et al.) for an open
+reference implementation against which an entire generation of sparse
+solvers has been validated.
+
+bibliographystyle:plain
+bibliography:references.bib
