@@ -100,10 +100,69 @@ To actually test c-big the user can run:
        -- --ignored xl_matrix_full_pipeline_smoke --nocapture=
 on a 96 GB-or-larger host.
 
+* 12:30 :bratu3d:fix:growth-flag:
+Triaged hypotheses 1-4 with =examples/triage_bratu3d.rs= (5-config
+sweep, output captured at =/tmp/feral-bratu3d-triage.log=):
+
+  | config                              | max\vert L\vert | plain rel_res | refined rel_res |
+  |-------------------------------------+-----------------+---------------+-----------------|
+  | Auto / threshold=0.0 / Fail         |    8.058e16     |   4.657e6     |   2.456e-9      |
+  | InfNorm / threshold=0.0 / Fail      |    8.058e16     |   4.657e6     |   2.456e-9      |
+  | Mc64Symmetric / threshold=0.0       |    4.341e16     |   3.687e4     |   3.882e-11     |
+  | Auto / threshold=0.01 / ForceAccept |    2.744e1      |   1.254e-14   |   1.254e-14     |
+  | Identity / threshold=0.0 / Fail     |    4.391e16     |   7.012e6     |   1.794e-9      |
+
+Conclusions:
+  - **H1 confirmed**: the factor IS broken — max\vert L\vert = 8e16 with
+    pivot_threshold=0.0 (BK alpha-test only). No NaN/Inf entries; pure
+    growth from accepted near-zero pivots whose 2x2 inverses multiply
+    column entries by ~1e10–1e16.
+  - **H2 falsified**: =InfNorm= scaling alone does not fix the plain
+    solve — same 4.66e6 residual. Scaling is not a substitute for
+    threshold pivoting.
+  - **H3 confirmed (alt)**: =Mc64Symmetric= partially helps (3.7e4
+    instead of 4.7e6) but still not a usable plain solve.
+  - **H3 fully confirmed**: =pivot_threshold = 0.01= (MUMPS default
+    CNTL(1)) reduces max\vert L\vert from 8e16 to 27 and gives
+    plain rel_res = 1.25e-14. This would be the right default to
+    pursue, but per user instruction defaults are NOT changed in
+    this PR.
+
+**Fix landed (option b — detection, not default change):** added
+=L_GROWTH_THRESHOLD = 1e6= and =flag_growth_for_refinement= helper in
+=src/dense/factor.rs=. Called at every dense-factor exit (=factor=,
+=factor_frontal_with_profile=, =factor_frontal_blocked=) so any factor
+with =max\vert L_ij\vert > 1e6= sets =needs_refinement = true=. The
+sparse multifrontal aggregator already ORs =FrontalFactors.needs_refinement=
+into =SparseFactors.needs_refinement=, so the bratu3d-class signal
+propagates to =Solver::factors().needs_refinement= without further
+plumbing.
+
+Why 1e6: well-pivoted BK with unit-diagonal L has \vert L_ij\vert
+\le 1/(1-\alpha) \approx 2.78. Matrices with growth in [2.78, 1e6]
+converge in 1–2 IR steps without needing to be flagged; matrices above
+1e6 are catastrophic and need IR for any reasonable accuracy.
+
+Tests:
+  - =src/dense/factor.rs::growth_flag_tests= (7 unit tests on the
+    helper directly: below/above threshold, catastrophic, negative
+    large, idempotent on pre-set, empty L, Inf entries).
+  - =tests/growth_flag.rs::well_conditioned_spd_does_not_flag_growth=
+    (negative-case end-to-end through =factor()=).
+  - =tests/growth_flag.rs::bratu3d_default_factor_flags_refinement=
+    (=#[ignore]= because matrix is external; verifies
+    =max\vert L\vert > 1e6= and =factors.needs_refinement = true=
+    end-to-end).
+  - Full =cargo test --release= passes — no regression.
+
+Plain =solve()= behavior on bratu3d is unchanged: callers still get
+the wrong answer if they use it directly. But now they have a
+programmatic signal — =factors.needs_refinement= — to detect the
+condition without having to evaluate the residual themselves.
+Default-change is a separate decision deferred to a future PR.
+
 * 11:20 :followups:
 Out of scope for this PR but on the radar:
-  - Investigate bratu3d plain-solve in a separate PR (hypotheses 1-4
-    above).
   - Add =data/matrices/kkt-expansion/= (BDRY2 n=501k, PDE2 n=451k,
     PDE1 n=361k, QUADCOPTER n=280k, YATP* n=246k, RDW2D5*U n=195k,
     OSCIGRAD n=100k) as a Phase 5 confidence target; analogous
@@ -111,3 +170,9 @@ Out of scope for this PR but on the radar:
   - Once Phase 5 lands, consider a =Quality::EscalateRefinement=
     return path so callers know to use =solve_refined= on
     indefinite-with-large-||L|| factors.
+  - Default-change PR: raise =BunchKaufmanParams::pivot_threshold=
+    from 0.0 to MUMPS-default 0.01 (and flip =on_zero_pivot= to
+    =ForceAccept= or document the interaction). Triage column D
+    above shows this fixes bratu3d plain solve to 1.25e-14 with
+    max\vert L\vert = 27. Needs separate review because changing the
+    default touches every existing user.

@@ -31,6 +31,42 @@ pub static FORCE_SCALAR_FRONTAL: std::sync::atomic::AtomicBool =
 /// handles stability via ratios against the local block max.
 const SSIDS_DET_SMALL: f64 = 1e-20;
 
+/// Pivot-growth threshold above which a factor is flagged for iterative
+/// refinement. A well-pivoted BK factor with unit-diagonal L satisfies
+/// |L_ij| ≤ 1/(1 − α) ≈ 2.78; values substantially above this indicate
+/// that some accepted pivot was small relative to its column max.
+///
+/// With `pivot_threshold = 0.0` (the BK default), the alpha-test is
+/// satisfied vacuously when both the candidate diagonal and its column
+/// off-diagonals are simultaneously tiny, producing a "successful"
+/// factor whose plain forward/back substitution cannot reach machine
+/// precision. Bratu3d under default params reaches max|L| ≈ 8e16 and
+/// returns a plain residual of 4.66e6; setting `pivot_threshold = 0.01`
+/// keeps max|L| ≈ 27 with plain residual 1.25e-14. See
+/// dev/journal/2026-04-25-02.org.
+///
+/// 1e6 is a conservative trigger: matrices with growth in [2.78, 1e6]
+/// converge in 1–2 IR steps without being flagged here; matrices above
+/// 1e6 are catastrophic and need IR for any reasonable accuracy.
+const L_GROWTH_THRESHOLD: f64 = 1e6;
+
+/// Sets `*needs_refinement = true` when any `|L_ij| > L_GROWTH_THRESHOLD`.
+/// Called at every dense-factor exit path so callers using plain
+/// `Solver::solve` (rather than `solve_refined`) get a programmatic
+/// signal — `factors.needs_refinement` — that the factor is too
+/// unstable for plain forward/back substitution.
+fn flag_growth_for_refinement(l: &[f64], needs_refinement: &mut bool) {
+    if *needs_refinement {
+        return;
+    }
+    for &v in l {
+        if v.abs() > L_GROWTH_THRESHOLD {
+            *needs_refinement = true;
+            return;
+        }
+    }
+}
+
 /// Parameters controlling Bunch-Kaufman factorization behavior.
 #[derive(Debug, Clone)]
 pub struct BunchKaufmanParams {
@@ -405,6 +441,8 @@ pub fn factor(
     }
 
     let inertia = Inertia::new(pos, neg, zero);
+
+    flag_growth_for_refinement(&l, &mut needs_refinement);
 
     Ok((
         Factors {
@@ -800,6 +838,8 @@ pub fn factor_frontal_with_profile(
         perm_inv[p] = i;
     }
 
+    flag_growth_for_refinement(&l, &mut needs_refinement);
+
     let result = FrontalFactors {
         nrow,
         ncol,
@@ -1051,6 +1091,8 @@ pub fn factor_frontal_blocked(
     for (i, &p) in perm.iter().enumerate() {
         perm_inv[p] = i;
     }
+
+    flag_growth_for_refinement(&l, &mut needs_refinement);
 
     Ok(FrontalFactors {
         nrow,
@@ -2227,5 +2269,69 @@ fn count_2x2_inertia(
 fn set_l_column_identity(a: &mut [f64], n: usize, k: usize) {
     for i in (k + 1)..n {
         a[k * n + i] = 0.0;
+    }
+}
+
+#[cfg(test)]
+mod growth_flag_tests {
+    use super::*;
+
+    #[test]
+    fn growth_below_threshold_does_not_flag() {
+        let l = vec![1.0, 2.78, -2.5, 0.0, 100.0, -999_999.0];
+        let mut flag = false;
+        flag_growth_for_refinement(&l, &mut flag);
+        assert!(!flag, "max|L| = 999_999 < 1e6 should not flag");
+    }
+
+    #[test]
+    fn growth_above_threshold_flags() {
+        let l = vec![1.0, 2.0, 1.5e6, -3.0];
+        let mut flag = false;
+        flag_growth_for_refinement(&l, &mut flag);
+        assert!(flag, "max|L| = 1.5e6 > 1e6 must flag");
+    }
+
+    #[test]
+    fn catastrophic_growth_flags() {
+        let l = vec![1.0, 1.0, 8.06e16, 1.0];
+        let mut flag = false;
+        flag_growth_for_refinement(&l, &mut flag);
+        assert!(flag, "max|L| = 8e16 (bratu3d-class) must flag");
+    }
+
+    #[test]
+    fn negative_large_entry_flags() {
+        let l = vec![-2e10, 1.0];
+        let mut flag = false;
+        flag_growth_for_refinement(&l, &mut flag);
+        assert!(flag, "negative large |L| must flag");
+    }
+
+    #[test]
+    fn already_set_flag_is_preserved() {
+        let l = vec![0.0, 0.0]; // would not flag on its own
+        let mut flag = true; // pre-set by zero-pivot path
+        flag_growth_for_refinement(&l, &mut flag);
+        assert!(flag, "must not clobber pre-set flag");
+    }
+
+    #[test]
+    fn empty_l_does_not_flag() {
+        let l: Vec<f64> = vec![];
+        let mut flag = false;
+        flag_growth_for_refinement(&l, &mut flag);
+        assert!(!flag);
+    }
+
+    #[test]
+    fn nan_and_inf_in_l_flag() {
+        // NaN.abs() is NaN; NaN > x is always false, so NaN alone does
+        // not trigger. But Inf does, and a real factor with NaN almost
+        // always also has Inf. This is an explicit doc of behavior.
+        let l_inf = vec![1.0, f64::INFINITY];
+        let mut flag = false;
+        flag_growth_for_refinement(&l_inf, &mut flag);
+        assert!(flag, "Inf entry must trigger");
     }
 }
