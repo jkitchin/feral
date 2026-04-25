@@ -268,6 +268,56 @@ pub struct SparseFactors {
     pub scaling_info: crate::scaling::ScalingInfo,
 }
 
+impl SparseFactors {
+    /// Minimum eigenvalue of D over all eliminated pivots.
+    ///
+    /// 1×1 pivots contribute `d_diag[k]` directly. 2×2 blocks
+    /// contribute the smaller eigenvalue of
+    /// `[[d_diag[k], d_subdiag[k]], [d_subdiag[k], d_diag[k+1]]]`,
+    /// computed as `(trace - sqrt(trace^2 - 4*det)) / 2`.
+    ///
+    /// 2×2 detection follows the solve-path convention
+    /// (`src/numeric/solve.rs:217`): `d_subdiag[k] != 0.0` with the
+    /// bounds check `k + 1 < nelim`.
+    ///
+    /// Returns `None` when no pivots were eliminated (n=0 or every
+    /// supernode skipped). Used by ipopt-style unconstrained
+    /// inertia correction (`-min_d + eps` as a direct delta_w).
+    pub fn min_diagonal(&self) -> Option<f64> {
+        let mut min_d = f64::INFINITY;
+        let mut any = false;
+        for nf in &self.node_factors {
+            let ff = &nf.frontal_factors;
+            let nelim = ff.nelim;
+            let mut k = 0;
+            while k < nelim {
+                let two_by_two = k + 1 < nelim && ff.d_subdiag[k] != 0.0;
+                let eig = if two_by_two {
+                    let a = ff.d_diag[k];
+                    let b = ff.d_subdiag[k];
+                    let c = ff.d_diag[k + 1];
+                    let trace = a + c;
+                    let det = a * c - b * b;
+                    let disc = (trace * trace - 4.0 * det).max(0.0).sqrt();
+                    (trace - disc) * 0.5
+                } else {
+                    ff.d_diag[k]
+                };
+                if eig < min_d {
+                    min_d = eig;
+                }
+                any = true;
+                k += if two_by_two { 2 } else { 1 };
+            }
+        }
+        if any {
+            Some(min_d)
+        } else {
+            None
+        }
+    }
+}
+
 /// Factor data for a single supernode.
 #[derive(Debug)]
 pub struct NodeFactors {

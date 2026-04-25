@@ -308,6 +308,15 @@ impl Solver {
         true
     }
 
+    /// Minimum eigenvalue of D over the most recent factor's pivots.
+    /// Returns `None` if no factor is stored. Mirrors Ipopt
+    /// `SymLinearSolver::MinDiagonal` for the unconstrained
+    /// inertia-correction shortcut. See
+    /// [`SparseFactors::min_diagonal`].
+    pub fn min_diagonal(&self) -> Option<f64> {
+        self.last_factors.as_ref().and_then(|f| f.min_diagonal())
+    }
+
     /// Borrow the most recent successful factor, if any. Lets a
     /// caller drive `solve_sparse_refined` directly when needed.
     pub fn factors(&self) -> Option<&SparseFactors> {

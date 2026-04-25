@@ -5,7 +5,12 @@
 //! Solver grows: this file lands the Step-2 set (I1, I5, I6) and
 //! grows in subsequent commits.
 
-use feral::{CscMatrix, FactorStatus, FeralError, Inertia, QualityLevel, Solver};
+use feral::numeric::factorize::{NumericParams, SmallLeafBatch};
+use feral::scaling::ScalingStrategy;
+use feral::symbolic::SupernodeParams;
+use feral::{
+    BunchKaufmanParams, CscMatrix, FactorStatus, FeralError, Inertia, QualityLevel, Solver,
+};
 
 /// I1 — baseline factor + solve without inertia check.
 ///
@@ -303,4 +308,75 @@ fn i8_solver_lifetime_state_persists() {
     assert_eq!(solver.symbolic_call_count(), n_sym_before);
     // Pivot threshold did not get reset by factor().
     assert!((solver.pivot_threshold() - want).abs() < 1e-15);
+}
+
+/// `Solver::min_diagonal()` returns `None` before any successful factor.
+#[test]
+fn min_diagonal_before_factor_is_none() {
+    let solver = Solver::new();
+    assert_eq!(solver.min_diagonal(), None);
+}
+
+fn solver_identity_scaling() -> Solver {
+    let np = NumericParams {
+        bk: BunchKaufmanParams::default(),
+        scaling: ScalingStrategy::Identity,
+        small_leaf: SmallLeafBatch::Off,
+        profiler: None,
+    };
+    Solver::with_params(np, SupernodeParams::default())
+}
+
+/// 1×1-pivot only: a 4×4 diagonal indefinite matrix has D = the
+/// diagonal of A under any pivot order, so min D is the smallest
+/// diagonal entry.
+///
+/// Identity scaling is forced so the matrix actually factored is A
+/// itself; otherwise default `Auto` scaling would rescale D and the
+/// hand-computed oracle would not apply.
+#[test]
+fn min_diagonal_diagonal_matrix_one_by_one_pivots() {
+    // A = diag(5, -2, 3, -7), lower-triangle CSC.
+    let csc =
+        CscMatrix::from_triplets(4, &[0, 1, 2, 3], &[0, 1, 2, 3], &[5.0, -2.0, 3.0, -7.0]).unwrap();
+
+    let mut solver = solver_identity_scaling();
+    let status = solver.factor(&csc, None);
+    assert!(matches!(status, FactorStatus::Success), "got {:?}", status);
+
+    let min_d = solver.min_diagonal().expect("min_diagonal");
+    assert!(
+        (min_d - (-7.0)).abs() < 1e-12,
+        "expected -7.0, got {}",
+        min_d
+    );
+}
+
+/// 2×2 pivot: A = [[0, 1], [1, 0]]. BK must pick a 2×2 block
+/// because the diagonals are zero. Eigenvalues are ±1, so the
+/// minimum is -1.
+///
+/// Verifies that `min_diagonal()` extracts the smaller eigenvalue
+/// of the 2×2 block, not just `d_diag[0] = 0`.
+#[test]
+fn min_diagonal_two_by_two_block_eigenvalue() {
+    // Lower triangle: (0,0)=0, (1,0)=1, (1,1)=0.
+    let csc = CscMatrix::from_triplets(2, &[0, 1, 1], &[0, 0, 1], &[0.0, 1.0, 0.0]).unwrap();
+
+    let mut solver = solver_identity_scaling();
+    let status = solver.factor(&csc, None);
+    assert!(matches!(status, FactorStatus::Success), "got {:?}", status);
+
+    // Inertia: one positive, one negative.
+    let x = solver.solve(&[1.0, 0.0]).expect("solve");
+    // [[0,1],[1,0]] x = [1,0] → x = [0, 1].
+    assert!((x[0]).abs() < 1e-12, "x[0] = {}", x[0]);
+    assert!((x[1] - 1.0).abs() < 1e-12, "x[1] = {}", x[1]);
+
+    let min_d = solver.min_diagonal().expect("min_diagonal");
+    assert!(
+        (min_d - (-1.0)).abs() < 1e-12,
+        "expected -1.0 (smaller eig of [[0,1],[1,0]]), got {}",
+        min_d
+    );
 }

@@ -585,3 +585,37 @@ the same 800 µs MC64 amortizes to ~25 µs/iteration over an IPM
 solve, which is the actual feral target. The bench measures
 single-factor wall time and will continue to show 8-9× MUMPS
 on KIRBY2 until the workload model includes IPM iteration.
+
+* 25:30 :ripopt-readiness:min-diagonal:adapter:
+Added optional feral-side hook in preparation for the in-tree
+ripopt LinearSolver adapter (Option A from the readiness write-up):
+
+- ~SparseFactors::min_diagonal()~ at ~src/numeric/factorize.rs:271~:
+  scans all eliminated pivots across ~node_factors~. 1×1 pivot
+  contributes ~d_diag[k]~. 2×2 block uses smaller eigenvalue
+  ~(trace - sqrt(trace² - 4·det)) / 2~. 2×2 detection follows the
+  solve-path convention (~d_subdiag[k] != 0.0~ with ~k+1 < nelim~).
+  Returns ~None~ when no pivots eliminated.
+- ~Solver::min_diagonal()~ at ~src/numeric/solver.rs:316~:
+  thin accessor — ~last_factors.as_ref().and_then(|f| f.min_diagonal())~.
+  ~None~ before any successful factor.
+
+Three integration tests in ~tests/pounce_interface.rs~:
+1. None before factor.
+2. ~diag(5,-2,3,-7)~ → -7. Forces Identity scaling so the
+   hand-computed oracle applies (default ~Auto~ would rescale D).
+3. ~A = [[0,1],[1,0]]~ → -1. BK picks a 2×2 block (zero diagonals);
+   verifies the eigenvalue path, not just ~d_diag[0]=0~.
+
+All 3 pass. Lib clippy clean. Existing pre-commit clippy hook is
+lib-only (~cargo clippy -- -D warnings~ without ~--tests~) so an
+unrelated ~int_plus_one~ lint at ~tests/delayed_pivoting.rs:394~ does
+not block commits — flagged for separate cleanup.
+
+This unblocks the unconstrained-inertia-correction fast path in
+ripopt ~kkt.rs:517~. The adapter ~impl LinearSolver for FeralLdl~
+can now wire ~min_diagonal()~ directly instead of returning the
+trait default ~None~.
+
+Next concrete step: write the in-tree adapter at
+~ripopt/src/linear_solver/feral.rs~ behind a ~feral~ cargo feature.
