@@ -22,3 +22,7 @@ tests/data/large/
 # OS / editor / agent runtime junk
 .DS_Store
 .claude/
+
+# Python bytecode caches (scripts/ is plain CLI scripts)
+__pycache__/
+*.pyc

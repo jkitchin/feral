@@ -49,7 +49,7 @@ dispatched automatically by a cheap O(n) elimination-tree shape predicate.
 We validate FERAL against a multi-source consensus oracle constructed from
 canonical Fortran MUMPS 5.8.2, BSD SPRAL/SSIDS 2024 cite:hogg2016sparse, and
 a self-consistent feral path. The validation corpus comprises approximately
-153,000 KKT matrices generated from CUTEst optimization problems and
+183,000 KKT matrices generated from CUTEst optimization problems and
 production chemical-engineering nonlinear programs. On the corpus tail
 FERAL is at parity with or faster than SSIDS while emitting a permissively
 licensed binary that has zero non-Rust runtime dependencies. We discuss
@@ -180,7 +180,7 @@ This work makes the following contributions:
    Excluded based on agreement across feral, MUMPS, and SSIDS, providing
    a robust ground truth for indefinite-system correctness testing where
    no single reference is universally trustworthy.
-5. Empirical evidence that on a 153,000-matrix KKT corpus FERAL is at
+5. Empirical evidence that on a 183,000-matrix KKT corpus FERAL is at
    parity with or ahead of SSIDS across the entire size range, despite
    not linking a vendor BLAS, and that the residual MUMPS performance
    gap on tiny IPM-KKT matrices is concentrated in symbolic-phase
@@ -570,12 +570,98 @@ votes per matrix and assigns one of four verdicts:
 - *Excluded*: at least one solver crashes, hangs, or returns malformed
   output.
 
-Approximately 153,000 KKT matrices generated from CUTEst optimization
+Approximately 183,000 KKT matrices generated from CUTEst optimization
 problems and production chemical-engineering NLPs (gas networks, water
 networks, electrolyte models) have been run through this framework. The
 verdict distribution is dominated by Definitive, with Borderline
 matrices constituting a small but instructive corpus of numerical
 edge cases that drive solver hardening.
+
+** Corpus characterization
+:PROPERTIES:
+:CUSTOM_ID: sec:corpus-characterization
+:END:
+
+Before reading the performance results in §[[#sec:results]], it helps to
+understand the population those numbers are computed over. The current
+corpus comprises 182,861 KKT matrices drawn from 967 distinct CUTEst
+problem families (the original 169,585-matrix collection plus a
+13,276-matrix expansion sweep targeted at PDE and large-scale
+problems). The five figures in this subsection summarize the structural
+distribution along the axes that drive solver behaviour:
+matrix size, sparsity, family coverage, sign class, and IPM-trajectory
+position.
+
+#+name: fig-size
+#+caption: Histogram of KKT matrix dimension $n$ across the 182,861-matrix validation corpus (log--log axes). The corpus is heavily skewed toward small matrices --- the median is $n = 9$ and the 99th percentile is $n = 6{,}002$ --- yet covers more than five orders of magnitude up to $n = 501{,}495$. The small-$n$ mode reflects the population of IPM iterates from CUTEst problems, where many problems have hand-coded test sizes in the single digits; the long tail captures the structural problems and large-scale chemical-engineering NLPs that exercise the multifrontal pipeline at full size.
+[[file:figures/corpus-size.png]]
+
+The size distribution (Figure ref:fig-size) explains why the
+performance story has two halves. The dominant population at
+$n \le 100$ exposes per-call overhead --- symbolic analysis,
+allocator setup, IR-loop scaffolding --- and is where MUMPS's
+ruthlessly tuned driver still leads. The tail at $n > 10^4$
+exercises the dense kernel inside large frontals and is where
+parallel scaling and SIMD efficiency matter.
+
+#+name: fig-nnz
+#+caption: Number of stored nonzeros (lower triangle) versus matrix dimension $n$ for every corpus matrix, coloured by row density $\log_{10}(\mathrm{nnz}/n)$. The dotted line marks $\mathrm{nnz} = n$ (purely diagonal); the dashed line marks $\mathrm{nnz} = n \log_2 n$, the asymptotic envelope expected for nested-dissection-amenable PDE discretizations. The bulk of the corpus sits below the $n \log_2 n$ envelope, with a thin upper band of structurally dense small KKTs (chemical-engineering NLPs whose Hessian is nearly full) and a wide lower band of sparse PDE-discretization KKTs.
+[[file:figures/corpus-nnz-vs-n.png]]
+
+Figure ref:fig-nnz shows that the corpus is genuinely sparse on
+average but contains a non-negligible upper band of dense small
+matrices that exercise the dense Bunch-Kaufman kernel directly
+(without supernodal blocking). This bimodality is one of the reasons
+the elimination-tree-shape predicate of §[[#sec:amalgamation]] matters:
+no single amalgamation policy is optimal across both bands.
+
+#+name: fig-families
+#+caption: Top 30 problem families by matrix count, with the remaining 937 families aggregated as "(other)". A flat ceiling at 3{,}000 matrices per family reflects an explicit cap during corpus collection (we sample at most 3{,}000 IPM iterates per CUTEst problem to avoid any single family dominating the statistics). The aggregate "(other)" bar at $\sim 98{,}000$ matrices confirms that no individual family has disproportionate influence on the consensus or performance metrics.
+[[file:figures/corpus-families.png]]
+
+The family distribution (Figure ref:fig-families) is the
+counterpoint to common benchmark concerns about
+"cherry-picked test sets". With 967 families and a hard per-family
+cap, the consensus and performance results aggregate over a population
+broad enough that no single problem class can drive a verdict. The
+"(other)" bar at $\sim 98{,}000$ matrices --- more than half of the
+corpus --- represents the long tail of CUTEst problems contributing
+between one and a few hundred matrices each.
+
+#+name: fig-inertia
+#+caption: Sign class of KKT inertia across the corpus (left) and the distribution of negative-eigenvalue fraction $n_-/n$ for the indefinite subset (right). 63.3% of matrices are strictly indefinite ($n_+, n_- > 0$), the canonical KKT case where IPM equality constraints contribute negative eigenvalues. 36.7% are positive definite ($n_- = 0$), corresponding to unconstrained or bound-constrained iterates where the IPM step reduces to a Newton solve. A single matrix is negative definite. Zero matrices are reported as rank deficient by the consensus oracle, consistent with the fact that the corpus samples successful IPM iterates rather than rejected ones.
+[[file:figures/corpus-inertia.png]]
+
+The inertia distribution (Figure ref:fig-inertia) confirms the
+target workload: nearly two-thirds of the corpus exercises the
+sign-indefinite path that requires Bunch-Kaufman pivoting and
+delayed-pivot promotion. The negative-fraction histogram (right
+panel) has a median of $n_-/n = 0.40$, meaning a typical KKT matrix
+has roughly 40% of its eigenvalues negative --- consistent with the
+expected $m/n$ ratio where $m$ is the number of equality constraints.
+The wide spread from $0$ to $\sim 0.85$ indicates the corpus samples
+across constraint regimes rather than concentrating on a single class
+of problems.
+
+#+name: fig-iteration
+#+caption: Distribution of IPM outer-iteration index across the corpus. Each KKT matrix carries the iteration count at which IPOPT generated it; iteration $0$ is the initial point, and matrices at larger indices correspond to later iterates approaching the central path or convergence. The corpus has a median index of 494 and a long tail extending past 2{,}500, reflecting that we deliberately retain matrices from the full IPM trajectory (including the ill-conditioned late iterates near $\mu \to 0$, where the KKT matrix becomes hardest to factor with correct inertia).
+[[file:figures/corpus-iteration.png]]
+
+The iteration distribution (Figure ref:fig-iteration) addresses an
+implicit concern about IPM-driven KKT corpora: a corpus drawn only
+from the easy initial iterates would not stress the solver. Our
+corpus is intentionally weighted toward the full trajectory --- the
+median matrix sits around iteration 500, and the corpus contains
+nontrivial population at iteration counts of $10^3$ and beyond. Late
+iterates near optimality are the matrices for which inertia
+correctness and rook-rescue pivoting matter most, and they are
+well-represented here.
+
+A reproducible characterization script
+(=scripts/characterize-corpus.py=) regenerates Figures
+ref:fig-size--ref:fig-iteration and the underlying
+=dev/corpus-characterization/summary.csv= from the on-disk corpus in
+roughly one minute on a 2024-era laptop.
 
 ** Reproducibility and continuous integration
 :PROPERTIES:
@@ -672,19 +758,19 @@ we instrumented the symbolic phase with a 14-stage profiler (Phase
 2.13b, =src/symbolic/profiler.rs=). The 5-run median attribution on
 KIRBY2_0007 is:
 
-| stage          |  µs | %     |
-|----------------+-----+-------|
-| ordering       | 773 | 85.5% |
-| (everything else, individually) | < 50 | each |
+| stage                           | µs   | %     |
+|---------------------------------+------+-------|
+| ordering                        | 773  | 85.5% |
+| (everything else, individually) | < 50 | each  |
 
 The ordering stage decomposes further into:
 
-| sub-stage      |  µs | %     |
+| sub-stage      | µs  | %     |
 |----------------+-----+-------|
 | MC64           | 827 | 94.2% |
-| compress + map |  27 | 3.1%  |
-| AMD itself     |  20 | 2.3%  |
-| post           |   0 | 0.0%  |
+| compress + map | 27  | 3.1%  |
+| AMD itself     | 20  | 2.3%  |
+| post           | 0   | 0.0%  |
 
 The 770µs "ordering bottleneck" on KIRBY2_0007 is /MC64/, not AMD.
 AMD itself runs in 20µs on $n = 458$. Critically, MC64 is also what
@@ -744,7 +830,7 @@ the immediately following commit and unrelated to solver semantics.
 
 FERAL today delivers a correct, certified-inertia, pure-Rust,
 BLAS-free sparse symmetric indefinite solver competitive with the
-state-of-the-art open BSD reference (SSIDS) across the entire 153,000-
+state-of-the-art open BSD reference (SSIDS) across the entire 183,000-
 matrix KKT corpus. It does not yet match the absolute speed of
 canonical Fortran MUMPS on tiny ($n < 1000$) IPM-KKT matrices in
 single-factor measurements, where MUMPS retains a 4--8x advantage
@@ -798,17 +884,14 @@ desired.
 :CUSTOM_ID: sec:ripopt
 :END:
 
-The companion ripopt project --- a Rust reimplementation of IPOPT ---
-currently uses rmumps (Rust bindings to canonical MUMPS) as its
-linear solver. Replacing rmumps with FERAL eliminates the Fortran
-runtime dependency entirely and reduces deployment complexity. The
-ripopt =LinearSolver= trait surface is small (=factor=, =solve=,
-=provides_inertia=, optional =min_diagonal=, optional =increase_quality=)
-and matches the FERAL =Solver= API one-to-one; integration is a
-~120-line shim crate. The =Solver::min_diagonal= accessor was added
-in commit =cb5d691= specifically to support ripopt's unconstrained-
-inertia-correction fast path. Integration is the immediate next
-project milestone.
+The companion ripopt project --- a Rust reimplementation of IPOPT --- currently
+uses rmumps (Rust bindings to canonical MUMPS) as its linear solver. The ripopt
+=LinearSolver= trait surface is small (=factor=, =solve=, =provides_inertia=,
+optional =min_diagonal=, optional =increase_quality=) and matches the FERAL
+=Solver= API one-to-one; integration is a ~120-line shim crate. The
+=Solver::min_diagonal= accessor was added in commit =cb5d691= specifically to
+support ripopt's unconstrained- inertia-correction fast path. Integration is the
+immediate next project milestone.
 
 * Conclusion
 :PROPERTIES:
@@ -817,7 +900,7 @@ project milestone.
 
 FERAL demonstrates that a pure-Rust, BLAS-free, MIT-licensed sparse
 symmetric indefinite direct solver with certified inertia can match
-the open-reference state of the art (SSIDS) on a 153,000-matrix
+the open-reference state of the art (SSIDS) on a 183,000-matrix
 production KKT corpus, including matrices arising from real chemical
 engineering nonlinear programs. The clean-room implementation derives
 from published papers and BSD-licensed reference code, uses no FFI to
