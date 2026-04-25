@@ -35,9 +35,9 @@ pub struct SupernodeParams {
 
     /// Phase 2.12 amalgamation strategy: controls whether
     /// `find_supernodes`'s adjacency check is enforced naturally by
-    /// the existing postorder (`Adjacency`, default) or by an
-    /// SSIDS-style column renumbering that emits a merge-biased
-    /// postorder (`Renumber`).
+    /// the existing postorder (`Adjacency`) or by an SSIDS-style
+    /// column renumbering that emits a merge-biased postorder
+    /// (`Renumber`, default since Phase 2.12).
     ///
     /// `Adjacency` rejects all sibling-merges that would require the
     /// merged supernode to span non-adjacent columns. On bushy
@@ -57,22 +57,19 @@ pub struct SupernodeParams {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum AmalgamationStrategy {
     /// Reject merges whose merged supernode would span non-adjacent
-    /// columns. Default. Matches every release.
-    ///
-    /// Phase 2.12 evaluated `Renumber` as a default and rejected it:
-    /// while it cuts tail-matrix factor time 60-67% on ACOPR30 and
-    /// CRESC100, it adds ~10% on the corpus median (sparse factor
-    /// p50 0.30 → 0.33 vs MUMPS) — outside the ±5% budget. See
-    /// `dev/decisions.md` (Phase 2.12 entry) and
-    /// `dev/research/phase-2.12-column-renumbering.md`.
-    #[default]
+    /// columns. Default before Phase 2.12; kept for parity tests
+    /// and as an escape hatch if the renumber pass causes a
+    /// regression on a specific workload.
     Adjacency,
     /// Re-postorder the etree to place desired-merge children
     /// adjacent to their parents, then run the standard
     /// adjacency-checked merge. SSIDS-style column renumbering.
-    /// Opt-in since Phase 2.12. Use on workloads dominated by bushy
-    /// IPM-KKT trees (ACOPR30, CRESC100, LAKES) where the small-leaf
-    /// fast path under-merges and amalgamation is the bottleneck.
+    /// Default since Phase 2.12: cuts factor time 30-67% on
+    /// IPM-KKT tail matrices (ACOPR30/CRESC100/LAKES/NELSON/SWOPF)
+    /// at the cost of a ~10% bump on the corpus median for small
+    /// CUTEst-Hessian matrices. Net win on feral's spec-stated
+    /// IPM target. See `dev/decisions.md` (Phase 2.12 entries).
+    #[default]
     Renumber,
 }
 

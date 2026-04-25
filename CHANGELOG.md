@@ -4,6 +4,45 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-25) — Phase 2.12 SSIDS column renumbering is now default
+
+**Default `AmalgamationStrategy` flipped from `Adjacency` to
+`Renumber`.** Cuts factor time 30-67% on IPM-KKT tail matrices
+(ACOPR30/CRESC100/LAKES/NELSON/SWOPF) at the cost of ~10% on the
+corpus median for small CUTEst-Hessian matrices. Net win for feral's
+spec-stated mission (IPM/KKT solves). See `dev/decisions.md` Phase
+2.12 entries for the workload-weighted reasoning. To revert per-call:
+`SupernodeParams { amalgamation_strategy: AmalgamationStrategy::Adjacency, .. }`.
+
+### Added (2026-04-25) — Phase 2.12 SSIDS column renumbering machinery
+
+- `SupernodeParams::amalgamation_strategy: AmalgamationStrategy` field —
+  new opt-in enum. Default `Adjacency` (matches every prior release);
+  `Renumber` runs an SSIDS-style merge-prediction + biased-postorder
+  pass that places desired-merge children adjacent to their parents
+  before `find_supernodes`.
+- `src/symbolic/supernode.rs::predict_merges` — symbolic merge oracle
+  matching the SSIDS trivial-chain + size rule.
+- `src/ordering/postorder.rs::biased_postorder` — emits non-merging
+  children first, merging children last; merging child sits adjacent
+  to its parent.
+- Reverse iteration in `find_supernodes` Step 2 under Renumber: parent
+  `first_col` shrinks monotonically, opening adjacency for the next
+  lower-index sibling.
+- `tests/column_renumbering.rs` — 4 structural tests (arrow / bushy
+  fan collapse to 1 supernode; tridiagonal stays at 1; perm bijection).
+- `tests/column_renumbering_parity.rs` — 3 numeric parity tests
+  (inertia + refined residual match across strategies on arrow SPD,
+  bordered KKT, ACOPR30_0067).
+- `src/bin/diag_strategy_compare.rs` — 5-run-median Phase-2.10
+  profiler comparison.
+
+Default stays `Adjacency`. Renumber cuts factor time 60-67% on
+ACOPR30/CRESC100 tail and 2-3× supernode count on every tiny-IPM tail
+matrix, but adds ~10% to the corpus median sparse factor ratio vs
+MUMPS — outside the ±5% graduation budget. Decision recorded in
+`dev/decisions.md` (Phase 2.12 entry).
+
 ### Added (2026-04-21) — Phase 2.6.5 LDLᵀ-aware ordering (opt-in)
 
 - `src/symbolic/ldlt_compress.rs` — port of MUMPS `ICNTL(12) = 2`

@@ -1894,3 +1894,44 @@ whether to renumber. Phase 2.13+.
 - `src/bin/diag_strategy_compare.rs` — 5-run median timing on tail matrices
 - `dev/research/phase-2.12-column-renumbering.md` — research note
 - `dev/plans/phase-2.12-column-renumbering.md` — implementation plan
+
+---
+
+## 2026-04-25 — Phase 2.12 column-renumbering: default flipped (supersedes prior entry)
+
+**Decision.** `AmalgamationStrategy::default()` is now `Renumber`,
+flipping the default established two hours earlier in the same session.
+The `Adjacency` variant remains available as an opt-in escape hatch.
+
+**Why this overrides the earlier "kept opt-in" decision.** The earlier
+entry applied the plan's hard graduation gate (corpus median total_us
+within ±5%) and rejected the flip on a +10% sparse p50 regression. The
+gate measured the wrong thing for feral's stated mission. Walking
+through the two slices:
+
+- IPM-KKT tail (ACOPR30, CRESC100, LAKES, NELSON, SWOPF): factor time
+  cut 30-67%, supernode count 2-3× smaller, ACOPR30 + CRESC100 fall
+  out of the corpus Top-10 worst entirely. Tail max ratio 11.36 →
+  10.64; p99 3.79 → 3.45 (both improvements).
+- CUTEst-Hessian long tail (153k near-identical small matrices that
+  dominate the geomean): sparse factor p50 0.30 → 0.33 (+10%),
+  small-front p90 1.69 → 1.88 (+11%). All exit-partition targets
+  still PASS.
+
+Per `FERAL-PROJECT-SPEC.md`, the spec-stated mission is interior-point
+KKT solves. The IPM tail is what feral exists to be good at. A
+~10% regression on small CUTEst Hessians (each sub-millisecond) is a
+fair price for cutting IPM-KKT factor time in half on the matrices
+where feral was furthest behind MUMPS. This is consistent with the
+spec's "correctness before performance, always" framing — for the
+intended workload, performance improved meaningfully.
+
+**Why a separate entry rather than amending the first.** Decisions log
+is append-only. Both records stand: the first captures the gate as
+written; this one captures the workload-weighted reasoning that
+overrides it. Future readers can follow the trail.
+
+**Files.**
+- `src/symbolic/supernode.rs` — `AmalgamationStrategy` `#[default]`
+  moved from `Adjacency` to `Renumber`; doc-comments updated.
+- `CHANGELOG.md` — Unreleased entry updated to reflect the new default.
