@@ -203,3 +203,39 @@ hatch. All 315 tests still pass. Decision-log appended (the prior
 "kept opt-in" entry stands as the gate-as-written record; the new
 entry supersedes it). CHANGELOG entry now reflects the flip as a
 Changed/default-update rather than an Added/opt-in feature.
+
+* 20:00 :phase-2.12:diagnostic:tail:
+Diagnostic dive on the new corpus tail (KIRBY2 / MUONSINE) under
+Renumber default. Two distinct root causes, neither matching the
+expected (a)-(e) shortlist cleanly:
+
+1. =KIRBY2_0007= (n=458, ratio 9.5x MUMPS): numeric phase is only
+   1.8x MUMPS (235µs vs 122µs). The 9.5x is dominated by *symbolic
+   phase* — =symbolic_factorize= (AMD + etree + supernode partition
+   + Renumber + small-leaf grouping) takes 924µs, 6x MUMPS's entire
+   factor. The bench rolls symbolic+numeric into =factor_us=, so
+   the apparent gap is analyze-phase overhead, not kernel.
+
+2. =MUONSINE_0000= (n=1537): under Adjacency, ratio is 1.4x MUMPS
+   (513 ncol≤5 fronts, numeric 332µs). Under Renumber default,
+   ratio is 5.5x — Renumber merged a path-like etree into a single
+   ncol=32 root frontal that costs 1008µs by itself. *Renumber
+   actively regressed this family* by over-merging a tree shape
+   that didn't need merging.
+
+Decision (with user): stay with Renumber default; queue both as
+Phase 2.13 work. The MUONSINE regression argues for shape-
+dispatched =AmalgamationStrategy::Auto= (Phase 2.13a); the KIRBY2
+finding argues for symbolic-phase profiling and per-call setup-cost
+reduction (Phase 2.13b), independent of amalgamation strategy.
+
+Methodology note: the Phase 2.10 profiler measures only the numeric
+loop; per-stage symbolic instrumentation does not yet exist. The
+KIRBY2 finding only became visible because the diagnostic agent
+manually subtracted numeric-phase µs from total bench-equivalent
+µs. Phase 2.13b's first probe should add a symbolic-phase profiler
+to make this measurable directly.
+
+Throwaway diag binary at =src/bin/diag_kirby_muonsine.rs= (broken,
+not committed) was deleted after the agent finished — it had four
+type errors that the agent didn't catch before reporting.
