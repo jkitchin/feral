@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 /// numeric-time concern and now lives on
 /// [`crate::numeric::factorize::NumericParams`]. This struct
 /// covers only the symbolic phase.
+#[derive(Clone)]
 pub struct SupernodeParams {
     /// Minimum number of eliminated columns in a supernode. Nodes with
     /// fewer eliminations are candidates for merging with their parent.
@@ -68,19 +69,26 @@ pub struct SupernodeParams {
 pub enum AmalgamationStrategy {
     /// Reject merges whose merged supernode would span non-adjacent
     /// columns. Default before Phase 2.12; kept for parity tests
-    /// and as an escape hatch if the renumber pass causes a
-    /// regression on a specific workload.
+    /// and as the explicit escape hatch when the merge prediction
+    /// pass would over-merge a path-like etree (e.g. MUONSINE).
     Adjacency,
     /// Re-postorder the etree to place desired-merge children
     /// adjacent to their parents, then run the standard
     /// adjacency-checked merge. SSIDS-style column renumbering.
-    /// Default since Phase 2.12: cuts factor time 30-67% on
-    /// IPM-KKT tail matrices (ACOPR30/CRESC100/LAKES/NELSON/SWOPF)
-    /// at the cost of a ~10% bump on the corpus median for small
-    /// CUTEst-Hessian matrices. Net win on feral's spec-stated
-    /// IPM target. See `dev/decisions.md` (Phase 2.12 entries).
-    #[default]
+    /// Default behavior of [`AmalgamationStrategy::Auto`] on bushy
+    /// IPM-KKT etrees: cuts factor time 30-67% on
+    /// ACOPR30/CRESC100/LAKES/NELSON/SWOPF.
+    /// See `dev/decisions.md` (Phase 2.12 entries).
     Renumber,
+    /// Phase 2.13a: shape-dispatched. A cheap O(n) etree predicate
+    /// picks `Adjacency` for path / near-path elimination trees and
+    /// `Renumber` for bushy ones, eliminating Renumber's
+    /// over-merging regression on path-like trees (MUONSINE_0000:
+    /// 5.5× → 1.4× MUMPS) while keeping the IPM-KKT tail wins.
+    /// Default since Phase 2.13a. See
+    /// `dev/research/phase-2.13a-amalgamation-auto.md`.
+    #[default]
+    Auto,
 }
 
 /// Ordering-stage preprocessing flag.
@@ -149,6 +157,51 @@ impl Supernode {
     pub fn contrib_size(&self) -> usize {
         let cn = self.contrib_nrow();
         cn * cn
+    }
+}
+
+/// Phase 2.13a — shape predicate threshold.
+///
+/// `multi_child_frac < THRESH` ⇒ path / near-path tree, dispatch to
+/// `Adjacency`. Otherwise dispatch to `Renumber`. Threshold chosen
+/// from the etree-shape probe (`src/bin/diag_etree_shape.rs`) on
+/// the 7 known-answer matrices. MUONSINE (the only Renumber-loses
+/// case in the probe) sits at 0.002; the next-lowest matrix
+/// (SWOPF, Renumber-wins) sits at 0.20. 0.05 is comfortably in the
+/// gap. See `dev/research/phase-2.13a-amalgamation-auto.md`.
+pub const AUTO_MULTI_CHILD_FRAC_THRESHOLD: f64 = 0.05;
+
+/// Phase 2.13a — pick `Adjacency` vs `Renumber` from the etree
+/// shape. O(n) on the etree; called once per
+/// `symbolic_factorize_with_method` invocation.
+///
+/// Returns `Adjacency` when the etree is path / near-path
+/// (Renumber would over-merge), otherwise `Renumber`. Never returns
+/// `Auto`; this function is the resolver for the `Auto` variant.
+pub fn pick_amalgamation_strategy(etree: &EliminationTree) -> AmalgamationStrategy {
+    let n = etree.n;
+    if n == 0 {
+        return AmalgamationStrategy::Adjacency;
+    }
+    let mut child_count = vec![0usize; n];
+    for &p in &etree.parent {
+        if let Some(par) = p {
+            child_count[par] += 1;
+        }
+    }
+    let n_leaves = child_count.iter().filter(|&&c| c == 0).count();
+    let n_internal = n - n_leaves;
+    if n_internal == 0 {
+        // Forest of isolated nodes — no amalgamation opportunities
+        // either way. `Adjacency` is the cheap default.
+        return AmalgamationStrategy::Adjacency;
+    }
+    let n_multi_child = child_count.iter().filter(|&&c| c >= 2).count();
+    let multi_child_frac = n_multi_child as f64 / n_internal as f64;
+    if multi_child_frac < AUTO_MULTI_CHILD_FRAC_THRESHOLD {
+        AmalgamationStrategy::Adjacency
+    } else {
+        AmalgamationStrategy::Renumber
     }
 }
 

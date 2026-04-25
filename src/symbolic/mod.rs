@@ -15,7 +15,8 @@ pub use ldlt_compress::{build_supermap, compress_pattern, expand_permutation, Su
 pub use profiler::{record_stage, StagePct, StageTiming, SymbolicProfileReport, SymbolicProfiler};
 pub use small_leaf::{find_small_leaf_groups, SmallLeafGroup, SmallLeafParams};
 pub use supernode::{
-    find_supernodes, AmalgamationStrategy, OrderingPreprocess, Supernode, SupernodeParams,
+    find_supernodes, pick_amalgamation_strategy, AmalgamationStrategy, OrderingPreprocess,
+    Supernode, SupernodeParams, AUTO_MULTI_CHILD_FRAC_THRESHOLD,
 };
 
 /// Which fill-reducing ordering to use in [`symbolic_factorize_with_method`].
@@ -522,6 +523,20 @@ pub fn symbolic_factorize_with_method(
     let mut permuted_pattern = permuted_pattern;
     let mut perm = perm;
     let mut etree = etree;
+
+    // Phase 2.13a: resolve `Auto` to a concrete strategy via a cheap
+    // O(n) etree shape predicate. The downstream Renumber gate and
+    // `find_supernodes` reverse-iteration check need a concrete
+    // variant — `Auto` is a top-level dispatch sentinel only.
+    let mut effective_params = snode_params.clone();
+    if matches!(
+        effective_params.amalgamation_strategy,
+        supernode::AmalgamationStrategy::Auto
+    ) {
+        effective_params.amalgamation_strategy = supernode::pick_amalgamation_strategy(&etree);
+    }
+    let snode_params: &SupernodeParams = &effective_params;
+
     let t_renumber = prof.map(|_| std::time::Instant::now());
     if matches!(
         snode_params.amalgamation_strategy,

@@ -4,6 +4,32 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-25) — Phase 2.13a `AmalgamationStrategy::Auto` is now default
+
+**Default `AmalgamationStrategy` flipped from `Renumber` to `Auto`.**
+Auto is a cheap O(n) etree-shape dispatcher: path / near-path
+elimination trees go to `Adjacency`, bushy trees go to `Renumber`.
+Eliminates the Phase 2.12 MUONSINE regression (5.5× → 1.4× MUMPS)
+while preserving the IPM-KKT tail wins from `Renumber`. Corpus
+Top-10 max ratio improves 10.64 → 9.66; p99 3.45 → 3.40. To pin a
+specific strategy: `SupernodeParams { amalgamation_strategy:
+AmalgamationStrategy::{Adjacency,Renumber}, .. }`. See
+`dev/decisions.md` Phase 2.13a entry.
+
+### Added (2026-04-25) — Phase 2.13a etree-shape dispatch
+
+- `AmalgamationStrategy::Auto` variant — new `#[default]`. Resolved
+  to `Adjacency` or `Renumber` via `pick_amalgamation_strategy`
+  before `find_supernodes`.
+- `feral::symbolic::pick_amalgamation_strategy(&etree)` — public
+  resolver, also exported.
+- `feral::symbolic::AUTO_MULTI_CHILD_FRAC_THRESHOLD` — public const
+  (0.05) for downstream consumers wanting the same predicate.
+- `src/bin/diag_etree_shape.rs` — predicate-design probe over the
+  7 known-answer matrices.
+- `tests/auto_strategy.rs` — 7 dispatch unit tests (path, complete
+  binary tree, empty, leaf-only forest, near-path, fan-at-root).
+
 ### Changed (2026-04-25) — Phase 2.12 SSIDS column renumbering is now default
 
 **Default `AmalgamationStrategy` flipped from `Adjacency` to

@@ -381,3 +381,78 @@ breakdown (allocations vs hash sizing vs work). A 5-call AMD
 profiler probe on n=458 would tell us whether the constant is
 dominated by setup (caching helps a lot) or by O(n alpha n) work
 (caching helps even more, but per-call shrink helps less).
+
+* 22:30 :phase-2.13a:auto:amalgamation:shape-predicate:
+Phase 2.13a implemented and validated.
+
+Shape probe (=src/bin/diag_etree_shape.rs=) on the 7 known-answer
+matrices revealed clean separation:
+
+#+begin_example
+matrix             multi_child_frac   best
+MUONSINE_0000      0.0020             Adjacency
+SWOPF_0000         0.2015             Renumber
+LAKES_0000         0.7523             Renumber
+ACOPR30_0067       0.8616             Renumber
+KIRBY2_0007        0.9744             Renumber (slight)
+CRESC100_0000      0.9757             Renumber
+NELSON_0000        0.9847             Renumber
+#+end_example
+
+Threshold =multi_child_frac < 0.05= → Adjacency, else Renumber.
+Comfortable margin (MUONSINE 0.002 vs SWOPF 0.20).
+
+Implementation:
+- =AmalgamationStrategy::Auto= variant added; =#[default]= moved
+  from Renumber to Auto.
+- =pick_amalgamation_strategy(etree)= O(n) function lives at
+  =src/symbolic/supernode.rs:180=, exported through =mod.rs=.
+- Auto resolution in =symbolic_factorize_with_method= happens
+  immediately before the existing Renumber gate (clones snode_params,
+  overwrites the strategy field).
+- =SupernodeParams= now derives Clone (Arc<Mutex<...>> field is
+  itself Clone via ref-count bump).
+- 7-test smoke suite at =tests/auto_strategy.rs= covers path,
+  bushy, empty, leaf-only, near-path, fan-at-root.
+
+Validation on tail (=diag_strategy_compare=, 5-run median):
+all 5 IPM-KKT tail matrices dispatch to Renumber under Auto and
+hold the Phase 2.12 wins (Renumber/Adjacency 0.31-0.84, matching
+the pre-Auto Renumber-default numbers).
+
+Corpus bench (153560 matrices with MUMPS oracle):
+
+#+begin_example
+metric         Adj base    Ren default    Auto (now)
+geomean        0.39        0.45           0.45
+p50            0.30        0.33           0.33
+p90            1.70        1.89           1.91
+p99            3.79        3.45           3.40
+max            11.36       10.64          9.66
+#+end_example
+
+Top-10 worst under Auto: 3x KIRBY2 + 4x GROUPING + 2x ACOPR30.
+*MUONSINE is gone* (was 7.12x under Renumber).
+
+Plan success criteria (from
+=dev/plans/phase-2.13-tail-diagnostic.md=):
+  1. ✅ MUONSINE regression eliminated (was 7.12x → not in Top-10)
+  2. ✅ Tail ACOPR30/CRESC100 keep 60-67% factor reduction
+     (Auto picks Renumber for them, matches Phase 2.12 numbers)
+  3. ❌ Median within ±2% of Adjacency: NOT met (still +10%)
+
+Honest finding: criterion 3 was never the MUONSINE problem. The
++10% median regression comes from Renumber's per-call overhead on
+the long tail of small CUTEst Hessians (HS118, MGH10LS, etc.), all
+of which have multi_child_frac ≥ 0.05 and so Auto correctly
+dispatches to Renumber. Recovering those needs an orthogonal
+lever — gating Renumber on small-n bushy trees where the
+amalgamation benefit doesn't amortize the rebuild cost.
+
+Recommended Phase 2.13c (deferred): n-gate inside Renumber path —
+e.g. =Renumber only if predicted_merges_count ≥ K=. This skips the
+rebuild on small bushy trees where the rebuild is pure overhead
+and was the main +10% culprit.
+
+Test count: 329 passed (was 322; +7 from auto_strategy tests),
+0 failed.

@@ -1935,3 +1935,55 @@ overrides it. Future readers can follow the trail.
 - `src/symbolic/supernode.rs` — `AmalgamationStrategy` `#[default]`
   moved from `Adjacency` to `Renumber`; doc-comments updated.
 - `CHANGELOG.md` — Unreleased entry updated to reflect the new default.
+
+## 2026-04-25 — Phase 2.13a `AmalgamationStrategy::Auto` is now default
+
+**Default `AmalgamationStrategy` flipped from `Renumber` to `Auto`.**
+Phase 2.12 made `Renumber` the default. That cut factor time 30-67%
+on IPM-KKT tail matrices but introduced a regression on path-like
+etrees: MUONSINE_0000 went from 1.4× MUMPS under `Adjacency` to 5.5×
+under `Renumber` because the merge-prediction pass over-merged a
+near-pure path into a single ncol=32 root frontal that costs ~1 ms
+on its own. The fix is dispatch on etree shape rather than picking
+one strategy globally.
+
+**Predicate.** `multi_child_frac = n_multi_child_internal / n_internal`,
+computed in O(n) on the etree before `find_supernodes`. Threshold
+`< 0.05` ⇒ `Adjacency` (path / near-path), else `Renumber` (bushy).
+Probe (`src/bin/diag_etree_shape.rs`) on 7 known-answer matrices
+showed clean separation: MUONSINE at 0.002 (the only Renumber-loses
+case), all 6 Renumber-wins matrices at 0.20-0.98. Threshold 0.05
+sits comfortably in the gap.
+
+**What Auto buys, measured on the 153560-matrix corpus.**
+- Tail wins preserved: ACOPR30/CRESC100/LAKES/NELSON/SWOPF dispatch
+  to `Renumber` (multi_child_frac 0.20-0.98 ≫ 0.05) and hold the
+  Phase 2.12 numbers.
+- MUONSINE regression eliminated: dispatches to `Adjacency`
+  (multi_child_frac 0.002), drops out of the corpus Top-10. Max
+  ratio improves 10.64 → 9.66.
+- p99 improves slightly (3.45 → 3.40); geomean and p50 unchanged
+  vs `Renumber`-default (0.45 / 0.33).
+- Cost of the predicate itself: O(n) child-count pass on the
+  etree, dominated by the existing `find_supernodes` cost by ~10×.
+
+**What Auto does not fix.** The +10% small-CUTEst-Hessian median
+gap vs `Adjacency` (Phase 2.12 entry) persists. Those matrices are
+structurally bushy (multi_child_frac ≥ 0.05) so Auto correctly
+dispatches them to `Renumber` and they pay its per-call rebuild
+overhead. Recovering those needs an orthogonal lever (Phase 2.13c
+candidate: gate Renumber on predicted_merges_count or n).
+
+**Files.**
+- `src/symbolic/supernode.rs` — `AmalgamationStrategy::Auto` variant
+  added; `#[default]` moved from `Renumber` to `Auto`. New
+  `pick_amalgamation_strategy(etree)` and
+  `AUTO_MULTI_CHILD_FRAC_THRESHOLD` constant.
+- `src/symbolic/mod.rs` — `Auto` resolved to a concrete variant
+  immediately before the existing Renumber gate in
+  `symbolic_factorize_with_method`.
+- `src/bin/diag_etree_shape.rs` — predicate-design probe.
+- `tests/auto_strategy.rs` — 7-case dispatch unit tests (path,
+  bushy, empty, leaf-only, near-path, fan-at-root).
+- `dev/research/phase-2.13a-amalgamation-auto.md` — research note.
+- `CHANGELOG.md` — Unreleased entry.
