@@ -25,9 +25,9 @@ migration to MUMPS+SSIDS consensus inertia
 ground truth and is the basis for the numbers below.
 
 The sparse multifrontal path now runs end-to-end on the **full
-~153k-matrix KKT corpus** with no n-size filter (matrices up to
-n = 5314 are present and produce residuals at machine precision on
-the well-conditioned majority). The Phase 1 "broken at scale" picture
+~183k-matrix KKT corpus** with no n-size filter (matrices range up
+to n ≈ 5×10⁵, with ~14k above n = 500 and ~10k above n = 1000;
+residuals are at machine precision on the well-conditioned majority). The Phase 1 "broken at scale" picture
 no longer applies: MC64 matching-based scaling shipped in Phase 2.2.1,
 and subsequent phases have layered on:
 
@@ -184,7 +184,7 @@ for the architecture of the consensus framework and
 [`dev/phase1-retrospective.org`](dev/phase1-retrospective.org) for the
 story of how and why it was built.
 
-## Known limitations (going into Phase 2)
+## Known limitations
 
 - **ACOPP30 family residuals**: on ACOPP30_0000, feral and canonical
   MUMPS agree on the factorization inertia but feral's final residual is
@@ -197,19 +197,11 @@ story of how and why it was built.
   is the Phase 1 default. For matrices with genuinely rank-deficient
   blocks, this produces a wrong `A⁻¹` that iterative refinement cannot
   recover. Delayed pivoting (SSIDS-style) is Phase 2.
-- **The sparse path has never run at scale.** Every matrix in the
-  Phase 1 validation corpus has n ≤ 500 because the bench enforces a
-  Phase 1a hold-over filter. The sparse multifrontal pipeline, which
-  is the point of Phase 1b, has literally never been run on a matrix
-  where the dense path wasn't also applicable. We do not know whether
-  `column_counts` has a latent O(n²) that manifests at larger sizes
-  (the Phase 1b plan explicitly noted "O(n²) worst case but fine for
-  dim ≤ 500"), whether the frontal allocation pattern holds up under
-  deep assembly trees, or whether the per-supernode vec allocations in
-  the sparse solve become dominant at large n. The first Phase 2 task
-  is lifting this limit and measuring feral against canonical MUMPS
-  and SSIDS on moderate-scale (n = 10³ – 10⁴) problems from
-  `ripopt/benchmarks/{large_scale, grid, gas, water}`.
+- **Per-frontal-only scaling.** Knight-Ruiz equilibration is applied
+  locally per frontal matrix; there is no global MC64-style matching
+  scaling across the whole matrix before ordering. This is the
+  proximate cause of the ACOPP30 residual gap above. A global scaling
+  pass is the next Phase 2 milestone.
 
 ## References
 
