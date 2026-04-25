@@ -97,10 +97,10 @@ fn shape_features(csc: &CscMatrix) {
         }
         if top5.len() < 5 {
             top5.push((nnz, j));
-            top5.sort_by(|a, b| b.0.cmp(&a.0));
+            top5.sort_by_key(|b| std::cmp::Reverse(b.0));
         } else if nnz > top5[4].0 {
             top5[4] = (nnz, j);
-            top5.sort_by(|a, b| b.0.cmp(&a.0));
+            top5.sort_by_key(|b| std::cmp::Reverse(b.0));
         }
     }
     println!(

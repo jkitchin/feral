@@ -404,7 +404,7 @@ fn print_perf_comparison(label: &str, timings: &[MatrixTiming], entries: &[KktEn
         }
     }
     let mut fam_rows: Vec<(&str, Vec<f64>)> = by_family.into_iter().collect();
-    fam_rows.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    fam_rows.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
     println!("\nPer-family factor geomean vs MUMPS (top 25 families by count):");
     println!(
         "{:<22} {:>6} {:>10} {:>10} {:>10}",
