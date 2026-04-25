@@ -926,3 +926,41 @@ is not Phase 2.11 scope.
 
 **Evidence.** `dev/journal/2026-04-25-03.org` Phase 2.11
 section, `src/bin/diag_small_leaf_gate.rs` 5-run output above.
+
+---
+
+## 2026-04-25 — Flipping `AmalgamationStrategy` default to `Renumber`
+
+**Phase.** 2.12 (column-renumbering amalgamation).
+
+**What was tried.** After implementing `AmalgamationStrategy::Renumber`
+(SSIDS-style column renumbering before `find_supernodes`) and observing
+60-67% factor-time reduction on the IPM tail (ACOPR30, CRESC100, LAKES),
+the natural next step was to flip the default to make every workload
+benefit. Ran the full corpus bench (`cargo run --release --bin bench`)
+to verify no regression on small-and-medium matrices.
+
+**Why rejected.** Corpus median sparse factor ratio vs MUMPS regressed:
+
+| metric                  | Adjacency | Renumber | Δ      |
+|-------------------------|-----------|----------|--------|
+| sparse factor p50       | 0.30      | 0.33     | +10%   |
+| sparse factor p90       | 1.70      | 1.89     | +11%   |
+| sparse factor p99       | 3.79      | 3.45     |  -9%   |
+| sparse small-front p90  | 1.69      | 1.88     | +11%   |
+| sparse medium p90       | 1.70      | 1.89     | +11%   |
+
+The plan's hard graduation criterion was "corpus median total_us within
+±5%". The +10% p50 / +11% p90 regression on the long tail of small
+matrices exceeds that budget. Tail wins are real but don't justify
+median tax on the rest of the corpus.
+
+**Disposition.** Renumber stays implemented as opt-in
+(`SupernodeParams::amalgamation_strategy = AmalgamationStrategy::Renumber`).
+Default remains `Adjacency`. Decision recorded in `dev/decisions.md`
+("Phase 2.12 column-renumbering kept opt-in"). Future work: shape-
+dispatched `Auto` strategy that picks per matrix.
+
+**Evidence.** `/tmp/feral_bench_adjacency.txt`,
+`/tmp/feral_bench_renumber.txt` (corpus bench full output);
+`dev/journal/2026-04-25-03.org` Phase 2.12 entries.

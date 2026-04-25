@@ -190,3 +190,16 @@ Phase 2.12 disposition: Renumber landed as opt-in. All tests pass
 the full ratio table. Tail-matrix wins are real and reproducible;
 the median-regression cost is the reason it doesn't graduate to
 default.
+
+* 19:30 :phase-2.12:flipped:
+User re-evaluated the gate-rigid "keep opt-in" call. The right
+question is not "did corpus median move ±5%" but "is this a net
+win for feral's spec-stated mission". For IPM/KKT solves it
+unambiguously is: 30-67% factor-time reduction on the tail at the
+cost of ~10% on sub-millisecond CUTEst Hessians. Flipped
+=AmalgamationStrategy::default()= from =Adjacency= to =Renumber=
+in commit =cd9af06=. Adjacency variant kept as opt-in escape
+hatch. All 315 tests still pass. Decision-log appended (the prior
+"kept opt-in" entry stands as the gate-as-written record; the new
+entry supersedes it). CHANGELOG entry now reflects the flip as a
+Changed/default-update rather than an Added/opt-in feature.
