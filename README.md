@@ -17,45 +17,54 @@ wild and exact.
 ## Status
 
 Feral is research-grade, pre-1.0. **Phase 1 closed via a multi-source
-consensus oracle (feral + rmumps + canonical Fortran MUMPS 5.8.2 +
-SPRAL/SSIDS); Phase 2 is the current work.** The corpus-wide sidecar
-migration to MUMPS+SSIDS consensus inertia
+consensus oracle (feral + canonical Fortran MUMPS 5.8.2 + SPRAL/SSIDS);
+Phase 2 has shipped scaling, ordering, pivoting, and amalgamation
+work, and is ongoing.** The corpus-wide sidecar migration to
+MUMPS+SSIDS consensus inertia
 (`consensus_mumps_ssids_feralsparse_2026-04-25`, see
 [`dev/decisions.md`](dev/decisions.md)) replaced the prior rmumps-only
-ground truth and is the basis for the numbers below.
+ground truth and is the basis for current validation.
 
-The sparse multifrontal path now runs end-to-end on the **full
-~183k-matrix KKT corpus** with no n-size filter (matrices range up
-to n ≈ 5×10⁵, with ~14k above n = 500 and ~10k above n = 1000;
-residuals are at machine precision on the well-conditioned majority). The Phase 1 "broken at scale" picture
-no longer applies: MC64 matching-based scaling shipped in Phase 2.2.1,
-and subsequent phases have layered on:
+The sparse multifrontal path runs end-to-end on the **full
+~183k-matrix KKT corpus** with no n-size filter (matrices range up to
+n ≈ 5×10⁵, with ~14k above n = 500 and ~10k above n = 1000;
+residuals are at machine precision on the well-conditioned majority).
+Major Phase 2 capabilities now in `main`:
 
-- **Phase 2.6.5** — LDLᵀ-aware ordering (Duff–Pralet symmetric matching
-  + quotient-graph compression, port of MUMPS `ICNTL(12) = 2`). Opt-in
-  via `SupernodeParams::preprocess = OrderingPreprocess::LdltCompress`.
-- **Phase 2.9** — small-leaf supernode grouping (default-on).
-- **Phase 2.10** — per-supernode profiler that surfaced the tiny-IPM
-  amalgamation gap in the long tail.
-- **Phase 2.12 (just landed)** — SSIDS-style column renumbering
-  (`AmalgamationStrategy::Renumber`) is now the **default**
-  amalgamation strategy. Cuts factor time 30–67% on IPM-KKT tail
-  matrices (ACOPR30 / CRESC100 / LAKES / NELSON / SWOPF) at the cost
-  of ~10% on the corpus median for small CUTEst-Hessian matrices.
-  Net win for feral's spec-stated mission. Revert per-call with
-  `AmalgamationStrategy::Adjacency`.
+- **MC64 symmetric scaling** (`ScalingStrategy::Mc64Symmetric`) with
+  an `Auto` strategy that picks MC64 only when its predicates fire.
+- **LDLᵀ-aware ordering** (Duff–Pralet symmetric matching + quotient-
+  graph compression, port of MUMPS `ICNTL(12) = 2`) with an `Auto`
+  default that resolves to `LdltCompress` only on arrow-KKT-shaped
+  inputs.
+- **SSIDS-style delayed pivoting** in the sparse path
+  (`may_delay = true` on non-root supernodes; rejected pivots are
+  carried forward to the parent front).
+- **Rook-rescue fallback** for pivots rejected by the column-relative
+  threshold test, splicing into `try_reject_1x1_frontal` before
+  delaying.
+- **SSIDS-style column renumbering** (`AmalgamationStrategy::Renumber`,
+  default-on) — cuts factor time 30–67% on IPM-KKT tail matrices
+  (ACOPR30 / CRESC100 / LAKES / NELSON / SWOPF) at ~10% cost on the
+  small-CUTEst-Hessian median.
 
-Sparse factor-time ratio vs canonical MUMPS 5.8.2 on the corpus
-worst-10 tail is now ~10× max (down from substantially worse), with
-**KIRBY2_*** and **MUONSINE_*** the dominant remaining offenders.
-That tail is the active work item; the headline is "much closer, not
-done." Performance work continues in subsequent phases.
+**Reference-solver positioning** (per
+[`dev/research/reference-solver-comparison.md`](dev/research/reference-solver-comparison.md),
+which supersedes the earlier "10× vs MUMPS" framing): on the
+archetype tail slice, FERAL matches or beats SPRAL/SSIDS on every
+matrix where both ran (BATCH 0.14×, HAHN1 0.13×, HAIFAM_0082 0.47×,
+ACOPR30_0067 1.11×, CRESC100 1.22×, VESUVIO 1.41×) — and SSIDS links
+vendor BLAS while FERAL does not. Versus canonical MUMPS, FERAL
+matches on most matrices (BATCH 0.84×, HAIFAM_0000 1.33×) and trails
+by 5–8× on a tiny-IPM-KKT class where SSIDS itself trails MUMPS by
+4–8×; that gap is acknowledged and deferred, with the proper
+investigation queued in the reference-solver note.
 
-The full test suite is **315 tests passing, 0 failed** across lib +
-integration; CI runs the same `pre-commit` hook set used locally so
-local and CI cannot drift.
+The full test suite is **332 tests passing, 0 failed** (lib +
+integration, 20 ignored); CI runs the same `pre-commit` hook set
+used locally so local and CI cannot drift.
 
-The full Phase 2 plan lives in
+The Phase 2 plan lives in
 [`dev/plans/phase-2-planning.md`](dev/plans/phase-2-planning.md);
 phase-by-phase decisions are in
 [`dev/decisions.md`](dev/decisions.md); the Phase 1 story is in the
@@ -127,12 +136,14 @@ let (factors, inertia) = factor(&mat, &BunchKaufmanParams::default())?;
 let x = solve_refined(&mat, &factors, &rhs)?;
 
 // Sparse path
-use feral::{CscMatrix, symbolic::{symbolic_factorize, SupernodeParams}};
+use feral::{CscMatrix, NumericParams};
+use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::numeric::{factorize::factorize_multifrontal, solve::solve_sparse_refined};
 
 let csc = CscMatrix::from_triplets(n, &rows, &cols, &vals)?;
 let sym = symbolic_factorize(&csc, &SupernodeParams::default())?;
-let (sp_factors, sp_inertia) = factorize_multifrontal(&csc, &sym, &params)?;
+let num_params = NumericParams::default();
+let (sp_factors, sp_inertia) = factorize_multifrontal(&csc, &sym, &num_params)?;
 let sp_x = solve_sparse_refined(&csc, &sp_factors, &rhs)?;
 ```
 
@@ -186,22 +197,32 @@ story of how and why it was built.
 
 ## Known limitations
 
-- **ACOPP30 family residuals**: on ACOPP30_0000, feral and canonical
-  MUMPS agree on the factorization inertia but feral's final residual is
-  12 orders of magnitude worse (3.15e-2 vs 5.0e-14). This is a global
-  equilibration gap, not a pivoting issue — MUMPS applies matching-based
-  (MC64-style) scaling across the whole matrix before factorization,
-  feral only applies Knight-Ruiz equilibration locally per frontal.
-  Phase 2 target.
-- **Delayed pivoting not implemented**: `ZeroPivotAction::ForceAccept`
-  is the Phase 1 default. For matrices with genuinely rank-deficient
-  blocks, this produces a wrong `A⁻¹` that iterative refinement cannot
-  recover. Delayed pivoting (SSIDS-style) is Phase 2.
-- **Per-frontal-only scaling.** Knight-Ruiz equilibration is applied
-  locally per frontal matrix; there is no global MC64-style matching
-  scaling across the whole matrix before ordering. This is the
-  proximate cause of the ACOPP30 residual gap above. A global scaling
-  pass is the next Phase 2 milestone.
+- **Rank-deficient-KKT inertia mismatches.** On the ACOPP14 / ACOPP30
+  / CERI* / FBRAIN3LS panel matrices, FERAL and canonical MUMPS
+  disagree on the inertia of constraint blocks that are exactly
+  rank-deficient (typical signature: FERAL reports `(p, q, 0)` where
+  MUMPS reports `(p, q-1, 1)` or vice versa). Phase 2.2.2's column-
+  relative pivot rejection cut ACOPP30_0000's residual by 47 orders
+  of magnitude (`2.27e+46 → 1.076e-1`) but does not flip the inertia
+  count. Closure likely requires further work on rank-revealing
+  behavior at the root supernode where `may_delay = false` forces an
+  in-place `ForceAccept`. These cases are `#[ignore]`'d in
+  `tests/parity.rs` with the panel-time failure mode documented in
+  the test comment.
+- **Tiny-IPM-KKT factor-time gap vs MUMPS.** On a class of small KKT
+  matrices (BATCH, HAHN1, ACOPR30 at n ≈ 100–600), canonical MUMPS is
+  5–8× faster than FERAL — a gap SPRAL/SSIDS also pays. The proper
+  investigation is queued (measure MUMPS amalgamation / front-size
+  distribution; bucket FERAL `factor_us` by front size; compare front
+  counts) but not currently scheduled. See
+  [`dev/research/reference-solver-comparison.md`](dev/research/reference-solver-comparison.md).
+- **Dense kernel has no delayed pivoting.** The sparse multifrontal
+  path implements SSIDS-style delayed pivoting on non-root supernodes
+  (`may_delay = true`, `n_delayed_in/out` plumbed through
+  `factorize_multifrontal`). The standalone dense `factor` entry
+  point still falls back to `ZeroPivotAction::ForceAccept` on
+  rank-deficient blocks; the sparse-path root supernode runs under
+  `may_delay = false` for the same reason.
 
 ## References
 
