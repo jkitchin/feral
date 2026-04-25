@@ -75,35 +75,47 @@ either:
 2. Does feral expose an analyze-once API path? (`SparseSolverState`
    in `dev/plans/policy-traits-api.md` may already have this scope —
    check.)
-3. Is the bench's `factor_us` measurement methodology correct? It
-   re-runs symbolic on every factorization, but MUMPS oracles likely
-   measure only `dmumps(JOB=2)` (numeric). If the oracle is numeric-
-   only and feral charges symbolic+numeric, the comparison is unfair
-   on small n where symbolic dominates. Confirm and either fix the
-   bench or note in the report.
+3. ~~Is the bench's `factor_us` measurement methodology correct?~~
+   **Resolved 2026-04-25.** MUMPS oracle uses `JOB=4` (analyze +
+   factor combined), feral bench times symbolic + numeric together
+   as a single block (`src/bin/bench.rs:1445-1476` with explicit
+   comment). The methodology is apples-to-apples. The 9.5× ratio
+   on KIRBY2_0007 is real; the gap is primarily feral-amd taking
+   770µs on n=458 vs MUMPS getting analyze+factor done in 122µs.
 
 ## Suggested execution order
 
-1. **Add per-stage symbolic profiler.** Instrument
-   `symbolic_factorize_with_method` with `Profiler` calls per stage.
-   Reuse the Phase 2.10 `Profiler` API. ~half-day.
+1. ~~**Add per-stage symbolic profiler.**~~ **Done 2026-04-25**
+   (commit `2143658`). `SymbolicProfiler` lives at
+   `src/symbolic/profiler.rs`; instrumentation covers 14 stages in
+   `symbolic_factorize_with_method`.
 
-2. **Confirm KIRBY2 hypothesis.** Run the per-stage profiler on
-   KIRBY2_0007 + MUONSINE_0000 + 5 small-n CUTEst Hessians. Identify
-   the dominant stage(s). ~half-day.
+2. ~~**Confirm KIRBY2 hypothesis.**~~ **Done 2026-04-25.** 5-run
+   median per-stage breakdown:
 
-3. **Verify bench methodology.** Read MUMPS oracle generator (in
-   `ref/mumps/` or wherever sidecar `factor_us` is sourced) and
-   confirm whether it measures symbolic + numeric or numeric only.
-   If numeric-only, document the discrepancy and decide whether to
-   subtract symbolic on the feral side or apply a methodology fix.
+   - KIRBY2_0007 (n=458): `ordering` 773µs / 85.5%, everything else
+     <50µs each. AMD per-call cost is the entire problem.
+   - MUONSINE_0000 (n=1537): `ordering` 440µs / 46.9%, `postorder`
+     206µs / 21.9%, `renumber` 159µs / 16.9%.
+
+   Hypothesis refined to: **AMD per-call setup cost dominates
+   symbolic on small-n.**
+
+3. ~~**Verify bench methodology.**~~ **Done 2026-04-25.** MUMPS
+   oracle uses `JOB=4` (analyze + factor combined); feral bench
+   times symbolic + numeric together. Apples-to-apples.
 
 4. **Implement `AmalgamationStrategy::Auto`.** Cheap shape predicate
    from the diagnostic, dispatch between Renumber and Adjacency.
    Test with parity tests + corpus bench. Success criteria above.
 
-5. **Decide on stage skipping or symbolic caching.** Depends on
-   step 2's outcome. Defer plan until then.
+5. **Decide between symbolic caching vs AMD per-call shrink.**
+   Both target the dominant stage on small-n; caching also targets
+   IPM-iteration economics broadly. Recommend a 5-call AMD
+   sub-stage profiler probe before committing to the fix path —
+   if AMD's 770µs is dominated by allocations and hash sizing,
+   per-call shrink is the cheap win; if it's dominated by O(n α n)
+   work, symbolic caching is the only meaningful lever.
 
 ## Out of scope
 

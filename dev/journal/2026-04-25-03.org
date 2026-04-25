@@ -313,3 +313,71 @@ done — the hypothesis is confirmed and refined to "AMD per-call
 setup cost dominates on small-n". Step 3 (bench methodology
 verification) and the fix decision (caching vs AMD constant
 shrink) remain.
+
+* 21:30 :phase-2.13b:bench-methodology:mumps:fairness:
+Phase 2.13b step 3: bench methodology fairness check.
+
+Question from the plan: does MUMPS's `factor_us` measure
+analyze+factor (apples-to-apples with feral) or only numeric
+(making feral's symbolic+numeric an unfair comparison on small-n)?
+
+Read =external_benchmarks/mumps_oracle/mumps_bench.F=:
+
+#+begin_example
+C     ---- Analyze + Factor ----
+      CALL SYSTEM_CLOCK(T_FAC_START)
+      MP%JOB = 4
+      CALL DMUMPS(MP)
+      CALL SYSTEM_CLOCK(T_FAC_END)
+      ...
+      FAC_US = ((T_FAC_END - T_FAC_START) * 1000000_8) / CLOCK_RATE
+      WRITE(12,'(A,I0)') "factor_us ", FAC_US
+#+end_example
+
+MUMPS JOB=4 means "analyze + factor" combined. The reported
+`factor_us` includes both phases. *Methodology is apples-to-
+apples.*
+
+Confirmed feral side too: =src/bin/bench.rs= line 1445-1476
+explicitly times symbolic + numeric together as one block,
+with a comment stating this is to match MUMPS/SSIDS semantics:
+
+#+begin_example
+// Symbolic factorization. Timed together with the numeric phase so
+// the reported `factor_us` is apples-to-apples with the single
+// `factor_us` field MUMPS and SSIDS emit for their equivalent work.
+let tf = Instant::now();
+... symbolic_factorize ...
+... factorize_multifrontal ...
+let sp_factor_us = tf.elapsed().as_micros();
+#+end_example
+
+*Conclusion.* The KIRBY2_0007 9.5× ratio is real. MUMPS does
+analyze+factor in 122µs for n=458; feral does the same work in
+~1160µs (904µs symbolic + ~235µs numeric). The bench is fair;
+the gap is primarily feral-amd taking 770µs on n=458 where MUMPS
+gets the entire combined operation done in 122µs.
+
+Methodology asymmetry note: feral uses min-of-N resample for fast
+matrices (=should_resample=); MUMPS oracle is single-shot. This
+*favors feral*, so it cannot explain a feral-disadvantage ratio.
+
+Phase 2.13b plan steps 1+2+3 are now complete. The remaining
+decision is the fix path:
+
+- (a) symbolic caching across same-pattern factorizations (IPM-
+  iteration friendly: re-use perm/etree/supernodes when only
+  numerical values change). Targets ALL stages, not just AMD.
+  Largest single architectural win, but requires API surface
+  (probably the SparseSolverState type from
+  =dev/plans/policy-traits-api.md=).
+- (b) shrink feral-amd per-call constant. Targets ordering only.
+  Direct attack on the dominant stage. Smaller scope, and may
+  also help mid-n cases.
+- both.
+
+Recommendation: defer the choice until measuring AMD's per-call
+breakdown (allocations vs hash sizing vs work). A 5-call AMD
+profiler probe on n=458 would tell us whether the constant is
+dominated by setup (caching helps a lot) or by O(n alpha n) work
+(caching helps even more, but per-call shrink helps less).
