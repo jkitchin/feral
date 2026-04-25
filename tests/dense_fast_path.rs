@@ -49,6 +49,23 @@ fn load_csc(path: &str) -> CscMatrix {
     }
 }
 
+/// Skip helper for corpus-dependent tests: matrices in `data/matrices/`
+/// are gitignored (CUTEst KKT corpus regenerates from ripopt runs;
+/// see .gitignore) so CI hosts don't have them. Returns `true` when
+/// the file is absent and the caller should `return` early.
+fn skip_if_missing(path: &str) -> bool {
+    if !Path::new(path).exists() {
+        eprintln!(
+            "SKIP: {} not present (data/matrices/ is gitignored; \
+             regenerate via ripopt CUTEst harness)",
+            path
+        );
+        true
+    } else {
+        false
+    }
+}
+
 /// Deterministic RHS — irrational scalars keep cancellation honest.
 fn make_rhs(n: usize, seed: u64) -> Vec<f64> {
     let mut s = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -170,6 +187,9 @@ fn test_gate_predicate_shape() {
 #[test]
 fn test_solve_parity_tro3x3() {
     let path = "data/matrices/kkt/TRO3X3/TRO3X3_0013.mtx";
+    if skip_if_missing(path) {
+        return;
+    }
     let csc = load_csc(path);
     assert!(csc.n <= 128, "TRO3X3_0013 expected in-gate (n={})", csc.n);
     let params = default_params();
@@ -221,6 +241,9 @@ fn test_cross_path_determinism_tro3x3() {
     // Factor the same in-gate matrix twice via the dense path.
     // Solves must be bit-equal (determinism floor).
     let path = "data/matrices/kkt/TRO3X3/TRO3X3_0013.mtx";
+    if skip_if_missing(path) {
+        return;
+    }
     let csc = load_csc(path);
     let params = default_params();
 

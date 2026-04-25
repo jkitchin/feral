@@ -119,6 +119,10 @@ fn assert_factors_equal(a: &SparseFactors, b: &SparseFactors, ctx: &str) {
 }
 
 fn assert_parity(path: &str) {
+    if !Path::new(path).exists() {
+        eprintln!("SKIP: {} not present (corpus is gitignored)", path);
+        return;
+    }
     let csc = load_csc(path);
     let snode_params = SupernodeParams::default();
     let sym = match symbolic_factorize(&csc, &snode_params) {

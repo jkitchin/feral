@@ -169,6 +169,10 @@ fn assert_parity(csc: &CscMatrix, ctx: &str) {
 }
 
 fn assert_parity_path(path: &str) {
+    if !Path::new(path).exists() {
+        eprintln!("SKIP: {} not present (corpus is gitignored)", path);
+        return;
+    }
     let csc = load_csc(path);
     assert_parity(&csc, path);
 }
@@ -247,6 +251,10 @@ fn small_leaf_groups_nonempty_on_archetypes() {
         "data/matrices/kkt/CRESC100/CRESC100_0000.mtx",
         "data/matrices/kkt/HAIFAM/HAIFAM_0082.mtx",
     ] {
+        if !Path::new(path).exists() {
+            eprintln!("SKIP: {} not present (corpus is gitignored)", path);
+            continue;
+        }
         let csc = load_csc(path);
         let snode_params = SupernodeParams::default();
         let sym = match symbolic_factorize(&csc, &snode_params) {

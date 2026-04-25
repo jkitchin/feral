@@ -38,6 +38,19 @@ fn load_csc(path: &str) -> CscMatrix {
     }
 }
 
+/// `data/matrices/` is gitignored; corpus is regenerated from ripopt
+/// CUTEst runs and not present on CI. Returns `true` when missing so
+/// the caller can early-return with a SKIP message instead of
+/// panicking through `read_mtx`.
+fn skip_if_missing(path: &str) -> bool {
+    if !Path::new(path).exists() {
+        eprintln!("SKIP: {} not present (corpus is gitignored)", path);
+        true
+    } else {
+        false
+    }
+}
+
 fn default_params() -> NumericParams {
     NumericParams::with_bk(BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
@@ -173,6 +186,9 @@ fn factor_both(
 }
 
 fn assert_parity(path: &str, ws: &mut FactorWorkspace) {
+    if skip_if_missing(path) {
+        return;
+    }
     let csc = load_csc(path);
     let ((f0, i0), (f1, i1)) = factor_both(&csc, ws);
     assert_inertia_eq(&i0, &i1, &format!("{}/total_inertia", path));
@@ -237,6 +253,9 @@ fn parity_cross_matrix_reuse() {
         "data/matrices/kkt/BATCH/BATCH_0000.mtx",
     ];
     for (step, path) in sequence.iter().enumerate() {
+        if skip_if_missing(path) {
+            return;
+        }
         let ctx = format!("step {} ({})", step, path);
         let csc = load_csc(path);
         let ((f0, i0), (f1, i1)) = factor_both(&csc, &mut ws);
@@ -253,6 +272,9 @@ fn parity_cross_matrix_reuse() {
 fn parity_repeat_same_matrix() {
     let mut ws = FactorWorkspace::new();
     let path = "data/matrices/kkt/BATCH/BATCH_0500.mtx";
+    if skip_if_missing(path) {
+        return;
+    }
     let csc = load_csc(path);
     let ((f_baseline, _), _) = factor_both(&csc, &mut ws);
     for step in 0..5 {

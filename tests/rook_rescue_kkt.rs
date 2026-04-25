@@ -101,7 +101,15 @@ fn run_family(family_dir: &str, stems: &[&str]) -> Vec<Result> {
     let mut results = Vec::with_capacity(stems.len());
     for stem in stems {
         let base = format!("data/matrices/kkt/{}/{}", family_dir, stem);
-        let mtx = read_mtx(Path::new(&format!("{}.mtx", base))).expect("read mtx");
+        let mtx_path = format!("{}.mtx", base);
+        if !Path::new(&mtx_path).exists() {
+            eprintln!(
+                "  skip {} — {} not present (corpus is gitignored)",
+                stem, mtx_path
+            );
+            continue;
+        }
+        let mtx = read_mtx(Path::new(&mtx_path)).expect("read mtx");
         let csc = mtx.to_csc().expect("to_csc");
         let sidecar = read_sidecar(Path::new(&format!("{}.json", base))).expect("sidecar");
         let rhs = sidecar.finite_rhs().expect("finite rhs");
@@ -231,6 +239,10 @@ fn test_rook_rescue_cresc100_panel() {
         "CRESC100_0009",
     ];
     let results = run_family("CRESC100", &stems);
+    if results.is_empty() {
+        eprintln!("SKIP: no CRESC100 matrices found (corpus is gitignored)");
+        return;
+    }
     report("CRESC100", &results);
     assert_family("CRESC100", &results);
 }
@@ -251,6 +263,10 @@ fn test_rook_rescue_gauss2_panel() {
         "GAUSS2_0009",
     ];
     let results = run_family("GAUSS2", &stems);
+    if results.is_empty() {
+        eprintln!("SKIP: no GAUSS2 matrices found (corpus is gitignored)");
+        return;
+    }
     report("GAUSS2", &results);
     assert_family("GAUSS2", &results);
 }
