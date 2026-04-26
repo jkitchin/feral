@@ -84,10 +84,11 @@ pub(crate) fn select_pivot(ws: &mut AmdWorkspace) -> Option<usize> {
 /// Build the new element `me` by merging the (variable) tail of
 /// `me`'s list with every element `e` already in `me`'s list.
 ///
-/// On success returns `(pme1, pme2, nvpiv, degme)`:
-/// - `pme1..=pme2` is the contiguous region in `ws.iw` holding the
-///   new element's **variable** members (supervariables, listed
-///   once each).
+/// On success returns `(pme1, pme2_excl, nvpiv, degme)`:
+/// - `pme1..pme2_excl` is the contiguous region in `ws.iw` holding
+///   the new element's **variable** members (supervariables, listed
+///   once each). Exclusive end so the empty case (`pme2_excl ==
+///   pme1`) is representable in `usize` without underflow.
 /// - `nvpiv` is the supervariable count of the pivot.
 /// - `degme` is the tentative new element's external degree (sum of
 ///   `nv[i]` over the assembled variables, before any absorption
@@ -278,12 +279,22 @@ pub(crate) fn create_element(
     ws.elen[me] = flip(nvpiv + degme as i32);
     ws.wflg = clear_flag(ws.wflg, ws.wbig, &mut ws.w);
 
-    Ok((pme1, pme2 as usize, nvpiv, degme))
+    // Convert the inclusive `pme2` (which is `pme1 - 1` when the
+    // pivot's variable list ended up empty — every neighbour was
+    // already absorbed) to an exclusive end so downstream loops can
+    // use a `usize` half-open range without the wrap-around bug
+    // `(-1i32) as usize == usize::MAX`.
+    let pme2_excl: usize = if pme2 < pme1 as i32 {
+        pme1
+    } else {
+        (pme2 + 1) as usize
+    };
+    Ok((pme1, pme2_excl, nvpiv, degme))
 }
 
 /// Finish the elimination step whose create-element phase produced
-/// `(pme1, pme2, nvpiv, degme)` and left `nv[me] = -nvpiv` and
-/// `nv[i] = -nv[i]` for every variable `i ∈ iw[pme1..=pme2]`.
+/// `(pme1, pme2_excl, nvpiv, degme)` and left `nv[me] = -nvpiv` and
+/// `nv[i] = -nv[i]` for every variable `i ∈ iw[pme1..pme2_excl]`.
 ///
 /// Does, in order:
 /// 1. **Pass-1 w-seeding** (faer `amd.rs:366-385`). For each
@@ -322,7 +333,7 @@ pub(crate) fn finalize_step(
     ws: &mut AmdWorkspace,
     me: usize,
     pme1: usize,
-    pme2_incl: usize,
+    pme2_excl: usize,
     nvpiv: i32,
     degme: usize,
     elenme: i32,
@@ -332,7 +343,7 @@ pub(crate) fn finalize_step(
     let mut nvpiv = nvpiv;
 
     // Pass 1: seed w[e] for every element in each member's list.
-    for pme in pme1..=pme2_incl {
+    for pme in pme1..pme2_excl {
         let i = ws.iw[pme] as usize;
         let eln = ws.elen[i];
         if eln > 0 {
@@ -357,7 +368,7 @@ pub(crate) fn finalize_step(
     // insertion for supervariable detection (amd.rs:451-460). `degme`
     // and `nvpiv` are mutated when mass-elim fires; the post-loop
     // degree/flop bookkeeping uses the updated values.
-    for pme in pme1..=pme2_incl {
+    for pme in pme1..pme2_excl {
         let i = ws.iw[pme] as usize;
         let p1 = ws.pe[i] as usize;
         let p2 = p1 + ws.elen[i] as usize;
@@ -489,7 +500,7 @@ pub(crate) fn finalize_step(
     // storage; they are restored to NONE at the heads involved so
     // the subsequent degree-list re-insertion pass can rebuild the
     // degree buckets cleanly.
-    for pme in pme1..=pme2_incl {
+    for pme in pme1..pme2_excl {
         let i_anchor = ws.iw[pme] as usize;
         if ws.nv[i_anchor] >= 0 {
             continue; // already restored / mass-elim'd
@@ -558,7 +569,7 @@ pub(crate) fn finalize_step(
     // survivors.
     let mut p_write = pme1;
     let nleft = ws.n - ws.nel;
-    for pme in pme1..=pme2_incl {
+    for pme in pme1..pme2_excl {
         let i = ws.iw[pme] as usize;
         let nvi = -ws.nv[i];
         if nvi > 0 {
@@ -928,11 +939,11 @@ mod tests {
         assert_eq!(me, 4, "first pivot is the LIFO head of deg-1");
         // elen[4] == 0 (no elements yet).
         assert_eq!(ws.elen[4], 0);
-        let (pme1, pme2, nvpiv, degme) = create_element(&mut ws, me).unwrap();
+        let (pme1, pme2_excl, nvpiv, degme) = create_element(&mut ws, me).unwrap();
         assert_eq!(nvpiv, 1, "singleton supervariable");
         assert_eq!(degme, 1, "only neighbor is the hub (nv=1)");
         // The new element's var list contains {hub} = {0}.
-        assert_eq!(pme2 - pme1 + 1, 1);
+        assert_eq!(pme2_excl - pme1, 1);
         assert_eq!(ws.iw[pme1], 0);
         assert_eq!(ws.pe[4], pme1 as i32);
         assert_eq!(ws.len[4], 1);
