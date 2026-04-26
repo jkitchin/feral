@@ -286,8 +286,8 @@ impl SparseFactors {
     ///
     /// Format:
     /// `n=<n> | <ordering> | <amalg> | preproc=<preproc> |
-    ///  scaling=<scaling_info> | n_supernodes=<k> | n_2x2=<n2> |
-    ///  n_delayed=<nd> | inertia=(p,n,z)`
+    ///  scaling=<scaling_info> | n_supernodes=<k> | nnz_L=<nL> |
+    ///  n_2x2=<n2> | n_delayed=<nd> | inertia=(p,n,z)`
     ///
     /// Aggregated from `node_factors` so it is O(supernodes) and
     /// allocation-light. The inertia summed here equals the
@@ -295,10 +295,12 @@ impl SparseFactors {
     pub fn summary(&self) -> String {
         let mut n_2x2 = 0usize;
         let mut n_delayed = 0usize;
+        let mut nnz_l = 0usize;
         let mut inertia = crate::inertia::Inertia::new(0, 0, 0);
         for nf in &self.node_factors {
             let ff = &nf.frontal_factors;
             n_delayed += ff.n_delayed;
+            nnz_l += ff.nrow * ff.nelim;
             let nelim = ff.nelim;
             let mut k = 0;
             while k < nelim {
@@ -315,19 +317,41 @@ impl SparseFactors {
             inertia.zero += nf.inertia.zero;
         }
         format!(
-            "n={} | ord={:?} | amalg={:?} | preproc={:?} | scaling={:?} | n_supernodes={} | n_2x2={} | n_delayed={} | inertia=({},{},{})",
+            "n={} | ord={:?} | amalg={:?} | preproc={:?} | scaling={:?} | n_supernodes={} | nnz_L={} | n_2x2={} | n_delayed={} | inertia=({},{},{})",
             self.n,
             self.resolved_method,
             self.resolved_amalgamation,
             self.resolved_preprocess,
             self.scaling_info,
             self.node_factors.len(),
+            nnz_l,
             n_2x2,
             n_delayed,
             inertia.positive,
             inertia.negative,
             inertia.zero,
         )
+    }
+
+    /// Total real entries used in the L factor across all supernodes.
+    ///
+    /// Per supernode this counts `nrow * nelim` (the dense column block
+    /// allocated for L, including the implicit unit diagonal positions).
+    /// Sum is comparable in spirit to MUMPS `INFOG(9)` "real entries
+    /// effectively used for factorization", though MUMPS reports a
+    /// slightly tighter measure that excludes the unit diagonal.
+    /// The D entries are not counted here (`nelim + n_2x2` extra
+    /// scalars; negligible for fill-ratio analysis on large fronts).
+    ///
+    /// Use case: fill-ratio diagnostics. `factor_nnz() / csc.nnz()` is
+    /// a quick proxy for ordering quality. Values <10× on KKT-style
+    /// matrices indicate a healthy ordering; values >50× suggest the
+    /// resolved `OrderingMethod` is mismatched to the structure.
+    pub fn factor_nnz(&self) -> usize {
+        self.node_factors
+            .iter()
+            .map(|nf| nf.frontal_factors.nrow * nf.frontal_factors.nelim)
+            .sum()
     }
 
     /// Minimum eigenvalue of D over all eliminated pivots.
@@ -1938,6 +1962,14 @@ mod tests {
             s.contains("scaling="),
             "summary missing scaling field: {}",
             s
+        );
+        let nnz_l = factors.factor_nnz();
+        assert!(nnz_l > 0, "tridiagonal factor_nnz must be > 0");
+        assert!(
+            s.contains(&format!("nnz_L={}", nnz_l)),
+            "summary nnz_L mismatch: got {}, want nnz_L={}",
+            s,
+            nnz_l
         );
         let expected = format!(
             "inertia=({},{},{})",
