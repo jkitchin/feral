@@ -74,3 +74,223 @@ Implications:
 - 138 Mittelmann matrices with =n>50k= remain unfactored on this
   laptop; largest =n=259681= (=nql180_0000=). Optional follow-up
   on a beefier machine.
+
+* 12:30 :oracle:guards:oom:
+While retooling SSIDS oracle for fill-parity on kkt-mittelmann the
+laptop OOM-killed mid-run on the n>50k tail (=cont5_2_4_l= n=180900,
+=nql180= n=259681). =diag_mittelmann.rs= already has
+=FERAL_DIAG_MAX_N=50000= but neither =run_ssids.py= nor =run_mumps.py=
+had any size cap. Added two complementary guards to both drivers:
+
+1. =--max-n N= (default 50000): peeks at the MatrixMarket header
+   and skips any matrix with =n > N= before manifest entry. Mirrors
+   =FERAL_DIAG_MAX_N=. Verified on =data/matrices/kkt-mittelmann/nql180=
+   (7 matrices all refused: =too large (n>50000): 7=) and
+   =arki0003= (66 small matrices pass through).
+2. =--mem-gb G=: applies =RLIMIT_AS= via =preexec_fn= to the
+   =ssids_bench= / =mumps_bench= subprocess. A pathological
+   small-=n=, dense-fill matrix that slips past the size cap will
+   abort the subprocess instead of triggering the kernel
+   OOM-killer. Off by default; opt-in.
+
+Skip-list mechanism (=skip-list.txt= for the SIGSEGV pair
+=MSQRTA_0001=, =MSQRTB_0001=) is unrelated — those crash inside
+SSIDS regardless of size.
+
+* 13:30 :bench:oom:streaming:
+While running fill-parity readouts the bench itself OOM-killed
+(exit 137, ~13 GB RSS) loading the kkt corpus. Root cause:
+=KktEntry= held a =SymmetricMatrix= populated via =mtx.to_dense()=
+at *load time* for every matrix in the manifest, even ones the
+sparse path would later use exclusively. With ~154k matrices and
+some n>180k, the dense block alone is hundreds of GB nominal.
+
+Fix in =src/bin/bench.rs=: =KktEntry.matrix= becomes
+=Option<SymmetricMatrix>=. A new env-controlled gate
+=FERAL_DENSE_MAX= (default 1000) decides at load time whether to
+build the dense copy:
+
+#+begin_src rust
+let dense = if csc.n <= dense_max {
+    Some(mtx.to_dense())
+} else {
+    None
+};
+#+end_src
+
+Dense-validation loop now skips entries with =matrix.is_none()=
+or =csc.n > dense_max=, counting them under
+=n_dense_skipped_large=. Sparse-validation loop is unaffected —
+it already only touches =entry.csc=. Tests pass; bench builds and
+runs without OOM on the full corpus.
+
+* 14:00 :diag:streaming:fill-parity:
+With the bench fixed, the diagnostic question — "is feral's L
+sparser/denser than MUMPS/SSIDS on the corpus?" — needs a
+streaming readout that never holds more than one matrix in
+memory. Wrote =src/bin/diag_fill_parity.rs=:
+
+- Recursive walk over =data/matrices/{kkt,kkt-expansion,kkt-mittelmann}=,
+  one matrix at a time; CSC only, drops COO immediately.
+- Pre-factor filter mirrors bench (NaN/inf, dim mismatch, no sidecar).
+- Numeric params mirror =params_kkt_sparse= (=pivot_threshold=0.01=,
+  =ForceAccept=) — without this the default =BunchKaufmanParams=
+  produced 65 % factor-fail on ACOPP30. Production parity matters.
+- =FERAL_DIAG_MAX_N= (default 50000) gates n.
+- Emits =factor_nnz(feral)/nnz(A)=, =/nnzL(MUMPS)=,
+  =/nnzL(SSIDS)= as geomean/p50/p90/p99/max + worst-name.
+
+First full run on =data/matrices/kkt= (154,588 matrices, 121 s
+wall, 422 MB RSS):
+- Factor success: 154,587 / 154,588 (one panic — see below).
+- =nnzL(feral)/nnz(A)= geomean 5.21, p50 4.74.
+- =nnzL(feral)/nnzL(MUMPS)= geomean 1.24, *p50 1.00*. Median
+  parity with MUMPS — feral isn't paying a fill tax on this
+  corpus.
+- =nnzL(feral)/nnzL(SSIDS)= geomean 1.79, p50 1.75. Consistently
+  ~1.75× looser than SSIDS.
+
+* 14:30 :diag:panic:bug:
+Mid-run on =data/matrices/kkt-expansion= the diagnostic panicked
+with =index out of bounds: the len is 1697 but the index is 1697=
+inside =factorize_multifrontal=. RSS spiked to 30 GB before the
+panic (a runaway in feral, not the diagnostic). Wrapped the
+factor call in =std::panic::catch_unwind(AssertUnwindSafe(...))=
+so a single bad matrix yields =skipped_panic+=1= and the run
+continues. Real feral bug logged separately — off-by-one inside
+the multifrontal pipeline on a kkt-expansion matrix. Not fixed
+this session.
+
+* 15:00 :diag:methodology:apples-to-apples:
+User flagged: the parity numbers above use feral's *adaptive*
+ordering (=symbolic_factorize= → =pick_default_method= → AMD or
+MetisND). MUMPS oracle uses default =ICNTL(7)= (AMD-flavored,
+because =mumps_bench= links only PORD+AMD, no METIS). SSIDS
+oracle uses default =options%ordering=1= = METIS. So the honest
+parity statements are:
+
+- =feral-AMD vs MUMPS= (both AMD-flavored).
+- =feral-MetisND vs SSIDS= (both METIS).
+- =feral-Auto= reported alongside as a sanity check on what
+  feral actually ships.
+
+Reworked =diag_fill_parity.rs= to factor each matrix three times
+(Auto, AMD, MetisND) and emit three labeled bands of parity
+metrics. =OrderingMethod::Auto= is dispatched via
+=symbolic_factorize_with_method=. Smoke test on ACOPP30
+(n≤198, all three orderings collapse to the same ordering on
+small graphs as expected): identical numbers across bands.
+
+* 15:30 :diag:results:kkt:
+Full =data/matrices/kkt= run with the three-ordering methodology,
+115 s wall, 430 MB RSS, 154,588 / 169,585 factored (14,997 matrices
+filtered pre-factor, 0 factor failures, 0 panics):
+
+| ordering   | feral/MUMPS geomean | feral/MUMPS p50 | feral/SSIDS geomean | feral/SSIDS p50 |
+|------------+---------------------+-----------------+---------------------+-----------------|
+| Auto       |                1.25 |            1.00 |                1.80 |            1.75 |
+| AMD        |                1.24 |            1.00 |                1.79 |            1.75 |
+| MetisND    |                1.24 |            1.00 |                1.78 |            1.75 |
+
+Three readings:
+
+1. *MUMPS parity is real and median-tight*: feral / MUMPS p50 =
+   1.00 across every ordering. Geomean 1.24× is driven by a
+   long-tail (p99=8, max=9 at =COOLHANSLS_0000=). On the typical
+   matrix feral matches MUMPS exactly.
+2. *AMD ≡ MetisND on this corpus*: numbers across the three
+   ordering bands are nearly indistinguishable. The kkt corpus
+   is dominated by structurally regular IPM iterates where AMD
+   and METIS find equivalent eliminations.
+3. *The SSIDS gap is not an ordering gap*: feral / SSIDS holds
+   ~1.75× p50 regardless of which ordering feral uses. The
+   ~75 % extra entries come from somewhere downstream of
+   ordering — most likely supernode amalgamation /
+   relaxation. SSIDS is more aggressive in merging supernodes
+   (zero-fill amalgamation), and =factor_nnz= = real entries
+   stored, including structural zeros within supernodes. Worth
+   a Phase 2.x investigation but not a correctness issue.
+
+Worst-case outlier =COOLHANSLS_0000= sits at 9× both oracles —
+it's a small, dense block that fits all three solvers about
+equally poorly relative to =nnz(A)=, so the ratios bunch up.
+
+* 16:00 :amd:bug:fix:
+Re-running =diag_fill_parity= on =data/matrices/kkt-expansion= /
+=kkt-mittelmann= panicked with =index out of bounds: the len is
+1697 but the index is 1697= inside =factorize_multifrontal=, with
+RSS ballooning to ~30 GB before the abort. Adding
+=catch_unwind= in the diag let the run continue but the bug was
+clearly real.
+
+Isolated to AMD via =FERAL_DIAG_MAX_N=5000= +
+=FERAL_DIAG_VERBOSE=1= — first failing matrix
+=ARWHDNE_0000= (n=500), reliably reproducible. Wrote a one-shot
+=src/bin/repro_arwhdne.rs= that loads the .mtx and calls
+=symbolic_factorize_with_method(OrderingMethod::Amd)= +
+=factorize_multifrontal=. Same panic.
+
+Root cause in =crates/feral-amd/src/algo.rs::create_element=:
+the in-place branch (=elenme==0=) walks the pivot's variable
+list, marking absorbed neighbours and writing surviving ones to
+=iw[pme1..]=. =pme2= is tracked as =i32= and is decremented for
+every absorbed entry. When *every* neighbour is absorbed,
+=pme2 = pme1 - 1= (i.e. =-1= in =i32=). The function returned
+=pme2 as usize=, which wrapped =-1i32= → =usize::MAX=. Downstream
+=finalize_step= uses =for pme in pme1..=pme2_incl= — turning
+that wrap-around into an "infinite" loop that panics on the very
+first =iw[pme]= access.
+
+Fix: switch to exclusive-end semantics. =create_element= now
+returns =pme2_excl: usize= = =pme1= when the pivot's var list is
+empty, else =(pme2 + 1) as usize=. =finalize_step= renamed
+parameter and converted all four loops from =pme1..=pme2_incl= to
+=pme1..pme2_excl=. Updated docstrings + the in-test assertion
+=pme2 - pme1 + 1 == 1= → =pme2_excl - pme1 == 1=.
+
+Validation:
+- =cargo test --release -p feral-amd= → 29 + 12 oracle = 41
+  pass, 0 fail.
+- =cargo test --release --lib= → 162 pass, 0 fail.
+- Repro on =ARWHDNE_0000= now: =symbolic ok, n_supernodes=469;
+  numeric ok, inertia=(500,0,0)=, matching the sidecar.
+
+Deleted =src/bin/repro_arwhdne.rs= as throwaway.
+
+* 17:54 :bench:oom:sparse:regression:
+Session-end =cargo run --bin bench --release= dies (SIGKILL) immediately
+after the dense pass with =--- Sparse solver validation ---= as the
+last printed line. Confirmed under both =FERAL_DENSE_MAX=1000= and
+=FERAL_DENSE_MAX=500=, running solo.
+
+The bench now walks =kkt + kkt-expansion + kkt-mittelmann=
+(167,614 matrices vs 154,588 in the 2026-04-25-03 baseline) so the
+working set tripled. The dense-form fix earlier this session
+prevented load-time OOM, but the residual CSC + sidecar arrays
+plus the sparse loop's per-matrix factor allocations push the
+process past the kernel's memory ceiling on this 64 GB laptop.
+
+Dense validation completes cleanly: 99.9 % inertia, 99.8 % residual,
+worst 1.87e-4 (=ERRINBAR_0824=) — same numbers as 2026-04-25-03.
+
+Logged as Next-Session item 0 in =dev/sessions/2026-04-26-01.md=.
+Likely fix shape: make =csc= itself lazy (load-on-demand keyed by
+mtx_path), or scope the sparse loop per-corpus-root so each
+sub-corpus's working set never sums.
+
+* 18:00 :diag:streaming:rss-spike:
+Re-running =diag_fill_parity= on =kkt-expansion= per the next-step
+plan, RSS climbed to 16 GB after ~5 min wall and stalled there.
+Killed it. The CHARDIS02 / CHARDIS1 / CHANDHEU dense-fill matrices
+(n=2000-3000, nnz=1-2 M) are the likely culprits — a single factor
+under three orderings could plausibly hold 5+ GB live during one
+matrix's lifetime.
+
+This is a follow-up: the streaming design is correct in theory
+(one matrix at a time, factor-and-drop) but a single pathological
+matrix can still spike RSS into multi-GB territory. Tighter
+=FERAL_DIAG_MAX_N= cap (e.g. 5000) is the immediate workaround;
+proper fix is to add a per-matrix nnz-density gate so the dense
+small-but-fully-populated matrices are skipped.
+
+Did not attempt fix this session. Logged as Next-Session item 1.
