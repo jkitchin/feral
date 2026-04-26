@@ -34,7 +34,7 @@ use std::time::Instant;
 
 use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
-use feral::{read_mtx, read_sidecar, solve_sparse, BunchKaufmanParams, Inertia};
+use feral::{read_mtx, read_sidecar, solve_sparse_refined, BunchKaufmanParams, Inertia};
 
 const ROOT: &str = "data/matrices/kkt-mittelmann";
 
@@ -243,7 +243,7 @@ fn run_one(mtx_path: &Path, agg: &mut Aggregate, verbose: bool, max_n: usize) ->
     if let Some(ref sc) = sidecar {
         if let Some(rhs) = sc.finite_rhs() {
             if rhs.len() == csc.n {
-                match solve_sparse(&factors, &rhs) {
+                match solve_sparse_refined(&csc, &factors, &rhs) {
                     Ok(x) => {
                         let mut ax = vec![0.0; csc.n];
                         csc.symv(&x, &mut ax);
