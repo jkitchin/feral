@@ -266,9 +266,70 @@ pub struct SparseFactors {
     /// Diagnostic info about how `scaling` was produced. Mirrored
     /// from `SymbolicFactorization::scaling_info` for telemetry.
     pub scaling_info: crate::scaling::ScalingInfo,
+
+    /// Concrete fill-reducing ordering method actually used. Mirrored
+    /// from `SymbolicFactorization::resolved_method`. Resolves
+    /// `OrderingMethod::Auto` to the dispatched method.
+    pub resolved_method: crate::symbolic::OrderingMethod,
+    /// Concrete amalgamation strategy actually used. Mirrored
+    /// from `SymbolicFactorization::resolved_amalgamation`.
+    pub resolved_amalgamation: crate::symbolic::AmalgamationStrategy,
+    /// Concrete ordering preprocessor actually used. Mirrored
+    /// from `SymbolicFactorization::resolved_preprocess`.
+    pub resolved_preprocess: crate::symbolic::OrderingPreprocess,
 }
 
 impl SparseFactors {
+    /// One-line diagnostic summary of the strategies and pivot counts
+    /// that produced these factors. Suitable for logging one record
+    /// per factorization in monitoring drivers.
+    ///
+    /// Format:
+    /// `n=<n> | <ordering> | <amalg> | preproc=<preproc> |
+    ///  scaling=<scaling_info> | n_supernodes=<k> | n_2x2=<n2> |
+    ///  n_delayed=<nd> | inertia=(p,n,z)`
+    ///
+    /// Aggregated from `node_factors` so it is O(supernodes) and
+    /// allocation-light. The inertia summed here equals the
+    /// `Inertia` returned from `factorize_multifrontal`.
+    pub fn summary(&self) -> String {
+        let mut n_2x2 = 0usize;
+        let mut n_delayed = 0usize;
+        let mut inertia = crate::inertia::Inertia::new(0, 0, 0);
+        for nf in &self.node_factors {
+            let ff = &nf.frontal_factors;
+            n_delayed += ff.n_delayed;
+            let nelim = ff.nelim;
+            let mut k = 0;
+            while k < nelim {
+                let two_by_two = k + 1 < nelim && ff.d_subdiag[k] != 0.0;
+                if two_by_two {
+                    n_2x2 += 1;
+                    k += 2;
+                } else {
+                    k += 1;
+                }
+            }
+            inertia.positive += nf.inertia.positive;
+            inertia.negative += nf.inertia.negative;
+            inertia.zero += nf.inertia.zero;
+        }
+        format!(
+            "n={} | ord={:?} | amalg={:?} | preproc={:?} | scaling={:?} | n_supernodes={} | n_2x2={} | n_delayed={} | inertia=({},{},{})",
+            self.n,
+            self.resolved_method,
+            self.resolved_amalgamation,
+            self.resolved_preprocess,
+            self.scaling_info,
+            self.node_factors.len(),
+            n_2x2,
+            n_delayed,
+            inertia.positive,
+            inertia.negative,
+            inertia.zero,
+        )
+    }
+
     /// Minimum eigenvalue of D over all eliminated pivots.
     ///
     /// 1×1 pivots contribute `d_diag[k]` directly. 2×2 blocks
@@ -570,6 +631,16 @@ pub fn dense_fast_factor_with_workspace(
             needs_refinement,
             scaling,
             scaling_info,
+            // Dense fast-path skips symbolic analysis; no ordering /
+            // amalgamation / preprocess actually ran. Record the
+            // concrete "did-nothing" values rather than the
+            // `Auto` sentinels (which are dispatch tokens, not
+            // resolutions). The single-supernode
+            // `node_factors.len() == 1` is the identifying signal
+            // that the fast path was taken.
+            resolved_method: crate::symbolic::OrderingMethod::Amd,
+            resolved_amalgamation: crate::symbolic::AmalgamationStrategy::Adjacency,
+            resolved_preprocess: crate::symbolic::OrderingPreprocess::None,
         },
         inertia,
     ))
@@ -860,6 +931,9 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
             // at assembly time.
             scaling: scaling_user,
             scaling_info,
+            resolved_method: symbolic.resolved_method,
+            resolved_amalgamation: symbolic.resolved_amalgamation,
+            resolved_preprocess: symbolic.resolved_preprocess,
         },
         total_inertia,
     ));
@@ -1459,6 +1533,9 @@ pub fn factorize_multifrontal_supernodal_parallel(
             needs_refinement,
             scaling: scaling_user,
             scaling_info,
+            resolved_method: symbolic.resolved_method,
+            resolved_amalgamation: symbolic.resolved_amalgamation,
+            resolved_preprocess: symbolic.resolved_preprocess,
         },
         total_inertia,
     ))
@@ -1822,6 +1899,74 @@ mod tests {
         assert_eq!(inertia.negative, 0);
         assert_eq!(inertia.zero, 0);
         assert_eq!(factors.n, 3);
+    }
+
+    #[test]
+    fn test_summary_one_liner() {
+        // Tridiagonal n=32 — large enough to bypass the dense
+        // fast-path (N_TINY=16, N_MAX=128 with density gate) so the
+        // multifrontal path runs and the resolved-field mirroring
+        // from `SymbolicFactorization` is exercised.
+        let n = 32usize;
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(2.0);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+
+        let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
+        let (factors, inertia) = factorize_multifrontal(&m, &sym, &make_params()).unwrap();
+
+        let s = factors.summary();
+        assert!(s.contains("ord="), "summary missing ord field: {}", s);
+        assert!(s.contains("amalg="), "summary missing amalg field: {}", s);
+        assert!(
+            s.contains("preproc="),
+            "summary missing preproc field: {}",
+            s
+        );
+        assert!(
+            s.contains("scaling="),
+            "summary missing scaling field: {}",
+            s
+        );
+        let expected = format!(
+            "inertia=({},{},{})",
+            inertia.positive, inertia.negative, inertia.zero
+        );
+        assert!(
+            s.contains(&expected),
+            "summary inertia mismatch: got {}, want substring {}",
+            s,
+            expected
+        );
+        // `Auto` is a dispatch sentinel, never a resolved value.
+        assert_ne!(
+            factors.resolved_amalgamation,
+            crate::symbolic::AmalgamationStrategy::Auto
+        );
+        assert_ne!(
+            factors.resolved_method,
+            crate::symbolic::OrderingMethod::Auto
+        );
+        assert_ne!(
+            factors.resolved_preprocess,
+            crate::symbolic::OrderingPreprocess::Auto
+        );
+        // Mirror invariant: the numeric factors agree with the
+        // symbolic factorization on the resolved strategies.
+        assert_eq!(factors.resolved_method, sym.resolved_method);
+        assert_eq!(factors.resolved_amalgamation, sym.resolved_amalgamation);
+        assert_eq!(factors.resolved_preprocess, sym.resolved_preprocess);
     }
 
     #[test]

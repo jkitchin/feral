@@ -171,6 +171,22 @@ pub struct SymbolicFactorization {
     /// rerunning the Hungarian kernel. `None` when no MC64 matching
     /// was computed during symbolic factorization.
     pub(crate) cached_mc64: Option<crate::scaling::Mc64Cache>,
+
+    /// Concrete ordering method actually dispatched. Records the
+    /// `OrderingMethod::Auto → AMD/MetisND/ScotchND/KahipND`
+    /// resolution made by `choose_adaptive`. For non-`Auto` callers
+    /// this is identical to the requested method.
+    pub resolved_method: OrderingMethod,
+    /// Concrete amalgamation strategy actually used.
+    /// `AmalgamationStrategy::Auto` is resolved by
+    /// `pick_amalgamation_strategy` before supernode detection; this
+    /// field records the resolved value.
+    pub resolved_amalgamation: supernode::AmalgamationStrategy,
+    /// Concrete ordering preprocessor actually used.
+    /// `OrderingPreprocess::Auto` is resolved by
+    /// `pick_ordering_preprocess`; this field records `None` or
+    /// `LdltCompress` after that dispatch.
+    pub resolved_preprocess: supernode::OrderingPreprocess,
 }
 
 /// Pick a default ordering for `symbolic_factorize` from cheap matrix
@@ -299,11 +315,13 @@ fn to_contract_pattern_bufs(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>)
 
 /// Run an external (contract-conforming) ordering crate on `pattern` and
 /// return the permutation as `Vec<usize>` in the in-tree convention
-/// (new-to-old: `perm[k]` is the original column that became column `k`).
+/// (new-to-old: `perm[k]` is the original column that became column `k`),
+/// along with the concrete `OrderingMethod` actually dispatched (matters
+/// when `method == Auto` is resolved adaptively).
 fn run_external_ordering(
     pattern: &CscPattern,
     method: OrderingMethod,
-) -> Result<Vec<usize>, FeralError> {
+) -> Result<(Vec<usize>, OrderingMethod), FeralError> {
     let (col_buf, row_buf) = to_contract_pattern_bufs(pattern)?;
     let pat = feral_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
         .ok_or_else(|| FeralError::InvalidInput("malformed CSC pattern".to_string()))?;
@@ -336,7 +354,7 @@ fn run_external_ordering(
         }
         out.push(u);
     }
-    Ok(out)
+    Ok((out, resolved))
 }
 
 /// Like [`symbolic_factorize`] but lets the caller pick the
@@ -395,7 +413,7 @@ pub fn symbolic_factorize_with_method(
         record_stage(prof, "pick_preprocess", t);
     }
     let t_ord = prof.map(|_| std::time::Instant::now());
-    let amd_perm: Vec<usize> = match resolved_preprocess {
+    let (amd_perm, resolved_method): (Vec<usize>, OrderingMethod) = match resolved_preprocess {
         OrderingPreprocess::None => run_external_ordering(&full_pattern, method)?,
         OrderingPreprocess::Auto => unreachable!("resolved above"),
         OrderingPreprocess::LdltCompress => {
@@ -405,18 +423,18 @@ pub fn symbolic_factorize_with_method(
             // overhead on matrices where scaling also runs MC64).
             let cache = crate::scaling::compute_mc64_cache(matrix)?;
             let map = build_supermap(&cache.perm);
-            let perm = if map.ncmp() == n {
+            let pair = if map.ncmp() == n {
                 // Matching gives no compression leverage; fall through
                 // to the uncompressed path rather than build and walk
                 // an identical-size graph.
                 run_external_ordering(&full_pattern, method)?
             } else {
                 let cpat = compress_pattern(&full_pattern, &map);
-                let super_perm = run_external_ordering(&cpat, method)?;
-                expand_permutation(&super_perm, &map)
+                let (super_perm, resolved) = run_external_ordering(&cpat, method)?;
+                (expand_permutation(&super_perm, &map), resolved)
             };
             cached_mc64 = Some(cache);
-            perm
+            pair
         }
     };
     if let Some(t) = t_ord {
@@ -626,6 +644,9 @@ pub fn symbolic_factorize_with_method(
         small_leaf_groups,
         snode_group,
         cached_mc64,
+        resolved_method,
+        resolved_amalgamation: snode_params.amalgamation_strategy,
+        resolved_preprocess,
     })
 }
 
