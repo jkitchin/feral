@@ -91,6 +91,8 @@ program ssids_bench
    nmat = nmat + 1
    call parse_line(line, mtx_path, rhs_path, out_path)
    have_failure = .false.
+   write(0,'(A,A)') "BEGIN ", trim(mtx_path)
+   flush(0)
 
    ! ---- Read MTX ----
    call read_mtx(mtx_path, mrows, mcols, mnnz, ira, jca, aa, ios)

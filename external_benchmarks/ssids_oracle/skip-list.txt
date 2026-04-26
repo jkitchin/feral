@@ -1,0 +1,9 @@
+# Matrices that crash ssids_bench with SIGSEGV during ssids_factor.
+# Confirmed reproducible single-threaded with OMP_CANCELLATION=true.
+# The crash is inside SSIDS's OMP cancellation path (flag -53 path
+# without OMP_CANCELLATION; segfault with it). External SSIDS bug
+# triggered by these specific KKT structures.
+#
+# Format: one matrix stem per line (matches Path.stem of the .mtx).
+MSQRTA_0001
+MSQRTB_0001

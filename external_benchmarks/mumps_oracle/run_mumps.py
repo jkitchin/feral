@@ -19,6 +19,7 @@ import argparse
 import json
 import math
 import os
+import resource
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,29 @@ MUMPS_BENCH = SCRIPT_DIR / "mumps_bench"
 
 def find_matrices(root: Path) -> list[Path]:
     return sorted(root.rglob("*.mtx"))
+
+
+def peek_matrix_dim(mtx: Path) -> int | None:
+    """Return n from the MatrixMarket header without loading entries.
+
+    Returns None if the file is unreadable or malformed. Used as a
+    cheap size gate before MUMPS allocates work arrays — large KKTs
+    in kkt-mittelmann (n up to ~260k) can OOM a laptop during
+    factorization.
+    """
+    try:
+        with mtx.open("r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("%"):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    return None
+                return int(parts[0])
+    except (OSError, ValueError):
+        return None
+    return None
 
 
 def load_rhs(json_path: Path) -> list[float] | None:
@@ -123,6 +147,15 @@ def main() -> int:
                     help="process at most N matrices (for sanity checks)")
     ap.add_argument("--skip-existing", action="store_true",
                     help="skip matrices where .mumps.json already exists")
+    ap.add_argument("--max-n", type=int, default=50000,
+                    help="skip matrices with n > MAX_N (mirrors FERAL_DIAG_MAX_N; "
+                         "0 disables). Default 50000 — protects against OOM on the "
+                         "kkt-mittelmann tail (largest n ~260k).")
+    ap.add_argument("--mem-gb", type=float, default=0.0,
+                    help="if > 0, cap the mumps_bench subprocess address space "
+                         "(RLIMIT_AS) at MEM_GB gigabytes. MUMPS will abort cleanly "
+                         "on the offending matrix instead of triggering the kernel "
+                         "OOM-killer.")
     ap.add_argument("--mumps-bench", type=Path, default=MUMPS_BENCH,
                     help="path to the mumps_bench binary")
     args = ap.parse_args()
@@ -149,6 +182,7 @@ def main() -> int:
     matrix_names: list[str] = []
     skipped = 0
     no_rhs = 0
+    too_large = 0
 
     with manifest_path.open("w") as manifest:
         for mtx in matrices:
@@ -157,6 +191,11 @@ def main() -> int:
             if args.skip_existing and canon_path.exists():
                 skipped += 1
                 continue
+            if args.max_n > 0:
+                n = peek_matrix_dim(mtx)
+                if n is None or n > args.max_n:
+                    too_large += 1
+                    continue
             rhs = load_rhs(json_path)
             if rhs is None:
                 no_rhs += 1
@@ -171,14 +210,25 @@ def main() -> int:
             matrix_names.append(mtx.stem)
 
     n_runs = len(matrix_names)
-    print(f"  to run: {n_runs}  (skipped existing: {skipped}, no rhs: {no_rhs})",
+    print(f"  to run: {n_runs}  (skipped existing: {skipped}, no rhs: {no_rhs}, "
+          f"too large (n>{args.max_n}): {too_large})",
           file=sys.stderr)
     if n_runs == 0:
         return 0
 
     cmd = [str(args.mumps_bench), str(manifest_path)]
     print(f"running: {' '.join(cmd)}", file=sys.stderr)
-    rc = subprocess.call(cmd)
+
+    preexec = None
+    if args.mem_gb > 0:
+        cap = int(args.mem_gb * 1024 * 1024 * 1024)
+        print(f"  RLIMIT_AS cap: {args.mem_gb:.1f} GB ({cap} bytes)", file=sys.stderr)
+
+        def _set_rlimit() -> None:
+            resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+        preexec = _set_rlimit
+
+    rc = subprocess.call(cmd, preexec_fn=preexec)
     if rc != 0:
         print(f"mumps_bench exited with {rc}", file=sys.stderr)
 
