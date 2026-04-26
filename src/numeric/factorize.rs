@@ -300,7 +300,10 @@ impl SparseFactors {
         for nf in &self.node_factors {
             let ff = &nf.frontal_factors;
             n_delayed += ff.n_delayed;
-            nnz_l += ff.nrow * ff.nelim;
+            // Match factor_nnz() accounting (lower-tri inc diag of
+            // eliminated block + trailing rect).
+            let trailing = ff.nrow.saturating_sub(ff.nelim) * ff.nelim;
+            nnz_l += ff.nelim * (ff.nelim + 1) / 2 + trailing;
             let nelim = ff.nelim;
             let mut k = 0;
             while k < nelim {
@@ -335,11 +338,23 @@ impl SparseFactors {
 
     /// Total real entries used in the L factor across all supernodes.
     ///
-    /// Per supernode this counts `nrow * nelim` (the dense column block
-    /// allocated for L, including the implicit unit diagonal positions).
-    /// Sum is comparable in spirit to MUMPS `INFOG(9)` "real entries
-    /// effectively used for factorization", though MUMPS reports a
-    /// slightly tighter measure that excludes the unit diagonal.
+    /// Per supernode the L block is `nrow × nelim` column-major with
+    /// unit-lower-triangular structure in the leading `nelim × nelim`
+    /// eliminated block. The strict-upper triangle of that block is
+    /// structurally zero and excluded from the count. The unit
+    /// diagonal *is* counted.
+    ///
+    /// Per-supernode count:
+    /// `nelim * (nelim + 1) / 2 + (nrow - nelim) * nelim`
+    ///   = (eliminated lower-tri inc diagonal) + (trailing rect rows).
+    ///
+    /// This matches SSIDS's `inform%num_factor` accounting exactly at
+    /// the median across the kkt corpus (verified by
+    /// `src/bin/diag_factor_nnz_accounting.rs`). MUMPS's `INFOG(9)`
+    /// uses a different accounting that includes additional entries
+    /// for delayed pivots and pre-allocation; nnzL/MUMPS ratios will
+    /// therefore be < 1 typically.
+    ///
     /// The D entries are not counted here (`nelim + n_2x2` extra
     /// scalars; negligible for fill-ratio analysis on large fronts).
     ///
@@ -350,7 +365,13 @@ impl SparseFactors {
     pub fn factor_nnz(&self) -> usize {
         self.node_factors
             .iter()
-            .map(|nf| nf.frontal_factors.nrow * nf.frontal_factors.nelim)
+            .map(|nf| {
+                let nrow = nf.frontal_factors.nrow;
+                let nelim = nf.frontal_factors.nelim;
+                let trailing = nrow.saturating_sub(nelim) * nelim;
+                let eliminated_lower_with_diag = nelim * (nelim + 1) / 2;
+                eliminated_lower_with_diag + trailing
+            })
             .sum()
     }
 
