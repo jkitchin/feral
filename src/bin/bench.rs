@@ -820,7 +820,13 @@ struct KktEntry {
     /// the thousands) at full n×n cost would OOM the bench at load time on
     /// the kkt corpus (n up to ~195k).
     matrix: Option<SymmetricMatrix>,
-    csc: CscMatrix,
+    /// `Option` so the sparse loop can `take()` it per iteration and
+    /// drop the CSC arrays as soon as that matrix is done. On the
+    /// full ~167k-matrix corpus the cumulative CSC working set
+    /// otherwise approaches the system's hard memory limit and
+    /// triggers the OS OOM-killer at sparse-loop entry. Populated
+    /// at load time; consumed during the sparse loop.
+    csc: Option<CscMatrix>,
     sidecar: KktSidecar,
     /// Canonical Fortran MUMPS 5.8.2 oracle timing from `*.mumps.json` if present.
     mumps_timing: Option<OracleTiming>,
@@ -1077,7 +1083,7 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
                 name: stem,
                 mtx_path: mtx_path.clone(),
                 matrix: dense,
-                csc,
+                csc: Some(csc),
                 sidecar,
                 mumps_timing,
                 ssids_timing,
@@ -1269,18 +1275,28 @@ fn main() {
     //                                    (see scripts/harvest-mittelmann-kkt.sh)
     // Mirrors the multi-root walk in scripts/characterize-corpus.py
     // (KKT_ROOTS).
-    let kkt_roots = [
-        Path::new("data/matrices/kkt"),
-        Path::new("data/matrices/kkt-expansion"),
-        Path::new("data/matrices/kkt-mittelmann"),
-    ];
+    // The corpus is split across three roots. Walking all three loads
+    // ~167k matrices and the cumulative CSC working set OOM-kills the
+    // process on a 64 GB laptop once the sparse loop's per-iter
+    // allocations land on top. Default to the historical `kkt` root
+    // (~154k matrices, fits in ~30 GB peak); FERAL_KKT_ROOTS=all opts
+    // into the expanded corpus on beefy hardware. Comma-separated subset
+    // also accepted (e.g. "kkt,kkt-mittelmann").
+    let kkt_roots_env = std::env::var("FERAL_KKT_ROOTS").unwrap_or_else(|_| "kkt".into());
+    let all_roots: &[&str] = &["kkt", "kkt-expansion", "kkt-mittelmann"];
+    let selected_roots: Vec<&str> = if kkt_roots_env == "all" {
+        all_roots.to_vec()
+    } else {
+        kkt_roots_env.split(',').map(|s| s.trim()).collect()
+    };
     let mut kkt_entries: Vec<KktEntry> = Vec::new();
-    for root in kkt_roots.iter() {
-        if !root.is_dir() {
+    for name in selected_roots.iter() {
+        let path_buf = Path::new("data/matrices").join(name);
+        if !path_buf.is_dir() {
             continue;
         }
-        print!("\nLoading KKT matrices from {} ... ", root.display());
-        let part = load_kkt_dir(root);
+        print!("\nLoading KKT matrices from {} ... ", path_buf.display());
+        let part = load_kkt_dir(&path_buf);
         println!("{} matrices loaded", part.len());
         kkt_entries.extend(part);
     }
@@ -1314,8 +1330,9 @@ fn main() {
 
     for entry in &kkt_entries {
         n_total += 1;
-        let n = entry.csc.n;
-        let nnz = entry.csc.values.len();
+        let csc = entry.csc.as_ref().expect("csc populated at load time");
+        let n = csc.n;
+        let nnz = csc.values.len();
 
         if n > dense_max {
             n_dense_skipped_large += 1;
@@ -1488,6 +1505,16 @@ fn main() {
         worst_residual, worst_residual_name
     );
 
+    // Drop the dense forms before the sparse loop runs — the sparse
+    // path only touches `entry.csc`, and on the full ~167k-matrix
+    // corpus the cumulative dense allocations otherwise OOM-kill the
+    // process when sparse-loop work-arrays land on top. n=300 alone
+    // is ~720 KB dense, ×154k dense-eligible entries = >100 GB
+    // nominal even before the loop allocates.
+    for entry in kkt_entries.iter_mut() {
+        entry.matrix = None;
+    }
+
     // --- Sparse solver validation ---
     println!("\n--- Sparse solver validation ---");
     // Phase 2.2.3: the previous nemin=10000 override was added to
@@ -1522,9 +1549,14 @@ fn main() {
     // phases, so this matches the comparison semantics.
     let mut sparse_timings: Vec<MatrixTiming> = Vec::new();
 
-    for entry in &kkt_entries {
+    for entry in kkt_entries.iter_mut() {
         sp_total += 1;
-        let n = entry.csc.n;
+        // Take ownership so the CSC arrays drop at end of this iteration.
+        // On the full ~167k-matrix corpus the cumulative CSC working set
+        // approaches the system memory ceiling and cooperates with the
+        // OS OOM-killer once sparse-loop work-arrays land on top.
+        let csc = entry.csc.take().expect("csc populated at load time");
+        let n = csc.n;
 
         let expected_inertia = Inertia {
             positive: entry.sidecar.inertia.positive,
@@ -1537,8 +1569,8 @@ fn main() {
         // `factor_us` field MUMPS and SSIDS emit for their equivalent work.
         let tf = Instant::now();
         let sym_result = match ordering_override {
-            Some(m) => symbolic_factorize_with_method(&entry.csc, &snode_params, m),
-            None => symbolic_factorize(&entry.csc, &snode_params),
+            Some(m) => symbolic_factorize_with_method(&csc, &snode_params, m),
+            None => symbolic_factorize(&csc, &snode_params),
         };
         let sym = match sym_result {
             Ok(s) => s,
@@ -1555,7 +1587,7 @@ fn main() {
 
         // Numeric factorization
         let (sp_factors, sp_inertia) =
-            match factorize_multifrontal(&entry.csc, &sym, &sparse_numeric_params) {
+            match factorize_multifrontal(&csc, &sym, &sparse_numeric_params) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("  {}: sparse factor failed: {}", entry.name, e);
@@ -1576,7 +1608,7 @@ fn main() {
             None => continue,
         };
         let ts = Instant::now();
-        let x = match solve_sparse_refined(&entry.csc, &sp_factors, &rhs) {
+        let x = match solve_sparse_refined(&csc, &sp_factors, &rhs) {
             Ok(x) => x,
             Err(e) => {
                 eprintln!("  {}: sparse solve failed: {}", entry.name, e);
@@ -1596,16 +1628,15 @@ fn main() {
             for _ in 0..RESAMPLE_COLD_REPS {
                 let tf = Instant::now();
                 let rs_sym = match ordering_override {
-                    Some(m) => symbolic_factorize_with_method(&entry.csc, &snode_params, m),
-                    None => symbolic_factorize(&entry.csc, &snode_params),
+                    Some(m) => symbolic_factorize_with_method(&csc, &snode_params, m),
+                    None => symbolic_factorize(&csc, &snode_params),
                 }
                 .expect("resample: symbolic_factorize (single-shot already succeeded)");
-                let (rs_factors, _) =
-                    factorize_multifrontal(&entry.csc, &rs_sym, &sparse_numeric_params)
-                        .expect("resample: factorize_multifrontal (single-shot already succeeded)");
+                let (rs_factors, _) = factorize_multifrontal(&csc, &rs_sym, &sparse_numeric_params)
+                    .expect("resample: factorize_multifrontal (single-shot already succeeded)");
                 fs.push(tf.elapsed().as_micros());
                 let ts = Instant::now();
-                let _ = solve_sparse_refined(&entry.csc, &rs_factors, &rhs)
+                let _ = solve_sparse_refined(&csc, &rs_factors, &rhs)
                     .expect("resample: solve_sparse_refined (single-shot already succeeded)");
                 ss.push(ts.elapsed().as_micros());
             }
@@ -1626,7 +1657,7 @@ fn main() {
 
         // Residual
         let mut ax = vec![0.0; n];
-        entry.csc.symv(&x, &mut ax);
+        csc.symv(&x, &mut ax);
         let mut res_sq = 0.0;
         let mut b_sq = 0.0;
         for i in 0..n {

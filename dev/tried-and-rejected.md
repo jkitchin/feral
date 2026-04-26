@@ -1027,3 +1027,33 @@ against an end-to-end cost/benefit measurement before touching a gate.
 `src/bin/diag_amd_substages.rs` and
 `src/bin/diag_compress_costbenefit.rs` outputs.
 
+
+---
+
+## 2026-04-26 — Per-iter take/drop alone as bench OOM fix
+
+**What.** Convert `KktEntry.csc` to `Option<CscMatrix>` and `take()` it
+per iteration in the sparse loop, plus drop `entry.matrix = None`
+between dense and sparse passes. Idea: cumulative working set should
+shrink as each matrix is processed and dropped.
+
+**Why it's not enough.** With the default corpus expanded to all three
+KKT roots (167,614 matrices), the cumulative CSC working set at
+sparse-loop *entry* is already ~30 GB. macOS allocator does not
+return freed memory to the OS immediately, so RSS stays high even
+after take/drop runs. Combined with Dropbox renderer + claude-code
++ rustc consuming another 10+ GB, system pressure builds and macOS
+jetsam SIGKILLs the bench after several minutes of silent processing.
+
+**What was actually shipped.** Both layers:
+1. Per-iter take/drop (kept as the right shape — small cost, useful
+   on expanded-corpus runs and bounds in-flight growth).
+2. `FERAL_KKT_ROOTS` env var defaulting to `kkt` (restores the
+   2026-04-25 baseline corpus scope, ~154,588 matrices, fits in
+   ~30 GB peak; `=all` opts into expanded corpus).
+
+**Evidence.** `dev/journal/2026-04-26-02.org` 18:00 + 19:05 entries.
+First fix alone: bench killed at ~30 GB RSS after 8 minutes silent
+in sparse loop. Both fixes together: bench completes end-to-end with
+99.8% sparse residual / 100% sparse inertia / Phase 2.8.1 PASS on
+both buckets.
