@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Characterize the FERAL KKT validation corpus.
 
-Walks data/matrices/kkt/ and data/matrices/kkt-expansion/, parses the
-matrix-market header (n, nnz) of each .mtx and the per-matrix sidecar
-JSON (inertia, iteration), and emits:
+Walks data/matrices/kkt/, data/matrices/kkt-expansion/, and
+data/matrices/kkt-mittelmann/, parses the matrix-market header
+(n, nnz) of each .mtx and the per-matrix sidecar JSON
+(inertia, iteration), and emits:
 
   dev/corpus-characterization/summary.csv  -- one row per matrix
   manuscript/figures/corpus-size.png       -- size histogram
@@ -31,7 +32,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-KKT_ROOTS = [ROOT / "data" / "matrices" / "kkt", ROOT / "data" / "matrices" / "kkt-expansion"]
+KKT_ROOTS = [
+    ROOT / "data" / "matrices" / "kkt",
+    ROOT / "data" / "matrices" / "kkt-expansion",
+    ROOT / "data" / "matrices" / "kkt-mittelmann",
+]
 OUT_CSV = ROOT / "dev" / "corpus-characterization" / "summary.csv"
 FIG_DIR = ROOT / "manuscript" / "figures"
 

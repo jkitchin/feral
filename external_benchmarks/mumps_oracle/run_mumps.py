@@ -104,9 +104,13 @@ def write_canonical(out_path: Path, name: str, raw: dict) -> None:
             "rhs_source": "sidecar",
             "residual_2norm_relative": float(raw.get("residual", "nan")),
             "factorization_status": "ok",
+            # factor_nnz = INFOG(9): real entries effectively used in
+            # factors. Source of truth for feral / MUMPS fill parity.
+            "factor_nnz": int(raw.get("infog9", 0)),
             "solver_info": {
                 "infog_1": int(raw.get("infog1", 0)),
                 "infog_28": int(raw.get("infog28", 0)),
+                "infog_9": int(raw.get("infog9", 0)),
             },
         }
     out_path.write_text(json.dumps(canonical) + "\n")

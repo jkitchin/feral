@@ -24,6 +24,9 @@
 !     solve_us <int>
 !     residual <f64>
 !     ssids_flag <int>
+!     matrix_rank <int>
+!     num_delay <int>
+!     num_factor <int>     (entries in factors after factorization)
 !     status ok|fail
 
 program ssids_bench
@@ -224,6 +227,10 @@ program ssids_bench
    write(12,'(A,I0)') "ssids_flag ", inform%flag
    write(12,'(A,I0)') "matrix_rank ", inform%matrix_rank
    write(12,'(A,I0)') "num_delay ", inform%num_delay
+   ! num_factor = entries in factors after numerical factorization;
+   ! source of truth for feral / SSIDS fill parity. Reported as
+   ! integer(long) in SPRAL; we let Fortran I0 widen it.
+   write(12,'(A,I0)') "num_factor ", inform%num_factor
    write(12,'(A)') "status ok"
    close(12)
    ndone = ndone + 1

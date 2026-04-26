@@ -473,16 +473,27 @@ fn print_perf_comparison(label: &str, timings: &[MatrixTiming], entries: &[KktEn
     // (and vice versa).
     let mut mumps_factor: Vec<f64> = Vec::new();
     let mut mumps_solve: Vec<f64> = Vec::new();
+    let mut mumps_fill: Vec<f64> = Vec::new();
     let mut ssids_factor: Vec<f64> = Vec::new();
     let mut ssids_solve: Vec<f64> = Vec::new();
+    let mut ssids_fill: Vec<f64> = Vec::new();
+    let nnz_ratio = |feral_nnz: u64, oracle_nnz: u64| -> f64 {
+        feral_nnz.max(1) as f64 / oracle_nnz.max(1) as f64
+    };
     for r in &rows {
         if let Some(m) = r.mumps {
             mumps_factor.push(ratio(r.timing.factor_us, m.factor_us));
             mumps_solve.push(ratio(r.timing.solve_us, m.solve_us));
+            if let (Some(fn_feral), Some(fn_mumps)) = (r.timing.factor_nnz, m.factor_nnz) {
+                mumps_fill.push(nnz_ratio(fn_feral, fn_mumps));
+            }
         }
         if let Some(s) = r.ssids {
             ssids_factor.push(ratio(r.timing.factor_us, s.factor_us));
             ssids_solve.push(ratio(r.timing.solve_us, s.solve_us));
+            if let (Some(fn_feral), Some(fn_ssids)) = (r.timing.factor_nnz, s.factor_nnz) {
+                ssids_fill.push(nnz_ratio(fn_feral, fn_ssids));
+            }
         }
     }
 
@@ -538,6 +549,13 @@ fn print_perf_comparison(label: &str, timings: &[MatrixTiming], entries: &[KktEn
     emit("solve/MUMPS", &mut mumps_solve);
     emit("factor/SSIDS", &mut ssids_factor);
     emit("solve/SSIDS", &mut ssids_solve);
+    // Fill parity: nnz(L_feral) / nnz(L_oracle). 1.0 means perfect
+    // parity; >>1 means feral picked a worse ordering / pivot path
+    // (correct, but inefficient). A correctness gap, not just a perf
+    // metric. Skipped silently when the oracle sidecar predates the
+    // factor_nnz field.
+    emit("nnzL/MUMPS", &mut mumps_fill);
+    emit("nnzL/SSIDS", &mut ssids_fill);
 
     // Per-family factor geomean vs MUMPS. Families with <3 MUMPS-ratio
     // samples are still shown — small families are often the most
@@ -815,6 +833,10 @@ struct KktEntry {
 struct OracleTiming {
     factor_us: u64,
     solve_us: u64,
+    /// Number of real entries used in the factors (factor_nnz).
+    /// MUMPS: `INFOG(9)`. SSIDS: `inform%num_factor`.
+    /// `None` for older sidecars written before the field was added.
+    factor_nnz: Option<u64>,
 }
 
 /// Per-matrix feral factor and solve timing on a single path.
@@ -836,6 +858,11 @@ struct MatrixTiming {
     max_front: usize,
     factor_us: u128,
     solve_us: u128,
+    /// feral `SparseFactors::factor_nnz()` — total `nrow * nelim`
+    /// across supernodes. `None` on the dense path (no supernodes).
+    /// Used by the fill-parity report against MUMPS / SSIDS oracle
+    /// `factor_nnz`.
+    factor_nnz: Option<u64>,
 }
 
 /// Multi-sample denoise parameters. Matrices whose MUMPS oracle time is
@@ -867,9 +894,15 @@ fn read_oracle_timing(path: &Path) -> Option<OracleTiming> {
     let v: serde_json::Value = serde_json::from_str(&contents).ok()?;
     let factor_us = v.get("factor_us")?.as_u64()?;
     let solve_us = v.get("solve_us")?.as_u64()?;
+    // factor_nnz is optional: older sidecars written before the field
+    // was added do not carry it. The fill-parity report reuses
+    // OracleTiming directly, so missing entries are simply skipped
+    // when building the per-matrix ratio.
+    let factor_nnz = v.get("factor_nnz").and_then(|x| x.as_u64());
     Some(OracleTiming {
         factor_us,
         solve_us,
+        factor_nnz,
     })
 }
 
@@ -1202,16 +1235,34 @@ fn main() {
 
     println!("\n{} matrices benchmarked", count);
 
-    // --- Real KKT matrices from data/matrices/kkt/ ---
-    let kkt_dir = Path::new("data/matrices/kkt");
-    print!("\nLoading KKT matrices from {} ... ", kkt_dir.display());
-
-    let kkt_entries = load_kkt_dir(kkt_dir);
+    // --- Real KKT matrices from data/matrices/kkt*/ ---
+    // Three roots are walked when present:
+    //   data/matrices/kkt/             — canonical CUTEst-derived corpus
+    //   data/matrices/kkt-expansion/   — supplementary harvests
+    //   data/matrices/kkt-mittelmann/  — Mittelmann ampl-nlp harvest
+    //                                    (see scripts/harvest-mittelmann-kkt.sh)
+    // Mirrors the multi-root walk in scripts/characterize-corpus.py
+    // (KKT_ROOTS).
+    let kkt_roots = [
+        Path::new("data/matrices/kkt"),
+        Path::new("data/matrices/kkt-expansion"),
+        Path::new("data/matrices/kkt-mittelmann"),
+    ];
+    let mut kkt_entries: Vec<KktEntry> = Vec::new();
+    for root in kkt_roots.iter() {
+        if !root.is_dir() {
+            continue;
+        }
+        print!("\nLoading KKT matrices from {} ... ", root.display());
+        let part = load_kkt_dir(root);
+        println!("{} matrices loaded", part.len());
+        kkt_entries.extend(part);
+    }
     if kkt_entries.is_empty() {
-        println!("not found (run collect_kkt from ripopt to generate)");
+        println!("\nno KKT matrices found under data/matrices/kkt* (run collect_kkt from ripopt or scripts/harvest-mittelmann-kkt.sh)");
         return;
     }
-    println!("{} matrices loaded", kkt_entries.len());
+    println!("\n{} KKT matrices total", kkt_entries.len());
 
     let mut n_total = 0usize;
     let mut n_inertia_pass = 0usize;
@@ -1313,6 +1364,10 @@ fn main() {
             max_front: n,
             factor_us: factor_us_final,
             solve_us: solve_us_final,
+            // Dense path: a single n×n front, no supernodes. Counts the
+            // strictly-lower-triangle entries (matches the multifrontal
+            // accounting on a single supernode of size n).
+            factor_nnz: Some((n as u64).saturating_mul(n as u64)),
         });
 
         // Compute residual: ||Ax - b|| / ||b||
@@ -1531,6 +1586,7 @@ fn main() {
             max_front: sp_max_front,
             factor_us: sp_factor_us_final,
             solve_us: sp_solve_us_final,
+            factor_nnz: Some(sp_factors.factor_nnz() as u64),
         });
 
         // Residual

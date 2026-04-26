@@ -28,6 +28,7 @@ C       solve_us <int>
 C       residual <f64>
 C       infog1 <int>
 C       infog28 <int>
+C       infog9 <int>     (real entries effectively used in factors)
 C       status ok|fail
 C
       PROGRAM MUMPS_BENCH
@@ -230,6 +231,11 @@ C     ---- Write result ----
       WRITE(12,'(A,ES24.16E3)') "residual ", REL_RES
       WRITE(12,'(A,I0)') "infog1 ", MP%INFOG(1)
       WRITE(12,'(A,I0)') "infog28 ", MP%INFOG(28)
+C     INFOG(9) = real entries effectively used in factors; "factor_nnz"
+C     for cross-solver fill comparison. Field 20 (estimated) and field 9
+C     (effective) can disagree when delayed pivots inflate storage; the
+C     effective value is the right reference for feral.
+      WRITE(12,'(A,I0)') "infog9 ", MP%INFOG(9)
       WRITE(12,'(A)') "status ok"
       CLOSE(12)
       NDONE = NDONE + 1

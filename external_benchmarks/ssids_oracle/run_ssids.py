@@ -98,10 +98,15 @@ def write_canonical(out_path: Path, name: str, raw: dict) -> None:
             "rhs_source": "sidecar",
             "residual_2norm_relative": float(raw.get("residual", "nan")),
             "factorization_status": "ok",
+            # factor_nnz = inform%num_factor: entries in factors after
+            # numerical factorization. Source of truth for feral / SSIDS
+            # fill parity.
+            "factor_nnz": int(raw.get("num_factor", 0)),
             "solver_info": {
                 "ssids_flag": int(raw.get("ssids_flag", 0)),
                 "matrix_rank": int(raw.get("matrix_rank", 0)),
                 "num_delay": int(raw.get("num_delay", 0)),
+                "num_factor": int(raw.get("num_factor", 0)),
             },
         }
     out_path.write_text(json.dumps(canonical) + "\n")
