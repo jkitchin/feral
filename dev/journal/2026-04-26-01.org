@@ -1,0 +1,76 @@
+#+TITLE: 2026-04-26 Session 01 — Mittelmann correctness + QCQP drill
+
+* 10:00 :mittelmann:correctness:gap:
+User flagged a real correctness gap: =diag_mittelmann.rs= as built
+checked only that =factorize_multifrontal= returned =Ok=, never that
+inertia matched the sidecar or that =||A x − b||/||b||= passed a gate.
+A solver that pivots poorly (5x fill, slow factor) could pass.
+Rewrote =src/bin/diag_mittelmann.rs= to load sidecar inertia + RHS,
+solve, gate inertia exact + residual ≤ =n·eps·1e6=, and aggregate
+=fill_ratio = nnz_L/nnz(A)= p50/p95/p99 + worst-case name. Added
+=FERAL_DIAG_MAX_N= (default 50000) and =DIAG_VERBOSE=. First full
+run: 600 seen / 138 skipped (n>50k) / 2 mtx-err / 458 OK / 2
+residual failures (=qcqp500-3nc_0000= 1.95e-7 vs tol 1.38e-7;
+=qcqp750-2nc_0000= 3.73e-7 vs tol 1.97e-7), 0 inertia failures.
+Fill p50 26.88×, max 222.81× (=henon120_0001=).
+
+* 10:30 :oracle:fill-parity:plumbing:
+User: "We should update the oracle so we can make sure we get a
+similar sparsity. That is actually a critical kind of correctness."
+Extended the MUMPS + SSIDS oracles to capture factor-nnz:
+=mumps_bench.F= writes =INFOG(9)= as =infog9=; =ssids_bench.f90=
+writes =inform%num_factor=; both Python drivers forward as
+top-level =factor_nnz= (schema-additive). Bench gets
+=OracleTiming.factor_nnz: Option<u64>= and =MatrixTiming.factor_nnz:
+Option<u64>=. =print_perf_comparison= adds =nnzL/MUMPS= and
+=nnzL/SSIDS= rows to the ratio table. KKT loader walks all three
+roots (=kkt=, =kkt-expansion=, =kkt-mittelmann=). Committed as 9d424af.
+
+* 11:00 :qcqp:drill:diagnosis:
+User: "Drill in now". Read the failing-matrix sidecars:
+- =qcqp500-3nc_0000=: iter 0, =delta_w=delta_c=0= (no regularization
+  on a non-convex Hessian).
+- =qcqp750-2nc_0000=: iter 0, =delta_w=1e8=, =delta_c=5.6e-9=.
+- Later iterates of the same problems (=_0001=, =_0002= with
+  =delta_w=1e20=) factor cleanly with res ~1e-13.
+Inertia exact in both failures. =n_2x2=0=, =n_delayed=0=. So this
+is residual conditioning at iteration 0, not a feral correctness
+bug.
+
+Built =/tmp/qcqp_drill.rs= → moved to =src/bin/qcqp_drill.rs=,
+testing four configs on each:
+
+| config                          | qcqp500-3nc_0000 | qcqp750-2nc_0000 |
+|---------------------------------+------------------+------------------|
+| (a) default + solve_sparse      | 1.95e-7 FAIL     | 3.73e-7 FAIL     |
+| (b) default + solve_sparse_ref. | 5.52e-11 OK      | 2.11e-9  OK      |
+| (c) MetisND + refined           | 5.75e-11 OK      | 1.72e-9  OK      |
+| (d) AMD+LdltCompress+refined    | 5.56e-11 OK      | 2.14e-9  OK      |
+
+Iterative refinement is the deciding factor; ordering is
+irrelevant. The 4–5 orders-of-magnitude jump from plain to
+refined says the factor itself is fine — the plain triangular
+back-substitution is just sitting on the conditioning edge of
+=n·eps·1e6=. Conclusion: =diag_mittelmann.rs= should use
+=solve_sparse_refined=, which is what a production IPM call site
+calls anyway.
+
+Deleted the throwaway =src/bin/qcqp_drill.rs=.
+
+* 11:45 :mittelmann:rerun:close:
+Switched =diag_mittelmann.rs= to =solve_sparse_refined=. Full
+re-run on all 600 matrices: =n_ok=460=, =n_inertia_fail=0=,
+=n_residual_fail=0=, =residual p50=3.44e-16=, =residual p99=8.16e-8=,
+=residual max=1.46e-7= (=qcqp1000-2c_0019=, within its size-scaled
+tolerance). Strategy distribution: AMD 237 / MetisND 223; Renumber
+447 / Adjacency 13; LdltCompress 228 / None 232; MC64 460/460.
+Closes the QCQP failure thread. Committed as b2627f2.
+
+Implications:
+- The plumbing for fill-parity is in place; the bench
+  =nnzL/MUMPS= / =nnzL/SSIDS= rows will populate as soon as
+  the oracle drivers are re-run on existing kkt + kkt-expansion
+  trees. Not blocking — silent skip until then.
+- 138 Mittelmann matrices with =n>50k= remain unfactored on this
+  laptop; largest =n=259681= (=nql180_0000=). Optional follow-up
+  on a beefier machine.
