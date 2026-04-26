@@ -815,7 +815,11 @@ struct KktEntry {
     name: String,
     /// Path to the .mtx file. Used to write `.feral.json` sidecars next to it.
     mtx_path: std::path::PathBuf,
-    matrix: SymmetricMatrix,
+    /// Dense form is materialized only when `n <= FERAL_DENSE_MAX` (default
+    /// 1000). The dense BK loop is the only consumer; large matrices (n in
+    /// the thousands) at full n×n cost would OOM the bench at load time on
+    /// the kkt corpus (n up to ~195k).
+    matrix: Option<SymmetricMatrix>,
     csc: CscMatrix,
     sidecar: KktSidecar,
     /// Canonical Fortran MUMPS 5.8.2 oracle timing from `*.mumps.json` if present.
@@ -948,6 +952,17 @@ fn write_feral_sidecar(
     std::fs::write(canonical, json)
 }
 
+/// `FERAL_DENSE_MAX` — gate above which the dense BK loop skips a matrix.
+/// Read at load time so `to_dense()` can be elided for matrices the dense
+/// path will never touch (the bench corpus has n up to ~195k; a single
+/// dense allocation would OOM).
+fn dense_max_from_env() -> usize {
+    std::env::var("FERAL_DENSE_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000)
+}
+
 /// Load all KKT matrices from `dir`, returning them sorted by name.
 /// Returns an empty vec if the directory does not exist.
 fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
@@ -955,6 +970,7 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
         return Vec::new();
     }
 
+    let dense_max = dense_max_from_env();
     let mut entries = Vec::new();
 
     // Walk subdirectories (one per problem)
@@ -1047,10 +1063,20 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
             let mumps_timing = read_oracle_timing(&mtx_path.with_extension("mumps.json"));
             let ssids_timing = read_oracle_timing(&mtx_path.with_extension("ssids.json"));
 
+            // Materialize the dense form only for matrices the dense BK
+            // loop will actually visit. Without this gate, n=195k matrices
+            // try to allocate ~300 GB at load time. csc.n is authoritative
+            // because to_csc() already validated the dimension.
+            let dense = if csc.n <= dense_max {
+                Some(mtx.to_dense())
+            } else {
+                None
+            };
+
             entries.push(KktEntry {
                 name: stem,
                 mtx_path: mtx_path.clone(),
-                matrix: mtx.to_dense(),
+                matrix: dense,
                 csc,
                 sidecar,
                 mumps_timing,
@@ -1281,25 +1307,34 @@ fn main() {
     // Dense BK is O(n^3). Above ~1000 it starts to dominate bench runtime
     // (a single n=5314 problem is ~150 GFLOPs scalar-unblocked). The sparse
     // loop below has no such cutoff. FERAL_DENSE_MAX overrides the default.
-    let dense_max: usize = std::env::var("FERAL_DENSE_MAX")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1000);
+    // Must match the value used by load_kkt_dir so `entry.matrix` is Some
+    // exactly when the loop wants to factor.
+    let dense_max: usize = dense_max_from_env();
     let mut n_dense_skipped_large = 0usize;
 
     for entry in &kkt_entries {
         n_total += 1;
-        let n = entry.matrix.n;
+        let n = entry.csc.n;
         let nnz = entry.csc.values.len();
 
         if n > dense_max {
             n_dense_skipped_large += 1;
             continue;
         }
+        // load_kkt_dir guarantees Some when csc.n <= dense_max. The match
+        // is a defensive skip rather than a panic — keeps the loop robust
+        // to a future load-time/loop-time mismatch.
+        let matrix = match entry.matrix.as_ref() {
+            Some(m) => m,
+            None => {
+                n_dense_skipped_large += 1;
+                continue;
+            }
+        };
 
         // Factor
         let t0 = Instant::now();
-        let (factors, inertia) = match factor_single_front(&entry.matrix, &params_kkt_sparse) {
+        let (factors, inertia) = match factor_single_front(matrix, &params_kkt_sparse) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  {}: factor failed: {}", entry.name, e);
@@ -1326,7 +1361,7 @@ fn main() {
         // solve_refined for all KKT solves to recover machine precision on
         // matrices flagged with needs_refinement under ForceAccept.
         let t1 = Instant::now();
-        let x = match solve_refined(&entry.matrix, &factors, &rhs) {
+        let x = match solve_refined(matrix, &factors, &rhs) {
             Ok(x) => x,
             Err(e) => {
                 eprintln!("  {}: solve failed: {}", entry.name, e);
@@ -1344,11 +1379,11 @@ fn main() {
             let mut ss: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
             for _ in 0..RESAMPLE_COLD_REPS {
                 let t0 = Instant::now();
-                let (rs_factors, _) = factor_single_front(&entry.matrix, &params_kkt_sparse)
+                let (rs_factors, _) = factor_single_front(matrix, &params_kkt_sparse)
                     .expect("resample: factor_single_front (single-shot already succeeded)");
                 fs.push(t0.elapsed().as_micros());
                 let t1 = Instant::now();
-                let _ = solve_refined(&entry.matrix, &rs_factors, &rhs)
+                let _ = solve_refined(matrix, &rs_factors, &rhs)
                     .expect("resample: solve_refined (single-shot already succeeded)");
                 ss.push(t1.elapsed().as_micros());
             }
@@ -1372,7 +1407,7 @@ fn main() {
 
         // Compute residual: ||Ax - b|| / ||b||
         let mut ax = vec![0.0; n];
-        entry.matrix.symv(&x, &mut ax);
+        matrix.symv(&x, &mut ax);
         let mut res_norm_sq = 0.0;
         let mut b_norm_sq = 0.0;
         for i in 0..n {
