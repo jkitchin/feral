@@ -91,3 +91,56 @@ is the cleanup that makes layer 2 sufficient (without it, even the
 
 Layer 1's =Option<CscMatrix>= cost: small. Single =expect= at the
 top of each loop iteration; drop happens at end of iter scope.
+
+* 19:30 :polak6:correctness:scaling:
+Drilled =POLAK6_0021= (worst sparse residual 2.99e8 in today's
+end-to-end bench). Augmented =src/bin/polak6_diag.rs= with the
+exact bench code path (Auto scaling + sidecar RHS +
+=solve_sparse_refined=).
+
+Diagnosis: same MC64 inertia regression identified in 2026-04-19.
+
+Matrix shape: n=9, stored_nnz=32, raw |diag| range 1e-4 to 1.3e42
+(spread of 1e46). Off-diagonal entries up to 4.2e37 in
+column 1, 1.3e42 in column 4. Constraint dual rows (6..9) carry
+the regularization =-delta_c = -1e-4= on the diagonal.
+
+Three scalings all yield wrong inertia:
+- =InfNorm=: factored inertia (5, 2, 2), residual 9.34e-1 (synthetic
+  RHS).
+- =Mc64Symmetric=: factored inertia (4, 4, 1), residual 2.35e28
+  (synthetic RHS).
+- =Auto= adaptive: =diag_only/n=4/9=0.444 >= 0.30= so routes to
+  MC64. Same factor and inertia as MC64.
+
+Bench-path reproduction (=Auto= + sidecar RHS + =solve_sparse_refined=):
+- Inertia: (4, 4, 1) (one zero pivot); expected (5, 4, 0).
+- Direct solve: =||b - Ax||/||b|| = 1.31e13=.
+- Refined solve: =||b - Ax||/||b|| = 2.99e8= (matches bench reported
+  worst residual exactly).
+- Bench tolerance =n*eps*1e6 = 2.0e-9=. PASS=NO by ~17 orders.
+
+Bench dump CSV row: dense residual 9.21e-17 (PASS, dense BK pivots
+freely and reaches the (1,4) hyperbolic 2x2), sparse residual 2.99e8
+(FAIL, multifrontal supernode pivoting can't reach the same 2x2 due
+to elimination tree structure).
+
+This is a single-matrix outlier, not a regression: the 2026-04-19
+session already characterized it. It became visible today only
+because the bench finally completed end-to-end. The 99.8% sparse
+residual rate is unchanged.
+
+Refinement is halving the magnitudes (1.31e13 -> 2.99e8) but cannot
+recover from a factor whose inertia is wrong. Three threads for
+follow-up:
+1. Higher pivot threshold (=1.0= partial pivoting) — would force
+   delaying pivots to find the 2x2; at the cost of fill-in.
+2. Allow 2x2 pivots across non-contiguous supernode columns —
+   architectural; matches what dense BK gets for free.
+3. =DELTA_C / DELTA_W=-aware regularization detection — the
+   constraint-block diagonal is exactly =-delta_c=, the (5,5) entry
+   is exactly =delta_w=. Skipping factor scaling for these
+   programmatically-known regularization rows could remove the
+   pathological scaling input.
+
+None of these is tonight's work. Logging for the next session.

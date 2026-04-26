@@ -26,11 +26,37 @@
 //! research note.
 
 use feral::numeric::factorize::factorize_multifrontal;
-use feral::numeric::solve::solve_sparse;
+use feral::numeric::solve::{solve_sparse, solve_sparse_refined};
 use feral::scaling::{compute_scaling, ScalingStrategy};
 use feral::symbolic::{symbolic_factorize_with_method, OrderingMethod, SupernodeParams};
 use feral::{read_mtx, BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 use std::path::Path;
+
+fn relative_residual(csc: &CscMatrix, x: &[f64], rhs: &[f64]) -> f64 {
+    let n = csc.n;
+    let mut ax = vec![0.0_f64; n];
+    for j in 0..n {
+        for k in csc.col_ptr[j]..csc.col_ptr[j + 1] {
+            let i = csc.row_idx[k];
+            ax[i] += csc.values[k] * x[j];
+            if i != j {
+                ax[j] += csc.values[k] * x[i];
+            }
+        }
+    }
+    let mut res2 = 0.0_f64;
+    let mut rhs2 = 0.0_f64;
+    for i in 0..n {
+        let r = rhs[i] - ax[i];
+        res2 += r * r;
+        rhs2 += rhs[i] * rhs[i];
+    }
+    if rhs2 > 0.0 {
+        (res2 / rhs2).sqrt()
+    } else {
+        res2.sqrt()
+    }
+}
 
 fn matrix_diagonal(csc: &CscMatrix) -> Vec<f64> {
     let n = csc.n;
@@ -290,6 +316,68 @@ fn main() {
     );
     println!();
     try_factor_and_solve("Auto (adaptive)", &csc, ScalingStrategy::Auto, expected);
+    println!();
+
+    // Reproduce the exact bench code path: Auto scaling + sidecar RHS +
+    // solve_sparse_refined. This is what the bench reports as the worst
+    // sparse residual.
+    println!("--- bench-path reproduction (Auto + sidecar RHS + refined solve) ---");
+    let sidecar_path = path.with_extension("json");
+    let sidecar_str = match std::fs::read_to_string(&sidecar_path) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("  sidecar read FAILED: {}", e);
+            return;
+        }
+    };
+    let sidecar: serde_json::Value = match serde_json::from_str(&sidecar_str) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("  sidecar parse FAILED: {}", e);
+            return;
+        }
+    };
+    let rhs: Vec<f64> = sidecar["rhs"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
+        .unwrap_or_default();
+    println!("  sidecar RHS len={}", rhs.len());
+    let r_min = rhs.iter().map(|x| x.abs()).fold(f64::INFINITY, f64::min);
+    let r_max = rhs.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+    println!("  RHS |b|: min={:.3e} max={:.3e}", r_min, r_max);
+
+    let snode_params = SupernodeParams::default();
+    let factor_params = feral::numeric::factorize::NumericParams {
+        bk: BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            pivot_threshold: 0.01,
+            ..BunchKaufmanParams::default()
+        },
+        scaling: ScalingStrategy::Auto,
+        small_leaf: Default::default(),
+        profiler: None,
+    };
+    let sym =
+        symbolic_factorize_with_method(&csc, &snode_params, OrderingMethod::Amd).expect("symbolic");
+    let (factors, inertia) = factorize_multifrontal(&csc, &sym, &factor_params).expect("factor");
+    println!(
+        "  inertia=({}, {}, {})  expected=({}, {}, {})",
+        inertia.positive, inertia.negative, inertia.zero, expected.0, expected.1, expected.2
+    );
+
+    // Direct solve (no refinement)
+    let x_direct = solve_sparse(&factors, &rhs).expect("solve");
+    let res_direct = relative_residual(&csc, &x_direct, &rhs);
+    println!("  direct solve  ||b - A x|| / ||b|| = {:.3e}", res_direct);
+
+    // Refined solve (what bench uses)
+    let x_refined = solve_sparse_refined(&csc, &factors, &rhs).expect("solve_refined");
+    let res_refined = relative_residual(&csc, &x_refined, &rhs);
+    println!("  refined solve ||b - A x|| / ||b|| = {:.3e}", res_refined);
+
+    let tol = (csc.n as f64) * f64::EPSILON * 1e6;
+    println!("  bench tol     = n * eps * 1e6   = {:.3e}", tol);
+    println!("  PASS={}", if res_refined <= tol { "yes" } else { "NO" });
 
     println!();
     println!("{}", "=".repeat(72));
