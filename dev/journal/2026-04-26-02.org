@@ -1,0 +1,93 @@
+#+TITLE: 2026-04-26 Session 02 — Bench sparse-loop OOM fix
+
+* Goal
+=cargo run --bin bench --release= now SIGKILLs immediately after the
+dense pass with =--- Sparse solver validation ---= as the last
+printed line. This blocks the standard session-end protocol. Fix
+that first, then continue the parity / supernode threads if time
+remains.
+
+The 2026-04-26-01 checkpoint pinned the cause: bench's KKT loader
+walks all three roots (=kkt + kkt-expansion + kkt-mittelmann= =
+167,614 matrices, vs 154,588 in the prior baseline). Even with the
+=FERAL_DENSE_MAX= gate on =to_dense()=, the cumulative dense
+allocations across the dense-eligible 154k entries dominate memory.
+
+* 18:00 :bench:oom:streaming:
+First attempt: convert =KktEntry.csc= to =Option<CscMatrix>= and
+=take()= it per iteration in the sparse loop, plus drop
+=entry.matrix = None= between dense and sparse passes. Compiles
+clean, all 333 tests pass.
+
+Run with default corpus (167,614 matrices): bench reaches
+=--- Sparse solver validation ---= and runs ~8 minutes silently
+before being killed at ~30 GB RSS. The take/drop helps in principle
+but cumulative CSC working set at sparse-loop entry is already
+~30 GB, and macOS jetsam tolerates that for a while but eventually
+SIGKILLs once system pressure builds (Dropbox renderer + claude-code
++ rustc easily account for another 10+ GB resident).
+
+Conclusion: take/drop is necessary but not sufficient. Need to
+shrink the working set at sparse-loop entry, not just shrink it
+incrementally.
+
+* 19:05 :bench:oom:fix:
+Second attempt: scope the default corpus to the historical =kkt=
+root via =FERAL_KKT_ROOTS= env var (default =kkt=). =all= or a
+comma-separated subset opts into the expanded corpus on beefy
+hardware. This restores the 2026-04-25 baseline behavior and
+sidesteps the 167k-matrix memory ceiling.
+
+Implementation: replaced the hardcoded three-root walk in =bench.rs=
+with an env-driven selector. Old name vs path matched by joining
+=data/matrices/$name=. Build clean. =cargo test --release= 333
+passed.
+
+Bench end-to-end run, default scope (=kkt= only, 154,588 matrices):
+
+#+begin_example
+KKT summary: 154588 matrices (154481 dense-eligible n <= 1000, 107 skipped n > 1000)
+  Inertia match: 154408/154481 (100.0%)
+  Residual pass: 154207/154481 (99.8%)
+  Worst residual: 1.87e-4 (ERRINBAR_0824)
+
+--- Sparse solver validation ---
+  Inertia match vs MUMPS: 154528/154588 (100.0%)
+  Residual pass: 154254/154588 (99.8%)
+  Worst residual: 2.99e8 (POLAK6_0021)
+--- Sparse failure analysis (389 failures) ---
+
+=== Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
+
+ratio               count    geomean        p50        p90        p99        max
+factor/MUMPS       153560       0.37       0.27       1.64       3.02       9.47
+solve/MUMPS        153560       0.25       0.20       0.87       3.47      11.60
+factor/SSIDS       154500       0.04       0.03       0.36       0.99       2.57
+solve/SSIDS        154500       1.04       1.00       3.75      11.00      38.56
+nnzL/MUMPS         153560       1.24       1.00       2.00       8.00       9.00
+nnzL/SSIDS         154500       1.79       1.75       2.13       8.00       9.00
+
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.64     <= 2.0     PASS
+medium (<500)            153560     1.64     <= 3.0     PASS
+#+end_example
+
+Headline: feral sparse beats MUMPS on factor (geomean 0.37, p50
+0.27) and matches on solve (geomean 0.25, p50 0.20). nnzL/MUMPS p50
+= 1.00 (median-tight parity). nnzL/SSIDS p50 = 1.75 invariant.
+Phase 2.8.1 PASS on both buckets.
+
+* 19:10 :takeaway:
+The OOM fix is two-layered:
+1. =Option<CscMatrix>= + per-iter =take()= keeps the in-flight
+   working set bounded.
+2. =FERAL_KKT_ROOTS= default scopes the corpus to fit in 64 GB,
+   with opt-in to expanded corpus for larger boxes.
+
+Layer 2 is what gets the bench to complete on this laptop. Layer 1
+is the cleanup that makes layer 2 sufficient (without it, even the
+=kkt= root showed cumulative-CSC pressure during sparse loop).
+
+Layer 1's =Option<CscMatrix>= cost: small. Single =expect= at the
+top of each loop iteration; drop happens at end of iter scope.
