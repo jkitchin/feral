@@ -1,0 +1,17 @@
+[package]
+name = "feral-amf"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Approximate Minimum Fill (AMF / HAMF4) fill-reducing ordering, quotient-graph algorithm (Amestoy 1999). Pure Rust, standalone."
+repository = "https://github.com/jkitchin/feral"
+keywords = ["sparse", "ordering", "amf", "fill-reducing", "linear-algebra"]
+categories = ["mathematics", "science"]
+
+[lib]
+name = "feral_amf"
+
+[dependencies]
+feral-ordering-core = { path = "../feral-ordering-core", version = "0.1" }
+
+[dev-dependencies]

@@ -218,6 +218,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "feral-amf"
+version = "0.1.0"
+dependencies = [
+ "feral-ordering-core",
+]
+
+[[package]]
 name = "feral-kahip"
 version = "0.1.0"
 dependencies = [
