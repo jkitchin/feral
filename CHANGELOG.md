@@ -4,6 +4,23 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Docs (2026-04-27) — AMF clean-room research note + plan
+
+`dev/research/amf-clean-room.md` and `dev/plans/amf-clean-room.md`
+land the foundation for a clean-room Approximate Minimum Fill
+(AMF / HAMF4) ordering as a peer of `feral-amd`. Motivation: MUMPS
+picks HAMF4 as the default for SYM=2 N≤10000 (`ana_set_ordering.F:
+52-78`), and we have empirical confirmation on at least one
+bipartite-KKT family (ORBIT2: feral-amd 5.1M nnz_L vs MUMPS HAMF4
+110k — 47×). Research note covers the Amestoy 1999 thesis fill
+metric, the six inner-loop sites that change vs AMD, and the
+`Metric`-trait architecture (extract shared quotient-graph
+machinery; `feral-amd` and `feral-amf` become thin specializations).
+Plan note breaks the work into four phases (module factoring with
+bit-parity gate, AMF metric impl + fixtures, MUMPS HAMF4 oracle
+plumbing, wire-up + corpus validation), 3-5 sessions total. No
+code changes — pure documentation.
+
 ### Performance (2026-04-27) — rank-bs trailing-update accumulator (W-2, 1×1)
 
 `src/dense/factor.rs::apply_blocked_schur` rewritten as a single

@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-27T12:21:18Z
+Generated: 2026-04-27T13:57:18Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,24 +59,24 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
-6505d89 tooling(bench): filter KKT corpus at load time via FERAL_KKT_FILTER
-ac2b3da perf(multifrontal): move contrib into ContribBlock — W-3b
-1720daf session: 2026-04-27-03 W-3a in-place dense kernel
-46d847b perf(dense): factor frontals in place — W-3a from kernel-speedup plan
-205d95b session: 2026-04-27-02 inertia accounting + kernel-speed plan
+ce6c091 docs(amf): research note + clean-room plan for HAMF4 ordering
+ea9f0b9 tooling(diag_orbit2_quotient): probe feral-amd dense deferral
+9c92c87 fix(feral-metis): default Fix A to disabled — empirical regression on ORBIT2
+f073070 perf(dense): rank-bs trailing-update accumulator -- W-2 (1x1)
+d345983 perf(dense): engage blocked panel for ncol >= 8 -- W-1
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-8ffe3941e8c25c1f)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-48eb938bc33b61d2)
 
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok
 test test_gate_tiny_sparse_in ... ok
-test test_determinism_tiny ... ok
 test test_gate_boundary_n_16 ... ok
+test test_determinism_tiny ... ok
 test test_solve_parity_tiny_real_matrix ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
