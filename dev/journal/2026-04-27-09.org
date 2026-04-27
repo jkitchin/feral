@@ -417,3 +417,79 @@ solve_many, env-var dispatch, per-column refinement).
 References cited: MUMPS 5.8.2 manual §3.10/3.11, SSIDS user guide
 §6.1/6.6, Ipopt's IpMumpsSolverInterface.cpp::MultiSolve, Mehrotra
 1992, Higham 2002 §13.
+
+* 21:10 :multi-rhs:F1.1:ripopt:
+F1.1 implementation landed in src/numeric/solve.rs +
+src/numeric/solver.rs. Added pub struct SolveManyWorkspace with
+for_factors(factors, nrhs) constructor; pub fn solve_sparse_many
+allocating result + forwarding; pub fn solve_sparse_many_into
+(dimension-checked, scaling-aware); fn solve_sparse_core_many_into
+running the column-batched supernodal kernel.
+
+Layout chosen: y[c*n + i] for column c row i; w[c*nrow + i] per
+supernode. Inner-loop shape:
+
+  for j in 0..nelim {
+      for i in (j+1)..nrow {
+          let l_ij = ff.l[j*nrow + i];
+          for c in 0..nrhs {
+              let off = c*nrow;
+              w[off+i] -= l_ij * w[off+j];
+          }
+      }
+  }
+
+Stride-1 over the column dimension; the compiler auto-vectorizes
+when nrhs is a runtime constant ≤ 8 in the IPM hot path. Single-
+RHS code path solve_sparse_core_into left bit-for-bit unchanged
+(zero regression risk).
+
+Solver::solve_many and Solver::solve_many_refined added in
+solver.rs. solve_many_refined runs the refinement loop per column,
+matching D6 (predictor-corrector convergence is per-column).
+
+tests/multi_rhs.rs added with 7 cases — all pass:
+  - equivalence with k independent single-RHS solves
+  - nrhs=0 returns empty
+  - nrhs=1 matches solve_sparse exactly
+  - n=0 returns Ok(empty)
+  - dim mismatch rejected
+  - refinement per-column determinism + residual sanity
+  - workspace reuse across two calls without stale state
+
+cargo clippy --lib --test multi_rhs -D warnings: clean. F1.2
+(bench instrumentation) and F1.4 (rayon) deferred — out of scope
+for this session; F1.3 (Solver::solve_many cross-validation
+against parity panel) deferred since the Solver methods exist and
+the per-column equivalence test covers correctness.
+
+* 21:25 :ripopt-integration:
+Authored dev/plans/ripopt-integration.md companion to kkt-feature
+-gaps.md. Maps each of F1/F2/F3 to specific ripopt call sites:
+
+  F1: ipm.rs:3217 try_mehrotra_predictor — predictor at line 3229,
+      corrector at line 3500. Plain Mehrotra has predictor →
+      corrector data dependency (mu_aff feeds corrector RHS), so
+      pure predictor-corrector does NOT batch. Real F1 win is in
+      Gondzio multi-corrector or higher-order Mehrotra where all
+      corrector RHSes are known after predictor resolves.
+
+  F2: ipm.rs:3067 try_solve_with_correction — δ_w escalation is
+      currently inertia-driven only; F2 adds κ̂_1 observability.
+      First adoption is logging only, NOT adaptive δ_w policy
+      (that's research-grade per Wächter & Biegler §3.1).
+
+  F3: linear_solver/mod.rs trait extension. Recommended Option 2
+      from the plan: separate SchurCapableSolver trait via
+      as_schur_capable() accessor on LinearSolver, NOT bolting
+      Schur onto the base trait. Schur is fundamentally a
+      different solve shape.
+
+API stability promise documented: the single-RHS feral surface
+(solve_sparse, Solver::solve, Solver::solve_refined) is frozen at
+F1.1; multi-RHS / condition / Schur are additive only. Existing
+ripopt code keeps compiling unchanged across all three feral
+phases.
+
+Sequencing table: each of F1/F2/F3 is independently shippable in
+ripopt; ripopt does not have to wait for all three.

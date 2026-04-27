@@ -292,6 +292,336 @@ fn solve_sparse_core_into(
     }
 }
 
+/// Workspace for `solve_sparse_many_into`. Sized for `nrhs` columns
+/// at construction time. Reuse across calls with the same `nrhs`
+/// avoids reallocation on the IPM hot path.
+///
+/// See `dev/research/multi-rhs.md` (F1.0) for the layout decisions
+/// — y/w/scaled_rhs are all column-major and widened by a factor
+/// of `nrhs` relative to the single-RHS `SolveWorkspace`.
+pub struct SolveManyWorkspace {
+    /// Permuted RHS / working solution vector, length `n * nrhs`,
+    /// column-major (column `c` lives at `[c*n .. (c+1)*n]`).
+    y: Vec<f64>,
+    /// Per-supernode gather/scatter buffer, length `max_nrow * nrhs`,
+    /// column-major.
+    w: Vec<f64>,
+    /// Pre-scaled RHS storage when MC64 scaling is active, length
+    /// `n * nrhs`. Empty when no scaling is applied.
+    scaled_rhs: Vec<f64>,
+    /// `nrhs` baked in at construction time. Re-using the workspace
+    /// for a different `nrhs` is a logic error and is checked.
+    nrhs: usize,
+    /// `n` baked in for the dimension check.
+    n: usize,
+}
+
+impl SolveManyWorkspace {
+    /// Allocate a workspace sized for `nrhs` solves against `factors`.
+    pub fn for_factors(factors: &SparseFactors, nrhs: usize) -> Self {
+        let n = factors.n;
+        let max_nrow = factors
+            .node_factors
+            .iter()
+            .map(|node| node.frontal_factors.nrow)
+            .max()
+            .unwrap_or(0);
+        let scaled_rhs_len = if matches!(factors.scaling_info, ScalingInfo::NotApplied) {
+            0
+        } else {
+            n * nrhs
+        };
+        Self {
+            y: vec![0.0; n * nrhs],
+            w: vec![0.0; max_nrow * nrhs],
+            scaled_rhs: vec![0.0; scaled_rhs_len],
+            nrhs,
+            n,
+        }
+    }
+}
+
+/// Solve `A · X = B` for `X`, where `B` and `X` are column-major
+/// `n × nrhs` matrices stored as flat slices of length `n * nrhs`.
+///
+/// Equivalent to `nrhs` independent calls to `solve_sparse`, but
+/// shares workspace and the supernodal traversal across columns.
+/// At small `nrhs` (1–8) this saves the per-call allocation; at
+/// larger `nrhs` the per-supernode kernels can amortize the
+/// gather/scatter overhead across columns.
+///
+/// `nrhs == 0` returns `Ok(Vec::new())`. `nrhs == 1` is a thin
+/// wrapper around `solve_sparse_into_ws`.
+///
+/// See `dev/plans/kkt-feature-gaps.md` F1 for the design and
+/// `dev/research/multi-rhs.md` for the layout decisions.
+pub fn solve_sparse_many(
+    factors: &SparseFactors,
+    rhs: &[f64],
+    nrhs: usize,
+) -> Result<Vec<f64>, FeralError> {
+    let n = factors.n;
+    if nrhs == 0 {
+        return Ok(Vec::new());
+    }
+    let mut x = vec![0.0; n * nrhs];
+    let mut ws = SolveManyWorkspace::for_factors(factors, nrhs);
+    solve_sparse_many_into(factors, rhs, nrhs, &mut x, &mut ws)?;
+    Ok(x)
+}
+
+/// In-place form of `solve_sparse_many` using a caller-owned
+/// workspace. The workspace must have been constructed with the
+/// same `nrhs` and `factors.n`; otherwise returns
+/// `FeralError::DimensionMismatch`.
+pub fn solve_sparse_many_into(
+    factors: &SparseFactors,
+    rhs: &[f64],
+    nrhs: usize,
+    x_out: &mut [f64],
+    ws: &mut SolveManyWorkspace,
+) -> Result<(), FeralError> {
+    let n = factors.n;
+    if nrhs == 0 {
+        return Ok(());
+    }
+    if ws.nrhs != nrhs || ws.n != n {
+        return Err(FeralError::DimensionMismatch {
+            expected: n * nrhs,
+            got: ws.n * ws.nrhs,
+        });
+    }
+    if rhs.len() != n * nrhs {
+        return Err(FeralError::DimensionMismatch {
+            expected: n * nrhs,
+            got: rhs.len(),
+        });
+    }
+    if x_out.len() != n * nrhs {
+        return Err(FeralError::DimensionMismatch {
+            expected: n * nrhs,
+            got: x_out.len(),
+        });
+    }
+    if n == 0 {
+        return Ok(());
+    }
+
+    // Pre-scale every column by D (MC64 congruence). Skipped when
+    // ScalingInfo::NotApplied (the scaling vector is all-ones).
+    let needs_scaling = !matches!(factors.scaling_info, ScalingInfo::NotApplied);
+    let rhs_for_core: &[f64] = if needs_scaling {
+        for c in 0..nrhs {
+            let off = c * n;
+            for i in 0..n {
+                ws.scaled_rhs[off + i] = rhs[off + i] * factors.scaling[i];
+            }
+        }
+        &ws.scaled_rhs
+    } else {
+        rhs
+    };
+
+    solve_sparse_core_many_into(factors, rhs_for_core, nrhs, x_out, &mut ws.y, &mut ws.w);
+
+    // Post-scale every column with the same D vector (see
+    // `solve_sparse_into_ws` for the cancellation argument).
+    if needs_scaling {
+        for c in 0..nrhs {
+            let off = c * n;
+            for i in 0..n {
+                x_out[off + i] *= factors.scaling[i];
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Multi-RHS core solve: forward-sub, D-solve, backward-sub on
+/// `nrhs` columns laid out column-major in `rhs`. Mirrors
+/// `solve_sparse_core_into` with the inner update loops widened
+/// to `nrhs` columns. The single-RHS path
+/// (`solve_sparse_core_into`) is preserved unchanged so the
+/// iterative-refinement code path stays on a tested code path.
+fn solve_sparse_core_many_into(
+    factors: &SparseFactors,
+    rhs: &[f64],
+    nrhs: usize,
+    x_out: &mut [f64],
+    y_buf: &mut [f64],
+    w_buf: &mut [f64],
+) {
+    let n = factors.n;
+    let y = &mut y_buf[..n * nrhs];
+
+    // Permute every column of the RHS: y[c, new] = b[c, perm[new]]
+    for c in 0..nrhs {
+        let src_off = c * n;
+        let dst_off = c * n;
+        for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
+            y[dst_off + new_idx] = rhs[src_off + old_idx];
+        }
+    }
+
+    // Phase 1: Forward substitution (postorder).
+    for node in &factors.node_factors {
+        let ff = &node.frontal_factors;
+        let nelim = ff.nelim;
+        let nrow = ff.nrow;
+        if nelim == 0 {
+            continue;
+        }
+
+        let w = &mut w_buf[..nrow * nrhs];
+        // Gather every column with the BK permutation applied.
+        for c in 0..nrhs {
+            let w_col = &mut w[c * nrow..(c + 1) * nrow];
+            let y_col = &y[c * n..(c + 1) * n];
+            for i in 0..nrow {
+                w_col[i] = y_col[node.row_indices[ff.perm[i]]];
+            }
+        }
+
+        // L-solve: for each eliminated column j, update rows below.
+        // Inner loop is length-`nrhs` axpy; compiler auto-vectorizes
+        // for small constant or runtime `nrhs`.
+        for j in 0..nelim {
+            for i in (j + 1)..nrow {
+                let l_ij = ff.l[j * nrow + i];
+                for c in 0..nrhs {
+                    let off = c * nrow;
+                    w[off + i] -= l_ij * w[off + j];
+                }
+            }
+        }
+
+        // Scatter back, undoing BK permutation.
+        for c in 0..nrhs {
+            let w_col = &w[c * nrow..(c + 1) * nrow];
+            let y_col = &mut y[c * n..(c + 1) * n];
+            for i in 0..nrow {
+                y_col[node.row_indices[ff.perm[i]]] = w_col[i];
+            }
+        }
+    }
+
+    // Phase 2: D-block solve. Per-column, since the 2×2 logic
+    // depends on values inside the column.
+    for node in &factors.node_factors {
+        let ff = &node.frontal_factors;
+        let nelim = ff.nelim;
+        let nrow = ff.nrow;
+        if nelim == 0 {
+            continue;
+        }
+
+        let w = &mut w_buf[..nrow * nrhs];
+        for c in 0..nrhs {
+            let w_col = &mut w[c * nrow..(c + 1) * nrow];
+            let y_col = &y[c * n..(c + 1) * n];
+            for i in 0..nrow {
+                w_col[i] = y_col[node.row_indices[ff.perm[i]]];
+            }
+        }
+
+        for c in 0..nrhs {
+            let w_col = &mut w[c * nrow..(c + 1) * nrow];
+            let mut k = 0;
+            while k < nelim {
+                if k + 1 < nelim && ff.d_subdiag[k] != 0.0 {
+                    let a = ff.d_diag[k];
+                    let b = ff.d_subdiag[k];
+                    let cc = ff.d_diag[k + 1];
+                    let det = a * cc - b * b;
+
+                    if det.abs() > ff.zero_tol_2x2 {
+                        let z1 = w_col[k];
+                        let z2 = w_col[k + 1];
+                        if b.abs() > f64::EPSILON * (a.abs() + cc.abs()).max(1.0) {
+                            let ak = a / b;
+                            let ck = cc / b;
+                            let denom = 1.0 / (ak * ck - 1.0);
+                            let z1k = z1 / b;
+                            let z2k = z2 / b;
+                            w_col[k] = (ck * z1k - z2k) * denom;
+                            w_col[k + 1] = (ak * z2k - z1k) * denom;
+                        } else {
+                            w_col[k] = (cc * z1 - b * z2) / det;
+                            w_col[k + 1] = (a * z2 - b * z1) / det;
+                        }
+                    }
+                    // else: 2×2 block force-accepted as singular; leave as-is.
+                    k += 2;
+                } else {
+                    if ff.d_diag[k].abs() > ff.zero_tol {
+                        w_col[k] /= ff.d_diag[k];
+                    }
+                    // else: pivot force-accepted as zero; leave as-is.
+                    k += 1;
+                }
+            }
+        }
+
+        for c in 0..nrhs {
+            let w_col = &w[c * nrow..(c + 1) * nrow];
+            let y_col = &mut y[c * n..(c + 1) * n];
+            for i in 0..nrow {
+                y_col[node.row_indices[ff.perm[i]]] = w_col[i];
+            }
+        }
+    }
+
+    // Phase 3: Backward substitution (reverse postorder).
+    for node in factors.node_factors.iter().rev() {
+        let ff = &node.frontal_factors;
+        let nelim = ff.nelim;
+        let nrow = ff.nrow;
+        if nelim == 0 {
+            continue;
+        }
+
+        let w = &mut w_buf[..nrow * nrhs];
+        for c in 0..nrhs {
+            let w_col = &mut w[c * nrow..(c + 1) * nrow];
+            let y_col = &y[c * n..(c + 1) * n];
+            for i in 0..nrow {
+                w_col[i] = y_col[node.row_indices[ff.perm[i]]];
+            }
+        }
+
+        // L^T-solve: per column, dot the trailing entries of column j
+        // of L with the trailing entries of `w_col` and subtract.
+        for j in (0..nelim).rev() {
+            for c in 0..nrhs {
+                let off = c * nrow;
+                let mut sum = 0.0;
+                for i in (j + 1)..nrow {
+                    sum += ff.l[j * nrow + i] * w[off + i];
+                }
+                w[off + j] -= sum;
+            }
+        }
+
+        for c in 0..nrhs {
+            let w_col = &w[c * nrow..(c + 1) * nrow];
+            let y_col = &mut y[c * n..(c + 1) * n];
+            for i in 0..nrow {
+                y_col[node.row_indices[ff.perm[i]]] = w_col[i];
+            }
+        }
+    }
+
+    // Unpermute every column: x[c, old] = y[c, new].
+    for c in 0..nrhs {
+        let src_off = c * n;
+        let dst_off = c * n;
+        for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
+            x_out[dst_off + old_idx] = y[src_off + new_idx];
+        }
+    }
+}
+
 /// Solve A·x = rhs using the sparse factorization with iterative refinement.
 ///
 /// Mirrors `crate::dense::solve::solve_refined` for the multifrontal path.

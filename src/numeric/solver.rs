@@ -15,7 +15,7 @@ use crate::inertia::Inertia;
 use crate::numeric::factorize::{
     factorize_multifrontal_with_workspace, FactorWorkspace, NumericParams, SparseFactors,
 };
-use crate::numeric::solve::{solve_sparse, solve_sparse_refined};
+use crate::numeric::solve::{solve_sparse, solve_sparse_many, solve_sparse_refined};
 use crate::scaling::ScalingStrategy;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::supernode::SupernodeParams;
@@ -225,6 +225,56 @@ impl Solver {
             Some(f) => solve_sparse_refined(matrix, f, rhs),
             None => Err(FeralError::NoFactor),
         }
+    }
+
+    /// Solve `A · X = B` for `X` against the most recent stored factor,
+    /// where `B` and `X` are column-major `n × nrhs` matrices stored
+    /// as flat slices of length `n * nrhs`. Returns
+    /// `FeralError::NoFactor` if no factor is stored.
+    ///
+    /// Equivalent to `nrhs` independent `solve` calls but shares
+    /// workspace and the supernodal traversal across columns.
+    /// Mehrotra predictor-corrector IPM uses `nrhs = 2`. See
+    /// `dev/plans/kkt-feature-gaps.md` F1.
+    pub fn solve_many(&self, rhs: &[f64], nrhs: usize) -> Result<Vec<f64>, FeralError> {
+        match &self.last_factors {
+            Some(f) => solve_sparse_many(f, rhs, nrhs),
+            None => Err(FeralError::NoFactor),
+        }
+    }
+
+    /// Multi-RHS solve with per-column iterative refinement against
+    /// the original matrix and the stored factor. Each column is
+    /// refined independently — convergence is per-column, not all-
+    /// at-once, matching the predictor-corrector use case where
+    /// the two columns target different residual basins.
+    pub fn solve_many_refined(
+        &self,
+        matrix: &CscMatrix,
+        rhs: &[f64],
+        nrhs: usize,
+    ) -> Result<Vec<f64>, FeralError> {
+        let factors = match &self.last_factors {
+            Some(f) => f,
+            None => return Err(FeralError::NoFactor),
+        };
+        if nrhs == 0 {
+            return Ok(Vec::new());
+        }
+        let n = factors.n;
+        if rhs.len() != n * nrhs {
+            return Err(FeralError::DimensionMismatch {
+                expected: n * nrhs,
+                got: rhs.len(),
+            });
+        }
+        let mut out = vec![0.0; n * nrhs];
+        for c in 0..nrhs {
+            let src = &rhs[c * n..(c + 1) * n];
+            let xc = solve_sparse_refined(matrix, factors, src)?;
+            out[c * n..(c + 1) * n].copy_from_slice(&xc);
+        }
+        Ok(out)
     }
 
     /// Two-stage quality escalation. Persistent across `factor()`
