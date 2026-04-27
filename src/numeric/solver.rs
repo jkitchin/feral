@@ -12,6 +12,7 @@
 
 use crate::error::FeralError;
 use crate::inertia::Inertia;
+use crate::numeric::condition::estimate_condition_1norm;
 use crate::numeric::factorize::{
     factorize_multifrontal_with_workspace, FactorWorkspace, NumericParams, SparseFactors,
 };
@@ -275,6 +276,18 @@ impl Solver {
             out[c * n..(c + 1) * n].copy_from_slice(&xc);
         }
         Ok(out)
+    }
+
+    /// Estimate `kappa_1(A) = ||A||_1 * ||A^{-1}||_1` via the
+    /// Hager-Higham 1-norm power iteration. Cost: 3-5 solves with the
+    /// stored factor. Returns `FeralError::NoFactor` if no factor is
+    /// stored. See `dev/research/condition-estimate.md` and F2 of
+    /// `dev/plans/kkt-feature-gaps.md`.
+    pub fn estimate_condition_1norm(&self, matrix: &CscMatrix) -> Result<f64, FeralError> {
+        match &self.last_factors {
+            Some(f) => estimate_condition_1norm(matrix, f),
+            None => Err(FeralError::NoFactor),
+        }
     }
 
     /// Two-stage quality escalation. Persistent across `factor()`

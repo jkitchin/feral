@@ -535,3 +535,52 @@ it), so the "<=5% overhead" gate from the plan is trivially met.
 References cited: Hager 1984 (SIAM JSC), Higham 1988 (ACM TOMS),
 Higham 2002 §15+§28, LAPACK DLACON/DGECON, MUMPS manual §6.2,
 SSIDS core_solve.f90::condition_est_1.
+
+* 22:30 :condition-estimate:F2.1:
+F2.1 implementation landed in src/numeric/condition.rs.
+
+API: three free functions — matrix_norm_1, estimate_inverse_norm_1,
+estimate_condition_1norm — re-exported at crate root. Plus
+Solver::estimate_condition_1norm that delegates to the free fn
+against the most recent factor.
+
+Implementation follows D2 from the F2.0 note: the symmetric
+identity A^{-T} = A^{-1} means each Hager iteration performs ONE
+solve, not two. The forward power iteration (not DLACON reverse-
+communication) plus Higham 1988 alternating-sign refinement step.
+
+Cycle guard: if argmax|z_i| repeats from the previous iteration,
+terminate. Matches LAPACK DLACON's tie-resolution convention.
+
+8 tests pass:
+  - matrix_norm_1 on diagonal and 2x2 symmetric off-diagonal
+    (verifies the lower-tri + symmetric-mirror summing).
+  - condition_diagonal_spectrum: diag(1, 1e3, 1e6) gives
+    estimator within 2x of true 1e6 (Hager converges in 1
+    iteration on diagonals).
+  - condition_well_conditioned_lower_bound: identity has kappa
+    in [1, 2].
+  - condition_n_zero returns 0.0.
+  - condition_dimension_mismatch_rejected.
+  - condition_hilbert_n4: H_4 (true kappa ~ 2.84e4 from Higham
+    2002 §28) within 10x.
+  - condition_hilbert_n6: H_6 (true kappa ~ 2.91e7) within 10x.
+
+Hilbert tests are the F2.1 acceptance gate from the plan
+(Hilbert kappa within 10x of Higham table). Both pass first try.
+
+Library test suite: 173 tests, all green. cargo clippy --lib
+-D warnings clean (one needless_range_loop fixed inline).
+
+Deferred to F2.2: MUMPS RINFOG(11) cross-validation harness.
+That requires extending external_benchmarks/mumps_oracle/
+mumps_bench.F to enable ICNTL(11)=2 and write RINFOG(11) to
+verdict.json — out of scope for this session since it changes
+the Fortran oracle.
+
+Deferred to a possible F2.3 iteration: ConditionWorkspace for
+allocation amortization. Current impl calls solve_sparse() each
+inner-loop iteration, which allocates a fresh SolveWorkspace per
+solve. For a 5-solve estimator on small-frontal matrices this
+adds maybe a microsecond per call; not worth the API surface
+expansion until profiling shows it matters.
