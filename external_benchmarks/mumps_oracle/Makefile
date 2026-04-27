@@ -25,9 +25,16 @@ LIBS := -L$(MUMPS_DIR)/lib -ldmumps -lmumps_common \
         -L$(OPENBLAS_DIR)/lib -lopenblas \
         -lpthread
 
-all: mumps mumps_bench
+all: mumps mumps_bench mumps_amf_oracle
 
 mumps_bench: mumps_bench.F $(MUMPS_DIR)/lib/libdmumps.a
+	$(FC) $(FFLAGS) -o $@ $< $(LIBS)
+
+# AMF/HAMF4 ordering oracle for feral-amf clean-room cross-check.
+# Analyze-only with ICNTL(7) = 2; dumps SYM_PERM + INFOG(20) per
+# matrix. Used by tests/amf_corpus_oracle.rs to gate
+# feral_amf nnz_L <= 1.10 * MUMPS HAMF4 nnz_L.
+mumps_amf_oracle: mumps_amf_oracle.F $(MUMPS_DIR)/lib/libdmumps.a
 	$(FC) $(FFLAGS) -o $@ $< $(LIBS)
 
 # Build the MUMPS sequential libraries from ref/mumps using our template.
@@ -38,7 +45,7 @@ $(MUMPS_DIR)/lib/libdmumps.a: Makefile.inc.mumps
 	$(MAKE) -C $(MUMPS_DIR) d
 
 clean:
-	rm -f mumps_bench *.o
+	rm -f mumps_bench mumps_amf_oracle *.o
 
 mumps-clean:
 	$(MAKE) -C $(MUMPS_DIR) clean

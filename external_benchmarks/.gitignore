@@ -1,4 +1,5 @@
 mumps_oracle/mumps_bench
+mumps_oracle/mumps_amf_oracle
 mumps_oracle/*.o
 ssids_oracle/ssids_bench
 ssids_oracle/*.o

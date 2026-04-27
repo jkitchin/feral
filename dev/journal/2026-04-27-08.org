@@ -197,3 +197,45 @@ After session 08 (cumulative B.2 + B.3 + B.4):
   external_benchmarks/mumps_oracle/ + tests/amf_corpus_oracle.rs)
   and D (wire AMF as default for SYM=2 N<=10000 in
   src/symbolic/mod.rs).
+
+* 16:00 :amf:phase-c:start:
+Phase C — MUMPS HAMF4 oracle plumbing. Goal: stand up the harness
+and the in-tree Rust gate so future corpus runs only need to call
+the Python driver and re-run the test. Corpus regen itself is a
+separate multi-hour run.
+
+* 16:30 :amf:phase-c:harness-built:
+mumps_amf_oracle.F builds against ref/mumps libdmumps.a using the
+existing Makefile.inc.mumps; analyze-only with ICNTL(7) = 2. Smoke
+on HATFLDFLNE_0009.mtx (n = 6): output reports
+  n 6
+  nnz 12
+  nnz_l_estimated 21
+  sym_perm 5,4,1,3,2,6 (1-indexed)
+which matches the structure expected of a 4-d / 2-c arrowhead
+factorisation. run_mumps_amf.py drives a manifest of two HATFLDFLNE
+matrices end-to-end and writes well-formed .hamf4.json sidecars
+with 0-indexed perm. .gitignore extended to skip the binary.
+
+* 16:45 :amf:phase-c:rust-gate:
+tests/amf_corpus_oracle.rs (in feral root tests/, not the per-crate
+tests/) implements the two #[ignore]d integration tests called out
+by the plan. Re-uses the public feral surface (read_mtx,
+CscMatrix::symmetric_pattern, ordering::amd::permute_pattern,
+EliminationTree::from_pattern, symbolic::column_counts_gnp +
+total_factor_nnz) plus feral_amf::amf_order_full as a dev-dep.
+Dev-dep added to root Cargo.toml; serde_json was already a runtime
+dep so deserialising the sidecars is free.
+
+Result on the two sidecars currently on disk: both within the
+1.10× gate. ORBIT2_0000 (no sidecar yet, so amf_corpus_gate skips
+it, but amf_orbit2_nnz_l_budget loads the matrix directly):
+feral-amf nnz_L = 32_105, well under the 120_000 budget. Phase C
+scaffold is functional; corpus regen is the next user-driven run.
+
+* 16:50 :status:end-of-session:
+Phases A.1, A.2, B.1, B.2, B.3, B.4, C-scaffold complete. Only
+Phase C corpus regen and Phase D default wiring remain. Test
+counts: feral lib 164/164, feral-amd 51 + 12 oracle_match,
+feral-amf 7 + 3 expected_perm + 2 corpus_oracle, feral-ordering-core
+56 + 10. All gates green.

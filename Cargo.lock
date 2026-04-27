@@ -200,6 +200,7 @@ dependencies = [
  "approx",
  "criterion",
  "feral-amd",
+ "feral-amf",
  "feral-kahip",
  "feral-metis",
  "feral-ordering-core",
