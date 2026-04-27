@@ -1140,23 +1140,32 @@ fn factor_one_supernode(
     // Step 3: Factor the frontal in place (W-3a). `frontal.data`
     // content is undefined on return; the buffer goes back to the pool.
     let may_delay = !is_root[snode_idx];
-    let ff = factor_frontal_blocked_in_place(&mut frontal, expanded_ncol, may_delay, &params.bk)?;
+    let mut ff =
+        factor_frontal_blocked_in_place(&mut frontal, expanded_ncol, may_delay, &params.bk)?;
     ws.frontal_values = frontal.data;
 
     let node_inertia = ff.inertia.clone();
     let node_nelim = ff.nelim;
     let node_n_delayed = ff.n_delayed;
 
-    // Step 4: Store contribution block for parent.
+    // Step 4: Store contribution block for parent. Move
+    // `ff.contrib` directly into `ContribBlock::data` (W-3b: avoid the
+    // 30 MB clone on CHAINWOO root). After this move,
+    // `frontal_factors.contrib` in the saved `NodeFactors` is empty —
+    // production solve paths only read `l`, `d_diag`, `d_subdiag`,
+    // `perm`, `perm_inv` from `frontal_factors`; `contrib` is consumed
+    // by the parent supernode during assembly and is dead data
+    // afterward.
     if ff.contrib_dim > 0 {
         let cdim = ff.contrib_dim;
         let mut contrib_row_indices = Vec::with_capacity(cdim);
         for cj in 0..cdim {
             contrib_row_indices.push(row_indices[ff.perm[node_nelim + cj]]);
         }
+        let contrib_data = std::mem::take(&mut ff.contrib);
         contrib_blocks[snode_idx] = Some(ContribBlock {
             row_indices: contrib_row_indices,
-            data: ff.contrib.clone(),
+            data: contrib_data,
             dim: cdim,
             n_delayed: node_n_delayed,
         });
@@ -1289,22 +1298,26 @@ fn factor_one_small_leaf(
 
     // W-3a: factor in place; pool returns the (now-undefined) buffer.
     let may_delay = !is_root[snode_idx];
-    let ff = factor_frontal_blocked_in_place(&mut frontal, expanded_ncol, may_delay, &params.bk)?;
+    let mut ff =
+        factor_frontal_blocked_in_place(&mut frontal, expanded_ncol, may_delay, &params.bk)?;
     ws.frontal_values = frontal.data;
 
     let node_inertia = ff.inertia.clone();
     let node_nelim = ff.nelim;
     let node_n_delayed = ff.n_delayed;
 
+    // W-3b: move `ff.contrib` rather than clone (see internal variant
+    // for the full contract).
     if ff.contrib_dim > 0 {
         let cdim = ff.contrib_dim;
         let mut contrib_row_indices = Vec::with_capacity(cdim);
         for cj in 0..cdim {
             contrib_row_indices.push(row_indices[ff.perm[node_nelim + cj]]);
         }
+        let contrib_data = std::mem::take(&mut ff.contrib);
         contrib_blocks[snode_idx] = Some(ContribBlock {
             row_indices: contrib_row_indices,
-            data: ff.contrib.clone(),
+            data: contrib_data,
             dim: cdim,
             n_delayed: node_n_delayed,
         });

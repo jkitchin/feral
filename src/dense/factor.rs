@@ -557,6 +557,12 @@ pub struct FrontalFactors {
     /// fully-summed columns; the remaining `nrow - ncol` positions hold
     /// the non-fully-summed trailing rows. When `nelim == ncol` the whole
     /// block is the classic Schur complement S = A22 - L21 * D * L21^T.
+    ///
+    /// The multifrontal driver may move this `Vec` into the parent's
+    /// `ContribBlock` (W-3b) — production paths must read `contrib` only
+    /// before storing the `FrontalFactors` into a `NodeFactors`. Direct
+    /// callers of `factor_frontal*` (tests, examples, the bit-parity
+    /// reference) see the populated `contrib` as documented.
     pub contrib: Vec<f64>,
     /// Dimension of the contribution block (`nrow - nelim`).
     pub contrib_dim: usize,

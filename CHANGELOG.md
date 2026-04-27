@@ -4,6 +4,17 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance (2026-04-27) — move contrib into ContribBlock (W-3b)
+
+The multifrontal driver previously cloned `ff.contrib` on every
+supernode to produce a `ContribBlock` for the parent. For
+CHAINWOO_0000's 1984-row root that clone is ~30 MB per factorization.
+Replaced with `std::mem::take(&mut ff.contrib)` in
+`factor_supernode_dense_internal` and `factor_supernode_leaf_dense`;
+the saved `NodeFactors.frontal_factors.contrib` is empty afterward
+(production solve paths never read it). CHAINWOO driver-level total:
+~23,246 → ~22,620 us. W-3b from `dev/plans/dense-kernel-speedup.md`.
+
 ### Performance (2026-04-27) — factor frontals in place (W-3a)
 
 Added `factor_frontal_blocked_in_place(&mut SymmetricMatrix, ...)` in

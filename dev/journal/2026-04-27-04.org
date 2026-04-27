@@ -1,0 +1,67 @@
+#+TITLE: 2026-04-27 Session 04 — W-3b: move contrib into ContribBlock
+
+* Goal
+W-3b from =dev/plans/dense-kernel-speedup.md=: eliminate the
+=ff.contrib.clone()= the multifrontal driver was performing on every
+supernode. For CHAINWOO_0000's 1984-row root supernode, the
+contribution block is cdim² = (1984-32)² × 8 bytes ≈ 30 MB; cloning
+that on every factorization is pure malloc traffic.
+
+* 10:00 :impl:w3b:multifrontal:
+Refactored =src/numeric/factorize.rs=:
+- =factor_supernode_dense_internal= (line 1144): bound =ff= as =mut=,
+  replaced =data: ff.contrib.clone()= with
+  =let contrib_data = std::mem::take(&mut ff.contrib);
+   data: contrib_data,=. The saved =NodeFactors.frontal_factors.contrib=
+  is empty afterward.
+- =factor_supernode_leaf_dense= (line 1301): same pattern.
+- Updated =FrontalFactors.contrib= doc in =src/dense/factor.rs:560= to
+  note the multifrontal-driver move-out semantics.
+
+Production paths only read =frontal_factors.contrib= during the
+multifrontal-driver assembly step (which now consumes it via
+=mem::take=); solve paths read =l=, =d_diag=, =d_subdiag=, =perm=,
+=perm_inv= but never =contrib=. Tests/examples that construct
+=FrontalFactors= directly via =factor_frontal*= still see the
+populated =contrib=.
+
+* 10:15 :tests:
+=cargo test --release= ✓ all 162 lib tests + integration suites pass.
+=cargo clippy --lib -- -D warnings= ✓ clean.
+Bit-parity tests in =tests/blocked_ldlt.rs=, =tests/factor_workspace_parity.rs=,
+=tests/parallel_parity.rs= all compare =fa.contrib= vs =fb.contrib=
+between equivalent runs — both now empty after the driver consumes
+them, so equality still holds.
+
+* 10:20 :diag-chainwoo:
+=cargo run --release --bin diag_chainwoo_profile= reports
+=total_us median = 22620= vs 23,246 us before W-3b (~3% additional
+gain, ~5.7% combined W-3a+W-3b vs the session 02 baseline of ~24,000 us).
+
+The headline gain remains modest because the CHAINWOO root supernode's
+factor time is dominated by pivot work in =lblt_panel_frontal= and the
+trailing update in =apply_blocked_schur=, not allocation. The 30 MB
+clone elimination matters more for memory pressure (less RSS / less
+allocator stress under repeated IPM-style factorizations) than for
+single-run wall time.
+
+* Decision
+Take the =mem::take= approach rather than introducing a borrowed
+output buffer in the kernel API. Reasons:
+1. Zero LoC change in the kernel — the in-place output is already
+   produced as a freshly-allocated =Vec=; we just transfer ownership
+   instead of cloning.
+2. Tests that read =ff.contrib[...]= directly via =factor_frontal*=
+   (delayed_pivoting.rs, etc.) keep working unchanged.
+3. Pooling the =contrib= buffer through =FactorWorkspace= would be a
+   larger refactor (the kernel would need to take an
+   =&mut Vec<f64>=). Defer to a future session if measurements show
+   it matters.
+
+* Combined session 03+04 effect
+- W-3a (commit 46d847b): in-place input matrix.
+- W-3b (this session): move contrib output into ContribBlock.
+- Driver-level CHAINWOO total: ~24,000 → ~22,620 us (5.7%).
+- Bit-parity preserved end-to-end.
+- Per-supernode allocator pressure reduced by both nrow*nrow
+  (input scratch) and cdim*cdim (clone-elision) doubles.
