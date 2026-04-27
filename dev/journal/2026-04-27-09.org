@@ -493,3 +493,45 @@ phases.
 
 Sequencing table: each of F1/F2/F3 is independently shippable in
 ripopt; ripopt does not have to wait for all three.
+
+* 21:55 :condition-estimate:F2.0:
+Authored dev/research/condition-estimate.md — F2.0 design note.
+Six decisions captured before F2.1 implementation:
+
+  D1. Algorithm: Hager 1984 + Higham 1988 refinement. Inline
+      forward-form (not DLACON reverse-communication) since we
+      have direct access to the factor.
+  D2. Symmetric specialization: A⁻ᵀ = A⁻¹ for our LDLᵀ factor,
+      so inner loop uses ONE solve per iteration not two. Total
+      cost 3-5 solves vs 6-10 for the general case.
+  D3. API: Solver::estimate_condition_1norm + lower-level
+      Solver::estimate_inverse_norm_1, plus free-function form
+      estimate_condition_1norm_free for callers holding
+      SparseFactors directly.
+  D4. ConditionWorkspace analogous to SolveWorkspace, allocated
+      once and reused across the 3-5 internal solves.
+  D5. Error contract: Err only on solve failure or dim mismatch;
+      "did not converge in 5 iter" is NOT an error (LAPACK
+      convention). n=0 returns Ok(0.0).
+  D6. Validation: Hilbert κ within 10× of Higham 2002 §28 table;
+      diagonal-spectrum within 2×; cross-validate against MUMPS
+      RINFOG(11) on N≥1000 corpus matrices, geomean ratio in
+      [0.5, 5.0].
+
+Errata caught: kkt-feature-gaps.md said MUMPS exposes the
+estimate via "INFOG(40)" — actually the correct field is
+"RINFOG(11)" (real-valued, populated when ICNTL(11)=2). Fixed
+the plan in the same commit. Field correction matters because
+F2.2's MUMPS oracle extension has to write the right field.
+
+Code-touch map identifies F2.1 work: new src/numeric/condition.rs
+with matrix_norm_1, estimate_inverse_norm_1, ConditionWorkspace,
+estimate_condition_1norm_free; Solver methods on solver.rs;
+tests/condition.rs with Hilbert + diagonal-spectrum panels.
+
+Cost: ~5 solves per call. Estimator is opt-in (callers ask for
+it), so the "<=5% overhead" gate from the plan is trivially met.
+
+References cited: Hager 1984 (SIAM JSC), Higham 1988 (ACM TOMS),
+Higham 2002 §15+§28, LAPACK DLACON/DGECON, MUMPS manual §6.2,
+SSIDS core_solve.f90::condition_est_1.

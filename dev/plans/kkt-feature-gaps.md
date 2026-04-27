@@ -130,8 +130,10 @@ conditioning signals to decide when to bump `δ_w` (Hessian
 perturbation) or `δ_c` (constraint relaxation). Without a
 condition-number estimate, feral's downstream IPM has only a
 heuristic δ-ladder with no feedback signal. MUMPS exposes
-estimate-of-`||A||₁·||A⁻¹||₁` via `INFOG(40)` (when `ICNTL(11)=2`);
-SSIDS exposes the same via `solve_inquiry`.
+estimate-of-`||A⁻¹||₁` via `RINFOG(11)` (when `ICNTL(11)=2`);
+SSIDS exposes the same via `solve_inquiry`. (See
+`dev/research/condition-estimate.md` for the field-name
+correction — earlier draft of this plan said `INFOG(40)`.)
 
 ### API sketch
 
@@ -180,7 +182,9 @@ reference; SSIDS implements it in `core_solve.f90::condition_est`.
   conservative gate).
 - **F2.2** — Expose via `Solver::estimate_condition_1norm`.
   Cross-validate against MUMPS sidecar conditioning data on the
-  full corpus where MUMPS provides `INFOG(40)`.
+  full corpus where MUMPS provides `RINFOG(11)`. F2.2 must extend
+  `external_benchmarks/mumps_oracle/mumps_bench.F` with
+  `ICNTL(11)=2` and write `RINFOG(11)` to verdict.json.
 - **F2.3** — Wire into iterative-refinement termination as a
   diagnostic. Don't change behavior yet — just emit the estimate
   alongside the residual at each refinement step. (A later
