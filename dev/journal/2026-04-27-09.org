@@ -383,3 +383,37 @@ Per-phase acceptance gates wired in the plan:
 Each phase has a research note prerequisite (F1.0, F2.0, F3.0)
 per CLAUDE.md "research → plan → tests first → implement →
 benchmark" cadence.
+
+* 20:25 :research:multi-rhs:f1.0:
+Wrote `dev/research/multi-rhs.md` (F1.0 of the KKT-feature-gaps
+roadmap). Six decisions captured:
+
+  D1. Layout: column-major n×k, `ldx == n` for F1.1-F1.3;
+      sub-block (`ldx > n`) deferred to F1.4.
+  D2. SolveManyWorkspace: y[n*k], w[max_nrow*k], scaled_rhs[n*k|0].
+  D3. Kernel dispatch: nrhs=1 scalar path, 2≤nrhs≤8 column-batched
+      stride-1 axpy (compiler auto-vectorizes), nrhs>8 deferred.
+  D4. Symmetric solve identity: no batched-symmetric speedup
+      beyond per-supernode trsm/gemm (matches MUMPS+SSIDS).
+  D5. API: solve_sparse_many, solve_sparse_many_into, plus
+      Solver::solve_many and ::solve_many_refined.
+  D6. Refinement is per-column, not all-at-once (matches Ipopt
+      predictor-corrector pattern; columns can take different
+      iteration counts).
+
+Code-touch map identifies the F1.1 work as: extract
+solve_sparse_core_many_into from solve_sparse_core_into with
+inner loop widened to k columns; preserve the nrhs=1 fast path;
+add SolveManyWorkspace and the four new entry points.
+
+Test plan (5 cases) and bench plan (`FERAL_BENCH_NRHS=k` env
+knob) wired into the note. Acceptance gate: per-column cost at
+k=4 ≤ 75% of k=1 cost on small-frontal panel (real batching
+amortization).
+
+Three open questions resolved in the note (Vec<f64> return for
+solve_many, env-var dispatch, per-column refinement).
+
+References cited: MUMPS 5.8.2 manual §3.10/3.11, SSIDS user guide
+§6.1/6.6, Ipopt's IpMumpsSolverInterface.cpp::MultiSolve, Mehrotra
+1992, Higham 2002 §13.
