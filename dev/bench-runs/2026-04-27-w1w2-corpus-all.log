@@ -1,0 +1,50 @@
+Starting corpus run: 2026-04-27T13:38:59Z
+Build: W-1 + W-2 + Fix A opt-in (default disabled)
+Roots: all (kkt + kkt-expansion + kkt-mittelmann)
+Commit: ea9f0b91399ea6a9fa573c48edb19729a34a53f1
+----
+FERAL benchmark harness
+  ordering: default (symbolic_factorize heuristic)
+  scaling: default (SupernodeParams::default)
+Loading matrices from data/benchmark-config.toml ... not found
+
+name                n   factor(μs)    solve(μs)        inertia
+--------------------------------------------------------------
+spd_10             10           40           10     (10, 0, 0)
+spd_50             50           20            2     (50, 0, 0)
+spd_100           100           79            5    (100, 0, 0)
+spd_200           200          390           16    (200, 0, 0)
+kkt_10_3           13            2            0     (10, 3, 0)
+kkt_30_10          40           21            1    (30, 10, 0)
+kkt_50_15          65           47            2    (50, 15, 0)
+kkt_100_30        130          201            7   (100, 30, 0)
+
+8 matrices benchmarked
+
+Loading KKT matrices from data/matrices/kkt ... 156927 matrices loaded
+
+  SKIP FMINSURF_0000 (no .json sidecar)
+  SKIP ODNAMUR_0000 (no .json sidecar)
+  SKIP ROCKET_0067 (no .json sidecar)
+  SKIP ROSEPETAL_0000 (no .json sidecar)
+  SKIP VAREIGVL_0000 (no .json sidecar)
+Loading KKT matrices from data/matrices/kkt-expansion ... 12649 matrices loaded
+
+Loading KKT matrices from data/matrices/kkt-mittelmann ... 600 matrices loaded
+
+170176 KKT matrices total
+  SKIP DIXMAANJ_0001 (mtx parse error: I/O error: data/matrices/kkt-expansion/DIXMAANJ/DIXMAANJ_0001.mtx: line 3904978: invalid value '8.85215930281821155e-')
+  SKIP DIXMAANL_0001 (mtx parse error: I/O error: data/matrices/kkt-expansion/DIXMAANL/DIXMAANL_0001.mtx: line 3928748: invalid value '4.81628433180690541e-')
+  SKIP FLETCBV3_0001 (mtx parse error: I/O error: data/matrices/kkt-expansion/FLETCBV3/FLETCBV3_0001.mtx: line 3474057: expected 'i j value', got '1431')
+  SKIP arki0003_0005 (mtx parse error: I/O error: data/matrices/kkt-mittelmann/arki0003/arki0003_0005.mtx: line 735245: expected 'i j value', got '931')
+  SKIP cont5_1_l_0003 (mtx parse error: I/O error: data/matrices/kkt-mittelmann/cont5_1_l/cont5_1_l_0003.mtx: line 302696: expected 'i j value', got '133930')
+
+KKT summary: 170176 matrices (157494 dense-eligible n <= 1000, 10120 skipped n > 1000, 2562 parse-skipped)
+  Inertia match: 157439/157494 (100.0%)
+  Residual pass: 157220/157494 (99.8%)
+  Parse-skipped: 2562
+  Worst residual: 1.87e-4 (ERRINBAR_0824)
+
+--- Sparse solver validation ---
+----
+Finished: 2026-04-27T13:52:34Z

@@ -82,3 +82,70 @@ Evidence (commit 6505d89):
   ./target/release/bench=: 0.18s end-to-end (was >60s post-load).
 - =cargo test --release= and =cargo test --release --tests=: all
   suites green (162 lib + integration; 17 ignored as expected).
+
+* 12:00 :bench:corpus:autopilot:
+Kicked off the full-corpus W-1+W-2 bench in the background as
+=dev/bench-runs/2026-04-27-w1w2-corpus-all.log= (PID under
+=FERAL_KKT_ROOTS=all=, commit =ea9f0b9=). Goal: quantify W-1+W-2
+geomean impact across ~167k matrices and check whether
+COSHFUN/CATENA/ORBIT2 (all in kkt-expansion) show patterns that
+would justify the 3-5 session AMF clean-room investment. The
+default "kkt" root would have missed all four clusters, so this
+run uses =all=.
+
+AMF clean-room is on hold until the corpus run lands. Decision
+gate: if AMF would close gaps on more than just ORBIT2, we go
+ahead; otherwise we accept the ORBIT2 47x gap and prioritise
+elsewhere.
+
+* 12:55 :bench:corpus:result:
+Full-corpus W-1+W-2 run completed in ~14 min wallclock
+(=dev/bench-runs/2026-04-27-w1w2-corpus-all.log=, 50 lines).
+
+Headline:
+- 170,176 matrices total (157,494 dense-eligible, 10,120 size-skip,
+  2,562 parse-skip on malformed sidecars).
+- Dense-path inertia: 157,439/157,494 (100.0%).
+- Dense-path residual: 157,220/157,494 (99.8%).
+- Worst residual: 1.87e-4 on ERRINBAR_0824.
+
+Anomaly: =--- Sparse solver validation ---= section is empty in the
+log; the dense run succeeded but the sparse loop produced no
+per-matrix output. Either gated behind an env var I missed or
+something terminated quietly mid-section. Not blocking AMF — the
+bench-run signal we needed (does AMD-vs-AMF gap show up in clusters
+beyond ORBIT2?) requires sparse-path nnz_L numbers, so this run is
+*not* the validation we wanted. Filed for later; the AMF case stands
+on the principled MUMPS-default argument anyway.
+
+* 13:00 :amf:research:pivot:
+User pushed back on running the corpus before committing to AMF:
+"if mumps does it, it matters, and it is not just one matrix, that
+is just what is in the corpus, we have evidence that large matrices
+are problematic." Accepted.
+
+Started =dev/research/amf-clean-room.md= with mumps-expert in
+parallel reading =ana_orderings.F:3722-5207= (the HAMF4 routine).
+Key findings landed in the note:
+
+- HAMF4 is a 400-600 LoC delta on top of AMD, NOT a 1500-LoC
+  clean-room. Same quotient-graph machinery, same hash detection,
+  same Scan-1/Scan-2 skeleton; six inner-loop sites change.
+- New data: one =WF= array of length N, doubling as fill score (for
+  variables) and cached element fill area (for elements).
+- New buckets: =NBBUCK = 2*N=, =PAS = max(N/8, 1)=, coarse
+  quantization above =NORIG= because RMF can be O(N^3).
+- AMF metric (Amestoy 1999 thesis):
+    RMF = DEG*(DEG-1+2*DEGME) - WF(i)
+    WF(i) = sum_e dext(e)*(2*deg(e)-dext(e)-1) + 2*NVI*sum_j nv(j)
+- Recommended architecture: extract =feral-ordering-core= with a
+  =Metric= trait; =feral-amd= and =feral-amf= become thin
+  specializations sharing one quotient-graph code path.
+- Test oracle: nnz_L from symbolic factorization, target
+  feral-amf nnz_L within 10% of MUMPS HAMF4 (109,782 on ORBIT2).
+  Byte-deterministic perm match infeasible because tie-breaking
+  depends on linked-list insertion order.
+- Estimated scope: 3-5 sessions (module factoring + AMF impl +
+  oracle plumbing + corpus validation).
+
+Plan note next: =dev/plans/amf-clean-room.md=.
