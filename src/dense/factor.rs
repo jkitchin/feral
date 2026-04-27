@@ -2113,7 +2113,7 @@ fn do_2x2_pivot(
 
     // Count inertia from the 2×2 block
     let det = a00 * a11 - a10 * a10;
-    count_2x2_inertia(det, a00, params, pos, neg, zero, needs_refinement)?;
+    count_2x2_inertia(det, a00, a11, params, pos, neg, zero, needs_refinement)?;
 
     if (k + 2) >= n {
         // No trailing submatrix to update
@@ -2212,32 +2212,38 @@ fn count_1x1_inertia(
 }
 
 /// Count inertia for a 2×2 pivot block.
-/// Uses determinant and sign of a00 to classify eigenvalue signs.
+/// Uses determinant and trace of the block to classify eigenvalue signs
+/// per Sylvester's law (matches `count_2x2_inertia_val` and the rmumps /
+/// canonical-MUMPS conventions).
+#[allow(clippy::too_many_arguments)]
 fn count_2x2_inertia(
     det: f64,
     a00: f64,
+    a11: f64,
     params: &BunchKaufmanParams,
     pos: &mut usize,
     neg: &mut usize,
     zero: &mut usize,
     needs_refinement: &mut bool,
 ) -> Result<(), FeralError> {
-    // KNOWN BUG: this should use trace = a00 + a11 to decide the sign
-    // of the non-zero eigenvalue, not a00 alone. KKT matrices produce
-    // 2×2 blocks where a00 = 0 (variable rows have zero Hessian
-    // diagonal) but a11 carries the sign. The trace-based fix was
-    // attempted in the 2026-04-12 ACOPP30 triage but caused a 16-matrix
-    // dense regression against rmumps's calibration. Re-attempt after
-    // canonical Fortran MUMPS becomes available as a second oracle
-    // (see dev/plans/phase-1b-consensus-exit.md). Documented in
-    // dev/journal/2026-04-12-01.org.
+    // 2026-04-27 (Fix B in dev/research/2x2-bk-inertia-accounting.md):
+    // switched the same-sign branch from `a00 > 0` to `trace > 0`. KKT
+    // matrices produce 2×2 blocks where `a00 == 0` (variable rows have
+    // zero Hessian diagonal) but `a11` carries the sign — the old rule
+    // mis-attributed those. The trace-based rule matches canonical
+    // Fortran MUMPS on ACOPP30_0000 (see dev/journal/2026-04-12-01.org
+    // §15:45 "MAJOR FINDING"). The 2026-04-12 attempt was abandoned
+    // because it regressed 16 dense matrices vs rmumps; the regression
+    // was against an outdated rmumps oracle, not against canonical
+    // MUMPS.
+    let trace = a00 + a11;
     if det.abs() <= params.zero_tol_2x2 {
-        // Near-singular 2×2 block
+        // Near-singular 2×2 block: one eigenvalue near zero, the other
+        // has sign of trace.
         match params.on_zero_pivot {
             ZeroPivotAction::ForceAccept => {
                 *needs_refinement = true;
-                // One eigenvalue near zero; the other has sign of trace
-                if a00 > 0.0 {
+                if trace > 0.0 {
                     *pos += 1;
                     *zero += 1;
                 } else {
@@ -2249,15 +2255,15 @@ fn count_2x2_inertia(
             ZeroPivotAction::Fail => Err(FeralError::NumericallyRankDeficient),
         }
     } else if det > 0.0 {
-        // Same-sign eigenvalues
-        if a00 > 0.0 {
+        // Same-sign eigenvalues: sign comes from trace.
+        if trace > 0.0 {
             *pos += 2;
         } else {
             *neg += 2;
         }
         Ok(())
     } else {
-        // Opposite-sign eigenvalues
+        // Opposite-sign eigenvalues.
         *pos += 1;
         *neg += 1;
         Ok(())
