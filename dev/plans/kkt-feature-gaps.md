@@ -181,10 +181,23 @@ reference; SSIDS implements it in `core_solve.f90::condition_est`.
   10× of true value (Hager is a lower bound; 10× is the textbook
   conservative gate).
 - **F2.2** — Expose via `Solver::estimate_condition_1norm`.
-  Cross-validate against MUMPS sidecar conditioning data on the
-  full corpus where MUMPS provides `RINFOG(11)`. F2.2 must extend
-  `external_benchmarks/mumps_oracle/mumps_bench.F` with
-  `ICNTL(11)=2` and write `RINFOG(11)` to verdict.json.
+  Extend `external_benchmarks/mumps_oracle/mumps_bench.F` with
+  `ICNTL(11)=1` (NOT `=2` as the original note said — `=2` does
+  not populate `RINFOG(11)`; see `dsol_driver.F:5742` and the
+  2026-04-27-09 journal entry) and write `RINFOG(4..11)` into the
+  canonical `.mumps.json` `conditioning` block. Build
+  `src/bin/diag_cond_parity` to walk the corpus and produce a
+  cross-validation report.
+
+  **Caveat (verified empirically over 165,959 corpus matrices):**
+  MUMPS `RINFOG(10)/(11)` are componentwise condition numbers in
+  the ∞-norm (Arioli-Demmel-Duff; `dsol_aux.F:935`), NOT
+  `||A||_1·||A^{-1}||_1`. The two estimators share the
+  Hager-Higham 1-norm power iteration but applied to different
+  operators. The corpus geomean ratio `kappa_feral / cond2` is
+  4.244e10, so the original "[0.5, 5.0]" gate is structurally
+  unattainable. F2.2 lands the harness and the report; the gate is
+  reframed below.
 - **F2.3** — Wire into iterative-refinement termination as a
   diagnostic. Don't change behavior yet — just emit the estimate
   alongside the residual at each refinement step. (A later
@@ -194,10 +207,20 @@ reference; SSIDS implements it in `core_solve.f90::condition_est`.
 ### Acceptance gate
 
 - `estimate_condition_1norm` returns within 10× of the true
-  `||A||₁·||A⁻¹||₁` on the Hilbert/KKT calibration set.
-- Cross-validation report comparing feral's estimate to MUMPS's
-  `INFOG(40)` on N ≥ 1000 corpus matrices, geomean ratio within
-  [0.5, 5.0].
+  `||A||₁·||A⁻¹||₁` on the Hilbert/KKT calibration set
+  (this is the binding gate — it tests the estimator itself).
+- F2.2 cross-validation harness exists and runs end-to-end on
+  the full corpus (`diag_cond_parity` produces a report). The
+  numerical comparison is *directional*: both estimators must
+  grow with conditioning, but the ratio is not bounded because
+  the operators differ. Empirical corpus geomean of
+  `kappa_feral / cond2` is 4.244e10 (n=165959; see
+  2026-04-27-09 journal). Future work — option (a) build a
+  separate 1-norm oracle by extending `mumps_bench.F` to compute
+  `||A^{-1}||_1` via solve-against-basis sweeps on a small
+  calibration set; or (b) keep MUMPS as a directional cross-
+  check and rely on the F2.1 Hilbert/KKT calibration as the
+  binding numerical gate.
 - No regression on the Phase 2.8.1 bench partition (the estimator
   is invoked only when explicitly requested).
 

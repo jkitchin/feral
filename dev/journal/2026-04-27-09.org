@@ -815,3 +815,64 @@ Outstanding for full F2.2 acceptance:
    gap. Update the plan acceptance gate or build a separate
    cross-validation oracle (e.g. compute MUMPS ‖A⁻¹‖_∞ via
    solve(A, e_i) and compare ratio).
+
+* 18:30 :f2.2:mumps:condition-estimate:corpus:results:
+F2.2 corpus cross-validation complete.
+
+Regenerated MUMPS sidecars over the full corpus with ICNTL(11)=1:
+- kkt           : 155899 / 156927 ok (99.3%)
+- kkt-expansion :  12174 /  12620 ok (96.5%)
+- kkt-mittelmann:    451 /    461 ok (97.8%)
+Total: 168,524 fresh sidecars. Failures (1,484 INFOG(1)=-9) are
+MUMPS workspace-too-small at default ICNTL(14); not a feral issue.
+
+diag_cond_parity over the corpus (n ≤ 50000):
+  seen:     183461
+  compared: 165959
+
+  kappa_feral / cond2 (RINFOG(11)):
+    geomean: 4.244e10
+    p10:     2.415e2
+    median:  4.590e9
+    p90:     1.090e18
+    max:     4.994e302  (LINSPANH_0047, near-singular)
+    min:     8.279e-1
+
+  kappa_feral / max(cond1, cond2):
+    geomean: 6.884e7
+    median:  1.981e5
+    p10:     4.414e0
+    p90:     5.143e15
+
+The plan's F2.2 acceptance gate ("geomean ratio within [0.5, 5.0]")
+is NOT achievable against MUMPS RINFOG(11). The semantic gap I
+flagged in the previous entry — RINFOG(10)/(11) are componentwise
+∞-norm condition numbers (Arioli-Demmel-Duff) versus feral's
+1-norm κ₁ — produces a ~10-order-of-magnitude geomean offset. The
+harness *works*; the spec's gate was miscalibrated for this
+oracle.
+
+Concrete next steps for the plan author:
+1. Drop RINFOG(11) as the cross-validation oracle. It is not the
+   right reference for κ₁(A).
+2. Build a 1-norm oracle by extending mumps_bench.F to compute
+   ‖A^{-1}‖_1 directly via solve(A, e_i) sweeps over the standard
+   basis vectors. This is O(n) solves but only needed for a
+   smaller calibration set (e.g. n ≤ 200 Hilbert / KKT panels with
+   known κ).
+3. Or: keep MUMPS as a directional cross-check only ("both
+   estimators grow as A becomes ill-conditioned"). The p10 ratio
+   of 4.4 against max(cond1,cond2) shows reasonable lower-envelope
+   tracking on at least 10% of the corpus; the geomean is dominated
+   by KKT ill-conditioning that MUMPS's componentwise estimator
+   collapses to ~1.0 because residuals are tight.
+4. The Hilbert / KKT-panel calibration (F2.1 acceptance, "within
+   10× of true value") is still the right gate for the estimator
+   itself; F2.2's role should be "harness exists, sidecar emits
+   conditioning fields, diag runs end-to-end" — all of which is
+   now true.
+
+Recommendation: amend dev/plans/kkt-feature-gaps.md F2.2 acceptance
+to drop the [0.5, 5.0] gate against RINFOG(11) and replace with
+"diag_cond_parity runs to completion on the full corpus and
+produces a report; F2.1's Hilbert calibration is the binding gate."
