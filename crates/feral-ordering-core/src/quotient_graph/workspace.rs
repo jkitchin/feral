@@ -1,4 +1,5 @@
-//! AMD quotient-graph workspace and initialization.
+//! Quotient-graph workspace and initialization, shared by AMD-family
+//! bottom-up orderings.
 //!
 //! All arrays follow the faer / SuiteSparse naming convention and use
 //! signed `i32` so we can reserve negative values for sentinels via
@@ -6,31 +7,33 @@
 //! indexed (per the ordering-crate contract), so workspace ingestion
 //! converts to `usize` only for Rust slice addressing.
 //!
-//! This module lands in Commit 3 of the Slice A plan
-//! (`dev/plans/ordering-amd-upgrade.md`). It builds the workspace
-//! arrays from a full-symmetric CSC pattern, runs the two
-//! initialization fast paths (zero-degree pre-elimination and
-//! dense-deferred bucket), and seats the remaining variables into
-//! degree-indexed linked lists ready for the elimination loop.
+//! Builds the workspace arrays from a full-symmetric CSC pattern,
+//! runs the two initialization fast paths (zero-degree
+//! pre-elimination and dense-deferred bucket), and seats the
+//! remaining variables into degree-indexed linked lists ready for
+//! the elimination loop.
 //!
-//! Reference: `ref/faer-rs/faer/src/sparse/linalg/amd.rs:186-219`.
+//! Migrated from `feral-amd` in 2026-04-27 to host the shared
+//! machinery for the planned `feral-amf` crate; the AMD-vs-AMF
+//! delta lives entirely in the elimination metric (see
+//! `dev/research/amf-clean-room.md`).
 //
 // Items are consumed by the elimination loop in subsequent commits
 // (Commit 4 onwards). Until then several fields and helpers are
 // intentionally unused.
 #![allow(dead_code)]
 
-use crate::AmdOptions;
-use feral_ordering_core::{CscPattern, OrderingError};
+use super::WorkspaceOptions;
+use crate::{CscPattern, OrderingError};
 
 /// Sentinel for "no index" in the `i32` arrays.
-pub(crate) const NONE: i32 = -1;
+pub const NONE: i32 = -1;
 
 /// Sentinel encoding used by the quotient graph: `flip(x) = -2 - x`.
 /// Used to mark absorbed elements (`pe[e] < 0` ⇒ `flip(parent)`) and
 /// as a tag on `elen` for freshly eliminated zero-degree variables.
 #[inline(always)]
-pub(crate) fn flip(x: i32) -> i32 {
+pub fn flip(x: i32) -> i32 {
     -2 - x
 }
 
@@ -43,7 +46,7 @@ pub(crate) fn flip(x: i32) -> i32 {
 ///
 /// Reference: `amd.rs:130-143`.
 #[inline]
-pub(crate) fn clear_flag(wflg: i32, wbig: i32, w: &mut [i32]) -> i32 {
+pub fn clear_flag(wflg: i32, wbig: i32, w: &mut [i32]) -> i32 {
     if wflg < 2 || wflg >= wbig {
         for x in w.iter_mut() {
             if *x != 0 {
@@ -61,45 +64,45 @@ pub(crate) fn clear_flag(wflg: i32, wbig: i32, w: &mut [i32]) -> i32 {
 /// is held here so the elimination loop can borrow them concurrently
 /// through split borrows without reallocation.
 #[derive(Debug)]
-pub(crate) struct AmdWorkspace {
-    pub(crate) n: usize,
-    pub(crate) iwlen: usize,
-    pub(crate) pfree: usize,
-    pub(crate) iw: Vec<i32>,
+pub struct Workspace {
+    pub n: usize,
+    pub iwlen: usize,
+    pub pfree: usize,
+    pub iw: Vec<i32>,
 
-    pub(crate) pe: Vec<i32>,
-    pub(crate) len: Vec<i32>,
-    pub(crate) nv: Vec<i32>,
-    pub(crate) elen: Vec<i32>,
-    pub(crate) degree: Vec<i32>,
-    pub(crate) w: Vec<i32>,
-    pub(crate) head: Vec<i32>,
-    pub(crate) next: Vec<i32>,
-    pub(crate) last: Vec<i32>,
+    pub pe: Vec<i32>,
+    pub len: Vec<i32>,
+    pub nv: Vec<i32>,
+    pub elen: Vec<i32>,
+    pub degree: Vec<i32>,
+    pub w: Vec<i32>,
+    pub head: Vec<i32>,
+    pub next: Vec<i32>,
+    pub last: Vec<i32>,
 
     /// Generation counter for the mark array `w`.
-    pub(crate) wflg: i32,
+    pub wflg: i32,
     /// Overflow ceiling for `wflg`: `i32::MAX - n`.
-    pub(crate) wbig: i32,
+    pub wbig: i32,
     /// Largest element size encountered so far — used by supervariable
     /// detection (Slice B) to bump `wflg` safely.
-    pub(crate) lemax: i32,
+    pub lemax: i32,
     /// Lower bound on the next pivot's degree. Monotone non-decreasing.
-    pub(crate) mindeg: usize,
+    pub mindeg: usize,
     /// Number of garbage-collection compactions so far.
-    pub(crate) ncmpa: u32,
+    pub ncmpa: u32,
     /// Supervariables eliminated so far (pivoted OR dense-deferred).
-    pub(crate) nel: usize,
+    pub nel: usize,
     /// Dense-deferred supervariable count.
-    pub(crate) ndense: i32,
+    pub ndense: i32,
     /// Variables folded into a concurrent pivot by mass elimination.
-    pub(crate) n_mass_elim: u32,
+    pub n_mass_elim: u32,
     /// Supervariable merges detected during indistinguishable-variable
     /// consolidation.
-    pub(crate) n_supervar_merge: u32,
+    pub n_supervar_merge: u32,
 }
 
-impl AmdWorkspace {
+impl Workspace {
     /// Build a workspace from a full-symmetric CSC pattern and run
     /// initialization. On return, all variables have been classified
     /// into one of three buckets:
@@ -113,10 +116,10 @@ impl AmdWorkspace {
     ///
     /// `pattern` must be the full-symmetric graph (both halves). The
     /// diagonal is ignored if present.
-    pub(crate) fn new(
+    pub fn new(
         pattern: &CscPattern<'_>,
-        opts: &AmdOptions,
-    ) -> Result<AmdWorkspace, OrderingError> {
+        opts: &WorkspaceOptions,
+    ) -> Result<Workspace, OrderingError> {
         let n = pattern.n;
 
         // i32 addressing requires n < i32::MAX. The algorithm also
@@ -224,7 +227,7 @@ impl AmdWorkspace {
             }
         }
 
-        Ok(AmdWorkspace {
+        Ok(Workspace {
             n,
             iwlen,
             pfree,
@@ -291,7 +294,7 @@ mod tests {
         let cp = [0, 1, 2, 3, 4];
         let ri = [0, 1, 2, 3];
         let p = pat(4, &cp, &ri);
-        let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
 
         assert_eq!(ws.n, 4);
         assert_eq!(ws.nel, 4, "all four pre-eliminated");
@@ -317,7 +320,7 @@ mod tests {
         let cp = [0, 2, 5, 8, 11, 13];
         let ri = [0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4];
         let p = pat(5, &cp, &ri);
-        let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
 
         assert_eq!(ws.n, 5);
         assert_eq!(ws.nel, 0, "no fast-path eliminations");
@@ -356,7 +359,7 @@ mod tests {
         let cp = [0, 5, 7, 9, 11, 13];
         let ri = [0, 1, 2, 3, 4, 0, 1, 0, 2, 0, 3, 0, 4];
         let p = pat(5, &cp, &ri);
-        let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
 
         assert_eq!(ws.degree, vec![4, 1, 1, 1, 1]);
         assert_eq!(ws.nel, 0);
@@ -387,7 +390,7 @@ mod tests {
             cp.push(ri.len() as i32);
         }
         let p = pat(n, &cp, &ri);
-        let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
 
         assert_eq!(ws.degree[0], (n - 1) as i32);
         assert_eq!(ws.nel, 1, "hub only");
@@ -419,11 +422,8 @@ mod tests {
             cp.push(ri.len() as i32);
         }
         let p = pat(n, &cp, &ri);
-        let opts = AmdOptions {
-            aggressive: true,
-            dense_alpha: -1.0,
-        };
-        let ws = AmdWorkspace::new(&p, &opts).unwrap();
+        let opts = WorkspaceOptions { dense_alpha: -1.0 };
+        let ws = Workspace::new(&p, &opts).unwrap();
         assert_eq!(ws.ndense, 0, "nothing deferred below n - 2");
         assert_eq!(ws.nel, 0);
     }
@@ -433,7 +433,7 @@ mod tests {
         let cp = [0i32];
         let ri: [i32; 0] = [];
         let p = pat(0, &cp, &ri);
-        let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
         assert_eq!(ws.n, 0);
         assert_eq!(ws.nel, 0);
         assert_eq!(ws.iwlen, 0);
@@ -448,7 +448,7 @@ mod tests {
         let cp = [0, 1, 2, 3];
         let ri = [0, 1, 2];
         let p = pat(3, &cp, &ri);
-        let ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
         assert_eq!(ws.len, vec![0, 0, 0]);
         assert_eq!(ws.pfree, 0);
         assert_eq!(ws.nel, 3);

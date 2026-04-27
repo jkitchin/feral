@@ -18,13 +18,14 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-mod algo;
 mod stats;
-mod workspace;
 
 pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT_VERSION};
 pub use stats::AmdStats;
 
+use feral_ordering_core::quotient_graph::{
+    finalize_permutation, run_elimination, Workspace, WorkspaceOptions,
+};
 use std::time::Instant;
 
 /// Tunable parameters for AMD ordering.
@@ -105,13 +106,16 @@ pub fn amd_order_full(
     opts: &AmdOptions,
 ) -> Result<(Vec<i32>, OrderingStats, AmdStats), OrderingError> {
     let t0 = Instant::now();
-    let mut ws = workspace::AmdWorkspace::new(pattern, opts)?;
+    let ws_opts = WorkspaceOptions {
+        dense_alpha: opts.dense_alpha,
+    };
+    let mut ws = Workspace::new(pattern, &ws_opts)?;
     let ndense = ws.ndense;
-    let flops = algo::run_elimination(&mut ws, opts.aggressive)?;
+    let flops = run_elimination(&mut ws, opts.aggressive)?;
     let ncmpa = ws.ncmpa;
     let n_mass_elim = ws.n_mass_elim;
     let n_supervar_merge = ws.n_supervar_merge;
-    let perm = algo::finalize_permutation(&mut ws);
+    let perm = finalize_permutation(&mut ws);
     let amd_stats = AmdStats {
         ncmpa,
         n_clear_flag: 0,
@@ -172,15 +176,18 @@ pub fn amd_order_substages(
     opts: &AmdOptions,
 ) -> Result<(Vec<i32>, AmdSubstages), OrderingError> {
     let t = Instant::now();
-    let mut ws = workspace::AmdWorkspace::new(pattern, opts)?;
+    let ws_opts = WorkspaceOptions {
+        dense_alpha: opts.dense_alpha,
+    };
+    let mut ws = Workspace::new(pattern, &ws_opts)?;
     let workspace_new_us = t.elapsed().as_micros() as u64;
 
     let t = Instant::now();
-    let _flops = algo::run_elimination(&mut ws, opts.aggressive)?;
+    let _flops = run_elimination(&mut ws, opts.aggressive)?;
     let run_elimination_us = t.elapsed().as_micros() as u64;
 
     let t = Instant::now();
-    let perm = algo::finalize_permutation(&mut ws);
+    let perm = finalize_permutation(&mut ws);
     let finalize_permutation_us = t.elapsed().as_micros() as u64;
 
     Ok((

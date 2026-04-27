@@ -33,6 +33,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod quotient_graph;
+
 use core::fmt;
 
 /// Version of the shared ordering-crate contract.

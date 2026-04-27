@@ -24,17 +24,17 @@
 
 #![allow(dead_code)]
 
-use crate::workspace::{clear_flag, flip, AmdWorkspace, NONE};
-use feral_ordering_core::OrderingError;
+use super::workspace::{clear_flag, flip, Workspace, NONE};
+use crate::OrderingError;
 
 /// Flop-counter deltas produced by a single elimination step.
 /// Matches faer's `amd.rs:547-557` accounting so `AmdStats` can
 /// accumulate consistent `ndiv` / `nms_ldl` / `nms_lu` totals.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct StepFlops {
-    pub(crate) ndiv: f64,
-    pub(crate) nms_lu: f64,
-    pub(crate) nms_ldl: f64,
+pub struct StepFlops {
+    pub ndiv: f64,
+    pub nms_lu: f64,
+    pub nms_ldl: f64,
 }
 
 impl StepFlops {
@@ -56,7 +56,7 @@ impl StepFlops {
 /// is cleared if a successor exists.
 ///
 /// Reference: faer `amd.rs:220-235`.
-pub(crate) fn select_pivot(ws: &mut AmdWorkspace) -> Option<usize> {
+pub fn select_pivot(ws: &mut Workspace) -> Option<usize> {
     let n = ws.n;
     let mut deg = ws.mindeg;
     let mut me_signed: i32 = NONE;
@@ -112,8 +112,8 @@ pub(crate) fn select_pivot(ws: &mut AmdWorkspace) -> Option<usize> {
 /// - `ws.nel` incremented by `nvpiv`.
 ///
 /// Reference: faer `amd.rs:236-366` (incl. inline GC at 289-338).
-pub(crate) fn create_element(
-    ws: &mut AmdWorkspace,
+pub fn create_element(
+    ws: &mut Workspace,
     me: usize,
 ) -> Result<(usize, usize, i32, usize), OrderingError> {
     let elenme = ws.elen[me];
@@ -329,8 +329,8 @@ pub(crate) fn create_element(
 ///    nvpiv`, compact `me`'s var list to `[pme1, p)`, trim `pfree`.
 /// 9. **Flop counters** (`amd.rs:547-557`).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn finalize_step(
-    ws: &mut AmdWorkspace,
+pub fn finalize_step(
+    ws: &mut Workspace,
     me: usize,
     pme1: usize,
     pme2_excl: usize,
@@ -631,10 +631,7 @@ pub(crate) fn finalize_step(
 /// At exit: `ws.nel == ws.n`, every `pe[i]` either points to a
 /// live parent (to be path-compressed by the postorder phase) or
 /// is `NONE` / `flip(parent)`.
-pub(crate) fn run_elimination(
-    ws: &mut AmdWorkspace,
-    aggressive: bool,
-) -> Result<StepFlops, OrderingError> {
+pub fn run_elimination(ws: &mut Workspace, aggressive: bool) -> Result<StepFlops, OrderingError> {
     let mut flops = StepFlops::default();
     while ws.nel < ws.n {
         let me = match select_pivot(ws) {
@@ -684,7 +681,7 @@ pub(crate) fn run_elimination(
 ///
 /// Returns a permutation `perm` of length `n` where `perm[k]` is the
 /// column of the original matrix to be eliminated at step `k`.
-pub(crate) fn finalize_permutation(ws: &mut AmdWorkspace) -> Vec<i32> {
+pub fn finalize_permutation(ws: &mut Workspace) -> Vec<i32> {
     let n = ws.n;
     if n == 0 {
         return Vec::new();
@@ -774,7 +771,7 @@ pub(crate) fn finalize_permutation(ws: &mut AmdWorkspace) -> Vec<i32> {
 /// (`> 0` selects pivots), apply the big-child-last heuristic, and
 /// run an iterative DFS postorder. Result indexes go into `ws.w`
 /// (NONE for non-pivot nodes).
-fn assembly_tree_postorder(ws: &mut AmdWorkspace) {
+fn assembly_tree_postorder(ws: &mut Workspace) {
     let n = ws.n;
     // Repurpose head/next/last as child/sibling/stack scratch.
     for x in ws.head.iter_mut() {
@@ -845,7 +842,7 @@ fn assembly_tree_postorder(ws: &mut AmdWorkspace) {
 /// Iterative DFS of one assembly-tree root. Stack lives in `last`,
 /// child list in `head`, sibling links in `next`. Writes postorder
 /// indices into `w`. Returns the next postorder index to assign.
-fn post_tree_dfs(ws: &mut AmdWorkspace, root: usize, k_start: usize) -> usize {
+fn post_tree_dfs(ws: &mut Workspace, root: usize, k_start: usize) -> usize {
     let mut k = k_start;
     let mut top: usize = 1;
     ws.last[0] = root as i32;
@@ -888,12 +885,12 @@ fn post_tree_dfs(ws: &mut AmdWorkspace, root: usize, k_start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AmdOptions;
-    use feral_ordering_core::CscPattern;
+    use crate::quotient_graph::WorkspaceOptions;
+    use crate::CscPattern;
 
-    fn ws_for<'a>(n: usize, cp: &'a [i32], ri: &'a [i32]) -> AmdWorkspace {
+    fn ws_for<'a>(n: usize, cp: &'a [i32], ri: &'a [i32]) -> Workspace {
         let p = CscPattern::new(n, cp, ri).unwrap();
-        AmdWorkspace::new(&p, &AmdOptions::default()).unwrap()
+        Workspace::new(&p, &WorkspaceOptions::default()).unwrap()
     }
 
     #[test]
@@ -1039,7 +1036,7 @@ mod tests {
             cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
-        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
         run_elimination(&mut ws, true).unwrap();
         assert_eq!(ws.nel, n);
     }
@@ -1081,7 +1078,7 @@ mod tests {
             cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(total, &cp, &ri).unwrap();
-        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
         run_elimination(&mut ws, true).unwrap();
         assert_eq!(ws.nel, total);
     }
@@ -1104,7 +1101,7 @@ mod tests {
             cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
-        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
         run_elimination(&mut ws, true).unwrap();
         assert_eq!(ws.nel, n);
         assert!(
@@ -1132,7 +1129,7 @@ mod tests {
             cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
-        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
         run_elimination(&mut ws, true).unwrap();
         assert_eq!(ws.ndense, 1);
         assert_eq!(ws.nel, n);
@@ -1158,7 +1155,7 @@ mod tests {
             cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
-        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
         // Hub (var 0) is dense-deferred; its nv was set to 0 during
         // init. So when a spoke's list references 0, it's skipped.
         let me = select_pivot(&mut ws).unwrap();
@@ -1234,7 +1231,7 @@ mod tests {
             cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
-        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
         run_elimination(&mut ws, true).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert_eq!(perm.len(), n);
@@ -1260,7 +1257,7 @@ mod tests {
             cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
-        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
         run_elimination(&mut ws, true).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert_eq!(perm.len(), n);
@@ -1305,7 +1302,7 @@ mod tests {
             cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(total, &cp, &ri).unwrap();
-        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
         run_elimination(&mut ws, true).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert_eq!(perm.len(), total);
@@ -1329,7 +1326,7 @@ mod tests {
             cp.push(ri.len() as i32);
         }
         let p = CscPattern::new(n, &cp, &ri).unwrap();
-        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
         run_elimination(&mut ws, true).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert_eq!(perm.len(), n);
@@ -1342,7 +1339,7 @@ mod tests {
         let cp = [0i32];
         let ri: [i32; 0] = [];
         let p = CscPattern::new(0, &cp, &ri).unwrap();
-        let mut ws = AmdWorkspace::new(&p, &AmdOptions::default()).unwrap();
+        let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
         run_elimination(&mut ws, true).unwrap();
         let perm = finalize_permutation(&mut ws);
         assert!(perm.is_empty());
