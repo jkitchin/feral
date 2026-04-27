@@ -584,3 +584,79 @@ inner-loop iteration, which allocates a fresh SolveWorkspace per
 solve. For a 5-solve estimator on small-frontal matrices this
 adds maybe a microsecond per call; not worth the API surface
 expansion until profiling shows it matters.
+
+* 23:00 :schur:F3.0:mumps:
+Authored dev/research/schur-complement.md — F3.0 design note.
+Spawned mumps-expert agent for an implementation-level review of
+MUMPS's Schur path (cited in the note with file:line refs into
+../ripopt/ref/mumps/src/).
+
+Six anchor MUMPS facts captured before deciding feral's API:
+
+  - Three output modes via ICNTL(19): centralized dense full-square,
+    distributed lower-tri, distributed full-square. Only mode 1
+    (centralized full-square symmetric) matters for a clean-room
+    shared-memory port.
+  - Validation: SIZE_SCHUR=0 silently disables, <0 or >=N is
+    INFO(1)=-49, missing LISTVAR_SCHUR is INFO(1)=-22. Schur is
+    incompatible with parallel analysis, max-transversal, analysis
+    -time scaling.
+  - Ordering constraint enforced INSIDE AMD/QAMD, not as a
+    post-processing step. HALO-SCHUR sets PERM(i)=N+1 for Schur
+    vars and amalgamates them into a single supervariable rooted
+    at LISTVAR_SCHUR(1).
+  - Numeric stopping rule: per-front, NVSCHUR = #{i in front :
+    PERM(i) >= N - SIZE_SCHUR + 1}. Elimination loop bounds NPIV
+    <= NASS - NVSCHUR. NO "is this the root?" branch in the inner
+    factor loop — purely a bound on the eliminable region.
+  - Output: SIZE_SCHUR x SIZE_SCHUR column-major Fortran, full
+    symmetric (both triangles) for the centralized symmetric mode.
+  - Schur block is NOT pivoted, scaled, or compressed. Delayed
+    pivots from descendants must be eliminated BEFORE the Schur,
+    not consumed into it (PARPIVT1_SET_NVSCHUR_MAX recomputes the
+    bound at the root).
+
+Seven decisions (D1-D7) recorded in the note. Key design choice
+diverging from MUMPS: D3 picks the "AMD on non-Schur subgraph,
+then append Schur tail" mechanism over MUMPS's HALO-SCHUR
+amalgamation. Rationale: feral does not own feral-amd's API
+surface; bolting a tail-pinned variable list onto its driver
+would require invasive changes. The alternative is composable
+across all four ordering methods (AMD, AMF, MetisND, ScotchND)
+and naturally produces the same single-root supernode after the
+elimination tree + supernode-detection passes amalgamate the
+Schur tail.
+
+Other decisions:
+  D1 single dense column-major full-square output (matches MUMPS
+     ICNTL(19)=1 only)
+  D2 schur_indices is the user's original-index list; output
+     row/col order matches the input list
+  D4 numeric hook computes nvschur per-front and bounds nelim;
+     for the postorder layout from D3, only the root supernode
+     has nvschur > 0, so non-root fronts run unchanged
+  D5 full-square output buffer (n_schur^2) not packed lower
+     (n_schur*(n_schur+1)/2): downstream consumers want any LAPACK
+     routine to work without packed adapters
+  D6 Bunch-Kaufman pivot loop at the root excludes Schur columns
+     from candidate selection — matches MUMPS exactly
+  D7 cross-validation oracle path: extend MUMPS oracle harness
+     with a schur driver writing the dense Schur to a sidecar;
+     feral compares entry-wise on N>=100 corpus matrices, max
+     relative error <= 1e-10
+
+Phase plan: F3.1 ordering hook (1-2 sessions), F3.2 numeric hook
+(2-3 sessions), F3.3 cross-validation (1 session), F3.4 optional
+solve_against_schur convenience. F3.4 deferred until a caller
+asks (sIPOPT-style sensitivity is the most likely trigger).
+
+Open questions resolved in the note: factor_with_schur uses the
+global default ordering method (composable per D3); empty
+schur_indices is treated as plain factor(); schur_indices.len()
+== n returns InvalidInput; iterative refinement is the user's
+problem (not feral's); inertia returned by factor_with_schur is
+the inertia of A_FF only — documented prominently.
+
+References cited: MUMPS file:line, Duff & Reid 1983 (multifrontal),
+Pirnay-López 2012 (sIPOPT use case), Gould-Scott-Hu 2007 (Schur
+API survey).
