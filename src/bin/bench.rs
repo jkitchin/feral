@@ -11,7 +11,7 @@ use feral::symbolic::{
 };
 use feral::{
     factor, factor_single_front, read_mtx, read_sidecar, solve, solve_refined,
-    solve_sparse_refined, BunchKaufmanParams, CscMatrix, Inertia, KktSidecar, SymmetricMatrix,
+    solve_sparse_refined, BunchKaufmanParams, Inertia, KktSidecar, SymmetricMatrix,
     ZeroPivotAction,
 };
 
@@ -810,23 +810,18 @@ fn bench_matrix(
     })
 }
 
-/// A loaded KKT matrix with its sidecar metadata.
+/// Metadata for a KKT matrix. Streaming-bench design (session 2026-04-26-04):
+/// the matrix data is **not** held in memory between loop iterations. Each
+/// dense / sparse loop body re-reads the .mtx on demand, materializes
+/// dense / CSC forms, runs the work, and drops them at end of iteration.
+/// This keeps peak memory bounded by the single largest matrix rather than
+/// growing with corpus size — required for the expanded corpus (167k
+/// matrices, 10k of which have n > 1000) on laptop-class hardware.
 struct KktEntry {
     name: String,
-    /// Path to the .mtx file. Used to write `.feral.json` sidecars next to it.
+    /// Path to the .mtx file. Re-read each iteration; also used to write
+    /// `.feral.json` sidecars next to it.
     mtx_path: std::path::PathBuf,
-    /// Dense form is materialized only when `n <= FERAL_DENSE_MAX` (default
-    /// 1000). The dense BK loop is the only consumer; large matrices (n in
-    /// the thousands) at full n×n cost would OOM the bench at load time on
-    /// the kkt corpus (n up to ~195k).
-    matrix: Option<SymmetricMatrix>,
-    /// `Option` so the sparse loop can `take()` it per iteration and
-    /// drop the CSC arrays as soon as that matrix is done. On the
-    /// full ~167k-matrix corpus the cumulative CSC working set
-    /// otherwise approaches the system's hard memory limit and
-    /// triggers the OS OOM-killer at sparse-loop entry. Populated
-    /// at load time; consumed during the sparse loop.
-    csc: Option<CscMatrix>,
     sidecar: KktSidecar,
     /// Canonical Fortran MUMPS 5.8.2 oracle timing from `*.mumps.json` if present.
     mumps_timing: Option<OracleTiming>,
@@ -969,14 +964,38 @@ fn dense_max_from_env() -> usize {
         .unwrap_or(1000)
 }
 
-/// Load all KKT matrices from `dir`, returning them sorted by name.
+/// `FERAL_SPARSE_MAX` — gate above which the sparse multifrontal loop skips
+/// a matrix. Default unlimited (`usize::MAX`) to preserve historical bench
+/// behavior on the kkt corpus (all matrices small enough to factor). On the
+/// expanded corpus (FERAL_KKT_ROOTS=all) some n>>1000 matrices have factor
+/// allocations that exceed a 64 GB ceiling on their own; setting
+/// `FERAL_SPARSE_MAX=50000` (or similar) skips them so the sparse pass
+/// completes end-to-end. Skipped matrices count toward sp_total but are
+/// reported separately as "size-skipped".
+fn sparse_max_from_env() -> usize {
+    std::env::var("FERAL_SPARSE_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX)
+}
+
+/// Load metadata only (sidecar + oracle timings) for all KKT matrices in `dir`.
 /// Returns an empty vec if the directory does not exist.
+///
+/// Streaming-bench design (session 2026-04-26-04): the .mtx is **not** parsed
+/// here. Each loop body re-reads it on demand and drops the matrix data at end
+/// of iteration. Validations that need .mtx data (entry NaN/Inf check, dim
+/// consistency, CSC convertibility) move into the loop bodies. Validations
+/// that only touch the sidecar (RHS finiteness) stay here so we filter out
+/// junk entries up front.
+///
+/// Skip diagnostics print as the meta walk runs, mirroring the old loader so
+/// users still see "SKIP foo (no .json sidecar)" lines.
 fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
     if !dir.is_dir() {
         return Vec::new();
     }
 
-    let dense_max = dense_max_from_env();
     let mut entries = Vec::new();
 
     // Walk subdirectories (one per problem)
@@ -1012,23 +1031,6 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
                 continue;
             }
 
-            let mtx = match read_mtx(&mtx_path) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("  SKIP {} (mtx parse error: {})", stem, e);
-                    continue;
-                }
-            };
-
-            // Phase 1a hard-coded a `mtx.n > 500` skip here. Phase 2
-            // lifts it: the sparse multifrontal path has no reason to
-            // skip larger matrices, and the Phase 1b validation that
-            // never ran on n > 500 is the #1 known scope gap
-            // (see dev/plans/phase-2-planning.md §2.1.1). Dense BK is
-            // still O(n^3) and painful above a few thousand, so the
-            // dense loop below has its own inline cutoff — but this
-            // load-time filter is gone.
-
             let sidecar = match read_sidecar(&json_path) {
                 Ok(s) => s,
                 Err(e) => {
@@ -1037,31 +1039,12 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
                 }
             };
 
-            // Skip matrices with NaN/Inf in RHS or matrix data (diverged IPM)
+            // Skip matrices with NaN/Inf in RHS (diverged IPM). NaN/Inf in
+            // matrix data is checked inside the loop bodies after the .mtx
+            // is parsed (we don't want to parse here on the big-corpus path).
             if sidecar.finite_rhs().is_none() {
                 continue;
             }
-            if mtx.entries.iter().any(|(_, _, v)| !v.is_finite()) {
-                continue;
-            }
-
-            // Validate dimension consistency
-            let expected_dim = sidecar.n + sidecar.m;
-            if mtx.n != expected_dim {
-                eprintln!(
-                    "  SKIP {} (mtx dim {} != sidecar n+m={}+{}={})",
-                    stem, mtx.n, sidecar.n, sidecar.m, expected_dim
-                );
-                continue;
-            }
-
-            let csc = match mtx.to_csc() {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("  SKIP {} (csc conversion: {})", stem, e);
-                    continue;
-                }
-            };
 
             // Oracle timing sidecars written by external_benchmarks/{mumps,ssids}_oracle.
             // Schema: see OracleTiming and read_oracle_timing above. Missing files are OK
@@ -1069,21 +1052,9 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
             let mumps_timing = read_oracle_timing(&mtx_path.with_extension("mumps.json"));
             let ssids_timing = read_oracle_timing(&mtx_path.with_extension("ssids.json"));
 
-            // Materialize the dense form only for matrices the dense BK
-            // loop will actually visit. Without this gate, n=195k matrices
-            // try to allocate ~300 GB at load time. csc.n is authoritative
-            // because to_csc() already validated the dimension.
-            let dense = if csc.n <= dense_max {
-                Some(mtx.to_dense())
-            } else {
-                None
-            };
-
             entries.push(KktEntry {
                 name: stem,
                 mtx_path: mtx_path.clone(),
-                matrix: dense,
-                csc: Some(csc),
                 sidecar,
                 mumps_timing,
                 ssids_timing,
@@ -1323,35 +1294,54 @@ fn main() {
     // Dense BK is O(n^3). Above ~1000 it starts to dominate bench runtime
     // (a single n=5314 problem is ~150 GFLOPs scalar-unblocked). The sparse
     // loop below has no such cutoff. FERAL_DENSE_MAX overrides the default.
-    // Must match the value used by load_kkt_dir so `entry.matrix` is Some
-    // exactly when the loop wants to factor.
     let dense_max: usize = dense_max_from_env();
     let mut n_dense_skipped_large = 0usize;
+    // Streaming bench: matrices are parsed inside each loop iteration and
+    // dropped at end of scope. Skip-at-parse counters track failures we
+    // would have caught at load time in the pre-streaming design.
+    let mut n_dense_parse_skipped = 0usize;
 
     for entry in &kkt_entries {
         n_total += 1;
-        let csc = entry.csc.as_ref().expect("csc populated at load time");
-        let n = csc.n;
-        let nnz = csc.values.len();
+        // Streaming load: parse the .mtx for this iteration only.
+        let mtx = match read_mtx(&entry.mtx_path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("  SKIP {} (mtx parse error: {})", entry.name, e);
+                n_dense_parse_skipped += 1;
+                continue;
+            }
+        };
+        let n = mtx.n;
+        let nnz = mtx.entries.len();
+
+        // Validate dimension consistency against sidecar.
+        let expected_dim = entry.sidecar.n + entry.sidecar.m;
+        if n != expected_dim {
+            eprintln!(
+                "  SKIP {} (mtx dim {} != sidecar n+m={}+{}={})",
+                entry.name, n, entry.sidecar.n, entry.sidecar.m, expected_dim
+            );
+            n_dense_parse_skipped += 1;
+            continue;
+        }
+        // NaN/Inf in matrix data (diverged IPM). RHS is already checked at
+        // load time; this is the per-matrix entry-value check that requires
+        // the .mtx contents.
+        if mtx.entries.iter().any(|(_, _, v)| !v.is_finite()) {
+            n_dense_parse_skipped += 1;
+            continue;
+        }
 
         if n > dense_max {
             n_dense_skipped_large += 1;
             continue;
         }
-        // load_kkt_dir guarantees Some when csc.n <= dense_max. The match
-        // is a defensive skip rather than a panic — keeps the loop robust
-        // to a future load-time/loop-time mismatch.
-        let matrix = match entry.matrix.as_ref() {
-            Some(m) => m,
-            None => {
-                n_dense_skipped_large += 1;
-                continue;
-            }
-        };
+        let matrix = mtx.to_dense();
 
         // Factor
         let t0 = Instant::now();
-        let (factors, inertia) = match factor_single_front(matrix, &params_kkt_sparse) {
+        let (factors, inertia) = match factor_single_front(&matrix, &params_kkt_sparse) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  {}: factor failed: {}", entry.name, e);
@@ -1378,7 +1368,7 @@ fn main() {
         // solve_refined for all KKT solves to recover machine precision on
         // matrices flagged with needs_refinement under ForceAccept.
         let t1 = Instant::now();
-        let x = match solve_refined(matrix, &factors, &rhs) {
+        let x = match solve_refined(&matrix, &factors, &rhs) {
             Ok(x) => x,
             Err(e) => {
                 eprintln!("  {}: solve failed: {}", entry.name, e);
@@ -1396,11 +1386,11 @@ fn main() {
             let mut ss: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
             for _ in 0..RESAMPLE_COLD_REPS {
                 let t0 = Instant::now();
-                let (rs_factors, _) = factor_single_front(matrix, &params_kkt_sparse)
+                let (rs_factors, _) = factor_single_front(&matrix, &params_kkt_sparse)
                     .expect("resample: factor_single_front (single-shot already succeeded)");
                 fs.push(t0.elapsed().as_micros());
                 let t1 = Instant::now();
-                let _ = solve_refined(matrix, &rs_factors, &rhs)
+                let _ = solve_refined(&matrix, &rs_factors, &rhs)
                     .expect("resample: solve_refined (single-shot already succeeded)");
                 ss.push(t1.elapsed().as_micros());
             }
@@ -1479,11 +1469,17 @@ fn main() {
         }
     }
 
-    // Summary
-    let n_dense_ran = n_total - n_dense_skipped_large;
+    // Summary. Streaming bench: parse-failed matrices were counted in
+    // n_total (everything in kkt_entries) but never reached the dense path,
+    // so subtract them from the denominator to keep pass-rate semantics
+    // identical to the pre-streaming bench (which excluded parse-fails at
+    // load time and never had them in n_total at all).
+    let n_dense_ran = n_total
+        .saturating_sub(n_dense_skipped_large)
+        .saturating_sub(n_dense_parse_skipped);
     println!(
-        "\nKKT summary: {} matrices ({} dense-eligible n <= {}, {} skipped n > {})",
-        n_total, n_dense_ran, dense_max, n_dense_skipped_large, dense_max
+        "\nKKT summary: {} matrices ({} dense-eligible n <= {}, {} skipped n > {}, {} parse-skipped)",
+        n_total, n_dense_ran, dense_max, n_dense_skipped_large, dense_max, n_dense_parse_skipped
     );
     println!(
         "  Inertia match: {}/{} ({:.1}%)",
@@ -1500,23 +1496,19 @@ fn main() {
     if n_factor_fail > 0 {
         println!("  Factor failures: {}", n_factor_fail);
     }
+    if n_dense_parse_skipped > 0 {
+        println!("  Parse-skipped: {}", n_dense_parse_skipped);
+    }
     println!(
         "  Worst residual: {:.2e} ({})",
         worst_residual, worst_residual_name
     );
 
-    // Drop the dense forms before the sparse loop runs — the sparse
-    // path only touches `entry.csc`, and on the full ~167k-matrix
-    // corpus the cumulative dense allocations otherwise OOM-kill the
-    // process when sparse-loop work-arrays land on top. n=300 alone
-    // is ~720 KB dense, ×154k dense-eligible entries = >100 GB
-    // nominal even before the loop allocates.
-    for entry in kkt_entries.iter_mut() {
-        entry.matrix = None;
-    }
-
     // --- Sparse solver validation ---
     println!("\n--- Sparse solver validation ---");
+    // Streaming bench: the dense loop did not retain any matrix data, so
+    // there is nothing to drop here before the sparse loop starts. Each
+    // sparse iteration re-parses the .mtx and drops at end of scope.
     // Phase 2.2.3: the previous nemin=10000 override was added to
     // mask an amalgamation bug that claimed non-contiguous column
     // ranges as if they were contiguous supernodes. That bug is
@@ -1549,13 +1541,52 @@ fn main() {
     // phases, so this matches the comparison semantics.
     let mut sparse_timings: Vec<MatrixTiming> = Vec::new();
 
-    for entry in kkt_entries.iter_mut() {
+    let mut sp_parse_skipped = 0usize;
+    let mut sp_size_skipped = 0usize;
+    let sparse_max: usize = sparse_max_from_env();
+    for entry in &kkt_entries {
         sp_total += 1;
-        // Take ownership so the CSC arrays drop at end of this iteration.
-        // On the full ~167k-matrix corpus the cumulative CSC working set
-        // approaches the system memory ceiling and cooperates with the
-        // OS OOM-killer once sparse-loop work-arrays land on top.
-        let csc = entry.csc.take().expect("csc populated at load time");
+        // Sidecar n+m is the matrix dimension. Cheap to check before parsing
+        // .mtx so we don't pay the parse cost for matrices we'll skip anyway.
+        if entry.sidecar.n + entry.sidecar.m > sparse_max {
+            sp_size_skipped += 1;
+            continue;
+        }
+        // Streaming load: parse the .mtx for this iteration only and drop at
+        // end of scope. Validations (NaN/Inf entry, dim consistency, CSC
+        // convertibility) move from load_kkt_dir to per-iteration here.
+        let mtx = match read_mtx(&entry.mtx_path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("  SKIP {} (mtx parse error: {})", entry.name, e);
+                sp_parse_skipped += 1;
+                continue;
+            }
+        };
+        let expected_dim = entry.sidecar.n + entry.sidecar.m;
+        if mtx.n != expected_dim {
+            eprintln!(
+                "  SKIP {} (mtx dim {} != sidecar n+m={}+{}={})",
+                entry.name, mtx.n, entry.sidecar.n, entry.sidecar.m, expected_dim
+            );
+            sp_parse_skipped += 1;
+            continue;
+        }
+        if mtx.entries.iter().any(|(_, _, v)| !v.is_finite()) {
+            sp_parse_skipped += 1;
+            continue;
+        }
+        let csc = match mtx.to_csc() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("  SKIP {} (csc conversion: {})", entry.name, e);
+                sp_parse_skipped += 1;
+                continue;
+            }
+        };
+        // mtx is no longer needed; drop it now to free the COO buffer before
+        // the multifrontal scratch allocations.
+        drop(mtx);
         let n = csc.n;
 
         let expected_inertia = Inertia {
@@ -1724,24 +1755,36 @@ fn main() {
         }
     }
 
-    println!("Sparse solver: {}/{} total", sp_total, sp_total);
+    // Streaming bench: parse-failed matrices were counted in sp_total but
+    // never reached the sparse path. Subtract them so pass-rate semantics
+    // match the pre-streaming bench.
+    let sp_attempted = sp_total
+        .saturating_sub(sp_parse_skipped)
+        .saturating_sub(sp_size_skipped);
+    println!("Sparse solver: {}/{} total", sp_attempted, sp_total);
+    if sp_size_skipped > 0 {
+        println!("  Size-skipped (n > {}): {}", sparse_max, sp_size_skipped);
+    }
     println!(
         "  Inertia match vs MUMPS: {}/{} ({:.1}%)",
         sp_inertia_pass,
-        sp_total,
-        100.0 * sp_inertia_pass as f64 / sp_total.max(1) as f64
+        sp_attempted,
+        100.0 * sp_inertia_pass as f64 / sp_attempted.max(1) as f64
     );
     println!(
         "  Residual pass: {}/{} ({:.1}%)",
         sp_residual_pass,
-        sp_total,
-        100.0 * sp_residual_pass as f64 / sp_total.max(1) as f64
+        sp_attempted,
+        100.0 * sp_residual_pass as f64 / sp_attempted.max(1) as f64
     );
     if sp_factor_fail > 0 {
         println!("  Factor failures: {}", sp_factor_fail);
     }
     if sp_solve_fail > 0 {
         println!("  Solve failures: {}", sp_solve_fail);
+    }
+    if sp_parse_skipped > 0 {
+        println!("  Parse-skipped: {}", sp_parse_skipped);
     }
     println!("  Worst residual: {:.2e} ({})", sp_worst_res, sp_worst_name);
 

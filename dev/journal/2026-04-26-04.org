@@ -1,0 +1,172 @@
+#+TITLE: 2026-04-26 Session 04 — Streaming bench redesign
+
+* Goal
+Session 03 left the expanded-corpus sparse pass blocked by the
+bench's upfront-load architecture: =FERAL_KKT_ROOTS=all= loads CSC
+for all 167,614 matrices simultaneously, then iterates dense + sparse
+loops. The 10,120 n>1000 matrices push the sparse-loop entry working
+set over the 64 GB laptop ceiling and SIGKILL the bench during the
+sparse iteration.
+
+Streaming redesign goal: load metadata only at startup, then in each
+loop iteration parse the .mtx on demand, do the work, drop. Peak
+memory bounded by single-largest-matrix rather than corpus
+cumulative.
+
+* 21:30 :plan:
+Two-pass streaming approach (lower-risk than single-pass):
+- Shrink =KktEntry= to metadata only (=name=, =mtx_path=, =sidecar=,
+  =mumps_timing=, =ssids_timing=). Drop =matrix= and =csc= fields.
+- =load_kkt_dir= becomes meta-only: walks subdirs, reads .json sidecar
+  + oracle JSONs, skips matrices missing sidecar or with NaN/Inf RHS.
+  Does NOT parse .mtx.
+- Dense loop body opens .mtx, validates NaN/Inf entries + dim, calls
+  =to_dense=, runs factor + solve, drops.
+- Sparse loop body opens .mtx (again — penalty: 167k extra parses),
+  converts to CSC, runs symbolic + multifrontal + solve, drops.
+- =print_perf_comparison= and =print_phase28_partition= switch from
+  =&[KktEntry]= to the same =&[KktEntry]= post-refactor (signature
+  unchanged, struct just lost matrix/csc fields).
+
+Cost: each .mtx parsed twice on the dense-eligible portion. For 154k
+small matrices that's ~seconds extra. For the 10k large matrices it
+matters more (~minutes), but those don't go through dense path
+(n > 1000) so they're parsed once for sparse. Net: ~few minutes
+extra runtime, vs unbounded crash today.
+
+Single-pass would save the duplicate parse but requires merging the
+output structure of the two loops. Two-pass preserves output
+ordering and contains the diff. Choosing two-pass.
+
+* 21:50 :impl:
+Refactor done. Diff:
+- =KktEntry= shrunk to =name + mtx_path + sidecar + mumps_timing +
+  ssids_timing= (5 fields, was 7). Dropped =matrix= and =csc=.
+- =load_kkt_dir= now metadata-only: reads .json sidecar + oracle JSONs,
+  filters on missing/bad sidecar + NaN/Inf RHS. Does NOT parse .mtx
+  or run NaN/Inf-entry / dim / csc validations.
+- Dense loop body parses .mtx, runs entry-finiteness / dim /
+  =to_dense=, factors, solves, drops at end of scope.
+- Sparse loop body parses .mtx, runs entry-finiteness / dim /
+  =to_csc=, drops mtx, runs symbolic + multifrontal + solve, drops
+  csc at end of scope.
+- New parse-skip counters (=n_dense_parse_skipped=, =sp_parse_skipped=)
+  surfaced in summaries when nonzero. Pass-rate denominators subtract
+  parse-skipped to preserve old semantics.
+
+Build clean. =cargo test --release= 333 pass.
+
+* 22:00 :validate:kkt:parity:
+Streaming bench on =FERAL_KKT_ROOTS=kkt= matches session 03 baseline
+exactly:
+
+#+begin_example
+KKT summary: 156927 matrices (154481 dense-eligible n <= 1000, 107 skipped n > 1000, 2339 parse-skipped)
+  Inertia match: 154408/154481 (100.0%)
+  Residual pass: 154207/154481 (99.8%)
+  Worst residual: 1.87e-4 (ERRINBAR_0824)
+
+Sparse solver: 154588/156927 total
+  Inertia match vs MUMPS: 154528/154588 (100.0%)
+  Residual pass: 154254/154588 (99.8%)
+  Worst residual: 2.99e8 (POLAK6_0021)
+
+=== Sparse perf vs canonical oracles ===
+factor/MUMPS       153560       0.36       0.27       1.61       2.92       7.18
+solve/MUMPS        153560       0.25       0.20       0.86       3.57      11.65
+nnzL/MUMPS         153560       0.75       0.62       1.43       4.50       5.00
+nnzL/SSIDS         154500       1.09       1.00       1.41       4.50       5.00
+#+end_example
+
+Two cosmetic deltas vs session 03:
+1. Total count is 156,927 instead of 154,588 — the +2,339 matrices
+   are kkt entries that have NaN/Inf in matrix data (silently
+   dropped at load time pre-streaming, now visible as
+   "Parse-skipped: 2339" in the summary).
+2. Sparse-loop summary line reads "Sparse solver: 154588/156927"
+   (attempted/total) instead of "154588/154588" — same fact, less
+   ambiguous.
+
+All inertia / residual / perf / nnzL numbers identical to baseline.
+
+* 22:05 :validate:expanded-corpus:
+Running =FERAL_KKT_ROOTS=all= now to confirm streaming bench
+unblocks the expanded-corpus sparse pass that session 03 left
+SIGKILLed.
+
+* 22:25 :validate:expanded-corpus:sigkill:
+=FERAL_KKT_ROOTS=all= streaming bench SIGKILLed (exit 137) during the
+sparse loop. Dense pass completed cleanly:
+
+#+begin_example
+KKT summary: 170176 matrices (157494 dense-eligible n <= 1000, 10120 skipped n > 1000, 2562 parse-skipped)
+  Inertia match: 157356/157494 (99.9%)
+  Residual pass: 157220/157494 (99.8%)
+  Worst residual: 1.87e-4 (ERRINBAR_0824)
+#+end_example
+
+Same pass-rates as session 03. Streaming bounds dense to ~17 GB peak
+(was 30+ GB in load-all design).
+
+Sparse loop got "--- Sparse solver validation ---" header out then died.
+Cause: the 10,120 n>1000 matrices include a long tail with n up to ~451k
+(sampled distribution: p99 ~15k, max 451k, ~10 matrices >50k). One of
+those factors blows the 64 GB ceiling on its own — streaming the load
+cannot help here, since a single factor is the issue.
+
+* 22:30 :impl:sparse-cap:
+Added =FERAL_SPARSE_MAX= env var (mirrors =FERAL_DENSE_MAX=). Default
+=usize::MAX= preserves historical kkt-corpus behavior. Gate uses
+=sidecar.n + sidecar.m= so we skip *before* parsing .mtx (cheap pre-check).
+New summary line: =Size-skipped (n > X): N= (only printed when nonzero).
+sp_attempted denominator subtracts both parse-skipped and size-skipped
+to keep pass-rate semantics.
+
+Build clean. Re-running with =FERAL_SPARSE_MAX=20000= (above the p99,
+skips ~0.3% of expanded corpus by size).
+
+* 22:50 :validate:expanded-corpus:complete:
+=FERAL_KKT_ROOTS=all FERAL_SPARSE_MAX=20000= streaming bench ran
+end-to-end (~50 min wall, peak RSS ~36 GB on 64 GB laptop). First
+time the expanded sparse corpus has been validated since session 03's
+SIGKILL.
+
+#+begin_example
+KKT summary: 170176 matrices (157494 dense-eligible n <= 1000, 10120 skipped n > 1000, 2562 parse-skipped)
+  Inertia match: 157356/157494 (99.9%)
+  Residual pass: 157220/157494 (99.8%)
+  Worst residual: 1.87e-4 (ERRINBAR_0824)
+
+Sparse solver: 167380/170176 total
+  Size-skipped (n > 20000): 237
+  Inertia match vs MUMPS: 166543/167380 (99.5%)
+  Residual pass: 167039/167380 (99.8%)
+  Parse-skipped: 2559
+  Worst residual: 2.99e8 (POLAK6_0021)
+#+end_example
+
+Dense pass identical to kkt-only baseline (same 99.9% / 99.8% / worst).
+Sparse pass shows 837 new inertia mismatches (99.5% vs 100.0% on kkt).
+Residual rate steady at 99.8%. Worst residual same outlier (POLAK6_0021).
+
+Sparse perf vs oracles on expanded corpus:
+#+begin_example
+factor/MUMPS  161353   p50 0.40  p90 2.35  p99 53.96  max 1012.44
+solve/MUMPS   161353   p50 0.20  p90 1.42  p99  8.06  max  535.53
+factor/SSIDS  161582   p50 0.04  p90 0.61  p99 11.60  max  460.62
+solve/SSIDS   161582   p50 1.00  p90 5.00  p99 20.57  max 2543.75
+nnzL/MUMPS    161353   p50 0.62  p90 1.74  p99  8.07  max   61.10
+nnzL/SSIDS    161582   p50 1.00  p90 1.69  p99  4.50  max   23.02
+#+end_example
+
+nnzL/SSIDS p50=1.000 confirms the factor_nnz fix holds on the expanded
+corpus. Phase 2.8.1 partition: small-frontal p90=2.03 (FAIL by 0.03 vs
+target 2.0), medium p90=2.35 (PASS). The small-frontal regression vs
+target comes from the new families in the expansion corpus (DIXMAANH,
+CHAINWOO, HYDROELL ratios in 600-1000x range — these are tiny n=3000-4000
+matrices where MUMPS's denser-stricter pivoting wins big in absolute
+microseconds even though both are fast). Documented for next session.
+
+Outstanding: 237 matrices with n>20000 still un-validated. Future work
+to either (a) raise the cap on a higher-memory machine, or (b) fix the
+cumulative-memory growth in the sparse loop so a 64 GB box can run them.
