@@ -232,6 +232,35 @@ impl NumericParams {
     }
 }
 
+/// Dense Schur complement block returned by
+/// [`factorize_multifrontal_with_schur`] (F3.2b).
+///
+/// Layout: column-major full-square `dim × dim` (the `dim²` buffer is
+/// dense; both upper and lower triangles are populated by mirroring the
+/// computed lower triangle, per `dev/research/schur-complement.md` D5).
+/// Row/column ordering matches the user-supplied `schur_indices` exactly.
+///
+/// The mathematical content is `S = A_SS − A_FS^T A_FF^{-1} A_FS` where
+/// `A_FF` is the eliminated (non-Schur) block, `A_FS` is the coupling,
+/// and `A_SS` is the Schur block. Inertia is *not* computed for `S` —
+/// callers wanting an inertia-correct read of the full system must
+/// account for the Schur block separately (see F3.0 D7 prominent doc).
+#[derive(Debug, Clone)]
+pub struct SchurBlock {
+    /// Side length of the Schur block (`= schur_indices.len()`).
+    pub dim: usize,
+    /// `dim × dim` column-major full-square dense buffer.
+    pub data: Vec<f64>,
+}
+
+impl SchurBlock {
+    /// Read the `(i, j)` entry. `0 <= i, j < dim`.
+    #[inline]
+    pub fn get(&self, i: usize, j: usize) -> f64 {
+        self.data[j * self.dim + i]
+    }
+}
+
 /// Stored factors from a sparse multifrontal LDL^T factorization.
 #[derive(Debug)]
 pub struct SparseFactors {
@@ -732,6 +761,232 @@ pub fn factorize_multifrontal(
     factorize_multifrontal_with_workspace(matrix, symbolic, params, &mut ws)
 }
 
+/// Numeric multifrontal factorization with a partial Schur extraction (F3.2b).
+///
+/// `symbolic` must have been produced by
+/// [`crate::symbolic::symbolic_factorize_with_schur`]; otherwise this
+/// returns `InvalidInput`. The matching invariant — `is_schur_tail ==
+/// Some(n_schur) > 0` — is the only structural precondition.
+///
+/// Pipeline divergence from [`factorize_multifrontal`]:
+///
+/// 1. Per-supernode `nvschur[s]` is computed from `is_schur_tail` and
+///    the supernode column ranges. Only supernodes whose column range
+///    intersects `[n - n_schur, n)` have `nvschur > 0`. Those
+///    supernodes are necessarily root(s) of the etree post-F3.2a (Schur
+///    columns occupy the highest etree-index positions).
+///
+/// 2. At each Schur-bearing root, the Bunch-Kaufman pivot loop
+///    eliminates only `expanded_ncol − nvschur` columns; the remaining
+///    `nvschur` Schur columns end up un-eliminated in the contribution
+///    block at positions `[0, nvschur) × [0, nvschur)` (col-major
+///    lower-triangle dense). This matches MUMPS
+///    `dfac_front_LDLT_type1.F:193-205`'s `NPIV ≤ NASS − NVSCHUR`
+///    bound (see dev/research/schur-complement.md D4-D6).
+///
+/// 3. After the postorder loop, the dense `n_schur × n_schur` Schur
+///    block is read out of the root supernode's `ContribBlock`,
+///    mirrored lower→upper, and returned as a [`SchurBlock`].
+///
+/// **Constraint** (F3.2b scope): the Schur columns must form a single
+/// contiguous tail and lie inside a single root supernode whose last
+/// column is at position `n - 1`. This holds for the F3.2a symbolic
+/// pipeline with adjacency-strategy amalgamation (the standard case).
+/// If the Schur columns straddle multiple supernodes, this entry point
+/// returns `InvalidInput`. Cross-validation against MUMPS HALO-SCHUR
+/// in F3.3 will broaden coverage.
+///
+/// Returned `Inertia` reflects the inertia of the *eliminated* block
+/// `A_FF` only — the Schur block's spectrum is not factored.
+pub fn factorize_multifrontal_with_schur(
+    matrix: &CscMatrix,
+    symbolic: &SymbolicFactorization,
+    params: &NumericParams,
+) -> Result<(SparseFactors, Inertia, SchurBlock), FeralError> {
+    let n_schur = symbolic.is_schur_tail.ok_or_else(|| {
+        FeralError::InvalidInput(
+            "factorize_multifrontal_with_schur requires symbolic produced by \
+             symbolic_factorize_with_schur (is_schur_tail is None)"
+                .to_string(),
+        )
+    })?;
+    if n_schur == 0 {
+        return Err(FeralError::InvalidInput(
+            "is_schur_tail = Some(0); use factorize_multifrontal instead".to_string(),
+        ));
+    }
+
+    let n = symbolic.n;
+    let n_snodes = symbolic.supernodes.len();
+
+    // Per-supernode nvschur. Schur columns occupy global perm positions
+    // [n - n_schur, n), so a supernode's nvschur is the size of its
+    // column-range intersection with that interval. The
+    // F3.2a postorder pins these positions to the tail of the supernode
+    // sequence, so only the last contiguous run of supernodes has
+    // nvschur > 0.
+    let mut nvschur_per_snode = vec![0usize; n_snodes];
+    let schur_lo = n - n_schur;
+    for (s, snode) in symbolic.supernodes.iter().enumerate() {
+        let col_lo = snode.first_col;
+        let col_hi = col_lo + snode.ncol();
+        if col_hi <= schur_lo || col_lo >= n {
+            continue;
+        }
+        let lo = col_lo.max(schur_lo);
+        let hi = col_hi.min(n);
+        nvschur_per_snode[s] = hi - lo;
+    }
+
+    // F3.2b scope guard: require the Schur tail to live entirely in
+    // one supernode whose last column is at position n - 1. Multi-
+    // supernode Schur tails are deferred to F3.3.
+    let last_snode = n_snodes
+        .checked_sub(1)
+        .ok_or_else(|| FeralError::InvalidInput("symbolic has zero supernodes".to_string()))?;
+    let last = &symbolic.supernodes[last_snode];
+    if last.first_col + last.ncol() != n {
+        return Err(FeralError::InvalidInput(
+            "Schur path expects last supernode to end at n-1".to_string(),
+        ));
+    }
+    if nvschur_per_snode[last_snode] != n_schur {
+        return Err(FeralError::InvalidInput(format!(
+            "F3.2b scope: Schur tail must lie in a single root supernode \
+             (last snode covers {} of {} Schur columns); see \
+             dev/research/schur-complement.md F3.3",
+            nvschur_per_snode[last_snode], n_schur
+        )));
+    }
+    for &k in &nvschur_per_snode[..last_snode] {
+        debug_assert_eq!(k, 0, "nvschur > 0 outside last snode violates F3.2b scope");
+    }
+
+    let mut ws = FactorWorkspace::new();
+    factorize_multifrontal_with_schur_inner(matrix, symbolic, params, &mut ws, &nvschur_per_snode)
+}
+
+/// F3.2b inner driver: a Schur-aware specialization of
+/// [`factorize_multifrontal_supernodal_with_workspace`]. Sequential.
+/// Skips the dense fast-path (incompatible with partial elimination)
+/// and the small-leaf batch path (leaves cannot be Schur-bearing under
+/// the F3.2a layout, but we route everything through the generic
+/// `factor_one_supernode` to keep the nvschur threading explicit).
+fn factorize_multifrontal_with_schur_inner(
+    matrix: &CscMatrix,
+    symbolic: &SymbolicFactorization,
+    params: &NumericParams,
+    ws: &mut FactorWorkspace,
+    nvschur_per_snode: &[usize],
+) -> Result<(SparseFactors, Inertia, SchurBlock), FeralError> {
+    let n = symbolic.n;
+    let n_snodes = symbolic.supernodes.len();
+
+    ws.row_map.clear();
+    ws.row_map.resize(n, usize::MAX);
+
+    let (scaling_user, scaling_info) = crate::scaling::compute_scaling(matrix, &params.scaling)?;
+    let scaling_pivot_order: Vec<f64> =
+        symbolic.perm.iter().map(|&old| scaling_user[old]).collect();
+
+    let permuted = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv)?;
+    let full_pattern = permuted.symmetric_pattern();
+
+    let mut is_root = vec![true; n_snodes];
+    for snode in &symbolic.supernodes {
+        for &child_idx in &snode.children {
+            if child_idx < n_snodes {
+                is_root[child_idx] = false;
+            }
+        }
+    }
+
+    let mut contrib_blocks: Vec<Option<ContribBlock>> = (0..n_snodes).map(|_| None).collect();
+    let mut node_factors: Vec<NodeFactors> = Vec::with_capacity(n_snodes);
+    let mut total_inertia = Inertia {
+        positive: 0,
+        negative: 0,
+        zero: 0,
+    };
+    let mut needs_refinement = false;
+
+    for (snode_idx, &nvschur) in nvschur_per_snode.iter().enumerate() {
+        let node = factor_one_supernode(
+            snode_idx,
+            symbolic,
+            &permuted,
+            &full_pattern,
+            &scaling_pivot_order,
+            &is_root,
+            params,
+            ws,
+            &mut contrib_blocks,
+            nvschur,
+        )?;
+        total_inertia.positive += node.inertia.positive;
+        total_inertia.negative += node.inertia.negative;
+        total_inertia.zero += node.inertia.zero;
+        if node.frontal_factors.needs_refinement {
+            needs_refinement = true;
+        }
+        node_factors.push(node);
+    }
+
+    // Extract the dense Schur block from the last (Schur-bearing) root
+    // supernode's contribution block. The first nvschur rows/cols of
+    // contrib are the Schur columns in user-supplied order — see
+    // factor_one_supernode (nvschur > 0) plus the BK pivot gate at
+    // src/dense/factor.rs:1670 (positions ≥ ncol_eff are never swapped).
+    let n_schur = nvschur_per_snode[n_snodes - 1];
+    debug_assert!(n_schur > 0);
+    let contrib = contrib_blocks[n_snodes - 1].take().ok_or_else(|| {
+        FeralError::InvalidInput(
+            "Schur path: root supernode produced no contribution block".to_string(),
+        )
+    })?;
+    if contrib.dim < n_schur {
+        return Err(FeralError::InvalidInput(format!(
+            "Schur extraction: root contrib dim {} < n_schur {}",
+            contrib.dim, n_schur
+        )));
+    }
+
+    // Extract leading n_schur × n_schur subblock. ContribBlock data is
+    // col-major dim × dim with valid data in the lower triangle (per
+    // factor_frontal_blocked_in_place / factor_frontal). Mirror to a
+    // full-square output buffer.
+    let mut out = vec![0.0f64; n_schur * n_schur];
+    for j in 0..n_schur {
+        for i in 0..n_schur {
+            let val = if i >= j {
+                contrib.data[j * contrib.dim + i]
+            } else {
+                contrib.data[i * contrib.dim + j]
+            };
+            out[j * n_schur + i] = val;
+        }
+    }
+
+    let factors = SparseFactors {
+        n,
+        perm: symbolic.perm.clone(),
+        perm_inv: symbolic.perm_inv.clone(),
+        node_factors,
+        needs_refinement,
+        scaling: scaling_user,
+        scaling_info,
+        resolved_method: symbolic.resolved_method,
+        resolved_amalgamation: symbolic.resolved_amalgamation,
+        resolved_preprocess: symbolic.resolved_preprocess,
+    };
+    let schur = SchurBlock {
+        dim: n_schur,
+        data: out,
+    };
+
+    Ok((factors, total_inertia, schur))
+}
+
 /// Gated dispatcher: routes to the D.3 dense fast-path when
 /// [`should_use_dense_fast_path`] fires, otherwise runs the
 /// multifrontal supernodal body in
@@ -935,6 +1190,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
             params,
             ws,
             &mut contrib_blocks,
+            0, // nvschur: standard path has no Schur tail
         )?;
         if let (Some(arc), Some(t)) = (params.profiler.as_ref(), t_snode) {
             let snode = &symbolic.supernodes[snode_idx];
@@ -1027,6 +1283,7 @@ fn factor_one_supernode(
     params: &NumericParams,
     ws: &mut FactorWorkspace,
     contrib_blocks: &mut [Option<ContribBlock>],
+    nvschur: usize,
 ) -> Result<NodeFactors, FeralError> {
     let snode = &symbolic.supernodes[snode_idx];
     let own_ncol = snode.ncol();
@@ -1139,9 +1396,23 @@ fn factor_one_supernode(
 
     // Step 3: Factor the frontal in place (W-3a). `frontal.data`
     // content is undefined on return; the buffer goes back to the pool.
+    //
+    // F3.2b: `nvschur` Schur columns at positions
+    // `[expanded_ncol - nvschur, expanded_ncol)` are excluded from the
+    // eliminable range. The BK pivot loop only swaps within
+    // `[0, ncol_eff)` (see `dense::factor` r_is_fully_summed gate at
+    // src/dense/factor.rs:1670), so Schur columns stay at their
+    // original positions and end up in the contribution block in the
+    // user-supplied order. nvschur > 0 implies is_root (Schur tail at
+    // top of etree post-F3.2a), so may_delay is forced to false.
+    debug_assert!(
+        nvschur == 0 || is_root[snode_idx],
+        "nvschur > 0 only valid at root supernodes (Schur tail invariant)"
+    );
+    debug_assert!(nvschur <= expanded_ncol);
     let may_delay = !is_root[snode_idx];
-    let mut ff =
-        factor_frontal_blocked_in_place(&mut frontal, expanded_ncol, may_delay, &params.bk)?;
+    let eliminable = expanded_ncol - nvschur;
+    let mut ff = factor_frontal_blocked_in_place(&mut frontal, eliminable, may_delay, &params.bk)?;
     ws.frontal_values = frontal.data;
 
     let node_inertia = ff.inertia.clone();
@@ -1684,6 +1955,7 @@ fn run_parallel_task<'a>(
                 params,
                 &mut ws_guard,
                 &mut local_contribs,
+                0, // nvschur: parallel path is not used by Schur API
             )
         };
 
@@ -2169,5 +2441,158 @@ mod tests {
         assert_eq!(i_inf.negative, 1);
         assert_eq!(i_id.positive, 2);
         assert_eq!(i_id.negative, 1);
+    }
+
+    /// 6×6 KKT for F3.2b Schur extraction tests. Same shape as the
+    /// hand-built oracle in src/symbolic tests:
+    /// - Non-Schur block diag(1,2,3,4) at positions 0..4
+    /// - Schur block (positions 4,5):
+    ///     [1.5, 0.2; 0.2, 2.5]
+    /// - Coupling A_FS:
+    ///     col 4 has rows {0:0.5, 2:0.7}; col 5 has rows {1:0.3, 3:0.9}
+    fn small_kkt_6x6_for_schur() -> CscMatrix {
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..4 {
+            rows.push(i);
+            cols.push(i);
+            vals.push((i + 1) as f64);
+        }
+        rows.push(4);
+        cols.push(0);
+        vals.push(0.5);
+        rows.push(4);
+        cols.push(2);
+        vals.push(0.7);
+        rows.push(5);
+        cols.push(1);
+        vals.push(0.3);
+        rows.push(5);
+        cols.push(3);
+        vals.push(0.9);
+        rows.push(4);
+        cols.push(4);
+        vals.push(1.5);
+        rows.push(5);
+        cols.push(4);
+        vals.push(0.2);
+        rows.push(5);
+        cols.push(5);
+        vals.push(2.5);
+        CscMatrix::from_triplets(6, &rows, &cols, &vals).unwrap()
+    }
+
+    /// Hand-computed Schur complement S = A_SS − A_FS^T A_FF^{-1} A_FS:
+    ///   A_FF = diag(1, 2, 3, 4) ⇒ A_FF^{-1} = diag(1, 0.5, 1/3, 0.25)
+    ///   A_FS^T A_FF^{-1} A_FS:
+    ///     (4,4) = 0.5²·1 + 0.7²·(1/3) = 0.25 + 0.49/3
+    ///     (4,5) = 0  (no shared row between col 4 and col 5)
+    ///     (5,5) = 0.3²·0.5 + 0.9²·0.25 = 0.045 + 0.2025
+    ///   S = [[1.5 − (0.25 + 0.49/3), 0.2],
+    ///        [0.2, 2.5 − (0.045 + 0.2025)]]
+    fn hand_computed_schur_2x2() -> [[f64; 2]; 2] {
+        let s00 = 1.5 - (0.25 + 0.49 / 3.0);
+        let s11 = 2.5 - (0.045 + 0.2025);
+        let s01 = 0.2;
+        [[s00, s01], [s01, s11]]
+    }
+
+    #[test]
+    fn schur_block_matches_hand_computed_for_small_kkt() {
+        let m = small_kkt_6x6_for_schur();
+        let params = crate::symbolic::SupernodeParams::default();
+        // ScalingStrategy::Identity is required because compute_scaling
+        // is called against the original matrix in the Schur driver,
+        // and the hand-computed S assumes no scaling. Default Auto on
+        // a 6-row matrix would route to InfNorm and rescale entries.
+        let sym = crate::symbolic::symbolic_factorize_with_schur(&m, &params, &[4, 5]).unwrap();
+        let nparams = NumericParams {
+            scaling: crate::scaling::ScalingStrategy::Identity,
+            ..NumericParams::default()
+        };
+        let (_factors, _inertia, schur) =
+            factorize_multifrontal_with_schur(&m, &sym, &nparams).unwrap();
+        assert_eq!(schur.dim, 2);
+        let expected = hand_computed_schur_2x2();
+        let tol = 1e-12;
+        for i in 0..2 {
+            for j in 0..2 {
+                let got = schur.get(i, j);
+                let want = expected[i][j];
+                assert!(
+                    (got - want).abs() < tol,
+                    "S({},{}) got {} want {} diff {}",
+                    i,
+                    j,
+                    got,
+                    want,
+                    (got - want).abs()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn schur_block_full_square_storage() {
+        // S(i,j) == S(j,i) at every entry — full-square storage with
+        // mirror to upper triangle.
+        let m = small_kkt_6x6_for_schur();
+        let params = crate::symbolic::SupernodeParams::default();
+        let sym = crate::symbolic::symbolic_factorize_with_schur(&m, &params, &[4, 5]).unwrap();
+        let nparams = NumericParams {
+            scaling: crate::scaling::ScalingStrategy::Identity,
+            ..NumericParams::default()
+        };
+        let (_, _, schur) = factorize_multifrontal_with_schur(&m, &sym, &nparams).unwrap();
+        for i in 0..schur.dim {
+            for j in 0..schur.dim {
+                assert!((schur.get(i, j) - schur.get(j, i)).abs() < 1e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn schur_user_order_preserved_when_reversed() {
+        // Reverse user order: schur_indices = [5, 4]. Then S
+        // reported has rows/cols permuted so that out(0,0) corresponds
+        // to original index 5 (= S_hand(1,1)).
+        let m = small_kkt_6x6_for_schur();
+        let params = crate::symbolic::SupernodeParams::default();
+        let sym = crate::symbolic::symbolic_factorize_with_schur(&m, &params, &[5, 4]).unwrap();
+        let nparams = NumericParams {
+            scaling: crate::scaling::ScalingStrategy::Identity,
+            ..NumericParams::default()
+        };
+        let (_, _, schur) = factorize_multifrontal_with_schur(&m, &sym, &nparams).unwrap();
+        let hand = hand_computed_schur_2x2();
+        // Mapping: out(i,j) = hand(map(i), map(j)) with map = [1, 0]
+        let map = [1usize, 0usize];
+        let tol = 1e-12;
+        for i in 0..2 {
+            for j in 0..2 {
+                let got = schur.get(i, j);
+                let want = hand[map[i]][map[j]];
+                assert!(
+                    (got - want).abs() < tol,
+                    "reversed S({},{}) got {} want {}",
+                    i,
+                    j,
+                    got,
+                    want
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn schur_rejects_symbolic_without_schur_tail() {
+        let m = small_kkt_6x6_for_schur();
+        let params = crate::symbolic::SupernodeParams::default();
+        let sym = crate::symbolic::symbolic_factorize(&m, &params).unwrap(); // no Schur
+        assert_eq!(sym.is_schur_tail, None);
+        let nparams = NumericParams::default();
+        let r = factorize_multifrontal_with_schur(&m, &sym, &nparams);
+        assert!(matches!(r, Err(FeralError::InvalidInput(_))));
     }
 }

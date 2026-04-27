@@ -26,7 +26,7 @@ pub use inertia::Inertia;
 pub use io::mtx::{parse_mtx, read_mtx, MtxMatrix};
 pub use io::sidecar::{read_sidecar, KktSidecar, SidecarInertia};
 pub use numeric::condition::{estimate_condition_1norm, estimate_inverse_norm_1, matrix_norm_1};
-pub use numeric::factorize::NumericParams;
+pub use numeric::factorize::{factorize_multifrontal_with_schur, NumericParams, SchurBlock};
 pub use numeric::solve::{solve_sparse, solve_sparse_refined};
 pub use numeric::solver::{FactorStatus, QualityLevel, Solver};
 pub use sparse::csc::{CscMatrix, CscPattern};

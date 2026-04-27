@@ -707,3 +707,50 @@ caught by compute_schur_aware_perm.
 Deferred to F3.2b: numeric stopping rule (per-front NVSCHUR
 bound, NPIV<=NASS-NVSCHUR), Bunch-Kaufman pivot exclusion at the
 root, dense Schur block extraction (n_schur^2 col-major buffer).
+
+* 00:30 :f32b:schur:numeric:extraction:
+F3.2b landed: numeric Schur stop rule + dense extraction.
+
+src/numeric/factorize.rs gains:
+- pub struct SchurBlock { dim, data: Vec<f64> } — full-square
+  col-major dense buffer (D5).
+- pub fn factorize_multifrontal_with_schur(matrix, sym, params)
+  -> Result<(SparseFactors, Inertia, SchurBlock)>; sequential
+  driver. Computes per-supernode nvschur from is_schur_tail, runs
+  the standard postorder loop with reduced eliminable count at
+  the Schur-bearing root, then mirrors the leading n_schur² block
+  from contrib_blocks[root].data into a full-square buffer.
+- factor_one_supernode signature gains nvschur: usize. Three
+  call sites updated to pass 0 (sequential, parallel, dense
+  fast-path). At the Schur root, ncol_eff = expanded_ncol -
+  nvschur is passed to factor_frontal_blocked_in_place; BK pivot
+  loop only swaps within [0, ncol_eff) (gate verified at
+  src/dense/factor.rs:1670 r_is_fully_summed = r < ncol), so
+  Schur columns stay at their original positions.
+
+Hand-computed Schur oracle on small_kkt_6x6:
+  A_FF = diag(1,2,3,4); A_FF^{-1} = diag(1, 0.5, 1/3, 0.25)
+  S_hand = [[1.5 - (0.25 + 0.49/3),  0.2],
+            [0.2,                    2.5 - (0.045 + 0.2025)]]
+  = [[1.086667, 0.2], [0.2, 2.2525]]
+Test schur_block_matches_hand_computed_for_small_kkt asserts
+entry-wise |got - want| < 1e-12. PASS first run. Reversed
+schur_indices=[5,4] also asserted (test
+schur_user_order_preserved_when_reversed).
+
+Scope guard: requires single-supernode root containing the
+entire Schur tail (last_snode covers [n-n_schur..n] and ends at
+n-1). Multi-supernode Schur tails return InvalidInput (deferred
+to F3.3 cross-validation). Verified to hold on small_kkt_6x6
+where AMD on the non-Schur subgraph + Adjacency amalgamation
+puts the Schur block in a single root supernode.
+
+cargo test --lib 198/198 PASS (4 new Schur F3.2b tests +
+existing 194). cargo clippy --lib -D warnings clean.
+
+Re-exported from lib.rs: factorize_multifrontal_with_schur,
+SchurBlock.
+
+Returned Inertia is for A_FF only. Documented prominently on the
+function and on SchurBlock — ripopt's inertia-correction loop
+must account for the Schur block separately (matches F3.0 D7).
