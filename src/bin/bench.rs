@@ -842,6 +842,13 @@ struct OracleTiming {
     /// MUMPS: `INFOG(9)`. SSIDS: `inform%num_factor`.
     /// `None` for older sidecars written before the field was added.
     factor_nnz: Option<u64>,
+    /// MUMPS-computed inertia of the dumped matrix. `None` for sidecars
+    /// without the field. When present this is the ground-truth inertia
+    /// the bench compares against; the IPOPT `.json` `inertia` field
+    /// records IPOPT's *expected* inertia at iteration entry, which is
+    /// not always what MUMPS factually computed (see
+    /// dev/research/2x2-bk-inertia-accounting.md §3a).
+    inertia: Option<(usize, usize, usize)>,
 }
 
 /// Per-matrix feral factor and solve timing on a single path.
@@ -904,10 +911,17 @@ fn read_oracle_timing(path: &Path) -> Option<OracleTiming> {
     // OracleTiming directly, so missing entries are simply skipped
     // when building the per-matrix ratio.
     let factor_nnz = v.get("factor_nnz").and_then(|x| x.as_u64());
+    let inertia = v.get("inertia").and_then(|i| {
+        let p = i.get("positive")?.as_u64()? as usize;
+        let n = i.get("negative")?.as_u64()? as usize;
+        let z = i.get("zero")?.as_u64()? as usize;
+        Some((p, n, z))
+    });
     Some(OracleTiming {
         factor_us,
         solve_us,
         factor_nnz,
+        inertia,
     })
 }
 
@@ -1351,11 +1365,19 @@ fn main() {
         };
         let factor_us = t0.elapsed().as_micros();
 
-        // Check inertia against sidecar
-        let expected_inertia = Inertia {
-            positive: entry.sidecar.inertia.positive,
-            negative: entry.sidecar.inertia.negative,
-            zero: entry.sidecar.inertia.zero,
+        // Check inertia against sidecar (prefer MUMPS oracle inertia when present;
+        // see dev/research/2x2-bk-inertia-accounting.md).
+        let expected_inertia = match entry.mumps_timing.and_then(|t| t.inertia) {
+            Some((p, n, z)) => Inertia {
+                positive: p,
+                negative: n,
+                zero: z,
+            },
+            None => Inertia {
+                positive: entry.sidecar.inertia.positive,
+                negative: entry.sidecar.inertia.negative,
+                zero: entry.sidecar.inertia.zero,
+            },
         };
         let inertia_ok = inertia == expected_inertia;
         if inertia_ok {
@@ -1589,10 +1611,22 @@ fn main() {
         drop(mtx);
         let n = csc.n;
 
-        let expected_inertia = Inertia {
-            positive: entry.sidecar.inertia.positive,
-            negative: entry.sidecar.inertia.negative,
-            zero: entry.sidecar.inertia.zero,
+        // Prefer the MUMPS-computed inertia from the `.mumps.json` oracle
+        // when available — it records what MUMPS factually returned on
+        // this saved matrix. Fall back to the IPOPT `.json` `inertia`
+        // (the *expected* inertia at IPM iteration entry, not always
+        // what MUMPS computed; see dev/research/2x2-bk-inertia-accounting.md).
+        let expected_inertia = match entry.mumps_timing.and_then(|t| t.inertia) {
+            Some((p, n, z)) => Inertia {
+                positive: p,
+                negative: n,
+                zero: z,
+            },
+            None => Inertia {
+                positive: entry.sidecar.inertia.positive,
+                negative: entry.sidecar.inertia.negative,
+                zero: entry.sidecar.inertia.zero,
+            },
         };
 
         // Symbolic factorization. Timed together with the numeric phase so
