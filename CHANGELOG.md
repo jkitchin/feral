@@ -4,6 +4,24 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-27) — F2.2 MUMPS RINFOG cross-validation harness
+
+The MUMPS oracle (`external_benchmarks/mumps_oracle/`) now runs
+with `ICNTL(11)=1` and emits `RINFOG(4..11)` (matrix infinity-
+norm, solution norm, scaled residual, omegas, forward-error
+bound, COND1, COND2). The canonical `.mumps.json` sidecar gains a
+`conditioning` block. `src/bin/diag_cond_parity` walks the corpus
+and reports `kappa_feral / RINFOG(11)` ratios.
+
+Note: RINFOG(10)/(11) are componentwise infinity-norm condition
+numbers (Arioli-Demmel-Duff, dsol_aux.F:935), not
+`||A||_1 * ||A^-1||_1`. The harness is therefore a directional
+cross-check; F2.1's Hilbert/KKT calibration remains the binding
+numerical gate for `estimate_condition_1norm`. Corpus geomean
+ratio over 165,959 matrices is 4.244e10 — ten orders of magnitude
+offset, which led to the F2.2 acceptance-gate reframe in
+`dev/decisions.md`.
+
 ### Changed (2026-04-27) — AMF default ordering for `n <= 10_000`
 
 `pick_default_method` in `src/symbolic/mod.rs` now mirrors MUMPS's

@@ -2039,3 +2039,54 @@ boundary).
   table.
 - `dev/journal/2026-04-27-09.org` — entry at 19:30 logging the
   triage and decision.
+
+---
+
+## 2026-04-27 — F2.2 cross-validation gate reframed
+
+**Decision.** F2.2's "geomean ratio within [0.5, 5.0] against
+MUMPS RINFOG(11)" acceptance gate is dropped. Replacement: F2.2
+ships when the harness exists end-to-end (mumps_bench emits
+RINFOG fields, run_mumps writes a `conditioning` sidecar block,
+diag_cond_parity runs over the corpus and produces a report).
+F2.1's existing Hilbert/KKT calibration ("within 10x of true
+||A||_1·||A^-1||_1") remains the binding numerical gate for the
+estimator itself.
+
+**Why.** Empirically verified over 165,959 corpus matrices that
+the gate is structurally unattainable. MUMPS RINFOG(10)/(11) are
+componentwise condition numbers in the infinity-norm
+(Arioli-Demmel-Duff; verified via mumps-expert reading
+dsol_aux.F:935 and dsol_driver.F:5742). Feral's
+estimate_condition_1norm computes ||A||_1·||A^-1||_1. Both use
+Hager-Higham 1-norm power iteration but applied to different
+operators, so direct ratio comparison is meaningless.
+
+Corpus geomean kappa_feral / cond2 = 4.244e10 — ten orders of
+magnitude offset from the original gate's [0.5, 5.0] band.
+Geomean against max(cond1, cond2) is 6.884e7. The p10 of the
+latter is 4.4, which shows the feral estimate does grow alongside
+the MUMPS componentwise estimate on the well-conditioned tail of
+the corpus, but the upper tail diverges by orders of magnitude
+because feral honestly reports near-singular conditioning where
+the MUMPS componentwise number collapses to ~1.0 due to a tight
+residual.
+
+**Scope of the change.**
+- F2.1 acceptance is unchanged.
+- F2.3 (iterative-refinement diagnostic emit) is unchanged.
+- A future "real 1-norm oracle" extension is recorded in the
+  plan as optional follow-on work: extend mumps_bench.F to
+  compute ||A^-1||_1 directly via solve(A, e_i) sweeps over the
+  standard basis, on a smaller calibration set (n <= 200
+  Hilbert / KKT panels with known kappa).
+- diag_cond_parity continues to ship as a directional diagnostic;
+  its report is informational, not a CI gate.
+
+**Files touched in this decision.**
+- `dev/plans/kkt-feature-gaps.md` — F2.2 phase + acceptance
+  rewritten.
+- `dev/journal/2026-04-27-09.org` — entries at 17:30 (harness)
+  and 18:30 (corpus result).
+- `external_benchmarks/mumps_oracle/mumps_bench.F`,
+  `run_mumps.py`, `src/bin/diag_cond_parity.rs` — the harness.
