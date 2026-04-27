@@ -1,0 +1,97 @@
+#+TITLE: 2026-04-27 Session 01 — sparse memory accumulation root cause
+
+* Goal
+Triage the cumulative memory growth in the sparse loop noted in
+session 04: RSS climbed from 17 GB (end of dense pass) to 36 GB
+(plateau) over the 167k-iteration sparse pass with
+=FERAL_SPARSE_MAX=20000=. Determine whether this is a real
+per-iteration leak or allocator high-water-mark retention.
+
+* 06:25 :impl:diag:
+Wrote =src/bin/diag_sparse_memory= — runs =factorize_multifrontal=
+on a chosen sequence of size buckets (small/medium/big), reports
+RSS in MB after each iteration via =ps -o rss=. Three reference
+matrices: HS118_0000 (n=32), EIGENALS_0000 (n=2550),
+CHAINWOO_0000 (n=4000).
+
+* 06:30 :findings:per-call-leak:
+Repeated calls on the SAME matrix do not leak meaningfully:
+- HS118_0000 × 100 iters: 2.2 MB → 3.0 MB (+0.8 MB, ~8 KB/iter,
+  mostly initialization overhead on first ~10 calls then flat).
+- EIGENALS_0000 × 50 iters: 2.2 MB → 5.6 MB, plateau by iter 13.
+
+So the per-iteration steady-state leak is < 10 KB/iter. With 167k
+iters that's at most ~1.7 GB — does not explain the 19 GB observed
+growth.
+
+* 06:35 :findings:hwm-retention:
+Mixed-size pattern reveals the real cause:
+=small,medium,big,medium,small,big,small=, 3 iters each:
+
+#+begin_example
+ iter    bucket      matrix           n      RSS_MB
+    1     small  HS118_0000          32         2.5
+    3     small  HS118_0000          32         2.6
+    4    medium  EIGENALS_0000     2550         5.0
+    6    medium  EIGENALS_0000     2550         5.6
+    7       big  CHAINWOO_0000     4000      1137.7
+    9       big  CHAINWOO_0000     4000      1173.6
+   10    medium  EIGENALS_0000     2550      1173.6  ← stuck at HWM
+   12    medium  EIGENALS_0000     2550      1173.6
+   13     small  HS118_0000          32      1173.6  ← still stuck
+   15     small  HS118_0000          32      1173.7
+   16       big  CHAINWOO_0000     4000      1185.4
+   18       big  CHAINWOO_0000     4000      1202.9
+   21     small  HS118_0000          32      1203.0
+#+end_example
+
+Two effects observed:
+1. CHAINWOO_0000 (n=4000) allocates *1.1 GB* on first call —
+   *the multifrontal factor is genuinely 1.1 GB on this matrix*.
+   By comparison, EIGENALS at n=2550 needs ~5 MB. The size
+   discrepancy is not n^2 — it is fill explosion from
+   sub-optimal pivoting on this specific matrix structure.
+2. macOS default allocator does not return the 1.1 GB to the OS
+   after the factor drops. RSS stays at the high-water-mark even
+   when the next 4 iterations are tiny n=32 matrices.
+
+* 06:40 :connection:phase-281:
+This same CHAINWOO/HYDROELL/DIXMAANH cluster is what session 04's
+Phase 2.8.1 partition flagged with 600–1000× factor-time ratio vs
+MUMPS:
+
+#+begin_example
+DIXMAANH_0008    3000   865637 μs   855 μs   1012.44×
+CHAINWOO_0002    4000   597662 μs   711 μs    840.59×
+CHAINWOO_0001    4000   493158 μs   725 μs    680.22×
+HYDROELL_0005    4033   513037 μs   761 μs    674.16×
+#+end_example
+
+The 1000× slowness and the GB-scale factor sizes are two faces of
+the same problem: feral's pivoting strategy produces O(1000×) more
+fill than MUMPS on these structures. Fix the fill, fix the
+slowness, fix the memory.
+
+* 06:45 :conclusion:
+The "cumulative memory growth" is *not* a leak. It is:
+
+(a) High-water-mark retention from outlier matrices whose factor
+    genuinely needs ~1 GB (CHAINWOO and similar). Default macOS
+    allocator does not return this memory to the OS.
+(b) Compounding over the 10k n>1000 matrix pass: each new outlier
+    family bumps the HWM up.
+
+Two mitigations possible:
+1. Switch the bench binary to a more aggressive allocator
+   (mimalloc / jemallocator) that returns freed memory to the OS
+   via MADV_FREE / madvise. Workaround for the symptom.
+2. *Fix the pivoting on CHAINWOO/HYDROELL/DIXMAANH families.*
+   This addresses both the memory and the slowness. Real fix.
+
+Real fix is in scope for a future session — is essentially the
+same investigation as Phase 2.8.1 small-frontal regression
+(session 04 next-session item 3).
+
+For now, document and accept the 36 GB working set on the dev
+laptop. Bench bench-mode users can opt into
+=FERAL_SPARSE_MAX=N= per session 04 for tighter memory bounds.
