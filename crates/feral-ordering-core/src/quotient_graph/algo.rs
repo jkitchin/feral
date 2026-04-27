@@ -619,6 +619,609 @@ pub fn finalize_step(
     }
 }
 
+/// AMF bucket index for a quantized fill score (`MinFill::bucket`).
+///
+/// Mirrors the metric trait's `MinFill::bucket` but is duplicated as a
+/// free function here so `algo.rs` does not need a back-edge to
+/// `metric.rs` (which itself imports from `algo`). Inlined.
+#[inline(always)]
+fn amf_bucket_of(score: i32, n: usize) -> usize {
+    if score <= 0 {
+        return 0;
+    }
+    let s = score as usize;
+    if s <= n {
+        return s;
+    }
+    let pas = (n / 8).max(1);
+    let nbbuck = 2 * n;
+    ((s - n) / pas + n).min(nbbuck)
+}
+
+/// Saturation cap used when quantizing the AMF RMF score into `i32`.
+/// `i32::MAX - 1` matches MUMPS `idummy = huge(idummy) - 1`
+/// (`ana_orderings.F:4230`).
+const AMF_DUMMY_I32: i32 = i32::MAX - 1;
+
+/// AMF analogue of [`select_pivot`]. Linear-scans coarse buckets
+/// (`idx > n`) for the entry with the smallest exact score; takes the
+/// head for fine buckets.
+///
+/// Side effects: `ws.mindeg` advances to the chosen bucket index. The
+/// chosen `me` is unlinked from its degree-list chain (head update for
+/// fine buckets, doubly-linked unlink for coarse buckets).
+///
+/// Reference: `ana_orderings.F:4392-4427`.
+pub fn select_pivot_amf(ws: &mut Workspace) -> Option<usize> {
+    let n = ws.n;
+    let nbuck = ws.head.len();
+    let mut deg = ws.mindeg;
+    while deg < nbuck && ws.head[deg] == NONE {
+        deg += 1;
+    }
+    if deg >= nbuck {
+        return None;
+    }
+    ws.mindeg = deg;
+    let head_me = ws.head[deg] as usize;
+
+    let me;
+    if deg > n {
+        // Coarse bucket: linear scan for the minimum-score entry.
+        let mut best = head_me;
+        let mut best_score = ws.wf[best];
+        let mut j = ws.next[best];
+        while j != NONE {
+            let ju = j as usize;
+            if ws.wf[ju] < best_score {
+                best_score = ws.wf[ju];
+                best = ju;
+            }
+            j = ws.next[ju];
+        }
+        me = best;
+        // Doubly-linked unlink (best may be mid-chain).
+        let ilast = ws.last[me];
+        let inext = ws.next[me];
+        if inext != NONE {
+            ws.last[inext as usize] = ilast;
+        }
+        if ilast != NONE {
+            ws.next[ilast as usize] = inext;
+        } else {
+            ws.head[deg] = inext;
+        }
+    } else {
+        me = head_me;
+        let inext = ws.next[me];
+        if inext != NONE {
+            ws.last[inext as usize] = NONE;
+        }
+        ws.head[deg] = inext;
+    }
+    Some(me)
+}
+
+/// AMF analogue of [`create_element`]. Identical structure; differs
+/// only in the bucket-index used when unlinking absorbed neighbours
+/// from their degree lists. AMD reads `degree[i]` (which doubles as
+/// the bucket index because AMD's bucket is identity); AMF computes
+/// `amf_bucket_of(wf[i], n)` because the AMF score and running degree
+/// are stored in distinct fields (`wf` vs `degree`).
+pub fn create_element_amf(
+    ws: &mut Workspace,
+    me: usize,
+) -> Result<(usize, usize, i32, usize), OrderingError> {
+    let n = ws.n;
+    let elenme = ws.elen[me];
+    let nvpiv = ws.nv[me];
+    ws.nel += nvpiv as usize;
+    ws.nv[me] = -nvpiv;
+    let mut degme: usize = 0;
+    let pme1: usize;
+    let pme2: i32;
+
+    if elenme == 0 {
+        let pme1_s = ws.pe[me];
+        pme1 = pme1_s as usize;
+        let list_start = pme1;
+        let list_end = list_start + ws.len[me] as usize;
+        let mut pme2_s = pme1_s - 1;
+        for p in list_start..list_end {
+            let i = ws.iw[p] as usize;
+            let nvi = ws.nv[i];
+            if nvi > 0 {
+                degme += nvi as usize;
+                ws.nv[i] = -nvi;
+                pme2_s += 1;
+                ws.iw[pme2_s as usize] = i as i32;
+                let ilast = ws.last[i];
+                let inext = ws.next[i];
+                if inext != NONE {
+                    ws.last[inext as usize] = ilast;
+                }
+                if ilast != NONE {
+                    ws.next[ilast as usize] = inext;
+                } else {
+                    let h_idx = amf_bucket_of(ws.wf[i], n);
+                    ws.head[h_idx] = inext;
+                }
+            }
+        }
+        pme2 = pme2_s;
+    } else {
+        let mut p = ws.pe[me] as usize;
+        let mut pme1_rw: usize = ws.pfree;
+        let slenme = (ws.len[me] - elenme) as usize;
+        let elenme_u = elenme as usize;
+        for knt1 in 1..=elenme_u + 1 {
+            let e: usize;
+            let mut pj: usize;
+            let ln: usize;
+            if knt1 > elenme_u {
+                e = me;
+                pj = p;
+                ln = slenme;
+            } else {
+                e = ws.iw[p] as usize;
+                p += 1;
+                pj = ws.pe[e] as usize;
+                ln = ws.len[e] as usize;
+            }
+            for knt2 in 1..=ln {
+                let i = ws.iw[pj] as usize;
+                pj += 1;
+                let nvi = ws.nv[i];
+                if nvi > 0 {
+                    if ws.pfree >= ws.iwlen {
+                        ws.pe[me] = p as i32;
+                        ws.len[me] -= knt1 as i32;
+                        if ws.len[me] == 0 {
+                            ws.pe[me] = NONE;
+                        }
+                        ws.pe[e] = pj as i32;
+                        ws.len[e] = (ln - knt2) as i32;
+                        if ws.len[e] == 0 {
+                            ws.pe[e] = NONE;
+                        }
+                        ws.ncmpa += 1;
+                        for j in 0..ws.n {
+                            let pn = ws.pe[j];
+                            if pn >= 0 {
+                                let pn_u = pn as usize;
+                                ws.pe[j] = ws.iw[pn_u];
+                                ws.iw[pn_u] = flip(j as i32);
+                            }
+                        }
+                        let mut psrc = 0usize;
+                        let mut pdst = 0usize;
+                        let pend = pme1_rw;
+                        while psrc < pend {
+                            let j_marker = flip(ws.iw[psrc]);
+                            psrc += 1;
+                            if j_marker >= 0 {
+                                let j = j_marker as usize;
+                                ws.iw[pdst] = ws.pe[j];
+                                ws.pe[j] = pdst as i32;
+                                pdst += 1;
+                                let lenj = ws.len[j] as usize;
+                                if lenj > 0 {
+                                    ws.iw.copy_within(psrc..psrc + lenj - 1, pdst);
+                                    psrc += lenj - 1;
+                                    pdst += lenj - 1;
+                                }
+                            }
+                        }
+                        let p1 = pdst;
+                        ws.iw.copy_within(pme1_rw..ws.pfree, pdst);
+                        pdst += ws.pfree - pme1_rw;
+                        pme1_rw = p1;
+                        ws.pfree = pdst;
+                        pj = ws.pe[e] as usize;
+                        p = ws.pe[me] as usize;
+                    }
+                    degme += nvi as usize;
+                    ws.nv[i] = -nvi;
+                    ws.iw[ws.pfree] = i as i32;
+                    ws.pfree += 1;
+                    let ilast = ws.last[i];
+                    let inext = ws.next[i];
+                    if inext != NONE {
+                        ws.last[inext as usize] = ilast;
+                    }
+                    if ilast != NONE {
+                        ws.next[ilast as usize] = inext;
+                    } else {
+                        let h_idx = amf_bucket_of(ws.wf[i], n);
+                        ws.head[h_idx] = inext;
+                    }
+                }
+            }
+            if e != me {
+                ws.pe[e] = flip(me as i32);
+                ws.w[e] = 0;
+            }
+        }
+        pme1 = pme1_rw;
+        pme2 = (ws.pfree - 1) as i32;
+    }
+
+    ws.degree[me] = degme as i32;
+    ws.pe[me] = pme1 as i32;
+    ws.len[me] = pme2 - pme1 as i32 + 1;
+    ws.elen[me] = flip(nvpiv + degme as i32);
+    ws.wflg = clear_flag(ws.wflg, ws.wbig, &mut ws.w);
+
+    let pme2_excl: usize = if pme2 < pme1 as i32 {
+        pme1
+    } else {
+        (pme2 + 1) as usize
+    };
+    Ok((pme1, pme2_excl, nvpiv, degme))
+}
+
+/// AMF analogue of [`finalize_step`]. The Pass-1 element seeding,
+/// hash-bucket detection, and supervariable-merge structure mirror
+/// AMD; the per-iteration accumulator carries the AMF triple
+/// `(deg, wf3, wf4)` (Amestoy 1999 thesis), and the re-insertion
+/// computes the quantized RMF score and inserts at
+/// `head[amf_bucket_of(wf[i], n)]`.
+///
+/// Six metric-specific sites compared to AMD (numbered per
+/// `dev/research/amf-clean-room.md` Section 6):
+/// 1. Pass-1 also resets `wf[e] = 0` on the first touch of each
+///    element (lazy cache sentinel).
+/// 2. Pass-2 element walk caches `wf[e] = dext * (2*deg(e) - dext - 1)`
+///    on first encounter and accumulates `wf4 += wf[e]`.
+/// 3. Pass-2 variable walk accumulates `wf3 += nv[j]`.
+/// 4. Loose-degree special case zeroes `wf3 = wf4 = 0`; the kept
+///    `degree[i]` cannot have a meaningful WF-subtraction so the
+///    AMF score is reset.
+/// 5. Supervariable merge takes `wf[i] = max(wf[i], wf[j])`.
+/// 6. Re-insertion uses the saturated/regular RMF formula with
+///    `dummy = i32::MAX - 1`, quantizes via `bucket(wf[i], n)`, and
+///    threads through `head` of length `2 * n + 2`.
+///
+/// Reference: `ana_orderings.F:4660-5025`.
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_step_amf(
+    ws: &mut Workspace,
+    me: usize,
+    pme1: usize,
+    pme2_excl: usize,
+    nvpiv: i32,
+    degme: usize,
+    elenme: i32,
+    aggressive: bool,
+) -> StepFlops {
+    let n = ws.n;
+    let mut degme = degme;
+    let mut nvpiv = nvpiv;
+
+    // Pass 1: seed w[e] for every element in each member's list, and
+    // reset wf[e] = 0 on the first touch (lazy cache for Pass-2).
+    for pme in pme1..pme2_excl {
+        let i = ws.iw[pme] as usize;
+        let eln = ws.elen[i];
+        if eln > 0 {
+            let nvi = -ws.nv[i];
+            let wnvi = ws.wflg - nvi;
+            let pi = ws.pe[i] as usize;
+            for k in 0..eln as usize {
+                let e = ws.iw[pi + k] as usize;
+                let mut we = ws.w[e];
+                if we >= ws.wflg {
+                    we -= nvi;
+                } else if we != 0 {
+                    we = ws.degree[e] + wnvi;
+                    ws.wf[e] = 0;
+                }
+                ws.w[e] = we;
+            }
+        }
+    }
+
+    // Pass 2: AMF triple-accumulator (deg, wf3, wf4), aggressive
+    // absorption on dext == 0, mass elimination, hash-bucket insert.
+    for pme in pme1..pme2_excl {
+        let i = ws.iw[pme] as usize;
+        let p1 = ws.pe[i] as usize;
+        let p2 = p1 + ws.elen[i] as usize;
+        let mut pn = p1;
+        let mut deg: usize = 0;
+        let mut hash: usize = 0;
+        let mut wf3: i32 = 0;
+        let mut wf4: i32 = 0;
+        let nvi = -ws.nv[i];
+
+        // Element sub-pass.
+        if aggressive {
+            for p in p1..p2 {
+                let e = ws.iw[p] as usize;
+                let we = ws.w[e];
+                if we != 0 {
+                    let dext = we - ws.wflg;
+                    if dext > 0 {
+                        if ws.wf[e] == 0 {
+                            // First touch this iter: cache the surface
+                            // contribution dext*(2*deg(e) - dext - 1).
+                            ws.wf[e] = dext * (2 * ws.degree[e] - dext - 1);
+                        }
+                        wf4 += ws.wf[e];
+                        deg += dext as usize;
+                        ws.iw[pn] = e as i32;
+                        pn += 1;
+                        hash = hash.wrapping_add(e);
+                    } else {
+                        // Aggressive absorption.
+                        ws.pe[e] = flip(me as i32);
+                        ws.w[e] = 0;
+                    }
+                }
+            }
+        } else {
+            for p in p1..p2 {
+                let e = ws.iw[p] as usize;
+                let we = ws.w[e];
+                if we != 0 {
+                    let dext = we - ws.wflg;
+                    if ws.wf[e] == 0 {
+                        ws.wf[e] = dext * (2 * ws.degree[e] - dext - 1);
+                    }
+                    wf4 += ws.wf[e];
+                    deg += dext as usize;
+                    ws.iw[pn] = e as i32;
+                    pn += 1;
+                    hash = hash.wrapping_add(e);
+                }
+            }
+        }
+
+        ws.elen[i] = (pn - p1 + 1) as i32;
+        let p3 = pn;
+        let p4 = p1 + ws.len[i] as usize;
+        // Variable sub-pass.
+        for p in p2..p4 {
+            let j = ws.iw[p] as usize;
+            let nvj = ws.nv[j];
+            if nvj > 0 {
+                deg += nvj as usize;
+                wf3 += nvj;
+                ws.iw[pn] = j as i32;
+                pn += 1;
+                hash = hash.wrapping_add(j);
+            }
+        }
+
+        if ws.elen[i] == 1 && p3 == pn {
+            // Mass elimination (equivalent to MUMPS DEG==0 in
+            // aggressive / non-halo mode).
+            ws.pe[i] = flip(me as i32);
+            let nvi_sv = -ws.nv[i];
+            debug_assert!(nvi_sv >= 0);
+            degme -= nvi_sv as usize;
+            nvpiv += nvi_sv;
+            ws.nel += nvi_sv as usize;
+            ws.nv[i] = 0;
+            ws.elen[i] = NONE;
+            ws.n_mass_elim += 1;
+        } else {
+            // Loose-degree special case: if the prior degree estimate
+            // is already tighter, keep it but the WF accumulator is
+            // not subtraction-safe — zero it.
+            if ws.degree[i] < deg as i32 {
+                wf3 = 0;
+                wf4 = 0;
+            } else {
+                ws.degree[i] = deg as i32;
+            }
+            // wf[i] = wf4 + 2 * nvi * wf3 (Amestoy 1999 eq. for B3
+            // contribution; see ana_orderings.F:4810).
+            ws.wf[i] = wf4 + 2 * nvi * wf3;
+
+            // Swap-dance to put `me` at the head of i's element list.
+            if p1 != pn {
+                ws.iw[pn] = ws.iw[p3];
+            }
+            if p3 != p1 {
+                ws.iw[p3] = ws.iw[p1];
+            }
+            ws.iw[p1] = me as i32;
+            ws.len[i] = (pn - p1 + 1) as i32;
+
+            // Hash-bucket insertion (sign-bit encoding identical to
+            // AMD; head reuse is safe because hash mod n falls in
+            // the fine bucket region [0, n)).
+            let h = hash % n;
+            let j = ws.head[h];
+            if j <= NONE {
+                ws.next[i] = flip(j);
+                ws.head[h] = flip(i as i32);
+            } else {
+                ws.next[i] = ws.last[j as usize];
+                ws.last[j as usize] = i as i32;
+            }
+            ws.last[i] = h as i32;
+        }
+    }
+
+    let degme_i32 = degme as i32;
+    ws.degree[me] = degme_i32;
+    if degme_i32 > ws.lemax {
+        ws.lemax = degme_i32;
+    }
+    ws.wflg += ws.lemax;
+    ws.wflg = clear_flag(ws.wflg, ws.wbig, &mut ws.w);
+
+    // Supervariable detection. Identical to AMD except merge updates
+    // wf[i] = max(wf[i], wf[j]).
+    for pme in pme1..pme2_excl {
+        let i_anchor = ws.iw[pme] as usize;
+        if ws.nv[i_anchor] >= 0 {
+            continue;
+        }
+        let h = ws.last[i_anchor] as usize;
+        let j_head = ws.head[h];
+        let mut i: i32 = if j_head == NONE {
+            NONE
+        } else if j_head < NONE {
+            ws.head[h] = NONE;
+            flip(j_head)
+        } else {
+            let chain_start = ws.last[j_head as usize];
+            ws.last[j_head as usize] = NONE;
+            chain_start
+        };
+        while i != NONE && ws.next[i as usize] != NONE {
+            let i_u = i as usize;
+            let ln = ws.len[i_u];
+            let eln = ws.elen[i_u];
+            let pi = ws.pe[i_u];
+            for p in (pi + 1) as usize..(pi + ln) as usize {
+                ws.w[ws.iw[p] as usize] = ws.wflg;
+            }
+            let mut jlast = i_u;
+            let mut jp = ws.next[i_u];
+            while jp != NONE {
+                let jj = jp as usize;
+                let mut ok = ws.len[jj] == ln && ws.elen[jj] == eln;
+                if ok {
+                    let pj = ws.pe[jj];
+                    for p in (pj + 1) as usize..(pj + ln) as usize {
+                        if ws.w[ws.iw[p] as usize] != ws.wflg {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    ws.pe[jj] = flip(i);
+                    // AMF merge: wf takes the max of the two scores.
+                    let wf_j = ws.wf[jj];
+                    if wf_j > ws.wf[i_u] {
+                        ws.wf[i_u] = wf_j;
+                    }
+                    ws.nv[i_u] += ws.nv[jj];
+                    ws.nv[jj] = 0;
+                    ws.elen[jj] = NONE;
+                    jp = ws.next[jj];
+                    ws.next[jlast] = jp;
+                    ws.n_supervar_merge += 1;
+                } else {
+                    jlast = jj;
+                    jp = ws.next[jj];
+                }
+            }
+            ws.wflg += 1;
+            i = ws.next[i_u];
+        }
+    }
+
+    // Re-insertion: AMF saturated/regular RMF, quantize, bucket.
+    let dummy_f = AMF_DUMMY_I32 as f64;
+    let n_f = if n == 0 { 1.0 } else { n as f64 };
+    let mut p_write = pme1;
+    let nleft = ws.n - ws.nel;
+    for pme in pme1..pme2_excl {
+        let i = ws.iw[pme] as usize;
+        let nvi = -ws.nv[i];
+        if nvi > 0 {
+            ws.nv[i] = nvi;
+            let degme_i = degme_i32;
+            let nvi_i = nvi;
+            let rmf: f64;
+            let deg_i = ws.degree[i];
+            if (deg_i as usize) + (degme_i as usize) > nleft {
+                // Saturated branch. RMF1 uses original DEG.
+                let deg_f = deg_i as f64;
+                let rmf1 = deg_f * (deg_f - 1.0 + 2.0 * degme_i as f64) - ws.wf[i] as f64;
+                let new_deg = (nleft as i32) - nvi_i;
+                ws.degree[i] = new_deg;
+                let nd = new_deg as f64;
+                let rmf_new =
+                    nd * (nd - 1.0) - (degme_i - nvi_i) as f64 * (degme_i - nvi_i - 1) as f64;
+                rmf = rmf_new.min(rmf1);
+            } else {
+                let deg_f = deg_i as f64;
+                ws.degree[i] = deg_i + degme_i - nvi_i;
+                rmf = deg_f * (deg_f - 1.0 + 2.0 * degme_i as f64) - ws.wf[i] as f64;
+            }
+            let rmf = rmf / (nvi_i as f64 + 1.0);
+            let qscore: i32 = if rmf < dummy_f {
+                rmf.round() as i32
+            } else if rmf / n_f < dummy_f {
+                (rmf / n_f).round() as i32
+            } else {
+                AMF_DUMMY_I32
+            };
+            ws.wf[i] = qscore.max(1);
+
+            let d = amf_bucket_of(ws.wf[i], n);
+            let inext = ws.head[d];
+            if inext != NONE {
+                ws.last[inext as usize] = i as i32;
+            }
+            ws.next[i] = inext;
+            ws.last[i] = NONE;
+            ws.head[d] = i as i32;
+            if d < ws.mindeg {
+                ws.mindeg = d;
+            }
+            ws.iw[p_write] = i as i32;
+            p_write += 1;
+        }
+    }
+
+    // Me bookkeeping (same as AMD).
+    ws.nv[me] = nvpiv;
+    ws.len[me] = (p_write as i32) - pme1 as i32;
+    if ws.len[me] == 0 {
+        ws.pe[me] = NONE;
+        ws.w[me] = 0;
+    }
+    if elenme != 0 {
+        ws.pfree = p_write;
+    }
+
+    // Flop counters (identical to AMD).
+    let f = nvpiv as f64;
+    let r = degme_i32 as f64 + ws.ndense as f64;
+    let lnzme = f * r + (f - 1.0) * f / 2.0;
+    let s = f * r * r + r * (f - 1.0) * f + (f - 1.0) * f * (2.0 * f - 1.0) / 6.0;
+
+    StepFlops {
+        ndiv: lnzme,
+        nms_lu: s,
+        nms_ldl: (s + lnzme) / 2.0,
+    }
+}
+
+/// AMF analogue of [`run_elimination`].
+pub fn run_elimination_amf(
+    ws: &mut Workspace,
+    aggressive: bool,
+) -> Result<StepFlops, OrderingError> {
+    let mut flops = StepFlops::default();
+    while ws.nel < ws.n {
+        let me = match select_pivot_amf(ws) {
+            Some(m) => m,
+            None => break,
+        };
+        let elenme = ws.elen[me];
+        let (pme1, pme2, nvpiv, degme) = create_element_amf(ws, me)?;
+        flops.accumulate(finalize_step_amf(
+            ws, me, pme1, pme2, nvpiv, degme, elenme, aggressive,
+        ));
+    }
+    let f = ws.ndense as f64;
+    let lnzme = (f - 1.0) * f / 2.0;
+    let s = (f - 1.0) * f * (2.0 * f - 1.0) / 6.0;
+    flops.ndiv += lnzme;
+    flops.nms_lu += s;
+    flops.nms_ldl += (s + lnzme) / 2.0;
+    Ok(flops)
+}
+
 /// Run the main AMD elimination loop until every live supervariable
 /// has been either pivoted or dense-deferred. Returns the
 /// accumulated flop counts.

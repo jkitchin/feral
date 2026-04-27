@@ -22,26 +22,27 @@
 //!
 //! The trait below covers (1)–(5). Site (6) is metric-specific in the
 //! Pass-2 inner loop and is reached via the `run_elimination`
-//! dispatch — each metric impl provides its own concrete loop today
-//! (AMD reuses the existing loop in `algo.rs`). Phase B will decide
-//! whether to share Pass-2 via further generic-ification or keep two
-//! concrete loops; the trait shape here is forward-compatible with
-//! either choice.
+//! dispatch — each metric impl wires its own concrete loop in
+//! `algo.rs` (AMD: `run_elimination`, AMF: `run_elimination_amf`).
+//! The trait stays light: keeping the inner loops as parallel
+//! concrete functions trades ~300 LoC duplication for zero risk to
+//! the AMD bit-parity contract.
 //!
 //! Reference: `dev/research/amf-clean-room.md` Section 6.
 
-use super::algo::{run_elimination as run_elimination_amd, StepFlops};
+use super::algo::{run_elimination as run_elimination_amd, run_elimination_amf, StepFlops};
 use super::workspace::Workspace;
 use crate::OrderingError;
 
 /// Selection metric for an AMD-family bottom-up ordering.
 ///
 /// All methods are zero-overhead `#[inline(always)]` no-ops or
-/// identity functions in the AMD case; AMF will provide non-trivial
-/// implementations in Phase B. The trait is currently consumed only
-/// at dispatch points (`run_elimination`, the ordering driver in
-/// [`crate::quotient_graph::order`]) — the inner-loop sites that read
-/// the trait directly will land in Phase B alongside MinFill.
+/// identity functions in the AMD case; AMF (`MinFill`) provides
+/// non-trivial implementations. The trait is consumed at the
+/// `run_elimination` dispatch point and at the bucket-allocation
+/// dispatch in [`crate::quotient_graph::order`]; the metric-specific
+/// inner-loop sites are inlined into the concrete `run_elimination_*`
+/// functions in `algo.rs`.
 pub trait Metric {
     /// Bucket key produced by the selection metric. AMD uses `i32`
     /// (the running degree); AMF will also use `i32` (quantized RMF).
@@ -73,9 +74,8 @@ pub trait Metric {
     /// Run the metric's elimination loop on a freshly initialised
     /// `Workspace`. Returns the accumulated flop counters.
     ///
-    /// MinDegree dispatches to the AMD-specific concrete loop in
-    /// `algo.rs`. Phase B's MinFill will provide its own concrete
-    /// loop or the AMD loop generic-ified over `M: Metric`.
+    /// MinDegree dispatches to `run_elimination` (the AMD-specific
+    /// loop); MinFill dispatches to `run_elimination_amf`.
     fn run_elimination(ws: &mut Workspace, aggressive: bool) -> Result<StepFlops, OrderingError>;
 }
 
@@ -139,12 +139,11 @@ impl Metric for MinDegree {
 /// to pick the minimum-RMF entry. Supervariable absorption merges
 /// the per-supervariable WF with `max`.
 ///
-/// **Inner loop status**: stubbed via [`OrderingError::Internal`] in
-/// [`MinFill::run_elimination`] — the AMF Pass-2 accumulator and the
-/// coarse-bucket linear scan land in Phase B.2 of
-/// `dev/plans/amf-clean-room.md`. The semantic methods below are the
-/// stable surface that the (forthcoming) inner loop and the
-/// `feral-amf` crate will consume.
+/// **Inner loop**: [`MinFill::run_elimination`] dispatches to
+/// `run_elimination_amf` (Phase B.2 of `dev/plans/amf-clean-room.md`).
+/// The lazy WF(e) cache, three-accumulator Pass-2, supervariable
+/// max-merge of `wf`, saturated/regular RMF branch, and coarse-bucket
+/// linear scan all live in `algo.rs`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MinFill;
 
@@ -211,10 +210,8 @@ impl Metric for MinFill {
         }
     }
 
-    fn run_elimination(_ws: &mut Workspace, _aggressive: bool) -> Result<StepFlops, OrderingError> {
-        Err(OrderingError::Internal(
-            "AMF inner loop not yet implemented (Phase B.2)",
-        ))
+    fn run_elimination(ws: &mut Workspace, aggressive: bool) -> Result<StepFlops, OrderingError> {
+        run_elimination_amf(ws, aggressive)
     }
 }
 
@@ -366,18 +363,21 @@ mod tests {
         assert_eq!(parent, 42, "equal ⇒ unchanged");
     }
 
-    /// Dispatch returns the documented Internal sentinel until Phase B.2
-    /// implements the AMF inner loop. Workspace-shape inputs are valid
-    /// but ignored.
+    /// MinFill's elimination now runs the real AMF inner loop on a
+    /// workspace allocated with the AMF bucket count `2 * n + 2`.
+    /// Smoke test on a 2-variable pattern: must succeed and reach
+    /// `nel == n`.
     #[test]
-    fn min_fill_run_elimination_is_stubbed() {
+    fn min_fill_run_elimination_completes() {
         use crate::quotient_graph::WorkspaceOptions;
         use crate::CscPattern;
         let cp = [0i32, 1, 2];
         let ri = [0i32, 1];
         let p = CscPattern::new(2, &cp, &ri).unwrap();
-        let mut ws = Workspace::new(&p, &WorkspaceOptions::default()).unwrap();
-        let err = MinFill::run_elimination(&mut ws, true).unwrap_err();
-        assert!(matches!(err, OrderingError::Internal(_)));
+        let mut ws =
+            Workspace::new_with_n_buckets(&p, &WorkspaceOptions::default(), MinFill::n_buckets(2))
+                .unwrap();
+        MinFill::run_elimination(&mut ws, true).expect("AMF loop runs");
+        assert_eq!(ws.nel, ws.n);
     }
 }

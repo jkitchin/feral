@@ -6,15 +6,13 @@
 //! permutation of `0..n`. These tests pin that contract so Phase
 //! B.2's MinFill inner loop has a passing oracle to drive against.
 //!
-//! Today, MinDegree is the only `Metric` impl whose
-//! `run_elimination` is implemented; MinFill returns
-//! [`OrderingError::Internal`] until B.2 lands. The MinFill arm of
-//! every parameterised test asserts the stubbed-error contract so
-//! the moment B.2 wires up `run_elimination_amf`, the same tests
-//! will start exercising it instead.
+//! Phase B.2 has wired up the AMF inner loop, so every `Metric` arm
+//! now exercises the real `run_elimination`. The five fixtures hold
+//! both `MinDegree` and `MinFill` to the same generic invariant
+//! (output is a permutation of `0..n`).
 
 use feral_ordering_core::quotient_graph::{order, Metric, MinDegree, MinFill, WorkspaceOptions};
-use feral_ordering_core::{CscPattern, OrderingError};
+use feral_ordering_core::CscPattern;
 
 // ---------------------------------------------------------------------
 // Fixture builders. Each returns owned (col_ptr, row_idx) so the test
@@ -135,25 +133,9 @@ fn run_and_check_perm<M: Metric>(pattern: &CscPattern<'_>) {
     assert_is_permutation(&perm, pattern.n);
 }
 
-/// Run `order::<M>` and assert it returns the expected stubbed
-/// internal-error sentinel (used for MinFill until Phase B.2).
-fn assert_stubbed<M: Metric>(pattern: &CscPattern<'_>) {
-    let opts = WorkspaceOptions::default();
-    let err = order::<M>(pattern, &opts, true).expect_err("MinFill must error until B.2");
-    match err {
-        OrderingError::Internal(msg) => assert!(
-            msg.contains("AMF inner loop"),
-            "unexpected internal message: {msg}"
-        ),
-        other => panic!("expected Internal stub, got {other:?}"),
-    }
-}
-
 // ---------------------------------------------------------------------
 // Per-fixture parameterised tests. Each fixture is run through both
-// MinDegree (must succeed) and MinFill (must produce the documented
-// stub). Once Phase B.2 lands, the MinFill arm flips from
-// `assert_stubbed` to `run_and_check_perm`; this is the gate.
+// MinDegree and MinFill arms; both must produce a valid permutation.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -164,10 +146,10 @@ fn mindegree_arrow_3_perm() {
 }
 
 #[test]
-fn minfill_arrow_3_stubbed() {
+fn minfill_arrow_3_perm() {
     let (cp, ri) = arrow_3();
     let p = CscPattern::new(3, &cp, &ri).expect("valid pattern");
-    assert_stubbed::<MinFill>(&p);
+    run_and_check_perm::<MinFill>(&p);
 }
 
 #[test]
@@ -178,10 +160,10 @@ fn mindegree_dual_arrow_5_perm() {
 }
 
 #[test]
-fn minfill_dual_arrow_5_stubbed() {
+fn minfill_dual_arrow_5_perm() {
     let (cp, ri) = dual_arrow_5();
     let p = CscPattern::new(5, &cp, &ri).expect("valid pattern");
-    assert_stubbed::<MinFill>(&p);
+    run_and_check_perm::<MinFill>(&p);
 }
 
 #[test]
@@ -192,10 +174,10 @@ fn mindegree_tridiag_10_perm() {
 }
 
 #[test]
-fn minfill_tridiag_10_stubbed() {
+fn minfill_tridiag_10_perm() {
     let (cp, ri) = tridiag(10);
     let p = CscPattern::new(10, &cp, &ri).expect("valid pattern");
-    assert_stubbed::<MinFill>(&p);
+    run_and_check_perm::<MinFill>(&p);
 }
 
 #[test]
@@ -206,10 +188,10 @@ fn mindegree_banded_20_3_perm() {
 }
 
 #[test]
-fn minfill_banded_20_3_stubbed() {
+fn minfill_banded_20_3_perm() {
     let (cp, ri) = banded(20, 3);
     let p = CscPattern::new(20, &cp, &ri).expect("valid pattern");
-    assert_stubbed::<MinFill>(&p);
+    run_and_check_perm::<MinFill>(&p);
 }
 
 #[test]
@@ -223,16 +205,11 @@ fn mindegree_empty_pattern_perm() {
 }
 
 #[test]
-fn minfill_empty_pattern_short_circuits_via_stub() {
-    // Even on n=0 MinFill must error today; once B.2 lands, this test
-    // becomes the n=0 parity case for the MinFill loop.
+fn minfill_empty_pattern_perm() {
     let cp = [0i32];
     let ri: [i32; 0] = [];
     let p = CscPattern::new(0, &cp, &ri).expect("empty pattern");
     let opts = WorkspaceOptions::default();
-    let res = order::<MinFill>(&p, &opts, true);
-    assert!(
-        matches!(res, Err(OrderingError::Internal(_))),
-        "expected stub error on n=0; got {res:?}"
-    );
+    let (perm, _) = order::<MinFill>(&p, &opts, true).expect("n=0 succeeds");
+    assert!(perm.is_empty());
 }

@@ -79,6 +79,13 @@ pub struct Workspace {
     pub head: Vec<i32>,
     pub next: Vec<i32>,
     pub last: Vec<i32>,
+    /// Per-supervariable / per-element fill-score scratch used by the
+    /// AMF inner loop only. Length `n`. Ignored by the AMD path
+    /// (`feral-amd` never reads or writes it). For variable indices
+    /// `i`, holds the running quantized RMF score; for element indices
+    /// `e`, holds the lazily-cached `dext * (2*deg(e) - dext - 1)`
+    /// surface contribution (sentinel `0` = "first touch this iter").
+    pub wf: Vec<i32>,
 
     /// Generation counter for the mark array `w`.
     pub wflg: i32,
@@ -120,7 +127,24 @@ impl Workspace {
         pattern: &CscPattern<'_>,
         opts: &WorkspaceOptions,
     ) -> Result<Workspace, OrderingError> {
+        Self::new_with_n_buckets(pattern, opts, pattern.n)
+    }
+
+    /// Variant of [`Workspace::new`] that allocates `head` with the
+    /// caller-supplied bucket count. Used by AMF, where the quantized
+    /// fill score can exceed `n` and the head array must extend up to
+    /// `NBBUCK + 1 = 2 * n + 1`. AMD always passes `pattern.n`, which
+    /// makes this byte-equivalent to [`Workspace::new`].
+    ///
+    /// `n_buckets` must be at least `n` so the init insertion at
+    /// `head[deg]` (with `deg ≤ dense ≤ n`) is in range.
+    pub fn new_with_n_buckets(
+        pattern: &CscPattern<'_>,
+        opts: &WorkspaceOptions,
+        n_buckets: usize,
+    ) -> Result<Workspace, OrderingError> {
         let n = pattern.n;
+        debug_assert!(n_buckets >= n, "n_buckets must cover deg ∈ [0, n)");
 
         // i32 addressing requires n < i32::MAX. The algorithm also
         // stores `pfree` as i32 via `pe[i]`, so iwlen must fit.
@@ -190,9 +214,10 @@ impl Workspace {
         let mut elen: Vec<i32> = vec![0; n];
         let mut w: Vec<i32> = vec![1; n];
         let degree: Vec<i32> = len.clone();
-        let mut head: Vec<i32> = vec![NONE; n];
+        let mut head: Vec<i32> = vec![NONE; n_buckets];
         let mut next: Vec<i32> = vec![NONE; n];
         let mut last: Vec<i32> = vec![NONE; n];
+        let mut wf: Vec<i32> = vec![0; n];
 
         let wbig = i32::MAX - n as i32;
         let wflg = 0; // clear_flag will lift to 2 on first use.
@@ -217,13 +242,18 @@ impl Workspace {
                 pe[i] = NONE;
                 nel += 1;
             } else {
-                // LIFO head-insert at head[deg].
+                // LIFO head-insert at head[deg]. The AMF metric's
+                // `bucket(deg, n)` is identity for `deg ≤ n`, so the
+                // index `deg` is the right slot for both AMD and AMF
+                // at init time. Seed the AMF fill score so the AMF
+                // path can compute `bucket(wf[i], n)` consistently.
                 let inext = head[deg];
                 if inext != NONE {
                     last[inext as usize] = i as i32;
                 }
                 next[i] = inext;
                 head[deg] = i as i32;
+                wf[i] = deg as i32;
             }
         }
 
@@ -241,6 +271,7 @@ impl Workspace {
             head,
             next,
             last,
+            wf,
             wflg,
             wbig,
             lemax: 0,

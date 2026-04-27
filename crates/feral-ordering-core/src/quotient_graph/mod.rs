@@ -9,10 +9,12 @@
 //! supervariable hash bucket detection, and the inline garbage
 //! collector. They differ only in the *selection metric* —
 //! approximate degree (AMD) vs approximate fill (AMF) — which is
-//! abstracted behind the [`Metric`] trait. Phase A.2 ships the trait
-//! plus the AMD-specialised [`MinDegree`] impl; Phase B will add
-//! [`Metric`]'s second impl ([`feral-amf`'s `MinFill`]) and decide
-//! whether the inner-loop body itself becomes generic over `M`.
+//! abstracted behind the [`Metric`] trait. Phase A shipped the trait
+//! plus the AMD-specialised [`MinDegree`] impl; Phase B.2 added
+//! [`MinFill`] driving the parallel `run_elimination_amf` /
+//! `create_element_amf` / `select_pivot_amf` / `finalize_step_amf`
+//! family in `algo.rs`. The duplicated inner loops trade LoC for a
+//! zero-risk AMD bit-parity contract.
 //!
 //! Reference: Amestoy, Davis, Duff (1996) "An approximate minimum
 //! degree ordering algorithm," SIAM J. Matrix Analysis 17:886-905;
@@ -30,7 +32,8 @@ mod metric;
 mod workspace;
 
 pub use algo::{
-    create_element, finalize_permutation, finalize_step, run_elimination, select_pivot, StepFlops,
+    create_element, create_element_amf, finalize_permutation, finalize_step, finalize_step_amf,
+    run_elimination, run_elimination_amf, select_pivot, select_pivot_amf, StepFlops,
 };
 pub use metric::{Metric, MinDegree, MinFill};
 pub use workspace::{clear_flag, flip, Workspace, NONE};
@@ -91,7 +94,8 @@ pub fn order<M: Metric>(
     opts: &WorkspaceOptions,
     aggressive: bool,
 ) -> Result<(Vec<i32>, OrderDiagnostics), OrderingError> {
-    let mut ws = Workspace::new(pattern, opts)?;
+    let n_buckets = M::n_buckets(pattern.n);
+    let mut ws = Workspace::new_with_n_buckets(pattern, opts, n_buckets)?;
     let flops = M::run_elimination(&mut ws, aggressive)?;
     let diag = OrderDiagnostics {
         ncmpa: ws.ncmpa,
