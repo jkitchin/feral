@@ -1057,3 +1057,49 @@ First fix alone: bench killed at ~30 GB RSS after 8 minutes silent
 in sparse loop. Both fixes together: bench completes end-to-end with
 99.8% sparse residual / 100% sparse inertia / Phase 2.8.1 PASS on
 both buckets.
+
+## 2026-04-26-03: factor_nnz() = nrow * nelim
+
+**Tried.** Counting per-supernode L block as `nrow * nelim` (full
+dense column block). Predates this session; introduced when the
+multifrontal supernode storage was first wired up.
+
+**Why rejected.** Confirmed via `src/bin/diag_factor_nnz_accounting.rs`
+to be a 1.75× overcounting artifact relative to SSIDS's
+`inform%num_factor`. The strict-upper triangle of the eliminated
+block is structurally always zero (lower-triangular factor) and was
+sweeping in nonexistent fill. Bench was reporting nnzL/SSIDS p50 ≈
+1.75 across the kkt corpus when feral's actual L-fill medianly
+matches SSIDS exactly.
+
+**Replacement.** Per-supernode count is now
+`nelim*(nelim+1)/2 + (nrow-nelim)*nelim` (lower-tri-with-diagonal of
+eliminated block + trailing rect). Median nnzL/SSIDS = 1.000 across
+the kkt corpus after the fix. Committed `ae81b81`.
+
+**Evidence.** Counts across 71 sampled matrices: C/SSIDS geomean
+1.914 / median 1.833; B/SSIDS geomean 1.149 / median 1.000. After
+the fix, bench reports nnzL/SSIDS p50 = 1.00, geomean = 1.09, p99 =
+4.50. See `dev/journal/2026-04-26-03.org` 20:10 / 20:25 entries.
+
+## 2026-04-26-03: FERAL_KKT_ROOTS=all on 64 GB laptop
+
+**Tried.** Setting `FERAL_KKT_ROOTS=all` (167,614 matrices across
+`kkt + kkt-expansion + kkt-mittelmann`, 21 GB on disk) to validate
+expanded corpus end-to-end on the dev laptop.
+
+**Why rejected.** SIGKILLed before "Loading KKT matrices" line
+prints. The bench loads all CSC matrices upfront before the dense
+loop runs; combined corpus working set exceeds the 64 GB ceiling.
+Even `FERAL_KKT_ROOTS=kkt-mittelmann` alone (596 matrices, 4.2 GB on
+disk) SIGKILLs during the sparse loop because 584 of the 596 are
+n>1000 and the cumulative CSC working set plus per-matrix sparse
+factor scratch overruns memory.
+
+**Status.** Not a feral correctness issue — it's a bench harness
+architectural limitation. Mittelmann dense subset (12/596 matrices,
+n ≤ 1000) validated 100% inertia + residual pass. Full expanded-
+corpus validation requires either streaming bench redesign or
+beefier hardware. See session 03 "Next Session Should" item 1.
+
+**Evidence.** `dev/journal/2026-04-26-03.org` 20:50 entry.

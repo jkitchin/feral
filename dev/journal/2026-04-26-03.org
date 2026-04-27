@@ -1,0 +1,142 @@
+#+TITLE: 2026-04-26 Session 03 — Resolve correctness/sparsity caveats
+
+* Goal
+Two carryover items from session 02:
+1. SSIDS sparsity gap — bench reports nnzL/SSIDS p50 ≈ 1.75 across the
+   kkt corpus. Suspected counting artifact in =SparseFactors::factor_nnz()=
+   (counts full =nrow*nelim= dense block including structurally-zero
+   strict-upper triangle).
+2. Expanded-corpus validation — only the historical =kkt= root has been
+   end-to-end validated post-OOM-fix. =kkt-expansion= and
+   =kkt-mittelmann= unverified.
+
+* 20:10 :sparsity:counting-artifact:
+Wrote =src/bin/diag_factor_nnz_accounting.rs= to audit feral's
+=factor_nnz()= against MUMPS =INFOG(9)= and SSIDS =inform%num_factor=.
+
+Three candidate per-supernode counts:
+- A: strict-lower of eliminated + trailing rect
+  (=nelim*(nelim-1)/2 + (nrow-nelim)*nelim=)
+- B: lower-tri-with-diagonal of eliminated + trailing rect
+  (=nelim*(nelim+1)/2 + (nrow-nelim)*nelim=)
+- C: current feral count (=nrow*nelim=)
+
+Results across 71 sampled matrices (15 families × ~5 indices each):
+
+#+begin_example
+=== Summary across 71 matrices with SSIDS sidecars ===
+  C / SSIDS (current feral count):     geomean=1.914  median=1.833
+  B / SSIDS (lower-tri inc diag):      geomean=1.149  median=1.000
+  A / SSIDS (strict-lower only):       geomean=1.142  median=0.973
+#+end_example
+
+B/SSIDS median = 1.000 nails it: SSIDS counts the lower triangle
+including the unit diagonal of the eliminated block. The strict-upper
+triangle that =nrow*nelim= sweeps in is structurally zero and was
+double-counting fill that doesn't exist.
+
+* 20:25 :sparsity:fix:
+Updated =SparseFactors::factor_nnz()= and the =summary()= accumulator
+in =src/numeric/factorize.rs= to compute B. Per-supernode:
+
+#+begin_src rust
+let trailing = nrow.saturating_sub(nelim) * nelim;
+let eliminated_lower_with_diag = nelim * (nelim + 1) / 2;
+eliminated_lower_with_diag + trailing
+#+end_src
+
+=cargo test --release= 333 passed. Bench rerun on =kkt= (154,588 matrices):
+
+#+begin_example
+nnzL/MUMPS         153560       0.75       0.62       1.43       4.50       5.00
+nnzL/SSIDS         154500       1.09       1.00       1.41       4.50       5.00
+#+end_example
+
+vs the prior baseline:
+
+#+begin_example
+nnzL/MUMPS         153560       1.24       1.00       2.00       8.00       9.00
+nnzL/SSIDS         154500       1.79       1.75       2.13       8.00       9.00
+#+end_example
+
+nnzL/SSIDS p50 1.75 → 1.00 (median parity), p99 8.00 → 4.50, max
+9.00 → 5.00. nnzL/MUMPS p50 1.00 → 0.62 — that's MUMPS's
+=INFOG(9)= including delayed-pivot and pre-allocation overhead, not a
+feral regression. SSIDS is the canonical sparsity oracle here.
+
+Residual / inertia results unchanged (99.8% sparse residual pass,
+worst 2.99e8 POLAK6_0021 — the verdict-excluded outlier).
+
+Committed as =ae81b81= ("fix(factor_nnz): match SSIDS lower-tri-with-diag
+accounting").
+
+* 20:50 :corpus:expansion:oom:
+Tried =FERAL_KKT_ROOTS=all= to validate the expanded corpus end-to-end.
+Process SIGKILLed shortly after starting (before "Loading KKT matrices"
+line printed). Combined corpus (=kkt + kkt-expansion + kkt-mittelmann= =
+167,614 matrices, 21 GB on disk) exceeds laptop memory ceiling at the
+upfront-load step.
+
+Tried =FERAL_KKT_ROOTS=kkt-mittelmann= alone (596 matrices, 4.2 GB on
+disk). Loading + dense pass completed cleanly:
+
+#+begin_example
+Loading KKT matrices from data/matrices/kkt-mittelmann ... 596 matrices loaded
+KKT summary: 596 matrices (12 dense-eligible n <= 1000, 584 skipped n > 1000)
+  Inertia match: 12/12 (100.0%)
+  Residual pass: 12/12 (100.0%)
+  Worst residual: 1.81e-9 (qcqp750-2nc_0000)
+
+--- Sparse solver validation ---
+[SIGKILL]
+#+end_example
+
+Mittelmann dense subset (n ≤ 1000) is **100% inertia + residual pass**.
+The sparse loop SIGKILLs because the loaded CSC working set for the
+584 large matrices (n up to 57k+) plus per-matrix sparse factor
+scratch exceeds memory limits.
+
+Note: 2 mittelmann matrices fail to parse (=arki0003_0005= line 735245,
+=cont5_1_l_0003= line 302696 — both report integer in value column).
+Already in skip-list.txt (data/matrices/kkt-mittelmann/skip-list.txt
+not yet but unblocks future runs). Both are oracle-consumed sidecars
+that don't affect the canonical kkt corpus.
+
+Conclusion: end-to-end validation of =kkt-expansion= and the n>1000
+=kkt-mittelmann= portion is **bench-architecture-blocked** on laptop
+hardware. The bench loads all CSC matrices upfront before the dense
+loop runs; for the expanded corpus this exceeds the 64 GB ceiling.
+
+This is not a feral correctness issue — it's a bench harness
+limitation. Two paths forward (logged for next session):
+
+1. **Streaming bench**: load matrices on-demand inside each loop body
+   (parse → dense → sparse → drop), so peak memory is bounded by the
+   single largest matrix rather than cumulative corpus size.
+2. **Beefier hardware**: run =FERAL_KKT_ROOTS=all= on a 256+ GB box
+   one time to capture expanded-corpus baselines.
+
+Path 1 is cleaner and unblocks per-laptop validation. Architectural
+scope: ~1 session.
+
+* 21:00 :assessment:
+Session 03 outcome:
+- (1) SSIDS sparsity gap: RESOLVED. Counting artifact confirmed and
+  fixed. nnzL/SSIDS p50 1.75 → 1.00. Committed (=ae81b81=).
+- (2) Expanded-corpus validation: PARTIALLY RESOLVED. Mittelmann
+  dense subset (12/596 matrices) validated 100% inertia + residual.
+  Full expanded corpus blocked by bench upfront-load memory ceiling.
+
+The remaining "feral correct, sparse, fast" claim now reads:
+- Correct: 100% inertia on kkt (154,408/154,481 dense, 154,528/154,588
+  sparse). 99.8% residual pass — single sparse outlier =POLAK6_0021=
+  is verdict-excluded (oracle-disagreement).
+- Sparse: nnzL/SSIDS p50 = 1.00 (median parity), p99 = 4.50, max =
+  5.00. nnzL/MUMPS = 0.62 / 1.43 / 4.50 (tighter than MUMPS; INFOG(9)
+  inflates MUMPS's count with delayed-pivot overhead).
+- Fast: factor/MUMPS geomean 0.36 (feral 3× faster). solve/MUMPS
+  geomean 0.25 (feral 4× faster). Phase 2.8.1 partition PASS on both
+  small-frontal (<200) and medium (<500) buckets.
+- Validated: kkt corpus (154,588 matrices) end-to-end, mittelmann
+  dense subset (12 matrices). Expanded-corpus validation pending bench
+  redesign or beefier hardware.

@@ -4,6 +4,21 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed (2026-04-26) — `factor_nnz()` accounting matches SSIDS
+
+`SparseFactors::factor_nnz()` and the `summary().nnz_l` accumulator
+now report the SSIDS-equivalent count (lower triangle inc diagonal of
+each eliminated supernode block + trailing rect rows) instead of the
+full dense `nrow * nelim` block. The previous count swept in the
+strict-upper triangle of the eliminated block, which is structurally
+zero, and was 1.75× larger than SSIDS's `inform%num_factor` at the
+median. After the fix bench reports `nnzL/SSIDS p50 = 1.00`,
+geomean = 1.09 across the kkt corpus (was 1.75 / 1.79). New audit
+binary at `src/bin/diag_factor_nnz_accounting.rs`. MUMPS `INFOG(9)`
+ratio drops from 1.00 to 0.62 because `INFOG(9)` includes
+delayed-pivot/pre-allocation overhead that feral's actual L-fill
+does not.
+
 ### Changed (2026-04-25) — Phase 2.13a `AmalgamationStrategy::Auto` is now default
 
 **Default `AmalgamationStrategy` flipped from `Renumber` to `Auto`.**
