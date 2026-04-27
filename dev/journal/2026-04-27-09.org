@@ -1,0 +1,70 @@
+#+TITLE: Journal 2026-04-27-09
+#+STARTUP: showall
+
+* 13:30 :amf:phase-d:start:
+Picking up Phase D of dev/plans/amf-clean-room.md after session 08
+landed Phase C scaffold (commit 1f40251). Goal for this session is
+the *opt-in* AMF wire-up only: add OrderingMethod::Amf and route it
+through run_external_ordering, but leave pick_default_method
+unchanged. The plan's MUMPS-style "AMF for SYM=2 N≤10000, MetisND
+otherwise" default flip is gated on the Phase C corpus regen
+(170k matrices, multi-hour user-driven run) producing the
+.hamf4.json sidecars that tests/amf_corpus_oracle.rs needs to
+validate per-cluster fill ratios before the default changes.
+
+* 13:35 :amf:phase-d:design:
+Decision: keep this commit minimal and ride the existing
+OrderingMethod plumbing. The dispatcher in run_external_ordering
+is already a simple match arm per method; Auto resolution
+(choose_adaptive) already short-circuits non-Auto inputs as
+passthrough, so adding Amf needs no change there.
+
+Promoted feral-amf from [dev-dependencies] to [dependencies] in
+root Cargo.toml. The dev-dep slot was used by
+tests/amf_corpus_oracle.rs only; runtime use from src/symbolic
+needs a real dep edge.
+
+* 13:40 :amf:phase-d:test-first:
+Added symbolic_factorize_amf_produces_valid_perm in
+src/symbolic/mod.rs::tests, mirroring
+symbolic_factorize_metis_produces_valid_perm. Asserts perm is a
+bijection on small_grid_5x5, perm[perm_inv[i]] == i, and
+sym.resolved_method == OrderingMethod::Amf. Pin on resolved_method
+catches future refactors of choose_adaptive that might
+accidentally route Amf elsewhere.
+
+* 13:45 :amf:phase-d:gates-green:
+- cargo test --release --lib: 165/165 (+1 from 164).
+- cargo test -p feral-amd --tests: 12/12 oracle_match (AMD bit-
+  parity preserved — this commit does not touch feral-amd or its
+  workspace plumbing).
+- cargo test --release --test amf_corpus_oracle -- --ignored:
+  2/2 (ORBIT2_0000 nnz_L = 32 105, well under the 120 000
+  budget; HATFLDFLNE_000{0,1} sidecars within 1.10× ratio).
+- cargo clippy -- -D warnings, cargo fmt --check: clean.
+
+Commit 6f752fd feat(amf): Phase D wire-up — opt-in
+OrderingMethod::Amf. 2 files changed, +37/-4.
+
+* 13:55 :bench:end-of-session:
+cargo run --bin bench --release on the 156 927 KKT corpus.
+Phase 2.8.1 exit partition unchanged from session 08:
+  - dense small-frontal p90 = 1.25 (target 2.0) PASS
+  - dense medium       p90 = 1.72 (target 3.0) PASS
+  - sparse small-frontal p90 = 1.52 (target 2.0) PASS
+  - sparse medium      p90 = 1.52 (target 3.0) PASS
+NASH_0111 still on top of the worst-ratio list at 22.75× — opt-in
+wire-up should not change anything since pick_default_method is
+untouched, and it doesn't.
+
+* 14:00 :status:end-of-session:
+Plan position: Phases A.1, A.2, B.1-B.4, C-scaffold, D-wire-up
+complete. Remaining: Phase C corpus regen (user-driven multi-
+hour run) and Phase D default flip (gated on the regen).
+
+Test counts:
+  feral lib              165/165
+  feral-amd              51 + 12 oracle_match
+  feral-amf              7 + 3 expected_perm
+  feral-ordering-core    56 + 10
+  amf_corpus_oracle      2/2 (ignored)
