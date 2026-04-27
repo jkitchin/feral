@@ -660,3 +660,21 @@ the inertia of A_FF only — documented prominently.
 References cited: MUMPS file:line, Duff & Reid 1983 (multifrontal),
 Pirnay-López 2012 (sIPOPT use case), Gould-Scott-Hu 2007 (Schur
 API survey).
+
+* 23:30 :f31:schur:ordering:
+F3.1 ordering primitive landed: src/ordering/schur.rs with
+compute_schur_aware_perm + restrict_pattern_to_subgraph helper.
+9 unit tests on a 6x6 hand-built KKT (4x4 identity-block + dense
+trailing 2x2 Schur): tail placement, valid permutation, empty
+fallback, dup/out-of-range/full-Schur rejection, n=0, single-element
+Schur, subgraph restriction edge-drop. cargo test --lib 182/182
+pass; cargo clippy --lib -D warnings clean. Wired via pub mod
+schur in src/ordering/mod.rs.
+
+Scope discipline: F3.1 delivers the ordering primitive only. The
+symbolic_factorize_with_schur integration (etree+postorder+supernode
+tail invariant) belongs in F3.2 alongside the numeric stopping
+rule (NVSCHUR per-front) and root-Schur block extraction. Reason:
+postorder doesn't preserve the appended Schur tail unconditionally,
+and that interaction is best handled in the same change as the
+NVSCHUR bound on nelim.
