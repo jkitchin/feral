@@ -24,7 +24,7 @@ pub use feral_ordering_core::{CscPattern, OrderingError, OrderingStats, CONTRACT
 pub use stats::AmdStats;
 
 use feral_ordering_core::quotient_graph::{
-    finalize_permutation, run_elimination, Workspace, WorkspaceOptions,
+    finalize_permutation, order, run_elimination, MinDegree, Workspace, WorkspaceOptions,
 };
 use std::time::Instant;
 
@@ -109,22 +109,16 @@ pub fn amd_order_full(
     let ws_opts = WorkspaceOptions {
         dense_alpha: opts.dense_alpha,
     };
-    let mut ws = Workspace::new(pattern, &ws_opts)?;
-    let ndense = ws.ndense;
-    let flops = run_elimination(&mut ws, opts.aggressive)?;
-    let ncmpa = ws.ncmpa;
-    let n_mass_elim = ws.n_mass_elim;
-    let n_supervar_merge = ws.n_supervar_merge;
-    let perm = finalize_permutation(&mut ws);
+    let (perm, diag) = order::<MinDegree>(pattern, &ws_opts, opts.aggressive)?;
     let amd_stats = AmdStats {
-        ncmpa,
+        ncmpa: diag.ncmpa,
         n_clear_flag: 0,
-        n_mass_elim,
-        n_supervar_merge,
-        n_dense_deferred: ndense.max(0) as u32,
-        ndiv: flops.ndiv.max(0.0) as u64,
-        nms_lu: flops.nms_lu.max(0.0) as u64,
-        nms_ldl: flops.nms_ldl.max(0.0) as u64,
+        n_mass_elim: diag.n_mass_elim,
+        n_supervar_merge: diag.n_supervar_merge,
+        n_dense_deferred: diag.ndense.max(0) as u32,
+        ndiv: diag.flops.ndiv.max(0.0) as u64,
+        nms_lu: diag.flops.nms_lu.max(0.0) as u64,
+        nms_ldl: diag.flops.nms_ldl.max(0.0) as u64,
     };
     let ordering_stats = OrderingStats {
         time_us: t0.elapsed().as_micros() as u64,
