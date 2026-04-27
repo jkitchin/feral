@@ -697,6 +697,213 @@ pub fn axpy2_minus_unroll4_nofma(
     });
 }
 
+/// Rank-`n_elim` deferred-Schur trailing-column update with strided source.
+///
+/// Computes, **for one trailing column at a time**, the cumulative
+/// rank-1 axpy:
+///
+/// ```text
+///     for q in 0..n_elim {
+///         dst[i] = dst[i] - alphas[q] * src[q*col_stride + i]   for i in 0..len
+///     }
+/// ```
+///
+/// `src` is laid out as `n_elim` columns of stride `col_stride`,
+/// where each column contributes only the first `len` entries to
+/// `dst` (`len == dst.len()`). The slack `col_stride - len` between
+/// successive columns is unused by the kernel and may contain
+/// arbitrary data — this matches the column-major front layout where
+/// `col_stride = nrow` and `len = nrow - j` for trailing column `j`.
+///
+/// The contract with [`axpy_minus_unroll4_nofma`] is bit-exact:
+/// per-element, the subtractions are issued in ascending `q` order
+/// using the same explicit `mul + sub` rounding sequence (no FMA).
+/// In particular, `alphas[q] == 0.0` is skipped — matching the
+/// `do_1x1_update` early-return on zero alpha. Calling this function
+/// with `n_elim` rank-1 contributions produces the same bit pattern as
+/// `n_elim` sequential calls to `axpy_minus_unroll4_nofma`, without
+/// the per-call pulp dispatch overhead.
+///
+/// Preconditions:
+/// - `dst.len() == len`.
+/// - `src.len() >= (n_elim - 1) * col_stride + len` when `n_elim > 0`.
+/// - `dst` is disjoint from `src`.
+/// - `alphas.len() == n_elim`.
+///
+/// W-2 from `dev/plans/dense-kernel-speedup.md`. Replaces the
+/// `O(n_elim * trailing)` pulp dispatch pattern with `O(trailing)`
+/// dispatches by accumulating all `n_elim` contributions in
+/// register-resident accumulators per row-vector.
+#[allow(dead_code, clippy::too_many_arguments)]
+pub fn schur_panel_minus_nofma_strided(
+    dst: &mut [f64],
+    src_block: &[f64],
+    src_first_col: usize,
+    n_elim: usize,
+    col_stride: usize,
+    src_row_offset: usize,
+    len: usize,
+    alphas: &[f64],
+) {
+    assert_eq!(
+        dst.len(),
+        len,
+        "schur_panel_minus_nofma_strided: dst.len() must equal len"
+    );
+    assert_eq!(
+        alphas.len(),
+        n_elim,
+        "schur_panel_minus_nofma_strided: alphas.len() must equal n_elim"
+    );
+
+    if n_elim == 0 || len == 0 {
+        return;
+    }
+
+    // Compute the start of pivot column q's row-`src_row_offset`
+    // entry inside `src_block`. Caller passes the entire `before`
+    // slice (everything ahead of the trailing column being updated)
+    // so we can address all pivot columns from a single base. The
+    // last byte we touch is
+    //   (src_first_col + n_elim - 1) * col_stride + src_row_offset + len - 1.
+    let last_q = n_elim - 1;
+    let max_idx = (src_first_col + last_q) * col_stride + src_row_offset + len;
+    assert!(
+        src_block.len() >= max_idx,
+        "schur_panel_minus_nofma_strided: src_block too short ({} < {})",
+        src_block.len(),
+        max_idx
+    );
+
+    struct K<'a> {
+        dst: &'a mut [f64],
+        src_block: &'a [f64],
+        src_first_col: usize,
+        n_elim: usize,
+        col_stride: usize,
+        src_row_offset: usize,
+        len: usize,
+        alphas: &'a [f64],
+    }
+
+    impl pulp::WithSimd for K<'_> {
+        type Output = ();
+
+        // The `for q in 0..n_elim` loops below use `q` to index multiple
+        // disjoint quantities (alphas[q], src_first_col + q, the per-q
+        // src column offset). Rewriting as
+        // `alphas.iter().enumerate().take(n_elim)` would obscure the
+        // hot-loop intent and complicate the zero-alpha skip.
+        #[allow(clippy::needless_range_loop)]
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) {
+            let Self {
+                dst,
+                src_block,
+                src_first_col,
+                n_elim,
+                col_stride,
+                src_row_offset,
+                len,
+                alphas,
+            } = self;
+
+            let (dst_body, dst_tail) = S::as_mut_simd_f64s(dst);
+            let body_len = dst_body.len();
+            let tail_off = body_len * S::F64_LANES;
+
+            // 4-way unrolled main body. Per chunk, we hold 4 dst
+            // accumulators in SIMD registers, then iterate q=0..n_elim
+            // and apply `dst -= mul(alpha_q, src_q)` to each accumulator
+            // sequentially. This preserves the bit-exact rounding order
+            // of `axpy_minus_unroll4_nofma` called n_elim times: for
+            // each lane, the sequence of rounded subtractions is
+            //   acc <- round(acc - round(alpha_q * src_q[i]))
+            // for q in ascending order — identical to the rank-1 outer
+            // loop in `apply_blocked_schur`.
+            let chunks = body_len / 4;
+            for chunk_idx in 0..chunks {
+                let base = chunk_idx * 4;
+                let mut a0 = dst_body[base];
+                let mut a1 = dst_body[base + 1];
+                let mut a2 = dst_body[base + 2];
+                let mut a3 = dst_body[base + 3];
+                for q in 0..n_elim {
+                    let alpha_q = alphas[q];
+                    if alpha_q == 0.0 {
+                        continue;
+                    }
+                    let av = simd.splat_f64s(alpha_q);
+                    let col_off = (src_first_col + q) * col_stride + src_row_offset;
+                    let src_q = &src_block[col_off..col_off + len];
+                    let (sb, _st) = S::as_simd_f64s(src_q);
+                    let m0 = simd.mul_f64s(av, sb[base]);
+                    let m1 = simd.mul_f64s(av, sb[base + 1]);
+                    let m2 = simd.mul_f64s(av, sb[base + 2]);
+                    let m3 = simd.mul_f64s(av, sb[base + 3]);
+                    a0 = simd.sub_f64s(a0, m0);
+                    a1 = simd.sub_f64s(a1, m1);
+                    a2 = simd.sub_f64s(a2, m2);
+                    a3 = simd.sub_f64s(a3, m3);
+                }
+                dst_body[base] = a0;
+                dst_body[base + 1] = a1;
+                dst_body[base + 2] = a2;
+                dst_body[base + 3] = a3;
+            }
+
+            // Tail full-lane SIMD vectors (0..3 leftover after the 4-way unroll).
+            let tail_chunks_start = chunks * 4;
+            for body_idx in tail_chunks_start..body_len {
+                let mut acc = dst_body[body_idx];
+                for q in 0..n_elim {
+                    let alpha_q = alphas[q];
+                    if alpha_q == 0.0 {
+                        continue;
+                    }
+                    let av = simd.splat_f64s(alpha_q);
+                    let col_off = (src_first_col + q) * col_stride + src_row_offset;
+                    let src_q = &src_block[col_off..col_off + len];
+                    let (sb, _st) = S::as_simd_f64s(src_q);
+                    let m = simd.mul_f64s(av, sb[body_idx]);
+                    acc = simd.sub_f64s(acc, m);
+                }
+                dst_body[body_idx] = acc;
+            }
+
+            // Masked tail (< one full lane). Same per-element ordering.
+            if !dst_tail.is_empty() {
+                let mut acc = simd.partial_load_f64s(dst_tail);
+                for q in 0..n_elim {
+                    let alpha_q = alphas[q];
+                    if alpha_q == 0.0 {
+                        continue;
+                    }
+                    let av = simd.splat_f64s(alpha_q);
+                    let col_off = (src_first_col + q) * col_stride + src_row_offset;
+                    let src_q = &src_block[col_off..col_off + len];
+                    let src_q_tail = &src_q[tail_off..];
+                    let s = simd.partial_load_f64s(src_q_tail);
+                    let m = simd.mul_f64s(av, s);
+                    acc = simd.sub_f64s(acc, m);
+                }
+                simd.partial_store_f64s(dst_tail, acc);
+            }
+        }
+    }
+
+    dispatch_nofma(K {
+        dst,
+        src_block,
+        src_first_col,
+        n_elim,
+        col_stride,
+        src_row_offset,
+        len,
+        alphas,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -948,6 +1155,111 @@ mod tests {
                 len
             );
         }
+    }
+
+    /// W-2: rank-`n_elim` accumulator must reproduce the bit pattern
+    /// produced by `n_elim` sequential `axpy_minus_unroll4_nofma`
+    /// calls in q-outer order. Since both kernels use explicit
+    /// `mul + sub` (no FMA), the per-element rounding sequence is
+    /// identical:
+    ///
+    ///   acc <- round(acc - round(alpha_q * src_q[i]))   for q in 0..n_elim
+    ///
+    /// We compare against an explicit reference loop rather than a
+    /// rebuilt naive_axpy_minus chain to keep the assertion tight.
+    #[test]
+    fn schur_panel_minus_nofma_strided_is_bit_exact_vs_rank1_reference() {
+        let mut rng = Xorshift64::new(0x517E_3D5C_4242_5042);
+        // n_elim values cover the W-2 fast-path range (1×1 panels);
+        // dst lengths cover SIMD boundaries.
+        let n_elim_sweep = [1usize, 2, 4, 7, 8, 16, 31, 32];
+        let len_sweep: &[usize] = &[1, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 256, 257];
+        for &n_elim in &n_elim_sweep {
+            for &len in len_sweep {
+                // col_stride > len: simulate the multifrontal layout
+                // where each pivot column has trailing slack.
+                let col_stride = len + 7 + n_elim;
+                // src_block holds `n_elim` columns of `col_stride` each;
+                // we treat row 0 of each column as the data the kernel
+                // touches (src_row_offset = 0 for simplicity).
+                let total = n_elim * col_stride;
+                let src_block: Vec<f64> = (0..total).map(|_| rng.next_f64()).collect();
+                let dst_init: Vec<f64> = (0..len).map(|_| rng.next_f64()).collect();
+                let alphas: Vec<f64> = (0..n_elim).map(|_| rng.next_f64() * 1.5).collect();
+
+                // Reference: run n_elim rank-1 axpys in q-ascending
+                // order. Each call uses the bit-exact rank-1 kernel.
+                let mut dst_ref = dst_init.clone();
+                for q in 0..n_elim {
+                    let alpha = alphas[q];
+                    if alpha == 0.0 {
+                        continue;
+                    }
+                    let col_off = q * col_stride;
+                    let src_q = &src_block[col_off..col_off + len];
+                    axpy_minus_unroll4_nofma(&mut dst_ref, src_q, alpha);
+                }
+
+                // Test kernel: single rank-`n_elim` dispatch.
+                let mut dst_kernel = dst_init.clone();
+                schur_panel_minus_nofma_strided(
+                    &mut dst_kernel,
+                    &src_block,
+                    /* src_first_col */ 0,
+                    n_elim,
+                    col_stride,
+                    /* src_row_offset */ 0,
+                    len,
+                    &alphas,
+                );
+
+                assert_eq!(
+                    dst_kernel, dst_ref,
+                    "rank-{} accumulator must be bit-exact vs n_elim*rank-1 \
+                     at len={}, col_stride={}",
+                    n_elim, len, col_stride
+                );
+            }
+        }
+    }
+
+    /// W-2: alpha_q == 0 must be a no-op for that q (matches the
+    /// rank-1 reference's `if alpha == 0.0 { continue }` guard).
+    #[test]
+    fn schur_panel_minus_nofma_strided_skips_zero_alphas() {
+        let mut rng = Xorshift64::new(0xABCD_5050_0042u64);
+        let n_elim = 4;
+        let len = 17;
+        let col_stride = len + 5;
+        let total = n_elim * col_stride;
+        let src_block: Vec<f64> = (0..total).map(|_| rng.next_f64()).collect();
+        let dst_init: Vec<f64> = (0..len).map(|_| rng.next_f64()).collect();
+        // Mix zero and non-zero alphas; q=1 and q=3 are zero.
+        let alphas = vec![0.5, 0.0, -0.25, 0.0];
+
+        let mut dst_ref = dst_init.clone();
+        for q in 0..n_elim {
+            let alpha = alphas[q];
+            if alpha == 0.0 {
+                continue;
+            }
+            let col_off = q * col_stride;
+            let src_q = &src_block[col_off..col_off + len];
+            axpy_minus_unroll4_nofma(&mut dst_ref, src_q, alpha);
+        }
+
+        let mut dst_kernel = dst_init.clone();
+        schur_panel_minus_nofma_strided(
+            &mut dst_kernel,
+            &src_block,
+            0,
+            n_elim,
+            col_stride,
+            0,
+            len,
+            &alphas,
+        );
+        assert_eq!(dst_kernel, dst_ref);
     }
 
     #[test]

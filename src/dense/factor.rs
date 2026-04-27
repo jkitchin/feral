@@ -1333,10 +1333,23 @@ fn peek_ahead_column(a: &mut [f64], nrow: usize, k: usize, c: usize, d_panel: &[
 }
 
 /// Apply the `n_elim` panel pivots' deferred rank-1 updates to the
-/// trailing columns `[j_start, nrow)`. Outer loop is pivot index
-/// (matching scalar's pivot-outer/column-inner traversal), inner loop
-/// is the axpy kernel — so per-element accumulation order is identical
-/// to `do_1x1_update` fired `n_elim` times.
+/// trailing columns `[j_start, nrow)`.
+///
+/// W-2 (`dev/plans/dense-kernel-speedup.md`): when every accepted
+/// pivot in the panel is a 1×1 (no 2×2 pivots and no rejected
+/// pivots), use the rank-`n_elim` accumulator
+/// `schur_kernel::schur_panel_minus_nofma` to issue one pulp dispatch
+/// per trailing column instead of `n_elim` per column. Per-element
+/// accumulation order — and hence bit-pattern — is preserved by
+/// applying the per-q `mul + sub` sequentially in register
+/// accumulators inside the kernel body.
+///
+/// The fallback path (rank-1 axpy in q-outer, j-inner order) remains
+/// the bit-exact reference. We route to it whenever any pivot is
+/// "rejected to zero" (rank-bs would still match because alpha=0 is
+/// skipped, but exercising the simpler reference here keeps the
+/// fallback honest) or when `n_elim < W2_RANK_BS_MIN` so the
+/// per-column alpha-precompute overhead is amortised.
 ///
 /// `j_start` is typically `k + n_elim`, except when the caller had the
 /// panel peek-ahead one extra column (`ScalarFallback`), in which case
@@ -1349,6 +1362,30 @@ fn apply_blocked_schur(
     j_start: usize,
     d_panel: &[f64],
 ) {
+    if n_elim == 0 || j_start >= nrow {
+        return;
+    }
+
+    // W-2 fast path: when the panel produced n_elim 1×1 pivots all
+    // with non-zero d, run the rank-`n_elim` accumulator. The check is
+    // O(n_elim); when it fails (any d_q == 0, indicating a
+    // zero-column or rejected pivot) we fall back to the q-outer
+    // rank-1 path. The rank-bs kernel is bit-exact with that fallback,
+    // so this gate is a perf knob (route around the alpha precompute
+    // when alphas would mostly be zero) rather than a correctness
+    // requirement.
+    const W2_RANK_BS_MIN: usize = 2;
+    let any_zero_d = d_panel.iter().take(n_elim).any(|&d| d.abs() == 0.0);
+
+    if !any_zero_d && n_elim >= W2_RANK_BS_MIN {
+        apply_blocked_schur_panel(a, nrow, k, n_elim, j_start, d_panel);
+        return;
+    }
+
+    // Fallback: rank-1 axpy reference. Outer loop is pivot index
+    // (matching scalar's pivot-outer/column-inner traversal), inner
+    // loop is the axpy kernel — so per-element accumulation order is
+    // identical to `do_1x1_update` fired `n_elim` times.
     for (q, &d_q) in d_panel.iter().enumerate().take(n_elim) {
         if d_q.abs() == 0.0 {
             continue;
@@ -1365,6 +1402,110 @@ fn apply_blocked_schur(
             let dst = &mut rest[j..nrow];
             schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
         }
+    }
+}
+
+/// Rank-`n_elim` deferred-Schur trailing-update path (W-2). Walks
+/// trailing columns `[j_start, nrow)` in the outer loop and, for each
+/// `j`, builds a length-`n_elim` `alphas` vector then issues a single
+/// `schur_kernel::schur_panel_minus_nofma` dispatch covering all
+/// `n_elim` rank-1 contributions to the column.
+///
+/// Caller invariants:
+/// - All `d_panel[0..n_elim]` are non-zero (1×1 pivots only). When any
+///   d_q is zero, route to the rank-1 fallback in
+///   `apply_blocked_schur` to keep the scalar reference honest. (The
+///   kernel itself does skip zero alphas, so this gate is a perf
+///   knob.)
+/// - `j_start <= nrow` and `n_elim > 0`.
+///
+/// Bit-exactness contract: per-element, the SIMD body issues
+/// `acc <- round(acc - round(alpha_q * src_q[i]))` for q in ascending
+/// order, the same sequence as the rank-1 reference.
+fn apply_blocked_schur_panel(
+    a: &mut [f64],
+    nrow: usize,
+    k: usize,
+    n_elim: usize,
+    j_start: usize,
+    d_panel: &[f64],
+) {
+    // Stack-friendly upper bound on n_elim. The current panel is
+    // gated at `params.block_size` which defaults to 64; if that
+    // ceiling ever changes, increase MAX_N_ELIM accordingly. Using a
+    // fixed-size buffer here avoids a per-column heap allocation in
+    // the hot path.
+    const MAX_N_ELIM: usize = 64;
+    debug_assert!(
+        n_elim <= MAX_N_ELIM,
+        "apply_blocked_schur_panel: n_elim {} exceeds MAX_N_ELIM {}",
+        n_elim,
+        MAX_N_ELIM
+    );
+
+    let mut alphas_buf = [0.0f64; MAX_N_ELIM];
+
+    for j in j_start..nrow {
+        // Per-trailing-column alpha vector. `l_jk = a[q_col*nrow + j]`
+        // is the L value at the jth row of pivot column q. The
+        // resulting `alpha = l_jk * d_q` matches the rank-1
+        // reference's `alpha` computation bit-for-bit (same f64
+        // multiply, same operands).
+        let alphas = &mut alphas_buf[..n_elim];
+        let mut all_zero_alpha = true;
+        for q in 0..n_elim {
+            let q_col = k + q;
+            let l_jk = a[q_col * nrow + j];
+            let d_q = d_panel[q];
+            let alpha = l_jk * d_q;
+            alphas[q] = alpha;
+            if alpha != 0.0 {
+                all_zero_alpha = false;
+            }
+        }
+        if all_zero_alpha {
+            // No update for this column — same outcome as the rank-1
+            // path skipping every q via its `if alpha == 0.0
+            // continue` early-return.
+            continue;
+        }
+
+        // Build the contiguous src panel: rows [j, nrow) of columns
+        // [k, k+n_elim). The src columns precede column `j` in
+        // memory, so they are disjoint from `dst` and we can reborrow
+        // through `split_at_mut`.
+        //
+        // Rather than copying src panel data, we hand the kernel the
+        // raw layout: each src_q is a stride-`(nrow - j)` slice
+        // starting at `(k+q)*nrow + j`. The kernel walks them by
+        // explicit offsets so no copy is required.
+        let trailing_len = nrow - j;
+        let (before, rest) = a.split_at_mut(j * nrow);
+        let dst = &mut rest[j..nrow];
+
+        // Build a contiguous `src_panel` view for the kernel. We need
+        // n_elim columns of length trailing_len each, but the source
+        // columns live in `before` at non-contiguous offsets
+        // `(k+q)*nrow + j`. The simplest correct approach is to
+        // construct the panel by copy into a stack-friendly buffer
+        // for the typical CHAINWOO root case where trailing_len <=
+        // 1984 and n_elim <= 32. To avoid that copy on the hot path,
+        // we instead use a direct-stride kernel variant.
+        //
+        // Implementation note: the rank-bs kernel
+        // `schur_panel_minus_nofma` expects a contiguous `src` slice
+        // of length `n_elim * src_stride`. We expose a
+        // strided-source variant below.
+        schur_kernel::schur_panel_minus_nofma_strided(
+            dst,
+            before,
+            k,
+            n_elim,
+            nrow,
+            j,
+            trailing_len,
+            alphas,
+        );
     }
 }
 
