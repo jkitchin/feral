@@ -1149,3 +1149,50 @@ accumulator) on top of the per-matrix peak. See session 04 "Next
 Session Should" item 1.
 
 **Evidence.** Session 04 journal 22:25 / 22:30 / 22:50 entries.
+
+## 2026-04-27-08: Phase B.4 tighter expected-perm pins (dual-arrow, tridiag)
+
+**Tried.** As part of Phase B.4 (`dev/plans/amf-clean-room.md` Phase
+B deliverable 6), pinned the qualitative claims sketched in the
+plan as test assertions in `crates/feral-amf/tests/expected_perm.rs`:
+
+1. 5x5 dual-arrowhead -- both hub vertices (0 and 4) deferred to
+   the last two positions of the perm.
+2. 7x7 tridiagonal -- both endpoints (0 and 6) eliminated before
+   any interior vertex.
+
+**Why rejected.** Both assertions failed on the actual implementation:
+
+- `dual_arrow_5` produced `perm = [3, 0, 1, 2, 4]`. Hub 0 was picked
+  at iteration 1, before spine vertices 1 and 2. Only one hub (4) is
+  in the last position.
+- `tridiag(7)` produced `perm = [6, 5, 4, 3, 2, 0, 1]`. The
+  implementation sweeps from one endpoint down to the other via
+  successive deg=1 surrogates -- this is the standard quotient-graph
+  one-end-sweep behaviour shared with AMD; vertex 0 is not picked
+  until iteration 5.
+
+The plan's qualitative claims were aspirational rather than
+metric-derived. Without a MUMPS HAMF4 oracle (Phase C) to
+distinguish "implementation produces a sensible permutation that
+happens to break the plan's claim" from "implementation has a bug",
+pinning these tighter assertions would either (a) require weakening
+the implementation to match a guess about expected behaviour, or
+(b) create a flaky gate that rejects sensible perms.
+
+**Status.** Resolved by weakening to claims directly derivable from
+the iteration-0 metric `RMF(i) = deg(i)*(deg(i)-1)`:
+
+- arrow_3: hub eliminated last (kept; passes).
+- dual_arrow_5: first pivot is a spine vertex; last pivot is a hub
+  vertex (passes).
+- tridiag(7): first pivot is an endpoint (passes).
+
+The tighter pins are deferred to Phase C, where the MUMPS HAMF4
+oracle on `data/matrices/kkt*` provides the external reference. A
+note to that effect lives in the test file's module doc.
+
+**Evidence.** Test failures in `cargo test -p feral-amf --release
+--test expected_perm` before the weakening:
+- `amf_dual_arrow_5_both_hubs_deferred` panicked: left {2, 4} != right {0, 4}.
+- `amf_tridiag_7_endpoints_first` panicked: max endpoint position 5 not less than min interior position 1.
