@@ -25,6 +25,7 @@ fn main() {
     let methods = [
         OrderingMethod::Auto,
         OrderingMethod::Amd,
+        OrderingMethod::Amf,
         OrderingMethod::MetisND,
         OrderingMethod::ScotchND,
         OrderingMethod::KahipND,

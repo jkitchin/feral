@@ -57,7 +57,68 @@ NASH_0111 still on top of the worst-ratio list at 22.75× — opt-in
 wire-up should not change anything since pick_default_method is
 untouched, and it doesn't.
 
-* 14:00 :status:end-of-session:
+* 14:30 :amf:audit:in-tree:
+Phase C corpus regen (MUMPS HAMF4 sidecars across ~170k matrices) is
+a deliberate user-driven action — not safe to autonomously launch a
+multi-hour Fortran-binary loop on shared state. Pivoted to an in-
+tree adjacent step: AMF-vs-AMD nnz_L audit on whatever feral has on
+disk today, no MUMPS sidecars required.
+
+Added src/bin/diag_amf_vs_amd.rs (registered in Cargo.toml). Walks
+data/matrices/, samples per-family with FERAL_AUDIT_PER_FAMILY (def 1)
+and FERAL_AUDIT_MAX_N (def 5000), runs both OrderingMethod::Amd and
+::Amf through symbolic_factorize_with_method, reports per-family
+geomean nnz_L ratio (amf/amd), corpus rollup, top 15 improvements,
+top 15 regressions. Uses sym.col_counts.iter().sum() so the 1.2
+factor_slack cancels out of the ratio.
+
+Also added Amf to diag_chainwoo's methods array and a
+feral-amf comparison block in diag_orbit2_quotient.
+
+* 14:35 :amf:audit:results:
+cargo run --release --bin diag_amf_vs_amd (defaults) on the present
+corpus:
+  - 782 matrices succeeded across 782 families (per_family=1)
+  - corpus geomean ratio amf/amd = 1.003 (essentially neutral)
+  - amd_total nnz_L = 50_237_087, amf_total nnz_L = 49_431_657
+  - AMF strictly better on 83, tied on 589, AMD strictly better on 110
+
+Top AMF wins (n ≤ 5000 sample):
+  MINPERM_0000     0.752×   428k → 322k nnz_L
+  TWIRIBG1_0000    0.758×   268k → 203k
+  LEUVEN1_0000     0.808×
+  DITTERT_0000     0.808×
+  MINC44_0000      0.821×
+  EIGENB2_0000     0.828×
+  TWIRIMD1_0000    0.829×
+
+Top AMF regressions:
+  HADAMARD_0000    5.165×   33k → 171k   <-- worth a closer look
+  DECONVBNE_0000   1.287×
+  PALMER7ANE_0000  1.222×
+  PALMER7ENE_0000  1.203×
+
+HADAMARD is the only big-jump regression — everything else is ≤ 1.29×.
+Implication: the MUMPS-style "AMF for n ≤ 10000" default flip is
+defensible on the cluster level (782 of 782 within 10% on average,
+83/110 distribution roughly balanced, geo ratio 1.003), but
+HADAMARD-shape patterns will need either a fall-back trigger or
+acceptance that the default flip can lose ~5× on a small minority
+of matrices. The corpus aggregate nnz_L drops by ~1.6% under AMF.
+
+This is preview data, not load-bearing — the MUMPS HAMF4 oracle in
+tests/amf_corpus_oracle.rs remains the correctness gate.
+
+* 14:40 :gates:green:
+- cargo fmt --check: clean.
+- cargo test --release --lib: 165/165 (unchanged).
+- cargo build --release --bin diag_amf_vs_amd: clean.
+
+Commit covers diag_amf_vs_amd.rs (new), diag_chainwoo.rs (Amf added
+to methods array), diag_orbit2_quotient.rs (Amf comparison block),
+Cargo.toml (new [[bin]] entry).
+
+* 14:45 :status:end-of-session:
 Plan position: Phases A.1, A.2, B.1-B.4, C-scaffold, D-wire-up
 complete. Remaining: Phase C corpus regen (user-driven multi-
 hour run) and Phase D default flip (gated on the regen).

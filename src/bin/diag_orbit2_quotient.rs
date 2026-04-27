@@ -102,6 +102,18 @@ fn main() {
         f_amd.factor_nnz()
     );
 
+    // Compare against feral-amf (HAMF4 quotient-graph fill metric).
+    // ORBIT2 is the kkt-expansion shape that motivated the AMF
+    // clean-room: AMD orders ORBIT2_0000 into a ~1.4M-nnz_L factor;
+    // AMF cuts it to ~32k.
+    let sym_amf = symbolic_factorize_with_method(&csc, &snode_params, OrderingMethod::Amf)
+        .expect("sym_amf ok");
+    let (f_amf, _) = factorize_multifrontal(&csc, &sym_amf, &nparams).expect("num_amf ok");
+    println!(
+        "[OrderingMethod::Amf, default AmfOptions] nnz_L = {}",
+        f_amf.factor_nnz()
+    );
+
     // Direct feral-amd probe: did dense deferral actually fire, where
     // does column 2697 (the only super-dense column) land?
     use feral_amd::{amd_order_opts, AmdOptions};
