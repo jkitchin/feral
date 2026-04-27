@@ -829,7 +829,28 @@ pub fn symbolic_factorize_with_schur(
 
     // Step 8: supernode detection. Adjacency strategy only — Renumber
     // would re-postorder and break the tail invariant.
-    let supernodes = supernode::find_supernodes(&etree, &col_counts, &effective_params);
+    let mut supernodes = supernode::find_supernodes(&etree, &col_counts, &effective_params);
+
+    // Step 8b (F3.2b multi-supernode tail): force-merge any Schur-bearing
+    // supernodes into a single tail supernode. This mirrors MUMPS's
+    // HALO-SCHUR amalgamation (`PE[schur[i]] = -schur[0]`,
+    // `ana_orderings.F:9187-9220`), where all Schur variables collapse
+    // into one supervariable so the numeric stopping rule lives in one
+    // place. feral's adjacency-only amalgamation (size_based with
+    // nemin=32, trivial_chain) does not always merge the Schur tail —
+    // when the Schur block is large or the row patterns of constituent
+    // Schur cols differ enough, multiple supernodes carry Schur cols,
+    // and the F3.2b numeric driver would reject. The merge here keeps
+    // the design contract from `dev/research/schur-complement.md` D4
+    // ("the only front with nvschur > 0 is the root") satisfied without
+    // requiring a multi-supernode numeric path.
+    //
+    // Safety: the F3.2a postorder pins Schur cols to `[n - n_schur, n)`
+    // and the supernode column ranges are contiguous in this numbering,
+    // so the merged supernode covers the contiguous range
+    // `[n - n_schur, n)` — preserving the find_supernodes contiguity
+    // invariant downstream code relies on.
+    merge_schur_tail_supernodes(&mut supernodes, n, n_schur)?;
 
     // Step 9: small-leaf grouping (consumed at numeric time only when
     // the small_leaf gate is On). Same as the standard pipeline.
@@ -862,6 +883,167 @@ pub fn symbolic_factorize_with_schur(
         resolved_preprocess: OrderingPreprocess::None,
         is_schur_tail: Some(n_schur),
     })
+}
+
+/// F3.2b helper: collapse all Schur-bearing supernodes (those whose
+/// column range intersects `[n - n_schur, n)`) into a single tail
+/// supernode. Mirrors MUMPS's HALO-SCHUR amalgamation
+/// (`ana_orderings.F:9187-9220`).
+///
+/// Returns `InvalidInput` if the Schur-bearing supernodes are not
+/// contiguous at the tail of the supernode list (would only arise from
+/// a reducible matrix where the Schur set spans multiple etree roots —
+/// not encountered in the KKT use cases this API targets).
+fn merge_schur_tail_supernodes(
+    supernodes: &mut Vec<Supernode>,
+    n: usize,
+    n_schur: usize,
+) -> Result<(), FeralError> {
+    let schur_lo = n - n_schur;
+
+    // Identify Schur-bearing supernodes. Walk forward and find the
+    // contiguous tail run; verify no Schur-bearing supernode lives
+    // below that run (which would indicate a forest-structured Schur
+    // set incompatible with F3.2a's postorder contract).
+    let mut tail_start: Option<usize> = None;
+    for (s, snode) in supernodes.iter().enumerate().rev() {
+        let col_lo = snode.first_col;
+        let col_hi = col_lo + snode.ncol();
+        let intersects = col_hi > schur_lo && col_lo < n;
+        if intersects {
+            tail_start = Some(s);
+        } else {
+            // First non-Schur supernode walking back from the end
+            // marks the boundary; nothing below should be Schur.
+            break;
+        }
+    }
+    // Verify nothing below `tail_start` is Schur-bearing (would imply
+    // forest Schur structure).
+    if let Some(start) = tail_start {
+        for (s, snode) in supernodes.iter().enumerate().take(start) {
+            let col_lo = snode.first_col;
+            let col_hi = col_lo + snode.ncol();
+            let intersects = col_hi > schur_lo && col_lo < n;
+            if intersects {
+                return Err(FeralError::InvalidInput(format!(
+                    "Schur-bearing supernodes are not contiguous at the \
+                     tail (snode {} bears Schur cols but lies below \
+                     non-Schur supernode(s) preceding the tail run \
+                     starting at index {}). This requires a forest- \
+                     structured Schur set; see \
+                     dev/research/schur-complement.md F3.2b.",
+                    s, start
+                )));
+            }
+        }
+    }
+
+    let Some(start) = tail_start else {
+        return Err(FeralError::InvalidInput(
+            "F3.2b merge: no Schur-bearing supernodes found despite \
+             n_schur > 0 (symbolic invariant broken)"
+                .to_string(),
+        ));
+    };
+    if start == supernodes.len() - 1 {
+        // Already a single Schur supernode at the tail — nothing to do.
+        // Verify it covers the full Schur range.
+        let last = &supernodes[start];
+        let col_lo = last.first_col;
+        let col_hi = col_lo + last.ncol();
+        if col_lo > schur_lo || col_hi != n {
+            return Err(FeralError::InvalidInput(format!(
+                "F3.2b merge: single Schur supernode at index {} does not \
+                 cover the full Schur tail [{}, {}) (covers [{}, {}))",
+                start, schur_lo, n, col_lo, col_hi
+            )));
+        }
+        return Ok(());
+    }
+
+    // Multi-supernode Schur tail: merge supernodes[start..] into one.
+    // The merged supernode replaces supernodes[start] in place, and all
+    // higher-indexed Schur supernodes are dropped from the list.
+    //
+    // Invariants on the merge set (verified):
+    //   - Column ranges are contiguous and together cover [schur_lo, n).
+    //   - Their union of children, minus the merge set itself, becomes
+    //     the new merged supernode's children. (No merged supernode can
+    //     be a child of another since they all bear Schur cols and the
+    //     etree forces parent > child in the postordered numbering, but
+    //     a child relationship would still place both in the merge set.)
+    //   - nrow is bumped to cover the row pattern union; we use a
+    //     conservative upper bound `(merged_first_col..n).len()` because
+    //     all merged supernodes share rows in `[merged_first_col, n)`.
+    let merged_first_col = supernodes[start].first_col;
+    if merged_first_col != schur_lo {
+        return Err(FeralError::InvalidInput(format!(
+            "F3.2b merge: tail run starts at col {} but Schur tail \
+             begins at {}",
+            merged_first_col, schur_lo
+        )));
+    }
+
+    // Verify contiguity of the column ranges.
+    let mut expected = merged_first_col;
+    for (s, snode) in supernodes.iter().enumerate().skip(start) {
+        if snode.first_col != expected {
+            return Err(FeralError::InvalidInput(format!(
+                "F3.2b merge: supernode {} starts at col {} but expected {} \
+                 (Schur supernode column ranges must be contiguous)",
+                s, snode.first_col, expected
+            )));
+        }
+        expected = snode.first_col + snode.ncol();
+    }
+    if expected != n {
+        return Err(FeralError::InvalidInput(format!(
+            "F3.2b merge: tail run ends at col {} but Schur tail ends at {}",
+            expected, n
+        )));
+    }
+
+    // Conservative nrow: max over merged supernodes of
+    // `(s.first_col + s.nrow) - merged_first_col`. Each constituent
+    // supernode's row pattern starts at its own first_col (in the
+    // find_supernodes layout) and extends `nrow` rows. The merged
+    // supernode starts at `merged_first_col`, so its row count must be
+    // at least the largest constituent extent above `merged_first_col`.
+    let mut merged_nrow = 0usize;
+    let merge_indices: std::collections::HashSet<usize> = (start..supernodes.len()).collect();
+    let mut merged_children: Vec<usize> = Vec::new();
+    for snode in supernodes.iter().skip(start) {
+        let extent = (snode.first_col + snode.nrow) - merged_first_col;
+        if extent > merged_nrow {
+            merged_nrow = extent;
+        }
+        for &c in &snode.children {
+            if !merge_indices.contains(&c) {
+                merged_children.push(c);
+            }
+        }
+    }
+    let merged_ncol = n_schur;
+    if merged_nrow < merged_ncol {
+        merged_nrow = merged_ncol;
+    }
+    let merged_row_indices: Vec<usize> =
+        (merged_first_col..merged_first_col + merged_nrow).collect();
+
+    // Replace supernodes[start] with the merged supernode and drop the
+    // rest. Children indices in the surviving supernodes don't shift —
+    // all merged supernodes are at the tail, so their indices were the
+    // largest in the old list.
+    supernodes[start] = Supernode {
+        first_col: merged_first_col,
+        ncol: merged_ncol,
+        nrow: merged_nrow,
+        row_indices: merged_row_indices,
+        children: merged_children,
+    };
+    supernodes.truncate(start + 1);
+    Ok(())
 }
 
 /// Compute the peak contribution pool size needed during postorder traversal.

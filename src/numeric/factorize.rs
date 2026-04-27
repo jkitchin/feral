@@ -788,13 +788,16 @@ pub fn factorize_multifrontal(
 ///    block is read out of the root supernode's `ContribBlock`,
 ///    mirrored lower→upper, and returned as a [`SchurBlock`].
 ///
-/// **Constraint** (F3.2b scope): the Schur columns must form a single
-/// contiguous tail and lie inside a single root supernode whose last
-/// column is at position `n - 1`. This holds for the F3.2a symbolic
-/// pipeline with adjacency-strategy amalgamation (the standard case).
-/// If the Schur columns straddle multiple supernodes, this entry point
-/// returns `InvalidInput`. Cross-validation against MUMPS HALO-SCHUR
-/// in F3.3 will broaden coverage.
+/// **Constraint**: the Schur columns must form a single contiguous tail
+/// and the tail-bearing supernode must be a single root whose last
+/// column is at position `n - 1`. The F3.2a symbolic pipeline now
+/// guarantees the single-supernode invariant by force-merging any
+/// Schur-bearing supernodes before this entry point sees them
+/// (see [`crate::symbolic::symbolic_factorize_with_schur`] step 8b,
+/// mirroring MUMPS's HALO-SCHUR amalgamation in
+/// `ana_orderings.F:9187-9220`). Forest-structured Schur sets (the
+/// matrix has multiple connected components, each contributing a Schur
+/// root) are rejected at the symbolic phase with `InvalidInput`.
 ///
 /// Returned `Inertia` reflects the inertia of the *eliminated* block
 /// `A_FF` only — the Schur block's spectrum is not factored.
@@ -2594,5 +2597,158 @@ mod tests {
         let nparams = NumericParams::default();
         let r = factorize_multifrontal_with_schur(&m, &sym, &nparams);
         assert!(matches!(r, Err(FeralError::InvalidInput(_))));
+    }
+
+    /// F3.2b multi-supernode Schur tail. Builds a problem where the
+    /// pre-merge symbolic phase produces multiple Schur-bearing
+    /// supernodes (size > nemin and with structurally distinct row
+    /// patterns); after the symbolic merge step (see
+    /// `merge_schur_tail_supernodes` in `symbolic/mod.rs`), the numeric
+    /// driver must accept the symbolic and produce the correct Schur
+    /// block. Verified against an oracle that solves
+    /// `A_FF * X = A_FS` densely and computes
+    /// `S = A_SS - A_FS^T * X`.
+    #[test]
+    fn schur_multi_supernode_tail_matches_oracle() {
+        // Two coupled subblocks A and B with their own dense Schur
+        // tail, plus a tridiagonal cross-link across the entire Schur
+        // set so the etree has a single Schur root (forest Schur is
+        // unsupported per F3.2a).
+        let half = 25usize;
+        let k_each = 40usize;
+        let n = 2 * half + 2 * k_each;
+
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(2.0 + i as f64);
+        }
+        for i in 0..half {
+            for s in 0..k_each {
+                let j = 2 * half + s;
+                rows.push(j);
+                cols.push(i);
+                vals.push(0.1);
+            }
+        }
+        for i in half..2 * half {
+            for s in 0..k_each {
+                let j = 2 * half + k_each + s;
+                rows.push(j);
+                cols.push(i);
+                vals.push(0.1);
+            }
+        }
+        for s in 0..k_each {
+            for t in 0..s {
+                rows.push(2 * half + s);
+                cols.push(2 * half + t);
+                vals.push(0.05);
+                rows.push(2 * half + k_each + s);
+                cols.push(2 * half + k_each + t);
+                vals.push(0.05);
+            }
+        }
+        for s in (2 * half + 1)..n {
+            rows.push(s);
+            cols.push(s - 1);
+            vals.push(0.03);
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let schur: Vec<usize> = (2 * half..n).collect();
+        let n_schur = schur.len();
+
+        let params = crate::symbolic::SupernodeParams::default();
+        let sym = crate::symbolic::symbolic_factorize_with_schur(&m, &params, &schur).unwrap();
+        let nparams = NumericParams {
+            scaling: crate::scaling::ScalingStrategy::Identity,
+            ..NumericParams::default()
+        };
+        let (_, _, schur_block) = factorize_multifrontal_with_schur(&m, &sym, &nparams).unwrap();
+        assert_eq!(schur_block.dim, n_schur);
+
+        // Build A as dense and the f-index list.
+        let mut is_schur = vec![false; n];
+        for &i in &schur {
+            is_schur[i] = true;
+        }
+        let f_indices: Vec<usize> = (0..n).filter(|i| !is_schur[*i]).collect();
+        let nf = f_indices.len();
+        let mut f_inv = vec![usize::MAX; n];
+        for (k, &i) in f_indices.iter().enumerate() {
+            f_inv[i] = k;
+        }
+        let mut a = vec![0.0f64; n * n];
+        for j in 0..n {
+            for k in m.col_ptr[j]..m.col_ptr[j + 1] {
+                let i = m.row_idx[k];
+                a[j * n + i] = m.values[k];
+                if i != j {
+                    a[i * n + j] = m.values[k];
+                }
+            }
+        }
+
+        // Factor A_FF (sparse).
+        let mut tr = (Vec::new(), Vec::new(), Vec::new());
+        for j in 0..n {
+            if is_schur[j] {
+                continue;
+            }
+            for k in m.col_ptr[j]..m.col_ptr[j + 1] {
+                let i = m.row_idx[k];
+                if !is_schur[i] {
+                    tr.0.push(f_inv[i]);
+                    tr.1.push(f_inv[j]);
+                    tr.2.push(m.values[k]);
+                }
+            }
+        }
+        let a_ff = CscMatrix::from_triplets(nf, &tr.0, &tr.1, &tr.2).unwrap();
+        let sym_ff = crate::symbolic::symbolic_factorize(&a_ff, &params).unwrap();
+        let (factors_ff, _) = factorize_multifrontal(&a_ff, &sym_ff, &nparams).unwrap();
+
+        // S = A_SS - A_FS^T A_FF^{-1} A_FS via column-by-column solve.
+        let mut s_ref = vec![0.0f64; n_schur * n_schur];
+        for (si, &i) in schur.iter().enumerate() {
+            for (sj, &j) in schur.iter().enumerate() {
+                s_ref[sj * n_schur + si] = a[j * n + i];
+            }
+        }
+        for (sj, &j) in schur.iter().enumerate() {
+            let mut rhs = vec![0.0f64; nf];
+            for &fi in &f_indices {
+                rhs[f_inv[fi]] = a[j * n + fi];
+            }
+            let x = crate::numeric::solve::solve_sparse(&factors_ff, &rhs).unwrap();
+            for (si, &i) in schur.iter().enumerate() {
+                let mut acc = 0.0;
+                for &fi in &f_indices {
+                    acc += a[i * n + fi] * x[f_inv[fi]];
+                }
+                s_ref[sj * n_schur + si] -= acc;
+            }
+        }
+
+        let mut max_rel = 0.0f64;
+        for sj in 0..n_schur {
+            for si in 0..n_schur {
+                let want = s_ref[sj * n_schur + si];
+                let got = schur_block.get(si, sj);
+                let denom = want.abs().max(1e-14);
+                let rel = (got - want).abs() / denom;
+                if rel > max_rel {
+                    max_rel = rel;
+                }
+            }
+        }
+        assert!(
+            max_rel < 1e-10,
+            "Schur block max relative error {} exceeds 1e-10",
+            max_rel
+        );
     }
 }
