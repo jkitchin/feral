@@ -902,6 +902,43 @@ pub fn factor_frontal_blocked(
 ) -> Result<FrontalFactors, FeralError> {
     matrix.validate()?;
     let nrow = matrix.n;
+    // Clone the lower triangle into a fresh scratch buffer so the
+    // in-place entry can factor without aliasing the caller's borrow.
+    // Hot-path callers in the multifrontal driver should call
+    // `factor_frontal_blocked_in_place` directly to skip this copy.
+    // (W-3a from `dev/plans/dense-kernel-speedup.md`.)
+    let mut scratch_data = vec![0.0; nrow * nrow];
+    for j in 0..nrow {
+        for i in j..nrow {
+            scratch_data[j * nrow + i] = matrix.data[j * nrow + i];
+        }
+    }
+    let mut scratch = crate::dense::matrix::SymmetricMatrix {
+        n: nrow,
+        data: scratch_data,
+    };
+    factor_frontal_blocked_in_place(&mut scratch, ncol, may_delay, params)
+}
+
+/// In-place blocked-panel BK LDLᵀ. Factors directly into `matrix.data`
+/// (which is treated as scratch storage); on return the lower-triangle
+/// content of `matrix.data` is undefined. Skips the input `validate()`
+/// scan; the caller is responsible for ensuring the lower triangle is
+/// finite. The multifrontal driver assembles fronts from a value-checked
+/// CSC, so per-front re-validation is redundant.
+///
+/// W-3a from `dev/plans/dense-kernel-speedup.md`: eliminates the
+/// `nrow * nrow` duplicate allocation + lower-triangle copy that the
+/// pre-W-3a `factor_frontal_blocked` performed on every call. For
+/// CHAINWOO_0000's 1984-row root supernode that copy is 30 MB
+/// per supernode call.
+pub fn factor_frontal_blocked_in_place(
+    matrix: &mut crate::dense::matrix::SymmetricMatrix,
+    ncol: usize,
+    may_delay: bool,
+    params: &BunchKaufmanParams,
+) -> Result<FrontalFactors, FeralError> {
+    let nrow = matrix.n;
 
     if ncol > nrow {
         return Err(FeralError::InvalidInput(format!(
@@ -950,13 +987,11 @@ pub fn factor_frontal_blocked(
         return factor_frontal(matrix, ncol, may_delay, params);
     }
 
-    // Copy lower triangle into the working array, same as `factor_frontal`.
-    let mut a = vec![0.0; nrow * nrow];
-    for j in 0..nrow {
-        for i in j..nrow {
-            a[j * nrow + i] = matrix.data[j * nrow + i];
-        }
-    }
+    // Factor in place into the caller's buffer — the kernel reads and
+    // writes only the lower triangle (strict upper is never touched),
+    // so reusing `matrix.data` is safe. After the panel loop and
+    // L/D/contrib extract phases we discard `matrix.data` content.
+    let a: &mut [f64] = matrix.data.as_mut_slice();
 
     let mut perm: Vec<usize> = (0..nrow).collect();
     let mut subdiag = vec![0.0; nrow];
@@ -972,8 +1007,10 @@ pub fn factor_frontal_blocked(
         let remaining = ncol - k;
         if remaining <= bs {
             // Scalar tail: process remaining pivots one at a time.
+            // Reborrow `a` (a `&mut [f64]`) so the same binding can be
+            // passed across multiple call sites.
             match scalar_pivot_step(
-                &mut a,
+                &mut *a,
                 nrow,
                 ncol,
                 k,
@@ -994,7 +1031,7 @@ pub fn factor_frontal_blocked(
         }
 
         let (n_elim, status) = lblt_panel_frontal(
-            &mut a,
+            &mut *a,
             nrow,
             k,
             bs,
@@ -1017,7 +1054,7 @@ pub fn factor_frontal_blocked(
             PanelStatus::Full => k + n_elim,
             PanelStatus::ScalarFallback | PanelStatus::Delayed => k + n_elim + 1,
         };
-        apply_blocked_schur(&mut a, nrow, k, n_elim, j_start, &d_panel);
+        apply_blocked_schur(&mut *a, nrow, k, n_elim, j_start, &d_panel);
         k += n_elim;
 
         match status {
@@ -1028,7 +1065,7 @@ pub fn factor_frontal_blocked(
                     break;
                 }
                 match scalar_pivot_step(
-                    &mut a,
+                    &mut *a,
                     nrow,
                     ncol,
                     k,

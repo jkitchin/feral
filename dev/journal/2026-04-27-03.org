@@ -1,0 +1,53 @@
+#+TITLE: 2026-04-27 Session 03 — W-3a: factor frontals in place
+
+* Goal
+Implement W-3a from =dev/plans/dense-kernel-speedup.md=: eliminate the
+=nrow * nrow= duplicate allocation + lower-triangle copy that
+=factor_frontal_blocked= performed on every supernode call. For
+CHAINWOO_0000's 1984-row root supernode that copy is ~30 MB per call.
+
+* 09:00 :impl:w3a:dense-kernel:
+Refactored =src/dense/factor.rs=:
+- Renamed the body of =factor_frontal_blocked= to a new entry
+  =factor_frontal_blocked_in_place(&mut SymmetricMatrix, ncol,
+  may_delay, params)= that factors directly into =matrix.data=.
+- Skips =matrix.validate()= (caller responsibility — the multifrontal
+  driver assembles fronts from a value-checked CSC).
+- Kept =factor_frontal_blocked(&SymmetricMatrix, ...)= as a thin wrapper
+  that clones the lower triangle into a fresh =SymmetricMatrix= scratch
+  and delegates. Tests/examples retain unchanged API.
+
+Migrated three hot-path callers in =src/numeric/factorize.rs=:
+- =factor_kkt_dense_path= (line 642 → 647)
+- =factor_supernode_dense_internal= (line 1144)
+- =factor_supernode_leaf_dense= (line 1293)
+All three already had =std::mem::take(&mut ws.frontal_values)= →
+=SymmetricMatrix= setup; switching to in-place was a one-line change
+plus =&mut frontal=.
+
+* 09:20 :tests:
+=cargo test --release= ✓ all 162 lib tests pass plus all integration
+tests (blocked_ldlt 9/9, rook_rescue, threshold_consistency, etc.).
+=cargo clippy --lib -- -D warnings= ✓ clean.
+
+* 09:30 :diag-chainwoo:profile:
+=cargo run --release --bin diag_chainwoo_profile= reports:
+- driver-level total median = 23246 us (vs ~24000 us baseline, ~3% faster
+  at driver level; the diag's Phase 8 isolated kernel runs still call
+  the wrapper, so they don't reflect the in-place migration —
+  factor_frontal_blocked stays as the bit-parity reference).
+- Phase 8 isolated kernel measurements show alloc was ~7% of total
+  for nrow=1984 ncol=32 (alloc=973250 ns of 13.77 ms total). The
+  multifrontal driver path now skips that 7% per-supernode call.
+
+The headline gain on CHAINWOO is modest because pivot work dominates
+for 32x32 ncol-bound fronts. Bigger wins expected on dense-leaning
+matrices (HAHN1, GAUSS2, BATCH, AVION2) which were called out as the
+dense kernel outliers in session 02's bench.
+
+* Decision
+W-3a alone does NOT meet the kernel-speedup plan's 8 ms CHAINWOO
+target. It is a prerequisite for W-3b (l/d_diag/contrib output Vec
+pooling) and W-1 (engage panel for ncol ≥ 8) which together close the
+gap. Land W-3a as a clean, isolated commit; defer W-3b/W-1/W-2 to
+follow-up sessions per the original plan order.

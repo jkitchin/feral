@@ -1,6 +1,6 @@
 #[cfg(test)]
 use crate::dense::factor::factor;
-use crate::dense::factor::{factor_frontal_blocked, BunchKaufmanParams, FrontalFactors};
+use crate::dense::factor::{factor_frontal_blocked_in_place, BunchKaufmanParams, FrontalFactors};
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
 use crate::inertia::Inertia;
@@ -639,10 +639,10 @@ pub fn dense_fast_factor_with_workspace(
     // multifrontal root-supernode behavior: ForceAccept absorbs any
     // unstable pivot instead of carrying it forward (there is no
     // ancestor in a single-node factorization).
-    let ff = factor_frontal_blocked(&sym, n, false, &params.bk)?;
-    // `factor_frontal_blocked` takes `&SymmetricMatrix` and copies
-    // into its own workspace, so `sym.data` is still the allocated
-    // buffer we took from the pool. Return it.
+    // Factor in place into `sym.data` (W-3a). `sym.data` content is
+    // undefined on return, but the buffer itself is reusable; return it
+    // to the pool.
+    let ff = factor_frontal_blocked_in_place(&mut sym, n, false, &params.bk)?;
     ws.dense_values = sym.data;
 
     let inertia = ff.inertia.clone();
@@ -1137,9 +1137,10 @@ fn factor_one_supernode(
         }
     }
 
-    // Step 3: Factor the frontal.
+    // Step 3: Factor the frontal in place (W-3a). `frontal.data`
+    // content is undefined on return; the buffer goes back to the pool.
     let may_delay = !is_root[snode_idx];
-    let ff = factor_frontal_blocked(&frontal, expanded_ncol, may_delay, &params.bk)?;
+    let ff = factor_frontal_blocked_in_place(&mut frontal, expanded_ncol, may_delay, &params.bk)?;
     ws.frontal_values = frontal.data;
 
     let node_inertia = ff.inertia.clone();
@@ -1286,8 +1287,9 @@ fn factor_one_small_leaf(
 
     // No extend-add: leaves have no children.
 
+    // W-3a: factor in place; pool returns the (now-undefined) buffer.
     let may_delay = !is_root[snode_idx];
-    let ff = factor_frontal_blocked(&frontal, expanded_ncol, may_delay, &params.bk)?;
+    let ff = factor_frontal_blocked_in_place(&mut frontal, expanded_ncol, may_delay, &params.bk)?;
     ws.frontal_values = frontal.data;
 
     let node_inertia = ff.inertia.clone();
