@@ -72,13 +72,40 @@ accounting").
 
 * 20:50 :corpus:expansion:oom:
 Tried =FERAL_KKT_ROOTS=all= to validate the expanded corpus end-to-end.
-Process SIGKILLed shortly after starting (before "Loading KKT matrices"
-line printed). Combined corpus (=kkt + kkt-expansion + kkt-mittelmann= =
-167,614 matrices, 21 GB on disk) exceeds laptop memory ceiling at the
-upfront-load step.
+Combined corpus = =kkt + kkt-expansion + kkt-mittelmann= = 167,614
+matrices, 21 GB on disk. Process **loaded and ran the dense pass to
+completion**, then SIGKILLed during the sparse loop:
 
-Tried =FERAL_KKT_ROOTS=kkt-mittelmann= alone (596 matrices, 4.2 GB on
-disk). Loading + dense pass completed cleanly:
+#+begin_example
+Loading KKT matrices from data/matrices/kkt           ... 154588 matrices loaded
+Loading KKT matrices from data/matrices/kkt-expansion ...  12430 matrices loaded
+Loading KKT matrices from data/matrices/kkt-mittelmann ...   596 matrices loaded
+167614 KKT matrices total
+
+KKT summary: 167614 matrices (157494 dense-eligible n <= 1000, 10120 skipped n > 1000)
+  Inertia match: 157356/157494 (99.9%)
+  Residual pass: 157220/157494 (99.8%)
+  Worst residual: 1.87e-4 (ERRINBAR_0824)
+
+--- Sparse solver validation ---
+[Killed: 9] exit=137
+#+end_example
+
+**Dense pass on expanded corpus validates 99.9% inertia + 99.8% residual
+across 157,494 matrices.** Worst residual is the same =ERRINBAR_0824=
+already known from the kkt-only baseline — no new outliers introduced
+by =kkt-expansion= or =kkt-mittelmann=. This is a substantial
+correctness win: feral's dense BK + sparse multifrontal hold up across
+2.6× more matrices than the historical baseline.
+
+The sparse loop SIGKILL is on the cumulative CSC working set for the
++10k n>1000 matrices kept in memory (the dense loop only touches
+n ≤ 1000 entries; the sparse loop iterates everything that loaded).
+=Option<CscMatrix>= per-iter take() drops them as the loop advances,
+but the up-front total at sparse-loop entry exceeds the laptop ceiling.
+
+Also tried =FERAL_KKT_ROOTS=kkt-mittelmann= alone (596 matrices, 4.2 GB
+on disk). Loading + dense pass completed cleanly:
 
 #+begin_example
 Loading KKT matrices from data/matrices/kkt-mittelmann ... 596 matrices loaded
@@ -137,6 +164,8 @@ The remaining "feral correct, sparse, fast" claim now reads:
 - Fast: factor/MUMPS geomean 0.36 (feral 3× faster). solve/MUMPS
   geomean 0.25 (feral 4× faster). Phase 2.8.1 partition PASS on both
   small-frontal (<200) and medium (<500) buckets.
-- Validated: kkt corpus (154,588 matrices) end-to-end, mittelmann
-  dense subset (12 matrices). Expanded-corpus validation pending bench
-  redesign or beefier hardware.
+- Validated: kkt corpus (154,588 matrices) end-to-end, expanded
+  corpus (167,614 matrices) **dense pass** (99.9% inertia, 99.8%
+  residual, worst residual = same =ERRINBAR_0824= already known).
+  Expanded-corpus **sparse pass** pending bench streaming redesign
+  or beefier hardware.

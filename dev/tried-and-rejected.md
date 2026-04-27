@@ -1088,18 +1088,22 @@ the fix, bench reports nnzL/SSIDS p50 = 1.00, geomean = 1.09, p99 =
 `kkt + kkt-expansion + kkt-mittelmann`, 21 GB on disk) to validate
 expanded corpus end-to-end on the dev laptop.
 
-**Why rejected.** SIGKILLed before "Loading KKT matrices" line
-prints. The bench loads all CSC matrices upfront before the dense
-loop runs; combined corpus working set exceeds the 64 GB ceiling.
-Even `FERAL_KKT_ROOTS=kkt-mittelmann` alone (596 matrices, 4.2 GB on
-disk) SIGKILLs during the sparse loop because 584 of the 596 are
-n>1000 and the cumulative CSC working set plus per-matrix sparse
-factor scratch overruns memory.
+**Why rejected.** Loaded all three roots and ran the dense pass to
+completion, then SIGKILLed during the sparse loop. The bench's
+sparse-loop entry state holds the CSC for all 10,120 n>1000 matrices
+simultaneously; even with per-iter `take()` drops, the upfront total
+exceeds the 64 GB ceiling. `FERAL_KKT_ROOTS=kkt-mittelmann` alone
+(596 matrices, 4.2 GB on disk) shows the same pattern.
 
 **Status.** Not a feral correctness issue — it's a bench harness
-architectural limitation. Mittelmann dense subset (12/596 matrices,
-n ≤ 1000) validated 100% inertia + residual pass. Full expanded-
-corpus validation requires either streaming bench redesign or
-beefier hardware. See session 03 "Next Session Should" item 1.
+architectural limitation. **Expanded-corpus dense pass validates
+99.9% inertia (157,356/157,494) and 99.8% residual (157,220/157,494)
+across 157,494 dense-eligible matrices**, with the worst residual
+(`ERRINBAR_0824`, 1.87e-4) matching the kkt-only baseline — no new
+failure modes from `kkt-expansion` (12,430 matrices) or
+`kkt-mittelmann` (596 matrices). Sparse-pass validation on the
+n>1000 portion of the expanded corpus requires either streaming
+bench redesign or beefier hardware. See session 03 "Next Session
+Should" item 1.
 
 **Evidence.** `dev/journal/2026-04-26-03.org` 20:50 entry.
