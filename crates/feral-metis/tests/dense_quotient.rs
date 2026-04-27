@@ -109,8 +109,13 @@ fn dense_column_lands_at_end_of_perm() {
     let (cp, ri) = csc_from_triples(N, &t);
     let pat = CscPattern::new(N, &cp, &ri).expect("valid CSC");
 
-    let opts = MetisOptions::default();
-    assert!(opts.dense_quotient_enabled, "Fix A should be on by default");
+    // Fix A is OFF by default per the 2026-04-27 expert review (see
+    // `MetisOptions::dense_quotient_enabled` doc comment). Enable it
+    // explicitly to exercise the opt-in code path.
+    let opts = MetisOptions {
+        dense_quotient_enabled: true,
+        ..Default::default()
+    };
 
     let (perm, _ostats, _mstats) = metis_order_full(&pat, &opts).expect("ordering ok");
     assert_is_permutation(&perm, N);
@@ -139,7 +144,10 @@ fn no_dense_column_matches_legacy_baseline() {
         dense_quotient_enabled: false,
         ..Default::default()
     };
-    let opts_on = MetisOptions::default();
+    let opts_on = MetisOptions {
+        dense_quotient_enabled: true,
+        ..Default::default()
+    };
 
     let (perm_off, _, _) = metis_order_full(&pat, &opts_off).expect("ok");
     let (perm_on, _, _) = metis_order_full(&pat, &opts_on).expect("ok");
@@ -195,7 +203,10 @@ fn disabling_quotient_keeps_dense_column_in_interior_permutation() {
     //
     // To make the contrast visible, also run with quotient ON and
     // confirm the column lands exactly at the last position.
-    let opts_on = MetisOptions::default();
+    let opts_on = MetisOptions {
+        dense_quotient_enabled: true,
+        ..Default::default()
+    };
     let (perm_on, _, _) = metis_order_full(&pat, &opts_on).expect("ok");
     assert_is_permutation(&perm_on, N);
     assert_eq!(perm_on.last().copied().unwrap_or(-1) as usize, DENSE_COL);
@@ -234,8 +245,10 @@ fn threshold_override_promotes_lower_degree_column() {
     assert_is_permutation(&perm_default, N);
 
     // Forced threshold 30: column degree 50 > 30 → dense, must be
-    // last.
+    // last. Quotient is OFF by default (post-2026-04-27 expert review),
+    // so opt in explicitly.
     let opts_forced = MetisOptions {
+        dense_quotient_enabled: true,
         dense_quotient_threshold: Some(30),
         ..Default::default()
     };

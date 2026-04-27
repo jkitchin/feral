@@ -286,3 +286,89 @@ the *order*, never the *pivot decision*, so the BK kernel's existing
   ORBIT2_0016 in the bench's top-10 shows they all share n=4795 and
   identical structure (KKT iterates of the same NLP), so a fix that works
   on ORBIT2_0000 should work on all 20.
+
+## 10. Post-mortem (2026-04-27, after Fix A landed)
+
+Fix A was implemented in `crates/feral-metis/src/lib.rs` (commit `ef366de`)
+exactly as specified in §6: pull columns with off-degree > `max(40,
+ceil(10*sqrt(n)))` out of the ND graph, run M1–M7 on the induced sparse
+subgraph, append dense columns at the end.
+
+**Empirical result on ORBIT2_0000 (`./target/release/diag_orbit2_quotient`):**
+
+| ordering                                  | nnz_L      |
+|-------------------------------------------|------------|
+| baseline (Fix A disabled, MetisND)        | 1,544,349  |
+| **Fix A enabled (default at commit time)**| 2,254,428  |
+| MUMPS reference                           | 109,782    |
+
+Fix A *increased* fill by 46%. The §6 prediction (110–200k) was wrong.
+
+### Why Fix A was the wrong shape
+
+Two reference-solver investigations (mumps-expert + spral-expert agents,
+2026-04-27) found:
+
+1. **MUMPS does NOT pre-strip dense columns.** `ICNTL(6)` is MC64
+   matching, not dense-row removal — the §6 reading of the user-guide
+   was a misinterpretation. MUMPS handles dense rows *inside* its
+   AMD/AMF (`MUMPS_QAMD` in `ana_orderings.F:5226+`) via the `THRESM`
+   parameter and the `HEAD(N)` quasi-dense list. The dense column is
+   always in the graph passed to the ordering algorithm; the algorithm
+   defers it during elimination.
+2. **MUMPS auto-dispatch on ORBIT2 picks AMF, not METIS.** For
+   `SYM=2, N=4795 ≤ SMALLSYM=10000, NBQD=1 < MAXQD=2`, the auto-choice
+   in `ana_set_ordering.F:52-78` picks `IORD=2` (HAMF4). HAMF4 has no
+   explicit dense detection but its bucketed-degree min-fill naturally
+   places very-high-degree variables last. MUMPS's 109k nnz_L came
+   from HAMF4, not METIS.
+3. **SSIDS does NOT special-case dense columns at all.** Full pattern
+   → METIS-ND → supernodal amalgamation with `nemin=32`. The dense
+   column lands at the top separator naturally; zero-fill chain merges
+   (`do_merge` in `core_analyse.f90:806-822`) collapse the chain into
+   one dense BLAS-3 root frontal. SSIDS's `nnz_L` on ORBIT2-shape
+   inputs is probably *not* small either — speed comes from BLAS-3
+   kernel quality on the root, not fill reduction.
+4. **Why pre-stripping regresses on bipartite KKT:** removing column
+   2697 strips 1794 entries (~30% of off-diagonal mass). The residual
+   graph is two diagonal blocks loosely glued by a thinned Jacobian —
+   METIS-ND can't find a useful separator, invents bad ones, and the
+   next-densest column dominates fill. The structural signal that made
+   the dense column the natural top separator was destroyed by the
+   pre-strip.
+
+### Action taken
+
+- Default flipped to `dense_quotient_enabled: false` (commit on top of
+  `f073070`). The opt-in code path is preserved for diagnostic
+  experimentation; `diag_orbit2_quotient` lets us continue measuring.
+- Fix A is structurally correct (verified in unit tests) but
+  empirically wrong for bipartite KKT. It may still help on
+  *bordered* patterns where the dense column is genuinely separable
+  from the rest of the graph; we have no fixture proving that yet.
+
+### Next direction (Fix B, deferred to a future session)
+
+Implement QAMD-style dense-row deferral inside `feral-amd` per the
+MUMPS source:
+
+- Add a `THRESM` parameter (`avg_deg*10 + (max_deg − avg_deg)/10 + 1`,
+  or simpler `50*avg_deg`).
+- During the AMD elimination loop, skip variables with degree > THRESM,
+  store them in a quasi-dense list (analog of `HEAD(N)` in
+  `ana_orderings.F:5500-5508`).
+- After all non-dense pivots are exhausted, mass-eliminate the dense
+  list at the end.
+- Reference: Davis 1996 §5; MUMPS `ana_orderings.F:5226-5650`.
+
+Estimated 100–200 LoC. Combined with a dispatcher fingerprint that
+matches MUMPS's auto-choice (`AvgDens*50` + `NBQD≥2` test from
+`dana_aux.F:3578-3585` and `ana_set_ordering.F:52-78`), this should
+fix ORBIT2/COSHFUN/CATENA.
+
+Before doing that, we should also answer: is feral's 1.54M nnz_L on
+ORBIT2 already concentrated in one large root supernode (SSIDS-shape
+outcome — meaning factor time is already dominated by BLAS-3 on the
+root, and W-1+W-2's kernel speedups already help), or spread across
+many supernodes (true ordering problem)? `diag_chainwoo_profile` on
+ORBIT2_0000 will answer this in <1 minute.

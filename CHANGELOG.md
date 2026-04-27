@@ -4,6 +4,50 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance (2026-04-27) — rank-bs trailing-update accumulator (W-2, 1×1)
+
+`src/dense/factor.rs::apply_blocked_schur` rewritten as a single
+`pulp::WithSimd` body (`schur_panel_minus_nofma_strided`) iterating
+`for j in j_start..nrow` outermost, accumulating all `n_elim`
+contributions in register accumulators, then storing — replacing the
+previous `O(n_elim * trailing)` SIMD dispatch pattern of `n_elim`
+rank-1 axpys. Bit-exact against the rank-1 reference (no FMA, explicit
+mul/sub ordering) — verified for `n_elim ∈ {1,2,4,7,8,16,31,32}` ×
+`len ∈ {1,3,7,8,9,15,16,17,31,32,33,63,64,65,256,257}`. 2×2 panels
+stay on the rank-1 fallback for now. Combined with W-1: CHAINWOO
+driver-level total 28.7 → 4.4 ms (**6.5× speedup**). W-2 from
+`dev/plans/dense-kernel-speedup.md`.
+
+### Performance (2026-04-27) — engage blocked panel for ncol >= 8 (W-1)
+
+`src/dense/factor.rs::factor_frontal_blocked_in_place` now dispatches
+the deferred-Schur panel kernel whenever `ncol >= 8` (was `ncol > bs`
+with default `bs=64`, sending every 32×32 CHAINWOO supernode to the
+scalar path). Bit-parity preserved against the scalar reference for
+the new fixtures `ncol ∈ {8, 12, 16, 24, 32}`. W-1 from
+`dev/plans/dense-kernel-speedup.md`. Combined effect with W-2 above.
+
+### Ordering (2026-04-27) — quasi-dense column quotient (Fix A, opt-in only)
+
+`crates/feral-metis/src/lib.rs::metis_order_full` gained an opt-in
+`MetisOptions::dense_quotient_enabled` flag (default **false**). When
+enabled, columns with off-degree > `max(40, ceil(10*sqrt(n)))` are
+pulled out of the ND graph, the M1–M7 pipeline runs on the
+sparse-induced subgraph, and the dense columns are appended at the
+end of the returned permutation. The technique is the user-guide
+reading of MUMPS `ICNTL(6)` and HSL_MC68's "dense parameter"; expert
+review of MUMPS and SPRAL sources (2026-04-27) found that neither
+solver actually pre-strips the graph — MUMPS handles dense rows
+*inside* QAMD via the `THRESM` parameter (`ana_orderings.F:5226+`)
+and SSIDS doesn't special-case them at all. Empirical test on
+ORBIT2_0000: enabling Fix A *increased* `nnz_L` from 1.54M to 2.25M
+because removing the dense column destroys the structural signal that
+makes it the natural top separator. The opt-in path is kept for
+diagnostic experimentation (`src/bin/diag_orbit2_quotient.rs`); the
+correct fix is a QAMD-style deferral inside `feral-amd`, deferred to a
+future session. See `dev/research/orbit2-cluster-regression.md` §10
+for the post-mortem.
+
 ### Tooling (2026-04-27) — bench `FERAL_KKT_FILTER` filters at load time
 
 `src/bin/bench.rs::load_kkt_dir` now reads `FERAL_KKT_FILTER` and skips

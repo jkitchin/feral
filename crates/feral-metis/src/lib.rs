@@ -102,21 +102,29 @@ pub struct MetisOptions {
     /// bisection and append them at the *end* of the returned
     /// permutation.
     ///
-    /// This is the same "quasi-dense quotient" technique HSL_MC68,
-    /// MUMPS (`ICNTL(6)`) and SSIDS use: a single column with
-    /// off-diagonal degree well above `O(sqrt(n))` causes recursive
-    /// bisection to bleed fill into every subtree it touches. Pulling
-    /// that column out and eliminating it last keeps it at the root
-    /// frontal where it belongs and shrinks `nnz_L` by a large
-    /// constant on arrow / bordered patterns.
+    /// **Default: `false`.** The technique was implemented to mimic
+    /// what we believed MUMPS's `ICNTL(6)` and SSIDS did, but expert
+    /// review of the MUMPS and SPRAL sources (2026-04-27) found:
+    /// (a) `ICNTL(6)` is MC64 matching, not dense-row removal;
+    /// (b) MUMPS handles dense rows *inside* its AMD/AMF
+    /// (`MUMPS_QAMD` in `ana_orderings.F:5226+` with the `THRESM`
+    /// parameter and `HEAD(N)` quasi-dense list); and
+    /// (c) SSIDS does not special-case dense rows at all — it relies
+    /// on METIS placing them in the top separator and supernodal
+    /// amalgamation collapsing the resulting chain into one dense
+    /// BLAS-3 root frontal. Neither solver pre-strips the graph.
+    /// Empirically, on ORBIT2_0000 (n=4795, one column of off-degree
+    /// 1794) Fix A *increased* `nnz_L` from 1.54M to 2.25M because
+    /// removing the dense column destroys the structural signal that
+    /// makes it the natural top separator. The opt-in path is kept
+    /// for diagnostic experimentation; the correct fix lives in
+    /// `feral-amd` (a QAMD-style deferral, future work).
     ///
-    /// References:
+    /// References (kept for the opt-in code path):
     /// - Davis & Hager, "Dynamic supernodes in sparse Cholesky
     ///   update/downdate and triangular solves" (2009), §3.2.
     /// - Davis (1996) AMD paper, §5 ("dense rows / `Alpha` parameter").
-    /// - MUMPS user guide §3.6 (`ICNTL(6)`).
-    ///
-    /// Default: `true`. Set to `false` to disable.
+    /// - MUMPS source: `ana_orderings.F:5226-5650` (QAMD).
     pub dense_quotient_enabled: bool,
     /// Override the off-diagonal-degree threshold above which a column
     /// is treated as quasi-dense.
@@ -139,7 +147,7 @@ impl Default for MetisOptions {
             two_hop_ratio_threshold: 0.85,
             max_imbalance: 0.20,
             fm_passes: 10,
-            dense_quotient_enabled: true,
+            dense_quotient_enabled: false,
             dense_quotient_threshold: None,
         }
     }
