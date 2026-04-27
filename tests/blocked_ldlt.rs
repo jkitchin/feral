@@ -345,6 +345,69 @@ fn test_may_delay_ncol_lt_nrow_parity() {
     assert_frontals_byte_identical(&scalar, &blocked, "may_delay ncol_lt_nrow");
 }
 
+/// W-1 (`dev/plans/dense-kernel-speedup.md`): the panel gate was
+/// lowered from `ncol > block_size` (default 64) to `ncol >= 8`,
+/// engaging the deferred-Schur path on the 32-col CHAINWOO root
+/// supernode and on every front in the 8..=32 size band. The scalar
+/// `factor_frontal` predates this change, so byte-identity against
+/// it satisfies the bit-parity contract per CLAUDE.md.
+///
+/// SPD sweep covering the new band, including sizes that exercise:
+///  - exact panel-cap fits (`ncol == 8, 16, 32`)
+///  - cap-not-multiple-of-cap leftovers (`ncol == 12, 24`)
+///  - small `ncol < nrow` fronts where the contribution block is
+///    populated by the deferred Schur (the new common case for the
+///    multifrontal driver).
+#[test]
+fn test_w1_spd_panel_band_parity() {
+    let params = default_params();
+    for &n in &[8usize, 12, 16, 24, 32] {
+        let mat = random_spd(n, 0xA1B2_C3D4 ^ n as u64);
+        let scalar = factor_frontal(&mat, n, false, &params).unwrap();
+        let blocked = factor_frontal_blocked(&mat, n, false, &params).unwrap();
+        assert_frontals_byte_identical(&scalar, &blocked, &format!("w1_spd ncol=nrow={}", n));
+    }
+}
+
+/// W-1: small `ncol < nrow` shapes. `nrow` chosen larger than ncol so
+/// the deferred Schur fires on a non-trivial trailing block. The
+/// CHAINWOO root supernode is `nrow=1984, ncol=32`; we use scaled-down
+/// analogs (`nrow=4*ncol`) to keep the test fast.
+#[test]
+fn test_w1_spd_panel_band_partial_parity() {
+    let params = default_params();
+    for &ncol in &[8usize, 12, 16, 24, 32] {
+        let nrow = 4 * ncol;
+        let mat = random_spd(nrow, 0x5151_AAAA ^ ncol as u64);
+        let scalar = factor_frontal(&mat, ncol, false, &params).unwrap();
+        let blocked = factor_frontal_blocked(&mat, ncol, false, &params).unwrap();
+        assert_frontals_byte_identical(
+            &scalar,
+            &blocked,
+            &format!("w1_spd nrow={}, ncol={}", nrow, ncol),
+        );
+    }
+}
+
+/// W-1: `may_delay == true` parity in the new panel band. SPD ⇒ no
+/// rejection ⇒ panel runs to completion, and the deferred-Schur path
+/// must continue to byte-match scalar.
+#[test]
+fn test_w1_may_delay_panel_band_parity() {
+    let params = default_params();
+    for &ncol in &[8usize, 12, 16, 24, 32] {
+        let nrow = 4 * ncol;
+        let mat = random_spd(nrow, 0xC0DE_1234 ^ ncol as u64);
+        let scalar = factor_frontal(&mat, ncol, true, &params).unwrap();
+        let blocked = factor_frontal_blocked(&mat, ncol, true, &params).unwrap();
+        assert_frontals_byte_identical(
+            &scalar,
+            &blocked,
+            &format!("w1_may_delay nrow={}, ncol={}", nrow, ncol),
+        );
+    }
+}
+
 /// Step 5 — forced rejection under `may_delay == true` triggers the
 /// SSIDS "break on first failure" path. The blocked panel must stop
 /// cleanly at the delayed column, apply the deferred Schur to trailing

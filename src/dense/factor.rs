@@ -988,8 +988,19 @@ pub fn factor_frontal_blocked_in_place(
 
     // Fallback conditions where the panel offers no advantage.
     // Delegation preserves parity trivially.
-    let bs = params.block_size;
-    if bs < 2 || ncol <= bs {
+    //
+    // W-1 (`dev/plans/dense-kernel-speedup.md`): engage the deferred-Schur
+    // panel for any `ncol >= PANEL_MIN_NCOL`. Previously the gate was
+    // `ncol > bs` (where `bs = params.block_size`, default 64), which
+    // sent every 32×32 CHAINWOO root supernode (62% of factor time on
+    // CHAINWOO_0000) through the scalar `factor_frontal` path. The
+    // panel kernel `lblt_panel_frontal` already handles small-`bs`
+    // dispatches; we widen the gate and clamp the working block size
+    // to `min(params.block_size, ncol)` so a single panel pass covers
+    // the entire elimination range when `ncol <= params.block_size`.
+    const PANEL_MIN_NCOL: usize = 8;
+    let bs = params.block_size.min(ncol);
+    if bs < 2 || ncol < PANEL_MIN_NCOL {
         return factor_frontal(matrix, ncol, may_delay, params);
     }
 
@@ -1011,7 +1022,12 @@ pub fn factor_frontal_blocked_in_place(
     let mut k = 0;
     while k < ncol {
         let remaining = ncol - k;
-        if remaining <= bs {
+        // Scalar tail engages when too few columns are left to amortize
+        // the deferred-Schur dispatch. With W-1 the first panel may
+        // process all `ncol` columns when `ncol <= bs`; subsequent
+        // iterations fall into the scalar tail only once fewer than
+        // `PANEL_MIN_NCOL` columns remain (matching the entry gate).
+        if remaining < PANEL_MIN_NCOL {
             // Scalar tail: process remaining pivots one at a time.
             // Reborrow `a` (a `&mut [f64]`) so the same binding can be
             // passed across multiple call sites.
@@ -1036,11 +1052,16 @@ pub fn factor_frontal_blocked_in_place(
             continue;
         }
 
+        // Clamp the panel cap to the remaining elimination range so the
+        // last partial panel never peeks past column `ncol - 1`. Without
+        // this clamp, when `ncol % bs != 0` the last panel call would
+        // read/write columns in the contribution-block region.
+        let panel_cap = bs.min(remaining);
         let (n_elim, status) = lblt_panel_frontal(
             &mut *a,
             nrow,
             k,
-            bs,
+            panel_cap,
             may_delay,
             params,
             &mut pos,
