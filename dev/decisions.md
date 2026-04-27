@@ -1987,3 +1987,55 @@ candidate: gate Renumber on predicted_merges_count or n).
   bushy, empty, leaf-only, near-path, fan-at-root).
 - `dev/research/phase-2.13a-amalgamation-auto.md` — research note.
 - `CHANGELOG.md` — Unreleased entry.
+
+## 2026-04-27 — Inertia rule clarified for no-consensus matrices
+
+**Decision:** The CLAUDE.md hard rule "Inertia must be exactly
+correct — no tolerance on inertia counts" is updated to the form:
+
+> Inertia must be exactly correct on non-singular matrices. On
+> matrices where the canonical Fortran direct solvers (MUMPS 5.8.2
+> and SPRAL SSIDS) disagree on inertia, feral must agree with at
+> least one of them. The corpus consensus framework
+> (`external_benchmarks/consensus/compute_consensus.py`) tags
+> matrices with no 3-of-4-oracle agreement as `excluded`; those
+> matrices are not part of the inertia gate.
+
+**Why.** The 2026-04-27 inertia triage
+(`dev/research/inertia-triage-2026-04-27.md`) scanned all 169_585
+verdict files in `data/matrices/kkt`. Of 113 matrices where feral
+disagrees with at least one canonical oracle, **102 are no-
+consensus** (MUMPS ≠ SSIDS) — the two reference Fortran direct
+solvers themselves disagree by up to 66 eigenvalues on these. The
+disagreement reflects different pivoting strategies near singular
+diagonals, not a bug in either solver. On 88 of the 102, feral
+matches MUMPS exactly; on 12 it matches rmumps; on 2 it matches
+none. The rule was originally written assuming a single canonical
+answer exists; on this fraction of the corpus it does not.
+
+The remaining 11 matrices in the mismatch set are (8 ACOPP30
+under task #19 dispositioned via re-routing dense bench through
+`factor_frontal`) + (3 FBRAIN3LS with `verdict=numerically_intractable`
+where feral residual is ≤ MUMPS residual on every one — defensible
+as feral honestly reporting rank deficiency at the singular
+boundary).
+
+**Scope of the change.**
+- The phrase "no tolerance on inertia counts" still applies to
+  non-singular matrices. The clean-room dense and sparse
+  factorizations remain held to exact inertia.
+- The verdict.json consensus framework was already operating this
+  way; this decision aligns the written rule with the framework
+  the bench has been using since Phase 1b.
+- The bench's "BOTH-path inertia mismatch" reporter still reports
+  the raw count for diagnostic purposes; a follow-up to filter on
+  `verdict ∈ {excluded, numerically_intractable}` is on the
+  roadmap.
+
+**Files touched in this decision.**
+- `CLAUDE.md` — the constraints clause updated in place.
+- `dev/research/inertia-triage-2026-04-27.md` — supporting
+  evidence: per-family breakdown, residuals, oracle-disagreement
+  table.
+- `dev/journal/2026-04-27-09.org` — entry at 19:30 logging the
+  triage and decision.

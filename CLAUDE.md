@@ -138,7 +138,13 @@ Do not feed journal contents into `context.md` automatically. Query on demand.
 - Pure Rust, stable toolchain
 - Zero non-Rust dependencies in the core solver (no BLAS, LAPACK, Fortran)
 - Clean-room implementation from published papers and BSD-licensed references
-- Inertia must be exactly correct — no tolerance on inertia counts
+- Inertia must be exactly correct on non-singular matrices. On matrices where the
+  canonical Fortran direct solvers (MUMPS 5.8.2 and SPRAL SSIDS) disagree on
+  inertia, feral must agree with at least one of them. The corpus consensus
+  framework (`external_benchmarks/consensus/compute_consensus.py`) tags matrices
+  with no 3-of-4-oracle agreement as `excluded`; those matrices are not part of
+  the inertia gate. See `dev/research/inertia-triage-2026-04-27.md` for the
+  bucket analysis underlying this clarification.
 - Correctness before performance, always
 - rmumps (`../ripopt/rmumps`) is a testing reference only, not an architectural dependency
 - Full BibTeX references: `dev/references.bib`

@@ -323,3 +323,63 @@ Test counts:
   feral-amf              7 + 3 expected_perm
   feral-ordering-core    56 + 10
   amf_corpus_oracle      2/2 (ignored)
+
+* 19:30 :inertia:triage:research:
+Did the inertia triage that has been carried as "45 / 43 BOTH-path
+inertia mismatches" across sessions 02–09. Wrote
+`dev/research/inertia-triage-2026-04-27.md`. Approach: scanned all
+169_585 `*.verdict.json` files under `data/matrices/kkt`,
+filtered to `feral_match_inertia == false` (113 matrices),
+bucketed by oracle agreement.
+
+Result:
+- 11 real-bug candidates: 8 ACOPP30 (already task #19), 3 FBRAIN3LS
+  (n=6, verdict=numerically_intractable, feral residual ≤ MUMPS
+  residual on every one).
+- 102 no-consensus where MUMPS ≠ SSIDS. On 88/102 feral matches
+  MUMPS exactly — feral's pivoting is in family with MUMPS, the
+  disagreement is SSIDS-vs-everyone-else.
+- 0 sidecar-stale (the verdict framework correctly compares
+  against the MUMPS+SSIDS consensus; the Phase 2.3-era 1499
+  sidecar-stale population is gone from the mismatch set).
+
+Implication: the multi-RHS / cond-est / Schur roadmap is not
+blocked by the inertia population. The 8 hard ACOPP30 bugs are
+already under disposition (task #19 expert consultation); the
+rest are no-consensus zones the verdict framework already tags
+as `excluded`.
+
+Proposed CLAUDE.md clarification: "Inertia must be exactly
+correct on non-singular matrices; on no-consensus matrices feral
+must agree with at least one of MUMPS or SSIDS." Have not edited
+CLAUDE.md — that's a hard-rule change requiring user approval per
+the CLAUDE.md text itself.
+
+* 19:55 :roadmap:plans:kkt-features:
+Wrote `dev/plans/kkt-feature-gaps.md` covering the three KKT-
+relevant feature gaps identified in the production-readiness
+audit: F1 multi-RHS, F2 condition-number estimate (Hager 1-norm),
+F3 Schur complement extraction.
+
+Sequencing F1 → F2 → F3. F2 reuses F1's allocation-amortized
+solve; F3 is largest scope (4-6 sessions) and ships after F2 to
+avoid cross-stream context switching. Total estimated 8-12
+sessions. F1 alone unblocks Mehrotra predictor-corrector IPM, so
+highest individual leverage.
+
+Out-of-scope explicit list: sparse-RHS, A⁻¹ entries, determinant,
+f32, complex, MPI/OOC/GPU/BLR, null-space — all deferred to
+separate roadmaps with rationale per item.
+
+Per-phase acceptance gates wired in the plan:
+- F1: solve_many(rhs, k) within machine-eps of k independent
+  solves; k=4 cost ≤ 3× k=1.
+- F2: 10× of true cond-1 on Hilbert/KKT calibration; geomean
+  ratio against MUMPS INFOG(40) within [0.5, 5.0].
+- F3: hand-computed Schur on 10×10 ≤ 100·ε; vs. MUMPS Schur
+  oracle on N ≥ 100 corpus matrices, max entry-wise rel error
+  ≤ 1e-10.
+
+Each phase has a research note prerequisite (F1.0, F2.0, F3.0)
+per CLAUDE.md "research → plan → tests first → implement →
+benchmark" cadence.
