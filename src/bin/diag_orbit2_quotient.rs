@@ -91,4 +91,34 @@ fn main() {
         "[OrderingMethod::MetisND, default MetisOptions] nnz_L = {}",
         f.factor_nnz()
     );
+
+    // Compare against feral-amd, which already implements Davis 1996
+    // §5 dense-row deferral via `AmdOptions::dense_alpha = 10.0`.
+    let sym_amd = symbolic_factorize_with_method(&csc, &snode_params, OrderingMethod::Amd)
+        .expect("sym_amd ok");
+    let (f_amd, _) = factorize_multifrontal(&csc, &sym_amd, &nparams).expect("num_amd ok");
+    println!(
+        "[OrderingMethod::Amd, default AmdOptions] nnz_L = {}",
+        f_amd.factor_nnz()
+    );
+
+    // Direct feral-amd probe: did dense deferral actually fire, where
+    // does column 2697 (the only super-dense column) land?
+    use feral_amd::{amd_order_opts, AmdOptions};
+    for &alpha in &[10.0_f64, 5.0, 2.0, 1.0, 0.5] {
+        let amd_opts = AmdOptions {
+            aggressive: true,
+            dense_alpha: alpha,
+        };
+        let (perm_amd, stats) = amd_order_opts(&cpat, &amd_opts).expect("amd ok");
+        let pos_2697 = perm_amd
+            .iter()
+            .position(|&p| p == 2697)
+            .unwrap_or(usize::MAX);
+        let last3: Vec<i32> = perm_amd.iter().rev().take(3).copied().collect();
+        println!(
+            "[feral-amd alpha={:.1}] n_dense_deferred={}, col2697 at perm[{}], last3={:?}",
+            alpha, stats.n_dense_deferred, pos_2697, last3
+        );
+    }
 }
