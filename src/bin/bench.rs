@@ -1010,6 +1010,22 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
         return Vec::new();
     }
 
+    // Load-time substring filter on the matrix name. When FERAL_KKT_FILTER
+    // is set, skip parsing sidecars / oracle JSON for non-matching stems.
+    // For a 156k-matrix corpus this turns the loader from minutes into
+    // seconds for targeted diagnostics. The same env var is also re-checked
+    // post-load as a redundant safety net (no-op when load-time filter ran).
+    let filter_env = std::env::var("FERAL_KKT_FILTER").ok();
+    let filter_patterns: Vec<String> = filter_env
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut entries = Vec::new();
 
     // Walk subdirectories (one per problem)
@@ -1038,6 +1054,13 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
         for mtx_entry in mtx_files {
             let mtx_path = mtx_entry.path();
             let stem = mtx_path.file_stem().unwrap().to_string_lossy().to_string();
+
+            if !filter_patterns.is_empty()
+                && !filter_patterns.iter().any(|p| stem.contains(p.as_str()))
+            {
+                continue;
+            }
+
             let json_path = mtx_path.with_extension("json");
 
             if !json_path.exists() {
@@ -1289,6 +1312,34 @@ fn main() {
         println!("\nno KKT matrices found under data/matrices/kkt* (run collect_kkt from ripopt or scripts/harvest-mittelmann-kkt.sh)");
         return;
     }
+
+    // Optional substring filter on the matrix name. Useful for targeted
+    // diagnostics ("FERAL_KKT_FILTER=CHAINWOO" runs only the CHAINWOO
+    // family); the full corpus is multi-hour and not always required.
+    // Comma-separated patterns are OR'd; an entry matches if its name
+    // contains any one of them.
+    if let Ok(filter) = std::env::var("FERAL_KKT_FILTER") {
+        let patterns: Vec<&str> = filter
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !patterns.is_empty() {
+            let before = kkt_entries.len();
+            kkt_entries.retain(|e| patterns.iter().any(|p| e.name.contains(p)));
+            println!(
+                "FERAL_KKT_FILTER={:?}: {} of {} matrices match",
+                filter,
+                kkt_entries.len(),
+                before
+            );
+            if kkt_entries.is_empty() {
+                println!("no matrices matched the filter; nothing to do");
+                return;
+            }
+        }
+    }
+
     println!("\n{} KKT matrices total", kkt_entries.len());
 
     let mut n_total = 0usize;
