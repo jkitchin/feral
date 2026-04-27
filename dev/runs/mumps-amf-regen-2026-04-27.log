@@ -1,0 +1,21 @@
+found 183461 matrices
+  to run: 183288  (skipped existing: 5, too large (n>50000): 168)
+running: /Users/jkitchin/Dropbox/projects/feral/external_benchmarks/mumps_oracle/mumps_amf_oracle /var/folders/gq/k1kgbl7n539_4dl1md8x3jt80000gn/T/mumps_amf_m4sy8w47/manifest.txt
+STOP 0
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/DIXMAANJ/DIXMAANJ_0001.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/DIXMAANK/DIXMAANK_0001.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/DIXMAANL/DIXMAANL_0001.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/FLETBV3M/FLETBV3M_0001.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/FLETCBV3/FLETCBV3_0001.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/FLETCHBV/FLETCHBV_0001.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/FMINSURF/FMINSURF_0000.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/GENHUMPS/GENHUMPS_0001.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/INDEF/INDEF_0001.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/ODNAMUR/ODNAMUR_0000.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/QUDLIN/QUDLIN_0001.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/ROCKET/ROCKET_0067.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/ROSEPETAL/ROSEPETAL_0000.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-expansion/VAREIGVL/VAREIGVL_0000.mtx
+ READ_MTX failed: /Users/jkitchin/Dropbox/projects/feral/data/matrices/kkt-mittelmann/arki0003/arki0003_0005.mtx
+mumps_amf_oracle done: 183273 / 183288 matrices succeeded
+wrote 183273 ok / 15 failed canonical sidecars

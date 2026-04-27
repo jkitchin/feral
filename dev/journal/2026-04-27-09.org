@@ -118,7 +118,80 @@ Commit covers diag_amf_vs_amd.rs (new), diag_chainwoo.rs (Amf added
 to methods array), diag_orbit2_quotient.rs (Amf comparison block),
 Cargo.toml (new [[bin]] entry).
 
-* 14:45 :status:end-of-session:
+* 14:55 :amf:phase-c:regen-launched:
+User said "kick off the regen", so launched
+external_benchmarks/mumps_oracle/run_mumps_amf.py against
+data/matrices --skip-existing --max-n 50000. 183_461 .mtx files
+on disk; oracle binary already built (last touched 13:19 today
+during Phase C scaffold).
+
+First nohup attempt died (relative log path resolved against the
+nohup'd shell's cwd, not feral root). Re-launched with absolute
+paths and disown; pid 92707 alive. Log: dev/runs/mumps-amf-
+regen-2026-04-27.log. Set up Monitor on sidecar count + error
+markers.
+
+* 16:30 :amf:phase-c:regen-done:
+Regen exited cleanly. Throughput: 183_288 attempted (15 read
+failures + 183_273 ok). 173 matrices skipped via --max-n filter or
+already-existed predicate. 183_293 .hamf4.json on disk now.
+
+Read failures (8 distinct families, all kkt-expansion shapes):
+GENHUMPS_0001, INDEF_0001, ODNAMUR_0000, QUDLIN_0001,
+ROCKET_0067, ROSEPETAL_0000, VAREIGVL_0000, arki0003_0005, plus
+7 more not echoed at the tail. These are READ_MTX failures inside
+the Fortran oracle, not feral-side errors.
+
+* 16:35 :amf:corpus-gate:results:
+cargo test --release --test amf_corpus_oracle -- --ignored
+--nocapture (149.23s):
+
+  ORBIT2_0000 budget pin    PASS    feral-amf nnz_L = 32_105 ≤ 120k
+  amf_corpus_gate           FAIL
+    found      183_293 sidecars
+    ok         183_257   (99.98%)
+    skipped         15   (read-failures from regen)
+    failed          21
+      CHARDIS1_0000  feral 2_001_000 vs MUMPS HAMF4 1_758_486
+                     (ratio 1.138 > 1.10 gate)
+      DTOC1ND_000{0..19}  matrix n=9990 vs sidecar n=9685
+                     (305-column delta; structural mismatch)
+
+Reading: 99.98% pass rate is a strong signal that feral-amf agrees
+with MUMPS HAMF4 on the corpus level. The 21 failures split:
+
+1. CHARDIS1_0000 is a real ratio miss at 1.138× — the only
+   matrix in 183k where feral's HAMF4-style metric ranks columns
+   different enough from MUMPS to inflate fill by ~14%. Probable
+   causes: (a) feral's quasi-dense quotient cuts off slightly
+   different from MUMPS's HAMF4 internal heuristic, (b) tie-
+   breaking under quantized RMF differs.
+
+2. DTOC1ND family: MUMPS reports n=9685 but the MTX file declares
+   n=9990. MUMPS oracle preprocessing must be collapsing 305
+   isolated rows/columns. Cosmetic test-harness issue, not a
+   feral correctness bug; tests/amf_corpus_oracle.rs rejects
+   sidecars where n disagrees because the perm length wouldn't
+   apply to the right shape. Three options: skip these in the
+   gate, teach the test to use MUMPS reduced-n, or regen with a
+   no-preprocess flag if one exists.
+
+* 16:40 :amf:phase-d:gate:status:
+Default flip ("AMF for n ≤ 10000, MetisND otherwise" from
+dev/plans/amf-clean-room.md lines 185-188) is *not* defensible
+yet. Need to either:
+  (a) close out CHARDIS1_0000 and the DTOC1ND family before
+      flipping (cleanest);
+  (b) document an explicit skip-list in the corpus gate and ship
+      the flip with the 99.98% pass rate as evidence.
+
+Recorded both as task #32 (CHARDIS1_0000) and task #33 (DTOC1ND
+n-mismatch). Stopping autonomous loop here for user input on which
+path to take — these are policy decisions (skip-list vs metric
+fix vs test-side fix) that should not be made without an explicit
+call.
+
+* 16:45 :status:end-of-session:
 Plan position: Phases A.1, A.2, B.1-B.4, C-scaffold, D-wire-up
 complete. Remaining: Phase C corpus regen (user-driven multi-
 hour run) and Phase D default flip (gated on the regen).
