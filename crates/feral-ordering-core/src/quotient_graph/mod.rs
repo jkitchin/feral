@@ -32,7 +32,7 @@ mod workspace;
 pub use algo::{
     create_element, finalize_permutation, finalize_step, run_elimination, select_pivot, StepFlops,
 };
-pub use metric::{Metric, MinDegree};
+pub use metric::{Metric, MinDegree, MinFill};
 pub use workspace::{clear_flag, flip, Workspace, NONE};
 
 use crate::{CscPattern, OrderingError};
