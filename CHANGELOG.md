@@ -4,6 +4,20 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance (2026-04-27) — factor frontals in place (W-3a)
+
+Added `factor_frontal_blocked_in_place(&mut SymmetricMatrix, ...)` in
+`src/dense/factor.rs` that factors directly into the caller's buffer,
+eliminating the `nrow*nrow` scratch allocation + lower-triangle copy
+the kernel had been performing on every supernode call. For
+CHAINWOO_0000's 1984-row root supernode that is ~30 MB per call. The
+multifrontal driver (`factor_kkt_dense_path`,
+`factor_supernode_dense_internal`, `factor_supernode_leaf_dense`)
+migrated to the in-place entry; `factor_frontal_blocked` stays as a
+wrapper for tests/examples/bit-parity reference. Bit-parity preserved
+(`tests/blocked_ldlt.rs` 9/9). W-3a from
+`dev/plans/dense-kernel-speedup.md`.
+
 ### Fixed (2026-04-27) — 2x2 BK pivot inertia uses trace, not a00
 
 `src/dense/factor.rs::count_2x2_inertia` decided eigenvalue signs from
