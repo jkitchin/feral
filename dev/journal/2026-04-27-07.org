@@ -1,0 +1,90 @@
+#+TITLE: FERAL journal — 2026-04-27 session 07
+#+DATE: 2026-04-27
+
+* 11:30 :amf:phase-a2:metric:
+Phase A.2 of dev/plans/amf-clean-room.md landed (commit d32f617).
+Introduced ~Metric~ trait at
+crates/feral-ordering-core/src/quotient_graph/metric.rs covering the
+six AMF inner-loop sites at the abstraction level expected by Phase
+B's MinFill (~n_buckets~, ~init_score~, ~bucket~, ~coarse_bucket~,
+~merge_supervariable~, ~run_elimination~). Conservative shape: AMD
+specialisation is identity / no-op via ~#[inline(always)]~;
+~MinDegree::run_elimination~ delegates to the existing concrete
+~run_elimination_amd~ in algo.rs so codegen is byte-identical. The
+inner-loop body is *not* generic-ified yet — that decision waits for
+Phase B's MinFill where the metric methods do non-trivial work.
+
+Top-level driver added at ~feral_ordering_core::quotient_graph::order<M>~
+returning ~(Vec<i32>, OrderDiagnostics)~ — the diagnostic struct
+exposes ncmpa / n_mass_elim / n_supervar_merge / ndense / flops so
+~feral-amd::amd_order_full~ can build ~AmdStats~ without re-borrowing
+the consumed Workspace. ~feral-amd~ rewired to call
+~order::<MinDegree>(...)~ directly.
+
+Bit-parity gate met:
+- 12/12 oracle_match.rs SuiteSparse AMD bit-parity tests pass.
+- feral-ordering-core 41 -> 46 (5 new MinDegree unit tests).
+- 164/164 feral lib, 51/51 feral-amd; clippy clean.
+
+* 11:50 :amf:phase-b1:minfill:
+Phase B.1 landed (commit 087b592) — MinFill semantic methods only,
+no inner loop yet (B.2). Implementation:
+
+- ~n_buckets(n) = 2*n + 2~ (NORIG + NBBUCK + halo, per
+  ana_orderings.F:4954-5017).
+- ~bucket(score, n)~: identity for ~s ≤ n~, coarse stride
+  ~PAS = max(n / 8, 1)~ above, capped at NBBUCK = 2*n. Defensive
+  ~score ≤ 0~ clamps to bucket 0 (truncation underflow on
+  ~RMF / (NVI + 1)~ should not happen but we won't panic if it
+  does).
+- ~coarse_bucket(idx) = idx > n~ (linear-scan trigger in
+  ~select_pivot~).
+- ~merge_supervariable~ takes max — WF absorbs the larger fill on
+  supervariable merges.
+- ~run_elimination~ stubbed:
+  ~Err(OrderingError::Internal("AMF inner loop not yet implemented (Phase B.2)"))~.
+
+10 new unit tests cover bucket arithmetic edges (negative-clamp,
+fine region, coarse stride, NBBUCK cap, PAS-at-least-1 for tiny n,
+coarse threshold, merge-takes-max, stubbed run_elimination).
+feral-ordering-core 46 -> 56. Clippy clean. AMD bit-parity preserved
+(MinFill is purely additive).
+
+* 12:15 :amf:phase-b:tests-first:
+Phase B "tests-first" gate landed (commit f5cf00b). Per CLAUDE.md
+research → plan → tests → implement: wrote functional invariant
+tests at ~crates/feral-ordering-core/tests/invariants.rs~
+parameterised over Metric. Five fixtures (3x3 arrowhead, 5x5
+dual-arrowhead, tridiag(10), banded(20,3), empty pattern), each run
+through both ~MinDegree~ (must succeed) and ~MinFill~ (must error
+with ~Internal("AMF inner loop ...")~) arms.
+
+Generic invariant assertions in ~assert_is_permutation~: length ==
+n, every entry in 0..n, no duplicates, full coverage. The
+~assert_stubbed~ helper is the gate for B.2 — the moment the AMF
+inner loop lands, the four MinFill arms flip from
+~assert_stubbed::<MinFill>~ to ~run_and_check_perm::<MinFill>~ and
+the same fixtures exercise the real loop. Re-export of ~MinFill~
+from ~feral_ordering_core::quotient_graph~ added in the same
+commit.
+
+Gate status:
+- 10/10 invariant tests pass (5 MinDegree + 5 MinFill stubs).
+- 12/12 AMD oracle_match still green — bit-parity guarantee from
+  Phase A is preserved end-to-end through B.1 + tests-first.
+- ~cargo clippy --release --package feral-ordering-core
+  --all-targets -- -D warnings~ clean.
+
+The hand-derived expected-perm fixtures from Phase B deliverable 6
+(3x3 arrowhead AMF picks hub last, 5x5 dual-arrowhead defers both
+hubs, etc.) are *not* yet in this commit — those tighten beyond the
+generic permutation invariant and should land alongside the actual
+B.2 inner loop so the expected outputs can be cross-checked against
+a working implementation, not derived in advance with no oracle.
+
+* 12:25 :bench:
+In-tree bench unchanged from session 06 — Phase A.2 / B.1 / tests-
+first work is on the AMF track and does not touch the AMD codegen.
+Dense + sparse exit partitions still PASS:
+- small-frontal (<200) p90 1.25 dense, 1.54 sparse (target <= 2.0)
+- medium (<500) p90 1.72 dense, 1.55 sparse (target <= 3.0)

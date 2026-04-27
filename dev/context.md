@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-27T15:01:38Z
+Generated: 2026-04-27T16:20:21Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,11 +59,11 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
-94573e3 refactor(ordering-core): extract quotient-graph machinery from feral-amd
-c928c68 session(2026-04-27-05): AMF research + plan + corpus baseline
-ce6c091 docs(amf): research note + clean-room plan for HAMF4 ordering
-ea9f0b9 tooling(diag_orbit2_quotient): probe feral-amd dense deferral
-9c92c87 fix(feral-metis): default Fix A to disabled — empirical regression on ORBIT2
+f5cf00b test(ordering-core): functional invariants parameterised over Metric
+087b592 feat(ordering-core): add MinFill metric semantic methods (Phase B.1)
+e94c4b0 docs(ordering-core): correct AMD bucket-length comment
+d32f617 refactor(ordering-core): add Metric trait + MinDegree impl for AMD
+3716297 session(2026-04-27-06): Phase A.1 quotient-graph extraction
 ```
 
 ## Test Status
