@@ -7,7 +7,8 @@
 //!
 //! 1. **Initial score** seeded from each row's adjacency length.
 //!    AMD: identity. AMF: identity (both = `len`).
-//! 2. **Bucket array length.** AMD: `n + 1`. AMF: `2 * n + 2` because
+//! 2. **Bucket array length.** AMD: `n` (degrees `0..n` indexable;
+//!    `select_pivot` scans `while deg < n`). AMF: `2 * n + 2` because
 //!    the quantized RMF can exceed `n`.
 //! 3. **Bucket index for a score.** AMD: identity. AMF: identity for
 //!    `s ≤ n`, then coarse stride `PAS = max(n / 8, 1)` above.
