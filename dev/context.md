@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-27T16:20:21Z
+Generated: 2026-04-27T16:52:56Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,11 +59,11 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+4222368 feat(ordering-core): AMF inner loop (Phase B.2)
+bd8bb45 session(2026-04-27-07): Phase A.2 + B.1 + tests-first gate
 f5cf00b test(ordering-core): functional invariants parameterised over Metric
 087b592 feat(ordering-core): add MinFill metric semantic methods (Phase B.1)
 e94c4b0 docs(ordering-core): correct AMD bucket-length comment
-d32f617 refactor(ordering-core): add Metric trait + MinDegree impl for AMD
-3716297 session(2026-04-27-06): Phase A.1 quotient-graph extraction
 ```
 
 ## Test Status
@@ -75,8 +75,8 @@ test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok
 test test_gate_tiny_sparse_in ... ok
-test test_gate_boundary_n_16 ... ok
 test test_determinism_tiny ... ok
+test test_gate_boundary_n_16 ... ok
 test test_solve_parity_tiny_real_matrix ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

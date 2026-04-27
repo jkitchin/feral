@@ -1,0 +1,134 @@
+#+TITLE: Journal 2026-04-27-08
+#+STARTUP: showall
+
+* 09:00 :amf:phase-b2:start:
+Picking up Phase B.2 of dev/plans/amf-clean-room.md after session 07
+landed Phase A.2 (Metric trait + MinDegree) and Phase B.1 (MinFill
+semantic methods + stubbed run_elimination + tests-first invariant
+gate). Goal: real HAMF4 inner loop. Constraint: 12/12 oracle_match.rs
+SuiteSparse AMD bit-parity must remain green throughout.
+
+* 09:05 :design:wf-on-workspace:
+Decision: WF: Vec<i32> lives on the shared Workspace, not on a
+metric-specific state struct. AMD ignores the field; the 4n-byte cost
+is negligible vs the existing PE/IW/LEN/NV arrays. The alternative
+(MetricState<M> associated type) was considered and rejected for the
+extra trait/dispatch surface it would add for no measurable saving.
+
+* 09:15 :design:parallel-loops:
+Decision: implement run_elimination_amf, create_element_amf,
+select_pivot_amf, finalize_step_amf as full copies of their AMD
+counterparts with the metric-specific edits inlined, rather than
+generic-ifying AMD's existing functions over M: Metric. Trades ~300
+LoC duplication for zero risk to the AMD bit-parity contract — that
+contract (12/12 SuiteSparse oracle_match) is the load-bearing test
+for the entire ordering crate. Once Phase C lands a HAMF4 oracle and
+Phase D drives AMF through the corpus, generic-ification can be
+revisited cheaply with both bit-parity tests in place to catch any
+regression.
+
+* 10:30 :amf:workspace:wf-init:
+Live-variable insertion in Workspace::new_with_n_buckets sets
+wf[i] = deg as i32 after the head[deg] insertion — matches MUMPS
+ana_orderings.F:4342 (WF(I) = DEG) at the start of HAMF4 setup.
+Pre-eliminated and dense-deferred entries leave wf at zero. The
+elimination loop overwrites wf for every live variable on every
+iteration via the saturated/regular RMF branch, so the only path that
+sees the initial value is the very first select_pivot before any
+finalize_step has run.
+
+* 10:45 :amf:bucket-arithmetic:
+amf_bucket_of(score, n) free fn factored out so both select_pivot_amf
+and create_element_amf use the same arithmetic without going through
+trait dispatch. Logic: clamp non-positive → 0 (defensive; RMF/(NVI+1)
+should never be negative in well-formed runs); identity below n;
+coarse-stride ((s - n) / pas + n).min(2*n) above. PAS = max(n/8, 1).
+Cap at 2*n to stay within the [0, NBBUCK] slot range.
+
+* 11:10 :amf:finalize-step-amf:pass2:
+finalize_step_amf Pass-2 implements the three-accumulator
+(deg, wf3, wf4) walk from the research note Section 6:
+- element walk: dext = degree[e] - extent_in_me; first touch caches
+  wf[e] = dext * (2*degree[e] - dext - 1); accumulates wf4 += wf[e]
+  and deg += dext.
+- variable walk: wf3 += nv[j], deg += nv[j].
+- loose-degree branch (degree[i] < deg): zero wf3, wf4 to suppress
+  the fill contribution from approximate-degree-tightened variables.
+- otherwise degree[i] = deg; wf[i] = wf4 + 2*nvi*wf3.
+Pass-1 lazy-zeroes wf[e] alongside the existing
+we = degree[e] + wnvi line.
+
+* 11:30 :amf:rmf-quantization:
+The saturated/regular RMF branch at the re-insertion point uses f64
+arithmetic to compute RMF = deg*(deg-1+2*degme) - wf[i] divided by
+(nvi+1), then double-fallback quantizes:
+  if rmf < dummy: qscore = rmf as i32 (rounded);
+  elif rmf / n < dummy: qscore = (rmf / n) as i32;
+  else: qscore = AMF_DUMMY_I32 (= i32::MAX - 1).
+wf[i] = max(1, qscore). The dummy = i32::MAX - 1 cap matches MUMPS
+ana_orderings.F:4230 (idummy = huge - 1). Saturated branch
+(degree[i] + degme > nleft): take the min of the original and capped
+RMF — protects against quantization stomping on degree-near-NLEFT
+candidates.
+
+* 12:15 :amf:supervar-merge:
+Supervariable merge uses max: wf[i_u] = max(wf[i_u], wf[j]). The
+research note Section 6 derives this from the worst-case fill
+argument: when two variables have identical structure, eliminating
+the merged supervariable produces fill at least equal to the worse
+of the two component RMFs. AMD's merge is a no-op (degree carries
+through nv accumulation); AMF needs the explicit step.
+
+* 12:35 :amf:select-pivot-coarse-scan:
+select_pivot_amf scans head[mindeg..]; at the first non-empty bucket
+it inspects whether the bucket is in the coarse region (deg > n).
+If yes: linear-walk the chain via next[] tracking the min-wf
+candidate, doubly-linked unlink at the end. If no: take the head
+directly (fine bucket — wf is exact, no scan needed). The amortized
+cost stays O(N + nnz) because each variable only re-enters the
+coarse-scan loop when its score crosses a coarse-bucket boundary.
+
+* 13:00 :tests:invariants-flipped:
+Flipped the four assert_stubbed::<MinFill> arms in
+tests/invariants.rs to run_and_check_perm::<MinFill>. Removed the
+assert_stubbed helper and the OrderingError import. Empty-pattern
+arm now asserts an empty perm. All five fixtures (arrow_3,
+dual_arrow_5, tridiag_10, banded_20_3, empty_pattern) drive both
+MinDegree and MinFill through the real elimination loop. 10/10 pass.
+
+* 13:15 :gate:bit-parity:
+oracle_match.rs SuiteSparse AMD bit-parity gate: 12/12 pass after
+Phase B.2. AMD codegen unchanged — Workspace::new forwards to
+new_with_n_buckets(p, opts, pattern.n), no read or write of wf, no
+*_amf function invoked. The Phase A bit-parity guarantee is preserved
+end-to-end.
+
+* 13:25 :test-counts:
+- feral-ordering-core lib: 56/56 (the Phase B.1 stub-error test was
+  rewritten as min_fill_run_elimination_completes — a smoke test for
+  the real loop — not added).
+- feral-ordering-core integration (invariants.rs): 10/10.
+- feral-amd: 51/51; 12/12 oracle_match.
+- feral lib: 164/164.
+- cargo clippy --release --package feral-ordering-core
+  --all-targets -- -D warnings: clean.
+- cargo fmt --check: clean.
+
+* 13:35 :commit:
+Commit 4222368 feat(ordering-core): AMF inner loop (Phase B.2).
+5 files changed, 694 insertions(+), 79 deletions(-).
+
+* 13:45 :bench:no-regression:
+cargo run --bin bench --release: numbers consistent with session 07.
+Sparse Phase 2.8.1 small-frontal (<200) p90 = 1.49, medium (<500)
+p90 = 1.50 (both PASS targets). Top-10 worst-factor-ratio list
+unchanged from session 07 (CRESC100_0169 still leads at 26.97×).
+Expected — AMF is purely additive vs the active AMD path; the
+symbolic-stage selector still picks AMD. Phase D is when this
+benchmark line moves.
+
+* 13:50 :next:phase-b3:
+Next session: Phase B.3 — feral-amf crate. Mirror feral-amd's public
+API. AmfOptions has no aggressive knob (HAMF4 always aggressively
+absorbs). Then B.4 (hand-derived expected-perm fixtures), C (MUMPS
+HAMF4 oracle), D (wire as default for SYM=2 N≤10000).
