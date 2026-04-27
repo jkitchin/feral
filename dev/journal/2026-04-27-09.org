@@ -678,3 +678,32 @@ rule (NVSCHUR per-front) and root-Schur block extraction. Reason:
 postorder doesn't preserve the appended Schur tail unconditionally,
 and that interaction is best handled in the same change as the
 NVSCHUR bound on nelim.
+
+* 23:55 :f32a:schur:symbolic:postorder:
+F3.2a landed: Schur-constrained symbolic factorization.
+src/ordering/postorder.rs gains schur_constrained_postorder that
+emits non-Schur descendants first (subtree-size sorted) and Schur
+nodes at their etree-index positions (preserving the user's
+input order). src/symbolic/mod.rs gains pub fn
+symbolic_factorize_with_schur which runs compute_schur_aware_perm
++ schur_constrained_postorder and forces preprocess=None +
+amalgamation=Adjacency to keep the tail invariant intact.
+SymbolicFactorization gains is_schur_tail: Option<usize> for
+F3.2b (numeric stop rule).
+
+Tests: 4 new postorder tests + 8 new symbolic-Schur tests on the
+6x6 KKT (small_kkt_6x6: 4-block + dense 2x2 trailing). All pass.
+Verified user-order preservation with both [4,5] and reversed
+[5,4]. cargo test --lib 194/194; cargo clippy --lib -D warnings
+clean.
+
+Tail invariant assertion: after composition, perm[n-n_schur..]
+must equal schur_indices exactly. Backed by debug_assert_eq.
+Caller-side guard: empty schur_indices delegates to
+symbolic_factorize_with_method (returns is_schur_tail=None);
+schur_indices.len()==n returns InvalidInput; duplicates / OOB
+caught by compute_schur_aware_perm.
+
+Deferred to F3.2b: numeric stopping rule (per-front NVSCHUR
+bound, NPIV<=NASS-NVSCHUR), Bunch-Kaufman pivot exclusion at the
+root, dense Schur block extraction (n_schur^2 col-major buffer).

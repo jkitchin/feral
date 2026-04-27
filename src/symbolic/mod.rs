@@ -200,6 +200,16 @@ pub struct SymbolicFactorization {
     /// `pick_ordering_preprocess`; this field records `None` or
     /// `LdltCompress` after that dispatch.
     pub resolved_preprocess: supernode::OrderingPreprocess,
+
+    /// F3.2: When this factorization was produced by
+    /// [`symbolic_factorize_with_schur`], records the size of the Schur
+    /// tail. The last `n_schur` columns of `perm` correspond to the
+    /// user-supplied `schur_indices` in the supplied order. `None` for
+    /// factorizations produced by [`symbolic_factorize`] or
+    /// [`symbolic_factorize_with_method`]. The numeric phase reads this
+    /// to enforce the per-front NPIV ≤ NASS − NVSCHUR stopping rule
+    /// (F3.2b).
+    pub is_schur_tail: Option<usize>,
 }
 
 /// Pick a default ordering for `symbolic_factorize` from cheap matrix
@@ -682,6 +692,175 @@ pub fn symbolic_factorize_with_method(
         resolved_method,
         resolved_amalgamation: snode_params.amalgamation_strategy,
         resolved_preprocess,
+        is_schur_tail: None,
+    })
+}
+
+/// Symbolic factorization with a user-supplied Schur tail (F3.2a).
+///
+/// Like [`symbolic_factorize_with_method`] except the last `n_schur`
+/// columns of the produced permutation are pinned to `schur_indices` in
+/// the supplied order — i.e. `perm[n - n_schur + i] == schur_indices[i]`
+/// for every `i`. This is the symbolic side of the Schur-complement API
+/// described in `dev/research/schur-complement.md` (F3.0).
+///
+/// The pipeline diverges from [`symbolic_factorize_with_method`] in
+/// three places:
+///
+/// 1. **Ordering.** The fill-reducing ordering is fixed to AMD on the
+///    non-Schur subgraph, via [`crate::ordering::schur::compute_schur_aware_perm`]
+///    (F3.1). Other methods are not yet wired in for the Schur path
+///    because each external ordering crate would need a "constrained
+///    ordering" or subgraph hook to honour the Schur tail invariant.
+///    See `dev/research/schur-complement.md` D3.
+///
+/// 2. **Postorder.** Standard CHOLMOD postorder is replaced by
+///    [`crate::ordering::postorder::schur_constrained_postorder`], which
+///    pins Schur nodes to their etree-index positions. The Schur subset
+///    forms a top-forest of the etree (parent always strictly greater
+///    than child, and Schur indices occupy `[n - n_schur, n)`), so the
+///    constraint is satisfiable.
+///
+/// 3. **Preprocessor / amalgamation strategy.** The
+///    [`OrderingPreprocess::LdltCompress`] preprocessor and the
+///    [`AmalgamationStrategy::Renumber`] reorderer both rewrite the
+///    column numbering and would break the tail invariant. The Schur
+///    path forces `preprocess == None` and `amalgamation_strategy ==
+///    Adjacency` regardless of what the caller passed in
+///    `snode_params`.
+///
+/// Empty `schur_indices` ⇒ returns the same result as
+/// [`symbolic_factorize_with_method`] with `OrderingMethod::Amd`.
+///
+/// `schur_indices.len() == n` ⇒ `InvalidInput` (the elimination set
+/// would be empty; almost certainly an upstream logic bug).
+///
+/// Returns `is_schur_tail = Some(n_schur)` so the numeric phase (F3.2b)
+/// can enforce the per-front `NPIV ≤ NASS − NVSCHUR` stopping rule.
+pub fn symbolic_factorize_with_schur(
+    matrix: &CscMatrix,
+    snode_params: &SupernodeParams,
+    schur_indices: &[usize],
+) -> Result<SymbolicFactorization, FeralError> {
+    let n = matrix.n;
+    let n_schur = schur_indices.len();
+
+    if n_schur == 0 {
+        // Empty Schur ⇒ standard symbolic factorization with AMD.
+        return symbolic_factorize_with_method(matrix, snode_params, OrderingMethod::Amd);
+    }
+
+    // Force the preprocessor and amalgamation strategy to values that
+    // preserve the column numbering. LdltCompress rewrites columns via
+    // the MC64 supermap; Renumber re-postorders. Both would break the
+    // Schur tail invariant.
+    let mut effective_params = snode_params.clone();
+    effective_params.preprocess = OrderingPreprocess::None;
+    effective_params.amalgamation_strategy = supernode::AmalgamationStrategy::Adjacency;
+
+    // Step 1: Schur-aware ordering. AMD on the non-Schur subgraph,
+    // followed by the Schur tail in user-supplied order. Validates
+    // schur_indices (duplicates / out-of-range / full-n).
+    let initial_perm = crate::ordering::schur::compute_schur_aware_perm(matrix, schur_indices)?;
+
+    // Step 2: build full symmetric pattern + permute.
+    let full_pattern = matrix.symmetric_pattern();
+    let initial_permuted = permute_pattern(&full_pattern, &initial_perm);
+
+    // Step 3: etree of permuted pattern. By construction Schur columns
+    // sit at indices [n - n_schur, n); etree.parent[j] > j for every j,
+    // so the Schur subset is closed under `parent` (top-forest).
+    let initial_etree = EliminationTree::from_pattern(&initial_permuted);
+
+    // Step 4: Schur-constrained postorder. Non-Schur descendants of
+    // Schur nodes emit first (subtree-size order); Schur nodes emit at
+    // their etree-index positions, preserving the user's input order.
+    // Mark the highest n_schur indices in the etree as Schur. By
+    // construction (compute_schur_aware_perm appends the Schur tail at
+    // the end of initial_perm), these positions correspond to the user's
+    // schur_indices in user-supplied order.
+    let mut is_schur = vec![false; n];
+    for slot in is_schur.iter_mut().skip(n - n_schur) {
+        *slot = true;
+    }
+    let (post, post_inv) =
+        crate::ordering::postorder::schur_constrained_postorder(&initial_etree, &is_schur);
+
+    // Postorder identity check on the Schur tail (defensive — the
+    // top-forest invariant should make this hold by construction).
+    for (k, &p) in post.iter().enumerate().skip(n - n_schur) {
+        debug_assert_eq!(
+            p, k,
+            "schur_constrained_postorder violated tail identity at k={}",
+            k
+        );
+    }
+
+    // Step 5: compose perm₀ with the postorder.
+    let perm: Vec<usize> = post.iter().map(|&p| initial_perm[p]).collect();
+    let mut perm_inv = vec![0usize; n];
+    for (new, &old) in perm.iter().enumerate() {
+        perm_inv[old] = new;
+    }
+
+    // Tail-invariant assertion: this is the F3.2a contract.
+    debug_assert_eq!(
+        &perm[n - n_schur..],
+        schur_indices,
+        "Schur tail invariant violated"
+    );
+
+    // Step 6: re-permute and rebuild etree on the final pattern.
+    let permuted_pattern = permute_pattern(&full_pattern, &perm);
+    let final_parent: Vec<Option<usize>> = (0..n)
+        .map(|new| {
+            let old_initial = post[new];
+            initial_etree.parent[old_initial].map(|old_par| post_inv[old_par])
+        })
+        .collect();
+    let etree = EliminationTree {
+        parent: final_parent,
+        n,
+    };
+
+    // Step 7: column counts on the final pattern + etree.
+    let col_counts = column_counts::column_counts_gnp(&permuted_pattern, &etree);
+    let factor_nnz = column_counts::total_factor_nnz(&col_counts);
+
+    // Step 8: supernode detection. Adjacency strategy only — Renumber
+    // would re-postorder and break the tail invariant.
+    let supernodes = supernode::find_supernodes(&etree, &col_counts, &effective_params);
+
+    // Step 9: small-leaf grouping (consumed at numeric time only when
+    // the small_leaf gate is On). Same as the standard pipeline.
+    let (small_leaf_groups, snode_group) =
+        find_small_leaf_groups(&supernodes, &permuted_pattern, &effective_params.small_leaf);
+
+    // Step 10: contribution sizes + peak memory.
+    let contrib_sizes: Vec<usize> = supernodes.iter().map(|s| s.contrib_size()).collect();
+    let peak_contrib_bytes = compute_peak_contrib(&supernodes, &contrib_sizes);
+
+    let factor_slack = 1.2;
+
+    Ok(SymbolicFactorization {
+        n,
+        perm,
+        perm_inv,
+        supernodes,
+        factor_nnz_estimate: (factor_nnz as f64 * factor_slack) as usize,
+        factor_slack,
+        contrib_sizes,
+        peak_contrib_bytes,
+        etree,
+        permuted_pattern,
+        col_counts,
+        small_leaf_groups,
+        snode_group,
+        cached_mc64: None,
+        resolved_method: OrderingMethod::Amd,
+        resolved_amalgamation: effective_params.amalgamation_strategy,
+        resolved_preprocess: OrderingPreprocess::None,
+        is_schur_tail: Some(n_schur),
     })
 }
 
@@ -1108,5 +1287,129 @@ mod tests {
                 nnz
             );
         }
+    }
+
+    /// 6×6 KKT-shaped matrix: leading 4×4 identity-like block, dense
+    /// trailing 2×2 Schur, with off-diagonal coupling A_FS connecting
+    /// rows {0..4} to columns {4,5}. Same structure used in the F3.1
+    /// schur.rs unit tests.
+    fn small_kkt_6x6() -> CscMatrix {
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        // Diagonal in non-Schur block (1..=4 along positions 0..4).
+        for i in 0..4 {
+            rows.push(i);
+            cols.push(i);
+            vals.push((i + 1) as f64);
+        }
+        // Coupling A_FS: column 4 connects to rows 0,2; column 5 connects to rows 1,3.
+        rows.push(4);
+        cols.push(0);
+        vals.push(0.5);
+        rows.push(4);
+        cols.push(2);
+        vals.push(0.7);
+        rows.push(5);
+        cols.push(1);
+        vals.push(0.3);
+        rows.push(5);
+        cols.push(3);
+        vals.push(0.9);
+        // Trailing 2×2 Schur block, dense.
+        rows.push(4);
+        cols.push(4);
+        vals.push(1.5);
+        rows.push(5);
+        cols.push(4);
+        vals.push(0.2);
+        rows.push(5);
+        cols.push(5);
+        vals.push(2.5);
+        CscMatrix::from_triplets(6, &rows, &cols, &vals).unwrap()
+    }
+
+    #[test]
+    fn schur_symbolic_tail_invariant_user_order() {
+        // schur_indices = [4, 5] in user order.
+        let m = small_kkt_6x6();
+        let params = SupernodeParams::default();
+        let sym = symbolic_factorize_with_schur(&m, &params, &[4, 5]).unwrap();
+        assert_eq!(sym.n, 6);
+        assert_eq!(sym.is_schur_tail, Some(2));
+        assert_eq!(&sym.perm[4..], &[4, 5]);
+    }
+
+    #[test]
+    fn schur_symbolic_tail_invariant_reversed_user_order() {
+        // schur_indices = [5, 4] — user-supplied order MUST be preserved
+        // exactly, not sorted.
+        let m = small_kkt_6x6();
+        let params = SupernodeParams::default();
+        let sym = symbolic_factorize_with_schur(&m, &params, &[5, 4]).unwrap();
+        assert_eq!(sym.is_schur_tail, Some(2));
+        assert_eq!(&sym.perm[4..], &[5, 4]);
+    }
+
+    #[test]
+    fn schur_symbolic_perm_is_valid_permutation() {
+        let m = small_kkt_6x6();
+        let params = SupernodeParams::default();
+        let sym = symbolic_factorize_with_schur(&m, &params, &[4, 5]).unwrap();
+        let mut sorted = sym.perm.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2, 3, 4, 5]);
+        // perm_inv consistency.
+        for (new, &old) in sym.perm.iter().enumerate() {
+            assert_eq!(sym.perm_inv[old], new);
+        }
+    }
+
+    #[test]
+    fn schur_symbolic_empty_falls_back_to_standard() {
+        // Empty schur_indices must produce a SymbolicFactorization with
+        // is_schur_tail = None (delegates to symbolic_factorize_with_method).
+        let m = small_kkt_6x6();
+        let params = SupernodeParams::default();
+        let sym = symbolic_factorize_with_schur(&m, &params, &[]).unwrap();
+        assert_eq!(sym.is_schur_tail, None);
+    }
+
+    #[test]
+    fn schur_symbolic_full_n_rejected() {
+        let m = small_kkt_6x6();
+        let params = SupernodeParams::default();
+        let result = symbolic_factorize_with_schur(&m, &params, &[0, 1, 2, 3, 4, 5]);
+        assert!(matches!(result, Err(FeralError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn schur_symbolic_duplicate_rejected() {
+        let m = small_kkt_6x6();
+        let params = SupernodeParams::default();
+        let result = symbolic_factorize_with_schur(&m, &params, &[4, 4]);
+        assert!(matches!(result, Err(FeralError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn schur_symbolic_supernodes_cover_n() {
+        // Sanity check: the supernode layout still covers all n columns.
+        let m = small_kkt_6x6();
+        let params = SupernodeParams::default();
+        let sym = symbolic_factorize_with_schur(&m, &params, &[4, 5]).unwrap();
+        let total: usize = sym.supernodes.iter().map(|s| s.ncol()).sum();
+        assert_eq!(total, 6);
+    }
+
+    #[test]
+    fn schur_symbolic_single_schur_index() {
+        let m = small_kkt_6x6();
+        let params = SupernodeParams::default();
+        let sym = symbolic_factorize_with_schur(&m, &params, &[5]).unwrap();
+        assert_eq!(sym.is_schur_tail, Some(1));
+        assert_eq!(sym.perm[5], 5);
+        let mut sorted = sym.perm.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2, 3, 4, 5]);
     }
 }
