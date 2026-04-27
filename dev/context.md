@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-27T10:17:00Z
+Generated: 2026-04-27T11:24:56Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,18 +59,18 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
-93aacb1 session: 2026-04-26-05 sparse inertia mismatches are accounting, not numeric
-ea08bd1 diag(inertia): audit sparse-only inertia mismatches in expanded corpus
-f2b4893 session: 2026-04-26-04 streaming bench unblocks expanded corpus
-53c07bb feat(bench): streaming load + FERAL_SPARSE_MAX cap
-35247f0 docs: correct session 03 expanded-corpus finding
+d960fb5 plan: dense kernel speedup -- close 5x per-nnz gap to MUMPS
+4658b17 research: kernel-speed investigation + diag_chainwoo_profile diag binary
+174ea43 fix(bench): prefer MUMPS oracle inertia over IPOPT iter-0 sidecar (Fix A)
+5ecbeb5 fix(dense): use trace not a00 for 2x2 BK pivot inertia (Fix B)
+d4f1f72 feat(symbolic): extend pick_default_method to CHAINWOO/HYDROELL/DIXMAANH
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-b9f6274652580205)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-8ffe3941e8c25c1f)
 
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok

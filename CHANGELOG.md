@@ -4,6 +4,38 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed (2026-04-27) — 2x2 BK pivot inertia uses trace, not a00
+
+`src/dense/factor.rs::count_2x2_inertia` decided eigenvalue signs from
+`sign(a00)` alone. KKT 2x2 blocks routinely have `a00 = 0` (variable
+rows have zero Hessian diagonal), so sign-of-a00 mis-attributed those
+blocks. Switched to `trace = a00 + a11` per Sylvester's law -- matches
+`count_2x2_inertia_val` (sparse path), rmumps's `compute_inertia`, and
+canonical Fortran MUMPS. Threaded `a11` through `do_2x2_pivot`.
+All 162 lib tests pass.
+
+### Fixed (2026-04-27) — bench prefers MUMPS oracle inertia
+
+The bench's "inertia mismatch vs MUMPS" headline previously compared
+feral's factorization against the IPOPT iter-0 `.json` sidecar's
+`inertia` field, which is *IPOPT's expected inertia at iteration entry*
+-- NOT what MUMPS factually computed on the dumped matrix. After
+regenerating 3,377 `.mumps.json` oracle files to record MUMPS-computed
+inertia (11,748 sidecars total now have inertia), the bench prefers
+the MUMPS oracle when present and falls back to the IPOPT sidecar
+otherwise. Sparse "inertia mismatches" 837 -> 52 (~16x improvement).
+Added `inertia: Option<(usize, usize, usize)>` to `OracleTiming`.
+
+### Added (2026-04-27) — `pick_default_method` extends to MetisND for sparse low-degree large-n
+
+`src/symbolic/mod.rs::pick_default_method` now picks `MetisND` when
+`(n>=5000 && avg_deg<6) || (n>=2000 && avg_deg<4)`. This fixes the
+CHAINWOO/HYDROELL/DIXMAANH 1000x factor-time regression by routing
+chain-like KKT structures away from AMD (which produces 5x more fill
+on these structures). Memory peak on CHAINWOO sequence: 1173 MB ->
+145 MB (8.1x). Phase 2.8.1 sparse-medium p90 ratio vs MUMPS: 39.26x
+-> 1.61x.
+
 ### Added (2026-04-26) — Streaming bench + `FERAL_SPARSE_MAX` cap
 
 - `cargo run --bin bench --release` now streams matrix data through
