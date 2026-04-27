@@ -166,6 +166,12 @@ def main() -> int:
     skipped = 0
     too_large = 0
 
+    # Index-based out filenames avoid collisions on case-insensitive
+    # filesystems (e.g. APFS default). Two .mtx files whose stems
+    # differ only in case (`DTOC1ND_0000` vs `dtoc1nd_0000`) used to
+    # share the same `<stem>.out.txt`, so the second oracle run
+    # would clobber the first and both canonical sidecars would
+    # carry the second matrix's data.
     with manifest_path.open("w") as manifest:
         for mtx in matrices:
             canon_path = mtx.with_suffix(".hamf4.json")
@@ -177,7 +183,8 @@ def main() -> int:
                 if n is None or n > args.max_n:
                     too_large += 1
                     continue
-            out_path = workdir / f"{mtx.stem}.out.txt"
+            idx = len(out_paths)
+            out_path = workdir / f"matrix_{idx:07d}.out.txt"
             manifest.write(f"{mtx.absolute()} {out_path.absolute()}\n")
             out_paths.append(out_path)
             canonical_paths.append(canon_path)
