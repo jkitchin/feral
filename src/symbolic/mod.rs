@@ -46,14 +46,12 @@ pub enum OrderingMethod {
     /// WF(i)) / (nv(i)+1)` rather than approximate degree).
     /// Same downstream pipeline as `Amd`.
     ///
-    /// Wired by `dev/plans/amf-clean-room.md` Phase D as an opt-in
-    /// only — `pick_default_method` continues to dispatch to AMD /
-    /// MetisND. The MUMPS-style "AMF for SYM=2 N≤10000, MetisND
-    /// otherwise" default flip is gated on the corpus regen
-    /// (`<stem>.hamf4.json` sidecars from
-    /// `external_benchmarks/mumps_oracle/run_mumps_amf.py`) being
-    /// in place so `tests/amf_corpus_oracle.rs` can validate per-
-    /// cluster fill ratios before the default changes.
+    /// Default for `n <= 10_000` per `pick_default_method`,
+    /// matching MUMPS's `ana_set_ordering.F` rule for SYM=2 small
+    /// matrices. Validated against MUMPS HAMF4 on the 183_293-
+    /// sidecar corpus by `tests/amf_corpus_oracle.rs`: feral nnz_L
+    /// is within 1.10× MUMPS HAMF4 nnz_L on 183_277 matrices, with
+    /// CHARDIS1_0000 the lone documented metric-divergence skip.
     Amf,
     /// feral-metis multilevel nested dissection.
     MetisND,
@@ -208,40 +206,53 @@ pub struct SymbolicFactorization {
 /// dimensions (no pattern walk). Narrow on purpose — see comment on
 /// `Auto` for why a broad dispatcher regressed the IPM bench.
 ///
-/// Current rule:
+/// Current rule (Phase D of `dev/plans/amf-clean-room.md`, mirrors
+/// MUMPS's `ana_set_ordering.F` AMF-vs-METIS heuristic):
+///   - `n == 0`                                        → `Amd`
+///     (avoids /0 and external-crate weirdness on the empty pattern)
 ///   - `n >= 5000 && nnz/n < 6` → `MetisND` (bordered-KKT catch:
-///     CUTEst CRESC132 where AMD orders the constraint block into a
+///     CUTEst CRESC132 where AMD/AMF order the constraint block into a
 ///     near-dense root frontal that swallows ~96% of n and drives a
 ///     ~5000-column delay cascade. CRESC132_0000 with AMD factors in
 ///     5.4 s; with METIS it factors in 480 ms — 11× win.)
 ///   - `n >= 2000 && nnz/n < 4` → `MetisND` (chain-pattern catch:
 ///     CHAINWOO/HYDROELL/DIXMAANH from the kkt-expansion corpus.
-///     n≈3000–4033, stored avg-deg 2–3. AMD orders these chain-like
-///     KKT systems into a dense root that triggers a runaway delay
-///     cascade — CHAINWOO_0000 produces 2.10M nnz_L with AMD vs 282k
-///     with METIS (7.5× fill, 17× factor time). DIXMAANH_0000:
-///     11.6× fill, 126× factor time. Also catches VESUVIO
-///     (n=3083, avg-deg=3.07; modest 1.35× fill win). Verified via
+///     n≈3000–4033, stored avg-deg 2–3. AMD/AMF order these chain-
+///     like KKT systems into a dense root that triggers a runaway
+///     delay cascade — CHAINWOO_0000 produces 2.10M nnz_L with AMD
+///     vs 282k with METIS. Also catches VESUVIO. Verified via
 ///     `diag_chainwoo` on 2026-04-27.)
-///   - everything else                                 → `Amd`
+///   - `n <= 10_000`                                   → `Amf`
+///     (MUMPS-style "small symmetric" rule: HAMF4 fill metric is
+///     within 1.10× of MUMPS HAMF4 on 183_277 of 183_293 sidecar'd
+///     matrices in `tests/amf_corpus_oracle.rs`, and the in-tree
+///     audit (`diag_amf_vs_amd`) shows AMF strictly better than AMD
+///     on 83/782 matrices, tied on 589, AMD better on 110, geomean
+///     ratio 1.003. ORBIT2_0000 alone goes from AMD's 1.4M nnz_L
+///     down to AMF's 32_105.)
+///   - everything else (`n > 10_000`)                  → `MetisND`
+///     (large patterns where nested dissection is the standard win.)
 ///
 /// `nnz` here is the matrix's *stored* nnz (lower triangle for
 /// symmetric matrices), not the symmetric pattern's. The threshold is
 /// calibrated to that convention; using the symmetric pattern would
 /// roughly double the ratio and shift the rule.
 ///
-/// The `n >= 2000` floor protects the IPM corpus's tiny-matrix tail
-/// (e.g. HAHN1 n=715, where AMD and METIS produce identical fill but
-/// METIS pays a fixed setup cost AMD does not).
+/// The `n >= 2000` floor on the chain-pattern catch protects the
+/// IPM corpus's tiny-matrix tail (e.g. HAHN1 n=715), where AMF
+/// remains the best default at small scale.
 fn pick_default_method(n: usize, stored_nnz: usize) -> OrderingMethod {
     if n == 0 {
         return OrderingMethod::Amd;
     }
     let avg_deg = stored_nnz as f64 / n as f64;
     if (n >= 5000 && avg_deg < 6.0) || (n >= 2000 && avg_deg < 4.0) {
-        OrderingMethod::MetisND
+        return OrderingMethod::MetisND;
+    }
+    if n <= 10_000 {
+        OrderingMethod::Amf
     } else {
-        OrderingMethod::Amd
+        OrderingMethod::MetisND
     }
 }
 
@@ -1006,18 +1017,22 @@ mod tests {
     }
 
     #[test]
-    fn symbolic_factorize_default_uses_amd_for_small_matrices() {
-        // Below the bordered-fallback threshold (n < 5000), the default
-        // entry point must dispatch to AMD.
+    fn symbolic_factorize_default_uses_amf_for_small_matrices() {
+        // Per Phase D of dev/plans/amf-clean-room.md: small matrices
+        // (n <= 10_000) that don't trigger the bordered-KKT or
+        // chain-pattern escape hatches default to AMF, mirroring
+        // MUMPS's ana_set_ordering.F rule for SYM=2 N≤10000.
         let m = small_grid_5x5();
         let params = SupernodeParams::default();
         let a = symbolic_factorize(&m, &params).unwrap();
-        let b = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd).unwrap();
+        let b = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amf).unwrap();
         assert_eq!(
             a.perm, b.perm,
-            "symbolic_factorize on n<5000 must equal symbolic_factorize_with_method(Amd)"
+            "symbolic_factorize on small dense matrices must equal \
+             symbolic_factorize_with_method(Amf)"
         );
         assert_eq!(a.factor_nnz_estimate, b.factor_nnz_estimate);
+        assert_eq!(a.resolved_method, OrderingMethod::Amf);
     }
 
     #[test]
@@ -1025,7 +1040,7 @@ mod tests {
         // CRESC132-shaped: n=5314, stored_nnz=22566 → avg_deg=4.25.
         // Triggers the bordered-KKT fallback.
         assert_eq!(pick_default_method(5314, 22566), OrderingMethod::MetisND);
-        // VESUVIO-shaped: n=3083, avg_deg=3.07. Now triggers the
+        // VESUVIO-shaped: n=3083, avg_deg=3.07. Triggers the
         // chain-pattern branch (n>=2000 && avg_deg<4). Verified
         // 2026-04-27: METIS gives 1.35× less fill than AMD here.
         assert_eq!(pick_default_method(3083, 9484), OrderingMethod::MetisND);
@@ -1035,20 +1050,31 @@ mod tests {
         // DIXMAANH-shaped: n=3000, avg_deg=3.0 → MetisND
         // (chain-pattern catch). 11.6× less fill than AMD.
         assert_eq!(pick_default_method(3000, 8999), OrderingMethod::MetisND);
-        // HAHN1-shaped: n=715 < 2000 → AMD. Below the chain-pattern
-        // floor; METIS pays setup cost without a fill win here.
-        assert_eq!(pick_default_method(715, 2839), OrderingMethod::Amd);
-        // Large but dense (avg_deg≥6): keep AMD.
-        assert_eq!(pick_default_method(10_000, 100_000), OrderingMethod::Amd);
-        // Boundary at n=5000: triggers (>=).
+        // HAHN1-shaped: n=715 < 2000, n <= 10_000 → AMF. Below the
+        // chain-pattern floor; AMF is the small-matrix default per
+        // the Phase D MUMPS-style rule.
+        assert_eq!(pick_default_method(715, 2839), OrderingMethod::Amf);
+        // n=10_000 dense (avg_deg≥6): exactly at the AMF/MetisND
+        // boundary, n <= 10_000 wins → AMF.
+        assert_eq!(pick_default_method(10_000, 100_000), OrderingMethod::Amf);
+        // Boundary at n=5000 with low avg_deg: bordered-KKT
+        // catch fires first → MetisND.
         assert_eq!(pick_default_method(5000, 20_000), OrderingMethod::MetisND);
-        // Boundary at n=2000 with avg_deg<4: triggers chain-pattern.
+        // Boundary at n=2000 with avg_deg<4: chain-pattern fires
+        // first → MetisND.
         assert_eq!(pick_default_method(2000, 6000), OrderingMethod::MetisND);
-        // n>=2000 but avg_deg≥4 and <5000: still AMD (chain-pattern
-        // floor on density not met).
-        assert_eq!(pick_default_method(3000, 13_000), OrderingMethod::Amd);
+        // n>=2000 but avg_deg≥4 and <5000, n<=10_000: → AMF
+        // (no escape hatch fires, falls through to AMF default).
+        assert_eq!(pick_default_method(3000, 13_000), OrderingMethod::Amf);
         // Empty matrix: AMD (avoids /0 and external-crate weirdness).
         assert_eq!(pick_default_method(0, 0), OrderingMethod::Amd);
+        // Large dense matrix (n > 10_000, avg_deg high): MetisND
+        // (the n>10k tail switches off AMF in favor of nested
+        // dissection per MUMPS).
+        assert_eq!(
+            pick_default_method(20_000, 200_000),
+            OrderingMethod::MetisND
+        );
     }
 
     #[test]

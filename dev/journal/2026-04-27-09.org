@@ -250,7 +250,69 @@ cargo fmt --check: clean. cargo clippy --release -- -D warnings
 clippy warnings in tests/rook_rescue.rs and tests/dense_ldlt.rs are
 unrelated to this commit.
 
-* 17:35 :status:end-of-session:
+* 17:50 :amf:phase-d:default-flip:
+With the corpus gate green and tasks #32/#33 closed, applied the
+Phase D default flip in pick_default_method.
+
+New rule:
+  - n == 0                                  → Amd
+  - n >= 5000 && nnz/n < 6  (bordered-KKT)  → MetisND
+  - n >= 2000 && nnz/n < 4  (chain-pattern) → MetisND
+  - n <= 10_000                             → Amf       (NEW)
+  - else                                    → MetisND   (CHANGED from Amd)
+
+Replaces the previous "AMD by default" rule. AMD remains
+available via OrderingMethod::Amd for diagnostic comparison;
+no AMD-using path is removed.
+
+Updated tests:
+  - pick_default_method_rules: HAHN1 (715), n=10_000-dense, and
+    n=3000-avg_deg=4.33 cases all flip from Amd to Amf.
+    Added a new n=20_000-dense case asserting MetisND for the
+    n>10k tail.
+  - symbolic_factorize_default_uses_amd_for_small_matrices →
+    renamed to ..._amf_..., now compares default vs explicit Amf
+    on small_grid_5x5.
+
+cargo test --release --lib: 165/165 pass.
+
+* 17:55 :amf:phase-d:bench-validation:
+cargo run --bin bench --release post-flip:
+
+Dense partition unchanged from session 09 baseline:
+  small-frontal (<200)   147982   p90=1.25   target<=2.0  PASS
+  medium       (<500)    152145   p90=1.72   target<=3.0  PASS
+
+Sparse partition shifted slightly:
+  small-frontal (<200)   153455   p90=1.56   target<=2.0  PASS
+  medium       (<500)    153560   p90=1.56   target<=3.0  PASS
+(was p90=1.52 pre-flip; +0.04 increase, well inside the 2.0/3.0
+targets)
+
+Worst-ratio tail moved decisively in our favor:
+  pre-flip:   NASH_0111      22.75×  (n=144, AMD default)
+  post-flip:  KIRBY2_0007     6.20×  (n=458, AMF default)
+
+The previous top-10 worst (all NASH_0xxx at 18-23×) is *gone*
+from the leaderboard. The new top-10 are KIRBY2 and GROUPING
+families at 5.0-6.2× — the absolute worst case on the corpus
+improved by 3.7×.
+
+* 18:00 :amf:phase-d:complete:
+CHANGELOG updated with [Unreleased] "Changed (2026-04-27) — AMF
+default ordering for n <= 10_000" entry. Plan dev/plans/amf-clean-
+room.md Phase D deliverables 1-5 all met:
+
+  1. OrderingMethod::Amf and dispatcher wire-up   ✅ session 09
+  2. MetisND-or-Amf heuristic in pick_default_method ✅ this session
+  3. Corpus gate green                           ✅ this session
+  4. CHANGELOG entry                             ✅ this session
+  5. Session checkpoint per CLAUDE.md            ✅ next entry
+
+The flip is reversible by reverting this commit if a future cluster
+study uncovers a regression. Phase D done.
+
+* 18:05 :status:end-of-session:
 Plan position: Phases A.1, A.2, B.1-B.4, C-scaffold, D-wire-up
 complete. Remaining: Phase C corpus regen (user-driven multi-
 hour run) and Phase D default flip (gated on the regen).

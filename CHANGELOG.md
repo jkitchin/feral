@@ -4,6 +4,37 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-27) — AMF default ordering for `n <= 10_000`
+
+`pick_default_method` in `src/symbolic/mod.rs` now mirrors MUMPS's
+`ana_set_ordering.F` AMF-vs-METIS rule: `Amf` for `n <= 10_000`,
+`MetisND` for `n > 10_000`, with the existing bordered-KKT
+(`n >= 5000 && nnz/n < 6`) and chain-pattern (`n >= 2000 && nnz/n
+< 4`) escape hatches preserved as MetisND. Replaces the previous
+"AMD by default" rule. AMD remains available via
+`OrderingMethod::Amd` for diagnostic comparison.
+
+Validated on the 183_293-sidecar Phase C corpus
+(`tests/amf_corpus_oracle.rs::amf_corpus_gate`): **183_277 ok / 16
+skipped / 0 fail** at the 1.10x feral-amf-vs-MUMPS-HAMF4 nnz_L
+gate. Bench Phase 2.8.1 exit partition post-flip:
+
+```
+Dense small-frontal (<200)   147982   p90=1.25   target<=2.0  PASS
+Dense medium       (<500)    152145   p90=1.72   target<=3.0  PASS
+Sparse small-frontal (<200)  153455   p90=1.56   target<=2.0  PASS
+Sparse medium       (<500)   153560   p90=1.56   target<=3.0  PASS
+```
+
+Sparse buckets moved from p90=1.52 (session 09 baseline, AMD
+default) to 1.56 (+0.04). Dense buckets unchanged. Worst-ratio
+tail improved dramatically: pre-flip top was NASH_0111 at 22.75x;
+post-flip top is KIRBY2_0007 at 6.20x.
+
+ORBIT2_0000 nnz_L stays at 32_105 (the AMF-clean-room headline
+win — AMD's 1.4M-nnz_L factor on this kkt-expansion shape was
+the original motivation).
+
 ### Docs (2026-04-27) — AMF clean-room research note + plan
 
 `dev/research/amf-clean-room.md` and `dev/plans/amf-clean-room.md`
