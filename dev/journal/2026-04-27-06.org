@@ -1,0 +1,74 @@
+#+TITLE: FERAL session journal — 2026-04-27-06
+#+STARTUP: showall
+
+* 11:00 :amf:phase-a:refactor:
+Continuation of session 05's AMF clean-room track. Session 05
+checkpointed the research note + plan + corpus baseline; this
+session executed Phase A.1 of =dev/plans/amf-clean-room.md=:
+extracting the AMD quotient-graph machinery into the new shared
+=feral-ordering-core::quotient_graph= module so the planned
+=feral-amf= can share the workspace + elimination loop.
+
+Move scope:
+- =crates/feral-amd/src/workspace.rs= → =crates/feral-ordering-core/src/quotient_graph/workspace.rs=
+- =crates/feral-amd/src/algo.rs= → =crates/feral-ordering-core/src/quotient_graph/algo.rs=
+- New =crates/feral-ordering-core/src/quotient_graph/mod.rs= with
+  re-exports + a =WorkspaceOptions= struct (workspace-only knobs:
+  just =dense_alpha=).
+- Renames: =AmdWorkspace= → =Workspace=, =AmdOptions= →
+  =WorkspaceOptions=. =aggressive= stays a parameter on
+  =run_elimination= since it's not workspace-construction state.
+- =pub(crate)= → =pub= on Workspace fields and the inner-loop entry
+  points so feral-amd / future feral-amf can call across crates.
+  Internal-but-pub status documented at the module level via
+  =#![allow(missing_docs)]= with a comment about CONTRACT_VERSION
+  not covering this module.
+- =feral-amd/src/lib.rs= updated to import from
+  =feral_ordering_core::quotient_graph= and call
+  =Workspace::new(pattern, &WorkspaceOptions { dense_alpha: ... })=.
+- Old feral-amd workspace.rs + algo.rs deleted.
+
+* 11:10 :amf:phase-a:bit-parity-gate:
+Bit-parity gate met:
+- =cargo test --release --workspace --tests=: all-pass.
+- =oracle_match.rs= 12/12 SuiteSparse AMD bit-for-bit comparison
+  tests pass (these are the strongest gate — they pin =feral-amd=
+  output against the reference C AMD library on five fixture
+  matrices).
+- =feral-ordering-core= 41/41 (the migrated workspace + algo
+  tests).
+- =feral= main lib 164/164.
+- =cargo clippy --workspace --release --lib -- -D warnings=: clean.
+
+Committed as =94573e3= "refactor(ordering-core): extract
+quotient-graph machinery from feral-amd". Diff size: 6 files
+changed, 414 insertions, 96 deletions (most of the insertion is
+documentation + module scaffolding; the renamed files barely
+changed).
+
+Pre-commit fmt hook caught one cargo fmt issue
+(=run_elimination= signature wrap); fixed and re-staged. No
+behavioral diffs.
+
+* 11:25 :amf:phase-a:next:
+Phase A.2 (Metric trait + AMD as MinDegree impl) is the natural
+next step but is a substantially larger refactor than A.1 was —
+the trait dispatch needs to thread through:
+- =select_pivot= (linear scan vs head-of-bucket).
+- =finalize_step= Pass-2 accumulator (=DEG= for AMD, triple
+  =(DEG, WF4, WF3)= for AMF).
+- =finalize_step= final-score insertion (=ws.head[deg]= vs
+  =ws.head[bucket(quantize(rmf))]=).
+- supervariable absorption (no-op vs =max= update).
+
+Risk: bit-parity-sensitive linked-list insertion order is the
+exact tie-break mechanism that makes AMD output deterministic; any
+trait-dispatch refactor that changes inlining or evaluation order
+inside Pass-2 could perturb the perm. Mitigation: introduce A.2 in
+a single atomic commit with the same =oracle_match.rs= bit-parity
+gate, and use =#[inline(always)]= on the trivial MinDegree trait
+methods so codegen is identical.
+
+Ending session 06 here with Phase A.1 atomically committed and
+the bit-parity gate verified. Session checkpoint goes in
+=dev/sessions/2026-04-27-06.md=.
