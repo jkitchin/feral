@@ -197,6 +197,10 @@ fn multilevel_node_bisection(
         two_hop_ratio_threshold: 0.85,
         max_imbalance: opts.max_imbalance,
         fm_passes: opts.fm_pass_cap,
+        // Inherit any new MetisOptions knobs from the upstream
+        // defaults. SCOTCH-specific dense-quotient handling lives in
+        // its own driver, not here.
+        ..MetisOptions::default()
     };
     let mut counters = CoarsenCounters::default();
     let levels = coarsen(graph, &metis_opts, rng, &mut counters);

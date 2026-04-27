@@ -44,6 +44,11 @@ pub(crate) fn multilevel_bisection(
         two_hop_ratio_threshold: 0.85,
         max_imbalance: p.max_imbalance,
         fm_passes: p.fm_pass_cap,
+        // Inherit any new MetisOptions knobs (e.g. dense quotient)
+        // from upstream defaults. KaHIP only uses MetisOptions to
+        // drive the shared coarsening framework, which ignores the
+        // dense-quotient fields.
+        ..MetisOptions::default()
     };
 
     let mut counters = CoarsenCounters::default();
