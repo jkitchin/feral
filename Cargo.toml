@@ -111,6 +111,7 @@ rayon = "1.10"
 # pending retirement per dev/decisions.md.
 feral-ordering-core = { path = "crates/feral-ordering-core" }
 feral-amd = { path = "crates/feral-amd" }
+feral-amf = { path = "crates/feral-amf" }
 feral-metis = { path = "crates/feral-metis" }
 feral-scotch = { path = "crates/feral-scotch" }
 feral-kahip = { path = "crates/feral-kahip" }
@@ -118,10 +119,6 @@ feral-kahip = { path = "crates/feral-kahip" }
 [dev-dependencies]
 approx = "0.5"
 criterion = { version = "0.5", features = ["html_reports"] }
-# Used by tests/amf_corpus_oracle.rs to gate feral-amf nnz_L
-# against the MUMPS HAMF4 sidecars produced by
-# external_benchmarks/mumps_oracle/run_mumps_amf.py.
-feral-amf = { path = "crates/feral-amf" }
 # rmumps used only for reference timing comparisons in benchmarks:
 # rmumps = { path = "../ripopt/rmumps" }  # uncomment when needed
 

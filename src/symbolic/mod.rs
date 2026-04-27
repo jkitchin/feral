@@ -40,6 +40,21 @@ pub enum OrderingMethod {
     /// 17-23% better and 18-88× faster on large).
     #[default]
     Amd,
+    /// Approximate Minimum Fill (`feral-amf` crate: HAMF4 variant
+    /// of Amestoy 1999 — quotient-graph elimination scored by
+    /// approximate fill `RMF(i) = (deg(i)·(deg(i)-1+2·degme) -
+    /// WF(i)) / (nv(i)+1)` rather than approximate degree).
+    /// Same downstream pipeline as `Amd`.
+    ///
+    /// Wired by `dev/plans/amf-clean-room.md` Phase D as an opt-in
+    /// only — `pick_default_method` continues to dispatch to AMD /
+    /// MetisND. The MUMPS-style "AMF for SYM=2 N≤10000, MetisND
+    /// otherwise" default flip is gated on the corpus regen
+    /// (`<stem>.hamf4.json` sidecars from
+    /// `external_benchmarks/mumps_oracle/run_mumps_amf.py`) being
+    /// in place so `tests/amf_corpus_oracle.rs` can validate per-
+    /// cluster fill ratios before the default changes.
+    Amf,
     /// feral-metis multilevel nested dissection.
     MetisND,
     /// feral-scotch nested dissection.
@@ -336,6 +351,7 @@ fn run_external_ordering(
     let resolved = choose_adaptive(pattern, method);
     let perm_i32 = match resolved {
         OrderingMethod::Amd => feral_amd::amd_order(&pat),
+        OrderingMethod::Amf => feral_amf::amf_order(&pat),
         OrderingMethod::MetisND => feral_metis::metis_order(&pat),
         OrderingMethod::ScotchND => feral_scotch::scotch_order(&pat),
         OrderingMethod::KahipND => feral_kahip::kahip_order(&pat),
@@ -848,6 +864,26 @@ mod tests {
             }
         }
         CscMatrix::from_triplets(m * n, &rows, &cols, &vals).unwrap()
+    }
+
+    #[test]
+    fn symbolic_factorize_amf_produces_valid_perm() {
+        // Phase D wire-up smoke test: OrderingMethod::Amf must
+        // produce a valid permutation through the full symbolic
+        // pipeline (postorder composition, etree, column counts,
+        // supernodes). This pins the dispatch wiring; bit-parity vs
+        // MUMPS HAMF4 is the job of tests/amf_corpus_oracle.rs.
+        let m = small_grid_5x5();
+        let params = SupernodeParams::default();
+        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amf).unwrap();
+        assert_eq!(sym.n, 25);
+        let mut sorted = sym.perm.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0..25).collect::<Vec<_>>(), "perm is a bijection");
+        for i in 0..25 {
+            assert_eq!(sym.perm[sym.perm_inv[i]], i);
+        }
+        assert_eq!(sym.resolved_method, OrderingMethod::Amf);
     }
 
     #[test]
