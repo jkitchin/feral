@@ -194,11 +194,20 @@ pub struct SymbolicFactorization {
 /// `Auto` for why a broad dispatcher regressed the IPM bench.
 ///
 /// Current rule:
-///   - `n >= 5000 && nnz/n < 6` → `MetisND` (catches bordered KKT
-///     structures like CUTEst CRESC132 where AMD orders the constraint
-///     block into a near-dense root frontal that swallows ~96% of n
-///     and drives a ~5000-column delay cascade. CRESC132_0000 with AMD
-///     factors in 5.4 s; with METIS it factors in 480 ms — 11× win.)
+///   - `n >= 5000 && nnz/n < 6` → `MetisND` (bordered-KKT catch:
+///     CUTEst CRESC132 where AMD orders the constraint block into a
+///     near-dense root frontal that swallows ~96% of n and drives a
+///     ~5000-column delay cascade. CRESC132_0000 with AMD factors in
+///     5.4 s; with METIS it factors in 480 ms — 11× win.)
+///   - `n >= 2000 && nnz/n < 4` → `MetisND` (chain-pattern catch:
+///     CHAINWOO/HYDROELL/DIXMAANH from the kkt-expansion corpus.
+///     n≈3000–4033, stored avg-deg 2–3. AMD orders these chain-like
+///     KKT systems into a dense root that triggers a runaway delay
+///     cascade — CHAINWOO_0000 produces 2.10M nnz_L with AMD vs 282k
+///     with METIS (7.5× fill, 17× factor time). DIXMAANH_0000:
+///     11.6× fill, 126× factor time. Also catches VESUVIO
+///     (n=3083, avg-deg=3.07; modest 1.35× fill win). Verified via
+///     `diag_chainwoo` on 2026-04-27.)
 ///   - everything else                                 → `Amd`
 ///
 /// `nnz` here is the matrix's *stored* nnz (lower triangle for
@@ -206,16 +215,15 @@ pub struct SymbolicFactorization {
 /// calibrated to that convention; using the symmetric pattern would
 /// roughly double the ratio and shift the rule.
 ///
-/// All entries in the IPM corpus's top families have `n < 5000` (the
-/// largest are HAHN1 n=715 and VESUVIO n=3083), so the bordered rule
-/// only fires on a handful of large matrices and pays its small extra
-/// symbolic cost on those alone.
+/// The `n >= 2000` floor protects the IPM corpus's tiny-matrix tail
+/// (e.g. HAHN1 n=715, where AMD and METIS produce identical fill but
+/// METIS pays a fixed setup cost AMD does not).
 fn pick_default_method(n: usize, stored_nnz: usize) -> OrderingMethod {
     if n == 0 {
         return OrderingMethod::Amd;
     }
     let avg_deg = stored_nnz as f64 / n as f64;
-    if n >= 5000 && avg_deg < 6.0 {
+    if (n >= 5000 && avg_deg < 6.0) || (n >= 2000 && avg_deg < 4.0) {
         OrderingMethod::MetisND
     } else {
         OrderingMethod::Amd
@@ -981,12 +989,28 @@ mod tests {
         // CRESC132-shaped: n=5314, stored_nnz=22566 → avg_deg=4.25.
         // Triggers the bordered-KKT fallback.
         assert_eq!(pick_default_method(5314, 22566), OrderingMethod::MetisND);
-        // VESUVIO-shaped: n=3083 < 5000 → AMD even though avg_deg<6.
-        assert_eq!(pick_default_method(3083, 9484), OrderingMethod::Amd);
+        // VESUVIO-shaped: n=3083, avg_deg=3.07. Now triggers the
+        // chain-pattern branch (n>=2000 && avg_deg<4). Verified
+        // 2026-04-27: METIS gives 1.35× less fill than AMD here.
+        assert_eq!(pick_default_method(3083, 9484), OrderingMethod::MetisND);
+        // CHAINWOO-shaped: n=4000, avg_deg=2.0 → MetisND
+        // (chain-pattern catch). 7.5× less fill than AMD.
+        assert_eq!(pick_default_method(4000, 7999), OrderingMethod::MetisND);
+        // DIXMAANH-shaped: n=3000, avg_deg=3.0 → MetisND
+        // (chain-pattern catch). 11.6× less fill than AMD.
+        assert_eq!(pick_default_method(3000, 8999), OrderingMethod::MetisND);
+        // HAHN1-shaped: n=715 < 2000 → AMD. Below the chain-pattern
+        // floor; METIS pays setup cost without a fill win here.
+        assert_eq!(pick_default_method(715, 2839), OrderingMethod::Amd);
         // Large but dense (avg_deg≥6): keep AMD.
         assert_eq!(pick_default_method(10_000, 100_000), OrderingMethod::Amd);
         // Boundary at n=5000: triggers (>=).
         assert_eq!(pick_default_method(5000, 20_000), OrderingMethod::MetisND);
+        // Boundary at n=2000 with avg_deg<4: triggers chain-pattern.
+        assert_eq!(pick_default_method(2000, 6000), OrderingMethod::MetisND);
+        // n>=2000 but avg_deg≥4 and <5000: still AMD (chain-pattern
+        // floor on density not met).
+        assert_eq!(pick_default_method(3000, 13_000), OrderingMethod::Amd);
         // Empty matrix: AMD (avoids /0 and external-crate weirdness).
         assert_eq!(pick_default_method(0, 0), OrderingMethod::Amd);
     }
