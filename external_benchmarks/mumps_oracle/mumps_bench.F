@@ -29,7 +29,24 @@ C       residual <f64>
 C       infog1 <int>
 C       infog28 <int>
 C       infog9 <int>     (real entries effectively used in factors)
+C       rinfog4 <f64>    (||A||_inf — populated when ICNTL(11)>=1)
+C       rinfog5 <f64>    (||X||_inf)
+C       rinfog6 <f64>    (scaled residual ||Ax-b||_inf / (||A||_inf·||x||_inf+||b||_inf))
+C       rinfog7 <f64>    (omega_1 componentwise residual)
+C       rinfog8 <f64>    (omega_2 componentwise residual)
+C       rinfog9 <f64>    (forward error upper bound: omega1*COND1 + omega2*COND2)
+C       rinfog10 <f64>   (COND1: componentwise condition number, set 1)
+C       rinfog11 <f64>   (COND2: componentwise condition number, set 2)
 C       status ok|fail
+C
+C   Note on ICNTL(11): MUMPS 5.8.2 populates the condition-number
+C   fields RINFOG(10)/(11) only when ICNTL(11)==1 (full statistics);
+C   ICNTL(11)==2 is the cheaper variant that skips LCOND and leaves
+C   RINFOG(9..11) unset. We use ICNTL(11)=1 here so RINFOG(11) is
+C   available for cross-validation against feral's
+C   estimate_condition_1norm. See dsol_driver.F:5742 in the MUMPS
+C   source. The kkt-feature-gaps F2.2 plan note refers to ICNTL(11)=2
+C   but the fields it requests (RINFOG(11)) require ICNTL(11)=1.
 C
       PROGRAM MUMPS_BENCH
       IMPLICIT NONE
@@ -90,6 +107,12 @@ C     Suppress MUMPS console output and request null pivot detection
       MP%ICNTL(3) = 0
       MP%ICNTL(4) = 0
       MP%ICNTL(24) = 1
+C     ICNTL(11)=1: full error analysis statistics including the two
+C     componentwise condition numbers RINFOG(10) (COND1) and
+C     RINFOG(11) (COND2). Used by feral's F2.2 cross-validation.
+C     ICNTL(11)=2 is cheaper but leaves RINFOG(9..11) unset, so it
+C     would not satisfy the cross-validation oracle.
+      MP%ICNTL(11) = 1
 
       CALL SYSTEM_CLOCK(COUNT_RATE=CLOCK_RATE, COUNT_MAX=CLOCK_MAX)
 
@@ -236,6 +259,20 @@ C     for cross-solver fill comparison. Field 20 (estimated) and field 9
 C     (effective) can disagree when delayed pivots inflate storage; the
 C     effective value is the right reference for feral.
       WRITE(12,'(A,I0)') "infog9 ", MP%INFOG(9)
+C     ICNTL(11)=1 error-analysis output. RINFOG(4)=||A||_inf,
+C     RINFOG(5)=||X||_inf, RINFOG(6)=scaled residual, RINFOG(7)=omega1,
+C     RINFOG(8)=omega2, RINFOG(9)=forward-error upper bound,
+C     RINFOG(10)=COND1, RINFOG(11)=COND2. Definitions: dsol_aux.F:935
+C     (DMUMPS_SOL_LCOND). For perfectly singular factors MUMPS leaves
+C     these at 0; downstream code must treat 0 as "unavailable".
+      WRITE(12,'(A,ES24.16E3)') "rinfog4 ", MP%RINFOG(4)
+      WRITE(12,'(A,ES24.16E3)') "rinfog5 ", MP%RINFOG(5)
+      WRITE(12,'(A,ES24.16E3)') "rinfog6 ", MP%RINFOG(6)
+      WRITE(12,'(A,ES24.16E3)') "rinfog7 ", MP%RINFOG(7)
+      WRITE(12,'(A,ES24.16E3)') "rinfog8 ", MP%RINFOG(8)
+      WRITE(12,'(A,ES24.16E3)') "rinfog9 ", MP%RINFOG(9)
+      WRITE(12,'(A,ES24.16E3)') "rinfog10 ", MP%RINFOG(10)
+      WRITE(12,'(A,ES24.16E3)') "rinfog11 ", MP%RINFOG(11)
       WRITE(12,'(A)') "status ok"
       CLOSE(12)
       NDONE = NDONE + 1

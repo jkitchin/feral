@@ -87,6 +87,23 @@ def write_rhs(rhs: list[float], path: Path) -> None:
             f.write(f"{v:.17e}\n")
 
 
+def _opt_float(s: str | None) -> float | None:
+    """Parse a value emitted by mumps_bench, treating exact-zero or
+    NaN/Inf as 'unavailable' (MUMPS returns 0.0 for RINFOG fields it
+    could not estimate, e.g. on singular factors)."""
+    if s is None:
+        return None
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    if not math.isfinite(v):
+        return None
+    if v == 0.0:
+        return None
+    return v
+
+
 def parse_output(path: Path) -> dict:
     out: dict[str, str] = {}
     if not path.exists():
@@ -135,6 +152,23 @@ def write_canonical(out_path: Path, name: str, raw: dict) -> None:
                 "infog_1": int(raw.get("infog1", 0)),
                 "infog_28": int(raw.get("infog28", 0)),
                 "infog_9": int(raw.get("infog9", 0)),
+            },
+            # MUMPS error-analysis statistics (ICNTL(11)=1).
+            # COND1/COND2 are componentwise condition numbers in the
+            # ∞-norm (Arioli-Demmel-Duff), distinct from feral's 1-norm
+            # κ₁; see dsol_aux.F:935 in the MUMPS source. Cross-
+            # validation should compare orders of magnitude, not exact
+            # values. RINFOG(11) == 0.0 means MUMPS could not estimate
+            # (e.g., singular factors); treat as missing data.
+            "conditioning": {
+                "matrix_norm_inf": _opt_float(raw.get("rinfog4")),
+                "solution_norm_inf": _opt_float(raw.get("rinfog5")),
+                "scaled_residual_inf": _opt_float(raw.get("rinfog6")),
+                "omega1": _opt_float(raw.get("rinfog7")),
+                "omega2": _opt_float(raw.get("rinfog8")),
+                "forward_error_bound": _opt_float(raw.get("rinfog9")),
+                "cond1": _opt_float(raw.get("rinfog10")),
+                "cond2": _opt_float(raw.get("rinfog11")),
             },
         }
     out_path.write_text(json.dumps(canonical) + "\n")

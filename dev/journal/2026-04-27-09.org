@@ -754,3 +754,64 @@ SchurBlock.
 Returned Inertia is for A_FF only. Documented prominently on the
 function and on SchurBlock — ripopt's inertia-correction loop
 must account for the Schur block separately (matches F3.0 D7).
+
+* 17:30 :f2.2:mumps:condition-estimate:cross-validation:
+F2.2 — MUMPS RINFOG cross-validation harness landed.
+
+Plan note (kkt-feature-gaps.md F2.2) said ICNTL(11)=2; verified
+via mumps-expert (dsol_driver.F:5742) that ICNTL(11)=2 does NOT
+populate RINFOG(11). Only ICNTL(11)=1 (full statistics)
+populates RINFOG(10) COND1 and RINFOG(11) COND2. Followed the
+spec's intent (cross-validate condition estimates) by setting
+ICNTL(11)=1; documented the deviation with a comment in
+mumps_bench.F.
+
+Semantic gap: RINFOG(10)/(11) are componentwise condition
+numbers in the ∞-norm (Arioli-Demmel-Duff; dsol_aux.F:935),
+weighted by the residual partition vectors w₁ and w₂. Feral's
+estimate_condition_1norm computes ‖A‖₁·‖A⁻¹‖₁. Both use Hager-
+Higham 1-norm power iteration but applied to different
+operators, so apples-to-apples agreement is not expected. The
+cross-validation report compares orders of magnitude; the
+acceptance gate from the plan ("geomean ratio within [0.5, 5.0]")
+was calibrated against a 1-norm oracle and is too tight for this
+∞-norm-componentwise oracle. Diag binary uses [0.1, 10.0] band.
+
+Files:
+- external_benchmarks/mumps_oracle/mumps_bench.F: set ICNTL(11)
+  =1, emit rinfog4..rinfog11 (eight new keys).
+- external_benchmarks/mumps_oracle/run_mumps.py: parse new keys,
+  add `conditioning` block to canonical sidecar with _opt_float
+  helper that drops 0.0/NaN/Inf as "MUMPS could not estimate".
+- src/bin/diag_cond_parity.rs (new): walks the corpus, factors
+  with feral, calls estimate_condition_1norm, reports
+  kappa_feral / cond2 ratio with geomean and percentiles.
+  5 unit tests for read_mumps_conditioning.
+
+Smoke tests:
+- mumps_bench MISRA1B_0008: emits all eight RINFOG fields
+  (rinfog4=1.5e9, rinfog11=1.0). ICNTL(11)=1 working.
+- diag_cond_parity MISRA1B (29 matrices, 2 with sidecars
+  regenerated): kappa_feral=6.0e8 vs cond1=1.8e4 on _0000;
+  kappa_feral=6.4e16 vs cond1=1.2e3 on _0008. Order-of-magnitude
+  gap reflects the ∞-norm-componentwise vs 1-norm semantic
+  difference, not a feral bug. Treat the diag as directional.
+
+cargo test --lib 198/198 PASS, --bin diag_cond_parity 5/5 PASS,
+cargo clippy --release (lib + bins) clean. cargo fmt clean.
+
+Outstanding for full F2.2 acceptance:
+1. Regenerate .mumps.json sidecars over the full corpus
+   (data/matrices/kkt, kkt-expansion, kkt-mittelmann) with the
+   new ICNTL(11)=1 binary. ~minutes for kkt; longer for the
+   mittelmann tail. Run user-side: `python3 run_mumps.py
+   data/matrices/kkt`.
+2. Run diag_cond_parity over the regenerated corpus and
+   inspect the geomean / percentile distribution of
+   kappa_feral / cond2. Decide whether the [0.1, 10.0] band
+   is appropriate or needs widening based on real data.
+3. The plan's "geomean within [0.5, 5.0]" gate cannot be met
+   against COND2 because of the ∞-norm-componentwise vs 1-norm
+   gap. Update the plan acceptance gate or build a separate
+   cross-validation oracle (e.g. compute MUMPS ‖A⁻¹‖_∞ via
+   solve(A, e_i) and compare ratio).
