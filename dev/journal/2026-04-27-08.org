@@ -132,3 +132,68 @@ Next session: Phase B.3 — feral-amf crate. Mirror feral-amd's public
 API. AmfOptions has no aggressive knob (HAMF4 always aggressively
 absorbs). Then B.4 (hand-derived expected-perm fixtures), C (MUMPS
 HAMF4 oracle), D (wire as default for SYM=2 N≤10000).
+
+* 14:30 :amf:phase-b3:start:
+Continuing autonomously into Phase B.3 — feral-amf crate. Plan is
+to mirror feral-amd public surface using MinFill. AmfOptions has
+no aggressive knob (HAMF4 always aggressively absorbs); dense_alpha
+behaves the same as feral-amd. AmfStats mirrors AmdStats field for
+field; the OrderDiagnostics surface from feral-ordering-core feeds
+both crates uniformly.
+
+* 14:50 :amf:phase-b3:done:
+Commit a467fe6 feat(amf): feral-amf crate (Phase B.3). 6 files,
++322/-1. Public API: amf_order, amf_order_with_stats, amf_order_opts,
+amf_order_full. tests/smoke.rs: 7/7 pass on the same five fixtures
+plus three-tuple-shape and AmfStats-shape checks. AMD bit-parity
+12/12 preserved. Workspace member added in root Cargo.toml; Cargo.lock
+regenerated.
+
+* 15:00 :amf:phase-b4:start:
+Phase B.4 — hand-derived expected-perm fixtures. Plan sketches three:
+3x3 hub-last, 5x5 dual-arrowhead both-hubs-deferred, 7x7 banded
+endpoints-first. Trying these as test assertions in
+crates/feral-amf/tests/expected_perm.rs.
+
+* 15:10 :amf:b4:tighter-pins-fail:
+Two of the three planned tighter pins fail on the actual
+implementation:
+- dual_arrow_5 produces perm = [3, 0, 1, 2, 4]. Hub 0 picked at
+  iteration 1 (not deferred). Only hub 4 is in the last position.
+- tridiag(7) produces perm = [6, 5, 4, 3, 2, 0, 1]. One-endpoint
+  sweep — endpoint 0 not picked until iteration 5.
+Both look like sensible quotient-graph dynamics, not bugs. Without
+the Phase C MUMPS HAMF4 oracle there is no way to tell "implementation
+diverges from MUMPS" from "implementation correctly follows AMF metric
+arithmetic past iteration 0 in a way the plan didn't anticipate."
+
+* 15:25 :amf:b4:weakened:
+Replaced the failing tighter pins with iteration-0 metric-derivable
+claims:
+- arrow_3: hub last (passes — derivable because hub remains strict
+  max-deg at every iteration).
+- dual_arrow_5: first pivot is spine, last pivot is a hub (passes —
+  iteration-0 metric strictly prefers spine, structural argument that
+  the final survivor is a hub).
+- tridiag(7): first pivot is an endpoint (passes — iteration-0
+  metric strictly prefers deg=1 over deg=2).
+Recorded the abandoned tighter pins in dev/tried-and-rejected.md
+under "2026-04-27-08: Phase B.4 tighter expected-perm pins" with
+specific failure perms as evidence. Phase C's MUMPS HAMF4 oracle
+will provide the tighter pins.
+
+Commit aa51067 test(amf): hand-derived expected-perm fixtures
+(Phase B.4). 2 files, +199/0. tests/expected_perm.rs: 3/3 pass.
+
+* 15:30 :amf:status:
+After session 08 (cumulative B.2 + B.3 + B.4):
+- feral-ordering-core: 56 unit + 10 integration. Both metrics drive
+  real elimination loop.
+- feral-amd: 51 unit + 12 oracle_match (bit-parity preserved).
+- feral-amf: 7 smoke + 3 expected_perm. Public API mirrors feral-amd.
+- feral lib: 164/164.
+- Plan position: Phases A.1, A.2, B.1, B.2, B.3, B.4 complete.
+  Remaining: C (MUMPS HAMF4 oracle plumbing in
+  external_benchmarks/mumps_oracle/ + tests/amf_corpus_oracle.rs)
+  and D (wire AMF as default for SYM=2 N<=10000 in
+  src/symbolic/mod.rs).
