@@ -4,6 +4,28 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-26) — Streaming bench + `FERAL_SPARSE_MAX` cap
+
+- `cargo run --bin bench --release` now streams matrix data through
+  each loop iteration instead of loading the entire corpus upfront.
+  `KktEntry` shrinks to metadata only (`name`, `mtx_path`, `sidecar`,
+  oracle timings). Each loop body re-reads the `.mtx`, runs work,
+  drops at end of scope. Peak RSS on `FERAL_KKT_ROOTS=all` drops from
+  30+ GB (load-all design, SIGKILLed) to ~17 GB end of dense / ~36 GB
+  end of sparse on the 64 GB dev laptop.
+- New `FERAL_SPARSE_MAX=N` env var caps the sparse multifrontal loop
+  by sidecar dimension (`n + m`). Default `usize::MAX` (no cap).
+  Set to `20000` (or similar) to bound the sparse pass on the
+  expanded corpus where the n>50000 tail blows the memory ceiling
+  per-matrix. Skipped matrices counted as `Size-skipped (n > N)`.
+- New `Parse-skipped` summary line counts matrices skipped during
+  per-iteration parse (NaN/Inf entries, dim mismatch, unparseable
+  `.mtx`); pass-rate denominators subtract these to preserve old
+  semantics.
+- First end-to-end expanded-corpus validation: 170,176 matrices,
+  sparse 167,380 attempted (99.5% inertia, 99.8% residual,
+  worst 2.99e8 same outlier as kkt-only POLAK6_0021).
+
 ### Fixed (2026-04-26) — `factor_nnz()` accounting matches SSIDS
 
 `SparseFactors::factor_nnz()` and the `summary().nnz_l` accumulator

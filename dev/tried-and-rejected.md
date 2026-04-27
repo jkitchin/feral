@@ -1107,3 +1107,45 @@ bench redesign or beefier hardware. See session 03 "Next Session
 Should" item 1.
 
 **Evidence.** `dev/journal/2026-04-26-03.org` 20:50 entry.
+
+## 2026-04-26-04: Single-pass streaming bench
+
+**Tried.** During the streaming-bench refactor, considered merging
+the dense and sparse loops into one pass over the corpus so each
+.mtx is parsed only once, then both loop bodies share the parsed
+data via local variables.
+
+**Why rejected.** Would invert the output ordering (currently dense
+summary prints first, then sparse) and merge the per-loop summary
+state machines into one. Diff would touch failure-tracking,
+perf-comparison, and phase-2.8.1 partition code that was independent
+across the two loops. Two-pass streaming costs an extra .mtx parse
+for the 157k dense-eligible matrices (~seconds in absolute) and
+preserves the diff containment.
+
+**Evidence.** Session 04 journal 21:30 entry. Two-pass refactor
+landed in commit 53c07bb and validated end-to-end on
+`FERAL_KKT_ROOTS=all`.
+
+## 2026-04-26-04: Uncapped sparse loop on 64 GB laptop with streaming bench
+
+**Tried.** After streaming refactor, ran `FERAL_KKT_ROOTS=all` with
+no `FERAL_SPARSE_MAX` cap to confirm the sparse loop handles the
+full 170,176-matrix expanded corpus.
+
+**Why rejected.** Streaming bounded the dense pass to ~17 GB peak
+(was 30+ GB load-all), but the sparse pass still SIGKILLed (exit 137)
+shortly after starting. Cause: the expansion corpus contains 10
+matrices with n > 50000 (max 451195) whose multifrontal factor
+allocation alone exceeds 64 GB. Streaming the load cannot help when
+the issue is a single matrix's working set.
+
+**Status.** Mitigated with `FERAL_SPARSE_MAX=20000` opt-in cap (skips
+237 matrices, leaves 167,380 attempted). End-to-end run completes at
+~50 min wall, ~36 GB peak RSS. Still leaves a residual question:
+even at cap=20000, RSS climbed from 17 GB to 36 GB across the sparse
+loop, suggesting cumulative growth (allocator fragmentation or hidden
+accumulator) on top of the per-matrix peak. See session 04 "Next
+Session Should" item 1.
+
+**Evidence.** Session 04 journal 22:25 / 22:30 / 22:50 entries.
