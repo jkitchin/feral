@@ -4,6 +4,16 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Tooling (2026-04-27) — bench `FERAL_KKT_FILTER` filters at load time
+
+`src/bin/bench.rs::load_kkt_dir` now reads `FERAL_KKT_FILTER` and skips
+non-matching `.mtx` stems before parsing the `.json` sidecar and
+oracle-timing sidecars. Targeted single-family runs that previously
+waited for the 156k-matrix corpus to load now complete in <1s
+(`FERAL_KKT_ROOTS=kkt-expansion FERAL_KKT_FILTER="CHAINWOO_0000"`:
+0.18s vs >60s post-load). The post-load filter is preserved as a
+redundant safety net.
+
 ### Performance (2026-04-27) — move contrib into ContribBlock (W-3b)
 
 The multifrontal driver previously cloned `ff.contrib` on every

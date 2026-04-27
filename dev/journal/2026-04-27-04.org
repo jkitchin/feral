@@ -65,3 +65,20 @@ output buffer in the kernel API. Reasons:
 - Bit-parity preserved end-to-end.
 - Per-supernode allocator pressure reduced by both nrow*nrow
   (input scratch) and cdim*cdim (clone-elision) doubles.
+
+* 11:30 :tooling:bench:
+Moved =FERAL_KKT_FILTER= substring matching into =load_kkt_dir= in
+=src/bin/bench.rs:1008=. Walker now skips non-matching .mtx stems
+before parsing the .json sidecar and oracle-timing sidecars
+(.mumps.json, .ssids.json). Post-load filter at the bottom of main()
+remains as a redundant safety net (no-op when load-time filter ran).
+
+Why: targeted single-family diagnostics on the 167k corpus took
+>60s just to load all sidecars before applying the post-load filter.
+
+Evidence (commit 6505d89):
+- =cargo clippy --bin bench --release -- -D warnings=: clean.
+- =FERAL_KKT_ROOTS=kkt-expansion FERAL_KKT_FILTER="CHAINWOO_0000"
+  ./target/release/bench=: 0.18s end-to-end (was >60s post-load).
+- =cargo test --release= and =cargo test --release --tests=: all
+  suites green (162 lib + integration; 17 ignored as expected).
