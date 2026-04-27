@@ -1,0 +1,267 @@
+#+TITLE: 2026-04-27 Session 02 — fix CHAINWOO ordering misroute + inertia triage
+
+* Goal
+Carry forward from session 01: actually FIX the memory accumulation
+issue rather than just characterize it. Session 01 identified that
+=symbolic_factorize='s default ordering routes CHAINWOO (n=4000,
+avg_deg=2.0) to AMD which produces 2.1M factor entries vs METIS's
+281K (7.5×). Same pathology hits HYDROELL/DIXMAANH.
+
+* 06:30 :impl:diag-chainwoo:
+Wrote =src/bin/diag_chainwoo= — runs every available ordering method
+on a single matrix and prints (n_snodes, sym_nnz_est, num_nnz_l,
+max_front, sym_us, num_us). Uses =symbolic_factorize_with_method= to
+bypass the dispatcher.
+
+CHAINWOO_0000 results:
+#+begin_example
+    method    n_snodes   sym_nnz_est     num_nnz_l   max_front      sym_us      num_us
+      Auto        2047         68480       2105552          32        1795      480232
+       Amd        2047         68480       2101584          32        1351      435132
+   MetisND        1934         70552        281526          32        6222       28720
+  ScotchND        1915         70520        277326          32        7790       29087
+   KahipND        2047         68480       2105552          32        1430      429919
+#+end_example
+
+Symbolic NNZ estimate is similar (~68k vs ~70k) but numeric factor
+blows up to 2.1M with AMD/KahipND vs 281K with METIS. Pivoting
+cascade: AMD/KahipND ordering causes BK pivot delays that propagate
+up the tree, fattening parent supernodes.
+
+Auto matches KahipND because =choose_adaptive= rule
+=n < 10_000 && avg_deg < 15.0= → KahipND. But Auto is opt-in only
+(per b5c67cb research note) so this isn't what bench uses.
+
+* 06:35 :investigation:default-method:
+Bench uses =symbolic_factorize=, which calls =pick_default_method=:
+#+begin_example
+fn pick_default_method(n: usize, stored_nnz: usize) -> OrderingMethod {
+    let avg_deg = stored_nnz as f64 / n as f64;
+    if n >= 5000 && avg_deg < 6.0 { MetisND } else { Amd }
+}
+#+end_example
+
+CHAINWOO has n=4000 — falls through to AMD. Threshold is calibrated
+to catch CRESC132 (n=5314) but misses the n=3000-4033 chain cluster.
+
+* 06:40 :evidence:cluster-profile:
+Profiled three more matrices to bound the fix:
+
+HYDROELL_0000 (n=4033, avg_deg=2.0):
+- AMD 2.17M (473 ms) vs METIS 282k (27 ms) — 7.7× fill, 17× speed
+DIXMAANH_0000 (n=3000, avg_deg=3.0):
+- AMD 1.17M (190 ms) vs METIS 101k (1.5 ms) — 11.6× fill, 126× speed
+VESUVIO_0000 (n=3083, avg_deg=3.07, IPM corpus):
+- AMD 52.5k vs METIS 39k — 1.35× fill (modest win)
+HAHN1_0000 (n=715, avg_deg=4.0):
+- AMD 10,451 = METIS 10,451 (same fill; METIS pays setup cost)
+
+Cluster: =n>=2000 && avg_deg<4= catches the chain pattern (CHAINWOO,
+HYDROELL, DIXMAANH, VESUVIO) without dragging tiny matrices in.
+
+* 06:45 :impl:dispatcher-fix:
+Extended =pick_default_method=:
+#+begin_example
+if (n >= 5000 && avg_deg < 6.0) || (n >= 2000 && avg_deg < 4.0) {
+    OrderingMethod::MetisND
+} else { OrderingMethod::Amd }
+#+end_example
+
+Updated =pick_default_method_rules= test for the new boundary cases
+(VESUVIO flips AMD→METIS, HAHN1 stays AMD, n=2000 boundary triggers).
+
+* 06:50 :validation:diag-sparse-memory:
+Re-ran =diag_sparse_memory= with pattern small,big,small,medium 5×
+each:
+#+begin_example
+  baseline RSS = 2.2 MB
+   1  small  HS118        32     2.5 MB
+   5  small  HS118        32     2.7 MB
+   6  big    CHAINWOO   4000   132.8 MB  ← was 1173 MB pre-fix
+  10  big    CHAINWOO   4000   145.0 MB
+  15  small  HS118        32   145.0 MB  (HWM held by CHAINWOO factor)
+  20  medium EIGENALS   2550   145.4 MB
+#+end_example
+
+CHAINWOO peak: 1173 MB → 145 MB (8.1× reduction). The HWM retention
+is now from a smaller legitimate factor, not pathological fill.
+
+* 06:55 :delegate:agent-2x2-inertia:
+Spawned a subagent to investigate the 837 sparse inertia mismatches
+(carried from session 05). Goal: characterize whether 2×2 BK pivot
+inertia accounting differs from MUMPS convention, propose fix.
+
+* 06:58 :validation:bench-expansion:
+Ran =FERAL_KKT_ROOTS=kkt-expansion FERAL_SPARSE_MAX=5000 bench=
+(12,649 matrices). Headline numbers:
+- Sparse factor/MUMPS geomean: 7.19× (was likely worse pre-fix)
+- Sparse factor/SSIDS geomean: 1.63×
+- Sparse nnz_L/MUMPS geomean:  2.45×
+- Dense inertia match: 97.8% (2936/3001)
+- Sparse inertia match: 93.0% (8852/9522)
+- Worst residual: 3.87e6 on QUDLIN_0001 — real numerical concern
+
+Phase 2.8.1 sparse partitions both still FAIL:
+- small-frontal (<200): p90=5.84 vs target 2.0
+- medium      (<500):  p90=35.76 vs target 3.0
+
+CHAINWOO geomean: ~840× (session 04) → 39× this run (~22× win).
+HYDROELL_0000 no longer in top-10 worst factor-ratio. New tail is
+ORBIT2 (n=4795) at 360-530× ratios.
+
+* 07:10 :findings:agent-2x2-inertia-result:
+Subagent reported: the 837 sparse inertia mismatches are *sidecar/
+oracle bugs*, not a FERAL bug. Direct evidence on SSCOSINE_0000:
+- The .mtx actually contains 951 negative diagonal entries (matrix
+  is not diagonally dominant; structurally indefinite)
+- FERAL reports inertia (4065, 935, 0) with relative residual
+  2.27e-16 — machine-precision-tight LDLᵀ = A
+- The sidecar reports (5000, 0, 0) — IPOPT's *expected* inertia at
+  IPM iteration 0, not what MUMPS computed on the dumped matrix
+
+FERAL's =count_2x2_inertia_val= at =src/dense/factor.rs:1894-1912=
+already implements the Sylvester-correct trace-based rule.
+
+Two recommended fixes (decoupled):
+- Fix A (primary): regenerate kkt-expansion sidecars via
+  =external_benchmarks/mumps_oracle/run_mumps.py=. No code change.
+- Fix B (secondary): dense-only =count_2x2_inertia= at
+  =src/dense/factor.rs:2253= uses a00 instead of trace; has TODO.
+  Doesn't affect sparse bench. Separate fix.
+
+The "Inertia match" headline metric is a corpus-truthing problem,
+not a FERAL correctness problem. Major de-scope.
+
+Research note: =dev/research/2x2-bk-inertia-accounting.md=
+
+* 07:12 :delegate:agent-orbit2:
+Spawned subagent to investigate the new dominant tail: ORBIT2 family
+(n=4795, 360-530× factor-time vs MUMPS) and the broader Phase 2.8.1
+medium-bucket failure (p90=35.76× across 5613 matrices). Pending.
+
+* 07:15 :commit:dispatcher-fix:
+Committed d4f1f72:
+- src/symbolic/mod.rs (extended pick_default_method)
+- src/bin/diag_chainwoo.rs (new diagnostic)
+- dev/research/2x2-bk-inertia-accounting.md (research note)
+
+* 07:25 :commit:fix-b-trace:
+User asked to do Fix A and B from the inertia research note.
+
+Fix B: switched =count_2x2_inertia= at =src/dense/factor.rs:2218=
+from sign-of-=a00= to sign-of-trace =(a00 + a11)= for the same-sign
+2×2 block branch, threading =a11= through =do_2x2_pivot=. KKT
+matrices produce 2×2 blocks where =a00=0= (variable rows have zero
+Hessian diagonal), so sign-of-=a00= mis-attributes those blocks.
+Trace-based rule matches =count_2x2_inertia_val= (multifrontal
+sparse path), rmumps's =compute_inertia=, and canonical Fortran
+MUMPS. The 2026-04-12 attempt was abandoned because it regressed
+16 dense matrices vs rmumps; canonical Fortran MUMPS later
+confirmed those rmumps oracles were wrong (per dev/journal/
+2026-04-12-01.org §15:45 "MAJOR FINDING"). All 162 lib tests pass.
+
+Committed 5ecbeb5.
+
+* 07:30 :delegate:agent-orbit2-result:
+ORBIT2 agent returned. Key finding: ORBIT2 (n=4795, avg_deg=3.06)
+is a *fill* problem, not kernel speed. Column 2698 has off-degree
+1794 — classic CUTEst "objective-coupled variable" arrow pattern.
+=pick_default_method= already routes to MetisND but feral-metis
+gives nnz_L=1.5M vs MUMPS 110k (still 14× fill). Even ARWHEAD
+shows every feral ordering returns identical nnz_L=169,440 vs MUMPS
+59,964 — dense column dominates regardless of ordering.
+
+Root cause: feral-metis lacks *dense-column quotient* — the standard
+MUMPS/HSL technique of pulling columns with deg > max(40, 10·√n)
+out before recursive bisection and appending them at the end of
+the permutation.
+
+Affects 25+ expansion families (COSHFUN, ARWHEAD, CATENA, BDQRTIC,
+GILBERT, FMINSURF, ...). Research note at
+=dev/research/orbit2-cluster-regression.md=.
+
+* 07:35 :delegate:kernel-team:
+User asked to put a *team of agents* on the kernel speed gap (CHAINWOO
+25ms feral vs 640µs MUMPS). Verified the gap is dual:
+- Fill: feral 281k nnz_L vs MUMPS 52k (5.4× more fill on best ordering)
+- Per-nnz: feral 89 ns/nnz vs MUMPS 14 ns/nnz (6.4× slower kernel)
+
+Compounds to the observed 39× ratio. Sidecar evidence:
+=CHAINWOO_0000.mumps.json= (factor 726µs, factor_nnz 51964).
+=CHAINWOO_0000.ssids.json= (factor 3564µs, factor_nnz 123447).
+
+Spawned four parallel agents:
+1. mumps-expert — what does MUMPS do for tiny fronts
+2. spral-expert — what does SSIDS do for tiny fronts
+3. faer-expert — what does pure-Rust faer do for dense BK
+4. general-purpose — profile feral's actual hot path
+
+* 07:40 :impl:fix-a-sidecar-regen:
+Started =external_benchmarks/mumps_oracle/run_mumps.py= over the
+kkt-expansion corpus with =--max-n 5000=, =--skip-existing=. 13,276
+total .mtx, 8156 already had .mumps.json. Regenerated 3,377 new
+sidecars (215 failed: TABLE7 family with INFOG=-9 workspace recovery
+failure — structurally degenerate). Total .mumps.json now 11,748.
+
+Added bench code change to =OracleTiming= struct: parse =inertia=
+field from .mumps.json, prefer it as the truth source for "Inertia
+match vs MUMPS" stat, falling back to IPOPT .json sidecar inertia
+when MUMPS oracle is missing. Both dense and sparse paths updated.
+
+Pending: re-run bench to confirm "Inertia match" jumps from 93.0%
+to ≥99.9% on the sparse path (per research note's prediction).
+Cannot commit yet because diag_chainwoo_profile.rs (in-flight from
+the kernel-profile agent) currently fails clippy.
+
+* 07:45 :findings:agent-mumps-result:
+mumps-expert returned. Three highest-impact findings:
+
+1. *Eliminate per-front allocations* (=numeric/factorize.rs:1114-1131=
+   and =dense/factor.rs:734-739, 954-959=). Each front allocates two
+   nrow*nrow Vecs and copies between them. For 1934 fronts of size 32
+   on CHAINWOO this is ~16 MB of zero-fill + copy. MUMPS uses one
+   global =S(LA)= arena. Expected: *2-3× kernel speedup*.
+
+2. *Fuse scale + Schur update + argmax* in =do_1x1_pivot=
+   (=dense/factor.rs:2050-2087=). Currently 2-pass; MUMPS pattern
+   (=dfac_front_aux.F:1815-1822=) does 1-pass with fused MAXFROMM
+   capture. Expected: *1.5-2× speedup* on the rank-1 hot loop.
+
+3. *Lower =block_size= to ≤ max small-front size, or add tiny-front
+   pulp axpy path* (=dense/factor.rs:949=). Current bs=64 + ncol≤bs
+   short-circuit means CHAINWOO (max 32) never reaches the SIMD
+   =axpy_minus= kernel. Expected: *1.3-1.6× speedup*.
+
+Stacked: 4-6×. Plausibly closes the 5× per-nnz gap.
+
+Research note: =dev/research/mumps-small-frontal-speed.md=.
+
+* 07:50 :findings:agent-spral-result:
+spral-expert returned. Three findings, partially overlapping with
+mumps-expert (per-front allocation is the common point):
+
+1. *Monomorphized 32×32 in-register LDL^T kernel* modeled on
+   =block_ldlt<T,32>= in =block_ldlt.hxx:289=. Hand-rolled SIMD
+   primitives: =find_maxloc= (vector tournament), =update_1x1=
+   (4-way manually-unrolled FMA), =update_2x2= (=omp simd=).
+   For a 32×32 aligned block the entire factorization is one
+   inlined loop. Expected: *30-40% reduction in factor time*.
+
+2. *Small-leaf-subtree batching* (=SymbolicSubtree.hxx:57-84=
+   threshold 4·10^6 flops). Group leaves at analyse time, run as
+   one OpenMP task with a single =lcol_= buffer for all nodes.
+   Buddy allocator for contrib blocks. Expected: *15-25%* on
+   chain-like graphs.
+
+3. *Fused multi-column Schur kernel* (=axpyN_minus= for N=4),
+   eliminating ~75% of pulp dispatch calls. Expected: *10-15%*.
+
+Combined ceiling: ~50-60% reduction (89 ns/nnz → 35-45 ns/nnz),
+landing feral in the SSIDS ballpark.
+
+Research note: =dev/research/ssids-small-frontal-speed.md=.
+
+Both agents converge on per-front allocation/copy as the dominant
+fixable bottleneck. mumps-expert ranks it 1st (2-3× alone);
+spral-expert ranks the kernel rewrite 1st but small-leaf batching
+addresses the same alloc/copy concern.
