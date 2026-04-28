@@ -4,6 +4,31 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-28) — `bench_solver_corpus` realistic-IPM perf bench
+
+New `src/bin/bench_solver_corpus.rs` walks `data/matrices/kkt/`,
+groups by family (`<FAM>_NNNN.mtx` → `FAM`), and per family runs two
+scenarios — one persistent `Solver` (caches `SymbolicFactorization`
+across same-pattern re-factorizations) vs the free-function loop
+that re-runs symbolic on every call. Reports per-family table and
+corpus-wide aggregate (geomean / p10 / p50 / p90 speedup, symbolic
+call counts, implied symbolic share of freefn wall).
+
+Initial run on 534 families × 19,410 iterates: **aggregate 1.70×,
+geomean 2.86×, p50 3.00×, p90 4.08×**. Symbolic share of freefn
+wall is 41.3% — the realistic figure for IPM-tail workloads, vs the
+artificial 64% reported by the per-matrix `bench` which recomputes
+symbolic on every of 154k matrices.
+
+Going forward `bench_solver_corpus` is the perf-tuning ground truth
+for symbolic-phase optimizations (decisions.md 2026-04-28). The
+per-matrix `bench` is retained for inertia/residual correctness
+sweeps and oracle ratio comparisons.
+
+Also added: `src/bin/profile_hot.rs` (samply target for sampling
+profiles of the hot pipeline) and `[profile.release] debug = true`
+in `Cargo.toml` so samply runs symbolicate cleanly.
+
 ### Changed (2026-04-27) — Dense kernel B-1 dual-column DSYRK (NR=2)
 
 Phase B-1 of `dev/plans/dense-kernel-blas3.md` (narrow first step).
