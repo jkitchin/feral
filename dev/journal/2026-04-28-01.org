@@ -152,3 +152,87 @@ as a `tried-and-rejected.md` entry citing the regime mismatch.
 The throwaway `probe_missing_diag` binary was deleted; the
 useful `probe_deltac_sensitivity` is committed as the basis for
 the decision.
+
+* 10:15 :refactor:solver:fingerprint:
+Strengthened `PatternFingerprint` in `src/numeric/solver.rs`.
+Old structure was `(n, col_ptr_len, row_idx_len)` — three integers
+that collide silently on any two matrices with the same (n, nnz).
+New structure is `(n, nnz, structural_hash: u64)` where
+`structural_hash` is a `DefaultHasher` (SipHash) of `col_ptr ||
+row_idx`. The IPM hot path is unaffected because successive
+iterates have byte-identical column structure and the equality
+test short-circuits on the prefix; this just closes the footgun
+for general callers who might hand `Solver` two different
+matrices with identical (n, nnz).
+
+Added 3 tests: F1 byte-identical patterns equal; F2 same (n,nnz)
+different `row_idx` distinct; F3 same (n,nnz) different `col_ptr`
+distinct. All 8 solver unit tests pass; full suite stays 205/205.
+Committed as 8b0c435.
+
+* 10:45 :perf:profile:samply:bench-corpus:
+Re-ran samply on `bench_solver_corpus` with --unstable-presymbolicate
+to get DWARF-resolved frames. 9039 samples at 1kHz over the full
+534-family bench (~9 s wall). Self-time category breakdown
+(persisted to `dev/profiles/bench_solver_corpus_2026-04-28.summary.txt`):
+
+| Category                             |  self% |
+|--------------------------------------+--------|
+| I/O (mtx read+parse)                 |  35.9% |
+| Allocator / memset / free            |  15.3% |
+| Symbolic / ordering / postorder      |   9.5% |
+| Dense Schur SIMD kernel              |   8.5% |
+| Scaling (hungarian/mc64/infnorm)     |   7.3% |
+| Dense factor (frontal+pivot)         |   6.8% |
+| Multifrontal assembly                |   2.6% |
+| (other)                              |  14.0% |
+
+Inclusive: `Solver::factor` 21.8%, `factorize_multifrontal*` 25.6%,
+`symbolic_factorize_with_method` 25.9%, `read_mtx` 33.6%.
+
+Read of the data:
+1. **I/O dominates the harness** — 36% wall on file read+parse is
+   inherent to the benchmark, not the solver. On a real IPM
+   workload where the matrix is already in memory, this 36% goes
+   to zero, and the remaining solver wall would be dominated by
+   the dense kernel and the multifrontal frontal factor.
+2. **MC64 is no longer the top scaling cost** — `mc64::compute_matching`
+   self-time is 0.7%, inclusive 7.7%. The hot scaling work is now
+   `hungarian_match` (2.9% self) which is called *from inside* MC64
+   (one of two augmenting-path passes) plus `compute_infnorm` (2.9%)
+   for the InfNorm path. The session-01 finding ("MC64 is 26% of
+   wall on the per-matrix bench") doesn't reproduce here precisely
+   because `bench_solver_corpus` exercises the Solver-cache
+   amortization path: 988 symbolic calls vs 19410 free-fn calls,
+   19.6× fewer.
+3. **Dense Schur kernel is the single biggest hot kernel** — 8.5%
+   self combined across `axpy_minus_unroll4_nofma` (5.2%),
+   `axpy2_minus_unroll4_nofma` (1.9%), and
+   `schur_panel_minus_nofma_strided_dual` (1.4%). The W-2 2x2
+   inline + B-1 dual-column DSYRK work that landed in the prior
+   two checkpoints is paying off in `factor_frontal_blocked_in_place`
+   (4.7% self / 14.7% inclusive).
+4. **Allocator activity is large** (15.3% combined for malloc,
+   free, memset, memmove). Some of this is benchmark harness
+   churn (per-iterate `CscMatrix::from_triplets` builds new vectors);
+   some is workspace allocation inside `factor_one_supernode`.
+   Future lever: pre-size the workspace once per Solver lifetime
+   and reuse across iterates. Not actionable today without a deeper
+   look — the workspace path was already refactored in session
+   2026-04-21.
+
+Aggregate harness output (unchanged from prior bench): 534
+families, 19410 iterates, **1.67x aggregate Solver vs free-fn**,
+**geomean 2.83x**, p50 3.00x, p90 4.05x. Implied symbolic share
+of free-fn wall: 40.2%, fully amortized by Solver.
+
+Conclusion for the session-01 question "what dominates after
+symbolic is amortized?": the dense per-supernode factor + Schur
+kernel together account for ~22% of wall (combined dense self),
+with the remaining numeric cost split between scaling (7.3%) and
+multifrontal assembly (2.6% self / 19.1% inclusive). The biggest
+remaining lever is continuing to widen the dense kernel
+(Phase 2.4.x track).
+
+Profile JSON saved at
+`dev/profiles/bench_solver_corpus_2026-04-28.json.gz` (+ syms).

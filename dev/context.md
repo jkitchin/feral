@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-28T11:16:41Z
+Generated: 2026-04-28T12:20:26Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,18 +59,18 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+8b0c435 refactor(solver): structural-hash PatternFingerprint
+355773b probe(scaling): add δ_c sensitivity probe + record MC64 skip rejection
+aadd001 session: 2026-04-28-01 checkpoint — Solver-corpus bench is the new perf gate
+4defc12 feat(bench): add bench_solver_corpus + profile_hot
 807f19f session: 2026-04-27-14 checkpoint — B-1 dual-column DSYRK (NR=2) lands
-9d89d73 feat(dense): B-1 dual-column DSYRK (NR=2) in apply_blocked_schur_panel
-c6f96f1 session: 2026-04-27-13 checkpoint — W-2 2x2 inline lands
-2011b33 feat(dense): W-2 2x2 inline (no-swap fast path) in lblt_panel_frontal
-f0d90a1 plan(W-2 2x2): research note + Phase A/B/C plan for dense kernel
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-f4da201931f29287)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-ea50f87b5e20710d)
 
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok

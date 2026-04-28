@@ -1,0 +1,62 @@
+bench_solver_corpus samply profile (2026-04-28)
+  total samples: 9039  (rate 1000Hz, ~9.0s)
+
+=== SELF-TIME by category ===
+  category                                  self%  matching syms
+  I/O (mtx read)                             35.9%  (15 fns)
+  Allocator / memset                         15.3%  (22 fns)
+  Dense factor (frontal+pivot)                6.8%  (5 fns)
+  Dense Schur SIMD kernel                     8.5%  (4 fns)
+  Multifrontal assembly                       2.6%  (3 fns)
+  Scaling (hungarian / mc64 / infnorm)        7.3%  (6 fns)
+  Symbolic / ordering / postorder / etree     9.5%  (41 fns)
+  (other)                                    14.0%
+
+=== TOP 25 self-time symbols ===
+   1326   14.7%  read
+    880    9.7%  __open
+    469    5.2%  feral::dense::schur_kernel::axpy_minus_unroll4_nofma
+    423    4.7%  feral::dense::factor::factor_frontal_blocked_in_place
+    343    3.8%  _xzm_free
+    330    3.7%  __getdirentries64
+    266    2.9%  feral::scaling::infnorm::compute_infnorm
+    258    2.9%  feral::scaling::hungarian::hungarian_match
+    223    2.5%  _platform_memset
+    222    2.5%  <core::str::iter::SplitWhitespace as core::iter::traits::iterator::Iterator>::next
+    197    2.2%  core::slice::sort::unstable::ipnsort
+    183    2.0%  feral::ordering::amd::permute_pattern
+    179    2.0%  feral::numeric::factorize::factor_one_supernode
+    174    1.9%  feral::dense::schur_kernel::axpy2_minus_unroll4_nofma
+    164    1.8%  __bzero
+    155    1.7%  _platform_memmove
+    155    1.7%  core::slice::memchr::memchr_aligned
+    141    1.6%  feral::sparse::csc::CscMatrix::from_triplets
+    124    1.4%  feral::sparse::csc::CscMatrix::symmetric_pattern
+    124    1.4%  feral::dense::schur_kernel::schur_panel_minus_nofma_strided_dual
+    120    1.3%  xzm_malloc
+     92    1.0%  feral_ordering_core::quotient_graph::algo::finalize_step_amf
+     90    1.0%  <alloc::vec::Vec<T> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<T,I>>::from_iter
+     88    1.0%  madvise
+     86    1.0%  feral::dense::factor::factor_frontal_with_profile
+
+=== TOP 20 inclusive (feral only) ===
+   3039   33.6%  feral::io::mtx::read_mtx
+   2338   25.9%  feral::symbolic::symbolic_factorize_with_method
+   2318   25.6%  feral::numeric::factorize::factorize_multifrontal_supernodal_with_workspace
+   1970   21.8%  feral::numeric::solver::Solver::factor
+   1723   19.1%  feral::numeric::factorize::factor_one_supernode
+   1333   14.7%  feral::dense::factor::factor_frontal_blocked_in_place
+   1289   14.3%  feral::numeric::factorize::factorize_multifrontal
+    798    8.8%  feral::io::mtx::parse_mtx
+    694    7.7%  feral::scaling::mc64::compute_matching
+    538    6.0%  feral::scaling::hungarian::hungarian_match
+    528    5.8%  feral::dense::factor::scalar_pivot_step
+    469    5.2%  feral::dense::schur_kernel::axpy_minus_unroll4_nofma
+    431    4.8%  feral::numeric::factorize::dense_fast_factor_with_workspace
+    407    4.5%  feral::scaling::compute_scaling_with_cache
+    396    4.4%  feral::symbolic::run_external_ordering
+    360    4.0%  feral::dense::factor::do_1x1_update
+    354    3.9%  feral::ordering::amd::permute_pattern
+    342    3.8%  feral::ordering::postorder::postorder
+    313    3.5%  feral::sparse::csc::CscMatrix::from_triplets
+    294    3.3%  feral::dense::factor::factor_frontal_with_profile
