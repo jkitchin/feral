@@ -2177,3 +2177,42 @@ for the dense path only.
 - `dev/journal/2026-04-28-01.org` — investigation log.
 - `dev/sessions/2026-04-28-01.md` — full session checkpoint.
 - `src/bin/profile_hot.rs` — the profiler harness.
+
+---
+
+## 2026-04-28 — Auto routing thresholds are δ_c-robust (probe evidence)
+
+**Decision.** The Auto routing rules in
+`src/scaling/mod.rs:371-392` (`pick_scaling_strategy`,
+`diag_only/n >= 0.30`) and `src/symbolic/mod.rs:299-321`
+(`pick_ordering_preprocess`, `low_degree/n >= 0.30`) are accepted
+as δ_c-robust without further hardening. Their thresholds were
+calibrated on the `data/matrices/kkt/` corpus (pre-regularized
+IPM snapshots dumped with δ_c ≈ 1e-8 on the dual block); the
+calibrations gate on **structural** ratios that do not depend on
+δ_c magnitude.
+
+**Evidence.** `src/bin/probe_deltac_sensitivity.rs` perturbs the
+detected dual-reg block of 9 representative KKT matrices by
+`mult ∈ {1e-4, 1e-2, 1, 1e2, 1e4}` (effective δ_c span 1e-12 to
+1e-4) and re-runs both routing functions plus a 5-run-median
+symbolic + numeric factor:
+
+- 0/9 matrices flipped scaling routing
+- 0/9 matrices flipped ordering preprocess
+- inertia stable across the sweep on every matrix
+- wall time within ±5% across multipliers (within run-to-run noise)
+- residuals scale with effective δ_c as expected for refined-solve
+  on a more-singular matrix; not a feral defect
+
+**Implications.** Future heuristic changes that gate on raw
+diagonal magnitude (an interpretation-class change rather than a
+structural-signature change) must validate against the same probe.
+A consumer with a different δ_c choice (POUNCE with a different
+`mu_init`, etc.) is not expected to see different routing answers.
+
+**Files referenced.**
+- `src/bin/probe_deltac_sensitivity.rs` — the probe.
+- `src/scaling/mod.rs` — Auto scaling routing.
+- `src/symbolic/mod.rs` — Auto preprocess routing.
+- `dev/journal/2026-04-28-01.org` — investigation log.

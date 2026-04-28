@@ -1196,3 +1196,76 @@ note to that effect lives in the test file's module doc.
 --test expected_perm` before the weakening:
 - `amf_dual_arrow_5_both_hubs_deferred` panicked: left {2, 4} != right {0, 4}.
 - `amf_tridiag_7_endpoints_first` panicked: max endpoint position 5 not less than min interior position 1.
+
+## 2026-04-28 — MUMPS missing-diagonal MC64 skip (mistranslated regime)
+
+**Context.** Session 2026-04-28-01's profile showed
+`mc64::compute_matching` at 26% inclusive wall in `profile_hot`.
+The session's planned next step was to port MUMPS's KKT-aware
+"skip MC64 if diagonal is mostly populated" rule from
+`mumps/src/dana_aux.F:1388-1416`: when
+`(missing_diag + zero_diag) < max(1, N/10)` MUMPS skips KEEP(52)=4
+matching and falls through to cheap symmetric Ruiz equilibration
+(SIMSCA, KEEP(52)=7). Estimated 5–15% wall savings.
+
+A plan note was written
+(`dev/plans/mc64-missing-diag-skip.md`) and a one-shot probe
+(`probe_missing_diag`, since deleted) was built to size the
+test thresholds before implementation.
+
+**Why rejected.** The probe surfaced a regime mismatch.
+
+The literal MUMPS rule is structural — it counts diagonal entries
+that are absent or *exactly* zero in the input CSC. Walk over the
+569-family corpus:
+
+| outcome under literal rule | families | of which arrow-KKT |
+|----------------------------|---------:|-------------------:|
+| would-skip (miss+zero < n/10) |   501  |       289 (lose MC64) |
+|   - non-arrow (today already InfNorm — no-op) |    212  |             — |
+| no-skip |     68  |          —         |
+
+289 of 569 families would lose the lever-C MC64 win
+(`dev/research/lever-c-adaptive-scaling.md`). 0 families would gain.
+
+Direct inspection of `data/matrices/kkt/VESUVIO/VESUVIO_0000.mtx`
+explains why: the dual block (rows 3054-3083) is stored with
+explicit `-1.00000000000000002e-8` — an IPM constraint
+regularization δ_c that the corpus generator dumped. Every KKT
+matrix in `data/matrices/kkt/` is a *post-regularization* IPM
+snapshot. The MUMPS rule was designed for SYM=2 inputs *before*
+such regularization, where dual diagonals are structurally absent.
+Applying the rule literally on regularized snapshots over-skips
+on essentially everything.
+
+A reframed numerical variant ("skip when most columns are
+diagonally dominant under a tolerance") was considered but
+shelved: the δ_c sensitivity probe (the next thing built, and the
+useful artifact from this exercise) showed Auto routing is
+already δ_c-robust by structural signature, so there is no
+heuristic-drift problem to fix here.
+
+**Disposition.** Rule not implemented. Plan note retained at
+`dev/plans/mc64-missing-diag-skip.md` as a pointer for the
+unlikely case that we get a *raw, unregularized* corpus to
+re-evaluate against. The throwaway `probe_missing_diag` binary
+was deleted; the related but useful
+`src/bin/probe_deltac_sensitivity.rs` was kept and is the basis
+for the new "Auto routing is δ_c-robust" decision in
+`dev/decisions.md`.
+
+**Lesson.** Heuristics ported from another solver's literature
+must be validated against the *input regime* feral actually sees,
+not just the algorithmic setting. MUMPS sees raw KKTs at analysis
+time; feral sees pre-regularized snapshots at refactor time.
+Same algorithm, different regime, different right answer.
+
+**Evidence.**
+- `src/bin/probe_deltac_sensitivity.rs` output (in this session's
+  journal).
+- `data/matrices/kkt/VESUVIO/VESUVIO_0000.mtx` line 3054–3083:
+  explicit `-1e-8` dual reg.
+- `dev/research/lever-c-adaptive-scaling.md`: lever-C win that
+  the literal rule would have destroyed.
+- `dev/plans/mc64-missing-diag-skip.md`: the plan that was
+  written then shelved.

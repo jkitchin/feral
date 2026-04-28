@@ -108,3 +108,47 @@ Next session candidates (in order of estimated wall savings):
 3. Profile bench_solver_corpus with samply to see what dominates
    *after* symbolic is amortized. The dense kernel + assembly
    should be more visible.
+
+* 09:00 :perf:probe:mc64:abandoned:
+Tackled the planned MUMPS missing-diagonal MC64 skip. Built a
+throwaway probe (`probe_missing_diag`) to size the threshold and
+found the literal rule mistranslated to feral's regime: 501 of
+569 corpus families would-skip, of which 289 are arrow-KKT that
+empirically WIN on MC64 (lever-C work). Reason: feral's KKT
+corpus stores explicit dual regularization (-1e-8 on VESUVIO,
+slack barrier perturbations on HS118), so `missing+zero diag`
+is ~0 on every matrix. MUMPS designed the rule for raw
+unregularized SYM=2 inputs.
+
+Discussed with user — they asked whether the corpus is even
+representative of how feral will be used or if we are skewing
+development. Pivoted to a δ_c sensitivity probe.
+
+* 09:30 :perf:probe:deltac:robustness:
+Built `src/bin/probe_deltac_sensitivity.rs`. Detects the dual
+reg block as the longest contiguous tail run of identical
+small-magnitude diagonals (|x| ≤ 1e-2, rel-tol 1e-4, min run 4).
+For each multiplier in {1e-4, 1e-2, 1, 1e2, 1e4}, perturbs the
+detected entries and reruns `pick_scaling_strategy`,
+`pick_ordering_preprocess`, and a 5-run-median symbolic + numeric
++ refined-solve. 11 matrices probed, 9 with detectable dual block
+(HS118 and KIRBY2 had heterogeneous slack diagonals — no clean
+δ_c).
+
+Result: 0/9 matrices flipped routing across an 8-order δ_c span.
+Inertia stable. Wall time ±5% (within noise). Residuals scale
+with effective δ_c as expected for refined-solve on a more
+singular matrix.
+
+Conclusion: Auto routing is δ_c-robust by structural signature
+(arrow-KKT detection and low-degree compression both gate on
+column-degree ratios, not magnitudes). The corpus's specific
+δ_c choice does not skew the routing logic; a downstream
+consumer with different mu_init / regularization should see
+identical routing answers.
+
+Recorded as a `decisions.md` entry. The MUMPS rule is recorded
+as a `tried-and-rejected.md` entry citing the regime mismatch.
+The throwaway `probe_missing_diag` binary was deleted; the
+useful `probe_deltac_sensitivity` is committed as the basis for
+the decision.

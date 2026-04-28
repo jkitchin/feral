@@ -104,6 +104,10 @@ path = "src/bin/profile_hot.rs"
 name = "bench_solver_corpus"
 path = "src/bin/bench_solver_corpus.rs"
 
+[[bin]]
+name = "probe_deltac_sensitivity"
+path = "src/bin/probe_deltac_sensitivity.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
