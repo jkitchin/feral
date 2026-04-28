@@ -314,3 +314,67 @@ Estimated wall impact 2-3% aggregate, ~10-20% on ACOPR30. Committed
 as 19bb815.
 
 Tasks 10-14 in TaskList track the implementation steps.
+
+* 16:30 :impl:dense-kernel:phase-a2:c0-only:
+Implemented Phase A2 swap-2x2 inline restricted to c==0. Initial
+attempt over the full panel range broke ACOPR30_0067 inertia
+(398,166 vs 400,164 — diff of 2). Root cause: the panel was
+allowing swap-2x2 even when r >= ncol (sub-diagonal range), but
+scalar's logic at IpFilterLSAcceptor:2120-2167 gates 2x2 on
+=r_is_fully_summed = r < ncol=. Added the matching gate to
+=lblt_panel_frontal=. All 208 tests pass byte-identical after
+the fix.
+
+** c==0 restriction — why not full panel
+At c > 0, computing scalar-state =arr= and =gamma_r= at the
+candidate row =r= requires peek-ahead-r (=peek_ahead_replay= writes
+column r entries below row r, but row r entries left-of-diagonal
+=a[j*nrow+r] for j in (col+1)..r= remain in deferred state and
+=symmetric_row_offdiag_max= reads them). If we peek-ahead-r and
+then bail (swap-1x1-wins or LAPACK-1x1-wins), the caller's
+=apply_blocked_schur= would re-apply rank-c updates to row r,
+double-applying them. A correct mid-panel extension needs an
+=apply_blocked_schur= "skip target column" parameter — tracked as
+follow-up work. At c==0 there are no committed pivots so peek-ahead
+is a no-op and the deferred state IS the scalar state; the swap-2x2
+inline is bit-exact without any new infrastructure.
+
+** Corpus measurement
+Re-ran =probe_panel_attribution=:
+
+  | metric                      | before | after |
+  |-----------------------------+--------+-------|
+  | swap bails                  |     19 |    18 |
+  | swap_ok (inline accept)     |    n/a |     0 |
+  | total panels                |     39 |    39 |
+
+The single-case drop in swap bails is from the new =r < ncol= gate
+matching scalar more precisely (one case that previously fell into
+=can_try_2x2= but was wrong is now correctly bailed); not from any
+inline accept. =swap_ok = 0= aggregate confirms ALL corpus swap-2x2
+cases happen at c > 0 — the c==0 restriction catches none of them.
+
+The plan's acceptance criterion of ≥75% bail drop is NOT met. The
+c==0 implementation is correct and tested via
+=test_swap_2x2_inside_panel_bare= (with =block_size: 8= forcing the
+panel boundary at the swap site), but the lever requires the
+mid-panel extension to move corpus wall.
+
+** Follow-up
+Mid-panel (c > 0) swap-2x2 needs:
+  1. =peek_ahead_replay= called twice (col+1 AND r)
+  2. A row-r-left-of-diagonal replay primitive (for the
+     =a[j*nrow+r], j in col..r= entries that
+     =symmetric_row_offdiag_max= reads)
+  3. =apply_blocked_schur(... skip_col=Some(r))= to avoid
+     double-applying when bail-after-peek leaves r in scalar state
+  4. Bail-state semantics: =ScalarFallbackPeekedTwo{col1, r}= to
+     thread which columns the caller must skip
+
+Estimated 4-6 hours of focused work + research note + test
+fixtures. Defer until the deferred-Schur kernel widening (B-1
+NR=4) ROI vs this is re-evaluated; B-1 is now 1.4% wall vs A2
+mid-panel ~3-4% wall (re-estimated downward from 4.6% since c==0
+catches some cases for free in well-conditioned matrices).
+
+Committed as dfe169e.

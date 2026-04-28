@@ -2216,3 +2216,50 @@ A consumer with a different δ_c choice (POUNCE with a different
 - `src/scaling/mod.rs` — Auto scaling routing.
 - `src/symbolic/mod.rs` — Auto preprocess routing.
 - `dev/journal/2026-04-28-01.org` — investigation log.
+
+---
+
+## 2026-04-28 — Phase A2 swap-2x2 inline restricted to c==0
+
+**Decision.** Phase A2 inline support for swap-required 2×2 pivots
+in `lblt_panel_frontal` is restricted to `c == 0` (the first pivot
+of any panel). Mid-panel (`c > 0`) swap-2×2 continues to bail to
+`scalar_pivot_step` via `PanelStatus::ScalarFallback`.
+
+**Why.** At c==0 the deferred state IS the scalar state (no
+committed pivots), so reading `arr` and `gamma_r` at the candidate
+row r is bit-exact with scalar without any new replay primitive.
+At c > 0, scalar-equivalent reads at row r require:
+
+1. `peek_ahead_replay(target = col + 1)` (already implemented for
+   the no-swap 2×2 path).
+2. `peek_ahead_replay(target = r)` — disjoint with (1) because
+   r > col + 1.
+3. A **new** row-r-left-of-diagonal replay primitive: the entries
+   `a[j*nrow + r]` for `j in (col+1)..r` are read by
+   `symmetric_row_offdiag_max(a, nrow, col, r)` but `peek_ahead_replay`
+   only updates `a[r*nrow + i]` for `i in r..nrow`.
+4. **Bail-state extension**: a new `PanelStatus::ScalarFallbackPeekedTwo
+   { col1, r }` to thread which two columns the caller's
+   `apply_blocked_schur` must skip.
+
+The c==0 path required ZERO new primitives and lays the API
+groundwork (perm threading, `INLINE_2X2_SWAP_OK` counter, probe
+output, fixture patterns) for the mid-panel extension.
+
+**Evidence.** All 208 tests pass byte-identical against scalar.
+Corpus `probe_panel_attribution` shows `swap_ok = 0` aggregate —
+ALL corpus swap-2×2 cases happen at c > 0, so the restriction
+catches none of them. The plan's ≥75% bail-drop acceptance
+criterion was NOT met; this decision documents the scope narrowing
+as intentional rather than a defect.
+
+**Trigger to revisit.** When Phase A2 mid-panel ROI is
+re-evaluated against alternatives (B-1 NR=4 widening, W-3
+workspace pre-sizing). If mid-panel wins, write a fresh research
+note for the row-r-left-of-diagonal replay primitive + the
+`apply_blocked_schur(..., skip_col=Option<usize>)` API extension,
+and land them as separate commits before the semantics change.
+
+References: `dev/sessions/2026-04-28-03.md`,
+`dev/journal/2026-04-28-01.org` 16:30 entry, commit `dfe169e`.
