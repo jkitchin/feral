@@ -22,6 +22,14 @@ use crate::dense::schur_kernel;
 pub static FORCE_SCALAR_FRONTAL: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Phase A diagnostic flag (dev/plans/dense-kernel-blas3.md). When set to
+/// `true`, `lblt_panel_frontal` skips the inline 2×2 acceptance and
+/// returns `ScalarFallback` on every 2×2 trigger (matching the pre-W-2
+/// 2×2 behavior). Used to bisect parity regressions specifically to the
+/// inline 2×2 path. Default `false` preserves the W-2 2×2 fast path.
+pub static DISABLE_PANEL_INLINE_2X2: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Dead-zero absolute floor for the 2×2 pivot cancellation test.
 /// Matches SPRAL SSIDS `datatypes.f90:260` default (`small = 1e-20`),
 /// used by `ldlt_tpp.cxx:98,106`. This is a true zero-detection floor
@@ -634,8 +642,20 @@ enum PanelStatus {
     Full,
     /// Panel terminated early because the next pivot needed capabilities
     /// the panel doesn't support (2×2 or swap). Caller runs one scalar
-    /// pivot step and may re-enter the panel afterwards.
+    /// pivot step and may re-enter the panel afterwards. The panel
+    /// peek-ahead'd column `k + n_elim` (one column) before bailing, so
+    /// `apply_blocked_schur` must use `j_start = k + n_elim + 1` to
+    /// avoid a double rank-1 update.
     ScalarFallback,
+    /// Like `ScalarFallback`, but the panel ALSO peek-ahead'd column
+    /// `k + n_elim + 1` while evaluating the no-swap 2×2 fast path
+    /// (Phase A, dev/plans/dense-kernel-blas3.md). The 2×2 candidate
+    /// failed one of the bail-out tests (swap-1×1 alternative,
+    /// LAPACK-extension 1×1 alternative, growth bound, or det floor).
+    /// Caller runs one scalar pivot step and uses
+    /// `j_start = k + n_elim + 2` in `apply_blocked_schur` to avoid a
+    /// double rank-1 update on either pre-updated column.
+    ScalarFallbackPeekedNext,
     /// Panel terminated early because the next 1×1 pivot was rejected
     /// under the SSIDS `may_delay == true` contract — the parent
     /// supernode will absorb the delayed columns. Caller applies the
@@ -1060,6 +1080,7 @@ pub fn factor_frontal_blocked_in_place(
         let (n_elim, status) = lblt_panel_frontal(
             &mut *a,
             nrow,
+            ncol,
             k,
             panel_cap,
             may_delay,
@@ -1069,6 +1090,7 @@ pub fn factor_frontal_blocked_in_place(
             &mut zero,
             &mut needs_refinement,
             &mut d_panel,
+            &mut subdiag,
         )?;
         // On ScalarFallback and Delayed the panel peek-ahead'd column
         // `k+n_elim` (applied pivots 0..n_elim-1 to it) before deciding
@@ -1080,13 +1102,19 @@ pub fn factor_frontal_blocked_in_place(
         let j_start = match status {
             PanelStatus::Full => k + n_elim,
             PanelStatus::ScalarFallback | PanelStatus::Delayed => k + n_elim + 1,
+            // Phase A (dev/plans/dense-kernel-blas3.md): the no-swap
+            // 2×2 inline path peek-ahead'd col+1 before bailing, so
+            // BOTH col=k+n_elim and col+1=k+n_elim+1 already carry the
+            // deferred updates from pivots 0..n_elim-1. Skip them
+            // both to avoid a double rank-1 update.
+            PanelStatus::ScalarFallbackPeekedNext => k + n_elim + 2,
         };
-        apply_blocked_schur(&mut *a, nrow, k, n_elim, j_start, &d_panel);
+        apply_blocked_schur(&mut *a, nrow, k, n_elim, j_start, &d_panel, &subdiag);
         k += n_elim;
 
         match status {
             PanelStatus::Full => {}
-            PanelStatus::ScalarFallback => {
+            PanelStatus::ScalarFallback | PanelStatus::ScalarFallbackPeekedNext => {
                 // One scalar step to handle the 2×2/swap case the panel declined.
                 if k >= ncol {
                     break;
@@ -1195,6 +1223,7 @@ pub fn factor_frontal_blocked_in_place(
 fn lblt_panel_frontal(
     a: &mut [f64],
     nrow: usize,
+    ncol: usize,
     k: usize,
     bs: usize,
     may_delay: bool,
@@ -1204,6 +1233,7 @@ fn lblt_panel_frontal(
     zero: &mut usize,
     needs_refinement: &mut bool,
     d_panel: &mut [f64],
+    subdiag: &mut [f64],
 ) -> Result<(usize, PanelStatus), FeralError> {
     let alpha_bk = params.alpha;
     let cap = bs;
@@ -1211,17 +1241,22 @@ fn lblt_panel_frontal(
     while c < cap {
         let col = k + c;
 
-        // Peek-ahead: apply pending rank-1 updates from pivots 0..c.
-        peek_ahead_column(a, nrow, k, c, d_panel);
+        // Peek-ahead: apply pending rank-1 (and rank-2 for accepted
+        // panel-internal 2×2's) updates from pivots 0..c.
+        peek_ahead_column(a, nrow, k, c, d_panel, subdiag);
 
-        // Compute gamma0 over rows (col+1)..nrow (unrestricted — matches
-        // scalar's gamma0 search, which includes rows ncol..nrow for the
-        // BK test even in frontal mode).
+        // Compute gamma0 + argmax row over rows (col+1)..nrow
+        // (unrestricted — matches scalar's gamma0 search, which
+        // includes rows ncol..nrow for the BK test even in frontal
+        // mode). The argmax row `r` is needed for the no-swap 2×2
+        // fast path below.
         let mut gamma0 = 0.0f64;
+        let mut r = col + 1;
         for i in (col + 1)..nrow {
             let v = a[col * nrow + i].abs();
             if v > gamma0 {
                 gamma0 = v;
+                r = i;
             }
         }
 
@@ -1240,9 +1275,142 @@ fn lblt_panel_frontal(
 
         let akk = a[col * nrow + col].abs();
         if akk < alpha_bk * gamma0 {
-            // 2×2 or swap needed. Panel cannot handle without full-state
-            // access; terminate and let scalar_pivot_step run one step.
-            return Ok((c, PanelStatus::ScalarFallback));
+            // 2×2 candidate. Try the no-swap 2×2 fast path inline
+            // (Phase A of dev/plans/dense-kernel-blas3.md). The
+            // conditions to accept inline mirror scalar_pivot_step's
+            // 2×2 branch but require zero swap and zero rejection:
+            //
+            //   - argmax row `r` is exactly `col + 1` (so the rank-2
+            //     pivot is over consecutive columns; no swap with a
+            //     fully-summed row needed)
+            //   - `col + 1 < ncol` (the 2×2 stays inside the
+            //     fully-summed range)
+            //   - `c + 1 < cap` (panel has room for two slots)
+            //   - swap-1×1 alternative fails (`arr < alpha * gamma_r`
+            //     where r = col+1)
+            //   - LAPACK-extension 1×1 alternative fails
+            //     (`akk * gamma_r < alpha * gamma0^2`)
+            //   - Duff-Reid growth bound passes
+            //   - SSIDS scale-invariant det floor passes
+            //
+            // Any condition fails → bail to scalar_pivot_step which
+            // handles all the swap/rejection/rook-rescue branches the
+            // panel deliberately does not.
+            let can_try_2x2 = r == col + 1 && col + 1 < ncol && c + 1 < cap;
+            if !can_try_2x2 || DISABLE_PANEL_INLINE_2X2.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok((c, PanelStatus::ScalarFallback));
+            }
+
+            let r_idx = col + 1;
+            // Peek-ahead col+1 with committed pivots 0..c-1. Scalar's
+            // eager updates have already mutated col+1 by this point
+            // (rank-1 from each prior pivot, rank-2 from any prior
+            // panel-internal 2×2). The deferred panel state has not.
+            // Replay onto col+1 so the upcoming reads of a[r_idx*..],
+            // gamma_r, growth-bound terms (rmax/tmax), and the L
+            // scaling step see the same state scalar would.
+            //
+            // CRITICAL: any bail-out below this line MUST return
+            // `ScalarFallbackPeekedNext` (not `ScalarFallback`) so the
+            // caller knows to use `j_start = k + n_elim + 2` in
+            // `apply_blocked_schur` — col+1's deferred updates have
+            // already been applied here.
+            peek_ahead_replay(a, nrow, k, c, r_idx, d_panel, subdiag);
+            let gamma_r = symmetric_row_offdiag_max(a, nrow, col, r_idx);
+            let arr = a[r_idx * nrow + r_idx].abs();
+
+            // swap-1×1 candidate: scalar would do "1×1 at r, swap
+            // r↔k", which is a swap. Bail.
+            if arr >= alpha_bk * gamma_r {
+                return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
+            }
+            // LAPACK-extension 1×1 candidate: scalar would do "1×1
+            // at k, no swap" via try_reject_1x1_with_rook_rescue.
+            // The panel's try_reject_1x1_frontal does not include
+            // rook rescue and the gamma threshold differs subtly;
+            // bail to keep semantics aligned.
+            if akk * gamma_r >= alpha_bk * gamma0 * gamma0 {
+                return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
+            }
+
+            // 2×2 accepted at (col, col+1) with no swap. Apply the
+            // same growth + det-floor checks scalar applies.
+            let d11 = a[col * nrow + col];
+            let d21 = a[col * nrow + (col + 1)];
+            let d22 = a[(col + 1) * nrow + (col + 1)];
+            let det = d11 * d22 - d21 * d21;
+
+            // Duff-Reid 2×2 growth bound — same predicate as
+            // scalar_pivot_step:1755-1756.
+            let mut rmax = 0.0f64;
+            let mut tmax = 0.0f64;
+            for i in (col + 2)..nrow {
+                let v0 = a[col * nrow + i].abs();
+                if v0 > rmax {
+                    rmax = v0;
+                }
+                let v1 = a[(col + 1) * nrow + i].abs();
+                if v1 > tmax {
+                    tmax = v1;
+                }
+            }
+            let amax = d21.abs();
+            let absdet = det.abs();
+            let u = params.pivot_threshold;
+            let growth_fail = (d22.abs() * rmax + amax * tmax) * u > absdet
+                || (d11.abs() * tmax + amax * rmax) * u > absdet;
+
+            // SSIDS scale-invariant det floor — same predicate as
+            // scalar_pivot_step:1776-1788.
+            let max_piv = d11.abs().max(d21.abs()).max(d22.abs());
+            let det_floor_fail = if max_piv < SSIDS_DET_SMALL {
+                true
+            } else {
+                let det_scale = 1.0 / max_piv;
+                let detpiv0 = (d11 * det_scale) * d22;
+                let detpiv1 = (d21 * det_scale) * d21;
+                let detpiv = detpiv0 - detpiv1;
+                let cancel_floor = SSIDS_DET_SMALL
+                    .max(detpiv0.abs() * 0.5)
+                    .max(detpiv1.abs() * 0.5);
+                detpiv.abs() < cancel_floor
+            };
+
+            if growth_fail || det_floor_fail {
+                // Rejection means scalar will run its
+                // may_delay/ForceAccept branches; the panel can't
+                // reproduce that here without duplicating bookkeeping.
+                // col+1 was peek-ahead'd above — caller must skip it.
+                return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
+            }
+
+            // Inline accept: record D values, scale L block, update
+            // inertia, defer the rank-2 trailing update.
+            let pivot_inertia = count_2x2_inertia_val(d11, d21, d22);
+            *pos += pivot_inertia.positive;
+            *neg += pivot_inertia.negative;
+            *zero += pivot_inertia.zero;
+
+            d_panel[c] = d11;
+            d_panel[c + 1] = d22;
+            subdiag[k + c] = d21;
+
+            // Scale the L block — same operation as do_2x2_update's
+            // first loop (factor.rs:2075-2080). The trailing rank-2
+            // update is deferred; replay happens via peek_ahead and
+            // apply_blocked_schur honoring `subdiag[k+c] != 0`.
+            if det.abs() != 0.0 {
+                let inv_det = 1.0 / det;
+                for i in (col + 2)..nrow {
+                    let a_ik = a[col * nrow + i];
+                    let a_ik1 = a[(col + 1) * nrow + i];
+                    a[col * nrow + i] = (d22 * a_ik - d21 * a_ik1) * inv_det;
+                    a[(col + 1) * nrow + i] = (d11 * a_ik1 - d21 * a_ik) * inv_det;
+                }
+            }
+
+            c += 2;
+            continue;
         }
 
         // 1×1 pivot at col, no swap. Try the column-relative threshold.
@@ -1306,29 +1474,82 @@ fn lblt_panel_frontal(
 /// the same via repeated calls to this helper in order `q = 0..c-1`.
 /// The inner axpy uses `schur_kernel::axpy_minus_unroll4_nofma` — the
 /// same kernel as `do_1x1_update` — so the per-lane rounding matches.
-fn peek_ahead_column(a: &mut [f64], nrow: usize, k: usize, c: usize, d_panel: &[f64]) {
-    let col = k + c;
-    for (q, &d_q) in d_panel.iter().enumerate().take(c) {
-        // Scalar's `do_1x1_update` returns early when d == 0; skipping
-        // here preserves that no-op behavior bit-exactly.
+fn peek_ahead_column(
+    a: &mut [f64],
+    nrow: usize,
+    k: usize,
+    c: usize,
+    d_panel: &[f64],
+    subdiag: &[f64],
+) {
+    peek_ahead_replay(a, nrow, k, c, k + c, d_panel, subdiag);
+}
+
+/// Replay primitive: apply the first `n_committed` panel pivots
+/// (those at panel positions `0..n_committed`) to `target_col` in
+/// q-ascending order, honoring `subdiag[k+q] != 0` as a 2×2 marker.
+/// Bit-exact with the eager scalar path applied to one trailing
+/// column. Used by `peek_ahead_column` (where `target_col = k+c`)
+/// and by the no-swap 2×2 inline path (where the panel must
+/// peek-ahead `target_col = col+1` before reading the second pivot's
+/// D values, growth-bound terms, and L scaling inputs).
+fn peek_ahead_replay(
+    a: &mut [f64],
+    nrow: usize,
+    k: usize,
+    n_committed: usize,
+    target_col: usize,
+    d_panel: &[f64],
+    subdiag: &[f64],
+) {
+    let col = target_col;
+    let mut q = 0usize;
+    while q < n_committed {
+        // Phase A 2×2 (dev/plans/dense-kernel-blas3.md): when pivot
+        // q is the start of an inline 2×2 block, replay the rank-2
+        // contribution via axpy2 — bit-exact with scalar
+        // do_2x2_update:2094.
+        if q + 1 < n_committed && subdiag[k + q] != 0.0 {
+            let d11 = d_panel[q];
+            let d22 = d_panel[q + 1];
+            let d21 = subdiag[k + q];
+            let q_col = k + q;
+            let q1_col = k + q + 1;
+            let l_jq = a[q_col * nrow + col];
+            let l_jq1 = a[q1_col * nrow + col];
+            let dl_jq = d11 * l_jq + d21 * l_jq1;
+            let dl_jq1 = d21 * l_jq + d22 * l_jq1;
+            // dst = column `col` rows col..nrow; src0/src1 =
+            // columns q_col, q1_col rows col..nrow. Disjoint because
+            // q1_col < col.
+            let (before, rest) = a.split_at_mut(col * nrow);
+            let src0 = &before[q_col * nrow + col..q_col * nrow + nrow];
+            let src1 = &before[q1_col * nrow + col..q1_col * nrow + nrow];
+            let dst = &mut rest[col..nrow];
+            schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_jq, src1, dl_jq1);
+            q += 2;
+            continue;
+        }
+        // 1×1 contribution. Scalar's `do_1x1_update` returns early
+        // when d == 0; skipping here preserves that no-op behavior
+        // bit-exactly.
+        let d_q = d_panel[q];
         if d_q.abs() == 0.0 {
+            q += 1;
             continue;
         }
         let q_col = k + q;
-        // l_jk = scaled L value at row `col` of column q_col (frozen after
-        // pivot q's scaling). `alpha = l_jk * d_q` reproduces scalar's
-        // `do_1x1_update` rank-1 alpha exactly.
         let l_jk = a[q_col * nrow + col];
         let alpha = l_jk * d_q;
         if alpha == 0.0 {
+            q += 1;
             continue;
         }
-        // dst = column `col` rows `col..nrow`; src = column `q_col` rows
-        // `col..nrow`. Disjoint because q_col < col.
         let (before, rest) = a.split_at_mut(col * nrow);
         let src = &before[q_col * nrow + col..q_col * nrow + nrow];
         let dst = &mut rest[col..nrow];
         schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+        q += 1;
     }
 }
 
@@ -1361,46 +1582,77 @@ fn apply_blocked_schur(
     n_elim: usize,
     j_start: usize,
     d_panel: &[f64],
+    subdiag: &[f64],
 ) {
     if n_elim == 0 || j_start >= nrow {
         return;
     }
 
     // W-2 fast path: when the panel produced n_elim 1×1 pivots all
-    // with non-zero d, run the rank-`n_elim` accumulator. The check is
-    // O(n_elim); when it fails (any d_q == 0, indicating a
-    // zero-column or rejected pivot) we fall back to the q-outer
-    // rank-1 path. The rank-bs kernel is bit-exact with that fallback,
-    // so this gate is a perf knob (route around the alpha precompute
-    // when alphas would mostly be zero) rather than a correctness
-    // requirement.
+    // with non-zero d AND no 2×2 pivots, run the rank-`n_elim`
+    // accumulator. The 2×2 gate is a correctness requirement (Phase
+    // A, dev/plans/dense-kernel-blas3.md): the rank-bs kernel
+    // accumulates contributions per-q sequentially (`acc -= a_q *
+    // s_q`), which is bit-exact with sequential rank-1 axpys but NOT
+    // with axpy2's fused `(a_0*s_0 + a_1*s_1)` add-then-sub
+    // ordering. Lifting this gate is Phase B-2.
     const W2_RANK_BS_MIN: usize = 2;
     let any_zero_d = d_panel.iter().take(n_elim).any(|&d| d.abs() == 0.0);
+    let has_2x2 = subdiag[k..k + n_elim].iter().any(|&s| s != 0.0);
 
-    if !any_zero_d && n_elim >= W2_RANK_BS_MIN {
+    if !any_zero_d && !has_2x2 && n_elim >= W2_RANK_BS_MIN {
         apply_blocked_schur_panel(a, nrow, k, n_elim, j_start, d_panel);
         return;
     }
 
-    // Fallback: rank-1 axpy reference. Outer loop is pivot index
-    // (matching scalar's pivot-outer/column-inner traversal), inner
-    // loop is the axpy kernel — so per-element accumulation order is
-    // identical to `do_1x1_update` fired `n_elim` times.
-    for (q, &d_q) in d_panel.iter().enumerate().take(n_elim) {
-        if d_q.abs() == 0.0 {
-            continue;
-        }
-        let q_col = k + q;
-        for j in j_start..nrow {
-            let l_jk = a[q_col * nrow + j];
-            let alpha = l_jk * d_q;
-            if alpha == 0.0 {
+    // Fallback: pivot-pair-or-singleton outer loop, kernel inner.
+    // Per-element accumulation order matches scalar:
+    //   - 1×1 at q: axpy with `alpha = l_jk * d_q` — bit-exact with
+    //     do_1x1_update:2057.
+    //   - 2×2 at (q, q+1): axpy2 with `(dl_j0, dl_j1)` derived from
+    //     the d11/d21/d22 block — bit-exact with do_2x2_update:2085.
+    let mut q = 0usize;
+    while q < n_elim {
+        if q + 1 < n_elim && subdiag[k + q] != 0.0 {
+            // 2×2 contribution from cols (q, q+1).
+            let d11 = d_panel[q];
+            let d22 = d_panel[q + 1];
+            let d21 = subdiag[k + q];
+            let q_col = k + q;
+            let q1_col = k + q + 1;
+            for j in j_start..nrow {
+                let l_jq = a[q_col * nrow + j];
+                let l_jq1 = a[q1_col * nrow + j];
+                let dl_jq = d11 * l_jq + d21 * l_jq1;
+                let dl_jq1 = d21 * l_jq + d22 * l_jq1;
+                // dst, src0, src1 are pairwise disjoint because
+                // q_col < q1_col < j.
+                let (before, rest) = a.split_at_mut(j * nrow);
+                let src0 = &before[q_col * nrow + j..q_col * nrow + nrow];
+                let src1 = &before[q1_col * nrow + j..q1_col * nrow + nrow];
+                let dst = &mut rest[j..nrow];
+                schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_jq, src1, dl_jq1);
+            }
+            q += 2;
+        } else {
+            let d_q = d_panel[q];
+            if d_q.abs() == 0.0 {
+                q += 1;
                 continue;
             }
-            let (before, rest) = a.split_at_mut(j * nrow);
-            let src = &before[q_col * nrow + j..q_col * nrow + nrow];
-            let dst = &mut rest[j..nrow];
-            schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+            let q_col = k + q;
+            for j in j_start..nrow {
+                let l_jk = a[q_col * nrow + j];
+                let alpha = l_jk * d_q;
+                if alpha == 0.0 {
+                    continue;
+                }
+                let (before, rest) = a.split_at_mut(j * nrow);
+                let src = &before[q_col * nrow + j..q_col * nrow + nrow];
+                let dst = &mut rest[j..nrow];
+                schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+            }
+            q += 1;
         }
     }
 }

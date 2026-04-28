@@ -408,6 +408,137 @@ fn test_w1_may_delay_panel_band_parity() {
     }
 }
 
+/// W-2 2×2 inline (no-swap fast path) — a panel that contains two
+/// no-swap 2×2 pivots at panel-internal positions, plus surrounding
+/// 1×1 pivots. The blocked panel must accept the 2×2's inline (no
+/// `ScalarFallback` bail-out) and produce byte-identical output to
+/// scalar `factor_frontal`. See `dev/plans/dense-kernel-blas3.md` §3.
+///
+/// Construction: ncol=nrow=64 (single panel pass). Strong diagonal
+/// at all rows except {16, 17} and {40, 41}, where the diagonals
+/// are zeroed and a large cross term `a[k, k+1]` forces a no-swap
+/// 2×2 pivot. Other off-diagonals are tiny noise so the column
+/// argmax for k=16, k=40 is at row k+1 (no swap required).
+#[test]
+fn test_2x2_inside_panel() {
+    let params = default_params();
+    let n = 64;
+    let mut data = vec![0.0f64; n * n];
+    for j in 0..n {
+        data[j * n + j] = 1.0 + j as f64 * 0.001;
+    }
+    let mut state = 0x2222_BD22u64;
+    for j in 0..n {
+        for i in (j + 1)..n {
+            data[j * n + i] = 1e-6 * rng_scalar(&mut state, i * n + j);
+        }
+    }
+    // Two no-swap 2×2 triggers inside the same panel (panel cap = 64
+    // by default). Zero diagonals at the pair, large cross term so
+    // BK picks 2×2 with r == k+1 (no swap).
+    for &k in &[16usize, 40] {
+        data[k * n + k] = 0.0;
+        data[(k + 1) * n + (k + 1)] = 0.0;
+        data[k * n + (k + 1)] = 1.0;
+    }
+    let mat = SymmetricMatrix { n, data };
+    let scalar = factor_frontal(&mat, n, false, &params).unwrap();
+    let blocked = factor_frontal_blocked(&mat, n, false, &params).unwrap();
+    assert_frontals_byte_identical(&scalar, &blocked, "2x2_inside_panel");
+}
+
+/// W-2 2×2 inline — multifrontal-style fixture: `nrow > ncol` so the
+/// panel's deferred-Schur step writes into the contribution block,
+/// AND a no-swap 2×2 fires inside the panel. Mirrors the path the
+/// real KKT matrices (SWOPF, HIMMELBJ) hit through
+/// `factorize_multifrontal`.
+#[test]
+fn test_2x2_inside_panel_ncol_lt_nrow() {
+    let params = default_params();
+    let nrow = 80;
+    let ncol = 48;
+    let mut data = vec![0.0f64; nrow * nrow];
+    for j in 0..nrow {
+        data[j * nrow + j] = 1.0 + j as f64 * 0.001;
+    }
+    let mut state = 0x7777_BD22u64;
+    for j in 0..nrow {
+        for i in (j + 1)..nrow {
+            data[j * nrow + i] = 1e-6 * rng_scalar(&mut state, i * nrow + j);
+        }
+    }
+    let k = 16;
+    data[k * nrow + k] = 0.0;
+    data[(k + 1) * nrow + (k + 1)] = 0.0;
+    data[k * nrow + (k + 1)] = 1.0;
+    let mat = SymmetricMatrix { n: nrow, data };
+    let scalar = factor_frontal(&mat, ncol, false, &params).unwrap();
+    let blocked = factor_frontal_blocked(&mat, ncol, false, &params).unwrap();
+    assert_frontals_byte_identical(&scalar, &blocked, "2x2_inside_panel_ncol_lt_nrow");
+}
+
+/// W-2 2×2 inline under `may_delay = true`. The multifrontal driver
+/// passes may_delay=true for non-root supernodes; the inline path
+/// must remain bit-exact under the SSIDS-style break-on-first-failure
+/// semantics.
+#[test]
+fn test_2x2_inside_panel_may_delay() {
+    let params = default_params();
+    let nrow = 80;
+    let ncol = 48;
+    let mut data = vec![0.0f64; nrow * nrow];
+    for j in 0..nrow {
+        data[j * nrow + j] = 1.0 + j as f64 * 0.001;
+    }
+    let mut state = 0xA1A1_BD22u64;
+    for j in 0..nrow {
+        for i in (j + 1)..nrow {
+            data[j * nrow + i] = 1e-6 * rng_scalar(&mut state, i * nrow + j);
+        }
+    }
+    let k = 20;
+    data[k * nrow + k] = 0.0;
+    data[(k + 1) * nrow + (k + 1)] = 0.0;
+    data[k * nrow + (k + 1)] = 1.0;
+    let mat = SymmetricMatrix { n: nrow, data };
+    let scalar = factor_frontal(&mat, ncol, true, &params).unwrap();
+    let blocked = factor_frontal_blocked(&mat, ncol, true, &params).unwrap();
+    assert_frontals_byte_identical(&scalar, &blocked, "2x2_inside_panel_may_delay");
+}
+
+/// W-2 2×2 inline — mixed-pivot panel pattern. Forces `{1, 1, 2, 1,
+/// 2, 1}` over the first 8 pivots (one panel pass), with surrounding
+/// 1×1's filling out the front. Tests the deferred Schur fallback
+/// that walks pivot-pair-or-singleton outer with `axpy2` for pairs
+/// and `axpy` for singletons. ncol=nrow=24 keeps the test fast while
+/// staying above `PANEL_MIN_NCOL=8`.
+#[test]
+fn test_mixed_pivots_in_panel() {
+    let params = default_params();
+    let n = 24;
+    let mut data = vec![0.0f64; n * n];
+    for j in 0..n {
+        data[j * n + j] = 1.0 + j as f64 * 0.001;
+    }
+    let mut state = 0x4242_BD22u64;
+    for j in 0..n {
+        for i in (j + 1)..n {
+            data[j * n + i] = 1e-6 * rng_scalar(&mut state, i * n + j);
+        }
+    }
+    // Pattern producing 2×2's at pivot positions (2, 3) and (4, 5),
+    // with 1×1's everywhere else.
+    for &k in &[2usize, 4] {
+        data[k * n + k] = 0.0;
+        data[(k + 1) * n + (k + 1)] = 0.0;
+        data[k * n + (k + 1)] = 1.0;
+    }
+    let mat = SymmetricMatrix { n, data };
+    let scalar = factor_frontal(&mat, n, false, &params).unwrap();
+    let blocked = factor_frontal_blocked(&mat, n, false, &params).unwrap();
+    assert_frontals_byte_identical(&scalar, &blocked, "mixed_pivots_in_panel");
+}
+
 /// Step 5 — forced rejection under `may_delay == true` triggers the
 /// SSIDS "break on first failure" path. The blocked panel must stop
 /// cleanly at the delayed column, apply the deferred Schur to trailing
