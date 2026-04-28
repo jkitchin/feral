@@ -106,10 +106,15 @@ fn print_row(label: &str, counts: &[(&str, u64)], total_pivots: u64) {
         .find(|(k, _)| *k == "fallback_2x2_growth_or_det")
         .map(|(_, v)| *v)
         .unwrap_or(0);
+    let swap_ok = counts
+        .iter()
+        .find(|(k, _)| *k == "inline_2x2_swap_ok")
+        .map(|(_, v)| *v)
+        .unwrap_or(0);
 
     let f_total = f_swap + f_w11 + f_lpk + f_gd;
     println!(
-        "{label:<14} pivots: in={pi:6}({inline_pct}) scal={ps:5}({scal_pct}) tail={st:4}  panels: full={pf:4} part={pp:4} dly={pd:3}  bails(2x2): swap={f_swap}({swap_p}) w11={f_w11}({w11_p}) lpk={f_lpk}({lpk_p}) g/d={f_gd}({gd_p})",
+        "{label:<14} pivots: in={pi:6}({inline_pct}) scal={ps:5}({scal_pct}) tail={st:4}  panels: full={pf:4} part={pp:4} dly={pd:3}  bails(2x2): swap={f_swap}({swap_p}) w11={f_w11}({w11_p}) lpk={f_lpk}({lpk_p}) g/d={f_gd}({gd_p})  swap_ok={swap_ok}",
         label = label,
         pi = pi,
         inline_pct = fmt_pct(pi, total_pivots),
@@ -127,6 +132,7 @@ fn print_row(label: &str, counts: &[(&str, u64)], total_pivots: u64) {
         lpk_p = fmt_pct(f_lpk, f_total),
         f_gd = f_gd,
         gd_p = fmt_pct(f_gd, f_total),
+        swap_ok = swap_ok,
     );
 }
 

@@ -73,6 +73,10 @@ pub mod panel_diag {
     /// Pivots performed by `scalar_pivot_step` (after a fallback or in
     /// the scalar tail).
     pub static PIVOTS_SCALAR: AtomicU64 = AtomicU64::new(0);
+    /// Phase A2 (`dev/plans/dense-kernel-w2-2x2-swap.md`): swap-required
+    /// 2×2 pivots committed inline at c==0. Counts a successful
+    /// `swap_rows_cols(col+1, r)` followed by an inline 2×2 accept.
+    pub static INLINE_2X2_SWAP_OK: AtomicU64 = AtomicU64::new(0);
 
     pub fn reset() {
         for c in [
@@ -86,12 +90,13 @@ pub mod panel_diag {
             &SCALAR_TAIL_STEPS,
             &PIVOTS_INLINE,
             &PIVOTS_SCALAR,
+            &INLINE_2X2_SWAP_OK,
         ] {
             c.store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
-    pub fn snapshot() -> [(&'static str, u64); 10] {
+    pub fn snapshot() -> [(&'static str, u64); 11] {
         use std::sync::atomic::Ordering::Relaxed;
         [
             ("panel_full", PANEL_FULL.load(Relaxed)),
@@ -116,6 +121,7 @@ pub mod panel_diag {
             ("scalar_tail_steps", SCALAR_TAIL_STEPS.load(Relaxed)),
             ("pivots_inline", PIVOTS_INLINE.load(Relaxed)),
             ("pivots_scalar", PIVOTS_SCALAR.load(Relaxed)),
+            ("inline_2x2_swap_ok", INLINE_2X2_SWAP_OK.load(Relaxed)),
         ]
     }
 }
@@ -1199,6 +1205,7 @@ pub fn factor_frontal_blocked_in_place(
             &mut needs_refinement,
             &mut d_panel,
             &mut subdiag,
+            &mut perm,
         )?;
         // On ScalarFallback and Delayed the panel peek-ahead'd column
         // `k+n_elim` (applied pivots 0..n_elim-1 to it) before deciding
@@ -1355,6 +1362,11 @@ fn lblt_panel_frontal(
     needs_refinement: &mut bool,
     d_panel: &mut [f64],
     subdiag: &mut [f64],
+    // Phase A2 (`dev/plans/dense-kernel-w2-2x2-swap.md`): the panel
+    // owns the swap-required 2×2 path; it commits row/col swaps via
+    // `swap_rows_cols(a, nrow, col+1, r, perm)` and the change must
+    // be visible to the caller's L extract step.
+    perm: &mut [usize],
 ) -> Result<(usize, PanelStatus), FeralError> {
     let alpha_bk = params.alpha;
     let cap = bs;
@@ -1417,44 +1429,85 @@ fn lblt_panel_frontal(
             // Any condition fails → bail to scalar_pivot_step which
             // handles all the swap/rejection/rook-rescue branches the
             // panel deliberately does not.
-            let can_try_2x2 = r == col + 1 && col + 1 < ncol && c + 1 < cap;
-            if !can_try_2x2 || DISABLE_PANEL_INLINE_2X2.load(std::sync::atomic::Ordering::Relaxed) {
+            // Phase A2 (`dev/plans/dense-kernel-w2-2x2-swap.md`):
+            // handle the swap-required 2×2 case (`r > col + 1`) inline
+            // when `c == 0`. At `c == 0` no pivots are committed, so
+            // the deferred state is identical to the scalar state and
+            // peek-ahead is a no-op. Reading `arr` at the original `r`
+            // and computing `gamma_r` over the un-mutated row matches
+            // scalar's pre-swap reads bit-for-bit. Mid-panel
+            // (`c > 0`) swap-2×2 still bails to scalar — it requires
+            // peek-ahead-of-r plus a row-r-replay primitive that is
+            // out of scope for A2.
+            let need_swap = r > col + 1;
+            // Scalar requires `r < ncol` for any swap (line 2120
+            // `r_is_fully_summed = r < ncol`); the swap-2×2 path is
+            // gated on the same predicate at line 2167. The no-swap
+            // path doesn't need this check (r == col+1 < ncol already).
+            let bounds_ok = col + 1 < ncol
+                && c + 1 < cap
+                && (!need_swap || r < ncol)
+                && !DISABLE_PANEL_INLINE_2X2.load(std::sync::atomic::Ordering::Relaxed);
+            let allowed = bounds_ok && (!need_swap || c == 0);
+            if !allowed {
                 diag_inc(&panel_diag::FALLBACK_2X2_NEED_SWAP_OR_BOUND);
                 return Ok((c, PanelStatus::ScalarFallback));
             }
 
-            let r_idx = col + 1;
-            // Peek-ahead col+1 with committed pivots 0..c-1. Scalar's
-            // eager updates have already mutated col+1 by this point
-            // (rank-1 from each prior pivot, rank-2 from any prior
-            // panel-internal 2×2). The deferred panel state has not.
-            // Replay onto col+1 so the upcoming reads of a[r_idx*..],
-            // gamma_r, growth-bound terms (rmax/tmax), and the L
-            // scaling step see the same state scalar would.
-            //
-            // CRITICAL: any bail-out below this line MUST return
-            // `ScalarFallbackPeekedNext` (not `ScalarFallback`) so the
-            // caller knows to use `j_start = k + n_elim + 2` in
-            // `apply_blocked_schur` — col+1's deferred updates have
-            // already been applied here.
-            peek_ahead_replay(a, nrow, k, c, r_idx, d_panel, subdiag);
-            let gamma_r = symmetric_row_offdiag_max(a, nrow, col, r_idx);
-            let arr = a[r_idx * nrow + r_idx].abs();
-
-            // swap-1×1 candidate: scalar would do "1×1 at r, swap
-            // r↔k", which is a swap. Bail.
-            if arr >= alpha_bk * gamma_r {
-                diag_inc(&panel_diag::FALLBACK_2X2_SWAP_1X1_WINS);
-                return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
-            }
-            // LAPACK-extension 1×1 candidate: scalar would do "1×1
-            // at k, no swap" via try_reject_1x1_with_rook_rescue.
-            // The panel's try_reject_1x1_frontal does not include
-            // rook rescue and the gamma threshold differs subtly;
-            // bail to keep semantics aligned.
-            if akk * gamma_r >= alpha_bk * gamma0 * gamma0 {
-                diag_inc(&panel_diag::FALLBACK_2X2_LAPACK_1X1_WINS);
-                return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
+            if need_swap {
+                // c == 0: state is scalar-equivalent; read arr/gamma_r
+                // at the original `r` row, then bail or commit swap.
+                // Bail returns `ScalarFallback` (no peek-ahead, no
+                // swap committed) — caller resumes at `j_start = k`
+                // and scalar redoes gamma0/r/swap identically.
+                let gamma_r_pre = symmetric_row_offdiag_max(a, nrow, col, r);
+                let arr_pre = a[r * nrow + r].abs();
+                if arr_pre >= alpha_bk * gamma_r_pre {
+                    diag_inc(&panel_diag::FALLBACK_2X2_SWAP_1X1_WINS);
+                    return Ok((c, PanelStatus::ScalarFallback));
+                }
+                if akk * gamma_r_pre >= alpha_bk * gamma0 * gamma0 {
+                    diag_inc(&panel_diag::FALLBACK_2X2_LAPACK_1X1_WINS);
+                    return Ok((c, PanelStatus::ScalarFallback));
+                }
+                // Commit the symmetric swap. After this, the state at
+                // column `col` is identical to scalar's post-swap
+                // state: a[col, col+1] holds the old `gamma0`, the
+                // (col+1, col+1) diagonal holds the old `arr`, and
+                // perm records the col+1 ↔ r swap.
+                swap_rows_cols(a, nrow, col + 1, r, perm);
+                // Fall through to the no-swap accept path; growth/det
+                // bail below uses `ScalarFallback` (no peek-ahead) —
+                // scalar restarts at `col`, sees the swapped state
+                // (its r will now be col+1), redoes the same checks,
+                // and lands in may_delay/ForceAccept identically.
+            } else {
+                // No-swap path: peek-ahead col+1 with committed pivots
+                // 0..c-1. Scalar's eager updates have already mutated
+                // col+1 by this point (rank-1 from each prior pivot,
+                // rank-2 from any prior panel-internal 2×2). The
+                // deferred panel state has not. Replay onto col+1 so
+                // the upcoming reads of a[r_idx*..], gamma_r,
+                // growth-bound terms (rmax/tmax), and the L scaling
+                // step see the same state scalar would.
+                //
+                // CRITICAL: any bail-out in this branch MUST return
+                // `ScalarFallbackPeekedNext` (not `ScalarFallback`)
+                // so the caller knows to use `j_start = k + n_elim + 2`
+                // in `apply_blocked_schur` — col+1's deferred updates
+                // have already been applied here.
+                let r_idx = col + 1;
+                peek_ahead_replay(a, nrow, k, c, r_idx, d_panel, subdiag);
+                let gamma_r = symmetric_row_offdiag_max(a, nrow, col, r_idx);
+                let arr = a[r_idx * nrow + r_idx].abs();
+                if arr >= alpha_bk * gamma_r {
+                    diag_inc(&panel_diag::FALLBACK_2X2_SWAP_1X1_WINS);
+                    return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
+                }
+                if akk * gamma_r >= alpha_bk * gamma0 * gamma0 {
+                    diag_inc(&panel_diag::FALLBACK_2X2_LAPACK_1X1_WINS);
+                    return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
+                }
             }
 
             // 2×2 accepted at (col, col+1) with no swap. Apply the
@@ -1504,13 +1557,25 @@ fn lblt_panel_frontal(
                 // Rejection means scalar will run its
                 // may_delay/ForceAccept branches; the panel can't
                 // reproduce that here without duplicating bookkeeping.
-                // col+1 was peek-ahead'd above — caller must skip it.
                 diag_inc(&panel_diag::FALLBACK_2X2_GROWTH_OR_DET);
+                if need_swap {
+                    // Swap branch: no peek-ahead was done. Scalar
+                    // restarts at `k + n_elim`; its own gamma0 search
+                    // on the post-swap state finds argmax at col+1
+                    // (so `r == col+1`, no second swap) and lands in
+                    // the same growth/det reject branch.
+                    return Ok((c, PanelStatus::ScalarFallback));
+                }
+                // No-swap branch: col+1 was peek-ahead'd above —
+                // caller must skip it (`j_start = k + n_elim + 2`).
                 return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
             }
 
             // Inline accept: record D values, scale L block, update
             // inertia, defer the rank-2 trailing update.
+            if need_swap {
+                diag_inc(&panel_diag::INLINE_2X2_SWAP_OK);
+            }
             let pivot_inertia = count_2x2_inertia_val(d11, d21, d22);
             *pos += pivot_inertia.positive;
             *neg += pivot_inertia.negative;

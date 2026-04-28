@@ -20,8 +20,11 @@
 //! Parity ORACLE is exact byte-identity of `(L, D_diag, D_subdiag,
 //! perm, inertia, contrib, nelim, n_delayed, needs_refinement)`.
 
-use feral::dense::factor::{factor_frontal, factor_frontal_blocked, FrontalFactors};
+use feral::dense::factor::{
+    factor_frontal, factor_frontal_blocked, panel_diag, FrontalFactors, PANEL_DIAG_ENABLED,
+};
 use feral::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
+use std::sync::atomic::Ordering;
 
 /// Deterministic pseudo-random f64 in (-1, 1). Matches the style used
 /// by `tests/dense_fast_path.rs`.
@@ -549,7 +552,14 @@ fn test_mixed_pivots_in_panel() {
 /// outputs must be byte-identical with scalar `factor_frontal`.
 #[test]
 fn test_swap_2x2_inside_panel_bare() {
-    let params = default_params();
+    // Use block_size=8 so the panel boundary lands at column k=8 —
+    // making the swap-2×2 the FIRST pivot of the second panel
+    // (c == 0). The Phase A2 c==0 inline path catches this case;
+    // mid-panel (c > 0) swap-2×2 still bails to scalar.
+    let params = BunchKaufmanParams {
+        block_size: 8,
+        ..default_params()
+    };
     let n = 24;
     let mut data = vec![0.0f64; n * n];
     for j in 0..n {
@@ -576,7 +586,23 @@ fn test_swap_2x2_inside_panel_bare() {
     data[13 * n + 13] = 0.5;
     let mat = SymmetricMatrix { n, data };
     let scalar = factor_frontal(&mat, n, false, &params).unwrap();
+    PANEL_DIAG_ENABLED.store(true, Ordering::Relaxed);
+    panel_diag::reset();
     let blocked = factor_frontal_blocked(&mat, n, false, &params).unwrap();
+    let snap = panel_diag::snapshot();
+    PANEL_DIAG_ENABLED.store(false, Ordering::Relaxed);
+    let swap_ok = snap
+        .iter()
+        .find(|(k, _)| *k == "inline_2x2_swap_ok")
+        .map(|(_, v)| *v)
+        .unwrap_or(0);
+    assert!(
+        swap_ok >= 1,
+        "swap_2x2_inside_panel_bare: expected inline_2x2_swap_ok>=1, got {} (panel still bailing). \
+         Snapshot: {:?}",
+        swap_ok,
+        snap
+    );
     assert_frontals_byte_identical(&scalar, &blocked, "swap_2x2_inside_panel_bare");
 }
 
