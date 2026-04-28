@@ -53,24 +53,40 @@ pub enum QualityLevel {
     Exhausted,
 }
 
-/// Conservative sparsity-pattern fingerprint used to detect when the
-/// cached `SymbolicFactorization` is stale. Two genuinely identical
-/// patterns produce the same fingerprint by construction; collisions
-/// between distinct patterns are possible but tolerated for the IPM
-/// use case (the consumer factors structurally identical KKTs).
+/// Structural fingerprint used to detect when the cached
+/// `SymbolicFactorization` is stale. Two genuinely identical
+/// patterns produce the same fingerprint by construction; the
+/// `structural_hash` field hashes both `col_ptr` and `row_idx`
+/// so two matrices that share `n` and `nnz` but differ in
+/// per-column degree distribution or per-column row indices
+/// fingerprint differently.
+///
+/// Hash collisions between distinct patterns are mathematically
+/// possible but cryptographically improbable (`u64` SipHash via
+/// `DefaultHasher`). The IPM use case never relies on this:
+/// successive iterates have *byte-identical* `col_ptr` / `row_idx`,
+/// so the equality test fires before any hash collision could
+/// matter. The structural hash is a defensive measure for
+/// general callers who might hand `Solver` two structurally
+/// distinct matrices that happen to share `(n, nnz)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PatternFingerprint {
     n: usize,
-    col_ptr_len: usize,
-    row_idx_len: usize,
+    nnz: usize,
+    structural_hash: u64,
 }
 
 impl PatternFingerprint {
     fn of(matrix: &CscMatrix) -> Self {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        matrix.col_ptr.hash(&mut h);
+        matrix.row_idx.hash(&mut h);
         Self {
             n: matrix.n,
-            col_ptr_len: matrix.col_ptr.len(),
-            row_idx_len: matrix.row_idx.len(),
+            nnz: matrix.row_idx.len(),
+            structural_hash: h.finish(),
         }
     }
 }
@@ -495,5 +511,73 @@ mod tests {
             assert!(steps < 20, "did not exhaust within 20 steps");
         }
         assert_eq!(s.quality_level(), QualityLevel::Exhausted);
+    }
+
+    /// F1 — same pattern fingerprints equal, structural hash stable
+    /// across value changes.
+    #[test]
+    fn f1_fingerprint_same_pattern_equal() {
+        let a = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
+        let b = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[7.0, 11.0, 13.0]).unwrap();
+        let fa = PatternFingerprint::of(&a);
+        let fb = PatternFingerprint::of(&b);
+        assert_eq!(
+            fa, fb,
+            "byte-identical patterns must fingerprint identically"
+        );
+    }
+
+    /// F2 — pre-existing footgun closed: two matrices with identical
+    /// `(n, nnz)` but different sparsity patterns now fingerprint
+    /// differently. Under the legacy `(n, col_ptr_len, row_idx_len)`
+    /// scheme these collided silently.
+    #[test]
+    fn f2_fingerprint_distinguishes_same_n_nnz_different_pattern() {
+        // Two 3x3 matrices, both with 3 nonzeros (lower-triangle
+        // CSC), but completely different patterns:
+        //
+        //   A = diag(2, 3, 5)          B = [[2 . .]
+        //                                    [1 3 .]
+        //                                    [. 1 .]]   (zero-diag last col)
+        //
+        // Both have n=3, nnz=3. Under the old fingerprint they would
+        // collide. The new structural hash must separate them.
+        let a = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
+        let b = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
+        // Sanity: B before mutation matches A.
+        assert_eq!(PatternFingerprint::of(&a), PatternFingerprint::of(&b));
+
+        // Now build a structurally different matrix with same (n, nnz)
+        // — same column pointers (one entry per column) but different
+        // row indices: [0, 2, 1] instead of [0, 1, 2].
+        let c = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 2, 1], &[2.0, 3.0, 5.0]).unwrap();
+        assert_eq!(c.n, a.n);
+        assert_eq!(c.row_idx.len(), a.row_idx.len());
+        assert_eq!(c.col_ptr.len(), a.col_ptr.len());
+        assert_ne!(
+            PatternFingerprint::of(&a),
+            PatternFingerprint::of(&c),
+            "same (n, nnz) but different row_idx must fingerprint differently"
+        );
+    }
+
+    /// F3 — different col_ptr distribution at same `(n, nnz)`
+    /// fingerprints differently.
+    #[test]
+    fn f3_fingerprint_distinguishes_different_col_ptr() {
+        // A: 4x4 diagonal, col_ptr = [0,1,2,3,4], nnz=4.
+        let a = CscMatrix::from_triplets(4, &[0, 1, 2, 3], &[0, 1, 2, 3], &[1.0, 2.0, 3.0, 4.0])
+            .unwrap();
+        // B: 4x4 with same nnz=4 but two entries in column 0 and one
+        // each in cols 1, 2 — different col_ptr.
+        let b = CscMatrix::from_triplets(4, &[0, 0, 1, 2], &[0, 1, 1, 2], &[1.0, 0.5, 2.0, 3.0])
+            .unwrap();
+        assert_eq!(a.n, b.n);
+        assert_eq!(a.row_idx.len(), b.row_idx.len());
+        assert_ne!(
+            PatternFingerprint::of(&a),
+            PatternFingerprint::of(&b),
+            "different col_ptr distribution must fingerprint differently"
+        );
     }
 }
