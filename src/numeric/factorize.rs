@@ -1,6 +1,6 @@
-#[cfg(test)]
-use crate::dense::factor::factor;
-use crate::dense::factor::{factor_frontal_blocked_in_place, BunchKaufmanParams, FrontalFactors};
+use crate::dense::factor::{
+    factor, factor_frontal_blocked_in_place, BunchKaufmanParams, FrontalFactors,
+};
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
 use crate::inertia::Inertia;
@@ -258,6 +258,60 @@ impl SchurBlock {
     #[inline]
     pub fn get(&self, i: usize, j: usize) -> f64 {
         self.data[j * self.dim + i]
+    }
+
+    /// Symmetric mat-vec `y = S · x`. `x.len() == y.len() == self.dim`.
+    /// Uses the full square buffer (both triangles populated).
+    pub fn symv(&self, x: &[f64], y: &mut [f64]) -> Result<(), FeralError> {
+        if x.len() != self.dim || y.len() != self.dim {
+            return Err(FeralError::DimensionMismatch {
+                expected: self.dim,
+                got: x.len().max(y.len()),
+            });
+        }
+        for yi in y.iter_mut() {
+            *yi = 0.0;
+        }
+        for (j, &xj) in x.iter().enumerate().take(self.dim) {
+            let col = &self.data[j * self.dim..(j + 1) * self.dim];
+            for (i, &v) in col.iter().enumerate() {
+                y[i] += v * xj;
+            }
+        }
+        Ok(())
+    }
+
+    /// F3.4 — Convenience solve `S · x = rhs` against the dense Schur
+    /// block. Factors `S` with the dense Bunch-Kaufman LDL^T solver
+    /// and runs a single solve. For repeated solves with the same `S`,
+    /// callers should drive `dense::factor::factor` and
+    /// `dense::solve::solve` directly to amortise the factor cost.
+    ///
+    /// `S` is treated as symmetric (the lower triangle of the stored
+    /// full-square buffer is used; the upper triangle is mirrored by
+    /// the factorization). The factorization uses the default
+    /// [`BunchKaufmanParams`]; pass parameters explicitly via
+    /// [`SchurBlock::solve_with`] for non-default thresholds.
+    pub fn solve(&self, rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
+        self.solve_with(rhs, &BunchKaufmanParams::default())
+    }
+
+    /// As [`SchurBlock::solve`], but with explicit Bunch-Kaufman
+    /// parameters (zero-pivot action, pivot threshold, etc.).
+    pub fn solve_with(
+        &self,
+        rhs: &[f64],
+        params: &BunchKaufmanParams,
+    ) -> Result<Vec<f64>, FeralError> {
+        if rhs.len() != self.dim {
+            return Err(FeralError::DimensionMismatch {
+                expected: self.dim,
+                got: rhs.len(),
+            });
+        }
+        let s_mat = SymmetricMatrix::from_column_major(self.dim, self.data.clone())?;
+        let (factors, _inertia) = factor(&s_mat, params)?;
+        crate::dense::solve::solve(&factors, rhs)
     }
 }
 
@@ -2777,5 +2831,113 @@ mod tests {
             "Schur block max relative error {} exceeds 1e-10",
             max_rel
         );
+    }
+
+    /// F3.4 — `SchurBlock::solve` factors the dense Schur block and
+    /// solves `S · x = rhs`. Verified against an explicit 3×3
+    /// symmetric indefinite Schur block with a hand-picked rhs.
+    #[test]
+    fn schur_block_solve_small_explicit() {
+        // S = [[ 4, -1,  0],
+        //      [-1,  3, -1],
+        //      [ 0, -1,  2]]   (SPD, used here just because hand-checked).
+        // x_true = [1, 2, 3]
+        // S · x = [4·1 + -1·2,  -1·1 + 3·2 + -1·3,  -1·2 + 2·3]
+        //       = [2, 2, 4]
+        let dim = 3;
+        let s = vec![
+            4.0, -1.0, 0.0, // col 0
+            -1.0, 3.0, -1.0, // col 1
+            0.0, -1.0, 2.0, // col 2
+        ];
+        let block = SchurBlock {
+            dim,
+            data: s.clone(),
+        };
+        let rhs = vec![2.0, 2.0, 4.0];
+        let x = block.solve(&rhs).expect("solve must succeed");
+        let want = [1.0, 2.0, 3.0];
+        for i in 0..dim {
+            assert!(
+                (x[i] - want[i]).abs() < 1e-12,
+                "x[{i}] = {} != {} (rel diff {:.3e})",
+                x[i],
+                want[i],
+                (x[i] - want[i]).abs()
+            );
+        }
+
+        // Round-trip: symv(S, x) == rhs.
+        let mut rhs_check = vec![0.0; dim];
+        block.symv(&x, &mut rhs_check).expect("symv");
+        for i in 0..dim {
+            assert!((rhs_check[i] - rhs[i]).abs() < 1e-12);
+        }
+    }
+
+    /// F3.4 — End-to-end: factorize a small KKT with a Schur tail,
+    /// pick a target `x_S`, compute `rhs_S = S · x_S` via `symv`, and
+    /// recover `x_S` via `SchurBlock::solve`. Exercises the dim and
+    /// rhs validation paths.
+    #[test]
+    fn schur_block_solve_roundtrip_after_factorize() {
+        // Reuse the 4-row 4-col KKT from the hand-computed test above.
+        // A = [[ 2, 0, 0, 1],
+        //      [ 0, 3, 0, 1],
+        //      [ 0, 0, 4, 1],
+        //      [ 1, 1, 1, 0]]   (last col/row is the Schur slot).
+        let entries = [
+            (0, 0, 2.0),
+            (1, 1, 3.0),
+            (2, 2, 4.0),
+            (3, 0, 1.0),
+            (3, 1, 1.0),
+            (3, 2, 1.0),
+        ];
+        let n = 4;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for &(r, c, v) in &entries {
+            rows.push(r);
+            cols.push(c);
+            vals.push(v);
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let schur_indices = vec![3];
+        let snode = crate::symbolic::SupernodeParams::default();
+        let sym =
+            crate::symbolic::symbolic_factorize_with_schur(&m, &snode, &schur_indices).unwrap();
+        let nparams = NumericParams {
+            scaling: crate::scaling::ScalingStrategy::Identity,
+            ..NumericParams::default()
+        };
+        let (_, _, schur_block) = factorize_multifrontal_with_schur(&m, &sym, &nparams).unwrap();
+
+        // Hand: S = A_SS - A_SF · A_FF^{-1} · A_FS
+        //         = 0 - [1 1 1] · diag(1/2, 1/3, 1/4) · [1; 1; 1]
+        //         = -(1/2 + 1/3 + 1/4) = -13/12
+        let want_s = -(1.0 / 2.0 + 1.0 / 3.0 + 1.0 / 4.0);
+        assert!((schur_block.get(0, 0) - want_s).abs() < 1e-12);
+
+        // Pick x_S, build rhs_S, recover x_S.
+        let x_target = vec![1.5_f64];
+        let mut rhs_s = vec![0.0; 1];
+        schur_block.symv(&x_target, &mut rhs_s).unwrap();
+        let x_solved = schur_block.solve(&rhs_s).unwrap();
+        assert!((x_solved[0] - x_target[0]).abs() < 1e-12);
+    }
+
+    /// F3.4 — Dimension mismatch on rhs is reported, not silently
+    /// truncated.
+    #[test]
+    fn schur_block_solve_dim_mismatch() {
+        let block = SchurBlock {
+            dim: 2,
+            data: vec![1.0, 0.0, 0.0, 1.0],
+        };
+        let rhs = vec![1.0, 2.0, 3.0];
+        let r = block.solve(&rhs);
+        assert!(matches!(r, Err(FeralError::DimensionMismatch { .. })));
     }
 }

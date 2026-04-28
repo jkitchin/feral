@@ -80,6 +80,60 @@ updated with current 250/250 pass count.
 cargo test --release: 200 lib + all bin/integration suites pass
 with no regression. cargo fmt clean. cargo clippy clean.
 
-* 12:05 :session:end:
+* 12:05 :f3.3:end:
 F3.3 acceptance gate now passes 250/250 on the corpus.
-Commit + checkpoint.
+Commit + checkpoint landed (commit 5e97fbd).
+
+* 12:30 :f3.4:design:
+User asked to push through and close F3.4 in this session.
+Spec line: "F3.4 — `solve_against_schur(s_matrix, rhs)`
+convenience — optional, defer if no caller asks." The minimal,
+honest reading: provide a method on `SchurBlock` that factors
+the dense block via the existing dense BK LDL^T and solves
+S·x=rhs. Caller controls the rest of the block-system glue
+(building r_S = b_S - A_SF · A_FF^{-1} · b_F, applying
+A_FF^{-1} again for x_F) — that part depends on application
+ordering and isn't a clean library primitive without exposing
+internal forward/backward sub.
+
+Considered the full block-solve composition. Trace: with the
+partial-elim factor returned by `factorize_multifrontal_with_schur`,
+`solve_sparse(factors, [b_F | b_S])` returns
+`[A_FF^{-1}·(b_F - A_FS·r_S) | r_S]` where `r_S` is the reduced
+rhs. To recover the actual `x_S = S^{-1}·r_S` requires either
+exposing forward/backward as separate primitives or running a
+correction solve. Neither belongs in F3.4 "convenience" scope.
+Declined to add; documented in commit body so a future caller
+asking for it has the analysis ready.
+
+* 12:45 :f3.4:impl:
+Added `SchurBlock::symv`, `solve`, `solve_with` on top of the
+existing `dense::factor::factor` and `dense::solve::solve`. The
+gated `#[cfg(test)] use crate::dense::factor::factor;` import
+in factorize.rs was promoted to a regular import to support the
+production solve path.
+
+* 12:50 :f3.4:tests:
+Three tests added in the existing `factorize::tests` module:
+
+1. `schur_block_solve_small_explicit` — 3×3 SPD `S =
+   tridiag(4,3,2 / -1)` with hand-checked rhs `S·[1,2,3] =
+   [2,2,4]`. (Initial draft had `[2,0,4]`; off-by-row,
+   recomputed to `[2,2,4]` and the test went green.)
+2. `schur_block_solve_roundtrip_after_factorize` — 4×4 KKT
+   `diag(2,3,4) ⊕ [1,1,1] coupling`, n_schur=1. Verifies
+   `S = -(1/2 + 1/3 + 1/4) = -13/12` against analytical value,
+   then symv→solve round-trip on a chosen `x_S`.
+3. `schur_block_solve_dim_mismatch` — caller-side guard for
+   wrong-length rhs returns `FeralError::DimensionMismatch`.
+
+* 13:00 :f3.4:cleanup:
+cargo test: 200 → 203 lib tests pass (the three F3.4 tests).
+clippy hit `needless_range_loop` in `symv`; rewrote with
+`x.iter().enumerate().take(self.dim)` and `iter().enumerate()`
+on the column slice. cargo fmt clean. cargo clippy clean.
+
+* 13:05 :session:end:
+F3.4 closed. F3 phase complete (F3.1 + F3.2/2b + F3.3 + F3.4).
+CHANGELOG entry added. Commit + checkpoint update + journal
+final entry.

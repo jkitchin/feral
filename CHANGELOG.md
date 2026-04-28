@@ -4,6 +4,30 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added (2026-04-27) — F3.4 `SchurBlock::solve` convenience
+
+Closes the F3 phase plan. Two new methods on `SchurBlock`:
+
+- `SchurBlock::symv(x, y)` — symmetric mat-vec `y = S · x` against
+  the dense full-square buffer.
+- `SchurBlock::solve(rhs)` and `solve_with(rhs, params)` — factor
+  `S` with the existing dense Bunch-Kaufman LDL^T solver and run a
+  single solve. The convenience wraps `dense::factor::factor` +
+  `dense::solve::solve`; for repeated solves with the same `S`,
+  callers should drive the underlying primitives directly to
+  amortise the factor cost.
+
+Tests cover (a) hand-computed 3×3 explicit Schur block,
+(b) end-to-end `factorize_multifrontal_with_schur` →
+`SchurBlock::symv` → `SchurBlock::solve` round-trip on a 4×4 KKT,
+(c) dimension-mismatch error path.
+
+This is the last item in the F3 (Schur complement extraction)
+phase plan from `dev/plans/kkt-feature-gaps.md`. With F3.1
+(ordering hook), F3.2/2b (numeric hook + multi-supernode tail),
+F3.3 (per-matrix oracle gate, 250/250 PASS), and F3.4 all
+landed, F3 is closed.
+
 ### Changed (2026-04-27) — F3.3 acceptance gate switched to per-matrix oracle bound
 
 The strict `feral-vs-MUMPS ≤ 1e-10` reading was unachievable on
