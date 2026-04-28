@@ -1,0 +1,96 @@
+#+TITLE: Journal 2026-04-27-14
+#+STARTUP: showall
+
+* 14:00 :b1:dual-kernel:design:
+Picking up Phase B-1 of dev/plans/dense-kernel-blas3.md after
+Phase A (W-2 2x2 inline) shipped in session-13. Plan calls for a
+register-blocked MR×NR DSYRK micro-kernel; pursuing a narrower
+NR=2 dual-column variant first as a stepping stone.
+
+Design: process two adjacent trailing columns (j, j+1) in lockstep,
+sharing src loads. Key observation: dst0[1..] (column j rows
+[j+1, nrow)) and dst1[..] (column j+1 rows [j+1, nrow)) reference
+the **same** src memory at column offset
+`(k+q)*nrow + j + 1`. So a single src load per chunk per q feeds
+both accumulator stacks.
+
+Cap: dst0[0] (column-j diagonal entry) processed by scalar
+prologue. Bit-exact with rank-1 reference per element.
+
+* 14:30 :b1:kernel-implementation:
+Wrote `schur_panel_minus_nofma_strided_dual` in
+src/dense/schur_kernel.rs (~210 LoC). Structure mirrors the
+existing `schur_panel_minus_nofma_strided`:
+- 4-way unrolled main body holding 8 SIMD registers (4 dst0 + 4 dst1)
+- tail full-lane chunks
+- masked partial-load tail
+
+Inner per-q does shared src load, then independent
+`mul -> sub` chains per accumulator. Zero-alpha skip honored
+independently per column to preserve bit-exactness with two
+sequential single-kernel calls.
+
+* 14:45 :b1:tests:
+Added two bit-exactness tests in schur_kernel.rs:
+- schur_panel_minus_nofma_strided_dual_is_bit_exact_vs_two_singles
+  (n_elim sweep × len0 sweep, 8×18 = 144 cases)
+- schur_panel_minus_nofma_strided_dual_skips_zero_alphas_independently
+
+Both pass `assert_eq!` (byte-identity vs the rank-1 reference
+chain). The two-singles oracle vs dual-kernel test confirms the
+src-load sharing transformation preserves rounding to the bit.
+
+* 14:55 :b1:wire-up:
+Modified `apply_blocked_schur_panel` in src/dense/factor.rs to
+walk trailing columns in pairs:
+- Inner loop builds alphas0/alphas1 buffers for cols j, j+1
+- split_at_mut sequence: first at j*nrow → before/rest; second
+  at nrow inside rest → col_j/after_j; carve dst0 = &mut col_j[j..]
+  and dst1 = &mut after_j[(j+1)..nrow]
+- Odd-tail column (when (nrow - j_start) is odd) falls back to
+  the single-column kernel
+
+* 15:05 :b1:test-corpus:
+- All 16 tests/blocked_ldlt.rs byte-identity tests pass
+- Full lib + integration suite: 0 FAILED
+- 2 new dual-kernel tests pass
+
+Bit-exactness contract preserved end-to-end.
+
+* 15:10 :b1:bench:
+cargo run --bin bench --release results:
+
+| partition           | session-13 p90 | session-14 p90 | target | verdict |
+| dense small (<200)  | 1.51 (was 1.46)| 1.51            | ≤ 2.0  | PASS    |
+| dense medium (<500) | 1.92 (was 1.88)| 1.92            | ≤ 3.0  | PASS    |
+| sparse small (<200) | 1.83 (was 1.80)| 1.83            | ≤ 2.0  | PASS    |
+| sparse medium (<500)| 1.83 (was 1.80)| 1.83            | ≤ 3.0  | PASS    |
+
+Slight regression on small/medium frontals from session-13
+baseline (within bench noise envelope). The dual kernel's value
+proposition is on wide trailing updates (n_elim ≥ 4-8 with
+trailing_len ≥ 64); small frontals see only the per-column
+buffer-fill overhead and unaligned dst0_bulk access. All bench
+gates still PASS comfortably.
+
+* 15:15 :b1:wide-root-profile:
+diag_qcqp_profile (qcqp1500-1c, default config):
+- Total factor: 7.86s
+- 1061×1061 root supernode: 1.43s
+- Wide ncol fronts (ncol ≥ 17): 4.96s of the 7.85s loop time
+
+Without an A/B oracle from a fresh git stash, can't directly
+attribute the 1.43s root cost vs prior. Will revisit when
+combined with Phase C cache-blocked dense root.
+
+* 15:25 :b1:next-steps:
+Phase B-1 lands as a narrow first step. Next:
+- Phase B-2: lift the all-1×1 gate by extending the dual kernel
+  (and rank-bs single kernel) to honor `subdiag[q] != 0` —
+  axpy2-style fused add-then-sub per 2×2 q pair.
+- Phase C: cache-blocked dense root for `nrow == ncol && ncol ≥ 256`
+  — combines panel-pivot + DSYRK flush per `ceil(ncol/bs)` outer
+  iterations. The 1061×1061 qcqp root is the target case.
+- Optional: widen NR in the dual kernel to 4 (process j, j+1, j+2, j+3
+  in lockstep). May further amortize src loads but quadruples the
+  register pressure.

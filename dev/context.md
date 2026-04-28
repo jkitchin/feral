@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-28T02:29:17Z
+Generated: 2026-04-28T02:56:04Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,12 +59,36 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+c6f96f1 session: 2026-04-27-13 checkpoint — W-2 2x2 inline lands
+2011b33 feat(dense): W-2 2x2 inline (no-swap fast path) in lblt_panel_frontal
+f0d90a1 plan(W-2 2x2): research note + Phase A/B/C plan for dense kernel
 036894e feat(F3.4): SchurBlock::solve convenience closes F3 phase
 5e97fbd feat(F3.3): switch acceptance gate to per-matrix oracle bound
-33b57ba diag(schur): F3.3 ACOPR14 BK pivot divergence probe
-95f055c session: 2026-04-27-11 checkpoint — F3.3 postorder fix
-b155276 fix(schur): F3.3 — forest-Schur-etree postorder + cross-val harness
 ```
 
 ## Test Status
+```
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-e5833036db602c08)
+
+running 5 tests
+test test_gate_just_outside_n_tiny ... ok
+test test_gate_tiny_sparse_in ... ok
+test test_determinism_tiny ... ok
+test test_gate_boundary_n_16 ... ok
+test test_solve_parity_tiny_real_matrix ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests feral
+
+running 1 test
+test src/symbolic/profiler.rs - symbolic::profiler::SymbolicProfiler (line 27) ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+```
+
+## Benchmark
 ```
