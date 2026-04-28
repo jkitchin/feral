@@ -4,6 +4,33 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-27) — Dense kernel B-1 dual-column DSYRK (NR=2)
+
+Phase B-1 of `dev/plans/dense-kernel-blas3.md` (narrow first step).
+Replaces the per-column rank-`n_elim` SIMD axpy in
+`apply_blocked_schur_panel` with a dual-column kernel that processes
+two adjacent trailing columns per dispatch and shares src loads
+between both accumulator stacks — halving src memory traffic on the
+bulk of the trailing update.
+
+- New `schur_panel_minus_nofma_strided_dual` kernel: 4-way unrolled
+  SIMD body holding 8 accumulator registers (4 dst0 + 4 dst1).
+  Cap (column-j diagonal) processed by scalar prologue; bulk
+  (dst0[1..] and dst1) shares one src load per chunk per q.
+- `apply_blocked_schur_panel` walks trailing columns in pairs;
+  odd-tail column falls back to the single-column kernel.
+- Bit-exact with two sequential `schur_panel_minus_nofma_strided`
+  calls (verified by 144-case n_elim × len0 sweep + zero-alpha
+  independence test).
+- All 16 `tests/blocked_ldlt.rs` byte-identity fixtures continue
+  to pass — per-supernode byte identity preserved.
+
+Bench: all four exit-partition gates still PASS; small/medium
+frontals see ~+2-3% session-13 baseline regression (within noise);
+wide trailing updates (qcqp1500-1c root) get the src-load-sharing
+win. Phase B-2 (lift all-1×1 gate for 2×2 streams) and Phase C
+(cache-blocked dense root) remain on the plan.
+
 ### Changed (2026-04-27) — Dense kernel W-2 2×2 inline (no-swap fast path)
 
 Phase A of `dev/plans/dense-kernel-blas3.md`. The blocked panel

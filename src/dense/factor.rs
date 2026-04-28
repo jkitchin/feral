@@ -1695,15 +1695,56 @@ fn apply_blocked_schur_panel(
         MAX_N_ELIM
     );
 
-    let mut alphas_buf = [0.0f64; MAX_N_ELIM];
+    let mut alphas0_buf = [0.0f64; MAX_N_ELIM];
+    let mut alphas1_buf = [0.0f64; MAX_N_ELIM];
 
-    for j in j_start..nrow {
-        // Per-trailing-column alpha vector. `l_jk = a[q_col*nrow + j]`
-        // is the L value at the jth row of pivot column q. The
-        // resulting `alpha = l_jk * d_q` matches the rank-1
-        // reference's `alpha` computation bit-for-bit (same f64
-        // multiply, same operands).
-        let alphas = &mut alphas_buf[..n_elim];
+    // Phase B-1: walk trailing columns in pairs (j, j+1) and dispatch
+    // the dual-column kernel that shares src loads across both
+    // accumulator stacks. Each pair is bit-exact with two sequential
+    // single-column dispatches (verified by the dual kernel's
+    // bit-exactness sweep). The odd-tail column (when (nrow - j_start)
+    // is odd) falls through to the single-column kernel.
+    let mut j = j_start;
+    while j + 1 < nrow {
+        let alphas0 = &mut alphas0_buf[..n_elim];
+        let alphas1 = &mut alphas1_buf[..n_elim];
+        let mut all_zero = true;
+        for q in 0..n_elim {
+            let q_col = k + q;
+            let l_jk0 = a[q_col * nrow + j];
+            let l_jk1 = a[q_col * nrow + j + 1];
+            let d_q = d_panel[q];
+            let alpha0 = l_jk0 * d_q;
+            let alpha1 = l_jk1 * d_q;
+            alphas0[q] = alpha0;
+            alphas1[q] = alpha1;
+            if alpha0 != 0.0 || alpha1 != 0.0 {
+                all_zero = false;
+            }
+        }
+        if !all_zero {
+            // Carve out two disjoint mutable slices: dst0 sits in
+            // column j (rows [j, nrow)), dst1 sits in column j+1
+            // (rows [j+1, nrow)). The src pivot columns [k, k+n_elim)
+            // all precede column j in memory, so a single
+            // split_at_mut at j*nrow gives us src in `before`. A
+            // second split inside `rest` separates column j from
+            // column j+1.
+            let (before, rest) = a.split_at_mut(j * nrow);
+            let (col_j, after_j) = rest.split_at_mut(nrow);
+            let dst0 = &mut col_j[j..];
+            let dst1 = &mut after_j[(j + 1)..nrow];
+            schur_kernel::schur_panel_minus_nofma_strided_dual(
+                dst0, dst1, before, k, n_elim, nrow, j, alphas0, alphas1,
+            );
+        }
+        j += 2;
+    }
+
+    if j < nrow {
+        // Odd remainder: one trailing column. Fall back to the
+        // single-column kernel.
+        let alphas = &mut alphas0_buf[..n_elim];
         let mut all_zero_alpha = true;
         for q in 0..n_elim {
             let q_col = k + q;
@@ -1715,49 +1756,21 @@ fn apply_blocked_schur_panel(
                 all_zero_alpha = false;
             }
         }
-        if all_zero_alpha {
-            // No update for this column — same outcome as the rank-1
-            // path skipping every q via its `if alpha == 0.0
-            // continue` early-return.
-            continue;
+        if !all_zero_alpha {
+            let trailing_len = nrow - j;
+            let (before, rest) = a.split_at_mut(j * nrow);
+            let dst = &mut rest[j..nrow];
+            schur_kernel::schur_panel_minus_nofma_strided(
+                dst,
+                before,
+                k,
+                n_elim,
+                nrow,
+                j,
+                trailing_len,
+                alphas,
+            );
         }
-
-        // Build the contiguous src panel: rows [j, nrow) of columns
-        // [k, k+n_elim). The src columns precede column `j` in
-        // memory, so they are disjoint from `dst` and we can reborrow
-        // through `split_at_mut`.
-        //
-        // Rather than copying src panel data, we hand the kernel the
-        // raw layout: each src_q is a stride-`(nrow - j)` slice
-        // starting at `(k+q)*nrow + j`. The kernel walks them by
-        // explicit offsets so no copy is required.
-        let trailing_len = nrow - j;
-        let (before, rest) = a.split_at_mut(j * nrow);
-        let dst = &mut rest[j..nrow];
-
-        // Build a contiguous `src_panel` view for the kernel. We need
-        // n_elim columns of length trailing_len each, but the source
-        // columns live in `before` at non-contiguous offsets
-        // `(k+q)*nrow + j`. The simplest correct approach is to
-        // construct the panel by copy into a stack-friendly buffer
-        // for the typical CHAINWOO root case where trailing_len <=
-        // 1984 and n_elim <= 32. To avoid that copy on the hot path,
-        // we instead use a direct-stride kernel variant.
-        //
-        // Implementation note: the rank-bs kernel
-        // `schur_panel_minus_nofma` expects a contiguous `src` slice
-        // of length `n_elim * src_stride`. We expose a
-        // strided-source variant below.
-        schur_kernel::schur_panel_minus_nofma_strided(
-            dst,
-            before,
-            k,
-            n_elim,
-            nrow,
-            j,
-            trailing_len,
-            alphas,
-        );
     }
 }
 
