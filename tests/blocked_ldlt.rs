@@ -539,6 +539,128 @@ fn test_mixed_pivots_in_panel() {
     assert_frontals_byte_identical(&scalar, &blocked, "mixed_pivots_in_panel");
 }
 
+/// Phase A2 (`dev/plans/dense-kernel-w2-2x2-swap.md`) — swap-required
+/// 2×2 inside a panel. Constructs a fixture where BK at column `k=8`
+/// triggers a 2×2 pivot whose argmax row `r=13` is NOT `k+1`. Scalar
+/// applies `swap_rows_cols(a, n, 9, 13, perm)` and proceeds; the
+/// blocked panel currently bails to scalar via
+/// `PanelStatus::ScalarFallback` (Phase A excluded swap-2×2). After
+/// Phase A2 the panel handles the swap inline. Either way, the
+/// outputs must be byte-identical with scalar `factor_frontal`.
+#[test]
+fn test_swap_2x2_inside_panel_bare() {
+    let params = default_params();
+    let n = 24;
+    let mut data = vec![0.0f64; n * n];
+    for j in 0..n {
+        data[j * n + j] = 1.0 + j as f64 * 0.001;
+    }
+    let mut state = 0x5A2A_BD22u64;
+    for j in 0..n {
+        for i in (j + 1)..n {
+            data[j * n + i] = 1e-6 * rng_scalar(&mut state, i * n + j);
+        }
+    }
+    // Force swap-required 2×2 at column k=8.
+    //   - akk = a[8,8] = 0 (forces 2×2 trigger)
+    //   - gamma0 found at row r=13 (NOT k+1=9), so symmetric swap of
+    //     rows/cols (9, 13) is required before the 2×2 can be taken
+    //     with consecutive columns.
+    //   - a[13,13] = 0.5 keeps swap-1×1 reject (arr < alpha * gamma_r)
+    //   - akk = 0 keeps LAPACK-1×1 reject (akk * gamma_r < alpha * gamma0^2)
+    //   - growth + det floor pass because gamma0 dominates.
+    let k = 8;
+    data[k * n + k] = 0.0;
+    data[k * n + 13] = 5.0;
+    data[k * n + (k + 1)] = 1e-3; // dwarfed by gamma0
+    data[13 * n + 13] = 0.5;
+    let mat = SymmetricMatrix { n, data };
+    let scalar = factor_frontal(&mat, n, false, &params).unwrap();
+    let blocked = factor_frontal_blocked(&mat, n, false, &params).unwrap();
+    assert_frontals_byte_identical(&scalar, &blocked, "swap_2x2_inside_panel_bare");
+}
+
+/// Phase A2 — chain of two swap-required 2×2 pivots inside the same
+/// panel. After the first swap-2×2 commits at panel positions (0, 1)
+/// (covering original cols `k=4` and `k=5` with a `9 ↔ 13`-style row
+/// swap), the next pivot at panel position 2 (col `k=6`) also triggers
+/// a swap-required 2×2. Tests that `peek_ahead_replay` correctly
+/// brings BOTH target columns into scalar state at every panel
+/// iteration, and that the perm tracks two consecutive swaps.
+#[test]
+fn test_swap_2x2_chain() {
+    let params = default_params();
+    let n = 32;
+    let mut data = vec![0.0f64; n * n];
+    for j in 0..n {
+        data[j * n + j] = 1.0 + j as f64 * 0.001;
+    }
+    let mut state = 0x5A2A_C4A1u64;
+    for j in 0..n {
+        for i in (j + 1)..n {
+            data[j * n + i] = 1e-6 * rng_scalar(&mut state, i * n + j);
+        }
+    }
+    // First swap-required 2×2 at k=4: zero diag, gamma0 at row 11.
+    {
+        let k = 4;
+        data[k * n + k] = 0.0;
+        data[k * n + 11] = 5.0;
+        data[k * n + (k + 1)] = 1e-3;
+        data[11 * n + 11] = 0.5;
+    }
+    // Second swap-required 2×2 at k=6 (after the first 2×2 has
+    // committed at panel positions 0,1): zero diag, gamma0 at row 17.
+    // Row 17 is well clear of the prior swap target so the rows the
+    // second swap references are independent.
+    {
+        let k = 6;
+        data[k * n + k] = 0.0;
+        data[k * n + 17] = 5.0;
+        data[k * n + (k + 1)] = 1e-3;
+        data[17 * n + 17] = 0.5;
+    }
+    let mat = SymmetricMatrix { n, data };
+    let scalar = factor_frontal(&mat, n, false, &params).unwrap();
+    let blocked = factor_frontal_blocked(&mat, n, false, &params).unwrap();
+    assert_frontals_byte_identical(&scalar, &blocked, "swap_2x2_chain");
+}
+
+/// Phase A2 — swap-required 2×2 immediately followed by a clean 1×1
+/// inside the same panel. After the 2×2 commits at panel positions
+/// (0, 1) with a row swap, the next pivot at panel position 2 must
+/// see the swapped state and pick a normal 1×1. Exercises the
+/// `peek_ahead_column` correctness for the column AFTER a committed
+/// 2×2-with-swap.
+#[test]
+fn test_swap_2x2_then_1x1() {
+    let params = default_params();
+    let n = 24;
+    let mut data = vec![0.0f64; n * n];
+    for j in 0..n {
+        data[j * n + j] = 1.0 + j as f64 * 0.001;
+    }
+    let mut state = 0x5A2A_F00Du64;
+    for j in 0..n {
+        for i in (j + 1)..n {
+            data[j * n + i] = 1e-6 * rng_scalar(&mut state, i * n + j);
+        }
+    }
+    // Swap-required 2×2 at k=4: zero diag, gamma0 at row 9 (not k+1=5).
+    let k = 4;
+    data[k * n + k] = 0.0;
+    data[k * n + 9] = 5.0;
+    data[k * n + (k + 1)] = 1e-3;
+    data[9 * n + 9] = 0.5;
+    // Columns 6..n keep their strong diagonals (set in the loop above)
+    // and tiny noise off-diagonals. After the swap at (5, 9), col 6
+    // and beyond should pivot cleanly as 1×1.
+    let mat = SymmetricMatrix { n, data };
+    let scalar = factor_frontal(&mat, n, false, &params).unwrap();
+    let blocked = factor_frontal_blocked(&mat, n, false, &params).unwrap();
+    assert_frontals_byte_identical(&scalar, &blocked, "swap_2x2_then_1x1");
+}
+
 /// Step 5 — forced rejection under `may_delay == true` triggers the
 /// SSIDS "break on first failure" path. The blocked panel must stop
 /// cleanly at the delayed column, apply the deferred Schur to trailing
