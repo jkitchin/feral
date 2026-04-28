@@ -4,6 +4,31 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-27) — Dense kernel W-2 2×2 inline (no-swap fast path)
+
+Phase A of `dev/plans/dense-kernel-blas3.md`. The blocked panel
+factorization (`lblt_panel_frontal`) now handles no-swap 2×2 pivots
+inline instead of bailing to the scalar path on every 2×2 trigger.
+ACOPR-style KKT panels with heavy 2×2 pivot counts (43.8% of factor
+time on `qcqp1500-1c` is in `ncol=17–32` panels, 28.6% in
+`ncol=33–64`) stay on the deferred-Schur fast path.
+
+- New `PanelStatus::ScalarFallbackPeekedNext` variant signals when
+  the inline 2×2 path pre-updated col+1 before bailing on
+  swap/LAPACK/growth/det-floor — caller adjusts `j_start` to avoid
+  a double rank-1 update.
+- New `peek_ahead_replay(target_col)` primitive supports replay onto
+  arbitrary trailing columns.
+- Rank-bs fast path stays gated on all-1×1 panels for bit-exactness
+  (axpy2's fused add-then-sub differs from the rank-bs SIMD body's
+  per-q sequential mul-sub). Lifting this gate is Phase B-2.
+- Bit-exactness contract: per-supernode byte-identity between
+  `factor_frontal` (scalar) and `factor_frontal_blocked` is
+  preserved on all 16 fixtures including 4 new W-2 2×2 fixtures.
+
+Symmetric-swap 2×2 and rook-rescue 2×2 still bail to scalar; phase B
+will address those.
+
 ### Added (2026-04-27) — F3.4 `SchurBlock::solve` convenience
 
 Closes the F3 phase plan. Two new methods on `SchurBlock`:
