@@ -108,6 +108,10 @@ path = "src/bin/bench_solver_corpus.rs"
 name = "probe_deltac_sensitivity"
 path = "src/bin/probe_deltac_sensitivity.rs"
 
+[[bin]]
+name = "probe_panel_attribution"
+path = "src/bin/probe_panel_attribution.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

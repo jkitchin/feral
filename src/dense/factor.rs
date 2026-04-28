@@ -30,6 +30,110 @@ pub static FORCE_SCALAR_FRONTAL: std::sync::atomic::AtomicBool =
 pub static DISABLE_PANEL_INLINE_2X2: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Phase B-1.5 diagnostic flag
+/// (`dev/research/dense-kernel-attribution-2026-04-28.md`). When `true`,
+/// the panel driver and `lblt_panel_frontal` increment the counters in
+/// `panel_diag` to attribute panel-vs-scalar work and bail reasons.
+/// Default `false`; the load is one relaxed atomic + branch per call
+/// site (well-predicted at "false") so production overhead is
+/// negligible.
+pub static PANEL_DIAG_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Counters populated when `PANEL_DIAG_ENABLED` is on. All `Relaxed`
+/// reads/writes — the diagnostic binary clears them between matrices
+/// and reads totals at the end of the run. Phase B-1.5
+/// (`dev/research/dense-kernel-attribution-2026-04-28.md`).
+pub mod panel_diag {
+    use std::sync::atomic::AtomicU64;
+    /// Panels that committed all `bs` requested pivots inline.
+    pub static PANEL_FULL: AtomicU64 = AtomicU64::new(0);
+    /// Panels that bailed with `n_elim < bs` via `ScalarFallback*`.
+    pub static PANEL_PARTIAL: AtomicU64 = AtomicU64::new(0);
+    /// Panels that broke on a delayed pivot (SSIDS may_delay path).
+    pub static PANEL_DELAYED: AtomicU64 = AtomicU64::new(0);
+    /// 2×2 trigger but argmax row r != col+1 (swap required), or
+    /// col+1 >= ncol, or panel cap exhausted. Inline 2×2 declined
+    /// before any peek-ahead; ScalarFallback returned.
+    pub static FALLBACK_2X2_NEED_SWAP_OR_BOUND: AtomicU64 = AtomicU64::new(0);
+    /// 2×2 trigger, no swap, but `arr >= alpha_bk * gamma_r` so the
+    /// scalar path's swap-1×1 alternative would win. Bail.
+    pub static FALLBACK_2X2_SWAP_1X1_WINS: AtomicU64 = AtomicU64::new(0);
+    /// 2×2 trigger, no swap, but LAPACK-extension 1×1 alternative
+    /// `akk * gamma_r >= alpha * gamma0^2` would win. Bail.
+    pub static FALLBACK_2X2_LAPACK_1X1_WINS: AtomicU64 = AtomicU64::new(0);
+    /// 2×2 candidate failed the Duff-Reid growth bound or the SSIDS
+    /// scale-invariant det floor. Bail to scalar (which has the
+    /// may_delay/ForceAccept escalation paths).
+    pub static FALLBACK_2X2_GROWTH_OR_DET: AtomicU64 = AtomicU64::new(0);
+    /// Scalar tail steps (panel disengaged because `remaining < PANEL_MIN_NCOL`).
+    pub static SCALAR_TAIL_STEPS: AtomicU64 = AtomicU64::new(0);
+    /// Pivots accepted inside the panel (committed via deferred-Schur).
+    pub static PIVOTS_INLINE: AtomicU64 = AtomicU64::new(0);
+    /// Pivots performed by `scalar_pivot_step` (after a fallback or in
+    /// the scalar tail).
+    pub static PIVOTS_SCALAR: AtomicU64 = AtomicU64::new(0);
+
+    pub fn reset() {
+        for c in [
+            &PANEL_FULL,
+            &PANEL_PARTIAL,
+            &PANEL_DELAYED,
+            &FALLBACK_2X2_NEED_SWAP_OR_BOUND,
+            &FALLBACK_2X2_SWAP_1X1_WINS,
+            &FALLBACK_2X2_LAPACK_1X1_WINS,
+            &FALLBACK_2X2_GROWTH_OR_DET,
+            &SCALAR_TAIL_STEPS,
+            &PIVOTS_INLINE,
+            &PIVOTS_SCALAR,
+        ] {
+            c.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub fn snapshot() -> [(&'static str, u64); 10] {
+        use std::sync::atomic::Ordering::Relaxed;
+        [
+            ("panel_full", PANEL_FULL.load(Relaxed)),
+            ("panel_partial", PANEL_PARTIAL.load(Relaxed)),
+            ("panel_delayed", PANEL_DELAYED.load(Relaxed)),
+            (
+                "fallback_2x2_need_swap_or_bound",
+                FALLBACK_2X2_NEED_SWAP_OR_BOUND.load(Relaxed),
+            ),
+            (
+                "fallback_2x2_swap_1x1_wins",
+                FALLBACK_2X2_SWAP_1X1_WINS.load(Relaxed),
+            ),
+            (
+                "fallback_2x2_lapack_1x1_wins",
+                FALLBACK_2X2_LAPACK_1X1_WINS.load(Relaxed),
+            ),
+            (
+                "fallback_2x2_growth_or_det",
+                FALLBACK_2X2_GROWTH_OR_DET.load(Relaxed),
+            ),
+            ("scalar_tail_steps", SCALAR_TAIL_STEPS.load(Relaxed)),
+            ("pivots_inline", PIVOTS_INLINE.load(Relaxed)),
+            ("pivots_scalar", PIVOTS_SCALAR.load(Relaxed)),
+        ]
+    }
+}
+
+#[inline(always)]
+fn diag_inc(counter: &std::sync::atomic::AtomicU64) {
+    if PANEL_DIAG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[inline(always)]
+fn diag_add(counter: &std::sync::atomic::AtomicU64, n: u64) {
+    if PANEL_DIAG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        counter.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Dead-zero absolute floor for the 2×2 pivot cancellation test.
 /// Matches SPRAL SSIDS `datatypes.f90:260` default (`small = 1e-20`),
 /// used by `ldlt_tpp.cxx:98,106`. This is a true zero-detection floor
@@ -1051,6 +1155,7 @@ pub fn factor_frontal_blocked_in_place(
             // Scalar tail: process remaining pivots one at a time.
             // Reborrow `a` (a `&mut [f64]`) so the same binding can be
             // passed across multiple call sites.
+            diag_inc(&panel_diag::SCALAR_TAIL_STEPS);
             match scalar_pivot_step(
                 &mut *a,
                 nrow,
@@ -1066,7 +1171,10 @@ pub fn factor_frontal_blocked_in_place(
                 &mut needs_refinement,
                 &mut n_rook_rescues,
             )? {
-                PivotStepResult::Advanced(n) => k += n,
+                PivotStepResult::Advanced(n) => {
+                    diag_add(&panel_diag::PIVOTS_SCALAR, n as u64);
+                    k += n;
+                }
                 PivotStepResult::Delayed => break,
             }
             continue;
@@ -1112,6 +1220,16 @@ pub fn factor_frontal_blocked_in_place(
         apply_blocked_schur(&mut *a, nrow, k, n_elim, j_start, &d_panel, &subdiag);
         k += n_elim;
 
+        // Phase B-1.5 attribution: count panel outcome and committed pivots.
+        diag_add(&panel_diag::PIVOTS_INLINE, n_elim as u64);
+        match status {
+            PanelStatus::Full => diag_inc(&panel_diag::PANEL_FULL),
+            PanelStatus::ScalarFallback | PanelStatus::ScalarFallbackPeekedNext => {
+                diag_inc(&panel_diag::PANEL_PARTIAL)
+            }
+            PanelStatus::Delayed => diag_inc(&panel_diag::PANEL_DELAYED),
+        }
+
         match status {
             PanelStatus::Full => {}
             PanelStatus::ScalarFallback | PanelStatus::ScalarFallbackPeekedNext => {
@@ -1134,7 +1252,10 @@ pub fn factor_frontal_blocked_in_place(
                     &mut needs_refinement,
                     &mut n_rook_rescues,
                 )? {
-                    PivotStepResult::Advanced(n) => k += n,
+                    PivotStepResult::Advanced(n) => {
+                        diag_add(&panel_diag::PIVOTS_SCALAR, n as u64);
+                        k += n;
+                    }
                     PivotStepResult::Delayed => break,
                 }
             }
@@ -1298,6 +1419,7 @@ fn lblt_panel_frontal(
             // panel deliberately does not.
             let can_try_2x2 = r == col + 1 && col + 1 < ncol && c + 1 < cap;
             if !can_try_2x2 || DISABLE_PANEL_INLINE_2X2.load(std::sync::atomic::Ordering::Relaxed) {
+                diag_inc(&panel_diag::FALLBACK_2X2_NEED_SWAP_OR_BOUND);
                 return Ok((c, PanelStatus::ScalarFallback));
             }
 
@@ -1322,6 +1444,7 @@ fn lblt_panel_frontal(
             // swap-1×1 candidate: scalar would do "1×1 at r, swap
             // r↔k", which is a swap. Bail.
             if arr >= alpha_bk * gamma_r {
+                diag_inc(&panel_diag::FALLBACK_2X2_SWAP_1X1_WINS);
                 return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
             }
             // LAPACK-extension 1×1 candidate: scalar would do "1×1
@@ -1330,6 +1453,7 @@ fn lblt_panel_frontal(
             // rook rescue and the gamma threshold differs subtly;
             // bail to keep semantics aligned.
             if akk * gamma_r >= alpha_bk * gamma0 * gamma0 {
+                diag_inc(&panel_diag::FALLBACK_2X2_LAPACK_1X1_WINS);
                 return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
             }
 
@@ -1381,6 +1505,7 @@ fn lblt_panel_frontal(
                 // may_delay/ForceAccept branches; the panel can't
                 // reproduce that here without duplicating bookkeeping.
                 // col+1 was peek-ahead'd above — caller must skip it.
+                diag_inc(&panel_diag::FALLBACK_2X2_GROWTH_OR_DET);
                 return Ok((c, PanelStatus::ScalarFallbackPeekedNext));
             }
 
