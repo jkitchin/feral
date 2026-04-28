@@ -901,6 +901,17 @@ fn merge_schur_tail_supernodes(
 ) -> Result<(), FeralError> {
     let schur_lo = n - n_schur;
 
+    // Step 0: split any supernode that straddles `schur_lo` into a
+    // non-Schur half and a Schur half. This restores the invariant that
+    // no supernode mixes eliminated-set columns with Schur-tail columns,
+    // which the merge logic below assumes. The straddle case occurs
+    // when adjacency-only amalgamation merges a small non-Schur
+    // fundamental supernode into the first Schur fundamental supernode
+    // via the size-based rule (both `< nemin`); without this split the
+    // resulting compound supernode crosses `schur_lo` and the F3.2b
+    // numeric driver would mis-locate the Schur columns.
+    split_straddling_supernode(supernodes, schur_lo)?;
+
     // Identify Schur-bearing supernodes. Walk forward and find the
     // contiguous tail run; verify no Schur-bearing supernode lives
     // below that run (which would indicate a forest-structured Schur
@@ -1043,6 +1054,96 @@ fn merge_schur_tail_supernodes(
         children: merged_children,
     };
     supernodes.truncate(start + 1);
+    Ok(())
+}
+
+/// F3.2b helper: split a supernode that straddles the Schur boundary
+/// (`first_col < schur_lo < first_col + ncol`) into a non-Schur half
+/// `[first_col, schur_lo)` and a Schur half `[schur_lo, first_col + ncol)`.
+/// The Schur half inherits the original supernode's etree-parent slot
+/// (the topmost cols of the original); the non-Schur half becomes the
+/// only child of the Schur half.
+///
+/// At most one straddler can exist after `find_supernodes` (column
+/// ranges are disjoint), so we either split exactly one or no-op.
+///
+/// Re-indexing rule: the new Schur half is inserted at position `b + 1`
+/// where `b` is the original index. Any reference to a child index `> b`
+/// shifts to `+1`; any reference `== b` (i.e., a parent that listed the
+/// original as a child) remaps to `b + 1` since the Schur half now
+/// occupies the original's etree role.
+fn split_straddling_supernode(
+    supernodes: &mut Vec<Supernode>,
+    schur_lo: usize,
+) -> Result<(), FeralError> {
+    let mut straddle_idx: Option<usize> = None;
+    for (s, snode) in supernodes.iter().enumerate() {
+        let lo = snode.first_col;
+        let hi = lo + snode.ncol;
+        if lo < schur_lo && hi > schur_lo {
+            if straddle_idx.is_some() {
+                return Err(FeralError::InvalidInput(format!(
+                    "F3.2b split: multiple supernodes straddle schur_lo={} \
+                     (impossible after find_supernodes — column ranges are disjoint)",
+                    schur_lo
+                )));
+            }
+            straddle_idx = Some(s);
+        }
+    }
+    let Some(b) = straddle_idx else {
+        return Ok(());
+    };
+
+    let original = supernodes[b].clone();
+    let ncol_ns = schur_lo - original.first_col;
+    let ncol_sc = original.ncol - ncol_ns;
+    let nrow_total = original.nrow;
+    if original.row_indices.len() != nrow_total {
+        return Err(FeralError::InvalidInput(format!(
+            "F3.2b split: supernode {} has nrow={} but row_indices len={}",
+            b,
+            nrow_total,
+            original.row_indices.len()
+        )));
+    }
+
+    // Rewrite all child references before insertion. Indices > b shift
+    // up by one; index == b (the original) remaps to b + 1 (the Schur
+    // half) since the Schur half occupies the original's parental
+    // position in the etree.
+    for snode in supernodes.iter_mut() {
+        for c in snode.children.iter_mut() {
+            if *c == b {
+                *c = b + 1;
+            } else if *c > b {
+                *c += 1;
+            }
+        }
+    }
+
+    // Non-Schur half replaces the original at index b. It keeps the
+    // original's children (etree-children all have indices < b, so they
+    // are unaffected by the shift above and still point at the right
+    // supernodes after the split). Row pattern stays full nrow_total
+    // because the contribution block of the non-Schur half feeds into
+    // the Schur half above it.
+    let non_schur = Supernode {
+        first_col: original.first_col,
+        ncol: ncol_ns,
+        nrow: nrow_total,
+        row_indices: original.row_indices.clone(),
+        children: original.children,
+    };
+    let schur_half = Supernode {
+        first_col: schur_lo,
+        ncol: ncol_sc,
+        nrow: nrow_total - ncol_ns,
+        row_indices: original.row_indices[ncol_ns..].to_vec(),
+        children: vec![b],
+    };
+    supernodes[b] = non_schur;
+    supernodes.insert(b + 1, schur_half);
     Ok(())
 }
 

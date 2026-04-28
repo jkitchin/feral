@@ -170,9 +170,16 @@ pub fn schur_constrained_postorder(
     let roots = etree.roots();
 
     let mut order = Vec::with_capacity(n);
-    let mut stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
 
+    // Phase 1: emit non-Schur nodes only. Walk the entire etree in DFS
+    // postorder but only push non-Schur nodes onto `order`. A Schur node
+    // is "transparent" — we recurse through it (so its non-Schur
+    // descendants are reached) but we skip emitting it. After phase 1,
+    // every non-Schur node sits at some position in `[0, n_f)` in a
+    // valid postorder of the non-Schur subgraph (where each non-Schur's
+    // sub-parent is its nearest non-Schur ancestor, or None).
     let sorted_roots = schur_partition_children(&roots, &sizes, is_schur);
+    let mut stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
     for &root in sorted_roots.iter() {
         let merged = schur_partition_children(&children[root], &sizes, is_schur);
         stack.push((root, merged, 0));
@@ -185,9 +192,32 @@ pub fn schur_constrained_postorder(
                 let next_children = schur_partition_children(&children[child], &sizes, is_schur);
                 stack.push((child, next_children, 0));
             } else {
-                order.push(node_id);
+                if !is_schur[node_id] {
+                    order.push(node_id);
+                }
                 stack.pop();
             }
+        }
+    }
+
+    // Phase 2: emit Schur nodes in ascending etree-index order. The
+    // contract from `compute_schur_aware_perm` places Schur indices at
+    // `[n - n_schur, n)`, so iterating `k` from `0..n` and pushing when
+    // `is_schur[k]` yields exactly the identity tail: `post[n_f + i] ==
+    // n_f + i` for every Schur position. A DFS over the Schur subtree
+    // would emit them in tree-walk order — correct only when the Schur
+    // etree is a single ascending chain. With a forest of Schur roots
+    // (e.g. KKT matrices like ACOPP30 where Schur cols 158, 159, 160,
+    // 161, 167, 168 are roots while 157 is parented under chain root
+    // 208), DFS reorders Schur indices and breaks the tail identity
+    // that `symbolic_factorize_with_schur` relies on. Direct ascending
+    // emission preserves the postorder validity (every Schur node's
+    // Schur children have smaller etree index, so they emit earlier;
+    // non-Schur descendants emitted in phase 1 already sit at positions
+    // `< n_f`).
+    for (k, &flag) in is_schur.iter().enumerate() {
+        if flag {
+            order.push(k);
         }
     }
 
@@ -392,6 +422,71 @@ mod tests {
         assert!(inv[4] >= 4);
         assert!(inv[5] >= 4);
         assert!(inv[4] < inv[5] || inv[5] < inv[4]); // both valid positions
+    }
+
+    #[test]
+    fn test_schur_postorder_forest_tail_identity() {
+        // F3.3 regression: when the Schur subtree is a *forest* (multiple
+        // Schur roots) with at least one internal Schur node whose parent
+        // is also Schur, a DFS over the Schur subtree emits Schur nodes
+        // in tree-walk order, not etree-index order. That breaks the
+        // tail identity post[k] == k that
+        // `symbolic_factorize_with_schur` relies on for the
+        // schur_indices contract.
+        //
+        // ACOPP30_0000 hit this: Schur roots were {158, 159, 160, 161,
+        // 167, 168, 195, 196, 197, 203, 204} plus a chain 157 → 162 →
+        // ... → 208. Tail identity was violated from col 174 onward,
+        // so the original A[174, 174] = -28.56 ended up at permuted
+        // (184, 184) and the Schur block had max relative error 0.997
+        // vs the dense oracle. The fix is to emit phase-2 Schur nodes
+        // directly in ascending etree-index order, not via DFS.
+        //
+        // Construction: n=8, Schur = {4, 5, 6, 7}. Etree:
+        //   non-Schur chain 0 → 1 → 2 → 3 → root 5 (Schur)
+        //   internal Schur 4 → root 7 (Schur)
+        //   Schur roots {5, 6, 7}; Schur 4 is a non-root Schur node.
+        let etree = EliminationTree {
+            parent: vec![
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(5),
+                Some(7),
+                None,
+                None,
+                None,
+            ],
+            n: 8,
+        };
+        let is_schur = vec![false, false, false, false, true, true, true, true];
+        let (post, inv) = schur_constrained_postorder(&etree, &is_schur);
+        // Tail identity: post[k] == k for every Schur k.
+        for k in 4..8 {
+            assert_eq!(
+                post[k], k,
+                "tail identity violated: post[{}] = {} (expected {})",
+                k, post[k], k
+            );
+            assert_eq!(inv[k], k);
+        }
+        // Topological invariant: every child precedes its parent.
+        for j in 0..8 {
+            if let Some(p) = etree.parent[j] {
+                assert!(
+                    inv[j] < inv[p],
+                    "child {} (pos {}) must precede parent {} (pos {})",
+                    j,
+                    inv[j],
+                    p,
+                    inv[p]
+                );
+            }
+        }
+        // Non-Schur prefix: post[0..4] is a permutation of {0, 1, 2, 3}.
+        let mut prefix: Vec<usize> = post[0..4].to_vec();
+        prefix.sort();
+        assert_eq!(prefix, vec![0, 1, 2, 3]);
     }
 
     #[test]

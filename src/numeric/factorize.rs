@@ -1344,9 +1344,9 @@ fn factor_one_supernode(
         .sum();
     let expanded_ncol = own_ncol + n_delayed_in;
 
-    // Build the row indices for this frontal. With delays the layout is
+    // Build the row indices for this frontal. The default layout is
     // [own native cols (own_ncol) | delayed cols from children (n_delayed_in) | trailing rows].
-    let row_indices = build_row_indices(
+    let mut row_indices = build_row_indices(
         snode,
         full_pattern,
         contrib_blocks,
@@ -1361,6 +1361,27 @@ fn factor_one_supernode(
         actual_nrow,
         expanded_ncol
     );
+    // F3.2b layout fix: when this is a Schur supernode (`nvschur > 0`)
+    // that received delayed columns from descendants (`n_delayed_in > 0`),
+    // the default layout above places own (Schur) cols at frontal
+    // positions [0, own_ncol) and delayed cols at [own_ncol, expanded_ncol).
+    // The BK pivot loop in `factor_frontal_blocked_in_place` eliminates
+    // positions [0, ncol_eff) where ncol_eff = expanded_ncol - nvschur =
+    // n_delayed_in, so without this swap the Schur cols sit inside the
+    // eliminable range and get factored out — which is exactly the
+    // opposite of what we want. Swap so delayed cols come first
+    // (eliminable) and Schur cols come after (excluded from pivoting,
+    // per the BK gate at src/dense/factor.rs:1670).
+    let own_col_offset = if nvschur > 0 && n_delayed_in > 0 {
+        let mut swapped = Vec::with_capacity(actual_nrow);
+        swapped.extend_from_slice(&row_indices[own_ncol..expanded_ncol]);
+        swapped.extend_from_slice(&row_indices[..own_ncol]);
+        swapped.extend_from_slice(&row_indices[expanded_ncol..]);
+        row_indices = swapped;
+        n_delayed_in
+    } else {
+        0
+    };
 
     // Populate the pooled `ws.row_map`. Invariant on entry: every entry
     // is `usize::MAX`. Mirror-clear at the end restores it.
@@ -1369,7 +1390,9 @@ fn factor_one_supernode(
     }
 
     // Step 1: Assemble original matrix entries into frontal, applying
-    // symmetric scaling D·A·D in place.
+    // symmetric scaling D·A·D in place. Own cols sit at frontal positions
+    // [own_col_offset, own_col_offset + own_ncol); for the standard path
+    // own_col_offset = 0, for the Schur swap path it's n_delayed_in.
     let scaling = scaling_pivot_order;
     let mut frontal_buf = std::mem::take(&mut ws.frontal_values);
     frontal_buf.clear();
@@ -1378,7 +1401,11 @@ fn factor_one_supernode(
         n: actual_nrow,
         data: frontal_buf,
     };
-    for (local_j, &gj) in row_indices[..own_ncol].iter().enumerate() {
+    for (k_local, &gj) in row_indices[own_col_offset..own_col_offset + own_ncol]
+        .iter()
+        .enumerate()
+    {
+        let local_j = own_col_offset + k_local;
         let s_j = scaling[gj];
         for k in permuted.col_ptr[gj]..permuted.col_ptr[gj + 1] {
             let gi = permuted.row_idx[k];

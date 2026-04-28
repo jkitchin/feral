@@ -25,7 +25,7 @@ LIBS := -L$(MUMPS_DIR)/lib -ldmumps -lmumps_common \
         -L$(OPENBLAS_DIR)/lib -lopenblas \
         -lpthread
 
-all: mumps mumps_bench mumps_amf_oracle
+all: mumps mumps_bench mumps_amf_oracle mumps_schur_bench
 
 mumps_bench: mumps_bench.F $(MUMPS_DIR)/lib/libdmumps.a
 	$(FC) $(FFLAGS) -o $@ $< $(LIBS)
@@ -37,6 +37,14 @@ mumps_bench: mumps_bench.F $(MUMPS_DIR)/lib/libdmumps.a
 mumps_amf_oracle: mumps_amf_oracle.F $(MUMPS_DIR)/lib/libdmumps.a
 	$(FC) $(FFLAGS) -o $@ $< $(LIBS)
 
+# Schur-complement oracle for feral F3.3 cross-validation. Runs
+# DMUMPS with ICNTL(19)=1 (centralized dense full-square) on a
+# user-supplied LISTVAR_SCHUR list and emits the dense Schur
+# block as raw little-endian f64 binary (column-major). Driven by
+# run_mumps_schur.py and consumed by src/bin/diag_schur_parity.rs.
+mumps_schur_bench: mumps_schur_bench.F $(MUMPS_DIR)/lib/libdmumps.a
+	$(FC) $(FFLAGS) -o $@ $< $(LIBS)
+
 # Build the MUMPS sequential libraries from ref/mumps using our template.
 mumps: $(MUMPS_DIR)/lib/libdmumps.a
 
@@ -45,7 +53,7 @@ $(MUMPS_DIR)/lib/libdmumps.a: Makefile.inc.mumps
 	$(MAKE) -C $(MUMPS_DIR) d
 
 clean:
-	rm -f mumps_bench mumps_amf_oracle *.o
+	rm -f mumps_bench mumps_amf_oracle mumps_schur_bench *.o
 
 mumps-clean:
 	$(MAKE) -C $(MUMPS_DIR) clean

@@ -4,6 +4,34 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed (2026-04-27) — F3.3 forest-Schur-etree postorder bug
+
+`schur_constrained_postorder` in `src/ordering/postorder.rs`
+emitted Schur nodes via DFS over the Schur subtree, which
+violates the `post[k] == k` tail identity that
+`symbolic_factorize_with_schur` relies on whenever the Schur
+etree is a forest (multiple Schur roots) rather than a single
+ascending chain. ACOPP30_0000 hit this with 11 Schur roots plus
+an internal chain — the resulting permutation reassigned the
+diagonal at col 174, producing max_rel_err = 0.997 vs the dense
+Schur oracle.
+
+Phase 2 now emits Schur nodes directly in ascending etree-index
+order, restoring the tail identity for arbitrary Schur-etree
+topology. Regression test
+`test_schur_postorder_forest_tail_identity` covers the minimal
+forest case (n=8, three Schur roots + internal Schur child).
+
+Corpus impact (`diag_schur_parity` on 250 matrices with MUMPS
+Schur sidecars):
+
+- Factor success: 68/250 → 250/250 (no factor failures).
+- Median max_rel_err vs MUMPS: 6.437e-13.
+- p90: 3.323e-9; p99: 2.059e-7; max: 1.033e-6 (ACOPR14_0002).
+- 136/250 within 1e-10 tolerance; 114/250 above (ACOPR14 family,
+  conditioning-driven BK pivot divergence — the dense oracle on
+  ACOPP30_0000 shows the same 9.8e-7 disagreement with MUMPS).
+
 ### Added (2026-04-27) — F2.2 MUMPS RINFOG cross-validation harness
 
 The MUMPS oracle (`external_benchmarks/mumps_oracle/`) now runs

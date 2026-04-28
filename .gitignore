@@ -26,3 +26,9 @@ tests/data/large/
 # Python bytecode caches (scripts/ is plain CLI scripts)
 __pycache__/
 *.pyc
+
+# MUMPS/SSIDS oracle binaries (rebuilt locally)
+external_benchmarks/mumps_oracle/mumps_bench
+external_benchmarks/mumps_oracle/mumps_amf_oracle
+external_benchmarks/mumps_oracle/mumps_schur_bench
+external_benchmarks/ssids_oracle/ssids_bench
