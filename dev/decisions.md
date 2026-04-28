@@ -2090,3 +2090,90 @@ residual.
   and 18:30 (corpus result).
 - `external_benchmarks/mumps_oracle/mumps_bench.F`,
   `run_mumps.py`, `src/bin/diag_cond_parity.rs` — the harness.
+
+## 2026-04-28 — `bench_solver_corpus` is the perf-tuning ground truth
+
+**Context.** The per-matrix `bench` (`src/bin/bench.rs`) walks ~154k
+KKT matrices through the FREE-FUNCTION API
+(`symbolic_factorize` + `factorize_multifrontal`). It re-runs symbolic
+on every matrix. A 2026-04-28 profile (`src/bin/profile_hot.rs`,
+samply ×4kHz, 200 reps × 7 representative matrices) reported
+`sym=64% factor=32% solve=4%` — the 64% sym share is an artifact of
+the bench harness, not of real production cost.
+
+**Reality of production workloads.** A real IPM tail re-factorizes
+the same KKT *pattern* hundreds of times per solve. feral has had
+a `Solver` (`src/numeric/solver.rs:85-208`) since the β refactor
+(decisions.md:1095-1140) that caches `SymbolicFactorization` across
+same-pattern re-factorizations and pools `FactorWorkspace`. The
+existing `bench_solver_reuse` (4 hardcoded families) demonstrated
+the win on a spot-check.
+
+**Decision.** Going forward, `bench_solver_corpus` (corpus-wide
+walk: group `<FAM>_NNNN.mtx` by family, run one persistent `Solver`
+per family vs the free-function loop) is the bench against which
+symbolic-phase optimizations are measured. Initial run on 534
+families × 19,410 iterates (cap=64/family):
+
+  aggregate speedup 1.70x   geomean 2.86x   p50 3.00x   p90 4.08x
+  symbolic share of freefn wall: 41.3% (down from 64% on profile_hot)
+
+**What does NOT change.** The per-matrix `bench` is retained for
+inertia/residual correctness sweeps and for per-matrix oracle ratio
+comparisons against MUMPS / SSIDS. Its 154k-matrix walk gives the
+breadth needed to surface tail-failure families. It is no longer the
+right venue for *perf* decisions.
+
+**Future-work guard.** Any optimization that targets MC64, METIS,
+postorder, or the numeric prologue should report numbers against
+`bench_solver_corpus`. A speedup that only shows on the per-matrix
+bench (which pays symbolic on every call) is suspect — it may be
+optimizing a workload that does not exist in production IPM use.
+
+**Files added.**
+- `src/bin/bench_solver_corpus.rs` (new bench).
+- `src/bin/profile_hot.rs` (samply target; supports the analysis).
+- `Cargo.toml`: `[profile.release] debug = true` so future samply
+  runs symbolicate cleanly.
+
+## 2026-04-28 — Decision NOT to adopt faer
+
+**Context.** User asked whether feral should adopt faer to fix
+generally-disappointing benchmark performance.
+
+**Investigation.** Profile (samply, atos symbolicated) showed:
+
+| % wall | function (inclusive) |
+|-------:|---|
+| 26.13% | `scaling::mc64::compute_matching` (Hungarian) |
+| 15.32% | `symbolic::run_external_ordering` → METIS ND |
+| 14.82% | `dense::factor::do_1x1_update` |
+| 11.22% | `dense::factor::factor_frontal_blocked_in_place` |
+| 10.49% | `ordering::postorder::postorder` |
+|  6.36% | `dense::schur_kernel::axpy_minus_unroll4_nofma` (self) |
+
+The actual SIMD inner kernel (`axpy_minus_unroll4_nofma`) is 6.4%
+self-time, already on faer's `pulp` SIMD primitive
+(Cargo.toml:106).
+
+**Decision.** Do not adopt faer beyond the existing `pulp`
+dependency. Rationale:
+
+1. ≥51% of wall is graph algorithms (MC64 + METIS + postorder)
+   that faer does not address.
+2. Dense-kernel headroom is bounded by `factor_frontal_blocked_in_place`
+   + `axpy_minus_unroll4_nofma` ≈ 12% wall, and the hot inner
+   loop is already on `pulp`. Realistic faer win: 3–6% wall.
+3. Adopting faer's blocked dense LDLᵀ as a black box would
+   contradict the "clean-room implementation from published papers"
+   constraint in CLAUDE.md.
+
+**Re-evaluation trigger.** If a future profile (against
+`bench_solver_corpus`) shows the dense kernel exceeding 25% of
+wall — e.g. after symbolic-phase wins land — revisit this decision
+for the dense path only.
+
+**Files referenced.**
+- `dev/journal/2026-04-28-01.org` — investigation log.
+- `dev/sessions/2026-04-28-01.md` — full session checkpoint.
+- `src/bin/profile_hot.rs` — the profiler harness.

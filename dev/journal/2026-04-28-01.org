@@ -1,0 +1,110 @@
+#+TITLE: Journal 2026-04-28-01
+#+STARTUP: showall
+
+* 06:30 :perf:profiling:bench:
+User asked whether we should adopt faer to speed up feral. Before
+answering, profiled the current bench to see where time actually
+goes. Built `src/bin/profile_hot.rs` looping 7 representative KKT
+matrices (HS118, BATCH, AVION2, HAHN1, VESUVIO, CRESC132 + BATCH_0500)
+through the full pipeline x200 reps. Stage breakdown via hand
+timers:
+
+  sym=64.4%  factor=31.7%  solve=3.9%
+
+Sampled with `samply record --rate 4000` (after `cargo install samply`
+and `[profile.release] debug = true`). Symbolicated via atos against
+the dSYM. Top inclusive functions in the profile_hot binary:
+
+  scaling::mc64::compute_matching     26.13%
+  symbolic::run_external_ordering     15.32%  (METIS ND)
+  ordering::postorder::postorder      10.49%
+  dense::factor::do_1x1_update        14.82%
+  dense::factor::factor_frontal_blocked_in_place  11.22%
+  dense::schur_kernel::axpy_minus_unroll4_nofma   6.36% (self)
+
+Top SELF was `axpy_minus_unroll4_nofma` at 6.36% — the actual SIMD
+inner kernel, already on faer's pulp primitive.
+
+Conclusion: faer cannot fix this. 51%+ of wall is graph algorithms
+(MC64 + METIS + postorder) that faer does not touch. Dense kernel
+upside ≤ 12% wall, half of that already captured by pulp.
+
+* 07:00 :perf:investigation:agent-team:
+Dispatched four parallel research agents:
+- spral-expert: SSIDS MC64 default policy
+- mumps-expert: MUMPS MC64 default policy and ICNTL(8) fall-through
+- Explore: feral MC64 wiring + symbolic stages + prologue map
+- Explore: prior-art search across decisions/tried-and-rejected/
+  research/journal for the three proposed interventions
+
+Findings:
+- SSIDS defaults to NO scaling (`spral/src/ssids/datatypes.f90:233`).
+- MUMPS SYM=2 defaults to MC64 BUT has a key skip rule: when
+  `(missing_diag + zero_diag) < N/10` it skips MC64 and falls
+  through to cheap symmetric Ruiz equilibration (SIMSCA), at
+  `mumps/src/dana_aux.F:1388-1416`. This is the canonical
+  KKT-aware skip.
+- feral has Policy 4 fallback (correctness, not perf gating)
+  and an `Auto` route that picks MC64 when `diag_only/n >= 0.3`
+  (arrow detection); it does NOT have MUMPS's inverse "skip when
+  diagonal is mostly populated" test.
+- feral already has a `Solver` struct in src/numeric/solver.rs
+  that caches symbolic across re-factorizations of the same
+  pattern — `bench_solver_reuse.rs` exercises it on 4 hardcoded
+  families. The pattern fingerprint is weak (n + col_ptr.len +
+  row_idx.len) but works for the IPM use case.
+- The per-matrix `bench` walks 154k matrices via the FREE-FUNCTION
+  API and recomputes symbolic on every call. This explains the
+  64% sym share in profile_hot — it's an artifact of the bench
+  harness, not real production cost.
+
+* 07:20 :perf:bench:solver-corpus:
+Wrote `src/bin/bench_solver_corpus.rs` to measure the realistic
+IPM-tail picture: walk the full kkt corpus, group by family
+(`<FAM>_NNNN.mtx` → `FAM`), per family run two scenarios — one
+persistent Solver and free-function loop — and report per-family
+plus aggregate speedups.
+
+Smoke test on 12 named families:
+  geomean speedup 1.89x  p10 1.45x  p50 1.79x  p90 3.40x  max 3.45x
+  implied symbolic share of freefn wall: 30.8%
+
+Full corpus run (534 families, 19410 iterates, cap=64 per family):
+  aggregate speedup: 1.70x
+  geomean speedup:   2.86x
+  p50: 3.00x  p90: 4.08x  max: 6.41x
+  symbolic calls:    986 (vs 19410 free-fn = 19.7x fewer)
+  implied symbolic share of freefn wall: 41.3%
+
+The conservative pattern-fingerprint catches genuine pattern changes
+within a family (e.g. VESUVIO: 22 sym calls in 64 iterates because
+NNZ varies between iterates), but reuse rate is still ~20x on average.
+
+Bottom 10 families by speedup show small/medium matrices where
+either symbolic is small relative to numeric (VESUVIO 1.00x), or
+the Solver bookkeeping costs more than it saves (BENNETT5 0.82x,
+worth a future investigation but not material — single outlier in
+534).
+
+* 07:40 :perf:conclusion:
+The bench harness (`src/bin/bench.rs`) is measuring an unrealistic
+workload. The right perf gate going forward is `bench_solver_corpus`.
+Optimization effort that targets symbolic-phase cost should be
+evaluated against the realistic 41% sym share, not the artificial
+64% from per-matrix free-function loops.
+
+Did NOT modify `bench.rs` — the per-matrix walk is still useful
+for inertia/residual correctness sweeps and oracle ratio
+comparisons on individual matrices. Both bench harnesses now
+co-exist; `bench_solver_corpus` is the new perf-tuning ground truth.
+
+Next session candidates (in order of estimated wall savings):
+1. Implement MUMPS's missing-diagonal MC64 skip (canonical KKT
+   gating; cite mumps/src/dana_aux.F:1411). Estimated 15-20%
+   wall savings on freefn bench, 5% on solver-corpus bench.
+2. Strengthen PatternFingerprint with XXH3(col_ptr || row_idx).
+   Eliminates the false-cache-hit footgun without changing
+   throughput on legitimate IPM workloads.
+3. Profile bench_solver_corpus with samply to see what dominates
+   *after* symbolic is amortized. The dense kernel + assembly
+   should be more visible.
