@@ -236,3 +236,81 @@ remaining lever is continuing to widen the dense kernel
 
 Profile JSON saved at
 `dev/profiles/bench_solver_corpus_2026-04-28.json.gz` (+ syms).
+
+* 14:30 :perf:dense-kernel:attribution:bail-reasons:
+Walked the 2026-04-28 samply stacks to attribute leaf
+axpy_*_unroll4_nofma samples to callers (n=9039). Result:
+
+| caller                            | wall % |
+|-----------------------------------+--------|
+| do_1x1_update (scalar fallback)   |  3.6%  |
+| do_2x2_update (scalar fallback)   |  1.0%  |
+| peek_ahead_replay (panel)         |  1.5%  |
+| factor_frontal blocked (Phase A)  |  0.8%  |
+| schur_panel...strided_dual (NR=2) |  1.4%  |
+
+Combined scalar fallback = 4.6% wall. Combined panel work =
+2.4% wall (excl. dual kernel). Best-case NR=4 widening saves
+1.4% * 0.5 = 0.7% wall. Scalar fallback is 6.6x larger lever.
+
+Built diagnostic: PANEL_DIAG_ENABLED atomic gate + 10 counters
+(panel_full/partial/delayed, fallback_2x2_{need_swap,swap_1x1_wins,
+lapack_1x1_wins,growth_or_det}, scalar_tail_steps, pivots_inline,
+pivots_scalar). Wired at 4 panel bail sites in lblt_panel_frontal,
+panel exit in factor_frontal_blocked_in_place, post-fallback scalar
+step, and scalar tail branch. Probe binary
+src/bin/probe_panel_attribution.rs runs across 10 representative
+matrices.
+
+Probe output (aggregate over 9 matrices that succeeded; CHAINWOO
+factor failed):
+
+  pivots: in=491 (86.1%) scal=79 (13.9%) tail=49
+  panels: full=16 part=23 dly=0
+  bails(2x2): swap=19 (82.6%) w11=2 (8.7%) lpk=2 (8.7%) g/d=0 (0.0%)
+
+**83% of panel bails are swap-required 2x2** (r != col+1). This
+is exactly the case Phase A explicitly deferred per
+dev/plans/dense-kernel-blas3.md ("Out of scope: 2x2 with symmetric
+swap, still ScalarFallback").
+
+Per-matrix breakdown:
+- VESUVIA, HS118, BATCH: 100% inline, no bails. Clean.
+- ACOPR30: 84.6% swap-2x2 bails. Strongest signal.
+- VESUVIO: 0% inline, 100% fallback. Worst case.
+- HAHN1, AVION2, CRESC100, CRESC132: mixed but swap-2x2 dominates.
+
+Decision: defer NR=4 dual widening. Next dense-kernel lever is
+Phase A2 — extend lblt_panel_frontal to handle swap-required 2x2
+inline. Growth + det checks already exist; new work is the
+symmetric swap in-place inside the panel preserving the
+deferred-Schur invariant.
+
+Estimated wall impact: ~2-3% (eliminates do_2x2_update + most
+post-bail do_1x1_update sweeps for ~80% of bails). Need a real
+plan + research note before implementation.
+
+Committed as 97c16e5 (research note + diagnostic + probe binary +
+Cargo.toml entry).
+
+* 15:00 :plan:dense-kernel:phase-a2:
+Wrote dev/plans/dense-kernel-w2-2x2-swap.md and supporting research
+note dev/research/dense-kernel-w2-2x2-swap.md for Phase A2 (swap-2x2
+inline). Key argument: swap_rows_cols already operates correctly on
+the deferred panel state because (a) its row swap loop ranges
+j in 0..p which covers the full committed L block, and (b) the
+symmetric swap commutes with the rank-c update by Π·M·Π^T algebra.
+
+The new precondition is two-column peek-ahead: both col+1 and r must
+be brought to scalar-state before the swap, because both are read
+during gamma_r, swap-1x1 reject, and growth/det checks.
+
+Plan sequenced as: (1) tests-first with three new fixtures
+(bare swap-2x2, chain, swap-then-1x1), (2) no-op refactor to thread
+&mut perm into lblt_panel_frontal, (3) impl + new INLINE_2X2_SWAP_OK
+counter, (4) re-profile.
+
+Estimated wall impact 2-3% aggregate, ~10-20% on ACOPR30. Committed
+as 19bb815.
+
+Tasks 10-14 in TaskList track the implementation steps.
