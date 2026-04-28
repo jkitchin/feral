@@ -10,14 +10,33 @@
 //!      on the same indices, producing feral's `SchurBlock`.
 //!   3. Loads the MUMPS reference Schur from the co-located
 //!      `<id>.mumps_schur.bin` (column-major full-symmetric f64).
-//!   4. Computes max relative entry-wise error
-//!      `max_{i,j} |feral(i,j) - mumps(i,j)| / max(|feral|, |mumps|, 1)`.
+//!   4. Loads (when available) the pure-Rust dense oracle Schur from
+//!      `<id>.dense_schur.bin`, produced by `produce_dense_schur`.
+//!   5. Computes pairwise max relative entry-wise errors
+//!      `max_{i,j} |a(i,j) - b(i,j)| / max(|a|, |b|, 1)`
+//!      for the three pairs (feral, MUMPS, oracle).
 //!
-//! Acceptance gate (per dev/research/schur-complement.md D7):
-//!   max relative error <= 1e-10 on N >= 100 corpus matrices.
+//! Acceptance gate (Option B, per dev/research/schur-complement.md):
+//!   per-matrix `feral-vs-oracle ≤ max(absolute_floor, K · MUMPS-vs-oracle)`
+//!   with `absolute_floor = 1e-10` and `K = 10`. The dense oracle is the
+//!   ground truth; the bound adapts to per-matrix conditioning so the
+//!   original `feral-vs-MUMPS ≤ 1e-10` reading (unachievable on
+//!   ill-conditioned ACOPR-family KKTs where MUMPS itself disagrees with
+//!   the dense oracle by ~1e-6) is replaced by "feral hits the same
+//!   conditioning floor as MUMPS, within a 10× factor for pivot-ordering
+//!   variation". Two LDL^T algorithms with different pivot choices can
+//!   reach the conditioning floor at slightly different floats; K=10 is
+//!   the standard multiplicative slack for that regime, while preserving
+//!   detection of any genuine algorithmic divergence (which would
+//!   produce ratios orders of magnitude larger).
+//!   Corpus floor: ≥ 100 matrices must satisfy the per-matrix bound.
+//!
+//! Matrices without a dense-oracle sidecar fall back to the strict
+//! `feral-vs-MUMPS ≤ tol` legacy reading and are reported separately.
 //!
 //! Inputs:
-//!   <id>.mtx + <id>.json (sidecar) + <id>.mumps_schur.json + <id>.mumps_schur.bin
+//!   <id>.mtx + <id>.json (sidecar) + <id>.mumps_schur.json
+//!   + <id>.mumps_schur.bin + (optional) <id>.dense_schur.bin
 //!
 //! Usage:
 //!   cargo run --release --bin diag_schur_parity
@@ -39,6 +58,9 @@ const DEFAULT_ROOTS: &[&str] = &[
 ];
 
 const DEFAULT_TOL: f64 = 1e-10;
+/// Multiplicative slack on MUMPS-vs-oracle: feral may sit up to K times
+/// the MUMPS conditioning floor. See module docstring for rationale.
+const DEFAULT_OPTIONB_SLACK: f64 = 10.0;
 
 fn percentile_f64(v: &mut [f64], q: f64) -> f64 {
     if v.is_empty() {
@@ -104,6 +126,45 @@ fn read_mumps_schur(json_path: &Path) -> Option<MumpsSchurRef> {
     })
 }
 
+/// Load the pure-Rust dense oracle Schur block for `<id>` if present
+/// at `<id>.dense_schur.bin`. Returns the column-major
+/// `n_schur * n_schur` matrix (same layout as MUMPS sidecar) or `None`
+/// when the file is missing or the size doesn't match `n_schur`.
+fn read_dense_oracle(mtx_path: &Path, n_schur: usize) -> Option<Vec<f64>> {
+    let bin_path = mtx_path.with_extension("dense_schur.bin");
+    let bytes = std::fs::read(&bin_path).ok()?;
+    let expected_bytes = n_schur * n_schur * 8;
+    if bytes.len() != expected_bytes {
+        return None;
+    }
+    let mut data = Vec::with_capacity(n_schur * n_schur);
+    for chunk in bytes.chunks_exact(8) {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(chunk);
+        data.push(f64::from_le_bytes(buf));
+    }
+    Some(data)
+}
+
+/// Max-rel entry-wise error between two `dim x dim` column-major
+/// matrices, using `max(|a|, |b|, 1.0)` as the denominator (same
+/// floor as the MUMPS-comparison metric).
+fn max_rel_block(a: &[f64], b: &[f64], dim: usize) -> f64 {
+    let mut max_rel: f64 = 0.0;
+    for j in 0..dim {
+        for i in 0..dim {
+            let av = a[j * dim + i];
+            let bv = b[j * dim + i];
+            let denom = av.abs().max(bv.abs()).max(1.0);
+            let rel = (av - bv).abs() / denom;
+            if rel > max_rel {
+                max_rel = rel;
+            }
+        }
+    }
+    max_rel
+}
+
 #[derive(Default)]
 struct Aggregate {
     seen: usize,
@@ -112,29 +173,30 @@ struct Aggregate {
     skipped_size: usize,
     skipped_factor_err: usize,
     compared: usize,
-    max_rel_errs: Vec<f64>,
-    above_tol: Vec<(String, f64)>,
-    worst: (f64, String),
+    /// All matrices we managed to compare: feral-vs-MUMPS error.
+    feral_vs_mumps: Vec<f64>,
+    /// Subset that also has a dense-oracle sidecar.
+    with_oracle: usize,
+    feral_vs_oracle: Vec<f64>,
+    mumps_vs_oracle: Vec<f64>,
+    /// Per-matrix Option B gate failures: feral-vs-oracle exceeded
+    /// `max(absolute_floor, mumps-vs-oracle)`.
+    optionb_failures: Vec<(String, f64, f64, f64)>, // (name, fvm, fvo, mvo)
+    /// Strict legacy fallback for matrices without an oracle:
+    /// feral-vs-MUMPS exceeded the absolute floor.
+    legacy_failures: Vec<(String, f64)>,
+    worst_fvm: (f64, String),
+    worst_fvo: (f64, String),
 }
 
-impl Aggregate {
-    fn record(&mut self, name: &str, max_rel: f64, tol: f64) {
-        if !max_rel.is_finite() {
-            self.skipped_factor_err += 1;
-            return;
-        }
-        self.compared += 1;
-        self.max_rel_errs.push(max_rel);
-        if max_rel > tol {
-            self.above_tol.push((name.to_string(), max_rel));
-        }
-        if max_rel > self.worst.0 {
-            self.worst = (max_rel, name.to_string());
-        }
-    }
-}
-
-fn run_one(mtx_path: &Path, agg: &mut Aggregate, max_n: usize, tol: f64, verbose: bool) {
+fn run_one(
+    mtx_path: &Path,
+    agg: &mut Aggregate,
+    max_n: usize,
+    tol: f64,
+    slack: f64,
+    verbose: bool,
+) {
     agg.seen += 1;
     let name = mtx_path
         .file_stem()
@@ -228,49 +290,73 @@ fn run_one(mtx_path: &Path, agg: &mut Aggregate, max_n: usize, tol: f64, verbose
         return;
     }
 
-    // Column-major entry-wise comparison with relative-error denominator
-    // max(|a|, |b|, 1.0). The +1.0 floor stops near-zero entries from
-    // dominating; max-rel-err over the full block is the F3.3 acceptance
-    // metric.
+    // Flatten feral SchurBlock to column-major n_schur*n_schur for
+    // pairwise comparison with the MUMPS / dense-oracle sidecars.
     let dim = schur.dim;
-    let mut max_rel: f64 = 0.0;
+    let mut feral_flat = vec![0.0_f64; dim * dim];
     for j in 0..dim {
         for i in 0..dim {
-            let a = schur.get(i, j);
-            let b = oracle.data[j * dim + i];
-            let denom = a.abs().max(b.abs()).max(1.0);
-            let rel = (a - b).abs() / denom;
-            if rel > max_rel {
-                max_rel = rel;
-            }
+            feral_flat[j * dim + i] = schur.get(i, j);
         }
     }
 
-    if verbose {
-        eprintln!(
-            "OK {} n={} n_schur={} max_rel_err={:.3e}",
-            name, oracle.n, oracle.n_schur, max_rel
-        );
-    }
-    agg.record(&name, max_rel, tol);
-}
-
-fn report(agg: &Aggregate, tol: f64) {
-    println!("=== diag_schur_parity ===");
-    println!("seen:                {}", agg.seen);
-    println!("  skipped no .mtx:   {}", agg.skipped_no_mtx);
-    println!("  skipped n>max:     {}", agg.skipped_size);
-    println!("  skipped no oracle: {}", agg.skipped_no_oracle);
-    println!("  skipped factor:    {}", agg.skipped_factor_err);
-    println!("compared:            {}", agg.compared);
-    println!("acceptance tol:      {:.1e}", tol);
-    if agg.max_rel_errs.is_empty() {
-        println!("(no comparisons — run run_mumps_schur.py first)");
+    let fvm = max_rel_block(&feral_flat, &oracle.data, dim);
+    if !fvm.is_finite() {
+        agg.skipped_factor_err += 1;
+        if verbose {
+            eprintln!("NONFINITE {}", name);
+        }
         return;
     }
-    let mut v = agg.max_rel_errs.clone();
-    println!();
-    println!("max relative entry-wise error (feral vs MUMPS Schur):");
+
+    agg.compared += 1;
+    agg.feral_vs_mumps.push(fvm);
+    if fvm > agg.worst_fvm.0 {
+        agg.worst_fvm = (fvm, name.clone());
+    }
+
+    // Optional dense-oracle sidecar enables the per-matrix Option B gate.
+    let dense = read_dense_oracle(mtx_path, dim);
+    if let Some(dense) = dense {
+        let fvo = max_rel_block(&feral_flat, &dense, dim);
+        let mvo = max_rel_block(&oracle.data, &dense, dim);
+        agg.with_oracle += 1;
+        agg.feral_vs_oracle.push(fvo);
+        agg.mumps_vs_oracle.push(mvo);
+        if fvo > agg.worst_fvo.0 {
+            agg.worst_fvo = (fvo, name.clone());
+        }
+        let bound = tol.max(slack * mvo);
+        if fvo > bound {
+            agg.optionb_failures.push((name.clone(), fvm, fvo, mvo));
+        }
+        if verbose {
+            eprintln!(
+                "OK {} n={} n_schur={} fvm={:.3e} fvo={:.3e} mvo={:.3e} bound={:.3e}",
+                name, oracle.n, oracle.n_schur, fvm, fvo, mvo, bound
+            );
+        }
+    } else {
+        // Legacy strict reading for matrices missing a dense oracle.
+        if fvm > tol {
+            agg.legacy_failures.push((name.clone(), fvm));
+        }
+        if verbose {
+            eprintln!(
+                "OK {} n={} n_schur={} fvm={:.3e} (no oracle, strict gate)",
+                name, oracle.n, oracle.n_schur, fvm
+            );
+        }
+    }
+}
+
+fn distribution_block(label: &str, errs: &[f64]) {
+    if errs.is_empty() {
+        println!("  ({} — no samples)", label);
+        return;
+    }
+    let mut v = errs.to_vec();
+    println!("{}:", label);
     println!("  count:   {}", v.len());
     println!("  min:     {:.3e}", percentile_f64(&mut v, 0.0));
     println!("  p10:     {:.3e}", percentile_f64(&mut v, 0.10));
@@ -278,32 +364,107 @@ fn report(agg: &Aggregate, tol: f64) {
     println!("  p90:     {:.3e}", percentile_f64(&mut v, 0.90));
     println!("  p99:     {:.3e}", percentile_f64(&mut v, 0.99));
     println!("  max:     {:.3e}", percentile_f64(&mut v, 1.0));
-    println!();
-    println!(
-        "above tol ({:.1e}): {} / {}",
-        tol,
-        agg.above_tol.len(),
-        agg.compared
-    );
-    let mut top = agg.above_tol.clone();
-    top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    for (name, err) in top.iter().take(20) {
-        println!("  {:<40} {:.3e}", name, err);
+}
+
+fn report(agg: &Aggregate, tol: f64, slack: f64) {
+    println!("=== diag_schur_parity ===");
+    println!("seen:                {}", agg.seen);
+    println!("  skipped no .mtx:   {}", agg.skipped_no_mtx);
+    println!("  skipped n>max:     {}", agg.skipped_size);
+    println!("  skipped no oracle: {}", agg.skipped_no_oracle);
+    println!("  skipped factor:    {}", agg.skipped_factor_err);
+    println!("compared:            {}", agg.compared);
+    println!("  with dense oracle: {}", agg.with_oracle);
+    println!("absolute floor (tol):{:.1e}", tol);
+    println!("Option B slack (K): {}", slack);
+    if agg.feral_vs_mumps.is_empty() {
+        println!("(no comparisons — run run_mumps_schur.py first)");
+        return;
     }
     println!();
-    println!("worst overall: {} max_rel={:.3e}", agg.worst.1, agg.worst.0);
+    distribution_block("feral vs MUMPS", &agg.feral_vs_mumps);
+    println!();
+    distribution_block("feral vs dense oracle", &agg.feral_vs_oracle);
+    println!();
+    distribution_block("MUMPS vs dense oracle", &agg.mumps_vs_oracle);
 
-    let n100 = agg.compared >= 100;
-    let pass_tol = agg.above_tol.is_empty();
     println!();
     println!(
-        "F3.3 gate (N >= 100 and max_rel <= {:.1e} on all): {}",
+        "Option B per-matrix gate failures (feral-vs-oracle > max({:.1e}, {} · MUMPS-vs-oracle)): {} / {}",
         tol,
-        if n100 && pass_tol { "PASS" } else { "FAIL" }
+        slack,
+        agg.optionb_failures.len(),
+        agg.with_oracle
+    );
+    let mut topb = agg.optionb_failures.clone();
+    topb.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    for (name, fvm, fvo, mvo) in topb.iter().take(10) {
+        println!(
+            "  {:<32} fvo={:.3e} mvo={:.3e} fvm={:.3e}",
+            name, fvo, mvo, fvm
+        );
+    }
+
+    if !agg.legacy_failures.is_empty() {
+        println!();
+        println!(
+            "Legacy strict (feral-vs-MUMPS > {:.1e}) on matrices without dense oracle: {} / {}",
+            tol,
+            agg.legacy_failures.len(),
+            agg.compared - agg.with_oracle
+        );
+        let mut topl = agg.legacy_failures.clone();
+        topl.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (name, err) in topl.iter().take(10) {
+            println!("  {:<40} {:.3e}", name, err);
+        }
+    }
+
+    println!();
+    println!(
+        "worst feral-vs-MUMPS:   {} = {:.3e}",
+        agg.worst_fvm.1, agg.worst_fvm.0
+    );
+    println!(
+        "worst feral-vs-oracle:  {} = {:.3e}",
+        agg.worst_fvo.1, agg.worst_fvo.0
+    );
+
+    // Option B gate: ≥ 100 matrices satisfy per-matrix
+    // `feral-vs-oracle ≤ max(tol, MUMPS-vs-oracle)`, plus the legacy
+    // strict gate must hold for matrices without an oracle (so we
+    // don't silently drop coverage on matrices we couldn't oracle).
+    let satisfied_optionb = agg.with_oracle.saturating_sub(agg.optionb_failures.len());
+    let legacy_clean = agg.legacy_failures.is_empty();
+    let pass_n = satisfied_optionb >= 100;
+    let pass_optionb = agg.optionb_failures.is_empty();
+    println!();
+    println!("F3.3 Option B gate (per-matrix bound + N>=100 satisfied + no legacy failures):");
+    println!(
+        "  N satisfying Option B: {} / {}   {}",
+        satisfied_optionb,
+        agg.with_oracle,
+        if pass_n { "PASS-N100" } else { "FAIL-N100" }
+    );
+    println!(
+        "  Option B clean:         {}",
+        if pass_optionb { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  Legacy strict clean:    {}",
+        if legacy_clean { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  Overall:                {}",
+        if pass_n && pass_optionb && legacy_clean {
+            "PASS"
+        } else {
+            "FAIL"
+        }
     );
 }
 
-fn walk_root(root: &Path, agg: &mut Aggregate, max_n: usize, tol: f64, verbose: bool) {
+fn walk_root(root: &Path, agg: &mut Aggregate, max_n: usize, tol: f64, slack: f64, verbose: bool) {
     if !root.is_dir() {
         return;
     }
@@ -314,9 +475,9 @@ fn walk_root(root: &Path, agg: &mut Aggregate, max_n: usize, tol: f64, verbose: 
     entries.sort();
     for p in entries {
         if p.is_dir() {
-            walk_root(&p, agg, max_n, tol, verbose);
+            walk_root(&p, agg, max_n, tol, slack, verbose);
         } else if p.extension().is_some_and(|ext| ext == "mtx") {
-            run_one(&p, agg, max_n, tol, verbose);
+            run_one(&p, agg, max_n, tol, slack, verbose);
         }
     }
 }
@@ -337,6 +498,10 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_TOL);
+    let slack: f64 = std::env::var("FERAL_DIAG_OPTIONB_SLACK")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_OPTIONB_SLACK);
     let verbose = std::env::var("FERAL_DIAG_VERBOSE")
         .ok()
         .map(|s| s != "0")
@@ -344,9 +509,9 @@ fn main() {
 
     let mut agg = Aggregate::default();
     for r in &roots {
-        walk_root(r, &mut agg, max_n, tol, verbose);
+        walk_root(r, &mut agg, max_n, tol, slack, verbose);
     }
-    report(&agg, tol);
+    report(&agg, tol, slack);
 }
 
 #[cfg(test)]

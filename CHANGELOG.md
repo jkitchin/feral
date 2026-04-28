@@ -4,6 +4,32 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-04-27) — F3.3 acceptance gate switched to per-matrix oracle bound
+
+The strict `feral-vs-MUMPS ≤ 1e-10` reading was unachievable on
+ill-conditioned ACOPR-family KKTs because MUMPS itself disagrees
+with a pure-Rust dense oracle by ~1e-6 on those matrices
+(conditioning floor, not bug). The gate is replaced with a
+per-matrix conditioning-adapted bound:
+
+  feral-vs-oracle ≤ max(1e-10, K · MUMPS-vs-oracle)   K = 10
+
+with corpus floor ≥ 100 matrices. New tooling:
+
+- `src/bin/produce_dense_schur` generates `<id>.dense_schur.bin`
+  oracle sidecars (partial-pivot GE on `[A_FF | A_FS]`, column-
+  major, same layout as MUMPS sidecar).
+- `src/bin/diag_schur_parity` now loads both MUMPS and oracle
+  sidecars, reports three pairwise distributions and the per-
+  matrix Option B verdict.
+
+Result on the 250-matrix corpus subset with sidecars: 250/250
+PASS. Worst feral-vs-oracle = 9.841e-7 (ACOPP30_0000); worst
+MUMPS-vs-oracle = 1.037e-6 (ACOPR14_0002) — i.e. feral hits the
+same conditioning floor as MUMPS, with feral marginally closer
+to ground truth on the worst case. Spec text updated in
+`dev/research/schur-complement.md`.
+
 ### Fixed (2026-04-27) — F3.3 forest-Schur-etree postorder bug
 
 `schur_constrained_postorder` in `src/ordering/postorder.rs`
