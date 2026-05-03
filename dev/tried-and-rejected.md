@@ -1269,3 +1269,52 @@ Same algorithm, different regime, different right answer.
   the literal rule would have destroyed.
 - `dev/plans/mc64-missing-diag-skip.md`: the plan that was
   written then shelved.
+
+---
+
+## 2026-05-03 — Phase B: shape-dispatched `nemin` within `Auto`
+
+**Hypothesis.** After Phase A landed `nemin = 16` as the global
+default, layer a shape-dispatched override on top of
+`AmalgamationStrategy::Auto` so path-like fixtures get
+`nemin = 32` (no `factor_nnz` cost, hypothesized small wall win
+from larger BLAS-3 panels) and bushy fixtures stay at `nemin = 16`
+(Phase A's choice).
+
+**What was tried.** Added `DEFAULT_NEMIN`, `NEMIN_PATH_LIKE = 32`,
+`NEMIN_BUSHY = 16` constants in `supernode.rs` and an override
+branch in `mod.rs:594-625` that flipped `nemin` only when the
+caller had not changed it from `DEFAULT_NEMIN`. Built
+`src/bin/diag_phase_b_nemin_sweep.rs` covering MUONSINE_0000
+(path-like), KIRBY2_0007 / ACOPR30_0067 / SWOPF_0000 (bushy).
+
+**Why rejected.**
+
+1. Path-like `factor_nnz` is **invariant** in `nemin` (MUONSINE
+   stays at 4606 across {8, 16, 24, 32, 48}) — there is no memory
+   motivation for the dispatch.
+2. Path-like wall-time signal is **not robust** under measurement
+   noise. Two consecutive sweep runs disagreed on direction:
+   run 1 nemin=48 was 8% faster than nemin=16 (195 vs 212 µs);
+   run 2 nemin=48 was 29% slower (273 vs 211 µs). The
+   200-µs-base scale is below the level where wall comparisons
+   on this CPU are trustworthy.
+3. Bushy fixtures uniformly confirmed Phase A's `nemin = 16`
+   choice: KIRBY2 ties at 8/16, then `factor_nnz` grows +9% at 32,
+   +26% at 48. ACOPR30 and SWOPF show similar monotonic growth.
+4. Per the decision rule pre-registered in
+   `dev/research/phase-b-shape-dispatched-nemin.md`: "If both
+   buckets prefer 16 (within ≤ 5% factor wall and ≤ 10%
+   factor_nnz of any other tested value), keep the global default
+   and document that Phase B is a no-op — don't add code that
+   doesn't earn its keep."
+
+**Reverted.** The implementation was reverted in the same session.
+`SupernodeParams::default()` keeps the literal `nemin: 16`; the
+constants and override branch were removed; the sweep binary is
+retained for any future reconsideration with a larger or
+differently-stratified fixture set.
+
+References: `dev/research/phase-b-shape-dispatched-nemin.md`,
+`dev/research/factor-nnz-residual-gap.md`, commit `4c0fc80`
+(Phase A).
