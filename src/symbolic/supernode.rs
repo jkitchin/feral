@@ -112,7 +112,7 @@ pub enum OrderingPreprocess {
 impl Default for SupernodeParams {
     fn default() -> Self {
         Self {
-            nemin: 32,
+            nemin: 16,
             preprocess: OrderingPreprocess::Auto,
             small_leaf: SmallLeafParams::default(),
             amalgamation_strategy: AmalgamationStrategy::default(),

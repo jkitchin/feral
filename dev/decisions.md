@@ -2313,3 +2313,82 @@ near the call site, one new test file.
 
 References: `dev/research/build-row-indices-fix.md`,
 `tests/build_row_indices_trailing_invariant.rs`.
+
+
+## 2026-05-03 — `SupernodeParams::default().nemin` lowered 32 → 16
+
+**Decision.** `SupernodeParams::default().nemin`
+(src/symbolic/supernode.rs:115) drops from 32 to 16. `nemin` is the
+minimum supernode size below which the symbolic phase merges
+parent and child during amalgamation: smaller `nemin` ⇒ thinner
+supernodes ⇒ tighter L storage and less pass-through padding;
+larger `nemin` ⇒ fatter supernodes with more BLAS-3 work per node
+but more pass-through inflation.
+
+**Why.** Two converging signals:
+
+1. The previous `nemin = 32` was inherited from an early
+   dense-kernel study (BLAS-3 sweet spot for inner GEMM panels)
+   and out of step with reference multifrontal solvers. MUMPS
+   uses `KEEP(63) = 5`; SSIDS's canonical config sits in the same
+   low band. `32` is the high-end outlier even among solvers
+   that explicitly trade L NNZ for kernel throughput.
+
+2. `dev/research/factor-nnz-residual-gap.md` (this session)
+   established that the post-`build_row_indices`-fix 1.6-2× gap
+   between numeric `factor_nnz` and Σ col_counts (GnP) is
+   dominantly **pass-through row padding** — rows from children's
+   contribs flowing through ancestors that don't pivot on those
+   rows, stored as zeros in the dense trailing rectangle. Smaller
+   supernodes have less inflation: each supernode's pass-through
+   cost scales with `(num_nrow − sym_nrow) × nelim`.
+
+**Evidence.** Sweep over
+{nemin ∈ 8, 16, 32, 64} × {AMD, METIS-ND} on PoissonControl
+K=50 and K=158 (this session journal `2026-05-03-01.org`):
+
+| K   | nemin | ordering | factor_nnz | Δ vs nemin=32 | factor_med_us | Δ wall |
+|-----|-------|----------|-----------:|--------------:|--------------:|-------:|
+| 50  | 32    | AMD      |    323,643 |       —       |         4,200 |   —    |
+| 50  | 16    | AMD      |    240,167 |          -26% |         3,440 |   -18% |
+| 50  | 8     | AMD      |    191,074 |          -41% |         3,300 |   -21% |
+| 158 | 32    | AMD      |  4,610,269 |       —       |        85,099 |   —    |
+| 158 | 16    | AMD      |  3,660,090 |          -21% |        86,572 |    +2% |
+| 158 | 8     | AMD      |  3,107,011 |          -33% |       103,400 |   +21% |
+
+`nemin = 16` is the sweet spot: substantial memory savings on both
+sizes, factor wall improved on the small case and ≈ par on the
+large case. `nemin = 8` recovers more memory but the wall regresses
+on K=158 (more pivot-block boundaries amortizing fewer GEMM3 rows
+per supernode). `nemin = 16` aligns with the "halfway between feral's
+prior 32 and MUMPS's 5" intuition and is what the data picks.
+
+The corpus bench (Phase 2.8.1 dense + sparse exit partition) retains
+its P90 ratio targets vs MUMPS at `nemin = 16`:
+small-frontal P90 = 1.33 (target ≤ 2.0, PASS), medium P90 = 1.70
+(target ≤ 3.0, PASS) on the dense path; sparse 1.56 / 1.56 PASS.
+Geomean factor ratio vs MUMPS is unchanged at 0.22 / 0.43 across the
+two partitions.
+
+**Why not also flip `AmalgamationStrategy::Auto` shape-dispatched
+nemin (planned Phase B).** Phase B (path-like → small `nemin`,
+bushy → larger `nemin`) is the right next step but layers logic
+onto an existing dispatcher and wants its own evaluation. This
+decision is the cheap, mechanical default flip that requires no
+new code path; Phase B will adjust `nemin` per-shape on top of
+this new baseline.
+
+**Touched call-sites.** One line in `SupernodeParams::default`.
+Lib tests and the `build_row_indices_trailing_invariant.rs`
+integration tests pass after relaxing one over-tight assertion
+(`nrow_matches_symbolic` → `nrow_at_least_symbolic`) — the prior
+`assert_eq!` was conceptually wrong (it conflated
+`Supernode.nrow` with the working frontal nrow), only happening to
+hold on the small fixtures because at `nemin = 32` those fixtures
+had no pass-through padding. The trailing-row floor invariant —
+the half of the test file that actually guards the
+`build_row_indices` fix — is unaffected and still passes.
+
+References: `dev/research/factor-nnz-residual-gap.md`,
+`dev/journal/2026-05-03-01.org` 14:00 entry,
+`dev/research/build-row-indices-fix.md`.

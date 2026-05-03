@@ -4,6 +4,34 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed (2026-05-03) — `SupernodeParams::default().nemin` 32 → 16
+
+`SupernodeParams::default().nemin` (src/symbolic/supernode.rs:115)
+drops from 32 to 16. `nemin` is the minimum supernode size below
+which the symbolic phase merges parent and child nodes during
+amalgamation. A larger `nemin` yields fewer, fatter supernodes (more
+BLAS-3 work per node, more pass-through row padding); a smaller
+`nemin` yields more, thinner supernodes (tighter L storage, more
+pivot-block boundaries).
+
+The previous `nemin = 32` was inherited from an early dense-kernel
+study and out of step with reference solvers — MUMPS uses 5,
+SSIDS's canonical configuration sits in the same low band. The new
+`nemin = 16` lands halfway, validated by a sweep over
+{8, 16, 32, 64} on PoissonControl K=50 and K=158 (both AMD and
+METIS-ND): nemin=16 is the sweet spot for `factor_nnz` and factor
+wall — K=50 `factor_nnz` -26%, factor wall -18%; K=158 `factor_nnz`
+-21%, factor wall ≈ par. The corpus bench retains its dense P90
+ratio targets (small-frontal ≤ 2.0 PASS, medium ≤ 3.0 PASS).
+
+The slack recovered comes from the pass-through row padding
+diagnosed in `dev/research/factor-nnz-residual-gap.md`: smaller
+supernodes have less inflation from rows that flow through ancestors
+not pivoting on those rows.
+
+References: `dev/research/factor-nnz-residual-gap.md`,
+`dev/decisions.md` 2026-05-03 nemin entry.
+
 ### Fixed (2026-05-03) — `build_row_indices` upper-triangle pollution
 
 `build_row_indices` (src/numeric/factorize.rs:2257-2298) now filters
