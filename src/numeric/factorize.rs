@@ -1415,6 +1415,23 @@ fn factor_one_supernode(
         actual_nrow,
         expanded_ncol
     );
+    // Trailing-row invariant: every row index at positions
+    // [expanded_ncol..actual_nrow) must be strictly above the supernode's
+    // own columns. Rows < first_col + own_ncol indicate either upper-triangle
+    // pollution from a symmetrized pattern or a stale contrib block leaking
+    // into the parent's frontal. See dev/research/build-row-indices-fix.md.
+    #[cfg(debug_assertions)]
+    {
+        let first_col = snode.first_col;
+        let own_last = first_col + own_ncol;
+        for (pos, &r) in row_indices.iter().enumerate().skip(expanded_ncol) {
+            debug_assert!(
+                r >= own_last,
+                "trailing row {} at position {} of supernode (first_col={}, own_ncol={}, expanded_ncol={}) is < first_col+own_ncol={}",
+                r, pos, first_col, own_ncol, expanded_ncol, own_last
+            );
+        }
+    }
     // F3.2b layout fix: when this is a Schur supernode (`nvschur > 0`)
     // that received delayed columns from descendants (`n_delayed_in > 0`),
     // the default layout above places own (Schur) cols at frontal
@@ -2190,10 +2207,26 @@ fn build_row_indices(
     // BTreeSet<usize> but with O(1) insert and a single O(m log m) sort
     // at the end to match the BTreeSet iteration order that callers
     // (and the parity tests) depend on.
+    //
+    // Filter `r < first_col + own_ncol` (the supernode's own col range
+    // upper bound): `full_pattern` is the fully-symmetrized A pattern
+    // (csc.rs:186), so iterating column j gives both lower-tri (r > j,
+    // legitimate trailing) and upper-tri (r < j, columns already
+    // eliminated by ancestors of those rows) entries. Upper-tri rows are
+    // not legitimate trailing rows in a multifrontal frontal — they
+    // would be padded with zeros and inflate factor_nnz without
+    // contributing structurally. The same filter on the children's
+    // contrib loop is defensive: a clean child cannot produce trailing
+    // rows < parent.first_col, but the filter guards against historical
+    // contribs built by an older buggy build_row_indices.
+    let own_last = first_col + own_ncol;
     build_trailing.clear();
     for j in first_col..first_col + own_ncol {
         for k in full_pattern.col_ptr[j]..full_pattern.col_ptr[j + 1] {
             let r = full_pattern.row_idx[k];
+            if r < own_last {
+                continue;
+            }
             if !build_seen[r] {
                 build_seen[r] = true;
                 build_trailing.push(r);
@@ -2203,6 +2236,9 @@ fn build_row_indices(
     for &child_idx in &snode.children {
         if let Some(contrib) = &contrib_blocks[child_idx] {
             for &r in &contrib.row_indices[contrib.n_delayed..] {
+                if r < own_last {
+                    continue;
+                }
                 if !build_seen[r] {
                     build_seen[r] = true;
                     build_trailing.push(r);

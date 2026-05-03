@@ -2263,3 +2263,53 @@ and land them as separate commits before the semantics change.
 
 References: `dev/sessions/2026-04-28-03.md`,
 `dev/journal/2026-04-28-01.org` 16:30 entry, commit `dfe169e`.
+
+## 2026-05-03 — `build_row_indices` filters upper-triangle pollution
+
+**Decision.** `build_row_indices` (src/numeric/factorize.rs:2257-2298)
+now skips trailing-row candidates with `r < first_col + own_ncol`.
+A `cfg(debug_assertions)` invariant assertion at
+src/numeric/factorize.rs:1469-1485 enforces, for every supernode,
+that every row at frontal positions
+`[own_ncol + n_delayed_in .. nrow)` is `>= first_col + own_ncol`.
+
+**Why.** `full_pattern = matrix.symmetric_pattern()` is the fully
+symmetrized A pattern; iterating column j gives both legitimate
+lower-tri rows (r > j) and upper-tri rows (r < j) that correspond
+to columns already eliminated by ancestors of those rows. Without
+filtering, upper-tri rows polluted every supernode's frontal,
+propagated up the etree through child contrib blocks, and inflated
+`factor_nnz` by 7-19× over the textbook L-fill (Σ col_counts via
+Gilbert-Ng-Peyton). On PoissonControl K=158 the symptom was
+factor_nnz = 46.7M vs symbolic 2.4M and a ~650× factor-time gap vs
+MUMPS. `column_counts_gnp` was already filtering correctly
+(column_counts.rs:135 `if partner <= i { continue; }`); only the
+numeric path was over-collecting.
+
+**Why this was performance, not correctness.** Rogue rows are
+upper-triangle entries A[r, j] for r < j. Numeric assembly only
+writes lower-tri interactions, so the rogue rows received zeros
+during assembly and never affected pivot decisions at the supernodes
+where they appeared as dead weight. Inertia is bit-identical before
+and after the fix on every test fixture and on PoissonControl K=50,
+K=158. The fix is purely structural — drop dead rows from frontals.
+
+**Evidence.** PoissonControl K=50 factor_nnz dropped from 1,363,445
+to 323,643 (4.2×) and factor time from 231,075 µs to 3,542 µs (65×).
+K=158 factor_nnz dropped from 46,734,661 to 4,610,269 (10×) and
+factor time from seconds to 85,099 µs. All 216 lib + integration
+tests pass identically to before the fix. New regression test
+`tests/build_row_indices_trailing_invariant.rs` covers four
+multifrontal-path fixtures (n > N_TINY=16) with both the trailing-row
+floor invariant and symbolic ↔ numeric nrow parity assertions. The
+debug_assert was first added before the filter changes — it fired on
+6 existing tests, confirming the bug's reach. After both the assert
+and the filter were in place all 216 tests pass.
+
+**Touched call-sites.** Two changes inside
+`build_row_indices` (factorize.rs:2274-2287 native pattern loop,
+factorize.rs:2289-2298 child contrib loop), one debug assertion
+near the call site, one new test file.
+
+References: `dev/research/build-row-indices-fix.md`,
+`tests/build_row_indices_trailing_invariant.rs`.

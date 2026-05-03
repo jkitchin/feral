@@ -4,6 +4,39 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed (2026-05-03) — `build_row_indices` upper-triangle pollution
+
+`build_row_indices` (src/numeric/factorize.rs:2257-2298) now filters
+trailing-row candidates with `r < first_col + own_ncol`. The
+function iterates `full_pattern.col_ptr[j]` for j in the supernode's
+own column range; `full_pattern` is the fully-symmetrized A pattern,
+so each column carries both lower-tri (r > j) and upper-tri (r < j)
+entries. Upper-tri rows correspond to columns already eliminated by
+ancestors of those rows in the etree — including them as trailing
+rows polluted every supernode's frontal, propagated up through child
+contrib blocks, and inflated `factor_nnz` by 7-19× over the textbook
+L-fill (Σ col_counts).
+
+Performance only: numeric assembly writes nothing into the rogue
+rows (they receive zeros), so they were dead weight in BK pivoting,
+not a source of wrong answers. Inertia is bit-identical across the
+test corpus before and after the fix.
+
+PoissonControl K=50 factor_nnz dropped from 1,363,445 to 323,643
+(4.2×) and factor time from 231,075 µs to 3,542 µs (65×). K=158
+factor_nnz dropped from 46,734,661 to 4,610,269 (10×) and factor
+time from seconds to 85,099 µs. All 216 lib + integration tests
+pass.
+
+A `cfg(debug_assertions)` invariant assertion at
+src/numeric/factorize.rs:1469-1485 verifies the trailing-row floor
+on every supernode in debug builds. New regression test file
+`tests/build_row_indices_trailing_invariant.rs` (8 tests) covers
+four multifrontal-path fixtures (n > N_TINY=16).
+
+References: `dev/research/build-row-indices-fix.md`,
+`dev/decisions.md` 2026-05-03 entry.
+
 ### Added (2026-04-28) — `bench_solver_corpus` realistic-IPM perf bench
 
 New `src/bin/bench_solver_corpus.rs` walks `data/matrices/kkt/`,
