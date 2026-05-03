@@ -281,6 +281,12 @@ fn i7_quality_escalation_loop_terminates_with_correct_inertia() {
 /// `factor()` should observe the bumped pivot threshold via
 /// `solver.pivot_threshold()`, and the new factorization should
 /// still succeed.
+///
+/// Note: `NumericParams::default()` baseline `pivot_threshold` is
+/// `1e-8` (MA27 `cntl[1]` default, issue #2), so the W5
+/// "0.0 → 0.01" first-jump rule does not fire from `Solver::new()`;
+/// the first `increase_quality` bump applies the geometric rule
+/// directly: 1e-8 → 1e-8^0.75 = 1e-6.
 #[test]
 fn i8_solver_lifetime_state_persists() {
     let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
@@ -288,17 +294,26 @@ fn i8_solver_lifetime_state_persists() {
     let mut solver = Solver::new();
     let _ = solver.factor(&csc, None);
     assert_eq!(solver.quality_level(), QualityLevel::Baseline);
+    assert_eq!(
+        solver.pivot_threshold(),
+        1e-8,
+        "Solver::new() baseline pivot threshold should be MA27's \
+         cntl[1] default 1e-8 (issue #2)"
+    );
 
-    // First bump on default (InfNorm) scaling: stage 1 is no-op,
-    // pivot jumps to 0.01.
+    // First bump on default (Auto) scaling: stage 1 is no-op (Auto
+    // is not Identity), fall through to stage 2. Baseline is
+    // already 1e-8, so bump applies geometric rule:
+    //   (1e-8)^0.75 = 10^(-8*0.75) = 10^-6 = 1e-6.
     assert!(solver.increase_quality());
     assert_eq!(solver.quality_level(), QualityLevel::PivotRaised);
-    assert_eq!(solver.pivot_threshold(), 0.01);
+    let want_after_1 = 1e-8_f64.powf(0.75);
+    assert!((solver.pivot_threshold() - want_after_1).abs() < 1e-15);
 
-    // Second bump: 0.01^0.75 ≈ 0.0316.
+    // Second bump: (1e-6)^0.75 = 10^-4.5 ≈ 3.162e-5.
     assert!(solver.increase_quality());
-    let want = 0.01_f64.powf(0.75);
-    assert!((solver.pivot_threshold() - want).abs() < 1e-15);
+    let want_after_2 = want_after_1.powf(0.75);
+    assert!((solver.pivot_threshold() - want_after_2).abs() < 1e-15);
 
     // Re-factor: state persists, factor still succeeds, symbolic
     // cache reused (same pattern).
@@ -307,7 +322,7 @@ fn i8_solver_lifetime_state_persists() {
     assert!(matches!(status, FactorStatus::Success));
     assert_eq!(solver.symbolic_call_count(), n_sym_before);
     // Pivot threshold did not get reset by factor().
-    assert!((solver.pivot_threshold() - want).abs() < 1e-15);
+    assert!((solver.pivot_threshold() - want_after_2).abs() < 1e-15);
 }
 
 /// `Solver::min_diagonal()` returns `None` before any successful factor.

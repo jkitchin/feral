@@ -65,6 +65,31 @@ four multifrontal-path fixtures (n > N_TINY=16).
 References: `dev/research/build-row-indices-fix.md`,
 `dev/decisions.md` 2026-05-03 entry.
 
+### Changed (2026-05-02) — `NumericParams::default()` `pivot_threshold = 1e-8`
+
+`NumericParams::default()` now sets `bk.pivot_threshold = 1e-8`,
+matching MA27's `cntl[1]` reference default (Ipopt's
+`ma27_pivtol`). Previously the default inherited
+`BunchKaufmanParams::default()`'s `0.0`, which silently disabled
+the column-relative pivot rejection, rook rescue, and delayed-
+pivoting rescue paths — producing exact-zero multiplier outputs on
+rank-deficient KKT-augmented LS-init systems (issue #2).
+
+`BunchKaufmanParams::default()` (the dense entry point) is
+unchanged at `0.0` per the 2026-04-13 dense-vs-sparse split.
+Callers that explicitly construct `BunchKaufmanParams` and pass it
+to `NumericParams::with_bk` are unaffected; in-tree sparse callers
+that already opt in to `0.01` (benches, parity tests) keep their
+override.
+
+The `Solver::increase_quality` cascade still includes the W5
+"0.0 → 0.01" first-jump rule for callers that explicitly disable
+the threshold; from `Solver::new()` the cascade now goes
+1e-8 → 1e-6 → 10^-4.5 → ... → `pivtol_max = 0.5`.
+
+References: `dev/research/issue-2-kkt-pivot-default.md`,
+`dev/plans/issue-2-kkt-pivot-default.md`, issue #2.
+
 ### Added (2026-04-28) — `bench_solver_corpus` realistic-IPM perf bench
 
 New `src/bin/bench_solver_corpus.rs` walks `data/matrices/kkt/`,

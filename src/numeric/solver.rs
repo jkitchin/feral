@@ -316,9 +316,16 @@ impl Solver {
     ///
     /// Stage 2 (`* → PivotRaised → Exhausted`): bump
     /// `bk.pivot_threshold`. From 0.0 jump to 0.01 (W5 special
-    /// case); else `min(pivtol_max, threshold^0.75)`. When the
-    /// new threshold reaches `pivtol_max`, transition to
-    /// `Exhausted` for the *next* call.
+    /// case, kept for callers that explicitly disable the threshold
+    /// via `with_bk` + `BunchKaufmanParams::default`); else
+    /// `min(pivtol_max, threshold^0.75)`. When the new threshold
+    /// reaches `pivtol_max`, transition to `Exhausted` for the
+    /// *next* call.
+    ///
+    /// `NumericParams::default()` already starts at
+    /// `pivot_threshold = 1e-8` (MA27 default, issue #2), so for
+    /// `Solver::new()` callers the W5 special case is dead and the
+    /// cascade goes 1e-8 → 1e-6 → 10^-4.5 → ... → `pivtol_max`.
     pub fn increase_quality(&mut self) -> bool {
         const FIRST_PIVOT_THRESHOLD: f64 = 0.01;
         const PIVOT_EXPONENT: f64 = 0.75;

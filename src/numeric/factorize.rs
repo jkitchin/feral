@@ -22,7 +22,7 @@ use std::time::Instant;
 /// factorizations of structurally identical KKTs (the IPM use
 /// case). See `dev/research/pounce-integration-interface.md` and
 /// `dev/plans/scaling-in-numeric.md` (β refactor).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NumericParams {
     /// Dense BK kernel parameters.
     pub bk: BunchKaufmanParams,
@@ -218,10 +218,61 @@ pub struct ProfileReport {
     pub validation_warnings: Vec<String>,
 }
 
+impl Default for NumericParams {
+    /// Sparse-multifrontal default. Sets `bk.pivot_threshold = 1e-8`
+    /// to match MA27's `cntl[1]` default, which is also Ipopt's
+    /// `ma27_pivtol` default. This activates the column-relative
+    /// pivot rejection (and downstream rook rescue / delayed
+    /// pivoting) on rank-deficient KKT-augmented systems while
+    /// staying conservative enough not to reject legitimate pivots
+    /// on Identity-scaled (un-equilibrated) matrices that consumers
+    /// like ripopt feed in directly.
+    ///
+    /// `BunchKaufmanParams::default()` (the dense entry point used
+    /// directly by `dense::factor::factor`) intentionally stays at
+    /// `pivot_threshold = 0.0` per the 2026-04-13 dense-vs-sparse
+    /// split: dense has no delayed-pivoting / rook-rescue
+    /// infrastructure to land rejected pivots in. See
+    /// `dev/decisions.md:325-344` and
+    /// `dev/research/issue-2-kkt-pivot-default.md`.
+    ///
+    /// Why `1e-8` instead of the SSIDS/MUMPS canonical `0.01`:
+    /// `0.01` was validated on MC64-equilibrated matrices where
+    /// `|d| >= 0.01 * col_max` rejects pivots that are tiny relative
+    /// to a normalized column. ripopt's KKT path runs Identity
+    /// scaling (it owns scaling at a higher layer to preserve the
+    /// inertia signal — see ripopt `feral_direct.rs:84-91`), so the
+    /// threshold fires on raw-value ratios that have not been
+    /// equilibrated. `1e-8` matches Ipopt's reference choice for
+    /// exactly this configuration; the in-tree sparse callers that
+    /// run with MC64/InfNorm scaling continue to override
+    /// explicitly to `0.01`.
+    ///
+    /// Issue #2 surfaced the gap: ripopt and other consumers that
+    /// build `NumericParams::default()` were inheriting `0.0` (via
+    /// `BunchKaufmanParams::default()`), which silently disabled
+    /// every saddle-point rescue path on rank-deficient KKT-augmented
+    /// LS-init systems and caused exact-zero multipliers on
+    /// non-structurally-zero rows.
+    fn default() -> Self {
+        Self {
+            bk: BunchKaufmanParams {
+                pivot_threshold: 1e-8,
+                ..BunchKaufmanParams::default()
+            },
+            scaling: ScalingStrategy::default(),
+            small_leaf: SmallLeafBatch::default(),
+            profiler: None,
+        }
+    }
+}
+
 impl NumericParams {
     /// Construct a `NumericParams` from a `BunchKaufmanParams`,
     /// using the default scaling strategy. Convenience for
-    /// callers that only customize BK behavior.
+    /// callers that only customize BK behavior. The supplied `bk`
+    /// is used verbatim — no `pivot_threshold` override is applied,
+    /// in contrast to `Default::default()`.
     pub fn with_bk(bk: BunchKaufmanParams) -> Self {
         Self {
             bk,

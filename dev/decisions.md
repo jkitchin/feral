@@ -2264,6 +2264,81 @@ and land them as separate commits before the semantics change.
 References: `dev/sessions/2026-04-28-03.md`,
 `dev/journal/2026-04-28-01.org` 16:30 entry, commit `dfe169e`.
 
+## 2026-05-02 — `NumericParams::default()` adopts `pivot_threshold = 1e-8`
+
+**Decision.** `NumericParams::default()`
+(`src/numeric/factorize.rs`) replaces `#[derive(Default)]` with a
+manual `impl Default` that sets `bk.pivot_threshold = 1e-8`, matching
+MA27's `cntl[1]` reference default — equivalently Ipopt's
+`ma27_pivtol` default.
+
+`BunchKaufmanParams::default()` stays at `pivot_threshold = 0.0`,
+preserving the 2026-04-13 dense-vs-sparse split decision (dense
+has no delayed-pivoting / rook-rescue infrastructure to land
+rejected pivots in; sparse does).
+
+**Why.** Issue #2 surfaced that ripopt and other consumers
+constructing `NumericParams::default()` were inheriting `0.0` via
+`BunchKaufmanParams::default()`. On rank-deficient KKT-augmented
+LS-init systems (`A = [I J^T; J diag]` with `m > n`, equality rows
+having `D = 0`, e.g. CUTEst `arki0003`), the SSIDS-style
+scale-invariant 2×2 det-floor in `factor.rs:2232-2243` rejects
+saddle blocks regardless of `pivot_threshold`, but the 1×1
+fallback's rook-rescue fast-path is dead at `pivot_threshold = 0`.
+The result: small pivots that MA27 would rescue via threshold
+partial pivoting got "accepted" with huge `1/d` rank-1 updates,
+propagated cancellation through the elimination tail, and produced
+exact-zero L columns and multipliers on non-structurally-zero
+rows. On `arki0003` this manifested as 58 zero `y_d` entries
+clustered at `_scon[2052..2138]`.
+
+**Why 1e-8 and not 0.01 (SSIDS/MUMPS canonical).** Both values
+re-enable the column-relative pivot rejection that the bug needs.
+The SSIDS canonical `u = 0.01` was validated on MC64-equilibrated
+inputs where every column has `colmax ≈ 1`, so a `1e-2` relative
+floor is roughly an absolute `1e-2` floor. ripopt's `FeralLdl`
+runs with `ScalingStrategy::Identity` (preserving inertia signal —
+see `feral_direct.rs:84-91`), where column maxes span IPM-scaled
+magnitudes. A `0.01` threshold there rejects substantially more
+pivots and forces them through the delayed-pivoting cascade; the
+MA27 `1e-8` value is conservative in that regime and is what Ipopt
+ships with for the same KKT pattern. Sparse callers that have
+explicitly chosen `0.01` (the in-tree benches, parity tests) keep
+their override. This decision sets a default that is correct for
+the unscaled-KKT consumer path (ripopt's primary use case) without
+changing those existing call-sites.
+
+The 2026-04-12 decision documented `0.01` as the canonical
+benchmark default backed by SSIDS/MUMPS empirical evidence on
+MC64-scaled corpora. The 2026-04-13 decision split dense (0.0)
+from sparse (0.01) for opt-in callers. This decision closes the
+remaining gap by giving the default consumer path a non-zero
+threshold while choosing the value that matches the canonical
+unscaled-KKT solver in the optimization domain (MA27/Ipopt).
+
+**Touched call-sites.** Six diagnostic bins, two integration tests
+(`tests/multi_rhs.rs`, `tests/ldlt_compress.rs`), one example
+(`examples/triage_bratu3d.rs`), and `Solver::new` all flip from
+`0.0` to `1e-8` baseline. Pivots in those tests are well-conditioned
+so the threshold change is a no-op; all 146+ tests pass under the
+new default. The `i8_solver_lifetime_state_persists` test in
+`tests/pounce_interface.rs` was updated to reflect that the W5
+"0.0 → 0.01" first-jump rule no longer fires from baseline; the
+cascade now reads 1e-8 → 1e-6 → 10^-4.5 → ... → `pivtol_max = 0.5`.
+The W5 rule is kept for callers that explicitly disable the
+threshold via `with_bk(BunchKaufmanParams::default())`.
+
+**Commitment.** ripopt's `set_pivot_threshold(1e-8)` workaround at
+`src/linear_solver/feral_direct.rs:128-131` (referenced in issue
+#2) becomes redundant after this change. ripopt-side cleanup is
+tracked in ripopt's own repo, not in feral.
+
+References: `dev/research/issue-2-kkt-pivot-default.md`,
+`dev/plans/issue-2-kkt-pivot-default.md`, issue
+[#2](https://github.com/jkitchin/feral/issues/2).
+
+---
+
 ## 2026-05-03 — `build_row_indices` filters upper-triangle pollution
 
 **Decision.** `build_row_indices` (src/numeric/factorize.rs:2257-2298)
