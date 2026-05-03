@@ -1,0 +1,158 @@
+#+TITLE: 2026-05-03-01 — build_row_indices upper-triangle pollution
+
+* 09:30 :investigation:perf:multifrontal:
+Picked up from prior compaction. User confirmed "primarily a
+performance issue, not an accuracy issue" framing. Diagnosis carried
+over: numeric factor_nnz 19× over symbolic textbook L-fill on
+PoissonControl K=158 (46.7M vs 2.4M). Worst-case at root supernode
+1429 (first_col=7467, ncol=33): symbolic predicts nrow=33, numeric
+reports nrow=3545, with 3512 rows < first_col. Only 33 rows are in
+own_range — the remaining 3512 are upper-triangle leakage.
+
+Root cause: ~build_row_indices~ at src/numeric/factorize.rs:2241-2308
+iterates ~full_pattern.col_ptr[j]~ for j ∈ own_cols.
+~full_pattern = matrix.symmetric_pattern()~ (csc.rs:186-239) is the
+fully symmetrized A pattern, so each column carries both r > j
+(legitimate trailing) and r < j (already-eliminated upper-tri)
+entries. The latter pollute every frontal and propagate up through
+child contrib blocks. Symbolic ~column_counts_gnp~ filters
+~partner <= i~ correctly (column_counts.rs:135); numeric did not.
+
+* 09:45 :plan:test-driven:
+Plan accepted by user: (1) cfg(debug_assertions) invariant assertion
+right after build_row_indices to catch the bug in existing tests,
+(2) filter ~r < first_col + own_ncol~ in both the native pattern
+loop and the children's contrib loop, (3) new regression test file
+covering both the trailing-row floor and symbolic↔numeric nrow
+parity, (4) verify all 216 tests pass + perf gate on K=50/K=158.
+
+* 10:00 :diagnose:debug-assert:
+Added debug_assert at factorize.rs:1469-1485 walking all positions
+[expanded_ncol..nrow) of row_indices, asserting r >= first_col +
+own_ncol. ~cargo test --lib~ failed on 6 tests:
+
+#+BEGIN_EXAMPLE
+schur_block_full_square_storage
+schur_block_matches_hand_computed_for_small_kkt
+schur_block_solve_roundtrip_after_factorize
+schur_multi_supernode_tail_matches_oracle
+schur_user_order_preserved_when_reversed
+test_summary_one_liner
+#+END_EXAMPLE
+
+Each failure pinpointed an upper-tri row at the first trailing
+position. Schur-block tests had first_col=4, own_ncol=2 with row 0
+showing up at position 2 — that's column 0 of the F-block leaking
+through symmetrized col 4.
+
+* 10:20 :fix:filter:
+Applied ~if r < own_last { continue; }~ guard at both the native
+pattern loop (factorize.rs:2274-2287) and the child contrib loop
+(factorize.rs:2289-2298). Added rationale comment block above
+explaining the symmetric-pattern semantics.
+
+~cargo test --lib~ now: 208 passed, 0 failed. Same on the full
+sweep ~cargo test~ — every test file with non-zero cases passes.
+
+* 10:35 :perf:gate:
+Built diag_poisson_kkt --release and re-ran K=50 and K=158:
+
+#+BEGIN_EXAMPLE
+K=50  before: factor_nnz=1,363,445  factor=231,075 µs  inertia=(+5000,-2500)
+K=50  after:  factor_nnz=  323,643  factor=  3,542 µs  inertia=(+5000,-2500)
+K=158 before: factor_nnz=46,734,661 factor= seconds   inertia=(+49928,-24964)
+K=158 after:  factor_nnz= 4,610,269 factor= 85,099 µs inertia=(+49928,-24964)
+#+END_EXAMPLE
+
+Factor time dropped 65× on K=50 and ~100× on K=158. Inertia
+bit-identical. Worst-case nrow_growth dropped from 107.42× (root) to
+4.62× (a mid-tree supernode with one delayed pivot). The remaining
+~1.6-1.9× factor_nnz vs Σ col_counts is explained by delayed-pivot
+fill plus contribution-block storage that the textbook count omits.
+
+* 10:50 :test:regression:
+Wrote tests/build_row_indices_trailing_invariant.rs with 8 tests:
+4× ~assert_trailing_invariant~ (tridiag_30, poisson_2d_5x5,
+small_kkt_saddle, disjoint_tridiag) and 3× ~assert_nrow_matches_symbolic~
+plus 1 solve-residual gate. All fixtures use n > 16 to bypass the
+N_TINY dense fast-path.
+
+First attempt failed on a 6-row diag-block fixture: numeric merged
+two disjoint 3-col blocks into a single 6×6 frontal because n=6 ≤
+N_TINY. Replaced with disjoint_tridiag(12) (n=24) which exercises
+the multifrontal path. All 8 tests pass.
+
+* 11:05 :doc:checkpoint:
+Wrote dev/research/build-row-indices-fix.md (full diagnosis with
+before/after numbers and test fixture list). Appended decision
+2026-05-03 to dev/decisions.md. Added Fixed entry to CHANGELOG.md
+Unreleased section.
+
+* 11:15 :verify:lint:
+~cargo clippy --lib~ clean. ~cargo clippy --test
+build_row_indices_trailing_invariant~ clean. ~cargo clippy --all-targets~
+fails on pre-existing issues in unrelated files
+(tests/sparse_postorder.rs doc-list-without-indentation, examples/parity_config_sweep
+unused field, multiple ~ok().expect()~ across older test files) — these
+predate this session and come from a Rust toolchain bump. Not in
+scope for this fix. Lib + new test pass clippy strictly.
+
+* 14:00 :investigation:factor-nnz:gap-analysis:
+User asked next: investigate the remaining 1.6-2× gap between
+numeric factor_nnz and Σ col_counts after the build_row_indices fix.
+Specifically how much is delayed-pivot fill vs contribution-block
+storage, and whether there's slack to recover.
+
+Instrumented diag_poisson_kkt with a per-supernode breakdown:
+true_L_nnz_in_own_cols (Σ col_counts in own range), sym_supernodal
+padded (own_ncol*(own_ncol+1)/2 + (sym.nrow-own_ncol)*own_ncol), and
+numeric_padded (factor_nnz formula). Two deltas: Δ_amalg = sym_padded
+- true_L; Δ_passthrough = numeric_padded - sym_padded.
+
+#+BEGIN_EXAMPLE
+K=50:  Σcc=143667 sym_padded=131071 numeric=323643
+       Δ_amalg=-12596 Δ_passthrough=+192572 (100% on n_delayed_in=0)
+       0 delayed pivots, 1430/1430 supernodes have n_delayed_in=0
+K=158: Σcc=2447001 sym_padded=2202355 numeric=4610269
+       Δ_amalg=-244646 Δ_passthrough=+2407914
+         of which +1741427 (72%) on n_delayed_in=0 nodes (13514/13868)
+       367 delayed pivots, max=2 per supernode
+#+END_EXAMPLE
+
+Conclusions:
+
+1. Delayed pivots are NOT the main source of the residual gap.
+   K=50 has zero delayed pivots and exhibits the same 2.25× ratio.
+   K=158's 367 delayed pivots only account for ~28% of the
+   passthrough delta.
+
+2. The dominant gap source is **pass-through row padding** in the
+   dense trailing block. Children's contrib rows that aren't in any
+   of the parent supernode's own-col L patterns get absorbed into
+   the parent's frontal as zero rows × nelim cols, and then passed
+   up to the grandparent. The numeric factor_nnz formula counts
+   those zero entries as stored entries.
+
+3. Δ_amalg is negative because Supernode.nrow at supernode.rs:358 is
+   set from col_counts[first_col].max(ncol) — the L count for the
+   FIRST column of the supernode, not the row union across all the
+   supernode's columns. Cosmetic accounting artifact, not slack.
+
+4. Worst-case on K=158: supernode 2537 with 24 children. sym says
+   nrow=32 (no trailing) because col_counts[12635]=32; numeric finds
+   nrow=148 because the 24 children push 116 trailing rows through.
+   116×33 = 3828 zero entries stored in this single supernode's
+   trailing block.
+
+5. Slack analysis: this gap is normal for dense supernodal
+   multifrontal storage and matches MUMPS/SSIDS reported ratios.
+   Three mechanisms could narrow it but none are free wins —
+   amalgamation tuning (nemin), compressed L storage (slower
+   solves), or better ordering (ND vs AMD; per Issue #3 to be
+   re-evaluated post-fix).
+
+Wrote dev/research/factor-nnz-residual-gap.md with the full
+breakdown and decision tree. No code changes — investigation
+concluded that the residual gap is structural and the proposed
+mechanisms to reduce it require multi-axis tradeoffs out of scope
+for a one-shot fix.

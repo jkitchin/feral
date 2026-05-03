@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-04-28T15:21:53Z
+Generated: 2026-05-03T18:14:15Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,18 +59,18 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
-dfe169e feat(dense): A2 swap-2x2 inline at panel start (c==0)
-9a576ef test(blocked_ldlt): A2 swap-2x2 fixtures (bare, chain, then-1x1)
-414b376 journal(2026-04-28-01): A2 plan + research note appended
-19bb815 plan(A2): swap-required 2x2 inline — research note + plan
-97c16e5 diag(dense): panel/scalar attribution counters + probe binary
+3b4f248 fix(numeric): NumericParams::default() sets pivot_threshold = 1e-8
+fbedff9 research(phase-b): shape-dispatched nemin REJECTED — sweep null
+4c0fc80 perf(symbolic): drop default nemin 32 -> 16 for tighter L
+9b2665f fix(numeric): build_row_indices skips upper-triangle pollution
+6bdca43 session: 2026-04-28-03 checkpoint — Phase A2 c==0 swap-2x2 lands
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-c05646289503a55b)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-d7178b1424e0147f)
 
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok
