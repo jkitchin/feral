@@ -2618,9 +2618,9 @@ mod tests {
     /// hand-built oracle in src/symbolic tests:
     /// - Non-Schur block diag(1,2,3,4) at positions 0..4
     /// - Schur block (positions 4,5):
-    ///     [1.5, 0.2; 0.2, 2.5]
+    ///   [1.5, 0.2; 0.2, 2.5]
     /// - Coupling A_FS:
-    ///     col 4 has rows {0:0.5, 2:0.7}; col 5 has rows {1:0.3, 3:0.9}
+    ///   col 4 has rows {0:0.5, 2:0.7}; col 5 has rows {1:0.3, 3:0.9}
     fn small_kkt_6x6_for_schur() -> CscMatrix {
         let mut rows = Vec::new();
         let mut cols = Vec::new();

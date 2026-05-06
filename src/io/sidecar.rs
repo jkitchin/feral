@@ -108,6 +108,6 @@ mod tests {
         }"#;
         let sc: KktSidecar = serde_json::from_str(json).unwrap();
         let rhs = sc.finite_rhs().unwrap();
-        assert!((rhs[0] - 123.456789012345678).abs() < 1e-10);
+        assert!((rhs[0] - 123.456_789_012_345_68).abs() < 1e-10);
     }
 }

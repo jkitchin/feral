@@ -221,7 +221,7 @@ mod tests {
         let kappa = estimate_condition_1norm(&m, &factors).unwrap();
         // True value is exactly 1e6; estimator should be within 2x.
         assert!(
-            kappa >= 0.5e6 && kappa <= 2.0e6,
+            (0.5e6..=2.0e6).contains(&kappa),
             "diagonal kappa {} not within 2x of 1e6",
             kappa
         );

@@ -7,6 +7,7 @@ description = "SCOTCH-style nested-dissection fill-reducing ordering (Pellegrini
 authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]
 repository = "https://github.com/jkitchin/feral"
 homepage = "https://github.com/jkitchin/feral"
+readme = "README.md"
 keywords = ["sparse", "ordering", "scotch", "nested-dissection", "linear-algebra"]
 categories = ["mathematics", "science"]
 

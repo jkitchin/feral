@@ -1418,7 +1418,7 @@ mod tests {
 
     #[test]
     fn axpy_minus_unroll4_nofma_is_bit_exact_vs_scalar() {
-        let mut rng = Xorshift64::new(0xB17_EAC70_0042_F00Du64);
+        let mut rng = Xorshift64::new(0xB17E_AC70_0042_F00D_u64);
         for &len in LENGTH_SWEEP {
             let src: Vec<f64> = (0..len).map(|_| rng.next_f64()).collect();
             let dst_init: Vec<f64> = (0..len).map(|_| rng.next_f64()).collect();
@@ -1681,7 +1681,7 @@ mod tests {
 
     #[test]
     fn axpy2_minus_unroll4_nofma_is_bit_exact_vs_scalar() {
-        let mut rng = Xorshift64::new(0xB17_EAC70_BAAD_F00Du64);
+        let mut rng = Xorshift64::new(0xB17E_AC70_BAAD_F00D_u64);
         for &len in LENGTH_SWEEP {
             let src0: Vec<f64> = (0..len).map(|_| rng.next_f64()).collect();
             let src1: Vec<f64> = (0..len).map(|_| rng.next_f64()).collect();

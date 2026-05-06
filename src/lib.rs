@@ -4,6 +4,9 @@
 // unwrap in `src/`, replacing the ad-hoc grep check in CI.
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(not(test), deny(clippy::expect_used))]
+// Style lints that fire only in test scaffolding — relaxed under cfg(test).
+// The lib build keeps default clippy strictness.
+#![cfg_attr(test, allow(clippy::needless_range_loop))]
 
 pub mod dense;
 pub mod error;

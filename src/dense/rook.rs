@@ -323,9 +323,10 @@ mod tests {
     use super::*;
 
     fn default_params_u(u: f64) -> BunchKaufmanParams {
-        let mut p = BunchKaufmanParams::default();
-        p.pivot_threshold = u;
-        p
+        BunchKaufmanParams {
+            pivot_threshold: u,
+            ..BunchKaufmanParams::default()
+        }
     }
 
     /// Test 2 matrix from `tests/rook_rescue.rs`: rook walks

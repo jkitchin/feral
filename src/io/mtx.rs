@@ -228,8 +228,8 @@ mod tests {
 ";
         let m = parse_mtx(mtx, "test").unwrap();
         assert_eq!(m.entries.len(), 2);
-        assert!((m.entries[0].2 - 123.456789012345678).abs() < 1e-10);
-        assert!((m.entries[1].2 - (-0.00987654321098765432)).abs() < 1e-16);
+        assert!((m.entries[0].2 - 123.456_789_012_345_68).abs() < 1e-10);
+        assert!((m.entries[1].2 - (-0.009_876_543_210_987_654)).abs() < 1e-16);
     }
 
     #[test]

@@ -359,7 +359,7 @@ mod tests {
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let (a, _) = postorder(&etree);
-        let (b, _) = schur_constrained_postorder(&etree, &vec![false; 5]);
+        let (b, _) = schur_constrained_postorder(&etree, &[false; 5]);
         assert_eq!(a, b);
     }
 

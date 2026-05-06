@@ -4,6 +4,32 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-06
+
+First public release on crates.io. Seven crates published in
+dependency order:
+
+- [`feral-ordering-core`](https://crates.io/crates/feral-ordering-core)
+  0.1.0 — locked contract surface (`CscPattern`, `OrderingStats`,
+  `OrderingError`, `CONTRACT_VERSION`).
+- [`feral-amd`](https://crates.io/crates/feral-amd) 0.1.0 — AMD
+  fill-reducing ordering (Amestoy, Davis & Duff 1996, 2004).
+- [`feral-amf`](https://crates.io/crates/feral-amf) 0.1.0 —
+  HAMF4 / Approximate Minimum Fill (Amestoy 1999).
+- [`feral-metis`](https://crates.io/crates/feral-metis) 0.1.0 —
+  multilevel nested-dissection (Karypis & Kumar 1998).
+- [`feral-scotch`](https://crates.io/crates/feral-scotch) 0.1.0 —
+  SCOTCH-style nested-dissection (Pellegrini 1996).
+- [`feral-kahip`](https://crates.io/crates/feral-kahip) 0.1.0 —
+  KaHIP flow-based nested-dissection (Sanders & Schulz 2011; data
+  reduction per Ost, Schulz & Strash 2021).
+- [`feral`](https://crates.io/crates/feral) 0.1.0 — sparse symmetric
+  indefinite direct solver with certified inertia counts.
+
+The accumulated `Unreleased` work below is the complete content of
+the 0.1.0 release; future entries will land under `## [Unreleased]`
+above.
+
 ### Changed (2026-05-03) — `SupernodeParams::default().nemin` 32 → 16
 
 `SupernodeParams::default().nemin` (src/symbolic/supernode.rs:115)
