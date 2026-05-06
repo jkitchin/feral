@@ -7,110 +7,37 @@ name = "feral"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Sparse symmetric indefinite direct solver in pure Rust"
+description = "Sparse symmetric indefinite direct solver in pure Rust, with certified inertia counts."
+authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]
+repository = "https://github.com/jkitchin/feral"
+homepage = "https://github.com/jkitchin/feral"
+readme = "README.md"
+keywords = ["sparse", "solver", "linear-algebra", "ldlt", "kkt"]
+categories = ["mathematics", "science"]
+autobins = false
+autoexamples = false
+autotests = false
+exclude = [
+    "/dev",
+    "/external_benchmarks",
+    "/data",
+    "/manuscript",
+    "/ref",
+    "/scripts",
+    "/assets",
+    "/examples",
+    "/src/bin",
+    "/tests",
+    "/.crucible",
+    "/.github",
+    "/.pre-commit-config.yaml",
+    "/CLAUDE.md",
+    "/FERAL-PROJECT-SPEC.md",
+    "/tasks.org",
+]
 
 [lib]
 name = "feral"
-
-[[bin]]
-name = "bench"
-path = "src/bin/bench.rs"
-
-[[bin]]
-name = "bench_orderings"
-path = "src/bin/bench_orderings.rs"
-
-[[bin]]
-name = "bench_solver_reuse"
-path = "src/bin/bench_solver_reuse.rs"
-
-[[bin]]
-name = "policy4_diag"
-path = "src/bin/policy4_diag.rs"
-
-[[bin]]
-name = "parallel_corpus_parity"
-path = "src/bin/parallel_corpus_parity.rs"
-
-[[bin]]
-name = "diag_acopr"
-path = "src/bin/diag_acopr.rs"
-
-[[bin]]
-name = "diag_par_repeat"
-path = "src/bin/diag_par_repeat.rs"
-
-[[bin]]
-name = "diag_parent_unique"
-path = "src/bin/diag_parent_unique.rs"
-
-[[bin]]
-name = "diag_par_firstdiff"
-path = "src/bin/diag_par_firstdiff.rs"
-
-[[bin]]
-name = "diag_par_frontal_hash"
-path = "src/bin/diag_par_frontal_hash.rs"
-
-[[bin]]
-name = "diag_mc64_cycles"
-path = "src/bin/diag_mc64_cycles.rs"
-
-[[bin]]
-name = "diag_compression_bench"
-path = "src/bin/diag_compression_bench.rs"
-
-[[bin]]
-name = "diag_dense_tail"
-path = "src/bin/diag_dense_tail.rs"
-
-[[bin]]
-name = "diag_compress_profile"
-path = "src/bin/diag_compress_profile.rs"
-
-[[bin]]
-name = "diag_fill_tail"
-path = "src/bin/diag_fill_tail.rs"
-
-[[bin]]
-name = "diag_split_tail"
-path = "src/bin/diag_split_tail.rs"
-
-[[bin]]
-name = "diag_supernode_cost"
-path = "src/bin/diag_supernode_cost.rs"
-
-[[bin]]
-name = "diag_small_leaf"
-path = "src/bin/diag_small_leaf.rs"
-
-[[bin]]
-name = "diag_leaf_profile"
-path = "src/bin/diag_leaf_profile.rs"
-
-[[bin]]
-name = "diag_chainwoo_profile"
-path = "src/bin/diag_chainwoo_profile.rs"
-
-[[bin]]
-name = "diag_amf_vs_amd"
-path = "src/bin/diag_amf_vs_amd.rs"
-
-[[bin]]
-name = "profile_hot"
-path = "src/bin/profile_hot.rs"
-
-[[bin]]
-name = "bench_solver_corpus"
-path = "src/bin/bench_solver_corpus.rs"
-
-[[bin]]
-name = "probe_deltac_sensitivity"
-path = "src/bin/probe_deltac_sensitivity.rs"
-
-[[bin]]
-name = "probe_panel_attribution"
-path = "src/bin/probe_panel_attribution.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -129,12 +56,12 @@ rayon = "1.10"
 # via the OrderingMethod enum in src/symbolic/mod.rs. The in-tree
 # src/ordering/amd.rs is still the default (OrderingMethod::Amd)
 # pending retirement per dev/decisions.md.
-feral-ordering-core = { path = "crates/feral-ordering-core" }
-feral-amd = { path = "crates/feral-amd" }
-feral-amf = { path = "crates/feral-amf" }
-feral-metis = { path = "crates/feral-metis" }
-feral-scotch = { path = "crates/feral-scotch" }
-feral-kahip = { path = "crates/feral-kahip" }
+feral-ordering-core = { path = "crates/feral-ordering-core", version = "0.1" }
+feral-amd = { path = "crates/feral-amd", version = "0.1" }
+feral-amf = { path = "crates/feral-amf", version = "0.1" }
+feral-metis = { path = "crates/feral-metis", version = "0.1" }
+feral-scotch = { path = "crates/feral-scotch", version = "0.1" }
+feral-kahip = { path = "crates/feral-kahip", version = "0.1" }
 
 [dev-dependencies]
 approx = "0.5"

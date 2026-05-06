@@ -1,6 +1,6 @@
 # FERAL
 
-![FERAL banner](assets/feral-banner.png)
+![FERAL banner](https://raw.githubusercontent.com/jkitchin/feral/main/assets/feral-banner.png)
 
 [![CI](https://github.com/jkitchin/feral/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/feral/actions/workflows/ci.yml)
 

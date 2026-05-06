@@ -3,8 +3,10 @@ name = "feral-kahip"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Pre-implementation scaffold for KaHIP-style flow-based nested-dissection fill-reducing ordering (Sanders & Schulz 2011). Currently a stub returning Internal error; phases K1-K6 are tracked in dev/plans/ordering-kahip.md. Pure Rust, clean-room, standalone. Implements the FERAL ordering-crate contract."
+description = "KaHIP-style flow-based nested-dissection fill-reducing ordering (Sanders & Schulz 2011; data reduction per Ost, Schulz & Strash 2021). Pure Rust, clean-room, standalone. Implements the FERAL ordering-crate contract."
+authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]
 repository = "https://github.com/jkitchin/feral"
+homepage = "https://github.com/jkitchin/feral"
 keywords = ["sparse", "ordering", "kahip", "nested-dissection", "linear-algebra"]
 categories = ["mathematics", "science"]
 
