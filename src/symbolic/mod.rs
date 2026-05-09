@@ -104,26 +104,41 @@ pub enum OrderingMethod {
 /// Resolve an `Auto` ordering to a concrete method from cheap pattern
 /// features. Non-`Auto` inputs pass through unchanged.
 ///
-/// The rule set is intentionally small and has a break-even fallback
-/// to `Amd`, so a pattern that matches no branch still gets a valid
-/// ordering. See `OrderingMethod::Auto` for the rationale.
+/// The rule set adds two shape-bakeoff branches on top of
+/// [`pick_default_method`]:
+///   - large-and-sparse (`n > 100_000`, full avg_deg < 5.0)  → `ScotchND`
+///   - small-and-sparse (`n <  10_000`, full avg_deg < 15.0) → `KahipND`
+///
+/// Anything else delegates to [`pick_default_method`], so `Auto` can't
+/// disagree with the no-arg `symbolic_factorize` default on the same
+/// matrix.
+///
+/// `pattern` is expected to be the matrix's full-symmetric pattern (the
+/// shape produced by `CscMatrix::symmetric_pattern`); the
+/// `pick_default_method` call below converts to a stored-nnz
+/// equivalent assuming the diagonal is included.
 fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMethod {
     if method != OrderingMethod::Auto {
         return method;
     }
     let n = pattern.n;
-    let nnz = pattern.row_idx.len();
+    let full_nnz = pattern.row_idx.len();
     if n == 0 {
         return OrderingMethod::Amd;
     }
-    let avg_deg = nnz as f64 / n as f64;
+    let avg_deg = full_nnz as f64 / n as f64;
     if n > 100_000 && avg_deg < 5.0 {
-        OrderingMethod::ScotchND
-    } else if n < 10_000 && avg_deg < 15.0 {
-        OrderingMethod::KahipND
-    } else {
-        OrderingMethod::Amd
+        return OrderingMethod::ScotchND;
     }
+    if n < 10_000 && avg_deg < 15.0 {
+        return OrderingMethod::KahipND;
+    }
+    // Convert full-symmetric nnz back to a stored-lower-triangle
+    // equivalent so `pick_default_method`'s thresholds (calibrated on
+    // stored nnz) apply: stored = (full + n) / 2 when the diagonal is
+    // included once on each row of the symmetric pattern.
+    let stored_nnz = (full_nnz + n) / 2;
+    pick_default_method(n, stored_nnz)
 }
 
 /// The complete output of symbolic factorization.
@@ -369,13 +384,16 @@ fn run_external_ordering(
     let (col_buf, row_buf) = to_contract_pattern_bufs(pattern)?;
     let pat = feral_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
         .ok_or_else(|| FeralError::InvalidInput("malformed CSC pattern".to_string()))?;
-    let resolved = choose_adaptive(pattern, method);
-    // `actual` diverges from `resolved` only when ScotchND silently
+    // `method` is expected to be concrete here — `Auto` is resolved
+    // upstream by `symbolic_factorize_with_method` against the
+    // original matrix's pattern, before any preprocessing.
+    debug_assert_ne!(method, OrderingMethod::Auto);
+    // `actual` diverges from `method` only when ScotchND silently
     // falls back to amd_leaf for every recursion (issue #3): the
     // returned permutation is bit-identical to AMD's, so the
     // `resolved_method` field must report Amd, not ScotchND.
-    let mut actual = resolved;
-    let perm_i32 = match resolved {
+    let mut actual = method;
+    let perm_i32 = match method {
         OrderingMethod::Amd => feral_amd::amd_order(&pat),
         OrderingMethod::Amf => feral_amf::amf_order(&pat),
         OrderingMethod::MetisND => feral_metis::metis_order(&pat),
@@ -389,7 +407,9 @@ fn run_external_ordering(
             })
         }
         OrderingMethod::KahipND => feral_kahip::kahip_order(&pat),
-        OrderingMethod::Auto => unreachable!("choose_adaptive resolves Auto"),
+        OrderingMethod::Auto => {
+            unreachable!("Auto is resolved by symbolic_factorize_with_method")
+        }
     };
     let perm_i32 = perm_i32
         .map_err(|e| FeralError::InvalidInput(format!("external ordering failed: {}", e)))?;
@@ -457,6 +477,14 @@ pub fn symbolic_factorize_with_method(
     if let Some(t) = t_sym {
         record_stage(prof, "symmetric_pattern", t);
     }
+
+    // Resolve `OrderingMethod::Auto` against the original matrix's
+    // pattern *before* preprocessing. If we resolved against the
+    // compressed pattern below, Auto would see a different `n` /
+    // `avg_deg` and reach a different conclusion than
+    // `symbolic_factorize` (which uses `pick_default_method` on the
+    // matrix directly). Issue #3.
+    let method = choose_adaptive(&full_pattern, method);
 
     let mut cached_mc64: Option<crate::scaling::Mc64Cache> = None;
     // Resolve `Auto` to `None` or `LdltCompress` before entering the
@@ -1467,7 +1495,11 @@ mod tests {
             choose_adaptive(&p, OrderingMethod::Auto),
             OrderingMethod::KahipND
         );
-        // Everything else → AMD.
+        // Everything else → delegate to pick_default_method. For
+        // (n=50_000, full avg_deg=20) the stored-equivalent avg_deg
+        // is ≈ 10.5 (= (20+1)/2 by `(full+n)/2/n`), neither of
+        // pick_default_method's chain/KKT branches fire, and the
+        // residual rule (`n > 10_000 → MetisND`) selects MetisND.
         let (cp, ri) = pat_bufs(50_000, 20);
         let p = CscPattern {
             n: 50_000,
@@ -1476,7 +1508,7 @@ mod tests {
         };
         assert_eq!(
             choose_adaptive(&p, OrderingMethod::Auto),
-            OrderingMethod::Amd
+            OrderingMethod::MetisND
         );
         // Non-Auto passes through.
         let (cp, ri) = pat_bufs(500, 6);
@@ -1792,5 +1824,26 @@ mod tests {
             "ScotchND degenerated to AMD-leaf-only on this KKT pattern; \
              resolved_method must report Amd, not ScotchND"
         );
+    }
+
+    #[test]
+    fn issue_3_auto_on_kkt_routes_via_pick_default_method() {
+        // Auto-path must defer to `pick_default_method` for shapes that
+        // don't match its own large-sparse / small-sparse rules.
+        // PoissonControl K=58 (n=10092, stored avg_deg≈2.67) sits
+        // outside choose_adaptive's existing branches and used to fall
+        // through to AMD. After issue #3's fix it falls through to
+        // pick_default_method, whose bordered-KKT catch picks MetisND.
+        let m = poisson_kkt_csc(58);
+        let params = SupernodeParams::default();
+        let auto = symbolic_factorize_with_method(&m, &params, OrderingMethod::Auto).unwrap();
+        let default = symbolic_factorize(&m, &params).unwrap();
+        assert_eq!(
+            auto.resolved_method, default.resolved_method,
+            "Auto must resolve to the same concrete method as \
+             `symbolic_factorize` (which uses pick_default_method) when \
+             choose_adaptive's own rules don't fire"
+        );
+        assert_eq!(auto.resolved_method, OrderingMethod::MetisND);
     }
 }
