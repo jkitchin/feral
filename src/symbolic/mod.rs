@@ -370,11 +370,24 @@ fn run_external_ordering(
     let pat = feral_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
         .ok_or_else(|| FeralError::InvalidInput("malformed CSC pattern".to_string()))?;
     let resolved = choose_adaptive(pattern, method);
+    // `actual` diverges from `resolved` only when ScotchND silently
+    // falls back to amd_leaf for every recursion (issue #3): the
+    // returned permutation is bit-identical to AMD's, so the
+    // `resolved_method` field must report Amd, not ScotchND.
+    let mut actual = resolved;
     let perm_i32 = match resolved {
         OrderingMethod::Amd => feral_amd::amd_order(&pat),
         OrderingMethod::Amf => feral_amf::amf_order(&pat),
         OrderingMethod::MetisND => feral_metis::metis_order(&pat),
-        OrderingMethod::ScotchND => feral_scotch::scotch_order(&pat),
+        OrderingMethod::ScotchND => {
+            let opts = feral_scotch::ScotchOptions::default();
+            feral_scotch::scotch_order_full(&pat, &opts).map(|(perm, _, sstats)| {
+                if sstats.n_separator_vertices == 0 {
+                    actual = OrderingMethod::Amd;
+                }
+                perm
+            })
+        }
         OrderingMethod::KahipND => feral_kahip::kahip_order(&pat),
         OrderingMethod::Auto => unreachable!("choose_adaptive resolves Auto"),
     };
@@ -399,7 +412,7 @@ fn run_external_ordering(
         }
         out.push(u);
     }
-    Ok((out, resolved))
+    Ok((out, actual))
 }
 
 /// Like [`symbolic_factorize`] but lets the caller pick the
@@ -1694,5 +1707,90 @@ mod tests {
         let mut sorted = sym.perm.clone();
         sorted.sort();
         assert_eq!(sorted, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    /// PoissonControl KKT lower-triangle CSC, mirrors
+    /// `src/bin/diag_poisson_kkt.rs`. n_kkt = 3K². K=20 → n=1200,
+    /// large enough to exceed amd_switch=120 (so SCOTCH actually
+    /// runs the multilevel pipeline) but small enough to be cheap.
+    fn poisson_kkt_csc(k: usize) -> CscMatrix {
+        let m = k * k;
+        let n_kkt = 3 * m;
+        let h = 1.0 / (k as f64 + 1.0);
+        let alpha = 0.01;
+        let inv_h2 = 1.0 / (h * h);
+
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..m {
+            rows.push(i);
+            cols.push(i);
+            vals.push(h * h);
+        }
+        for i in 0..m {
+            rows.push(m + i);
+            cols.push(m + i);
+            vals.push(alpha * h * h);
+        }
+        for i in 0..k {
+            for j in 0..k {
+                let c = i * k + j;
+                let con_row = 2 * m + c;
+                rows.push(con_row);
+                cols.push(c);
+                vals.push(4.0 * inv_h2);
+                if i > 0 {
+                    rows.push(con_row);
+                    cols.push((i - 1) * k + j);
+                    vals.push(-inv_h2);
+                }
+                if i + 1 < k {
+                    rows.push(con_row);
+                    cols.push((i + 1) * k + j);
+                    vals.push(-inv_h2);
+                }
+                if j > 0 {
+                    rows.push(con_row);
+                    cols.push(i * k + (j - 1));
+                    vals.push(-inv_h2);
+                }
+                if j + 1 < k {
+                    rows.push(con_row);
+                    cols.push(i * k + (j + 1));
+                    vals.push(-inv_h2);
+                }
+                rows.push(con_row);
+                cols.push(m + c);
+                vals.push(-1.0);
+            }
+        }
+        CscMatrix::from_triplets(n_kkt, &rows, &cols, &vals).expect("kkt csc")
+    }
+
+    #[test]
+    fn issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates() {
+        // SCOTCH bisection produces no separator on bordered-KKT
+        // patterns (verified directly in
+        // `crates/feral-scotch/tests/issue_3_kkt_repro.rs`); the
+        // recursion falls into amd_leaf for the entire graph and the
+        // returned permutation is bit-identical to AMD's.
+        // `resolved_method` must reflect what ran, not what was asked.
+        //
+        // Preprocess is pinned to None so SCOTCH sees the raw KKT
+        // pattern; with LdltCompress the compressed graph is small
+        // enough that bisection sometimes succeeds.
+        let m = poisson_kkt_csc(20);
+        let params = SupernodeParams {
+            preprocess: OrderingPreprocess::None,
+            ..SupernodeParams::default()
+        };
+        let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::ScotchND).unwrap();
+        assert_eq!(
+            sym.resolved_method,
+            OrderingMethod::Amd,
+            "ScotchND degenerated to AMD-leaf-only on this KKT pattern; \
+             resolved_method must report Amd, not ScotchND"
+        );
     }
 }
