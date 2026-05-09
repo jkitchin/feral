@@ -556,8 +556,8 @@ mod tests {
 
         // Now build a structurally different matrix with same (n, nnz)
         // — same column pointers (one entry per column) but different
-        // row indices: [0, 2, 1] instead of [0, 1, 2].
-        let c = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 2, 1], &[2.0, 3.0, 5.0]).unwrap();
+        // row indices: [2, 2, 2] instead of [0, 1, 2].
+        let c = CscMatrix::from_triplets(3, &[2, 2, 2], &[0, 1, 2], &[2.0, 3.0, 5.0]).unwrap();
         assert_eq!(c.n, a.n);
         assert_eq!(c.row_idx.len(), a.row_idx.len());
         assert_eq!(c.col_ptr.len(), a.col_ptr.len());
@@ -577,7 +577,7 @@ mod tests {
             .unwrap();
         // B: 4x4 with same nnz=4 but two entries in column 0 and one
         // each in cols 1, 2 — different col_ptr.
-        let b = CscMatrix::from_triplets(4, &[0, 0, 1, 2], &[0, 1, 1, 2], &[1.0, 0.5, 2.0, 3.0])
+        let b = CscMatrix::from_triplets(4, &[0, 1, 1, 2], &[0, 0, 1, 2], &[1.0, 0.5, 2.0, 3.0])
             .unwrap();
         assert_eq!(a.n, b.n);
         assert_eq!(a.row_idx.len(), b.row_idx.len());

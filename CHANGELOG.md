@@ -4,6 +4,18 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `CscMatrix::from_triplets` rejects upper-triangle entries (#4)
+
+`CscMatrix::from_triplets` and `CscMatrix::validate` now return
+`FeralError::InvalidInput` when any triplet has `row < col`. Previously
+upper-triangle entries were silently accepted and routed through
+`sort_and_sum_duplicates`, producing a `CscMatrix` whose row indices
+violated the documented "lower triangle only" invariant. Downstream
+consumers (e.g. `symmetric_pattern`) assume lower-triangle storage, so
+the same symmetric matrix described with upper- vs lower-triangle
+triplets produced different solve results. The error message identifies
+the offending triplet by index and `(row, col)`. Reported by @janosh.
+
 ## [0.1.0] - 2026-05-06
 
 First public release on crates.io. Seven crates published in

@@ -75,6 +75,13 @@ impl CscMatrix {
                     r, n
                 )));
             }
+            if r < c {
+                return Err(FeralError::InvalidInput(format!(
+                    "triplet {} ({}, {}) is upper-triangle; \
+                     CscMatrix stores only the lower triangle (row >= col)",
+                    k, r, c
+                )));
+            }
             let pos = offsets[c];
             row_idx[pos] = r;
             values[pos] = vals[k];
@@ -164,6 +171,13 @@ impl CscMatrix {
                 if self.row_idx[k] >= self.n {
                     return Err(FeralError::InvalidInput(format!(
                         "row index {} out of bounds in column {}",
+                        self.row_idx[k], j
+                    )));
+                }
+                if self.row_idx[k] < j {
+                    return Err(FeralError::InvalidInput(format!(
+                        "row index {} in column {} is upper-triangle; \
+                         CscMatrix stores only the lower triangle (row >= col)",
                         self.row_idx[k], j
                     )));
                 }
@@ -373,6 +387,48 @@ mod tests {
         let mut m = sample_3x3();
         m.row_idx[0] = 5; // out of bounds
         assert!(m.validate().is_err());
+    }
+
+    /// Issue #4: upper-triangle triplets must be rejected, not silently
+    /// accepted. The two matrices below describe the same symmetric
+    /// system; previously the upper-triangle form was accepted and
+    /// produced different solve results downstream.
+    #[test]
+    fn test_from_triplets_rejects_upper_triangle() {
+        // Lower-triangle form: (0,0)=2, (1,0)=1, (1,1)=2
+        let lower = CscMatrix::from_triplets(2, &[0, 1, 1], &[0, 0, 1], &[2.0, 1.0, 2.0]).unwrap();
+        lower.validate().unwrap();
+
+        // Upper-triangle form of the same matrix: (0,0)=2, (0,1)=1, (1,1)=2.
+        // Must be rejected — previously was silently accepted.
+        let err = CscMatrix::from_triplets(2, &[0, 0, 1], &[0, 1, 1], &[2.0, 1.0, 2.0])
+            .expect_err("upper-triangle triplet must be rejected");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("upper-triangle"),
+            "error should mention upper-triangle, got: {}",
+            msg
+        );
+    }
+
+    /// `validate()` must also reject upper-triangle row indices, in case
+    /// a `CscMatrix` is constructed by a path that bypasses
+    /// `from_triplets` (e.g. direct field assignment in tests).
+    #[test]
+    fn test_validate_rejects_upper_triangle_row() {
+        let mut m = sample_3x3();
+        // Force an upper-triangle entry: column 1's first row becomes 0
+        // (row 0, col 1 is upper-triangle).
+        m.row_idx[2] = 0;
+        let err = m
+            .validate()
+            .expect_err("validate must reject upper-triangle row");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("upper-triangle"),
+            "error should mention upper-triangle, got: {}",
+            msg
+        );
     }
 
     #[test]
