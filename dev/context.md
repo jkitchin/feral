@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-09T18:14:02Z
+Generated: 2026-05-09T19:36:09Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,27 +59,27 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
-4075640 release: 0.1.0 housekeeping — CHANGELOG stamp, sub-crate READMEs, clippy clean
-4b93719 release: prepare crates.io 0.1.0 metadata for feral + 6 ordering crates
-375de90 session: 2026-05-03-01 checkpoint — build_row_indices, nemin, issue #2
-3b4f248 fix(numeric): NumericParams::default() sets pivot_threshold = 1e-8
-fbedff9 research(phase-b): shape-dispatched nemin REJECTED — sweep null
+5e1d814 fix(symbolic): Auto resolves against original matrix and delegates to pick_default_method (#3)
+0b2099a fix(symbolic): honest resolved_method when ScotchND degenerates to amd_leaf (#3)
+c7f7364 test(scotch): KKT-shape regression test for issue #3 bisection-degenerate fallback
+da28ff9 session: 2026-05-09-01 checkpoint -- issue #4 fix
+98aa3d5 fix: reject upper-triangle triplets in CscMatrix::from_triplets (#4)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::test_symbolic_factorize_dense ... ok
+test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test dense::schur_kernel::tests::schur_panel_minus_nofma_strided_is_bit_exact_vs_rank1_reference ... ok
 test dense::schur_kernel::tests::schur_panel_minus_nofma_strided_dual_is_bit_exact_vs_two_singles ... ok
 test numeric::factorize::tests::schur_multi_supernode_tail_matches_oracle ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
+test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 
-test result: ok. 210 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 212 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
 
    Doc-tests feral
 

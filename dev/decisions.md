@@ -2467,3 +2467,52 @@ the half of the test file that actually guards the
 References: `dev/research/factor-nnz-residual-gap.md`,
 `dev/journal/2026-05-03-01.org` 14:00 entry,
 `dev/research/build-row-indices-fix.md`.
+
+## 2026-05-09 — `resolved_method` is what ran, not what was asked
+
+**Decision.** `SymbolicFactorization.resolved_method` is a contract
+field whose value MUST equal the concrete ordering algorithm that
+produced `perm`. When `OrderingMethod::ScotchND` is requested and the
+SCOTCH driver silently falls back to `amd_leaf` for every recursion
+node (bisection produces an empty side at every level), the field is
+re-stamped to `OrderingMethod::Amd`. Detection signal:
+`feral_scotch::ScotchStats.n_separator_vertices == 0` from
+`scotch_order_full`. The fallback itself is preserved as a recovery
+path — only its visibility is fixed.
+
+**`OrderingMethod::Auto` is dispatched against the original matrix.**
+Auto resolution happens once in `symbolic_factorize_with_method`,
+against `matrix.symmetric_pattern()`, *before* any
+`OrderingPreprocess::LdltCompress` reshaping. The concrete method is
+threaded through the dispatch as a non-`Auto` value;
+`run_external_ordering` carries a `debug_assert_ne!(method, Auto)`.
+
+**`choose_adaptive` delegates to `pick_default_method` on residual.**
+The bare `→ Amd` else branch is replaced by a delegation that uses
+the `(full_nnz + n) / 2` stored-equivalent estimate (exact when the
+diagonal is stored once per row, which `CscMatrix::symmetric_pattern`
+produces). This makes `Auto` a strict superset of `pick_default_method`
+on every input — the two existing shape-bakeoff branches (large-
+sparse → ScotchND, small-sparse → KahipND) keep priority, with
+`pick_default_method` as the residual.
+
+**Why.** Prior behavior: `Auto` could disagree with the no-arg
+`symbolic_factorize` default on the same matrix, because (a)
+`choose_adaptive` was called on the post-compression pattern with a
+different `n`, and (b) its residual was unconditional `Amd`. Issue #3
+flagged the K=158 PoissonControl case where `Auto → Amd` instead of
+the expected `MetisND`. Code that branched on `resolved_method` (bench
+dispatch, oracle scoring) was making decisions on a value that did
+not describe the actual computation.
+
+**Touched call-sites.** `src/symbolic/mod.rs`: `choose_adaptive`,
+`symbolic_factorize_with_method` (one new line: pre-resolution),
+`run_external_ordering` (ScotchND branch reworked, internal
+`choose_adaptive` call removed). One existing test
+(`choose_adaptive_rules`) updated: the residual case (`n=50_000`,
+full avg_deg=20) now expects `MetisND` instead of `Amd`, reflecting
+the delegation. No production callers branched on the old `Amd`
+residual that this commit changed.
+
+References: GitHub issue #3, `crates/feral-scotch/tests/issue_3_kkt_repro.rs`,
+`src/symbolic/mod.rs::tests::issue_3_*` (two new tests).

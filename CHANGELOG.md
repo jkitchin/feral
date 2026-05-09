@@ -4,6 +4,32 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — Honest `resolved_method` and consistent `Auto` routing (#3)
+
+`SymbolicFactorization.resolved_method` now reflects what the symbolic
+pipeline actually ran rather than what the caller requested. Two
+behavior changes:
+
+- **ScotchND silent fallback is surfaced.** When SCOTCH's nested-
+  dissection recursion produces no separator for the entire graph
+  (bordered-KKT shapes such as PoissonControl trigger this), the
+  driver falls back to AMD via `amd_leaf` for every recursion node.
+  Previously `resolved_method` still reported `ScotchND` while the
+  permutation was bit-identical to AMD's. It now reports `Amd`. The
+  recovery itself is unchanged — only its visibility is fixed.
+- **`OrderingMethod::Auto` is consistent with the no-arg default.**
+  Auto resolution now happens against the original matrix's pattern
+  before any `LdltCompress` preprocessor reshapes the graph, and the
+  residual branch delegates to `pick_default_method` (the rule used
+  by the no-arg `symbolic_factorize`). Previously Auto could pick a
+  different concrete method than the default rule on the same
+  matrix, depending on whether compression triggered. Auto is now a
+  strict superset: same answer as the default plus the two extra
+  shape-bakeoff branches (`n>100_000` → ScotchND, `n<10_000` →
+  KahipND).
+
+Reported by independent triage on K=158 PoissonControl benchmarks.
+
 ### Fixed — `CscMatrix::from_triplets` rejects upper-triangle entries (#4)
 
 `CscMatrix::from_triplets` and `CscMatrix::validate` now return

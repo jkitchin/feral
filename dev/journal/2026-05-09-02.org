@@ -1,0 +1,108 @@
+#+TITLE: 2026-05-09 Session 02 — Issue #3 (ScotchND silent fallback)
+
+* 16:30 :issue3:scotch:auto:resolved_method:
+  Triaged GitHub issue #3 (ScotchND silently falls back to AMD on
+  KKT-shaped matrices). Reproducer in the issue: PoissonControl K=158
+  (n=74892, nnz_lower=199080) under =--scotch= produces factor metrics
+  (=factor_nnz=46_734_661, supernodes=13_868, max_nrow=523, Σ
+  nrow·ncol=3_115_715=) byte-identical to =--amd=, while
+  =resolved_method= still says =ScotchND=. Wrote a smaller K=20
+  (n=1200) reproducer at =crates/feral-scotch/tests/issue_3_kkt_repro.rs=
+  and confirmed the symptom directly:
+
+  #+begin_example
+  ScotchStats {
+    n_compressed_out: 0,
+    n_levels: 8,           # multilevel pipeline did run
+    n_components: 1,
+    n_separator_vertices: 0,   # …but never produced a separator
+    n_fm_passes: 416,
+    n_amd_leaf_calls: 1,       # everything fell into amd_leaf
+  }
+  #+end_example
+
+  Root cause is the degenerate-bisection recovery at
+  =crates/feral-scotch/src/node_nd.rs:147-150=: when SCOTCH's
+  multilevel bisection returns an empty A or B partition, =recurse=
+  silently invokes =amd_leaf= on the entire subgraph. Correct as
+  recovery; not surfaced through =OrderingStats= or
+  =resolved_method=. Code that branches on =resolved_method= (bench
+  dispatch, oracle scoring) was making decisions on a lie.
+
+* 17:10 :auto:choose_adaptive:pick_default_method:
+  Issue's "Related" note (=Auto= resolves to =Amd= on n=74892 instead
+  of the expected =MetisND=) confirmed by code inspection. Two
+  conspiring causes:
+
+  - =choose_adaptive=:: was called inside =run_external_ordering= on
+    whatever pattern that function received. With
+    =OrderingPreprocess::LdltCompress= (auto-enabled when ≥30% of
+    columns have stored degree ≤2 — true for any KKT with an
+    f-block), the input to =choose_adaptive= is the *compressed*
+    graph, with a different =n= than the original matrix. The K=58
+    case lands in the =n<10_000= branch only after compression
+    shrinks the graph below threshold.
+  - =choose_adaptive=' s residual:: was bare =Amd=, parallel to but
+    not consistent with =pick_default_method= 's residual rules
+    (bordered-KKT and chain-pattern catches). =Auto= -the-explicit-
+    opt-in-dispatcher was strictly *less* informed than the no-arg
+    default.
+
+  Fix: pre-resolve =Auto= once in =symbolic_factorize_with_method=
+  against the *original* matrix's full pattern, before any
+  preprocessing; thread the concrete method through the dispatch.
+  Update =choose_adaptive= 's residual to delegate to
+  =pick_default_method= (using the =(full_nnz + n) / 2= stored-
+  equivalent identity). Drop the now-redundant =choose_adaptive=
+  call inside =run_external_ordering= and add a
+  =debug_assert_ne!(method, Auto)= to pin the new contract.
+
+* 17:55 :tests:regression:
+  Three new tests:
+
+  - =crates/feral-scotch/tests/issue_3_kkt_repro.rs=:: SCOTCH-driver
+    -level regression. Asserts =n_separator_vertices == 0=,
+    =n_amd_leaf_calls >= 1=, =scotch_perm == amd_perm= on the K=20
+    KKT pattern.
+  - =src/symbolic/mod.rs::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates=::
+    requests =ScotchND= with =preprocess=None=, asserts
+    =resolved_method == Amd=.
+  - =src/symbolic/mod.rs::tests::issue_3_auto_on_kkt_routes_via_pick_default_method=::
+    builds K=58 KKT (n=10092), requests =Auto=, asserts
+    =resolved_method == MetisND= and that it matches what
+    =symbolic_factorize= (no-arg) picks.
+
+  One existing test updated: =choose_adaptive_rules= 's "everything
+  else → AMD" case (n=50_000, full avg_deg=20) now expects =MetisND=
+  because the delegation reaches =pick_default_method= 's =n>10_000
+  → MetisND= residual rule. Comment in the test records the
+  arithmetic.
+
+* 18:25 :evidence:gates:
+  All three commits validated:
+
+  - =cargo test --release --workspace=:: 212 lib + 7+61+51+4+56+10+43+1
+    workspace tests pass; 0 failures, 2 pre-existing ignored.
+  - =cargo clippy --all-targets -- -D warnings=:: clean.
+  - =cargo fmt --check=:: clean.
+  - Three atomic commits landed on =main=:
+    - =c7f7364= test(scotch): KKT-shape regression test for issue #3
+    - =0b2099a= fix(symbolic): honest resolved_method when ScotchND
+      degenerates to amd_leaf (#3)
+    - =5e1d814= fix(symbolic): Auto resolves against original matrix
+      and delegates to pick_default_method (#3)
+
+* 18:40 :unfixed:future:
+  Not addressed (out of scope for this session):
+
+  - *Why* SCOTCH bisection degenerates on bordered-KKT shapes. Likely
+    interaction between the very-low-stored avg_deg (~2.66 on K=158)
+    and SCOTCH's =max_imbalance=0.05= forcing the FM cut to drain one
+    side. Worth logging A/B/SEP counts at the top level if anyone
+    wants ScotchND to actually work on KKT. Today, =MetisND= is the
+    right answer for these shapes per =pick_default_method=, and
+    that is now what =Auto= picks.
+  - The existing missing =[[bin]]= declarations (also flagged in
+    =2026-05-09-01.md= "Next Session Should"): =cargo run --bin bench
+    --release= still fails with =no bin target named 'bench'=. Not a
+    regression introduced here.
