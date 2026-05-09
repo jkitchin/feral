@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-03T18:14:15Z
+Generated: 2026-05-09T18:14:02Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,27 +59,27 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+4075640 release: 0.1.0 housekeeping — CHANGELOG stamp, sub-crate READMEs, clippy clean
+4b93719 release: prepare crates.io 0.1.0 metadata for feral + 6 ordering crates
+375de90 session: 2026-05-03-01 checkpoint — build_row_indices, nemin, issue #2
 3b4f248 fix(numeric): NumericParams::default() sets pivot_threshold = 1e-8
 fbedff9 research(phase-b): shape-dispatched nemin REJECTED — sweep null
-4c0fc80 perf(symbolic): drop default nemin 32 -> 16 for tighter L
-9b2665f fix(numeric): build_row_indices skips upper-triangle pollution
-6bdca43 session: 2026-04-28-03 checkpoint — Phase A2 c==0 swap-2x2 lands
 ```
 
 ## Test Status
 ```
-test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::test_symbolic_factorize_dense ... ok
+test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test dense::schur_kernel::tests::schur_panel_minus_nofma_strided_is_bit_exact_vs_rank1_reference ... ok
+test dense::schur_kernel::tests::schur_panel_minus_nofma_strided_dual_is_bit_exact_vs_two_singles ... ok
+test numeric::factorize::tests::schur_multi_supernode_tail_matches_oracle ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-d7178b1424e0147f)
-
-running 5 tests
-test test_gate_just_outside_n_tiny ... ok
-test test_gate_tiny_sparse_in ... ok
-test test_gate_boundary_n_16 ... ok
-test test_determinism_tiny ... ok
-test test_solve_parity_tiny_real_matrix ... ok
-
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 210 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
 
    Doc-tests feral
 
@@ -92,3 +92,4 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 ## Benchmark
 ```
+error: no bin target named `bench` in default-run packages

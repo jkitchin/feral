@@ -1,0 +1,54 @@
+* 14:00 :triage:issue-4:csc:
+Issue #4 (janosh): CscMatrix::from_triplets accepts upper-tri triplets
+despite docstring "row >= col"; downstream solves diverge. Confirmed by
+reading src/sparse/csc.rs:35-93 (from_triplets) and src/sparse/csc.rs:144-184
+(validate) — neither enforces r >= c. Repro from issue body would silently
+factorize a different matrix because symmetric_pattern (csc.rs:186-209)
+assumes lower-tri storage.
+
+* 14:05 :scope:audit:
+Regex-scanned all rs files for from_triplets call sites with int-literal
+rows/cols. Only two pre-existing upper-tri call sites: src/numeric/solver.rs:560
+(F2 fingerprint test) and src/numeric/solver.rs:580 (F3 fingerprint test).
+Both exist purely to construct distinct sparsity patterns; can be rewritten
+with lower-tri rows that still satisfy the structural distinctness intent.
+io/mtx.rs already normalizes upper-tri to lower before from_triplets.
+
+* 14:10 :decision:no-auto-normalize:
+Chose option 1 from issue (reject) over option 2 (auto-normalize upper to
+lower). Auto-normalize would silently coerce non-symmetric input into
+symmetric storage, masking real user errors. Reject preserves the
+documented contract and produces a clear error pointing to the offending
+triplet by index.
+
+* 14:15 :impl:csc:
+from_triplets: added `if r < c { return Err(...) }` after the `r >= n`
+bounds check (csc.rs:78-84). validate: added the analogous check inside
+the existing per-column loop (csc.rs:177-183). Error message names the
+offending triplet index/(r,c) so failures are self-diagnosing.
+
+* 14:20 :tests:regression:
+Added test_from_triplets_rejects_upper_triangle (exact issue repro,
+asserts Err with "upper-triangle" in message) and
+test_validate_rejects_upper_triangle_row (direct row_idx mutation path).
+Updated f2/f3 fingerprint tests to use lower-tri row patterns
+([2,2,2] for F2; [0,1,1,2] for F3).
+
+* 14:25 :evidence:green:
+cargo test: 210 passed (was 208; +2 regression tests). cargo fmt --check
+clean. cargo clippy -- -D warnings clean. End-to-end verification:
+ran the issue's exact main() against this branch — produces
+"triplet 1 (0, 1) is upper-triangle; CscMatrix stores only the lower
+triangle (row >= col)" instead of silent wrong solve.
+
+* 14:30 :pre-existing:bench-broken:
+`cargo run --bin bench --release` fails with "no bin target named bench"
+because Cargo.toml has autobins = false and no [[bin]] declarations.
+src/bin/bench.rs and other bin sources still exist on disk. Not introduced
+by this session; assemble-context.sh swallows the error. Flagged in next
+session goals.
+
+* 14:35 :session:checkpoint:
+Wrote dev/sessions/2026-05-09-01.md and refreshed dev/context.md via
+./dev/assemble-context.sh. CHANGELOG.md Unreleased entry added crediting
+@janosh.
