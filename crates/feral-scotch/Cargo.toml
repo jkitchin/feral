@@ -20,3 +20,5 @@ feral-amd = { path = "../feral-amd", version = "0.1" }
 feral-metis = { path = "../feral-metis", version = "0.1" }
 
 [dev-dependencies]
+feral-amd = { path = "../feral-amd", version = "0.1" }
+feral-ordering-core = { path = "../feral-ordering-core", version = "0.1" }
