@@ -61,6 +61,76 @@ Test currently asserts =any_decrease= on the positive count (locks in
 the symptom). Once Option B lands, that flips to assert monotone
 non-decreasing.
 
+* 15:30 :issue-5:option-b:invalidated:
+Two diagnostic sweeps invalidate the research note's Option B
+(norm-relative pivot floor / SEUIL analog) as a fix for the wandering
+symptom.
+
+** zero_tol sweep (n+ trace by zero_tol)
+#+begin_example
+zero_tol = 1e-10:  [93, 91, 94, 90, 92, 90, 90, 90, 90, 90]
+zero_tol =  1e-8:  [93, 91, 94, 90, 92, 90, 90, 90, 90, 90]
+zero_tol =  1e-6:  [93, 91, 94, 90, 92, 90, 90, 90, 90, 90]
+zero_tol =  1e-4:  [93, 91, 94, 90, 92, 93, 90, 90, 90, 90]
+zero_tol =  1e-2:  [93, 91, 94, 90, 92, 90, 90, 90, 90, 90]
+#+end_example
+Identical n+ trace across 8 orders of magnitude of =zero_tol=. The
+wandering pivots are O(1), not below the floor. Option B's
+absolute-floor lever does not touch the wandering at small δ_w; it
+only pulls the large-δ_w underflow tail into the zero bucket
+(visible as n- collapsing earlier and zero count rising at large δ_w).
+
+** pivot_threshold sweep (n+ trace by u)
+#+begin_example
+u = 0:     [93, 91, 94, 90, 92, 90, 90, 90, 90, 90]   range 4
+u = 1e-10: [96, 98, 97, 91, 101, 98, 94, 101, 96, 90] range 10
+u = 1e-8:  [96, 98, 97, 91, 101, 98, 94, 98, 90, 90]  range 10
+u = 1e-2:  [96, 98, 97, 91, 104, 98, 94, 96, 90, 90]  range 13
+u = 0.5:   [93, 95, 96, 92, 93, 98, 95, 94, 93, 90]   range 6
+#+end_example
+
+Raising =pivot_threshold= (issue #2's lever) makes the wandering
+*worse*, not better. With u=0 the spread is {90..94} (4); with u in
+the recommended {1e-8 .. 0.1} range the spread blows out to {91..101}
+(10). At u=0.5 (Bunch-Kaufman's classical value, ripopt's =pivtol_max=
+cap) it settles at {92..98} (6). None achieve monotonicity.
+
+** Conclusion
+The wandering is not a magnitude-threshold problem. It's BK pivot
+ordering ambiguity on a structurally rank-deficient J: each
+floating-point perturbation of the input picks a different valid
+factorization with a different (pos, neg, zero) categorization. All
+the sweeps reach the *correct* inertia (90, 45, 28) at most δ_w
+values, but stochastically jitter ±5 around it depending on which
+pivots were committed in which order.
+
+The =δ_c = -1e-8= baked into the corpus matrix breaks this
+degeneracy: with that 1e-8 in place, every δ_w produces clean
+(90, 73, 0). That's Ipopt's static regularization doing exactly
+what it's designed for.
+
+** Implications for the fix
+Option B (Norm-relative pivot floor) is *not* the right intervention
+for this symptom. The actual fix is one of:
+
+1. =Caller-side= — ripopt should add δ_c > 0 from iteration 0 to
+   break the rank-deficiency before passing the KKT to feral. This
+   matches Ipopt's standard practice and is the canonical IPM
+   prescription. *No feral-side change required.*
+2. =Force-1×1 mode= — add a flag to feral that disables 2×2 pivot
+   selection entirely, so degenerate cases get split into 1×1's with
+   well-defined sign assignments. Less stable in growth but more
+   stable in inertia. Useful as an "inertia-correction-friendly"
+   mode an IPM can opt into during δ_w escalation.
+3. =Eigenvalue-aware 2×2 split= — when a 2×2 candidate has a
+   smaller eigenvalue below SEUIL, split it into a 1×1 (with the
+   larger eigenvalue) plus a 1×1 zero. Requires explicit
+   eigendecomposition of the 2×2 block. Intermediate complexity.
+
+Recommend pause + ask the user which direction to pursue. The
+reproducer test + diagnostics are committed; pivoting work waits on
+that decision.
+
 * 14:45 :issue-5:test-design:regression:
 The test is a *negative-control regression test* — it passes today
 because the bug is present, and will fail when the bug is fixed. The

@@ -3032,7 +3032,10 @@ mod tests {
     /// entries (the (1,1) block) of MSS1_0000 and observe inertia.
     /// Mirrors `ripopt::feral_direct.rs`'s configuration exactly.
     /// See `dev/research/issue-5-mss1-inertia-monotonicity.md`.
-    fn issue5_mss1_inertia_sweep() -> Option<Vec<(f64, Inertia)>> {
+    fn issue5_mss1_inertia_sweep_with(
+        zero_tol: f64,
+        pivot_threshold: f64,
+    ) -> Option<Vec<(f64, Inertia)>> {
         let path = std::path::Path::new("data/matrices/kkt/MSS1/MSS1_0000.mtx");
         let mtx = match crate::io::mtx::read_mtx(path) {
             Ok(m) => m,
@@ -3047,20 +3050,11 @@ mod tests {
         // ripopt's exact configuration from feral_direct.rs:
         let mut bk = BunchKaufmanParams {
             on_zero_pivot: ZeroPivotAction::ForceAccept,
-            zero_tol: 1e-10,
-            zero_tol_2x2: 1e-20,
+            zero_tol,
+            zero_tol_2x2: zero_tol * zero_tol,
             ..BunchKaufmanParams::default()
         };
-        // `pivtol_max = 0.5` from the issue is the *cap* on
-        // pivot_threshold during inertia correction. The issue #2
-        // fix raised the default to 1e-8; with that value the
-        // wandering pattern from the issue does NOT reproduce. The
-        // reporter's ripopt is still using the pre-issue-#2 default
-        // of 0.0 (which `BunchKaufmanParams::default()` continues
-        // to set on the dense entry, but which `NumericParams::
-        // default()` overrides to 1e-8). We replicate the reporter's
-        // configuration explicitly here.
-        bk.pivot_threshold = 0.0;
+        bk.pivot_threshold = pivot_threshold;
 
         let params = NumericParams {
             bk,
@@ -3123,6 +3117,12 @@ mod tests {
     ///
     /// Skipped silently if `data/matrices/kkt/MSS1/MSS1_0000.mtx`
     /// is not present in the working tree.
+    fn issue5_mss1_inertia_sweep() -> Option<Vec<(f64, Inertia)>> {
+        // Default: ripopt's exact pre-issue-#2 configuration —
+        // `zero_tol = 1e-10`, `pivot_threshold = 0.0`.
+        issue5_mss1_inertia_sweep_with(1e-10, 0.0)
+    }
+
     #[test]
     fn issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep() {
         let Some(results) = issue5_mss1_inertia_sweep() else {
@@ -3167,5 +3167,60 @@ mod tests {
              flip it to `assert!(monotone)` per dev/research/issue-5-mss1-inertia-monotonicity.md.",
             positives
         );
+    }
+
+    /// Issue #5 diagnostic — does raising `zero_tol` alone (no other
+    /// code change) cure the wandering? Empirical answer (2026-05-10):
+    /// **no**. zero_tol from 1e-10 to 1e-2 produces identical n+
+    /// `[93, 91, 94, 90, 92, ...]`. The wandering pivots have
+    /// magnitudes O(1) — the BK 1×1/2×2 boundary instability is
+    /// *above* the absolute pivot floor regime. Option B's SEUIL
+    /// floor will not fix the wandering; it only stabilises the
+    /// large-δ_w underflow tail.
+    ///
+    /// Diagnostic-only — always passes; prints the sweep table.
+    #[test]
+    fn issue_5_mss1_zero_tol_sweep_diagnostic() {
+        let tols = [1e-10, 1e-8, 1e-6, 1e-4, 1e-2];
+        for &tol in &tols {
+            let Some(results) = issue5_mss1_inertia_sweep_with(tol, 0.0) else {
+                return;
+            };
+            let positives: Vec<usize> = results.iter().map(|(_, i)| i.positive).collect();
+            let negatives: Vec<usize> = results.iter().map(|(_, i)| i.negative).collect();
+            let zeros: Vec<usize> = results.iter().map(|(_, i)| i.zero).collect();
+            let monotone = positives.windows(2).all(|w| w[1] >= w[0]);
+            eprintln!(
+                "zero_tol = {:>5.0e}: monotone(+) = {}\n  +: {:?}\n  -: {:?}\n  0: {:?}",
+                tol, monotone, positives, negatives, zeros
+            );
+        }
+    }
+
+    /// Issue #5 diagnostic — does raising `pivot_threshold` (issue
+    /// #2's lever) cure the wandering? `pivot_threshold` gates the
+    /// 2×2 Duff-Reid growth bound, rejecting marginal 2×2 pivots
+    /// in favor of 1×1 splits. If the wandering is driven by 2×2
+    /// pivots flickering across the α-test boundary, raising
+    /// pivot_threshold should stabilise the trace at issue #2's
+    /// recommended `1e-8` default.
+    ///
+    /// Diagnostic-only — always passes; prints the sweep table.
+    #[test]
+    fn issue_5_mss1_pivot_threshold_sweep_diagnostic() {
+        let us = [0.0, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2, 1e-1, 0.5];
+        for &u in &us {
+            let Some(results) = issue5_mss1_inertia_sweep_with(1e-10, u) else {
+                return;
+            };
+            let positives: Vec<usize> = results.iter().map(|(_, i)| i.positive).collect();
+            let negatives: Vec<usize> = results.iter().map(|(_, i)| i.negative).collect();
+            let zeros: Vec<usize> = results.iter().map(|(_, i)| i.zero).collect();
+            let monotone = positives.windows(2).all(|w| w[1] >= w[0]);
+            eprintln!(
+                "pivot_threshold = {:>5.0e}: monotone(+) = {}\n  +: {:?}\n  -: {:?}\n  0: {:?}",
+                u, monotone, positives, negatives, zeros
+            );
+        }
     }
 }

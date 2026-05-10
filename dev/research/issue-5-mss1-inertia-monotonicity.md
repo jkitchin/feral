@@ -304,3 +304,77 @@ Option C stays in the queue, untouched, until evidence forces it.
   `dfac_driver.F:472-497` (threshold resolution).
 - SPRAL SSIDS source `ldlt_tpp.cxx:89-119` (`test_2x2`),
   `:226` (1×1 threshold), `datatypes.f90:260-262` (defaults).
+
+## 9. Addendum 2026-05-10 — Option B invalidated by empirical sweep
+
+After landing the standalone reproducer (Option A), two diagnostic
+sweeps in `src/numeric/factorize.rs::tests::issue_5_mss1_*_sweep_diagnostic`
+demonstrate that **Option B does not address the wandering symptom**.
+
+| `zero_tol`  | `pivot_threshold` | n+ trace                                |
+|-------------|-------------------|------------------------------------------|
+| 1e-10       | 0.0               | [93, 91, 94, 90, 92, 90, 90, 90, 90, 90] |
+| 1e-2        | 0.0               | [93, 91, 94, 90, 92, 90, 90, 90, 90, 90] |
+| 1e-10       | 1e-8              | [96, 98, 97, 91,101, 98, 94, 98, 90, 90] |
+| 1e-10       | 0.5               | [93, 95, 96, 92, 93, 98, 95, 94, 93, 90] |
+
+The wandering pivots have magnitudes O(1) and are not affected by any
+absolute floor in the range we tested. Raising `pivot_threshold`
+*amplifies* the wander rather than damping it (more 2×2 pivots get
+rejected and re-routed through 1×1 splits, but the splits are equally
+ambiguous on a rank-deficient J and BK lacks the inertia continuity
+property under perturbation).
+
+What is happening: with the (2,2)-block −1e-8 stripped, J's
+structural rank deficiency (rank ≈ 45 of m=73) makes BK's pivot
+choice ambiguous — multiple valid factorizations exist, each with
+slightly different (pos, neg, zero) categorizations. Floating-point
+perturbations from δ_w propagate through the Schur updates and
+deterministically (but unstably) select different pivot orderings.
+The resulting inertia jitters ±5 around the structurally correct
+(90, 45, 28) without any individual pivot being "wrong" by the
+α-test or growth-bound criteria.
+
+When the corpus matrix's (2,2) block −1e-8 is **kept** (Ipopt's
+default static δ_c regularization), every δ_w in the sweep produces
+clean (90, 73, 0). That is Ipopt's static regularization doing its
+job: breaking the rank-deficiency makes the BK pivot choice
+deterministic.
+
+### Revised recommendations
+
+1. **Caller-side fix (recommended for the production failure).**
+   ripopt's `PDPerturbationHandler` should set `δ_c > 0` from
+   iteration 0 (or as soon as iter-0 inertia disagrees with the
+   target). This matches Ipopt's standard practice and is the
+   canonical interior-point prescription for rank-deficient
+   constraint Jacobians (W&B 2006 §3.1, equation 13). No feral-side
+   change required.
+2. **Force-1×1 mode (optional feral-side palliative).** Add a
+   `BunchKaufmanParams::force_1x1: bool` flag that disables the
+   α-test 2×2 branch entirely. All pivots become 1×1 with sign of
+   the diagonal post-Schur. More stable inertia under perturbation,
+   worse growth properties, larger backward error. Useful as an
+   "inertia-correction-friendly" mode an IPM can opt into during
+   δ_w escalation when the standard mode wanders.
+3. **Eigenvalue-aware 2×2 split.** When a 2×2 candidate has a
+   smaller eigenvalue (in absolute value) below `eps^(2/3) · max(|d11|, |d21|, |d22|)`,
+   split it into a 1×1 (carrying the larger eigenvalue, sign known)
+   plus a 1×1 zero. Requires explicit eigendecomposition of the 2×2
+   block — single sqrt per block, modest cost. Intermediate
+   complexity; targets the failure mode directly without disabling
+   2×2 entirely.
+
+Option B (norm-relative pivot floor) remains a defensible *general*
+improvement for matching MUMPS's null-pivot behavior on the broader
+corpus, but it does not solve issue #5. Track it separately if at
+all; do not block on issue #5.
+
+The Option C "caller inertia hint" is also unhelpful for this
+symptom — the caller knowing the target doesn't help when each valid
+factorization simultaneously satisfies all numeric tests.
+
+Pause point: which of (1)/(2)/(3) does the project want to pursue?
+The reproducer test + diagnostics are landed and stable. The fix
+direction is now a project decision, not a numerics debugging
+question.
