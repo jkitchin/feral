@@ -1,0 +1,78 @@
+#+TITLE: Journal — 2026-05-10-01
+#+AUTHOR: claude
+
+* 14:30 :issue-5:bk-pivoting:reproducer:
+Reproduced the issue #5 wandering inertia symptom on MSS1_0000 in a
+unit test inside =src/numeric/factorize.rs::tests=. The reproducer
+sweeps δ_w ∈ {0, 1e-4, 1e-2, 1, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12}
+adding to the (1,1)-block diagonals (first 90 entries). Configuration
+matches ripopt's =feral_direct.rs= exactly: =Identity= scaling,
+=ForceAccept= zero-pivot, =zero_tol=1e-10=, =zero_tol_2x2=1e-20=,
+=pivot_threshold=0.0=.
+
+Key finding: the corpus =MSS1_0000.mtx= has Ipopt's static
+regularization δ_c = -1e-8 baked into the (2,2) block. With it in
+place, every δ_w in the sweep produces a clean =(90, 73, 0)=. Strip
+it (matching the reporter's =dc=0= trace), and the wandering appears:
+
+#+begin_example
+δ_w =      0e0  →  inertia(+ 93, - 48, 0: 22)
+δ_w =     1e-4  →  inertia(+ 91, - 46, 0: 26)
+δ_w =     1e-2  →  inertia(+ 94, - 49, 0: 20)
+δ_w =      1e0  →  inertia(+ 90, - 45, 0: 28)
+δ_w =      1e2  →  inertia(+ 92, - 47, 0: 24)
+δ_w =      1e4  →  inertia(+ 90, - 45, 0: 28)
+δ_w =      1e6  →  inertia(+ 90, - 45, 0: 28)
+δ_w =      1e8  →  inertia(+ 90, - 45, 0: 28)
+δ_w =     1e10  →  inertia(+ 90, - 45, 0: 28)
+δ_w =     1e12  →  inertia(+ 90, -  1, 0: 72)
+#+end_example
+
+Mathematical truth: with K = [[(1+δ_w)·I, J^T], [J, 0]] and J having
+structural rank ≈ 45, the *correct* inertia at every finite δ_w is
+=(135, 45, 28)=, independent of δ_w. The Schur complement is
+S = -(1+δ_w)^-1·J·J^T which has rank 45 throughout. So:
+
+  - δ_w = 1, 1e4, 1e6, 1e8, 1e10 produce (90, 45, 28) — the n+ count
+    is wrong (should be 135) but n- and zero are right.
+  - δ_w = 0, 1e-4, 1e-2, 1e2 wander: n+ flips between 90 and 94.
+  - δ_w = 1e12 collapses: Schur entries underflow to ~0 and BK reads
+    pivots as zero (72 zeros). Real failure mode.
+
+The ripopt =PDPerturbationHandler= relies on monotone non-decreasing
+n+ as δ_w increases, expecting eventually n+ → n_x = 90. With the
+wandering it sees n+ = 91 → 94 → 90 etc. and ramps to 1e12 hoping to
+pin it. This breaks the IPM Newton step.
+
+Two distinct phenomena are conflated in the trace:
+1. =δ_w ∈ [0, 1e10]=: BK 1×1/2×2 boundary instability — pivot
+   selection flips at the α-test (|akk| ≷ 0.6404·γ_0) as δ_w sweeps
+   through the magnitude of off-diagonal J^T entries.
+2. =δ_w = 1e12=: Schur underflow. (1+δ_w)^-1·J·J^T entries fall below
+   =zero_tol=, BK declares zero pivots.
+
+Both are addressed by Option B (norm-relative pivot floor) in the
+research note: a SEUIL-style floor catches the wandering pivots with
+an absolute threshold, and routes the underflowed pivots to a
+sign-preserving zero count rather than letting them silently flip
+between 1×1 sign assignments.
+
+Test currently asserts =any_decrease= on the positive count (locks in
+the symptom). Once Option B lands, that flips to assert monotone
+non-decreasing.
+
+* 14:45 :issue-5:test-design:regression:
+The test is a *negative-control regression test* — it passes today
+because the bug is present, and will fail when the bug is fixed. The
+docstring on =issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep=
+explicitly tells the next agent to flip the assertion when Option B
+lands. This is preferable to =#[ignore]=-ing a positive-control test
+that requires the fix because (a) the fix can be developed
+incrementally without breaking CI, and (b) reverse-incident reviewers
+get an immediate red flag on regression.
+
+Skipped silently (=return=, not =panic!=) if the corpus matrix is
+absent — keeps the test usable in the published crate where
+=data/= is excluded.
+
+Next: implement Option B (SEUIL-floor) and verify the test flip.

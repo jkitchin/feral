@@ -3027,4 +3027,145 @@ mod tests {
         let r = block.solve(&rhs);
         assert!(matches!(r, Err(FeralError::DimensionMismatch { .. })));
     }
+
+    /// Issue #5 reproducer — sweep δ_w on the first 90 diagonal
+    /// entries (the (1,1) block) of MSS1_0000 and observe inertia.
+    /// Mirrors `ripopt::feral_direct.rs`'s configuration exactly.
+    /// See `dev/research/issue-5-mss1-inertia-monotonicity.md`.
+    fn issue5_mss1_inertia_sweep() -> Option<Vec<(f64, Inertia)>> {
+        let path = std::path::Path::new("data/matrices/kkt/MSS1/MSS1_0000.mtx");
+        let mtx = match crate::io::mtx::read_mtx(path) {
+            Ok(m) => m,
+            Err(_) => return None, // fixture not present — skip
+        };
+        let n = mtx.n;
+        // The (1,1) block is the first n_x rows/cols. MSS1: n_x = 90,
+        // n_eq = 73, total 163 (per .json sidecar).
+        let n_x = 90usize;
+        assert_eq!(n, 163, "MSS1_0000 expected n=163");
+
+        // ripopt's exact configuration from feral_direct.rs:
+        let mut bk = BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            zero_tol: 1e-10,
+            zero_tol_2x2: 1e-20,
+            ..BunchKaufmanParams::default()
+        };
+        // `pivtol_max = 0.5` from the issue is the *cap* on
+        // pivot_threshold during inertia correction. The issue #2
+        // fix raised the default to 1e-8; with that value the
+        // wandering pattern from the issue does NOT reproduce. The
+        // reporter's ripopt is still using the pre-issue-#2 default
+        // of 0.0 (which `BunchKaufmanParams::default()` continues
+        // to set on the dense entry, but which `NumericParams::
+        // default()` overrides to 1e-8). We replicate the reporter's
+        // configuration explicitly here.
+        bk.pivot_threshold = 0.0;
+
+        let params = NumericParams {
+            bk,
+            scaling: ScalingStrategy::Identity,
+            small_leaf: SmallLeafBatch::default(),
+            profiler: None,
+        };
+
+        let deltas = [
+            0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12,
+        ];
+
+        let mut results = Vec::with_capacity(deltas.len());
+        for &dw in &deltas {
+            // Add δ_w to the first n_x diagonal entries. Build via
+            // triplets so we don't have to deal with whether the
+            // diagonal entries already exist (from_triplets sums
+            // duplicates).
+            let mut rows: Vec<usize> = Vec::with_capacity(mtx.entries.len() + n_x);
+            let mut cols: Vec<usize> = Vec::with_capacity(mtx.entries.len() + n_x);
+            let mut vals: Vec<f64> = Vec::with_capacity(mtx.entries.len() + n_x);
+            for &(r, c, v) in &mtx.entries {
+                // The corpus matrix already has -1e-8 baked into the
+                // (2,2) block (Ipopt's default static regularization).
+                // The reporter's `dc=0` trace is over the *unperturbed*
+                // KKT, so strip it here. Add δ_c=0 (i.e. nothing) back.
+                if r >= n_x && c >= n_x && r == c {
+                    continue;
+                }
+                rows.push(r);
+                cols.push(c);
+                vals.push(v);
+            }
+            for i in 0..n_x {
+                rows.push(i);
+                cols.push(i);
+                vals.push(dw);
+            }
+            let csc = CscMatrix::from_triplets(n, &rows, &cols, &vals)
+                .expect("MSS1_0000 + δ_w·I CSC build");
+
+            let sym = symbolic_factorize(&csc, &SupernodeParams::default())
+                .expect("symbolic factorize MSS1_0000");
+            let (_factors, inertia) = factorize_multifrontal(&csc, &sym, &params)
+                .expect("numeric factorize MSS1_0000 + δ_w·I");
+            results.push((dw, inertia));
+        }
+        Some(results)
+    }
+
+    /// Issue #5 — confirm the BK 1×1/2×2 boundary instability on
+    /// MSS1_0000. This test currently *locks in* the wandering
+    /// pattern reported in the issue: it asserts that across the
+    /// δ_w sweep, the positive count is **non-monotone** (decreases
+    /// at least once between consecutive entries before reaching
+    /// the n+ = 90 target). The negative assertion is the regression
+    /// test fixture for the future fix — when the norm-relative
+    /// pivot floor (Option B in the research note) lands, this
+    /// assertion will *flip* to monotone non-decreasing.
+    ///
+    /// Skipped silently if `data/matrices/kkt/MSS1/MSS1_0000.mtx`
+    /// is not present in the working tree.
+    #[test]
+    fn issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep() {
+        let Some(results) = issue5_mss1_inertia_sweep() else {
+            return;
+        };
+
+        // Print the trace on test failure — this is the diagnostic
+        // payload the issue is about. Captured by `cargo test --
+        // --nocapture`.
+        for (dw, inertia) in &results {
+            eprintln!(
+                "δ_w = {:>8.0e}  →  inertia(+{:3}, -{:3}, 0:{:>3})",
+                dw, inertia.positive, inertia.negative, inertia.zero
+            );
+        }
+
+        // After stripping the (2,2)-block -1e-8 (Ipopt's static
+        // regularization), the constraint Jacobian J has structural
+        // rank deficiency: rank(J) ≈ 45, m-rank(J) ≈ 28. The Schur
+        // complement of [[(1+δ_w)·I, J^T], [J, 0]] is then
+        // S = -(1+δ_w)^-1·J·J^T which has rank 45 for any finite
+        // δ_w. So the *correct* inertia at every δ_w in the sweep
+        // is (n_x + rank(J), rank(J), m - rank(J)) = (135, 45, 28),
+        // independent of δ_w. The PDPerturbationHandler in ripopt
+        // assumes inertia is monotone non-decreasing in δ_w and
+        // ramps it expecting to see n+ → n_x as δ_w grows. That
+        // assumption holds for non-degenerate KKT but fails here —
+        // and the wandering observed in the BK 1×1/2×2 boundary
+        // makes the failure dramatic.
+        //
+        // Lock in the symptom: positive count is *non-monotone*
+        // across the sweep. Once Option B (norm-relative pivot
+        // floor / SEUIL analog) lands, this assertion flips to
+        // `assert!(positives are monotone non-decreasing)` per
+        // dev/research/issue-5-mss1-inertia-monotonicity.md.
+        let positives: Vec<usize> = results.iter().map(|(_, i)| i.positive).collect();
+        let any_decrease = positives.windows(2).any(|w| w[1] < w[0]);
+        assert!(
+            any_decrease,
+            "issue #5 reproducer expected non-monotone positive count, got monotone: \
+             {:?}. If this assertion fails after the SEUIL-floor fix lands, \
+             flip it to `assert!(monotone)` per dev/research/issue-5-mss1-inertia-monotonicity.md.",
+            positives
+        );
+    }
 }
