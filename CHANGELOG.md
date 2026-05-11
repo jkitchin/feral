@@ -42,6 +42,19 @@ the same symmetric matrix described with upper- vs lower-triangle
 triplets produced different solve results. The error message identifies
 the offending triplet by index and `(row, col)`. Reported by @janosh.
 
+### Investigated
+
+- Issue #5 (MSS1 BK inertia non-monotone under δ_w·I): triage
+  complete, closed on the feral side. Landed a reproducer test
+  + zero_tol/pivot_threshold sweep diagnostics in
+  `src/numeric/factorize.rs::tests`. Empirically demonstrated
+  that no in-kernel magnitude-floor lever cures the wandering;
+  cross-checked MUMPS 5.8.2 and MA57 (via Ipopt's wrapper) and
+  confirmed neither implements eigenvalue-aware 2×2 splitting.
+  Recommended fix is upstream (caller-side δ_c bump matching
+  Ipopt's `PerturbForSingularity`). Full analysis in
+  `dev/research/issue-5-mss1-inertia-monotonicity.md` §9.
+
 ## [0.1.0] - 2026-05-06
 
 First public release on crates.io. Seven crates published in

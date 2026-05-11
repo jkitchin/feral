@@ -131,6 +131,56 @@ Recommend pause + ask the user which direction to pursue. The
 reproducer test + diagnostics are committed; pivoting work waits on
 that decision.
 
+* 16:15 :issue-5:ma57:mumps:closed:
+Cross-checked MUMPS 5.8.2 (=ref/mumps/src/dfac_front_aux.F=
+DMUMPS_FAC_I_LDLT) and MA57 (Duff 2004 + Ipopt's wrapper at
+=ref/Ipopt/src/Algorithm/LinearSolvers/IpMa57TSolverInterface.cpp=)
+via the mumps-expert and ipopt-expert agents. Findings:
+
+** Both keep 2×2 atomic; neither implements eigenvalue split
+- MUMPS: lines 1590-1619 show acceptance via =sqrt(|det|) ≤ SEUIL=
+  proxy + Duff-Reid growth bound; rejection at label 460 advances to
+  next 1×1 candidate. Inertia is Sylvester via =det= and =sign(D22)=
+  (matches feral's =count_2x2_inertia_val=).
+- MA57: Duff 2004 §3.3 + Ipopt config at =:375, 538, 629= confirm
+  atomic 2×2; threshold lever is =CNTL(1) = pivtol=, default 1e-8,
+  ramped via =IncreaseQuality()= (=:821-835=) toward 1e-4.
+
+** The =sqrt(|det|)= proxy is the root-cause MUMPS dodges by accident
+For a 2×2 with one large and one small eigenvalue, =λ_min · λ_max =
+det= ⇒ =sqrt(|det|) = sqrt(|λ_min|·|λ_max|)= overestimates =|λ_min|=.
+With the SYM=2 default =CNTL(3)=CNTL(4)=0= (no SEUIL), near-singular
+2×2's pass acceptance and contribute (1+, 1-) on indefinite signature
+— exactly feral's behavior. MUMPS users hit the same wandering when
+they set =CNTL(4)=0= and lack rank-revealing mode.
+
+** Ipopt's escalation stack = caller-side fix
+=IpPDFullSpaceSolver.cpp:541-639= shows the canonical recipe:
+1. =WRONG_INERTIA= with too few negs → =IncreaseQuality()= (bump
+   pivtol), retry. If saturated → =PerturbForSingularity= (δ_c bump).
+2. Other =WRONG_INERTIA= → =PerturbForWrongInertia= (δ_w bump).
+3. =neg_curv_test_tol= (Zavala-Chiang inertia-free curvature test) is
+   the escape hatch when the solver doesn't report inertia at all.
+
+The reporter's ripopt is doing only step 2 (δ_w escalation) and is
+missing step 1's δ_c branch. That's the upstream fix.
+
+** Decision: close issue #5 on the feral side
+Implementing Option 2 (force-1×1) or Option 3 (eigenvalue split)
+would produce inertia outputs that diverge from MUMPS and MA57 —
+violating the corpus consensus invariant in CLAUDE.md and the
+inertia gate in =dev/research/inertia-triage-2026-04-27.md=. Both
+options non-canonical; both rejected.
+
+Option B (norm-relative pivot floor) is independently defensible
+for matching MUMPS's null-pivot bookkeeping but does not solve
+issue #5. Track separately; do not bundle.
+
+The reproducer test stays in place as a regression guard. The
+research note's §9 carries the full analysis and decision. Next
+action is upstream-facing: respond on the GitHub issue with this
+analysis and suggest the ripopt-side =PerturbForSingularity= addition.
+
 * 14:45 :issue-5:test-design:regression:
 The test is a *negative-control regression test* — it passes today
 because the bug is present, and will fail when the bug is fixed. The

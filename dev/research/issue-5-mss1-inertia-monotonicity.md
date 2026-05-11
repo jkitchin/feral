@@ -341,40 +341,112 @@ clean (90, 73, 0). That is Ipopt's static regularization doing its
 job: breaking the rank-deficiency makes the BK pivot choice
 deterministic.
 
-### Revised recommendations
+### What the canonical solvers actually do
 
-1. **Caller-side fix (recommended for the production failure).**
-   ripopt's `PDPerturbationHandler` should set `δ_c > 0` from
-   iteration 0 (or as soon as iter-0 inertia disagrees with the
-   target). This matches Ipopt's standard practice and is the
-   canonical interior-point prescription for rank-deficient
-   constraint Jacobians (W&B 2006 §3.1, equation 13). No feral-side
-   change required.
-2. **Force-1×1 mode (optional feral-side palliative).** Add a
-   `BunchKaufmanParams::force_1x1: bool` flag that disables the
-   α-test 2×2 branch entirely. All pivots become 1×1 with sign of
-   the diagonal post-Schur. More stable inertia under perturbation,
-   worse growth properties, larger backward error. Useful as an
-   "inertia-correction-friendly" mode an IPM can opt into during
-   δ_w escalation when the standard mode wanders.
-3. **Eigenvalue-aware 2×2 split.** When a 2×2 candidate has a
-   smaller eigenvalue (in absolute value) below `eps^(2/3) · max(|d11|, |d21|, |d22|)`,
-   split it into a 1×1 (carrying the larger eigenvalue, sign known)
-   plus a 1×1 zero. Requires explicit eigendecomposition of the 2×2
-   block — single sqrt per block, modest cost. Intermediate
-   complexity; targets the failure mode directly without disabling
-   2×2 entirely.
+Investigated 2026-05-10 via `mumps-expert` and `ipopt-expert` agents.
+Cross-checked against MUMPS 5.8.2 source and Ipopt 3.14's MA57
+wrapper.
 
-Option B (norm-relative pivot floor) remains a defensible *general*
-improvement for matching MUMPS's null-pivot behavior on the broader
-corpus, but it does not solve issue #5. Track it separately if at
-all; do not block on issue #5.
+**MUMPS 5.8.2** (`ref/mumps/src/dfac_front_aux.F:1590-1619`,
+`DMUMPS_FAC_I_LDLT`):
 
-The Option C "caller inertia hint" is also unhelpful for this
-symptom — the caller knowing the target doesn't help when each valid
-factorization simultaneously satisfies all numeric tests.
+- 2×2 blocks are **atomic**. No eigenvalue split.
+- Acceptance tests (in order): (a) `sqrt(|DETPIV|) ≤ SEUIL` — null
+  test using `sqrt(|det|)` as a *proxy* for `|λ_min|`; (b)
+  Duff-Reid 2×2 growth bound `(|d22|·RMAX + AMAX·TMAX)·UULOC > |DETPIV|`
+  and its symmetric pair. With the SYM=2 default `CNTL(3)=CNTL(4)=0`
+  the `sqrt(|det|)` test is effectively `|DETPIV|=0` only — so a
+  near-singular 2×2 with `det≈ε` and `λ_max=O(1)` is **accepted** and
+  contributes `(1+,1-,0)` whenever `det<0`, i.e., exactly the
+  non-monotone bookkeeping observed here. The `sqrt(|det|) ≤ SEUIL`
+  bound is loose precisely because `λ_min·λ_max = det` ⇒
+  `sqrt(|det|) = sqrt(|λ_min|·|λ_max|)` overestimates `|λ_min|` for
+  unbalanced pivots.
+- Inertia: Sylvester via `det` and `sign(D22)`
+  (`dfac_front_aux.F:1613-1619`):
+  ```
+  IF (DETPIV < 0)        NNEGW += 1   ! (1+, 1-)
+  ELSE IF (D22 < 0)      NNEGW += 2   ! (0,  2-)
+  ELSE                   /* none */    ! (2+, 0)
+  ```
+  Matches feral's `count_2x2_inertia_val`.
+- Rank-revealing mode (`ICNTL(56)≠0` → `KEEP(19)≠0`,
+  `dfac_front_aux.F:1513-1517`): rejects any candidate with
+  `max(AMAX, RMAX, |PIVOT|) ≤ SEUIL` and defers to parent. This is
+  the closest MUMPS comes to "indefinite-aware mode for KKT".
+- Static pivoting (`CNTL(4)=SEUIL>0`, see `:1326-1328`,
+  `:821-823`): replaces too-small diagonals with `±CSEUIL` rather
+  than rejecting them. Counted in `NBTINYW`.
 
-Pause point: which of (1)/(2)/(3) does the project want to pursue?
-The reproducer test + diagnostics are landed and stable. The fix
-direction is now a project decision, not a numerics debugging
-question.
+**MA57** (Duff 2004 ACM TOMS 30(2) §3.3, plus Ipopt wrapper at
+`ref/Ipopt/src/Algorithm/LinearSolvers/IpMa57TSolverInterface.cpp`):
+
+- 2×2 blocks **atomic**. No eigenvalue split.
+- `CNTL(1) = pivtol` (Ipopt default `1e-8`, max `1e-4`,
+  `:200-213`); `CNTL(2) = sqrt(eps)` tiny-pivot threshold.
+- `INFO(24) = NEIG` reported via Sylvester (sign of `det` + sign of
+  `D22`).
+- Ipopt's `IncreaseQuality()` (`:821-835`):
+  ```
+  pivtol_ = min(pivtolmax_, pivtol_^0.75)
+  ```
+  geometric ramp toward `1e-4`. This is MA57's primary lever
+  against wandering inertia.
+
+**Ipopt's escalation stack** when MA57 returns `WRONG_INERTIA`
+(`ref/Ipopt/src/Algorithm/IpPDFullSpaceSolver.cpp`):
+
+1. **Too few negatives** (singular signal, `:541`):
+   `IncreaseQuality()` (bump `CNTL(1)`), retry. If quality saturated:
+   `PerturbForSingularity` (escalate `δ_c`, `:568`).
+2. **Otherwise wrong** (`:579`): `PerturbForWrongInertia`
+   (escalate `δ_w`).
+3. **Inertia-free escape hatch** (`:592-639`,
+   `neg_curv_test_tol`, default 0 = off): Zavala-Chiang curvature
+   test on the computed step. Used when the linear solver doesn't
+   report inertia (e.g. PARDISO selective inertia, iterative
+   methods).
+
+### Synthesis
+
+Neither MA57 nor MUMPS implements eigenvalue-aware 2×2 splitting.
+Their strategy is to keep the linear-solver inertia output
+faithful (Sylvester via det/trace, atomic 2×2) and push the
+correction loop one level up into the IPM driver. Implementing
+Option 3 (eigenvalue-aware split) in feral would break this
+symmetry and create inertia outputs that diverge from the canonical
+Fortran solvers — violating the corpus consensus invariant in
+`CLAUDE.md` and `dev/research/inertia-triage-2026-04-27.md`. **Do
+not pursue Option 3.**
+
+Option 2 (force-1×1 mode) is similarly non-canonical and would
+generate inertia outputs no oracle would corroborate. Defer
+indefinitely.
+
+### Decision (2026-05-10)
+
+1. **No feral-side code change for issue #5.** The reproducer test
+   and diagnostic sweeps (committed `c002bec`, `cc8a45b`) document
+   the symptom and demonstrate why the in-kernel levers don't
+   touch it.
+2. **Recommendation is upstream:** ripopt's `PDPerturbationHandler`
+   should follow Ipopt's escalation stack. The cleanest fix is
+   `PerturbForSingularity`-style δ_c bump on the first
+   `WRONG_INERTIA` signal where neg < expected (the structural
+   rank-deficiency case), in addition to the existing `δ_w`
+   escalation.
+3. **Track-but-don't-block:** Option B (norm-relative pivot floor /
+   MUMPS SEUIL analog) remains a defensible *general* improvement
+   for matching MUMPS's null-pivot bookkeeping on the broader
+   corpus. If pursued, it must be validated against the consensus
+   inertia gate (no regressions on the 154k-matrix corpus).
+   Independent of issue #5; do not bundle.
+4. **Leave the test in place as a regression guard.** It locks in
+   the symptom under the `Identity / ForceAccept / pivot_threshold=0`
+   configuration. If a future change happens to flip it to monotone
+   non-decreasing, the assertion message directs the next agent to
+   flip the assertion accordingly.
+
+Issue #5 is closed on the feral side. Recommended user-facing
+disposition: respond on the GitHub issue with this analysis and
+suggest the ripopt-side `PerturbForSingularity` fix.

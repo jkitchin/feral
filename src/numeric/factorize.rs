@@ -3105,15 +3105,27 @@ mod tests {
         Some(results)
     }
 
-    /// Issue #5 — confirm the BK 1×1/2×2 boundary instability on
-    /// MSS1_0000. This test currently *locks in* the wandering
-    /// pattern reported in the issue: it asserts that across the
-    /// δ_w sweep, the positive count is **non-monotone** (decreases
-    /// at least once between consecutive entries before reaching
-    /// the n+ = 90 target). The negative assertion is the regression
-    /// test fixture for the future fix — when the norm-relative
-    /// pivot floor (Option B in the research note) lands, this
-    /// assertion will *flip* to monotone non-decreasing.
+    /// Issue #5 — regression guard for the BK 1×1/2×2 boundary
+    /// instability on MSS1_0000.
+    ///
+    /// **Disposition (2026-05-10): closed on the feral side.** Per
+    /// `dev/research/issue-5-mss1-inertia-monotonicity.md` §9, the
+    /// wandering is caused by BK pivot-ordering ambiguity on a
+    /// structurally rank-deficient J. Neither the in-kernel
+    /// magnitude-floor levers (`zero_tol`, `pivot_threshold`) nor
+    /// the canonical Fortran solvers (MUMPS, MA57) handle this in
+    /// the linear-solver layer — they keep 2×2 atomic and rely on
+    /// the IPM driver to escalate δ_w / δ_c. The recommended fix
+    /// is upstream: ripopt should add a `PerturbForSingularity`
+    /// δ_c bump to its inertia-correction loop.
+    ///
+    /// This test stays as a regression guard: it asserts the
+    /// wandering pattern persists under ripopt's exact
+    /// configuration. If a future change happens to flip it to
+    /// monotone non-decreasing, that's the signal to revisit the
+    /// disposition — flip the assertion to
+    /// `assert!(positives.windows(2).all(|w| w[1] >= w[0]))` and
+    /// update the research note.
     ///
     /// Skipped silently if `data/matrices/kkt/MSS1/MSS1_0000.mtx`
     /// is not present in the working tree.
@@ -3162,9 +3174,10 @@ mod tests {
         let any_decrease = positives.windows(2).any(|w| w[1] < w[0]);
         assert!(
             any_decrease,
-            "issue #5 reproducer expected non-monotone positive count, got monotone: \
-             {:?}. If this assertion fails after the SEUIL-floor fix lands, \
-             flip it to `assert!(monotone)` per dev/research/issue-5-mss1-inertia-monotonicity.md.",
+            "issue #5 regression: expected non-monotone positive count, got monotone: \
+             {:?}. If this assertion fails, the in-kernel pivot behavior has changed; \
+             revisit the disposition in dev/research/issue-5-mss1-inertia-monotonicity.md \
+             §9 and flip the assertion to monotone non-decreasing.",
             positives
         );
     }
