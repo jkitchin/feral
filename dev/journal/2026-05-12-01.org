@@ -127,3 +127,45 @@ Closing the cont-201 assembly-tree-parallelism investigation. The
 1.5× cached-mode headroom is etree-topology-bound — no scheduler
 change inside the assembly tree can recover it. Within-supernode
 parallelism is the next axis if pursued.
+
+* 16:00 :scaling:cache:verified:
+Iteration 3 of cont-201 investigation: scaling-cache verification.
+Added =solver_scaling_phase_split= probe test that times each step
+of =compute_scaling_with_cache= separately with =cache = None=.
+
+Results:
+| matrix    | picked        | pick_ms | scale_ms (no-cache) |
+|-----------+---------------+---------+---------------------|
+| bcsstk38  | InfNorm       |   0.004 |               4.048 |
+| bratu3d   | InfNorm       |   0.014 |               0.814 |
+| c-big     | Mc64Symmetric |   0.216 |            2302.744 |
+| cont-201  | InfNorm       |   0.030 |               4.146 |
+
+Findings:
+1. =c-big= picks MC64; no-cache path is **2.3 seconds**; production
+   cached path is **2.4 ms** (from iter-2 telemetry). Cache works,
+   delivering a 1000× speedup.
+2. cont-201/bcsstk38 pick InfNorm; ~4 ms is fundamental
+   Knight-Ruiz iteration on matrix VALUES (not pattern). Cannot
+   be cached across IPM iterations.
+3. The 3.95 ms cont-201 scaling slice is real per-factor work,
+   not a missed cache.
+
+This resolves probe #2 from the prior session's "Next Session
+Should". No engineering action needed on the cache.
+
+* 16:10 :session-summary:
+This session shipped three iterations of the cont-201 parallel
+headroom investigation, each falsifying a prior hypothesis:
+- iter 1: lock contention → falsified (≤3.4% of body)
+- iter 2: scope idle = engineering loss → falsified (78% etree
+  topology)
+- iter 3: scaling cache miss → falsified (cache works; InfNorm
+  is value-dependent)
+
+Net result: cont-201's cached-mode 56 ms wall is at its
+assembly-tree parallelism ceiling. Within-supernode parallelism
+is the only remaining axis; gated behind Phase 2.4.3 SIMD work.
+
+Telemetry surface remains in-tree as a permanent diagnostic
+(16 atomics + 2 probe tests, all #[ignore]'d).

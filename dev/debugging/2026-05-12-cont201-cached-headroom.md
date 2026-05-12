@@ -237,3 +237,71 @@ walked through:
 
 This closes the cont-201 assembly-tree-parallelism investigation.
 Reopen only if a within-supernode parallelism prototype is built.
+
+---
+
+## Iteration 3 (2026-05-12, same session): scaling-cache verification
+
+Iteration 1 noted that cont-201's cached-mode wall spends 3.95 ms in
+the `scaling` phase and flagged this as a candidate cache miss
+("investigating whether `compute_scaling_with_cache` actually hits
+its cache on the second call is the next concrete probe").
+
+Resolution: probe via a tiny diagnostic test
+(`solver_scaling_phase_split`, `#[ignore]`) that loads each corpus
+matrix and times three components separately — `pick_scaling_strategy`
+(O(n) col_ptr scan), `compute_scaling_with_cache(..., cache=None)`,
+and the `scaling_pivot_order` gather. Cache-less timing tells us the
+upper bound of `compute_scaling` work when the symbolic-stage MC64
+cache is absent.
+
+### Data
+
+| matrix    |      n |     nnz | picked        | pick_ms | scale_ms (no cache) | reorder_ms |
+| --------- | -----: | ------: | ------------- | ------: | ------------------: | ---------: |
+| bcsstk38  |   8032 | 181 746 | InfNorm       |   0.004 |               4.048 |      0.006 |
+| bratu3d   | 27 792 |  88 627 | InfNorm       |   0.014 |               0.814 |      0.012 |
+| c-big     | 345 241 | 1 343 126 | Mc64Symmetric |   0.216 |            2 302.744 |      0.148 |
+| cont-201  | 80 595 | 239 596 | InfNorm       |   0.030 |               4.146 |      0.032 |
+
+### Findings
+
+**1. MC64 cache works as designed.** c-big picks `Mc64Symmetric`.
+With `cache = None` the full Hungarian matching runs and takes
+**2.3 seconds**. The parallel-driver test (`AtomicLockStats`)
+measured `phase_scaling_ns` = 2.43 ms on cached c-big — a **1000×
+speedup**, exactly the `scaling_from_cache` O(n) fast path. The
+cache hits and delivers the expected win.
+
+**2. cont-201's 3.95 ms is fundamental InfNorm work, not a missed
+cache.** cont-201 picks `InfNorm` (Auto's default for non-arrow-KKT
+matrices). InfNorm runs up to 10 Knight-Ruiz iterations and depends
+on matrix **values**, not pattern. There is no cache to hit across
+IPM iterations because the values change every Newton step. The
+3.95 ms is roughly 10 iterations × 240k nnz × ~1.6 ns/op,
+consistent with the measurement.
+
+**3. bcsstk38's 3.78 ms scaling slice has the same explanation** —
+InfNorm on 182k nnz.
+
+### Conclusion
+
+Probe #2 from prior session (verify `compute_scaling_with_cache`
+cache hits) is **resolved with no action needed**. The cache is
+operating correctly; the per-factor scaling cost is unavoidable
+value-dependent work for the matrices that pick InfNorm.
+
+Engineering opportunities ranked:
+
+- **InfNorm SIMD vectorization** — the Knight-Ruiz inner loop is
+  abs + max + sqrt + reciprocal, ~1.6 ns/op scalar. SIMD would
+  shave maybe 3× off cont-201's 3.95 ms, recovering 2-3 ms of a 56
+  ms wall (5%). Low priority unless the IPM hot path becomes
+  scaling-bound on other matrices.
+- **InfNorm iteration-count instrumentation** — count actual
+  Knight-Ruiz iterations per matrix. If cont-201 hits the 10-iter
+  cap, that's pathological and worth investigating; if it converges
+  in 2-3 iterations, the cost is already minimal. Not worth doing
+  speculatively.
+
+This completes the cont-201 cached-symbolic investigation.

@@ -108,6 +108,20 @@ the offending triplet by index and `(row, col)`. Reported by @janosh.
   assembly-tree investigation. See iteration 2 in
   `dev/debugging/2026-05-12-cont201-cached-headroom.md`.
 
+- Scaling cache verification (iteration 3) — `compute_scaling_with_cache`
+  works as designed. Added `solver_scaling_phase_split` test
+  (`#[ignore]`) that loads the corpus and times
+  `pick_scaling_strategy` + `compute_scaling_with_cache(cache=None)`
+  + reorder gather. c-big picks `Mc64Symmetric` and the no-cache
+  path takes **2.3 seconds** (full Hungarian); the cached path
+  in production takes **2.4 ms** — 1000× speedup, cache hits.
+  cont-201 and bcsstk38 pick `InfNorm`, which is values-dependent
+  Knight-Ruiz iteration (~4 ms per call) and is **not cacheable**
+  across IPM iterations. The 3.95 ms scaling slice on cached
+  cont-201 is fundamental per-factor work, not a missed cache.
+  Closes scaling probe from session 2026-05-12-02 "Next session
+  should #2".
+
 - Issue #5 (MSS1 BK inertia non-monotone under δ_w·I): triage
   complete, closed on the feral side. Landed a reproducer test
   + zero_tol/pivot_threshold sweep diagnostics in

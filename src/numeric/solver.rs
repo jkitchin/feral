@@ -1410,6 +1410,111 @@ mod tests {
         eprintln!();
     }
 
+    /// Probe: what does `pick_scaling_strategy` return for each
+    /// corpus matrix, and where does the wall time inside
+    /// `phase_scaling_ns` actually live? Splits the 3.95 ms cont-201
+    /// cached-mode scaling slice into (strategy pick) +
+    /// (compute_scaling) + (scaling_pivot_order build).
+    ///
+    /// The hypothesis under test: the scaling phase's per-factor cost
+    /// is unavoidable per-iteration value-dependent work (InfNorm
+    /// must re-run because it depends on values, not pattern), NOT a
+    /// missed cache. If true, the 3.95 ms is fundamental and not
+    /// recoverable for the IPM hot path. If false (e.g. the
+    /// strategy-pick or scaling_pivot_order build dominates),
+    /// there is engineering work available.
+    #[test]
+    #[ignore]
+    fn solver_scaling_phase_split() {
+        use crate::read_mtx;
+        use crate::scaling::{compute_scaling_with_cache, pick_scaling_strategy};
+        use std::path::PathBuf;
+        use std::time::Instant;
+
+        let dir = PathBuf::from("tests/data/large");
+        if !dir.is_dir() {
+            eprintln!("SKIP: {} not found.", dir.display());
+            return;
+        }
+
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "mtx"))
+            .collect();
+        paths.sort();
+        if paths.is_empty() {
+            eprintln!("SKIP: no .mtx in {}.", dir.display());
+            return;
+        }
+
+        eprintln!("\n  Scaling-phase split (Auto strategy default)");
+        eprintln!(
+            "  matrix                 n       nnz     picked        pick_ms  scale_ms  reorder_ms  total_ms"
+        );
+        eprintln!(
+            "  ---------------------- ------- ------- ------------- -------  --------  ----------  --------"
+        );
+
+        for path in &paths {
+            let mtx = match read_mtx(path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let csc = match mtx.to_csc() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .trim_end_matches(".mtx");
+
+            // Strategy pick: scans col_ptr (O(n)) for diag-only count.
+            let t0 = Instant::now();
+            let picked = pick_scaling_strategy(&csc);
+            let pick_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+            // Compute scaling itself with the resolved strategy.
+            // We deliberately pass `cache = None` here so the timing
+            // reflects the path the Solver hits when no MC64 cache
+            // was built (most non-arrow matrices). For MC64 cases we
+            // would need the cache; documented below.
+            let t1 = Instant::now();
+            let (scaling_vec, _info) = match compute_scaling_with_cache(&csc, &picked, None) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let scale_ms = t1.elapsed().as_secs_f64() * 1e3;
+
+            // Reorder: O(n) gather under symbolic.perm. We don't have
+            // the symbolic factorize here; use identity perm to time
+            // the gather kernel itself. This upper-bounds the cache-
+            // friendly case; the real path has a non-identity perm.
+            let perm: Vec<usize> = (0..csc.n).collect();
+            let t2 = Instant::now();
+            let _reordered: Vec<f64> = perm.iter().map(|&old| scaling_vec[old]).collect();
+            let reorder_ms = t2.elapsed().as_secs_f64() * 1e3;
+
+            let total = pick_ms + scale_ms + reorder_ms;
+            let picked_label = format!("{:?}", picked);
+            eprintln!(
+                "  {:22} {:7} {:7} {:13} {:7.3}  {:7.3}   {:7.3}     {:7.3}",
+                name,
+                csc.n,
+                csc.nnz(),
+                picked_label,
+                pick_ms,
+                scale_ms,
+                reorder_ms,
+                total
+            );
+        }
+        eprintln!();
+    }
+
     /// Bit-exact parity: factoring the same matrix under the
     /// parallel driver and the sequential driver must produce
     /// identical summed inertia and identical `solve(rhs)` output.

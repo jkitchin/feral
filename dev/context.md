@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-12T19:16:28Z
+Generated: 2026-05-12T19:21:21Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,27 +59,27 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+c51ea91 diag(parallel): localize cont-201 within-scope gap to rayon idle
 adbe2f1 diag(parallel): falsify lock-contention hypothesis on cont-201
 055cf07 session(2026-05-12-01): perf checkpoint — parallel default + alloc churn
 13c1410 perf(issue-7): default Solver to parallel driver + slash multifrontal alloc churn
 2bfc3b4 research(issue-5): close on feral side; document MUMPS+MA57 strategy
-cc8a45b research(issue-5): empirical sweeps invalidate Option B as the fix
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
 test numeric::factorize::tests::schur_multi_supernode_tail_matches_oracle ... ok
 test scaling::tests::auto_falls_back_to_infnorm_on_mss1_0009 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
 test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 
-test result: ok. 214 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.28s
+test result: ok. 214 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.28s
 
    Doc-tests feral
 
