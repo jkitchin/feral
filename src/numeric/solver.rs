@@ -423,6 +423,13 @@ impl Solver {
         true
     }
 
+    /// Full inertia of the last successful factor, if any. Returns
+    /// `None` if no factor is stored. See `num_negative_eigenvalues`
+    /// for the Ipopt-shaped accessor that panics on a missing factor.
+    pub fn inertia(&self) -> Option<&Inertia> {
+        self.last_inertia.as_ref()
+    }
+
     /// Minimum eigenvalue of D over the most recent factor's pivots.
     /// Returns `None` if no factor is stored. Mirrors Ipopt
     /// `SymLinearSolver::MinDiagonal` for the unconstrained
