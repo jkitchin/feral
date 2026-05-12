@@ -1,6 +1,6 @@
 [package]
 name = "feral-amf"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Approximate Minimum Fill (AMF / HAMF4) fill-reducing ordering, quotient-graph algorithm (Amestoy 1999). Pure Rust, standalone."
@@ -15,6 +15,6 @@ categories = ["mathematics", "science"]
 name = "feral_amf"
 
 [dependencies]
-feral-ordering-core = { path = "../feral-ordering-core", version = "0.1" }
+feral-ordering-core = { path = "../feral-ordering-core", version = "0.2" }
 
 [dev-dependencies]

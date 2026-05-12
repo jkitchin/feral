@@ -1,6 +1,6 @@
 [package]
 name = "feral-kahip"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "KaHIP-style flow-based nested-dissection fill-reducing ordering (Sanders & Schulz 2011; data reduction per Ost, Schulz & Strash 2021). Pure Rust, clean-room, standalone. Implements the FERAL ordering-crate contract."
@@ -15,8 +15,8 @@ categories = ["mathematics", "science"]
 name = "feral_kahip"
 
 [dependencies]
-feral-ordering-core = { path = "../feral-ordering-core", version = "0.1" }
-feral-amd = { path = "../feral-amd", version = "0.1" }
-feral-metis = { path = "../feral-metis", version = "0.1" }
+feral-ordering-core = { path = "../feral-ordering-core", version = "0.2" }
+feral-amd = { path = "../feral-amd", version = "0.2" }
+feral-metis = { path = "../feral-metis", version = "0.2" }
 
 [dev-dependencies]

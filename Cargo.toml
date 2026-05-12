@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "feral"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Sparse symmetric indefinite direct solver in pure Rust, with certified inertia counts."
@@ -56,12 +56,12 @@ rayon = "1.10"
 # via the OrderingMethod enum in src/symbolic/mod.rs. The in-tree
 # src/ordering/amd.rs is still the default (OrderingMethod::Amd)
 # pending retirement per dev/decisions.md.
-feral-ordering-core = { path = "crates/feral-ordering-core", version = "0.1" }
-feral-amd = { path = "crates/feral-amd", version = "0.1" }
-feral-amf = { path = "crates/feral-amf", version = "0.1" }
-feral-metis = { path = "crates/feral-metis", version = "0.1" }
-feral-scotch = { path = "crates/feral-scotch", version = "0.1" }
-feral-kahip = { path = "crates/feral-kahip", version = "0.1" }
+feral-ordering-core = { path = "crates/feral-ordering-core", version = "0.2" }
+feral-amd = { path = "crates/feral-amd", version = "0.2" }
+feral-amf = { path = "crates/feral-amf", version = "0.2" }
+feral-metis = { path = "crates/feral-metis", version = "0.2" }
+feral-scotch = { path = "crates/feral-scotch", version = "0.2" }
+feral-kahip = { path = "crates/feral-kahip", version = "0.2" }
 
 [dev-dependencies]
 approx = "0.5"

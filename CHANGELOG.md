@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-12
+
 ### Fixed — Honest `resolved_method` and consistent `Auto` routing (#3)
 
 `SymbolicFactorization.resolved_method` now reflects what the symbolic
@@ -69,6 +71,30 @@ the offending triplet by index and `(row, col)`. Reported by @janosh.
   — dense-native Knight-Ruiz iteration for the D.3/D.4 dense
   fast-path; the sparse `compute_infnorm` remains the path for the
   multifrontal driver.
+- `Solver::inertia()` — `Option<&Inertia>` accessor returning the
+  full inertia of the last successful factor. Complements the
+  Ipopt-shaped `num_negative_eigenvalues` (which panics if no factor
+  is stored) for callers that prefer to branch on `None`. Used by
+  the cross-solver bench harness.
+
+### Tooling
+
+- Cross-solver comparison harness under
+  `external_benchmarks/comparison/` (run.py, aggregate.py, report.py)
+  measures feral against MUMPS 5.8.2 and HSL MA97 2.8.1 on a sampled
+  SuiteSparse subset and emits `REPORT.md`. Each solver is configured
+  to its production-quality (refinement-on) settings so the residual
+  comparison is apples-to-apples:
+  - feral driver routes through `solve_sparse_refined` (Richardson
+    refinement with stagnation exit) in `src/bin/bench_one_matrix.rs`.
+  - `external_benchmarks/mumps_oracle/mumps_bench.F` sets
+    `ICNTL(10) = 2` (max two iterative-refinement steps) — MUMPS
+    default is 0 (no refinement).
+  - `external_benchmarks/hsl_bench/hsl_bench.c` wraps
+    `ma97_solve_d` in a 4-step Richardson loop because MA97 has no
+    native residual-based refinement entry for non-singular systems.
+  Configuration is documented in the generated report's Solvers
+  table.
 
 ### Performance
 
