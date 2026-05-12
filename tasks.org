@@ -136,46 +136,52 @@ and others. I think we might try to build standalone rust libraries for each of 
   - Next step if pursued: dev/plans/feral-metis-hemsr-coarsening.md
     (or similar) — NOT a dedicated crate plan.
 
-* TODO performance: blocked BK + SIMD micro-kernel for src/dense/factor.rs
+* DONE performance: blocked BK + SIMD micro-kernel for src/dense/factor.rs
+  CLOSED: [2026-05-12 Tue]
   - Context: dev/sessions/2026-04-18-08.md "Next Session Should #1";
     dev/journal/2026-04-18-08.org VESUVIO entry.
-  - Pure performance issue, NOT correctness. VESUVIO matrices factor
-    correctly under both AMD and MetisND (inertia matches oracle,
-    residuals pass). They just take 84x longer than MUMPS.
-  - Bottleneck: scalar rank-1 BK updates in src/dense/factor.rs
-    on the dense root frontal (~2059x959 for VESUVIO). Measured
-    ~8 GFLOP/s vs MUMPS DGETRF on Accelerate ~400 GFLOP/s, exact
-    50x kernel gap explains the 84x factor ratio.
-  - Both AMD and MetisND produce the same ~67%-of-n root frontal
-    (single dense linking column with 1026 nnz). Not an ordering
-    fix; needs blocked BK + SIMD.
-  - Existing prerequisite plans:
-    + dev/plans/phase-2.4.1-blocked-ldlt.md
-    + dev/plans/phase-2.4.2-simd-schur-kernel.md
-  - Estimated: 4-6 sessions to first measurable win. Risk:
-    BK pivoting interleaves with the trailing update, so naive
-    blocking is unsafe; SIMD on stable Rust means hand-written
-    core::arch with runtime dispatch.
-  - Corpus geomean factor/MUMPS already 0.42 (we win on average);
-    this addresses the long tail (VESUVIO/CRESC arrow-KKTs only).
-  - Defer until: a downstream consumer or benchmark target makes
-    the VESUVIO tail a blocker, OR the current substantial-feature
-    queue is empty.
-  - Progress as of 2026-05-12:
+  - Audit on 2026-05-12 (session 05) found the "Remaining" item
+    (Phase 2.4.2 redo with no-FMA SIMD) was already shipped in
+    d9887a9 (2026-04-14). The `axpy_minus_unroll4_nofma` /
+    `axpy2_minus_unroll4_nofma` kernels are wired into
+    `do_1x1_update` (src/dense/factor.rs:2501) and
+    `do_2x2_update` (:2523), plus the blocked panel/Schur paths
+    at lines 1719, 1741, 1824, 1843, 1927, 1953. The decisions.md
+    2026-04-14 entry "Phase 2.4.3: Schur SIMD kernel must use
+    separate mul + sub, not FMA" records the bit-exact-vs-scalar
+    contract and the bench numbers:
+    + dense factor/MUMPS p90  : 2.27 → 1.86 (-18%)
+    + sparse factor/MUMPS p90 : 3.18 → 2.82 (-11%)
+    + sparse inertia match    : 153009 → 153009 (zero regression)
+    + sparse residual pass    : 154329 → 154329 (zero regression)
+    Both Phase 2.8 exit gates (dense ≤2.0, sparse ≤3.0) hit.
+  - VESUVIO tail itself is addressed by adaptive MC64 scaling:
+    + AMD+mc64 on VESUVIO_0021: 645us (vs AMD+infnorm 44514us).
+    + MetisND+mc64 on VESUVIO_0021: 666us (vs MetisND+infnorm 45772us).
+    + CRESC132_0000 same pattern: mc64 1367us vs infnorm 46197us.
+    + The corpus consensus Auto scaling routes VESUVIA/VESUVIOU to
+      MC64 (tests scaling::tests::auto_keeps_mc64_on_vesuvia_0000
+      and auto_keeps_mc64_on_vesuviou_0000). So the "84x slowdown"
+      regime no longer fires for the routed Auto path.
+  - Shipped phases:
     + Phase 2.4.1 blocked LDLᵀ wired (d279810, 2026-04-20).
-    + Phase 2.4.2 SIMD Schur kernel REVERTED — `mul_add_f64s`
-      (one rounding) flips 1 ULP vs scalar mul+sub (two
-      roundings); 4-matrix inertia + 26-matrix residual
-      regressions. Need `mul_f64s + sub_f64s` rewrite +
-      bit-parity unit tests before re-wiring (see
-      dev/decisions.md 2026-04-14).
+    + Phase 2.4.2 FMA SIMD: reverted on 2026-04-14 (1-ULP inertia
+      flip on 4 matrices; documented in dev/tried-and-rejected.md).
+    + Phase 2.4.3 nofma SIMD: shipped 2026-04-14 in d9887a9.
+      Production hot path uses separate mul+sub for bit-parity
+      with the scalar loop. Verified by 30 bit-exact unit tests
+      at length sweep {0,1,2,3,4,5,7,8,9,15,...,1024} in
+      src/dense/schur_kernel.rs::tests.
     + Phase 2.4.3 rook-rescue: shipped as correctness, not perf
       (7d3eed3 step 8 validation).
     + W-1/W-2/W-3 + B-1 dual-column DSYRK + A2 swap-2x2:
       shipped 2026-04-21..23 (d345983, f073070, 2011b33,
       9d89d73, dfe169e, 46d847b, ac2b3da).
-  - Remaining: redo Phase 2.4.2 with no-FMA SIMD ops, validate
-    bit-parity, re-wire kernel.
+  - Further dense-kernel work (panel-BK / threaded inner kernels)
+    would only matter for the rare AMD+infnorm-on-VESUVIO regime
+    that Auto scaling now routes around. No downstream consumer
+    has flagged this as a blocker, so close. Open a new task if
+    a future workload makes the rare regime hot.
 
 * DONE follow-up: MSS1_0009 MC64-pathology triage (defer until after integration)
   CLOSED: [2026-05-12 Tue]
