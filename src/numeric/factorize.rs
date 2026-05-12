@@ -649,6 +649,15 @@ pub struct FactorWorkspace {
     /// Left empty when ownership is temporarily borrowed by an
     /// in-flight `SymmetricMatrix`.
     dense_values: Vec<f64>,
+    /// Per-worker scratch for the parallel driver: a sparse Option
+    /// lookup keyed by supernode index. The parallel task drains its
+    /// children's `ContribBlock`s into this vec (under the shared
+    /// `contrib_blocks` mutex), passes it to `factor_one_supernode`,
+    /// then takes its own slot out into the shared store. All slots
+    /// are guaranteed `None` between tasks, so no clearing is needed.
+    /// Pre-sized to `n_snodes` once per worker by the parallel driver;
+    /// sequential drivers don't touch this field.
+    local_contribs: Vec<Option<ContribBlock>>,
 }
 
 impl FactorWorkspace {
@@ -1516,13 +1525,8 @@ fn factor_one_supernode(
     // [own_col_offset, own_col_offset + own_ncol); for the standard path
     // own_col_offset = 0, for the Schur swap path it's n_delayed_in.
     let scaling = scaling_pivot_order;
-    let mut frontal_buf = std::mem::take(&mut ws.frontal_values);
-    frontal_buf.clear();
-    frontal_buf.resize(actual_nrow * actual_nrow, 0.0);
-    let mut frontal = SymmetricMatrix {
-        n: actual_nrow,
-        data: frontal_buf,
-    };
+    let frontal_buf = std::mem::take(&mut ws.frontal_values);
+    let mut frontal = SymmetricMatrix::from_pooled_buf(actual_nrow, frontal_buf);
     for (k_local, &gj) in row_indices[own_col_offset..own_col_offset + own_ncol]
         .iter()
         .enumerate()
@@ -1698,13 +1702,8 @@ fn factor_one_small_leaf(
     }
 
     let scaling = scaling_pivot_order;
-    let mut frontal_buf = std::mem::take(&mut ws.frontal_values);
-    frontal_buf.clear();
-    frontal_buf.resize(actual_nrow * actual_nrow, 0.0);
-    let mut frontal = SymmetricMatrix {
-        n: actual_nrow,
-        data: frontal_buf,
-    };
+    let frontal_buf = std::mem::take(&mut ws.frontal_values);
+    let mut frontal = SymmetricMatrix::from_pooled_buf(actual_nrow, frontal_buf);
     for (local_j, &gj) in row_indices[..own_ncol].iter().enumerate() {
         let s_j = scaling[gj];
         for k in permuted.col_ptr[gj]..permuted.col_ptr[gj + 1] {
@@ -1922,6 +1921,10 @@ pub fn factorize_multifrontal_supernodal_parallel(
             let mut w = FactorWorkspace::new();
             w.row_map.resize(n, usize::MAX);
             w.build_seen.resize(n, false);
+            // Per-worker children-contrib lookup. Allocated once here
+            // instead of per-task; slots are always `None` after each
+            // task drains children + takes own (see run_parallel_task).
+            w.local_contribs.resize_with(n_snodes, || None);
             Mutex::new(w)
         })
         .collect();
@@ -2063,24 +2066,6 @@ fn run_parallel_task<'a>(
         let snode = &symbolic.supernodes[snode_idx];
         let n_snodes = symbolic.supernodes.len();
 
-        // Stage child contributions into a task-local vec so the
-        // helper can read/take them without holding the shared lock.
-        // Most entries stay None; only the children's slots are
-        // populated. The helper writes its own slot into this same
-        // vec, which we extract after the helper returns.
-        let mut local_contribs: Vec<Option<ContribBlock>> = (0..n_snodes).map(|_| None).collect();
-        {
-            let mut shared = match contrib_blocks.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            for &c in &snode.children {
-                if c < n_snodes {
-                    local_contribs[c] = shared[c].take();
-                }
-            }
-        }
-
         // Pick a per-thread workspace slot. `current_thread_index`
         // returns Some(worker_idx) when this task runs on a rayon
         // worker, and None when it runs on the calling thread
@@ -2092,12 +2077,36 @@ fn run_parallel_task<'a>(
         let thread_idx = thread_idx.min(thread_ws.len() - 1);
         let ws_mtx = &thread_ws[thread_idx];
 
-        let result = {
+        let (result, own_contrib) = {
             let mut ws_guard = match ws_mtx.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            factor_one_supernode(
+
+            // Move the pooled local_contribs out of the workspace so
+            // we can hand `&mut FactorWorkspace` and `&mut Vec<...>`
+            // independently to `factor_one_supernode`. The vec returns
+            // to the workspace at the end of this block. All slots are
+            // guaranteed `None` going in (postcondition of the prior
+            // task on this worker took both children's slots and the
+            // own_contrib slot below).
+            let mut local_contribs = std::mem::take(&mut ws_guard.local_contribs);
+
+            // Stage child contributions: shared lock held only for
+            // the drain, not across the factor body.
+            {
+                let mut shared = match contrib_blocks.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                for &c in &snode.children {
+                    if c < n_snodes {
+                        local_contribs[c] = shared[c].take();
+                    }
+                }
+            }
+
+            let res = factor_one_supernode(
                 snode_idx,
                 symbolic,
                 permuted,
@@ -2108,12 +2117,18 @@ fn run_parallel_task<'a>(
                 &mut ws_guard,
                 &mut local_contribs,
                 0, // nvschur: parallel path is not used by Schur API
-            )
+            );
+
+            let own = local_contribs[snode_idx].take();
+            // Return the pooled vec to the workspace. All slots are
+            // `None` (children were taken into us above; own was just
+            // taken out), so no clearing is needed.
+            ws_guard.local_contribs = local_contribs;
+            (res, own)
         };
 
         match result {
             Ok(node) => {
-                let own_contrib = local_contribs[snode_idx].take();
                 {
                     let mut shared = match contrib_blocks.lock() {
                         Ok(g) => g,
@@ -3063,9 +3078,7 @@ mod tests {
             profiler: None,
         };
 
-        let deltas = [
-            0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12,
-        ];
+        let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];
 
         let mut results = Vec::with_capacity(deltas.len());
         for &dw in &deltas {

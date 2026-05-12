@@ -42,6 +42,42 @@ the same symmetric matrix described with upper- vs lower-triangle
 triplets produced different solve results. The error message identifies
 the offending triplet by index and `(row, col)`. Reported by @janosh.
 
+### Changed
+
+- `Solver` now defaults to the rayon-parallel multifrontal driver
+  (`factorize_multifrontal_parallel_with_workspace`). The driver is
+  bit-exact with the sequential supernodal path on a per-supernode
+  basis and falls through to the sequential path when the supernode
+  count is below `N_PAR_MIN = 32`, so small-problem latency is not
+  affected. Override with `Solver::new().with_parallel(false)`.
+  Closes #7. Motivation: pounce's `marine_1600` / `pinene_3200`
+  Mittelmann runs were spending all their time in sequential
+  `factor_one_supernode` even though the parallel driver was
+  available; this wires `Solver` directly to it.
+
+### Added
+
+- `Solver::with_parallel(bool)` — opt out of the rayon-parallel
+  driver (returns `Self` for builder chaining).
+- `Solver::parallel()` — test/diagnostic accessor for the current
+  flag value.
+- `SymmetricMatrix::from_pooled_buf(n, buf)` constructor that zeros
+  only the lower triangle when reusing a pooled buffer; cuts the
+  dead upper-triangle memset out of `factor_one_supernode`'s
+  per-supernode hot path. See dev/decisions.md 2026-05-12.
+
+### Performance
+
+- Pooled `local_contribs` per rayon worker inside `FactorWorkspace`,
+  removing a per-task `Vec<Option<ContribBlock>>` of length
+  `n_snodes` from the parallel driver. Decisive on cont-201
+  (sequential **–34%**, parallel-at-T=8 **–10%**); also helps
+  bratu3d (**–6% / –5%**). Bit-exact. See dev/decisions.md
+  2026-05-12 and dev/sessions/2026-05-12-01.md.
+- Skip the upper-triangle zero on pooled frontal buffer reuse
+  (`SymmetricMatrix::from_pooled_buf`). Bit-exact; 5–10% sequential
+  wall reduction across mid-size matrices.
+
 ### Investigated
 
 - Issue #5 (MSS1 BK inertia non-monotone under δ_w·I): triage

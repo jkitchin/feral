@@ -159,16 +159,14 @@ fn profile_matrix(label: &str, mtx_path: &str, prof: &mut Profile) {
                 }
                 prof.row_map_setup.push(t0.elapsed().as_nanos());
 
-                // Phase: memset
+                // Phase: memset (lower-triangle-only on pool reuse;
+                // see SymmetricMatrix::from_pooled_buf).
                 let t0 = Instant::now();
-                frontal_buf.clear();
-                frontal_buf.resize(actual_nrow * actual_nrow, 0.0);
+                let mut frontal = SymmetricMatrix::from_pooled_buf(
+                    actual_nrow,
+                    std::mem::take(&mut frontal_buf),
+                );
                 prof.memset.push(t0.elapsed().as_nanos());
-
-                let mut frontal = SymmetricMatrix {
-                    n: actual_nrow,
-                    data: std::mem::take(&mut frontal_buf),
-                };
 
                 // Phase: scatter
                 let t0 = Instant::now();

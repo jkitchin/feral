@@ -2516,3 +2516,122 @@ residual that this commit changed.
 
 References: GitHub issue #3, `crates/feral-scotch/tests/issue_3_kkt_repro.rs`,
 `src/symbolic/mod.rs::tests::issue_3_*` (two new tests).
+
+## 2026-05-12 — `Solver` defaults to the parallel multifrontal driver (issue #7)
+
+**Decision.** `Solver::new()` and `Solver::with_params(...)` now
+produce a `Solver` whose `factor()` routes through
+`factorize_multifrontal_parallel_with_workspace`. The previous
+default was the sequential supernodal driver. An override is
+provided as `Solver::with_parallel(false)`, and a diagnostic
+accessor `Solver::parallel()` reports the current state.
+
+**Why this is safe.** The parallel driver carries a documented
+bit-exact contract with the sequential supernodal path on a
+per-supernode basis (same FP sum order per supernode, per-thread
+`FactorWorkspace`, mutex-only on the shared contribution-block
+store — see the doc comment at
+`src/numeric/factorize.rs:1822`). Internally it also self-gates
+on `should_parallelize_assembly` (`N_PAR_MIN = 32` supernodes,
+`src/numeric/factorize.rs:1769`) so problems below that threshold
+fall through to the sequential supernodal path within the same
+call — making default-on neutral for small problems and a strict
+constant-factor win on large ones.
+
+**Motivating evidence.** Issue #7 reports that pounce's Mittelmann
+runs (`marine_1600`, `pinene_3200`) timed out on the inner sparse
+factor while the parallel driver sat unused, because the public
+`Solver::factor` entry only routed through the sequential path.
+The MA57-vs-feral gap in pounce on those benchmarks was essentially
+this wiring.
+
+**Bit-exact regression test.** Added
+`solver_parallel_factor_matches_sequential` in the
+`src/numeric/solver.rs::tests` module. Fixture: 64 independent
+2×2 indefinite blocks `[[1, 2], [2, 1]]` (n = 128, 64 disjoint
+elimination trees, well above `N_PAR_MIN`). Asserts equality of
+summed inertia, `num_negative_eigenvalues`, and **bit-identical
+f64 bits** of the `solve(rhs)` output between
+`Solver::new()` (parallel) and
+`Solver::new().with_parallel(false)` (sequential). Per the CLAUDE.md
+hard rule, this is `==`, not a tolerance.
+
+**Touched call-sites.** Three edits, all in
+`src/numeric/solver.rs`: a new `use_parallel: bool` field,
+initialization to `true` in `with_params`, a `with_parallel`
+builder, a `parallel` accessor, and a function-pointer dispatch
+inside `factor()` selecting between
+`factorize_multifrontal_parallel_with_workspace` and
+`factorize_multifrontal_with_workspace`. Both functions have
+identical signatures so the dispatch is one branch wide.
+
+**Out of scope.** The pulp SIMD wiring at
+`src/dense/factor.rs:1719/1741/1824/1843` mentioned in issue #7
+is *not* included here. That work is blocked on Phase 2.4.3
+(replace `mul_add_f64s` with `mul_f64s + sub_f64s` to recover
+bit-exact rounding versus the scalar path); the 2026-04-14
+reverted-FMA decision earlier in this file is the prerequisite.
+
+References: issue #7,
+`src/numeric/factorize.rs::factorize_multifrontal_parallel_with_workspace`,
+CHANGELOG.md `[Unreleased] / Changed`.
+
+## 2026-05-12 — Skip upper-triangle memset on pooled frontal buffer
+
+**Decision.** Added `SymmetricMatrix::from_pooled_buf(n, buf)` in
+`src/dense/matrix.rs`. The dense BK + Schur kernels touch only the
+lower triangle of a `SymmetricMatrix`, so the upper-triangle zero
+on pool-reuse is dead work. The new constructor grows the buffer
+if needed (which zeros only the tail) and explicitly zeros the
+`n(n+1)/2` lower-triangle cells. The full-`nrow*nrow` zero is
+gone.
+
+**Why this is safe.** Inspection of `src/dense/factor.rs:1137`
+(scalar Schur), `src/dense/schur_kernel.rs:738`
+(`schur_panel_minus_nofma_strided` — the pulp SIMD kernel), and
+the BK pivot/swap paths confirms that no consumer reads upper-
+triangle cells of a `SymmetricMatrix`. Indexers always normalize
+to `(max(i,j), min(i,j))`. Added a doc-comment audit note on the
+new constructor stating this contract.
+
+**Bit-exact.** No FP value changes; the kernels never saw those
+upper cells in the first place.
+
+**Measured impact.** Roughly 5–10% wall-time reduction on
+sequential factor across mid-size matrices (bratu3d, cont-201).
+Numbers in `dev/sessions/2026-05-12-01.md`.
+
+**References.** `src/dense/matrix.rs::SymmetricMatrix::from_pooled_buf`,
+`src/numeric/factorize.rs::factor_one_supernode` (two call sites),
+`src/bin/diag_leaf_profile.rs` (one diagnostic site).
+
+## 2026-05-12 — Pool `local_contribs` per worker in the parallel driver
+
+**Decision.** Moved the `Vec<Option<ContribBlock>>` of length
+`n_snodes` that `run_parallel_task` was allocating on every spawned
+task into a new `FactorWorkspace::local_contribs` field. The
+parallel driver pre-sizes one such vec per rayon worker; tasks
+take it out via `std::mem::take`, use it as the children-contrib
+staging area + own-contrib output slot, then put it back. All
+slots are `None` between tasks (postcondition: children's slots
+were drained into the pool by the task entry, and the own slot
+was just taken out at task exit), so no clearing is needed.
+
+**Why this is safe.** Same data flows through `factor_one_supernode`
+in the same order. The split-borrow is achieved with safe Rust
+(`std::mem::take` plus a `&mut FactorWorkspace` whose
+`local_contribs` field is empty during the call), so no `unsafe`
+is required.
+
+**Bit-exact.** Same values, same order, just heap-allocated once
+per worker instead of once per task.
+
+**Measured impact.** Decisive on cont-201 (11 121 tasks × 11 121
+slot vec = ~9 GB of cumulative allocator churn before the fix):
+sequential wall **–34%** (435.7 → 286.0 ms), parallel-at-T=8
+**–10%** (219.7 → 198.9 ms). bratu3d **–6% / –5%**. Small matrices
+unchanged. Numbers in `dev/sessions/2026-05-12-01.md`.
+
+**References.** `src/numeric/factorize.rs::FactorWorkspace`,
+`src/numeric/factorize.rs::factorize_multifrontal_supernodal_parallel`,
+`src/numeric/factorize.rs::run_parallel_task`.

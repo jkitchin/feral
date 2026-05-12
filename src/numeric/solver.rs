@@ -14,7 +14,8 @@ use crate::error::FeralError;
 use crate::inertia::Inertia;
 use crate::numeric::condition::estimate_condition_1norm;
 use crate::numeric::factorize::{
-    factorize_multifrontal_with_workspace, FactorWorkspace, NumericParams, SparseFactors,
+    factorize_multifrontal_parallel_with_workspace, factorize_multifrontal_with_workspace,
+    FactorWorkspace, NumericParams, SparseFactors,
 };
 use crate::numeric::solve::{solve_sparse, solve_sparse_many, solve_sparse_refined};
 use crate::scaling::ScalingStrategy;
@@ -119,6 +120,14 @@ pub struct Solver {
     /// `factorize_multifrontal_with_workspace` entry, so stale
     /// data cannot leak between factor attempts.
     workspace: FactorWorkspace,
+    /// Route `factor()` through the rayon-parallel multifrontal
+    /// driver when `true`. Default `true`. The parallel driver is
+    /// bit-exact with the sequential supernodal driver and falls
+    /// through to the sequential path via
+    /// `should_parallelize_assembly` when the supernode count is
+    /// below `N_PAR_MIN`, so default-on does not regress small-
+    /// problem latency. See issue #7.
+    use_parallel: bool,
 }
 
 impl Solver {
@@ -141,7 +150,19 @@ impl Solver {
             last_pattern_fingerprint: None,
             symbolic_call_count: 0,
             workspace: FactorWorkspace::new(),
+            use_parallel: true,
         }
+    }
+
+    /// Toggle the rayon-parallel multifrontal driver. Default is
+    /// `true`; pass `false` to force the sequential supernodal
+    /// driver (useful for determinism studies or single-threaded
+    /// benchmarks). The two drivers are bit-exact equal on every
+    /// supernode — flipping this only affects scheduling, not
+    /// numerics.
+    pub fn with_parallel(mut self, parallel: bool) -> Self {
+        self.use_parallel = parallel;
+        self
     }
 
     /// Factor `matrix`. If `check_inertia` is `Some(expected)`,
@@ -178,12 +199,14 @@ impl Solver {
         };
 
         // Step 4: numeric factor via the pooled workspace; map errors.
-        match factorize_multifrontal_with_workspace(
-            matrix,
-            symbolic,
-            &self.numeric_params,
-            &mut self.workspace,
-        ) {
+        // Both drivers share the same signature and a bit-exact
+        // contract; pick by the `use_parallel` toggle.
+        let driver = if self.use_parallel {
+            factorize_multifrontal_parallel_with_workspace
+        } else {
+            factorize_multifrontal_with_workspace
+        };
+        match driver(matrix, symbolic, &self.numeric_params, &mut self.workspace) {
             Ok((factors, inertia)) => {
                 // Step 5: stash; PartialSingular maps to Singular.
                 let partial_singular = matches!(
@@ -377,6 +400,12 @@ impl Solver {
     /// Test/diagnostic accessor for the current scaling strategy.
     pub fn scaling_strategy(&self) -> &ScalingStrategy {
         &self.numeric_params.scaling
+    }
+
+    /// Whether `factor()` is configured to use the rayon-parallel
+    /// multifrontal driver. Default `true`. See `with_parallel`.
+    pub fn parallel(&self) -> bool {
+        self.use_parallel
     }
 
     /// Number of negative eigenvalues from the last factor.
@@ -586,5 +615,624 @@ mod tests {
             PatternFingerprint::of(&b),
             "different col_ptr distribution must fingerprint differently"
         );
+    }
+
+    // -- Issue #7: parallel driver exposure on `Solver` -----------------
+
+    /// `Solver::new()` defaults to the rayon-parallel multifrontal
+    /// driver. The parallel driver internally falls through to the
+    /// sequential supernodal path on small problems via
+    /// `should_parallelize_assembly` so default-on does not regress
+    /// small-problem latency.
+    #[test]
+    fn solver_parallel_default_is_on() {
+        let solver = Solver::new();
+        assert!(
+            solver.parallel(),
+            "Solver::new() should default to use_parallel = true"
+        );
+    }
+
+    /// `Solver::with_parallel` toggles the driver flag in both
+    /// directions.
+    #[test]
+    fn solver_with_parallel_toggles() {
+        let solver = Solver::new().with_parallel(false);
+        assert!(!solver.parallel());
+        let solver = solver.with_parallel(true);
+        assert!(solver.parallel());
+    }
+
+    /// Amdahl-ceiling breakdown for the parallel driver. For each
+    /// large matrix, runs the sequential driver with a `Profiler`
+    /// attached, reports the supernode-time histogram, and computes
+    /// the Amdahl ceiling = `total_seq / max_snode_seq`. Combined
+    /// with the wall-clock A/B from
+    /// `solver_parallel_speedup_largematrices`, this localises
+    /// whether the remaining gap to the ceiling is from
+    /// non-supernode work (assembly, mutex, allocation) or from
+    /// being already at the ceiling (Amdahl-bound).
+    ///
+    /// `#[ignore]`'d — same data-dir contract as the speedup test.
+    /// Invoke under release with:
+    ///
+    /// ```text
+    /// cargo test --release solver_parallel_profile_breakdown \
+    ///     -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn solver_parallel_profile_breakdown() {
+        use crate::numeric::factorize::Profiler;
+        use crate::read_mtx;
+        use std::path::PathBuf;
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        let dir = PathBuf::from("tests/data/large");
+        if !dir.is_dir() {
+            eprintln!("SKIP: {} not found.", dir.display());
+            return;
+        }
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "mtx"))
+            .collect();
+        paths.sort();
+        if paths.is_empty() {
+            eprintln!("SKIP: no .mtx in {}.", dir.display());
+            return;
+        }
+
+        for path in &paths {
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .trim_end_matches(".mtx")
+                .to_string();
+            let mtx = match read_mtx(path) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("[{}] SKIP read: {:?}", name, e);
+                    continue;
+                }
+            };
+            let csc = match mtx.to_csc() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[{}] SKIP csc: {:?}", name, e);
+                    continue;
+                }
+            };
+
+            // Sequential with profiler.
+            let prof = Arc::new(Mutex::new(Profiler::new()));
+            let np = NumericParams {
+                profiler: Some(prof.clone()),
+                ..NumericParams::default()
+            };
+            let mut seq = Solver::with_params(np, SupernodeParams::default()).with_parallel(false);
+            let t0 = Instant::now();
+            let seq_status = seq.factor(&csc, None);
+            let seq_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+            // Parallel A/B (fresh solver, no profiler — driver does
+            // not record timings).
+            let mut par = Solver::new();
+            let t0 = Instant::now();
+            let par_status = par.factor(&csc, None);
+            let par_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+            let prof = match prof.lock() {
+                Ok(p) => p.clone(),
+                Err(e) => {
+                    eprintln!("[{}] profiler poisoned: {}", name, e);
+                    continue;
+                }
+            };
+            let report = prof.report();
+            let timings = prof.timings();
+            let max_us = timings.iter().map(|t| t.us).max().unwrap_or(0);
+            let top: Vec<_> = {
+                let mut v: Vec<_> = timings.iter().collect();
+                v.sort_by_key(|t| std::cmp::Reverse(t.us));
+                v.into_iter().take(5).collect()
+            };
+            let amdahl_ceiling_ms = if max_us > 0 {
+                seq_ms / ((report.total_us as f64) / (max_us as f64))
+            } else {
+                f64::INFINITY
+            };
+
+            let ok_seq = matches!(seq_status, FactorStatus::Success);
+            let ok_par = matches!(par_status, FactorStatus::Success);
+
+            eprintln!();
+            eprintln!(
+                "=== {} (n={}, nnz={}) [seq={}, par={}]",
+                name,
+                csc.n,
+                csc.row_idx.len(),
+                if ok_seq { "OK" } else { "FAIL" },
+                if ok_par { "OK" } else { "FAIL" }
+            );
+            eprintln!(
+                "  seq wall:       {:>9.1} ms   par wall: {:>9.1} ms   measured speedup: {:.2}×",
+                seq_ms,
+                par_ms,
+                if par_ms > 0.0 { seq_ms / par_ms } else { 0.0 }
+            );
+            eprintln!(
+                "  n_supernodes:   {:>9}     loop_us: {} us   prologue: {} us   epilogue: {} us   overhead: {:.1}%",
+                report.n_supernodes,
+                report.loop_us,
+                report.prologue_us,
+                report.epilogue_us,
+                report.overhead_pct
+            );
+            eprintln!(
+                "  Amdahl ceiling: par >= {:>5.1} ms  ⇒ max speedup ≈ {:.2}×  (largest single snode = {} us = {:.1}% of total)",
+                amdahl_ceiling_ms,
+                if max_us > 0 {
+                    (report.total_us as f64) / (max_us as f64)
+                } else {
+                    0.0
+                },
+                max_us,
+                if report.total_us > 0 {
+                    100.0 * (max_us as f64) / (report.total_us as f64)
+                } else {
+                    0.0
+                }
+            );
+            eprintln!("  top-5 supernodes by us:");
+            for t in &top {
+                eprintln!(
+                    "      snode #{:6}  nrow={:6}  ncol={:6}  us={:>10}  ({:.1}% of total)",
+                    t.snode_idx,
+                    t.nrow,
+                    t.ncol,
+                    t.us,
+                    if report.total_us > 0 {
+                        100.0 * (t.us as f64) / (report.total_us as f64)
+                    } else {
+                        0.0
+                    }
+                );
+            }
+            eprintln!("  size histogram:");
+            for b in &report.buckets {
+                if b.count == 0 {
+                    continue;
+                }
+                eprintln!(
+                    "      nrow {:>6}   count={:>6}   sum_us={:>10}   {:5.1}% of loop   avg_us={:.0}",
+                    b.range, b.count, b.sum_us, b.pct_of_total, b.avg_us
+                );
+            }
+
+            // Critical-path analysis: the TRUE parallel ceiling is
+            // `total_work / longest_weighted_path_through_etree`, not
+            // `total_work / max_single_snode`. The naive ceiling above
+            // is an upper bound; the weighted-path ceiling is what an
+            // ideal scheduler with infinite workers can actually
+            // reach. If `true_ceiling ≈ measured_speedup`, the etree
+            // topology is the limit and no scheduler change will
+            // help — only restructuring (e.g. intra-supernode
+            // parallelism) can. Re-runs `symbolic_factorize` because
+            // the Solver consumed its symbolic; the call is
+            // deterministic.
+            let symbolic =
+                match crate::symbolic::symbolic_factorize(&csc, &SupernodeParams::default()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("  (skip critical path: symbolic_factorize failed: {:?})", e);
+                        continue;
+                    }
+                };
+            let n_snodes = symbolic.supernodes.len();
+            let mut work_us = vec![0u64; n_snodes];
+            for t in timings {
+                if t.snode_idx < n_snodes {
+                    work_us[t.snode_idx] = t.us;
+                }
+            }
+            // Postorder property: child indices < parent index, so a
+            // single forward pass computes earliest-finish bottom-up.
+            let mut earliest_finish = vec![0u64; n_snodes];
+            for (i, snode) in symbolic.supernodes.iter().enumerate() {
+                let max_child = snode
+                    .children
+                    .iter()
+                    .filter(|&&c| c < n_snodes)
+                    .map(|&c| earliest_finish[c])
+                    .max()
+                    .unwrap_or(0);
+                earliest_finish[i] = max_child + work_us[i];
+            }
+            let critical_path_us = earliest_finish.iter().max().copied().unwrap_or(0);
+            let total_us = work_us.iter().sum::<u64>();
+            let true_ceiling = if critical_path_us > 0 {
+                (total_us as f64) / (critical_path_us as f64)
+            } else {
+                0.0
+            };
+            // Depth from root (root = 0). Build parent table from
+            // children, then walk parents in reverse postorder.
+            let mut parent: Vec<Option<usize>> = vec![None; n_snodes];
+            for (i, s) in symbolic.supernodes.iter().enumerate() {
+                for &c in &s.children {
+                    if c < n_snodes {
+                        parent[c] = Some(i);
+                    }
+                }
+            }
+            let mut depth = vec![0usize; n_snodes];
+            for i in (0..n_snodes).rev() {
+                if let Some(p) = parent[i] {
+                    depth[i] = depth[p] + 1;
+                }
+            }
+            let max_depth = *depth.iter().max().unwrap_or(&0);
+            let mut level_count = vec![0usize; max_depth + 1];
+            let mut level_work_us = vec![0u64; max_depth + 1];
+            for i in 0..n_snodes {
+                level_count[depth[i]] += 1;
+                level_work_us[depth[i]] += work_us[i];
+            }
+            eprintln!(
+                "  CRITICAL PATH: {} us = {:.1} ms   total_work: {} us = {:.1} ms",
+                critical_path_us,
+                (critical_path_us as f64) / 1000.0,
+                total_us,
+                (total_us as f64) / 1000.0
+            );
+            eprintln!(
+                "  TRUE parallel ceiling: {:.2}× (total_work / critical_path)",
+                true_ceiling
+            );
+            eprintln!(
+                "  etree depth: max={}  upper-tree level distribution (top 15 levels from root):",
+                max_depth
+            );
+            for d in 0..=(max_depth.min(14)) {
+                if level_count[d] == 0 {
+                    continue;
+                }
+                eprintln!(
+                    "      depth {:>4}  count={:>6}  work_us={:>10}  ({:.1}% of total)",
+                    d,
+                    level_count[d],
+                    level_work_us[d],
+                    if total_us > 0 {
+                        100.0 * (level_work_us[d] as f64) / (total_us as f64)
+                    } else {
+                        0.0
+                    }
+                );
+            }
+        }
+        eprintln!();
+    }
+
+    /// Wall-clock A/B between the parallel and sequential drivers on
+    /// the four matrices in `tests/data/large/`. `#[ignore]`'d
+    /// because it requires the large-matrix data dir (gitignored)
+    /// and is a measurement, not a correctness gate.
+    ///
+    /// Invoke under release with:
+    ///
+    /// ```text
+    /// cargo test --release solver_parallel_speedup_largematrices \
+    ///     -- --ignored --nocapture
+    /// ```
+    ///
+    /// Prints per-matrix wall-clock for `Solver::new()` (parallel)
+    /// vs `Solver::new().with_parallel(false)` (sequential), plus
+    /// the inertia check across both modes. Output is parsed by
+    /// `dev/sessions/*.md` checkpoints — keep the format stable.
+    #[test]
+    #[ignore]
+    fn solver_parallel_speedup_largematrices() {
+        use crate::read_mtx;
+        use std::path::PathBuf;
+        use std::time::Instant;
+
+        let dir = PathBuf::from("tests/data/large");
+        if !dir.is_dir() {
+            eprintln!("SKIP: {} not found.", dir.display());
+            return;
+        }
+
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "mtx"))
+            .collect();
+        paths.sort();
+        if paths.is_empty() {
+            eprintln!("SKIP: no .mtx in {}.", dir.display());
+            return;
+        }
+
+        eprintln!(
+            "\n  matrix                          n       nnz   par_ms   seq_ms  speedup  inertia_eq"
+        );
+        eprintln!(
+            "  ------------------------------ -------- -------- -------- -------- -------- ----------"
+        );
+        for path in &paths {
+            let mtx = match read_mtx(path) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("  SKIP {}: {:?}", path.display(), e);
+                    continue;
+                }
+            };
+            let csc = match mtx.to_csc() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("  SKIP {}: csc {:?}", path.display(), e);
+                    continue;
+                }
+            };
+            let nnz = csc.row_idx.len();
+            let n = csc.n;
+
+            let mut par = Solver::new();
+            let t0 = Instant::now();
+            let par_status = par.factor(&csc, None);
+            let par_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+            let mut seq = Solver::new().with_parallel(false);
+            let t0 = Instant::now();
+            let seq_status = seq.factor(&csc, None);
+            let seq_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+            let par_ok = matches!(par_status, FactorStatus::Success);
+            let seq_ok = matches!(seq_status, FactorStatus::Success);
+            let inertia_eq = if par_ok && seq_ok {
+                par.num_negative_eigenvalues() == seq.num_negative_eigenvalues()
+            } else {
+                false
+            };
+
+            let speedup = if par_ms > 0.0 { seq_ms / par_ms } else { 0.0 };
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .trim_end_matches(".mtx");
+            eprintln!(
+                "  {:30} {:8} {:8} {:8.1} {:8.1} {:7.2}× {:>10}",
+                name,
+                n,
+                nnz,
+                par_ms,
+                seq_ms,
+                speedup,
+                if inertia_eq {
+                    "yes"
+                } else if par_ok && seq_ok {
+                    "NO"
+                } else {
+                    "(failed)"
+                }
+            );
+        }
+        eprintln!();
+    }
+
+    /// Thread-count sweep: factor each large corpus matrix under the
+    /// parallel driver with `RAYON_NUM_THREADS=1,2,4,8` (a custom
+    /// rayon pool is built per row). Used to discriminate between
+    /// compute-bound and memory-bandwidth-bound regimes — if speedup
+    /// flattens at 4→8 threads on a matrix, the inner kernel has
+    /// saturated DRAM bandwidth, not lock contention or per-task
+    /// overhead.
+    ///
+    /// `#[ignore]` for the same reason as
+    /// `solver_parallel_speedup_largematrices`: requires the
+    /// gitignored large-matrix data dir and is a measurement, not a
+    /// correctness gate.
+    ///
+    /// Invoke under release with:
+    ///
+    /// ```text
+    /// cargo test --release solver_parallel_threadcount_sweep \
+    ///     -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn solver_parallel_threadcount_sweep() {
+        use crate::read_mtx;
+        use std::path::PathBuf;
+        use std::time::Instant;
+
+        let dir = PathBuf::from("tests/data/large");
+        if !dir.is_dir() {
+            eprintln!("SKIP: {} not found.", dir.display());
+            return;
+        }
+
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "mtx"))
+            .collect();
+        paths.sort();
+        if paths.is_empty() {
+            eprintln!("SKIP: no .mtx in {}.", dir.display());
+            return;
+        }
+
+        let thread_counts: &[usize] = &[1, 2, 4, 8];
+        eprintln!(
+            "\n  matrix                          n       nnz    T=1_ms   T=2_ms   T=4_ms   T=8_ms   sp_2   sp_4   sp_8"
+        );
+        eprintln!(
+            "  ------------------------------ -------- -------- -------- -------- -------- -------- ------ ------ ------"
+        );
+        for path in &paths {
+            let mtx = match read_mtx(path) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("  SKIP {}: {:?}", path.display(), e);
+                    continue;
+                }
+            };
+            let csc = match mtx.to_csc() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("  SKIP {}: csc {:?}", path.display(), e);
+                    continue;
+                }
+            };
+            let nnz = csc.row_idx.len();
+            let n = csc.n;
+
+            let mut wall_ms: Vec<f64> = Vec::with_capacity(thread_counts.len());
+            for &nt in thread_counts {
+                let pool = match rayon::ThreadPoolBuilder::new().num_threads(nt).build() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!(
+                            "  SKIP {}: failed to build rayon pool with {} threads: {}",
+                            path.display(),
+                            nt,
+                            e
+                        );
+                        continue;
+                    }
+                };
+                let elapsed_ms = pool.install(|| {
+                    let mut solver = Solver::new();
+                    let t0 = Instant::now();
+                    let _ = solver.factor(&csc, None);
+                    t0.elapsed().as_secs_f64() * 1e3
+                });
+                wall_ms.push(elapsed_ms);
+            }
+
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .trim_end_matches(".mtx");
+            let t1 = wall_ms.first().copied().unwrap_or(f64::NAN);
+            let t2 = wall_ms.get(1).copied().unwrap_or(f64::NAN);
+            let t4 = wall_ms.get(2).copied().unwrap_or(f64::NAN);
+            let t8 = wall_ms.get(3).copied().unwrap_or(f64::NAN);
+            let sp2 = if t2 > 0.0 { t1 / t2 } else { f64::NAN };
+            let sp4 = if t4 > 0.0 { t1 / t4 } else { f64::NAN };
+            let sp8 = if t8 > 0.0 { t1 / t8 } else { f64::NAN };
+            eprintln!(
+                "  {:30} {:8} {:8} {:8.1} {:8.1} {:8.1} {:8.1} {:5.2}× {:5.2}× {:5.2}×",
+                name, n, nnz, t1, t2, t4, t8, sp2, sp4, sp8
+            );
+        }
+        eprintln!();
+    }
+
+    /// Bit-exact parity: factoring the same matrix under the
+    /// parallel driver and the sequential driver must produce
+    /// identical summed inertia and identical `solve(rhs)` output.
+    /// The parallel driver documents bit-exact parity (same FP sum
+    /// order per supernode, per-thread workspaces, mutex only on
+    /// the contribution-block store), so this is asserted with
+    /// `==`, not a tolerance. Per CLAUDE.md hard rules, do not
+    /// loosen this to a tolerance without recorded justification.
+    ///
+    /// Fixture: 64 independent 2×2 indefinite blocks `[[1, 2],
+    /// [2, 1]]` give n = 128 with 64 disjoint elimination trees,
+    /// well above the `N_PAR_MIN = 32` gate so the parallel driver
+    /// actually dispatches the rayon task graph rather than falling
+    /// through to the sequential path.
+    #[test]
+    fn solver_parallel_factor_matches_sequential() {
+        const N_BLOCKS: usize = 64;
+        let n = 2 * N_BLOCKS;
+        let mut rows = Vec::with_capacity(3 * N_BLOCKS);
+        let mut cols = Vec::with_capacity(3 * N_BLOCKS);
+        let mut vals = Vec::with_capacity(3 * N_BLOCKS);
+        for b in 0..N_BLOCKS {
+            let i = 2 * b;
+            // Lower triangle of [[1, 2], [2, 1]] per block.
+            rows.push(i);
+            cols.push(i);
+            vals.push(1.0);
+            rows.push(i + 1);
+            cols.push(i);
+            vals.push(2.0);
+            rows.push(i + 1);
+            cols.push(i + 1);
+            vals.push(1.0);
+        }
+        let csc = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+
+        // Deterministic RHS: 1..=n as f64.
+        let rhs: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+
+        let mut par = Solver::new();
+        assert!(par.parallel());
+        assert!(matches!(par.factor(&csc, None), FactorStatus::Success));
+        let par_factors = par.factors().expect("parallel factors");
+        let par_inertia =
+            par_factors
+                .node_factors
+                .iter()
+                .fold((0usize, 0usize, 0usize), |(p, ng, z), nf| {
+                    (
+                        p + nf.inertia.positive,
+                        ng + nf.inertia.negative,
+                        z + nf.inertia.zero,
+                    )
+                });
+        let par_n_supernodes = par_factors.node_factors.len();
+        assert!(
+            par_n_supernodes >= crate::numeric::factorize::N_PAR_MIN,
+            "fixture should produce >= N_PAR_MIN supernodes, got {}",
+            par_n_supernodes
+        );
+        let par_neg = par.num_negative_eigenvalues();
+        let par_x = par.solve(&rhs).expect("parallel solve");
+
+        let mut seq = Solver::new().with_parallel(false);
+        assert!(!seq.parallel());
+        assert!(matches!(seq.factor(&csc, None), FactorStatus::Success));
+        let seq_inertia = seq
+            .factors()
+            .expect("sequential factors")
+            .node_factors
+            .iter()
+            .fold((0usize, 0usize, 0usize), |(p, ng, z), nf| {
+                (
+                    p + nf.inertia.positive,
+                    ng + nf.inertia.negative,
+                    z + nf.inertia.zero,
+                )
+            });
+        let seq_neg = seq.num_negative_eigenvalues();
+        let seq_x = seq.solve(&rhs).expect("sequential solve");
+
+        assert_eq!(par_inertia, seq_inertia, "summed inertia mismatch");
+        assert_eq!(par_neg, seq_neg, "num_negative_eigenvalues mismatch");
+        for (i, (a, b)) in par_x.iter().zip(seq_x.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "solve[{}] differs: parallel = {} ({:#x}), sequential = {} ({:#x})",
+                i,
+                a,
+                a.to_bits(),
+                b,
+                b.to_bits()
+            );
+        }
     }
 }
