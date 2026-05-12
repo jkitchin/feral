@@ -338,6 +338,7 @@ fn solver_identity_scaling() -> Solver {
         scaling: ScalingStrategy::Identity,
         small_leaf: SmallLeafBatch::Off,
         profiler: None,
+        parallel_telemetry: None,
     };
     Solver::with_params(np, SupernodeParams::default())
 }

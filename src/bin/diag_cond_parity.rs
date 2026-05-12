@@ -26,6 +26,7 @@
 //!   FERAL_DIAG_MAX_N=20000 cargo run --release --bin diag_cond_parity
 //!   FERAL_DIAG_VERBOSE=1 cargo run --release --bin diag_cond_parity
 
+#![allow(clippy::items_after_test_module)]
 use std::path::{Path, PathBuf};
 
 use feral::numeric::condition::estimate_condition_1norm;

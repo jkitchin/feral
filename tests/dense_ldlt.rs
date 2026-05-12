@@ -4,6 +4,7 @@
 //! selection algorithm (research note Section 9.1) and to verify exact
 //! inertia counting for 2×2 blocks.
 
+#![allow(clippy::ok_expect, clippy::needless_range_loop)]
 use feral::{
     factor, solve, solve_refined, BunchKaufmanParams, FeralError, Inertia, SymmetricMatrix,
     ZeroPivotAction,

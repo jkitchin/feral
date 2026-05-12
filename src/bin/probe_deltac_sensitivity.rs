@@ -168,6 +168,7 @@ fn ldlt_params() -> NumericParams {
         scaling: ScalingStrategy::Auto,
         small_leaf: Default::default(),
         profiler: None,
+        parallel_telemetry: None,
     }
 }
 

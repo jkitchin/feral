@@ -73,6 +73,7 @@ fn ldlt_params(profiler: Arc<Mutex<Profiler>>) -> NumericParams {
         scaling: Default::default(),
         small_leaf: Default::default(),
         profiler: Some(profiler),
+        parallel_telemetry: None,
     }
 }
 

@@ -45,6 +45,7 @@ fn params_off() -> NumericParams {
         scaling: Default::default(),
         small_leaf: SmallLeafBatch::Off,
         profiler: None,
+        parallel_telemetry: None,
     }
 }
 

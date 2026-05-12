@@ -7,6 +7,7 @@
 //!
 //! See `dev/research/phase-2.13a-amalgamation-auto.md`.
 
+#![allow(clippy::assertions_on_constants, clippy::needless_range_loop)]
 use feral::ordering::elimination_tree::EliminationTree;
 use feral::symbolic::{
     pick_amalgamation_strategy, AmalgamationStrategy, AUTO_MULTI_CHILD_FRAC_THRESHOLD,

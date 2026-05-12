@@ -7,6 +7,7 @@
 //!
 //! See dev/research/postorder-pipeline.md for the full explanation.
 
+#![allow(clippy::doc_lazy_continuation, clippy::needless_range_loop)]
 use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{

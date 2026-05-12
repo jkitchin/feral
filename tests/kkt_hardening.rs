@@ -6,6 +6,7 @@
 //! 4. Jacobian-dominated structure (large J, small H)
 //! 5. Reconstruction accuracy diagnosis for ill-conditioned KKT
 
+#![allow(clippy::needless_range_loop)]
 use feral::{
     factor, solve, solve_refined, BunchKaufmanParams, Inertia, SymmetricMatrix, ZeroPivotAction,
 };

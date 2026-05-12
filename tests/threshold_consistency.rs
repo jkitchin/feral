@@ -11,6 +11,7 @@
 //!
 //! See dev/plans/threshold-mismatch-fix.md.
 
+#![allow(clippy::needless_range_loop)]
 use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
 use feral::numeric::solve::{solve_sparse, solve_sparse_refined};
 use feral::symbolic::{symbolic_factorize, SupernodeParams};

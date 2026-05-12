@@ -45,6 +45,7 @@
 //!      against a dense LDLᵀ oracle to prove the delayed pivot path
 //!      reaches the same factorization as the dense path.
 
+#![allow(clippy::int_plus_one)]
 use feral::dense::factor::{factor, factor_frontal};
 use feral::numeric::factorize::factorize_multifrontal_supernodal;
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
@@ -352,6 +353,7 @@ fn delay_numeric_params() -> feral::numeric::factorize::NumericParams {
         scaling: feral::scaling::ScalingStrategy::Identity,
         small_leaf: feral::numeric::factorize::SmallLeafBatch::default(),
         profiler: None,
+        parallel_telemetry: None,
     }
 }
 

@@ -45,6 +45,7 @@ fn ldlt_params(gate: SmallLeafBatch, profiler: Arc<Mutex<Profiler>>) -> NumericP
         scaling: Default::default(),
         small_leaf: gate,
         profiler: Some(profiler),
+        parallel_telemetry: None,
     }
 }
 

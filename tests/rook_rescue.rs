@@ -30,6 +30,7 @@
 //! `L·D·Lᵀ ≈ A` is the numerical acceptance criterion; inertia is
 //! checked against a hand-computed sign pattern.
 
+#![allow(clippy::erasing_op, clippy::identity_op)]
 use feral::dense::factor::{factor_frontal, factor_frontal_blocked};
 use feral::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
 

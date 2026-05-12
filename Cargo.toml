@@ -14,9 +14,9 @@ homepage = "https://github.com/jkitchin/feral"
 readme = "README.md"
 keywords = ["sparse", "solver", "linear-algebra", "ldlt", "kkt"]
 categories = ["mathematics", "science"]
-autobins = false
+autobins = true
 autoexamples = false
-autotests = false
+autotests = true
 exclude = [
     "/dev",
     "/external_benchmarks",

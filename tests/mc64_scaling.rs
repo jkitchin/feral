@@ -22,6 +22,11 @@
 //!     matching ran (`Applied`) vs was skipped (`NotApplied`) vs
 //!     was partial (`PartialSingular { n_unmatched }`).
 
+#![allow(
+    clippy::manual_range_contains,
+    clippy::approx_constant,
+    clippy::needless_range_loop
+)]
 use feral::scaling::{compute_scaling, ScalingInfo, ScalingStrategy};
 use feral::CscMatrix;
 
