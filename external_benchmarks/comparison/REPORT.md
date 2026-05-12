@@ -64,6 +64,41 @@ accuracy matters; the bare back-substitution defaults are
 | mumps | 8.1e-18 | 2.8e-16 | 5.2e-15 | 4.3e-09 | 0 |
 | ma97 | 3.9e-17 | 1.6e-16 | 7.5e-16 | 8.2e-15 | 0 |
 
+## Behavior on ill-conditioned KKTs
+
+MUMPS emits a componentwise condition-number estimate
+(`RINFOG(10)` / COND1, computed under `ICNTL(11) = 1`).
+Pulling the matrices with the highest COND1 and showing
+what each solver does on the *same* system answers the
+question "does feral hold up when the matrix is hard?".
+
+Selection: top matrices in the sample by MUMPS-reported
+COND1, with a floor of 1e8 (below that the system is well-
+enough conditioned that all three solvers reach machine ε).
+
+| Matrix | n | MUMPS COND1 | feral res / inertia | MUMPS res / inertia | MA97 res / inertia |
+|---|---:|---:|---|---|---|
+| cont5_2_1_l/cont5_2_1_l_0002 | 180,900 | 1.7e+14 | 6.9e-16 / 90600+90300+0 | 9.8e-16 / 90600+90300+0 | 7.3e-16 / 90600+90300+0 |
+| cont5_2_2_l/cont5_2_2_l_0002 | 180,900 | 1.7e+14 | 7.1e-16 / 90600+90300+0 | 9.8e-16 / 90600+90300+0 | 9.5e-16 / 90600+90300+0 |
+| cont5_2_3_l/cont5_2_3_l_0002 | 180,900 | 1.7e+14 | 7.1e-16 / 90600+90300+0 | 9.8e-16 / 90600+90300+0 | 9.5e-16 / 90600+90300+0 |
+| cont5_1_l/cont5_1_l_0002 | 180,900 | 9.3e+11 | 7.0e-16 / 90600+90300+0 | 9.7e-16 / 90600+90300+0 | 4.7e-17 / 90600+90300+0 |
+| qcqp1000-1nc/qcqp1000-1nc_0043 | 1,154 | 6.3e+11 | 8.9e-17 / 1000+154+0 | 1.2e-16 / 1000+154+0 | 2.1e-16 / 1000+154+0 |
+| ex4_2_160/ex4_2_160_0009 | 77,115 | 3.5e+11 | 3.2e-16 / 51198+25917+0 | 3.7e-16 / 51198+25917+0 | 1.5e-16 / 51198+25917+0 |
+| arki0009/arki0009_0033 | 12,144 | 3.0e+11 | 1.3e-16 / 6220+5924+0 | 1.4e-16 / 6220+5924+0 | 1.8e-16 / 6220+5924+0 |
+| NARX_CFy/NARX_CFy_0001 | 92,229 | 1.5e+11 | 2.0e-16 / 43973+48256+0 | 1.4e-16 / 43973+48256+0 | 2.2e-16 / 43973+48256+0 |
+| dtoc1nd/dtoc1nd_0010 | 9,685 | 5.6e+10 | 7.5e-16 / 5960+3725+0 | 2.8e-15 / 5960+3725+0 | 4.9e-17 / 5960+3725+0 |
+| ex8_2_2/ex8_2_2_0054 | 9,453 | 2.0e+10 | 6.2e-17 / 7510+1943+0 | 8.0e-17 / 7510+1943+0 | 1.2e-16 / 7510+1943+0 |
+
+Interpretation: a residual ≈ ε·COND1 is the best a
+linear solve can theoretically achieve. When COND1 is
+1e14, machine-ε factors give ~1e-2 forward error; what
+matters in this regime is whether the solver (a) detects
+the conditioning rather than silently returning garbage,
+(b) agrees with the reference on inertia, and (c) gets
+a residual close to the others on the same system.
+Disagreements on inertia for ill-conditioned matrices
+are surfaced in the next section.
+
 ## Inertia agreement
 
 All three solvers report identical inertia on **57** of 63 matrices.

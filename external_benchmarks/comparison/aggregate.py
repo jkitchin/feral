@@ -127,9 +127,11 @@ def main() -> int:
                 rel = to_float(d, "residual")
             if rel is not None and math.isfinite(rel):
                 entry["rel_res"] = rel
-            # mumps also reports scaled residual rinfog6 + condition
-            # number rinfog11. Carry both for diagnostics.
-            for k in ("rinfog6", "rinfog11"):
+            # mumps also reports scaled residual rinfog6 and the two
+            # componentwise condition numbers rinfog10 (COND1) and
+            # rinfog11 (COND2). Carry all three for diagnostics; the
+            # report's ill-conditioned section keys off rinfog10.
+            for k in ("rinfog6", "rinfog10", "rinfog11"):
                 v = to_float(d, k)
                 if v is not None and math.isfinite(v):
                     entry[k] = v

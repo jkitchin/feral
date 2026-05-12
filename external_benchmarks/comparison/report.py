@@ -198,6 +198,59 @@ def render(records) -> str:
                      f"{fmt_res(p90)} | {fmt_res(vs[-1])} | {bad} |")
     lines.append("")
 
+    # --- 5b. Behavior on ill-conditioned KKTs ---
+    lines.append("## Behavior on ill-conditioned KKTs")
+    lines.append("")
+    lines.append("MUMPS emits a componentwise condition-number estimate")
+    lines.append("(`RINFOG(10)` / COND1, computed under `ICNTL(11) = 1`).")
+    lines.append("Pulling the matrices with the highest COND1 and showing")
+    lines.append("what each solver does on the *same* system answers the")
+    lines.append("question \"does feral hold up when the matrix is hard?\".")
+    lines.append("")
+    lines.append("Selection: top matrices in the sample by MUMPS-reported")
+    lines.append("COND1, with a floor of 1e8 (below that the system is well-")
+    lines.append("enough conditioned that all three solvers reach machine ε).")
+    lines.append("")
+    cond_rows = []
+    for rec in records:
+        m = rec["solvers"].get("mumps", {})
+        cond = m.get("rinfog10")
+        if cond is None or not math.isfinite(cond) or cond < 1e8:
+            continue
+        cond_rows.append((cond, rec))
+    cond_rows.sort(key=lambda t: -t[0])
+    if not cond_rows:
+        lines.append("No matrix in the sample has MUMPS COND1 ≥ 1e8.")
+    else:
+        lines.append("| Matrix | n | MUMPS COND1 | feral res / inertia | "
+                     "MUMPS res / inertia | MA97 res / inertia |")
+        lines.append("|---|---:|---:|---|---|---|")
+        def cell(e):
+            if e.get("status") != "ok":
+                return f"`{e.get('status', '?')}`"
+            r = fmt_res(e.get("rel_res"))
+            iv = e.get("inertia")
+            inert = f"{iv[0]}+{iv[1]}+{iv[2]}" if iv else "—"
+            return f"{r} / {inert}"
+        for cond, rec in cond_rows[:10]:
+            mx = rec["matrix"]
+            f_ = cell(rec["solvers"].get("feral", {}))
+            mm = cell(rec["solvers"].get("mumps", {}))
+            aa = cell(rec["solvers"].get("ma97",  {}))
+            lines.append(f"| {mx['family']}/{mx['id']} | {mx['n']:,} | "
+                         f"{cond:.1e} | {f_} | {mm} | {aa} |")
+        lines.append("")
+        lines.append("Interpretation: a residual ≈ ε·COND1 is the best a")
+        lines.append("linear solve can theoretically achieve. When COND1 is")
+        lines.append("1e14, machine-ε factors give ~1e-2 forward error; what")
+        lines.append("matters in this regime is whether the solver (a) detects")
+        lines.append("the conditioning rather than silently returning garbage,")
+        lines.append("(b) agrees with the reference on inertia, and (c) gets")
+        lines.append("a residual close to the others on the same system.")
+        lines.append("Disagreements on inertia for ill-conditioned matrices")
+        lines.append("are surfaced in the next section.")
+    lines.append("")
+
     # --- 6. Inertia agreement ---
     lines.append("## Inertia agreement")
     lines.append("")
