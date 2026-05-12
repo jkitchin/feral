@@ -65,9 +65,27 @@ the offending triplet by index and `(row, col)`. Reported by @janosh.
   only the lower triangle when reusing a pooled buffer; cuts the
   dead upper-triangle memset out of `factor_one_supernode`'s
   per-supernode hot path. See dev/decisions.md 2026-05-12.
+- `compute_infnorm_dense(&SymmetricMatrix)` in `src/scaling/infnorm.rs`
+  — dense-native Knight-Ruiz iteration for the D.3/D.4 dense
+  fast-path; the sparse `compute_infnorm` remains the path for the
+  multifrontal driver.
 
 ### Performance
 
+- Dense fast-path (`dense_fast_factor`) now runs Knight-Ruiz ∞-norm
+  scaling directly on the column-major lower-triangle buffer
+  produced by `to_dense_into`, removing the `row_idx[k]`
+  indirection that dominated wall time on small-dense matrices.
+  Routing: `ScalingStrategy::Auto` and `InfNorm` go through the
+  dense KR; `Mc64Symmetric`, `Identity`, `External` are honored
+  via the unchanged sparse path. Bit-exact with the sparse KR on
+  every fast-path-gate matrix (`should_use_dense_fast_path` ⇒
+  matrix is small enough that every column-major slot maps 1:1
+  onto a CSC entry or a known-zero, and `(d_i · 0 · d_j) = 0`
+  is a no-op in the max-reduction). Targets the
+  `dev/results/lever-d3/stage1-stage2-2026-04-19.md` §1 finding
+  that `compute_scaling` was 82% (34 of 41 µs) of dense-path
+  wall time on TRO3X3_0013.
 - Pooled `local_contribs` per rayon worker inside `FactorWorkspace`,
   removing a per-task `Vec<Option<ContribBlock>>` of length
   `n_snodes` from the parallel driver. Decisive on cont-201

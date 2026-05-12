@@ -33,6 +33,7 @@
 //!      backward sweep. **Same vector on both ends**, not its
 //!      inverse — see the research note for the derivation.
 
+use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
 use crate::sparse::csc::CscMatrix;
 
@@ -158,6 +159,38 @@ pub fn compute_scaling(
     strategy: &ScalingStrategy,
 ) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
     compute_scaling_with_cache(matrix, strategy, None)
+}
+
+/// Scaling for the D.3/D.4 dense fast-path.
+///
+/// The dense fast-path has already (or is about to) densify the
+/// matrix into a `SymmetricMatrix` column-major buffer. For the two
+/// most common strategies (`Auto` and `InfNorm`) this routes to a
+/// dense-native Knight-Ruiz iteration over the existing buffer,
+/// avoiding the sparse `compute_infnorm`'s `row_idx[k]` indirection.
+/// The dense KR is bit-exact with the sparse KR on every fast-path-
+/// gate matrix (see `infnorm::compute_infnorm_dense` doc comment),
+/// so the speedup is free of correctness risk.
+///
+/// `Mc64Symmetric`, `Identity`, and `External` strategies are honored
+/// as-is via [`compute_scaling`] — the user explicitly asked for them
+/// and the fast-path should not override that.
+///
+/// `Auto`'s arrow-KKT branch (`pick_scaling_strategy` returning
+/// `Mc64Symmetric`) is intentionally short-circuited here: on
+/// matrices small enough to be in the dense fast-path gate, the MC64
+/// Hungarian's conditioning win over InfNorm is marginal and its
+/// symbolic overhead dominates the dense-path wall time. See
+/// `dev/results/lever-d3/stage1-stage2-2026-04-19.md` §1.
+pub(crate) fn compute_scaling_dense_fast(
+    matrix: &CscMatrix,
+    sym: &SymmetricMatrix,
+    strategy: &ScalingStrategy,
+) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
+    match strategy {
+        ScalingStrategy::Auto | ScalingStrategy::InfNorm => Ok(infnorm::compute_infnorm_dense(sym)),
+        _ => compute_scaling(matrix, strategy),
+    }
 }
 
 /// Variant of [`compute_scaling`] that accepts a precomputed MC64

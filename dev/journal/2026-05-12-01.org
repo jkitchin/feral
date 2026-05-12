@@ -169,3 +169,68 @@ is the only remaining axis; gated behind Phase 2.4.3 SIMD work.
 
 Telemetry surface remains in-tree as a permanent diagnostic
 (16 atomics + 2 probe tests, all #[ignore]'d).
+
+* 17:30 :housekeeping:tasks.org:
+Audited tasks.org against the codebase. Three entries were stale and
+have been marked DONE with implementation pointers:
+- D.4 tiny-n fast path → shipped 2026-04-20 (ddefc2f, 16fdd77).
+  =N_TINY=16= is live at src/numeric/factorize.rs:814.
+- Adaptive ordering dispatcher → shipped as Phase 2.4.4 shape-based
+  =OrderingPreprocess::Auto= default (2f482d7), AMF Phase D
+  (dcf9f53), LDLT-aware ordering (1ffbd7c).
+- MSS1_0009 MC64-pathology triage → closed as issue-5 on the feral
+  side (2bfc3b4, cc8a45b, c002bec); fix is upstream (δ_c bump),
+  not a feral bug.
+Also annotated the blocked-BK/SIMD entry with the milestones that
+shipped (Phase 2.4.1 blocked LDLᵀ, W-1/W-2/W-3, B-1, A2 swap-2x2)
+versus what remains (redo Phase 2.4.2 SIMD with mul_f64s + sub_f64s
+for bit-parity).
+
+After the sweep, the open TODO list is 4 items: small-n
+compute_scaling fast path, post-D.3 top-10 triage, Mongoose
+evaluation, and blocked-BK/SIMD VESUVIO tail.
+
+* 18:05 :scaling:dense-fast-path:perf:
+Shipped the small-n =compute_scaling= fast path.
+
+Design: when =should_use_dense_fast_path= fires, the dense-fast-path
+already has (or is about to produce) a =SymmetricMatrix= dense
+buffer. Run Knight-Ruiz directly on that buffer instead of the
+sparse =compute_infnorm= which strides through =row_idx[k]=
+indirection on every entry.
+
+Implementation:
+- =compute_infnorm_dense(&SymmetricMatrix)= in src/scaling/infnorm.rs.
+  Walks the lower-triangle in column-major order; bit-exact with
+  sparse KR on any fast-path-gate matrix since CSC-stored entries
+  and dense-stored entries cover the same nonzeros and the
+  =if v > row_max[i]= guard makes the extra zero positions
+  no-ops.
+- =compute_scaling_dense_fast(matrix, sym, strategy)= in
+  src/scaling/mod.rs. Routes Auto/InfNorm to the dense KR; honors
+  Mc64Symmetric / Identity / External via the existing
+  =compute_scaling= path.
+- Reordered =dense_fast_factor_with_workspace= to call
+  =to_dense_into= *before* computing the scaling, so the dense KR
+  iterates the buffer that is about to be scaled in place.
+
+Tests added (run as part of the lib's unit-test build, not the
+gitignored corpus-dependent integration tests):
+- =scaling::infnorm::tests::dense_matches_sparse_on_arrow_6x6=
+- =scaling::infnorm::tests::dense_matches_sparse_on_dense_5x5=
+- =numeric::factorize::tests::dense_fast_factor_auto_matches_explicit_infnorm_bitwise=
+  — bit-equal =D_diag= across Auto vs explicit InfNorm strategies
+  on an n=24 in-gate matrix.
+
+=cargo test --release= → 217 passed; 0 failed; 5 ignored (was 214).
+=cargo clippy --release --tests -- -D warnings= → clean.
+=cargo fmt --check= → clean.
+
+Caveat: =autotests = false= in Cargo.toml means the 34 integration
+tests in tests/*.rs do not run in =cargo test=. The dense-path
+solve-parity test for TRO3X3_0013 (tests/dense_fast_path.rs)
+therefore did not exercise this change. Adding =[[test]]=
+declarations is its own task (carry-forward from session 02/03).
+The unit-test bit-parity assertion at least pins the algorithmic
+equivalence; corpus residual verification waits until the bench
+harness + integration tests are wired back.

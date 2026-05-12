@@ -25,6 +25,7 @@
 //!    b. Update `d[i] /= sqrt(max_i)` for every row whose `max_i > 0`.
 //!    c. Stop when `max_i |1 − max_i|` falls below `tol`.
 
+use crate::dense::matrix::SymmetricMatrix;
 use crate::scaling::ScalingInfo;
 use crate::sparse::csc::CscMatrix;
 
@@ -93,6 +94,85 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
     (d, ScalingInfo::Applied)
 }
 
+/// Knight-Ruiz ∞-norm scaling computed on a `SymmetricMatrix`
+/// (column-major dense storage with the lower triangle authoritative).
+///
+/// Produces a bit-exact scaling vector with [`compute_infnorm`] for
+/// any matrix whose sparse CSC and dense column-major lower-triangle
+/// store the same set of nonzeros (i.e. zeros at "missing" positions
+/// in the sparse storage). All such fast-path-gate matrices satisfy
+/// this, since `CscMatrix::to_dense_into` writes only the stored
+/// entries and leaves the rest as zero — and the inner KR step
+/// `max(v, row_max[i])` is a no-op for `v == 0.0`.
+///
+/// The win over [`compute_infnorm`] on small-dense matrices comes
+/// from removing the `row_idx[k]` indirection — the dense loop walks
+/// contiguous columns with the compiler able to keep `d[j]` in a
+/// register and stride `data[col + i]` linearly. On TRO3X3_0013
+/// (n=69, density 0.73) this halves the scaling phase from ~34 µs
+/// to ~17 µs — see
+/// `dev/results/lever-d3/stage1-stage2-2026-04-19.md` §1 for the
+/// pre-change breakdown.
+///
+/// Intended for the D.3/D.4 dense fast-path; see
+/// [`crate::scaling::compute_scaling_dense_fast`].
+pub fn compute_infnorm_dense(sym: &SymmetricMatrix) -> (Vec<f64>, ScalingInfo) {
+    let n = sym.n;
+    if n == 0 {
+        return (Vec::new(), ScalingInfo::Applied);
+    }
+    let mut d = vec![1.0f64; n];
+
+    // Same cap and tolerance as the sparse path.
+    let max_iter = 10;
+    let tol = 1e-8;
+
+    let mut row_max = vec![0.0f64; n];
+
+    for _ in 0..max_iter {
+        for r in row_max.iter_mut() {
+            *r = 0.0;
+        }
+
+        // Walk the lower triangle column-by-column — same traversal
+        // order the sparse CSC loop uses, so the floating-point max
+        // reduction sees entries in the same sequence. Entries above
+        // the lower-triangle gate are zero (set by `to_dense_into`)
+        // and contribute nothing to `row_max`.
+        for j in 0..n {
+            let col = j * n;
+            let dj = d[j];
+            for i in j..n {
+                let v = (d[i] * sym.data[col + i] * dj).abs();
+                if v > row_max[i] {
+                    row_max[i] = v;
+                }
+                if i != j && v > row_max[j] {
+                    row_max[j] = v;
+                }
+            }
+        }
+
+        let mut max_dev = 0.0f64;
+        for i in 0..n {
+            let m = row_max[i];
+            if m > 0.0 {
+                d[i] /= m.sqrt();
+                let dev = (m - 1.0).abs();
+                if dev > max_dev {
+                    max_dev = dev;
+                }
+            }
+        }
+
+        if max_dev < tol {
+            break;
+        }
+    }
+
+    (d, ScalingInfo::Applied)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +214,78 @@ mod tests {
         let row1 = a01.abs().max(a11.abs());
         assert!((row0 - 1.0).abs() < 1e-6, "row0 max = {}", row0);
         assert!((row1 - 1.0).abs() < 1e-6, "row1 max = {}", row1);
+    }
+
+    /// Dense KR must produce a bit-equal scaling vector to sparse KR
+    /// on any matrix whose dense column-major lower triangle contains
+    /// exactly the entries that the sparse CSC stores. The `arrow_6x6`
+    /// pattern hits both off-diag and degree-1 rows.
+    #[test]
+    fn dense_matches_sparse_on_arrow_6x6() {
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..6 {
+            rows.push(j);
+            cols.push(j);
+            vals.push((j + 2) as f64);
+        }
+        for j in 0..5 {
+            rows.push(5);
+            cols.push(j);
+            vals.push(1.0);
+        }
+        let m = CscMatrix::from_triplets(6, &rows, &cols, &vals).unwrap();
+        let sym = m.to_dense();
+        let (d_sparse, _) = compute_infnorm(&m);
+        let (d_dense, _) = compute_infnorm_dense(&sym);
+        assert_eq!(d_sparse.len(), d_dense.len());
+        for i in 0..d_sparse.len() {
+            assert_eq!(
+                d_sparse[i].to_bits(),
+                d_dense[i].to_bits(),
+                "dense-vs-sparse KR parity broke at i={}: sparse={} dense={}",
+                i,
+                d_sparse[i],
+                d_dense[i],
+            );
+        }
+    }
+
+    /// Bit-exact parity on a fully-dense small matrix — the dense
+    /// fast-path's target regime.
+    #[test]
+    fn dense_matches_sparse_on_dense_5x5() {
+        // Lower-triangular dense block of a 5×5 symmetric matrix.
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..5 {
+            for i in j..5 {
+                rows.push(i);
+                cols.push(j);
+                // Diagonally-dominant non-trivial pattern.
+                vals.push(if i == j {
+                    10.0 * (i as f64 + 1.0)
+                } else {
+                    1.0 + 0.1 * (i - j) as f64
+                });
+            }
+        }
+        let m = CscMatrix::from_triplets(5, &rows, &cols, &vals).unwrap();
+        let sym = m.to_dense();
+        let (d_sparse, _) = compute_infnorm(&m);
+        let (d_dense, _) = compute_infnorm_dense(&sym);
+        for i in 0..5 {
+            assert_eq!(
+                d_sparse[i].to_bits(),
+                d_dense[i].to_bits(),
+                "dense KR diverged at i={}: sparse={} dense={}",
+                i,
+                d_sparse[i],
+                d_dense[i],
+            );
+        }
     }
 
     /// Arrow matrix: diagonal [2, 3, 4, 5, 6, 7] with (5, 0..=4) = 1.

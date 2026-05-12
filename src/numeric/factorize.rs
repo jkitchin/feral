@@ -4,7 +4,7 @@ use crate::dense::factor::{
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
 use crate::inertia::Inertia;
-use crate::scaling::{compute_scaling, compute_scaling_with_cache, ScalingStrategy};
+use crate::scaling::{compute_scaling_dense_fast, compute_scaling_with_cache, ScalingStrategy};
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::SymbolicFactorization;
 use std::sync::{Arc, Mutex};
@@ -871,9 +871,22 @@ pub fn dense_fast_factor_with_workspace(
         ));
     }
 
+    // Densify the CSC into a SymmetricMatrix (lower-triangle populated
+    // at data[j*n + i] for i >= j). The densify happens *before*
+    // scaling so the dense-native Knight-Ruiz path can iterate
+    // the column-major buffer directly. Pool the `n * n` buffer:
+    // hand the caller-owned Vec to `to_dense_into`, use it, then
+    // return it to `ws.dense_values` before falling out of the
+    // function.
+    let dense_buf = std::mem::take(&mut ws.dense_values);
+    let mut sym = matrix.to_dense_into(dense_buf);
+
     // Global symmetric scaling — same contract as the multifrontal
     // path. Perm is identity here so user-order == pivot-order.
-    let (scaling, scaling_info) = compute_scaling(matrix, &params.scaling)?;
+    // `compute_scaling_dense_fast` routes `Auto`/`InfNorm` to the
+    // dense-native KR iteration over `sym`; other strategies use
+    // the sparse `compute_scaling` path.
+    let (scaling, scaling_info) = compute_scaling_dense_fast(matrix, &sym, &params.scaling)?;
     if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
         eprintln!(
             "warning: MC64 matching left {} of {} variables unmatched; \
@@ -882,13 +895,7 @@ pub fn dense_fast_factor_with_workspace(
         );
     }
 
-    // Densify the CSC into a SymmetricMatrix (lower-triangle populated
-    // at data[j*n + i] for i >= j) then apply D · A · D in place.
-    // Pool the `n * n` buffer: hand the caller-owned Vec to
-    // `to_dense_into`, use it, then return it to `ws.dense_values`
-    // before falling out of the function.
-    let dense_buf = std::mem::take(&mut ws.dense_values);
-    let mut sym = matrix.to_dense_into(dense_buf);
+    // Apply D · A · D in place on the dense buffer.
     for (j, &s_j) in scaling.iter().enumerate() {
         let col = j * n;
         for (i, &s_i) in scaling.iter().enumerate().skip(j) {
@@ -2847,6 +2854,95 @@ mod tests {
         assert_eq!(i_inf.negative, 1);
         assert_eq!(i_id.positive, 2);
         assert_eq!(i_id.negative, 1);
+    }
+
+    /// Dense fast-path: `ScalingStrategy::Auto` short-circuits to
+    /// the dense-native KR. The factor must be bit-exact with an
+    /// explicit `ScalingStrategy::InfNorm` call on the same input.
+    /// Guards against accidental re-introduction of Auto's MC64
+    /// branch in the fast path.
+    #[test]
+    fn dense_fast_factor_auto_matches_explicit_infnorm_bitwise() {
+        use crate::scaling::ScalingStrategy;
+        // n=24 dense diagonally-dominant lower-triangular pattern;
+        // fires the D.3 gate (density well above 0.25, n <= 128).
+        let n = 24usize;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..n {
+            rows.push(j);
+            cols.push(j);
+            vals.push(10.0 * (j as f64 + 1.0));
+            for i in (j + 1)..n {
+                rows.push(i);
+                cols.push(j);
+                vals.push(1.0 + 0.1 * (i - j) as f64);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        assert!(
+            should_use_dense_fast_path(m.n, m.row_idx.len()),
+            "test setup: dense fast-path gate must fire"
+        );
+
+        let auto = NumericParams {
+            bk: BunchKaufmanParams {
+                on_zero_pivot: ZeroPivotAction::ForceAccept,
+                ..BunchKaufmanParams::default()
+            },
+            scaling: ScalingStrategy::Auto,
+            small_leaf: Default::default(),
+            profiler: None,
+            parallel_telemetry: None,
+        };
+        let infnorm = NumericParams {
+            scaling: ScalingStrategy::InfNorm,
+            ..auto.clone()
+        };
+
+        let (f_auto, i_auto) = dense_fast_factor(&m, &auto).unwrap();
+        let (f_inf, i_inf) = dense_fast_factor(&m, &infnorm).unwrap();
+
+        assert_eq!(i_auto, i_inf, "inertia diverged under Auto vs InfNorm");
+
+        // Bit-equality of the per-node `D` values is the strongest
+        // signature: the BK kernel ran on identical scaled inputs.
+        assert_eq!(
+            f_auto.node_factors.len(),
+            f_inf.node_factors.len(),
+            "node count diverged",
+        );
+        for (k, (na, ni)) in f_auto
+            .node_factors
+            .iter()
+            .zip(f_inf.node_factors.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                na.frontal_factors.d_diag.len(),
+                ni.frontal_factors.d_diag.len(),
+                "node {} D-diag length diverged",
+                k,
+            );
+            for (j, (da, di)) in na
+                .frontal_factors
+                .d_diag
+                .iter()
+                .zip(ni.frontal_factors.d_diag.iter())
+                .enumerate()
+            {
+                assert_eq!(
+                    da.to_bits(),
+                    di.to_bits(),
+                    "node {} D_diag[{}] bits differ: auto={} infnorm={}",
+                    k,
+                    j,
+                    da,
+                    di,
+                );
+            }
+        }
     }
 
     /// 6×6 KKT for F3.2b Schur extraction tests. Same shape as the

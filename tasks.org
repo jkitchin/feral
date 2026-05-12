@@ -18,7 +18,8 @@
     7c9e07d (RED), 32dd65a (GREEN), 70f077e (stage 1/2),
     e0db169 (stage 3).
 
-* TODO follow-up: D.4 tiny-n fast path (n <= 16)
+* DONE follow-up: D.4 tiny-n fast path (n <= 16)
+  CLOSED: [2026-05-12 Tue]
   - Context: dev/research/sparse-tail-d3-d4-2026-04-19.md §3.
   - D.3's `dense_fast_factor` synthesis path is a prerequisite and
     is now landed — D.4 reuses the same SparseFactors shape with a
@@ -27,8 +28,13 @@
     (n=11) and similar in the post-D.3 top-10.
   - Needs its own plan before code. Start at
     dev/plans/sparse-tail-d4.md.
+  - Shipped 2026-04-20. Plan landed (2fe8836), GREEN
+    (ddefc2f "add N_TINY=16 disjunct to dense-fast-path gate"),
+    closed by stage-2 corpus bench (16fdd77). N_TINY=16 is live
+    at src/numeric/factorize.rs:814.
 
-* TODO follow-up: small-n `compute_scaling` fast path
+* DONE follow-up: small-n `compute_scaling` fast path
+  CLOSED: [2026-05-12 Tue]
   - Context: dev/results/lever-d3/stage1-stage2-2026-04-19.md §1
     (phase breakdown). `compute_scaling` is 82% of dense-path wall
     time on TRO3X3_0013 (34 of 41 us at n=69).
@@ -38,14 +44,50 @@
     over InfNorm is marginal on small-dense matrices and the
     matching overhead dominates.
   - Estimated win: TRO3X3_0013 41 us -> ~20 us (halving).
+  - Shipped 2026-05-12. Implementation:
+    + Added `compute_infnorm_dense(&SymmetricMatrix)` in
+      src/scaling/infnorm.rs — dense-native Knight-Ruiz iteration
+      over column-major lower-triangle storage. Bit-exact with
+      sparse `compute_infnorm` on every fast-path-gate matrix
+      (verified by `dense_matches_sparse_on_arrow_6x6` +
+      `dense_matches_sparse_on_dense_5x5` unit tests).
+    + Added `compute_scaling_dense_fast` in src/scaling/mod.rs
+      that routes `Auto`/`InfNorm` strategies to the dense KR;
+      `Mc64Symmetric`, `Identity`, and `External` are honored
+      via the existing sparse `compute_scaling` path.
+    + Reordered `dense_fast_factor_with_workspace` to densify
+      *before* scaling so the dense KR can iterate the existing
+      buffer.
+    + Added `dense_fast_factor_auto_matches_explicit_infnorm_bitwise`
+      regression test (bit-exact D-diag parity across Auto and
+      explicit InfNorm strategies on an n=24 in-gate matrix).
 
-* TODO follow-up: pool `CscMatrix::to_dense` buffer via FactorWorkspace
+* DONE follow-up: pool `CscMatrix::to_dense` buffer via FactorWorkspace
+  CLOSED: [2026-05-12 Tue]
   - Context: dev/plans/sparse-tail-d3.md §"Interaction with
     FactorWorkspace" (explicitly listed as a follow-up there).
   - 9 us per call on TRO3X3_0013 (22% of dense-path wall time).
     Widen FactorWorkspace with a `dense_buf: Vec<f64>` field;
     `dense_fast_factor` takes it via `std::mem::take` + clear +
     resize, then hands it back.
+  - Shipped 2026-04-20 in commit 08a8803 "phase-2.5.x: pool
+    CscMatrix::to_dense via FactorWorkspace". Implementation:
+    + `FactorWorkspace::dense_values: Vec<f64>` field
+      (src/numeric/factorize.rs:769).
+    + `CscMatrix::to_dense_into(buf: Vec<f64>) -> SymmetricMatrix`
+      reuses the caller-owned buffer (src/sparse/csc.rs:274).
+    + `dense_fast_factor_with_workspace` takes via
+      `std::mem::take(&mut ws.dense_values)` and hands back
+      `ws.dense_values = sym.data` at the end
+      (src/numeric/factorize.rs:890-907).
+    + Both dispatch points (factorize_multifrontal_with_workspace
+      and ..._parallel_with_workspace) route through the pooled
+      variant (lines 1246, 1922).
+    + Pre-D.3 dense path was already a `with_workspace`
+      consumer; the pool is exercised across consecutive
+      `Solver::factor` calls within a single solver lifetime.
+  - tasks.org just hadn't been kept in sync. No new work
+    needed.
 
 * TODO follow-up: diagnose post-D.3 top-10 worst ratios
   - Context: dev/results/lever-d3/stage3-corpus-2026-04-19.md.
@@ -55,6 +97,13 @@
     or out-of-gate (density < 0.25) and the multifrontal path is
     slow? Decides whether the lever is "widen the gate" or
     "attack the remaining multifrontal overhead".
+  - Progress: HS85_0022 was diagnosed and resolved by D.4
+    tiny-n fast path (df540ab "HS85 diagnosis + D.4 tiny-n
+    fast-path", 2026-04-20). DECONVC_0105 and the remainder of
+    the post-D.3 top-10 are still untriaged. Re-run the
+    stage-3 corpus bench against the current head to see what
+    the new top-10 looks like after D.4 + dense kernel work
+    (W-1/W-2/W-3, B-1) before deciding the lever.
 
 * DONE create detailed crucibles for ordering strategies
 CLOSED: [2026-05-05 Tue 08:12] DEADLINE: <2026-04-27 Mon>
@@ -112,8 +161,36 @@ and others. I think we might try to build standalone rust libraries for each of 
   - Defer until: a downstream consumer or benchmark target makes
     the VESUVIO tail a blocker, OR the current substantial-feature
     queue is empty.
+  - Progress as of 2026-05-12:
+    + Phase 2.4.1 blocked LDLᵀ wired (d279810, 2026-04-20).
+    + Phase 2.4.2 SIMD Schur kernel REVERTED — `mul_add_f64s`
+      (one rounding) flips 1 ULP vs scalar mul+sub (two
+      roundings); 4-matrix inertia + 26-matrix residual
+      regressions. Need `mul_f64s + sub_f64s` rewrite +
+      bit-parity unit tests before re-wiring (see
+      dev/decisions.md 2026-04-14).
+    + Phase 2.4.3 rook-rescue: shipped as correctness, not perf
+      (7d3eed3 step 8 validation).
+    + W-1/W-2/W-3 + B-1 dual-column DSYRK + A2 swap-2x2:
+      shipped 2026-04-21..23 (d345983, f073070, 2011b33,
+      9d89d73, dfe169e, 46d847b, ac2b3da).
+  - Remaining: redo Phase 2.4.2 with no-FMA SIMD ops, validate
+    bit-parity, re-wire kernel.
 
-* TODO follow-up: MSS1_0009 MC64-pathology triage (defer until after integration)
+* DONE follow-up: MSS1_0009 MC64-pathology triage (defer until after integration)
+  CLOSED: [2026-05-12 Tue]
+  - Closed as issue-5 on the feral side. Triage outcome: this was
+    *not* an MC64 pathology — it is a BK 1×1/2×2 inertia
+    non-monotonicity under δ_w·I. Reproducer test +
+    zero_tol/pivot_threshold sweep diagnostics landed in
+    src/numeric/factorize.rs::tests (commits c002bec, cc8a45b).
+    Empirical sweeps invalidated every in-kernel magnitude-floor
+    lever. Cross-check: MUMPS 5.8.2 and MA57 (via Ipopt) do not
+    implement eigenvalue-aware 2×2 splitting either. Recommended
+    fix is upstream (caller-side δ_c bump matching Ipopt's
+    PerturbForSingularity). Full analysis in
+    dev/research/issue-5-mss1-inertia-monotonicity.md §9.
+    Commit 2bfc3b4 documents the closure + MUMPS/MA57 strategy.
   - Context: dev/research/lever-c-policy-diff-2026-04-19.md.
   - Single non-jiggle non-excluded regression in Policy 3 (adaptive
     scaling): MSS1_0009 (n=163), baseline rel_res 6.31e-12 →
@@ -136,7 +213,8 @@ and others. I think we might try to build standalone rust libraries for each of 
     InfNorm). Current: keep InfNorm. Revisit alongside the
     triage above.
 
-* TODO follow-up: adaptive ordering dispatcher
+* DONE follow-up: adaptive ordering dispatcher
+  CLOSED: [2026-05-12 Tue]
   - User request 2026-04-18-03 (session priority-list item 5).
   - Observation from dev/research/ordering-bakeoff-2026-04-18.md:
     AMD wins on small matrices (parity corpus), SCOTCH or METIS win
@@ -146,3 +224,7 @@ and others. I think we might try to build standalone rust libraries for each of 
     function-call-time decision, not a full factor-and-measure.
   - Precondition: the post-FM-rebalance, post-AMD-retirement bakeoff
     numbers are stable. Both are in place as of 2026-04-18-03.
+  - Shipped as Phase 2.4.4 "shape-based OrderingPreprocess::Auto
+    default" (commit 2f482d7) plus AMF Phase D default flip for
+    n <= 10_000 (dcf9f53) and LDLT-aware ordering preprocessing
+    (1ffbd7c, phase-2.6.5).
