@@ -2635,3 +2635,38 @@ unchanged. Numbers in `dev/sessions/2026-05-12-01.md`.
 **References.** `src/numeric/factorize.rs::FactorWorkspace`,
 `src/numeric/factorize.rs::factorize_multifrontal_supernodal_parallel`,
 `src/numeric/factorize.rs::run_parallel_task`.
+
+## 2026-05-12 — Reject lock-free contribution-block store
+
+**Decision.** Keep the `Mutex<HashMap<usize, ContribBlock>>` shared
+contribution-block store in the rayon parallel multifrontal driver
+as-is. Do **not** redesign it into a sharded/lock-free structure.
+
+**Why.** Empirical falsification via `AtomicLockStats` telemetry
+(this session). At T=4 on a representative four-matrix sample the
+total wait+hold time on the contribution-block + node-factors
+mutexes accounts for:
+
+- bcsstk38: 1.8% of aggregate body time
+- bratu3d:  0.2%
+- c-big:    0.02%
+- cont-201: 3.4%
+
+cont-201 is the worst case and is still <4%. A lock-free store
+would buy at most that fraction back, and would not change the
+within-scope work-stealing/dep-chain idle that constitutes the
+remaining cont-201 cached-mode headroom (loop utilization 68.5%
+inside the rayon::scope).
+
+**Evidence.** Test
+`numeric::solver::tests::solver_parallel_lock_breakdown` (cold +
+cached pair, T=4), plus full numbers in
+`dev/debugging/2026-05-12-cont201-cached-headroom.md`.
+
+**Escape hatch.** The `AtomicLockStats` telemetry stays in tree so
+the decision can be re-checked at higher thread counts or different
+matrix mixes without re-instrumenting.
+
+**References.** `src/numeric/factorize.rs::AtomicLockStats`,
+`src/numeric/factorize.rs::run_parallel_task`,
+`src/numeric/solver.rs::tests::solver_parallel_lock_breakdown`.

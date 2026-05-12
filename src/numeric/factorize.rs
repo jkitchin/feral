@@ -43,6 +43,17 @@ pub struct NumericParams {
     /// timing work runs — zero overhead in production. See
     /// `dev/plans/phase-2.10-supernode-profiler.md`.
     pub profiler: Option<Arc<Mutex<Profiler>>>,
+    /// Optional lock-contention telemetry for the rayon-parallel
+    /// multifrontal driver. When `Some`, the driver records the
+    /// wait+hold time spent on the shared `contrib_blocks` and
+    /// `node_factors_out` mutexes, plus a task count. When `None`
+    /// (default) the driver performs a single Option-is_none check
+    /// per lock acquire — branch-predicted away in production.
+    /// Diagnostic only; the values reported are not part of any
+    /// correctness contract. See `dev/sessions/2026-05-12-01.md`
+    /// "Next Session Should" for the cont-201 investigation that
+    /// motivates this hook.
+    pub parallel_telemetry: Option<Arc<AtomicLockStats>>,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -263,6 +274,7 @@ impl Default for NumericParams {
             scaling: ScalingStrategy::default(),
             small_leaf: SmallLeafBatch::default(),
             profiler: None,
+            parallel_telemetry: None,
         }
     }
 }
@@ -279,6 +291,94 @@ impl NumericParams {
             scaling: ScalingStrategy::default(),
             small_leaf: SmallLeafBatch::default(),
             profiler: None,
+            parallel_telemetry: None,
+        }
+    }
+}
+
+/// Lock-contention + phase telemetry for the rayon-parallel
+/// multifrontal driver. Atomic fields aggregate across worker
+/// threads via `fetch_add`. Driver-phase fields are written once by
+/// the calling thread and use atomics only for uniformity (no
+/// contention there). Snapshot via `snapshot()` after the factor
+/// returns. See `NumericParams::parallel_telemetry`.
+#[derive(Default, Debug)]
+pub struct AtomicLockStats {
+    /// Cumulative time spent waiting to acquire `contrib_blocks`.
+    pub contrib_wait_ns: std::sync::atomic::AtomicU64,
+    /// Cumulative time spent holding `contrib_blocks` (excluding wait).
+    pub contrib_hold_ns: std::sync::atomic::AtomicU64,
+    /// Cumulative time spent waiting to acquire `node_factors_out`.
+    pub node_factors_wait_ns: std::sync::atomic::AtomicU64,
+    /// Cumulative time spent holding `node_factors_out` (excluding wait).
+    pub node_factors_hold_ns: std::sync::atomic::AtomicU64,
+    /// Cumulative time spent inside `factor_one_supernode` itself,
+    /// excluding the lock brackets above. Aggregated across workers,
+    /// so on an 8-thread run this can exceed wall time by ~8×.
+    pub factor_body_ns: std::sync::atomic::AtomicU64,
+    /// Number of parallel tasks executed.
+    pub n_tasks: std::sync::atomic::AtomicU64,
+    /// `compute_scaling_with_cache` + scaling_pivot_order build.
+    pub phase_scaling_ns: std::sync::atomic::AtomicU64,
+    /// `permute_csc_values` (P·A·Pᵀ rebuild).
+    pub phase_permute_ns: std::sync::atomic::AtomicU64,
+    /// `permuted.symmetric_pattern()`.
+    pub phase_symmetric_pattern_ns: std::sync::atomic::AtomicU64,
+    /// `is_root` + `parents` + `pending` atomic counters +
+    /// `contrib_blocks` / `node_factors_out` mutex setup.
+    pub phase_tree_setup_ns: std::sync::atomic::AtomicU64,
+    /// Per-worker `FactorWorkspace` provisioning, including
+    /// `local_contribs.resize_with(n_snodes, ...)`.
+    pub phase_thread_ws_ns: std::sync::atomic::AtomicU64,
+    /// Leaves collection (single linear pass over supernodes).
+    pub phase_leaves_ns: std::sync::atomic::AtomicU64,
+    /// The `rayon::scope` itself — sums to the parallel hot-loop
+    /// wall time plus rayon overhead. Compare against
+    /// `factor_body_ns / T` to see worker utilization.
+    pub phase_scope_ns: std::sync::atomic::AtomicU64,
+    /// Final epilogue: `node_factors_out.into_inner()` + the
+    /// postorder iteration that builds `final_nodes` and aggregates
+    /// inertia.
+    pub phase_collect_ns: std::sync::atomic::AtomicU64,
+}
+
+/// Plain-data snapshot of `AtomicLockStats` (non-atomic, easy to print).
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ParallelLockStats {
+    pub contrib_wait_ns: u64,
+    pub contrib_hold_ns: u64,
+    pub node_factors_wait_ns: u64,
+    pub node_factors_hold_ns: u64,
+    pub factor_body_ns: u64,
+    pub n_tasks: u64,
+    pub phase_scaling_ns: u64,
+    pub phase_permute_ns: u64,
+    pub phase_symmetric_pattern_ns: u64,
+    pub phase_tree_setup_ns: u64,
+    pub phase_thread_ws_ns: u64,
+    pub phase_leaves_ns: u64,
+    pub phase_scope_ns: u64,
+    pub phase_collect_ns: u64,
+}
+
+impl AtomicLockStats {
+    pub fn snapshot(&self) -> ParallelLockStats {
+        use std::sync::atomic::Ordering;
+        ParallelLockStats {
+            contrib_wait_ns: self.contrib_wait_ns.load(Ordering::Relaxed),
+            contrib_hold_ns: self.contrib_hold_ns.load(Ordering::Relaxed),
+            node_factors_wait_ns: self.node_factors_wait_ns.load(Ordering::Relaxed),
+            node_factors_hold_ns: self.node_factors_hold_ns.load(Ordering::Relaxed),
+            factor_body_ns: self.factor_body_ns.load(Ordering::Relaxed),
+            n_tasks: self.n_tasks.load(Ordering::Relaxed),
+            phase_scaling_ns: self.phase_scaling_ns.load(Ordering::Relaxed),
+            phase_permute_ns: self.phase_permute_ns.load(Ordering::Relaxed),
+            phase_symmetric_pattern_ns: self.phase_symmetric_pattern_ns.load(Ordering::Relaxed),
+            phase_tree_setup_ns: self.phase_tree_setup_ns.load(Ordering::Relaxed),
+            phase_thread_ws_ns: self.phase_thread_ws_ns.load(Ordering::Relaxed),
+            phase_leaves_ns: self.phase_leaves_ns.load(Ordering::Relaxed),
+            phase_scope_ns: self.phase_scope_ns.load(Ordering::Relaxed),
+            phase_collect_ns: self.phase_collect_ns.load(Ordering::Relaxed),
         }
     }
 }
@@ -1850,13 +1950,16 @@ pub fn factorize_multifrontal_supernodal_parallel(
     params: &NumericParams,
 ) -> Result<(SparseFactors, Inertia), FeralError> {
     use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use std::sync::Mutex;
 
     let n = symbolic.n;
     let n_snodes = symbolic.supernodes.len();
+    let telemetry = params.parallel_telemetry.as_deref();
 
     // Setup — mirrors the sequential driver. Reuse the symbolic-phase
     // MC64 cache if present (see the sequential driver for details).
+    let t_phase = telemetry.map(|_| std::time::Instant::now());
     let (scaling_user, scaling_info) =
         compute_scaling_with_cache(matrix, &params.scaling, symbolic.cached_mc64.as_ref())?;
     if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
@@ -1868,8 +1971,26 @@ pub fn factorize_multifrontal_supernodal_parallel(
     }
     let scaling_pivot_order: Vec<f64> =
         symbolic.perm.iter().map(|&old| scaling_user[old]).collect();
+    if let (Some(t), Some(start)) = (telemetry, t_phase) {
+        t.phase_scaling_ns
+            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    let t_phase = telemetry.map(|_| std::time::Instant::now());
     let permuted = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv)?;
+    if let (Some(t), Some(start)) = (telemetry, t_phase) {
+        t.phase_permute_ns
+            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    let t_phase = telemetry.map(|_| std::time::Instant::now());
     let full_pattern = permuted.symmetric_pattern();
+    if let (Some(t), Some(start)) = (telemetry, t_phase) {
+        t.phase_symmetric_pattern_ns
+            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    let t_phase = telemetry.map(|_| std::time::Instant::now());
 
     let mut is_root = vec![true; n_snodes];
     for snode in &symbolic.supernodes {
@@ -1907,7 +2028,12 @@ pub fn factorize_multifrontal_supernodal_parallel(
     let node_factors_out: Mutex<Vec<Option<NodeFactors>>> =
         Mutex::new((0..n_snodes).map(|_| None).collect());
     let first_error: Mutex<Option<FeralError>> = Mutex::new(None);
+    if let (Some(t), Some(start)) = (telemetry, t_phase) {
+        t.phase_tree_setup_ns
+            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 
+    let t_phase = telemetry.map(|_| std::time::Instant::now());
     // Per-thread workspaces. Provision one workspace per rayon
     // worker PLUS one extra slot for the calling thread, which may
     // also execute tasks inside `rayon::scope` and has
@@ -1928,7 +2054,12 @@ pub fn factorize_multifrontal_supernodal_parallel(
             Mutex::new(w)
         })
         .collect();
+    if let (Some(t), Some(start)) = (telemetry, t_phase) {
+        t.phase_thread_ws_ns
+            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 
+    let t_phase = telemetry.map(|_| std::time::Instant::now());
     // Collect the true leaves (supernodes with no children) BEFORE
     // entering the scope. Using `pending[i].load() == 0` as the
     // seeding predicate is unsound: once the scope is live, workers
@@ -1949,7 +2080,12 @@ pub fn factorize_multifrontal_supernodal_parallel(
             }
         })
         .collect();
+    if let (Some(t), Some(start)) = (telemetry, t_phase) {
+        t.phase_leaves_ns
+            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 
+    let t_phase = telemetry.map(|_| std::time::Instant::now());
     rayon::scope(|scope| {
         for &leaf_idx in &leaves {
             run_parallel_task(
@@ -1970,7 +2106,12 @@ pub fn factorize_multifrontal_supernodal_parallel(
             );
         }
     });
+    if let (Some(t), Some(start)) = (telemetry, t_phase) {
+        t.phase_scope_ns
+            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 
+    let t_phase = telemetry.map(|_| std::time::Instant::now());
     // Surface any first-error that the tasks captured.
     let err_opt = match first_error.into_inner() {
         Ok(v) => v,
@@ -2008,6 +2149,10 @@ pub fn factorize_multifrontal_supernodal_parallel(
             needs_refinement = true;
         }
         final_nodes.push(node);
+    }
+    if let (Some(t), Some(start)) = (telemetry, t_phase) {
+        t.phase_collect_ns
+            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
     Ok((
@@ -2051,6 +2196,11 @@ fn run_parallel_task<'a>(
 ) {
     use std::sync::atomic::Ordering;
     scope.spawn(move |s| {
+        let telemetry = params.parallel_telemetry.as_deref();
+        if let Some(t) = telemetry {
+            t.n_tasks.fetch_add(1, Ordering::Relaxed);
+        }
+
         // Fast-exit if a prior task errored; the scope will still
         // drain, we just skip actual work.
         {
@@ -2095,17 +2245,28 @@ fn run_parallel_task<'a>(
             // Stage child contributions: shared lock held only for
             // the drain, not across the factor body.
             {
+                let t_wait_start = telemetry.map(|_| std::time::Instant::now());
                 let mut shared = match contrib_blocks.lock() {
                     Ok(g) => g,
                     Err(p) => p.into_inner(),
                 };
+                if let (Some(t), Some(start)) = (telemetry, t_wait_start) {
+                    t.contrib_wait_ns
+                        .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                let hold_start = telemetry.map(|_| std::time::Instant::now());
                 for &c in &snode.children {
                     if c < n_snodes {
                         local_contribs[c] = shared[c].take();
                     }
                 }
+                if let (Some(t), Some(start)) = (telemetry, hold_start) {
+                    t.contrib_hold_ns
+                        .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
             }
 
+            let factor_start = telemetry.map(|_| std::time::Instant::now());
             let res = factor_one_supernode(
                 snode_idx,
                 symbolic,
@@ -2118,6 +2279,10 @@ fn run_parallel_task<'a>(
                 &mut local_contribs,
                 0, // nvschur: parallel path is not used by Schur API
             );
+            if let (Some(t), Some(start)) = (telemetry, factor_start) {
+                t.factor_body_ns
+                    .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
 
             let own = local_contribs[snode_idx].take();
             // Return the pooled vec to the workspace. All slots are
@@ -2130,18 +2295,38 @@ fn run_parallel_task<'a>(
         match result {
             Ok(node) => {
                 {
+                    let t_wait_start = telemetry.map(|_| std::time::Instant::now());
                     let mut shared = match contrib_blocks.lock() {
                         Ok(g) => g,
                         Err(p) => p.into_inner(),
                     };
+                    if let (Some(t), Some(start)) = (telemetry, t_wait_start) {
+                        t.contrib_wait_ns
+                            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
+                    let hold_start = telemetry.map(|_| std::time::Instant::now());
                     shared[snode_idx] = own_contrib;
+                    if let (Some(t), Some(start)) = (telemetry, hold_start) {
+                        t.contrib_hold_ns
+                            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
                 }
                 {
+                    let t_wait_start = telemetry.map(|_| std::time::Instant::now());
                     let mut nf = match node_factors_out.lock() {
                         Ok(g) => g,
                         Err(p) => p.into_inner(),
                     };
+                    if let (Some(t), Some(start)) = (telemetry, t_wait_start) {
+                        t.node_factors_wait_ns
+                            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
+                    let hold_start = telemetry.map(|_| std::time::Instant::now());
                     nf[snode_idx] = Some(node);
+                    if let (Some(t), Some(start)) = (telemetry, hold_start) {
+                        t.node_factors_hold_ns
+                            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
                 }
                 if let Some(parent_idx) = parents[snode_idx] {
                     let prev = pending[parent_idx].fetch_sub(1, Ordering::AcqRel);
@@ -2612,12 +2797,14 @@ mod tests {
             scaling: ScalingStrategy::InfNorm,
             small_leaf: Default::default(),
             profiler: None,
+            parallel_telemetry: None,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
             scaling: ScalingStrategy::Identity,
             small_leaf: Default::default(),
             profiler: None,
+            parallel_telemetry: None,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
@@ -3076,6 +3263,7 @@ mod tests {
             scaling: ScalingStrategy::Identity,
             small_leaf: SmallLeafBatch::default(),
             profiler: None,
+            parallel_telemetry: None,
         };
 
         let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];

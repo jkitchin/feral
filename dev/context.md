@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-12T16:37:31Z
+Generated: 2026-05-12T17:31:34Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,17 +59,17 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+055cf07 session(2026-05-12-01): perf checkpoint — parallel default + alloc churn
+13c1410 perf(issue-7): default Solver to parallel driver + slash multifrontal alloc churn
 2bfc3b4 research(issue-5): close on feral side; document MUMPS+MA57 strategy
 cc8a45b research(issue-5): empirical sweeps invalidate Option B as the fix
 c002bec test(issue-5): regression test for MSS1 BK 1×1/2×2 wandering inertia
-4075640 release: 0.1.0 housekeeping — CHANGELOG stamp, sub-crate READMEs, clippy clean
-4b93719 release: prepare crates.io 0.1.0 metadata for feral + 6 ordering crates
 ```
 
 ## Test Status
 ```
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
 test dense::schur_kernel::tests::schur_panel_minus_nofma_strided_is_bit_exact_vs_rank1_reference ... ok
-test dense::schur_kernel::tests::schur_panel_minus_nofma_strided_dual_is_bit_exact_vs_two_singles ... ok
 test numeric::factorize::tests::schur_multi_supernode_tail_matches_oracle ... ok
 test scaling::tests::auto_falls_back_to_infnorm_on_mss1_0009 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
@@ -79,7 +79,7 @@ test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 
-test result: ok. 214 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.28s
+test result: ok. 214 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.28s
 
    Doc-tests feral
 

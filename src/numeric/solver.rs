@@ -470,6 +470,7 @@ mod tests {
             scaling,
             small_leaf: Default::default(),
             profiler: None,
+            parallel_telemetry: None,
         };
         Solver::with_params(np, SupernodeParams::default())
     }
@@ -1134,6 +1135,231 @@ mod tests {
             eprintln!(
                 "  {:30} {:8} {:8} {:8.1} {:8.1} {:8.1} {:8.1} {:5.2}× {:5.2}× {:5.2}×",
                 name, n, nnz, t1, t2, t4, t8, sp2, sp4, sp8
+            );
+        }
+        eprintln!();
+    }
+
+    /// Diagnostic: profile rayon-parallel lock contention across the
+    /// large-matrix corpus. Wires
+    /// `NumericParams::parallel_telemetry` and reports per-matrix
+    /// wait/hold time on the two global mutexes
+    /// (`contrib_blocks` and `node_factors_out`) plus the aggregate
+    /// time spent inside `factor_one_supernode`. Aggregated body time
+    /// across N workers can exceed wall time by up to N×, which
+    /// reveals worker idleness when (body / N) < wall.
+    ///
+    /// Motivation: post-perf session 2026-05-12-01, cont-201 sits at
+    /// ~30% of its 4.83× node-level parallel ceiling. Two suspects
+    /// are global-mutex contention and rayon task-spawn overhead;
+    /// this test produces evidence for/against the mutex hypothesis.
+    ///
+    /// Ignored by default — same gating as
+    /// `solver_parallel_threadcount_sweep`.
+    ///
+    /// Invoke under release with:
+    ///
+    /// ```text
+    /// cargo test --release solver_parallel_lock_breakdown \
+    ///     -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn solver_parallel_lock_breakdown() {
+        use crate::numeric::factorize::AtomicLockStats;
+        use crate::read_mtx;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        let dir = PathBuf::from("tests/data/large");
+        if !dir.is_dir() {
+            eprintln!("SKIP: {} not found.", dir.display());
+            return;
+        }
+
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "mtx"))
+            .collect();
+        paths.sort();
+        if paths.is_empty() {
+            eprintln!("SKIP: no .mtx in {}.", dir.display());
+            return;
+        }
+
+        // Use a single fixed pool size so the breakdown is
+        // apples-to-apples across matrices. 4 threads strikes a
+        // balance: enough to surface contention, not so many that
+        // worker idleness obscures it.
+        let n_threads = 4usize;
+        let pool = match rayon::ThreadPoolBuilder::new()
+            .num_threads(n_threads)
+            .build()
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("SKIP: rayon pool build failed: {}", e);
+                return;
+            }
+        };
+
+        eprintln!(
+            "\n  Parallel lock-contention + phase breakdown (T={} threads)",
+            n_threads
+        );
+        eprintln!(
+            "  matrix                 wall_ms  body_ms_agg  body/T   contrib_wait_ms  contrib_hold_ms  nf_wait_ms  nf_hold_ms  n_tasks  body_frac  wait_frac"
+        );
+        eprintln!(
+            "  ---------------------- -------- ----------- -------- ---------------- ---------------- ----------- ----------- -------- --------- ---------"
+        );
+
+        for path in &paths {
+            let mtx = match read_mtx(path) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("  SKIP {}: {:?}", path.display(), e);
+                    continue;
+                }
+            };
+            let csc = match mtx.to_csc() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("  SKIP {}: csc {:?}", path.display(), e);
+                    continue;
+                }
+            };
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .trim_end_matches(".mtx");
+
+            let stats = Arc::new(AtomicLockStats::default());
+            let np = NumericParams {
+                parallel_telemetry: Some(stats.clone()),
+                ..NumericParams::default()
+            };
+
+            // First call pays the symbolic-analyze cost; second call
+            // hits the Solver's pattern-fingerprint cache so wall ≈
+            // pure numeric. This matches the pounce/IPM use case
+            // where many factors reuse the same SymbolicFactorization.
+            // We report the SECOND call's stats so the breakdown
+            // reflects the production hot path.
+            let (wall_ms, snap, wall_first_ms) = pool.install(|| {
+                let mut solver = Solver::with_params(np, SupernodeParams::default());
+                let t_first = Instant::now();
+                let _ = solver.factor(&csc, None);
+                let wall_first = t_first.elapsed().as_secs_f64() * 1e3;
+                // Reset telemetry so the snapshot reflects only the
+                // second call.
+                stats
+                    .contrib_wait_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .contrib_hold_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .node_factors_wait_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .node_factors_hold_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .factor_body_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats.n_tasks.store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .phase_scaling_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .phase_permute_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .phase_symmetric_pattern_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .phase_tree_setup_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .phase_thread_ws_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .phase_leaves_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .phase_scope_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .phase_collect_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                let t0 = Instant::now();
+                let _ = solver.factor(&csc, None);
+                let wall = t0.elapsed().as_secs_f64() * 1e3;
+                (wall, stats.snapshot(), wall_first)
+            });
+
+            eprintln!(
+                "  --- {} (cold wall={:.1} ms, cached/2nd wall={:.1} ms) ---",
+                name, wall_first_ms, wall_ms
+            );
+
+            let body_ms_agg = (snap.factor_body_ns as f64) / 1e6;
+            let body_per_t = body_ms_agg / (n_threads as f64);
+            let body_frac = if wall_ms > 0.0 {
+                body_per_t / wall_ms
+            } else {
+                0.0
+            };
+            let total_wait_ms = (snap.contrib_wait_ns + snap.node_factors_wait_ns) as f64 / 1e6;
+            let wait_frac_agg = if body_ms_agg > 0.0 {
+                total_wait_ms / body_ms_agg
+            } else {
+                0.0
+            };
+
+            eprintln!(
+                "  {:22} {:8.1} {:11.1} {:8.1} {:16.3} {:16.3} {:11.3} {:11.3} {:8} {:8.2}× {:8.2}%",
+                name,
+                wall_ms,
+                body_ms_agg,
+                body_per_t,
+                snap.contrib_wait_ns as f64 / 1e6,
+                snap.contrib_hold_ns as f64 / 1e6,
+                snap.node_factors_wait_ns as f64 / 1e6,
+                snap.node_factors_hold_ns as f64 / 1e6,
+                snap.n_tasks,
+                body_frac,
+                wait_frac_agg * 100.0
+            );
+            // Per-phase breakdown of the (sequential) driver wrapper
+            // — these run on the calling thread before/after the
+            // rayon::scope. They form the "non-loop" floor that
+            // bounds achievable parallel speedup, independent of how
+            // many threads you give it.
+            let scaling = snap.phase_scaling_ns as f64 / 1e6;
+            let permute = snap.phase_permute_ns as f64 / 1e6;
+            let sympat = snap.phase_symmetric_pattern_ns as f64 / 1e6;
+            let tree = snap.phase_tree_setup_ns as f64 / 1e6;
+            let tws = snap.phase_thread_ws_ns as f64 / 1e6;
+            let leaves = snap.phase_leaves_ns as f64 / 1e6;
+            let scope = snap.phase_scope_ns as f64 / 1e6;
+            let collect = snap.phase_collect_ns as f64 / 1e6;
+            let phase_sum = scaling + permute + sympat + tree + tws + leaves + scope + collect;
+            let non_loop = phase_sum - scope;
+            eprintln!(
+                "    phases (ms): scaling={:.2} permute={:.2} sympat={:.2} tree={:.2} thread_ws={:.2} leaves={:.2} scope={:.2} collect={:.2}",
+                scaling, permute, sympat, tree, tws, leaves, scope, collect,
+            );
+            eprintln!(
+                "    sum_phases={:.2} ms,  non_loop (everything except rayon::scope)={:.2} ms,  scope/wall={:.2}",
+                phase_sum,
+                non_loop,
+                if wall_ms > 0.0 { scope / wall_ms } else { 0.0 },
             );
         }
         eprintln!();

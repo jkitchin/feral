@@ -80,6 +80,19 @@ the offending triplet by index and `(row, col)`. Reported by @janosh.
 
 ### Investigated
 
+- Parallel multifrontal driver lock contention (T=4) — falsified.
+  Added opt-in `AtomicLockStats` telemetry to `NumericParams` with
+  per-task lock wait/hold counters and eight per-phase wall-time
+  counters wrapping the sequential prologue/epilogue. cont-201's
+  previously-reported residual headroom is **sequential symbolic
+  factorize** (157 ms of a 214 ms single-shot wall), not mutex
+  contention (worst-case 3.4% of body time on cont-201, 0.02% on
+  c-big). On the cached-symbolic path (production / pounce-IPM
+  regime) cont-201 wall drops 214 → 56 ms with body_frac jumping
+  0.15× → 0.55×; remaining 1.5× headroom is inside the rayon::scope,
+  not at lock sites. Full analysis in
+  `dev/debugging/2026-05-12-cont201-cached-headroom.md`.
+
 - Issue #5 (MSS1 BK inertia non-monotone under δ_w·I): triage
   complete, closed on the feral side. Landed a reproducer test
   + zero_tol/pivot_threshold sweep diagnostics in

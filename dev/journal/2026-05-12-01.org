@@ -1,0 +1,82 @@
+#+TITLE: Journal 2026-05-12-01
+#+DATE: 2026-05-12
+
+* 12:45 :parallel:telemetry:cont-201:
+Picked up "Next Session Should #1" from 2026-05-12-01 checkpoint:
+investigate cont-201's residual 30%-of-ceiling parallel headroom
+before fixing anything. Plan: instrument the global mutexes and
+per-task body time, measure first.
+
+* 13:05 :parallel:telemetry:falsified:
+Added =AtomicLockStats= struct + =parallel_telemetry: Option<Arc<...>>=
+field on =NumericParams=. Six wait/hold/body/task counters wired in
+=run_parallel_task= at the three global mutex sites (contrib_blocks,
+node_factors_out, factor_body bracket).
+
+First sweep (T=4, single factor() per matrix):
+| matrix    | wall_ms | body_agg | wait_ms | wait_frac |
+|-----------+---------+----------+---------+-----------|
+| bcsstk38  |    27.5 |     14.1 |    0.25 |     1.76% |
+| bratu3d   |   682.5 |    961.3 |    1.78 |     0.19% |
+| c-big     |  266621 |   274202 |    51.9 |     0.02% |
+| cont-201  |   208.5 |    121.0 |     3.8 |     3.16% |
+
+Lock contention is rounding error in every case. cont-201 worst at
+3.16%, c-big at 0.02%. Hypothesis #1 falsified.
+
+* 13:18 :parallel:phase-breakdown:driver-prologue:
+Added 8 per-phase wall timers wrapping the sequential prologue/
+epilogue inside =factorize_multifrontal_supernodal_parallel=:
+scaling, permute, symmetric_pattern, tree_setup, thread_ws, leaves,
+rayon::scope itself, collect.
+
+Same sweep, now with phases:
+- bcsstk38 wall=28.6, phase_sum=15.7 ms, scope=9.0 → ~13 ms unaccounted
+- cont-201 wall=211, phase_sum=54, scope=45 → ~157 ms unaccounted
+
+The ~157 ms unaccounted on cont-201 is BEFORE the parallel driver
+runs — it's =symbolic_factorize=, called by =Solver::factor= on cache
+miss. The "parallel driver" is fine; the single-shot wall is dominated
+by a one-time analysis step.
+
+* 13:21 :parallel:cached-mode:cont-201:
+Reframed: pounce/IPM hot path reuses the symbolic factor via
+=Solver='s pattern-fingerprint cache. Modified the test to run TWO
+factor() calls (cold + cached), zero the 14 atomics between, and
+report the SECOND call's stats. Single fixed pool size T=4.
+
+Cached numbers (cold → cached wall):
+- bcsstk38: 27.4 → 15.0 ms
+- bratu3d:  689 → 618 ms
+- c-big:    268s → 262s
+- cont-201: 214 → **56 ms** (3.8× faster than cold)
+
+cont-201 cached breakdown:
+- non_loop (driver prologue/epilogue) = 9.0 ms (scaling 4 + permute 4)
+- rayon::scope = 45.1 ms
+- body_per_T = 30.9 ms → loop utilization = 30.9/45.1 = 68.5%
+- body_frac vs wall = 0.55× (was 0.15× in cold single-shot)
+- T=4 ideal at critical-path 23.5 + non_loop 9 = 32 ms (vs measured 56)
+- Remaining ceiling = 1.5×, in the loop, not at locks.
+
+* 13:25 :writeup:debugging-note:
+Wrote =dev/debugging/2026-05-12-cont201-cached-headroom.md= with
+full table + breakdown. Conclusion:
+
+1. Lock contention falsified — do NOT redesign the contribution store.
+2. The headroom on cont-201 lives inside rayon::scope (within-scope
+   utilization 68.5%, not lock waits).
+3. Best next probes (in order): per-task wait/work/post-store
+   breakdown; verify =compute_scaling_with_cache= cache hits;
+   topological-level scheduler experiment.
+
+* 13:40 :perf-process:cargo-bench-broken:
+Tried =cargo run --bin bench --release= for the session checkpoint;
+fails with "no bin target named bench". 4b93719 (the 0.1.0 release
+prep) flipped =autobins = false= and dropped all [[bin]] entries to
+make feral library-only for publish. =src/bin/bench.rs= exists but
+isn't wired. The CLAUDE.md mandate to record =cargo run --bin bench
+--release= output at session end is currently blocked by the release
+config. Not flipping autobins just to record numbers — the
+diagnostic test output IS this session's perf evidence. Flagging
+this as a separate process item for the next session.

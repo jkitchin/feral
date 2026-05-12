@@ -1318,3 +1318,42 @@ differently-stratified fixture set.
 References: `dev/research/phase-b-shape-dispatched-nemin.md`,
 `dev/research/factor-nnz-residual-gap.md`, commit `4c0fc80`
 (Phase A).
+
+## 2026-05-12 — Lock-free contribution-block store for parallel driver
+
+**Hypothesis.** cont-201's 1.44× speedup at T=8 (vs 4.83× theoretical
+critical-path ceiling) is bottlenecked by the shared
+`Mutex<HashMap<usize, ContribBlock>>` in
+`factorize_multifrontal_supernodal_parallel`. Hot path acquires twice
+per task (children-drain + own-store).
+
+**Test.** Added `AtomicLockStats` opt-in telemetry (six lock
+wait/hold/body/task atomics + eight per-phase wall timers) and
+extended `solver_parallel_lock_breakdown` to run cold + cached
+factor pairs at T=4, reporting cached-symbolic numbers
+(production/IPM regime).
+
+**Result.** Falsified.
+
+| matrix    | total mutex wait + hold | aggregate body | wait-frac |
+| --------- | ----------------------: | -------------: | --------: |
+| bcsstk38  |               0.28 ms   |      14.3 ms   |     1.8%  |
+| bratu3d   |               2.15 ms   |     956.1 ms   |     0.2%  |
+| c-big     |              65.6  ms   |  273526 ms     |     0.02% |
+| cont-201  |               4.82 ms   |     123.5 ms   |     3.9%  |
+
+cont-201 cached wall is 56.2 ms; the 1.5× residual headroom in cached
+mode lives inside the rayon::scope (loop utilization 68.5%), not at
+the locks. A lock-free store would recover ≤4% of body time worst
+case, ≤0.04% best case.
+
+**Action.** Telemetry kept in tree as an opt-in diagnostic surface
+(`NumericParams::parallel_telemetry`). No re-design of the
+contribution-block store. Decision recorded in `dev/decisions.md`
+2026-05-12 "Reject lock-free contribution-block store". Full
+breakdown in `dev/debugging/2026-05-12-cont201-cached-headroom.md`.
+
+References: `src/numeric/factorize.rs::AtomicLockStats`,
+`src/numeric/factorize.rs::run_parallel_task`,
+`src/numeric/solver.rs::tests::solver_parallel_lock_breakdown`,
+`dev/debugging/2026-05-12-cont201-cached-headroom.md`.
