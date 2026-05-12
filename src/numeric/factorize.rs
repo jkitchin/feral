@@ -316,6 +316,20 @@ pub struct AtomicLockStats {
     /// excluding the lock brackets above. Aggregated across workers,
     /// so on an 8-thread run this can exceed wall time by ~8×.
     pub factor_body_ns: std::sync::atomic::AtomicU64,
+    /// Cumulative wall time of the entire `scope.spawn(...)` closure
+    /// body across all tasks (includes lock waits, `factor_body`, and
+    /// per-task control flow like the snode lookup, fast-exit check,
+    /// pending-decrement, and recursive spawn). Aggregated across
+    /// workers. Compute `task_wall_agg / T` to compare against
+    /// `phase_scope_ns`: the gap is rayon idle (worker waiting for an
+    /// eligible task) or scope spawn/join overhead.
+    pub task_wall_ns: std::sync::atomic::AtomicU64,
+    /// Cumulative wait time on the per-worker
+    /// `Mutex<FactorWorkspace>`. Expected to be near zero (each
+    /// worker has its own slot); non-zero values mean rayon scheduled
+    /// two tasks onto the same worker queue before the first finished
+    /// (an event that would also imply a worker idle elsewhere).
+    pub ws_lock_wait_ns: std::sync::atomic::AtomicU64,
     /// Number of parallel tasks executed.
     pub n_tasks: std::sync::atomic::AtomicU64,
     /// `compute_scaling_with_cache` + scaling_pivot_order build.
@@ -350,6 +364,8 @@ pub struct ParallelLockStats {
     pub node_factors_wait_ns: u64,
     pub node_factors_hold_ns: u64,
     pub factor_body_ns: u64,
+    pub task_wall_ns: u64,
+    pub ws_lock_wait_ns: u64,
     pub n_tasks: u64,
     pub phase_scaling_ns: u64,
     pub phase_permute_ns: u64,
@@ -370,6 +386,8 @@ impl AtomicLockStats {
             node_factors_wait_ns: self.node_factors_wait_ns.load(Ordering::Relaxed),
             node_factors_hold_ns: self.node_factors_hold_ns.load(Ordering::Relaxed),
             factor_body_ns: self.factor_body_ns.load(Ordering::Relaxed),
+            task_wall_ns: self.task_wall_ns.load(Ordering::Relaxed),
+            ws_lock_wait_ns: self.ws_lock_wait_ns.load(Ordering::Relaxed),
             n_tasks: self.n_tasks.load(Ordering::Relaxed),
             phase_scaling_ns: self.phase_scaling_ns.load(Ordering::Relaxed),
             phase_permute_ns: self.phase_permute_ns.load(Ordering::Relaxed),
@@ -2197,6 +2215,7 @@ fn run_parallel_task<'a>(
     use std::sync::atomic::Ordering;
     scope.spawn(move |s| {
         let telemetry = params.parallel_telemetry.as_deref();
+        let t_task_start = telemetry.map(|_| std::time::Instant::now());
         if let Some(t) = telemetry {
             t.n_tasks.fetch_add(1, Ordering::Relaxed);
         }
@@ -2209,6 +2228,10 @@ fn run_parallel_task<'a>(
                 Err(p) => p.into_inner(),
             };
             if err_guard.is_some() {
+                if let (Some(t), Some(start)) = (telemetry, t_task_start) {
+                    t.task_wall_ns
+                        .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
                 return;
             }
         }
@@ -2228,10 +2251,15 @@ fn run_parallel_task<'a>(
         let ws_mtx = &thread_ws[thread_idx];
 
         let (result, own_contrib) = {
+            let t_ws_wait = telemetry.map(|_| std::time::Instant::now());
             let mut ws_guard = match ws_mtx.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
+            if let (Some(t), Some(start)) = (telemetry, t_ws_wait) {
+                t.ws_lock_wait_ns
+                    .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
 
             // Move the pooled local_contribs out of the workspace so
             // we can hand `&mut FactorWorkspace` and `&mut Vec<...>`
@@ -2359,6 +2387,11 @@ fn run_parallel_task<'a>(
                     *err_guard = Some(e);
                 }
             }
+        }
+
+        if let (Some(t), Some(start)) = (telemetry, t_task_start) {
+            t.task_wall_ns
+                .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
     });
 }

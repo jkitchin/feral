@@ -80,3 +80,50 @@ isn't wired. The CLAUDE.md mandate to record =cargo run --bin bench
 config. Not flipping autobins just to record numbers — the
 diagnostic test output IS this session's perf evidence. Flagging
 this as a separate process item for the next session.
+
+* 15:18 :parallel:within-scope:rayon-idle:
+Iteration 2 of cont-201 investigation. Added =task_wall_ns= (whole
+spawn-closure bracket) and =ws_lock_wait_ns= (per-worker workspace
+mutex) to =AtomicLockStats=. Goal: localize the 14.2 ms cached-mode
+gap between body_per_T (30.9 ms) and scope (45.1 ms) on cont-201.
+
+Derivation: rayon_idle = scope·T − task_wall_agg = capacity
+unfilled by the etree-ordered ready-queue. ctrl_flow_agg =
+task_wall_agg − body_agg − all_locks = per-task closure overhead.
+
+Results (T=4, cached-symbolic):
+
+| matrix    | scope·T cap | task_wall_agg | rayon_idle | idle% | locks | ctrl-flow |
+|-----------+-------------+---------------+------------+-------+-------+-----------|
+| bcsstk38  |        30.6 |          14.7 |       15.9 |   52% |   0.2 |       0.4 |
+| bratu3d   |        2591 |          1017 |       1574 |   61% |   2.3 |       2.5 |
+| c-big     |     1117728 |        292151 |     825577 |   74% |  76.1 |      68.3 |
+| cont-201  |       194.5 |         145.3 |       49.2 |   25% |   6.7 |       6.0 |
+
+cont-201's gap is 78% rayon_idle (12.3 ms/worker), 10% locks
+(1.7 ms/T), 10% ctrl-flow (1.5 ms/T). **Etree-topology bound**,
+not engineering loss.
+
+* 15:25 :parallel:c-big:not-helpful:
+Surprise: c-big at T=4 is essentially sequential. body_agg=292s,
+wall=280s → 1.04× speedup. 74% of worker capacity is rayon-idle.
+The parallel multifrontal driver buys c-big nothing; work funnels
+through a thin critical path of big supernodes near the root.
+
+This recasts the value proposition of the parallel driver: it helps
+cont-201/bratu3d (where the etree has breadth) but does not help
+c-big. To accelerate c-big the only remaining axis is
+within-supernode parallelism (panel-BK or threaded dense kernels),
+which is what MUMPS's threaded BLAS + SPRAL's panel scheduler
+provide.
+
+* 15:32 :parallel:workspace-lock:uncontended:
+=ws_lock_wait_ns= shows the per-worker workspace mutex wait is
+≤2.5 ms across all matrices, worst case 0.02 ms/worker (c-big).
+=thread_ws[thread_idx]= design is empirically uncontended.
+
+* 15:35 :parallel:investigation-closed:
+Closing the cont-201 assembly-tree-parallelism investigation. The
+1.5× cached-mode headroom is etree-topology-bound — no scheduler
+change inside the assembly tree can recover it. Within-supernode
+parallelism is the next axis if pursued.

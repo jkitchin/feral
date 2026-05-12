@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-12T17:31:34Z
+Generated: 2026-05-12T19:16:28Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,17 +59,17 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+adbe2f1 diag(parallel): falsify lock-contention hypothesis on cont-201
 055cf07 session(2026-05-12-01): perf checkpoint — parallel default + alloc churn
 13c1410 perf(issue-7): default Solver to parallel driver + slash multifrontal alloc churn
 2bfc3b4 research(issue-5): close on feral side; document MUMPS+MA57 strategy
 cc8a45b research(issue-5): empirical sweeps invalidate Option B as the fix
-c002bec test(issue-5): regression test for MSS1 BK 1×1/2×2 wandering inertia
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test dense::schur_kernel::tests::schur_panel_minus_nofma_strided_is_bit_exact_vs_rank1_reference ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::test_symbolic_factorize_kkt ... ok
 test numeric::factorize::tests::schur_multi_supernode_tail_matches_oracle ... ok
 test scaling::tests::auto_falls_back_to_infnorm_on_mss1_0009 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok

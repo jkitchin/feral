@@ -138,3 +138,102 @@ C. **etree-depth schedule.** cont-201 has etree depth 28 and 11121
 This is a permanent diagnostic surface, gated behind the
 `parallel_telemetry` field. The test stays `#[ignore]`'d to keep
 `cargo test` quick.
+
+---
+
+## Iteration 2 (2026-05-12, same session): within-scope localization
+
+Added two more atomic counters to localize the 14.2 ms cached-mode
+gap between `body_per_T` and `scope` on cont-201:
+
+- `task_wall_ns` — bracket of the entire `scope.spawn(...)` closure
+  body (includes locks + factor_body + per-task control flow). Lets
+  us compute `rayon_idle = scope · T − task_wall_agg`, the time the
+  rayon pool spent with workers waiting for an eligible task (i.e.
+  parallelism unavailable due to etree dependencies, not engineering
+  loss).
+- `ws_lock_wait_ns` — wait time on the per-worker
+  `Mutex<FactorWorkspace>`. Expected near zero (one slot per
+  worker); confirms the per-worker workspace design.
+
+### Data (T=4, cached-symbolic, ms)
+
+| matrix    | scope | scope·T capacity | task_wall_agg | rayon_idle | idle % | in_task_locks | ctrl_flow | ws_wait |
+| --------- | ----: | ---------------: | ------------: | ---------: | -----: | ------------: | --------: | ------: |
+| bcsstk38  |   7.6 |             30.6 |          14.7 |       15.9 |    52% |          0.20 |      0.39 |   0.013 |
+| bratu3d   |   648 |             2591 |          1017 |       1574 |    61% |          2.26 |      2.45 |   0.110 |
+| c-big     | 279432 |          1117728 |        292151 |     825577 |    74% |         76.13 |     68.32 |   2.506 |
+| cont-201  |  48.6 |            194.5 |         145.3 |       49.2 |    25% |          6.73 |      5.98 |   0.231 |
+
+Definitions:
+
+- `rayon_idle = scope · T − task_wall_agg` — aggregate worker-idle
+  time inside the rayon::scope. Bound on parallelism that the
+  current etree-ordered ready-queue cannot fill.
+- `in_task_locks_agg = contrib_wait + contrib_hold + nf_wait + nf_hold + ws_wait`
+- `ctrl_flow_agg = task_wall_agg − body_agg − in_task_locks` — per-task
+  closure overhead (n_tasks bump, fast-exit check, snode lookup,
+  pending decrement, recursive spawn call).
+
+### Findings
+
+**1. cont-201's residual headroom is etree-topology bound.** Of the
+14.2 ms cached-mode gap between body_per_T (30.9 ms) and scope
+(45.1 ms in iter 1 / 48.6 ms in iter 2), the breakdown at T=4 is:
+
+- rayon_idle: 49.2 / 4 = **12.3 ms/worker** (dep-chain wait)
+- in_task_locks: 6.73 / 4 = 1.68 ms/worker
+- ctrl_flow: 5.98 / 4 = 1.50 ms/worker
+
+The dominant share (~78%) is rayon idle, i.e. workers genuinely have
+no eligible task. cont-201's etree has depth 28 and 11121 supernodes,
+so near the root the dependency chain has insufficient breadth to
+keep 4 workers busy. **A topological-level scheduler will not fix
+this** — rayon's work-stealing already drains the ready-queue
+greedily. The missing parallelism isn't there.
+
+To recover this 12 ms/worker, the only axis available is
+**within-supernode parallelism** (panel-BK or threaded dense kernels
+inside `factor_one_supernode`), which is what MUMPS' threaded BLAS
++ SPRAL's panel scheduler give them.
+
+**2. c-big is essentially sequential at T=4.** Of the four matrices,
+c-big shows the parallel driver buying a 1.04× speedup at T=4
+(body_agg 292s vs wall 280s). 74% of worker capacity is rayon idle.
+This is consistent with c-big's structure funneling almost all the
+work through a thin critical path of large supernodes near the root.
+Critical-path analysis (not yet run on c-big) would confirm.
+
+Same conclusion as (1) applies: the parallelism deficit cannot be
+recovered by changing the inter-task scheduler. It needs
+within-supernode parallelism. Until then, **c-big is not a profitable
+target for assembly-tree parallelism**.
+
+**3. Per-worker workspace mutex is confirmed uncontended.** Worst
+case is c-big at 2.5 ms across 117898 tasks over 4 workers (= 0.02
+ms/worker). Validates the `thread_ws[thread_idx]` design.
+
+**4. Small matrices (bcsstk38) waste worker capacity on idle.**
+52% rayon idle on bcsstk38 reflects the etree running out of breadth
+quickly. Combined with iter 1's 6.6 ms non_loop floor, this argues
+for `N_PAR_MIN`-style gating to fall back to sequential below a
+size threshold — already in place (parallel driver self-gates).
+
+### Conclusions
+
+The investigation that started as "cont-201 30% of ceiling" has
+walked through:
+
+- **iter 0** (prior session): critical-path analysis → 1.44× of
+  4.83× theoretical at T=8 → "must be lock contention or task
+  spawn overhead"
+- **iter 1** (this session): mutex telemetry + phase breakdown →
+  lock contention is rounding error; "cold gap" was symbolic
+  factorize; **cached cont-201 wall 56 ms is the production
+  number**, with 1.5× residual headroom in the scope.
+- **iter 2** (this session): within-scope localization → the 1.5×
+  is rayon idle, not locks/control-flow. Etree topology bound.
+  Within-supernode parallelism is the only remaining axis.
+
+This closes the cont-201 assembly-tree-parallelism investigation.
+Reopen only if a within-supernode parallelism prototype is built.

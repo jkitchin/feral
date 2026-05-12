@@ -2670,3 +2670,47 @@ matrix mixes without re-instrumenting.
 **References.** `src/numeric/factorize.rs::AtomicLockStats`,
 `src/numeric/factorize.rs::run_parallel_task`,
 `src/numeric/solver.rs::tests::solver_parallel_lock_breakdown`.
+
+## 2026-05-12 (b) — Defer within-supernode parallelism; close cont-201 assembly-tree investigation
+
+**Decision.** Close the cont-201 assembly-tree parallelism
+investigation as **etree-topology-bound**. Do not pursue
+topological-level schedulers, alternative ready-queue
+structures, or other assembly-tree-level tuning. The remaining
+1.5× cached-mode headroom on cont-201 (T=4) cannot be recovered
+by changing the rayon scheduling pattern.
+
+**Empirical basis.** Within-scope localization (iteration 2 of
+the cont-201 investigation, added `task_wall_ns` +
+`ws_lock_wait_ns` to `AtomicLockStats`):
+
+- cont-201 cached at T=4: scope·T capacity = 194.5 ms,
+  task_wall_agg = 145.3 ms, rayon_idle = 49.2 ms = **25% of
+  capacity = 12.3 ms/worker**. Locks contribute 1.7 ms/T,
+  ctrl-flow 1.5 ms/T. The dominant residual is workers waiting
+  for the next eligible task — etree dependencies, not
+  engineering loss.
+
+- c-big at T=4: 74% rayon-idle capacity; parallel driver buys
+  only 1.04× speedup over body_agg. Confirms the same bound
+  on a much larger matrix.
+
+**Next axis if needed.** Within-supernode parallelism (panel-BK
+or threaded dense kernels inside `factor_one_supernode`), which
+is what MUMPS' threaded BLAS + SPRAL's panel scheduler provide.
+This is a substantial undertaking — Phase 2.4.3
+(`mul_f64s` + `sub_f64s` to restore bit-exact rounding in the
+Schur kernel SIMD path) must complete first per
+`dev/decisions.md` 2026-04-14 before any further dense-kernel
+parallelism work. Track as a separate effort.
+
+**Diagnostic surface kept.** All 16 atomics in `AtomicLockStats`
+stay in tree (opt-in, default None, zero cost). The
+`solver_parallel_lock_breakdown` test is the canonical way to
+re-check this decision at other thread counts or matrix mixes.
+
+**References.** `dev/debugging/2026-05-12-cont201-cached-headroom.md`
+(iteration 2), `src/numeric/factorize.rs::AtomicLockStats`,
+`src/numeric/solver.rs::tests::solver_parallel_lock_breakdown`,
+`dev/decisions.md` 2026-04-14 (SIMD/FMA blocker on
+within-supernode kernel parallelism).

@@ -93,6 +93,21 @@ the offending triplet by index and `(row, col)`. Reported by @janosh.
   not at lock sites. Full analysis in
   `dev/debugging/2026-05-12-cont201-cached-headroom.md`.
 
+- Parallel driver within-scope localization (iteration 2) —
+  rayon idle dominates. Added `task_wall_ns` (whole-closure
+  bracket) and `ws_lock_wait_ns` (per-worker workspace mutex
+  wait) to `AtomicLockStats`. Derived `rayon_idle = scope·T −
+  task_wall_agg` quantifies the parallelism deficit attributable
+  to etree dependencies. cont-201 cached: rayon_idle = 12.3 ms/T
+  (78% of the gap) vs locks 1.7 ms/T (10%) and ctrl-flow 1.5
+  ms/T (10%). c-big at T=4 is essentially sequential (74%
+  rayon-idle capacity, 1.04× speedup vs body_agg). Conclusion:
+  **assembly-tree parallelism is exhausted** on these matrices;
+  within-supernode parallelism (panel-BK / threaded dense
+  kernels) is the only remaining axis. Closes the cont-201
+  assembly-tree investigation. See iteration 2 in
+  `dev/debugging/2026-05-12-cont201-cached-headroom.md`.
+
 - Issue #5 (MSS1 BK inertia non-monotone under δ_w·I): triage
   complete, closed on the feral side. Landed a reproducer test
   + zero_tol/pivot_threshold sweep diagnostics in

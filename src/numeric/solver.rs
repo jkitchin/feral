@@ -1272,6 +1272,12 @@ mod tests {
                 stats
                     .factor_body_ns
                     .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .task_wall_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                stats
+                    .ws_lock_wait_ns
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
                 stats.n_tasks.store(0, std::sync::atomic::Ordering::Relaxed);
                 stats
                     .phase_scaling_ns
@@ -1360,6 +1366,45 @@ mod tests {
                 phase_sum,
                 non_loop,
                 if wall_ms > 0.0 { scope / wall_ms } else { 0.0 },
+            );
+
+            // Within-scope breakdown: where does the rayon::scope
+            // wall time go? `scope` is the wall time of the
+            // rayon::scope on the calling thread. We measure
+            // `task_wall_agg`, the aggregate wall time of the
+            // `scope.spawn` closure body across all tasks (includes
+            // lock waits + factor_body + per-task control flow). The
+            // gap `scope * T - task_wall_agg` is rayon idle (a
+            // worker has no eligible task and is waiting), which
+            // upper-bounds the parallelism deficit attributable to
+            // the etree topology + scheduler. Within each task,
+            // `task_wall_per_t - body_per_t - (contrib + nf + ws)`
+            // is the per-task control-flow floor.
+            let task_wall_agg = snap.task_wall_ns as f64 / 1e6;
+            let task_wall_per_t = task_wall_agg / (n_threads as f64);
+            let ws_wait = snap.ws_lock_wait_ns as f64 / 1e6;
+            let scope_capacity = scope * (n_threads as f64);
+            let rayon_idle = (scope_capacity - task_wall_agg).max(0.0);
+            let in_task_locks = (snap.contrib_wait_ns
+                + snap.contrib_hold_ns
+                + snap.node_factors_wait_ns
+                + snap.node_factors_hold_ns
+                + snap.ws_lock_wait_ns) as f64
+                / 1e6;
+            let ctrl_flow_agg = (task_wall_agg - body_ms_agg - in_task_locks).max(0.0);
+            eprintln!(
+                "    within-scope: task_wall_agg={:.2} ms  task_wall/T={:.2} ms  ws_wait_agg={:.3} ms  in_task_locks_agg={:.2} ms  ctrl_flow_agg={:.2} ms  rayon_idle (scope·T − task_wall)={:.2} ms ({:.0}% of capacity)",
+                task_wall_agg,
+                task_wall_per_t,
+                ws_wait,
+                in_task_locks,
+                ctrl_flow_agg,
+                rayon_idle,
+                if scope_capacity > 0.0 {
+                    100.0 * rayon_idle / scope_capacity
+                } else {
+                    0.0
+                },
             );
         }
         eprintln!();
