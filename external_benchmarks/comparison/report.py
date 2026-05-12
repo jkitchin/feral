@@ -311,6 +311,26 @@ def render(records) -> str:
             narrative.append("")
         if narrative:
             lines.extend(narrative)
+            lines.append("**Caveats on the HEART6 numbers.**")
+            lines.append("")
+            lines.append("- *Synthetic vs original RHS.* The bench RHS is")
+            lines.append("  `b = A · x_true` with `x_true[i] = 1 + i/n`, which")
+            lines.append("  is a consistent system — the easy case for iterative")
+            lines.append("  refinement. The original pounce failure used IPM step")
+            lines.append("  RHSes (computed from the optimization residual and")
+            lines.append("  not guaranteed consistent with the factorization's")
+            lines.append("  working precision). Those original RHSes are on disk")
+            lines.append("  at `data/matrices/kkt/HEART6_pounce_diag/heart6_iter_*_rhs.mtx`;")
+            lines.append("  replaying them is the stronger correctness test and")
+            lines.append("  is a follow-up the bench harness doesn't yet automate.")
+            lines.append("- *COND1 discrepancy.* MUMPS COND1 ≈ 3e13 on iter_b")
+            lines.append("  while the pounce report quoted cond ≈ 4e24 from a")
+            lines.append("  hand estimate. MUMPS's COND1 is a componentwise")
+            lines.append("  estimate from `RINFOG(10)` (Arioli/Demmel/Duff");
+            lines.append("  1989); the pounce number was a normwise hand")
+            lines.append("  estimate. Different estimators, both confirm the")
+            lines.append("  same qualitative point: the matrix is hard.")
+            lines.append("")
     lines.append("")
 
     # --- 6. Inertia agreement ---

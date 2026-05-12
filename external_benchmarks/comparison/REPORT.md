@@ -107,6 +107,26 @@ The pounce report observed feral residual ≈ 1e11 on iter_a, **silent wrong-ine
 
 **MSS1 (issue #5).** Triage subject for the BK 1×1/2×2 inertia-monotonicity investigation. MUMPS `fail`s on this matrix (`INFOG(1) = -9`, insufficient symbolic-phase integer workspace — a known MUMPS-side limitation that doesn't reflect the matrix's analytic conditioning). feral and MA97 both succeed with inertia 89+74+0 and residuals 2.6e-16 / 8.7e-16 respectively. Feral is strictly more robust than MUMPS here.
 
+**Caveats on the HEART6 numbers.**
+
+- *Synthetic vs original RHS.* The bench RHS is
+  `b = A · x_true` with `x_true[i] = 1 + i/n`, which
+  is a consistent system — the easy case for iterative
+  refinement. The original pounce failure used IPM step
+  RHSes (computed from the optimization residual and
+  not guaranteed consistent with the factorization's
+  working precision). Those original RHSes are on disk
+  at `data/matrices/kkt/HEART6_pounce_diag/heart6_iter_*_rhs.mtx`;
+  replaying them is the stronger correctness test and
+  is a follow-up the bench harness doesn't yet automate.
+- *COND1 discrepancy.* MUMPS COND1 ≈ 3e13 on iter_b
+  while the pounce report quoted cond ≈ 4e24 from a
+  hand estimate. MUMPS's COND1 is a componentwise
+  estimate from `RINFOG(10)` (Arioli/Demmel/Duff
+  1989); the pounce number was a normwise hand
+  estimate. Different estimators, both confirm the
+  same qualitative point: the matrix is hard.
+
 
 ## Inertia agreement
 
