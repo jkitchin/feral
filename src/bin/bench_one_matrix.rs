@@ -83,7 +83,11 @@ fn solve_one(mtx_path: &str, rhs_path: &str, out_path: &str) -> std::io::Result<
         Ok(m) => m,
         Err(e) => {
             writeln!(out, "status fail")?;
-            writeln!(out, "fail_reason read_mtx_{}", format!("{:?}", e).replace(' ', "_"))?;
+            writeln!(
+                out,
+                "fail_reason read_mtx_{}",
+                format!("{:?}", e).replace(' ', "_")
+            )?;
             return Ok(());
         }
     };
@@ -91,7 +95,11 @@ fn solve_one(mtx_path: &str, rhs_path: &str, out_path: &str) -> std::io::Result<
         Ok(c) => c,
         Err(e) => {
             writeln!(out, "status fail")?;
-            writeln!(out, "fail_reason to_csc_{}", format!("{:?}", e).replace(' ', "_"))?;
+            writeln!(
+                out,
+                "fail_reason to_csc_{}",
+                format!("{:?}", e).replace(' ', "_")
+            )?;
             return Ok(());
         }
     };
@@ -103,7 +111,11 @@ fn solve_one(mtx_path: &str, rhs_path: &str, out_path: &str) -> std::io::Result<
         Ok(b) => b,
         Err(e) => {
             writeln!(out, "status fail")?;
-            writeln!(out, "fail_reason rhs_{}", format!("{}", e).replace(' ', "_"))?;
+            writeln!(
+                out,
+                "fail_reason rhs_{}",
+                format!("{}", e).replace(' ', "_")
+            )?;
             return Ok(());
         }
     };
@@ -114,7 +126,11 @@ fn solve_one(mtx_path: &str, rhs_path: &str, out_path: &str) -> std::io::Result<
         Ok(s) => s,
         Err(e) => {
             writeln!(out, "status fail")?;
-            writeln!(out, "fail_reason symbolic_{}", format!("{:?}", e).replace(' ', "_"))?;
+            writeln!(
+                out,
+                "fail_reason symbolic_{}",
+                format!("{:?}", e).replace(' ', "_")
+            )?;
             return Ok(());
         }
     };
@@ -127,14 +143,17 @@ fn solve_one(mtx_path: &str, rhs_path: &str, out_path: &str) -> std::io::Result<
     let params = NumericParams::default();
     let mut ws = FactorWorkspace::new();
     let t0 = Instant::now();
-    let factor_res =
-        factorize_multifrontal_parallel_with_workspace(&csc, &sym, &params, &mut ws);
+    let factor_res = factorize_multifrontal_parallel_with_workspace(&csc, &sym, &params, &mut ws);
     let factor_us = t0.elapsed().as_micros() as u64;
     let (factors, inertia) = match factor_res {
         Ok(pair) => pair,
         Err(e) => {
             writeln!(out, "status fail")?;
-            writeln!(out, "fail_reason factor_{}", format!("{:?}", e).replace(' ', "_"))?;
+            writeln!(
+                out,
+                "fail_reason factor_{}",
+                format!("{:?}", e).replace(' ', "_")
+            )?;
             writeln!(out, "analyse_us {}", analyse_us)?;
             return Ok(());
         }
@@ -150,7 +169,11 @@ fn solve_one(mtx_path: &str, rhs_path: &str, out_path: &str) -> std::io::Result<
         Ok(x) => x,
         Err(e) => {
             writeln!(out, "status fail")?;
-            writeln!(out, "fail_reason solve_{}", format!("{:?}", e).replace(' ', "_"))?;
+            writeln!(
+                out,
+                "fail_reason solve_{}",
+                format!("{:?}", e).replace(' ', "_")
+            )?;
             writeln!(out, "analyse_us {}", analyse_us)?;
             writeln!(out, "factor_us {}", factor_us)?;
             return Ok(());
