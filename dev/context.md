@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-09T19:36:09Z
+Generated: 2026-05-12T16:37:31Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,27 +59,27 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
-5e1d814 fix(symbolic): Auto resolves against original matrix and delegates to pick_default_method (#3)
-0b2099a fix(symbolic): honest resolved_method when ScotchND degenerates to amd_leaf (#3)
-c7f7364 test(scotch): KKT-shape regression test for issue #3 bisection-degenerate fallback
-da28ff9 session: 2026-05-09-01 checkpoint -- issue #4 fix
-98aa3d5 fix: reject upper-triangle triplets in CscMatrix::from_triplets (#4)
+2bfc3b4 research(issue-5): close on feral side; document MUMPS+MA57 strategy
+cc8a45b research(issue-5): empirical sweeps invalidate Option B as the fix
+c002bec test(issue-5): regression test for MSS1 BK 1×1/2×2 wandering inertia
+4075640 release: 0.1.0 housekeeping — CHANGELOG stamp, sub-crate READMEs, clippy clean
+4b93719 release: prepare crates.io 0.1.0 metadata for feral + 6 ordering crates
 ```
 
 ## Test Status
 ```
-test symbolic::tests::test_symbolic_factorize_basic ... ok
-test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::test_symbolic_factorize_dense ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test dense::schur_kernel::tests::schur_panel_minus_nofma_strided_is_bit_exact_vs_rank1_reference ... ok
 test dense::schur_kernel::tests::schur_panel_minus_nofma_strided_dual_is_bit_exact_vs_two_singles ... ok
 test numeric::factorize::tests::schur_multi_supernode_tail_matches_oracle ... ok
+test scaling::tests::auto_falls_back_to_infnorm_on_mss1_0009 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
-test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 
-test result: ok. 212 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+test result: ok. 214 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.28s
 
    Doc-tests feral
 

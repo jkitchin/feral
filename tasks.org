@@ -56,7 +56,14 @@
     slow? Decides whether the lever is "widen the gate" or
     "attack the remaining multifrontal overhead".
 
+* DONE create detailed crucibles for ordering strategies
+CLOSED: [2026-05-05 Tue 08:12] DEADLINE: <2026-04-27 Mon>
 
+- [X] AMD
+- [X] METIS
+- [X] SCOTCH
+
+and others. I think we might try to build standalone rust libraries for each of these, so we can use them later. These will be highly focused efforts on just the ordering, with dedicated efforts to testing.
 * TODO follow-up: evaluate Mongoose (SuiteSparse edge separator + AMD hybrid)
   - User request 2026-04-18-03.
   - SuiteSparse Mongoose is an edge-separator-driven hybrid ordering that
