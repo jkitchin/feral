@@ -113,6 +113,13 @@ C     RINFOG(11) (COND2). Used by feral's F2.2 cross-validation.
 C     ICNTL(11)=2 is cheaper but leaves RINFOG(9..11) unset, so it
 C     would not satisfy the cross-validation oracle.
       MP%ICNTL(11) = 1
+C     ICNTL(10) > 0: max number of steps of iterative refinement.
+C     MUMPS default is 0 (no refinement). The bench harness sets it
+C     to 2, matching the feral driver which uses
+C     `solve_sparse_refined` (Richardson iteration with a similar
+C     step budget). This makes the cross-solver accuracy comparison
+C     fair — every solver is configured to refine.
+      MP%ICNTL(10) = 2
 
       CALL SYSTEM_CLOCK(COUNT_RATE=CLOCK_RATE, COUNT_MAX=CLOCK_MAX)
 

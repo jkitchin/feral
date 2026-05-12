@@ -1,0 +1,3340 @@
+[
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "BT2",
+      "id": "BT2_0006",
+      "n": 4,
+      "nnz": 9,
+      "density": 0.9
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 96,
+        "factor_us": 10,
+        "solve_us": 1,
+        "rel_res": 3.7984418089541897e-16,
+        "inertia": [
+          3,
+          1,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 544,
+        "solve_us": 823,
+        "rel_res": 4.910197738305756e-16,
+        "rinfog6": 3.811012092590217e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          3,
+          1,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 830,
+        "factor_us": 4869,
+        "solve_us": 43,
+        "rel_res": 1.0048909717220249e-16,
+        "inertia": [
+          3,
+          1,
+          0
+        ],
+        "nnz_l": "10"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "HS17",
+      "id": "HS17_0006",
+      "n": 4,
+      "nnz": 9,
+      "density": 0.9
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 7,
+        "factor_us": 1,
+        "solve_us": 0,
+        "rel_res": 1.4723478296570512e-17,
+        "inertia": [
+          2,
+          2,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 21,
+        "solve_us": 19,
+        "rel_res": 3.292269833637447e-17,
+        "rinfog6": 5.111457889415873e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          2,
+          2,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 18,
+        "factor_us": 38,
+        "solve_us": 7,
+        "rel_res": 5.3650620789162305e-17,
+        "inertia": [
+          2,
+          2,
+          0
+        ],
+        "nnz_l": "10"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "PALMER4NE",
+      "id": "PALMER4NE_0009",
+      "n": 4,
+      "nnz": 10,
+      "density": 1.0
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 8,
+        "factor_us": 1,
+        "solve_us": 0,
+        "rel_res": 3.665771077397191e-16,
+        "inertia": [
+          4,
+          0,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 19,
+        "solve_us": 14,
+        "rel_res": 2.8455153612392167e-16,
+        "rinfog6": 1.6936320031037268e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          4,
+          0,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 12,
+        "factor_us": 11,
+        "solve_us": 3,
+        "rel_res": 1.422671695762425e-16,
+        "inertia": [
+          4,
+          0,
+          0
+        ],
+        "nnz_l": "10"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "OSBORNE1",
+      "id": "OSBORNE1_0041",
+      "n": 5,
+      "nnz": 15,
+      "density": 1.0
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 6,
+        "factor_us": 2,
+        "solve_us": 0,
+        "rel_res": 2.781358323488287e-16,
+        "inertia": [
+          5,
+          0,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 21,
+        "solve_us": 16,
+        "rel_res": 2.781356997234237e-16,
+        "rinfog6": 9.233766897046641e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          5,
+          0,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 17,
+        "factor_us": 13,
+        "solve_us": 3,
+        "rel_res": 1.1140631922021178e-16,
+        "inertia": [
+          5,
+          0,
+          0
+        ],
+        "nnz_l": "15"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "LANCZOS1",
+      "id": "LANCZOS1_0029",
+      "n": 6,
+      "nnz": 21,
+      "density": 1.0
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 8,
+        "factor_us": 1,
+        "solve_us": 0,
+        "rel_res": 1.0726010812772999e-16,
+        "inertia": [
+          6,
+          0,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 21,
+        "solve_us": 14,
+        "rel_res": 7.111688838938834e-17,
+        "rinfog6": 6.872341751611694e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          6,
+          0,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 11,
+        "factor_us": 13,
+        "solve_us": 3,
+        "rel_res": 1.3637867653206545e-16,
+        "inertia": [
+          6,
+          0,
+          0
+        ],
+        "nnz_l": "21"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "POLAK4",
+      "id": "POLAK4_0066",
+      "n": 6,
+      "nnz": 18,
+      "density": 0.8571428571428571
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 10,
+        "factor_us": 1,
+        "solve_us": 0,
+        "rel_res": 1.3741021445989724e-16,
+        "inertia": [
+          3,
+          3,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 17,
+        "solve_us": 16,
+        "rel_res": 1.1044523428572655e-16,
+        "rinfog6": 1.9880160103328605e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          3,
+          3,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 20,
+        "factor_us": 950,
+        "solve_us": 8,
+        "rel_res": 5.62873222899492e-17,
+        "inertia": [
+          3,
+          3,
+          0
+        ],
+        "nnz_l": "21"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "CERI651B",
+      "id": "CERI651B_0978",
+      "n": 7,
+      "nnz": 28,
+      "density": 1.0
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 7,
+        "factor_us": 2,
+        "solve_us": 0,
+        "rel_res": 2.471364308232578e-16,
+        "inertia": [
+          7,
+          0,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 16,
+        "solve_us": 14,
+        "rel_res": 4.0260936576213214e-16,
+        "rinfog6": 1.7614875226548099e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          7,
+          0,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 21,
+        "factor_us": 11,
+        "solve_us": 4,
+        "rel_res": 1.2918283923904625e-16,
+        "inertia": [
+          7,
+          0,
+          0
+        ],
+        "nnz_l": "28"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "HS43",
+      "id": "HS43_0004",
+      "n": 7,
+      "nnz": 19,
+      "density": 0.6785714285714286
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 10,
+        "factor_us": 1,
+        "solve_us": 0,
+        "rel_res": 3.8869036726856023e-16,
+        "inertia": [
+          4,
+          3,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 16,
+        "solve_us": 16,
+        "rel_res": 7.161177048833447e-17,
+        "rinfog6": 4.529822433420634e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          4,
+          3,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 17,
+        "factor_us": 9,
+        "solve_us": 9,
+        "rel_res": 4.90846337299283e-16,
+        "inertia": [
+          4,
+          3,
+          0
+        ],
+        "nnz_l": "28"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "HS76I",
+      "id": "HS76I_0005",
+      "n": 7,
+      "nnz": 19,
+      "density": 0.6785714285714286
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 9,
+        "factor_us": 1,
+        "solve_us": 0,
+        "rel_res": 1.7933372672660165e-16,
+        "inertia": [
+          4,
+          3,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 16,
+        "solve_us": 14,
+        "rel_res": 1.8482402365207448e-16,
+        "rinfog6": 1.7211729122222398e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          4,
+          3,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 10,
+        "factor_us": 8,
+        "solve_us": 10,
+        "rel_res": 1.6190940770140093e-16,
+        "inertia": [
+          4,
+          3,
+          0
+        ],
+        "nnz_l": "28"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "VESUVIA",
+      "id": "VESUVIA_0040",
+      "n": 8,
+      "nnz": 36,
+      "density": 1.0
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 8,
+        "factor_us": 2,
+        "solve_us": 0,
+        "rel_res": 1.5300995163750357e-17,
+        "inertia": [
+          8,
+          0,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 17,
+        "solve_us": 15,
+        "rel_res": 2.475976948512469e-16,
+        "rinfog6": 1.0126690537734005e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          8,
+          0,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 14,
+        "factor_us": 19,
+        "solve_us": 4,
+        "rel_res": 2.415425382720125e-16,
+        "inertia": [
+          8,
+          0,
+          0
+        ],
+        "nnz_l": "36"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "VESUVIO",
+      "id": "VESUVIO_0043",
+      "n": 8,
+      "nnz": 36,
+      "density": 1.0
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 5,
+        "factor_us": 3,
+        "solve_us": 0,
+        "rel_res": 7.043210054461137e-17,
+        "inertia": [
+          8,
+          0,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 13,
+        "solve_us": 12,
+        "rel_res": 1.538479583969015e-16,
+        "rinfog6": 8.380707160294973e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          8,
+          0,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 16,
+        "factor_us": 19,
+        "solve_us": 3,
+        "rel_res": 2.7753229880198586e-16,
+        "inertia": [
+          8,
+          0,
+          0
+        ],
+        "nnz_l": "36"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "OSBORNEB",
+      "id": "OSBORNEB_0008",
+      "n": 11,
+      "nnz": 66,
+      "density": 1.0
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 11,
+        "factor_us": 2,
+        "solve_us": 0,
+        "rel_res": 5.879406766439491e-16,
+        "inertia": [
+          11,
+          0,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 18,
+        "solve_us": 16,
+        "rel_res": 1.304025476785835e-16,
+        "rinfog6": 3.255705836515603e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          11,
+          0,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 17,
+        "factor_us": 11,
+        "solve_us": 66,
+        "rel_res": 5.241150086534019e-16,
+        "inertia": [
+          11,
+          0,
+          0
+        ],
+        "nnz_l": "66"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "3PK",
+      "id": "3PK_0005",
+      "n": 30,
+      "nnz": 230,
+      "density": 0.4946236559139785
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 53,
+        "factor_us": 14,
+        "solve_us": 1,
+        "rel_res": 1.468523528120927e-16,
+        "inertia": [
+          30,
+          0,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 87,
+        "solve_us": 30,
+        "rel_res": 2.342786082883933e-16,
+        "rinfog6": 1.2930377164196786e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          30,
+          0,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 39,
+        "factor_us": 207,
+        "solve_us": 10,
+        "rel_res": 1.1059325157336522e-16,
+        "inertia": [
+          30,
+          0,
+          0
+        ],
+        "nnz_l": "332"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "METHANB8LS",
+      "id": "METHANB8LS_0004",
+      "n": 31,
+      "nnz": 256,
+      "density": 0.5161290322580645
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 21,
+        "factor_us": 17,
+        "solve_us": 1,
+        "rel_res": 5.09897423374208e-16,
+        "inertia": [
+          31,
+          0,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 48,
+        "solve_us": 35,
+        "rel_res": 5.28307228140494e-16,
+        "rinfog6": 6.178318583665633e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          31,
+          0,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 25,
+        "factor_us": 26,
+        "solve_us": 10,
+        "rel_res": 8.481557157996915e-16,
+        "inertia": [
+          31,
+          0,
+          0
+        ],
+        "nnz_l": "304"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "DECONVB",
+      "id": "DECONVB_0039",
+      "n": 51,
+      "nnz": 891,
+      "density": 0.6719457013574661
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 59,
+        "factor_us": 21,
+        "solve_us": 3,
+        "rel_res": 3.706255586511564e-16,
+        "inertia": [
+          51,
+          0,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 65,
+        "solve_us": 32,
+        "rel_res": 2.3728613449815495e-16,
+        "rinfog6": 8.023867733555624e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          51,
+          0,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 57,
+        "factor_us": 28,
+        "solve_us": 5,
+        "rel_res": 3.00400905273712e-16,
+        "inertia": [
+          51,
+          0,
+          0
+        ],
+        "nnz_l": "990"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "HIMMELBJ",
+      "id": "HIMMELBJ_0023",
+      "n": 57,
+      "nnz": 358,
+      "density": 0.21657592256503327
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 66,
+        "factor_us": 45,
+        "solve_us": 3,
+        "rel_res": 5.903283296186803e-17,
+        "inertia": [
+          43,
+          14,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 76,
+        "solve_us": 32,
+        "rel_res": 5.810631275954077e-17,
+        "rinfog6": 8.404856022456269e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          43,
+          14,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 44,
+        "factor_us": 32,
+        "solve_us": 6,
+        "rel_res": 1.2635128526440849e-16,
+        "inertia": [
+          43,
+          14,
+          0
+        ],
+        "nnz_l": "785"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "DMN37142",
+      "id": "DMN37142_0122",
+      "n": 66,
+      "nnz": 2211,
+      "density": 1.0
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 93,
+        "factor_us": 58,
+        "solve_us": 5,
+        "rel_res": 5.427643183219082e-16,
+        "inertia": [
+          66,
+          0,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 89,
+        "solve_us": 40,
+        "rel_res": 5.567400481990535e-16,
+        "rinfog6": 5.3187237248541317e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          66,
+          0,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 87,
+        "factor_us": 96,
+        "solve_us": 6,
+        "rel_res": 3.0744747741819257e-16,
+        "inertia": [
+          66,
+          0,
+          0
+        ],
+        "nnz_l": "2211"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "DISCS",
+      "id": "DISCS_0320",
+      "n": 102,
+      "nnz": 496,
+      "density": 0.09442223491338284
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 91,
+        "factor_us": 583,
+        "solve_us": 12,
+        "rel_res": 1.2326631274817912e-16,
+        "inertia": [
+          36,
+          66,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 127,
+        "solve_us": 43,
+        "rel_res": 4.9852031429327385e-14,
+        "rinfog6": 5.5168352274693585e-14,
+        "rinfog11": 1.0,
+        "inertia": [
+          36,
+          66,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 42,
+        "factor_us": 60,
+        "solve_us": 15,
+        "rel_res": 1.0250519688511739e-16,
+        "inertia": [
+          36,
+          66,
+          0
+        ],
+        "nnz_l": "2288"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "ACOPP14",
+      "id": "ACOPP14_0010",
+      "n": 106,
+      "nnz": 586,
+      "density": 0.10333274554752249
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 95,
+        "factor_us": 230,
+        "solve_us": 6,
+        "rel_res": 1.6164034246470366e-16,
+        "inertia": [
+          38,
+          68,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 105,
+        "solve_us": 54,
+        "rel_res": 1.7542094240353417e-16,
+        "rinfog6": 3.9190280977348284e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          38,
+          68,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 63,
+        "factor_us": 49,
+        "solve_us": 8,
+        "rel_res": 2.0555034061073963e-16,
+        "inertia": [
+          38,
+          68,
+          0
+        ],
+        "nnz_l": "1239"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "SPANHYD",
+      "id": "SPANHYD_0291",
+      "n": 114,
+      "nnz": 561,
+      "density": 0.08558352402745996
+    },
+    "solvers": {
+      "feral": {
+        "status": "fail",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 107,
+        "fail_reason": "factor_InvalidInput(\"matrix_contains_NaN_or_Inf_at_index_(0,0)\")"
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 93,
+        "solve_us": 46,
+        "rinfog6": 0.0,
+        "inertia": [
+          0,
+          0,
+          114
+        ],
+        "infog1": "2"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 70,
+        "factor_us": 30,
+        "solve_us": 28,
+        "inertia": [
+          2,
+          30,
+          82
+        ],
+        "nnz_l": "1505"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "AIRPORT",
+      "id": "AIRPORT_0214",
+      "n": 126,
+      "nnz": 1932,
+      "density": 0.24146981627296588
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 157,
+        "factor_us": 317,
+        "solve_us": 20,
+        "rel_res": 3.1768497090567e-16,
+        "inertia": [
+          84,
+          42,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 140,
+        "solve_us": 52,
+        "rel_res": 1.3850500119402033e-15,
+        "rinfog6": 3.2158812645430664e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          84,
+          42,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 94,
+        "factor_us": 78,
+        "solve_us": 10,
+        "rel_res": 7.500348799410863e-16,
+        "inertia": [
+          84,
+          42,
+          0
+        ],
+        "nnz_l": "5669"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "QPCBLEND",
+      "id": "QPCBLEND_0210",
+      "n": 157,
+      "nnz": 648,
+      "density": 0.052245424494074016
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 208,
+        "factor_us": 165,
+        "solve_us": 17,
+        "rel_res": 1.621869086270938e-16,
+        "inertia": [
+          83,
+          74,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 127,
+        "solve_us": 59,
+        "rel_res": 2.1224356523092702e-15,
+        "rinfog6": 2.8915412832487053e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          83,
+          74,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 99,
+        "factor_us": 67,
+        "solve_us": 13,
+        "rel_res": 4.1384785838634247e-16,
+        "inertia": [
+          83,
+          74,
+          0
+        ],
+        "nnz_l": "2157"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "MSS1",
+      "id": "MSS1_0165",
+      "n": 163,
+      "nnz": 2521,
+      "density": 0.18861289839892265
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 241,
+        "factor_us": 223,
+        "solve_us": 30,
+        "rel_res": 2.551147963321684e-16,
+        "inertia": [
+          89,
+          74,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "fail",
+        "solver_version": "mumps-5.8.2"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 164,
+        "factor_us": 170,
+        "solve_us": 15,
+        "rel_res": 8.733562403397582e-16,
+        "inertia": [
+          89,
+          74,
+          0
+        ],
+        "nnz_l": "10330"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "HYDCAR20",
+      "id": "HYDCAR20_0110",
+      "n": 198,
+      "nnz": 1071,
+      "density": 0.054362722704431245
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 212,
+        "factor_us": 186,
+        "solve_us": 11,
+        "rel_res": 4.724573931165707e-16,
+        "inertia": [
+          99,
+          99,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 182,
+        "solve_us": 63,
+        "rel_res": 4.204244115982295e-16,
+        "rinfog6": 8.642492542354091e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          99,
+          99,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 100,
+        "factor_us": 100,
+        "solve_us": 24,
+        "rel_res": 1.7486540906628235e-16,
+        "inertia": [
+          99,
+          99,
+          0
+        ],
+        "nnz_l": "3325"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "GROUPING",
+      "id": "GROUPING_0190",
+      "n": 225,
+      "nnz": 1475,
+      "density": 0.05801376597836775
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 356,
+        "factor_us": 352,
+        "solve_us": 24,
+        "rel_res": 1.881610901693037e-16,
+        "inertia": [
+          100,
+          125,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 157,
+        "solve_us": 87,
+        "rel_res": 8.75330618956805e-15,
+        "rinfog6": 6.026529165531037e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          100,
+          125,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 205,
+        "factor_us": 337,
+        "solve_us": 60,
+        "rel_res": 5.845961676231115e-17,
+        "inertia": [
+          100,
+          125,
+          0
+        ],
+        "nnz_l": "5602"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "CORE1",
+      "id": "CORE1_0250",
+      "n": 242,
+      "nnz": 516,
+      "density": 0.017549229670441792
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 186,
+        "factor_us": 291,
+        "solve_us": 14,
+        "rel_res": 9.398996153513088e-17,
+        "inertia": [
+          183,
+          59,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 103,
+        "solve_us": 70,
+        "rel_res": 1.4011118075216165e-14,
+        "rinfog6": 1.8145668792013412e-14,
+        "rinfog11": 1.0,
+        "inertia": [
+          183,
+          59,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 64,
+        "factor_us": 76,
+        "solve_us": 23,
+        "rel_res": 7.349797384765938e-17,
+        "inertia": [
+          183,
+          59,
+          0
+        ],
+        "nnz_l": "1756"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "HAIFAM",
+      "id": "HAIFAM_0370",
+      "n": 249,
+      "nnz": 1303,
+      "density": 0.04186345381526104
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 330,
+        "factor_us": 309,
+        "solve_us": 13,
+        "rel_res": 9.686663893039554e-17,
+        "inertia": [
+          99,
+          150,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 218,
+        "solve_us": 90,
+        "rel_res": 3.0509885384884144e-16,
+        "rinfog6": 2.298173538107196e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          99,
+          150,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 141,
+        "factor_us": 60,
+        "solve_us": 15,
+        "rel_res": 2.0234766980899022e-16,
+        "inertia": [
+          99,
+          150,
+          0
+        ],
+        "nnz_l": "3762"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "LHAIFAM",
+      "id": "LHAIFAM_0410",
+      "n": 249,
+      "nnz": 960,
+      "density": 0.030843373493975902
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 313,
+        "factor_us": 286,
+        "solve_us": 12,
+        "rel_res": 4.747297201518707e-16,
+        "inertia": [
+          99,
+          150,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "fail",
+        "solver_version": "mumps-5.8.2"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 114,
+        "factor_us": 66,
+        "solve_us": 14,
+        "rel_res": 6.305888813666367e-16,
+        "inertia": [
+          99,
+          150,
+          0
+        ],
+        "nnz_l": "3642"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "ACOPR14",
+      "id": "ACOPR14_0250",
+      "n": 284,
+      "nnz": 953,
+      "density": 0.02354830738818878
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 215,
+        "factor_us": 365,
+        "solve_us": 13,
+        "rel_res": 3.915189974772984e-16,
+        "inertia": [
+          202,
+          82,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 157,
+        "solve_us": 98,
+        "rel_res": 5.154577271376807e-15,
+        "rinfog6": 6.118405454015373e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          202,
+          82,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 89,
+        "factor_us": 69,
+        "solve_us": 24,
+        "rel_res": 1.3782188743035418e-16,
+        "inertia": [
+          202,
+          82,
+          0
+        ],
+        "nnz_l": "2667"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "CRESC50",
+      "id": "CRESC50_0250",
+      "n": 306,
+      "nnz": 1067,
+      "density": 0.022716144003746993
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 184,
+        "factor_us": 244,
+        "solve_us": 21,
+        "rel_res": 1.0893828947441224e-16,
+        "inertia": [
+          206,
+          100,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 139,
+        "solve_us": 105,
+        "rel_res": 1.4937036255734164e-15,
+        "rinfog6": 7.942494627316798e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          206,
+          100,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 66,
+        "factor_us": 52,
+        "solve_us": 29,
+        "rel_res": 8.933081896040654e-17,
+        "inertia": [
+          206,
+          100,
+          0
+        ],
+        "nnz_l": "2309"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "NELSON",
+      "id": "NELSON_0250",
+      "n": 387,
+      "nnz": 1027,
+      "density": 0.013679107061988865
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 233,
+        "factor_us": 361,
+        "solve_us": 10,
+        "rel_res": 1.86887272224348e-16,
+        "inertia": [
+          259,
+          128,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 109,
+        "solve_us": 105,
+        "rel_res": 6.451054703186054e-16,
+        "rinfog6": 3.5992965927700723e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          259,
+          128,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 57,
+        "factor_us": 72,
+        "solve_us": 24,
+        "rel_res": 3.870141395598354e-17,
+        "inertia": [
+          259,
+          128,
+          0
+        ],
+        "nnz_l": "1953"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "BENNETT5",
+      "id": "BENNETT5_0128",
+      "n": 465,
+      "nnz": 1238,
+      "density": 0.011426461765656006
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 283,
+        "factor_us": 362,
+        "solve_us": 22,
+        "rel_res": 1.2433232903478909e-15,
+        "inertia": [
+          311,
+          154,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "fail",
+        "solver_version": "mumps-5.8.2"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 61,
+        "factor_us": 85,
+        "solve_us": 43,
+        "rel_res": 5.314585501318857e-16,
+        "inertia": [
+          311,
+          154,
+          0
+        ],
+        "nnz_l": "2343"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "KOEBHELBNE",
+      "id": "KOEBHELBNE_0250",
+      "n": 471,
+      "nnz": 1248,
+      "density": 0.011227464104501782
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 233,
+        "factor_us": 334,
+        "solve_us": 13,
+        "rel_res": 4.514994569713624e-15,
+        "inertia": [
+          315,
+          156,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 174,
+        "solve_us": 259,
+        "rel_res": 1.6612761009754173e-16,
+        "rinfog6": 2.447378788188299e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          315,
+          156,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 58,
+        "factor_us": 52,
+        "solve_us": 29,
+        "rel_res": 7.01517956896976e-17,
+        "inertia": [
+          315,
+          156,
+          0
+        ],
+        "nnz_l": "2364"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "qcqp500-3c",
+      "id": "qcqp500-3c_0003",
+      "n": 620,
+      "nnz": 130891,
+      "density": 0.6799179263414887
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 4937,
+        "factor_us": 6776,
+        "solve_us": 384,
+        "rel_res": 1.6820968024253377e-16,
+        "inertia": [
+          500,
+          120,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 5277,
+        "solve_us": 1062,
+        "rel_res": 1.2796364868335057e-16,
+        "rinfog6": 2.638861201068903e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          500,
+          120,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 8992,
+        "factor_us": 33178,
+        "solve_us": 859,
+        "rel_res": 1.029737306181859e-16,
+        "inertia": [
+          500,
+          120,
+          0
+        ],
+        "nnz_l": "133118"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "CHWIRUT1",
+      "id": "CHWIRUT1_0195",
+      "n": 645,
+      "nnz": 1718,
+      "density": 0.008246334029327765
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 287,
+        "factor_us": 452,
+        "solve_us": 19,
+        "rel_res": 9.469948788686109e-16,
+        "inertia": [
+          431,
+          214,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 276,
+        "solve_us": 356,
+        "rel_res": 1.456927106325419e-15,
+        "rinfog6": 5.1050221508080585e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          431,
+          214,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 216,
+        "factor_us": 186,
+        "solve_us": 92,
+        "rel_res": 4.709765113932616e-17,
+        "inertia": [
+          431,
+          214,
+          0
+        ],
+        "nnz_l": "3252"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "GAUSS2",
+      "id": "GAUSS2_0018",
+      "n": 758,
+      "nnz": 3265,
+      "density": 0.011350165646368468
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 343,
+        "factor_us": 527,
+        "solve_us": 30,
+        "rel_res": 1.6366980337650559e-16,
+        "inertia": [
+          508,
+          250,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 293,
+        "solve_us": 234,
+        "rel_res": 1.675441740767897e-16,
+        "rinfog6": 1.5755714189048013e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          508,
+          250,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 317,
+        "factor_us": 343,
+        "solve_us": 63,
+        "rel_res": 1.2685991295612248e-16,
+        "inertia": [
+          508,
+          250,
+          0
+        ],
+        "nnz_l": "7663"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "qcqp750-2c",
+      "id": "qcqp750-2c_0000",
+      "n": 888,
+      "nnz": 281604,
+      "density": 0.7134344693399811
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 12555,
+        "factor_us": 19524,
+        "solve_us": 895,
+        "rel_res": 1.6765072944418612e-16,
+        "inertia": [
+          750,
+          138,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 11122,
+        "solve_us": 2103,
+        "rel_res": 1.708443263815129e-16,
+        "rinfog6": 3.792937118660471e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          750,
+          138,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 11100,
+        "factor_us": 172085,
+        "solve_us": 1585,
+        "rel_res": 1.9113767111232855e-16,
+        "inertia": [
+          750,
+          138,
+          0
+        ],
+        "nnz_l": "289481"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "qcqp1000-1nc",
+      "id": "qcqp1000-1nc_0043",
+      "n": 1154,
+      "nnz": 11868,
+      "density": 0.017808188345450043
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 2529,
+        "factor_us": 9388,
+        "solve_us": 346,
+        "rel_res": 8.900669311325849e-17,
+        "inertia": [
+          1000,
+          154,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 9653,
+        "solve_us": 1002,
+        "rel_res": 1.2148885632507775e-16,
+        "rinfog6": 3.47706235801358e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          1000,
+          154,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 8012,
+        "factor_us": 56092,
+        "solve_us": 456,
+        "rel_res": 2.0513492262482809e-16,
+        "inertia": [
+          1000,
+          154,
+          0
+        ],
+        "nnz_l": "271483"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "elec_400",
+      "id": "elec_400_0006",
+      "n": 1600,
+      "nnz": 722200,
+      "density": 0.5638663335415366
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 37120,
+        "factor_us": 80725,
+        "solve_us": 4927,
+        "rel_res": 1.6321795280919093e-15,
+        "inertia": [
+          1200,
+          400,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 29925,
+        "solve_us": 5600,
+        "rel_res": 3.2142569916890765e-14,
+        "rinfog6": 1.0400707238006545e-13,
+        "rinfog11": 1.0,
+        "inertia": [
+          1200,
+          400,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 23961,
+        "factor_us": 106381,
+        "solve_us": 8306,
+        "rel_res": 3.98763254146619e-16,
+        "inertia": [
+          1200,
+          400,
+          0
+        ],
+        "nnz_l": "726994"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "VESUVIOU",
+      "id": "VESUVIOU_0028",
+      "n": 3083,
+      "nnz": 12813,
+      "density": 0.002695211975803042
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 1971,
+        "factor_us": 1311,
+        "solve_us": 119,
+        "rel_res": 8.950651279163614e-17,
+        "inertia": [
+          2058,
+          1025,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 2506,
+        "solve_us": 1870,
+        "rel_res": 8.058275069552166e-18,
+        "rinfog6": 6.353529177826199e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          2058,
+          1025,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 598,
+        "factor_us": 517,
+        "solve_us": 84,
+        "rel_res": 1.4654912356507007e-16,
+        "inertia": [
+          2058,
+          1025,
+          0
+        ],
+        "nnz_l": "29340"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "arki0003",
+      "id": "arki0003_0033",
+      "n": 4010,
+      "nnz": 15359,
+      "density": 0.0019098352348995375
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 9158,
+        "factor_us": 1061,
+        "solve_us": 146,
+        "rel_res": 9.195728427654727e-17,
+        "inertia": [
+          1872,
+          2138,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 1402,
+        "solve_us": 959,
+        "rel_res": 1.1373636595268596e-16,
+        "rinfog6": 2.8933906326535305e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          1872,
+          2138,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 958,
+        "factor_us": 472,
+        "solve_us": 135,
+        "rel_res": 9.221191939752307e-17,
+        "inertia": [
+          1872,
+          2138,
+          0
+        ],
+        "nnz_l": "52195"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "CRESC132",
+      "id": "CRESC132_0003",
+      "n": 5314,
+      "nnz": 22576,
+      "density": 0.001598645513315968
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 14937,
+        "factor_us": 3320,
+        "solve_us": 175,
+        "rel_res": 1.4389726600539894e-16,
+        "inertia": [
+          2660,
+          2654,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 11382,
+        "solve_us": 4066,
+        "rel_res": 4.606709586052134e-17,
+        "rinfog6": 2.691494842427238e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          2660,
+          2654,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 1094,
+        "factor_us": 2086,
+        "solve_us": 222,
+        "rel_res": 2.6484865842047574e-16,
+        "inertia": [
+          2660,
+          2654,
+          0
+        ],
+        "nnz_l": "37233"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "qcqp1000-2c",
+      "id": "qcqp1000-2c_0010",
+      "n": 6107,
+      "nnz": 210614,
+      "density": 0.011292504795242322
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 37687,
+        "factor_us": 41756,
+        "solve_us": 1671,
+        "rel_res": 2.5086578686919545e-16,
+        "inertia": [
+          1000,
+          5107,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 72975,
+        "solve_us": 10645,
+        "rel_res": 2.1979916100455135e-16,
+        "rinfog6": 3.519882874699003e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          1000,
+          5107,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 15827,
+        "factor_us": 142405,
+        "solve_us": 2027,
+        "rel_res": 1.7677708179840774e-16,
+        "inertia": [
+          1000,
+          5107,
+          0
+        ],
+        "nnz_l": "640288"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "ex8_2_2",
+      "id": "ex8_2_2_0054",
+      "n": 9453,
+      "nnz": 32089,
+      "density": 0.0007181264501867556
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 13145,
+        "factor_us": 2995,
+        "solve_us": 223,
+        "rel_res": 6.19432003482075e-17,
+        "inertia": [
+          7510,
+          1943,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 7029,
+        "solve_us": 3295,
+        "rel_res": 7.999444476733348e-17,
+        "rinfog6": 2.4628674248778745e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          7510,
+          1943,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 1605,
+        "factor_us": 758,
+        "solve_us": 235,
+        "rel_res": 1.1948810557329245e-16,
+        "inertia": [
+          7510,
+          1943,
+          0
+        ],
+        "nnz_l": "66121"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "dtoc1nd",
+      "id": "dtoc1nd_0010",
+      "n": 9685,
+      "nnz": 217270,
+      "density": 0.004632182593316562
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 9962,
+        "factor_us": 8789,
+        "solve_us": 1050,
+        "rel_res": 7.539694402162535e-16,
+        "inertia": [
+          5960,
+          3725,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 11726,
+        "solve_us": 4696,
+        "rel_res": 2.7692456487349016e-15,
+        "rinfog6": 9.480146579447641e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          5960,
+          3725,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 7270,
+        "factor_us": 5944,
+        "solve_us": 3841,
+        "rel_res": 4.901673804195929e-17,
+        "inertia": [
+          5960,
+          3725,
+          0
+        ],
+        "nnz_l": "366311"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "qcqp1000-2nc",
+      "id": "qcqp1000-2nc_0006",
+      "n": 11214,
+      "nnz": 209574,
+      "density": 0.003332787076469043
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 89060,
+        "factor_us": 207819,
+        "solve_us": 3277,
+        "rel_res": 7.33329241303355e-17,
+        "inertia": [
+          6107,
+          5107,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 193035,
+        "solve_us": 11857,
+        "rel_res": 1.3769680804622768e-16,
+        "rinfog6": 4.6521459668337266e-17,
+        "rinfog11": 1.0,
+        "inertia": [
+          6107,
+          5107,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 16683,
+        "factor_us": 176239,
+        "solve_us": 2283,
+        "rel_res": 9.256352998726786e-17,
+        "inertia": [
+          6107,
+          5107,
+          0
+        ],
+        "nnz_l": "732257"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "qcqp1500-1nc",
+      "id": "qcqp1500-1nc_0000",
+      "n": 12008,
+      "nnz": 191476,
+      "density": 0.0026556254250573452
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 132293,
+        "factor_us": 792081,
+        "solve_us": 13268,
+        "rel_res": 2.02405550951435e-16,
+        "inertia": [
+          1500,
+          10508,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "fail",
+        "solver_version": "mumps-5.8.2"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 42436,
+        "factor_us": 347368,
+        "solve_us": 24946,
+        "rel_res": 6.744809473139285e-17,
+        "inertia": [
+          1500,
+          10508,
+          0
+        ],
+        "nnz_l": "1406751"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "arki0009",
+      "id": "arki0009_0033",
+      "n": 12144,
+      "nnz": 37147,
+      "density": 0.000503726111419383
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 32835,
+        "factor_us": 5136,
+        "solve_us": 721,
+        "rel_res": 1.3184885284031777e-16,
+        "inertia": [
+          6220,
+          5924,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 48816,
+        "solve_us": 6446,
+        "rel_res": 1.4194851755508716e-16,
+        "rinfog6": 4.0962463732424267e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          6220,
+          5924,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 5441,
+        "factor_us": 19663,
+        "solve_us": 1509,
+        "rel_res": 1.7594300449612048e-16,
+        "inertia": [
+          6220,
+          5924,
+          0
+        ],
+        "nnz_l": "373458"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "robot_a",
+      "id": "robot_a_0001",
+      "n": 53008,
+      "nnz": 252774,
+      "density": 0.00017991665437536798
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 193339,
+        "factor_us": 55584,
+        "solve_us": 2978,
+        "rel_res": 1.488397745590588e-16,
+        "inertia": [
+          1001,
+          52007,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 207231,
+        "solve_us": 62563,
+        "rel_res": 1.45139282046304e-16,
+        "rinfog6": 2.6895682436970015e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          1001,
+          52007,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 23264,
+        "factor_us": 10307,
+        "solve_us": 3792,
+        "rel_res": 1.652721551128494e-16,
+        "inertia": [
+          1001,
+          52007,
+          0
+        ],
+        "nnz_l": "273756"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "robot_c",
+      "id": "robot_c_0000",
+      "n": 53014,
+      "nnz": 248794,
+      "density": 0.00017704373321568654
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 277490,
+        "factor_us": 55138,
+        "solve_us": 5546,
+        "rel_res": 4.1849902582943047e-16,
+        "inertia": [
+          1001,
+          52013,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 205386,
+        "solve_us": 102313,
+        "rel_res": 1.5807022559666565e-12,
+        "rinfog6": 3.1608505441467524e-13,
+        "rinfog11": 1.0,
+        "inertia": [
+          1001,
+          52013,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 22392,
+        "factor_us": 9870,
+        "solve_us": 6674,
+        "rel_res": 3.580140452566548e-16,
+        "inertia": [
+          1001,
+          52013,
+          0
+        ],
+        "nnz_l": "273774"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "dirichlet120",
+      "id": "dirichlet120_0003",
+      "n": 54122,
+      "nnz": 422193,
+      "density": 0.00028826062629463777
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 280148,
+        "factor_us": 261543,
+        "solve_us": 28550,
+        "rel_res": 1.5805129913463881e-15,
+        "inertia": [
+          53881,
+          241,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 747148,
+        "solve_us": 67848,
+        "rel_res": 1.266048279020902e-15,
+        "rinfog6": 2.127586892671206e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          53881,
+          241,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 307182,
+        "factor_us": 5386197,
+        "solve_us": 183285,
+        "rel_res": 5.64774169631663e-17,
+        "inertia": [
+          53881,
+          241,
+          0
+        ],
+        "nnz_l": "14640330"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "lane_emden120",
+      "id": "lane_emden120_0003",
+      "n": 57962,
+      "nnz": 396481,
+      "density": 0.00023602508241892285
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 267145,
+        "factor_us": 297145,
+        "solve_us": 28683,
+        "rel_res": 1.7949800931970314e-15,
+        "inertia": [
+          57721,
+          241,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 687983,
+        "solve_us": 43664,
+        "rel_res": 1.1691260703872838e-15,
+        "rinfog6": 3.913690938863208e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          57721,
+          241,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 307825,
+        "factor_us": 6288776,
+        "solve_us": 212588,
+        "rel_res": 8.771561385967581e-17,
+        "inertia": [
+          57721,
+          241,
+          0
+        ],
+        "nnz_l": "11746468"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "gasoil_3200",
+      "id": "gasoil_3200_0007",
+      "n": 63999,
+      "nnz": 425766,
+      "density": 0.00020789680307504806
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 12240322,
+        "factor_us": 11970,
+        "solve_us": 6206,
+        "rel_res": 1.1199182691669434e-14,
+        "inertia": [
+          32001,
+          31998,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 2412392,
+        "solve_us": 14572,
+        "rel_res": 2.309969341915191e-15,
+        "rinfog6": 9.384227239371634e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          32001,
+          31998,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 16833,
+        "factor_us": 6151357,
+        "solve_us": 9471,
+        "rel_res": 5.5921359831738e-16,
+        "inertia": [
+          32001,
+          31998,
+          0
+        ],
+        "nnz_l": "939245"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "ex4_2_160",
+      "id": "ex4_2_160_0009",
+      "n": 77115,
+      "nnz": 255354,
+      "density": 8.587945967595744e-05
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 172354,
+        "factor_us": 42149,
+        "solve_us": 8062,
+        "rel_res": 3.2297718623488803e-16,
+        "inertia": [
+          51198,
+          25917,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 281206,
+        "solve_us": 34919,
+        "rel_res": 3.6765267450346056e-16,
+        "rinfog6": 2.5725339894677817e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          51198,
+          25917,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 16288,
+        "factor_us": 672178,
+        "solve_us": 72563,
+        "rel_res": 1.461063865667602e-16,
+        "inertia": [
+          51198,
+          25917,
+          0
+        ],
+        "nnz_l": "3154508"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "NARX_CFy",
+      "id": "NARX_CFy_0001",
+      "n": 92229,
+      "nnz": 400808,
+      "density": 9.423813192846362e-05
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 294380,
+        "factor_us": 79545,
+        "solve_us": 5740,
+        "rel_res": 1.967595246798768e-16,
+        "inertia": [
+          43973,
+          48256,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 465435,
+        "solve_us": 61802,
+        "rel_res": 1.4324365070860392e-16,
+        "rinfog6": 2.9490330836172076e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          43973,
+          48256,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 24115,
+        "factor_us": 447311,
+        "solve_us": 20247,
+        "rel_res": 2.201358028920472e-16,
+        "inertia": [
+          43973,
+          48256,
+          0
+        ],
+        "nnz_l": "2090887"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "dtoc2",
+      "id": "dtoc2_0001",
+      "n": 103920,
+      "nnz": 992230,
+      "density": 0.00018375530847331408
+    },
+    "solvers": {
+      "feral": {
+        "status": "fail",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 601108,
+        "fail_reason": "factor_InvalidInput(\"matrix_contains_NaN_or_Inf_at_index_(0,0)\")"
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 589964,
+        "solve_us": 43754,
+        "rinfog6": 0.0,
+        "inertia": [
+          64641,
+          38854,
+          425
+        ],
+        "infog1": "2"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 429451,
+        "factor_us": 48293,
+        "solve_us": 55001,
+        "inertia": [
+          64924,
+          38920,
+          76
+        ],
+        "nnz_l": "4934361"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "optmass",
+      "id": "optmass_0007",
+      "n": 110011,
+      "nnz": 260020,
+      "density": 4.296952739039047e-05
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 164351,
+        "factor_us": 46944,
+        "solve_us": 4240,
+        "rel_res": 1.2301478919685593e-16,
+        "inertia": [
+          60006,
+          50005,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 231532,
+        "solve_us": 26270,
+        "rel_res": 1.3565368734393415e-16,
+        "rinfog6": 3.050680123192637e-16,
+        "rinfog11": 1.0,
+        "inertia": [
+          60006,
+          50005,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 137093,
+        "factor_us": 13527,
+        "solve_us": 5021,
+        "rel_res": 1.3241316210603092e-16,
+        "inertia": [
+          60006,
+          50005,
+          0
+        ],
+        "nnz_l": "1091787"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "pinene_3200",
+      "id": "pinene_3200_0005",
+      "n": 127995,
+      "nnz": 732976,
+      "density": 8.948090089161432e-05
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 1111251,
+        "factor_us": 27271,
+        "solve_us": 18405,
+        "rel_res": 1.2131768174007027e-14,
+        "inertia": [
+          64000,
+          63995,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 1874009,
+        "solve_us": 33653,
+        "rel_res": 4.314512043307511e-09,
+        "rinfog6": 9.373186038568355e-10,
+        "rinfog11": 1.0,
+        "inertia": [
+          64000,
+          63995,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 277133,
+        "factor_us": 109547,
+        "solve_us": 41371,
+        "rel_res": 8.154282522232726e-15,
+        "inertia": [
+          64000,
+          63995,
+          0
+        ],
+        "nnz_l": "2911204"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "cont5_1_l",
+      "id": "cont5_1_l_0002",
+      "n": 180900,
+      "nnz": 720303,
+      "density": 4.4021585961693884e-05
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 445439,
+        "factor_us": 121574,
+        "solve_us": 29947,
+        "rel_res": 7.003268452759202e-16,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 549072,
+        "solve_us": 77447,
+        "rel_res": 9.737447153679059e-16,
+        "rinfog6": 4.481569028873393e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 530511,
+        "factor_us": 1897600,
+        "solve_us": 258752,
+        "rel_res": 4.684095540920823e-17,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ],
+        "nnz_l": "9632787"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "cont5_2_1_l",
+      "id": "cont5_2_1_l_0002",
+      "n": 180900,
+      "nnz": 720303,
+      "density": 4.4021585961693884e-05
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 443787,
+        "factor_us": 102797,
+        "solve_us": 27897,
+        "rel_res": 6.922781343712955e-16,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 550616,
+        "solve_us": 76006,
+        "rel_res": 9.805827237531477e-16,
+        "rinfog6": 4.369243379210889e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 539158,
+        "factor_us": 2127032,
+        "solve_us": 54897,
+        "rel_res": 7.318826368850336e-16,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ],
+        "nnz_l": "9610817"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "cont5_2_2_l",
+      "id": "cont5_2_2_l_0002",
+      "n": 180900,
+      "nnz": 720303,
+      "density": 4.4021585961693884e-05
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 439692,
+        "factor_us": 116932,
+        "solve_us": 29428,
+        "rel_res": 7.1077953591616e-16,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 527519,
+        "solve_us": 76590,
+        "rel_res": 9.780926732863436e-16,
+        "rinfog6": 5.386083348849962e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 544389,
+        "factor_us": 1868366,
+        "solve_us": 100693,
+        "rel_res": 9.53836291970607e-16,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ],
+        "nnz_l": "9632787"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "cont5_2_3_l",
+      "id": "cont5_2_3_l_0002",
+      "n": 180900,
+      "nnz": 720303,
+      "density": 4.4021585961693884e-05
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 439489,
+        "factor_us": 120187,
+        "solve_us": 29095,
+        "rel_res": 7.118621283686465e-16,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 529821,
+        "solve_us": 76219,
+        "rel_res": 9.758575743243449e-16,
+        "rinfog6": 5.386083348856419e-15,
+        "rinfog11": 1.0,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 545993,
+        "factor_us": 1685993,
+        "solve_us": 117001,
+        "rel_res": 9.520238610009364e-16,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ],
+        "nnz_l": "9632787"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "mittelmann",
+      "family": "nql180",
+      "id": "nql180_0003",
+      "n": 259681,
+      "nnz": 939300,
+      "density": 2.785815149502963e-05
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 3760897,
+        "factor_us": 275751,
+        "solve_us": 41056,
+        "rel_res": 1.0805853099543573e-14,
+        "inertia": [
+          129601,
+          130080,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 792802,
+        "solve_us": 113876,
+        "rel_res": 5.215947152210827e-15,
+        "rinfog6": 3.2671179332939063e-13,
+        "rinfog11": 1.0,
+        "inertia": [
+          129601,
+          130080,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 827689,
+        "factor_us": 2962168,
+        "solve_us": 129693,
+        "rel_res": 9.238552005871561e-16,
+        "inertia": [
+          129601,
+          130080,
+          0
+        ],
+        "nnz_l": "9688655"
+      }
+    }
+  }
+]
