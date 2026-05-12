@@ -1,0 +1,84 @@
+name: Release
+on:
+  release:
+    types: [published]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.release.tag_name }}"
+          want="${tag#v}"
+          got=$(grep -E '^version\s*=' Cargo.toml | head -1 \
+                | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$want" != "$got" ]; then
+            echo "Tag '$tag' (version $want) does not match Cargo.toml version $got"
+            exit 1
+          fi
+          echo "Tag and Cargo.toml version both at $got"
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo publish (dependency order)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Publish each crate in dependency order. `feral` depends on
+          # the six ordering crates; feral-amd/amf/metis/scotch/kahip
+          # all depend on feral-ordering-core.
+          #
+          # crates.io indexing is eventually consistent: after a
+          # successful publish, the next crate's resolver may still
+          # see the old index for a few seconds. We retry up to 5
+          # times with 20s between attempts; that's enough on a
+          # cold cache and idempotent on a warm one (re-publishing
+          # an existing version errors, which we treat as success).
+          publish_one() {
+            local crate="$1"
+            local attempt=1
+            while [ $attempt -le 5 ]; do
+              echo "::group::publish $crate (attempt $attempt)"
+              if cargo publish -p "$crate" 2>&1 | tee /tmp/publish.log; then
+                echo "::endgroup::"
+                return 0
+              fi
+              # If the version is already published, treat as success
+              # so re-runs of the workflow are idempotent.
+              if grep -q "already exists on crates.io index" /tmp/publish.log \
+                || grep -q "crate version .* is already uploaded" /tmp/publish.log; then
+                echo "$crate already published at this version; treating as success"
+                echo "::endgroup::"
+                return 0
+              fi
+              echo "::endgroup::"
+              echo "publish $crate attempt $attempt failed; sleeping 20s"
+              sleep 20
+              attempt=$((attempt+1))
+            done
+            echo "publish $crate failed after 5 attempts"
+            return 1
+          }
+
+          publish_one feral-ordering-core
+          publish_one feral-amd
+          publish_one feral-amf
+          publish_one feral-metis
+          publish_one feral-scotch
+          publish_one feral-kahip
+          publish_one feral
