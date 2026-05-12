@@ -1,6 +1,6 @@
 # FERAL vs MUMPS vs HSL MA97 — KKT solver comparison
 
-Total matrices: **63**, drawn from the FERAL CUTEst
+Total matrices: **66**, drawn from the FERAL CUTEst
 KKT corpus and Mittelmann large-scale KKT corpus.
 Sampling spans 5 size buckets and 63 distinct CUTEst/Mittelmann
 families. RHS is synthetic: `b = A · x_true` with
@@ -29,7 +29,7 @@ accuracy matters; the bare back-substitution defaults are
 
 | Bucket | Count |
 |---|---:|
-| tiny (n<100) | 17 |
+| tiny (n<100) | 20 |
 | small (100-1k) | 20 |
 | medium (1k-10k) | 8 |
 | large (10k-100k) | 10 |
@@ -39,16 +39,16 @@ accuracy matters; the bare back-substitution defaults are
 
 | Solver | OK | Fail | Missing |
 |---|---:|---:|---:|
-| feral | 61 | 2 | 0 |
-| mumps | 59 | 4 | 0 |
-| ma97 | 63 | 0 | 0 |
+| feral | 64 | 2 | 0 |
+| mumps | 62 | 4 | 0 |
+| ma97 | 66 | 0 | 0 |
 
 ## Factor time by size bucket (geomean μs)
 
 | Bucket | n range |  feral |  MUMPS |  MA97  | feral/MUMPS | feral/MA97 |
 |---|---|---:|---:|---:|---:|---:|
-| tiny (n<100) | 4–66 | 4 | 32 | 37 | 0.12× | 0.10× |
-| small (100-1k) | 102–888 | 455 | 239 | 168 | 1.90× | 2.71× |
+| tiny (n<100) | 4–66 | 4 | 40 | 49 | 0.10× | 0.08× |
+| small (100-1k) | 102–888 | 456 | 239 | 169 | 1.90× | 2.69× |
 | medium (1k-10k) | 1154–9685 | 6,655 | 9,555 | 6,113 | 0.70× | 1.09× |
 | large (10k-100k) | 11214–92229 | 77,759 | 342,640 | 307,957 | 0.23× | 0.25× |
 | xl (>=100k) | 103920–259681 | 93,399 | 601,558 | 477,336 | 0.16× | 0.20× |
@@ -60,8 +60,8 @@ accuracy matters; the bare back-substitution defaults are
 
 | Solver | min | median | p90 | max | # > 1e-8 |
 |---|---:|---:|---:|---:|---:|
-| feral | 1.5e-17 | 2.5e-16 | 1.6e-15 | 1.2e-14 | 0 |
-| mumps | 8.1e-18 | 2.8e-16 | 5.2e-15 | 4.3e-09 | 0 |
+| feral | 1.5e-17 | 2.3e-16 | 1.2e-15 | 1.2e-14 | 0 |
+| mumps | 8.1e-18 | 3.4e-16 | 5.2e-15 | 4.3e-09 | 0 |
 | ma97 | 3.9e-17 | 1.6e-16 | 7.5e-16 | 8.2e-15 | 0 |
 
 ## Behavior on ill-conditioned KKTs
@@ -81,13 +81,13 @@ enough conditioned that all three solvers reach machine ε).
 | cont5_2_1_l/cont5_2_1_l_0002 | 180,900 | 1.7e+14 | 6.9e-16 / 90600+90300+0 | 9.8e-16 / 90600+90300+0 | 7.3e-16 / 90600+90300+0 |
 | cont5_2_2_l/cont5_2_2_l_0002 | 180,900 | 1.7e+14 | 7.1e-16 / 90600+90300+0 | 9.8e-16 / 90600+90300+0 | 9.5e-16 / 90600+90300+0 |
 | cont5_2_3_l/cont5_2_3_l_0002 | 180,900 | 1.7e+14 | 7.1e-16 / 90600+90300+0 | 9.8e-16 / 90600+90300+0 | 9.5e-16 / 90600+90300+0 |
+| HEART6_pounce_diag/heart6_iter_b | 12 | 2.8e+13 | 1.4e-16 / 4+8+0 | 6.9e-16 / 4+8+0 | 7.7e-16 / 4+8+0 |
+| HEART6_pounce_diag/heart6_iter_a | 12 | 9.5e+11 | 2.3e-16 / 6+6+0 | 4.0e-15 / 6+6+0 | 6.9e-17 / 6+6+0 |
 | cont5_1_l/cont5_1_l_0002 | 180,900 | 9.3e+11 | 7.0e-16 / 90600+90300+0 | 9.7e-16 / 90600+90300+0 | 4.7e-17 / 90600+90300+0 |
 | qcqp1000-1nc/qcqp1000-1nc_0043 | 1,154 | 6.3e+11 | 8.9e-17 / 1000+154+0 | 1.2e-16 / 1000+154+0 | 2.1e-16 / 1000+154+0 |
 | ex4_2_160/ex4_2_160_0009 | 77,115 | 3.5e+11 | 3.2e-16 / 51198+25917+0 | 3.7e-16 / 51198+25917+0 | 1.5e-16 / 51198+25917+0 |
 | arki0009/arki0009_0033 | 12,144 | 3.0e+11 | 1.3e-16 / 6220+5924+0 | 1.4e-16 / 6220+5924+0 | 1.8e-16 / 6220+5924+0 |
 | NARX_CFy/NARX_CFy_0001 | 92,229 | 1.5e+11 | 2.0e-16 / 43973+48256+0 | 1.4e-16 / 43973+48256+0 | 2.2e-16 / 43973+48256+0 |
-| dtoc1nd/dtoc1nd_0010 | 9,685 | 5.6e+10 | 7.5e-16 / 5960+3725+0 | 2.8e-15 / 5960+3725+0 | 4.9e-17 / 5960+3725+0 |
-| ex8_2_2/ex8_2_2_0054 | 9,453 | 2.0e+10 | 6.2e-17 / 7510+1943+0 | 8.0e-17 / 7510+1943+0 | 1.2e-16 / 7510+1943+0 |
 
 Interpretation: a residual ≈ ε·COND1 is the best a
 linear solve can theoretically achieve. When COND1 is
@@ -99,9 +99,18 @@ a residual close to the others on the same system.
 Disagreements on inertia for ill-conditioned matrices
 are surfaced in the next section.
 
+**HEART6 (pounce-filed report, 2026-05-10).** Three specific KKT iterations from the CUTEst HEART6 IPM run (`dev/debugging/2026-05-10-pounce-heart6-residual.md`) were filed against feral as silent correctness regressions on ill-conditioned KKTs. With the refinement-on Solver wired in, all three are now unanimous across feral, MUMPS, and MA97:
+- iter_a (cond ≈ 1e12): feral residual 2.3e-16, MUMPS 4.0e-15, MA97 6.9e-17; inertia 6+6+0 on all three.
+- iter_b (cond ≈ 3e13): feral residual 1.4e-16, MUMPS 6.9e-16, MA97 7.7e-16; inertia 4+8+0 on all three.
+- iter_c (cond ≈ 500): feral residual 2.4e-16, MUMPS 5.0e-15, MA97 1.9e-16; inertia 6+6+0 on all three.
+The pounce report observed feral residual ≈ 1e11 on iter_a, **silent wrong-inertia (reported 6 instead of true 8) on iter_b**, and residual ≈ 1e4 on iter_c at a modest cond ≈ 500. The 1.4e-16 residual on iter_b plus the matching 4+/8+/0 inertia is the headline: feral no longer hides the conditioning when refinement is on.
+
+**MSS1 (issue #5).** Triage subject for the BK 1×1/2×2 inertia-monotonicity investigation. MUMPS `fail`s on this matrix (`INFOG(1) = -9`, insufficient symbolic-phase integer workspace — a known MUMPS-side limitation that doesn't reflect the matrix's analytic conditioning). feral and MA97 both succeed with inertia 89+74+0 and residuals 2.6e-16 / 8.7e-16 respectively. Feral is strictly more robust than MUMPS here.
+
+
 ## Inertia agreement
 
-All three solvers report identical inertia on **57** of 63 matrices.
+All three solvers report identical inertia on **60** of 66 matrices.
 
 ## Failures
 
@@ -121,6 +130,7 @@ All three solvers report identical inertia on **57** of 63 matrices.
 | Matrix | n | nnz | feral | MUMPS | MA97 | feral/MUMPS |
 |---|---:|---:|---:|---:|---:|---:|
 | gasoil_3200/gasoil_3200_0007 | 63,999 | 425,766 | 12.0ms | 2.41s | 6.15s | 0.00× |
+| HEART6_pounce_diag/heart6_iter_a | 12 | 58 | 15μs | 2.5ms | 692μs | 0.01× |
 | pinene_3200/pinene_3200_0005 | 127,995 | 732,976 | 27.3ms | 1.87s | 109.5ms | 0.01× |
 | BT2/BT2_0006 | 4 | 9 | 10μs | 544μs | 4.9ms | 0.02× |
 | HS17/HS17_0006 | 4 | 9 | 1μs | 21μs | 38μs | 0.05× |
@@ -129,7 +139,6 @@ All three solvers report identical inertia on **57** of 63 matrices.
 | POLAK4/POLAK4_0066 | 6 | 18 | 1μs | 17μs | 950μs | 0.06× |
 | HS43/HS43_0004 | 7 | 19 | 1μs | 16μs | 9μs | 0.06× |
 | HS76I/HS76I_0005 | 7 | 19 | 1μs | 16μs | 8μs | 0.06× |
-| OSBORNE1/OSBORNE1_0041 | 5 | 15 | 2μs | 21μs | 13μs | 0.10× |
 
 ### Top 10 feral losses vs MUMPS
 
@@ -162,6 +171,9 @@ All three solvers report identical inertia on **57** of 63 matrices.
 | VESUVIA/VESUVIA_0040 | 8 | 36 | 100.0% | 2μs / 1.5e-17 | 17μs / 2.5e-16 | 19μs / 2.4e-16 |
 | VESUVIO/VESUVIO_0043 | 8 | 36 | 100.0% | 3μs / 7.0e-17 | 13μs / 1.5e-16 | 19μs / 2.8e-16 |
 | OSBORNEB/OSBORNEB_0008 | 11 | 66 | 100.0% | 2μs / 5.9e-16 | 18μs / 1.3e-16 | 11μs / 5.2e-16 |
+| HEART6_pounce_diag/heart6_iter_a | 12 | 58 | 74.4% | 15μs / 2.3e-16 | 2.5ms / 4.0e-15 | 692μs / 6.9e-17 |
+| HEART6_pounce_diag/heart6_iter_b | 12 | 58 | 74.4% | 3μs / 1.4e-16 | 40μs / 6.9e-16 | 13μs / 7.7e-16 |
+| HEART6_pounce_diag/heart6_iter_c | 12 | 58 | 74.4% | 4μs / 2.4e-16 | 28μs / 5.0e-15 | 1.3ms / 1.9e-16 |
 | 3PK/3PK_0005 | 30 | 230 | 49.5% | 14μs / 1.5e-16 | 87μs / 2.3e-16 | 207μs / 1.1e-16 |
 | METHANB8LS/METHANB8LS_0004 | 31 | 256 | 51.6% | 17μs / 5.1e-16 | 48μs / 5.3e-16 | 26μs / 8.5e-16 |
 | DECONVB/DECONVB_0039 | 51 | 891 | 67.2% | 21μs / 3.7e-16 | 65μs / 2.4e-16 | 28μs / 3.0e-16 |
@@ -172,7 +184,7 @@ All three solvers report identical inertia on **57** of 63 matrices.
 | SPANHYD/SPANHYD_0291 | 114 | 561 | 8.6% | `fail` | 93μs / — | 30μs / — |
 | AIRPORT/AIRPORT_0214 | 126 | 1,932 | 24.1% | 317μs / 3.2e-16 | 140μs / 1.4e-15 | 78μs / 7.5e-16 |
 | QPCBLEND/QPCBLEND_0210 | 157 | 648 | 5.2% | 165μs / 1.6e-16 | 127μs / 2.1e-15 | 67μs / 4.1e-16 |
-| MSS1/MSS1_0165 | 163 | 2,521 | 18.9% | 223μs / 2.6e-16 | `fail` | 170μs / 8.7e-16 |
+| MSS1/MSS1_0165 | 163 | 2,521 | 18.9% | 228μs / 2.6e-16 | `fail` | 192μs / 8.7e-16 |
 | HYDCAR20/HYDCAR20_0110 | 198 | 1,071 | 5.4% | 186μs / 4.7e-16 | 182μs / 4.2e-16 | 100μs / 1.7e-16 |
 | GROUPING/GROUPING_0190 | 225 | 1,475 | 5.8% | 352μs / 1.9e-16 | 157μs / 8.8e-15 | 337μs / 5.8e-17 |
 | CORE1/CORE1_0250 | 242 | 516 | 1.8% | 291μs / 9.4e-17 | 103μs / 1.4e-14 | 76μs / 7.3e-17 |

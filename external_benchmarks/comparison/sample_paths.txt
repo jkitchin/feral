@@ -61,3 +61,6 @@
 /Users/jkitchin/projects/feral/data/matrices/kkt-mittelmann/cont5_2_2_l/cont5_2_2_l_0002.mtx
 /Users/jkitchin/projects/feral/data/matrices/kkt-mittelmann/cont5_2_3_l/cont5_2_3_l_0002.mtx
 /Users/jkitchin/projects/feral/data/matrices/kkt-mittelmann/nql180/nql180_0003.mtx
+/Users/jkitchin/projects/feral/data/matrices/kkt/HEART6_pounce_diag/heart6_iter_a.mtx
+/Users/jkitchin/projects/feral/data/matrices/kkt/HEART6_pounce_diag/heart6_iter_b.mtx
+/Users/jkitchin/projects/feral/data/matrices/kkt/HEART6_pounce_diag/heart6_iter_c.mtx

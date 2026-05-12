@@ -662,6 +662,171 @@
   {
     "matrix": {
       "corpus": "kkt",
+      "family": "HEART6_pounce_diag",
+      "id": "heart6_iter_a",
+      "n": 12,
+      "nnz": 58,
+      "density": 0.7435897435897436
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 90,
+        "factor_us": 15,
+        "solve_us": 2,
+        "rel_res": 2.258010779376998e-16,
+        "inertia": [
+          6,
+          6,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 2508,
+        "solve_us": 1542,
+        "rel_res": 3.960652836187098e-15,
+        "rinfog6": 2.0157553291970058e-15,
+        "rinfog10": 948697140314.9222,
+        "rinfog11": 1.0,
+        "inertia": [
+          6,
+          6,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 890,
+        "factor_us": 692,
+        "solve_us": 346,
+        "rel_res": 6.901522909830703e-17,
+        "inertia": [
+          6,
+          6,
+          0
+        ],
+        "nnz_l": "78"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "HEART6_pounce_diag",
+      "id": "heart6_iter_b",
+      "n": 12,
+      "nnz": 58,
+      "density": 0.7435897435897436
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 18,
+        "factor_us": 3,
+        "solve_us": 0,
+        "rel_res": 1.3544757159328742e-16,
+        "inertia": [
+          4,
+          8,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 40,
+        "solve_us": 25,
+        "rel_res": 6.864977108314891e-16,
+        "rinfog6": 3.8497178302424353e-16,
+        "rinfog10": 27895122183465.477,
+        "rinfog11": 1.0,
+        "inertia": [
+          4,
+          8,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 12,
+        "factor_us": 13,
+        "solve_us": 3,
+        "rel_res": 7.747519053580292e-16,
+        "inertia": [
+          4,
+          8,
+          0
+        ],
+        "nnz_l": "78"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
+      "family": "HEART6_pounce_diag",
+      "id": "heart6_iter_c",
+      "n": 12,
+      "nnz": 58,
+      "density": 0.7435897435897436
+    },
+    "solvers": {
+      "feral": {
+        "status": "ok",
+        "solver_version": "feral-0.2.0",
+        "analyse_us": 12,
+        "factor_us": 4,
+        "solve_us": 0,
+        "rel_res": 2.412854446299951e-16,
+        "inertia": [
+          6,
+          6,
+          0
+        ]
+      },
+      "mumps": {
+        "status": "ok",
+        "solver_version": "mumps-5.8.2",
+        "factor_us": 28,
+        "solve_us": 17,
+        "rel_res": 5.0429886851915305e-15,
+        "rinfog6": 4.178154774065764e-15,
+        "rinfog10": 498.91650668606576,
+        "rinfog11": 1.0,
+        "inertia": [
+          6,
+          6,
+          0
+        ],
+        "infog1": "0"
+      },
+      "ma97": {
+        "status": "ok",
+        "solver_version": "ma97-2.8.1",
+        "analyse_us": 18,
+        "factor_us": 1317,
+        "solve_us": 14,
+        "rel_res": 1.931607721767754e-16,
+        "inertia": [
+          6,
+          6,
+          0
+        ],
+        "nnz_l": "78"
+      }
+    }
+  },
+  {
+    "matrix": {
+      "corpus": "kkt",
       "family": "3PK",
       "id": "3PK_0005",
       "n": 30,
@@ -1212,9 +1377,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 241,
-        "factor_us": 223,
-        "solve_us": 30,
+        "analyse_us": 272,
+        "factor_us": 228,
+        "solve_us": 36,
         "rel_res": 2.551147963321684e-16,
         "inertia": [
           89,
@@ -1229,9 +1394,9 @@
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 164,
-        "factor_us": 170,
-        "solve_us": 15,
+        "analyse_us": 200,
+        "factor_us": 192,
+        "solve_us": 23,
         "rel_res": 8.733562403397582e-16,
         "inertia": [
           89,

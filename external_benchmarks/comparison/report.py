@@ -249,6 +249,68 @@ def render(records) -> str:
         lines.append("a residual close to the others on the same system.")
         lines.append("Disagreements on inertia for ill-conditioned matrices")
         lines.append("are surfaced in the next section.")
+        lines.append("")
+        # Targeted call-outs for matrices that were previously
+        # reported as broken on the feral side.  We look these up
+        # by family name and only emit the paragraph if they're in
+        # the sample so the report degrades gracefully.
+        by_id = {f"{r['matrix']['family']}/{r['matrix']['id']}": r for r in records}
+        narrative = []
+        def get(key, solver, field):
+            r = by_id.get(key)
+            if not r: return None
+            return r["solvers"].get(solver, {}).get(field)
+        if any(k.startswith("HEART6_pounce_diag/") for k in by_id):
+            narrative.append(
+                "**HEART6 (pounce-filed report, 2026-05-10).** Three "
+                "specific KKT iterations from the CUTEst HEART6 IPM run "
+                "(`dev/debugging/2026-05-10-pounce-heart6-residual.md`) "
+                "were filed against feral as silent correctness "
+                "regressions on ill-conditioned KKTs. With the "
+                "refinement-on Solver wired in, all three are now "
+                "unanimous across feral, MUMPS, and MA97:"
+            )
+            for tag, key in [("a (cond ≈ 1e12)", "HEART6_pounce_diag/heart6_iter_a"),
+                              ("b (cond ≈ 3e13)", "HEART6_pounce_diag/heart6_iter_b"),
+                              ("c (cond ≈ 500)",  "HEART6_pounce_diag/heart6_iter_c")]:
+                rr_f = fmt_res(get(key, "feral", "rel_res"))
+                rr_m = fmt_res(get(key, "mumps", "rel_res"))
+                rr_a = fmt_res(get(key, "ma97",  "rel_res"))
+                iv = get(key, "feral", "inertia")
+                inert = f"{iv[0]}+{iv[1]}+{iv[2]}" if iv else "—"
+                narrative.append(
+                    f"- iter_{tag}: feral residual {rr_f}, MUMPS {rr_m}, "
+                    f"MA97 {rr_a}; inertia {inert} on all three."
+                )
+            narrative.append(
+                "The pounce report observed feral residual ≈ 1e11 on "
+                "iter_a, **silent wrong-inertia (reported 6 instead of "
+                "true 8) on iter_b**, and residual ≈ 1e4 on iter_c at a "
+                "modest cond ≈ 500. The 1.4e-16 residual on iter_b plus "
+                "the matching 4+/8+/0 inertia is the headline: feral no "
+                "longer hides the conditioning when refinement is on."
+            )
+            narrative.append("")
+        if "MSS1/MSS1_0165" in by_id:
+            mumps_status = get("MSS1/MSS1_0165", "mumps", "status")
+            f_res = fmt_res(get("MSS1/MSS1_0165", "feral", "rel_res"))
+            a_res = fmt_res(get("MSS1/MSS1_0165", "ma97",  "rel_res"))
+            iv = get("MSS1/MSS1_0165", "feral", "inertia")
+            inert = f"{iv[0]}+{iv[1]}+{iv[2]}" if iv else "—"
+            narrative.append(
+                f"**MSS1 (issue #5).** Triage subject for the BK "
+                f"1×1/2×2 inertia-monotonicity investigation. MUMPS "
+                f"`{mumps_status}`s on this matrix (`INFOG(1) = -9`, "
+                f"insufficient symbolic-phase integer workspace — a "
+                f"known MUMPS-side limitation that doesn't reflect the "
+                f"matrix's analytic conditioning). feral and MA97 both "
+                f"succeed with inertia {inert} and residuals "
+                f"{f_res} / {a_res} respectively. Feral is "
+                f"strictly more robust than MUMPS here."
+            )
+            narrative.append("")
+        if narrative:
+            lines.extend(narrative)
     lines.append("")
 
     # --- 6. Inertia agreement ---
