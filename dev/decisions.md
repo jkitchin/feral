@@ -2844,3 +2844,74 @@ implementation work that the data shows would not have paid back.
 - `src/dense/factor.rs:1189-1193` — 32×32 dispatch entry.
 - `src/dense/factor.rs:1480-1488` — the remaining un-fused panel
   γ₀ scan.
+
+---
+
+## 2026-05-13 — Small-front bench-gap: retrospective on the #9/#10/#11/#13 model
+
+**Decision.** Record explicit retrospective that the original
+small-front-performance model implicit in issues #11, #12, #13
+("kernel cost dwarfs driver overhead; closing the kernel will
+reveal the driver win") did not hold against post-land data.
+
+**What the post-land data shows.** After #9 Step 2 dispatch
+(`d3f1132`) and #13 phases A+B+C (workspace pooling +
+extend_add direct writes + contrib pool):
+
+- bench p90 small 1.36 → 1.33, medium 1.78 → 1.74 (~0.04
+  absolute movement each)
+- `diag_supernode_cost` ns/sup vs ns/nnz: ns/sup still dominates
+  ns/nnz by 4× to 36× across every long-tail corpus row at
+  every nemin
+- ACOPR30_0067 ns/sup 943 / ns/nnz 61 (15× ratio preserved)
+- HAIFAM_0082 ns/sup 1174 / ns/nnz 33 (36× ratio preserved)
+
+The two layers were the same order of magnitude all along.
+Both shrank a bit; neither dwarfed the other; the *ratio*
+between them is preserved post-land, so the bench p90 — which
+captures end-to-end including sparse path / refinement /
+scaling layers neither of those issues touched — barely
+moved.
+
+**Implication for the un-done #13 candidate.** The single
+largest un-done lever on the per-front overhead axis is the
+`SymmetricMatrix::validate()` bypass on the multifrontal hot
+path. `factor_frontal` at `src/dense/factor.rs:871` runs
+`matrix.validate()` (O(n²/2) NaN/Inf scan) on every call;
+the 32×32 SIMD path now reaches it via `factor_block32` on
+every 32×32 front. That's ~528 reads, plausibly 260–800 ns
+out of the 600–1200 ns/sup budget. The multifrontal driver
+assembles fronts from a value-checked CSC, so the per-front
+re-scan is unconditionally redundant on that path.
+
+Per `dev/research/small-matrix-perf-retrospective-2026-05-13.md`
+this lever alone won't hit #13 criterion #2 (small <1.30 /
+medium <1.60); even a 30–60% per-front overhead reduction on
+the SIMD-dispatched cluster maps to <0.05 absolute bench p90
+movement on the current mix because bench p90 has other
+amortized layers.
+
+**Scope.** This entry records the model correction; it does
+*not* commit to landing the validate-bypass. That is a new
+line of work outside the original scope of #13 (which was
+the three pooling/direct-write phases that did land) and
+should be its own issue if pursued.
+
+**Lesson — bench p90 is the wrong instrument for kernel/
+overhead work in isolation.** Bench p90 is the right top-line
+metric but the wrong attribution metric for any single layer.
+For per-front cost the right instruments are
+`diag_supernode_cost`'s ns/sup and ns/nnz columns (both moved
+under #13 Phase A; criterion #1 met). For end-to-end ratio,
+bench p90 is correct. Future small-front work should gate on
+the kernel/overhead-attributed metric (`diag_supernode_cost`),
+not on bench p90 alone, so that the gate isn't masked by
+unrelated layers.
+
+**References.**
+- `dev/research/small-matrix-perf-retrospective-2026-05-13.md`
+- `dev/tried-and-rejected.md` 2026-04-25 Phase 2.11 entry
+  (SmallLeafBatch flip noise-floor result)
+- `dev/research/dense-app-path.md` (gate measurement)
+- `src/dense/factor.rs:871` (validate call site on hot path)
+- `src/dense/matrix.rs:106-133` (validate body)
