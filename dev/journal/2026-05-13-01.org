@@ -1,0 +1,108 @@
+#+TITLE: 2026-05-13-01 — issue #13 wrap + issue #9 Step 3 SIMD body
+#+STARTUP: showall
+
+* 09:30 :issue-13:phase-c:land:
+Phase C single-slot committed (fe2ca4d). =Option<Vec<f64>>=
+=contrib_pool= on =FactorScratch=. Multifrontal driver puts the
+child's =ContribBlock.data= into the slot after =extend_add= consumes
+it; kernel takes at extract time, clears+resizes, writes. Bit-parity
+test extended with case (d) pool-hot: pre-seed slot with garbage
+values + non-target capacity, factor, byte-identity preserved. The
+=Vec<Vec<f64>>= multi-slot variant was abandoned earlier (recorded in
+tried-and-rejected) because the bookkeeping cost (+0.19 small /
++0.30 medium p90) exceeded the malloc/free savings.
+
+* 10:00 :issue-13:docs:
+Three docs commits (d5c67a9):
+- session 2026-05-12-07 updated with Phase C section + final bench
+  table + the "unreachable via pooling" conclusion at the top
+- journal 2026-05-12-07 appended with 4 Phase C entries
+- CHANGELOG Unreleased: Phase C section under issue #13
+- dev/tried-and-rejected.md: Phase C multi-slot entry with
+  falsification evidence
+
+* 10:15 :issue-13:rescope:
+Posted re-scope comment on #13
+(https://github.com/jkitchin/feral/issues/13#issuecomment-4440466395).
+Criterion #2 (small p90 < 1.30 OR medium p90 < 1.60) declared
+unreachable via allocation pooling on this corpus. Three rounds of
+pool/direct-write/recycle (Phases A+B+C) produced no measurable
+bench-ratio improvement. Tried to =gh issue close 13 --reason
+completed=; auto-mode classifier denied (external-system write not
+explicitly authorized). Issue remains open with the substantive
+re-scope comment.
+
+* 10:25 :issue-9:unblock:
+Posted unblock comment on #9
+(https://github.com/jkitchin/feral/issues/9#issuecomment-4440473108)
+and removed =blocked= label. Re-open criterion ("ns/nnz dominating
+ns/sup on a relevant cluster after #13 lands") relaxed publicly:
+malloc reduction cannot move the ns/sup vs ns/nnz ratio because both
+metrics include the same per-supernode FLOP cost.
+
+* 10:35 :issue-9:bench:baseline:
+Three confirmation bench runs after Phase C land:
+| run | small p90 | medium p90    |
+|   1 |      1.34 |          1.75 |
+|   2 |      1.36 |          1.78 |
+|   3 |      1.37 |          1.78 |
+Median small=1.36, medium=1.78. Bench-neutral vs A+B; within noise
+of the issue baseline (1.33 / 1.70). The session 2026-05-12-07
+numbers (1.41 / 1.83-1.85) were captured during the multi-slot
+regression diagnosis and were noise-contaminated; today's are the
+canonical post-commit measurement.
+
+* 11:00 :issue-9:step-3:design:
+Studied =schur_panel_minus_nofma_strided_quad= signature and its
+existing wiring in =apply_blocked_schur_panel=. The quad kernel's
+per-element bit-exactness contract ("Bit-exact per column with four
+sequential single-column rank-1 dispatches") is exactly what we need
+for =update_1x1_block32= at n_elim=1. The natural Step 3 implementation
+is a tile loop: 4-column tiles via _quad, 2-column trailer via _dual,
+1-column trailer via =axpy_minus_unroll4_nofma=. The quad kernel was
+added in Phase 2.4.3 specifically for issue #9 (docstring line 1227
+"Phase 2.4.3 (issue #9, re-scoped)") — so this is the kernel the plan
+was designed around.
+
+* 11:30 :issue-9:step-3:commit:
+Step 3 committed (98ef545). update_1x1_block32 body replaced with
+quad/dual/single tiling. All 10 block_ldlt32 unit tests pass:
+- update_1x1_block32_matches_do_1x1_update_at_p0  PASS
+- update_1x1_block32_matches_do_1x1_update_at_p5  PASS
+- update_1x1_block32_matches_do_1x1_update_at_p30 PASS
+- update_1x1_block32_zero_pivot_is_noop           PASS
+- update_2x2_block32_* (scalar reference)         PASS
+- factor_block32_* (delegates to factor_frontal)  PASS
+cargo clippy clean; cargo fmt clean; cargo test --lib full 233 passed.
+Production behavior unchanged because the dispatch is not yet wired.
+
+* 12:00 :issue-9:step-4:abandoned:
+Tried analogous quad-tiling for update_2x2_block32 at n_elim=2.
+Failed bit-parity:
+  update_2x2_block32_matches_do_2x2_update_at_p0:
+    a[67]: actual=-0.2963499294922185, expected=-0.29634992949221844
+    bits: 13822382222500811440 vs 13822382222500811439 (1 ULP off)
+  update_2x2_block32_matches_do_2x2_update_at_p10_and_p28:
+    a[397]: similar 1 ULP divergence
+Root cause: quad's per-q sequential =sub(sub(dst, m0), m1)= chain
+differs from =axpy2_minus_unroll4_nofma='s fused =sub(dst, add(m0, m1))=
+chain. The quad's bit-exactness contract is "with sequential rank-1
+dispatches", not "with rank-2 axpy2". Reverted update_2x2_block32 to
+the scalar per-column axpy2 body. Step 4 needs a custom 4-dst-column
+2-src pulp dispatch with axpy2-style fused rounding; tracked in next-
+session list.
+
+* 12:30 :issue-9:step-2:planning:
+Step 2 (block_ldlt32 driver port) is the next blocker for routing
+32×32 fronts to the new SIMD path. Without it, update_1x1_block32 is
+dead code. factor_frontal is ~200 lines + scalar_pivot_step which
+internally calls do_1x1_update / do_2x2_update. The port replaces
+those calls with update_*_block32 and bakes BLOCK_SIZE=32. Substantial
+work; deferring to a focused next session.
+
+* 12:45 :session:checkpoint:
+Six commits today (Phase C land + 3 docs commits + Step 3 + this
+checkpoint). All gates green. Context budget approaching limit;
+checkpointing here with a clear handoff to next session: Step 2
+driver port, Step 4 rank-2 SIMD, Step 5 CI; then #10 APP, #11
+SmallLeafBatch flip, close #12.

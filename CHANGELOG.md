@@ -4,6 +4,25 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Issue #9 Step 3: SIMD body for `update_1x1_block32`
+
+`update_1x1_block32` in `src/dense/block_ldlt32.rs` now tiles trailing
+destination columns in groups of four through
+`schur_panel_minus_nofma_strided_quad` (n_elim=1), with a trailing
+`_dual` for the 2-column tail and a final
+`axpy_minus_unroll4_nofma` for the 1-column tail. Each tile packs 4
+dst columns per pulp dispatch sharing one source-column load — the
+intended Phase 2.4.3 register-resident pattern. Per-element output is
+byte-identical to the scalar reference and to `factor::do_1x1_update`
+(verified by 4 bit-parity unit tests at p=0, p=5, p=30, zero-pivot).
+The function is not yet on the production path; that requires the
+block_ldlt32 driver port (Step 2) and dispatch wiring in
+`factor_frontal_blocked_in_place`. Step 4 (rank-2 SIMD body for
+`update_2x2_block32`) is deferred — the quad kernel's per-q
+sequential rounding chain is 1-ULP-divergent from
+`axpy2_minus_unroll4_nofma`'s fused chain, so Step 4 needs a custom
+4-dst-column 2-src pulp dispatch.
+
 ### Changed — Per-supernode fixed-overhead reduction (#13, Phases A + B + C)
 
 **Phase C (single-slot contrib pool).** New `pub contrib_pool:
