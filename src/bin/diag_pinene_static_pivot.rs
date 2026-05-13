@@ -186,13 +186,7 @@ fn main() -> std::io::Result<()> {
         Mode::StaticAll,
     );
     // Default (delayed pivoting enabled) — may take ~87s on 0009.
-    run(
-        "default               ",
-        &csc,
-        &rhs,
-        &oracle,
-        Mode::Default,
-    );
+    run("default               ", &csc, &rhs, &oracle, Mode::Default);
 
     Ok(())
 }

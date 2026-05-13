@@ -122,14 +122,14 @@ fn main() -> std::io::Result<()> {
     );
 
     println!("\n-- individual candidates --");
-    run("AMD",       &csc, &rhs, &oracle, OrderingMethod::Amd);
-    run("MetisND",   &csc, &rhs, &oracle, OrderingMethod::MetisND);
-    run("ScotchND",  &csc, &rhs, &oracle, OrderingMethod::ScotchND);
-    run("KahipND",   &csc, &rhs, &oracle, OrderingMethod::KahipND);
+    run("AMD", &csc, &rhs, &oracle, OrderingMethod::Amd);
+    run("MetisND", &csc, &rhs, &oracle, OrderingMethod::MetisND);
+    run("ScotchND", &csc, &rhs, &oracle, OrderingMethod::ScotchND);
+    run("KahipND", &csc, &rhs, &oracle, OrderingMethod::KahipND);
 
     println!("\n-- dispatcher modes --");
-    run("Auto",      &csc, &rhs, &oracle, OrderingMethod::Auto);
-    run("AutoRace",  &csc, &rhs, &oracle, OrderingMethod::AutoRace);
+    run("Auto", &csc, &rhs, &oracle, OrderingMethod::Auto);
+    run("AutoRace", &csc, &rhs, &oracle, OrderingMethod::AutoRace);
 
     Ok(())
 }
