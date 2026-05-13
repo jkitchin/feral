@@ -618,3 +618,34 @@ matrix*, but the 0.94-0.95 window is too narrow to trust on
 unseen iterates. Treat cascade_break_ratio as a knob the IPM
 integrator tunes per iterate (e.g., crank up when residual is
 already large, leave off in clean regimes), not a global default.
+
+* 19:58 :issue-8:bench:regression-guard:
+Added src/bin/bench_issue8.rs as a regression bench for the
+cascade-break fix landed in 7998386 / b998e36 / 672ab7a / c92cafe.
+Walks every iterate under data/matrices/kkt-mittelmann/pinene_3200
+and .../marine_1600, reports factor wall, solve wall, delay_in,
+inertia (vs sidecar oracle), residual after refined solve, and
+applies two guards: per-iterate factor < 5 s, aggregate factor
+< 30 s. Per-iterate guard breach or inertia mismatch returns
+nonzero (skip with --no-guard for report-only).
+
+Result with new defaults (cascade_break_ratio=Some(0.5),
+cascade_break_eps=Some(1e-10)):
+
+  - iterates run:        28 / 28
+  - inertia exact:       28 / 28
+  - total factor wall:    2.267 s
+  - max single-iter:      0.270 s  (marine_1600_0009)
+  - worst rel_res:       2.661e-11 (pinene_3200_0000, refined)
+  - GUARDS: PASS, exit 0
+
+Headline pre/post-fix on the issue motivators:
+  - pinene_3200_0009: 87.234 s -> 0.031 s  (2814x)
+  - marine_1600_0009: 59.914 s -> 0.269 s  (223x)
+  - marine_1600_0017: 101.398 s -> 0.088 s (1152x)
+
+The guard thresholds are an order of magnitude above observed
+numbers, so this bench flags future regressions that reintroduce
+cascade behavior without firing on routine timing noise.
+cargo fmt + clippy -D warnings + cargo test --lib (240/240 pass)
+all clean.
