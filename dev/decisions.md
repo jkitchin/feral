@@ -2714,3 +2714,61 @@ re-check this decision at other thread counts or matrix mixes.
 `src/numeric/solver.rs::tests::solver_parallel_lock_breakdown`,
 `dev/decisions.md` 2026-04-14 (SIMD/FMA blocker on
 within-supernode kernel parallelism).
+
+## 2026-05-12 (c) — Park BLAS-3 quad kernel; pivot to per-front overhead
+
+**Context.** Issue #9 (Phase 2.4.3 BLAS-3 trailing-update kernel)
+landed `schur_panel_minus_nofma_strided_quad` and wired it into
+`apply_blocked_schur_panel`. The quad kernel packs four destination
+columns per pulp-dispatch, halving src memory traffic vs the existing
+dual kernel. It is correct (176-config bit-parity sweep + 19 blocked_ldlt
+integration tests passing byte-identical) and zero-regression on the
+154k-matrix corpus.
+
+**The original motivation no longer holds.** The 2026-04-27 CHAINWOO
+profile (`dev/research/feral-kernel-profile-chainwoo.md`) cited a
+1984-row root front at 62 % of factor time. That front no longer
+exists on the current build — METIS-ND on CHAINWOO_0000 now produces
+actual frontal sizes ≤ 18 rows and the matrix factors in ~740 µs end
+to end (vs 24 ms in the profile note). The intervening landings (W-4
+in `lblt_panel_frontal`, 1x1 fast path, post-2026-04 ordering changes)
+shrank the wide-front case faster than this work could close it.
+
+**Re-profile finding.** `cargo run --bin diag_supernode_cost --release`
+shows the new dominant cost is **fixed per-supernode overhead** at
+small fronts. ns/sup is 600–1900 across the long-tail corpus while
+ns/nnz is 30–165. The nemin sweep on ACOPR30_0067 confirms it:
+shrinking supernode count from 493 → 158 (nemin 1 → 32) drops total
+time from 242 µs → 152 µs even as per-supernode cost climbs from
+492 ns → 964 ns. The arithmetic layer (which quad targets) is not
+the bottleneck on this corpus.
+
+**Decision.** Retain the quad kernel + wiring as parked infrastructure
+on the merge target. Justification:
+1. It is correct and in production for every front with ≥ 4 trailing
+   columns. No maintenance burden — the bit-parity tests are the
+   regression gate and they sweep 176 configs.
+2. The win it targets (tall-skinny fronts where trailing-update
+   bandwidth dominates) is workload-dependent. A future workload
+   shift — larger problems, different ordering, an amalgamation
+   change that grows fronts — re-engages the quad path automatically.
+3. Reverting would lose the bit-parity harness and ~700 LoC of
+   reviewed, tested kernel code that has zero runtime cost on small
+   fronts (the dispatch path is identical, just routed through a
+   wider kernel when ncol ≥ 4).
+
+**Next axis.** Open a new issue for per-front overhead reduction.
+Candidate items from `dev/research/feral-kernel-profile-chainwoo.md`
+§3 and §4: workspace pooling (eliminate per-front `vec![0.0; ...]` +
+L/D/contrib `Vec::new`), bypass `SymmetricMatrix::validate()` when
+caller already validated, replace `SymmetricMatrix::set/get` branches
+in `extend_add` with direct slice writes.
+
+**Lesson for future kernel work.** Re-measure the profile that
+motivates the work *immediately before* writing code, not weeks
+prior. Front shapes can shift under intervening landings.
+
+**References.** Branch `feat/issue-9-block32-kernel` commits
+`fdd631c` (quad kernel + tests), `8a07386` (wiring),
+`dev/research/blas3-trailing-update.md`,
+`dev/plans/phase-2.4.3-blas3-trailing-update.md`.
