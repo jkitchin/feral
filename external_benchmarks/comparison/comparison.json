@@ -12,8 +12,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 96,
-        "factor_us": 10,
+        "analyse_us": 80,
+        "factor_us": 12,
         "solve_us": 1,
         "rel_res": 3.7984418089541897e-16,
         "inertia": [
@@ -25,8 +25,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 544,
-        "solve_us": 823,
+        "factor_us": 861,
+        "solve_us": 924,
         "rel_res": 4.910197738305756e-16,
         "rinfog6": 3.811012092590217e-17,
         "rinfog10": 45.84621563363601,
@@ -38,12 +38,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 7,
+        "solve_us": 4,
+        "rel_res": 4.775646168318846e-16,
+        "inertia": [
+          3,
+          1,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 830,
-        "factor_us": 4869,
-        "solve_us": 43,
+        "analyse_us": 674,
+        "factor_us": 87,
+        "solve_us": 46,
         "rel_res": 1.0048909717220249e-16,
         "inertia": [
           3,
@@ -67,7 +79,7 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 7,
+        "analyse_us": 6,
         "factor_us": 1,
         "solve_us": 0,
         "rel_res": 1.4723478296570512e-17,
@@ -80,8 +92,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 21,
-        "solve_us": 19,
+        "factor_us": 31,
+        "solve_us": 23,
         "rel_res": 3.292269833637447e-17,
         "rinfog6": 5.111457889415873e-17,
         "rinfog10": 28.733489904663365,
@@ -93,12 +105,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 2,
+        "solve_us": 1,
+        "rel_res": 1.0411071346157965e-17,
+        "inertia": [
+          2,
+          2,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 18,
-        "factor_us": 38,
-        "solve_us": 7,
+        "analyse_us": 12,
+        "factor_us": 13,
+        "solve_us": 1,
         "rel_res": 5.3650620789162305e-17,
         "inertia": [
           2,
@@ -122,9 +146,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 8,
+        "analyse_us": 5,
         "factor_us": 1,
-        "solve_us": 0,
+        "solve_us": 2,
         "rel_res": 3.665771077397191e-16,
         "inertia": [
           4,
@@ -135,8 +159,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 19,
-        "solve_us": 14,
+        "factor_us": 21,
+        "solve_us": 15,
         "rel_res": 2.8455153612392167e-16,
         "rinfog6": 1.6936320031037268e-16,
         "rinfog10": 429.9698774305723,
@@ -148,12 +172,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 1,
+        "solve_us": 1,
+        "rel_res": 1.4248375645317545e-16,
+        "inertia": [
+          4,
+          0,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 12,
-        "factor_us": 11,
-        "solve_us": 3,
+        "analyse_us": 6,
+        "factor_us": 3,
+        "solve_us": 2,
         "rel_res": 1.422671695762425e-16,
         "inertia": [
           4,
@@ -190,8 +226,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 21,
-        "solve_us": 16,
+        "factor_us": 19,
+        "solve_us": 15,
         "rel_res": 2.781356997234237e-16,
         "rinfog6": 9.233766897046641e-17,
         "rinfog10": 273036894.36665905,
@@ -203,12 +239,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 2,
+        "solve_us": 0,
+        "rel_res": 2.781358323488287e-16,
+        "inertia": [
+          5,
+          0,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 17,
-        "factor_us": 13,
-        "solve_us": 3,
+        "analyse_us": 15,
+        "factor_us": 8,
+        "solve_us": 1,
         "rel_res": 1.1140631922021178e-16,
         "inertia": [
           5,
@@ -232,7 +280,7 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 8,
+        "analyse_us": 6,
         "factor_us": 1,
         "solve_us": 0,
         "rel_res": 1.0726010812772999e-16,
@@ -246,7 +294,7 @@
         "status": "ok",
         "solver_version": "mumps-5.8.2",
         "factor_us": 21,
-        "solve_us": 14,
+        "solve_us": 15,
         "rel_res": 7.111688838938834e-17,
         "rinfog6": 6.872341751611694e-17,
         "rinfog10": 121308.65121563183,
@@ -258,11 +306,23 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 2,
+        "solve_us": 1,
+        "rel_res": 1.5779042964682287e-16,
+        "inertia": [
+          6,
+          0,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 11,
-        "factor_us": 13,
+        "analyse_us": 8,
+        "factor_us": 4,
         "solve_us": 3,
         "rel_res": 1.3637867653206545e-16,
         "inertia": [
@@ -287,7 +347,7 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 10,
+        "analyse_us": 12,
         "factor_us": 1,
         "solve_us": 0,
         "rel_res": 1.3741021445989724e-16,
@@ -300,8 +360,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 17,
-        "solve_us": 16,
+        "factor_us": 21,
+        "solve_us": 17,
         "rel_res": 1.1044523428572655e-16,
         "rinfog6": 1.9880160103328605e-17,
         "rinfog10": 18119561720.14915,
@@ -313,12 +373,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 1,
+        "solve_us": 1,
+        "rel_res": 1.561883818079285e-16,
+        "inertia": [
+          3,
+          3,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 20,
-        "factor_us": 950,
-        "solve_us": 8,
+        "analyse_us": 6,
+        "factor_us": 7,
+        "solve_us": 2,
         "rel_res": 5.62873222899492e-17,
         "inertia": [
           3,
@@ -342,8 +414,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 7,
-        "factor_us": 2,
+        "analyse_us": 8,
+        "factor_us": 1,
         "solve_us": 0,
         "rel_res": 2.471364308232578e-16,
         "inertia": [
@@ -356,7 +428,7 @@
         "status": "ok",
         "solver_version": "mumps-5.8.2",
         "factor_us": 16,
-        "solve_us": 14,
+        "solve_us": 15,
         "rel_res": 4.0260936576213214e-16,
         "rinfog6": 1.7614875226548099e-16,
         "rinfog10": 2517849546.7359586,
@@ -368,12 +440,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 2,
+        "solve_us": 0,
+        "rel_res": 2.0130468297473152e-16,
+        "inertia": [
+          7,
+          0,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 21,
-        "factor_us": 11,
-        "solve_us": 4,
+        "analyse_us": 8,
+        "factor_us": 6,
+        "solve_us": 2,
         "rel_res": 1.2918283923904625e-16,
         "inertia": [
           7,
@@ -397,7 +481,7 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 10,
+        "analyse_us": 11,
         "factor_us": 1,
         "solve_us": 0,
         "rel_res": 3.8869036726856023e-16,
@@ -411,7 +495,7 @@
         "status": "ok",
         "solver_version": "mumps-5.8.2",
         "factor_us": 16,
-        "solve_us": 16,
+        "solve_us": 14,
         "rel_res": 7.161177048833447e-17,
         "rinfog6": 4.529822433420634e-17,
         "rinfog10": 21.23123221415939,
@@ -423,12 +507,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 3,
+        "solve_us": 1,
+        "rel_res": 3.709273230938808e-17,
+        "inertia": [
+          4,
+          3,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 17,
-        "factor_us": 9,
-        "solve_us": 9,
+        "analyse_us": 7,
+        "factor_us": 5,
+        "solve_us": 2,
         "rel_res": 4.90846337299283e-16,
         "inertia": [
           4,
@@ -452,7 +548,7 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 9,
+        "analyse_us": 11,
         "factor_us": 1,
         "solve_us": 0,
         "rel_res": 1.7933372672660165e-16,
@@ -465,7 +561,7 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 16,
+        "factor_us": 15,
         "solve_us": 14,
         "rel_res": 1.8482402365207448e-16,
         "rinfog6": 1.7211729122222398e-16,
@@ -478,12 +574,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 2,
+        "solve_us": 0,
+        "rel_res": 1.8617806414059933e-16,
+        "inertia": [
+          4,
+          3,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 10,
-        "factor_us": 8,
-        "solve_us": 10,
+        "analyse_us": 7,
+        "factor_us": 6,
+        "solve_us": 1,
         "rel_res": 1.6190940770140093e-16,
         "inertia": [
           4,
@@ -507,7 +615,7 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 8,
+        "analyse_us": 7,
         "factor_us": 2,
         "solve_us": 0,
         "rel_res": 1.5300995163750357e-17,
@@ -533,12 +641,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 3,
+        "solve_us": 5,
+        "rel_res": 1.2379884742539826e-16,
+        "inertia": [
+          8,
+          0,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 14,
-        "factor_us": 19,
-        "solve_us": 4,
+        "analyse_us": 9,
+        "factor_us": 10,
+        "solve_us": 5,
         "rel_res": 2.415425382720125e-16,
         "inertia": [
           8,
@@ -575,7 +695,7 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 13,
+        "factor_us": 15,
         "solve_us": 12,
         "rel_res": 1.538479583969015e-16,
         "rinfog6": 8.380707160294973e-17,
@@ -588,12 +708,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 2,
+        "solve_us": 0,
+        "rel_res": 1.4617805115121681e-16,
+        "inertia": [
+          8,
+          0,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 16,
-        "factor_us": 19,
-        "solve_us": 3,
+        "analyse_us": 15,
+        "factor_us": 4,
+        "solve_us": 2,
         "rel_res": 2.7753229880198586e-16,
         "inertia": [
           8,
@@ -617,8 +749,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 11,
-        "factor_us": 2,
+        "analyse_us": 9,
+        "factor_us": 3,
         "solve_us": 0,
         "rel_res": 5.879406766439491e-16,
         "inertia": [
@@ -631,7 +763,7 @@
         "status": "ok",
         "solver_version": "mumps-5.8.2",
         "factor_us": 18,
-        "solve_us": 16,
+        "solve_us": 17,
         "rel_res": 1.304025476785835e-16,
         "rinfog6": 3.255705836515603e-17,
         "rinfog10": 654.455075626941,
@@ -643,12 +775,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 4,
+        "solve_us": 8,
+        "rel_res": 3.389391480993888e-16,
+        "inertia": [
+          11,
+          0,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 17,
-        "factor_us": 11,
-        "solve_us": 66,
+        "analyse_us": 10,
+        "factor_us": 5,
+        "solve_us": 7,
         "rel_res": 5.241150086534019e-16,
         "inertia": [
           11,
@@ -672,9 +816,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 90,
-        "factor_us": 15,
-        "solve_us": 2,
+        "analyse_us": 27,
+        "factor_us": 14,
+        "solve_us": 1,
         "rel_res": 2.258010779376998e-16,
         "inertia": [
           6,
@@ -685,8 +829,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 2508,
-        "solve_us": 1542,
+        "factor_us": 75,
+        "solve_us": 32,
         "rel_res": 3.960652836187098e-15,
         "rinfog6": 2.0157553291970058e-15,
         "rinfog10": 948697140314.9222,
@@ -698,12 +842,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 7,
+        "solve_us": 9,
+        "rel_res": 1.6967465430320484e-16,
+        "inertia": [
+          6,
+          6,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 890,
-        "factor_us": 692,
-        "solve_us": 346,
+        "analyse_us": 35,
+        "factor_us": 49,
+        "solve_us": 14,
         "rel_res": 6.901522909830703e-17,
         "inertia": [
           6,
@@ -727,7 +883,7 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 18,
+        "analyse_us": 11,
         "factor_us": 3,
         "solve_us": 0,
         "rel_res": 1.3544757159328742e-16,
@@ -740,8 +896,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 40,
-        "solve_us": 25,
+        "factor_us": 23,
+        "solve_us": 18,
         "rel_res": 6.864977108314891e-16,
         "rinfog6": 3.8497178302424353e-16,
         "rinfog10": 27895122183465.477,
@@ -753,12 +909,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 12,
+        "solve_us": 2,
+        "rel_res": 7.687052654327698e-17,
+        "inertia": [
+          4,
+          8,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 12,
-        "factor_us": 13,
-        "solve_us": 3,
+        "analyse_us": 26,
+        "factor_us": 18,
+        "solve_us": 6,
         "rel_res": 7.747519053580292e-16,
         "inertia": [
           4,
@@ -782,8 +950,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 12,
-        "factor_us": 4,
+        "analyse_us": 8,
+        "factor_us": 3,
         "solve_us": 0,
         "rel_res": 2.412854446299951e-16,
         "inertia": [
@@ -795,8 +963,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 28,
-        "solve_us": 17,
+        "factor_us": 18,
+        "solve_us": 15,
         "rel_res": 5.0429886851915305e-15,
         "rinfog6": 4.178154774065764e-15,
         "rinfog10": 498.91650668606576,
@@ -808,12 +976,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 4,
+        "solve_us": 1,
+        "rel_res": 1.5755232961686087e-16,
+        "inertia": [
+          6,
+          6,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 18,
-        "factor_us": 1317,
-        "solve_us": 14,
+        "analyse_us": 13,
+        "factor_us": 17,
+        "solve_us": 11,
         "rel_res": 1.931607721767754e-16,
         "inertia": [
           6,
@@ -837,7 +1017,7 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 53,
+        "analyse_us": 72,
         "factor_us": 14,
         "solve_us": 1,
         "rel_res": 1.468523528120927e-16,
@@ -850,8 +1030,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 87,
-        "solve_us": 30,
+        "factor_us": 276,
+        "solve_us": 70,
         "rel_res": 2.342786082883933e-16,
         "rinfog6": 1.2930377164196786e-16,
         "rinfog10": 2156950.3620013962,
@@ -863,12 +1043,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 21,
+        "solve_us": 3,
+        "rel_res": 2.3675622305661785e-16,
+        "inertia": [
+          30,
+          0,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 39,
-        "factor_us": 207,
-        "solve_us": 10,
+        "analyse_us": 38,
+        "factor_us": 31,
+        "solve_us": 9,
         "rel_res": 1.1059325157336522e-16,
         "inertia": [
           30,
@@ -892,9 +1084,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 21,
-        "factor_us": 17,
-        "solve_us": 1,
+        "analyse_us": 28,
+        "factor_us": 21,
+        "solve_us": 2,
         "rel_res": 5.09897423374208e-16,
         "inertia": [
           31,
@@ -905,8 +1097,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 48,
-        "solve_us": 35,
+        "factor_us": 46,
+        "solve_us": 26,
         "rel_res": 5.28307228140494e-16,
         "rinfog6": 6.178318583665633e-17,
         "rinfog10": 954220889.3784227,
@@ -918,12 +1110,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 18,
+        "solve_us": 8,
+        "rel_res": 3.616431670193595e-16,
+        "inertia": [
+          31,
+          0,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 25,
-        "factor_us": 26,
-        "solve_us": 10,
+        "analyse_us": 32,
+        "factor_us": 23,
+        "solve_us": 3,
         "rel_res": 8.481557157996915e-16,
         "inertia": [
           31,
@@ -947,8 +1151,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 59,
-        "factor_us": 21,
+        "analyse_us": 61,
+        "factor_us": 23,
         "solve_us": 3,
         "rel_res": 3.706255586511564e-16,
         "inertia": [
@@ -961,7 +1165,7 @@
         "status": "ok",
         "solver_version": "mumps-5.8.2",
         "factor_us": 65,
-        "solve_us": 32,
+        "solve_us": 30,
         "rel_res": 2.3728613449815495e-16,
         "rinfog6": 8.023867733555624e-17,
         "rinfog10": 52.54384205197062,
@@ -972,6 +1176,18 @@
           0
         ],
         "infog1": "0"
+      },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 47,
+        "solve_us": 6,
+        "rel_res": 2.4223875925259417e-16,
+        "inertia": [
+          51,
+          0,
+          0
+        ]
       },
       "ma97": {
         "status": "ok",
@@ -1002,8 +1218,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 66,
-        "factor_us": 45,
+        "analyse_us": 69,
+        "factor_us": 46,
         "solve_us": 3,
         "rel_res": 5.903283296186803e-17,
         "inertia": [
@@ -1015,8 +1231,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 76,
-        "solve_us": 32,
+        "factor_us": 65,
+        "solve_us": 33,
         "rel_res": 5.810631275954077e-17,
         "rinfog6": 8.404856022456269e-17,
         "rinfog10": 815540129.319834,
@@ -1028,11 +1244,23 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 28,
+        "solve_us": 8,
+        "rel_res": 5.81063130699067e-17,
+        "inertia": [
+          43,
+          14,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 44,
-        "factor_us": 32,
+        "analyse_us": 46,
+        "factor_us": 31,
         "solve_us": 6,
         "rel_res": 1.2635128526440849e-16,
         "inertia": [
@@ -1057,8 +1285,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 93,
-        "factor_us": 58,
+        "analyse_us": 75,
+        "factor_us": 56,
         "solve_us": 5,
         "rel_res": 5.427643183219082e-16,
         "inertia": [
@@ -1070,8 +1298,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 89,
-        "solve_us": 40,
+        "factor_us": 82,
+        "solve_us": 35,
         "rel_res": 5.567400481990535e-16,
         "rinfog6": 5.3187237248541317e-17,
         "rinfog10": 41173.377090543436,
@@ -1083,12 +1311,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 93,
+        "solve_us": 12,
+        "rel_res": 2.9441162799733606e-16,
+        "inertia": [
+          66,
+          0,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 87,
-        "factor_us": 96,
-        "solve_us": 6,
+        "analyse_us": 82,
+        "factor_us": 92,
+        "solve_us": 9,
         "rel_res": 3.0744747741819257e-16,
         "inertia": [
           66,
@@ -1112,9 +1352,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 91,
-        "factor_us": 583,
-        "solve_us": 12,
+        "analyse_us": 79,
+        "factor_us": 446,
+        "solve_us": 11,
         "rel_res": 1.2326631274817912e-16,
         "inertia": [
           36,
@@ -1126,7 +1366,7 @@
         "status": "ok",
         "solver_version": "mumps-5.8.2",
         "factor_us": 127,
-        "solve_us": 43,
+        "solve_us": 46,
         "rel_res": 4.9852031429327385e-14,
         "rinfog6": 5.5168352274693585e-14,
         "rinfog10": 1288.3281178728694,
@@ -1138,12 +1378,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 32,
+        "solve_us": 8,
+        "rel_res": 1.1072664940001273e-16,
+        "inertia": [
+          36,
+          66,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 42,
-        "factor_us": 60,
-        "solve_us": 15,
+        "analyse_us": 45,
+        "factor_us": 57,
+        "solve_us": 18,
         "rel_res": 1.0250519688511739e-16,
         "inertia": [
           36,
@@ -1167,8 +1419,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 95,
-        "factor_us": 230,
+        "analyse_us": 107,
+        "factor_us": 302,
         "solve_us": 6,
         "rel_res": 1.6164034246470366e-16,
         "inertia": [
@@ -1180,8 +1432,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 105,
-        "solve_us": 54,
+        "factor_us": 82,
+        "solve_us": 42,
         "rel_res": 1.7542094240353417e-16,
         "rinfog6": 3.9190280977348284e-16,
         "rinfog10": 13576715.529486956,
@@ -1193,12 +1445,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 48,
+        "solve_us": 7,
+        "rel_res": 1.240413379356756e-16,
+        "inertia": [
+          38,
+          68,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 63,
-        "factor_us": 49,
-        "solve_us": 8,
+        "analyse_us": 64,
+        "factor_us": 50,
+        "solve_us": 7,
         "rel_res": 2.0555034061073963e-16,
         "inertia": [
           38,
@@ -1222,14 +1486,14 @@
       "feral": {
         "status": "fail",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 107,
+        "analyse_us": 135,
         "fail_reason": "factor_InvalidInput(\"matrix_contains_NaN_or_Inf_at_index_(0,0)\")"
       },
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 93,
-        "solve_us": 46,
+        "factor_us": 95,
+        "solve_us": 48,
         "rinfog6": 0.0,
         "rinfog10": 1.0,
         "inertia": [
@@ -1239,11 +1503,22 @@
         ],
         "infog1": "2"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 117,
+        "solve_us": 6,
+        "inertia": [
+          0,
+          33,
+          81
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 70,
-        "factor_us": 30,
+        "analyse_us": 73,
+        "factor_us": 31,
         "solve_us": 28,
         "inertia": [
           2,
@@ -1267,9 +1542,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 157,
-        "factor_us": 317,
-        "solve_us": 20,
+        "analyse_us": 147,
+        "factor_us": 320,
+        "solve_us": 18,
         "rel_res": 3.1768497090567e-16,
         "inertia": [
           84,
@@ -1280,8 +1555,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 140,
-        "solve_us": 52,
+        "factor_us": 131,
+        "solve_us": 54,
         "rel_res": 1.3850500119402033e-15,
         "rinfog6": 3.2158812645430664e-15,
         "rinfog10": 8.902218250116382,
@@ -1293,11 +1568,23 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 69,
+        "solve_us": 18,
+        "rel_res": 3.1734424540210353e-16,
+        "inertia": [
+          84,
+          42,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
         "analyse_us": 94,
-        "factor_us": 78,
+        "factor_us": 79,
         "solve_us": 10,
         "rel_res": 7.500348799410863e-16,
         "inertia": [
@@ -1322,8 +1609,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 208,
-        "factor_us": 165,
+        "analyse_us": 213,
+        "factor_us": 247,
         "solve_us": 17,
         "rel_res": 1.621869086270938e-16,
         "inertia": [
@@ -1335,7 +1622,7 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 127,
+        "factor_us": 122,
         "solve_us": 59,
         "rel_res": 2.1224356523092702e-15,
         "rinfog6": 2.8915412832487053e-15,
@@ -1348,12 +1635,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 67,
+        "solve_us": 15,
+        "rel_res": 1.5490101168611946e-16,
+        "inertia": [
+          83,
+          74,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 99,
-        "factor_us": 67,
-        "solve_us": 13,
+        "analyse_us": 111,
+        "factor_us": 69,
+        "solve_us": 15,
         "rel_res": 4.1384785838634247e-16,
         "inertia": [
           83,
@@ -1377,9 +1676,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 272,
-        "factor_us": 228,
-        "solve_us": 36,
+        "analyse_us": 245,
+        "factor_us": 207,
+        "solve_us": 35,
         "rel_res": 2.551147963321684e-16,
         "inertia": [
           89,
@@ -1391,12 +1690,24 @@
         "status": "fail",
         "solver_version": "mumps-5.8.2"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 103,
+        "solve_us": 15,
+        "rel_res": 2.17545971116458e-16,
+        "inertia": [
+          89,
+          74,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 200,
-        "factor_us": 192,
-        "solve_us": 23,
+        "analyse_us": 172,
+        "factor_us": 173,
+        "solve_us": 14,
         "rel_res": 8.733562403397582e-16,
         "inertia": [
           89,
@@ -1420,9 +1731,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 212,
-        "factor_us": 186,
-        "solve_us": 11,
+        "analyse_us": 213,
+        "factor_us": 216,
+        "solve_us": 12,
         "rel_res": 4.724573931165707e-16,
         "inertia": [
           99,
@@ -1433,7 +1744,7 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 182,
+        "factor_us": 181,
         "solve_us": 63,
         "rel_res": 4.204244115982295e-16,
         "rinfog6": 8.642492542354091e-17,
@@ -1446,12 +1757,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 90,
+        "solve_us": 12,
+        "rel_res": 1.5970912973088061e-16,
+        "inertia": [
+          99,
+          99,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 100,
-        "factor_us": 100,
-        "solve_us": 24,
+        "analyse_us": 95,
+        "factor_us": 94,
+        "solve_us": 20,
         "rel_res": 1.7486540906628235e-16,
         "inertia": [
           99,
@@ -1475,9 +1798,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 356,
-        "factor_us": 352,
-        "solve_us": 24,
+        "analyse_us": 370,
+        "factor_us": 274,
+        "solve_us": 26,
         "rel_res": 1.881610901693037e-16,
         "inertia": [
           100,
@@ -1488,7 +1811,7 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 157,
+        "factor_us": 159,
         "solve_us": 87,
         "rel_res": 8.75330618956805e-15,
         "rinfog6": 6.026529165531037e-15,
@@ -1501,12 +1824,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 189,
+        "solve_us": 14,
+        "rel_res": 1.933300584115675e-16,
+        "inertia": [
+          100,
+          125,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 205,
-        "factor_us": 337,
-        "solve_us": 60,
+        "analyse_us": 111,
+        "factor_us": 179,
+        "solve_us": 23,
         "rel_res": 5.845961676231115e-17,
         "inertia": [
           100,
@@ -1530,8 +1865,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 186,
-        "factor_us": 291,
+        "analyse_us": 179,
+        "factor_us": 316,
         "solve_us": 14,
         "rel_res": 9.398996153513088e-17,
         "inertia": [
@@ -1543,8 +1878,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 103,
-        "solve_us": 70,
+        "factor_us": 102,
+        "solve_us": 71,
         "rel_res": 1.4011118075216165e-14,
         "rinfog6": 1.8145668792013412e-14,
         "rinfog10": 2485013755.17795,
@@ -1556,12 +1891,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 70,
+        "solve_us": 14,
+        "rel_res": 8.248948497757987e-17,
+        "inertia": [
+          183,
+          59,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 64,
-        "factor_us": 76,
-        "solve_us": 23,
+        "analyse_us": 68,
+        "factor_us": 77,
+        "solve_us": 21,
         "rel_res": 7.349797384765938e-17,
         "inertia": [
           183,
@@ -1585,9 +1932,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 330,
-        "factor_us": 309,
-        "solve_us": 13,
+        "analyse_us": 347,
+        "factor_us": 367,
+        "solve_us": 14,
         "rel_res": 9.686663893039554e-17,
         "inertia": [
           99,
@@ -1598,7 +1945,7 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 218,
+        "factor_us": 211,
         "solve_us": 90,
         "rel_res": 3.0509885384884144e-16,
         "rinfog6": 2.298173538107196e-16,
@@ -1611,12 +1958,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 85,
+        "solve_us": 20,
+        "rel_res": 7.21146045360938e-16,
+        "inertia": [
+          99,
+          150,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 141,
-        "factor_us": 60,
-        "solve_us": 15,
+        "analyse_us": 139,
+        "factor_us": 62,
+        "solve_us": 19,
         "rel_res": 2.0234766980899022e-16,
         "inertia": [
           99,
@@ -1640,9 +1999,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 313,
-        "factor_us": 286,
-        "solve_us": 12,
+        "analyse_us": 329,
+        "factor_us": 314,
+        "solve_us": 14,
         "rel_res": 4.747297201518707e-16,
         "inertia": [
           99,
@@ -1654,12 +2013,24 @@
         "status": "fail",
         "solver_version": "mumps-5.8.2"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 90,
+        "solve_us": 14,
+        "rel_res": 8.204945830812133e-17,
+        "inertia": [
+          99,
+          150,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 114,
+        "analyse_us": 124,
         "factor_us": 66,
-        "solve_us": 14,
+        "solve_us": 13,
         "rel_res": 6.305888813666367e-16,
         "inertia": [
           99,
@@ -1683,8 +2054,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 215,
-        "factor_us": 365,
+        "analyse_us": 212,
+        "factor_us": 302,
         "solve_us": 13,
         "rel_res": 3.915189974772984e-16,
         "inertia": [
@@ -1696,8 +2067,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 157,
-        "solve_us": 98,
+        "factor_us": 132,
+        "solve_us": 85,
         "rel_res": 5.154577271376807e-15,
         "rinfog6": 6.118405454015373e-15,
         "rinfog10": 6429.3667315913835,
@@ -1709,10 +2080,22 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 69,
+        "solve_us": 19,
+        "rel_res": 1.2664973623335791e-16,
+        "inertia": [
+          202,
+          82,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 89,
+        "analyse_us": 91,
         "factor_us": 69,
         "solve_us": 24,
         "rel_res": 1.3782188743035418e-16,
@@ -1738,9 +2121,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 184,
-        "factor_us": 244,
-        "solve_us": 21,
+        "analyse_us": 186,
+        "factor_us": 274,
+        "solve_us": 22,
         "rel_res": 1.0893828947441224e-16,
         "inertia": [
           206,
@@ -1751,8 +2134,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 139,
-        "solve_us": 105,
+        "factor_us": 109,
+        "solve_us": 96,
         "rel_res": 1.4937036255734164e-15,
         "rinfog6": 7.942494627316798e-16,
         "rinfog10": 187.90184339439537,
@@ -1764,12 +2147,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 43,
+        "solve_us": 8,
+        "rel_res": 2.625745417576441e-16,
+        "inertia": [
+          206,
+          100,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 66,
-        "factor_us": 52,
-        "solve_us": 29,
+        "analyse_us": 67,
+        "factor_us": 51,
+        "solve_us": 30,
         "rel_res": 8.933081896040654e-17,
         "inertia": [
           206,
@@ -1794,8 +2189,8 @@
         "status": "ok",
         "solver_version": "feral-0.2.0",
         "analyse_us": 233,
-        "factor_us": 361,
-        "solve_us": 10,
+        "factor_us": 423,
+        "solve_us": 14,
         "rel_res": 1.86887272224348e-16,
         "inertia": [
           259,
@@ -1806,8 +2201,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 109,
-        "solve_us": 105,
+        "factor_us": 100,
+        "solve_us": 103,
         "rel_res": 6.451054703186054e-16,
         "rinfog6": 3.5992965927700723e-16,
         "rinfog10": 406.6637929664637,
@@ -1819,12 +2214,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 45,
+        "solve_us": 8,
+        "rel_res": 1.7393930979807552e-17,
+        "inertia": [
+          259,
+          128,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
         "analyse_us": 57,
-        "factor_us": 72,
-        "solve_us": 24,
+        "factor_us": 73,
+        "solve_us": 28,
         "rel_res": 3.870141395598354e-17,
         "inertia": [
           259,
@@ -1848,9 +2255,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 283,
-        "factor_us": 362,
-        "solve_us": 22,
+        "analyse_us": 287,
+        "factor_us": 356,
+        "solve_us": 26,
         "rel_res": 1.2433232903478909e-15,
         "inertia": [
           311,
@@ -1862,11 +2269,23 @@
         "status": "fail",
         "solver_version": "mumps-5.8.2"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 63,
+        "solve_us": 9,
+        "rel_res": 1.789952020763434e-14,
+        "inertia": [
+          311,
+          154,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 61,
-        "factor_us": 85,
+        "analyse_us": 62,
+        "factor_us": 122,
         "solve_us": 43,
         "rel_res": 5.314585501318857e-16,
         "inertia": [
@@ -1891,8 +2310,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 233,
-        "factor_us": 334,
+        "analyse_us": 241,
+        "factor_us": 415,
         "solve_us": 13,
         "rel_res": 4.514994569713624e-15,
         "inertia": [
@@ -1904,8 +2323,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 174,
-        "solve_us": 259,
+        "factor_us": 176,
+        "solve_us": 266,
         "rel_res": 1.6612761009754173e-16,
         "rinfog6": 2.447378788188299e-16,
         "rinfog10": 240.5790330085539,
@@ -1917,12 +2336,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 45,
+        "solve_us": 10,
+        "rel_res": 9.192385274642224e-17,
+        "inertia": [
+          315,
+          156,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
         "analyse_us": 58,
-        "factor_us": 52,
-        "solve_us": 29,
+        "factor_us": 50,
+        "solve_us": 35,
         "rel_res": 7.01517956896976e-17,
         "inertia": [
           315,
@@ -1946,9 +2377,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 4937,
-        "factor_us": 6776,
-        "solve_us": 384,
+        "analyse_us": 5393,
+        "factor_us": 7295,
+        "solve_us": 350,
         "rel_res": 1.6820968024253377e-16,
         "inertia": [
           500,
@@ -1959,8 +2390,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 5277,
-        "solve_us": 1062,
+        "factor_us": 5723,
+        "solve_us": 1084,
         "rel_res": 1.2796364868335057e-16,
         "rinfog6": 2.638861201068903e-16,
         "rinfog10": 1068359971.3904035,
@@ -1972,12 +2403,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 3664,
+        "solve_us": 597,
+        "rel_res": 4.0900021661407214e-37,
+        "inertia": [
+          500,
+          120,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 8992,
-        "factor_us": 33178,
-        "solve_us": 859,
+        "analyse_us": 4254,
+        "factor_us": 46629,
+        "solve_us": 12492,
         "rel_res": 1.029737306181859e-16,
         "inertia": [
           500,
@@ -2001,8 +2444,8 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 287,
-        "factor_us": 452,
+        "analyse_us": 290,
+        "factor_us": 384,
         "solve_us": 19,
         "rel_res": 9.469948788686109e-16,
         "inertia": [
@@ -2014,8 +2457,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 276,
-        "solve_us": 356,
+        "factor_us": 268,
+        "solve_us": 347,
         "rel_res": 1.456927106325419e-15,
         "rinfog6": 5.1050221508080585e-15,
         "rinfog10": 2146616.60597409,
@@ -2027,12 +2470,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 75,
+        "solve_us": 12,
+        "rel_res": 6.666317863920683e-17,
+        "inertia": [
+          431,
+          214,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 216,
-        "factor_us": 186,
-        "solve_us": 92,
+        "analyse_us": 484,
+        "factor_us": 1019,
+        "solve_us": 91,
         "rel_res": 4.709765113932616e-17,
         "inertia": [
           431,
@@ -2056,9 +2511,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 343,
-        "factor_us": 527,
-        "solve_us": 30,
+        "analyse_us": 356,
+        "factor_us": 461,
+        "solve_us": 29,
         "rel_res": 1.6366980337650559e-16,
         "inertia": [
           508,
@@ -2069,8 +2524,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 293,
-        "solve_us": 234,
+        "factor_us": 283,
+        "solve_us": 235,
         "rel_res": 1.675441740767897e-16,
         "rinfog6": 1.5755714189048013e-16,
         "rinfog10": 806130.150846125,
@@ -2082,12 +2537,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 116,
+        "solve_us": 27,
+        "rel_res": 6.203701269161627e-17,
+        "inertia": [
+          508,
+          250,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 317,
-        "factor_us": 343,
-        "solve_us": 63,
+        "analyse_us": 336,
+        "factor_us": 304,
+        "solve_us": 61,
         "rel_res": 1.2685991295612248e-16,
         "inertia": [
           508,
@@ -2111,9 +2578,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 12555,
-        "factor_us": 19524,
-        "solve_us": 895,
+        "analyse_us": 12701,
+        "factor_us": 20217,
+        "solve_us": 965,
         "rel_res": 1.6765072944418612e-16,
         "inertia": [
           750,
@@ -2124,8 +2591,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 11122,
-        "solve_us": 2103,
+        "factor_us": 11274,
+        "solve_us": 2156,
         "rel_res": 1.708443263815129e-16,
         "rinfog6": 3.792937118660471e-16,
         "rinfog10": 275956564.17722183,
@@ -2137,12 +2604,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 9351,
+        "solve_us": 1260,
+        "rel_res": 1.610733308287405e-16,
+        "inertia": [
+          750,
+          138,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 11100,
-        "factor_us": 172085,
-        "solve_us": 1585,
+        "analyse_us": 9640,
+        "factor_us": 1046007,
+        "solve_us": 5851,
         "rel_res": 1.9113767111232855e-16,
         "inertia": [
           750,
@@ -2166,9 +2645,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 2529,
-        "factor_us": 9388,
-        "solve_us": 346,
+        "analyse_us": 2647,
+        "factor_us": 10282,
+        "solve_us": 351,
         "rel_res": 8.900669311325849e-17,
         "inertia": [
           1000,
@@ -2179,8 +2658,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 9653,
-        "solve_us": 1002,
+        "factor_us": 8973,
+        "solve_us": 1024,
         "rel_res": 1.2148885632507775e-16,
         "rinfog6": 3.47706235801358e-16,
         "rinfog10": 630586311278.158,
@@ -2192,12 +2671,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 18034,
+        "solve_us": 306,
+        "rel_res": 1.23870498438236e-54,
+        "inertia": [
+          1000,
+          154,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 8012,
-        "factor_us": 56092,
-        "solve_us": 456,
+        "analyse_us": 7208,
+        "factor_us": 785207,
+        "solve_us": 5089,
         "rel_res": 2.0513492262482809e-16,
         "inertia": [
           1000,
@@ -2221,9 +2712,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 37120,
-        "factor_us": 80725,
-        "solve_us": 4927,
+        "analyse_us": 37701,
+        "factor_us": 83303,
+        "solve_us": 5158,
         "rel_res": 1.6321795280919093e-15,
         "inertia": [
           1200,
@@ -2234,8 +2725,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 29925,
-        "solve_us": 5600,
+        "factor_us": 33335,
+        "solve_us": 5458,
         "rel_res": 3.2142569916890765e-14,
         "rinfog6": 1.0400707238006545e-13,
         "rinfog10": 35.49973433948705,
@@ -2247,12 +2738,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 139843,
+        "solve_us": 3121,
+        "rel_res": 1.6451484767937877e-15,
+        "inertia": [
+          1200,
+          400,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 23961,
-        "factor_us": 106381,
-        "solve_us": 8306,
+        "analyse_us": 24443,
+        "factor_us": 2650864,
+        "solve_us": 8699,
         "rel_res": 3.98763254146619e-16,
         "inertia": [
           1200,
@@ -2276,9 +2779,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 1971,
-        "factor_us": 1311,
-        "solve_us": 119,
+        "analyse_us": 1887,
+        "factor_us": 1551,
+        "solve_us": 115,
         "rel_res": 8.950651279163614e-17,
         "inertia": [
           2058,
@@ -2289,8 +2792,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 2506,
-        "solve_us": 1870,
+        "factor_us": 2615,
+        "solve_us": 1847,
         "rel_res": 8.058275069552166e-18,
         "rinfog6": 6.353529177826199e-17,
         "rinfog10": 11931527967.550718,
@@ -2302,12 +2805,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 482,
+        "solve_us": 88,
+        "rel_res": 3.0371950448879304e-18,
+        "inertia": [
+          2058,
+          1025,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 598,
-        "factor_us": 517,
-        "solve_us": 84,
+        "analyse_us": 639,
+        "factor_us": 558,
+        "solve_us": 122,
         "rel_res": 1.4654912356507007e-16,
         "inertia": [
           2058,
@@ -2331,9 +2846,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 9158,
-        "factor_us": 1061,
-        "solve_us": 146,
+        "analyse_us": 8409,
+        "factor_us": 1349,
+        "solve_us": 301,
         "rel_res": 9.195728427654727e-17,
         "inertia": [
           1872,
@@ -2344,8 +2859,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 1402,
-        "solve_us": 959,
+        "factor_us": 1465,
+        "solve_us": 962,
         "rel_res": 1.1373636595268596e-16,
         "rinfog6": 2.8933906326535305e-16,
         "rinfog10": 78019987.52730417,
@@ -2357,12 +2872,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 4791,
+        "solve_us": 174,
+        "rel_res": 3.3645893239185115e-49,
+        "inertia": [
+          1872,
+          2138,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 958,
-        "factor_us": 472,
-        "solve_us": 135,
+        "analyse_us": 991,
+        "factor_us": 484,
+        "solve_us": 144,
         "rel_res": 9.221191939752307e-17,
         "inertia": [
           1872,
@@ -2386,9 +2913,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 14937,
-        "factor_us": 3320,
-        "solve_us": 175,
+        "analyse_us": 14189,
+        "factor_us": 3520,
+        "solve_us": 180,
         "rel_res": 1.4389726600539894e-16,
         "inertia": [
           2660,
@@ -2399,8 +2926,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 11382,
-        "solve_us": 4066,
+        "factor_us": 11501,
+        "solve_us": 4011,
         "rel_res": 4.606709586052134e-17,
         "rinfog6": 2.691494842427238e-17,
         "rinfog10": 13637028.194198508,
@@ -2412,12 +2939,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 1438,
+        "solve_us": 109,
+        "rel_res": 2.4883290549228703e-18,
+        "inertia": [
+          2660,
+          2654,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 1094,
-        "factor_us": 2086,
-        "solve_us": 222,
+        "analyse_us": 1076,
+        "factor_us": 2168,
+        "solve_us": 172,
         "rel_res": 2.6484865842047574e-16,
         "inertia": [
           2660,
@@ -2441,9 +2980,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 37687,
-        "factor_us": 41756,
-        "solve_us": 1671,
+        "analyse_us": 39280,
+        "factor_us": 46932,
+        "solve_us": 1729,
         "rel_res": 2.5086578686919545e-16,
         "inertia": [
           1000,
@@ -2454,8 +2993,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 72975,
-        "solve_us": 10645,
+        "factor_us": 73187,
+        "solve_us": 10614,
         "rel_res": 2.1979916100455135e-16,
         "rinfog6": 3.519882874699003e-16,
         "rinfog10": 1478661782.4359338,
@@ -2467,12 +3006,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 23324,
+        "solve_us": 1455,
+        "rel_res": 8.166407451226882e-40,
+        "inertia": [
+          1000,
+          5107,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 15827,
-        "factor_us": 142405,
-        "solve_us": 2027,
+        "analyse_us": 15787,
+        "factor_us": 2962147,
+        "solve_us": 7956,
         "rel_res": 1.7677708179840774e-16,
         "inertia": [
           1000,
@@ -2496,9 +3047,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 13145,
-        "factor_us": 2995,
-        "solve_us": 223,
+        "analyse_us": 14494,
+        "factor_us": 3129,
+        "solve_us": 258,
         "rel_res": 6.19432003482075e-17,
         "inertia": [
           7510,
@@ -2509,8 +3060,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 7029,
-        "solve_us": 3295,
+        "factor_us": 7272,
+        "solve_us": 3349,
         "rel_res": 7.999444476733348e-17,
         "rinfog6": 2.4628674248778745e-16,
         "rinfog10": 19597269446.272125,
@@ -2522,12 +3073,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 856,
+        "solve_us": 247,
+        "rel_res": 3.558571057961543e-53,
+        "inertia": [
+          7510,
+          1943,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 1605,
-        "factor_us": 758,
-        "solve_us": 235,
+        "analyse_us": 1599,
+        "factor_us": 776,
+        "solve_us": 238,
         "rel_res": 1.1948810557329245e-16,
         "inertia": [
           7510,
@@ -2551,9 +3114,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 9962,
-        "factor_us": 8789,
-        "solve_us": 1050,
+        "analyse_us": 10109,
+        "factor_us": 8768,
+        "solve_us": 1091,
         "rel_res": 7.539694402162535e-16,
         "inertia": [
           5960,
@@ -2564,8 +3127,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 11726,
-        "solve_us": 4696,
+        "factor_us": 11589,
+        "solve_us": 4750,
         "rel_res": 2.7692456487349016e-15,
         "rinfog6": 9.480146579447641e-15,
         "rinfog10": 56413769494.67634,
@@ -2577,12 +3140,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 4914,
+        "solve_us": 1263,
+        "rel_res": 2.6930542811831215e-16,
+        "inertia": [
+          5960,
+          3725,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 7270,
-        "factor_us": 5944,
-        "solve_us": 3841,
+        "analyse_us": 6704,
+        "factor_us": 5903,
+        "solve_us": 3864,
         "rel_res": 4.901673804195929e-17,
         "inertia": [
           5960,
@@ -2606,9 +3181,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 89060,
-        "factor_us": 207819,
-        "solve_us": 3277,
+        "analyse_us": 93925,
+        "factor_us": 237108,
+        "solve_us": 3298,
         "rel_res": 7.33329241303355e-17,
         "inertia": [
           6107,
@@ -2619,8 +3194,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 193035,
-        "solve_us": 11857,
+        "factor_us": 179580,
+        "solve_us": 11882,
         "rel_res": 1.3769680804622768e-16,
         "rinfog6": 4.6521459668337266e-17,
         "rinfog10": 4266433580.1959205,
@@ -2632,12 +3207,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 27587,
+        "solve_us": 1461,
+        "rel_res": 1.687933942359808e-17,
+        "inertia": [
+          6107,
+          5107,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 16683,
-        "factor_us": 176239,
-        "solve_us": 2283,
+        "analyse_us": 16546,
+        "factor_us": 2873589,
+        "solve_us": 10739,
         "rel_res": 9.256352998726786e-17,
         "inertia": [
           6107,
@@ -2661,9 +3248,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 132293,
-        "factor_us": 792081,
-        "solve_us": 13268,
+        "analyse_us": 139771,
+        "factor_us": 830964,
+        "solve_us": 13088,
         "rel_res": 2.02405550951435e-16,
         "inertia": [
           1500,
@@ -2675,12 +3262,24 @@
         "status": "fail",
         "solver_version": "mumps-5.8.2"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 139493,
+        "solve_us": 31801,
+        "rel_res": 2.0562861822061934e-16,
+        "inertia": [
+          1500,
+          10508,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 42436,
-        "factor_us": 347368,
-        "solve_us": 24946,
+        "analyse_us": 42657,
+        "factor_us": 5716485,
+        "solve_us": 51132,
         "rel_res": 6.744809473139285e-17,
         "inertia": [
           1500,
@@ -2704,9 +3303,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 32835,
-        "factor_us": 5136,
-        "solve_us": 721,
+        "analyse_us": 33525,
+        "factor_us": 5668,
+        "solve_us": 779,
         "rel_res": 1.3184885284031777e-16,
         "inertia": [
           6220,
@@ -2717,8 +3316,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 48816,
-        "solve_us": 6446,
+        "factor_us": 50005,
+        "solve_us": 6159,
         "rel_res": 1.4194851755508716e-16,
         "rinfog6": 4.0962463732424267e-16,
         "rinfog10": 301028757998.3624,
@@ -2730,12 +3329,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 8525,
+        "solve_us": 624,
+        "rel_res": 6.6607620628835655e-37,
+        "inertia": [
+          6220,
+          5924,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 5441,
-        "factor_us": 19663,
-        "solve_us": 1509,
+        "analyse_us": 5340,
+        "factor_us": 229257,
+        "solve_us": 11676,
         "rel_res": 1.7594300449612048e-16,
         "inertia": [
           6220,
@@ -2759,9 +3370,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 193339,
-        "factor_us": 55584,
-        "solve_us": 2978,
+        "analyse_us": 203552,
+        "factor_us": 51629,
+        "solve_us": 3134,
         "rel_res": 1.488397745590588e-16,
         "inertia": [
           1001,
@@ -2772,8 +3383,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 207231,
-        "solve_us": 62563,
+        "factor_us": 214776,
+        "solve_us": 62667,
         "rel_res": 1.45139282046304e-16,
         "rinfog6": 2.6895682436970015e-16,
         "rinfog10": 903774.2258994485,
@@ -2785,12 +3396,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 7682,
+        "solve_us": 1755,
+        "rel_res": 1.245886029287127e-16,
+        "inertia": [
+          1001,
+          52007,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 23264,
-        "factor_us": 10307,
-        "solve_us": 3792,
+        "analyse_us": 23449,
+        "factor_us": 10597,
+        "solve_us": 2739,
         "rel_res": 1.652721551128494e-16,
         "inertia": [
           1001,
@@ -2814,9 +3437,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 277490,
-        "factor_us": 55138,
-        "solve_us": 5546,
+        "analyse_us": 282666,
+        "factor_us": 56973,
+        "solve_us": 6105,
         "rel_res": 4.1849902582943047e-16,
         "inertia": [
           1001,
@@ -2827,8 +3450,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 205386,
-        "solve_us": 102313,
+        "factor_us": 216736,
+        "solve_us": 103962,
         "rel_res": 1.5807022559666565e-12,
         "rinfog6": 3.1608505441467524e-13,
         "rinfog10": 288322.15931750956,
@@ -2840,12 +3463,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 12065,
+        "solve_us": 1667,
+        "rel_res": 3.348891457697262e-16,
+        "inertia": [
+          1001,
+          52013,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 22392,
-        "factor_us": 9870,
-        "solve_us": 6674,
+        "analyse_us": 22667,
+        "factor_us": 10034,
+        "solve_us": 7016,
         "rel_res": 3.580140452566548e-16,
         "inertia": [
           1001,
@@ -2869,9 +3504,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 280148,
-        "factor_us": 261543,
-        "solve_us": 28550,
+        "analyse_us": 288968,
+        "factor_us": 291118,
+        "solve_us": 29290,
         "rel_res": 1.5805129913463881e-15,
         "inertia": [
           53881,
@@ -2882,8 +3517,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 747148,
-        "solve_us": 67848,
+        "factor_us": 802787,
+        "solve_us": 68554,
         "rel_res": 1.266048279020902e-15,
         "rinfog6": 2.127586892671206e-15,
         "rinfog10": 171.09928257981863,
@@ -2895,12 +3530,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 1742838,
+        "solve_us": 73339,
+        "rel_res": 8.091139319216617e-16,
+        "inertia": [
+          53881,
+          241,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 307182,
-        "factor_us": 5386197,
-        "solve_us": 183285,
+        "analyse_us": 310447,
+        "factor_us": 28664769,
+        "solve_us": 797148,
         "rel_res": 5.64774169631663e-17,
         "inertia": [
           53881,
@@ -2924,9 +3571,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 267145,
-        "factor_us": 297145,
-        "solve_us": 28683,
+        "analyse_us": 273855,
+        "factor_us": 327323,
+        "solve_us": 30125,
         "rel_res": 1.7949800931970314e-15,
         "inertia": [
           57721,
@@ -2937,8 +3584,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 687983,
-        "solve_us": 43664,
+        "factor_us": 710116,
+        "solve_us": 47015,
         "rel_res": 1.1691260703872838e-15,
         "rinfog6": 3.913690938863208e-15,
         "rinfog10": 2513.169617826667,
@@ -2950,12 +3597,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 585164,
+        "solve_us": 20016,
+        "rel_res": 1.5108689267198931e-15,
+        "inertia": [
+          57721,
+          241,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 307825,
-        "factor_us": 6288776,
-        "solve_us": 212588,
+        "analyse_us": 323895,
+        "factor_us": 15203511,
+        "solve_us": 263764,
         "rel_res": 8.771561385967581e-17,
         "inertia": [
           57721,
@@ -2979,9 +3638,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 12240322,
-        "factor_us": 11970,
-        "solve_us": 6206,
+        "analyse_us": 12746872,
+        "factor_us": 12531,
+        "solve_us": 7222,
         "rel_res": 1.1199182691669434e-14,
         "inertia": [
           32001,
@@ -2992,8 +3651,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 2412392,
-        "solve_us": 14572,
+        "factor_us": 2452144,
+        "solve_us": 14265,
         "rel_res": 2.309969341915191e-15,
         "rinfog6": 9.384227239371634e-15,
         "rinfog10": 758685.2068346628,
@@ -3005,12 +3664,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 3713486,
+        "solve_us": 4271,
+        "rel_res": 9.92884341655958e-15,
+        "inertia": [
+          32001,
+          31998,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 16833,
-        "factor_us": 6151357,
-        "solve_us": 9471,
+        "analyse_us": 17706,
+        "factor_us": 6175901,
+        "solve_us": 9403,
         "rel_res": 5.5921359831738e-16,
         "inertia": [
           32001,
@@ -3034,9 +3705,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 172354,
-        "factor_us": 42149,
-        "solve_us": 8062,
+        "analyse_us": 174221,
+        "factor_us": 43117,
+        "solve_us": 8655,
         "rel_res": 3.2297718623488803e-16,
         "inertia": [
           51198,
@@ -3047,8 +3718,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 281206,
-        "solve_us": 34919,
+        "factor_us": 290612,
+        "solve_us": 35814,
         "rel_res": 3.6765267450346056e-16,
         "rinfog6": 2.5725339894677817e-15,
         "rinfog10": 352834015136.9179,
@@ -3060,12 +3731,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 66092,
+        "solve_us": 8796,
+        "rel_res": 9.254531708951391e-17,
+        "inertia": [
+          51198,
+          25917,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 16288,
-        "factor_us": 672178,
-        "solve_us": 72563,
+        "analyse_us": 17623,
+        "factor_us": 2413159,
+        "solve_us": 92562,
         "rel_res": 1.461063865667602e-16,
         "inertia": [
           51198,
@@ -3089,9 +3772,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 294380,
-        "factor_us": 79545,
-        "solve_us": 5740,
+        "analyse_us": 308427,
+        "factor_us": 85384,
+        "solve_us": 6134,
         "rel_res": 1.967595246798768e-16,
         "inertia": [
           43973,
@@ -3102,8 +3785,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 465435,
-        "solve_us": 61802,
+        "factor_us": 476323,
+        "solve_us": 64029,
         "rel_res": 1.4324365070860392e-16,
         "rinfog6": 2.9490330836172076e-15,
         "rinfog10": 153747554666.82642,
@@ -3115,12 +3798,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 50332,
+        "solve_us": 9442,
+        "rel_res": 2.2312815854216907e-17,
+        "inertia": [
+          43973,
+          48256,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 24115,
-        "factor_us": 447311,
-        "solve_us": 20247,
+        "analyse_us": 27120,
+        "factor_us": 1505611,
+        "solve_us": 246141,
         "rel_res": 2.201358028920472e-16,
         "inertia": [
           43973,
@@ -3144,14 +3839,14 @@
       "feral": {
         "status": "fail",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 601108,
+        "analyse_us": 631033,
         "fail_reason": "factor_InvalidInput(\"matrix_contains_NaN_or_Inf_at_index_(0,0)\")"
       },
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 589964,
-        "solve_us": 43754,
+        "factor_us": 594337,
+        "solve_us": 46184,
         "rinfog6": 0.0,
         "rinfog10": 1.0,
         "inertia": [
@@ -3161,12 +3856,23 @@
         ],
         "infog1": "2"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 60223,
+        "solve_us": 8185,
+        "inertia": [
+          64847,
+          38970,
+          103
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 429451,
-        "factor_us": 48293,
-        "solve_us": 55001,
+        "analyse_us": 429348,
+        "factor_us": 47900,
+        "solve_us": 58522,
         "inertia": [
           64924,
           38920,
@@ -3189,9 +3895,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 164351,
-        "factor_us": 46944,
-        "solve_us": 4240,
+        "analyse_us": 169589,
+        "factor_us": 47547,
+        "solve_us": 4609,
         "rel_res": 1.2301478919685593e-16,
         "inertia": [
           60006,
@@ -3202,8 +3908,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 231532,
-        "solve_us": 26270,
+        "factor_us": 242874,
+        "solve_us": 25724,
         "rel_res": 1.3565368734393415e-16,
         "rinfog6": 3.050680123192637e-16,
         "rinfog10": 48642.630032561465,
@@ -3215,12 +3921,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 8590,
+        "solve_us": 3697,
+        "rel_res": 8.332115663672182e-17,
+        "inertia": [
+          60006,
+          50005,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 137093,
-        "factor_us": 13527,
-        "solve_us": 5021,
+        "analyse_us": 138218,
+        "factor_us": 13239,
+        "solve_us": 5136,
         "rel_res": 1.3241316210603092e-16,
         "inertia": [
           60006,
@@ -3244,9 +3962,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 1111251,
-        "factor_us": 27271,
-        "solve_us": 18405,
+        "analyse_us": 1128867,
+        "factor_us": 28929,
+        "solve_us": 18852,
         "rel_res": 1.2131768174007027e-14,
         "inertia": [
           64000,
@@ -3257,8 +3975,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 1874009,
-        "solve_us": 33653,
+        "factor_us": 1906875,
+        "solve_us": 34325,
         "rel_res": 4.314512043307511e-09,
         "rinfog6": 9.373186038568355e-10,
         "rinfog10": 58186987.99315064,
@@ -3270,12 +3988,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 138469,
+        "solve_us": 7777,
+        "rel_res": 8.140001852975916e-15,
+        "inertia": [
+          64000,
+          63995,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 277133,
-        "factor_us": 109547,
-        "solve_us": 41371,
+        "analyse_us": 276472,
+        "factor_us": 110785,
+        "solve_us": 46131,
         "rel_res": 8.154282522232726e-15,
         "inertia": [
           64000,
@@ -3299,9 +4029,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 445439,
-        "factor_us": 121574,
-        "solve_us": 29947,
+        "analyse_us": 456173,
+        "factor_us": 125960,
+        "solve_us": 30185,
         "rel_res": 7.003268452759202e-16,
         "inertia": [
           90600,
@@ -3312,8 +4042,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 549072,
-        "solve_us": 77447,
+        "factor_us": 565300,
+        "solve_us": 86844,
         "rel_res": 9.737447153679059e-16,
         "rinfog6": 4.481569028873393e-15,
         "rinfog10": 928953510095.5923,
@@ -3325,12 +4055,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 153099,
+        "solve_us": 22433,
+        "rel_res": 1.1305836020383097e-16,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 530511,
-        "factor_us": 1897600,
-        "solve_us": 258752,
+        "analyse_us": 536711,
+        "factor_us": 8907409,
+        "solve_us": 658729,
         "rel_res": 4.684095540920823e-17,
         "inertia": [
           90600,
@@ -3354,9 +4096,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 443787,
-        "factor_us": 102797,
-        "solve_us": 27897,
+        "analyse_us": 455487,
+        "factor_us": 103460,
+        "solve_us": 28922,
         "rel_res": 6.922781343712955e-16,
         "inertia": [
           90600,
@@ -3367,8 +4109,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 550616,
-        "solve_us": 76006,
+        "factor_us": 551154,
+        "solve_us": 81572,
         "rel_res": 9.805827237531477e-16,
         "rinfog6": 4.369243379210889e-15,
         "rinfog10": 170356665336196.88,
@@ -3380,12 +4122,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 131960,
+        "solve_us": 27165,
+        "rel_res": 1.248583133978272e-16,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 539158,
-        "factor_us": 2127032,
-        "solve_us": 54897,
+        "analyse_us": 537316,
+        "factor_us": 7996898,
+        "solve_us": 269271,
         "rel_res": 7.318826368850336e-16,
         "inertia": [
           90600,
@@ -3409,9 +4163,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 439692,
-        "factor_us": 116932,
-        "solve_us": 29428,
+        "analyse_us": 455114,
+        "factor_us": 121862,
+        "solve_us": 30043,
         "rel_res": 7.1077953591616e-16,
         "inertia": [
           90600,
@@ -3422,8 +4176,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 527519,
-        "solve_us": 76590,
+        "factor_us": 551050,
+        "solve_us": 82240,
         "rel_res": 9.780926732863436e-16,
         "rinfog6": 5.386083348849962e-15,
         "rinfog10": 169631995485857.72,
@@ -3435,12 +4189,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 166828,
+        "solve_us": 22773,
+        "rel_res": 1.2675427492159123e-16,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 544389,
-        "factor_us": 1868366,
-        "solve_us": 100693,
+        "analyse_us": 552440,
+        "factor_us": 7747622,
+        "solve_us": 291704,
         "rel_res": 9.53836291970607e-16,
         "inertia": [
           90600,
@@ -3464,9 +4230,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 439489,
-        "factor_us": 120187,
-        "solve_us": 29095,
+        "analyse_us": 453408,
+        "factor_us": 124859,
+        "solve_us": 30595,
         "rel_res": 7.118621283686465e-16,
         "inertia": [
           90600,
@@ -3477,8 +4243,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 529821,
-        "solve_us": 76219,
+        "factor_us": 601693,
+        "solve_us": 81522,
         "rel_res": 9.758575743243449e-16,
         "rinfog6": 5.386083348856419e-15,
         "rinfog10": 169631995482410.5,
@@ -3490,12 +4256,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 165949,
+        "solve_us": 35896,
+        "rel_res": 1.2698050239674028e-16,
+        "inertia": [
+          90600,
+          90300,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 545993,
-        "factor_us": 1685993,
-        "solve_us": 117001,
+        "analyse_us": 540334,
+        "factor_us": 7540164,
+        "solve_us": 314162,
         "rel_res": 9.520238610009364e-16,
         "inertia": [
           90600,
@@ -3519,9 +4297,9 @@
       "feral": {
         "status": "ok",
         "solver_version": "feral-0.2.0",
-        "analyse_us": 3760897,
-        "factor_us": 275751,
-        "solve_us": 41056,
+        "analyse_us": 4213660,
+        "factor_us": 295321,
+        "solve_us": 42816,
         "rel_res": 1.0805853099543573e-14,
         "inertia": [
           129601,
@@ -3532,8 +4310,8 @@
       "mumps": {
         "status": "ok",
         "solver_version": "mumps-5.8.2",
-        "factor_us": 792802,
-        "solve_us": 113876,
+        "factor_us": 810923,
+        "solve_us": 119162,
         "rel_res": 5.215947152210827e-15,
         "rinfog6": 3.2671179332939063e-13,
         "rinfog10": 9991999.439047888,
@@ -3545,12 +4323,24 @@
         ],
         "infog1": "0"
       },
+      "ma57": {
+        "status": "ok",
+        "solver_version": "ma57-2023.11.17",
+        "factor_us": 4316407,
+        "solve_us": 50814,
+        "rel_res": 1.30249469537673e-16,
+        "inertia": [
+          129601,
+          130080,
+          0
+        ]
+      },
       "ma97": {
         "status": "ok",
         "solver_version": "ma97-2.8.1",
-        "analyse_us": 827689,
-        "factor_us": 2962168,
-        "solve_us": 129693,
+        "analyse_us": 808412,
+        "factor_us": 7192813,
+        "solve_us": 275729,
         "rel_res": 9.238552005871561e-16,
         "inertia": [
           129601,

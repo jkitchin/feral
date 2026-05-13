@@ -23,7 +23,7 @@ import statistics
 from pathlib import Path
 
 COMP_DIR = Path(__file__).resolve().parent
-SOLVERS = ["feral", "mumps", "ma97"]
+SOLVERS = ["feral", "mumps", "ma57", "ma97"]
 
 
 def bucket(n: int) -> str:
@@ -78,13 +78,13 @@ def render(records) -> str:
     lines: list[str] = []
 
     # --- 1. Overview ---
-    lines.append("# FERAL vs MUMPS vs HSL MA97 — KKT solver comparison")
+    lines.append("# FERAL vs MUMPS vs HSL MA57 vs HSL MA97 — KKT solver comparison")
     lines.append("")
     lines.append(f"Total matrices: **{len(records)}**, drawn from the FERAL CUTEst")
     lines.append("KKT corpus and Mittelmann large-scale KKT corpus.")
     lines.append("Sampling spans 5 size buckets and 63 distinct CUTEst/Mittelmann")
     lines.append("families. RHS is synthetic: `b = A · x_true` with")
-    lines.append("`x_true[i] = 1 + i/n`. Same RHS is fed to all three solvers.")
+    lines.append("`x_true[i] = 1 + i/n`. Same RHS is fed to all four solvers.")
     lines.append("")
     lines.append("**Solvers** — each is configured with its recommended")
     lines.append("high-accuracy defaults: shape-aware scaling on, iterative")
@@ -113,6 +113,17 @@ def render(records) -> str:
                  "default is `0` = no refinement); `ICNTL(11) = 1` (full "
                  "error analysis); `ICNTL(24) = 1` (null pivot detection). "
                  "Sequential build, no MC64 scaling by default. |")
+    lines.append(f"| MA57  | {versions['ma57']  or '?'} | "
+                 "`ma57bd` + `ma57dd` | "
+                 "`ICNTL(6) = 5` (auto AMD / METIS); `ICNTL(7) = 1` "
+                 "(numerical BK-style pivoting); `ICNTL(15) = 1` "
+                 "(automatic scaling on); `CNTL(1) = 1e-8` pivot threshold "
+                 "(matches Ipopt's MA57 default). Solve uses `MA57DD JOB=1` "
+                 "with `ICNTL(9) = 1` — single solve with no iterative "
+                 "refinement, since with refinement on (`ICNTL(9) = 10`) "
+                 "MA57 produced non-deterministic NaN solutions on several "
+                 "borderline-conditioned KKT systems. Residual is computed "
+                 "externally by the driver. CoinHSL 2023.11.17, sequential. |")
     lines.append(f"| MA97  | {versions['ma97']  or '?'} | "
                  "`ma97_factor matrix_type=4` + Richardson loop around "
                  "`ma97_solve_d` | "
@@ -161,8 +172,9 @@ def render(records) -> str:
     for rec in records:
         b = bucket(rec["matrix"]["n"])
         by_bucket.setdefault(b, []).append(rec)
-    lines.append("| Bucket | n range |  feral |  MUMPS |  MA97  | feral/MUMPS | feral/MA97 |")
-    lines.append("|---|---|---:|---:|---:|---:|---:|")
+    lines.append("| Bucket | n range |  feral |  MUMPS |  MA57  |  MA97  | "
+                 "feral/MUMPS | feral/MA57 | feral/MA97 |")
+    lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|")
     for b in ["tiny (n<100)", "small (100-1k)", "medium (1k-10k)",
               "large (10k-100k)", "xl (>=100k)"]:
         recs = by_bucket.get(b, [])
@@ -173,11 +185,13 @@ def render(records) -> str:
                           for r in recs if r["solvers"].get(s, {}).get("status") == "ok"])
               for s in SOLVERS}
         ratio_mu = gm["feral"]/gm["mumps"] if gm["feral"] and gm["mumps"] else None
+        ratio_57 = gm["feral"]/gm["ma57"]  if gm["feral"] and gm["ma57"]  else None
         ratio_ma = gm["feral"]/gm["ma97"]  if gm["feral"] and gm["ma97"]  else None
         def f(x): return f"{x:,.0f}" if x else "—"
         def fr(x): return f"{x:.2f}×" if x else "—"
         lines.append(f"| {b} | {nrange} | {f(gm['feral'])} | {f(gm['mumps'])} | "
-                     f"{f(gm['ma97'])} | {fr(ratio_mu)} | {fr(ratio_ma)} |")
+                     f"{f(gm['ma57'])} | {f(gm['ma97'])} | {fr(ratio_mu)} | "
+                     f"{fr(ratio_57)} | {fr(ratio_ma)} |")
     lines.append("")
     lines.append("> Ratios < 1.0 mean **feral is faster**. Geomean is over the")
     lines.append("> matrices in the bucket where the named solver succeeded.")
@@ -223,8 +237,9 @@ def render(records) -> str:
         lines.append("No matrix in the sample has MUMPS COND1 ≥ 1e8.")
     else:
         lines.append("| Matrix | n | MUMPS COND1 | feral res / inertia | "
-                     "MUMPS res / inertia | MA97 res / inertia |")
-        lines.append("|---|---:|---:|---|---|---|")
+                     "MUMPS res / inertia | MA57 res / inertia | "
+                     "MA97 res / inertia |")
+        lines.append("|---|---:|---:|---|---|---|---|")
         def cell(e):
             if e.get("status") != "ok":
                 return f"`{e.get('status', '?')}`"
@@ -236,9 +251,10 @@ def render(records) -> str:
             mx = rec["matrix"]
             f_ = cell(rec["solvers"].get("feral", {}))
             mm = cell(rec["solvers"].get("mumps", {}))
-            aa = cell(rec["solvers"].get("ma97",  {}))
+            a57 = cell(rec["solvers"].get("ma57",  {}))
+            a97 = cell(rec["solvers"].get("ma97",  {}))
             lines.append(f"| {mx['family']}/{mx['id']} | {mx['n']:,} | "
-                         f"{cond:.1e} | {f_} | {mm} | {aa} |")
+                         f"{cond:.1e} | {f_} | {mm} | {a57} | {a97} |")
         lines.append("")
         lines.append("Interpretation: a residual ≈ ε·COND1 is the best a")
         lines.append("linear solve can theoretically achieve. When COND1 is")
@@ -275,12 +291,13 @@ def render(records) -> str:
                               ("c (cond ≈ 500)",  "HEART6_pounce_diag/heart6_iter_c")]:
                 rr_f = fmt_res(get(key, "feral", "rel_res"))
                 rr_m = fmt_res(get(key, "mumps", "rel_res"))
-                rr_a = fmt_res(get(key, "ma97",  "rel_res"))
+                rr_57 = fmt_res(get(key, "ma57", "rel_res"))
+                rr_97 = fmt_res(get(key, "ma97",  "rel_res"))
                 iv = get(key, "feral", "inertia")
                 inert = f"{iv[0]}+{iv[1]}+{iv[2]}" if iv else "—"
                 narrative.append(
                     f"- iter_{tag}: feral residual {rr_f}, MUMPS {rr_m}, "
-                    f"MA97 {rr_a}; inertia {inert} on all three."
+                    f"MA57 {rr_57}, MA97 {rr_97}; inertia {inert}."
                 )
             narrative.append(
                 "The pounce report observed feral residual ≈ 1e11 on "
@@ -294,7 +311,8 @@ def render(records) -> str:
         if "MSS1/MSS1_0165" in by_id:
             mumps_status = get("MSS1/MSS1_0165", "mumps", "status")
             f_res = fmt_res(get("MSS1/MSS1_0165", "feral", "rel_res"))
-            a_res = fmt_res(get("MSS1/MSS1_0165", "ma97",  "rel_res"))
+            a57_res = fmt_res(get("MSS1/MSS1_0165", "ma57", "rel_res"))
+            a97_res = fmt_res(get("MSS1/MSS1_0165", "ma97",  "rel_res"))
             iv = get("MSS1/MSS1_0165", "feral", "inertia")
             inert = f"{iv[0]}+{iv[1]}+{iv[2]}" if iv else "—"
             narrative.append(
@@ -303,10 +321,10 @@ def render(records) -> str:
                 f"`{mumps_status}`s on this matrix (`INFOG(1) = -9`, "
                 f"insufficient symbolic-phase integer workspace — a "
                 f"known MUMPS-side limitation that doesn't reflect the "
-                f"matrix's analytic conditioning). feral and MA97 both "
-                f"succeed with inertia {inert} and residuals "
-                f"{f_res} / {a_res} respectively. Feral is "
-                f"strictly more robust than MUMPS here."
+                f"matrix's analytic conditioning). feral, MA57, and MA97 "
+                f"all succeed with inertia {inert} and residuals "
+                f"feral={f_res}, MA57={a57_res}, MA97={a97_res}. Feral "
+                f"is strictly more robust than MUMPS here."
             )
             narrative.append("")
         if narrative:
@@ -345,18 +363,19 @@ def render(records) -> str:
             agree += 1
         elif all(i for i in ins):
             disagree.append((rec, ins))
-    lines.append(f"All three solvers report identical inertia on **{agree}** "
+    lines.append(f"All four solvers report identical inertia on **{agree}** "
                  f"of {len(records)} matrices.")
     if disagree:
         lines.append("")
         lines.append("Inertia mismatches:")
         lines.append("")
-        lines.append("| Matrix | n | feral | MUMPS | MA97 |")
-        lines.append("|---|---:|---|---|---|")
+        lines.append("| Matrix | n | feral | MUMPS | MA57 | MA97 |")
+        lines.append("|---|---:|---|---|---|---|")
         for rec, ins in disagree:
             m = rec["matrix"]
-            f_, m_, a_ = (f"{x[0]}+{x[1]}+{x[2]}" if x else "—" for x in ins)
-            lines.append(f"| {m['family']}/{m['id']} | {m['n']} | {f_} | {m_} | {a_} |")
+            cells = [f"{x[0]}+{x[1]}+{x[2]}" if x else "—" for x in ins]
+            lines.append(f"| {m['family']}/{m['id']} | {m['n']} | "
+                         f"{cells[0]} | {cells[1]} | {cells[2]} | {cells[3]} |")
     lines.append("")
 
     # --- 7. Failures table ---
@@ -391,21 +410,23 @@ def render(records) -> str:
     ratios.sort(key=lambda t: t[0])
     def fmt_row(rec, ratio):
         mx = rec["matrix"]
-        f = rec["solvers"]["feral"]; m = rec["solvers"]["mumps"]; a = rec["solvers"].get("ma97", {})
+        f = rec["solvers"]["feral"]; m = rec["solvers"]["mumps"]
+        a57 = rec["solvers"].get("ma57", {}); a97 = rec["solvers"].get("ma97", {})
         return (f"| {mx['family']}/{mx['id']} | {mx['n']:,} | {mx['nnz']:,} | "
                 f"{fmt_us(f['factor_us'])} | {fmt_us(m['factor_us'])} | "
-                f"{fmt_us(a.get('factor_us'))} | {ratio:.2f}× |")
+                f"{fmt_us(a57.get('factor_us'))} | {fmt_us(a97.get('factor_us'))} | "
+                f"{ratio:.2f}× |")
     lines.append("### Top 10 feral wins vs MUMPS")
     lines.append("")
-    lines.append("| Matrix | n | nnz | feral | MUMPS | MA97 | feral/MUMPS |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    lines.append("| Matrix | n | nnz | feral | MUMPS | MA57 | MA97 | feral/MUMPS |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
     for ratio, rec in ratios[:10]:
         lines.append(fmt_row(rec, ratio))
     lines.append("")
     lines.append("### Top 10 feral losses vs MUMPS")
     lines.append("")
-    lines.append("| Matrix | n | nnz | feral | MUMPS | MA97 | feral/MUMPS |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    lines.append("| Matrix | n | nnz | feral | MUMPS | MA57 | MA97 | feral/MUMPS |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|")
     for ratio, rec in ratios[-10:][::-1]:
         lines.append(fmt_row(rec, ratio))
     lines.append("")
@@ -415,8 +436,8 @@ def render(records) -> str:
     lines.append("")
     lines.append("| Matrix | n | nnz | density | "
                  "feral factor / rel\\_res | MUMPS factor / rel\\_res | "
-                 "MA97 factor / rel\\_res |")
-    lines.append("|---|---:|---:|---:|---|---|---|")
+                 "MA57 factor / rel\\_res | MA97 factor / rel\\_res |")
+    lines.append("|---|---:|---:|---:|---|---|---|---|")
     for rec in records:
         mx = rec["matrix"]
         cells = []
@@ -427,7 +448,8 @@ def render(records) -> str:
             else:
                 cells.append(f"`{e.get('status', '?')}`")
         lines.append(f"| {mx['family']}/{mx['id']} | {mx['n']:,} | {mx['nnz']:,} | "
-                     f"{mx['density']:.1%} | {cells[0]} | {cells[1]} | {cells[2]} |")
+                     f"{mx['density']:.1%} | {cells[0]} | {cells[1]} | "
+                     f"{cells[2]} | {cells[3]} |")
     lines.append("")
     lines.append("---")
     lines.append("")

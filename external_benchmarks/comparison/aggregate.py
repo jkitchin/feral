@@ -17,6 +17,7 @@ Output schema (list of records):
                     "inertia": [pos, neg, zero], "status": "ok|fail",
                     "fail_reason": "..."},
         "mumps":  {...},
+        "ma57":   {...},
         "ma97":   {...}
       }
     }
@@ -34,7 +35,7 @@ from pathlib import Path
 COMP_DIR = Path(__file__).resolve().parent
 OUT_DIR = COMP_DIR / "out"
 
-SOLVERS = ["feral", "mumps", "ma97"]
+SOLVERS = ["feral", "mumps", "ma57", "ma97"]
 
 
 def parse_sidecar(path: Path) -> dict | None:

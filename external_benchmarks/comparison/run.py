@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-solver comparison harness: feral vs MUMPS vs HSL MA97.
+"""Cross-solver comparison harness: feral vs MUMPS vs HSL MA57 vs HSL MA97.
 
 Reads the curated `sample.tsv`, generates one synthetic RHS per matrix
 (b = A * x_true with x_true[i] = 1 + i/n), then invokes each solver
@@ -11,9 +11,9 @@ Per-solver sidecars land under `external_benchmarks/comparison/out/<solver>/`.
 Aggregation into a single `comparison.json` is done by `aggregate.py`.
 
 Usage:
-    python3 run.py                 # full sample
+    python3 run.py                 # full sample, all four solvers
     python3 run.py --limit 5       # smoke
-    python3 run.py --solvers feral,ma97  # subset
+    python3 run.py --solvers feral,ma57  # subset
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ RHS_DIR = COMP_DIR / "rhs"
 
 FERAL_BIN = ROOT / "target" / "release" / "bench_one_matrix"
 MUMPS_BIN = ROOT / "external_benchmarks" / "mumps_oracle" / "mumps_bench"
+MA57_BIN = ROOT / "external_benchmarks" / "ma57_oracle" / "ma57_bench"
 HSL_BIN = ROOT / "external_benchmarks" / "hsl_bench" / "hsl_bench"
 
 
@@ -134,6 +135,8 @@ def run_solver(solver: str, manifest: Path, time_limit_s: int) -> None:
         bin_ = FERAL_BIN
     elif solver == "mumps":
         bin_ = MUMPS_BIN
+    elif solver == "ma57":
+        bin_ = MA57_BIN
     elif solver == "ma97":
         bin_ = HSL_BIN
     else:
@@ -153,7 +156,7 @@ def main() -> int:
     ap.add_argument("--sample", default=str(COMP_DIR / "sample.tsv"))
     ap.add_argument("--limit", type=int, default=None,
                     help="cap number of matrices (smoke run)")
-    ap.add_argument("--solvers", default="feral,mumps,ma97")
+    ap.add_argument("--solvers", default="feral,mumps,ma57,ma97")
     ap.add_argument("--time-limit", type=int, default=600,
                     help="seconds per solver, whole manifest")
     ap.add_argument("--force-rhs", action="store_true")
