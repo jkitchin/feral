@@ -68,3 +68,27 @@ fdd631c feat(issue-9): Phase 2.4.3 BLAS-3 quad kernel — schur_panel_minus_nofm
 
 ## Test Status
 ```
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-181091aaff0a8e67)
+
+running 5 tests
+test test_gate_just_outside_n_tiny ... ok
+test test_gate_tiny_sparse_in ... ok
+test test_determinism_tiny ... ok
+test test_gate_boundary_n_16 ... ok
+test test_solve_parity_tiny_real_matrix ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests feral
+
+running 1 test
+test src/symbolic/profiler.rs - symbolic::profiler::SymbolicProfiler (line 27) ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+```
+
+## Benchmark
+```
