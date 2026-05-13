@@ -1,3 +1,4 @@
+pub(crate) mod block_ldlt32;
 pub mod equilibrate;
 pub mod factor;
 pub mod matrix;
