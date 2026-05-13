@@ -4,6 +4,36 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — BLAS-3 quad-column trailing-update kernel (#9, parked on #13)
+
+`schur_panel_minus_nofma_strided_quad` in `src/dense/schur_kernel.rs`
+processes four trailing columns per pulp dispatch, halving src memory
+traffic vs the existing dual kernel. Wired into
+`apply_blocked_schur_panel` — every front with ≥ 4 trailing columns
+now routes through quad → dual → single fall-through. Bit-exact per
+column with four sequential single-column dispatches (176-config
+parity sweep + 19 byte-identical `blocked_ldlt` integration tests).
+Zero corpus regression: dense small-frontal p90 1.33 (target ≤ 2.0
+PASS), medium p90 1.70 (target ≤ 3.0 PASS); 154428/154481 inertia
+match, 99.8 % residual pass.
+
+No measurable headline-throughput win on the current corpus — the
+2026-04-27 CHAINWOO_0000 root that motivated the work (1984 × 32) no
+longer exists on the current build (max actual nrow = 18 after METIS-
+ND on this build). The new bottleneck is per-supernode fixed
+overhead, tracked as issue #13. Kernel retained as parked
+infrastructure: it re-engages automatically when fronts grow tall-
+skinny again. See `dev/decisions.md` 2026-05-12 (c).
+
+### Added — block_ldlt32 scaffold and trailing-update primitives (#9)
+
+New module `src/dense/block_ldlt32.rs` with `BLOCK_SIZE = 32`,
+`factor_block32` stub (delegates to `factor_frontal` pending the
+const-generic driver port), `update_1x1_block32`, `update_2x2_block32`
+scalar primitives, and a bit-parity test harness diffing factors by
+`to_bits()`. Signatures match the planned pulp dispatch contract; the
+SIMD body swap is a surgical follow-up gated on issue #13.
+
 ## [0.2.0] - 2026-05-12
 
 ### Fixed — Honest `resolved_method` and consistent `Auto` routing (#3)
