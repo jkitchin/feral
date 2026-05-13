@@ -28,6 +28,7 @@
 
 use crate::dense::factor::{factor_frontal, BunchKaufmanParams, FrontalFactors};
 use crate::dense::matrix::SymmetricMatrix;
+use crate::dense::schur_kernel;
 use crate::error::FeralError;
 
 /// Hard-coded block size for this kernel.
@@ -67,6 +68,91 @@ pub(crate) fn factor_block32(
     // does not yet route here, so this branch is currently exercised
     // only by the unit tests below.
     factor_frontal(matrix, ncol, may_delay, params)
+}
+
+/// Rank-1 trailing update for a 1×1 pivot at column `p` of a 32×32
+/// column-major dense block.
+///
+/// Bit-exact analogue of `factor::do_1x1_update(a, 32, p)`. Reads the
+/// pivot value from `a[p*32 + p]`, scales the strict-below-diagonal
+/// portion of column `p` by `1/d` in place, then applies
+/// `a[j*32 + r] -= alpha * a[p*32 + r]` for every `(j, r)` with
+/// `p < j < 32` and `j <= r < 32`, where `alpha = a[p*32 + j]_post · d`
+/// (the same two-rounding chain `do_1x1_update` uses).
+///
+/// **Step 2a body:** scalar reference. Identical per-element rounding
+/// to `do_1x1_update` because (i) `alpha` is computed the same way,
+/// (ii) the axpy uses `axpy_minus_unroll4_nofma` which is itself
+/// bit-exact with scalar, (iii) the outer loop walks `j` in the same
+/// order. **Step 3** replaces this body with a one-pulp-dispatch
+/// kernel that packs 4 destination columns per source-vector load.
+/// The signature does not change and the bit-parity tests below
+/// catch any per-element divergence.
+#[allow(dead_code)] // Driver dispatch lands in Step 2b.
+pub(crate) fn update_1x1_block32(a: &mut [f64], p: usize) {
+    debug_assert!(a.len() >= BLOCK_SIZE * BLOCK_SIZE);
+    debug_assert!(p < BLOCK_SIZE);
+    let n = BLOCK_SIZE;
+    let d = a[p * n + p];
+    if d.abs() == 0.0 {
+        return;
+    }
+    let inv_d = 1.0 / d;
+    for i in (p + 1)..n {
+        a[p * n + i] *= inv_d;
+    }
+    for j in (p + 1)..n {
+        let l_jk = a[p * n + j];
+        let alpha = l_jk * d;
+        // src = column p rows j..n (already scaled by inv_d above);
+        // dst = column j rows j..n. Disjoint because p < j.
+        let (before, rest) = a.split_at_mut(j * n);
+        let src = &before[p * n + j..p * n + n];
+        let dst = &mut rest[j..n];
+        schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+    }
+}
+
+/// Rank-2 trailing update for a 2×2 pivot at columns `p`, `p+1` of a
+/// 32×32 column-major dense block.
+///
+/// Bit-exact analogue of `factor::do_2x2_update(a, 32, p, d11, d21,
+/// d22)`. Computes the 2×2 inverse from `(d11, d21, d22)`, scales
+/// the strict-below-diagonal portion of columns `p` and `p+1` in
+/// place by that inverse, then applies the rank-2 update for every
+/// trailing column `j` in `(p+2)..32`.
+///
+/// **Step 2a body:** scalar reference. Step 3 swaps the body for a
+/// two-source-load SIMD kernel; signature is stable.
+#[allow(dead_code)] // Driver dispatch lands in Step 2b.
+pub(crate) fn update_2x2_block32(a: &mut [f64], p: usize, d11: f64, d21: f64, d22: f64) {
+    debug_assert!(a.len() >= BLOCK_SIZE * BLOCK_SIZE);
+    debug_assert!(p + 1 < BLOCK_SIZE);
+    let n = BLOCK_SIZE;
+    let det = d11 * d22 - d21 * d21;
+    if det.abs() == 0.0 {
+        return;
+    }
+    let inv_det = 1.0 / det;
+
+    for i in (p + 2)..n {
+        let a_ik = a[p * n + i];
+        let a_ik1 = a[(p + 1) * n + i];
+        a[p * n + i] = (d22 * a_ik - d21 * a_ik1) * inv_det;
+        a[(p + 1) * n + i] = (d11 * a_ik1 - d21 * a_ik) * inv_det;
+    }
+
+    for j in (p + 2)..n {
+        let l_j0 = a[p * n + j];
+        let l_j1 = a[(p + 1) * n + j];
+        let dl_j0 = d11 * l_j0 + d21 * l_j1;
+        let dl_j1 = d21 * l_j0 + d22 * l_j1;
+        let (before, rest) = a.split_at_mut(j * n);
+        let src0 = &before[p * n + j..p * n + n];
+        let src1 = &before[(p + 1) * n + j..(p + 1) * n + n];
+        let dst = &mut rest[j..n];
+        schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_j0, src1, dl_j1);
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +273,161 @@ mod tests {
             data: src.data.clone(),
         };
         (a, b)
+    }
+
+    /// Build a 32×32 dense lower-triangular block (column-major) seeded
+    /// from splitmix64 — same generator as `seeded_indefinite_32x32`
+    /// but returns the raw `[f64; 1024]` for direct primitive tests
+    /// (no `SymmetricMatrix` wrapper).
+    fn seeded_block_1024(seed: u64) -> Vec<f64> {
+        let mut state: u64 = seed;
+        let mut next = || -> f64 {
+            state = state.wrapping_add(0x9E3779B97F4A7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^= z >> 31;
+            ((z >> 11) as f64) * f64::from_bits(0x3CA0_0000_0000_0000)
+        };
+        let mut data = vec![0.0f64; BLOCK_SIZE * BLOCK_SIZE];
+        for j in 0..BLOCK_SIZE {
+            for i in j..BLOCK_SIZE {
+                let v = if i == j {
+                    2.0 * next() - 1.0
+                } else {
+                    next() - 0.5
+                };
+                data[j * BLOCK_SIZE + i] = v;
+            }
+        }
+        data
+    }
+
+    fn assert_blocks_bit_equal(actual: &[f64], expected: &[f64], context: &str) {
+        assert_eq!(actual.len(), expected.len(), "{}: block length", context);
+        for k in 0..actual.len() {
+            assert_eq!(
+                actual[k].to_bits(),
+                expected[k].to_bits(),
+                "{}: a[{k}] mismatch (actual={}, expected={})",
+                context,
+                actual[k],
+                expected[k],
+            );
+        }
+    }
+
+    /// `update_1x1_block32(a, p)` produces a block byte-identical to
+    /// `factor::do_1x1_update(a, 32, p)`. Under the Step 2a scalar body
+    /// this is bit-equal by construction; the same assertion catches
+    /// any divergence introduced by Step 3's SIMD body.
+    #[test]
+    fn update_1x1_block32_matches_do_1x1_update_at_p0() {
+        let a0 = seeded_block_1024(0xA5A5_5A5A_DEAD_BEEF);
+        let mut a_scalar = a0.clone();
+        let mut a_block = a0;
+        crate::dense::factor::do_1x1_update(&mut a_scalar, BLOCK_SIZE, 0);
+        update_1x1_block32(&mut a_block, 0);
+        assert_blocks_bit_equal(&a_block, &a_scalar, "update_1x1_block32 at p=0");
+    }
+
+    /// Same parity check at p=5 — a mid-block pivot. Stages the matrix
+    /// by running `do_1x1_update` for pivots 0..5 first so the inputs
+    /// to the primitive at p=5 are a realistic mid-factorization state.
+    #[test]
+    fn update_1x1_block32_matches_do_1x1_update_at_p5() {
+        let a0 = seeded_block_1024(0x1234_5678_9ABC_DEF0);
+        // Stage: run pivots 0..5 with the scalar primitive.
+        let mut a_staged = a0;
+        for p in 0..5 {
+            crate::dense::factor::do_1x1_update(&mut a_staged, BLOCK_SIZE, p);
+        }
+        let mut a_scalar = a_staged.clone();
+        let mut a_block = a_staged;
+        crate::dense::factor::do_1x1_update(&mut a_scalar, BLOCK_SIZE, 5);
+        update_1x1_block32(&mut a_block, 5);
+        assert_blocks_bit_equal(&a_block, &a_scalar, "update_1x1_block32 at p=5");
+    }
+
+    /// `update_1x1_block32` near the trailing edge (p=30, only one
+    /// remaining column) — exercises the small-trail path that Step 3
+    /// must still handle correctly.
+    #[test]
+    fn update_1x1_block32_matches_do_1x1_update_at_p30() {
+        let a0 = seeded_block_1024(0xF00D_FACE_C0FF_EE00);
+        let mut a_staged = a0;
+        for p in 0..30 {
+            crate::dense::factor::do_1x1_update(&mut a_staged, BLOCK_SIZE, p);
+        }
+        let mut a_scalar = a_staged.clone();
+        let mut a_block = a_staged;
+        crate::dense::factor::do_1x1_update(&mut a_scalar, BLOCK_SIZE, 30);
+        update_1x1_block32(&mut a_block, 30);
+        assert_blocks_bit_equal(&a_block, &a_scalar, "update_1x1_block32 at p=30");
+    }
+
+    /// `update_1x1_block32` with d == 0 is a no-op (early return),
+    /// matching `do_1x1_update`. Verifies the early-exit branch is
+    /// byte-equivalent.
+    #[test]
+    fn update_1x1_block32_zero_pivot_is_noop() {
+        let a0 = seeded_block_1024(0xBADD_F00D_DEAD_BEEF);
+        let mut a_scalar = a0.clone();
+        let mut a_block = a0;
+        // Zero out the pivot diagonal at p=2.
+        a_scalar[2 * BLOCK_SIZE + 2] = 0.0;
+        a_block[2 * BLOCK_SIZE + 2] = 0.0;
+        crate::dense::factor::do_1x1_update(&mut a_scalar, BLOCK_SIZE, 2);
+        update_1x1_block32(&mut a_block, 2);
+        assert_blocks_bit_equal(&a_block, &a_scalar, "update_1x1_block32 zero pivot");
+    }
+
+    /// `update_2x2_block32(a, p, d11, d21, d22)` byte-matches
+    /// `factor::do_2x2_update(a, 32, p, d11, d21, d22)` at p=0 with
+    /// arbitrary 2×2 inverse coefficients.
+    #[test]
+    fn update_2x2_block32_matches_do_2x2_update_at_p0() {
+        let a0 = seeded_block_1024(0xCAFE_BABE_1234_5678);
+        let mut a_scalar = a0.clone();
+        let mut a_block = a0;
+        let d11 = 2.5;
+        let d21 = -0.75;
+        let d22 = 1.125;
+        crate::dense::factor::do_2x2_update(&mut a_scalar, BLOCK_SIZE, 0, d11, d21, d22);
+        update_2x2_block32(&mut a_block, 0, d11, d21, d22);
+        assert_blocks_bit_equal(&a_block, &a_scalar, "update_2x2_block32 at p=0");
+    }
+
+    /// `update_2x2_block32` mid-block (p=10) and near edge (p=28).
+    #[test]
+    fn update_2x2_block32_matches_do_2x2_update_at_p10_and_p28() {
+        let a0 = seeded_block_1024(0x0123_4567_89AB_CDEF);
+        let (d11, d21, d22) = (-1.5, 0.25, 0.875);
+
+        let mut a_scalar = a0.clone();
+        let mut a_block = a0.clone();
+        crate::dense::factor::do_2x2_update(&mut a_scalar, BLOCK_SIZE, 10, d11, d21, d22);
+        update_2x2_block32(&mut a_block, 10, d11, d21, d22);
+        assert_blocks_bit_equal(&a_block, &a_scalar, "update_2x2_block32 at p=10");
+
+        let mut a_scalar2 = a0.clone();
+        let mut a_block2 = a0;
+        crate::dense::factor::do_2x2_update(&mut a_scalar2, BLOCK_SIZE, 28, d11, d21, d22);
+        update_2x2_block32(&mut a_block2, 28, d11, d21, d22);
+        assert_blocks_bit_equal(&a_block2, &a_scalar2, "update_2x2_block32 at p=28");
+    }
+
+    /// Singular 2×2 (det == 0) is a no-op in both paths.
+    #[test]
+    fn update_2x2_block32_singular_is_noop() {
+        let a0 = seeded_block_1024(0xDEAD_BEEF_FEED_FACE);
+        let mut a_scalar = a0.clone();
+        let mut a_block = a0;
+        // d11*d22 - d21^2 == 0 → det = 0.
+        let (d11, d21, d22) = (1.0, 1.0, 1.0);
+        crate::dense::factor::do_2x2_update(&mut a_scalar, BLOCK_SIZE, 5, d11, d21, d22);
+        update_2x2_block32(&mut a_block, 5, d11, d21, d22);
+        assert_blocks_bit_equal(&a_block, &a_scalar, "update_2x2_block32 singular");
     }
 
     #[test]

@@ -2498,7 +2498,7 @@ fn try_reject_1x1_with_rook_rescue(
 }
 
 /// 1×1 rank-1 update: update columns k+1..n after eliminating column k.
-fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
+pub(crate) fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
     let d = a[k * n + k];
     if d.abs() == 0.0 {
         return;
@@ -2520,7 +2520,7 @@ fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
 }
 
 /// Rank-2 update after a 2×2 pivot at columns `k`, `k+1`.
-fn do_2x2_update(a: &mut [f64], n: usize, k: usize, d11: f64, d21: f64, d22: f64) {
+pub(crate) fn do_2x2_update(a: &mut [f64], n: usize, k: usize, d11: f64, d21: f64, d22: f64) {
     let det = d11 * d22 - d21 * d21;
     if det.abs() == 0.0 {
         return;
