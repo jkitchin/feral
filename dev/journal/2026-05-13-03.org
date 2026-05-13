@@ -439,3 +439,137 @@ Files touched this commit:
 Build status: cargo build --tests --bins clean; cargo clippy
 --bins --tests --release -- -D warnings clean; cargo test
 --release: 240+ tests passing, no failures.
+
+* 23:55 :issue8:amd:ordering:result:
+AMD vs METIS-ND on pinene_3200, default NumericParams (delayed
+pivoting on, no static-pivot fallback). New diag bin
+`src/bin/diag_pinene_amd.rs` runs both orderings and reports
+n_super, root count, max supernode ncol (symbolic, pre-delay),
+total delay_in, factor wallclock, inertia, residual.
+
+  [pinene_3200_0009] n=127995 nnz=732976 avg_deg=5.73 oracle=(64000,63995,0)
+    [AMD    ]  sym=1.447s  factor=19.528s  solve=0.151s  n_super=9603  roots=1  max_super_ncol=25   delay_in=1821731  n_2x2=47193  inertia ok  rel_res=1.410e-14
+    [MetisND]  sym=1.575s  factor=89.917s  solve=0.228s  n_super=10487 roots=1  max_super_ncol=320  delay_in=118058   n_2x2=63008  inertia ok  rel_res=3.267e-14
+
+  [pinene_3200_0008] same matrix, sibling iterate
+    [AMD    ]  sym=0.777s  factor=0.220s   solve=0.019s  max_super_ncol=25   delay_in=121073   inertia ok  rel_res=3.123e-14
+    [MetisND]  sym=1.423s  factor=0.044s   solve=0.019s  max_super_ncol=320  delay_in=15756    inertia ok  rel_res=1.768e-14
+
+Findings:
+
+1. On the slow iterate (0009), AMD is 4.6x faster than METIS-ND
+   (19.5s vs 89.9s) with identical inertia and equivalent
+   residual. The cascade fix does NOT require static pivoting —
+   ordering alone can break it.
+
+2. AMD has *more* delays (1.82M vs 118k) but they're distributed
+   across small supernodes (max ncol 25 vs 320). The wallclock
+   determinant isn't total delay count, it's the size of the
+   front each delay lands in. METIS's wider supernodes (5x larger
+   panels in the symbolic phase, which then absorb 118k delays to
+   become ~14k-column expanded fronts at the root) are the
+   bottleneck.
+
+3. On the fast iterate (0008), METIS is 5x faster than AMD
+   (0.044s vs 0.220s). Light-delay regime favors METIS's wider
+   panels for trailing-update throughput. So a hardcoded "AMD on
+   pinene" is the wrong fix — both orderings are right somewhere.
+
+4. `pick_default_method` heuristic (src/symbolic/mod.rs:269) is
+   wrong for *this iterate* but not necessarily wrong for the
+   family: it picks MetisND for n>=5000 ∧ avg_deg<6, which gives
+   correct fast factor on 0008 but cascade-vulnerable factor on
+   0009. The numeric regime that triggers heavy delay isn't
+   visible from pattern alone — same matrix, different values.
+
+Implications:
+
+a. Static pivoting (issue #43) is one fix mechanism but trades
+   correctness on naive on-everywhere mode. AMD is a different
+   mechanism that's correctness-preserving but slower on the
+   easy iterates.
+
+b. The right disposition is probably: keep the current
+   pick_default_method, but offer a `Solver::with_ordering`
+   builder and an AMD-retry fallback when factor wallclock or
+   delay_in crosses a threshold. Or: implement an adaptive trigger
+   on top of #43 (cap delays per node) which keeps METIS for the
+   easy iterates and breaks the cascade on the hard ones without
+   retry.
+
+c. The cliff between 0008 and 0009 fast/slow is a numeric-regime
+   transition, not a pattern transition — so no static
+   `pick_default_method` rule can address it. Either retry on
+   wallclock budget exhaustion or per-supernode adaptive static
+   pivoting.
+
+* 00:30 :issue8:issue43:cascade-break:result:
+Implemented adaptive cascade-break trigger (issue #43 follow-up).
+New `NumericParams.cascade_break_ratio: Option<f64>` and
+`Solver::with_cascade_break(ratio)` builder. At a non-root
+supernode whose front is at least `ratio` delayed columns from
+below (`n_delayed_in / expanded_ncol >= ratio`), the trigger
+flips that one supernode to `may_delay = false` with a locally-
+overridden `ZeroPivotAction::ForceAccept`. Light-delay nodes keep
+SSIDS-style delayed pivoting.
+
+Plumbed at src/numeric/factorize.rs:1784, with a `local_bk`
+Cow-like dance to override on_zero_pivot only at the triggered
+node. Builder added at src/numeric/solver.rs:200.
+
+Results on pinene_3200, all-modes diag:
+
+  [pinene_3200_0009] n=127995 oracle=(64000,63995,0)
+    [static-all       ]  factor=0.027s  inertia=(63997,63994,4) ok=false  delay_in=0     rel_res=4.485e-2
+    [cascade-break 0.50]  factor=0.036s  inertia=(63997,63994,4) ok=false  delay_in=24150 rel_res=3.168e-5
+    [cascade-break 0.25]  factor=0.029s  inertia=(63999,63994,2) ok=false  delay_in=17134 rel_res=1.466e-5
+    [default            ]  factor=88.4s   inertia=(64000,63995,0) ok=true   delay_in=118058 rel_res=3.267e-14
+
+  [pinene_3200_0008] same matrix, sibling iterate
+    [static-all       ]  factor=0.034s  inertia=(63998,63995,2) ok=false  delay_in=0     rel_res=5.734e-5
+    [cascade-break 0.50]  factor=0.037s  inertia=(63999,63995,1) ok=false  delay_in=9844  rel_res=4.028e-5
+    [cascade-break 0.25]  factor=0.034s  inertia=(63999,63995,1) ok=false  delay_in=7975  rel_res=4.028e-5
+    [default            ]  factor=0.054s  inertia=(64000,63995,0) ok=true   delay_in=15756 rel_res=1.768e-14
+
+Findings:
+
+1. Cascade-break mechanism works: 2460x speedup on 0009 (0.036s
+   vs 88.4s at ratio=0.50). Trigger fires only where delays
+   accumulate, so most supernodes still delay normally — total
+   delay_in drops from 118k to 24k at ratio=0.50 instead of to
+   zero (static-all).
+
+2. Residual quality improves over static-all by ~1000x: 3.2e-5
+   vs 4.5e-2 on 0009. The pivots that DO get force-accepted are
+   restricted to overloaded nodes, so fewer total small-pivot
+   perturbations make it into L.
+
+3. Inertia still leaks. Cascade-break 0.50 on 0009 leaks 4 false
+   zeros (same as static-all); ratio 0.25 leaks 2. ratio 0.25
+   leaks 1 even on the easy iterate 0008. The threshold trades
+   speed for fidelity but does NOT recover correctness — once a
+   force-accepted pivot enters L at any threshold, the inertia
+   property is gone for that signature.
+
+4. So #43 in either form (naive or adaptive) is a speed/inertia
+   trade. The IPM-side outer regularization (delta_c
+   escalation triggered by inertia mismatch) is the only way to
+   make this safe, and that has to live in ripopt, not feral.
+
+Comparison against AMD (23:55 entry):
+- AMD: 19.5s, **correct inertia**, rel_res 1.4e-14. Slower than
+  cascade-break by 500x but no correctness compromise.
+- cascade-break 0.50: 0.036s, inertia 4-off, rel_res 3.2e-5.
+  Faster than AMD by 500x but only usable if caller tolerates
+  perturbed inertia.
+
+Disposition: ship both mechanisms (`with_static_pivoting`,
+`with_cascade_break`, `Solver::with_ordering`-style override),
+default to current behavior, document the trade explicitly,
+and let the IPM integrator (ripopt) pick its policy per IPM
+state (e.g., enable cascade-break only in restoration mode
+where inertia is already perturbed by design).
+
+Build status: cargo build clean; cargo test --release: 240 lib
++ 0 integration failures; cargo clippy --bins --tests --release
+-D warnings clean.

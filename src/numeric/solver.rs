@@ -191,6 +191,25 @@ impl Solver {
         self
     }
 
+    /// Adaptive cascade-break trigger. At any non-root supernode
+    /// whose front is at least `ratio` delayed columns from below
+    /// (`n_delayed_in / expanded_ncol >= ratio`), flip that one
+    /// supernode to `may_delay = false` with a locally-overridden
+    /// `ZeroPivotAction::ForceAccept` policy. Light-delay nodes
+    /// keep SSIDS-style delayed pivoting; heavy-delay nodes absorb
+    /// the perturbation rather than passing 10^4–10^5 delays into
+    /// the root front.
+    ///
+    /// Pass `0.5` for a starting threshold ("front is at least 50%
+    /// delays"). Set to `0.0` to force-break at any non-root node
+    /// that received any delay (equivalent to `with_static_pivoting`
+    /// except the root still uses the configured `on_zero_pivot`).
+    /// Pass `None` semantics by not calling this builder.
+    pub fn with_cascade_break(mut self, ratio: f64) -> Self {
+        self.numeric_params.cascade_break_ratio = Some(ratio);
+        self
+    }
+
     /// Factor `matrix`. If `check_inertia` is `Some(expected)`,
     /// returns `WrongInertia { actual, expected }` on mismatch
     /// without invalidating the stored factor (caller may still
@@ -506,6 +525,7 @@ mod tests {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
+            cascade_break_ratio: None,
         };
         Solver::with_params(np, SupernodeParams::default())
     }
@@ -1278,6 +1298,7 @@ mod tests {
                 parallel_telemetry: Some(stats.clone()),
                 fma: false,
                 allow_delayed_pivots: true,
+                cascade_break_ratio: None,
                 ..NumericParams::default()
             };
 

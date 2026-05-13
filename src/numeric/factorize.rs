@@ -1,6 +1,6 @@
 use crate::dense::factor::{
     factor, factor_frontal_blocked_in_place_with_scratch, BunchKaufmanParams, FactorScratch,
-    FrontalFactors,
+    FrontalFactors, ZeroPivotAction,
 };
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
@@ -101,6 +101,24 @@ pub struct NumericParams {
     /// path. See `dev/journal/2026-05-13-03.org` 22:55 entry for
     /// the root-cause analysis.
     pub allow_delayed_pivots: bool,
+
+    /// Adaptive static-pivoting trigger. When `Some(r)`, a non-root
+    /// supernode whose `n_delayed_in / expanded_ncol >= r` flips to
+    /// `may_delay = false` for that one supernode only, with a
+    /// locally-overridden `on_zero_pivot = ForceAccept` to absorb
+    /// failures in place. The rest of the etree keeps SSIDS-style
+    /// delayed pivoting. Default `None` (disabled).
+    ///
+    /// Issue #8 motivation: on `pinene_3200_0009`, METIS-ND
+    /// concentrates 118k delays into three ~14k-column expanded
+    /// fronts (87s factor). The cascade-break trigger lets the
+    /// easy iterates keep their cheap delayed-pivot path while
+    /// breaking the cliff iterates at the overloaded node.
+    /// A starting value of `0.5` ("front is at least 50% delayed
+    /// columns") catches the cascade signature without firing on
+    /// light-delay nodes — calibrate against the corpus before
+    /// promoting to default.
+    pub cascade_break_ratio: Option<f64>,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -324,6 +342,7 @@ impl Default for NumericParams {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
+            cascade_break_ratio: None,
         }
     }
 }
@@ -343,6 +362,7 @@ impl NumericParams {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
+            cascade_break_ratio: None,
         }
     }
 }
@@ -1761,13 +1781,34 @@ fn factor_one_supernode(
         "nvschur > 0 only valid at root supernodes (Schur tail invariant)"
     );
     debug_assert!(nvschur <= expanded_ncol);
-    let may_delay = !is_root[snode_idx] && params.allow_delayed_pivots;
+    // Adaptive cascade-break: at a non-root supernode whose front
+    // is mostly delayed columns from below, flip to may_delay=false
+    // with a locally-overridden ForceAccept policy. Absorbs the
+    // perturbation here instead of pushing 10^4-10^5 delays into
+    // the dense root front. See issue #8.
+    let cascade_break = match params.cascade_break_ratio {
+        Some(r) if !is_root[snode_idx] && params.allow_delayed_pivots && expanded_ncol > 0 => {
+            (n_delayed_in as f64) / (expanded_ncol as f64) >= r
+        }
+        _ => false,
+    };
+    let may_delay = !is_root[snode_idx] && params.allow_delayed_pivots && !cascade_break;
+    let local_bk;
+    let bk_ref: &BunchKaufmanParams = if cascade_break {
+        local_bk = BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            ..params.bk.clone()
+        };
+        &local_bk
+    } else {
+        &params.bk
+    };
     let eliminable = expanded_ncol - nvschur;
     let mut ff = factor_frontal_blocked_in_place_with_scratch(
         &mut frontal,
         eliminable,
         may_delay,
-        &params.bk,
+        bk_ref,
         &mut ws.factor_scratch,
     )?;
     ws.frontal_values = frontal.data;
@@ -2933,6 +2974,7 @@ mod tests {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
+            cascade_break_ratio: None,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
@@ -2942,6 +2984,7 @@ mod tests {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
+            cascade_break_ratio: None,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
@@ -2994,6 +3037,7 @@ mod tests {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
+            cascade_break_ratio: None,
         };
         let infnorm = NumericParams {
             scaling: ScalingStrategy::InfNorm,
@@ -3494,6 +3538,7 @@ mod tests {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
+            cascade_break_ratio: None,
         };
 
         let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];

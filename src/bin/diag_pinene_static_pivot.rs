@@ -41,24 +41,37 @@ fn rel_residual_2norm(csc: &CscMatrix, x: &[f64], b: &[f64]) -> f64 {
     }
 }
 
-fn run(label: &str, csc: &CscMatrix, rhs: &[f64], oracle: &Inertia, static_pivot: bool) {
+enum Mode {
+    /// Default — delayed pivoting on every non-root supernode.
+    Default,
+    /// Force-accept everywhere (issue #43 naive form).
+    StaticAll,
+    /// Adaptive: force-accept only at non-root supernodes whose
+    /// front is at least `f` delayed columns from below.
+    CascadeBreak(f64),
+}
+
+fn run(label: &str, csc: &CscMatrix, rhs: &[f64], oracle: &Inertia, mode: Mode) {
     let snode = SupernodeParams::default();
     let sym = symbolic_factorize(csc, &snode).expect("symbolic");
 
     let base = NumericParams::default();
-    let bk = if static_pivot {
-        // Static-pivoting fallback: force-accept failing pivots in
-        // place rather than delaying them up the tree.
-        BunchKaufmanParams {
+    let bk = match mode {
+        Mode::StaticAll | Mode::CascadeBreak(_) => BunchKaufmanParams {
             on_zero_pivot: ZeroPivotAction::ForceAccept,
             ..base.bk.clone()
-        }
-    } else {
-        base.bk.clone()
+        },
+        Mode::Default => base.bk.clone(),
+    };
+    let allow_delayed = !matches!(mode, Mode::StaticAll);
+    let cascade = match mode {
+        Mode::CascadeBreak(r) => Some(r),
+        _ => None,
     };
     let params = NumericParams {
         bk,
-        allow_delayed_pivots: !static_pivot,
+        allow_delayed_pivots: allow_delayed,
+        cascade_break_ratio: cascade,
         ..base
     };
     let mut ws = FactorWorkspace::new();
@@ -135,9 +148,23 @@ fn main() -> std::io::Result<()> {
         csc.row_idx.len()
     );
 
-    run("static-pivot ON ", &csc, &rhs, &oracle, true);
+    run("static-all       ", &csc, &rhs, &oracle, Mode::StaticAll);
+    run(
+        "cascade-break 0.50",
+        &csc,
+        &rhs,
+        &oracle,
+        Mode::CascadeBreak(0.5),
+    );
+    run(
+        "cascade-break 0.25",
+        &csc,
+        &rhs,
+        &oracle,
+        Mode::CascadeBreak(0.25),
+    );
     // Default (delayed pivoting enabled) — may take ~87s on 0009.
-    run("static-pivot OFF", &csc, &rhs, &oracle, false);
+    run("default            ", &csc, &rhs, &oracle, Mode::Default);
 
     Ok(())
 }

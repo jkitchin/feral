@@ -48,6 +48,7 @@ fn ldlt_params(gate: SmallLeafBatch, profiler: Arc<Mutex<Profiler>>) -> NumericP
         parallel_telemetry: None,
         fma: false,
         allow_delayed_pivots: true,
+        cascade_break_ratio: None,
     }
 }
 
