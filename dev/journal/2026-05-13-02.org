@@ -1,0 +1,106 @@
+#+TITLE: 2026-05-13-02 — issue #9 Step 2 dispatch wiring
+#+STARTUP: showall
+
+* 08:00 :session:resume:
+Resumed from compacted context of 2026-05-13-01. Prior session
+checkpointed at 12:45 with Step 3 (=update_1x1_block32= SIMD body)
+landed and dispatch wiring pending. Stop-hook flagged issues #9–#13
+as "partially resolved but not fully closed". Continuing Step 2.
+
+* 08:05 :issue-9:step-2:analysis:
+Examined =factor_frontal_blocked_in_place_with_scratch= dispatch
+logic. Key finding: =apply_blocked_schur_panel= (factor.rs:1945)
+already calls =schur_panel_minus_nofma_strided_quad= — the same
+kernel =update_1x1_block32= uses. Initial conclusion was that the
+panel path subsumes the new SIMD body; closer reading falsified that.
+
+When =bs == ncol == 32= (the dominant CHAINWOO front shape), the
+panel kernel reaches =c == cap == 32=, so =n_elim = 32= and
+=j_start = k + n_elim = nrow = 32=. The =apply_blocked_schur_panel=
+call site at line 2073 (=apply_blocked_schur=) is then a no-op —
+=j_start >= nrow= early-returns. ALL trailing update FLOPs at this
+front size are done by per-column =peek_ahead_replay= (single-column
+=axpy_minus_unroll4_nofma=). The quad SIMD dispatches in
+=apply_blocked_schur_panel= never execute on a full 32×32 panel.
+
+Conclusion: the panel path is suboptimal for full 32×32 fronts, and
+routing them through =factor_frontal=' s eager-update loop (which
+fires =update_1x1_block32= via the do_*_update fast-paths) gives the
+quad kernel something to do.
+
+* 08:10 :issue-9:step-2:design:
+Dispatch design:
+1. =do_1x1_update= and =do_2x2_update= (factor.rs) — add =n == 32=
+   fast-path delegating to =update_*_block32=. Bit-exact per existing
+   parity sweep.
+2. =factor_frontal_blocked_in_place_with_scratch= — dispatch
+   =nrow == BLOCK_SIZE && ncol == BLOCK_SIZE= to =factor_block32=,
+   which delegates to =factor_frontal= which now uses the SIMD body
+   via the do_*_update fast-paths.
+
+This is simpler than the original plan's "port =lblt_panel_frontal=
+body with BLOCK_SIZE baked in" approach. The fast-path indirection
+gives us the same SIMD coverage without rewriting 300+ lines of BK
+pivot logic.
+
+Bit-parity reasoning: =factor_frontal= is the documented oracle for
+both =lblt_panel_frontal= and =update_1x1_block32=. Per-element
+rounding chain unchanged across all three.
+
+* 08:15 :issue-9:step-2:implement:
+Three diffs in factor.rs / block_ldlt32.rs:
+- =do_1x1_update= line 2626: =if n == BLOCK_SIZE { return update_1x1_block32(a, k); }=
+- =do_2x2_update= line 2658: same pattern for =update_2x2_block32=
+- =factor_frontal_blocked_in_place_with_scratch= post-FORCE_SCALAR_FRONTAL:
+  =if nrow == 32 && ncol == 32 { return factor_block32(...); }=
+Dropped =#[allow(dead_code)]= from =BLOCK_SIZE=, =factor_block32=,
+=update_1x1_block32=, =update_2x2_block32= since they're now wired.
+
+* 08:18 :issue-9:step-2:test:
+- =cargo test --lib= 233 passed, 5 ignored. No regressions.
+- =cargo test --tests= (full suite incl. =factor_scratch_parity=,
+  =parallel_parity=, =parity=, =small_leaf_parity=, =stress_tests=,
+  =sparse_refined=, =threshold_consistency=, =tiny_fast_path=): all
+  green.
+- =cargo clippy --lib --tests -- -D warnings= clean.
+- =cargo fmt --check= clean.
+
+* 08:20 :issue-9:step-2:bench:
+Three bench runs:
+| run | small p90 | medium p90 | inertia       |
+|   1 |      1.33 |       1.74 | 154428/154481 |
+|   2 |      1.32 |       1.70 | 154428/154481 |
+|   3 |      1.33 |       1.74 | 154428/154481 |
+Median small=1.33 (prev 1.36), medium=1.74 (prev 1.78). Modest but
+consistent improvement at the better edge of the noise band. Inertia
+byte-identical to baseline.
+
+* 08:23 :issue-9:step-2:commit:
+Committed as d3f1132. Commit body documents the j_start=nrow no-op
+finding and the bit-parity oracle chain (factor_frontal → both
+lblt_panel_frontal and update_1x1_block32).
+
+* 08:25 :issue-9:comment:denied:
+Tried =gh issue comment 9= with a step-2 land summary. Auto-mode
+classifier denied (external-system write not pre-authorized). Comment
+body at =/tmp/feral-issue-9-step2-comment.md=; user can post it
+manually at their convenience.
+
+* 08:27 :issue-9:step-4:defer:
+Step 4 (rank-2 SIMD body for =update_2x2_block32=) genuinely needs a
+new pulp kernel =schur_panel_axpy2_minus_nofma_strided_quad= with
+per-element =dst = sub(dst, add(mul(a0,s0), mul(a1,s1)))= chain (axpy2's
+fused rounding) across 4 destination columns. The existing quad
+kernel's per-q sequential =sub(sub(dst, m0), m1)= chain differs by 1
+ULP. 2×2 pivots are rare on the bench corpus (sub-percent) so the
+expected bench impact is below the noise band. Skipping in favor of
+checkpoint + handoff.
+
+* 08:30 :session:checkpoint:
+Issue #9 substantively resolved: Steps 1, 2, 3 landed; 32×32 SIMD
+kernel on production hot path; bit-exact with scalar oracle; bench
+neutral-to-favorable. Steps 4 (rare-pivot optimization) and 5 (CI)
+remain as documented follow-ups. #10 still blocked on the broader
+#9 surface (APP). #11 still pending #10. #12 (meta) closes when 10
++ 11 land. #13 substantively complete (auto-classifier blocked the
+close command in the prior session; user can close manually).

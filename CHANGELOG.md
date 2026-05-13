@@ -4,24 +4,44 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
-### Added — Issue #9 Step 3: SIMD body for `update_1x1_block32`
+### Added — Issue #9 Steps 2 + 3: 32×32 register-resident kernel wired into production
 
-`update_1x1_block32` in `src/dense/block_ldlt32.rs` now tiles trailing
-destination columns in groups of four through
-`schur_panel_minus_nofma_strided_quad` (n_elim=1), with a trailing
-`_dual` for the 2-column tail and a final
+**Step 3 (SIMD body).** `update_1x1_block32` in
+`src/dense/block_ldlt32.rs` tiles trailing destination columns in
+groups of four through `schur_panel_minus_nofma_strided_quad`
+(n_elim=1), with a trailing `_dual` for the 2-column tail and a final
 `axpy_minus_unroll4_nofma` for the 1-column tail. Each tile packs 4
 dst columns per pulp dispatch sharing one source-column load — the
 intended Phase 2.4.3 register-resident pattern. Per-element output is
 byte-identical to the scalar reference and to `factor::do_1x1_update`
 (verified by 4 bit-parity unit tests at p=0, p=5, p=30, zero-pivot).
-The function is not yet on the production path; that requires the
-block_ldlt32 driver port (Step 2) and dispatch wiring in
-`factor_frontal_blocked_in_place`. Step 4 (rank-2 SIMD body for
-`update_2x2_block32`) is deferred — the quad kernel's per-q
-sequential rounding chain is 1-ULP-divergent from
-`axpy2_minus_unroll4_nofma`'s fused chain, so Step 4 needs a custom
-4-dst-column 2-src pulp dispatch.
+
+**Step 2 (dispatch wiring).** `do_1x1_update` and `do_2x2_update`
+(factor.rs) gain an `n == 32` fast-path delegating to
+`update_1x1_block32` / `update_2x2_block32`.
+`factor_frontal_blocked_in_place_with_scratch` dispatches
+`nrow==ncol==32` fronts to `factor_block32` (which delegates to
+`factor_frontal`); the eager unblocked BK loop drives the SIMD update
+via the fast-paths. This bypasses `lblt_panel_frontal` for full
+32×32 fronts because, at `bs==ncol==32`, the panel's
+`apply_blocked_schur_panel` quad-dispatch path is unreachable
+(`j_start = k + n_elim == nrow` skips the batched trailing update),
+so all trailing-update FLOPs are done by single-column peek-ahead
+axpys. The eager-update path issues quad dispatches for every
+trailing tile of 4 columns instead.
+
+Bench: median small p90 1.33 (was 1.36), median medium p90 1.74
+(was 1.78) across 3 runs. Modest but consistent improvement at the
+better edge of the noise band. Inertia 154428/154481, byte-identical
+to baseline.
+
+**Step 4 (rank-2 SIMD body)** remains deferred — the quad kernel's
+per-q sequential rounding chain is 1-ULP-divergent from
+`axpy2_minus_unroll4_nofma`'s fused chain, so a custom
+4-dst-column 2-src pulp dispatch is required. 2×2 pivots are rare on
+the bench corpus (no measurable bench impact expected); tracked as
+follow-up. **Step 5 (cross-arch CI gate)** also tracked as
+follow-up.
 
 ### Changed — Per-supernode fixed-overhead reduction (#13, Phases A + B + C)
 
