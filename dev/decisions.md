@@ -2915,3 +2915,190 @@ unrelated layers.
 - `dev/research/dense-app-path.md` (gate measurement)
 - `src/dense/factor.rs:871` (validate call site on hot path)
 - `src/dense/matrix.rs:106-133` (validate body)
+
+---
+
+## 2026-05-13 — `feral-capi` as a separate workspace member, not a core feature
+
+**Decision.** Adding a C ABI surface to enable feral as a
+plug-in linear solver for canonical (C++) Ipopt 3.14 does not
+violate the "Pure Rust, stable toolchain; zero non-Rust
+dependencies in the core solver" constraint in CLAUDE.md.
+The C ABI lives in a **separate workspace member crate**,
+provisionally named `feral-capi`, and is optional — only
+required for the Ipopt-via-C++-shim integration.
+
+**Layout.**
+
+- Core `feral` crate: `crate-type = ["rlib"]`. No FFI, no
+  `extern "C"`, no cdylib output. Unchanged from today
+  except that the top-level `Cargo.toml` becomes a
+  `[workspace]` root.
+- `feral-capi/`: `crate-type = ["cdylib", "staticlib",
+  "rlib"]`. Depends on `feral`. All `extern "C"`
+  declarations and FFI-boundary `unsafe` blocks live
+  here. Exposes `feral_create / feral_destroy /
+  feral_set_option_* / feral_initialize_structure /
+  feral_get_values_ptr / feral_factor / feral_solve /
+  feral_num_neg_evals / feral_increase_quality` plus the
+  status enum and a `feral_capi.h` header (committed or
+  cbindgen-generated, TBD in the plan).
+- `feral-ipopt-shim/` (separate concern): the C++ shim
+  consuming `feral-capi`'s output. Layout decision
+  pending (Open Question #1 in the research note).
+
+**Why a separate crate over a feature flag on `feral`:**
+
+1. The "pure Rust core" property becomes a *crate-level*
+   invariant, not a config-option invariant. Reviewers
+   audit FFI safety in one place
+   (`feral-capi/src/lib.rs`) instead of grepping for
+   `#[cfg(feature = "capi")]` across the core crate.
+2. The cdylib / staticlib outputs are produced **only**
+   when someone explicitly builds `feral-capi`. Default
+   `cargo build` in the workspace root still produces
+   only an rlib for the core crate (workspace builds all
+   members, but the cdylib is small and only present
+   when the Ipopt integration is being built).
+3. Matches the precedent set by ripopt's split of
+   `rmumps` from the core IPM crate.
+
+**Constraint scope clarification.** The CLAUDE.md
+constraint "Zero non-Rust dependencies in the core solver
+(no BLAS, LAPACK, Fortran)" refers to **runtime / build
+dependencies** of the core numerical code. A C ABI export
+surface is the opposite direction — *feral* providing a
+non-Rust-callable interface, not feral *consuming* a
+non-Rust dependency. No core numerical algorithm imports
+or links against any C/C++/Fortran code. The shim that
+consumes `feral-capi` is a downstream consumer like any
+other.
+
+**References.**
+- `dev/research/feral-ipopt-c-shim.md` — full design
+  rationale and lifecycle mapping.
+- `/Users/jkitchin/projects/ripopt/rmumps` — precedent
+  for the workspace-member-for-FFI pattern.
+- CLAUDE.md "Constraints (hard, do not change without
+  recording in decisions.md)".
+
+---
+
+## 2026-05-13 — `feral-ipopt-shim` lives in-tree during bring-up
+
+**Decision.** The C++ shim that subclasses Ipopt's
+`SparseSymLinearSolverInterface` and forwards to feral via
+the `feral-capi` C ABI lives **in-tree** at
+`feral/feral-ipopt-shim/` during the bring-up phase. Plan
+to split it to a separate repository once the C ABI
+stabilizes (semver 1.0) and/or we need to support more
+than one Ipopt-version shim variant.
+
+**Rationale.**
+
+- During bring-up the C ABI will churn. Every C ABI change
+  needs a coordinated update to the shim. In-tree means
+  one PR, one CI run; cross-repo means a two-PR
+  coordination with pinned-version bumps each time.
+- The "pure Rust core" branding is protected by the
+  *crate* boundary (`feral` core stays rlib-only with no
+  FFI). `feral-ipopt-shim/` is a sibling directory, not
+  part of the Rust workspace; the Rust API consumer can
+  ignore it entirely.
+- Precedent in-tree already: `ref/Ipopt/`, `ref/mumps/`,
+  `ref/spral/` are vendored non-Rust sources the core
+  doesn't link against. A first-party C++ subdirectory is
+  a milder version of the same pattern.
+
+**Split criteria** (when these are met, split to its own
+repo):
+
+1. `feral-capi` reaches semver 1.0 with a stable C ABI
+   that can be released independently.
+2. We want to maintain multiple shim variants (e.g.,
+   Ipopt 3.14 and Ipopt 3.15+, or HSL-style dlopen
+   variants) without each driving feral-repo PRs.
+
+**Repo layout during bring-up:**
+
+```
+feral/
+├── Cargo.toml         # workspace root
+├── src/               # core feral, rlib-only
+├── feral-capi/        # workspace member, cdylib + staticlib + rlib
+├── feral-ipopt-shim/  # in-tree C++ shim, NOT a workspace member
+│   ├── CMakeLists.txt
+│   ├── include/feral_capi.h   # mirrored from feral-capi
+│   ├── src/
+│   │   ├── FeralSolverInterface.hpp
+│   │   └── FeralSolverInterface.cpp
+│   ├── patches/ipopt-3.14-feral-solver.patch
+│   └── tests/
+└── ref/Ipopt/        # vendored Ipopt source for shim build + reference
+```
+
+**CI impact.** A new `feral-ipopt-shim` job runs CMake
+build + smoke test on Linux + macOS. It is **non-blocking
+during bring-up** (marked `continue-on-error: true` or
+equivalent); becomes a required job once it's reliable.
+
+**References.**
+- `dev/research/feral-ipopt-c-shim.md` Open Question #1
+  (resolved by this entry).
+- `dev/decisions.md` 2026-05-13 "`feral-capi` as a
+  separate workspace member" (companion decision).
+
+---
+
+## 2026-05-13 — C ABI lives in `feral::capi`, not a separate workspace member (supersedes earlier-today decision)
+
+**Decision.** During implementation, the planned
+`feral-capi` workspace member was collapsed into the core
+`feral` crate as `pub mod capi` (`src/capi.rs`). The
+`feral` package now declares `crate-type = ["staticlib",
+"rlib"]`. The earlier 2026-05-13 decision ("`feral-capi`
+as a separate workspace member") is **superseded** by
+this entry; that entry remains in the log as the prior
+intent.
+
+**What changed:**
+
+- No new workspace member. `src/capi.rs` is part of the
+  core `feral` crate, behind `pub mod capi`.
+- `Cargo.toml` adds `staticlib` to the existing `rlib`
+  crate-type rather than introducing a sibling cdylib
+  crate.
+- The `feral-ipopt-shim/` C++ shim links against
+  `target/release/libferal.a` directly (no intermediate
+  `feral-capi`).
+
+**Why the collapse:**
+
+1. The C ABI is small (7 functions, ~250 lines) and tied
+   1:1 to types already public in the core crate
+   (`CscMatrix`, `Solver`, `FactorStatus`). A separate
+   workspace member would have re-exported these or
+   wrapped them with no added isolation.
+2. Single `cargo build` produces both the rlib for Rust
+   consumers and the staticlib for the C++ shim — no
+   second crate to coordinate. Pure-Rust consumers
+   ignore the staticlib artifact.
+3. The FFI safety surface is still localized to one file
+   (`src/capi.rs`) with a clear module boundary. The
+   "audit FFI in one place" property the prior decision
+   wanted is preserved.
+
+**What's *not* changed:**
+
+- The CLAUDE.md "pure Rust core, zero non-Rust deps"
+  constraint scope clarification from the prior entry
+  still stands: feral exposing a C ABI is not the same
+  as feral consuming a non-Rust dependency.
+- The `feral-ipopt-shim/` in-tree-during-bring-up
+  decision still stands.
+
+**References.**
+- `src/capi.rs` (7 `extern "C"` functions, status codes).
+- `Cargo.toml:39-45` (lib crate-type).
+- `src/lib.rs` (`pub mod capi;`).
+- `feral-ipopt-shim/` (consumer, in-tree).

@@ -27,12 +27,13 @@ tests/data/large/
 __pycache__/
 *.pyc
 
-# MUMPS/SSIDS oracle binaries (rebuilt locally)
+# MUMPS/SSIDS/MA57 oracle binaries (rebuilt locally)
 external_benchmarks/mumps_oracle/mumps_bench
 external_benchmarks/mumps_oracle/mumps_amf_oracle
 external_benchmarks/mumps_oracle/mumps_schur_bench
 external_benchmarks/ssids_oracle/ssids_bench
 external_benchmarks/hsl_bench/hsl_bench
+external_benchmarks/ma57_oracle/ma57_bench
 
 # Cross-solver comparison harness: large per-matrix artifacts
 # (RHS binary blobs and per-run .out files are regenerable from
@@ -40,3 +41,9 @@ external_benchmarks/hsl_bench/hsl_bench
 # comparison.json / sample.tsv are tracked).
 external_benchmarks/comparison/out/
 external_benchmarks/comparison/rhs/
+
+# NLP-comparison harness: per-run logs are regenerable from `python run.py`.
+# Only the harness code + REPORT.md + results.json are tracked.
+external_benchmarks/nlp_comparison/logs/
+external_benchmarks/nlp_comparison/out/
+external_benchmarks/nlp_comparison/run.log
