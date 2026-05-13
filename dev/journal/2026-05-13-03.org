@@ -1,0 +1,44 @@
+* 13:00 :issue-10:gate-measurement:
+User asked "fix issue #10" (APP path). Per the FERAL feature
+lifecycle, research first. Found that the issue's own posted
+re-open comment sets a measurable gate — "fresh diag_supernode_cost
+shows ns/nnz dominates ns/sup on a relevant cluster." Ran the binary
+to check the gate before any code work.
+
+* 13:05 :issue-10:diag-supernode-cost:
+~cargo run --bin diag_supernode_cost --release~ on post-d7267fe.
+Result: across every corpus row and every nemin in the ACOPR30
+sweep, ns/sup exceeds ns/nnz by 4× to 36×. ACOPR30_0067 nemin=32
+(the cluster the gate names explicitly): ns/sup=943, ns/nnz=61
+— ratio 15× the wrong way. HAIFAM_0082 (widest corpus fronts,
+max 86): ns/sup=1174, ns/nnz=33 — ratio 36× the wrong way.
+
+The gate condition is the opposite of what the data shows. APP
+work is not justified today by the issue's own re-open criterion.
+
+* 13:15 :issue-10:stale-motivation:
+Re-traced the motivating gap. The 89 ns/nnz_L figure in
+dev/research/mumps-small-frontal-speed.md is stale on the current
+build:
+- ~fused_gamma0~ landed ad05ff4 (2026-04-11) — eliminates per-pivot
+  γ₀ scan on scalar's no-swap branches, the same trick the issue
+  attributes uniquely to MUMPS MAXFROMM.
+- 32×32 SIMD body landed d3f1132 (2026-05-13) — quad pulp dispatch
+  for trailing updates on the dominant CHAINWOO front shape.
+
+The two big mechanisms the APP proposal targeted are already in
+place via different code paths.
+
+* 13:25 :issue-10:closure:
+Wrote dev/research/dense-app-path.md documenting the gate
+measurement and design space. Appended dev/decisions.md entry
+recommending closure. Appended dev/tried-and-rejected.md entry
+recording the not-undertaken work and the lesson.
+
+Lesson reinforced (same as 2026-05-12 (c) BLAS-3 quad parking):
+the session-checkpoint "Next session should" list is not a
+substitute for re-measuring the gate. The previous session
+advanced #10 as the next target on the strength of #9 landing,
+without re-running diag_supernode_cost. One binary run was the
+difference between writing dead code and recording a clean
+closure.

@@ -1399,3 +1399,60 @@ next plausible lever.
 References: `src/dense/factor.rs::FactorScratch`,
 `src/numeric/factorize.rs::factor_one_supernode`,
 `tests/factor_scratch_parity.rs` case (d), commit `fe2ca4d`.
+
+---
+
+## 2026-05-13 — Issue #10 APP path: implementation not undertaken; gate not met
+
+**What was proposed.** Issue #10 — add an APP (aggressive partial
+pivoting) path to `src/dense/factor.rs` alongside the existing
+per-pivot threshold check. The proposal cites a ~5× per-nnz_L gap
+on CHAINWOO-style fronts (89 ns vs 14 ns for MUMPS) and proposes
+a block-level deferred check that avoids per-pivot column scans.
+
+**What the gate said.** The issue's own posted re-open comment (by
+`jkitchin`) required a fresh `diag_supernode_cost` run showing
+"ns/nnz dominates ns/sup on a relevant cluster" before APP work
+is justified.
+
+**What the data shows.** `cargo run --bin diag_supernode_cost
+--release` (2026-05-13, post-`d7267fe`):
+
+```
+ACOPR30_0067 nemin=32  ncol_max=32  ns/sup=943   ns/nnz=61   ratio 15×
+CRESC100_0000 default  ncol_max=16  ns/sup=914   ns/nnz=79   ratio 12×
+HAIFAM_0082            ncol_max=86  ns/sup=1174  ns/nnz=33   ratio 36×
+```
+
+Across **every** corpus row and every nemin in the sweep, ns/sup
+exceeds ns/nnz by 4× to 36× — the opposite of the gate condition.
+The per-front fixed cost still dominates the per-nnz arithmetic
+cost on the long-tail corpus.
+
+**Why the motivating gap closed.** The 89 ns/nnz_L figure cited in
+the issue is stale on the current build:
+
+- `fused_gamma0` (`factor.rs:369-371`, landed `ad05ff4`
+  2026-04-11) carries the next pivot's γ₀ and argmax row across
+  the rank-1 update on the scalar path — the same trick the issue
+  attributed uniquely to MUMPS `MAXFROMM`. Per-pivot column scans
+  on the no-swap branch are already eliminated.
+- The 32×32 SIMD body (`block_ldlt32`, landed `d3f1132`
+  2026-05-13) puts trailing-update FLOPs for the dominant CHAINWOO
+  front shape through a quad pulp dispatch. The dispatch at
+  `factor.rs:1189-1193` routes `nrow == ncol == 32` fronts to
+  `factor_block32` before the panel path is reached.
+
+**Decision.** Do not implement APP. Recorded in `dev/decisions.md`
+2026-05-13. Full analysis in `dev/research/dense-app-path.md`.
+
+**Lesson.** Same as the 2026-05-12 (c) BLAS-3 quad parking: the
+session-checkpoint "Next session should" list is not a substitute
+for re-measuring the gate. The previous session
+(`dev/sessions/2026-05-13-02.md`) advanced #10 as the next target
+on the strength of #9 having landed, without re-running
+`diag_supernode_cost`. One binary run was the difference between
+implementing dead code and recording a clean closure.
+
+References: `dev/research/dense-app-path.md`,
+`dev/decisions.md` 2026-05-13 entry, issue #10 thread.

@@ -2772,3 +2772,75 @@ prior. Front shapes can shift under intervening landings.
 `fdd631c` (quad kernel + tests), `8a07386` (wiring),
 `dev/research/blas3-trailing-update.md`,
 `dev/plans/phase-2.4.3-blas3-trailing-update.md`.
+
+## 2026-05-13 — Do not implement issue #10 APP path; gate not met
+
+**Context.** Issue #10 proposes an APP (aggressive partial pivoting)
+path alongside the existing per-pivot threshold check in
+`src/dense/factor.rs`. The issue itself posted a re-open gate:
+"fresh `diag_supernode_cost` shows ns/nnz dominates ns/sup on a
+relevant cluster (ACOPR30, CRESC100 at nemin=32, or any new corpus
+with fronts wide enough to use the panel path)."
+
+The previous session's checkpoint (`dev/sessions/2026-05-13-02.md`)
+listed #10 as the next target on the assumption that #9 landing was
+the only remaining precondition. The gate measurement was not
+re-done at that time.
+
+**Measurement.** `cargo run --bin diag_supernode_cost --release` on
+the post-`d7267fe` build (full output in
+`dev/research/dense-app-path.md`):
+
+- ACOPR30_0067 at nemin=32 (the cluster the gate names): ns/sup
+  943, ns/nnz 61. Ratio 15× the wrong way.
+- CRESC100_0000 default nemin=16: ns/sup 914, ns/nnz 79. 12× the
+  wrong way.
+- HAIFAM_0082 (widest fronts on corpus, max 86): ns/sup 1174, ns/nnz
+  33. 36× the wrong way.
+
+Across every matrix and every nemin in the sweep, ns/sup dominates
+ns/nnz by at least 4× — the opposite of the gate condition.
+
+**Decision.** Do not implement APP today. The two motivating gaps
+the issue cites (per-pivot γ₀ scan and per-element SIMD trailing
+update) have been closed via different code paths since the
+motivating measurement was taken:
+
+1. `fused_gamma0` (`factor.rs:369-371, 400-405, ...`, landed
+   `ad05ff4` 2026-04-11) eliminates the per-pivot column scan on
+   the scalar path's no-swap branches — the same trick the issue
+   body attributes uniquely to MUMPS `MAXFROMM`.
+2. The 32×32 SIMD body (`block_ldlt32::update_1x1_block32`, landed
+   `98ef545`+`d3f1132` 2026-05-12/13) puts trailing-update FLOPs on
+   the dominant CHAINWOO-style 32-col front shape through a quad
+   pulp dispatch.
+
+The remaining un-fused γ₀ scan in `lblt_panel_frontal:1480-1488` is
+real but on the current corpus its code path is bypassed for the
+dominant front size (32×32 dispatches to `factor_block32` before
+the panel path is reached) and unmeasured-but-likely-tiny on the
+remaining sizes (max corpus front 86, mostly ≤ 17).
+
+**Recommendation.** Close issue #10 with a comment citing
+`dev/research/dense-app-path.md`. The issue's own "narrow
+alternative" — fuse γ₀ into the panel's deferred rank-1 stream —
+is also not justified today; revisit only when a corpus front
+appears at sizes 32–96 with low enough per-front overhead that
+the panel γ₀ scan shows up in a profile.
+
+**Lesson reinforced.** Same as the 2026-05-12 (c) BLAS-3 quad
+decision: re-measure the profile that motivates the work
+immediately before writing code. The 2026-05-13-02 session
+checkpoint advanced #10 as the next target without re-checking
+the gate; re-measuring took one binary run and avoided weeks of
+implementation work that the data shows would not have paid back.
+
+**References.**
+- `dev/research/dense-app-path.md` — gate measurement and design
+  space.
+- Issue #10 posted comment by `jkitchin` — the gate text.
+- `src/dense/factor.rs:369-371, 400-405, 439-441, 465-467,
+  486-488, 537-539, 555-557` — fused_gamma0 thread.
+- `src/dense/factor.rs:1189-1193` — 32×32 dispatch entry.
+- `src/dense/factor.rs:1480-1488` — the remaining un-fused panel
+  γ₀ scan.
