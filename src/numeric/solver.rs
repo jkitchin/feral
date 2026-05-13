@@ -165,6 +165,18 @@ impl Solver {
         self
     }
 
+    /// Toggle the FMA opt-in dispatch on dense trailing-update and
+    /// panel-update kernels. Default `false` keeps the bit-exact
+    /// `*_nofma` path; pass `true` to dispatch through the FMA
+    /// siblings (`schur_panel_minus_fma_strided*`,
+    /// `axpy_minus_unroll4`, `axpy2_minus_unroll4`) for ~2x arithmetic
+    /// throughput on aarch64 NEON and x86 V3 AVX2+FMA. Trade-off
+    /// detailed on [`NumericParams::fma`].
+    pub fn with_fma(mut self, fma: bool) -> Self {
+        self.numeric_params.fma = fma;
+        self
+    }
+
     /// Factor `matrix`. If `check_inertia` is `Some(expected)`,
     /// returns `WrongInertia { actual, expected }` on mismatch
     /// without invalidating the stored factor (caller may still
@@ -478,6 +490,7 @@ mod tests {
             small_leaf: Default::default(),
             profiler: None,
             parallel_telemetry: None,
+            fma: false,
         };
         Solver::with_params(np, SupernodeParams::default())
     }
@@ -1248,6 +1261,7 @@ mod tests {
             let stats = Arc::new(AtomicLockStats::default());
             let np = NumericParams {
                 parallel_telemetry: Some(stats.clone()),
+                fma: false,
                 ..NumericParams::default()
             };
 

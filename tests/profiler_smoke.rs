@@ -49,6 +49,7 @@ fn params_with(profiler: Option<Arc<Mutex<Profiler>>>) -> NumericParams {
         small_leaf: Default::default(),
         profiler,
         parallel_telemetry: None,
+        fma: false,
     }
 }
 

@@ -169,6 +169,7 @@ fn ldlt_params() -> NumericParams {
         small_leaf: Default::default(),
         profiler: None,
         parallel_telemetry: None,
+        fma: false,
     }
 }
 

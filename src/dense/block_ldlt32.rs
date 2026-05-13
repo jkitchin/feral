@@ -88,7 +88,7 @@ pub(crate) fn factor_block32(
 /// sequential single-column rank-1 dispatches — i.e. byte-identical to
 /// the Step 2 scalar body and to `do_1x1_update`. Verified by the
 /// unit tests in this module.
-pub(crate) fn update_1x1_block32(a: &mut [f64], p: usize) {
+pub(crate) fn update_1x1_block32(a: &mut [f64], p: usize, fma: bool) {
     debug_assert!(a.len() >= BLOCK_SIZE * BLOCK_SIZE);
     debug_assert!(p < BLOCK_SIZE);
     let n = BLOCK_SIZE;
@@ -124,21 +124,39 @@ pub(crate) fn update_1x1_block32(a: &mut [f64], p: usize) {
             let dst1 = &mut col_j1[(j + 1)..n];
             let dst2 = &mut col_j2[(j + 2)..n];
             let dst3 = &mut col_j3_and_after[(j + 3)..n];
-            schur_kernel::schur_panel_minus_nofma_strided_quad(
-                dst0,
-                dst1,
-                dst2,
-                dst3,
-                before,
-                p,
-                1,
-                n,
-                j,
-                &[alpha0],
-                &[alpha1],
-                &[alpha2],
-                &[alpha3],
-            );
+            if fma {
+                schur_kernel::schur_panel_minus_fma_strided_quad(
+                    dst0,
+                    dst1,
+                    dst2,
+                    dst3,
+                    before,
+                    p,
+                    1,
+                    n,
+                    j,
+                    &[alpha0],
+                    &[alpha1],
+                    &[alpha2],
+                    &[alpha3],
+                );
+            } else {
+                schur_kernel::schur_panel_minus_nofma_strided_quad(
+                    dst0,
+                    dst1,
+                    dst2,
+                    dst3,
+                    before,
+                    p,
+                    1,
+                    n,
+                    j,
+                    &[alpha0],
+                    &[alpha1],
+                    &[alpha2],
+                    &[alpha3],
+                );
+            }
         }
         j += 4;
     }
@@ -151,17 +169,31 @@ pub(crate) fn update_1x1_block32(a: &mut [f64], p: usize) {
             let (col_j, after_j) = rest.split_at_mut(n);
             let dst0 = &mut col_j[j..n];
             let dst1 = &mut after_j[(j + 1)..n];
-            schur_kernel::schur_panel_minus_nofma_strided_dual(
-                dst0,
-                dst1,
-                before,
-                p,
-                1,
-                n,
-                j,
-                &[alpha0],
-                &[alpha1],
-            );
+            if fma {
+                schur_kernel::schur_panel_minus_fma_strided_dual(
+                    dst0,
+                    dst1,
+                    before,
+                    p,
+                    1,
+                    n,
+                    j,
+                    &[alpha0],
+                    &[alpha1],
+                );
+            } else {
+                schur_kernel::schur_panel_minus_nofma_strided_dual(
+                    dst0,
+                    dst1,
+                    before,
+                    p,
+                    1,
+                    n,
+                    j,
+                    &[alpha0],
+                    &[alpha1],
+                );
+            }
         }
         j += 2;
     }
@@ -172,7 +204,11 @@ pub(crate) fn update_1x1_block32(a: &mut [f64], p: usize) {
             let (before, rest) = a.split_at_mut(j * n);
             let src = &before[p * n + j..p * n + n];
             let dst = &mut rest[j..n];
-            schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+            if fma {
+                schur_kernel::axpy_minus_unroll4(dst, src, alpha);
+            } else {
+                schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+            }
         }
     }
 }
@@ -193,7 +229,7 @@ pub(crate) fn update_1x1_block32(a: &mut [f64], p: usize) {
 /// `sub(dst, add(m0, m1))` chain, so the rank-2 4-column kernel needs
 /// a fresh pulp dispatch. Tracked separately as Step 4 follow-up; for
 /// now this body remains the scalar path used by every 2×2 pivot.
-pub(crate) fn update_2x2_block32(a: &mut [f64], p: usize, d11: f64, d21: f64, d22: f64) {
+pub(crate) fn update_2x2_block32(a: &mut [f64], p: usize, d11: f64, d21: f64, d22: f64, fma: bool) {
     debug_assert!(a.len() >= BLOCK_SIZE * BLOCK_SIZE);
     debug_assert!(p + 1 < BLOCK_SIZE);
     let n = BLOCK_SIZE;
@@ -219,7 +255,11 @@ pub(crate) fn update_2x2_block32(a: &mut [f64], p: usize, d11: f64, d21: f64, d2
         let src0 = &before[p * n + j..p * n + n];
         let src1 = &before[(p + 1) * n + j..(p + 1) * n + n];
         let dst = &mut rest[j..n];
-        schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_j0, src1, dl_j1);
+        if fma {
+            schur_kernel::axpy2_minus_unroll4(dst, src0, dl_j0, src1, dl_j1);
+        } else {
+            schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_j0, src1, dl_j1);
+        }
     }
 }
 
@@ -394,8 +434,8 @@ mod tests {
         let a0 = seeded_block_1024(0xA5A5_5A5A_DEAD_BEEF);
         let mut a_scalar = a0.clone();
         let mut a_block = a0;
-        crate::dense::factor::do_1x1_update(&mut a_scalar, BLOCK_SIZE, 0);
-        update_1x1_block32(&mut a_block, 0);
+        crate::dense::factor::do_1x1_update(&mut a_scalar, BLOCK_SIZE, 0, false);
+        update_1x1_block32(&mut a_block, 0, false);
         assert_blocks_bit_equal(&a_block, &a_scalar, "update_1x1_block32 at p=0");
     }
 
@@ -408,12 +448,12 @@ mod tests {
         // Stage: run pivots 0..5 with the scalar primitive.
         let mut a_staged = a0;
         for p in 0..5 {
-            crate::dense::factor::do_1x1_update(&mut a_staged, BLOCK_SIZE, p);
+            crate::dense::factor::do_1x1_update(&mut a_staged, BLOCK_SIZE, p, false);
         }
         let mut a_scalar = a_staged.clone();
         let mut a_block = a_staged;
-        crate::dense::factor::do_1x1_update(&mut a_scalar, BLOCK_SIZE, 5);
-        update_1x1_block32(&mut a_block, 5);
+        crate::dense::factor::do_1x1_update(&mut a_scalar, BLOCK_SIZE, 5, false);
+        update_1x1_block32(&mut a_block, 5, false);
         assert_blocks_bit_equal(&a_block, &a_scalar, "update_1x1_block32 at p=5");
     }
 
@@ -425,12 +465,12 @@ mod tests {
         let a0 = seeded_block_1024(0xF00D_FACE_C0FF_EE00);
         let mut a_staged = a0;
         for p in 0..30 {
-            crate::dense::factor::do_1x1_update(&mut a_staged, BLOCK_SIZE, p);
+            crate::dense::factor::do_1x1_update(&mut a_staged, BLOCK_SIZE, p, false);
         }
         let mut a_scalar = a_staged.clone();
         let mut a_block = a_staged;
-        crate::dense::factor::do_1x1_update(&mut a_scalar, BLOCK_SIZE, 30);
-        update_1x1_block32(&mut a_block, 30);
+        crate::dense::factor::do_1x1_update(&mut a_scalar, BLOCK_SIZE, 30, false);
+        update_1x1_block32(&mut a_block, 30, false);
         assert_blocks_bit_equal(&a_block, &a_scalar, "update_1x1_block32 at p=30");
     }
 
@@ -445,8 +485,8 @@ mod tests {
         // Zero out the pivot diagonal at p=2.
         a_scalar[2 * BLOCK_SIZE + 2] = 0.0;
         a_block[2 * BLOCK_SIZE + 2] = 0.0;
-        crate::dense::factor::do_1x1_update(&mut a_scalar, BLOCK_SIZE, 2);
-        update_1x1_block32(&mut a_block, 2);
+        crate::dense::factor::do_1x1_update(&mut a_scalar, BLOCK_SIZE, 2, false);
+        update_1x1_block32(&mut a_block, 2, false);
         assert_blocks_bit_equal(&a_block, &a_scalar, "update_1x1_block32 zero pivot");
     }
 
@@ -461,8 +501,8 @@ mod tests {
         let d11 = 2.5;
         let d21 = -0.75;
         let d22 = 1.125;
-        crate::dense::factor::do_2x2_update(&mut a_scalar, BLOCK_SIZE, 0, d11, d21, d22);
-        update_2x2_block32(&mut a_block, 0, d11, d21, d22);
+        crate::dense::factor::do_2x2_update(&mut a_scalar, BLOCK_SIZE, 0, d11, d21, d22, false);
+        update_2x2_block32(&mut a_block, 0, d11, d21, d22, false);
         assert_blocks_bit_equal(&a_block, &a_scalar, "update_2x2_block32 at p=0");
     }
 
@@ -474,14 +514,14 @@ mod tests {
 
         let mut a_scalar = a0.clone();
         let mut a_block = a0.clone();
-        crate::dense::factor::do_2x2_update(&mut a_scalar, BLOCK_SIZE, 10, d11, d21, d22);
-        update_2x2_block32(&mut a_block, 10, d11, d21, d22);
+        crate::dense::factor::do_2x2_update(&mut a_scalar, BLOCK_SIZE, 10, d11, d21, d22, false);
+        update_2x2_block32(&mut a_block, 10, d11, d21, d22, false);
         assert_blocks_bit_equal(&a_block, &a_scalar, "update_2x2_block32 at p=10");
 
         let mut a_scalar2 = a0.clone();
         let mut a_block2 = a0;
-        crate::dense::factor::do_2x2_update(&mut a_scalar2, BLOCK_SIZE, 28, d11, d21, d22);
-        update_2x2_block32(&mut a_block2, 28, d11, d21, d22);
+        crate::dense::factor::do_2x2_update(&mut a_scalar2, BLOCK_SIZE, 28, d11, d21, d22, false);
+        update_2x2_block32(&mut a_block2, 28, d11, d21, d22, false);
         assert_blocks_bit_equal(&a_block2, &a_scalar2, "update_2x2_block32 at p=28");
     }
 
@@ -493,8 +533,8 @@ mod tests {
         let mut a_block = a0;
         // d11*d22 - d21^2 == 0 → det = 0.
         let (d11, d21, d22) = (1.0, 1.0, 1.0);
-        crate::dense::factor::do_2x2_update(&mut a_scalar, BLOCK_SIZE, 5, d11, d21, d22);
-        update_2x2_block32(&mut a_block, 5, d11, d21, d22);
+        crate::dense::factor::do_2x2_update(&mut a_scalar, BLOCK_SIZE, 5, d11, d21, d22, false);
+        update_2x2_block32(&mut a_block, 5, d11, d21, d22, false);
         assert_blocks_bit_equal(&a_block, &a_scalar, "update_2x2_block32 singular");
     }
 

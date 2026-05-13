@@ -127,6 +127,7 @@ fn try_factor_and_solve(
         small_leaf: Default::default(),
         profiler: None,
         parallel_telemetry: None,
+        fma: false,
     };
     let sym = match symbolic_factorize_with_method(csc, &snode_params, OrderingMethod::Amd) {
         Ok(s) => s,
@@ -358,6 +359,7 @@ fn main() {
         small_leaf: Default::default(),
         profiler: None,
         parallel_telemetry: None,
+        fma: false,
     };
     let sym =
         symbolic_factorize_with_method(&csc, &snode_params, OrderingMethod::Amd).expect("symbolic");

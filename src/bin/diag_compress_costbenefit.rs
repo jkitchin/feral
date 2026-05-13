@@ -77,6 +77,7 @@ fn ldlt_params() -> NumericParams {
         small_leaf: SmallLeafBatch::Off,
         profiler: Some(Arc::new(Mutex::new(Profiler::new()))),
         parallel_telemetry: None,
+        fma: false,
     }
 }
 

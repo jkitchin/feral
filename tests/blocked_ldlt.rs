@@ -558,6 +558,7 @@ fn test_swap_2x2_inside_panel_bare() {
     // mid-panel (c > 0) swap-2×2 still bails to scalar.
     let params = BunchKaufmanParams {
         block_size: 8,
+        fma: false,
         ..default_params()
     };
     let n = 24;

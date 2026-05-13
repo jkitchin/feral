@@ -55,6 +55,25 @@ pub struct NumericParams {
     /// "Next Session Should" for the cont-201 investigation that
     /// motivates this hook.
     pub parallel_telemetry: Option<Arc<AtomicLockStats>>,
+    /// Opt-in FMA dispatch on the dense trailing-update / panel-update
+    /// kernels. Default `false` preserves the cross-arch bit-exactness
+    /// invariant of the production `*_nofma` kernels (one rounding per
+    /// `mul` plus one per `sub`); when `true`, the dense factor /
+    /// block_ldlt32 paths dispatch to the FMA siblings
+    /// (`schur_panel_minus_fma_strided*`, `axpy_minus_unroll4`,
+    /// `axpy2_minus_unroll4`) which fuse the multiply-accumulate into
+    /// one `mul_add` per step (single rounding, ~2x arithmetic
+    /// throughput on aarch64 NEON and x86 V3 AVX2+FMA).
+    ///
+    /// Trade-off: the FMA path is **not** bit-exact with the non-FMA
+    /// path; per-element drift is bounded by `n_elim * ULP` (see
+    /// `dense::schur_kernel::fma_vs_nofma_panel_kernels_within_n_elim_ulps`
+    /// for the contract). Inertia is unchanged on well-conditioned
+    /// matrices; residuals match within `64 * EPS`. Opt in when
+    /// throughput matters more than cross-policy bit-identity (large
+    /// supernode workloads like Mittelmann's pinene_3200 NLP — see
+    /// issue #8 and `dev/research/fma-kernel-opt-in.md`).
+    pub fma: bool,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -276,6 +295,7 @@ impl Default for NumericParams {
             small_leaf: SmallLeafBatch::default(),
             profiler: None,
             parallel_telemetry: None,
+            fma: false,
         }
     }
 }
@@ -293,6 +313,7 @@ impl NumericParams {
             small_leaf: SmallLeafBatch::default(),
             profiler: None,
             parallel_telemetry: None,
+            fma: false,
         }
     }
 }
@@ -2881,6 +2902,7 @@ mod tests {
             small_leaf: Default::default(),
             profiler: None,
             parallel_telemetry: None,
+            fma: false,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
@@ -2888,6 +2910,7 @@ mod tests {
             small_leaf: Default::default(),
             profiler: None,
             parallel_telemetry: None,
+            fma: false,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
@@ -2938,6 +2961,7 @@ mod tests {
             small_leaf: Default::default(),
             profiler: None,
             parallel_telemetry: None,
+            fma: false,
         };
         let infnorm = NumericParams {
             scaling: ScalingStrategy::InfNorm,
@@ -3436,6 +3460,7 @@ mod tests {
             small_leaf: SmallLeafBatch::default(),
             profiler: None,
             parallel_telemetry: None,
+            fma: false,
         };
 
         let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];

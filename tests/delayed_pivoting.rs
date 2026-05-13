@@ -354,6 +354,7 @@ fn delay_numeric_params() -> feral::numeric::factorize::NumericParams {
         small_leaf: feral::numeric::factorize::SmallLeafBatch::default(),
         profiler: None,
         parallel_telemetry: None,
+        fma: false,
     }
 }
 

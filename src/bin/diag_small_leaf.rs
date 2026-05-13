@@ -80,6 +80,7 @@ fn params_off() -> NumericParams {
         small_leaf: SmallLeafBatch::Off,
         profiler: None,
         parallel_telemetry: None,
+        fma: false,
     }
 }
 

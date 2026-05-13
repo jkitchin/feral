@@ -42,3 +42,32 @@ advanced #10 as the next target on the strength of #9 landing,
 without re-running diag_supernode_cost. One binary run was the
 difference between writing dead code and recording a clean
 closure.
+
+* 18:45 :issue-8:fma:phase-2:
+Phase 2 plumbing landed: NumericParams.fma, Solver::with_fma builder,
+and dispatch shims through 6 helpers in factor.rs + 2 in
+block_ldlt32.rs. New tests/fma_opt_in_roundtrip.rs constructs a
+112x112 arrow saddle KKT (96 SPD diagonal block, 16 dense constraint
+rows; expected inertia (96, 16, 0)), factors it twice through the
+Solver builder (default vs .with_fma(true)), and asserts:
+- both produce identical inertia
+- both back-solves achieve |Ax-b|_inf / |b|_inf < 1e-10
+
+Mechanics: do_1x1_update / do_2x2_update / peek_ahead_column /
+peek_ahead_replay / apply_blocked_schur / apply_blocked_schur_panel
+all take fma: bool as the last param; each branches `if fma { ...
+fma kernel ... } else { ... nofma kernel ... }` at every Schur call
+site. block_ldlt32::update_1x1_block32 and update_2x2_block32 do
+the same. Entry points that already hold &BunchKaufmanParams pass
+params.fma into the helpers.
+
+Test counts: 451 passed, 0 failed, 27 ignored under cargo test
+--release. cargo clippy --release --all-targets -- -D warnings
+clean (added two #[allow(clippy::too_many_arguments)] for the now
+8-arg peek_ahead_replay and apply_blocked_schur). 19 unrelated
+struct-literal sites in tests/ and src/bin/ updated to set
+`fma: false` (the field is non-optional).
+
+Next: Phase 3 verification — rerun the Mittelmann pinene_3200 NLP
+with .with_fma(true) and compare wallclock + inertia vs the default
+path. Then Phase 4 release (CHANGELOG, decisions, bump to 0.3.1).

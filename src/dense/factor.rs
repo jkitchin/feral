@@ -271,6 +271,15 @@ pub struct BunchKaufmanParams {
     /// factor through the scalar path. Default 64 matches faer's
     /// `factor.rs:722` crossover. See `dev/plans/phase-2.4.1-blocked-ldlt.md`.
     pub block_size: usize,
+
+    /// Opt-in FMA dispatch on the dense trailing-update / panel-update
+    /// kernels. Default `false` keeps the cross-arch bit-exact non-FMA
+    /// path; `true` switches to the FMA siblings for ~2x arithmetic
+    /// throughput on aarch64 NEON and x86 V3 AVX2+FMA. Mirrors
+    /// `NumericParams::fma`; the sparse multifrontal driver copies
+    /// `NumericParams::fma` here when constructing per-supernode BK
+    /// params. See `dev/research/fma-kernel-opt-in.md`, issue #8.
+    pub fma: bool,
 }
 
 /// Action to take when a near-zero pivot is encountered.
@@ -292,6 +301,7 @@ impl Default for BunchKaufmanParams {
             on_zero_pivot: ZeroPivotAction::Fail,
             pivot_threshold: 0.0,
             block_size: 64,
+            fma: false,
         }
     }
 }
@@ -1309,7 +1319,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             // both to avoid a double rank-1 update.
             PanelStatus::ScalarFallbackPeekedNext => k + n_elim + 2,
         };
-        apply_blocked_schur(&mut *a, nrow, k, n_elim, j_start, &*d_panel, &*subdiag);
+        apply_blocked_schur(&mut *a, nrow, k, n_elim, j_start, &*d_panel, &*subdiag, params.fma);
         k += n_elim;
 
         // Phase B-1.5 attribution: count panel outcome and committed pivots.
@@ -1470,7 +1480,7 @@ fn lblt_panel_frontal(
 
         // Peek-ahead: apply pending rank-1 (and rank-2 for accepted
         // panel-internal 2×2's) updates from pivots 0..c.
-        peek_ahead_column(a, nrow, k, c, d_panel, subdiag);
+        peek_ahead_column(a, nrow, k, c, d_panel, subdiag, params.fma);
 
         // Compute gamma0 + argmax row over rows (col+1)..nrow
         // (unrestricted — matches scalar's gamma0 search, which
@@ -1591,7 +1601,7 @@ fn lblt_panel_frontal(
                 // in `apply_blocked_schur` — col+1's deferred updates
                 // have already been applied here.
                 let r_idx = col + 1;
-                peek_ahead_replay(a, nrow, k, c, r_idx, d_panel, subdiag);
+                peek_ahead_replay(a, nrow, k, c, r_idx, d_panel, subdiag, params.fma);
                 let gamma_r = symmetric_row_offdiag_max(a, nrow, col, r_idx);
                 let arr = a[r_idx * nrow + r_idx].abs();
                 if arr >= alpha_bk * gamma_r {
@@ -1765,9 +1775,11 @@ fn peek_ahead_column(
     c: usize,
     d_panel: &[f64],
     subdiag: &[f64],
+    fma: bool,
 ) {
-    peek_ahead_replay(a, nrow, k, c, k + c, d_panel, subdiag);
+    peek_ahead_replay(a, nrow, k, c, k + c, d_panel, subdiag, fma);
 }
+
 
 /// Replay primitive: apply the first `n_committed` panel pivots
 /// (those at panel positions `0..n_committed`) to `target_col` in
@@ -1777,6 +1789,7 @@ fn peek_ahead_column(
 /// and by the no-swap 2×2 inline path (where the panel must
 /// peek-ahead `target_col = col+1` before reading the second pivot's
 /// D values, growth-bound terms, and L scaling inputs).
+#[allow(clippy::too_many_arguments)]
 fn peek_ahead_replay(
     a: &mut [f64],
     nrow: usize,
@@ -1785,6 +1798,7 @@ fn peek_ahead_replay(
     target_col: usize,
     d_panel: &[f64],
     subdiag: &[f64],
+    fma: bool,
 ) {
     let col = target_col;
     let mut q = 0usize;
@@ -1810,7 +1824,11 @@ fn peek_ahead_replay(
             let src0 = &before[q_col * nrow + col..q_col * nrow + nrow];
             let src1 = &before[q1_col * nrow + col..q1_col * nrow + nrow];
             let dst = &mut rest[col..nrow];
-            schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_jq, src1, dl_jq1);
+            if fma {
+                schur_kernel::axpy2_minus_unroll4(dst, src0, dl_jq, src1, dl_jq1);
+            } else {
+                schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_jq, src1, dl_jq1);
+            }
             q += 2;
             continue;
         }
@@ -1832,7 +1850,11 @@ fn peek_ahead_replay(
         let (before, rest) = a.split_at_mut(col * nrow);
         let src = &before[q_col * nrow + col..q_col * nrow + nrow];
         let dst = &mut rest[col..nrow];
-        schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+        if fma {
+            schur_kernel::axpy_minus_unroll4(dst, src, alpha);
+        } else {
+            schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+        }
         q += 1;
     }
 }
@@ -1859,6 +1881,7 @@ fn peek_ahead_replay(
 /// `j_start` is typically `k + n_elim`, except when the caller had the
 /// panel peek-ahead one extra column (`ScalarFallback`), in which case
 /// `j_start = k + n_elim + 1` to avoid double-updating the peeked column.
+#[allow(clippy::too_many_arguments)]
 fn apply_blocked_schur(
     a: &mut [f64],
     nrow: usize,
@@ -1867,6 +1890,7 @@ fn apply_blocked_schur(
     j_start: usize,
     d_panel: &[f64],
     subdiag: &[f64],
+    fma: bool,
 ) {
     if n_elim == 0 || j_start >= nrow {
         return;
@@ -1885,7 +1909,7 @@ fn apply_blocked_schur(
     let has_2x2 = subdiag[k..k + n_elim].iter().any(|&s| s != 0.0);
 
     if !any_zero_d && !has_2x2 && n_elim >= W2_RANK_BS_MIN {
-        apply_blocked_schur_panel(a, nrow, k, n_elim, j_start, d_panel);
+        apply_blocked_schur_panel(a, nrow, k, n_elim, j_start, d_panel, fma);
         return;
     }
 
@@ -1915,7 +1939,11 @@ fn apply_blocked_schur(
                 let src0 = &before[q_col * nrow + j..q_col * nrow + nrow];
                 let src1 = &before[q1_col * nrow + j..q1_col * nrow + nrow];
                 let dst = &mut rest[j..nrow];
-                schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_jq, src1, dl_jq1);
+                if fma {
+                    schur_kernel::axpy2_minus_unroll4(dst, src0, dl_jq, src1, dl_jq1);
+                } else {
+                    schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_jq, src1, dl_jq1);
+                }
             }
             q += 2;
         } else {
@@ -1934,7 +1962,11 @@ fn apply_blocked_schur(
                 let (before, rest) = a.split_at_mut(j * nrow);
                 let src = &before[q_col * nrow + j..q_col * nrow + nrow];
                 let dst = &mut rest[j..nrow];
-                schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+                if fma {
+                    schur_kernel::axpy_minus_unroll4(dst, src, alpha);
+                } else {
+                    schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+                }
             }
             q += 1;
         }
@@ -1965,6 +1997,7 @@ fn apply_blocked_schur_panel(
     n_elim: usize,
     j_start: usize,
     d_panel: &[f64],
+    fma: bool,
 ) {
     // Stack-friendly upper bound on n_elim. The current panel is
     // gated at `params.block_size` which defaults to 64; if that
@@ -2033,10 +2066,17 @@ fn apply_blocked_schur_panel(
             let dst1 = &mut col_j1[(j + 1)..nrow];
             let dst2 = &mut col_j2[(j + 2)..nrow];
             let dst3 = &mut col_j3_and_after[(j + 3)..nrow];
-            schur_kernel::schur_panel_minus_nofma_strided_quad(
-                dst0, dst1, dst2, dst3, before, k, n_elim, nrow, j, alphas0, alphas1, alphas2,
-                alphas3,
-            );
+            if fma {
+                schur_kernel::schur_panel_minus_fma_strided_quad(
+                    dst0, dst1, dst2, dst3, before, k, n_elim, nrow, j, alphas0, alphas1, alphas2,
+                    alphas3,
+                );
+            } else {
+                schur_kernel::schur_panel_minus_nofma_strided_quad(
+                    dst0, dst1, dst2, dst3, before, k, n_elim, nrow, j, alphas0, alphas1, alphas2,
+                    alphas3,
+                );
+            }
         }
         j += 4;
     }
@@ -2065,9 +2105,15 @@ fn apply_blocked_schur_panel(
             let (col_j, after_j) = rest.split_at_mut(nrow);
             let dst0 = &mut col_j[j..];
             let dst1 = &mut after_j[(j + 1)..nrow];
-            schur_kernel::schur_panel_minus_nofma_strided_dual(
-                dst0, dst1, before, k, n_elim, nrow, j, alphas0, alphas1,
-            );
+            if fma {
+                schur_kernel::schur_panel_minus_fma_strided_dual(
+                    dst0, dst1, before, k, n_elim, nrow, j, alphas0, alphas1,
+                );
+            } else {
+                schur_kernel::schur_panel_minus_nofma_strided_dual(
+                    dst0, dst1, before, k, n_elim, nrow, j, alphas0, alphas1,
+                );
+            }
         }
         j += 2;
     }
@@ -2091,16 +2137,29 @@ fn apply_blocked_schur_panel(
             let trailing_len = nrow - j;
             let (before, rest) = a.split_at_mut(j * nrow);
             let dst = &mut rest[j..nrow];
-            schur_kernel::schur_panel_minus_nofma_strided(
-                dst,
-                before,
-                k,
-                n_elim,
-                nrow,
-                j,
-                trailing_len,
-                alphas,
-            );
+            if fma {
+                schur_kernel::schur_panel_minus_fma_strided(
+                    dst,
+                    before,
+                    k,
+                    n_elim,
+                    nrow,
+                    j,
+                    trailing_len,
+                    alphas,
+                );
+            } else {
+                schur_kernel::schur_panel_minus_nofma_strided(
+                    dst,
+                    before,
+                    k,
+                    n_elim,
+                    nrow,
+                    j,
+                    trailing_len,
+                    alphas,
+                );
+            }
         }
     }
 }
@@ -2120,10 +2179,11 @@ fn finish_1x1_outcome(
     pos: &mut usize,
     neg: &mut usize,
     zero: &mut usize,
+    fma: bool,
 ) -> PivotStepResult {
     match outcome {
         PivotOutcome::Accepted => {
-            do_1x1_update(a, nrow, k);
+            do_1x1_update(a, nrow, k, fma);
             PivotStepResult::Advanced(1)
         }
         PivotOutcome::Rejected => PivotStepResult::Advanced(1),
@@ -2134,7 +2194,7 @@ fn finish_1x1_outcome(
             *neg += inertia.negative;
             *zero += inertia.zero;
             subdiag[k] = d21;
-            do_2x2_update(a, nrow, k, d11, d21, d22);
+            do_2x2_update(a, nrow, k, d11, d21, d22, fma);
             PivotStepResult::Advanced(2)
         }
     }
@@ -2193,7 +2253,7 @@ fn scalar_pivot_step(
             needs_refinement,
         )?;
         match outcome {
-            PivotOutcome::Accepted => do_1x1_update(a, nrow, k),
+            PivotOutcome::Accepted => do_1x1_update(a, nrow, k, params.fma),
             PivotOutcome::Rejected => {}
             PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
             PivotOutcome::AcceptedRook2x2 { .. } => {
@@ -2254,7 +2314,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
         )?;
         return Ok(finish_1x1_outcome(
-            outcome, a, nrow, k, subdiag, pos, neg, zero,
+            outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma,
         ));
     }
 
@@ -2284,7 +2344,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
         )?;
         return Ok(finish_1x1_outcome(
-            outcome, a, nrow, k, subdiag, pos, neg, zero,
+            outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma,
         ));
     }
 
@@ -2306,7 +2366,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
         )?;
         return Ok(finish_1x1_outcome(
-            outcome, a, nrow, k, subdiag, pos, neg, zero,
+            outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma,
         ));
     }
 
@@ -2419,7 +2479,7 @@ fn scalar_pivot_step(
                 n_rook_rescues,
             )?;
             return Ok(finish_1x1_outcome(
-                outcome, a, nrow, k, subdiag, pos, neg, zero,
+                outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma,
             ));
         }
 
@@ -2430,7 +2490,7 @@ fn scalar_pivot_step(
 
         subdiag[k] = d21;
         // 2×2 update
-        do_2x2_update(a, nrow, k, d11, d21, d22);
+        do_2x2_update(a, nrow, k, d11, d21, d22, params.fma);
         Ok(PivotStepResult::Advanced(2))
     } else {
         // Can't do 2×2 (r is not fully summed or only 1 column left).
@@ -2451,7 +2511,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
         )?;
         Ok(finish_1x1_outcome(
-            outcome, a, nrow, k, subdiag, pos, neg, zero,
+            outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma,
         ))
     }
 }
@@ -2639,12 +2699,15 @@ fn try_reject_1x1_with_rook_rescue(
 }
 
 /// 1×1 rank-1 update: update columns k+1..n after eliminating column k.
-pub(crate) fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
+///
+/// `fma=true` selects the FMA panel kernels (issue #8 opt-in); `fma=false`
+/// preserves the cross-arch bit-exact non-FMA path.
+pub(crate) fn do_1x1_update(a: &mut [f64], n: usize, k: usize, fma: bool) {
     // Issue #9 Step 2: route n==32 to the block-32 SIMD body. Bit-exact
     // per the parity sweep in `block_ldlt32::tests` (4 unit tests cover
     // p=0/5/30 + zero-pivot).
     if n == crate::dense::block_ldlt32::BLOCK_SIZE {
-        crate::dense::block_ldlt32::update_1x1_block32(a, k);
+        crate::dense::block_ldlt32::update_1x1_block32(a, k, fma);
         return;
     }
     let d = a[k * n + k];
@@ -2663,18 +2726,33 @@ pub(crate) fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
         let (before, rest) = a.split_at_mut(j * n);
         let src = &before[k * n + j..k * n + n];
         let dst = &mut rest[j..n];
-        schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+        if fma {
+            schur_kernel::axpy_minus_unroll4(dst, src, alpha);
+        } else {
+            schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+        }
     }
 }
 
 /// Rank-2 update after a 2×2 pivot at columns `k`, `k+1`.
-pub(crate) fn do_2x2_update(a: &mut [f64], n: usize, k: usize, d11: f64, d21: f64, d22: f64) {
+///
+/// `fma=true` selects the FMA panel kernels (issue #8 opt-in); `fma=false`
+/// preserves the cross-arch bit-exact non-FMA path.
+pub(crate) fn do_2x2_update(
+    a: &mut [f64],
+    n: usize,
+    k: usize,
+    d11: f64,
+    d21: f64,
+    d22: f64,
+    fma: bool,
+) {
     // Issue #9 Step 2: route n==32 to the block-32 body. The Step 4 SIMD
     // rank-2 kernel is still pending, so update_2x2_block32 is currently
     // the scalar per-column axpy2 (bit-identical to this function at
     // n==32); the indirection is a hook for Step 4.
     if n == crate::dense::block_ldlt32::BLOCK_SIZE {
-        crate::dense::block_ldlt32::update_2x2_block32(a, k, d11, d21, d22);
+        crate::dense::block_ldlt32::update_2x2_block32(a, k, d11, d21, d22, fma);
         return;
     }
     let det = d11 * d22 - d21 * d21;
@@ -2702,7 +2780,11 @@ pub(crate) fn do_2x2_update(a: &mut [f64], n: usize, k: usize, d11: f64, d21: f6
         let src0 = &before[k * n + j..k * n + n];
         let src1 = &before[(k + 1) * n + j..(k + 1) * n + n];
         let dst = &mut rest[j..n];
-        schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_j0, src1, dl_j1);
+        if fma {
+            schur_kernel::axpy2_minus_unroll4(dst, src0, dl_j0, src1, dl_j1);
+        } else {
+            schur_kernel::axpy2_minus_unroll4_nofma(dst, src0, dl_j0, src1, dl_j1);
+        }
     }
 }
 
