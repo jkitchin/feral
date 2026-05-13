@@ -2615,8 +2615,19 @@ struct ContribBlock {
 }
 
 /// Extend-add: assemble a child's contribution block into the parent frontal.
+///
+/// Issue #13 Phase B: bypasses `SymmetricMatrix::set`/`get` and writes
+/// directly into `frontal.data`. The lower-triangle column-major linear
+/// index for cell `(row, col)` with `row >= col` is `col * n + row`; the
+/// `parent_i >= parent_j` test below canonicalises which of the two
+/// indices is the row. This removes the redundant `i >= j` branch that
+/// `set`/`get` perform on every cell and eliminates one read+write call
+/// frame per cell. With ~38 children per medium front each contributing
+/// up to `cdim*(cdim+1)/2` cells, this trims a measurable per-front cost.
 fn extend_add(contrib: &ContribBlock, parent_row_map: &[usize], frontal: &mut SymmetricMatrix) {
     let cdim = contrib.dim;
+    let fn_ = frontal.n;
+    let f_data: &mut [f64] = frontal.data.as_mut_slice();
     for cj in 0..cdim {
         let parent_j = parent_row_map[contrib.row_indices[cj]];
         if parent_j == usize::MAX {
@@ -2631,12 +2642,13 @@ fn extend_add(contrib: &ContribBlock, parent_row_map: &[usize], frontal: &mut Sy
             if val == 0.0 {
                 continue;
             }
-            // Place in lower triangle of parent frontal
-            if parent_i >= parent_j {
-                frontal.set(parent_i, parent_j, frontal.get(parent_i, parent_j) + val);
+            // Canonicalise to lower triangle: ensure row >= col.
+            let (row, col) = if parent_i >= parent_j {
+                (parent_i, parent_j)
             } else {
-                frontal.set(parent_j, parent_i, frontal.get(parent_j, parent_i) + val);
-            }
+                (parent_j, parent_i)
+            };
+            f_data[col * fn_ + row] += val;
         }
     }
 }
