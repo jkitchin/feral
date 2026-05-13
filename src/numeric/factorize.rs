@@ -358,8 +358,20 @@ impl Default for NumericParams {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
-            cascade_break_ratio: None,
-            cascade_break_eps: None,
+            // Auto-armed bounded perturbation. The cascade-break test
+            // (`n_delayed_in / expanded_ncol >= 0.5`) is a per-node
+            // check that is bit-identical to today's default on
+            // healthy matrices (no node crosses 50% delays-in). On
+            // cascade-prone matrices it fires at the overloaded
+            // supernode with a bounded `sign(d) * max(|d|, 1e-10)`
+            // perturbation. The eps=1e-10 floor keeps the per-pivot
+            // perturbation below the smallest nonzero eigenvalue
+            // magnitude on numerically reasonable problems (Weyl:
+            // `|λ - λ'| <= ||Δ||_2 <= eps`), so inertia is preserved.
+            // Closest precedent: MA57 cntl(4), SuperLU_DIST static
+            // pivoting threshold. Off-switch: set these to `None`.
+            cascade_break_ratio: Some(0.5),
+            cascade_break_eps: Some(1e-10),
         }
     }
 }
@@ -379,8 +391,10 @@ impl NumericParams {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
-            cascade_break_ratio: None,
-            cascade_break_eps: None,
+            // Match `Default::default()` — auto-armed bounded
+            // perturbation. See the comment there for rationale.
+            cascade_break_ratio: Some(0.5),
+            cascade_break_eps: Some(1e-10),
         }
     }
 }
