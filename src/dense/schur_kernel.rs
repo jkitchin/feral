@@ -1183,6 +1183,421 @@ pub fn schur_panel_minus_nofma_strided_dual(
     });
 }
 
+/// Quad-column rank-`n_elim` deferred-Schur trailing-update.
+///
+/// Processes four adjacent trailing columns `j`, `j+1`, `j+2`, `j+3`
+/// in lockstep, sharing each `src_q` load between all four column
+/// accumulators. Computes, for each column c in 0..4 independently:
+///
+/// ```text
+///     for q in 0..n_elim {
+///         dst_c[i] -= alphas_c[q] * src[(src_first_col + q)*col_stride
+///                                       + src_row_offset + c + i]
+///                                                            for i in 0..(len0 - c)
+///     }
+/// ```
+///
+/// `dst0` has length `len0 = nrow - j`; `dst1`, `dst2`, `dst3` have
+/// lengths `len0 - 1`, `len0 - 2`, `len0 - 3` respectively (each
+/// trailing column is one row shorter than the previous, matching the
+/// lower-triangular L panel layout). The cap rows 0, 1, 2 are handled
+/// by a scalar prologue (3 elements; tiny relative to the bulk). The
+/// bulk processes rows where all four columns have a corresponding
+/// entry, length `len3 = len0 - 3`.
+///
+/// Bit-exactness contract: for each column independently the
+/// per-element rounding sequence
+///   `acc <- round(acc - round(alpha_q * src_q[i]))`
+/// is issued in `q` ascending order, identical to four sequential
+/// calls of [`schur_panel_minus_nofma_strided`] on columns `j..j+4`.
+/// The bulk SIMD body uses **unroll factor 2** (not 4) so the eight
+/// live accumulator registers (2 chunks × 4 cols) fit AVX2's 16-ymm
+/// budget without spilling.
+///
+/// Preconditions:
+/// - `dst0.len() == len0`, `dst1.len() == len0 - 1`,
+///   `dst2.len() == len0 - 2`, `dst3.len() == len0 - 3` (asserted).
+/// - `alphas{0,1,2,3}.len() == n_elim`.
+/// - `src_block.len() >= (src_first_col + n_elim - 1)*col_stride
+///                       + src_row_offset + len0`.
+/// - All four `dst` slices and `src_block` pairwise disjoint
+///   (caller's burden; guaranteed by `apply_blocked_schur_panel`'s
+///   nested `split_at_mut`).
+///
+/// Phase 2.4.3 (issue #9, re-scoped). Halves source memory traffic
+/// vs the dual kernel; doubles arithmetic per src-vector load.
+#[allow(dead_code, clippy::too_many_arguments)]
+pub fn schur_panel_minus_nofma_strided_quad(
+    dst0: &mut [f64],
+    dst1: &mut [f64],
+    dst2: &mut [f64],
+    dst3: &mut [f64],
+    src_block: &[f64],
+    src_first_col: usize,
+    n_elim: usize,
+    col_stride: usize,
+    src_row_offset: usize,
+    alphas0: &[f64],
+    alphas1: &[f64],
+    alphas2: &[f64],
+    alphas3: &[f64],
+) {
+    let len0 = dst0.len();
+    let len1 = dst1.len();
+    let len2 = dst2.len();
+    let len3 = dst3.len();
+    assert_eq!(
+        len1 + 1,
+        len0,
+        "schur_panel_minus_nofma_strided_quad: dst1 must be exactly one shorter than dst0 \
+         (len0={}, len1={})",
+        len0,
+        len1
+    );
+    assert_eq!(
+        len2 + 2,
+        len0,
+        "schur_panel_minus_nofma_strided_quad: dst2 must be exactly two shorter than dst0 \
+         (len0={}, len2={})",
+        len0,
+        len2
+    );
+    assert_eq!(
+        len3 + 3,
+        len0,
+        "schur_panel_minus_nofma_strided_quad: dst3 must be exactly three shorter than dst0 \
+         (len0={}, len3={})",
+        len0,
+        len3
+    );
+    assert_eq!(
+        alphas0.len(),
+        n_elim,
+        "schur_panel_minus_nofma_strided_quad: alphas0.len() must equal n_elim"
+    );
+    assert_eq!(
+        alphas1.len(),
+        n_elim,
+        "schur_panel_minus_nofma_strided_quad: alphas1.len() must equal n_elim"
+    );
+    assert_eq!(
+        alphas2.len(),
+        n_elim,
+        "schur_panel_minus_nofma_strided_quad: alphas2.len() must equal n_elim"
+    );
+    assert_eq!(
+        alphas3.len(),
+        n_elim,
+        "schur_panel_minus_nofma_strided_quad: alphas3.len() must equal n_elim"
+    );
+
+    if n_elim == 0 || len0 == 0 {
+        return;
+    }
+
+    let last_q = n_elim - 1;
+    let max_idx = (src_first_col + last_q) * col_stride + src_row_offset + len0;
+    assert!(
+        src_block.len() >= max_idx,
+        "schur_panel_minus_nofma_strided_quad: src_block too short ({} < {})",
+        src_block.len(),
+        max_idx
+    );
+
+    // Cap row 0 (dst0[0] only). Process via scalar q-loop; bit-exact
+    // with rank-1's per-element rounding since SIMD `mul`/`sub` of a
+    // single-lane vector is identical IEEE-754 to scalar `*`/`-`.
+    for (q, &alpha_q) in alphas0.iter().enumerate().take(n_elim) {
+        if alpha_q == 0.0 {
+            continue;
+        }
+        let col_off = (src_first_col + q) * col_stride + src_row_offset;
+        let s = src_block[col_off];
+        dst0[0] -= alpha_q * s;
+    }
+
+    if len0 == 1 {
+        return;
+    }
+
+    // Cap row 1 (dst0[1] and dst1[0]). Both share src row offset
+    // src_row_offset + 1.
+    for q in 0..n_elim {
+        let col_off = (src_first_col + q) * col_stride + src_row_offset + 1;
+        let s = src_block[col_off];
+        let a0 = alphas0[q];
+        let a1 = alphas1[q];
+        if a0 != 0.0 {
+            dst0[1] -= a0 * s;
+        }
+        if a1 != 0.0 {
+            dst1[0] -= a1 * s;
+        }
+    }
+
+    if len0 == 2 {
+        return;
+    }
+
+    // Cap row 2 (dst0[2], dst1[1], dst2[0]). All three share src row
+    // offset src_row_offset + 2.
+    for q in 0..n_elim {
+        let col_off = (src_first_col + q) * col_stride + src_row_offset + 2;
+        let s = src_block[col_off];
+        let a0 = alphas0[q];
+        let a1 = alphas1[q];
+        let a2 = alphas2[q];
+        if a0 != 0.0 {
+            dst0[2] -= a0 * s;
+        }
+        if a1 != 0.0 {
+            dst1[1] -= a1 * s;
+        }
+        if a2 != 0.0 {
+            dst2[0] -= a2 * s;
+        }
+    }
+
+    if len0 == 3 {
+        return;
+    }
+
+    // Bulk: rows j+3..nrow. All four columns have a corresponding
+    // entry. dst0_bulk[i], dst1_bulk[i], dst2_bulk[i], dst3_bulk[i]
+    // all share src row offset src_row_offset + 3 + i.
+
+    struct K<'a> {
+        dst0_bulk: &'a mut [f64],
+        dst1_bulk: &'a mut [f64],
+        dst2_bulk: &'a mut [f64],
+        dst3_bulk: &'a mut [f64],
+        src_block: &'a [f64],
+        src_first_col: usize,
+        n_elim: usize,
+        col_stride: usize,
+        src_row_offset_bulk: usize,
+        len: usize,
+        alphas0: &'a [f64],
+        alphas1: &'a [f64],
+        alphas2: &'a [f64],
+        alphas3: &'a [f64],
+    }
+
+    impl pulp::WithSimd for K<'_> {
+        type Output = ();
+
+        // The `for q in 0..n_elim` loops below use `q` to index
+        // multiple disjoint quantities (alphas{0..3}[q],
+        // src_first_col + q). Rewriting as `.iter().enumerate()` would
+        // obscure the hot-loop intent.
+        #[allow(clippy::needless_range_loop)]
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) {
+            let Self {
+                dst0_bulk,
+                dst1_bulk,
+                dst2_bulk,
+                dst3_bulk,
+                src_block,
+                src_first_col,
+                n_elim,
+                col_stride,
+                src_row_offset_bulk,
+                len,
+                alphas0,
+                alphas1,
+                alphas2,
+                alphas3,
+            } = self;
+
+            let (d0_body, d0_tail) = S::as_mut_simd_f64s(dst0_bulk);
+            let (d1_body, d1_tail) = S::as_mut_simd_f64s(dst1_bulk);
+            let (d2_body, d2_tail) = S::as_mut_simd_f64s(dst2_bulk);
+            let (d3_body, d3_tail) = S::as_mut_simd_f64s(dst3_bulk);
+            // All four bulks have identical length; SIMD body/tail
+            // splits coincide.
+            let body_len = d0_body.len();
+            debug_assert_eq!(body_len, d1_body.len());
+            debug_assert_eq!(body_len, d2_body.len());
+            debug_assert_eq!(body_len, d3_body.len());
+            let tail_off = body_len * S::F64_LANES;
+
+            // Unroll-2 main body. Per chunk, hold 2 accumulators per
+            // dst column = 8 SIMD acc regs total. Plus 2 src regs (one
+            // per chunk lane) + 1 alpha splat reg reused = ~11 live
+            // regs. Fits AVX2's 16-ymm budget without spilling.
+            //
+            // Per q: load src_q chunk ONCE into (s0, s1), then apply
+            // (alpha0_q, s) → dst0 accumulators, (alpha1_q, s) → dst1,
+            // (alpha2_q, s) → dst2, (alpha3_q, s) → dst3. Bit-exact
+            // per column with four sequential single-column rank-1
+            // dispatches because each column's accumulator sees the
+            // same q-ascending `acc <- sub(acc, mul(alpha_q, src))`
+            // chain, independent of the other columns.
+            let chunks = body_len / 2;
+            for chunk_idx in 0..chunks {
+                let base = chunk_idx * 2;
+                let mut a00 = d0_body[base];
+                let mut a01 = d0_body[base + 1];
+                let mut a10 = d1_body[base];
+                let mut a11 = d1_body[base + 1];
+                let mut a20 = d2_body[base];
+                let mut a21 = d2_body[base + 1];
+                let mut a30 = d3_body[base];
+                let mut a31 = d3_body[base + 1];
+                for q in 0..n_elim {
+                    let a0q = alphas0[q];
+                    let a1q = alphas1[q];
+                    let a2q = alphas2[q];
+                    let a3q = alphas3[q];
+                    if a0q == 0.0 && a1q == 0.0 && a2q == 0.0 && a3q == 0.0 {
+                        continue;
+                    }
+                    let col_off = (src_first_col + q) * col_stride + src_row_offset_bulk;
+                    let src_q = &src_block[col_off..col_off + len];
+                    let (sb, _st) = S::as_simd_f64s(src_q);
+                    let s0 = sb[base];
+                    let s1 = sb[base + 1];
+                    if a0q != 0.0 {
+                        let av0 = simd.splat_f64s(a0q);
+                        a00 = simd.sub_f64s(a00, simd.mul_f64s(av0, s0));
+                        a01 = simd.sub_f64s(a01, simd.mul_f64s(av0, s1));
+                    }
+                    if a1q != 0.0 {
+                        let av1 = simd.splat_f64s(a1q);
+                        a10 = simd.sub_f64s(a10, simd.mul_f64s(av1, s0));
+                        a11 = simd.sub_f64s(a11, simd.mul_f64s(av1, s1));
+                    }
+                    if a2q != 0.0 {
+                        let av2 = simd.splat_f64s(a2q);
+                        a20 = simd.sub_f64s(a20, simd.mul_f64s(av2, s0));
+                        a21 = simd.sub_f64s(a21, simd.mul_f64s(av2, s1));
+                    }
+                    if a3q != 0.0 {
+                        let av3 = simd.splat_f64s(a3q);
+                        a30 = simd.sub_f64s(a30, simd.mul_f64s(av3, s0));
+                        a31 = simd.sub_f64s(a31, simd.mul_f64s(av3, s1));
+                    }
+                }
+                d0_body[base] = a00;
+                d0_body[base + 1] = a01;
+                d1_body[base] = a10;
+                d1_body[base + 1] = a11;
+                d2_body[base] = a20;
+                d2_body[base + 1] = a21;
+                d3_body[base] = a30;
+                d3_body[base + 1] = a31;
+            }
+
+            // Tail full-lane SIMD vector (0 or 1 leftover after the
+            // unroll-2 main body).
+            let tail_chunks_start = chunks * 2;
+            for body_idx in tail_chunks_start..body_len {
+                let mut acc0 = d0_body[body_idx];
+                let mut acc1 = d1_body[body_idx];
+                let mut acc2 = d2_body[body_idx];
+                let mut acc3 = d3_body[body_idx];
+                for q in 0..n_elim {
+                    let a0q = alphas0[q];
+                    let a1q = alphas1[q];
+                    let a2q = alphas2[q];
+                    let a3q = alphas3[q];
+                    if a0q == 0.0 && a1q == 0.0 && a2q == 0.0 && a3q == 0.0 {
+                        continue;
+                    }
+                    let col_off = (src_first_col + q) * col_stride + src_row_offset_bulk;
+                    let src_q = &src_block[col_off..col_off + len];
+                    let (sb, _st) = S::as_simd_f64s(src_q);
+                    let s = sb[body_idx];
+                    if a0q != 0.0 {
+                        let av0 = simd.splat_f64s(a0q);
+                        acc0 = simd.sub_f64s(acc0, simd.mul_f64s(av0, s));
+                    }
+                    if a1q != 0.0 {
+                        let av1 = simd.splat_f64s(a1q);
+                        acc1 = simd.sub_f64s(acc1, simd.mul_f64s(av1, s));
+                    }
+                    if a2q != 0.0 {
+                        let av2 = simd.splat_f64s(a2q);
+                        acc2 = simd.sub_f64s(acc2, simd.mul_f64s(av2, s));
+                    }
+                    if a3q != 0.0 {
+                        let av3 = simd.splat_f64s(a3q);
+                        acc3 = simd.sub_f64s(acc3, simd.mul_f64s(av3, s));
+                    }
+                }
+                d0_body[body_idx] = acc0;
+                d1_body[body_idx] = acc1;
+                d2_body[body_idx] = acc2;
+                d3_body[body_idx] = acc3;
+            }
+
+            // Masked tail (< one full lane). Same per-element ordering.
+            if !d0_tail.is_empty() {
+                let mut acc0 = simd.partial_load_f64s(d0_tail);
+                let mut acc1 = simd.partial_load_f64s(d1_tail);
+                let mut acc2 = simd.partial_load_f64s(d2_tail);
+                let mut acc3 = simd.partial_load_f64s(d3_tail);
+                for q in 0..n_elim {
+                    let a0q = alphas0[q];
+                    let a1q = alphas1[q];
+                    let a2q = alphas2[q];
+                    let a3q = alphas3[q];
+                    if a0q == 0.0 && a1q == 0.0 && a2q == 0.0 && a3q == 0.0 {
+                        continue;
+                    }
+                    let col_off = (src_first_col + q) * col_stride + src_row_offset_bulk;
+                    let src_q = &src_block[col_off..col_off + len];
+                    let src_q_tail = &src_q[tail_off..];
+                    let s = simd.partial_load_f64s(src_q_tail);
+                    if a0q != 0.0 {
+                        let av0 = simd.splat_f64s(a0q);
+                        acc0 = simd.sub_f64s(acc0, simd.mul_f64s(av0, s));
+                    }
+                    if a1q != 0.0 {
+                        let av1 = simd.splat_f64s(a1q);
+                        acc1 = simd.sub_f64s(acc1, simd.mul_f64s(av1, s));
+                    }
+                    if a2q != 0.0 {
+                        let av2 = simd.splat_f64s(a2q);
+                        acc2 = simd.sub_f64s(acc2, simd.mul_f64s(av2, s));
+                    }
+                    if a3q != 0.0 {
+                        let av3 = simd.splat_f64s(a3q);
+                        acc3 = simd.sub_f64s(acc3, simd.mul_f64s(av3, s));
+                    }
+                }
+                simd.partial_store_f64s(d0_tail, acc0);
+                simd.partial_store_f64s(d1_tail, acc1);
+                simd.partial_store_f64s(d2_tail, acc2);
+                simd.partial_store_f64s(d3_tail, acc3);
+            }
+        }
+    }
+
+    // Split each dst into (cap, bulk). dst0 cap is 3 elements,
+    // dst1 cap is 2, dst2 cap is 1, dst3 has no cap.
+    let (_d0_cap, d0_bulk) = dst0.split_at_mut(3);
+    let (_d1_cap, d1_bulk) = dst1.split_at_mut(2);
+    let (_d2_cap, d2_bulk) = dst2.split_at_mut(1);
+    dispatch_nofma(K {
+        dst0_bulk: d0_bulk,
+        dst1_bulk: d1_bulk,
+        dst2_bulk: d2_bulk,
+        dst3_bulk: dst3,
+        src_block,
+        src_first_col,
+        n_elim,
+        col_stride,
+        src_row_offset_bulk: src_row_offset + 3,
+        len: len3,
+        alphas0,
+        alphas1,
+        alphas2,
+        alphas3,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1677,6 +2092,231 @@ mod tests {
         );
         assert_eq!(dst0_kernel, dst0_ref);
         assert_eq!(dst1_kernel, dst1_ref);
+    }
+
+    /// Phase 2.4.3 (issue #9): quad-column kernel must be bit-exact
+    /// with four sequential calls to the single-column strided kernel,
+    /// one per dst column.
+    #[test]
+    fn schur_panel_minus_nofma_strided_quad_is_bit_exact_vs_four_singles() {
+        let mut rng = Xorshift64::new(0x9A77_E11E_2026_0512_u64);
+        let n_elim_sweep = [1usize, 2, 4, 7, 8, 16, 31, 32];
+        // len0 must be >= 4 for the quad path to engage non-trivially.
+        // We still test small len0 (1..=3) to exercise the cap-only
+        // shortcuts; the dispatch caller skips quad in those cases.
+        let len0_sweep: &[usize] = &[
+            3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18, 19, 31, 32, 33, 63, 64, 65, 127, 128, 257,
+        ];
+        for &n_elim in &n_elim_sweep {
+            for &len0 in len0_sweep {
+                let src_row_offset = 3usize;
+                let col_stride = src_row_offset + len0 + 5 + n_elim;
+                let total = n_elim * col_stride;
+                let src_block: Vec<f64> = (0..total).map(|_| rng.next_f64()).collect();
+
+                let len1 = len0 - 1;
+                let len2 = len0 - 2;
+                let len3 = len0 - 3;
+                let dst0_init: Vec<f64> = (0..len0).map(|_| rng.next_f64()).collect();
+                let dst1_init: Vec<f64> = (0..len1).map(|_| rng.next_f64()).collect();
+                let dst2_init: Vec<f64> = (0..len2).map(|_| rng.next_f64()).collect();
+                let dst3_init: Vec<f64> = (0..len3).map(|_| rng.next_f64()).collect();
+                let alphas0: Vec<f64> = (0..n_elim).map(|_| rng.next_f64() * 1.5).collect();
+                let alphas1: Vec<f64> = (0..n_elim).map(|_| rng.next_f64() * 1.5).collect();
+                let alphas2: Vec<f64> = (0..n_elim).map(|_| rng.next_f64() * 1.5).collect();
+                let alphas3: Vec<f64> = (0..n_elim).map(|_| rng.next_f64() * 1.5).collect();
+
+                let mut dst0_ref = dst0_init.clone();
+                let mut dst1_ref = dst1_init.clone();
+                let mut dst2_ref = dst2_init.clone();
+                let mut dst3_ref = dst3_init.clone();
+                schur_panel_minus_nofma_strided(
+                    &mut dst0_ref,
+                    &src_block,
+                    0,
+                    n_elim,
+                    col_stride,
+                    src_row_offset,
+                    len0,
+                    &alphas0,
+                );
+                if len1 > 0 {
+                    schur_panel_minus_nofma_strided(
+                        &mut dst1_ref,
+                        &src_block,
+                        0,
+                        n_elim,
+                        col_stride,
+                        src_row_offset + 1,
+                        len1,
+                        &alphas1,
+                    );
+                }
+                if len2 > 0 {
+                    schur_panel_minus_nofma_strided(
+                        &mut dst2_ref,
+                        &src_block,
+                        0,
+                        n_elim,
+                        col_stride,
+                        src_row_offset + 2,
+                        len2,
+                        &alphas2,
+                    );
+                }
+                if len3 > 0 {
+                    schur_panel_minus_nofma_strided(
+                        &mut dst3_ref,
+                        &src_block,
+                        0,
+                        n_elim,
+                        col_stride,
+                        src_row_offset + 3,
+                        len3,
+                        &alphas3,
+                    );
+                }
+
+                let mut dst0_kernel = dst0_init.clone();
+                let mut dst1_kernel = dst1_init.clone();
+                let mut dst2_kernel = dst2_init.clone();
+                let mut dst3_kernel = dst3_init.clone();
+                schur_panel_minus_nofma_strided_quad(
+                    &mut dst0_kernel,
+                    &mut dst1_kernel,
+                    &mut dst2_kernel,
+                    &mut dst3_kernel,
+                    &src_block,
+                    0,
+                    n_elim,
+                    col_stride,
+                    src_row_offset,
+                    &alphas0,
+                    &alphas1,
+                    &alphas2,
+                    &alphas3,
+                );
+
+                assert_eq!(
+                    dst0_kernel, dst0_ref,
+                    "dst0 mismatch at n_elim={}, len0={}",
+                    n_elim, len0
+                );
+                assert_eq!(
+                    dst1_kernel, dst1_ref,
+                    "dst1 mismatch at n_elim={}, len0={}",
+                    n_elim, len0
+                );
+                assert_eq!(
+                    dst2_kernel, dst2_ref,
+                    "dst2 mismatch at n_elim={}, len0={}",
+                    n_elim, len0
+                );
+                assert_eq!(
+                    dst3_kernel, dst3_ref,
+                    "dst3 mismatch at n_elim={}, len0={}",
+                    n_elim, len0
+                );
+            }
+        }
+    }
+
+    /// Phase 2.4.3 (issue #9): zero-alpha skips honored independently
+    /// per column. Each column's reference uses its own alpha pattern;
+    /// the all-zero-q skip in the kernel must not affect any column
+    /// whose own alpha is non-zero at that q.
+    #[test]
+    fn schur_panel_minus_nofma_strided_quad_skips_zero_alphas_independently() {
+        let mut rng = Xorshift64::new(0xCAFE_F00D_2026_0512_u64);
+        let n_elim = 6;
+        let len0 = 67;
+        let len1 = len0 - 1;
+        let len2 = len0 - 2;
+        let len3 = len0 - 3;
+        let src_row_offset = 2usize;
+        let col_stride = src_row_offset + len0 + 4 + n_elim;
+        let total = n_elim * col_stride;
+        let src_block: Vec<f64> = (0..total).map(|_| rng.next_f64()).collect();
+        let dst0_init: Vec<f64> = (0..len0).map(|_| rng.next_f64()).collect();
+        let dst1_init: Vec<f64> = (0..len1).map(|_| rng.next_f64()).collect();
+        let dst2_init: Vec<f64> = (0..len2).map(|_| rng.next_f64()).collect();
+        let dst3_init: Vec<f64> = (0..len3).map(|_| rng.next_f64()).collect();
+        // Independent zero patterns: q=0 zero in alphas0; q=1 zero in
+        // alphas1,2; q=2 zero in all four (the all-zero-q skip path);
+        // q=3 zero in alphas3; q=4 zero in alphas2; q=5 non-zero in all.
+        let alphas0 = vec![0.0, 0.5, 0.0, -0.25, 0.75, 1.1];
+        let alphas1 = vec![0.4, 0.0, 0.0, 0.6, 0.3, -0.9];
+        let alphas2 = vec![-0.5, 0.0, 0.0, 0.2, 0.0, 0.7];
+        let alphas3 = vec![0.8, -0.3, 0.0, 0.0, 0.55, 0.4];
+
+        let mut dst0_ref = dst0_init.clone();
+        let mut dst1_ref = dst1_init.clone();
+        let mut dst2_ref = dst2_init.clone();
+        let mut dst3_ref = dst3_init.clone();
+        schur_panel_minus_nofma_strided(
+            &mut dst0_ref,
+            &src_block,
+            0,
+            n_elim,
+            col_stride,
+            src_row_offset,
+            len0,
+            &alphas0,
+        );
+        schur_panel_minus_nofma_strided(
+            &mut dst1_ref,
+            &src_block,
+            0,
+            n_elim,
+            col_stride,
+            src_row_offset + 1,
+            len1,
+            &alphas1,
+        );
+        schur_panel_minus_nofma_strided(
+            &mut dst2_ref,
+            &src_block,
+            0,
+            n_elim,
+            col_stride,
+            src_row_offset + 2,
+            len2,
+            &alphas2,
+        );
+        schur_panel_minus_nofma_strided(
+            &mut dst3_ref,
+            &src_block,
+            0,
+            n_elim,
+            col_stride,
+            src_row_offset + 3,
+            len3,
+            &alphas3,
+        );
+
+        let mut dst0_kernel = dst0_init.clone();
+        let mut dst1_kernel = dst1_init.clone();
+        let mut dst2_kernel = dst2_init.clone();
+        let mut dst3_kernel = dst3_init.clone();
+        schur_panel_minus_nofma_strided_quad(
+            &mut dst0_kernel,
+            &mut dst1_kernel,
+            &mut dst2_kernel,
+            &mut dst3_kernel,
+            &src_block,
+            0,
+            n_elim,
+            col_stride,
+            src_row_offset,
+            &alphas0,
+            &alphas1,
+            &alphas2,
+            &alphas3,
+        );
+        assert_eq!(dst0_kernel, dst0_ref);
+        assert_eq!(dst1_kernel, dst1_ref);
+        assert_eq!(dst2_kernel, dst2_ref);
+        assert_eq!(dst3_kernel, dst3_ref);
     }
 
     #[test]
