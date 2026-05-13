@@ -1,0 +1,31 @@
+{
+  "title": "FERAL: Factored Error-Resistant Algebra Library",
+  "description": "A pure-Rust sparse symmetric indefinite linear solver with certified inertia counts, built as a clean-room replacement for MUMPS in interior-point optimization workloads. Implements multifrontal LDL^T with Bunch-Kaufman pivoting, exact inertia certification gated against MUMPS 5.8.2 and SPRAL SSIDS oracles, and a C ABI plug-in for Ipopt 3.14.",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Kitchin, John R.",
+      "affiliation": "Carnegie Mellon University",
+      "orcid": "0000-0003-2625-9232"
+    }
+  ],
+  "keywords": [
+    "sparse linear algebra",
+    "direct solver",
+    "LDLT",
+    "symmetric indefinite",
+    "multifrontal",
+    "interior-point optimization",
+    "KKT systems",
+    "Rust"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/jkitchin/feral",
+      "relation": "isSupplementTo",
+      "resource_type": "software"
+    }
+  ]
+}

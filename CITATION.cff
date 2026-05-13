@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use FERAL in academic work, please cite it as below."
+title: "FERAL: Factored Error-Resistant Algebra Library"
+abstract: >-
+  A pure-Rust sparse symmetric indefinite linear solver with certified
+  inertia counts, built as a clean-room replacement for MUMPS in
+  interior-point optimization workloads.
+type: software
+authors:
+  - family-names: Kitchin
+    given-names: John R.
+    email: jkitchin@andrew.cmu.edu
+    affiliation: Carnegie Mellon University
+    orcid: "https://orcid.org/0000-0003-2625-9232"
+version: 0.3.0
+date-released: 2026-05-13
+license: MIT
+repository-code: "https://github.com/jkitchin/feral"
+url: "https://github.com/jkitchin/feral"
+keywords:
+  - sparse-linear-algebra
+  - direct-solver
+  - LDLT
+  - symmetric-indefinite
+  - multifrontal
+  - interior-point
+  - KKT
+  - rust
