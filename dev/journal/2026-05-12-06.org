@@ -89,3 +89,72 @@ Next: Step 2 — port the panel driver as a BS=32 const-generic with
 eager trailing update. The interesting tests
 (=seeded_indefinite_32x32=) become load-bearing once the kernel body
 diverges from the scalar call path.
+
+* 21:00 :issue-9:phase-2.4.3:pivot:
+Profile re-examination flipped the strategy. CHAINWOO's dominant
+cost was Snode 1933 (1984×32 root) — 62 % of factor time per
+=dev/research/feral-kernel-profile-chainwoo.md=. That is a
+**trailing-update** bottleneck, not the within-block factor that
+block_ldlt32 targets. The 32×32 in-block work is ≤ 8 % of the front.
+
+Wrote =dev/research/blas3-trailing-update.md= and
+=dev/plans/phase-2.4.3-blas3-trailing-update.md=. Re-scoped issue
+#9: keep Steps 1+2a block_ldlt32 as infrastructure, pivot the
+dominant-cost work to a quad-column trailing-update kernel.
+
+* 21:30 :issue-9:phase-2.4.3:tdd-step1-blas3:
+Implemented =schur_panel_minus_nofma_strided_quad= in
+=src/dense/schur_kernel.rs= (~340 LoC). Four-column variant of the
+existing dual kernel: one pulp dispatch packs 4 destinations per
+src-vector load, halving src bandwidth and doubling SIMD arithmetic
+per load.
+
+Design choice — **unroll=2 not 4** for the bulk SIMD body. 4 dst
+accumulators × 4 chunks = 16 acc regs would spill on AVX2's 16-ymm
+budget. Unroll=2 → 8 acc regs + 2 src + 1 alpha splat = ~11 live,
+fits comfortably. AVX-512 under-uses its register file but the
+dominant win is src-bandwidth halving, not register utilization.
+
+Caps (3 rows that don't have entries in all four columns) processed
+by scalar q-loops — max 192 scalar mul-subs per quad call, negligible
+vs the bulk.
+
+Bit-parity tests (2 new):
+- =schur_panel_minus_nofma_strided_quad_is_bit_exact_vs_four_singles=
+  sweeps 176 configs (n_elim × len0) against four sequential
+  single-column dispatches via =assert_eq!(Vec<f64>, Vec<f64>)=.
+- =schur_panel_minus_nofma_strided_quad_skips_zero_alphas_independently=
+  exercises the all-zero-q skip and per-column zero-alpha conditional.
+
+Both pass. Committed as fdd631c.
+
+* 21:50 :issue-9:phase-2.4.3:step2-wire:
+Wired quad into =apply_blocked_schur_panel= (=src/dense/factor.rs:1867=).
+Walk trailing columns in groups of 4; fall through to dual for a
+2-or-3-column remainder, single for 0-or-1-column. Adds two
+MAX_N_ELIM-sized alpha buffers on the existing stack pattern. Three
+nested =split_at_mut= calls carve 4 disjoint dst slices.
+
+Evidence:
+#+begin_src
+cargo test --lib                  → 233 passed (5 ignored), 0 fail
+cargo test --test blocked_ldlt    → 19 passed byte-identical
+cargo run --bin bench --release   → 154428/154481 inertia, 99.8% resid
+  Dense p90 small-frontal: 1.33 (PASS, target ≤ 2.0)
+  Dense p90 medium       : 1.70 (PASS, target ≤ 3.0)
+cargo clippy --lib --tests -- -D warnings  clean
+cargo fmt --check                 clean
+#+end_src
+
+CHAINWOO_0000 observation: total factor time on this machine is now
+~740 µs end-to-end (vs the 24 ms quoted in 2026-04-27 — W-4 and the
+1×1 fast path landed since). Actual frontal sizes max at nrow=18
+(Phase 7 of diag_chainwoo_profile). So CHAINWOO is no longer
+trailing-update-dominated; the quad win will show on wider tall-skinny
+fronts (qcqp1500-1c 1061×1061 root, large ACOPR fronts). The
+blocked_ldlt byte-identical pass is the strongest correctness gate —
+quad is in production for every front with 4+ trailing columns.
+
+Committed as 8a07386. Branch =feat/issue-9-block32-kernel= now has 4
+commits on top of main (Step 1 block_ldlt32 + Step 2a block32 prims +
+quad Step 1 + quad Step 2).
