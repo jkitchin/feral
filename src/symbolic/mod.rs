@@ -99,6 +99,28 @@ pub enum OrderingMethod {
     /// Applying `Auto` to `Auto` loops once through the dispatcher and
     /// then runs the chosen concrete method.
     Auto,
+    /// Race-based dispatcher: runs full symbolic factorization on each
+    /// concrete candidate in {`Amd`, `MetisND`, `ScotchND`, `KahipND`}
+    /// and returns the one with the smallest `factor_nnz_estimate`.
+    ///
+    /// Unlike [`Auto`], which guesses the winner from cheap pattern
+    /// features, `AutoRace` measures the actual symbolic outcome. Cost
+    /// is ~4× a single symbolic pass (~50–500 ms total at n≈10⁵), paid
+    /// once per problem because symbolic factorization is reused across
+    /// numeric refactorizations with the same sparsity pattern.
+    ///
+    /// Motivated by issue #8: on `pinene_3200_0009` the
+    /// [`pick_default_method`] heuristic picks `MetisND` (88 s numeric
+    /// factor), but `Amd` factors in 19.5 s on the same matrix — a 4.5×
+    /// win that the cheap predicate misses. Racing eliminates the
+    /// guess: whichever candidate wins on this matrix is the one we
+    /// use, no calibration required.
+    ///
+    /// Candidates that fail (e.g. external crate returns an error) are
+    /// skipped; the race succeeds as long as at least one candidate
+    /// produces a valid symbolic factorization. `resolved_method` on
+    /// the returned `SymbolicFactorization` records the actual winner.
+    AutoRace,
 }
 
 /// Resolve an `Auto` ordering to a concrete method from cheap pattern
@@ -410,6 +432,9 @@ fn run_external_ordering(
         OrderingMethod::Auto => {
             unreachable!("Auto is resolved by symbolic_factorize_with_method")
         }
+        OrderingMethod::AutoRace => {
+            unreachable!("AutoRace is resolved by symbolic_factorize_with_method")
+        }
     };
     let perm_i32 = perm_i32
         .map_err(|e| FeralError::InvalidInput(format!("external ordering failed: {}", e)))?;
@@ -435,6 +460,51 @@ fn run_external_ordering(
     Ok((out, actual))
 }
 
+/// Concrete candidates raced by [`OrderingMethod::AutoRace`]. See the
+/// variant docstring for rationale.
+const RACE_CANDIDATES: &[OrderingMethod] = &[
+    OrderingMethod::Amd,
+    OrderingMethod::MetisND,
+    OrderingMethod::ScotchND,
+    OrderingMethod::KahipND,
+];
+
+/// Race the [`RACE_CANDIDATES`] orderings at symbolic time and return the
+/// `SymbolicFactorization` with the smallest `factor_nnz_estimate`.
+///
+/// Implements the [`OrderingMethod::AutoRace`] dispatcher. Candidates
+/// that error out (e.g. external crate failure) are skipped; the race
+/// succeeds as long as at least one candidate produces a valid result.
+/// Returns an error only if every candidate fails.
+fn symbolic_factorize_race(
+    matrix: &CscMatrix,
+    snode_params: &SupernodeParams,
+) -> Result<SymbolicFactorization, FeralError> {
+    let mut best: Option<SymbolicFactorization> = None;
+    let mut last_err: Option<FeralError> = None;
+    for &cand in RACE_CANDIDATES {
+        match symbolic_factorize_with_method(matrix, snode_params, cand) {
+            Ok(sym) => {
+                let is_better = best
+                    .as_ref()
+                    .map(|b| sym.factor_nnz_estimate < b.factor_nnz_estimate)
+                    .unwrap_or(true);
+                if is_better {
+                    best = Some(sym);
+                }
+            }
+            Err(e) => {
+                last_err = Some(e);
+            }
+        }
+    }
+    best.ok_or_else(|| {
+        last_err.unwrap_or_else(|| {
+            FeralError::InvalidInput("AutoRace: no candidates available".to_string())
+        })
+    })
+}
+
 /// Like [`symbolic_factorize`] but lets the caller pick the
 /// fill-reducing ordering via [`OrderingMethod`].
 ///
@@ -445,6 +515,13 @@ pub fn symbolic_factorize_with_method(
     snode_params: &SupernodeParams,
     method: OrderingMethod,
 ) -> Result<SymbolicFactorization, FeralError> {
+    // AutoRace is resolved here by running each concrete candidate
+    // through this same function and picking the smallest
+    // `factor_nnz_estimate`. The recursive call passes a concrete
+    // `OrderingMethod`, so there is no infinite loop.
+    if method == OrderingMethod::AutoRace {
+        return symbolic_factorize_race(matrix, snode_params);
+    }
     let n = matrix.n;
 
     // Phase 2.13b per-stage profiler. Every timer is `Some` only when
