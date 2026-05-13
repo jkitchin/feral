@@ -126,18 +126,34 @@ pub mod panel_diag {
     }
 }
 
-/// Issue #13 Phase A — caller-supplied scratch for the two internal-only
-/// working buffers in `factor_frontal_blocked_in_place`. Reusing the
-/// allocation across supernodes removes two `Vec` allocations per call
-/// without touching the returned `FrontalFactors`. The scratch may be
-/// re-warmed across calls of differing `nrow` / `bs` — the kernel
-/// `clear()`s then `resize()`s on entry, preserving capacity.
+/// Issue #13 Phase A + C — caller-supplied scratch.
+///
+/// **Phase A**: two internal-only working buffers (`subdiag`, `d_panel`)
+/// reused across supernodes. The kernel `clear()`s then `resize()`s on
+/// entry, preserving capacity across calls of differing `nrow` / `bs`.
+///
+/// **Phase C**: `contrib_pool` is a stack of recyclable `Vec<f64>`
+/// buffers that the multifrontal driver feeds back after `extend_add`
+/// has consumed a child's contribution block. The kernel pops one at
+/// extract time, `clear()`+`resize()`s to `cdim*cdim`, and writes the
+/// trailing Schur block. When the pool is empty the kernel falls back
+/// to a fresh allocation — `FrontalFactors` always owns its `contrib`
+/// Vec, the pool is purely a malloc-amortisation channel.
 #[derive(Default, Debug, Clone)]
 pub struct FactorScratch {
     /// Working subdiagonal of D, length `nrow` per call.
     pub subdiag: Vec<f64>,
     /// Panel-local D values, length `bs` per call.
     pub d_panel: Vec<f64>,
+    /// Recyclable contribution-block buffer (Phase C, single-slot).
+    /// The factor kernel takes at extract time; the multifrontal driver
+    /// puts after `extend_add` consumes a child contribution block.
+    /// `None` means the kernel falls back to a fresh `Vec` allocation.
+    /// A single-slot pool keeps bookkeeping cost to one branch +
+    /// `Option::take` / `=Some(...)` per supernode; a multi-slot
+    /// `Vec<Vec<f64>>` pool was tried and regressed bench p90 by ~0.2
+    /// (small) / ~0.3 (medium) — see issue #13 Phase C investigation.
+    pub contrib_pool: Option<Vec<f64>>,
 }
 
 impl FactorScratch {
@@ -1351,8 +1367,17 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         }
     }
 
+    // Phase C: take the recyclable buffer from the scratch pool (single
+    // slot). `clear()` resets logical length while preserving capacity;
+    // `resize(_, 0.0)` zero-fills back to `cdim*cdim` so the cell writes
+    // below see the same starting state as `vec![0.0; cdim*cdim]` did.
+    // When the slot is empty, `take()` returns `None` and
+    // `unwrap_or_default()` gives a fresh empty Vec — bit-identical to
+    // the previous `vec![0.0; ...]` path.
     let cdim = nrow - nelim;
-    let mut contrib = vec![0.0; cdim * cdim];
+    let mut contrib = scratch.contrib_pool.take().unwrap_or_default();
+    contrib.clear();
+    contrib.resize(cdim * cdim, 0.0);
     for cj in 0..cdim {
         for ci in cj..cdim {
             contrib[cj * cdim + ci] = a[(nelim + cj) * nrow + (nelim + ci)];

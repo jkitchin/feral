@@ -1681,9 +1681,17 @@ fn factor_one_supernode(
     }
 
     // Step 2: Assemble child contribution blocks (extend-add).
+    //
+    // Phase C: once `extend_add` has consumed `contrib`, move its `data`
+    // Vec into the factor scratch's single-slot pool. The next
+    // supernode's factor kernel will take it instead of allocating a
+    // fresh Vec. If the slot is already occupied (multi-child front),
+    // the new buffer overwrites the slot — the old one is freed
+    // normally. This keeps bookkeeping to one branch per child.
     for &child_idx in &snode.children {
-        if let Some(contrib) = contrib_blocks[child_idx].take() {
+        if let Some(mut contrib) = contrib_blocks[child_idx].take() {
             extend_add(&contrib, &ws.row_map, &mut frontal);
+            ws.factor_scratch.contrib_pool = Some(std::mem::take(&mut contrib.data));
         }
     }
 

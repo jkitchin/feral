@@ -105,6 +105,19 @@ fn one_case(n: usize, ncol: usize, seed: u64, warm: &mut FactorScratch, tag: &st
     let ff_warm =
         factor_frontal_blocked_in_place_with_scratch(&mut sym_c, ncol, true, &p, warm).unwrap();
     assert_byte_identical(&ff_wrapper, &ff_warm, &format!("{} warm", tag));
+
+    // (d) Phase C: pre-seed the contrib_pool with a Vec of non-target
+    //     size and garbage values. The kernel must clear+resize and
+    //     produce byte-identical output. This exercises the pool-hot
+    //     path: the slot is occupied, existing capacity != cdim*cdim,
+    //     residual bytes must not leak into the new contrib.
+    let mut sym_d = random_indefinite(n, seed);
+    let mut pooled = FactorScratch::new();
+    pooled.contrib_pool = Some(vec![-3.14e7; (n + 5) * (n + 5)]);
+    let ff_pool =
+        factor_frontal_blocked_in_place_with_scratch(&mut sym_d, ncol, true, &p, &mut pooled)
+            .unwrap();
+    assert_byte_identical(&ff_wrapper, &ff_pool, &format!("{} pool-hot", tag));
 }
 
 #[test]
