@@ -4,7 +4,33 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
-### Changed — Per-supernode fixed-overhead reduction (#13, Phases A + B)
+### Changed — Per-supernode fixed-overhead reduction (#13, Phases A + B + C)
+
+**Phase C (single-slot contrib pool).** New `pub contrib_pool:
+Option<Vec<f64>>` field on `FactorScratch`. The multifrontal driver puts
+the child's `ContribBlock.data` into the slot after `extend_add` consumes
+it; the kernel takes at extract time, clears+resizes to `cdim*cdim`,
+and writes. When the slot is empty (cold scratch, or take outpaces put),
+the kernel falls back to a fresh `Vec` allocation — bit-identical to the
+pre-Phase-C path. An initial multi-slot `Vec<Vec<f64>>` variant was
+abandoned: it preserved bit-parity but regressed bench p90 by ~+0.19
+(small) / ~+0.30 (medium) in 4 consecutive runs (growable-indirection
+bookkeeping cost more than the malloc/free pairs it avoided). The
+single-slot variant is bench-neutral vs Phase A+B (small p90 1.41,
+medium p90 1.83–1.85) and bit-parity is preserved across all four
+parity cases including the new (d) pool-hot pre-seeded case.
+
+Phase C contributes no measurable bench movement on this corpus, but
+the infrastructure is correct and ready: if a future kernel change
+makes the contrib allocation a bigger fraction of factor cost, the
+recycle path engages automatically. Final issue #13 standing:
+criterion #1 (ns/sup reduction) MET, criterion #2 (bench p90 small <
+1.30 OR medium < 1.60) **unreachable via allocation pooling on this
+corpus**, criterion #3 (no correctness regression) MET, criterion #4
+(bit-exact `blocked_ldlt`) MET. Per-front kernel cost (32×32 SIMD,
+issue #9) is the next plausible lever for the bench-ratio gap.
+
+### Changed — Per-supernode fixed-overhead reduction (#13, Phases A + B background)
 
 **Phase A (`FactorScratch` pool).** New `FactorScratch { subdiag, d_panel }`
 struct in `src/dense/factor.rs` pools the two internal-only working buffers

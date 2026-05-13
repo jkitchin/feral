@@ -1357,3 +1357,45 @@ References: `src/numeric/factorize.rs::AtomicLockStats`,
 `src/numeric/factorize.rs::run_parallel_task`,
 `src/numeric/solver.rs::tests::solver_parallel_lock_breakdown`,
 `dev/debugging/2026-05-12-cont201-cached-headroom.md`.
+
+---
+
+## 2026-05-13 — Phase C multi-slot contrib pool (Vec<Vec<f64>>)
+
+**Hypothesis.** Pool the multifrontal contribution-block buffers across
+supernodes using a `Vec<Vec<f64>>` stack on `FactorScratch.contrib_pool`,
+so the parent's extract step pops a recycled `Vec` instead of `vec![0.0;
+cdim*cdim]`. Issue #13 phase C, motivated by the open bench-ratio
+acceptance criterion #2 (small p90 < 1.30 OR medium p90 < 1.60).
+
+**Test.** Implemented in `src/dense/factor.rs` (extract step pops from
+the pool, clears, resizes) and `src/numeric/factorize.rs` (driver pushes
+the child's `ContribBlock.data` onto the pool after `extend_add`
+consumes it). Bit-parity preserved across all four parity cases in
+`tests/factor_scratch_parity.rs` including a new (d) pool-hot pre-seed
+case. Bench: 4 consecutive `cargo run --bin bench --release` runs.
+
+**Result.** Falsified.
+
+| variant                  | small p90 | medium p90  | inertia       |
+| ------------------------ | --------: | ----------: | ------------- |
+| Phase A+B (re-measured)  |      1.41 | 1.83 – 1.86 | 154428/154481 |
+| Phase C multi-slot       | 1.60-1.62 | 2.13 – 2.17 | 154428/154481 |
+
+Multi-slot regressed bench p90 by ~+0.19 (small) / ~+0.30 (medium). The
+growable-indirection bookkeeping cost (push/pop, scattered heap
+pointers from `Vec<Vec<f64>>`, branch on capacity) exceeded the
+malloc/free pairs it avoided. The malloc cost was never the bench
+bottleneck on this corpus.
+
+**Action.** Replaced by a single-slot `Option<Vec<f64>>` pool, which is
+bench-neutral (small 1.41, medium 1.83–1.85 — back to A+B baseline)
+while preserving bit-parity. Committed as feat(issue-13): Phase C —
+single-slot contrib pool (neutral), commit `fe2ca4d`. Issue #13
+re-scoped: criterion #2 declared unreachable via allocation pooling
+on this corpus; per-front kernel cost (32×32 SIMD, issue #9) is the
+next plausible lever.
+
+References: `src/dense/factor.rs::FactorScratch`,
+`src/numeric/factorize.rs::factor_one_supernode`,
+`tests/factor_scratch_parity.rs` case (d), commit `fe2ca4d`.

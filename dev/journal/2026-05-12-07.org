@@ -114,3 +114,42 @@ return. Design choice (ABI break vs take-into vs with_capacity
 hints) deferred to a separate session because the gap is small
 (0.04-0.10 on p90) and Phase A established the scratch-pool
 pattern that any of the three Phase C variants can reuse.
+
+* 23:45 :issue-13:phase-c:scope:
+Restarted Phase C the same evening. Field lifecycle analysis: =l=,
+=d_diag=, =d_subdiag=, =perm=, =perm_inv= all move into long-lived
+=NodeFactors= so they have no recycle point during factorisation.
+Only =contrib= has one — child's =ContribBlock.data= is consumed by
+the parent's =extend_add= and dropped. That is the natural recycle
+target. Pooling the long-lived fields would need an ABI break or a
+=take_into_factors= swap; deferred indefinitely.
+
+* 00:20 :issue-13:phase-c:multi-slot:regression:
+First implementation used =Vec<Vec<f64>>= as a stack of recyclable
+buffers. Bit-parity preserved across all 4 cases (a/b/c/d). But
+bench regressed badly. 4 consecutive runs:
+| variant            | small p90 | medium p90    |
+| Phase A+B (today)  |      1.41 | 1.83 - 1.86   |
+| Phase C multi-slot |  1.60-1.62| 2.13 - 2.17   |
+Deltas: +0.19 small / +0.30 medium. The =Vec<Vec<f64>>= bookkeeping
+(push/pop, growable indirection, scattered heap pointers) costs more
+than the malloc/free pairs it avoids. Recorded in tried-and-rejected.
+
+* 00:45 :issue-13:phase-c:single-slot:
+Collapsed pool to =Option<Vec<f64>>= — single slot, =take= /
+=Some(...)=. Driver puts the child buffer into the slot after
+=extend_add= consumes it; kernel takes at extract time, clears+
+resizes, writes. Fallback to fresh =Vec= when empty. 4 bench runs:
+small p90 1.41, medium p90 1.83-1.85 — back to A+B baseline.
+Neutral, not negative. Phase parity test extended with case (d)
+pool-hot: pre-seed slot with garbage values + non-target capacity,
+factor, byte-identity preserved. Committed fe2ca4d.
+
+* 01:00 :issue-13:rescope:issue-9:unblock:
+Conclusion: criterion #2 (small p90 < 1.30 OR medium p90 < 1.60) is
+*unreachable via allocation pooling on this corpus*. Three phases
+of pool/direct-write/recycle have not moved the bench ratio. The
+malloc cost was never the bottleneck. Re-scope #13 explicitly:
+criteria #1 (ns/sup), #3 (no regression), #4 (bit-exact) all MET;
+criterion #2 needs a different lever. Per-front kernel cost (32×32
+SIMD) — that is issue #9 — is the next plausible lever. Unblock #9.
