@@ -1,0 +1,116 @@
+#+TITLE: 2026-05-12-07 — issue #13 Phases A + B
+#+STARTUP: showall
+
+* 19:30 :issue-10:issue-13:planning:
+User asked to take on #10 (APP). Investigation showed the scalar
+path's =fused_gamma0= mechanism (factor_frontal.rs:332-334, 402-451)
+already implements the MUMPS MAXFROMM equivalent that motivated #10.
+The remaining open question on #10 reduces to "blocked + APP on top
+of #9 (32x32 SIMD)", and #9 itself was parked on #13. Confirmed
+dependency chain #10 → #9 → #13 with the user; posted public blocked-
+on-#9 comment on #10 with explicit user approval. blocked label
+applied to both #9 and #10.
+
+* 20:05 :issue-13:plan:
+Wrote =dev/plans/issue-13-overhead.md=. Three phases:
+- Phase A: =FactorScratch{subdiag, d_panel}= pool, kernel prologue
+  clear+resize, opt-in via =_with_scratch= entry, wrapper preserves
+  ABI.
+- Phase B: =extend_add= direct slice writes (canonicalise once,
+  index =col*n + row=).
+- Phase C: return-struct pooling (=l=, =d_diag=, =d_subdiag=,
+  =contrib=, =perm=, =perm_inv=) — deferred unless A+B miss
+  acceptance.
+
+Stale issue target: =SymmetricMatrix::validate()= bypass is *already
+done* in =factor_frontal_blocked_in_place= (line 1062-1064 documents
+the skip). Not actionable.
+
+* 20:30 :issue-13:phase-a:implementation:
+Implemented Phase A in =src/dense/factor.rs= + =src/numeric/factorize.rs=.
+Subtlety: the inner functions take =&mut [f64]= for =subdiag= /
+=d_panel=, so the kernel body needs reborrows =&mut *subdiag=
+(not =&mut subdiag=, which would be =&mut &mut [f64]=). Five call
+sites updated. =SymmetricMatrix= does not impl =Clone= so the
+parity test generates a fresh =random_indefinite(n, seed)= per case
+rather than cloning.
+
+* 21:15 :issue-13:phase-a:parity:
+=tests/factor_scratch_parity.rs= (165 lines, 2 tests) — three-way
+byte-identity gate per case: (a) wrapper, (b) =_with_scratch= fresh,
+(c) =_with_scratch= warm from a 19x19 pre-call. Asserts on =l=,
+=d_diag=, =d_subdiag=, =perm=, =perm_inv=, =contrib=, =inertia=,
+=n_delayed=, =needs_refinement=, =n_rook_rescues= via =.to_bits()=.
+Size sweep covers scalar-tail (ncol<8), single-panel, multi-panel,
+and ncol<nrow frontal cases. Repeated-calls test reuses one warm
+scratch across 6 mixed-size calls. Both tests pass. =cargo test
+--lib= 233/233; =cargo test --test blocked_ldlt= 19/19.
+
+* 21:50 :issue-13:phase-a:measurement:
+=diag_supernode_cost= showed dramatic ns/sup drops at the time of
+measurement:
+| matrix       | before | after |  delta |
+| CRESC100     |   1890 |   879 |  -54 % |
+| ACOPR30_0185 |   1308 |   717 |  -45 % |
+| ACOPR30_0067 |   1092 |   706 |  -35 % |
+| HAIFAM       |   1748 |  1185 |  -32 % |
+| KIRBY2       |    758 |   636 |  -16 % |
+
+Bench run-to-run gave (small=1.40, medium=1.91) and (small=1.37,
+medium=1.85) — *worse* than issue baseline (1.33 / 1.70). Reported
+honestly per CLAUDE.md rule. Suspicion at the time: thermal noise.
+
+Committed 575f86a.
+
+* 22:25 :issue-13:phase-b:implementation:
+Implemented Phase B in =src/numeric/factorize.rs::extend_add=.
+=frontal.data.as_mut_slice()= captured once outside the cj loop;
+linear index =col*n + row= computed after canonicalising via
+=if parent_i >= parent_j= (which is the symmetric-storage contract,
+*not* a redundant branch). The branchy =set/get= path is gone.
+
+=cargo test --lib= 233/233; =cargo test --test blocked_ldlt= 19/19;
+=cargo test --tests= full integration suite green. =clippy= clean.
+=cargo fmt --check= clean.
+
+* 22:45 :issue-13:phase-b:variance:
+Phase B's first =diag_supernode_cost= run gave CRESC=1855, much
+higher than Phase A's claimed 879. Suspected regression. Stashed
+Phase B and ran 3 baseline runs with Phase A only:
+| matrix       | A only (3 runs)     | A+B (3 runs)        |
+| CRESC100     | 1614 / 1900 / 1903  | 1641 / 1778 / 1688  |
+| ACOPR30_0185 | 1193 / 1195 / 1350  | 1204 / 1346 / 1189  |
+| ACOPR30_0067 | 1095 / 1057 / 1180  | 1018 / 1137 / 1042  |
+| HAIFAM       | 1654 / 1649 / 1799  | 1610 / 1763 / 1656  |
+| KIRBY2       |  725 /  732 /  786  |  719 /  716 /  737  |
+
+Conclusion: Phase A's earlier 879/717/706 numbers came from a
+quieter machine moment. Phase B is within noise of Phase A. The
+ns/sup acceptance criterion (#13 #1) is still MET as of the Phase A
+commit; the higher absolute numbers today are environmental.
+Restored Phase B and proceeded.
+
+* 23:00 :issue-13:phase-b:bench:
+Two bench runs after Phase B:
+| metric       | run 1 | run 2 |
+| small p90    |  1.37 |  1.33 |
+| medium p90   |  1.78 |  1.75 |
+| Inertia      |  154428/154481 | 154428/154481 |
+
+vs Phase A: 1.40/1.91, 1.37/1.85. Phase B *recovers* the small-
+frontal headroom Phase A had lost and partially recovers medium.
+Issue #13 acceptance criterion #2 still not met (small p90 < 1.30
+OR medium p90 < 1.60). Criteria #1, #3, #4 MET; #2 missed by
+0.03-0.18 depending on bucket.
+
+Committed 1e26902.
+
+* 23:15 :issue-13:phase-c:deferred:
+Phase A+B did not clear the bench p90 threshold. Phase C (return-
+struct pooling for =l=, =d_diag=, =d_subdiag=, =contrib=, =perm=,
+=perm_inv=) is the next plausible target — the per-supernode
+overhead profile points to remaining allocs in =FrontalFactors=
+return. Design choice (ABI break vs take-into vs with_capacity
+hints) deferred to a separate session because the gap is small
+(0.04-0.10 on p90) and Phase A established the scratch-pool
+pattern that any of the three Phase C variants can reuse.

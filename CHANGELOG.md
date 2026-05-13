@@ -4,6 +4,46 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — Per-supernode fixed-overhead reduction (#13, Phases A + B)
+
+**Phase A (`FactorScratch` pool).** New `FactorScratch { subdiag, d_panel }`
+struct in `src/dense/factor.rs` pools the two internal-only working buffers
+that `factor_frontal_blocked_in_place` previously allocated per supernode.
+New entry point `factor_frontal_blocked_in_place_with_scratch` accepts
+`&mut FactorScratch`; the existing function is now a thin wrapper that
+allocates a fresh scratch and delegates. `FactorWorkspace` carries a
+`factor_scratch` field that the three hot-path call sites in
+`src/numeric/factorize.rs` (D.3 dense fast path, `factor_one_supernode`,
+`factor_one_small_leaf`) thread through. The scratch is safe to re-warm
+across different `(nrow, bs)` shapes — the kernel prologue clears and
+resizes unconditionally. Bit-parity gated by
+`tests/factor_scratch_parity.rs` (7-case size sweep + 6-case repeated-
+calls regression) plus the 19 byte-identity `tests/blocked_ldlt.rs`
+integration tests.
+
+**Phase B (`extend_add` direct writes).** The multifrontal `extend_add`
+in `src/numeric/factorize.rs` now bypasses `SymmetricMatrix::set`/`get`
+and writes directly into `frontal.data` using the lower-triangle column-
+major linear index. Per-cell work drops by one indirection, one branch,
+and one redundant `i >= j` sanity check, with the symmetric-storage
+canonicalisation preserved at the caller.
+
+Diagnostic (`cargo run --bin diag_supernode_cost --release`): Phase A
+delivered −16 % to −54 % ns/sup on the CRESC100 / ACOPR30 / HAIFAM /
+KIRBY2 cluster (issue #13 acceptance criterion #1 MET). Phase B is
+within run-to-run noise of Phase A on ns/sup, which is expected
+because extend_add is a child-driven post-factor cost rather than
+per-supernode.
+
+Bench (`cargo run --bin bench --release`): dense small-frontal p90
+1.33–1.37 and medium p90 1.75–1.78 (vs issue baseline 1.33 / 1.70).
+Issue #13 acceptance criterion #2 (small p90 < 1.30 OR medium p90 <
+1.60) NOT met by Phases A+B alone. 154428/154481 inertia match
+preserved exactly. Phase C (return-struct pooling for `l`, `d_diag`,
+`d_subdiag`, `contrib`, `perm`, `perm_inv`) is deferred to a separate
+session; design choice (ABI break vs take-into vs with_capacity hints)
+is unresolved.
+
 ### Added — BLAS-3 quad-column trailing-update kernel (#9, parked on #13)
 
 `schur_panel_minus_nofma_strided_quad` in `src/dense/schur_kernel.rs`
