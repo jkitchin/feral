@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "feral"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "Sparse symmetric indefinite direct solver in pure Rust, with certified inertia counts."
@@ -38,6 +38,11 @@ exclude = [
 
 [lib]
 name = "feral"
+# `staticlib` is added so the C ABI exposed by `src/capi.rs` can be
+# linked into the C++ Ipopt build via `feral-ipopt-shim`. The C ABI
+# is opt-in for downstream Ipopt builders; pure-Rust consumers
+# continue to use the `rlib`. See dev/decisions.md 2026-05-13.
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

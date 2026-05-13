@@ -1,0 +1,85 @@
+Add feral as a linear_solver=feral option in Ipopt 3.14.
+
+Three changes to src/Algorithm/IpAlgBuilder.cpp:
+  1. #include "IpFeralSolverInterface.hpp" at the top.
+  2. Register "feral" in the linear_solver option's value list.
+  3. Add `else if (linear_solver == "feral")` dispatch branch.
+
+Two changes to src/Makefile.am:
+  Compile IpFeralSolverInterface.cpp into libipopt unconditionally.
+
+Two changes to src/Makefile.in (POC: avoids needing COIN-OR BuildTools
+m4 macros to re-run autoreconf):
+  Add IpFeralSolverInterface.lo to am_libipopt_la_OBJECTS and
+  IpFeralSolverInterface.cpp to libipopt_la_SOURCES, mirroring the
+  Makefile.am change.
+
+If COIN-OR BuildTools is installed, run `autoreconf -i` to regenerate
+Makefile.in cleanly; otherwise the Makefile.in hunks below are
+sufficient for the POC build.
+
+--- a/src/Algorithm/IpAlgBuilder.cpp
++++ b/src/Algorithm/IpAlgBuilder.cpp
+@@ -72,6 +72,7 @@
+ #ifdef IPOPT_HAS_MUMPS
+ # include "IpMumpsSolverInterface.hpp"
+ #endif
++#include "IpFeralSolverInterface.hpp"
+
+ namespace Ipopt
+ {
+@@ -200,6 +201,9 @@
+       descrs.push_back("use the Mumps package");
+    }
+
++   options.push_back("feral");
++   descrs.push_back("use the feral package (pure-Rust sparse LDLT)");
++
+    options.push_back("custom");
+    descrs.push_back("use custom linear solver (expert use)");
+
+@@ -513,6 +517,11 @@
+    }
+ #endif
+
++   else if( linear_solver == "feral" )
++   {
++      SolverInterface = new FeralSolverInterface();
++      linear_solver = FeralSolverInterface::GetName();
++   }
+    else if( linear_solver == "custom" )
+    {
+       SolverInterface = NULL;
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -218,6 +218,8 @@
+   libipopt_la_SOURCES += Algorithm/LinearSolvers/IpMumpsSolverInterface.cpp
+ endif
+
++libipopt_la_SOURCES += Algorithm/LinearSolvers/IpFeralSolverInterface.cpp
++
+ if COIN_HAS_SPRAL
+   libipopt_la_SOURCES += Algorithm/LinearSolvers/IpSpralSolverInterface.cpp
+ endif
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -281,7 +281,8 @@
+ 	Interfaces/IpTNLP.lo Interfaces/IpTNLPAdapter.lo \
+ 	Interfaces/IpTNLPReducer.lo $(am__objects_1) $(am__objects_2) \
+ 	$(am__objects_3) $(am__objects_4) $(am__objects_5) \
+-	$(am__objects_6) $(am__objects_7) $(am__objects_8) \
++	$(am__objects_6) $(am__objects_7) \
++	Algorithm/LinearSolvers/IpFeralSolverInterface.lo $(am__objects_8) \
+ 	$(am__objects_9) $(am__objects_10)
+ libipopt_la_OBJECTS = $(am_libipopt_la_OBJECTS)
+ AM_V_lt = $(am__v_lt_@AM_V@)
+@@ -860,7 +861,8 @@
+ 	Interfaces/IpStdInterfaceTNLP.cpp Interfaces/IpStdFInterface.c \
+ 	Interfaces/IpTNLP.cpp Interfaces/IpTNLPAdapter.cpp \
+ 	Interfaces/IpTNLPReducer.cpp $(am__append_1) $(am__append_2) \
+-	$(am__append_3) $(am__append_4) $(am__append_5) \
++	$(am__append_3) $(am__append_4) $(am__append_5) \
++	Algorithm/LinearSolvers/IpFeralSolverInterface.cpp \
+ 	$(am__append_6) $(am__append_7) $(am__append_8) \
+ 	$(am__append_9) $(am__append_10)
+ AM_CPPFLAGS = \

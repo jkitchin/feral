@@ -8,6 +8,7 @@
 // The lib build keeps default clippy strictness.
 #![cfg_attr(test, allow(clippy::needless_range_loop))]
 
+pub mod capi;
 pub mod dense;
 pub mod error;
 pub mod inertia;

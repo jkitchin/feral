@@ -4,6 +4,45 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-13
+
+### Added — Feral C ABI for Ipopt linkage (`feral::capi`)
+
+New `pub mod capi` (`src/capi.rs`) exposes a minimal C ABI surface
+matching Ipopt's `SparseSymLinearSolverInterface` plug-in shape:
+`feral_new`, `feral_free`, `feral_set_structure`, `feral_values_ptr`,
+`feral_factor`, `feral_solve`, `feral_num_neg`. Matrix format is
+Ipopt's `CSR_Format_0_Offset` (upper-triangle CSR, 0-based) which is
+byte-identical to feral's lower-triangle CSC. Status codes mirror
+Ipopt's `ESymSolverStatus` enum.
+
+`Cargo.toml` adds `staticlib` to `crate-type` so the ABI can be
+linked into the C++ Ipopt build via the `feral-ipopt-shim/` patch
+(opt-in for downstream Ipopt builders; pure-Rust consumers continue
+to use the `rlib`). See `dev/research/feral-ipopt-c-shim.md` and
+`dev/plans/feral-ipopt-shim.md` for the design.
+
+### Added — Ipopt 3-way NLP comparison harness
+
+`external_benchmarks/nlp_comparison/` runs the Ipopt
+ScalableProblems suite against three Ipopt 3.14.20 binaries
+(`build-mumps`, `build-ma57`, `build-feral`), each linked to a
+single sparse direct solver. 35 problems × 3 solvers; see
+`REPORT.md` for the 2026-05-13 sweep. MUMPS 35/35 optimal, MA57
+34/35, feral 34/35; geomean over triple-optimal subset: MUMPS
+139 ms, feral 158 ms, MA57 162 ms. Generates `results.json` and a
+Markdown report. Logs/out/RHS blobs gitignored; only the harness +
+report are tracked.
+
+### Added — MA57 oracle + 4-way cross-solver comparison
+
+`external_benchmarks/ma57_oracle/` builds a CoinHSL MA57 benchmark
+binary alongside the existing MUMPS/SSIDS oracles.
+`external_benchmarks/comparison/` is extended from 3-way to 4-way
+(feral + MUMPS + SSIDS + MA57), with new `run.py` / `aggregate.py`
+/ `report.py` wiring MA57 into the per-matrix sample comparison and
+`REPORT.md` summary.
+
 ### Added — Issue #9 Steps 2 + 3: 32×32 register-resident kernel wired into production
 
 **Step 3 (SIMD body).** `update_1x1_block32` in
