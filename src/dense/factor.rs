@@ -1887,15 +1887,69 @@ fn apply_blocked_schur_panel(
 
     let mut alphas0_buf = [0.0f64; MAX_N_ELIM];
     let mut alphas1_buf = [0.0f64; MAX_N_ELIM];
+    let mut alphas2_buf = [0.0f64; MAX_N_ELIM];
+    let mut alphas3_buf = [0.0f64; MAX_N_ELIM];
 
-    // Phase B-1: walk trailing columns in pairs (j, j+1) and dispatch
-    // the dual-column kernel that shares src loads across both
-    // accumulator stacks. Each pair is bit-exact with two sequential
-    // single-column dispatches (verified by the dual kernel's
-    // bit-exactness sweep). The odd-tail column (when (nrow - j_start)
-    // is odd) falls through to the single-column kernel.
+    // Phase 2.4.3 (issue #9, re-scoped): walk trailing columns in
+    // groups of 4, dispatching the quad-column kernel that shares
+    // each src-vector load across 4 destination accumulators. Each
+    // quad is bit-exact with four sequential single-column dispatches
+    // (verified by the quad kernel's bit-exactness sweep).
+    //
+    // Fall-through: 2-or-3-column remainder uses dual + (optional)
+    // single; 0-or-1-column remainder uses single.
     let mut j = j_start;
-    while j + 1 < nrow {
+    while j + 3 < nrow {
+        let alphas0 = &mut alphas0_buf[..n_elim];
+        let alphas1 = &mut alphas1_buf[..n_elim];
+        let alphas2 = &mut alphas2_buf[..n_elim];
+        let alphas3 = &mut alphas3_buf[..n_elim];
+        let mut all_zero = true;
+        for q in 0..n_elim {
+            let q_col = k + q;
+            let base = q_col * nrow;
+            let l_jk0 = a[base + j];
+            let l_jk1 = a[base + j + 1];
+            let l_jk2 = a[base + j + 2];
+            let l_jk3 = a[base + j + 3];
+            let d_q = d_panel[q];
+            let alpha0 = l_jk0 * d_q;
+            let alpha1 = l_jk1 * d_q;
+            let alpha2 = l_jk2 * d_q;
+            let alpha3 = l_jk3 * d_q;
+            alphas0[q] = alpha0;
+            alphas1[q] = alpha1;
+            alphas2[q] = alpha2;
+            alphas3[q] = alpha3;
+            if alpha0 != 0.0 || alpha1 != 0.0 || alpha2 != 0.0 || alpha3 != 0.0 {
+                all_zero = false;
+            }
+        }
+        if !all_zero {
+            // Carve out four disjoint mutable slices. The src pivot
+            // columns [k, k+n_elim) all precede column j in memory,
+            // so a single split at j*nrow gives src in `before`.
+            // Three nested splits inside `rest` separate columns
+            // j, j+1, j+2, j+3.
+            let (before, rest) = a.split_at_mut(j * nrow);
+            let (col_j, rest1) = rest.split_at_mut(nrow);
+            let (col_j1, rest2) = rest1.split_at_mut(nrow);
+            let (col_j2, col_j3_and_after) = rest2.split_at_mut(nrow);
+            let dst0 = &mut col_j[j..];
+            let dst1 = &mut col_j1[(j + 1)..nrow];
+            let dst2 = &mut col_j2[(j + 2)..nrow];
+            let dst3 = &mut col_j3_and_after[(j + 3)..nrow];
+            schur_kernel::schur_panel_minus_nofma_strided_quad(
+                dst0, dst1, dst2, dst3, before, k, n_elim, nrow, j, alphas0, alphas1, alphas2,
+                alphas3,
+            );
+        }
+        j += 4;
+    }
+
+    // 2-or-3-column remainder: use dual to consume the next pair, if
+    // any. After this, at most 1 column remains.
+    if j + 1 < nrow {
         let alphas0 = &mut alphas0_buf[..n_elim];
         let alphas1 = &mut alphas1_buf[..n_elim];
         let mut all_zero = true;
@@ -1913,13 +1967,6 @@ fn apply_blocked_schur_panel(
             }
         }
         if !all_zero {
-            // Carve out two disjoint mutable slices: dst0 sits in
-            // column j (rows [j, nrow)), dst1 sits in column j+1
-            // (rows [j+1, nrow)). The src pivot columns [k, k+n_elim)
-            // all precede column j in memory, so a single
-            // split_at_mut at j*nrow gives us src in `before`. A
-            // second split inside `rest` separates column j from
-            // column j+1.
             let (before, rest) = a.split_at_mut(j * nrow);
             let (col_j, after_j) = rest.split_at_mut(nrow);
             let dst0 = &mut col_j[j..];
