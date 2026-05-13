@@ -80,15 +80,17 @@ pub(crate) fn factor_block32(
 /// `p < j < 32` and `j <= r < 32`, where `alpha = a[p*32 + j]_post · d`
 /// (the same two-rounding chain `do_1x1_update` uses).
 ///
-/// **Step 2a body:** scalar reference. Identical per-element rounding
-/// to `do_1x1_update` because (i) `alpha` is computed the same way,
-/// (ii) the axpy uses `axpy_minus_unroll4_nofma` which is itself
-/// bit-exact with scalar, (iii) the outer loop walks `j` in the same
-/// order. **Step 3** replaces this body with a one-pulp-dispatch
-/// kernel that packs 4 destination columns per source-vector load.
-/// The signature does not change and the bit-parity tests below
-/// catch any per-element divergence.
-#[allow(dead_code)] // Driver dispatch lands in Step 2b.
+/// **Step 3 body (issue #9):** packs trailing destination columns in
+/// tiles of four through [`schur_panel_minus_nofma_strided_quad`] with
+/// `n_elim = 1`, then a [`schur_panel_minus_nofma_strided_dual`] for
+/// the trailing pair (when applicable), then a final
+/// [`axpy_minus_unroll4_nofma`] for the last column. Per the quad
+/// kernel's bit-exactness contract, each destination column observes
+/// the same per-element `dst = sub(dst, mul(alpha, src))` chain as four
+/// sequential single-column rank-1 dispatches — i.e. byte-identical to
+/// the Step 2 scalar body and to `do_1x1_update`. Verified by the
+/// unit tests in this module.
+#[allow(dead_code)] // Driver dispatch lands in the block_ldlt32 driver.
 pub(crate) fn update_1x1_block32(a: &mut [f64], p: usize) {
     debug_assert!(a.len() >= BLOCK_SIZE * BLOCK_SIZE);
     debug_assert!(p < BLOCK_SIZE);
@@ -101,15 +103,80 @@ pub(crate) fn update_1x1_block32(a: &mut [f64], p: usize) {
     for i in (p + 1)..n {
         a[p * n + i] *= inv_d;
     }
-    for j in (p + 1)..n {
-        let l_jk = a[p * n + j];
-        let alpha = l_jk * d;
-        // src = column p rows j..n (already scaled by inv_d above);
-        // dst = column j rows j..n. Disjoint because p < j.
-        let (before, rest) = a.split_at_mut(j * n);
-        let src = &before[p * n + j..p * n + n];
-        let dst = &mut rest[j..n];
-        schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+
+    // Tile trailing columns in groups of 4, then a final group of 2 if
+    // the count is even, then a final group of 1 if the count is odd.
+    // The quad/dual kernels were added in Phase 2.4.2/2.4.3 for issue
+    // #9 (re-scoped) and are bit-exact per column with the single-
+    // column `axpy_minus_unroll4_nofma` reference; see the docstrings
+    // and parity sweep in `schur_kernel`.
+    let mut j = p + 1;
+    while j + 3 < n {
+        let alpha0 = a[p * n + j] * d;
+        let alpha1 = a[p * n + (j + 1)] * d;
+        let alpha2 = a[p * n + (j + 2)] * d;
+        let alpha3 = a[p * n + (j + 3)] * d;
+        if alpha0 != 0.0 || alpha1 != 0.0 || alpha2 != 0.0 || alpha3 != 0.0 {
+            // Carve four disjoint mutable dst slices. Column p (the
+            // src) lives in `before`, since p < j.
+            let (before, rest) = a.split_at_mut(j * n);
+            let (col_j, rest1) = rest.split_at_mut(n);
+            let (col_j1, rest2) = rest1.split_at_mut(n);
+            let (col_j2, col_j3_and_after) = rest2.split_at_mut(n);
+            let dst0 = &mut col_j[j..n];
+            let dst1 = &mut col_j1[(j + 1)..n];
+            let dst2 = &mut col_j2[(j + 2)..n];
+            let dst3 = &mut col_j3_and_after[(j + 3)..n];
+            schur_kernel::schur_panel_minus_nofma_strided_quad(
+                dst0,
+                dst1,
+                dst2,
+                dst3,
+                before,
+                p,
+                1,
+                n,
+                j,
+                &[alpha0],
+                &[alpha1],
+                &[alpha2],
+                &[alpha3],
+            );
+        }
+        j += 4;
+    }
+
+    if j + 1 < n {
+        let alpha0 = a[p * n + j] * d;
+        let alpha1 = a[p * n + (j + 1)] * d;
+        if alpha0 != 0.0 || alpha1 != 0.0 {
+            let (before, rest) = a.split_at_mut(j * n);
+            let (col_j, after_j) = rest.split_at_mut(n);
+            let dst0 = &mut col_j[j..n];
+            let dst1 = &mut after_j[(j + 1)..n];
+            schur_kernel::schur_panel_minus_nofma_strided_dual(
+                dst0,
+                dst1,
+                before,
+                p,
+                1,
+                n,
+                j,
+                &[alpha0],
+                &[alpha1],
+            );
+        }
+        j += 2;
+    }
+
+    if j < n {
+        let alpha = a[p * n + j] * d;
+        if alpha != 0.0 {
+            let (before, rest) = a.split_at_mut(j * n);
+            let src = &before[p * n + j..p * n + n];
+            let dst = &mut rest[j..n];
+            schur_kernel::axpy_minus_unroll4_nofma(dst, src, alpha);
+        }
     }
 }
 
@@ -122,9 +189,14 @@ pub(crate) fn update_1x1_block32(a: &mut [f64], p: usize) {
 /// place by that inverse, then applies the rank-2 update for every
 /// trailing column `j` in `(p+2)..32`.
 ///
-/// **Step 2a body:** scalar reference. Step 3 swaps the body for a
-/// two-source-load SIMD kernel; signature is stable.
-#[allow(dead_code)] // Driver dispatch lands in Step 2b.
+/// **Status:** scalar reference (per-column `axpy2_minus_unroll4_nofma`).
+/// Step 4 of the plan (4-dst-column packing) is deferred — the quad
+/// kernel's per-q sequential `sub(sub(dst, m0), m1)` rounding chain is
+/// not bit-exact with `axpy2_minus_unroll4_nofma`'s fused
+/// `sub(dst, add(m0, m1))` chain, so the rank-2 4-column kernel needs
+/// a fresh pulp dispatch. Tracked separately as Step 4 follow-up; for
+/// now this body remains the scalar path used by every 2×2 pivot.
+#[allow(dead_code)] // Driver dispatch lands in the block_ldlt32 driver.
 pub(crate) fn update_2x2_block32(a: &mut [f64], p: usize, d11: f64, d21: f64, d22: f64) {
     debug_assert!(a.len() >= BLOCK_SIZE * BLOCK_SIZE);
     debug_assert!(p + 1 < BLOCK_SIZE);
