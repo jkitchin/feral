@@ -149,7 +149,21 @@ fn run_matrix(tag: &str) {
 }
 
 fn main() -> std::io::Result<()> {
-    run_matrix("pinene_3200_0009");
-    run_matrix("pinene_3200_0000");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        for tag in &args {
+            run_matrix(tag);
+        }
+        return Ok(());
+    }
+    // Issue #8 broad sweep: pinene_3200 full iterate history +
+    // marine_1600 full iterate history. Both were called out in the
+    // original issue body as multi-hundred-second factor outliers.
+    for i in 0..10 {
+        run_matrix(&format!("pinene_3200_{:04}", i));
+    }
+    for i in 0..18 {
+        run_matrix(&format!("marine_1600_{:04}", i));
+    }
     Ok(())
 }
