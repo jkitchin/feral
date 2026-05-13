@@ -51,6 +51,7 @@ fn ldlt_params(profiler: Arc<Mutex<Profiler>>) -> NumericParams {
         fma: false,
         allow_delayed_pivots: true,
         cascade_break_ratio: None,
+        cascade_break_eps: None,
     }
 }
 

@@ -47,8 +47,12 @@ enum Mode {
     /// Force-accept everywhere (issue #43 naive form).
     StaticAll,
     /// Adaptive: force-accept only at non-root supernodes whose
-    /// front is at least `f` delayed columns from below.
+    /// front is at least `f` delayed columns from below. Unbounded Δ.
     CascadeBreak(f64),
+    /// Same trigger as `CascadeBreak`, but with the bounded-Δ
+    /// `PerturbToEps` path: rejected pivots become
+    /// `sign(d) * max(|d|, eps)` and are counted by sign.
+    CascadeBreakEps(f64, f64),
 }
 
 fn run(label: &str, csc: &CscMatrix, rhs: &[f64], oracle: &Inertia, mode: Mode) {
@@ -57,21 +61,28 @@ fn run(label: &str, csc: &CscMatrix, rhs: &[f64], oracle: &Inertia, mode: Mode) 
 
     let base = NumericParams::default();
     let bk = match mode {
-        Mode::StaticAll | Mode::CascadeBreak(_) => BunchKaufmanParams {
-            on_zero_pivot: ZeroPivotAction::ForceAccept,
-            ..base.bk.clone()
-        },
+        Mode::StaticAll | Mode::CascadeBreak(_) | Mode::CascadeBreakEps(_, _) => {
+            BunchKaufmanParams {
+                on_zero_pivot: ZeroPivotAction::ForceAccept,
+                ..base.bk.clone()
+            }
+        }
         Mode::Default => base.bk.clone(),
     };
     let allow_delayed = !matches!(mode, Mode::StaticAll);
     let cascade = match mode {
-        Mode::CascadeBreak(r) => Some(r),
+        Mode::CascadeBreak(r) | Mode::CascadeBreakEps(r, _) => Some(r),
+        _ => None,
+    };
+    let cascade_eps = match mode {
+        Mode::CascadeBreakEps(_, e) => Some(e),
         _ => None,
     };
     let params = NumericParams {
         bk,
         allow_delayed_pivots: allow_delayed,
         cascade_break_ratio: cascade,
+        cascade_break_eps: cascade_eps,
         ..base
     };
     let mut ws = FactorWorkspace::new();
@@ -148,23 +159,40 @@ fn main() -> std::io::Result<()> {
         csc.row_idx.len()
     );
 
-    run("static-all       ", &csc, &rhs, &oracle, Mode::StaticAll);
+    println!("\n-- unbounded ForceAccept (legacy) --");
+    for r in [0.99, 0.95, 0.94, 0.90, 0.75, 0.50, 0.25] {
+        let label = format!("cascade-break       {r:.2}");
+        run(&label, &csc, &rhs, &oracle, Mode::CascadeBreak(r));
+    }
+
+    println!("\n-- bounded-Δ PerturbToEps, eps=1e-8 --");
+    for r in [0.99, 0.95, 0.94, 0.90, 0.75, 0.50, 0.25] {
+        let label = format!("cascade-break-eps   {r:.2}");
+        run(&label, &csc, &rhs, &oracle, Mode::CascadeBreakEps(r, 1e-8));
+    }
+
+    println!("\n-- bounded-Δ PerturbToEps, eps=1e-10 --");
+    for r in [0.99, 0.95, 0.94, 0.90, 0.75, 0.50, 0.25] {
+        let label = format!("cascade-break-eps10 {r:.2}");
+        run(&label, &csc, &rhs, &oracle, Mode::CascadeBreakEps(r, 1e-10));
+    }
+
+    println!();
     run(
-        "cascade-break 0.50",
+        "static-all            ",
         &csc,
         &rhs,
         &oracle,
-        Mode::CascadeBreak(0.5),
-    );
-    run(
-        "cascade-break 0.25",
-        &csc,
-        &rhs,
-        &oracle,
-        Mode::CascadeBreak(0.25),
+        Mode::StaticAll,
     );
     // Default (delayed pivoting enabled) — may take ~87s on 0009.
-    run("default            ", &csc, &rhs, &oracle, Mode::Default);
+    run(
+        "default               ",
+        &csc,
+        &rhs,
+        &oracle,
+        Mode::Default,
+    );
 
     Ok(())
 }

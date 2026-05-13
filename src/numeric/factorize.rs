@@ -119,6 +119,22 @@ pub struct NumericParams {
     /// light-delay nodes — calibrate against the corpus before
     /// promoting to default.
     pub cascade_break_ratio: Option<f64>,
+
+    /// Per-pivot perturbation floor for cascade-break supernodes.
+    /// When `cascade_break_ratio` fires AND this is `Some(eps)`, the
+    /// triggered supernode runs with
+    /// `on_zero_pivot = PerturbToEps { abs_floor: eps }`, replacing
+    /// each tiny pivot by `sign(d) * max(|d|, eps)` and counting it
+    /// by sign rather than zero. The factor then satisfies
+    /// `LDL^T = A + Δ` with `||Δ||_∞ <= eps` per perturbed pivot —
+    /// inertia is preserved provided every nonzero eigenvalue of
+    /// `A` exceeds the cumulative perturbation. Default `None`
+    /// keeps the legacy `ForceAccept` semantics (unbounded Δ,
+    /// counts perturbed pivots as zero). See
+    /// `dev/journal/2026-05-13-03.org` 01:15 for the matrix-specific
+    /// "sweet spot" pathology that motivates bounded-Δ
+    /// perturbation.
+    pub cascade_break_eps: Option<f64>,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -343,6 +359,7 @@ impl Default for NumericParams {
             fma: false,
             allow_delayed_pivots: true,
             cascade_break_ratio: None,
+            cascade_break_eps: None,
         }
     }
 }
@@ -363,6 +380,7 @@ impl NumericParams {
             fma: false,
             allow_delayed_pivots: true,
             cascade_break_ratio: None,
+            cascade_break_eps: None,
         }
     }
 }
@@ -1795,8 +1813,18 @@ fn factor_one_supernode(
     let may_delay = !is_root[snode_idx] && params.allow_delayed_pivots && !cascade_break;
     let local_bk;
     let bk_ref: &BunchKaufmanParams = if cascade_break {
+        // When `cascade_break_eps` is set, use the bounded-Δ
+        // perturbation path; otherwise fall back to the legacy
+        // unbounded `ForceAccept`. The eps is treated as an absolute
+        // floor per pivot — callers should pre-multiply by an
+        // estimate of `||A||_∞` when working with non-normalized
+        // matrices.
+        let on_zero = match params.cascade_break_eps {
+            Some(eps) => ZeroPivotAction::PerturbToEps { abs_floor: eps },
+            None => ZeroPivotAction::ForceAccept,
+        };
         local_bk = BunchKaufmanParams {
-            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            on_zero_pivot: on_zero,
             ..params.bk.clone()
         };
         &local_bk
@@ -2975,6 +3003,7 @@ mod tests {
             fma: false,
             allow_delayed_pivots: true,
             cascade_break_ratio: None,
+            cascade_break_eps: None,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
@@ -2985,6 +3014,7 @@ mod tests {
             fma: false,
             allow_delayed_pivots: true,
             cascade_break_ratio: None,
+            cascade_break_eps: None,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
@@ -3038,6 +3068,7 @@ mod tests {
             fma: false,
             allow_delayed_pivots: true,
             cascade_break_ratio: None,
+            cascade_break_eps: None,
         };
         let infnorm = NumericParams {
             scaling: ScalingStrategy::InfNorm,
@@ -3539,6 +3570,7 @@ mod tests {
             fma: false,
             allow_delayed_pivots: true,
             cascade_break_ratio: None,
+            cascade_break_eps: None,
         };
 
         let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];

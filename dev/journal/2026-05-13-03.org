@@ -573,3 +573,48 @@ where inertia is already perturbed by design).
 Build status: cargo build clean; cargo test --release: 240 lib
 + 0 integration failures; cargo clippy --bins --tests --release
 -D warnings clean.
+
+* 01:15 :issue-8:cascade-break:sweep:
+Fine-grained cascade_break_ratio sweep on pinene_3200_0009
+(oracle=(64000, 63995, 0)) to characterize the phase transition.
+
+Above 0.95 (degrades monotonically with ratio):
+  0.995  factor=48.6s  inertia 1-off  rel_res=4.6e-6
+  0.99   factor=17.5s  inertia 2-off  rel_res=3.3e-6
+  0.98   factor=21.0s  inertia 2-off  rel_res=3.2e-4
+  0.97   factor= 7.1s  inertia 3-off  rel_res=2.7e-4
+  0.96   factor= 3.8s  inertia 4-off  rel_res=1.4e-3
+
+Sweet-spot band [0.94, 0.95]:
+  0.95   factor=1.28s  ok            rel_res=1.8e-14
+  0.94   factor=1.37s  ok            rel_res=1.0e-14
+
+Below 0.94 (leaks one):
+  0.93   factor=0.82s  1-off  rel_res=4.6e-6
+  0.92   factor=0.70s  1-off  rel_res=2.4e-5
+  0.91   factor=0.43s  1-off  rel_res=2.4e-5
+  0.90   factor=0.40s  1-off  rel_res=2.4e-5
+
+Findings:
+- The user hypothesis ("try larger than 0.99") is falsified by
+  this sweep: pushing higher monotonically *increases* both wall
+  clock and inertia error. Closer to 1.0 means the trigger fires
+  on fewer supernodes, so more delays pile up at the root and the
+  Bunch-Kaufman growth bound is breached on the perturbed front
+  rather than absorbed cleanly by a single mid-tree node.
+- The correctness window is narrow (0.94-0.95) and not smooth.
+  Whether inertia matches the oracle is fundamentally about
+  *which* supernode the trigger fires on, not a continuous
+  tradeoff. Between 0.93 and 0.94 a single different supernode
+  flips the trigger; that supernode happens to be where one
+  negative pivot was hiding in the delayed-from-below set.
+- Fastest correct point on 0009 remains 0.95 at 1.28s (69x over
+  default 87.8s). 0.94 is 1.07x slower (1.37s) with one
+  fewer delayed_in (63656 vs 65270) and marginally better
+  residual (1.0e-14 vs 1.8e-14) — not a meaningful improvement.
+
+Implication for default: 0.95 is a defensible default *for this
+matrix*, but the 0.94-0.95 window is too narrow to trust on
+unseen iterates. Treat cascade_break_ratio as a knob the IPM
+integrator tunes per iterate (e.g., crank up when residual is
+already large, leave off in clean regimes), not a global default.

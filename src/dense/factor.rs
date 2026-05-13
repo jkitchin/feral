@@ -285,10 +285,43 @@ pub struct BunchKaufmanParams {
 /// Action to take when a near-zero pivot is encountered.
 #[derive(Debug, Clone)]
 pub enum ZeroPivotAction {
-    /// Accept the tiny pivot; flag for iterative refinement.
+    /// Accept the tiny pivot at face value: zero the L column, count
+    /// as one extra zero in the inertia signature, and flag for
+    /// iterative refinement. The perturbation magnitude is unbounded —
+    /// effectively the difference between the true pivot and zero.
+    /// Use this only when downstream code can tolerate sign-loss in
+    /// the perturbed positions (e.g. callers that re-check inertia
+    /// against an expected signature and refactor on mismatch).
     ForceAccept,
     /// Return FeralError::NumericallyRankDeficient.
     Fail,
+    /// Replace the tiny pivot with `sign(d) * max(|d|, abs_floor)`,
+    /// keep the L column live, and count the perturbed pivot by its
+    /// sign (positive or negative — never zero). Sign of `0.0` is
+    /// treated as `+1.0`. The factor satisfies
+    /// `LDL^T = A + Δ` with `||Δ||_∞ <= abs_floor` per perturbed pivot;
+    /// by Weyl's inequality eigenvalues move by at most `||Δ||_2`,
+    /// so inertia is preserved whenever every nonzero eigenvalue of
+    /// `A` has magnitude exceeding the cumulative perturbation. The
+    /// caller is responsible for choosing `abs_floor`: a typical
+    /// recipe is `eps_rel * ||A||_∞` with `eps_rel` between `1e-12`
+    /// and `1e-8` for IPM KKT systems. Sets `needs_refinement = true`
+    /// so callers can drive iterative refinement against unperturbed
+    /// `A`. See `dev/journal/2026-05-13-03.org` §01:15 for the
+    /// motivating cascade-break behavior.
+    PerturbToEps { abs_floor: f64 },
+}
+
+/// Compute the perturbed pivot for `ZeroPivotAction::PerturbToEps`.
+/// `sign(0) = +1`, so a true zero pivot becomes `+abs_floor`.
+#[inline]
+fn perturb_to_floor(d: f64, abs_floor: f64) -> f64 {
+    let mag = d.abs().max(abs_floor);
+    if d < 0.0 {
+        -mag
+    } else {
+        mag
+    }
 }
 
 impl Default for BunchKaufmanParams {
@@ -395,6 +428,16 @@ pub fn factor(
                     ZeroPivotAction::Fail => {
                         return Err(FeralError::NumericallyRankDeficient);
                     }
+                    ZeroPivotAction::PerturbToEps { abs_floor } => {
+                        let d_new = perturb_to_floor(d, abs_floor);
+                        a[k * n + k] = d_new;
+                        needs_refinement = true;
+                        if d_new > 0.0 {
+                            pos += 1;
+                        } else {
+                            neg += 1;
+                        }
+                    }
                 }
             } else if d > 0.0 {
                 pos += 1;
@@ -416,9 +459,10 @@ pub fn factor(
 
         if gamma0 == 0.0 {
             // Column is zero off-diagonal: 1×1 pivot (matrix reducible)
-            let d = a[k * n + k];
             count_1x1_inertia(
-                d,
+                &mut a,
+                n,
+                k,
                 params,
                 &mut pos,
                 &mut neg,
@@ -1501,13 +1545,13 @@ fn lblt_panel_frontal(
 
         if gamma0 == 0.0 {
             // Zero-column: matches scalar's gamma0==0 branch exactly.
-            let d = a[col * nrow + col];
-            count_1x1_inertia(d, params, pos, neg, zero, needs_refinement)?;
+            count_1x1_inertia(a, nrow, col, params, pos, neg, zero, needs_refinement)?;
             set_l_column_identity(a, nrow, col);
             // The L column is all zeros (below diagonal); the diagonal is
-            // unchanged. Store the diagonal as d_panel[c] — subsequent
-            // replay with alpha = (0 * d) = 0 is a no-op, matching scalar.
-            d_panel[c] = d;
+            // unchanged (or perturbed in place by `count_1x1_inertia`
+            // under `PerturbToEps`). Subsequent replay with
+            // alpha = (0 * d) = 0 is a no-op, matching scalar.
+            d_panel[c] = a[col * nrow + col];
             c += 1;
             continue;
         }
@@ -2289,8 +2333,7 @@ fn scalar_pivot_step(
     };
 
     if gamma0 == 0.0 {
-        let d = a[k * nrow + k];
-        count_1x1_inertia(d, params, pos, neg, zero, needs_refinement)?;
+        count_1x1_inertia(a, nrow, k, params, pos, neg, zero, needs_refinement)?;
         set_l_column_identity(a, nrow, k);
         return Ok(PivotStepResult::Advanced(1));
     }
@@ -2459,7 +2502,11 @@ fn scalar_pivot_step(
                     ZeroPivotAction::Fail => {
                         return Err(FeralError::NumericallyRankDeficient);
                     }
-                    ZeroPivotAction::ForceAccept => {
+                    ZeroPivotAction::ForceAccept | ZeroPivotAction::PerturbToEps { .. } => {
+                        // PerturbToEps falls back to ForceAccept-style
+                        // accounting for a near-singular 2×2 block; the
+                        // subsequent 1×1 attempt below will apply the
+                        // bounded-Δ perturbation per pivot.
                         *needs_refinement = true;
                     }
                 }
@@ -2576,14 +2623,27 @@ fn try_reject_1x1_frontal(
                 ZeroPivotAction::ForceAccept => {
                     *needs_refinement = true;
                     *zero += 1;
+                    for i in (k + 1)..nrow {
+                        a[k * nrow + i] = 0.0;
+                    }
+                    a[k * nrow + k] = 0.0;
+                    return Ok(PivotOutcome::Rejected);
                 }
                 ZeroPivotAction::Fail => return Err(FeralError::NumericallyRankDeficient),
+                ZeroPivotAction::PerturbToEps { abs_floor } => {
+                    let d_new = perturb_to_floor(d, abs_floor);
+                    a[k * nrow + k] = d_new;
+                    *needs_refinement = true;
+                    if d_new > 0.0 {
+                        *pos += 1;
+                    } else {
+                        *neg += 1;
+                    }
+                    // Fall through to Accepted: caller runs do_1x1_update
+                    // with the perturbed pivot.
+                    return Ok(PivotOutcome::Accepted);
+                }
             }
-            for i in (k + 1)..nrow {
-                a[k * nrow + i] = 0.0;
-            }
-            a[k * nrow + k] = 0.0;
-            return Ok(PivotOutcome::Rejected);
         }
         // Case (b): small but nonzero — accept with correct sign.
         *needs_refinement = true;
@@ -2911,39 +2971,54 @@ fn do_1x1_pivot(
     zero: &mut usize,
     needs_refinement: &mut bool,
 ) -> Result<(f64, usize), FeralError> {
-    let d = a[k * n + k];
+    let mut d = a[k * n + k];
     let threshold = (params.pivot_threshold * col_max).max(params.zero_tol);
 
     if d.abs() <= threshold {
         // Pivot rejected (either absolute floor or column-relative
         // Duff-Reid/MUMPS threshold). Route through the existing
-        // ForceAccept/Fail zero-pivot path so the inertia count is
-        // consistent, then zero the L column so the rank-1 update
-        // below contributes nothing.
+        // ForceAccept/Fail/PerturbToEps zero-pivot path so the inertia
+        // count is consistent. ForceAccept zeros the L column so the
+        // rank-1 update contributes nothing; PerturbToEps swaps in a
+        // bounded-magnitude pivot and falls through to the regular
+        // L-scaling + rank-1 update path.
         match params.on_zero_pivot {
             ZeroPivotAction::ForceAccept => {
                 *needs_refinement = true;
                 *zero += 1;
+                for i in (k + 1)..n {
+                    a[k * n + i] = 0.0;
+                }
+                // Also zero the diagonal so solve's `|d| > zero_tol`
+                // check skips this position. Preserving the tiny
+                // original would otherwise leave `|d| > zero_tol` true
+                // for pivots just above the absolute floor but below
+                // u*col_max, causing solve to divide by them.
+                a[k * n + k] = 0.0;
+                return Ok((0.0, k + 2));
             }
             ZeroPivotAction::Fail => return Err(FeralError::NumericallyRankDeficient),
+            ZeroPivotAction::PerturbToEps { abs_floor } => {
+                d = perturb_to_floor(d, abs_floor);
+                a[k * n + k] = d;
+                *needs_refinement = true;
+                if d > 0.0 {
+                    *pos += 1;
+                } else {
+                    *neg += 1;
+                }
+                // Fall through to L scaling + rank-1 update with the
+                // perturbed `d` already counted. Skip the duplicate
+                // sign-count below.
+            }
         }
-        // Zero the L column
-        for i in (k + 1)..n {
-            a[k * n + i] = 0.0;
-        }
-        // Also zero the diagonal so solve's `|d| > zero_tol` check skips
-        // this position. Preserving the tiny original would otherwise
-        // leave `|d| > zero_tol` true for pivots just above the absolute
-        // floor but below u*col_max, causing solve to divide by them.
-        a[k * n + k] = 0.0;
-        return Ok((0.0, k + 2));
-    }
-
-    // Accept: count inertia by sign.
-    if d > 0.0 {
-        *pos += 1;
     } else {
-        *neg += 1;
+        // Accept: count inertia by sign.
+        if d > 0.0 {
+            *pos += 1;
+        } else {
+            *neg += 1;
+        }
     }
 
     let d_inv = 1.0 / d;
@@ -3083,15 +3158,23 @@ fn do_2x2_pivot(
     Ok((next_gamma0, next_r))
 }
 
-/// Count inertia for a 1×1 pivot.
+/// Count inertia for a 1×1 pivot at position `k` (column-major stride
+/// `stride`). When the pivot is below `zero_tol` and the configured
+/// `ZeroPivotAction` is `PerturbToEps`, the diagonal entry at
+/// `a[k*stride + k]` is overwritten with the perturbed pivot in place
+/// so the D-block solve will divide by the bounded magnitude.
+#[allow(clippy::too_many_arguments)]
 fn count_1x1_inertia(
-    d: f64,
+    a: &mut [f64],
+    stride: usize,
+    k: usize,
     params: &BunchKaufmanParams,
     pos: &mut usize,
     neg: &mut usize,
     zero: &mut usize,
     needs_refinement: &mut bool,
 ) -> Result<(), FeralError> {
+    let d = a[k * stride + k];
     if d.abs() <= params.zero_tol {
         match params.on_zero_pivot {
             ZeroPivotAction::ForceAccept => {
@@ -3100,6 +3183,17 @@ fn count_1x1_inertia(
                 Ok(())
             }
             ZeroPivotAction::Fail => Err(FeralError::NumericallyRankDeficient),
+            ZeroPivotAction::PerturbToEps { abs_floor } => {
+                let d_new = perturb_to_floor(d, abs_floor);
+                a[k * stride + k] = d_new;
+                *needs_refinement = true;
+                if d_new > 0.0 {
+                    *pos += 1;
+                } else {
+                    *neg += 1;
+                }
+                Ok(())
+            }
         }
     } else if d > 0.0 {
         *pos += 1;
@@ -3140,7 +3234,16 @@ fn count_2x2_inertia(
         // Near-singular 2×2 block: one eigenvalue near zero, the other
         // has sign of trace.
         match params.on_zero_pivot {
-            ZeroPivotAction::ForceAccept => {
+            ZeroPivotAction::ForceAccept | ZeroPivotAction::PerturbToEps { .. } => {
+                // PerturbToEps falls back to ForceAccept-style
+                // accounting for a near-singular 2×2 block: count one
+                // sign + one zero. A bounded-Δ perturbation of the
+                // block determinant would require modifying the
+                // already-applied 2×2 update, which is out of scope
+                // for the present pass. Callers driving PerturbToEps
+                // should rely on the 1×1 paths for bounded perturbation
+                // and treat 2×2 near-singular blocks as residual cases
+                // for iterative refinement.
                 *needs_refinement = true;
                 if trace > 0.0 {
                     *pos += 1;

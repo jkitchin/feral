@@ -210,6 +210,28 @@ impl Solver {
         self
     }
 
+    /// Enable bounded-Δ perturbation for cascade-break supernodes.
+    /// At triggered supernodes the BK policy switches to
+    /// `ZeroPivotAction::PerturbToEps { abs_floor: eps }`: each
+    /// rejected pivot becomes `sign(d) * max(|d|, eps)` and is
+    /// counted by sign rather than absorbed as zero. The factor
+    /// satisfies `LDL^T = A + Δ` with `||Δ||_∞ <= eps` per
+    /// perturbed pivot.
+    ///
+    /// Without this knob, cascade-break uses the legacy unbounded
+    /// `ForceAccept` (inertia is not preserved in general; the
+    /// 0.94–0.95 sweet spot on `pinene_3200_0009` is matrix-specific
+    /// luck — see `dev/journal/2026-05-13-03.org` 01:15).
+    ///
+    /// Recommended `eps`: `1e-8` to `1e-10` for KKT systems with
+    /// `||A||_∞` in the `O(1)–O(10³)` range typical of IPM iterates.
+    /// Callers should multiply by an estimate of `||A||_∞` for
+    /// non-normalized matrices.
+    pub fn with_cascade_break_eps(mut self, eps: f64) -> Self {
+        self.numeric_params.cascade_break_eps = Some(eps);
+        self
+    }
+
     /// Factor `matrix`. If `check_inertia` is `Some(expected)`,
     /// returns `WrongInertia { actual, expected }` on mismatch
     /// without invalidating the stored factor (caller may still
@@ -526,6 +548,7 @@ mod tests {
             fma: false,
             allow_delayed_pivots: true,
             cascade_break_ratio: None,
+            cascade_break_eps: None,
         };
         Solver::with_params(np, SupernodeParams::default())
     }
@@ -1299,6 +1322,7 @@ mod tests {
                 fma: false,
                 allow_delayed_pivots: true,
                 cascade_break_ratio: None,
+                cascade_break_eps: None,
                 ..NumericParams::default()
             };
 
