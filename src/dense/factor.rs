@@ -126,6 +126,27 @@ pub mod panel_diag {
     }
 }
 
+/// Issue #13 Phase A — caller-supplied scratch for the two internal-only
+/// working buffers in `factor_frontal_blocked_in_place`. Reusing the
+/// allocation across supernodes removes two `Vec` allocations per call
+/// without touching the returned `FrontalFactors`. The scratch may be
+/// re-warmed across calls of differing `nrow` / `bs` — the kernel
+/// `clear()`s then `resize()`s on entry, preserving capacity.
+#[derive(Default, Debug, Clone)]
+pub struct FactorScratch {
+    /// Working subdiagonal of D, length `nrow` per call.
+    pub subdiag: Vec<f64>,
+    /// Panel-local D values, length `bs` per call.
+    pub d_panel: Vec<f64>,
+}
+
+impl FactorScratch {
+    /// Construct an empty scratch. Equivalent to `default()`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 #[inline(always)]
 fn diag_inc(counter: &std::sync::atomic::AtomicU64) {
     if PANEL_DIAG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1074,6 +1095,29 @@ pub fn factor_frontal_blocked_in_place(
     may_delay: bool,
     params: &BunchKaufmanParams,
 ) -> Result<FrontalFactors, FeralError> {
+    let mut scratch = FactorScratch::new();
+    factor_frontal_blocked_in_place_with_scratch(matrix, ncol, may_delay, params, &mut scratch)
+}
+
+/// Issue #13 Phase A — pooled-scratch variant of
+/// [`factor_frontal_blocked_in_place`]. The caller-supplied `scratch`
+/// holds the `subdiag` and `d_panel` working buffers; repeated calls
+/// across a single `FactorScratch` lifetime amortise those two
+/// allocations per supernode. The returned `FrontalFactors` still
+/// owns its `l`/`d_diag`/`d_subdiag`/`perm`/`perm_inv`/`contrib`
+/// Vecs — phase C (deferred) would extend the pooling there.
+///
+/// Bit-exact with [`factor_frontal_blocked_in_place`]: the scratch
+/// buffers are `clear()`+`resize()`d on entry so a warm scratch from
+/// a prior call (even of a different `nrow`) is indistinguishable
+/// from a fresh `FactorScratch::new()`.
+pub fn factor_frontal_blocked_in_place_with_scratch(
+    matrix: &mut crate::dense::matrix::SymmetricMatrix,
+    ncol: usize,
+    may_delay: bool,
+    params: &BunchKaufmanParams,
+    scratch: &mut FactorScratch,
+) -> Result<FrontalFactors, FeralError> {
     let nrow = matrix.n;
 
     if ncol > nrow {
@@ -1141,13 +1185,22 @@ pub fn factor_frontal_blocked_in_place(
     let a: &mut [f64] = matrix.data.as_mut_slice();
 
     let mut perm: Vec<usize> = (0..nrow).collect();
-    let mut subdiag = vec![0.0; nrow];
+    // Issue #13 Phase A: pooled `subdiag` and `d_panel` from caller-supplied
+    // scratch. `clear()` + `resize()` preserves capacity across calls so a
+    // warm scratch (even with a larger prior `nrow`/`bs`) reuses the heap
+    // allocation. Zero-initialised — both buffers are read before write in
+    // the may_delay-rejection and panel-bail paths.
+    scratch.subdiag.clear();
+    scratch.subdiag.resize(nrow, 0.0);
+    scratch.d_panel.clear();
+    scratch.d_panel.resize(bs, 0.0);
+    let subdiag: &mut [f64] = scratch.subdiag.as_mut_slice();
+    let d_panel: &mut [f64] = scratch.d_panel.as_mut_slice();
     let mut pos = 0usize;
     let mut neg = 0usize;
     let mut zero = 0usize;
     let mut needs_refinement = false;
     let mut n_rook_rescues = 0usize;
-    let mut d_panel = vec![0.0f64; bs];
 
     let mut k = 0;
     while k < ncol {
@@ -1170,7 +1223,7 @@ pub fn factor_frontal_blocked_in_place(
                 may_delay,
                 params,
                 &mut perm,
-                &mut subdiag,
+                &mut *subdiag,
                 &mut pos,
                 &mut neg,
                 &mut zero,
@@ -1203,8 +1256,8 @@ pub fn factor_frontal_blocked_in_place(
             &mut neg,
             &mut zero,
             &mut needs_refinement,
-            &mut d_panel,
-            &mut subdiag,
+            &mut *d_panel,
+            &mut *subdiag,
             &mut perm,
         )?;
         // On ScalarFallback and Delayed the panel peek-ahead'd column
@@ -1224,7 +1277,7 @@ pub fn factor_frontal_blocked_in_place(
             // both to avoid a double rank-1 update.
             PanelStatus::ScalarFallbackPeekedNext => k + n_elim + 2,
         };
-        apply_blocked_schur(&mut *a, nrow, k, n_elim, j_start, &d_panel, &subdiag);
+        apply_blocked_schur(&mut *a, nrow, k, n_elim, j_start, &*d_panel, &*subdiag);
         k += n_elim;
 
         // Phase B-1.5 attribution: count panel outcome and committed pivots.
@@ -1252,7 +1305,7 @@ pub fn factor_frontal_blocked_in_place(
                     may_delay,
                     params,
                     &mut perm,
-                    &mut subdiag,
+                    &mut *subdiag,
                     &mut pos,
                     &mut neg,
                     &mut zero,

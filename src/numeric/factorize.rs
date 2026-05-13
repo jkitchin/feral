@@ -1,5 +1,6 @@
 use crate::dense::factor::{
-    factor, factor_frontal_blocked_in_place, BunchKaufmanParams, FrontalFactors,
+    factor, factor_frontal_blocked_in_place_with_scratch, BunchKaufmanParams, FactorScratch,
+    FrontalFactors,
 };
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
@@ -776,6 +777,11 @@ pub struct FactorWorkspace {
     /// Pre-sized to `n_snodes` once per worker by the parallel driver;
     /// sequential drivers don't touch this field.
     local_contribs: Vec<Option<ContribBlock>>,
+    /// Issue #13 Phase A: pooled `subdiag` + `d_panel` working buffers
+    /// for `factor_frontal_blocked_in_place_with_scratch`. Reused
+    /// across supernodes within a single workspace lifetime; the
+    /// kernel `clear()`s and `resize()`s on entry, preserving capacity.
+    pub factor_scratch: FactorScratch,
 }
 
 impl FactorWorkspace {
@@ -910,7 +916,13 @@ pub fn dense_fast_factor_with_workspace(
     // Factor in place into `sym.data` (W-3a). `sym.data` content is
     // undefined on return, but the buffer itself is reusable; return it
     // to the pool.
-    let ff = factor_frontal_blocked_in_place(&mut sym, n, false, &params.bk)?;
+    let ff = factor_frontal_blocked_in_place_with_scratch(
+        &mut sym,
+        n,
+        false,
+        &params.bk,
+        &mut ws.factor_scratch,
+    )?;
     ws.dense_values = sym.data;
 
     let inertia = ff.inertia.clone();
@@ -1693,7 +1705,13 @@ fn factor_one_supernode(
     debug_assert!(nvschur <= expanded_ncol);
     let may_delay = !is_root[snode_idx];
     let eliminable = expanded_ncol - nvschur;
-    let mut ff = factor_frontal_blocked_in_place(&mut frontal, eliminable, may_delay, &params.bk)?;
+    let mut ff = factor_frontal_blocked_in_place_with_scratch(
+        &mut frontal,
+        eliminable,
+        may_delay,
+        &params.bk,
+        &mut ws.factor_scratch,
+    )?;
     ws.frontal_values = frontal.data;
 
     let node_inertia = ff.inertia.clone();
@@ -1845,8 +1863,13 @@ fn factor_one_small_leaf(
 
     // W-3a: factor in place; pool returns the (now-undefined) buffer.
     let may_delay = !is_root[snode_idx];
-    let mut ff =
-        factor_frontal_blocked_in_place(&mut frontal, expanded_ncol, may_delay, &params.bk)?;
+    let mut ff = factor_frontal_blocked_in_place_with_scratch(
+        &mut frontal,
+        expanded_ncol,
+        may_delay,
+        &params.bk,
+        &mut ws.factor_scratch,
+    )?;
     ws.frontal_values = frontal.data;
 
     let node_inertia = ff.inertia.clone();
