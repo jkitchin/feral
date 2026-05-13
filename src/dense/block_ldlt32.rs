@@ -37,7 +37,6 @@ use crate::error::FeralError;
 /// front size on KKT chain matrices (see
 /// `dev/research/ssids-small-frontal-speed.md` §0). Other block sizes
 /// take the existing `factor_frontal_blocked` path.
-#[allow(dead_code)] // Wired into factor.rs dispatch in Step 2 of the plan.
 pub const BLOCK_SIZE: usize = 32;
 
 /// Factor a 32×32 symmetric matrix using the register-resident
@@ -51,7 +50,6 @@ pub const BLOCK_SIZE: usize = 32;
 /// tests in this module pass trivially under the stub; they become
 /// load-bearing in Step 2 when the kernel body diverges from the
 /// scalar oracle's call path.
-#[allow(dead_code)] // Wired into factor.rs dispatch in Step 2 of the plan.
 pub(crate) fn factor_block32(
     matrix: &SymmetricMatrix,
     ncol: usize,
@@ -90,7 +88,6 @@ pub(crate) fn factor_block32(
 /// sequential single-column rank-1 dispatches — i.e. byte-identical to
 /// the Step 2 scalar body and to `do_1x1_update`. Verified by the
 /// unit tests in this module.
-#[allow(dead_code)] // Driver dispatch lands in the block_ldlt32 driver.
 pub(crate) fn update_1x1_block32(a: &mut [f64], p: usize) {
     debug_assert!(a.len() >= BLOCK_SIZE * BLOCK_SIZE);
     debug_assert!(p < BLOCK_SIZE);
@@ -196,7 +193,6 @@ pub(crate) fn update_1x1_block32(a: &mut [f64], p: usize) {
 /// `sub(dst, add(m0, m1))` chain, so the rank-2 4-column kernel needs
 /// a fresh pulp dispatch. Tracked separately as Step 4 follow-up; for
 /// now this body remains the scalar path used by every 2×2 pivot.
-#[allow(dead_code)] // Driver dispatch lands in the block_ldlt32 driver.
 pub(crate) fn update_2x2_block32(a: &mut [f64], p: usize, d11: f64, d21: f64, d22: f64) {
     debug_assert!(a.len() >= BLOCK_SIZE * BLOCK_SIZE);
     debug_assert!(p + 1 < BLOCK_SIZE);

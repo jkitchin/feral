@@ -1176,6 +1176,22 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         return factor_frontal(matrix, ncol, may_delay, params);
     }
 
+    // Issue #9 Step 2 dispatch: 32×32 fully-summed fronts go through
+    // `factor_block32`. That function delegates to `factor_frontal`,
+    // whose eager `do_1x1_update` / `do_2x2_update` now route to the
+    // block-32 SIMD body (`update_1x1_block32` quad/dual/single tiling)
+    // at n==32. The panel path (`lblt_panel_frontal`) was leaving the
+    // batched-source quad kernel unused at bs==ncol==32 because
+    // `j_start = k + n_elim == nrow` skips `apply_blocked_schur_panel`;
+    // the eager-update path uses the quad kernel for every trailing
+    // tile of 4 columns. Bit-parity: factor_frontal is the documented
+    // oracle for both lblt_panel_frontal and the block-32 SIMD body.
+    if nrow == crate::dense::block_ldlt32::BLOCK_SIZE
+        && ncol == crate::dense::block_ldlt32::BLOCK_SIZE
+    {
+        return crate::dense::block_ldlt32::factor_block32(matrix, ncol, may_delay, params);
+    }
+
     // Fallback conditions where the panel offers no advantage.
     // Delegation preserves parity trivially.
     //
@@ -2624,6 +2640,13 @@ fn try_reject_1x1_with_rook_rescue(
 
 /// 1×1 rank-1 update: update columns k+1..n after eliminating column k.
 pub(crate) fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
+    // Issue #9 Step 2: route n==32 to the block-32 SIMD body. Bit-exact
+    // per the parity sweep in `block_ldlt32::tests` (4 unit tests cover
+    // p=0/5/30 + zero-pivot).
+    if n == crate::dense::block_ldlt32::BLOCK_SIZE {
+        crate::dense::block_ldlt32::update_1x1_block32(a, k);
+        return;
+    }
     let d = a[k * n + k];
     if d.abs() == 0.0 {
         return;
@@ -2646,6 +2669,14 @@ pub(crate) fn do_1x1_update(a: &mut [f64], n: usize, k: usize) {
 
 /// Rank-2 update after a 2×2 pivot at columns `k`, `k+1`.
 pub(crate) fn do_2x2_update(a: &mut [f64], n: usize, k: usize, d11: f64, d21: f64, d22: f64) {
+    // Issue #9 Step 2: route n==32 to the block-32 body. The Step 4 SIMD
+    // rank-2 kernel is still pending, so update_2x2_block32 is currently
+    // the scalar per-column axpy2 (bit-identical to this function at
+    // n==32); the indirection is a hook for Step 4.
+    if n == crate::dense::block_ldlt32::BLOCK_SIZE {
+        crate::dense::block_ldlt32::update_2x2_block32(a, k, d11, d21, d22);
+        return;
+    }
     let det = d11 * d22 - d21 * d21;
     if det.abs() == 0.0 {
         return;
