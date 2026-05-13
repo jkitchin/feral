@@ -81,6 +81,7 @@ fn params_off() -> NumericParams {
         profiler: None,
         parallel_telemetry: None,
         fma: false,
+        allow_delayed_pivots: true,
     }
 }
 

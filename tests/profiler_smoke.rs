@@ -50,6 +50,7 @@ fn params_with(profiler: Option<Arc<Mutex<Profiler>>>) -> NumericParams {
         profiler,
         parallel_telemetry: None,
         fma: false,
+        allow_delayed_pivots: true,
     }
 }
 

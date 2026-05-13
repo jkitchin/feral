@@ -1319,7 +1319,9 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             // both to avoid a double rank-1 update.
             PanelStatus::ScalarFallbackPeekedNext => k + n_elim + 2,
         };
-        apply_blocked_schur(&mut *a, nrow, k, n_elim, j_start, &*d_panel, &*subdiag, params.fma);
+        apply_blocked_schur(
+            &mut *a, nrow, k, n_elim, j_start, &*d_panel, &*subdiag, params.fma,
+        );
         k += n_elim;
 
         // Phase B-1.5 attribution: count panel outcome and committed pivots.
@@ -1779,7 +1781,6 @@ fn peek_ahead_column(
 ) {
     peek_ahead_replay(a, nrow, k, c, k + c, d_panel, subdiag, fma);
 }
-
 
 /// Replay primitive: apply the first `n_committed` panel pivots
 /// (those at panel positions `0..n_committed`) to `target_col` in

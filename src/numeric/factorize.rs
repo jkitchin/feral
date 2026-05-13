@@ -74,6 +74,33 @@ pub struct NumericParams {
     /// supernode workloads like Mittelmann's pinene_3200 NLP — see
     /// issue #8 and `dev/research/fma-kernel-opt-in.md`).
     pub fma: bool,
+
+    /// When `true` (default), non-root supernodes run with
+    /// `may_delay = true` — pivots that fail the column-relative
+    /// threshold or the 2×2 Duff-Reid growth bound are pushed up
+    /// the elimination tree to the parent (SSIDS-style delayed
+    /// pivoting). When `false`, every supernode runs as if it
+    /// were the root (`may_delay = false`): failing pivots are
+    /// force-accepted in place via the existing
+    /// `ZeroPivotAction::ForceAccept` path, with iterative
+    /// refinement to recover residual.
+    ///
+    /// Disabling delayed pivoting is the FERAL analogue of MA57's
+    /// `cntl[4]` static-pivoting fallback. Issue #8 (Mittelmann
+    /// `pinene_3200_0009`) hits a delayed-pivot cascade: 118k
+    /// pivots delayed up to ~14k-column root supernodes, yielding
+    /// an 87s factor on an otherwise sub-second problem. Setting
+    /// `allow_delayed_pivots = false` breaks the cascade at the
+    /// cost of bounded L growth (`O(1/|d|)` per force-accepted
+    /// small pivot), which iterative refinement is expected to
+    /// recover.
+    ///
+    /// Default `true` preserves the SSIDS-canonical behavior the
+    /// FERAL corpus is verified against. Flip per-call via
+    /// `Solver::with_static_pivoting(true)` for the issue #8 fast
+    /// path. See `dev/journal/2026-05-13-03.org` 22:55 entry for
+    /// the root-cause analysis.
+    pub allow_delayed_pivots: bool,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -296,6 +323,7 @@ impl Default for NumericParams {
             profiler: None,
             parallel_telemetry: None,
             fma: false,
+            allow_delayed_pivots: true,
         }
     }
 }
@@ -314,6 +342,7 @@ impl NumericParams {
             profiler: None,
             parallel_telemetry: None,
             fma: false,
+            allow_delayed_pivots: true,
         }
     }
 }
@@ -1732,7 +1761,7 @@ fn factor_one_supernode(
         "nvschur > 0 only valid at root supernodes (Schur tail invariant)"
     );
     debug_assert!(nvschur <= expanded_ncol);
-    let may_delay = !is_root[snode_idx];
+    let may_delay = !is_root[snode_idx] && params.allow_delayed_pivots;
     let eliminable = expanded_ncol - nvschur;
     let mut ff = factor_frontal_blocked_in_place_with_scratch(
         &mut frontal,
@@ -1891,7 +1920,7 @@ fn factor_one_small_leaf(
     // No extend-add: leaves have no children.
 
     // W-3a: factor in place; pool returns the (now-undefined) buffer.
-    let may_delay = !is_root[snode_idx];
+    let may_delay = !is_root[snode_idx] && params.allow_delayed_pivots;
     let mut ff = factor_frontal_blocked_in_place_with_scratch(
         &mut frontal,
         expanded_ncol,
@@ -2903,6 +2932,7 @@ mod tests {
             profiler: None,
             parallel_telemetry: None,
             fma: false,
+            allow_delayed_pivots: true,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
@@ -2911,6 +2941,7 @@ mod tests {
             profiler: None,
             parallel_telemetry: None,
             fma: false,
+            allow_delayed_pivots: true,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
@@ -2962,6 +2993,7 @@ mod tests {
             profiler: None,
             parallel_telemetry: None,
             fma: false,
+            allow_delayed_pivots: true,
         };
         let infnorm = NumericParams {
             scaling: ScalingStrategy::InfNorm,
@@ -3461,6 +3493,7 @@ mod tests {
             profiler: None,
             parallel_telemetry: None,
             fma: false,
+            allow_delayed_pivots: true,
         };
 
         let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];

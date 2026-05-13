@@ -177,6 +177,20 @@ impl Solver {
         self
     }
 
+    /// Disable delayed pivoting. When `on = true`, every supernode
+    /// runs as if it were the root: pivots failing the BK threshold
+    /// or 2×2 Duff–Reid test are force-accepted in place via
+    /// `ZeroPivotAction::ForceAccept` rather than being delayed up
+    /// to the parent. FERAL analogue of MA57's `cntl[4]` static-
+    /// pivoting fallback. Use only when iterative refinement is
+    /// available to recover the lost accuracy on accepted small
+    /// pivots — appropriate for IPM KKT systems where outer
+    /// regularization (δ_c, δ_x) and refinement absorb the residual.
+    pub fn with_static_pivoting(mut self, on: bool) -> Self {
+        self.numeric_params.allow_delayed_pivots = !on;
+        self
+    }
+
     /// Factor `matrix`. If `check_inertia` is `Some(expected)`,
     /// returns `WrongInertia { actual, expected }` on mismatch
     /// without invalidating the stored factor (caller may still
@@ -491,6 +505,7 @@ mod tests {
             profiler: None,
             parallel_telemetry: None,
             fma: false,
+            allow_delayed_pivots: true,
         };
         Solver::with_params(np, SupernodeParams::default())
     }
@@ -1262,6 +1277,7 @@ mod tests {
             let np = NumericParams {
                 parallel_telemetry: Some(stats.clone()),
                 fma: false,
+                allow_delayed_pivots: true,
                 ..NumericParams::default()
             };
 

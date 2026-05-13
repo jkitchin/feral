@@ -71,3 +71,371 @@ struct-literal sites in tests/ and src/bin/ updated to set
 Next: Phase 3 verification — rerun the Mittelmann pinene_3200 NLP
 with .with_fma(true) and compare wallclock + inertia vs the default
 path. Then Phase 4 release (CHANGELOG, decisions, bump to 0.3.1).
+
+* 21:30 :issue-8:fma:phase-3:negative-result:
+Phase 3 verification ran. Built src/bin/bench_fma_phase3.rs (factor
+each matrix twice — NumericParams default vs params.fma=true — under
+a configurable wallclock budget, asserts inertia matches sidecar
+oracle on both paths, reports residual via solve_sparse_refined).
+
+Results on the three default Mittelmann targets (n, nnz, inertia
+all match oracle on both paths; residuals bit-identical between
+nofma and fma to the 4 sig figs printed):
+
+  marine_1600_0000   n=76807   nofma=0.043s  fma=0.041s  res=2.18e-12
+  gasoil_3200_0000   n=63999   nofma=0.011s  fma=0.010s  res=6.36e-15
+  pinene_3200_0000   n=127995  nofma=0.025s  fma=0.027s  res=2.66e-11
+
+The first pinene iterate factors in 25ms, not the >600s claimed in
+issue #8. Walked the IPM iterates:
+
+  pinene_3200_0001  nofma=0.027s  fma=0.029s
+  pinene_3200_0003  nofma=0.027s  fma=0.026s
+  pinene_3200_0005  nofma=0.025s  fma=0.029s
+  pinene_3200_0007  nofma=0.025s  fma=0.024s
+  pinene_3200_0008  nofma=0.044s  fma=0.045s
+  pinene_3200_0009  nofma=87.536s (>budget)  fma=87.500s
+
+The cliff is 0008 (44ms) -> 0009 (87s) — 1990x slowdown with
+**identical structure** (same n, same nnz=732976). Iterate 0009 has
+the same oracle inertia (64000, 63995, 0) and ultimately produces a
+small residual (3.27e-14 on the FMA path), so it's not a singular
+pivot — but the factor wallclock blows up.
+
+**Critical finding: FMA opt-in does NOT fix issue #8.** On the slow
+iterate FMA on (87.500s) vs FMA off (87.536s) is within noise. The
+bottleneck on pinene_3200_0009 is *not* arithmetic throughput in
+the Schur kernels. FMA halves the rounding per axpy/schur op but
+gives zero wallclock relief here, which means the kernels we are
+dispatching through are not the hot loop on that iterate. Candidate
+causes (none confirmed yet):
+
+- Repeated 2x2 pivot search / cascade of delayed pivots
+- A panel-restart loop spending time outside the SIMD body
+- A 32x32 block path that hits a scalar fallback
+- A symbolic structure that produces a single very tall thin
+  supernode where the FMA siblings don't dominate
+
+So Phase 3's performance gate (`pinene_3200 <= 5s`) is **not met**.
+
+What Phase 3 *did* prove:
+- ✅ Inertia gate: FMA path matches oracle on every iterate tested
+- ✅ Residual gate: FMA path matches nofma path to the printed sig
+  figs on every fast iterate; on the slow iterate FMA reaches
+  3.27e-14 (we only have FMA-side residual since nofma was
+  truncated)
+- ❌ Performance gate: FMA opt-in gives zero speedup on the issue
+  #8 motivator
+
+Implications for the plan:
+1. Phase 4 (release as 0.3.1) is still defensible *as plumbing* —
+   the opt-in is correct, safe, and ready for users who want FMA
+   on cross-arch-tolerant problems. But it should not be marketed
+   as fixing pinene_3200.
+2. The real issue #8 root cause needs a different investigation —
+   probably a profiler run on pinene_3200_0009 to identify where
+   the 87s is actually spent. Likely candidates: pivot cascade,
+   delayed-pivot handling, panel restart, or a non-SIMD path that
+   dominates.
+3. The fma-kernel-opt-in.md plan needs a "Phase 3 result" addendum
+   that records this negative finding before any 0.3.1 release.
+
+Next: do not release 0.3.1 yet. First identify what is actually
+slow on pinene_3200_0009 — that is the real issue #8 fix.
+
+* 22:15 :issue-8:profile:pinene-0009:bandwidth-bound:
+samply profile of pinene_3200_0009 (89.254s factor, FMA off, 1000 Hz,
+89229 samples on one rayon worker — 100% single-threaded).
+
+=== Top symbols by SELF time ===
+  91.8%  feral::dense::schur_kernel::axpy2_minus_unroll4_nofma
+   6.5%  feral::dense::schur_kernel::axpy_minus_unroll4_nofma
+   0.5%  factor_frontal_blocked_in_place_with_scratch
+   0.3%  swap_rows_cols
+   0.3%  schur_panel_minus_nofma_strided_quad
+
+=== Top INCLUSIVE ===
+ 100.0%  rayon worker thread (single worker doing all the work)
+  99.6%  factor_frontal_blocked_in_place_with_scratch
+  91.8%  axpy2_minus_unroll4_nofma
+  35.6%  scalar_pivot_step
+  32.2%  do_2x2_update
+   3.1%  do_1x1_update
+
+=== Callers of the hot kernels ===
+axpy2_minus_unroll4 (~81.8k samples):
+  53,141  factor_frontal_blocked_in_place_with_scratch (direct)
+  28,706  do_2x2_update
+     27  peek_ahead_replay
+
+axpy_minus_unroll4 (~5.8k samples):
+   3,041  factor_frontal_blocked_in_place_with_scratch (direct)
+   2,784  do_1x1_update
+       2  peek_ahead_replay
+
+=== Diagnosis ===
+
+1. The 87s is spent in ONE frontal supernode. 99.6% inclusive in
+   factor_frontal_blocked_in_place_with_scratch on one rayon worker
+   means we're inside a single supernode for the entire wallclock.
+
+2. ~92% of self time is in axpy2_minus_unroll4_nofma — the 2x2
+   trailing-update kernel. Only ~6.5% in the 1x1 axpy variant.
+   2x2 pivots dominate by ~14:1 over 1x1 on this iterate.
+
+3. **FMA does not help because axpy is memory-bandwidth bound.**
+   The kernel performs ~2 flops per 16 bytes of memory traffic
+   (load src, load+store dst). FMA halves the rounding per op but
+   does not reduce memory traffic, so FMA on (87.500s) vs FMA off
+   (87.536s) is within noise. This is the answer to why the Phase
+   3 perf gate is not met — FMA was the wrong lever.
+
+4. The structural question is now: why does iterate 0009 have so
+   many 2x2 pivot decisions when iterate 0008 (identical n, nnz,
+   and symbolic pattern) factors in 44ms? Candidates:
+
+   a. Near-zero 1x1 pivots that Bunch-Kaufman escalates to 2x2
+      (the BK criterion: |a_ii| < alpha * max_off_col triggers
+      2x2 search). Iterate 0009 may have many small diagonal
+      entries due to barrier parameter scaling at this IPM step.
+
+   b. The frontal supernode in question is likely the trailing
+      saddle block (constraint Hessian) which becomes
+      progressively more ill-conditioned as the barrier mu shrinks
+      across IPM iterates. Iterates 0001..0008 may have been at
+      mu > some threshold where the constraint block was numerically
+      definite enough to pick 1x1 pivots; iterate 0009 crosses
+      that threshold.
+
+   c. We may be missing a panel restart / supernode amalgamation
+      heuristic that MA57 has (which finishes in 2.6s on the full
+      IPM).
+
+5. The fix is NOT FMA. The fix has to come from one of:
+   - Reduce 2x2 pivot count (better pivot threshold, scaling, or
+     a panel-level static-pivoting heuristic for nearly-symmetric-
+     positive blocks)
+   - Reduce trailing-update cost (cache blocking, panel size
+     tuning — but axpy is already as simple as a memory loop gets)
+   - Use a different elimination order on this supernode (LDL^T
+     within a dense block can still be left-looking to halve the
+     memory traffic)
+
+Profile saved: dev/profiles/pinene_3200_0009.json.gz
+
+Next: counts of 1x1 vs 2x2 pivots on iterate 0008 vs 0009 (need
+to instrument the factor or read it back from the multifrontal
+return value). Also: dump supernode sizes from the symbolic factor
+to identify which supernode is the 87s one.
+
+* 22:55 :issue-8:root-cause:delayed-pivot-cascade:
+Per-supernode pivot stats via diag_pinene_pivot_cliff. The 87s slow
+iterate's anatomy is now fully characterised.
+
+=== Headline numbers (pinene_3200) ===
+
+  metric                   _0008 (44ms)    _0009 (87s)    ratio
+  ----------------------   ------------    -----------   ------
+  n_supernodes (symbolic)  10487           10487          same
+  n_2x2 (total)            58321           63008          1.08×
+  n_delayed (total)        15756          *118058*       *7.5×*
+  nnz_L                    3.7M           *115.7M*       *31×*
+  max_node n_2x2           196             *6693*        *34×*
+  max_node n_delayed_in    439            *14551*        *33×*
+
+The cliff is in delayed pivots, not 2x2 count. Total 2x2 grows only
+8 %; delays grow 7.5× and concentrate in the ROOT separator. The
+factor nnz balloons 31×.
+
+=== Where the 87s lives ===
+
+The three TOP supernodes (10484, 10485, 10486 — root nodes of
+METIS-ND in 0008 are small; in 0009 they are huge after delays):
+
+  node    first    ncol   nelim   nrow    ndIn   n_2x2
+  10484   127554   14567     21   14991   14551       7
+  10485   127570   14866    842   14971   14546     403
+  10486   127890   14130  14130   14130   14025    6693
+
+Compare 0008 — same nodes:
+
+  node    first    ncol  nelim   nrow   ndIn  n_2x2
+  10485   127570    557    557    662    237    196
+  10484   127554    455    218    879    439     45
+
+Symbolic ncol per node is unchanged (10485's symbolic ncol = 320 in
+both). The ballooning is entirely from `n_delayed_in` — pivots
+delayed up from children. On 0009, every child of 10484/10485/10486
+pushes thousands of pivots up. The cascade terminates at the root
+(may_delay=false), where they MUST be factored.
+
+Factor-work proxy for node 10486: nelim × (nrow - nelim/2)
+                                = 14130 × 7065 ≈ 1.0 × 10⁸
+Add the dense LDL^T flops on a 14130×14130 block: ≈ N³/3
+                                = 9.4 × 10¹¹ flops
+At memory-bandwidth-bound axpy throughput (≈12 GFLOPs effective
+on Apple silicon for the unrolled axpy2 nofma kernel), this is
+≈ 78s, which matches the 87s wallclock (the other 9s is the
+similar work in 10484 and 10485).
+
+=== Delay trigger ===
+
+The delay comes from `dense/factor.rs` panel/scalar logic. Two
+sites:
+  - try_reject_1x1_frontal (line 2549): |d| <= max(u*col_max, eps)
+    with u = NumericParams::default().bk.pivot_threshold = 1e-8.
+    Triggers when the diagonal is < 1e-8× the off-diagonal column
+    max.
+  - 2x2 growth_fail / det_floor_fail (line 2446) with may_delay=
+    true. Triggers when the 2x2 candidate fails the Duff-Reid
+    growth bound `(|d22|·rmax + |d21|·tmax)·u > |det|` (u=1e-8) or
+    the SSIDS scale-invariant det floor.
+
+On pinene IPM iterates: the KKT bottom-right block is `-δ_c · I`
+where δ_c is the constraint regularisation. As μ shrinks, δ_c
+shrinks too (Ipopt's default is δ_c = μ^β with β ~ 0.25). At
+iterate 0009, δ_c is small enough that constraint rows fail
+either the 1x1 column-relative test (|−δ_c| < 1e-8 · |J entry|)
+or the 2x2 growth bound. Iterate 0008 was still safely above the
+threshold for most of those rows.
+
+=== Why MA57 doesn't hit this (best public-knowledge guess) ===
+
+The user hinted "I guess it is factorization". Without reading
+MA57 source (per session constraint), what is known publicly from
+Duff (2004), Duff & Pralet (2005), and the HSL documentation:
+
+1. **MA57 uses the same threshold partial pivoting framework.**
+   `cntl[1]` defaults to 0.01 in the HSL distribution; Ipopt sets
+   `ma57_pivtol = 1e-8`. Same value as FERAL's default. So the
+   raw threshold isn't the difference.
+
+2. **MA57 has a documented "static pivoting" fallback** for the
+   case where delays accumulate beyond a budget. When too many
+   pivots are delayed at any node, MA57 can perturb the diagonal
+   (|d| := |d| + alpha) and accept the pivot in place, avoiding
+   the delay. This is exposed in HSL as `cntl[4]` (static pivot
+   threshold) and in Ipopt as `ma57_block_size` / `ma57_pre_alloc`.
+   FERAL has NO static-pivot fallback in the panel — it always
+   delays. **This is almost certainly the difference.**
+
+3. **MA57's amalgamation may produce a different elimination tree.**
+   FERAL uses METIS-ND + supernode-amalgamation; MA57 uses AMD by
+   default in Ipopt. AMD often produces a fatter tree with a
+   smaller root separator on saddle-point problems. With a smaller
+   root, even worst-case delay accumulation doesn't balloon the
+   root supernode to 14k columns.
+
+4. **MA57 may inline scaling differently.** Ipopt's MA57 driver
+   runs MC64 scaling by default unless explicitly disabled.
+   FERAL's summary says `scaling=Applied` so we are scaling, but
+   it's worth checking whether the scaling is producing values
+   that escape the threshold on iterate 0009.
+
+The combination of (2) + (3) is the most credible answer: MA57's
+static-pivoting fallback prevents the cascade, AND its AMD-based
+ordering produces a smaller root separator that bounds worst-case
+work even if some pivots do delay.
+
+=== Action items (not in this turn) ===
+
+a. Check whether ripopt's Ipopt+FERAL run with this matrix was
+   actually using `ScalingStrategy::Identity` (which would skip
+   MC64) — if so, scaling differences alone could explain a
+   lot.
+b. Implement a static-pivoting fallback: when a node's
+   n_delayed_in exceeds some fraction of its ncol, switch
+   may_delay=false (perturb-and-accept) for the remaining
+   pivots in that node. This breaks the cascade at the cost of
+   slight residual that iterative refinement recovers.
+c. Try AMD vs METIS-ND on pinene_3200_0009. If AMD's root
+   separator is much smaller, that alone may bound the worst
+   case.
+d. Try `pivot_threshold = 1e-2` (the SSIDS canonical default
+   for MC64-scaled matrices) and see whether the delay count
+   drops — though this would change the inertia gate and needs
+   the corpus rerun.
+
+=== Conclusion on issue #8 ===
+
+The FMA opt-in path is technically correct and ready to ship as
+plumbing, but it is **not** the fix for issue #8. The Phase 4
+release (0.3.1) should be reframed: ship FMA as an opt-in for
+users who want cross-arch-tolerant FMA, with a clear note that it
+does not change the trailing-update dominant cost on iterates
+hitting the delay cascade. The real issue #8 fix is a static-
+pivoting fallback (or ordering change) to cap delay accumulation
+at the root.
+
+Profile and pivot-cliff diag saved:
+  dev/profiles/pinene_3200_0009.json.gz
+  src/bin/diag_pinene_0009_profile.rs
+  src/bin/diag_pinene_pivot_cliff.rs
+
+* 23:40 :issue8:issue43:static-pivot:landed:
+Implemented issue #43 — static-pivoting fallback. New
+`NumericParams.allow_delayed_pivots: bool` (default true) plumbed
+through both per-supernode `may_delay` sites in factorize.rs
+(lines 1764 + 1923):
+
+    let may_delay = !is_root[snode_idx] && params.allow_delayed_pivots;
+
+Exposed via `Solver::with_static_pivoting(on: bool)` builder
+(mirrors `with_fma`). FERAL analogue of MA57's `cntl[4]`.
+
+New diag binary `src/bin/diag_pinene_static_pivot.rs` factors a
+named iterate twice (static-pivot on/off) and reports factor
+wallclock, inertia vs sidecar oracle, total 2x2 / total
+delayed_in, and rel residual after `solve_sparse_refined`.
+
+Results on issue #8 motivator:
+
+  [pinene_3200_0008] n=127995 nnz=732976  oracle=(64000, 63995, 0)
+    [static-pivot ON ]  factor=  0.027s  solve=0.024s  inertia=(63998,63995,2) (ok=false)  rel_res=5.734e-5
+    [static-pivot OFF]  factor=  0.044s  solve=0.018s  inertia=(64000,63995,0) (ok=true)   rel_res=1.768e-14
+
+  [pinene_3200_0009] n=127995 nnz=732976  oracle=(64000, 63995, 0)
+    [static-pivot ON ]  factor=  0.028s  solve=0.024s  inertia=(63997,63994,4) (ok=false)  rel_res=4.485e-2
+    [static-pivot OFF]  factor= 88.076s  solve=0.259s  inertia=(64000,63995,0) (ok=true)   rel_res=3.267e-14
+
+Speed claim confirmed: 88.076s -> 0.028s on iterate 0009 (3146x
+faster). The cascade hypothesis is the right diagnosis — when
+delayed-pivot accumulation is the bottleneck, killing the cascade
+recovers ~all of the wallclock.
+
+Correctness caveat: naive static pivoting (force-accept on every
+threshold/Duff-Reid failure) sacrifices inertia and residual.
+On 0008 inertia leaks 2 false zeros; on 0009 it leaks 4 false
+zeros and rel residual is 4.5e-2 (vs 3.3e-14 with delayed
+pivoting). Iterative refinement at 4.5e-2 won't recover for
+typical IPM convergence tolerances.
+
+Conclusion: the static-pivoting mechanism is correct and the
+plumbing works as designed. But "drop in `with_static_pivoting(true)`
+to fix issue #8" is not viable on its own — it trades 87s for
+inertia loss. Two viable follow-ups:
+
+  1. Adaptive trigger: enable static pivoting only at supernodes
+     where `n_delayed_in / ncol > threshold` (e.g. >= 0.5). Top of
+     the etree absorbs the perturbation, leaves stay exact. This
+     matches MA57's behavior where `cntl[4]` typically only fires
+     on the trailing constraint block.
+  2. Outer regularization: at the IPM (ripopt) layer, when feral
+     reports the perturbed inertia, retry the linear system with
+     an inflated delta_c. The IPM filter line-search already
+     handles this, so the residual cap from static pivoting may
+     be acceptable as long as inertia is "close enough" for the
+     inertia-correction PD perturbation handler to escalate.
+
+Files touched this commit:
+- src/numeric/factorize.rs (field + may_delay AND)
+- src/numeric/solver.rs   (Solver::with_static_pivoting)
+- src/numeric/solve.rs    (test-module make_params closure cleanup)
+- src/dense/factor.rs     (unrelated: cargo fmt-only)
+- src/bin/diag_pinene_static_pivot.rs (new)
+- src/bin/bench_fma_phase3.rs (clippy: NumericParams { fma, ..default })
+- 27 other call-sites (test/bin) updated to populate the new field
+
+Build status: cargo build --tests --bins clean; cargo clippy
+--bins --tests --release -- -D warnings clean; cargo test
+--release: 240+ tests passing, no failures.

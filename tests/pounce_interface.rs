@@ -340,6 +340,7 @@ fn solver_identity_scaling() -> Solver {
         profiler: None,
         parallel_telemetry: None,
         fma: false,
+        allow_delayed_pivots: true,
     };
     Solver::with_params(np, SupernodeParams::default())
 }

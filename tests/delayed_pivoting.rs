@@ -355,6 +355,7 @@ fn delay_numeric_params() -> feral::numeric::factorize::NumericParams {
         profiler: None,
         parallel_telemetry: None,
         fma: false,
+        allow_delayed_pivots: true,
     }
 }
 

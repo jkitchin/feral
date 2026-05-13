@@ -78,6 +78,7 @@ fn ldlt_params() -> NumericParams {
         profiler: Some(Arc::new(Mutex::new(Profiler::new()))),
         parallel_telemetry: None,
         fma: false,
+        allow_delayed_pivots: true,
     }
 }
 

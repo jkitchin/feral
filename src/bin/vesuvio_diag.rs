@@ -127,6 +127,7 @@ fn run_one_method(csc: &CscMatrix, method: OrderingMethod, scaling: ScalingStrat
         profiler: None,
         parallel_telemetry: None,
         fma: false,
+        allow_delayed_pivots: true,
     };
     let scale_tag = match scaling {
         ScalingStrategy::InfNorm => "infnorm",
