@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-13T16:00:46Z
+Generated: 2026-05-13T17:00:25Z
 
 ## Latest Session
 File: dev/sessions/phase-2-baseline.md
@@ -59,25 +59,25 @@ Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
 
 ## Git Status
 ```
+1b087ac chore(dev): 2026-05-13 session artifacts — decisions, context, gitignore
+34b0854 bench(nlp): add 3-way Ipopt x {MUMPS, MA57, feral} NLP comparison + report
+cd8ec4d bench(ma57): add MA57 oracle and extend cross-solver comparison to 4-way
+e81efbd feat(capi): expose feral C ABI for Ipopt linkage; bump to 0.3.0
 be5a024 docs(small-front-perf): retrospective on #9/#11/#12/#13 model
-d3aa627 docs(issue-10): research-phase gate measurement; recommend closure
-d7267fe docs(session): 2026-05-13-02 — issue #9 Step 2 dispatch land
-d3f1132 feat(issue-9): Step 2 — wire 32×32 dispatch via do_*_update fast-paths
-1b94119 docs(session): session 2026-05-13-01 — Phase C land + issue #9 Step 3
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-4431a482ae44d88b)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-1f1f5ba8af0bd3da)
 
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok
 test test_gate_tiny_sparse_in ... ok
-test test_gate_boundary_n_16 ... ok
 test test_determinism_tiny ... ok
 test test_solve_parity_tiny_real_matrix ... ok
+test test_gate_boundary_n_16 ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -99,14 +99,14 @@ Loading matrices from data/benchmark-config.toml ... not found
 
 name                n   factor(μs)    solve(μs)        inertia
 --------------------------------------------------------------
-spd_10             10          173           27     (10, 0, 0)
-spd_50             50           88           12     (50, 0, 0)
-spd_100           100          361           16    (100, 0, 0)
-spd_200           200         1625           40    (200, 0, 0)
-kkt_10_3           13           10            1     (10, 3, 0)
-kkt_30_10          40           65            2    (30, 10, 0)
-kkt_50_15          65          146            5    (50, 15, 0)
-kkt_100_30        130          644           16   (100, 30, 0)
+spd_10             10          138           24     (10, 0, 0)
+spd_50             50           72            8     (50, 0, 0)
+spd_100           100          282           13    (100, 0, 0)
+spd_200           200         1622           45    (200, 0, 0)
+kkt_10_3           13            9            1     (10, 3, 0)
+kkt_30_10          40           71            2    (30, 10, 0)
+kkt_50_15          65          167            5    (50, 15, 0)
+kkt_100_30        130          740           16   (100, 30, 0)
 
 8 matrices benchmarked
 
@@ -146,21 +146,21 @@ PALMER1ENE                   17          0         17        1.22e-8
 DEVGLA2                      15          0         15        1.50e-7
 CERI651ALS                   15          0         15        4.31e-8
 MISTAKE                      11          0         11        1.33e-6
-DJTL                          7          0          7        5.33e-7
 ALLINITA                      7          0          7        5.43e-7
+DJTL                          7          0          7        5.33e-7
 SNAKE                         6          0          6        1.83e-9
 LSC2LS                        5          0          5        1.95e-8
 PALMER2E                      3          0          3        6.94e-9
-EQC                           3          0          3        8.12e-8
 HS118                         3          0          3        9.68e-8
-PALMER4E                      2          0          2        4.84e-9
+EQC                           3          0          3        8.12e-8
 PALMER3E                      2          0          2        3.36e-9
-ERRINBAR                      2          0          2        1.87e-4
 TRUSPYR2                      2          0          2        1.70e-8
-HATFLDFL                      2          0          2        1.56e-9
 ACOPP14                       2          2          0       6.35e-16
-HS13                          1          0          1        1.56e-9
-CERI651BLS                    1          0          1        2.12e-9
+ERRINBAR                      2          0          2        1.87e-4
+HATFLDFL                      2          0          2        1.56e-9
+PALMER4E                      2          0          2        4.84e-9
+BROWNBS                       1          0          1        2.11e-8
+LEVYMONE5                     1          0          1        7.46e-9
   ... and 14 more families
 
 Top 15 worst residuals:
@@ -199,16 +199,16 @@ SNAKE                         8          0          8        6.64e-9
 ALLINITA                      7          0          7        9.70e-7
 DJTL                          7          0          7        1.00e-6
 LSC2LS                        6          0          6        2.88e-8
-HS118                         3          0          3        6.52e-8
 EQC                           3          0          3        2.15e-7
+HS118                         3          0          3        6.52e-8
+TRUSPYR2                      2          0          2        1.24e-8
+CONGIGMZ                      2          0          2        1.76e-8
+ACOPP14                       2          2          0       3.25e-16
+HS114                         2          0          2        3.30e-8
 CERI651BLS                    2          0          2        2.28e-9
 ERRINBAR                      2          0          2        2.94e-4
-CONGIGMZ                      2          0          2        1.76e-8
-HS114                         2          0          2        3.30e-8
-ACOPP14                       2          2          0       3.25e-16
-TRUSPYR2                      2          0          2        1.24e-8
-HS13                          1          0          1        3.52e-9
-BROWNBS                       1          0          1        2.11e-8
+LEVYMONT5                     1          0          1        4.20e-8
+SIMPLLPB                      1          0          1        1.11e-9
   ... and 15 more families
 
 Top 15 worst residuals:
@@ -262,15 +262,15 @@ SNAKE                         6          0          6        6.64e-9
 LSC2LS                        5          0          5        2.88e-8
 EQC                           3          0          3        2.15e-7
 HS118                         3          0          3        9.68e-8
+ACOPP14                       2          2          0       6.35e-16
 TRUSPYR2                      2          0          2        1.70e-8
 ERRINBAR                      2          0          2        2.94e-4
-ACOPP14                       2          2          0       6.35e-16
-LEVYMONT5                     1          0          1        4.20e-8
-LEVYMONE5                     1          0          1        3.19e-8
-CONGIGMZ                      1          0          1        1.76e-8
-CERI651BLS                    1          0          1        2.13e-9
-PALMER3E                      1          0          1        3.36e-9
+FLETCHER                      1          0          1        3.63e-6
+PALMER4E                      1          0          1        3.30e-9
 TRO3X3                        1          0          1        1.35e-6
+LEVYMONE5                     1          0          1        3.19e-8
+PALMER3E                      1          0          1        3.36e-9
+LEVYMONT5                     1          0          1        4.20e-8
   ... and 10 more families
 
 Top 15 worst shared residuals:
@@ -302,16 +302,16 @@ CERI651ALS                    7          0          7        2.99e-9
 CERI651CLS                    6          0          6        3.41e-9
 PALMER1ENE                    5          0          5        1.24e-8
 SNAKE                         2          0          2        1.39e-9
+EXPFITNE                      1          0          1        1.39e-7
 CONGIGMZ                      1          0          1        4.65e-9
 ACOPP30                       1          1          0        2.06e-9
-EXPFITNE                      1          0          1        1.39e-7
-SIMPLLPB                      1          0          1        1.11e-9
 PALMER5A                      1          0          1        2.20e-9
-PALMER2E                      1          0          1        1.80e-9
 PFIT2                         1          0          1        3.55e-6
-HS114                         1          0          1        6.43e-9
-CERI651BLS                    1          0          1        2.28e-9
 PALMER1NE                     1          0          1        3.45e-9
+SIMPLLPB                      1          0          1        1.11e-9
+PALMER2E                      1          0          1        1.80e-9
+CERI651BLS                    1          0          1        2.28e-9
+HS114                         1          0          1        6.43e-9
 LSC2LS                        1          0          1        1.03e-9
 
 Top 25 worst sparse-only residuals (triage candidates):
@@ -324,8 +324,8 @@ PALMER1ENE_0110                  8      7.08e-9      (8, 0, 0)      (8, 0, 0)  t
 FBRAIN3LS_0732                   6      7.03e-9      (6, 0, 0)      (6, 0, 0)  true false
 HS114_0758                      21      6.43e-9    (10, 11, 0)    (10, 11, 0)  true false
 FBRAIN3LS_0844                   6      5.80e-9      (6, 0, 0)      (6, 0, 0)  true false
-CERI651DLS_0643                  7      5.25e-9      (7, 0, 0)      (7, 0, 0)  true false
 CERI651DLS_0642                  7      5.25e-9      (7, 0, 0)      (7, 0, 0)  true false
+CERI651DLS_0643                  7      5.25e-9      (7, 0, 0)      (7, 0, 0)  true false
 CONGIGMZ_0000                    8      4.65e-9      (3, 5, 0)      (3, 5, 0)  true false
 HS46_0376                        7      4.56e-9      (5, 2, 0)      (5, 2, 0)  true false
 FBRAIN3LS_0681                   6      3.76e-9      (6, 0, 0)      (6, 0, 0)  true false
