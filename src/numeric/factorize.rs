@@ -11,6 +11,17 @@ use crate::symbolic::SymbolicFactorization;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// Symbolic-arm gate for the cascade-break trigger
+/// (`NumericParams::cascade_break_ratio`). When the symbolic factor
+/// reports `symbolic.n < CASCADE_BREAK_MIN_N`, the trigger is
+/// guaranteed to be a no-op regardless of how it is configured —
+/// cascade-break savings only accumulate when some front can grow,
+/// via delay propagation, to several thousand columns, and the
+/// achievable expanded ncol is bounded above by `n`. Issue #15
+/// (2026-05-14). See
+/// `dev/research/issue-15-cascade-break-symbolic-arm.md`.
+pub const CASCADE_BREAK_MIN_N: usize = 4096;
+
 /// Numeric-phase parameters bundle.
 ///
 /// Groups the dense Bunch-Kaufman pivot configuration with the
@@ -118,6 +129,14 @@ pub struct NumericParams {
     /// columns") catches the cascade signature without firing on
     /// light-delay nodes — calibrate against the corpus before
     /// promoting to default.
+    ///
+    /// Symbolic-arm gate (issue #15, 2026-05-14): the trigger is
+    /// additionally guarded by `symbolic.n >= CASCADE_BREAK_MIN_N`,
+    /// because cascade-break savings only accumulate when some
+    /// front can grow (via delay propagation) to several thousand
+    /// columns — bounded above by `n`. Below the threshold the
+    /// trigger is a no-op even when armed. See
+    /// `dev/research/issue-15-cascade-break-symbolic-arm.md`.
     pub cascade_break_ratio: Option<f64>,
 
     /// Per-pivot perturbation floor for cascade-break supernodes.
@@ -1818,8 +1837,19 @@ fn factor_one_supernode(
     // with a locally-overridden ForceAccept policy. Absorbs the
     // perturbation here instead of pushing 10^4-10^5 delays into
     // the dense root front. See issue #8.
+    //
+    // Symbolic-arm gate (issue #15): require symbolic.n >=
+    // CASCADE_BREAK_MIN_N. Below the threshold no front can grow
+    // large enough (via delay propagation) for cascade-break savings
+    // to outweigh the IPM perturbation tax — the gate makes the
+    // trigger a no-op for small problems whether or not it was armed.
     let cascade_break = match params.cascade_break_ratio {
-        Some(r) if !is_root[snode_idx] && params.allow_delayed_pivots && expanded_ncol > 0 => {
+        Some(r)
+            if !is_root[snode_idx]
+                && params.allow_delayed_pivots
+                && expanded_ncol > 0
+                && symbolic.n >= CASCADE_BREAK_MIN_N =>
+        {
             (n_delayed_in as f64) / (expanded_ncol as f64) >= r
         }
         _ => false,

@@ -4,6 +4,23 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — Symbolic-arm gate on cascade-break trigger (issue #15)
+
+The cascade-break trigger (`NumericParams::cascade_break_ratio`)
+now requires `symbolic.n >= CASCADE_BREAK_MIN_N` (=4096) to fire.
+Below the threshold the trigger is a guaranteed no-op regardless
+of how aggressively it is configured. Cascade-break savings only
+accumulate when some front can grow, via delay propagation, to
+several thousand columns — and `n` is an upper bound on
+achievable expanded ncol. Issue #15 reported a 14× regression on
+qcqp1000-1nc (n=1154) attributed to `Some(0.5)` firing
+aggressively; per-iterate data shows the trigger actually never
+fires on qcqp because `n_delayed_in = 0` everywhere. The gate
+makes the trigger a structural no-op on small problems while
+preserving the cascade-break wins on marine_1600 / pinene_3200
+(both n > 70 000). See
+`dev/research/issue-15-cascade-break-symbolic-arm.md`.
+
 ## [0.3.0] - 2026-05-13
 
 ### Added — Feral C ABI for Ipopt linkage (`feral::capi`)
