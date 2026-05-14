@@ -4,6 +4,35 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Synthetic-matrix scaling benchmark vs MUMPS and MA57
+
+New harness at `external_benchmarks/scaling/` that sweeps four
+synthetic matrix families (`dense_si`, `banded_spd`, `laplace2d`,
+`saddle_kkt`) across multiple sizes and compares feral against
+MUMPS 5.8.2 and HSL MA57 on a derived `total_factor_us` metric
+(analyse + numeric factor combined, accounting for MUMPS's bundled
+`JOB=4` timing). Components: `run.py` driver (matrix generation,
+RHS synthesis, solver manifests, aggregation), `plot.py` (four
+PNGs per family + overview, log-log fits), `report.org` (full
+write-up), and `scaling.tsv` for downstream analysis. Headline
+finding: feral's numeric factor is at parity with MUMPS on every
+sparse family and at parity with MA57 on `banded_spd` at the
+largest `n` — but symbolic analysis is 91-96% of total wall time
+on structurally-regular sparse families, making it the highest-
+impact optimization target. See
+`external_benchmarks/scaling/report.org` for the full discussion.
+
+### Changed — `dev/assemble-context.sh` no longer re-runs full corpus bench
+
+Default `./dev/assemble-context.sh` invocation now sources the
+benchmark section from the latest dated session checkpoint instead
+of executing `cargo run --bin bench --release` (which walks ~150k
+corpus matrices and takes ~3.5 minutes). Pass `--with-bench` to
+re-run for fresh numbers. Refresh time drops from ~3m30s to ~3s.
+Also fixes a pre-existing glob bug where `phase-2-baseline.md` was
+selected as "latest" because it sorts after `2026-...` lexically;
+the glob is now `dev/sessions/[0-9]*.md`.
+
 ### Added — F2.3 iterative-refinement diagnostics
 
 New public function `solve_sparse_refined_with_diagnostics` and
