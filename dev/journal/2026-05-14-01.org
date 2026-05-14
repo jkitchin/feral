@@ -1,0 +1,76 @@
+#+TITLE: Journal 2026-05-14-01
+
+* 09:30 :f2.3:condition-est:refinement:
+F2.0/F2.1/F2.2 audit showed the condition estimator and corpus
+parity harness were already landed in prior sessions:
+- =src/numeric/condition.rs= (322 lines, 9 tests passing).
+- =Solver::estimate_condition_1norm= at =src/numeric/solver.rs:392=.
+- =src/bin/diag_cond_parity.rs= walks the corpus, computes
+  =kappa_feral / cond2= statistics, and reports geomean+percentiles
+  without any failing gate.
+- =external_benchmarks/mumps_oracle/mumps_bench.F= emits the full
+  =RINFOG(4..11)= conditioning block with the =ICNTL(11)=1= fix.
+
+Only F2.3 ("emit kappa alongside residual at each refinement
+step") was outstanding.
+
+* 09:55 :f2.3:design:
+Decision: kappa_1 is a property of (A, factor), not of the
+refinement iterate. Computing it once per refinement run (3-5
+extra solves) is correct; computing it per step would multiply
+that cost by the iteration count for zero new information.
+
+Per-step diagnostic is the Skeel forward-error bound
+=kappa_1_est * relative_residual= — this *does* change per step
+because relative_residual drops as refinement progresses.
+
+API shape: new public function =solve_sparse_refined_with_diagnostics=
+mirroring =solve_sparse_refined= exactly in control flow, returning
+=(Vec<f64>, RefinementDiagnostics)=. Refactored the existing
+function into a private =solve_sparse_refined_core(..., with_diagnostics: bool)=
+so both surfaces share one implementation. F2.3 mandate is "no
+behavior change" — same iterate must come out either way.
+
+* 10:35 :f2.3:tests:
+Six tests added to =src/numeric/solve.rs= test module:
+1. =diagnostics_match_non_diagnostic_solution= — bit-exact iterate
+   parity between the diagnostic and plain variants (KKT 3x3).
+2. =diagnostics_populate_well_conditioned= — fields populated on
+   tridiagonal SPD; returned_step points to best-residual step.
+3. =diagnostics_kappa_matches_standalone= — diag.kappa_1_est is
+   bit-exactly the value =estimate_condition_1norm(&m, &factors)=
+   returns (Hilbert n=6 used; kappa > 1e4).
+4. =diagnostics_forward_error_bound_field= — verifies the identity
+   =forward_error_bound[k] = kappa_1_est * relative_residual[k]=.
+5. =diagnostics_n_zero= — empty matrix returns empty solution and
+   zero anorm/kappa (skip kappa computation).
+6. =diagnostics_dim_mismatch_rejected= — wrong-length RHS error.
+
+All six pass. Full =cargo test --lib= = 246/246. Clippy clean.
+
+* 11:00 :f2.2:audit:
+Confirmed =diag_cond_parity= is correctly *directional*:
+- No assertion / failing band — always reports and exits 0.
+- Header docstring lines 9-18 explicitly explain the
+  Arioli-Demmel-Duff ∞-norm vs Hager-Higham 1-norm operator
+  mismatch and the resulting impossibility of tight parity.
+- Reports geomean, percentiles, and extreme |ln(ratio)| values
+  on both =cond2= and =max(cond1, cond2)= so triage can see the
+  spread.
+
+Minor staleness: the docstring mentions a "[0.1, 10.0] band"
+target, but the plan's updated empirical observation is
+=geomean(kappa_feral / cond2) ≈ 4.244e10= over 165959 corpus
+matrices (2026-04-27-09 journal). The "[0.1, 10.0]" framing is
+overoptimistic by ~10 orders of magnitude. Not a code defect —
+the tool doesn't enforce it — but worth a one-line clarification
+in a follow-up.
+
+* 11:10 :f2.3:exports:
+Re-exported from =src/lib.rs= for downstream consumers
+(ripopt diagnostic logging):
+  =solve_sparse_refined_with_diagnostics=,
+  =RefinementDiagnostics=,
+  =RefinementStep=.
+
+Build clean.
