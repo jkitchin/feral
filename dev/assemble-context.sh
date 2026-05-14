@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
 # Assemble dev/context.md from current project state.
 # Budget: ~350 lines. Truncate lower-priority items if needed.
+#
+# Pass --with-bench to re-run the full corpus benchmark (~3 minutes).
+# By default the benchmark section is sourced from the latest session
+# checkpoint instead, making the refresh complete in seconds.
 set -euo pipefail
 
 OUT="dev/context.md"
 BUDGET=350
+WITH_BENCH=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-bench) WITH_BENCH=1 ;;
+        *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
 
 {
 echo "# FERAL Context (auto-generated)"
@@ -14,7 +25,7 @@ echo ""
 
 # Latest session checkpoint
 echo "## Latest Session"
-LATEST_SESSION=$(ls -1 dev/sessions/*.md 2>/dev/null | sort | tail -1 || true)
+LATEST_SESSION=$(ls -1 dev/sessions/[0-9]*.md 2>/dev/null | sort | tail -1 || true)
 if [ -n "${LATEST_SESSION:-}" ]; then
     echo "File: $LATEST_SESSION"
     echo '```'
@@ -42,7 +53,19 @@ echo ""
 # Benchmark output
 echo "## Benchmark"
 echo '```'
-cargo run --bin bench --release 2>&1 | grep -v "^   Compiling\|^   Downloading\|^    Finished\|^     Running\|^     Locking\|^ Downloading"
+if [ "$WITH_BENCH" -eq 1 ]; then
+    cargo run --bin bench --release 2>&1 | grep -v "^   Compiling\|^   Downloading\|^    Finished\|^     Running\|^     Locking\|^ Downloading"
+else
+    # Source bench results from the latest session checkpoint to avoid
+    # the ~3 minute corpus walk. Re-run with --with-bench for fresh numbers.
+    if [ -n "${LATEST_SESSION:-}" ] && grep -q '^## Benchmark Results' "$LATEST_SESSION"; then
+        echo "(skipped: pass --with-bench to re-run; sourced from $LATEST_SESSION)"
+        echo ""
+        awk '/^## Benchmark Results/{flag=1; next} /^## /{flag=0} flag' "$LATEST_SESSION" | grep -v '^```$'
+    else
+        echo "(skipped: pass --with-bench to re-run; no session checkpoint with bench)"
+    fi
+fi
 echo '```'
 echo ""
 

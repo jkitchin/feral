@@ -1,83 +1,83 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-13T17:00:25Z
+Generated: 2026-05-14T20:42:04Z
 
 ## Latest Session
-File: dev/sessions/phase-2-baseline.md
+File: dev/sessions/2026-05-14-02.md
 ```
-# Phase 2 Performance Baseline Report
+# Session 2026-05-14-02
 
-**Date:** 2026-04-14
-**Head commit under test:** `e08c7a1` (Triage: ERRINBAR_0824 and ACOPP30_0004)
-**Corpus:** 154588 KKT matrices in `data/matrices/kkt/` (dense-eligible: 154481
-at `n <= 1000`; 107 skipped at `n > 1000`)
-**Oracles:** canonical Fortran MUMPS 5.8.2 and SPRAL SSIDS (via
-`external_benchmarks/{mumps,ssids}_oracle`), per-matrix `factor_us` /
-`solve_us` in `*.mumps.json` / `*.ssids.json` sidecars.
+## Bench vs. prior session
 
-This is the Phase 2.1.8 baseline required by
-`dev/plans/phase-2-planning.md` §2.1.8. Every later optimization in Phase
-2.4 (dense perf) and Phase 2.5 (sparse perf) is measured against these
-numbers.
+Phase 2.8.1 corpus bench not re-run this session — work was on
+external benchmark infrastructure, not on the multifrontal hot
+path. The most recent numbers are from session `2026-05-14-01`
+(both dense and sparse Phase 2.8.1 gates PASS, p90 ratios in
+[1.32, 1.70] dense / [1.56, 1.56] sparse). No code in `src/`
+that the corpus bench exercises changed this session.
 
-## Harness additions (Phase 2.1.7)
+## Goal
 
-`src/bin/bench.rs` gained:
+User asked first about the `assemble-context.sh` hang from the
+prior session, then requested a synthetic-matrix scaling
+benchmark comparing feral, MUMPS, and MA57, with plots and an
+org-mode write-up. Scope:
 
-- `OracleTiming` + `read_oracle_timing` — parses the `factor_us` /
-  `solve_us` fields out of oracle JSON sidecars.
-- `KktEntry::{mumps_timing, ssids_timing}` — populated in `load_kkt_dir`
-  by `with_extension("mumps.json")` / `with_extension("ssids.json")`;
-  missing files leave the fields as `None`.
-- `MatrixTiming` — per-matrix feral factor+solve μs, collected in both
-  the dense and sparse loops.
-- Sparse-loop `Instant::now()` calls — the old sparse loop reported
-  inertia and residual but not timings; now records `sp_factor_us`
-  (symbolic + numeric combined, matching the semantics of MUMPS's and
-  SSIDS's single `factor_us` field) and `sp_solve_us`.
-- `print_perf_comparison` — joins feral timings against
-  `{mumps,ssids}_timing`, emits overall ratio distribution
-  (geomean, p50, p90, p99, max), per-family geomean, and top-10 worst
-  factor-ratio matrices vs MUMPS.
+1. Diagnose and fix the `assemble-context.sh` slowness (the
+   "hang" was actually the full corpus bench running for ~3.5
+   minutes).
+2. Scaffold a scaling benchmark at `external_benchmarks/scaling/`
+   covering four matrix families (dense SI, banded SPD, 2D
+   Laplacian, saddle-point KKT) across multiple sizes.
+3. Generate plots (log-log factor time, ratio vs MUMPS, residual
+   quality, four-panel overview).
+4. Produce an org-mode report distilling the actionable
+   improvement targets vs. fundamental constraints visible in
+   the data.
 
-Ratio clamp: both sides use `.max(1) μs` so that sub-microsecond
-matrices at the clock-resolution floor produce ratio = 1.0 rather than
-collapsing the log-space geomean.
+## Accomplished
 
-## Overall results — ratio = feral_μs / oracle_μs
+### 1. `dev/assemble-context.sh` — bench is now opt-in
 
-Lower ratio = feral is faster. Ratio < 1.0 means feral beats the oracle.
+- Added `--with-bench` flag (default: skip). Default mode
+  sources the `## Benchmark Results` section from the latest
+  dated session checkpoint instead of re-running
+  `cargo run --bin bench --release`.
+- Fixed a pre-existing glob bug: `ls dev/sessions/*.md | sort |
+  tail -1` returned `phase-2-baseline.md` because it sorts
+  after `2026-...` lexicographically. The glob is now
+  `dev/sessions/[0-9]*.md` which restricts to dated sessions.
+- Result: refresh time drops from **3m32s → 3.25s** for the
+  default case. `--with-bench` recovers the original behaviour.
+- Verified end-to-end: `./dev/assemble-context.sh` writes a
+  352-line `dev/context.md` with the bench section correctly
+  sourced from `dev/sessions/2026-05-14-01.md`.
 
-### Dense path (`factor_single_front` + `solve_refined`), 154481 matrices
+### 2. Scaling benchmark — `external_benchmarks/scaling/`
 
-| metric        | count  | geomean |   p50 |   p90 |   p99 |      max |
-|---------------|-------:|--------:|------:|------:|------:|---------:|
-| factor/MUMPS  | 153472 |    0.23 |  0.11 |  2.27 | 28.99 |   296.45 |
-| solve/MUMPS   | 153472 |    0.37 |  0.25 |  2.00 | 23.40 |   523.76 |
-| factor/SSIDS  | 154393 |    0.01 |  0.00 |  0.34 |  8.04 |    48.23 |
 ```
 
 ## Git Status
 ```
-1b087ac chore(dev): 2026-05-13 session artifacts — decisions, context, gitignore
-34b0854 bench(nlp): add 3-way Ipopt x {MUMPS, MA57, feral} NLP comparison + report
-cd8ec4d bench(ma57): add MA57 oracle and extend cross-solver comparison to 4-way
-e81efbd feat(capi): expose feral C ABI for Ipopt linkage; bump to 0.3.0
-be5a024 docs(small-front-perf): retrospective on #9/#11/#12/#13 model
+7b2a061 chore(session): 2026-05-14-01 -- F2.3 diagnostics + cond-parity audit
+c6eee1f feat(F2.3): RefinementDiagnostics for iterative refinement
+aca9f3d fix(issue-15): skip cascade-arm gate test when corpus missing
+b19b94c journal(2026-05-13-04): cascade-break ratio distribution + symbolic-arm gate
+c7d2048 diag(issue-15): per-family probes for cascade-break gate calibration
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-1f1f5ba8af0bd3da)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-e512e6534a50691d)
 
 running 5 tests
-test test_gate_just_outside_n_tiny ... ok
 test test_gate_tiny_sparse_in ... ok
+test test_gate_just_outside_n_tiny ... ok
+test test_gate_boundary_n_16 ... ok
 test test_determinism_tiny ... ok
 test test_solve_parity_tiny_real_matrix ... ok
-test test_gate_boundary_n_16 ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -92,261 +92,211 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 ## Benchmark
 ```
-FERAL benchmark harness
-  ordering: default (symbolic_factorize heuristic)
-  scaling: default (SupernodeParams::default)
-Loading matrices from data/benchmark-config.toml ... not found
+(skipped: pass --with-bench to re-run; no session checkpoint with bench)
+```
 
-name                n   factor(μs)    solve(μs)        inertia
---------------------------------------------------------------
-spd_10             10          138           24     (10, 0, 0)
-spd_50             50           72            8     (50, 0, 0)
-spd_100           100          282           13    (100, 0, 0)
-spd_200           200         1622           45    (200, 0, 0)
-kkt_10_3           13            9            1     (10, 3, 0)
-kkt_30_10          40           71            2    (30, 10, 0)
-kkt_50_15          65          167            5    (50, 15, 0)
-kkt_100_30        130          740           16   (100, 30, 0)
+## Recent Decisions
+**Why the collapse:**
 
-8 matrices benchmarked
+1. The C ABI is small (7 functions, ~250 lines) and tied
+   1:1 to types already public in the core crate
+   (`CscMatrix`, `Solver`, `FactorStatus`). A separate
+   workspace member would have re-exported these or
+   wrapped them with no added isolation.
+2. Single `cargo build` produces both the rlib for Rust
+   consumers and the staticlib for the C++ shim — no
+   second crate to coordinate. Pure-Rust consumers
+   ignore the staticlib artifact.
+3. The FFI safety surface is still localized to one file
+   (`src/capi.rs`) with a clear module boundary. The
+   "audit FFI in one place" property the prior decision
+   wanted is preserved.
 
-  SKIP heart6_iter_a (no .json sidecar)
-  SKIP heart6_iter_a_rhs (no .json sidecar)
-  SKIP heart6_iter_b (no .json sidecar)
-  SKIP heart6_iter_b_rhs (no .json sidecar)
-  SKIP heart6_iter_c (no .json sidecar)
-  SKIP heart6_iter_c_rhs (no .json sidecar)
-Loading KKT matrices from data/matrices/kkt ... 156927 matrices loaded
+**What's *not* changed:**
 
-156927 KKT matrices total
+- The CLAUDE.md "pure Rust core, zero non-Rust deps"
+  constraint scope clarification from the prior entry
+  still stands: feral exposing a C ABI is not the same
+  as feral consuming a non-Rust dependency.
+- The `feral-ipopt-shim/` in-tree-during-bring-up
+  decision still stands.
 
-KKT summary: 156927 matrices (154481 dense-eligible n <= 1000, 107 skipped n > 1000, 2339 parse-skipped)
-  Inertia match: 154428/154481 (100.0%)
-  Residual pass: 154207/154481 (99.8%)
-  Parse-skipped: 2339
-  Worst residual: 1.87e-4 (ERRINBAR_0824)
+**References.**
+- `src/capi.rs` (7 `extern "C"` functions, status codes).
+- `Cargo.toml:39-45` (lib crate-type).
+- `src/lib.rs` (`pub mod capi;`).
+- `feral-ipopt-shim/` (consumer, in-tree).
 
---- Sparse solver validation ---
-Sparse solver: 154588/156927 total
-  Inertia match vs MUMPS: 154545/154588 (100.0%)
-  Residual pass: 154250/154588 (99.8%)
-  Parse-skipped: 2339
-  Worst residual: 2.94e-4 (ERRINBAR_0824)
+## Recent Tried-and-Rejected
+  on the no-swap branch are already eliminated.
+- The 32×32 SIMD body (`block_ldlt32`, landed `d3f1132`
+  2026-05-13) puts trailing-update FLOPs for the dominant CHAINWOO
+  front shape through a quad pulp dispatch. The dispatch at
+  `factor.rs:1189-1193` routes `nrow == ncol == 32` fronts to
+  `factor_block32` before the panel path is reached.
 
---- Dense failure analysis (320 failures) ---
+**Decision.** Do not implement APP. Recorded in `dev/decisions.md`
+2026-05-13. Full analysis in `dev/research/dense-app-path.md`.
 
-family                    total    inertia   residual      worst_res
-FBRAIN3LS                    48          4         48        2.82e-7
-ACOPP30                      43         43          0       3.02e-14
-CERI651DLS                   39          1         39        7.06e-8
-HS46                         27          0         27        7.51e-8
-PFIT2                        23          0         23        5.39e-6
-CERI651CLS                   20          2         20        2.06e-7
-PALMER1ENE                   17          0         17        1.22e-8
-DEVGLA2                      15          0         15        1.50e-7
-CERI651ALS                   15          0         15        4.31e-8
-MISTAKE                      11          0         11        1.33e-6
-ALLINITA                      7          0          7        5.43e-7
-DJTL                          7          0          7        5.33e-7
-SNAKE                         6          0          6        1.83e-9
-LSC2LS                        5          0          5        1.95e-8
-PALMER2E                      3          0          3        6.94e-9
-HS118                         3          0          3        9.68e-8
-EQC                           3          0          3        8.12e-8
-PALMER3E                      2          0          2        3.36e-9
-TRUSPYR2                      2          0          2        1.70e-8
-ACOPP14                       2          2          0       6.35e-16
-ERRINBAR                      2          0          2        1.87e-4
-HATFLDFL                      2          0          2        1.56e-9
-PALMER4E                      2          0          2        4.84e-9
-BROWNBS                       1          0          1        2.11e-8
-LEVYMONE5                     1          0          1        7.46e-9
-  ... and 14 more families
+**Lesson.** Same as the 2026-05-12 (c) BLAS-3 quad parking: the
+session-checkpoint "Next session should" list is not a substitute
+for re-measuring the gate. The previous session
+(`dev/sessions/2026-05-13-02.md`) advanced #10 as the next target
+on the strength of #9 having landed, without re-running
+`diag_supernode_cost`. One binary run was the difference between
+implementing dead code and recording a clean closure.
 
-Top 15 worst residuals:
-name                             n     residual       expected         actual
-ERRINBAR_0824                   27      1.87e-4     (18, 9, 0)     (18, 9, 0)
-PRICE4_0002                      2      7.74e-6      (2, 0, 0)      (2, 0, 0)
-PFIT2_0248                       6      5.39e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0548                       6      3.66e-6      (3, 3, 0)      (3, 3, 0)
-FLETCHER_0002                   16      3.63e-6     (12, 4, 0)     (12, 4, 0)
-PFIT2_0340                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0338                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0339                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0299                       6      1.37e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0297                       6      1.37e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0298                       6      1.37e-6      (3, 3, 0)      (3, 3, 0)
-MISTAKE_0100                    22      1.33e-6     (9, 13, 0)     (9, 13, 0)
-TRO3X3_0637                     43      9.07e-7    (30, 13, 0)    (30, 13, 0)
-PFIT2_0390                       6      6.86e-7      (3, 3, 0)      (3, 3, 0)
-PFIT2_0545                       6      6.76e-7      (3, 3, 0)      (3, 3, 0)
+References: `dev/research/dense-app-path.md`,
+`dev/decisions.md` 2026-05-13 entry, issue #10 thread.
 
---- Sparse failure analysis (377 failures) ---
+## Source Files
+```
+src/bin/alloc_probe.rs
+src/bin/bench_fma_phase3.rs
+src/bin/bench_issue8.rs
+src/bin/bench_one_matrix.rs
+src/bin/bench_orderings.rs
+src/bin/bench_solver_corpus.rs
+src/bin/bench_solver_reuse.rs
+src/bin/bench.rs
+src/bin/blas3_prototype.rs
+src/bin/d3_probe.rs
+src/bin/d4_probe.rs
+src/bin/diag_acopr.rs
+src/bin/diag_acopr14.rs
+src/bin/diag_amalgamation.rs
+src/bin/diag_amd_substages.rs
+src/bin/diag_amf_vs_amd.rs
+src/bin/diag_cascade_default_evidence.rs
+src/bin/diag_cascade_ratio_distribution.rs
+src/bin/diag_chainwoo_profile.rs
+src/bin/diag_chainwoo.rs
+src/bin/diag_compress_costbenefit.rs
+src/bin/diag_compress_profile.rs
+src/bin/diag_compression_bench.rs
+src/bin/diag_cond_parity.rs
+src/bin/diag_dense_tail.rs
+src/bin/diag_etree_shape.rs
+src/bin/diag_factor_nnz_accounting.rs
+src/bin/diag_fill_parity.rs
+src/bin/diag_fill_tail.rs
+src/bin/diag_inertia_mismatch.rs
+src/bin/diag_leaf_profile.rs
+src/bin/diag_max_ncol.rs
+src/bin/diag_mc64_cycles.rs
+src/bin/diag_mittelmann.rs
+src/bin/diag_orbit2_quotient.rs
+src/bin/diag_ordering_race.rs
+src/bin/diag_par_firstdiff.rs
+src/bin/diag_par_frontal_hash.rs
+src/bin/diag_par_repeat.rs
+src/bin/diag_parent_unique.rs
+src/bin/diag_phase_b_nemin_sweep.rs
+src/bin/diag_pinene_0009_profile.rs
+src/bin/diag_pinene_amd.rs
+src/bin/diag_pinene_pivot_cliff.rs
+src/bin/diag_pinene_static_pivot.rs
+src/bin/diag_poisson_kkt.rs
+src/bin/diag_qcqp_knobs.rs
+src/bin/diag_qcqp_profile.rs
+src/bin/diag_schur_parity.rs
+src/bin/diag_small_leaf_gate.rs
+src/bin/diag_small_leaf.rs
+src/bin/diag_sparse_memory.rs
+src/bin/diag_split_tail.rs
+src/bin/diag_strategy_compare.rs
+src/bin/diag_supernode_cost.rs
+src/bin/diag_swopf_w22x2.rs
+src/bin/diag_symbolic_stages.rs
+src/bin/dump_diff.rs
+src/bin/hs85_diag.rs
+src/bin/parallel_corpus_parity.rs
+src/bin/polak6_diag.rs
+src/bin/policy4_diag.rs
+src/bin/probe_deltac_sensitivity.rs
+src/bin/probe_panel_attribution.rs
+src/bin/produce_dense_schur.rs
+src/bin/profile_hot.rs
+src/bin/profile_sparse.rs
+src/bin/profile_supernode_distribution.rs
+src/bin/solve_microbench.rs
+src/bin/vesuvio_diag.rs
+src/capi.rs
+src/dense/block_ldlt32.rs
+src/dense/equilibrate.rs
+src/dense/factor.rs
+src/dense/matrix.rs
+src/dense/mod.rs
+src/dense/rook.rs
+src/dense/schur_kernel.rs
+src/dense/solve.rs
+src/error.rs
+src/inertia.rs
+src/io/mod.rs
+src/io/mtx.rs
+src/io/sidecar.rs
+src/lib.rs
+src/numeric/condition.rs
+src/numeric/factorize.rs
+src/numeric/mod.rs
+src/numeric/solve.rs
+src/numeric/solver.rs
+src/ordering/amd.rs
+src/ordering/elimination_tree.rs
+src/ordering/mod.rs
+src/ordering/postorder.rs
+src/ordering/schur.rs
+src/scaling/hungarian.rs
+src/scaling/infnorm.rs
+src/scaling/mc64.rs
+src/scaling/mod.rs
+src/sparse/csc.rs
+src/sparse/mod.rs
+src/symbolic/column_counts.rs
+src/symbolic/ldlt_compress.rs
+src/symbolic/mod.rs
+src/symbolic/profiler.rs
+src/symbolic/small_leaf.rs
+src/symbolic/supernode.rs
+```
 
-family                    total    inertia   residual      worst_res
-FBRAIN3LS                    57          2         57        6.09e-7
-CERI651DLS                   46          1         46        8.88e-8
-HS46                         43          0         43        9.26e-8
-ACOPP30                      42         36          6        6.62e-6
-CERI651CLS                   26          2         25        2.41e-7
-PFIT2                        24          0         24        7.46e-6
-CERI651ALS                   20          0         20        1.13e-7
-PALMER1ENE                   18          0         18        1.56e-8
-DEVGLA2                      15          0         15        7.45e-7
-HATFLDFL                     12          0         12        3.36e-9
-MISTAKE                      11          0         11        7.29e-7
-SNAKE                         8          0          8        6.64e-9
-ALLINITA                      7          0          7        9.70e-7
-DJTL                          7          0          7        1.00e-6
-LSC2LS                        6          0          6        2.88e-8
-EQC                           3          0          3        2.15e-7
-HS118                         3          0          3        6.52e-8
-TRUSPYR2                      2          0          2        1.24e-8
-CONGIGMZ                      2          0          2        1.76e-8
-ACOPP14                       2          2          0       3.25e-16
-HS114                         2          0          2        3.30e-8
-CERI651BLS                    2          0          2        2.28e-9
-ERRINBAR                      2          0          2        2.94e-4
-LEVYMONT5                     1          0          1        4.20e-8
-SIMPLLPB                      1          0          1        1.11e-9
-  ... and 15 more families
-
-Top 15 worst residuals:
-name                             n     residual       expected         actual
-ERRINBAR_0824                   27      2.94e-4     (18, 9, 0)     (18, 9, 0)
-PRICE4_0002                      2      7.74e-6      (2, 0, 0)      (2, 0, 0)
-PFIT2_0297                       6      7.46e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0298                       6      7.46e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0299                       6      7.46e-6      (3, 3, 0)      (3, 3, 0)
-ACOPP30_0067                   209      6.62e-6   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0064                   209      5.75e-6   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0066                   209      5.45e-6   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0065                   209      5.42e-6   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0063                   209      4.93e-6   (72, 137, 0)   (72, 137, 0)
-FLETCHER_0002                   16      3.63e-6     (12, 4, 0)     (12, 4, 0)
-PFIT2_0300                       6      3.55e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0327                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0328                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0329                       6      2.71e-6      (3, 3, 0)      (3, 3, 0)
-
---- Dense ∩ Sparse failure overlap ---
-Failed in BOTH dense and sparse:  298
-Failed in dense only:             22
-Failed in sparse only:            79
-
-Shared failure mode breakdown:
-  Inertia mismatch on BOTH paths:            42
-  Residual-only fail on BOTH paths:         248
-  Mixed (one inertia, other residual):        8
-
-Shared failure size class breakdown:
-  n <=  100:     255
-  n <= 1000:      43
-  n >  1000:       0
-
-Top 25 families in shared failures:
-family                    total    inertia   residual      worst_res
-FBRAIN3LS                    45          2         41        6.09e-7
-ACOPP30                      41         35          0        6.62e-6
-CERI651DLS                   37          1         36        8.88e-8
-HS46                         27          0         27        9.26e-8
-PFIT2                        23          0         23        7.46e-6
-CERI651CLS                   20          2         18        2.41e-7
-DEVGLA2                      15          0         15        7.45e-7
-CERI651ALS                   13          0         13        1.13e-7
-PALMER1ENE                   13          0         13        1.56e-8
-MISTAKE                      11          0         11        1.33e-6
-ALLINITA                      7          0          7        9.70e-7
-DJTL                          7          0          7        1.00e-6
-SNAKE                         6          0          6        6.64e-9
-LSC2LS                        5          0          5        2.88e-8
-EQC                           3          0          3        2.15e-7
-HS118                         3          0          3        9.68e-8
-ACOPP14                       2          2          0       6.35e-16
-TRUSPYR2                      2          0          2        1.70e-8
-ERRINBAR                      2          0          2        2.94e-4
-FLETCHER                      1          0          1        3.63e-6
-PALMER4E                      1          0          1        3.30e-9
-TRO3X3                        1          0          1        1.35e-6
-LEVYMONE5                     1          0          1        3.19e-8
-PALMER3E                      1          0          1        3.36e-9
-LEVYMONT5                     1          0          1        4.20e-8
-  ... and 10 more families
-
-Top 15 worst shared residuals:
-name                             n    dense_res   sparse_res       expected     actual(sp)
-ERRINBAR_0824                   27      1.87e-4      2.94e-4     (18, 9, 0)     (18, 9, 0)
-PRICE4_0002                      2      7.74e-6      7.74e-6      (2, 0, 0)      (2, 0, 0)
-PFIT2_0297                       6      1.37e-6      7.46e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0298                       6      1.37e-6      7.46e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0299                       6      1.37e-6      7.46e-6      (3, 3, 0)      (3, 3, 0)
-ACOPP30_0067                   209     2.18e-14      6.62e-6   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0064                   209     2.14e-14      5.75e-6   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0066                   209     1.28e-14      5.45e-6   (72, 137, 0)   (72, 137, 0)
-ACOPP30_0065                   209     1.65e-14      5.42e-6   (72, 137, 0)   (72, 137, 0)
-PFIT2_0248                       6      5.39e-6      1.49e-7      (3, 3, 0)      (3, 3, 0)
-ACOPP30_0063                   209     2.24e-14      4.93e-6   (72, 137, 0)   (72, 137, 0)
-PFIT2_0548                       6      3.66e-6      2.86e-8      (3, 3, 0)      (3, 3, 0)
-FLETCHER_0002                   16      3.63e-6      3.63e-6     (12, 4, 0)     (12, 4, 0)
-PFIT2_0327                       6      4.15e-8      2.71e-6      (3, 3, 0)      (3, 3, 0)
-PFIT2_0328                       6      4.15e-8      2.71e-6      (3, 3, 0)      (3, 3, 0)
-
---- Sparse-only failures (79 matrices: sparse fail, dense pass) ---
-
-family                    total    inertia   residual      worst_res
-HS46                         16          0         16        4.56e-9
-FBRAIN3LS                    12          0         12        1.36e-8
-HATFLDFL                     11          0         11        3.36e-9
-CERI651DLS                    9          0          9        5.25e-9
-CERI651ALS                    7          0          7        2.99e-9
-CERI651CLS                    6          0          6        3.41e-9
-PALMER1ENE                    5          0          5        1.24e-8
-SNAKE                         2          0          2        1.39e-9
-EXPFITNE                      1          0          1        1.39e-7
-CONGIGMZ                      1          0          1        4.65e-9
-ACOPP30                       1          1          0        2.06e-9
-PALMER5A                      1          0          1        2.20e-9
-PFIT2                         1          0          1        3.55e-6
-PALMER1NE                     1          0          1        3.45e-9
-SIMPLLPB                      1          0          1        1.11e-9
-PALMER2E                      1          0          1        1.80e-9
-CERI651BLS                    1          0          1        2.28e-9
-HS114                         1          0          1        6.43e-9
-LSC2LS                        1          0          1        1.03e-9
-
-Top 25 worst sparse-only residuals (triage candidates):
-name                             n       sp_res       expected     actual(sp)  i_ok  r_ok
-PFIT2_0300                       6      3.55e-6      (3, 3, 0)      (3, 3, 0)  true false
-EXPFITNE_0000                    2      1.39e-7      (2, 0, 0)      (2, 0, 0)  true false
-FBRAIN3LS_0736                   6      1.36e-8      (6, 0, 0)      (6, 0, 0)  true false
-PALMER1ENE_0107                  8      1.24e-8      (8, 0, 0)      (8, 0, 0)  true false
-PALMER1ENE_0110                  8      7.08e-9      (8, 0, 0)      (8, 0, 0)  true false
-FBRAIN3LS_0732                   6      7.03e-9      (6, 0, 0)      (6, 0, 0)  true false
-HS114_0758                      21      6.43e-9    (10, 11, 0)    (10, 11, 0)  true false
-FBRAIN3LS_0844                   6      5.80e-9      (6, 0, 0)      (6, 0, 0)  true false
-CERI651DLS_0642                  7      5.25e-9      (7, 0, 0)      (7, 0, 0)  true false
-CERI651DLS_0643                  7      5.25e-9      (7, 0, 0)      (7, 0, 0)  true false
-CONGIGMZ_0000                    8      4.65e-9      (3, 5, 0)      (3, 5, 0)  true false
-HS46_0376                        7      4.56e-9      (5, 2, 0)      (5, 2, 0)  true false
-FBRAIN3LS_0681                   6      3.76e-9      (6, 0, 0)      (6, 0, 0)  true false
-PALMER1NE_0007                   4      3.45e-9      (4, 0, 0)      (4, 0, 0)  true false
-CERI651CLS_0292                  7      3.41e-9      (7, 0, 0)      (7, 0, 0)  true false
-HATFLDFL_0480                    3      3.36e-9      (3, 0, 0)      (3, 0, 0)  true false
-PALMER1ENE_0106                  8      3.30e-9      (8, 0, 0)      (8, 0, 0)  true false
-HS46_0296                        7      3.24e-9      (5, 2, 0)      (5, 2, 0)  true false
-HS46_0331                        7      3.22e-9      (5, 2, 0)      (5, 2, 0)  true false
-CERI651ALS_0364                  7      2.99e-9      (7, 0, 0)      (7, 0, 0)  true false
-HS46_0363                        7      2.98e-9      (5, 2, 0)      (5, 2, 0)  true false
-HS46_0295                        7      2.95e-9      (5, 2, 0)      (5, 2, 0)  true false
-CERI651DLS_0477                  7      2.88e-9      (7, 0, 0)      (7, 0, 0)  true false
-CERI651ALS_0330                  7      2.83e-9      (7, 0, 0)      (7, 0, 0)  true false
-CERI651ALS_0614                  7      2.75e-9      (7, 0, 0)      (7, 0, 0)  true false
-
---- Dense-only failures (22 matrices: dense fail, sparse pass) ---
-name                             n        d_res       expected      actual(d)
-PALMER2E_0144                    8      6.94e-9      (8, 0, 0)      (8, 0, 0)
-PALMER2E_0143                    8      6.48e-9      (8, 0, 0)      (8, 0, 0)
-PALMER4E_0041                    8      4.84e-9      (8, 0, 0)      (8, 0, 0)
-CERI651DLS_0613                  7      4.18e-9      (7, 0, 0)      (7, 0, 0)
-
-(truncated from      663 lines to 350 line budget)
+## Test Files
+```
+tests/amf_corpus_oracle.rs
+tests/auto_strategy.rs
+tests/blocked_ldlt.rs
+tests/build_row_indices_trailing_invariant.rs
+tests/column_renumbering_parity.rs
+tests/column_renumbering.rs
+tests/delayed_pivoting.rs
+tests/dense_fast_path.rs
+tests/dense_ldlt.rs
+tests/factor_scratch_parity.rs
+tests/factor_workspace_parity.rs
+tests/fma_opt_in_roundtrip.rs
+tests/growth_flag.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_2_kkt_ls_init.rs
+tests/kkt_hardening.rs
+tests/kkt_matrices.rs
+tests/large_matrix_smoke.rs
+tests/ldlt_compress.rs
+tests/mc64_end_to_end.rs
+tests/mc64_scaling.rs
+tests/multi_rhs.rs
+tests/parallel_parity.rs
+tests/parity.rs
+tests/pivot_rejection.rs
+tests/pounce_interface.rs
+tests/profiler_smoke.rs
+tests/property_tests.rs
+tests/rook_rescue_kkt.rs
+tests/rook_rescue.rs
+tests/small_leaf_parity.rs
+tests/sparse_postorder.rs
+tests/sparse_refined.rs
+tests/stress_tests.rs
+tests/symbolic_profiler.rs
+tests/threshold_consistency.rs
+tests/tiny_fast_path.rs
+```
