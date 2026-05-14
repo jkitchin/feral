@@ -1020,9 +1020,12 @@ mod tests {
 
     fn factor_well_cond(m: &CscMatrix) -> SparseFactors {
         let sym = symbolic_factorize(m, &SupernodeParams::default()).unwrap();
-        let (factors, _) =
-            factorize_multifrontal(m, &sym, &crate::numeric::factorize::NumericParams::default())
-                .unwrap();
+        let (factors, _) = factorize_multifrontal(
+            m,
+            &sym,
+            &crate::numeric::factorize::NumericParams::default(),
+        )
+        .unwrap();
         factors
     }
 
@@ -1056,8 +1059,7 @@ mod tests {
         let factors = factor_well_cond(&m);
 
         let x_plain = solve_sparse_refined(&m, &factors, &rhs).unwrap();
-        let (x_diag, _diag) =
-            solve_sparse_refined_with_diagnostics(&m, &factors, &rhs).unwrap();
+        let (x_diag, _diag) = solve_sparse_refined_with_diagnostics(&m, &factors, &rhs).unwrap();
         for i in 0..x_plain.len() {
             assert_eq!(
                 x_plain[i].to_bits(),
