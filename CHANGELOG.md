@@ -4,6 +4,20 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — F2.3 iterative-refinement diagnostics
+
+New public function `solve_sparse_refined_with_diagnostics` and
+companion types `RefinementDiagnostics` / `RefinementStep`
+(`src/numeric/solve.rs`). Mirrors `solve_sparse_refined` exactly
+in control flow and returned iterate; additionally emits the
+per-step residual / Skeel forward-error-bound trajectory plus a
+shared `kappa_1_est` from the Hager-Higham 1-norm estimator. The
+non-diagnostic path is unchanged — diagnostics are opt-in and add
+3-5 solves (one κ̂ pass) plus an O(nnz) `||A||_1` walk only when
+explicitly requested. Intended for ripopt's δ-ladder logging
+(per `dev/plans/kkt-feature-gaps.md` §F2.3). Re-exported at the
+crate root.
+
 ### Changed — Symbolic-arm gate on cascade-break trigger (issue #15)
 
 The cascade-break trigger (`NumericParams::cascade_break_ratio`)

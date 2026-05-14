@@ -1,4 +1,5 @@
 #![allow(clippy::needless_range_loop)]
+use super::condition::{estimate_inverse_norm_1, matrix_norm_1};
 use super::factorize::SparseFactors;
 use crate::error::FeralError;
 use crate::scaling::ScalingInfo;
@@ -654,6 +655,98 @@ pub fn solve_sparse_refined(
     factors: &SparseFactors,
     rhs: &[f64],
 ) -> Result<Vec<f64>, FeralError> {
+    let (x, _) = solve_sparse_refined_core(matrix, factors, rhs, false)?;
+    Ok(x)
+}
+
+/// Per-step diagnostic data emitted by
+/// [`solve_sparse_refined_with_diagnostics`].
+///
+/// Step 0 is the unrefined initial solve; subsequent steps are refinement
+/// iterations. The number of steps is bounded by the refinement cap
+/// (currently 10 + 1 initial = 11) and may exit early on convergence,
+/// divergence, or plateau.
+#[derive(Debug, Clone, Copy)]
+pub struct RefinementStep {
+    /// Step index (0 = unrefined solve, 1.. = refinement iterations).
+    pub step: usize,
+    /// `||r||_2` where `r = b - A·x` after this step.
+    pub residual_2norm: f64,
+    /// `||r||_2 / ||b||_2`. Falls back to `residual_2norm` when
+    /// `||b|| = 0` (the trivial RHS case).
+    pub relative_residual: f64,
+    /// Skeel-style forward-error bound estimate
+    /// `kappa_1_est * relative_residual` — a conservative upper bound
+    /// on the relative forward error `||x - x_true||_∞ / ||x_true||_∞`
+    /// for iterative refinement (Skeel 1980; Higham 2002 §15).
+    /// Constant `kappa_1_est` is shared across all steps within one
+    /// refinement run.
+    pub forward_error_bound: f64,
+    /// True iff this step strictly improved on the best residual so far.
+    pub improved: bool,
+}
+
+/// Diagnostic data returned by [`solve_sparse_refined_with_diagnostics`].
+///
+/// `kappa_1_est` is computed once per refinement run via the Hager–Higham
+/// 1-norm power iteration (3–5 extra solves) — it depends only on `A` and
+/// its factor, not on the residual or `x`. Per-step `forward_error_bound`
+/// values multiply this constant against the trajectory's relative
+/// residual.
+///
+/// This is the F2.3 deliverable from `dev/plans/kkt-feature-gaps.md`:
+/// diagnostic emission only, no behavior change. The non-diagnostic
+/// [`solve_sparse_refined`] continues to make the identical control-flow
+/// choices.
+#[derive(Debug, Clone)]
+pub struct RefinementDiagnostics {
+    /// Exact `||A||_1` (single linear pass over the CSC values).
+    pub anorm_1: f64,
+    /// Hager–Higham estimate of `||A||_1 · ||A^{-1}||_1`. A statistical
+    /// lower bound; see `dev/research/condition-estimate.md`.
+    pub kappa_1_est: f64,
+    /// Per-step residual / forward-error trajectory. `steps[0]` is the
+    /// unrefined solve.
+    pub steps: Vec<RefinementStep>,
+    /// Index into `steps` whose iterate is returned (best `||r||_2`).
+    pub returned_step: usize,
+}
+
+/// Iterative refinement with full per-step diagnostics.
+///
+/// Mirrors [`solve_sparse_refined`] exactly in control flow and returned
+/// iterate; additionally returns a [`RefinementDiagnostics`] struct
+/// containing `||A||_1`, the Hager–Higham 1-norm κ̂ estimate, and the
+/// per-step residual / Skeel forward-error-bound trajectory.
+///
+/// Cost: one extra `||A||_1` pass plus 3–5 extra sparse solves for the
+/// κ̂ estimate, on top of the refinement loop. Intended for
+/// observability (ripopt's δ-ladder logging, Skeel-style termination
+/// research) — production hot paths should call [`solve_sparse_refined`]
+/// instead.
+pub fn solve_sparse_refined_with_diagnostics(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+) -> Result<(Vec<f64>, RefinementDiagnostics), FeralError> {
+    let (x, diag) = solve_sparse_refined_core(matrix, factors, rhs, true)?;
+    // `with_diagnostics = true` always yields `Some`; if it ever doesn't,
+    // that's a logic bug — `expect` is fine in test code, but per CLAUDE.md
+    // we use Result in src/. Return DimensionMismatch as a defensive
+    // signal (can't actually happen with current control flow).
+    let diag = diag.ok_or(FeralError::DimensionMismatch {
+        expected: 1,
+        got: 0,
+    })?;
+    Ok((x, diag))
+}
+
+fn solve_sparse_refined_core(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    with_diagnostics: bool,
+) -> Result<(Vec<f64>, Option<RefinementDiagnostics>), FeralError> {
     let n = factors.n;
     if rhs.len() != n {
         return Err(FeralError::DimensionMismatch {
@@ -661,6 +754,18 @@ pub fn solve_sparse_refined(
             got: rhs.len(),
         });
     }
+
+    // κ̂ is a property of (A, factor), independent of x and the
+    // refinement trajectory. Compute it once up front so per-step
+    // diagnostics can derive the Skeel forward-error bound by
+    // multiplying with the step's relative residual.
+    let (anorm_1, kappa_1_est) = if with_diagnostics && n > 0 {
+        let a1 = matrix_norm_1(matrix);
+        let inv1 = estimate_inverse_norm_1(factors)?;
+        (a1, a1 * inv1)
+    } else {
+        (0.0, 0.0)
+    };
 
     let mut ws = SolveWorkspace::for_factors(factors);
     let mut x = vec![0.0; n];
@@ -709,7 +814,23 @@ pub fn solve_sparse_refined(
         }
     };
 
-    for _step in 0..max_steps {
+    let rel_res = |rn: f64| if b_norm > 0.0 { rn / b_norm } else { rn };
+
+    let mut steps: Vec<RefinementStep> = if with_diagnostics {
+        let rr = rel_res(r_norm);
+        vec![RefinementStep {
+            step: 0,
+            residual_2norm: r_norm,
+            relative_residual: rr,
+            forward_error_bound: kappa_1_est * rr,
+            improved: true,
+        }]
+    } else {
+        Vec::new()
+    };
+    let mut returned_step: usize = 0;
+
+    for step in 1..=max_steps {
         if relative_reached(best_r_norm) {
             break;
         }
@@ -731,8 +852,22 @@ pub fn solve_sparse_refined(
             best_r_norm = r_norm;
             best_x.copy_from_slice(&x);
             stagnant_count = 0;
+            if with_diagnostics {
+                returned_step = step;
+            }
         } else {
             stagnant_count += 1;
+        }
+
+        if with_diagnostics {
+            let rr = rel_res(r_norm);
+            steps.push(RefinementStep {
+                step,
+                residual_2norm: r_norm,
+                relative_residual: rr,
+                forward_error_bound: kappa_1_est * rr,
+                improved,
+            });
         }
 
         if r_norm > best_r_norm * divergence_factor {
@@ -748,7 +883,17 @@ pub fn solve_sparse_refined(
         }
     }
 
-    Ok(best_x)
+    let diag = if with_diagnostics {
+        Some(RefinementDiagnostics {
+            anorm_1,
+            kappa_1_est,
+            steps,
+            returned_step,
+        })
+    } else {
+        None
+    };
+    Ok((best_x, diag))
 }
 
 fn norm2(v: &[f64]) -> f64 {
@@ -869,5 +1014,172 @@ mod tests {
         )
         .unwrap();
         check_solve(&m, &[1.0, 2.0, 3.0, 4.0, 5.0], 1e-12);
+    }
+
+    // ----- F2.3 RefinementDiagnostics tests -----
+
+    fn factor_well_cond(m: &CscMatrix) -> SparseFactors {
+        let sym = symbolic_factorize(m, &SupernodeParams::default()).unwrap();
+        let (factors, _) =
+            factorize_multifrontal(m, &sym, &crate::numeric::factorize::NumericParams::default())
+                .unwrap();
+        factors
+    }
+
+    /// Hilbert matrix H_n[i,j] = 1/(i+j+1), lower-triangular CSC.
+    fn hilbert(n: usize) -> CscMatrix {
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..n {
+            for i in j..n {
+                rows.push(i);
+                cols.push(j);
+                vals.push(1.0 / ((i + j + 1) as f64));
+            }
+        }
+        CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
+    }
+
+    #[test]
+    fn diagnostics_match_non_diagnostic_solution() {
+        // The diagnostic variant must produce the same iterate as the
+        // non-diagnostic one — F2.3 mandate is "no behavior change".
+        let m = CscMatrix::from_triplets(
+            3,
+            &[0, 1, 2, 2, 2],
+            &[0, 1, 0, 1, 2],
+            &[2.0, 3.0, 1.0, 1.0, -1e-8],
+        )
+        .unwrap();
+        let rhs = [1.0, 2.0, 3.0];
+        let factors = factor_well_cond(&m);
+
+        let x_plain = solve_sparse_refined(&m, &factors, &rhs).unwrap();
+        let (x_diag, _diag) =
+            solve_sparse_refined_with_diagnostics(&m, &factors, &rhs).unwrap();
+        for i in 0..x_plain.len() {
+            assert_eq!(
+                x_plain[i].to_bits(),
+                x_diag[i].to_bits(),
+                "iterate mismatch at index {}: {} vs {}",
+                i,
+                x_plain[i],
+                x_diag[i],
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostics_populate_well_conditioned() {
+        // SPD tridiagonal: refinement should converge in 0-1 steps and
+        // kappa_1_est should be modest.
+        let n = 5;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(4.0);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let rhs: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+        let factors = factor_well_cond(&m);
+        let (_, diag) = solve_sparse_refined_with_diagnostics(&m, &factors, &rhs).unwrap();
+
+        assert!(diag.anorm_1 > 0.0, "anorm_1 must be > 0 for nonzero A");
+        assert!(
+            diag.kappa_1_est >= 1.0 - 1e-8,
+            "kappa_1_est {} below 1.0 lower bound",
+            diag.kappa_1_est
+        );
+        assert!(!diag.steps.is_empty(), "diagnostics must contain step 0");
+        assert_eq!(diag.steps[0].step, 0);
+        // returned_step must index a valid step.
+        assert!(diag.returned_step < diag.steps.len());
+        // The returned iterate's residual must be the best seen.
+        let best = diag
+            .steps
+            .iter()
+            .map(|s| s.residual_2norm)
+            .fold(f64::INFINITY, f64::min);
+        assert_eq!(diag.steps[diag.returned_step].residual_2norm, best);
+    }
+
+    #[test]
+    fn diagnostics_kappa_matches_standalone() {
+        // The κ̂ embedded in diagnostics must equal what callers would
+        // get from calling estimate_condition_1norm() directly on the
+        // same (matrix, factor) pair.
+        let m = hilbert(6);
+        let rhs = [1.0, 0.5, 1.0, 0.5, 1.0, 0.5];
+        let factors = factor_well_cond(&m);
+        let kappa_standalone =
+            crate::numeric::condition::estimate_condition_1norm(&m, &factors).unwrap();
+        let (_, diag) = solve_sparse_refined_with_diagnostics(&m, &factors, &rhs).unwrap();
+        assert_eq!(
+            diag.kappa_1_est.to_bits(),
+            kappa_standalone.to_bits(),
+            "diag kappa {} != standalone {}",
+            diag.kappa_1_est,
+            kappa_standalone,
+        );
+        // Hilbert-6 is ill-conditioned: κ̂ should easily exceed 1e4.
+        assert!(
+            diag.kappa_1_est > 1.0e4,
+            "Hilbert-6 kappa_1_est {} too small",
+            diag.kappa_1_est,
+        );
+    }
+
+    #[test]
+    fn diagnostics_forward_error_bound_field() {
+        // forward_error_bound[k] = kappa_1_est * relative_residual[k].
+        // Verify the identity directly so downstream consumers
+        // (ripopt δ-ladder logging) can rely on the derived field.
+        let m = hilbert(4);
+        let rhs = [1.0, 2.0, 3.0, 4.0];
+        let factors = factor_well_cond(&m);
+        let (_, diag) = solve_sparse_refined_with_diagnostics(&m, &factors, &rhs).unwrap();
+        for s in &diag.steps {
+            let expected = diag.kappa_1_est * s.relative_residual;
+            let diff = (s.forward_error_bound - expected).abs();
+            assert!(
+                diff <= 1e-15 * expected.max(1.0),
+                "step {} fwd-err {} vs expected {} (diff {})",
+                s.step,
+                s.forward_error_bound,
+                expected,
+                diff
+            );
+            assert!(s.forward_error_bound >= 0.0);
+            assert!(s.residual_2norm.is_finite());
+        }
+    }
+
+    #[test]
+    fn diagnostics_n_zero() {
+        let m = CscMatrix::from_triplets(0, &[], &[], &[]).unwrap();
+        let factors = factor_well_cond(&m);
+        let (x, diag) = solve_sparse_refined_with_diagnostics(&m, &factors, &[]).unwrap();
+        assert!(x.is_empty());
+        // For n=0 we skip the kappa computation; values default to 0.
+        assert_eq!(diag.anorm_1, 0.0);
+        assert_eq!(diag.kappa_1_est, 0.0);
+    }
+
+    #[test]
+    fn diagnostics_dim_mismatch_rejected() {
+        let m = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 2.0, 3.0]).unwrap();
+        let factors = factor_well_cond(&m);
+        // Wrong-length RHS must surface as DimensionMismatch.
+        let r = solve_sparse_refined_with_diagnostics(&m, &factors, &[1.0, 2.0]);
+        assert!(r.is_err());
     }
 }
