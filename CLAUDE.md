@@ -60,6 +60,18 @@ without the research note first.
   on every `git commit` and CI uses the identical hooks via
   `pre-commit/action`. Skip/override is not allowed; fix the offending
   code instead. See `.pre-commit-config.yaml`.
+  - If `pre-commit install` errors with "Cowardly refusing to install hooks
+    with `core.hooksPath` set", a global git config (often from another tool)
+    is hijacking the hooks path. Override per-repo with
+    `git config --local --unset core.hooksPath`, then re-run
+    `pre-commit install`. Verify with `ls .git/hooks/pre-commit` (should
+    exist and reference pre-commit). Without this, local commits silently
+    skip fmt/clippy and CI will catch the drift — as happened on
+    e8dab31 (cargo fmt fix-up).
+  - Until hooks are confirmed installed, run
+    `cargo fmt && cargo clippy --all-targets -- -D warnings` manually
+    before every commit. Treat a missing hook as a bug to fix, not a step
+    to live with.
 - If you try something and abandon it, record it in `dev/tried-and-rejected.md`
   immediately — do not wait for the checkpoint
 
