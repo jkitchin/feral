@@ -1,0 +1,355 @@
+* 21:07 :issue-2:issue-5:revisit:matrix-prep:
+Picking up on the question of whether issues #2 (zero multipliers
+on LS-augmented arki0003) and #5 (non-monotone inertia under δ_w
+sweep on MSS1 KKT) are still problems against current feral
+(0.3.0), given both were filed against 0.1.0.
+
+Matrix inventory:
+- =data/matrices/kkt/MSS1/MSS1_0000.mtx= is the iter-0 KKT
+  (n=163, n_var=90, m_eq=73, δ_w=0, δ_c=0, true inertia (90,73,0)).
+  Matches issue #5's "iter-0 augmented system for MSS1" exactly.
+- 330 MSS1 iterates total in =data/matrices/kkt/MSS1/=.
+- =data/matrices/kkt-mittelmann/arki0003/arki0003_0033.mtx= at n=4010.
+  Same dimension as issue #2's LS-augmented matrix but different
+  shape: corpus dumps are IPM-iterate KKTs, not =[I J^T; J diag]=
+  LS-init matrices. Issue #2's reporter offered to extract the LS
+  matrix on request — never done. Re-extraction needed.
+
+Hint from existing corpus data: =MSS1_0000.feral.json= records
+feral 0.1.0 reporting (90, 73, 0) at δ_w=0, but issue #5 trace
+shows feral at the same δ_w=0 returning (98, 65). The difference
+is almost certainly ScalingStrategy::Identity (explicit in the
+issue's ripopt config) vs adaptive scaling (corpus default). So
+the probe must use Identity scaling to faithfully reproduce.
+
+Plan:
+1. Write =src/bin/probe_issue5_perturb.rs= — load MSS1_0000.mtx,
+   sweep δ_w ∈ {0, 1e-4, 1e-2, 1, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12},
+   add δ_w to the first 90 diagonal entries, factor with BOTH
+   Identity + Auto scaling under the issue's BK config
+   (pivot_threshold=0.0, zero_tol=1e-10, zero_tol_2x2=1e-20,
+   on_zero_pivot=ForceAccept), report inertia and flag
+   monotonicity violations.
+2. Run probe, decide whether #5 reproduces in current feral.
+3. Re-extract arki0003 LS-augmented iter-0 matrix from ripopt
+   for #2's reproducer.
+
+* 21:18 :issue-2:issue-5:status-check:already-resolved:
+Both issues already have research notes AND regression tests in
+the working tree — the disposition work was done 2026-04-30/05-10
+and I missed it on first pass.
+
+- =dev/research/issue-2-kkt-pivot-default.md= — decision: override
+  =NumericParams::default()= to set =bk.pivot_threshold = 1e-8=
+  (MA27's =cntl[1]= default). Confirmed in =src/numeric/factorize.rs:354=:
+  =Self { bk: BunchKaufmanParams { pivot_threshold: 1e-8, ... } ... }=.
+  Test =tests/issue_2_kkt_ls_init.rs::ls_init_redundant_eq_factors_under_default=
+  passes — synthetic =[I J^T; J diag]= with redundant eq constraints
+  factors cleanly under the new default. Negative control
+  =bunch_kaufman_params_default_unchanged= confirms the dense
+  entry point still has =pivot_threshold = 0.0= per the
+  2026-04-13 dense/sparse split.
+
+- =dev/research/issue-5-mss1-inertia-monotonicity.md= §9
+  (2026-05-10 addendum) — decision: NO feral-side code change.
+  Wandering is BK 1×1/2×2 pivot ambiguity on a structurally
+  rank-deficient J (rank≈45 of m=73), not an absolute-floor or
+  α-test problem. MUMPS and MA57 both have the same atomic-2×2
+  Sylvester accounting; "fixing" feral would diverge from oracle
+  consensus and violate CLAUDE.md's inertia gate. Recommended
+  fix is upstream: ripopt should add =PerturbForSingularity=
+  δ_c bump to its inertia-correction loop. Three regression
+  tests are in place:
+
+  =issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep= —
+  ASSERTS wandering happens (lock-in guard). If a future change
+  makes it monotone non-decreasing the assertion message
+  instructs the next agent to flip it.
+
+  =issue_5_mss1_zero_tol_sweep_diagnostic= — diagnostic, always
+  passes; varies =zero_tol ∈ {1e-10, 1e-8, 1e-6, 1e-4, 1e-2}=,
+  shows zero_tol does not cure wandering.
+
+  =issue_5_mss1_pivot_threshold_sweep_diagnostic= — diagnostic,
+  always passes; varies =pivot_threshold ∈ {0, 1e-10, ..., 5e-1}=,
+  shows raising pivot_threshold (issue #2's lever) does not cure
+  wandering either.
+
+Captured sweep traces (=cargo test --release --lib issue_5_mss1
+-- --nocapture=):
+
+  zero_tol = 1e-10, pivot_threshold = 0:
+    +: [93, 91, 94, 90, 92, 90, 90, 90, 90, 90]
+    -: [48, 46, 49, 45, 47, 45, 45, 45, 45, 1]
+    0: [22, 26, 20, 28, 24, 28, 28, 28, 28, 72]
+
+  pivot_threshold = 1e-8 (new default), zero_tol = 1e-10:
+    +: [96, 98, 97, 91, 101, 98, 94, 98, 90, 90]
+    -: [53, 51, 55, 48, 51, 53, 59, 52, 51, 18]
+    0: [14, 14, 11, 24, 11, 12, 10, 13, 22, 55]
+
+The pivot_threshold=1e-8 trace is more dramatic (n+ swings from
+91 to 101 across the sweep), confirming the addendum's claim:
+issue #2's fix does not address issue #5.
+
+Net status of "is this still a problem?":
+- #2: NO on feral side. Default now ships with MA27-equivalent
+  pivot_threshold. arki0003 LS-init reproducer is the small
+  synthetic test; the real arki0003 matrix from ripopt is
+  optional polish if we want a corpus regression entry.
+- #5: YES symptom still reproduces but disposition is "not a
+  feral-side fix". Both GitHub issues are still OPEN — the
+  user-facing post-mortems haven't been written.
+
+Next move: either (a) extract the real arki0003 LS-init matrix
+from ripopt and stash it as an in-tree corpus regression, then
+post the dispositions on both GitHub issues and close them, or
+(b) skip the extraction and just close the issues citing the
+existing in-tree synthetic test for #2 plus the §9 addendum
+for #5.
+
+* 21:48 :issue-15:cascade-ratio:counter-evidence:
+User requested data-driven validation of issue #15's hypothesis
+("cascade-break fires too aggressively on qcqp1000-1nc; loosen
+default from 0.5 to 0.85"). Wrote
+=src/bin/diag_cascade_ratio_distribution.rs= — factors each
+iterate with =cascade_break_ratio = None= and reads
+=NodeFactors.n_delayed_in= / =NodeFactors.ncol= on every
+non-root supernode. Ratio is exactly the trigger expression
+at =src/numeric/factorize.rs:1823=.
+
+Interim data (qcqp1000-1nc, 30 of 86 iterates) is dramatic:
+
+  qcqp1000-1nc_0000 … _0029: max_ratio = 0.000 on ALL 30 iterates
+
+That is, =n_delayed_in = 0= on every non-root supernode across
+every iterate tested. The BK threshold-pivot rejection that
+=cascade_break_ratio= gates against simply does not happen on
+qcqp1000-1nc with current defaults — there are no delays to
+break.
+
+Consequence: **cascade-break cannot be the cause of the 14×
+regression reported in issue #15.** It never fires on these
+matrices. The issue's experimental setup conflates two changes:
+
+  - feral local-HEAD (no FMA, no cascade-break): 141 iters / 21.3 s
+  - feral 0.3.0+ (FMA on, cascade_break_ratio: Some(0.5)): 888 / 293 s
+
+The user attributed the regression to cascade-break based on
+API surface change, without isolating FMA. The cascade-break
+ratio on qcqp1000-1nc is identically zero, so removing it from
+the default would have zero effect on these wallclocks.
+
+Marine_1600 data (still running) confirms the OTHER side of
+issue #15's claim — cascade-break IS doing useful work on
+marine. Per-iterate max_ratio:
+
+  marine_1600_0000  0.000   factor    44 ms
+  marine_1600_0001  0.857   factor   121 ms
+  marine_1600_0002  0.342   factor    63 ms
+  marine_1600_0003  0.200   factor    53 ms
+  marine_1600_0004  0.211   factor    82 ms
+  marine_1600_0005  0.935   factor   124 ms
+  marine_1600_0006  0.965   factor   162 ms
+  marine_1600_0007  0.954   factor    91 ms
+  marine_1600_0008  0.987   factor   903 ms
+  marine_1600_0009  0.998   factor 59001 ms
+  marine_1600_0010  0.998   factor 72472 ms
+  marine_1600_0011  0.998   factor 90181 ms
+  marine_1600_0012  0.999   factor 67514 ms
+  marine_1600_0013  0.998   factor 71437 ms
+  marine_1600_0014  0.999   factor 60406 ms
+  marine_1600_0015  0.998   factor 105477 ms
+  (16, 17 still running)
+
+NB: factor times here are WITH =cascade_break_ratio = None=
+(intentionally — to measure raw cascade severity). With
+default-on, 0009+ would be much faster — that is the issue-#8
+fix doing its job.
+
+Pinene_3200 still pending. Pinene iterates take O(minute) each;
+may need to stop early.
+
+Next: complete the run on marine/pinene tails, write the full
+per-family report, then form the recommendation. Tentative:
+do not loosen the cascade_break_ratio default to 0.85 based on
+this evidence — qcqp regression is unrelated. Need to
+independently bisect FMA vs cascade-break in pounce.
+
+* 23:55 :issue-15:cascade-ratio:full-report:
+Diag run complete (=cargo run --release --bin
+diag_cascade_ratio_distribution=). Final per-family distributions
+of =n_delayed_in / ncol= across all non-root supernodes (factored
+with =cascade_break_ratio = None= so delays propagate naturally):
+
+| family       | iters | non-root snodes | p50  | p90   | p95   | p99   | max   |
+|--------------+-------+-----------------+------+-------+-------+-------+-------|
+| qcqp1000-1nc |    30 |           5,340 | 0.00 | 0.000 | 0.000 | 0.000 | 0.000 |
+| marine_1600  |    18 |         146,930 | 0.00 | 0.100 | 0.486 | 0.846 | 0.999 |
+| pinene_3200  |    10 |         105,669 | 0.00 | 0.042 | 0.059 | 0.515 | 0.999 |
+
+Bin counts (count of non-root supernodes by ratio band):
+
+| band         | qcqp  | marine  | pinene  |
+|--------------+-------+---------+---------|
+| [0.00, 0.50) | 5,340 | 139,632 | 104,474 |
+| [0.50, 0.65) |     0 |   2,828 |     657 |
+| [0.65, 0.75) |     0 |   1,715 |     214 |
+| [0.75, 0.85) |     0 |   1,336 |     145 |
+| [0.85, 0.95) |     0 |   1,055 |     129 |
+| [0.95, 1.01) |     0 |     364 |      50 |
+
+Top fronts firing on the three problem families:
+
+  qcqp1000-1nc — none fire at any threshold ≥ 0.5
+  marine_1600  — ncol=15351 ratio=0.940 (snode 8402, iter 0015)
+                 ncol=14519 ratio=0.999 (snode 7591, iter 0017)
+                 ncol=14506 ratio=0.999 (snode 7592, iter 0017)
+  pinene_3200  — ncol=14866 ratio=0.978 (snode 10485, iter 0009)
+                 ncol=14567 ratio=0.999 (snode 10484, iter 0009)
+                 ncol= 3831 ratio=0.995 (snode 10483, iter 0009)
+
+Findings:
+
+1. qcqp1000-1nc is RATIO-FLAT-ZERO across the entire IPM trace.
+   Every non-root supernode reports =n_delayed_in = 0=. Cascade-
+   break cannot fire on these matrices with the current 0.5
+   default, with 0.85, or with any value in =(0, 1]=. Therefore
+   the 14× wallclock regression reported in #15 is NOT caused
+   by =cascade_break_ratio=. The user's experimental table
+   conflated two flips at once: =no FMA, no cascade-break= vs
+   =FMA on, cascade_break_ratio: Some(0.5)=. FMA is the only
+   candidate remaining for the regression.
+
+2. The pathological cliff fronts on marine_1600 and pinene_3200
+   are all ratio ≥ 0.94 at huge ncol (≈15k columns). A 0.85
+   threshold would still catch every one of them. So the
+   proposed loosening to 0.85 is *safe* on the optimal-control
+   side — it just isn't necessary, because it has nothing to do
+   with the qcqp regression.
+
+3. The "moderate" firings in the [0.5, 0.85) band on marine
+   (5,879 supernodes) and pinene (1,016 supernodes) are the only
+   plausible suspects for unnecessary perturbation. If a future
+   benchmark on smaller block-banded problems shows similar
+   iter-count inflation, the threshold should be tightened then,
+   not preemptively.
+
+Recommendation (to be posted on #15):
+
+  - Do NOT loosen the default to 0.85 based on the #15 evidence.
+    The premise (cascade-break is firing on qcqp1000-1nc and
+    causing perturbation tax) is refuted by data.
+  - Ask the user to bisect their pounce-side test:
+      run A: feral 0.3.0+, =with_fma(false)=,
+              =cascade_break_ratio = Some(0.5)=
+      run B: feral 0.3.0+, =with_fma(true)=,
+              =cascade_break_ratio = None=
+    The difference between A and B isolates which knob owns
+    the 14× regression. Hypothesis: it is entirely FMA.
+  - If A == B, the regression is FMA; FMA correctness has been
+    investigated in issue #9 / dev/research/fma-pivot-stability
+    and the current decision is FMA-on by default with the
+    error-free transform path. Re-open that thread if A == B.
+
+Posting the counter-evidence comment on #15 with the table
+above. Leaving the issue OPEN — the user owns the bisect.
+
+* 00:30 :issue-15:symbolic-arm:implementation:
+User: "lets go with 3" (symbolic-arm gate on n).
+
+Followed CLAUDE.md feature lifecycle: code inspection → research
+note → test first → implement → benchmark.
+
+** Pre-implementation surprise: symbolic max ncol does NOT
+separate the families. Added =src/bin/diag_max_ncol.rs= probing
+per-family symbolic.supernodes[*].ncol:
+
+| family       |       n | max sym ncol | numeric expanded |
+|--------------+---------+--------------+------------------|
+| MSS1         |     163 |           25 |             ~25  |
+| qcqp1000-1nc |   1,154 |          391 |            ~391  |
+| pinene_3200  | 127,995 |          320 |         ~14,800  |
+| marine_1600  |  76,807 |        1,119 |         ~15,400  |
+
+Pinene's pathological 14.8k-column cliff front grows 50× via
+delay propagation; symbolic ncol there is only 320. Symbolic max
+ncol orders qcqp > pinene, the OPPOSITE of what cascade-break
+needs. So the gate cannot use max ncol.
+
+Discriminator that DOES work: =symbolic.n=. There is a ~70× gap
+between qcqp (1154) and marine (76807). Principled framing:
+achievable expanded_ncol is bounded above by n; cascade-break
+savings only accumulate at front sizes ≥ several thousand
+columns; therefore =n < N_HEAVY= is sufficient to make
+cascade-break irrelevant. Calibration: N_HEAVY = 4096 (above all
+small problems in the corpus, well below marine/pinene).
+
+** Implementation in three pieces:
+
+1. =dev/research/issue-15-cascade-break-symbolic-arm.md= — full
+   decision record with the principled framing.
+
+2. =src/numeric/factorize.rs=:
+   - Added =pub const CASCADE_BREAK_MIN_N: usize = 4096;= at
+     module level (line 13).
+   - Modified the cascade-break trigger guard at the (old)
+     line 1821 in =factor_one_supernode= to also require
+     =symbolic.n >= CASCADE_BREAK_MIN_N=.
+   - Updated docs on =cascade_break_ratio= field.
+   - factor_one_small_leaf path doesn't need the gate (leaves
+     have no children → no n_delayed_in → cascade-break
+     trivially can't fire there).
+
+3. =tests/issue_15_cascade_arm_gate.rs= — two tests:
+   - =cascade_break_min_n_constant_locked= — pins the value.
+   - =small_n_disarms_cascade_break_trigger= — loads MSS1_0000
+     (n=163), factors twice (=cascade_break_ratio = Some(0.0)=
+     vs =None=) under pivot_threshold=0.5, asserts per-node
+     n_delayed_in counts match, inertia matches,
+     needs_refinement matches. Sanity check at the end asserts
+     MSS1 actually produces non-root delays (so the test isn't
+     vacuously true).
+
+** Verification:
+
+  cargo test --release: ALL PASS (no regressions)
+  cargo clippy --release --all-targets -- -D warnings: clean
+  cargo fmt --check: clean (after one auto-fmt pass)
+
+Specific regression checks for cascade-break:
+
+  cargo run --release --bin diag_cascade_default_evidence -- pinene_3200_0009:
+    off:     factor=88.052s
+    default: factor=0.035s    ← cascade-break STILL firing (n > 4096)
+
+  cargo run --release --bin bench_issue8:
+    marine_1600_{0009..0017}: each factor < 0.3 s    ← STILL fast
+    aggregate: 28/28 inertia exact, total 2.294 s, worst rel_res 2.661e-11
+    GUARDS: PASS
+
+  cargo run --bin bench --release:
+    Dense Phase 2.8.1: small (147,982) p90=1.21, medium (152,145) p90=1.57 — PASS
+    Sparse Phase 2.8.1: small (153,455) p90=1.52, medium (153,560) p90=1.52 — PASS
+
+** What this NOT-does: a no-op on every existing test surface
+(all the tests use =cascade_break_ratio: None= or rely on
+realistic-sized matrices where n >> 4096). The gate is invisible
+to the corpus except for "small problems with aggressive cascade
+arming would no longer perturb" — which only the new test
+exercises.
+
+** Net status of #15: the proposed loosening to Some(0.85) is
+no longer needed; the symbolic-arm gate disarms cascade-break on
+qcqp1000-1nc structurally without changing the optimal-control
+defaults. The 14× regression must come from a different knob
+(most likely FMA); follow-up belongs in the bisect the user
+agreed to in the GitHub thread.
+
+** Should I close #15? The gate solves the structural concern
+the issue surfaces ("don't fire cascade-break where it can't
+help"), but leaves the unresolved FMA-vs-cascade bisect dangling.
+Better to leave #15 open, post a follow-up comment with the
+implementation summary, and let the user close after their
+bisect. Doing that next.
+
