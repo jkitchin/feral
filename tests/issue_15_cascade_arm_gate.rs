@@ -36,6 +36,13 @@ fn small_n_disarms_cascade_break_trigger() {
     // suppress the trigger so the factor is bit-identical to the
     // `None` configuration on the same matrix.
     let path = Path::new("data/matrices/kkt/MSS1/MSS1_0000.mtx");
+    if !path.exists() {
+        eprintln!(
+            "SKIP: {} not present (corpus is gitignored, not available in CI)",
+            path.display()
+        );
+        return;
+    }
     let mtx = read_mtx(path).expect("read MSS1_0000.mtx");
     let csc = mtx.to_csc().expect("to_csc");
     assert!(
