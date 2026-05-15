@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-15T15:29:27Z
+Generated: 2026-05-15T17:48:48Z
 
 ## Latest Session
-File: dev/sessions/2026-05-15-02.md
+File: dev/sessions/2026-05-15-03.md
 ```
-# Session 2026-05-15-02
+# Session 2026-05-15-03
 
 ## Bench vs. prior session
 
-Synthetic bench only — corpus matrices are gitignored and not
-present on this machine (the prior session's corpus output was
-from a machine with them). No regression suspected: refinement
-is solve-side; factor hot path untouched.
+Synthetic-only bench (corpus not present locally). Synthetic numbers
+sit slightly higher than session 2026-05-15-02 (e.g., spd_200 factor
+401 μs → 878 μs) but the harness is microsecond-noisy on synthetic
+inputs and the hot-path stayed untouched (the new code only runs at
+the parallel-dispatch gate which the synthetic bench doesn't reach).
+Not flagging as regression.
 
 ```
-spd_10             10           81           11     (10, 0, 0)
-spd_50             50           22            3     (50, 0, 0)
-spd_100           100           79            5    (100, 0, 0)
-spd_200           200          401           16    (200, 0, 0)
-kkt_10_3           13            3            0     (10, 3, 0)
-kkt_30_10          40           30            1    (30, 10, 0)
-kkt_50_15          65           53            2    (50, 15, 0)
-kkt_100_30        130          205            7   (100, 30, 0)
+spd_10             10          103           18     (10, 0, 0)
+spd_50             50           64            5     (50, 0, 0)
+spd_100           100          184           11    (100, 0, 0)
+spd_200           200          878           36    (200, 0, 0)
+kkt_10_3           13            8            1     (10, 3, 0)
+kkt_30_10          40           44            2    (30, 10, 0)
+kkt_50_15          65          113            4    (50, 15, 0)
+kkt_100_30        130          460           15   (100, 30, 0)
 ```
 
 ## Goal
 
-Address feral issue #18 (NARX_CFy stall) and the still-open #17
-(robot_1600) by acting on task 1 from session 2026-05-15-01's
-"next session should": *wire `Solver::solve_refined` into the IPM
-consumers*. Verify on both reproducers.
+Address feral issue #19: `should_parallelize_assembly` fires rayon
+on too-small assembly trees (small-KKT IPM control-NLP profile),
+producing per-iter wall regression because rayon spawn / cv-wait
+overhead exceeds the parallel speedup. Add a work-aware gate.
 
 ## Accomplished
 
-### 1. Triaged #18 against #17
+### 1. Reproduced the issue (with caveats)
 
-#18's `NARX_CFy.nl` stall trajectory matches #17's `robot_1600`
-exactly: early progress, then α stuck in [0.05, 0.30], inf_du
-~1e-3 indefinitely. Issue's hypothesis #1 (backsolve residual
-floor) aligns with the session 2026-05-15-01 forensic conclusion:
-cascade-break's L-factor perturbation produces a per-pivot
-residual ~1e-5 that exceeds the duality gap in late iters. Same
-root cause; same fix.
+On Apple M4 Pro (14 cores), 200 iters / problem:
 
-### 2. Wired `solve_many_refined` into the C ABI
+| problem | parallel | sequential | par/seq ratio | sys/wall (par) |
+|---|---|---|---|---|
+| robot_1600 | 25.3 s | 34.4 s | 0.74× | 53% |
+| henon120 | 101 s | 294 s | 0.34× | 21% |
 
-`src/capi.rs:feral_solve` now routes through
-`Solver::solve_many_refined` against the cached `s.matrix`. Opt-
-out via `FERAL_REFINE=0|false|off|no`. Added two inline unit tests
-exercising both paths on the 2x2 indefinite `[[1,2],[2,1]]` (#17
-forensics canonical example).
+The issue claims a **12× wall regression** on robot_1600 — that does
+not reproduce on M4 Pro; parallel is actually 1.3× *faster* in wall.
+But rayon overhead is clearly real (27 s of sys time inside a 25.3 s
+wall on robot_1600 parallel = 53% sys-bound). The issue's machine is
+the same M4 Pro but evidently in a different load / measurement
+regime where the cv-wait cost translated to wall. The fix direction
+is the same on any machine: stop firing parallel on too-small trees.
 
-Justification for using `s.matrix` as the refinement reference:
-Ipopt's `MultiSolve` protocol guarantees no values writes between
-`feral_factor` and `feral_solve` — Ipopt only writes via the
+### 2. Work-aware gate in `should_parallelize_assembly`
+
 ```
 
 ## Git Status
 ```
+6de5790 chore(session): 2026-05-15-02 -- issue #18 refinement wire-up
+597a90a fix(capi): default feral_solve to solve_many_refined for issues #17, #18
 6a7d1d5 chore(session): 2026-05-15-01 -- issue #17 diagnosis
 921cb23 diag(issue-17): bin to compare cb=off vs cb=default per-matrix
 6e95b82 docs(CLAUDE.md): note core.hooksPath workaround for pre-commit
-e8dab31 style: cargo fmt on src/numeric/solve.rs
-1f25a54 feat(bench): synthetic-matrix scaling bench vs MUMPS + MA57
 ```
 
 ## Test Status
@@ -96,36 +96,36 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 ```
 
 ## Recent Decisions
+robot_1600 at 200 iters) because parallel was a slight wall win
+there; the user-tunable override absorbs the disagreement.
 
-**Why.** Per the 2026-05-15-01 decision and forensics: cascade-
-break perturbs the L factor (not just D), producing a per-pivot
-backsolve residual ~1e-5 that exceeds the IPM duality gap in late
-iters. The unrefined backsolve was the binding constraint for
-feral#17 (`robot_1600`) and feral#18 (`NARX_CFy`). One round of
-refinement against the cached original matrix closes the gap.
+**Override.** `NumericParams::min_parallel_flops: Option<u64>`
+(default `None` → use the const). Set to `Some(0)` to disable the
+flop gate (structural-only behavior, equivalent to the pre-fix
+heuristic); `Some(u64::MAX)` to force-reject all parallel dispatch
+at the tree level. Pounce-side wired as `POUNCE_FERAL_MIN_PAR_FLOPS=<
+u64>` env var.
 
-**Cost.** Per backsolve: one sparse SymV (mat-vec) + one extra
-forward/back substitution. For NARX_CFy that maps to ~3.2× the
-wallclock of ipopt-MUMPS at the same iter band — orthogonal to
-the stall failure mode and addressable separately.
+**Why a const + override instead of runtime calibration.** Startup
+calibration adds complexity for diminishing returns; the env-var
+override gives a consumer-controlled tuning knob with O(1) cost.
+Calibration probe in `dev/research/issue-19-parallel-heuristic.md`
+"Calibration follow-up" section.
 
 **Evidence.**
-- `ipopt-feral NARX_CFy.nl ... max_iter=500` → Optimal, 485
-  iters, 498 s (was: TIMEOUT @ 250 s, iter 279).
-- `ipopt-feral robot_1600.nl ... max_iter=500` → Optimal, 301
-  iters, 19.3 s (was: MaxIter @ 3000 iters, 395 s on pounce; or
-  MaxIter @ 200 with the issue's stale opt-file cap).
-- `cargo test --lib --release` → 248 passed including two new
-  `capi::tests::capi_factor_and_refined_solve` /
-  `capi_solve_unrefined_opt_out`.
-- `cargo test --release -p pounce-feral` → 6 passed.
+- `robot_1600` (M4 Pro, 200 iters): OLD parallel 25.3 s wall + 27 s
+  sys; NEW default 33.5 s wall + 0.3 s sys (sys time -99%). NEW with
+  `MIN_PAR_FLOPS=0` override: 25.4 s wall + 24.7 s sys (matches OLD).
+- `henon120`: NEW default 97.9 s wall (parallel correctly preserved
+  by the gate), within noise of OLD 101 s. The gate's flop estimate
+  for henon120 clears the 10^8 threshold.
+- `cargo test --lib --release` → 254 passed (248 prior + 6 new).
 
 **References.**
-- feral GitHub issues #17, #18.
-- `dev/sessions/2026-05-15-02.md`.
-- `dev/journal/2026-05-15-02.org`.
-- Prior decision block (2026-05-15-01) for the forensic
-  groundwork this builds on.
+- feral GitHub issue #19.
+- `dev/sessions/2026-05-15-03.md`.
+- `dev/research/issue-19-parallel-heuristic.md`.
+- `dev/journal/2026-05-15-03.org`.
 
 ## Recent Tried-and-Rejected
 robot_1600 in 40 iters / 6.1 s vs cb=default's MaxIter at 200

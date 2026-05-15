@@ -3185,3 +3185,47 @@ the stall failure mode and addressable separately.
 - `dev/journal/2026-05-15-02.org`.
 - Prior decision block (2026-05-15-01) for the forensic
   groundwork this builds on.
+
+---
+
+## 2026-05-15-03 — Work-aware parallel-assembly gate with runtime override
+
+**Decision.** `should_parallelize_assembly` now gates on a per-
+supernode flop estimate in addition to the existing structural checks
+(`n_snodes ≥ N_PAR_MIN` AND ≥1 multi-child supernode). The flop gate
+is `sum_s ncol_s * nrow_s^2 ≥ PAR_MIN_FLOPS = 10^8`.
+
+`PAR_MIN_FLOPS` is the conservative default: protects the issue #19
+reporter's hardware where parallel was a wall regression on small-KKT
+control NLPs (`robot_1600`). On Apple M4 Pro (the same machine the
+reporter is on) the gate causes a small wall cost (25 → 33 s on
+robot_1600 at 200 iters) because parallel was a slight wall win
+there; the user-tunable override absorbs the disagreement.
+
+**Override.** `NumericParams::min_parallel_flops: Option<u64>`
+(default `None` → use the const). Set to `Some(0)` to disable the
+flop gate (structural-only behavior, equivalent to the pre-fix
+heuristic); `Some(u64::MAX)` to force-reject all parallel dispatch
+at the tree level. Pounce-side wired as `POUNCE_FERAL_MIN_PAR_FLOPS=<
+u64>` env var.
+
+**Why a const + override instead of runtime calibration.** Startup
+calibration adds complexity for diminishing returns; the env-var
+override gives a consumer-controlled tuning knob with O(1) cost.
+Calibration probe in `dev/research/issue-19-parallel-heuristic.md`
+"Calibration follow-up" section.
+
+**Evidence.**
+- `robot_1600` (M4 Pro, 200 iters): OLD parallel 25.3 s wall + 27 s
+  sys; NEW default 33.5 s wall + 0.3 s sys (sys time -99%). NEW with
+  `MIN_PAR_FLOPS=0` override: 25.4 s wall + 24.7 s sys (matches OLD).
+- `henon120`: NEW default 97.9 s wall (parallel correctly preserved
+  by the gate), within noise of OLD 101 s. The gate's flop estimate
+  for henon120 clears the 10^8 threshold.
+- `cargo test --lib --release` → 254 passed (248 prior + 6 new).
+
+**References.**
+- feral GitHub issue #19.
+- `dev/sessions/2026-05-15-03.md`.
+- `dev/research/issue-19-parallel-heuristic.md`.
+- `dev/journal/2026-05-15-03.org`.
