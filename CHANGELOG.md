@@ -4,6 +4,21 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `Solver` reuses a persistent `rayon::ThreadPool` (feral#19 follow-up)
+
+`Solver` now owns a lazily-built `rayon::ThreadPool` that is reused
+across every `factor()` call dispatching the parallel multifrontal
+driver. Built on first parallel-fire; persists for the `Solver`'s
+lifetime. Inside `pool.install(...)` the inner driver's
+`rayon::scope` / `current_thread_index` / `current_num_threads`
+calls bind to this pool's workers instead of the global pool, so
+the cv-wait wakeup cost that issue #19 flagged is paid once
+up-front rather than per `factor()`. End-to-end measurement on M4
+Pro `robot_1600` (force-parallel, 200 IPM iters): sys time dropped
+28% (24.7 s → 17.9 s). No user-facing API change; the existing
+`Solver::with_parallel(false)` toggle continues to skip the pool
+build entirely. See `dev/sessions/2026-05-15-04.md`.
+
 ### Changed — work-aware gate in `should_parallelize_assembly` (feral#19)
 
 `should_parallelize_assembly` (the dispatcher inside

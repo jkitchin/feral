@@ -128,6 +128,24 @@ pub struct Solver {
     /// below `N_PAR_MIN`, so default-on does not regress small-
     /// problem latency. See issue #7.
     use_parallel: bool,
+    /// Lazily-built rayon `ThreadPool` reused across every
+    /// `factor()` call that dispatches the parallel multifrontal
+    /// driver. `None` until first parallel-fire; once built, the
+    /// pool's worker threads persist for the `Solver`'s lifetime
+    /// (or until `Drop`).
+    ///
+    /// Reusing the pool eliminates the per-call thread-spawn and
+    /// initial cv-wait-wakeup cost that issue #19 flagged at 53%
+    /// sys time on `robot_1600`. Once warm, the workers stay
+    /// parked between calls and resume on the next `install`
+    /// without re-entering the kernel scheduler for each new task.
+    ///
+    /// Thread count: matches `rayon::current_num_threads()` at
+    /// first build (honors `RAYON_NUM_THREADS` and the default
+    /// `num_cpus`). Wrapped in `Arc` so `install` can run inside
+    /// the same `&mut self` borrow that touches `numeric_params`
+    /// and `workspace` — `install` only needs `&ThreadPool`.
+    parallel_pool: Option<std::sync::Arc<rayon::ThreadPool>>,
 }
 
 impl Solver {
@@ -151,7 +169,32 @@ impl Solver {
             symbolic_call_count: 0,
             workspace: FactorWorkspace::new(),
             use_parallel: true,
+            parallel_pool: None,
         }
+    }
+
+    /// Build (lazily) the rayon `ThreadPool` that the parallel
+    /// multifrontal driver will execute inside, and return an
+    /// `Arc` to it. The pool is constructed on the first call and
+    /// reused on every subsequent one — see the field doc on
+    /// `parallel_pool` for the issue #19 motivation.
+    ///
+    /// On `ThreadPoolBuilder::build` failure the caller is given
+    /// `None` so the dispatcher can fall through to the global
+    /// rayon pool. In practice the builder only fails on bad
+    /// `num_threads` configuration (e.g. zero) which we never
+    /// pass.
+    fn ensure_parallel_pool(&mut self) -> Option<std::sync::Arc<rayon::ThreadPool>> {
+        if self.parallel_pool.is_none() {
+            let n = rayon::current_num_threads().max(1);
+            match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
+                Ok(pool) => {
+                    self.parallel_pool = Some(std::sync::Arc::new(pool));
+                }
+                Err(_) => return None,
+            }
+        }
+        self.parallel_pool.as_ref().map(std::sync::Arc::clone)
     }
 
     /// Toggle the rayon-parallel multifrontal driver. Default is
@@ -259,6 +302,20 @@ impl Solver {
                 Err(e) => return FactorStatus::FatalError(e),
             }
         }
+        // Step 3.5: ensure the parallel `ThreadPool` is built when
+        // we're about to dispatch the parallel driver. Done *before*
+        // the immutable `symbolic` borrow below so the mutable borrow
+        // on `self.parallel_pool` doesn't collide. The pool persists
+        // across `factor()` calls — see the field doc on
+        // `parallel_pool` for the issue #19 motivation. The clone is
+        // an `Arc::clone` (one atomic refcount bump) — the pool
+        // itself stays put.
+        let pool = if self.use_parallel {
+            self.ensure_parallel_pool()
+        } else {
+            None
+        };
+
         // Safe: just-set above or already Some.
         let symbolic = match &self.last_symbolic {
             Some(s) => s,
@@ -267,13 +324,43 @@ impl Solver {
 
         // Step 4: numeric factor via the pooled workspace; map errors.
         // Both drivers share the same signature and a bit-exact
-        // contract; pick by the `use_parallel` toggle.
-        let driver = if self.use_parallel {
-            factorize_multifrontal_parallel_with_workspace
+        // contract; pick by the `use_parallel` toggle. When parallel
+        // is on and a pool was successfully built, run the
+        // dispatcher inside `pool.install(...)` so any `rayon::scope`
+        // / `rayon::current_thread_index` calls inside the parallel
+        // driver use this pool's workers instead of the global pool.
+        // The dispatcher inside
+        // `factorize_multifrontal_parallel_with_workspace` may still
+        // route to the sequential driver via
+        // `should_parallelize_assembly`; in that case `install` is a
+        // no-op on the inner code that doesn't touch rayon.
+        let result = if self.use_parallel {
+            if let Some(p) = pool.as_ref() {
+                p.install(|| {
+                    factorize_multifrontal_parallel_with_workspace(
+                        matrix,
+                        symbolic,
+                        &self.numeric_params,
+                        &mut self.workspace,
+                    )
+                })
+            } else {
+                factorize_multifrontal_parallel_with_workspace(
+                    matrix,
+                    symbolic,
+                    &self.numeric_params,
+                    &mut self.workspace,
+                )
+            }
         } else {
-            factorize_multifrontal_with_workspace
+            factorize_multifrontal_with_workspace(
+                matrix,
+                symbolic,
+                &self.numeric_params,
+                &mut self.workspace,
+            )
         };
-        match driver(matrix, symbolic, &self.numeric_params, &mut self.workspace) {
+        match result {
             Ok((factors, inertia)) => {
                 // Step 5: stash; PartialSingular maps to Singular.
                 let partial_singular = matches!(
@@ -721,6 +808,97 @@ mod tests {
         assert!(!solver.parallel());
         let solver = solver.with_parallel(true);
         assert!(solver.parallel());
+    }
+
+    /// Issue #19 follow-up: the `Solver`-owned rayon `ThreadPool` is
+    /// built lazily on first parallel-fire and reused on subsequent
+    /// `factor()` calls. Verify by Arc-pointer identity that the
+    /// pool stored across two factorizations is the same instance.
+    ///
+    /// Construct an indefinite tridiagonal that is large enough
+    /// (`n = 4096`) to clear the `should_parallelize_assembly`
+    /// structural gate's `N_PAR_MIN = 32` supernode count, but small
+    /// enough that the new flop gate may or may not fire — pool
+    /// construction is independent of whether the gate ends up
+    /// dispatching parallel for the inner driver, since `factor()`
+    /// always calls `ensure_parallel_pool()` when `use_parallel`
+    /// is on.
+    #[test]
+    fn solver_reuses_thread_pool_across_factors() {
+        // Indefinite tridiagonal: `2 -1 0 ... ; -1 2 -1 ... ; ...`
+        // shifted by `-2.5*I` to push some eigenvalues negative,
+        // so it doesn't get rejected by an SPD-only fast path.
+        let n = 256usize;
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(2.0 - 2.5);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("matrix");
+
+        let mut s = Solver::new();
+        assert!(s.parallel_pool.is_none(), "pool must be lazy");
+
+        let r1 = s.factor(&m, None);
+        assert!(
+            matches!(r1, FactorStatus::Success),
+            "first factor must succeed, got {:?}",
+            r1
+        );
+        let p1 = s
+            .parallel_pool
+            .as_ref()
+            .expect("pool must be built after first parallel factor")
+            .clone();
+
+        let r2 = s.factor(&m, None);
+        assert!(matches!(r2, FactorStatus::Success));
+        let p2 = s.parallel_pool.as_ref().expect("pool persists").clone();
+
+        // `Arc::ptr_eq` confirms it's the same `ThreadPool`
+        // instance — not just a structurally-equivalent rebuild.
+        assert!(
+            std::sync::Arc::ptr_eq(&p1, &p2),
+            "ThreadPool must be reused across factor() calls (issue #19 follow-up)"
+        );
+    }
+
+    /// When `use_parallel` is false, the lazy pool must never be
+    /// built — there's no need for one and we don't want to spawn
+    /// worker threads we won't use.
+    #[test]
+    fn solver_with_parallel_false_does_not_build_pool() {
+        let n = 32usize;
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(2.0);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("matrix");
+
+        let mut s = Solver::new().with_parallel(false);
+        let r = s.factor(&m, None);
+        assert!(matches!(r, FactorStatus::Success));
+        assert!(
+            s.parallel_pool.is_none(),
+            "with_parallel(false) must not build a thread pool"
+        );
     }
 
     /// Amdahl-ceiling breakdown for the parallel driver. For each
