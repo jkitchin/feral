@@ -131,6 +131,7 @@ fn try_factor_and_solve(
         allow_delayed_pivots: true,
         cascade_break_ratio: None,
         cascade_break_eps: None,
+        min_parallel_flops: None,
     };
     let sym = match symbolic_factorize_with_method(csc, &snode_params, OrderingMethod::Amd) {
         Ok(s) => s,
@@ -366,6 +367,7 @@ fn main() {
         allow_delayed_pivots: true,
         cascade_break_ratio: None,
         cascade_break_eps: None,
+        min_parallel_flops: None,
     };
     let sym =
         symbolic_factorize_with_method(&csc, &snode_params, OrderingMethod::Amd).expect("symbolic");

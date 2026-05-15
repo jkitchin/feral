@@ -343,6 +343,7 @@ fn solver_identity_scaling() -> Solver {
         allow_delayed_pivots: true,
         cascade_break_ratio: None,
         cascade_break_eps: None,
+        min_parallel_flops: None,
     };
     Solver::with_params(np, SupernodeParams::default())
 }

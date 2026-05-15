@@ -50,6 +50,7 @@ fn ldlt_params(gate: SmallLeafBatch, profiler: Arc<Mutex<Profiler>>) -> NumericP
         allow_delayed_pivots: true,
         cascade_break_ratio: None,
         cascade_break_eps: None,
+        min_parallel_flops: None,
     }
 }
 

@@ -4,6 +4,23 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — work-aware gate in `should_parallelize_assembly` (feral#19)
+
+`should_parallelize_assembly` (the dispatcher inside
+`factorize_multifrontal_parallel_with_workspace`) now also requires
+that the estimated total tree flop count clear `PAR_MIN_FLOPS = 10^8`
+before firing the rayon-parallel driver. Previously the gate was
+structural only (`n_snodes ≥ N_PAR_MIN` + ≥1 multi-child supernode),
+which let parallel fire on small-KKT IPM control-NLP profiles
+(`robot_1600`) where rayon spawn / cv-wait overhead exceeded the
+parallel speedup. New public surface: `pub const PAR_MIN_FLOPS`,
+`pub fn estimate_assembly_flops`, `pub fn should_parallelize_assembly_
+with_threshold`, and `NumericParams::min_parallel_flops: Option<u64>`
+for per-call tuning. Pounce-side env-var hook
+`POUNCE_FERAL_MIN_PAR_FLOPS=<u64>` plumbs the override. See
+`dev/decisions.md` (2026-05-15-03 block) and
+`dev/sessions/2026-05-15-03.md`.
+
 ### Changed — `feral_solve` C ABI defaults to iterative refinement
 
 `feral_solve` in the C ABI (`src/capi.rs`) now routes through

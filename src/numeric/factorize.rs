@@ -7,7 +7,7 @@ use crate::error::FeralError;
 use crate::inertia::Inertia;
 use crate::scaling::{compute_scaling_dense_fast, compute_scaling_with_cache, ScalingStrategy};
 use crate::sparse::csc::CscMatrix;
-use crate::symbolic::SymbolicFactorization;
+use crate::symbolic::{Supernode, SymbolicFactorization};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -154,6 +154,20 @@ pub struct NumericParams {
     /// "sweet spot" pathology that motivates bounded-Δ
     /// perturbation.
     pub cascade_break_eps: Option<f64>,
+
+    /// Override the minimum estimated tree-flop count at which
+    /// [`should_parallelize_assembly`] is willing to dispatch the
+    /// rayon-parallel driver. `None` (default) uses [`PAR_MIN_FLOPS`].
+    ///
+    /// Issue #19 follow-up: rayon spawn / cv-wait overhead is
+    /// hardware-dependent; the default const is calibrated for the
+    /// reporter's machine. Consumers that have measured their own
+    /// break-even point can override here. Set to `Some(0)` to
+    /// disable the flop gate entirely (still subject to `N_PAR_MIN`
+    /// and the structural multi-child gate); set to `Some(u64::MAX)`
+    /// to force the gate to always reject (functionally equivalent
+    /// to `Solver::with_parallel(false)` for tree-level dispatch).
+    pub min_parallel_flops: Option<u64>,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -391,6 +405,7 @@ impl Default for NumericParams {
             // pivoting threshold. Off-switch: set these to `None`.
             cascade_break_ratio: Some(0.5),
             cascade_break_eps: Some(1e-10),
+            min_parallel_flops: None,
         }
     }
 }
@@ -414,6 +429,7 @@ impl NumericParams {
             // perturbation. See the comment there for rationale.
             cascade_break_ratio: Some(0.5),
             cascade_break_eps: Some(1e-10),
+            min_parallel_flops: None,
         }
     }
 }
@@ -2086,20 +2102,90 @@ fn factor_one_small_leaf(
 /// where per-task overhead breaks even.
 pub const N_PAR_MIN: usize = 32;
 
-/// Predicate: does the symbolic factorization present enough structure
-/// for the parallel driver to win?
+/// Minimum total assembly-tree flop estimate (sum of
+/// `ncol * nrow^2` per supernode) at which the parallel driver is
+/// expected to amortise rayon spawn / cv-wait overhead. Issue #19
+/// follow-up to the Phase 2.5.2 Step E reassessment that never
+/// closed.
 ///
-/// Two conditions:
+/// Calibration argument (Apple M4 Pro, 14 cores): rayon spawn +
+/// per-pool cv-wait wakeup is ~100 μs per dispatch; sequential
+/// factor throughput on the Schur kernel is ~10 GFLOP/s; break-
+/// even sequential time per call is ~1 ms = 10^7 flops. We gate
+/// one decimal order above that so parallel must be meaningfully
+/// faster — not merely break-even — before firing.
+///
+/// Symptomatically: this gate's job is to keep `should_parallelize_
+/// assembly` from firing on the small-KKT IPM control-NLP profile
+/// (issue #19 robot_1600 reproducer: many small supernodes ⇒
+/// structural gate passes ⇒ rayon overhead burned for no gain),
+/// while still firing on the larger-KKT cases (henon120, where the
+/// parallel driver wins ~2.9× on this CPU).
+pub const PAR_MIN_FLOPS: u64 = 100_000_000;
+
+/// Cheap O(n_supernodes) flop-cost estimate for the entire assembly
+/// tree. Used as the work gate inside [`should_parallelize_assembly`].
+///
+/// Per-supernode proxy: `ncol * nrow^2`. This overestimates a touch
+/// (the true cost is `ncol^3/3 + ncol^2*nrow_below + ncol*nrow_
+/// below^2`) but dominates the true cost by a small constant whenever
+/// `nrow > 2*ncol`, which holds for all but trivial supernodes. The
+/// proxy is order-of-magnitude correct, which is what the threshold
+/// gate needs.
+///
+/// Returns `u64` because a non-trivial factorization can produce
+/// flop counts well above `usize::MAX` on a 32-bit platform; on
+/// 64-bit it's equivalent. Saturating arithmetic on the per-node
+/// multiply so wildly pathological inputs can't panic — at `nrow ≥
+/// 2^22` the cube already saturates and we'll definitely choose
+/// parallel anyway.
+pub fn estimate_assembly_flops(supernodes: &[Supernode]) -> u64 {
+    supernodes
+        .iter()
+        .map(|s| {
+            let ncol = s.ncol as u64;
+            let nrow = s.nrow as u64;
+            ncol.saturating_mul(nrow).saturating_mul(nrow)
+        })
+        .fold(0u64, |acc, x| acc.saturating_add(x))
+}
+
+/// Predicate: does the symbolic factorization present enough structure
+/// and work for the parallel driver to win?
+///
+/// Three conditions, all required:
 /// 1. `n_snodes >= N_PAR_MIN` — enough tasks to amortise thread-pool
 ///    overhead.
 /// 2. At least one supernode has ≥ 2 children — a pure postorder
 ///    chain has zero sibling parallelism, so the parallel driver
 ///    would add only overhead.
+/// 3. Estimated total tree flops `>= PAR_MIN_FLOPS` — gate the issue
+///    #19 case where the assembly tree is structurally rich but every
+///    individual supernode is too small to absorb rayon overhead
+///    (small-KKT IPM control-NLP profile, e.g. robot_1600).
+///
+/// Uses the const [`PAR_MIN_FLOPS`] as the flop threshold. To override
+/// per-call (e.g. consumers that have calibrated their hardware), see
+/// [`should_parallelize_assembly_with_threshold`] or pass
+/// `NumericParams::min_parallel_flops`.
 pub fn should_parallelize_assembly(symbolic: &SymbolicFactorization) -> bool {
+    should_parallelize_assembly_with_threshold(symbolic, PAR_MIN_FLOPS)
+}
+
+/// `should_parallelize_assembly` with the flop threshold supplied
+/// explicitly. Useful when `NumericParams::min_parallel_flops` is set
+/// or in tests that exercise threshold-edge behavior.
+pub fn should_parallelize_assembly_with_threshold(
+    symbolic: &SymbolicFactorization,
+    min_flops: u64,
+) -> bool {
     if symbolic.supernodes.len() < N_PAR_MIN {
         return false;
     }
-    symbolic.supernodes.iter().any(|s| s.children.len() >= 2)
+    if !symbolic.supernodes.iter().any(|s| s.children.len() >= 2) {
+        return false;
+    }
+    estimate_assembly_flops(&symbolic.supernodes) >= min_flops
 }
 
 /// Gated parallel entry point. Phase 2.5.2 Step D.
@@ -2122,7 +2208,8 @@ pub fn factorize_multifrontal_parallel_with_workspace(
     if should_use_dense_fast_path(matrix.n, matrix.row_idx.len()) {
         return dense_fast_factor_with_workspace(matrix, params, ws);
     }
-    if should_parallelize_assembly(symbolic) {
+    let threshold = params.min_parallel_flops.unwrap_or(PAR_MIN_FLOPS);
+    if should_parallelize_assembly_with_threshold(symbolic, threshold) {
         return factorize_multifrontal_supernodal_parallel(matrix, symbolic, params);
     }
     factorize_multifrontal_supernodal_with_workspace(matrix, symbolic, params, ws)
@@ -3048,6 +3135,7 @@ mod tests {
             allow_delayed_pivots: true,
             cascade_break_ratio: None,
             cascade_break_eps: None,
+            min_parallel_flops: None,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
@@ -3059,6 +3147,7 @@ mod tests {
             allow_delayed_pivots: true,
             cascade_break_ratio: None,
             cascade_break_eps: None,
+            min_parallel_flops: None,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
@@ -3113,6 +3202,7 @@ mod tests {
             allow_delayed_pivots: true,
             cascade_break_ratio: None,
             cascade_break_eps: None,
+            min_parallel_flops: None,
         };
         let infnorm = NumericParams {
             scaling: ScalingStrategy::InfNorm,
@@ -3615,6 +3705,7 @@ mod tests {
             allow_delayed_pivots: true,
             cascade_break_ratio: None,
             cascade_break_eps: None,
+            min_parallel_flops: None,
         };
 
         let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];
@@ -3787,5 +3878,174 @@ mod tests {
                 u, monotone, positives, negatives, zeros
             );
         }
+    }
+
+    /// Build a small Vec<Supernode> with the given (ncol, nrow,
+    /// n_children) so the flop-estimate gate can be tested in
+    /// isolation. The supernode `children` lists are not consistent
+    /// (they'd require ordering and parent pointers — not what we're
+    /// testing here), but `estimate_assembly_flops` only inspects
+    /// `ncol` and `nrow`, and `should_parallelize_assembly` only
+    /// inspects `children.len()` against 2.
+    fn make_supernodes(specs: &[(usize, usize, usize)]) -> Vec<Supernode> {
+        specs
+            .iter()
+            .map(|&(ncol, nrow, n_children)| Supernode {
+                first_col: 0,
+                ncol,
+                nrow,
+                row_indices: vec![0; nrow],
+                children: vec![0; n_children],
+            })
+            .collect()
+    }
+
+    /// Minimal `SymbolicFactorization` carrying only the fields
+    /// `should_parallelize_assembly` inspects (`supernodes`). All
+    /// other fields are zeroed/empty defaults; do not pass this
+    /// stub to anything that touches the etree, pattern, or
+    /// permutation.
+    fn stub_symbolic(n: usize, snodes: Vec<Supernode>) -> SymbolicFactorization {
+        SymbolicFactorization {
+            n,
+            perm: Vec::new(),
+            perm_inv: Vec::new(),
+            supernodes: snodes,
+            factor_nnz_estimate: 0,
+            factor_slack: 1.2,
+            contrib_sizes: Vec::new(),
+            peak_contrib_bytes: 0,
+            etree: crate::ordering::elimination_tree::EliminationTree {
+                parent: Vec::new(),
+                n: 0,
+            },
+            permuted_pattern: crate::sparse::csc::CscPattern {
+                n: 0,
+                col_ptr: vec![0],
+                row_idx: Vec::new(),
+            },
+            col_counts: Vec::new(),
+            small_leaf_groups: Vec::new(),
+            snode_group: Vec::new(),
+            cached_mc64: None,
+            resolved_method: crate::symbolic::OrderingMethod::Amd,
+            resolved_amalgamation: crate::symbolic::AmalgamationStrategy::Adjacency,
+            resolved_preprocess: crate::symbolic::OrderingPreprocess::None,
+            is_schur_tail: None,
+        }
+    }
+
+    #[test]
+    fn estimate_assembly_flops_empty_tree_is_zero() {
+        assert_eq!(estimate_assembly_flops(&[]), 0);
+    }
+
+    #[test]
+    fn estimate_assembly_flops_sums_ncol_times_nrow_squared() {
+        // Two supernodes: (2, 4) → 2*4*4 = 32, (3, 5) → 3*5*5 = 75.
+        // Total expected: 107.
+        let snodes = make_supernodes(&[(2, 4, 0), (3, 5, 0)]);
+        assert_eq!(estimate_assembly_flops(&snodes), 107);
+    }
+
+    #[test]
+    fn estimate_assembly_flops_saturates_on_pathological_input() {
+        // ncol = 1, nrow = u32::MAX as usize on a 64-bit host: nrow^2
+        // = ~1.8e19 which fits in u64; ncol * that fits too. Make it
+        // bigger: 100 nodes of (1, 2^32) — each contributes 2^64
+        // which saturates to u64::MAX, and the sum saturates to
+        // u64::MAX. The point is `should_parallelize_assembly` must
+        // return true (high-flop regime) without panicking.
+        let snodes = make_supernodes(&[(1, 1usize << 32, 0); 4]);
+        // Per-node: 1 * 2^32 * 2^32 = 2^64 → saturates to u64::MAX.
+        // Sum: 4 × u64::MAX → saturates to u64::MAX.
+        assert_eq!(estimate_assembly_flops(&snodes), u64::MAX);
+    }
+
+    /// `should_parallelize_assembly` end-to-end on a tridiagonal
+    /// n=64 matrix. The elimination tree is a pure chain (each
+    /// supernode has 0 or 1 children) — even though the per-node
+    /// flops may be small the structural-chain gate alone keeps the
+    /// parallel driver off. Pre-issue-#19 the gate was already
+    /// rejecting this; the test pins the existing behavior.
+    #[test]
+    fn should_parallelize_assembly_rejects_tridiagonal_chain() {
+        let n = 64usize;
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(2.0);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
+        assert!(
+            !should_parallelize_assembly(&sym),
+            "tridiagonal n=64 has a chain etree (or trivially small \
+             supernode count); parallel driver must not fire"
+        );
+    }
+
+    /// New issue-#19 gate: hand-built tree with N_PAR_MIN multi-child
+    /// supernodes but per-node flops below the threshold. The
+    /// structural gates pass; the flop gate must veto.
+    #[test]
+    fn should_parallelize_assembly_rejects_low_flop_multi_child_tree() {
+        // 64 supernodes, every other one has 2 children — structural
+        // gate passes. ncol=2, nrow=4 ⇒ 32 flops/node × 64 = 2048
+        // flops total. Way below PAR_MIN_FLOPS = 10^8.
+        let mut specs = vec![(2usize, 4usize, 2usize); 64];
+        for (i, s) in specs.iter_mut().enumerate() {
+            if i % 2 == 1 {
+                s.2 = 0;
+            }
+        }
+        let snodes = make_supernodes(&specs);
+        assert!(snodes.len() >= N_PAR_MIN);
+        assert!(snodes.iter().any(|s| s.children.len() >= 2));
+        assert!(estimate_assembly_flops(&snodes) < PAR_MIN_FLOPS);
+        // Build a SymbolicFactorization with these supernodes. Most
+        // fields are unused by should_parallelize_assembly — use
+        // empty placeholders.
+        let sym = stub_symbolic(128, snodes);
+        assert!(
+            !should_parallelize_assembly(&sym),
+            "tree with {} supernodes and {} flops < PAR_MIN_FLOPS = {} \
+             must dispatch sequentially per issue #19",
+            sym.supernodes.len(),
+            estimate_assembly_flops(&sym.supernodes),
+            PAR_MIN_FLOPS,
+        );
+    }
+
+    /// Counterpart to the previous test: same structure but per-node
+    /// flops large enough to clear the gate.
+    #[test]
+    fn should_parallelize_assembly_accepts_high_flop_multi_child_tree() {
+        // 64 supernodes, ncol=64, nrow=256 ⇒ 64 * 65536 = 4.19e6
+        // flops/node × 64 ≈ 2.7e8 total. Above PAR_MIN_FLOPS.
+        let mut specs = vec![(64usize, 256usize, 2usize); 64];
+        for (i, s) in specs.iter_mut().enumerate() {
+            if i % 2 == 1 {
+                s.2 = 0;
+            }
+        }
+        let snodes = make_supernodes(&specs);
+        assert!(estimate_assembly_flops(&snodes) >= PAR_MIN_FLOPS);
+        let sym = stub_symbolic(64 * 256, snodes);
+        assert!(
+            should_parallelize_assembly(&sym),
+            "tree with structural gates passed and {} flops >= {} \
+             must dispatch parallel",
+            estimate_assembly_flops(&sym.supernodes),
+            PAR_MIN_FLOPS,
+        );
     }
 }
