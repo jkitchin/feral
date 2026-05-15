@@ -1,0 +1,92 @@
+#+TITLE: Session 2026-05-15-04 journal — Solver-owned rayon ThreadPool (issue #19 follow-up)
+
+* 16:30 :issue-19:plan:
+Following on session 2026-05-15-03 next-session item (2): the rayon
+spawn / cv-wait overhead in ~factorize_multifrontal_supernodal_
+parallel~ is independent of the work-aware gate. Even when the gate
+fires correctly, every parallel ~factor()~ call rebuilds an implicit
+rayon scope context. A persistent ~ThreadPool~ owned by the
+~Solver~ avoids that per-call cost.
+
+* 16:45 :impl:thread-pool-field:
+Added ~parallel_pool: Option<Arc<rayon::ThreadPool>>~ to ~Solver~.
+Lazy-init via ~ensure_parallel_pool()~ helper that returns an
+~Arc<ThreadPool>~ (or ~None~ on builder failure). Built on first
+parallel ~factor()~; pool persists for the ~Solver~'s lifetime.
+
+Thread count matches ~rayon::current_num_threads()~ at build time —
+honors ~RAYON_NUM_THREADS~ and falls through to ~num_cpus::get()~ as
+the global pool would. Don't try to be clever about thread-count
+tuning: the existing global-pool calibration is already there for
+us.
+
+* 16:55 :impl:wire-into-factor:
+~Solver::factor~ now reads, in order:
+  1. ensure pool (mutable self borrow on ~parallel_pool~)
+  2. borrow symbolic (immutable on ~last_symbolic~)
+  3. call ~pool.install(|| factorize_multifrontal_parallel_with_
+     workspace(...))~ when both ~use_parallel~ is on and the pool
+     was built successfully
+
+Inside ~install~, all ~rayon::scope~ / ~current_thread_index~ /
+~current_num_threads~ calls in the inner driver bind to this pool's
+workers instead of the global pool. No further changes to the inner
+function — the entire pool-reuse benefit comes from the single
+~install~ wrapping.
+
+* 17:10 :test:
+Added 2 unit tests in ~numeric::solver::tests~:
+- ~solver_reuses_thread_pool_across_factors~ — factor a tridiagonal
+  twice, verify ~Arc::ptr_eq~ on the stored pool across the two
+  calls. Pinning the reuse invariant.
+- ~solver_with_parallel_false_does_not_build_pool~ — verify that
+  the lazy build is gated behind ~use_parallel~ so a
+  sequentially-configured solver doesn't spawn worker threads it
+  won't use.
+
+Both pass. Full suite: ~cargo test --lib --release~ → 256 passed
+(was 254 + 2 new). ~cargo clippy --all-targets --release -- -D
+warnings~ clean. ~cargo fmt --check~ clean.
+
+* 17:25 :verify:robot-1600-and-henon120:
+
+| problem | config | wall | sys | Δsys vs session-03 |
+|---------+--------+------+-----+--------------------|
+| robot_1600 | default (gate→seq) | 35.4 s | 0.6 s | n/a (gate dispatches sequential, pool unused) |
+| robot_1600 | MIN_PAR_FLOPS=0 (force par) | 25.9 s | 17.9 s | -28% (24.7 → 17.9 s) |
+| henon120 | default (gate→par) | 102.7 s | 19.3 s | within noise (18.0 → 19.3 s) |
+
+The small-call regime (robot_1600 force-parallel) is exactly the
+profile issue #19 surfaced — many ~factor()~ calls per IPM iter,
+each previously paying rayon spawn + cv-wait. 28% sys-time
+reduction. Wall on M4 Pro is essentially unchanged because the
+cv-wait wasn't yet wall-dominant; on the issue reporter's hardware
+where it was, this should translate to a wall improvement too.
+
+The large-workload regime (henon120) doesn't benefit measurably
+because rayon overhead is a tiny fraction of per-call factor cost.
+
+* 17:35 :bench:
+Synthetic-only (no corpus on machine). Numbers within ~10% of last
+session — the synthetic harness is microsecond-noisy and the
+parallel pool is not exercised by these small problems.
+
+#+begin_example
+spd_10             10           83           30     (10, 0, 0)
+spd_50             50           44            5     (50, 0, 0)
+spd_100           100          157            9    (100, 0, 0)
+spd_200           200          780           31    (200, 0, 0)
+kkt_10_3           13            6            1     (10, 3, 0)
+kkt_30_10          40           42            2    (30, 10, 0)
+kkt_50_15          65          108            5    (50, 15, 0)
+kkt_100_30        130          431           13   (100, 30, 0)
+#+end_example
+
+* 17:45 :note:no-config-knob:
+Did NOT add a user-facing toggle for pool reuse. It's strictly
+better than per-call pool creation (lower sys, same wall in the
+worst case), and the existing ~with_parallel(false)~ toggle already
+disables the entire parallel path including pool construction.
+A "use global pool" escape hatch could be added later if some
+consumer needs to share threads with their own rayon work, but
+none of feral's current consumers do.

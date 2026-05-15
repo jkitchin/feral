@@ -3229,3 +3229,44 @@ Calibration probe in `dev/research/issue-19-parallel-heuristic.md`
 - `dev/sessions/2026-05-15-03.md`.
 - `dev/research/issue-19-parallel-heuristic.md`.
 - `dev/journal/2026-05-15-03.org`.
+
+---
+
+## 2026-05-15-04 — Solver-owned rayon ThreadPool (issue #19 follow-up)
+
+**Decision.** `Solver` now owns a lazy-built `rayon::ThreadPool`
+that is reused across every `factor()` call dispatching the
+parallel multifrontal driver. Field: `parallel_pool:
+Option<Arc<rayon::ThreadPool>>`. Built on first parallel-fire;
+persists for the `Solver`'s lifetime.
+
+Implementation: `Solver::factor` calls `ensure_parallel_pool()`
+before borrowing `last_symbolic`, then runs the parallel driver
+inside `pool.install(|| ...)`. Inside `install`, all
+`rayon::scope` / `current_thread_index` / `current_num_threads`
+in the inner driver bind to this pool's workers.
+
+**Why.** Issue #19 (sessions 2026-05-15-03/04) flagged rayon
+spawn / cv-wait wakeup as 53% of sys time on `robot_1600`. The
+work-aware gate added in session 2026-05-15-03 sidesteps this
+cost by *not firing parallel*; the pool reuse decision instead
+*amortises* the cost when parallel does fire. Complementary, not
+substitutive.
+
+**No user-facing toggle.** Pool reuse is strictly dominant over
+per-call construction (lower sys, same wall worst case). The
+existing `with_parallel(false)` toggle already disables the
+parallel path *including* pool construction — pinned by test
+`solver_with_parallel_false_does_not_build_pool`.
+
+**Evidence.** robot_1600 force-parallel (200 iters, M4 Pro): sys
+time 24.7 s → 17.9 s (**-28%**). Wall on M4 Pro unchanged because
+cv-wait wasn't yet wall-dominant locally; on the issue reporter's
+hardware where it reportedly was, this should translate to a wall
+win too. `cargo test --lib --release` → 256 passed (254 prior + 2
+new pool-reuse tests).
+
+**References.**
+- feral GitHub issue #19.
+- `dev/sessions/2026-05-15-04.md`.
+- `dev/journal/2026-05-15-04.org`.

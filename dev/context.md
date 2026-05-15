@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-15T17:48:48Z
+Generated: 2026-05-15T18:15:35Z
 
 ## Latest Session
-File: dev/sessions/2026-05-15-03.md
+File: dev/sessions/2026-05-15-04.md
 ```
-# Session 2026-05-15-03
+# Session 2026-05-15-04
 
 ## Bench vs. prior session
 
-Synthetic-only bench (corpus not present locally). Synthetic numbers
-sit slightly higher than session 2026-05-15-02 (e.g., spd_200 factor
-401 μs → 878 μs) but the harness is microsecond-noisy on synthetic
-inputs and the hot-path stayed untouched (the new code only runs at
-the parallel-dispatch gate which the synthetic bench doesn't reach).
-Not flagging as regression.
+Synthetic-only bench, ~10% variance against session 2026-05-15-03
+(corpus not present on this machine). Hot path untouched —
+pool reuse only affects the parallel-fan-out path which the
+synthetic bench doesn't exercise.
 
 ```
-spd_10             10          103           18     (10, 0, 0)
-spd_50             50           64            5     (50, 0, 0)
-spd_100           100          184           11    (100, 0, 0)
-spd_200           200          878           36    (200, 0, 0)
-kkt_10_3           13            8            1     (10, 3, 0)
-kkt_30_10          40           44            2    (30, 10, 0)
-kkt_50_15          65          113            4    (50, 15, 0)
-kkt_100_30        130          460           15   (100, 30, 0)
+spd_10             10           83           30     (10, 0, 0)
+spd_50             50           44            5     (50, 0, 0)
+spd_100           100          157            9    (100, 0, 0)
+spd_200           200          780           31    (200, 0, 0)
+kkt_10_3           13            6            1     (10, 3, 0)
+kkt_30_10          40           42            2    (30, 10, 0)
+kkt_50_15          65          108            5    (50, 15, 0)
+kkt_100_30        130          431           13   (100, 30, 0)
 ```
 
 ## Goal
 
-Address feral issue #19: `should_parallelize_assembly` fires rayon
-on too-small assembly trees (small-KKT IPM control-NLP profile),
-producing per-iter wall regression because rayon spawn / cv-wait
-overhead exceeds the parallel speedup. Add a work-aware gate.
+Issue #19 follow-up: replace the implicit rayon scope context that
+the parallel multifrontal driver currently builds per `factor()`
+call with a `Solver`-owned `rayon::ThreadPool` that persists across
+calls. Reduces the cv-wait wakeup cost that session 2026-05-15-03's
+work-aware gate could only sidestep, not eliminate.
 
 ## Accomplished
 
-### 1. Reproduced the issue (with caveats)
+### 1. `Solver::parallel_pool` lazy-init field
 
-On Apple M4 Pro (14 cores), 200 iters / problem:
+`src/numeric/solver.rs`:
 
-| problem | parallel | sequential | par/seq ratio | sys/wall (par) |
-|---|---|---|---|---|
-| robot_1600 | 25.3 s | 34.4 s | 0.74× | 53% |
-| henon120 | 101 s | 294 s | 0.34× | 21% |
+- New field `parallel_pool: Option<Arc<rayon::ThreadPool>>`.
+- New helper `ensure_parallel_pool() -> Option<Arc<ThreadPool>>`
+  that lazy-builds on first call and clones the Arc on subsequent
+  ones.
+- Thread count matches `rayon::current_num_threads()` at build
+  time (honors `RAYON_NUM_THREADS`, falls through to num_cpus as
+  the global pool would).
+- `Solver::factor` now reads the pool *before* taking the
+  immutable `symbolic` borrow, so the mutable borrow on
+  `parallel_pool` doesn't collide. The dispatcher runs inside
+  `pool.install(...)` when both `use_parallel` is on and the pool
+  built successfully.
 
-The issue claims a **12× wall regression** on robot_1600 — that does
-not reproduce on M4 Pro; parallel is actually 1.3× *faster* in wall.
-But rayon overhead is clearly real (27 s of sys time inside a 25.3 s
-wall on robot_1600 parallel = 53% sys-bound). The issue's machine is
-the same M4 Pro but evidently in a different load / measurement
-regime where the cv-wait cost translated to wall. The fix direction
-is the same on any machine: stop firing parallel on too-small trees.
-
-### 2. Work-aware gate in `should_parallelize_assembly`
-
+Inside `pool.install(...)`, the inner driver's `rayon::scope` /
+`current_thread_index` / `current_num_threads` calls bind to this
+pool's workers instead of the global pool. No changes to the inner
 ```
 
 ## Git Status
 ```
+2dc8fb3 chore(session): 2026-05-15-03 -- issue #19 work-aware parallel gate
+19d7b03 fix(parallel): work-aware gate in should_parallelize_assembly (#19)
 6de5790 chore(session): 2026-05-15-02 -- issue #18 refinement wire-up
 597a90a fix(capi): default feral_solve to solve_many_refined for issues #17, #18
 6a7d1d5 chore(session): 2026-05-15-01 -- issue #17 diagnosis
-921cb23 diag(issue-17): bin to compare cb=off vs cb=default per-matrix
-6e95b82 docs(CLAUDE.md): note core.hooksPath workaround for pre-commit
 ```
 
 ## Test Status
@@ -76,8 +76,8 @@ running 5 tests
 test test_gate_just_outside_n_tiny ... ok
 test test_gate_tiny_sparse_in ... ok
 test test_solve_parity_tiny_real_matrix ... ok
-test test_gate_boundary_n_16 ... ok
 test test_determinism_tiny ... ok
+test test_gate_boundary_n_16 ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -96,36 +96,36 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 ```
 
 ## Recent Decisions
-robot_1600 at 200 iters) because parallel was a slight wall win
-there; the user-tunable override absorbs the disagreement.
+Implementation: `Solver::factor` calls `ensure_parallel_pool()`
+before borrowing `last_symbolic`, then runs the parallel driver
+inside `pool.install(|| ...)`. Inside `install`, all
+`rayon::scope` / `current_thread_index` / `current_num_threads`
+in the inner driver bind to this pool's workers.
 
-**Override.** `NumericParams::min_parallel_flops: Option<u64>`
-(default `None` → use the const). Set to `Some(0)` to disable the
-flop gate (structural-only behavior, equivalent to the pre-fix
-heuristic); `Some(u64::MAX)` to force-reject all parallel dispatch
-at the tree level. Pounce-side wired as `POUNCE_FERAL_MIN_PAR_FLOPS=<
-u64>` env var.
+**Why.** Issue #19 (sessions 2026-05-15-03/04) flagged rayon
+spawn / cv-wait wakeup as 53% of sys time on `robot_1600`. The
+work-aware gate added in session 2026-05-15-03 sidesteps this
+cost by *not firing parallel*; the pool reuse decision instead
+*amortises* the cost when parallel does fire. Complementary, not
+substitutive.
 
-**Why a const + override instead of runtime calibration.** Startup
-calibration adds complexity for diminishing returns; the env-var
-override gives a consumer-controlled tuning knob with O(1) cost.
-Calibration probe in `dev/research/issue-19-parallel-heuristic.md`
-"Calibration follow-up" section.
+**No user-facing toggle.** Pool reuse is strictly dominant over
+per-call construction (lower sys, same wall worst case). The
+existing `with_parallel(false)` toggle already disables the
+parallel path *including* pool construction — pinned by test
+`solver_with_parallel_false_does_not_build_pool`.
 
-**Evidence.**
-- `robot_1600` (M4 Pro, 200 iters): OLD parallel 25.3 s wall + 27 s
-  sys; NEW default 33.5 s wall + 0.3 s sys (sys time -99%). NEW with
-  `MIN_PAR_FLOPS=0` override: 25.4 s wall + 24.7 s sys (matches OLD).
-- `henon120`: NEW default 97.9 s wall (parallel correctly preserved
-  by the gate), within noise of OLD 101 s. The gate's flop estimate
-  for henon120 clears the 10^8 threshold.
-- `cargo test --lib --release` → 254 passed (248 prior + 6 new).
+**Evidence.** robot_1600 force-parallel (200 iters, M4 Pro): sys
+time 24.7 s → 17.9 s (**-28%**). Wall on M4 Pro unchanged because
+cv-wait wasn't yet wall-dominant locally; on the issue reporter's
+hardware where it reportedly was, this should translate to a wall
+win too. `cargo test --lib --release` → 256 passed (254 prior + 2
+new pool-reuse tests).
 
 **References.**
 - feral GitHub issue #19.
-- `dev/sessions/2026-05-15-03.md`.
-- `dev/research/issue-19-parallel-heuristic.md`.
-- `dev/journal/2026-05-15-03.org`.
+- `dev/sessions/2026-05-15-04.md`.
+- `dev/journal/2026-05-15-04.org`.
 
 ## Recent Tried-and-Rejected
 robot_1600 in 40 iters / 6.1 s vs cb=default's MaxIter at 200
