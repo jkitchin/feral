@@ -133,3 +133,82 @@ cargo run --release --bin calibrate_par_min_flops -- --reps 10
 ```
 
 Knob: `--reps N` (default 3). Honours `RAYON_NUM_THREADS`.
+
+---
+
+## Update — session 2026-05-15-06: cross-hardware run + robot_1600 probe
+
+### Cross-hardware Poisson-KKT (feral-home, also M4 Pro)
+
+Re-ran the calibration probe on `feral-home` (the issue #19
+reporter's host, M4 Pro, 14 threads, reps=10). Numbers match
+session-05's M4 Pro within ~10% across every row; break-even,
+≥1.2× and ≥1.35× win thresholds are identical. Same hardware
+family produces the same crossover.
+
+### Direct robot_1600 measurement (`probe_issue_19`)
+
+The Poisson-KKT calibration recommended 3×10⁷ but did not measure
+the actual issue #19 workload. New binary `src/bin/probe_issue_19.rs`
+times `Solver::factor()` on a robot_1600 KKT dump under three
+configurations (sequential / parallel-with-gate / parallel-gate-off).
+30 reps, median, feral-home:
+
+| iter | est_flops | seq (med ms) | gated (med) | parallel (med) | par speedup vs seq |
+| ---- | --------- | ------------ | ----------- | -------------- | ------------------ |
+| 0000 | 4.75×10⁶  | 5.24         | 5.26        | 7.87           | **0.67×** (hurts)  |
+| 0001 | 1.13×10⁷  | 9.65         | 9.62        | 6.80           | **1.42×**          |
+| 0003 | 1.13×10⁷  | 10.27        | 10.29       | 6.96           | **1.48×**          |
+| 0006 | 9.43×10⁶  | 8.31         | 8.19        | 6.70           | **1.24×**          |
+
+Findings:
+
+1. **The original issue #19 12× wall regression does not reproduce
+   on feral-home post-`91e028a`.** Forced-parallel is *faster*
+   than sequential on three of four robot_1600 iters. ThreadPool
+   reuse closed the regression; the gate is no longer doing
+   regression-prevention work.
+
+2. **The break-even sits at ~6×10⁶ on robot_1600 too** — same as
+   Poisson-KKT. Iter 0000 (4.75×10⁶ < break-even) → parallel hurts
+   0.67×. Iters 0001/0003 (1.13×10⁷ > break-even) → parallel wins
+   1.42-1.48×. Iter 0006 (9.43×10⁶, just above break-even) →
+   parallel wins 1.24×.
+
+3. **The old `PAR_MIN_FLOPS = 10⁸` blocks all three robot_1600
+   wins.** The session-05 recommendation of 3×10⁷ would also have
+   blocked them. Both were too conservative.
+
+### Revised recommendation (and the change actually landed)
+
+**Lower `PAR_MIN_FLOPS` from 10⁸ to 10⁷.** Justification:
+
+- Above iter 0000's 4.75×10⁶ (parallel hurts 0.67×) ⇒ stays
+  sequential.
+- At or below iters 0001/0003's 1.13×10⁷ (parallel wins 1.4-1.5×)
+  ⇒ now allows parallel.
+- Iter 0006 (9.43×10⁶, parallel wins 1.24×) is sacrificed: the
+  threshold sits 1.06× above its est_flops, so this iter stays
+  sequential. Trade: ~1.6× safety margin against the 6×10⁶
+  break-even is more important than a 1.24× win on a margin
+  workload where measurement noise could swing the ratio.
+
+This revises the earlier 3×10⁷ recommendation in this note. The
+revision is justified by the direct evidence: 30-rep measurement
+on the actual issue workload (`robot_1600`) shows parallel wins
+~1.4× at 1.1×10⁷ flops, with min/p90 well-separated from
+sequential — well outside the noise band that motivated the
+conservative recommendation. Poisson-KKT's tighter K=50 margin
+(1.2× win at 1.2×10⁷) was the originating concern; robot_1600
+shows that workload was an outlier, not the rule.
+
+The session-05 caveats (one workload family, M4 Pro only) still
+apply for *non*-robot-1600/Poisson workloads. The
+per-instance `NumericParams::min_parallel_flops` knob remains the
+correct override for hardware or workloads where the local
+crossover differs.
+
+### Closeout
+
+Issue #19 closed as "resolved-by-ThreadPool-reuse"; follow-up
+issue filed for corpus-wide gate measurement (henon120 et al.).

@@ -2108,20 +2108,36 @@ pub const N_PAR_MIN: usize = 32;
 /// follow-up to the Phase 2.5.2 Step E reassessment that never
 /// closed.
 ///
-/// Calibration argument (Apple M4 Pro, 14 cores): rayon spawn +
-/// per-pool cv-wait wakeup is ~100 μs per dispatch; sequential
-/// factor throughput on the Schur kernel is ~10 GFLOP/s; break-
-/// even sequential time per call is ~1 ms = 10^7 flops. We gate
-/// one decimal order above that so parallel must be meaningfully
-/// faster — not merely break-even — before firing.
+/// Empirical calibration on Apple M4 Pro (14 rayon threads) across
+/// two workload families:
 ///
-/// Symptomatically: this gate's job is to keep `should_parallelize_
-/// assembly` from firing on the small-KKT IPM control-NLP profile
-/// (issue #19 robot_1600 reproducer: many small supernodes ⇒
-/// structural gate passes ⇒ rayon overhead burned for no gain),
-/// while still firing on the larger-KKT cases (henon120, where the
-/// parallel driver wins ~2.9× on this CPU).
-pub const PAR_MIN_FLOPS: u64 = 100_000_000;
+/// - Poisson-KKT (`calibrate_par_min_flops`, sessions 2026-05-15-05
+///   and -06): break-even at `est_flops ≈ 6×10⁶`.
+/// - `robot_1600` KKT (`probe_issue_19`, session 2026-05-15-06):
+///   iter 0000 (4.75×10⁶ flops) → parallel hurts 0.67×; iters 0001
+///   /0003 (1.13×10⁷ flops) → parallel wins 1.42-1.48×; iter 0006
+///   (9.43×10⁶ flops) → parallel wins 1.24×. Same crossover ≈ 6×10⁶.
+///
+/// The threshold is set just above break-even (10⁷ ≈ 1.7× safety
+/// margin) so the gate fires sequential on iter 0000-class problems
+/// where rayon overhead dominates, and parallel on iter 0001/0003-
+/// class problems where parallel wins ≥1.4×. The intermediate iter
+/// 0006 (9.43×10⁶) sits below the threshold and stays sequential —
+/// we trade its 1.24× win for one decimal of safety margin against
+/// the break-even.
+///
+/// The pre-issue-#19 history: this const was originally 10⁸ on a
+/// freehand "100 µs spawn + 10 GFLOP/s" argument, which was ~10×
+/// conservative. The persistent rayon `ThreadPool` reuse landed in
+/// `91e028a` cut the per-call cv-wait overhead enough that the
+/// original 12× wall regression on `robot_1600` no longer
+/// reproduces; the gate's remaining job is to veto parallel on
+/// problems below break-even, not to be a blunt safety belt.
+///
+/// Consumers on non-M4 hardware (or with non-Poisson tree shapes)
+/// can override per-call via [`NumericParams::min_parallel_flops`]
+/// (or `POUNCE_FERAL_MIN_PAR_FLOPS=<u64>` from pounce-feral).
+pub const PAR_MIN_FLOPS: u64 = 10_000_000;
 
 /// Cheap O(n_supernodes) flop-cost estimate for the entire assembly
 /// tree. Used as the work gate inside [`should_parallelize_assembly`].
@@ -4004,7 +4020,7 @@ mod tests {
     fn should_parallelize_assembly_rejects_low_flop_multi_child_tree() {
         // 64 supernodes, every other one has 2 children — structural
         // gate passes. ncol=2, nrow=4 ⇒ 32 flops/node × 64 = 2048
-        // flops total. Way below PAR_MIN_FLOPS = 10^8.
+        // flops total. Way below PAR_MIN_FLOPS (10⁷ post-calibration).
         let mut specs = vec![(2usize, 4usize, 2usize); 64];
         for (i, s) in specs.iter_mut().enumerate() {
             if i % 2 == 1 {

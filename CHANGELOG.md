@@ -4,6 +4,42 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `PAR_MIN_FLOPS` lowered from 10⁸ to 10⁷ (feral#19 closeout)
+
+The work-aware parallel-assembly gate threshold drops from 10⁸ to
+10⁷ flops after direct measurement on `robot_1600` KKT dumps
+(`probe_issue_19`, session 2026-05-15-06, Apple M4 Pro):
+
+- iter 0000 (4.75×10⁶ flops): parallel hurts 0.67× → gate keeps
+  sequential ✓
+- iter 0001/0003 (1.13×10⁷ flops): parallel wins 1.42-1.48× →
+  gate now allows parallel ✓ (old 10⁸ default was blocking this)
+- iter 0006 (9.43×10⁶ flops): parallel wins 1.24× → still
+  sequential under the new threshold; traded for safety margin
+  against the 6×10⁶ break-even.
+
+Two earlier confounders that justified the conservative 10⁸: the
+per-call `rayon::ThreadPool` cv-wait cost (eliminated by the
+persistent pool in `91e028a`), and the freehand "100 µs spawn +
+10 GFLOP/s" calibration argument (off by ~10× on each side).
+The original 12× wall regression on `robot_1600` no longer
+reproduces post-`91e028a` — forced-parallel is now ~30% *faster*
+than sequential there.
+
+Non-M4 hardware can still override per-call via
+`NumericParams::min_parallel_flops` (or
+`POUNCE_FERAL_MIN_PAR_FLOPS=<u64>` from pounce-feral). See
+`dev/research/par-min-flops-calibration-2026-05-15.md` (update
+section) and `dev/sessions/2026-05-15-06.md`.
+
+### Added — `probe_issue_19` binary
+
+`cargo run --release --bin probe_issue_19 -- <mtx> [reps]` times
+`Solver::factor()` on a single KKT matrix under three configs
+(sequential, parallel-with-gate, parallel-with-gate-off) and
+reports the gate's decision. Used to land the issue-#19 closeout;
+useful in general for diagnosing per-workload gate behaviour.
+
 ### Changed — `Solver` reuses a persistent `rayon::ThreadPool` (feral#19 follow-up)
 
 `Solver` now owns a lazily-built `rayon::ThreadPool` that is reused
