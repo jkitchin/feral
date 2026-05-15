@@ -3102,3 +3102,37 @@ intent.
 - `Cargo.toml:39-45` (lib crate-type).
 - `src/lib.rs` (`pub mod capi;`).
 - `feral-ipopt-shim/` (consumer, in-tree).
+
+---
+
+## 2026-05-15 — Issue #17 reclassified: solve-accuracy regression, not inertia bug
+
+**Decision.** feral issue #17 (robot_1600 WrongInertia loop with
+`cascade_break_ratio = Some(0.5)`) is reclassified from
+"cascade-break produces wrong inertia" to "cascade-break produces
+~5-OOM solve-accuracy regression."
+
+**Evidence.** On 4 KKT matrices dumped from a `cb=default` pounce
+run (iter004/010/043/046 on `robot_1600.nl`), feral's inertia
+matches MA57 exactly under `cb=default`: every `(p, n, z)` tuple
+agrees. The "WrongInertia" status is IPM expected-count vs actual
+matrix inertia (IPM-trajectory issue), not a feral counting
+error. On iter004 with identical input, solve vectors differ by
+relative 1.4e-5 between `cb=off` and `cb=default` despite
+identical reported inertia — implying the L factor is perturbed,
+not just D.
+
+**Implication for fix path.** The right cut is *downstream*
+(wire `Solver::solve_refined` into pounce-feral so iterative
+refinement absorbs the 1e-5 perturbation), not *upstream*
+(disabling cascade-break would revert the cascade-arm gate
+shipped by #15 without addressing the root cause). The deeper
+fix is to ensure cascade-break perturbs only D, not L — that
+work is gated on whether refinement alone closes #17.
+
+**References.**
+- `dev/sessions/2026-05-15-01.md` (full investigation).
+- `dev/journal/2026-05-15-01.org`.
+- `src/bin/diag_robot1600_eigs.rs` (reproducer).
+- pounce commit `84add74` (`POUNCE_FERAL_CASCADE_BREAK` env-var).
+- feral commit `c6eee1f` (F2.3 `RefinementDiagnostics`).

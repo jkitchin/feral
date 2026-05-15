@@ -1456,3 +1456,31 @@ implementing dead code and recording a clean closure.
 
 References: `dev/research/dense-app-path.md`,
 `dev/decisions.md` 2026-05-13 entry, issue #10 thread.
+
+---
+
+## 2026-05-15 — Default `cascade_break_ratio = None` to fix issue #17
+
+**Attempt.** Considered making feral's default `cascade_break_ratio`
+revert to `None` (legacy delayed-pivot path) to close issue #17
+without any IPM-side change. Rationale: cb=off converges
+robot_1600 in 40 iters / 6.1 s vs cb=default's MaxIter at 200
+iters / 53 s.
+
+**Why rejected.** Cascade-break is the cascade-arm gate shipped
+by #15 and is calibrated across the bench corpus to help on a
+specific class of matrices. Disabling it by default would
+regress those without addressing the underlying mechanism in
+robot_1600. The 2026-05-15 decision (`dev/decisions.md`)
+established the failure is a *solve-accuracy* regression (~5-OOM
+on identical inertia), not an *inertia-counting* one. Fixing it
+upstream by removing cascade-break trades one regression for
+another.
+
+**Status.** Issue #17 is being addressed downstream: wire
+`Solver::solve_refined` into `pounce-feral/src/lib.rs:107` so
+F2.3 iterative refinement absorbs the perturbation. Pursued in
+next session.
+
+References: `dev/sessions/2026-05-15-01.md`,
+`dev/decisions.md` 2026-05-15 entry, issue #17 thread.

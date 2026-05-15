@@ -1,0 +1,98 @@
+#+TITLE: Journal 2026-05-15-01
+#+STARTUP: showall
+
+* 09:00 :issue-17:robot_1600:cascade-break:
+Picked up feral issue #17 (robot_1600 fails with cascade_break_ratio
+=Some(0.5)). Hypothesis in the issue: cascade-break force-accepts small
+pivots → wrong inertia count → IPM over-regularizes → MaxIter.
+
+Reproduced: pounce-feral on robot_1600.nl
+- cb=default: MaxIter @ 200 iters, 53 s
+- cb=off (POUNCE_FERAL_CASCADE_BREAK=off): Optimal in 40 iters, 6.1 s
+Big effect, so the trigger is implicated.
+
+* 09:30 :issue-17:diagnostic:patches:
+Wired POUNCE_FERAL_CASCADE_BREAK env-var into pounce-feral so we can
+A/B compare without rebuilding. Pattern matches existing
+POUNCE_DUMP_KKT and FERAL_PARALLEL. 6/6 pounce-feral tests pass.
+Committed locally on pounce main as ~84add74~. Push to origin/main
+denied by auto mode classifier (default-branch push not authorized);
+commit sits local pending user decision.
+
+* 10:00 :issue-17:dump-kkt:
+Dumped KKT JSONL for both configs via POUNCE_DUMP_KKT. Initial run
+silently produced empty files because POUNCE_DUMP_KKT semantics is
+file-path not dir-path — fixed and re-ran.
+
+Extracted 4 iter matrices to ~.mtx~ (iter004, 010, 043, 046 — chosen
+to span the cb=default trajectory).
+
+* 10:30 :issue-17:reference-solver:MA57:MUMPS:
+MUMPS factor failed on all 4 with INFOG(1)=-9 (memory allocation).
+MA57 succeeded on all 4 → used MA57 as the reference oracle.
+
+Result: feral inertia matches MA57 *exactly* on every dumped matrix
+under cb=default:
+- iter004: (14398, 9602, 0) ✓
+- iter010: (14399, 9601, 0) ✓
+- iter043: (14398, 9602, 0) ✓
+- iter046: (14383, 9617, 0) ✓
+
+This *overturns* the issue's hypothesis. Cascade-break is not
+producing wrong inertia. The "WrongInertia" status from pounce is
+the IPM's expected count (9601) disagreeing with the matrix's actual
+inertia — that's an IPM-trajectory issue, not a feral counting bug.
+
+* 11:00 :issue-17:solve-accuracy:5oom:
+On iter004 (identical input matrix in cb=off and cb=default), both
+configs report Success and same inertia (14398, 9602, 0). But the
+solution vectors differ:
+
+#+BEGIN_EXAMPLE
+||sol_cb_default - sol_cb_off||_inf       = 2.3e-4
+||sol_cb_off||_inf                         = 16
+relative diff                              = 1.4e-5
+#+END_EXAMPLE
+
+That's ~5 orders of magnitude solve-accuracy loss for cb=default vs
+cb=off without any change in reported inertia. Plausible cause: the
+cascade-break perturbation modifies the L factor (not just D), so
+the solve sees a slightly different system than what generated the
+inertia count.
+
+* 11:30 :issue-17:f23:refinement:
+Looked at where pounce calls feral's solve. ~pounce-feral/src/lib.rs:107~
+calls ~Solver::solve~, not ~Solver::solve_refined~. The F2.3 iterative
+refinement we shipped last week (with ~RefinementDiagnostics~) is
+therefore *not absorbing this 1e-5 solve error*.
+
+Three candidate fixes:
+1. Wire ~Solver::solve_refined~ into pounce-feral. Cheapest fix; F2.3
+   already has the kernel.
+2. Default ~cascade_break_ratio = None~ in feral. Reverts to legacy
+   delayed-pivot path; we lose the cascade-arm gate (#15) benefit
+   on the matrices it actually helps.
+3. Keep cascade-break but ensure the L factor isn't perturbed when
+   it triggers — only D gets touched.
+
+(2) is too blunt. (1) is recommended next step; (3) is the deeper
+fix that lets cascade-break keep its inertia-correctness role while
+not degrading solves.
+
+* 12:00 :issue-17:diag-bin:
+Created ~src/bin/diag_robot1600_eigs.rs~ for offline reproduction.
+Takes one or more KKT .mtx files, runs feral under both cb=off and
+cb=default, reports inertia + K smallest |eig(D)| + count of pivots
+below 1e-12 / 1e-10 / 1e-8 / 1e-6 thresholds. Useful for future
+issue triage; first non-test consumer of ~SparseFactors~ field
+walking from a bin.
+
+* 14:00 :session-end:bench:
+Phase 2.8.1 corpus bench:
+- dense:  small <200 p90=1.21 ✓  medium <500 p90=1.54 ✓
+- sparse: small <200 p90=1.46 ✓  medium <500 p90=1.46 ✓
+No regression from last session (2026-05-14-02 was infra-only).
+
+cargo test --lib --release → 246 passed, 0 failed, 5 ignored.
+cargo clippy --all-targets -- -D warnings → clean (after renaming
+~eigs_of_D~ → ~eigs_of_d~ in the new diag bin).
