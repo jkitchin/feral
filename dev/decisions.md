@@ -3136,3 +3136,52 @@ work is gated on whether refinement alone closes #17.
 - `src/bin/diag_robot1600_eigs.rs` (reproducer).
 - pounce commit `84add74` (`POUNCE_FERAL_CASCADE_BREAK` env-var).
 - feral commit `c6eee1f` (F2.3 `RefinementDiagnostics`).
+
+---
+
+## 2026-05-15-02 — Iterative refinement is the default downstream fix for cascade-break L-factor perturbation
+
+**Decision.** Make `Solver::solve_many_refined` (one round of
+iterative refinement against the original matrix) the *default*
+backsolve path for both feral IPM consumers:
+
+- `src/capi.rs:feral_solve` (the C ABI consumed by
+  `feral-ipopt-shim` and any future Ipopt-style integration).
+  Opt out with `FERAL_REFINE=0`.
+- `pounce-feral` (`pounce/crates/pounce-feral/src/lib.rs`,
+  `use_refined` field). Opt out with `POUNCE_FERAL_REFINE=0`.
+
+Cascade-break (`NumericParams::cascade_break_ratio = Some(0.5)`)
+stays enabled — it helps on the matrices it was calibrated for
+(feral#8, #15) and the perturbation it introduces is absorbed by
+one round of refinement.
+
+**Why.** Per the 2026-05-15-01 decision and forensics: cascade-
+break perturbs the L factor (not just D), producing a per-pivot
+backsolve residual ~1e-5 that exceeds the IPM duality gap in late
+iters. The unrefined backsolve was the binding constraint for
+feral#17 (`robot_1600`) and feral#18 (`NARX_CFy`). One round of
+refinement against the cached original matrix closes the gap.
+
+**Cost.** Per backsolve: one sparse SymV (mat-vec) + one extra
+forward/back substitution. For NARX_CFy that maps to ~3.2× the
+wallclock of ipopt-MUMPS at the same iter band — orthogonal to
+the stall failure mode and addressable separately.
+
+**Evidence.**
+- `ipopt-feral NARX_CFy.nl ... max_iter=500` → Optimal, 485
+  iters, 498 s (was: TIMEOUT @ 250 s, iter 279).
+- `ipopt-feral robot_1600.nl ... max_iter=500` → Optimal, 301
+  iters, 19.3 s (was: MaxIter @ 3000 iters, 395 s on pounce; or
+  MaxIter @ 200 with the issue's stale opt-file cap).
+- `cargo test --lib --release` → 248 passed including two new
+  `capi::tests::capi_factor_and_refined_solve` /
+  `capi_solve_unrefined_opt_out`.
+- `cargo test --release -p pounce-feral` → 6 passed.
+
+**References.**
+- feral GitHub issues #17, #18.
+- `dev/sessions/2026-05-15-02.md`.
+- `dev/journal/2026-05-15-02.org`.
+- Prior decision block (2026-05-15-01) for the forensic
+  groundwork this builds on.

@@ -1,0 +1,129 @@
+#+TITLE: Session 2026-05-15-02 journal — issue #18 (NARX_CFy) + #17 (robot_1600) refinement wire-up
+
+* 09:30 :issue-18:triage:
+GitHub issue #18 reported: ipopt-feral and pounce-feral stall on
+NARX_CFy (485-iter Mittelmann NLP) while ipopt-MA57 (234 iters,
+33s) and ipopt-MUMPS (437 iters, 154s) converge. Trajectory shape
+matches issue #17 (robot_1600): early progress, then α stuck in
+[0.05, 0.30] with inf_du ~1e-3.
+
+Cross-IPM confirmation (ipopt + pounce both stall with feral, both
+converge with MA57) isolates the regression to feral. Issue's
+hypothesis #1 (backsolve residual floor) aligns with what session
+2026-05-15-01 already discovered for robot_1600: cascade-break
+perturbs the L factor → 5-OOM solve-accuracy regression →
+unrefined backsolve can't beat duality gap.
+
+* 09:55 :issue-18:plan:
+Plan: wire ~Solver::solve_refined~ into both consumers (pounce-
+feral and feral-ipopt-shim via the C ABI). Verification: re-run
+ipopt-feral on NARX_CFy and robot_1600. Expected: convergence in
+iter band comparable to ipopt-MUMPS.
+
+Pounce-feral already had the plumbing (~POUNCE_FERAL_REFINE=1~)
+from a prior session — just needs the default flipped. C ABI in
+~src/capi.rs:feral_solve~ goes through ~solve_many~, not
+~solve_many_refined~ — needs surgery.
+
+* 10:20 :capi:edit:
+Modified ~src/capi.rs:feral_solve~ to route through
+~Solver::solve_many_refined~ against the cached ~s.matrix~. Added
+~FERAL_REFINE=0~ env-var opt-out for debugging. Added two inline
+unit tests (~capi_factor_and_refined_solve~,
+~capi_solve_unrefined_opt_out~).
+
+Tests: ~cargo test --lib --release~ → 248 passed (was 246 +
+2 new), 0 failed, 5 ignored. clippy + fmt clean.
+
+Justification for ~s.matrix~ being the right reference: Ipopt's
+~MultiSolve~ protocol guarantees no values writes between
+~feral_factor~ and ~feral_solve~ (we own the values buffer, caller
+only writes when given the pointer back). So ~s.matrix~ at solve
+time equals the matrix that was factored.
+
+* 10:45 :pounce-feral:edit:
+Flipped ~use_refined~ default in
+~pounce/crates/pounce-feral/src/lib.rs~ from off → on. Env-var
+~POUNCE_FERAL_REFINE~ is now opt-OUT (~=0/false/off/no~). Updated
+the doc comment to reference feral#17 and #18 with the session
+2026-05-15-01 forensic finding.
+
+Tests: ~cargo test --release -p pounce-feral~ → 6 passed.
+
+* 11:10 :verify:rebuild:
+Rebuilt ~libferal.a~ via ~cargo build --release --lib~ (37 MB
+staticlib). Re-linked the ~ipopt-feral~ binary by deleting
+~build-feral/src/Apps/AmplSolver/ipopt~ and running
+~make ipopt LIBS=/Users/jkitchin/projects/feral/target/release/libferal.a~
+from that dir. ~nm~ confirms new ~_feral_solve~ symbol address.
+
+The Makefile that produced the original binary doesn't have
+libferal.a in any LDADD/LIBS — the user evidently passed
+~LIBS=/path/to/libferal.a~ at make time. Documented for future
+me.
+
+* 11:25 :verify:narx-cfy:
+~ipopt-feral NARX_CFy.nl linear_solver=feral max_iter=500 print_level=5~
+
+Result: *Optimal Solution Found, 485 iters, 498 s wallclock.*
+
+Trajectory comparison vs issue #18 report:
+- iter 99: old 8.81e-3 α=0.09 (stall onset); new 8.78e-3 α=1.00 (refinement breaking through)
+- iter 234: old still oscillating; new 8.86e-3 α=1.00
+- iter 437: ipopt-MUMPS converged at 8.6014e-3; new still iterating, obj 8.59e-3
+- iter 485: new converges to 8.5822552e-3, inf_du=8.9e-9, complementarity 3.4e-9
+
+Iter count (485) is in the same band as ipopt-MUMPS (437) and
+passes the issue's iter gate (≤500). Wall (498s) misses the 200s
+gate — that's general feral factor speed (~3.2× MUMPS),
+orthogonal to the stall mechanism. *Failure mode is closed.*
+
+* 11:48 :verify:robot-1600:trap:
+First robot_1600 run hit MaxIter @ 200 / 12s — looked like the
+fix failed. Root cause: stale ~/tmp/ipopt.opt~ overriding
+~max_iter~ to 200. Re-ran from
+~/tmp/feral_narx_artifacts/~ (no opt file).
+
+Result: *Optimal Solution Found, 301 iters, 19.3 s wallclock.*
+
+Vs issue #17 baselines:
+- ipopt-MA57: 35 iters, 0.4s
+- ipopt-MUMPS: 35 iters, 1.2s
+- old pounce-feral cb=default: MaxIter @ 3000 iters, 395s
+- old ipopt-feral: MaxIter (capped by stale opt file)
+- new ipopt-feral: 301 iters, 19.3s ✓
+
+301 iters is still ~8× MA57 — refinement closes the stall but
+cascade-break still costs significant iter count vs cb=off (which
+hit 39-40 iters). Not addressed in this session; would need
+further L-factor forensics per task 2 of session 2026-05-15-01's
+"next session should". Failure mode #17 is closed.
+
+* 12:05 :issue-comment-blocked:
+~gh issue comment 18~ denied by Claude Code auto mode classifier
+(reads as "publishing under user identity beyond scope"). Drafted
+the comment in chat for the user to post manually.
+
+* 12:30 :decisions:
+Iterative refinement is the right downstream fix for the
+cascade-break L-factor perturbation; keep cascade-break enabled
+(it helps on calibrated matrices per feral#8, #15). Refinement
+default is now ON for the two IPM consumers. Recorded in
+~dev/decisions.md~.
+
+* 12:40 :bench:
+~cargo run --bin bench --release~ — synthetic-only output (no
+corpus on this machine). Eight matrices, all passing. No
+regression suspected: refinement is solve-side only; factor hot
+path untouched.
+
+#+begin_example
+spd_10             10           81           11     (10, 0, 0)
+spd_50             50           22            3     (50, 0, 0)
+spd_100           100           79            5    (100, 0, 0)
+spd_200           200          401           16    (200, 0, 0)
+kkt_10_3           13            3            0     (10, 3, 0)
+kkt_30_10          40           30            1    (30, 10, 0)
+kkt_50_15          65           53            2    (50, 15, 0)
+kkt_100_30        130          205            7   (100, 30, 0)
+#+end_example
