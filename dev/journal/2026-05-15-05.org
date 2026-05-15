@@ -1,0 +1,81 @@
+* 21:30 :issue19:calibration:planning:
+Session 05 goal: calibrate ~PAR_MIN_FLOPS~ (issue #19 follow-up
+from session 04's next-session list, item 1). Push status check
+first since session 04 claimed 5 unpushed commits but git status
+shows ~origin/main~ already up to date — those commits made it
+out before the checkpoint claim was written. No push needed.
+
+* 21:45 :issue19:calibration:corpus:
+Corpus not present locally (no ~data/matrices/kkt/~), so the
+canonical ~bench_solver_corpus~ harness can't drive the
+calibration directly. Picked the Poisson optimal-control KKT
+synthetic from ~diag_poisson_kkt.rs~ instead — it's a realistic
+sparse-indefinite KKT with a wide enough size range (K=15..160
+→ n_kkt 675..76800) to span 5 orders of magnitude in
+~estimate_assembly_flops~.
+
+* 22:00 :issue19:calibration:probe:
+Wrote ~src/bin/calibrate_par_min_flops.rs~. Sweeps K, runs
+symbolic once per K, then times best-of-N sequential vs
+forced-parallel factor calls. The "forced" framing uses
+~factorize_multifrontal_supernodal_parallel~ and
+~factorize_multifrontal_supernodal_with_workspace~ directly,
+bypassing ~should_parallelize_assembly~. This separates
+*driver performance* (what we want to calibrate) from *gate
+decision* (what the gate currently does about it).
+
+All runs inside a single persistent ~rayon::ThreadPool~ wrapping
+the parallel calls in ~pool.install(...)~, matching the
+Solver-owned pool from session 04. Without this the calibration
+would measure pool-construction overhead repeatedly, which is
+not the production case.
+
+* 22:15 :issue19:calibration:result:
+Probe output (reps=10, M4 Pro, 14 rayon threads):
+
+#+begin_example
+   K     n_kkt   n_snode    mc     est_flops     seq_ms     par_ms   par/seq    decision
+  15       675       223     y        126429      0.201      0.438     2.179  sequential
+  20      1200       373     y        323233      0.383      0.674     1.760  sequential
+  25      1875       580     y        671452      0.635      0.942     1.483  sequential
+  30      2700       812     y       2478214      1.207      1.429     1.184         tie
+  40      4800      1447     y       5913401      2.355      2.320     0.985         tie
+  50      7500      2254     y      11872426      4.233      3.518     0.831    parallel
+  60     10800      3247     y      23302522      7.305      5.405     0.740    parallel
+  80     19200      5827     y      56828648     16.063      9.868     0.614    parallel
+ 100     30000      9061     y     114790149     30.230     16.117     0.533    parallel
+ 130     50700     15341     y     266729561     61.135     28.724     0.470    parallel
+ 160     76800     23313     y     541077112    114.278     47.630     0.417    parallel
+#+end_example
+
+Break-even at est_flops ≈ 6e6 (K=40). Parallel wins ≥1.2× at
+est_flops ≥ 1.2e7 (K=50). Current ~PAR_MIN_FLOPS = 1e8~ is ~5×
+conservative on this hardware — misses K=50/60/80 wins of
+1.2×–1.65×.
+
+* 22:30 :issue19:calibration:decision:
+Decision: *don't change the const default in this session*.
+Two reasons:
+
+1. Calibration is on one workload family (Poisson-KKT) and one
+   CPU (M4 Pro). Issue #19's reporter saw the 12× wall regression
+   on non-M4 hardware on robot_1600, a different problem family.
+   Without their probe data I can't verify 3e7 would be safe on
+   their workload mix.
+
+2. The existing ~NumericParams::min_parallel_flops~ knob already
+   lets consumers override the default. Lowering the default is
+   only a default-policy change, not a capability change — it
+   should be made with cross-hardware data, not unilaterally.
+
+Wrote up the methodology, data, and recommendation in
+~dev/research/par-min-flops-calibration-2026-05-15.md~. Will
+post to issue #19 asking the reporter to run the probe on their
+hardware.
+
+* 22:40 :issue19:calibration:tests:
+~cargo test --lib --release~ → 256 passed (no new tests; the
+probe is a binary, not a test). ~cargo clippy --all-targets
+--release -- -D warnings~ clean. ~cargo fmt~ applied once after
+the initial write (fmt reflowed one chained ~pool.install~ call
+to satisfy line length).
