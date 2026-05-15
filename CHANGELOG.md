@@ -4,6 +4,24 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `feral_solve` C ABI defaults to iterative refinement
+
+`feral_solve` in the C ABI (`src/capi.rs`) now routes through
+`Solver::solve_many_refined` against the cached factored matrix
+by default. This closes the residual floor that was causing
+ipopt-feral to stall in the final-tail convergence on Mittelmann
+`NARX_CFy.nl` (feral#18 — ipopt-feral now Optimal at 485 iters
+vs TIMEOUT before) and `robot_1600.nl` (feral#17 — ipopt-feral
+now Optimal at 301 iters / 19 s vs MaxIter before). The fix is
+the same in both: cascade-break perturbs the L factor enough
+that the unrefined backsolve carries a ~1e-5 residual that the
+IPM can't drive below the duality gap; one round of refinement
+against the original matrix closes the gap. Opt out with
+`FERAL_REFINE=0` in the environment. Cascade-break itself stays
+enabled — it helps on the matrices it was calibrated for
+(feral#8, feral#15). See `dev/decisions.md` (2026-05-15-02
+block) and `dev/sessions/2026-05-15-02.md`.
+
 ### Added — Synthetic-matrix scaling benchmark vs MUMPS and MA57
 
 New harness at `external_benchmarks/scaling/` that sweeps four

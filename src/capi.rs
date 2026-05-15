@@ -197,10 +197,24 @@ pub unsafe extern "C" fn feral_factor(
 /// Solve `A X = B` in place. `rhs` is column-major, length
 /// `n * nrhs`. On success the buffer holds X.
 ///
+/// By default this routes through `Solver::solve_many_refined`: one
+/// round of iterative refinement against the original matrix held
+/// in `s.matrix`. This closes the residual floor that caused
+/// ipopt-feral to stall in the final-tail convergence on
+/// `robot_1600` (feral#17) and `NARX_CFy` (feral#18) — feral's
+/// inertia agrees with MA57 on those problems, but cascade-break's
+/// L-factor perturbation produces a per-pivot residual the IPM
+/// can't drive below the duality gap without refinement.
+///
+/// Opt out by setting `FERAL_REFINE=0` in the environment. With
+/// refinement disabled this is equivalent to `Solver::solve_many`.
+///
 /// # Safety
 /// `s` must come from `feral_new` and a successful `feral_factor`
 /// must have run since the most recent `feral_set_structure` /
-/// values fill. `rhs` must point to at least `n * nrhs` `f64`s.
+/// values fill. The values buffer must not have been modified
+/// between `feral_factor` and `feral_solve` (Ipopt's protocol).
+/// `rhs` must point to at least `n * nrhs` `f64`s.
 #[no_mangle]
 pub unsafe extern "C" fn feral_solve(s: *mut FeralSolver, nrhs: i32, rhs: *mut f64) -> i32 {
     catch_unwind(AssertUnwindSafe(|| {
@@ -209,14 +223,25 @@ pub unsafe extern "C" fn feral_solve(s: *mut FeralSolver, nrhs: i32, rhs: *mut f
         }
         // SAFETY: caller contract.
         let s = &*s;
-        let n = match &s.matrix {
-            Some(m) => m.n,
+        let matrix = match &s.matrix {
+            Some(m) => m,
             None => return FERAL_FATAL,
         };
+        let n = matrix.n;
         let nrhs_usize = nrhs as usize;
         // SAFETY: caller contract — `rhs` has at least n*nrhs entries.
         let rhs_slice = std::slice::from_raw_parts_mut(rhs, n * nrhs_usize);
-        match s.solver.solve_many(rhs_slice, nrhs_usize) {
+
+        let refined = !matches!(
+            std::env::var("FERAL_REFINE").as_deref(),
+            Ok("0") | Ok("false") | Ok("off") | Ok("no"),
+        );
+        let solved = if refined {
+            s.solver.solve_many_refined(matrix, rhs_slice, nrhs_usize)
+        } else {
+            s.solver.solve_many(rhs_slice, nrhs_usize)
+        };
+        match solved {
             Ok(x) => {
                 rhs_slice.copy_from_slice(&x);
                 FERAL_SUCCESS
@@ -243,4 +268,82 @@ pub unsafe extern "C" fn feral_num_neg(s: *const FeralSolver) -> i32 {
         s.neg_evals
     }))
     .unwrap_or(-1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 2x2 indefinite `[[1,2],[2,1]]` (eigenvalues 3, -1) — RHS (3,3),
+    /// expected `x = (1, 1)`. CSR upper-triangle with 0-based indices:
+    /// row 0: cols (0,1); row 1: col (1). `ia = [0, 2, 3]`,
+    /// `ja = [0, 1, 1]`, `values = [1, 2, 1]`. Exercises factor →
+    /// refined solve via the C ABI surface.
+    #[test]
+    fn capi_factor_and_refined_solve() {
+        unsafe {
+            let s = feral_new();
+            assert!(!s.is_null());
+
+            let ia: [i32; 3] = [0, 2, 3];
+            let ja: [i32; 3] = [0, 1, 1];
+            assert_eq!(
+                feral_set_structure(s, 2, 3, ia.as_ptr(), ja.as_ptr()),
+                FERAL_SUCCESS
+            );
+            let vp = feral_values_ptr(s);
+            assert!(!vp.is_null());
+            std::ptr::copy_nonoverlapping([1.0_f64, 2.0, 1.0].as_ptr(), vp, 3);
+
+            assert_eq!(feral_factor(s, 1, 1), FERAL_SUCCESS);
+            assert_eq!(feral_num_neg(s), 1);
+
+            let mut rhs = [3.0_f64, 3.0];
+            // Default path (refined).
+            assert_eq!(feral_solve(s, 1, rhs.as_mut_ptr()), FERAL_SUCCESS);
+            assert!((rhs[0] - 1.0).abs() < 1e-12, "x0 = {}", rhs[0]);
+            assert!((rhs[1] - 1.0).abs() < 1e-12, "x1 = {}", rhs[1]);
+
+            feral_free(s);
+        }
+    }
+
+    /// Same matrix as above, but with `FERAL_REFINE=0` set. Verifies
+    /// the opt-out path still solves correctly.
+    #[test]
+    fn capi_solve_unrefined_opt_out() {
+        // Process-wide env var — fine because cargo serialises this
+        // test (single mod, single thread per env mutation) and we
+        // restore it before exit. If the test panics with REFINE off
+        // we leak the override; that only affects this test binary.
+        let prior = std::env::var("FERAL_REFINE").ok();
+        // SAFETY: single-threaded test sets a process-wide env var. No
+        // other thread observes the transition.
+        unsafe {
+            std::env::set_var("FERAL_REFINE", "0");
+
+            let s = feral_new();
+            let ia: [i32; 3] = [0, 2, 3];
+            let ja: [i32; 3] = [0, 1, 1];
+            assert_eq!(
+                feral_set_structure(s, 2, 3, ia.as_ptr(), ja.as_ptr()),
+                FERAL_SUCCESS
+            );
+            let vp = feral_values_ptr(s);
+            std::ptr::copy_nonoverlapping([1.0_f64, 2.0, 1.0].as_ptr(), vp, 3);
+            assert_eq!(feral_factor(s, 0, 0), FERAL_SUCCESS);
+
+            let mut rhs = [3.0_f64, 3.0];
+            assert_eq!(feral_solve(s, 1, rhs.as_mut_ptr()), FERAL_SUCCESS);
+            assert!((rhs[0] - 1.0).abs() < 1e-12);
+            assert!((rhs[1] - 1.0).abs() < 1e-12);
+
+            feral_free(s);
+
+            match prior {
+                Some(v) => std::env::set_var("FERAL_REFINE", v),
+                None => std::env::remove_var("FERAL_REFINE"),
+            }
+        }
+    }
 }
