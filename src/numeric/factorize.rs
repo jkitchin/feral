@@ -3881,12 +3881,16 @@ mod tests {
     }
 
     /// Build a small Vec<Supernode> with the given (ncol, nrow,
-    /// n_children) so the flop-estimate gate can be tested in
-    /// isolation. The supernode `children` lists are not consistent
-    /// (they'd require ordering and parent pointers — not what we're
-    /// testing here), but `estimate_assembly_flops` only inspects
-    /// `ncol` and `nrow`, and `should_parallelize_assembly` only
-    /// inspects `children.len()` against 2.
+    /// n_children) for testing `estimate_assembly_flops` and
+    /// `should_parallelize_assembly` in isolation. Neither
+    /// function reads `row_indices` or the contents of `children`
+    /// — only `ncol`, `nrow`, `children.len()`, and the
+    /// supernodes-vec length. `row_indices` is therefore left
+    /// empty (not `vec![0; nrow]`) so the saturation test can
+    /// pass `nrow = 1 << 32` without OOMing on a 32 GiB
+    /// allocation — see CI failure on commit 8a2a8e1
+    /// (`memory allocation of 34359738368 bytes failed` on the
+    /// GH Actions runner).
     fn make_supernodes(specs: &[(usize, usize, usize)]) -> Vec<Supernode> {
         specs
             .iter()
@@ -3894,7 +3898,7 @@ mod tests {
                 first_col: 0,
                 ncol,
                 nrow,
-                row_indices: vec![0; nrow],
+                row_indices: Vec::new(),
                 children: vec![0; n_children],
             })
             .collect()
