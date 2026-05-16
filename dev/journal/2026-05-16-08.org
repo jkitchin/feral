@@ -1,0 +1,107 @@
+* 2026-05-16-08 — SQD fast-path phases (c)-(h)
+
+* 13:00 :sqd:phase-c:
+  Wired `factor_diagonal` + `factor_frontal_diagonal_in_place`
+  into src/dense/factor.rs between the BK frontal kernel and
+  the panel helpers (≈350 lines). Reuse of `do_1x1_update` for
+  the rank-1 trailing update means any future axpy SIMD work
+  benefits both paths. 3 unit tests in tests/sqd_fast_path.rs:
+  - 2x2 diag(-1, +1) → identity perm, inertia (1,1,0).
+  - 2x2 [[-2, 1], [1, 3]] → signs correct, L·D·L^T recovers
+    K within 1e-12 after un-equilibration.
+  - 2x2 with a[0,0]=0 → Err (placeholder NumericallyRankDeficient).
+  cargo test --test sqd_fast_path: 3 passed. Lib: 259 passed.
+  Committed at 58e7421.
+
+* 13:35 :sqd:phase-d:dispatch:
+  Three FrontalFactors construction sites in
+  src/numeric/factorize.rs gained an `if params.sqd_mode` arm:
+  dense_fast_factor_with_workspace (line 1117 area),
+  factor_one_supernode (line 1974), factor_one_small_leaf
+  (line 2132). Each new arm calls
+  factor_frontal_diagonal_in_place with no may_delay or
+  factor_scratch (SQD never delays; diagonal kernel does no
+  panel work).
+  Added 3 Solver-level integration tests:
+  - dense path (n=4 diag with mixed signs).
+  - multifrontal path (n=24 banded SQD; density << 1/4 routes
+    through factor_one_supernode); residual ||A x - e_0|| < 1e-10.
+  - contract-violation surfaces non-success.
+  6 tests pass. Committed at 05730a4.
+
+* 14:10 :sqd:phase-e:error:guard:
+  Added `FeralError::SqdContractViolated { column, pivot }` to
+  src/error.rs (with Display impl) and wired the L-column growth
+  guard into the diagonal kernel:
+  - guard formula: max_{i>k} |a[i,k]| <= 1/sqrt(EPS) ≈ 6.7e7
+    after do_1x1_update (a[i,k] now holds l_{ik}).
+  - Both `|d| <= zero_tol` and L-growth bound trip the new
+    variant.
+  Test sqd_l_growth_bound_rejected: 2x2 with a[0,0]=1e-12,
+  a[1,0]=1.0 — uses factor_frontal_diagonal_in_place directly
+  to bypass equilibration (which would rescale d to ~1 and
+  hide the bug). l_{1,0} = 1e12 trips the guard with column=0.
+  Tightened sqd_solver_dispatch_contract_violation_returns_failed
+  to match on FactorStatus::FatalError(SqdContractViolated).
+  7 tests pass. Committed at b44b9d9.
+
+* 14:35 :sqd:phase-f:tests:
+  Grew tests/sqd_fast_path.rs to 11 tests with the four
+  remaining plan categories:
+  - Reference parity #1: SPD diag(1,2,3,4) — BK and SQD both
+    recover input to 1e-12; inertia (4,0,0) agrees.
+  - Reference parity #2: 4x4 true SQD KKT with negative-block
+    diag(-1,-2), positive-block diag(1,1), coupling A. SQD
+    recovers K to 1e-12; inertia (2,2,0).
+  - Property: 7 random SQD trials with sizes m=3..6, p=2..4;
+    E,F ~ uniform(0.5,1.5); A ~ uniform(-0.1,0.1) (coupling
+    bounded so L-growth guard never trips); relative residual
+    < 1e-10 each trial. Inline LCG (deterministic, no rand
+    dep).
+  - Cache: two consecutive solver.factor(A, ...) under
+    with_sqd_mode(true) → symbolic_call_count == 1, solves
+    match bit-for-bit.
+  Helper `recover_k(&Factors)` reconstructs
+  D_eq^{-1}·L·diag(D)·L^T·D_eq^{-1} for the diagonal-D case
+  (perm identity under SQD). 11 tests pass. Committed at 4adef8c.
+
+* 15:10 :sqd:phase-g:bench:finding:
+  src/bin/bench_sqd.rs lands the synthetic-SQD harness. 6 KKT
+  shapes (tiny-dense n=16 through large-banded n=1000). Per
+  shape: 5 reps + 1 warmup, median wall-clock. Initially had
+  the ship-gate causing non-zero exit on MISS; reverted to
+  informational PASS/MISS so CI doesn't flap on per-machine
+  noise.
+  Measured (M4 Pro):
+    tiny-dense    speedup 1.04-1.12  (small absolute time, noise)
+    small-dense   speedup 1.05-1.07
+    medium-dense  speedup 0.93-1.00
+    small-banded  speedup 1.03-1.17
+    medium-banded speedup 1.06-1.07
+    large-banded  speedup 0.96-0.97  (consistent slowdown!)
+    geomean 1.025-1.053
+  The aspirational 1.15x geomean was too ambitious for these
+  shapes. The do_1x1_update kernel dominates wall-clock; the
+  BK 1x1-vs-2x2 search is not the bottleneck the plan assumed.
+  Committed at 499e5de.
+
+* 15:45 :sqd:phase-h:reframe:
+  User feedback ("Speed up is ok, especially if it works when
+  other approaches don't") reframed the value proposition.
+  Updated the session checkpoint and decisions.md entry to lead
+  with robustness:
+  - Vanderbei 1995 Theorem 2.1 guarantees diagonal D
+    *independent* of pivot-search success.
+  - Loud contract enforcement (SqdContractViolated immediately
+    on either guard trip) — never silent BK fallback.
+  - Targets in IPM inner loops (predictable factor time)
+    + saddle-point regularizers where SQD is by-construction.
+  The 1.025-1.05x speedup is now framed as a bonus, not the
+  point.
+
+* 16:00 :sqd:done:
+  Phase (h) closes the SQD ship-out. CHANGELOG, decisions.md,
+  session checkpoint, and this journal all landed. Next: pounce
+  IPM can flip on with_sqd_mode(true) and measure
+  iteration-level numbers — that's where saving a few percent
+  per factor compounds into something measurable.

@@ -4,6 +4,46 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — SQD (symmetric quasi-definite) fast-path (#34)
+
+New opt-in factorisation path for matrices satisfying Vanderbei
+(1995)'s SQD contract `K = [[-E, A^T], [A, F]]` with `E, F ≻ 0`.
+Enable via `Solver::new().with_sqd_mode(true)`. The kernel skips
+the Bunch-Kaufman 1×1-vs-2×2 pivot search and runs a pure
+diagonal-D loop, reusing the shared `do_1x1_update` rank-1
+trailing kernel.
+
+New public surface:
+- `feral::dense::factor::factor_diagonal`
+- `feral::dense::factor::factor_frontal_diagonal_in_place`
+- `feral::Solver::with_sqd_mode(bool)`
+- `feral::NumericParams::sqd_mode: bool`
+- `feral::FeralError::SqdContractViolated { column: usize,
+  pivot: f64 }`
+
+Contract enforcement (loud failure, never silent BK fallback):
+1. `|d_kk| > zero_tol` near-zero guard.
+2. `max |l_{ik}| <= 1/sqrt(EPS) ≈ 6.7e7` Gill-Saunders-Shinnerl
+   1996 column-growth guard.
+
+A trip on either surfaces `SqdContractViolated` immediately;
+the caller decides whether to refactor with `with_sqd_mode(false)`
+(BK fallback) or investigate the input.
+
+Bench: new `cargo run --release --bin bench_sqd` runs 6 synthetic
+KKT shapes through both BK and SQD paths and reports per-shape
+speedup + geomean. Measured geomean speedup ≈ 1.025–1.05× on the
+synthetic corpus (M4 Pro, 2026-05-16); the value proposition is
+primarily robustness (predictable factor time, loud contract
+trips, no pivot-search dependence on near-threshold pivots) rather
+than raw speed. See `dev/sessions/2026-05-16-08.md` and
+`dev/research/sqd-fast-path.md` for the full discussion.
+
+Tests: 11 in `tests/sqd_fast_path.rs` covering kernel hand-checks,
+Solver-level dispatch (dense + multifrontal), contract-trip on
+both bounds, BK-vs-SQD reference parity, random-SQD property
+trials, and the symbolic-cache reuse contract.
+
 ### Changed — Issue #10 closes; default `nemin=16` and `OrderingMethod::Amd` confirmed (#10)
 
 Issue #10 ("Add APP path alongside TPP in dense LDLᵀ kernel") closes

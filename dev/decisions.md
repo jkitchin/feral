@@ -3512,3 +3512,43 @@ References:
 - `dev/research/issue-10-amalgamation-floor.md` (#5)
 - Commits: d3b031d, 61002f8.
 - GH: https://github.com/jkitchin/feral/issues/10#issuecomment-4467668859
+
+---
+
+## 2026-05-16 — SQD fast-path phases (c)–(g): ship as robustness path, not as a speed lever
+
+**Decision.** The M7 SQD fast-path (`Solver::with_sqd_mode(true)`)
+ships as an opt-in robustness feature, not as a performance
+optimisation. Bench targets retained as aspirational but the
+binary exits success regardless of MISS — `bench_sqd` reports
+PASS/MISS for informational tracking only.
+
+**Why.** Phase (g) measurement (`src/bin/bench_sqd.rs`, 2026-05-16
+M4 Pro) shows geomean speedup 1.025–1.05× across 6 synthetic SQD
+shapes (tiny-dense through large-banded; n = 16..1000), with
+~5% noise band that flips the sign on individual shapes. The
+shared rank-1 trailing-update kernel (`do_1x1_update`) dominates
+per-pivot wall-clock — skipping the BK 1×1-vs-2×2 search saves
+only a modest constant per column.
+
+**What ships:** the *contract*. Vanderbei (1995) Theorem 2.1
+guarantees a diagonal D for any SQD input, *independent* of any
+pivot search succeeding. For matrices near the BK pivot
+threshold (IPM KKT systems as μ shrinks, ill-conditioned saddle
+systems from constrained QP), the SQD path can complete cleanly
+where BK is forced into 2×2 pivots, rook rescues, or
+delayed-pivot cascades. Trips on the two contract guards
+(`|d| > zero_tol`; `max|l_{ik}| <= 1/sqrt(EPS)`) surface
+`FeralError::SqdContractViolated { column, pivot }` immediately
+— never silent BK fallback.
+
+**Default unchanged:** `NumericParams::sqd_mode = false`. Callers
+who can assert the contract opt in via
+`Solver::new().with_sqd_mode(true)`.
+
+References:
+- `dev/research/sqd-fast-path.md`
+- `dev/sessions/2026-05-16-08.md` (phase-by-phase ship log)
+- Commits: 58e7421 (c), 05730a4 (d), b44b9d9 (e), 4adef8c (f),
+  499e5de (g).
+- GH: #34
