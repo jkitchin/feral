@@ -320,3 +320,27 @@ Pushed origin/main (3 commits ahead: 8986679 fix, d02b39a diag,
 Next session goal per checkpoint: issue #33 (Mittelmann clnlbeam,
 97% main-thread in scalar 1×1 pivot path; extreme repro of #12
 small-front gap).
+
+* 23:30 :issue-33:slb:ab:result:negative:
+Ran the SmallLeafBatch on/off A/B that issue #33 suggestion 1
+asked for: re-test SLB on the actual 1D-banded Mittelmann panel
+(clnlbeam, henon120, lane_emden120, dirichlet120; 20 matrices)
+under the hypothesis that real workloads might tip the
+signal-vs-noise that Phase 2.11 synthetics failed.
+
+Result: panel geomean 1.002x, median 0.999x, min 0.947x, max
+1.071x. 2 wins, 1 loss out of 20. FAILS the #11 criterion (median
+≥ 1.10x AND max regression ≤ +5%).
+
+Binary: ~src/bin/diag_clnlbeam_slb.rs~. Research note:
+~dev/research/issue-33-slb-ab.md~.
+
+Key finding: the matrices with many small groups (avg 4.7-6.9
+members) show ZERO benefit, while the matrices with very wide
+groups (avg 200+) show only modest 1.05-1.07x. So per-supernode
+driver overhead is NOT the dominant cost. Per-front kernel work
+(TPP scan + scalar Schur update) really is the bottleneck.
+
+This is the empirical answer to #11 and re-prioritizes the
+roadmap: SLB cannot fix #33; #10 APP must land first. Going to
+append a tried-and-rejected entry tomorrow and re-aim at #10.
