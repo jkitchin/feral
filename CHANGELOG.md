@@ -4,6 +4,22 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Verified — Parallel assembly heuristic regression vectors after PAR_MIN_FLOPS calibration (#19)
+
+Re-ran `probe_issue_19` on the two original GH #19 regression vectors
+(robot_1600 small-KKT IPM and henon120 large-KKT IPM) on Apple M4
+Pro post `b12e03c` (PAR_MIN_FLOPS=1e7). The original 12× wall
+regression on robot_1600 no longer reproduces: the default-gated
+solver is within 1.26× of the optimal driver on the worst iter and
+beats sequential 1.3–1.45× on iters where the gate fires. The
+original 2.8× parallel win on henon120 is retained and improved to
+4.3–6.3× on steady-state iters. Persistent rayon `ThreadPool` reuse
+(`91e028a`) plus the lowered threshold (`b12e03c`) jointly close the
+issue. Full per-iter timing table and gate-decision audit in
+`dev/research/issue-19-par-min-flops-verification.md`. No source
+changes; GH #19 closed with cross-references to this note and the
+four contributing commits.
+
 ### Changed — Issue #10 closes; default `nemin=16` and `OrderingMethod::Amd` confirmed (#10)
 
 Issue #10 ("Add APP path alongside TPP in dense LDLᵀ kernel") closes
