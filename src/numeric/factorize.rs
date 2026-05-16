@@ -1075,7 +1075,8 @@ pub fn dense_fast_factor_with_workspace(
     // (preserves the absolute-tolerance contract on dense
     // abort-on-zero callers). See
     // `dev/research/f01-rankdef-underreporting.md`.
-    let local_params = override_null_pivot_tol(params, scaled_matrix_infnorm_dense(&sym.data, n), n);
+    let local_params =
+        override_null_pivot_tol(params, scaled_matrix_infnorm_dense(&sym.data, n), n);
     let params: &NumericParams = local_params.as_ref().unwrap_or(params);
 
     // Factor the full n columns. `may_delay = false` matches the
@@ -1510,8 +1511,11 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // classified as zero rather than as small-but-real. No-op under
     // `on_zero_pivot == Fail`. See
     // `dev/research/f01-rankdef-underreporting.md`.
-    let local_params =
-        override_null_pivot_tol(params, scaled_matrix_infnorm(&permuted, &scaling_pivot_order), n);
+    let local_params = override_null_pivot_tol(
+        params,
+        scaled_matrix_infnorm(&permuted, &scaling_pivot_order),
+        n,
+    );
     let params: &NumericParams = local_params.as_ref().unwrap_or(params);
 
     // Full symmetric pattern for correct row index computation
@@ -2350,8 +2354,11 @@ pub fn factorize_multifrontal_supernodal_parallel(
     // F-01: raise the per-supernode BK `zero_tol` to the Wilkinson
     // backward error floor `n · EPS · ||A_scaled||_inf`. See sequential
     // driver above and `dev/research/f01-rankdef-underreporting.md`.
-    let local_params =
-        override_null_pivot_tol(params, scaled_matrix_infnorm(&permuted, &scaling_pivot_order), n);
+    let local_params = override_null_pivot_tol(
+        params,
+        scaled_matrix_infnorm(&permuted, &scaling_pivot_order),
+        n,
+    );
     let params: &NumericParams = local_params.as_ref().unwrap_or(params);
 
     let t_phase = telemetry.map(|_| std::time::Instant::now());
