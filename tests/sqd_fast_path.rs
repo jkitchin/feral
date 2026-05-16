@@ -12,8 +12,10 @@
 //! listed in `dev/plans/sqd-fast-path.md` (and the user-approved
 //! plan at `~/.claude/plans/let-s-work-on-a-reflective-anchor.md`).
 
-use feral::dense::factor::{factor_diagonal, BunchKaufmanParams, Factors};
-use feral::{CscMatrix, FactorStatus, Inertia, Solver, SymmetricMatrix};
+use feral::dense::factor::{
+    factor_diagonal, factor_frontal_diagonal_in_place, BunchKaufmanParams, Factors,
+};
+use feral::{CscMatrix, FactorStatus, FeralError, Inertia, Solver, SymmetricMatrix};
 
 fn params() -> BunchKaufmanParams {
     BunchKaufmanParams::default()
@@ -112,8 +114,7 @@ fn sqd_2x2_with_offdiag_hand_check() {
 }
 
 /// SQD contract violation: a diagonal-zero matrix at column 0 must
-/// return `Err` (phase c uses the placeholder `NumericallyRankDeficient`;
-/// phase e replaces with `SqdContractViolated`).
+/// return `Err(FeralError::SqdContractViolated { column: 0, .. })`.
 #[test]
 fn sqd_zero_pivot_rejected() {
     let n = 2;
@@ -122,7 +123,35 @@ fn sqd_zero_pivot_rejected() {
     data[1] = 1.0;
     data[n + 1] = 3.0;
     let mat = SymmetricMatrix { n, data };
-    assert!(factor_diagonal(&mat, &params()).is_err());
+    match factor_diagonal(&mat, &params()) {
+        Err(FeralError::SqdContractViolated { column, pivot }) => {
+            assert_eq!(column, 0);
+            assert_eq!(pivot, 0.0);
+        }
+        other => panic!("expected SqdContractViolated, got {:?}", other),
+    }
+}
+
+/// Phase (e) — L-column growth bound trips even when the pivot
+/// itself clears `zero_tol`. Call `factor_frontal_diagonal_in_place`
+/// directly (bypass equilibration, which would otherwise rescale
+/// the pivot to ~1) with `a[0,0] = 1e-12`, `a[1,0] = 1.0`. After
+/// the rank-1 update, l_{1,0} = 1.0 / 1e-12 = 1e12, well above
+/// `1/sqrt(EPS) ≈ 6.7e7`. Expect SqdContractViolated at column 0.
+#[test]
+fn sqd_l_growth_bound_rejected() {
+    let n = 2;
+    let mut data = vec![0.0_f64; n * n];
+    data[0] = 1e-12;
+    data[1] = 1.0;
+    data[n + 1] = 3.0;
+    let mut mat = SymmetricMatrix { n, data };
+    match factor_frontal_diagonal_in_place(&mut mat, n, &params()) {
+        Err(FeralError::SqdContractViolated { column, .. }) => {
+            assert_eq!(column, 0);
+        }
+        other => panic!("expected SqdContractViolated, got {:?}", other),
+    }
 }
 
 // ---------- Phase (d): Solver-level dispatch ----------
@@ -242,14 +271,15 @@ fn sqd_solver_dispatch_contract_violation_returns_failed() {
 
     let mut solver = Solver::new().with_sqd_mode(true);
     let status = solver.factor(&csc, None);
-    // Phase (c) returns NumericallyRankDeficient → FactorStatus
-    // surfaces as Failed or Singular. Phase (e) will tighten to
-    // SqdContractViolated. Until then, just verify non-success.
-    assert!(
-        !matches!(status, FactorStatus::Success),
-        "expected non-success, got {:?}",
-        status
-    );
+    // Phase (e): contract trip surfaces as
+    // FatalError(SqdContractViolated { column: 0, pivot: 0.0 }).
+    match status {
+        FactorStatus::FatalError(FeralError::SqdContractViolated { column, pivot }) => {
+            assert_eq!(column, 0);
+            assert_eq!(pivot, 0.0);
+        }
+        other => panic!("expected FatalError(SqdContractViolated), got {:?}", other),
+    }
 }
 
 /// Reconstruct `L * diag(d_diag) * L^T` into a column-major n×n

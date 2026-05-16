@@ -1584,8 +1584,8 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
 }
 
 // =============================================================
-// SQD (Symmetric Quasi-Definite) fast-path — issue #34 phase (c)
-// =============================================================
+// SQD (Symmetric Quasi-Definite) fast-path — issue #34
+// =====================================================
 //
 // Vanderbei (1995) Theorem 2.1: every symmetric permutation of
 // K = [[-E, A^T], [A, F]] with E, F ≻ 0 admits an LDL^T with purely
@@ -1594,12 +1594,13 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
 // 1x1-vs-2x2 selection and run a pure diagonal-pivot loop. Mutually
 // exclusive with delayed pivoting (the builder enforces).
 //
-// The kernels are uncalled in this commit (phase c "gated"); phase
-// (d) wires `factor_one_supernode` to dispatch on `params.sqd_mode`
-// and phase (e) replaces the placeholder contract-violation error
-// (`FeralError::NumericallyRankDeficient`) with a dedicated
-// `FeralError::SqdContractViolated { column, pivot }` variant plus
-// the `sqd_diagonal_ok` L-growth predicate.
+// Contract enforcement (phase e): each pivot is checked against two
+// bounds derived from Gill-Saunders-Shinnerl 1996:
+//   (i)  |d_kk|       > zero_tol        (near-zero guard)
+//   (ii) max |l_{ik}| <= 1 / sqrt(EPS)  (column-growth guard,
+//        ≈ 6.7e7 in f64)
+// A trip on either surfaces `FeralError::SqdContractViolated
+// { column, pivot }` immediately — never a silent BK fallback.
 //
 // References: dev/research/sqd-fast-path.md, dev/decisions.md
 // 2026-05-16 entry, issue #34.
@@ -1612,9 +1613,9 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
 /// without modification. Equilibration is applied identically to
 /// [`factor`].
 ///
-/// Contract violation: `|d| <= params.zero_tol` at any column
-/// returns `Err(FeralError::NumericallyRankDeficient)` — placeholder
-/// until phase (e) introduces `FeralError::SqdContractViolated`.
+/// Contract violation: `|d| <= params.zero_tol` or the column-growth
+/// bound `max |l_{ik}| > 1/sqrt(EPS)` at any column k returns
+/// `Err(FeralError::SqdContractViolated { column: k, pivot: d })`.
 /// `params.on_zero_pivot` is *ignored*: SQD treats `zero_tol` as a
 /// hard contract trip, not a force-accept threshold.
 pub fn factor_diagonal(
@@ -1726,15 +1727,38 @@ pub fn factor_frontal_diagonal_in_place(
     //   1. d = a[k,k]; if |d| <= zero_tol, contract violated.
     //   2. Rank-1 update the trailing block via the shared
     //      `do_1x1_update` kernel (also scales L[:, k] by 1/d).
-    //   3. Count inertia from the sign of d.
+    //   3. Check the L-column growth bound (Gill-Saunders-Shinnerl
+    //      1996): max_{i>k} |l_{ik}| <= 1/sqrt(EPS) ≈ 6.7e7. A
+    //      violation means the diagonal pivot was too small relative
+    //      to its column even though it cleared `zero_tol` — abort
+    //      with SqdContractViolated rather than carry forward a
+    //      back-error blow-up.
+    //   4. Count inertia from the sign of d.
+    let l_growth_bound = 1.0 / f64::EPSILON.sqrt();
     for k in 0..ncol {
         let d = a[k * nrow + k];
         if d.abs() <= params.zero_tol {
-            // Placeholder error until phase (e) ships
-            // `FeralError::SqdContractViolated { column: k, pivot: d }`.
-            return Err(FeralError::NumericallyRankDeficient);
+            return Err(FeralError::SqdContractViolated {
+                column: k,
+                pivot: d,
+            });
         }
         do_1x1_update(a, nrow, k, fma);
+        // Post-update L-growth check: a[i, k] for i > k now holds l_{ik}.
+        let col_base = k * nrow;
+        let mut max_l: f64 = 0.0;
+        for i in (k + 1)..nrow {
+            let v = a[col_base + i].abs();
+            if v > max_l {
+                max_l = v;
+            }
+        }
+        if max_l > l_growth_bound {
+            return Err(FeralError::SqdContractViolated {
+                column: k,
+                pivot: d,
+            });
+        }
         if d > 0.0 {
             pos += 1;
         } else {
