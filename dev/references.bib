@@ -855,3 +855,43 @@
                growth means the sign pattern of D is strictly more
                stable than under BK-partial.}
 }
+
+@article{schenk2006fastfact,
+  author    = {Schenk, Olaf and G{\"a}rtner, Klaus},
+  title     = {On Fast Factorization Pivoting Methods for Sparse Symmetric
+               Indefinite Systems},
+  journal   = {Electronic Transactions on Numerical Analysis ({ETNA})},
+  year      = {2006},
+  volume    = {23},
+  pages     = {158--179},
+  url       = {https://etna.mcs.kent.edu/volumes/2001-2010/vol23/abstract.php?vol=23&pages=158-179},
+  note      = {PARDISO's supernode pivot-perturbation strategy. Tiny pivots
+               below a relative floor (alpha * machine_eps * ||A||_inf,
+               with alpha typically 1e-3 to 1e-8) are perturbed in place
+               rather than delayed up the etree. Cited in FERAL's
+               cascade-break research note as the closest published
+               precedent for the per-pivot perturbation knob; PARDISO does
+               not gate on a delay-fraction predicate, so the
+               cascade_break_ratio = 0.5 threshold has no direct analogue.
+               No local copy in dev/refs/.}
+}
+
+@book{higham2002accuracy,
+  author    = {Higham, Nicholas J.},
+  title     = {Accuracy and Stability of Numerical Algorithms},
+  publisher = {{SIAM}},
+  address   = {Philadelphia, PA},
+  year      = {2002},
+  edition   = {2},
+  isbn      = {978-0-89871-521-7},
+  doi       = {10.1137/1.9780898718027},
+  url       = {https://doi.org/10.1137/1.9780898718027},
+  note      = {Standard reference for backward-error analysis and
+               working-precision arithmetic. Section 2.6 (unit roundoff
+               for IEEE-754 double = 2^-53 ~ 1.11e-16) and the pivoting
+               chapters frame the cascade_break_eps = 1e-10 default as
+               a O(u * ||A||_inf) pivot-replacement floor with safety
+               factor against rounding-noise activation. No specific
+               1e-10 constant is derived; this is a framing reference.
+               No local copy in dev/refs/.}
+}
