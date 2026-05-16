@@ -449,6 +449,23 @@ impl Solver {
                 &mut self.workspace,
             )
         };
+        // Issue #38: invalidate the one-shot MC64 cache that the
+        // symbolic phase populated for the immediately-following
+        // numeric reuse. The cache stores the iter-0 Hungarian
+        // matching, dual variables, and column maxes; an IPM driver
+        // calls `factor()` repeatedly on the same pattern with new
+        // values, and reusing iter-0 scaling on iter-N matrix silently
+        // corrupts inertia and (eventually) explodes factor cost. See
+        // `dev/journal/2026-05-16-30.org` §17:25 and the rocket_12800
+        // / pinene_3200 reproducers. The cache stays valid for the
+        // *first* numeric call after symbolic (values match by
+        // construction); clearing it here means call #2+ falls through
+        // to a fresh `compute_symmetric(matrix)` against current values.
+        // Cost: one extra MC64 (~100–200 ms on n≈1e5) per warm refactor
+        // when scaling resolves to `Mc64Symmetric`; correctness wins.
+        if let Some(s) = self.last_symbolic.as_mut() {
+            s.cached_mc64 = None;
+        }
         match result {
             Ok((factors, inertia)) => {
                 // Step 5: stash; PartialSingular maps to Singular.
@@ -837,6 +854,61 @@ mod tests {
             s.symbolic_call_count(),
             1,
             "symbolic must be cached across re-factor on same pattern"
+        );
+    }
+
+    /// Issue #38: the `OrderingPreprocess::LdltCompress` path populates
+    /// `SymbolicFactorization::cached_mc64` for the immediately-following
+    /// numeric reuse. In an IPM driver the same `Solver` is fed values-
+    /// drifting matrices on the same pattern, and reusing the iter-0
+    /// cache on iter-N silently corrupts inertia and explodes per-factor
+    /// cost (rocket_12800 reproducer: 43.2 s wrong vs 1.6 s correct).
+    ///
+    /// The fix in `Solver::factor` clears `cached_mc64` after every
+    /// numeric call. This test locks the invariant directly by
+    /// inspecting the field, since the downstream symptom (wrong
+    /// inertia) only manifests on large arrow-KKT matrices where the
+    /// scaling change destabilises Bunch-Kaufman pivoting — Sylvester's
+    /// law keeps inertia invariant under any symmetric scaling on
+    /// small well-conditioned matrices, so a behavioural test on a
+    /// 4×4 reproducer is insensitive.
+    #[test]
+    fn mc64_cache_invalidated_after_factor_issue_38() {
+        use crate::symbolic::OrderingPreprocess;
+        // 4×4 block-anti-diagonal: MC64 matches (0,2) and (1,3) on
+        // the large off-diagonals, so `LdltCompress` populates
+        // `cached_mc64` (ncmp=2 < n=4 makes the compression path
+        // take the cache-storing branch).
+        let csc =
+            CscMatrix::from_triplets(4, &[0, 1, 2, 3], &[0, 1, 0, 1], &[1.0, 1.0, 10.0, 10.0])
+                .expect("valid CSC");
+
+        let np = NumericParams {
+            scaling: ScalingStrategy::Mc64Symmetric,
+            ..NumericParams::default()
+        };
+        let sn = SupernodeParams {
+            nemin: 1,
+            preprocess: OrderingPreprocess::LdltCompress,
+            ..SupernodeParams::default()
+        };
+        let mut s = Solver::with_params(np, sn);
+
+        let status = s.factor(&csc, None);
+        assert!(
+            matches!(status, FactorStatus::Success),
+            "factor must succeed on block-antidiag, got {:?}",
+            status
+        );
+        let sym = s
+            .last_symbolic
+            .as_ref()
+            .expect("symbolic must be stored after Success");
+        assert!(
+            sym.cached_mc64.is_none(),
+            "cached_mc64 must be cleared after factor() (issue #38: IPM \
+             reuse of iter-0 MC64 cache on iter-N matrix silently corrupts \
+             inertia and explodes factor cost on real arrow-KKTs)"
         );
     }
 
