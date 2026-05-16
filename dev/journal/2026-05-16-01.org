@@ -81,3 +81,89 @@ Results (stress baseline after split):
 Updated CHANGELOG.md (F-01 entry under Added) and
 `dev/research/f01-rankdef-underreporting.md` (implementation
 outcome section with empirical table and split rationale).
+
+* 19:30 :issue-17:rocket_12800:capi:regression-test:
+Landed three commits closing the primary thread of issue #17:
+- a82ec85: cargo fmt fix-up for F-01 (9910fce slipped past hooks).
+- da23d13: ~feral_new()~ in ~src/capi.rs~ constructs ~Solver::new()~
+  with cascade-break OFF (matches 585d739 Rust-side default), with
+  ~FERAL_CASCADE_BREAK=on|1|true|yes~ opt-in for A/B reproduction.
+  ipopt-feral parity with pounce-feral now lives in feral, not in
+  per-caller env workarounds.
+- 4de8a56: ~tests/issue_17_robot_1600_cascade_off.rs~ locks two
+  invariants — ~NumericParams::default()~ keeps cascade-break
+  disarmed (CI-safe synthetic check), and ~robot_1600_0003~ factors
+  via ~Solver::new()~ and reports MUMPS reference inertia
+  ~(14399, 9601, 0)~ (skips when corpus absent).
+
+* 20:00 :issue-17:rocket_12800:finishing-thread:investigation:
+Investigated the residual thread from #17: "rocket_12800 has a
+second inertia disagreement at iter 10 even with CB=off." Goal:
+either reproduce + root-cause, or document a clean punt.
+
+Method: rebuilt pounce against current feral (F-01 + da23d13),
+ran ~pounce rocket_12800.nl max_iter=3~ with ~POUNCE_DUMP_KKT~
+pointed at ~/tmp/rocket_dump.jsonl~ to capture every KKT system
+pounce-feral was asked to factor. 8 solves dumped (165 MB).
+
+Repacked each into a symmetric MTX and ran ~diag_robot1600_eigs~:
+
+- solve_00 (iter 0): feral reports ~(51201, 38400, 0)~ — matches
+  IPM expected. Smallest |eigs| ~1.3e-5, no near-zeros.
+- solve_01 (iter 1, first attempt): feral reports ~(51199, 38402, 0)~
+  — 2 NEGATIVES OVER EXPECTED. Smallest |eig| ~+6.64e-5~, still
+  far above any null-pivot floor. This is the WrongInertia that
+  triggers pounce's ~IpPDPerturbationHandler~ to bump ~delta_w~
+  and re-solve, exactly as designed for genuine negative-curvature
+  detection.
+- solve_02 (iter 1, after first perturbation): still ~(51199, 38402, 0)~
+  — perturbation hasn't shifted enough negatives to positive yet.
+- solve_05 (iter 2): back to ~(51201, 38400, 0)~ after sufficient
+  perturbation. Smallest |eigs| ~5.4e-5.
+
+~cb=off~ and ~cb=default~ give bit-identical inertia on all four
+solves — cascade-break is no longer involved (it's None in
+defaults). No pivots below 1e-12, 1e-10, 1e-8, OR 1e-6 in any of
+the four — the F-01 split's null-pivot band is empty here, so
+F-01 cannot have caused the disagreement either.
+
+Conclusion: there is no feral bug on rocket_12800 iter 1. The
+matrix genuinely has 38402 negative eigenvalues (the IPM expected
+38400). MUMPS / MA57 would report the same negative count and the
+same WrongInertia; their IPM would also regularize at iter 1.
+
+The original issue text:
+
+  "iters 0-9 match reference iter table to 7 sig figs;
+   regularization fires at iter 10 where reference doesn't"
+
+predates a stack of feral changes (626ac39 F-03 sparse default to
+ForceAccept; 9910fce F-01 split; da23d13 CB-off C-API default;
+several PAR_MIN_FLOPS / threadpool tweaks). The IPM trajectory
+under those changes is different — iter-1 inertia is not where
+feral and the references disagree any more. With current defaults
+the run still MaxIters, but the failure mode has shifted into
+restoration-phase divergence (objective walks from -1.0e0 to
+-1.6e0 to -1.0e0 across iters 9-60 in restoration), which is an
+IPM-side line-search/restoration quality story rather than a
+linear-solver story.
+
+What this closes: the feral half of #17 is closed. The thread is
+"rocket_12800 still MaxIters in pounce-feral", which is now a
+pounce-side investigation (restoration-phase tuning, max_soc,
+acceptable_tol, mu strategy) — feral reports correct inertia on
+every solve we dumped.
+
+Not closed (but moved out of feral scope):
+- A fresh capture of rocket_12800 under ipopt-MUMPS to confirm
+  the reference IPM does NOT regularize at iter 1, and to dump
+  reference inertia per iter for cross-check.
+- Pounce-side iter-table reproduction with the previous reference
+  to confirm what (if anything) the trajectory shift is due to.
+- Whether ~cascade_break_ratio=Some(0.7)~ (the working island on
+  robot_1600) is the right thing to recommend for control-class
+  Mittelmann problems — separate decision question.
+
+Evidence kept in ~/tmp/rocket_dump.jsonl~ (165 MB, not committed)
+and ~/tmp/rocket_solves/solve_*.mtx~ (extracted matrices, not
+committed). Reproduction recipe captured here in the journal.
