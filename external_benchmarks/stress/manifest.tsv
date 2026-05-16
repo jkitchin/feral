@@ -23,6 +23,7 @@ synth	rankdef_50_5	50	395	rankdef	Synthetic rank-45 50x50
 synth	rankdef_200_20	200	5550	rankdef	Synthetic rank-180 200x200
 synth	near_singular_eps9	100	1485	near_sing	100x100 sym indef with eps=1e-9 pivot
 synth	near_singular_eps12	100	1485	near_sing	100x100 sym indef with eps=1e-12 pivot
+synth	near_singular_eps_7	100	1485	near_sing	100x100 sym indef one λ=1e-7; pinned per issue #31 boundary
 synth	ill_cond_e10	100	1485	illcond	100x100 sym indef cond ~ 1e10
 synth	ill_cond_e14	100	1485	illcond	100x100 sym indef cond ~ 1e14
 synth	deep_null_cascade_50	50	149	cascade	Long zero-pivot cascade, n=50

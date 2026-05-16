@@ -132,6 +132,17 @@ GENERATORS = {
     "deep_null_cascade_200": lambda: gen_deep_null_cascade(200),
 }
 
+# Parametric near-singular sweep (issue #31). Each `near_singular_eps_<p>`
+# is a 100x100 sym indef matrix with exactly one eigenvalue at scale 10^-p,
+# the remaining 99 eigenvalues uniform in [0.5, 3.0] with random sign. The
+# seed varies with p so the sweep is not just rescaling of a single random
+# basis. p ∈ {6..14} covers the regime from "well above" the BK threshold
+# (1e-8) down to "two orders below" so we can pinpoint the detection bound.
+for _p in range(6, 15):
+    GENERATORS[f"near_singular_eps_{_p}"] = (
+        lambda p=_p: gen_near_singular(100, p, seed=100 + p)
+    )
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()

@@ -1,0 +1,80 @@
+#+TITLE: Session journal 2026-05-16-03
+#+STARTUP: showall
+
+* 14:20 :issue31:near-singular:inertia:bk:
+Closing GitHub issue #31 — M6 inertia certification on near-singular
+matrices. Goal: parametric sweep p ∈ {6..14} for `near_singular_eps_p`,
+find the BK detection boundary, document.
+
+* 14:30 :sweep:generator:
+Extended `external_benchmarks/stress/synth.py` with a parametric
+generator family `near_singular_eps_<p>` for p ∈ {6..14} (seed = 100+p,
+n=100, one λ = 10^-p, 99 healthy λ in [0.5, 3.0]). The existing
+seeded entries `near_singular_eps9` (seed=5) and `near_singular_eps12`
+(seed=6) are kept as-is to preserve corpus history.
+
+* 14:45 :sweep:binary:detection-boundary:
+Wrote `src/bin/diag_near_singular_sweep.rs`. Runs `Solver::new()`
+factor + `solve_refined` on each matrix; reports
+`(status, inertia, min|D_ii|, rel_res, pivtol)`.
+
+Result: every matrix in p ∈ {6..14} reports `inertia.zero == 0` with
+`min|D_ii|` between 9 and 22 and `rel_res` between 2e-16 and 6e-15.
+The "detection boundary" is `p = 6` — feral never detects the null
+pivot. The cross-check on `near_singular_eps9` / `near_singular_eps12`
+(different seed) confirms the same: zero == 0, rel_res ~ 4-5e-16.
+
+This *contradicts the issue's premise*. The issue assumed feral was
+detecting null pivots at p=9, 12. It is not.
+
+* 15:00 :bk:theory:thresholds:
+Read `src/dense/factor.rs` thresholds. Two thresholds:
+
+  - `zero_tol` = `f64::EPSILON ≈ 2.22e-16` (absolute floor for "true zero").
+  - `pivot_threshold * col_max` (column-relative). NumericParams::default()
+    sets `bk.pivot_threshold = 1e-8`, so the relative threshold here is
+    ~1e-7 (col_max ≈ O(10) for these matrices).
+
+Neither threshold ever fires because the random orthonormal Q spreads
+the small λ=10^-p across all rows. Each pre-factor `min |A_ii|` is
+already ≥ 4e-5 (mostly 1e-3 or larger). BK's emerging Schur complement
+diagonals never get small. Standard story — Higham 2002 Ch. 11 gives
+the bound |d_k| ≥ (1-α²)σ_min(A_22), and dispersing one mode across
+n directions leaves σ_min(A_22) ~ O(1) until the last block.
+
+* 15:20 :decision:no-default-change:
+Decision: do NOT change the default thresholds and do NOT propose
+trailing-norm criterion. Reasons documented in the research note
+section "Proposed criterion (rejected)":
+
+  1. Trailing-norm probe would flag p∈{6,7,8,9} as rank-deficient when
+     MUMPS/SSIDS/Pardiso all report rank-100. Would violate the
+     CLAUDE.md inertia gate.
+  2. MA27/HSL precedent: report inertia of D, not inertia inferred
+     from a separate condition probe. Users have
+     `estimate_condition_1norm` for rank certification.
+  3. Residual gate already passes uniformly at machine precision —
+     factorization is informationally complete.
+
+* 15:40 :research-note:
+Wrote `dev/research/inertia-near-singular-certification.md` with the
+full table, the theory (Bunch-Kaufman 1977, Ashcraft-Grimes-Lewis 1998,
+Higham 2002), the bound argument, and the rejected alternative. Two
+open questions left for the parent / follow-up:
+
+  - true exact-zero eigenvalue (rankdef_100_1) probably also reports
+    zero==0 — should the corpus include one to make this explicit?
+  - the issue assumed sidecar oracles report zero==1 for eps9/eps12.
+    If true, that's an inertia-gate issue. If false (more likely),
+    the note's stance is fully defensible.
+
+* 15:50 :manifest:regression:
+Added regression row `near_singular_eps_7` to
+`external_benchmarks/stress/manifest.tsv`. Per the issue's acceptance
+criterion ("near_singular_eps_<boundary+1>") — since the boundary is
+6, the pin is p=7. Pins the lowest probe; future change that flips
+inertia here gets caught.
+
+* 16:00 :clippy:fmt:
+`cargo fmt` then `cargo clippy --all-targets -- -D warnings` clean.
+Sweep binary compiles + runs as expected. Boundary stable on rerun.
