@@ -263,6 +263,16 @@ fn compute_scaling_auto_with_cache(
     const RAW_GUARD: f64 = 1e6;
     const MC_OFF_GUARD: f64 = 1e6;
     const RATIO_GUARD: f64 = 1e5;
+    // When InfNorm's scaling vector spread (max|s|/min|s|) is below
+    // this threshold, the matrix is already nearly equilibrated by a
+    // single Knight-Ruiz pass; MC64's heavier matching is gratuitous
+    // and on some KKT families (ACOPP30 cond~3e16) produces a strictly
+    // worse factor. Threshold validated on a 9-matrix panel in
+    // `dev/research/acopp30-plateau-2.md`: catches ACOPP30 (1.63),
+    // MSS1 (1.09), HS75 (20.8) without flipping VESUVIA/VESUVIO/
+    // VESUVIOU/MEYER3NE/CRESC132 (all >> 1e3 or where MC64 strictly
+    // wins).
+    const IN_SPREAD_GUARD: f64 = 1e3;
 
     let picked = pick_scaling_strategy(matrix);
     if !matches!(picked, ScalingStrategy::Mc64Symmetric) {
@@ -279,8 +289,21 @@ fn compute_scaling_auto_with_cache(
         }
     };
 
+    // Pre-MC64 InfNorm trial: if Knight-Ruiz produces a tight
+    // scaling vector, the matrix is already well-equilibrated and
+    // MC64's matching can only hurt. This catches the ACOPP30
+    // plateau-2 family (raw_drng=1.06e10 but in_spread=1.63), which
+    // the legacy `raw_drng >= RAW_GUARD → use MC64 unconditionally`
+    // fast-path mis-routed. See `dev/research/acopp30-plateau-2.md`.
+    let (in_vec, in_info) = infnorm::compute_infnorm(matrix);
+    if scaling_spread(&in_vec) < IN_SPREAD_GUARD {
+        return Ok((in_vec, in_info));
+    }
+
     // Cheap pre-filter: a wide raw |diag| range means MC64 has
-    // genuine work to do. Skip the diagnostic and use MC64.
+    // genuine work to do (and the InfNorm trial above did not
+    // produce a tight scaling). Skip the off-diag diagnostic and
+    // commit to MC64.
     if raw_diag_range(matrix) >= RAW_GUARD {
         return mc64_from_cache(matrix);
     }
@@ -291,7 +314,6 @@ fn compute_scaling_auto_with_cache(
         // MC64 produced a well-conditioned scaled matrix.
         return Ok((mc_vec, mc_info));
     }
-    let (in_vec, in_info) = infnorm::compute_infnorm(matrix);
     let in_off = max_off_diag_ratio(matrix, &in_vec);
     let ratio = if in_off > 0.0 {
         mc_off / in_off
@@ -307,6 +329,31 @@ fn compute_scaling_auto_with_cache(
         Ok((in_vec, in_info))
     } else {
         Ok((mc_vec, mc_info))
+    }
+}
+
+/// Return `max|s|/min|s|` over the nonzero entries of `s`. Returns
+/// `+∞` if `s` has no nonzero entry. Used by Policy 4 as a fast
+/// "is the matrix already equilibrated?" probe on the InfNorm
+/// scaling vector.
+fn scaling_spread(s: &[f64]) -> f64 {
+    let mut lo = f64::INFINITY;
+    let mut hi = 0.0_f64;
+    for v in s {
+        let a = v.abs();
+        if a > 0.0 {
+            if a < lo {
+                lo = a;
+            }
+            if a > hi {
+                hi = a;
+            }
+        }
+    }
+    if lo.is_finite() && lo > 0.0 {
+        hi / lo
+    } else {
+        f64::INFINITY
     }
 }
 
@@ -650,12 +697,51 @@ mod tests {
         assert_eq!(auto_s, mc_s, "Auto must keep MC64 on VESUVIOU_0000");
     }
 
-    /// HS75_0000 is one of the two "material wins" — MC64 scaling
-    /// gives a 4-order residual improvement. The fallback rule
-    /// must not fire here. mc_off=1.08e9, in_off=1e10, ratio=0.108
-    /// — well below 1.0, far from the 1e5 RATIO_GUARD.
+    /// ACOPP30_0064 was the seed plateau matrix for issue #23's
+    /// "plateau-2" investigation. Under the legacy Policy 4
+    /// fast-path (`raw_drng >= 1e6 → MC64 unconditionally`),
+    /// raw_drng=1.06e10 routed it to MC64, which produced a
+    /// catastrophic scaling: factor zero pivot, rel_ref = 1.74e-1.
+    /// The IN_SPREAD_GUARD pre-MC64 trial accepts InfNorm
+    /// (in_spread=1.63 << 1e3) and factors to rel_ref ≈ 1e-14.
+    /// See `dev/research/acopp30-plateau-2.md`.
     #[test]
-    fn auto_keeps_mc64_on_hs75_0000() {
+    fn auto_picks_infnorm_on_acopp30_0064() {
+        let path = std::path::Path::new("data/matrices/kkt/ACOPP30/ACOPP30_0064.mtx");
+        let mtx = match crate::io::mtx::read_mtx(path) {
+            Ok(m) => m,
+            Err(_) => return, // fixture not present — skip
+        };
+        let csc = mtx.to_csc().expect("ACOPP30_0064 CSC build");
+        // Routing rule still picks MC64 (arrow-KKT shape unchanged).
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
+        // But Auto should resolve to InfNorm via the IN_SPREAD_GUARD.
+        let (auto_s, _) =
+            compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto on ACOPP30_0064");
+        let (in_s, _) =
+            compute_scaling(&csc, &ScalingStrategy::InfNorm).expect("InfNorm on ACOPP30_0064");
+        let (mc_s, _) =
+            compute_scaling(&csc, &ScalingStrategy::Mc64Symmetric).expect("MC64 on ACOPP30_0064");
+        assert_eq!(
+            auto_s, in_s,
+            "Auto must pick InfNorm on ACOPP30_0064 (in_spread<<1e3, MC64 catastrophic)"
+        );
+        assert_ne!(
+            auto_s, mc_s,
+            "Auto must NOT use MC64 on ACOPP30_0064 (regresses rel_ref to 1.7e-1)"
+        );
+    }
+
+    /// HS75_0000 has in_spread ≈ 20.8, so the IN_SPREAD_GUARD
+    /// pre-MC64 InfNorm trial accepts InfNorm before ever calling
+    /// MC64. The original `auto_keeps_mc64_on_hs75_0000` test asserted
+    /// MC64 as "the win" based on a stale measurement; current probe
+    /// (`src/bin/probe_scaling_policy4.rs`) shows InfNorm = 4.20e-17
+    /// and MC64 = 1.31e-16 on HS75 — InfNorm strictly wins.
+    /// `dev/research/acopp30-plateau-2.md` records the per-matrix
+    /// rel_ref measurements that motivated the new policy.
+    #[test]
+    fn auto_picks_infnorm_on_hs75_0000() {
         let path = std::path::Path::new("data/matrices/kkt/HS75/HS75_0000.mtx");
         let mtx = match crate::io::mtx::read_mtx(path) {
             Ok(m) => m,
@@ -663,8 +749,11 @@ mod tests {
         };
         let csc = mtx.to_csc().expect("HS75_0000 CSC build");
         let (auto_s, _) = compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto on HS75_0000");
-        let (mc_s, _) =
-            compute_scaling(&csc, &ScalingStrategy::Mc64Symmetric).expect("MC64 on HS75_0000");
-        assert_eq!(auto_s, mc_s, "Auto must keep MC64 on HS75_0000 (the win)");
+        let (in_s, _) =
+            compute_scaling(&csc, &ScalingStrategy::InfNorm).expect("InfNorm on HS75_0000");
+        assert_eq!(
+            auto_s, in_s,
+            "Auto must pick InfNorm on HS75_0000 (in_spread<1e3, InfNorm strictly wins)"
+        );
     }
 }
