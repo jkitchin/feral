@@ -1,0 +1,40 @@
+#+TITLE: Journal — 2026-05-16-01
+
+* 10:00 :f03:bloweybl:zero-pivot:default:
+F-03 fix landed. `NumericParams::default()` now sets
+`on_zero_pivot: ZeroPivotAction::ForceAccept`, overriding the
+`Fail` inherited from `BunchKaufmanParams::default()`. Dense default
+stays `Fail`.
+
+Oracle evidence (from research note
+`dev/research/f03-bloweybl-rank-rejection.md`):
+- MUMPS 5.8.2: inertia=(20001, 10001, 1), residual 2.4e-14
+- MA57 2023.11.17: inertia=(20001, 10001, 1), residual 2.7e-15
+- Both agree on one zero pivot; sibling `bloweybq` (half-size,
+  same generator) factors cleanly with zero null pivots.
+
+Tests:
+- new `f03_default_force_accept_factors_isolated_zero_pivot` in
+  `tests/pounce_interface.rs` — asserts diag(1, 0, 1) factors to
+  Success with inertia (2, 0, 1) under the new default.
+- `solve_after_singular_returns_no_factor` and
+  `i4_singular_under_fail_returns_singular_clears_factor` updated
+  to opt-in to `Fail` via `Solver::with_params`.
+- `cargo test --release` all green (full suite, no regressions).
+- `cargo clippy --all-targets --release -- -D warnings` clean.
+
+Stress baseline movement:
+- bloweybl: `NumericallyRankDeficient` → ok, inertia=(20001, 10001, 1),
+  residual 1.68e-15 (matches MUMPS+MA57 to within an order of
+  magnitude). Real reliability improvement.
+- rankdef_5_2/10_3/50_5: status=fail → ok (with zero=1 instead of
+  expected zero=k). These were previously masked by report.py's
+  carve-out for `Fail`-rejected rankdef matrices; the F-01 bug
+  was always there, F-03 just made it visible. Now flagged=4
+  (was 2), but all 4 are the same root cause (#21).
+
+* 10:30 :baseline:report:
+Refreshed `external_benchmarks/stress/baseline.txt` and
+`baseline.json`. New totals: 24 ok, 4 flagged (all four rankdef
+synth rows, all flagged by F-01 under-reporting). Real-world
+matrices: 18 GHS_indef all ok, 6 synth non-rankdef all ok.

@@ -145,5 +145,23 @@ milestones above. Each item gets its own research note under
 
 | ID    | matrix          | symptom                                              | issue | status |
 | ----- | --------------- | ---------------------------------------------------- | ----- | ------ |
-| F-01  | rankdef_200_20  | reports `zero=0`, expected `zero=20`                 | #21   | open   |
-| F-03  | bloweybl        | `NumericallyRankDeficient` on saddle w/ 2/3 zero diag | #32  | open   |
+| F-01  | rankdef_*       | under-reports `zero` on rankdef synth corpus (all 4) | #21   | open   |
+| F-03  | bloweybl        | `NumericallyRankDeficient` on saddle w/ 2/3 zero diag | #32  | fixed  |
+
+### F-03 fix (2026-05-16)
+
+`NumericParams::default()` now sets `on_zero_pivot: ZeroPivotAction::ForceAccept`
+(was inheriting `Fail` from `BunchKaufmanParams::default()`). The dense
+default is unchanged. Matches MUMPS `INFOG(28)` / MA57 `cntl[4]` semantics.
+
+Baseline movement: `bloweybl` flipped `flagged` → `ok` with
+`inertia=(20001, 10001, 1)` matching the MUMPS + MA57 oracle (residual
+1.68e-15). The three small `rankdef_*` synth matrices that previously
+counted as "correct refusal" (status=fail, NumericallyRankDeficient) now
+factor successfully but expose the same F-01 under-reporting bug as
+`rankdef_200_20` — total `flagged` rose 2→4 only because what was
+masking F-01 on those rows (the report.py carve-out for `Fail`-rejected
+rankdef) no longer fires. Real reliability improvement: `bloweybl`
+factors; no matrix that previously factored has changed outcome.
+
+See `dev/research/f03-bloweybl-rank-rejection.md` for analysis.

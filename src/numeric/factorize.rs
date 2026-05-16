@@ -381,8 +381,22 @@ impl Default for NumericParams {
     /// non-structurally-zero rows.
     fn default() -> Self {
         Self {
+            // `on_zero_pivot: ForceAccept` overrides the dense
+            // `BunchKaufmanParams::default()` `Fail` — see F-03
+            // (`dev/research/f03-bloweybl-rank-rejection.md`, issue
+            // #32). The sparse multifrontal path has delayed-pivot
+            // infrastructure that lets the eliminator recover from
+            // an isolated zero pivot at the root (the dense entry
+            // point does not), and the two reference oracles MUMPS
+            // and MA57 both produce a usable factor with one zero
+            // pivot on `GHS_indef/bloweybl`. Counting the zero in
+            // `inertia.zero` matches MUMPS `INFOG(28)` and MA57
+            // semantics. Dense callers that want abort-on-zero
+            // continue to get it via `BunchKaufmanParams::default()`;
+            // sparse callers that want it must opt in explicitly.
             bk: BunchKaufmanParams {
                 pivot_threshold: 1e-8,
+                on_zero_pivot: ZeroPivotAction::ForceAccept,
                 ..BunchKaufmanParams::default()
             },
             scaling: ScalingStrategy::default(),

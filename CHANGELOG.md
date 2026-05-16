@@ -4,6 +4,42 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — sparse `NumericParams::default()` accepts isolated zero pivots (F-03, #32)
+
+`NumericParams::default().bk.on_zero_pivot` now defaults to
+`ZeroPivotAction::ForceAccept` instead of inheriting `Fail` from
+`BunchKaufmanParams::default()`. The sparse multifrontal path has
+infrastructure (delayed pivoting, root force-accept) to recover
+from an isolated zero pivot; the dense entry point does not, and
+its default remains unchanged.
+
+Behavior change for callers of `Solver::new()`:
+
+- Matrices with isolated zero pivots that previously returned
+  `FactorStatus::Singular` (factor discarded) now return
+  `FactorStatus::Success` with `inertia.zero > 0` and the factor
+  preserved. Detect rank-deficiency via `solver.inertia()`.
+- Matches MUMPS `INFOG(28)` (number of null pivots) and MA57
+  `cntl[4]` defaults — both oracles produce usable factors on
+  matrices like `GHS_indef/bloweybl` (n=30003 saddle with 2/3
+  zero diagonals) where feral previously rejected with
+  `NumericallyRankDeficient`.
+- Stress baseline: `bloweybl` flips from failed to ok with
+  `inertia=(20001, 10001, 1)` matching both MUMPS and MA57
+  (residual 1.68e-15).
+- No matrix that previously factored successfully changes
+  outcome.
+
+Callers wanting the legacy abort-on-zero behavior can opt in
+explicitly: `BunchKaufmanParams { on_zero_pivot:
+ZeroPivotAction::Fail, .. }`. Two `pounce_interface.rs` tests
+that depended on the old default were updated to opt in.
+
+References:
+`dev/research/f03-bloweybl-rank-rejection.md`,
+`dev/plans/robustness-roadmap.md` (F-03 entry),
+`src/numeric/factorize.rs:382-417`.
+
 ### Added — JAX integration (`feral.jax`)
 
 `feral.jax` exposes a differentiable, vmap-able, jit-able sparse

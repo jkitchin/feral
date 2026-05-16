@@ -15,9 +15,9 @@
       "inertia_pos": "25",
       "inertia_neg": "25",
       "inertia_zero": "0",
-      "analyse_us": "28",
-      "factor_us": "21",
-      "solve_us": "4",
+      "analyse_us": "29",
+      "factor_us": "27",
+      "solve_us": "2",
       "rel_res": "1.00964907830023950e-16",
       "refined": "yes",
       "status": "ok"
@@ -40,8 +40,8 @@
       "inertia_pos": "99",
       "inertia_neg": "101",
       "inertia_zero": "0",
-      "analyse_us": "62",
-      "factor_us": "47",
+      "analyse_us": "67",
+      "factor_us": "52",
       "solve_us": "7",
       "rel_res": "1.46745125309971290e-16",
       "refined": "yes",
@@ -65,9 +65,9 @@
       "inertia_pos": "3000",
       "inertia_neg": "3001",
       "inertia_zero": "0",
-      "analyse_us": "90788",
-      "factor_us": "299923",
-      "solve_us": "5597",
+      "analyse_us": "89455",
+      "factor_us": "313630",
+      "solve_us": "6033",
       "rel_res": "1.83689732749742843e-16",
       "refined": "yes",
       "status": "ok"
@@ -90,8 +90,8 @@
       "inertia_pos": "50",
       "inertia_neg": "50",
       "inertia_zero": "0",
-      "analyse_us": "115",
-      "factor_us": "126",
+      "analyse_us": "122",
+      "factor_us": "131",
       "solve_us": "12",
       "rel_res": "6.83114662462378059e-16",
       "refined": "yes",
@@ -115,9 +115,9 @@
       "inertia_pos": "37",
       "inertia_neg": "63",
       "inertia_zero": "0",
-      "analyse_us": "114",
-      "factor_us": "121",
-      "solve_us": "18",
+      "analyse_us": "118",
+      "factor_us": "122",
+      "solve_us": "12",
       "rel_res": "7.07801988675708157e-16",
       "refined": "yes",
       "status": "ok"
@@ -140,9 +140,9 @@
       "inertia_pos": "19121",
       "inertia_neg": "13659",
       "inertia_zero": "0",
-      "analyse_us": "157941",
-      "factor_us": "1843715",
-      "solve_us": "16470",
+      "analyse_us": "160165",
+      "factor_us": "1671308",
+      "solve_us": "17290",
       "rel_res": "1.45937152968266952e-16",
       "refined": "yes",
       "status": "ok"
@@ -165,9 +165,9 @@
       "inertia_pos": "54",
       "inertia_neg": "46",
       "inertia_zero": "0",
-      "analyse_us": "113",
-      "factor_us": "114",
-      "solve_us": "34",
+      "analyse_us": "107",
+      "factor_us": "115",
+      "solve_us": "23",
       "rel_res": "4.62985408301437512e-16",
       "refined": "yes",
       "status": "ok"
@@ -190,9 +190,9 @@
       "inertia_pos": "51",
       "inertia_neg": "49",
       "inertia_zero": "0",
-      "analyse_us": "94",
+      "analyse_us": "109",
       "factor_us": "112",
-      "solve_us": "34",
+      "solve_us": "23",
       "rel_res": "4.05307739049945068e-16",
       "refined": "yes",
       "status": "ok"
@@ -215,9 +215,9 @@
       "inertia_pos": "10001",
       "inertia_neg": "0",
       "inertia_zero": "0",
-      "analyse_us": "11399",
-      "factor_us": "2548",
-      "solve_us": "389",
+      "analyse_us": "11863",
+      "factor_us": "2419",
+      "solve_us": "316",
       "rel_res": "3.66797580978388688e-16",
       "refined": "yes",
       "status": "ok"
@@ -240,9 +240,9 @@
       "inertia_pos": "7111",
       "inertia_neg": "5000",
       "inertia_zero": "0",
-      "analyse_us": "126853",
-      "factor_us": "1591646",
-      "solve_us": "9372",
+      "analyse_us": "127712",
+      "factor_us": "1588712",
+      "solve_us": "9090",
       "rel_res": "1.76844838723012286e-15",
       "refined": "yes",
       "status": "ok"
@@ -265,9 +265,9 @@
       "inertia_pos": "10000",
       "inertia_neg": "7500",
       "inertia_zero": "0",
-      "analyse_us": "230189",
-      "factor_us": "696402",
-      "solve_us": "15414",
+      "analyse_us": "231768",
+      "factor_us": "686811",
+      "solve_us": "15057",
       "rel_res": "1.41231703303712709e-16",
       "refined": "yes",
       "status": "ok"
@@ -287,13 +287,17 @@
       "solver": "feral-0.3.0",
       "n": "30003",
       "nnz": "70001",
-      "status": "fail",
-      "fail_reason": "factor_NumericallyRankDeficient",
-      "analyse_us": "74656"
+      "inertia_pos": "20001",
+      "inertia_neg": "10001",
+      "inertia_zero": "1",
+      "analyse_us": "73271",
+      "factor_us": "8140",
+      "solve_us": "1941",
+      "rel_res": "1.67723743843897984e-15",
+      "refined": "yes",
+      "status": "ok"
     },
-    "flags": [
-      "status=fail:factor_NumericallyRankDeficient"
-    ]
+    "flags": []
   },
   {
     "row": {
@@ -311,9 +315,9 @@
       "inertia_pos": "12602",
       "inertia_neg": "37398",
       "inertia_zero": "0",
-      "analyse_us": "189226",
-      "factor_us": "35227",
-      "solve_us": "5199",
+      "analyse_us": "244167",
+      "factor_us": "48649",
+      "solve_us": "14634",
       "rel_res": "1.97184454211241986e-14",
       "refined": "yes",
       "status": "ok"
@@ -336,9 +340,9 @@
       "inertia_pos": "54660",
       "inertia_neg": "5340",
       "inertia_zero": "0",
-      "analyse_us": "127059",
-      "factor_us": "10023",
-      "solve_us": "2251",
+      "analyse_us": "148538",
+      "factor_us": "11053",
+      "solve_us": "2989",
       "rel_res": "4.00863499011283207e-15",
       "refined": "yes",
       "status": "ok"
@@ -361,9 +365,9 @@
       "inertia_pos": "41825",
       "inertia_neg": "33175",
       "inertia_zero": "0",
-      "analyse_us": "2973520",
-      "factor_us": "8935640",
-      "solve_us": "105106",
+      "analyse_us": "3654799",
+      "factor_us": "9386624",
+      "solve_us": "109429",
       "rel_res": "1.53076099354616551e-16",
       "refined": "yes",
       "status": "ok"
@@ -386,9 +390,9 @@
       "inertia_pos": "15625",
       "inertia_neg": "12167",
       "inertia_zero": "0",
-      "analyse_us": "62724",
-      "factor_us": "623579",
-      "solve_us": "24392",
+      "analyse_us": "62953",
+      "factor_us": "627845",
+      "solve_us": "24066",
       "rel_res": "9.93952366155667695e-16",
       "refined": "yes",
       "status": "ok"
@@ -411,9 +415,9 @@
       "inertia_pos": "25455",
       "inertia_neg": "6771",
       "inertia_zero": "0",
-      "analyse_us": "187103",
-      "factor_us": "302060",
-      "solve_us": "20977",
+      "analyse_us": "185897",
+      "factor_us": "297859",
+      "solve_us": "21093",
       "rel_res": "1.97980379805751724e-16",
       "refined": "yes",
       "status": "ok"
@@ -433,11 +437,19 @@
       "solver": "feral-0.3.0",
       "n": "5",
       "nnz": "15",
-      "status": "fail",
-      "fail_reason": "factor_NumericallyRankDeficient",
-      "analyse_us": "21"
+      "inertia_pos": "2",
+      "inertia_neg": "2",
+      "inertia_zero": "1",
+      "analyse_us": "21",
+      "factor_us": "5",
+      "solve_us": "2",
+      "rel_res": "4.24859506074120952e-16",
+      "refined": "yes",
+      "status": "ok"
     },
-    "flags": []
+    "flags": [
+      "zero=1!=expected=2"
+    ]
   },
   {
     "row": {
@@ -452,11 +464,19 @@
       "solver": "feral-0.3.0",
       "n": "10",
       "nnz": "55",
-      "status": "fail",
-      "fail_reason": "factor_NumericallyRankDeficient",
-      "analyse_us": "9"
+      "inertia_pos": "4",
+      "inertia_neg": "5",
+      "inertia_zero": "1",
+      "analyse_us": "10",
+      "factor_us": "4",
+      "solve_us": "1",
+      "rel_res": "3.60001358594055791e-16",
+      "refined": "yes",
+      "status": "ok"
     },
-    "flags": []
+    "flags": [
+      "zero=1!=expected=3"
+    ]
   },
   {
     "row": {
@@ -471,11 +491,19 @@
       "solver": "feral-0.3.0",
       "n": "50",
       "nnz": "1275",
-      "status": "fail",
-      "fail_reason": "factor_NumericallyRankDeficient",
-      "analyse_us": "45"
+      "inertia_pos": "25",
+      "inertia_neg": "24",
+      "inertia_zero": "1",
+      "analyse_us": "45",
+      "factor_us": "33",
+      "solve_us": "10",
+      "rel_res": "2.93334653951506517e-15",
+      "refined": "yes",
+      "status": "ok"
     },
-    "flags": []
+    "flags": [
+      "zero=1!=expected=5"
+    ]
   },
   {
     "row": {
@@ -493,9 +521,9 @@
       "inertia_pos": "112",
       "inertia_neg": "88",
       "inertia_zero": "0",
-      "analyse_us": "413",
-      "factor_us": "821",
-      "solve_us": "146",
+      "analyse_us": "424",
+      "factor_us": "804",
+      "solve_us": "144",
       "rel_res": "1.31706644997047650e-14",
       "refined": "yes",
       "status": "ok"
@@ -520,9 +548,9 @@
       "inertia_pos": "8448",
       "inertia_neg": "4098",
       "inertia_zero": "0",
-      "analyse_us": "56419",
-      "factor_us": "7825",
-      "solve_us": "11220",
+      "analyse_us": "57607",
+      "factor_us": "7815",
+      "solve_us": "12409",
       "rel_res": "3.39561899641627047e-14",
       "refined": "yes",
       "status": "ok"
@@ -545,9 +573,9 @@
       "inertia_pos": "13360",
       "inertia_neg": "9607",
       "inertia_zero": "0",
-      "analyse_us": "60383",
-      "factor_us": "11537",
-      "solve_us": "1953",
+      "analyse_us": "59729",
+      "factor_us": "11596",
+      "solve_us": "1637",
       "rel_res": "2.01426579548309047e-14",
       "refined": "yes",
       "status": "ok"
@@ -570,9 +598,9 @@
       "inertia_pos": "23130",
       "inertia_neg": "15304",
       "inertia_zero": "0",
-      "analyse_us": "125660",
-      "factor_us": "9161",
-      "solve_us": "2733",
+      "analyse_us": "138882",
+      "factor_us": "10830",
+      "solve_us": "2379",
       "rel_res": "5.99116938915360254e-16",
       "refined": "yes",
       "status": "ok"
@@ -595,9 +623,9 @@
       "inertia_pos": "33280",
       "inertia_neg": "16386",
       "inertia_zero": "0",
-      "analyse_us": "268789",
-      "factor_us": "37370",
-      "solve_us": "57983",
+      "analyse_us": "293596",
+      "factor_us": "61946",
+      "solve_us": "79068",
       "rel_res": "9.60807985570730112e-14",
       "refined": "yes",
       "status": "ok"
@@ -620,9 +648,9 @@
       "inertia_pos": "38978",
       "inertia_neg": "21030",
       "inertia_zero": "0",
-      "analyse_us": "150268",
-      "factor_us": "8025",
-      "solve_us": "1580",
+      "analyse_us": "209854",
+      "factor_us": "10243",
+      "solve_us": "1977",
       "rel_res": "1.73409881212659677e-14",
       "refined": "yes",
       "status": "ok"
@@ -645,9 +673,9 @@
       "inertia_pos": "129160",
       "inertia_neg": "53570",
       "inertia_zero": "0",
-      "analyse_us": "989530",
-      "factor_us": "416121",
-      "solve_us": "38333",
+      "analyse_us": "1060310",
+      "factor_us": "598322",
+      "solve_us": "48959",
       "rel_res": "4.66379077206187795e-15",
       "refined": "yes",
       "status": "ok"
@@ -670,9 +698,9 @@
       "inertia_pos": "133814",
       "inertia_neg": "56110",
       "inertia_zero": "0",
-      "analyse_us": "1060709",
-      "factor_us": "199385",
-      "solve_us": "28542",
+      "analyse_us": "1162492",
+      "factor_us": "179935",
+      "solve_us": "28634",
       "rel_res": "1.60637284029960092e-14",
       "refined": "yes",
       "status": "ok"

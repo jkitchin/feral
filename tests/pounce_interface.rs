@@ -10,7 +10,19 @@ use feral::scaling::ScalingStrategy;
 use feral::symbolic::SupernodeParams;
 use feral::{
     BunchKaufmanParams, CscMatrix, FactorStatus, FeralError, Inertia, QualityLevel, Solver,
+    ZeroPivotAction,
 };
+
+/// Helper: NumericParams with the legacy `Fail`-on-zero-pivot
+/// default restored. Used by tests that exercise the Singular code
+/// path. After F-03 (#32), `NumericParams::default()` switched to
+/// `ZeroPivotAction::ForceAccept` to match MUMPS/MA57 behavior on
+/// rank-deficient saddle-point systems like `GHS_indef/bloweybl`.
+fn np_fail_on_zero() -> NumericParams {
+    let mut np = NumericParams::default();
+    np.bk.on_zero_pivot = ZeroPivotAction::Fail;
+    np
+}
 
 /// I1 — baseline factor + solve without inertia check.
 ///
@@ -51,10 +63,15 @@ fn solve_before_factor_returns_no_factor() {
 
 /// `Solver::solve` after a Singular factor (which clears storage)
 /// also returns `FeralError::NoFactor`.
+///
+/// Opts into legacy `ZeroPivotAction::Fail` via `with_params` —
+/// after F-03 (#32) the new default `ForceAccept` would turn
+/// `diag(1, 0, 1)` into a successful factor with `inertia.zero == 1`,
+/// not a `Singular` status.
 #[test]
 fn solve_after_singular_returns_no_factor() {
     let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 0.0, 1.0]).unwrap();
-    let mut solver = Solver::new();
+    let mut solver = Solver::with_params(np_fail_on_zero(), SupernodeParams::default());
     let status = solver.factor(&csc, None);
     assert!(matches!(status, FactorStatus::Singular));
 
@@ -204,18 +221,18 @@ fn i3_factor_with_wrong_inertia_returns_wronginertia_keeps_factor() {
     assert_eq!(solver.num_negative_eigenvalues(), 0);
 }
 
-/// I4 — singular under default `Fail` mode returns `Singular` and
+/// I4 — singular under explicit `Fail` mode returns `Singular` and
 /// clears the stored factor.
 ///
 /// `diag(1, 0, 1)` has a structural zero pivot at position 1 with
-/// no symmetric off-diagonal coupling that BK could pivot around,
-/// so default `ZeroPivotAction::Fail` should fire and the factor
-/// should be discarded.
+/// no symmetric off-diagonal coupling that BK could pivot around.
+/// With `ZeroPivotAction::Fail` opted in (the historical default
+/// before F-03 / #32), the factor is discarded.
 #[test]
 fn i4_singular_under_fail_returns_singular_clears_factor() {
     let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 0.0, 1.0]).unwrap();
 
-    let mut solver = Solver::new();
+    let mut solver = Solver::with_params(np_fail_on_zero(), SupernodeParams::default());
     let status = solver.factor(&csc, None);
 
     assert!(
@@ -226,6 +243,41 @@ fn i4_singular_under_fail_returns_singular_clears_factor() {
     assert!(
         solver.factors().is_none(),
         "factors should be cleared on Singular"
+    );
+}
+
+/// F-03 regression — under the new default `ZeroPivotAction::ForceAccept`,
+/// `diag(1, 0, 1)` factors cleanly with `inertia == (2, 0, 1)` and
+/// the factor is preserved. Matches MUMPS / MA57 behavior on
+/// matrices with isolated zero pivots (e.g. `GHS_indef/bloweybl`).
+/// See `dev/research/f03-bloweybl-rank-rejection.md` and issue #32.
+#[test]
+fn f03_default_force_accept_factors_isolated_zero_pivot() {
+    let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 0.0, 1.0]).unwrap();
+
+    let mut solver = Solver::new();
+    let status = solver.factor(&csc, None);
+
+    assert!(
+        matches!(status, FactorStatus::Success),
+        "expected Success under new ForceAccept default, got {:?}",
+        status
+    );
+
+    assert!(
+        solver.factors().is_some(),
+        "factor should be preserved on Success"
+    );
+    let inertia = solver.inertia().expect("inertia stored on Success").clone();
+    assert_eq!(
+        inertia,
+        Inertia {
+            positive: 2,
+            negative: 0,
+            zero: 1,
+        },
+        "expected (2, 0, 1) inertia from diag(1, 0, 1), got {:?}",
+        inertia
     );
 }
 
