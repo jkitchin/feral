@@ -140,9 +140,7 @@ fn process_family(family: &str) -> (Vec<f64>, usize, usize) {
         } else if speedup <= 0.95 {
             losses += 1;
         }
-        println!(
-            "{label:>20}  {n_snodes:>7}  {plain:>10}  {mfm:>10}  {speedup:>6.2}x"
-        );
+        println!("{label:>20}  {n_snodes:>7}  {plain:>10}  {mfm:>10}  {speedup:>6.2}x");
     }
     (speedups, wins, losses)
 }

@@ -7,6 +7,33 @@
 # checkpoint instead, making the refresh complete in seconds.
 set -euo pipefail
 
+# --- Hook sanity check (see CLAUDE.md) ---
+# A stale `core.hooksPath` (often left by a Dropbox/iCloud move of the
+# clone) makes `pre-commit install` succeed silently into a directory
+# git never reads, so `cargo fmt --check` and `cargo clippy` never run
+# locally and CI fails on every push. Detect and auto-fix here so the
+# session never starts in that broken state.
+HOOKS_PATH=$(git config --local --get core.hooksPath 2>/dev/null || true)
+if [ -n "$HOOKS_PATH" ] && [ ! -e "$HOOKS_PATH/pre-commit" ]; then
+    echo "WARNING: core.hooksPath=$HOOKS_PATH but no pre-commit hook there." >&2
+    echo "  Unsetting local core.hooksPath and reinstalling pre-commit." >&2
+    git config --local --unset core.hooksPath
+    if command -v pre-commit >/dev/null 2>&1; then
+        pre-commit install >&2
+    else
+        echo "  pre-commit not on PATH; install it then run: pre-commit install" >&2
+    fi
+fi
+if [ ! -x .git/hooks/pre-commit ]; then
+    echo "WARNING: .git/hooks/pre-commit missing." >&2
+    if command -v pre-commit >/dev/null 2>&1; then
+        echo "  Running: pre-commit install" >&2
+        pre-commit install >&2
+    else
+        echo "  pre-commit not on PATH; CI will fail on fmt/clippy without it." >&2
+    fi
+fi
+
 OUT="dev/context.md"
 BUDGET=350
 WITH_BENCH=0
