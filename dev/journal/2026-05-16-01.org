@@ -344,3 +344,33 @@ driver overhead is NOT the dominant cost. Per-front kernel work
 This is the empirical answer to #11 and re-prioritizes the
 roadmap: SLB cannot fix #33; #10 APP must land first. Going to
 append a tried-and-rejected entry tomorrow and re-aim at #10.
+
+* 12:00 :issue-10:maxfromm:dense:parity:
+MAXFROMM Phase 1 implementation landed. Per the research note
+~dev/research/issue-10-app-vs-maxfromm.md~ (committed 03d3bbb):
+added ~TppMethod::{Plain, Maxfromm}~ enum and
+~BunchKaufmanParams::tpp_method~ (default Plain). Modified
+~scalar_pivot_step~ to take a ~cached_maxfromm: &mut Option<f64>~
+slot; at the start of each pivot iteration, if the slot is Some
+AND the diagonal dominates by alpha, short-circuit the AMAX scan
+and route directly to the 1×1-at-k accept path. After
+~do_1x1_update~, scan column k+1 once and stash for the next
+iteration. Cleared on 2×2 / delay / rejection / panel pass.
+
+Modified 3 callers of ~scalar_pivot_step~ (~factor_frontal~ +
+two sites in ~factor_frontal_blocked~) to thread the cache.
+
+Tests: new ~tests/maxfromm_parity.rs~ (5 tests, scalar + blocked
+× SPD + indefinite + ncol<nrow). One bug caught on first run:
+~factor_frontal_blocked~ did not clear the cache before panel
+calls; a stale Some from a post-panel scalar fallback could leak
+into the next iteration's scalar step. Fixed by setting
+~cached_maxfromm = None~ before every ~lblt_panel_frontal~
+call. All 5 parity tests pass after the fix; full ~cargo test
+--release~ green (~257 lib tests + all integration tests + 0
+failures); clippy clean.
+
+Behavior with default Plain: byte-identical to pre-Phase-1.
+Maxfromm requires opt-in via ~tpp_method = TppMethod::Maxfromm~.
+Next: Phase 2 corpus validation (clnlbeam panel A/B,
+inertia corpus sweep) before considering a default flip.

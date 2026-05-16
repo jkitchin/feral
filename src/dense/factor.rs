@@ -221,6 +221,31 @@ fn flag_growth_for_refinement(l: &[f64], needs_refinement: &mut bool) {
     }
 }
 
+/// Threshold-partial-pivoting acceleration mode.
+///
+/// `Plain` (default) computes the column AMAX from scratch at every
+/// pivot iteration. `Maxfromm` reuses MUMPS's MAXFROMM trick (see
+/// `dfac_front_aux.F` `DMUMPS_FAC_I_LDLT` / `DMUMPS_FAC_MQ_LDLT`):
+/// after a 1×1 rank-1 trailing update at pivot `k`, scan the freshly
+/// updated column `k+1` once and stash its max. The next iteration
+/// then accepts at pivot `k+1` without re-scanning iff
+/// `|a_{k+1,k+1}| >= alpha * cached_max`. The acceptance predicate is
+/// bit-identical to `Plain`'s BK test, so inertia and L/D are
+/// unchanged — only the AMAX scan is skipped. Falls back to a full
+/// scan on rejection / delay / 2×2.
+///
+/// See `dev/research/issue-10-app-vs-maxfromm.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TppMethod {
+    /// Recompute the AMAX scan at every pivot (Phase ≤ 2.11 behavior).
+    #[default]
+    Plain,
+    /// Capture column k+1's AMAX as a byproduct of the rank-1 trailing
+    /// update at pivot k; reuse on the next pivot when the diagonal
+    /// dominates by `alpha`.
+    Maxfromm,
+}
+
 /// Parameters controlling Bunch-Kaufman factorization behavior.
 #[derive(Debug, Clone)]
 pub struct BunchKaufmanParams {
@@ -307,6 +332,11 @@ pub struct BunchKaufmanParams {
     /// `NumericParams::fma` here when constructing per-supernode BK
     /// params. See `dev/research/fma-kernel-opt-in.md`, issue #8.
     pub fma: bool,
+
+    /// Threshold-partial-pivoting acceleration. See [`TppMethod`].
+    /// Default `Plain` (no acceleration); the multifrontal driver may
+    /// flip this per-front via `NumericParams::tpp_method`.
+    pub tpp_method: TppMethod,
 }
 
 /// Action to take when a near-zero pivot is encountered.
@@ -380,6 +410,7 @@ impl Default for BunchKaufmanParams {
             pivot_threshold: 0.0,
             block_size: 64,
             fma: false,
+            tpp_method: TppMethod::Plain,
         }
     }
 }
@@ -1035,6 +1066,9 @@ pub fn factor_frontal_with_profile(
 
     let t_pivot = profile.as_ref().map(|_| std::time::Instant::now());
     let mut k = 0;
+    // MAXFROMM cache: live across `scalar_pivot_step` calls within
+    // this front. Always start empty (no prior pivot for `k=0`).
+    let mut cached_maxfromm: Option<f64> = None;
 
     // Factor only the first ncol columns. Pivot search restricted to [k, ncol).
     // Per-step body is extracted as `scalar_pivot_step` so the Phase 2.4.1b
@@ -1056,6 +1090,7 @@ pub fn factor_frontal_with_profile(
             &mut zero,
             &mut needs_refinement,
             &mut n_rook_rescues,
+            &mut cached_maxfromm,
         )? {
             PivotStepResult::Advanced(n) => k += n,
             PivotStepResult::Delayed => break,
@@ -1339,6 +1374,12 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     let mut zero = 0usize;
     let mut needs_refinement = false;
     let mut n_rook_rescues = 0usize;
+    // MAXFROMM cache: live across both scalar-tail steps and the
+    // post-panel fallback step within this front. Panel paths do not
+    // populate it (the panel processes its own AMAX); the cache is
+    // simply None after a panel pass, which forces the next scalar
+    // step to do a full scan exactly as it does today.
+    let mut cached_maxfromm: Option<f64> = None;
 
     let mut k = 0;
     while k < ncol {
@@ -1367,6 +1408,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
                 &mut zero,
                 &mut needs_refinement,
                 &mut n_rook_rescues,
+                &mut cached_maxfromm,
             )? {
                 PivotStepResult::Advanced(n) => {
                     diag_add(&panel_diag::PIVOTS_SCALAR, n as u64);
@@ -1382,6 +1424,11 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         // this clamp, when `ncol % bs != 0` the last panel call would
         // read/write columns in the contribution-block region.
         let panel_cap = bs.min(remaining);
+        // The panel rewrites column `k` and beyond; any cached MAXFROMM
+        // from a prior scalar fallback no longer describes the post-panel
+        // column. Clear so the next scalar step falls back to a full
+        // AMAX scan exactly as Plain would.
+        cached_maxfromm = None;
         let (n_elim, status) = lblt_panel_frontal(
             &mut *a,
             nrow,
@@ -1451,6 +1498,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
                     &mut zero,
                     &mut needs_refinement,
                     &mut n_rook_rescues,
+                    &mut cached_maxfromm,
                 )? {
                     PivotStepResult::Advanced(n) => {
                         diag_add(&panel_diag::PIVOTS_SCALAR, n as u64);
@@ -2261,10 +2309,37 @@ fn apply_blocked_schur_panel(
     }
 }
 
+/// MAXFROMM capture: scan column `col` of the trailing submatrix
+/// (rows `col+1..n`) for its max absolute value. Returns `None` when
+/// the column has no off-diagonal entries (last pivot).
+///
+/// Cheap because the column was just written by the rank-1 trailing
+/// update at pivot `k = col - 1` — the cache line containing
+/// `a[col*n + col+1 ..]` is hot.
+#[inline]
+fn capture_maxfromm_col(a: &[f64], n: usize, col: usize) -> Option<f64> {
+    if col + 1 >= n {
+        return None;
+    }
+    let mut mf = 0.0f64;
+    for i in (col + 1)..n {
+        let v = a[col * n + i].abs();
+        if v > mf {
+            mf = v;
+        }
+    }
+    Some(mf)
+}
+
 /// Translate a `PivotOutcome` from `try_reject_1x1_with_rook_rescue`
 /// (or plain `try_reject_1x1_frontal`) into a `PivotStepResult` and
 /// perform the required trailing-update. Used at every scalar BK
 /// 1×1 call site to centralize the `AcceptedRook2x2` dispatch.
+///
+/// `maxfromm` is the MAXFROMM cache slot: when `Some`, on
+/// `Accepted` the freshly updated column `k+1` is scanned and the
+/// result stored; on every other outcome the slot is cleared (next
+/// iteration must re-scan). When `None`, no capture happens.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn finish_1x1_outcome(
@@ -2277,14 +2352,28 @@ fn finish_1x1_outcome(
     neg: &mut usize,
     zero: &mut usize,
     fma: bool,
+    maxfromm: Option<&mut Option<f64>>,
 ) -> PivotStepResult {
     match outcome {
         PivotOutcome::Accepted => {
             do_1x1_update(a, nrow, k, fma);
+            if let Some(slot) = maxfromm {
+                *slot = capture_maxfromm_col(a, nrow, k + 1);
+            }
             PivotStepResult::Advanced(1)
         }
-        PivotOutcome::Rejected => PivotStepResult::Advanced(1),
-        PivotOutcome::Delayed => PivotStepResult::Delayed,
+        PivotOutcome::Rejected => {
+            if let Some(slot) = maxfromm {
+                *slot = None;
+            }
+            PivotStepResult::Advanced(1)
+        }
+        PivotOutcome::Delayed => {
+            if let Some(slot) = maxfromm {
+                *slot = None;
+            }
+            PivotStepResult::Delayed
+        }
         PivotOutcome::AcceptedRook2x2 { d11, d21, d22 } => {
             let inertia = count_2x2_inertia_val(d11, d21, d22);
             *pos += inertia.positive;
@@ -2292,6 +2381,9 @@ fn finish_1x1_outcome(
             *zero += inertia.zero;
             subdiag[k] = d21;
             do_2x2_update(a, nrow, k, d11, d21, d22, fma);
+            if let Some(slot) = maxfromm {
+                *slot = None;
+            }
             PivotStepResult::Advanced(2)
         }
     }
@@ -2321,22 +2413,32 @@ fn scalar_pivot_step(
     zero: &mut usize,
     needs_refinement: &mut bool,
     n_rook_rescues: &mut usize,
+    cached_maxfromm: &mut Option<f64>,
 ) -> Result<PivotStepResult, FeralError> {
     let alpha = params.alpha;
     let remaining = ncol - k;
+    let use_maxfromm = matches!(params.tpp_method, TppMethod::Maxfromm);
+    // Take ownership of any cached value: it belongs to *this* pivot.
+    // Subsequent paths will re-populate it (or leave it None).
+    let cached = cached_maxfromm.take();
 
     if remaining == 1 {
         // Last eliminated pivot: always 1×1. Compute the column max
         // over rows (k+1..nrow) for the column-relative threshold.
         // Rook rescue cannot fire here (needs ncol-k >= 2), so call
         // the rejection routine directly.
-        let mut col_max = 0.0f64;
-        for i in (k + 1)..nrow {
-            let v = a[k * nrow + i].abs();
-            if v > col_max {
-                col_max = v;
+        let col_max = if let Some(mf) = cached {
+            mf
+        } else {
+            let mut m = 0.0f64;
+            for i in (k + 1)..nrow {
+                let v = a[k * nrow + i].abs();
+                if v > m {
+                    m = v;
+                }
             }
-        }
+            m
+        };
         let outcome = try_reject_1x1_frontal(
             a,
             nrow,
@@ -2358,6 +2460,50 @@ fn scalar_pivot_step(
             }
         }
         return Ok(PivotStepResult::Advanced(1));
+    }
+
+    // MAXFROMM short-circuit: if the previous 1×1 stash gives a
+    // gamma0-equivalent for this pivot AND the diagonal already
+    // dominates by `alpha`, skip the AMAX scan and routing 1×1-at-k.
+    // gamma0 is `max_{i>k} |a[i,k]|` — for the in-place column-k
+    // factor, MAXFROMM captured exactly this set after pivot k-1.
+    // Bit-identical to the full-scan BK 1×1 path that follows.
+    if use_maxfromm {
+        if let Some(mf) = cached {
+            let akk = a[k * nrow + k].abs();
+            if akk >= alpha * mf {
+                let outcome = try_reject_1x1_with_rook_rescue(
+                    a,
+                    nrow,
+                    ncol,
+                    k,
+                    mf,
+                    may_delay,
+                    params,
+                    perm,
+                    pos,
+                    neg,
+                    zero,
+                    needs_refinement,
+                    n_rook_rescues,
+                )?;
+                return Ok(finish_1x1_outcome(
+                    outcome,
+                    a,
+                    nrow,
+                    k,
+                    subdiag,
+                    pos,
+                    neg,
+                    zero,
+                    params.fma,
+                    Some(cached_maxfromm),
+                ));
+            }
+            // Diagonal too small relative to cached MAXFROMM — fall
+            // through to full scan. `cached_maxfromm` is already
+            // cleared (we `.take()`d it above).
+        }
     }
 
     // Find max |A[i,k]| for i in (k, ncol) — restricted to fully-summed rows
@@ -2410,7 +2556,20 @@ fn scalar_pivot_step(
             n_rook_rescues,
         )?;
         return Ok(finish_1x1_outcome(
-            outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma,
+            outcome,
+            a,
+            nrow,
+            k,
+            subdiag,
+            pos,
+            neg,
+            zero,
+            params.fma,
+            if use_maxfromm {
+                Some(&mut *cached_maxfromm)
+            } else {
+                None
+            },
         ));
     }
 
@@ -2440,7 +2599,20 @@ fn scalar_pivot_step(
             n_rook_rescues,
         )?;
         return Ok(finish_1x1_outcome(
-            outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma,
+            outcome,
+            a,
+            nrow,
+            k,
+            subdiag,
+            pos,
+            neg,
+            zero,
+            params.fma,
+            if use_maxfromm {
+                Some(&mut *cached_maxfromm)
+            } else {
+                None
+            },
         ));
     }
 
@@ -2462,7 +2634,20 @@ fn scalar_pivot_step(
             n_rook_rescues,
         )?;
         return Ok(finish_1x1_outcome(
-            outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma,
+            outcome,
+            a,
+            nrow,
+            k,
+            subdiag,
+            pos,
+            neg,
+            zero,
+            params.fma,
+            if use_maxfromm {
+                Some(&mut *cached_maxfromm)
+            } else {
+                None
+            },
         ));
     }
 
@@ -2579,7 +2764,20 @@ fn scalar_pivot_step(
                 n_rook_rescues,
             )?;
             return Ok(finish_1x1_outcome(
-                outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma,
+                outcome,
+                a,
+                nrow,
+                k,
+                subdiag,
+                pos,
+                neg,
+                zero,
+                params.fma,
+                if use_maxfromm {
+                    Some(&mut *cached_maxfromm)
+                } else {
+                    None
+                },
             ));
         }
 
@@ -2589,7 +2787,10 @@ fn scalar_pivot_step(
         *zero += pivot_inertia.zero;
 
         subdiag[k] = d21;
-        // 2×2 update
+        // 2×2 update — cache for pivot k+2 cannot be derived from a
+        // 2×2 trailing update without extra bookkeeping; clear so the
+        // next iteration falls back to a full scan. (Phase 4 may wire
+        // 2×2 capture; see issue-10 research note.)
         do_2x2_update(a, nrow, k, d11, d21, d22, params.fma);
         Ok(PivotStepResult::Advanced(2))
     } else {
@@ -2611,7 +2812,20 @@ fn scalar_pivot_step(
             n_rook_rescues,
         )?;
         Ok(finish_1x1_outcome(
-            outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma,
+            outcome,
+            a,
+            nrow,
+            k,
+            subdiag,
+            pos,
+            neg,
+            zero,
+            params.fma,
+            if use_maxfromm {
+                Some(&mut *cached_maxfromm)
+            } else {
+                None
+            },
         ))
     }
 }
