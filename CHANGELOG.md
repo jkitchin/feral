@@ -4,6 +4,20 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — M5 stress-smoke CI gate (#28)
+
+New `stress-smoke` job in `.github/workflows/ci.yml` runs the
+stress harness on every push/PR with `--max-n 1000` (21 matrices:
+all synth + small `cuter_kkt` rows). `report.py` exits non-zero on
+any newly-flagged matrix, making the gate PR-blocking. Local
+M-series wall-clock for `synth.py + run.py + report.py` after the
+release build is ~0.7s; total CI job stays well under the 10-min
+acceptance budget from #28. Caches
+`external_benchmarks/stress/matrices/` keyed on the manifest hash
+so SuiteSparse downloads occur at most once per manifest change.
+README documents gate semantics: "blocked" definition,
+baseline-update procedure, allowlist convention.
+
 ### Added — SQD (symmetric quasi-definite) fast-path (#34)
 
 New opt-in factorisation path for matrices satisfying Vanderbei

@@ -72,6 +72,95 @@ python3 external_benchmarks/stress/report.py
 Exit code is `0` iff no matrix is flagged — wire `report.py` into CI
 to gate against regressions.
 
+## CI gate semantics (M5 — issue #28)
+
+The `stress-smoke` job in `.github/workflows/ci.yml` runs on every
+push and pull request. It is **PR-blocking**: a non-zero exit from
+`report.py` fails the workflow and prevents merge.
+
+What the gate runs:
+
+```bash
+cargo build --release --bin bench_one_matrix
+python3 external_benchmarks/stress/synth.py
+python3 external_benchmarks/stress/run.py --max-n 1000
+python3 external_benchmarks/stress/report.py
+```
+
+The `--max-n 1000` cap selects 21 rows from the 125-row manifest
+(all synth, the three `cuter_kkt FBRAIN3LS_*` borderline rows, and
+any future SuiteSparse row with n ≤ 1000). Local M-series
+wall-clock for the trio is ~0.7s after build; on GitHub's x86
+runner the whole job (toolchain + cargo build + tests) stays well
+under the 10-minute acceptance budget from #28.
+
+### What "blocked" means
+
+A PR is blocked when `report.py` would print at least one row with
+a non-empty `flags` column **and** exit non-zero. Concretely that
+means *one of the four acceptance rules above tripped on a matrix
+that previously passed*. Matrices that are not present (status
+`missing` — typically because `fetch.py` was not run) count as
+`n_missing` rather than `n_flag` and **do not block** the gate; the
+CI job only fails on a true regression.
+
+### How to update the gate when behavior intentionally changes
+
+If a code change legitimately alters which matrices flag (e.g. you
+add a new synthetic generator whose first run produces an unknown
+inertia signature, or you tighten an internal tolerance and a
+borderline matrix moves), do the change in two parts:
+
+1. Land the code change on a branch and run the smoke suite locally.
+   Capture the new sidecars by re-running
+   `python3 external_benchmarks/stress/run.py` over the full
+   manifest, then
+   `python3 external_benchmarks/stress/report.py --json baseline.json`
+   to refresh the snapshot.
+2. Commit `external_benchmarks/stress/baseline.json` in the **same**
+   PR that introduces the behavior change, and explain in the commit
+   body why each row moved. The reviewer's job is to confirm the
+   movement is intentional. The PR description must reference the
+   issue tracking the behavior change so the audit trail survives.
+
+Never edit `baseline.json` by hand. Always regenerate it via
+`report.py --json`. The hard rule from `CLAUDE.md` — *NEVER loosen a
+test tolerance without human approval* — applies to `--rel-res` and
+to the inertia-oracle rules in `expected_zero()` / `classify()`.
+
+### How to skip or allowlist a matrix
+
+There is no per-matrix allowlist mechanism in `report.py` today.
+The current design relies on two earlier safety valves:
+
+- **Category-level pardon** for rank-deficient refusals.
+  `classify()` already returns no flags when a matrix in the
+  `rankdef`, `saddle_rankdef`, or `stokes` category fails to
+  factor with `NumericallyRankDeficient` — that response is correct
+  behavior on a genuinely rank-deficient input. Add new categories
+  to `rankdef_like_cats` if you introduce a generator whose oracle
+  is "must reject as rank-deficient".
+- **Manifest exclusion** for matrices that should not be run at
+  all (e.g. a download that times out at the 10-min budget). Remove
+  the row from `manifest.tsv` rather than skipping it at report
+  time; the manifest is the authoritative scope of the suite.
+
+If you do need a per-matrix allowlist in the future, the convention
+will be a dict at the top of `report.py` keyed on
+`f"{group}__{name}"` with the value carrying the issue reference,
+e.g. `"GHS_indef__bloweybl": "issue #32 -- saddle-block 2/3-zero diag"`.
+Each entry must reference an open GitHub issue tracking the fix;
+allowlists without an issue reference will be rejected in review.
+
+### Caching SuiteSparse downloads in CI
+
+The CI job uses `actions/cache@v4` with the key
+`stress-matrices-${{ hashFiles('external_benchmarks/stress/manifest.tsv') }}`,
+so a SuiteSparse re-download only happens when `manifest.tsv`
+changes. At today's `--max-n 1000` cap there is no SuiteSparse row
+in scope and the cache is effectively a no-op; once smaller rows
+land (or the cap is raised) the cache becomes load-bearing.
+
 ## Layout
 
 ```
