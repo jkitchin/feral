@@ -714,3 +714,30 @@ fn test_may_delay_rejection_parity() {
     let blocked = factor_frontal_blocked(&mat, n, true, &params).unwrap();
     assert_frontals_byte_identical(&scalar, &blocked, "may_delay rejection");
 }
+
+/// Issue #36 — regression guard for the `MAX_N_ELIM` cap in
+/// `apply_blocked_schur_panel`. Before #36 the cap was 64, matching
+/// the default `block_size`, but any caller that raised `block_size`
+/// past 64 hit a release-build panic ("range end index 128 out of
+/// range for slice of length 64") in the deferred-Schur path.
+///
+/// This test exercises the previously-panicking code path by setting
+/// `block_size = 128` on an SPD problem large enough that the panel
+/// fully populates (`nrow > block_size`, `ncol > block_size`). It is
+/// a *liveness* test (no panic) rather than a parity test: the
+/// scalar kernel ignores `block_size`, so byte-identity here would
+/// only re-prove the existing parity contract on a different size.
+#[test]
+fn test_issue36_block_size_128_no_panic() {
+    let params = BunchKaufmanParams {
+        on_zero_pivot: ZeroPivotAction::ForceAccept,
+        pivot_threshold: 0.01,
+        block_size: 128,
+        ..BunchKaufmanParams::default()
+    };
+    let n = 200;
+    let mat = random_spd(n, 0x3600_0036);
+    let blocked = factor_frontal_blocked(&mat, n, false, &params).unwrap();
+    assert_eq!(blocked.nelim, n, "issue36 nelim should be full n");
+    assert_eq!(blocked.inertia.zero, 0, "issue36 SPD has no zero pivots");
+}

@@ -2376,13 +2376,20 @@ fn apply_blocked_schur_panel(
     d_panel: &[f64],
     fma: bool,
 ) {
-    // Stack-friendly upper bound on n_elim. The current panel is
-    // gated at `params.block_size` which defaults to 64; if that
-    // ceiling ever changes, increase MAX_N_ELIM accordingly. Using a
-    // fixed-size buffer here avoids a per-column heap allocation in
-    // the hot path.
-    const MAX_N_ELIM: usize = 64;
-    debug_assert!(
+    // Stack-friendly upper bound on n_elim. Sized at 128 to cover
+    // the default `params.block_size = 64` and the larger panels
+    // tuning experiments (probe_wide_supernode `PROBE_BLOCK_SIZE=128`)
+    // want to explore. Stack cost: 4 buffers × 128 × 8 B = 4 KB per
+    // call -- acceptable in the hot path.
+    //
+    // The `assert!` (not `debug_assert!`) is intentional: prior to
+    // issue #36 a release build with `block_size > 64` produced a
+    // cryptic "range end index N out of range for slice of length 64"
+    // panic from the `[..n_elim]` slice below. The named assertion
+    // gives a clear failure mode if anyone ever raises block_size
+    // past this new ceiling.
+    const MAX_N_ELIM: usize = 128;
+    assert!(
         n_elim <= MAX_N_ELIM,
         "apply_blocked_schur_panel: n_elim {} exceeds MAX_N_ELIM {}",
         n_elim,
