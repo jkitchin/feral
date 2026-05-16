@@ -45,10 +45,17 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
-      - name: Install maturin + test deps
+      - name: Create venv and install maturin + test deps
         run: |
+          python -m venv .venv
+          . .venv/bin/activate
           python -m pip install --upgrade pip
           pip install maturin pytest numpy scipy
+          # Expose the venv to subsequent steps. `maturin develop`
+          # (and pytest, via the venv's python) need both VIRTUAL_ENV
+          # set and the venv's bin/ first on PATH.
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Build extension in editable mode
         working-directory: python
         run: maturin develop --release
