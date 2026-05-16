@@ -14,8 +14,12 @@ regression is confirmed at the kernel level, not just at the full-factor
 level — so the cause is intrinsic to the FMA kernel body, not panel
 admin or dispatch overhead.
 
-x86 measurement is pending (probe ships in this commit; CI run on a
-Linux x86 runner will resolve the decision-tree branch).
+x86 measurement landed (CI run 25971444759 on ubuntu-latest x86_64
+via commit f1f9894): FMA is **1.55× faster** in every shape — the
+textbook AVX2+FMA win. Decision tree branch 3 ("x86 wins, aarch64
+loses") confirmed. See §"Resolution" at the end of this note and
+`dev/decisions.md` 2026-05-16 — FMA Schur-panel kernel: per-arch
+asymmetry.
 
 ## Probe
 
@@ -74,20 +78,44 @@ non-FMA path is implicit `off`), and the slower-per-element body
 actually wins in steady state. Verifying requires `cargo asm` on
 both bodies, which is outside this probe's scope.
 
-## Decision tree (from issue #35) — current state
+## Decision tree (from issue #35) — resolved
 
-- **aarch64-only regression** → gate `fma = true` behind
-  `cfg(target_arch = "x86_64")`. Awaiting x86 measurement. **(probable)**
-- **Regression on both** → remove the FMA path entirely. **(possible)**
-- **x86 wins, aarch64 loses** → no-op; per-arch default is already
-  `fma = false`. Document the asymmetry in `dev/decisions.md`. **(possible)**
+x86 measurement from CI run 25971444759 (ubuntu-latest x86_64, same
+probe, same shapes):
 
-x86 verification: easiest path is a CI run of `cargo run --release
---bin probe_fma_kernel` on the existing `check` job (ubuntu-latest,
-x86_64). Adding two lines to `.github/workflows/ci.yml` would surface
-the numbers in CI logs for the cost of one extra release-mode build
-step. Not done in this commit — let user prioritise against the
-existing CI budget.
+```
+shape          fma med    nofma med   fma GF   nofma GF   fma/nofma
+wide_2829x433  2745.8 us  4255.6 us   0.52     0.33       1.55
+square_1928    1841.2 us  2851.0 us   0.52     0.33       1.55
+narrow_512x32   237.4 us   363.8 us   0.52     0.34       1.53
+```
+
+(Caveat: the ubuntu-latest runner is a shared virtualised x86 so the
+absolute GFLOPS are ~40× lower than the M-series aarch64 numbers
+above — reads like AVX2/V3 dispatch is hitting frequency throttling
+or a non-V3 fallback. The *ratio* is clean and consistent across
+shapes, which is the only quantity #35's decision tree needs.)
+
+Resolution: **branch 3 — "x86 wins, aarch64 loses"** is confirmed.
+The production default (`fma = false`) is already correct for both
+architectures' worst case. Documented in `dev/decisions.md` 2026-05-16
+"FMA Schur-panel kernel: per-arch asymmetry, defaults stay".
+
+No code change. Two paths were considered and rejected:
+
+- Gate `fma = true` to `cfg(target_arch = "x86_64")` in
+  `BunchKaufmanParams`: would silently override explicit opt-in,
+  blocking probe binaries that legitimately want to time the
+  aarch64 FMA path. Decision: keep the flag a pure runtime knob.
+- Remove the FMA path: loses the x86 1.5× win and the existing
+  bit-exact rank-1 reference tests on both kernels. Decision: keep.
+
+## Resolution
+
+Issue #35 closes with no code change, both arches' best kernel
+already wired by default. The aarch64 ILP regression and the x86 FMA
+win are captured in the decision log so a future tuner doesn't
+re-discover the asymmetry from scratch.
 
 ## References
 

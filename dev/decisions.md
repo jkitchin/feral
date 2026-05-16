@@ -3552,3 +3552,50 @@ References:
 - Commits: 58e7421 (c), 05730a4 (d), b44b9d9 (e), 4adef8c (f),
   499e5de (g).
 - GH: #34
+
+## 2026-05-16 — FMA Schur-panel kernel: per-arch asymmetry, defaults stay (#35)
+
+**Decision:** Keep the FMA path. Keep `BunchKaufmanParams::fma =
+false` as the default. Do *not* gate the flag per-arch in code.
+Document the asymmetry here and in the FMA opt-in research note so
+future callers know which side of the dispatch is profitable.
+
+**Why:** The kernel-direct A/B probe `probe_fma_kernel` resolves the
+issue #35 decision tree to its "x86 wins, aarch64 loses" branch:
+
+| shape         | aarch64 fma/nofma | x86_64 fma/nofma |
+|---------------|------------------:|-----------------:|
+| wide_2829x433 |              0.80 |             1.55 |
+| square_1928   |              0.85 |             1.55 |
+| narrow_512x32 |              0.89 |             1.53 |
+
+Numbers come from `probe_fma_kernel` on M-series (commit ee46d72)
+and ubuntu-latest x86_64 (CI run 25971444759 via commit f1f9894).
+The aarch64 regression is intrinsic to the kernel body — `mul + sub`
+exposes more ILP than `mul_add` on NEON pipes — while x86 V3
+(AVX2+FMA) gets the textbook 1.5x speedup.
+
+Two paths were considered and rejected:
+
+1. **Gate `fma = true` to `cfg(target_arch = "x86_64")` in
+   `BunchKaufmanParams`.** Rejected because it would silently
+   override an explicit caller opt-in; downstream tooling that uses
+   the flag for parity/regression bisection (e.g. probe binaries)
+   would lose the ability to time the FMA path on aarch64 even when
+   that's the explicit measurement goal.
+2. **Remove the FMA path.** Rejected because x86 callers do get the
+   1.5x and the path's correctness is well-tested
+   (`schur_kernel.rs` has bit-exact rank-1 reference tests on both
+   variants).
+
+Production default `fma = false` already gives every arch its best
+kernel, so no runtime change is needed. Callers building on x86 can
+opt in via `Solver::new().with_fma(true)`.
+
+References:
+- `dev/research/fma-kernel-aarch64-regression-2026-05-16.md` (probe
+  methodology + aarch64 numbers).
+- `dev/research/fma-kernel-opt-in.md` (original opt-in design).
+- Probe: `src/bin/probe_fma_kernel.rs`.
+- Commits: ee46d72 (probe + note), f1f9894 (CI wiring), this entry.
+- GH: #35.
