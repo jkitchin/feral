@@ -43,6 +43,27 @@ Tests: 11 in `tests/sqd_fast_path.rs` covering kernel hand-checks,
 Solver-level dispatch (dense + multifrontal), contract-trip on
 both bounds, BK-vs-SQD reference parity, random-SQD property
 trials, and the symbolic-cache reuse contract.
+### Added — M3 stress corpus expansion (#26)
+
+Triples the SuiteSparse stress-suite corpus from 18 to 104 rows
+(125 total with synth + cuter_kkt). New groups: `Schenk_IBMNA` (49
+indef Jacobians from circuit / nonlinear-arithmetic problems),
+remaining `GHS_indef` entries in the n ≤ 100k tier (33 saddle / pde /
+opt / dense rows), and 4 Boeing mechanics matrices with indefinite
+stiffness blocks (`bcsstk35/37/39`, `nasa1824`). Each row is tagged
+under the existing `category` taxonomy so `report.py`'s per-category
+roll-up stays meaningful: `indef=59`, `saddle=15`, `opt=15`,
+`mech=4`, `dense=6`, `pde=5`. Full run completes in 4m35s wall
+(13× headroom under the 1h acceptance ceiling); `report.py` is
+byte-stable across back-to-back invocations and exit code is 0 on
+all 122 ready rows. Pattern-encoded (`nasa2910`, `nasa4704`) and
+integer-encoded (`aug2d`, `aug2dc`, `aug3d`) matrices excluded
+pending matrix-market reader extension — see
+`dev/tried-and-rejected.md`. Schenk_AFE skipped entirely (all
+matrices are ≥504k rows, outside the n ≤ 100k size tier and over
+the time budget). Background, group selection, SPD filter, and
+pathologies-encountered documented in
+`dev/research/stress-corpus-m3.md`.
 
 ### Changed — Issue #10 closes; default `nemin=16` and `OrderingMethod::Amd` confirmed (#10)
 

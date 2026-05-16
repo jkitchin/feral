@@ -38,3 +38,89 @@ synth	saddle_rankdef_100_20_5	180	13130	saddle_rankdef	KKT m=80 rank(A)=75 → i
 synth	wide_frontal_616	616	178982	wide_frontal	Bordered block diag, single supernode width 600
 synth	mc64_resistant_200	200	20100	mc64_resistant	Q D Q^T with one λ=1e-8; MC64 scaling cannot fix κ~1e8
 synth	stokes_q1p0_8	162	866	stokes	Q1-P0 Stokes h=8; inertia (98,62,2), 2 spurious pressure modes
+Boeing	nasa1824	1824	20516	mech	NASA structural indef stiffness
+Boeing	bcsstk37	25503	583240	mech	Indefinite stiffness, structural
+Boeing	bcsstk35	30237	740200	mech	Indefinite stiffness, structural
+Boeing	bcsstk39	46772	1068033	mech	Indefinite stiffness, structural
+GHS_indef	laser	3002	5000	dense	Laser cavity PDE
+GHS_indef	sit100	10262	34094	pde	Sit-100 PDE
+GHS_indef	linverse	11999	53988	dense	Linear inverse problem, dense
+GHS_indef	stokes64s	12546	74242	saddle	Stokes 64^2 scaled variant
+GHS_indef	tuma2	12992	28440	saddle	Optimization KKT
+GHS_indef	ncvxqp9	16554	31547	opt	Non-convex QP (small)
+GHS_indef	qpband	20000	30000	opt	Banded QP
+GHS_indef	dtoc	24993	34986	opt	Discrete-time optimal control
+GHS_indef	brainpc2	27607	96601	pde	Brain phase-change PDE
+GHS_indef	spmsrtls	29995	129971	dense	Spectral method sparse, dense
+GHS_indef	bloweya	30004	80005	opt	Bloweya bound-constrained
+GHS_indef	aug3dcqp	35543	77829	saddle	Augmented 3D KKT QP
+GHS_indef	c-58	37595	295076	indef	Schenk IBMNA mirror, mildly indef
+GHS_indef	c-59	41282	260909	indef	Schenk IBMNA mirror, mildly indef
+GHS_indef	c-62ghs	41731	300537	indef	Schenk IBMNA mirror
+GHS_indef	c-63	44234	239469	indef	Schenk IBMNA mirror
+GHS_indef	sparsine	50000	799494	dense	Sinusoidal sparse, dense supernodes
+GHS_indef	dawson5	51537	531157	pde	Dawson optimization, dense fill
+GHS_indef	copter2	55476	407714	dense	Helicopter dynamics dense
+GHS_indef	blockqp1	60012	340022	opt	Block-structured QP
+GHS_indef	ncvxqp5	62500	237483	opt	Non-convex QP
+GHS_indef	c-68	64810	315408	indef	Schenk IBMNA mirror
+GHS_indef	c-69	67458	345714	indef	Schenk IBMNA mirror
+GHS_indef	k1_san	67759	303364	saddle	K1 sandia saddle
+GHS_indef	c-70	68924	363955	indef	Schenk IBMNA mirror
+GHS_indef	c-71	76638	468096	indef	Schenk IBMNA mirror
+GHS_indef	a0nsdsil	80016	200021	saddle	Augmented saddle, large
+GHS_indef	a2nnsnsl	80016	196115	saddle	Augmented saddle, large
+GHS_indef	cont-201	80595	239596	saddle	Continuous PDE saddle
+GHS_indef	c-72	84064	395811	indef	Schenk IBMNA mirror
+GHS_indef	ncvxqp7	87500	312481	opt	Non-convex QP
+GHS_indef	olesnik0	88263	402623	saddle	Olesnik aerospace saddle
+GHS_indef	boyd1	93279	652246	opt	Boyd large-scale opt
+Schenk_IBMNA	c-18	2169	8657	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-19	2327	12072	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-20	2921	12803	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-21	3509	17833	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-22	3792	16332	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-25	3797	26716	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-23	3969	17524	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-24	4119	19909	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-26	4307	19422	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-27	4563	17969	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-28	4598	17594	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-29	5033	24382	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-30	5321	35507	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-31	5339	41955	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-32	5975	30223	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-33	6317	31220	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-35	6537	34714	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-34	6611	35472	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-36	7479	36710	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-38	8127	42908	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-37	8204	41440	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-39	9271	73041	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-41	9769	55757	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-40	9941	45721	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-42	10471	60378	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-44	10728	47864	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-43	11125	67400	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-45	13206	93829	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-46	14913	72655	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-47	15343	113372	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-48	18354	92217	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-49	21132	89087	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-50	22401	108013	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-51	23196	113123	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-52	23948	113332	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-53	30235	201224	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-54	31793	211743	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-56	35910	208405	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-57	37833	221515	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-62	41731	300537	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-61	43618	176817	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-60	43640	171109	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-65	48066	204297	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-66	49989	274498	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-66b	49989	274498	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-64	51035	384438	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-64b	51035	384438	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-67	57975	294955	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
+Schenk_IBMNA	c-67b	57975	294955	indef	Schenk IBM NA indef (nonlinear arithmetic / circuits)
