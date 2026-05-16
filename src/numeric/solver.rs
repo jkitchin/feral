@@ -21,7 +21,7 @@ use crate::numeric::solve::{solve_sparse, solve_sparse_many, solve_sparse_refine
 use crate::scaling::ScalingStrategy;
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::supernode::SupernodeParams;
-use crate::symbolic::{symbolic_factorize, SymbolicFactorization};
+use crate::symbolic::{symbolic_factorize_with_method, OrderingMethod, SymbolicFactorization};
 
 /// Result of a single `Solver::factor` attempt.
 #[derive(Debug)]
@@ -146,6 +146,15 @@ pub struct Solver {
     /// the same `&mut self` borrow that touches `numeric_params`
     /// and `workspace` — `install` only needs `&ThreadPool`.
     parallel_pool: Option<std::sync::Arc<rayon::ThreadPool>>,
+    /// Fill-reducing ordering method passed to every
+    /// `symbolic_factorize_with_method` call this `Solver` issues.
+    /// Default `OrderingMethod::Auto` — the same dispatcher
+    /// `symbolic_factorize` uses, so unconfigured `Solver`s match
+    /// the free-function default exactly. Library consumers override
+    /// via `with_ordering` to experimentally try ND on banded /
+    /// 1D-banded KKTs (#33 suggested action §3, supernode-shape
+    /// thesis).
+    ordering: OrderingMethod,
 }
 
 impl Solver {
@@ -170,6 +179,7 @@ impl Solver {
             workspace: FactorWorkspace::new(),
             use_parallel: true,
             parallel_pool: None,
+            ordering: OrderingMethod::Auto,
         }
     }
 
@@ -284,6 +294,33 @@ impl Solver {
         self
     }
 
+    /// Override the fill-reducing ordering method used at the next
+    /// (and subsequent) symbolic factorization. Default
+    /// `OrderingMethod::Auto` matches the free-function
+    /// `symbolic_factorize` dispatcher exactly.
+    ///
+    /// Motivating use case: issue #33's 1D-banded Mittelmann panel
+    /// (clnlbeam) bottlenecked at 97% main-thread in the scalar 1×1
+    /// pivot path because AMD produces thin supernodes on banded
+    /// structure. Nested-dissection orderings (`ScotchND`,
+    /// `MetisND`, `KahipND`) tend to produce squarer fronts on such
+    /// problems, letting more work batch through the blocked panel
+    /// kernel. Library consumers can switch in
+    /// `Solver::new().with_ordering(OrderingMethod::ScotchND)` and
+    /// re-time to test the supernode-shape thesis without rebuilding.
+    ///
+    /// Takes effect at the next `factor()` call that triggers a
+    /// symbolic re-factorization. A cached symbolic from a prior
+    /// `factor()` with a different ordering is not invalidated by
+    /// this call alone — pattern-fingerprint mismatch is what
+    /// triggers symbolic invalidation. To force a re-symbolic with
+    /// the new method on the same pattern, call this *before* the
+    /// first `factor()`, or pass a structurally-different matrix.
+    pub fn with_ordering(mut self, method: OrderingMethod) -> Self {
+        self.ordering = method;
+        self
+    }
+
     /// Factor `matrix`. If `check_inertia` is `Some(expected)`,
     /// returns `WrongInertia { actual, expected }` on mismatch
     /// without invalidating the stored factor (caller may still
@@ -302,7 +339,7 @@ impl Solver {
 
         // Step 3: ensure symbolic is cached.
         if self.last_symbolic.is_none() {
-            match symbolic_factorize(matrix, &self.snode_params) {
+            match symbolic_factorize_with_method(matrix, &self.snode_params, self.ordering) {
                 Ok(sym) => {
                     self.symbolic_call_count += 1;
                     self.last_symbolic = Some(sym);
