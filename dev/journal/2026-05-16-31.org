@@ -1,0 +1,67 @@
+* 17:50 :issue38:fix-landed:
+Landed db20166 fix(#38): one-shot MC64 cache invalidation in
+`Solver::factor` (clears `last_symbolic.cached_mc64` after every
+numeric call). Plus in-module regression test
+`numeric::solver::tests::mc64_cache_invalidated_after_factor_issue_38`
+that inspects the cache field directly. Verified the test fails
+when fix is removed (panic on assertion) and passes when restored.
+Full test suite green (cargo test --release: exit 0).
+
+Posted finding-comment on #38 reframing the issue as silent
+correctness bug not just warm-slowdown:
+https://github.com/jkitchin/feral/issues/38#issuecomment-4468206937
+
+Sylvester's law detour: initial integration test on a 4x4
+block-antidiag was a no-op — symmetric scaling preserves inertia
+exactly on small well-conditioned matrices. Replaced with the
+direct field-inspection unit test; that's the only way to catch
+the bug without a real arrow-KKT corpus.
+
+* 18:30 :pinene:probe:cache-fix-doesnt-rescue-37:
+Ran probe_pinene_issue38_fix (uncommitted) through 10 pinene_3200
+dumps under one warm Solver::new() with the fix landed:
+| iter | factor    | inertia |
+|------+-----------+---------|
+|    0 |   0.983 s | OK      |
+|    1 |   0.917 s | OK      |
+|    2 |   0.706 s | OK      |
+|    3 |   0.872 s | OK      |
+|    4 |   0.940 s | OK      |
+|    5 | 451.871 s | OK      |
+|   6+ | killed @ 600 s wall |
+
+Inertia stays correct throughout — no silent corruption.
+Late-iter cost explosion (iter 5: 452 s) is the same
+wide-supernode cascade the #37 issue body diagnosed, not a stale-
+cache symptom. The MC64-cache fix neither rescues nor regresses
+pinene_3200. #37 remains closed under the per-problem
+feral_cascade_break=yes mitigation.
+
+Session-30's "likely also rescues #37" hypothesis is dead. The
+cache-staleness path and the wide-supernode-cascade path are
+independent mechanisms that happen to share the arrow-KKT
+trigger condition.
+
+* 18:35 :issue18:user-side-confirmation:
+User reports ipopt-feral now solves NARX_CFy. The feral-side
+fix shipped in 597a90a (default feral_solve → solve_many_refined)
+gated by tests in 2289d1d + ea98f98. With end-to-end
+ipopt-feral confirmation, #18 can close — drafting closing
+comment in next iteration.
+
+* 18:40 :research-note:checkpoint:
+Wrote dev/research/mc64-cache-staleness-2026-05-16.md covering:
+- Failure mechanism (5-step trace from ScalingStrategy::Auto
+  through scaling_from_cache → wrong factor)
+- Why symptom is drifting inertia not obviously wrong solve
+  (BK pivoting destabilises under mis-scaling; on conditioned
+  small matrices Sylvester preserves inertia, on real arrow-KKTs
+  delayed-pivot cascade kicks in)
+- Four fix options analysed against IPM use case
+- Diagnostic evidence (warm replay, warm-vs-fresh, PAR=0
+  localisation, InfNorm control — all tables from session-30)
+- Relationship to #37 (independent mechanism; cache fix doesn't
+  rescue, probe results inlined)
+
+Session-31 checkpoint follows; this closes the session-30 ->
+session-31 fix-landing arc.

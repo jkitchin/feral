@@ -1934,3 +1934,41 @@ is specific to pinene's elimination tree shape, not to AMD itself.
 (retained for the session; reproducible via
 `cargo run --release --bin diag_pinene_amd -- pinene_3200_0009`,
 `pinene_3200_0008`, and `robot_1600_0003` from a checkout at HEAD).
+
+---
+
+## 2026-05-16 — Behavioural integration test for #38 cache staleness on 4×4 matrix
+
+**What.** Initial regression test for the issue #38 MC64-cache-staleness fix
+(`tests/issue_38_mc64_cache_warm_vs_fresh.rs`) factored two value-perturbed
+matrices on the same block-anti-diagonal 4×4 pattern through one warm
+`Solver` and asserted `warm.inertia() == fresh.inertia()`. Mirrors the
+rocket_12800 reproducer's warm-vs-fresh comparison in miniature.
+
+**Why it was rejected.** The test passed with the fix removed. Sylvester's
+law of inertia preserves inertia exactly under any symmetric non-singular
+scaling, so on small well-conditioned matrices applying iter-0 MC64
+scaling to iter-N values produces the correct inertia regardless. The bug
+only manifests as wrong inertia on large arrow-KKTs where the mis-scaling
+destabilises Bunch-Kaufman pivoting enough to trigger a delayed-pivot
+cascade — and that cascade is not reproducible on a 4×4 matrix.
+
+**Disposition.** Replaced with an in-module unit test
+(`numeric::solver::tests::mc64_cache_invalidated_after_factor_issue_38`)
+that inspects `last_symbolic.cached_mc64` directly and asserts it is
+`None` after one `factor()` call. The pub(crate) field is only accessible
+from `super::*` so the test had to move from `tests/` to the in-module
+`#[cfg(test)]` block. Verified the unit test fails when the fix is
+removed (panics on the assertion) and passes when restored.
+
+**Lesson.** Behavioural tests for scaling-related bugs need either (a) a
+matrix large enough to expose BK pivot-threshold sensitivity, which means
+shipping corpus data, or (b) a direct-field assertion on the cache state.
+For one-shot caches that should be cleared per call, (b) is cheaper and
+more targeted than (a).
+
+**Evidence.** See `dev/research/mc64-cache-staleness-2026-05-16.md` and
+the diagnostic tables in `dev/journal/2026-05-16-30.org`. Verification
+procedure (toggle fix, run `cargo test --release --lib
+numeric::solver::tests::mc64_cache_invalidated_after_factor_issue_38`,
+observe pass/fail) reproducible from HEAD.

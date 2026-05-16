@@ -1,80 +1,80 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-16T21:01:59Z
+Generated: 2026-05-16T21:46:35Z
 
 ## Latest Session
-File: dev/sessions/2026-05-16-30.md
+File: dev/sessions/2026-05-16-31.md
 ```
-# Session 2026-05-16-30 — Issue #37 reframe via #38: stale MC64 cache root-cause
+# Session 2026-05-16-31 — Land the #38 MC64-cache-staleness fix
 
 ## Goal
 
-User assertion: #37 (pinene_3200 CB=off regression) "relies on a workaround
-that should not be needed". Investigate whether the workaround
-(`Solver::with_cascade_break(0.5)` builder, or pounce-side
-`feral_cascade_break=yes` ipopt option) can be eliminated by a feral-side
-default fix.
+Land the fix identified in session-30 (stale MC64 cache reused across
+warm `Solver::factor` calls produces silently wrong inertia and
+explodes cost on real arrow-KKTs). Per session-30's "next session
+should":
 
-Mid-session redirect: user pointed at issue #38 (sister case to #37 on
-`rocket_12800` where BOTH CB modes fail), which reframes the question from
-"flip the right default" to "fix the underlying mechanism". Pivoted to
-chasing #38's Failure A (warm-Solver-state slowdown).
+- Write research note `dev/research/mc64-cache-staleness-2026-05-16.md`
+- Land the fix + regression test
+- Re-test #37 (pinene_3200) under the fix
+- Post finding-comment on #38
 
 ## Accomplished
 
-- **AutoRace ordering hypothesis killed by diag data.** Ran
-  `diag_pinene_amd` on `pinene_3200_{0008,0009}` + `robot_1600_0003` to
-  test whether switching `Solver::new()`'s default from
-  `OrderingMethod::Auto` to `OrderingMethod::AutoRace` would close #37 by
-  preferring AMD on pinene. Result: under CB=off, AMD on pinene_3200 is
-  **~10× WORSE** than MetisND (917s and 1055s vs MetisND's 88s, with
-  ~13.5M delayed pivots), not 4.5× better as the c92cafe commit message
-  claimed. c92cafe's benchmark predates 585d739 (cascade-break became
-  opt-in), so it was measuring AMD-with-CB-armed. Robot_1600_0003 was
-  clean (both AMD and MetisND produce neg=9601 matching the MUMPS oracle,
-  AMD 1.4× faster), so the regression guard would not have fired.
-  Conclusion: ordering choice cannot fix #37; the mechanism is the issue.
+- **Fix landed: db20166** `fix(#38): invalidate stale MC64 cache
+  between factor() calls`. One-shot cache invalidation at the end of
+  `Solver::factor`: clears `last_symbolic.cached_mc64` after every
+  numeric call. The cache stays valid for the first numeric call
+  after symbolic (values match by construction); subsequent calls
+  fall through to a fresh `mc64::compute_symmetric(matrix)` against
+  current values. Cost: one extra MC64 (~100–200 ms on n ≈ 1e5) per
+  warm refactor when scaling resolves to `Mc64Symmetric`.
 
-- **Reproduced #38 Failure A** (warm-Solver-state slowdown) on the 18
-  `/tmp/rkt_*.bin` rocket dumps. Default `Solver::new()` (CB=off,
-  parallel=on, scaling=Auto):
+- **Regression test**
+  `numeric::solver::tests::mc64_cache_invalidated_after_factor_issue_38`.
+  Inspects `last_symbolic.cached_mc64` directly after one `factor()`
+  call and asserts it is `None`. Field-inspection rather than
+  behavioural: Sylvester's law keeps inertia invariant under any
+  symmetric scaling on well-conditioned small matrices, so the
+  downstream wrong-inertia symptom only manifests on large arrow-KKTs
+  — a 4×4 reproducer is insensitive. Verified the test fails when the
+  fix is removed (panics on the assertion) and passes when restored.
 
-  | call | factor   | neg   | comment            |
-  |-----:|---------:|------:|--------------------|
-  | #000 |  0.320s  | 38400 | cold (incl. symbolic) |
-  | #009 |  0.023s  | 38400 | warm, stable        |
-  | #010 |  0.022s  | 38395 | inertia drift starts |
-  | #014 |  0.024s  | 38145 | drift continuing    |
-  | #015 |  0.056s  | 37513 | cost begins to climb |
-  | #016 |  2.093s  | 35900 | cost explodes       |
-  | #017 | 43.216s  | 31720 | runaway             |
+- **Test suite green.** `cargo test --release` exit 0;
+  `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+  pass via pre-commit hooks.
 
-  Matches issue body's qualitative description.
+- **#38 finding-comment posted**:
+  <https://github.com/jkitchin/feral/issues/38#issuecomment-4468206937>.
+  Reframes the issue as silent inertia corruption (not just "warm
+  slowdown") with the four diagnostic tables (warm replay,
+  warm-vs-fresh, PAR=0 localisation, InfNorm control) from
+  session-30. Closes Failure A; leaves issue open for Failure B
+  (CB=on iter-4 disagreement vs MA57) which is a separate
+  investigation.
 
-- **NEW FINDING (bigger than #38's framing): warm Solver under default
-  `ScalingStrategy::Auto` produces SILENTLY WRONG INERTIA on the same
-  matrix that a fresh Solver factors correctly.** Side-by-side fresh
-  vs warm on calls #014..#017:
+- **Research note written**:
+  `dev/research/mc64-cache-staleness-2026-05-16.md`. Covers the
 ```
 
 ## Git Status
 ```
+db20166 fix(#38): invalidate stale MC64 cache between factor() calls
+c0cceea chore(session): 2026-05-16-30 -- #37 -> #38 stale MC64 cache finding
 87e6be3 chore(session): 2026-05-16-29 -- #13 merge + #18 residual gates + #11 close
 40f687c docs(#11): reject SmallLeafBatch::On default flip on post-SIMD+APP re-eval
 0b60d9a perf(dense): in-place scratch-pooled scalar fallback (#13)
-ea98f98 test(#18): add refined-solve residual gate (1e-10) to NARX_CFy corpus
-a520e73 docs: close #35 — FMA per-arch asymmetry confirmed, defaults stay
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-6bd386c5815a5f71)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-86a6a76d01c16bc9)
 
 running 5 tests
-test test_gate_just_outside_n_tiny ... ok
 test test_gate_tiny_sparse_in ... ok
+test test_gate_just_outside_n_tiny ... ok
 test test_gate_boundary_n_16 ... ok
 test test_determinism_tiny ... ok
 test test_solve_parity_tiny_real_matrix ... ok
@@ -92,13 +92,26 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-16-30.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-16-31.md)
 
 
-No `cargo run --bin bench --release` this session — pure investigation,
-no code changes to the solver. The numbers above (rocket replay sweeps)
-are the relevant measurements. No regression run because no change
-landed.
+`cargo run --bin bench --release` — both Phase 2.8.1 partition gates
+pass at p90, no regressions:
+
+--- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     147982     1.37     <= 2.0     PASS
+medium (<500)            152145     1.87     <= 3.0     PASS
+
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.74     <= 2.0     PASS
+medium (<500)            153560     1.75     <= 3.0     PASS
+
+Top-10 worst per-matrix ratios unchanged from session-30 baseline
+(MUONSINE_0000 30.6×, KIRBY2_*  ~6-8×, SWOPF_* ~6×). The fix only
+touches a single boolean assignment in `Solver::factor`; bench
+matrices factor cold so the cache path isn't exercised here.
 
 ```
 
@@ -135,26 +148,26 @@ References:
 - GH: #35.
 
 ## Recent Tried-and-Rejected
-So the regression guard would not have caught this — the failure
-is specific to pinene's elimination tree shape, not to AMD itself.
 
-**Disposition.**
-- `Solver::new()` retains `OrderingMethod::Auto` as the default.
-- The c92cafe claim about AMD speedup on pinene is now historical
-  (CB=on regime only) and should not be cited as motivation for
-  default-ordering changes.
-- Closing #37 requires fixing the underlying CB-mechanism gap, not
-  the ordering choice. The follow-up investigation (see
-  `dev/sessions/2026-05-16-30.md` and `dev/journal/2026-05-16-30.org`)
-  redirects to issue #38 and surfaces a separate silent-correctness
-  bug — stale MC64 cache producing wrong inertia on warm IPM
-  re-factors — that is the more likely root cause for both #37 and #38.
+**Disposition.** Replaced with an in-module unit test
+(`numeric::solver::tests::mc64_cache_invalidated_after_factor_issue_38`)
+that inspects `last_symbolic.cached_mc64` directly and asserts it is
+`None` after one `factor()` call. The pub(crate) field is only accessible
+from `super::*` so the test had to move from `tests/` to the in-module
+`#[cfg(test)]` block. Verified the unit test fails when the fix is
+removed (panics on the assertion) and passes when restored.
 
-**Evidence.** Diag outputs at
-`/private/tmp/claude-501/-Users-jkitchin-projects-feral/<session>/tasks/{br9xq3zub,bh8zlfol7,b0ozjbi4h}.output`
-(retained for the session; reproducible via
-`cargo run --release --bin diag_pinene_amd -- pinene_3200_0009`,
-`pinene_3200_0008`, and `robot_1600_0003` from a checkout at HEAD).
+**Lesson.** Behavioural tests for scaling-related bugs need either (a) a
+matrix large enough to expose BK pivot-threshold sensitivity, which means
+shipping corpus data, or (b) a direct-field assertion on the cache state.
+For one-shot caches that should be cleared per call, (b) is cheaper and
+more targeted than (a).
+
+**Evidence.** See `dev/research/mc64-cache-staleness-2026-05-16.md` and
+the diagnostic tables in `dev/journal/2026-05-16-30.org`. Verification
+procedure (toggle fix, run `cargo test --release --lib
+numeric::solver::tests::mc64_cache_invalidated_after_factor_issue_38`,
+observe pass/fail) reproducible from HEAD.
 
 ## Source Files
 ```
@@ -240,6 +253,7 @@ src/bin/probe_fma_kernel.rs
 src/bin/probe_ir_trajectory.rs
 src/bin/probe_issue_19.rs
 src/bin/probe_panel_attribution.rs
+src/bin/probe_pinene_issue38_fix.rs
 src/bin/probe_scaling_policy4.rs
 src/bin/probe_wide_supernode.rs
 src/bin/produce_dense_schur.rs
