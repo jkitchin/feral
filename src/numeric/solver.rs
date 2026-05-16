@@ -253,18 +253,27 @@ impl Solver {
         self
     }
 
-    /// Enable bounded-Δ perturbation for cascade-break supernodes.
+    /// Enable static-pivot perturbation for cascade-break supernodes.
     /// At triggered supernodes the BK policy switches to
     /// `ZeroPivotAction::PerturbToEps { abs_floor: eps }`: each
     /// rejected pivot becomes `sign(d) * max(|d|, eps)` and is
-    /// counted by sign rather than absorbed as zero. The factor
-    /// satisfies `LDL^T = A + Δ` with `||Δ||_∞ <= eps` per
-    /// perturbed pivot.
+    /// counted by sign rather than absorbed as zero.
+    ///
+    /// The factor satisfies `L · D · L^T = A + Δ` for the L and D
+    /// produced, but `Δ` is *not* bounded by `eps`. See the
+    /// `ZeroPivotAction::PerturbToEps` docstring and
+    /// `dev/research/cascade-break-l-perturbation-2026-05-15.md`
+    /// for the correct bound (the implicit Δ flows through the
+    /// trailing Schur update and is bounded in `||A||² / eps`).
+    /// On IPM KKT matrices the unrefined residual stays small in
+    /// practice; iterative refinement against unperturbed `A` is
+    /// recommended for tight tolerances.
     ///
     /// Without this knob, cascade-break uses the legacy unbounded
-    /// `ForceAccept` (inertia is not preserved in general; the
-    /// 0.94–0.95 sweet spot on `pinene_3200_0009` is matrix-specific
-    /// luck — see `dev/journal/2026-05-13-03.org` 01:15).
+    /// `ForceAccept` (zero-out L and D at the rejected pivot;
+    /// inertia is not preserved in general). The 0.94–0.95 ratio
+    /// sweet spot reported on `pinene_3200_0009` is matrix-specific
+    /// — see `dev/journal/2026-05-13-03.org` §01:15.
     ///
     /// Recommended `eps`: `1e-8` to `1e-10` for KKT systems with
     /// `||A||_∞` in the `O(1)–O(10³)` range typical of IPM iterates.

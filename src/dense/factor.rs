@@ -298,17 +298,33 @@ pub enum ZeroPivotAction {
     /// Replace the tiny pivot with `sign(d) * max(|d|, abs_floor)`,
     /// keep the L column live, and count the perturbed pivot by its
     /// sign (positive or negative — never zero). Sign of `0.0` is
-    /// treated as `+1.0`. The factor satisfies
-    /// `LDL^T = A + Δ` with `||Δ||_∞ <= abs_floor` per perturbed pivot;
-    /// by Weyl's inequality eigenvalues move by at most `||Δ||_2`,
-    /// so inertia is preserved whenever every nonzero eigenvalue of
-    /// `A` has magnitude exceeding the cumulative perturbation. The
-    /// caller is responsible for choosing `abs_floor`: a typical
-    /// recipe is `eps_rel * ||A||_∞` with `eps_rel` between `1e-12`
-    /// and `1e-8` for IPM KKT systems. Sets `needs_refinement = true`
-    /// so callers can drive iterative refinement against unperturbed
-    /// `A`. See `dev/journal/2026-05-13-03.org` §01:15 for the
-    /// motivating cascade-break behavior.
+    /// treated as `+1.0`.
+    ///
+    /// The factor satisfies `L · D · L^T = A + Δ` exactly (within
+    /// roundoff) for the L and D produced, but `Δ` is *not* localised
+    /// to the perturbed diagonal entry. `L[i,k] = A[i,k] / d_new`
+    /// stays live, so the trailing Schur update reduces `A[i,j]` by
+    /// `A[i,k] · A[j,k] / d_new` rather than the "true" reduction
+    /// `A[i,k] · A[j,k] / d_orig`. The implicit `Δ` per perturbed
+    /// pivot therefore scales with `||A[k+1:,k]||² · |1/d_new −
+    /// 1/d_orig|`, which is bounded by `||A[:,k]||² / abs_floor`
+    /// in the worst case — *not* by `abs_floor` as a naive Weyl
+    /// reading might suggest. On numerically reasonable IPM KKT
+    /// matrices the unrefined residual stays small in practice
+    /// (e.g. `~1e-5` on `robot_1600_0004`), but downstream code
+    /// should drive iterative refinement against unperturbed `A`
+    /// for tight tolerances. Sets `needs_refinement = true`.
+    ///
+    /// Closest published precedent: LAPACK static pivoting (Trefethen
+    /// & Bau §22) and MA57's `cntl(4)` static-pivot replacement. A
+    /// typical `abs_floor` recipe is `eps_rel · ||A||_∞` with
+    /// `eps_rel` between `1e-12` and `1e-8` for IPM KKT systems.
+    ///
+    /// History: `dev/journal/2026-05-13-03.org` §01:15 (motivation),
+    /// `dev/research/cascade-break-l-perturbation-2026-05-15.md`
+    /// (forensics), `dev/tried-and-rejected.md` "L-zeroing fix"
+    /// (rejected attempt at making the bound match the original
+    /// docstring).
     PerturbToEps { abs_floor: f64 },
 }
 

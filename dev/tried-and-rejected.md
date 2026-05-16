@@ -1484,3 +1484,66 @@ next session.
 
 References: `dev/sessions/2026-05-15-01.md`,
 `dev/decisions.md` 2026-05-15 entry, issue #17 thread.
+
+
+## 2026-05-15 — "Zero L on `PerturbToEps`" to enforce the Weyl bound
+
+**Attempt.** `ZeroPivotAction::PerturbToEps`'s docstring claimed
+`LDL^T = A + Δ` with `||Δ||_∞ ≤ abs_floor` per perturbed pivot.
+Session 02 measured an ~`1.4×10⁻⁵` unrefined solve-diff on
+`robot_1600_0004` and concluded the bound was being violated.
+Diagnosis: with the pivot perturbed to `d_new ≈ eps` and L still
+scaled by `1/d_new`, the L column entries grow as `A[i,k]/eps`,
+which the research note framed as a `1/eps` amplification "violating
+the Weyl bound."
+
+Proposed fix (mirror of `ForceAccept`): zero `L[:,k]` below the
+diagonal after writing the perturbed `D[k,k]`, return
+`PivotOutcome::Rejected` so `do_1x1_update` is skipped. Predicted
+post-fix residual: `~1e-14` (LAPACK static-pivoting bound). Applied
+to both 1×1 PerturbToEps sites (`try_reject_1x1_frontal` and
+`do_1x1_pivot`).
+
+**Why rejected.** Direct measurement on `robot_1600_0004` (probe
+`src/bin/probe_cascade_perturb.rs`):
+
+| config                         | residual          |
+| ------------------------------ | ----------------- |
+| cb=off                         | 6.24e-7           |
+| cb=default (pre-fix code)      | 1.06e-5           |
+| cb=default (with L-zero fix)   | **2.13e+3**       |
+| cb=fa (ForceAccept)            | 2.10e+2           |
+
+The fix made the residual five orders of magnitude *worse* than
+pre-fix. Reason: with L zeroed but `D[k,k] = d_new ≈ eps`, the solve
+divides `x[k] = (rhs - L row k contribution) / d_new ≈ rhs / 1e-10`.
+There is no longer a live L column to cancel the `1/d_new` factor.
+
+The premise was also wrong on the math: pre-fix code's factorization
+*is* self-consistent. `(A[i,k]/d_new) · d_new · 1 = A[i,k]` exactly,
+so off-diagonal column-k entries are preserved. The implicit `Δ`
+flows through the Schur update (`Δ_schur[i,j] = A[i,k]·A[j,k]·(1/d_new
+− 1/d_orig)`) and is bounded by `||A||²/eps` in the worst case — not
+by `eps`. The original docstring's bound was incorrect, but the code
+was doing the right thing for solve.
+
+**Resolution.**
+
+1. Code revert: no change to the `PerturbToEps` branches.
+2. Docstring corrected (`src/dense/factor.rs` `PerturbToEps`,
+   `src/numeric/solver.rs` `with_cascade_break_eps`) to honestly
+   describe the perturbation structure.
+3. Cascade-break flipped to **opt-in** by default
+   (`NumericParams::default()` now has
+   `cascade_break_ratio = None, cascade_break_eps = None`).
+   MUMPS and MA57 don't ship an equivalent of cascade-break-eps;
+   auto-arming a non-standard mechanism was creating surprises and
+   the prior tried-and-rejected entry above ("Default
+   `cascade_break_ratio = None` to fix issue #17") was based on the
+   wrong assumption that the win-case had no opt-in path. The win
+   case (`pinene_3200_0009`, 88.6 s → 34 ms) is preserved via
+   explicit `Solver::with_cascade_break(0.5).with_cascade_break_eps(1e-10)`.
+
+References: `dev/research/cascade-break-l-perturbation-2026-05-15.md`,
+session 2026-05-15-02 (original 1.4e-5 measurement), session
+2026-05-15-07 (this entry).

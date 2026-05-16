@@ -391,20 +391,27 @@ impl Default for NumericParams {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
-            // Auto-armed bounded perturbation. The cascade-break test
-            // (`n_delayed_in / expanded_ncol >= 0.5`) is a per-node
-            // check that is bit-identical to today's default on
-            // healthy matrices (no node crosses 50% delays-in). On
-            // cascade-prone matrices it fires at the overloaded
-            // supernode with a bounded `sign(d) * max(|d|, 1e-10)`
-            // perturbation. The eps=1e-10 floor keeps the per-pivot
-            // perturbation below the smallest nonzero eigenvalue
-            // magnitude on numerically reasonable problems (Weyl:
-            // `|λ - λ'| <= ||Δ||_2 <= eps`), so inertia is preserved.
-            // Closest precedent: MA57 cntl(4), SuperLU_DIST static
-            // pivoting threshold. Off-switch: set these to `None`.
-            cascade_break_ratio: Some(0.5),
-            cascade_break_eps: Some(1e-10),
+            // Cascade-break is off by default. The mechanism (replace
+            // tiny pivots in cascade-overloaded supernodes with
+            // `sign(d) * max(|d|, eps)`) was previously auto-armed on
+            // the theory that `||Δ||_∞ <= eps` per perturbed pivot
+            // (Weyl). That bound does not hold: with L scaled by
+            // `1/d_new` the implicit Δ flows through the Schur update
+            // and grows with `||A[:,k]||² / d_new`. Empirically on
+            // IPM KKT matrices the unrefined residual stays small
+            // (~1e-5 on robot_1600 iter004 — fine after iterative
+            // refinement), but the feature is non-standard (MUMPS and
+            // MA57 don't have an equivalent) and was producing
+            // surprising downstream behavior. Callers that want the
+            // pinene_3200-style cascade-absorption speedup can opt in
+            // via `Solver::with_cascade_break_eps` /
+            // `Solver::with_cascade_break`. See
+            // `dev/research/cascade-break-l-perturbation-2026-05-15.md`
+            // for the analysis and
+            // `dev/tried-and-rejected.md` "cascade_break L-zeroing fix"
+            // for the rejected attempt at restoring the Weyl bound.
+            cascade_break_ratio: None,
+            cascade_break_eps: None,
             min_parallel_flops: None,
         }
     }
@@ -425,10 +432,10 @@ impl NumericParams {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
-            // Match `Default::default()` — auto-armed bounded
-            // perturbation. See the comment there for rationale.
-            cascade_break_ratio: Some(0.5),
-            cascade_break_eps: Some(1e-10),
+            // Match `Default::default()` — cascade-break opt-in. See
+            // the comment there for rationale.
+            cascade_break_ratio: None,
+            cascade_break_eps: None,
             min_parallel_flops: None,
         }
     }

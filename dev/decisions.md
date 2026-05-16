@@ -3270,3 +3270,77 @@ new pool-reuse tests).
 - feral GitHub issue #19.
 - `dev/sessions/2026-05-15-04.md`.
 - `dev/journal/2026-05-15-04.org`.
+
+---
+
+## 2026-05-15 — Cascade-break is opt-in by default
+
+**Decision.** `NumericParams::default()` returns
+`cascade_break_ratio = None, cascade_break_eps = None`. Callers
+that want the cascade-absorption speedup opt in via
+`Solver::with_cascade_break(0.5).with_cascade_break_eps(1e-10)`.
+Reverses the auto-arming choice recorded earlier in this file
+(see the 2026-05-13 cascade-break decision and the 2026-05-15
+"Default `cascade_break_ratio = None` to fix issue #17"
+tried-and-rejected entry, which was based on the assumption that
+the win case had no opt-in path).
+
+**Why.** Three reasons:
+
+1. The original `PerturbToEps` Weyl-bound claim
+   (`||Δ||_∞ ≤ abs_floor` per perturbed pivot) was wrong. With
+   `L` scaled by `1/d_new`, the implicit `Δ` flows through the
+   trailing Schur update and is bounded by `||A||² / eps` in the
+   worst case, not by `eps`. On IPM matrices it stays small in
+   practice (`~1e-5` unrefined on `robot_1600_0004`), but the
+   docstring was misleading.
+
+2. A proposed fix to enforce the Weyl bound (zero `L[:,k]` after
+   writing perturbed `D[k,k]`, return `Rejected` from BK pivot
+   step) was implemented and measured: `robot_1600_0004` unrefined
+   residual went from `1.06e-5` → `2.13e+3`. The L-zeroing breaks
+   solve self-consistency because `x[k] = (rhs - L row k) / d_new`
+   then divides by `eps` with nothing to cancel it. See
+   `dev/tried-and-rejected.md` "Zero L on `PerturbToEps`"
+   2026-05-15 entry.
+
+3. MUMPS 5.8.2 and MA57 (the two Fortran reference solvers feral
+   compares against) don't ship an equivalent feature. Closest
+   precedent is MA57's `cntl(4)` static-pivot replacement which is
+   off by default and global (not per-supernode triggered).
+   Auto-arming a non-standard mechanism by default was creating
+   surprising downstream behavior — two confusing investigation
+   sessions (02 + this one) traced to it.
+
+**What stays.** The cascade-break mechanism itself is unchanged.
+The pinene_3200 win (2840× on `_0009`, 94 s → 33 ms, confirmed in
+this session via `probe_cascade_perturb`) is fully recoverable
+with a single builder call. The `Solver::with_cascade_break_eps`
+and `Solver::with_cascade_break` builders are unchanged. Tests
+that exercise the gate continue to construct `NumericParams`
+with explicit `Some(...)` values.
+
+**Evidence.**
+- `probe_cascade_perturb` on `robot_1600_0004` (n=24000):
+  cb=off residual 6.24e-7; cb=default residual 1.06e-5;
+  cb=fa residual 2.10e+2.
+- `probe_cascade_perturb` on `pinene_3200_0009` (n=127995):
+  cb=off factor 94 s, residual 2.27e-2; cb=default factor 33 ms,
+  residual 7.99e-2 (with inertia preserved); cb=fa factor 36 ms
+  but wrong inertia and residual 5.34e+3.
+- `cargo test --lib --release` → 256 passed; integration tests
+  pass; `cargo clippy --all-targets --release -- -D warnings` clean;
+  `cargo fmt --check` clean.
+- `cargo run --release --bin bench` Phase 2.8.1 dense+sparse
+  small-frontal and medium buckets all PASS; bench numbers within
+  noise of session 2026-05-15-06.
+
+**References.**
+- `dev/research/cascade-break-l-perturbation-2026-05-15.md` —
+  the corrected forensics (the note's original "zero L" proposal
+  was rejected; the note now records both the wrong premise and
+  the right outcome).
+- `dev/tried-and-rejected.md` — 2026-05-15 "Zero L on
+  `PerturbToEps`" entry.
+- `src/bin/probe_cascade_perturb.rs` — the probe that produced
+  the residual numbers.

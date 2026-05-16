@@ -4,6 +4,58 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — cascade-break is now opt-in (was auto-armed by default)
+
+`NumericParams::default()` previously set `cascade_break_ratio =
+Some(0.5)` and `cascade_break_eps = Some(1e-10)`, auto-arming a
+non-standard "static-pivot at cascade-overloaded supernodes"
+mechanism. Both now default to `None`. Callers that want the
+`pinene_3200`-style cascade-absorption speedup (88.6 s → 33 ms on
+`_0009`, ~2840× — confirmed in this session via
+`probe_cascade_perturb`) opt in explicitly:
+
+```rust
+let mut s = Solver::new()
+    .with_cascade_break(0.5)
+    .with_cascade_break_eps(1e-10);
+```
+
+Rationale:
+
+1. The original `PerturbToEps` docstring claimed `||Δ||_∞ ≤
+   abs_floor` per perturbed pivot (Weyl-localised). That bound is
+   wrong: with L scaled by `1/d_new`, the implicit `Δ` flows
+   through the trailing Schur update and is bounded in
+   `||A||² / eps` in the worst case. On IPM KKT matrices the
+   unrefined residual stays small in practice (`~1e-5` on
+   `robot_1600_0004`), but the claim was misleading.
+
+2. MUMPS and MA57 don't ship an equivalent feature. Auto-arming a
+   non-standard mechanism by default was creating surprises in
+   downstream tooling.
+
+3. A proposed code fix to make the bound match the docstring
+   (zero `L[:,k]` after writing the perturbed `D[k,k]`) was tried
+   and rejected — measurement showed the residual on
+   `robot_1600_0004` got *worse* by 5 orders of magnitude (1e-5 →
+   2e3) because the solve loses the live L column needed to
+   cancel `1/d_new` during back-substitution. See
+   `dev/tried-and-rejected.md` "Zero L on `PerturbToEps`".
+
+Also updated: the `PerturbToEps` and `with_cascade_break_eps`
+docstrings now honestly describe the perturbation structure
+(LAPACK static-pivoting / MA57 `cntl(4)` precedent, not a Weyl
+`eps` bound). New probe binary `probe_cascade_perturb` measures
+residuals across cb=off / cb=default / cb=fa configurations.
+
+Phase 2.8.1 corpus gates remain PASS; bench numbers within noise
+of session 2026-05-15-06.
+
+References:
+`dev/research/cascade-break-l-perturbation-2026-05-15.md`,
+`dev/tried-and-rejected.md` (2026-05-15 zero-L entry),
+`src/bin/probe_cascade_perturb.rs`.
+
 ### Changed — `PAR_MIN_FLOPS` lowered from 10⁸ to 10⁷ (feral#19 closeout)
 
 The work-aware parallel-assembly gate threshold drops from 10⁸ to
