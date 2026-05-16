@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-16T16:37:14Z
+Generated: 2026-05-16T17:15:29Z
 
 ## Latest Session
 File: dev/sessions/2026-05-16-02.md
@@ -59,25 +59,25 @@ the bimodal `n_delayed_in / expanded_ncol` distribution measured in
 
 ## Git Status
 ```
+2630770 research(#30): IR convergence policy -- keep residual-based exit
+d3b031d research(#10): supernode-shape ordering A/B — NEGATIVE on Mittelmann panel
+af53f4e chore(context): refresh dev/context.md with new test+bench excerpt
+84238ac chore(session): 2026-05-16-02 -- CI hooksPath fix, #24/#25/#33 §3, axpy negative
 fa62918 test(scaling): relax MSS1_0009 reason check to either fallback variant
-e789ec3 Merge branch 'worktree-agent-ab2727cb5b91921b5'
-2efa315 feat(solver): Solver::with_ordering builder (#33 §3)
-02e699a feat(scaling): surface MC64 -> InfNorm silent fallback (#24)
-7f096c1 docs(cascade-break): document derivation status of ratio=0.5, eps=1e-10 (#25)
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-0aeadf63730f046f)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-992ca24bc06b4fa0)
 
 running 5 tests
-test test_gate_tiny_sparse_in ... ok
 test test_gate_just_outside_n_tiny ... ok
+test test_gate_tiny_sparse_in ... ok
+test test_solve_parity_tiny_real_matrix ... ok
 test test_gate_boundary_n_16 ... ok
 test test_determinism_tiny ... ok
-test test_solve_parity_tiny_real_matrix ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -132,36 +132,36 @@ section above.
 ```
 
 ## Recent Decisions
-this session via `probe_cascade_perturb`) is fully recoverable
-with a single builder call. The `Solver::with_cascade_break_eps`
-and `Solver::with_cascade_break` builders are unchanged. Tests
-that exercise the gate continue to construct `NumericParams`
-with explicit `Some(...)` values.
+matrices) costs zero extra IR solves under the current code.
 
 **Evidence.**
-- `probe_cascade_perturb` on `robot_1600_0004` (n=24000):
-  cb=off residual 6.24e-7; cb=default residual 1.06e-5;
-  cb=fa residual 2.10e+2.
-- `probe_cascade_perturb` on `pinene_3200_0009` (n=127995):
-  cb=off factor 94 s, residual 2.27e-2; cb=default factor 33 ms,
-  residual 7.99e-2 (with inertia preserved); cb=fa factor 36 ms
-  but wrong inertia and residual 5.34e+3.
-- `cargo test --lib --release` → 256 passed; integration tests
-  pass; `cargo clippy --all-targets --release -- -D warnings` clean;
-  `cargo fmt --check` clean.
-- `cargo run --release --bin bench` Phase 2.8.1 dense+sparse
-  small-frontal and medium buckets all PASS; bench numbers within
-  noise of session 2026-05-15-06.
+- `dev/research/ir-convergence-policy.md` — methodology, raw
+  per-matrix table, bucket A/B/C analysis,
+  `external_benchmarks/stress/out/ir_probe/*.out` sidecars.
+- κ̂(A) distributions overlap between the "IR helps" bucket
+  (κ̂ ∈ [1.16e3, 8.00e22]) and the "IR no-op" bucket
+  (κ̂ ∈ [9.94e1, 2.29e29]); no κ̂ threshold separates them.
+  Routing `bratu3d` (κ̂=1.16e3) into a skip path would lose
+  10.24 decades of residual.
+- 4 stagnant matrices cost ≤3 IR solves each (the existing
+  `max_stagnant_steps=2` rule). Total "wasted" IR work across
+  the corpus is ≤12 extra solve-calls — bounded and small.
+- `cargo test` and `cargo clippy --all-targets -- -D warnings`
+  clean (no implementation change in `src/`; only the probe
+  binary and analysis script were added).
+
+**Escape hatches for callers who want to bypass IR.** They
+already exist: `Solver::solve`, `solve_sparse`, and
+`solve_sparse_many` call back-substitution directly without IR.
+The skip-IR knob is a method-selection decision at the call
+site, not a parameter inside `solve_sparse_refined`.
 
 **References.**
-- `dev/research/cascade-break-l-perturbation-2026-05-15.md` —
-  the corrected forensics (the note's original "zero L" proposal
-  was rejected; the note now records both the wrong premise and
-  the right outcome).
-- `dev/tried-and-rejected.md` — 2026-05-15 "Zero L on
-  `PerturbToEps`" entry.
-- `src/bin/probe_cascade_perturb.rs` — the probe that produced
-  the residual numbers.
+- `dev/research/ir-convergence-policy.md`
+- `src/bin/probe_ir_trajectory.rs`
+- `external_benchmarks/stress/analyze_ir.py`
+- `external_benchmarks/stress/out/ir_probe/`
+- `src/numeric/solve.rs` lines 640–897 (the unchanged loop)
 
 ## Recent Tried-and-Rejected
 [3, 4, 5, 6, 8, 10, 16, 32, 64, 128].
@@ -227,6 +227,7 @@ src/bin/diag_max_ncol.rs
 src/bin/diag_mc64_cycles.rs
 src/bin/diag_mittelmann.rs
 src/bin/diag_orbit2_quotient.rs
+src/bin/diag_ordering_panel.rs
 src/bin/diag_ordering_race.rs
 src/bin/diag_par_firstdiff.rs
 src/bin/diag_par_frontal_hash.rs
@@ -258,6 +259,7 @@ src/bin/policy4_diag.rs
 src/bin/probe_acopp30_64.rs
 src/bin/probe_cascade_perturb.rs
 src/bin/probe_deltac_sensitivity.rs
+src/bin/probe_ir_trajectory.rs
 src/bin/probe_issue_19.rs
 src/bin/probe_panel_attribution.rs
 src/bin/probe_scaling_policy4.rs
@@ -346,9 +348,5 @@ tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
 tests/sparse_refined.rs
 tests/stress_tests.rs
-tests/symbolic_profiler.rs
-tests/threshold_consistency.rs
 
-(truncated from      352 lines to 350 line budget)
-
-(truncated from      352 lines to 350 line budget)
+(truncated from      354 lines to 350 line budget)
