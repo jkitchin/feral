@@ -82,6 +82,7 @@ fn ldlt_params() -> NumericParams {
         cascade_break_ratio: None,
         cascade_break_eps: None,
         min_parallel_flops: None,
+        sqd_mode: false,
     }
 }
 

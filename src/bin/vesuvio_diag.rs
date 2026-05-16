@@ -131,6 +131,7 @@ fn run_one_method(csc: &CscMatrix, method: OrderingMethod, scaling: ScalingStrat
         cascade_break_ratio: None,
         cascade_break_eps: None,
         min_parallel_flops: None,
+        sqd_mode: false,
     };
     let scale_tag = match scaling {
         ScalingStrategy::InfNorm => "infnorm",

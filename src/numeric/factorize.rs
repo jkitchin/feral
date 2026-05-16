@@ -168,6 +168,29 @@ pub struct NumericParams {
     /// to force the gate to always reject (functionally equivalent
     /// to `Solver::with_parallel(false)` for tree-level dispatch).
     pub min_parallel_flops: Option<u64>,
+
+    /// Opt-in symmetric-quasi-definite (SQD) fast-path. When `true`,
+    /// the caller asserts the input KKT has Vanderbei (1995) structure
+    /// `K = [[-E, A^T], [A, F]]` with `E, F` symmetric positive
+    /// definite — the common case in IPOPT after the first inertia
+    /// correction sets `δ_w, δ_c > 0`, and structural in IP-PMM
+    /// (Pougkakiotis-Gondzio 2020). Under this contract every
+    /// symmetric permutation admits an `LDL^T` with **purely
+    /// diagonal `D`** (Vanderbei Thm 2.1), so the per-supernode
+    /// Bunch-Kaufman 1x1-vs-2x2 search can be skipped entirely.
+    ///
+    /// Default `false` preserves the unconditional BK + delayed-pivot
+    /// path that every existing caller is verified against. Mutually
+    /// exclusive with `allow_delayed_pivots = true` and with
+    /// `cascade_break_ratio = Some(_)`; the `Solver::with_sqd_mode`
+    /// builder enforces the invariant by clearing both fields when
+    /// `sqd_mode` is enabled. Contract violations at runtime surface
+    /// as `FeralError::SqdContractViolated` (loud failure, no silent
+    /// BK fallback) — see commit (e) of the M7 phasing.
+    ///
+    /// See `dev/research/sqd-fast-path.md`, `dev/decisions.md`
+    /// 2026-05-16 entry, and issue #34.
+    pub sqd_mode: bool,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -427,6 +450,10 @@ impl Default for NumericParams {
             cascade_break_ratio: None,
             cascade_break_eps: None,
             min_parallel_flops: None,
+            // SQD fast-path off by default. Opt in via
+            // `Solver::with_sqd_mode(true)`; see `sqd_mode` doc and
+            // `dev/research/sqd-fast-path.md`.
+            sqd_mode: false,
         }
     }
 }
@@ -451,6 +478,7 @@ impl NumericParams {
             cascade_break_ratio: None,
             cascade_break_eps: None,
             min_parallel_flops: None,
+            sqd_mode: false,
         }
     }
 }
@@ -3315,6 +3343,7 @@ mod tests {
             cascade_break_ratio: None,
             cascade_break_eps: None,
             min_parallel_flops: None,
+            sqd_mode: false,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
@@ -3327,6 +3356,7 @@ mod tests {
             cascade_break_ratio: None,
             cascade_break_eps: None,
             min_parallel_flops: None,
+            sqd_mode: false,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
@@ -3382,6 +3412,7 @@ mod tests {
             cascade_break_ratio: None,
             cascade_break_eps: None,
             min_parallel_flops: None,
+            sqd_mode: false,
         };
         let infnorm = NumericParams {
             scaling: ScalingStrategy::InfNorm,
@@ -3885,6 +3916,7 @@ mod tests {
             cascade_break_ratio: None,
             cascade_break_eps: None,
             min_parallel_flops: None,
+            sqd_mode: false,
         };
 
         let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];

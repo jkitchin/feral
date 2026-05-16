@@ -69,6 +69,7 @@ fn small_n_disarms_cascade_break_trigger() {
         cascade_break_ratio: None,
         cascade_break_eps: None,
         min_parallel_flops: None,
+        sqd_mode: false,
         ..NumericParams::default()
     };
     let armed = NumericParams {
@@ -77,6 +78,7 @@ fn small_n_disarms_cascade_break_trigger() {
         cascade_break_ratio: Some(0.0),
         cascade_break_eps: Some(1e-10),
         min_parallel_flops: None,
+        sqd_mode: false,
         ..NumericParams::default()
     };
 

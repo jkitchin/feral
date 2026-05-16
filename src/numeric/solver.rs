@@ -302,6 +302,41 @@ impl Solver {
         self
     }
 
+    /// Enable the symmetric-quasi-definite (SQD) fast-path. When
+    /// `on = true`, the caller asserts the input KKT has Vanderbei
+    /// (1995) structure `K = [[-E, A^T], [A, F]]` with `E, F` SPD —
+    /// the common case in IPOPT after the first inertia correction
+    /// sets `δ_w, δ_c > 0`, and structural in IP-PMM
+    /// (Pougkakiotis-Gondzio 2020). Under this contract every
+    /// symmetric permutation admits an `LDL^T` with diagonal `D`
+    /// (Vanderbei Thm 2.1), so the per-supernode Bunch-Kaufman
+    /// 1x1-vs-2x2 search is skipped entirely.
+    ///
+    /// Default `off`. Mutually exclusive with delayed pivoting and
+    /// cascade-break: enabling SQD also clears
+    /// `allow_delayed_pivots` (no delayed pivots — every supernode
+    /// runs root-style with diagonal-only kernel) and
+    /// `cascade_break_ratio` (no cascade absorption — diagonal-only
+    /// kernel has no rejected pivots to absorb). The
+    /// `cascade_break_eps` knob is also cleared for the same reason.
+    /// Disabling SQD (`on = false`) restores neither: callers that
+    /// want delayed pivoting back must re-enable explicitly.
+    ///
+    /// Contract violations at runtime surface as
+    /// `FeralError::SqdContractViolated { column, pivot }` — loud
+    /// failure, never silent BK fallback. See
+    /// `dev/research/sqd-fast-path.md`, `dev/decisions.md`
+    /// 2026-05-16 entry, and issue #34.
+    pub fn with_sqd_mode(mut self, on: bool) -> Self {
+        self.numeric_params.sqd_mode = on;
+        if on {
+            self.numeric_params.allow_delayed_pivots = false;
+            self.numeric_params.cascade_break_ratio = None;
+            self.numeric_params.cascade_break_eps = None;
+        }
+        self
+    }
+
     /// Override the fill-reducing ordering method used at the next
     /// (and subsequent) symbolic factorization. Default
     /// `OrderingMethod::Auto` matches the free-function
@@ -720,6 +755,7 @@ mod tests {
             cascade_break_ratio: None,
             cascade_break_eps: None,
             min_parallel_flops: None,
+            sqd_mode: false,
         };
         Solver::with_params(np, SupernodeParams::default())
     }
