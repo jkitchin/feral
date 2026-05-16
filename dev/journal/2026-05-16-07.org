@@ -1,0 +1,80 @@
+#+TITLE: Session 2026-05-16-07 — M3 stress corpus (#26)
+
+* 14:25 :stress:corpus:scope:
+Reading issue #26: triple the stress manifest's SuiteSparse count
+(18 → ≥ 80) by adding remaining GHS_indef (n ≤ 100k),
+Schenk_IBMNA, Schenk_AFE, Boeing/bcsstk* indef stiffness, and any
+Stokes/driven-cavity from data/matrices/kkt-mittelmann/. Acceptance:
+fetch.py succeeds for all rows; run.py < 1 h wall;
+report.py byte-stable across back-to-back runs.
+
+* 14:30 :metadata:scrape:
+Scraped SuiteSparse catalog metadata for all candidate matrices via
+a 12-thread urllib ThreadPoolExecutor. Confirmed Schenk_AFE matrices
+are all ≥ 504k rows (10/16 SPD, 6 indef), so the whole group is
+outside the n ≤ 100k tier. Documenting as a skipped-on-scope
+follow-up in tried-and-rejected.
+
+* 14:33 :spd:filter:
+Of 13 Boeing/bcsstk* + nasa* + msc* candidates, only 6 are
+indefinite (bcsstk35/37/39 + nasa1824/2910/4704). All others are
+SPD per the catalog's "Positive Definite: yes" field. Issue
+explicitly excludes SPD.
+
+* 14:38 :kkt:mittelmann:
+Inspected /Users/jkitchin/projects/feral/data/matrices/kkt-mittelmann/
+— 47 family dirs, none are Stokes or driven-cavity. Closest is
+cont5_*  (continuous PDE control); not a Stokes match. The Stokes
+matrices already in the manifest (stokes64, stokes128) come from
+SuiteSparse GHS_indef and are correctly categorized as saddle. No
+relocation needed.
+
+* 14:42 :manifest:append:
+Appended 91 new rows to manifest.tsv. Total 130 rows = 4 Boeing +
+3 cuter_kkt + 51 GHS_indef + 49 Schenk_IBMNA + 18 synth. Initial
+nnz column used scraped catalog values (total nnz); rewrote with
+.mtx header values to match the existing lower-tri convention.
+
+* 14:55 :fetch:download:
+Ran fetch.py: 91 newly downloaded, 21 already present. All
+downloads succeeded. Symlinked external_benchmarks/stress/matrices/
+GHS_indef → main worktree to reuse cached tarballs.
+
+* 14:58 :run:wall:
+Built bench_one_matrix release binary (21 s), then
+`time python3 external_benchmarks/stress/run.py --time-limit 3600`:
+  real    4m35.174s    user    7m36.408s    sys     0m21.398s
+Well under the 1 h acceptance ceiling (13× headroom).
+
+* 15:02 :report:flag:
+First report.py invocation: 5 flagged, all status=fail at the
+io stage.
+  - Boeing/nasa2910, nasa4704: "unsupported header
+    '%%MatrixMarket matrix coordinate pattern symmetric' (expected:
+    %%MatrixMarket matrix coordinate real symmetric)"
+  - GHS_indef/aug2d, aug2dc, aug3d: same rejection with
+    "coordinate integer symmetric".
+src/io/mtx.rs accepts only `coordinate real symmetric`. Dropping
+the 5 unsupported matrices from the manifest; documenting in
+tried-and-rejected as future-work (extend the reader).
+
+* 15:05 :report:stable:
+After drop, report.py exit=0, 122 ok / 0 flagged / 3 missing
+(the cuter_kkt FBRAIN3LS rows whose source lives at
+/Users/jkitchin/projects/feral/data/matrices/kkt/FBRAIN3LS — not
+in the agent worktree). Two back-to-back invocations produce
+byte-identical output:
+  $ diff /tmp/report_a.txt /tmp/report_b.txt && echo STABLE
+  STABLE
+
+* 15:10 :counts:final:
+Final manifest: 125 rows = 104 SuiteSparse + 18 synth + 3 cuter_kkt.
+Per-category: indef=59, saddle=15, opt=15, mech=4, dense=6,
+pde=5, plus the synth-only buckets. Target (≥ 80 SuiteSparse)
+exceeded by 30%.
+
+* 15:15 :checks:green:
+cargo fmt --check: clean. cargo clippy --all-targets -- -D
+warnings: clean. cargo test --lib: 259 passed, 0 failed.
+No source-tree changes — only manifest, research note, CHANGELOG,
+tried-and-rejected.

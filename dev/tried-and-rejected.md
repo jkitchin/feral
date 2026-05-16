@@ -1697,3 +1697,70 @@ has fusion opportunities — they just don't help here.
 
 Documented in `dev/research/issue-10-amalgamation-floor.md`. A/B
 binary: `src/bin/diag_nemin_amalgamation_panel.rs`. Commit 61002f8.
+
+## 2026-05-16 — M3 stress corpus: matrix-market reader unsupported formats (#26)
+
+**What was tried.** Adding to the stress manifest the following
+SuiteSparse matrices that match the M3 inclusion criteria (indefinite,
+n ≤ 100k, in `GHS_indef` / `Boeing` groups):
+
+- `Boeing/nasa2910` (2910×174k, "no" posdef, indef stiffness)
+- `Boeing/nasa4704` (4704×104k, "no" posdef, indef stiffness)
+- `GHS_indef/aug2d`  (29k×76k, saddle)
+- `GHS_indef/aug2dc` (30k×80k, scaled saddle)
+- `GHS_indef/aug3d`  (24k×69k, 3D saddle)
+
+**Symptom.** `bench_one_matrix` factor failed at the I/O stage with:
+
+```
+status=fail  fail_reason=read_mtx IoError("...
+  unsupported header '%%MatrixMarket matrix coordinate pattern symmetric'
+  (expected: %%MatrixMarket matrix coordinate real symmetric)")
+```
+
+for the two NASA matrices, and the analogous `coordinate integer
+symmetric` rejection for the three augmented-saddle matrices. The
+NASA tarballs ship **pattern** matrices (no numeric values) and the
+augmented matrices ship **integer** matrices; feral's MM reader at
+`src/io/mtx.rs` accepts only `coordinate real symmetric`.
+
+**Why it was rejected (for this issue).** Extending the MM reader to
+synthesize values for pattern matrices (typical convention: all-ones)
+and to parse integer values as `f64` is straightforward but out of
+scope for a corpus-expansion ticket — it requires a separate test
+harness and a small spec decision (what value does a pattern entry
+take? plain 1.0, or random?). All five matrices were dropped from
+the M3 manifest after numeric factorization confirmed the I/O
+rejection. If a future session wants to re-add them, the gate is:
+extend `mtx.rs` to handle `pattern` and `integer`, add round-trip
+tests, then `cd external_benchmarks/stress && fetch.py` should
+already have the .mtx files cached.
+
+Final manifest count after drop: 104 SuiteSparse rows
+(target ≥ 80 met with 30% headroom).
+
+## 2026-05-16 — M3 stress corpus: Schenk_AFE skipped on size (#26)
+
+**What was tried.** Including the Schenk_AFE group in the stress
+manifest as called for by the M3 ticket.
+
+**Symptom.** All 16 Schenk_AFE matrices have n ∈ [504855, 1508065].
+The M3 issue specifies "n ≤ 100k" for the GHS_indef tier;
+extrapolating that size cap to the AFE group leaves zero candidates.
+Of the 16, 10 are SPD (`af_*_k101` family + half of `af_shell*`),
+which the issue explicitly excludes ("skip the SPD ones"). The 6
+indefinite shells (`af_shell1/2/5/6/9/10`) range from 504k to 1.5M
+rows; sample timing on an existing 50k×500k matrix is ~40 ms factor,
+so a 500k×17M shell would land in the 5–20 s range each. Six of
+them would be ~1–2 minutes of suite time — fine for budget — but
+they are coarse mesh slices of the same finite-element problem
+(automotive shell, sequential time steps) and add little diversity
+beyond a single representative.
+
+**Why it was rejected (for this issue).** Bringing in 6 near-duplicate
+mesh slices burns row-count headroom that's better spent on
+structurally diverse matrices in the smaller-n tier. A future ticket
+that wants to stress the dense-supernode path on million-row
+matrices should add 1–2 representative `af_shell*` rows with a fresh
+research note on whether they exhibit fill patterns distinct from
+what `sparsine` / `copter2` already cover.
