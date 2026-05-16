@@ -1,0 +1,101 @@
+#+TITLE: Session 2026-05-15-06 journal
+#+DATE: 2026-05-15
+
+* 23:30 :issue-19:calibration:start:
+Picked up "start on issue #19". Session-05 left the next task as
+"run calibrate_par_min_flops on the reporter's hardware". I /am/
+the reporter (jkitchin), running on feral-home. Hardware identifies
+as Apple M4 Pro / 14 threads — same family as the dev box session-05
+ran on.
+
+* 23:40 :calibration:m4pro-feral-home:
+Ran =cargo run --release --bin calibrate_par_min_flops -- --reps 10=
+on feral-home. Result matched session-05 within run-to-run noise
+across every row (worst case K=80: par/seq 0.55 vs 0.61, ~10% off;
+mostly within ~3%). Break-even 6e6, par wins ≥1.2× at 1.2e7, par
+wins ≥1.35× at 2.3e7. Cross-hardware verification within the M4 Pro
+family complete; no surprise.
+
+Began drafting the const change to drop PAR_MIN_FLOPS from 1e8 to
+3e7 per the session-05 research-note recommendation, including
+docstring/CHANGELOG/research-note updates.
+
+* 23:55 :red-herring:pivot:
+User interrupted: "This feels like a red herring." Reverted the
+in-flight changes (kept on disk, nothing committed). Reframed: the
+calibration framework gives me a Poisson-KKT crossover, but the
+issue is about robot_1600 (control-NLP small-KKT, different tree
+shape). Question I should have asked at the start: does the gate
+veto on robot_1600 actually matter, post-ThreadPool-reuse?
+
+* 00:10 :probe:probe-issue-19:
+Wrote =src/bin/probe_issue_19.rs=. Times Solver::factor() under
+three configs on a single KKT mtx dump:
+  1. parallel=false (sequential)
+  2. parallel=true, gate=default (the current behaviour)
+  3. parallel=true, min_parallel_flops=Some(0) (forced parallel)
+
+Found =data/matrices/kkt-mittelmann/robot_1600/= already on this
+machine — multiple iter dumps committed. Ran on iters 0000, 0001,
+0003, 0006 (30 reps each).
+
+* 00:25 :result:robot-1600:gate-too-conservative:
+Headline: the original 12× wall regression /does not reproduce/.
+
+| iter | est_flops | seq    | gated  | forced-par | par speedup |
+|------+-----------+--------+--------+------------+-------------|
+| 0000 | 4.75e6    | 5.24 ms | 5.26 ms | 7.87 ms    | 0.67× (hurts) |
+| 0001 | 1.13e7    | 9.65    | 9.62    | 6.80       | 1.42×       |
+| 0003 | 1.13e7    | 10.27   | 10.29   | 6.96       | 1.48×       |
+| 0006 | 9.43e6    | 8.31    | 8.19    | 6.70       | 1.24×       |
+
+Three of four iters: forced parallel is /faster/ than sequential.
+The persistent ThreadPool reuse from 91e028a closed the per-call
+cv-wait overhead that the issue originally flagged.
+
+But the current gate (PAR_MIN_FLOPS=1e8) is blocking parallel on
+iters 0001/0003/0006 — costing 1.24-1.48× on the workload it was
+designed to protect. Break-even on robot_1600 is at the same ~6e6
+flops as Poisson-KKT — same crossover transfers across these two
+KKT families.
+
+User-side answer: lower PAR_MIN_FLOPS to 1e7 (recommended option in
+AskUserQuestion). Also: close #19, file follow-up for corpus-wide
+measurement.
+
+* 00:40 :commit:perf:par-min-flops-1e7:
+Two commits:
+- =25926cc feat(bench): probe_issue_19 binary=
+- =b12e03c perf(factor): lower PAR_MIN_FLOPS from 1e8 to 1e7 (#19 closeout)=
+
+cargo test --lib --release: 256 passed. clippy / fmt clean.
+
+Verified gate behaviour post-change with the same probe binary:
+gate now decides PARALLEL on iters 0001 and 0003 (1.13e7 > 1e7),
+sequential on iter 0000 (4.75e6 < 1e7) and iter 0006 (9.43e6 < 1e7).
+
+* 00:55 :gh:blocked:
+Tried =gh issue comment 19= + =gh issue close 19= + =gh issue create=
+for the corpus-wide follow-up. Auto-mode classifier blocked all
+three citing "red herring" in conversation history as reason to
+distrust the close. AskUserQuestion answer ("Close, file follow-up
+issue for corpus-wide measurement") wasn't recognised as
+authorization. Staged drafts at =/tmp/feral-issue-19-comment.md= and
+=/tmp/feral-issue-19-followup.md= for user to paste-run manually.
+
+Not a blocker for the local work — commits are landed; the GH state
+change is independent.
+
+* 01:00 :decision:
+Lowered =PAR_MIN_FLOPS= from 1e8 to 1e7 based on direct robot_1600
+measurement (post-ThreadPool-reuse). Trade: sacrificed iter 0006's
+1.24× win for ~1.6× safety margin against the 6e6 break-even.
+Argument detailed in =dev/research/par-min-flops-calibration-2026-05-15.md=
+update section.
+
+This revises the session-05 research-note recommendation (3e7,
+based on Poisson-KKT noise-conservatism for K=50's 1.2× win). The
+direct robot_1600 measurement provided evidence stronger than the
+noise-band concern — 30-rep min/p90 of parallel well separated
+from sequential's min at est_flops = 1.13e7. K=50's 1.2× was an
+outlier of measurement timing, not the rule.
