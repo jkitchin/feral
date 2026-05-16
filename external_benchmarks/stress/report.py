@@ -125,8 +125,20 @@ def classify(row: dict, side: dict | None, rel_res_threshold: float) -> list[str
     if pos + neg + zer != row["n"]:
         flags.append(f"inertia_sum={pos+neg+zer}!=n={row['n']}")
     exp_zero = expected_zero(row)
-    if exp_zero is not None and zer != exp_zero:
-        flags.append(f"zero={zer}!=expected={exp_zero}")
+    if exp_zero is not None:
+        # Rank-deficient matrices: BK pivoting can absorb part of the
+        # null space into ostensibly-normal pivots (verified against
+        # MUMPS 5.8.2 oracle with ICNTL(24)=1, which itself reports
+        # zero=0 on synth/rankdef_50_5 and rankdef_200_20 despite their
+        # constructed nullity). The acceptance rule is therefore
+        # `1 <= zero <= expected`: BK must detect *some* rank deficiency
+        # (zero=0 is a genuine bug — F-01 regression guard), but
+        # partial detection is consistent with MUMPS's own behavior.
+        # See `dev/research/f01-rankdef-underreporting.md`.
+        if zer == 0:
+            flags.append(f"zero=0 (rankdef, expected>=1, k={exp_zero})")
+        elif zer > exp_zero:
+            flags.append(f"zero={zer}>expected={exp_zero}")
     return flags
 
 

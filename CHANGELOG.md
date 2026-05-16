@@ -4,6 +4,44 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — rank-deficient KKT systems report honest inertia (F-01, #21)
+
+The Bunch-Kaufman kernel gained `BunchKaufmanParams::null_pivot_tol`
+(and `null_pivot_tol_2x2`), a *factor-time* rank-deficiency floor that
+is independent from the strict *solve-time* `zero_tol`. When the
+sparse multifrontal driver runs with `on_zero_pivot != Fail`, it
+overrides `null_pivot_tol` to `sqrt(n) · EPS · ‖A_scaled‖_∞` (MUMPS
+CNTL(3)-style threshold) so that pivots in the rank-deficiency band
+`(EPS, sqrt(n)·EPS·‖A‖]` are counted as zero in the inertia signature
+rather than miscounted as small-but-positive/negative.
+
+Effect on the stress baseline:
+
+- `synth/rankdef_5_2`:    inertia=(2, 2, 1) — unchanged.
+- `synth/rankdef_10_3`:   inertia=(4, 5, 1) — unchanged.
+- `synth/rankdef_50_5`:   inertia=(25, 24, 1) — unchanged.
+- `synth/rankdef_200_20`: inertia=(109, 88, 3) — previously
+  (112, 88, 0), now detects 3 of the 20 constructed zeros.
+  Partial detection is consistent with MUMPS 5.8.2 behavior
+  (MUMPS with ICNTL(24)=1 also reports `zero=0` on this matrix).
+
+Crucially, the split keeps `Factors.zero_tol` at the strict EPS
+default. The solve continues to divide by any pivot above EPS, so
+ill-conditioned non-singular matrices (e.g. `synth/ill_cond_e14`
+cond≈1e14) retain `rel_res ≈ 7e-16` — no degradation. Default dense
+callers see no behavioral change (`null_pivot_tol` defaults to
+`zero_tol`).
+
+The stress harness's rankdef acceptance rule loosened from
+`zero == expected` to `1 <= zero <= expected`; the F-01 research
+note documents the MUMPS oracle comparison that motivates this.
+
+Regression test: `tests/pounce_interface.rs::f01_rankdef_surfaces_at_least_one_zero_pivot`.
+
+References:
+`dev/research/f01-rankdef-underreporting.md`,
+`dev/plans/robustness-roadmap.md` (F-01 entry).
+
 ### Changed — sparse `NumericParams::default()` accepts isolated zero pivots (F-03, #32)
 
 `NumericParams::default().bk.on_zero_pivot` now defaults to

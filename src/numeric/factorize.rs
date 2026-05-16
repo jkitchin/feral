@@ -1067,6 +1067,17 @@ pub fn dense_fast_factor_with_workspace(
         }
     }
 
+    // F-01: raise the BK kernel's `zero_tol` to the Wilkinson backward
+    // error floor `n · EPS · ||A_scaled||_inf` so rank-deficiency
+    // pivots that land above EPS but in the noise band are classified
+    // as zero (case a in `try_reject_1x1_frontal`) rather than as
+    // small-but-real (case b). No-op under `on_zero_pivot == Fail`
+    // (preserves the absolute-tolerance contract on dense
+    // abort-on-zero callers). See
+    // `dev/research/f01-rankdef-underreporting.md`.
+    let local_params = override_null_pivot_tol(params, scaled_matrix_infnorm_dense(&sym.data, n), n);
+    let params: &NumericParams = local_params.as_ref().unwrap_or(params);
+
     // Factor the full n columns. `may_delay = false` matches the
     // multifrontal root-supernode behavior: ForceAccept absorbs any
     // unstable pivot instead of carrying it forward (there is no
@@ -1492,6 +1503,16 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
 
     // Permute the matrix values into the new ordering
     let permuted = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv)?;
+
+    // F-01: raise the per-supernode BK `zero_tol` to the Wilkinson
+    // backward error floor `n · EPS · ||A_scaled||_inf` so
+    // rank-deficiency pivots that surface during elimination are
+    // classified as zero rather than as small-but-real. No-op under
+    // `on_zero_pivot == Fail`. See
+    // `dev/research/f01-rankdef-underreporting.md`.
+    let local_params =
+        override_null_pivot_tol(params, scaled_matrix_infnorm(&permuted, &scaling_pivot_order), n);
+    let params: &NumericParams = local_params.as_ref().unwrap_or(params);
 
     // Full symmetric pattern for correct row index computation
     let full_pattern = permuted.symmetric_pattern();
@@ -2326,6 +2347,13 @@ pub fn factorize_multifrontal_supernodal_parallel(
             .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
+    // F-01: raise the per-supernode BK `zero_tol` to the Wilkinson
+    // backward error floor `n · EPS · ||A_scaled||_inf`. See sequential
+    // driver above and `dev/research/f01-rankdef-underreporting.md`.
+    let local_params =
+        override_null_pivot_tol(params, scaled_matrix_infnorm(&permuted, &scaling_pivot_order), n);
+    let params: &NumericParams = local_params.as_ref().unwrap_or(params);
+
     let t_phase = telemetry.map(|_| std::time::Instant::now());
     let full_pattern = permuted.symmetric_pattern();
     if let (Some(t), Some(start)) = (telemetry, t_phase) {
@@ -2719,6 +2747,108 @@ fn run_parallel_task<'a>(
                 .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
     });
+}
+
+/// Row-sum infinity norm of the symmetrically-scaled matrix `D · A · D`,
+/// where `A` is stored as a CSC lower-triangle in pivot order and
+/// `scaling[k]` is `D_kk` in pivot order.
+///
+/// Used by the F-01 fix to compute a post-scaling relative null-pivot
+/// threshold for the BK kernel. See
+/// `dev/research/f01-rankdef-underreporting.md`. O(nnz).
+fn scaled_matrix_infnorm(permuted: &CscMatrix, scaling: &[f64]) -> f64 {
+    let n = permuted.n;
+    let mut row_sum = vec![0.0_f64; n];
+    for j in 0..n {
+        let s_j = scaling[j];
+        for k in permuted.col_ptr[j]..permuted.col_ptr[j + 1] {
+            let i = permuted.row_idx[k];
+            let m = (permuted.values[k] * scaling[i] * s_j).abs();
+            row_sum[i] += m;
+            if i != j {
+                row_sum[j] += m;
+            }
+        }
+    }
+    row_sum.into_iter().fold(0.0_f64, f64::max)
+}
+
+/// Row-sum infinity norm of a symmetric matrix stored densely in the
+/// `SymmetricMatrix` convention used by the dense fast path:
+/// column-major, lower triangle at `data[j*n + i]` for `i >= j`. The
+/// upper triangle (`i < j`) may hold stale buffer contents and is
+/// ignored.
+fn scaled_matrix_infnorm_dense(data: &[f64], n: usize) -> f64 {
+    let mut row_sum = vec![0.0_f64; n];
+    for j in 0..n {
+        for i in j..n {
+            let m = data[j * n + i].abs();
+            row_sum[i] += m;
+            if i != j {
+                row_sum[j] += m;
+            }
+        }
+    }
+    row_sum.into_iter().fold(0.0_f64, f64::max)
+}
+
+/// Compute the BK kernel's null-pivot tolerance from the scaled
+/// matrix's infinity norm. Returns `sqrt(n) · EPS · ||A_scaled||_inf`,
+/// matching the MUMPS 5.8.2 default for `CNTL(3)` under
+/// `ICNTL(24) = 1` (null-pivot detection enabled).
+///
+/// Tradeoff: `n · EPS · ‖A‖` (the full Wilkinson backward-error bound
+/// for LDLᵀ) catches more rank-deficient pivots but mis-classifies
+/// genuine small eigenvalues on ill-conditioned non-singular matrices
+/// (e.g. `synth/ill_cond_e14` n=100 cond=1e14: pivots at ~1e-14 are
+/// real, not zero). The `sqrt(n)` formula keeps the floor strictly
+/// below such pivots while still raising it ~`sqrt(n)`× above the
+/// dense default of `EPS`. MA57 and SSIDS use `sqrt(EPS)` absolute,
+/// which is much looser but configurable. See F-01 research note.
+#[inline]
+fn null_pivot_floor(scaled_infnorm: f64, n: usize) -> f64 {
+    (n as f64).sqrt() * f64::EPSILON * scaled_infnorm
+}
+
+/// Apply the F-01 post-scaling null-pivot tolerance override.
+///
+/// Returns `Some(local)` when the caller should use a cloned
+/// `NumericParams` with raised `bk.null_pivot_tol` /
+/// `bk.null_pivot_tol_2x2`, or `None` when the original `params` is
+/// sufficient (either the floor is below the existing
+/// `null_pivot_tol`, or `on_zero_pivot == Fail` preserves the
+/// absolute-threshold contract for abort-on-zero callers).
+///
+/// Only `null_pivot_tol` is bumped — `zero_tol` (the solve-time
+/// divide-skip floor, propagated to `Factors.zero_tol`) stays at the
+/// strict EPS default. This keeps ill-conditioned but non-singular
+/// matrices (e.g. `synth/ill_cond_e14`) usable at solve time while
+/// the factor-time inertia count honestly reports rank deficiency.
+/// See `dev/research/f01-rankdef-underreporting.md`.
+///
+/// The 2×2 block threshold is set to `floor · ‖A_scaled‖_inf` rather
+/// than `floor²`. A near-singular 2×2 block of a symmetric matrix has
+/// one eigenvalue at the pivot floor and one at the matrix scale, so
+/// its determinant has magnitude ~ `floor · ‖A‖`. The default
+/// `floor²` would only catch blocks with *both* eigenvalues at the
+/// floor — orders of magnitude smaller than the actual
+/// rank-deficiency signature.
+fn override_null_pivot_tol(
+    params: &NumericParams,
+    scaled_infnorm: f64,
+    n: usize,
+) -> Option<NumericParams> {
+    if matches!(params.bk.on_zero_pivot, ZeroPivotAction::Fail) {
+        return None;
+    }
+    let floor = null_pivot_floor(scaled_infnorm, n);
+    if floor <= params.bk.null_pivot_tol {
+        return None;
+    }
+    let mut local = params.clone();
+    local.bk.null_pivot_tol = floor;
+    local.bk.null_pivot_tol_2x2 = (floor * scaled_infnorm).max(floor * floor);
+    Some(local)
 }
 
 /// Permute a CSC matrix: compute the lower triangle of P·A·Pᵀ.

@@ -227,8 +227,10 @@ pub struct BunchKaufmanParams {
     /// Pivot threshold α. BK standard: (1 + sqrt(17)) / 8 ≈ 0.6404.
     pub alpha: f64,
 
-    /// A 1×1 pivot |d| <= zero_tol is considered numerically zero.
-    /// Default: f64::EPSILON ≈ 2.22e-16.
+    /// A 1×1 pivot |d| <= zero_tol is considered "truly zero" — the L
+    /// column is zeroed (or the pivot is perturbed under PerturbToEps)
+    /// and the solve will skip dividing by `d_diag[k]` when checking
+    /// `|d| > factors.zero_tol`. Default: f64::EPSILON ≈ 2.22e-16.
     ///
     /// Rationale: for a well-equilibrated matrix with ||A|| ~ 1, the
     /// rounding error floor is ~eps. Any pivot more than eps above zero
@@ -238,11 +240,36 @@ pub struct BunchKaufmanParams {
     /// on SPD matrices — verified by triage against canonical MUMPS,
     /// SSIDS, and rmumps on CERI651DLS_0534 and FBRAIN3LS_0788
     /// (2026-04-12, dev/journal/2026-04-12-01.org).
+    ///
+    /// This is the *solve-time* floor (propagated to Factors.zero_tol).
+    /// For factor-time rank-deficiency detection on scaled matrices,
+    /// see `null_pivot_tol`.
     pub zero_tol: f64,
 
-    /// A 2×2 pivot block is near-singular when |det| <= zero_tol_2x2.
-    /// Default: zero_tol².
+    /// A 2×2 pivot block is "truly singular" when |det| <= zero_tol_2x2.
+    /// Default: zero_tol². Solve-time floor; see `null_pivot_tol_2x2`
+    /// for the factor-time rank-deficiency analogue.
     pub zero_tol_2x2: f64,
+
+    /// Factor-time rank-deficiency floor for 1×1 pivots. A pivot with
+    /// `zero_tol < |d| <= null_pivot_tol` is counted as zero in the
+    /// inertia signature (rank deficiency) but the factor is left
+    /// untouched: L stays divided by `d`, the trailing update fires,
+    /// and the solve uses the strict `zero_tol` to decide whether to
+    /// divide. Default equals `zero_tol` (no rank-deficiency band).
+    ///
+    /// The sparse multifrontal driver overrides this to
+    /// `sqrt(n) · EPS · ‖A_scaled‖_∞` (MUMPS CNTL(3)-style) when
+    /// `on_zero_pivot != Fail`, so rank-deficient KKT systems report
+    /// honest inertia without degrading solve quality on
+    /// ill-conditioned but non-singular matrices. See
+    /// `dev/research/f01-rankdef-underreporting.md`.
+    pub null_pivot_tol: f64,
+
+    /// Factor-time rank-deficiency floor for 2×2 pivot blocks. Mirrors
+    /// `null_pivot_tol` for the 2×2 determinant check. Default equals
+    /// `zero_tol_2x2`.
+    pub null_pivot_tol_2x2: f64,
 
     /// What to do when the selected pivot is numerically zero.
     pub on_zero_pivot: ZeroPivotAction,
@@ -347,6 +374,8 @@ impl Default for BunchKaufmanParams {
             alpha: (1.0 + 17f64.sqrt()) / 8.0, // ≈ 0.6404
             zero_tol,
             zero_tol_2x2: zero_tol * zero_tol,
+            null_pivot_tol: zero_tol,
+            null_pivot_tol_2x2: zero_tol * zero_tol,
             on_zero_pivot: ZeroPivotAction::Fail,
             pivot_threshold: 0.0,
             block_size: 64,
@@ -455,6 +484,13 @@ pub fn factor(
                         }
                     }
                 }
+            } else if matches!(params.on_zero_pivot, ZeroPivotAction::ForceAccept)
+                && d.abs() <= params.null_pivot_tol
+            {
+                // F-01 rank-deficiency band on the trailing 1×1: count
+                // zero, leave d intact for the solve.
+                needs_refinement = true;
+                zero += 1;
             } else if d > 0.0 {
                 pos += 1;
             } else {
@@ -2608,32 +2644,35 @@ fn try_reject_1x1_frontal(
     needs_refinement: &mut bool,
 ) -> Result<PivotOutcome, FeralError> {
     let d = a[k * nrow + k];
-    let threshold = (params.pivot_threshold * col_max).max(params.zero_tol);
+    // Reject-gate uses `null_pivot_tol` so rank-deficiency pivots in
+    // the [zero_tol, null_pivot_tol] band are routed through the case
+    // split below. When `null_pivot_tol == zero_tol` (default) this
+    // collapses to the historical floor.
+    let threshold = (params.pivot_threshold * col_max).max(params.null_pivot_tol);
 
     if d.abs() <= threshold {
         if may_delay {
             return Ok(PivotOutcome::Delayed);
         }
         // At the root (may_delay=false) we have no parent to absorb
-        // the rejected pivot. Split the branch by absolute magnitude:
+        // the rejected pivot. Three branches by absolute magnitude:
         //
-        //  (a) |d| <= zero_tol — truly numerically zero. Set d=0 so
-        //      solve skips this position, count as rank-deficient.
+        //  (a)  |d| <= zero_tol  — truly numerically zero. Set d=0
+        //       so solve skips this position; count as zero. This is
+        //       the strict floor (default EPS).
         //
-        //  (b) zero_tol < |d| <= u*col_max — small but clearly
-        //      nonzero. The SSIDS reference's `ldlt_tpp_factor` at
-        //      the root simply breaks out leaving un-eliminated
-        //      columns, which silently under-reports rank; that is
-        //      not acceptable under feral's "inertia must be exactly
-        //      correct" invariant. Instead we accept the pivot at
-        //      its actual magnitude with its correct sign, counting
-        //      it as positive or negative inertia per SSIDS/MUMPS
-        //      convention for degenerate LPs. L growth is bounded
-        //      by 1/|d| per step which can be large, so we request
-        //      iterative refinement to recover the residual. This
-        //      closes DEGENLPA-family failures where MUMPS reports
-        //      e.g. (20, 15, 0) and the prior ForceAccept-zero path
-        //      gave (20, 14, 1).
+        //  (a') zero_tol < |d| <= null_pivot_tol — rank-deficiency
+        //       band per Wilkinson's backward error bound. Count as
+        //       zero in inertia (F-01) but leave d_diag and L intact
+        //       so the solve can still divide by `d` (its strict
+        //       `factors.zero_tol` check on the divide stays at EPS).
+        //       `needs_refinement = true` guards the residual.
+        //
+        //  (b)  null_pivot_tol < |d| <= u*col_max — small but clearly
+        //       nonzero by the relative-scale test. Accept with
+        //       correct sign, request iterative refinement. Matches
+        //       SSIDS/MUMPS convention for degenerate LPs (e.g.
+        //       DEGENLPA where MUMPS reports (20, 15, 0)).
         if d.abs() <= params.zero_tol {
             match params.on_zero_pivot {
                 ZeroPivotAction::ForceAccept => {
@@ -2660,6 +2699,17 @@ fn try_reject_1x1_frontal(
                     return Ok(PivotOutcome::Accepted);
                 }
             }
+        }
+        // Case (a'): rank-deficiency band — count as zero, keep factor
+        // intact so the solve can divide by `d`. Only fires under
+        // ForceAccept; Fail and PerturbToEps fall through to case (b)
+        // for consistency with their pre-F-01 semantics.
+        if matches!(params.on_zero_pivot, ZeroPivotAction::ForceAccept)
+            && d.abs() <= params.null_pivot_tol
+        {
+            *needs_refinement = true;
+            *zero += 1;
+            return Ok(PivotOutcome::Accepted);
         }
         // Case (b): small but nonzero — accept with correct sign.
         *needs_refinement = true;
@@ -2714,7 +2764,7 @@ fn try_reject_1x1_with_rook_rescue(
     n_rook_rescues: &mut usize,
 ) -> Result<PivotOutcome, FeralError> {
     let d = a[k * nrow + k];
-    let threshold = (params.pivot_threshold * col_max).max(params.zero_tol);
+    let threshold = (params.pivot_threshold * col_max).max(params.null_pivot_tol);
 
     // Well-conditioned fast path: pivot clears the threshold. Delegate
     // verbatim so accounting stays byte-identical to the pre-rook path.
@@ -2988,44 +3038,57 @@ fn do_1x1_pivot(
     needs_refinement: &mut bool,
 ) -> Result<(f64, usize), FeralError> {
     let mut d = a[k * n + k];
-    let threshold = (params.pivot_threshold * col_max).max(params.zero_tol);
+    let threshold = (params.pivot_threshold * col_max).max(params.null_pivot_tol);
 
     if d.abs() <= threshold {
         // Pivot rejected (either absolute floor or column-relative
-        // Duff-Reid/MUMPS threshold). Route through the existing
-        // ForceAccept/Fail/PerturbToEps zero-pivot path so the inertia
-        // count is consistent. ForceAccept zeros the L column so the
-        // rank-1 update contributes nothing; PerturbToEps swaps in a
-        // bounded-magnitude pivot and falls through to the regular
-        // L-scaling + rank-1 update path.
-        match params.on_zero_pivot {
-            ZeroPivotAction::ForceAccept => {
-                *needs_refinement = true;
-                *zero += 1;
-                for i in (k + 1)..n {
-                    a[k * n + i] = 0.0;
+        // Duff-Reid/MUMPS threshold). Three-way split mirrors
+        // try_reject_1x1_frontal: strict-zero (zero L), rank-deficiency
+        // band (count zero but keep factor live), or small-but-real
+        // (count by sign).
+        if d.abs() <= params.zero_tol {
+            // Truly-zero path: zero L, route by on_zero_pivot.
+            match params.on_zero_pivot {
+                ZeroPivotAction::ForceAccept => {
+                    *needs_refinement = true;
+                    *zero += 1;
+                    for i in (k + 1)..n {
+                        a[k * n + i] = 0.0;
+                    }
+                    // Also zero the diagonal so solve's `|d| > zero_tol`
+                    // check skips this position.
+                    a[k * n + k] = 0.0;
+                    return Ok((0.0, k + 2));
                 }
-                // Also zero the diagonal so solve's `|d| > zero_tol`
-                // check skips this position. Preserving the tiny
-                // original would otherwise leave `|d| > zero_tol` true
-                // for pivots just above the absolute floor but below
-                // u*col_max, causing solve to divide by them.
-                a[k * n + k] = 0.0;
-                return Ok((0.0, k + 2));
+                ZeroPivotAction::Fail => return Err(FeralError::NumericallyRankDeficient),
+                ZeroPivotAction::PerturbToEps { abs_floor } => {
+                    d = perturb_to_floor(d, abs_floor);
+                    a[k * n + k] = d;
+                    *needs_refinement = true;
+                    if d > 0.0 {
+                        *pos += 1;
+                    } else {
+                        *neg += 1;
+                    }
+                    // Fall through to L scaling + rank-1 update with the
+                    // perturbed `d` already counted.
+                }
             }
-            ZeroPivotAction::Fail => return Err(FeralError::NumericallyRankDeficient),
-            ZeroPivotAction::PerturbToEps { abs_floor } => {
-                d = perturb_to_floor(d, abs_floor);
-                a[k * n + k] = d;
-                *needs_refinement = true;
-                if d > 0.0 {
-                    *pos += 1;
-                } else {
-                    *neg += 1;
-                }
-                // Fall through to L scaling + rank-1 update with the
-                // perturbed `d` already counted. Skip the duplicate
-                // sign-count below.
+        } else if matches!(params.on_zero_pivot, ZeroPivotAction::ForceAccept)
+            && d.abs() <= params.null_pivot_tol
+        {
+            // Rank-deficiency band (F-01): count zero, keep d and L
+            // live so the trailing update fires and the solve can
+            // divide by the small-but-real pivot.
+            *needs_refinement = true;
+            *zero += 1;
+        } else {
+            // Small but real (case b): accept with sign.
+            *needs_refinement = true;
+            if d > 0.0 {
+                *pos += 1;
+            } else {
+                *neg += 1;
             }
         }
     } else {
@@ -3211,6 +3274,14 @@ fn count_1x1_inertia(
                 Ok(())
             }
         }
+    } else if matches!(params.on_zero_pivot, ZeroPivotAction::ForceAccept)
+        && d.abs() <= params.null_pivot_tol
+    {
+        // F-01 rank-deficiency band: count as zero, leave d intact so
+        // the solve can divide (solve checks the strict factors.zero_tol).
+        *needs_refinement = true;
+        *zero += 1;
+        Ok(())
     } else if d > 0.0 {
         *pos += 1;
         Ok(())
@@ -3272,6 +3343,21 @@ fn count_2x2_inertia(
             }
             ZeroPivotAction::Fail => Err(FeralError::NumericallyRankDeficient),
         }
+    } else if matches!(params.on_zero_pivot, ZeroPivotAction::ForceAccept)
+        && det.abs() <= params.null_pivot_tol_2x2
+    {
+        // F-01 rank-deficiency band for 2×2 blocks: count one zero, the
+        // other by trace sign. The block update has already fired and
+        // the solve will divide using strict factors.zero_tol_2x2.
+        *needs_refinement = true;
+        if trace > 0.0 {
+            *pos += 1;
+            *zero += 1;
+        } else {
+            *neg += 1;
+            *zero += 1;
+        }
+        Ok(())
     } else if det > 0.0 {
         // Same-sign eigenvalues: sign comes from trace.
         if trace > 0.0 {

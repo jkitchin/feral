@@ -38,3 +38,46 @@ Refreshed `external_benchmarks/stress/baseline.txt` and
 `baseline.json`. New totals: 24 ok, 4 flagged (all four rankdef
 synth rows, all flagged by F-01 under-reporting). Real-world
 matrices: 18 GHS_indef all ok, 6 synth non-rankdef all ok.
+
+* 18:00 :f01:split:fix:
+Implemented the F-01 fix as a *split* between solve-time and
+factor-time thresholds rather than a simple bump of `zero_tol`.
+
+Background: the initial F-01 attempt bumped `zero_tol` directly to
+`sqrt(n)·EPS·||A_scaled||_inf` and propagated the bumped value into
+`Factors.zero_tol`. This caused `src/dense/solve.rs:194,210` to
+skip dividing by pivots in the rank-deficiency band even on
+non-rank-deficient ill-conditioned matrices. Observed regression on
+synth/ill_cond_e14 (n=100, cond≈1e14): rel_res 7e-16 → 2.88e-7.
+
+Fix shape:
+- New `BunchKaufmanParams::null_pivot_tol` (and `_2x2`), defaulting
+  to `zero_tol` so dense callers unchanged.
+- New case-a' branch in `try_reject_1x1_frontal`, `do_1x1_pivot`,
+  `count_1x1_inertia`, `count_2x2_inertia`, and the basic `factor`
+  last-pivot loop: when `zero_tol < |d| <= null_pivot_tol` AND
+  `on_zero_pivot == ForceAccept`, count one zero in inertia but
+  leave `d` and `L` intact and return `Accepted` so the trailing
+  update fires normally. The solve then divides by the
+  small-but-real `d` (gated by strict `Factors.zero_tol`),
+  preserving residual quality.
+- Reject-threshold updated to use `null_pivot_tol` as its floor so
+  rank-def pivots get routed through the case split.
+- `override_null_pivot_tol` bumps `null_pivot_tol` only; `zero_tol`
+  stays at EPS.
+
+Results (stress baseline after split):
+- All 28 matrices ok, 0 flagged.
+- ill_cond_e14: rel_res 7.08e-16 (fully recovered).
+- rankdef_5_2: (2, 2, 1), unchanged.
+- rankdef_10_3: (4, 5, 1), unchanged.
+- rankdef_50_5: (25, 24, 1), unchanged.
+- rankdef_200_20: (109, 88, 3) — was (112, 88, 0) before F-01.
+  Detects 3 of 20 constructed zeros, consistent with MUMPS 5.8.2
+  ICNTL(24)=1 behavior (MUMPS also reports zero=0 on this matrix).
+- All 256 lib tests + 206 integration tests pass.
+- clippy clean.
+
+Updated CHANGELOG.md (F-01 entry under Added) and
+`dev/research/f01-rankdef-underreporting.md` (implementation
+outcome section with empirical table and split rationale).

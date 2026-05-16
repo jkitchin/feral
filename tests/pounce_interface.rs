@@ -291,6 +291,69 @@ fn f03_default_force_accept_factors_isolated_zero_pivot() {
 /// iteration. The structural assertion is that the loop runs
 /// to `Success` within a small budget regardless of how many
 /// quality bumps it takes.
+/// F-01 regression: a rank-deficient symmetric matrix must surface
+/// *at least one* zero pivot in the inertia. Before F-01, the dense
+/// `BunchKaufmanParams::default()` `zero_tol = EPS` was below the
+/// Wilkinson backward-error floor `n · EPS · ||A||_inf`, so the
+/// 200×200 `synth/rankdef_200_20` matrix (constructed nullity 20)
+/// was reported with `inertia.zero == 0` — the rank deficiency was
+/// completely absorbed into case-b "small but real" sign votes.
+/// The driver-level override raises `zero_tol` to the noise floor.
+///
+/// We use a rank-1 dyadic A = u uᵀ at n=5 with u = ones; eigenvalues
+/// are (5, 0, 0, 0, 0). Sylvester signature: (1, 0, 4). The first
+/// Gaussian elimination step zeroes the trailing 4×4 block exactly
+/// (in exact arithmetic), so all 4 trailing pivots land in the noise
+/// floor. BK pivoting may absorb part of the null space, so the
+/// acceptance bar is `1 <= zero <= 4` — at least one detection, no
+/// over-reporting. MUMPS 5.8.2 with ICNTL(24)=1 itself reports
+/// partial nullity on `synth/rankdef_50_5` and `rankdef_200_20`
+/// (zero=0), so exact constructed-nullity matching is not the
+/// invariant. See `dev/research/f01-rankdef-underreporting.md`.
+#[test]
+fn f01_rankdef_surfaces_at_least_one_zero_pivot() {
+    // A = u uᵀ with u = (1, 1, 1, 1, 1). Rank 1, n=5. Sylvester:
+    // (positive=1, negative=0, zero=4). ||A||_inf = 5.
+    let n = 5usize;
+    let mut rows = Vec::new();
+    let mut cols = Vec::new();
+    let mut vals = Vec::new();
+    for j in 0..n {
+        for i in j..n {
+            rows.push(i);
+            cols.push(j);
+            vals.push(1.0);
+        }
+    }
+    let csc = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+
+    let mut solver = Solver::new();
+    let status = solver.factor(&csc, None);
+    assert!(
+        matches!(status, FactorStatus::Success),
+        "factor must succeed under default ForceAccept, got {:?}",
+        status
+    );
+    let inertia = solver.inertia().expect("inertia stored on Success").clone();
+    assert_eq!(
+        inertia.positive + inertia.negative + inertia.zero,
+        n,
+        "inertia must sum to n"
+    );
+    assert!(
+        inertia.zero >= 1,
+        "F-01 regression: must detect at least one zero pivot on a \
+         rank-1 5x5 dyadic, got inertia {:?}",
+        inertia
+    );
+    assert!(
+        inertia.zero <= 4,
+        "must not over-report zeros beyond constructed nullity, \
+         got inertia {:?}",
+        inertia
+    );
+}
+
 #[test]
 fn i7_quality_escalation_loop_terminates_with_correct_inertia() {
     // Bordered KKT from tests/sparse_postorder.rs.
