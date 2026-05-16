@@ -1905,6 +1905,11 @@ fn factor_one_supernode(
     // large enough (via delay propagation) for cascade-break savings
     // to outweigh the IPM perturbation tax — the gate makes the
     // trigger a no-op for small problems whether or not it was armed.
+    //
+    // Defaults (`ratio=0.5`, `eps=1e-10`) when callers opt in are
+    // empirical, not derivable from a published criterion — see
+    // `dev/research/cascade-break.md` for the full citation review.
+    // Do not change without re-running `bench_issue8`.
     let cascade_break = match params.cascade_break_ratio {
         Some(r)
             if !is_root[snode_idx]
