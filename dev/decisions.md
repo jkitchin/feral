@@ -3393,3 +3393,82 @@ site, not a parameter inside `solve_sparse_refined`.
 - `external_benchmarks/stress/analyze_ir.py`
 - `external_benchmarks/stress/out/ir_probe/`
 - `src/numeric/solve.rs` lines 640–897 (the unchanged loop)
+
+---
+
+## 2026-05-16 — SQD fast-path: opt-in builder, loud failure on contract violation
+
+**Decision.** A symmetric quasi-definite (SQD) fast-path will be added to
+the dense LDL^T kernel as an **opt-in** builder
+`Solver::with_sqd_mode(bool)`, defaulting to `false`. When enabled, the
+caller asserts that the input matrix has the Vanderbei (1995) structure
+`K = [[-E, A^T], [A, F]]` with `E, F` symmetric positive definite — the
+common case in IPOPT-style KKT after the first inertia-correction
+iteration sets `delta_w, delta_c > 0`. The kernel then runs a
+diagonal-only pivot loop (no 1x1-vs-2x2 search) backed by a new
+`pub fn factor_diagonal` in `src/dense/factor.rs`, with the existing
+Bunch-Kaufman path untouched as the default.
+
+Contract violation (vanishing pivot, or `||L[:,k]||_inf` growth above
+`1/sqrt(EPS)`) returns a new `FeralError::SqdContractViolated { column,
+pivot }` rather than silently falling back to BK. Mutually exclusive
+with `allow_delayed_pivots = true` semantics; the builder enforces this
+by clearing the delayed-pivot fields when `sqd_mode` is enabled.
+
+**Why opt-in and not a new default.**
+- Preserves FERAL's "BK + exact inertia" invariant unconditionally for
+  any caller who does not opt in.
+- Matches the existing builder pattern (`with_static_pivoting`,
+  `with_cascade_break`).
+- Makes contract violations attributable to the caller's regularization
+  choice, not to a hidden auto-detect heuristic with its own threshold
+  knobs.
+- Trivially upgradeable later to a `factor_kkt(matrix, delta_w, delta_c)`
+  entry point if usage warrants — the underlying `factor_diagonal`
+  kernel is unchanged.
+
+**Why loud failure and not silent BK fallback.**
+- `with_sqd_mode(true)` is an *assertion* by the caller. Silently
+  retreating to BK hides the caller's bug if `delta_w` was set to zero
+  or scaling drifted, and lets a regression land where caller stops
+  baking regularization properly.
+- Caller can implement fallback themselves: catch `SqdContractViolated`,
+  rebuild the `Solver` for that one call without `with_sqd_mode`, refactor.
+  The `last_symbolic` cache survives the rebuild (pattern unchanged).
+
+**Why a separate `factor_diagonal()` and not a flag inside `factor()`.**
+- Current `factor()` at `src/dense/factor.rs:449-696` is a tightly fused
+  state machine (`fused_gamma0` / `have_fused`, BK steps 1-7, Duff-Reid
+  growth test, `do_2x2_pivot`). A flag-gated branch would muddy both.
+- SQD loop is a strict subset (pick `a[k,k]`, divide, rank-1 update);
+  cleaner as its own function with independent test coverage.
+- Shared kernel work (rank-1 trailing update) is factored into a helper
+  called from both paths.
+
+**Reconsideration clause.** Revisit if (1) corpus classifier shows < 30%
+of KKT corpus is SQD-eligible (would reduce shipping value), or
+(2) ship-gate benchmark (geomean speedup `t_BK_warm / t_SQD_warm >= 1.15`)
+fails. If revisited, the natural next design is auto-detection inside
+`factor_one_supernode` gated by a structural fingerprint — but only with
+empirical evidence that opt-in friction is hurting adoption.
+
+**Alternatives considered (and rejected — see
+`dev/research/sqd-fast-path.md` "Design alternatives" section).**
+- Auto-detect SQD structure inside `factor()`: rejected — detection cost
+  every call, borderline matrices, inverts safety contract.
+- Drop-in replacement of BK with SQD as default: rejected — inverts safety
+  contract for non-KKT callers.
+- New `factor_kkt(kkt, delta_w, delta_c)` entry: rejected for v1 — larger
+  API surface, breaks current "values baked into matrix" contract.
+  Upgradeable later.
+- Silent BK fallback on contract violation: rejected — hides caller bugs.
+
+**References.**
+- `dev/research/sqd-fast-path.md` — full motivation, stability analysis,
+  failure-mode catalogue, alternatives.
+- `dev/references.bib` — vanderbei1995sqd, gill1996sqd_stability,
+  orban2017sqd, friedlander2012regularized, pougkakiotis2020ippmm,
+  greif2014kkt_eigenvalue_bounds.
+- `/Users/jkitchin/.claude/plans/let-s-work-on-a-reflective-anchor.md` —
+  user-approved implementation plan (commit phasing a-h).
+- GitHub tracking issue: filed in commit (a).

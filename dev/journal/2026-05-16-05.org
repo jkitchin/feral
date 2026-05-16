@@ -1,0 +1,77 @@
+#+TITLE: 2026-05-16 session 05 — SQD fast-path commit (a)
+#+STARTUP: overview
+
+* 09:00 :sqd:planning:research:
+Approved plan for the SQD (symmetric quasi-definite) fast-path landed at
+=/Users/jkitchin/.claude/plans/let-s-work-on-a-reflective-anchor.md=.
+
+Design locked with user:
+- Opt-in builder =Solver::with_sqd_mode(bool)= (off by default).
+- GitHub tracking issue in the existing =M<N>:= milestone style.
+- Loud failure (=FeralError::SqdContractViolated=) on contract violation,
+  not silent BK fallback.
+- Separate =factor_diagonal()= kernel in =src/dense/factor.rs=, not a
+  flag-gated branch inside the BK =factor()= state machine.
+- Mutually exclusive with =allow_delayed_pivots= (builder enforces).
+
+Commit phasing: (a) research note + bib + decisions + GH issue (this
+commit), (b) =NumericParams::sqd_mode= field + builder, (c) dense
+=factor_diagonal=, (d) wire =factor_one_supernode= dispatch, (e)
+=FeralError::SqdContractViolated= + predicate, (f) tests, (g) bench,
+(h) session checkpoint + CHANGELOG.
+
+* 09:10 :sqd:bib:crossref:
+Verified six new DOIs via CrossRef before adding to =dev/references.bib=:
+
+| Key                                  | DOI                         | CrossRef year |
+|--------------------------------------+-----------------------------+---------------|
+| vanderbei1995sqd                     | 10.1137/0805005             |          1995 |
+| gill1996sqd_stability                | 10.1137/S0895479893252623   |          1996 |
+| orban2017sqd                         | 10.1137/1.9781611974737     |          2017 |
+| friedlander2012regularized           | 10.1007/s12532-012-0035-2   |          2012 |
+| pougkakiotis2020ippmm                | 10.1007/s10589-020-00240-9  |          2020 |
+| greif2014kkt_eigenvalue_bounds       | 10.1137/120890600           |          2014 |
+
+Note: the plan named the Pougkakiotis-Gondzio paper "2021" (online-first
+year). CrossRef returns 2020 (issue year). Used 2020 in the bibkey to
+match the file's existing convention (cf. =goto2008anatomy=, year is
+publication year). All six are SQD-relevant: existence theorem (Vanderbei),
+stability bound (GSS), modern monograph (Orban-Arioli), regularized-IPM
+lineage that makes SQD structural (Friedlander-Orban, Pougkakiotis-
+Gondzio), and eigenvalue bounds informing the L-growth threshold (GMO).
+
+* 09:25 :sqd:research-note:
+Wrote =dev/research/sqd-fast-path.md= covering:
+- Motivation: per-supernode BK scan cost from issue #10 post-mortem.
+- Vanderbei's Theorem 2.1 (existence of diagonal-D LDL^T).
+- When FERAL sees SQD: IPOPT after first inertia correction; IP-PMM
+  always; modern regularized IPM is moving toward SQD-always.
+- GSS-1996 stability bound: conditional on E, F bounded below.
+- Mechanics of what the fast-path skips (the BK 1x1-vs-2x2 scan and
+  2x2 branch).
+- Per-supernode timing model: ~2x kernel speedup limit for small
+  fronts, asymptotic constant for large fronts.
+- Design alternatives considered and rejected (5 of them).
+- Failure-mode catalogue.
+- =is_sqd_candidate= predicate spec.
+- Follow-up issues to file after shipping.
+
+* 09:35 :sqd:decisions:
+Appended SQD entry to =dev/decisions.md=. The decision: opt-in builder,
+loud failure, separate =factor_diagonal()= kernel. Reconsideration clause
+triggers if corpus classifier shows <30% SQD-eligibility or ship-gate
+geomean speedup <1.15.
+
+* 09:50 :sqd:github:
+Opened GitHub issue [[https://github.com/jkitchin/feral/issues/34][#34]]
+("M7: SQD fast-path — opt-in diagonal-only LDLT for quasi-definite
+KKT") with label =enhancement= and the full task / acceptance
+breakdown. Issue body mirrors the user-approved plan phasing (a)-(h).
+Back-filled the research note's "GitHub tracking issue" line with #34.
+
+* 10:00 :sqd:commit:
+Commit (a) staged: research note + 6 bib entries + decisions log entry
++ this journal file. No code changed. Pre-commit hooks (cargo fmt,
+cargo clippy) will still run; both should no-op since no Rust source
+was touched. Running cargo test once for the spec-mandated "every
+commit" hygiene check before commit.

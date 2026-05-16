@@ -291,6 +291,112 @@
                to sparse direct approach; informs GPU kernel threshold decisions.}
 }
 
+% ============================================================
+% Regularized / Quasi-Definite KKT Systems (SQD theory)
+% DOIs verified via CrossRef 2026-05-16
+% ============================================================
+
+@article{vanderbei1995sqd,
+  author    = {Vanderbei, Robert J.},
+  title     = {Symmetric Quasidefinite Matrices},
+  journal   = {{SIAM} Journal on Optimization},
+  year      = {1995},
+  volume    = {5},
+  number    = {1},
+  pages     = {100--113},
+  doi       = {10.1137/0805005},
+  url       = {https://doi.org/10.1137/0805005},
+  note      = {The existence theorem for diagonal-D LDL^T on symmetric
+               quasi-definite matrices: K = [[-E, A^T], [A, F]] with E, F SPD
+               admits LDL^T with diagonal D under any symmetric permutation
+               (Theorem 2.1). Foundation of FERAL's with_sqd_mode fast-path.
+               Read Sections 2-3 before implementing.}
+}
+
+@article{gill1996sqd_stability,
+  author    = {Gill, Philip E. and Saunders, Michael A. and Shinnerl, Joseph R.},
+  title     = {On the Stability of {C}holesky Factorization for
+               Symmetric Quasidefinite Systems},
+  journal   = {{SIAM} Journal on Matrix Analysis and Applications},
+  year      = {1996},
+  volume    = {17},
+  number    = {1},
+  pages     = {35--46},
+  doi       = {10.1137/S0895479893252623},
+  url       = {https://doi.org/10.1137/S0895479893252623},
+  note      = {Stability companion to Vanderbei (1995). Diagonal pivoting is
+               backward stable iff E, F are bounded below away from zero
+               (Theorem 4.1). Section 5 gives the practical bound for
+               regularized KKT. Justifies FERAL's runtime contract predicate
+               sqd_diagonal_ok and the SqdContractViolated error.}
+}
+
+@book{orban2017sqd,
+  author    = {Orban, Dominique and Arioli, Mario},
+  title     = {Iterative Solution of Symmetric Quasi-Definite Linear Systems},
+  publisher = {{SIAM}},
+  series    = {SIAM Spotlights},
+  volume    = {3},
+  year      = {2017},
+  doi       = {10.1137/1.9781611974737},
+  url       = {https://doi.org/10.1137/1.9781611974737},
+  note      = {Modern monograph on SQD systems. Chapter 2 collects the
+               existence and stability theorems with current notation;
+               Chapter 3 covers iterative methods that exploit SQD structure
+               (out of scope for FERAL but informs the broader landscape).}
+}
+
+@article{friedlander2012regularized,
+  author    = {Friedlander, Michael P. and Orban, Dominique},
+  title     = {A Primal--Dual Regularized Interior-Point Method for
+               Convex Quadratic Programs},
+  journal   = {Mathematical Programming Computation},
+  year      = {2012},
+  volume    = {4},
+  number    = {1},
+  pages     = {71--107},
+  doi       = {10.1007/s12532-012-0035-2},
+  url       = {https://doi.org/10.1007/s12532-012-0035-2},
+  note      = {Regularized IPM whose KKT system is structurally SQD at every
+               iterate (both delta_w and delta_c are always positive by
+               construction). Establishes that the SQD-fast-path is the
+               *expected* regime for modern IPM, not the exception.}
+}
+
+@article{pougkakiotis2020ippmm,
+  author    = {Pougkakiotis, Spyridon and Gondzio, Jacek},
+  title     = {An Interior Point-Proximal Method of Multipliers for
+               Convex Quadratic Programming},
+  journal   = {Computational Optimization and Applications},
+  year      = {2020},
+  volume    = {78},
+  number    = {2},
+  pages     = {307--351},
+  doi       = {10.1007/s10589-020-00240-9},
+  url       = {https://doi.org/10.1007/s10589-020-00240-9},
+  note      = {IP-PMM lineage. KKT system is always SQD by construction.
+               Confirms the trend that modern always-regularized IPMs make
+               the SQD fast-path the common case, not a special case.}
+}
+
+@article{greif2014kkt_eigenvalue_bounds,
+  author    = {Greif, Chen and Moulding, Erin and Orban, Dominique},
+  title     = {Bounds on Eigenvalues of Matrices Arising from
+               Interior-Point Methods},
+  journal   = {{SIAM} Journal on Optimization},
+  year      = {2014},
+  volume    = {24},
+  number    = {1},
+  pages     = {49--83},
+  doi       = {10.1137/120890600},
+  url       = {https://doi.org/10.1137/120890600},
+  note      = {Eigenvalue bounds for unreduced, augmented, and condensed KKT
+               systems. Section 4 covers the regularized augmented form; the
+               eigenvalue scale informs FERAL's SQD_L_GROWTH_LIMIT threshold
+               in sqd_diagonal_ok. Also the principled defense for keeping
+               the unreduced KKT in FERAL rather than collapsing slacks.}
+}
+
 % --- Low-Rank Compression in Multifrontal ---
 
 @article{amestoy2017blr,
