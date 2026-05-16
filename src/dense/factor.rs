@@ -1039,22 +1039,130 @@ pub fn factor_frontal_with_profile(
         });
     }
 
-    // Phase: alloc + copy
+    // Phase: alloc + copy. Public-API callers do not provide a scratch
+    // matrix; allocate a working copy here so the in-place kernel can
+    // factor without aliasing the caller's borrow. The multifrontal
+    // driver bypasses this copy via `factor_frontal_in_place_with_scratch`.
     let t0 = profile.as_ref().map(|_| std::time::Instant::now());
-    let mut a = vec![0.0; nrow * nrow];
+    let mut scratch_data = vec![0.0; nrow * nrow];
     for j in 0..nrow {
         for i in j..nrow {
-            a[j * nrow + i] = matrix.data[j * nrow + i];
+            scratch_data[j * nrow + i] = matrix.data[j * nrow + i];
         }
     }
+    let mut scratch_matrix = crate::dense::matrix::SymmetricMatrix {
+        n: nrow,
+        data: scratch_data,
+    };
     if let (Some(p), Some(t)) = (profile.as_deref_mut(), t0) {
         p.alloc_copy_ns += t.elapsed().as_nanos();
     }
 
-    // Phase: setup (perm, subdiag, counters)
+    let mut tmp_scratch = FactorScratch::new();
+    factor_frontal_in_place_with_scratch_impl(
+        &mut scratch_matrix,
+        ncol,
+        may_delay,
+        params,
+        &mut tmp_scratch,
+        profile,
+    )
+}
+
+/// Issue #13 — scalar-fallback in-place + scratch-pooled variant of
+/// [`factor_frontal`].
+///
+/// Operates directly on `matrix.data` (treated as scratch) and reuses
+/// the caller-supplied `FactorScratch` for the `subdiag` working buffer,
+/// removing both the per-call `vec![0.0; nrow*nrow]` copy and the
+/// per-call `vec![0.0; nrow]` subdiag allocation that `factor_frontal`
+/// pays. Also skips `SymmetricMatrix::validate()`: the multifrontal
+/// driver assembles fronts from value-checked CSC data, so the NaN/Inf
+/// scan is redundant on the hot path. A `debug_assert!` enforces the
+/// finite-input invariant in debug builds.
+///
+/// Bit-exact with `factor_frontal` on valid (finite) input — identical
+/// pivot loop, identical extract logic.
+pub(crate) fn factor_frontal_in_place_with_scratch(
+    matrix: &mut crate::dense::matrix::SymmetricMatrix,
+    ncol: usize,
+    may_delay: bool,
+    params: &BunchKaufmanParams,
+    scratch: &mut FactorScratch,
+) -> Result<FrontalFactors, FeralError> {
+    factor_frontal_in_place_with_scratch_impl(matrix, ncol, may_delay, params, scratch, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn factor_frontal_in_place_with_scratch_impl(
+    matrix: &mut crate::dense::matrix::SymmetricMatrix,
+    ncol: usize,
+    may_delay: bool,
+    params: &BunchKaufmanParams,
+    scratch: &mut FactorScratch,
+    mut profile: Option<&mut FrontalProfile>,
+) -> Result<FrontalFactors, FeralError> {
+    let nrow = matrix.n;
+
+    if ncol > nrow {
+        return Err(FeralError::InvalidInput(format!(
+            "ncol {} > nrow {}",
+            ncol, nrow
+        )));
+    }
+    if ncol == 0 {
+        return Ok(FrontalFactors {
+            nrow,
+            ncol: 0,
+            nelim: 0,
+            l: Vec::new(),
+            d_diag: Vec::new(),
+            d_subdiag: Vec::new(),
+            perm: (0..nrow).collect(),
+            perm_inv: (0..nrow).collect(),
+            contrib: matrix.data.clone(),
+            contrib_dim: nrow,
+            n_delayed: 0,
+            inertia: Inertia {
+                positive: 0,
+                negative: 0,
+                zero: 0,
+            },
+            needs_refinement: false,
+            n_rook_rescues: 0,
+            zero_tol: params.zero_tol,
+            zero_tol_2x2: params.zero_tol_2x2,
+        });
+    }
+
+    // Invariant: callers must supply a finite-valued lower triangle.
+    // Multifrontal callers satisfy this by construction (the assembled
+    // frontal is a sum of CSC values pre-scaled by finite factors);
+    // a debug_assert! catches accidental misuse without paying for the
+    // scan in release.
+    debug_assert!(
+        matrix.data.iter().enumerate().all(|(idx, &v)| {
+            let j = idx / nrow;
+            let i = idx % nrow;
+            if i < j {
+                true
+            } else {
+                v.is_finite()
+            }
+        }),
+        "factor_frontal_in_place_with_scratch: lower triangle contains NaN/Inf"
+    );
+
+    // Factor in place into the caller's buffer. The pivot kernel reads
+    // and writes only the lower triangle (strict upper is never touched).
+    let a: &mut [f64] = matrix.data.as_mut_slice();
+
+    // Phase: setup (perm, pooled subdiag, counters)
     let t0 = profile.as_ref().map(|_| std::time::Instant::now());
     let mut perm: Vec<usize> = (0..nrow).collect();
-    let mut subdiag = vec![0.0; nrow];
+    scratch.subdiag.clear();
+    scratch.subdiag.resize(nrow, 0.0);
+    let subdiag: &mut [f64] = scratch.subdiag.as_mut_slice();
     let mut pos = 0usize;
     let mut neg = 0usize;
     let mut zero = 0usize;
@@ -1071,20 +1179,16 @@ pub fn factor_frontal_with_profile(
     let mut cached_maxfromm: Option<f64> = None;
 
     // Factor only the first ncol columns. Pivot search restricted to [k, ncol).
-    // Per-step body is extracted as `scalar_pivot_step` so the Phase 2.4.1b
-    // blocked-panel path can share the rejection/delay fallback with the
-    // unblocked driver. This loop is behavior-preserving byte-for-byte vs
-    // the pre-extraction body.
     while k < ncol {
         match scalar_pivot_step(
-            &mut a,
+            a,
             nrow,
             ncol,
             k,
             may_delay,
             params,
             &mut perm,
-            &mut subdiag,
+            subdiag,
             &mut pos,
             &mut neg,
             &mut zero,
@@ -1102,9 +1206,6 @@ pub fn factor_frontal_with_profile(
     }
     let t_extract = profile.as_ref().map(|_| std::time::Instant::now());
 
-    // At the break point, `k` is the number of successfully eliminated
-    // pivots. When `may_delay == false` this equals `ncol`; when
-    // `may_delay == true` and a pivot was delayed, `nelim < ncol`.
     let nelim = k;
     let n_delayed = ncol - nelim;
 
@@ -1135,11 +1236,12 @@ pub fn factor_frontal_with_profile(
     }
 
     // Extract contribution block: trailing (nrow-nelim) × (nrow-nelim) of a.
-    // When `nelim < ncol` the first `n_delayed` rows/columns of this block
-    // are delayed fully-summed columns; the remaining positions hold the
-    // non-fully-summed trailing rows exactly as before.
+    // Pool the contrib buffer through `scratch.contrib_pool` — bit-identical
+    // to `vec![0.0; cdim*cdim]` after clear()+resize(_,0.0).
     let cdim = nrow - nelim;
-    let mut contrib = vec![0.0; cdim * cdim];
+    let mut contrib = scratch.contrib_pool.take().unwrap_or_default();
+    contrib.clear();
+    contrib.resize(cdim * cdim, 0.0);
     for cj in 0..cdim {
         for ci in cj..cdim {
             contrib[cj * cdim + ci] = a[(nelim + cj) * nrow + (nelim + ci)];
@@ -1348,7 +1450,16 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     const PANEL_MIN_NCOL: usize = 8;
     let bs = params.block_size.min(ncol);
     if bs < 2 || ncol < PANEL_MIN_NCOL {
-        return factor_frontal(matrix, ncol, may_delay, params);
+        // Issue #13: route the scalar fallback through the in-place,
+        // scratch-pooled variant. The public `factor_frontal` entry
+        // would re-validate `matrix.data` (a redundant NaN/Inf scan)
+        // and clone the lower triangle into a fresh `nrow*nrow` buffer
+        // (a redundant copy: the panel-fallback caller already holds
+        // the data in `matrix.data` and was about to factor it in
+        // place). The `_with_scratch` variant skips both and reuses
+        // `scratch.subdiag`/`scratch.contrib_pool` — bit-identical
+        // result on finite input.
+        return factor_frontal_in_place_with_scratch(matrix, ncol, may_delay, params, scratch);
     }
 
     // Factor in place into the caller's buffer — the kernel reads and
