@@ -244,3 +244,59 @@ committed), ~/tmp/narx_solves/solve_*.mtx~ (extracted, not
 committed), ~/tmp/narx_index.py~ and ~/tmp/narx_extract.py~
 (extractor scripts). Diag extension at
 ~src/bin/diag_robot1600_eigs.rs~ is uncommitted.
+
+* 11:30 :acopp30:scaling:mc64:issue-23:plateau-2:
+Picked up issue #23. After the SSIDS det floor closed the
+original 8 ACOPP30 suspects (1.5e-14..1.9e-9 rel_ref), a full
+105-matrix sweep via the new ~src/bin/diag_acopp30_residual.rs~
+binary revealed 6 NEW plateau matrices at iters 59, 63-67:
+
+| iter | rel_ref  | inertia (feral)   |
+|------+----------+-------------------|
+| 0059 | 1.88e-06 | (71, 137, 1)      |
+| 0063 | 1.56e-01 | (71, 137, 1)      |
+| 0064 | 1.74e-01 | (71, 137, 1)      |
+| 0065 | 9.07e-02 | (71, 137, 1)      |
+| 0066 | 1.49e-01 | (71, 137, 1)      |
+| 0067 | 9.07e-02 | (71, 137, 1)      |
+
+All 6 emit min|D|=0 (literal-zero ForceAccept). MUMPS gets 1e-5,
+SSIDS gets 1e-13. ~cond1(A) ~ 3e16~.
+
+Built ~src/bin/probe_acopp30_64.rs~ to sweep NumericParams
+knobs: pivot_threshold, on_zero_pivot, scaling strategy.
+~ScalingStrategy::InfNorm~ and ~ScalingStrategy::Identity~ both
+give rel_ref ~ 1e-14 on all 6 plateaus, with a different pivot
+pattern (101x1+54x2 vs 115x1+47x2 under Auto/MC64). Forcing
+~DIAG_SCALING=infnorm~ on the full sweep: 105/105 ACOPP30
+matrices pass rel_ref < 1e-10.
+
+Root cause: ~ScalingStrategy::Auto~ routes ACOPP30 to MC64
+(arrow-KKT shape), and Policy 4's first guard at
+~src/scaling/mod.rs:284~ skips the diagnostic when
+~raw_diag_range >= 1e6~. ACOPP30 has ~raw_drng = 1.06e10~, so
+MC64 is used unconditionally. On this family MC64 produces a
+catastrophic scaling that yields a zero pivot. The existing
+Policy 4 ~mc_off/in_off~ ratio fallback can't catch the case
+because both metrics are +inf (both scalings leave dead
+diagonals).
+
+Built ~src/bin/probe_scaling_policy4.rs~ over a 9-matrix panel
+(ACOPP30, MEYER3NE, MSS1, VESUVIA, VESUVIO, VESUVIOU, HS75,
+CRESC132, MUONSINE). Discovered ~in_spread~ (max|s|/min|s| of
+the InfNorm scaling vector) is the clean discriminator:
+
+| in_spread bracket | matrices                        | MC64 outcome      |
+|-------------------+---------------------------------+-------------------|
+| < 100             | ACOPP30 (1.63), MSS1 (1.09),    | mixed — ACOPP30   |
+|                   | HS75 (20.8), MUONSINE (99.6)    | BAD               |
+| 100..10k          | CRESC132 (859), VESUVIO (1.3e4) | tie               |
+| > 10k             | VESUVIA (7.6e7), VESUVIOU       | MC64 strictly     |
+|                   | (8.4e5), MEYER3NE (6.6e9)       | wins              |
+
+Proposed fix: pre-MC64 InfNorm trial in
+~compute_scaling_auto_with_cache~. If ~max|s|/min|s| < 1e3~,
+return InfNorm immediately. Catches the 6 ACOPP30 plateaus
+without flipping any of the matrices Policy 4 was designed to
+keep on MC64. Research note:
+~dev/research/acopp30-plateau-2.md~.
