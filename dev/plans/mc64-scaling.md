@@ -749,6 +749,16 @@ addressed in this session:
 
 Probably 3–4 focused sessions.
 
+## Follow-ups
+
+- **Issue #24 (M2, completed 2026-05-16)** — surface the silent
+  MC64 → InfNorm fallback in `compute_scaling_auto_with_cache`
+  as a structured signal. Adds `ScalingInfo::Mc64FallbackToInfnorm
+  { reason: Mc64FallbackReason }`, a `Solver::scaling_info()` /
+  `Solver::mc64_fallback_count()` accessor pair, and a
+  `mc64_fallback yes/no` field in the `bench_one_matrix` sidecar.
+  See `dev/research/issue-24-mc64-fallback.md`.
+
 ## What happens next (not part of this plan)
 
 After Phase 2.2.1 is complete and merged, the next Phase 2 tasks

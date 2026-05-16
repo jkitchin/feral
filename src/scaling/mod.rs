@@ -127,6 +127,26 @@ pub enum ScalingStrategy {
     Auto,
 }
 
+/// Reason that `ScalingStrategy::Auto` chose InfNorm scaling instead
+/// of the MC64 matching it had nominally routed to. Issue #24.
+///
+/// See `dev/research/issue-24-mc64-fallback.md` for the rationale
+/// behind surfacing this signal as a distinct `ScalingInfo` variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mc64FallbackReason {
+    /// `Auto` picked MC64 by shape, but the pre-MC64 InfNorm trial
+    /// (`scaling_spread(in_vec) < IN_SPREAD_GUARD`) produced a tight
+    /// scaling — the matrix was already well-equilibrated and the
+    /// Hungarian matching never ran. ACOPP30 / MSS1 family.
+    InfNormSpreadAcceptable,
+    /// MC64 ran but produced a catastrophically worse scaling than
+    /// InfNorm on a matrix whose raw `|diag|` range was tame enough
+    /// that MC64 had no inherent ill-conditioning to recover from.
+    /// Policy 4 ratio guard (`mc_off > 1e6 ∧ mc_off / in_off > 1e5
+    /// ∧ raw_drng < 1e6`). MSS1_0009 class.
+    Mc64WorseThanInfnorm,
+}
+
 /// Diagnostic information about how the scaling was computed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalingInfo {
@@ -137,9 +157,25 @@ pub enum ScalingInfo {
     /// number of variables that could not be matched. The returned
     /// scaling vector has `1.0` at the unmatched positions.
     PartialSingular { n_unmatched: usize },
+    /// `ScalingStrategy::Auto` resolved to `Mc64Symmetric` by shape
+    /// routing but then fell back to InfNorm. The scaling vector
+    /// returned alongside this info is the InfNorm vector (so the
+    /// solve path applies it). Issue #24 — was previously
+    /// indistinguishable from `Applied` for InfNorm.
+    Mc64FallbackToInfnorm { reason: Mc64FallbackReason },
     /// No matching-based scaling was applied (e.g., the caller
     /// requested `Identity` or `External`).
     NotApplied,
+}
+
+impl ScalingInfo {
+    /// `true` when the scaling vector was produced by the InfNorm
+    /// fallback after `Auto` had routed to MC64. Issue #24
+    /// downstream consumers (`Solver::mc64_fallback_count`, bench
+    /// sidecar) read this rather than matching on the variant.
+    pub fn is_mc64_fallback(&self) -> bool {
+        matches!(self, ScalingInfo::Mc64FallbackToInfnorm { .. })
+    }
 }
 
 /// Compute the symmetric scaling vector for a sparse symmetric
@@ -295,9 +331,19 @@ fn compute_scaling_auto_with_cache(
     // plateau-2 family (raw_drng=1.06e10 but in_spread=1.63), which
     // the legacy `raw_drng >= RAW_GUARD → use MC64 unconditionally`
     // fast-path mis-routed. See `dev/research/acopp30-plateau-2.md`.
-    let (in_vec, in_info) = infnorm::compute_infnorm(matrix);
+    //
+    // Issue #24: tag the result as `Mc64FallbackToInfnorm` so
+    // downstream telemetry can distinguish a "user picked InfNorm"
+    // from a "Auto routed to MC64 but fell back" outcome. The
+    // underlying scaling vector is unchanged.
+    let (in_vec, _in_info) = infnorm::compute_infnorm(matrix);
     if scaling_spread(&in_vec) < IN_SPREAD_GUARD {
-        return Ok((in_vec, in_info));
+        return Ok((
+            in_vec,
+            ScalingInfo::Mc64FallbackToInfnorm {
+                reason: Mc64FallbackReason::InfNormSpreadAcceptable,
+            },
+        ));
     }
 
     // Cheap pre-filter: a wide raw |diag| range means MC64 has
@@ -323,10 +369,16 @@ fn compute_scaling_auto_with_cache(
     if ratio > RATIO_GUARD {
         // MC64 is catastrophically worse than InfNorm AND the raw
         // matrix is already well-behaved — fall back to InfNorm.
-        // Forward `in_info` (`ScalingInfo::Applied`) so the solve
-        // path actually uses the scaling vector instead of treating
-        // it as identity.
-        Ok((in_vec, in_info))
+        // The solve path applies the InfNorm scaling vector; tag
+        // the info as `Mc64FallbackToInfnorm` so callers (Solver
+        // telemetry, bench sidecar) can distinguish this from a
+        // user-requested InfNorm. Issue #24.
+        Ok((
+            in_vec,
+            ScalingInfo::Mc64FallbackToInfnorm {
+                reason: Mc64FallbackReason::Mc64WorseThanInfnorm,
+            },
+        ))
     } else {
         Ok((mc_vec, mc_info))
     }
@@ -624,6 +676,60 @@ mod tests {
         assert!(r.is_infinite(), "got {r}");
     }
 
+    /// Issue #24: a synthetic all-diagonal matrix triggers the
+    /// `Auto` shape rule (diag_only/n = 1.0) but the pre-MC64
+    /// InfNorm trial gives a constant scaling vector (spread = 1),
+    /// so `IN_SPREAD_GUARD` fires and the fallback is taken.
+    /// Assert the returned `ScalingInfo` is `Mc64FallbackToInfnorm`
+    /// with the expected reason — the previously-silent fallback
+    /// is now structurally surfaced.
+    #[test]
+    fn auto_surfaces_infnorm_spread_fallback_on_uniform_diag() {
+        // 6×6 pure diagonal with all entries equal. Routing:
+        //   diag_only / n = 1.0 ≥ 0.3 → MC64 picked.
+        // InfNorm on a uniform diagonal yields s[i] = 1/sqrt(2.0)
+        // for every i, so scaling_spread = 1.0 << 1e3 — the
+        // IN_SPREAD_GUARD fires.
+        let n = 6;
+        let mut col_ptr = Vec::with_capacity(n + 1);
+        let mut row_idx = Vec::new();
+        let mut values = Vec::new();
+        col_ptr.push(0);
+        for j in 0..n {
+            row_idx.push(j);
+            values.push(2.0);
+            col_ptr.push(row_idx.len());
+        }
+        let csc = CscMatrix {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        };
+        // Precondition: routing rule says MC64.
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
+        // The fallback must surface the new variant with the
+        // InfNormSpreadAcceptable reason.
+        let (auto_s, info) = compute_scaling(&csc, &ScalingStrategy::Auto)
+            .expect("Auto on uniform diag should succeed");
+        match info {
+            ScalingInfo::Mc64FallbackToInfnorm {
+                reason: Mc64FallbackReason::InfNormSpreadAcceptable,
+            } => {}
+            other => panic!(
+                "expected Mc64FallbackToInfnorm{{InfNormSpreadAcceptable}}, got {:?}",
+                other
+            ),
+        }
+        // And the returned vector must be the InfNorm vector
+        // (so the solve path applies it, not identity).
+        let (in_s, _) = compute_scaling(&csc, &ScalingStrategy::InfNorm)
+            .expect("InfNorm on uniform diag should succeed");
+        assert_eq!(auto_s, in_s, "fallback vector must be the InfNorm vector");
+        // is_mc64_fallback convenience method matches the variant.
+        assert!(info.is_mc64_fallback());
+    }
+
     /// Policy 4 fallback regression test — MSS1_0009 should resolve
     /// to InfNorm under Auto despite the diag_only/n=0.45 ratio
     /// triggering the MC64 routing rule. The fallback fires because
@@ -646,7 +752,7 @@ mod tests {
 
         // But Auto should resolve to the InfNorm scaling because of
         // the Policy 4 fallback.
-        let (auto_s, _) = compute_scaling(&csc, &ScalingStrategy::Auto)
+        let (auto_s, auto_info) = compute_scaling(&csc, &ScalingStrategy::Auto)
             .expect("Auto on MSS1_0009 should succeed");
         let (in_s, _) = compute_scaling(&csc, &ScalingStrategy::InfNorm)
             .expect("InfNorm on MSS1_0009 should succeed");
@@ -657,6 +763,19 @@ mod tests {
             auto_s, mc_s,
             "Auto must NOT use MC64 on MSS1_0009 (would regress residual to 1e-6)"
         );
+        // Issue #24: this is the `Mc64WorseThanInfnorm` reason
+        // (MC64 ran but produced 7.8e14 max-off-ratio vs InfNorm's
+        // 2.0e8). The InfNormSpreadAcceptable guard does not fire
+        // first because MSS1_0009's InfNorm spread is above 1e3.
+        match auto_info {
+            ScalingInfo::Mc64FallbackToInfnorm {
+                reason: Mc64FallbackReason::Mc64WorseThanInfnorm,
+            } => {}
+            other => panic!(
+                "MSS1_0009: expected Mc64FallbackToInfnorm{{Mc64WorseThanInfnorm}}, got {:?}",
+                other
+            ),
+        }
     }
 
     /// Policy 4 fallback must NOT fire on the VESUVIO/CRESC class —
@@ -716,7 +835,7 @@ mod tests {
         // Routing rule still picks MC64 (arrow-KKT shape unchanged).
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
         // But Auto should resolve to InfNorm via the IN_SPREAD_GUARD.
-        let (auto_s, _) =
+        let (auto_s, auto_info) =
             compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto on ACOPP30_0064");
         let (in_s, _) =
             compute_scaling(&csc, &ScalingStrategy::InfNorm).expect("InfNorm on ACOPP30_0064");
@@ -730,6 +849,18 @@ mod tests {
             auto_s, mc_s,
             "Auto must NOT use MC64 on ACOPP30_0064 (regresses rel_ref to 1.7e-1)"
         );
+        // Issue #24: this fallback is the InfNormSpreadAcceptable
+        // path — MC64 never ran because the InfNorm trial
+        // produced a tight scaling.
+        match auto_info {
+            ScalingInfo::Mc64FallbackToInfnorm {
+                reason: Mc64FallbackReason::InfNormSpreadAcceptable,
+            } => {}
+            other => panic!(
+                "ACOPP30_0064: expected Mc64FallbackToInfnorm{{InfNormSpreadAcceptable}}, got {:?}",
+                other
+            ),
+        }
     }
 
     /// HS75_0000 has in_spread ≈ 20.8, so the IN_SPREAD_GUARD

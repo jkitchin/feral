@@ -143,6 +143,18 @@ After implementation:
 via Mc64Cache); larger on the per-matrix `bench` where MC64 reruns
 on every call when LdltCompress doesn't fire.
 
+## Related work
+
+- **Issue #24 (M2)** — surfaces the silent MC64 → InfNorm
+  fallback (`compute_scaling_auto_with_cache`) through
+  `ScalingInfo::Mc64FallbackToInfnorm`, `Solver::mc64_fallback_count()`,
+  and the `bench_one_matrix` sidecar `mc64_fallback` field. Together
+  with this plan's MC64-skip and the Policy 4 fallback, the system
+  now has both a *positive* skip (this plan) and a *visible* skip
+  (issue #24), so future MC64 wall-time work has a per-matrix
+  signal to optimize against. See
+  `dev/research/issue-24-mc64-fallback.md`.
+
 ## Reference
 
 - `mumps/src/dana_aux.F:1388-1416` — SYM=2 missing-diagonal skip
