@@ -1,0 +1,682 @@
+[
+  {
+    "row": {
+      "group": "synth",
+      "name": "deep_null_cascade_50",
+      "n": 50,
+      "nnz": 149,
+      "category": "cascade",
+      "notes": "Long zero-pivot cascade, n=50"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "50",
+      "nnz": "147",
+      "inertia_pos": "25",
+      "inertia_neg": "25",
+      "inertia_zero": "0",
+      "analyse_us": "28",
+      "factor_us": "21",
+      "solve_us": "4",
+      "rel_res": "1.00964907830023950e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "synth",
+      "name": "deep_null_cascade_200",
+      "n": 200,
+      "nnz": 599,
+      "category": "cascade",
+      "notes": "Long zero-pivot cascade, n=200"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "200",
+      "nnz": "597",
+      "inertia_pos": "99",
+      "inertia_neg": "101",
+      "inertia_zero": "0",
+      "analyse_us": "62",
+      "factor_us": "47",
+      "solve_us": "7",
+      "rel_res": "1.46745125309971290e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "exdata_1",
+      "n": 6001,
+      "nnz": 1137751,
+      "category": "dense",
+      "notes": "Dense-ish exdata, fill-in stress"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "6001",
+      "nnz": "1137751",
+      "inertia_pos": "3000",
+      "inertia_neg": "3001",
+      "inertia_zero": "0",
+      "analyse_us": "90788",
+      "factor_us": "299923",
+      "solve_us": "5597",
+      "rel_res": "1.83689732749742843e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "synth",
+      "name": "ill_cond_e10",
+      "n": 100,
+      "nnz": 1485,
+      "category": "illcond",
+      "notes": "100x100 sym indef cond ~ 1e10"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "100",
+      "nnz": "5050",
+      "inertia_pos": "50",
+      "inertia_neg": "50",
+      "inertia_zero": "0",
+      "analyse_us": "115",
+      "factor_us": "126",
+      "solve_us": "12",
+      "rel_res": "6.83114662462378059e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "synth",
+      "name": "ill_cond_e14",
+      "n": 100,
+      "nnz": 1485,
+      "category": "illcond",
+      "notes": "100x100 sym indef cond ~ 1e14"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "100",
+      "nnz": "5050",
+      "inertia_pos": "37",
+      "inertia_neg": "63",
+      "inertia_zero": "0",
+      "analyse_us": "114",
+      "factor_us": "121",
+      "solve_us": "18",
+      "rel_res": "7.07801988675708157e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "c-55",
+      "n": 32780,
+      "nnz": 218115,
+      "category": "indef",
+      "notes": "Schenk_IBMNA collection \u2014 mildly indef"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "32780",
+      "nnz": "218115",
+      "inertia_pos": "19121",
+      "inertia_neg": "13659",
+      "inertia_zero": "0",
+      "analyse_us": "157941",
+      "factor_us": "1843715",
+      "solve_us": "16470",
+      "rel_res": "1.45937152968266952e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "synth",
+      "name": "near_singular_eps12",
+      "n": 100,
+      "nnz": 1485,
+      "category": "near_sing",
+      "notes": "100x100 sym indef with eps=1e-12 pivot"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "100",
+      "nnz": "5050",
+      "inertia_pos": "54",
+      "inertia_neg": "46",
+      "inertia_zero": "0",
+      "analyse_us": "113",
+      "factor_us": "114",
+      "solve_us": "34",
+      "rel_res": "4.62985408301437512e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "synth",
+      "name": "near_singular_eps9",
+      "n": 100,
+      "nnz": 1485,
+      "category": "near_sing",
+      "notes": "100x100 sym indef with eps=1e-9 pivot"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "100",
+      "nnz": "5050",
+      "inertia_pos": "51",
+      "inertia_neg": "49",
+      "inertia_zero": "0",
+      "analyse_us": "94",
+      "factor_us": "112",
+      "solve_us": "34",
+      "rel_res": "4.05307739049945068e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "bloweybq",
+      "n": 10001,
+      "nnz": 39996,
+      "category": "opt",
+      "notes": "Bloweybq small"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "10001",
+      "nnz": "39996",
+      "inertia_pos": "10001",
+      "inertia_neg": "0",
+      "inertia_zero": "0",
+      "analyse_us": "11399",
+      "factor_us": "2548",
+      "solve_us": "389",
+      "rel_res": "3.66797580978388688e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "ncvxqp1",
+      "n": 12111,
+      "nnz": 40537,
+      "category": "opt",
+      "notes": "Non-convex QP (small)"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "12111",
+      "nnz": "40537",
+      "inertia_pos": "7111",
+      "inertia_neg": "5000",
+      "inertia_zero": "0",
+      "analyse_us": "126853",
+      "factor_us": "1591646",
+      "solve_us": "9372",
+      "rel_res": "1.76844838723012286e-15",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "cvxqp3",
+      "n": 17500,
+      "nnz": 69981,
+      "category": "opt",
+      "notes": "Convex QP \u2014 used as PD baseline"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "17500",
+      "nnz": "69981",
+      "inertia_pos": "10000",
+      "inertia_neg": "7500",
+      "inertia_zero": "0",
+      "analyse_us": "230189",
+      "factor_us": "696402",
+      "solve_us": "15414",
+      "rel_res": "1.41231703303712709e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "bloweybl",
+      "n": 30003,
+      "nnz": 70001,
+      "category": "opt",
+      "notes": "Bloweybl bound-constrained"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "30003",
+      "nnz": "70001",
+      "status": "fail",
+      "fail_reason": "factor_NumericallyRankDeficient",
+      "analyse_us": "74656"
+    },
+    "flags": [
+      "status=fail:factor_NumericallyRankDeficient"
+    ]
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "ncvxbqp1",
+      "n": 50000,
+      "nnz": 199984,
+      "category": "opt",
+      "notes": "Non-convex bound-constrained QP"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "50000",
+      "nnz": "199984",
+      "inertia_pos": "12602",
+      "inertia_neg": "37398",
+      "inertia_zero": "0",
+      "analyse_us": "189226",
+      "factor_us": "35227",
+      "solve_us": "5199",
+      "rel_res": "1.97184454211241986e-14",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "dixmaanl",
+      "n": 60000,
+      "nnz": 179999,
+      "category": "opt",
+      "notes": "CUTEr Dixmaan-L; nearly indef Hessian"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "60000",
+      "nnz": "179999",
+      "inertia_pos": "54660",
+      "inertia_neg": "5340",
+      "inertia_zero": "0",
+      "analyse_us": "127059",
+      "factor_us": "10023",
+      "solve_us": "2251",
+      "rel_res": "4.00863499011283207e-15",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "ncvxqp3",
+      "n": 75000,
+      "nnz": 274982,
+      "category": "opt",
+      "notes": "Non-convex QP (large)"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "75000",
+      "nnz": "274982",
+      "inertia_pos": "41825",
+      "inertia_neg": "33175",
+      "inertia_zero": "0",
+      "analyse_us": "2973520",
+      "factor_us": "8935640",
+      "solve_us": "105106",
+      "rel_res": "1.53076099354616551e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "bratu3d",
+      "n": 27792,
+      "nnz": 88627,
+      "category": "pde",
+      "notes": "3D Bratu, indefinite Jacobian"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "27792",
+      "nnz": "88627",
+      "inertia_pos": "15625",
+      "inertia_neg": "12167",
+      "inertia_zero": "0",
+      "analyse_us": "62724",
+      "factor_us": "623579",
+      "solve_us": "24392",
+      "rel_res": "9.93952366155667695e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "helm3d01",
+      "n": 32226,
+      "nnz": 230335,
+      "category": "pde",
+      "notes": "Helmholtz 3D, indef oscillatory"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "32226",
+      "nnz": "230335",
+      "inertia_pos": "25455",
+      "inertia_neg": "6771",
+      "inertia_zero": "0",
+      "analyse_us": "187103",
+      "factor_us": "302060",
+      "solve_us": "20977",
+      "rel_res": "1.97980379805751724e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "synth",
+      "name": "rankdef_5_2",
+      "n": 5,
+      "nnz": 14,
+      "category": "rankdef",
+      "notes": "Hand-built rank-3 5x5 sym indef"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "5",
+      "nnz": "15",
+      "status": "fail",
+      "fail_reason": "factor_NumericallyRankDeficient",
+      "analyse_us": "21"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "synth",
+      "name": "rankdef_10_3",
+      "n": 10,
+      "nnz": 39,
+      "category": "rankdef",
+      "notes": "Hand-built rank-7 10x10"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "10",
+      "nnz": "55",
+      "status": "fail",
+      "fail_reason": "factor_NumericallyRankDeficient",
+      "analyse_us": "9"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "synth",
+      "name": "rankdef_50_5",
+      "n": 50,
+      "nnz": 395,
+      "category": "rankdef",
+      "notes": "Synthetic rank-45 50x50"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "50",
+      "nnz": "1275",
+      "status": "fail",
+      "fail_reason": "factor_NumericallyRankDeficient",
+      "analyse_us": "45"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "synth",
+      "name": "rankdef_200_20",
+      "n": 200,
+      "nnz": 5550,
+      "category": "rankdef",
+      "notes": "Synthetic rank-180 200x200"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "200",
+      "nnz": "20100",
+      "inertia_pos": "112",
+      "inertia_neg": "88",
+      "inertia_zero": "0",
+      "analyse_us": "413",
+      "factor_us": "821",
+      "solve_us": "146",
+      "rel_res": "1.31706644997047650e-14",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": [
+      "zero=0!=expected=20"
+    ]
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "stokes64",
+      "n": 12546,
+      "nnz": 74242,
+      "category": "saddle",
+      "notes": "Stokes flow, 64^2 grid"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "12546",
+      "nnz": "74242",
+      "inertia_pos": "8448",
+      "inertia_neg": "4098",
+      "inertia_zero": "0",
+      "analyse_us": "56419",
+      "factor_us": "7825",
+      "solve_us": "11220",
+      "rel_res": "3.39561899641627047e-14",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "tuma1",
+      "n": 22967,
+      "nnz": 50560,
+      "category": "saddle",
+      "notes": "Optimization KKT"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "22967",
+      "nnz": "50560",
+      "inertia_pos": "13360",
+      "inertia_neg": "9607",
+      "inertia_zero": "0",
+      "analyse_us": "60383",
+      "factor_us": "11537",
+      "solve_us": "1953",
+      "rel_res": "2.01426579548309047e-14",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "mario001",
+      "n": 38434,
+      "nnz": 114643,
+      "category": "saddle",
+      "notes": "2D Mario saddle-point, small"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "38434",
+      "nnz": "114643",
+      "inertia_pos": "23130",
+      "inertia_neg": "15304",
+      "inertia_zero": "0",
+      "analyse_us": "125660",
+      "factor_us": "9161",
+      "solve_us": "2733",
+      "rel_res": "5.99116938915360254e-16",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "stokes128",
+      "n": 49666,
+      "nnz": 295938,
+      "category": "saddle",
+      "notes": "Stokes flow, 128^2 grid"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "49666",
+      "nnz": "295938",
+      "inertia_pos": "33280",
+      "inertia_neg": "16386",
+      "inertia_zero": "0",
+      "analyse_us": "268789",
+      "factor_us": "37370",
+      "solve_us": "57983",
+      "rel_res": "9.60807985570730112e-14",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "a5esindl",
+      "n": 60008,
+      "nnz": 145004,
+      "category": "saddle",
+      "notes": "Augmented system, large"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "60008",
+      "nnz": "145004",
+      "inertia_pos": "38978",
+      "inertia_neg": "21030",
+      "inertia_zero": "0",
+      "analyse_us": "150268",
+      "factor_us": "8025",
+      "solve_us": "1580",
+      "rel_res": "1.73409881212659677e-14",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "d_pretok",
+      "n": 182730,
+      "nnz": 885416,
+      "category": "saddle",
+      "notes": "Large 3D pretok, threshold-pivot stress"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "182730",
+      "nnz": "885416",
+      "inertia_pos": "129160",
+      "inertia_neg": "53570",
+      "inertia_zero": "0",
+      "analyse_us": "989530",
+      "factor_us": "416121",
+      "solve_us": "38333",
+      "rel_res": "4.66379077206187795e-15",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  },
+  {
+    "row": {
+      "group": "GHS_indef",
+      "name": "turon_m",
+      "n": 189924,
+      "nnz": 912345,
+      "category": "saddle",
+      "notes": "Mining model, large saddle"
+    },
+    "side": {
+      "solver": "feral-0.3.0",
+      "n": "189924",
+      "nnz": "912345",
+      "inertia_pos": "133814",
+      "inertia_neg": "56110",
+      "inertia_zero": "0",
+      "analyse_us": "1060709",
+      "factor_us": "199385",
+      "solve_us": "28542",
+      "rel_res": "1.60637284029960092e-14",
+      "refined": "yes",
+      "status": "ok"
+    },
+    "flags": []
+  }
+]

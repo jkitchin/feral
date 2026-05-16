@@ -10,13 +10,32 @@ on a larger fraction of the manifest.
 
 ## Baseline (this branch, 2026-05-16)
 
-Stress harness built. Synth-only run:
+Stress harness built. Full-manifest baseline captured in
+`external_benchmarks/stress/baseline.txt` and `baseline.json`.
 
-  - **ok**: 9 / 10 (cascade, illcond, near_sing, 3 rankdef refusals)
-  - **flag**: 1 — `rankdef_200_20`: feral returns `(112, 88, 0)` instead
-    of `zero=20`. **Open finding F-01.**
+  - **total**: 28 matrices (18 SuiteSparse GHS_indef + 10 synth)
+  - **ok**: 26
+  - **flagged**: 2
+    - `rankdef_200_20`: synth, `(112, 88, 0)` vs expected `zero=20`
+      → **F-01** (issue #21)
+    - `bloweybl`: real, `NumericallyRankDeficient` rejection on
+      saddle-block with 2/3 zero diagonals; sibling `bloweybq`
+      factors fine → **F-03** (issue #32)
+  - **dropped**: `copter1` — SuiteSparse mirror returns 404; will be
+    replaced during M3.
 
-SuiteSparse rows: 19 not yet downloaded (run `fetch.py`).
+All 7 saddle matrices pass (`turon_m` n=189924 in 199ms). All PDE,
+near-singular, ill-conditioned, dense, and cascade matrices pass.
+Worst residual under the flag threshold: `stokes128` at 9.6e-14.
+
+To reproduce:
+```
+cargo build --release --bin bench_one_matrix
+python3 external_benchmarks/stress/synth.py
+python3 external_benchmarks/stress/fetch.py
+python3 external_benchmarks/stress/run.py
+python3 external_benchmarks/stress/report.py
+```
 
 ## Milestone plan
 
@@ -124,6 +143,7 @@ milestones above. Each item gets its own research note under
 
 ## Findings log
 
-| ID    | matrix          | symptom                              | issue | status |
-| ----- | --------------- | ------------------------------------ | ----- | ------ |
-| F-01  | rankdef_200_20  | reports `zero=0`, expected `zero=20` | #21   | open   |
+| ID    | matrix          | symptom                                              | issue | status |
+| ----- | --------------- | ---------------------------------------------------- | ----- | ------ |
+| F-01  | rankdef_200_20  | reports `zero=0`, expected `zero=20`                 | #21   | open   |
+| F-03  | bloweybl        | `NumericallyRankDeficient` on saddle w/ 2/3 zero diag | #32  | open   |

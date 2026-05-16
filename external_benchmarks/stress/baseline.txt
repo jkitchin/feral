@@ -1,0 +1,46 @@
+category          n name                           status       fac_us    rel_res          inertia  flags
+--------------------------------------------------------------------------------------------------------------
+cascade          50 deep_null_cascade_50           ok               21   1.01e-16        (25,25,0)  
+cascade         200 deep_null_cascade_200          ok               47   1.47e-16       (99,101,0)  
+dense          6001 exdata_1                       ok           299923   1.84e-16    (3000,3001,0)  
+illcond         100 ill_cond_e10                   ok              126   6.83e-16        (50,50,0)  
+illcond         100 ill_cond_e14                   ok              121   7.08e-16        (37,63,0)  
+indef         32780 c-55                           ok          1843715   1.46e-16  (19121,13659,0)  
+near_sing       100 near_singular_eps12            ok              114   4.63e-16        (54,46,0)  
+near_sing       100 near_singular_eps9             ok              112   4.05e-16        (51,49,0)  
+opt           10001 bloweybq                       ok             2548   3.67e-16      (10001,0,0)  
+opt           12111 ncvxqp1                        ok          1591646   1.77e-15    (7111,5000,0)  
+opt           17500 cvxqp3                         ok           696402   1.41e-16   (10000,7500,0)  
+opt           30003 bloweybl                       fail              -          -                -  status=fail:factor_NumericallyRankDeficient
+opt           50000 ncvxbqp1                       ok            35227   1.97e-14  (12602,37398,0)  
+opt           60000 dixmaanl                       ok            10023   4.01e-15   (54660,5340,0)  
+opt           75000 ncvxqp3                        ok          8935640   1.53e-16  (41825,33175,0)  
+pde           27792 bratu3d                        ok           623579   9.94e-16  (15625,12167,0)  
+pde           32226 helm3d01                       ok           302060   1.98e-16   (25455,6771,0)  
+rankdef           5 rankdef_5_2                    fail              -          -                -  
+rankdef          10 rankdef_10_3                   fail              -          -                -  
+rankdef          50 rankdef_50_5                   fail              -          -                -  
+rankdef         200 rankdef_200_20                 ok              821   1.32e-14       (112,88,0)  zero=0!=expected=20
+saddle        12546 stokes64                       ok             7825   3.40e-14    (8448,4098,0)  
+saddle        22967 tuma1                          ok            11537   2.01e-14   (13360,9607,0)  
+saddle        38434 mario001                       ok             9161   5.99e-16  (23130,15304,0)  
+saddle        49666 stokes128                      ok            37370   9.61e-14  (33280,16386,0)  
+saddle        60008 a5esindl                       ok             8025   1.73e-14  (38978,21030,0)  
+saddle       182730 d_pretok                       ok           416121   4.66e-15 (129160,53570,0)  
+saddle       189924 turon_m                        ok           199385   1.61e-14 (133814,56110,0)  
+--------------------------------------------------------------------------------------------------------------
+total 28: ok=26, flagged=2, missing=0, other=0
+
+=== by category ===
+category        total     ok   flag   miss
+cascade             2      2      0      0
+dense               1      1      0      0
+illcond             2      2      0      0
+indef               1      1      0      0
+near_sing           2      2      0      0
+opt                 7      6      1      0
+pde                 2      2      0      0
+rankdef             4      3      1      0
+saddle              7      7      0      0
+
+wrote external_benchmarks/stress/baseline.json

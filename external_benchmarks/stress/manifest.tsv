@@ -1,23 +1,22 @@
 group	name	n	nnz	category	notes
-GHS_indef	mario001	38434	204912	saddle	2D Mario saddle-point, small
-GHS_indef	c-55	32780	403450	indef	Schenk_IBMNA collection — mildly indef
-GHS_indef	bratu3d	27792	173796	pde	3D Bratu, indefinite Jacobian
-GHS_indef	helm3d01	32226	428444	pde	Helmholtz 3D, indef oscillatory
-GHS_indef	tuma1	22967	87760	saddle	Optimization KKT
-GHS_indef	dixmaanl	60000	299998	opt	CUTEr Dixmaan-L; nearly indef Hessian
-GHS_indef	ncvxbqp1	50000	349968	opt	Non-convex bound-constrained QP
-GHS_indef	a5esindl	60008	376135	saddle	Augmented system, large
-GHS_indef	cvxqp3	17500	114962	opt	Convex QP — used as PD baseline
+GHS_indef	mario001	38434	114643	saddle	2D Mario saddle-point, small
+GHS_indef	c-55	32780	218115	indef	Schenk_IBMNA collection — mildly indef
+GHS_indef	bratu3d	27792	88627	pde	3D Bratu, indefinite Jacobian
+GHS_indef	helm3d01	32226	230335	pde	Helmholtz 3D, indef oscillatory
+GHS_indef	tuma1	22967	50560	saddle	Optimization KKT
+GHS_indef	dixmaanl	60000	179999	opt	CUTEr Dixmaan-L; nearly indef Hessian
+GHS_indef	ncvxbqp1	50000	199984	opt	Non-convex bound-constrained QP
+GHS_indef	a5esindl	60008	145004	saddle	Augmented system, large
+GHS_indef	cvxqp3	17500	69981	opt	Convex QP — used as PD baseline
 GHS_indef	stokes64	12546	74242	saddle	Stokes flow, 64^2 grid
 GHS_indef	stokes128	49666	295938	saddle	Stokes flow, 128^2 grid
-GHS_indef	d_pretok	182730	1641672	saddle	Large 3D pretok, threshold-pivot stress
-GHS_indef	turon_m	189924	1690876	saddle	Mining model, large saddle
-GHS_indef	ncvxqp1	12000	73760	opt	Non-convex QP (small)
-GHS_indef	ncvxqp3	75000	499964	opt	Non-convex QP (large)
-GHS_indef	exdata_1	6001	2269500	dense	Dense-ish exdata, fill-in stress
-GHS_indef	bloweybl	30003	120000	opt	Bloweybl bound-constrained
-GHS_indef	bloweybq	10001	49999	opt	Bloweybq small
-GHS_indef	copter1	17222	211064	mech	Copter mechanics
+GHS_indef	d_pretok	182730	885416	saddle	Large 3D pretok, threshold-pivot stress
+GHS_indef	turon_m	189924	912345	saddle	Mining model, large saddle
+GHS_indef	ncvxqp1	12111	40537	opt	Non-convex QP (small)
+GHS_indef	ncvxqp3	75000	274982	opt	Non-convex QP (large)
+GHS_indef	exdata_1	6001	1137751	dense	Dense-ish exdata, fill-in stress
+GHS_indef	bloweybl	30003	70001	opt	Bloweybl bound-constrained
+GHS_indef	bloweybq	10001	39996	opt	Bloweybq small
 synth	rankdef_5_2	5	14	rankdef	Hand-built rank-3 5x5 sym indef
 synth	rankdef_10_3	10	39	rankdef	Hand-built rank-7 10x10
 synth	rankdef_50_5	50	395	rankdef	Synthetic rank-45 50x50
