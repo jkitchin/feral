@@ -1595,3 +1595,30 @@ leaves so block kernels can engage).
 References: `dev/research/issue-10-maxfromm-phase2-corpus.md` (full
 post-mortem), `dev/research/issue-33-slb-ab.md` (parallel SLB result),
 journal `2026-05-16-01.org` 11:32 + 12:30 entries.
+
+## 2026-05-16-02 — Manual 4-way unrolled scalar axpy as #10/#33 unblocker
+
+`src/bin/bench_axpy_small.rs` (50M iters/measure, min-of-5) compared
+`pulp` (current `axpy_minus_unroll4_nofma` SIMD dispatch), `scalar`
+(`for (d,s) in dst.iter_mut().zip(src) { *d -= alpha * *s; }`), and
+`unroll4` (manual 4-way unroll without pulp dispatch) at lengths
+[3, 4, 5, 6, 8, 10, 16, 32, 64, 128].
+
+Result: pulp ties with plain scalar within 1ns/call quantization at
+all lengths 3..128; manual unroll4 is *slower* (0.25-1.00x). The
+compiler auto-vectorizes the scalar form as well as the explicit SIMD
+dispatch. Kernel-call overhead is *not* the bottleneck.
+
+Implication: the #10 Phase 2 corpus post-mortem's hypothesis that
+"the next lever is the scalar rank-1 trailing-update kernel" was
+also wrong. Three architectural levers tried against the 1D-banded
+Mittelmann panel (#33 SmallLeafBatch driver overhead, #10 MAXFROMM
+pivot selection, axpy kernel tightening) all come up within noise.
+
+Remaining levers for the corpus: (a) `Solver::with_ordering(ScotchND)`
+to widen the supernode shape (untested, just landed via #33 §3);
+(b) supernode amalgamation (symbolic-side restructure); (c) accept
+a hardware floor for sequential factorization on this shape.
+
+References: `src/bin/bench_axpy_small.rs`, journal
+`2026-05-16-02.org` 11:30 entry.

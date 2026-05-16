@@ -4,6 +4,36 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `Solver::with_ordering(method)` builder (#33 §3)
+
+The `Solver` builder now exposes the fill-reducing ordering choice
+through `Solver::with_ordering(OrderingMethod)`. Default is
+`OrderingMethod::Auto` (unchanged behavior — matches
+`symbolic_factorize`'s dispatcher exactly), with explicit `Amd`,
+`Amf`, `MetisND`, `ScotchND`, `KahipND` available.
+
+Motivation: issue #33's 1D-banded Mittelmann panel (clnlbeam)
+bottlenecks 97% main-thread in the scalar 1×1 pivot path because
+AMD produces thin supernodes on banded structure. The
+"supernode-shape thesis" is that nested-dissection orderings
+produce squarer fronts that let more work batch through the
+blocked panel kernel. The machinery already existed
+(`symbolic_factorize_with_method`, `OrderingMethod`), but `Solver`
+always routed through the `Auto` dispatcher — there was no way to
+override without forking the symbolic plumbing. This release
+closes that gap so library consumers can re-time banded KKTs with
+`Solver::new().with_ordering(OrderingMethod::ScotchND)` without
+rebuilding.
+
+Per-corpus speedup measurement on banded KKTs is left to follow-up
+empirical work; this release ships only the lever.
+
+Regression tests in `tests/solver_with_ordering.rs`:
+`with_ordering_threads_method_into_symbolic_phase` (proves the
+choice actually reaches the symbolic phase by comparing permutations)
+and `with_ordering_auto_matches_default` (guard against the default
+silently drifting from `Solver::new()`).
+
 ### Added — `Mc64FallbackToInfnorm` diagnostic surfacing (#24, M2)
 
 `ScalingStrategy::Auto` previously fell back from MC64 to InfNorm
