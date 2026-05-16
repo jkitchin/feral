@@ -29,11 +29,28 @@ pub struct FeralSolver {
 }
 
 /// Create a new solver handle. Returns null on panic.
+///
+/// Cascade-break is off by default after 585d739. Set
+/// `FERAL_CASCADE_BREAK=on` (or `1`/`true`) in the environment to
+/// opt back into the legacy `ratio=0.5, eps=1e-10` configuration —
+/// required for ipopt-feral parity with pounce-feral, which opts
+/// into the same defaults at its own construction site.
 #[no_mangle]
 pub extern "C" fn feral_new() -> *mut FeralSolver {
     catch_unwind(|| {
+        let cb_on = matches!(
+            std::env::var("FERAL_CASCADE_BREAK").as_deref(),
+            Ok("1") | Ok("on") | Ok("true") | Ok("yes"),
+        );
+        let solver = if cb_on {
+            Solver::new()
+                .with_cascade_break(0.5)
+                .with_cascade_break_eps(1e-10)
+        } else {
+            Solver::new()
+        };
         Box::into_raw(Box::new(FeralSolver {
-            solver: Solver::new(),
+            solver,
             matrix: None,
             neg_evals: 0,
         }))
