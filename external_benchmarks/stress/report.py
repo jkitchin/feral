@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Analyze stress-suite sidecars and flag pathologies.
+
+Reads `out/feral/<group>__<name>.out`, joins against `manifest.tsv` to
+recover category/expected-inertia metadata (for synth/* rows we know the
+zero count exactly), and emits:
+
+  * a per-matrix table (n, status, factor_us, rel_res, inertia)
+  * a summary table by category
+  * a "flagged" section listing matrices that fail any acceptance rule:
+      - status != ok
+      - rel_res > REL_RES_THRESHOLD (default 1e-6)
+      - inertia.zero != expected for rankdef rows
+      - cascade matrices that fail to factor at all
+
+Exit code: 0 if no flags, 1 if any matrix is flagged (CI gate friendly).
+
+Usage: python3 report.py  [--rel-res 1e-6]  [--json out.json]
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import re
+import sys
+from pathlib import Path
+
+STRESS_DIR = Path(__file__).resolve().parent
+OUT_DIR = STRESS_DIR / "out" / "feral"
+
+DEFAULT_REL_RES = 1e-6
+
+
+def parse_manifest(path: Path) -> list[dict]:
+    rows = []
+    with path.open() as f:
+        header = f.readline().rstrip("\n").split("\t")
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < len(header):
+                continue
+            rows.append(dict(zip(header, parts)))
+    for r in rows:
+        r["n"] = int(r["n"])
+        r["nnz"] = int(r["nnz"])
+    return rows
+
+
+def parse_sidecar(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    d: dict = {}
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(maxsplit=1)
+            if len(parts) != 2:
+                continue
+            d[parts[0]] = parts[1]
+    return d
+
+
+def fnum(d: dict, k: str) -> float | None:
+    v = d.get(k)
+    if v is None:
+        return None
+    try:
+        x = float(v)
+        return x if math.isfinite(x) else None
+    except ValueError:
+        return None
+
+
+def inum(d: dict, k: str) -> int | None:
+    v = d.get(k)
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        return None
+
+
+def expected_zero(row: dict) -> int | None:
+    """For synth/rankdef_<n>_<k> rows, the expected null space dim is k."""
+    if row.get("group") != "synth":
+        return None
+    m = re.match(r"^rankdef_(\d+)_(\d+)$", row["name"])
+    if m:
+        return int(m.group(2))
+    return None
+
+
+def classify(row: dict, side: dict | None, rel_res_threshold: float) -> list[str]:
+    """Return a list of flag strings for this matrix (empty = clean)."""
+    flags: list[str] = []
+    if side is None:
+        flags.append("missing")
+        return flags
+    status = side.get("status", "missing")
+    if status != "ok":
+        reason = side.get("fail_reason", "no_reason")
+        # For rankdef matrices, refusing to factor with
+        # NumericallyRankDeficient is *correct* behavior — the matrix
+        # really is rank-deficient. Don't flag it.
+        if (row.get("category") == "rankdef"
+                and "RankDeficient" in reason):
+            return flags
+        flags.append(f"status={status}:{reason}")
+        return flags
+    rel = fnum(side, "rel_res")
+    if rel is None:
+        flags.append("rel_res=NaN")
+    elif rel > rel_res_threshold:
+        flags.append(f"rel_res={rel:.2e}>{rel_res_threshold:.0e}")
+    pos = inum(side, "inertia_pos")
+    neg = inum(side, "inertia_neg")
+    zer = inum(side, "inertia_zero")
+    if pos is None or neg is None or zer is None:
+        flags.append("inertia=missing")
+        return flags
+    if pos + neg + zer != row["n"]:
+        flags.append(f"inertia_sum={pos+neg+zer}!=n={row['n']}")
+    exp_zero = expected_zero(row)
+    if exp_zero is not None and zer != exp_zero:
+        flags.append(f"zero={zer}!=expected={exp_zero}")
+    return flags
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--manifest", default=str(STRESS_DIR / "manifest.tsv"))
+    ap.add_argument("--rel-res", type=float, default=DEFAULT_REL_RES,
+                    help=f"max acceptable relative residual "
+                         f"(default {DEFAULT_REL_RES:.0e})")
+    ap.add_argument("--json", default=None,
+                    help="write full results JSON to this path")
+    args = ap.parse_args()
+
+    rows = parse_manifest(Path(args.manifest))
+    rows.sort(key=lambda r: (r.get("category", ""), r["n"], r["name"]))
+
+    records = []
+    for r in rows:
+        sidecar = OUT_DIR / f"{r['group']}__{r['name']}.out"
+        side = parse_sidecar(sidecar)
+        flags = classify(r, side, args.rel_res)
+        records.append({"row": r, "side": side, "flags": flags})
+
+    print(f"{'category':<11} {'n':>7} {'name':<30} {'status':<8} "
+          f"{'fac_us':>10} {'rel_res':>10} {'inertia':>16}  flags")
+    print("-" * 110)
+    n_ok = 0
+    n_flag = 0
+    n_missing = 0
+    for rec in records:
+        r = rec["row"]
+        s = rec["side"] or {}
+        status = s.get("status", "missing")
+        fac = s.get("factor_us", "-")
+        rel = fnum(s, "rel_res")
+        rel_str = f"{rel:.2e}" if rel is not None else "-"
+        pos = inum(s, "inertia_pos")
+        neg = inum(s, "inertia_neg")
+        zer = inum(s, "inertia_zero")
+        inertia_str = (f"({pos},{neg},{zer})"
+                       if pos is not None and neg is not None and zer is not None
+                       else "-")
+        flag_str = ",".join(rec["flags"]) if rec["flags"] else ""
+        print(f"{r.get('category', '?'):<11} {r['n']:>7} {r['name'][:30]:<30} "
+              f"{status:<8} {str(fac):>10} {rel_str:>10} "
+              f"{inertia_str:>16}  {flag_str}")
+        if rec["flags"] == ["missing"]:
+            n_missing += 1
+        elif rec["flags"]:
+            n_flag += 1
+        elif status == "ok":
+            n_ok += 1
+        elif (rec["row"].get("category") == "rankdef"
+              and not rec["flags"]):
+            # Correct refusal to factor a rankdef matrix.
+            n_ok += 1
+
+    print("-" * 110)
+    print(f"total {len(records)}: ok={n_ok}, flagged={n_flag}, "
+          f"missing={n_missing}, "
+          f"other={len(records) - n_ok - n_flag - n_missing}")
+    if n_missing:
+        print(f"  ({n_missing} matrices not downloaded — "
+              f"run fetch.py to include them)")
+
+    # Per-category roll-up
+    cats: dict[str, dict[str, int]] = {}
+    for rec in records:
+        cat = rec["row"].get("category", "?")
+        c = cats.setdefault(cat,
+                            {"total": 0, "ok": 0, "flagged": 0, "missing": 0})
+        c["total"] += 1
+        if rec["flags"] == ["missing"]:
+            c["missing"] += 1
+        elif rec["flags"]:
+            c["flagged"] += 1
+        else:
+            c["ok"] += 1
+    print("\n=== by category ===")
+    print(f"{'category':<14} {'total':>6} {'ok':>6} {'flag':>6} {'miss':>6}")
+    for cat in sorted(cats):
+        c = cats[cat]
+        print(f"{cat:<14} {c['total']:>6} {c['ok']:>6} "
+              f"{c['flagged']:>6} {c['missing']:>6}")
+
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump(records, f, indent=2, default=str)
+        print(f"\nwrote {args.json}")
+
+    return 0 if n_flag == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
