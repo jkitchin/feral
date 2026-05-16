@@ -1,6 +1,6 @@
 use crate::dense::factor::{
-    factor, factor_frontal_blocked_in_place_with_scratch, BunchKaufmanParams, FactorScratch,
-    FrontalFactors, ZeroPivotAction,
+    factor, factor_frontal_blocked_in_place_with_scratch, factor_frontal_diagonal_in_place,
+    BunchKaufmanParams, FactorScratch, FrontalFactors, ZeroPivotAction,
 };
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
@@ -1114,13 +1114,24 @@ pub fn dense_fast_factor_with_workspace(
     // Factor in place into `sym.data` (W-3a). `sym.data` content is
     // undefined on return, but the buffer itself is reusable; return it
     // to the pool.
-    let ff = factor_frontal_blocked_in_place_with_scratch(
-        &mut sym,
-        n,
-        false,
-        &params.bk,
-        &mut ws.factor_scratch,
-    )?;
+    //
+    // Issue #34 phase (d): SQD fast-path dispatch. When the caller has
+    // declared the input symmetric quasi-definite via
+    // `Solver::with_sqd_mode(true)`, skip the BK 1x1-vs-2x2 search and
+    // use the diagonal-only kernel. Vanderbei 1995 Theorem 2.1
+    // guarantees a diagonal D exists for any SQD matrix in the order
+    // we receive it.
+    let ff = if params.sqd_mode {
+        factor_frontal_diagonal_in_place(&mut sym, n, &params.bk)?
+    } else {
+        factor_frontal_blocked_in_place_with_scratch(
+            &mut sym,
+            n,
+            false,
+            &params.bk,
+            &mut ws.factor_scratch,
+        )?
+    };
     ws.dense_values = sym.data;
 
     let inertia = ff.inertia.clone();
@@ -1971,13 +1982,21 @@ fn factor_one_supernode(
         &params.bk
     };
     let eliminable = expanded_ncol - nvschur;
-    let mut ff = factor_frontal_blocked_in_place_with_scratch(
-        &mut frontal,
-        eliminable,
-        may_delay,
-        bk_ref,
-        &mut ws.factor_scratch,
-    )?;
+    // Issue #34 phase (d): SQD fast-path. The diagonal kernel ignores
+    // `may_delay` (SQD never delays — it either accepts the diagonal
+    // pivot or trips `SqdContractViolated`) and `bk_ref` overrides
+    // (no cascade-break logic applies since 2x2 pivots aren't formed).
+    let mut ff = if params.sqd_mode {
+        factor_frontal_diagonal_in_place(&mut frontal, eliminable, &params.bk)?
+    } else {
+        factor_frontal_blocked_in_place_with_scratch(
+            &mut frontal,
+            eliminable,
+            may_delay,
+            bk_ref,
+            &mut ws.factor_scratch,
+        )?
+    };
     ws.frontal_values = frontal.data;
 
     let node_inertia = ff.inertia.clone();
@@ -2129,13 +2148,19 @@ fn factor_one_small_leaf(
 
     // W-3a: factor in place; pool returns the (now-undefined) buffer.
     let may_delay = !is_root[snode_idx] && params.allow_delayed_pivots;
-    let mut ff = factor_frontal_blocked_in_place_with_scratch(
-        &mut frontal,
-        expanded_ncol,
-        may_delay,
-        &params.bk,
-        &mut ws.factor_scratch,
-    )?;
+    // Issue #34 phase (d): SQD fast-path; see factor_one_supernode for
+    // the rationale on bypassing `may_delay` and the BK overrides.
+    let mut ff = if params.sqd_mode {
+        factor_frontal_diagonal_in_place(&mut frontal, expanded_ncol, &params.bk)?
+    } else {
+        factor_frontal_blocked_in_place_with_scratch(
+            &mut frontal,
+            expanded_ncol,
+            may_delay,
+            &params.bk,
+            &mut ws.factor_scratch,
+        )?
+    };
     ws.frontal_values = frontal.data;
 
     let node_inertia = ff.inertia.clone();

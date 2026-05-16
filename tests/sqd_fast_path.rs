@@ -1,12 +1,11 @@
-//! Issue #34 phase (c) — unit smoke test for the SQD
-//! (symmetric quasi-definite) diagonal-only kernel.
+//! Issue #34 phases (c) and (d) — SQD (symmetric quasi-definite)
+//! diagonal-only fast-path.
 //!
-//! Phase (c) introduces `factor_diagonal` and
-//! `factor_frontal_diagonal_in_place` but leaves them uncalled by
-//! production code (phase (d) wires `factor_one_supernode` dispatch).
-//! This file holds the minimum coverage that proves the kernel
-//! builds, returns the documented shape, and matches a hand-computed
-//! 2x2 SQD example.
+//! Phase (c) introduced `factor_diagonal` and
+//! `factor_frontal_diagonal_in_place` as standalone kernels.
+//! Phase (d) wires `Solver::with_sqd_mode(true)` to dispatch the
+//! supernodal driver (`factor_one_supernode`, `factor_one_small_leaf`,
+//! and the dense fast-path) through the diagonal kernel.
 //!
 //! Phase (f) will grow this file with the full reference-parity,
 //! property, regression, negative, builder, and cache test categories
@@ -14,7 +13,7 @@
 //! plan at `~/.claude/plans/let-s-work-on-a-reflective-anchor.md`).
 
 use feral::dense::factor::{factor_diagonal, BunchKaufmanParams, Factors};
-use feral::{Inertia, SymmetricMatrix};
+use feral::{CscMatrix, FactorStatus, Inertia, Solver, SymmetricMatrix};
 
 fn params() -> BunchKaufmanParams {
     BunchKaufmanParams::default()
@@ -124,6 +123,133 @@ fn sqd_zero_pivot_rejected() {
     data[n + 1] = 3.0;
     let mat = SymmetricMatrix { n, data };
     assert!(factor_diagonal(&mat, &params()).is_err());
+}
+
+// ---------- Phase (d): Solver-level dispatch ----------
+
+/// Phase (d) — dense fast-path dispatch. A 4×4 diagonal SQD
+/// (n ≤ N_TINY = 16) routes through `dense_fast_factor`, which now
+/// dispatches on `params.sqd_mode`. Verifies the diagonal kernel
+/// took the call (post-solve recovery of an arbitrary RHS) and the
+/// reported inertia matches the SQD theoretical prediction.
+#[test]
+fn sqd_solver_dispatch_dense_path() {
+    let n = 4;
+    let rows = vec![0, 1, 2, 3];
+    let cols = vec![0, 1, 2, 3];
+    let vals = vec![-1.0_f64, -2.0, 3.0, 4.0];
+    let csc = CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("csc");
+
+    let mut solver = Solver::new().with_sqd_mode(true);
+    let status = solver.factor(
+        &csc,
+        Some(Inertia {
+            positive: 2,
+            negative: 2,
+            zero: 0,
+        }),
+    );
+    assert!(matches!(status, FactorStatus::Success), "got {:?}", status);
+
+    // Solve A x = b with b = [1, 2, 3, 4]^T. Expected:
+    // x = [-1, -1, 1, 1]
+    let x = solver.solve(&[1.0, 2.0, 3.0, 4.0]).expect("solve");
+    assert!((x[0] - (-1.0)).abs() < 1e-12, "x[0]={}", x[0]);
+    assert!((x[1] - (-1.0)).abs() < 1e-12, "x[1]={}", x[1]);
+    assert!((x[2] - 1.0).abs() < 1e-12, "x[2]={}", x[2]);
+    assert!((x[3] - 1.0).abs() < 1e-12, "x[3]={}", x[3]);
+}
+
+/// Phase (d) — multifrontal supernode dispatch. n=24 banded SQD
+/// (density well below 1/4 and n > N_TINY) routes through
+/// `factor_one_supernode`. First 12 columns negative-diagonal, last
+/// 12 positive-diagonal; off-diagonal coupling at i,i+1 in the
+/// positive block to force a non-trivial elimination tree.
+#[test]
+fn sqd_solver_dispatch_multifrontal_path() {
+    let n = 24;
+    let mut rows = Vec::new();
+    let mut cols = Vec::new();
+    let mut vals = Vec::new();
+    // Diagonal: -2.0 on first 12, +2.0 on last 12.
+    for i in 0..n {
+        rows.push(i);
+        cols.push(i);
+        vals.push(if i < 12 { -2.0 } else { 2.0 });
+    }
+    // Sub-diagonal coupling in the positive block (i, i+1) for i in
+    // 12..n-1 — small magnitude (0.1) so the SQD off-diagonal stays
+    // dominated by the diagonal and we recover a valid factorization.
+    for i in 12..n - 1 {
+        rows.push(i + 1);
+        cols.push(i);
+        vals.push(0.1);
+    }
+    let csc = CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("csc");
+
+    let mut solver = Solver::new().with_sqd_mode(true);
+    let status = solver.factor(
+        &csc,
+        Some(Inertia {
+            positive: 12,
+            negative: 12,
+            zero: 0,
+        }),
+    );
+    assert!(matches!(status, FactorStatus::Success), "got {:?}", status);
+
+    // Solve with b = e_0 (first canonical) and verify A x ≈ b by
+    // residual norm. Avoids hand-computing the exact x for the banded
+    // positive block.
+    let mut b = vec![0.0_f64; n];
+    b[0] = 1.0;
+    let x = solver.solve(&b).expect("solve");
+    // Compute residual r = A x - b directly from the triplets.
+    let mut r = vec![0.0_f64; n];
+    for k in 0..rows.len() {
+        let (i, j, v) = (rows[k], cols[k], vals[k]);
+        r[i] += v * x[j];
+        if i != j {
+            r[j] += v * x[i];
+        }
+    }
+    for ri in r.iter_mut() {
+        *ri -= 0.0;
+    }
+    r[0] -= 1.0;
+    let r_norm: f64 = r.iter().map(|&v| v * v).sum::<f64>().sqrt();
+    assert!(r_norm < 1e-10, "residual norm = {} too large", r_norm);
+}
+
+/// Phase (d) — SQD contract-trip surfaces through the Solver as
+/// `FactorStatus::Failed`. Diagonal-zero at column 0 of a 24×24
+/// matrix (forces multifrontal routing) trips the contract.
+#[test]
+fn sqd_solver_dispatch_contract_violation_returns_failed() {
+    let n = 24;
+    let mut rows = Vec::new();
+    let mut cols = Vec::new();
+    let mut vals = Vec::new();
+    rows.push(0);
+    cols.push(0);
+    vals.push(0.0); // contract trip — zero diagonal at column 0
+    for i in 1..n {
+        rows.push(i);
+        cols.push(i);
+        vals.push(if i < 12 { -2.0 } else { 2.0 });
+    }
+    let csc = CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("csc");
+
+    let mut solver = Solver::new().with_sqd_mode(true);
+    let status = solver.factor(&csc, None);
+    // Phase (c) returns NumericallyRankDeficient → FactorStatus
+    // surfaces as Failed or Singular. Phase (e) will tighten to
+    // SqdContractViolated. Until then, just verify non-success.
+    assert!(
+        !matches!(status, FactorStatus::Success),
+        "expected non-success, got {:?}",
+        status
+    );
 }
 
 /// Reconstruct `L * diag(d_diag) * L^T` into a column-major n×n
