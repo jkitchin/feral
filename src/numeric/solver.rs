@@ -658,6 +658,12 @@ impl Solver {
         self.use_parallel
     }
 
+    /// Whether the SQD (symmetric quasi-definite) fast-path is enabled.
+    /// See `with_sqd_mode`.
+    pub fn sqd_mode(&self) -> bool {
+        self.numeric_params.sqd_mode
+    }
+
     /// Number of negative eigenvalues from the last factor.
     /// Panics if no factor has been performed yet (mirrors Ipopt
     /// `NumberOfNegEVals()`, which has the same precondition).

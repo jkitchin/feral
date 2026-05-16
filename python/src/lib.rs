@@ -6,7 +6,9 @@
 use feral::error::FeralError as RustFeralError;
 use feral::inertia::Inertia as RustInertia;
 use feral::numeric::factorize::NumericParams;
-use feral::numeric::solver::{FactorStatus as RustFactorStatus, QualityLevel as RustQualityLevel, Solver as RustSolver};
+use feral::numeric::solver::{
+    FactorStatus as RustFactorStatus, QualityLevel as RustQualityLevel, Solver as RustSolver,
+};
 use feral::scaling::ScalingStrategy;
 use feral::sparse::csc::CscMatrix as RustCscMatrix;
 use feral::symbolic::SupernodeParams;
@@ -46,6 +48,7 @@ create_exception!(_feral, FactorError, FeralError);
 create_exception!(_feral, SingularError, FactorError);
 create_exception!(_feral, WrongInertiaError, FactorError);
 create_exception!(_feral, NumericFailure, FactorError);
+create_exception!(_feral, SqdContractViolated, FactorError);
 create_exception!(_feral, SolveError, FeralError);
 create_exception!(_feral, PatternMismatch, FeralError);
 create_exception!(_feral, FeralIOError, FeralError);
@@ -56,12 +59,15 @@ fn map_feral_err(e: RustFeralError) -> PyErr {
             SingularError::new_err("matrix is numerically rank-deficient")
         }
         RustFeralError::InvalidInput(s) => PyValueError::new_err(s),
-        RustFeralError::DimensionMismatch { expected, got } => {
-            SolveError::new_err(format!("dimension mismatch: expected {expected}, got {got}"))
-        }
+        RustFeralError::DimensionMismatch { expected, got } => SolveError::new_err(format!(
+            "dimension mismatch: expected {expected}, got {got}"
+        )),
         RustFeralError::IoError(s) => FeralIOError::new_err(s),
-        RustFeralError::NoFactor => SolveError::new_err(
-            "no factorization available; call Solver.factor() first",
+        RustFeralError::NoFactor => {
+            SolveError::new_err("no factorization available; call Solver.factor() first")
+        }
+        RustFeralError::SqdContractViolated { column, pivot } => SqdContractViolated::new_err(
+            format!("SQD contract violated at column {column}: pivot = {pivot:e}"),
         ),
     }
 }
@@ -86,7 +92,11 @@ impl Inertia {
     #[new]
     #[pyo3(signature = (n_pos, n_neg, n_zero=0))]
     fn new(n_pos: usize, n_neg: usize, n_zero: usize) -> Self {
-        Self { n_pos, n_neg, n_zero }
+        Self {
+            n_pos,
+            n_neg,
+            n_zero,
+        }
     }
 
     /// Total dimension: `n_pos + n_neg + n_zero`.
@@ -300,10 +310,7 @@ impl CscMatrix {
     /// Build a CscMatrix from a dense numpy array. The array must be
     /// square and symmetric; only the lower triangle is read.
     #[classmethod]
-    fn from_dense<'py>(
-        _cls: &Bound<'py, PyType>,
-        a: PyReadonlyArray2<'py, f64>,
-    ) -> PyResult<Self> {
+    fn from_dense<'py>(_cls: &Bound<'py, PyType>, a: PyReadonlyArray2<'py, f64>) -> PyResult<Self> {
         let arr = a.as_array();
         let shape = arr.shape();
         if shape[0] != shape[1] {
@@ -509,6 +516,12 @@ impl Solver {
     ///   Default `"auto"`.
     /// - `pivot_threshold`: BK column-relative pivot threshold. Default
     ///   uses `NumericParams::default()` (MA27-style 1e-8).
+    /// - `sqd_mode`: opt in to the symmetric-quasi-definite fast path
+    ///   (Vanderbei 1995). Skips the BK 1x1-vs-2x2 pivot search; the
+    ///   factor either completes under a stated diagonal-D contract or
+    ///   raises :class:`SqdContractViolated` (loud, never a silent BK
+    ///   fallback). Default `False`. See
+    ///   `dev/research/sqd-fast-path-2026-05-16.md`.
     #[new]
     #[pyo3(signature = (
         *,
@@ -519,6 +532,7 @@ impl Solver {
         cascade_break_eps = None,
         scaling = "auto",
         pivot_threshold = None,
+        sqd_mode = false,
     ))]
     fn new(
         parallel: bool,
@@ -528,6 +542,7 @@ impl Solver {
         cascade_break_eps: Option<f64>,
         scaling: &str,
         pivot_threshold: Option<f64>,
+        sqd_mode: bool,
     ) -> PyResult<Self> {
         let mut np = NumericParams::default();
         np.fma = fma;
@@ -538,8 +553,12 @@ impl Solver {
         if let Some(pt) = pivot_threshold {
             np.bk.pivot_threshold = pt;
         }
+        np.sqd_mode = sqd_mode;
         let inner = RustSolver::with_params(np, SupernodeParams::default()).with_parallel(parallel);
-        Ok(Self { inner, last_pattern: None })
+        Ok(Self {
+            inner,
+            last_pattern: None,
+        })
     }
 
     /// Factor `A`. If `expected_inertia` is provided and disagrees with
@@ -558,14 +577,24 @@ impl Solver {
         let status = py.allow_threads(|| self.inner.factor(a.inner(), expected_rust));
         self.last_pattern = Some(sig);
         match status {
-            RustFactorStatus::Success => Ok((STATUS_SUCCESS, self.inner.inertia().cloned().map(Into::into))),
-            RustFactorStatus::Singular => Ok((STATUS_SINGULAR, self.inner.inertia().cloned().map(Into::into))),
-            RustFactorStatus::WrongInertia { actual, expected: _ } => {
-                Ok((STATUS_WRONG_INERTIA, Some(actual.into())))
-            }
+            RustFactorStatus::Success => Ok((
+                STATUS_SUCCESS,
+                self.inner.inertia().cloned().map(Into::into),
+            )),
+            RustFactorStatus::Singular => Ok((
+                STATUS_SINGULAR,
+                self.inner.inertia().cloned().map(Into::into),
+            )),
+            RustFactorStatus::WrongInertia {
+                actual,
+                expected: _,
+            } => Ok((STATUS_WRONG_INERTIA, Some(actual.into()))),
             RustFactorStatus::FatalError(e) => Err(match e {
                 RustFeralError::NumericallyRankDeficient => SingularError::new_err(format!("{e}")),
                 RustFeralError::InvalidInput(s) => PyValueError::new_err(s),
+                RustFeralError::SqdContractViolated { .. } => {
+                    SqdContractViolated::new_err(format!("{e}"))
+                }
                 other => NumericFailure::new_err(format!("{other}")),
             }),
         }
@@ -596,11 +625,7 @@ impl Solver {
     /// Solve `A · x = b` against the stored factor. `b` may be a 1-D
     /// array of length `n` or a 2-D `(n, nrhs)` array (one column per
     /// RHS). Returns a numpy array of the same shape as `b`.
-    fn solve<'py>(
-        &self,
-        py: Python<'py>,
-        b: &Bound<'py, PyAny>,
-    ) -> PyResult<PyObject> {
+    fn solve<'py>(&self, py: Python<'py>, b: &Bound<'py, PyAny>) -> PyResult<PyObject> {
         // 2-D path
         if let Ok(arr2) = b.extract::<PyReadonlyArray2<'py, f64>>() {
             let view = arr2.as_array();
@@ -771,6 +796,12 @@ impl Solver {
         self.inner.parallel()
     }
 
+    /// Whether the SQD (symmetric quasi-definite) fast-path is enabled.
+    #[getter]
+    fn sqd_mode(&self) -> bool {
+        self.inner.sqd_mode()
+    }
+
     /// Total stored nonzeros in L + D after the last factor; `None`
     /// if no factor is stored.
     #[getter]
@@ -786,10 +817,11 @@ impl Solver {
 
     fn __repr__(&self) -> String {
         format!(
-            "Solver(parallel={}, scaling={}, pivot_threshold={:.3e})",
+            "Solver(parallel={}, scaling={}, pivot_threshold={:.3e}, sqd_mode={})",
             self.inner.parallel(),
             format!("{:?}", self.inner.scaling_strategy()),
-            self.inner.pivot_threshold()
+            self.inner.pivot_threshold(),
+            self.inner.sqd_mode()
         )
     }
 
@@ -805,8 +837,11 @@ impl Solver {
         _exc_tb: Option<&Bound<'_, PyAny>>,
     ) -> bool {
         // Drop and rebuild a fresh inner solver so the cached factor
-        // and rayon pool are released deterministically.
-        let np = NumericParams::default();
+        // and rayon pool are released deterministically. Preserve the
+        // configured sqd_mode so the context manager's exit doesn't
+        // silently reset the contract.
+        let mut np = NumericParams::default();
+        np.sqd_mode = self.inner.sqd_mode();
         let _ = std::mem::replace(
             &mut self.inner,
             RustSolver::with_params(np, SupernodeParams::default()),
@@ -830,8 +865,15 @@ fn _feral(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("FeralError", py.get_type_bound::<FeralError>())?;
     m.add("FactorError", py.get_type_bound::<FactorError>())?;
     m.add("SingularError", py.get_type_bound::<SingularError>())?;
-    m.add("WrongInertiaError", py.get_type_bound::<WrongInertiaError>())?;
+    m.add(
+        "WrongInertiaError",
+        py.get_type_bound::<WrongInertiaError>(),
+    )?;
     m.add("NumericFailure", py.get_type_bound::<NumericFailure>())?;
+    m.add(
+        "SqdContractViolated",
+        py.get_type_bound::<SqdContractViolated>(),
+    )?;
     m.add("SolveError", py.get_type_bound::<SolveError>())?;
     m.add("PatternMismatch", py.get_type_bound::<PatternMismatch>())?;
     m.add("FeralIOError", py.get_type_bound::<FeralIOError>())?;

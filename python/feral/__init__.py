@@ -34,6 +34,7 @@ FactorError = _feral.FactorError
 SingularError = _feral.SingularError
 WrongInertiaError = _feral.WrongInertiaError
 NumericFailure = _feral.NumericFailure
+SqdContractViolated = _feral.SqdContractViolated
 SolveError = _feral.SolveError
 PatternMismatch = _feral.PatternMismatch
 FeralIOError = _feral.FeralIOError
@@ -154,6 +155,7 @@ __all__ = [
     "SingularError",
     "WrongInertiaError",
     "NumericFailure",
+    "SqdContractViolated",
     "SolveError",
     "PatternMismatch",
     "FeralIOError",
