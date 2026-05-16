@@ -4,6 +4,34 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — near-singular inertia sweep + certification (#31)
+
+New diagnostic binary `diag_near_singular_sweep` runs
+`Solver::new()` factor + iterative-refinement solve on the
+parametric `near_singular_eps_<p>` family (p ∈ {6..14}) and
+reports `(status, inertia, min|D_ii|, rel_res, pivtol)` for each.
+Together with the new research note
+`dev/research/inertia-near-singular-certification.md` this
+documents the detection boundary at p = 6 — i.e. feral's default
+Bunch-Kaufman thresholds (`zero_tol = f64::EPSILON`,
+`pivot_threshold = 1e-8`) are *provably unable to detect a single
+isolated small eigenvalue in a generic dense random-Q symmetric
+matrix at any p*, including the canonical
+`near_singular_eps9` / `near_singular_eps12` stress matrices
+which never actually reported the null pivot. The factorization
+remains stable (rel_res ≤ 6e-15 across the sweep) because BK
+treats the small mode as a healthy O(1) trailing pivot — see
+Higham 2002 Ch. 11.
+
+The Python generator `external_benchmarks/stress/synth.py` is
+extended with `near_singular_eps_<p>` entries for p ∈ {6..14},
+and `external_benchmarks/stress/manifest.tsv` now pins
+`near_singular_eps_7` as a regression matrix at the boundary +1
+slot per the issue's acceptance criterion.
+
+No solver code, no defaults changed. The rejected
+trailing-norm-based criterion is documented in the note.
+
 ### Added — `Solver::with_ordering(method)` builder (#33 §3)
 
 The `Solver` builder now exposes the fill-reducing ordering choice

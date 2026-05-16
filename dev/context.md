@@ -1,83 +1,83 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-16T16:37:14Z
+Generated: 2026-05-16T17:12:39Z
 
 ## Latest Session
-File: dev/sessions/2026-05-16-02.md
+File: dev/sessions/2026-05-16-03.md
 ```
-# Session 2026-05-16-02
+# Session 2026-05-16-03
 
 ## Goal
-Continue the issue-10 "remaining lever" investigation started end of
-session 01 (axpy SIMD kernel microbench), and clear independent
-single-shot issues from the open queue.
 
-When the user reported every push breaking on GH Actions, scope
-expanded to a root-cause CI-hooks fix, then to merging the parallel-
-agent deliveries on #25 and #24, and to closing out #33 §3
-(`Solver::with_ordering`) since it was the smallest open lever
-adjacent to #10's blocker.
+Close GitHub issue #31 (M6: inertia certification on near-singular —
+sweep `eps_pow`, find detection boundary). Build a parametric sweep
+over `near_singular_eps_<p>` for p ∈ {6..14}, identify the boundary at
+which the default Bunch-Kaufman pivot threshold stops detecting the
+null pivot, and either certify the current threshold or propose a
+better criterion.
 
 ## Accomplished
 
-### "Remaining lever" axpy microbench — negative (commit `05722a3` co-bundled)
-Built `src/bin/bench_axpy_small.rs` comparing `pulp` /
-`scalar` / `unroll4` at lengths [3..128] with 50M iters/measure.
-Result: pulp SIMD dispatch ties with plain scalar within 1ns/call
-quantization at all small lengths; manual unroll4 is slower. The
-compiler auto-vectorizes the scalar form as well as the explicit
-SIMD dispatch. *Rules out kernel-call overhead as the bottleneck for
-clnlbeam.*  Combined with the prior negative #33 SLB A/B and the
-negative #10 MAXFROMM Phase 2 A/B, all three architectural levers
-tried against the 1D-banded Mittelmann panel come up within noise.
+- Extended `external_benchmarks/stress/synth.py` with a parametric
+  generator family `near_singular_eps_<p>` for p ∈ {6..14}
+  (seed = 100+p, n=100, one λ=10^-p, 99 healthy λ in [0.5, 3.0]).
+  Existing `near_singular_eps9` / `near_singular_eps12` rows preserved.
+- New diagnostic binary `src/bin/diag_near_singular_sweep.rs` that
+  runs `Solver::new()` factor + `solve_refined` on each matrix and
+  reports `(status, inertia, min|D_ii|, rel_res, pivtol)`.
+- Wrote `dev/research/inertia-near-singular-certification.md` with the
+  full sweep table, theory, bound argument, and the rejected
+  alternative criterion.
+- Added regression row `near_singular_eps_7` to
+  `external_benchmarks/stress/manifest.tsv` (per the issue's
+  acceptance criterion of "boundary + 1").
 
-### CI hooks self-heal (commit `05722a3`)
-Root cause of "every push breaks on GH Actions": `core.hooksPath`
-was set to `/Users/jkitchin/Dropbox/projects/feral/.git/hooks`
-(stale from a prior clone location), pointing at a directory that
-does not exist on this machine — so git silently bypassed every
-local pre-commit hook. CI caught the fmt drift on every push.
+### Key finding
 
-Fix: added a self-healing guard at the top of
-`dev/assemble-context.sh` that detects a `core.hooksPath` pointing
-nowhere, auto-unsets it, and reinstalls pre-commit. Verified the
-guard fires on a synthetic broken state. CLAUDE.md already
-documented this exact failure mode as a doc note; the guard
-promotes the doc into automation so future sessions cannot
-inherit the broken state silently.
+The issue's premise was wrong. The sweep shows feral reports
+`inertia.zero == 0` for *every* p ∈ {6..14}, including the canonical
+`near_singular_eps9` and `near_singular_eps12` matrices — they were
+never actually being detected as null. The boundary is p = 6.
 
-### Issue #25 — cascade-break defaults research note (commit `7f096c1`)
-Worktree-isolated agent wrote `dev/research/cascade-break.md` (392
-lines) deriving (or not deriving) the defaults `ratio = 0.5` and
-`eps = 1e-10` from the published literature.
+| p  | status   | (pos, neg, zero) | min &#124;D_ii&#124; | rel_res    |
+|----|----------|------------------|----------------------|------------|
+|  6 | Success  | (48, 52, 0)      | -1.25e+1             | 4.32e-16   |
+|  9 | Success  | (59, 41, 0)      | -1.47e+1             | 4.55e-16   |
+| 12 | Success  | (53, 47, 0)      | -2.12e+1             | 5.74e-16   |
+| 14 | Success  | (43, 57, 0)      | -9.55e+0             | 2.14e-15   |
 
-**Conclusion: empirical, not derivable.** `ratio = 0.5` was
-calibrated on `pinene_3200_0009` in #8 and cross-validated against
-the bimodal `n_delayed_in / expanded_ncol` distribution measured in
-#15. Wächter & Biegler 2006 uses `κ⁻_w = 1/3` not `1/2`;
+The factorization is stable (residuals 2-6 × 10^-16 after iterative
+refinement) but the null space is invisible to a magnitude-based
+pivot test. This is the expected behavior for a single small
+eigenvalue dispersed across a random orthonormal basis Q — see
+Higham 2002 Ch. 11 and the BK bound `|d_k| ≥ (1-α²) σ_min(A_22)`
+which lower-bounds the pivot magnitude by the *trailing* submatrix's
+smallest singular value, not the input matrix's.
+
+## Benchmark Results
 ```
 
 ## Git Status
 ```
+d3b031d research(#10): supernode-shape ordering A/B — NEGATIVE on Mittelmann panel
+af53f4e chore(context): refresh dev/context.md with new test+bench excerpt
+84238ac chore(session): 2026-05-16-02 -- CI hooksPath fix, #24/#25/#33 §3, axpy negative
 fa62918 test(scaling): relax MSS1_0009 reason check to either fallback variant
 e789ec3 Merge branch 'worktree-agent-ab2727cb5b91921b5'
-2efa315 feat(solver): Solver::with_ordering builder (#33 §3)
-02e699a feat(scaling): surface MC64 -> InfNorm silent fallback (#24)
-7f096c1 docs(cascade-break): document derivation status of ratio=0.5, eps=1e-10 (#25)
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-0aeadf63730f046f)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-510ea496d233abcf)
 
 running 5 tests
-test test_gate_tiny_sparse_in ... ok
 test test_gate_just_outside_n_tiny ... ok
+test test_gate_tiny_sparse_in ... ok
+test test_solve_parity_tiny_real_matrix ... ok
 test test_gate_boundary_n_16 ... ok
 test test_determinism_tiny ... ok
-test test_solve_parity_tiny_real_matrix ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -92,42 +92,13 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-16-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-16-03.md)
 
 
-`cargo run --bin bench --release` (tail -40):
-
-Top 10 worst factor-ratio vs MUMPS:
-name                             n    feral(μs)    mumps(μs)      ratio
-MUONSINE_0000                 1537        11321          376      30.11
-KIRBY2_0007                    458          963          119       8.09
-KIRBY2_0006                    458          983          127       7.74
-KIRBY2_0008                    458          788          122       6.46
-KIRBY2_0009                    458          714          128       5.58
-KIRBY2_0010                    458          680          133       5.11
-CRESC132_0000                 5314        62572        12266       5.10
-KIRBY2_0011                    458          610          120       5.08
-GROUPING_0139                  225          472          113       4.18
-KIRBY2_0012                    458          465          118       3.94
-
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.37     <= 2.0     PASS
-medium (<500)            152145     1.74     <= 3.0     PASS
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.73     <= 2.0     PASS
-medium (<500)            153560     1.73     <= 3.0     PASS
-
-Both partitions PASS their p90 ratio gates against MUMPS, unchanged
-from session 01. Worst-case list is consistent with the long-tail
-matrices documented in #12 / #14. No regression from this session's
-commits.
-
-Microbench (`src/bin/bench_axpy_small.rs`, 50M iters/measure):
-pulp ties scalar within 1ns at lengths 3..128 — see Accomplished
-section above.
+Did not run `cargo run --bin bench --release` — this session only
+added a diagnostic binary, a generator extension, a research note,
+and a manifest row. No solver code touched, no benchmark-relevant
+changes. The sweep binary's own output is in the research note.
 
 ```
 
@@ -226,7 +197,9 @@ src/bin/diag_leaf_profile.rs
 src/bin/diag_max_ncol.rs
 src/bin/diag_mc64_cycles.rs
 src/bin/diag_mittelmann.rs
+src/bin/diag_near_singular_sweep.rs
 src/bin/diag_orbit2_quotient.rs
+src/bin/diag_ordering_panel.rs
 src/bin/diag_ordering_race.rs
 src/bin/diag_par_firstdiff.rs
 src/bin/diag_par_frontal_hash.rs
@@ -348,7 +321,5 @@ tests/sparse_refined.rs
 tests/stress_tests.rs
 tests/symbolic_profiler.rs
 tests/threshold_consistency.rs
-
-(truncated from      352 lines to 350 line budget)
-
-(truncated from      352 lines to 350 line budget)
+tests/tiny_fast_path.rs
+```
