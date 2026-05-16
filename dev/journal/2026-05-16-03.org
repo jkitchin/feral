@@ -78,3 +78,47 @@ inertia here gets caught.
 * 16:00 :clippy:fmt:
 `cargo fmt` then `cargo clippy --all-targets -- -D warnings` clean.
 Sweep binary compiles + runs as expected. Boundary stable on rerun.
+* 09:00 :issue30:ir:plan:
+Starting issue #30: iterative-refinement convergence policy.
+
+Plan:
+1. Add a probe binary that calls =solve_sparse_refined_with_diagnostics= on
+   every stress-suite matrix, emits per-step =||r||_2/||b||_2= trajectory plus
+   the κ̂ Hager-Higham estimate.
+2. Run on the full 28-matrix stress manifest.
+3. Analyze: per matrix, compute (a) IR-OFF residual = step 0 relative
+   residual, (b) IR-ON residual = best step, (c) ratio. Cross with κ̂
+   to find the regime where IR strictly helps.
+4. Decide a skip policy backed by data.
+
+The bench binary currently calls =solve_sparse_refined= which is the
+non-diagnostic path. The diagnostic variant only differs in ~3-5 extra
+sparse solves for the κ̂ estimate (small overhead, acceptable for a
+one-off study).
+
+* 10:30 :issue30:ir:data:
+Ran =probe_ir_trajectory= on the full 28-matrix stress manifest.
+All factored cleanly; full trajectory + κ̂ recorded under
+=external_benchmarks/stress/out/ir_probe/=.
+
+Bucket analysis (=analyze_ir.py=):
+- Bucket A (rel_res_0 already below =eps*sqrt(n)=): 17/28. Zero IR
+  cost because the loop short-circuits at line 834 before doing
+  any IR step.
+- Bucket B (IR strictly helps): 7/28. Gain ranges from 0.77 to
+  10.24 decades. All converge in exactly 1 useful IR step.
+- Bucket C (residual stagnates above threshold): 4/28. Bounded
+  by the existing 2-strike plateau rule (≤3 wasted solves each).
+
+Key finding: κ̂ does NOT separate the buckets. =bratu3d= has
+κ̂=1.16e3 and needs IR (gain 10.24); =tuma1= has κ̂=1.82e3 and
+doesn't. Any κ̂-based skip heuristic would mis-route =bratu3d=.
+
+* 11:00 :issue30:ir:decision:
+Decision: do NOT change =solve_sparse_refined=. The current
+exit criteria are correct as measured. Wrote the research note
+to =dev/research/ir-convergence-policy.md= and appended the
+decision to =dev/decisions.md=.
+
+No new public API. No regression risk (no implementation change
+in =src/=, only the probe binary and analysis script were added).

@@ -3344,3 +3344,52 @@ with explicit `Some(...)` values.
   `PerturbToEps`" entry.
 - `src/bin/probe_cascade_perturb.rs` — the probe that produced
   the residual numbers.
+
+## 2026-05-16 — Issue #30 IR convergence policy: keep residual-based exit, no κ̂ skip heuristic
+
+**Context.** Issue #30 (M6) asked when iterative refinement
+strictly improves the residual and whether `solve_sparse_refined`
+should adopt a skip-IR policy on well-conditioned inputs. The
+deliverable was a research note backed by stress-suite data plus
+a decision recorded here.
+
+**Decision.** Do not add a skip-IR heuristic to
+`solve_sparse_refined`. The current exit criteria —
+residual-based termination at `||r||/||b|| < ε·√n`, 2-strike
+plateau guard, 100× divergence guard, max 10 steps — are
+already near-optimal on the full 28-matrix stress corpus.
+
+The loop short-circuits on the existing residual check
+(line 834 of `src/numeric/solve.rs`) when the unrefined solve
+is already at floor noise, so the "always runs IR" framing in
+the issue is not what the measurements show: bucket A (17/28
+matrices) costs zero extra IR solves under the current code.
+
+**Evidence.**
+- `dev/research/ir-convergence-policy.md` — methodology, raw
+  per-matrix table, bucket A/B/C analysis,
+  `external_benchmarks/stress/out/ir_probe/*.out` sidecars.
+- κ̂(A) distributions overlap between the "IR helps" bucket
+  (κ̂ ∈ [1.16e3, 8.00e22]) and the "IR no-op" bucket
+  (κ̂ ∈ [9.94e1, 2.29e29]); no κ̂ threshold separates them.
+  Routing `bratu3d` (κ̂=1.16e3) into a skip path would lose
+  10.24 decades of residual.
+- 4 stagnant matrices cost ≤3 IR solves each (the existing
+  `max_stagnant_steps=2` rule). Total "wasted" IR work across
+  the corpus is ≤12 extra solve-calls — bounded and small.
+- `cargo test` and `cargo clippy --all-targets -- -D warnings`
+  clean (no implementation change in `src/`; only the probe
+  binary and analysis script were added).
+
+**Escape hatches for callers who want to bypass IR.** They
+already exist: `Solver::solve`, `solve_sparse`, and
+`solve_sparse_many` call back-substitution directly without IR.
+The skip-IR knob is a method-selection decision at the call
+site, not a parameter inside `solve_sparse_refined`.
+
+**References.**
+- `dev/research/ir-convergence-policy.md`
+- `src/bin/probe_ir_trajectory.rs`
+- `external_benchmarks/stress/analyze_ir.py`
+- `external_benchmarks/stress/out/ir_probe/`
+- `src/numeric/solve.rs` lines 640–897 (the unchanged loop)
