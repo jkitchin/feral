@@ -1,0 +1,112 @@
+#+TITLE: Session 2026-05-16-11 — Issue #11 SmallLeafBatch re-eval
+#+STARTUP: showall
+
+* 15:10 :issue11:setup:
+Issue #11 re-runs the Phase 2.11 SmallLeafBatch default-flip
+experiment now that #9 (SIMD kernel) and #10 (APP pivoting) are
+closed. Hypothesis: the per-front kernel cost was dwarfing the
+driver overhead small-leaf batching amortizes; with the kernel
+now SIMD + APP, the gate flip should clear the +10% / -5% bar
+the Phase 2.11 5-run repeat failed.
+
+Worktree branch: =worktree-agent-a0fd99cd1319a3cd0= (clean main
+at 30a30fc).
+
+Current default: =SmallLeafBatch::Off= (src/numeric/factorize.rs
+line 212-213).  =bench_one_matrix= consumes
+=NumericParams::default()= so toggling the gate would normally
+require two compile rounds.  To keep the harness simple I added
+a one-off =FERAL_SMALL_LEAF=on|off= env var override in
+=src/bin/bench_one_matrix.rs= only (the library default and all
+other binaries are untouched).  This matches the protocol — the
+=Off= variant exercises the current compiled-in default, the
+=On= variant flips it for that one process.
+
+* 15:14 :issue11:harness:
+Wrote =external_benchmarks/comparison/issue_11_ab.py=. Drives
+=bench_one_matrix= over the full =sample.tsv= (67 matrices, but
+66 have RHS on disk) with =FERAL_SMALL_LEAF=off= then =on=,
+interleaved per run to mitigate thermal / scheduler bias.  Five
+runs per variant, per-matrix median, then per-bucket median
+speedup + worst per-matrix slowdown.  Writes per-variant per-run
+sidecars under =out_ab/= and a JSON summary at
+=out_ab/issue_11_summary.json=.
+
+Buckets reused from =report.py=: tiny (n<100), small (100-1k),
+medium (1k-10k), large (10k-100k), xlarge (>=100k).  Decision
+criterion is on tiny + small combined.
+
+* 15:25 :issue11:smoke:
+Smoke ran =--runs 1 --limit 5= (only n=4..6 tiny matrices,
+useless for real signal but confirmed harness wiring).
+Then kicked off the full run: =python3 issue_11_ab.py --runs 5=
+on all 66 matrices that have RHS files on disk.
+
+First-run timings:
+- off run 1/5: 357.9s
+- on  run 1/5: 316.0s
+
+Per-run difference of ~13% at the wall-clock level is consistent
+with the hypothesis (on faster than off in aggregate), but the
+decision is the per-matrix bucket median, not the wall.
+
+* 15:40 :issue11:tests:
+While bench runs: =cargo test --release --lib= 259 passed,
+=cargo test --release --tests= 5 passed.
+=cargo clippy --bin bench_one_matrix -- -D warnings= clean.
+=cargo fmt --check= clean.
+The =FERAL_SMALL_LEAF= env var change is isolated to
+=src/bin/bench_one_matrix.rs= so no library tests are affected.
+
+* 16:25 :issue11:result:reject:
+Bench finished after ~55 min wall.  Per-bucket medians (+ = On
+faster than Off):
+
+| bucket | n  | med_%  | worst_slow_% | best_speed_% |
+|--------+----+--------+--------------+--------------|
+| tiny   | 20 |  0.00  |        50.00 |        40.00 |
+| small  | 19 | +1.90  |         9.09 |         8.97 |
+| medium |  8 | +0.30  |         2.01 |         6.37 |
+| large  | 10 | +7.70  |        12.53 |        21.46 |
+| xlarge |  7 | -4.35  |         6.55 |         8.57 |
+
+Decision (tiny+small, n=39):
+- median speedup        +1.44%  (criterion >= +10%) FAIL
+- worst per-matrix slow +50.00% (criterion <= +5%)  FAIL
+
+DECISION: REJECT.  Default stays =SmallLeafBatch::Off=.
+
+The +50% / +25% / +10% outliers on n=5, 6, 12 matrices are
+1 µs timer noise (2→3 µs, 4→5 µs, etc.) — the only signal in
+tiny is rounding error.  Small-bucket median is +1.9%, within
+the ±5% per-matrix noise band the Phase 2.11 5-run repeat
+already documented.  Real signal (large bucket +7.7% median)
+is out of scope for issue #11 — the criterion is tiny+small.
+
+The hypothesis (SIMD + APP would expose driver-overhead
+savings) is not supported: the kernel-cost reduction did not
+shift the gate flip out of noise on the target bucket.
+
+* 16:30 :issue11:worktree:
+Mid-session discovered =Edit= calls keyed by
+=/Users/jkitchin/projects/feral/...= had been targeting the
+*main* worktree at =/Users/jkitchin/projects/feral= rather
+than my agent worktree at
+=/Users/jkitchin/projects/feral/.claude/worktrees/agent-a0fd99cd1319a3cd0=,
+because the bash =cwd= was resolving to the main worktree on
+every invocation.  Then the agent worktree was removed
+entirely (presumably by a parallel agent), leaving my changes
+only in the main worktree's working tree.
+
+Recovered by creating a fresh branch =issue-11-small-leaf-reeval=
+off the new main HEAD (=ea98f98=), reverting the
+=bench_one_matrix.rs= and =issue_11_ab.py= staging diffs (per
+the failure-path workflow which says "single commit appending
+to tried-and-rejected.md only"), and committing the
+tried-and-rejected entry + this journal + session checkpoint.
+
+* 16:35 :issue11:close:
+Wrote the rejection entry to =dev/tried-and-rejected.md=
+(append-only, includes the measurement table and the worst-
+offenders / best-wins tables).  Closing #11 with a link to the
+entry.  Session checkpoint at =dev/sessions/2026-05-16-11.md=.

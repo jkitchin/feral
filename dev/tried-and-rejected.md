@@ -1764,3 +1764,119 @@ that wants to stress the dense-supernode path on million-row
 matrices should add 1–2 representative `af_shell*` rows with a fresh
 research note on whether they exhibit fill patterns distinct from
 what `sparsine` / `copter2` already cover.
+
+---
+
+## 2026-05-16 — Issue #11 `SmallLeafBatch::On` default flip, post-SIMD+APP re-eval
+
+**Phase.** Issue #11 — re-evaluate the Phase 2.11 default flip
+after #9 (SIMD trailing-update kernel) and #10 (APP pivoting)
+landed and closed. Hypothesis: with per-front kernel cost
+reduced by SIMD + APP, the driver-overhead savings from
+small-leaf batching should finally clear the +10% median /
+−5% worst-case bar that the Phase 2.11 5-run repeat failed.
+
+**Protocol.** 5 runs per variant on the full
+`external_benchmarks/comparison/sample.tsv` (66 matrices that
+have synthetic RHS on disk, spanning tiny/small/medium/large/
+xlarge buckets). Variants interleaved per-run to mitigate
+thermal / scheduler bias. Driver was
+`target/release/bench_one_matrix` with a one-off
+`FERAL_SMALL_LEAF=on|off` env-var override applied in
+`src/bin/bench_one_matrix.rs` to A/B without recompiling. The
+library default of `SmallLeafBatch::Off` was unchanged for the
+run.
+
+Per-matrix median across 5 runs, then per-bucket median speedup
+and worst per-matrix slowdown. Driver: `solve_one` measures
+`factor_us` via `Instant::now()` around
+`factorize_multifrontal_parallel_with_workspace`. Wall-time per
+run was ~5–6 min (10 runs total ≈ 55 min). Decision criterion
+(must meet BOTH): median speedup ≥ +10% on tiny + small, worst
+per-matrix slowdown ≤ +5%.
+
+**Result.** Per-bucket medians (positive = `On` faster):
+
+| bucket | n_mats | med_speedup_% | worst_slowdown_% | best_speedup_% |
+|--------|-------:|--------------:|-----------------:|---------------:|
+| tiny   |     20 |          0.00 |           +50.00 |         +40.00 |
+| small  |     19 |         +1.90 |            +9.09 |          +8.97 |
+| medium |      8 |         +0.30 |            +2.01 |          +6.37 |
+| large  |     10 |         +7.70 |           +12.53 |         +21.46 |
+| xlarge |      7 |         −4.35 |            +6.55 |          +8.57 |
+
+Decision (tiny + small combined, n=39):
+- median speedup +1.44% (criterion ≥ +10%) — **FAIL**
+- worst per-matrix slowdown +50.00% (criterion ≤ +5%) — **FAIL**
+
+**Worst offenders, tiny + small bucket (Off → On µs, median of 5):**
+
+| matrix                | n   | off | on  | slow_% |
+|-----------------------|----:|----:|----:|-------:|
+| OSBORNE1_0041         |   5 |   2 |   3 | +50.00 |
+| LANCZOS1_0029         |   6 |   2 |   3 | +50.00 |
+| heart6_iter_c         |  12 |   4 |   5 | +25.00 |
+| METHANB8LS_0004       |  31 |  19 |  21 | +10.53 |
+| QPCBLEND_0210         | 157 |  88 |  96 |  +9.09 |
+| HIMMELBJ_0023         |  57 |  50 |  53 |  +6.00 |
+
+The +25–50% slowdowns on n≤12 matrices are 1 µs `Instant`
+resolution noise (2→3, 4→5 µs); the QPCBLEND_0210 and
+METHANB8LS_0004 entries (n=157, n=31) are real but ≤+10%.
+
+**Best wins, tiny + small (Off → On µs, median of 5):**
+
+| matrix                | n   | off | on  | speedup |
+|-----------------------|----:|----:|----:|--------:|
+| heart6_iter_b         |  12 |   5 |   3 |   1.667 |
+| OSBORNEB_0008         |  11 |   4 |   3 |   1.333 |
+| VESUVIA_0040          |   8 |   5 |   4 |   1.250 |
+| BT2_0006              |   4 |   6 |   5 |   1.200 |
+| HAIFAM_0370           | 249 | 145 | 132 |   1.098 |
+
+The wins on n≤12 matrices are likewise within timer-resolution
+noise; the only real bucket-relevant win is HAIFAM_0370 (+9.8%)
+and a handful of small-bucket entries in the +5–8% range.
+
+**Why rejected.** The post-SIMD + post-APP measurement
+replicates the Phase 2.11 conclusion: small-leaf batching does
+not move the median on tiny + small matrices clear of noise.
+The hypothesis (kernel-cost amortization would expose
+driver-overhead savings) is not supported by the data:
+- tiny bucket median speedup is exactly 0.0% (the 1 µs timer
+  resolution dominates).
+- small bucket median speedup is +1.9% (within noise; the
+  Phase 2.11 5-run repeat reported ±5% per-matrix noise on the
+  IPM tail).
+- The +50% / +25% / +10% slowdowns on individual matrices put
+  the worst-case far above the +5% bar regardless of whether
+  the median moved.
+
+The `large` bucket shows a +7.7% median speedup with a +12.5%
+worst slowdown, which is interesting but out of scope for
+issue #11 (the criterion is tiny + small per the SSIDS-style
+small-front amortization target).
+
+**Disposition.**
+- `SmallLeafBatch::Off` remains the compiled-in default. The
+  doc-comment at `src/numeric/factorize.rs:203-209` already
+  records the Phase 2.11 rejection; this re-eval extends that
+  rejection to the post-SIMD + post-APP kernel regime.
+- The diagnostics from this session are NOT kept in tree per
+  the issue's failure-path workflow (single commit appending
+  this entry). The harness (`issue_11_ab.py` + the
+  `FERAL_SMALL_LEAF` env-var hook in `bench_one_matrix.rs`)
+  is reproducible from this entry plus the journal at
+  `dev/journal/2026-05-16-11.org` should a future agent want
+  to re-run after another kernel improvement.
+- Per the matching reasoning in the original Phase 2.11
+  rejection: the tail gap is structural (bushy elimination
+  tree, addressed by the Phase 2.12 column-renumbering
+  amalgamation), not a driver-overhead problem the small-leaf
+  fast path can solve. Closing #11.
+
+**Evidence.** Full run log: `/tmp/issue11_full.log` (10 runs,
+55 min wall). Per-matrix sidecars: `out_ab/{off,on}/run{0..4}/`.
+Summary JSON: `out_ab/issue_11_summary.json`. Both deleted at
+the end of session per workflow; reproduce from
+`dev/journal/2026-05-16-11.org`.
