@@ -1547,3 +1547,51 @@ was doing the right thing for solve.
 References: `dev/research/cascade-break-l-perturbation-2026-05-15.md`,
 session 2026-05-15-02 (original 1.4e-5 measurement), session
 2026-05-15-07 (this entry).
+
+---
+
+## 2026-05-16 — MAXFROMM as default TppMethod for 1D-banded Mittelmann panel
+
+**Tried.** MUMPS-style MAXFROMM acceleration of TPP pivot selection
+(`TppMethod::Maxfromm`): capture column k+1's AMAX as a byproduct of
+the rank-1 trailing update at pivot k, then short-circuit the next
+pivot's AMAX scan when `|a_{k+1,k+1}| >= alpha * cached`. Predicted
+≥2× speedup on the 1D-banded Mittelmann panel (clnlbeam, henon120,
+lane_emden120, dirichlet120) per the original research note
+`dev/research/issue-10-app-vs-maxfromm.md`.
+
+**Rejected.** Default-flip to `TppMethod::Maxfromm` rejected. Phase 2
+corpus A/B (`src/bin/diag_clnlbeam_maxfromm.rs`, min-of-7, 20
+matrices across 4 families): panel median 0.997×, geomean 1.000×,
+all per-family medians within ±5% measurement noise. The ≥2.0×
+prediction was wrong because (i) the per-pivot AMAX scan was already
+cheap (~10% of pivot cost on narrow supernodes, not the dominant
+fraction); (ii) MAXFROMM moves the scan rather than removing it
+(post-update capture vs pre-pivot scan); (iii) on cache miss
+(2×2/rejection/panel boundary) MAXFROMM ADDS work — the capture
+runs but is never consumed. The 97%-1×1 finding from #33 was real
+but the dominant cost in each 1×1 is the rank-1 axpy, not the AMAX
+scan.
+
+**Resolution.** Phase 1 infrastructure is kept (commit 590bc50):
+`TppMethod::{Plain, Maxfromm}` enum and `BunchKaufmanParams::tpp_method`
+field, default `Plain`. Opt-in `Maxfromm` is byte-identical on
+factorization output (5 parity tests in `tests/maxfromm_parity.rs`)
+and ~zero cost on this corpus (within noise). The enum stays as a
+primitive for future experiments on wider-front workloads where AMAX
+scan cost might actually be measurable.
+
+The Phase 4 plan from the original research note (wire MAXFROMM into
+`block_ldlt32`) is deferred indefinitely until a corpus is identified
+where MAXFROMM measurably wins.
+
+Both #33 (SmallLeafBatch) and #10 (MAXFROMM) targeting the same
+1D-banded panel landed within noise, jointly demonstrating that the
+bottleneck on that corpus is neither per-supernode driver overhead
+nor pivot selection. The next lever is the scalar rank-1 trailing-
+update kernel itself (or supernode amalgamation to widen narrow
+leaves so block kernels can engage).
+
+References: `dev/research/issue-10-maxfromm-phase2-corpus.md` (full
+post-mortem), `dev/research/issue-33-slb-ab.md` (parallel SLB result),
+journal `2026-05-16-01.org` 11:32 + 12:30 entries.

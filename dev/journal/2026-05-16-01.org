@@ -374,3 +374,33 @@ Behavior with default Plain: byte-identical to pre-Phase-1.
 Maxfromm requires opt-in via ~tpp_method = TppMethod::Maxfromm~.
 Next: Phase 2 corpus validation (clnlbeam panel A/B,
 inertia corpus sweep) before considering a default flip.
+
+* 12:30 :issue-10:maxfromm:bench:negative:
+MAXFROMM Phase 2 corpus A/B on the 4-family Mittelmann panel
+(20 matrices). FAIL the ≥2.0× criterion: median 0.997×, geomean
+1.000×, all per-family medians within ±5% noise.
+
+Binary: ~src/bin/diag_clnlbeam_maxfromm.rs~. Research note with
+the post-mortem: ~dev/research/issue-10-maxfromm-phase2-corpus.md~.
+
+Key conclusion: the prediction in the original research note was
+WRONG. The AMAX scan was already cheap relative to the rank-1
+trailing-update axpy on narrow supernodes (~10% of per-pivot
+cost, not the dominant fraction). Capture moves the scan rather
+than saving it, and on cache misses it adds work. The 97%-1×1
+fact from #33 was real; the conclusion that the 1×1 work was
+AMAX-bound was the mistake.
+
+Decision: default stays Plain; Maxfromm available as opt-in.
+Phase 4 (block_ldlt32 wiring) deferred indefinitely until a
+corpus is identified where it wins.
+
+The remaining lever for the 1D-banded Mittelmann panel is the
+scalar rank-1 trailing-update kernel itself. Logged in the
+research note: tighten the per-pivot axpy (fuse L-column scale
+with axpy, explicit prefetch on ncol<=10) OR amalgamate
+supernodes to widen narrow leaves so APP / block_ldlt32 engages.
+
+Phase 1 infrastructure stays — correct, free in default mode,
+zero-cost opt-in. Worth keeping as a primitive for later
+experimentation on wider-front workloads.
