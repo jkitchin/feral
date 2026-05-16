@@ -1,0 +1,67 @@
+#+TITLE: Session journal 2026-05-16-04 (M4 synth generators, issue #27)
+
+* 13:32 :session-start:m4:synth:
+  Worktree agent-a2da3d0db2f4a5beb on branch
+  worktree-agent-a2da3d0db2f4a5beb. Goal: close issue #27 (synthetic
+  generators for saddle-rankdef, wide-frontal, MC64-resistant, Stokes)
+  plus the issue #31 follow-up asking for an explicit exact-zero
+  rankdef matrix.
+
+* 13:40 :research:saddle-inertia:
+  The issue text quotes the saddle inertia formula as
+  =(n, n - dim ker(A), 2 dim ker(A))= but that double-counts:
+  =n + (n - k) + 2k = 2n + k= which does not equal the matrix size
+  =n + m = 2n - k=. Rederived from the standard saddle-inertia
+  result (Gould 1985, Forsgren-Murray 1993): for K = [H A^T; A 0]
+  with H ≻ 0 and A an m×n constraint of rank m-r, the inertia is
+  =(n, m-r, r)=. Total =n + m - r + r = n + m= ✓.
+  Used the corrected formula in the generator; oracle matches
+  =np.linalg.eigvalsh= exactly on both saddle_rankdef sizes
+  (50_10_3 → (50,37,3), 100_20_5 → (100,75,5)).
+
+* 14:05 :tried-and-rejected:mc64-resistant:
+  First mc64_resistant attempt was =A = I + α u u^T= with u = 𝟙/√n
+  and α = -2, which I claimed would give cond ~ 1e8 after MC64
+  scaling. Wrong: the eigenvalues of that rank-1 update are 1
+  (mult n-1) and 1+α = -1, so cond(A) = 1 and there is nothing for
+  MC64 to fail at. Verified with =np.linalg.cond= on the assembled
+  matrix: 1.48 before scaling, unchanged after. Switched to a Q D Q^T
+  construction with one eigenvalue at 1e-8 in a dense random basis;
+  this is the canonical "MC64 sees an O(1) diagonal and produces
+  s ≈ 1, so scaling does not equilibrate" setup. Verified
+  cond = 2.0e8 before *and* after a symmetric row-max scaling proxy.
+
+* 14:30 :research:stokes-q1p0:
+  Q1-P0 has TWO spurious pressure modes in 2D, not one. I initially
+  wrote the oracle as =1= (just the constant mode); =np.linalg.matrix_rank=
+  on the assembled B revealed =rank B = n_p - 2= for h=8 (B is 64×98,
+  rank 62). This matches the textbook checkerboard mode (Brezzi-Fortin
+  1991, §VI.5). Updated the oracle to =(n_u_free, n_p - 2, 2)= and
+  re-ran: feral reports inertia =(98, 62, 2)= exactly. Updated the
+  generator's docstring and the research note.
+
+* 14:55 :verification:report-py:
+  Ran =python3 external_benchmarks/stress/synth.py --only <name>= for
+  all seven new generators; each produced a deterministic .mtx file
+  with the expected nnz count. Built target/release/bench_one_matrix
+  (9.26s incremental). =run.py --category rankdef,saddle_rankdef,stokes,wide_frontal,mc64_resistant=
+  ran all 7 new matrices in <14ms total factor time
+  (wide_frontal_616 dominated at 12.9ms). =report.py= flagged none.
+  Inertia match table:
+    rankdef_exact_50_5      detected zero=1 (expected 5)   pass (1≤z≤k rule)
+    rankdef_exact_100_10    detected zero=1 (expected 10)  pass
+    saddle_rankdef_50_10_3  detected zero=1 (expected 3)   pass
+    saddle_rankdef_100_20_5 detected zero=4 (expected 5)   pass
+    stokes_q1p0_8           detected zero=2 (expected 2)   exact ✓
+    wide_frontal_616        no zero oracle, factors clean
+    mc64_resistant_200      no zero oracle, factors clean
+  The rankdef_exact_* underdetection is consistent with the existing
+  F-01 dispersed-null-space phenomenon documented for the original
+  rankdef_n_k generators. The =stokes_q1p0_8= exact match is the most
+  encouraging signal — feral's BK pivoting correctly recovers the
+  2-dimensional LBB defect on a real saddle structure.
+
+* 15:10 :commit:m4:
+  About to commit. Verified =cargo fmt --check= and
+  =cargo clippy --all-targets -- -D warnings= are clean (no Rust
+  changes in this session, but the worktree was clean coming in).

@@ -85,12 +85,35 @@ def inum(d: dict, k: str) -> int | None:
 
 
 def expected_zero(row: dict) -> int | None:
-    """For synth/rankdef_<n>_<k> rows, the expected null space dim is k."""
+    """Expected null space dimension for oracle-checked synth rows.
+
+    Oracle conventions for the M4 generators (issue #27 + #31
+    follow-up). See `dev/research/synthetic-generators-m4.md` for the
+    derivations.
+
+    - rankdef_<n>_<k>            → k          (existing convention)
+    - rankdef_exact_<n>_<k>      → k          (#31 follow-up)
+    - saddle_rankdef_<n>_<k>_<r> → r          (saddle nullity)
+    - stokes_q1p0_<h>            → 2          (constant + checkerboard
+                                                pressure modes)
+    Other categories (wide_frontal, mc64_resistant) return None;
+    they are checked only for status + consistency-sum, not zero.
+    """
     if row.get("group") != "synth":
         return None
-    m = re.match(r"^rankdef_(\d+)_(\d+)$", row["name"])
+    name = row["name"]
+    m = re.match(r"^rankdef_(\d+)_(\d+)$", name)
     if m:
         return int(m.group(2))
+    m = re.match(r"^rankdef_exact_(\d+)_(\d+)$", name)
+    if m:
+        return int(m.group(2))
+    m = re.match(r"^saddle_rankdef_(\d+)_(\d+)_(\d+)$", name)
+    if m:
+        return int(m.group(3))
+    m = re.match(r"^stokes_q1p0_(\d+)$", name)
+    if m:
+        return 2
     return None
 
 
@@ -103,10 +126,13 @@ def classify(row: dict, side: dict | None, rel_res_threshold: float) -> list[str
     status = side.get("status", "missing")
     if status != "ok":
         reason = side.get("fail_reason", "no_reason")
-        # For rankdef matrices, refusing to factor with
-        # NumericallyRankDeficient is *correct* behavior — the matrix
-        # really is rank-deficient. Don't flag it.
-        if (row.get("category") == "rankdef"
+        # For any category whose oracle expects nonzero null-space dim,
+        # refusing to factor with NumericallyRankDeficient is *correct*
+        # behavior — the matrix really is rank-deficient. Covers
+        # rankdef, saddle_rankdef, stokes (constant+checkerboard
+        # pressure modes).
+        rankdef_like_cats = {"rankdef", "saddle_rankdef", "stokes"}
+        if (row.get("category") in rankdef_like_cats
                 and "RankDeficient" in reason):
             return flags
         flags.append(f"status={status}:{reason}")

@@ -28,6 +28,39 @@ learns to source `cuter_kkt` rows from the in-repo
 `data/matrices/kkt/<family>/<sample>.mtx` CUTEst dump rather than
 SuiteSparse. README updated to document both the group and the
 category.
+### Added — M4 synthetic stress generators (#27 + #31 follow-up)
+
+`external_benchmarks/stress/synth.py` gains five generator families
+covering pathologies the existing `rankdef` / `near_sing` / `illcond`
+/ `cascade` synthetics did not reach:
+
+- `rankdef_exact_<n>_<k>` — exact-IEEE-zero variant requested in the
+  #31 follow-up; makes the dispersed-null-space failure mode an
+  explicit oracle target rather than a side effect.
+- `saddle_rankdef_<n>_<k>_<r>` — KKT block `[H A^T; A 0]` with
+  rank-deficient constraint, inertia oracle `(n, m−r, r)`.
+- `wide_frontal_<n>` — bordered block diagonal forcing a single
+  supernode of width 600, stresses the sparse → dense crossover.
+- `mc64_resistant_<n>` — `Q D Q^T` with one eigenvalue at 1e-8 and
+  dense Q; MC64 sees an O(1) diagonal and produces s ≈ 1, so the
+  scaled matrix still has cond ≈ 1e8.
+- `stokes_q1p0_<h>` — Q1-P0 mixed-element Stokes saddle on an h × h
+  mesh, inertia oracle `(n_u_free, n_p − 2, 2)` (constant +
+  checkerboard pressure modes).
+
+`report.py` is extended with regex-based oracle dispatch for each
+new naming convention, and the rank-deficient-refusal short-circuit
+is broadened from `category == "rankdef"` to also cover
+`saddle_rankdef` and `stokes`. The manifest gains seven new rows
+(two per family for rankdef_exact and saddle_rankdef, one each for
+wide_frontal / mc64_resistant / stokes). Math, oracle derivations,
+and the abandoned rank-1-perturbation attempt for mc64_resistant
+are documented in `dev/research/synthetic-generators-m4.md`.
+
+Verified end-to-end: `synth.py --only <name>` produces each matrix,
+feral factors all seven with `rel_res < 1e-13`, and `report.py`
+flags none. The Stokes matrix gives an exact inertia match
+`(98, 62, 2)`.
 
 ### Added — near-singular inertia sweep + certification (#31)
 
