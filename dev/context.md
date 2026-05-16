@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-16T17:57:40Z
+Generated: 2026-05-16T18:33:13Z
 
 ## Latest Session
-File: dev/sessions/2026-05-16-06.md
+File: dev/sessions/2026-05-16-07.md
 ```
-# Session 2026-05-16-06
+# Session 2026-05-16-07
 
 ## Goal
 
-Close out the final pre-floor lever for issue #10 (forced supernode
-amalgamation), merge agent-27's M4 synthetic generators, and ship
-the cumulative 5-lever verdict for the 1D-banded Mittelmann panel.
+Verify whether GH #19 (parallel-assembly heuristic regresses
+small-KKT IPM 12×, helps large-KKT 2.8×) is empirically resolved by
+the four follow-up commits already on `main`, and close the issue
+if the data supports it. The implementation was complete after
+session `2026-05-15-06`, but the GH `gh issue close` call was
+blocked by the auto-mode classifier in that session; this session
+finishes the closeout.
 
 ## Accomplished
 
-### Issue #10 closed — 5/5 architectural levers exhausted
+### Verified — verdict A (fixed). Closed GH #19.
 
-| # | Lever                            | Verdict on 1D-banded panel  |
-|---|----------------------------------|-----------------------------|
-| 1 | SmallLeafBatch driver removal    | within noise                |
-| 2 | MAXFROMM AMAX-scan cache         | within noise                |
-| 3 | Manual axpy SIMD tightening      | pulp ties scalar within 1ns |
-| 4 | Ordering swap (Metis/Scotch ND)  | 1.3–2.3× slower             |
-| 5 | Forced amalgamation (nemin)      | shape widens 2×; time flat  |
+Reproduced the original two-vector regression panel on Apple M4 Pro
+(14 rayon workers) using the existing `probe_issue_19` binary
+(`src/bin/probe_issue_19.rs`, committed `25926cc`). 10 reps per
+config, median wall, three configs per matrix.
 
-This session covered lever #5. Built
-`src/bin/diag_nemin_amalgamation_panel.rs` sweeping
-`SupernodeParams::nemin ∈ {16, 32, 64, 128}` on the 4-family ×
-20-matrix Mittelmann panel. Pilot run with `nemin ∈ {256, MAX}`
-hung 30+ min on `clnlbeam_0000` (collapsed front of order >n/2);
-capped at 128.
+**robot_1600** (4 iters: 0000, 0001, 0003, 0006):
 
-Per-family geomean factor_us ratios vs nemin=16 baseline:
+| iter | est_flops | seq    | gated  | forced | par/seq |
+| ---- | --------- | ------ | ------ | ------ | ------- |
+| 0000 | 4.75e6    | 7.21   | 6.52   | 8.99   | 0.80×   |
+| 0001 | 1.13e7    | 12.76  | 8.80   | 8.71   | **1.45×** |
+| 0003 | 1.13e7    | 18.67  | 14.39  | 14.48  | **1.30×** |
+| 0006 | 9.43e6    | 13.90  | 17.56  | 9.65   | 1.44× (vetoed) |
 
-| family        | n=32  | n=64  | n=128 |
-|---------------|-------|-------|-------|
-| clnlbeam      | 1.032 | 1.356 | 1.989 |
-| henon120      | 0.970 | 0.960 | 1.029 |
-| lane_emden120 | 0.953 | 0.903 | 0.909 |
-| dirichlet120  | 0.951 | 0.943 | 0.958 |
+Worst-case slowdown of default-gated vs optimal driver: 1.26× on
+iter 0006 (deliberate safety-margin trade-off in `b12e03c`).
+Original issue's worst case: 12×. Regression vector closed.
 
-Acceptance gate `factor_us/nemin16 < 0.9` met only on
-`lane_emden120@nemin=64` (0.903), and only barely. ncol_mean
-doubled at nemin=64 across three of four families (the shape
-lever did engage), but factor_nnz inflated 1.23-1.33× and factor
-time stayed flat or regressed (clnlbeam −36%).
+**henon120** (4 iters: 0000, 0001, 0003, 0005):
 
-Closed GH #10 with cumulative 5-lever summary comment pointing at
-the three research notes. Defaults unchanged: `nemin=16`,
-`OrderingMethod::Amd`. The opt-in knobs `Solver::with_ordering`
-and `SupernodeParams::nemin` stay shipped for non-1D-banded
-workloads where elimination trees have genuine fusion
-opportunities.
+| iter | est_flops | seq    | gated  | forced | par/seq |
+| ---- | --------- | ------ | ------ | ------ | ------- |
+| 0000 | 9.83e5    | 22.16  | 19.35  | 73.73  | 1.15×   |
+| 0001 | 6.13e9    | 655.00 | 104.74 | 119.01 | **6.25×** |
+| 0003 | 6.13e9    | 433.79 | 98.18  | 97.49  | **4.42×** |
+| 0005 | 6.13e9    | 447.61 | 104.37 | 116.37 | **4.29×** |
 
-### Agent-27 merge (M4 synthetic generators)
+Original issue: parallel wins 2.8× on henon120. Current: parallel
+wins 4.3-6.3× on the three steady-state iters. Improvement vector
+retained and amplified.
+
+### Artefacts
+
+- `dev/research/issue-19-par-min-flops-verification.md` — full
 ```
 
 ## Git Status
 ```
+c7479fd feat(#34): NumericParams::sqd_mode + Solver::with_sqd_mode builder
+1a18336 chore(session): 2026-05-16-06 -- close #10 (hardware floor); merge agent-27
 61002f8 research(issue-10): forced supernode amalgamation lever fails (5/5 levers exhausted)
 d3e6199 docs(#34): SQD fast-path research note + bib + decisions
 05aef71 merge(agent-27): M4 synthetic generators for saddle/wide-frontal/MC64/Stokes
-7965f30 chore(session): 2026-05-16-04 -- M4 synth generators checkpoint
-864ee14 feat(stress): M4 synthetic generators for saddle / wide-frontal / MC64 / Stokes (#27)
 ```
 
 ## Test Status
@@ -74,10 +74,10 @@ test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok
+test test_solve_parity_tiny_real_matrix ... ok
 test test_gate_tiny_sparse_in ... ok
 test test_gate_boundary_n_16 ... ok
 test test_determinism_tiny ... ok
-test test_solve_parity_tiny_real_matrix ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -92,33 +92,19 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-16-06.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-16-07.md)
 
 
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.34     <= 2.0     PASS
-medium (<500)            152145     1.70     <= 3.0     PASS
+`cargo run --bin bench --release` not re-run this session because no
+production code changed; the only deltas are documentation +
+research-note + CHANGELOG. The `probe_issue_19` results above are
+the substantive measurements.
 
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.68     <= 2.0     PASS
-medium (<500)            153560     1.68     <= 3.0     PASS
+Hygiene gates:
 
-Top 10 worst factor-ratio vs MUMPS:
-name                             n    feral(μs)    mumps(μs)      ratio
-MUONSINE_0000                 1537        10600          376      28.19
-KIRBY2_0007                    458          894          119       7.51
-KIRBY2_0006                    458          839          127       6.61
-KIRBY2_0008                    458          733          122       6.01
-CRESC132_0000                 5314        64748        12266       5.28
-KIRBY2_0009                    458          653          128       5.10
-KIRBY2_0010                    458          667          133       5.02
-KIRBY2_0011                    458          567          120       4.72
-KIRBY2_0012                    458          463          118       3.92
-ACOPR30_0000                   400          782          211       3.71
-
-No regression versus session 02 baseline. Bench gates PASS.
+cargo test --lib --release      -> 259 passed, 0 failed, 5 ignored
+cargo clippy --all-targets --release -- -D warnings -> clean
+cargo fmt --check               -> clean
 
 ```
 

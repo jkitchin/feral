@@ -1,0 +1,64 @@
+* 14:30 :issue-19:verification:orient:
+Worktree spun up to verify whether GH #19 (parallel-assembly
+heuristic, 12× regression on robot_1600 / 2.8× win on henon120) is
+empirically resolved by the four follow-up commits already on main:
+- 19d7b03 work-aware gate
+- 91e028a persistent rayon ThreadPool
+- db7b761 calibrate_par_min_flops + research note
+- b12e03c lower PAR_MIN_FLOPS 1e8 -> 1e7 (#19 closeout)
+Session 2026-05-15-06 already drafted close-comment + follow-up at
+/tmp/feral-issue-19-{comment,followup}.md but auto-mode classifier
+blocked the gh CLI calls. So implementation is done, GH state is
+stale — this session re-verifies on the original two vectors and
+pulls the trigger.
+
+* 14:38 :issue-19:data-located:
+robot_1600 + henon120 KKT dumps live in
+/Users/jkitchin/projects/feral/data/matrices/kkt-mittelmann/{robot_1600,henon120}/.
+Worktree has no data/ dir; using absolute paths to the main repo.
+Seven robot_1600 iters (0000-0006) and six henon120 iters
+(0000-0005) available. probe_issue_19 binary built from existing
+source in src/bin/probe_issue_19.rs (committed 25926cc).
+
+* 14:45 :issue-19:robot1600:reproduction:
+Probed four robot_1600 iters x 3 configs x 10 reps each on M4 Pro
+(14 rayon workers). Medians (ms):
+
+  iter 0000  est_flops 4.75e6   seq 7.21  gated 6.52  forced 8.99
+  iter 0001  est_flops 1.13e7   seq 12.76 gated 8.80  forced 8.71
+  iter 0003  est_flops 1.13e7   seq 18.67 gated 14.39 forced 14.48
+  iter 0006  est_flops 9.43e6   seq 13.90 gated 17.56 forced 9.65
+
+Original issue claim: "parallel=true regresses ~12x on robot_1600".
+Reproduction worst case: 1.26x slower (iter 0006, gate keeps it
+sequential at 17.56ms when forced-parallel would do 9.65ms).
+Best case: 1.45x faster (iter 0001 — gate fires, wins). 12x
+regression does not reproduce.
+
+* 14:55 :issue-19:henon120:reproduction:
+Same probe on four henon120 iters. Medians (ms):
+
+  iter 0000  est_flops 9.83e5   seq 22.16  gated 19.35  forced 73.73
+  iter 0001  est_flops 6.13e9   seq 655.00 gated 104.74 forced 119.01
+  iter 0003  est_flops 6.13e9   seq 433.79 gated 98.18  forced 97.49
+  iter 0005  est_flops 6.13e9   seq 447.61 gated 104.37 forced 116.37
+
+Iter 0000 is warm-up (low flops); gate sequential is correct
+(forced parallel 3.3x slower). Iters 0001/0003/0005 are steady-
+state; gate fires PARALLEL and wins 4.3-6.3x vs sequential. Issue
+reported 2.8x parallel win on henon120; current default is better.
+
+* 15:00 :issue-19:verdict:
+Verdict A — fixed. Both regression vectors resolved. No source
+changes warranted this session; the implementation predates this
+session. Wrote dev/research/issue-19-par-min-flops-verification.md
+with the full reproduction table and gate-decision audit.
+CHANGELOG entry under [Unreleased] / "Verified" subsection. Will
+close GH #19 via gh CLI with the data table embedded.
+
+* 15:05 :hygiene:tests:
+cargo test --lib --release -> 259 passed, 0 failed, 5 ignored.
+cargo clippy --all-targets --release -- -D warnings -> clean.
+cargo fmt --check -> clean. Constraints satisfied; nothing touched
+in the SQD-protected files (factorize.rs, dense/factor.rs,
+solver.rs, error.rs).
