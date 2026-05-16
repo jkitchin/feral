@@ -1583,6 +1583,214 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     })
 }
 
+// =============================================================
+// SQD (Symmetric Quasi-Definite) fast-path — issue #34 phase (c)
+// =============================================================
+//
+// Vanderbei (1995) Theorem 2.1: every symmetric permutation of
+// K = [[-E, A^T], [A, F]] with E, F ≻ 0 admits an LDL^T with purely
+// diagonal D. The caller asserts the contract by opting in via
+// Solver::with_sqd_mode(true); these kernels skip the Bunch-Kaufman
+// 1x1-vs-2x2 selection and run a pure diagonal-pivot loop. Mutually
+// exclusive with delayed pivoting (the builder enforces).
+//
+// The kernels are uncalled in this commit (phase c "gated"); phase
+// (d) wires `factor_one_supernode` to dispatch on `params.sqd_mode`
+// and phase (e) replaces the placeholder contract-violation error
+// (`FeralError::NumericallyRankDeficient`) with a dedicated
+// `FeralError::SqdContractViolated { column, pivot }` variant plus
+// the `sqd_diagonal_ok` L-growth predicate.
+//
+// References: dev/research/sqd-fast-path.md, dev/decisions.md
+// 2026-05-16 entry, issue #34.
+
+/// SQD fast-path top-level entry — analog of [`factor`] for a caller
+/// who has asserted the Vanderbei (1995) quasi-definite contract.
+///
+/// Returns the same `Factors` shape as [`factor`] with `d_subdiag`
+/// all zero (diagonal D), so existing solve paths handle the result
+/// without modification. Equilibration is applied identically to
+/// [`factor`].
+///
+/// Contract violation: `|d| <= params.zero_tol` at any column
+/// returns `Err(FeralError::NumericallyRankDeficient)` — placeholder
+/// until phase (e) introduces `FeralError::SqdContractViolated`.
+/// `params.on_zero_pivot` is *ignored*: SQD treats `zero_tol` as a
+/// hard contract trip, not a force-accept threshold.
+pub fn factor_diagonal(
+    matrix: &crate::dense::matrix::SymmetricMatrix,
+    params: &BunchKaufmanParams,
+) -> Result<(Factors, Inertia), FeralError> {
+    matrix.validate()?;
+    let n = matrix.n;
+
+    let d_eq = crate::dense::equilibrate::equilibrate_scaling(matrix);
+
+    let mut scratch_data = vec![0.0; n * n];
+    for j in 0..n {
+        for i in j..n {
+            scratch_data[j * n + i] = d_eq[i] * matrix.data[j * n + i] * d_eq[j];
+        }
+    }
+    let mut scratch = crate::dense::matrix::SymmetricMatrix {
+        n,
+        data: scratch_data,
+    };
+
+    let frontal = factor_frontal_diagonal_in_place(&mut scratch, n, params)?;
+
+    // Reshape FrontalFactors into top-level Factors. SQD eliminates
+    // every column (nelim == ncol == nrow == n) so the contrib block
+    // is empty and perm is identity.
+    debug_assert_eq!(frontal.nelim, n, "SQD must eliminate every column");
+    debug_assert_eq!(frontal.contrib_dim, 0, "SQD leaves no contribution");
+    Ok((
+        Factors {
+            n,
+            l: frontal.l,
+            d_diag: frontal.d_diag,
+            d_subdiag: frontal.d_subdiag,
+            perm: frontal.perm,
+            perm_inv: frontal.perm_inv,
+            d_eq,
+            needs_refinement: frontal.needs_refinement,
+            zero_tol: params.zero_tol,
+            zero_tol_2x2: params.zero_tol_2x2,
+        },
+        frontal.inertia,
+    ))
+}
+
+/// SQD fast-path supernode kernel — analog of
+/// [`factor_frontal_blocked_in_place_with_scratch`] for the
+/// diagonal-D contract. Factors the first `ncol` columns of
+/// `matrix.data` (column-major lower triangle) into `(L, D)` with
+/// purely diagonal `D`, leaving the trailing
+/// `(nrow - ncol) × (nrow - ncol)` Schur complement in the
+/// contribution block. The shared rank-1 trailing-update kernel
+/// `do_1x1_update` is reused unchanged — only the per-pivot driver
+/// differs (no `column_offdiag_max`, no `symmetric_row_offdiag_max`,
+/// no `try_reject_1x1_frontal`, no 2x2 branch).
+///
+/// `may_delay` is implicitly `false` (the SQD-vs-delayed builder
+/// invariant is enforced one level up by `Solver::with_sqd_mode`);
+/// the kernel has no delayed-pivot machinery.
+pub fn factor_frontal_diagonal_in_place(
+    matrix: &mut crate::dense::matrix::SymmetricMatrix,
+    ncol: usize,
+    params: &BunchKaufmanParams,
+) -> Result<FrontalFactors, FeralError> {
+    let nrow = matrix.n;
+
+    if ncol > nrow {
+        return Err(FeralError::InvalidInput(format!(
+            "ncol {} > nrow {}",
+            ncol, nrow
+        )));
+    }
+    if ncol == 0 {
+        return Ok(FrontalFactors {
+            nrow,
+            ncol: 0,
+            nelim: 0,
+            l: Vec::new(),
+            d_diag: Vec::new(),
+            d_subdiag: Vec::new(),
+            perm: (0..nrow).collect(),
+            perm_inv: (0..nrow).collect(),
+            contrib: matrix.data.clone(),
+            contrib_dim: nrow,
+            n_delayed: 0,
+            inertia: Inertia {
+                positive: 0,
+                negative: 0,
+                zero: 0,
+            },
+            needs_refinement: false,
+            n_rook_rescues: 0,
+            zero_tol: params.zero_tol,
+            zero_tol_2x2: params.zero_tol_2x2,
+        });
+    }
+
+    let a = matrix.data.as_mut_slice();
+
+    let mut pos = 0usize;
+    let mut neg = 0usize;
+    // SQD treats `zero_tol` as a contract trip, so the FMA flag is
+    // the only `params` field that genuinely matters for the inner
+    // kernel. Cache it once.
+    let fma = params.fma;
+
+    // Diagonal-only BK substitute. For each pivot:
+    //   1. d = a[k,k]; if |d| <= zero_tol, contract violated.
+    //   2. Rank-1 update the trailing block via the shared
+    //      `do_1x1_update` kernel (also scales L[:, k] by 1/d).
+    //   3. Count inertia from the sign of d.
+    for k in 0..ncol {
+        let d = a[k * nrow + k];
+        if d.abs() <= params.zero_tol {
+            // Placeholder error until phase (e) ships
+            // `FeralError::SqdContractViolated { column: k, pivot: d }`.
+            return Err(FeralError::NumericallyRankDeficient);
+        }
+        do_1x1_update(a, nrow, k, fma);
+        if d > 0.0 {
+            pos += 1;
+        } else {
+            neg += 1;
+        }
+    }
+
+    // Extract L (nrow × ncol), D diagonal, and contribution block —
+    // the shape matches `factor_frontal_blocked_in_place_with_scratch`
+    // so downstream consumers (solver, contribution-block assembler)
+    // see no structural difference.
+    let nelim = ncol;
+    let mut l = vec![0.0; nrow * nelim];
+    let mut d_diag = vec![0.0; nelim];
+    for j in 0..nelim {
+        d_diag[j] = a[j * nrow + j];
+        l[j * nrow + j] = 1.0;
+        for i in (j + 1)..nrow {
+            l[j * nrow + i] = a[j * nrow + i];
+        }
+    }
+
+    let cdim = nrow - nelim;
+    let mut contrib = vec![0.0; cdim * cdim];
+    for cj in 0..cdim {
+        for ci in cj..cdim {
+            contrib[cj * cdim + ci] = a[(nelim + cj) * nrow + (nelim + ci)];
+        }
+    }
+
+    let perm: Vec<usize> = (0..nrow).collect();
+    let perm_inv = perm.clone();
+
+    let mut needs_refinement = false;
+    flag_growth_for_refinement(&l, &mut needs_refinement);
+
+    Ok(FrontalFactors {
+        nrow,
+        ncol,
+        nelim,
+        l,
+        d_diag,
+        d_subdiag: vec![0.0; nelim],
+        perm,
+        perm_inv,
+        contrib,
+        contrib_dim: cdim,
+        n_delayed: 0,
+        inertia: Inertia::new(pos, neg, 0),
+        needs_refinement,
+        n_rook_rescues: 0,
+        zero_tol: params.zero_tol,
+        zero_tol_2x2: params.zero_tol_2x2,
+    })
+}
+
 /// Process one blocked panel of up to `bs` pure 1×1 pivots starting at
 /// global column `k`. Applies per-column peek-ahead (replay of pending
 /// rank-1 updates from prior panel pivots) before each pivot search so
