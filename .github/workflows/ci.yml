@@ -41,3 +41,48 @@ jobs:
         # Reject bare summary-only commits on PRs (advisory — does not block CI)
         run: |
           git log --format="%B" -1 | awk 'NR==2{found=1} END{if(!found){print "WARNING: commit has no body";}}'
+
+  stress-smoke:
+    # M5 gate (issue #28). Runs the stress harness in synth + small-
+    # SuiteSparse mode (n <= 1000) and fails the build if report.py
+    # flags any new matrix relative to the documented allowlist.
+    #
+    # Sizing budget: on a local M-series mac the trio (synth.py +
+    # run.py --max-n 1000 + report.py) completes in <1s after the
+    # release build (8s cold). x86 GitHub runners are ~2.5x slower
+    # but the cargo build dominates either way; the whole job
+    # comfortably fits the 10-min acceptance budget from #28.
+    #
+    # At n<=1000 the matrix set is 21 rows: 17 synth (zero network),
+    # 3 cuter_kkt (sourced locally from tests/data/parity/), and one
+    # SuiteSparse row (none currently — the smallest GHS_indef in
+    # the manifest is n=6001). The actions/cache step below is wired
+    # for the day a small SuiteSparse row is added; today it is a
+    # zero-byte cache.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # Speed up the release build of bench_one_matrix across runs.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: stress-smoke
+      # Cache the downloaded SuiteSparse matrices keyed on the
+      # manifest hash so a manifest edit is the only trigger for a
+      # re-fetch. The cache is per-manifest-content, not per-branch.
+      - name: cache stress matrices
+        uses: actions/cache@v4
+        with:
+          path: external_benchmarks/stress/matrices
+          key: stress-matrices-${{ hashFiles('external_benchmarks/stress/manifest.tsv') }}
+      - name: build bench_one_matrix
+        run: cargo build --release --bin bench_one_matrix
+      - name: synth matrices
+        run: python3 external_benchmarks/stress/synth.py
+      - name: run stress (n<=1000)
+        run: python3 external_benchmarks/stress/run.py --max-n 1000
+      - name: report (PR-blocking gate)
+        run: python3 external_benchmarks/stress/report.py
