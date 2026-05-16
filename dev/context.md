@@ -1,76 +1,76 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-16T17:12:39Z
+Generated: 2026-05-16T17:39:54Z
 
 ## Latest Session
-File: dev/sessions/2026-05-16-03.md
+File: dev/sessions/2026-05-16-04.md
 ```
-# Session 2026-05-16-03
+# Session 2026-05-16-04
 
 ## Goal
 
-Close GitHub issue #31 (M6: inertia certification on near-singular —
-sweep `eps_pow`, find detection boundary). Build a parametric sweep
-over `near_singular_eps_<p>` for p ∈ {6..14}, identify the boundary at
-which the default Bunch-Kaufman pivot threshold stops detecting the
-null pivot, and either certify the current threshold or propose a
-better criterion.
+Close issue #27 (M4 synthetic generators for saddle-rankdef,
+wide-frontal, MC64-resistant, and Stokes pathologies in the stress
+suite) and the issue #31 follow-up asking for an explicit exact-zero
+rankdef matrix to expose the dispersed-null-space failure mode.
 
 ## Accomplished
 
-- Extended `external_benchmarks/stress/synth.py` with a parametric
-  generator family `near_singular_eps_<p>` for p ∈ {6..14}
-  (seed = 100+p, n=100, one λ=10^-p, 99 healthy λ in [0.5, 3.0]).
-  Existing `near_singular_eps9` / `near_singular_eps12` rows preserved.
-- New diagnostic binary `src/bin/diag_near_singular_sweep.rs` that
-  runs `Solver::new()` factor + `solve_refined` on each matrix and
-  reports `(status, inertia, min|D_ii|, rel_res, pivtol)`.
-- Wrote `dev/research/inertia-near-singular-certification.md` with the
-  full sweep table, theory, bound argument, and the rejected
-  alternative criterion.
-- Added regression row `near_singular_eps_7` to
-  `external_benchmarks/stress/manifest.tsv` (per the issue's
-  acceptance criterion of "boundary + 1").
+Added five new generator families to
+`external_benchmarks/stress/synth.py`, all seeded for bit-
+reproducibility and verified against NumPy oracles:
 
-### Key finding
+| generator                  | matrix size | nnz   | expected inertia |
+|----------------------------|-------------|-------|------------------|
+| `rankdef_exact_50_5`       | 50          | 1275  | (21, 24, 5)      |
+| `rankdef_exact_100_10`     | 100         | 5050  | (50, 40, 10)     |
+| `saddle_rankdef_50_10_3`   | 90          | 3315  | (50, 37, 3)      |
+| `saddle_rankdef_100_20_5`  | 180         | 13130 | (100, 75, 5)     |
+| `wide_frontal_616`         | 616         | 178982| data-dependent   |
+| `mc64_resistant_200`       | 200         | 20100 | (107, 93, 0)     |
+| `stokes_q1p0_8`            | 162         | 866   | (98, 62, 2)      |
 
-The issue's premise was wrong. The sweep shows feral reports
-`inertia.zero == 0` for *every* p ∈ {6..14}, including the canonical
-`near_singular_eps9` and `near_singular_eps12` matrices — they were
-never actually being detected as null. The boundary is p = 6.
+`report.py` extended with regex-based oracle dispatch for each new
+naming convention (`rankdef_exact_<n>_<k>`,
+`saddle_rankdef_<n>_<k>_<r>`, `stokes_q1p0_<h>` map to expected zero
+counts of k, r, and 2 respectively). The rank-deficient-refusal
+short-circuit broadened from `category == "rankdef"` to also cover
+`saddle_rankdef` and `stokes`. Manifest gains seven new rows.
 
-| p  | status   | (pos, neg, zero) | min &#124;D_ii&#124; | rel_res    |
-|----|----------|------------------|----------------------|------------|
-|  6 | Success  | (48, 52, 0)      | -1.25e+1             | 4.32e-16   |
-|  9 | Success  | (59, 41, 0)      | -1.47e+1             | 4.55e-16   |
-| 12 | Success  | (53, 47, 0)      | -2.12e+1             | 5.74e-16   |
-| 14 | Success  | (43, 57, 0)      | -9.55e+0             | 2.14e-15   |
+Math, oracle derivations, and the abandoned mc64_resistant first
+attempt are documented in
+`dev/research/synthetic-generators-m4.md`.
 
-The factorization is stable (residuals 2-6 × 10^-16 after iterative
-refinement) but the null space is invisible to a magnitude-based
-pivot test. This is the expected behavior for a single small
-eigenvalue dispersed across a random orthonormal basis Q — see
-Higham 2002 Ch. 11 and the BK bound `|d_k| ≥ (1-α²) σ_min(A_22)`
-which lower-bounds the pivot magnitude by the *trailing* submatrix's
-smallest singular value, not the input matrix's.
+End-to-end verification:
+- `python3 external_benchmarks/stress/synth.py --only <name>` produces
+  each matrix with deterministic header (`50 50 1275`, etc.).
+- `cargo build --release --bin bench_one_matrix` succeeds.
+- `python3 external_benchmarks/stress/run.py --category
+  rankdef,saddle_rankdef,stokes,wide_frontal,mc64_resistant` factors
+  all 7 new matrices in <14ms total factor time; the largest
+  individual factor is `wide_frontal_616` at 12.9ms.
+- `python3 external_benchmarks/stress/report.py` flags none. All seven
+  matrices have `rel_res < 1e-13`. `stokes_q1p0_8` returns the exact
+  expected inertia `(98, 62, 2)` — feral's BK pivoting correctly
+  recovers the 2-dimensional LBB defect.
 
 ## Benchmark Results
 ```
 
 ## Git Status
 ```
-d3b031d research(#10): supernode-shape ordering A/B — NEGATIVE on Mittelmann panel
-af53f4e chore(context): refresh dev/context.md with new test+bench excerpt
-84238ac chore(session): 2026-05-16-02 -- CI hooksPath fix, #24/#25/#33 §3, axpy negative
-fa62918 test(scaling): relax MSS1_0009 reason check to either fallback variant
-e789ec3 Merge branch 'worktree-agent-ab2727cb5b91921b5'
+74f5f26 merge(#30): IR convergence policy research — keep current loop
+d431362 chore(context): refresh dev/context.md after issue #30 research
+2630770 research(#30): IR convergence policy -- keep residual-based exit
+594db5a merge(#31): near-singular eps boundary certification (worktree agent)
+7657b0d docs(inertia): certify near-singular detection boundary p=6 (#31)
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-510ea496d233abcf)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-e78ae26ec1799036)
 
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok
@@ -92,69 +92,93 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-16-03.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-16-04.md)
 
 
-Did not run `cargo run --bin bench --release` — this session only
-added a diagnostic binary, a generator extension, a research note,
-and a manifest row. No solver code touched, no benchmark-relevant
-changes. The sweep binary's own output is in the research note.
+`cargo run --bin bench --release` (no synthetic matrices in
+`data/benchmark-config.toml`, so the standard suite was unaffected by
+this session's changes):
+
+name                n   factor(μs)    solve(μs)        inertia
+--------------------------------------------------------------
+spd_10             10           43            0     (10, 0, 0)
+spd_50             50           21            3     (50, 0, 0)
+spd_100           100           86            5    (100, 0, 0)
+spd_200           200          422           20    (200, 0, 0)
+kkt_10_3           13            3            0     (10, 3, 0)
+kkt_30_10          40           21            1    (30, 10, 0)
+kkt_50_15          65           49            2    (50, 15, 0)
+kkt_100_30        130          206            7   (100, 30, 0)
+
+8 matrices benchmarked
+
+Stress-suite factor times for the new matrices (from `run.py`):
+
+rankdef_exact_50_5      58 μs
+rankdef_exact_100_10   119 μs
+saddle_rankdef_50_10_3  91 μs
+stokes_q1p0_8          133 μs
+saddle_rankdef_100_20_5 603 μs
+mc64_resistant_200     853 μs
+wide_frontal_616     12866 μs
+
+All well under the 1-second target.
 
 ```
 
 ## Recent Decisions
-this session via `probe_cascade_perturb`) is fully recoverable
-with a single builder call. The `Solver::with_cascade_break_eps`
-and `Solver::with_cascade_break` builders are unchanged. Tests
-that exercise the gate continue to construct `NumericParams`
-with explicit `Some(...)` values.
+matrices) costs zero extra IR solves under the current code.
 
 **Evidence.**
-- `probe_cascade_perturb` on `robot_1600_0004` (n=24000):
-  cb=off residual 6.24e-7; cb=default residual 1.06e-5;
-  cb=fa residual 2.10e+2.
-- `probe_cascade_perturb` on `pinene_3200_0009` (n=127995):
-  cb=off factor 94 s, residual 2.27e-2; cb=default factor 33 ms,
-  residual 7.99e-2 (with inertia preserved); cb=fa factor 36 ms
-  but wrong inertia and residual 5.34e+3.
-- `cargo test --lib --release` → 256 passed; integration tests
-  pass; `cargo clippy --all-targets --release -- -D warnings` clean;
-  `cargo fmt --check` clean.
-- `cargo run --release --bin bench` Phase 2.8.1 dense+sparse
-  small-frontal and medium buckets all PASS; bench numbers within
-  noise of session 2026-05-15-06.
+- `dev/research/ir-convergence-policy.md` — methodology, raw
+  per-matrix table, bucket A/B/C analysis,
+  `external_benchmarks/stress/out/ir_probe/*.out` sidecars.
+- κ̂(A) distributions overlap between the "IR helps" bucket
+  (κ̂ ∈ [1.16e3, 8.00e22]) and the "IR no-op" bucket
+  (κ̂ ∈ [9.94e1, 2.29e29]); no κ̂ threshold separates them.
+  Routing `bratu3d` (κ̂=1.16e3) into a skip path would lose
+  10.24 decades of residual.
+- 4 stagnant matrices cost ≤3 IR solves each (the existing
+  `max_stagnant_steps=2` rule). Total "wasted" IR work across
+  the corpus is ≤12 extra solve-calls — bounded and small.
+- `cargo test` and `cargo clippy --all-targets -- -D warnings`
+  clean (no implementation change in `src/`; only the probe
+  binary and analysis script were added).
+
+**Escape hatches for callers who want to bypass IR.** They
+already exist: `Solver::solve`, `solve_sparse`, and
+`solve_sparse_many` call back-substitution directly without IR.
+The skip-IR knob is a method-selection decision at the call
+site, not a parameter inside `solve_sparse_refined`.
 
 **References.**
-- `dev/research/cascade-break-l-perturbation-2026-05-15.md` —
-  the corrected forensics (the note's original "zero L" proposal
-  was rejected; the note now records both the wrong premise and
-  the right outcome).
-- `dev/tried-and-rejected.md` — 2026-05-15 "Zero L on
-  `PerturbToEps`" entry.
-- `src/bin/probe_cascade_perturb.rs` — the probe that produced
-  the residual numbers.
+- `dev/research/ir-convergence-policy.md`
+- `src/bin/probe_ir_trajectory.rs`
+- `external_benchmarks/stress/analyze_ir.py`
+- `external_benchmarks/stress/out/ir_probe/`
+- `src/numeric/solve.rs` lines 640–897 (the unchanged loop)
 
 ## Recent Tried-and-Rejected
-[3, 4, 5, 6, 8, 10, 16, 32, 64, 128].
+scaling to fail at — the matrix is already perfectly equilibrated.
 
-Result: pulp ties with plain scalar within 1ns/call quantization at
-all lengths 3..128; manual unroll4 is *slower* (0.25-1.00x). The
-compiler auto-vectorizes the scalar form as well as the explicit SIMD
-dispatch. Kernel-call overhead is *not* the bottleneck.
+Direct verification on n=200, seed=601:
+- `np.linalg.cond(A) = 1.48` before any scaling
+- after a symmetric row-max scaling (proxy for MC64-style scaling):
+  `cond = 1.48` (unchanged, as expected)
 
-Implication: the #10 Phase 2 corpus post-mortem's hypothesis that
-"the next lever is the scalar rank-1 trailing-update kernel" was
-also wrong. Three architectural levers tried against the 1D-banded
-Mittelmann panel (#33 SmallLeafBatch driver overhead, #10 MAXFROMM
-pivot selection, axpy kernel tightening) all come up within noise.
+The "rank-1 perturbation of a diagonally dominant skeleton" framing
+suggested in the issue was misleading: a low-rank update of an O(1)
+diagonal redistributes O(1) mass; it does not produce the dispersed
+ill-conditioning that defeats diagonal scaling.
 
-Remaining levers for the corpus: (a) `Solver::with_ordering(ScotchND)`
-to widen the supernode shape (untested, just landed via #33 §3);
-(b) supernode amalgamation (symbolic-side restructure); (c) accept
-a hardware floor for sequential factorization on this shape.
+Replaced with `A = Q D Q^T` construction where Q is a random dense
+orthonormal basis and D has one eigenvalue at `1e-8` with the rest
+O(1). Now `cond(A) = 2e8` before *and* after symmetric scaling — the
+small eigenvalue is in a basis direction that diagonal scaling
+cannot reach.
 
-References: `src/bin/bench_axpy_small.rs`, journal
-`2026-05-16-02.org` 11:30 entry.
+Documented in `dev/research/synthetic-generators-m4.md` §4. The
+current generator uses the Q D Q^T construction.
 
 ## Source Files
 ```
@@ -231,6 +255,7 @@ src/bin/policy4_diag.rs
 src/bin/probe_acopp30_64.rs
 src/bin/probe_cascade_perturb.rs
 src/bin/probe_deltac_sensitivity.rs
+src/bin/probe_ir_trajectory.rs
 src/bin/probe_issue_19.rs
 src/bin/probe_panel_attribution.rs
 src/bin/probe_scaling_policy4.rs
