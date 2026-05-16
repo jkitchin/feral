@@ -1622,3 +1622,33 @@ a hardware floor for sequential factorization on this shape.
 
 References: `src/bin/bench_axpy_small.rs`, journal
 `2026-05-16-02.org` 11:30 entry.
+
+## 2026-05-16 — Rank-1 perturbation for `mc64_resistant` synthetic
+
+First attempt at the `mc64_resistant_n` generator (issue #27 stress
+suite) built the matrix as `A = I + α · u u^T` with `u = 𝟙/√n` and
+`α = -2`, on the theory that a rank-1 update of a flat diagonal would
+defeat MC64's symmetric scaling.
+
+Wrong: the eigenvalues of this rank-1 update are `1` (multiplicity
+n-1) and `1 + α = -1`. So `cond(A) = 1` and there is nothing for MC64
+scaling to fail at — the matrix is already perfectly equilibrated.
+
+Direct verification on n=200, seed=601:
+- `np.linalg.cond(A) = 1.48` before any scaling
+- after a symmetric row-max scaling (proxy for MC64-style scaling):
+  `cond = 1.48` (unchanged, as expected)
+
+The "rank-1 perturbation of a diagonally dominant skeleton" framing
+suggested in the issue was misleading: a low-rank update of an O(1)
+diagonal redistributes O(1) mass; it does not produce the dispersed
+ill-conditioning that defeats diagonal scaling.
+
+Replaced with `A = Q D Q^T` construction where Q is a random dense
+orthonormal basis and D has one eigenvalue at `1e-8` with the rest
+O(1). Now `cond(A) = 2e8` before *and* after symmetric scaling — the
+small eigenvalue is in a basis direction that diagonal scaling
+cannot reach.
+
+Documented in `dev/research/synthetic-generators-m4.md` §4. The
+current generator uses the Q D Q^T construction.

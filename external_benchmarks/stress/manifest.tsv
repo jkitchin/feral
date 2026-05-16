@@ -28,3 +28,10 @@ synth	ill_cond_e10	100	1485	illcond	100x100 sym indef cond ~ 1e10
 synth	ill_cond_e14	100	1485	illcond	100x100 sym indef cond ~ 1e14
 synth	deep_null_cascade_50	50	149	cascade	Long zero-pivot cascade, n=50
 synth	deep_null_cascade_200	200	599	cascade	Long zero-pivot cascade, n=200
+synth	rankdef_exact_50_5	50	1275	rankdef	Exact-zero rankdef (issue #31 follow-up); dispersed null
+synth	rankdef_exact_100_10	100	5050	rankdef	Exact-zero rankdef, larger; dispersed null
+synth	saddle_rankdef_50_10_3	90	3315	saddle_rankdef	KKT [H A^T; A 0] m=40 rank(A)=37 → inertia (50,37,3)
+synth	saddle_rankdef_100_20_5	180	13130	saddle_rankdef	KKT m=80 rank(A)=75 → inertia (100,75,5)
+synth	wide_frontal_616	616	178982	wide_frontal	Bordered block diag, single supernode width 600
+synth	mc64_resistant_200	200	20100	mc64_resistant	Q D Q^T with one λ=1e-8; MC64 scaling cannot fix κ~1e8
+synth	stokes_q1p0_8	162	866	stokes	Q1-P0 Stokes h=8; inertia (98,62,2), 2 spurious pressure modes
