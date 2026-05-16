@@ -1880,3 +1880,57 @@ small-front amortization target).
 Summary JSON: `out_ab/issue_11_summary.json`. Both deleted at
 the end of session per workflow; reproduce from
 `dev/journal/2026-05-16-11.org`.
+
+
+## 2026-05-16: `OrderingMethod::AutoRace` as `Solver::new()` default (proposed for #37)
+
+**What was tried.** Switching `Solver::new()`'s default ordering
+from `OrderingMethod::Auto` to `OrderingMethod::AutoRace` to close
+issue #37 (pinene_3200 CB=off regression) without requiring the
+per-problem `Solver::with_cascade_break(0.5)` workaround. The
+hypothesis rested on the c92cafe commit message claiming
+"on pinene_3200_0009 the [`pick_default_method`] heuristic picks
+`MetisND` (88 s numeric factor), but `Amd` factors in 19.5 s on
+the same matrix — a 4.5× win that the cheap predicate misses."
+
+**How it failed.** Diag runs of `diag_pinene_amd` on the actual
+default-config Solver (CB=off since 585d739) show AMD on
+pinene_3200 is **catastrophically worse** than MetisND, not better:
+
+| variant            | iter   | factor    | delay_in   | n_2x2 |
+|--------------------|--------|-----------|------------|-------|
+| AMD     CB=off     | _0009  |  917.477s | 13,572,596 | 21,001|
+| AMD     CB=off     | _0008  | 1055.306s | 13,425,707 | 20,790|
+| MetisND CB=off     | _0009  |   ~88s    | (per c92cafe) |   —   |
+| AMD     CB=on (0.5)| _0009  |   19.5s   | (per c92cafe) |   —   |
+
+The 4.5× AMD win in the c92cafe writeup was measured under
+cascade-break ARMED (CB ratio in the 0.94–0.95 sweet spot per
+`dev/journal/2026-05-13-03.org`). After 585d739 made CB opt-in,
+the AMD-without-CB path produces 13.5M delayed pivots that
+cascade through the elimination tree, dominating the factor cost.
+MetisND is "less bad" only because its larger root supernode
+absorbs more delays before the cascade compounds.
+
+Robot_1600_0003 (the #17 regression guard) was clean under either
+ordering (both produce neg=9601 matching MUMPS, AMD 1.4× faster).
+So the regression guard would not have caught this — the failure
+is specific to pinene's elimination tree shape, not to AMD itself.
+
+**Disposition.**
+- `Solver::new()` retains `OrderingMethod::Auto` as the default.
+- The c92cafe claim about AMD speedup on pinene is now historical
+  (CB=on regime only) and should not be cited as motivation for
+  default-ordering changes.
+- Closing #37 requires fixing the underlying CB-mechanism gap, not
+  the ordering choice. The follow-up investigation (see
+  `dev/sessions/2026-05-16-30.md` and `dev/journal/2026-05-16-30.org`)
+  redirects to issue #38 and surfaces a separate silent-correctness
+  bug — stale MC64 cache producing wrong inertia on warm IPM
+  re-factors — that is the more likely root cause for both #37 and #38.
+
+**Evidence.** Diag outputs at
+`/private/tmp/claude-501/-Users-jkitchin-projects-feral/<session>/tasks/{br9xq3zub,bh8zlfol7,b0ozjbi4h}.output`
+(retained for the session; reproducible via
+`cargo run --release --bin diag_pinene_amd -- pinene_3200_0009`,
+`pinene_3200_0008`, and `robot_1600_0003` from a checkout at HEAD).

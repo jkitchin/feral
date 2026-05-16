@@ -1,0 +1,183 @@
+* 16:21 :issue37:investigation:ordering:
+Investigating user assertion that #37 (pinene_3200 CB=off regression) "relies on a
+workaround that should not be needed". Hypothesis: switching Solver::new()'s default
+ordering from OrderingMethod::Auto to OrderingMethod::AutoRace would close #37 by
+picking AMD over MetisND on pinene_3200, eliminating the cascade-break workaround need.
+
+Evidence cited for hypothesis: c92cafe commit message claims AMD on pinene_3200_0009
+is 19.5s vs MetisND 88s (4.5× win), while pick_default_method routes
+n=127995, avg_deg=5.73 → MetisND (5000-floor, avg_deg<6 gate).
+
+Launched three diag_pinene_amd runs to gather data: pinene_3200_0008,
+pinene_3200_0009, and the #17 reproducer robot_1600_0003 as a regression guard.
+
+* 16:32 :issue37:diag:robot1600:
+robot_1600_0003 diag completed first. Result:
+- AMD:     sym=0.020s factor=0.012s neg=9601 (matches MUMPS oracle)
+- MetisND: sym=0.056s factor=0.017s neg=9601 (matches)
+Both produce correct inertia under CB=off; AMD ~1.4× faster. So switching to
+AutoRace would not regress #17. Hypothesis still alive at this point.
+
+* 16:50 :issue37:diag:pinene:hypothesis-killed:
+Both pinene runs completed. Hypothesis is DEAD:
+- pinene_3200_0009 AMD: factor=917.477s delay_in=13572596 n_2x2=21001 inertia OK
+- pinene_3200_0008 AMD: factor=1055.306s delay_in=13425707 n_2x2=20790 inertia OK
+
+AMD on pinene_3200 under CB=off is ~10× WORSE than MetisND (88s), not 4.5× better.
+The c92cafe "AMD wins on pinene" claim predates 585d739 making cascade-break opt-in
+by default — c92cafe's diag was likely run with CB armed. Without CB the 13.5M
+delayed pivots cascade through the tree for both AMD and MetisND.
+
+Conclusion: AutoRace default flip cannot fix #37. The bug is in the cascade-break
+mechanism being opt-in (and the lack of a safe mid-ground), not in ordering choice.
+
+* 17:00 :issue38:hand-off:reframe:
+User redirected: "see issue #38". #38 is the user's deliberate reframe of #17+#37
+as a CB-mechanism question: rocket_12800 has BOTH CB modes failing (CB=off explodes
+per-factor, CB=on triggers wrong-inertia / restoration spiral). Issue body proposes
+two distinct root-causes to investigate:
+- Failure A: warm-Solver-state slowdown at high δ_w under CB=off (per-factor cost
+  runs away at iter #017 — 57s observed)
+- Failure B: iter-4 numerical disagreement vs MA57 under CB=on
+
+Fix either independently → workaround story improves: fix A → CB=off viable
+everywhere; fix B → CB=on viable everywhere.
+
+User confirmed reproducer dumps exist at /tmp/rkt_{000..017}.bin, and the
+uncommitted feral_replay.rs helper is in src/bin/. Tracked workspace is dirty
+with feral_replay.rs, feral_time.rs, Makefile (all uncommitted).
+
+* 17:05 :issue38:repro:failureA:confirmed:
+Reproduced Failure A with default Solver::new() (CB=off, parallel=on):
+| call | build  | factor  | neg   | comment       |
+|------+--------+---------+-------+---------------|
+| #000 | 0.004s | 0.320s  | 38400 | cold (symbolic)|
+| #001 | 0.003s | 0.023s  | 38402 | warm stable    |
+| #009 | 0.003s | 0.023s  | 38400 | warm stable    |
+| #010 | 0.003s | 0.022s  | 38395 | drift starts   |
+| #013 | 0.003s | 0.023s  | 38288 | drift          |
+| #014 | 0.003s | 0.024s  | 38145 | drift          |
+| #015 | 0.004s | 0.056s  | 37513 | cost picks up  |
+| #016 | 0.003s | 2.093s  | 35900 | cost explodes  |
+| #017 | 0.004s | 43.216s | 31720 | runaway        |
+
+Matches issue body's qualitative description (cost jump #015 → #017,
+inertia drift from ~38400 to 31720). The 43s vs 57s in the issue body
+is within run-to-run variance.
+
+* 17:10 :issue38:fresh-vs-warm:silent-corruption:
+Added FRESH=1 mode to feral_replay (rebuilds Solver each call, reuses
+no state). Replayed calls 14-17 fresh:
+| call | factor warm | factor fresh | neg warm | neg fresh |
+|------+-------------+--------------+----------+-----------|
+| #014 | 0.024s      | 1.206s       | 38145    | **38400** |
+| #015 | 0.056s      | 1.222s       | 37513    | **38400** |
+| #016 | 2.093s      | 1.194s       | 35900    | **38400** |
+| #017 | 43.216s     | 1.640s       | 31720    | **38400** |
+
+THIS IS BIGGER THAN #38'S WARM-SLOWDOWN HYPOTHESIS.
+
+Same matrix file. Same Solver::new() config. Warm produces DRIFTING, WRONG
+inertia (silent corruption — visible from call #010 onward in the original
+sweep, well before cost explodes); fresh produces stable, correct inertia
+(38400 = MA57's value per CB=on data in issue body) on every call.
+
+The warm-state cost amplification at #017 is 26× (43.2s warm vs 1.6s fresh).
+
+* 17:15 :issue38:localization:not-rayon:
+Re-ran warm + fresh under PAR=0 (sequential driver). Both effects reproduce
+identically without the parallel driver. PAR=0 warm: 38400→35900 drift,
+cost explodes at #016 same as PAR=on. PAR=0 fresh #14-17: 38400 stable,
+~1.25s each. → bug is in factorize_multifrontal_supernodal_with_workspace,
+NOT in parallel-pool warm state.
+
+* 17:25 :issue38:root-cause:mc64-cache-staleness:
+Hypothesized stale MC64 cache. Mechanism:
+- ScalingStrategy default = Auto (mod.rs:126)
+- Auto on arrow-KKT routes to Mc64Symmetric (compute_scaling_auto_with_cache)
+- pick_ordering_preprocess triggers LdltCompress when n>=128 and
+  >=30% columns have degree<=2 (rocket KKT qualifies — 38400 slack columns
+  in n=89601)
+- LdltCompress at symbolic time populates SymbolicFactorization::cached_mc64
+  via mc64::compute_matching(matrix) at iter 0 values
+- compute_scaling_with_cache(matrix, Mc64Symmetric, Some(cache)) takes the
+  Some path → scaling_from_cache(cache) → applies iter-0 cache to iter-N matrix
+- MC64 matching, dual variables (u, v), and column maxes (cmax) are all
+  value-dependent — but the cache reuses iter-0 values across all subsequent
+  factor() calls
+
+The bug: in IPM, every factor() call uses different values on the same
+pattern. The cache is built once at iter 0 and reused, silently applying
+iter-0's scaling to iter-N's matrix. As values drift, the scaling becomes
+increasingly mismatched, producing wrong inertia and eventually a cascade
+of delayed pivots that explode the factor cost.
+
+* 17:30 :issue38:hypothesis-confirmed:scaling=infnorm:
+Added SCALING={identity,infnorm,mc64} env-var to feral_replay (constructs
+NumericParams with the chosen strategy). Re-ran warm CB=off with InfNorm:
+
+| call | factor  | neg   |
+|------+---------+-------|
+| #000 | 0.409s  | 38400 |
+| #009 | 0.026s  | 38400 |
+| #010 | 0.026s  | 38400 |
+| #013 | 0.027s  | 38400 |
+| #014 | 0.028s  | 38400 |
+| #015 | 0.042s  | 38400 |
+| #016 | 0.028s  | 38400 |
+| #017 | 0.027s  | 38400 |
+
+Stable 38400 inertia throughout, ~27ms factor times across all 18 calls,
+NO cost explosion. Bypassing the MC64 cache entirely fixes both the inertia
+corruption AND the cost runaway. **Root cause confirmed.**
+
+Cross-check: SCALING=identity does NOT fix the bug (matrix is ill-conditioned
+enough to cascade even without scaling — but Identity also has no cache, so
+it's a confounded probe). The InfNorm result is the clean control: it isolates
+the cache mechanism (Identity uses no cache; InfNorm uses no cache; Identity
+fails for matrix reasons; InfNorm succeeds because equilibration prevents the
+cascade). The cleanest probe would be Auto-with-cache-forced-None — implies
+modifying the solver.
+
+* 17:35 :issue38:scope:fix-plan:
+The MC64 cache must be invalidated (or recomputed) per factor() call when
+the matrix values change. Options:
+1. Drop the cache entirely. Lose the ~70% symbolic-overhead amortization
+   that motivated the cache; but the amortization assumed reuse for the
+   SAME matrix, which never happens in IPM.
+2. Recompute the cache lazily on each factor() when scaling resolves to
+   Mc64. Same cost as no cache for IPM, no savings on reuse.
+3. Cache-with-revalidation: at factor() entry, cheap check whether values
+   changed since cache was built (hash of a sentinel value? first column
+   sum?), invalidate if so. Cheap check, recomputes only when needed.
+4. Treat the cache as the "initial guess" for an MC64 warm-start (does
+   Hungarian support warm-starting?). Most aggressive; needs research.
+
+Option 2 is the safe immediate fix. Option 3 is the optimization. Option
+4 is research scope.
+
+Independent of which path, this needs a regression test that locks the
+warm-vs-fresh inertia agreement on the rocket_12800 dumps (or a smaller
+arrow-KKT reproducer that ships with the repo).
+
+* 17:45 :issue38:next-steps:session-handoff:
+Captured all findings. Plan for next session:
+- Write research note dev/research/mc64-cache-staleness-2026-05-16.md
+  covering the failure mechanism + the four fix options analyzed against
+  the IPM use case
+- Post a comment on #38 summarizing this finding (it changes the issue's
+  framing: not "warm slowdown" but "stale MC64 cache produces wrong inertia
+  and eventually explodes cost")
+- Land the fix (option 2 likely) + regression test on rocket KKTs (need to
+  decide whether to commit a small reproducer fixture or keep the test in
+  the /tmp dumps regime)
+- Re-test #37 pinene_3200 under the fix — likely also rescued, since pinene
+  is also arrow-KKT (KKT order 127995 with optimal-control slack structure)
+  and likely hits the same cache-staleness path
+
+Out of session-scope but worth recording:
+- AutoRace default flip is NOT the fix for #37 (this session's first
+  hypothesis killed by the diag data)
+- The integration session checkpoint at dev/sessions/2026-05-16-29.md
+  flagged "+7.7% large-bucket median speedup" as a next-session item; that
+  remains untouched.
