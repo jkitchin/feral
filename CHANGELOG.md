@@ -4,6 +4,26 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — Issue #10 closes; default `nemin=16` and `OrderingMethod::Amd` confirmed (#10)
+
+Issue #10 ("Add APP path alongside TPP in dense LDLᵀ kernel") closes
+without an APP implementation. Five architectural levers were tried
+against the 1D-banded Mittelmann panel — SLB driver removal,
+MAXFROMM AMAX cache, manual axpy SIMD, ordering swap (Metis/Scotch
+ND), and forced supernode amalgamation (`nemin ∈ {32, 64, 128}`) —
+and all five came up negative. The rank-1 axpy kernel on
+`ncol=1..16` fronts is bandwidth-bound; pulp saturates the vector
+ALU; AMD's elimination tree is already shape-optimal under the
+nnz_L bound. New diagnostic binary `diag_nemin_amalgamation_panel`
+sweeps `SupernodeParams::nemin ∈ {16, 32, 64, 128}` on the 4-family
+× 20-matrix panel and reports paired-by-matrix geomean ratios; the
+shape lever engages (`ncol_mean` doubles at nemin=64) but factor
+time stays flat or regresses 36% on `clnlbeam`. Cumulative 5-lever
+table and the joint conclusion are documented in
+`dev/research/issue-10-amalgamation-floor.md`. The opt-in knobs
+(`Solver::with_ordering`, `SupernodeParams::nemin`) stay shipped;
+defaults unchanged.
+
 ### Added — FBRAIN3LS pivot-threshold sweep + stress-suite entry (#29)
 
 New diagnostic binary `diag_fbrain3ls_pivtol_sweep` factors five

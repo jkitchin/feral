@@ -3472,3 +3472,43 @@ empirical evidence that opt-in friction is hurting adoption.
 - `/Users/jkitchin/.claude/plans/let-s-work-on-a-reflective-anchor.md` —
   user-approved implementation plan (commit phasing a-h).
 - GitHub tracking issue: filed in commit (a).
+
+---
+
+## 2026-05-16 — Issue #10 closes as hardware floor; default `nemin=16` retained
+
+Issue #10 ("Add APP path alongside TPP in dense LDLᵀ kernel") closes
+without an APP implementation. Five architectural levers were
+tried against the 1D-banded Mittelmann panel; all five came up
+negative:
+
+1. SmallLeafBatch driver removal — within noise.
+2. MAXFROMM AMAX-scan cache — within noise.
+3. Manual axpy SIMD tightening — pulp ties scalar within 1ns/call.
+4. Ordering swap (Metis/Scotch ND) — 1.3–2.3× slower; no shape
+   widening (`ncol_p90` invariant at 10.08 across all orderings).
+5. Forced supernode amalgamation (`nemin ∈ {32, 64, 128}`) — shape
+   widens 2× but factor time flat or regresses 36% on `clnlbeam`.
+
+The rank-1 axpy kernel on `ncol=1..16` fronts is bandwidth-bound;
+pulp saturates the vector ALU; AMD's elimination tree is already
+shape-optimal under the nnz_L bound. No further per-pivot speedup
+is available without changing the front structure in ways that
+violate the nnz_L bound that motivated the ordering choice.
+
+**Decision.** Keep `SupernodeParams { nemin: 16, .. }` as the
+default. Keep `OrderingMethod::Amd` as the default. The opt-in
+knobs `Solver::with_ordering(MetisND/ScotchND)` (shipped session 02)
+and `SupernodeParams::nemin` (existing) stay available for
+workloads where the elimination tree genuinely has fusion
+opportunities. No APP-class kernel is shipped; future work that
+*adds new front structure* (children-of-children amalgamation
+across non-adjacent tree levels, or a kernel that handles
+`ncol < tile-size` differently) is welcome as a fresh issue.
+
+References:
+- `dev/research/issue-10-maxfromm-phase2-corpus.md` (#1, #2)
+- `dev/research/issue-10-ordering-supernode-shape.md` (#4)
+- `dev/research/issue-10-amalgamation-floor.md` (#5)
+- Commits: d3b031d, 61002f8.
+- GH: https://github.com/jkitchin/feral/issues/10#issuecomment-4467668859

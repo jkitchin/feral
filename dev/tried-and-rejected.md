@@ -1652,3 +1652,48 @@ cannot reach.
 
 Documented in `dev/research/synthetic-generators-m4.md` §4. The
 current generator uses the Q D Q^T construction.
+
+---
+
+## 2026-05-16 — Forced supernode amalgamation (`nemin > 16`) on the 1D-banded Mittelmann panel
+
+**What.** Sweep `SupernodeParams::nemin ∈ {16, 32, 64, 128}` on the
+4-family × 20-matrix Mittelmann panel (`clnlbeam`, `henon120`,
+`lane_emden120`, `dirichlet120`). Hypothesis: widening the
+amalgamation threshold above the Phase 2.13a default of 16 will
+fuse bottom-of-tree chain-link supernodes into rectangular fronts
+wide enough to re-engage MAXFROMM / APP-class kernels.
+
+**Result. The shape lever engages but the time profile does not
+respond.**
+
+| family        | factor_us/nemin=16 (geomean, paired) |       |       |
+|---------------+-------+-------+-------|
+|               | n=32  | n=64  | n=128 |
+| clnlbeam      | 1.032 | 1.356 | 1.989 |
+| henon120      | 0.970 | 0.960 | 1.029 |
+| lane_emden120 | 0.953 | 0.903 | 0.909 |
+| dirichlet120  | 0.951 | 0.943 | 0.958 |
+
+`ncol_mean` doubles at nemin=64 across three of four families, but
+`factor_nnz` inflates 1.23–1.33× and factor time stays flat or
+regresses. `clnlbeam` regresses 36% at nemin=64 because chain-link
+merges blow trailing-fill faster than the wider panel can amortize.
+
+**Why it was rejected.** Closes the fifth and final architectural
+lever for issue #10. All five (SLB driver removal, MAXFROMM AMAX
+cache, manual axpy SIMD, ordering swap, this nemin sweep) come up
+negative on the 1D-banded panel. The rank-1 axpy kernel on
+`ncol=1..16` fronts is bandwidth-bound; pulp saturates the vector
+ALU; AMD's elimination tree is already shape-optimal under the
+nnz_L bound. A pilot run at `nemin ∈ {256, MAX}` hung on
+`clnlbeam_0000` — a single near-dense front of order >n/2 collapsed
+the dense LDL into a non-returning state. Sweep capped at 128.
+
+Issue #10 closes as "hardware floor reached on the 1D-banded panel."
+The opt-in knobs (`Solver::with_ordering`, `SupernodeParams::nemin`)
+stay shipped for workloads where the elimination tree genuinely
+has fusion opportunities — they just don't help here.
+
+Documented in `dev/research/issue-10-amalgamation-floor.md`. A/B
+binary: `src/bin/diag_nemin_amalgamation_panel.rs`. Commit 61002f8.

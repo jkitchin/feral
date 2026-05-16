@@ -1,83 +1,83 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-16T17:39:54Z
+Generated: 2026-05-16T17:57:40Z
 
 ## Latest Session
-File: dev/sessions/2026-05-16-04.md
+File: dev/sessions/2026-05-16-06.md
 ```
-# Session 2026-05-16-04
+# Session 2026-05-16-06
 
 ## Goal
 
-Close issue #27 (M4 synthetic generators for saddle-rankdef,
-wide-frontal, MC64-resistant, and Stokes pathologies in the stress
-suite) and the issue #31 follow-up asking for an explicit exact-zero
-rankdef matrix to expose the dispersed-null-space failure mode.
+Close out the final pre-floor lever for issue #10 (forced supernode
+amalgamation), merge agent-27's M4 synthetic generators, and ship
+the cumulative 5-lever verdict for the 1D-banded Mittelmann panel.
 
 ## Accomplished
 
-Added five new generator families to
-`external_benchmarks/stress/synth.py`, all seeded for bit-
-reproducibility and verified against NumPy oracles:
+### Issue #10 closed — 5/5 architectural levers exhausted
 
-| generator                  | matrix size | nnz   | expected inertia |
-|----------------------------|-------------|-------|------------------|
-| `rankdef_exact_50_5`       | 50          | 1275  | (21, 24, 5)      |
-| `rankdef_exact_100_10`     | 100         | 5050  | (50, 40, 10)     |
-| `saddle_rankdef_50_10_3`   | 90          | 3315  | (50, 37, 3)      |
-| `saddle_rankdef_100_20_5`  | 180         | 13130 | (100, 75, 5)     |
-| `wide_frontal_616`         | 616         | 178982| data-dependent   |
-| `mc64_resistant_200`       | 200         | 20100 | (107, 93, 0)     |
-| `stokes_q1p0_8`            | 162         | 866   | (98, 62, 2)      |
+| # | Lever                            | Verdict on 1D-banded panel  |
+|---|----------------------------------|-----------------------------|
+| 1 | SmallLeafBatch driver removal    | within noise                |
+| 2 | MAXFROMM AMAX-scan cache         | within noise                |
+| 3 | Manual axpy SIMD tightening      | pulp ties scalar within 1ns |
+| 4 | Ordering swap (Metis/Scotch ND)  | 1.3–2.3× slower             |
+| 5 | Forced amalgamation (nemin)      | shape widens 2×; time flat  |
 
-`report.py` extended with regex-based oracle dispatch for each new
-naming convention (`rankdef_exact_<n>_<k>`,
-`saddle_rankdef_<n>_<k>_<r>`, `stokes_q1p0_<h>` map to expected zero
-counts of k, r, and 2 respectively). The rank-deficient-refusal
-short-circuit broadened from `category == "rankdef"` to also cover
-`saddle_rankdef` and `stokes`. Manifest gains seven new rows.
+This session covered lever #5. Built
+`src/bin/diag_nemin_amalgamation_panel.rs` sweeping
+`SupernodeParams::nemin ∈ {16, 32, 64, 128}` on the 4-family ×
+20-matrix Mittelmann panel. Pilot run with `nemin ∈ {256, MAX}`
+hung 30+ min on `clnlbeam_0000` (collapsed front of order >n/2);
+capped at 128.
 
-Math, oracle derivations, and the abandoned mc64_resistant first
-attempt are documented in
-`dev/research/synthetic-generators-m4.md`.
+Per-family geomean factor_us ratios vs nemin=16 baseline:
 
-End-to-end verification:
-- `python3 external_benchmarks/stress/synth.py --only <name>` produces
-  each matrix with deterministic header (`50 50 1275`, etc.).
-- `cargo build --release --bin bench_one_matrix` succeeds.
-- `python3 external_benchmarks/stress/run.py --category
-  rankdef,saddle_rankdef,stokes,wide_frontal,mc64_resistant` factors
-  all 7 new matrices in <14ms total factor time; the largest
-  individual factor is `wide_frontal_616` at 12.9ms.
-- `python3 external_benchmarks/stress/report.py` flags none. All seven
-  matrices have `rel_res < 1e-13`. `stokes_q1p0_8` returns the exact
-  expected inertia `(98, 62, 2)` — feral's BK pivoting correctly
-  recovers the 2-dimensional LBB defect.
+| family        | n=32  | n=64  | n=128 |
+|---------------|-------|-------|-------|
+| clnlbeam      | 1.032 | 1.356 | 1.989 |
+| henon120      | 0.970 | 0.960 | 1.029 |
+| lane_emden120 | 0.953 | 0.903 | 0.909 |
+| dirichlet120  | 0.951 | 0.943 | 0.958 |
 
-## Benchmark Results
+Acceptance gate `factor_us/nemin16 < 0.9` met only on
+`lane_emden120@nemin=64` (0.903), and only barely. ncol_mean
+doubled at nemin=64 across three of four families (the shape
+lever did engage), but factor_nnz inflated 1.23-1.33× and factor
+time stayed flat or regressed (clnlbeam −36%).
+
+Closed GH #10 with cumulative 5-lever summary comment pointing at
+the three research notes. Defaults unchanged: `nemin=16`,
+`OrderingMethod::Amd`. The opt-in knobs `Solver::with_ordering`
+and `SupernodeParams::nemin` stay shipped for non-1D-banded
+workloads where elimination trees have genuine fusion
+opportunities.
+
+### Agent-27 merge (M4 synthetic generators)
 ```
 
 ## Git Status
 ```
-74f5f26 merge(#30): IR convergence policy research — keep current loop
-d431362 chore(context): refresh dev/context.md after issue #30 research
-2630770 research(#30): IR convergence policy -- keep residual-based exit
-594db5a merge(#31): near-singular eps boundary certification (worktree agent)
-7657b0d docs(inertia): certify near-singular detection boundary p=6 (#31)
+61002f8 research(issue-10): forced supernode amalgamation lever fails (5/5 levers exhausted)
+d3e6199 docs(#34): SQD fast-path research note + bib + decisions
+05aef71 merge(agent-27): M4 synthetic generators for saddle/wide-frontal/MC64/Stokes
+7965f30 chore(session): 2026-05-16-04 -- M4 synth generators checkpoint
+864ee14 feat(stress): M4 synthetic generators for saddle / wide-frontal / MC64 / Stokes (#27)
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-e78ae26ec1799036)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-57494b3d3352096b)
 
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok
 test test_gate_tiny_sparse_in ... ok
-test test_solve_parity_tiny_real_matrix ... ok
 test test_gate_boundary_n_16 ... ok
 test test_determinism_tiny ... ok
+test test_solve_parity_tiny_real_matrix ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -92,93 +92,89 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-16-04.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-16-06.md)
 
 
-`cargo run --bin bench --release` (no synthetic matrices in
-`data/benchmark-config.toml`, so the standard suite was unaffected by
-this session's changes):
+--- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     147982     1.34     <= 2.0     PASS
+medium (<500)            152145     1.70     <= 3.0     PASS
 
-name                n   factor(μs)    solve(μs)        inertia
---------------------------------------------------------------
-spd_10             10           43            0     (10, 0, 0)
-spd_50             50           21            3     (50, 0, 0)
-spd_100           100           86            5    (100, 0, 0)
-spd_200           200          422           20    (200, 0, 0)
-kkt_10_3           13            3            0     (10, 3, 0)
-kkt_30_10          40           21            1    (30, 10, 0)
-kkt_50_15          65           49            2    (50, 15, 0)
-kkt_100_30        130          206            7   (100, 30, 0)
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.68     <= 2.0     PASS
+medium (<500)            153560     1.68     <= 3.0     PASS
 
-8 matrices benchmarked
+Top 10 worst factor-ratio vs MUMPS:
+name                             n    feral(μs)    mumps(μs)      ratio
+MUONSINE_0000                 1537        10600          376      28.19
+KIRBY2_0007                    458          894          119       7.51
+KIRBY2_0006                    458          839          127       6.61
+KIRBY2_0008                    458          733          122       6.01
+CRESC132_0000                 5314        64748        12266       5.28
+KIRBY2_0009                    458          653          128       5.10
+KIRBY2_0010                    458          667          133       5.02
+KIRBY2_0011                    458          567          120       4.72
+KIRBY2_0012                    458          463          118       3.92
+ACOPR30_0000                   400          782          211       3.71
 
-Stress-suite factor times for the new matrices (from `run.py`):
-
-rankdef_exact_50_5      58 μs
-rankdef_exact_100_10   119 μs
-saddle_rankdef_50_10_3  91 μs
-stokes_q1p0_8          133 μs
-saddle_rankdef_100_20_5 603 μs
-mc64_resistant_200     853 μs
-wide_frontal_616     12866 μs
-
-All well under the 1-second target.
+No regression versus session 02 baseline. Bench gates PASS.
 
 ```
 
 ## Recent Decisions
-matrices) costs zero extra IR solves under the current code.
+1. SmallLeafBatch driver removal — within noise.
+2. MAXFROMM AMAX-scan cache — within noise.
+3. Manual axpy SIMD tightening — pulp ties scalar within 1ns/call.
+4. Ordering swap (Metis/Scotch ND) — 1.3–2.3× slower; no shape
+   widening (`ncol_p90` invariant at 10.08 across all orderings).
+5. Forced supernode amalgamation (`nemin ∈ {32, 64, 128}`) — shape
+   widens 2× but factor time flat or regresses 36% on `clnlbeam`.
 
-**Evidence.**
-- `dev/research/ir-convergence-policy.md` — methodology, raw
-  per-matrix table, bucket A/B/C analysis,
-  `external_benchmarks/stress/out/ir_probe/*.out` sidecars.
-- κ̂(A) distributions overlap between the "IR helps" bucket
-  (κ̂ ∈ [1.16e3, 8.00e22]) and the "IR no-op" bucket
-  (κ̂ ∈ [9.94e1, 2.29e29]); no κ̂ threshold separates them.
-  Routing `bratu3d` (κ̂=1.16e3) into a skip path would lose
-  10.24 decades of residual.
-- 4 stagnant matrices cost ≤3 IR solves each (the existing
-  `max_stagnant_steps=2` rule). Total "wasted" IR work across
-  the corpus is ≤12 extra solve-calls — bounded and small.
-- `cargo test` and `cargo clippy --all-targets -- -D warnings`
-  clean (no implementation change in `src/`; only the probe
-  binary and analysis script were added).
+The rank-1 axpy kernel on `ncol=1..16` fronts is bandwidth-bound;
+pulp saturates the vector ALU; AMD's elimination tree is already
+shape-optimal under the nnz_L bound. No further per-pivot speedup
+is available without changing the front structure in ways that
+violate the nnz_L bound that motivated the ordering choice.
 
-**Escape hatches for callers who want to bypass IR.** They
-already exist: `Solver::solve`, `solve_sparse`, and
-`solve_sparse_many` call back-substitution directly without IR.
-The skip-IR knob is a method-selection decision at the call
-site, not a parameter inside `solve_sparse_refined`.
+**Decision.** Keep `SupernodeParams { nemin: 16, .. }` as the
+default. Keep `OrderingMethod::Amd` as the default. The opt-in
+knobs `Solver::with_ordering(MetisND/ScotchND)` (shipped session 02)
+and `SupernodeParams::nemin` (existing) stay available for
+workloads where the elimination tree genuinely has fusion
+opportunities. No APP-class kernel is shipped; future work that
+*adds new front structure* (children-of-children amalgamation
+across non-adjacent tree levels, or a kernel that handles
+`ncol < tile-size` differently) is welcome as a fresh issue.
 
-**References.**
-- `dev/research/ir-convergence-policy.md`
-- `src/bin/probe_ir_trajectory.rs`
-- `external_benchmarks/stress/analyze_ir.py`
-- `external_benchmarks/stress/out/ir_probe/`
-- `src/numeric/solve.rs` lines 640–897 (the unchanged loop)
+References:
+- `dev/research/issue-10-maxfromm-phase2-corpus.md` (#1, #2)
+- `dev/research/issue-10-ordering-supernode-shape.md` (#4)
+- `dev/research/issue-10-amalgamation-floor.md` (#5)
+- Commits: d3b031d, 61002f8.
+- GH: https://github.com/jkitchin/feral/issues/10#issuecomment-4467668859
 
 ## Recent Tried-and-Rejected
-scaling to fail at — the matrix is already perfectly equilibrated.
+regresses. `clnlbeam` regresses 36% at nemin=64 because chain-link
+merges blow trailing-fill faster than the wider panel can amortize.
 
-Direct verification on n=200, seed=601:
-- `np.linalg.cond(A) = 1.48` before any scaling
-- after a symmetric row-max scaling (proxy for MC64-style scaling):
-  `cond = 1.48` (unchanged, as expected)
+**Why it was rejected.** Closes the fifth and final architectural
+lever for issue #10. All five (SLB driver removal, MAXFROMM AMAX
+cache, manual axpy SIMD, ordering swap, this nemin sweep) come up
+negative on the 1D-banded panel. The rank-1 axpy kernel on
+`ncol=1..16` fronts is bandwidth-bound; pulp saturates the vector
+ALU; AMD's elimination tree is already shape-optimal under the
+nnz_L bound. A pilot run at `nemin ∈ {256, MAX}` hung on
+`clnlbeam_0000` — a single near-dense front of order >n/2 collapsed
+the dense LDL into a non-returning state. Sweep capped at 128.
 
-The "rank-1 perturbation of a diagonally dominant skeleton" framing
-suggested in the issue was misleading: a low-rank update of an O(1)
-diagonal redistributes O(1) mass; it does not produce the dispersed
-ill-conditioning that defeats diagonal scaling.
+Issue #10 closes as "hardware floor reached on the 1D-banded panel."
+The opt-in knobs (`Solver::with_ordering`, `SupernodeParams::nemin`)
+stay shipped for workloads where the elimination tree genuinely
+has fusion opportunities — they just don't help here.
 
-Replaced with `A = Q D Q^T` construction where Q is a random dense
-orthonormal basis and D has one eigenvalue at `1e-8` with the rest
-O(1). Now `cond(A) = 2e8` before *and* after symmetric scaling — the
-small eigenvalue is in a basis direction that diagonal scaling
-cannot reach.
-
-Documented in `dev/research/synthetic-generators-m4.md` §4. The
-current generator uses the Q D Q^T construction.
+Documented in `dev/research/issue-10-amalgamation-floor.md`. A/B
+binary: `src/bin/diag_nemin_amalgamation_panel.rs`. Commit 61002f8.
 
 ## Source Files
 ```
@@ -214,6 +210,7 @@ src/bin/diag_cond_parity.rs
 src/bin/diag_dense_tail.rs
 src/bin/diag_etree_shape.rs
 src/bin/diag_factor_nnz_accounting.rs
+src/bin/diag_fbrain3ls_pivtol_sweep.rs
 src/bin/diag_fill_parity.rs
 src/bin/diag_fill_tail.rs
 src/bin/diag_inertia_mismatch.rs
@@ -222,6 +219,7 @@ src/bin/diag_max_ncol.rs
 src/bin/diag_mc64_cycles.rs
 src/bin/diag_mittelmann.rs
 src/bin/diag_near_singular_sweep.rs
+src/bin/diag_nemin_amalgamation_panel.rs
 src/bin/diag_orbit2_quotient.rs
 src/bin/diag_ordering_panel.rs
 src/bin/diag_ordering_race.rs

@@ -1,0 +1,64 @@
+#+TITLE: 2026-05-16 session 06 — merge agent-27 + close #10 (amalgamation lever)
+#+STARTUP: overview
+
+* 12:30 :issue10:nemin:sweep:plan:
+Continuing from session 04. Five architectural levers identified for
+#10 on the 1D-banded Mittelmann panel; four already negative
+(SLB / MAXFROMM / axpy SIMD / ordering swap). Final lever is forced
+amalgamation via =SupernodeParams::nemin > 16=. Built
+=diag_nemin_amalgamation_panel= sweeping {16, 32, 64, 128, 256,
+usize::MAX} on the 4-family × 20-matrix panel.
+
+* 12:45 :issue10:nemin:pilot-hang:
+Pilot run with nemin=MAX hung for 30+ min on the *first* matrix
+(clnlbeam_0000). Symptoms: =factor_us= grows super-linearly with
+nemin (clnlbeam_0000: 27→28→35→53→122ms at 16/32/64/128/256), and
+nemin=MAX collapses the entire elimination tree into a near-dense
+front of order >n/2 that the dense LDL never returns from. Killed
+process (PIDs 69919/69981). Capping the sweep at 128 — the largest
+value that completes in seconds while preserving the regression
+signal. Documented the cap in the binary's =const NEMINS= comment.
+
+* 13:00 :merge:agent-27:
+Merged worktree agent #27 (M4 synth generators) into main. Conflicts
+on CHANGELOG.md and external_benchmarks/stress/manifest.tsv — both
+resolved by concatenating the agent's M4 section after the #29
+section. Test suite green (259 passed). Pushed and closed #27 with
+the three substantive corrections vs the issue text noted in the
+close comment.
+
+* 13:10 :issue10:nemin:sweep:result:
+Capped sweep complete in ~3min. Per-family geomean factor_us ratios
+vs nemin=16 baseline:
+
+  | family        | n=32  | n=64  | n=128 |
+  |---------------+-------+-------+-------|
+  | clnlbeam      | 1.032 | 1.356 | 1.989 |
+  | henon120      | 0.970 | 0.960 | 1.029 |
+  | lane_emden120 | 0.953 | 0.903 | 0.909 |
+  | dirichlet120  | 0.951 | 0.943 | 0.958 |
+
+Acceptance was factor_us/nemin16 < 0.9. Only lane_emden120@nemin=64
+(0.903) reaches the threshold, and only barely. clnlbeam regresses
+monotonically. ncol_mean *does* double at nemin=64 (shape lever
+engages) but factor_nnz inflates 1.23-1.33× and time stays flat.
+
+* 13:25 :issue10:research-note:
+Wrote =dev/research/issue-10-amalgamation-floor.md=. Documents:
+- The 5-lever cumulative table (SLB, MAXFROMM, axpy, ordering, nemin
+  — all negative).
+- The capped-sweep result table.
+- The pilot-hang explanation (capped at 128).
+- Why the shape lever engages but time stays flat: trailing-fill
+  grows faster than the wider panel can amortize, and the natural
+  ncol distribution doesn't reach the L2 register tile boundary.
+- Decision: keep nemin=16 default; close #10 as "hardware floor
+  reached on the 1D-banded panel"; opt-in knobs stay shipped.
+
+* 13:35 :issue10:close:
+Closed GH issue #10 with the 5-lever summary comment pointing at
+the three research notes (=issue-10-maxfromm-phase2-corpus.md=,
+=issue-10-ordering-supernode-shape.md=,
+=issue-10-amalgamation-floor.md=). The opt-in knobs
+(=Solver::with_ordering=, =SupernodeParams::nemin=) ship for future
+workloads with genuine fusion opportunities.
