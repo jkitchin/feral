@@ -1,0 +1,41 @@
+#+TITLE: Journal — Issue #28 (M5: stress-suite smoke into CI)
+#+DATE: 2026-05-16
+
+* 15:20 :setup:orient:
+Read issue #28, robustness-roadmap.md M5 section, stress/README.md,
+report.py / run.py / fetch.py / synth.py, baseline.json, existing
+ci.yml. Plan:
+
+1. Add =stress-smoke= job to .github/workflows/ci.yml: synth → run
+   --max-n 1000 → report.
+2. Cache matrices/ keyed on manifest.tsv hash via actions/cache@v4.
+3. Document gate semantics in stress/README.md.
+4. Handle currently-flagged matrices (allowlist if non-trivial fix).
+
+* 15:21 :timing:smoke:
+Local M-series timing on the smoke trio:
+- =cargo build --release --bin bench_one_matrix= → 8.15s (cold)
+- =python3 synth.py= → 0.34s
+- =python3 run.py --max-n 1000= → 0.52s (18/21 ready, 0 failures)
+- =python3 report.py= → 0.04s (rc=0; 0 flagged)
+
+Total Python-only wall-clock: ~0.9s. With cold cargo build:
+~9s. On x86 CI runner times 2.5 plus toolchain install / caching:
+generous upper bound ~5-8 min. Safely under the 10-min budget.
+
+3 missing-but-under-cap rows are =cuter_kkt FBRAIN3LS_*=; their
+source data lives only in =tests/data/parity/fbrain3ls/= (a single
+sample, 0839) so =fetch.py= cannot synthesize the other two. They
+report as missing rather than flagged; behavior is gate-friendly.
+
+* 15:22 :gate:flags:
+Current flag count under =--max-n 1000=: 0. No matrices need
+fixing or allowlisting at this cap.
+
+The full-manifest flagged count from baseline is *also 0* (the
+report shows ok=18, flagged=0 after run.py --max-n 1000). The
+"currently-flagged" mentioned in the M5 issue refers to legacy
+F-01 / F-03 from the old baseline; those are now resolved in
+classify() via the rankdef_like_cats early-return + the
+=zero=0 vs zero<=expected= dual rule. No new allowlist is needed.
+
