@@ -112,6 +112,13 @@ pub struct Solver {
     /// called from this `Solver`. Used by integration tests to
     /// verify the cache-reuse property and by future telemetry.
     symbolic_call_count: usize,
+    /// Diagnostic counter: number of `factor()` calls whose
+    /// resulting `ScalingInfo` was `Mc64FallbackToInfnorm`. Issue #24:
+    /// surfaces the previously-silent MC64 → InfNorm fallback so
+    /// IPM drivers can warn / log a structured diagnostic without
+    /// reaching into per-factor state. Increments once per
+    /// `factor()` that fell back; resets on `Solver::new()`.
+    mc64_fallback_count: usize,
     /// Pooled scratch for the numeric phase. Retained across
     /// `factor` calls so IPM-style re-factorizations (same
     /// pattern, new values; or bumped pivot threshold) do not
@@ -176,6 +183,7 @@ impl Solver {
             last_inertia: None,
             last_pattern_fingerprint: None,
             symbolic_call_count: 0,
+            mc64_fallback_count: 0,
             workspace: FactorWorkspace::new(),
             use_parallel: true,
             parallel_pool: None,
@@ -413,6 +421,13 @@ impl Solver {
                     factors.scaling_info,
                     crate::scaling::ScalingInfo::PartialSingular { .. }
                 );
+                // Issue #24: bump the MC64-fallback counter so callers
+                // can poll a single number to detect "Auto promised
+                // matching, actually got InfNorm" without inspecting
+                // per-factor state.
+                if factors.scaling_info.is_mc64_fallback() {
+                    self.mc64_fallback_count += 1;
+                }
                 self.last_factors = Some(factors);
                 self.last_inertia = Some(inertia.clone());
                 if partial_singular {
@@ -658,6 +673,28 @@ impl Solver {
     pub fn symbolic_call_count(&self) -> usize {
         self.symbolic_call_count
     }
+
+    /// `ScalingInfo` from the most recent successful `factor()`.
+    /// Returns `None` if no factor is stored. Use this to detect
+    /// `Mc64FallbackToInfnorm` (issue #24) or `PartialSingular`
+    /// after factoring without re-deriving it from a `factors()`
+    /// borrow.
+    pub fn scaling_info(&self) -> Option<&crate::scaling::ScalingInfo> {
+        self.last_factors.as_ref().map(|f| &f.scaling_info)
+    }
+
+    /// Number of `factor()` calls on this `Solver` whose resulting
+    /// `ScalingInfo` was `Mc64FallbackToInfnorm`. Issue #24:
+    /// `ScalingStrategy::Auto` can silently fall back from MC64 to
+    /// InfNorm in two cases (`InfNormSpreadAcceptable`,
+    /// `Mc64WorseThanInfnorm` — see [`Mc64FallbackReason`]). This
+    /// counter lets long-running IPM drivers detect the fallback
+    /// without inspecting each factor's `scaling_info`.
+    ///
+    /// [`Mc64FallbackReason`]: crate::scaling::Mc64FallbackReason
+    pub fn mc64_fallback_count(&self) -> usize {
+        self.mc64_fallback_count
+    }
 }
 
 impl Default for Solver {
@@ -685,6 +722,80 @@ mod tests {
             min_parallel_flops: None,
         };
         Solver::with_params(np, SupernodeParams::default())
+    }
+
+    /// Issue #24: a uniform-diagonal matrix triggers the
+    /// `Auto` MC64 routing (diag_only / n = 1.0) but the pre-MC64
+    /// InfNorm trial passes the IN_SPREAD_GUARD, so the fallback
+    /// fires. After `factor()` returns Success, `Solver::scaling_info`
+    /// reports the new variant and `mc64_fallback_count` is 1.
+    ///
+    /// Note: `n` must exceed the dense fast-path gate
+    /// (`should_use_dense_fast_path`, n=128 with density<0.25), or
+    /// the Auto-routing logic is bypassed in favour of the dense
+    /// fast-path's InfNorm-only short-circuit. A diagonal matrix
+    /// with `n=200` is sparse (density << 0.25) so the sparse
+    /// path is taken and Auto's fallback fires.
+    #[test]
+    fn mc64_fallback_surfaces_via_solver_api() {
+        let n = 200;
+        let mut col_ptr = Vec::with_capacity(n + 1);
+        let mut row_idx = Vec::new();
+        let mut values = Vec::new();
+        col_ptr.push(0);
+        for j in 0..n {
+            row_idx.push(j);
+            values.push(2.0);
+            col_ptr.push(row_idx.len());
+        }
+        let csc = CscMatrix {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        };
+        // Precondition: not on the dense fast-path so Auto's
+        // fallback logic actually runs.
+        assert!(
+            !crate::numeric::factorize::should_use_dense_fast_path(csc.n, csc.row_idx.len()),
+            "test setup error: matrix would take dense fast-path"
+        );
+
+        let mut s = solver_with_scaling(ScalingStrategy::Auto);
+        assert_eq!(s.mc64_fallback_count(), 0);
+        assert!(s.scaling_info().is_none());
+
+        let status = s.factor(&csc, None);
+        assert!(
+            matches!(status, FactorStatus::Success),
+            "factor must succeed on a positive-definite uniform diagonal, got {:?}",
+            status
+        );
+
+        // The new ScalingInfo variant is surfaced through the
+        // `scaling_info` accessor, and the fallback counter is
+        // bumped exactly once.
+        match s.scaling_info() {
+            Some(crate::scaling::ScalingInfo::Mc64FallbackToInfnorm {
+                reason: crate::scaling::Mc64FallbackReason::InfNormSpreadAcceptable,
+            }) => {}
+            other => panic!(
+                "expected Mc64FallbackToInfnorm{{InfNormSpreadAcceptable}}, got {:?}",
+                other
+            ),
+        }
+        assert_eq!(s.mc64_fallback_count(), 1);
+
+        // Re-factoring the same matrix bumps the counter again
+        // (every fallback fire is counted, not just unique
+        // patterns) — same pattern, so symbolic is cached.
+        let _ = s.factor(&csc, None);
+        assert_eq!(s.mc64_fallback_count(), 2);
+        assert_eq!(
+            s.symbolic_call_count(),
+            1,
+            "symbolic must be cached across re-factor on same pattern"
+        );
     }
 
     /// U1 — Baseline + Identity scaling: stage 1 fires.

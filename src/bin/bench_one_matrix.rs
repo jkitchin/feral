@@ -21,6 +21,7 @@ use std::time::Instant;
 use feral::numeric::factorize::factorize_multifrontal_parallel_with_workspace;
 use feral::numeric::factorize::FactorWorkspace;
 use feral::numeric::solve::solve_sparse_refined;
+use feral::scaling::{Mc64FallbackReason, ScalingInfo};
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{read_mtx, CscMatrix, NumericParams};
 
@@ -191,6 +192,24 @@ fn solve_one(mtx_path: &str, rhs_path: &str, out_path: &str) -> std::io::Result<
     writeln!(out, "solve_us {}", solve_us)?;
     writeln!(out, "rel_res {:.17e}", rel)?;
     writeln!(out, "refined yes")?;
+    // Issue #24: surface the silent MC64 → InfNorm fallback so a
+    // bench-row reader can distinguish "Auto resolved to MC64"
+    // from "Auto promised MC64 but fell back to InfNorm". The
+    // field is always present (yes/no) like `refined`.
+    let (fallback_flag, fallback_reason) = match &factors.scaling_info {
+        ScalingInfo::Mc64FallbackToInfnorm { reason } => {
+            let r = match reason {
+                Mc64FallbackReason::InfNormSpreadAcceptable => "infnorm_spread_acceptable",
+                Mc64FallbackReason::Mc64WorseThanInfnorm => "mc64_worse_than_infnorm",
+            };
+            ("yes", Some(r))
+        }
+        _ => ("no", None),
+    };
+    writeln!(out, "mc64_fallback {}", fallback_flag)?;
+    if let Some(r) = fallback_reason {
+        writeln!(out, "mc64_fallback_reason {}", r)?;
+    }
     writeln!(out, "status ok")?;
     Ok(())
 }

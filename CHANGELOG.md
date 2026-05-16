@@ -4,6 +4,45 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `Mc64FallbackToInfnorm` diagnostic surfacing (#24, M2)
+
+`ScalingStrategy::Auto` previously fell back from MC64 to InfNorm
+silently in two cases (`InfNormSpreadAcceptable` pre-MC64 trial
+and `Mc64WorseThanInfnorm` post-MC64 Policy 4 ratio guard).
+Callers had no way to learn which scaling actually ran, making
+"feral got the wrong answer" reports undiagnosable.
+
+This release surfaces the fallback as a new structured signal:
+
+- `ScalingInfo::Mc64FallbackToInfnorm { reason: Mc64FallbackReason }`
+  is returned from `compute_scaling` / `compute_scaling_with_cache`
+  on every fallback path. The variant carries the trigger reason
+  (`InfNormSpreadAcceptable` or `Mc64WorseThanInfnorm`) for
+  triage. The fallback scaling vector itself is unchanged.
+- `Solver::scaling_info() -> Option<&ScalingInfo>` exposes the
+  most recent factor's scaling info.
+- `Solver::mc64_fallback_count() -> usize` is a session-cumulative
+  counter that long-running IPM drivers can poll without
+  inspecting per-factor state.
+- `bench_one_matrix` now emits `mc64_fallback yes|no` (plus a
+  `mc64_fallback_reason` key when yes) in the sidecar so the
+  cross-solver comparison harness can audit fallback frequency
+  per corpus.
+
+The new variant slots in alongside the existing `Applied`,
+`PartialSingular`, and `NotApplied`; downstream solve consumers
+(`solve.rs::needs_scaling`) treat it as "scaling applied"
+because the InfNorm vector is the correct scaling for the
+returned factor.
+
+Regression tests:
+`src/scaling/mod.rs::tests::auto_surfaces_infnorm_spread_fallback_on_uniform_diag`
+(synthetic, always runs); the fixture-gated
+`auto_falls_back_to_infnorm_on_mss1_0009` and
+`auto_picks_infnorm_on_acopp30_0064` were extended to assert the
+new variant when the corpus is present. Solver-level coverage in
+`src/numeric/solver.rs::tests::mc64_fallback_surfaces_via_solver_api`.
+
 ### Changed — `ScalingStrategy::Auto` pre-MC64 InfNorm trial (#23, ACOPP30 plateau-2)
 
 `compute_scaling_auto_with_cache` now runs the InfNorm Knight-Ruiz
