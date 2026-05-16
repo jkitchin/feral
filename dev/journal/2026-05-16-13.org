@@ -1,0 +1,68 @@
+#+TITLE: Session 2026-05-16-13 — Per-supernode fixed-overhead reduction (#13)
+
+* 15:12 :setup:baseline:
+Issue #13: target per-supernode fixed overhead (workspace pool,
+validate bypass, extend_add direct writes). Baseline captured from
+=cargo run --bin diag_supernode_cost --release=:
+
+| matrix                       |   n | fact_nnz | nsup | max | num_us | ns/sup | ns/nnz |
+|------------------------------+-----+----------+------+-----+--------+--------+--------|
+| CRESC100_0000                | 806 |     2630 |  230 |  16 |    287 |   1248 |    109 |
+| ACOPR30_0185                 | 564 |     2417 |  232 |  17 |    269 |   1163 |    111 |
+| ACOPR30_0067                 | 564 |     2417 |  232 |  17 |    255 |   1101 |    105 |
+| HAIFAM_0082                  | 249 |     5584 |  157 |  86 |    336 |   2143 |     60 |
+| HAHN1_0049                   | 715 |     4438 |  247 |  12 |    316 |   1281 |     71 |
+| GAUSS2_0029                  | 758 |     5250 |  259 |  16 |    347 |   1340 |     66 |
+| KIRBY2_0007                  | 458 |     1603 |  161 |  17 |    194 |   1206 |    121 |
+| AVION2_0000                  |  94 |      181 |   41 |  16 |     24 |    593 |    134 |
+
+Note: ns/sup is already a bit lower than the issue's 2026-05-12 figures
+(1248 vs 1890 for CRESC100, 1101 vs 1092 for ACOPR30_0067) — recent
+sessions have already moved the needle. Target cluster: CRESC100,
+ACOPR30, KIRBY2.
+
+Plan: target (1) workspace pool in factor_frontal_blocked_in_place first.
+
+* 15:45 :impl:phase-2:phase-1-extend:
+Implemented combined Target (1)+(2): added private
+=factor_frontal_in_place_with_scratch= variant in
+=src/dense/factor.rs= that:
+  - operates in-place on =matrix.data= (no per-call
+    =vec![0.0; nrow*nrow]= clone),
+  - reuses =FactorScratch.subdiag= and =FactorScratch.contrib_pool=
+    (no per-call subdiag/contrib allocs),
+  - skips =SymmetricMatrix::validate()= (the multifrontal driver
+    assembles fronts from value-checked CSC values — invariant
+    enforced by =debug_assert!=).
+
+Refactored =factor_frontal_with_profile= to delegate to the new
+impl after the public validate+copy. Panel-fallback site in
+=factor_frontal_blocked_in_place_with_scratch= now routes to the
+in-place variant instead of =factor_frontal=.
+
+Result (=diag_supernode_cost --release=):
+
+| matrix         | ns/sup before | ns/sup after | delta  |
+|----------------+---------------+--------------+--------|
+| CRESC100_0000  |          1248 |          832 |  -33%  |
+| ACOPR30_0185   |          1163 |          690 |  -41%  |
+| ACOPR30_0067   |          1101 |          677 |  -38%  |
+| HAIFAM_0082    |          2143 |         1824 |  -15%  |
+| HAHN1_0049     |          1281 |          924 |  -28%  |
+| GAUSS2_0029    |          1340 |          940 |  -30%  |
+| KIRBY2_0007    |          1206 |          750 |  -38%  |
+| AVION2_0000    |           593 |          472 |  -20%  |
+
+=cargo test --release= clean, =cargo clippy --all-targets -- -D warnings=
+clean, fmt clean. Bench correctness gates:
+  - Inertia match: 154428/154481 (100.0%) — exact gate target
+  - Residual pass: 154207/154481 (99.8%) — above gate
+  - dense small-frontal p90 ≈ 1.37 (gate <1.30, MISS)
+  - dense medium p90 ≈ 1.78 (gate <1.60, MISS)
+  - sparse small-frontal p90 ≈ 1.67 (PASS <2.0)
+  - sparse medium p90 ≈ 1.68 (PASS <3.0)
+
+Primary acceptance gate (ns/sup reduced on CRESC100/ACOPR30/KIRBY2
+cluster) is PASS by a wide margin. Bench p90 gates not hit — these
+are downstream of dense-kernel arithmetic, not per-supernode
+overhead. Issue says "any one is sufficient", so PASS.
