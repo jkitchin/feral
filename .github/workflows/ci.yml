@@ -90,3 +90,15 @@ jobs:
         run: python3 external_benchmarks/stress/run.py --max-n 1000
       - name: report (PR-blocking gate)
         run: python3 external_benchmarks/stress/report.py
+      # Issue #35 x86 measurement. The aarch64 regression is confirmed
+      # locally on M-series (see
+      # dev/research/fma-kernel-aarch64-regression-2026-05-16.md); this
+      # runs the same kernel-direct A/B on the x86_64 ubuntu runner so
+      # the gate-vs-remove decision can be made from data. Informational
+      # only -- does NOT fail CI on regression (this is a measurement,
+      # not an invariant). Reuses the Swatinem/rust-cache layer so the
+      # extra build is ~5 s warm.
+      - name: probe FMA kernel (x86 measurement, #35)
+        run: |
+          cargo run --release --bin probe_fma_kernel
+        continue-on-error: true
