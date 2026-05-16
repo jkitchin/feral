@@ -167,3 +167,80 @@ Not closed (but moved out of feral scope):
 Evidence kept in ~/tmp/rocket_dump.jsonl~ (165 MB, not committed)
 and ~/tmp/rocket_solves/solve_*.mtx~ (extracted matrices, not
 committed). Reproduction recipe captured here in the journal.
+
+* 21:30 :issue18:narx_cfy:cascade-break:inertia:diagnostic:
+Issue #18 NARX_CFy MaxIter root-cause found: pounce-feral's
+hard-coded =cascade_break_ratio=0.5, eps=1e-10= default is
+introducing inertia errors that trigger IPM WrongInertia loops.
+Without cascade-break, feral returns the IPM-expected inertia on
+the same matrices.
+
+Repro:
+- ~POUNCE_DUMP_KKT=/tmp/narx_dump.jsonl POUNCE_FERAL_REFINE=1
+  pounce NARX_CFy.nl max_iter=110~ → 9.3 GB dump, 494 KKT solves.
+- Result: MaxIter at iter 110, 252s, =dual_inf=1.0= stuck,
+  =constr_viol=8.6e-8= (primal converging, dual stalled).
+- Index pass: 125 Success / 369 WrongInertia. WrongInertia at
+  =solve_01= already (long, sustained).
+- =CAVEAT=: =num_neg_evals_actual= in the dump is
+  =last_neg_evals=, only updated on Success. So the dumped =act=
+  field is stale on WrongInertia records; must extract MTX and
+  re-factor to get true reported inertia.
+
+Extracted 15 representative solves (=/tmp/narx_solves/=) and ran
+=diag_robot1600_eigs= (extended with =cb=pounce= config matching
+pounce-feral's =Solver::new().with_cascade_break(0.5)
+.with_cascade_break_eps(1e-10)=):
+
+| solve | status (dump) | cb=off          | cb=pounce        | smallest |D|       |
+|-------+---------------+-----------------+------------------+--------------------|
+|   000 | Success       | (48509,48256,0) | (48509,48256,0)  | +1.8e-8 (cb=off)   |
+|   001 | WrongInertia  | (48509,48256,0) | (48510,48255,0)* | +2e-16 cb=pounce   |
+|   100 | WrongInertia  | (48508,48257,0) | (48507,48258,0)* | -7e-9 cb=off       |
+|   250 | WrongInertia  | (48509,48256,0) | (48509,48256,0)  | +1e-8 cb=off       |
+|   300 | Success       | (48509,48256,0) | (48509,48256,0)  | +1e-8 cb=off       |
+|   400 | WrongInertia  | (48509,48256,0) | (48508,48257,0)* | +1e-8 cb=off       |
+|   478 | WrongInertia  | (48509,48256,0) | (48509,48256,0)  | -4e-8 cb=off       |
+|   485 | WrongInertia  | (48509,48256,0) | (48509,48256,0)  | +9e-3 cb=off       |
+|   491 | WrongInertia  | (48509,48256,0) | (48509,48256,0)  | +1e0  cb=off       |
+
+(* = inertia disagrees with expected)
+
+Expected (IPM): pos=48509, neg=48256, zero=0.
+
+Findings:
+1. =cb=off= matches expected on 14 of 15 solves. Only solve_100
+   shows a genuine 1-neg overshoot, with smallest |D|=-7.45e-9
+   (borderline; near the BK pivot acceptance floor). This is
+   indistinguishable from MUMPS/MA57 territory and would
+   trigger the same WrongInertia there.
+2. =cb=pounce= introduces 100–400 tiny pivots (|D|<1e-10) that
+   the inertia routine signs arbitrarily, shifting the count
+   by ±1 on solves 001, 100, 400. =solve_001= had
+   136 pivots below 1e-12 with cb=pounce vs 0 with cb=off.
+3. Solves 485 and 491 (well-conditioned: smallest |D| = 9e-3
+   and 1.0) were tagged WrongInertia by pounce but BOTH
+   configs return correct inertia in offline reproduction.
+   Hypothesis: parallel-reduction non-determinism in the
+   factor (default =with_parallel(true)= for both pounce-feral
+   and diag, but ordering differs from the actual pounce run).
+
+This parallels the issue #17 robot_1600 finding: cascade-break
+helps SOME problems (pinene_3200 — 33ms vs 94s) and hurts
+others. The C-API switched to CB-off default in da23d13.
+Pounce-feral still hard-codes CB-on at
+=pounce-feral/src/lib.rs:67-73=. The same flip — make CB-on
+opt-in via =POUNCE_FERAL_CASCADE_BREAK=on= — would be the
+direct hardening for #18.
+
+Action proposed (NOT yet executed): mirror the C-API default
+in pounce-feral. The robot_1600 hardening + this NARX_CFy
+finding form two of two corroborating cases. Pinene_3200 is
+the only known cb-on beneficiary; if regression there is
+significant, gate via a per-problem heuristic instead.
+
+Evidence kept in ~/tmp/narx_dump.jsonl~ (9.3 GB, not
+committed), ~/tmp/narx_solves/solve_*.mtx~ (extracted, not
+committed), ~/tmp/narx_index.py~ and ~/tmp/narx_extract.py~
+(extractor scripts). Diag extension at
+~src/bin/diag_robot1600_eigs.rs~ is uncommitted.

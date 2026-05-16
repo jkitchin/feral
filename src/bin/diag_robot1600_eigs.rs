@@ -116,6 +116,12 @@ fn main() -> std::io::Result<()> {
         };
         report("cb=off    ", &csc, off);
         report("cb=default", &csc, NumericParams::default());
+        let pounce = NumericParams {
+            cascade_break_ratio: Some(0.5),
+            cascade_break_eps: Some(1e-10),
+            ..NumericParams::default()
+        };
+        report("cb=pounce ", &csc, pounce);
     }
     Ok(())
 }
