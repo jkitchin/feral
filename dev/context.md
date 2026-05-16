@@ -1,82 +1,82 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-16T01:44:30Z
+Generated: 2026-05-16T15:11:28Z
 
 ## Latest Session
-File: dev/sessions/2026-05-15-07.md
+File: dev/sessions/2026-05-16-01.md
 ```
-# Session 2026-05-15-07
+# Session 2026-05-16-01
 
 ## Goal
-
-Build a thorough, pip-installable, uv-compatible Python interface
-to feral, targeting the IPM in the user's `discopt` project as the
-primary consumer. GH issue #20.
+Investigate and close the 6 ACOPP30 plateau-2 matrices revealed by the
+full 105-matrix corpus sweep (issue #23, expanded scope). After the
+SSIDS scale-invariant det floor closed the original 8 suspects, iters
+59, 63, 64, 65, 66, 67 stayed at rel_ref 1.88e-6..1.74e-1 under default
+`Solver`, all reporting `min|D|=0`.
 
 ## Accomplished
 
-Shipped the entire `python/` subtree:
+### Investigation (commit d02b39a)
+- Built `src/bin/diag_acopp30_residual.rs`: reproducer for #23. Sweeps
+  all 105 ACOPP30 matrices with `--all`; `DIAG_SCALING` env var
+  overrides scaling strategy. Reports inertia, min|D|, rel_raw, rel_ref.
+- Built `src/bin/probe_acopp30_64.rs`: NumericParams knob sweep. Proved
+  pivot_threshold / on_zero_pivot / PerturbToEps cannot rescue any of
+  the 6; only changing the scaling strategy changes the pivot pattern
+  (115×1+47×2 broken vs 101×1+54×2 working).
+- Built `src/bin/probe_scaling_policy4.rs`: 9-matrix Policy 4 validation
+  panel diagnostic. Discovered `in_spread = max|s|/min|s|` of the
+  InfNorm scaling vector is the clean discriminator between
+  matrices-where-MC64-helps and matrices-where-MC64-hurts.
+- Drafted `dev/research/acopp30-plateau-2.md` with hypothesis tree,
+  evidence tables, root-cause analysis, and proposed fix.
 
-- **Rust binding** (`python/src/lib.rs`, ~600 lines): PyO3 0.22 +
-  rust-numpy 0.22. Surfaces `CscMatrix`, `Solver`,
-  `Inertia`, `FactorStatus`, `QualityLevel`, plus an exception
-  hierarchy (`FeralError` → `FactorError` → `SingularError` /
-  `WrongInertiaError` / `NumericFailure`; `SolveError`,
-  `PatternMismatch`, `FeralIOError`). GIL is released around
-  factor/solve/refactor via `py.allow_threads`.
+### Fix (commit 8986679)
+Landed `IN_SPREAD_GUARD = 1e3` pre-MC64 InfNorm trial in
+`src/scaling/mod.rs::compute_scaling_auto_with_cache`. Before the
+existing `raw_drng >= 1e6 → MC64 unconditionally` fast-path, run
+InfNorm Knight-Ruiz; if the resulting scaling vector has
+`max|s|/min|s| < 1e3`, accept InfNorm and skip MC64. The `in_vec` is
+hoisted and reused by the existing `mc_off/in_off` ratio test, so the
+net cost is one InfNorm pass per Auto invocation that reaches the
+MC64 leg.
 
-- **Pure-Python layer** (`python/feral/`):
-  - `__init__.py` — re-exports + `FactorStatus`/`QualityLevel`
-    IntEnums + `from_scipy`/`to_scipy` adapters.
-  - `ipm.py` — `KktSolver` dataclass implementing the
-    Wächter–Biegler 2006 §3.1 perturbation escalation, plus
-    `FactorReport`. `solve_pair` for Mehrotra predictor-corrector.
+Test changes:
+- Renamed `auto_keeps_mc64_on_hs75_0000` → `auto_picks_infnorm_on_hs75_0000`.
+  The old test asserted MC64 as "the win" with a 4-order residual
+  improvement; current per-matrix probe shows InfNorm = 4.20e-17
+  strictly beats MC64 = 1.31e-16. Updated to match new (correct)
+  behavior.
+- Added `auto_picks_infnorm_on_acopp30_0064` regression test asserting
+  `pick_scaling_strategy` still picks MC64 (arrow-KKT shape) but
+  `compute_scaling(Auto)` resolves to InfNorm via IN_SPREAD_GUARD.
 
-- **Tests** (23/23 pass):
-  - `test_basic.py` (15): CscMatrix construction, factor/solve,
-    inertia, refactor symbolic reuse, PatternMismatch detection,
-    multi-RHS (1D and 2D), solve_refined, exceptions, repr.
-  - `test_scipy_interop.py` (4): from_scipy in full/lower-triangle
-    forms, solve-matches-dense, to_scipy round-trip.
-  - `test_ipm.py` (4): basic KKT factor+solve, 20-iteration
-    symbolic-reuse loop (`symbolic_call_count == 1`), inertia
-    perturbation, `solve_pair`.
-
-- **Examples** (`python/examples/`):
-  - `quickstart.py` — minimal SPD factor/solve.
-  - `discopt_ipm_kkt.py` — HS071 KKT Newton loop demo. Factor
-    time drops 0.37 ms → 0.02 ms cold → warm; symbolic count
-    stays at 1 across the loop.
-
-- **Distribution**:
-  - `python/pyproject.toml` — PEP 517 maturin backend, abi3-py310,
-    `feral-solver` name, numpy>=1.23, `[scipy]` extra.
-  - `python/Cargo.toml` — empty `[workspace]` opts out of root.
-  - `python/README.md` — quickstart, IPM usage, scipy interop,
-    build-from-source.
-  - Built `feral_solver-0.3.0-cp310-abi3-macosx_11_0_arm64.whl`
+### Validation
+- `DIAG_SCALING=auto cargo run --release --bin diag_acopp30_residual -- --all`:
+  **105/105 ACOPP30 matrices pass rel_ref < 1e-10** (previously 99/105).
+- Policy 4 panel: zero regressions. MEYER3NE / VESUVIA / VESUVIO /
 ```
 
 ## Git Status
 ```
-585d739 fix(numeric): make cascade-break opt-in; correct PerturbToEps docs
-2b1c3d2 chore(session): 2026-05-15-06 -- close issue #19, PAR_MIN_FLOPS=1e7
-b12e03c perf(factor): lower PAR_MIN_FLOPS from 1e8 to 1e7 (#19 closeout)
-25926cc feat(bench): probe_issue_19 binary
-30a30fc chore(session): 2026-05-15-05 -- PAR_MIN_FLOPS calibration
-```
+8986679 fix(scaling): pre-MC64 InfNorm trial in Policy 4 (clostest result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-## Test Status
-```
-test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-e39990277cb5fde0)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-72ad14a7f1d9bf8c)
 
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok
 test test_gate_tiny_sparse_in ... ok
 test test_gate_boundary_n_16 ... ok
 test test_determinism_tiny ... ok
+test test_solve_paritytest result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-72ad14a7f1d9bf8c)
+
+running 5 tests
+test test_gate_just_outside_n_tiny ... ok
+test test_gate_tiny_sparse_in ... ok
+test test_determinism_tiny ... ok
+test test_gate_boundary_n_16 ... ok
 test test_solve_parity_tiny_real_matrix ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -92,21 +92,21 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-15-07.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-16-01.md)
 
 
-No Rust benchmark changes this session (no changes to `src/`).
-Existing session-06 bench numbers stand; the python crate is
-out-of-workspace and does not touch the hot path.
+=== Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     147982     1.38     <= 2.0     PASS
+medium (<500)            152145     1.80     <= 3.0     PASS
 
-spd_10             10           56            0     (10, 0, 0)
-spd_50             50           27            3     (50, 0, 0)
-spd_100           100           89            5    (100, 0, 0)
-spd_200           200          423           20    (200, 0, 0)
-kkt_10_3           13            3            0     (10, 3, 0)
-kkt_30_10          40           25            1    (30, 10, 0)
-kkt_50_15          65           55            2    (50, 15, 0)
-kkt_100_30        130          223            7   (100, 30, 0)
+=== Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.74     <= 2.0     PASS
+medium (<500)            153560     1.74     <= 3.0     PASS
+
+Bench partitions stable vs prior session (small-frontal sparse 1.69 →
+1.74 is within run-to-run noise; both gates pass).
 
 ```
 
@@ -178,6 +178,7 @@ src/bin/blas3_prototype.rs
 src/bin/calibrate_par_min_flops.rs
 src/bin/d3_probe.rs
 src/bin/d4_probe.rs
+src/bin/diag_acopp30_residual.rs
 src/bin/diag_acopr.rs
 src/bin/diag_acopr14.rs
 src/bin/diag_amalgamation.rs
@@ -230,10 +231,12 @@ src/bin/hs85_diag.rs
 src/bin/parallel_corpus_parity.rs
 src/bin/polak6_diag.rs
 src/bin/policy4_diag.rs
+src/bin/probe_acopp30_64.rs
 src/bin/probe_cascade_perturb.rs
 src/bin/probe_deltac_sensitivity.rs
 src/bin/probe_issue_19.rs
 src/bin/probe_panel_attribution.rs
+src/bin/probe_scaling_policy4.rs
 src/bin/produce_dense_schur.rs
 src/bin/profile_hot.rs
 src/bin/profile_sparse.rs
@@ -295,6 +298,8 @@ tests/factor_workspace_parity.rs
 tests/fma_opt_in_roundtrip.rs
 tests/growth_flag.rs
 tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
 tests/issue_2_kkt_ls_init.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs

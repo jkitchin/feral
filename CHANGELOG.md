@@ -4,6 +4,45 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `ScalingStrategy::Auto` pre-MC64 InfNorm trial (#23, ACOPP30 plateau-2)
+
+`compute_scaling_auto_with_cache` now runs the InfNorm Knight-Ruiz
+pass *before* committing to MC64 when the arrow-KKT router selects
+it. If the resulting scaling vector has `max|s|/min|s| < 1e3`
+(IN_SPREAD_GUARD), Auto accepts InfNorm and skips MC64 entirely.
+This catches matrices where the structure suggests MC64 is needed
+but the values are already near-equilibrated; on such matrices
+MC64's matching is gratuitous and on the ACOPP30 KKT family
+(cond ≈ 3e16) catastrophic.
+
+Before this change, the legacy fast-path (`raw_diag_range >= 1e6 →
+MC64 unconditionally`) routed 6 ACOPP30 matrices (iters 59, 63-67
+of the 105-matrix corpus) to a literal-zero pivot that iterative
+refinement could not recover (rel_ref 1.88e-6 to 1.74e-1). After
+the fix, all 105/105 ACOPP30 matrices pass rel_ref < 1e-10 under
+default `Solver`.
+
+Policy 4 panel validation (9-matrix): zero regressions. The
+matrices where MC64 strictly wins (VESUVIA / VESUVIO / VESUVIOU /
+MEYER3NE, all with in_spread > 1e4) still route to MC64. HS75 and
+MUONSINE (in_spread < 100) now route to InfNorm and produce
+sub-1e-15 residuals — strictly better than the prior MC64 default.
+
+The in_vec computation is hoisted above the existing `raw_drng`
+fast-path and reused by the downstream `mc_off/in_off` ratio test,
+so the cost is one InfNorm pass per Auto invocation that reaches
+the MC64 leg of the router.
+
+Regression tests:
+`src/scaling/mod.rs::tests::auto_picks_infnorm_on_acopp30_0064`,
+`auto_picks_infnorm_on_hs75_0000` (renamed from
+`auto_keeps_mc64_on_hs75_0000`).
+
+References:
+`dev/research/acopp30-plateau-2.md`,
+`src/bin/probe_scaling_policy4.rs` (panel diagnostic),
+`src/bin/diag_acopp30_residual.rs` (105-matrix sweep).
+
 ### Added — rank-deficient KKT systems report honest inertia (F-01, #21)
 
 The Bunch-Kaufman kernel gained `BunchKaufmanParams::null_pivot_tol`

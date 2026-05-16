@@ -300,3 +300,23 @@ return InfNorm immediately. Catches the 6 ACOPP30 plateaus
 without flipping any of the matrices Policy 4 was designed to
 keep on MC64. Research note:
 ~dev/research/acopp30-plateau-2.md~.
+
+* 22:30 :issue-23:scaling:fix:landed:
+~src/scaling/mod.rs::compute_scaling_auto_with_cache~ gained the
+~IN_SPREAD_GUARD = 1e3~ pre-MC64 InfNorm trial. Commit 8986679.
+
+Verification:
+- ~cargo test --lib scaling~: 26 pass (incl. new
+  ~auto_picks_infnorm_on_acopp30_0064~ regression + renamed
+  ~auto_picks_infnorm_on_hs75_0000~).
+- Bench partitions: dense small/medium 1.38/1.80, sparse 1.74/1.74
+  (PASS / PASS).
+- 105/105 ACOPP30 pass rel_ref < 1e-10 under default Auto.
+- Policy 4 panel: zero regressions.
+
+Pushed origin/main (3 commits ahead: 8986679 fix, d02b39a diag,
+2289d1d NARX_CFy test).
+
+Next session goal per checkpoint: issue #33 (Mittelmann clnlbeam,
+97% main-thread in scalar 1×1 pivot path; extreme repro of #12
+small-front gap).
