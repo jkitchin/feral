@@ -1,0 +1,11 @@
+target/
+wheelhouse/
+dist/
+*.so
+*.pyd
+*.dylib
+__pycache__/
+*.egg-info/
+.pytest_cache/
+venv/
+.venv/

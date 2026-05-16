@@ -1,0 +1,65 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "feral-solver"
+version = "0.3.0"
+description = "Sparse symmetric indefinite direct solver with certified inertia, in pure Rust."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "John Kitchin", email = "jkitchin@andrew.cmu.edu" },
+]
+keywords = ["sparse", "solver", "linear-algebra", "ldlt", "kkt", "interior-point"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = [
+    "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+scipy = ["scipy>=1.10"]
+test = [
+    "pytest>=7",
+    "scipy>=1.10",
+    "numpy>=1.23",
+]
+dev = [
+    "maturin>=1.5,<2.0",
+    "pytest>=7",
+    "scipy>=1.10",
+    "numpy>=1.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/jkitchin/feral"
+Repository = "https://github.com/jkitchin/feral"
+Issues = "https://github.com/jkitchin/feral/issues"
+
+[tool.maturin]
+module-name = "feral._feral"
+python-source = "."
+manifest-path = "Cargo.toml"
+features = ["pyo3/extension-module"]
+strip = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

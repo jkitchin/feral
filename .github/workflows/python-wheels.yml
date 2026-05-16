@@ -1,0 +1,172 @@
+name: Python wheels
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "python/**"
+      - "src/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/python-wheels.yml"
+  pull_request:
+    paths:
+      - "python/**"
+      - "src/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/python-wheels.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Cancel in-progress runs on the same branch when a new push lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # --- Sanity build + tests on Linux only, on every push/PR --------
+  test:
+    name: Test wheel (linux-x86_64, python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install maturin + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install maturin pytest numpy scipy
+      - name: Build extension in editable mode
+        working-directory: python
+        run: maturin develop --release
+      - name: Run pytest
+        working-directory: python
+        run: python -m pytest tests/ -v
+
+  # --- Build release wheels via cibuildwheel ----------------------
+  wheels:
+    name: Wheel ${{ matrix.os }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            arch: x86_64
+          - os: linux
+            runner: ubuntu-24.04-arm
+            arch: aarch64
+          - os: macos
+            runner: macos-14
+            arch: universal2
+          - os: windows
+            runner: windows-latest
+            arch: AMD64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install cibuildwheel
+        run: python -m pip install cibuildwheel==2.21.3
+      - name: Build wheels
+        working-directory: python
+        env:
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux_* *-win32 *-manylinux_i686"
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_BUILD_FRONTEND: "build[uv]"
+          CIBW_BEFORE_BUILD_LINUX: "pip install maturin && rustup toolchain install stable --profile minimal && rustup default stable"
+          CIBW_BEFORE_BUILD_MACOS: "pip install maturin"
+          CIBW_BEFORE_BUILD_WINDOWS: "pip install maturin"
+          CIBW_ENVIRONMENT_LINUX: 'PATH="/root/.cargo/bin:$PATH"'
+          CIBW_ENVIRONMENT_MACOS: 'MACOSX_DEPLOYMENT_TARGET=11.0'
+          CIBW_TEST_REQUIRES: "pytest numpy scipy"
+          CIBW_TEST_COMMAND: "python -m pytest {project}/tests -v"
+        run: cibuildwheel --output-dir wheelhouse
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.arch }}
+          path: python/wheelhouse/*.whl
+
+  # --- Build sdist -----------------------------------------------
+  sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build sdist
+        working-directory: python
+        run: |
+          python -m pip install maturin
+          maturin sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: python/target/wheels/*.tar.gz
+
+  # --- Smoke test on uv + pip -------------------------------------
+  smoke-test:
+    name: Smoke test (uv install)
+    needs: [wheels]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux-x86_64
+          path: wheelhouse
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: Smoke test via uv pip
+        run: |
+          export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python \
+            --find-links wheelhouse feral-solver numpy
+          /tmp/smoke/bin/python python/examples/quickstart.py
+
+  # --- Publish to PyPI on tagged release --------------------------
+  publish:
+    name: Publish to PyPI
+    needs: [wheels, sdist, smoke-test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    environment:
+      name: pypi
+      url: https://pypi.org/p/feral-solver
+    permissions:
+      id-token: write    # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "wheels-*"
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

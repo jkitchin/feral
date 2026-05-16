@@ -1,0 +1,20 @@
+[workspace]
+
+[package]
+name = "feral-python"
+version = "0.3.0"
+edition = "2021"
+license = "MIT"
+description = "Python bindings for feral — sparse symmetric indefinite direct solver."
+authors = ["John Kitchin <jkitchin@andrew.cmu.edu>"]
+repository = "https://github.com/jkitchin/feral"
+publish = false
+
+[lib]
+name = "_feral"
+crate-type = ["cdylib"]
+
+[dependencies]
+feral = { path = ".." }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
+numpy = "0.22"

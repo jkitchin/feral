@@ -4,6 +4,60 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Python interface (`feral-solver` on PyPI)
+
+First-class Python binding shipped under `python/`, published as
+`feral-solver`. Built with PyO3 0.22 + maturin, distributed as
+abi3-py310 wheels (one wheel per platform, Python 3.10+).
+
+User-visible surface:
+
+- `feral.CscMatrix` — sparse CSC matrix with `from_dense`,
+  `from_triplet`, `from_mtx`, `from_scipy`, `to_scipy`, plus
+  `set_values` for cheap value-only refactor.
+- `feral.Solver` — direct solver with `factor`, `refactor`,
+  `solve` (1D and 2D RHS), `solve_refined`,
+  `estimate_condition_1norm`, `increase_quality`. Properties:
+  `inertia`, `num_negative_eigenvalues`, `factor_nnz`,
+  `symbolic_call_count`, `quality_level`, `needs_refinement`,
+  `pivot_threshold`, `parallel`, `scaling`.
+- `feral.Inertia(n_pos, n_neg, n_zero)` — first-class triple with
+  `matches`, `__iter__`, `as_tuple`.
+- `feral.FactorStatus` / `feral.QualityLevel` — IntEnums.
+- Exception hierarchy: `FeralError` → `FactorError`,
+  `SolveError`, `PatternMismatch`, `FeralIOError`;
+  `FactorError` → `SingularError`, `WrongInertiaError`,
+  `NumericFailure`.
+- `feral.ipm.KktSolver` — Wächter–Biegler 2006 §3.1 perturbation
+  loop wrapper for IPM callers (target consumer: `discopt`).
+  Caches diagonal indices once, applies δ_w / δ_c escalation
+  inertia-driven, returns `FactorReport` with attempt count and
+  wall time. Symbolic factorization is reused across the full
+  Newton loop.
+- `feral.from_scipy(a, *, symmetric="lower"|"upper"|"full")` and
+  `feral.to_scipy(m)` for scipy.sparse interop.
+
+Distribution:
+
+- `pyproject.toml` declares maturin build backend, ABI3 wheel
+  tags, numpy>=1.23 runtime dep, optional `[scipy]` extra.
+- `.github/workflows/python-wheels.yml` runs tests on every PR
+  (ubuntu × py3.10/3.12/3.13) and on tagged releases builds
+  wheels via cibuildwheel for linux x86_64 + aarch64, macos
+  universal2 (arm64+x86_64), and windows AMD64, plus sdist,
+  plus a uv-install smoke test, and publishes to PyPI via
+  trusted publishing.
+
+Tests: 23/23 pytest tests pass. The Newton-loop reuse test
+(`test_kkt_solver_symbolic_reuse_across_newton_loop`) confirms
+`symbolic_call_count == 1` after 20 perturbed factorizations.
+
+Caveat: `KktSolver` requires every diagonal entry it intends to
+perturb (including (2,2)-block zeros) to be present in the CSC
+pattern. The HS071 example shows the from_triplet idiom.
+
+Closes #20.
+
 ### Changed — cascade-break is now opt-in (was auto-armed by default)
 
 `NumericParams::default()` previously set `cascade_break_ratio =
