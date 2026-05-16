@@ -4,6 +4,45 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — JAX integration (`feral.jax`)
+
+`feral.jax` exposes a differentiable, vmap-able, jit-able sparse
+symmetric solve via implicit differentiation. Installs via the
+`[jax]` extra: `pip install feral-solver[jax]`.
+
+Surface:
+- `feral.jax.SparsePattern.from_csc(n, indices, indptr)` — hashable
+  static sparsity descriptor. Pass as `pattern=...` kwarg.
+- `feral.jax.solve(values, b, pattern=pattern)` — JAX-traceable
+  solve of `A x = b`. Custom JAX primitive with rules for:
+  - `jax.grad` / `jax.vjp` / `jax.jacrev` (reverse-mode, one extra
+    solve via implicit diff; values-gradient projected to the CSC
+    pattern via a symmetric outer-product primitive).
+  - `jax.jvp` / `jax.jacfwd` (forward-mode, `dx = A⁻¹(db - dA x)`).
+  - `jax.vmap` over `b`, over `values`, or over both (vmap-over-
+    values loops independent factorizations on the host).
+  - `jax.jit` (routes the host call through `jax.pure_callback`).
+- `feral.jax.matvec(values, x, pattern=pattern)` — differentiable
+  symmetric matvec, also exposed as a primitive.
+
+Requires `jax>=0.4.30` and **x64 mode** (`jax.config.update("jax_enable_x64",
+True)`). feral is double-precision only; float32 inputs raise `TypeError`.
+
+Tests (15/15 pass) verify: grad-w.r.t.-b against `A^{-T} g`, grad-w.r.t.-
+values against central finite differences, jvp against finite differences,
+`jacrev`/`jacfwd` against `inv(A)`, vmap over both axes, jit + jit(grad).
+
+Caveats:
+- Host hop per call (pure_callback breaks XLA fusion). Designed for
+  outer Newton/IPM loops, not inner `scan`-style fusion.
+- No second-order autodiff yet (`jax.hessian` unsupported in this
+  release — the pattern-outer primitive has no JVP rule).
+- Each `solve` call spins up a fresh `feral.Solver` and re-factors.
+  For symbolic reuse across an IPM Newton loop, use `feral.ipm.KktSolver`
+  directly (stateful, non-JAX path).
+
+Example: `python/examples/jax_quickstart.py`.
+
 ### Added — Python interface (`feral-solver` on PyPI)
 
 First-class Python binding shipped under `python/`, published as
