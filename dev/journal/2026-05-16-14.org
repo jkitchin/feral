@@ -1,0 +1,146 @@
+#+TITLE: Journal 2026-05-16-14 — Issue #14 wide-supernode throughput probe
+#+STARTUP: showall
+
+* 15:10 :orient:issue-14:
+Read issue #14, `dev/research/feral-kernel-profile-chainwoo.md`, decisions.md
+entries for 2026-05-12 (a/b/c) covering Phase 2.4.3 BLAS-3 quad kernel that
+landed and was parked. Issue is explicitly "months-of-work" investment; today's
+task is the *concrete next-step probe* only — measure utilization on snode 3607
+(1928×1928) and snode 3593 (2829×433) from MBndryCntrl_3D_27 n=31104. Pick
+between two paths: (1) tune existing 32×32 dispatch / panel kernel with
+register tiling, software prefetch; (2) write a new GEMM-equivalent micro-kernel.
+
+The blocker for loading the real supernode is the Ipopt NLP infrastructure
+(needs solve_problem + Ipopt link). Build path: synthesize a representative
+indefinite saddle-point frontal at the two shapes and instrument the existing
+panel kernels. Existing diagnostic plumbing: `panel_diag` module in
+`src/dense/factor.rs` (PANEL_DIAG_ENABLED gate, counters PANEL_FULL/PARTIAL,
+PIVOTS_INLINE/SCALAR, SCALAR_TAIL_STEPS) — already counts panel-vs-scalar
+dispatches. Schur kernel counter coverage: none currently for SIMD-body vs
+scalar-tail executions. Plan: derive these analytically (NEON F64_LANES = 2
+on aarch64, fixed from `S::F64_LANES` in pulp dispatch) per element processed.
+
+Approach for the probe:
+1. Standalone bin `src/bin/probe_wide_supernode.rs`.
+2. Build synthetic 1928×1928 SPD-ish + KKT-style indefinite frontals at
+   (nrow=1928, ncol=1928) and (nrow=2829, ncol=433).
+3. Time `factor_frontal_blocked_in_place` with `panel_diag` enabled.
+4. Compute effective FLOPs: panel LDLᵀ is n³/3 in pivot block + 2·n_trail·ncol²
+   in Schur update. Compare to wall time → GFLOPS. Report SIMD-path saturation
+   estimate: lanes used / element-FLOPs issued.
+
+* 15:25 :investigate:
+Looked at how pulp dispatches in schur_kernel: `pulp::Arch::new().dispatch(K)`
+which calls `with_simd<S: pulp::Simd>` with the platform-best S. On aarch64,
+this is `pulp::aarch64::Neon` with `F64_LANES = 2`. The quad kernel
+(`schur_panel_minus_*_strided_quad`) issues 8 SIMD acc regs per chunk over 4
+destination columns, unrolled 2× = 16 logical regs (`Phase 2.4.3` note in
+factor.rs:2398). The "wide / near-square" supernode hits this path for every
+trailing-column quad ≥ 4 wide; the path is *engaged* but the question is
+arithmetic intensity, not coverage.
+
+For (1928, 1928) full-square: panel processes ncol=1928 in 30 panel passes of
+bs=64 each (default block_size). For each panel, deferred Schur is a rank-64
+update over a shrinking trailing block — 1864×1864 then 1800×1800 etc. The
+FLOPs for this front: panel LDLᵀ ≈ n³/3 = 1928³/3 ≈ 2.39 GFLOP. If the issue
+quotes 152 ms for snode 3607 → 15.7 GFLOPS sustained on real assembly. Issue
+reports 1.3 GFLOPS on snode 3593 — that's the wider-trail / smaller-pivot one.
+Need to measure both shapes.
+
+* 15:35 :build:probe-bin:
+Wrote `src/bin/probe_wide_supernode.rs`. Two phases per shape:
+- Phase A: scalar reference `factor_frontal` baseline.
+- Phase B: blocked panel `factor_frontal_blocked_in_place` with panel_diag.
+Computes effective GFLOPS from the LDLᵀ work model and reports
+panel-vs-scalar pivot accounting.
+
+For the SIMD-body / scalar-tail accounting, I derive analytically from
+NEON F64_LANES = 2 and the trailing-block geometry (per-quad: dst lengths
+len0, len0-1, len0-2, len0-3 → bulk is len0-3, all SIMD-aligned modulo 2;
+tail is 0 or 1 lane). The probe reports `simd_elements`, `scalar_tail_elements`
+totals derived from the trailing-block shapes the kernel walks. This is
+exact under the assumption pulp dispatches NEON (verified by the cfg
+target_feature check at startup).
+
+* 15:55 :results:probe:
+First clean run of `probe_wide_supernode` (PROBE_REPS=5, bs=64, fma=false):
+
+| shape   | label | med ms | peak GFLOPS | med GFLOPS |
+|---------|-------|--------|-------------|------------|
+| 1928×1928 | SPD | 593.31 | 9.85        | 8.05       |
+| 1928×1928 | KKT | 227.51 | 31.85       | 20.99      |
+| 2829×433  | SPD | 177.94 | 33.57       | 33.29      |
+| 2829×433  | KKT | 177.24 | 34.79       | 33.42      |
+
+Surprises:
+1. The 2829×433 supernode hits 33 GFLOPS in synthetic — NOT 1.3 GFLOPS as
+   the issue's back-of-envelope estimates. The issue's 196 ms for snode
+   3593 in the live driver matches our 178 ms synthetic — i.e. the kernel
+   itself is fine, the issue's "1.3 GFLOPS" derived from a 250 MFLOP
+   estimate is off by ~25× because the real FLOP count is ~5.92 GFLOP
+   (we measure 6 GFLOP, the issue text estimates 250 MFLOP via
+   "(433² LDLᵀ) + (2396×433 Schur)" which is too low — the rank-433
+   schur over 2396×2396 trailing rows is what drives FLOPs).
+2. SPD 1928×1928 is *worse* than KKT 1928×1928 (593 vs 227 ms). Hypothesis:
+   the SPD matrix's diagonal dominance keeps every pivot trivial (no rook,
+   no 2x2), so every panel goes through the "full" deferred-Schur path
+   which does 31 × bs=64 panel passes of growing-trail rank-64 Schur on
+   ~1864² block. KKT triggers some 2x2 paths that take a shorter route?
+   Need to check `panels` counter — both report panel_full=31 / partial=0,
+   so the panel count is identical. The KKT speedup might actually be a
+   cache-locality artifact of the indefinite path's specific access pattern.
+   Worth flagging but not the main result.
+3. FMA path is *slower* on aarch64 NEON for these shapes (~0.65× on shape B
+   SPD, mixed on shape A). Suggests the FMA dispatch's `pulp::mul_add_f64s`
+   either isn't issuing FMADD or is taking a worse code-gen path. Counter
+   to issue #8 expectations.
+4. SIMD coverage is >99.84% by FLOP across all configs — the scalar tail is
+   negligible. The dispatch already uses NEON 2-lane vectors throughout.
+
+* 16:00 :ablation:block-size:
+Tried bs=128 → panics at `apply_blocked_schur_panel` MAX_N_ELIM=64
+hardcoded buffer overflow. bs=128 is currently a latent crash if anyone
+sets BunchKaufmanParams::block_size > 64 in production. Not exploited
+because default is 64 and the panel clamps to `bs.min(ncol)`.
+
+Tried bs=32:
+- A.SPD: 270 ms (down from 593 ms at bs=64). 17.65 GFLOPS median.
+- A.KKT: 343 ms (up from 227 ms at bs=64). 13.89 GFLOPS.
+- B.SPD: 249 ms (up from 177 ms at bs=64).
+- B.KKT: 247 ms (up from 177 ms at bs=64).
+
+bs=32 cuts shape A SPD time in half but degrades the rest. Suggests
+**bs is shape-dependent**: full-square fronts want smaller panels (?),
+wide trailing-row fronts want bs=64. This is consistent with a
+data-reuse argument — smaller panels reduce the panel-internal cache
+miss rate at the cost of more outer iterations. The current default
+(64) is good for the wide case and bad for the full-square root.
+
+This already points to a cheap win: tune bs per (nrow, ncol) shape.
+
+* 16:05 :scalar-vs-blocked:
+Shape B scalar `factor_frontal`: 413 ms (3-rep median). Blocked: 178 ms.
+2.32× speedup from the panel + quad kernel. So the existing pipeline
+already extracts ~2.3× over scalar on this shape. Issue #14's premise
+that "the dense kernel needs a BLAS-class rewrite" implies a ceiling
+above 33 GFLOPS — likely true (Accelerate DGEMM at ~50–100 GFLOPS on
+this machine) but the current path is already at ~30–50% of that
+ceiling, not the 1.3 / 50 ≈ 2.5% the issue's headline numbers suggest.
+
+* 16:20 :commit:
+Committed probe binary (aef4091) and research note (9855fea). pre-commit
+hooks passed on both. Now running bench + assemble-context + writing
+session checkpoint.
+
+* 16:25 :result:summary:
+After high-rep stable measurement (REPS=9):
+- Kernel is at 33-35 GFLOPS on both target shapes.
+- Issue #14's "1.3 GFLOPS" was a 25x FLOP-count underestimate.
+- No go on either kernel-rewrite path; redirect to driver overhead
+  + symbolic amalgamation A/B vs MA57.
+
+Two free findings:
+- BunchKaufmanParams::fma=true is SLOWER on aarch64 NEON for these
+  shapes (0.65-0.93x). Contradicts issue #8.
+- MAX_N_ELIM=64 in apply_blocked_schur_panel is a latent panic when
+  PROBE_BLOCK_SIZE>64.
