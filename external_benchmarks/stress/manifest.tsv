@@ -28,3 +28,6 @@ synth	ill_cond_e10	100	1485	illcond	100x100 sym indef cond ~ 1e10
 synth	ill_cond_e14	100	1485	illcond	100x100 sym indef cond ~ 1e14
 synth	deep_null_cascade_50	50	149	cascade	Long zero-pivot cascade, n=50
 synth	deep_null_cascade_200	200	599	cascade	Long zero-pivot cascade, n=200
+cuter_kkt	FBRAIN3LS__FBRAIN3LS_0839	6	21	borderline	Issue #29 borderline KKT; feral inertia (5,0,1) vs MUMPS/SSIDS (6,0,0); see dev/research/fbrain3ls-2x2-stability.md
+cuter_kkt	FBRAIN3LS__FBRAIN3LS_0843	6	21	borderline	Issue #29 borderline KKT; feral (5,0,1) vs (6,0,0); pivot tol insensitive
+cuter_kkt	FBRAIN3LS__FBRAIN3LS_0851	6	21	borderline	Issue #29 borderline KKT; feral (5,0,1) vs (6,0,0); pivot tol insensitive

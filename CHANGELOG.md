@@ -4,6 +4,31 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — FBRAIN3LS pivot-threshold sweep + stress-suite entry (#29)
+
+New diagnostic binary `diag_fbrain3ls_pivtol_sweep` factors five
+FBRAIN3LS borderline samples (`0788`, `0839`, `0843`, `0848`, `0851`)
+under `pivot_threshold ∈ {0, 1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-2}`
+in two passes (`ForceAccept` and `Fail` for `on_zero_pivot`) and
+reports per-row inertia, smallest |D|, and the JSON-RHS relative
+residual. The new research note
+`dev/research/fbrain3ls-2x2-stability.md` writes up the result: the
+sweep is flat across all seven `pivot_threshold` values in both
+passes, and FBRAIN3LS produces no 2×2 pivot blocks at any tested
+threshold. The active gate on these matrices is the F-01
+`null_pivot_tol` override (`sqrt(n) · EPS · ‖A‖_inf`), not
+`pivot_threshold`. The default `NumericParams::default().bk.pivot_threshold
+= 1e-8` is therefore kept on its existing rationale (Ipopt
+`ma27_pivtol` compatibility for Identity-scaled IPM-KKT callers).
+
+`external_benchmarks/stress/manifest.tsv` gains three
+`cuter_kkt / FBRAIN3LS__FBRAIN3LS_{0839,0843,0851}` rows under a
+new `borderline` category, and `external_benchmarks/stress/fetch.py`
+learns to source `cuter_kkt` rows from the in-repo
+`data/matrices/kkt/<family>/<sample>.mtx` CUTEst dump rather than
+SuiteSparse. README updated to document both the group and the
+category.
+
 ### Added — near-singular inertia sweep + certification (#31)
 
 New diagnostic binary `diag_near_singular_sweep` runs

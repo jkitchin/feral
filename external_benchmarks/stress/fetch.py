@@ -25,8 +25,17 @@ from pathlib import Path
 
 STRESS_DIR = Path(__file__).resolve().parent
 MATRICES_DIR = STRESS_DIR / "matrices"
+REPO_ROOT = STRESS_DIR.parent.parent
 
 BASE_URL = "https://suitesparse-collection-website.herokuapp.com/MM"
+
+# `group=cuter_kkt` rows are sourced from the local CUTEst KKT dump
+# (produced by ripopt's `collect_kkt`). The `name` field encodes
+# "<family>/<sample>" so the lookup path is
+#     data/matrices/kkt/<family>/<sample>.mtx
+# Used for FBRAIN3LS borderline samples (issue #29) which are not in
+# SuiteSparse but are part of feral's regression coverage.
+CUTER_KKT_ROOT = REPO_ROOT / "data" / "matrices" / "kkt"
 
 
 def parse_manifest(path: Path) -> list[dict]:
@@ -50,6 +59,24 @@ def fetch_one(group: str, name: str, force: bool) -> bool:
     if tgt.exists() and not force:
         return False
     tgt.parent.mkdir(parents=True, exist_ok=True)
+
+    if group == "cuter_kkt":
+        # name = "<family>__<sample>", path = data/matrices/kkt/<family>/<sample>.mtx
+        parts = name.split("__", 1)
+        if len(parts) != 2:
+            print(f"    FAIL cuter_kkt: bad name {name!r} "
+                  f"(expected <family>__<sample>)", flush=True)
+            return False
+        family, sample = parts
+        src = CUTER_KKT_ROOT / family / f"{sample}.mtx"
+        if not src.exists():
+            print(f"    FAIL cuter_kkt: missing {src}", flush=True)
+            return False
+        shutil.copy(src, tgt)
+        print(f"    ok -> {tgt.relative_to(REPO_ROOT)} (from local CUTEst dump)",
+              flush=True)
+        return True
+
     url = f"{BASE_URL}/{group}/{name}.tar.gz"
     print(f"  fetching {group}/{name} ...", flush=True)
     with tempfile.TemporaryDirectory() as td:
