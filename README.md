@@ -148,6 +148,54 @@ a wrong `A⁻¹`, the refinement guarantees the returned `x` is no worse
 than the unrefined solve, even when individual refinement steps would
 have amplified the error.
 
+## Python bindings
+
+The `feral-solver` package on PyPI provides Python bindings built with
+[maturin](https://www.maturin.rs/) + [pyo3](https://pyo3.rs/). Wheels
+are published for CPython 3.10+ on Linux x86_64/aarch64, macOS
+universal2, and Windows x86_64 — no Rust toolchain required for users.
+
+```bash
+pip install feral-solver           # plain
+pip install 'feral-solver[scipy]'  # scipy.sparse adapters
+pip install 'feral-solver[jax]'    # JAX interop
+```
+
+Quickstart:
+
+```python
+import numpy as np
+import feral
+
+A = feral.CscMatrix.from_dense(np.array([
+    [4.0, 1.0, 0.0],
+    [1.0, 3.0, 2.0],
+    [0.0, 2.0, 5.0],
+]))
+
+solver = feral.Solver()
+status, inertia = solver.factor(A)
+assert status == feral.FactorStatus.SUCCESS
+x = solver.solve(np.array([1.0, 2.0, 3.0]))
+```
+
+For interior-point KKT solves, `feral.ipm.KktSolver` wraps
+`feral.Solver` with the Wächter–Biegler 2006 §3.1 perturbation-
+escalation loop; symbolic analysis is cached across an entire Newton
+run. `feral.from_scipy(...)` / `feral.to_scipy(...)` round-trip with
+`scipy.sparse` matrices. See [`python/README.md`](python/README.md)
+for the full API and IPM usage, and `python/examples/` for an end-to-
+end Newton step.
+
+Build the bindings from source:
+
+```bash
+cd python
+pip install maturin
+maturin develop --release
+pytest tests/
+```
+
 ## Running the KKT benchmark
 
 ```sh
