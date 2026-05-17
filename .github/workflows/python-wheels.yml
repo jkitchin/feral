@@ -98,8 +98,17 @@ jobs:
           CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
           CIBW_SKIP: "*-musllinux_* *-win32 *-manylinux_i686"
           CIBW_ARCHS: ${{ matrix.arch }}
-          CIBW_BUILD_FRONTEND: "build[uv]"
-          CIBW_BEFORE_BUILD_LINUX: "pip install maturin && rustup toolchain install stable --profile minimal && rustup default stable"
+          # Default "build" frontend works on every platform without
+          # extra runner setup; "build[uv]" required uv to be present
+          # on macOS/Windows runners, which it is not.
+          CIBW_BUILD_FRONTEND: "build"
+          # The manylinux container does not ship rustup; bootstrap it
+          # before invoking it. CIBW_ENVIRONMENT_LINUX puts the cargo
+          # bin on PATH for subsequent build steps.
+          CIBW_BEFORE_BUILD_LINUX: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+            . $HOME/.cargo/env
+            pip install maturin
           CIBW_BEFORE_BUILD_MACOS: "pip install maturin"
           CIBW_BEFORE_BUILD_WINDOWS: "pip install maturin"
           CIBW_ENVIRONMENT_LINUX: 'PATH="/root/.cargo/bin:$PATH"'
