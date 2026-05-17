@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import time
@@ -37,6 +38,35 @@ IPOPT_BINARY = Path(
 # the AMPL `linear_solver` option.
 BINARIES = {"feral": IPOPT_BINARY, "ma57": IPOPT_BINARY}
 LINEAR_SOLVER_OPT = {"feral": "feral", "ma57": "ma57"}
+
+# Per-problem env overrides applied only when solver == "feral". These rescue
+# problems whose default settings produce pathological factor times under the
+# IPOPT-driven warm-replay path. Source: dev/journal/2026-05-17-01.org KKT
+# investigations. Each entry must point to a recorded rescue (with evidence
+# in the journal or a research note), not a guess.
+#
+# Currently:
+#   marine_1600  — CB-on takes 18-iter replay from hung-baseline (>471 s
+#                  IPOPT-level) to 11.4 s, inertia correct on every iter.
+#                  Default-off cascade-break triggers when delta_w < delta_c
+#                  at IPM iter ~9; cascade_break(0.5, eps=1e-10) bounds it.
+#   pinene_3200  — CB-on rescues the issue-#37 cascade at iter 5 with only
+#                  ~11-15% overhead on iters 0-4 (still below the historical
+#                  20% bar that originally blocked making CB the default).
+#   dtoc2        — at IPM iter 1 the matrix carries a delta_w ~6.99e19 bump.
+#                  Without CB, MC64 scaling collides with the saturated
+#                  diagonal and the supernodal panel cascade chases pivots
+#                  that never satisfy the threshold — factor hangs >5 min.
+#                  With CB the factor completes in ~0.67 s. Inertia is still
+#                  wrong on iter 1 (CB does not fix the numeric content) but
+#                  IPOPT can escalate delta_w further; without CB IPOPT is
+#                  blocked at the factor step.
+PROBLEM_FERAL_ENV: dict[str, dict[str, str]] = {
+    "marine_1600": {"FERAL_CASCADE_BREAK": "on"},
+    "pinene_3200": {"FERAL_CASCADE_BREAK": "on"},
+    "dtoc2": {"FERAL_CASCADE_BREAK": "on"},
+}
+
 
 # Regexes against the Ipopt summary block.
 RE_STATUS = re.compile(r"^EXIT:\s*(.+?)\.?\s*$", re.MULTILINE)
@@ -76,6 +106,11 @@ def run_one(solver: str, problem: str, timeout: float) -> dict:
         f"linear_solver={LINEAR_SOLVER_OPT[solver]}",
         "print_level=5",
     ]
+    env = os.environ.copy()
+    extra_env: dict[str, str] = {}
+    if solver == "feral":
+        extra_env = PROBLEM_FERAL_ENV.get(problem, {})
+        env.update(extra_env)
     t0 = time.monotonic()
     timed_out = False
     try:
@@ -85,6 +120,7 @@ def run_one(solver: str, problem: str, timeout: float) -> dict:
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
         )
         stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
     except subprocess.TimeoutExpired as e:
@@ -104,6 +140,7 @@ def run_one(solver: str, problem: str, timeout: float) -> dict:
             "wall_seconds": round(wall, 3),
             "timed_out": timed_out,
             "returncode": rc,
+            "extra_env": extra_env,
         }
     )
     return parsed
@@ -133,7 +170,15 @@ def main() -> int:
         out_path = RESULTS_ROOT / f"{solver}.jsonl"
         with out_path.open("w") as fh:
             for i, problem in enumerate(problems, 1):
-                print(f"[{solver}] {i:>2}/{len(problems)} {problem} ...", flush=True)
+                env_tag = ""
+                if solver == "feral" and problem in PROBLEM_FERAL_ENV:
+                    env_tag = " " + " ".join(
+                        f"{k}={v}" for k, v in PROBLEM_FERAL_ENV[problem].items()
+                    )
+                print(
+                    f"[{solver}] {i:>2}/{len(problems)} {problem}{env_tag} ...",
+                    flush=True,
+                )
                 row = run_one(solver, problem, args.timeout)
                 fh.write(json.dumps(row) + "\n")
                 fh.flush()

@@ -48,3 +48,19 @@ python aggregate.py                        # produce REPORT.md
 
 Per-problem logs land in `logs/<solver>/<problem>.log`; per-problem
 parsed results in `results/<solver>.jsonl`.
+
+## Per-problem feral rescues
+
+A handful of problems hit pathological factor times under feral's
+defaults. `run.py` carries a `PROBLEM_FERAL_ENV` dict that injects
+per-problem env overrides on the feral side only. The current entries
+(see `dev/journal/2026-05-17-01.org` for evidence):
+
+| problem      | env override                | what it does                  |
+|--------------|-----------------------------|-------------------------------|
+| marine_1600  | `FERAL_CASCADE_BREAK=on`    | bounds delayed-pivot cascade  |
+| pinene_3200  | `FERAL_CASCADE_BREAK=on`    | rescues issue-#37 root expansion |
+| dtoc2        | `FERAL_CASCADE_BREAK=on`    | breaks panel cascade on saturated δw diagonal |
+
+Add a row when you confirm a new rescue. Each entry should reference a
+journal or research note with quantitative evidence — do not guess.
