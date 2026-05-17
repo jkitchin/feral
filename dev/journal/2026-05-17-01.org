@@ -1262,3 +1262,147 @@ problems, baseline vs FERAL_STATIC_PIVOT=1e-8:
 Identical iteration counts, wall-time deltas <2 % (noise).
 No regression. Knob defaults to None (off) so all default-path
 users are bit-identical to before.
+
+* 11:45 :rocket_12800:mc64:probe:live:
+Live ipopt-feral MC64 trace (FERAL_MC64_TRACE=1) on
+rocket_12800.nl (30 IPM iters, 10.8 s total Ipopt time):
+
+- 30 MC64 recomputes (one per warm factor call — confirms #38's
+  `db20166` cache invalidation forces fresh MC64 every time)
+- Per-call MC64 wall: 14 - 2482 ms, total ~5950 ms
+  - Cheap (<100 ms): 22 calls × ~36 ms avg = 789 ms
+  - Expensive (>100 ms): 8 calls × ~641 ms avg = 5133 ms
+    (clustered at iters 1-7 warm-up and iters 21,25,26 restoration)
+- **MC64 = 55 % of total Ipopt wall** on rocket_12800
+
+Earlier dumped-corpus probe (probe_rocket_slow on /tmp/rkt_017.bin,
+n=89601, nnz=435190) showed 98 % MC64 dominance — but the live KKT
+has nnz=614378 (41 % larger) and MC64 cost is *highly value-
+dependent* (cheap calls converge in few augmenting paths, expensive
+ones do not). The /tmp dumps came from pounce's IPM, not ipopt's;
+they are larger/different matrices.
+
+Implication for value-bounded MC64 cache (research note 2026-05-17):
+- Best case: cache hits all 22 cheap calls (where matching is
+  stable) → save ~679 ms (downsize 22×36→22×5 ms)
+- The 8 expensive calls are where the matching genuinely changed,
+  and a sound bound should *reject* the cache there → no savings
+- Expected speedup on rocket_12800: ~6.5 % of total Ipopt wall
+  (~700 ms / 10.8 s)
+
+This is more modest than the probe predicted. The architectural
+case for the cache (align with MA57's analysis-only MC64; remove
+the regression introduced by `db20166`) stands, but the headline
+number doesn't carry the project. The bigger gap vs MA57 (~3 s
+remaining after MC64) lives elsewhere — numeric kernel, ordering,
+or symbolic — and warrants its own profile.
+
+Decision: still proceed with the cache as the correct architectural
+fix and a measurable (if modest) win; will instrument other
+Mittelmann problems to find one where MC64 dominates consistently
+and the cache pays off harder.
+
+* 12:30 :robot_1600:cascade:findings:
+Live ipopt-feral trace on robot_1600 with FERAL_FACTOR_TRACE=1 and
+delayed-pivot count exposed: per-factor wall correlates 1:1 with
+sum_delayed_in. Cheap calls (10 ms) have sum_delayed≈30; expensive
+calls (200-2000 ms) have sum_delayed=30k-60k out of n=24000 — the
+delayed-pivot cascade is rampant in mid-IPM iters.
+
+Same mechanism as issue #37 (pinene_3200) and the marine_1600
+investigation earlier today. Cascade-break with ratio=0.5 + eps=1e-10
+rescues robot_1600 from 13.7 s to **2.4 s** (5.6× wall reduction).
+
+Root cause of the gap between dumped-corpus probe and live ipopt:
+the corpus only has dumps from iters 0-6 (warm-up + 1 cold), where
+factors are 11-130 ms each. Live IPM continues through iter 35,
+where late-iter KKTs trigger the cascade. The probe systematically
+under-represents the hard iters.
+
+* 12:50 :auto-cb:capi:fix:
+Discovered `Solver::with_auto_cascade_break(β)` exists in
+src/numeric/solver.rs and implements warm-arm logic (next factor
+arms CB if prior factor had `max(n_delayed_in) ≥ β·n`), but
+**`capi.rs` never calls it** — so the gate is dead code in
+ipopt-feral. Wired it through `FERAL_AUTO_CB_BETA` env var with
+default 0.05 (matches the recommended-β comment).
+
+Spot-check on 10 representative Mittelmann problems vs prior
+baseline (`external_benchmarks/.../results/feral.jsonl`):
+
+| problem        | baseline | auto-CB | delta | MA57 ratio |
+|---             |     ---: |    ---: |   --: |        --: |
+| robot_1600     |  13.81 s |  3.58 s | -74 % | 7.2× (was 27.8×) |
+| marine_1600    | 470.87 s | 58.13 s | -88 % |  72× (was 587×)  |
+| clnlbeam       | 361.26 s | 47.73 s | -87 % | 3.7× (was 28.1×) |
+| corkscrw       |  53.89 s | 15.43 s | -71 % | 4.8× (was 16.8×) |
+| camshape_6400  |   6.67 s |  2.09 s | -69 % | 3.0× (was 9.6×)  |
+| dtoc2          |  timeout |  78 s   | rescued | 31× (was t/o)  |
+| bearing_400    |   6.21 s |  4.86 s | -22 % | (still > MA57)   |
+| arki0003       |   3.10 s |  3.17 s |  ±0   | 5.1×             |
+| rocket_12800   |   8.73 s | 10.55 s | +21 % | 5.6× (was 4.7×)  |
+| pinene_3200    |  timeout | timeout | none — needs per-problem CB=on |
+
+**Net: 6 dramatic wins, 1 noise, 1 minor regression
+(rocket_12800), 1 unchanged.** pinene_3200 still needs the
+PROBLEM_FERAL_ENV override because its very first factor is the
+expensive one (~94 s) — auto-arm fires too late to rescue cold.
+
+rocket_12800 regression (+1.8 s on 8.7 s baseline) deserves a
+follow-up: the auto-arm likely fires on rocket_12800 mid-IPM and
+the cascade-break perturbation adds refinement cost. With this
+change, the prior session's MC64-cache investigation becomes lower
+priority for that problem — would need to verify whether the
+perturbation cost or refinement cost is the actual culprit.
+
+Probe binaries kept for future investigation:
+- src/bin/probe_rocket_profile.rs (corpus-based)
+- src/bin/probe_rocket_slow.rs (single-call deep dive)
+- src/bin/probe_robot_profile.rs (new today)
+- src/bin/probe_rkt_shape.rs (Auto-policy gate verification)
+- src/bin/probe_marine_shape.rs / probe_marine_time.rs
+- src/bin/probe_clnlbeam_shape.rs
+
+Trace instruments retained in production code (env-gated, zero
+cost when unset):
+- FERAL_MC64_TRACE=1 — per-call MC64 timing
+  (src/scaling/mc64.rs `MC64_RECOMPUTE_COUNT`)
+- FERAL_FACTOR_TRACE=1 — per-factor wall + delayed-pivot counts
+  (src/capi.rs `feral_factor`)
+- FERAL_AUTO_CB_DEBUG=1 — auto-arm fire/no-fire reasoning
+  (already in src/numeric/solver.rs)
+- FERAL_AUTO_CB_BETA=<f64> — auto-arm threshold override
+  (new in src/capi.rs; default 0.05; 0 disables)
+
+Research note `dev/research/mc64-value-bounded-cache-2026-05-17.md`
+documents the value-bounded MC64 cache design; deferred since the
+cascade-break fix is the more impactful lever. Cache work remains
+correct and worthwhile but not the headline.
+
+* 15:10 :clnlbeam:scaling:auto:fix:#68:
+Implemented the §14:30 plan: tightened `pick_scaling_strategy` to
+require BOTH `diag_only/n >= 0.30` AND `max_col_nnz > 32` before
+routing to MC64. Single O(n+nnz) pass, no allocations.
+
+Tests added/updated in =src/scaling/mod.rs= covering both gates
+independently (`pick_scaling_strategy_picks_infnorm_for_banded_high_diag_only`,
+`pick_scaling_strategy_max_col_nnz_threshold_boundary`,
+`pick_scaling_strategy_routes_clnlbeam_to_infnorm` fixture-gated)
+and updated the existing arrow/spread/dense tests to use shapes
+that satisfy the new gate. Updated `auto_picks_infnorm_on_acopp30_0064`
+to reflect that the routing layer (not the IN_SPREAD_GUARD
+fallback) is now the mechanism rescuing ACOPP30_0064 — end-to-end
+behaviour (Auto scaling vector == InfNorm scaling vector) is
+unchanged; the safety-net path is still exercised by the synthetic
+uniform-diag fallback test.
+
+Threshold calibration (`32`) sits well above ACOPP30's max column
+nnz (29; the highest-degree matrix that should route to InfNorm)
+and well below MUONSINE's (512; the lowest-degree matrix that
+should route to MC64), giving order-of-magnitude margin on both
+sides.
+
+Expected impact on full Mittelmann sweep: clnlbeam 2367 iters /
+361s → 506 iters / 57s (matches the FERAL_SCALING=infnorm probe
+from §14:30). VESUVIO/CRESC/MUONSINE/ACOPP30 unchanged. All
+existing scaling tests pass (`cargo test scaling::`).

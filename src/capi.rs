@@ -94,6 +94,27 @@ pub extern "C" fn feral_new() -> *mut FeralSolver {
         let mut solver = Solver::with_params(np, SupernodeParams::default());
         if cb_on {
             solver = solver.with_cascade_break(0.5).with_cascade_break_eps(1e-10);
+        } else {
+            // Warm-CB auto-arm. Default β=0.05 ≈ "5% of n got delayed
+            // at some supernode last call ⇒ arm CB for this call only."
+            // Wired here (not in Solver::new) because the auto-arm only
+            // makes sense in the IPM loop where the same Solver gets
+            // called repeatedly on the same pattern with drifting
+            // values. Disable by setting FERAL_AUTO_CB_BETA=0.
+            //
+            // Live evidence (2026-05-17): robot_1600 with CB=off takes
+            // 13.7 s due to delayed-pivot cascades (sum_delayed=60k on
+            // n=24000 in late-IPM iters); FERAL_CASCADE_BREAK=on cuts
+            // it to 2.4 s (5.6×). The auto-arm gives the same rescue
+            // without per-problem opt-in.
+            let beta = std::env::var("FERAL_AUTO_CB_BETA")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .unwrap_or(0.05);
+            if beta > 0.0 {
+                solver = solver.with_auto_cascade_break(beta);
+            }
         }
         if matches!(
             std::env::var("FERAL_PARALLEL").as_deref(),
@@ -235,7 +256,42 @@ pub unsafe extern "C" fn feral_factor(
         // Pass None for check_inertia — Ipopt only constrains
         // negative-eigenvalue count, not positive. We do the
         // negative-count check ourselves below.
+        let trace_factor = matches!(
+            std::env::var("FERAL_FACTOR_TRACE").as_deref(),
+            Ok("1") | Ok("on"),
+        );
+        let solve_t0 = if trace_factor {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let status = s.solver.factor(&matrix, None);
+        if let Some(t0) = solve_t0 {
+            let ms = t0.elapsed().as_secs_f64() * 1e3;
+            let (sum_delayed, max_delayed, n_snodes) = match s.solver.factors() {
+                Some(f) => {
+                    let sum: usize = f.node_factors.iter().map(|nf| nf.n_delayed_in).sum();
+                    let max: usize = f
+                        .node_factors
+                        .iter()
+                        .map(|nf| nf.n_delayed_in)
+                        .max()
+                        .unwrap_or(0);
+                    (sum, max, f.node_factors.len())
+                }
+                None => (0, 0, 0),
+            };
+            eprintln!(
+                "[feral factor] n={} nnz={} {:.1} ms snodes={} sum_delayed={} max_delayed={} status={:?}",
+                matrix.n,
+                matrix.row_idx.len(),
+                ms,
+                n_snodes,
+                sum_delayed,
+                max_delayed,
+                status,
+            );
+        }
         match status {
             FactorStatus::Success => {
                 let inertia = match s.solver.inertia() {
