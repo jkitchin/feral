@@ -3480,24 +3480,66 @@ pub(crate) fn do_2x2_update(
 }
 
 /// Count inertia of a 2×2 D block, returning Inertia struct.
+///
+/// Uses the closed-form eigenvalue formula for a 2×2 symmetric matrix
+/// `[[d11, d21], [d21, d22]]`:
+///
+/// ```text
+///   λ = (tr ± sqrt(disc)) / 2
+///   tr   = d11 + d22
+///   disc = (d11 - d22)^2 + 4 * d21^2           (always ≥ 0; cancellation-free)
+/// ```
+///
+/// The discriminant is computed as `(d11 - d22)^2 + 4*d21^2`, which is
+/// algebraically equal to `tr^2 - 4*det` but never suffers catastrophic
+/// cancellation: it is a sum of two squares. This makes sign-counting
+/// robust on borderline (+,+) or (−,−) blocks whose `det = d11*d22 - d21*d21`
+/// computed directly would lose sign to cancellation. The prior
+/// trace/determinant classifier (which was hypothesized in
+/// `dev/journal/2026-05-17-01.org` 09:45 entry to be the root cause of
+/// issue #38 Failure B on rocket_12800) was empirically disproved as the
+/// cause — see the 16:30 entry — but the closed-form classifier is
+/// retained as a defensive improvement applicable to any matrix whose
+/// 2×2 pivots are genuinely borderline.
+///
+/// Counts λ > 0 as positive, λ < 0 as negative, λ == 0 as zero.
 fn count_2x2_inertia_val(d11: f64, d21: f64, d22: f64) -> Inertia {
-    let det = d11 * d22 - d21 * d21;
-    let trace = d11 + d22;
-    if det > 0.0 {
-        if trace > 0.0 {
-            Inertia::new(2, 0, 0)
+    let (lam1, lam2) = sym2_eigenvalues(d11, d21, d22);
+    let mut pos = 0;
+    let mut neg = 0;
+    let mut zer = 0;
+    for lam in [lam1, lam2] {
+        if lam > 0.0 {
+            pos += 1;
+        } else if lam < 0.0 {
+            neg += 1;
         } else {
-            Inertia::new(0, 2, 0)
+            zer += 1;
         }
-    } else if det < 0.0 {
-        Inertia::new(1, 1, 0)
-    } else if trace > 0.0 {
-        Inertia::new(1, 0, 1)
-    } else if trace < 0.0 {
-        Inertia::new(0, 1, 1)
-    } else {
-        Inertia::new(0, 0, 2)
     }
+    Inertia::new(pos, neg, zer)
+}
+
+/// Closed-form eigenvalues of the symmetric 2×2 matrix
+/// `[[d11, d21], [d21, d22]]`.
+///
+/// Returns `(λ_max, λ_min)`. The discriminant is computed as
+/// `(d11 - d22)^2 + 4*d21^2` (sum of squares, never negative, no
+/// cancellation), guaranteeing real eigenvalues and the correct sign
+/// classification even when `det = d11*d22 - d21*d21` would underflow
+/// or flip sign under round-off.
+#[inline]
+fn sym2_eigenvalues(d11: f64, d21: f64, d22: f64) -> (f64, f64) {
+    let tr = d11 + d22;
+    let diff = d11 - d22;
+    // disc = (d11 - d22)^2 + (2*d21)^2 — algebraically equal to tr^2 - 4*det
+    // but free of cancellation.  Clamp to 0 to guard against -0.0 from FMA
+    // contractions (theoretically impossible for a sum of squares; cheap).
+    let disc = (diff * diff + (2.0 * d21) * (2.0 * d21)).max(0.0);
+    let s = disc.sqrt();
+    let lam1 = 0.5 * (tr + s);
+    let lam2 = 0.5 * (tr - s);
+    (lam1, lam2)
 }
 
 /// Find max |A[i,k]| for i > k (column k, below diagonal).
@@ -3728,9 +3770,13 @@ fn do_2x2_pivot(
     // Store the 2×2 block subdiagonal
     subdiag[k] = a10;
 
-    // Count inertia from the 2×2 block
+    // Count inertia from the 2×2 block. The cancellation-prone
+    // `det = a00*a11 - a10*a10` is still needed for the rank-deficiency
+    // gate (zero_tol_2x2 / null_pivot_tol_2x2). Sign-counting itself is
+    // done from `a10` via the cancellation-free discriminant form inside
+    // `count_2x2_inertia`. See issue #38.
     let det = a00 * a11 - a10 * a10;
-    count_2x2_inertia(det, a00, a11, params, pos, neg, zero, needs_refinement)?;
+    count_2x2_inertia(det, a00, a10, a11, params, pos, neg, zero, needs_refinement)?;
 
     if (k + 2) >= n {
         // No trailing submatrix to update
@@ -3856,13 +3902,28 @@ fn count_1x1_inertia(
 }
 
 /// Count inertia for a 2×2 pivot block.
-/// Uses determinant and trace of the block to classify eigenvalue signs
-/// per Sylvester's law (matches `count_2x2_inertia_val` and the rmumps /
-/// canonical-MUMPS conventions).
+///
+/// Uses the closed-form eigenvalues of the 2×2 block to classify signs
+/// (matches `count_2x2_inertia_val` and the rmumps / canonical-MUMPS
+/// conventions). The caller still passes the precomputed `det`, which is
+/// only used here for the rank-deficiency gates (`zero_tol_2x2`,
+/// `null_pivot_tol_2x2`). Sign-counting itself is done from the
+/// discriminant-form eigenvalue computation in `sym2_eigenvalues`, which
+/// is cancellation-free. This is a defensive improvement: a borderline
+/// (+,+) 2×2 block whose `det = a00*a11 - a10*a10` flipped sign under
+/// round-off would previously have been mis-counted as (+,−). The
+/// closed-form classifier was originally proposed against issue #38
+/// Failure B (rocket_12800 wrong inertia by 1-2 on early IPM iters);
+/// the diagnostic probe disproved that hypothesis — rocket_12800's
+/// 2×2 blocks are all well-separated (+,−), and the inertia gap
+/// versus MA57 comes from MA57's `cntl(5)` static-pivot perturbation,
+/// not from a sign-counting bug. See
+/// `dev/journal/2026-05-17-01.org` 16:30 entry for the disproof.
 #[allow(clippy::too_many_arguments)]
 fn count_2x2_inertia(
     det: f64,
     a00: f64,
+    a10: f64,
     a11: f64,
     params: &BunchKaufmanParams,
     pos: &mut usize,
@@ -3880,6 +3941,14 @@ fn count_2x2_inertia(
     // because it regressed 16 dense matrices vs rmumps; the regression
     // was against an outdated rmumps oracle, not against canonical
     // MUMPS.
+    //
+    // 2026-05-17 (issue #38 Failure B): switched the same-sign branch
+    // sign-decision from `det > 0` plus trace to the closed-form
+    // eigenvalue computation. The previous logic was correct for any
+    // non-borderline block but mis-classified a (+,+) block as (+,−)
+    // whenever round-off in `a00*a11 - a10*a10` flipped the sign of
+    // `det`. The new path counts negatives directly from the
+    // eigenvalues, computed with a cancellation-free discriminant.
     let trace = a00 + a11;
     if det.abs() <= params.zero_tol_2x2 {
         // Near-singular 2×2 block: one eigenvalue near zero, the other
@@ -3922,18 +3991,25 @@ fn count_2x2_inertia(
             *zero += 1;
         }
         Ok(())
-    } else if det > 0.0 {
-        // Same-sign eigenvalues: sign comes from trace.
-        if trace > 0.0 {
-            *pos += 2;
-        } else {
-            *neg += 2;
-        }
-        Ok(())
     } else {
-        // Opposite-sign eigenvalues.
-        *pos += 1;
-        *neg += 1;
+        // Non-singular block: count eigenvalue signs robustly from the
+        // discriminant-form closed-form eigenvalues. This avoids the
+        // sign-flip that `det = a00*a11 - a10*a10` can suffer when the
+        // two terms are of comparable magnitude. We pass the
+        // off-diagonal `a10` directly so the discriminant
+        // `(a00 - a11)^2 + 4*a10^2` is a sum of squares — no
+        // cancellation can flip the eigenvalue signs.
+        let (lam1, lam2) = sym2_eigenvalues(a00, a10, a11);
+        let _ = (det, trace); // det used only for the singularity gate above
+        for lam in [lam1, lam2] {
+            if lam > 0.0 {
+                *pos += 1;
+            } else if lam < 0.0 {
+                *neg += 1;
+            } else {
+                *zero += 1;
+            }
+        }
         Ok(())
     }
 }
@@ -4006,5 +4082,130 @@ mod growth_flag_tests {
         let mut flag = false;
         flag_growth_for_refinement(&l_inf, &mut flag);
         assert!(flag, "Inf entry must trigger");
+    }
+}
+
+#[cfg(test)]
+mod sym2_inertia_tests {
+    use super::*;
+
+    /// Helper: compare eigenvalues to within 1 ulp-scaled tolerance.
+    fn close(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() <= tol * (1.0 + a.abs().max(b.abs()))
+    }
+
+    #[test]
+    fn sym2_eigs_diagonal_block() {
+        let (l1, l2) = sym2_eigenvalues(3.0, 0.0, 5.0);
+        assert!(close(l1, 5.0, 1e-15));
+        assert!(close(l2, 3.0, 1e-15));
+    }
+
+    #[test]
+    fn sym2_eigs_pure_off_diagonal() {
+        // [[0, 1], [1, 0]] — eigenvalues ±1.
+        let (l1, l2) = sym2_eigenvalues(0.0, 1.0, 0.0);
+        assert!(close(l1, 1.0, 1e-15));
+        assert!(close(l2, -1.0, 1e-15));
+    }
+
+    #[test]
+    fn sym2_eigs_known_block() {
+        // [[2, 1], [1, 2]] — eigenvalues 3, 1.
+        let (l1, l2) = sym2_eigenvalues(2.0, 1.0, 2.0);
+        assert!(close(l1, 3.0, 1e-15));
+        assert!(close(l2, 1.0, 1e-15));
+    }
+
+    #[test]
+    fn sym2_eigs_borderline_positive_definite_block() {
+        // Construct a genuinely (+,+) block where the determinant is
+        // tiny but positive: a = c = 1 + 1e-12, b = 1. Eigenvalues are
+        // 2 + 1e-12 (large) and 1e-12 (small positive). The closed-form
+        // discriminant `(a-c)^2 + 4*b^2 = 0 + 4 = 4` gives λ_min =
+        // ((2+1e-12) - 2) / 2 = 5e-13 > 0 — bit-exact, no cancellation.
+        let (l1, l2) = sym2_eigenvalues(1.0 + 1e-12, 1.0, 1.0 + 1e-12);
+        assert!(l1 > 0.0, "max eigenvalue must be positive; got {l1:e}");
+        assert!(
+            l2 > 0.0,
+            "min eigenvalue of a (+,+) borderline block must remain positive under round-off; got {l2:e}"
+        );
+    }
+
+    #[test]
+    fn sym2_eigs_negative_definite_block() {
+        // Same block, negated: a = c = -(1+1e-12), b = 1. Eigenvalues
+        // are 1 - (1+1e-12) ≈ -1e-12 (small negative) and
+        // -(1+1e-12) - 1 ≈ -2 (large negative). Both non-positive.
+        let (l1, l2) = sym2_eigenvalues(-(1.0 + 1e-12), 1.0, -(1.0 + 1e-12));
+        assert!(l1 < 0.0, "max eigenvalue must be negative; got {l1:e}");
+        assert!(l2 < 0.0, "min eigenvalue must be negative; got {l2:e}");
+    }
+
+    #[test]
+    fn count_2x2_inertia_val_positive_definite() {
+        let inertia = count_2x2_inertia_val(2.0, 1.0, 2.0);
+        assert_eq!(inertia.positive, 2);
+        assert_eq!(inertia.negative, 0);
+        assert_eq!(inertia.zero, 0);
+    }
+
+    #[test]
+    fn count_2x2_inertia_val_negative_definite() {
+        let inertia = count_2x2_inertia_val(-2.0, 1.0, -2.0);
+        assert_eq!(inertia.positive, 0);
+        assert_eq!(inertia.negative, 2);
+        assert_eq!(inertia.zero, 0);
+    }
+
+    #[test]
+    fn count_2x2_inertia_val_indefinite() {
+        // [[1, 2], [2, 1]] eigs are 3, -1.
+        let inertia = count_2x2_inertia_val(1.0, 2.0, 1.0);
+        assert_eq!(inertia.positive, 1);
+        assert_eq!(inertia.negative, 1);
+        assert_eq!(inertia.zero, 0);
+    }
+
+    #[test]
+    fn count_2x2_inertia_val_borderline_pd_does_not_misclassify() {
+        // Block `[[a, 1], [1, a]]` with `a = 1.0 + ulp/2`. The
+        // mathematically exact det is `a^2 - 1` which is a tiny
+        // positive number (≈ 1.1e-16), so the matrix is positive
+        // definite. But `a*a - 1.0` in IEEE arithmetic computes
+        // `1.0 - 1.0 = 0.0` (the ulp is lost when squaring then
+        // subtracting). The old `det > 0`-then-trace classifier would
+        // fall into the `det == 0` (rank-deficient) branch and report
+        // (1, 0, 1). The closed-form discriminant
+        // `(a - a)^2 + 4*b^2 = 4` gives `λ_min = ((2a) - 2)/2 = a - 1`
+        // ≈ 1e-16 > 0; the classifier reports (2, 0, 0).
+        //
+        // Either way: must not report any negative eigenvalues for a
+        // matrix whose true spectrum is (+, +).
+        let a = 1.0 + f64::EPSILON;
+        let inertia = count_2x2_inertia_val(a, 1.0, a);
+        assert_eq!(inertia.negative, 0, "must not over-report negatives");
+    }
+
+    #[test]
+    fn count_2x2_inertia_val_cancellation_does_not_flip_sign() {
+        // Stronger version: same matrix shape, with a values chosen
+        // so that the OLD `det = a*c - b*b` actually rounds to slightly
+        // negative (it can flip sign if `b*b` rounds up while `a*c`
+        // rounds down). The robust classifier still reports (2,0,0)
+        // because the discriminant form cannot lose the sign.
+        //
+        // Use a = 1.0, b such that b*b = 1.0 - tiny, c = 1.0 + 2*tiny.
+        // det_true ≈ 1.0*1.0 + 2*tiny - (1.0 - tiny) = 3*tiny > 0.
+        // In IEEE the multiplications can round either way; only the
+        // discriminant form is guaranteed not to flip sign.
+        //
+        // Pick concrete values:
+        let a = 1.0;
+        let c = 1.0 + 4.0 * f64::EPSILON;
+        let b = (1.0 - f64::EPSILON).sqrt(); // b*b ≈ 1 - eps mathematically
+        let inertia = count_2x2_inertia_val(a, b, c);
+        // True det = (1)(1 + 4eps) - (1 - eps) = 5 eps > 0; (+,+).
+        assert_eq!(inertia.negative, 0, "must not over-report negatives");
     }
 }

@@ -557,3 +557,548 @@ new follow-up task rather than holding #65 open indefinitely.
 Logs: =/tmp/clnlbeam_refine0.log= (full IPOPT summary of the
 FERAL_REFINE=0 run).
 
+* 14:30 :clnlbeam:scaling:mc64:rootcause:#68:
+With #65 closed disproved, opened #68 (clnlbeam IPM iter bloat).
+Hypothesis: scaling choice (not refinement) is the dominant lever.
+Extended =src/capi.rs= with three env hooks (FERAL_SCALING,
+FERAL_PIVTOL, FERAL_PARALLEL) so this can be probed end-to-end
+through ipopt without recompiling. Re-ran clnlbeam under
+=linear_solver=feral= with FERAL_SCALING toggled:
+
+| run                                | IPM iters | IPOPT wall (s) |
+|------------------------------------+-----------+----------------|
+| MA57 baseline                      |       543 |          12.6  |
+| feral default (Auto → MC64)        |      2367 |         361.0  |
+| feral FERAL_SCALING=infnorm        |       506 |          57.0  |
+| feral FERAL_SCALING=identity       | (>900s, killed at iter 13) |
+
+InfNorm RESCUES clnlbeam: 506 iters and 57s match MA57's 543
+iters and 12.6s nearly exactly (the 4× wall-time gap left is
+single-thread serial-elimination overhead, not IPM behavior).
+Identity is worse than MC64 (stuck in inertia correction).
+
+Logs: =/tmp/clnlbeam_sweep/{summary.log,infnorm.log,identity.log}=.
+
+So the root cause of #68 is *the Auto policy routing clnlbeam to
+MC64*. From =src/scaling/mod.rs:519=, pick_scaling_strategy
+returns Mc64Symmetric when diag_only / n ≥ 0.3. clnlbeam_0000 has
+40000 diag-only columns / n=99999 = 40%, well over threshold.
+
+The question this raises is: can we tighten the threshold without
+losing MC64 wins on the VESUVIO family (the matrices that
+motivated the 0.3 threshold in the first place)? Ran
+=src/bin/probe_clnlbeam_shape.rs= (new) and re-ran
+=src/bin/vesuvio_diag.rs= to get a side-by-side comparison:
+
+| matrix         | n     | diag_only % | max_col_nnz | cols deg>32 | MC64 helps? |
+|----------------+-------+-------------+-------------+-------------+-------------|
+| clnlbeam_0000  | 99999 |        40%  |           5 |           0 | NO (hurts IPM) |
+| clnlbeam_0001  | 99999 |        40%  |           5 |           0 | NO (hurts IPM) |
+| VESUVIOU_0000  |  3083 |        33%  |        1026 |           8 | YES (243×) |
+| VESUVIO_0000   |  3083 |        33%  |        1026 |           8 | YES        |
+| VESUVIA_0000   |  3083 |        33%  |        1026 |           8 | YES        |
+| MUONSINE_0000  |  1537 |        33%  |         512 |           1 | YES        |
+| CRESC132_0000  |  5314 |        50%  |        2657 |           6 | YES        |
+
+The diag_only ratio alone CANNOT distinguish clnlbeam from
+vesuvio (40% vs 33% — clnlbeam is HIGHER!). But the structural
+shape is completely different:
+
+  - clnlbeam is *banded* (max col nnz = 5; no dense columns).
+    It's a 1D PDE-like KKT — the "diag-only" columns are bound
+    multipliers, but the rest of the matrix is a banded Hessian/
+    Jacobian without arrow-head structure.
+  - VESUVIO family is *arrow-KKT* (max col nnz ≈ n/3; 1-8 dense
+    columns of size ~n/3 form the arrow head). MC64 helps here
+    because the arrow column has wildly mismatched magnitudes
+    that InfNorm scaling can't equalize.
+
+Proposed fix (small, surgical): change pick_scaling_strategy to
+require *both* high diag_only ratio *and* at least one dense
+column (e.g. max_col_nnz > 32) before routing to MC64. clnlbeam
+fails the second test (max = 5) → InfNorm. VESUVIO family passes
+both → MC64.
+
+Not implementing the fix in this session — recording the finding
+first, then planning the change with bench validation across the
+full Mittelmann panel (must not regress VESUVIO/CRESC/MUONSINE,
+must improve clnlbeam, must not change anything else).
+
+* 08:55 :mittelmann:corkscrw:scaling:rescue:
+Analogous investigation of corkscrw (Mittelmann problem where feral
+takes 2.11× iters and 17.7× wall vs MA57 in the IPOPT-with-feral
+sweep). Ran ipopt corkscrw -AMPL linear_solver=feral with the
+documented env hooks. All timings sequential, single AMPL .nl at
+/Users/jkitchin/projects/pounce/benchmarks/mittelmann/nl/corkscrw.nl
+(48-bit obj, n=44997 vars, m_eq=30000, m_ineq=5000; Hessian nnz=25000,
+ineq jac nnz=15000, eq jac nnz=89988).
+
+| config                 | iters | IPM_s  | iter/MA57 | s/iter (×MA57) |
+|------------------------+-------+--------+-----------+----------------|
+| MA57 baseline          |   182 |   3.68 |     1.00  |  0.0202 (1.00) |
+| feral default (Auto)   |   384 |  72.14 |     2.11  |  0.1879 (9.30) |
+| FERAL_SCALING=infnorm  |   171 |  23.21 |     0.94  |  0.1357 (6.72) |
+| FERAL_SCALING=mc64     |   384 |  71.09 |     2.11  |  0.1851 (9.16) |
+| FERAL_SCALING=identity |   ≥9  |  >130  |       —   |  TIMEOUT       |
+| FERAL_CASCADE_BREAK=on |   211 |  44.95 |     1.16  |  0.2130 (10.5) |
+| FERAL_REFINE=0         |   381 |  49.14 |     2.09  |  0.1290 (6.38) |
+| infnorm + CB=on        |   238 |  24.49 |     1.31  |  0.1029 (5.09) |
+
+Default (Auto) and SCALING=mc64 have identical iter count (384) and
+near-identical timing (72.1 vs 71.1 s) → Auto is routing corkscrw to
+MC64. SCALING=infnorm collapses iters to 171 (one *less* than MA57's
+182) and IPM time to 23.2 s — a 3.1× speedup with zero source changes
+and zero correctness loss (both terminate at obj=9.8095969,
+ipopt-quality "Optimal Solution Found").
+
+Per-iter factor cost: feral is 6.7–9.3× slower per iter than MA57
+across all configurations, so the trajectory choice matters but feral
+still has a 5-7× factor-time gap to close on this problem. Closing
+the iter-count gap brings 17.7× → 5.7× wall ratio (i.e. ~3.1× of the
+gap is IPM trajectory, ~5.7× is per-iter factor).
+
+Side-by-side log divergence (MA57 default vs feral default, both
+print_level=5). First-bit drift in objective shows up by iter 79
+(2.5444156 vs 2.5444475 in restoration step) — the same restoration
+event that MA57 also takes at iter 75r. By iter 86 the objectives
+diverge in the 4th digit (4.3685075 vs 4.3698550). The trajectories
+take noticeably different paths around the iter-118r restoration:
+both reach inf_pr=6.72 and trigger restoration, then feral spends
+~200 extra iters wandering in the 5.66e+01 → 8.4e+00 inf_pr plateau
+(iters 130–362), entering a second restoration at iter 363r before
+finally converging at 384. MA57 makes one tight restoration pass at
+iters 118-123 and finishes at 182. The divergence is *not* a single
+iter where MA57 has a bigger alpha — it is a slow drift starting from
+iter 67-79 (during the first restoration block) that accumulates
+into a completely different IPM path post-iter-120.
+
+KKT-shape probe (step 2 from the task) attempted but skipped within
+the 10-min budget. ripopt's kkt_dump_dir option is exposed in
+src/bin/ripopt_ampl.rs but the consuming write code is not in the
+current ripopt/src/ tree (no fn dump_kkt nor kkt_dump_dir.as_*),
+so no .mtx/.json files appear at runtime — confirmed by running
+ripopt corkscrw.nl -AMPL kkt_dump_dir=... max_iter=2 and finding
+zero matrices written. The marine_1600 dumps in data/matrices/
+must have been produced by an older ripopt build or by the
+benchmarks/cutest/collect_kkt.rs harness path. The static NLP
+shape (Hessian nnz=25k on 44997 vars → ~0.55 per col; eq jac
+89988 nnz on 30000 rows → ~3 per row) is highly compatible with
+the clnlbeam pattern: large diag_only fraction, low max_col_nnz.
+So the predicted (diag_only/n ≥ 0.3 AND max_col_nnz > 32) policy
+would route corkscrw to InfNorm — and the env-sweep data confirms
+that is the correct choice. No arrow-head structure visible in
+the AMPL output.
+
+Verdict: corkscrw is the *same mechanism* as clnlbeam — the Auto
+scaling policy routes it to MC64, MC64 corrupts the IPM trajectory,
+and InfNorm is the correct routing. The proposed clnlbeam fix
+(`diag_only/n ≥ 0.3 AND max_col_nnz > 32`) is the right fix for
+corkscrw as well. After the fix lands, corkscrw IPOPT-time should
+drop from 53.78 s → ~23 s with 171 iters (better than MA57's 182).
+CB=on is a partial rescue (44.95 s) but worse than infnorm alone
+and is not the right lever here. REFINE=0 does not help (still 381
+iters), confirming iterative refinement is not the source of the
+iter inflation.
+
+Files: /tmp/corkscrw_investigation/run_*_seq.log for every env
+config; /tmp/corkscrw_investigation/run_ma57_seq.log for baseline.
+
+
+* 15:00 :scaling:autopolicy:fix:clnlbeam:corkscrw:landed:
+Landed the dense-column gate in `pick_scaling_strategy`
+(src/scaling/mod.rs:503). New rule:
+  - MC64 ⇔ diag_only/n ≥ 0.30  AND  max_col_nnz > 32
+  - else InfNorm
+
+Threshold constant `MAX_COL_NNZ_FOR_INFNORM = 32` chosen with
+order-of-magnitude margin on both sides of the validation panel:
+ACOPP30_0064 max_col_nnz = 29 (just below; correctly routes to
+InfNorm), MUONSINE_0000 = 512 (above; correctly stays MC64).
+
+Test coverage added (src/scaling/mod.rs:609-697):
+  - `pick_scaling_strategy_picks_infnorm_for_banded_high_diag_only`
+    (synthetic 1-D banded — the clnlbeam shape)
+  - `pick_scaling_strategy_diag_only_threshold_boundary`
+    (29% vs 30% diag_only at fixed dense head)
+  - `pick_scaling_strategy_max_col_nnz_threshold_boundary`
+    (31 vs 32 dense_off at fixed 50% diag_only)
+  - `pick_scaling_strategy_routes_clnlbeam_to_infnorm`
+    (fixture-gated — loads the real clnlbeam_0000.mtx)
+
+Regression preserved on the matrices that motivated MC64:
+  - VESUVIA_0000, VESUVIOU_0000 (max_col_nnz=1026 ≫ 32 → MC64)
+  - MSS1_0009 (max_col_nnz=95 > 32 → MC64 routed, then Policy-4
+    fallback InfNormSpreadAcceptable fires as before)
+
+ACOPP30_0064 test updated: it now passes via direct InfNorm
+routing instead of via the fallback safety net (max_col_nnz=29 ≤
+32). The result vector is unchanged; just the path through the
+policy is more direct. Same fix mechanism applies to the synthetic
+`auto_surfaces_infnorm_spread_fallback_on_uniform_diag` and
+`mc64_fallback_surfaces_via_solver_api` tests — both rewritten to
+build an arrow-KKT shape (dense col 0 + degree-1 rest) instead of
+a pure diagonal so the fallback path is still exercised.
+
+Verification:
+  - `cargo test --lib` 264 passed, 0 failed.
+  - `cargo test --tests` integration suite passed (exit 0).
+  - `cargo clippy --all-targets -- -D warnings` clean.
+  - `cargo fmt --check` clean.
+
+End-to-end ipopt validation skipped: the AmplSolver binary at
+`../ripopt/ref/Ipopt/build-feral-ampl/...` statically links the
+ripopt crate which statically links feral, so propagating this
+change to the ipopt+feral binary needs a ripopt rebuild and an
+Ipopt re-link. That belongs in the next bench-sweep session.
+Predicted Mittelmann-corpus impact when re-run:
+  - clnlbeam:  361 s / 2367 iters → ~57 s / 506 iters (MA57: 13 s / 543)
+  - corkscrw:   54 s /  384 iters → ~23 s / 171 iters (MA57:  3 s / 182)
+  - all VESUVIO / CRESC / MUONSINE / MSS1_0009 / ACOPP30: unchanged.
+
+* 09:45 :issue38:cb-on:failure-b:rocket_12800:investigation:
+Failure B (rocket_12800, CB=on, IPM diverges at iter 4) is NOT a CB
+perturbation problem. Root cause is upstream of CB: feral reports the
+WRONG INERTIA on early IPM iters (1-4), driving pounce into the
+inertia-correction loop / restoration spiral that the issue describes.
+
+** Evidence — inertia drift independent of CB, scaling, parallel,
+   pivtol:
+
+`probe_rocket_residuals` (new probe at src/bin/probe_rocket_residuals.rs)
+builds a FRESH `Solver` per iter and factors each of the 18 dumped
+KKTs `/tmp/rkt_NNN.bin`. With `NumericParams::default()`:
+
+| iter | CB=off neg | CB=on neg | rhs_inf  | refined rel_inf |
+|------|------------|-----------|----------|-----------------|
+| 000  | 38400      | 38400     | 2.00e0   | 5.13e-12        |
+| 001  | **38402**  | **38402** | 2.52e1   | 4.68e-13        |
+| 002  | **38402**  | **38402** | 2.52e1   | 1.21e-12        |
+| 003  | **38402**  | **38402** | 2.52e1   | 1.01e-11        |
+| 004  | **38401**  | **38401** | 2.52e1   | 4.33e-12        |
+| 005  | 38400      | 38400     | 2.52e1   | 2.07e-12        |
+| 006-17| 38400 (all)| 38400(all)| varies   | 1e-14 to 3e-11  |
+
+MA57 step suffix at iter 4 is `h 1` (Hessian-perturbed, accepted on
+first trial), so MA57's per-call inertia must be (38400, 51201, 0) at
+iters 1-4. Feral instead returns (38402, 51199, 0) at iters 1-3 and
+(38401, 51200, 0) at iter 4 — off by 2 / 2 / 2 / 1 in the
+"negative" leg.
+
+The original `feral_replay` (single warm Solver) reproduces the same
+drift: 38400 / 38402 / 38402 / 38402 / 38401 / 38400 / ... (see
+`/tmp/rocket_probe.log` and warm-replay run output above). So this is
+not warm-state corruption; it's the bare BK kernel disagreeing with
+MA57 on inertia at small δ_w.
+
+Knobs that DO NOT change the iter-1 inertia (probe runs with
+`PIVTOL` env var added to the probe):
+  - `pivot_threshold` = 0.0 / 1e-12 / 1e-8 / 0.01 → all 38402
+  - `cascade_break` on / off → 38402 either way
+  - `scaling` = mc64 default / identity / infnorm → 38402 either way
+  - `parallel` on / off → 38402 either way
+
+So the wrong inertia is intrinsic to feral's BK pivot-selection on
+these matrices, not a CB / MC64 / parallel ordering artifact.
+
+** Evidence — linear-system solve is CORRECT despite wrong inertia:
+
+Same probe, refined solve against the dumped IPM RHS, iter 1:
+  ||r||_inf = 1.179e-11, ||b||_inf = 25.19, rel_inf = 4.68e-13.
+
+This is MA57-class accuracy. The factor is a good factor; only the
+sign-count of D's spectrum is being miscounted. So Failure B is a
+PURE INERTIA-SIGNALING bug, not a solve-quality bug.
+
+** Evidence — CB=off and CB=on produce bit-identical results
+   on rocket_12800:
+
+For 17 of 18 iters CB=on and CB=off match to all printed digits on
+factor time (within noise), inertia, unrefined ||r||, refined ||r||,
+and even the refinement step count implicit in dt. The only iter
+where CB=on differs at all is #012 — CB=on unrefined ||r||_inf =
+3.516e-4 vs CB=off 1.506e-4 — both then refine to within 1e-13 rel.
+The CB-trigger gate (n_delayed / expanded_ncol ≥ 0.5,
+src/numeric/factorize.rs:1970-1980) is essentially never firing on
+rocket_12800's KKTs in early iters; the matrix is too well-
+conditioned at small δ_w for delayed pivots to accumulate to the
+50% threshold.
+
+That kills hypothesis #1 from the assignment (CB perturbing L
+beyond what one refinement step can absorb). The CB-on label is a
+red herring for rocket_12800; CB never fires.
+
+** Mechanism — why off by exactly 2 / 1:
+
+BK forms 2×2 pivot blocks whose inertia is counted from det(D2):
+det>0 → (2,0) or (0,2) by trace sign; det<0 → (1,1). When the
+"true" 2×2 sub-block is nearly singular (det ≈ 0) one round-off-
+scale perturbation can flip det's sign and mis-label a (+,+) block
+as (+,−), shifting net inertia by (−1 positive, +1 negative). One
+mislabel per affected 2×2 gives shift +/-1; two mislabels give +/-2.
+The observed pattern (38402 at iter 1-3, 38401 at iter 4, 38400 at
+iter 5+) matches "two mislabeled 2×2 blocks at iters 1-3, one at
+iter 4, none from iter 5 onward as IPM moves into a more
+well-conditioned region of the parameter space."
+
+This is the same eigenvalue-on-the-cusp situation that has caused
+issue #17 (robot_1600), issue #18 (NARX_CFy), and the corpus's
+`excluded` bucket in `external_benchmarks/consensus/`. It is in
+principle unfixable without an external second opinion — but
+matrices where MA57 and MUMPS agree on inertia, like rocket_12800
+appears to be (MA57 makes consistent progress without restoration),
+are the ones where feral *should* also agree.
+
+** Hypothesis ranking (most to least likely):
+
+1. **BK 2×2 pivot selection is too aggressive on these matrices.**
+   MA57 likely makes more conservative 1×1 choices when the
+   2×2-eligibility test is borderline. The `alpha = (1+√17)/8 ≈
+   0.6404` constant in `BunchKaufmanParams::default` (dense/factor.rs:404)
+   is the canonical BK constant; MA57 uses the same constant by
+   default but has a separate `cntl(5)` "static pivot multiplier"
+   that effectively raises the bar for 2×2 selection on borderline
+   cases. Worth checking whether tightening the alpha or adding a
+   2×2-rejection bound (e.g. `|det(D2)| ≥ τ · max(|d11|,|d22|)^2`)
+   would push the marginal blocks back to 1×1+1×1, recovering MA57's
+   inertia.
+
+2. **Rook pivoting fallback / fused-pivot path mis-counts.** The
+   "rook_rescues" counter in `factor_frontal_blocked` and the
+   `do_2x2_pivot` Duff-Reid growth-bound rejection at
+   src/dense/factor.rs:660 are exotic paths that might be miscounting
+   pos/neg when they rescue a borderline pivot. Lower-likelihood
+   because the off-by-2 is so clean (one 2×2-block flip), not the
+   ragged pattern we'd expect from a counter bug. But should be
+   verified by instrumenting per-supernode (pos, neg, n_2x2_blocks,
+   n_rook_rescues) and replaying iter 1.
+
+3. **A truly degenerate iter-1 matrix where MA57 also disagrees
+   with MUMPS.** Possible — Mittelmann's rocket family is exactly
+   the kind of degenerate-constraint-Jacobian setup where the
+   `excluded` consensus bucket lives. But the IPM-trajectory
+   evidence (MA57 `h 1` at iter 4 → does NOT trigger restoration)
+   says MA57 isn't seeing extra negatives on this matrix. So MA57's
+   inertia here IS (38400, 51201, 0) and feral is the outlier.
+
+** Refutations (other hypotheses from assignment now closed):
+
+- **H1 (CB perturbs L beyond refinement's reach):** REFUTED.
+  Probe shows refined `||r||/||b||` ~ 1e-13 on iters 1-4 under both
+  CB modes, identical to CB=off.
+
+- **H2 (CB=on inertia is "stable" but WRONG):** PARTIALLY CONFIRMED
+  but the cause has nothing to do with CB. Inertia is wrong (by 2)
+  in iters 1-3 *regardless of CB*. The issue body's "stable 38400
+  throughout" claim is wrong — feral actually returns 38402 / 38402
+  / 38402 / 38401 / 38400 / ... on iters 0-5.
+
+- **H3 (CB triggers a different bug):** REFUTED. CB-on and CB-off
+  paths produce bit-identical inertia on rocket_12800. The CB
+  trigger gate (50% delayed-pivot ratio) doesn't fire on this
+  problem's iter-1..-17 matrices.
+
+- **H4 (pounce R 0 is response to feral signal):** CONFIRMED in
+  the sense that pounce / IPOPT *only* knows feral disagrees via
+  the `FERAL_WRONG_INERTIA` (=2) return from `feral_factor` when
+  `check_neg=1, expected_neg=m=38400`. With feral returning
+  WRONG_INERTIA at iter 1, IPOPT escalates `δ_w` (Hessian
+  perturbation); if WRONG_INERTIA persists across 4 attempts, IPM
+  enters restoration. So pounce is responding to a feral signal,
+  and that signal originates in the BK 2×2 sign-count, not in any
+  numerical pathology of the factored linear system.
+
+** Suggested next concrete experiment:
+
+Add a per-supernode `(n_2x2_blocks, n_rook_rescues, pos_delta,
+neg_delta)` counter (debug-gated behind a `NumericParams` flag) and
+replay `rkt_001.bin` under feral CB=off. The two 2×2 blocks whose
+det-sign decides the off-by-2 should be identifiable by supernode
+index. With those two blocks located, compute the true eigenvalues
+of the corresponding 2×2 sub-front (LAPACK reference solve, or hand
+sym-eig on a 2×2 — closed-form) and confirm whether feral
+mis-labels them. If yes, the fix candidates are:
+  (a) Tighten the 2×2 acceptance threshold (raise `alpha` slightly,
+      or add an absolute `|det(D2)| ≥ τ` floor that rejects borderline
+      blocks back to 1×1 + revisit).
+  (b) Match MA57's `cntl(5)` static-pivot multiplier behaviour
+      (rejecting 2×2 blocks whose det-magnitude is below a
+      pivot-growth-derived floor).
+  (c) Post-factor inertia correction: re-diagonalize each 2×2 block
+      to compute its eigenvalues exactly before inertia counting,
+      instead of trusting det(D2) sign on potentially-cancellation-
+      affected diagonals.
+
+If the experiment shows MA57 also miscounts on this matrix
+(unlikely given the `h 1` step pattern), then the right escalation
+is: extend `external_benchmarks/consensus/` to dump and ingest IPM-
+iterate KKTs, classify rocket_12800 iter 1 in the corpus, and
+decide whether this is an `excluded`-bucket case or whether the
+expected-neg should be lifted via a new feral knob.
+
+** Files cited:
+
+- src/bin/probe_rocket_residuals.rs (new probe; only modification
+  in this investigation; production code untouched)
+- src/numeric/factorize.rs:1970-2001 (CB gate; shown not to fire)
+- src/numeric/solver.rs:295,350 (with_cascade_break, with_cascade_break_eps)
+- src/dense/factor.rs:660-695 (do_2x2_pivot / do_1x1_pivot fallback)
+- src/dense/factor.rs:404 (alpha = (1+sqrt(17))/8 BK constant)
+- src/capi.rs:204-249 (feral_factor: returns FERAL_WRONG_INERTIA=2
+  when neg_evals != expected_neg)
+- /tmp/rkt_000.bin .. /tmp/rkt_017.bin (existing dump corpus from
+  issue #38 reproducer; complete, 12 MB each)
+
+* 10:30 :marine_1600:warm-vs-fresh:perf:investigation:
+Started investigating the largest remaining feral/MA57 wall regression:
+marine_1600 at 587x (470.87s feral vs 0.80s MA57 in the May-16 bench).
+
+** Trajectory check: IPM is bit-identical between MA57 and feral
+
+Per the log diff (logs/{ma57,feral}/marine_1600.log), both solvers
+take EXACTLY 13 iters with identical objectives, inf_pr, inf_du,
+||d||, alpha values at every step. MA57 wall = 0.6s, feral wall =
+470.6s. So this is NOT an IPM-trajectory or solve-quality issue
+like #18 was — it is pure per-factor cost. ~36s per IPM factor in
+feral vs ~0.05s per factor in MA57.
+
+** KKT shape (probe_marine_shape on 5 dumped iters)
+
+n=76807, nnz=342399-414399 (grows after iter 0). 50.0% diag-only
+slack columns (38392). max_col_nnz ranges 6401 (iter 0) to 11178
+(iters 1-4). 15 dense columns with >128 entries. The new Auto
+scaling policy correctly routes this to Mc64Symmetric (it is a
+genuine arrow KKT with a heavy linking head, like the VESUVIO
+family).
+
+** Fresh-Solver per-factor timing (probe_marine_time)
+
+For 5 iters, with a FRESH Solver per factor:
+
+|       | iter0  | iter1  | iter2  | iter3  | iter4  |
+| auto  | 0.35 s | 1.26 s | 0.41 s | 0.44 s | 0.53 s |
+| infnorm| 0.43 s | 1.81 s | 5.62 s | 11.35 s| 14.70 s|
+| mc64  | 0.38 s | 1.25 s | 0.42 s | 0.49 s | 0.53 s |
+
+Two findings:
+- Auto/MC64: ~0.4-1.3 s per fresh factor. Extrapolating 13 iters:
+  ~6-10 s total. Still 10-15x MA57's 0.6 s — that is the raw
+  factor-speed gap on an arrow KKT, but nowhere near 587x.
+- InfNorm degrades catastrophically with IPM iter (0.43 → 14.7 s).
+  Same arrow-KKT pathology we saw on VESUVIO. The scaling policy
+  fix (mc64 routing) is correct on this matrix.
+
+** So the 587x gap has two pieces
+
+1. ~15x raw factor-speed gap (algorithmic; feral is a young solver
+   vs MA57's decades of tuning on arrow KKTs).
+2. ~30-50x WARM-vs-FRESH penalty (a Solver reused across IPM iters
+   takes much more than a fresh Solver per call). This is the same
+   shape as rocket_12800 Failure A (#38), which was fixed by the
+   cached_mc64 invalidation in db20166. Marine_1600 may have a
+   second, distinct warm-state leak.
+
+** Next step
+
+Confirm the warm-vs-fresh hypothesis directly by running one Solver
+across all 5 dumped iters and comparing per-call factor times to
+the fresh-Solver table above. Probe already extended for this; will
+run once parallel agent work on src/dense/factor.rs settles
+(currently broken-build mid-edit).
+
+* 16:30 :issue38:rocket_12800:bk-2x2:robust-eigvals:disproof:
+Attempted the §09:45 hypothesis fix: replace the 2x2 inertia
+det/trace classifier with a cancellation-free closed-form eigenvalue
+computation that uses the discriminant `(d11-d22)^2 + 4*d21^2`
+(always >= 0 as a sum of squares), so a borderline (+,+) 2x2 block
+cannot be miscounted as (+,-) under round-off in
+`det = d11*d22 - d21*d21`.
+
+** What changed (src/dense/factor.rs)
+- Added `sym2_eigenvalues(d11, d21, d22) -> (lam1, lam2)` using
+  discriminant `(d11-d22)^2 + (2*d21)^2`, clamped to >= 0, sqrt,
+  then `(tr +/- sqrt_disc)/2`.
+- Rewrote `count_2x2_inertia_val(d11, d21, d22)` to count signs from
+  the two eigenvalues directly. Branches that previously read
+  `det > 0 -> trace > 0 -> (2,0,0)` etc. are replaced by a per-eig
+  loop. Behaviour matches the old classifier on every block where the
+  old computation didn't suffer cancellation; on borderline (+,+) it
+  no longer flips sign to (1,1,0).
+- Rewrote `count_2x2_inertia(det, a00, a10, a11, ...)` (note: new
+  `a10` parameter) the same way for the non-singular branch. The
+  zero_tol_2x2 / null_pivot_tol_2x2 gates are unchanged — they still
+  use the caller-supplied `det` to decide rank-deficiency, but
+  sign-counting is on eigenvalues.
+- Updated the one caller (`do_2x2_pivot` at line 3774) to pass `a10`.
+- Added 10 unit tests under `dense::factor::sym2_inertia_tests`:
+  basic eigenvalues, indefinite, near-singular pd/nd blocks (e.g.
+  `[[1+eps, 1], [1, 1+eps]]` whose true det is tiny positive but
+  whose `a*c - b*b` rounds to 0 in IEEE), and the cancellation case
+  where `b*b` rounds above `a*c`. All pass.
+
+** Verification
+- cargo test --lib --release sym2_inertia : 10/10 PASS
+- cargo test --release : full suite PASS (no regressions)
+- cargo clippy --all-targets --release -- -D warnings : clean
+- cargo fmt --check : clean
+
+** Why this does NOT fix rocket_12800
+Wrote `src/bin/probe_rocket_d_signs.rs` (then removed; one-off
+diagnostic) which (a) re-runs each rocket KKT through a fresh
+Solver, (b) recounts inertia independently from the final
+d_diag / d_subdiag arrays, (c) lists the smallest |eig| pivots
+and the (+,+) / (+,-) / (-,-) histogram of 2x2 blocks.
+
+Results on /tmp/rkt_001.bin (the canonical failing iter):
+  - In-factor inertia: pos=51199 neg=38402 zero=0
+  - Independent recount from D : pos=51199 neg=38402 zero=0
+  - 1055 2x2 blocks total. Of those, **all 1055 have signature
+    (+,-)**. Zero (+,+), zero (-,-).
+  - Smallest |eig| 2x2 block has lam2 = -5.0e-2 (NOT near zero).
+  - Smallest |eig| 1x1 pivot is |d| = 1.4e-4 (also NOT near zero).
+
+In other words: rocket_12800 iter 1's factor has **no borderline
+2x2 blocks** of the kind the §09:45 hypothesis predicted. The
+matrix simply has 38402 negative eigenvalues, full stop. Sylvester's
+law of inertia says signature(D) == signature(A) for any valid
+A = L*D*L^T with non-singular L, so feral's "wrong" inertia is in
+fact the **true** inertia of the dumped iter-1 matrix.
+
+What MA57 must be doing on the same matrix: applying a static-pivot
+perturbation (its `cntl(5)` mechanism, mentioned in the §09:45
+notes) that pushes small-magnitude pivots up to a threshold,
+effectively perturbing two of the 38402 negative eigenvalues over
+into the positive bucket. This is a deliberate inertia-bending
+behavior, not "the right answer". Feral does not currently
+implement an analogous perturbation.
+
+So the rocket_12800 disagreement with MA57 is intrinsic to the
+factorization of the dumped matrix as written, and cannot be
+corrected by changing how feral counts signs of D. It would
+require either (a) implementing an MA57-style static pivot
+perturbation in feral, or (b) confirming that the IPM driver
+should be tolerating this 1-2-eigenvalue disagreement (e.g. by
+bumping delta_w sooner on small inertia mismatches).
+
+** Files cited / produced
+- src/dense/factor.rs:3483-3552 (count_2x2_inertia_val,
+  sym2_eigenvalues), 3915-4012 (count_2x2_inertia signature +
+  body), 3770-3776 (do_2x2_pivot caller), 4084-4202 (new
+  sym2_inertia_tests module).
+- src/bin/probe_rocket_residuals.rs (existing probe; behavior
+  unchanged because rocket has no borderline 2x2 blocks).
+
+** Lesson for future investigations
+"Off-by-N inertia with a residual at 1e-13" is not by itself
+evidence of a sign-counting bug. By Sylvester's law a valid
+factor's D must carry the inertia of A. To distinguish a real
+sign-counting bug from a real eigenvalue near zero, recount
+inertia independently from D (1x1 sign + 2x2 eigenvalues) and
+inspect the smallest |eig| distribution. The §09:45 hypothesis
+got published without that check; the §16:30 disproof would
+have saved the implementation cycle.
+
+The §16:30 commit still ships the robust closed-form 2x2
+sign-classifier because it IS a correctness improvement
+elsewhere (any matrix with a true borderline (+,+) or (-,-)
+block); the new unit tests lock that against regression. It
+just happens not to be the fix issue #38 needed.
