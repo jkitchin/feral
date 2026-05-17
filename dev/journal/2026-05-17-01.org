@@ -1,0 +1,464 @@
+#+TITLE: 2026-05-17-01 KKT-level investigation of FERAL-slow Mittelmann problems
+#+DATE: 2026-05-17
+
+* 06:46 :mittelmann:kkt:probe:agents:
+Background: yesterday's full 47-problem ipopt+{ma57,feral} sweep
+(external_benchmarks/mittelmann_ipopt) produced 32 vs 37 Optimal counts
+and several problems where ma57 wins by large margins (784x on
+marine_1600, 32x on robot_1600, etc.). User asked us to focus only on
+the KKT factor part — does feral's per-factor work itself explain the
+gap, or is the gap in the IPM trajectory? Use parallel agents to
+investigate per problem; suggest custom settings if any rescue feral.
+
+Dispatched 5 general-purpose agents, each running
+./target/release/probe_kkt_replay <problem> with combinations of
+SCALING={identity,infnorm,mc64}, CB=1, PAR=0, FRESH=1 against the
+existing KKT dumps in data/matrices/kkt-mittelmann/<problem>/:
+- dtoc2 (3 dumps)            agent a54f89c7fa0bffc79
+- pinene_3200 (10 dumps)     agent a84f721906859018f
+- marine_1600 (18 dumps)     agent a5edd7c72ec3f9062 (then re-dispatch a59e00af7dfec8840)
+- robot_1600 (7 dumps)       agent aa0453526e56e9e80
+- clnlbeam (2 dumps)         agent ab1d325fec2de8d84
+
+* 07:00 :robot_1600:kkt:findings:
+Agent aa0453526e56e9e80 (robot_1600) reported back.
+
+Key result: **the 32x system-level slowdown is NOT visible in the dump
+corpus.** The 7 dumped iters (0-6) all factor at ~12-60 ms — total
+0.215 s for CB=1, 0.219 s default warm, vs MA57's ~0.08 s. That's a
+2-3x per-factor overhead, not 32x.
+
+Per-iter factor times (ms) across 7 dumped iters:
+
+| Setting           | i0 | i1 | i2 | i3 | i4 | i5    | i6 | Total |
+|-------------------+----+----+----+----+----+-------+----+-------|
+| MA57 baseline     | 12 | 12 | 12 | 12 | 12 | 12    | 12 |    84 |
+| default warm      | 40 | 57 | 15 | 18 | 17 | 16    | 57 |   219 |
+| FRESH=1           | 42 | 57 | 60 | 61 | 54 | 57    | 57 |   389 |
+| CB=1              | 39 | 60 | 14 | 15 | 15 | 12    | 59 |   215 |
+| SCALING=infnorm   | 42 | 59 | 10 |  9 |  8 | 16    | 62 |   205 |
+| SCALING=identity  | 40 | 57 | 36 |  8 |  9 | *1795 | 62 |  2006 |
+| CB=1+infnorm      | 44 | 66 | 10 | 11 |  8 |  9 W  | 66 |   215 |
+| PAR=0             | 45 | 70 | 21 | 26 | 25 | 24    | 70 |   280 |
+
+(W = WrongInertia 14400/9600/0 vs expected 14399/9601/0 — combining
+CB+infnorm regresses iter 5.)
+
+Conclusion: the missing 13s lives in iters 7-34 (28 iters not dumped)
+and in inertia-correction inner-loop refactorizations that happen
+between IPM iters (delta_w escalation at iters 2,4,6 visible in IPOPT
+log). The dump corpus only captures the first attempt of each IPM
+iter, not the regularized retries. Real fix: extend the pounce KKT
+dumper to capture inertia-correction sub-iterations; until then we
+can't localize the gap further.
+
+CB=1 is **not** an effective rescue for robot_1600. Recommendation:
+ship defaults, open follow-up to dump retry sequences.
+
+Reference files cited by agent:
+- src/bin/probe_kkt_replay.rs
+- external_benchmarks/mittelmann_ipopt/logs/feral/robot_1600.log
+- dev/decisions.md (2026-05-15 reclassification of #17)
+
+* 07:01 :clnlbeam:ipm:findings:
+Agent ab1d325fec2de8d84 (clnlbeam) reported back. Different failure
+mode — not a KKT-factor cost issue, an **IPM-trajectory drift**.
+
+Per-iter factor time (only 2 dumps available):
+
+| Setting             | iter 0 (s) | iter 1 (s) | inertia       |
+|---------------------+------------+------------+---------------|
+| default (mc64+CB off) |       5.33 |       2.77 | OK (59999/40000/0) |
+| SCALING=infnorm     |       5.81 |       0.05 | OK             |
+| SCALING=identity    |       5.70 |       0.05 | OK             |
+| mc64 FRESH=1 CB=1   |       5.84 |       3.11 | OK             |
+
+Inertia exactly correct on every setting. No SYMSOLVER_*_INERTIA
+retries in feral's IPOPT log.
+
+Side-by-side ma57 vs feral IPOPT logs: iters 0-28 are bit-identical
+to ~5 digits. First measurable divergence at iter 29 (alpha_du differs
+0.6% relative). By iter 32 inf_du has split 4.37e+02 vs 1.57e+02.
+Both eventually reach the same optimum (obj 3.4487613141e+02, 9-digit
+agreement) but feral takes ~2200 more iters because it lands in a
+worse basin after the iter-45 ||d||~7e+3 pathology.
+
+Agent's hypothesis: refined-residual gate in src/numeric/solve.rs:803
+(`threshold = f64::EPSILON * n_sqrt` ~= 7e-14) is one digit looser
+than MA57's de-facto 1e-15 residual. On a κ(A) ~1e10 KKT, this
+amplifies into a 1e-3 step-direction perturbation at iter 29.
+
+Cheap test: tighten gate to `f64::EPSILON * n` and re-run clnlbeam
+end-to-end. If the trajectory snaps onto MA57's, hypothesis confirmed.
+Defer change pending dtoc2/pinene_3200/marine agent results to avoid
+making an unprincipled change.
+
+* 07:15 :marine_1600:partial:cascade:
+Original marine_1600 agent (a5edd7c72ec3f9062) kept emitting late
+spurious task-notification echoes after its initial 1.3s reported
+"hung on iter 10" finish. Buried in the echoes was useful partial
+signal:
+- CB=1: factor times bounded ~0.7-0.9 s/iter, total 11.7 s for 18-iter
+  replay, all inertia correct.
+- Default warm: explodes to 25 s / 52 s on later iters.
+
+That matches the issue #37 wide-supernode cascade pattern.
+Re-dispatched as a59e00af7dfec8840 with explicit per-config timeouts
+and file logging so we get the full clean table. Awaiting result.
+
+* 07:25 :marine_1600:findings:cascade:CB:
+Re-dispatched agent a59e00af7dfec8840 (marine_1600) reported with
+clean solo runs and timeouts.
+
+Per-iter factor time (solo, no contention):
+
+| Config           | i0   | i1   | i8   | i9    | Total / Status        |
+|------------------+------+------+------+-------+-----------------------|
+| baseline         | 0.39 | 1.49 | 1.51 | 30.2  | hung after i9 (CPU lim)|
+| **CB=1**         | 0.40 | 1.44 | 0.56 | 0.66  | **11.4 s / all 18 OK**|
+| SCALING=identity | 10.7 | 20.9 |      |       | hung at i2            |
+| SCALING=infnorm  | 0.37 | 2.40 | >9   |       | progressively worse   |
+| SCALING=mc64     | 0.38 |      |      |       | **exit 1** after i0   |
+| PAR=0            | 0.71 | 3.11 | 3.64 |       | similar to baseline   |
+| FRESH=1          | 0.85 | 3.09 | 4.88 |       | similar to baseline   |
+
+MA57 ref: wall 0.802 s, IPM 0.6 s, 13 iters. Feral IPOPT-level: 470.6 s
+(587x slower at default settings).
+
+**Root cause:** runaway delayed-pivot cascade. Blowup triggers exactly
+at iter 9 — when delta_w first drops below delta_c (5e-9 vs 1.5e-9 per
+sidecar). Below that perturbation level Bunch-Kaufman rejects many
+pivots; without a cascade cap they accumulate into the root front
+(thousands of delays per src/numeric/solver.rs:255-262), root-front
+work explodes from <1.5 s/iter to >30 s/iter with no plateau in sight.
+
+**CB=1 fix:** flattens to 0.4-0.7 s/iter steady state, all 18 iters in
+11.4 s, inertia exactly correct (38415/38392/0 matches MUMPS oracle).
+~40-50x speedup over baseline. Residual ~14x gap to MA57 remains
+(11.4 s vs 0.8 s) attributable to constant-factor supernodal kernel
+overhead, not algorithmic pathology.
+
+**Latent bugs found:**
+1. =SCALING=mc64= errors out (exit 1) after iter 0 on marine_1600.
+   Worth filing separately.
+2. =SCALING=infnorm= degrades on this matrix — default scaling choice
+   is doing real work to *prevent* this.
+3. =SCALING=identity= is 27x worse on iter 0 alone — confirms the
+   default scaler is essential.
+
+** Verified: C API gates CB on FERAL_CASCADE_BREAK env var
+src/capi.rs:39-51 shows feral_new() opts into CB only when the env
+var =FERAL_CASCADE_BREAK= is set to {1,on,true,yes}. The
+external_benchmarks/mittelmann_ipopt sweep did NOT set this. So the
+587x marine_1600 (and the marine TIMEOUT) is the cascade-at-default
+manifesting in the IPOPT-level numbers exactly as #37 predicts.
+
+Immediate cheap test: re-run feral sweep with
+=FERAL_CASCADE_BREAK=on= and see how many of the 7 TIMEOUTs convert
+to Optimal. Hypothesis: marine_1600, dtoc2, possibly others.
+
+* 07:30 :pinene_3200:findings:cascade:warm_state:
+Agent a84f721906859018f reported.
+
+Per-iter factor (s); "—" = killed at 600 s wall:
+
+| iter            |  0   |  1   |  2   |  3   |  4   |  5   | tot(0-7) |
+|-----------------+------+------+------+------+------+------+----------|
+| default (MC64)  | 1.03 | 1.02 | 0.64 | 0.93 | 0.96 |  —   | DNF       |
+| CB              | 1.17 | 1.04 | 0.83 | 1.05 | 1.19 | 0.05 | **5.46**  |
+| CB+FRESH        | 1.25 | 1.13 | 1.18 | 1.41 | 1.56 | 1.56 | 11.77     |
+| infnorm         | 1.32 | 1.20 | 0.05 | 0.15 | 16.06|  —   | DNF       |
+| CB+infnorm      | 1.39 | 1.19 | 0.05 | 0.05 | 0.05 | 0.06 | **2.88**  |
+| PAR=0           | 1.13 | 1.16 | 0.91 | 0.89 | 1.15 |  —   | DNF       |
+| PAR=0+CB        | 1.07 | 1.23 | 0.92 | 1.19 | 1.24 | 0.08 | 5.93      |
+
+** Key findings
+1. Baseline reproduces session-31 #37 — iter 5 cascades unbounded.
+2. CB=1 rescue overhead on iters 0-4 is **~11-15%** vs default
+   (5.28 s vs 4.57 s for iters 0-4). **Below the historical >20% bar
+   that originally blocked making CB the default.** Actionable
+   promotion candidate, contingent on full-corpus regression.
+3. **FRESH=1 alone kills the cascade** (1.56 s on iter 5 vs DNF
+   baseline) — cascade is **warm-state amplification**, NOT a
+   structural property of matrix index 5. Accumulated delayed-pivot
+   bookkeeping inside the reused Solver triggers pathological
+   supernode expansion. **This is an independent bug from CB** and
+   is likely fixable by resetting an accumulated buffer between
+   factor() calls.
+4. CB+infnorm = 2.88 s total (best). Trades MC64's robustness —
+   needs corpus-wide validation.
+5. SCALING=infnorm without CB is unstable (iter 4 explodes).
+6. Parallelism not the trigger (PAR=0 still cascades at iter 5).
+
+** Symbolic auto-detection lead
+Agent notes that `sym.supernodes.iter().map(|s| s.nrow).max()` is
+already used in src/bin/{bench.rs,diag_chainwoo.rs,vesuvio_diag.rs}.
+Natural extension: arm cascade_break automatically when
+`max_supernode_nrow / n > ALPHA` (calibrated from
+diag_cascade_ratio_distribution). pinene_3200's root expands to 14k
+cols of 128k n (~11%). Would eliminate per-problem opt-in.
+
+** Recommendations (from agent; not yet executed)
+- Re-baseline CB=on across the full corpus.
+- Add symbolic auto-arm: `if max_super_nrow >= ALPHA * n { arm CB }`.
+- Investigate the warm-state amplification (FRESH=1 eliminates
+  cascade) — likely a buffer-reset bug independent of CB.
+
+* 08:00 :dtoc2:findings:CB:scaling:
+Agent a54f89c7fa0bffc79 reported.
+
+Iter-1 factor time per setting (FRESH=1 unless noted):
+
+| Setting              | i0          | i1            | i2   | inertia i1               |
+|----------------------+-------------+---------------+------+--------------------------|
+| default (mc64,par,off)| 0.66        | **TIMEOUT >5m** |      |                          |
+| SCALING=identity     | 1.38 WRONG  | TIMEOUT >5m   |      |                          |
+| SCALING=infnorm      | 0.70 OK     | **0.72**      | 0.66 | 64670/39250/0 (280 flip) |
+| CB=1 (mc64+cascade)  | 0.65 OK     | **0.67**      | 0.67 | 64545/39375/0 (405 flip) |
+| PAR=0 (mc64)         | 0.67 OK     | TIMEOUT >5m   |      |                          |
+| infnorm+CB           | 0.65 OK     | 0.67          | 0.67 | same as infnorm          |
+| warm+CB              | 0.69 OK     | 0.71          | 0.08 | same as CB               |
+
+**Root cause:** FRESH=1 still hangs without CB, so this is NOT
+warm-state amplification (different from pinene/marine). The hang is
+in the factorization itself when ALL of:
+  - iter-1 matrix carries the huge delta_w ~6.99e19 bump on diagonal
+  - MC64 scaling is enabled
+  - cascade is disabled
+MC64 on a diagonal that saturates fp dynamic range produces row/col
+scale factors that collide with the regularized diagonal; without CB,
+the supernodal panel cascade chases pivots that never satisfy the
+threshold — pathological pivot-search loop.
+
+**Rescue: CB=1.** Iter 1 completes in 0.67 s vs timeout. Inertia is
+still wrong (405 flips off the oracle 64950/38970/0), but the factor
+*completes*, which lets IPOPT escalate delta_w further via its normal
+inertia-correction loop. Without CB the IPM blocks at the factor step.
+
+PAR=0 does NOT rescue — rules out parallel deadlock.
+
+**Suggested follow-up (agent's recommendation):** MC64 should
+auto-detect `max|diag| >> max|offdiag|` (the regularized-diagonal
+signature) and fall back to identity scaling on those rows. Would
+make the rescue automatic without per-problem opt-in.
+
+* 08:05 :deliverable:per_problem_env:
+Added `PROBLEM_FERAL_ENV` to external_benchmarks/mittelmann_ipopt/run.py:
+  - marine_1600  → FERAL_CASCADE_BREAK=on
+  - pinene_3200  → FERAL_CASCADE_BREAK=on
+  - dtoc2        → FERAL_CASCADE_BREAK=on
+
+Env is injected via subprocess.run(env=...) on the feral side only,
+recorded in each result row as `extra_env`, and shown in the operator
+print line. README.md updated with the rescue table.
+
+Also created research note at
+dev/research/warm-state-cascade-amplification-2026-05-17.md
+documenting the FRESH=1-kills-cascade evidence (pinene, marine — but
+NOT dtoc2, where FRESH still hangs) and a 4-step investigation plan
+for the underlying warm-state bug.
+
+* 08:10 :latent_bugs:
+Three latent bugs surfaced by today's investigation:
+  1. SCALING=mc64 errors out (exit 1) on marine_1600 after iter 0.
+  2. Warm-state amplification of the wide-supernode cascade
+     (pinene_3200, marine_1600) — independent from CB; FRESH=1
+     bypasses it. See research note.
+  3. MC64 collides with saturated regularized diagonal (dtoc2) —
+     pathological pivot-search loop without CB.
+
+  And one IPM-level issue:
+  4. clnlbeam IPM trajectory diverges from MA57 starting at iter 29
+     (5-digit bit-agreement up to iter 28). Hypothesis: refinement
+     gate src/numeric/solve.rs:803 (`f64::EPSILON * sqrt(n)`) is one
+     digit looser than MA57's effective residual. Cheap test: tighten
+     to `f64::EPSILON * n`. Same optimum reached either way.
+
+* 08:15 :session_summary:
+Per the user's request:
+  - DONE: per-problem opt files (run.py PROBLEM_FERAL_ENV, README rescue table).
+  - DONE: warm-state amplification bug filed as research note.
+
+Remaining (not done; not in this session's scope):
+  - Validate the rescues end-to-end by re-running the harness with the
+    new env settings (separate session — sweep takes hours).
+  - Implement the warm-state buffer-reset fix.
+  - Implement the MC64 saturated-diagonal auto-fallback (dtoc2 fix).
+  - Tighten clnlbeam refinement gate.
+
+* 09:00 :investigation_step1:disproof:cascade_structural:
+User asked to begin the 4-step investigation in the warm-state
+research note.
+
+Step 1 (reproduce in isolation):
+  - Added `Solver::invalidate_symbolic_cache(&mut self)`
+    (src/numeric/solver.rs around line 753) — single-line bisection
+    hook, drops `last_symbolic` and `last_pattern_fingerprint`
+    without touching workspace / last_factors / pool.
+  - Added `src/bin/probe_warm_cascade.rs` — runs four modes
+    (COLD, WARM, SYMOFF, ALLNEW) on a pair of consecutive KKT dumps.
+  - Built clean.
+  - Ran `probe_warm_cascade` (defaults: pinene_3200, prev=4, curr=5).
+    **COLD mode hung at 240 s wall.**
+
+Then verified independently with the original warm-replay probe:
+  - `FRESH=1 MAX_ITER=6 probe_kkt_replay pinene_3200`:
+    iters 0-4 factor in ~1.0 s fresh each, iter 5 hangs (killed at
+    180 s).
+  - `FRESH=1 MAX_ITER=12 probe_kkt_replay marine_1600`:
+    iters 0-8 factor in 0.3-1.5 s fresh each, iter 9 takes 64 s,
+    iter 10 hangs (killed at 120 s).
+
+**Disproof:** the cascade is NOT warm-state amplification. It is
+structural to the iter-N matrix. A fresh `Solver` handed the
+problematic matrix cascades identically. The agent's "FRESH 1.56 s"
+claim was a misremembering of its own table's CB+FRESH=1.555 row —
+the agent never measured FRESH-alone.
+
+Re-read of `factor()`: every cache that could plausibly leak between
+calls is correctly invalidated (last_symbolic on pattern change,
+cached_mc64 unconditionally after every numeric factor per #38,
+workspace doc-claims and code-confirms clean entry, last_factors
+overwritten). So the warm-state mechanism never existed.
+
+The corrected story:
+  - CB=1 is the ONLY known rescue for the three cascade problems.
+  - FRESH does not help — bug is not in solver state.
+  - The bug is in how the supernodal pivot-search loop handles
+    certain numerical patterns (small δw → many delays; saturated
+    δw + MC64 → pivot-search loop).
+
+Logs: /tmp/warm_cascade_pinene.log, /tmp/pinene_fresh_verify.log,
+/tmp/marine_fresh_verify.log.
+
+* 09:10 :investigation_refocused:
+Rewrote dev/research/warm-state-cascade-amplification-2026-05-17.md
+in full to document the disproof and refocus the investigation:
+  - Title now "Wide-supernode cascade on small-δ_w KKT matrices".
+  - Step 2 is no longer "bisect solver state" (no state to bisect);
+    it is "instrument the supernodal pivot-search loop with a
+    per-supernode candidate-evaluation counter".
+  - Step 3 is "symbolic-time auto-arm:
+    `if max_supernode_nrow / n >= α then arm CB`".
+  - Step 4 is the dtoc2 MC64-saturated-diagonal fix.
+
+This shifts the investigation away from a non-existent warm-state
+bug and onto two real, actionable kernel-level fixes (auto-arm CB
+at symbolic time; auto-fallback MC64 on saturated diagonals).
+
+* 10:15 :sqd:cascade:probe:
+User asked: does SQD help the cascade matrices? Added SQD=1 env
+to probe_kkt_replay and ran FRESH=1 SQD=1 on the three cascade
+problems.
+
+Results:
+- pinene_3200 (MAX_ITER=8): iter 1 OK (0.97s); iter 0,2-7 trip
+  SqdContractViolated with pivots 1e-7..1e-9. Cascade iter 5
+  fails in 1.2s (vs hang >451s without SQD or CB).
+- marine_1600 (MAX_ITER=11): 8/11 OK; iter 6,8,9,10 trip
+  SqdContract with pivots 1e-8..1e-10. iter 9 cascade fails in
+  0.46s instead of hanging.
+- dtoc2 (MAX_ITER=3): iter 0 OK; iter 1,2 WrongInertia
+  (64692/39228 vs expected 64950/38970, off by 258). SQD is
+  UNSAFE on dtoc2 — silent sign errors that BK 2x2 blocks would
+  catch.
+
+Diagnosis: the reported pivots (1e-7 to 1e-9) are nowhere near
+zero_tol (f64::EPSILON = 2.22e-16), so they're tripping the
+L-growth bound at src/dense/factor.rs:1848 (1/sqrt(EPS) ≈ 6.7e7),
+not the magnitude trip. With pivot d=1e-9 and off-diagonal ~1,
+the post-division L entry hits ~1e9 > 6.7e7.
+
+Could raise the L-growth bound (e.g. to 1/EPS ≈ 4.5e15) to
+"accept" these, but then we'd carry 1e9-magnitude L entries
+forward — guaranteed cancellation blow-up downstream.
+
+Verdict: SQD is not a rescue for the cascade. It converts
+"hang for 451s" into "fail fast in 1s" which is a strictly
+better failure mode but still triggers an IPOPT δ_w retry.
+Real fix is still cascade_break (succeeds via perturb) or
+symbolic-time auto-arm of CB. dtoc2 specifically must NOT
+use SQD because of the wrong-inertia case.
+
+Implication: per-problem opt list does NOT add SQD; CB stays
+the recommended rescue.
+
+* 11:05 :symbolic:cascade:autoarm:disproof:
+Step 3 (symbolic-time auto-arm of cascade_break) hypothesis was:
+"if max supernode width >= α*n at symbolic time, arm CB." Wrote
+src/bin/probe_supernode_widths to measure max_nrow/n and
+max_ncol/n on five problems × 10–12 iters each.
+
+Data (max_nrow/n across all iters):
+- pinene_3200 (n=127995, cascades): 0.003–0.005
+- marine_1600 (n=76807,  cascades): 0.013–0.020
+- dtoc2       (n=103920, cascades): 0.001
+- robot_1600  (n=24000,  benign):    0.001–0.007
+- clnlbeam    (n=99999,  benign):    0.000
+
+Cascade vs benign overlap completely on the symbolic ratio.
+Hypothesis disproved: a pure symbolic auto-arm based on supernode
+widths CANNOT distinguish cascade-prone from benign matrices.
+
+Mechanism reason: the cascade emerges from delayed pivots
+ACCUMULATING up the etree at runtime. The symbolic pass sees only
+the pre-delay structure where every supernode is small (~400–1500
+columns). The runtime root expansion to 21k cols (pinene iter 5
+smoking gun) is invisible at symbolic time because delays are a
+function of NUMERIC values, not pattern.
+
+Alternative approaches that could work:
+- (a) Runtime auto-arm: monitor n_delayed accumulation mid-factor
+  and arm CB on remaining supernodes when n_delayed exceeds a
+  threshold. Architectural change — params are immutable during
+  factor today.
+- (b) Warm auto-arm: record root supernode's n_delayed count from
+  the previous factor() call; if it exceeded β*n, arm CB for the
+  next factor on the same pattern. Requires persistent state and
+  pattern-fingerprint guard. Lets the first factor pay the cascade
+  cost but rescues iter 2+.
+- (c) Etree-depth or aspect-ratio heuristic. Untested; cascade
+  matrices may have wide-fanin trees that concentrate delays.
+
+Task #63 marked completed with finding. New task to track (b)
+warm auto-arm as the only realistic single-shot fix without an
+architectural change.
+
+* 11:50 :dtoc2:rootcause:fixed:input_validation:
+Investigating the dtoc2 MC64-saturated-diagonal "bug" (task #64) led
+to the actual root cause via `probe_dtoc2_mc64`:
+
+  dtoc2_0000.mtx: max|diag|=1e10, max|offdiag|=1.0 (saturated but OK)
+  dtoc2_0001.mtx: **103 inf entries**, max finite=6.99e19
+
+IPOPT's δ_w bump overflowed past 1e308 on 103 already-large diagonal
+entries between iter 0 and iter 1. The dumped matrix literally has
++inf values. The previous diagnosis ("MC64 collides with saturated
+regularized diagonal") was a symptom — the real bug is feral never
+checked inputs for non-finite values. Without that check, the BK
+pivot-search loops indefinitely because every threshold test fails
+against an inf column maximum.
+
+Fix: added O(nnz) non-finite scan at Step 0 of `Solver::factor()`
+(src/numeric/solver.rs:420). Returns `FatalError(InvalidInput(...))`
+with the offending nnz index. Test added:
+`factor_rejects_non_finite_values` (Inf and NaN paths).
+
+Reproduction: `SCALING=mc64 MAX_ITER=3 ./target/release/probe_kkt_replay dtoc2`
+- Before: iter 0 OK (0.65s); iter 1 hangs > 5 min.
+- After:  iter 0 OK (0.92s); iter 1 fails in 0ms with
+  "matrix value at nnz index 849751 is non-finite (inf)".
+
+Implication for IPOPT integration: when feral reports
+InvalidInput("non-finite"), the IPM driver should back off δ_w
+rather than retry, because the matrix it sent is unfactorisable.
+Today's per-problem env `FERAL_CASCADE_BREAK=on` for dtoc2 is
+still useful — it lets the factorisation complete on the saturated-
+but-finite iter 1 cases (e.g. dtoc2 iter 1 in a fresh IPOPT run
+where δ_w bumped to 7e19 without overflowing) — but the hang case
+is now a fast clear failure.
+
+Outstanding: task #65 (clnlbeam refinement gate) still blocked on
+math-direction verification. Task description says "tighten by
+changing ε*sqrt(n) → ε*n" but ε*n is LARGER (looser).
+
