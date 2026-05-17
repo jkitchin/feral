@@ -462,3 +462,52 @@ Outstanding: task #65 (clnlbeam refinement gate) still blocked on
 math-direction verification. Task description says "tighten by
 changing ε*sqrt(n) → ε*n" but ε*n is LARGER (looser).
 
+* 13:20 :clnlbeam:refinement:disproof:#65:
+Built =src/bin/probe_clnlbeam_refine.rs= to measure what relative
+residual iterative refinement actually reaches on clnlbeam_{0000,0001}
+plus the rest of the 1D-banded panel. The probe builds b = A·x_exact
+for a deterministic pseudo-random x_exact, runs
+=solve_sparse_refined_with_diagnostics=, and prints per-step
+||r||_2 / rel_res / κ̂·rr.
+
+Results (release build):
+
+| matrix             | step 0 rel_res | step 1 rel_res | gate (ε√n) |
+|--------------------+----------------+----------------+------------|
+| clnlbeam iter 0    |       1.07e-12 |       1.24e-16 |    7.02e-14 |
+| clnlbeam iter 1    |       1.44e-12 |       1.24e-16 |    7.02e-14 |
+| henon120 iter 0    |       1.55e-15 |   (gate met)   |    4.01e-14 |
+| henon120 iter 5    |       1.36e-16 |   (gate met)   |    4.01e-14 |
+| lane_emden120 i 0  |       8.76e-15 |   (gate met)   |    5.34e-14 |
+| lane_emden120 i 5  |       1.41e-16 |   (gate met)   |    5.34e-14 |
+
+The §07:01 hypothesis (gate too loose → x returned at 7e-14 instead
+of MA57's 1e-15 → IPM trajectory drift) is **disproved**:
+
+1. On clnlbeam, refinement runs exactly ONE step and lands at
+   ~1.24e-16. That is below ε ≈ 2.22e-16 and far below the
+   current ε√n gate of 7e-14. Tightening the gate to ε or 1e-15
+   returns the SAME x (same step-1 iterate, gate satisfied either
+   way) — i.e. zero behavioural change.
+
+2. On henon120 and lane_emden120, the bare solve (step 0) already
+   sits at 1e-15 / 1e-16; refinement does not run at all.
+
+So the gate is **not the binding constraint** on any matrix in the
+1D-banded panel. The actual delivered relative residual is at
+floor (~ε). The clnlbeam iter-29 IPM divergence has a different
+root cause — candidates include parallel reduction order in symv,
+pivot 2x2-vs-1x1 tie-breaking under MC64-scaled values, or
+something in the IPM step computation itself that amplifies an
+otherwise-benign ε-level x difference.
+
+Action: leave =src/numeric/solve.rs:803= unchanged. Document the
+disproof here and in the task. Open question on iter-29 drift
+remains but is **not** addressable by tightening the refinement
+gate; it should be reframed (probably as "what about the parallel
+solve introduces non-reproducibility vs MA57" or as "is the IPM
+step calculation in IPOPT amplifying a tiny linear-system noise").
+
+Evidence: =src/bin/probe_clnlbeam_refine.rs= (committed). Run with
+=cargo run --release --bin probe_clnlbeam_refine -- <problem> <iter>=.
+
