@@ -511,3 +511,49 @@ step calculation in IPOPT amplifying a tiny linear-system noise").
 Evidence: =src/bin/probe_clnlbeam_refine.rs= (committed). Run with
 =cargo run --release --bin probe_clnlbeam_refine -- <problem> <iter>=.
 
+* 13:40 :clnlbeam:ipopt:refine_off:#65:
+User pushed back: "MA57 solves it and feral doesn't." Strictly
+both reach Optimal; feral takes ~4.4× MA57's IPM iters (and ~28×
+wall time). The §13:20 probe only addressed the gate; it did not
+rule out that *refinement itself* (rather than the gate) is the
+lever. Direct experiment:
+
+| run                        | IPM iters | IPOPT wall (s) |
+|----------------------------+-----------+----------------|
+| MA57 baseline              |       543 |          12.6  |
+| feral, refined (default)   |      2367 |         361.0  |
+| feral, FERAL_REFINE=0      |      2535 |         283.1  |
+
+FERAL_REFINE=0 was run via:
+
+  FERAL_REFINE=0 ipopt clnlbeam -AMPL linear_solver=feral print_level=5
+
+Result: with refinement off, feral takes ~170 *more* IPM iters,
+not fewer. So refinement is **helping a little but is not the
+dominant lever**; the 1824-iter gap to MA57 cannot be attributed
+to the refinement step (or to the gate that controls it).
+
+Implication for task #65: closing the iters-gap to MA57 on
+clnlbeam requires changing something in the **factor**, not in
+the solve. Candidate root causes (none verified):
+  - L,D values diverge slightly from MA57's because of different
+    pivoting tie-breaks or 2x2 vs 1x1 selection on equally-valid
+    pivots. Over 543 IPM iters those compound.
+  - MC64 scaling produces a different permutation than MA57's
+    default (MC64 is implementation-defined for ties); the
+    resulting factor lives in a slightly different basin.
+  - The bare solve x-difference at iter 0 is ~1e-12 in our probe;
+    a 1e-12 starting noise can dominate later IPM iter behavior
+    even with a perfect refinement gate.
+
+What this means for #65: there is **no refinement-gate change**
+that fixes the clnlbeam slowness. Closing the task as
+"refinement-gate hypothesis disproved end-to-end" — the experiment
+above proves the gate is downstream of the actual cause. The
+clnlbeam IPM-iter-bloat is a *separate*, larger investigation
+about factor numerical reproducibility vs MA57; opening as a
+new follow-up task rather than holding #65 open indefinitely.
+
+Logs: =/tmp/clnlbeam_refine0.log= (full IPOPT summary of the
+FERAL_REFINE=0 run).
+
