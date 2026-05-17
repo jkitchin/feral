@@ -257,7 +257,13 @@ fn main() {
         };
         let feral_residual = rel_residual(&input.csc, &x, &rhs);
 
-        let inertia_ok = feral_inertia == mumps_inertia;
+        // Oracle-consensus inertia gate per CLAUDE.md correctness contract:
+        // feral must agree with at least one of {MUMPS, SSIDS}. Falls back
+        // to MUMPS-only when no SSIDS sidecar exists.
+        let inertia_ok = feral_inertia == mumps_inertia
+            || ssids_inertia
+                .as_ref()
+                .is_some_and(|s| &feral_inertia == s);
         let residual_ratio = if mumps_residual > 0.0 {
             feral_residual / mumps_residual
         } else {
@@ -474,9 +480,9 @@ fn main() {
     test_body.push_str("//! Phase 2.2.3 follow-up — parity panel.\n");
     test_body.push_str("//!\n");
     test_body.push_str("//! For each curated matrix in `tests/data/parity/`, assert feral's\n");
-    test_body.push_str("//! multi-frontal solve matches the MUMPS oracle exactly on inertia\n");
-    test_body.push_str("//! and within K*MUMPS on relative residual. Regenerate this file by\n");
-    test_body.push_str("//! running:\n");
+    test_body.push_str("//! multi-frontal solve matches at least one of {MUMPS, SSIDS}\n");
+    test_body.push_str("//! oracles on inertia (CLAUDE.md correctness contract) and is\n");
+    test_body.push_str("//! within K*MUMPS on relative residual. Regenerate by running:\n");
     test_body.push_str("//!     cargo run --release --example select_parity_panel\n");
     test_body.push_str("//!\n");
     test_body.push_str("//! Do NOT edit tests/parity.rs by hand. The file is generated.\n\n");
@@ -521,6 +527,10 @@ fn main() {
     test_body.push_str("    let res = data[\"residual_2norm_relative\"].as_f64().unwrap();\n");
     test_body.push_str("    (Inertia::new(pos, neg, zero), res)\n");
     test_body.push_str("}\n\n");
+    test_body.push_str("fn try_read_oracle(path: &Path) -> Option<(Inertia, f64)> {\n");
+    test_body.push_str("    if !path.exists() { return None; }\n");
+    test_body.push_str("    Some(read_oracle(path))\n");
+    test_body.push_str("}\n\n");
     test_body.push_str("fn run_parity(fam: &str, stem: &str) {\n");
     test_body.push_str("    let base = format!(\"tests/data/parity/{}/{}\", fam, stem);\n");
     test_body.push_str(
@@ -529,14 +539,22 @@ fn main() {
     test_body.push_str("    let csc = mtx.to_csc().expect(\"to_csc\");\n");
     test_body.push_str("    let sidecar = read_sidecar(Path::new(&format!(\"{}.json\", base))).expect(\"sidecar\");\n");
     test_body.push_str("    let rhs = sidecar.finite_rhs().expect(\"finite rhs\");\n");
-    test_body.push_str("    let (mumps_inertia, mumps_res) = read_oracle(Path::new(&format!(\"{}.mumps.json\", base)));\n\n");
+    test_body.push_str("    let (mumps_inertia, mumps_res) = read_oracle(Path::new(&format!(\"{}.mumps.json\", base)));\n");
+    test_body.push_str("    let ssids = try_read_oracle(Path::new(&format!(\"{}.ssids.json\", base)));\n\n");
     test_body.push_str("    let sym = symbolic_factorize(&csc, &SupernodeParams::default()).expect(\"symbolic\");\n");
     test_body.push_str("    let (fac, inertia) = factorize_multifrontal(&csc, &sym, &ldlt_params()).expect(\"factor\");\n");
     test_body.push_str("    let x = solve_sparse_refined(&csc, &fac, &rhs).expect(\"solve\");\n");
     test_body.push_str("    let feral_res = rel_residual(&csc, &x, &rhs);\n\n");
-    test_body.push_str("    assert_eq!(\n");
-    test_body.push_str("        inertia, mumps_inertia,\n");
-    test_body.push_str("        \"{} inertia: feral={} mumps={}\", stem, inertia, mumps_inertia\n");
+    test_body.push_str("    // Oracle-consensus inertia gate per CLAUDE.md correctness contract:\n");
+    test_body.push_str("    // feral must match at least one of {MUMPS, SSIDS}. Falls back to\n");
+    test_body.push_str("    // MUMPS-only when no SSIDS sidecar exists.\n");
+    test_body.push_str("    let matches_mumps = inertia == mumps_inertia;\n");
+    test_body.push_str("    let matches_ssids = ssids.as_ref().map(|(i, _)| &inertia == i).unwrap_or(false);\n");
+    test_body.push_str("    assert!(\n");
+    test_body.push_str("        matches_mumps || matches_ssids,\n");
+    test_body.push_str("        \"{} inertia: feral={} mumps={}{}\",\n");
+    test_body.push_str("        stem, inertia, mumps_inertia,\n");
+    test_body.push_str("        ssids.as_ref().map(|(i, _)| format!(\" ssids={}\", i)).unwrap_or_default(),\n");
     test_body.push_str("    );\n");
     test_body.push_str("    // Gate: feral residual must be within K*MUMPS residual, OR at or\n");
     test_body.push_str("    // below the absolute floor. The floor catches matrices where MUMPS\n");
@@ -558,10 +576,10 @@ fn main() {
         .filter(|r| result_bucket(r) == "pass")
         .count();
     test_body.push_str(&format!(
-        "// Panel snapshot: {}/{} matrices pass MUMPS parity at panel time.\n\
-         // Failing matrices are `#[ignore]`'d with the panel-time failure\n\
-         // mode in the attribute comment. Passing matrices run as regular\n\
-         // tests and protect against regression. As fixes land, rerun\n\
+        "// Panel snapshot: {}/{} matrices pass oracle-consensus parity at\n\
+         // panel time. Failing matrices are `#[ignore]`'d with the panel-time\n\
+         // failure mode in the attribute comment. Passing matrices run as\n\
+         // regular tests and protect against regression. As fixes land, rerun\n\
          // `cargo run --release --example select_parity_panel` to refresh\n\
          // the panel and un-ignore the now-passing matrices.\n\n",
         pass_count,
@@ -583,10 +601,17 @@ fn main() {
             ));
         } else {
             let reason = match result_bucket(r) {
-                "fail_inertia" => format!(
-                    "inertia mismatch (feral={} mumps={})",
-                    r.feral_inertia, r.mumps_inertia
-                ),
+                "fail_inertia" => {
+                    let ssids_str = r
+                        .ssids_inertia
+                        .as_ref()
+                        .map(|i| format!(" ssids={}", i))
+                        .unwrap_or_default();
+                    format!(
+                        "inertia mismatch (feral={} mumps={}{})",
+                        r.feral_inertia, r.mumps_inertia, ssids_str
+                    )
+                }
                 "fail_residual" => format!(
                     "residual ratio {:.2e} (feral={:.2e}, mumps={:.2e})",
                     r.residual_ratio, r.feral_residual, r.mumps_residual

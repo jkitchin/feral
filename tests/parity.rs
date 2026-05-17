@@ -1,9 +1,9 @@
 //! Phase 2.2.3 follow-up — parity panel.
 //!
 //! For each curated matrix in `tests/data/parity/`, assert feral's
-//! multi-frontal solve matches the MUMPS oracle exactly on inertia
-//! and within K*MUMPS on relative residual. Regenerate this file by
-//! running:
+//! multi-frontal solve matches at least one of {MUMPS, SSIDS} oracles
+//! on inertia (CLAUDE.md correctness contract) and is within K*MUMPS
+//! on relative residual. Regenerate by running:
 //!     cargo run --release --example select_parity_panel
 //!
 //! Do NOT edit tests/parity.rs by hand. The file is generated.
@@ -54,6 +54,13 @@ fn read_oracle(path: &Path) -> (Inertia, f64) {
     (Inertia::new(pos, neg, zero), res)
 }
 
+fn try_read_oracle(path: &Path) -> Option<(Inertia, f64)> {
+    if !path.exists() {
+        return None;
+    }
+    Some(read_oracle(path))
+}
+
 fn run_parity(fam: &str, stem: &str) {
     let base = format!("tests/data/parity/{}/{}", fam, stem);
     let mtx = read_mtx(Path::new(&format!("{}.mtx", base))).expect("read mtx");
@@ -61,16 +68,28 @@ fn run_parity(fam: &str, stem: &str) {
     let sidecar = read_sidecar(Path::new(&format!("{}.json", base))).expect("sidecar");
     let rhs = sidecar.finite_rhs().expect("finite rhs");
     let (mumps_inertia, mumps_res) = read_oracle(Path::new(&format!("{}.mumps.json", base)));
+    let ssids = try_read_oracle(Path::new(&format!("{}.ssids.json", base)));
 
     let sym = symbolic_factorize(&csc, &SupernodeParams::default()).expect("symbolic");
     let (fac, inertia) = factorize_multifrontal(&csc, &sym, &ldlt_params()).expect("factor");
     let x = solve_sparse_refined(&csc, &fac, &rhs).expect("solve");
     let feral_res = rel_residual(&csc, &x, &rhs);
 
-    assert_eq!(
-        inertia, mumps_inertia,
-        "{} inertia: feral={} mumps={}",
-        stem, inertia, mumps_inertia
+    // Oracle-consensus inertia gate per CLAUDE.md correctness contract:
+    // feral must match at least one of {MUMPS, SSIDS}. Falls back to
+    // MUMPS-only when no SSIDS sidecar exists.
+    let matches_mumps = inertia == mumps_inertia;
+    let matches_ssids = ssids.as_ref().map(|(i, _)| &inertia == i).unwrap_or(false);
+    assert!(
+        matches_mumps || matches_ssids,
+        "{} inertia: feral={} mumps={}{}",
+        stem,
+        inertia,
+        mumps_inertia,
+        ssids
+            .as_ref()
+            .map(|(i, _)| format!(" ssids={}", i))
+            .unwrap_or_default(),
     );
     // Gate: feral residual must be within K*MUMPS residual, OR at or
     // below the absolute floor. The floor catches matrices where MUMPS
@@ -88,56 +107,46 @@ fn run_parity(fam: &str, stem: &str) {
     );
 }
 
-// Panel snapshot: 13/26 matrices pass MUMPS parity at panel time.
-// Failing matrices are `#[ignore]`'d with the panel-time failure
-// mode in the attribute comment. Passing matrices run as regular
-// tests and protect against regression. As fixes land, rerun
-// `cargo run --release --example select_parity_panel` to refresh
-// the panel and un-ignore the now-passing matrices.
+// Panel snapshot: 20/26 matrices pass oracle-consensus parity. Remaining
+// failures are `#[ignore]`'d with the panel-time failure mode in the
+// attribute comment. Passing matrices run as regular tests and protect
+// against regression. As fixes land, rerun
+// `cargo run --release --example select_parity_panel` to refresh the
+// panel and un-ignore the now-passing matrices.
 
-// Panel time: inertia mismatch (feral=(38, 68, 0) mumps=(37, 68, 1))
 #[test]
-#[ignore]
 fn parity_acopp14_0001() {
     run_parity("acopp14", "ACOPP14_0001");
 }
 
-// Panel time: inertia mismatch (feral=(38, 68, 0) mumps=(37, 68, 1))
 #[test]
-#[ignore]
 fn parity_acopp14_0003() {
     run_parity("acopp14", "ACOPP14_0003");
 }
 
-// Panel time: inertia mismatch (feral=(71, 138, 0) mumps=(71, 137, 1))
 #[test]
-#[ignore]
 fn parity_acopp30_0000() {
     run_parity("acopp30", "ACOPP30_0000");
 }
 
-// Panel time: inertia mismatch (feral=(71, 138, 0) mumps=(72, 137, 0))
 #[test]
-#[ignore]
 fn parity_acopp30_0001() {
     run_parity("acopp30", "ACOPP30_0001");
 }
 
-// Panel time: inertia mismatch (feral=(71, 137, 1) mumps=(72, 137, 0))
+// Three-way oracle disagreement (feral=(71, 137, 1) mumps=(72, 137, 0) ssids=(71, 138, 0))
 #[test]
 #[ignore]
 fn parity_acopp30_0005() {
     run_parity("acopp30", "ACOPP30_0005");
 }
 
-// Panel time: inertia mismatch (feral=(7, 0, 0) mumps=(6, 0, 1))
 #[test]
-#[ignore]
 fn parity_ceri651cls_0486() {
     run_parity("ceri651cls", "CERI651CLS_0486");
 }
 
-// Panel time: inertia mismatch (feral=(7, 0, 0) mumps=(6, 0, 1))
+// Inertia consensus OK; residual ratio 1.64 > K=10 (feral=1.18e-8, mumps=7.16e-10)
 #[test]
 #[ignore]
 fn parity_ceri651cls_0487() {
@@ -164,7 +173,8 @@ fn parity_cresc132_0000() {
     run_parity("cresc132", "CRESC132_0000");
 }
 
-// Panel time: inertia mismatch (feral=(5, 0, 1) mumps=(6, 0, 0))
+// Inertia mismatch (feral=(5, 0, 1) mumps=(6, 0, 0) ssids=(6, 0, 0))
+// — feral is the outlier; tracked as #39.
 #[test]
 #[ignore]
 fn parity_fbrain3ls_0839() {

@@ -1494,3 +1494,18 @@ Remaining 11 ignored: ACOPP14_{0001,0003}, ACOPP30_{0000,0001,0005},
 CERI651CLS_{0486,0487}, FBRAIN3LS_0839, SSI_{1685,2412,2597}. Parity
 suite: 15 passed / 0 failed / 11 ignored (was 13/0/13). README
 known-limitations updated: CERI* narrowed to CERI651CLS.
+
+* 17:25 :parity:oracle-consensus:issue:
+Switched tests/parity.rs from MUMPS-only gate to oracle-consensus
+(feral must match MUMPS OR SSIDS), matching the CLAUDE.md correctness
+contract verbatim. Updated both the generator
+(examples/select_parity_panel.rs) and the test file by hand.
+Un-ignored 5 matrices that already agreed with SSIDS at panel time:
+ACOPP14_{0001,0003}, ACOPP30_{0000,0001}, CERI651CLS_0486. Re-checked
+CERI651CLS_0487: inertia agrees with SSIDS but residual ratio 1.64
+(feral=1.18e-8 vs mumps=7.16e-10) — still #[ignore]'d under the
+residual gate. FBRAIN3LS_0839 is feral=(5,0,1) vs both MUMPS and
+SSIDS=(6,0,0) — genuine feral outlier; filed as #39. ACOPP30_0005 is
+a three-way oracle disagreement (excluded by spec). Parity suite:
+20 passed / 0 failed / 6 ignored (was 15/0/11). README known-
+limitations rewritten to match: FBRAIN3LS_0839 + residual-only cases.

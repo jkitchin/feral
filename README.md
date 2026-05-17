@@ -271,18 +271,21 @@ story of how and why it was built.
 
 ## Known limitations
 
-- **Rank-deficient-KKT inertia mismatches.** On the ACOPP14 / ACOPP30
-  / CERI651CLS / FBRAIN3LS panel matrices, FERAL and canonical MUMPS
-  disagree on the inertia of constraint blocks that are exactly
-  rank-deficient (typical signature: FERAL reports `(p, q, 0)` where
-  MUMPS reports `(p, q-1, 1)` or vice versa). Phase 2.2.2's column-
-  relative pivot rejection cut ACOPP30_0000's residual by 47 orders
-  of magnitude (`2.27e+46 → 1.076e-1`) but does not flip the inertia
-  count. Closure likely requires further work on rank-revealing
-  behavior at the root supernode where `may_delay = false` forces an
-  in-place `ForceAccept`. These cases are `#[ignore]`'d in
-  `tests/parity.rs` with the panel-time failure mode documented in
-  the test comment.
+- **Rank-deficient-KKT inertia outlier (FBRAIN3LS_0839).** FERAL
+  reports `(5, 0, 1)` where both MUMPS and SSIDS agree on `(6, 0, 0)`
+  — feral is the outlier. The other historically-failing rank-
+  deficient panel matrices (ACOPP14×2, ACOPP30 × 2, CERI651CLS) all
+  agree with SSIDS against MUMPS and now pass the oracle-consensus
+  gate per the CLAUDE.md correctness contract. ACOPP30_0005 is a
+  three-way oracle disagreement (excluded). Closure likely requires
+  further work on rank-revealing behavior at the root supernode
+  where `may_delay = false` forces an in-place `ForceAccept`.
+- **Tiny residual gap on a few panel matrices.** CERI651CLS_0487 and
+  three SSI matrices (`SSI_1685`, `SSI_2412`, `SSI_2597`) produce
+  feral residuals 1.6×–1600× larger than MUMPS — all still tiny in
+  absolute terms (~1e-8 to ~1e-13) but outside the K=10 residual
+  gate. Inertia is correct in every case. These are `#[ignore]`'d
+  in `tests/parity.rs`.
 - **Tiny-IPM-KKT factor-time gap vs MUMPS.** On a class of small KKT
   matrices (BATCH, HAHN1, ACOPR30 at n ≈ 100–600), canonical MUMPS is
   5–8× faster than FERAL — a gap SPRAL/SSIDS also pays. The proper
