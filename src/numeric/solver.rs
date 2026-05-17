@@ -162,6 +162,29 @@ pub struct Solver {
     /// 1D-banded KKTs (#33 suggested action §3, supernode-shape
     /// thesis).
     ordering: OrderingMethod,
+    /// Warm cascade-break auto-arm threshold. `Some(β)` means: at the
+    /// start of `factor()`, if the previous factor on this pattern
+    /// generated a supernode with `n_delayed_in >= β·n`, locally set
+    /// `cascade_break_ratio = 0.5` and `cascade_break_eps = 1e-10`
+    /// for this call. `None` (default) disables the auto-arm.
+    ///
+    /// Symbolic-time auto-arm was disproved on 2026-05-17 (see
+    /// `dev/research/warm-state-cascade-amplification-2026-05-17.md`
+    /// step 3): the cascade is a runtime property of delayed pivots,
+    /// not a pattern property. Warm auto-arm pays the cost on the
+    /// first factor and rescues iter 2+ on the same pattern.
+    auto_cascade_break_beta: Option<f64>,
+    /// Maximum per-supernode `n_delayed_in` observed in the previous
+    /// `factor()` call. Reset to `None` on pattern change.
+    prev_max_n_delayed_in: Option<usize>,
+    /// Latch: once the warm auto-arm has fired on this pattern,
+    /// stay armed for every subsequent factor on the same pattern.
+    /// Reset to `false` on pattern change. Without latching the
+    /// trigger fires once, suppresses the cascade so the next factor
+    /// sees small delays, and disarms — letting a fresh cascade hit
+    /// next iter. With latching we pay the CB cost permanently after
+    /// the first observed cascade rather than oscillating.
+    auto_arm_latched: bool,
 }
 
 impl Solver {
@@ -188,6 +211,9 @@ impl Solver {
             use_parallel: true,
             parallel_pool: None,
             ordering: OrderingMethod::Auto,
+            auto_cascade_break_beta: None,
+            prev_max_n_delayed_in: None,
+            auto_arm_latched: false,
         }
     }
 
@@ -268,6 +294,29 @@ impl Solver {
     /// Pass `None` semantics by not calling this builder.
     pub fn with_cascade_break(mut self, ratio: f64) -> Self {
         self.numeric_params.cascade_break_ratio = Some(ratio);
+        self
+    }
+
+    /// Warm auto-arm for cascade-break. With `Some(β)`, the next
+    /// `factor()` call on the same pattern after a factor that
+    /// produced a supernode with `n_delayed_in ≥ β·n` locally arms
+    /// `cascade_break_ratio = 0.5` and `cascade_break_eps = 1e-10`
+    /// for the duration of that call only. `numeric_params` is not
+    /// mutated; the user-set `cascade_break_*` knobs (if any) take
+    /// precedence and disable the auto-arm.
+    ///
+    /// Recommended `β` ≈ 0.05 — 5% of `n` as `n_delayed_in` at any
+    /// supernode means the cascade is well underway. Below ~0.02
+    /// the trigger fires on benign light-delay nodes.
+    ///
+    /// Symbolic-time auto-arm was disproved on 2026-05-17 (cascade
+    /// is a runtime property; see
+    /// `dev/research/warm-state-cascade-amplification-2026-05-17.md`).
+    /// Warm auto-arm is the cheapest viable single-shot rescue: the
+    /// first factor pays the cascade cost, iter 2+ rides the rescue
+    /// without user intervention.
+    pub fn with_auto_cascade_break(mut self, beta: f64) -> Self {
+        self.auto_cascade_break_beta = Some(beta);
         self
     }
 
@@ -369,6 +418,24 @@ impl Solver {
     /// without invalidating the stored factor (caller may still
     /// `solve` against it). See plan §`factor()` flow.
     pub fn factor(&mut self, matrix: &CscMatrix, check_inertia: Option<Inertia>) -> FactorStatus {
+        // Step 0: reject non-finite input. A single +∞ / -∞ / NaN
+        // entry sends the BK pivot-search loop into pathological
+        // behavior (every threshold test fails against the inf
+        // column max; pivots cascade indefinitely). Caught upstream:
+        // dtoc2 iter 1 was shipping 103 inf entries from IPOPT's
+        // δ_w bump that overflowed beyond 1e308 — feral spun until
+        // timeout. Fail fast with a clear message so the IPM driver
+        // can decide to back off δ_w. O(nnz), allocation-free.
+        // See `dev/journal/2026-05-17-01.org` §08:00 (dtoc2 root
+        // cause), §11:50 (input-validation fix).
+        for (k, &v) in matrix.values.iter().enumerate() {
+            if !v.is_finite() {
+                return FactorStatus::FatalError(FeralError::InvalidInput(format!(
+                    "matrix value at nnz index {k} is non-finite ({v}); \
+                     fix the upstream computation before calling factor()"
+                )));
+            }
+        }
         // Step 1: pattern fingerprint.
         let fp = PatternFingerprint::of(matrix);
 
@@ -378,6 +445,10 @@ impl Solver {
             self.last_factors = None;
             self.last_inertia = None;
             self.last_pattern_fingerprint = None;
+            // Warm auto-arm signal is pattern-bound: a new pattern
+            // means the prior n_delayed observation no longer applies.
+            self.prev_max_n_delayed_in = None;
+            self.auto_arm_latched = false;
         }
 
         // Step 3: ensure symbolic is cached.
@@ -411,6 +482,57 @@ impl Solver {
             None => unreachable!("symbolic just populated"),
         };
 
+        // Step 3.6: warm cascade-break auto-arm. If the prior factor
+        // on this pattern produced a supernode with n_delayed_in >=
+        // β·n, locally arm cascade_break for this call. User-set
+        // cascade_break_* takes precedence (auto-arm only fills in
+        // when both are None). The effective params is a clone — we
+        // never mutate self.numeric_params here so the user's
+        // configuration survives across factor() calls.
+        let auto_arm_fires = match (
+            self.auto_cascade_break_beta,
+            self.prev_max_n_delayed_in,
+            self.numeric_params.cascade_break_ratio,
+        ) {
+            (Some(_), _, None) if self.auto_arm_latched => true,
+            (Some(beta), Some(prev), None) => {
+                let fires = (prev as f64) >= beta * (symbolic.n as f64);
+                if fires {
+                    self.auto_arm_latched = true;
+                }
+                fires
+            }
+            _ => false,
+        };
+        let effective_params: NumericParams = if auto_arm_fires {
+            if std::env::var("FERAL_AUTO_CB_DEBUG").is_ok() {
+                eprintln!(
+                    "[auto-cb] armed: prev_max_n_delayed_in={} n={} β={:.3}",
+                    self.prev_max_n_delayed_in.unwrap_or(0),
+                    symbolic.n,
+                    self.auto_cascade_break_beta.unwrap_or(0.0),
+                );
+            }
+            let mut p = self.numeric_params.clone();
+            p.cascade_break_ratio = Some(0.5);
+            if p.cascade_break_eps.is_none() {
+                p.cascade_break_eps = Some(1e-10);
+            }
+            p
+        } else {
+            if std::env::var("FERAL_AUTO_CB_DEBUG").is_ok()
+                && self.auto_cascade_break_beta.is_some()
+            {
+                eprintln!(
+                    "[auto-cb] not armed: prev_max_n_delayed_in={:?} n={} β={:.3}",
+                    self.prev_max_n_delayed_in,
+                    symbolic.n,
+                    self.auto_cascade_break_beta.unwrap_or(0.0),
+                );
+            }
+            self.numeric_params.clone()
+        };
+
         // Step 4: numeric factor via the pooled workspace; map errors.
         // Both drivers share the same signature and a bit-exact
         // contract; pick by the `use_parallel` toggle. When parallel
@@ -429,7 +551,7 @@ impl Solver {
                     factorize_multifrontal_parallel_with_workspace(
                         matrix,
                         symbolic,
-                        &self.numeric_params,
+                        &effective_params,
                         &mut self.workspace,
                     )
                 })
@@ -445,7 +567,7 @@ impl Solver {
             factorize_multifrontal_with_workspace(
                 matrix,
                 symbolic,
-                &self.numeric_params,
+                &effective_params,
                 &mut self.workspace,
             )
         };
@@ -480,6 +602,18 @@ impl Solver {
                 if factors.scaling_info.is_mc64_fallback() {
                     self.mc64_fallback_count += 1;
                 }
+                // Record the max per-supernode n_delayed_in seen on
+                // this factor so the next factor() on the same
+                // pattern can warm-arm cascade_break. See
+                // `with_auto_cascade_break` for the policy.
+                self.prev_max_n_delayed_in = Some(
+                    factors
+                        .node_factors
+                        .iter()
+                        .map(|nf| nf.n_delayed_in)
+                        .max()
+                        .unwrap_or(0),
+                );
                 self.last_factors = Some(factors);
                 self.last_inertia = Some(inertia.clone());
                 if partial_singular {
@@ -753,6 +887,22 @@ impl Solver {
     pub fn mc64_fallback_count(&self) -> usize {
         self.mc64_fallback_count
     }
+
+    /// Drop the cached symbolic factorisation and its associated
+    /// pattern fingerprint, forcing the next `factor()` call to
+    /// re-run `symbolic_factorize_with_method` from scratch.
+    ///
+    /// The pooled numeric `workspace`, the cached `last_factors`,
+    /// and the persistent `parallel_pool` are NOT touched. This is
+    /// the bisection hook for the warm-state amplification
+    /// investigation (`dev/research/warm-state-cascade-amplification-2026-05-17.md`):
+    /// it lets a probe distinguish "warm everything" from
+    /// "warm everything *except* symbolic" without rebuilding the
+    /// whole `Solver`.
+    pub fn invalidate_symbolic_cache(&mut self) {
+        self.last_symbolic = None;
+        self.last_pattern_fingerprint = None;
+    }
 }
 
 impl Default for Solver {
@@ -781,6 +931,58 @@ mod tests {
             sqd_mode: false,
         };
         Solver::with_params(np, SupernodeParams::default())
+    }
+
+    /// Regression for the dtoc2 iter-1 hang (2026-05-17 §08:00,
+    /// §11:50): IPOPT's δ_w bump overflowed beyond 1e308 on 103
+    /// diagonal entries, shipping a matrix with literal `+inf`
+    /// values to feral. Without input validation the BK pivot
+    /// search loops forever (every threshold test fails against
+    /// the inf column max). With Step 0 validation in `factor()`,
+    /// the call must return `FatalError(InvalidInput)` in O(nnz)
+    /// rather than hang.
+    #[test]
+    fn factor_rejects_non_finite_values() {
+        let n = 10;
+        let mut col_ptr = Vec::with_capacity(n + 1);
+        let mut row_idx = Vec::new();
+        let mut values: Vec<f64> = Vec::new();
+        col_ptr.push(0);
+        for j in 0..n {
+            row_idx.push(j);
+            values.push(if j == 5 { f64::INFINITY } else { 2.0 });
+            col_ptr.push(row_idx.len());
+        }
+        let csc = CscMatrix {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        };
+        let mut s = Solver::new();
+        match s.factor(&csc, None) {
+            FactorStatus::FatalError(FeralError::InvalidInput(msg)) => {
+                assert!(
+                    msg.contains("non-finite"),
+                    "error message should explain the trip: got {msg}"
+                );
+            }
+            other => panic!("expected FatalError(InvalidInput), got {other:?}"),
+        }
+
+        // NaN must also be rejected.
+        let mut values2: Vec<f64> = (0..n).map(|_| 2.0_f64).collect();
+        values2[3] = f64::NAN;
+        let csc2 = CscMatrix {
+            n,
+            col_ptr: csc.col_ptr.clone(),
+            row_idx: csc.row_idx.clone(),
+            values: values2,
+        };
+        match s.factor(&csc2, None) {
+            FactorStatus::FatalError(FeralError::InvalidInput(_)) => {}
+            other => panic!("expected FatalError(InvalidInput) for NaN, got {other:?}"),
+        }
     }
 
     /// Issue #24: a uniform-diagonal matrix triggers the

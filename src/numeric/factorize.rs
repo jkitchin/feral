@@ -8,8 +8,26 @@ use crate::inertia::Inertia;
 use crate::scaling::{compute_scaling_dense_fast, compute_scaling_with_cache, ScalingStrategy};
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::{Supernode, SymbolicFactorization};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
+
+/// Per-supernode tracing gate. Set `FERAL_TRACE_SUPERNODE=1` (or any
+/// non-empty value) in the environment to log one line per
+/// supernode factor call: `[sn-trace] sn=<idx> nrow=<r> exp_ncol=<c>
+/// n_del_in=<d> may_del=<m> cb=<cb> nelim=<n> n_del_out=<dout>
+/// rook_rescues=<rr> ms=<ms>`. Off by default — the OnceLock keeps
+/// the check at one atomic load per supernode call. Used by the
+/// wide-supernode cascade investigation
+/// (`dev/research/warm-state-cascade-amplification-2026-05-17.md`)
+/// to identify which supernode burns time on cascade-prone matrices.
+fn supernode_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FERAL_TRACE_SUPERNODE")
+            .map(|v| !v.is_empty() && v != "0" && v != "off" && v != "false")
+            .unwrap_or(false)
+    })
+}
 
 /// Symbolic-arm gate for the cascade-break trigger
 /// (`NumericParams::cascade_break_ratio`). When the symbolic factor
@@ -1986,6 +2004,8 @@ fn factor_one_supernode(
     // `may_delay` (SQD never delays — it either accepts the diagonal
     // pivot or trips `SqdContractViolated`) and `bk_ref` overrides
     // (no cascade-break logic applies since 2x2 pivots aren't formed).
+    let trace = supernode_trace_enabled();
+    let t_sn = trace.then(Instant::now);
     let mut ff = if params.sqd_mode {
         factor_frontal_diagonal_in_place(&mut frontal, eliminable, &params.bk)?
     } else {
@@ -1997,6 +2017,15 @@ fn factor_one_supernode(
             &mut ws.factor_scratch,
         )?
     };
+    if let Some(t0) = t_sn {
+        let ms = t0.elapsed().as_secs_f64() * 1e3;
+        eprintln!(
+            "[sn-trace] sn={snode_idx} nrow={actual_nrow} exp_ncol={expanded_ncol} \
+             elim={eliminable} n_del_in={n_delayed_in} may_del={may_delay} cb={cascade_break} \
+             nelim={} n_del_out={} rook_rescues={} ms={ms:.3}",
+            ff.nelim, ff.n_delayed, ff.n_rook_rescues,
+        );
+    }
     ws.frontal_values = frontal.data;
 
     let node_inertia = ff.inertia.clone();
