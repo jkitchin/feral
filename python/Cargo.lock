@@ -59,7 +59,7 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "feral"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "feral-amd",
  "feral-amf",
@@ -110,7 +110,7 @@ version = "0.2.0"
 
 [[package]]
 name = "feral-python"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "feral",
  "numpy",
