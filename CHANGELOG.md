@@ -4,6 +4,14 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-17
+
+Headline: feral is now at parity with MA57 on the 47-problem Mittelmann
+panel (solve-rate 39/47 vs 39/47, geomean wall ratio feral/ma57 = 0.96
+on the 37 both-solved problems). The two changes that closed the gap are
+the auto-armed cascade-break default and the tightened MC64 routing
+gate; both are described below.
+
 ### Changed — auto-arm cascade-break by default in the C-API (#37, #38)
 
 The Ipopt-feral C-API (`feral_new`) now arms

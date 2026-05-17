@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "feral"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 description = "Sparse symmetric indefinite direct solver in pure Rust, with certified inertia counts."
