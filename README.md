@@ -164,6 +164,85 @@ family-grouped failure analysis and dense ∩ sparse cross-comparison.
 The KKT matrices are not committed — generate them via ripopt's
 `collect_kkt` tool.
 
+## Using FERAL inside Ipopt
+
+FERAL ships with everything needed to build [Ipopt
+3.14](https://github.com/coin-or/Ipopt) with `linear_solver=feral`
+as a selectable option. The vendored Ipopt source lives in
+`ref/Ipopt/`; the integration glue (a `LinearSolverInterface`
+shim against FERAL's C ABI, plus the autotools patch) lives in
+`feral-ipopt-shim/`.
+
+### Quickstart
+
+```sh
+# One-shot: builds libferal.a, patches Ipopt, configures, builds,
+# and links Ipopt against the static FERAL archive.
+make ipopt
+
+# Smoke test: run the bundled hs071 sample NLP with linear_solver=feral.
+make hs071
+```
+
+Under the hood `make ipopt` delegates to `feral-ipopt-shim/Makefile`,
+which:
+
+1. `cargo build --release` to produce `target/release/libferal.a`
+2. Copies `IpFeralSolverInterface.{hpp,cpp}` and `feral_capi.h` into
+   `ref/Ipopt/src/Algorithm/LinearSolvers/` and applies
+   `patches/ipopt-feral.patch`
+3. Configures Ipopt with `--disable-shared --enable-static
+   --without-hsl --without-spral --without-pardiso --without-asl`
+4. `make -j` in `ref/Ipopt/build-feral/`
+
+To rebuild after editing FERAL source: `cargo build --release && make
+-C ref/Ipopt/build-feral` (the relink picks up the fresh `.a`).
+
+### Runtime env knobs
+
+FERAL exposes its tuning options through environment variables that
+the C ABI reads on `feral_new()`:
+
+| variable                  | default | effect |
+|---------------------------|---------|--------|
+| `FERAL_CASCADE_BREAK`     | off     | `on` arms the static-pivot cascade-break perturbation unconditionally |
+| `FERAL_AUTO_CB_BETA`      | `0.05`  | warm cascade-break auto-arm threshold (fraction of `n`); `0` disables |
+| `FERAL_SCALING`           | auto    | `auto` \| `infnorm` \| `mc64` \| `identity` |
+| `FERAL_PIVTOL`            | `1e-8`  | Bunch-Kaufman partial-pivot threshold |
+| `FERAL_PARALLEL`          | off     | `on` enables the rayon-based parallel multifrontal driver |
+| `FERAL_FACTOR_TRACE`      | off     | `on` streams per-factor wall + delayed-pivot counts to stderr |
+| `FERAL_MC64_TRACE`        | off     | `on` streams per-call MC64 wall to stderr |
+
+The defaults are the ones validated in the v0.4.0 Mittelmann sweep
+(see `CHANGELOG.md`).
+
+### Mittelmann NLP benchmark
+
+`external_benchmarks/mittelmann_ipopt/` runs Ipopt with both MA57 and
+FERAL on the 47-problem [Mittelmann NLP
+panel](https://plato.asu.edu/ftp/ampl-nlp.html). The harness, the
+aggregator, and the per-problem rescue dictionary are committed; the
+`.nl` problem files are **not** (~1.5 GiB total, single file up to
+~290 MiB).
+
+To reproduce the benchmark:
+
+1. Fetch the AMPL `.nl` files from Mittelmann's public archive
+   (https://plato.asu.edu/ftp/ampl-nlp.html — the problem list is in
+   `external_benchmarks/mittelmann_ipopt/run.py::PROBLEMS`).
+2. Edit `NL_DIR` and `PROBLEMS` at the top of `run.py` to point at
+   your local checkout.
+3. Build an Ipopt binary that has both MA57 (HSL) and FERAL linked
+   in. The shim Makefile above produces a FERAL-only Ipopt; for the
+   dual-solver comparison binary you also need a licensed HSL source
+   tree and an Ipopt configure step that links `libcoinhsl`.
+4. `python run.py --solvers feral,ma57 --timeout 600 && python
+   aggregate.py` produces `REPORT.md` (gitignored, regenerates from
+   `results/{ma57,feral}.jsonl`).
+
+See `external_benchmarks/mittelmann_ipopt/README.md` for the per-
+problem rescue table and finer-grained invocation modes.
+
 ## Running the multi-oracle consensus
 
 Requires `gfortran`, `OpenBLAS`, `METIS`, and the `ref/mumps` and
