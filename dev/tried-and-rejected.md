@@ -1972,3 +1972,66 @@ the diagnostic tables in `dev/journal/2026-05-16-30.org`. Verification
 procedure (toggle fix, run `cargo test --release --lib
 numeric::solver::tests::mc64_cache_invalidated_after_factor_issue_38`,
 observe pass/fail) reproducible from HEAD.
+
+
+## 2026-05-17 — cibuildwheel for Python wheels with a `path = ".."` workspace dep
+
+**Approach.** Build Python wheels for `feral-solver` with cibuildwheel
+2.21.3 from `.github/workflows/python-wheels.yml`. Tried three layered
+configurations:
+
+1. `CIBW_BUILD_FRONTEND: "build[uv]"` with `CIBW_BEFORE_BUILD_LINUX:
+   "pip install maturin && rustup toolchain install stable"`.
+2. After (1) failed on macOS/Windows: kept cibuildwheel, switched to
+   plain `"build"` frontend (`uv` is not on the runner), bootstrapped
+   rustup in the manylinux container via the `sh.rustup.rs` installer.
+3. Both of the above with the matrix unchanged.
+
+**Symptom of (1).** macOS-14 and windows-latest runners: `uv: command
+not found` during cibuildwheel setup. Linux: `rustup: command not
+found` inside the manylinux container. (commit 07d385e fixed both.)
+
+**Symptom of (2) — the deeper failure.** Even after rustup +
+`pip install maturin` ran cleanly inside the manylinux container,
+`python -m build` errored with:
+
+    error: failed to load manifest for dependency `feral`
+      Caused by: failed to read `/Cargo.toml`
+      Caused by: No such file or directory (os error 2)
+
+cibuildwheel copies only the package dir (`python/`) into its build
+sandbox at `/project`. `python/Cargo.toml` declares
+`feral = { path = ".." }`, which resolves to `/Cargo.toml` inside the
+sandbox — and that file does not exist because cibuildwheel never
+shipped the parent crate. No `CIBW_BEFORE_BUILD` hook can fix this:
+the source isn't even in the container.
+
+**Disposition.** Replaced the wheel matrix with
+`PyO3/maturin-action@v1` (commit 2442d1f). That action mounts the
+whole `$GITHUB_WORKSPACE` into the manylinux container (and runs
+natively on macOS/Windows), so the workspace path dependency just
+works. Verified end-to-end via release-event run 26003542088:
+4 wheel jobs + sdist + smoke-test + PyPI publish all green.
+
+**Trade-off.** cibuildwheel offered `CIBW_TEST_COMMAND` to pytest
+each wheel inside its build sandbox. `maturin-action` does not have a
+direct equivalent. The `test` job (linux × py3.10/3.12/3.13) and the
+`smoke-test` job (linux wheel + `uv pip install` + quickstart.py)
+still gate the release, so coverage for the platforms that matter
+most for the release gate is intact. Per-platform wheel-pytest could
+be added back as a separate job that downloads the wheel artifact
+and runs pytest against it, but for v0.4.0 it was not worth the
+churn.
+
+**Lesson.** cibuildwheel is the wrong tool when the Python crate has
+a sibling-path Rust dependency. The package-dir-only copy semantics
+fundamentally cannot see the parent. Reach for `maturin-action`
+first when the layout is a Rust workspace with a Python crate
+inside it.
+
+**Evidence.** Run 26002981755 (initial failure, 4/4 wheels red).
+Run 26003051776 (after fix 1, 3/4 still red — log of job
+76429732912 contains the cargo manifest error verbatim). Run
+26003260115 (after switching to maturin-action, 4/4 wheels green).
+Run 26003542088 (re-cut v0.4.0 release event, full pipeline green
+through PyPI publish).

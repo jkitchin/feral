@@ -4,6 +4,35 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — Python wheel pipeline now uses `PyO3/maturin-action`
+
+The v0.4.0 release publish revealed two cibuildwheel-config bugs that
+the push/PR CI never tripped (the wheel matrix only runs on `release`
+or `workflow_dispatch`). After fixing the trivial ones (manylinux has
+no rustup; macOS/Windows runners have no `uv`), the deeper problem was
+that cibuildwheel only copies `python/` into the sandbox, so
+`feral = { path = ".." }` in `python/Cargo.toml` cannot resolve.
+Switched the wheel matrix to `PyO3/maturin-action@v1`, which mounts
+the whole `$GITHUB_WORKSPACE` into the manylinux container and runs
+natively on macOS/Windows. Trade-off: per-wheel `CIBW_TEST_COMMAND`
+is gone; the `test` job (linux × py3.10/3.12/3.13) and the
+`smoke-test` job (linux wheel + `uv pip install` + quickstart.py)
+still gate every release.
+
+### Changed — `tests/parity.rs` now uses oracle-consensus, not MUMPS-only
+
+The parity gate now accepts a feral inertia that matches **either**
+MUMPS 5.8.2 **or** SPRAL SSIDS, which is the literal correctness
+contract from `CLAUDE.md`. Side-effect: 5 previously-`#[ignore]`'d
+panel matrices that always agreed with SSIDS at oracle-generation
+time (ACOPP14_0001, ACOPP14_0003, ACOPP30_0000, ACOPP30_0001,
+CERI651CLS_0486) now pass. One genuine outlier remains — FBRAIN3LS
+matrix 0839, where feral reports `(5,0,1)` while both MUMPS and
+SSIDS report `(6,0,0)` (filed as [#39][i39]). Parity suite: 20
+passed / 0 failed / 6 ignored.
+
+[i39]: https://github.com/jkitchin/feral/issues/39
+
 ## [0.4.0] - 2026-05-17
 
 Headline: feral is now at parity with MA57 on the 47-problem Mittelmann

@@ -1509,3 +1509,47 @@ SSIDS=(6,0,0) — genuine feral outlier; filed as #39. ACOPP30_0005 is
 a three-way oracle disagreement (excluded by spec). Parity suite:
 20 passed / 0 failed / 6 ignored (was 15/0/11). README known-
 limitations rewritten to match: FBRAIN3LS_0839 + residual-only cases.
+
+* 19:45 :release:python-wheels:pypi:
+Cut v0.4.0. First publish run (26002981755) failed on all 4 wheel
+jobs. Two cibuildwheel bugs surfaced (the matrix only fires on
+release/workflow_dispatch, so push/PR never caught them):
+
+1. ~CIBW_BUILD_FRONTEND: "build[uv]"~ requires uv on the runner;
+   macOS-14 and windows-latest don't ship it. Dropped to plain
+   ~"build"~ (commit 07d385e). Verified -> Windows green.
+2. ~CIBW_BEFORE_BUILD_LINUX~ called ~rustup~ but manylinux ships
+   without it. Bootstrapped via ~sh.rustup.rs~ in same commit.
+
+Linux + macOS still red after that. Root cause traced via
+~gh run view --job 76429732912 --log-failed~:
+
+#+begin_example
+error: failed to load manifest for dependency `feral`
+  Caused by: failed to read `/Cargo.toml`
+  Caused by: No such file or directory (os error 2)
+#+end_example
+
+cibuildwheel copies only the package dir (~python/~) into its
+sandbox, so ~feral = { path = ".." }~ in ~python/Cargo.toml~ can't
+resolve. Switched the wheel matrix to ~PyO3/maturin-action@v1~
+(commit 2442d1f), which mounts the whole ~$GITHUB_WORKSPACE~ into
+the manylinux container. Verification run 26003260115: all 4 wheel
+jobs + smoke-test green.
+
+Re-cut v0.4.0 cleanly: ~gh release delete v0.4.0 --cleanup-tag~,
+re-tagged at 2442d1f, re-published. Release run 26003542088
+completed cleanly; PyPI ~feral-solver==0.4.0~ now serves sdist + 4
+abi3 wheels:
+
+- ~cp310-abi3-manylinux_2_17_x86_64~
+- ~cp310-abi3-manylinux_2_28_aarch64~
+- ~cp310-abi3-macosx_10_12_universal2~
+- ~cp310-abi3-win_amd64~
+- ~feral_solver-0.4.0.tar.gz~
+
+Trade-off recorded in the commit: per-wheel ~CIBW_TEST_COMMAND~
+pytest is gone. The ~test~ job (linux, py3.10/3.12/3.13) and the
+~smoke-test~ job (linux wheel + uv pip install + quickstart.py)
+still gate the release, so coverage is intact for the platforms
+that matter most.
