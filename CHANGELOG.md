@@ -4,6 +4,55 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — auto-arm cascade-break by default in the C-API (#37, #38)
+
+The Ipopt-feral C-API (`feral_new`) now arms
+`Solver::with_auto_cascade_break(0.05)` by default when the user
+has not set `FERAL_CASCADE_BREAK=on`. The auto-arm mechanism (in
+`src/numeric/solver.rs` since #38) enables
+`cascade_break_ratio=0.5, eps=1e-10` for the *next* factor call
+when the *previous* call had `max(n_delayed_in) >= 0.05 * n`. Disable
+by setting `FERAL_AUTO_CB_BETA=0`; override the threshold with any
+non-negative finite float.
+
+Impact on the 47-problem Mittelmann panel (600 s timeout each, vs
+MA57): solve-rate parity (39/47 each), geomean wall ratio
+feral/ma57 = 0.96 on the 37 both-solved problems, feral aggregate
+wall = 54 % of MA57 aggregate. Headline rescues:
+
+| problem        | CB=off    | auto-CB   | Δ        |
+|----------------|-----------|-----------|----------|
+| robot_1600     | 13.81 s   |  2.93 s   |  -79 %   |
+| marine_1600    | 470.87 s  | 20.45 s   |  -96 %   |
+| clnlbeam       | 361.26 s  | 45.27 s   |  -87 %   |
+| corkscrw       | 53.89 s   | 16.13 s   |  -70 %   |
+| dtoc2          | timeout   |  3.69 s   | rescued  |
+
+Six dramatic wins; one minor regression (rocket_12800 +21 %).
+
+### Changed — scaling Auto routing now requires dense arrow head, not just diag-only mass (#68)
+
+`pick_scaling_strategy` previously routed any matrix with
+`diag_only / n >= 0.30` to MC64. This conflated true arrow KKTs
+(VESUVIO family: 33% diag-only, dense linking columns) where MC64
+yields 6x-243x speedups, with banded 1-D PDE KKTs (clnlbeam: 40%
+diag-only, max_col_nnz=5) where MC64 hurts the IPM trajectory.
+
+Tightened gate: route to MC64 only when ALSO `max_col_nnz > 32`.
+Single O(n+nnz) pass over `col_ptr + row_idx`, no allocations.
+clnlbeam end-to-end: 2367 iters / 361 s -> 506 iters / 45 s.
+VESUVIO/CRESC/MUONSINE/ACOPP30 routing unchanged.
+
+### Added — diagnostic env-gated tracers
+
+Two zero-cost-when-unset tracers for diagnosing per-factor cost
+in live ipopt-feral runs:
+
+- `FERAL_MC64_TRACE=1` -- per-call MC64 wall + process-global
+  recompute counter (`MC64_RECOMPUTE_COUNT` in `src/scaling/mc64.rs`).
+- `FERAL_FACTOR_TRACE=1` -- per-factor wall + `sum_delayed` +
+  `max_delayed` from `src/capi.rs::feral_factor`.
+
 ### Added — M5 stress-smoke CI gate (#28)
 
 New `stress-smoke` job in `.github/workflows/ci.yml` runs the
