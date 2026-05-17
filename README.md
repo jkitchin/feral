@@ -5,15 +5,9 @@
 [![CI](https://github.com/jkitchin/feral/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/feral/actions/workflows/ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20162687.svg)](https://doi.org/10.5281/zenodo.20162687)
 
-**F**actored **E**rror-**R**esistant **A**lgebra **L**ibrary — a pure-Rust
-sparse symmetric indefinite linear solver with certified inertia counts,
-built as a clean-room replacement for MUMPS in interior-point
-optimization workloads.
+Feral is a pure-Rust sparse symmetric indefinite linear solver with certified inertia counts for use in interior-point optimization algorithms.
 
-The name is a pun. **Fe** is iron's chemical symbol (atomic number 26,
-atomic mass 55.85). Iron rusts. Rust is the language this is written in.
-The creatures that survive in the wild are *feral*. The solver is both
-wild and exact.
+The name is a pun. **Fe** is iron's chemical symbol. Iron rusts. Rust is the language this is written in. A *feral* animal is one that was domesticated but now lives in the wild. 
 
 ## Status
 
