@@ -1102,3 +1102,163 @@ sign-classifier because it IS a correctness improvement
 elsewhere (any matrix with a true borderline (+,+) or (-,-)
 block); the new unit tests lock that against regression. It
 just happens not to be the fix issue #38 needed.
+
+* 17:10 :marine_1600:rescue:closeout:investigation:
+Marine_1600 587x regression: ~rescued~. Today's binary
+(includes 3b9fb1b warm-CB auto-arm + 1c36f2d closed-form 2x2
+eigval classifier) drops marine_1600 from 470s -> 20s with
+FERAL_CASCADE_BREAK=on (the bench override).
+
+** Live ipopt-feral on marine_1600 today
+
+| config                     | iters | wall    | vs MA57 |
+|----------------------------+-------+---------+---------|
+| ma57 (baseline)            |    13 |   0.57s |     1x  |
+| feral CB=off (default)     |    13 | 484.76s |   850x  |
+| feral CB=on (bench override) |   20 |  20.04s |    35x  |
+
+** Why the bench number changed so much
+
+May-16 23:42 bench ran with the CB=on override AND db20166
+cache-invalidation, yet got 470s/13 iters. Today CB=on gets
+20s/20 iters. The difference must come from one of:
+- 1c36f2d (closed-form 2x2 inertia, from this session's agent)
+- 3b9fb1b (warm-CB auto-arm + non-finite validation)
+Trajectory shifted (13 -> 20 iters), so the linear-solve
+mathematics differ; either change can be the cause. Did not
+bisect; the rescue is the rescue.
+
+** What is still bad
+
+CB=off DEFAULT still runs the original ~485s pathology on
+marine_1600. So the per-problem override (run.py:65) remains
+necessary. This means CB-off is not yet a safe global default
+on every arrow-KKT regime; the warm-CB auto-arm needs to fire
+on marine_1600 to make the override unnecessary.
+
+Suggested next probe: bisect 1c36f2d vs 3b9fb1b to attribute
+the rescue, then check whether warm-CB auto-arm is firing in
+the CB=off live run on marine_1600 (and if not, why not - the
+gate may be too conservative for this arrow shape).
+
+** Track 1 update (#38 closed-form 2x2 eigval)
+
+Agent landed commit 1c36f2d: closed-form 2x2 eigenvalue
+inertia classifier (sym2_eigenvalues with cancellation-free
+discriminant). 516 tests pass, fmt+clippy clean. Investigation
+DISPROVED the original off-by-2 hypothesis - rocket_12800
+iter 1 has all (+,-) blocks with well-separated eigenvalues,
+the old (det>0, trace>0) classifier and the new classifier
+agree on every block. The TRUE inertia of the matrix is
+(38402, 51199, 0); IPM expects (38400, 51201, 0), which is
+what MA57's cntl(5) static-pivot perturbation produces. So
+#38 needs MA57-style static pivoting or IPM-driver tolerance
+for small inertia mismatches; the eigval classifier stays as
+a defensive improvement but doesn't close the issue.
+
+* 10:58 :issue-38:static-pivot:capi:implementation:
+
+Implemented MA57-style static-pivot perturbation knob for
+issue #38. Adds NumericParams.static_pivot_threshold (Option<f64>,
+default None = off) with semantics matching MA57 cntl(5):
+relative threshold; the per-call absolute floor is
+`t * ||A||_inf`, propagated into BunchKaufmanParams.static_pivot_floor.
+For 1x1 pivots with |d| < floor, d is set to sign(d) * floor
+(positive when d == 0). For 2x2 blocks, perturb_2x2_to_floor
+computes both eigenvalues (sym2_eigenvalues, cancellation-free
+discriminant) and if the smaller |lambda| < floor, shifts both
+diagonals by tau = target - lambda_small where target =
+sign(lambda_small) * floor (preserving sign of the small
+eigenvalue). Both code paths set Factors.needs_refinement = true
+so the solve path will run one mixed-precision refinement step.
+
+Sign rule is *sign-preserving*, matching the conservative
+MA57 cntl(5) default behavior (cf. Duff/Pralet 2007, eq. 14).
+Sign-FLIPPING (which would actually shift feral's 38402 -> 38400
+on rocket_12800 iters 1-3) was considered and rejected: it can
+mis-label a genuinely negative pivot as positive on truly
+indefinite KKTs (saddle-point check would silently fail).
+
+C ABI exposure: FERAL_STATIC_PIVOT=<float> env var read at
+feral_new() time; values <= 0 or non-finite are ignored.
+
+** Tests
+
+  - 5 unit tests in dense::factor::static_pivot_tests on the
+    perturb helpers (sign preservation, no-op when off, no-op
+    when above floor).
+  - 5 integration tests in tests/issue_38_static_pivot.rs via
+    Solver::factor with ScalingStrategy::Identity (bypassing
+    Knight-Ruiz so the floor is applied at known magnitudes):
+      + sign-preserving floor on negative pivot (inertia (2,2))
+      + sign-preserving floor on positive pivot (inertia (3,1))
+      + no-op when all pivots above floor
+      + with_static_pivot_threshold builder
+      + capi feral_new() reads FERAL_STATIC_PIVOT env var
+  - Full cargo test --release: all passing (146 "test result: ok"
+    lines, 0 FAILED, exit 0). cargo clippy --all-targets --release
+    -- -D warnings clean.
+
+** Probe: rocket_12800 inertia sweep
+
+src/bin/probe_static_pivot_inertia.rs replays all 18 dumped
+/tmp/rkt_*.bin KKTs at thresholds {0, 1e-12, 1e-10, 1e-8, 1e-6}:
+
+| iter | t=0    | t=1e-12 | t=1e-10 | t=1e-8  | t=1e-6  |
+|    0 | 38400  | 38400   | 38400   | 38400*  | 38400*  |
+|    1 | 38402  | 38402   | 38402*  | 38404*  | 38392*  |
+|    2 | 38402* | 38402*  | 38402*  | 38404*  | 38413*  |
+|    3 | 38402  | 38402   | 38402*  | 38404*  | 38392*  |
+|    4 | 38401  | 38401   | 38401*  | 38405*  | 38411*  |
+|    5 | 38400  | 38400   | 38400*  | 38400*  | 38401*  |
+| 5-17 | 38400 (mostly stable; t=1e-6 escalates at iters 7-15) |
+
+(* = needs_refinement was set, i.e. the floor fired on at least
+one pivot.) Floor engages as expected; sign-preserving rule
+keeps 38402 fixed at iters 1-3 (or pushes it higher at larger
+t as enlarged-magnitude blocks accumulate). This **does NOT**
+match MA57's de-facto 38400 at iters 1-3 -- to do so would
+require sign-FLIPPING (small lambda < 0 -> +floor), which has
+the safety hazard noted above.
+
+** ipopt-feral end-to-end on rocket_12800
+
+| run                      | iters | IPM_s | wall_s |
+| baseline (no knob)       |    30 |  8.30 |   9.12 |
+| FERAL_STATIC_PIVOT=1e-8  |    30 |  8.21 |   8.44 |
+
+Conclusion: the knob does NOT shift IPM trajectory on
+rocket_12800. Inspection of print_level=8 shows that even
+*without* the knob, ipopt+feral on rocket_12800 takes 30 iters
+(within 1 of MA57's reported 31), with no visible delta_w
+escalations in the lg(rg) column. The earlier hypothesis
+("8.8s vs MA57 1.7s, attributable to inertia-restart overhead")
+was inaccurate: the wall-time gap is per-iter factor cost
+(feral ~270ms/iter vs MA57 ~55ms/iter on this KKT), NOT
+inertia-restart overhead. The 30-iter trajectory is already
+fine without any knob.
+
+So #38 is closed by **two complementary outcomes**:
+  - the closed-form 2x2 eigval classifier (commit 1c36f2d)
+    proved the original off-by-2 hypothesis was wrong on
+    rocket_12800; the inertia disagreement with MA57 is a
+    true 2x2 sign-on-the-cusp issue, not a classifier bug.
+  - the static-pivot knob lands a defensive MA57-compatible
+    feature that callers can opt into (NumericParams or
+    FERAL_STATIC_PIVOT env var) when they hit a genuine
+    delta_w-escalation pathology. On rocket_12800 it
+    happens not to be needed.
+
+** Regression: marine_1600 / clnlbeam / corkscrw
+
+ipopt-feral end-to-end on three "feral-slow" Mittelmann
+problems, baseline vs FERAL_STATIC_PIVOT=1e-8:
+
+| problem     | iters base | s base | iters knob | s knob |
+| marine_1600 |         13 |    493 |         13 |    485 |
+| clnlbeam    |       2367 |    371 |       2367 |    373 |
+| corkscrw    |        384 |     57 |        384 |     58 |
+
+Identical iteration counts, wall-time deltas <2 % (noise).
+No regression. Knob defaults to None (off) so all default-path
+users are bit-identical to before.

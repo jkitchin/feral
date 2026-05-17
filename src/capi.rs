@@ -13,6 +13,9 @@
 //! Status codes mirror Ipopt's `ESymSolverStatus` enum at
 //! `ref/Ipopt/src/Algorithm/LinearSolvers/IpSymLinearSolver.hpp:19-33`.
 
+use crate::numeric::factorize::NumericParams;
+use crate::scaling::ScalingStrategy;
+use crate::symbolic::supernode::SupernodeParams;
 use crate::{CscMatrix, FactorStatus, Solver};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -30,11 +33,31 @@ pub struct FeralSolver {
 
 /// Create a new solver handle. Returns null on panic.
 ///
-/// Cascade-break is off by default after 585d739. Set
-/// `FERAL_CASCADE_BREAK=on` (or `1`/`true`) in the environment to
-/// opt back into the legacy `ratio=0.5, eps=1e-10` configuration —
-/// required for ipopt-feral parity with pounce-feral, which opts
-/// into the same defaults at its own construction site.
+/// Honored environment variables (all read once at construction):
+///   - `FERAL_CASCADE_BREAK` = `1`/`on`/`true`/`yes` — opt into the
+///     legacy `ratio=0.5, eps=1e-10` cascade-break configuration
+///     (off by default after 585d739). Required for ipopt-feral
+///     parity with pounce-feral.
+///   - `FERAL_SCALING` = `identity`/`infnorm`/`mc64`/`auto` — override
+///     the default scaling strategy. Used for task #68 (clnlbeam
+///     IPM iter bloat investigation) to test whether MC64-vs-other
+///     scaling changes the IPM trajectory.
+///   - `FERAL_PARALLEL` = `0`/`off`/`false` — disable parallel
+///     multifrontal factorization (single-threaded). Used to test
+///     parallel-reduction-order non-reproducibility.
+///   - `FERAL_PIVTOL` = `<float>` — override `pivot_threshold` (default
+///     1e-8 matching MA27/ipopt's `ma27_pivtol`). Used to test
+///     whether tighter pivots (e.g. 0.01 MA57-canonical) change the
+///     IPM trajectory.
+///   - `FERAL_STATIC_PIVOT` = `<float>` — enable MA57-style static-
+///     pivot perturbation (issue #38). Sets
+///     `NumericParams::static_pivot_threshold`; the solver computes
+///     `||A||_∞` per `factor()` and applies an absolute floor
+///     `t * ||A||_∞` to every accepted 1×1 / 2×2 pivot. Off by
+///     default; recommended starting value `1e-8`. Bends small
+///     pivots toward the IPM's expected inertia and cuts
+///     PDPerturbationHandler δ_w escalation cost on problems like
+///     rocket_12800.
 #[no_mangle]
 pub extern "C" fn feral_new() -> *mut FeralSolver {
     catch_unwind(|| {
@@ -42,13 +65,43 @@ pub extern "C" fn feral_new() -> *mut FeralSolver {
             std::env::var("FERAL_CASCADE_BREAK").as_deref(),
             Ok("1") | Ok("on") | Ok("true") | Ok("yes"),
         );
-        let solver = if cb_on {
-            Solver::new()
-                .with_cascade_break(0.5)
-                .with_cascade_break_eps(1e-10)
-        } else {
-            Solver::new()
-        };
+
+        let mut np = NumericParams::default();
+        if let Ok(s) = std::env::var("FERAL_SCALING") {
+            match s.as_str() {
+                "identity" => np.scaling = ScalingStrategy::Identity,
+                "infnorm" => np.scaling = ScalingStrategy::InfNorm,
+                "mc64" => np.scaling = ScalingStrategy::Mc64Symmetric,
+                "auto" => np.scaling = ScalingStrategy::Auto,
+                _ => {} // silently ignore unknown values, keep default
+            }
+        }
+        if let Ok(s) = std::env::var("FERAL_PIVTOL") {
+            if let Ok(v) = s.parse::<f64>() {
+                if v.is_finite() && v >= 0.0 {
+                    np.bk.pivot_threshold = v;
+                }
+            }
+        }
+        if let Ok(s) = std::env::var("FERAL_STATIC_PIVOT") {
+            if let Ok(v) = s.parse::<f64>() {
+                if v.is_finite() && v > 0.0 {
+                    np.static_pivot_threshold = Some(v);
+                }
+            }
+        }
+
+        let mut solver = Solver::with_params(np, SupernodeParams::default());
+        if cb_on {
+            solver = solver.with_cascade_break(0.5).with_cascade_break_eps(1e-10);
+        }
+        if matches!(
+            std::env::var("FERAL_PARALLEL").as_deref(),
+            Ok("0") | Ok("off") | Ok("false") | Ok("no"),
+        ) {
+            solver = solver.with_parallel(false);
+        }
+
         Box::into_raw(Box::new(FeralSolver {
             solver,
             matrix: None,

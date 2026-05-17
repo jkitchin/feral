@@ -52,6 +52,7 @@ fn params_off() -> NumericParams {
         cascade_break_eps: None,
         min_parallel_flops: None,
         sqd_mode: false,
+        static_pivot_threshold: None,
     }
 }
 

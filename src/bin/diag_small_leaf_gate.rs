@@ -52,6 +52,7 @@ fn ldlt_params(gate: SmallLeafBatch, profiler: Arc<Mutex<Profiler>>) -> NumericP
         cascade_break_eps: None,
         min_parallel_flops: None,
         sqd_mode: false,
+        static_pivot_threshold: None,
     }
 }
 

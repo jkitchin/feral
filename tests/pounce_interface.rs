@@ -460,6 +460,7 @@ fn solver_identity_scaling() -> Solver {
         cascade_break_eps: None,
         min_parallel_flops: None,
         sqd_mode: false,
+        static_pivot_threshold: None,
     };
     Solver::with_params(np, SupernodeParams::default())
 }

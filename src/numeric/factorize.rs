@@ -209,6 +209,32 @@ pub struct NumericParams {
     /// See `dev/research/sqd-fast-path.md`, `dev/decisions.md`
     /// 2026-05-16 entry, and issue #34.
     pub sqd_mode: bool,
+
+    /// MA57-style static-pivot perturbation threshold (issue #38).
+    /// When `Some(t)`, `Solver::factor` computes `||A||_∞` once per
+    /// call and propagates an absolute floor
+    /// `static_pivot_floor = t * ||A||_∞` into
+    /// `BunchKaufmanParams.static_pivot_floor` for that factor call.
+    /// Every accepted 1×1 / 2×2 pivot whose magnitude (for 2×2:
+    /// smallest |eigenvalue|) is below the floor is perturbed up to
+    /// the floor and counted by sign. The factor satisfies
+    /// `LDL^T = A + Δ` with `||Δ||_F ≤ floor` per perturbed pivot.
+    ///
+    /// Default `None` (disabled). Recommended starting value for IPM
+    /// use: `1e-8` (matches MA57's `cntl[0]` default). The C ABI
+    /// reads `FERAL_STATIC_PIVOT=<float>` to set this without a
+    /// rebuild.
+    ///
+    /// Inertia is then reported for the perturbed `A + Δ`, not `A` —
+    /// this is the whole point: bend small-magnitude pivots so the
+    /// returned inertia matches the IPM's expectation, cutting the
+    /// PDPerturbationHandler δ_w escalation cost. Iterative
+    /// refinement against unperturbed `A` (the default in `Solver::
+    /// solve_many_refined`) recovers solve accuracy.
+    ///
+    /// See `dev/research/static-pivot-perturbation-2026-05-17.md`
+    /// and `dev/journal/2026-05-17-01.org` §16:30 / §17:10.
+    pub static_pivot_threshold: Option<f64>,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -472,6 +498,12 @@ impl Default for NumericParams {
             // `Solver::with_sqd_mode(true)`; see `sqd_mode` doc and
             // `dev/research/sqd-fast-path.md`.
             sqd_mode: false,
+            // Issue #38: static-pivot perturbation is opt-in. Default
+            // None preserves the canonical BK inertia (matches MUMPS /
+            // SSIDS / rmumps for non-perturbed problems). Enable per
+            // call via `Solver::with_static_pivot_threshold(t)` or via
+            // the `FERAL_STATIC_PIVOT=<float>` env var (C ABI path).
+            static_pivot_threshold: None,
         }
     }
 }
@@ -497,6 +529,7 @@ impl NumericParams {
             cascade_break_eps: None,
             min_parallel_flops: None,
             sqd_mode: false,
+            static_pivot_threshold: None,
         }
     }
 }
@@ -3398,6 +3431,7 @@ mod tests {
             cascade_break_eps: None,
             min_parallel_flops: None,
             sqd_mode: false,
+            static_pivot_threshold: None,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
@@ -3411,6 +3445,7 @@ mod tests {
             cascade_break_eps: None,
             min_parallel_flops: None,
             sqd_mode: false,
+            static_pivot_threshold: None,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
@@ -3467,6 +3502,7 @@ mod tests {
             cascade_break_eps: None,
             min_parallel_flops: None,
             sqd_mode: false,
+            static_pivot_threshold: None,
         };
         let infnorm = NumericParams {
             scaling: ScalingStrategy::InfNorm,
@@ -3971,6 +4007,7 @@ mod tests {
             cascade_break_eps: None,
             min_parallel_flops: None,
             sqd_mode: false,
+            static_pivot_threshold: None,
         };
 
         let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];

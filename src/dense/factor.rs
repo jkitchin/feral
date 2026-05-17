@@ -337,6 +337,30 @@ pub struct BunchKaufmanParams {
     /// Default `Plain` (no acceleration); the multifrontal driver may
     /// flip this per-front via `NumericParams::tpp_method`.
     pub tpp_method: TppMethod,
+
+    /// Absolute pivot magnitude floor (issue #38, MA57-style static
+    /// pivoting). When `> 0.0`, every accepted 1×1 or 2×2 pivot whose
+    /// magnitude (for 2×2: smallest |eigenvalue|) is below
+    /// `static_pivot_floor` is perturbed up to the floor with the
+    /// current sign preserved (1×1) or bent away from zero (2×2).
+    /// Inertia is counted from the perturbed pivot and
+    /// `needs_refinement` is set.
+    ///
+    /// Default `0.0` (disabled). The sparse multifrontal driver wires
+    /// this up via `NumericParams::static_pivot_threshold` — callers
+    /// pass a *relative* threshold there and `Solver::factor` computes
+    /// `||A||_∞` once per call and stores the resulting absolute floor
+    /// here.
+    ///
+    /// The factor satisfies `LDL^T = A + Δ` with `||Δ||_F ≤ floor` per
+    /// perturbed pivot. Inertia reflects the inertia of `A + Δ`, not
+    /// `A` — this is the whole point of the knob, matching MA57's
+    /// behavior of bending small-magnitude pivots toward the IPM's
+    /// expected inertia. Iterative refinement against unperturbed `A`
+    /// recovers solve accuracy.
+    ///
+    /// See `dev/research/static-pivot-perturbation-2026-05-17.md`.
+    pub static_pivot_floor: f64,
 }
 
 /// Action to take when a near-zero pivot is encountered.
@@ -397,6 +421,55 @@ fn perturb_to_floor(d: f64, abs_floor: f64) -> f64 {
     }
 }
 
+/// MA57-style static-pivot perturbation for a 2×2 symmetric block
+/// `[[a00, a10], [a10, a11]]`. Returns `Some((a00_new, a11_new))` when
+/// the smaller `|eigenvalue|` is `< abs_floor`, otherwise `None`. The
+/// returned block has the same off-diagonal `a10`; the diagonal entries
+/// are shifted by `τ` with sign matched to push `λ_min` toward
+/// `± abs_floor`. This bends the small eigenvalue away from zero while
+/// leaving `λ_max` shifted by the same `τ` (changing its magnitude by
+/// at most `τ`).
+///
+/// Pre-condition: `abs_floor > 0.0`. With `abs_floor == 0.0` returns
+/// `None` (knob disabled).
+///
+/// Cost: one `sym2_eigenvalues` call (constant time). Caller writes
+/// the returned diagonals back into the L storage before computing
+/// `det` and counting inertia.
+#[inline]
+fn perturb_2x2_to_floor(a00: f64, a10: f64, a11: f64, abs_floor: f64) -> Option<(f64, f64)> {
+    if abs_floor <= 0.0 {
+        return None;
+    }
+    let (lam1, lam2) = sym2_eigenvalues(a00, a10, a11);
+    // λ_min by absolute value (the "small" eigenvalue we want to push).
+    let (lam_small, lam_other) = if lam1.abs() <= lam2.abs() {
+        (lam1, lam2)
+    } else {
+        (lam2, lam1)
+    };
+    if lam_small.abs() >= abs_floor {
+        return None;
+    }
+    // Push λ_small to ±abs_floor. Sign: preserve current sign of
+    // λ_small; if λ_small == 0.0, push toward sign of λ_other (keeps
+    // the (+,-) / (+,+) / (-,-) signature unambiguous); if both are
+    // zero, push positive (matches `perturb_to_floor` convention).
+    let target = if lam_small > 0.0 {
+        abs_floor
+    } else if lam_small < 0.0 {
+        -abs_floor
+    } else if lam_other > 0.0 {
+        abs_floor
+    } else if lam_other < 0.0 {
+        -abs_floor
+    } else {
+        abs_floor
+    };
+    let tau = target - lam_small;
+    Some((a00 + tau, a11 + tau))
+}
+
 impl Default for BunchKaufmanParams {
     fn default() -> Self {
         let zero_tol = f64::EPSILON;
@@ -411,6 +484,7 @@ impl Default for BunchKaufmanParams {
             block_size: 64,
             fma: false,
             tpp_method: TppMethod::Plain,
+            static_pivot_floor: 0.0,
         }
     }
 }
@@ -494,7 +568,25 @@ pub fn factor(
 
         if remaining == 1 {
             // Last pivot: always 1×1
-            let d = a[k * n + k];
+            let mut d = a[k * n + k];
+
+            // Issue #38: MA57-style static-pivot perturbation on the
+            // trailing 1×1. Same semantics as `do_1x1_pivot`: floor
+            // before any rejection logic, count by sign, mark
+            // needs_refinement.
+            if params.static_pivot_floor > 0.0 && d.abs() < params.static_pivot_floor {
+                d = perturb_to_floor(d, params.static_pivot_floor);
+                a[k * n + k] = d;
+                needs_refinement = true;
+                if d > 0.0 {
+                    pos += 1;
+                } else {
+                    neg += 1;
+                }
+                k += 1;
+                continue;
+            }
+
             if d.abs() <= params.zero_tol {
                 match params.on_zero_pivot {
                     ZeroPivotAction::ForceAccept => {
@@ -3006,9 +3098,25 @@ fn scalar_pivot_step(
         if r != k + 1 {
             swap_rows_cols(a, nrow, k + 1, r, perm);
         }
-        let d11 = a[k * nrow + k];
+        let mut d11 = a[k * nrow + k];
         let d21 = a[k * nrow + (k + 1)];
-        let d22 = a[(k + 1) * nrow + (k + 1)];
+        let mut d22 = a[(k + 1) * nrow + (k + 1)];
+
+        // Issue #38: MA57-style static-pivot perturbation on the 2×2
+        // block. Push the smaller |eigenvalue| up to the floor before
+        // the Duff-Reid growth bound / detpiv tests fire, so a
+        // borderline (eigval < floor) block is accepted at the floor
+        // rather than rejected and force-accepted as a small 1×1.
+        if let Some((new_d11, new_d22)) =
+            perturb_2x2_to_floor(d11, d21, d22, params.static_pivot_floor)
+        {
+            d11 = new_d11;
+            d22 = new_d22;
+            a[k * nrow + k] = d11;
+            a[(k + 1) * nrow + (k + 1)] = d22;
+            *needs_refinement = true;
+        }
+
         let det = d11 * d22 - d21 * d21;
 
         // Duff-Reid 2×2 growth bound (MUMPS dfac_front_aux.F:1599-1606):
@@ -3208,6 +3316,27 @@ fn try_reject_1x1_frontal(
     needs_refinement: &mut bool,
 ) -> Result<PivotOutcome, FeralError> {
     let d = a[k * nrow + k];
+
+    // Issue #38: MA57-style static-pivot perturbation. If
+    // `static_pivot_floor > 0.0` and `|d|` is below it, perturb in
+    // place to `sign(d) * floor` and accept directly. This short-
+    // circuits the may_delay / rook-rescue / force-accept logic
+    // because the floored pivot is, by construction, large enough to
+    // accept. Inertia is counted by sign; `needs_refinement = true`.
+    // The downstream `do_1x1_update` will divide by the perturbed
+    // pivot. See `dev/research/static-pivot-perturbation-2026-05-17.md`.
+    if params.static_pivot_floor > 0.0 && d.abs() < params.static_pivot_floor {
+        let d_new = perturb_to_floor(d, params.static_pivot_floor);
+        a[k * nrow + k] = d_new;
+        *needs_refinement = true;
+        if d_new > 0.0 {
+            *pos += 1;
+        } else {
+            *neg += 1;
+        }
+        return Ok(PivotOutcome::Accepted);
+    }
+
     // Reject-gate uses `null_pivot_tol` so rank-deficiency pivots in
     // the [zero_tol, null_pivot_tol] band are routed through the case
     // split below. When `null_pivot_tol == zero_tol` (default) this
@@ -3644,6 +3773,53 @@ fn do_1x1_pivot(
     needs_refinement: &mut bool,
 ) -> Result<(f64, usize), FeralError> {
     let mut d = a[k * n + k];
+
+    // Issue #38: MA57-style static-pivot perturbation. If a static-pivot
+    // floor is enabled and `|d|` is below it, perturb `d` up to the
+    // floor with the current sign preserved (sign(0) → +). Count by
+    // sign, mark needs_refinement, and skip the column-relative
+    // rejection logic — the floored pivot is, by construction, large
+    // enough to use directly. See
+    // `dev/research/static-pivot-perturbation-2026-05-17.md`.
+    if params.static_pivot_floor > 0.0 && d.abs() < params.static_pivot_floor {
+        d = perturb_to_floor(d, params.static_pivot_floor);
+        a[k * n + k] = d;
+        *needs_refinement = true;
+        if d > 0.0 {
+            *pos += 1;
+        } else {
+            *neg += 1;
+        }
+        let d_inv = 1.0 / d;
+        for i in (k + 1)..n {
+            a[k * n + i] *= d_inv;
+        }
+        let mut next_gamma0 = 0.0;
+        let mut next_r = k + 2;
+        if k + 1 < n {
+            let j = k + 1;
+            let l_jk = a[k * n + j];
+            let l_jk_d = l_jk * d;
+            a[j * n + j] -= a[k * n + j] * l_jk_d;
+            for i in (j + 1)..n {
+                a[j * n + i] -= a[k * n + i] * l_jk_d;
+                let val = a[j * n + i].abs();
+                if val > next_gamma0 {
+                    next_gamma0 = val;
+                    next_r = i;
+                }
+            }
+        }
+        for j in (k + 2)..n {
+            let l_jk = a[k * n + j];
+            let l_jk_d = l_jk * d;
+            for i in j..n {
+                a[j * n + i] -= a[k * n + i] * l_jk_d;
+            }
+        }
+        return Ok((next_gamma0, next_r));
+    }
+
     let threshold = (params.pivot_threshold * col_max).max(params.null_pivot_tol);
 
     if d.abs() <= threshold {
@@ -3763,9 +3939,25 @@ fn do_2x2_pivot(
     zero: &mut usize,
     needs_refinement: &mut bool,
 ) -> Result<(f64, usize), FeralError> {
-    let a00 = a[k * n + k];
+    let mut a00 = a[k * n + k];
     let a10 = a[k * n + (k + 1)];
-    let a11 = a[(k + 1) * n + (k + 1)];
+    let mut a11 = a[(k + 1) * n + (k + 1)];
+
+    // Issue #38: MA57-style static-pivot perturbation on the 2×2 block.
+    // If `static_pivot_floor > 0.0` and the smaller |eigenvalue| is
+    // below the floor, shift the diagonals to push that eigenvalue to
+    // ±floor before the rank-2 update fires. Mark needs_refinement.
+    // The block remains symmetric and well-conditioned for the
+    // downstream Schur update. See
+    // `dev/research/static-pivot-perturbation-2026-05-17.md`.
+    if let Some((new_a00, new_a11)) = perturb_2x2_to_floor(a00, a10, a11, params.static_pivot_floor)
+    {
+        a00 = new_a00;
+        a11 = new_a11;
+        a[k * n + k] = a00;
+        a[(k + 1) * n + (k + 1)] = a11;
+        *needs_refinement = true;
+    }
 
     // Store the 2×2 block subdiagonal
     subdiag[k] = a10;
@@ -3864,6 +4056,23 @@ fn count_1x1_inertia(
     needs_refinement: &mut bool,
 ) -> Result<(), FeralError> {
     let d = a[k * stride + k];
+
+    // Issue #38: MA57-style static-pivot perturbation. The callers of
+    // `count_1x1_inertia` (factor.rs:619, 2065, 2958) are always the
+    // "zero off-diagonal column" branch — no trailing update fires on
+    // this column, so overwriting `a[k*stride + k]` in place is sound.
+    if params.static_pivot_floor > 0.0 && d.abs() < params.static_pivot_floor {
+        let d_new = perturb_to_floor(d, params.static_pivot_floor);
+        a[k * stride + k] = d_new;
+        *needs_refinement = true;
+        if d_new > 0.0 {
+            *pos += 1;
+        } else {
+            *neg += 1;
+        }
+        return Ok(());
+    }
+
     if d.abs() <= params.zero_tol {
         match params.on_zero_pivot {
             ZeroPivotAction::ForceAccept => {
@@ -4208,4 +4417,89 @@ mod sym2_inertia_tests {
         // True det = (1)(1 + 4eps) - (1 - eps) = 5 eps > 0; (+,+).
         assert_eq!(inertia.negative, 0, "must not over-report negatives");
     }
+}
+
+#[cfg(test)]
+mod static_pivot_tests {
+    //! Issue #38: MA57-style static-pivot perturbation tests.
+    //!
+    //! The dense `factor` entry point applies its own iterative
+    //! infinity-norm equilibration (`equilibrate_scaling`), which
+    //! makes pivot magnitudes hard to control directly. To exercise
+    //! the BK pivot kernel at known scale we use unequilibrated
+    //! single-supernode inputs and disable equilibration by setting
+    //! all rows to unit-row-max already (so `d_eq` ≈ 1 within
+    //! convergence tolerance), plus a tight tolerance match on the
+    //! reflected pivot floor.
+    use super::*;
+
+    /// `perturb_2x2_to_floor` helper: smaller eigenvalue is below
+    /// floor — returns Some, larger eigenvalue is barely changed.
+    #[test]
+    fn perturb_2x2_helper_pushes_small_eigenvalue() {
+        // [[1, 0], [0, -1e-10]] — eigenvalues 1 and -1e-10.
+        let (a00, a10, a11) = (1.0, 0.0, -1e-10);
+        let floor = 1e-6;
+        let (new_a00, new_a11) = perturb_2x2_to_floor(a00, a10, a11, floor).expect("must perturb");
+        // λ_small (-1e-10) gets pushed to -floor = -1e-6.
+        let (l1, l2) = sym2_eigenvalues(new_a00, a10, new_a11);
+        let lmin = if l1.abs() < l2.abs() { l1 } else { l2 };
+        assert!(
+            (lmin.abs() - floor).abs() < 1e-12,
+            "smaller |eig| should equal floor; got {lmin:e}"
+        );
+        assert!(lmin < 0.0, "sign of λ_min must stay negative; got {lmin:e}");
+    }
+
+    /// Helper preserves sign of small positive eigenvalue too.
+    #[test]
+    fn perturb_2x2_helper_preserves_positive_sign() {
+        let (a00, a10, a11) = (-1.0, 0.0, 1e-10);
+        let floor = 1e-6;
+        let (new_a00, new_a11) = perturb_2x2_to_floor(a00, a10, a11, floor).expect("must perturb");
+        let (l1, l2) = sym2_eigenvalues(new_a00, a10, new_a11);
+        let lmin = if l1.abs() < l2.abs() { l1 } else { l2 };
+        assert!(lmin > 0.0, "sign of λ_min must stay positive; got {lmin:e}");
+        assert!((lmin - floor).abs() < 1e-12);
+    }
+
+    /// `perturb_2x2_to_floor` no-op when both eigenvalues already
+    /// exceed the floor.
+    #[test]
+    fn perturb_2x2_helper_no_op_above_floor() {
+        let (a00, a10, a11) = (2.0, 0.0, -1.0);
+        assert!(perturb_2x2_to_floor(a00, a10, a11, 0.1).is_none());
+    }
+
+    /// `perturb_2x2_to_floor` disabled when floor = 0.0.
+    #[test]
+    fn perturb_2x2_helper_disabled_when_floor_zero() {
+        let (a00, a10, a11) = (1e-20, 0.0, 1e-20);
+        assert!(perturb_2x2_to_floor(a00, a10, a11, 0.0).is_none());
+    }
+
+    /// Helper handles the "true zero" case: pushes to +floor along
+    /// the sign of the other eigenvalue.
+    #[test]
+    fn perturb_2x2_helper_handles_zero_small_eigenvalue() {
+        // [[1, 0], [0, 0]] — eigenvalues 1, 0.
+        let (a00, a10, a11) = (1.0, 0.0, 0.0);
+        let floor = 1e-6;
+        let (new_a00, new_a11) = perturb_2x2_to_floor(a00, a10, a11, floor).expect("must perturb");
+        let (l1, l2) = sym2_eigenvalues(new_a00, a10, new_a11);
+        let lmin = if l1.abs() < l2.abs() { l1 } else { l2 };
+        // λ_other > 0, so the zero λ_small is pushed positive.
+        assert!(lmin > 0.0, "λ_small pushed toward sign(λ_other)");
+        assert!((lmin - floor).abs() < 1e-12);
+    }
+
+    // NOTE: end-to-end perturbation behavior is verified via the
+    // sparse `Solver::factor` integration tests in
+    // `tests/issue_38_static_pivot.rs`. The dense `factor` entry
+    // point applies iterative `equilibrate_scaling` (Knight-Ruiz),
+    // which normalizes diagonals to ±1 on diagonal inputs and makes
+    // controlled-magnitude floor tests subtle. The kernel-level
+    // perturbation helpers above (`perturb_2x2_to_floor`,
+    // `perturb_to_floor`) plus the sparse-solver integration tests
+    // cover the full pipeline.
 }

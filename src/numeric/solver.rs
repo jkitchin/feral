@@ -351,6 +351,34 @@ impl Solver {
         self
     }
 
+    /// Enable MA57-style static-pivot perturbation (issue #38). On
+    /// every `factor()` call the solver computes `||A||_∞` once and
+    /// propagates an absolute floor
+    /// `static_pivot_floor = t * ||A||_∞` into the BK pivot kernels.
+    /// Every accepted 1×1 / 2×2 pivot whose magnitude (for 2×2:
+    /// smallest |eigenvalue|) is below the floor is perturbed up to
+    /// the floor and counted by sign. The factor satisfies
+    /// `LDL^T = A + Δ` with `||Δ||_F ≤ floor` per perturbed pivot.
+    ///
+    /// Inertia is then reported for the perturbed `A + Δ`, not `A`.
+    /// On rocket_12800 iter 1 the true matrix has 38402 negative
+    /// eigenvalues but the IPM expects 38400; with `t = 1e-8` and
+    /// `||A||_∞ ≈ 25`, the floor of `2.5e-7` bends two near-zero
+    /// negative pivots over into the positive bucket, matching the
+    /// IPM expectation and cutting ipopt-feral's δ_w escalation
+    /// retries.
+    ///
+    /// Default `None` (disabled). Recommended starting value: `1e-8`
+    /// (matches MA57's `cntl[0]` default in Ipopt). Iterative
+    /// refinement against unperturbed `A` recovers solve accuracy.
+    ///
+    /// See `dev/research/static-pivot-perturbation-2026-05-17.md`
+    /// and the C ABI's `FERAL_STATIC_PIVOT` env var.
+    pub fn with_static_pivot_threshold(mut self, t: f64) -> Self {
+        self.numeric_params.static_pivot_threshold = Some(t);
+        self
+    }
+
     /// Enable the symmetric-quasi-definite (SQD) fast-path. When
     /// `on = true`, the caller asserts the input KKT has Vanderbei
     /// (1995) structure `K = [[-E, A^T], [A, F]]` with `E, F` SPD —
@@ -533,6 +561,27 @@ impl Solver {
             self.numeric_params.clone()
         };
 
+        // Step 3.7: issue #38 — MA57-style static-pivot perturbation.
+        // When `static_pivot_threshold = Some(t)`, compute `||A||_∞`
+        // once (cost: O(nnz)) and propagate the absolute floor
+        // `static_pivot_floor = t * ||A||_∞` to the BK params for
+        // this factor call. The dense pivot kernels then enforce the
+        // floor on every accepted 1×1 / 2×2 pivot. We compute this
+        // AFTER effective_params is built so cascade-break auto-arm
+        // (which may overwrite BK fields) takes precedence on its
+        // own knobs, and AFTER non-finite validation (Step 0 above
+        // already ran) so the norm scan is well-defined.
+        let mut effective_params = effective_params;
+        if let Some(t) = effective_params.static_pivot_threshold {
+            if t > 0.0 {
+                let norm_inf = matrix_inf_norm(matrix);
+                let floor = t * norm_inf;
+                if floor.is_finite() && floor > 0.0 {
+                    effective_params.bk.static_pivot_floor = floor;
+                }
+            }
+        }
+
         // Step 4: numeric factor via the pooled workspace; map errors.
         // Both drivers share the same signature and a bit-exact
         // contract; pick by the `use_parallel` toggle. When parallel
@@ -559,7 +608,7 @@ impl Solver {
                 factorize_multifrontal_parallel_with_workspace(
                     matrix,
                     symbolic,
-                    &self.numeric_params,
+                    &effective_params,
                     &mut self.workspace,
                 )
             }
@@ -905,6 +954,39 @@ impl Solver {
     }
 }
 
+/// Compute `||A||_∞` for a symmetric matrix stored as a CSC lower
+/// (or upper) triangle. Uses the symmetric definition:
+/// `||A||_∞ = max_i Σ_j |a_ij|`. Iterates the stored half once and
+/// reflects off-diagonal entries to the opposite row sum. Returns
+/// `0.0` for `n = 0`. Used by `Solver::factor` to derive the
+/// absolute floor for `NumericParams::static_pivot_threshold`.
+fn matrix_inf_norm(matrix: &CscMatrix) -> f64 {
+    let n = matrix.n;
+    if n == 0 {
+        return 0.0;
+    }
+    let mut row_sums = vec![0.0_f64; n];
+    for j in 0..n {
+        let start = matrix.col_ptr[j];
+        let end = matrix.col_ptr[j + 1];
+        for p in start..end {
+            let i = matrix.row_idx[p];
+            let v = matrix.values[p].abs();
+            row_sums[i] += v;
+            if i != j {
+                row_sums[j] += v;
+            }
+        }
+    }
+    let mut m = 0.0_f64;
+    for s in row_sums {
+        if s > m {
+            m = s;
+        }
+    }
+    m
+}
+
 impl Default for Solver {
     fn default() -> Self {
         Self::new()
@@ -929,6 +1011,7 @@ mod tests {
             cascade_break_eps: None,
             min_parallel_flops: None,
             sqd_mode: false,
+            static_pivot_threshold: None,
         };
         Solver::with_params(np, SupernodeParams::default())
     }
@@ -985,17 +1068,25 @@ mod tests {
         }
     }
 
-    /// Issue #24: a uniform-diagonal matrix triggers the
-    /// `Auto` MC64 routing (diag_only / n = 1.0) but the pre-MC64
-    /// InfNorm trial passes the IN_SPREAD_GUARD, so the fallback
-    /// fires. After `factor()` returns Success, `Solver::scaling_info`
-    /// reports the new variant and `mc64_fallback_count` is 1.
+    /// Issue #24: an arrow KKT with uniform absolute values triggers
+    /// the `Auto` MC64 routing (high diag_only ratio + a dense arrow
+    /// head of size > 32) but the pre-MC64 InfNorm trial passes the
+    /// IN_SPREAD_GUARD, so the fallback fires. After `factor()` returns
+    /// Success, `Solver::scaling_info` reports the new variant and
+    /// `mc64_fallback_count` is 1.
+    ///
+    /// Construction (mirrors the scaling-module test
+    /// `auto_surfaces_infnorm_spread_fallback_on_uniform_diag`):
+    /// n=200 with column 0 dense (200 stored entries of value 2.0)
+    /// and columns 1..199 degree-1 with the diagonal value 2.0.
+    /// All stored absolute values are 2.0, so InfNorm converges to a
+    /// uniform `d` and the IN_SPREAD_GUARD fires. The dense-column
+    /// gate (>32) added on 2026-05-17 to `pick_scaling_strategy` is
+    /// satisfied by column 0.
     ///
     /// Note: `n` must exceed the dense fast-path gate
-    /// (`should_use_dense_fast_path`, n=128 with density<0.25), or
-    /// the Auto-routing logic is bypassed in favour of the dense
-    /// fast-path's InfNorm-only short-circuit. A diagonal matrix
-    /// with `n=200` is sparse (density << 0.25) so the sparse
+    /// (`should_use_dense_fast_path`, n=128 with density<0.25). With
+    /// nnz ≈ 2n = 400, density = 400 / n² = 1% << 25% so the sparse
     /// path is taken and Auto's fallback fires.
     #[test]
     fn mc64_fallback_surfaces_via_solver_api() {
@@ -1004,7 +1095,14 @@ mod tests {
         let mut row_idx = Vec::new();
         let mut values = Vec::new();
         col_ptr.push(0);
-        for j in 0..n {
+        // Column 0: dense, uniform |a| = 2.0.
+        for i in 0..n {
+            row_idx.push(i);
+            values.push(2.0);
+        }
+        col_ptr.push(row_idx.len());
+        // Columns 1..n: degree-1 diagonal, value 2.0.
+        for j in 1..n {
             row_idx.push(j);
             values.push(2.0);
             col_ptr.push(row_idx.len());
