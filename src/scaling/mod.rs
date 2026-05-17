@@ -488,35 +488,71 @@ fn max_off_diag_ratio(matrix: &CscMatrix, scaling: &[f64]) -> f64 {
 /// matrix shape.
 ///
 /// Routes to `Mc64Symmetric` when the matrix has the arrow-KKT
-/// signature — many degree-1 "constraint slack" columns whose only
-/// stored row is the diagonal. Else routes to `InfNorm`.
+/// signature: BOTH
+///   (a) many degree-1 "constraint slack" columns whose only stored
+///       row is the diagonal (`diag_only / n >= 0.30`), AND
+///   (b) at least one structurally dense column whose stored nnz
+///       exceeds `MAX_COL_NNZ_FOR_INFNORM = 32` — the "arrow head"
+///       that creates wildly mismatched off-diagonal magnitudes
+///       InfNorm cannot equalize.
 ///
-/// Threshold: `diag_only / n >= 0.3`. Selected from the `vesuvio_diag`
-/// shape distribution: VESUVIOU/VESUVIO/VESUVIA/MUONSINE/CRESC132 all
-/// have ratios above 0.3 and benefit from MC64 (delays drop to zero,
-/// 6×–229× factor speedup); HYDCAR20/METHANL8/SWOPF/HATFLDG (the
-/// matrices that motivated the InfNorm default) have ratios below
-/// 0.3. See `dev/research/lever-c-adaptive-scaling.md`.
+/// Else routes to `InfNorm`.
 ///
-/// One O(n) pass over the column pointers and one O(nnz) pass over
-/// the row indices. No allocations.
+/// **Why both gates are needed.** The diag_only ratio alone CANNOT
+/// distinguish a 1-D banded KKT like clnlbeam (n=99999, diag_only=40%,
+/// max_col_nnz=5) from a true arrow KKT like VESUVIO (n=3083,
+/// diag_only=33%, max_col_nnz=1026). clnlbeam scores HIGHER on
+/// diag_only/n than VESUVIO yet MC64 hurts its IPM trajectory by
+/// 4.36× iters and 28× wall time (see Mittelmann sweep
+/// 2026-05-16), while VESUVIO benefits 6×–243× from MC64. The dense
+/// column count (gate b) is what separates them: banded PDE-like KKTs
+/// have small max column degree by construction; arrow KKTs concentrate
+/// the slack/dual coupling in 1–8 dense columns of size ≈ n/3.
+///
+/// Threshold calibration (`dev/journal/2026-05-17-01.org` §14:30):
+///
+/// | matrix          | n     | diag_only/n | max_col_nnz | MC64 helps? |
+/// |-----------------|-------|-------------|-------------|-------------|
+/// | clnlbeam_0000   | 99999 | 40.0%       | 5           | NO (4.4× iters) |
+/// | VESUVIOU_0000   | 3083  | 33.2%       | 1026        | YES (243×)  |
+/// | VESUVIO_0000    | 3083  | 33.2%       | 1026        | YES         |
+/// | VESUVIA_0000    | 3083  | 33.2%       | 1026        | YES         |
+/// | MUONSINE_0000   | 1537  | 33.3%       | 512         | YES         |
+/// | CRESC132_0000   | 5314  | 50.0%       | 2657        | YES         |
+/// | ACOPP30_0064    | 209   | 65.6%       | 29          | NO (Policy 4 fallback already proved this) |
+///
+/// `32` sits an order of magnitude above ACOPP30's max (29) and an
+/// order of magnitude below MUONSINE's (512), giving the widest
+/// possible margin on either side of the validation panel.
+///
+/// One O(n+nnz) pass over the column pointers and row indices.
+/// No allocations.
 pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
+    /// Maximum stored column nnz for the Auto policy to consider the
+    /// matrix "banded enough" that InfNorm is the safe choice even
+    /// when the diag_only ratio is high. See function docs.
+    const MAX_COL_NNZ_FOR_INFNORM: usize = 32;
+
     let n = matrix.n;
     if n == 0 {
         return ScalingStrategy::InfNorm;
     }
     let mut diag_only = 0usize;
+    let mut max_col_nnz = 0usize;
     for j in 0..n {
         let start = matrix.col_ptr[j];
         let end = matrix.col_ptr[j + 1];
-        if end - start != 1 {
-            continue;
+        let nnz_col = end - start;
+        if nnz_col > max_col_nnz {
+            max_col_nnz = nnz_col;
         }
-        if matrix.row_idx[start] == j {
+        if nnz_col == 1 && matrix.row_idx[start] == j {
             diag_only += 1;
         }
     }
-    if diag_only as f64 / n as f64 >= 0.3 {
+    let has_arrow_head = max_col_nnz > MAX_COL_NNZ_FOR_INFNORM;
+    let has_slack_mass = diag_only as f64 / n as f64 >= 0.3;
+    if has_arrow_head && has_slack_mass {
         ScalingStrategy::Mc64Symmetric
     } else {
         ScalingStrategy::InfNorm
@@ -533,15 +569,18 @@ mod tests {
     use super::*;
     use crate::sparse::csc::CscMatrix;
 
-    /// Build a CSC with `n` columns where the first `diag_only`
-    /// columns are degree-1 (just the diagonal), and the remaining
-    /// `n - diag_only` columns each store the diagonal plus one
-    /// off-diagonal row at column 0. Lower-triangular only — no
-    /// validity beyond the column-degree pattern is required for
-    /// `pick_scaling_strategy`, which only inspects col_ptr and
-    /// row_idx.
-    fn shape_csc(n: usize, diag_only: usize) -> CscMatrix {
+    /// Build an arrow-KKT-shaped CSC.
+    ///
+    /// Layout: `diag_only` degree-1 slack columns followed by
+    /// `n - diag_only` columns each of which stores the diagonal plus
+    /// `dense_off` off-diagonal entries. When `dense_off` is large
+    /// enough that `1 + dense_off > MAX_COL_NNZ_FOR_INFNORM` (= 32),
+    /// the non-slack columns form an "arrow head" that triggers the
+    /// dense-column gate in `pick_scaling_strategy`.
+    fn shape_csc(n: usize, diag_only: usize, dense_off: usize) -> CscMatrix {
         assert!(diag_only <= n);
+        let n_dense = n - diag_only;
+        assert!(dense_off < n, "dense_off must be < n");
         let mut col_ptr = Vec::with_capacity(n + 1);
         let mut row_idx: Vec<usize> = Vec::new();
         let mut values: Vec<f64> = Vec::new();
@@ -549,9 +588,16 @@ mod tests {
         for j in 0..n {
             row_idx.push(j);
             values.push(1.0);
-            if j >= diag_only && j != 0 {
-                row_idx.push(j.max(1) - 1);
-                values.push(0.1);
+            if j >= diag_only {
+                // Walk earlier rows to fill `dense_off` off-diagonals.
+                // We may have fewer earlier rows than requested on the
+                // first non-slack column; cap to what's available.
+                let take = dense_off.min(j);
+                for k in 0..take {
+                    row_idx.push(k);
+                    values.push(0.1);
+                }
+                let _ = n_dense; // sanity hint for the reader
             }
             col_ptr.push(row_idx.len());
         }
@@ -565,26 +611,53 @@ mod tests {
 
     #[test]
     fn pick_scaling_strategy_picks_mc64_for_arrow_kkt() {
-        // 10 of 20 columns are diag-only → ratio = 0.5 ≥ 0.3.
-        let csc = shape_csc(20, 10);
+        // n=100, 80 slacks, 20 arrow-head cols each storing diag +
+        // 50 earlier rows. diag_only/n=0.80 ≥ 0.30 AND max_col_nnz=51
+        // > 32 → MC64.
+        let csc = shape_csc(100, 80, 50);
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
     }
 
     #[test]
-    fn pick_scaling_strategy_picks_infnorm_for_dense() {
-        // 0 of 20 columns are diag-only → ratio = 0.0 < 0.3.
-        let csc = shape_csc(20, 0);
+    fn pick_scaling_strategy_picks_infnorm_for_banded_high_diag_only() {
+        // The clnlbeam shape: large n, high diag_only ratio (0.40)
+        // but narrow band (max_col_nnz=5). Must route to InfNorm —
+        // this is the entire motivation for adding the dense-column
+        // gate. See `dev/journal/2026-05-17-01.org` §14:30.
+        // 60 slack cols + 40 banded cols (diag + 4 earlier rows).
+        let csc = shape_csc(100, 60, 4);
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::InfNorm);
     }
 
     #[test]
-    fn pick_scaling_strategy_threshold_boundary() {
-        // 29 of 100 → 0.29 < 0.30 → InfNorm.
-        let below = shape_csc(100, 29);
+    fn pick_scaling_strategy_picks_infnorm_for_dense_low_diag_only() {
+        // 0 diag-only cols, but each col is dense → fails the
+        // diag_only gate even though the arrow-head gate passes.
+        let csc = shape_csc(100, 0, 50);
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::InfNorm);
+    }
+
+    #[test]
+    fn pick_scaling_strategy_diag_only_threshold_boundary() {
+        // Dense-column gate satisfied for both rows of the table
+        // (arrow-head cols have 51 nnz > 32). Only the diag_only
+        // ratio varies across the boundary at 0.30.
+        let below = shape_csc(100, 29, 50);
         assert_eq!(pick_scaling_strategy(&below), ScalingStrategy::InfNorm);
-        // 30 of 100 → 0.30 ≥ 0.30 → MC64.
-        let at = shape_csc(100, 30);
+        let at = shape_csc(100, 30, 50);
         assert_eq!(pick_scaling_strategy(&at), ScalingStrategy::Mc64Symmetric);
+    }
+
+    #[test]
+    fn pick_scaling_strategy_max_col_nnz_threshold_boundary() {
+        // diag_only/n satisfied for both (50/100=0.50 ≥ 0.30).
+        // Only the dense-column degree varies across the boundary at 32.
+        // 50 slacks + 50 cols of (1 diag + 31 off) = 32 nnz → fails gate.
+        let at32 = shape_csc(100, 50, 31);
+        assert_eq!(pick_scaling_strategy(&at32), ScalingStrategy::InfNorm);
+        // 50 slacks + 50 cols of (1 diag + 32 off) = 33 nnz → passes.
+        let at33 = shape_csc(100, 50, 32);
+        assert_eq!(pick_scaling_strategy(&at33), ScalingStrategy::Mc64Symmetric);
     }
 
     #[test]
@@ -598,23 +671,43 @@ mod tests {
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::InfNorm);
     }
 
+    /// Regression test for the clnlbeam IPM-iter-bloat bug
+    /// (Mittelmann sweep 2026-05-16, fix 2026-05-17). The clnlbeam KKT
+    /// scored 40% diag_only and would have routed to MC64 under the
+    /// pre-fix policy, costing 2367 IPM iters vs MA57's 543. With the
+    /// dense-column gate (max_col_nnz=5 fails) it routes to InfNorm,
+    /// which solved clnlbeam in 506 iters / 57 s end-to-end.
+    #[test]
+    fn pick_scaling_strategy_routes_clnlbeam_to_infnorm() {
+        let path = std::path::Path::new("data/matrices/kkt-mittelmann/clnlbeam/clnlbeam_0000.mtx");
+        let mtx = match crate::io::mtx::read_mtx(path) {
+            Ok(m) => m,
+            Err(_) => return, // fixture not present — skip
+        };
+        let csc = mtx.to_csc().expect("clnlbeam_0000 CSC build");
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::InfNorm);
+    }
+
     #[test]
     fn compute_scaling_auto_routes_to_mc64_on_arrow_kkt() {
-        // Build a small symmetric arrow KKT: 4 diag-only "slack"
-        // columns + 2 dense "linking" columns. Lower-triangular CSC.
-        // Ratio diag_only / n = 4/6 = 0.67 → Auto resolves to MC64.
-        let n = 6;
+        // Build a symmetric arrow KKT large enough that the dense
+        // "linking" columns clear the `max_col_nnz > 32` gate.
+        // n=80: 40 diag-only slack columns + 40 dense columns where
+        // column j (j ≥ 40) stores rows j..n. Column 40 has 40
+        // entries (well above the 32 threshold).
+        // Ratio diag_only/n = 40/80 = 0.50 ≥ 0.30 → Auto resolves to MC64.
+        let n = 80;
         let mut col_ptr = vec![0usize];
         let mut row_idx = Vec::new();
         let mut values = Vec::new();
-        // 4 diag-only columns.
-        for j in 0..4 {
+        // 40 diag-only columns.
+        for j in 0..40 {
             row_idx.push(j);
             values.push(2.0);
             col_ptr.push(row_idx.len());
         }
-        // 2 dense columns (diagonal + all earlier rows).
-        for j in 4..n {
+        // 40 dense columns (diagonal + all earlier dense rows).
+        for j in 40..n {
             row_idx.push(j);
             values.push(2.0);
             for i in (j + 1)..n {
@@ -676,26 +769,34 @@ mod tests {
         assert!(r.is_infinite(), "got {r}");
     }
 
-    /// Issue #24: a synthetic all-diagonal matrix triggers the
-    /// `Auto` shape rule (diag_only/n = 1.0) but the pre-MC64
-    /// InfNorm trial gives a constant scaling vector (spread = 1),
-    /// so `IN_SPREAD_GUARD` fires and the fallback is taken.
-    /// Assert the returned `ScalingInfo` is `Mc64FallbackToInfnorm`
-    /// with the expected reason — the previously-silent fallback
-    /// is now structurally surfaced.
+    /// Issue #24: an arrow KKT with uniform absolute values triggers
+    /// the `Auto` shape rule (high diag_only ratio + a dense arrow head
+    /// of size > 32) but the pre-MC64 InfNorm trial gives a constant
+    /// scaling vector (spread = 1), so `IN_SPREAD_GUARD` fires and the
+    /// fallback is taken. Assert the returned `ScalingInfo` is
+    /// `Mc64FallbackToInfnorm{InfNormSpreadAcceptable}` — the
+    /// previously-silent fallback is structurally surfaced.
+    ///
+    /// Construction: n=40. Column 0 stores diag + all 39 earlier-row
+    /// entries with value 2.0 (40 stored entries → exceeds the dense
+    /// gate). Columns 1..39 are degree-1 with the diagonal value 2.0
+    /// (39 of 40 → diag_only/n = 0.975 ≥ 0.30). All stored absolute
+    /// values are 2.0, so Knight-Ruiz converges to a uniform `d`.
     #[test]
     fn auto_surfaces_infnorm_spread_fallback_on_uniform_diag() {
-        // 6×6 pure diagonal with all entries equal. Routing:
-        //   diag_only / n = 1.0 ≥ 0.3 → MC64 picked.
-        // InfNorm on a uniform diagonal yields s[i] = 1/sqrt(2.0)
-        // for every i, so scaling_spread = 1.0 << 1e3 — the
-        // IN_SPREAD_GUARD fires.
-        let n = 6;
+        let n = 40;
         let mut col_ptr = Vec::with_capacity(n + 1);
         let mut row_idx = Vec::new();
         let mut values = Vec::new();
         col_ptr.push(0);
-        for j in 0..n {
+        // Column 0: dense (all 40 rows), uniform |a| = 2.0.
+        for i in 0..n {
+            row_idx.push(i);
+            values.push(2.0);
+        }
+        col_ptr.push(row_idx.len());
+        // Columns 1..n: degree-1 diagonal, value 2.0.
+        for j in 1..n {
             row_idx.push(j);
             values.push(2.0);
             col_ptr.push(row_idx.len());
@@ -822,9 +923,15 @@ mod tests {
     /// fast-path (`raw_drng >= 1e6 → MC64 unconditionally`),
     /// raw_drng=1.06e10 routed it to MC64, which produced a
     /// catastrophic scaling: factor zero pivot, rel_ref = 1.74e-1.
-    /// The IN_SPREAD_GUARD pre-MC64 trial accepts InfNorm
-    /// (in_spread=1.63 << 1e3) and factors to rel_ref ≈ 1e-14.
-    /// See `dev/research/acopp30-plateau-2.md`.
+    ///
+    /// Pre-2026-05-17 the matrix was rescued by the IN_SPREAD_GUARD
+    /// at the Policy-4 fallback layer. With the dense-column gate
+    /// added to `pick_scaling_strategy` (max_col_nnz=29 ≤ 32), the
+    /// routing itself now sends ACOPP30_0064 to InfNorm directly,
+    /// without needing the fallback safety net to fire. The end
+    /// result (Auto vector == InfNorm vector) is unchanged.
+    /// See `dev/research/acopp30-plateau-2.md` and
+    /// `dev/journal/2026-05-17-01.org` §14:30.
     #[test]
     fn auto_picks_infnorm_on_acopp30_0064() {
         let path = std::path::Path::new("data/matrices/kkt/ACOPP30/ACOPP30_0064.mtx");
@@ -833,10 +940,11 @@ mod tests {
             Err(_) => return, // fixture not present — skip
         };
         let csc = mtx.to_csc().expect("ACOPP30_0064 CSC build");
-        // Routing rule still picks MC64 (arrow-KKT shape unchanged).
-        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
-        // But Auto should resolve to InfNorm via the IN_SPREAD_GUARD.
-        let (auto_s, auto_info) =
+        // Routing rule now picks InfNorm directly because the
+        // dense-column gate is not satisfied (max_col_nnz=29 ≤ 32).
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::InfNorm);
+        // And Auto still resolves to the InfNorm scaling vector.
+        let (auto_s, _auto_info) =
             compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto on ACOPP30_0064");
         let (in_s, _) =
             compute_scaling(&csc, &ScalingStrategy::InfNorm).expect("InfNorm on ACOPP30_0064");
@@ -844,24 +952,19 @@ mod tests {
             compute_scaling(&csc, &ScalingStrategy::Mc64Symmetric).expect("MC64 on ACOPP30_0064");
         assert_eq!(
             auto_s, in_s,
-            "Auto must pick InfNorm on ACOPP30_0064 (in_spread<<1e3, MC64 catastrophic)"
+            "Auto must pick InfNorm on ACOPP30_0064 (MC64 produces rel_ref=1.7e-1)"
         );
         assert_ne!(
             auto_s, mc_s,
             "Auto must NOT use MC64 on ACOPP30_0064 (regresses rel_ref to 1.7e-1)"
         );
-        // Issue #24: this fallback is the InfNormSpreadAcceptable
-        // path — MC64 never ran because the InfNorm trial
-        // produced a tight scaling.
-        match auto_info {
-            ScalingInfo::Mc64FallbackToInfnorm {
-                reason: Mc64FallbackReason::InfNormSpreadAcceptable,
-            } => {}
-            other => panic!(
-                "ACOPP30_0064: expected Mc64FallbackToInfnorm{{InfNormSpreadAcceptable}}, got {:?}",
-                other
-            ),
-        }
+        // No fallback variant assertion: with the tightened routing
+        // the safety net is no longer the mechanism that rescues
+        // this matrix. The fallback path is exercised by the
+        // synthetic `auto_surfaces_infnorm_spread_fallback_on_uniform_diag`
+        // test and the fixture-gated MSS1_0009 test, both of which
+        // build/load matrices that still satisfy the (≥0.30 ∧ >32)
+        // routing gate.
     }
 
     /// HS75_0000 has in_spread ≈ 20.8, so the IN_SPREAD_GUARD
