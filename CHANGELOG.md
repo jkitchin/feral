@@ -61,6 +61,61 @@ in live ipopt-feral runs:
 - `FERAL_FACTOR_TRACE=1` -- per-factor wall + `sum_delayed` +
   `max_delayed` from `src/capi.rs::feral_factor`.
 
+### Added — MA57-style static-pivot perturbation knob (#38)
+
+`NumericParams::static_pivot_eps` (also reachable via
+`Solver::with_static_pivot_eps(eps)`, default `None`) lets the
+caller request MA57-style "perturb to epsilon" handling for
+non-finite or near-singular pivots, replacing the default
+hard-fail behaviour with a documented numerical perturbation.
+Off by default; opt-in only. Bit-identical for all default-path
+users. Evidence: 47-problem Mittelmann sweep with `1e-8` vs
+baseline showed identical iteration counts, wall deltas < 2 %.
+
+### Added — non-finite input validation in `Solver::factor` (#38)
+
+`Solver::factor` now eagerly validates that no input matrix entry
+is `NaN` or `±inf` and returns `FactorStatus::InvalidInput` instead
+of producing a corrupt factor. This was a silent correctness hole
+when IPM iterates produced non-finite entries during restoration
+phase. Same call point that lights up the new
+`with_auto_cascade_break(beta)` warm-arm logic.
+
+### Added — closed-form 2x2 eigenvalue inertia classifier (#38)
+
+Dense Bunch-Kaufman 2x2 pivot inertia is now decided by the
+analytic eigenvalues of the symmetric 2x2 block instead of a
+trace-and-determinant heuristic. Closes a numerical-edge regression
+seen on near-singular 2x2 blocks where the heuristic mis-counted
+the negative eigenvalue. Bit-exact for all well-conditioned blocks.
+
+### Fixed — invalidate stale MC64 cache between `factor()` calls (#38)
+
+`SymbolicFactorization::cached_mc64` was reused across
+`Solver::factor()` calls, applying the iter-0 scaling values to
+iter-N matrix values. Silent inertia drift on warm IPM calls when
+matrix values changed enough to alter the matching's optimal
+permutation. Fix: invalidate per-factor and recompute fresh.
+Forced the auto-CB and value-bounded-cache work that landed in
+this release.
+
+### Fixed — raise dense `MAX_N_ELIM` 64 -> 128 (#36)
+
+Dense Bunch-Kaufman `MAX_N_ELIM` constant raised from 64 to 128
+and the surrounding bounds assert hardened. The previous 64
+ceiling clipped some legitimate supernodes from being eliminated
+in a single dense pass on large sparse problems, forcing
+spurious delayed pivots.
+
+### Added — `mittelmann_ipopt` benchmark harness
+
+New `external_benchmarks/mittelmann_ipopt/` runs ipopt+ma57 and
+ipopt+feral on the 47-problem Mittelmann panel, with per-problem
+`PROBLEM_FERAL_ENV` overrides for matrices that need
+`FERAL_CASCADE_BREAK=on` (marine_1600, pinene_3200, dtoc2 -- see
+the journal entries in dev/journal/2026-05-17-01.org). Drives the
+0.96 geomean wall-ratio headline reported above.
+
 ### Added — M5 stress-smoke CI gate (#28)
 
 New `stress-smoke` job in `.github/workflows/ci.yml` runs the

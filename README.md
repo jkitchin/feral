@@ -3,7 +3,7 @@
 ![FERAL banner](https://raw.githubusercontent.com/jkitchin/feral/main/assets/feral-banner.png)
 
 [![CI](https://github.com/jkitchin/feral/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/feral/actions/workflows/ci.yml)
-[![DOI](https://zenodo.org/badge/1207855216.svg)](https://doi.org/10.5281/zenodo.20162687)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20162687.svg)](https://doi.org/10.5281/zenodo.20162687)
 
 **F**actored **E**rror-**R**esistant **A**lgebra **L**ibrary — a pure-Rust
 sparse symmetric indefinite linear solver with certified inertia counts,
