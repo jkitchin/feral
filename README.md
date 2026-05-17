@@ -272,7 +272,7 @@ story of how and why it was built.
 ## Known limitations
 
 - **Rank-deficient-KKT inertia mismatches.** On the ACOPP14 / ACOPP30
-  / CERI* / FBRAIN3LS panel matrices, FERAL and canonical MUMPS
+  / CERI651CLS / FBRAIN3LS panel matrices, FERAL and canonical MUMPS
   disagree on the inertia of constraint blocks that are exactly
   rank-deficient (typical signature: FERAL reports `(p, q, 0)` where
   MUMPS reports `(p, q-1, 1)` or vice versa). Phase 2.2.2's column-

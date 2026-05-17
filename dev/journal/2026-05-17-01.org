@@ -1483,3 +1483,14 @@ NARX_CFy, steering_12800) which warrant their own targeted work.
 
 Results archived: external_benchmarks/mittelmann_ipopt/REPORT.md
 and results/{ma57,feral}.jsonl.
+
+* 17:03 :parity:tests:
+Reran the 13 #[ignore]'d parity matrices to check whether v0.4.0 work
+closed any of them. Two now pass cold and were un-ignored:
+parity_ceri651dls_0618 and parity_roszman1_0241. ACOPP30_0001's
+mismatch signature drifted from feral=(71,137,1) mumps=(72,137,0) to
+feral=(71,138,0) mumps=(72,137,0); updated the attribute comment.
+Remaining 11 ignored: ACOPP14_{0001,0003}, ACOPP30_{0000,0001,0005},
+CERI651CLS_{0486,0487}, FBRAIN3LS_0839, SSI_{1685,2412,2597}. Parity
+suite: 15 passed / 0 failed / 11 ignored (was 13/0/13). README
+known-limitations updated: CERI* narrowed to CERI651CLS.

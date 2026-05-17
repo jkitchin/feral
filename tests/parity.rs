@@ -116,7 +116,7 @@ fn parity_acopp30_0000() {
     run_parity("acopp30", "ACOPP30_0000");
 }
 
-// Panel time: inertia mismatch (feral=(71, 137, 1) mumps=(72, 137, 0))
+// Panel time: inertia mismatch (feral=(71, 138, 0) mumps=(72, 137, 0))
 #[test]
 #[ignore]
 fn parity_acopp30_0001() {
@@ -144,9 +144,7 @@ fn parity_ceri651cls_0487() {
     run_parity("ceri651cls", "CERI651CLS_0487");
 }
 
-// Panel time: inertia mismatch (feral=(7, 0, 0) mumps=(6, 0, 1))
 #[test]
-#[ignore]
 fn parity_ceri651dls_0618() {
     run_parity("ceri651dls", "CERI651DLS_0618");
 }
@@ -213,9 +211,7 @@ fn parity_muonsine_0027() {
     run_parity("muonsine", "MUONSINE_0027");
 }
 
-// Panel time: residual ratio 1.17e1 > K=10 (feral=2.44e-14, mumps=2.08e-15)
 #[test]
-#[ignore]
 fn parity_roszman1_0241() {
     run_parity("roszman1", "ROSZMAN1_0241");
 }
