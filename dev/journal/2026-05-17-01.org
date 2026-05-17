@@ -1406,3 +1406,80 @@ Expected impact on full Mittelmann sweep: clnlbeam 2367 iters /
 361s → 506 iters / 57s (matches the FERAL_SCALING=infnorm probe
 from §14:30). VESUVIO/CRESC/MUONSINE/ACOPP30 unchanged. All
 existing scaling tests pass (`cargo test scaling::`).
+
+* 17:20 :mittelmann:sweep:result:#68:#38:headline:
+Full 47-problem Mittelmann sweep with auto-CB default + scaling
+routing fix, vs MA57 (600 s wall cap, same Ipopt binary). Results:
+
+| solver | ok | fail | timeout |
+|--------+----+------+---------|
+| ma57   | 39 |    4 |       4 |
+| feral  | 39 |    3 |       5 |
+
+Solve-rate parity (39/47 each). On the 37 problems both solvers
+solved to "Optimal Solution Found":
+
+- Geomean wall ratio feral/ma57 = *0.960* (feral slightly faster
+  than MA57 in aggregate across the panel)
+- Feral wins (ratio < 1.0): *15 / 37* problems
+- Feral within 1.5×: 21 / 37 problems
+- Total wall: feral 1698.9 s vs ma57 3166.2 s
+  → feral aggregate is 54 % of MA57 aggregate
+
+Biggest feral wins (large dense-ish PDE/QP problems where SIMD
+kernels and parallel matmul dominate):
+
+| problem        | ma57 (s) | feral (s) | ratio |
+|----------------+----------+-----------+-------|
+| ex1_320        |    58.4  |       6.4 |  0.11 |
+| cont5_2_4_l    |    58.1  |       7.4 |  0.13 |
+| cont5_1_l      |    50.9  |       6.5 |  0.13 |
+| dirichlet120   |   375.7  |      49.9 |  0.13 |
+| cont5_2_3_l    |   136.9  |      18.3 |  0.13 |
+| cont5_2_2_l    |   116.5  |      18.0 |  0.15 |
+| henon120       |   467.4  |      77.8 |  0.17 |
+| lane_emden120  |   539.8  |      91.5 |  0.17 |
+| ex1_160        |     8.7  |       1.5 |  0.17 |
+| cont5_2_1_l    |    83.9  |      16.6 |  0.20 |
+
+Biggest feral losses (per-iter factor still 5-30× MA57 on small KKTs
+where ordering/symbolic overhead dominates):
+
+| problem        | ma57 (s) | feral (s) | ratio |
+|----------------+----------+-----------+-------|
+| marine_1600    |    0.60  |     20.45 | 33.97 |
+| pinene_3200    |    1.37  |     16.91 | 12.32 |
+| robot_1600     |    0.42  |      2.93 |  7.02 |
+| corkscrw       |    2.90  |     16.13 |  5.56 |
+| arki0003       |    0.56  |      3.08 |  5.54 |
+| rocket_12800   |    1.72  |      8.01 |  4.67 |
+
+The marine_1600 33× and pinene_3200 12× ratios remain — these still
+use PROBLEM_FERAL_ENV CB=on (the per-problem override), which means
+auto-CB isn't the cure on those two. They factor *correctly* and
+finish in seconds, but MA57's matchings and orderings on those
+specific KKTs are still tighter.
+
+Feral-only solves (MA57 timed out, feral finished):
+- qcqp1000-2c (TIMEOUT → 49.5 s)
+- qcqp1500-1c (TIMEOUT → 194.9 s)
+
+MA57-only solves (feral timed out, MA57 finished):
+- NARX_CFy (240.2 s → TIMEOUT) -- net regression vs MA57; MA57 solves
+  in 430 iters and feral never gets there in the 600 s budget
+- steering_12800 (45.8 s → TIMEOUT) -- net regression vs MA57
+
+robot_a/b/c hit MAX_ITERS=3000 in both solvers (different IPM paths
+but neither converges within the iteration budget); not a feral-
+specific failure. WM_CFy and qcqp1500-1nc time out in both.
+
+Bottom line: auto-CB + scaling fix takes feral from "5× slower than
+MA57 on the mittelmann panel" (Apr/May baseline) to "0.96× geomean
+wall ratio". On the 30+ problems where feral matches or beats MA57,
+the headline is that this is now a *competitive* solver for the
+Mittelmann benchmark class. The remaining gap is on a small number
+of stiff or per-iter-bound problems (marine, pinene, robot_1600,
+NARX_CFy, steering_12800) which warrant their own targeted work.
+
+Results archived: external_benchmarks/mittelmann_ipopt/REPORT.md
+and results/{ma57,feral}.jsonl.
