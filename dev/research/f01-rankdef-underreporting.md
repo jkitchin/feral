@@ -264,3 +264,144 @@ rule was relaxed to `1 <= zero <= expected` accordingly.
 
 All 28 stress matrices pass, full test suite green (206 integration
 + 256 lib), clippy clean.
+
+---
+
+## 2026-05-17 — Sign-fallback refinement (issue #39)
+
+### Motivation
+
+`FBRAIN3LS_0839` (n=6, parity panel) reported feral inertia `(5, 0, 1)`
+where MUMPS 5.8.2 and SPRAL SSIDS both report `(6, 0, 0)`. The matrix
+is borderline-singular (`cond ≈ 2.13e+17`) but not actually rank-deficient
+by the canonical Fortran solvers' own pivot-magnitude convention.
+
+Probe (`src/bin/probe_fbrain.rs`) traced the trailing 1×1 pivot to:
+
+    d_diag[5] = +2.467786894e-16
+    EPS = 2.22e-16
+    sqrt(6) · EPS · ||A_scaled||_inf ≈ 2.70e-15   (override floor)
+
+The pivot sits *strictly above* `EPS` and *strictly below* the
+override-bumped `null_pivot_tol`. Under the original 2026-05-16 split
+this lands in case (a') of the F-01 band and was emitted as
+`zero += 1`. Both reference solvers do *not* run with null-pivot
+detection enabled and report the pivot by sign (positive → `pos += 1`).
+
+### Decision: count band pivots by sign, not as zero
+
+The F-01 design memo above frames the band as "MUMPS-aligned
+rank-deficiency surfacing". That framing is half-right: MUMPS surfaces
+rank deficiency *only when ICNTL(24)=1 is explicitly enabled*. Default
+MUMPS behavior (which is the parity reference) is to count by sign.
+Two convention discrepancies were live simultaneously:
+
+1. On FBRAIN3LS_0839 the band over-counts zeros, breaking the CLAUDE.md
+   correctness contract (must agree with MUMPS or SSIDS on non-singular
+   matrices). This is the new failure.
+
+2. On rank-deficient synth matrices the band under-counts versus the
+   *constructed* rank (e.g. `rankdef_200_20` k=20, band reports 3).
+   This was already known and accepted in the 2026-05-16 entry.
+
+The right resolution unifies the two: in the F-01 band the pivot is
+**counted by sign**, exactly as the case (b) sign-accept path does
+outside the band. Strict zeros (`|d| ≤ EPS`) are still zeros — that
+is case (a) above and is preserved unchanged.
+
+Equivalent statement: the original three-way classification
+`{strict-zero, band, sign}` is collapsed to a two-way
+`{strict-zero, sign}`. The band still exists as a *force-accept-without-rejection*
+zone (callers that set `on_zero_pivot = ForceAccept` won't see a
+rejection in the band, vs callers with a stricter mode), but it no
+longer mutates the inertia count.
+
+### Why this is the right trade
+
+- **Matches the parity oracle convention.** Both MUMPS (default) and
+  SSIDS count by sign on borderline pivots. CLAUDE.md's correctness
+  contract is "agree with at least one of MUMPS, SSIDS"; sign-fallback
+  in the band is the only behavior that satisfies the contract on
+  FBRAIN3LS_0839 without breaking the strict-zero (case-a) path.
+
+- **The strict case (a) still catches genuine rank deficiency.** Every
+  synthetic rank-deficient matrix in the stress corpus has at least
+  one pivot that collapses to *exactly* 0.0 (or below `EPS`) under
+  Bunch-Kaufman partial pivoting; that path is unchanged. Verified by
+  `src/bin/probe_f01.rs` before implementation. See per-matrix table
+  below.
+
+- **Rank deficiency is over-determined by the residual.** A factorization
+  whose backward error is at machine precision and whose pivots are
+  all `|d| > EPS` is, by definition, a valid LDLᵀ factor; the inertia
+  on that factor is meaningful regardless of whether some pivots are
+  small. Forcing those small pivots to "zero" is a *detector* convention,
+  not a *correctness* requirement.
+
+### Pre-implementation regression audit
+
+`src/bin/probe_f01.rs` dumps `|d|` for every pivot of:
+- `FBRAIN3LS_0839` (the new outlier),
+- the dyadic rank-1 matrix `u·uᵀ`, u=ones, n=5 (the F-01 unit test),
+- every `synth/rankdef_*.mtx` matrix.
+
+Headline finding: the dyadic test produces pivots that are *exactly* 0.0
+after the first elimination (rank-1 → 4 trailing zeros), all of which
+land in strict case (a). No regression risk for the
+`f01_rankdef_surfaces_at_least_one_zero_pivot` invariant test.
+
+| matrix | band pivots → zero (old) | band pivots → sign (new) | strict-zero (case a) |
+|--------|--------------------------|--------------------------|----------------------|
+| FBRAIN3LS_0839      | 1 | 0 | 0 |
+| dyadic n=5          | 0 | 0 | 4 |
+| rankdef_5_2         | 0 | 0 | 1 |
+| rankdef_10_3        | 0 | 0 | 1 |
+| rankdef_50_5        | 0 | 0 | 1 |
+| rankdef_exact_50_5  | 0 | 0 | 1 |
+| rankdef_exact_100_10| varied | 0 | 0 |
+| rankdef_200_20      | 3 | 0 | 0 |
+
+The flipped matrices (`rankdef_exact_100_10`, `rankdef_200_20`,
+`saddle_rankdef_100_20_5`, `stokes_q1p0_8`) all have constructed null
+dimension `k ≥ 5` but produce zero strict-zero pivots — their null
+space surfaces only as small band pivots. After sign-fallback these
+matrices report `zero = 0`, matching what MUMPS-with-ICNTL(24)=1 itself
+reports on `rankdef_50_5` and `rankdef_200_20` (cited in the
+`external_benchmarks/stress/report.py` `rankdef_like_cats` comment).
+
+### Touch points (new)
+
+- `src/dense/factor.rs`: five sign-fallback sites covering both 1×1
+  and 2×2 paths:
+  - basic `factor()` last-pivot loop,
+  - `do_1x1_pivot` band branch,
+  - `try_reject_1x1_frontal` band branch (multifrontal kernel),
+  - `count_1x1_inertia` (gamma0==0 column) band branch,
+  - `count_2x2_inertia` band branch — uses `sym2_eigenvalues` to count
+    both roots by sign rather than "one trace-sign + one zero".
+- `src/dense/factor.rs::BunchKaufmanParams::null_pivot_tol`: ~60-line
+  doc block on the field explaining the sign-fallback rationale,
+  FBRAIN3LS_0839 anchor, per-matrix impact table, and dyadic invariant
+  preservation. Every emission site has an inline comment cross-referencing
+  the doc block and issue #39.
+- `tests/parity.rs::parity_fbrain3ls_0839`: un-ignored. Doc comment
+  cites this addendum.
+- `external_benchmarks/stress/report.py::ALLOWLIST`: four `#39`
+  entries for matrices whose `zero=expected → zero=0` transition is
+  the intended sign-fallback behavior matching MUMPS convention:
+  `rankdef_exact_100_10`, `rankdef_200_20`, `saddle_rankdef_100_20_5`,
+  `stokes_q1p0_8`.
+- `src/bin/probe_f01.rs`, `src/bin/probe_fbrain.rs`: pivot-audit
+  binaries kept in tree for future regression triage.
+
+### Validation
+
+- Parity panel: 20/0/6 → 21/0/5 (FBRAIN3LS_0839 un-ignored, passes).
+- Stress: ok=52 / flagged=1 (only `sparsine` status=missing, pre-existing
+  and unrelated). Four matrices moved into ALLOWLIST(#39) with matching
+  rationale to the existing #28 entry.
+- F-01 invariant test `f01_rankdef_surfaces_at_least_one_zero_pivot`
+  still passes (case-a path unchanged on exact-zero pivots).
+- Full library + integration suite green.
+- No perf delta expected and none observed (the change is one extra
+  sign check per F-01 band hit; band hits are rare).

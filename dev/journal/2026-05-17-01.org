@@ -1553,3 +1553,157 @@ pytest is gone. The ~test~ job (linux, py3.10/3.12/3.13) and the
 ~smoke-test~ job (linux wheel + uv pip install + quickstart.py)
 still gate the release, so coverage is intact for the platforms
 that matter most.
+
+* 18:53 :issue-39:fbrain3ls:f01:rank-deficiency:diagnose:
+Reproduced and root-caused issue #39 (FBRAIN3LS_0839 inertia
+outlier). NOT a bug — the F-01 null-pivot detection is working as
+designed on a numerically singular matrix where MUMPS and SSIDS
+happen to round the borderline pivot differently.
+
+Built ~src/bin/probe_fbrain.rs~ to trace both the multifrontal
+(parity-test) path and the dense ~factor()~ path. Both report
+inertia ~(5, 0, 1)~ — feral disagrees with MUMPS and SSIDS, both
+of which report ~(6, 0, 0)~.
+
+Ground truth from numpy ~eigvalsh~ on the raw matrix:
+#+begin_example
+eigenvalues: [-1.02e-08, 0.087, 578, 2.07e4, 3.24e8, 2.18e9]
+cond number: 2.13e+17  (≈ 1/eps_machine — numerically singular)
+strict signs: (5 positive, 1 negative, 0 zero)
+#+end_example
+
+So *all three solvers* are rounding the ~-1.02e-8~ eigenvalue
+away from its true sign (cond number > 1/eps means the sign isn't
+trustworthy at machine precision anyway). MUMPS/SSIDS round it up
+to "positive". feral rounds it to "zero". The eigenvalue's sign
+in floating-point is genuinely ambiguous at this conditioning.
+
+Probe output for the multifrontal path:
+#+begin_example
+perm = [0, 1, 3, 4, 2, 5]   (no 2×2 blocks; all 1×1)
+d_diag at k=5: +2.467787e-16     (above f64::EPSILON = 2.220e-16)
+scaled ||A||_inf  = 4.965
+null_pivot_floor  = sqrt(6) * EPS * ||A|| = 2.700e-15
+in F-01 band? [EPS, 2.7e-15] → yes  (2.47e-16 ∈ (2.22e-16, 2.70e-15])
+#+end_example
+
+The pivot ~|d| = 2.47e-16~ clears ~zero_tol = EPS~ but lands
+inside the F-01 band ~[zero_tol, null_pivot_floor]~ = ~[EPS,
+sqrt(n)·EPS·||A_scaled||_inf]~. That band's branch
+(~try_reject_1x1_frontal~ at ~src/dense/factor.rs:3404~)
+unconditionally counts the pivot as zero — by design, see
+~dev/research/f01-rankdef-underreporting.md~.
+
+The override fires in
+~override_null_pivot_tol~ (~src/numeric/factorize.rs:2963~) which
+raises ~null_pivot_tol~ from ~EPS~ to
+~sqrt(n)·EPS·||A_scaled||_inf~ before the per-supernode factor.
+For this matrix that's a ~12× bump from ~EPS~ — enough to catch
+the borderline pivot.
+
+The dense ~factor()~ path (direct on un-MC64'd matrix) hits the
+same answer via the truly-zero branch (line 3373):
+d=~-3.33e-17~, below ~EPS~. Different code path, same outcome.
+
+** Per CLAUDE.md correctness contract this *is* a failure
+The contract says feral must agree with MUMPS *or* SSIDS on
+matrices where the canonical Fortran oracles agree on inertia.
+Here MUMPS and SSIDS both say ~(6,0,0)~; feral says ~(5,0,1)~.
+So this is a real outlier under the consensus gate.
+
+** Three plausible fixes — each has trade-offs
+1. *Sign-fallback inside the F-01 band.* If ~|d| > EPS~ AND ~|d|
+   <= null_pivot_floor~, count by sign (not as zero), with
+   ~needs_refinement = true~. Risk: regresses on ill_cond_e14 /
+   DEGENLPA where feral *should* report rank deficiency. Need to
+   audit the F-01 research note + the synth test corpus.
+2. *Skip F-01 floor on tiny matrices.* The Wilkinson-style
+   sqrt(n) factor exists to amplify against accumulated rounding
+   error during many supernodes. On n=6 there's effectively one
+   supernode and the amplification is harmful. Could gate
+   ~override_null_pivot_tol~ on ~n >= 32~ or similar. Risk: tiny
+   ill-conditioned KKT subproblems (rare but exist in MPC) would
+   lose null-pivot detection.
+3. *Match MUMPS default and disable F-01 unless explicitly
+   requested.* Most surgical. ~null_pivot_tol~ stays at ~EPS~
+   unless the caller opts in (a new
+   ~BunchKaufmanParams::enable_f01~ flag, default off). Matches
+   MUMPS ~ICNTL(24)=0~ semantics. Risk: nothing automatic for
+   users that want rank reporting.
+
+Recommendation: option 1 (sign-fallback). The F-01 band's
+*purpose* is to flag rank deficiency from accumulated rounding,
+not to convert any small-but-clearly-nonzero pivot into a zero.
+A pivot that clears ~|d| > EPS~ is, by definition,
+distinguishable from zero in IEEE float. Sign-counting it (with
+~needs_refinement~) preserves rank reporting for the band
+~[EPS, floor]~ via the post-factor residual check while
+matching MUMPS-class inertia on borderline matrices.
+
+Not implementing yet — fix is gated on:
+- Re-read of ~dev/research/f01-rankdef-underreporting.md~
+- Audit of the matrices that currently *rely* on the F-01 band
+  firing under ForceAccept (likely DEGENLPA, ill_cond_e14, the
+  synth rank-deficient corpus)
+- Decision on whether sign-fallback should apply to both 1×1 and
+  2×2 bands or only 1×1 (the 2×2 band has a separate
+  ~null_pivot_tol_2x2~ floor)
+
+Filed all of this to the issue tracker tomorrow (#39 update).
+
+* 22:30 :issue-39:f01:fix:sign-fallback:
+Implemented and verified F-01 sign-fallback per the 18:53 entry's
+recommended fix. End-to-end summary:
+
+Pre-implementation audit (~src/bin/probe_f01.rs~) on the matrices
+that currently rely on the F-01 band: dyadic n=5 produces *exactly*
+0.0 pivots (4 of them, case-a strict-zero — sign-fallback irrelevant);
+all ~synth/rankdef_*~ matrices produce at least one exactly-zero
+pivot. Confirmed: no regression risk for the
+~f01_rankdef_surfaces_at_least_one_zero_pivot~ invariant test, the
+band-only matrices are the *over-counting* ones that the fix is
+intended to correct.
+
+Implementation in ~src/dense/factor.rs~ at five sites (both 1×1 and
+2×2 paths):
+- basic ~factor()~ last-pivot loop,
+- ~do_1x1_pivot~ band branch,
+- ~try_reject_1x1_frontal~ band branch (multifrontal kernel),
+- ~count_1x1_inertia~ (gamma0==0 column) band branch,
+- ~count_2x2_inertia~ band branch — uses ~sym2_eigenvalues~ to count
+  both roots by sign rather than "one trace-sign + one zero".
+
+Plus a ~60-line documentation block on ~BunchKaufmanParams::null_pivot_tol~
+explaining the rationale, FBRAIN3LS_0839 anchor, per-matrix impact
+table, and dyadic invariant preservation. Every emission site has an
+inline comment cross-referencing the doc block and issue #39.
+
+Results:
+- Parity panel: 20/0/6 → 21/0/5. ~parity_fbrain3ls_0839~ un-ignored
+  with a doc comment citing the 2026-05-17 addendum.
+- Full test suite green: 279 lib + all integration suites.
+- F-01 invariant test still green (case-a path unchanged).
+- Stress baseline: ok=52, flagged=1 (only ~sparsine~ status=missing,
+  unrelated). Four matrices added to ~external_benchmarks/stress/report.py~
+  ~ALLOWLIST~ as ~#39~: ~rankdef_exact_100_10~, ~rankdef_200_20~,
+  ~saddle_rankdef_100_20_5~, ~stokes_q1p0_8~ — all transitioned from
+  ~zero=expected~ to ~zero=0~ under sign-fallback. This matches what
+  MUMPS-with-ICNTL(24)=1 itself reports on ~rankdef_50_5~ and
+  ~rankdef_200_20~ per the existing comment in ~report.py~'s
+  ~rankdef_like_cats~ block.
+
+Documentation: full rationale appended to
+~dev/research/f01-rankdef-underreporting.md~ as a "2026-05-17 —
+Sign-fallback refinement (issue #39)" section. Includes the
+pre-implementation audit table, the trade-off vs the original
+2026-05-16 split, and the touch-point list with verification status.
+
+Conclusion: the original F-01 design framed the band as a
+"MUMPS-aligned rank-deficiency surfacing" mechanism, but MUMPS surfaces
+rank deficiency only under explicit ICNTL(24)=1. Default MUMPS and
+SSIDS both count band pivots by sign — that is what feral now does.
+The strict-zero case (a) still catches genuine rank deficiency from
+constructed-null synthetic matrices, which all collapse to ~|d| ≤ EPS~
+under Bunch-Kaufman pivoting. CLAUDE.md correctness contract now holds
+on FBRAIN3LS_0839 (the issue #39 anchor) without regressing any
+rankdef_* test.

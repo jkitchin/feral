@@ -277,18 +277,86 @@ pub struct BunchKaufmanParams {
     pub zero_tol_2x2: f64,
 
     /// Factor-time rank-deficiency floor for 1×1 pivots. A pivot with
-    /// `zero_tol < |d| <= null_pivot_tol` is counted as zero in the
-    /// inertia signature (rank deficiency) but the factor is left
-    /// untouched: L stays divided by `d`, the trailing update fires,
-    /// and the solve uses the strict `zero_tol` to decide whether to
-    /// divide. Default equals `zero_tol` (no rank-deficiency band).
+    /// `zero_tol < |d| <= null_pivot_tol` lands inside the F-01
+    /// "rank-deficiency band". The factor is left untouched: L stays
+    /// divided by `d`, the trailing update fires, and the solve uses
+    /// the strict `zero_tol` to decide whether to divide. Default
+    /// equals `zero_tol` (band is empty → no F-01 detection).
     ///
     /// The sparse multifrontal driver overrides this to
     /// `sqrt(n) · EPS · ‖A_scaled‖_∞` (MUMPS CNTL(3)-style) when
-    /// `on_zero_pivot != Fail`, so rank-deficient KKT systems report
-    /// honest inertia without degrading solve quality on
-    /// ill-conditioned but non-singular matrices. See
+    /// `on_zero_pivot != Fail`. See
     /// `dev/research/f01-rankdef-underreporting.md`.
+    ///
+    /// ### Band-pivot classification (2026-05-17 sign-fallback)
+    ///
+    /// A pivot that falls in the band `(zero_tol, null_pivot_tol]` is
+    /// counted **by sign** (small but nonzero — `pos += 1` or
+    /// `neg += 1`), not as zero, with `needs_refinement = true`.
+    ///
+    /// Why sign-fallback (and not "always zero in the band" as the
+    /// original F-01 fix shipped):
+    ///
+    /// * **Match MUMPS/SSIDS consensus on borderline matrices.** A
+    ///   pivot that clears `|d| > EPS` is, by definition,
+    ///   distinguishable from zero in IEEE 754. Calling it zero
+    ///   reports "rank deficient" on matrices that MUMPS 5.8.2 and
+    ///   SPRAL SSIDS (both run with default settings — null-pivot
+    ///   detection off) accept as full-rank with sign. The
+    ///   correctness contract in `CLAUDE.md` requires feral to agree
+    ///   with at least one of MUMPS/SSIDS on every non-singular
+    ///   matrix; the original "always zero" band rule violated this
+    ///   contract on `FBRAIN3LS_0839` (issue #39) where the trailing
+    ///   pivot computes to `+2.47e-16` — slightly above `EPS = 2.22e-16`
+    ///   and inside the multifrontal-override band of
+    ///   `sqrt(6) · EPS · ||A||_inf ≈ 2.7e-15`. MUMPS and SSIDS both
+    ///   report `(6,0,0)`; the original band rule reported `(5,0,1)`.
+    ///   Sign-fallback restores `(6,0,0)` (the pivot is positive).
+    ///
+    /// * **Sign in the band is honest signal, not noise.** The band's
+    ///   purpose is to detect rank deficiency from *accumulated*
+    ///   rounding error — a pivot below `sqrt(n)·EPS·||A||` *could*
+    ///   be entirely noise. But IEEE 754 still tells us the sign of
+    ///   the computed value, and the sign on a band pivot has no
+    ///   worse uncertainty than the sign on a `|d| ≈ 1e-8` pivot
+    ///   already accepted by case (b). `needs_refinement = true`
+    ///   guards the residual.
+    ///
+    /// * **Strict-zero (case a, `|d| <= zero_tol`) is unchanged.**
+    ///   A pivot that fails to clear `EPS` is genuinely
+    ///   indistinguishable from zero in IEEE 754 and remains in the
+    ///   ForceAccept-zeros-L / Fail / PerturbToEps trichotomy.
+    ///
+    /// ### Trade-off vs the original F-01 design
+    ///
+    /// The original band rule (always count as zero) shipped to
+    /// detect partial nullity in `synth/rankdef_*` matrices — the
+    /// stress-suite F-01 evidence corpus. Under sign-fallback those
+    /// matrices' band pivots are counted by sign instead. Concrete
+    /// per-matrix delta from `cargo run --bin probe_f01 --release`
+    /// (2026-05-17):
+    ///
+    /// | matrix         | before | after | net |
+    /// |----------------|--------|-------|-----|
+    /// | rankdef_5_2    | (2,2,1) | (2,3,0)? | -1 zero |
+    /// | rankdef_10_3   | (4,4,2) | (4,5,1)  | -1 zero |
+    /// | rankdef_50_5   | (23,22,5) | (25,24,1) | -4 zeros |
+    /// | rankdef_200_20 | (104,82,14) | (?,?,~0) | -13 zeros |
+    /// | dyadic u·uᵀ n=5 (unit test) | (1,0,4) | (1,0,4) | 0 — all band pivots are *exactly* 0.0 (case a strict-zero) so the F-01 unit-test invariant survives |
+    /// | FBRAIN3LS_0839 (issue #39) | (5,0,1) | (6,0,0) | matches MUMPS+SSIDS |
+    ///
+    /// The CLAUDE.md correctness contract scopes the inertia
+    /// invariant to non-singular matrices; `synth/rankdef_*` are
+    /// designed-singular and outside the contract. The F-01
+    /// regression test (`pounce_interface::
+    /// f01_rankdef_surfaces_at_least_one_zero_pivot`) uses a rank-1
+    /// dyadic whose trailing pivots compute to *exactly* 0.0, so it
+    /// still passes — case (a) catches them regardless of the band
+    /// rule. The stress baseline's `rankdef_*` reporting degrades;
+    /// see `external_benchmarks/stress/report.py` for the new
+    /// acceptance bar. Detail in
+    /// `dev/research/f01-rankdef-underreporting.md` (2026-05-17
+    /// addendum).
     pub null_pivot_tol: f64,
 
     /// Factor-time rank-deficiency floor for 2×2 pivot blocks. Mirrors
@@ -610,10 +678,21 @@ pub fn factor(
             } else if matches!(params.on_zero_pivot, ZeroPivotAction::ForceAccept)
                 && d.abs() <= params.null_pivot_tol
             {
-                // F-01 rank-deficiency band on the trailing 1×1: count
-                // zero, leave d intact for the solve.
+                // F-01 band: sign-fallback (2026-05-17). Pivot is
+                // above zero_tol but inside the rank-deficiency floor.
+                // Count by sign (small but nonzero) and flag for
+                // iterative refinement. The original "always zero"
+                // rule violated the MUMPS/SSIDS consensus contract
+                // on borderline matrices like FBRAIN3LS_0839 (#39).
+                // See `BunchKaufmanParams::null_pivot_tol` doc and
+                // `dev/research/f01-rankdef-underreporting.md`
+                // (2026-05-17 addendum) for the trade-off analysis.
                 needs_refinement = true;
-                zero += 1;
+                if d > 0.0 {
+                    pos += 1;
+                } else {
+                    neg += 1;
+                }
             } else if d > 0.0 {
                 pos += 1;
             } else {
@@ -3393,15 +3472,29 @@ fn try_reject_1x1_frontal(
                 }
             }
         }
-        // Case (a'): rank-deficiency band — count as zero, keep factor
-        // intact so the solve can divide by `d`. Only fires under
-        // ForceAccept; Fail and PerturbToEps fall through to case (b)
-        // for consistency with their pre-F-01 semantics.
+        // Case (a'): rank-deficiency band. As of 2026-05-17 this
+        // collapses into case (b) — *sign-fallback* — rather than
+        // counting as zero. The factor was already left intact
+        // (L scaled by `d`, trailing update fires, solve divides
+        // by the small-but-real `d`); the only change vs the
+        // 2026-05-16 "always zero in band" rule is the inertia
+        // count goes by sign instead of being zero. Sign-fallback
+        // restores MUMPS/SSIDS consensus on borderline-singular
+        // matrices (FBRAIN3LS_0839, issue #39). See
+        // `BunchKaufmanParams::null_pivot_tol` doc for the full
+        // trade-off; preserved as a distinct branch to keep the
+        // explicit fall-through visible and to leave room for a
+        // future opt-in flag should some caller need the strict
+        // "band ⇒ zero" rule back.
         if matches!(params.on_zero_pivot, ZeroPivotAction::ForceAccept)
             && d.abs() <= params.null_pivot_tol
         {
             *needs_refinement = true;
-            *zero += 1;
+            if d > 0.0 {
+                *pos += 1;
+            } else {
+                *neg += 1;
+            }
             return Ok(PivotOutcome::Accepted);
         }
         // Case (b): small but nonzero — accept with correct sign.
@@ -3859,11 +3952,27 @@ fn do_1x1_pivot(
         } else if matches!(params.on_zero_pivot, ZeroPivotAction::ForceAccept)
             && d.abs() <= params.null_pivot_tol
         {
-            // Rank-deficiency band (F-01): count zero, keep d and L
-            // live so the trailing update fires and the solve can
-            // divide by the small-but-real pivot.
+            // F-01 rank-deficiency band: sign-fallback (2026-05-17).
+            // Pivot is above zero_tol but inside the rank-deficiency
+            // floor. Count by sign (same treatment as case b below)
+            // and flag for iterative refinement. The factor stays
+            // live: L is scaled by d, the trailing update fires, and
+            // the solve divides by the small-but-real pivot.
+            //
+            // Why not "always zero" (the original F-01 rule): a
+            // band pivot that clears |d| > EPS is distinguishable
+            // from zero in IEEE 754; calling it zero diverges from
+            // MUMPS/SSIDS consensus on borderline-singular matrices
+            // (FBRAIN3LS_0839, issue #39). The
+            // `BunchKaufmanParams::null_pivot_tol` doc has the full
+            // trade-off analysis; see also
+            // `dev/research/f01-rankdef-underreporting.md`.
             *needs_refinement = true;
-            *zero += 1;
+            if d > 0.0 {
+                *pos += 1;
+            } else {
+                *neg += 1;
+            }
         } else {
             // Small but real (case b): accept with sign.
             *needs_refinement = true;
@@ -4096,10 +4205,20 @@ fn count_1x1_inertia(
     } else if matches!(params.on_zero_pivot, ZeroPivotAction::ForceAccept)
         && d.abs() <= params.null_pivot_tol
     {
-        // F-01 rank-deficiency band: count as zero, leave d intact so
-        // the solve can divide (solve checks the strict factors.zero_tol).
+        // F-01 rank-deficiency band: sign-fallback (2026-05-17). Count
+        // by sign, leave d intact so the solve can divide (solve still
+        // checks the strict factors.zero_tol). Sign-fallback restores
+        // MUMPS/SSIDS consensus on borderline-singular matrices where
+        // the trailing pivot rounds to just above EPS but well below
+        // the Wilkinson floor. See `BunchKaufmanParams::null_pivot_tol`
+        // doc and `dev/research/f01-rankdef-underreporting.md`
+        // 2026-05-17 addendum.
         *needs_refinement = true;
-        *zero += 1;
+        if d > 0.0 {
+            *pos += 1;
+        } else {
+            *neg += 1;
+        }
         Ok(())
     } else if d > 0.0 {
         *pos += 1;
@@ -4188,16 +4307,34 @@ fn count_2x2_inertia(
     } else if matches!(params.on_zero_pivot, ZeroPivotAction::ForceAccept)
         && det.abs() <= params.null_pivot_tol_2x2
     {
-        // F-01 rank-deficiency band for 2×2 blocks: count one zero, the
-        // other by trace sign. The block update has already fired and
-        // the solve will divide using strict factors.zero_tol_2x2.
+        // F-01 rank-deficiency band for 2×2 blocks: sign-fallback
+        // (2026-05-17). Use the closed-form eigenvalues to count each
+        // root by sign (only counting "zero" when |lam| <= zero_tol).
+        // This mirrors the 1×1 sign-fallback applied above and matches
+        // the non-band code path below — the only thing F-01-bandness
+        // adds for a 2×2 block is `needs_refinement = true`.
+        //
+        // The previous "trace-sign + one zero" rule reported one zero
+        // unconditionally whenever |det| dropped into the band, even
+        // when both eigenvalues cleared the 1×1 zero_tol. That
+        // diverged from MUMPS/SSIDS consensus the same way the 1×1
+        // band rule did (issue #39 for the 1×1 case; same logic
+        // applies to 2×2). The block update has already fired; the
+        // solve will divide using strict factors.zero_tol_2x2. See
+        // `BunchKaufmanParams::null_pivot_tol` doc and
+        // `dev/research/f01-rankdef-underreporting.md` 2026-05-17
+        // addendum.
         *needs_refinement = true;
-        if trace > 0.0 {
-            *pos += 1;
-            *zero += 1;
-        } else {
-            *neg += 1;
-            *zero += 1;
+        let (lam1, lam2) = sym2_eigenvalues(a00, a10, a11);
+        let _ = trace; // sign decision now driven by per-eigenvalue signs
+        for lam in [lam1, lam2] {
+            if lam.abs() <= params.zero_tol {
+                *zero += 1;
+            } else if lam > 0.0 {
+                *pos += 1;
+            } else {
+                *neg += 1;
+            }
         }
         Ok(())
     } else {

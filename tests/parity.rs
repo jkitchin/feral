@@ -173,10 +173,17 @@ fn parity_cresc132_0000() {
     run_parity("cresc132", "CRESC132_0000");
 }
 
-// Inertia mismatch (feral=(5, 0, 1) mumps=(6, 0, 0) ssids=(6, 0, 0))
-// — feral is the outlier; tracked as #39.
+// Issue #39: previously feral reported (5,0,1) while MUMPS 5.8.2 and
+// SPRAL SSIDS both report (6,0,0). Root-caused to the F-01
+// rank-deficiency band converting the trailing pivot
+// |d| = 2.47e-16 (above EPS, inside the
+// sqrt(n)·EPS·||A||_inf override band) into a zero, which diverged
+// from oracle consensus on a borderline-singular matrix
+// (cond ≈ 2.13e+17). Resolved 2026-05-17 by switching the band rule
+// from "always zero" to sign-fallback. See
+// `BunchKaufmanParams::null_pivot_tol` doc and
+// `dev/research/f01-rankdef-underreporting.md` 2026-05-17 addendum.
 #[test]
-#[ignore]
 fn parity_fbrain3ls_0839() {
     run_parity("fbrain3ls", "FBRAIN3LS_0839");
 }

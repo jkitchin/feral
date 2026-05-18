@@ -55,8 +55,8 @@ by 5–8× on a tiny-IPM-KKT class where SSIDS itself trails MUMPS by
 4–8×; that gap is acknowledged and deferred, with the proper
 investigation queued in the reference-solver note.
 
-The full test suite is **332 tests passing, 0 failed** (lib +
-integration, 20 ignored); CI runs the same `pre-commit` hook set
+The full test suite is **534 tests passing, 0 failed** (lib +
+integration, 19 ignored); CI runs the same `pre-commit` hook set
 used locally so local and CI cannot drift.
 
 The Phase 2 plan lives in
@@ -95,7 +95,7 @@ These are hard rules, recorded in `dev/decisions.md`:
    are test infrastructure only, built manually and never linked from
    `cargo`.
 3. MIT license.
-4. Clean-room implementation from published papers and BSD-licensed
+4. Primary implementation from published papers and BSD-licensed
    references. Canonical references are cited in `references.bib`.
 5. Inertia must be exactly correct — no tolerance on inertia counts for
    Definitive matrices in the consensus framework.
@@ -251,15 +251,15 @@ To rebuild after editing FERAL source: `cargo build --release && make
 FERAL exposes its tuning options through environment variables that
 the C ABI reads on `feral_new()`:
 
-| variable                  | default | effect |
-|---------------------------|---------|--------|
-| `FERAL_CASCADE_BREAK`     | off     | `on` arms the static-pivot cascade-break perturbation unconditionally |
-| `FERAL_AUTO_CB_BETA`      | `0.05`  | warm cascade-break auto-arm threshold (fraction of `n`); `0` disables |
-| `FERAL_SCALING`           | auto    | `auto` \| `infnorm` \| `mc64` \| `identity` |
-| `FERAL_PIVTOL`            | `1e-8`  | Bunch-Kaufman partial-pivot threshold |
-| `FERAL_PARALLEL`          | off     | `on` enables the rayon-based parallel multifrontal driver |
-| `FERAL_FACTOR_TRACE`      | off     | `on` streams per-factor wall + delayed-pivot counts to stderr |
-| `FERAL_MC64_TRACE`        | off     | `on` streams per-call MC64 wall to stderr |
+| variable              | default | effect                                                                |
+|-----------------------|---------|-----------------------------------------------------------------------|
+| `FERAL_CASCADE_BREAK` | off     | `on` arms the static-pivot cascade-break perturbation unconditionally |
+| `FERAL_AUTO_CB_BETA`  | `0.05`  | warm cascade-break auto-arm threshold (fraction of `n`); `0` disables |
+| `FERAL_SCALING`       | auto    | `auto` | `infnorm` | `mc64` | `identity`                              |
+| `FERAL_PIVTOL`        | `1e-8`  | Bunch-Kaufman partial-pivot threshold                                 |
+| `FERAL_PARALLEL`      | off     | `on` enables the rayon-based parallel multifrontal driver             |
+| `FERAL_FACTOR_TRACE`  | off     | `on` streams per-factor wall + delayed-pivot counts to stderr         |
+| `FERAL_MC64_TRACE`    | off     | `on` streams per-call MC64 wall to stderr                             |
 
 The defaults are the ones validated in the v0.4.0 Mittelmann sweep
 (see `CHANGELOG.md`).
@@ -319,15 +319,17 @@ story of how and why it was built.
 
 ## Known limitations
 
-- **Rank-deficient-KKT inertia outlier (FBRAIN3LS_0839).** FERAL
-  reports `(5, 0, 1)` where both MUMPS and SSIDS agree on `(6, 0, 0)`
-  — feral is the outlier. The other historically-failing rank-
-  deficient panel matrices (ACOPP14×2, ACOPP30 × 2, CERI651CLS) all
-  agree with SSIDS against MUMPS and now pass the oracle-consensus
-  gate per the CLAUDE.md correctness contract. ACOPP30_0005 is a
-  three-way oracle disagreement (excluded). Closure likely requires
-  further work on rank-revealing behavior at the root supernode
-  where `may_delay = false` forces an in-place `ForceAccept`.
+- **Three-way oracle disagreement (ACOPP30_0005).** Feral, MUMPS, and
+  SSIDS each report a different inertia on this borderline KKT
+  matrix; it is `#[ignore]`'d in `tests/parity.rs` and excluded by
+  the consensus framework. The other historically-failing rank-
+  deficient panel matrices (FBRAIN3LS_0839, ACOPP14×2, ACOPP30×2,
+  CERI651CLS) all now pass the oracle-consensus gate per the
+  CLAUDE.md correctness contract. FBRAIN3LS_0839 closed 2026-05-17
+  via the F-01 sign-fallback fix
+  ([#39](https://github.com/jkitchin/feral/issues/39); see
+  [`dev/research/f01-rankdef-underreporting.md`](dev/research/f01-rankdef-underreporting.md)
+  2026-05-17 addendum).
 - **Tiny residual gap on a few panel matrices.** CERI651CLS_0487 and
   three SSI matrices (`SSI_1685`, `SSI_2412`, `SSI_2597`) produce
   feral residuals 1.6×–1600× larger than MUMPS — all still tiny in

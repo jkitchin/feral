@@ -4,6 +4,26 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — F-01 sign-fallback closes FBRAIN3LS_0839 inertia outlier ([#39][i39])
+
+Bunch-Kaufman pivots whose magnitude lands in the F-01
+rank-deficiency band `(EPS, sqrt(n)·EPS·||A_scaled||_∞]` are now
+counted by sign instead of as zero, matching the default convention
+of both reference solvers (MUMPS without `ICNTL(24)=1`, SSIDS). The
+strict-zero path (`|d| ≤ EPS`) is unchanged, so synthetic
+rank-deficient matrices whose null pivots collapse to exactly 0.0
+under BK partial pivoting still detect at least one zero. Five
+emission sites in `src/dense/factor.rs` (basic `factor` last-pivot,
+`do_1x1_pivot`, `try_reject_1x1_frontal`, `count_1x1_inertia`,
+`count_2x2_inertia`) and a ~60-line doc block on
+`BunchKaufmanParams::null_pivot_tol` are updated together; full
+rationale in `dev/research/f01-rankdef-underreporting.md` 2026-05-17
+addendum. Parity panel: 20/0/6 → 21/0/5
+(`parity_fbrain3ls_0839` un-ignored). Four stress matrices
+(`rankdef_exact_100_10`, `rankdef_200_20`, `saddle_rankdef_100_20_5`,
+`stokes_q1p0_8`) now report `zero=0` matching MUMPS-with-`ICNTL(24)=1`
+and are ALLOWLISTED(#39) in `external_benchmarks/stress/report.py`.
+
 ### Changed — Python wheel pipeline now uses `PyO3/maturin-action`
 
 The v0.4.0 release publish revealed two cibuildwheel-config bugs that

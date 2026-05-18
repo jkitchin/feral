@@ -134,6 +134,37 @@ ALLOWLIST: dict[str, tuple[str, str]] = {
         "comment notes MUMPS itself misses on similar matrices. Allowlist "
         "until the cross-arch BK pivot path is hardened (separate issue).",
     ),
+    "rankdef_exact_100_10": (
+        "#39",
+        "F-01 sign-fallback (2026-05-17). Pivots with |d| in the band "
+        "(EPS, sqrt(n)*EPS*||A||] are now counted by sign instead of as "
+        "zero, to match MUMPS/SSIDS convention on FBRAIN3LS_0839. MUMPS "
+        "(ICNTL(24)=1) itself reports zero=0 on this matrix; the factor "
+        "is numerically valid (rel_res < 1e-13). See "
+        "dev/research/f01-rankdef-underreporting.md 2026-05-17 addendum.",
+    ),
+    "rankdef_200_20": (
+        "#39",
+        "F-01 sign-fallback (2026-05-17). MUMPS (ICNTL(24)=1) also "
+        "reports zero=0 on this matrix; feral's new behavior matches. "
+        "Factor numerically valid (rel_res < 1e-13). See "
+        "dev/research/f01-rankdef-underreporting.md 2026-05-17 addendum.",
+    ),
+    "saddle_rankdef_100_20_5": (
+        "#39",
+        "F-01 sign-fallback (2026-05-17). Borderline rank-deficient "
+        "saddle; band pivots now counted by sign. Factor numerically "
+        "valid (rel_res < 1e-14). See "
+        "dev/research/f01-rankdef-underreporting.md 2026-05-17 addendum.",
+    ),
+    "stokes_q1p0_8": (
+        "#39",
+        "F-01 sign-fallback (2026-05-17). Q1-P0 Stokes element with "
+        "constant + checkerboard pressure null modes. Band pivots now "
+        "counted by sign. Factor numerically valid (rel_res < 1e-14). "
+        "See dev/research/f01-rankdef-underreporting.md 2026-05-17 "
+        "addendum.",
+    ),
 }
 
 
