@@ -364,4 +364,9 @@ and code. Canonical references:
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+FERAL is MIT-licensed. See [`LICENSE`](LICENSE).
+
+Third-party attributions for code incorporated from other open-source
+projects (notably the SPRAL Hungarian/MC64 scaling routines used in
+`src/scaling/`) are recorded in [`NOTICE`](NOTICE), with the full
+upstream license texts in [`LICENSE-THIRD-PARTY`](LICENSE-THIRD-PARTY).
