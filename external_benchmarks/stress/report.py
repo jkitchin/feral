@@ -113,47 +113,18 @@ def load_oracles(path: Path) -> dict[str, dict]:
 # underlying issue is tracked. Each entry must cite a GH issue and a
 # short reason. Remove the entry when the issue closes.
 #
-# The allowlist below has two kinds of entry:
-#
-#  * #40 cross-arch Bunch-Kaufman pivot divergence — feral-aarch64
-#    reports zero=1 on two borderline rank-deficient synthetics
-#    (rankdef_50_5, rankdef_exact_50_5) where the canonical oracles
-#    report zero=0. On x86 (CI) feral matches an oracle, so these are
-#    local-aarch64-only and the x86 gate is green for them.
-#  * #42 both-arch consensus miss — on rankdef_10_3 feral reports
-#    zero=1 on *both* x86 and aarch64 (verified: CI run 26159004313
-#    reports (4,5,1) on x86, identical to local aarch64), matching no
-#    canonical oracle. This one flags on CI too, so it is allowlisted
-#    on every architecture, not just locally.
-#
-# All affected factors are numerically valid (rel_res < 1e-13); only
-# the strict-zero pivot count is in dispute.
+# Currently empty. Issues #40 and #42 — the borderline rank-deficient
+# synthetics rankdef_10_3 / rankdef_50_5 / rankdef_exact_50_5, whose
+# `zero` inertia count diverged from the canonical oracles (no
+# consensus match on #42, cross-arch divergence on #40) — were
+# resolved by Option A: feral now counts every pivot by sign, so the
+# `zero` component is structurally 0 under ForceAccept on every
+# architecture. feral reports the SSIDS/MA57 consensus triple on all
+# three matrices. See dev/decisions.md and
+# dev/research/f01-rankdef-underreporting.md.
 #
 # Format: matrix_name -> (issue_url_or_number, reason).
-ALLOWLIST: dict[str, tuple[str, str]] = {
-    "rankdef_10_3": (
-        "#42",
-        "Both-arch consensus miss (not cross-arch). feral reports "
-        "zero=1 on x86 AND aarch64 alike (CI run 26159004313 gives "
-        "(4,5,1) on x86, identical to local aarch64). That matches no "
-        "canonical oracle: MUMPS ICNTL(24)=1 zero=3, SSIDS zero=0. "
-        "Allowlisted on every architecture until #42 is resolved.",
-    ),
-    "rankdef_50_5": (
-        "#40",
-        "Cross-arch BK-pivot divergence. feral-aarch64 reports zero=1; "
-        "MUMPS ICNTL(24)=1 and SSIDS both report zero=0. CI x86 feral "
-        "reports zero=0, matching both oracles, so x86 is clean. "
-        "Allowlisted for local aarch64 runs until #40 is resolved.",
-    ),
-    "rankdef_exact_50_5": (
-        "#40",
-        "Cross-arch BK-pivot divergence. feral-aarch64 reports zero=1; "
-        "MUMPS ICNTL(24)=1 and SSIDS both report zero=0. CI x86 feral "
-        "reports zero=0, matching both oracles, so x86 is clean. "
-        "Allowlisted for local aarch64 runs until #40 is resolved.",
-    ),
-}
+ALLOWLIST: dict[str, tuple[str, str]] = {}
 
 
 def classify(row: dict, side: dict | None, rel_res_threshold: float,
