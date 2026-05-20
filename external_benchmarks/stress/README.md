@@ -66,12 +66,17 @@ python3 external_benchmarks/stress/report.py
 
 1. `status != ok` (factor failure, symbolic failure, read failure)
 2. `rel_res > 1e-6` (configurable via `--rel-res`)
-3. For rank-deficient synthetics: `inertia.zero` outside the accepted
-   band. BK pivoting can absorb part or all of a constructed null
-   space into normal pivots, so the band is `1 <= zero <= expected`
-   — except for matrices in `classify()`'s `MUMPS_REPORTS_ZERO0` set,
-   where the MUMPS 5.8.2 (ICNTL(24)=1) oracle itself reports `zero=0`
-   and the band is therefore `0 <= zero <= expected`.
+3. For rank-deficient synthetics: `inertia.zero` matches no canonical
+   oracle. Borderline-singular matrices have no unique `zero` — a
+   near-null pivot can legitimately be counted by sign (`zero=0`) or
+   detected as null (`zero>0`), and canonical solvers disagree by
+   design. `CLAUDE.md` defines "correct" as agreeing with at least
+   one of {MUMPS, SSIDS}, so `classify()` accepts feral's `zero` iff
+   it equals MUMPS's or SSIDS's frozen value in `oracles.json`.
+   Regenerate that file with `gen_oracles.py` after any `synth.py`
+   change — the `mtx_sha256` pin makes `report.py` flag a stale
+   oracle rather than gate against the wrong matrix bytes. See
+   `dev/research/stress-consensus-oracle.md`.
 4. `inertia.pos + inertia.neg + inertia.zero != n` (impossible sum)
 
 Exit code is `0` iff no matrix is flagged — wire `report.py` into CI
@@ -130,13 +135,14 @@ borderline matrix moves), do the change in two parts:
 
 Never edit `baseline.json` by hand. Always regenerate it via
 `report.py --json`. The hard rule from `CLAUDE.md` — *NEVER loosen a
-test tolerance without human approval* — applies to `--rel-res` and
-to the inertia-oracle rules in `expected_zero()` / `classify()`.
+test tolerance without human approval* — applies to `--rel-res`, to
+the consensus rule in `classify()`, and to `oracles.json` (which must
+only ever be regenerated from the real solver binaries via
+`gen_oracles.py`, never hand-edited).
 
 ### How to skip or allowlist a matrix
 
-There is no per-matrix allowlist mechanism in `report.py` today.
-The current design relies on two earlier safety valves:
+`report.py` has three safety valves, in order of preference:
 
 - **Category-level pardon** for rank-deficient refusals.
   `classify()` already returns no flags when a matrix in the
@@ -149,13 +155,16 @@ The current design relies on two earlier safety valves:
   all (e.g. a download that times out at the 10-min budget). Remove
   the row from `manifest.tsv` rather than skipping it at report
   time; the manifest is the authoritative scope of the suite.
-
-If you do need a per-matrix allowlist in the future, the convention
-will be a dict at the top of `report.py` keyed on
-`f"{group}__{name}"` with the value carrying the issue reference,
-e.g. `"GHS_indef__bloweybl": "issue #32 -- saddle-block 2/3-zero diag"`.
-Each entry must reference an open GitHub issue tracking the fix;
-allowlists without an issue reference will be rejected in review.
+- **Per-matrix allowlist** (`ALLOWLIST` dict at the top of
+  `report.py`) for a known, tracked divergence that should not block
+  CI while the fix is in flight. Each entry is keyed on the matrix
+  `name` and carries `(issue, reason)`; both are mandatory and an
+  allowlist entry without a GitHub issue reference is rejected in
+  review. The current entries split two ways: two `#40` (cross-arch
+  BK-pivot divergence) entries that flag on local aarch64 only — x86
+  CI matches a canonical oracle for those — and one `#42`
+  (`rankdef_10_3`) for a both-arch consensus miss that flags on every
+  architecture, CI included. Remove an entry when its issue closes.
 
 ### Caching SuiteSparse downloads in CI
 

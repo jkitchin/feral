@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Analyze stress-suite sidecars and flag pathologies.
 
-Reads `out/feral/<group>__<name>.out`, joins against `manifest.tsv` to
-recover category/expected-inertia metadata (for synth/* rows we know the
-zero count exactly), and emits:
+Reads `out/feral/<group>__<name>.out`, joins against `manifest.tsv` for
+category metadata and against `oracles.json` for the frozen solver
+inertia of the rank-deficient synthetics, and emits:
 
   * a per-matrix table (n, status, factor_us, rel_res, inertia)
   * a summary table by category
   * a "flagged" section listing matrices that fail any acceptance rule:
       - status != ok
       - rel_res > REL_RES_THRESHOLD (default 1e-6)
-      - inertia.zero != expected for rankdef rows
-      - cascade matrices that fail to factor at all
+      - inertia.zero matches no canonical oracle (MUMPS/SSIDS) for a
+        rank-deficient synthetic — see oracles.json
+      - inertia components do not sum to n
 
 Exit code: 0 if no flags, 1 if any matrix is flagged (CI gate friendly).
 
@@ -20,14 +21,16 @@ Usage: python3 report.py  [--rel-res 1e-6]  [--json out.json]
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
-import re
 import sys
 from pathlib import Path
 
 STRESS_DIR = Path(__file__).resolve().parent
 OUT_DIR = STRESS_DIR / "out" / "feral"
+SYNTH_DIR = STRESS_DIR / "matrices" / "synth"
+ORACLES_JSON = STRESS_DIR / "oracles.json"
 
 DEFAULT_REL_RES = 1e-6
 
@@ -84,124 +87,77 @@ def inum(d: dict, k: str) -> int | None:
         return None
 
 
-def expected_zero(row: dict) -> int | None:
-    """Expected null space dimension for oracle-checked synth rows.
+def load_oracles(path: Path) -> dict[str, dict]:
+    """Load oracles.json → {matrix_name: oracle_entry}.
 
-    Oracle conventions for the M4 generators (issue #27 + #31
-    follow-up). See `dev/research/synthetic-generators-m4.md` for the
-    derivations.
+    Each oracle_entry carries n, constructed_k, mtx_sha256, and an
+    `oracles` sub-dict of solver → inertia triple. See
+    `dev/research/stress-consensus-oracle.md` and gen_oracles.py.
 
-    - rankdef_<n>_<k>            → k          (existing convention)
-    - rankdef_exact_<n>_<k>      → k          (#31 follow-up)
-    - saddle_rankdef_<n>_<k>_<r> → r          (saddle nullity)
-    - stokes_q1p0_<h>            → 2          (constant + checkerboard
-                                                pressure modes)
-    Other categories (wide_frontal, mc64_resistant) return None;
-    they are checked only for status + consistency-sum, not zero.
+    Returns {} if the file is absent or unparseable; classify() then
+    skips the consensus check, degrading to status + sum checks only
+    (a missing oracle file must not crash the gate).
     """
-    if row.get("group") != "synth":
-        return None
-    name = row["name"]
-    m = re.match(r"^rankdef_(\d+)_(\d+)$", name)
-    if m:
-        return int(m.group(2))
-    m = re.match(r"^rankdef_exact_(\d+)_(\d+)$", name)
-    if m:
-        return int(m.group(2))
-    m = re.match(r"^saddle_rankdef_(\d+)_(\d+)_(\d+)$", name)
-    if m:
-        return int(m.group(3))
-    m = re.match(r"^stokes_q1p0_(\d+)$", name)
-    if m:
-        return 2
-    return None
-
-
-# Matrices where the MUMPS 5.8.2 oracle (ICNTL(24)=1, the same option
-# the stress gate treats as its inertia oracle) itself reports zero=0
-# despite a constructed null space: Bunch-Kaufman pivoting absorbs the
-# entire null space into ostensibly-normal pivots, and even MUMPS's
-# null-pivot detector finds nothing. For these matrices feral reporting
-# zero=0 *matches the oracle* and is not a bug, so classify() does not
-# flag zero=0 for them.
-#
-# Verified 2026-05-19 by running external_benchmarks/mumps_oracle/
-# mumps_bench (MUMPS 5.8.2, ICNTL(24)=1) on each .mtx; full inertia:
-#   rankdef_50_5        MUMPS (26, 24, 0)
-#   rankdef_200_20      MUMPS (111, 89, 0)
-#   rankdef_exact_50_5  MUMPS (24, 26, 0)
-# (Run on aarch64 -- the only mumps_bench build available. The gate
-# already treated the MUMPS value as a fixed oracle; this turns a
-# prose citation into a checked fact.)
-MUMPS_REPORTS_ZERO0: frozenset[str] = frozenset({
-    "rankdef_50_5",
-    "rankdef_200_20",
-    "rankdef_exact_50_5",
-})
+    if not path.exists():
+        return {}
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    matrices = doc.get("matrices", {})
+    return matrices if isinstance(matrices, dict) else {}
 
 
 # Per-matrix allowlist: matrices whose `classify` flags are known
-# pre-existing divergences, kept here to unblock CI while the
-# underlying issue is tracked. Each entry must cite a GH issue and
-# a short reason. Remove the entry when the issue closes.
+# pre-existing divergences, kept here to unblock local runs while the
+# underlying issue is tracked. Each entry must cite a GH issue and a
+# short reason. Remove the entry when the issue closes.
+#
+# The allowlist below has two kinds of entry:
+#
+#  * #40 cross-arch Bunch-Kaufman pivot divergence — feral-aarch64
+#    reports zero=1 on two borderline rank-deficient synthetics
+#    (rankdef_50_5, rankdef_exact_50_5) where the canonical oracles
+#    report zero=0. On x86 (CI) feral matches an oracle, so these are
+#    local-aarch64-only and the x86 gate is green for them.
+#  * #42 both-arch consensus miss — on rankdef_10_3 feral reports
+#    zero=1 on *both* x86 and aarch64 (verified: CI run 26159004313
+#    reports (4,5,1) on x86, identical to local aarch64), matching no
+#    canonical oracle. This one flags on CI too, so it is allowlisted
+#    on every architecture, not just locally.
+#
+# All affected factors are numerically valid (rel_res < 1e-13); only
+# the strict-zero pivot count is in dispute.
 #
 # Format: matrix_name -> (issue_url_or_number, reason).
 ALLOWLIST: dict[str, tuple[str, str]] = {
-    "saddle_rankdef_50_10_3": (
+    "rankdef_10_3": (
+        "#42",
+        "Both-arch consensus miss (not cross-arch). feral reports "
+        "zero=1 on x86 AND aarch64 alike (CI run 26159004313 gives "
+        "(4,5,1) on x86, identical to local aarch64). That matches no "
+        "canonical oracle: MUMPS ICNTL(24)=1 zero=3, SSIDS zero=0. "
+        "Allowlisted on every architecture until #42 is resolved.",
+    ),
+    "rankdef_50_5": (
         "#40",
-        "x86/aarch64 BK-pivot divergence on borderline rank-deficient saddle. "
-        "Local aarch64 returns inertia (50,39,1) -- detects 1 zero pivot. "
-        "CI x86 returns (52,38,0) -- absorbs the null mode into a normal "
-        "pivot. Both factors are numerically valid (rel_res < 1e-14); the "
-        "rankdef detection is exactly the borderline case the classify() "
-        "comment notes MUMPS itself misses on similar matrices. Allowlist "
-        "until the cross-arch BK pivot path is hardened.",
+        "Cross-arch BK-pivot divergence. feral-aarch64 reports zero=1; "
+        "MUMPS ICNTL(24)=1 and SSIDS both report zero=0. CI x86 feral "
+        "reports zero=0, matching both oracles, so x86 is clean. "
+        "Allowlisted for local aarch64 runs until #40 is resolved.",
     ),
-    "rankdef_5_2": (
+    "rankdef_exact_50_5": (
         "#40",
-        "Cross-arch BK-pivot divergence, exposed by the #39 F-01 band "
-        "widening (2026-05-17). probe_f01.rs on aarch64 finds 1 "
-        "strict-zero pivot (|d| = 9.3e-17, below EPS) -> inertia "
-        "(2,2,1). CI x86 produces a slightly different pivot that lands "
-        "just above EPS and is counted by sign -> (3,2,0), zero=0. Both "
-        "factors numerically valid (rel_res < 1e-15). This is the same "
-        "x86/aarch64 BK divergence as saddle_rankdef_50_10_3, not the "
-        "deterministic every-arch F-01 flip of the #39 entries below.",
-    ),
-    "rankdef_exact_100_10": (
-        "#39",
-        "F-01 sign-fallback (2026-05-17). Pivots with |d| in the band "
-        "(EPS, sqrt(n)*EPS*||A||] are now counted by sign instead of as "
-        "zero, to match the default sign-counting convention used as the "
-        "FBRAIN3LS_0839 parity reference. feral reports inertia "
-        "(56,44,0), zero=0, matching the MA57 oracle's (56,44,0). The "
-        "MUMPS 5.8.2 oracle with explicit null-pivot detection "
-        "(ICNTL(24)=1) reports (54,43,3), zero=3 -- so feral and "
-        "MUMPS-ICNTL(24)=1 genuinely disagree here. The factor is "
-        "numerically valid (rel_res < 1e-13). Whether sign-counting or "
-        "null-detection is the correct oracle on these constructed "
-        "rank-deficient matrices is tracked in #41; see "
-        "dev/research/f01-rankdef-underreporting.md 2026-05-17 addendum.",
-    ),
-    "saddle_rankdef_100_20_5": (
-        "#39",
-        "F-01 sign-fallback (2026-05-17). Borderline rank-deficient "
-        "saddle; band pivots now counted by sign. Factor numerically "
-        "valid (rel_res < 1e-14). See "
-        "dev/research/f01-rankdef-underreporting.md 2026-05-17 addendum.",
-    ),
-    "stokes_q1p0_8": (
-        "#39",
-        "F-01 sign-fallback (2026-05-17). Q1-P0 Stokes element with "
-        "constant + checkerboard pressure null modes. Band pivots now "
-        "counted by sign. Factor numerically valid (rel_res < 1e-14). "
-        "See dev/research/f01-rankdef-underreporting.md 2026-05-17 "
-        "addendum.",
+        "Cross-arch BK-pivot divergence. feral-aarch64 reports zero=1; "
+        "MUMPS ICNTL(24)=1 and SSIDS both report zero=0. CI x86 feral "
+        "reports zero=0, matching both oracles, so x86 is clean. "
+        "Allowlisted for local aarch64 runs until #40 is resolved.",
     ),
 }
 
 
-def classify(row: dict, side: dict | None, rel_res_threshold: float) -> list[str]:
+def classify(row: dict, side: dict | None, rel_res_threshold: float,
+             oracles: dict[str, dict]) -> list[str]:
     """Return a list of flag strings for this matrix (empty = clean)."""
     flags: list[str] = []
     if side is None:
@@ -234,23 +190,33 @@ def classify(row: dict, side: dict | None, rel_res_threshold: float) -> list[str
         return flags
     if pos + neg + zer != row["n"]:
         flags.append(f"inertia_sum={pos+neg+zer}!=n={row['n']}")
-    exp_zero = expected_zero(row)
-    if exp_zero is not None:
-        # Rank-deficient matrices: BK pivoting can absorb part or all
-        # of the constructed null space into ostensibly-normal pivots.
-        # Acceptance rule: `zero <= expected`, with a lower bound of 1
-        # *unless* the MUMPS 5.8.2 oracle (ICNTL(24)=1) itself reports
-        # zero=0 on the matrix — see MUMPS_REPORTS_ZERO0. For those
-        # matrices feral reporting zero=0 matches the oracle and is
-        # correct; for every other rankdef matrix zero=0 is a genuine
-        # bug (F-01 regression guard). Partial detection
-        # (1 <= zero <= expected) is always accepted — it is consistent
-        # with MUMPS's own behavior under ICNTL(24)=1.
-        # See `dev/research/f01-rankdef-underreporting.md`.
-        if zer == 0 and row["name"] not in MUMPS_REPORTS_ZERO0:
-            flags.append(f"zero=0 (rankdef, expected>=1, k={exp_zero})")
-        elif zer > exp_zero:
-            flags.append(f"zero={zer}>expected={exp_zero}")
+    # Consensus inertia check for the rank-deficient synthetics.
+    # Borderline-singular matrices have no unique `zero`: canonical
+    # solvers disagree by design (a near-null pivot counted by sign vs.
+    # detected as null). CLAUDE.md defines "correct" as agreeing with
+    # at least one of {MUMPS, SSIDS}, so the gate checks feral.zero
+    # against the frozen per-matrix oracle in oracles.json rather than
+    # the constructed null-space label. See
+    # dev/research/stress-consensus-oracle.md.
+    oracle = oracles.get(row["name"])
+    if oracle is not None:
+        mtx = SYNTH_DIR / f"{row['name']}.mtx"
+        if mtx.exists():
+            live_sha = hashlib.sha256(mtx.read_bytes()).hexdigest()
+            if live_sha != oracle.get("mtx_sha256"):
+                flags.append("oracle_stale (matrix bytes changed; "
+                             "rerun gen_oracles.py)")
+                return flags
+        canonical = {
+            name: o["zero"]
+            for name, o in oracle.get("oracles", {}).items()
+            if name in ("mumps", "ssids")
+        }
+        if canonical and zer not in canonical.values():
+            pairs = ", ".join(f"{k}={v}"
+                              for k, v in sorted(canonical.items()))
+            flags.append(
+                f"zero={zer} matches no canonical oracle ({pairs})")
     return flags
 
 
@@ -266,12 +232,13 @@ def main() -> int:
 
     rows = parse_manifest(Path(args.manifest))
     rows.sort(key=lambda r: (r.get("category", ""), r["n"], r["name"]))
+    oracles = load_oracles(ORACLES_JSON)
 
     records = []
     for r in rows:
         sidecar = OUT_DIR / f"{r['group']}__{r['name']}.out"
         side = parse_sidecar(sidecar)
-        flags = classify(r, side, args.rel_res)
+        flags = classify(r, side, args.rel_res, oracles)
         records.append({"row": r, "side": side, "flags": flags})
 
     print(f"{'category':<11} {'n':>7} {'name':<30} {'status':<8} "

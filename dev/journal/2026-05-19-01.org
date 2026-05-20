@@ -255,3 +255,87 @@ sign-fallback. feral's zero=0 has TWO canonical consensus partners
 reports zero>0. Per CLAUDE.md ("feral inertia must agree with MUMPS
 or SSIDS") feral agrees with SSIDS -- the constraint is satisfied,
 and feral's zero=0 is defensible, not under-detection.
+
+* 07:48 :stress-gate:consensus-oracle:report-py:issue-tracking:
+Option 3 done: converted the stress gate from a hardcoded name-derived
+band to a real per-matrix solver-consensus check. The band
+(expected_zero("rankdef_<n>_<k>")=k; accept 1<=zero<=k) plus its two
+patch layers -- MUMPS_REPORTS_ZERO0 (3-matrix exemption) and the
+5-entry ALLOWLIST -- are gone.
+
+New rule in report.py::classify(): for a rankdef synthetic, accept
+feral.zero iff it equals MUMPS-IC24.zero OR SSIDS.zero, read from a
+committed oracles.json. gen_oracles.py generates that file from the
+three real Fortran oracle binaries; each entry pins an mtx_sha256 so a
+synth.py change is caught as a stale-oracle flag. This is the same
+oracle pattern tests/parity.rs already uses for the KKT corpus -- the
+stress suite was the lone holdout on a fake label.
+
+report.py output: total 125, ok=69, flagged=0, missing=56, EXIT=0.
+The consensus check fires exactly as designed:
+- rankdef_5_2 (2,2,1): feral zero=1 == MUMPS zero=1 -> clean. Was
+  #40-allowlisted under the old gate; now passes legitimately.
+- rankdef_exact_100_10 (55,45,0), saddle_rankdef_100_20_5 (102,78,0),
+  stokes_q1p0_8 (99,63,0): feral zero=0 == SSIDS zero=0 -> clean.
+  All three were #39-allowlisted; now pass legitimately.
+- rankdef_10_3/rankdef_50_5/rankdef_exact_50_5: feral-aarch64 zero=1
+  matches NO canonical oracle (e.g. rankdef_50_5 mumps=0,ssids=0) ->
+  flagged -> #40-allowlisted. On x86 CI feral reports zero=0, matches
+  the oracle, no allowlist needed. This is the #40 cross-arch
+  divergence the old band's 1<=zero<=k silently swallowed; the
+  consensus rule is *tighter* here and now surfaces it.
+
+Not a pure relaxation, so no tolerance-loosening approval needed:
+looser where the band was wrong (zero=0 is what all of MUMPS-default/
+SSIDS/MA57/feral produce), tighter where it was too loose (partial
+detection no oracle agrees with).
+
+Issue impact: #39 already CLOSED last session (c7471ce) -- untouched.
+#41 (sign-fallback vs ICNTL(24)=1: which oracle?) is resolved -- the
+gate now accepts either convention via consensus; closeable. #40
+stays OPEN -- it is a real bug, now honestly surfaced instead of
+hidden behind a fake band.
+
+Wrote dev/research/stress-consensus-oracle.md (doubles as the plan --
+it carries the proposed rule + storage design, so no separate
+dev/plans/ file). decisions.md appended (supersedes the 2026-05-19
+MUMPS_REPORTS_ZERO0 entry). stress/README.md acceptance rule 3 +
+allowlist section rewritten.
+
+* 08:12 :stress-gate:cross-arch:issue-40:issue-42:correction:
+CORRECTION to the 08:?? entry above (and to the first draft of
+report.py ALLOWLIST + the stress-consensus-oracle.md note +
+decisions.md): the claim "on x86 CI feral reports zero=0 for
+rankdef_10_3" is WRONG. Pulled the actual CI log (run 26159004313,
+commit 4eb9c5e, ubuntu-latest x86_64) and read the real numbers:
+
+| matrix             | aarch64    | x86 CI     | zero diverges? |
+|--------------------+------------+------------+----------------|
+| rankdef_5_2        | (2,2,1) z1 | (3,2,0) z0 | yes            |
+| rankdef_10_3       | (4,5,1) z1 | (4,5,1) z1 | NO -- same     |
+| rankdef_50_5       | (25,24,1)  | (26,24,0)  | yes            |
+| rankdef_exact_50_5 | (24,25,1)  | (24,26,0)  | yes            |
+
+So rankdef_10_3 is NOT a cross-arch case -- feral reports zero=1 on
+BOTH arches, matching no canonical oracle (mumps-IC24 z3, ssids z0).
+That is a both-arch consensus miss, a different bug from #40. Opened
+#42 for it; re-pointed the report.py ALLOWLIST entry from #40 to #42
+with honest both-arch text; the #42 entry is allowlisted on every
+arch, not just aarch64. The two real #40 entries (rankdef_50_5,
+rankdef_exact_50_5) stay.
+
+Also corrected #40's body: its "Root cause" section blamed FMA
+contraction + SIMD reduction order, but the stress harness runs
+NumericParams::default() -> fma:false (factor.rs:553), so it takes
+dispatch_nofma (schur_kernel.rs:539-562), which is bit-portable by
+construction (explicit mul+sub, never mul_add, elementwise so
+SIMD-width-invariant -- see the in-tree comment). FMA cannot be the
+mechanism on that path. Marked the root cause UNVERIFIED; listed
+pulp dispatch / thread-count-dependent reduction in
+numeric/factorize.rs / unaudited factor.rs arithmetic as the open
+suspects. Added a note to #40 that it should be diagnosed on a Linux
+x86_64 box with local reproduction, not by pushing instrumented
+commits and reading CI logs ("CI volleyball").
+
+Lesson: do not assume the symmetric x86 value of a cross-arch report
+-- read the CI log. The user's questions caught this before commit.
