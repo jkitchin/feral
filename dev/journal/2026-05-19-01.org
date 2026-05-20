@@ -154,3 +154,21 @@ MUMPS-ICNTL(24)=1 genuinely disagree (0 vs 3). Whether feral zero=0 is
 defensible (it matches *default* sign-counting MUMPS, the #39 parity
 reference) or a real under-detection bug is a #39-scope question, not
 follow-up 1. Left untouched; needs its own triage.
+
+* 23:55 :ci:stress-smoke:mumps-oracle:inertia:issue-tracking:
+Opened #41 for the open item above. Probed the MUMPS oracle on
+stokes_q1p0_8 too (was not in the 8-matrix rankdef run): MUMPS
+(98,62,2). So all three remaining #39 ALLOWLIST matrices show feral
+zero=0 vs MUMPS-ICNTL(24)=1 zero>0:
+
+  rankdef_exact_100_10    feral (55,45,0)  MUMPS (54,43,3)
+  saddle_rankdef_100_20_5 feral (102,78,0) MUMPS (100,75,5)
+  stokes_q1p0_8           feral (99,63,0)  MUMPS (98,62,2)
+
+#41 records the verified table, the false "MUMPS reports zero=0"
+justification on the rankdef_exact_100_10 entry, and the open
+correctness question (intended #39 parity behavior vs under-detection
+bug). Suggested first action in #41: run the SSIDS oracle -- if SSIDS
+also sign-counts, feral has a consensus partner. Not folded in here;
+#41 is its own triage. report.py ALLOWLIST entries still cite #39 --
+left as-is, re-citing to #41 is part of that triage, not this task.
