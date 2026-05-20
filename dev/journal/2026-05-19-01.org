@@ -55,3 +55,38 @@ after FactorStatus::Success, if feral_min_pivot/feral_max_pivot <
 singular_pivot_ratio (≈1e-12), return ESymSolverStatus::Singular ->
 PerturbForSingularity -> delta_w. Keeps pounce's residual-ratio
 pretend_singular path unchanged; adds the cheaper solver-reported trigger.
+
+* 21:55 :ci:stress-smoke:cross-arch:f01:
+Push of the 8-commit backlog turned CI red -- stress-smoke
+report.py PR-blocking gate, flagged=3: rankdef_5_2, rankdef_50_5,
+rankdef_exact_50_5 all "zero=0 (rankdef, expected>=1)". NOT from this
+session's near-singularity work (the `check` job -- test/clippy/fmt --
+passed green). Root cause: commit c7471ce (F-01 sign-fallback, #39,
+2026-05-17) was committed locally but never pushed, so CI ran the
+stress gate against it for the first time tonight.
+
+Diagnosis: this is the #28 cross-arch BK-pivot divergence, exposed by
+the #39 band widening -- NOT the deterministic every-arch F-01 flip
+of the four #39-allowlisted matrices. Evidence:
+- f01-rankdef-underreporting.md probe_f01.rs audit (aarch64): all
+  three have 1 strict-zero pivot -> zero=1.
+- CI x86: zero=0 (BK produces a slightly different pivot landing just
+  above EPS; rankdef_5_2's pivot is logged at 9.3e-17, straddling
+  EPS=2.22e-16).
+- Local report.py rerun on aarch64 tonight: (2,2,1), (25,24,1),
+  (24,25,1) -- all zero=1, flagged=0, EXIT=0. The divergence is
+  purely x86-vs-aarch64.
+- For rankdef_50_5, MUMPS (ICNTL(24)=1) itself reports zero=0
+  (f01 note line 369 + classify() comment) -- x86 feral matches MUMPS.
+
+Fix: three ALLOWLIST entries in external_benchmarks/stress/report.py
+citing #28 (not #39 -- conflating a cross-arch divergence with the
+deterministic F-01 flip would mislabel failure as intended behavior).
+Each factor is numerically valid (rel_res <= 3.2e-15). Local report.py
+EXIT=0 after the change; x86 CI will be the real confirmation.
+
+Open item flagged to user, not folded in: classify()'s own comment
+names rankdef_50_5 as a known MUMPS-zero=0 matrix yet still flags it
+-- the gate's expected_zero for that matrix is arguably wrong and
+should be corrected rather than allowlisted. And #28 is now a
+4-matrix divergence; the issue should be updated to track the scope.

@@ -134,6 +134,36 @@ ALLOWLIST: dict[str, tuple[str, str]] = {
         "comment notes MUMPS itself misses on similar matrices. Allowlist "
         "until the cross-arch BK pivot path is hardened (separate issue).",
     ),
+    "rankdef_5_2": (
+        "#28",
+        "Cross-arch BK-pivot divergence, exposed by the #39 F-01 band "
+        "widening (2026-05-17). probe_f01.rs on aarch64 finds 1 "
+        "strict-zero pivot (|d| = 9.3e-17, below EPS) -> inertia "
+        "(2,2,1). CI x86 produces a slightly different pivot that lands "
+        "just above EPS and is counted by sign -> (3,2,0), zero=0. Both "
+        "factors numerically valid (rel_res < 1e-15). This is the same "
+        "x86/aarch64 BK divergence as saddle_rankdef_50_10_3, not the "
+        "deterministic every-arch F-01 flip of the #39 entries below.",
+    ),
+    "rankdef_50_5": (
+        "#28",
+        "Cross-arch BK-pivot divergence, exposed by the #39 F-01 band "
+        "widening (2026-05-17). CI x86 reports (26,24,0), zero=0; "
+        "MUMPS (ICNTL(24)=1) itself reports zero=0 on this matrix "
+        "(cited in dev/research/f01-rankdef-underreporting.md and the "
+        "classify() rankdef_like_cats comment), so x86 feral matches "
+        "MUMPS. aarch64 probe_f01.rs finds 1 strict-zero pivot. Factor "
+        "numerically valid (rel_res < 1e-14). The gate's expected>=1 is "
+        "the synthetic construction label, not the MUMPS oracle.",
+    ),
+    "rankdef_exact_50_5": (
+        "#28",
+        "Cross-arch BK-pivot divergence, exposed by the #39 F-01 band "
+        "widening (2026-05-17). CI x86 reports (24,26,0), zero=0; "
+        "probe_f01.rs on aarch64 finds 1 strict-zero pivot -> zero=1. "
+        "Factor numerically valid (rel_res < 1e-14). Same x86/aarch64 "
+        "BK divergence class as saddle_rankdef_50_10_3 (#28).",
+    ),
     "rankdef_exact_100_10": (
         "#39",
         "F-01 sign-fallback (2026-05-17). Pivots with |d| in the band "
