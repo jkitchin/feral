@@ -912,6 +912,95 @@ impl SparseFactors {
             None
         }
     }
+
+    /// Smallest accepted pivot magnitude `min|λ(D)|` over every
+    /// eliminated 1×1 and 2×2 block. This is FERAL's near-singularity
+    /// signal — the analog of MA57's `CNTL(2)` small-pivot threshold.
+    ///
+    /// A 1×1 pivot contributes `|d_diag[k]|`. A 2×2 block contributes
+    /// the *smaller-magnitude* eigenvalue of
+    /// `[[d_diag[k], d_subdiag[k]], [d_subdiag[k], d_diag[k+1]]]`,
+    /// computed as `|det| / larger_magnitude` to stay cancellation-free
+    /// when the block is near-singular.
+    ///
+    /// Distinct from [`min_diagonal`](Self::min_diagonal), which returns
+    /// the *signed* smallest eigenvalue (the most-negative one) for the
+    /// unconstrained inertia-correction shortcut. Near-singularity needs
+    /// the smallest-in-*magnitude* pivot regardless of sign.
+    ///
+    /// The value lives in the scaled space of the matrix actually
+    /// factored (`S·A·S`); pair it with [`max_pivot_magnitude`] to form
+    /// the scale-free ratio `min/max ≈ 1/κ(D)`. See
+    /// `dev/research/near-singularity-signal.md`.
+    ///
+    /// Returns `None` when no pivots were eliminated.
+    pub fn min_pivot_magnitude(&self) -> Option<f64> {
+        self.pivot_magnitude_extent().map(|(min, _max)| min)
+    }
+
+    /// Largest accepted pivot magnitude `max|λ(D)|` over every
+    /// eliminated 1×1 and 2×2 block. Provided so a caller can form the
+    /// scale-free near-singularity ratio `min_pivot_magnitude() /
+    /// max_pivot_magnitude()` without recomputing `||S·A·S||`.
+    ///
+    /// Returns `None` when no pivots were eliminated. See
+    /// [`min_pivot_magnitude`](Self::min_pivot_magnitude).
+    pub fn max_pivot_magnitude(&self) -> Option<f64> {
+        self.pivot_magnitude_extent().map(|(_min, max)| max)
+    }
+
+    /// Single pass over the D blocks returning `(min|λ|, max|λ|)`.
+    /// Shared by [`min_pivot_magnitude`](Self::min_pivot_magnitude) and
+    /// [`max_pivot_magnitude`](Self::max_pivot_magnitude). 2×2 detection
+    /// follows the solve-path convention (`d_subdiag[k] != 0.0`).
+    fn pivot_magnitude_extent(&self) -> Option<(f64, f64)> {
+        let mut min_mag = f64::INFINITY;
+        let mut max_mag = 0.0f64;
+        let mut any = false;
+        for nf in &self.node_factors {
+            let ff = &nf.frontal_factors;
+            let nelim = ff.nelim;
+            let mut k = 0;
+            while k < nelim {
+                let two_by_two = k + 1 < nelim && ff.d_subdiag[k] != 0.0;
+                let (smaller, larger) = if two_by_two {
+                    // Eigenvalues of [[a,b],[b,c]]: λ± = (t ± √(t²−4Δ))/2.
+                    // The larger magnitude (|t|+√disc)/2 is
+                    // cancellation-free; the smaller is |Δ|/larger
+                    // since |λ₊·λ₋| = |Δ|.
+                    let a = ff.d_diag[k];
+                    let b = ff.d_subdiag[k];
+                    let c = ff.d_diag[k + 1];
+                    let trace = a + c;
+                    let det = a * c - b * b;
+                    let disc = (trace * trace - 4.0 * det).max(0.0).sqrt();
+                    let larger = (trace.abs() + disc) * 0.5;
+                    let smaller = if larger > 0.0 {
+                        det.abs() / larger
+                    } else {
+                        0.0
+                    };
+                    (smaller, larger)
+                } else {
+                    let m = ff.d_diag[k].abs();
+                    (m, m)
+                };
+                if smaller < min_mag {
+                    min_mag = smaller;
+                }
+                if larger > max_mag {
+                    max_mag = larger;
+                }
+                any = true;
+                k += if two_by_two { 2 } else { 1 };
+            }
+        }
+        if any {
+            Some((min_mag, max_mag))
+        } else {
+            None
+        }
+    }
 }
 
 /// Factor data for a single supernode.

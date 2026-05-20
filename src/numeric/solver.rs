@@ -895,6 +895,31 @@ impl Solver {
         self.last_factors.as_ref().and_then(|f| f.min_diagonal())
     }
 
+    /// Smallest accepted pivot magnitude `min|λ(D)|` over the most
+    /// recent factor — FERAL's near-singularity signal, the analog of
+    /// MA57's `CNTL(2)` small-pivot threshold. Returns `None` if no
+    /// factor is stored. Unlike [`min_diagonal`](Self::min_diagonal)
+    /// (signed smallest eigenvalue), this is the smallest-in-magnitude
+    /// pivot regardless of sign. Pair with
+    /// [`max_pivot_magnitude`](Self::max_pivot_magnitude) for the
+    /// scale-free ratio. See [`SparseFactors::min_pivot_magnitude`] and
+    /// `dev/research/near-singularity-signal.md`.
+    pub fn min_pivot_magnitude(&self) -> Option<f64> {
+        self.last_factors
+            .as_ref()
+            .and_then(|f| f.min_pivot_magnitude())
+    }
+
+    /// Largest accepted pivot magnitude `max|λ(D)|` over the most
+    /// recent factor. Returns `None` if no factor is stored. See
+    /// [`min_pivot_magnitude`](Self::min_pivot_magnitude) and
+    /// [`SparseFactors::max_pivot_magnitude`].
+    pub fn max_pivot_magnitude(&self) -> Option<f64> {
+        self.last_factors
+            .as_ref()
+            .and_then(|f| f.max_pivot_magnitude())
+    }
+
     /// Borrow the most recent successful factor, if any. Lets a
     /// caller drive `solve_sparse_refined` directly when needed.
     pub fn factors(&self) -> Option<&SparseFactors> {

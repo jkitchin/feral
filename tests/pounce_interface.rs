@@ -518,3 +518,113 @@ fn min_diagonal_two_by_two_block_eigenvalue() {
         min_d
     );
 }
+
+// --- near-singularity signal: min|λ(D)| / max|λ(D)| ---------------------
+//
+// See dev/research/near-singularity-signal.md. These exercise
+// Solver::{min,max}_pivot_magnitude — the MA57 CNTL(2) analog. The
+// oracle is hand calculation, external to the implementation.
+
+/// `min_pivot_magnitude()` / `max_pivot_magnitude()` return `None`
+/// before any successful factor.
+#[test]
+fn pivot_magnitude_before_factor_is_none() {
+    let solver = Solver::new();
+    assert_eq!(solver.min_pivot_magnitude(), None);
+    assert_eq!(solver.max_pivot_magnitude(), None);
+}
+
+/// 1×1-pivot only: A = diag(5, -2, 3, -7) under identity scaling gives
+/// D = the diagonal, so the pivot magnitudes are {5, 2, 3, 7}. The
+/// near-singularity signal is the smallest magnitude (2), distinct
+/// from `min_diagonal()` which returns the signed minimum (-7).
+#[test]
+fn pivot_magnitude_one_by_one_pivots() {
+    let csc =
+        CscMatrix::from_triplets(4, &[0, 1, 2, 3], &[0, 1, 2, 3], &[5.0, -2.0, 3.0, -7.0]).unwrap();
+
+    let mut solver = solver_identity_scaling();
+    let status = solver.factor(&csc, None);
+    assert!(matches!(status, FactorStatus::Success), "got {:?}", status);
+
+    let min_mag = solver.min_pivot_magnitude().expect("min_pivot_magnitude");
+    let max_mag = solver.max_pivot_magnitude().expect("max_pivot_magnitude");
+    assert!(
+        (min_mag - 2.0).abs() < 1e-12,
+        "expected 2.0, got {}",
+        min_mag
+    );
+    assert!(
+        (max_mag - 7.0).abs() < 1e-12,
+        "expected 7.0, got {}",
+        max_mag
+    );
+    // Magnitude-min is positive even though min_diagonal() is negative.
+    assert_eq!(solver.min_diagonal(), Some(-7.0));
+}
+
+/// 2×2 pivot: A = [[0,1],[1,0]] forces a 2×2 BK block with eigenvalues
+/// ±1, so both pivot magnitudes are 1. Verifies the smaller-*magnitude*
+/// eigenvalue is extracted (not `d_diag[0]=0`, not the signed -1).
+#[test]
+fn pivot_magnitude_two_by_two_block() {
+    let csc = CscMatrix::from_triplets(2, &[0, 1, 1], &[0, 0, 1], &[0.0, 1.0, 0.0]).unwrap();
+
+    let mut solver = solver_identity_scaling();
+    let status = solver.factor(&csc, None);
+    assert!(matches!(status, FactorStatus::Success), "got {:?}", status);
+
+    let min_mag = solver.min_pivot_magnitude().expect("min_pivot_magnitude");
+    let max_mag = solver.max_pivot_magnitude().expect("max_pivot_magnitude");
+    assert!(
+        (min_mag - 1.0).abs() < 1e-12,
+        "expected 1.0 (|smaller eig| of [[0,1],[1,0]]), got {}",
+        min_mag
+    );
+    assert!(
+        (max_mag - 1.0).abs() < 1e-12,
+        "expected 1.0, got {}",
+        max_mag
+    );
+}
+
+/// Near-singular regression: A = diag(1, 1e-14, -3). The 1e-14 entry
+/// is above `zero_tol` (≈2.2e-16) so it is accepted as a small-but-
+/// nonzero 1×1 pivot and counted by sign. Inertia is still correct
+/// (2 positive, 1 negative), but `min_pivot_magnitude()` surfaces the
+/// near-singularity an inertia-only signal would hide — the ratio
+/// `min/max ≈ 3e-15` is small enough for a perturbation handler to
+/// threshold.
+#[test]
+fn pivot_magnitude_near_singular_regression() {
+    let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 1e-14, -3.0]).unwrap();
+
+    let mut solver = solver_identity_scaling();
+    let status = solver.factor(&csc, None);
+    assert!(matches!(status, FactorStatus::Success), "got {:?}", status);
+
+    // Inertia is correct despite the near-singular pivot.
+    let inertia = solver.inertia().expect("inertia");
+    assert_eq!(inertia.positive, 2);
+    assert_eq!(inertia.negative, 1);
+    assert_eq!(inertia.zero, 0);
+
+    let min_mag = solver.min_pivot_magnitude().expect("min_pivot_magnitude");
+    let max_mag = solver.max_pivot_magnitude().expect("max_pivot_magnitude");
+    assert!(
+        (min_mag - 1e-14).abs() < 1e-26,
+        "expected ~1e-14, got {}",
+        min_mag
+    );
+    assert!(
+        (max_mag - 3.0).abs() < 1e-12,
+        "expected 3.0, got {}",
+        max_mag
+    );
+    // The thresholdable near-singularity ratio.
+    assert!(
+        min_mag / max_mag < 1e-12,
+        "ratio {} should be below a CNTL(2)-style threshold",
+        min_mag / max_mag
+    );
+}
