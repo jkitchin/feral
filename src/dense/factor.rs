@@ -658,8 +658,19 @@ pub fn factor(
             if d.abs() <= params.zero_tol {
                 match params.on_zero_pivot {
                     ZeroPivotAction::ForceAccept => {
+                        // Issue #42 (Option A): count every accepted pivot
+                        // by sign, including a bit-exact `0.0` one. The
+                        // sign rule `d > 0.0` routes `+0.0` to `neg`
+                        // (`0.0 > 0.0` is false). The `zero` inertia
+                        // component is therefore structurally 0 under
+                        // ForceAccept — see `dev/decisions.md` and
+                        // `dev/research/f01-rankdef-underreporting.md`.
                         needs_refinement = true;
-                        zero += 1;
+                        if d > 0.0 {
+                            pos += 1;
+                        } else {
+                            neg += 1;
+                        }
                     }
                     ZeroPivotAction::Fail => {
                         return Err(FeralError::NumericallyRankDeficient);
@@ -3391,7 +3402,10 @@ fn try_reject_1x1_frontal(
     params: &BunchKaufmanParams,
     pos: &mut usize,
     neg: &mut usize,
-    zero: &mut usize,
+    // Issue #42 (Option A): 1×1 paths now count every pivot by sign and
+    // never increment `zero`. Parameter retained for signature parity
+    // with `count_2x2_inertia` (still has a `*zero` write).
+    _zero: &mut usize,
     needs_refinement: &mut bool,
 ) -> Result<PivotOutcome, FeralError> {
     let d = a[k * nrow + k];
@@ -3448,8 +3462,20 @@ fn try_reject_1x1_frontal(
         if d.abs() <= params.zero_tol {
             match params.on_zero_pivot {
                 ZeroPivotAction::ForceAccept => {
+                    // Issue #42 (Option A): count the strict-zero pivot
+                    // by sign before the L-column / diagonal are zeroed.
+                    // `d` still holds the original (pre-zeroing) value;
+                    // `d > 0.0` routes `+0.0` to `neg`. Numerical
+                    // handling — L zeroing, diagonal zeroing, the
+                    // `Rejected` outcome, `needs_refinement` — is
+                    // unchanged; only the inertia counter moves from
+                    // `zero` to a sign bucket.
                     *needs_refinement = true;
-                    *zero += 1;
+                    if d > 0.0 {
+                        *pos += 1;
+                    } else {
+                        *neg += 1;
+                    }
                     for i in (k + 1)..nrow {
                         a[k * nrow + i] = 0.0;
                     }
@@ -3862,7 +3888,9 @@ fn do_1x1_pivot(
     params: &BunchKaufmanParams,
     pos: &mut usize,
     neg: &mut usize,
-    zero: &mut usize,
+    // Issue #42 (Option A): 1×1 paths count every pivot by sign and
+    // never increment `zero`. Parameter retained for signature parity.
+    _zero: &mut usize,
     needs_refinement: &mut bool,
 ) -> Result<(f64, usize), FeralError> {
     let mut d = a[k * n + k];
@@ -3925,8 +3953,17 @@ fn do_1x1_pivot(
             // Truly-zero path: zero L, route by on_zero_pivot.
             match params.on_zero_pivot {
                 ZeroPivotAction::ForceAccept => {
+                    // Issue #42 (Option A): count the strict-zero pivot
+                    // by sign before the L-column / diagonal are zeroed.
+                    // `d` still holds the original value here; `d > 0.0`
+                    // routes `+0.0` to `neg`. The L/diagonal zeroing and
+                    // the `(0.0, k+2)` return are unchanged.
                     *needs_refinement = true;
-                    *zero += 1;
+                    if d > 0.0 {
+                        *pos += 1;
+                    } else {
+                        *neg += 1;
+                    }
                     for i in (k + 1)..n {
                         a[k * n + i] = 0.0;
                     }
@@ -4161,7 +4198,9 @@ fn count_1x1_inertia(
     params: &BunchKaufmanParams,
     pos: &mut usize,
     neg: &mut usize,
-    zero: &mut usize,
+    // Issue #42 (Option A): 1×1 paths count every pivot by sign and
+    // never increment `zero`. Parameter retained for signature parity.
+    _zero: &mut usize,
     needs_refinement: &mut bool,
 ) -> Result<(), FeralError> {
     let d = a[k * stride + k];
@@ -4185,8 +4224,15 @@ fn count_1x1_inertia(
     if d.abs() <= params.zero_tol {
         match params.on_zero_pivot {
             ZeroPivotAction::ForceAccept => {
+                // Issue #42 (Option A): count the strict-zero pivot by
+                // sign. `d > 0.0` routes `+0.0` to `neg`; `zero` is
+                // structurally 0 under ForceAccept.
                 *needs_refinement = true;
-                *zero += 1;
+                if d > 0.0 {
+                    *pos += 1;
+                } else {
+                    *neg += 1;
+                }
                 Ok(())
             }
             ZeroPivotAction::Fail => Err(FeralError::NumericallyRankDeficient),
@@ -4279,26 +4325,28 @@ fn count_2x2_inertia(
     // eigenvalues, computed with a cancellation-free discriminant.
     let trace = a00 + a11;
     if det.abs() <= params.zero_tol_2x2 {
-        // Near-singular 2×2 block: one eigenvalue near zero, the other
-        // has sign of trace.
+        // Near-singular 2×2 block.
         match params.on_zero_pivot {
             ZeroPivotAction::ForceAccept | ZeroPivotAction::PerturbToEps { .. } => {
-                // PerturbToEps falls back to ForceAccept-style
-                // accounting for a near-singular 2×2 block: count one
-                // sign + one zero. A bounded-Δ perturbation of the
-                // block determinant would require modifying the
-                // already-applied 2×2 update, which is out of scope
-                // for the present pass. Callers driving PerturbToEps
-                // should rely on the 1×1 paths for bounded perturbation
-                // and treat 2×2 near-singular blocks as residual cases
-                // for iterative refinement.
+                // Issue #42 (Option A): count *both* eigenvalues of the
+                // near-singular 2×2 block by sign. `sym2_eigenvalues` is
+                // cancellation-free and `lam > 0.0` routes a `0.0` root
+                // to `neg`, so `zero` is structurally 0 under
+                // ForceAccept. The previous rule counted one `zero`
+                // unconditionally. PerturbToEps shares this path: a
+                // bounded-Δ perturbation of the block determinant would
+                // require modifying the already-applied 2×2 update,
+                // which is out of scope; it gets the same sign
+                // accounting and relies on iterative refinement.
                 *needs_refinement = true;
-                if trace > 0.0 {
-                    *pos += 1;
-                    *zero += 1;
-                } else {
-                    *neg += 1;
-                    *zero += 1;
+                let (lam1, lam2) = sym2_eigenvalues(a00, a10, a11);
+                let _ = trace; // sign decision driven by per-eigenvalue signs
+                for lam in [lam1, lam2] {
+                    if lam > 0.0 {
+                        *pos += 1;
+                    } else {
+                        *neg += 1;
+                    }
                 }
                 Ok(())
             }
@@ -4307,30 +4355,24 @@ fn count_2x2_inertia(
     } else if matches!(params.on_zero_pivot, ZeroPivotAction::ForceAccept)
         && det.abs() <= params.null_pivot_tol_2x2
     {
-        // F-01 rank-deficiency band for 2×2 blocks: sign-fallback
-        // (2026-05-17). Use the closed-form eigenvalues to count each
-        // root by sign (only counting "zero" when |lam| <= zero_tol).
-        // This mirrors the 1×1 sign-fallback applied above and matches
-        // the non-band code path below — the only thing F-01-bandness
-        // adds for a 2×2 block is `needs_refinement = true`.
+        // F-01 rank-deficiency band for 2×2 blocks. Issue #42 (Option
+        // A): pure sign-counting — count each closed-form eigenvalue by
+        // sign with no "zero" bucket, exactly matching the 1×1 paths
+        // and the non-singular branch below. The only thing
+        // F-01-bandness adds for a 2×2 block is `needs_refinement`.
         //
-        // The previous "trace-sign + one zero" rule reported one zero
-        // unconditionally whenever |det| dropped into the band, even
-        // when both eigenvalues cleared the 1×1 zero_tol. That
-        // diverged from MUMPS/SSIDS consensus the same way the 1×1
-        // band rule did (issue #39 for the 1×1 case; same logic
-        // applies to 2×2). The block update has already fired; the
-        // solve will divide using strict factors.zero_tol_2x2. See
-        // `BunchKaufmanParams::null_pivot_tol` doc and
-        // `dev/research/f01-rankdef-underreporting.md` 2026-05-17
-        // addendum.
+        // History: the 2026-05-17 rule still counted a root as `zero`
+        // when `|lam| <= zero_tol`; #39 then made the 1×1 band
+        // sign-count; #42 (Option A) completes the collapse so neither
+        // the 1×1 nor the 2×2 path ever increments `zero`. The block
+        // update has already fired; the solve divides using strict
+        // `factors.zero_tol_2x2`. See `dev/decisions.md` and
+        // `dev/research/f01-rankdef-underreporting.md`.
         *needs_refinement = true;
         let (lam1, lam2) = sym2_eigenvalues(a00, a10, a11);
-        let _ = trace; // sign decision now driven by per-eigenvalue signs
+        let _ = trace; // sign decision driven entirely by per-eigenvalue signs
         for lam in [lam1, lam2] {
-            if lam.abs() <= params.zero_tol {
-                *zero += 1;
-            } else if lam > 0.0 {
+            if lam > 0.0 {
                 *pos += 1;
             } else {
                 *neg += 1;

@@ -298,19 +298,24 @@ fn test_zero_column_force_accept() {
         Err(e) => panic!("dense_fast_factor on zero-column matrix failed: {}", e),
     };
     assert_eq!(factors.n, n, "factor n mismatch");
-    // Exactly one zero pivot — the forced column — should be in the
-    // inertia count. The remaining n-1 pivots come from the
-    // diagonally-dominant pattern and should all be positive.
+    // Issue #42 (Option A): the forced zero-pivot column reduces to a
+    // bit-exact 0.0 pivot, counted by sign — +0.0 routes to `negative`
+    // (`0.0 > 0.0` is false) — so `zero` is structurally 0. The
+    // remaining n-1 diagonally-dominant pivots are all positive.
     assert_eq!(
-        inertia.zero, 1,
-        "zero inertia count: expected 1 for one-zero-col input, got {}",
+        inertia.zero, 0,
+        "Option A counts every pivot by sign; expected zero=0, got {}",
         inertia.zero
     );
     assert_eq!(
-        inertia.positive + inertia.negative,
-        n - 1,
-        "remaining pivots should sum to n-1; got pos={} neg={}",
-        inertia.positive,
+        inertia.negative, 1,
+        "the one forced +0.0 pivot routes to negative; got neg={}",
         inertia.negative
+    );
+    assert_eq!(
+        inertia.positive,
+        n - 1,
+        "remaining n-1 pivots should all be positive; got pos={}",
+        inertia.positive
     );
 }

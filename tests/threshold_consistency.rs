@@ -249,13 +249,12 @@ fn polak6_0021_residual_after_threshold_fix() {
 #[test]
 fn factor_inertia_force_accept_implies_solve_skip_invariant() {
     // Invariant: every pivot counted as zero in inertia must satisfy
-    // |d_diag[k]| <= factors.zero_tol. This is the property that the
-    // threshold-mismatch fix relies on — solve uses factors.zero_tol to
-    // decide whether to divide, so if factor counted a pivot as zero
-    // it must be at-or-below the same threshold.
+    // |d_diag[k]| <= factors.zero_tol. Issue #42 (Option A): inertia.zero
+    // is now structurally 0, so the invariant holds vacuously; the
+    // d_diag/zero_tol check below is kept as a regression guard.
     //
     // Use a 4x4 block-diagonal matrix with two rank-1 blocks of [[1,1],[1,1]].
-    // Each block has eigenvalues 0 and 2. Inertia: (2, 0, 2).
+    // Each block has eigenvalues 0 and 2 (mathematical inertia (2, 0, 2)).
     let mut mat = SymmetricMatrix::zeros(4);
     mat.set(0, 0, 1.0);
     mat.set(1, 0, 1.0);
@@ -265,15 +264,19 @@ fn factor_inertia_force_accept_implies_solve_skip_invariant() {
     mat.set(3, 3, 1.0);
 
     let (factors, inertia) = factor(&mat, &ldlt_params()).expect("factor");
-    // Equilibration may turn this into 2 positives + 2 zeros, or detect a
-    // 2x2 block. Either way, the count of zero pivots should be 2.
+    // Issue #42 (Option A): each rank-1 block contributes one positive
+    // pivot (d=1) and one bit-exact 0.0 pivot counted by sign (+0.0 →
+    // negative). feral's reported inertia is the sign-count (2, 2, 0),
+    // not the mathematical inertia (2, 0, 2). The triple still sums to n.
     assert_eq!(
-        inertia.zero + inertia.positive,
+        inertia.positive + inertia.negative + inertia.zero,
         4,
-        "got inertia {}",
+        "inertia must sum to n; got inertia {}",
         inertia
     );
-    assert_eq!(inertia.negative, 0, "got inertia {}", inertia);
+    assert_eq!(inertia.positive, 2, "got inertia {}", inertia);
+    assert_eq!(inertia.negative, 2, "got inertia {}", inertia);
+    assert_eq!(inertia.zero, 0, "got inertia {}", inertia);
 
     // Bulk invariant: the count of d_diag entries with |d| <= zero_tol
     // is at least inertia.zero.

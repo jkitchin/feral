@@ -246,11 +246,13 @@ fn i4_singular_under_fail_returns_singular_clears_factor() {
     );
 }
 
-/// F-03 regression — under the new default `ZeroPivotAction::ForceAccept`,
-/// `diag(1, 0, 1)` factors cleanly with `inertia == (2, 0, 1)` and
-/// the factor is preserved. Matches MUMPS / MA57 behavior on
-/// matrices with isolated zero pivots (e.g. `GHS_indef/bloweybl`).
-/// See `dev/research/f03-bloweybl-rank-rejection.md` and issue #32.
+/// F-03 regression — under the default `ZeroPivotAction::ForceAccept`,
+/// `diag(1, 0, 1)` factors cleanly and the factor is preserved.
+/// Issue #42 (Option A): the isolated 0.0 pivot is counted by sign
+/// (+0.0 → negative), so the reported inertia is (2, 1, 0). Matches
+/// MUMPS / MA57 behavior on matrices with isolated zero pivots (e.g.
+/// `GHS_indef/bloweybl`). See `dev/research/f03-bloweybl-rank-rejection.md`,
+/// `dev/decisions.md`, and issues #32 / #42.
 #[test]
 fn f03_default_force_accept_factors_isolated_zero_pivot() {
     let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 0.0, 1.0]).unwrap();
@@ -273,47 +275,41 @@ fn f03_default_force_accept_factors_isolated_zero_pivot() {
         inertia,
         Inertia {
             positive: 2,
-            negative: 0,
-            zero: 1,
+            negative: 1,
+            zero: 0,
         },
-        "expected (2, 0, 1) inertia from diag(1, 0, 1), got {:?}",
+        "issue #42: diag(1, 0, 1) — the 0.0 pivot is sign-counted to \
+         negative, expected (2, 1, 0), got {:?}",
         inertia
     );
 }
 
-/// I7 — IPM-style escalation loop terminates with `Success`.
+/// F-01 / issue #42 — a rank-deficient symmetric matrix factored under
+/// the default `ZeroPivotAction::ForceAccept` counts every pivot by
+/// sign, so `inertia.zero == 0` structurally.
 ///
-/// Demonstrates the canonical caller pattern from the plan:
-/// factor → check → bump quality → re-factor. Uses a bordered
-/// KKT (3 positive variables, 1 constraint, expected inertia
-/// (3, 1, 0)) where the first factor with default params already
-/// gives the correct inertia, so the loop terminates in 1
-/// iteration. The structural assertion is that the loop runs
-/// to `Success` within a small budget regardless of how many
-/// quality bumps it takes.
-/// F-01 regression: a rank-deficient symmetric matrix must surface
-/// *at least one* zero pivot in the inertia. Before F-01, the dense
-/// `BunchKaufmanParams::default()` `zero_tol = EPS` was below the
-/// Wilkinson backward-error floor `n · EPS · ||A||_inf`, so the
-/// 200×200 `synth/rankdef_200_20` matrix (constructed nullity 20)
-/// was reported with `inertia.zero == 0` — the rank deficiency was
-/// completely absorbed into case-b "small but real" sign votes.
-/// The driver-level override raises `zero_tol` to the noise floor.
+/// Before issue #42, feral used a hybrid rule: pivots that reduced to
+/// a *bit-exact* `0.0` were counted into `inertia.zero`, while merely
+/// tiny pivots were counted by sign (#39 sign-fallback). That hybrid
+/// produced an inertia triple matching no canonical oracle on
+/// `synth/rankdef_10_3` (feral zero=1 vs SSIDS/MA57 zero=0). Option A
+/// (see `dev/decisions.md` and `dev/research/f01-rankdef-underreporting.md`)
+/// collapses the rule to pure sign-counting: `d > 0.0 ? pos : neg`,
+/// which routes bit-exact `+0.0` to `negative` (`0.0 > 0.0` is false).
 ///
 /// We use a rank-1 dyadic A = u uᵀ at n=5 with u = ones; eigenvalues
-/// are (5, 0, 0, 0, 0). Sylvester signature: (1, 0, 4). The first
-/// Gaussian elimination step zeroes the trailing 4×4 block exactly
-/// (in exact arithmetic), so all 4 trailing pivots land in the noise
-/// floor. BK pivoting may absorb part of the null space, so the
-/// acceptance bar is `1 <= zero <= 4` — at least one detection, no
-/// over-reporting. MUMPS 5.8.2 with ICNTL(24)=1 itself reports
-/// partial nullity on `synth/rankdef_50_5` and `rankdef_200_20`
-/// (zero=0), so exact constructed-nullity matching is not the
-/// invariant. See `dev/research/f01-rankdef-underreporting.md`.
+/// are (5, 0, 0, 0, 0). Sylvester signature is (1, 0, 4), but under
+/// pure sign-counting the four exact-zero pivots are *not* reported as
+/// zero — they split between positive and negative by their stored
+/// sign. The invariant feral now guarantees: `zero == 0`, at least one
+/// `positive` (the rank-1 mass), and the triple sums to n. Rank
+/// deficiency is still surfaced via `min_pivot_magnitude` (continuous)
+/// and `ZeroPivotAction::Fail` (factor status), not the inertia triple.
 #[test]
-fn f01_rankdef_surfaces_at_least_one_zero_pivot() {
-    // A = u uᵀ with u = (1, 1, 1, 1, 1). Rank 1, n=5. Sylvester:
-    // (positive=1, negative=0, zero=4). ||A||_inf = 5.
+fn f01_dyadic_rankdef_counts_pivots_by_sign() {
+    // A = u uᵀ with u = (1, 1, 1, 1, 1). Rank 1, n=5. Under pure
+    // sign-counting feral reports zero=0; the rank-1 positive mass
+    // guarantees at least one positive pivot.
     let n = 5usize;
     let mut rows = Vec::new();
     let mut cols = Vec::new();
@@ -340,20 +336,66 @@ fn f01_rankdef_surfaces_at_least_one_zero_pivot() {
         n,
         "inertia must sum to n"
     );
-    assert!(
-        inertia.zero >= 1,
-        "F-01 regression: must detect at least one zero pivot on a \
-         rank-1 5x5 dyadic, got inertia {:?}",
+    assert_eq!(
+        inertia.zero, 0,
+        "issue #42: under pure sign-counting every pivot — including \
+         bit-exact 0.0 — is counted by sign, so zero must be 0, got {:?}",
         inertia
     );
     assert!(
-        inertia.zero <= 4,
-        "must not over-report zeros beyond constructed nullity, \
-         got inertia {:?}",
+        inertia.positive >= 1,
+        "the rank-1 dyadic carries positive mass: at least one \
+         positive pivot expected, got {:?}",
         inertia
     );
 }
 
+/// issue #42 regression — the synthetic stress matrix
+/// `synth/rankdef_10_3` (n=10, constructed rank deficiency 3) must
+/// report the consensus-oracle inertia triple (4, 6, 0).
+///
+/// This matrix is the one that exposed feral's no-oracle-match hybrid
+/// count (feral reported (4, 5, 1)). SSIDS and MA57 both report
+/// (4, 6, 0); MUMPS with explicit null-pivot detection (ICNTL(24)=1)
+/// reports (3, 4, 3). Option A makes feral bit-identical to the
+/// SSIDS/MA57 consensus. Oracle triple frozen in
+/// `external_benchmarks/stress/oracles.json`.
+#[test]
+fn issue_42_rankdef_10_3_inertia_matches_consensus_oracle() {
+    use std::path::Path;
+    let mtx = feral::read_mtx(Path::new(
+        "external_benchmarks/stress/matrices/synth/rankdef_10_3.mtx",
+    ))
+    .expect("read rankdef_10_3.mtx");
+    let csc = mtx.to_csc().expect("rankdef_10_3 to CSC");
+
+    let mut solver = Solver::new();
+    let status = solver.factor(&csc, None);
+    assert!(
+        matches!(status, FactorStatus::Success),
+        "factor must succeed under default ForceAccept, got {:?}",
+        status
+    );
+    let inertia = solver.inertia().expect("inertia stored on Success").clone();
+    assert_eq!(
+        (inertia.positive, inertia.negative, inertia.zero),
+        (4, 6, 0),
+        "issue #42: rankdef_10_3 must match the SSIDS/MA57 consensus \
+         oracle (4, 6, 0), got {:?}",
+        inertia
+    );
+}
+
+/// I7 — IPM-style escalation loop terminates with `Success`.
+///
+/// Demonstrates the canonical caller pattern from the plan:
+/// factor → check → bump quality → re-factor. Uses a bordered
+/// KKT (3 positive variables, 1 constraint, expected inertia
+/// (3, 1, 0)) where the first factor with default params already
+/// gives the correct inertia, so the loop terminates in 1
+/// iteration. The structural assertion is that the loop runs
+/// to `Success` within a small budget regardless of how many
+/// quality bumps it takes.
 #[test]
 fn i7_quality_escalation_loop_terminates_with_correct_inertia() {
     // Bordered KKT from tests/sparse_postorder.rs.

@@ -129,9 +129,12 @@ fn threshold_rejects_tiny_1x1_pivot_dense() {
         n_zero_pivots(&f1) >= n_zero_pivots(&f0),
         "u=0.01 should not reduce the number of zero pivots"
     );
-    // On a rank-1 matrix, inertia must be (1, 0, 2).
+    // Issue #42 (Option A): on a rank-1 3×3 all-ones matrix the two
+    // rank-deficient pivots reduce to bit-exact 0.0 and are counted by
+    // sign (+0.0 → negative). feral's reported inertia is (1, 2, 0).
     assert_eq!(inertia1.positive, 1, "rank-1 got inertia {}", inertia1);
-    assert_eq!(inertia1.zero, 2, "rank-1 got inertia {}", inertia1);
+    assert_eq!(inertia1.negative, 2, "rank-1 got inertia {}", inertia1);
+    assert_eq!(inertia1.zero, 0, "rank-1 got inertia {}", inertia1);
 
     let rhs = vec![1.0, 1.0, 1.0]; // in the column space (sum of columns = [3,3,3]/3)
     let x = solve(&f1, &rhs).expect("solve u=0.01");
