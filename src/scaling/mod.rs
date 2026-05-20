@@ -145,6 +145,18 @@ pub enum Mc64FallbackReason {
     /// Policy 4 ratio guard (`mc_off > 1e6 ∧ mc_off / in_off > 1e5
     /// ∧ raw_drng < 1e6`). MSS1_0009 class.
     Mc64WorseThanInfnorm,
+    /// MC64 ran but the scaling vector it produced is itself
+    /// numerically degenerate: its own spread `max|s| / min|s|`
+    /// exceeds `1 / EPS ≈ 4.5e15`. `D = diag(s)` is then singular to
+    /// working precision, `D·A·D` underflows during the factorization,
+    /// and Bunch-Kaufman force-accepts exact-zero pivots — a silently
+    /// wrong solve (issue #45). Seen on saddle-point KKTs with a
+    /// structurally-zero `(2,2)` block, where the symmetric matching
+    /// forces extreme path-accumulated dual potentials. The whole
+    /// parity corpus stays under `3.27e15`; the CHO `parmest` KKT hits
+    /// `≈ 3e82`. See
+    /// `dev/research/kkt-mc64-scaling-blowup-2026-05-20.md`.
+    Mc64ScalingDegenerate,
 }
 
 /// Diagnostic information about how the scaling was computed.
@@ -309,6 +321,16 @@ fn compute_scaling_auto_with_cache(
     // VESUVIOU/MEYER3NE/CRESC132 (all >> 1e3 or where MC64 strictly
     // wins).
     const IN_SPREAD_GUARD: f64 = 1e3;
+    // Issue #45: an MC64 scaling vector whose own spread
+    // `max|s| / min|s|` exceeds `1 / EPS` is degenerate to working
+    // precision — `D = diag(s)` is singular, `D·A·D` underflows, and
+    // Bunch-Kaufman force-accepts exact-zero pivots, returning a
+    // silently wrong solve. Corpus max is 3.27e15 (ssine); the CHO
+    // `parmest` saddle-point KKT blows up to ≈ 3e82. `1 / EPS`
+    // (≈ 4.503e15) is a hard numerical invariant — every legitimate
+    // corpus matrix clears it. See
+    // `dev/research/kkt-mc64-scaling-blowup-2026-05-20.md`.
+    const MC64_SPREAD_GUARD: f64 = 1.0 / f64::EPSILON;
 
     let picked = pick_scaling_strategy(matrix);
     if !matches!(picked, ScalingStrategy::Mc64Symmetric) {
@@ -346,15 +368,37 @@ fn compute_scaling_auto_with_cache(
         ));
     }
 
+    // Compute the MC64 scaling once. Every branch below either
+    // returns this vector or inspects it; before issue #45 the
+    // `raw_diag_range` fast-path recomputed it on a separate return.
+    let (mc_vec, mc_info) = mc64_from_cache(matrix)?;
+
+    // Issue #45: catastrophic-spread guard. An MC64 scaling whose own
+    // spread exceeds `MC64_SPREAD_GUARD` is degenerate to working
+    // precision and silently corrupts the factorization (see the
+    // constant's doc comment). Discard it and fall back to the
+    // already-computed InfNorm vector. This check is placed BEFORE
+    // the `raw_diag_range` fast-path so it fires regardless of raw
+    // conditioning — the CHO KKT is genuinely ill-conditioned
+    // (`raw_diag_range >= RAW_GUARD`) and so took the fast-path
+    // straight to the unchecked MC64 vector before this guard.
+    if scaling_spread(&mc_vec) > MC64_SPREAD_GUARD {
+        return Ok((
+            in_vec,
+            ScalingInfo::Mc64FallbackToInfnorm {
+                reason: Mc64FallbackReason::Mc64ScalingDegenerate,
+            },
+        ));
+    }
+
     // Cheap pre-filter: a wide raw |diag| range means MC64 has
     // genuine work to do (and the InfNorm trial above did not
     // produce a tight scaling). Skip the off-diag diagnostic and
     // commit to MC64.
     if raw_diag_range(matrix) >= RAW_GUARD {
-        return mc64_from_cache(matrix);
+        return Ok((mc_vec, mc_info));
     }
 
-    let (mc_vec, mc_info) = mc64_from_cache(matrix)?;
     let mc_off = max_off_diag_ratio(matrix, &mc_vec);
     if mc_off <= MC_OFF_GUARD {
         // MC64 produced a well-conditioned scaled matrix.
@@ -607,6 +651,79 @@ mod tests {
             row_idx,
             values,
         }
+    }
+
+    /// Build the parameter-estimation saddle-point KKT used as the
+    /// issue-#45 spread-guard test oracle. Identical construction to
+    /// `src/bin/probe_mc64_synth.rs::build_kkt` — that probe is the
+    /// documented source of the measured MC64/InfNorm spreads (journal
+    /// 2026-05-20-02 16:34).
+    ///
+    /// `[H Bᵀ; B 0]` stored as the lower triangle: `ntheta` dense
+    /// parameter columns (graded H diagonal `1 .. theta_top`, each
+    /// coupling to every constraint with coefficient `pcoef`), `nx`
+    /// zero-diagonal state columns chained to `nc = nx` zero-`(2,2)`
+    /// constraint columns by the constant ratio `base` (state `s`
+    /// couples to constraint `s` with coefficient 1 and to constraint
+    /// `s-1` with coefficient `base`). The constant ratio makes the
+    /// chain translation-invariant — InfNorm equilibrates it
+    /// uniformly — while MC64's symmetric matching telescopes `base`
+    /// into a path-accumulated potential. Routes to `Mc64Symmetric`:
+    /// `diag_only/n ≈ 0.5`, `max_col_nnz = 1 + nc > 32`.
+    fn build_synth_kkt(
+        ntheta: usize,
+        nx: usize,
+        theta_top: f64,
+        base: f64,
+        pcoef: f64,
+    ) -> CscMatrix {
+        let nc = nx;
+        let n = ntheta + nx + nc;
+        let con0 = ntheta + nx; // first constraint global index
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        // Parameter columns: graded H diagonal + coupling to every
+        // constraint.
+        for p in 0..ntheta {
+            let hp = if ntheta > 1 {
+                theta_top.powf(p as f64 / (ntheta - 1) as f64)
+            } else {
+                1.0
+            };
+            rows.push(p);
+            cols.push(p);
+            vals.push(hp);
+            for c in 0..nc {
+                rows.push(con0 + c);
+                cols.push(p);
+                vals.push(pcoef);
+            }
+        }
+        // State columns: zero H diagonal + chain coupling.
+        for s in 0..nx {
+            let js = ntheta + s;
+            rows.push(js);
+            cols.push(js);
+            vals.push(0.0);
+            if s >= 1 {
+                rows.push(con0 + s - 1);
+                cols.push(js);
+                vals.push(base);
+            }
+            rows.push(con0 + s);
+            cols.push(js);
+            vals.push(1.0);
+        }
+        // Constraint columns: zero (2,2) diagonal only.
+        for c in 0..nc {
+            let jc = con0 + c;
+            rows.push(jc);
+            cols.push(jc);
+            vals.push(0.0);
+        }
+        CscMatrix::from_triplets(n, &rows, &cols, &vals)
+            .expect("synthetic KKT triplets are valid lower-triangle")
     }
 
     #[test]
@@ -989,6 +1106,142 @@ mod tests {
         assert_eq!(
             auto_s, in_s,
             "Auto must pick InfNorm on HS75_0000 (in_spread<1e3, InfNorm strictly wins)"
+        );
+    }
+
+    // ---- Issue #45: MC64 catastrophic-spread guard ----
+
+    /// T1 — `scaling_spread` returns `max|s| / min|s|` over the
+    /// nonzero entries. Hand-calculated oracle.
+    #[test]
+    fn scaling_spread_hand_oracle() {
+        // 4.0 / 1e-3 = 4000.
+        assert!((scaling_spread(&[1e-3, 1.0, 4.0]) - 4000.0).abs() < 1e-9);
+        // Zeros and signs are ignored: 8 / 2 = 4.
+        assert!((scaling_spread(&[0.0, -2.0, 8.0, 0.0]) - 4.0).abs() < 1e-12);
+        // A vector with no nonzero entry has undefined spread → +∞.
+        assert!(scaling_spread(&[0.0, 0.0]).is_infinite());
+    }
+
+    /// T2 — Issue #45. On a saddle-point KKT where MC64 symmetric
+    /// scaling produces a vector whose own spread exceeds `1/EPS`,
+    /// `Auto` must discard the degenerate MC64 vector and fall back
+    /// to the InfNorm vector, tagging the result
+    /// `Mc64FallbackToInfnorm{Mc64ScalingDegenerate}`.
+    ///
+    /// Oracle: `src/bin/probe_mc64_synth` measured this exact matrix
+    /// (`build_synth_kkt(8, 80, 1e8, 4.0, 0.5)`) at MC64 spread
+    /// 3.34e94 (far above `1/EPS ≈ 4.50e15`) and InfNorm spread
+    /// 2.00e4 (above `IN_SPREAD_GUARD = 1e3`, so the MC64 branch is
+    /// genuinely reached). The two preconditions below re-assert
+    /// those measured facts so the test fails loudly if the oracle
+    /// ever drifts. Journal: 2026-05-20-02 16:34.
+    #[test]
+    fn auto_falls_back_on_catastrophic_mc64_spread() {
+        let csc = build_synth_kkt(8, 80, 1e8, 4.0, 0.5);
+        // Precondition 1: the shape router sends this to MC64.
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
+        // Precondition 2: MC64's own scaling spread exceeds the guard.
+        let (mc_vec, _) = compute_scaling(&csc, &ScalingStrategy::Mc64Symmetric)
+            .expect("MC64 scaling should succeed");
+        let mc_spread = scaling_spread(&mc_vec);
+        assert!(
+            mc_spread > 1.0 / f64::EPSILON,
+            "test oracle invalid: MC64 spread {mc_spread:.3e} must exceed the guard"
+        );
+        // The guard must fire: Auto returns the InfNorm vector with
+        // the new degenerate-scaling reason.
+        let (auto_vec, info) =
+            compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto scaling should succeed");
+        match info {
+            ScalingInfo::Mc64FallbackToInfnorm {
+                reason: Mc64FallbackReason::Mc64ScalingDegenerate,
+            } => {}
+            other => {
+                panic!("expected Mc64FallbackToInfnorm{{Mc64ScalingDegenerate}}, got {other:?}")
+            }
+        }
+        let (in_vec, _) = compute_scaling(&csc, &ScalingStrategy::InfNorm)
+            .expect("InfNorm scaling should succeed");
+        assert_eq!(auto_vec, in_vec, "fallback must return the InfNorm vector");
+        assert_ne!(
+            auto_vec, mc_vec,
+            "fallback must NOT return the degenerate MC64 vector"
+        );
+    }
+
+    /// T3 — Issue #45 non-regression. When MC64's scaling spread is
+    /// BELOW the guard, `Auto` must keep the MC64 vector — the guard
+    /// must not be over-eager. Same builder as T2 with `base = 1.1`:
+    /// `probe_mc64_synth` measured MC64 spread 9.31e6 (well under
+    /// `1/EPS`) and InfNorm spread 1.05e4 (above `IN_SPREAD_GUARD`,
+    /// so the MC64 branch — and thus the new guard — is genuinely
+    /// reached rather than short-circuited).
+    #[test]
+    fn auto_keeps_mc64_when_spread_below_guard() {
+        let csc = build_synth_kkt(8, 80, 1e8, 1.1, 0.5);
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
+        let (mc_vec, _) = compute_scaling(&csc, &ScalingStrategy::Mc64Symmetric)
+            .expect("MC64 scaling should succeed");
+        let mc_spread = scaling_spread(&mc_vec);
+        assert!(
+            mc_spread < 1.0 / f64::EPSILON,
+            "test oracle invalid: MC64 spread {mc_spread:.3e} must be below the guard"
+        );
+        let (auto_vec, info) =
+            compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto scaling should succeed");
+        assert_eq!(
+            auto_vec, mc_vec,
+            "Auto must keep the MC64 vector when spread is below the guard"
+        );
+        assert!(
+            !matches!(
+                info,
+                ScalingInfo::Mc64FallbackToInfnorm {
+                    reason: Mc64FallbackReason::Mc64ScalingDegenerate,
+                }
+            ),
+            "the spread guard must not fire below the threshold, got {info:?}"
+        );
+    }
+
+    /// T4 — Issue #45 non-regression. The spread guard must not
+    /// regress a matrix that genuinely reaches the new code path.
+    /// `build_synth_kkt(8, 80, 1e8, 1.1, 0.5)` is well-conditioned
+    /// (`probe_mc64_synth`: InfNorm relres 4.4e-11, MC64 relres
+    /// 3.6e-11). Factoring and solving it through `Auto` must still
+    /// produce a small residual. Oracle: the relative residual
+    /// `‖A·x−b‖ / ‖b‖` is a mathematical identity.
+    #[test]
+    fn auto_solves_below_guard_matrix_correctly() {
+        use crate::numeric::factorize::factorize_multifrontal;
+        use crate::numeric::solve::solve_sparse;
+        use crate::symbolic::{symbolic_factorize_with_method, OrderingMethod, SupernodeParams};
+        use crate::NumericParams;
+
+        let csc = build_synth_kkt(8, 80, 1e8, 1.1, 0.5);
+        let snode = SupernodeParams::default();
+        let np = NumericParams {
+            scaling: ScalingStrategy::Auto,
+            ..NumericParams::default()
+        };
+        let sym = symbolic_factorize_with_method(&csc, &snode, OrderingMethod::Auto)
+            .expect("symbolic factorization should succeed");
+        let (factors, _inertia) =
+            factorize_multifrontal(&csc, &sym, &np).expect("numeric factorization should succeed");
+        let rhs = vec![1.0_f64; csc.n];
+        let x = solve_sparse(&factors, &rhs).expect("solve should succeed");
+        let mut ax = vec![0.0; csc.n];
+        csc.symv(&x, &mut ax);
+        let num = ax
+            .iter()
+            .zip(&rhs)
+            .fold(0.0_f64, |m, (&a, &b)| m.max((a - b).abs()));
+        let den = rhs.iter().fold(0.0_f64, |m, &b| m.max(b.abs())).max(1.0);
+        let relres = num / den;
+        assert!(
+            relres <= 1e-6,
+            "Auto solve relres {relres:.3e} exceeds 1e-6"
         );
     }
 }

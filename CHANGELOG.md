@@ -4,6 +4,30 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — MC64 catastrophic-spread guard ([#45][i45])
+
+`ScalingStrategy::Auto` no longer applies an MC64 symmetric scaling
+vector whose own spread `max|s| / min|s|` exceeds `1 / EPS`
+(≈ 4.5e15). Such a scaling is degenerate to working precision:
+`D = diag(s)` is singular, `D·A·D` underflows during the
+factorization, and Bunch-Kaufman force-accepts exact-zero pivots —
+producing a silently wrong solve while `factor()` still reports
+`Success` with the correct inertia. On the CHO `parmest` saddle-point
+KKT (n=43332) MC64's symmetric matching produced a scaling spanning
+≈ 3e82; `Auto` now detects this, falls back to the InfNorm scaling it
+already computed on the same path, and solves correctly (relative
+residual 7e11 → 2.5e-8). The fallback is surfaced as
+`ScalingInfo::Mc64FallbackToInfnorm { reason:
+Mc64FallbackReason::Mc64ScalingDegenerate }` (a new variant). The
+guard is anchored to the hard numerical invariant `1 / EPS`, not
+fitted to a corpus: every matrix in the 38-family parity corpus has
+MC64 spread ≤ 3.27e15, well below the threshold. Only `Auto` is
+guarded; an explicit `ScalingStrategy::Mc64Symmetric` request is an
+informed user choice and is honored as-is. See
+`dev/research/kkt-mc64-scaling-blowup-2026-05-20.md`.
+
+[i45]: https://github.com/jkitchin/feral/issues/45
+
 ### Changed — inertia counts every pivot by sign ([#42][i42], [#40][i40])
 
 Under the default `ZeroPivotAction::ForceAccept`, FERAL's reported

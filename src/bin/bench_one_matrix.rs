@@ -201,6 +201,7 @@ fn solve_one(mtx_path: &str, rhs_path: &str, out_path: &str) -> std::io::Result<
             let r = match reason {
                 Mc64FallbackReason::InfNormSpreadAcceptable => "infnorm_spread_acceptable",
                 Mc64FallbackReason::Mc64WorseThanInfnorm => "mc64_worse_than_infnorm",
+                Mc64FallbackReason::Mc64ScalingDegenerate => "mc64_scaling_degenerate",
             };
             ("yes", Some(r))
         }
