@@ -1,0 +1,145 @@
+* 15:00 :issue-42:inertia:rankdef:f01:diagnosis:
+Picked up issue #42 — feral reports inertia (4,5,1), zero=1, on the
+synthetic stress matrix rankdef_10_3, agreeing with no canonical oracle
+(MUMPS ICNTL(24)=1 zero=3, SSIDS zero=0, MA57 zero=0). The stress gate
+(report.py) requires feral.zero ∈ {mumps.zero, ssids.zero} = {3, 0};
+zero=1 is allowlisted under #42.
+
+Ran probe_f01 (already in-tree) to dump feral's actual per-pivot |d|
+on rankdef_10_3. Result:
+
+  inertia=(4,5,1)  null_pivot_tol = sqrt(n)·EPS·||A_scaled|| = 4.337e-15
+
+  k=7  |d|=5.551e-15  d=+5.551e-15  SIGN-ACCEPT (above tol) -> +
+  k=8  |d|=8.075e-16  d=-8.075e-16  F-01 BAND (sign-fallback) -> -
+  k=9  |d|=0.000e0    d=+0.000e0    STRICT_ZERO (case a)     -> zero
+
+So zero=1 is NOT a threshold-band artifact. It is the count of
+*bit-exactly-zero* pivots: exactly one of the three constructed-null
+pivots (the trailing 1×1 Schur complement, k=9) reduces to a true 0.0
+under feral's elimination order. The strict-zero rule |d| ≤ EPS
+correctly catches it. The other two near-null pivots reduce to tiny
+nonzero floats (5.55e-15, 8.08e-16) and are counted by sign per the
+#39 sign-fallback design — which deliberately left the strict-zero
+case (a) path unchanged (f01-rankdef-underreporting.md:309 "Strict
+zeros (|d| ≤ EPS) are still zeros").
+
+Note k=7 at 5.551e-15 is ABOVE the current null_pivot_tol 4.337e-15,
+so even reverting the #39 sign-fallback (count whole band as zero)
+would yield zero=2, not 3. MUMPS-IC24's zero=3 requires a larger
+relative threshold than feral's sqrt(n)·EPS·||A||.
+
+Why the oracles differ:
+- MUMPS-IC24=3: explicit null-pivot detection, relative threshold
+  catches all three (5.5e-15, 8.1e-16, 0.0).
+- SSIDS=0, MA57=0: default sign-counting; their elimination order
+  produces no bit-exact-zero pivot, so all three near-nulls are
+  tiny-nonzero and counted by sign.
+- feral=1: hybrid — detects the one bit-exact zero, counts the two
+  near-zeros by sign.
+
+Conclusion: this is a genuine design decision, not a localizable bug.
+feral is consistent within itself (#39 chose the sign-counting lane;
+case (a) only ever catches true 0.0). The hybrid count is the
+unavoidable consequence of "count by sign EXCEPT bit-exact zeros."
+Three resolution paths exist (zero=0 via counting exact zeros by sign;
+zero=2/3 via relative rank detection, contradicts #39; or change the
+gate / exclude the matrix). Surfacing to the user for the decision.
+
+* 15:40 :issue-42:decision:f01:option-a:
+Discussed the three resolution paths with the user. Established that
+KKT solving does NOT need a precise rank count — the IPM consumes the
+continuous near-singularity signal (min_pivot_magnitude, built
+2026-05-19) and thresholds it host-side; the `zero` inertia count has
+one real consumer, the stress/consensus verification gate. Decision:
+**Option A** — feral commits to the SSIDS/MA57/default-MUMPS
+convention: count every pivot by sign, including bit-exact-0.0 pivots.
+`zero` inertia component becomes structurally 0 under ForceAccept.
+
+Verified the fix lands exactly: rankdef_10_3 k=9 pivot is d=+0.000e0;
+sign rule `d > 0.0` routes +0.0 to neg (0.0>0.0 is false). That makes
+feral report (4,6,0) — bit-identical to BOTH oracles
+(oracles.json: ssids=(4,6,0), ma57=(4,6,0)). Not just the zero
+component — the full triple matches.
+
+Unavoidable ripple: the F-01 invariant test
+`f01_rankdef_surfaces_at_least_one_zero_pivot` (tests/pounce_interface.rs:314)
+factors the dyadic u·uᵀ (four bit-exact-0.0 pivots) and asserts
+zero>=1. The dyadic's pivots and rankdef_10_3's k=9 are the identical
+case (exact 0.0), so no fix preserves both. User approved inverting
+the test. feral keeps rank-deficiency detection via two other
+channels: min_pivot_magnitude (continuous) and strict ZeroPivotAction
+-> NumericallyRankDeficient (factor status). Only the inertia triple
+under ForceAccept changes.
+
+Bonus: Option A is structural (never count zero), so it also resolves
+issue #40 (feral-aarch64 zero=1 vs x86 zero=0 on rankdef_50_5 /
+rankdef_exact_50_5) — #40 is purely a zero-component cross-arch
+divergence per report.py's own comment. Three allowlist entries
+removable: rankdef_10_3 (#42), rankdef_50_5 (#40), rankdef_exact_50_5
+(#40).
+
+Edit sites (src/dense/factor.rs), all ForceAccept strict-zero paths,
+inertia counter only — numerical handling (L-column zeroing, diagonal
+zeroing, Rejected outcome, needs_refinement) unchanged:
+  - 662   basic factor() last-pivot loop
+  - 3452  try_reject_1x1_frontal case (a)
+  - 3929  do_1x1_pivot case (a)
+  - 4189  count_1x1_inertia strict branch
+  - 4281-4338 count_2x2_inertia strict + band branches (both -> sign)
+Leaving count_2x2_inertia_val (3739) and count_2x2_inertia
+non-singular branch (4356): unreachable for zero (det != 0 precondition).
+
+* 12:32 :issue-42:issue-40:implementation:tests:option-a:
+Implemented Option A in src/dense/factor.rs — all five ForceAccept
+strict-zero inertia-counter sites now count by sign instead of
+incrementing `zero`:
+  - basic factor() last-pivot loop
+  - try_reject_1x1_frontal case (a) — sign captured before L/diag zeroing
+  - do_1x1_pivot case (a) — sign captured before L/diag zeroing
+  - count_1x1_inertia strict branch
+  - count_2x2_inertia strict + band branches (both eigenvalues by sign)
+Numerical handling unchanged: L-column zeroing, diagonal zeroing,
+Rejected/(0.0,k+2) returns, needs_refinement all preserved. The
+`zero` out-param of the three 1×1 helpers is now dead — renamed to
+`_zero` (kept for signature parity with count_2x2_inertia, whose
+non-singular branch still has a `*zero` write at lam==0.0). count_2x2's
+strict branch dropped its `trace`-sign rule for sym2_eigenvalues.
+
+clippy --all-targets -D warnings: clean. cargo test --no-fail-fast:
+541 passed, 0 failed.
+
+Test blast radius larger than the plan anticipated. The plan named one
+test to invert (f01_rankdef_surfaces_at_least_one_zero_pivot). Option A
+actually inverts SEVEN tests across SIX files — every test that
+asserted the old "exact-0.0 pivot counts as zero" behavior. All are
+the identical exact-0.0 case the user already approved inverting:
+  - pounce_interface.rs: f01 dyadic (renamed
+    f01_dyadic_rankdef_counts_pivots_by_sign, asserts zero=0); f03
+    diag(1,0,1) (2,0,1)->(2,1,0)
+  - delayed_pivoting.rs: factor_frontal_root_force_accepts_without_delay
+    zero=2 -> negative=2,zero=0
+  - dense_fast_path.rs: test_zero_column_force_accept zero=1 ->
+    negative=1,zero=0
+  - dense_ldlt.rs: test_force_accept_with_refinement zero=1 ->
+    (1,1,0)
+  - pivot_rejection.rs: threshold_rejects_tiny_1x1_pivot_dense
+    (1,0,2) -> (1,2,0)
+  - threshold_consistency.rs:
+    factor_inertia_force_accept_implies_solve_skip_invariant (2,0,2)
+    -> (2,2,0); the solve-skip invariant n_below >= inertia.zero is
+    now vacuous (zero structurally 0) but kept as a regression guard.
+Every solve-correctness / needs_refinement / factor-preservation
+assertion in those tests was left intact — only the inertia triple
+inverted. New regression test added:
+issue_42_rankdef_10_3_inertia_matches_consensus_oracle asserts
+rankdef_10_3 -> (4,6,0).
+
+Stress gate: removed all three ALLOWLIST entries from report.py
+(rankdef_10_3 #42, rankdef_50_5 #40, rankdef_exact_50_5 #40). Ran
+`python3 run.py --category rankdef` + `report.py`: all 6 rankdef
+matrices clean, 0 flags. rankdef_10_3 -> (4,6,0), rankdef_50_5 ->
+(25,25,0), rankdef_exact_50_5 -> (24,26,0) — all zero=0, all matching
+a canonical oracle. #40 resolved as a side effect (Option A is
+structural: zero is never incremented, so no cross-arch divergence
+in the zero component is possible).

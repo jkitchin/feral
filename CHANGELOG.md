@@ -4,6 +4,36 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — inertia counts every pivot by sign ([#42][i42], [#40][i40])
+
+Under the default `ZeroPivotAction::ForceAccept`, FERAL's reported
+inertia now classifies *every* accepted pivot by sign — including a
+pivot that reduced to a bit-exact `0.0`, which is counted as `negative`
+(`0.0 > 0.0` is `false`). The `zero` component of the inertia triple is
+therefore structurally `0` whenever the factorization succeeds under
+`ForceAccept`. This makes FERAL's reported inertia a *sign-count*, the
+same convention used by SSIDS, MA57, and default MUMPS; it is no longer
+the mathematical (eigenvalue-sign) inertia on rank-deficient matrices.
+
+Previously FERAL used a hybrid rule that counted bit-exact-`0.0` pivots
+into `zero` while counting merely-tiny pivots by sign, producing an
+inertia triple that matched no canonical solver on borderline
+rank-deficient matrices (e.g. `rankdef_10_3`: FERAL reported `(4,5,1)`;
+SSIDS/MA57 report `(4,6,0)`). Whether a near-null pivot rounds to a
+bit-exact `0.0` depends on elimination order and per-CPU FMA
+contraction, so the old `zero` lane was also architecture-dependent
+(#40). Counting every pivot by sign removes both problems: FERAL now
+matches the SSIDS/MA57 consensus on every rank-deficient corpus matrix,
+identically on every architecture. Rank deficiency remains observable
+via `min_pivot_magnitude` (continuous) and `ZeroPivotAction::Fail`
+(which still returns `NumericallyRankDeficient`). No factorization or
+solve numerics changed — only the inertia counter. Rationale in
+`dev/decisions.md` (2026-05-20) and
+`dev/research/f01-rankdef-underreporting.md`.
+
+[i42]: https://github.com/jkitchin/feral/issues/42
+[i40]: https://github.com/jkitchin/feral/issues/40
+
 ### Changed — MC64 partial-singular warning is now opt-in ([#43][i43])
 
 The one-line `warning: MC64 matching left N of M variables unmatched`

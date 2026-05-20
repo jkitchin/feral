@@ -405,3 +405,110 @@ reports on `rankdef_50_5` and `rankdef_200_20` (cited in the
 - Full library + integration suite green.
 - No perf delta expected and none observed (the change is one extra
   sign check per F-01 band hit; band hits are rare).
+
+## 2026-05-20 — Strict-zero sign-fallback (issue #42, "Option A")
+
+### Motivation
+
+`rankdef_10_3` (n=10, constructed null dim k=3) reported feral inertia
+`(4, 5, 1)` — `zero=1`. No canonical oracle agrees: MUMPS
+`ICNTL(24)=1` reports `(3,4,3)`, SSIDS `(4,6,0)`, MA57 `(4,6,0)`. The
+CLAUDE.md correctness contract requires feral's `zero` to equal MUMPS's
+or SSIDS's; `1 ∉ {3, 0}`.
+
+`src/bin/probe_f01.rs` dumped feral's three near-null pivots:
+
+    k=7  |d|=5.551e-15  d=+5.551e-15   above null_pivot_tol  -> sign (+)
+    k=8  |d|=8.075e-16  d=-8.075e-16   F-01 band             -> sign (-)
+    k=9  |d|=0.000e0    d=+0.000e0     strict-zero (case a)  -> zero
+
+`zero=1` is the count of *bit-exactly-zero* pivots: the trailing 1×1
+Schur complement (`k=9`) reduces to a true `0.0` under feral's
+elimination order. The 2026-05-17 sign-fallback addendum above
+deliberately preserved case (a) (`|d| ≤ EPS` ⇒ `zero`); that is what
+`zero=1` is. The other two near-nulls round to tiny nonzero floats and
+are counted by sign. feral's count is a hybrid — "count by sign except
+bit-exact zeros" — that no reference solver produces.
+
+### Decision: count strict-zero pivots by sign too
+
+The 2026-05-17 addendum collapsed `{strict-zero, band, sign}` to
+`{strict-zero, sign}`. This addendum collapses it the rest of the way
+to `{sign}`: under `ZeroPivotAction::ForceAccept`, **every** pivot is
+counted by sign, including a strict-zero pivot whose magnitude is
+`≤ EPS` (the sign of a bit-exact `+0.0` under the existing `d > 0.0`
+rule is negative — `0.0 > 0.0` is false). feral's `zero` inertia
+component becomes structurally `0` under `ForceAccept`.
+
+Rationale — why the `zero` count can be dropped without loss:
+
+1. **The IPM does not consume it.** An interior-point host needs a
+   near-singularity *signal*, not a precise rank count. That signal is
+   `Solver::min_pivot_magnitude` (continuous, host-thresholded; built
+   2026-05-19, see `dev/plans/near-singularity-signal.md`). The `zero`
+   inertia component's only consumer is the stress/consensus
+   verification gate.
+
+2. **It was never a reliable rank detector anyway.** Case (a) only
+   fires on a pivot that rounds to *bit-exact* `0.0`. A genuinely
+   near-singular matrix almost always produces dust (`~1e-15`) instead,
+   counted by sign. feral catching `rankdef_10_3` at `zero=1` was an
+   artifact of one pivot landing exactly on `0.0`.
+
+3. **Rank-deficiency detection is retained on two other channels.**
+   A caller wanting a hard rank check sets a strict `ZeroPivotAction`
+   (`Fail`) and gets `FeralError::NumericallyRankDeficient`. The
+   continuous magnitude is on `min/max_pivot_magnitude`. Only the
+   inertia *triple* under `ForceAccept` changes.
+
+4. **It matches the consensus oracle exactly.** With `k=9` counted by
+   sign (`+0.0 → neg`), feral reports `(4,6,0)` — bit-identical to
+   SSIDS and MA57 (`oracles.json`). Not just the `zero` component;
+   the full triple.
+
+### Why not Option B (relative-threshold rank detection → zero=3)
+
+Reaching MUMPS-`ICNTL(24)`'s `zero=3` requires a threshold above
+`5.55e-15` (k=7's magnitude) — larger than feral's
+`null_pivot_tol = √n·EPS·‖A‖ ≈ 4.34e-15`. Such a threshold is
+matrix-dependent and round-off-fragile: a pivot landing on either side
+of the cutoff flips the count, which is the cross-architecture failure
+mode of issue #40. It also reverses the 2026-05-17 sign-fallback
+decision. MUMPS itself makes this opt-in (`ICNTL(24)=1`). Rejected.
+
+### Consequence: F-01 invariant test inverted
+
+`tests/pounce_interface.rs::f01_rankdef_surfaces_at_least_one_zero_pivot`
+factors the rank-1 dyadic `u·uᵀ` (n=5), whose four trailing pivots are
+*bit-exact* `0.0`, and asserts `zero ≥ 1`. The dyadic's pivots and
+`rankdef_10_3`'s `k=9` are the identical case; no fix for #42 can keep
+this invariant. The test is inverted: the dyadic now reports `zero=0`
+(all four `+0.0` pivots counted by sign). Human approval obtained
+before the change (CLAUDE.md test-modification rule).
+
+### Bonus: resolves issue #40
+
+#40 is feral-aarch64 reporting `zero=1` where x86 reports `zero=0` on
+`rankdef_50_5` / `rankdef_exact_50_5` — a purely `zero`-component
+cross-architecture divergence (one arch's elimination produces a
+bit-exact-`0.0` pivot, the other does not). Option A makes `zero`
+structurally `0` on every architecture, so the divergence cannot
+occur. Three `report.py` ALLOWLIST entries are removed: `rankdef_10_3`
+(#42), `rankdef_50_5` and `rankdef_exact_50_5` (#40).
+
+### Touch points
+
+- `src/dense/factor.rs`: five `ForceAccept` strict-zero sites, inertia
+  counter changed from `zero += 1` to a sign count; numerical handling
+  (L-column zeroing, diagonal zeroing, `Rejected` outcome,
+  `needs_refinement`) unchanged:
+  - basic `factor()` last-pivot loop,
+  - `do_1x1_pivot` case (a),
+  - `try_reject_1x1_frontal` case (a),
+  - `count_1x1_inertia` strict branch,
+  - `count_2x2_inertia` strict + band branches (count both
+    `sym2_eigenvalues` roots by sign).
+- `tests/pounce_interface.rs`: F-01 invariant test inverted; new
+  `rankdef_10_3` regression test against the `(4,6,0)` oracle.
+- `external_benchmarks/stress/report.py::ALLOWLIST`: `#42` and both
+  `#40` entries removed.

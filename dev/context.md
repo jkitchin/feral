@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-20T01:38:05Z
+Generated: 2026-05-20T16:43:57Z
 
 ## Latest Session
-File: dev/sessions/2026-05-19-01.md
+File: dev/sessions/2026-05-20-01.md
 ```
-# Session 2026-05-19-01
+# Session 2026-05-20-01
 
 ## Goal
 
-Close the gap that prevents an IPM backed by FERAL (`pounce`) from bumping
-its Hessian perturbation `δ_w` on KKT systems that are ill-conditioned but
-land on the correct inertia. Ipopt+MA57 solves three Mittelmann-class
-problems in 100–291 iters; pounce+FERAL stalls because the perturbation
-handler never fires. The agreed fix: have FERAL report a near-singularity
-signal — `min|λ(D)|`, the smallest accepted pivot magnitude — that the
-perturbation handler can threshold.
+Resolve issue #42 — feral reports `inertia.zero=1` on the synthetic
+stress matrix `rankdef_10_3`, matching no canonical oracle on either
+architecture (MUMPS ICNTL(24)=1 `zero=3`, SSIDS `zero=0`, MA57
+`zero=0`). Implement the user-approved **Option A**: feral commits to
+the SSIDS/MA57/default-MUMPS convention of counting every pivot by
+sign, so the `zero` inertia component becomes structurally `0` under
+`ZeroPivotAction::ForceAccept`.
 
 ## Accomplished
 
-- **Research note + plan** — `dev/research/near-singularity-signal.md`,
-  `dev/plans/near-singularity-signal.md`. Root cause traced: FERAL's default
-  `ZeroPivotAction::ForceAccept` force-accepts a near-singular pivot and
-  returns `FactorStatus::Success`; the only near-singularity-adjacent fact
-  reaching the IPM is `needs_refinement`, which is internal, a coarse
-  boolean, and already true on healthy cascade-break factorizations. MA57
-  reports the analogous case via `CNTL(2)` → `INFO(1)==4` → Ipopt
-  `SYMSOLVER_SINGULAR` → `PerturbForSingularity`.
-
-- **Rust API** — `SparseFactors::{min,max}_pivot_magnitude` over a shared
-  `pivot_magnitude_extent()` pass, mirroring the existing `min_diagonal()`.
-  `Solver::{min,max}_pivot_magnitude` delegate. 2×2 smaller magnitude
-  computed `|det|/larger` to stay cancellation-free on near-singular blocks.
-  Kept deliberately distinct from `min_diagonal()` (signed-min vs.
-  magnitude-min).
-
-- **C ABI** — `feral_min_pivot` / `feral_max_pivot` (`-1.0` sentinel on
-  no-factor / null handle). Declared in `feral-ipopt-shim/include/feral_capi.h`.
-
-- **Evidence** — 5 new tests, all with hand-computed oracles external to the
-  implementation:
-  - `diag(5,-2,3,-7)`: `min|λ|=2`, `max|λ|=7`, `min_diagonal=-7`
-  - `[[0,1],[1,0]]`: 2×2 block, `min=max=1` (`|smaller eig|`, not
-    `d_diag[0]=0`)
-  - `diag(1,1e-14,-3)`: inertia `(2,1,0)` still correct, `min|λ|≈1e-14`,
-    ratio `min/max≈3e-15` — thresholdable where inertia alone is silent
-  - `None` / `-1.0` sentinel before any factor
-  - C ABI `capi_min_max_pivot`: `[[1,2],[2,1]]` under identity scaling →
-    `min|λ(D)|=1`, `max|λ(D)|=3`
-  Full `cargo test` exit 0; `cargo clippy --all-targets -- -D warnings`
-  clean.
-
-- Three atomic commits (research+plan; Rust API; C ABI). CHANGELOG
-  Unreleased and `dev/decisions.md` updated.
-
-## Benchmark Results
+- **Diagnosed #42** (probe_f01 on `rankdef_10_3`): feral's `zero=1` was
+  the count of *bit-exactly-zero* pivots — exactly one trailing pivot
+  (k=9) reduced to a true `0.0` under feral's elimination order; the
+  strict-zero rule `|d| <= EPS` counted it as zero while the #39
+  sign-fallback counted the other two near-null pivots by sign. A
+  hybrid no solver shares.
+- **Implemented Option A** in `src/dense/factor.rs` — all five
+  `ForceAccept` strict-zero inertia-counter sites now count by sign
+  (`d > 0.0 ? positive : negative`; `+0.0` routes to `negative`)
+  instead of incrementing `zero`:
+  - basic `factor()` last-pivot loop
+  - `try_reject_1x1_frontal` case (a) — sign captured before L/diag zeroing
+  - `do_1x1_pivot` case (a) — sign captured before L/diag zeroing
+  - `count_1x1_inertia` strict branch
+  - `count_2x2_inertia` strict + band branches (both eigenvalues by
+    sign via `sym2_eigenvalues`)
+  Numerical handling unchanged: L-column zeroing, diagonal zeroing,
+  `Rejected`/`(0.0,k+2)` returns, `needs_refinement` all preserved. The
+  now-dead `zero` out-param of the three 1×1 helpers was renamed
+  `_zero` (kept for signature parity with `count_2x2_inertia`).
+- **Inverted 7 tests across 6 files** — every test that asserted the
+  old "exact-`0.0` pivot counts as `zero`" behavior. All are the
+  identical exact-`0.0` case the user approved inverting. Only the
+  inertia triple changed; all solve-correctness / `needs_refinement` /
+  factor-preservation assertions preserved:
+  - `pounce_interface.rs`: `f01_dyadic_rankdef_counts_pivots_by_sign`
+    (renamed, asserts `zero=0`); `f03_default_force_accept_factors_isolated_zero_pivot`
+    `(2,0,1)`→`(2,1,0)`
+  - `delayed_pivoting.rs`: `factor_frontal_root_force_accepts_without_delay`
+    `zero=2`→`negative=2,zero=0`
+  - `dense_fast_path.rs`: `test_zero_column_force_accept` `zero=1`→`negative=1,zero=0`
+  - `dense_ldlt.rs`: `test_force_accept_with_refinement` `zero=1`→`(1,1,0)`
+  - `pivot_rejection.rs`: `threshold_rejects_tiny_1x1_pivot_dense` `(1,0,2)`→`(1,2,0)`
+  - `threshold_consistency.rs`: `factor_inertia_force_accept_implies_solve_skip_invariant`
+    `(2,0,2)`→`(2,2,0)`
+- **Added regression test** `issue_42_rankdef_10_3_inertia_matches_consensus_oracle`
 ```
 
 ## Git Status
 ```
-40b5612 fix(stress): allowlist 3 #28 cross-arch BK-pivot divergences
-8298d7b chore(session): 2026-05-19-01 -- near-singularity signal min|λ(D)|
-f6640eb feat(capi): feral_min_pivot / feral_max_pivot near-singularity ABI
-cb03009 feat(numeric): min/max pivot magnitude near-singularity signal
-5b81db0 docs(research): plan near-singularity signal (min|λ(D)|)
+1f6a1a9 test(stress): drop #42/#40 allowlist entries — Option A makes zero structural
+68c7d6c fix(inertia): count every pivot by sign under ForceAccept (#42, #40)
+350d1eb fix(log): MC64 partial-singular warning is opt-in, default off (#43)
+1503ad4 test(stress): replace synthetic-label oracle with committed solver consensus
+4eb9c5e fix(ssids-oracle): rebuild fixes stale rpath; portable rpath + -53 hint
 ```
 
 ## Test Status
@@ -75,8 +75,8 @@ test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok
 test test_gate_tiny_sparse_in ... ok
-test test_determinism_tiny ... ok
 test test_gate_boundary_n_16 ... ok
+test test_determinism_tiny ... ok
 test test_solve_parity_tiny_real_matrix ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -92,60 +92,60 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-19-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-20-01.md)
 
-
-Purely additive change (new query accessors; no factorization/solve path
-touched). Phase 2.8.1 exit partition all PASS, in line with the prior
-session:
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.33     <= 2.0     PASS
-medium (<500)            152145     1.70     <= 3.0     PASS
+small-frontal (<200)     147982     1.37     <= 2.0     PASS
+medium (<500)            152145     1.83     <= 3.0     PASS
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.58     <= 2.0     PASS
-medium (<500)            153560     1.58     <= 3.0     PASS
+small-frontal (<200)     153455     1.59     <= 2.0     PASS
+medium (<500)            153560     1.60     <= 3.0     PASS
 
-(Microbenchmark noise: a second run read 1.36 / 1.74 / 1.56 / 1.56 — same
-verdicts. Worst factor-ratio outliers unchanged: `MUONSINE_0000` ≈28–30×,
-`KIRBY2_*` 4–8×, `CRESC132_0000` ≈4.8×.)
+Prior session (2026-05-19-01) recorded Dense 1.33/1.70, Sparse
+1.58/1.58, with a documented second-run noise band of 1.36/1.74/1.56.
+This session's numbers (1.37/1.83/1.59/1.60) are within that
+microbenchmark noise band — the change is inertia-counter-only and
+touches no numeric path, so no genuine regression is expected or
+present. All four buckets PASS. Worst factor-ratio outlier unchanged:
+`MUONSINE_0000` ≈30×.
 
 ```
 
 ## Recent Decisions
-and returns `FactorStatus::Success`. MA57 reports the analogous case
-via its `CNTL(2)` small-pivot threshold → `INFO(1)==4` →
-Ipopt `SYMSOLVER_SINGULAR` → `PerturbForSingularity`.
+`sqrt(n)*EPS*||A||`, so matching it means picking a tolerance to fit
+one matrix; (3) a rank count precise enough for one corpus matrix is
+not something any feral consumer needs.
 
-Two alternatives were considered and rejected:
-
-1. **Add a `FactorStatus::NearSingular` variant** (FERAL decides the
-   threshold and reports a distinct status). Rejected: it bakes a
-   policy threshold into the solver, is an ABI break, and forces every
-   caller to handle a status that only matters to perturbation-driven
-   IPMs. The threshold is caller-specific (it is pounce's analog of
-   `CNTL(2)`), so the solver should not own it.
-2. **Paper over it inside FERAL** — MA57-style internal static-pivot
-   bending (issue #38, `dev/research/static-pivot-perturbation-2026-05-17.md`).
-   Already a separate opt-in lever; it perturbs the factor instead of
-   informing the caller, which is the wrong fix when the *IPM* is the
-   component that should react.
-
-Decision: FERAL stays policy-free. It reports the magnitude; the
-caller thresholds it (recommended: the scale-free ratio
-`min|λ(D)| / max|λ(D)| ≈ 1/κ(D)`) and decides whether to treat the
-factor as singular. `min|λ(D)|` is computed for free in a pass that
-mirrors the existing `min_diagonal()` — no factorization/solve cost.
+Consequence — test inversion: the `ForceAccept` exact-`0.0` path had a
+dedicated invariant test family asserting `zero >= 1`. No fix can both
+keep those green and resolve #42 — they test the identical exact-`0.0`
+case. Seven tests across six files were inverted to assert the
+sign-count (`f01_dyadic_rankdef_counts_pivots_by_sign`,
+`f03_default_force_accept_factors_isolated_zero_pivot`,
+`factor_frontal_root_force_accepts_without_delay`,
+`test_zero_column_force_accept`, `test_force_accept_with_refinement`,
+`threshold_rejects_tiny_1x1_pivot_dense`,
+`factor_inertia_force_accept_implies_solve_skip_invariant`). Every
+solve-correctness, `needs_refinement`, and factor-preservation
+assertion in those tests was preserved; only the inertia triple
+changed. Rank deficiency is still surfaced through two unchanged
+channels: `min_pivot_magnitude` (continuous) and
+`ZeroPivotAction::Fail` → `NumericallyRankDeficient` (factor status).
 
 References:
-- `dev/research/near-singularity-signal.md`, `dev/plans/near-singularity-signal.md`.
-- `factorize.rs` `min_diagonal()` — the signed-min precedent this
-  magnitude-min signal is deliberately kept distinct from.
-- Issue #38 / `static-pivot-perturbation-2026-05-17.md` — the rejected
-  "paper over it" lever.
+- `src/dense/factor.rs` — five `ForceAccept` strict-zero sites: the
+  basic `factor()` last-pivot loop, `try_reject_1x1_frontal` case (a),
+  `do_1x1_pivot` case (a), `count_1x1_inertia` strict branch,
+  `count_2x2_inertia` strict + band branches.
+- `external_benchmarks/stress/report.py` — all three `ALLOWLIST`
+  entries removed (`rankdef_10_3` #42, `rankdef_50_5` #40,
+  `rankdef_exact_50_5` #40).
+- `dev/research/f01-rankdef-underreporting.md` — 2026-05-20 section.
+- Issues #42 (resolved) and #40 (resolved as a side effect).
 
 ## Recent Tried-and-Rejected
 direct equivalent. The `test` job (linux × py3.10/3.12/3.13) and the
@@ -349,4 +349,6 @@ tests/parallel_parity.rs
 tests/parity.rs
 tests/pivot_rejection.rs
 
+
+(truncated from      365 lines to 350 line budget)
 (truncated from      365 lines to 350 line budget)

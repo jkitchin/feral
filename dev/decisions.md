@@ -3801,3 +3801,85 @@ References:
 - `src/numeric/solver.rs` — `Solver::with_partial_singular_warning`.
 - `src/capi.rs` — `FERAL_WARN_PARTIAL_SINGULAR` env var in `feral_new`.
 - Issue #43.
+
+## 2026-05-20 — Inertia counts every pivot by sign; `zero` is structural 0 under ForceAccept (#42, Option A)
+
+Decision: under `ZeroPivotAction::ForceAccept` (the default), feral's
+inertia counter classifies *every* accepted pivot by sign — including a
+pivot that reduced to a bit-exact `0.0`. The sign rule is `d > 0.0 ?
+positive : negative`; because `0.0 > 0.0` is `false`, a `+0.0` pivot is
+counted as `negative`. The `zero` component of the reported inertia
+triple is therefore structurally `0` whenever the factorization
+succeeds under `ForceAccept`. feral's reported inertia is a
+*sign-count*, not the mathematical (eigenvalue-sign) inertia: on a
+rank-deficient matrix the two differ.
+
+Context: issue #42. On the synthetic stress matrix `rankdef_10_3` feral
+reported `(4, 5, 1)` — `zero=1` — matching no canonical oracle (MUMPS
+ICNTL(24)=1 reports `zero=3`, SSIDS and MA57 report `zero=0`). The
+`zero=1` was the count of *bit-exactly-zero* pivots: feral's
+elimination order produced exactly one trailing pivot that reduced to a
+true `0.0`, and the strict-zero rule `|d| <= EPS` counted it as zero
+while the #39 sign-fallback counted the other two near-null pivots by
+sign. The result was a hybrid that no solver shares.
+
+This is the third and final step of a collapse begun earlier:
+- Pre-#39: `{strict-zero, rank-deficiency band, sign}` — three lanes.
+- #39 (c7471ce): `{strict-zero, sign}` — band pivots counted by sign.
+- #42 (this entry, Option A): `{sign}` — strict zeros counted by sign
+  too. The `zero` lane is gone.
+
+Rationale: the `zero` inertia count has exactly one real consumer — the
+stress/consensus verification gate. KKT solving does not need it: the
+IPM (pounce) consumes the continuous near-singularity signal
+`min_pivot_magnitude` / `max_pivot_magnitude` (added 2026-05-19) and
+thresholds it host-side. SSIDS, MA57, and default-MUMPS all sign-count;
+only MUMPS with explicit null-pivot detection (ICNTL(24)=1) reports a
+nonzero `zero`. Committing to the sign-counting convention makes feral
+bit-identical to the SSIDS/MA57 consensus on every rank-deficient
+matrix in the corpus, and removes an architecture-dependent failure
+mode: whether a near-null pivot rounds to a bit-exact `0.0` depends on
+the elimination order and the FMA contraction the target CPU uses, so a
+`zero` lane is inherently non-portable (this was issue #40 — feral
+reported `zero=1` on aarch64 and `zero=0` on x86 for `rankdef_50_5` /
+`rankdef_exact_50_5`). Option A is structural — `zero` is never
+incremented under `ForceAccept` — so #40 cannot recur.
+
+Alternative considered and rejected — Option B (relative-threshold rank
+detection): widen the null-pivot tolerance so all near-null pivots are
+detected and counted as `zero`, targeting MUMPS-ICNTL(24)'s `zero=3` on
+`rankdef_10_3`. Rejected: (1) it directly contradicts the #39
+sign-fallback decision, which was itself adopted to restore
+MUMPS/SSIDS consensus on borderline-singular matrices (FBRAIN3LS_0839);
+(2) even reverting #39 entirely would yield `zero=2`, not `3`, on
+`rankdef_10_3` — MUMPS-ICNTL(24)'s threshold is larger than
+`sqrt(n)*EPS*||A||`, so matching it means picking a tolerance to fit
+one matrix; (3) a rank count precise enough for one corpus matrix is
+not something any feral consumer needs.
+
+Consequence — test inversion: the `ForceAccept` exact-`0.0` path had a
+dedicated invariant test family asserting `zero >= 1`. No fix can both
+keep those green and resolve #42 — they test the identical exact-`0.0`
+case. Seven tests across six files were inverted to assert the
+sign-count (`f01_dyadic_rankdef_counts_pivots_by_sign`,
+`f03_default_force_accept_factors_isolated_zero_pivot`,
+`factor_frontal_root_force_accepts_without_delay`,
+`test_zero_column_force_accept`, `test_force_accept_with_refinement`,
+`threshold_rejects_tiny_1x1_pivot_dense`,
+`factor_inertia_force_accept_implies_solve_skip_invariant`). Every
+solve-correctness, `needs_refinement`, and factor-preservation
+assertion in those tests was preserved; only the inertia triple
+changed. Rank deficiency is still surfaced through two unchanged
+channels: `min_pivot_magnitude` (continuous) and
+`ZeroPivotAction::Fail` → `NumericallyRankDeficient` (factor status).
+
+References:
+- `src/dense/factor.rs` — five `ForceAccept` strict-zero sites: the
+  basic `factor()` last-pivot loop, `try_reject_1x1_frontal` case (a),
+  `do_1x1_pivot` case (a), `count_1x1_inertia` strict branch,
+  `count_2x2_inertia` strict + band branches.
+- `external_benchmarks/stress/report.py` — all three `ALLOWLIST`
+  entries removed (`rankdef_10_3` #42, `rankdef_50_5` #40,
+  `rankdef_exact_50_5` #40).
+- `dev/research/f01-rankdef-underreporting.md` — 2026-05-20 section.
+- Issues #42 (resolved) and #40 (resolved as a side effect).
