@@ -117,6 +117,29 @@ def expected_zero(row: dict) -> int | None:
     return None
 
 
+# Matrices where the MUMPS 5.8.2 oracle (ICNTL(24)=1, the same option
+# the stress gate treats as its inertia oracle) itself reports zero=0
+# despite a constructed null space: Bunch-Kaufman pivoting absorbs the
+# entire null space into ostensibly-normal pivots, and even MUMPS's
+# null-pivot detector finds nothing. For these matrices feral reporting
+# zero=0 *matches the oracle* and is not a bug, so classify() does not
+# flag zero=0 for them.
+#
+# Verified 2026-05-19 by running external_benchmarks/mumps_oracle/
+# mumps_bench (MUMPS 5.8.2, ICNTL(24)=1) on each .mtx; full inertia:
+#   rankdef_50_5        MUMPS (26, 24, 0)
+#   rankdef_200_20      MUMPS (111, 89, 0)
+#   rankdef_exact_50_5  MUMPS (24, 26, 0)
+# (Run on aarch64 -- the only mumps_bench build available. The gate
+# already treated the MUMPS value as a fixed oracle; this turns a
+# prose citation into a checked fact.)
+MUMPS_REPORTS_ZERO0: frozenset[str] = frozenset({
+    "rankdef_50_5",
+    "rankdef_200_20",
+    "rankdef_exact_50_5",
+})
+
+
 # Per-matrix allowlist: matrices whose `classify` flags are known
 # pre-existing divergences, kept here to unblock CI while the
 # underlying issue is tracked. Each entry must cite a GH issue and
@@ -145,25 +168,6 @@ ALLOWLIST: dict[str, tuple[str, str]] = {
         "x86/aarch64 BK divergence as saddle_rankdef_50_10_3, not the "
         "deterministic every-arch F-01 flip of the #39 entries below.",
     ),
-    "rankdef_50_5": (
-        "#40",
-        "Cross-arch BK-pivot divergence, exposed by the #39 F-01 band "
-        "widening (2026-05-17). CI x86 reports (26,24,0), zero=0; "
-        "MUMPS (ICNTL(24)=1) itself reports zero=0 on this matrix "
-        "(cited in dev/research/f01-rankdef-underreporting.md and the "
-        "classify() rankdef_like_cats comment), so x86 feral matches "
-        "MUMPS. aarch64 probe_f01.rs finds 1 strict-zero pivot. Factor "
-        "numerically valid (rel_res < 1e-14). The gate's expected>=1 is "
-        "the synthetic construction label, not the MUMPS oracle.",
-    ),
-    "rankdef_exact_50_5": (
-        "#40",
-        "Cross-arch BK-pivot divergence, exposed by the #39 F-01 band "
-        "widening (2026-05-17). CI x86 reports (24,26,0), zero=0; "
-        "probe_f01.rs on aarch64 finds 1 strict-zero pivot -> zero=1. "
-        "Factor numerically valid (rel_res < 1e-14). Same x86/aarch64 "
-        "BK divergence class as saddle_rankdef_50_10_3 (#40).",
-    ),
     "rankdef_exact_100_10": (
         "#39",
         "F-01 sign-fallback (2026-05-17). Pivots with |d| in the band "
@@ -171,13 +175,6 @@ ALLOWLIST: dict[str, tuple[str, str]] = {
         "zero, to match MUMPS/SSIDS convention on FBRAIN3LS_0839. MUMPS "
         "(ICNTL(24)=1) itself reports zero=0 on this matrix; the factor "
         "is numerically valid (rel_res < 1e-13). See "
-        "dev/research/f01-rankdef-underreporting.md 2026-05-17 addendum.",
-    ),
-    "rankdef_200_20": (
-        "#39",
-        "F-01 sign-fallback (2026-05-17). MUMPS (ICNTL(24)=1) also "
-        "reports zero=0 on this matrix; feral's new behavior matches. "
-        "Factor numerically valid (rel_res < 1e-13). See "
         "dev/research/f01-rankdef-underreporting.md 2026-05-17 addendum.",
     ),
     "saddle_rankdef_100_20_5": (
@@ -233,16 +230,18 @@ def classify(row: dict, side: dict | None, rel_res_threshold: float) -> list[str
         flags.append(f"inertia_sum={pos+neg+zer}!=n={row['n']}")
     exp_zero = expected_zero(row)
     if exp_zero is not None:
-        # Rank-deficient matrices: BK pivoting can absorb part of the
-        # null space into ostensibly-normal pivots (verified against
-        # MUMPS 5.8.2 oracle with ICNTL(24)=1, which itself reports
-        # zero=0 on synth/rankdef_50_5 and rankdef_200_20 despite their
-        # constructed nullity). The acceptance rule is therefore
-        # `1 <= zero <= expected`: BK must detect *some* rank deficiency
-        # (zero=0 is a genuine bug — F-01 regression guard), but
-        # partial detection is consistent with MUMPS's own behavior.
+        # Rank-deficient matrices: BK pivoting can absorb part or all
+        # of the constructed null space into ostensibly-normal pivots.
+        # Acceptance rule: `zero <= expected`, with a lower bound of 1
+        # *unless* the MUMPS 5.8.2 oracle (ICNTL(24)=1) itself reports
+        # zero=0 on the matrix — see MUMPS_REPORTS_ZERO0. For those
+        # matrices feral reporting zero=0 matches the oracle and is
+        # correct; for every other rankdef matrix zero=0 is a genuine
+        # bug (F-01 regression guard). Partial detection
+        # (1 <= zero <= expected) is always accepted — it is consistent
+        # with MUMPS's own behavior under ICNTL(24)=1.
         # See `dev/research/f01-rankdef-underreporting.md`.
-        if zer == 0:
+        if zer == 0 and row["name"] not in MUMPS_REPORTS_ZERO0:
             flags.append(f"zero=0 (rankdef, expected>=1, k={exp_zero})")
         elif zer > exp_zero:
             flags.append(f"zero={zer}>expected={exp_zero}")

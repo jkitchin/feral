@@ -3642,3 +3642,52 @@ References:
   magnitude-min signal is deliberately kept distinct from.
 - Issue #38 / `static-pivot-perturbation-2026-05-17.md` — the rejected
   "paper over it" lever.
+
+---
+
+## 2026-05-19 — Stress gate: rankdef oracle is the MUMPS value, not the construction label
+
+The `stress-smoke` PR-blocking gate (`external_benchmarks/stress/report.py`)
+flagged `rankdef_50_5` whenever feral reported `inertia.zero == 0`,
+because `classify()` derived the expected null-space dimension from the
+synthetic *construction label* `k` parsed out of the matrix name
+(`rankdef_<n>_<k>`) and demanded `1 <= zero <= k`.
+
+This is the wrong oracle. Bunch-Kaufman pivoting can absorb a
+constructed null space into ostensibly-normal pivots; the matrix is
+rank-deficient *by construction*, but a direct solver need not detect
+it. The canonical reference, MUMPS 5.8.2 with `ICNTL(24)=1` (null-pivot
+detection on — the same option the gate already names as its oracle),
+reports `zero=0` on some of these matrices. The gate's own `classify()`
+comment even acknowledged this for `rankdef_50_5`, yet still flagged it.
+
+Decision: `classify()` accepts `zero=0` on a rank-deficient synthetic
+when — and only when — the MUMPS 5.8.2 (`ICNTL(24)=1`) oracle itself
+reports `zero=0` on that matrix. The set of such matrices,
+`MUMPS_REPORTS_ZERO0`, is verified by running
+`external_benchmarks/mumps_oracle/mumps_bench` on each `.mtx`, not by
+trusting a code comment. As of 2026-05-19 the set is `{rankdef_50_5,
+rankdef_200_20, rankdef_exact_50_5}` (MUMPS inertia `(26,24,0)`,
+`(111,89,0)`, `(24,26,0)` respectively). For every other
+rank-deficient synthetic the lower bound stays `1` — `zero=0` there is
+a genuine bug (F-01 regression guard).
+
+This relaxes a gate criterion; per the `CLAUDE.md` hard rule it was
+done with explicit human approval (session 2026-05-19, the user
+authorized follow-up 1 after reviewing the verified MUMPS oracle
+table).
+
+Consequence: three ALLOWLIST entries became dead and were removed —
+`rankdef_50_5` and `rankdef_exact_50_5` (were `#40`) and
+`rankdef_200_20` (was `#39`). The cross-arch BK-pivot divergence on
+`rankdef_50_5` / `rankdef_exact_50_5` still exists (feral reports
+`zero=1` on aarch64, `zero=0` on x86) and is still tracked by #40, but
+it is no longer gate-blocking because both values now sit inside the
+accepted band.
+
+References:
+- `external_benchmarks/stress/report.py` — `MUMPS_REPORTS_ZERO0`,
+  `classify()`.
+- `external_benchmarks/mumps_oracle/` — the MUMPS 5.8.2 oracle binary.
+- `dev/research/f01-rankdef-underreporting.md` — F-01 / #39 context.
+- Issue #40 — cross-arch BK-pivot divergence.

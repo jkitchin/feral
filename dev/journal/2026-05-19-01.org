@@ -113,3 +113,44 @@ Follow-up 1 (rankdef_50_5 expected_zero is the gate's bug, not
 feral's) NOT done -- it relaxes a gate criterion, so it waits on user
 sign-off plus a re-run of the MUMPS ICNTL(24)=1 oracle to confirm
 zero=0 before baking the value into classify().
+
+* 23:30 :ci:stress-smoke:mumps-oracle:inertia:follow-up-1:
+User approved follow-up 1. Before touching classify(), ran the real
+MUMPS 5.8.2 oracle (ICNTL(24)=1 -- confirmed set at mumps_bench.F:109;
+inertia_zero = INFOG(28)) on all 8 rankdef synth .mtx files via
+external_benchmarks/mumps_oracle/mumps_bench, dummy all-ones RHS
+(inertia is RHS-independent). Verified table:
+
+  rankdef_5_2             (2,2,1)    zero=1
+  rankdef_10_3            (3,4,3)    zero=3
+  rankdef_50_5            (26,24,0)  zero=0   <- confirms the claim
+  rankdef_200_20          (111,89,0) zero=0   <- confirms the claim
+  rankdef_exact_50_5      (24,26,0)  zero=0   <- NEW: also zero=0
+  rankdef_exact_100_10    (54,43,3)  zero=3   <- NOT zero=0
+  saddle_rankdef_50_10_3  (50,37,3)  zero=3
+  saddle_rankdef_100_20_5 (100,75,5) zero=5
+
+So the MUMPS-reports-zero=0 set is THREE matrices, not two:
+rankdef_50_5, rankdef_200_20, rankdef_exact_50_5. The f01 note and
+the report.py comment only named the first two; rankdef_exact_50_5 is
+a new finding from the oracle run.
+
+Implemented: MUMPS_REPORTS_ZERO0 frozenset in report.py with the
+verified inertia in the comment; classify() skips the zero=0 flag iff
+the name is in the set; updated the classify() doc comment and README
+acceptance rule 3. Removed three now-dead ALLOWLIST entries
+(rankdef_50_5, rankdef_exact_50_5 were #40; rankdef_200_20 was #39).
+report.py EXIT=0, flagged=0; rankdef_200_20 now passes via the
+exemption (no longer ALLOWLISTED), the two cross-arch matrices pass
+on aarch64 with zero=1 and will pass on x86 with zero=0. Allowlist
+down to 5 entries (2x#40, 3x#39). decisions.md entry appended.
+
+OPEN ITEM flagged to user, NOT folded in: the #39 ALLOWLIST entry for
+rankdef_exact_100_10 claims "MUMPS (ICNTL(24)=1) itself reports zero=0
+on this matrix". The oracle run above shows MUMPS reports zero=3 on
+rankdef_exact_100_10 -- the entry's justification is factually wrong.
+feral reports zero=0 there (intended #39 sign-fallback), so feral and
+MUMPS-ICNTL(24)=1 genuinely disagree (0 vs 3). Whether feral zero=0 is
+defensible (it matches *default* sign-counting MUMPS, the #39 parity
+reference) or a real under-detection bug is a #39-scope question, not
+follow-up 1. Left untouched; needs its own triage.

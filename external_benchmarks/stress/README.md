@@ -66,7 +66,12 @@ python3 external_benchmarks/stress/report.py
 
 1. `status != ok` (factor failure, symbolic failure, read failure)
 2. `rel_res > 1e-6` (configurable via `--rel-res`)
-3. For `rankdef_n_k` synthetics: `inertia.zero != k` (oracle mismatch)
+3. For rank-deficient synthetics: `inertia.zero` outside the accepted
+   band. BK pivoting can absorb part or all of a constructed null
+   space into normal pivots, so the band is `1 <= zero <= expected`
+   — except for matrices in `classify()`'s `MUMPS_REPORTS_ZERO0` set,
+   where the MUMPS 5.8.2 (ICNTL(24)=1) oracle itself reports `zero=0`
+   and the band is therefore `0 <= zero <= expected`.
 4. `inertia.pos + inertia.neg + inertia.zero != n` (impossible sum)
 
 Exit code is `0` iff no matrix is flagged — wire `report.py` into CI
