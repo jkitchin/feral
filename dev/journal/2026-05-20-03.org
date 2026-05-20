@@ -134,3 +134,19 @@ Inertia stays (300,200,0) in BOTH — the cascade is slow-but-correct,
 exactly as on CHO; the fill bound (not inertia) is what catches the
 regression. The 5× bound separates 0.83x from 61.23x decisively. Fix
 restored, test green, clippy clean.
+
+* 20:30 :issue45:csc:cleanup:
+Dropped the uncommitted `CscMatrix::from_triplets_strict` from
+`src/sparse/csc.rs` (git checkout — discarded ~50 lines + 3 tests).
+It was written 14:55 in session 2026-05-20-02 as a loud-catch guard
+for a hypothesised #45 duplicate-coordinate doubling bug; that
+hypothesis was disproven the same session (journal 2026-05-20-02:
+"the 14:30 duplicate-doubling hypothesis for #45 is WRONG — there
+are no duplicate coordinates here"). The shipped #45 fix (b017beb)
+is the MC64 1/EPS scaling-spread guard in src/scaling/mod.rs, zero
+csc.rs changes; #45 is CLOSED. `from_triplets_strict` had no caller
+in src/ or tests/ — orphaned speculative public API. Decision: drop
+unused API rather than carry it; re-add with a caller if a real
+duplicate-emitting integration bug ever surfaces. Resolves "Next
+Session Should" item 3 of checkpoint 2026-05-20-03. Working tree
+now fully clean.
