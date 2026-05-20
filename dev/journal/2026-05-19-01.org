@@ -1,0 +1,57 @@
+#+TITLE: Session journal 2026-05-19-01
+#+STARTUP: showall
+
+* 20:55 :near-singularity:ipm-integration:research:
+Picked up the user request: pounce's FERAL backend cannot bump delta_w on
+KKT systems that are ill-conditioned but land on correct inertia. Ipopt+MA57
+solves three Mittelmann-class problems in 100-291 iters; pounce+FERAL stalls
+because the perturbation handler never fires.
+
+Root cause traced: FERAL's default ZeroPivotAction::ForceAccept
+(src/dense/factor.rs:444,660) force-accepts a near-singular pivot, sets
+needs_refinement=true, returns FactorStatus::Success. The only
+near-singularity-adjacent fact reaching the IPM is needs_refinement -- which
+is internal to SparseFactors, a coarse boolean, and already true on healthy
+cascade-break factorizations. Not thresholdable, not specific.
+
+MA57 reports this via CNTL(2) small-pivot threshold -> INFO(1)==4
+(rank-deficient) -> Ipopt SYMSOLVER_SINGULAR -> PerturbForSingularity, a
+distinct escalation branch from PerturbForWrongInertia. FERAL has no analog.
+
+Concluded: FERAL must expose min|λ(D)|, the smallest accepted pivot
+magnitude. Wrote dev/research/near-singularity-signal.md and
+dev/plans/near-singularity-signal.md. Additive only -- no factor/solve
+behavior change.
+
+* 21:05 :near-singularity:api:
+Implemented SparseFactors::{min,max}_pivot_magnitude over a shared
+pivot_magnitude_extent() pass, mirroring the existing min_diagonal()
+(factorize.rs:882). Key design points:
+- 1×1 pivot magnitude is |d_diag[k]|.
+- 2×2 block: larger magnitude (|t|+√disc)/2 is cancellation-free; smaller is
+  |det|/larger since |λ₊·λ₋|=|det|. Avoids catastrophic cancellation on
+  near-singular blocks.
+- Distinct from min_diagonal(): that is signed-min (most-negative eigenvalue)
+  for unconstrained inertia correction; near-singularity needs magnitude-min.
+Solver delegates added. 4 tests in tests/pounce_interface.rs with hand
+oracles:
+  diag(5,-2,3,-7)  -> min|λ|=2, max|λ|=7, min_diagonal=-7
+  [[0,1],[1,0]]    -> 2×2 block, min=max=1 (|smaller eig|, not d_diag[0]=0)
+  diag(1,1e-14,-3) -> inertia (2,1,0) still correct, min|λ|≈1e-14,
+                      ratio min/max≈3e-15 -- thresholdable; inertia silent
+  None before factor
+All 4 pass; cargo clippy --all-targets -D warnings clean; factorize:: 25/25.
+
+* 21:18 :near-singularity:capi:
+Added C ABI feral_min_pivot / feral_max_pivot (return -1.0 sentinel on
+no-factor / null handle -- unambiguous since a magnitude is non-negative).
+Declared in feral-ipopt-shim/include/feral_capi.h. Test capi_min_max_pivot:
+sentinel before factor + on null handle; after factoring [[1,2],[2,1]]
+(eigenvalues 3,-1) under FERAL_SCALING=identity the 2×2 D block gives
+min|λ(D)|=1, max|λ(D)|=3 (hand oracle). capi:: 3/3 pass, clippy clean.
+
+Pounce-side consumption (different repo, spec only in research note §4):
+after FactorStatus::Success, if feral_min_pivot/feral_max_pivot <
+singular_pivot_ratio (≈1e-12), return ESymSolverStatus::Singular ->
+PerturbForSingularity -> delta_w. Keeps pounce's residual-ratio
+pretend_singular path unchanged; adds the cheaper solver-reported trigger.

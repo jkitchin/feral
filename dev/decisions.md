@@ -3599,3 +3599,46 @@ References:
 - Probe: `src/bin/probe_fma_kernel.rs`.
 - Commits: ee46d72 (probe + note), f1f9894 (CI wiring), this entry.
 - GH: #35.
+
+## 2026-05-19 — Near-singularity signal is reported, not enforced (`min|λ(D)|`)
+
+FERAL exposes a near-singularity signal — `min|λ(D)|`, the smallest
+accepted pivot magnitude — as plain query accessors
+(`Solver::min_pivot_magnitude` / `max_pivot_magnitude`, C ABI
+`feral_min_pivot` / `feral_max_pivot`). It does **not** change
+`FactorStatus` or factorization behavior in response to it.
+
+The motivating case: an IPM backend (pounce) cannot bump its Hessian
+perturbation `δ_w` on KKT systems that are ill-conditioned but land on
+the correct inertia, because FERAL's default
+`ZeroPivotAction::ForceAccept` force-accepts the near-singular pivot
+and returns `FactorStatus::Success`. MA57 reports the analogous case
+via its `CNTL(2)` small-pivot threshold → `INFO(1)==4` →
+Ipopt `SYMSOLVER_SINGULAR` → `PerturbForSingularity`.
+
+Two alternatives were considered and rejected:
+
+1. **Add a `FactorStatus::NearSingular` variant** (FERAL decides the
+   threshold and reports a distinct status). Rejected: it bakes a
+   policy threshold into the solver, is an ABI break, and forces every
+   caller to handle a status that only matters to perturbation-driven
+   IPMs. The threshold is caller-specific (it is pounce's analog of
+   `CNTL(2)`), so the solver should not own it.
+2. **Paper over it inside FERAL** — MA57-style internal static-pivot
+   bending (issue #38, `dev/research/static-pivot-perturbation-2026-05-17.md`).
+   Already a separate opt-in lever; it perturbs the factor instead of
+   informing the caller, which is the wrong fix when the *IPM* is the
+   component that should react.
+
+Decision: FERAL stays policy-free. It reports the magnitude; the
+caller thresholds it (recommended: the scale-free ratio
+`min|λ(D)| / max|λ(D)| ≈ 1/κ(D)`) and decides whether to treat the
+factor as singular. `min|λ(D)|` is computed for free in a pass that
+mirrors the existing `min_diagonal()` — no factorization/solve cost.
+
+References:
+- `dev/research/near-singularity-signal.md`, `dev/plans/near-singularity-signal.md`.
+- `factorize.rs` `min_diagonal()` — the signed-min precedent this
+  magnitude-min signal is deliberately kept distinct from.
+- Issue #38 / `static-pivot-perturbation-2026-05-17.md` — the rejected
+  "paper over it" lever.
