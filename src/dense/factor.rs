@@ -3183,10 +3183,39 @@ fn scalar_pivot_step(
         ));
     }
 
-    if r_is_fully_summed && k + 1 < ncol {
-        // 2×2 pivot using {k, r}, both fully summed
-        if r != k + 1 {
-            swap_rows_cols(a, nrow, k + 1, r, perm);
+    // 2×2 partner selection (issue #46). BK's magnitude-argmax `r` is
+    // the textbook 2×2 partner when it is fully summed. When it is not
+    // (`r >= ncol` — an out-of-front coupling), fall back to the literal
+    // next column `k+1`, *provided* `k` and `k+1` are actually coupled
+    // (`a[k,k+1] != 0`). The `LdltCompress` analysis phase co-locates
+    // every MC64-matched saddle pair at adjacent fully-summed columns,
+    // so for a zero-diagonal KKT constraint column `k+1` is the
+    // numerically correct partner even when BK's magnitude argmax points
+    // at an out-of-front coupling. Without this, such a column delays up
+    // the elimination tree and the delays cascade (issue #46: 23×
+    // factor-nnz blowup on the CHO `parmest` KKT, where the matched
+    // partner sits co-located at k+1 but the kernel never considers it).
+    //
+    // The 2×2 is still gated by the Duff-Reid growth bound and the SSIDS
+    // det floor below: a `{k,k+1}` candidate that is numerically unsound
+    // fails those tests and the code falls through to the last-resort
+    // 1×1 exactly as before. This widens the 2×2 *search*, it does not
+    // relax the stability gate. The `a[k,k+1] != 0` guard keeps the path
+    // bit-identical to the pre-#46 kernel for every structurally
+    // uncoupled neighbour. See
+    // `dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md`.
+    let partner = if r_is_fully_summed && k + 1 < ncol {
+        Some(r)
+    } else if k + 1 < ncol && a[k * nrow + (k + 1)] != 0.0 {
+        Some(k + 1)
+    } else {
+        None
+    };
+
+    if let Some(partner) = partner {
+        // 2×2 pivot using {k, partner}; bring `partner` into k+1.
+        if partner != k + 1 {
+            swap_rows_cols(a, nrow, k + 1, partner, perm);
         }
         let mut d11 = a[k * nrow + k];
         let d21 = a[k * nrow + (k + 1)];
@@ -3342,7 +3371,8 @@ fn scalar_pivot_step(
         do_2x2_update(a, nrow, k, d11, d21, d22, params.fma);
         Ok(PivotStepResult::Advanced(2))
     } else {
-        // Can't do 2×2 (r is not fully summed or only 1 column left).
+        // No 2×2 partner: only one column left, or r is not fully
+        // summed and k is structurally uncoupled from k+1.
         // Last-resort 1×1 at k with column-relative rejection.
         let outcome = try_reject_1x1_with_rook_rescue(
             a,

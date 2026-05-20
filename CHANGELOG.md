@@ -4,6 +4,31 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — delayed-pivot cascade on zero-(2,2)-block saddle KKT ([#46][i46])
+
+The numeric Bunch-Kaufman kernel no longer cascades into a delayed-pivot
+blowup on an interior-point / saddle-point KKT `[[H, Bᵀ], [B, 0]]` whose
+`(2,2)` block is structurally zero. Such a KKT has thousands of
+zero-diagonal constraint columns; the kernel's 2×2 pivot search
+considered only the magnitude-argmax partner row `r`, and when `r` was
+not fully summed (an out-of-front coupling) it could neither form a 2×2
+nor 1×1 the zero diagonal — so it delayed the column up the elimination
+tree, and the delays cascaded. On the POUNCE `cho` `parmest` KKT
+(n=43332) this produced a 28M-nonzero, ~17 s factorization where MA57
+takes ~70 ms — ~160× slower end-to-end. `scalar_pivot_step` now also
+considers the adjacent column `k+1` as the 2×2 partner when `r` is out
+of front and `k`/`k+1` are coupled: the `LdltCompress` analysis phase
+already co-locates each MC64-matched saddle partner there. The 2×2 is
+still gated by the Duff–Reid growth bound and the determinant floor, so
+this widens the pivot *search* without relaxing the stability test, and
+is bit-identical to the previous kernel whenever `r` is fully summed or
+the neighbour is structurally uncoupled. On the `cho` KKT: factor time
+11.7 s → 0.20 s (57×), factor-nonzeros 28.05M → 3.35M, inertia
+`(21672, 21660, 0)` unchanged. See
+`dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md`.
+
+[i46]: https://github.com/jkitchin/feral/issues/46
+
 ### Fixed — MC64 catastrophic-spread guard ([#45][i45])
 
 `ScalingStrategy::Auto` no longer applies an MC64 symmetric scaling
