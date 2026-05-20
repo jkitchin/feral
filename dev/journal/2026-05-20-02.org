@@ -1,0 +1,375 @@
+#+TITLE: FERAL session journal 2026-05-20-02
+#+STARTUP: showall
+
+* 14:05 :issue45:repro:not-reproduced:
+Asked to confirm issue #45 — CHO `parmest` KKT: factor succeeds with
+correct inertia but back-solve residual ~1e10–1e18 (true ||x||∞≈3.24e5).
+
+Wrote a standalone reproducer binary `src/bin/probe_issue45.rs`: it
+runs exactly the issue's snippet — `read_mtx` → `to_csc` →
+`Solver::new()` → `factor(&csc, None)` → `solve(&rhs)` /
+`solve_refined` — on the committed pair
+`/Users/jkitchin/projects/pounce/benchmarks/cho/feral_repro/cho_iter0_kkt.mtx`
++ `cho_iter0_rhs.txt` (dated May 20 13:08, 2 min before the issue was
+filed at 17:10Z).
+
+Result on current main (25a72ef): **bug NOT reproduced.**
+  status        = Success
+  inertia       = pos=21672, neg=21660, zero=0  (neg matches expected 21660)
+  min_pivot_mag = 1.957928609524187e-9   (NOT below 1e-20)
+  max_pivot_mag = 4.81e9
+  ||x||∞        = 3.237466e5             (matches true 3.24e5)
+  rel residual  = 2.46e-8  (plain) / 1.45e-11 (refined)
+
+The issue's central diagnostic claim — "a pivot magnitude below 1e-20,
+~10 orders below the matrix's smallest eigenvalue" — is false for this
+matrix: feral's min pivot is 1.96e-9, *above* |λ|min≈3e-10. The factor
+is healthy and the solve is MA57-comparable (MA57 rel res ~1e-5).
+
+* 14:18 :issue45:bisect:worktree:
+Issue cites feral rev `8298d7b` (v0.4.0). `8298d7b` is the 2026-05-19-01
+session checkpoint, an ancestor of main; the only src/ numeric change
+between it and HEAD is the #42 inertia counter (68c7d6c), which is
+inertia-count-only and numerically inert by design.
+
+To rule out a silent fix, checked out `8298d7b` in a worktree
+(`git worktree add /tmp/feral-8298d7b 8298d7b`) and re-ran the probe.
+Output is **byte-identical** to main: min_pivot 1.957928609524187e-9,
+rel residual 2.46e-8, ||x||∞ 3.237466e5. Worktree removed.
+
+Conclusion: issue #45 does not reproduce on the cited rev OR current
+main. The committed standalone reproducer does not trigger the bug.
+
+* 14:30 :issue45:root-cause:pounce-feral:
+The matrix that triggers the bug in the POUNCE run is therefore NOT the
+dumped `cho_iter0_kkt.mtx`. Inspected the integration at
+`pounce/crates/pounce-feral/src/lib.rs`:
+
+- `initialize_structure` (lib.rs:296-322) canonicalizes every COO
+  triplet `(i,j)` to the lower triangle `(max,min)`. Its comment says
+  pounce's KKT assembly "emits a mix of lower- and upper-triangle
+  entries" (relying on MA57's either-triangle tolerance).
+- feral's `CscMatrix::from_triplets` **sums duplicate coordinates**
+  (`src/sparse/csc.rs:33`, `sort_and_sum_duplicates` at csc.rs:103).
+
+If pounce's COO emits any off-diagonal entry in *both* triangles, the
+two copies collapse to one lower-triangle coordinate after
+canonicalization and feral sums them → that off-diagonal is **doubled**.
+A KKT matrix with arbitrary off-diagonals doubled is a different,
+corrupted matrix — consistent with the symptom (factor "succeeds" with
+a tiny pivot, solve blows up). The dumped symmetric `.mtx` has each
+off-diagonal once, so the standalone repro is clean.
+
+Also: the pounce-feral comment claiming feral "does NOT check"
+upper-triangle entries is **stale** — current feral *rejects* them with
+`FeralError::InvalidInput` (`csc.rs:78-84`).
+
+Hypothesis (well-supported, not yet proven): issue #45 is a POUNCE-side
+integration bug (pounce-feral triplet canonicalization colliding with
+feral's duplicate-summing), not a FERAL solve/factor bug.
+
+Next diagnostic (pounce-side): dump the actual `CscMatrix` pounce-feral
+builds at `lib.rs:202` right before `solver.factor`, and diff it against
+`cho_iter0_kkt.mtx`. If off-diagonals differ by a factor of 2, the
+hypothesis is confirmed.
+
+* 14:55 :issue45:from-triplets-strict:guard:
+Added `CscMatrix::from_triplets_strict` (`src/sparse/csc.rs`) — the
+loud-catch guard for the issue-#45 duplicate-coordinate class. Design:
+
+- `from_triplets` behavior is UNCHANGED — it still sums duplicates.
+  That is a documented contract and correct for accumulating assembly;
+  `factorize.rs:4147` explicitly relies on it ("from_triplets sums").
+  Changing the default was rejected — regression risk, and it would
+  break legitimate FEM-style accumulation.
+- New `from_triplets_strict` delegates to a shared private
+  `from_triplets_impl(..., strict: bool)`. With `strict`, the dedup
+  pass returns `FeralError::InvalidInput` naming the first repeated
+  `(row, col)` instead of summing.
+- `sort_and_sum_duplicates` now takes `strict: bool` and returns
+  `Result<(), FeralError>` (private, single caller — no API churn).
+
+Tests (oracle = hand calculation, rule-compliant):
+- `test_from_triplets_strict_accepts_unique_coordinates` — strict and
+  default produce byte-identical CSC when no coordinate repeats.
+- `test_from_triplets_strict_rejects_duplicate_coordinate` — error
+  message names "row 1", "col 0".
+- `test_from_triplets_strict_catches_doubled_off_diagonal` — the #45
+  class: triplets [(1,0),(1,0),(0,0),(1,1)] — default `from_triplets`
+  silently doubles the (1,0) off-diagonal to 2.0; strict rejects.
+
+`cargo test --lib sparse::csc`: 14 passed. `cargo clippy --all-targets
+-- -D warnings`: clean. Full suite running.
+
+Integrators (pounce-feral) should switch to `from_triplets_strict` so
+the silent doubling becomes a hard error at assembly time.
+
+* 14:58 :issue45:gh-comment:blocked:
+Attempted to post the findings as a comment on GH #45 (user chose
+option "c" = both: comment + guard). The auto-mode permission
+classifier denied the `gh issue comment` write. Comment drafted at
+`/tmp/issue45_comment.md`; surfaced to user for re-approval or manual
+posting. Guard work (part b) is complete regardless.
+
+* 15:40 :issue46:repro:confirmed:fill:
+Reviewed issue #46 — LDLᵀ factor 5–12 s on the CHO KKT, ~160× slower
+than MA57. Wrote `src/bin/probe_issue46.rs`: ordering sweep + a
+diagonal-completed comparison.
+
+Sweep on `cho_iter0_kkt.mtx` (n=43332, in-nnz=205512) matches the
+issue within noise — and factor_nnz exposes the cause as catastrophic
+fill:
+  ordering    factor_ms   factor_nnz   fill
+  Auto          11755      28054562   136.5x
+  Amd           42561      67893271   330.4x
+  Amf            5019      18063829    87.9x
+  MetisND       11923      28054562   136.5x  (= Auto)
+  ScotchND      10942      26207936   127.5x
+  KahipND       16873      34029091   165.6x
+18–68M factor nonzeros on a 205K-nnz input is pathological; factor
+time tracks fill. #46 reproduces solidly.
+
+* 15:55 :issue46:root-cause:missing-diagonal:confirmed:
+Decisive experiment. `cho_iter0_kkt.mtx` has only 10812 stored
+diagonal entries — 32520 of 43332 columns (75%) have NO diagonal.
+feral's `symmetric_pattern()` (`src/sparse/csc.rs:255`), the input to
+AMD/ND ordering and the etree, does NOT force the diagonal.
+
+`complete_diagonal()` inserts an explicit 0.0 for every missing column
+(nnz 205512 → 238032, +32520 zeros) and re-factors:
+  stripped Auto       : 11755 ms,  28.0M factor_nnz,  fill 136.5x
+  diag-completed Auto :   606 ms,   4.4M factor_nnz,  fill  21.6x
+**19× faster, 6.3× less fill** just from restoring the structural
+diagonal. 606 ms matches the issue's reported 650 ms. #46's diagnosis
+is exactly right — feral's ordering needs the complete diagonal to
+find the good elimination tree on saddle-point KKT.
+
+* 16:05 :issue46:issue45:reconciled:
+The diagonal-completed factor returns status=Success but the solve
+residual is **2.07e22** — garbage. THAT is #45. So the real #45
+reproducer is the diagonal-completed (explicit-zero-diagonal) pattern,
+NOT the stripped `cho_iter0_kkt.mtx` (which solves cleanly, res
+2.46e-8 — confirmed 14:05). This fully reconciles the earlier #45
+contradiction: #45's standalone snippet pointed at the wrong (stripped)
+file; #46 itself says "strip → correct, keep → garbage", agreeing with
+the 14:05 finding.
+
+#45 and #46 are ONE structural defect: feral mishandles
+structurally-zero diagonals on saddle-point KKT — symbolically (absent
+→ 19× fill) and numerically (present → zero 1×1 pivot → garbage,
+silently Success). Current code cannot win: strip → correct but slow;
+keep → fast but wrong.
+
+Correction: the 14:30 "duplicate-doubling" hypothesis for #45 is
+WRONG — there are no duplicate coordinates here. The real mechanism is
+the explicit-zero diagonal taken as a 1×1 pivot. `from_triplets_strict`
+remains a fine general guard but is NOT the #45 fix.
+
+Fix (both feral-side, coupled):
+1. Symbolic: force the full structural diagonal before the
+   fill-reducing ordering / etree (standard — MA57/MUMPS/CHOLMOD all
+   assume a complete diagonal). Gets the 19× factor speedup.
+2. Numeric: BK pivoting must not take a zero/tiny diagonal as a 1×1
+   pivot — pair it into a 2×2 pivot with an off-diagonal (Duff–Reid,
+   as MA57 does). Gets the correct solve. Without (2), completing the
+   diagonal just trades #46 for #45.
+
+* 17:30 :issue45:issue46:root-cause:numeric-not-ordering:
+Decisive experiment (`src/bin/probe_issue45_ordering.rs`): factor the
+matrix with `factorize_multifrontal(matrix, sym)` for crossed
+(symbolic-source × numeric-input) pairs, sym from
+`symbolic_factorize_with_method(.., Auto)`:
+
+  pair                       factor   factor_nnz   relres
+  sym(stripped)+num(stripped)  11530ms   28054562   2.46e-8
+  sym(completed)+num(stripped) 11036ms   28054562   2.46e-8
+  sym(completed)+num(completed)  219ms    4436782   7.15e11
+
+Two findings overturn the 15:55/16:05 journal diagnosis:
+
+1. sym(stripped) and sym(completed) give **bit-identical** numeric
+   results on the same input (fnnz 28054562, pivot [1.96e-9,4.81e9],
+   relres 2.455e-8 — identical to all digits). The fill-reducing
+   ordering AND supernode structure are **diagonal-insensitive** —
+   completing the diagonal does NOT change the ordering. The etree
+   (skips i>=j) and GNP column counts (skip i<=j) are provably
+   diagonal-insensitive; this confirms it end-to-end.
+
+2. With the *same* symbolic, numeric input alone flips the result:
+   num(stripped) → 28.0M fnnz / 11 s; num(completed) → 4.4M / 219 ms.
+   So the catastrophic fill (#46) is **not** an ordering problem. It
+   is a numeric delayed-pivot cascade driven by the absent diagonal.
+   The 16:05 claim "feral's ordering needs the complete diagonal" is
+   WRONG.
+
+Mechanism (one defect, both faces):
+- absent diagonal  → BK delays the pivot → delayed-pivot cascade →
+  28M fill, 11 s, but delays eventually resolve → clean solve (#46).
+- explicit-0.0 diag → BK accepts a 0.0 1x1 pivot (min pivot mag is
+  exactly 0.00e0) → no delays → 4.4M, 219 ms, but garbage solve,
+  status Success (#45).
+
+Open question: the dense front holds 0.0 at the diagonal either way,
+so `factorize_multifrontal` must consume the matrix beyond a pure
+value-scatter to tell absent from explicit-0.0. Prime suspect:
+scaling (MC64/equilibration) — moved into the numeric phase by the
+β refactor. Next: read the assembly + scaling path in factorize.rs.
+
+* 17:55 :issue45:issue46:root-cause:scaling:decisive:
+Crossed numeric-input × explicit scaling strategy
+(`probe_issue45_ordering.rs`, scaling forced, not Auto):
+
+  input      scaling         factor   factor_nnz   min_pivot   relres
+  stripped   Identity        39838ms   58163992    3.54e-8     8.19e-10
+  stripped   InfNorm         11205ms   28054562    1.96e-9     2.46e-8
+  stripped   Mc64Symmetric     220ms    4436782    0.00e0      7.15e11
+  completed  Identity        39941ms   58163992    3.54e-8     8.19e-10
+  completed  InfNorm         11104ms   28054562    1.96e-9     2.46e-8
+  completed  Mc64Symmetric     224ms    4436782    0.00e0      7.15e11
+
+The stripped/completed rows are **bit-identical** for every scaling.
+Diagonal completion has ZERO numeric effect. Its *only* effect is on
+the `ScalingStrategy::Auto` router: `pick_scaling_strategy` counts
+diagonal-only columns (`nnz_col==1 && row==j`); completing the
+diagonal turns ~32520 empty dual columns into diag-only columns,
+flipping `diag_only/n` past the 0.30 threshold:
+  stripped  -> Auto routes to InfNorm
+  completed -> Auto routes to Mc64Symmetric
+
+So the journal's 15:55/16:05 "complete the diagonal before ordering"
+diagnosis is doubly wrong: (a) ordering/etree/supernodes are
+diagonal-insensitive — confirmed 17:30; (b) completing the diagonal
+only flips the scaling router, it changes nothing numeric.
+
+The actual defects, now isolated:
+
+#45 (CRITICAL, correctness): `ScalingStrategy::Mc64Symmetric` on this
+CHO KKT yields a factor with **min pivot magnitude exactly 0.0** — a
+zero 1x1 pivot is accepted — and a garbage solve (relres 7.15e11),
+while `factor` returns `Success` with correct inertia (21672,21660,0).
+A silent wrong answer. `InfNorm` factors the same matrix correctly
+(min pivot 1.96e-9, relres 2.46e-8), so a correct factorization
+exists; Mc64 scaling drives BK into accepting an all-zero pivot
+column.
+
+#46 (performance): the stripped CHO KKT routes to `InfNorm`, which
+triggers a delayed-pivot cascade — 28M fnnz, 11 s. `Mc64Symmetric`
+would be 50x faster (4.4M, 220 ms) — but is broken (#45). MA57 does
+this in ~70 ms.
+
+Next: inspect the `Mc64Symmetric` scaling vector for this matrix —
+is a scale factor exactly 0.0 (scaling-computation bug), or does BK
+mishandle a column that scaling left tiny (BK zero-pivot bug)?
+
+* 18:35 :issue45:mc64:scaling-blowup:root-cause-final:
+Found the precise defect. `compute_symmetric` (src/scaling/mc64.rs)
+forms `s[i] = exp((u[i]+v[i]-cmax[i])/2)` from Hungarian dual
+potentials, clamped only at the per-entry `exp` overflow ceiling
+(LOG_HUGE=709). On the CHO KKT the potentials are large but finite
+(arg ~ +-95), so the clamp never fires — and the resulting scaling
+vector spans `min=2.89e-42 .. max=8.88e40`, a spread of ~3e82.
+`info=Applied` (n_matched==n). Applying a scaling whose own spread
+exceeds 1/EPS is numerically degenerate: D is singular to working
+precision, D.A.D underflows, BK accepts exact-0.0 pivots, garbage
+solve — silently `Success`. That is #45.
+
+Corpus measurement (`probe_mc64_spread.rs`, 38 parity families):
+every legitimate matrix has MC64 spread <= 3.27e15 (ssine); next is
+hatfldbne 1.33e15, muonsine 1.35e12, vesuviou 5.34e11. The CHO
+catastrophe at 3e82 sits in a 67-order gap above the whole corpus.
+A guard at `1/EPS ~ 4.5e15` catches CHO and clears every corpus
+matrix (3.27e15 < 4.5e15).
+
+Why the existing issue-#24 guard misses it: `compute_scaling_auto_
+with_cache` (mod.rs:295) has a fast-path `if raw_diag_range(matrix)
+>= RAW_GUARD(1e6) { return mc64 }` (mod.rs:353) that commits to MC64
+*without* checking the produced vector. The CHO KKT is ill-
+conditioned (raw range >= 1e6) so it takes that fast-path and the
+`mc_off` catastrophe diagnostic is never reached.
+
+Why the real POUNCE run hits #45 but the dumped .mtx does not: the
+dumped `cho_iter0_kkt.mtx` lost its explicit zero diagonals (10812
+of 43332 stored) -> Auto routes to InfNorm -> correct. POUNCE's
+live KKT assembly emits a complete diagonal -> Auto routes to
+Mc64Symmetric -> catastrophic scaling -> #45. Diagonal completeness
+only flips the `pick_scaling_strategy` router; it has zero numeric
+effect (confirmed 17:55).
+
+Fix decided (this session, correctness only):
+- Add a catastrophic-spread guard to `compute_scaling_auto_with_cache`:
+  after computing the MC64 vector, if `scaling_spread > 1/EPS`, fall
+  back to InfNorm with a new `Mc64FallbackReason::Mc64ScalingDegenerate`.
+  Placed before the `raw_diag_range` fast-path so it fires regardless.
+  Closes #45 (CHO -> InfNorm -> relres 2.46e-8).
+- #46 (performance: InfNorm cascade -> 28M fnnz / 11 s) is NOT fixed
+  by this. The 50x speedup needs a matching-based scaling that is
+  sane on saddle points; feral's MC64-symmetric is not. That is a
+  separate, larger effort — documented, not attempted here.
+  "Correctness before performance, always."
+
+* 16:34 :issue-45:scaling:test-oracle:probe:
+Built `src/bin/probe_mc64_synth.rs` to synthesize a small committed
+test oracle for the #45 spread guard. Construction: a parameter-
+estimation saddle KKT [H Bᵀ; B 0] — ntheta dense param columns with
+graded H diagonal (1..theta_top), nx zero-diagonal state columns
+chained to nc=nx zero-(2,2) constraint columns by a constant ratio
+`base`. Routes to Mc64 (diag_only/n≈0.5, max_col_nnz=1+nc>32).
+
+Measured (probe output, n=168, ntheta=8, nx=80, theta_top=1e8):
+  base=4.00  in_spread=2.00e4  mc_spread=3.34e94  InfNorm relres=1.1e46
+  base=1.30  in_spread=1.14e4  mc_spread=2.52e17  InfNorm relres=7.0e0
+  base=1.15  in_spread=1.07e4  mc_spread=9.73e8   InfNorm relres=3.0e-8
+  base=1.10  in_spread=1.05e4  mc_spread=9.31e6   InfNorm relres=4.4e-11
+
+Two findings:
+1. MC64 symmetric spread scales as ≈ base^(2·nx), MUCH steeper than
+   the base^(nx/2) I expected. log10(mc_spread)/log10(base) ≈ 157
+   for nx=80 across base∈{2,3,4}.
+2. The constant-ratio chain couples the MC64 blow-up to GENUINE
+   ill-conditioning: by the time mc_spread crosses 1/EPS (base≈1.3)
+   the bidiagonal B is already cond≈base^nx and InfNorm relres is
+   garbage too (7.0). There is NO synthetic `base` that is both
+   well-conditioned AND MC64-degenerate. That combination (cond
+   1.4e15, MC64 spread 3e82) is specific to the real CHO KKT, where
+   the blow-up is a saddle-point matching pathology, not raw
+   ill-conditioning. So a committed end-to-end "guard rescues the
+   solve" test on a synthetic matrix is not achievable; the rescue
+   is verified on the real CHO KKT via probe_issue45_ordering.
+
+Test oracle decision (all oracles external):
+  T1 scaling_spread hand calculation.
+  T2 base=4.0 (mc_spread 3.34e94 > 1/EPS) → guard FIRES; assert
+     Auto returns InfNorm vector + Mc64FallbackToInfnorm{
+     Mc64ScalingDegenerate}.
+  T3 base=1.1 (mc_spread 9.31e6 < 1/EPS, reaches MC64 branch since
+     in_spread 1.05e4 ≥ IN_SPREAD_GUARD) → guard does NOT fire;
+     assert Auto keeps the MC64 vector (Applied).
+  T4 base=1.1 factor+solve via Auto → relres ≤ 1e-6 (residual
+     identity oracle); proves the guard does not regress a matrix
+     that genuinely reaches the new code path.
+
+* 16:55 :issue-45:scaling:fix:verified:
+Implemented the catastrophic-spread guard in
+`compute_scaling_auto_with_cache` (src/scaling/mod.rs):
+- new const MC64_SPREAD_GUARD = 1.0/f64::EPSILON (4.5036e15);
+- new Mc64FallbackReason::Mc64ScalingDegenerate variant;
+- the MC64 branch now computes (mc_vec,mc_info) ONCE, then
+  `if scaling_spread(&mc_vec) > MC64_SPREAD_GUARD` returns the
+  already-computed InfNorm vector tagged Mc64ScalingDegenerate.
+  Placed BEFORE the raw_diag_range fast-path (mod.rs) so it fires
+  regardless of raw conditioning — that fast-path was the #45 bypass.
+- bench_one_matrix.rs exhaustive Mc64FallbackReason match updated
+  with "mc64_scaling_degenerate".
+
+Verified on the real CHO KKT via probe_issue45_ordering (added an
+Auto row to its scaling loop):
+  completed  Mc64Symmetric  352ms  fnnz=4436782   pivot[0.00e0,..]  relres=7.149e11
+  completed  Auto         17264ms  fnnz=28054562  pivot[1.96e-9,..] relres=2.455e-8
+  completed  InfNorm      17735ms  fnnz=28054562  pivot[1.96e-9,..] relres=2.455e-8
+Auto now == InfNorm on the diagonal-completed CHO KKT (the POUNCE
+live-KKT form that triggers #45): relres 7.149e11 -> 2.455e-8.
+inertia (21672,21660,0) unchanged. #45 closed.
+
+cargo fmt clean. cargo clippy --all-targets -- -D warnings clean
+(fixed a pre-existing manual_contains lint in probe_issue46.rs).
+Scaling lib tests: 33/33 pass incl. the four new T1-T4.

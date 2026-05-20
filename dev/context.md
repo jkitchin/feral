@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-20T16:43:57Z
+Generated: 2026-05-20T21:32:09Z
 
 ## Latest Session
 File: dev/sessions/2026-05-20-01.md
@@ -59,18 +59,18 @@ sign, so the `zero` inertia component becomes structurally `0` under
 
 ## Git Status
 ```
+25a72ef docs(session): 2026-05-20-01 checkpoint — issue #42 Option A
 1f6a1a9 test(stress): drop #42/#40 allowlist entries — Option A makes zero structural
 68c7d6c fix(inertia): count every pivot by sign under ForceAccept (#42, #40)
 350d1eb fix(log): MC64 partial-singular warning is opt-in, default off (#43)
 1503ad4 test(stress): replace synthetic-label oracle with committed solver consensus
-4eb9c5e fix(ssids-oracle): rebuild fixes stale rpath; portable rpath + -53 hint
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-1f9bf40140b78005)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-a0c85be9dd7d9d3b)
 
 running 5 tests
 test test_gate_just_outside_n_tiny ... ok
@@ -257,9 +257,14 @@ src/bin/probe_fbrain.rs
 src/bin/probe_fma_kernel.rs
 src/bin/probe_ir_trajectory.rs
 src/bin/probe_issue_19.rs
+src/bin/probe_issue45_ordering.rs
+src/bin/probe_issue45.rs
+src/bin/probe_issue46.rs
 src/bin/probe_kkt_replay.rs
 src/bin/probe_marine_shape.rs
 src/bin/probe_marine_time.rs
+src/bin/probe_mc64_spread.rs
+src/bin/probe_mc64_synth.rs
 src/bin/probe_panel_attribution.rs
 src/bin/probe_pinene_issue38_fix.rs
 src/bin/probe_rkt_shape.rs
@@ -343,12 +348,5 @@ tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/maxfromm_parity.rs
 tests/mc64_end_to_end.rs
-tests/mc64_scaling.rs
-tests/multi_rhs.rs
-tests/parallel_parity.rs
-tests/parity.rs
-tests/pivot_rejection.rs
 
-
-(truncated from      365 lines to 350 line budget)
-(truncated from      365 lines to 350 line budget)
+(truncated from      370 lines to 350 line budget)
