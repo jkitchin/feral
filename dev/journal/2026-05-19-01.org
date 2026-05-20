@@ -172,3 +172,34 @@ bug). Suggested first action in #41: run the SSIDS oracle -- if SSIDS
 also sign-counts, feral has a consensus partner. Not folded in here;
 #41 is its own triage. report.py ALLOWLIST entries still cite #39 --
 left as-is, re-citing to #41 is part of that triage, not this task.
+
+* 22:30 :ci:stress-smoke:issue-tracking:f01:doc-fix:
+User approved the cheap unambiguous parts: close #39 and fix the
+false #41 doc claim; the unified gate lower-bound change stays held
+for sign-off.
+
+Closed #39. The FBRAIN3LS_0839 outlier was fixed by c7471ce
+(F-01 sign-fallback) on 2026-05-17; #39 stayed open only because a
+direct push to main carries no "closes #39" keyword. Verified before
+closing: cargo test --test parity parity_fbrain3ls_0839 -> ok (1
+passed). Closing comment records root cause, fix, verification, and
+the deliberate #39/#41 scope split (#39 = borderline real matrix
+diverging from BOTH default oracles; #41 = feral matching
+default-MUMPS/MA57 sign-counting but not explicit MUMPS
+ICNTL(24)=1 null-detection on constructed rankdef synthetics).
+
+Fixed the false claim in report.py's rankdef_exact_100_10 ALLOWLIST
+entry. Old text: "MUMPS (ICNTL(24)=1) itself reports zero=0 on this
+matrix" -- the oracle run (2026-05-19) showed MUMPS-ICNTL(24)=1
+reports (54,43,3), zero=3. New text states the verified story
+honestly: feral reports (56,44,0) zero=0 matching the MA57 oracle's
+(56,44,0); MUMPS-ICNTL(24)=1 reports (54,43,3) zero=3; the two
+genuinely disagree; the correct-oracle question is tracked in #41.
+report.py EXIT=0, flagged=0 after the edit (rankdef_exact_100_10
+still ALLOWLISTED(#39), reason text now accurate).
+
+HELD, not done: dropping the rankdef gate lower bound 1 -> 0
+(0 <= zero <= expected), which MA57 reporting zero=0 on all 8
+synthetics would justify and which would retire MUMPS_REPORTS_ZERO0
+and all 5 ALLOWLIST entries. That is a gate relaxation -- needs the
+human sign-off CLAUDE.md requires.

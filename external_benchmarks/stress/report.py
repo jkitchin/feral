@@ -172,9 +172,15 @@ ALLOWLIST: dict[str, tuple[str, str]] = {
         "#39",
         "F-01 sign-fallback (2026-05-17). Pivots with |d| in the band "
         "(EPS, sqrt(n)*EPS*||A||] are now counted by sign instead of as "
-        "zero, to match MUMPS/SSIDS convention on FBRAIN3LS_0839. MUMPS "
-        "(ICNTL(24)=1) itself reports zero=0 on this matrix; the factor "
-        "is numerically valid (rel_res < 1e-13). See "
+        "zero, to match the default sign-counting convention used as the "
+        "FBRAIN3LS_0839 parity reference. feral reports inertia "
+        "(56,44,0), zero=0, matching the MA57 oracle's (56,44,0). The "
+        "MUMPS 5.8.2 oracle with explicit null-pivot detection "
+        "(ICNTL(24)=1) reports (54,43,3), zero=3 -- so feral and "
+        "MUMPS-ICNTL(24)=1 genuinely disagree here. The factor is "
+        "numerically valid (rel_res < 1e-13). Whether sign-counting or "
+        "null-detection is the correct oracle on these constructed "
+        "rank-deficient matrices is tracked in #41; see "
         "dev/research/f01-rankdef-underreporting.md 2026-05-17 addendum.",
     ),
     "saddle_rankdef_100_20_5": (
