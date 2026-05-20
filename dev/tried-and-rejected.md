@@ -2035,3 +2035,51 @@ Run 26003051776 (after fix 1, 3/4 still red — log of job
 26003260115 (after switching to maturin-action, 4/4 wheels green).
 Run 26003542088 (re-cut v0.4.0 release event, full pipeline green
 through PyPI publish).
+
+---
+
+## 2026-05-20 — #46 "activation-predicate" diagnosis (wrong; overturned by probes)
+
+**What.** A three-agent research phase (one reading feral's pivoting
+machinery, one MUMPS 5.8.2, one SPRAL SSIDS) diagnosed the issue-#46
+delayed-pivot cascade on zero-(2,2)-block saddle KKTs as an
+*analysis-phase ordering failure*. The proposed fix: broaden
+`pick_ordering_preprocess` (`src/symbolic/mod.rs`) with a
+zero/absent-diagonal-fraction predicate (MUMPS `dana_aux.F:1887`-style,
+threshold ≈ 0.10·n) so `OrderingPreprocess::LdltCompress` would turn on
+for these matrices. Captured in
+`dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md` (now corrected)
+and `dev/plans/kkt-zero-2x2-cascade-fix.md` (now corrected) as the
+load-bearing "Phase 1".
+
+**Why rejected.** Ground-truth probes on the real CHO `parmest` KKT
+refuted every load-bearing claim before any activation code was written:
+
+- `probe_issue46_preprocess` — feral stores only the lower triangle, so
+  KKT constraint columns are stored-degree 0/1, **not** high-degree. The
+  existing `low_degree(≤2)` predicate already fires (frac 0.7505);
+  `pick_ordering_preprocess` **already** returns `LdltCompress` for the
+  CHO KKT and `build_supermap` already forms 21 660 pairs. The proposed
+  activation predicate is a no-op.
+- `probe_issue46_supernode` — with `LdltCompress` active: symbolic
+  `factor_nnz_estimate = 1.22M`, numeric `factor_nnz = 28.05M` (23×
+  blowup), max supernode `ncol = 133` (no giant root supernode),
+  **20 918 / 21 660 pairs co-located in the same supernode, 20 794 at
+  adjacent columns (96.6 %)**. The ordering is fine and the pairs are
+  co-located; the cascade is purely a numeric delayed-pivot blowup.
+- The MUMPS/SSIDS conclusion "matching-based ordering *is* the fix" was
+  incomplete: MUMPS/MA57 also rely on MC64 *scaling* (makes matched
+  entries magnitude ≈ 1 so BK's argmax hits the partner). feral's MC64
+  scaling is degenerate on saddles (#45) and rejected — feral cannot use
+  that mechanism. Worse, on CHO `preprocess=None` actually produced
+  *less* fill (21.9M) than `LdltCompress` (28M).
+
+**The actual bug** was the numeric kernel: `scalar_pivot_step`'s 2×2
+partner search only considered the magnitude-argmax row `r` and, when
+`r` was out-of-front, delayed instead of using the co-located partner
+at `k+1`. Fixed there (see `decisions.md` 2026-05-20 #46 entry).
+
+**Lesson.** A convergent multi-agent diagnosis is not evidence — three
+agents reading reference solvers agreed on a story that a single probe
+on the real matrix overturned in minutes. Probe the actual failing
+matrix *before* writing a research note's "recommended fix", not after.

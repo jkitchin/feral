@@ -1,0 +1,136 @@
+#+TITLE: FERAL session journal 2026-05-20-03
+#+STARTUP: showall
+
+* 18:50 :issue46:research:agents:
+Started the #46 fix (delayed-pivot cascade on zero-(2,2)-block KKT,
+~160x slower than MA57). #45 is fixed and shipped (b017beb..d432086);
+its GH comment is posted (issue45#issuecomment-4502926605, a corrected
+version — the pre-drafted comment was stale and wrongly blamed POUNCE).
+#46 status comment posted (issue46#issuecomment-4503005570).
+
+Ran the FERAL research phase: three parallel agents — one inspecting
+feral's pivoting machinery, one reading MUMPS 5.8.2, one reading SPRAL
+SSIDS — on "how to factor a saddle-point KKT with a structurally-zero
+(2,2) block without the delayed-pivot cascade."
+
+Convergent finding, all three: the cascade is an ANALYSIS-phase
+failure, not a factorization-phase failure. MUMPS (ICNTL(12),
+DMUMPS_SYM_MWM + DMUMPS_LDLT_COMPRESS) and SSIDS (ordering=2,
+match_order.f90) both do the identical thing: symmetric max-weight
+matching pairs each zero-diagonal constraint row with a coupled
+variable row, the graph is compressed onto those pairs, the
+fill-reducing ordering runs on the compressed graph, then the
+permutation is expanded keeping each pair's two members adjacent — so
+both land in the same supernode/front and the numeric kernel forms the
+2x2 in-place. MUMPS turns this on automatically for SYM=2 when
+zero-diagonal count > N/10 (dana_aux.F:1887).
+
+Decisive: feral ALREADY HAS this — OrderingPreprocess::LdltCompress
+(src/symbolic/ldlt_compress.rs): build_supermap (MC64 matching ->
+pairs), compress_pattern, expand_permutation (pairs adjacent). It is a
+documented port of MUMPS ICNTL(12)=2. The ONLY problem: it is gated
+off. pick_ordering_preprocess (symbolic/mod.rs:336) activates it only
+when low_degree_cols/n >= 0.30, where low_degree = stored degree <= 2.
+A KKT constraint column couples to a whole row of B — it is HIGH
+degree, never <= 2 — so the CHO KKT gets OrderingPreprocess::None and
+the cascade fires. The numeric BK kernel already handles the saddle
+2x2 [[0,b],[b,0]] correctly (count_2x2_inertia_val classifies it
+(+1,-1,0), do_2x2_update divides by det=-b^2). Conclusion: the fix is
+primarily an activation predicate, not a new kernel. Research note:
+dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md.
+
+* 19:10 :issue46:probe:diagnosis:overturned:
+Ground-truth probes on the real CHO KKT. The 3-agent research note's
+diagnosis is wrong in every load-bearing claim. Two new probes:
+
+probe_issue46_preprocess — refutes "gap 1 = activation". feral stores
+the LOWER triangle only, so KKT constraint columns are stored-degree
+0/1, NOT high-degree. The existing low_degree(<=2) predicate fires
+(frac 0.7505); pick_ordering_preprocess ALREADY returns LdltCompress
+for the CHO KKT. build_supermap ALREADY forms 21660 pairs. Activation
+is a no-op fix — it already works.
+
+probe_issue46_supernode — refutes "gap 2 = supernode split" AND the
+whole ordering hypothesis. With preprocess=LdltCompress:
+  symbolic factor_nnz_estimate = 1.22M   (no-delay prediction)
+  numeric  factor_nnz          = 28.05M  (blowup 22.97x)
+  supernodes=8270  max ncol=133          (NO giant root supernode)
+  MC64 pairs: 20918/21660 same-supernode, 20794 adjacent cols
+  n_delayed=103110  n_2x2=11736
+So 96.6% of pairs ARE co-located adjacent, max front is 133 cols, the
+symbolic ordering predicts only 1.22M fill — yet numeric blows up 23x.
+The cascade is NOT an ordering failure and NOT a supernode-split
+failure. It is purely a NUMERIC delayed-pivot blowup (gap 3).
+
+Worse: preprocess=None co-locates fewer pairs (10289) but produces
+LESS fill (21.9M) and is faster (7.5s) than LdltCompress (28M, 11.7s).
+feral's matching-based ordering actively HURTS here. The 3-agent
+"matching-based ordering IS the fix" conclusion is disproven.
+
+Decisive control — allow_delayed_pivots=false (static pivoting):
+  27ms  factor_nnz=1.495M  blowup=1.22x  inertia=(15422,27910,0)
+The cascade vanishes entirely (430x faster, fill == symbolic
+estimate) — confirming 100% of the blowup is delayed pivots. BUT the
+inertia is WRONG: (15422,27910,0) vs the correct (21672,21660,0).
+Force-accept assigns arbitrary signs to ~6250 saddle pivots. So
+allow_delayed_pivots=false is NOT an admissible fix — it violates the
+hard "inertia exactly correct on non-singular matrices" constraint.
+That is exactly why it is an opt-in knob, not the default.
+
+panel_diag on the delayed run: fallback_2x2_need_swap_or_bound=14584
+is the dominant fallback — the panel inline-2×2 path declines because
+BK's magnitude-argmax row r != k+1. The matched partner is co-located
+at k+1 but the kernel's argmax search picks a different r (often an
+out-of-front coupling), cannot form a 2×2, and the constraint
+column's zero diagonal cannot be a 1×1 -> delay.
+
+Root cause (confirmed): the numeric BK kernel re-derives pivots blind
+via magnitude-argmax and never uses the analysis-phase MC64 pairing.
+For a zero-diagonal constraint column whose largest coupling points
+out of the front, it delays even though the co-located saddle partner
+sits at the adjacent fully-summed column. MUMPS/MA57 avoid this
+because MC64 *scaling* makes every matched entry magnitude 1, so
+argmax always lands on the partner — but feral's MC64 scaling is
+degenerate on saddles (#45, spread 3e82) and is correctly rejected.
+feral has the matching ORDERING but not the matching-aware NUMERIC
+pivot selection. That is the real gap-3 fix.
+
+* 19:55 :issue46:fix:regression-test:verified:
+Wrote tests/issue_46_saddle_kkt_cascade.rs — a committed regression
+test for the #46 fix. Synthetic structurally-zero-(2,2)-block saddle
+KKT, n=500 (nv=300 vars, nc=200 constraints), constraints-first layout
+A=[[0,B],[Bᵀ,H]]. Oracles: (1) inertia exactly (300,200,0) — saddle-
+point inertia theorem, H SPD + B full row rank, external math; (2)
+solve relative residual ≤ 1e-8 — identity; (3) factor_nnz ≤ 5× the
+symbolic estimate — cascade guard / measurement oracle.
+
+Design iteration (3 attempts, verified empirically against a
+temporarily-reverted kernel):
+  v1 tridiagonal-H + banded-B, variables-first: blowup 1.02x, NO
+     cascade even on the buggy kernel. Too regular.
+  v2 global-variable g coupled to all constraints, variables-first:
+     still 1.02x. Two reasons it didn't cascade — (a) InfNorm scaling
+     symmetrically equalises the g-coupling and the partner-coupling
+     (d[g]≤1/2, structurally defeats any magnitude gap); (b) more
+     fundamental: build_supermap canonicalises every MC64 pair as
+     (min,max), and with variables-first the variable index < the
+     constraint index, so expand_permutation emits variable-then-
+     constraint — BK reaches the *variable* partner first, its only
+     off-diagonal IS the constraint, the 2×2 forms, no delay.
+  v3 same global-g structure but CONSTRAINTS-FIRST layout (constraints
+     [0,nc), variables [nc,n)) so the pair is (constraint,variable)
+     and the zero-diagonal column is reached first; plus Identity
+     scaling to isolate the kernel (the #46 fix must be correct
+     without leaning on rescaling — feral's MC64 scaling is degenerate
+     on saddles, #45). This cascades.
+
+Decisive verification — temporarily reverted scalar_pivot_step to the
+pre-#46 condition (partner = r-only):
+  buggy kernel:  factor_nnz=80700  blowup=61.23x  n_delayed=398
+                 n_2x2=0    -> TEST FAILS
+  fixed kernel:  factor_nnz=1100   blowup=0.83x   n_delayed=0
+                 n_2x2=199  -> TEST PASSES
+Inertia stays (300,200,0) in BOTH — the cascade is slow-but-correct,
+exactly as on CHO; the fill bound (not inertia) is what catches the
+regression. The 5× bound separates 0.83x from 61.23x decisively. Fix
+restored, test green, clippy clean.

@@ -3883,3 +3883,50 @@ References:
   `rankdef_exact_50_5` #40).
 - `dev/research/f01-rankdef-underreporting.md` — 2026-05-20 section.
 - Issues #42 (resolved) and #40 (resolved as a side effect).
+
+---
+
+## 2026-05-20 — BK 2×2 partner search may fall back to the co-located `k+1` (#46)
+
+**Decision.** The dense Bunch-Kaufman kernel `scalar_pivot_step`
+(`src/dense/factor.rs`) selects its 2×2 pivot partner with a two-tier
+rule: (1) the magnitude-argmax row `r` when `r` is fully summed (the
+textbook BK choice, unchanged), else (2) the literal next column `k+1`
+when `k` and `k+1` are coupled (`a[k,k+1] != 0`). Tier 2 is new.
+
+**Why.** A structurally-zero-(2,2)-block saddle KKT has thousands of
+zero-diagonal constraint columns. When such a column's largest coupling
+points at an out-of-front (not-fully-summed) row, the pre-#46 kernel
+could form neither a 2×2 (argmax not fully summed) nor a 1×1 (zero
+diagonal) and delayed the column — the delays cascaded (issue #46: 23×
+factor-nnz blowup, ~160× end-to-end slowdown vs MA57 on the CHO
+`parmest` KKT). The analysis-phase `OrderingPreprocess::LdltCompress`
+already co-locates every MC64-matched saddle partner at the adjacent
+column, so `k+1` is the numerically correct partner the argmax search
+was missing.
+
+**Consequence — a soft analysis→numeric coupling.** The numeric kernel
+now opportunistically benefits from the analysis phase having placed the
+matched partner at `k+1`. This is *not* a hard dependency: tier 2 is
+guarded by `a[k,k+1] != 0`, and a `{k,k+1}` candidate that is
+numerically unsound still fails the Duff–Reid growth bound and the
+SSIDS determinant floor and falls through to the last-resort 1×1
+exactly as before. The change widens the 2×2 *search*; it does not
+relax the stability gate. With no co-located partner the behavior is
+bit-identical to the pre-#46 kernel. Future work that changes how
+`LdltCompress` lays out matched pairs should be aware the kernel reads
+`k+1` as the preferred saddle partner.
+
+**Evidence.** CHO KKT: factor 11.7 s → 0.20 s (57×), factor-nnz
+28.05M → 3.35M, inertia `(21672, 21660, 0)` unchanged. Regression test
+`tests/issue_46_saddle_kkt_cascade.rs` verified against a
+temporarily-reverted kernel: pre-#46 → 61× fill blowup (test fails),
+fixed → 0.83× (test passes).
+
+**References.**
+- `src/dense/factor.rs` — `scalar_pivot_step`, the 2×2 partner block.
+- `dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md` — corrected
+  diagnosis (the original three-agent "ordering failure" diagnosis was
+  overturned by ground-truth probes).
+- `tests/issue_46_saddle_kkt_cascade.rs` — committed regression test.
+- Issue #46 (resolved).
