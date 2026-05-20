@@ -203,3 +203,55 @@ HELD, not done: dropping the rankdef gate lower bound 1 -> 0
 synthetics would justify and which would retire MUMPS_REPORTS_ZERO0
 and all 5 ALLOWLIST entries. That is a gate relaxation -- needs the
 human sign-off CLAUDE.md requires.
+
+* 07:15 :ssids-oracle:infra:dyld:inertia:issue-tracking:
+Fixed the SSIDS oracle binary. Two distinct faults, only one a real
+binary bug:
+
+1. Stale rpath (the real fault). otool -l on the Apr-26 ssids_bench
+   showed LC_RPATH /Users/jkitchin/Dropbox/projects/feral/ref/spral/
+   build -- a path from before the repo moved out of Dropbox. The
+   binary loads @rpath/libspral.dylib; with no live rpath resolving
+   it, dyld fails. libspral.dylib itself is fine: its own deps are
+   all absolute (/opt/homebrew/...), only the bench's rpath was
+   stale. ssids_bench is gitignored, so the stale binary survived
+   the move un-rebuilt.
+
+2. flag=-53 was NOT a binary bug. -53 = SSIDS_ERROR_OMP_CANCELLATION
+   (ref/spral/src/ssids/ssids.f90:1450, push_omp_settings called
+   from ssids_factor:834). SSIDS CPU code requires OMP cancellation,
+   enabled only via the OMP_CANCELLATION env var read at process
+   start. run_ssids.py already exports OMP_CANCELLATION=true
+   (run_ssids.py:230); the prior session's failing run was a direct
+   manual invocation without it.
+
+Fix: rebuilt ssids_bench (Makefile $(abspath ...) gives the correct
+current rpath). Added a portable @loader_path/../../ref/spral/build
+rpath to the Makefile so a rebuilt binary survives a future repo
+move. Added subroutine hint_omp_cancellation to ssids_bench.f90: on
+flag -53 it prints "re-run with OMP_CANCELLATION=true" instead of a
+bare number. Verified: WITH OMP_CANCELLATION=true -> 9/9 succeed;
+WITHOUT -> flag=-53 + the hint line.
+
+SSIDS oracle data on the 9 rankdef synthetics (OMP_CANCELLATION=true,
+OMP_PROC_BIND=spread; flag=50 = SSIDS_WARNING_OMP_PROC_BIND is a
+benign warning, status ok):
+
+  rankdef_5_2             (4,1,0)    rank=5   zero=0
+  rankdef_10_3            (4,6,0)    rank=10  zero=0
+  rankdef_50_5            (25,25,0)  rank=50  zero=0
+  rankdef_200_20          (110,90,0) rank=200 zero=0
+  rankdef_exact_50_5      (24,26,0)  rank=50  zero=0
+  rankdef_exact_100_10    (56,44,0)  rank=100 zero=0
+  saddle_rankdef_50_10_3  (52,38,0)  rank=90  zero=0
+  saddle_rankdef_100_20_5 (103,77,0) rank=180 zero=0
+  stokes_q1p0_8           (100,62,0) rank=162 zero=0
+
+SSIDS reports zero=0 (full matrix_rank=n) on ALL of them. This
+answers #41's suggested action 1: SSIDS sign-counts the borderline
+pivots exactly like MA57, default MUMPS, and feral's #39
+sign-fallback. feral's zero=0 has TWO canonical consensus partners
+(MA57 + SSIDS); only MUMPS with explicit ICNTL(24)=1 null-detection
+reports zero>0. Per CLAUDE.md ("feral inertia must agree with MUMPS
+or SSIDS") feral agrees with SSIDS -- the constraint is satisfied,
+and feral's zero=0 is defensible, not under-detection.

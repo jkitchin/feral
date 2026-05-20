@@ -151,6 +151,7 @@ program ssids_bench
    call ssids_analyse(.true., ncols, ptr, row_idx, akeep, options, inform)
    if (inform%flag < 0) then
       write(0,*) "ssids_analyse failed on ", trim(mtx_path), " flag=", inform%flag
+      call hint_omp_cancellation(inform%flag)
       have_failure = .true.
       goto 600
    end if
@@ -158,6 +159,7 @@ program ssids_bench
    call system_clock(t_fac_end)
    if (inform%flag < 0) then
       write(0,*) "ssids_factor failed on ", trim(mtx_path), " flag=", inform%flag
+      call hint_omp_cancellation(inform%flag)
       have_failure = .true.
       goto 600
    end if
@@ -268,6 +270,20 @@ program ssids_bench
    stop 0
 
 contains
+
+   ! SSIDS flag -53 (SSIDS_ERROR_OMP_CANCELLATION) means the SSIDS CPU
+   ! code found OMP cancellation disabled. It can only be enabled via the
+   ! OMP_CANCELLATION environment variable, which must be set *before*
+   ! the process starts — a Fortran program cannot set it for itself.
+   ! run_ssids.py exports it; a direct invocation must too. Print an
+   ! actionable hint instead of leaving the bare flag number cryptic.
+   subroutine hint_omp_cancellation(flag)
+      integer, intent(in) :: flag
+      if (flag == -53) then
+         write(0,'(A)') "  hint: flag -53 = SSIDS_ERROR_OMP_CANCELLATION; " // &
+            "re-run with OMP_CANCELLATION=true set in the environment"
+      end if
+   end subroutine hint_omp_cancellation
 
    subroutine parse_line(line_in, p1, p2, p3)
       character(len=*), intent(in) :: line_in
