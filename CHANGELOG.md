@@ -4,6 +4,25 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — MC64 partial-singular warning is now opt-in ([#43][i43])
+
+The one-line `warning: MC64 matching left N of M variables unmatched`
+stderr breadcrumb (emitted from three numeric-driver sites on
+`ScalingInfo::PartialSingular`) is now off by default. `PartialSingular`
+is routine and benign for IPM hosts, which factorize structurally
+rank-deficient KKT systems on the first attempt of most iterations; the
+unconditional stderr write flooded host logs for expected, downstream-
+recovered behavior. The new `NumericParams::warn_partial_singular` flag
+(default `false`) gates all three sites. Enable it via the
+`Solver::with_partial_singular_warning(true)` builder or the
+`FERAL_WARN_PARTIAL_SINGULAR=1` env var on the C ABI. The same fact is
+always available structurally via `Solver::scaling_info()` (and as a
+count via `Solver::mc64_fallback_count()`), so this is a diagnostic
+breadcrumb, not a correctness signal. No factorization/solve behavior
+change.
+
+[i43]: https://github.com/jkitchin/feral/issues/43
+
 ### Added — near-singularity signal (`min|λ(D)|`)
 
 `Solver::min_pivot_magnitude` / `max_pivot_magnitude` (and the

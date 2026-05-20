@@ -379,6 +379,26 @@ impl Solver {
         self
     }
 
+    /// Opt into the MC64 partial-singular stderr breadcrumb. When
+    /// `on = true`, each `factor()` whose scaling phase leaves
+    /// variables unmatched (`ScalingInfo::PartialSingular`) emits a
+    /// one-line `warning:` to stderr.
+    ///
+    /// Default `false`. `PartialSingular` is routine and benign for
+    /// IPM hosts, which factorize structurally rank-deficient KKT
+    /// systems on the first attempt of most iterations; an
+    /// unconditional stderr write floods host logs for behavior that
+    /// is expected and recovered downstream. The same fact is always
+    /// available structurally via [`Solver::scaling_info`] (and as a
+    /// count via [`Solver::mc64_fallback_count`] for the `Auto`-
+    /// fallback case), so this toggle is a diagnostic convenience,
+    /// not a correctness signal. The `FERAL_WARN_PARTIAL_SINGULAR`
+    /// env var sets it for the C ABI. Issue #43.
+    pub fn with_partial_singular_warning(mut self, on: bool) -> Self {
+        self.numeric_params.warn_partial_singular = on;
+        self
+    }
+
     /// Enable the symmetric-quasi-definite (SQD) fast-path. When
     /// `on = true`, the caller asserts the input KKT has Vanderbei
     /// (1995) structure `K = [[-E, A^T], [A, F]]` with `E, F` SPD —
@@ -1037,8 +1057,35 @@ mod tests {
             min_parallel_flops: None,
             sqd_mode: false,
             static_pivot_threshold: None,
+            warn_partial_singular: false,
         };
         Solver::with_params(np, SupernodeParams::default())
+    }
+
+    /// #43 — the MC64 partial-singular stderr breadcrumb is off by
+    /// default (feral stays quiet as a library should) and the
+    /// `with_partial_singular_warning` builder toggles it.
+    #[test]
+    fn partial_singular_warning_default_off_and_builder_toggles() {
+        assert!(
+            !NumericParams::default().warn_partial_singular,
+            "default must be quiet (#43)"
+        );
+        assert!(
+            !NumericParams::with_bk(BunchKaufmanParams::default()).warn_partial_singular,
+            "with_bk constructor must also default quiet (#43)"
+        );
+
+        let off = Solver::new();
+        assert!(!off.numeric_params.warn_partial_singular);
+
+        let on = Solver::new().with_partial_singular_warning(true);
+        assert!(on.numeric_params.warn_partial_singular);
+
+        let back_off = Solver::new()
+            .with_partial_singular_warning(true)
+            .with_partial_singular_warning(false);
+        assert!(!back_off.numeric_params.warn_partial_singular);
     }
 
     /// Regression for the dtoc2 iter-1 hang (2026-05-17 §08:00,

@@ -361,6 +361,7 @@ fn delay_numeric_params() -> feral::numeric::factorize::NumericParams {
         min_parallel_flops: None,
         sqd_mode: false,
         static_pivot_threshold: None,
+        warn_partial_singular: false,
     }
 }
 

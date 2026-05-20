@@ -53,6 +53,7 @@ fn params_off() -> NumericParams {
         min_parallel_flops: None,
         sqd_mode: false,
         static_pivot_threshold: None,
+        warn_partial_singular: false,
     }
 }
 

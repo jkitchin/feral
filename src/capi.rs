@@ -58,6 +58,14 @@ pub struct FeralSolver {
 ///     pivots toward the IPM's expected inertia and cuts
 ///     PDPerturbationHandler δ_w escalation cost on problems like
 ///     rocket_12800.
+///   - `FERAL_WARN_PARTIAL_SINGULAR` = `1`/`on`/`true`/`yes` — opt
+///     into a one-line stderr `warning:` whenever MC64 matching
+///     leaves variables unmatched (`ScalingInfo::PartialSingular`).
+///     Off by default (issue #43): `PartialSingular` is routine and
+///     benign for IPM hosts that factorize structurally rank-
+///     deficient KKT systems every iteration, so feral stays quiet
+///     as a library should. On the Rust API the same fact is
+///     always available structurally via `Solver::scaling_info`.
 #[no_mangle]
 pub extern "C" fn feral_new() -> *mut FeralSolver {
     catch_unwind(|| {
@@ -89,6 +97,12 @@ pub extern "C" fn feral_new() -> *mut FeralSolver {
                     np.static_pivot_threshold = Some(v);
                 }
             }
+        }
+        if matches!(
+            std::env::var("FERAL_WARN_PARTIAL_SINGULAR").as_deref(),
+            Ok("1") | Ok("on") | Ok("true") | Ok("yes"),
+        ) {
+            np.warn_partial_singular = true;
         }
 
         let mut solver = Solver::with_params(np, SupernodeParams::default());

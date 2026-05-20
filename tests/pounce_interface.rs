@@ -461,6 +461,7 @@ fn solver_identity_scaling() -> Solver {
         min_parallel_flops: None,
         sqd_mode: false,
         static_pivot_threshold: None,
+        warn_partial_singular: false,
     };
     Solver::with_params(np, SupernodeParams::default())
 }

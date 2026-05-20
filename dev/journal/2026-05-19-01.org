@@ -339,3 +339,41 @@ commits and reading CI logs ("CI volleyball").
 
 Lesson: do not assume the symmetric x86 value of a cross-arch report
 -- read the CI log. The user's questions caught this before commit.
+
+* 09:30 :issue-43:log-hygiene:capi:
+Issue #43 -- the MC64 partial-singular stderr breadcrumb floods host
+logs. Three numeric-driver sites in src/numeric/factorize.rs
+(dense_fast_factor ~1250, sequential supernodal ~1693, parallel
+supernodal ~2575) printed "warning: MC64 matching left N of M
+variables unmatched" unconditionally on ScalingInfo::PartialSingular.
+For an IPM host (pounce, ipopt-feral) that factorizes a structurally
+rank-deficient KKT on the first attempt of most iterations, that is
+one stderr line per iteration for behavior that is expected and
+recovered downstream.
+
+Fix: opt-in gate. Added NumericParams.warn_partial_singular: bool
+(default false), gating all three eprintln! sites on
+`if params.warn_partial_singular`. Surfaced it as
+Solver::with_partial_singular_warning(on) builder and the
+FERAL_WARN_PARTIAL_SINGULAR=1 C-ABI env var (capi.rs feral_new,
+mirrors the FERAL_CASCADE_BREAK matches! pattern). The same fact stays
+available structurally via Solver::scaling_info() and as a count via
+Solver::mc64_fallback_count() -- so nothing is lost, the stderr line
+was never the only channel.
+
+Considered and rejected the `log`/`tracing` crate route: that is a
+new core dependency and would need a decisions.md entry; the existing
+house precedent (FERAL_FACTOR_TRACE / the [sn-trace] eprintln) is
+opt-in env-gated diagnostics with no logging framework, so this
+matches. Default-off is the library-correct choice: feral is a
+library and should be quiet unless asked.
+
+Mechanical cost: NumericParams gained a field, so every full struct
+literal broke. `cargo build --all-targets` found exactly 14 literal
+sites (6 in src/, the rest tests/bins); files using
+`..NumericParams::default()` spread or the with_bk constructor were
+unaffected. All fixed with `warn_partial_singular: false`.
+
+Evidence: cargo test --lib 281 passed (was 280, +1 for the new
+partial_singular_warning_default_off_and_builder_toggles test); full
+cargo test exit 0; cargo clippy --all-targets -- -D warnings exit 0.

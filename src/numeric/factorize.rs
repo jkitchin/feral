@@ -235,6 +235,25 @@ pub struct NumericParams {
     /// See `dev/research/static-pivot-perturbation-2026-05-17.md`
     /// and `dev/journal/2026-05-17-01.org` §16:30 / §17:10.
     pub static_pivot_threshold: Option<f64>,
+
+    /// When `true`, the numeric drivers emit a one-line stderr
+    /// `warning:` whenever MC64 matching leaves variables unmatched
+    /// (`ScalingInfo::PartialSingular`) and scaling falls back to
+    /// identity on those rows/columns. Default `false`.
+    ///
+    /// `PartialSingular` is routine and benign for IPM hosts, which
+    /// factorize structurally rank-deficient KKT systems on the first
+    /// attempt of most iterations; an unconditional stderr write
+    /// floods host logs for behavior that is expected and recovered
+    /// downstream. The same information is always available
+    /// structurally via `Solver::scaling_info()` (and as a count via
+    /// `Solver::mc64_fallback_count` for the `Auto`-fallback case),
+    /// so the stderr line is an opt-in diagnostic breadcrumb, not a
+    /// correctness signal. Default `false` keeps feral quiet as a
+    /// library should be; enable it via
+    /// `Solver::with_partial_singular_warning(true)` or the
+    /// `FERAL_WARN_PARTIAL_SINGULAR` env var (C ABI). Issue #43.
+    pub warn_partial_singular: bool,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -504,6 +523,13 @@ impl Default for NumericParams {
             // call via `Solver::with_static_pivot_threshold(t)` or via
             // the `FERAL_STATIC_PIVOT=<float>` env var (C ABI path).
             static_pivot_threshold: None,
+            // Issue #43: the MC64 partial-singular notice is a
+            // routine, benign condition for IPM hosts. Default `false`
+            // keeps the library quiet; the structured signal is always
+            // on `Solver::scaling_info()`. Enable via
+            // `Solver::with_partial_singular_warning(true)` or
+            // `FERAL_WARN_PARTIAL_SINGULAR` (C ABI).
+            warn_partial_singular: false,
         }
     }
 }
@@ -530,6 +556,8 @@ impl NumericParams {
             min_parallel_flops: None,
             sqd_mode: false,
             static_pivot_threshold: None,
+            // Quiet by default — see `Default::default()` and #43.
+            warn_partial_singular: false,
         }
     }
 }
@@ -1219,12 +1247,14 @@ pub fn dense_fast_factor_with_workspace(
     // dense-native KR iteration over `sym`; other strategies use
     // the sparse `compute_scaling` path.
     let (scaling, scaling_info) = compute_scaling_dense_fast(matrix, &sym, &params.scaling)?;
-    if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
-        eprintln!(
-            "warning: MC64 matching left {} of {} variables unmatched; \
-             scaling is identity on those rows/columns",
-            n_unmatched, n
-        );
+    if params.warn_partial_singular {
+        if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
+            eprintln!(
+                "warning: MC64 matching left {} of {} variables unmatched; \
+                 scaling is identity on those rows/columns",
+                n_unmatched, n
+            );
+        }
     }
 
     // Apply D · A · D in place on the dense buffer.
@@ -1660,18 +1690,21 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // instead of a second Hungarian.
     let (scaling_user, scaling_info) =
         compute_scaling_with_cache(matrix, &params.scaling, symbolic.cached_mc64.as_ref())?;
-    if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
-        // No project-wide logging framework yet; mirror the Phase 1
-        // convention of eprintln! for unusual diagnostics so this is
-        // visible in bench output without being a hard failure.
-        // Structurally singular matrices are allowed to proceed —
-        // they typically surface the issue as a zero pivot during
-        // numeric factorization, the right layer to reject.
-        eprintln!(
-            "warning: MC64 matching left {} of {} variables unmatched; \
-             scaling is identity on those rows/columns",
-            n_unmatched, n
-        );
+    // `PartialSingular` is routine for IPM hosts factorizing
+    // structurally rank-deficient KKT systems; structurally singular
+    // matrices are allowed to proceed — they typically surface the
+    // issue as a zero pivot during numeric factorization, the right
+    // layer to reject. The stderr breadcrumb is opt-in (#43): default
+    // off so feral stays quiet as a library; the same fact is always
+    // available structurally via `Solver::scaling_info()`.
+    if params.warn_partial_singular {
+        if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
+            eprintln!(
+                "warning: MC64 matching left {} of {} variables unmatched; \
+                 scaling is identity on those rows/columns",
+                n_unmatched, n
+            );
+        }
     }
     // Pivot-order cache of `scaling_user`: for each pivot index k,
     // `scaling_pivot_order[k] == scaling_user[symbolic.perm[k]]`.
@@ -2539,12 +2572,14 @@ pub fn factorize_multifrontal_supernodal_parallel(
     let t_phase = telemetry.map(|_| std::time::Instant::now());
     let (scaling_user, scaling_info) =
         compute_scaling_with_cache(matrix, &params.scaling, symbolic.cached_mc64.as_ref())?;
-    if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
-        eprintln!(
-            "warning: MC64 matching left {} of {} variables unmatched; \
-             scaling is identity on those rows/columns",
-            n_unmatched, n
-        );
+    if params.warn_partial_singular {
+        if let crate::scaling::ScalingInfo::PartialSingular { n_unmatched } = &scaling_info {
+            eprintln!(
+                "warning: MC64 matching left {} of {} variables unmatched; \
+                 scaling is identity on those rows/columns",
+                n_unmatched, n
+            );
+        }
     }
     let scaling_pivot_order: Vec<f64> =
         symbolic.perm.iter().map(|&old| scaling_user[old]).collect();
@@ -3521,6 +3556,7 @@ mod tests {
             min_parallel_flops: None,
             sqd_mode: false,
             static_pivot_threshold: None,
+            warn_partial_singular: false,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
@@ -3535,6 +3571,7 @@ mod tests {
             min_parallel_flops: None,
             sqd_mode: false,
             static_pivot_threshold: None,
+            warn_partial_singular: false,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
@@ -3592,6 +3629,7 @@ mod tests {
             min_parallel_flops: None,
             sqd_mode: false,
             static_pivot_threshold: None,
+            warn_partial_singular: false,
         };
         let infnorm = NumericParams {
             scaling: ScalingStrategy::InfNorm,
@@ -4097,6 +4135,7 @@ mod tests {
             min_parallel_flops: None,
             sqd_mode: false,
             static_pivot_threshold: None,
+            warn_partial_singular: false,
         };
 
         let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];

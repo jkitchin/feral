@@ -3759,3 +3759,45 @@ References:
 - Issue #42 — `rankdef_10_3` both-arch consensus miss (opened by this
   work, once the CI log showed the divergence is not cross-arch).
 - Issue #41 — sign-fallback vs `ICNTL(24)=1`; resolved by this rule.
+
+---
+
+## 2026-05-20 — MC64 partial-singular warning is opt-in, default off (#43)
+
+Decision: the `warning: MC64 matching left N of M variables unmatched`
+stderr line emitted by the three numeric drivers on
+`ScalingInfo::PartialSingular` is gated behind a new
+`NumericParams::warn_partial_singular` flag that defaults to `false`.
+feral prints nothing for `PartialSingular` unless the host opts in.
+
+Rationale: `PartialSingular` is routine and benign for the primary
+consumers of feral — IPM hosts (pounce, ipopt-feral) factorize
+structurally rank-deficient KKT systems on the first attempt of most
+iterations. An unconditional stderr write is then one warning line per
+IPM iteration for behavior that is expected and downstream-recovered,
+which buries genuine diagnostics in host logs. A library should be
+quiet unless asked; `PartialSingular` is not an error, it is a state.
+
+The information is not lost: it remains available structurally via
+`Solver::scaling_info()` and as a count via
+`Solver::mc64_fallback_count()`. The stderr line was always a
+convenience breadcrumb, never the only channel, so gating it off by
+default removes no capability.
+
+Alternative considered and rejected: adopt the `log` or `tracing`
+crate so the host controls verbosity through a standard facade. That
+introduces a new dependency into the core solver and would itself need
+a decision entry; it is disproportionate to one warning line. The
+house precedent is opt-in env-gated diagnostics with no logging
+framework (`FERAL_FACTOR_TRACE`, the `[sn-trace]` eprintln), and this
+change follows it: a `Solver::with_partial_singular_warning(bool)`
+builder plus a `FERAL_WARN_PARTIAL_SINGULAR` C-ABI env var. If a
+project-wide logging facade is ever adopted, that is a separate,
+larger decision and this flag folds into it cleanly.
+
+References:
+- `src/numeric/factorize.rs` — `NumericParams::warn_partial_singular`,
+  the three gated `eprintln!` sites.
+- `src/numeric/solver.rs` — `Solver::with_partial_singular_warning`.
+- `src/capi.rs` — `FERAL_WARN_PARTIAL_SINGULAR` env var in `feral_new`.
+- Issue #43.
