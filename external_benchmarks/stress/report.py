@@ -125,17 +125,17 @@ def expected_zero(row: dict) -> int | None:
 # Format: matrix_name -> (issue_url_or_number, reason).
 ALLOWLIST: dict[str, tuple[str, str]] = {
     "saddle_rankdef_50_10_3": (
-        "#28",
+        "#40",
         "x86/aarch64 BK-pivot divergence on borderline rank-deficient saddle. "
         "Local aarch64 returns inertia (50,39,1) -- detects 1 zero pivot. "
         "CI x86 returns (52,38,0) -- absorbs the null mode into a normal "
         "pivot. Both factors are numerically valid (rel_res < 1e-14); the "
         "rankdef detection is exactly the borderline case the classify() "
         "comment notes MUMPS itself misses on similar matrices. Allowlist "
-        "until the cross-arch BK pivot path is hardened (separate issue).",
+        "until the cross-arch BK pivot path is hardened.",
     ),
     "rankdef_5_2": (
-        "#28",
+        "#40",
         "Cross-arch BK-pivot divergence, exposed by the #39 F-01 band "
         "widening (2026-05-17). probe_f01.rs on aarch64 finds 1 "
         "strict-zero pivot (|d| = 9.3e-17, below EPS) -> inertia "
@@ -146,7 +146,7 @@ ALLOWLIST: dict[str, tuple[str, str]] = {
         "deterministic every-arch F-01 flip of the #39 entries below.",
     ),
     "rankdef_50_5": (
-        "#28",
+        "#40",
         "Cross-arch BK-pivot divergence, exposed by the #39 F-01 band "
         "widening (2026-05-17). CI x86 reports (26,24,0), zero=0; "
         "MUMPS (ICNTL(24)=1) itself reports zero=0 on this matrix "
@@ -157,12 +157,12 @@ ALLOWLIST: dict[str, tuple[str, str]] = {
         "the synthetic construction label, not the MUMPS oracle.",
     ),
     "rankdef_exact_50_5": (
-        "#28",
+        "#40",
         "Cross-arch BK-pivot divergence, exposed by the #39 F-01 band "
         "widening (2026-05-17). CI x86 reports (24,26,0), zero=0; "
         "probe_f01.rs on aarch64 finds 1 strict-zero pivot -> zero=1. "
         "Factor numerically valid (rel_res < 1e-14). Same x86/aarch64 "
-        "BK divergence class as saddle_rankdef_50_10_3 (#28).",
+        "BK divergence class as saddle_rankdef_50_10_3 (#40).",
     ),
     "rankdef_exact_100_10": (
         "#39",

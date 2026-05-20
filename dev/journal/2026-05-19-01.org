@@ -90,3 +90,26 @@ names rankdef_50_5 as a known MUMPS-zero=0 matrix yet still flags it
 -- the gate's expected_zero for that matrix is arguably wrong and
 should be corrected rather than allowlisted. And #28 is now a
 4-matrix divergence; the issue should be updated to track the scope.
+
+* 22:40 :ci:stress-smoke:allowlist:issue-tracking:
+Investigated the two follow-ups. Correction: #28 is CLOSED and is the
+M5 milestone "wire stress-suite smoke into CI" -- a placeholder, not a
+bug tracker. The ALLOWLIST contract says "remove the entry when the
+issue closes", so all four #28 citations (saddle_rankdef_50_10_3 plus
+tonight's three) violated it. The saddle entry's own reason text even
+said "(separate issue)" -- the original author knew #28 was wrong.
+
+Fix: opened #40 "Cross-arch BK-pivot divergence on borderline
+rank-deficient matrices" (label bug), documenting the x86/aarch64
+EPS-straddle, the four affected matrices, evidence, root cause (BK
+pivot selection is not bitwise-portable: FMA/SIMD reduction order
+differs), and the real fix (portable reduction order or a band wide
+enough that FMA-scale perturbations cannot flip the decision).
+Re-pointed all four ALLOWLIST entries #28 -> #40; dropped the stale
+"(separate issue)" phrase from the saddle entry. report.py syntax OK,
+EXIT=0, flagged=0; saddle_rankdef_50_10_3 shows ALLOWLISTED(#40).
+
+Follow-up 1 (rankdef_50_5 expected_zero is the gate's bug, not
+feral's) NOT done -- it relaxes a gate criterion, so it waits on user
+sign-off plus a re-run of the MUMPS ICNTL(24)=1 oracle to confirm
+zero=0 before baking the value into classify().
