@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-20T01:22:41Z
+Generated: 2026-05-20T01:38:05Z
 
 ## Latest Session
 File: dev/sessions/2026-05-19-01.md
@@ -59,11 +59,11 @@ perturbation handler can threshold.
 
 ## Git Status
 ```
+40b5612 fix(stress): allowlist 3 #28 cross-arch BK-pivot divergences
+8298d7b chore(session): 2026-05-19-01 -- near-singularity signal min|λ(D)|
 f6640eb feat(capi): feral_min_pivot / feral_max_pivot near-singularity ABI
 cb03009 feat(numeric): min/max pivot magnitude near-singularity signal
 5b81db0 docs(research): plan near-singularity signal (min|λ(D)|)
-acd3300 chore(context): refresh dev/context.md for v0.4.0 + F-01 fix
-c7471ce fix(dense): F-01 sign-fallback closes FBRAIN3LS_0839 inertia outlier (#39)
 ```
 
 ## Test Status
