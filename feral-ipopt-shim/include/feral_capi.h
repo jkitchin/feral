@@ -43,6 +43,16 @@ int feral_solve(FeralSolver* s, int nrhs, double* rhs);
 /* Query. */
 int feral_num_neg(const FeralSolver* s);
 
+/* Near-singularity signal — the analog of MA57's CNTL(2) small-pivot
+ * threshold. feral_min_pivot returns min|lambda(D)|, the smallest
+ * accepted pivot magnitude over every 1x1/2x2 D block; feral_max_pivot
+ * returns the largest. Both return -1.0 when no factor is available or
+ * s is NULL. A perturbation handler thresholds the scale-free ratio
+ * feral_min_pivot / feral_max_pivot to detect a near-singular system
+ * even when feral_num_neg reports the correct inertia. */
+double feral_min_pivot(const FeralSolver* s);
+double feral_max_pivot(const FeralSolver* s);
+
 #ifdef __cplusplus
 }
 #endif

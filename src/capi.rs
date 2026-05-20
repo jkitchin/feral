@@ -396,6 +396,53 @@ pub unsafe extern "C" fn feral_num_neg(s: *const FeralSolver) -> i32 {
     .unwrap_or(-1)
 }
 
+/// Smallest accepted pivot magnitude `min|λ(D)|` of the most recently
+/// factored matrix — FERAL's near-singularity signal, the analog of
+/// MA57's `CNTL(2)` small-pivot threshold. Returns `-1.0` when no
+/// factor is available or `s` is null (a magnitude is non-negative by
+/// construction, so a negative return is an unambiguous "no value").
+///
+/// An IPM perturbation handler thresholds `feral_min_pivot(s) /
+/// feral_max_pivot(s)` — a scale-free ratio ≈ 1/κ(D) — to decide
+/// whether to treat the factor as singular and bump its Hessian
+/// perturbation, even when `feral_num_neg` reports the correct
+/// inertia. See `dev/research/near-singularity-signal.md`.
+///
+/// # Safety
+/// `s` must come from `feral_new`.
+#[no_mangle]
+pub unsafe extern "C" fn feral_min_pivot(s: *const FeralSolver) -> f64 {
+    if s.is_null() {
+        return -1.0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: caller contract.
+        let s = &*s;
+        s.solver.min_pivot_magnitude().unwrap_or(-1.0)
+    }))
+    .unwrap_or(-1.0)
+}
+
+/// Largest accepted pivot magnitude `max|λ(D)|` of the most recently
+/// factored matrix. Returns `-1.0` when no factor is available or `s`
+/// is null. Pair with [`feral_min_pivot`] to form the scale-free
+/// near-singularity ratio. See `dev/research/near-singularity-signal.md`.
+///
+/// # Safety
+/// `s` must come from `feral_new`.
+#[no_mangle]
+pub unsafe extern "C" fn feral_max_pivot(s: *const FeralSolver) -> f64 {
+    if s.is_null() {
+        return -1.0;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: caller contract.
+        let s = &*s;
+        s.solver.max_pivot_magnitude().unwrap_or(-1.0)
+    }))
+    .unwrap_or(-1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +516,64 @@ mod tests {
             match prior {
                 Some(v) => std::env::set_var("FERAL_REFINE", v),
                 None => std::env::remove_var("FERAL_REFINE"),
+            }
+        }
+    }
+
+    /// `feral_min_pivot` / `feral_max_pivot` — the near-singularity
+    /// signal. Before any factor both return the `-1.0` sentinel. After
+    /// factoring the 2×2 indefinite `[[1,2],[2,1]]` (eigenvalues 3, -1)
+    /// under forced identity scaling, the D block is that 2×2 itself,
+    /// so `min|λ(D)| = 1` and `max|λ(D)| = 3`. Oracle is hand
+    /// calculation, external to the implementation.
+    #[test]
+    fn capi_min_max_pivot() {
+        let prior = std::env::var("FERAL_SCALING").ok();
+        // SAFETY: single-threaded test sets a process-wide env var,
+        // restored before exit. Identity scaling is benign for any
+        // other capi test that races this window.
+        unsafe {
+            std::env::set_var("FERAL_SCALING", "identity");
+
+            let s = feral_new();
+            assert!(!s.is_null());
+
+            // No factor yet → sentinel.
+            assert!(feral_min_pivot(s) < 0.0, "expected sentinel pre-factor");
+            assert!(feral_max_pivot(s) < 0.0, "expected sentinel pre-factor");
+
+            let ia: [i32; 3] = [0, 2, 3];
+            let ja: [i32; 3] = [0, 1, 1];
+            assert_eq!(
+                feral_set_structure(s, 2, 3, ia.as_ptr(), ja.as_ptr()),
+                FERAL_SUCCESS
+            );
+            let vp = feral_values_ptr(s);
+            std::ptr::copy_nonoverlapping([1.0_f64, 2.0, 1.0].as_ptr(), vp, 3);
+            assert_eq!(feral_factor(s, 0, 0), FERAL_SUCCESS);
+
+            let min_p = feral_min_pivot(s);
+            let max_p = feral_max_pivot(s);
+            assert!(
+                (min_p - 1.0).abs() < 1e-12,
+                "min|λ(D)|: expected 1.0, got {}",
+                min_p
+            );
+            assert!(
+                (max_p - 3.0).abs() < 1e-12,
+                "max|λ(D)|: expected 3.0, got {}",
+                max_p
+            );
+
+            feral_free(s);
+
+            // Null handle → sentinel.
+            assert!(feral_min_pivot(std::ptr::null()) < 0.0);
+            assert!(feral_max_pivot(std::ptr::null()) < 0.0);
+
+            match prior {
+                Some(v) => std::env::set_var("FERAL_SCALING", v),
+                None => std::env::remove_var("FERAL_SCALING"),
             }
         }
     }

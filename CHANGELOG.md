@@ -4,6 +4,21 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — near-singularity signal (`min|λ(D)|`)
+
+`Solver::min_pivot_magnitude` / `max_pivot_magnitude` (and the
+underlying `SparseFactors` methods) report the smallest and largest
+accepted pivot magnitude over every 1×1/2×2 D block — FERAL's analog
+of MA57's `CNTL(2)` small-pivot threshold. The C ABI exposes them as
+`feral_min_pivot` / `feral_max_pivot` (returning `-1.0` when no factor
+is available). An IPM perturbation handler thresholds the scale-free
+ratio `min/max ≈ 1/κ(D)` to bump its Hessian perturbation on KKT
+systems that are near-singular but land on the correct inertia — where
+FERAL's `ZeroPivotAction::ForceAccept` force-accepts the pivot and an
+inertia-only signal is silent. Computed for free in a pass mirroring
+the existing `min_diagonal()`; no factorization/solve behavior change.
+Rationale in `dev/research/near-singularity-signal.md`.
+
 ### Fixed — F-01 sign-fallback closes FBRAIN3LS_0839 inertia outlier ([#39][i39])
 
 Bunch-Kaufman pivots whose magnitude lands in the F-01
