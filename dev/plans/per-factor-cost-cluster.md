@@ -4,8 +4,12 @@
 **pivoted off** 2026-05-21 — the cache is correct and tested but has
 no measured corpus payoff (gate metric confounded by the IPM δ
 trajectory; MC64 is <2 % of factor cost vs the iter 6-9 blowup). See
-`decisions.md` / `tried-and-rejected.md` 2026-05-21. Effort moves to
-**Track A** (the delayed-pivot cascade — the actual 98 % cost).
+`decisions.md` / `tried-and-rejected.md` 2026-05-21. Effort moved to
+**Track A**. A1 done 2026-05-21 (pinene cascade characterized — see
+below). A2 reframed 2026-05-21: it is the issue #46 zero-(2,2)-block
+cascade, and the fix is extending the matching-aware kernel, not
+arming CB (CB gives 100× but corrupts inertia). A2 is the next
+implementation task.
 **Date:** 2026-05-21
 **Research note:** `dev/research/per-factor-cost-cluster-2026-05-21.md`
 (see §10 for the B1 findings that revise this plan)
@@ -93,39 +97,73 @@ regressions. Update `REPORT-vs-plato.md`.
 
 ---
 
-## Track A — proactive cascade-break (Mechanism A)
+## Track A — pinene zero-(2,2)-block cascade (Mechanism A)
 
-`CB=on` already collapses the `robot`/`marine` spikes ~10×. The defect
-is that `Solver::with_auto_cascade_break` is *reactive* — it arms
-factor N+1 from factor N's delayed count, so the first cascade in a
-trajectory is never prevented (`robot` iter 1, `marine` iter 9).
+**Reframed 2026-05-21 by the A1/A2 investigation (session 2026-05-21-01).**
+The `pinene_3200` iter 6-9 blowup — 493.9 s replay, 98 % of wall — is
+the **issue #46 zero-(2,2)-block delayed-pivot cascade**, not a
+generic spike that a proactive CB arm would fix.
 
-### A1 — delayed-pivot trace (instrumentation, also serves arki + NARX)
+### A1 — pinene cascade characterized — DONE
 
-Expose per-factor `sum_delayed` / `max_delayed` from the `Solver`
-result (today only `capi.rs`'s `FERAL_FACTOR_TRACE` env path sees it).
-This both (a) lets a proactive arm decide and (b) gives the
-delayed-pivot count needed to finish classifying `arki0003` (research
-note §6) and `NARX_CFy` (#44 — research note §10.3: loop-dominated,
-449 fronts with nrow>128 up to nrow=1877 ncol=77, value-dependent
-across IPM iters). NARX's large fronts are consistent with
-delayed-pivot accumulation; A1's trace confirms or refutes that
-before A2's lever is chosen.
+`diag_pinene_pivot_cliff` on iterates 0008/0009 (n=127995): the factor
+builds a **fully dense ~17.5k×17.5k root front** (node 10486, ~14 % of
+n; `nelim = nrow`), ~91 % of root columns in 2×2 pivots, fed by
+133 648 delayed pivots. The three supernodes below the root are
+~3.8k–18k columns wide but eliminate only 4 / 11 / 493 columns — pure
+delay conduits. The cascade worsens monotonically as the IPM drives
+δ_c→0 (root 15446→17538, `nnz_L` 128.5M→165.7M across two iters).
 
-### A2 — make the arm proactive
+### A2 — make bounded-Δ cascade-break inertia-exact — THE REAL FIX
 
-Options, in preference order:
+`CB=on` (forced `cascade_break(0.5, eps=1e-10)` every factor) gives a
+**100× speedup** on pinene — 493.9 s → 4.86 s, iter 6-9 fronts from
+64-208 s to ~45 ms. **But iter 9 returns `WrongInertia`** (got
+63999/63995/**1**, want .../0): the `PerturbToEps` absolute floor
+1e-10 is below the inertia zero-tolerance, so a force-accepted
+near-zero pivot still classifies as zero on the most-converged
+iterate. This is the *same* inadmissibility issue #46 already recorded
+for its `allow_delayed_pivots=false` control ("breaks the cascade but
+gets the inertia wrong … not an admissible fix").
 
-1. **Symbolic arm** — `dev/research/issue-15-cascade-break-symbolic-arm.md`
-   already explored arming cascade-break from symbolic structure
-   (arrow/saddle KKT shape) rather than from a prior factor. Pick this
-   up: if the symbolic phase flags a cascade-prone structure, arm CB
-   from iter 0.
-2. **Arm-from-iter-0 heuristic** — start armed, disarm once a factor
-   completes with low delayed count. Cheaper to implement, looser.
+So A2 is **not** "arm CB by default" (the symbolic arm was already
+disproved in `warm-state-cascade-amplification-2026-05-17.md`; and an
+armed CB that corrupts inertia is inadmissible regardless of *when* it
+arms). The #46 kernel fix (matching-aware 2×2 partner in
+`scalar_pivot_step`) is already in pinene's production path
+(`preproc=LdltCompress` confirmed) yet pinene still cascades — so #46
+did not fully cover pinene. A2 must:
 
-Cross-check against `dev/research/cascade-break.md` and
-`warm-state-cascade-amplification-2026-05-17.md` before choosing.
+1. **Localized — DONE 2026-05-21.** `probe_issue46_supernode
+   pinene_3200_0009.mtx`: co-location is good (93.9 % of MC64 pairs
+   adjacent, symbolic estimate 2.4M), so #46's gaps A/B are clear.
+   The production path cascades anyway — `panel_diag` dominant
+   fallback **`fallback_2x2_need_swap_or_bound = 31542`** (the *same*
+   fallback that was #46's CHO culprit). #46 widened the 2×2
+   *search* so the kernel finds the co-located partner `k+1`; on
+   pinene the partner *is* found but the `{k,k+1}` 2×2 candidate is
+   then **rejected at the numerical stability gate** → delayed →
+   cascade. Static pivoting force-accepts the same columns as 1×1,
+   which is fast (52 ms, 1.25×) but wrong by one sign
+   (inertia 64001/63994 vs 64000/63995).
+2. **Fix the 2×2 stability gate for saddle pivots.** Read the
+   `fallback_2x2_need_swap_or_bound` path in `src/dense/factor.rs`
+   (`scalar_pivot_step` and the panel inline-2×2). A genuine saddle
+   2×2 `[[0,b],[b,a]]` has `det = -b² < 0` — a legitimate indefinite
+   pivot (one +, one −), inertia-exact by construction. Find why
+   pinene's saddle 2×2s fail the swap-or-bound check and admit them.
+   This is the correct fix vs. CB's perturb-and-hope. **Correctness-
+   critical** — write a research note first, tests-first, oracle from
+   the saddle-point inertia theorem (Benzi/Golub/Liesen 2005 §3.4),
+   exactly as #46 did.
+3. **If a residual cascade remains**, make bounded-Δ CB inertia-exact:
+   scale `cascade_break_eps` by `||A||_∞` (the factorize.rs:2206-2209
+   comment already prescribes this and neither `CB=1` nor the auto-CB
+   path at solver.rs:638 does it) so the perturbation clears the
+   zero-tolerance, and sign the perturbation to preserve inertia.
+
+Cross-check: `dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md`
+(the #46 fix), `dev/research/cascade-break.md`.
 
 ### A3 — validation
 

@@ -342,12 +342,83 @@ cascade worsens monotonically across IPM iters (root 15446 -> 17538,
 nnz_L 128.5M -> 165.7M, +29%) because δ shrinks each iteration.
 
 Fix lever: cascade-break — force-accept pivots LOW in the tree so
-they stop delaying into the root. Open A2 question: default auto-CB
-(AUTO_CB=0.05) should arm — root delays 17433 >> 0.05*n=6400 — yet
-the warm replay (§19:30) still explodes. Either the pinene pattern
-fingerprint changes between IPM iters (resetting auto-CB state, as
-it provably does on rocket) or bounded-Δ PerturbToEps does not
-break THIS cascade. Next session: measure pinene under explicit
-CB=on and trace the auto-CB arm state. Cross-ref the issue #46 fix
-(session 2026-05-20-03) — same zero-(2,2)-block cascade, smaller
-KKT; check whether its fix path transfers.
+they stop delaying into the root.
+
+* 21:25 :perf:trackA:pinene:cb-experiment:result:
+Ran CB=1 probe_kkt_replay pinene_3200 (forced cascade-break every
+call, ratio=0.5 eps=1e-10). Decisive:
+
+| iter  | default | CB=1   |
+|-------+---------+--------|
+| 6     |  64.8 s | 0.042s |
+| 7     |  77.8 s | 0.044s |
+| 8     | 135.7 s | 0.044s |
+| 9     | 208.2 s | 0.047s |
+| TOTAL | 493.9 s | 4.86 s |
+
+Cascade-break IS the fix for speed — a 100× whole-replay speedup,
+the iter 6-9 fronts collapse from 64-208 s to ~45 ms. CB genuinely
+breaks this cascade (contradicts the §20:55 worry that bounded-Δ
+PerturbToEps might not).
+
+BUT: iter 9 returns WrongInertia — got 63999/63995/1, want
+64000/63995/0. One spurious zero eigenvalue. iters 6-8 are
+inertia-correct under CB; only iter 9 (the most IPM-converged,
+smallest δ) fails. Mechanism: cascade-break force-accepts a pivot
+BK wanted to delay; that pivot is genuinely ≈0 at its supernode;
+PerturbToEps{abs_floor:1e-10} bumps it to ±1e-10, but if the
+inertia zero-tolerance exceeds 1e-10 the perturbed pivot still
+classifies as zero. The eps is an ABSOLUTE floor (factorize.rs
+:2206-2209 explicitly says "callers should pre-multiply by
+||A||_∞") and neither CB=1 nor the auto-CB path (solver.rs:638)
+scales it — raw 1e-10. So bounded-Δ CB trades the cascade for an
+inertia error on near-singular iterates.
+
+Track A2 is therefore NOT "arm CB by default" — it is "make
+bounded-Δ cascade-break inertia-exact". The perturbation must be
+(a) larger than the inertia zero-tolerance so the pivot classifies
+as nonzero, and (b) signed to match the true eigenvalue. This is
+the issue #46 / kkt-zero-2x2-block-cascade territory — check
+whether the #46 fix (session 2026-05-20-03) already produced an
+inertia-exact cascade path before designing a new one.
+
+* 21:55 :perf:trackA:pinene:issue46-probe:rootcause:
+Ran probe_issue46_supernode on pinene_3200_0009.mtx (it takes a
+<kkt.mtx> arg). Configs 1+2 are decisive; config 3 (None preproc)
+was killed at 25 min — its cascade is far worse and not needed.
+
+Config 1 — LdltCompress, delayed (THE PRODUCTION PATH):
+  numeric 159 s | factor_nnz 165.7M | blowup 69.5x
+  inertia (64000,63995,0) CORRECT | n_delayed 133648
+  panel_diag: fallback_2x2_need_swap_or_bound=31542  <-- dominant
+              (of panel_partial=32138), scalar_tail_steps=16125,
+              pivots_scalar=88179, pivots_inline=25533,
+              inline_2x2_swap_ok=4462
+
+Config 2 — LdltCompress, static (allow_delayed_pivots=false):
+  numeric 52 ms | factor_nnz 2.99M | blowup 1.25x | n_delayed 0
+  inertia (64001,63994,0) WRONG (want 64000,63995,0)
+  panel_diag: fallback_2x2_need_swap_or_bound=29773
+
+Co-location is GOOD: 60122/63995 = 93.9% of MC64 pairs land at
+adjacent columns (CHO was 96.6%); symbolic factor_nnz_estimate is
+only 2.4M. So #46's gaps A (ordering) and B (supernode split) are
+both clear on pinene — same as CHO.
+
+ROOT CAUSE — a gap BEYOND #46. #46 widened the 2×2 *search* so the
+kernel FINDS the co-located saddle partner k+1. On pinene the
+partner is found, but the {k,k+1} 2×2 candidate is then REJECTED
+at the numerical stability gate: fallback_2x2_need_swap_or_bound
+fires 31542 times — the SAME fallback name that was #46's CHO
+culprit (14584 there). With may_delay=true those 31542 rejected
+2×2s delay → the 133648-pivot, 69× cascade (correct inertia, slow).
+With static, the same columns force-accept as 1×1 → fast (52 ms,
+1.25x) but ONE saddle pivot gets the wrong sign → inertia
+(64001,63994,0). A genuine saddle 2×2 [[0,b],[b,a]] has det
+-b²<0 — a legit indefinite pivot (one +, one −) — so it SHOULD
+pass the gate. The next step is to read the
+fallback_2x2_need_swap_or_bound path in src/dense/factor.rs and
+find why pinene's legitimate saddle 2×2s fail the swap-or-bound
+check. That kernel change — not CB, not arming — is the A2 fix.
+It is correctness-critical: research note + tests-first, oracle
+from the saddle-point inertia theorem (as #46 did).
