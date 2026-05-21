@@ -200,11 +200,18 @@ fn main() {
         false,
         &pairs,
     );
-    run(
-        "None, delayed",
-        &csc,
-        OrderingPreprocess::None,
-        true,
-        &pairs,
-    );
+    // Config 3 (`None` preprocessing) cascades far worse than the
+    // production `LdltCompress` path and can run >25 min on a large
+    // KKT; it is not the production path. Opt in with `PROBE_ALL=1`.
+    if std::env::var("PROBE_ALL").is_ok() {
+        run(
+            "None, delayed",
+            &csc,
+            OrderingPreprocess::None,
+            true,
+            &pairs,
+        );
+    } else {
+        println!("(skipping 'None, delayed' — set PROBE_ALL=1 to include it)");
+    }
 }

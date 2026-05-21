@@ -77,6 +77,29 @@ pub mod panel_diag {
     /// 2×2 pivots committed inline at c==0. Counts a successful
     /// `swap_rows_cols(col+1, r)` followed by an inline 2×2 accept.
     pub static INLINE_2X2_SWAP_OK: AtomicU64 = AtomicU64::new(0);
+    /// Track A2 (`dev/plans/per-factor-cost-cluster.md`): scalar 2×2
+    /// candidate delayed (`may_delay`) because the Duff-Reid growth
+    /// bound failed and the SSIDS det floor passed.
+    pub static SCALAR_2X2_DELAY_GROWTH: AtomicU64 = AtomicU64::new(0);
+    /// Track A2: scalar 2×2 candidate delayed (`may_delay`) because the
+    /// SSIDS scale-invariant det floor failed and the growth bound passed.
+    pub static SCALAR_2X2_DELAY_DET: AtomicU64 = AtomicU64::new(0);
+    /// Track A2: scalar 2×2 candidate delayed (`may_delay`) — both the
+    /// Duff-Reid growth bound and the SSIDS det floor failed.
+    pub static SCALAR_2X2_DELAY_BOTH: AtomicU64 = AtomicU64::new(0);
+    /// Track A2: scalar 1×1 candidate delayed (`may_delay`) at the
+    /// column-relative threshold gate in `try_reject_1x1_frontal`. Also
+    /// covers the no-2×2-partner last-resort 1×1 fallback path.
+    pub static SCALAR_1X1_DELAY: AtomicU64 = AtomicU64::new(0);
+    /// Track A2: of the `SCALAR_2X2_DELAY_*` events, those whose 2×2
+    /// block has `det < 0` — an indefinite (saddle-like) pivot, one
+    /// positive / one negative eigenvalue, inertia-exact by construction.
+    pub static SCALAR_2X2_DELAY_NEGDET: AtomicU64 = AtomicU64::new(0);
+    /// Track A2: of the `SCALAR_1X1_DELAY` events, those whose diagonal
+    /// is `|d| <= zero_tol` — a structurally near-zero column (a
+    /// zero-(2,2)-block constraint column that fell through to the
+    /// last-resort 1×1 because no 2×2 partner was found).
+    pub static SCALAR_1X1_DELAY_TINY: AtomicU64 = AtomicU64::new(0);
 
     pub fn reset() {
         for c in [
@@ -91,12 +114,18 @@ pub mod panel_diag {
             &PIVOTS_INLINE,
             &PIVOTS_SCALAR,
             &INLINE_2X2_SWAP_OK,
+            &SCALAR_2X2_DELAY_GROWTH,
+            &SCALAR_2X2_DELAY_DET,
+            &SCALAR_2X2_DELAY_BOTH,
+            &SCALAR_1X1_DELAY,
+            &SCALAR_2X2_DELAY_NEGDET,
+            &SCALAR_1X1_DELAY_TINY,
         ] {
             c.store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
-    pub fn snapshot() -> [(&'static str, u64); 11] {
+    pub fn snapshot() -> [(&'static str, u64); 17] {
         use std::sync::atomic::Ordering::Relaxed;
         [
             ("panel_full", PANEL_FULL.load(Relaxed)),
@@ -122,6 +151,18 @@ pub mod panel_diag {
             ("pivots_inline", PIVOTS_INLINE.load(Relaxed)),
             ("pivots_scalar", PIVOTS_SCALAR.load(Relaxed)),
             ("inline_2x2_swap_ok", INLINE_2X2_SWAP_OK.load(Relaxed)),
+            (
+                "scalar_2x2_delay_growth",
+                SCALAR_2X2_DELAY_GROWTH.load(Relaxed),
+            ),
+            ("scalar_2x2_delay_det", SCALAR_2X2_DELAY_DET.load(Relaxed)),
+            ("scalar_2x2_delay_both", SCALAR_2X2_DELAY_BOTH.load(Relaxed)),
+            ("scalar_1x1_delay", SCALAR_1X1_DELAY.load(Relaxed)),
+            (
+                "scalar_2x2_delay_negdet",
+                SCALAR_2X2_DELAY_NEGDET.load(Relaxed),
+            ),
+            ("scalar_1x1_delay_tiny", SCALAR_1X1_DELAY_TINY.load(Relaxed)),
         ]
     }
 }
@@ -3309,6 +3350,16 @@ fn scalar_pivot_step(
             // column-relative threshold, which triggers the existing
             // ForceAccept path.
             if may_delay {
+                if growth_fail && det_floor_fail {
+                    diag_inc(&panel_diag::SCALAR_2X2_DELAY_BOTH);
+                } else if growth_fail {
+                    diag_inc(&panel_diag::SCALAR_2X2_DELAY_GROWTH);
+                } else {
+                    diag_inc(&panel_diag::SCALAR_2X2_DELAY_DET);
+                }
+                if det < 0.0 {
+                    diag_inc(&panel_diag::SCALAR_2X2_DELAY_NEGDET);
+                }
                 return Ok(PivotStepResult::Delayed);
             }
             if det_floor_fail {
@@ -3468,6 +3519,10 @@ fn try_reject_1x1_frontal(
 
     if d.abs() <= threshold {
         if may_delay {
+            diag_inc(&panel_diag::SCALAR_1X1_DELAY);
+            if d.abs() <= params.zero_tol {
+                diag_inc(&panel_diag::SCALAR_1X1_DELAY_TINY);
+            }
             return Ok(PivotOutcome::Delayed);
         }
         // At the root (may_delay=false) we have no parent to absorb
