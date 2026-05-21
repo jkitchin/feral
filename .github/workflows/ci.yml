@@ -28,6 +28,17 @@ jobs:
       # `#![cfg_attr(not(test), deny(clippy::unwrap_used))]` directive at
       # the top of src/lib.rs, so the clippy step above catches it. No
       # separate grep rule needed.
+      #
+      # The pounce_interface issue-#42 regression test reads the synth
+      # stress fixture matrices/synth/rankdef_10_3.mtx. That tree is
+      # git-ignored (matrices/ holds only generated corpora), so the
+      # fixture must be generated here before `cargo test` — mirrors the
+      # `synth matrices` step in the stress-smoke job. synth.py needs
+      # numpy; the rest of the harness uses only stdlib.
+      - name: synth stress fixtures
+        run: |
+          python3 -m pip install --upgrade pip "numpy>=1.23"
+          python3 external_benchmarks/stress/synth.py
       - name: test
         run: cargo test
       - name: amd-cleanroom
