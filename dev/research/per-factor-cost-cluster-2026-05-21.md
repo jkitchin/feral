@@ -203,3 +203,85 @@ signatures and need separate fixes:
 
 See `dev/plans/per-factor-cost-cluster.md` for the implementation
 plan.
+
+---
+
+## 10. B1 update — prologue sub-phase instrumentation (same session)
+
+Plan step B1 instrumented the prologue sub-phases
+(`PrologueBreakdown` on `Profiler`/`ProfileReport`). The result
+**corrects two claims above** — recorded here rather than editing
+§5/§8 so the reasoning trail is visible.
+
+### 10.1 rocket_12800 — the cost is the MC64 Hungarian
+
+`probe_rocket_profile` prologue breakdown, rocket iter 0
+(prologue = 4152 ms):
+
+| sub-phase            |   wall | % prologue |
+|----------------------|-------:|-----------:|
+| scaling              | 4145.7 ms |   99.8% |
+| permute_csc_values   |    4.8 ms |    0.1% |
+| └ from_triplets      |    3.8 ms |    0.1% |
+| symmetric_pattern    |    1.2 ms |    0.0% |
+| infnorm + null tol   |    0.6 ms |    0.0% |
+| everything else      |  <0.1 ms each |     |
+
+The plan's prime suspect — the `from_triplets` rebuild inside
+`permute_csc_values` — is **exonerated** (3.8 ms). The entire
+Mechanism-B cost is the `scaling` sub-phase.
+
+Drilling one level (`diagnose_scaling`):
+
+```
+pick_scaling_strategy(rocket_12800) -> Mc64Symmetric
+compute_scaling(InfNorm)        =    5.4 ms
+compute_scaling(Mc64Symmetric)  = 4111.3 ms   <- the MC64 Hungarian
+```
+
+**Mechanism B is the MC64 Hungarian matching**, 4.1 s on
+rocket_12800 (n=89601). `SymbolicFactorization::cached_mc64` is
+cleared after the first factor (the issue #38 fix, `db20166`), so
+IPM iters 2..N rerun the full Hungarian from scratch every call.
+
+### 10.2 §5 correction — it *is* scaling
+
+§5 concluded "Not scaling / MC64" from `probe_kkt_replay`'s
+`SCALING=infnorm` giving rocket 6.905 s ≈ 6.455 s default. B1
+disproves this: InfNorm scaling is 5.4 ms vs MC64's 4111 ms, so
+forcing InfNorm should cut ~4 s/call. The §5 `SCALING=infnorm`
+number is unreliable — `probe_kkt_replay`'s env wiring is suspect
+(`SCALING=identity` was already flagged confounded in the journal).
+§5's "not warm-state, intrinsic to factoring each matrix" holds
+only in the narrow sense that the Hungarian reruns every call.
+
+### 10.3 §8 correction — NARX_CFy is *not* Mechanism B
+
+§8 classified `NARX_CFy` as "B (likely)" by exclusion and asked for
+a direct profile to confirm. The profile **disconfirms** it:
+
+```
+NARX_CFy iter0: prologue=41 ms  loop=910 ms  overhead=4.3%
+  449 supernodes nrow>128 (up to nrow=1877 ncol=77) sum 863 ms = 94.9% of loop
+NARX_CFy iter1: prologue=20 ms  loop=70 ms    (fast)
+```
+
+`NARX_CFy` is **loop-dominated and value-dependent** — iter 0 slow,
+iter 1 fast on the same symbolic pattern, with huge fronts
+(nrow=1877 for a 77-column supernode). Its MC64 Hungarian is only
+29 ms. This is the same family as `arki0003` (§6), not Mechanism B.
+It needs the delayed-pivot trace (plan A1), not the prologue fix.
+
+### 10.4 Revised classification
+
+| problem      | mechanism | confirmed cost                         |
+|--------------|-----------|----------------------------------------|
+| rocket_12800 | B         | MC64 Hungarian 4.1 s, rerun every call |
+| NARX_CFy     | A-adjacent| value-dependent large fronts (loop)    |
+| robot_1600   | A         | delayed-pivot cascade into root        |
+| marine_1600  | A (+ §7)  | delayed-pivot cascade, single spike    |
+| arki0003     | A-adjacent| value-dependent pivoting (loop)        |
+
+`rocket_12800` is the **only** confirmed Mechanism B problem. The
+"prologue-dominated" framing of §5/§9 was right for rocket and
+wrong for NARX.

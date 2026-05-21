@@ -287,6 +287,37 @@ pub struct SupernodeTiming {
     pub us: u64,
 }
 
+/// Per-sub-phase wallclock breakdown of the numeric prologue —
+/// everything `factorize_multifrontal_supernodal_with_workspace` does
+/// before the per-supernode loop. Populated only when a `Profiler` is
+/// attached; every field is zero on the default (un-profiled) path.
+///
+/// Added for the per-factor cost cluster, Track B1
+/// (`dev/plans/per-factor-cost-cluster.md`): on `rocket_12800` the
+/// prologue is 99.5% of factor wall (3.4 s vs a 10 ms supernode loop)
+/// and the cause is not visible from static reading, so it has to be
+/// attributed empirically.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct PrologueBreakdown {
+    /// `row_map` clear + resize to `n`.
+    pub row_map_us: u64,
+    /// `compute_scaling_with_cache` (MC64 / InfNorm / cache replay).
+    pub scaling_us: u64,
+    /// Building the pivot-order scaling vector.
+    pub scaling_pivot_order_us: u64,
+    /// `permute_csc_values` (P·A·Pᵀ rebuild) — total.
+    pub permute_us: u64,
+    /// The `CscMatrix::from_triplets` sub-call inside `permute_csc_values`.
+    /// Subset of `permute_us`; the prime suspect for the prologue cost.
+    pub permute_from_triplets_us: u64,
+    /// `scaled_matrix_infnorm` + `override_null_pivot_tol`.
+    pub infnorm_tol_us: u64,
+    /// `CscMatrix::symmetric_pattern` (full pattern for row indices).
+    pub symmetric_pattern_us: u64,
+    /// `is_root` flags + `contrib_blocks` / `node_factors` allocation.
+    pub setup_us: u64,
+}
+
 /// Per-invocation profiler for `factorize_multifrontal_supernodal_with_workspace`.
 ///
 /// Attached to `NumericParams::profiler` as `Some(Arc<Mutex<Profiler>>)`
@@ -302,6 +333,7 @@ pub struct SupernodeTiming {
 pub struct Profiler {
     timings: Vec<SupernodeTiming>,
     prologue_us: u64,
+    prologue_breakdown: PrologueBreakdown,
     epilogue_us: u64,
     total_us: u64,
 }
@@ -394,6 +426,7 @@ impl Profiler {
         ProfileReport {
             n_supernodes: self.timings.len(),
             prologue_us: self.prologue_us,
+            prologue_breakdown: self.prologue_breakdown.clone(),
             epilogue_us: self.epilogue_us,
             loop_us,
             total_us: self.total_us,
@@ -419,6 +452,10 @@ pub struct BucketStats {
 pub struct ProfileReport {
     pub n_supernodes: usize,
     pub prologue_us: u64,
+    /// Sub-phase attribution of `prologue_us` (Track B1). Zero on the
+    /// un-profiled path; sub-phases sum to slightly less than
+    /// `prologue_us` (a few un-timed O(1) checks are not attributed).
+    pub prologue_breakdown: PrologueBreakdown,
     pub epilogue_us: u64,
     /// Sum of per-supernode timings — the inner-loop wallclock.
     pub loop_us: u64,
@@ -1522,7 +1559,7 @@ fn factorize_multifrontal_with_schur_inner(
     let scaling_pivot_order: Vec<f64> =
         symbolic.perm.iter().map(|&old| scaling_user[old]).collect();
 
-    let permuted = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv)?;
+    let (permuted, _) = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv, false)?;
     let full_pattern = permuted.symmetric_pattern();
 
     let mut is_root = vec![true; n_snodes];
@@ -1667,6 +1704,15 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     let t_total = params.profiler.as_ref().map(|_| Instant::now());
     let t_prologue = params.profiler.as_ref().map(|_| Instant::now());
 
+    // Track B1 (`dev/plans/per-factor-cost-cluster.md`): per-sub-phase
+    // attribution of the prologue. `profiling` gates every
+    // `Instant::now()` below, so the un-profiled production path does
+    // no extra timing work.
+    let profiling = params.profiler.is_some();
+    let mut bd = PrologueBreakdown::default();
+    let tic = || profiling.then(Instant::now);
+    let toc = |t: Option<Instant>| t.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+
     let n = symbolic.n;
     let n_snodes = symbolic.supernodes.len();
 
@@ -1676,8 +1722,10 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // call. `clear()` keeps capacity; `resize` rewrites entries —
     // cost is O(n), not O(n_snodes * n) as the pre-workspace code
     // paid.
+    let t_phase = tic();
     ws.row_map.clear();
     ws.row_map.resize(n, usize::MAX);
+    bd.row_map_us = toc(t_phase);
 
     // β refactor: scaling is a numeric-phase concern, computed
     // here against the live matrix values, not cached on the
@@ -1688,8 +1736,10 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // already produced an `Mc64Cache` that we reuse here when the
     // scaling strategy also resolves to MC64 — O(n) post-processing
     // instead of a second Hungarian.
+    let t_phase = tic();
     let (scaling_user, scaling_info) =
         compute_scaling_with_cache(matrix, &params.scaling, symbolic.cached_mc64.as_ref())?;
+    bd.scaling_us = toc(t_phase);
     // `PartialSingular` is routine for IPM hosts factorizing
     // structurally rank-deficient KKT systems; structurally singular
     // matrices are allowed to proceed — they typically surface the
@@ -1710,12 +1760,20 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // `scaling_pivot_order[k] == scaling_user[symbolic.perm[k]]`.
     // This matches the assembly-time lookup pattern below where the
     // permuted CSC is indexed in pivot positions.
+    let t_phase = tic();
     let scaling_pivot_order: Vec<f64> =
         symbolic.perm.iter().map(|&old| scaling_user[old]).collect();
+    bd.scaling_pivot_order_us = toc(t_phase);
     debug_assert_eq!(scaling_pivot_order.len(), n);
 
-    // Permute the matrix values into the new ordering
-    let permuted = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv)?;
+    // Permute the matrix values into the new ordering. The
+    // `from_triplets` rebuild inside is timed separately (B1 prime
+    // suspect) and returned as `from_triplets_us`.
+    let t_phase = tic();
+    let (permuted, from_triplets_us) =
+        permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv, profiling)?;
+    bd.permute_us = toc(t_phase);
+    bd.permute_from_triplets_us = from_triplets_us;
 
     // F-01: raise the per-supernode BK `zero_tol` to the Wilkinson
     // backward error floor `n · EPS · ||A_scaled||_inf` so
@@ -1723,15 +1781,19 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // classified as zero rather than as small-but-real. No-op under
     // `on_zero_pivot == Fail`. See
     // `dev/research/f01-rankdef-underreporting.md`.
+    let t_phase = tic();
     let local_params = override_null_pivot_tol(
         params,
         scaled_matrix_infnorm(&permuted, &scaling_pivot_order),
         n,
     );
     let params: &NumericParams = local_params.as_ref().unwrap_or(params);
+    bd.infnorm_tol_us = toc(t_phase);
 
     // Full symmetric pattern for correct row index computation
+    let t_phase = tic();
     let full_pattern = permuted.symmetric_pattern();
+    bd.symmetric_pattern_us = toc(t_phase);
 
     // Phase 2.3 Step 5: identify root supernodes (no parent in the etree
     // forest). A node is a root iff no other supernode lists it as a
@@ -1740,6 +1802,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // of delaying them to a non-existent ancestor. On disconnected
     // matrices the forest has multiple roots — this handles them
     // uniformly.
+    let t_phase = tic();
     let mut is_root = vec![true; n_snodes];
     for snode in &symbolic.supernodes {
         for &child_idx in &snode.children {
@@ -1759,6 +1822,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
         zero: 0,
     };
     let mut needs_refinement = false;
+    bd.setup_us = toc(t_phase);
 
     // Process supernodes in postorder (children before parents).
     // Phase 2.5.2 Step B: per-supernode body extracted into
@@ -1891,6 +1955,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     if let Some(arc) = params.profiler.as_ref() {
         if let Ok(mut prof) = arc.lock() {
             prof.prologue_us = prologue_us.unwrap_or(0);
+            prof.prologue_breakdown = bd;
             prof.epilogue_us = t_epilogue
                 .map(|t| t.elapsed().as_micros() as u64)
                 .unwrap_or(0);
@@ -2589,7 +2654,7 @@ pub fn factorize_multifrontal_supernodal_parallel(
     }
 
     let t_phase = telemetry.map(|_| std::time::Instant::now());
-    let permuted = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv)?;
+    let (permuted, _) = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv, false)?;
     if let (Some(t), Some(start)) = (telemetry, t_phase) {
         t.phase_permute_ns
             .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -3103,11 +3168,19 @@ fn override_null_pivot_tol(
 }
 
 /// Permute a CSC matrix: compute the lower triangle of P·A·Pᵀ.
+/// Permute the CSC matrix values into pivot order.
+///
+/// Returns the permuted matrix and, when `profile` is set, the wall
+/// microseconds spent inside the `CscMatrix::from_triplets` rebuild
+/// (Track B1: that rebuild re-sorts every entry and is the prime
+/// suspect for the prologue cost). `profile == false` returns `0` for
+/// the timing with no `Instant::now()` calls — the production path.
 fn permute_csc_values(
     matrix: &CscMatrix,
     _perm: &[usize],
     perm_inv: &[usize],
-) -> Result<CscMatrix, FeralError> {
+    profile: bool,
+) -> Result<(CscMatrix, u64), FeralError> {
     let n = matrix.n;
 
     // Collect permuted entries in lower triangle
@@ -3133,7 +3206,10 @@ fn permute_csc_values(
     let cols: Vec<usize> = triplets.iter().map(|t| t.1).collect();
     let vals: Vec<f64> = triplets.iter().map(|t| t.2).collect();
 
-    CscMatrix::from_triplets(n, &rows, &cols, &vals)
+    let t_ft = profile.then(Instant::now);
+    let permuted = CscMatrix::from_triplets(n, &rows, &cols, &vals)?;
+    let from_triplets_us = t_ft.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0);
+    Ok((permuted, from_triplets_us))
 }
 
 /// Build row indices for a frontal matrix.
@@ -4480,6 +4556,102 @@ mod tests {
              must dispatch parallel",
             estimate_assembly_flops(&sym.supernodes),
             PAR_MIN_FLOPS,
+        );
+    }
+
+    // ---- Track B1: prologue sub-phase instrumentation ----
+
+    #[test]
+    fn permute_csc_values_profile_flag_gates_timing_not_values() {
+        // 3x3 symmetric matrix stored lower-triangle: diag (4,5,6),
+        // one off-diagonal (1,0)=2. A non-identity permutation
+        // (perm_inv reverses the order) makes the rebuild non-trivial.
+        let m = CscMatrix::from_triplets(3, &[0, 1, 2, 1], &[0, 1, 2, 0], &[4.0, 5.0, 6.0, 2.0])
+            .unwrap();
+        let perm = [2usize, 1, 0];
+        let perm_inv = [2usize, 1, 0];
+
+        let (off, t_off) = permute_csc_values(&m, &perm, &perm_inv, false).unwrap();
+        let (on, t_on) = permute_csc_values(&m, &perm, &perm_inv, true).unwrap();
+
+        // The `profile` flag is timing-only: the permuted matrix must
+        // be bit-identical regardless of whether timing is collected.
+        assert_eq!(off.n, on.n);
+        assert_eq!(off.col_ptr, on.col_ptr);
+        assert_eq!(off.row_idx, on.row_idx);
+        assert_eq!(off.values, on.values);
+
+        // `profile == false` does no `Instant::now()` call, so the
+        // reported `from_triplets_us` is deterministically zero.
+        assert_eq!(t_off, 0, "profile=false must report zero timing");
+        // `profile == true` may legitimately round to zero on a tiny
+        // matrix — only the gating direction is asserted here.
+        let _ = t_on;
+    }
+
+    #[test]
+    fn prologue_breakdown_subphases_sum_within_prologue() {
+        // Tridiagonal SPD n=64 (diag 2, off-diag -1): large enough to
+        // exercise the supernodal driver. Inertia oracle is by hand —
+        // a symmetric diagonally-dominant tridiagonal matrix with
+        // positive diagonal is SPD, so inertia is (64, 0, 0).
+        let n = 64usize;
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(2.0);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
+
+        let prof = Arc::new(Mutex::new(Profiler::new()));
+        let mut params = make_params();
+        params.profiler = Some(prof.clone());
+        let (_factors, inertia) = factorize_multifrontal(&m, &sym, &params).unwrap();
+        assert_eq!(
+            (inertia.positive, inertia.negative, inertia.zero),
+            (64, 0, 0),
+            "SPD tridiagonal must factor with all-positive inertia"
+        );
+
+        let report = match prof.lock() {
+            Ok(p) => p.report(),
+            Err(_) => panic!("profiler mutex poisoned"),
+        };
+        let bd = &report.prologue_breakdown;
+
+        // `from_triplets` is a sub-call of `permute_csc_values`, so its
+        // wall is a subset of `permute_us`.
+        assert!(
+            bd.permute_from_triplets_us <= bd.permute_us,
+            "from_triplets ({} us) cannot exceed permute total ({} us)",
+            bd.permute_from_triplets_us,
+            bd.permute_us
+        );
+
+        // The seven sub-phases are disjoint segments of the prologue
+        // span, so the sum of their (floored) wall cannot exceed the
+        // (floored) prologue wall.
+        let subphase_sum = bd.row_map_us
+            + bd.scaling_us
+            + bd.scaling_pivot_order_us
+            + bd.permute_us
+            + bd.infnorm_tol_us
+            + bd.symmetric_pattern_us
+            + bd.setup_us;
+        assert!(
+            subphase_sum <= report.prologue_us,
+            "prologue sub-phases sum to {} us, exceeding prologue {} us",
+            subphase_sum,
+            report.prologue_us
         );
     }
 }

@@ -99,3 +99,67 @@ Wrote dev/research/per-factor-cost-cluster-2026-05-21.md (full
 findings + evidence tables) and dev/plans/per-factor-cost-cluster.md
 (two-track plan). No solver code changed this session — research
 phase only, per the user's explicit scoping.
+
+* 16:10 :issue48:trackc:
+Filed Track C as GitHub issue #48 — marine_1600 returns spurious
+WrongInertia (zero eigenvalues) at IPM iters 10/14/16/17 under both
+CB modes (got 38409/38392/6, want 38415/38392/0). Correctness
+defect, not perf; likely linked to #39 2x2 near-singular
+classification. Plan updated to reference #48; do not fold into
+the perf tracks.
+
+* 16:40 :perf:b1:instrument:prologue:
+Track B1: instrumented the numeric prologue sub-phases. Added
+PrologueBreakdown (8 fields) to Profiler/ProfileReport, wrapped
+each prologue sub-phase in factorize_multifrontal_supernodal_with_workspace
+with profiling-gated tic/toc, and split out the from_triplets
+rebuild inside permute_csc_values (signature now returns
+(CscMatrix, u64), 3 callers updated). Zero overhead when profiler
+is None. cargo test --lib 287 passed; new tests
+permute_csc_values_profile_flag_gates_timing_not_values and
+prologue_breakdown_subphases_sum_within_prologue. clippy
+--all-targets clean.
+
+* 17:00 :perf:b1:result:smoking-gun:
+probe_rocket_profile with the prologue breakdown:
+
+rocket_12800 iter0: prologue=4152 ms, of which
+  scaling                4145.7 ms  99.8%
+  permute_csc_values        4.8 ms   0.1%  (from_triplets 3.8 ms)
+  symmetric_pattern         1.2 ms
+  everything else          <1 ms each
+
+The plan's prime suspect (from_triplets) is EXONERATED — 3.8 ms.
+The entire Mechanism-B cost is the `scaling` sub-phase.
+
+Drilled one level (diagnose_scaling in the probe):
+  pick_scaling_strategy(rocket) -> Mc64Symmetric
+  compute_scaling(InfNorm)       =    5.4 ms
+  compute_scaling(Mc64Symmetric) = 4111.3 ms   <-- the MC64 Hungarian
+
+So Mechanism B = the MC64 Hungarian matching, 4.1 s on rocket. The
+cache (SymbolicFactorization::cached_mc64) is cleared after the
+first factor (issue #38 fix db20166), so IPM iters 2..N rerun the
+full Hungarian every call.
+
+* 17:05 :perf:b1:correction:research-note:
+B1 disconfirms two claims in the 2026-05-21 research note:
+- §5 "Not scaling / MC64": WRONG. Direct measurement shows MC64
+  scaling IS 99.8% of the rocket factor. The §5 control
+  "SCALING=infnorm gives rocket 6.905 s ~= default" is now
+  contradicted — InfNorm scaling is 5.4 ms, so forcing infnorm
+  should save ~4 s/call. The probe_kkt_replay SCALING=infnorm
+  number is unreliable (env wiring suspect; identity was already
+  flagged confounded). §5's "intrinsic to factoring each matrix"
+  conclusion stands only in the sense that the Hungarian reruns
+  every call — it is not warm-state, but it IS scaling.
+- §8 "NARX_CFy classified B (likely)": WRONG. probe shows NARX
+  iter0 prologue=41 ms, loop=910 ms — LOOP-dominated, not
+  prologue. 449 supernodes with nrow>128 (up to nrow=1877
+  ncol=77) sum 863 ms = 94.9% of the loop. NARX iter1 is fast
+  (loop=70 ms): value-dependent large-front cost, same family as
+  arki0003 (§6), NOT Mechanism B. NARX MC64 Hungarian is only
+  29 ms — cheap. NARX needs the Mechanism-A/arki delayed-pivot
+  trace, not the prologue fix.
+Net: rocket_12800 is the ONLY confirmed Mechanism B. Its fix is
+MC64-specific — see plan B2 update.
