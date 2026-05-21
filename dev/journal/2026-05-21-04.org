@@ -80,3 +80,32 @@ bottleneck — honest BLAS work in large fronts — is untouched.
 Conclusion: #44 STILL RELEVANT, stays open. Distinct from #47 (which is
 the MC64 cache). #44 needs a real factor-speed effort on the large-front
 kernel; #47 needs explicit-zero normalization. Different fixes.
+
+* 18:45 :issue47:mc64:correction:root-cause:
+Corrected the #47 mechanism after reading the cache code with the
+human. The §17:50 entry (and the comment first posted on #47) claimed
+explicit zeros defeat the MC64 value-bounded scaling cache via its
+diagonal-dominance value-bound test. WRONG — value_bound.rs already
+disqualifies explicit-zero-diagonal rows (qualifying_rows:155; test
+explicit_zero_diagonal_disqualifies_row) and is never consulted here
+because the cache is never *populated*.
+
+Re-ran probe_explicit_zeros with scaling_info instrumentation:
+  stripped: scaling_info=Applied every call, mc64_fallbacks=0, cache_hits 1,2,3
+  kept:     scaling_info=Mc64FallbackToInfnorm{Mc64ScalingDegenerate}
+            every call, mc64_fallbacks 1..4, cache_hits 0,0,0.
+
+Real mechanism: explicit zeros tip MC64's symmetric matching into
+Mc64ScalingDegenerate (scaling spread > 1/EPS — the 3e82 blow-up
+documented at scaling/mod.rs:171, research note
+kkt-mc64-scaling-blowup-2026-05-20, issue #45). A degenerate MC64 ->
+ScalingInfo::Mc64FallbackToInfnorm, not Applied. The B2 cache populates
+only on Applied (solver.rs:803), else None (solver.rs:812) -> never
+populated -> the full Hungarian reruns every warm factor (~345ms) and
+is discarded. That wasted Hungarian is the entire 2x.
+
+The stripped matrix's MC64 returns Applied — so explicit zeros are the
+*cause* of the degeneracy, not merely a cache-key mismatch. Drop-zeros
+is therefore the root-cause fix, not a workaround. Orthogonal option: a
+negative cache (remember MC64-degenerate fingerprints, skip the wasted
+Hungarian). Posted the corrected mechanism on #47.
