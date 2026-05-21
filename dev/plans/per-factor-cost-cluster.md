@@ -128,7 +128,7 @@ and `rocket_12800` are CB-neutral-to-slightly-negative).
 
 Research note §7: `marine_1600` returns `WrongInertia` at iters
 10/14/16/17 under both CB modes (spurious zero eigenvalues). This is a
-correctness defect, not perf. **File as a new issue** and triage
+correctness defect, not perf. Filed as **#48**; triage
 separately — likely related to the 2×2 near-singular classification
 work (#39, `dev/research/fbrain3ls-2x2-stability.md`). Do not fold it
 into the perf tracks.
@@ -151,4 +151,4 @@ into the perf tracks.
 | #44 NARX_CFy timeout       | B   | B2 fix → B3 should close it |
 | #38 residual rocket_12800  | B   | B2/B3 — the closed-issue residual |
 | #47 explicit-zero fast path| B-adjacent | re-evaluate after B2; may interact with the `from_triplets`/pattern path |
-| marine_1600 WrongInertia   | C   | new issue |
+| marine_1600 WrongInertia   | C   | filed as #48 |
