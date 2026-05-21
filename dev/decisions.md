@@ -4059,3 +4059,62 @@ all four exit-partition buckets PASS.
 - `dev/plans/kkt-cascade-fix1-fine-grained-delay.md` — the plan.
 - `dev/journal/2026-05-21-02.org` — implementation/test/benchmark log.
 - `dev/sessions/2026-05-21-02.md` — session checkpoint.
+
+## 2026-05-21 — 2×2 inertia is classified from the cancellation-free sign of `det`, not from a subtracted eigenvalue (#48)
+
+**Decision.** The inertia of a symmetric 2×2 pivot block
+`[[d11,d21],[d21,d22]]` is classified from the **sign of its
+determinant** (computed cancellation-free) together with the sign of
+its trace — never from a closed-form eigenvalue `λ = 0.5·(tr ∓ s)`.
+`classify_2x2_inertia` (`src/dense/factor.rs`) is the single classifier:
+`det < 0` → straddle `(1,1,0)`; `det > 0` → `(2,0,0)`/`(0,2,0)` by
+`sign(tr)`; `det == 0` exactly → `(1,0,1)`/`(0,1,1)`/`(0,0,2)` by
+`sign(tr)`. `count_2x2_inertia_val` and all three branches of
+`count_2x2_inertia` route through it.
+
+**The determinant kernel.** `det_sym2x2` uses Kahan's fused
+difference-of-products: `w = fl(d21·d21)`, `e = fma(d21,d21,-w)` (the
+exact rounding error), `det = fma(d11,d22,-w) + e`. Relative error
+≤ 2·u for *any* inputs (Jeannerod, Louvet & Muller 2013), so
+`sign(det)` is exact unless the block is genuinely singular to working
+precision. `f64::mul_add` is correctly-rounded on every target
+(hardware FMA where available, software otherwise) — this introduces
+no non-Rust dependency and no `unsafe`.
+
+**Why not the closed-form eigenvalue.** `sym2_eigenvalues` computes
+`s = sqrt((d11-d22)² + 4·d21²)` cancellation-free, but the *final*
+step `0.5·(tr ∓ s)` is itself a subtraction: a genuine non-singular
+2×2 whose small eigenvalue lies below `ULP(0.5·tr)` IEEE-rounds that
+eigenvalue to **exactly 0.0**, which the old code counted as a `zero`.
+This produced `WrongInertia` on the borderline near-singular
+`pinene_3200` and `marine_1600` KKT iterates once Fix 1 (#46) removed
+the delayed-pivot cascade that had been masking it.
+
+**Why not `s` vs `|tr|`.** A comparison `s ⋚ |tr|` was considered and
+**rejected**: for a block one of whose diagonal entries lies far below
+the other's ULP, *both* `tr = d11+d22` and the discriminant
+`(d11-d22)²` annihilate the small entry — the same cancellation — so
+`s == |tr|` and it still mis-reports `det == 0`. The Kahan determinant
+does not, because the product `d11·d22` never adds `d11` into `d22`.
+(Worked example: journal `2026-05-21-03.org` §18:05.)
+
+**Issue #42 Option A is preserved.** The two force-accept branches of
+`count_2x2_inertia` (`zero_tol_2x2` / `null_pivot_tol_2x2` bands) still
+never report a `zero`: a genuine zero eigenvalue from
+`classify_2x2_inertia` is folded into `neg`, matching the pre-existing
+`λ>0 → pos, else → neg` convention. The non-singular `else` branch
+reports `zero` honestly — but `det_sym2x2` is accurate there, so it is
+structurally 0 for any genuinely non-singular block.
+
+**Evidence.** Tests-first: 4 new in-file tests (oracle = diagonal-2×2
+inertia by hand calculation) failed on the pre-fix code, all 19
+`sym2_inertia_tests` pass after. `probe_kkt_replay` default config:
+`pinene_3200` all 10 iterates `(64000,63995,0)` exact (was iters 8/9
+`WrongInertia`); `marine_1600` all 18 exact (was iter 17
+`WrongInertia` — the defect filed as #48); `robot_1600` unchanged.
+Bench inertia match 100.0%, all four exit-partition buckets PASS.
+
+**References.**
+- `dev/plans/kkt-cascade-fix2-2x2-inertia-cancellation.md` — the plan.
+- `dev/journal/2026-05-21-03.org` §17:40/§18:05/§18:45/§19:00.
+- `dev/sessions/2026-05-21-03.md` — session checkpoint.

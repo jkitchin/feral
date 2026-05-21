@@ -4,6 +4,32 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — spurious zero in 2×2 inertia (cancellation) ([#48][i48])
+
+The 2×2 pivot-block inertia classifier no longer fabricates a spurious
+`zero` eigenvalue. `count_2x2_inertia` / `count_2x2_inertia_val` in
+`src/dense/factor.rs` classified signs from the closed-form eigenvalues
+`λ = 0.5·(tr ∓ s)`; although `s` is computed cancellation-free, the
+*final* subtraction `0.5·(tr ∓ s)` itself cancels — a genuine
+non-singular 2×2 whose small eigenvalue lies below `ULP(0.5·tr)`
+IEEE-rounds to *exactly 0.0* and was then counted as a `zero`. The
+classifier now decides from the cancellation-free sign of the
+determinant — `det_sym2x2`, Kahan's fused difference-of-products
+(relative error ≤ 2·u for any inputs) — plus the sign of the trace,
+via the new `classify_2x2_inertia`: `det < 0` → straddle `(1,1,0)`;
+`det > 0` → `(2,0,0)`/`(0,2,0)` by `sign(tr)`; `det == 0` exactly →
+`(1,0,1)`/`(0,1,1)`/`(0,0,2)`. A `zero` is now produced only on
+genuine exact singularity. This surfaced when Fix 1 (below) removed
+the delayed-pivot cascade that had been masking it: it restored
+inertia-exactness on the `pinene_3200` KKT replay (iters 8/9 had
+returned `WrongInertia`) and, as a side effect, on the `marine_1600`
+replay (iter 17 — the defect previously filed as #48). KKT-dump
+factor-replay under the default config: `pinene_3200` all 10 iterates
+exact, `marine_1600` all 18 exact, `robot_1600` unchanged. Benchmark
+inertia match 100.0%; all four exit-partition buckets pass. See
+`dev/plans/kkt-cascade-fix2-2x2-inertia-cancellation.md` and journal
+`2026-05-21-03.org`.
+
 ### Fixed — delayed-pivot cascade amplifier (fine-grained delay) ([#46][i46])
 
 The Bunch-Kaufman driver loops in `src/dense/factor.rs` no longer
@@ -78,6 +104,7 @@ the neighbour is structurally uncoupled. On the `cho` KKT: factor time
 `dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md`.
 
 [i46]: https://github.com/jkitchin/feral/issues/46
+[i48]: https://github.com/jkitchin/feral/issues/48
 
 ### Fixed — MC64 catastrophic-spread guard ([#45][i45])
 

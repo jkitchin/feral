@@ -3848,45 +3848,84 @@ pub(crate) fn do_2x2_update(
     }
 }
 
-/// Count inertia of a 2×2 D block, returning Inertia struct.
-///
-/// Uses the closed-form eigenvalue formula for a 2×2 symmetric matrix
-/// `[[d11, d21], [d21, d22]]`:
-///
-/// ```text
-///   λ = (tr ± sqrt(disc)) / 2
-///   tr   = d11 + d22
-///   disc = (d11 - d22)^2 + 4 * d21^2           (always ≥ 0; cancellation-free)
-/// ```
-///
-/// The discriminant is computed as `(d11 - d22)^2 + 4*d21^2`, which is
-/// algebraically equal to `tr^2 - 4*det` but never suffers catastrophic
-/// cancellation: it is a sum of two squares. This makes sign-counting
-/// robust on borderline (+,+) or (−,−) blocks whose `det = d11*d22 - d21*d21`
-/// computed directly would lose sign to cancellation. The prior
-/// trace/determinant classifier (which was hypothesized in
-/// `dev/journal/2026-05-17-01.org` 09:45 entry to be the root cause of
-/// issue #38 Failure B on rocket_12800) was empirically disproved as the
-/// cause — see the 16:30 entry — but the closed-form classifier is
-/// retained as a defensive improvement applicable to any matrix whose
-/// 2×2 pivots are genuinely borderline.
-///
-/// Counts λ > 0 as positive, λ < 0 as negative, λ == 0 as zero.
+/// Count inertia of a 2×2 D block `[[d11, d21], [d21, d22]]`, returning
+/// an `Inertia` struct. Thin wrapper over [`classify_2x2_inertia`].
 fn count_2x2_inertia_val(d11: f64, d21: f64, d22: f64) -> Inertia {
-    let (lam1, lam2) = sym2_eigenvalues(d11, d21, d22);
-    let mut pos = 0;
-    let mut neg = 0;
-    let mut zer = 0;
-    for lam in [lam1, lam2] {
-        if lam > 0.0 {
-            pos += 1;
-        } else if lam < 0.0 {
-            neg += 1;
+    classify_2x2_inertia(d11, d21, d22)
+}
+
+/// Determinant of the symmetric 2×2 `[[d11, d21], [d21, d22]]` computed
+/// without catastrophic cancellation.
+///
+/// `det = d11*d22 - d21*d21` written naively loses all significant
+/// digits — and can flip sign or round to *exactly* 0.0 — when the two
+/// products are close: a borderline pivot, or a block one of whose
+/// diagonal entries lies far below the other's ULP (as for a split MC64
+/// pair reaching the root front, the pinene Track-A3 case).
+///
+/// This uses Kahan's fused difference-of-products: with `w = fl(d21*d21)`
+/// and its exact rounding error `e = fma(d21, d21, -w)`, the determinant
+/// is `(d11*d22 - w) + e`, the first term evaluated with one `fma`. The
+/// result has relative error ≤ 2·u for *any* inputs (Jeannerod, Louvet &
+/// Muller 2013), so `sign(det)` is exact whenever the block is not
+/// genuinely singular to working precision. The product `d11*d22` never
+/// adds `d11` into `d22`, so no diagonal entry is annihilated — unlike
+/// `tr = d11+d22` or the discriminant `(d11-d22)^2`.
+///
+/// `f64::mul_add` is a correctly-rounded fused multiply-add on every
+/// platform (hardware FMA where available, software otherwise).
+#[inline]
+fn det_sym2x2(d11: f64, d21: f64, d22: f64) -> f64 {
+    let w = d21 * d21;
+    let e = d21.mul_add(d21, -w); // exact rounding error of d21*d21
+    let f = d11.mul_add(d22, -w); // d11*d22 - w
+    f + e
+}
+
+/// Inertia of the symmetric 2×2 `[[d11, d21], [d21, d22]]`, classified
+/// from the cancellation-free sign of its determinant ([`det_sym2x2`])
+/// and the sign of its trace.
+///
+/// For a symmetric 2×2 the eigenvalues `λ₁,λ₂` satisfy `λ₁·λ₂ = det` and
+/// `λ₁+λ₂ = tr`, so the inertia is fixed by those two signs alone:
+///
+/// * `det < 0` → eigenvalues straddle zero → `(1, 1, 0)`
+/// * `det > 0` → both share the sign of `tr` (which is then non-zero) →
+///   `(2, 0, 0)` if `tr > 0`, else `(0, 2, 0)`
+/// * `det == 0` → one eigenvalue is exactly 0, the other equals `tr` →
+///   `(1, 0, 1)` / `(0, 1, 1)` / `(0, 0, 2)` by the sign of `tr`
+///
+/// This never inspects a *subtracted* eigenvalue, so it cannot fabricate
+/// a spurious zero the way `0.5·(tr ∓ s)` does when `tr ≈ s`: a genuine
+/// non-singular block whose small eigenvalue rounds to 0.0 there is here
+/// classified by `sign(det)`, which `det_sym2x2` keeps exact. A `zero`
+/// is produced only on genuine exact singularity (`det_sym2x2 == 0.0`).
+/// `sign(tr)` is reliable because correctly-rounded FP addition never
+/// rounds a non-zero sum across zero. See journal 2026-05-21-03 §18:05
+/// and `dev/plans/kkt-cascade-fix2-2x2-inertia-cancellation.md`.
+#[inline]
+fn classify_2x2_inertia(d11: f64, d21: f64, d22: f64) -> Inertia {
+    let det = det_sym2x2(d11, d21, d22);
+    let tr = d11 + d22;
+    if det < 0.0 {
+        Inertia::new(1, 1, 0)
+    } else if det > 0.0 {
+        if tr > 0.0 {
+            Inertia::new(2, 0, 0)
         } else {
-            zer += 1;
+            Inertia::new(0, 2, 0)
+        }
+    } else {
+        // det == 0.0 exactly — genuinely singular: one eigenvalue is 0,
+        // the other equals tr.
+        if tr > 0.0 {
+            Inertia::new(1, 0, 1)
+        } else if tr < 0.0 {
+            Inertia::new(0, 1, 1)
+        } else {
+            Inertia::new(0, 0, 2)
         }
     }
-    Inertia::new(pos, neg, zer)
 }
 
 /// Closed-form eigenvalues of the symmetric 2×2 matrix
@@ -4433,21 +4472,22 @@ fn count_1x1_inertia(
 
 /// Count inertia for a 2×2 pivot block.
 ///
-/// Uses the closed-form eigenvalues of the 2×2 block to classify signs
-/// (matches `count_2x2_inertia_val` and the rmumps / canonical-MUMPS
-/// conventions). The caller still passes the precomputed `det`, which is
-/// only used here for the rank-deficiency gates (`zero_tol_2x2`,
-/// `null_pivot_tol_2x2`). Sign-counting itself is done from the
-/// discriminant-form eigenvalue computation in `sym2_eigenvalues`, which
-/// is cancellation-free. This is a defensive improvement: a borderline
-/// (+,+) 2×2 block whose `det = a00*a11 - a10*a10` flipped sign under
-/// round-off would previously have been mis-counted as (+,−). The
-/// closed-form classifier was originally proposed against issue #38
-/// Failure B (rocket_12800 wrong inertia by 1-2 on early IPM iters);
-/// the diagnostic probe disproved that hypothesis — rocket_12800's
-/// 2×2 blocks are all well-separated (+,−), and the inertia gap
-/// versus MA57 comes from MA57's `cntl(5)` static-pivot perturbation,
-/// not from a sign-counting bug. See
+/// Classifies signs via [`classify_2x2_inertia`] — the cancellation-free
+/// `sign(det)` (Kahan difference-of-products) plus `sign(tr)` — matching
+/// `count_2x2_inertia_val` and the rmumps / canonical-MUMPS conventions.
+/// The caller still passes the precomputed `det`, which is only used here
+/// for the rank-deficiency gates (`zero_tol_2x2`, `null_pivot_tol_2x2`).
+/// The sign accounting no longer depends on that cancellation-prone
+/// `det`: a borderline (+,+) block whose `det = a00*a11 - a10*a10`
+/// flipped sign under round-off would previously have been mis-counted
+/// as (+,−), and (Track A3) a genuine non-singular block whose small
+/// eigenvalue `0.5·(tr∓s)` rounds to exactly 0.0 was mis-counted as
+/// having a `zero`. The closed-form classifier was originally proposed
+/// against issue #38 Failure B (rocket_12800 wrong inertia by 1-2 on
+/// early IPM iters); the diagnostic probe disproved that hypothesis —
+/// rocket_12800's 2×2 blocks are all well-separated (+,−), and the
+/// inertia gap versus MA57 comes from MA57's `cntl(5)` static-pivot
+/// perturbation, not from a sign-counting bug. See
 /// `dev/journal/2026-05-17-01.org` 16:30 entry for the disproof.
 #[allow(clippy::too_many_arguments)]
 fn count_2x2_inertia(
@@ -4474,36 +4514,43 @@ fn count_2x2_inertia(
     //
     // 2026-05-17 (issue #38 Failure B): switched the same-sign branch
     // sign-decision from `det > 0` plus trace to the closed-form
-    // eigenvalue computation. The previous logic was correct for any
-    // non-borderline block but mis-classified a (+,+) block as (+,−)
-    // whenever round-off in `a00*a11 - a10*a10` flipped the sign of
-    // `det`. The new path counts negatives directly from the
-    // eigenvalues, computed with a cancellation-free discriminant.
-    let trace = a00 + a11;
+    // eigenvalue computation.
+    //
+    // 2026-05-21 (Track A3, Fix 2): replaced the `sym2_eigenvalues`
+    // sign-counting with `classify_2x2_inertia`. `sym2_eigenvalues`
+    // computes `λ = 0.5·(tr ∓ s)`; that final subtraction itself
+    // cancels and IEEE-rounds an analytically-nonzero small eigenvalue
+    // of a genuine non-singular block to *exactly* 0.0, which the
+    // non-singular branch below then mis-counted as `zero` (pinene
+    // KKT iters 8/9). `classify_2x2_inertia` decides from the
+    // cancellation-free `sign(det)` (Kahan difference-of-products) and
+    // never inspects a subtracted eigenvalue. See journal
+    // 2026-05-21-03 §18:05 and
+    // `dev/plans/kkt-cascade-fix2-2x2-inertia-cancellation.md`.
+    //
+    // The `det` argument (the cancellation-prone `a00*a11 - a10*a10`)
+    // is retained only for the near-singular *gates* below — it selects
+    // which band a block falls in (and hence `needs_refinement`); the
+    // sign accounting no longer depends on it.
     if det.abs() <= params.zero_tol_2x2 {
         // Near-singular 2×2 block.
         match params.on_zero_pivot {
             ZeroPivotAction::ForceAccept | ZeroPivotAction::PerturbToEps { .. } => {
-                // Issue #42 (Option A): count *both* eigenvalues of the
-                // near-singular 2×2 block by sign. `sym2_eigenvalues` is
-                // cancellation-free and `lam > 0.0` routes a `0.0` root
-                // to `neg`, so `zero` is structurally 0 under
-                // ForceAccept. The previous rule counted one `zero`
-                // unconditionally. PerturbToEps shares this path: a
+                // Issue #42 (Option A): a force-accepted near-singular
+                // 2×2 block never reports a `zero` pivot — both
+                // eigenvalues are counted by sign. `classify_2x2_inertia`
+                // yields a genuine `zero` only on exact singularity
+                // (`det == 0.0` to the last bit); fold that into `neg`,
+                // preserving the pre-existing `λ>0 → pos, else → neg`
+                // convention. PerturbToEps shares this path: a
                 // bounded-Δ perturbation of the block determinant would
                 // require modifying the already-applied 2×2 update,
                 // which is out of scope; it gets the same sign
                 // accounting and relies on iterative refinement.
                 *needs_refinement = true;
-                let (lam1, lam2) = sym2_eigenvalues(a00, a10, a11);
-                let _ = trace; // sign decision driven by per-eigenvalue signs
-                for lam in [lam1, lam2] {
-                    if lam > 0.0 {
-                        *pos += 1;
-                    } else {
-                        *neg += 1;
-                    }
-                }
+                let inertia = classify_2x2_inertia(a00, a10, a11);
+                *pos += inertia.positive;
+                *neg += inertia.negative + inertia.zero;
                 Ok(())
             }
             ZeroPivotAction::Fail => Err(FeralError::NumericallyRankDeficient),
@@ -4512,10 +4559,9 @@ fn count_2x2_inertia(
         && det.abs() <= params.null_pivot_tol_2x2
     {
         // F-01 rank-deficiency band for 2×2 blocks. Issue #42 (Option
-        // A): pure sign-counting — count each closed-form eigenvalue by
-        // sign with no "zero" bucket, exactly matching the 1×1 paths
-        // and the non-singular branch below. The only thing
-        // F-01-bandness adds for a 2×2 block is `needs_refinement`.
+        // A): pure sign-counting — no "zero" bucket, exactly matching
+        // the 1×1 paths. The only thing F-01-bandness adds for a 2×2
+        // block is `needs_refinement`.
         //
         // History: the 2026-05-17 rule still counted a root as `zero`
         // when `|lam| <= zero_tol`; #39 then made the 1×1 band
@@ -4525,35 +4571,22 @@ fn count_2x2_inertia(
         // `factors.zero_tol_2x2`. See `dev/decisions.md` and
         // `dev/research/f01-rankdef-underreporting.md`.
         *needs_refinement = true;
-        let (lam1, lam2) = sym2_eigenvalues(a00, a10, a11);
-        let _ = trace; // sign decision driven entirely by per-eigenvalue signs
-        for lam in [lam1, lam2] {
-            if lam > 0.0 {
-                *pos += 1;
-            } else {
-                *neg += 1;
-            }
-        }
+        let inertia = classify_2x2_inertia(a00, a10, a11);
+        *pos += inertia.positive;
+        *neg += inertia.negative + inertia.zero;
         Ok(())
     } else {
-        // Non-singular block: count eigenvalue signs robustly from the
-        // discriminant-form closed-form eigenvalues. This avoids the
-        // sign-flip that `det = a00*a11 - a10*a10` can suffer when the
-        // two terms are of comparable magnitude. We pass the
-        // off-diagonal `a10` directly so the discriminant
-        // `(a00 - a11)^2 + 4*a10^2` is a sum of squares — no
-        // cancellation can flip the eigenvalue signs.
-        let (lam1, lam2) = sym2_eigenvalues(a00, a10, a11);
-        let _ = (det, trace); // det used only for the singularity gate above
-        for lam in [lam1, lam2] {
-            if lam > 0.0 {
-                *pos += 1;
-            } else if lam < 0.0 {
-                *neg += 1;
-            } else {
-                *zero += 1;
-            }
-        }
+        // Non-singular block: `det.abs()` is above both bands, so the
+        // block is genuinely non-singular and `classify_2x2_inertia`
+        // reports `(1,1,0)` / `(2,0,0)` / `(0,2,0)` — never a `zero`.
+        // A `zero` is surfaced here only on the (effectively
+        // unreachable) genuine exact singularity, in which case
+        // reporting it honestly is correct.
+        let inertia = classify_2x2_inertia(a00, a10, a11);
+        let _ = det; // det used only for the singularity gates above
+        *pos += inertia.positive;
+        *neg += inertia.negative;
+        *zero += inertia.zero;
         Ok(())
     }
 }
@@ -4751,6 +4784,110 @@ mod sym2_inertia_tests {
         let inertia = count_2x2_inertia_val(a, b, c);
         // True det = (1)(1 + 4eps) - (1 - eps) = 5 eps > 0; (+,+).
         assert_eq!(inertia.negative, 0, "must not over-report negatives");
+    }
+
+    // ---- Track A3 fix-forward: cancellation-free 2×2 inertia ----
+    //
+    // External oracle: a *diagonal* symmetric 2×2 `[[d11,0],[0,d22]]`
+    // has eigenvalues `d11` and `d22` exactly, so its inertia is the
+    // signs of the diagonal entries by inspection. The det/trace
+    // classification of a symmetric 2×2 is textbook (λ₁λ₂ = det,
+    // λ₁+λ₂ = tr). These cases are hand-derived, independent of the
+    // implementation under test.
+    //
+    // The three `*_tiny_huge_*` cases each have a diagonal entry far
+    // below the other's ULP, so `tr = d11±d22` and the discriminant
+    // both annihilate the small entry — the regime where the old
+    // `0.5·(tr∓s)` eigenvalue rounds an analytically-nonzero root to
+    // exactly 0.0 and fabricates a spurious `zero`. They FAILED on the
+    // pre-fix code; see journal 2026-05-21-03 §18:05.
+
+    #[test]
+    fn count_2x2_inertia_val_diagonal_tiny_huge_positive() {
+        // [[1e-30, 0], [0, 1e30]] — eigenvalues 1e-30 and 1e30, both
+        // strictly positive ⇒ inertia (2, 0, 0). det = 1e-30·1e30 = 1.0.
+        let inertia = count_2x2_inertia_val(1e-30, 0.0, 1e30);
+        assert_eq!(inertia, Inertia::new(2, 0, 0), "got {inertia}");
+    }
+
+    #[test]
+    fn count_2x2_inertia_val_diagonal_tiny_neg_huge_pos() {
+        // [[-1e-30, 0], [0, 1e30]] — eigenvalues -1e-30 and 1e30,
+        // opposite signs ⇒ straddle ⇒ inertia (1, 1, 0).
+        let inertia = count_2x2_inertia_val(-1e-30, 0.0, 1e30);
+        assert_eq!(inertia, Inertia::new(1, 1, 0), "got {inertia}");
+    }
+
+    #[test]
+    fn count_2x2_inertia_val_diagonal_both_negative() {
+        // [[-1e-30, 0], [0, -1e30]] — eigenvalues -1e-30 and -1e30,
+        // both strictly negative ⇒ inertia (0, 2, 0).
+        let inertia = count_2x2_inertia_val(-1e-30, 0.0, -1e30);
+        assert_eq!(inertia, Inertia::new(0, 2, 0), "got {inertia}");
+    }
+
+    #[test]
+    fn count_2x2_inertia_val_genuine_singular_positive() {
+        // [[0, 0], [0, 5]] — eigenvalues 0 and 5 ⇒ inertia (1, 0, 1).
+        // A genuine exact zero must still be reported as `zero`.
+        let inertia = count_2x2_inertia_val(0.0, 0.0, 5.0);
+        assert_eq!(inertia, Inertia::new(1, 0, 1), "got {inertia}");
+    }
+
+    #[test]
+    fn count_2x2_inertia_val_genuine_singular_negative() {
+        // [[0, 0], [0, -5]] — eigenvalues 0 and -5 ⇒ inertia (0, 1, 1).
+        let inertia = count_2x2_inertia_val(0.0, 0.0, -5.0);
+        assert_eq!(inertia, Inertia::new(0, 1, 1), "got {inertia}");
+    }
+
+    #[test]
+    fn count_2x2_inertia_val_genuine_double_zero() {
+        // [[0, 0], [0, 0]] — both eigenvalues 0 ⇒ inertia (0, 0, 2).
+        let inertia = count_2x2_inertia_val(0.0, 0.0, 0.0);
+        assert_eq!(inertia, Inertia::new(0, 0, 2), "got {inertia}");
+    }
+
+    #[test]
+    fn count_2x2_inertia_val_off_diagonal_straddle() {
+        // [[0, 1], [1, 0]] — eigenvalues ±1 ⇒ inertia (1, 1, 0).
+        let inertia = count_2x2_inertia_val(0.0, 1.0, 0.0);
+        assert_eq!(inertia, Inertia::new(1, 1, 0), "got {inertia}");
+    }
+
+    #[test]
+    fn count_2x2_inertia_val_well_separated_pd() {
+        // [[2, 1], [1, 2]] — eigenvalues 3 and 1 ⇒ inertia (2, 0, 0).
+        let inertia = count_2x2_inertia_val(2.0, 1.0, 2.0);
+        assert_eq!(inertia, Inertia::new(2, 0, 0), "got {inertia}");
+    }
+
+    #[test]
+    fn count_2x2_inertia_nonsingular_branch_no_spurious_zero() {
+        // The non-singular (`else`) branch of `count_2x2_inertia` must
+        // not fabricate a `zero` for a genuinely non-singular block.
+        // [[1e-30, 0], [0, 1e30]]: det = 1.0, far above the
+        // near-singular bands ⇒ takes the `else` branch ⇒ must report
+        // (2, 0, 0). The pre-fix code reported (1, 0, 1).
+        let params = BunchKaufmanParams::default();
+        let det = 1e-30 * 1e30 - 0.0; // = 1.0, the value the caller passes
+        let mut pos = 0;
+        let mut neg = 0;
+        let mut zero = 0;
+        let mut needs_refinement = false;
+        count_2x2_inertia(
+            det,
+            1e-30,
+            0.0,
+            1e30,
+            &params,
+            &mut pos,
+            &mut neg,
+            &mut zero,
+            &mut needs_refinement,
+        )
+        .expect("non-singular 2×2 must classify without error");
+        assert_eq!((pos, neg, zero), (2, 0, 0), "spurious zero in else branch");
     }
 }
 
