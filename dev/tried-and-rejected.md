@@ -2083,3 +2083,57 @@ at `k+1`. Fixed there (see `decisions.md` 2026-05-20 #46 entry).
 agents reading reference solvers agreed on a story that a single probe
 on the real matrix overturned in minutes. Probe the actual failing
 matrix *before* writing a research note's "recommended fix", not after.
+
+## 2026-05-21 — B2 value-bounded MC64 scaling cache: gate metric confounded by IPM δ
+
+**Approach.** Track B2 of the per-factor cost-cluster plan: eliminate
+the per-IPM-iteration MC64 Hungarian cost by caching the iter-0 MC64
+scaling vector `D₀` at `Solver` scope and reusing it on warm
+`factor()` replays, gated by an O(nnz) "value-bound" check
+(`mc64_value_bound_passes`). The check accepts reuse while the
+*diagonal dominance* of `D₀·A_N·D₀` stays within a growth budget of
+its iter-0 baseline — the premise (`mc64-value-bounded-cache-2026-05-17.md`)
+being that MC64 scaling is pattern-dominated and `D₀` stays "good"
+across iterations as long as `D₀·A_N·D₀` remains diagonally dominant
+enough that Bunch-Kaufman picks the same pivots.
+
+**Symptoms / why rejected (as a payoff lever — the code itself is
+correct and ships as latent infrastructure).**
+
+- The value-bound gate rejects **every** warm iteration on
+  pinene_3200. DBG instrumentation on condition 1 (ratio growth):
+  iter 2 max_ratio 1.906e8 (budget 1.162e8); iter 3 7.770e8
+  (5.180e8); iter 4 2.486e10 (1.657e10); iter 5 5.562e10 (3.708e10).
+  All FAIL. `mc64 scaling-cache hits: 0`.
+
+- The metric is **confounded**. The baseline `r0 ≈ 5.8e7` shows the
+  MC64-scaled KKT is nowhere near diagonally dominant in the first
+  place. The KKT (2,2)-block rows carry a tiny δ-regularized diagonal
+  (≈1e-8) against ≈1 off-diagonals, so their off/diag ratio is ≈1/δ.
+  As the interior-point method drives the regularization δ→0, the
+  ratio explodes 1e8→1e10 — the gate is measuring the IPM's barrier
+  trajectory, not whether `D₀` is still a usable scaling. There is no
+  `GROWTH_FACTOR` value that separates "δ shrank" (safe to reuse)
+  from "matching changed" (unsafe — corrupts inertia, #38). The
+  premise that MC64-scaled indefinite KKT is diagonally dominant is
+  false; "diagonal dominance of `D·A·D`" is the wrong proxy.
+
+- Even with a perfect gate, B2 targets <2 % of the cost. pinene_3200's
+  10 iters total 493.9 s; iters 6-9 are 64.8/77.8/135.7/208.2 s (the
+  cost-cluster blowup, 98 %). The MC64 Hungarian is ≤6 s total.
+
+- The named target rocket_12800 cannot even exhibit a hit: its 2-iter
+  dump changes pattern between iters (332793→435190 nnz).
+
+**What was kept.** The cache wiring (`Solver::with_mc64_cache`),
+`src/scaling/value_bound.rs`, and — separately — the `External`
+scaling correctness fix B2 surfaced (see `decisions.md` 2026-05-21).
+All correct and tested; the *approach* of a cheap value-proxy gate
+for cross-iteration MC64 reuse is what is rejected.
+
+**Lesson.** Validate the cost model before building the optimization.
+B2 assumed "MC64 Hungarian reruns every IPM iter and dominates" — true
+for rocket_12800's iter-0 profile, false for pinene's actual 10-iter
+trajectory where the delayed-pivot blowup dwarfs everything. A
+per-factor profile of the *named target's full iteration sequence*,
+not a single iteration, should precede the plan.

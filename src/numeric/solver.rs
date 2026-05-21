@@ -18,7 +18,9 @@ use crate::numeric::factorize::{
     FactorWorkspace, NumericParams, SparseFactors,
 };
 use crate::numeric::solve::{solve_sparse, solve_sparse_many, solve_sparse_refined};
-use crate::scaling::ScalingStrategy;
+use crate::scaling::{
+    mc64_value_bound_passes, precompute_mc64_validity, Mc64CacheValidity, ScalingStrategy,
+};
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::supernode::SupernodeParams;
 use crate::symbolic::{symbolic_factorize_with_method, OrderingMethod, SymbolicFactorization};
@@ -90,6 +92,32 @@ impl PatternFingerprint {
             structural_hash: h.finish(),
         }
     }
+}
+
+/// Solver-scope value-bounded MC64 scaling cache (Track B2).
+///
+/// An IPM driver replays `factor()` on a bit-identical sparsity
+/// pattern with drifting values. The MC64 Hungarian that produces
+/// the scaling vector is pattern-dominated, so the iter-0 scaling
+/// `D₀` is usually still good for iter N. This cache stores `D₀`
+/// plus the baseline diagonal-dominance fingerprint; on each warm
+/// `factor()` `mc64_value_bound_passes` decides reuse-vs-recompute
+/// in O(nnz) without rerunning the Hungarian (~4 s on
+/// `rocket_12800`). See `dev/plans/mc64-value-bounded-cache.md`.
+///
+/// Distinct from `SymbolicFactorization::cached_mc64`, the one-shot
+/// post-symbolic cache that is still cleared after every factor for
+/// issue #38 — this lives at `Solver` scope and is gated, so reusing
+/// it cannot reintroduce the #38 inertia drift.
+struct Mc64ScalingCache {
+    /// Pattern this cache was built for. Reuse is rejected unless the
+    /// current matrix fingerprints identically.
+    fingerprint: PatternFingerprint,
+    /// User-order MC64 scaling vector `D₀` from the cache-baseline
+    /// factor. Injected as `ScalingStrategy::External` on a hit.
+    scaling: Vec<f64>,
+    /// Baseline diagonal-dominance fingerprint for the value bound.
+    validity: Mc64CacheValidity,
 }
 
 /// Stateful linear-solver handle. Mirrors Ipopt `SymLinearSolver`.
@@ -185,6 +213,20 @@ pub struct Solver {
     /// next iter. With latching we pay the CB cost permanently after
     /// the first observed cascade rather than oscillating.
     auto_arm_latched: bool,
+    /// Track B2 master switch for the value-bounded MC64 scaling
+    /// cache. Default `true`; flip off with `with_mc64_cache(false)`
+    /// for tests/probes that need every factor to recompute scaling
+    /// from scratch. When `false`, `mc64_scaling_cache` stays `None`.
+    mc64_cache_enabled: bool,
+    /// Solver-scope value-bounded MC64 scaling cache. `Some` only
+    /// after a factor on the current pattern produced an
+    /// `ScalingInfo::Applied` MC64 scaling. Cleared on pattern
+    /// change. See [`Mc64ScalingCache`].
+    mc64_scaling_cache: Option<Mc64ScalingCache>,
+    /// Diagnostic counter: number of `factor()` calls that reused
+    /// the value-bounded MC64 scaling cache. Exposed via
+    /// [`Solver::mc64_cache_hit_count`].
+    mc64_cache_hit_count: usize,
 }
 
 impl Solver {
@@ -214,6 +256,9 @@ impl Solver {
             auto_cascade_break_beta: None,
             prev_max_n_delayed_in: None,
             auto_arm_latched: false,
+            mc64_cache_enabled: true,
+            mc64_scaling_cache: None,
+            mc64_cache_hit_count: 0,
         }
     }
 
@@ -317,6 +362,29 @@ impl Solver {
     /// without user intervention.
     pub fn with_auto_cascade_break(mut self, beta: f64) -> Self {
         self.auto_cascade_break_beta = Some(beta);
+        self
+    }
+
+    /// Toggle the value-bounded MC64 scaling cache (Track B2).
+    /// Default `true`.
+    ///
+    /// When on, a `factor()` that runs the MC64 Hungarian
+    /// (`ScalingInfo::Applied`) caches the resulting scaling vector
+    /// at `Solver` scope. Subsequent `factor()` calls on the same
+    /// sparsity pattern reuse it — skipping the Hungarian, ~4 s on
+    /// `rocket_12800` — whenever an O(nnz) value-bound check confirms
+    /// the current matrix's values have not drifted past the
+    /// matching's diagonal-dominance guarantee. On drift the check
+    /// rejects and the Hungarian reruns fresh (the pre-B2 behaviour).
+    ///
+    /// Pass `false` for tests and probes that must observe a fresh
+    /// MC64 on every factor; this also keeps `mc64_scaling_cache`
+    /// permanently `None`. See `dev/plans/mc64-value-bounded-cache.md`.
+    pub fn with_mc64_cache(mut self, on: bool) -> Self {
+        self.mc64_cache_enabled = on;
+        if !on {
+            self.mc64_scaling_cache = None;
+        }
         self
     }
 
@@ -497,6 +565,9 @@ impl Solver {
             // means the prior n_delayed observation no longer applies.
             self.prev_max_n_delayed_in = None;
             self.auto_arm_latched = false;
+            // Track B2: the MC64 scaling cache is keyed on the
+            // pattern fingerprint; a new pattern voids it.
+            self.mc64_scaling_cache = None;
         }
 
         // Step 3: ensure symbolic is cached.
@@ -602,6 +673,38 @@ impl Solver {
             }
         }
 
+        // Step 3.8: Track B2 — value-bounded MC64 scaling cache. When
+        // a prior factor on this exact pattern produced an MC64
+        // scaling (`ScalingInfo::Applied`) and the current matrix's
+        // values have not drifted past the matching's diagonal-
+        // dominance bound, reuse the cached scaling vector instead of
+        // rerunning the Hungarian (~4 s on rocket_12800). The reuse
+        // is injected as `ScalingStrategy::External`, which the
+        // numeric prologue's `compute_scaling_with_cache` resolves in
+        // O(n). The value-bound check (`mc64_value_bound_passes`) is
+        // the correctness gate that keeps this from reintroducing the
+        // #38 iter-0-scaling-on-iter-N inertia drift: on drift it
+        // rejects and we fall through to a fresh MC64 — same path as
+        // the cache being absent. See
+        // `dev/plans/mc64-value-bounded-cache.md`.
+        let scaling_cache_hit = if self.mc64_cache_enabled {
+            match &self.mc64_scaling_cache {
+                Some(c)
+                    if c.fingerprint == fp
+                        && mc64_value_bound_passes(matrix, &c.scaling, &c.validity) =>
+                {
+                    effective_params.scaling = ScalingStrategy::External(c.scaling.clone());
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if scaling_cache_hit {
+            self.mc64_cache_hit_count += 1;
+        }
+
         // Step 4: numeric factor via the pooled workspace; map errors.
         // Both drivers share the same signature and a bit-exact
         // contract; pick by the `use_parallel` toggle. When parallel
@@ -683,6 +786,32 @@ impl Solver {
                         .max()
                         .unwrap_or(0),
                 );
+                // Track B2: maintain the value-bounded MC64 scaling
+                // cache. This block runs only on a cache *miss*
+                // (`!scaling_cache_hit`); the injected-`External` reuse
+                // path keeps its existing entry untouched. On a miss,
+                // if this factor ran the MC64 Hungarian to completion
+                // (`ScalingInfo::Applied`), install a fresh entry so
+                // the next warm factor on this pattern can skip the
+                // Hungarian. A cheap InfNorm / fallback / Identity
+                // scaling (anything reporting not-`Applied`) is not
+                // worth caching — drop the cache so a later genuine
+                // MC64 reinstalls it. `PartialSingular` is excluded:
+                // a partial matching on a singular matrix is not a
+                // scaling worth reusing.
+                if self.mc64_cache_enabled && !scaling_cache_hit {
+                    if matches!(factors.scaling_info, crate::scaling::ScalingInfo::Applied) {
+                        let scaling = factors.scaling.clone();
+                        let validity = precompute_mc64_validity(matrix, &scaling);
+                        self.mc64_scaling_cache = Some(Mc64ScalingCache {
+                            fingerprint: fp,
+                            scaling,
+                            validity,
+                        });
+                    } else {
+                        self.mc64_scaling_cache = None;
+                    }
+                }
                 self.last_factors = Some(factors);
                 self.last_inertia = Some(inertia.clone());
                 if partial_singular {
@@ -980,6 +1109,16 @@ impl Solver {
     /// [`Mc64FallbackReason`]: crate::scaling::Mc64FallbackReason
     pub fn mc64_fallback_count(&self) -> usize {
         self.mc64_fallback_count
+    }
+
+    /// Number of `factor()` calls on this `Solver` that reused the
+    /// value-bounded MC64 scaling cache (Track B2) instead of
+    /// rerunning the Hungarian. Resets on `Solver::new()`; stays `0`
+    /// when `with_mc64_cache(false)` is set. Lets tests and replay
+    /// probes report the cache hit rate without inspecting
+    /// per-factor state. See `dev/plans/mc64-value-bounded-cache.md`.
+    pub fn mc64_cache_hit_count(&self) -> usize {
+        self.mc64_cache_hit_count
     }
 
     /// Drop the cached symbolic factorisation and its associated
@@ -1281,6 +1420,203 @@ mod tests {
             "cached_mc64 must be cleared after factor() (issue #38: IPM \
              reuse of iter-0 MC64 cache on iter-N matrix silently corrupts \
              inertia and explodes factor cost on real arrow-KKTs)"
+        );
+    }
+
+    /// Symmetric tridiagonal `n×n` CSC (lower triangle) with `diag`
+    /// on the diagonal and `off` on the first sub-diagonal. When
+    /// `diag > 2·|off|` the matrix is strictly diagonally dominant
+    /// with a positive diagonal, hence SPD with inertia `(n, 0, 0)`.
+    fn tridiag(n: usize, diag: f64, off: f64) -> CscMatrix {
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..n {
+            rows.push(j);
+            cols.push(j);
+            vals.push(diag);
+            if j + 1 < n {
+                rows.push(j + 1);
+                cols.push(j);
+                vals.push(off);
+            }
+        }
+        CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("valid CSC")
+    }
+
+    fn mc64_solver() -> Solver {
+        let np = NumericParams {
+            scaling: ScalingStrategy::Mc64Symmetric,
+            ..NumericParams::default()
+        };
+        Solver::with_params(np, SupernodeParams::default())
+    }
+
+    /// Track B2: re-factoring an identical matrix reuses the
+    /// value-bounded MC64 scaling cache — zero value drift, the
+    /// value bound passes, the Hungarian is skipped on call 2.
+    #[test]
+    fn mc64_scaling_cache_hit_on_identical_refactor() {
+        let a = tridiag(6, 10.0, 1.0); // SPD → inertia (6,0,0)
+        let mut s = mc64_solver();
+
+        let st1 = s.factor(&a, Some(Inertia::new(6, 0, 0)));
+        assert!(matches!(st1, FactorStatus::Success), "factor 1: {:?}", st1);
+        assert_eq!(s.mc64_cache_hit_count(), 0, "first factor cannot hit");
+
+        let st2 = s.factor(&a, Some(Inertia::new(6, 0, 0)));
+        assert!(matches!(st2, FactorStatus::Success), "factor 2: {:?}", st2);
+        assert_eq!(
+            s.mc64_cache_hit_count(),
+            1,
+            "identical refactor must reuse the cached MC64 scaling"
+        );
+    }
+
+    /// Track B2: a cache hit must produce a bit-identical
+    /// factorization to the cache-off path. Oracle = the cache-off
+    /// fresh-MC64 path (pre-B2 code). On identical values fresh MC64
+    /// is deterministic, so reusing `D₀` applies the same congruence.
+    #[test]
+    fn mc64_cache_hit_bit_matches_cache_off() {
+        let a = tridiag(6, 10.0, 1.0);
+        let rhs: Vec<f64> = (1..=6).map(|x| x as f64).collect();
+
+        let mut on = mc64_solver(); // cache on by default
+        let mut off = mc64_solver().with_mc64_cache(false);
+
+        for call in 0..3 {
+            let so = on.factor(&a, None);
+            let sf = off.factor(&a, None);
+            assert!(
+                matches!(so, FactorStatus::Success) && matches!(sf, FactorStatus::Success),
+                "call {call}: on={:?} off={:?}",
+                so,
+                sf
+            );
+            let xo = on.solve(&rhs).expect("cache-on solve");
+            let xf = off.solve(&rhs).expect("cache-off solve");
+            assert_eq!(
+                xo, xf,
+                "call {call}: cache-on solve must bit-match cache-off"
+            );
+            assert_eq!(
+                on.last_inertia, off.last_inertia,
+                "call {call}: inertia must match"
+            );
+        }
+        assert_eq!(
+            on.mc64_cache_hit_count(),
+            2,
+            "calls 1 and 2 reuse the call-0 cache"
+        );
+        assert_eq!(
+            off.mc64_cache_hit_count(),
+            0,
+            "with_mc64_cache(false) never hits"
+        );
+    }
+
+    /// Track B2: a pattern change voids the cache; it is rebuilt for
+    /// the new pattern and hits on that pattern's repeated factor.
+    #[test]
+    fn mc64_cache_rebuilt_on_pattern_change() {
+        let a6 = tridiag(6, 10.0, 1.0);
+        let a8 = tridiag(8, 10.0, 1.0); // distinct pattern (n differs)
+        let mut s = mc64_solver();
+
+        assert!(matches!(
+            s.factor(&a6, Some(Inertia::new(6, 0, 0))),
+            FactorStatus::Success
+        ));
+        assert!(matches!(
+            s.factor(&a6, Some(Inertia::new(6, 0, 0))),
+            FactorStatus::Success
+        ));
+        assert_eq!(s.mc64_cache_hit_count(), 1, "repeated a6 factor hits");
+
+        assert!(
+            matches!(
+                s.factor(&a8, Some(Inertia::new(8, 0, 0))),
+                FactorStatus::Success
+            ),
+            "a different pattern must factor cleanly"
+        );
+        assert_eq!(
+            s.mc64_cache_hit_count(),
+            1,
+            "a pattern change cannot be a cache hit"
+        );
+        assert!(matches!(
+            s.factor(&a8, Some(Inertia::new(8, 0, 0))),
+            FactorStatus::Success
+        ));
+        assert_eq!(
+            s.mc64_cache_hit_count(),
+            2,
+            "the rebuilt cache hits on the repeated a8 factor"
+        );
+    }
+
+    /// Track B2 — the #38 guard. When the matrix values drift far
+    /// past the matching's diagonal-dominance bound, the value-bound
+    /// check must reject the stale cache and rerun the Hungarian.
+    /// This is the property that keeps the B2 cache from
+    /// reintroducing the #38 iter-0-scaling-on-iter-N inertia drift.
+    ///
+    /// `a0` is diagonally dominant SPD → inertia (4,0,0). `a1` shares
+    /// the pattern but blows the off-diagonal 50× past the diagonal.
+    /// `a1` is a Toeplitz tridiagonal with eigenvalues
+    /// `λ_k = 10 + 100·cos(kπ/5)` = {90.9, 40.9, −20.9, −70.9}
+    /// → inertia (2,2,0) (hand oracle).
+    #[test]
+    fn mc64_cache_rejected_on_value_drift_issue_38_guard() {
+        let a0 = tridiag(4, 10.0, 1.0);
+        let a1 = tridiag(4, 10.0, 50.0);
+        let mut s = mc64_solver();
+
+        assert!(matches!(
+            s.factor(&a0, Some(Inertia::new(4, 0, 0))),
+            FactorStatus::Success
+        ));
+        assert_eq!(
+            s.mc64_cache_hit_count(),
+            0,
+            "first factor installs the cache"
+        );
+
+        // a1's values have drifted far past the dominance bound
+        // under a0's scaling: the value-bound check must reject, the
+        // Hungarian reruns fresh, and inertia stays correct.
+        let st = s.factor(&a1, Some(Inertia::new(2, 2, 0)));
+        assert!(
+            matches!(st, FactorStatus::Success),
+            "drifted matrix must factor to its correct inertia (2,2,0), got {:?}",
+            st
+        );
+        assert_eq!(
+            s.mc64_cache_hit_count(),
+            0,
+            "value drift past the dominance bound must reject the stale cache"
+        );
+    }
+
+    /// Track B2: `with_mc64_cache(false)` keeps every factor on the
+    /// fresh-MC64 path — no hits ever, and the cache stays `None`.
+    #[test]
+    fn mc64_cache_disabled_never_hits() {
+        let a = tridiag(6, 10.0, 1.0);
+        let mut s = mc64_solver().with_mc64_cache(false);
+        for _ in 0..4 {
+            assert!(matches!(
+                s.factor(&a, Some(Inertia::new(6, 0, 0))),
+                FactorStatus::Success
+            ));
+        }
+        assert_eq!(s.mc64_cache_hit_count(), 0, "disabled cache never hits");
+        assert!(
+            s.mc64_scaling_cache.is_none(),
+            "disabled cache stays unpopulated"
         );
     }
 

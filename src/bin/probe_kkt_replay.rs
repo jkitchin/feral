@@ -48,6 +48,12 @@ fn build_solver() -> Solver {
         let beta: f64 = s_.parse().unwrap_or(0.05);
         s = s.with_auto_cascade_break(beta);
     }
+    // Track B2: value-bounded MC64 scaling cache. On by default;
+    // `MC64_CACHE=0` forces a fresh Hungarian on every factor so the
+    // probe can diff cache-on vs cache-off inertia/time.
+    if matches!(env::var("MC64_CACHE").as_deref(), Ok("0") | Ok("off")) {
+        s = s.with_mc64_cache(false);
+    }
     s
 }
 
@@ -82,6 +88,9 @@ fn main() {
     if let Ok(s_) = env::var("AUTO_CB") {
         let beta: f64 = s_.parse().unwrap_or(0.05);
         eprintln!("[probe] AUTO_CB ON (β={beta})");
+    }
+    if matches!(env::var("MC64_CACHE").as_deref(), Ok("0") | Ok("off")) {
+        eprintln!("[probe] MC64 scaling cache OFF");
     }
 
     println!(
@@ -142,4 +151,7 @@ fn main() {
     }
     println!("---");
     println!("total feral factor time: {total:.3} s");
+    if !fresh {
+        println!("mc64 scaling-cache hits: {}", solver.mc64_cache_hit_count());
+    }
 }

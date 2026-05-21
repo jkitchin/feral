@@ -41,6 +41,7 @@ use crate::sparse::csc::CscMatrix;
 mod hungarian;
 mod infnorm;
 mod mc64;
+mod value_bound;
 
 /// Compute the MC64 symmetric matching on the lower-triangle CSC
 /// matrix and return the column-to-row permutation (`perm[j]` is the
@@ -62,6 +63,17 @@ pub fn mc64_matching(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), FeralErr
 /// [`compute_scaling_with_cache`]. See Phase 2.4.4 compression
 /// symbolic-speedup work.
 pub(crate) use mc64::Mc64Cache;
+
+/// Value-bounded MC64 scaling-cache validity check (Track B2). The
+/// `Solver` caches a freshly-computed MC64 scaling vector, records
+/// its baseline diagonal-dominance fingerprint via
+/// [`precompute_mc64_validity`], and on each warm `factor()` calls
+/// [`mc64_value_bound_passes`] to decide reuse-vs-recompute without
+/// rerunning the Hungarian. See
+/// `dev/plans/mc64-value-bounded-cache.md`.
+pub(crate) use value_bound::{
+    mc64_value_bound_passes, precompute_mc64_validity, Mc64CacheValidity,
+};
 
 /// Run the full MC64 pipeline once and return the cached output.
 /// Used by the symbolic `LdltCompress` preprocessor so the numeric
@@ -162,7 +174,11 @@ pub enum Mc64FallbackReason {
 /// Diagnostic information about how the scaling was computed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalingInfo {
-    /// MC64 matching ran to completion on a non-singular matrix.
+    /// A non-trivial scaling vector was applied to the matrix and the
+    /// solve path must undo it. Produced when MC64 matching ran to
+    /// completion on a non-singular matrix, and when the caller
+    /// supplied an `External` scaling vector (the factor applies
+    /// `D = diag(s)` regardless of how `s` was obtained).
     Applied,
     /// MC64 matching found a partial solution; unmatched rows and
     /// columns fall back to identity scaling. `n_unmatched` is the
@@ -175,8 +191,11 @@ pub enum ScalingInfo {
     /// solve path applies it). Issue #24 — was previously
     /// indistinguishable from `Applied` for InfNorm.
     Mc64FallbackToInfnorm { reason: Mc64FallbackReason },
-    /// No matching-based scaling was applied (e.g., the caller
-    /// requested `Identity` or `External`).
+    /// The scaling vector is all-ones — applying it is a no-op, so the
+    /// solve path skips pre/post scaling entirely. Produced only by
+    /// `ScalingStrategy::Identity`. (`External` reports `Applied` even
+    /// when its vector happens to be all-ones, since the factor still
+    /// runs the scaling loop.)
     NotApplied,
 }
 
@@ -265,7 +284,15 @@ pub(crate) fn compute_scaling_with_cache(
                     matrix.n,
                 )));
             }
-            Ok((s.clone(), ScalingInfo::NotApplied))
+            // `Applied`, not `NotApplied`: the factor scales the matrix
+            // by `D = diag(s)` unconditionally, so the solve MUST undo
+            // it. `NotApplied` is a load-bearing invariant meaning "the
+            // scaling vector is all-ones" — the solve keys off it to
+            // skip pre/post scaling (`solve_sparse`). Pairing a real
+            // `s` with `NotApplied` factors `D·A·D` but solves it as
+            // `A`, returning `D⁻¹A⁻¹D⁻¹b`. `s` may itself be all-ones,
+            // in which case `Applied` just does bit-exact `×1.0` no-ops.
+            Ok((s.clone(), ScalingInfo::Applied))
         }
         ScalingStrategy::InfNorm => Ok(infnorm::compute_infnorm(matrix)),
         ScalingStrategy::Mc64Symmetric => match cache {

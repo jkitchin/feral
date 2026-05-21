@@ -4,6 +4,34 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `External` scaling produced a silent 10× solve error
+
+`ScalingStrategy::External` is now solve-correct. The factorization
+applies the user-supplied scaling `D = diag(s)` to the matrix
+unconditionally (`D·A·D`), but the solve path had been skipping the
+matching pre/post un-scaling because the `External` arm reported
+`ScalingInfo::NotApplied` — a flag the solve treats as "the scaling
+vector is all-ones, no-op." A non-identity `External` vector therefore
+factored `D·A·D` but solved it as `A`, returning `D⁻¹A⁻¹D⁻¹b` instead
+of `A⁻¹b` (a 10× error on a `D = 0.3162·I` vector). `External` now
+reports `ScalingInfo::Applied`; `NotApplied` is produced only by
+`ScalingStrategy::Identity`. The bug was latent — no prior code drove
+a non-identity `External` vector through a solve.
+
+### Added — value-bounded MC64 scaling cache (`Solver::with_mc64_cache`)
+
+`Solver` can cache a freshly-computed MC64 symmetric scaling vector and
+reuse it across warm `factor()` replays on the same sparsity pattern,
+skipping the Hungarian matching when an O(nnz) value-bound check
+confirms the cached scaling is still within budget. Default on; a
+genuine cache hit is bit-identical to the no-cache path. Disable with
+`Solver::with_mc64_cache(false)`; observe hits via
+`Solver::mc64_cache_hit_count()`. Note: on the current KKT corpus the
+value-bound gate rarely accepts a reuse (the metric is confounded by
+the interior-point regularization trajectory), so this is presently
+latent infrastructure with no measured speedup — see
+`dev/decisions.md` 2026-05-21.
+
 ### Fixed — delayed-pivot cascade on zero-(2,2)-block saddle KKT ([#46][i46])
 
 The numeric Bunch-Kaufman kernel no longer cascades into a delayed-pivot

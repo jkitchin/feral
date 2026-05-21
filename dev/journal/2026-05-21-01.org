@@ -163,3 +163,115 @@ B1 disconfirms two claims in the 2026-05-21 research note:
   trace, not the prologue fix.
 Net: rocket_12800 is the ONLY confirmed Mechanism B. Its fix is
 MC64-specific — see plan B2 update.
+
+* 17:30 :perf:b2:plan:codeinspect:
+Track B2: code inspection for the value-bounded MC64 cache.
+Findings:
+- Injection point is free: ScalingStrategy::External(Vec<f64>)
+  already exists; compute_scaling_with_cache's External arm is an
+  O(n) clone. Solver can inject a cached scaling by setting
+  effective_params.scaling = External(cached) — no numeric-phase
+  plumbing.
+- Capture point: SparseFactors.scaling (user-order vector applied)
+  + scaling_info == ScalingInfo::Applied (MC64 ran to completion).
+- The new cache is Solver-scope, additive over the symbolic-scope
+  cached_mc64 (still cleared per #38). The #38 regression test only
+  inspects cached_mc64 → untouched.
+
+Feasibility risk found and resolved EMPIRICALLY: the research
+note's value-bound check assumes a fully-populated diagonal. A KKT
+with a structurally-zero (2,2) block has rows with zero diag +
+nonzero off-diag → ratio +inf → r0 = +inf → conditions 1 & 2
+neutered. Measured rocket_12800_0000.mtx: 89601/89601 explicit
+diagonal entries, NONE zero (min|diag|=5.6e-9, max=6.3e3) — the
+IPM regularises the (2,2) block (-δ_c·I). So the note's design
+applies directly to the target. For general robustness the plan
+adds Deviation 1: all three conditions are computed only over
+"qualifying rows" (structurally-present, nonzero baseline diag).
+
+Wrote dev/plans/mc64-value-bounded-cache.md (architecture, the
+External-injection design, Deviation 1, 8-group tests-first
+sequence, probe_kkt_replay validation over 106 local KKT matrices
+as both calibration loop and acceptance gate).
+
+* 18:40 :perf:b2:bug:scaling:correctness:
+B2 integration test `mc64_cache_hit_bit_matches_cache_off` caught a
+real pre-existing bug in `ScalingStrategy::External`. On a cache hit
+(`External(D₀)` injection) the solve returned exactly 10× the
+cache-off oracle on `tridiag(6,10.0,1.0)`:
+  cache-on : [0.8333..., 1.6667..., ...]
+  cache-off: [0.0833..., 0.1667..., ...]  (correct)
+10 = the matrix diagonal. Instrumented the capture/hit/result
+points: `factors.scaling` is bit-identical `[0.3162...×6]` in BOTH
+the External and the fresh-Mc64Symmetric path — the ONLY difference
+was `scaling_info`: `NotApplied` (External) vs `Applied` (MC64).
+
+Root cause: the solve keys `needs_scaling` off `scaling_info`
+(`solve.rs:113` — `!matches!(scaling_info, NotApplied)`), and sizes
+the `scaled_rhs` workspace the same way (`solve.rs:74,330`). The
+contract is `NotApplied ⇔ scaling vector is all-ones no-op`. The
+factor, however, applies `D·A·D` UNCONDITIONALLY for every strategy
+(`factorize.rs:1298` dense, `scaling_pivot_order` supernodal). The
+`External` arm of `compute_scaling_with_cache` paired a *real*
+vector with `NotApplied` → factor builds `D·A·D`, solve skips the
+un-scaling → returns `D⁻¹A⁻¹D⁻¹b`. With `D=0.3162·I` that is
+`10·A⁻¹b`. Latent since `External` was added; never hit because no
+prior code drove a non-identity `External` vector through
+factor+solve (the only tests, `external_strategy_passes_through`,
+checked `compute_scaling`'s return value, not a solve).
+
+Fix: `External` arm now returns `ScalingInfo::Applied` — a
+non-trivial scaling WAS applied and the solve must undo it.
+`NotApplied` is now exclusively `Identity` (genuine all-ones).
+Updated the `Applied`/`NotApplied` docstrings and the
+`external_strategy_passes_through` test (oracle: factor scales ⇒
+solve must un-scale; independent oracle = the cache-off path).
+`cargo test --lib numeric::solver::tests`: 22 passed, 0 failed —
+`mc64_cache_hit_bit_matches_cache_off` now bit-matches across all
+3 calls. Implication: B2's `External` injection point is sound; the
+plan's assumption that `External` was solve-correct was wrong, and
+the integration test (cache-off as independent oracle) is what
+caught it — exactly its design purpose.
+
+* 19:30 :perf:b2:probe:calibration:pivot:
+B2 `probe_kkt_replay` validation — the B2 cache delivers ~zero
+corpus payoff. Three findings:
+
+1. rocket_12800 (the named B2 target) cannot demonstrate a hit:
+   its corpus dump is 2 iterations and the pattern *changes*
+   between them — iter 0 has 332793 nnz, iter 1 has 435190 nnz
+   (+30%). `PatternFingerprint` mismatch correctly voids the cache
+   at Step 2. Cache installs on iter 1; there is no iter 2.
+   `mc64 scaling-cache hits: 0`, iter-1 factor time identical
+   cache-on (2.624s) vs cache-off (2.628s).
+
+2. pinene_3200 (10 iters): the cache IS present and the
+   fingerprint matches from iter 2 on, but the value-bound gate
+   rejects EVERY warm iter (`vb_ok=false`). DBG3 instrumentation
+   on condition 1 (ratio growth):
+     iter 2: max_ratio 1.906e8  budget 1.162e8  FAIL
+     iter 3: max_ratio 7.770e8  budget 5.180e8  FAIL
+     iter 4: max_ratio 2.486e10 budget 1.657e10 FAIL
+     iter 5: max_ratio 5.562e10 budget 3.708e10 FAIL
+   The baseline r0 is itself ≈5.8e7 — the MC64-scaled KKT is
+   nowhere near diagonally dominant. Root cause: the KKT (2,2)
+   rows have a tiny δ-regularized diagonal (≈1e-8) against ≈1
+   off-diagonals; their off/diag ratio is ≈1/δ. As the IPM
+   converges δ→0, so the ratio explodes 1e8→1e10. The value-bound
+   metric (diagonal dominance of D·A·D) does NOT measure "is the
+   cached scaling reusable" — it tracks the IPM's regularization
+   trajectory δ, a quantity intrinsic to the solver and unrelated
+   to scaling staleness. No GROWTH_FACTOR recalibration fixes a
+   confounded metric.
+
+3. B2 targets <2% of the cost. pinene_3200's 10 iters total
+   493.9s; iters 6-9 alone are 64.8/77.8/135.7/208.2s — the
+   per-factor cost-cluster blowup, 98% of the wall time. The MC64
+   Hungarian B2 eliminates is ≤6s across all 10 iters.
+
+Decision (with human approval): PIVOT. Stop B2 as a payoff push.
+The B2 cache is correct, fully tested, and lands as latent
+infrastructure; its corpus payoff is unproven and the gate metric
+is the wrong instrument. Refocus on the iter 6-9 factor-time
+explosion — that is where feral's per-factor cost actually lives.
+Recorded in decisions.md and tried-and-rejected.md.

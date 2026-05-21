@@ -1,6 +1,11 @@
 # Plan — per-factor cost cluster
 
-**Status:** B1 done (instrumentation landed). B2 target confirmed.
+**Status:** B1 done (instrumentation landed). B2 implemented but
+**pivoted off** 2026-05-21 — the cache is correct and tested but has
+no measured corpus payoff (gate metric confounded by the IPM δ
+trajectory; MC64 is <2 % of factor cost vs the iter 6-9 blowup). See
+`decisions.md` / `tried-and-rejected.md` 2026-05-21. Effort moves to
+**Track A** (the delayed-pivot cascade — the actual 98 % cost).
 **Date:** 2026-05-21
 **Research note:** `dev/research/per-factor-cost-cluster-2026-05-21.md`
 (see §10 for the B1 findings that revise this plan)

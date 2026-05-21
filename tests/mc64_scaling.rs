@@ -134,15 +134,18 @@ fn identity_strategy_returns_ones() {
 }
 
 /// `External(vec)` passes through the user-supplied vector
-/// verbatim and reports `NotApplied` (the scaling strategy is
-/// external, not MC64).
+/// verbatim and reports `Applied`: the factor scales the matrix by
+/// `D = diag(s)` unconditionally, so the solve must undo it.
+/// `NotApplied` is reserved for the all-ones (genuine no-op) case;
+/// pairing it with a real `s` would factor `D·A·D` but solve it as
+/// `A` (the solve keys `needs_scaling` off `scaling_info`).
 #[test]
 fn external_strategy_passes_through() {
     let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 1.0, 1.0]).unwrap();
     let user = vec![0.5, 2.0, 3.14];
     let (scaling, info) = compute_scaling(&csc, &ScalingStrategy::External(user.clone())).unwrap();
     assert_eq!(scaling, user);
-    assert_eq!(info, ScalingInfo::NotApplied);
+    assert_eq!(info, ScalingInfo::Applied);
 }
 
 /// `External(vec)` with wrong length returns an error rather

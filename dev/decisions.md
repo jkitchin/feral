@@ -3930,3 +3930,86 @@ fixed → 0.83× (test passes).
   overturned by ground-truth probes).
 - `tests/issue_46_saddle_kkt_cascade.rs` — committed regression test.
 - Issue #46 (resolved).
+
+## 2026-05-21 — `ScalingStrategy::External` reports `ScalingInfo::Applied` (latent 10× bug)
+
+**Decision.** The `External` arm of `compute_scaling_with_cache` now
+returns `ScalingInfo::Applied`, not `NotApplied`.
+
+**Why.** `ScalingInfo::NotApplied` is a load-bearing invariant: the
+solve path keys `needs_scaling` off it (`solve.rs:113`) and sizes the
+`scaled_rhs` workspace off it (`solve.rs:74,330`). Its contract is
+`NotApplied ⇔ the scaling vector is all-ones, applying it is a no-op`.
+The factor, however, applies `D·A·D` *unconditionally* for every
+strategy (`factorize.rs:1298` dense; `scaling_pivot_order` supernodal).
+The old `External` arm paired a genuine user-supplied scaling vector
+with `NotApplied` — so the factor built `D·A·D` but the solve skipped
+the un-scaling, returning `D⁻¹A⁻¹D⁻¹b` instead of `A⁻¹b`. On a vector
+`D = 0.3162·I` (MC64 on a diag-10 matrix) that is a silent 10× error.
+
+Latent since `External` was added: no prior code drove a non-identity
+`External` vector through factor+solve. The only `External` tests
+(`external_strategy_passes_through`) checked `compute_scaling`'s return
+value, never a solve. Track B2's `External`-injection cache is the
+first real user; its acceptance test
+(`mc64_cache_hit_bit_matches_cache_off`, cache-off as independent
+oracle) caught it.
+
+**Consequence.** `NotApplied` is now produced only by
+`ScalingStrategy::Identity` (genuine all-ones). `Applied` no longer
+implies "MC64 ran" — it means "a non-trivial scaling was applied and
+the solve must undo it." `Solver::scaling_info()` reports `Applied`
+after a B2 cache hit; the fresh-vs-reused distinction is
+`mc64_cache_hit_count()`, not `scaling_info`.
+
+**Evidence.** `mc64_cache_hit_bit_matches_cache_off`: cache-on solve
+was `[0.833…]`, cache-off (oracle) `[0.0833…]` — exactly 10×. After
+the fix, bit-identical across all 3 calls. Full suite 302 lib +
+integration tests green.
+
+## 2026-05-21 — Track B2 value-bounded MC64 cache: ship as latent infrastructure, payoff unproven
+
+**Decision.** The B2 value-bounded MC64 scaling cache lands complete,
+correct, and fully tested, but is recorded as **latent infrastructure
+with no proven corpus payoff**. The project pivots off B2 to the
+per-factor cost-cluster blowup. (Human-approved pivot.)
+
+**Why.** `probe_kkt_replay` validation showed B2 delivers ~zero
+measured speedup on the KKT corpus:
+
+1. **rocket_12800** (the named B2 target) cannot exhibit a cache hit:
+   its corpus dump is 2 iterations and the sparsity pattern *changes*
+   between them (332793 → 435190 nnz, +30%). The pattern fingerprint
+   correctly voids the cache; there is no warm replay to accelerate.
+
+2. **pinene_3200** (10 iters): the cache installs and the fingerprint
+   matches from iter 2 on, but the value-bound gate rejects *every*
+   warm iter on condition 1 (ratio growth: 1.9e8, 7.8e8, 2.5e10,
+   5.6e10 vs budgets 1.2e8 … 3.7e10). The baseline `r0 ≈ 5.8e7`: the
+   MC64-scaled KKT is not remotely diagonally dominant. Root cause —
+   the KKT (2,2)-block rows have a tiny δ-regularized diagonal (≈1e-8)
+   against ≈1 off-diagonals; the off/diag ratio is ≈1/δ, and as the
+   IPM drives δ→0 the ratio explodes 1e8→1e10. The value-bound metric
+   (diagonal dominance of `D·A·D`) tracks the IPM's regularization
+   trajectory, not scaling staleness — it is the wrong instrument, and
+   no `GROWTH_FACTOR` recalibration fixes a confounded metric.
+
+3. **Cost share.** pinene_3200's 10 iters total 493.9 s; iters 6-9
+   alone are 64.8/77.8/135.7/208.2 s — the per-factor cost-cluster
+   blowup, 98 % of wall time. The MC64 Hungarian B2 eliminates is
+   ≤6 s across all 10 iters. B2 optimizes a <2 % slice.
+
+**Consequence.** The cache (`Solver::with_mc64_cache`, default on) and
+the `External` correctness fix stay. They are harmless: the value-bound
+check is O(nnz), well under 1 % of factor cost, and on a genuine hit it
+is provably bit-identical to the no-cache path. The B2 *approach* —
+caching MC64 across IPM iterations gated by a cheap value proxy — is
+recorded as not-yet-viable in `tried-and-rejected.md`. Effort moves to
+the iter 6-9 factor-time explosion, where feral's per-factor cost
+actually lives.
+
+**References.**
+- `dev/journal/2026-05-21-01.org` §18:40, §19:30.
+- `dev/plans/mc64-value-bounded-cache.md` — B2 plan.
+- `src/scaling/value_bound.rs` — the (confounded) gate.
+- `dev/plans/per-factor-cost-cluster.md` — the cluster the pivot targets.
