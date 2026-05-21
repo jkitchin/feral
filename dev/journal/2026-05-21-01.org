@@ -275,3 +275,79 @@ infrastructure; its corpus payoff is unproven and the gate metric
 is the wrong instrument. Refocus on the iter 6-9 factor-time
 explosion — that is where feral's per-factor cost actually lives.
 Recorded in decisions.md and tried-and-rejected.md.
+
+* 20:10 :perf:b2:commit:bench:
+Committed B2 + the External fix as c990def ("feat(scaling):
+value-bounded MC64 scaling cache (B2) + fix External 10× bug",
+11 files, 1351 insertions). Pre-commit fmt+clippy hooks passed.
+Mandatory session-end bench (cargo run --bin bench --release):
+PASS on all four exit-partition buckets — dense small/medium p90
+1.32/1.74, sparse 1.57/1.57 (targets ≤2.0/≤3.0). No regression
+from B2 (scaling-path change, none of the bench corpus is a
+zero-(2,2)-block KKT).
+
+* 20:25 :perf:trackA:pinene:blowup:
+Started Track A — the iter 6-9 pinene_3200 explosion (the user's
+chosen direction). pinene corpus is 10 IPM iterates (0000-0009).
+warm probe_kkt_replay (journal §19:30): iters 6-9 = 64.8 / 77.8 /
+135.7 / 208.2 s, 98% of the 493.9 s total.
+
+Prior history: this IS issue #8. dev/research/
+warm-state-cascade-amplification-2026-05-17.md already DISPROVED
+the warm-state hypothesis — the cascade is structural to the
+iter-N matrix's NUMERIC content, not accumulated Solver state
+(FRESH=1 cascades identically). CB=1 rescues all cascades to
+~0.1 s/iter; the blocked fix path is "proactive cascade-break"
+(plan Track A2). The note's preferred A2 option — symbolic-time
+auto-arm on max_supernode_nrow/n — was itself DISPROVED 2026-05-17
+(cascade/benign width ratios overlap completely).
+
+Direct evidence: ran diag_pinene_pivot_cliff (factors 0008 and
+0009 standalone, per-supernode 2x2 / delayed-pivot stats). The
+probe's stale header claims "0008 fast: 44ms" — FALSE today:
+standalone 0008 ran ~3 min (≈ its warm ~135.7 s). Standalone ≈
+warm confirms the warm-state disproof still holds.
+
+* 20:55 :perf:trackA:pinene:cascade:rootfront:
+diag_pinene_pivot_cliff complete. Both iterates, n=127995,
+nnz=733k, inertia (64000,63995,0):
+
+| metric              |    0008 |    0009 |
+|---------------------+---------+---------|
+| root front nelim    |   15446 |   17538 |   <- ~14% of n, fully dense
+| root n_2x2          |    7064 |    8221 |   <- ~91% of root cols in 2x2
+| root n_delayed_in   |   15341 |   17433 |
+| root work_proxy     |  119.3M |  153.8M |
+| nnz_L               |  128.5M |  165.7M |
+| total_2x2           |   61454 |   62302 |
+| total_delayed       |  116541 |  133648 |
+
+The cascade is unambiguous. The LAST supernode (node 10486) is a
+fully dense ~17.5k x 17.5k ROOT FRONT — nelim = nrow = 17538, no
+trailing block, ~14% of n. Cost ≈ dense LDLT of a 17.5k matrix
+≈ 17538^3/3 ≈ 1.8e12 flops — that is the 208 s.
+
+The three supernodes directly below the root (10483/10484/10485)
+are themselves huge — ncol = 3830 / 17617 / 17926 — but eliminate
+almost NOTHING: nelim = 4 / 11 / 493. They are pure delay
+conduits: ndIn ≈ 3811 / 17601 / 17606, delaying essentially every
+column upward. All real elimination happens at the root.
+
+Mechanism: the zero-(2,2)-block KKT (issue #46 family). As the IPM
+converges δ_c → 0, the (2,2) diagonal vanishes; every (2,2) row
+must be 2x2-paired with a (1,1) row, and Bunch-Kaufman cannot make
+the pairing locally, so the column delays up the tree — all the
+way into the root. 91% of root columns end up in 2x2 pivots. The
+cascade worsens monotonically across IPM iters (root 15446 -> 17538,
+nnz_L 128.5M -> 165.7M, +29%) because δ shrinks each iteration.
+
+Fix lever: cascade-break — force-accept pivots LOW in the tree so
+they stop delaying into the root. Open A2 question: default auto-CB
+(AUTO_CB=0.05) should arm — root delays 17433 >> 0.05*n=6400 — yet
+the warm replay (§19:30) still explodes. Either the pinene pattern
+fingerprint changes between IPM iters (resetting auto-CB state, as
+it provably does on rocket) or bounded-Δ PerturbToEps does not
+break THIS cascade. Next session: measure pinene under explicit
+CB=on and trace the auto-CB arm state. Cross-ref the issue #46 fix
+(session 2026-05-20-03) — same zero-(2,2)-block cascade, smaller
+KKT; check whether its fix path transfers.
