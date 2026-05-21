@@ -4,6 +4,28 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — delayed-pivot cascade amplifier (fine-grained delay) ([#46][i46])
+
+The Bunch-Kaufman driver loops in `src/dense/factor.rs` no longer
+forfeit the whole remaining tail of a supernode on the first delayed
+pivot. Both loops did `Delayed => break` followed by
+`n_delayed = ncol - nelim`, so a single stuck column delayed every
+column after it — the amplifier behind the `pinene_3200` interior-point
+KKT factor-time explosion. The loops now use **fine-grained delayed
+pivoting (swap-to-boundary)**: a stuck column at index `k` is swapped
+with the last still-eligible column and the eligible range shrinks by
+one, so the driver keeps eliminating and a delay forfeits exactly one
+column. This is real delayed pivoting — the stuck column is promoted to
+the parent front intact — so inertia stays exact by construction (no
+force-accept, no perturbation). On `pinene_3200_0009` (n=127995): total
+delayed pivots 133648 → 11309, factor-nonzeros ~165.7M → 3.6M (fill
+blowup 69× → 1.51×), factor time ~183 s → 78 ms, inertia
+`(64000, 63995, 0)` exact and unchanged. The change is bit-identical on
+any matrix with no delayed pivots; all four benchmark exit-partition
+buckets pass with no regression. See
+`dev/research/kkt-cascade-amplifier-2026-05-21.md` and
+`dev/plans/kkt-cascade-fix1-fine-grained-delay.md`.
+
 ### Fixed — `External` scaling produced a silent 10× solve error
 
 `ScalingStrategy::External` is now solve-correct. The factorization

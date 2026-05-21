@@ -116,6 +116,22 @@ n; `nelim = nrow`), ~91 % of root columns in 2×2 pivots, fed by
 delay conduits. The cascade worsens monotonically as the IPM drives
 δ_c→0 (root 15446→17538, `nnz_L` 128.5M→165.7M across two iters).
 
+### A2 — fix the delayed-pivot cascade — FIX 1 DONE 2026-05-21-02
+
+**Fix 1 (fine-grained delay / swap-to-boundary) shipped session
+2026-05-21-02.** Both BK driver loops in `src/dense/factor.rs` now
+swap a stuck column to the fully-summed boundary and decrement
+`ncol_eff` instead of breaking; the new `delay_swap_to_boundary`
+helper does the symmetric swap. On `pinene_3200_0009`: `n_delayed`
+133648→11309, factor_nnz ~165.7M→3.6M (blowup 69×→1.51×), factor
+time ~183 s→78 ms, inertia exact and unchanged (64000,63995,0).
+Bench: all four exit-partition buckets PASS, no regression. The
+residual 11309 delays are the genuine (un-amplified) count from
+Triggers A/B — at 1.51× blowup **Fix 2/3 are not needed**. Plan:
+`dev/plans/kkt-cascade-fix1-fine-grained-delay.md` (status DONE).
+
+Original diagnosis follows.
+
 ### A2 — fix the delayed-pivot cascade — DIAGNOSED 2026-05-21
 
 Full diagnosis: `dev/research/kkt-cascade-amplifier-2026-05-21.md`.

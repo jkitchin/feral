@@ -4013,3 +4013,49 @@ actually lives.
 - `dev/plans/mc64-value-bounded-cache.md` — B2 plan.
 - `src/scaling/value_bound.rs` — the (confounded) gate.
 - `dev/plans/per-factor-cost-cluster.md` — the cluster the pivot targets.
+
+## 2026-05-21 — BK driver delays one column at a time (swap-to-boundary), not break-on-first (#46)
+
+**Decision.** Both Bunch-Kaufman driver loops in `src/dense/factor.rs`
+(the plain driver `factor_frontal_in_place_with_scratch_impl` and the
+panel driver) use **fine-grained delayed pivoting**: when the pivot at
+column `k` returns `Delayed`, the driver swaps that column to the
+last still-eligible position (`ncol_eff - 1`), decrements `ncol_eff`,
+and keeps eliminating at `k`. The prior behaviour — `Delayed => break`
+then `n_delayed = ncol - nelim` — is removed. A delay now forfeits
+exactly one column instead of the whole remaining supernode tail.
+
+**Why.** On the `pinene_3200` interior-point KKT the break-on-first
+behaviour was a cascade *amplifier*: 3936 genuine scalar delay events
+became `n_delayed = 133648` (~34 forfeited columns per event), a 69×
+fill blowup and a ~183 s factor. The static-pivoting config
+(`n_delayed = 0`, 1.25× factor) proved the forfeited tail columns are
+pivotable — the break threw away real, doable work. Diagnosis:
+`dev/research/kkt-cascade-amplifier-2026-05-21.md`.
+
+**Why this is correctness-safe.** Swap-to-boundary is *real* delayed
+pivoting, not force-accept or perturbation — the stuck column is
+promoted to the parent front intact and re-attempted there with more
+context. Inertia stays exact by construction. A `PivotOutcome::Delayed`
+return leaves the front clean (columns `[k, nrow)` consistently
+updated through pivot `k-1`), so the symmetric swap of two
+un-eliminated columns introduces no inconsistency. The multifrontal
+driver already maps the contribution block through `ff.perm`
+(`factorize.rs` builds contrib row indices as
+`row_indices[ff.perm[nelim + cj]]`), so the order of delayed columns
+within the block does not matter. The change is bit-identical on any
+matrix with no delayed pivots, and `may_delay == false` (root
+supernode) never returns `Delayed` so root behaviour is unchanged.
+
+**Evidence.** `pinene_3200_0009` (n=127995): `n_delayed`
+133648 → 11309, factor-nonzeros ~165.7M → 3.6M (blowup 69× → 1.51×),
+factor time ~183 s → 78 ms, inertia `(64000, 63995, 0)` exact and
+unchanged. New tests `tests/fine_grained_delay.rs` (oracle: Bunch &
+Kaufman 1977 pivot admissibility). Full suite + clippy green; bench
+all four exit-partition buckets PASS.
+
+**References.**
+- `dev/research/kkt-cascade-amplifier-2026-05-21.md` — the diagnosis.
+- `dev/plans/kkt-cascade-fix1-fine-grained-delay.md` — the plan.
+- `dev/journal/2026-05-21-02.org` — implementation/test/benchmark log.
+- `dev/sessions/2026-05-21-02.md` — session checkpoint.

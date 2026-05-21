@@ -1400,13 +1400,22 @@ fn factor_frontal_in_place_with_scratch_impl(
     // MAXFROMM cache: live across `scalar_pivot_step` calls within
     // this front. Always start empty (no prior pivot for `k=0`).
     let mut cached_maxfromm: Option<f64> = None;
+    // Fine-grained delayed pivoting (Track A2 / Fix 1): columns still
+    // eligible for elimination are [k, ncol_eff). When a pivot delays,
+    // `delay_swap_to_boundary` moves the stuck column out to
+    // `ncol_eff - 1` and shrinks the range, so a delay forfeits one
+    // column instead of the whole supernode tail. `may_delay == false`
+    // never yields `Delayed`, so `ncol_eff` then stays `== ncol` and
+    // this path is byte-identical to the pre-fix loop.
+    let mut ncol_eff = ncol;
 
-    // Factor only the first ncol columns. Pivot search restricted to [k, ncol).
-    while k < ncol {
+    // Factor only the first ncol columns. Pivot search is restricted to
+    // [k, ncol_eff); `ncol_eff` shrinks as stuck columns are delayed.
+    while k < ncol_eff {
         match scalar_pivot_step(
             a,
             nrow,
-            ncol,
+            ncol_eff,
             k,
             may_delay,
             params,
@@ -1420,7 +1429,12 @@ fn factor_frontal_in_place_with_scratch_impl(
             &mut cached_maxfromm,
         )? {
             PivotStepResult::Advanced(n) => k += n,
-            PivotStepResult::Delayed => break,
+            PivotStepResult::Delayed => {
+                delay_swap_to_boundary(a, nrow, k, &mut ncol_eff, &mut perm);
+                // The column now at `k` changed; drop the stale
+                // MAXFROMM stash (it described the swapped-out column).
+                cached_maxfromm = None;
+            }
         }
     }
 
@@ -1716,8 +1730,14 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     let mut cached_maxfromm: Option<f64> = None;
 
     let mut k = 0;
-    while k < ncol {
-        let remaining = ncol - k;
+    // Fine-grained delayed pivoting (Track A2 / Fix 1) — see the plain
+    // driver and `delay_swap_to_boundary`. The eligible elimination
+    // range is [k, ncol_eff); a delayed pivot is swapped out to the
+    // boundary instead of breaking the loop. `may_delay == false` never
+    // delays, so `ncol_eff` then stays `== ncol`.
+    let mut ncol_eff = ncol;
+    while k < ncol_eff {
+        let remaining = ncol_eff - k;
         // Scalar tail engages when too few columns are left to amortize
         // the deferred-Schur dispatch. With W-1 the first panel may
         // process all `ncol` columns when `ncol <= bs`; subsequent
@@ -1731,7 +1751,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             match scalar_pivot_step(
                 &mut *a,
                 nrow,
-                ncol,
+                ncol_eff,
                 k,
                 may_delay,
                 params,
@@ -1748,7 +1768,10 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
                     diag_add(&panel_diag::PIVOTS_SCALAR, n as u64);
                     k += n;
                 }
-                PivotStepResult::Delayed => break,
+                PivotStepResult::Delayed => {
+                    delay_swap_to_boundary(&mut *a, nrow, k, &mut ncol_eff, &mut perm);
+                    cached_maxfromm = None;
+                }
             }
             continue;
         }
@@ -1766,7 +1789,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         let (n_elim, status) = lblt_panel_frontal(
             &mut *a,
             nrow,
-            ncol,
+            ncol_eff,
             k,
             panel_cap,
             may_delay,
@@ -1815,13 +1838,13 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             PanelStatus::Full => {}
             PanelStatus::ScalarFallback | PanelStatus::ScalarFallbackPeekedNext => {
                 // One scalar step to handle the 2×2/swap case the panel declined.
-                if k >= ncol {
+                if k >= ncol_eff {
                     break;
                 }
                 match scalar_pivot_step(
                     &mut *a,
                     nrow,
-                    ncol,
+                    ncol_eff,
                     k,
                     may_delay,
                     params,
@@ -1838,10 +1861,23 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
                         diag_add(&panel_diag::PIVOTS_SCALAR, n as u64);
                         k += n;
                     }
-                    PivotStepResult::Delayed => break,
+                    PivotStepResult::Delayed => {
+                        delay_swap_to_boundary(&mut *a, nrow, k, &mut ncol_eff, &mut perm);
+                        cached_maxfromm = None;
+                    }
                 }
             }
-            PanelStatus::Delayed => break,
+            // Fine-grained delay (Track A2 / Fix 1): the panel stopped
+            // because the pivot at column `k` (the value after the
+            // `k += n_elim` above) was rejected under the `may_delay`
+            // contract. `apply_blocked_schur` already brought the
+            // trailing columns current, so the front is clean — swap
+            // the stuck column to the boundary and keep eliminating
+            // instead of forfeiting the supernode tail.
+            PanelStatus::Delayed => {
+                delay_swap_to_boundary(&mut *a, nrow, k, &mut ncol_eff, &mut perm);
+                cached_maxfromm = None;
+            }
         }
     }
 
@@ -3920,6 +3956,41 @@ fn symmetric_row_offdiag_max(a: &[f64], n: usize, k: usize, r: usize) -> f64 {
 
 /// Swap rows and columns p and q in the lower triangle of the working matrix,
 /// and update the permutation vector.
+/// Fine-grained delayed pivoting (Track A2 / Fix 1).
+///
+/// The Bunch-Kaufman pivot at column `k` delayed. Rather than breaking
+/// the driver loop — which forfeits the whole remaining tail of the
+/// supernode as delayed pivots (the cascade amplifier, see
+/// `dev/research/kkt-cascade-amplifier-2026-05-21.md`) — swap the stuck
+/// column out to the fully-summed boundary `*ncol_eff - 1` and shrink
+/// the eligible range. The driver then keeps eliminating at `k`, so a
+/// delay forfeits exactly one column.
+///
+/// Sound because a `Delayed` return leaves the front clean (see
+/// `PivotOutcome::Delayed`): columns `[k, nrow)` are consistently
+/// updated through pivot `k-1`, so this symmetric swap of two
+/// un-eliminated columns introduces no inconsistency. `swap_rows_cols`
+/// records the permutation in `perm`; the multifrontal driver maps the
+/// contribution block back through `perm` (`factorize.rs` builds the
+/// contrib row indices as `row_indices[ff.perm[nelim + cj]]`), so the
+/// order of delayed columns within the block does not matter.
+#[inline]
+fn delay_swap_to_boundary(
+    a: &mut [f64],
+    nrow: usize,
+    k: usize,
+    ncol_eff: &mut usize,
+    perm: &mut [usize],
+) {
+    debug_assert!(
+        k < *ncol_eff,
+        "stuck column {k} must lie within the eligible range [k, {})",
+        *ncol_eff,
+    );
+    *ncol_eff -= 1;
+    swap_rows_cols(a, nrow, k, *ncol_eff, perm);
+}
+
 fn swap_rows_cols(a: &mut [f64], n: usize, p: usize, q: usize, perm: &mut [usize]) {
     if p == q {
         return;

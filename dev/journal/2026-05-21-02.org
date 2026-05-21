@@ -1,0 +1,125 @@
+#+TITLE: FERAL session journal 2026-05-21-02
+#+STARTUP: showeverything
+
+* 15:10 :session-start:track-a2:fix1:
+Session goal handed over from 2026-05-21-01 checkpoint: implement
+Fix 1 — fine-grained delayed pivoting (swap-to-boundary) for the
+pinene KKT cascade amplifier. Research note already written:
+dev/research/kkt-cascade-amplifier-2026-05-21.md. Correctness-
+critical (touches the pivot/inertia path); FERAL lifecycle =
+research(done) -> code inspection -> plan -> tests-first ->
+implement -> benchmark.
+
+* 15:35 :code-inspection:fix1:
+Inspected the two BK driver functions in src/dense/factor.rs:
+- Plain driver `factor_frontal_in_place_with_scratch_impl`, loop
+  1405-1425, single delay site 1423 (`Delayed => break`).
+- Panel driver, loop 1719-1846, three delay sites: 1751 (scalar
+  tail), 1841 (scalar fallback after panel), 1844
+  (`PanelStatus::Delayed`).
+Both compute `nelim = k; n_delayed = ncol - nelim` after the loop.
+
+Key findings that de-risk swap-to-boundary:
+1. `PivotOutcome::Delayed` docstring (factor.rs:1115-1118): "The
+   kernel has not mutated any state for the failed pivot." So at
+   delay time the front columns [k..nrow) are consistently updated
+   through pivot k-1 — a clean symmetric swap of column k with
+   column ncol_eff-1 is valid.
+2. `swap_rows_cols(a, n, p, q, perm)` (factor.rs:3923) is the
+   existing symmetric-swap helper; updates `perm`, no-ops on p==q.
+3. CRITICAL: the multifrontal driver already consumes a permuted
+   contribution block. factorize.rs:2267 builds the contrib block's
+   global row indices as `row_indices[ff.perm[node_nelim + cj]]` —
+   it applies `ff.perm` over the WHOLE contrib range, not assuming
+   `perm[nelim..nrow]` is identity. So permuting `perm[nelim..ncol)`
+   via swap-to-boundary is consumed correctly; delayed-column
+   ordering within the block does not matter.
+4. swap-to-boundary only swaps columns in [0,ncol) — `perm[ncol..nrow)`
+   stays identity, contrib values + indices stay consistent.
+5. Termination: each iteration either advances k (Advanced) or
+   decrements ncol_eff (Delayed); `ncol_eff - k` strictly decreases
+   -> O(ncol) iterations, no infinite loop.
+
+Existing kernel delayed-pivot tests (tests/delayed_pivoting.rs)
+checked: `factor_frontal_partial_elim_with_delay` and
+`..._delays_first_pivot...` both use genuinely-stuck PAIRS (mutually
+coupled, 2×2 fails growth bound), so swap-to-boundary still delays
+both — those tests are unchanged by Fix 1. Confirmed by hand-tracing
+`block_diagonal_partial_frontal`.
+
+* 16:20 :tests-first:fix1:
+Wrote tests/fine_grained_delay.rs with two tests before touching
+factor.rs. Oracle = Bunch & Kaufman 1977 pivot admissibility: the
+fixtures are built so exactly ONE column is provably stuck (near-zero
+diagonal 1e-14, only coupling = out-of-front trailing row → no 1×1,
+no 2×2 partner) and every other fully-summed column is provably
+pivotable (positive diagonal, no off-diagonal → gamma0=0). External
+math, not read off the impl.
+- T1 plain driver: 5×5, ncol=4 → expect nelim=3, n_delayed=1,
+  inertia=(3,0,0), perm[3]=1, contrib holds the stuck column.
+- T2 panel driver: ncol=12 (>= PANEL_MIN_NCOL=8) → expect
+  nelim=11, n_delayed=1, inertia=(11,0,0), perm[11]=1.
+Both FAIL before the fix (expected, tests-first): `nelim: left 1,
+right 3` and `left 1, right 11` — break-on-first forfeits the
+pivotable tail.
+
+* 16:45 :implement:fix1:
+Implemented swap-to-boundary in src/dense/factor.rs. Added the
+`delay_swap_to_boundary(a, nrow, k, &mut ncol_eff, &mut perm)`
+helper (factor.rs:3977) — decrements `*ncol_eff`, then
+`swap_rows_cols(a, nrow, k, *ncol_eff, perm)`. Converted both BK
+driver loops:
+- Plain driver `factor_frontal_in_place_with_scratch_impl`:
+  `let mut ncol_eff = ncol`; loop guard `k < ncol_eff`;
+  `scalar_pivot_step(.., ncol_eff, ..)`; `Delayed => break` becomes
+  `delay_swap_to_boundary(..)` + `cached_maxfromm = None` (the stale
+  MAXFROMM stash described the swapped-out column).
+- Panel driver: `ncol_eff` introduced; loop guard `k < ncol_eff`;
+  `remaining = ncol_eff - k`; `lblt_panel_frontal(.., ncol_eff, ..)`;
+  all three delay sites (scalar tail, scalar fallback,
+  `PanelStatus::Delayed`) converted the same way.
+Post-loop `nelim = k; n_delayed = ncol - nelim` UNCHANGED in both —
+at exit `nelim == ncol_eff`, and `n_delayed` uses the original
+`ncol`. After the fix the new tests pass; delayed_pivoting (6) and
+issue_46_saddle_kkt_cascade (1) regression guards stay green.
+
+* 17:10 :validation:fix1:test-green:clippy-clean:
+Full `cargo test` green: 302 lib + all integration suites,
+0 failed. `cargo clippy --all-targets -- -D warnings` clean
+(exit 0).
+
+* 17:25 :benchmark:fix1:pinene:cascade-broken:
+Ran `probe_issue46_supernode pinene_3200_0009.mtx` (n=127995,
+nnz(lower)=732976, 63995 MC64 pairs). Fix 1 breaks the cascade:
+
+  | metric      | before Fix 1 | after Fix 1 |
+  |-------------|-------------:|------------:|
+  | n_delayed   |       133648 |       11309 |
+  | factor_nnz  |      ~165.7M |     3601077 |
+  | blowup      |          69x |       1.51x |
+  | factor time |       ~183 s |        78 ms |
+  | inertia     | (64000,63995,0) | (64000,63995,0) |
+
+Inertia EXACT and unchanged — (64000,63995,0), 64000+63995=127995=n,
+zero count 0. Saddle-point inertia theorem satisfied. ~2350x factor
+speedup; blowup 69x -> 1.51x. The static (no-delay) config gives
+blowup 1.25x but inertia (64001,63994,0) — one eigenvalue
+misclassified by force-accept; the delayed path is now both fast AND
+inertia-exact, which static pivoting is not.
+
+Residual delays remain (n_delayed=11309): panel_diag shows
+scalar_2x2_delay_growth=6014, scalar_1x1_delay=4850 — Triggers A/B
+from the research note. Fix 1 removed the amplifier; the residual
+11309 is the genuine delay count without forfeiture. At 1.51x blowup
+/ 78 ms this is well inside budget — Fix 2/3 are not needed.
+
+* 17:40 :benchmark:bench:no-regression:
+`cargo run --bin bench --release` — all four exit-partition buckets
+PASS, no regression from Fix 1:
+  dense  small-frontal p90 1.33 (was 1.32)  <= 2.0  PASS
+  dense  medium        p90 1.75 (was 1.74)  <= 3.0  PASS
+  sparse small-frontal p90 1.52 (was 1.57)  <= 2.0  PASS
+  sparse medium        p90 1.52 (was 1.57)  <= 3.0  PASS
+Sparse buckets improved slightly (1.57 -> 1.52); dense unchanged
+within noise. Fix 1 is byte-identical on any matrix with no delays,
+so the corpus-wide neutrality is expected. Track A2 / Fix 1 done.
