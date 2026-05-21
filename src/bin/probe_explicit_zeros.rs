@@ -113,11 +113,17 @@ fn run(label: &str, csc: &CscMatrix, rhs: &[f64], repeat: usize) {
             Err(_) => f64::NAN,
         };
         let tag = if call == 0 { "cold" } else { "warm" };
+        let scaling = s
+            .scaling_info()
+            .map(|si| format!("{si:?}"))
+            .unwrap_or_else(|| "-".to_string());
         println!(
             "  call {call} ({tag:<4}) factor_ms={ms:>8.1}  factor_nnz={fnnz:<9}  \
-             symbolic_calls={}  mc64_cache_hits={}  inertia={inertia:<16} rel_res={rel:.2e}  {status:?}",
+             symbolic_calls={}  mc64_cache_hits={}  mc64_fallbacks={}  inertia={inertia:<16} \
+             rel_res={rel:.2e}  scaling_info={scaling}  {status:?}",
             s.symbolic_call_count(),
             s.mc64_cache_hit_count(),
+            s.mc64_fallback_count(),
         );
     }
     println!();
