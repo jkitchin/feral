@@ -109,3 +109,39 @@ The stripped matrix's MC64 returns Applied — so explicit zeros are the
 is therefore the root-cause fix, not a workaround. Orthogonal option: a
 negative cache (remember MC64-degenerate fingerprints, skip the wasted
 Hungarian). Posted the corrected mechanism on #47.
+
+* 19:10 :issue47:mc64:reference:mumps:ssids:
+Asked what MUMPS 5.8.2 and SPRAL SSIDS do with explicit zeros, to
+inform the #47 fix scope. Spawned mumps-expert and spral-expert.
+
+Both converge: NEITHER strips explicit zeros from the input matrix or
+the analysis pattern. Analysis (ordering, etree, symbolic) is
+value-blind; the stored pattern incl. zeros is the contract. Stripping
+at input would change etree/fill and break the value<->pattern index
+map. This confirms the "do NOT strip the whole matrix" caution
+(value-dependent fingerprint -> re-analysis churn).
+
+The matching/scaling kernels handle zeros locally:
+- SSIDS (scaling.f90:640 hungarian_wrapper, :1524 auction_match,
+  match_order.f90:100): builds a private working copy and does
+  `if (val == 0.0) cycle` BEFORE `log(|val|)`. A stored zero = non-edge
+  for the matching. An explicit-zero (2,2) diagonal -> that column is
+  unmatched -> Duff-Pralet correction (scaling.f90:767-800) sets its
+  scale from matched neighbors, 1/0=1 convention -> scaling bounded.
+  Equilibration is max-based, needs no strip (`where(maxentry>0)`).
+- MUMPS (dana_aux.F:3854-3860): keeps zeros in the Hungarian but maps a
+  zero-valued edge to a large FINITE cost FACT+RINF (not log(0)=-inf,
+  not removal); RINF is a matrix-scaled infinity surrogate. Post-match
+  guard: scale factor > 0.5*log(huge/2N) -> warn-and-proceed. Norm
+  scalings: row/col max==0 -> scale 1.0.
+
+Implication for #47: the fix is NOT a matrix-level strip. It is ~5
+lines in feral's MC64 symmetric Hungarian kernel — drop explicit zeros
+from the matching working copy before the log transform (SSIDS style),
+and handle the resulting unmatched columns (Duff-Pralet correction or
+identity for that column). feral currently feeds zeros into the
+matching -> log(0) garbage -> 3e82 degenerate scaling ->
+Mc64ScalingDegenerate -> InfNorm fallback -> cache never populates.
+feral already has the MUMPS-style "detect degeneracy + fall back" half;
+it lacks the SSIDS-style "don't feed log(0)" half. Smaller and
+lower-risk than the from_triplets canonicalization considered earlier.
