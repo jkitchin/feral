@@ -6,10 +6,12 @@ no measured corpus payoff (gate metric confounded by the IPM δ
 trajectory; MC64 is <2 % of factor cost vs the iter 6-9 blowup). See
 `decisions.md` / `tried-and-rejected.md` 2026-05-21. Effort moved to
 **Track A**. A1 done 2026-05-21 (pinene cascade characterized — see
-below). A2 reframed 2026-05-21: it is the issue #46 zero-(2,2)-block
-cascade, and the fix is extending the matching-aware kernel, not
-arming CB (CB gives 100× but corrupts inertia). A2 is the next
-implementation task.
+below). A2 diagnosed 2026-05-21 via scalar-path delay-cause
+instrumentation — see `dev/research/kkt-cascade-amplifier-2026-05-21.md`.
+The cascade is an **amplifier × two triggers**, NOT "the 2×2 stability
+gate" (the earlier framing was an over-read; corrected below). The
+recommended fix is **fine-grained delay** (swap-to-boundary), which
+is the next implementation task — pending a tests-first plan.
 **Date:** 2026-05-21
 **Research note:** `dev/research/per-factor-cost-cluster-2026-05-21.md`
 (see §10 for the B1 findings that revise this plan)
@@ -114,53 +116,59 @@ n; `nelim = nrow`), ~91 % of root columns in 2×2 pivots, fed by
 delay conduits. The cascade worsens monotonically as the IPM drives
 δ_c→0 (root 15446→17538, `nnz_L` 128.5M→165.7M across two iters).
 
-### A2 — make bounded-Δ cascade-break inertia-exact — THE REAL FIX
+### A2 — fix the delayed-pivot cascade — DIAGNOSED 2026-05-21
 
-`CB=on` (forced `cascade_break(0.5, eps=1e-10)` every factor) gives a
-**100× speedup** on pinene — 493.9 s → 4.86 s, iter 6-9 fronts from
-64-208 s to ~45 ms. **But iter 9 returns `WrongInertia`** (got
-63999/63995/**1**, want .../0): the `PerturbToEps` absolute floor
-1e-10 is below the inertia zero-tolerance, so a force-accepted
-near-zero pivot still classifies as zero on the most-converged
-iterate. This is the *same* inadmissibility issue #46 already recorded
-for its `allow_delayed_pivots=false` control ("breaks the cascade but
-gets the inertia wrong … not an admissible fix").
+Full diagnosis: `dev/research/kkt-cascade-amplifier-2026-05-21.md`.
+Scalar-path delay-cause instrumentation (new `panel_diag` counters)
++ `probe_issue46_supernode pinene_3200_0009.mtx` localized the
+cascade as an **amplifier × two triggers**:
 
-So A2 is **not** "arm CB by default" (the symbolic arm was already
-disproved in `warm-state-cascade-amplification-2026-05-17.md`; and an
-armed CB that corrupts inertia is inadmissible regardless of *when* it
-arms). The #46 kernel fix (matching-aware 2×2 partner in
-`scalar_pivot_step`) is already in pinene's production path
-(`preproc=LdltCompress` confirmed) yet pinene still cascades — so #46
-did not fully cover pinene. A2 must:
+- **Amplifier — break-on-first-delay.** The BK driver loop
+  (`factor.rs:1719-1849`) does `Delayed => break` then
+  `n_delayed = ncol - nelim`: one delayed pivot forfeits the whole
+  remaining tail of the supernode. 3936 delay events →
+  `n_delayed = 133648` (~34 columns/event). Config 2 (static
+  pivoting, `n_delayed=0`, healthy 1.25× factor) proves the
+  forfeited columns are pivotable — the forfeit throws away work.
+- **Trigger A — split MC64 pairs (2840 events).** 1×1 delays whose
+  matched partner is not co-located (`a[k][k+1]==0` →
+  `partner=None`). Lines up with the 3781 split-across-supernodes
+  pairs — the residual #46 co-location gap.
+- **Trigger B — growth-bound rejection (1096 events).** Co-located
+  saddle 2×2 candidates that failed the Duff-Reid growth bound (816
+  with `det<0`, genuine indefinite saddles). The SSIDS det floor
+  fires 0 times — not involved.
 
-1. **Localized — DONE 2026-05-21.** `probe_issue46_supernode
-   pinene_3200_0009.mtx`: co-location is good (93.9 % of MC64 pairs
-   adjacent, symbolic estimate 2.4M), so #46's gaps A/B are clear.
-   The production path cascades anyway — `panel_diag` dominant
-   fallback **`fallback_2x2_need_swap_or_bound = 31542`** (the *same*
-   fallback that was #46's CHO culprit). #46 widened the 2×2
-   *search* so the kernel finds the co-located partner `k+1`; on
-   pinene the partner *is* found but the `{k,k+1}` 2×2 candidate is
-   then **rejected at the numerical stability gate** → delayed →
-   cascade. Static pivoting force-accepts the same columns as 1×1,
-   which is fast (52 ms, 1.25×) but wrong by one sign
-   (inertia 64001/63994 vs 64000/63995).
-2. **Fix the 2×2 stability gate for saddle pivots.** Read the
-   `fallback_2x2_need_swap_or_bound` path in `src/dense/factor.rs`
-   (`scalar_pivot_step` and the panel inline-2×2). A genuine saddle
-   2×2 `[[0,b],[b,a]]` has `det = -b² < 0` — a legitimate indefinite
-   pivot (one +, one −), inertia-exact by construction. Find why
-   pinene's saddle 2×2s fail the swap-or-bound check and admit them.
-   This is the correct fix vs. CB's perturb-and-hope. **Correctness-
-   critical** — write a research note first, tests-first, oracle from
-   the saddle-point inertia theorem (Benzi/Golub/Liesen 2005 §3.4),
-   exactly as #46 did.
-3. **If a residual cascade remains**, make bounded-Δ CB inertia-exact:
-   scale `cascade_break_eps` by `||A||_∞` (the factorize.rs:2206-2209
-   comment already prescribes this and neither `CB=1` nor the auto-CB
-   path at solver.rs:638 does it) so the perturbation clears the
-   zero-tolerance, and sign the perturbation to preserve inertia.
+**Correction to the earlier framing.** Prior plan/journal text said
+A2 is "fix the 2×2 stability gate" and pointed at
+`fallback_2x2_need_swap_or_bound=31542`. That was an over-read:
+`need_swap_or_bound` is the *panel delegating* a swap-2×2 case to
+`scalar_pivot_step`, not a rejection. The true delay split is
+2840 (1×1) / 1096 (2×2 growth) / 0 (det floor).
+
+**Recommended fix (research note §6), in order:**
+
+1. **Fix 1 — fine-grained delay (swap-to-boundary).** PRIMARY.
+   Replace `Delayed => break` with: swap the stuck column to the
+   fully-summed boundary, decrement `ncol_eff`, keep eliminating.
+   Forfeits 1 column per stuck pivot, not ~34. Inertia-exact by
+   construction (real delayed pivoting; no force-accept, no
+   perturbation). Largest single lever, independent of the
+   matching machinery. The panel path (`PanelStatus::Delayed`
+   break, `factor.rs:1844`) needs the same treatment for
+   generality — though `pinene` has `PANEL_DELAYED=0`.
+2. **Fix 2 — matching-aware growth-bound exemption** for co-located
+   MC64-matched saddle 2×2s (≤1096 events). Only if a residual
+   cascade remains after Fix 1.
+3. **Fix 3 — tighter co-location** for split pairs (analysis-phase,
+   `ldlt_compress.rs`). Deepest; only if triggers A still dominate.
+
+**Correctness-critical** — Fix 1 touches the pivot/inertia path.
+Needs a tests-first plan; oracle = saddle-point inertia theorem
+(Benzi/Golub/Liesen 2005 §3.4), exactly as #46 did. Do **not** ship
+`cascade_break` as the production fix (100× speedup but corrupts
+iter-9 inertia — same inadmissibility as `allow_delayed_pivots=false`).
+The bounded-Δ CB repair stays a fallback only.
 
 Cross-check: `dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md`
 (the #46 fix), `dev/research/cascade-break.md`.

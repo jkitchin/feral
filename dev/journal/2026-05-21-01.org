@@ -422,3 +422,87 @@ find why pinene's legitimate saddle 2×2s fail the swap-or-bound
 check. That kernel change — not CB, not arming — is the A2 fix.
 It is correctness-critical: research note + tests-first, oracle
 from the saddle-point inertia theorem (as #46 did).
+
+* 14:08 :perf:trackA:pinene:issue46:instrumentation:rootcause:correction:
+Added scalar-path delay-cause counters to panel_diag in
+src/dense/factor.rs (SCALAR_2X2_DELAY_{GROWTH,DET,BOTH,NEGDET},
+SCALAR_1X1_DELAY{,_TINY}; profiling-gated, zero prod overhead) and
+re-ran probe_issue46_supernode on pinene_3200_0009.mtx. The result
+CORRECTS the §20:55 / §21:55 over-read above — those entries claimed
+the cascade is "the {k,k+1} 2x2 candidate REJECTED at the numerical
+stability gate (fallback_2x2_need_swap_or_bound)". Code inspection +
+these counters disprove that:
+
+1. fallback_2x2_need_swap_or_bound (31542) is NOT a rejection. It is
+   the PANEL declining an inline 2x2 (mid-panel swap needed, or
+   col+1>=ncol) and DELEGATING to scalar_pivot_step. Not a delay.
+
+2. The actual delay site is scalar_pivot_step (factor.rs ~3304 for
+   2x2, ~3471 in try_reject_1x1_frontal for 1x1). Config 1 (the
+   production path, LdltCompress+delayed), pinene_3200_0009, 183 s,
+   n_delayed=133648:
+     scalar_2x2_delay_growth = 1059  (Duff-Reid growth bound)
+     scalar_2x2_delay_both   =   37  (growth AND det floor)
+     scalar_2x2_delay_det    =    0  (SSIDS det floor ALONE: never)
+     scalar_2x2_delay_negdet =  816  (of the 1096 2x2 delays, det<0)
+     scalar_1x1_delay        = 2840  (1x1 column-relative threshold)
+     scalar_1x1_delay_tiny   =    0  (of the 2840, |d|<=zero_tol)
+   Total delay EVENTS = 1059+37+2840 = 3936. The SSIDS det floor
+   plays NO role (0). The 2x2 stability gate that does fire is the
+   Duff-Reid GROWTH bound (1096), and the 1x1 threshold (2840) is the
+   bigger contributor, not the 2x2 gate.
+
+3. THE AMPLIFIER. 3936 delay events but n_delayed=133648 -> ~34
+   columns per event. Cause: the BK driver loop (factor.rs:1719-1849)
+   does `PivotStepResult::Delayed => break` then `nelim=k;
+   n_delayed=ncol-nelim`. ONE delayed pivot forfeits the ENTIRE
+   remaining tail of the supernode. The cascade is event_count x
+   tail_length, and the tail-forfeit is the multiplier.
+
+4. The 2840 1x1 delays are NOT zero-diagonal saddle columns
+   (scalar_1x1_delay_tiny=0): every one has zero_tol < |d| <=
+   pivot_threshold*col_max. They are small-but-nonzero pivots whose
+   2x2 partner is NOT co-located (a[k][k+1]==0 -> partner=None ->
+   last-resort 1x1). These line up with the 3781 split-across-
+   supernodes MC64 pairs (probe header) -> the residual #46
+   co-location gap: #46 co-locates 93.9%, the other ~6% split and
+   delay until they reach a front holding their partner.
+
+5. The 1096 2x2 delays ARE co-located saddle pairs that DID form a
+   {k,k+1} 2x2 candidate, then failed the Duff-Reid growth bound;
+   816 are genuine indefinite saddles (det<0, one+/one-,
+   inertia-exact by construction).
+
+KEY EVIDENCE for the fix: config 2 (static, allow_delayed=false)
+force-accepts every pivot, n_delayed=0, and produces a HEALTHY 1.25x
+factor (2.99M nnz, 50 ms) -- only ONE wrong inertia sign
+(64001,63994 vs 64000,63995). So when stuck pivots are set aside,
+the REST of every supernode is pivotable. That makes fine-grained
+delay (swap the stuck column to the front boundary and KEEP
+eliminating, instead of `break`) a promising inertia-exact fix for
+the amplifier: it would forfeit 1 column per stuck pivot, not ~34.
+Next: write the A2 research note covering (a) amplifier fix
+swap-to-boundary, (b) trigger A = better co-location for split
+pairs, (c) trigger B = matching-aware growth-bound exemption for
+co-located saddle 2x2s. Correctness-critical: research note ->
+tests-first -> implement, oracle = saddle-point inertia theorem.
+
+* 14:42 :session-end:checkpoint:commit:
+Closed the A2-diagnosis session. Committed the diagnostic work as
+70f2e44 (diag(dense): localize pinene KKT cascade — amplifier × two
+triggers): the 6 new panel_diag counters in src/dense/factor.rs, the
+probe PROBE_ALL gate, and the research note
+dev/research/kkt-cascade-amplifier-2026-05-21.md. cargo test --lib
+302 passed; clippy --all-targets -D warnings clean; pre-commit
+fmt+clippy hooks passed.
+
+Corrected the over-read in the checkpoint (2026-05-21-01.md) and the
+plan (per-factor-cost-cluster.md): the A2 "Track A2 investigation"
+section and "Next Session Should" now carry the amplifier × two-
+triggers diagnosis, and item 1 of Next Session is "Fix 1,
+fine-grained delay (swap-to-boundary)" — not "fix the 2×2 stability
+gate". bench unchanged from the checkpoint (148/152k dense,
+153/153k sparse buckets all PASS; instrumentation is profiling-gated,
+zero overhead). The fix itself (Fix 1) is correctness-critical and
+is next session's work — tests-first, oracle = saddle-point inertia
+theorem.
