@@ -1,0 +1,101 @@
+* 2026-05-21 Session 01 — per-factor cost cluster profiling
+
+* 13:00 :issue38:closeout:
+Closed issue #38 (rocket_12800: BOTH CB modes fail). Both failure
+modes were resolved across earlier sessions and the journal of
+2026-05-17-01 already recorded "#38 is closed by two complementary
+outcomes" — the GitHub issue had simply been left open. Posted a
+closing summary comment (Failure A = stale MC64 cache, fixed
+db20166 + auto-CB f1da854; Failure B = root-caused as a genuine
+2x2 sign-on-the-cusp via 1c36f2d, static-pivot knob 0d874f5).
+Sister issue #37 was already closed.
+
+* 13:30 :perf:cluster:scope:
+User observation: the #38 residual (rocket ~4.67x MA57 per-factor)
+plus issue #44 (NARX_CFy times out) point to a coherent body of
+per-factor performance work. Open issues #44/#47/#38-residual are
+all per-factor cost. Decision: cross-cutting profiling pass over
+the 6-problem Mittelmann loss cluster (NARX_CFy, rocket_12800,
+marine_1600, robot_1600, corkscrw, arki0003) BEFORE any code, to
+establish one-mechanism-vs-several.
+
+* 14:00 :perf:cluster:data-inventory:
+KKT corpora present locally under data/matrices/kkt-mittelmann/
+(gitignored). Counts: arki0003 66 mtx, marine_1600 18, NARX_CFy 3,
+robot_1600 7, rocket_12800 2. corkscrw dir empty (0 mtx) — dropped
+from this pass. probe_kkt_replay is the right tool (warm replay
+through one Solver, per-call factor time + inertia vs json oracle).
+
+* 14:30 :perf:cluster:cb-discriminator:headline:
+Ran probe_kkt_replay on the 5 problems under default (AUTO_CB=0.05)
+and CB=on. The CB=on experiment cleanly separates TWO mechanisms.
+
+Default totals / CB=on totals:
+| problem      | default | CB=on  | CB helps? |
+|--------------+---------+--------+-----------|
+| arki0003     |  1.441s | 1.502s | no        |
+| robot_1600   |  0.633s | 0.199s | YES ~3x   |
+| NARX_CFy     |  1.641s | 1.733s | no        |
+| rocket_12800 |  6.455s | 6.632s | no        |
+| marine_1600  | 24.485s |10.520s | YES ~2.3x |
+
+Per-call detail:
+- robot_1600: iter1 0.473s -> 0.054s under CB. One cascade spike.
+- marine_1600: iter9 14.651s -> 0.588s under CB. One cascade spike.
+- marine_1600: WrongInertia at iters 10/14/16/17 PERSISTS under
+  CB=on (got 38409/38392/6 etc, want 38415/38392/0). Distinct
+  correctness drift, not a perf mechanism.
+- arki0003: iters 1-4 are 0.30-0.42s, iters 6-65 are 0.001s, on
+  the SAME IPM pattern. CB=on does not move it.
+- rocket_12800: both iters ~2.7-3.8s, CB-immune.
+
+Conclusion: Mechanism A = delayed-pivot cascade (robot, marine),
+CB-fixable. Mechanism B = CB-immune sustained cost (rocket; arki
+and NARX CB-immune too).
+
+* 14:50 :perf:cluster:fresh-scaling:
+FRESH=1 (rebuild Solver each call) totals: arki 2.515s, robot
+1.912s, NARX 1.971s, rocket 6.374s, marine 239.552s. rocket
+FRESH ~= warm (6.37 vs 6.46) -> NOT a warm-state leak (contrast
+#38 Failure A). Others FRESH slower = re-symbolic overhead.
+marine FRESH 239s = uncontrolled cascades with no CB at all.
+
+SCALING sweep on the CB-immune set: infnorm gives arki 1.419s,
+NARX 1.854s, rocket 6.905s — all ~= default or slightly worse.
+identity arki 4.877s (worse). Scaling strategy is NOT the
+Mechanism-B cost driver; MC64 is not the bottleneck on this
+corpus (contrast the #38-live measurement where MC64 was 55%).
+
+* 15:10 :perf:cluster:supernode-profile:smoking-gun:
+probe_rocket_profile (sequential, profiler attached):
+  rocket iter0: prologue=3408.5ms  loop=10.8ms  epilogue=0.0ms
+                total=3424.7ms  overhead=99.5%  n_snodes=16406
+  rocket iter1: prologue=2287.4ms  loop=7.9ms   n_snodes=6283
+The per-supernode factorization LOOP is ~10ms. 99.5% of the
+factor time is the PROLOGUE (everything in factorize_numeric
+before the supernode loop: scaling, permute_csc_values,
+symmetric_pattern, from_triplets, workspace setup). 16406
+supernodes for n=89601 — avg 5.5 col/supernode, all nrow<=32.
+
+probe_robot_profile: robot iter2 prologue=6.6ms loop=424.8ms.
+snode 3957 (the LAST/root supernode, nominally 28x28) alone =
+278ms. Classic delayed-pivot accumulation into the root front.
+
+So the two mechanisms have OPPOSITE profile signatures:
+- Mechanism A (robot/marine): loop-dominated; cost piles into a
+  few large/root supernodes via delayed pivots.
+- Mechanism B (rocket): prologue-dominated; the numeric loop is
+  already fast. NOT covered by phase-2.11 small-front
+  amalgamation (that targets loop-side tiny-front overhead).
+
+Static read of the prologue (factorize.rs:1668-1782) shows only
+O(n)/O(nnz) code — symmetric_pattern, permute_csc_values,
+from_triplets are all linear. 3.4s for nnz=333k is ~100-1000x
+too slow for the apparent work. The cost is empirical and needs
+sub-phase instrumentation to localize — that is plan step B1.
+
+* 15:30 :perf:cluster:deliverables:
+Wrote dev/research/per-factor-cost-cluster-2026-05-21.md (full
+findings + evidence tables) and dev/plans/per-factor-cost-cluster.md
+(two-track plan). No solver code changed this session — research
+phase only, per the user's explicit scoping.

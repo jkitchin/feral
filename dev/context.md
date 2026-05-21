@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-20T22:51:17Z
+Generated: 2026-05-21T12:20:56Z
 
 ## Latest Session
-File: dev/sessions/2026-05-20-02.md
+File: dev/sessions/2026-05-20-03.md
 ```
-# Session 2026-05-20-02
+# Session 2026-05-20-03
 
 ## Goal
-Fix the defect underlying GitHub issue #45: the CHO `parmest` KKT factors
-successfully with correct inertia but the back-solve returns garbage
-(residual ~7e11) while `factor()` silently reports `Success`. Issue #46
-(LDLᵀ ~160× slower than MA57) was explicitly scoped OUT as a separate,
-larger performance effort — "correctness before performance, always".
+
+Fix issue #46 — FERAL's LDLᵀ ~160× slower than MA57 on the POUNCE CHO
+`parmest` IPM KKT (n=43332): a delayed-pivot cascade on a saddle-point
+KKT with a structurally-zero (2,2) block (28M factor-nnz, ~17 s
+factor). Post a status comment on #46, then fix it correctly.
+
+## Benchmark Results
+
+No regression. Bench numbers are flat vs the prior session
+(2026-05-20-02). The single trivially-worse number — dense medium p90
+1.70 → 1.71 (+0.01) — is benchmark noise: an interim run this session
+read 1.74, and the final run below reverted to baseline. The #46 fix
+is a numeric-kernel change that does not touch ordering, and none of
+the bench corpus is a zero-(2,2)-block saddle KKT, so no real effect is
+expected.
+
+```
+--- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     147982     1.32     <= 2.0     PASS
+medium (<500)            152145     1.71     <= 3.0     PASS
+
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.57     <= 2.0     PASS
+medium (<500)            153560     1.57     <= 3.0     PASS
+
+Top 10 worst factor-ratio vs MUMPS:
+MUONSINE_0000  18.96   ACOPR30_0001  12.31   ACOPR14_0211  9.93
+ACOPR30_0039    8.14   KIRBY2_0007    7.92   ACOPR14_0128  7.03
+ACOPR14_0365    6.93   KIRBY2_0006    6.91   ACOPR14_0187  6.75
+ACOPR14_0472    6.66
+```
+
+(Prior session 2026-05-20-02: Dense 1.32 / 1.70, Sparse 1.57 / 1.57.)
 
 ## Accomplished
 
-### Root cause isolated (issue #45)
-A long diagnostic chain (full trace in `dev/journal/2026-05-20-02.org`)
-overturned two earlier wrong hypotheses (duplicate-coordinate doubling;
-ordering needs a complete diagonal) and converged on the real defect:
+**Diagnosed #46 — and overturned the three-agent research diagnosis.**
+The session opened with a three-agent research phase (feral source,
+MUMPS 5.8.2, SPRAL SSIDS) that converged on "analysis-phase ordering
+failure, fix = broaden `pick_ordering_preprocess`'s activation
+predicate". Two ground-truth probes on the real CHO KKT refuted every
+load-bearing claim:
 
-- `ScalingStrategy::Auto` applies an MC64 symmetric scaling vector whose
-  own spread `max|s| / min|s|` exceeds `1/EPS ≈ 4.5e15`. On the CHO KKT
-  MC64 produced spread ≈ **3e82** (`min 2.89e-42 .. max 8.88e40`).
-- Such a scaling is degenerate to working precision: `D = diag(s)` is
-  singular, `D·A·D` underflows, Bunch-Kaufman force-accepts exact-`0.0`
-  1×1 pivots (`min pivot mag = 0.00e0`), the solve is garbage, and
-  `factor()` still returns `Success` with correct inertia.
-- The existing issue-#24 guard missed it: `compute_scaling_auto_with_cache`
-  had a fast-path `if raw_diag_range(matrix) >= RAW_GUARD(1e6) { return mc64 }`
-  that committed to MC64 *without* inspecting the produced vector. The CHO
-  KKT is ill-conditioned (raw range ≥ 1e6) so it took that fast-path and
-  the `mc_off` catastrophe diagnostic was never reached.
-- Diagnosis note: `dev/research/kkt-mc64-scaling-blowup-2026-05-20.md`.
-
-### Fix — MC64 catastrophic-spread guard
-`src/scaling/mod.rs`, `compute_scaling_auto_with_cache`:
-- New `const MC64_SPREAD_GUARD: f64 = 1.0 / f64::EPSILON` (≈ 4.5036e15).
-  Corpus max MC64 spread is 3.27e15 (ssine) — a 67-order gap below the
-  CHO catastrophe; the guard catches CHO and clears the whole corpus.
-- New `Mc64FallbackReason::Mc64ScalingDegenerate` variant.
-- The MC64 branch now computes `(mc_vec, mc_info)` **once**, then
-  `if scaling_spread(&mc_vec) > MC64_SPREAD_GUARD` returns the
-  already-computed InfNorm vector tagged `Mc64ScalingDegenerate`.
-  Placed **before** the `raw_diag_range` fast-path so it fires regardless
-  of raw conditioning — that fast-path was the #45 bypass.
-- `src/bin/bench_one_matrix.rs`: exhaustive `Mc64FallbackReason` match
-  extended with `"mc64_scaling_degenerate"`.
-
-### Verification
-- Real CHO KKT via `probe_issue45_ordering` (added an `Auto` row to its
-  scaling loop): `completed Auto` went from **relres 7.149e11 → 2.455e-8**,
-  inertia (21672,21660,0) unchanged. `Auto` now == `InfNorm` on the
-  diagonal-completed CHO KKT (the POUNCE live-KKT form that triggers #45).
-  #45 closed.
+- `probe_issue46_preprocess` — feral stores only the lower triangle, so
+  KKT constraint columns are stored-degree 0/1, *not* high-degree. The
 ```
 
 ## Git Status
 ```
-eb77966 test(issue46): ground-truth probes for the zero-(2,2)-block cascade
-070840b fix(ldlt): break the zero-(2,2)-block KKT delayed-pivot cascade (#46)
-d432086 docs(session): checkpoint 2026-05-20-02 — issue #45 MC64 spread guard
-6bda61d test(probe): add issue #45/#46 diagnostic and oracle probes
-b017beb fix(scaling): guard against catastrophic MC64 scaling spread (#45)
+c898f71 fix(ci): commit arch-unstable rankdef synth fixtures to fix stress-smoke (#46)
+70649e7 ci: generate synth stress fixtures before cargo test
+b3e4d3e docs(journal): record dropping the unused from_triplets_strict
+672e0c5 docs(context): complete dev/context.md regeneration
+9016ef9 docs(session): checkpoint 2026-05-20-03 — fix #46 zero-(2,2)-block cascade
 ```
 
 ## Test Status
@@ -92,34 +92,34 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-20-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-20-03.md)
 
-Top 10 worst factor-ratio vs MUMPS:
-name                             n    feral(μs)    mumps(μs)      ratio
-MUONSINE_0000                 1537        10486          376      27.89
-KIRBY2_0007                    458          901          119       7.57
-KIRBY2_0006                    458          886          127       6.98
-KIRBY2_0008                    458          727          122       5.96
-KIRBY2_0009                    458          673          128       5.26
-KIRBY2_0011                    458          598          120       4.98
-KIRBY2_0010                    458          648          133       4.87
-CRESC132_0000                 5314        59673        12266       4.86
-KIRBY2_0012                    458          453          118       3.84
-GROUPING_0299                  225          396          117       3.38
+
+No regression. Bench numbers are flat vs the prior session
+(2026-05-20-02). The single trivially-worse number — dense medium p90
+1.70 → 1.71 (+0.01) — is benchmark noise: an interim run this session
+read 1.74, and the final run below reverted to baseline. The #46 fix
+is a numeric-kernel change that does not touch ordering, and none of
+the bench corpus is a zero-(2,2)-block saddle KKT, so no real effect is
+expected.
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
 small-frontal (<200)     147982     1.32     <= 2.0     PASS
-medium (<500)            152145     1.70     <= 3.0     PASS
+medium (<500)            152145     1.71     <= 3.0     PASS
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
 small-frontal (<200)     153455     1.57     <= 2.0     PASS
 medium (<500)            153560     1.57     <= 3.0     PASS
-No regression vs the previous session — both phase exit partitions still
-PASS. The fix touches only the `ScalingStrategy::Auto` router on matrices
-whose MC64 spread exceeds `1/EPS`; empirically none in the parity corpus,
-so corpus benchmark numbers are unchanged.
+
+Top 10 worst factor-ratio vs MUMPS:
+MUONSINE_0000  18.96   ACOPR30_0001  12.31   ACOPR14_0211  9.93
+ACOPR30_0039    8.14   KIRBY2_0007    7.92   ACOPR14_0128  7.03
+ACOPR14_0365    6.93   KIRBY2_0006    6.91   ACOPR14_0187  6.75
+ACOPR14_0472    6.66
+
+(Prior session 2026-05-20-02: Dense 1.32 / 1.70, Sparse 1.57 / 1.57.)
 
 ```
 
