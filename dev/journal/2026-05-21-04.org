@@ -1,0 +1,82 @@
+#+TITLE: FERAL session journal 2026-05-21-04
+#+STARTUP: showall
+
+* 17:30 :issue47:cho:explicit-zeros:repro:
+Asked to check whether issue #47 (explicit-zero entries defeating the
+zero-(2,2)-block fast path, ~2× slower on CHO parmest) still reproduces
+after Fix 1 (42434a5) + Fix 2 (80c05f5).
+
+First: standalone iter-0 factor, both variants, current HEAD —
+=probe_explicit_zeros= (new). cho_iter0_kkt.mtx (stripped, 205512 nnz)
+vs cho_iter0_kkt_with_explicit_zeros.txt (326245 nnz, 120733 explicit
+zeros). Result: stripped 439ms/1.508M nnz_L, kept 456ms/1.515M — no
+penalty, inertia exact (21672,21660,0) both, residual ~1e-9. So iter-0
+alone shows nothing — consistent with the issue's own caveat ("iter-0
+is not the slow case").
+
+End-to-end CHO parmest, current feral HEAD (temporarily repointed
+pounce-feral at the local checkout + env-gated its zero-strip; both
+POUNCE edits reverted afterwards, binary rebuilt):
+
+| variant            | wall   | IPM iters | feral factor calls |
+| zeros stripped     | 10.6 s |        41 |                 50 |
+| explicit zeros kept| 22.6 s |        35 |                 44 |
+
+#47 STILL REPRODUCES — ~2.1× wall, ~2.5× per factor — with the #46
+cascade fix in place. It is not the #46 cascade.
+
+* 17:50 :issue47:mc64:cache:root-cause:
+Localised #47. Per-factor timing instrumented in pounce-feral (temp):
+stripped run has ~11 expensive (~520ms) + ~39 cheap (~19ms) factor
+calls; kept run has all 44 calls at ~400ms — zero cheap refactors.
+
+Reproduced standalone: =probe_explicit_zeros= now factors each matrix
+4× on one warm Solver.
+
+  stripped:  cold 434ms -> warm 15/14/15ms   symbolic_calls=1  mc64_cache_hits=1,2,3
+  kept:      cold 468ms -> warm 359/359/360ms symbolic_calls=1  mc64_cache_hits=0,0,0
+
+Root cause: explicit zeros defeat the MC64 value-bounded scaling cache
+(Track B2). Evidence:
+- Cold factor fine either way (~450ms) — not a cascade, not fill.
+- Symbolic IS reused either way (symbolic_call_count stays 1). The
+  pattern fingerprint (PatternFingerprint::of, solver.rs:83 — hashes
+  col_ptr+row_idx only) is constant for the kept matrix since POUNCE
+  fixes structure once. Symbolic cache is not the problem.
+- MC64 cache never hits with explicit zeros (mc64_cache_hits stays 0),
+  so the Hungarian match reruns every factor — ~345ms of the ~360ms
+  warm refactor. Stripped, the cache hits -> warm refactor ~15ms (24×).
+
+The explicit-zero (2,2) diagonals make the cache's diagonal-dominance
+value-bound test (mc64_value_bound_passes) fail, so it conservatively
+recomputes scaling every iterate. That recompute is the whole 2×.
+
+Implication: the issue's hypothesised mechanism ("#46 fast path keys on
+structural absence") is wrong. The fix is issue option (a) — feral
+drops explicit zeros in from_triplets/symbolic so the kept matrix is
+structurally identical to the stripped one and the MC64 cache engages.
+#47 stays open. Posted the pinned root cause on the issue.
+
+* 18:00 :issue44:narx:per-factor:assessment:
+Asked whether issue #44 (NARX_CFy per-factor cost, ipopt-feral times
+out at 600s) is still relevant after Fix 1 + Fix 2.
+
+=probe_narx_factor= (new), default Solver, current HEAD, the captured
+corpus:
+
+  NARX_CFy_0000  factor 1207ms  nnz_L 5.79M  inertia (43973,48256,0)  res 6.3e-12
+  NARX_CFy_0001  factor  433ms  nnz_L 1.73M  exact                    res 2.2e-14
+  NARX_CFy_0002  factor  417ms  nnz_L 1.73M  exact                    res 4.4e-14
+
+Total FRESH 2.06s vs the pre-Fix-1 FRESH replay of 1.97s (journal
+2026-05-21-01) — unchanged. Fix 1 + Fix 2 did not move NARX_CFy.
+
+Expected: the 2026-05-21-01 profiling already established NARX_CFy is
+large-dense-front bound (449 supernodes nrow>128 = 94.9% of the iter-0
+loop; "NARX is CB-immune"; MC64 only 29ms). Fix 1 attacks the
+delayed-pivot cascade amplifier; NARX has no cascade to break, so its
+bottleneck — honest BLAS work in large fronts — is untouched.
+
+Conclusion: #44 STILL RELEVANT, stays open. Distinct from #47 (which is
+the MC64 cache). #44 needs a real factor-speed effort on the large-front
+kernel; #47 needs explicit-zero normalization. Different fixes.
