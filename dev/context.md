@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-21T21:18:19Z
+Generated: 2026-05-21T22:14:27Z
 
 ## Latest Session
-File: dev/sessions/2026-05-21-02.md
+File: dev/sessions/2026-05-21-03.md
 ```
-# Session 2026-05-21-02
+# Session 2026-05-21-03
 
 ## Goal
 
-Track A2 — implement **Fix 1: fine-grained delayed pivoting
-(swap-to-boundary)** for the `pinene_3200` interior-point KKT
-delayed-pivot cascade (issue #46 family). Replace the Bunch-Kaufman
-driver loops' break-on-first-delay behaviour — which forfeits the
-entire remaining supernode tail on the first delayed pivot — with
-swap-to-boundary, so a delay forfeits exactly one column.
-Correctness-critical (touches the pivot/inertia path); FERAL
-lifecycle: research (done last session) → code inspection → plan →
-tests-first → implement → benchmark.
+Track A3 — validate Fix 1 (fine-grained delayed pivoting, `42434a5`)
+end-to-end via `probe_kkt_replay` on `pinene_3200`, `robot_1600`,
+`marine_1600`; confirm the pinene iter 6–9 factor-time explosion is
+gone and per-iter inertia stays exact.
+
+A3 surfaced a **correctness regression**; per the human's "fix forward
+this session" instruction the goal expanded to: keep Fix 1, diagnose
+and fix the residual so pinene is both fast *and* inertia-exact.
 
 ## Accomplished
 
-### Fix 1 — fine-grained delayed pivoting (swap-to-boundary) — DONE
+### A3 validation — found a regression
 
-- **Code inspection** of both BK driver functions in
-  `src/dense/factor.rs`. Five de-risking findings (journal §15:35):
-  `PivotOutcome::Delayed` leaves the front clean; `swap_rows_cols`
-  is the existing symmetric-swap helper; `factorize.rs:2267` already
-  consumes a permuted contribution block via `ff.perm`; swaps stay
-  within `[0, ncol)` so `perm[ncol..nrow)` stays identity;
-  termination is guaranteed (`ncol_eff - k` strictly decreases).
-- **Plan** written: `dev/plans/kkt-cascade-fix1-fine-grained-delay.md`.
-- **Tests first** — `tests/fine_grained_delay.rs`, two tests, oracle
-  = Bunch & Kaufman 1977 pivot admissibility (fixtures built so
-  exactly one column is provably stuck, every other provably
-  pivotable). Both **failed before the fix** (`nelim: left 1,
-  right 3` / `left 1, right 11`) — break-on-first forfeits the
-  pivotable tail. Tests-first protocol satisfied.
-- **Implementation** — added the `delay_swap_to_boundary` helper
-  (`factor.rs:3977`) and converted all four delay sites: plain
-  driver `factor_frontal_in_place_with_scratch_impl` (1 site), panel
-  driver (scalar tail, scalar fallback, `PanelStatus::Delayed`).
-  Each loop now carries `ncol_eff` (initially `= ncol`); a `Delayed`
-  return calls `delay_swap_to_boundary` and drops the stale
-  `cached_maxfromm`. Post-loop `nelim = k; n_delayed = ncol - nelim`
-  unchanged (`nelim == ncol_eff` at exit). Byte-identical on any
-  matrix with no delays; `may_delay == false` root supernode
-  unchanged.
-- **Validation** — full `cargo test` green (302 lib + all
-  integration suites, 0 failed); `cargo clippy --all-targets -D
-  warnings` clean. New tests pass; `delayed_pivoting` (6) and
-  `issue_46_saddle_kkt_cascade` (1) regression guards stay green.
+Fix 1 broke the pinene delayed-pivot cascade (456 s → 4.7 s) but
+returned `WrongInertia` on the borderline near-singular iterates 8/9
+(δ_c ≈ 1e-11): a spurious `inertia.zero`. Pre-Fix-1 warm replay was
+all-exact (456 s, worktree at `ef5fb7e`) — so this is a Fix 1
+regression. It violated the hard rule "inertia must be exactly correct
+on non-singular matrices."
 
-### Cascade broken on pinene_3200
+### Root cause — pre-existing 2×2-inertia cancellation bug
 
-`probe_issue46_supernode pinene_3200_0009.mtx` (n=127995, 63995 MC64
+Fix 1 did not *cause* the regression; it *exposed* one. The pre-Fix-1
+break-on-first cascade dumped ~116k–133k columns to a dense root front
+whose full BK pivoting gave Sylvester-exact inertia — that cascade was
+silently buying correctness. The latent bug: `count_2x2_inertia` /
+`count_2x2_inertia_val` classified signs from `λ = 0.5·(tr ∓ s)`;
+although `s` is cancellation-free, the *final* subtraction `0.5·(tr∓s)`
+cancels — a genuine non-singular 2×2 whose small eigenvalue is below
+`ULP(0.5·tr)` IEEE-rounds to *exactly 0.0*, counted as a `zero`.
+
+### Fix 2 — cancellation-free 2×2 inertia classification
+
+Lifecycle: research (journal §17:40/§18:05) → plan
+(`dev/plans/kkt-cascade-fix2-2x2-inertia-cancellation.md`) →
+tests-first → implement → verify → benchmark.
+
+- Added `det_sym2x2` — Kahan fused difference-of-products
+  (`w=fl(d21²)`, `e=fma(d21,d21,-w)`, `det=fma(d11,d22,-w)+e`),
+  relative error ≤ 2·u for any inputs.
+- Added `classify_2x2_inertia` — classifies from `sign(det)` +
+  `sign(tr)`: `det<0`→(1,1,0); `det>0`→(2,0,0)/(0,2,0); `det==0`
+  exactly→(1,0,1)/(0,1,1)/(0,0,2).
+- `count_2x2_inertia_val` delegates to it; `count_2x2_inertia`'s three
+  branches reclassified through it (force-accept bands fold a genuine
+  zero into `neg`, preserving #42 Option A; non-singular branch reports
 ```
 
 ## Git Status
 ```
-42434a5 fix(dense): fine-grained delayed pivoting kills the BK cascade amplifier (#46)
-ef5fb7e docs(session): checkpoint 2026-05-21-01 — A2 amplifier diagnosis
-70f2e44 diag(dense): localize pinene KKT cascade — amplifier × two triggers
-d3d93d2 docs(trackA): localize pinene cascade to the 2x2 stability gate
-76174bd docs(session): checkpoint 2026-05-21-01 — B2 landed, pivot to Track A
+12585d9 docs(journal): record #47 root cause and #44 assessment
+2eab12f test(issue-44): add NARX_CFy per-factor cost probe
+6185415 test(issue-47): add explicit-zeros warm-refactor probe
+787315f docs(session): checkpoint 2026-05-21-03 — Track A3 + Fix 2 (2×2 inertia)
+80c05f5 fix(inertia): classify 2×2 blocks from cancellation-free sign(det) (#48)
 ```
 
 ## Test Status
