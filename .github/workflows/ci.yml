@@ -30,15 +30,9 @@ jobs:
       # separate grep rule needed.
       #
       # The pounce_interface issue-#42 regression test reads the synth
-      # stress fixture matrices/synth/rankdef_10_3.mtx. That tree is
-      # git-ignored (matrices/ holds only generated corpora), so the
-      # fixture must be generated here before `cargo test` — mirrors the
-      # `synth matrices` step in the stress-smoke job. synth.py needs
-      # numpy; the rest of the harness uses only stdlib.
-      - name: synth stress fixtures
-        run: |
-          python3 -m pip install --upgrade pip "numpy>=1.23"
-          python3 external_benchmarks/stress/synth.py
+      # fixture matrices/synth/rankdef_10_3.mtx — committed to the repo
+      # (see external_benchmarks/stress/.gitignore), so `cargo test`
+      # needs no matrix generation step here.
       - name: test
         run: cargo test
       - name: amd-cleanroom
@@ -91,7 +85,13 @@ jobs:
       - name: cache stress matrices
         uses: actions/cache@v4
         with:
-          path: external_benchmarks/stress/matrices
+          # Cache downloaded SuiteSparse corpora only — never
+          # matrices/synth, which now holds committed fixtures (see
+          # external_benchmarks/stress/.gitignore). A restored cache
+          # must not clobber those tracked files.
+          path: |
+            external_benchmarks/stress/matrices
+            !external_benchmarks/stress/matrices/synth
           key: stress-matrices-${{ hashFiles('external_benchmarks/stress/manifest.tsv') }}
       - name: build bench_one_matrix
         run: cargo build --release --bin bench_one_matrix

@@ -1,4 +1,20 @@
-matrices/
+# matrices/ holds generated and downloaded corpora and is not tracked
+# — EXCEPT the rank-deficient synth fixtures pinned by oracles.json
+# (mtx_sha256). Those are built via np.linalg.qr, which is not
+# bit-reproducible across CPU architectures, so they cannot be
+# regenerated to a matching SHA in CI; they are committed instead.
+# See the stress-smoke job in .github/workflows/ci.yml.
+matrices/*
+!matrices/synth/
+matrices/synth/*
+!matrices/synth/rankdef_5_2.mtx
+!matrices/synth/rankdef_10_3.mtx
+!matrices/synth/rankdef_50_5.mtx
+!matrices/synth/rankdef_200_20.mtx
+!matrices/synth/rankdef_exact_50_5.mtx
+!matrices/synth/rankdef_exact_100_10.mtx
+!matrices/synth/saddle_rankdef_50_10_3.mtx
+!matrices/synth/saddle_rankdef_100_20_5.mtx
 rhs/
 out/
 *.tar.gz
