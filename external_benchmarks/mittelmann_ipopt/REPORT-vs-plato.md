@@ -168,6 +168,19 @@ local timeouts are lower bounds.
    the rescue. Followup: investigate whether those problems need a
    different default rather than a CB rescue.
 
+   *Update 2026-05-21 (Track A3):* the underlying defect is now fixed
+   under the **default** config — the CB rescue is no longer needed.
+   Fix 1 (fine-grained delayed pivoting, `42434a5`) removes the
+   delayed-pivot cascade and Fix 2 (cancellation-free 2×2 inertia,
+   this session) removes the spurious-zero inertia error. KKT-dump
+   *factor-replay* (`probe_kkt_replay`, default config, no CB):
+   `pinene_3200` 456 s → 4.60 s with all 10 iterates inertia-exact;
+   `marine_1600` all 18 iterates exact in 5.39 s; `robot_1600`
+   0.199 s. The full IPM-solve numbers in the tables above predate
+   both fixes and the `PROBLEM_FERAL_ENV` CB overrides for these two
+   problems should now be dropped — re-run the `mittelmann_ipopt`
+   benchmark to refresh the solve-time columns and confirm.
+
 ---
 
 Regenerate by running:

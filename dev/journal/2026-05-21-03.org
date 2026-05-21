@@ -1,0 +1,226 @@
+#+TITLE: FERAL session journal 2026-05-21-03
+#+STARTUP: showeverything
+
+* 15:35 :session-start:track-a3:
+Session goal handed over from 2026-05-21-02 checkpoint: Track A3 —
+validate Fix 1 (fine-grained delayed pivoting, landed 42434a5)
+end-to-end. Re-run the full Mittelmann KKT dump replay on
+pinene_3200, robot_1600, marine_1600 via `probe_kkt_replay`; confirm
+the pinene iter 6-9 factor-time explosion is gone and per-iter
+inertia stays exact. Then update REPORT-vs-plato.md if appropriate.
+Dump dirs present: pinene_3200 (10 iters), robot_1600 (7),
+marine_1600 (18).
+
+* 15:55 :benchmark:track-a3:replay:
+Ran `probe_kkt_replay` (warm Solver, default config = Fix 1 active)
+on all three problems.
+
+robot_1600: total 0.197 s, all 7 iters OK, inertia (14399,9601,0)
+exact throughout. Matches the 0.199 s CB=on target from the
+2026-05-21-01 next-session note — clean win, Fix 1 default now hits
+the CB number without CB.
+
+marine_1600: total 5.811 s, iters 0-16 OK with exact inertia
+(38415,38392,0); iter 17 WrongInertia(got 38414/38392/1, want
+38415/38392/0). The 2026-05-21-01 note said marine returned
+WrongInertia at iters 10/14/16/17 under both CB modes — Fix 1
+default now fails ONLY iter 17. Improvement; iter 17 residual is
+Track C / #48.
+
+pinene_3200: total 4.710 s (was 493.9 s pre-Fix-1) — the iter 6-9
+explosion is GONE (iters 5-9 now 0.04-0.05 s each). BUT iter 9
+returns WrongInertia(got 63998/63995/2, want 64000/63995/0). The
+standalone probe `probe_issue46_supernode pinene_3200_0009.mtx`
+(fresh symbolic) gave EXACT inertia on the same matrix — so warm
+symbolic reuse is implicated.
+
+* 16:05 :investigation:track-a3:pinene-iter9:
+Ran `FRESH=1 probe_kkt_replay pinene_3200` (rebuilds Solver every
+iter -> fresh symbolic per iter). Result flips which iterate fails:
+- FRESH: iter 8 WrongInertia(63999/63995/1), iter 9 OK. total 11.4 s.
+- WARM:  iter 8 OK, iter 9 WrongInertia(63998/63995/2). total 4.7 s.
+So at least one of {iter 8, iter 9} returns WrongInertia regardless
+of warm/fresh — the failure is borderline (most IPM-converged
+iterates, smallest delta_c) and the symbolic ordering tips which one
+fails. Fresh iter 9 OK is consistent with the standalone probe.
+
+NumericParams::default(): bk.pivot_threshold=1e-8,
+on_zero_pivot=ForceAccept, allow_delayed_pivots=true. A genuinely-
+stuck column reaching the root front (may_delay=false) gets
+force-accepted; a structural near-zero is counted in inertia.zero.
+
+Journal agent checked pre-Fix-1 evidence: the standalone probe
+Config 1 (LdltCompress, delayed = production path) gave iter 9
+(64000,63995,0) CORRECT at 183 s before Fix 1. CB=1 and
+allow_delayed=false both gave iter-9 WrongInertia (different wrong
+values). No pre-Fix-1 WARM `probe_kkt_replay pinene_3200` table was
+found in the journal — running it now in a worktree at ef5fb7e
+(pre-Fix-1) to settle whether warm iter 8/9 WrongInertia is a Fix 1
+regression or pre-existing.
+
+* 16:25 :investigation:track-a3:pinene-iter8:
+Standalone probe `probe_issue46_supernode pinene_3200_0008.mtx`
+(fresh, LdltCompress):
+- allow_delayed=true  (Fix 1 path): inertia (63999,63995,1) WRONG,
+  66 ms, n_delayed=8395, blowup 1.39x
+- allow_delayed=false (static):     inertia (64000,63995,0) CORRECT,
+  55 ms, n_delayed=0, blowup 1.25x
+On iter 8 the STATIC path is correct and the DELAYED path is wrong —
+the exact opposite of iter 9 (delayed correct, static wrong). Neither
+path is correct on both. pinene iters 6-9 have delta_c ~ 8.6e-11 to
+1.8e-11 (sidecar JSON) — the constraint regularization is ~1000x
+below the 1e-8 pivot threshold, so every (2,2)-row diagonal is
+"tiny": these are numerically borderline / near-singular KKTs.
+
+* 16:55 :regression:track-a3:fix1:CONFIRMED:
+Pre-Fix-1 warm `probe_kkt_replay pinene_3200` (worktree at ef5fb7e):
+
+  iter  factor_s   inertia          status
+   0-5  0.7-1.0    (64000,63995,0)  OK
+   6    46.232     (64000,63995,0)  OK
+   7    74.768     (64000,63995,0)  OK
+   8    129.182    (64000,63995,0)  OK
+   9    200.714    (64000,63995,0)  OK
+  total 455.984 s
+
+ALL 10 iters were inertia-EXACT before Fix 1. Fix 1 (warm) total
+4.71 s but iter 9 WrongInertia; Fix 1 (fresh) total 11.4 s but
+iter 8 WrongInertia. CONCLUSION: **Fix 1 is a correctness regression
+on pinene's borderline iters 8/9.** It traded "slow but exact"
+(456 s) for "fast but inexact on near-singular KKTs" (4.7 s). This
+violates the hard rule "inertia must be exactly correct on
+non-singular matrices" and "correctness before performance, always".
+
+Mechanism: pre-Fix-1 break-on-first cascades ~116k-133k columns to
+the dense root front; the root (may_delay=false) does full
+Bunch-Kaufman pivoting over the whole crowd -> Sylvester's law gives
+exact inertia. The cascade IS what bought correctness. Fix 1's lean
+delay sends only the ~8k-11k genuinely-stuck columns to the root; a
+borderline (2,2)-row whose MC64 2x2 partner is a *pivotable* column
+(correctly eliminated early by Fix 1) reaches a root front without
+its partner -> no valid 2x2 -> ForceAccept near-zero -> spurious
+zero in the inertia count. This is Trigger A (split MC64 pairs)
+turned from a perf issue into a correctness issue.
+
+Fix 1 cannot ship as-is. Decision needed: revert vs fix-forward
+(co-location / delayed-pivot ordering). Surfacing to the human.
+
+* 17:20 :decision:track-a3:
+Human chose FIX FORWARD: keep Fix 1, fix the residual so pinene is
+both fast and inertia-exact.
+
+* 17:40 :code-inspection:track-a3:root-cause:
+iter-8 panel_diag (allow_delayed=true): scalar_1x1_delay_tiny=1 —
+exactly one event, matching the one spurious inertia.zero. But the
+1×1 reject path (`try_reject_1x1_frontal`, factor.rs:3513) counts
+every force-accepted pivot BY SIGN and never writes `zero` (issue
+#42 Option A). So the spurious zero cannot be a 1×1 — it must be a
+2×2.
+
+The two 2×2 zero-writing sites both classify via `sym2_eigenvalues`
+(factor.rs:3901) and count `lam == 0.0` as zero:
+- `count_2x2_inertia_val` (3875) — the `scalar_pivot_step` accept
+  site (3448).
+- `count_2x2_inertia` (4453) else-branch (4554).
+`sym2_eigenvalues` returns `lam = 0.5*(tr ± s)` with `s` computed
+cancellation-free as `sqrt((d11-d22)^2 + 4*d21^2)`. But the FINAL
+step `0.5*(tr - s)` (and `0.5*(tr + s)`) is itself a subtraction:
+for a genuine non-singular 2×2 whose small eigenvalue is far below
+`ULP(0.5*tr)`, `0.5*(tr ∓ s)` IEEE-rounds to *exactly 0.0* even
+though the eigenvalue is analytically nonzero. That exact 0.0 is
+then counted as `zero`.
+
+ROOT CAUSE: catastrophic cancellation in `0.5*(tr ∓ s)` fabricates
+a spurious zero eigenvalue. iter 8's borderline saddle block (a
+straddle 2×2, det<0, |tr| ≈ s) loses its small eigenvalue to this
+rounding -> (1,1,0) miscounted as (0,1,1) -> inertia (63999,63995,1).
+
+THE FIX: classify the 2×2 inertia from the cancellation-free
+comparison `s` vs `|tr|`, never from a subtracted eigenvalue.
+  s > |tr|  <=>  det < 0  -> straddle, (1,1,0)
+  s < |tr|  <=>  det > 0  -> same sign as tr, (2,0,0) or (0,2,0)
+  s == |tr| <=>  det == 0 -> one genuine zero, (1,0,1)/(0,1,1)
+`s = sqrt((d11-d22)^2 + 4*d21^2)` and `|tr| = |d11+d22|` are both
+reliably computed; the comparison `s <=> |tr|` is the cancellation-
+free evaluation of `sign(det)`. This is mathematically exact for the
+inertia of a symmetric 2×2 and produces a `zero` only on genuine
+exact singularity (`s == |tr|` to the last bit). External oracle for
+the tests-first unit tests: a *diagonal* 2×2 (d21=0) has inertia =
+the signs of its diagonal entries by inspection — pick d11 tiny,
+d22 huge so the discriminant drops d11 and `0.5(tr-s)` rounds to 0.
+
+* 18:05 :code-inspection:track-a3:correction:
+CORRECTION to the 17:40 entry. On working the diagonal-2×2 oracle
+through, `s vs |tr|` does NOT fix it. Take `[[1e-30,0],[0,1e30]]`
+(true eigenvalues 1e-30 and 1e30, both positive -> (2,0,0)):
+  tr  = 1e-30 + 1e30  -> 1e30   (d11 lost: below ULP(1e30))
+  s   = sqrt((1e-30-1e30)^2) = |1e-30-1e30| -> 1e30   (d11 lost again)
+So `s == |tr|` in FP -> the classifier says det==0 -> (1,0,1) WRONG.
+The 17:40 entry's *own* oracle construction ("discriminant drops
+d11") is exactly the case where `s` and `tr` BOTH drop d11 — the
+two cancellations are the same cancellation. `s vs |tr|` cannot
+recover a diagonal entry that `d11 +/- d22` has already annihilated.
+
+THE ACTUAL FIX: compute the determinant cancellation-free with
+Kahan's fused difference-of-products and classify from `sign(det)`
++ `sign(tr)`:
+  w = fl(d21*d21);  e = fma(d21,d21,-w)        # exact error of d21^2
+  det = fma(d11,d22,-w) + e                    # d11*d22 - d21^2, ~2u rel err
+For the diagonal oracle d21=0 so w=e=0 and det = fma(d11,d22,0) =
+d11*d22 = 1e-30*1e30 = 1.0 exactly -> det>0, tr>0 -> (2,0,0) CORRECT.
+The product d11*d22 never adds d11 to d22, so no diagonal entry is
+lost. Jeannerod-Louvet-Muller 2013: this kernel has relative error
+<= 2u for ANY inputs, so sign(det) is exact unless the block is
+genuinely singular to working precision. sign(tr) is reliable
+because correctly-rounded FP addition never rounds a nonzero sum
+across zero. Classifier: det<0 -> (1,1,0); det>0 -> (2,0,0)/(0,2,0)
+by sign(tr); det==0 exactly -> (1,0,1)/(0,1,1)/(0,0,2) by sign(tr).
+External oracle stands (diagonal 2×2 inertia by inspection) — it
+just disproves `s vs |tr|` and confirms the Kahan-det classifier.
+
+* 18:30 :tests:track-a3:fix2:
+Tests-first (in-file mod sym2_inertia_tests, private fns, oracle =
+hand calculation). Added 9 tests; on the pre-fix code 4 FAILED
+exactly as predicted:
+  count_2x2_inertia_val_diagonal_tiny_huge_positive   got (1,0,1) want (2,0,0)
+  count_2x2_inertia_val_diagonal_tiny_neg_huge_pos    got (1,0,1) want (1,1,0)
+  count_2x2_inertia_val_diagonal_both_negative        got (0,1,1) want (0,2,0)
+  count_2x2_inertia_nonsingular_branch_no_spurious_zero got (1,0,1) want (2,0,0)
+The 5 regression-guard tests (genuine singular, off-diag straddle,
+well-separated PD) passed pre-fix — confirms the change is targeted.
+
+* 18:45 :implement:track-a3:fix2:
+factor.rs: added `det_sym2x2` (Kahan fma difference-of-products) and
+`classify_2x2_inertia` (det<0->(1,1,0); det>0->(2,0,0)/(0,2,0) by
+sign(tr); det==0->(1,0,1)/(0,1,1)/(0,0,2)). `count_2x2_inertia_val`
+now delegates to it. `count_2x2_inertia`: all three branches
+reclassified via `classify_2x2_inertia` — the two force-accept bands
+fold a genuine zero into `neg` (preserves issue #42 Option A
+`lam>0->pos else->neg`); the non-singular `else` branch reports
+`zero` honestly (now structurally 0 since accurate det is nonzero
+there). `sym2_eigenvalues` kept — still used by
+`perturb_2x2_to_floor`. All 19 sym2_inertia_tests pass; full
+`cargo test` green; `cargo clippy --all-targets -D warnings` clean.
+
+* 19:00 :benchmark:track-a3:fix2:VALIDATED:
+probe_kkt_replay with Fix 2 active (default config):
+  pinene_3200 WARM:  all 10 iters (64000,63995,0) OK, total 4.60 s
+  pinene_3200 FRESH: all 10 iters (64000,63995,0) OK, total 12.08 s
+  robot_1600:        all 7 iters OK (unchanged), 0.199 s
+  marine_1600:       all 18 iters OK, total 5.39 s
+Pre-Fix-2: pinene WARM iter 9 WrongInertia, FRESH iter 8
+WrongInertia; marine iter 17 WrongInertia. ALL now exact. marine
+iter 17 (previously filed Track C / #48) was the SAME 2×2
+cancellation bug — Fix 2 closes it as a bonus, no separate work.
+Standalone `probe_issue46_supernode pinene_3200_0008.mtx`: both
+allow_delayed=true and =false now give (64000,63995,0) — pre-fix the
+delayed path gave (63999,63995,1).
+
+`cargo run --bin bench --release`: Inertia match 100.0%
+(dense 154432/154481, sparse 154536/154588); dense p90 ratios
+1.32 / 1.74 PASS, sparse 1.52 / 1.52 PASS. No regression.
+
+CONCLUSION: Track A3 fix-forward complete. Fix 1 + Fix 2 together:
+pinene KKT replay 456 s -> 4.6 s (99×) AND inertia-exact on every
+iterate. The hard rule "inertia must be exactly correct on
+non-singular matrices" is restored; Fix 1 ships.

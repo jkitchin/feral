@@ -189,24 +189,39 @@ The bounded-Δ CB repair stays a fallback only.
 Cross-check: `dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md`
 (the #46 fix), `dev/research/cascade-break.md`.
 
-### A3 — validation
+### A3 — validation — DONE 2026-05-21-03
 
-`robot_1600` and `marine_1600` replay totals should drop to the
-`CB=on` numbers (0.199 s, 10.5 s) under the *default* config. Re-test
-end-to-end; confirm no regression on problems where CB currently
-hurts (the auto-CB spot-check in 2026-05-17-01 showed `bearing_400`
-and `rocket_12800` are CB-neutral-to-slightly-negative).
+Validated Fix 1 end-to-end. Result: Fix 1 broke the pinene cascade
+(456 s → 4.7 s) but **regressed inertia** on pinene's borderline iters
+8/9 — a spurious `inertia.zero`. Human chose fix-forward.
+
+Root cause (not in Fix 1): the 2×2 inertia classifier read a
+*subtracted* eigenvalue `0.5·(tr∓s)`, which catastrophically cancels
+and rounds an analytically-nonzero small eigenvalue of a genuine
+non-singular block to exactly 0.0. Fix 1's lean delay merely *exposed*
+the latent bug that the pre-Fix-1 cascade-to-root-front had masked.
+
+**Fix 2** (this session): classify the 2×2 inertia from the
+cancellation-free `sign(det)` (Kahan fused difference-of-products,
+`det_sym2x2`) plus `sign(tr)` — never from a subtracted eigenvalue.
+See `dev/plans/kkt-cascade-fix2-2x2-inertia-cancellation.md` and
+journal 2026-05-21-03 §18:05/§19:00.
+
+Final (default config, Fix 1 + Fix 2): pinene_3200 all 10 iters
+exact, 4.60 s warm / 12.08 s fresh (was 456 s, all-exact, pre-Fix-1);
+robot_1600 all 7 exact 0.199 s; marine_1600 **all 18 exact** 5.39 s.
+Bench inertia match 100.0%, all p90 ratio gates PASS.
 
 ---
 
-## Track C — marine_1600 WrongInertia drift (correctness)
+## Track C — marine_1600 WrongInertia drift — RESOLVED by Fix 2
 
-Research note §7: `marine_1600` returns `WrongInertia` at iters
-10/14/16/17 under both CB modes (spurious zero eigenvalues). This is a
-correctness defect, not perf. Filed as **#48**; triage
-separately — likely related to the 2×2 near-singular classification
-work (#39, `dev/research/fbrain3ls-2x2-stability.md`). Do not fold it
-into the perf tracks.
+Research note §7 had `marine_1600` returning `WrongInertia` at iters
+10/14/16/17 (spurious zero eigenvalues), filed as **#48**. This was the
+*same* 2×2-inertia cancellation bug as the pinene A3 regression: Fix 2
+(`det_sym2x2` / `classify_2x2_inertia`) closes it — `marine_1600` now
+replays all 18 iters inertia-exact. No separate Track-C work needed;
+#48 is fixed by the Fix 2 commit.
 
 ---
 
