@@ -1,0 +1,119 @@
+#+TITLE: FERAL journal 2026-05-22-01
+#+STARTUP: showall
+
+* 07:15 :issue-49:review:scaling:regression:
+Reviewed issue #49 — "0.4.0: #47 value-aware scaling routing regresses
+LDLᵀ factor cost on explicit-zero-(2,2) KKT (Mittelmann ex4_2)". The
+issue pins commit e49694b (#47) and reports POUNCE ex4_2_320 going
+~10.8s -> TIMEOUT 600s, ex4_2_160 ~2.4s -> 19.2s.
+
+Built probe_issue49 (src/bin/) — loads a KKT .mtx, prints the routing
+decision value-blind (pre-#47) AND value-aware (post-#47), then factors
+under Auto/Mc64Symmetric/InfNorm (low-level) and on a warm Solver
+(POUNCE's analyze-once/refactor-many path).
+
+Finding 1 — #47 does NOT change ex4_2 routing. Both forms route to
+InfNorm:
+  ex4_2_160: value-blind  InfNorm [diag_only=25917 (0.336), max_col_nnz=6]
+             value-aware  InfNorm [diag_only=0     (0.000), max_col_nnz=6]
+The arrow-head gate is max_col_nnz > 32; ex4_2 has max_col_nnz=6 (a
+banded KKT, not an arrow KKT), so has_arrow_head is FALSE and the
+matrix routes to InfNorm regardless of how diag_only is counted. #47
+only ever flips routing when has_arrow_head is already true. e49694b
+is exonerated as the cause.
+
+Finding 2 — the issue's recommended repro does not reproduce. Factored
+ex4_2_160_iter0_kkt.mtx (n=77115, 255354 stored nnz, 25917 explicit
+zeros) with a standalone feral at HEAD (bb3b712):
+  low-level factor (Auto/Mc64/InfNorm) ~52-55 ms, all identical
+  warm Solver: cold 271.8 ms, warm 51.7-55.6 ms x4
+  nnz_L=3.84M, n_delayed=3, inertia (51198,25917,0) exact
+  (matches mtx header neg_evals=25917), rel_res 2.4e-13
+  symbolic_calls=1, mc64_cache_hits=1..4, mc64_fallbacks=0
+ex4_2_320 (n=307835): low-level ~0.38s, inertia (204798,103037,0)
+exact, rel_res 1.8e-13. NOT 2.56s.
+
+So standalone feral bb3b712 on the iter-0 KKT is in the FAST regime —
+consistent with the issue's *good* (b3e4d3e, 2.4s) end-to-end number,
+not the 19.2s regression. The issue's own verification recipe ("factor
+the iter-0 .mtx standalone, compare") shows no regression.
+
+Finding 3 — the issue mis-reads its iter-0 evidence. The "0.55s iter-0
+factor" is a COLD number (one-time MetisND symbolic for n=77k is in
+it); the "good-feral 2.4s/21it = 0.11s/iter" it is compared against is
+an average dominated by cheap ~52ms warm refactors. Cold-vs-average is
+apples-to-oranges; the cold factor costs ~0.27-0.55s in BOTH feral
+revisions.
+
+Conclusion: the regression (if the 19.2s end-to-end is real) is NOT on
+the iter-0 KKT and NOT caused by #47. It must be on later IPM iterates
+— ex4_2's (2,2) block fills in as delta_c becomes nonzero and the
+(1,1) block fills as lambda becomes nonzero, so iterate k>>0 is a
+denser/harder matrix — whose dumps are not in the repro. The remaining
+functional suspects in b3e4d3e..bb3b712 are 42434a5 (#46 fine-grained
+delayed pivoting), 80c05f5 (#48 2x2 inertia), c990def (B2 MC64 cache)
+— NOT e49694b.
+
+Recommended back to the issue: POUNCE must dump the slow iterates
+(kkt:5, kkt:10, kkt:15, kkt:20), not just kkt:0; only then can the
+range be bisected against an actually-slow matrix. Also worth ruling
+out the pounce-feral wrapper (does it build a fresh Solver per iterate
+/ does the pattern fingerprint stay stable so symbolic+MC64 caches
+engage — in this probe they do, symbolic_calls stays 1).
+
+* 07:49 :issue-49:issue-44:cache:scaling:regression:correction:
+Rechecked #49 on the explicit "there is a cache issue" hypothesis —
+the 07:15 entry under-weighted c990def (B2 cache). Three new facts.
+
+Fact 1 — the B2 "MC64 scaling cache" FIRES on ex4_2, which never runs
+MC64. Root cause: compute_infnorm (src/scaling/infnorm.rs:35,94)
+returns ScalingInfo::Applied, byte-identical to the MC64 Applied. The
+B2 population gate (solver.rs:803) is matches!(scaling_info, Applied),
+so it caches the InfNorm vector and on the next warm factor() injects
+the STALE iter-k InfNorm vector as ScalingStrategy::External.
+Dumped 12 real consecutive ex4_2_160 IPM iterates from POUNCE
+(/tmp/ex42d, --dump kkt:0-12) + 10 of ex4_2_320 (/tmp/ex42d320).
+probe_cache_sequence IPM-PATTERN run:
+  _160: calls 0-3 cache MISS, calls 4-11 CACHE HIT (8/12)
+  _320: calls 0-6 cache MISS, calls 7-9 CACHE HIT (3/10)
+The cache is live on this matrix class, not dormant.
+
+Fact 2 — decisions.md "B2 ships as latent infrastructure / value-bound
+rejects every warm iter / harmless" (2026-05-21 entry) is FALSE for
+explicit-zero-(2,2) KKTs. It was validated only on pinene_3200 /
+rocket_12800, both fully-populated δ-regularized diagonals where the
+ratio-growth condition explodes 1e8→1e10 and rejects. ex4_2's (2,2)
+block is STRUCTURALLY zero → value_bound.rs qualifying_rows() excludes
+25917/77115 rows (34%) on _160, 103037/307835 on _320. The bound then
+aggregates only over the stable (1,1) block and PASSES. The "Deviation
+1 / qualifying rows" carve-out is exactly what un-dorms B2 here.
+
+Fact 3 — the cache is NOT the #49 cost regression. Standalone feral
+factor cost is FLAT regardless of cache state: _320 ~242-291 ms
+(misses) vs ~241-250 ms (hits); _160 ~52 ms vs ~43 ms. Inertia exact
+throughout (_320 (204798,103037,0), _160 (51198,25917,0)); n_delayed
+small; rel_res 2.4e-13. The stale-scaling reuse is a latent
+CORRECTNESS defect, benign on every ex4_2 iterate measured — not a
+perf regression. e49694b (#47) stays exonerated.
+
+Where the #49 regression actually lives: POUNCE ex4_2_320 timing
+(--dump timing:all, max_iter=3): factorization 3.106 s / back_solve
+0.041 s / overall 3.378 s — ~0.78 s per factor for the first 3 iters,
+then it explodes (the kkt:0-14 dump run hit the 400 s timeout at
+~iter 9 → iters 3-9 cost ~397 s). Standalone feral factors those same
+dumped iter-9 KKTs in 0.25 s. So POUNCE's per-factor blows up on late
+iterates while standalone feral on the dumped matrix does not — i.e.
+POUNCE is NOT factoring the raw dumped kkt_solve_001 matrix, or pays
+cold symbolic every iterate. This is the known #44/#48 "iter 6-9
+factor-time blowup" cost cluster, NOT the cache. _160 stays fast
+(POUNCE total 2.03 s, 13 iters) because its symbolic is cheap.
+
+Conclusion: the user's instinct was right — there IS a cache bug
+(B2 caches/reuses InfNorm scaling on explicit-zero-(2,2) KKTs), and
+it should be fixed (gate population on MC64-actually-ran, not on
+ScalingInfo::Applied). But it does not cause #49's cost regression;
+that is the per-factor cost cluster reproducing only inside the
+POUNCE-feral drive, not on the standalone dumped KKT. #44 relevance:
+same cache fires there too (NARX routes Mc64Symmetric, caches a
+genuine MC64 vector) but #44's cost is likewise the cascade, not the
+cache. Probes: src/bin/probe_issue49.rs, probe_cache_sequence.rs.

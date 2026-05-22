@@ -19,7 +19,8 @@ use crate::numeric::factorize::{
 };
 use crate::numeric::solve::{solve_sparse, solve_sparse_many, solve_sparse_refined};
 use crate::scaling::{
-    mc64_value_bound_passes, precompute_mc64_validity, Mc64CacheValidity, ScalingStrategy,
+    mc64_value_bound_passes, pick_scaling_strategy, precompute_mc64_validity, Mc64CacheValidity,
+    ScalingStrategy,
 };
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::supernode::SupernodeParams;
@@ -219,8 +220,10 @@ pub struct Solver {
     /// from scratch. When `false`, `mc64_scaling_cache` stays `None`.
     mc64_cache_enabled: bool,
     /// Solver-scope value-bounded MC64 scaling cache. `Some` only
-    /// after a factor on the current pattern produced an
-    /// `ScalingInfo::Applied` MC64 scaling. Cleared on pattern
+    /// after a factor on the current pattern ran the MC64 Hungarian
+    /// to completion (see the `mc64_ran` gate in `factor()` — a bare
+    /// `ScalingInfo::Applied` is *not* sufficient, since InfNorm and
+    /// External also report it; issue #49). Cleared on pattern
     /// change. See [`Mc64ScalingCache`].
     mc64_scaling_cache: Option<Mc64ScalingCache>,
     /// Diagnostic counter: number of `factor()` calls that reused
@@ -790,17 +793,42 @@ impl Solver {
                 // cache. This block runs only on a cache *miss*
                 // (`!scaling_cache_hit`); the injected-`External` reuse
                 // path keeps its existing entry untouched. On a miss,
-                // if this factor ran the MC64 Hungarian to completion
-                // (`ScalingInfo::Applied`), install a fresh entry so
-                // the next warm factor on this pattern can skip the
-                // Hungarian. A cheap InfNorm / fallback / Identity
-                // scaling (anything reporting not-`Applied`) is not
-                // worth caching — drop the cache so a later genuine
-                // MC64 reinstalls it. `PartialSingular` is excluded:
-                // a partial matching on a singular matrix is not a
-                // scaling worth reusing.
+                // if this factor ran the MC64 Hungarian to completion,
+                // install a fresh entry so the next warm factor on this
+                // pattern can skip the ~seconds-scale Hungarian.
+                //
+                // Issue #49: `ScalingInfo::Applied` alone is NOT a
+                // sufficient gate. `compute_infnorm` (and `External`)
+                // also report `Applied` — it means only "a non-trivial
+                // scaling was applied, the solve must undo it", not
+                // "MC64 ran". Caching an InfNorm vector here is both
+                // pointless (InfNorm is O(nnz) — there is nothing
+                // expensive to amortize) and a staleness hazard: the
+                // warm-hit path would replay a stale iter-0 InfNorm
+                // scaling on a drifted iter-N matrix. So additionally
+                // require the effective strategy to have *run* the
+                // Hungarian: explicit `Mc64Symmetric`, or `Auto` that
+                // `pick_scaling_strategy` routes to `Mc64Symmetric`.
+                // `Auto`'s Policy-4 / spread fallbacks report
+                // `Mc64FallbackToInfnorm` and `PartialSingular` reports
+                // its own variant — both already excluded by requiring
+                // `Applied`. On any non-MC64 outcome drop the cache so
+                // a later genuine MC64 reinstalls it.
+                let mc64_ran = matches!(factors.scaling_info, crate::scaling::ScalingInfo::Applied)
+                    && match &effective_params.scaling {
+                        ScalingStrategy::Mc64Symmetric => true,
+                        ScalingStrategy::Auto => matches!(
+                            pick_scaling_strategy(matrix),
+                            ScalingStrategy::Mc64Symmetric
+                        ),
+                        // InfNorm, Identity, or a user-supplied External:
+                        // not an MC64 Hungarian result — never cache.
+                        ScalingStrategy::InfNorm
+                        | ScalingStrategy::Identity
+                        | ScalingStrategy::External(_) => false,
+                    };
                 if self.mc64_cache_enabled && !scaling_cache_hit {
-                    if matches!(factors.scaling_info, crate::scaling::ScalingInfo::Applied) {
+                    if mc64_ran {
                         let scaling = factors.scaling.clone();
                         let validity = precompute_mc64_validity(matrix, &scaling);
                         self.mc64_scaling_cache = Some(Mc64ScalingCache {
@@ -1556,6 +1584,46 @@ mod tests {
             2,
             "the rebuilt cache hits on the repeated a8 factor"
         );
+    }
+
+    /// Track B2 — issue #49. The value-bounded *MC64* cache must not
+    /// engage when scaling resolves to InfNorm. `compute_infnorm`
+    /// reports `ScalingInfo::Applied` — byte-identical to a completed
+    /// MC64 matching — so the pre-fix population gate
+    /// `matches!(scaling_info, Applied)` wrongly cached the InfNorm
+    /// vector and a warm hit replayed a stale iter-0 InfNorm scaling
+    /// on the drifted iter-N matrix.
+    ///
+    /// A tridiagonal SPD matrix routes to InfNorm under `Auto`
+    /// (`max_col_nnz = 2 < 32`, no arrow head, no slack mass), so a
+    /// `Solver::new()` (default `Auto`, cache on) re-factoring it must
+    /// keep `mc64_cache_hit_count` at 0 — the gate now additionally
+    /// requires the effective strategy to have run the Hungarian.
+    #[test]
+    fn mc64_cache_does_not_engage_on_infnorm_route_issue_49() {
+        let a = tridiag(6, 10.0, 1.0); // SPD → inertia (6,0,0)
+                                       // Precondition: Auto really routes this matrix to InfNorm.
+                                       // If routing ever changes this guards the test's premise.
+        assert!(
+            matches!(pick_scaling_strategy(&a), ScalingStrategy::InfNorm),
+            "test setup error: tridiag must route to InfNorm"
+        );
+
+        let mut s = Solver::new(); // Auto scaling, cache on by default
+        for call in 0..3 {
+            let st = s.factor(&a, Some(Inertia::new(6, 0, 0)));
+            assert!(matches!(st, FactorStatus::Success), "call {call}: {:?}", st);
+        }
+        assert_eq!(
+            s.mc64_cache_hit_count(),
+            0,
+            "an InfNorm-routed scaling must never populate or hit the \
+             MC64 cache (issue #49: InfNorm's ScalingInfo::Applied was \
+             indistinguishable from a completed MC64 matching)"
+        );
+        // Symbolic stays cached across the warm refactors — the fix
+        // only touches the scaling cache, not the symbolic cache.
+        assert_eq!(s.symbolic_call_count(), 1, "symbolic must be cached");
     }
 
     /// Track B2 — the #38 guard. When the matrix values drift far

@@ -4,6 +4,29 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — B2 scaling cache no longer caches InfNorm scaling ([#49][i49])
+
+The B2 value-bounded *MC64* scaling cache (`src/numeric/solver.rs`)
+now populates only when the factor actually ran the MC64 Hungarian
+matching. Previously the population gate was
+`matches!(scaling_info, ScalingInfo::Applied)` — but `compute_infnorm`
+and a user-supplied `External` scaling both also report
+`ScalingInfo::Applied`. `Applied` means "a non-trivial scaling was
+applied, the solve must undo it", not "MC64 ran". On a matrix that
+routes to InfNorm (e.g. POUNCE's Mittelmann `ex4_2` explicit-zero
+`(2,2)` KKT, `max_col_nnz=6` → InfNorm) the cache therefore stored the
+iterate-0 InfNorm vector and a later warm `factor()` replayed that
+stale scaling as an injected `External` on the drifted iterate-N
+matrix — a latent correctness defect (benign on every `ex4_2` iterate
+measured, but unsound). The gate now additionally requires the
+effective strategy to have run the Hungarian: explicit
+`Mc64Symmetric`, or `Auto` that `pick_scaling_strategy` routes to
+`Mc64Symmetric`. Caching InfNorm bought nothing anyway — InfNorm is
+O(nnz), the same cost as the value-bound check it would have replaced.
+The genuine-MC64 cache path (populate, value-bound hit, pattern-change
+rebuild) is unchanged; all three existing MC64-cache tests stay green.
+See journal `2026-05-22-01.org` and `dev/plans/mc64-value-bounded-cache.md`.
+
 ### Fixed — explicit-zero KKT entries no longer route to MC64 ([#47][i47])
 
 `pick_scaling_strategy` (`src/scaling/mod.rs`) is now value-aware: when
@@ -126,6 +149,7 @@ the neighbour is structurally uncoupled. On the `cho` KKT: factor time
 [i46]: https://github.com/jkitchin/feral/issues/46
 [i47]: https://github.com/jkitchin/feral/issues/47
 [i48]: https://github.com/jkitchin/feral/issues/48
+[i49]: https://github.com/jkitchin/feral/issues/49
 
 ### Fixed — MC64 catastrophic-spread guard ([#45][i45])
 
