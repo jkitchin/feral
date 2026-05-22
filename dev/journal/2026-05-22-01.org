@@ -304,3 +304,36 @@ ULP nondeterminism confirmed but upstream of feral with the triplet
 order proven deterministic. Suggested closing #49 once the fix lands in
 the POUNCE feral pin.
 issue comment: github.com/jkitchin/feral/issues/49#issuecomment-4519132118
+
+* 14:30 :nondeterminism:retraction:methodology:issue-49:
+RETRACTION. The §12:10 / §13:40 claim "ULP nondeterminism IS present
+— proven, iter-4 inf_pr 7.32 vs 7.33 e-13" is WRONG and is withdrawn.
+
+What was wrong: the four logs it rested on (pounce_ts, pounce_conv,
+pounce_ab, pounce_iter11) were NEVER produced by an identical command
+on an identical binary. pounce_ts had no print_timing_statistics=yes
+and was piped through a perl timer; pounce_conv had the flag and no
+pipe. More importantly they linked DIFFERENT feral builds — some pre-,
+some post- the B2 cache fix 86fb953. The cache bug deterministically
+alters the factorization, so a pre/post split gives a stable two-value
+spread that is NOT run-to-run noise. I had never once run an identical
+command twice before asserting nondeterminism. Comparing logs across a
+build boundary and reading the delta as a FP-summation fingerprint was
+a methodology error.
+
+Controlled experiment (the one I should have run first): the EXACT
+same command — identical binary, identical args, ex4_2_320 to
+convergence — 20 times. Result: 20/20 finished 10-11s, 17 iters,
+Optimal; 20/20 iteration tables BYTE-IDENTICAL (0/19 differ from run
+01); iter-4 inf_pr = 7.33e-13 in ALL 20 (no 7.32/7.33 split); 0 hangs.
+
+The 600s timeout is likewise retracted as a "reproduced hang": it was
+almost certainly the pre-cache-fix feral, whose B2 bug deterministically
+inflated ex4_2 factorizations and blew a 600s budget. Two different
+deterministic binaries mistaken for one nondeterministic one.
+
+Conclusion: there is no ULP nondeterminism and no hang to track —
+neither in feral nor as a POUNCE follow-up. feral factorization is
+value-deterministic (structural proof: no parallel FP reduction; plus
+thousands of bit-identical repeated factorizations). POUNCE ex4_2_320
+is deterministic. Issue #49 corrected (comment 4519668029) and CLOSED.

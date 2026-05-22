@@ -4255,3 +4255,50 @@ iterates: `mc64_hits` 3/10 → 0/10. All 23 solver tests and the full
 - `src/bin/probe_issue49.rs`, `probe_cache_sequence.rs`,
   `probe_hang_loop.rs` — diagnostic probes.
 - `dev/sessions/2026-05-22-01.md` — session checkpoint.
+
+---
+
+## 2026-05-22 — Correction: no ULP nondeterminism; issue #49 closed
+
+**Status:** correction. Append-only — this does NOT modify the
+2026-05-22 "B2 cache population gates on MC64-actually-ran" entry above;
+it retracts one claim made in that entry's "Not the #49 cost regression"
+paragraph.
+
+**What is retracted.** The earlier entry stated: *"ULP-level
+nondeterminism *is* confirmed — iteration 4's `inf_pr` reads `7.32e-13`
+vs `7.33e-13` across runs."* **That is wrong and is withdrawn.** It also
+follows that the lone 600 s timeout is not evidence of a nondeterministic
+hang.
+
+**Why it was wrong.** The four POUNCE ex4_2_320 logs the claim rested on
+were never produced by an identical command on an identical binary: they
+used different POUNCE invocations (`print_timing_statistics`,
+perl-pipe) and almost certainly linked different feral builds across the
+`86fb953` cache fix. The B2 cache bug deterministically alters the
+factorization, so a pre/post-fix split produces a stable two-value
+spread that is not run-to-run noise. No identical command was ever run
+twice before the claim was made — a methodology error.
+
+**The controlled experiment.** The exact same command — identical
+binary, identical args, ex4_2_320 to convergence — run 20×: 20/20
+finished 10–11 s / 17 iters / `Optimal`; 20/20 iteration tables
+byte-identical; iter-4 `inf_pr = 7.33e-13` in all 20 (no split); 0
+hangs. The 600 s timeout most likely linked the pre-cache-fix feral,
+whose B2 bug deterministically blew a 600 s budget — two deterministic
+binaries mistaken for one nondeterministic one.
+
+**Decision.** There is no ULP nondeterminism and no hang to track —
+neither in feral nor as a POUNCE follow-up. feral factorization is
+value-deterministic (no parallel FP reduction; thousands of
+bit-identical repeated factorizations). The triplet-order HashMap
+hypothesis was separately traced and disproven (journal §13:40). GitHub
+issue #49 is **closed** — its subject (the B2 cache cost regression) is
+fixed by `86fb953` and the cost table no longer reproduces.
+
+**References.**
+- `dev/journal/2026-05-22-01.org` §14:30 (retraction), §13:40 (triplet
+  trace), §12:10 (the now-withdrawn claim).
+- `dev/sessions/2026-05-22-01.md` — checkpoint, section (b) corrected.
+- `src/bin/probe_value_determinism.rs` — parallel value-determinism probe.
+- GitHub issue #49 — correction comment 4519668029; closed completed.
