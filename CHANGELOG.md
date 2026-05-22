@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-22
+
 ### Performance — Schur trailing-update kernel widened ([#44][i44])
 
 The deferred-Schur trailing-update SIMD kernel
