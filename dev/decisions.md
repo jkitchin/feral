@@ -4185,3 +4185,73 @@ pre-fix code and pass after; all 47 scaling tests and the full
   rejected negative-cache option B).
 - `dev/journal/2026-05-21-04.org` — session journal.
 - `dev/sessions/2026-05-21-04.md` — session checkpoint.
+
+## 2026-05-22 — B2 cache population gates on MC64-actually-ran, not `ScalingInfo::Applied` (#49)
+
+**Decision.** The B2 value-bounded MC64 scaling cache
+(`Mc64ScalingCache`, `src/numeric/solver.rs`) populates only when MC64
+*actually ran* this factorization — i.e. the effective strategy is
+`ScalingStrategy::Mc64Symmetric`, or `Auto` whose `pick_scaling_strategy`
+route is `Mc64Symmetric` — **and** `scaling_info == Applied`. On any
+non-MC64 route (`InfNorm`, `Identity`, `External`) the cache is left
+empty and any prior cache is cleared. The bare
+`matches!(scaling_info, Applied)` gate is replaced by this `mc64_ran`
+conjunction.
+
+**Why.** This corrects — does not contradict the append-only record of
+— the 2026-05-21 "B2 ships as latent infrastructure" decision's claim
+that the cache is *harmless*. That claim was validated only on
+pinene_3200 / rocket_12800 (fully-populated δ-regularized diagonals
+where the value-bound gate rejects every warm iter). It is **false for
+explicit-zero-(2,2)-block KKTs** (Mittelmann ex4_2). Root cause:
+`compute_infnorm` (`src/scaling/infnorm.rs`) returns
+`ScalingInfo::Applied`, byte-identical to the MC64-complete `Applied`.
+The old population gate could not tell InfNorm from MC64, so on an
+InfNorm-routed matrix B2 cached the **InfNorm** scaling vector and, on
+the next warm `factor()`, re-injected a *stale iter-k* InfNorm vector as
+`ScalingStrategy::External`. On ex4_2 the value-bound gate then passes
+(its `qualifying_rows()` carve-out excludes the 34 % structurally-zero
+`(2,2)` rows and aggregates only the stable `(1,1)` block), so the stale
+scaling is silently accepted — a latent correctness defect, benign in
+measured residual/inertia on every ex4_2 iterate but wrong by
+construction.
+
+**Why this layer.** The defect is the *population* predicate confusing
+two scaling sources, so the fix is the predicate. `ScalingInfo` itself
+is not split into per-source variants — that is a wider type change
+touching every scaling consumer; gating on the strategy that was
+actually requested/routed is exact and local. The cost is one
+`pick_scaling_strategy` call on the `Auto` path, already O(nnz) and far
+under factor cost.
+
+**Not the #49 cost regression.** This fix is correctness-only.
+Standalone feral factor cost on ex4_2 is flat regardless of cache state
+(_320 ~242–291 ms miss vs ~241–250 ms hit). #49's cost symptom was
+investigated separately: the "~40 s/iter" premise is refuted (ex4_2_320
+solves in ~10.6 s, reproduced 12×), and the lone reported 600 s timeout
+could not be reproduced (1000 standalone parallel factorizations + 12
+full POUNCE runs: 0 hangs) or localized to feral. ULP-level
+nondeterminism *is* confirmed — iteration 4's `inf_pr` reads `7.32e-13`
+vs `7.33e-13` across runs — but it is upstream of feral (feral
+factorization is value-deterministic; the source is POUNCE's
+HashMap-influenced assembly/evaluation, cf. POUNCE issue #44). Whether
+that ULP noise can tip a near-singular KKT into the deterministic
+#44/#46/#48 cascade is plausible but unproven; the 600 s timeout
+remains a single unexplained event. Not the cache and not #47; left for
+a separate task on the POUNCE side.
+
+**Evidence.** New test
+`mc64_cache_does_not_engage_on_infnorm_route_issue_49` (factors
+`tridiag(6,10,1)` 3× on one `Solver`; asserts route is `InfNorm`,
+`mc64_cache_hit_count()==0`, `symbolic_call_count()==1`) fails pre-fix,
+passes after. `probe_cache_sequence` over all 10 dumped ex4_2_320 IPM
+iterates: `mc64_hits` 3/10 → 0/10. All 23 solver tests and the full
+`cargo test` suite green; `cargo fmt`/`clippy` clean. Committed
+`86fb953`.
+
+**References.**
+- `dev/journal/2026-05-22-01.org` §07:49, §09:30, §10:10.
+- `src/numeric/solver.rs` — the `mc64_ran` gate.
+- `src/bin/probe_issue49.rs`, `probe_cache_sequence.rs`,
+  `probe_hang_loop.rs` — diagnostic probes.
+- `dev/sessions/2026-05-22-01.md` — session checkpoint.

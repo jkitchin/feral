@@ -117,3 +117,155 @@ POUNCE-feral drive, not on the standalone dumped KKT. #44 relevance:
 same cache fires there too (NARX routes Mc64Symmetric, caches a
 genuine MC64 vector) but #44's cost is likewise the cascade, not the
 cache. Probes: src/bin/probe_issue49.rs, probe_cache_sequence.rs.
+
+* 09:30 :issue-49:cache:fix:scaling:
+Fixed the B2 cache bug from the 07:49 entry. Root cause: B2 population
+gate was matches!(scaling_info, Applied), and InfNorm's compute_infnorm
+also returns ScalingInfo::Applied — indistinguishable from MC64-complete
+Applied. So B2 cached the InfNorm vector and re-injected a stale iter-k
+InfNorm scaling as ScalingStrategy::External on the next warm factor().
+Fix (solver.rs): added an mc64_ran gate — the cache only populates when
+the effective strategy is Mc64Symmetric, OR Auto routing (via
+pick_scaling_strategy) to Mc64Symmetric, AND scaling_info==Applied.
+InfNorm / Identity / External never populate B2. On a non-MC64 route the
+cache is explicitly cleared (mc64_scaling_cache = None).
+New test mc64_cache_does_not_engage_on_infnorm_route_issue_49: factors
+tridiag(6,10,1) 3x on one Solver, asserts pick_scaling_strategy==InfNorm,
+mc64_cache_hit_count()==0, symbolic_call_count()==1.
+Post-fix probe_cache_sequence on all 10 ex4_2_320 iterates: mc64_hits=0
+(was 3/10 before). 23 solver tests + full suite green; fmt+clippy clean.
+Committed 86fb953. CHANGELOG [Unreleased] updated.
+
+* 10:10 :issue-49:pounce:performance:parallel:race:intermittent:
+Task (b): investigated the claimed POUNCE-feral per-iterate cost gap
+("~40s/iter in POUNCE vs ~0.25s standalone"). The premise is wrong.
+Clean measurements (print_timing_statistics, per-line timestamps):
+  ex4_2_320 to convergence (17 iters): 10.6s parallel / 17.5s serial
+  ex4_2_160 to convergence (21 iters): 2.29s
+  12-run repeat batch: parallel 10.2-10.8s, serial 16.9-17.7s, all exit 0
+Per-factor ~0.5s parallel — fully consistent with standalone feral warm
+factor ~0.25-0.3s. No systematic gap. POUNCE's wrapper rebuilds
+CscMatrix::from_triplets every factor() but symbolic + pattern caches
+stay engaged (symbolic_calls=1), so warm refactors stay cheap.
+
+BUT a real intermittent pathology exists. One uncapped convergence run
+TIMED OUT at 600s stuck during iteration 11 — a single factorization
+hung ~590s. This is exactly #49's "10.8s -> TIMEOUT 600s": 10.8s is
+normal, 600s is this hang. Properties:
+  - feral parallel factorization is value-deterministic (fixed
+    snode.children assembly order); iteration logs bit-identical to 7
+    sig figs across all runs through iter 11. Hang gives CORRECT output
+    + ~1000x wall-time blowup (0.5s -> ~590s) => EXECUTION-TIME race,
+    not a numerical trajectory split.
+  - Rate: ~1/12 per RUN is the wrong unit. A run does ~17 factorizations
+    and hangs if any one does: P(run)=1-(1-p)^17 ~= 17p ~= 1/12 =>
+    p ~= 1/200 per factorization. NOT deterministic-at-an-iterate — the
+    12-run batch all completed 17 iters (passed iter 11) cleanly; a
+    deterministic slow iterate would have hung all 12.
+  - NOT #47 (ex4_2 routes InfNorm regardless, max_col_nnz=6, no
+    arrow-head), NOT the B2 cache, NOT --dump kkt I/O (reproduces on
+    no-dump runs), NOT the known #44/#46/#48 DETERMINISTIC delayed-pivot
+    cascade.
+Read run_parallel_task in factorize.rs (rayon::scope + pending-decrement
+trampoline, fetch_sub(1,AcqRel), prev==1 spawns parent): structurally
+correct on inspection. Prime suspect: a lost spawn in that trampoline
+(parent snode task never scheduled => permanent hang). A DOUBLED spawn
+there is the sibling bug — the now-fixed 2026-04-21 inertia race.
+Journal agent confirmed: NO prior FERAL record of intermittent/
+nondeterministic PERFORMANCE pathology; this is new and undocumented.
+
+Reproduction probe: src/bin/probe_hang_loop.rs factors one dumped KKT
+REPEAT times on a warm Solver (parallel|serial), flushing per-call so a
+hang shows as a stalled line and a soft spike (>5x median) is flagged.
+Launched 1000x parallel on ex4_2_320_009_kkt.mtx to convert the
+~1/200 race into a catchable event; serial arm to A/B the scheduler.
+
+Conclusion: cache bug fixed; the "cost gap" as described does not exist;
+#49 actually caught a rare (~1/200-per-factorization) execution-time
+race in the parallel multifrontal driver. Recommend scoping the hang
+hunt as its own task — needs the reproduction harness above plus a
+deeper read of the spawn/steal/wakeup path.
+
+* 11:30 :issue-49:pounce-44:correction:retraction:parallel:
+CORRECTION to the 10:10 entry — the "real intermittent race in feral's
+parallel driver" claim is RETRACTED as an overclaim. Two facts forced
+the walk-back.
+
+Fact 1 — probe_hang_loop finished: 1000 back-to-back PARALLEL factors of
+ex4_2_320_009_kkt.mtx on one warm Solver. median=277.1ms, worst=1095.2ms
+@call0 (the cold symbolic, worst/median=4.0x), ZERO spikes, ZERO hangs,
+total 294.3s, exit 0. Combined with the 12 full POUNCE runs (0 hangs),
+the hang is unreproduced everywhere I controlled. One uncapped POUNCE
+run timed out at 600s (last printed line iter 10) — but it was never
+localized: the log just stopped; I assumed feral factorization but never
+ruled out POUNCE's own step computation or a system transient. A single
+unreproduced, unlocalized timeout is NOT a demonstrated feral bug.
+Calling it "a race in feral's parallel scheduler" was not warranted.
+
+Fact 2 — the human pointed at POUNCE issue #44 (BLEACHNG): "non-
+deterministic solve — fast Error_In_Step_Computation vs >90s hang",
+n=17, m=0. Same fast-vs-hang symptom. Decisive: n=17 is far below any
+feral parallel threshold (one tiny dense front) and n=17 cannot take
+90s in feral under any pivoting — so for BLEACHNG feral's parallel path
+is exonerated; the nondeterminism MUST be POUNCE-side. POUNCE #44's own
+notes name the suspect: "HashMap iteration order ... nondeterministic
+iteration order ... uninitialized scratch". POUNCE does use HashMap in
+its .nl / Hessian-tape code (pounce-cli/src/nl_tape.rs,
+nl_hessian_program.rs, nl_reader.rs).
+
+Reframed hypothesis (UNPROVEN, no feral race needed): POUNCE assembles
+KKT triplets in a HashMap-influenced order -> per-process random seed
+makes the triplet order vary run-to-run -> from_triplets sums duplicate
+coordinates in a different order -> ULP-level KKT value differences ->
+on a near-singular KKT this can flip feral's delayed-pivot trajectory
+and occasionally tip it into the KNOWN DETERMINISTIC #44/#46/#48
+cascade into a dense root front. Deterministic feral behavior fed
+nondeterministic input — which is exactly why the 1000x FIXED-matrix
+probe found nothing. Caveat: ex4_2_320 iteration logs were bit-identical
+to 7 figs across captured runs (mild evidence against run-to-run input
+divergence for that problem; ULP noise can hide below 7 printed figs).
+
+Corrected conclusion: (a) cache bug fixed (86fb953) — solid. (b) the
+"~40s/iter" premise is refuted (ex4_2_320 ~10.6s, reproduced 12x) —
+solid. The lone 600s timeout is unreproduced, unlocalized, and NOT a
+demonstrated feral defect; it belongs under POUNCE #44 (POUNCE-side
+nondeterminism), not as a feral bug. Next step is read-only on the
+POUNCE side: is the KKT triplet order HashMap-dependent? Do not chase a
+feral parallel-scheduler race that 1000 factorizations could not show.
+
+* 12:10 :issue-49:nondeterminism:correction:evidence:
+CORRECTION to both the 10:10 and 11:30 entries: they state the
+ex4_2_320 iteration logs are "bit-identical to 7 sig figs" across runs.
+That is FALSE — I repeated it from the prior session summary without
+checking the logs, which were on disk the whole time.
+
+Direct evidence of nondeterminism. Iteration 4, primal-infeasibility
+column, four POUNCE ex4_2_320 runs:
+  pounce_ts      4  3.7409062e0  7.33e-13  3.75e-6 ...
+  pounce_conv    4  3.7409062e0  7.32e-13  3.75e-6 ...
+  pounce_ab      4  3.7409062e0  7.32e-13  3.75e-6 ...
+  pounce_iter11  4  3.7409062e0  7.33e-13  3.75e-6 ...
+Every other printed digit on every iteration line matches; inf_pr at
+iter 4 splits 7.32e-13 / 7.33e-13, two runs each. The runs differ only
+in max_iter / --dump flags, none of which can change iter-4 arithmetic
+— so this is genuine run-to-run variation, ~1e-15 absolute. It is the
+fingerprint of order-dependent floating-point summation: inf_pr ~7e-13
+is near-total cancellation, which amplifies ULP-level (1e-16) summand
+noise into the visible 3rd digit.
+
+So nondeterminism IS present — proven, ULP-level. But it is upstream of
+feral: feral factorization is value-deterministic (1000x fixed-matrix
+probe = flat), so fixed input gives fixed output. The variation enters
+in POUNCE's KKT assembly or constraint/derivative evaluation.
+HashMap-ordered iteration is the textbook Rust cause of order-dependent
+summation, and POUNCE uses HashMap in its .nl/Hessian-tape code — so the
+HashMap hypothesis is now evidence-backed (not proven; exact path not
+traced).
+
+Net, precisely stated: (1) ULP-level nondeterminism — confirmed,
+upstream of feral. (2) It is normally harmless — all 12+ runs still
+converge in 17 iters. (3) The 600s timeout — still n=1, unlocalized;
+whether ULP noise can occasionally tip a near-singular KKT into the
+deterministic #44/#46/#48 cascade is plausible but UNPROVEN, not
+asserted. The earlier confusion was conflating "cannot reproduce a
+600s hang" (true) with "everything is deterministic" (false).
