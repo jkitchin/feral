@@ -1628,9 +1628,11 @@ pub fn schur_panel_minus_nofma_strided_dual(
 ///   `acc <- round(acc - round(alpha_q * src_q[i]))`
 /// is issued in `q` ascending order, identical to four sequential
 /// calls of [`schur_panel_minus_nofma_strided`] on columns `j..j+4`.
-/// The bulk SIMD body uses **unroll factor 2** (not 4) so the eight
-/// live accumulator registers (2 chunks × 4 cols) fit AVX2's 16-ymm
-/// budget without spilling.
+/// The bulk SIMD body's unroll factor is arch-gated: 4 on aarch64 (16
+/// accumulators, 4 row-vecs × 4 cols, fit the 32-register NEON budget),
+/// 2 elsewhere (8 accumulators fit AVX2's 16-ymm budget without
+/// spilling). The unroll factor only regroups body vectors into chunks;
+/// it never reorders a per-element accumulation, so it is bit-neutral.
 ///
 /// Preconditions:
 /// - `dst0.len() == len0`, `dst1.len() == len0 - 1`,
@@ -1840,29 +1842,30 @@ pub fn schur_panel_minus_nofma_strided_quad(
             debug_assert_eq!(body_len, d3_body.len());
             let tail_off = body_len * S::F64_LANES;
 
-            // Unroll-2 main body. Per chunk, hold 2 accumulators per
-            // dst column = 8 SIMD acc regs total. Plus 2 src regs (one
-            // per chunk lane) + 1 alpha splat reg reused = ~11 live
-            // regs. Fits AVX2's 16-ymm budget without spilling.
+            // Register-blocked main body. `UNROLL` SIMD row-vectors per
+            // dst column are kept live across the whole rank-q loop:
+            // 4 on aarch64 (16 accumulators + 4 src + 1 alpha splat ≈
+            // 21 live regs, fits 32-register NEON), 2 on x86 (8 acc +
+            // 2 src + 1 splat ≈ 11 live, fits AVX2's 16 ymm). `UNROLL`
+            // is `const`, so the `for k in 0..UNROLL` loops fully
+            // unroll and SROA scalarizes the small `[S::f64s; UNROLL]`
+            // arrays back into registers.
             //
-            // Per q: load src_q chunk ONCE into (s0, s1), then apply
+            // Per q: load each src_q chunk vector ONCE, then apply
             // (alpha0_q, s) → dst0 accumulators, (alpha1_q, s) → dst1,
-            // (alpha2_q, s) → dst2, (alpha3_q, s) → dst3. Bit-exact
-            // per column with four sequential single-column rank-1
-            // dispatches because each column's accumulator sees the
-            // same q-ascending `acc <- sub(acc, mul(alpha_q, src))`
-            // chain, independent of the other columns.
-            let chunks = body_len / 2;
+            // (alpha2_q, s) → dst2, (alpha3_q, s) → dst3. Bit-exact per
+            // column with four sequential single-column rank-1
+            // dispatches: each body vector's accumulator runs the same
+            // q-ascending `acc <- sub(acc, mul(alpha_q, src))` chain
+            // regardless of which chunk it lands in.
+            const UNROLL: usize = if cfg!(target_arch = "aarch64") { 4 } else { 2 };
+            let chunks = body_len / UNROLL;
             for chunk_idx in 0..chunks {
-                let base = chunk_idx * 2;
-                let mut a00 = d0_body[base];
-                let mut a01 = d0_body[base + 1];
-                let mut a10 = d1_body[base];
-                let mut a11 = d1_body[base + 1];
-                let mut a20 = d2_body[base];
-                let mut a21 = d2_body[base + 1];
-                let mut a30 = d3_body[base];
-                let mut a31 = d3_body[base + 1];
+                let base = chunk_idx * UNROLL;
+                let mut a0: [S::f64s; UNROLL] = core::array::from_fn(|k| d0_body[base + k]);
+                let mut a1: [S::f64s; UNROLL] = core::array::from_fn(|k| d1_body[base + k]);
+                let mut a2: [S::f64s; UNROLL] = core::array::from_fn(|k| d2_body[base + k]);
+                let mut a3: [S::f64s; UNROLL] = core::array::from_fn(|k| d3_body[base + k]);
                 for q in 0..n_elim {
                     let a0q = alphas0[q];
                     let a1q = alphas1[q];
@@ -1874,42 +1877,41 @@ pub fn schur_panel_minus_nofma_strided_quad(
                     let col_off = (src_first_col + q) * col_stride + src_row_offset_bulk;
                     let src_q = &src_block[col_off..col_off + len];
                     let (sb, _st) = S::as_simd_f64s(src_q);
-                    let s0 = sb[base];
-                    let s1 = sb[base + 1];
+                    let s: [S::f64s; UNROLL] = core::array::from_fn(|k| sb[base + k]);
                     if a0q != 0.0 {
                         let av0 = simd.splat_f64s(a0q);
-                        a00 = simd.sub_f64s(a00, simd.mul_f64s(av0, s0));
-                        a01 = simd.sub_f64s(a01, simd.mul_f64s(av0, s1));
+                        for k in 0..UNROLL {
+                            a0[k] = simd.sub_f64s(a0[k], simd.mul_f64s(av0, s[k]));
+                        }
                     }
                     if a1q != 0.0 {
                         let av1 = simd.splat_f64s(a1q);
-                        a10 = simd.sub_f64s(a10, simd.mul_f64s(av1, s0));
-                        a11 = simd.sub_f64s(a11, simd.mul_f64s(av1, s1));
+                        for k in 0..UNROLL {
+                            a1[k] = simd.sub_f64s(a1[k], simd.mul_f64s(av1, s[k]));
+                        }
                     }
                     if a2q != 0.0 {
                         let av2 = simd.splat_f64s(a2q);
-                        a20 = simd.sub_f64s(a20, simd.mul_f64s(av2, s0));
-                        a21 = simd.sub_f64s(a21, simd.mul_f64s(av2, s1));
+                        for k in 0..UNROLL {
+                            a2[k] = simd.sub_f64s(a2[k], simd.mul_f64s(av2, s[k]));
+                        }
                     }
                     if a3q != 0.0 {
                         let av3 = simd.splat_f64s(a3q);
-                        a30 = simd.sub_f64s(a30, simd.mul_f64s(av3, s0));
-                        a31 = simd.sub_f64s(a31, simd.mul_f64s(av3, s1));
+                        for k in 0..UNROLL {
+                            a3[k] = simd.sub_f64s(a3[k], simd.mul_f64s(av3, s[k]));
+                        }
                     }
                 }
-                d0_body[base] = a00;
-                d0_body[base + 1] = a01;
-                d1_body[base] = a10;
-                d1_body[base + 1] = a11;
-                d2_body[base] = a20;
-                d2_body[base + 1] = a21;
-                d3_body[base] = a30;
-                d3_body[base + 1] = a31;
+                d0_body[base..base + UNROLL].copy_from_slice(&a0);
+                d1_body[base..base + UNROLL].copy_from_slice(&a1);
+                d2_body[base..base + UNROLL].copy_from_slice(&a2);
+                d3_body[base..base + UNROLL].copy_from_slice(&a3);
             }
 
-            // Tail full-lane SIMD vector (0 or 1 leftover after the
-            // unroll-2 main body).
-            let tail_chunks_start = chunks * 2;
+            // Tail full-lane SIMD vectors (0..UNROLL-1 leftover after
+            // the register-blocked main body), one vector at a time.
+            let tail_chunks_start = chunks * UNROLL;
             for body_idx in tail_chunks_start..body_len {
                 let mut acc0 = d0_body[body_idx];
                 let mut acc1 = d1_body[body_idx];
