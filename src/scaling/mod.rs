@@ -560,14 +560,22 @@ fn max_off_diag_ratio(matrix: &CscMatrix, scaling: &[f64]) -> f64 {
 ///
 /// Routes to `Mc64Symmetric` when the matrix has the arrow-KKT
 /// signature: BOTH
-///   (a) many degree-1 "constraint slack" columns whose only stored
-///       row is the diagonal (`diag_only / n >= 0.30`), AND
-///   (b) at least one structurally dense column whose stored nnz
+///   (a) many degree-1 "constraint slack" columns whose only
+///       structurally nonzero entry is the diagonal
+///       (`diag_only / n >= 0.30`), AND
+///   (b) at least one structurally dense column whose nonzero count
 ///       exceeds `MAX_COL_NNZ_FOR_INFNORM = 32` — the "arrow head"
 ///       that creates wildly mismatched off-diagonal magnitudes
 ///       InfNorm cannot equalize.
 ///
 /// Else routes to `InfNorm`.
+///
+/// Both counts ignore explicit stored `0.0` entries (issue #47): an
+/// explicit zero is not coupling and not mass, so a value-only zero
+/// must not change which scaling strategy a matrix routes to. Callers
+/// that refill a fixed sparsity pattern each solve (POUNCE-style IPM
+/// backends) leave such zeros in the zero-`(2,2)` block; a value-blind
+/// router would split the kept and stripped forms of the same KKT.
 ///
 /// **Why both gates are needed.** The diag_only ratio alone CANNOT
 /// distinguish a 1-D banded KKT like clnlbeam (n=99999, diag_only=40%,
@@ -613,11 +621,28 @@ pub fn pick_scaling_strategy(matrix: &CscMatrix) -> ScalingStrategy {
     for j in 0..n {
         let start = matrix.col_ptr[j];
         let end = matrix.col_ptr[j + 1];
-        let nnz_col = end - start;
+        // Issue #47: count only structurally meaningful entries. An
+        // explicit stored `0.0` is not coupling and not mass — POUNCE
+        // -style callers refill a fixed pattern each IPM iterate,
+        // leaving value-only `0.0` slots in the zero-`(2,2)` block.
+        // Counting them lets a value-only zero flip this scaling
+        // router; the kept CHO `parmest` KKT then routes to MC64 while
+        // the structurally-identical stripped one routes to InfNorm.
+        let mut nnz_col = 0usize;
+        let mut diag_nonzero = false;
+        for k in start..end {
+            if matrix.values[k] == 0.0 {
+                continue;
+            }
+            nnz_col += 1;
+            if matrix.row_idx[k] == j {
+                diag_nonzero = true;
+            }
+        }
         if nnz_col > max_col_nnz {
             max_col_nnz = nnz_col;
         }
-        if nnz_col == 1 && matrix.row_idx[start] == j {
+        if nnz_col == 1 && diag_nonzero {
             diag_only += 1;
         }
     }
@@ -681,10 +706,7 @@ mod tests {
     }
 
     /// Build the parameter-estimation saddle-point KKT used as the
-    /// issue-#45 spread-guard test oracle. Identical construction to
-    /// `src/bin/probe_mc64_synth.rs::build_kkt` — that probe is the
-    /// documented source of the measured MC64/InfNorm spreads (journal
-    /// 2026-05-20-02 16:34).
+    /// issue-#45 spread-guard test oracle.
     ///
     /// `[H Bᵀ; B 0]` stored as the lower triangle: `ntheta` dense
     /// parameter columns (graded H diagonal `1 .. theta_top`, each
@@ -695,18 +717,34 @@ mod tests {
     /// `s-1` with coefficient `base`). The constant ratio makes the
     /// chain translation-invariant — InfNorm equilibrates it
     /// uniformly — while MC64's symmetric matching telescopes `base`
-    /// into a path-accumulated potential. Routes to `Mc64Symmetric`:
-    /// `diag_only/n ≈ 0.5`, `max_col_nnz = 1 + nc > 32`.
+    /// into a path-accumulated potential. The chain block is identical
+    /// to `src/bin/probe_mc64_synth.rs::build_kkt`, the documented
+    /// source of the measured MC64/InfNorm spreads (journal
+    /// 2026-05-20-02 16:34).
+    ///
+    /// `nslack` degree-1 columns with a *nonzero* unit diagonal are
+    /// appended last. They model the bound slacks of a
+    /// bound-constrained parameter-estimation KKT (real slack mass +
+    /// zero equality duals). They are required for issue #47: with the
+    /// value-aware router the explicit-zero constraint/state diagonals
+    /// no longer count as `diag_only`, so genuine slack mass is what
+    /// routes this matrix to `Mc64Symmetric` (`nslack/n >= 0.30`,
+    /// `max_col_nnz = 1 + nc > 32`). Being disconnected from the chain,
+    /// MC64's matching decomposes over them (each matches itself,
+    /// `log|1| = 0`, scale 1) — the chain potentials, and hence
+    /// `scaling_spread`, are unchanged from the no-slack form.
     fn build_synth_kkt(
         ntheta: usize,
         nx: usize,
         theta_top: f64,
         base: f64,
         pcoef: f64,
+        nslack: usize,
     ) -> CscMatrix {
         let nc = nx;
-        let n = ntheta + nx + nc;
+        let n = ntheta + nx + nc + nslack;
         let con0 = ntheta + nx; // first constraint global index
+        let slack0 = ntheta + nx + nc; // first slack global index
         let mut rows = Vec::new();
         let mut cols = Vec::new();
         let mut vals = Vec::new();
@@ -748,6 +786,14 @@ mod tests {
             rows.push(jc);
             cols.push(jc);
             vals.push(0.0);
+        }
+        // Slack columns: genuine degree-1 mass, nonzero unit diagonal,
+        // disconnected from the chain.
+        for s in 0..nslack {
+            let js = slack0 + s;
+            rows.push(js);
+            cols.push(js);
+            vals.push(1.0);
         }
         CscMatrix::from_triplets(n, &rows, &cols, &vals)
             .expect("synthetic KKT triplets are valid lower-triangle")
@@ -813,6 +859,124 @@ mod tests {
             values: vec![],
         };
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::InfNorm);
+    }
+
+    /// Issue #47 — `pick_scaling_strategy` must treat an explicit stored
+    /// `0.0` as structurally absent. POUNCE-style callers refill a fixed
+    /// KKT pattern each IPM iterate, leaving value-only `0.0` slots in
+    /// the zero-`(2,2)` block; a value-blind structural router counts
+    /// them and flips the scaling strategy (CHO `parmest`: kept routes
+    /// to MC64, stripped to InfNorm — `probe_explicit_zeros`).
+    ///
+    /// Layout (n=100): 50 arrow-head columns each storing the diagonal
+    /// plus 40 nonzero rows below it (41 nnz > 32 → arrow head); then 50
+    /// "constraint" columns whose diagonal is the variable:
+    ///   - `Zero`:   one explicit `0.0` on the diagonal.
+    ///   - `Absent`: structurally empty.
+    ///   - `Real`:   one nonzero `1.0` on the diagonal.
+    ///
+    /// Oracle (hand calculation): an explicit `0.0` is not mass. `Zero`
+    /// and `Absent` must route identically (→ InfNorm: no real slack
+    /// mass); `Real` has 50 genuine degree-1 columns (0.50 ≥ 0.30) → MC64.
+    #[test]
+    fn pick_scaling_strategy_explicit_zero_diag_not_slack_mass() {
+        #[derive(Clone, Copy)]
+        enum Cdiag {
+            Zero,
+            Absent,
+            Real,
+        }
+        fn build(cdiag: Cdiag) -> CscMatrix {
+            let n = 100;
+            let n_dense = 50;
+            let mut col_ptr = vec![0usize];
+            let mut row_idx: Vec<usize> = Vec::new();
+            let mut values: Vec<f64> = Vec::new();
+            // Arrow-head columns: diagonal + 40 nonzero rows below.
+            for j in 0..n_dense {
+                row_idx.push(j);
+                values.push(2.0);
+                for r in (j + 1)..(j + 41) {
+                    row_idx.push(r);
+                    values.push(0.3);
+                }
+                col_ptr.push(row_idx.len());
+            }
+            // Constraint columns.
+            for j in n_dense..n {
+                match cdiag {
+                    Cdiag::Zero => {
+                        row_idx.push(j);
+                        values.push(0.0);
+                    }
+                    Cdiag::Absent => {}
+                    Cdiag::Real => {
+                        row_idx.push(j);
+                        values.push(1.0);
+                    }
+                }
+                col_ptr.push(row_idx.len());
+            }
+            CscMatrix {
+                n,
+                col_ptr,
+                row_idx,
+                values,
+            }
+        }
+        // Explicit-zero diagonals and structural absence must agree.
+        assert_eq!(
+            pick_scaling_strategy(&build(Cdiag::Zero)),
+            ScalingStrategy::InfNorm,
+            "explicit-zero constraint diagonals are not slack mass"
+        );
+        assert_eq!(
+            pick_scaling_strategy(&build(Cdiag::Absent)),
+            ScalingStrategy::InfNorm
+        );
+        // Genuine nonzero degree-1 columns are slack mass → MC64.
+        assert_eq!(
+            pick_scaling_strategy(&build(Cdiag::Real)),
+            ScalingStrategy::Mc64Symmetric
+        );
+    }
+
+    /// Issue #47 — an explicit-zero *off-diagonal* entry must neither
+    /// inflate `max_col_nnz` nor disqualify an otherwise-`diag_only`
+    /// column. Here the 50 constraint columns each store a nonzero
+    /// diagonal AND a single explicit-zero off-diagonal; value-aware
+    /// counting still sees them as 50 degree-1 columns (0.50 ≥ 0.30) →
+    /// MC64. (Value-blind counting would call them degree-2 and route
+    /// to InfNorm.)
+    #[test]
+    fn pick_scaling_strategy_explicit_zero_offdiag_ignored() {
+        let n = 100;
+        let mut col_ptr = vec![0usize];
+        let mut row_idx: Vec<usize> = Vec::new();
+        let mut values: Vec<f64> = Vec::new();
+        for j in 0..50 {
+            row_idx.push(j);
+            values.push(2.0);
+            for r in (j + 1)..(j + 41) {
+                row_idx.push(r);
+                values.push(0.3);
+            }
+            col_ptr.push(row_idx.len());
+        }
+        for j in 50..n {
+            row_idx.push(0);
+            values.push(0.0); // explicit-zero off-diagonal
+            row_idx.push(j);
+            values.push(1.0); // nonzero diagonal
+            col_ptr.push(row_idx.len());
+        }
+        let csc = CscMatrix {
+            n,
+            col_ptr,
+            row_idx,
+            values,
+        };
+        assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
     }
 
     /// Regression test for the clnlbeam IPM-iter-bloat bug
@@ -1156,16 +1320,19 @@ mod tests {
     /// to the InfNorm vector, tagging the result
     /// `Mc64FallbackToInfnorm{Mc64ScalingDegenerate}`.
     ///
-    /// Oracle: `src/bin/probe_mc64_synth` measured this exact matrix
-    /// (`build_synth_kkt(8, 80, 1e8, 4.0, 0.5)`) at MC64 spread
-    /// 3.34e94 (far above `1/EPS ≈ 4.50e15`) and InfNorm spread
-    /// 2.00e4 (above `IN_SPREAD_GUARD = 1e3`, so the MC64 branch is
-    /// genuinely reached). The two preconditions below re-assert
-    /// those measured facts so the test fails loudly if the oracle
-    /// ever drifts. Journal: 2026-05-20-02 16:34.
+    /// Oracle: `src/bin/probe_mc64_synth` measured the chain block of
+    /// this matrix (`base = 4.0`) at MC64 spread 3.34e94 (far above
+    /// `1/EPS ≈ 4.50e15`) and InfNorm spread 2.00e4 (above
+    /// `IN_SPREAD_GUARD = 1e3`, so the MC64 branch is genuinely
+    /// reached). The 120 appended unit slack columns (issue #47: they
+    /// carry the genuine `diag_only` mass the value-aware router
+    /// requires) are disconnected from the chain, so neither spread
+    /// moves. All three preconditions below re-assert the measured
+    /// facts so the test fails loudly if the oracle ever drifts.
+    /// Journal: 2026-05-20-02 16:34.
     #[test]
     fn auto_falls_back_on_catastrophic_mc64_spread() {
-        let csc = build_synth_kkt(8, 80, 1e8, 4.0, 0.5);
+        let csc = build_synth_kkt(8, 80, 1e8, 4.0, 0.5, 120);
         // Precondition 1: the shape router sends this to MC64.
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
         // Precondition 2: MC64's own scaling spread exceeds the guard.
@@ -1175,6 +1342,16 @@ mod tests {
         assert!(
             mc_spread > 1.0 / f64::EPSILON,
             "test oracle invalid: MC64 spread {mc_spread:.3e} must exceed the guard"
+        );
+        let (in_vec, _) = compute_scaling(&csc, &ScalingStrategy::InfNorm)
+            .expect("InfNorm scaling should succeed");
+        // Precondition 3: InfNorm spread clears IN_SPREAD_GUARD (1e3),
+        // so Auto genuinely reaches the MC64 branch and the new guard
+        // rather than short-circuiting on the pre-MC64 InfNorm trial.
+        let in_spread = scaling_spread(&in_vec);
+        assert!(
+            in_spread > 1e3,
+            "test oracle invalid: InfNorm spread {in_spread:.3e} must exceed IN_SPREAD_GUARD"
         );
         // The guard must fire: Auto returns the InfNorm vector with
         // the new degenerate-scaling reason.
@@ -1188,8 +1365,6 @@ mod tests {
                 panic!("expected Mc64FallbackToInfnorm{{Mc64ScalingDegenerate}}, got {other:?}")
             }
         }
-        let (in_vec, _) = compute_scaling(&csc, &ScalingStrategy::InfNorm)
-            .expect("InfNorm scaling should succeed");
         assert_eq!(auto_vec, in_vec, "fallback must return the InfNorm vector");
         assert_ne!(
             auto_vec, mc_vec,
@@ -1200,13 +1375,15 @@ mod tests {
     /// T3 — Issue #45 non-regression. When MC64's scaling spread is
     /// BELOW the guard, `Auto` must keep the MC64 vector — the guard
     /// must not be over-eager. Same builder as T2 with `base = 1.1`:
-    /// `probe_mc64_synth` measured MC64 spread 9.31e6 (well under
-    /// `1/EPS`) and InfNorm spread 1.05e4 (above `IN_SPREAD_GUARD`,
-    /// so the MC64 branch — and thus the new guard — is genuinely
-    /// reached rather than short-circuited).
+    /// `probe_mc64_synth` measured the chain block at MC64 spread
+    /// 9.31e6 (well under `1/EPS`) and InfNorm spread 1.05e4 (above
+    /// `IN_SPREAD_GUARD`, so the MC64 branch — and thus the new guard
+    /// — is genuinely reached rather than short-circuited). The 120
+    /// appended unit slack columns (issue #47) are disconnected and
+    /// move neither spread.
     #[test]
     fn auto_keeps_mc64_when_spread_below_guard() {
-        let csc = build_synth_kkt(8, 80, 1e8, 1.1, 0.5);
+        let csc = build_synth_kkt(8, 80, 1e8, 1.1, 0.5, 120);
         assert_eq!(pick_scaling_strategy(&csc), ScalingStrategy::Mc64Symmetric);
         let (mc_vec, _) = compute_scaling(&csc, &ScalingStrategy::Mc64Symmetric)
             .expect("MC64 scaling should succeed");
@@ -1214,6 +1391,15 @@ mod tests {
         assert!(
             mc_spread < 1.0 / f64::EPSILON,
             "test oracle invalid: MC64 spread {mc_spread:.3e} must be below the guard"
+        );
+        let in_spread = scaling_spread(
+            &compute_scaling(&csc, &ScalingStrategy::InfNorm)
+                .expect("InfNorm scaling should succeed")
+                .0,
+        );
+        assert!(
+            in_spread > 1e3,
+            "test oracle invalid: InfNorm spread {in_spread:.3e} must exceed IN_SPREAD_GUARD"
         );
         let (auto_vec, info) =
             compute_scaling(&csc, &ScalingStrategy::Auto).expect("Auto scaling should succeed");
@@ -1234,9 +1420,10 @@ mod tests {
 
     /// T4 — Issue #45 non-regression. The spread guard must not
     /// regress a matrix that genuinely reaches the new code path.
-    /// `build_synth_kkt(8, 80, 1e8, 1.1, 0.5)` is well-conditioned
-    /// (`probe_mc64_synth`: InfNorm relres 4.4e-11, MC64 relres
-    /// 3.6e-11). Factoring and solving it through `Auto` must still
+    /// `build_synth_kkt(8, 80, 1e8, 1.1, 0.5, 120)` is well-conditioned
+    /// (`probe_mc64_synth`: chain-block InfNorm relres 4.4e-11, MC64
+    /// relres 3.6e-11; the 120 unit slack columns add only trivial
+    /// 1×1 pivots). Factoring and solving it through `Auto` must still
     /// produce a small residual. Oracle: the relative residual
     /// `‖A·x−b‖ / ‖b‖` is a mathematical identity.
     #[test]
@@ -1246,7 +1433,7 @@ mod tests {
         use crate::symbolic::{symbolic_factorize_with_method, OrderingMethod, SupernodeParams};
         use crate::NumericParams;
 
-        let csc = build_synth_kkt(8, 80, 1e8, 1.1, 0.5);
+        let csc = build_synth_kkt(8, 80, 1e8, 1.1, 0.5, 120);
         let snode = SupernodeParams::default();
         let np = NumericParams {
             scaling: ScalingStrategy::Auto,
