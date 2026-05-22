@@ -4,6 +4,26 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — explicit-zero KKT entries no longer route to MC64 ([#47][i47])
+
+`pick_scaling_strategy` (`src/scaling/mod.rs`) is now value-aware: when
+counting per-column nnz, `max_col_nnz`, and the `diag_only` slack-mass
+tally it skips explicit stored `0.0` entries. Previously it counted
+*stored* entries, so a constraint column holding an explicit `0.0`
+`(2,2)`-block diagonal was mistaken for a degree-1 slack column. On
+POUNCE's CHO `parmest` KKT — which keeps explicit-zero `(2,2)`
+diagonals — this drove `diag_only/n` to 0.500 (kept) versus 0.000
+(stripped), so the structurally identical kept matrix routed to
+`Mc64Symmetric` while the stripped one routed to `InfNorm`. MC64 then
+degenerated (the ≈3e82 spread blow-up of [#45][i45]), fell back to
+`InfNorm`, the B2 value-bounded scaling cache never populated, and
+every warm factor re-ran the ~345 ms Hungarian match — the ~2× wall
+slowdown. With the fix the kept matrix routes to `InfNorm` like the
+stripped one: `scaling_info=Applied`, MC64 cache hits, warm refactor
+~16 ms (was ~370 ms — ~23×), inertia and residual unchanged. See
+`dev/plans/issue-47-explicit-zero-routing.md` and journal
+`2026-05-21-04.org`.
+
 ### Fixed — spurious zero in 2×2 inertia (cancellation) ([#48][i48])
 
 The 2×2 pivot-block inertia classifier no longer fabricates a spurious
@@ -104,6 +124,7 @@ the neighbour is structurally uncoupled. On the `cho` KKT: factor time
 `dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md`.
 
 [i46]: https://github.com/jkitchin/feral/issues/46
+[i47]: https://github.com/jkitchin/feral/issues/47
 [i48]: https://github.com/jkitchin/feral/issues/48
 
 ### Fixed — MC64 catastrophic-spread guard ([#45][i45])

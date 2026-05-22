@@ -145,3 +145,125 @@ Mc64ScalingDegenerate -> InfNorm fallback -> cache never populates.
 feral already has the MUMPS-style "detect degeneracy + fall back" half;
 it lacks the SSIDS-style "don't feed log(0)" half. Smaller and
 lower-risk than the from_triplets canonicalization considered earlier.
+
+* 20:30 :issue47:mc64:routing:correction:repro:
+Mechanism re-pinned a THIRD time — and this time verified empirically
+before claiming anything. Code inspection while preparing the fix
+found build_cost_graph (mc64.rs:256) ALREADY drops explicit zeros
+(lines 274, 300: `if val == 0.0 { continue; }`). So the §19:10 fix
+scope ("SSIDS-style drop zeros in the MC64 Hungarian") was wrong — that
+is already done. MC64's cost graph is zero-free for both matrices.
+
+Instrumented probe_explicit_zeros to print pick_scaling_strategy's
+structural inputs and routing decision. Result:
+
+  route stripped            diag_only=0      (0.000)  max_col_nnz=10861  -> InfNorm
+  route explicit zeros kept diag_only=21660  (0.500)  max_col_nnz=10866  -> Mc64Symmetric
+
+THE divergence point. pick_scaling_strategy (mod.rs:601) counts STORED
+entries. A constraint column in the zero-(2,2) block, lower-triangle
+stored, has only its diagonal. Kept: that diagonal is an explicit 0.0
+-> nnz_col=1, row_idx==j -> counted diag_only. Stripped: the 0.0 is
+gone -> nnz_col=0 -> NOT diag_only. So diag_only/n is 0.500 (kept) vs
+0.000 (stripped); has_slack_mass (>=0.30) flips; kept routes to
+Mc64Symmetric, stripped to InfNorm.
+
+compute_scaling_auto_with_cache returns early on non-MC64 routing
+(mod.rs:363), so the stripped matrix NEVER runs MC64 — it is InfNorm
+with scaling_info=Applied, cache populates, warm 15ms. The kept matrix
+runs MC64, degenerates (issue #45, 3e82 spread), falls back ->
+Mc64FallbackToInfnorm{Mc64ScalingDegenerate}, cache never populates,
+warm 370ms. Confirmed in the same probe run.
+
+Correction to §18:45: "the stripped matrix's MC64 returns Applied" is
+WRONG — the stripped matrix never runs MC64 at all. Its Applied comes
+from InfNorm.
+
+Root cause is now solid: explicit zeros are not structure, but
+pick_scaling_strategy — a structural heuristic — counts them, so they
+flip routing. An explicit-zero-only column is not slack mass.
+
+Two fix options, recorded for the human decision:
+- A (value-aware routing): make pick_scaling_strategy skip explicit
+  zeros when computing nnz_col/diag_only/max_col_nnz. Principled — the
+  kept matrix then routes identically to stripped (InfNorm). Blast
+  radius: build_synth_kkt (the issue-#45 oracle, mod.rs:700) pushes
+  explicit-zero state+constraint diagonals (lines 735, 750), so its
+  routing flips to InfNorm too; tests T2/T3 (auto_falls_back_on_
+  catastrophic_mc64_spread, auto_keeps_mc64_when_spread_below_guard)
+  assert pick_scaling_strategy==Mc64Symmetric as a precondition and
+  would need rework (the spread guard becomes defense-in-depth with no
+  live Auto-path test, or build_synth_kkt gains a nonzero-diagonal
+  variant re-measured via probe_mc64_synth).
+- B (negative cache): when MC64 degenerates for a fingerprint, record
+  it in the B2 cache and skip the Hungarian on warm refactors. Fixes
+  #47's cost (the 2x is all warm refactors) without touching routing
+  or the issue-#45 tests. Cold still pays one wasted Hungarian.
+
+Posted the corrected mechanism on #47. Asking the human to pick A/B.
+
+* 20:39 :issue-47:scaling:fix:implemented:
+Implemented Option A — value-aware pick_scaling_strategy. The human
+denied the A/B AskUserQuestion, directing "update it then fix it that
+way"; took A as the root-cause fix (B only masks warm-refactor cost
+and leaves a value-blind router in place).
+
+Change (src/scaling/mod.rs): the per-column loop in
+pick_scaling_strategy no longer does nnz_col = end - start. It now
+iterates k in start..end, skips entries where values[k] == 0.0, and
+counts only numeric nonzeros toward nnz_col / max_col_nnz; a column is
+diag_only only when its single numeric nonzero is the diagonal. Doc
+comment updated to state both counts ignore explicit stored 0.0
+(issue #47). One extra contiguous values[] read per stored entry, no
+second pass, no alloc.
+
+Verification on the real CHO parmest iter-0 KKT (probe_explicit_zeros,
+route_diag instrumentation):
+  route stripped            diag_only=0      -> InfNorm
+  route explicit zeros kept diag_only=21660  (0.500) -> Mc64Symmetric   [before]
+  route explicit zeros kept diag_only=0              -> InfNorm         [after]
+Kept matrix now routes identically to stripped: scaling_info=Applied,
+mc64_cache_hits=1,2,3, mc64_fallbacks=0, warm refactor ~16ms (was
+~370ms, ~23x). Inertia (21672,21660,0) exact, residual 5.04e-9
+unchanged.
+
+Tests-first: two new unit tests built three ways via a Cdiag enum
+{Zero, Absent, Real} — Zero/Absent must route InfNorm, Real must route
+Mc64Symmetric (pick_scaling_strategy_explicit_zero_diag_not_slack_mass);
+explicit-zero off-diagonals on nonzero-diagonal constraint columns must
+still route Mc64Symmetric (pick_scaling_strategy_explicit_zero_offdiag_
+ignored). Both fail on pre-fix code, pass after. Oracle is the routing
+contract itself, hand-reasoned — not a reference solver.
+
+* 20:42 :issue-47:issue-45:tests:build-synth-kkt:
+Issue-#45 spread-guard test fallout, as predicted in the §20:30 A
+blast-radius note. build_synth_kkt builds explicit-zero (2,2)
+diagonals, so after the value-aware change its KKT routed to InfNorm
+and T2/T3 (auto_falls_back_on_catastrophic_mc64_spread,
+auto_keeps_mc64_when_spread_below_guard) failed:
+  assertion `left == right` failed
+    left: InfNorm   right: Mc64Symmetric
+
+Resolved by adding nslack: usize to build_synth_kkt — it now appends
+nslack disconnected genuine unit-diagonal slack columns (real 1.0 on
+the diagonal, nothing else). That restores diag_only slack mass so the
+synth KKT routes to MC64 again, without touching the theta/x/constraint
+chain that drives the mc_spread/in_spread degeneracy oracle. T2/T3/T4
+call build_synth_kkt(8, 80, ..., 120). Added an in_spread > 1e3
+precondition to T2/T3 so the oracle self-validates: if the slack
+columns had perturbed the spread the precondition would catch it.
+After: all 47 scaling tests pass, full cargo test green (EXITCODE:0,
+163 "test result: ok", zero failures), clippy --all-targets clean.
+
+* 20:44 :issue-47:session-end:bench:
+cargo run --bin bench --release: 8 synthetic matrices, all inertia
+exact (spd_*, kkt_*), factor times in line with prior sessions
+(spd_200 389us, kkt_100_30 203us). The bench harness uses in-repo
+synthetic matrices, not the POUNCE corpus, so #47 (a warm-refactor
+caching effect on a real KKT) does not show here — expected, no
+regression. The #47 speedup evidence is the probe_explicit_zeros
+numbers above (~23x warm refactor).
+
+Committed: ed147dd test(issue-47) probe routing diagnostic;
+e49694b fix(scaling) value-aware pick_scaling_strategy (#47);
+129f268 docs(plan) issue-47 plan.

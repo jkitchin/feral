@@ -4118,3 +4118,70 @@ Bench inertia match 100.0%, all four exit-partition buckets PASS.
 - `dev/plans/kkt-cascade-fix2-2x2-inertia-cancellation.md` — the plan.
 - `dev/journal/2026-05-21-03.org` §17:40/§18:05/§18:45/§19:00.
 - `dev/sessions/2026-05-21-03.md` — session checkpoint.
+
+## 2026-05-21 — `pick_scaling_strategy` counts numeric nonzeros, not stored entries (#47)
+
+**Decision.** The structural router `pick_scaling_strategy`
+(`src/scaling/mod.rs`) classifies a column from its **numeric** content:
+an explicit stored `0.0` entry does not contribute to per-column nnz,
+to `max_col_nnz`, or to the `diag_only` slack-mass tally. A column
+counts as `diag_only` only when its *one numeric nonzero* is the
+diagonal. The router's two gates — `has_arrow_head` (`max_col_nnz > 32`)
+and `has_slack_mass` (`diag_only/n ≥ 0.30`) — are therefore invariant
+under the presence or absence of explicit zeros.
+
+**Why.** The router decides `Mc64Symmetric` vs `InfNorm`. Counting
+stored entries made the decision depend on caller fill: POUNCE's CHO
+`parmest` keeps explicit-zero `(2,2)`-block diagonals, so a zero-block
+constraint column (whose only stored lower-triangle entry is its `0.0`
+diagonal) was counted as a degree-1 slack column. `diag_only/n` then
+read 0.500 with explicit zeros kept versus 0.000 with them stripped —
+the *same matrix* numerically — and routed to MC64 in one case and
+`InfNorm` in the other. MC64 then hit the [#45] catastrophic-spread
+guard, fell back to `InfNorm` anyway, and left the B2 value-bounded
+scaling cache unpopulated (it fills only on `ScalingInfo::Applied`), so
+every warm factor re-ran the ~345 ms Hungarian — issue #47's ~2× wall
+slowdown.
+
+**Why this layer.** The fix lives in the router, not in `from_triplets`
+or the symbolic phase. Stripping explicit zeros at ingest was the
+session-03 checkpoint's proposed option (a); it was **not** taken — it
+is a larger, structure-mutating change with its own test surface, and
+it would only mask a router that is value-blind by construction. A
+routing decision that flips on numerically-irrelevant stored zeros is
+the actual defect. Making the *count* numeric fixes the cause at one
+site and leaves explicit-zero matrices structurally intact for every
+other consumer.
+
+**Cost.** The column loop already iterated `row_idx[start..end]`; it now
+also reads `values[k]` in the same pass — one extra contiguous array
+read per stored entry, no allocation, no second pass. Negligible
+against the factorization it precedes.
+
+**Test-oracle interaction (#45 spread-guard tests).** The
+test-module-local `build_synth_kkt` builds its `(2,2)` block with
+explicit-zero diagonals, so after this change its KKT routed to
+`InfNorm` and the T2/T3/T4 spread-guard tests (which require MC64 to
+*run* so the `Mc64ScalingDegenerate` guard can fire) broke. Resolved by
+adding an `nslack` parameter to `build_synth_kkt` that appends
+disconnected genuine unit-diagonal slack columns — restoring `diag_only`
+slack mass and MC64 routing *without* perturbing the chain that drives
+the `mc_spread`/`in_spread` oracle. The T2/T3 inline preconditions
+(`in_spread > 1e3`, etc.) confirm the oracle still holds.
+
+**Evidence.** `probe_explicit_zeros` on the real CHO `parmest` iter-0
+KKT: before, kept → `Mc64Symmetric` → `Mc64FallbackToInfnorm`, warm
+refactor ~370 ms, `mc64_cache_hits=0`; after, kept → `InfNorm` (matches
+the stripped matrix), `scaling_info=Applied`, `mc64_cache_hits=1,2,3`,
+`mc64_fallbacks=0`, warm refactor ~16 ms (~23×). Inertia
+`(21672,21660,0)` exact, residual `5.04e-9` unchanged. Two new unit
+tests (`pick_scaling_strategy_explicit_zero_diag_not_slack_mass`,
+`pick_scaling_strategy_explicit_zero_offdiag_ignored`) fail on the
+pre-fix code and pass after; all 47 scaling tests and the full
+`cargo test` suite green.
+
+**References.**
+- `dev/plans/issue-47-explicit-zero-routing.md` — the plan (incl. the
+  rejected negative-cache option B).
+- `dev/journal/2026-05-21-04.org` — session journal.
+- `dev/sessions/2026-05-21-04.md` — session checkpoint.
