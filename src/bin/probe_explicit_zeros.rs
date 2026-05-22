@@ -26,6 +26,7 @@ use std::io::BufRead;
 use std::path::Path;
 use std::time::Instant;
 
+use feral::scaling::{pick_scaling_strategy, ScalingStrategy};
 use feral::{read_mtx, CscMatrix, Solver};
 
 const DIR: &str = "/Users/jkitchin/projects/pounce/benchmarks/cho/feral_repro";
@@ -84,6 +85,42 @@ fn read_rhs(path: &Path, n: usize) -> Vec<f64> {
 /// Count stored entries whose value is exactly 0.0.
 fn explicit_zeros(csc: &CscMatrix) -> usize {
     csc.values.iter().filter(|&&v| v == 0.0).count()
+}
+
+/// Report the structural inputs to `pick_scaling_strategy` and the
+/// strategy it routes to. `pick_scaling_strategy` counts *stored*
+/// entries, so explicit zeros inflate `diag_only` / `max_col_nnz`.
+/// This is the suspected #47 divergence point: if the kept matrix
+/// routes to `Mc64Symmetric` while the stripped one routes to
+/// `InfNorm`, the kept matrix runs (and degenerates) MC64 while the
+/// stripped one never touches it.
+fn route_diag(label: &str, csc: &CscMatrix) {
+    let n = csc.n;
+    let mut diag_only = 0usize;
+    let mut max_col_nnz = 0usize;
+    for j in 0..n {
+        let start = csc.col_ptr[j];
+        let end = csc.col_ptr[j + 1];
+        let nnz_col = end - start;
+        if nnz_col > max_col_nnz {
+            max_col_nnz = nnz_col;
+        }
+        if nnz_col == 1 && csc.row_idx[start] == j {
+            diag_only += 1;
+        }
+    }
+    let strategy = pick_scaling_strategy(csc);
+    let mc64 = matches!(strategy, ScalingStrategy::Mc64Symmetric);
+    println!(
+        "  route {label:<22} diag_only={diag_only:<7} ({:.3})  max_col_nnz={max_col_nnz:<6}  \
+         -> {strategy:?}{}",
+        diag_only as f64 / n as f64,
+        if mc64 {
+            "  [runs MC64]"
+        } else {
+            "  [InfNorm, no MC64]"
+        },
+    );
 }
 
 /// Factor `csc` `repeat` times on a *single warm* `Solver` — the IPM
@@ -151,6 +188,10 @@ fn main() {
         "CHO parmest iter-0 KKT  n={}  (issue #47: explicit-zero penalty)",
         stripped.n
     );
+    println!("Scaling-strategy routing (pick_scaling_strategy counts stored entries):");
+    route_diag("stripped", &stripped);
+    route_diag("explicit zeros kept", &kept);
+    println!();
     println!("Each matrix factored 4x on one warm Solver (analyze-once / refactor-many).\n");
     run("stripped", &stripped, &rhs, 4);
     run("explicit zeros kept", &kept, &rhs, 4);
