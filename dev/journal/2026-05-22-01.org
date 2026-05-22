@@ -269,3 +269,38 @@ whether ULP noise can occasionally tip a near-singular KKT into the
 deterministic #44/#46/#48 cascade is plausible but UNPROVEN, not
 asserted. The earlier confusion was conflating "cannot reproduce a
 600s hang" (true) with "everything is deterministic" (false).
+
+* 13:40 :pounce:hashmap:nondeterminism:investigation:
+Followed up the §12:10 HashMap hypothesis by tracing the POUNCE KKT
+triplet-order assembly read-only. Chain:
+- pounce-feral/src/lib.rs initialize_structure(dim,nonzeros,ia,ja):
+  builds rows_0/cols_0 via plain `for k in 0..nonzeros` indexed loop,
+  canonicalizing to lower triangle. No HashMap.
+- pounce-algorithm/src/kkt/std_aug_system_solver.rs build_structure:
+  irn/jcn = deterministic concatenation — Hessian via w.irows()/
+  w.jcols() (extend_from_slice), then `for i in 0..n` loops for the
+  Dx/Ds/Dc/Dd/-I blocks, then j_c/j_d row-col zips. No HashMap.
+- pounce-cli/src/nl_reader.rs:1095-1185: Hessian sparsity is a
+  BTreeSet<(usize,usize)> (sorted); h_irow/h_jcol built by enumerated
+  iteration over it. Jacobian jac_cols built per-row from BTreeSet
+  <usize>. Both deterministic, sorted.
+- The ONE HashMap iteration, nl_reader.rs:1137 `for (&(i,j),&idx) in
+  hess_map.iter()`, feeds an order-independent scatter-write into a
+  `decoding` table — each slot written exactly once, final state is
+  iteration-order-independent. Benign.
+- No rayon / parallel reduction in the eval path.
+
+Conclusion: the POUNCE KKT triplet order is NOT HashMap-dependent — it
+is fully deterministic. The HashMap hypothesis for the triplet ORDER is
+disproven. The confirmed ULP nondeterminism (§12:10, iter-4 inf_pr
+7.32 vs 7.33 e-13) therefore originates elsewhere in POUNCE's eval path
+— not traced, open question on the POUNCE side.
+
+Updated GitHub issue #49 with the corrected, consolidated diagnosis:
+cache strand fixed (86fb953); the ~350x/~40s-per-iter cost framing is
+refuted (ex4_2_320 back to ~10.6s, the pre-#47 b3e4d3e figure); the
+600s timeout is n=1, unreproduced, unlocalized, not a feral race;
+ULP nondeterminism confirmed but upstream of feral with the triplet
+order proven deterministic. Suggested closing #49 once the fix lands in
+the POUNCE feral pin.
+issue comment: github.com/jkitchin/feral/issues/49#issuecomment-4519132118
