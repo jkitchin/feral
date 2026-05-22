@@ -4,6 +4,22 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — Schur trailing-update kernel widened ([#44][i44])
+
+The deferred-Schur trailing-update SIMD kernel
+(`src/dense/schur_kernel.rs`) was widened to a quad NEON-tile inner
+loop (commit `5f1661c`). Micro-benchmark shows ~2.2–2.5×; end-to-end
+on the `NARX_CFy` numeric loop the gain is ~3–7% — the kernel is one
+phase of a loop that is also ~39% contribution-block memory traffic.
+A phase-breakdown probe (`probe_narx_phases`, `dense::factor::
+phase_timing` counters) measured the warm loop: schur 43.5%,
+extend_add 21.1%, contrib-extract 17.7%, the rest assembly and
+bookkeeping. Issue #44 is closed: `NARX_CFy` factors correctly; the
+residual gap vs MA57 is a structural BLAS-free performance gap, and
+the remaining levers are small (~2%) or need an `unsafe`/layout
+change not warranted for an already-correct solver. See the #44
+wrap-up comment and journal `2026-05-22-02.org`.
+
 ### Fixed — B2 scaling cache no longer caches InfNorm scaling ([#49][i49])
 
 The B2 value-bounded *MC64* scaling cache (`src/numeric/solver.rs`)
@@ -146,6 +162,7 @@ the neighbour is structurally uncoupled. On the `cho` KKT: factor time
 `(21672, 21660, 0)` unchanged. See
 `dev/research/kkt-zero-2x2-block-cascade-2026-05-20.md`.
 
+[i44]: https://github.com/jkitchin/feral/issues/44
 [i46]: https://github.com/jkitchin/feral/issues/46
 [i47]: https://github.com/jkitchin/feral/issues/47
 [i48]: https://github.com/jkitchin/feral/issues/48

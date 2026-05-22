@@ -1,82 +1,82 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-22T13:00:25Z
+Generated: 2026-05-22T18:08:54Z
 
 ## Latest Session
-File: dev/sessions/2026-05-21-04.md
+File: dev/sessions/2026-05-22-02.md
 ```
-# Session 2026-05-21-04
+# Session 2026-05-22-02
 
 ## Goal
-
-Investigation session (no `src/` changes). Two questions from the human:
-
-1. **#47** — do explicit-zero KKT entries still cost a ~2× slowdown on
-   POUNCE CHO `parmest` after Fix 1 (`42434a5` fine-grained delayed
-   pivoting) + Fix 2 (`80c05f5` cancellation-free 2×2 inertia)?
-2. **#44** — is the NARX_CFy per-factor cost issue (ipopt-feral times
-   out at 600 s) still relevant after the same two fixes?
+Investigate GitHub issue #44 — `NARX_CFy` factors ~4.4× slower per-factor
+in Pounce+feral than Ipopt+MA57 (Pounce 346 s / 418 iters; Ipopt
+32 s / 234 iters). Find what, if anything, is fixable on the feral side.
 
 ## Accomplished
 
-### #47 — reproduces, root cause pinned
+- **Schur trailing-update kernel widened** (`5f1661c`). Widened the
+  deferred-Schur SIMD kernel to a quad NEON-tile inner loop.
+  Micro-benchmark ~2.2–2.5×; end-to-end on the NARX loop ~3–7% — the
+  kernel is one phase of a loop that is also heavily memory-bound.
 
-A standalone iter-0 factor shows **no** penalty (stripped 439 ms vs
-kept 456 ms), consistent with the issue's own caveat that iter-0 is not
-the slow case. So the cost is in the warm-refactor path.
+- **Phase-breakdown instrumentation** (`162b6ff`, `2e9b1e0`). Added
+  `dense::factor::phase_timing` ns-counters (gated by
+  `PHASE_TIMING_ENABLED`, timing-only, bit-exactness preserved) and the
+  `probe_narx_phases` binary. Measured — not guessed — the warm
+  `NARX_CFy_0000` numeric loop (~1128 ms, stable ±0.5 pp / 3 runs):
 
-End-to-end POUNCE CHO `parmest` on current feral HEAD (measured by
-*temporarily* repointing `pounce-feral` at the local checkout and
-env-gating its zero-strip — **both POUNCE edits reverted afterwards,
-binary rebuilt against `b3e4d3e`; POUNCE is untouched**):
+  | phase | % loop | what |
+  |---|---:|---|
+  | schur | 43.5% | SIMD trailing update (already widened, BLAS-free ceiling) |
+  | extend_add | 21.1% | child→parent contrib scatter-add |
+  | contrib-extract | 17.7% | frontal→contrib copy (zero-fill ~3.9%) |
+  | asm-residual | 7.1% | row_map populate/clear |
+  | df-residual | 4.8% | dense-factor bookkeeping |
+  | scalartail | 4.6% | scalar pivot tail |
+  | panelfactor/other | ~2.3% | — |
 
-| variant             | wall   | IPM iters | feral factor calls |
-|---------------------|--------|-----------|--------------------|
-| explicit zeros stripped | 10.6 s | 41    | 50                 |
-| explicit zeros kept     | 22.6 s | 35    | 44                 |
+  Finding: contribution-block memory traffic (extend_add +
+  contrib-extract ≈ 39%) is the #2 cost, nearly the size of the Schur
+  kernel itself.
 
-#47 **still reproduces** — ~2.1× wall — with the #46 cascade fix in
-place. It is not the #46 cascade.
+- **Amalgamation refuted.** 35 430 fronts with `ncol ≤ 4` cost 0.2% of
+  the loop combined; ~950 medium fronts carry 93%. Merging tiny fronts
+  amortizes nothing.
 
-**Root cause (pinned):** explicit zeros defeat the MC64 value-bounded
-scaling cache (Track B2). New probe `probe_explicit_zeros` factors the
-iter-0 KKT 4× on one warm `Solver`:
+- **Contrib zero-fill investigated, not removed.** The "provably dead"
+  claim was corrected: three consumers bit-compare the full `contrib`
+  Vec (the `block_ldlt32` test + two parity diagnostics), so the
+  zero-fill is load-bearing for the deterministic `0.0` upper triangle.
+  Removing its cost needs `unsafe set_len` (first core-path unsafe);
+  genuine win ~2%. Per "correctness before performance", not pursued.
 
-```
-stripped:            cold 434ms -> warm 15/14/15ms    symbolic_calls=1  mc64_cache_hits=1,2,3
-explicit zeros kept: cold 468ms -> warm 359/359/360ms  symbolic_calls=1  mc64_cache_hits=0,0,0
-```
+- **Issue #44 closed** with a wrap-up comment documenting the measured
+  breakdown (comment 4521506652). feral is correct on `NARX_CFy`; the
+  residual gap vs MA57 is an acknowledged structural BLAS-free gap.
 
-- Cold factor fine either way (~450 ms) — not a cascade, not fill.
-- Symbolic analysis **is** reused either way (`symbolic_calls` stays 1)
-  — the pattern fingerprint / symbolic cache is not the problem.
-- The MC64 cache **never hits** with explicit zeros
-  (`mc64_cache_hits` stays 0) — the Hungarian match reruns every
-  factor, ~345 ms of the ~360 ms warm refactor. Stripped, the cache
-  hits and the warm refactor collapses to ~15 ms (24× gap).
-
+`cargo test`: 314 passed, 0 failed, 5 ignored. `cargo clippy
 ```
 
 ## Git Status
 ```
-86fb953 fix(scaling): gate B2 cache on MC64-actually-ran, not ScalingInfo::Applied (#49)
-bb3b712 docs(session): checkpoint 2026-05-21-04 — fix #47 value-aware scaling routing
-129f268 docs(plan): record issue-47 value-aware routing plan
-e49694b fix(scaling): make pick_scaling_strategy value-aware (#47)
-ed147dd test(issue-47): add scaling-strategy routing diagnostic to probe_explicit_zeros
+2e9b1e0 perf(probe): drill the NARX numeric loop into measured sub-phases (#44)
+162b6ff probe(#44): phase-breakdown probe — Schur kernel is ~45% of the NARX loop
+5f1661c perf(schur): arch-gate quad-kernel unroll to 4 on aarch64 (#44)
+5dcaf7b diag(#44): add diag_narx_kernel_gflops — supernode-loop flop rate
+db96569 docs: retract the ULP-nondeterminism claim; close issue #49
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-7246f50f8450e0fc)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-06946b9447ae7dad)
 
 running 5 tests
-test test_gate_just_outside_n_tiny ... ok
 test test_gate_tiny_sparse_in ... ok
-test test_determinism_tiny ... ok
+test test_gate_just_outside_n_tiny ... ok
 test test_gate_boundary_n_16 ... ok
+test test_determinism_tiny ... ok
 test test_solve_parity_tiny_real_matrix ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -92,102 +92,88 @@ test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-21-04.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-22-02.md)
 
-
-`cargo run --bin bench --release`:
-
-  Inertia match: 154432/154481 (100.0%)
-  Residual pass: 154207/154481 (99.8%)
-  Inertia match vs MUMPS: 154536/154588 (100.0%)
-  Residual pass: 154256/154588 (99.8%)
+Top 10 worst factor-ratio vs MUMPS:
+name                             n    feral(μs)    mumps(μs)      ratio
+KIRBY2_0007                    458          956          119       8.03
+CRESC132_0000                 5314        87492        12266       7.13
+KIRBY2_0006                    458          885          127       6.97
+KIRBY2_0008                    458          839          122       6.88
+KIRBY2_0009                    458          773          128       6.04
+MUONSINE_0000                 1537         2051          376       5.45
+KIRBY2_0010                    458          694          133       5.22
+KIRBY2_0011                    458          610          120       5.08
+KIRBY2_0012                    458          485          118       4.11
+HAHN1_0187                     715          754          201       3.75
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-small-frontal (<200)     147982     1.34     <= 2.0     PASS
-medium (<500)            152145     1.74     <= 3.0     PASS
+bucket                    count      p90     target  verdict
+small-frontal (<200)     147982     1.32     <= 2.0     PASS
+medium (<500)            152145     1.71     <= 3.0     PASS
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-small-frontal (<200)     153455     1.52     <= 2.0     PASS
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.53     <= 2.0     PASS
 medium (<500)            153560     1.53     <= 3.0     PASS
-
-Identical to session 2026-05-21-03 (sparse medium 1.53 vs 1.52 is
-run-to-run jitter). Expected — this session added only `src/bin`
-probes, no library change.
-
-
-name                n   factor(μs)    solve(μs)        inertia
---------------------------------------------------------------
-spd_10             10           51            0     (10, 0, 0)
-spd_50             50           20            2     (50, 0, 0)
-spd_100           100           77            5    (100, 0, 0)
-spd_200           200          389           16    (200, 0, 0)
-kkt_10_3           13            2            0     (10, 3, 0)
-kkt_30_10          40           20            1    (30, 10, 0)
-kkt_50_15          65           49            2    (50, 15, 0)
-kkt_100_30        130          203            7   (100, 30, 0)
-
-8 matrices benchmarked
-
-All inertia exact, factor times in line with prior sessions. The bench
-harness uses in-repo synthetic matrices, not the POUNCE corpus, so #47
-(a warm-refactor caching effect on a real KKT) does not surface here —
-expected; the #47 evidence is the `probe_explicit_zeros` table above.
+All exit-partition buckets PASS. No regression vs the prior session;
+the NARX kernel widening is not exercised by these corpus buckets.
 
 ```
 
 ## Recent Decisions
-is not split into per-source variants — that is a wider type change
-touching every scaling consumer; gating on the strategy that was
-actually requested/routed is exact and local. The cost is one
-`pick_scaling_strategy` call on the `Auto` path, already O(nnz) and far
-under factor cost.
+whether the gap is a fixable feral defect.
 
-**Not the #49 cost regression.** This fix is correctness-only.
-Standalone feral factor cost on ex4_2 is flat regardless of cache state
-(_320 ~242–291 ms miss vs ~241–250 ms hit). #49's cost symptom (a
-POUNCE run 10.8 s → 600 s timeout) was separately diagnosed as a rare
-(~1/200-per-factorization) **execution-time race in the parallel
-multifrontal driver** — value-deterministic output, ~1000× wall-time
-blowup on one factorization — not the cache and not #47. That hang is
-left scoped as its own task.
+**What was done.** Widened the deferred-Schur trailing-update SIMD
+kernel to a quad NEON-tile loop (`5f1661c`; ~2.2–2.5× micro-bench,
+~3–7% end-to-end). Built a phase-breakdown probe (`probe_narx_phases`,
+`dense::factor::phase_timing` ns-counters; `162b6ff`, `2e9b1e0`) and
+*measured* the warm numeric loop instead of guessing: schur 43.5%,
+extend_add 21.1%, contrib-extract 17.7%, assembly+bookkeeping the rest.
 
-**Evidence.** New test
-`mc64_cache_does_not_engage_on_infnorm_route_issue_49` (factors
-`tridiag(6,10,1)` 3× on one `Solver`; asserts route is `InfNorm`,
-`mc64_cache_hit_count()==0`, `symbolic_call_count()==1`) fails pre-fix,
-passes after. `probe_cache_sequence` over all 10 dumped ex4_2_320 IPM
-iterates: `mc64_hits` 3/10 → 0/10. All 23 solver tests and the full
-`cargo test` suite green; `cargo fmt`/`clippy` clean. Committed
-`86fb953`.
+**Decision.** Close #44. The Schur kernel (43.5%) is already widened
+and at the BLAS-free ceiling. The #2 lever — contribution-block memory
+traffic, `extend_add` + `contrib-extract` ≈ 39% — would need a
+packed lower-triangular contrib-block refactor or `unsafe` buffer
+handling (the contrib zero-fill is *not* dead: three consumers
+bit-compare the full `contrib` Vec including the upper triangle, so it
+is load-bearing for determinism; removing only its wasted half is
+~2% and still needs the first `unsafe` in the core numeric data path).
+Per the project constraint "correctness before performance, always",
+none of that is warranted for an already-correct solver. The 4.4× gap
+vs MA57 — a decades-tuned Fortran solver — is acknowledged as a
+structural performance gap and documented in the #44 wrap-up comment
+for any future revisit.
 
 **References.**
-- `dev/journal/2026-05-22-01.org` §07:49, §09:30, §10:10.
-- `src/numeric/solver.rs` — the `mc64_ran` gate.
-- `src/bin/probe_issue49.rs`, `probe_cache_sequence.rs`,
-  `probe_hang_loop.rs` — diagnostic probes.
-- `dev/sessions/2026-05-22-01.md` — session checkpoint.
+- GitHub issue #44 — wrap-up comment 4521506652; closed.
+- `dev/journal/2026-05-22-02.org` — §15:00 phase-probe headline,
+  §15:20 amalgamation refuted, §16:00 measured drill-down, §17:00
+  zero-fill correction + close.
+- `dev/sessions/2026-05-22-02.md` — checkpoint.
+- `CHANGELOG.md` — Unreleased Performance entry.
 
 ## Recent Tried-and-Rejected
+**Removing the contrib-block zero-fill — not free, not pursued.**
+The 16:00 journal claim "the `resize(cdim*cdim, 0.0)` is 100%
+removable, provably safe" was wrong: it checked only `extend_add` (a
+lower-triangle-only reader). Grepping every reader of `.contrib` found
+**three consumers that bit-compare the full contrib Vec including the
+upper triangle**: the `block_ldlt32` unit test (`to_bits()` per
+element), `parallel_corpus_parity.rs:70`, and `diag_par_firstdiff.rs`.
+The zero-fill is what makes the upper triangle deterministically
+`0.0`; deleting it naively regresses the test and breaks parity.
+Removing only its cost requires `unsafe Vec::set_len` — safe Rust
+cannot length a `Vec` without N initializing writes, and `src/` has no
+`unsafe` in the core numeric data path. The genuinely-wasted portion
+is ~2% (the lower-triangle zeros the copy overwrites anyway); the
+other half is load-bearing. Decision (jrk): not worth the first
+core-path `unsafe` for ~2% on an already-correct solver. Issue #44
+closed.
 
-- Even with a perfect gate, B2 targets <2 % of the cost. pinene_3200's
-  10 iters total 493.9 s; iters 6-9 are 64.8/77.8/135.7/208.2 s (the
-  cost-cluster blowup, 98 %). The MC64 Hungarian is ≤6 s total.
-
-- The named target rocket_12800 cannot even exhibit a hit: its 2-iter
-  dump changes pattern between iters (332793→435190 nnz).
-
-**What was kept.** The cache wiring (`Solver::with_mc64_cache`),
-`src/scaling/value_bound.rs`, and — separately — the `External`
-scaling correctness fix B2 surfaced (see `decisions.md` 2026-05-21).
-All correct and tested; the *approach* of a cheap value-proxy gate
-for cross-iteration MC64 reuse is what is rejected.
-
-**Lesson.** Validate the cost model before building the optimization.
-B2 assumed "MC64 Hungarian reruns every IPM iter and dominates" — true
-for rocket_12800's iter-0 profile, false for pinene's actual 10-iter
-trajectory where the delayed-pivot blowup dwarfs everything. A
-per-factor profile of the *named target's full iteration sequence*,
-not a single iteration, should precede the plan.
+**Lesson.** "Provably dead" requires grepping *all* consumers of the
+buffer, not the one obvious algorithmic reader. Diagnostic and test
+binaries that bit-compare whole buffers make "never read" false.
 
 ## Source Files
 ```
@@ -232,6 +218,7 @@ src/bin/diag_leaf_profile.rs
 src/bin/diag_max_ncol.rs
 src/bin/diag_mc64_cycles.rs
 src/bin/diag_mittelmann.rs
+src/bin/diag_narx_kernel_gflops.rs
 src/bin/diag_near_singular_sweep.rs
 src/bin/diag_nemin_amalgamation_panel.rs
 src/bin/diag_orbit2_quotient.rs
@@ -292,6 +279,7 @@ src/bin/probe_marine_time.rs
 src/bin/probe_mc64_spread.rs
 src/bin/probe_mc64_synth.rs
 src/bin/probe_narx_factor.rs
+src/bin/probe_narx_phases.rs
 src/bin/probe_panel_attribution.rs
 src/bin/probe_pinene_issue38_fix.rs
 src/bin/probe_rkt_shape.rs
@@ -302,6 +290,7 @@ src/bin/probe_rocket_slow.rs
 src/bin/probe_scaling_policy4.rs
 src/bin/probe_static_pivot_inertia.rs
 src/bin/probe_supernode_widths.rs
+src/bin/probe_value_determinism.rs
 src/bin/probe_warm_cascade.rs
 src/bin/probe_wide_supernode.rs
 src/bin/produce_dense_schur.rs
@@ -348,5 +337,16 @@ src/symbolic/mod.rs
 src/symbolic/profiler.rs
 src/symbolic/small_leaf.rs
 src/symbolic/supernode.rs
+```
 
-(truncated from      400 lines to 350 line budget)
+## Test Files
+```
+tests/amf_corpus_oracle.rs
+tests/auto_strategy.rs
+tests/blocked_ldlt.rs
+tests/build_row_indices_trailing_invariant.rs
+tests/column_renumbering_parity.rs
+tests/column_renumbering.rs
+tests/delayed_pivoting.rs
+
+(truncated from      389 lines to 350 line budget)

@@ -4302,3 +4302,39 @@ fixed by `86fb953` and the cost table no longer reproduces.
 - `dev/sessions/2026-05-22-01.md` — checkpoint, section (b) corrected.
 - `src/bin/probe_value_determinism.rs` — parallel value-determinism probe.
 - GitHub issue #49 — correction comment 4519668029; closed completed.
+
+## 2026-05-22 — Issue #44 closed: the NARX_CFy gap vs MA57 is a structural BLAS-free performance gap, not a bug
+
+**Context.** Issue #44: `NARX_CFy` factors ~4.4× slower per-factor in
+Pounce+feral than Ipopt+MA57 (Pounce 346 s / 418 iters; Ipopt
+32 s / 234 iters). feral's result is **correct** — the question was
+whether the gap is a fixable feral defect.
+
+**What was done.** Widened the deferred-Schur trailing-update SIMD
+kernel to a quad NEON-tile loop (`5f1661c`; ~2.2–2.5× micro-bench,
+~3–7% end-to-end). Built a phase-breakdown probe (`probe_narx_phases`,
+`dense::factor::phase_timing` ns-counters; `162b6ff`, `2e9b1e0`) and
+*measured* the warm numeric loop instead of guessing: schur 43.5%,
+extend_add 21.1%, contrib-extract 17.7%, assembly+bookkeeping the rest.
+
+**Decision.** Close #44. The Schur kernel (43.5%) is already widened
+and at the BLAS-free ceiling. The #2 lever — contribution-block memory
+traffic, `extend_add` + `contrib-extract` ≈ 39% — would need a
+packed lower-triangular contrib-block refactor or `unsafe` buffer
+handling (the contrib zero-fill is *not* dead: three consumers
+bit-compare the full `contrib` Vec including the upper triangle, so it
+is load-bearing for determinism; removing only its wasted half is
+~2% and still needs the first `unsafe` in the core numeric data path).
+Per the project constraint "correctness before performance, always",
+none of that is warranted for an already-correct solver. The 4.4× gap
+vs MA57 — a decades-tuned Fortran solver — is acknowledged as a
+structural performance gap and documented in the #44 wrap-up comment
+for any future revisit.
+
+**References.**
+- GitHub issue #44 — wrap-up comment 4521506652; closed.
+- `dev/journal/2026-05-22-02.org` — §15:00 phase-probe headline,
+  §15:20 amalgamation refuted, §16:00 measured drill-down, §17:00
+  zero-fill correction + close.
+- `dev/sessions/2026-05-22-02.md` — checkpoint.
+- `CHANGELOG.md` — Unreleased Performance entry.

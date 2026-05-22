@@ -238,3 +238,27 @@ Where to spend time, in priority order:
   extend_add traffic; or fewer/bigger fronts. Not a micro-opt.
 - schur (43.5%): kernel, already widened (5f1661c); BLAS-free ceiling
   limits further gains.
+
+* 17:00 :issue44:narx:zerofill:correction:closed:
+The 16:00 claim "contrib zero-fill is 100% removable, provably safe"
+was WRONG — it checked only =extend_add=. Before touching code, grepped
+all readers of =.contrib=: THREE consumers bit-compare the FULL contrib
+Vec including the upper triangle —
+  - block_ldlt32.rs:358-369  unit test, =to_bits()= assert per element
+  - parallel_corpus_parity.rs:70  =bits_eq(a.contrib, b.contrib)=
+  - diag_par_firstdiff.rs:94  element-wise contrib compare
+The =resize(_,0.0)= is what makes the upper triangle deterministically
+0.0; deleting it naively regresses the test and breaks parity (upper
+triangle = pool garbage). The zero-fill is load-bearing, not dead.
+Removing its *cost* needs =unsafe set_len= (safe Rust cannot length a
+Vec without N initializing writes) — src/ has unsafe only at the C-FFI
+boundary and SIMD intrinsics, none in the core numeric path. Genuine
+win is ~2% (half the zero-fill — the lower-triangle portion that the
+copy overwrites anyway); the other half is needed for determinism.
+Lesson: "provably dead" requires grepping ALL consumers, not one.
+
+Decision (jrk): the remaining #44 levers are small (~2%) or hard
+(packed-triangular contrib refactor; first core-path unsafe). feral
+is correct on NARX_CFy. Closed issue #44 with a wrap-up comment
+documenting the measured phase breakdown — comment 4521506652. The
+4.4x gap vs MA57 stands as an acknowledged structural gap, not a bug.

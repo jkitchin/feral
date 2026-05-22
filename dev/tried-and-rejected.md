@@ -2137,3 +2137,37 @@ for rocket_12800's iter-0 profile, false for pinene's actual 10-iter
 trajectory where the delayed-pivot blowup dwarfs everything. A
 per-factor profile of the *named target's full iteration sequence*,
 not a single iteration, should precede the plan.
+
+## 2026-05-22 — #44 NARX_CFy: amalgamation lever and contrib zero-fill removal
+
+Two optimization ideas for the `NARX_CFy` numeric loop, both rejected
+after measurement.
+
+**Amalgamating tiny fronts — refuted by the front-size distribution.**
+Hypothesis: NARX's loop is dominated by per-front fixed overhead, so
+merging small supernodes amortizes it. `probe_narx_phases`
+size-distribution: 35 430 fronts with `ncol ≤ 4` cost 0.2% of the loop
+*combined*; ~950 medium fronts (`ncol` 5–64) carry 93%. The tiny
+fronts are already free; there is nothing to amortize. Amalgamation is
+not the lever.
+
+**Removing the contrib-block zero-fill — not free, not pursued.**
+The 16:00 journal claim "the `resize(cdim*cdim, 0.0)` is 100%
+removable, provably safe" was wrong: it checked only `extend_add` (a
+lower-triangle-only reader). Grepping every reader of `.contrib` found
+**three consumers that bit-compare the full contrib Vec including the
+upper triangle**: the `block_ldlt32` unit test (`to_bits()` per
+element), `parallel_corpus_parity.rs:70`, and `diag_par_firstdiff.rs`.
+The zero-fill is what makes the upper triangle deterministically
+`0.0`; deleting it naively regresses the test and breaks parity.
+Removing only its cost requires `unsafe Vec::set_len` — safe Rust
+cannot length a `Vec` without N initializing writes, and `src/` has no
+`unsafe` in the core numeric data path. The genuinely-wasted portion
+is ~2% (the lower-triangle zeros the copy overwrites anyway); the
+other half is load-bearing. Decision (jrk): not worth the first
+core-path `unsafe` for ~2% on an already-correct solver. Issue #44
+closed.
+
+**Lesson.** "Provably dead" requires grepping *all* consumers of the
+buffer, not the one obvious algorithmic reader. Diagnostic and test
+binaries that bit-compare whole buffers make "never read" false.
