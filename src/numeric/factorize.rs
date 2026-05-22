@@ -2094,6 +2094,7 @@ fn factor_one_supernode(
     // Build the row indices for this frontal. The default layout is
     // [own native cols (own_ncol) | delayed cols from children (n_delayed_in) | trailing rows].
     let _pt_asm = phase_timing::start();
+    let _pt_br = phase_timing::start();
     let mut row_indices = build_row_indices(
         snode,
         full_pattern,
@@ -2102,6 +2103,7 @@ fn factor_one_supernode(
         &mut ws.build_trailing,
         &mut ws.build_seen,
     );
+    phase_timing::stop(&phase_timing::BUILDROW_NS, _pt_br);
     let actual_nrow = row_indices.len();
     debug_assert!(
         actual_nrow >= expanded_ncol,
@@ -2161,6 +2163,7 @@ fn factor_one_supernode(
     let scaling = scaling_pivot_order;
     let frontal_buf = std::mem::take(&mut ws.frontal_values);
     let mut frontal = SymmetricMatrix::from_pooled_buf(actual_nrow, frontal_buf);
+    let _pt_sc = phase_timing::start();
     for (k_local, &gj) in row_indices[own_col_offset..own_col_offset + own_ncol]
         .iter()
         .enumerate()
@@ -2176,6 +2179,7 @@ fn factor_one_supernode(
             }
         }
     }
+    phase_timing::stop(&phase_timing::SCATTER_NS, _pt_sc);
 
     // Step 2: Assemble child contribution blocks (extend-add).
     //
@@ -2185,12 +2189,14 @@ fn factor_one_supernode(
     // fresh Vec. If the slot is already occupied (multi-child front),
     // the new buffer overwrites the slot — the old one is freed
     // normally. This keeps bookkeeping to one branch per child.
+    let _pt_ea = phase_timing::start();
     for &child_idx in &snode.children {
         if let Some(mut contrib) = contrib_blocks[child_idx].take() {
             extend_add(&contrib, &ws.row_map, &mut frontal);
             ws.factor_scratch.contrib_pool = Some(std::mem::take(&mut contrib.data));
         }
     }
+    phase_timing::stop(&phase_timing::EXTENDADD_NS, _pt_ea);
     phase_timing::stop(&phase_timing::ASSEMBLY_NS, _pt_asm);
 
     // Step 3: Factor the frontal in place (W-3a). `frontal.data`

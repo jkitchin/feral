@@ -203,6 +203,22 @@ pub mod phase_timing {
     /// Of the dense factor: the scalar pivot tail (`scalar_pivot_step`).
     pub static SCALARTAIL_NS: AtomicU64 = AtomicU64::new(0);
 
+    // --- Sub-phase counters (drill-down of ASSEMBLY and DENSEFACTOR). ---
+    /// Of assembly: `build_row_indices` (frontal row-index layout).
+    pub static BUILDROW_NS: AtomicU64 = AtomicU64::new(0);
+    /// Of assembly: Step 1 original-entry scatter (scaled `D·A·D`).
+    pub static SCATTER_NS: AtomicU64 = AtomicU64::new(0);
+    /// Of assembly: Step 2 child contribution-block extend-add.
+    pub static EXTENDADD_NS: AtomicU64 = AtomicU64::new(0);
+    /// Of the dense factor: `L`/`D` extraction from the in-place buffer.
+    pub static LEXTRACT_NS: AtomicU64 = AtomicU64::new(0);
+    /// Of the dense factor: contribution-block zero-fill + extraction.
+    pub static CONTRIBEXTRACT_NS: AtomicU64 = AtomicU64::new(0);
+    /// Of `contribextract`: just the `resize(cdim*cdim, 0.0)` zero-fill,
+    /// isolated to size the dead-work it represents (the subsequent copy
+    /// overwrites every lower-triangle cell, the only cells ever read).
+    pub static CONTRIBZEROFILL_NS: AtomicU64 = AtomicU64::new(0);
+
     /// Zero all counters.
     pub fn reset() {
         for c in [
@@ -211,6 +227,12 @@ pub mod phase_timing {
             &PANELFACTOR_NS,
             &SCHUR_NS,
             &SCALARTAIL_NS,
+            &BUILDROW_NS,
+            &SCATTER_NS,
+            &EXTENDADD_NS,
+            &LEXTRACT_NS,
+            &CONTRIBEXTRACT_NS,
+            &CONTRIBZEROFILL_NS,
         ] {
             c.store(0, Relaxed);
         }
@@ -225,6 +247,23 @@ pub mod phase_timing {
             SCHUR_NS.load(Relaxed),
             SCALARTAIL_NS.load(Relaxed),
         )
+    }
+
+    /// `(buildrow, scatter, extendadd, lextract, contribextract)` ns —
+    /// the sub-phase drill-down of `assembly` and `densefactor`.
+    pub fn snapshot_detail() -> (u64, u64, u64, u64, u64) {
+        (
+            BUILDROW_NS.load(Relaxed),
+            SCATTER_NS.load(Relaxed),
+            EXTENDADD_NS.load(Relaxed),
+            LEXTRACT_NS.load(Relaxed),
+            CONTRIBEXTRACT_NS.load(Relaxed),
+        )
+    }
+
+    /// The dead-work zero-fill within `contribextract`, ns.
+    pub fn snapshot_contrib_zerofill() -> u64 {
+        CONTRIBZEROFILL_NS.load(Relaxed)
     }
 
     /// Begin timing a phase — `Some(Instant)` iff timing is enabled.
@@ -1523,6 +1562,7 @@ fn factor_frontal_in_place_with_scratch_impl(
     let n_delayed = ncol - nelim;
 
     // Extract L (nrow × nelim), D diagonal, and contribution block
+    let _pt_lx = phase_timing::start();
     let mut l = vec![0.0; nrow * nelim];
     let mut d_diag = vec![0.0; nelim];
 
@@ -1547,19 +1587,24 @@ fn factor_frontal_in_place_with_scratch_impl(
             j += 1;
         }
     }
+    phase_timing::stop(&phase_timing::LEXTRACT_NS, _pt_lx);
 
     // Extract contribution block: trailing (nrow-nelim) × (nrow-nelim) of a.
     // Pool the contrib buffer through `scratch.contrib_pool` — bit-identical
     // to `vec![0.0; cdim*cdim]` after clear()+resize(_,0.0).
+    let _pt_cx = phase_timing::start();
     let cdim = nrow - nelim;
     let mut contrib = scratch.contrib_pool.take().unwrap_or_default();
     contrib.clear();
+    let _pt_zf = phase_timing::start();
     contrib.resize(cdim * cdim, 0.0);
+    phase_timing::stop(&phase_timing::CONTRIBZEROFILL_NS, _pt_zf);
     for cj in 0..cdim {
         for ci in cj..cdim {
             contrib[cj * cdim + ci] = a[(nelim + cj) * nrow + (nelim + ci)];
         }
     }
+    phase_timing::stop(&phase_timing::CONTRIBEXTRACT_NS, _pt_cx);
 
     let mut perm_inv = vec![0usize; nrow];
     for (i, &p) in perm.iter().enumerate() {
@@ -1968,6 +2013,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     let n_delayed = ncol - nelim;
 
     // Extract L, D, contrib — identical logic to `factor_frontal`.
+    let _pt_lx = phase_timing::start();
     let mut l = vec![0.0; nrow * nelim];
     let mut d_diag = vec![0.0; nelim];
 
@@ -1991,6 +2037,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             j += 1;
         }
     }
+    phase_timing::stop(&phase_timing::LEXTRACT_NS, _pt_lx);
 
     // Phase C: take the recyclable buffer from the scratch pool (single
     // slot). `clear()` resets logical length while preserving capacity;
@@ -1999,15 +2046,19 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     // When the slot is empty, `take()` returns `None` and
     // `unwrap_or_default()` gives a fresh empty Vec — bit-identical to
     // the previous `vec![0.0; ...]` path.
+    let _pt_cx = phase_timing::start();
     let cdim = nrow - nelim;
     let mut contrib = scratch.contrib_pool.take().unwrap_or_default();
     contrib.clear();
+    let _pt_zf = phase_timing::start();
     contrib.resize(cdim * cdim, 0.0);
+    phase_timing::stop(&phase_timing::CONTRIBZEROFILL_NS, _pt_zf);
     for cj in 0..cdim {
         for ci in cj..cdim {
             contrib[cj * cdim + ci] = a[(nelim + cj) * nrow + (nelim + ci)];
         }
     }
+    phase_timing::stop(&phase_timing::CONTRIBEXTRACT_NS, _pt_cx);
 
     let mut perm_inv = vec![0usize; nrow];
     for (i, &p) in perm.iter().enumerate() {

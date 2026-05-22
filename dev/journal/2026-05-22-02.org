@@ -187,3 +187,54 @@ build_row_indices + scatter + extend-add (can't yet split bookkeeping
 from O(nnz) work); =df-overhead= is a residual (densefactor − panel −
 schur − tail) — real wall time but its label is provisional until
 decomposed.
+
+* 16:00 :issue44:narx:phase-probe:drill:measured:
+Human: "stop guessing, make actual measurements." Split the two soft
+buckets with five more =phase_timing= counters: =assembly= →
+build_row_indices / scatter / extend_add; =densefactor= → L-extract /
+contrib-extract (both bracketed in =factor_frontal_blocked_in_place_
+with_scratch= AND the scalar-fallback =factor_frontal_in_place_with_
+scratch_impl=, since NARX ncol=5-7 fronts take the fallback).
+
+NARX_CFy_0000 warm loop ~1128 ms, MEASURED (3 runs, ±0.5pp):
+  assembly          28.8%
+    build_row_indices  0.5%
+    scatter            0.1%
+    extend_add        21.1%   <-- child->parent contrib scatter-add
+    asm-residual       7.1%   (row_map populate/clear, F3.2b swap)
+  densefactor       72.4%
+    panelfactor        1.2%
+    schur             43.5%   <-- the SIMD compute kernel
+    scalartail         4.6%
+    L-extract          0.5%
+    contrib-extract   17.7%   <-- frontal->contrib copy
+      zerofill         3.9%   <-- DEAD WORK (see below)
+    df-residual        4.8%
+
+Two measured findings:
+
+(1) The contrib-block zero-fill is dead work. =contrib-extract= does
+=contrib.resize(cdim*cdim, 0.0)= then a copy loop writing only the
+lower triangle (ci>=cj). Read =extend_add= (factorize.rs:3425): it
+reads =contrib.data[cj*cdim+ci]= only for ci>=cj — the SAME index set
+the copy writes. Every cell read is overwritten by the copy; the
+upper triangle is never touched. The =resize(_,0.0)= is 100%
+removable. Measured cost: 3.9% of the loop (~44 ms). Smaller than the
+earlier ~10% guess — the memset is bandwidth-bound and cheap relative
+to the strided copy. Free 4%, no algorithm change.
+
+(2) Contribution-block traffic is the #2 cost after the kernel.
+extend_add 21% + contrib-extract 18% = ~39% of the loop is moving
+contribution blocks (child->parent scatter-add, then frontal->contrib
+copy). All O(cdim^2) memory traffic per front, NOT arithmetic. For
+NARX's ~950 tall medium fronts (ncol 5-64, nrow up to ~1900) this is
+the structural cost. schur is 43.5% — so kernel and contrib-traffic
+are nearly equal halves of the loop.
+
+Where to spend time, in priority order:
+- contrib zero-fill: delete it. ~4%, trivial, provably safe.
+- contrib-block traffic (~39%): the real lever. Needs a design look —
+  packed-triangular contrib storage halves both the copy and the
+  extend_add traffic; or fewer/bigger fronts. Not a micro-opt.
+- schur (43.5%): kernel, already widened (5f1661c); BLAS-free ceiling
+  limits further gains.

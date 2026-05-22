@@ -41,9 +41,13 @@ fn ms(ns: u64) -> f64 {
 /// One snapshot tuple of the global phase counters, in ns:
 /// `(assembly, densefactor, panelfactor, schur, scalartail)`.
 type Phases = (u64, u64, u64, u64, u64);
+/// Sub-phase drill-down, in ns:
+/// `(buildrow, scatter, extendadd, lextract, contribextract)`.
+type Detail = (u64, u64, u64, u64, u64);
 
-fn report_loop(label: &str, loop_us: u64, p: Phases) {
+fn report_loop(label: &str, loop_us: u64, p: Phases, d: Detail, contrib_zerofill: u64) {
     let (asm, df, panel, schur, tail) = p;
+    let (buildrow, scatter, extendadd, lextract, contribextract) = d;
     let loop_ns = loop_us * 1000;
     let pct = |ns: u64| {
         if loop_ns > 0 {
@@ -52,45 +56,35 @@ fn report_loop(label: &str, loop_us: u64, p: Phases) {
             0.0
         }
     };
+    let line = |indent: &str, name: &str, ns: u64| {
+        println!("{indent}{name:<18}{:>9.1} ms  {:>5.1}%", ms(ns), pct(ns));
+    };
     // Loop-overhead = whatever in the supernode loop is neither assembly
     // nor dense factor: frontal-buffer build, Step-4 contrib deposit,
     // row_map populate/clear, profiler bookkeeping.
     let loop_oh = loop_ns.saturating_sub(asm + df);
-    // Dense-factor-overhead = dense factor minus its three timed phases:
-    // panel dispatch, block bookkeeping, inertia/permutation assembly.
-    let df_oh = df.saturating_sub(panel + schur + tail);
+    // assembly residual = assembly minus its three timed sub-phases:
+    // row_map populate/clear + the F3.2b Schur-layout swap.
+    let asm_res = asm.saturating_sub(buildrow + scatter + extendadd);
+    // df residual = dense factor minus its five timed sub-phases:
+    // entry setup, the panel-loop control, perm_inv, growth flag,
+    // result-struct build.
+    let df_res = df.saturating_sub(panel + schur + tail + lextract + contribextract);
     println!("  {label}  loop={:.1} ms", ms(loop_ns));
-    println!(
-        "    assembly        {:>9.1} ms  {:>5.1}%",
-        ms(asm),
-        pct(asm)
-    );
-    println!("    densefactor     {:>9.1} ms  {:>5.1}%", ms(df), pct(df));
-    println!(
-        "      ├─ panelfactor{:>9.1} ms  {:>5.1}%",
-        ms(panel),
-        pct(panel)
-    );
-    println!(
-        "      ├─ schur      {:>9.1} ms  {:>5.1}%",
-        ms(schur),
-        pct(schur)
-    );
-    println!(
-        "      ├─ scalartail {:>9.1} ms  {:>5.1}%",
-        ms(tail),
-        pct(tail)
-    );
-    println!(
-        "      └─ df-overhead{:>9.1} ms  {:>5.1}%",
-        ms(df_oh),
-        pct(df_oh)
-    );
-    println!(
-        "    loop-overhead   {:>9.1} ms  {:>5.1}%",
-        ms(loop_oh),
-        pct(loop_oh)
-    );
+    line("    ", "assembly", asm);
+    line("      ├─ ", "build_row_indices", buildrow);
+    line("      ├─ ", "scatter (D·A·D)", scatter);
+    line("      ├─ ", "extend_add", extendadd);
+    line("      └─ ", "asm-residual", asm_res);
+    line("    ", "densefactor", df);
+    line("      ├─ ", "panelfactor", panel);
+    line("      ├─ ", "schur", schur);
+    line("      ├─ ", "scalartail", tail);
+    line("      ├─ ", "L-extract", lextract);
+    line("      ├─ ", "contrib-extract", contribextract);
+    line("      │  └ ", "zerofill (dead)", contrib_zerofill);
+    line("      └─ ", "df-residual", df_res);
+    line("    ", "loop-overhead", loop_oh);
 }
 
 /// Bucket supernodes by `ncol` (number of eliminated columns). The
@@ -190,6 +184,8 @@ fn run(iter: usize) {
     let st_cold = solver.factor(&csc, None);
     let cold_ms = t0.elapsed().as_secs_f64() * 1e3;
     let cold_phases = phase_timing::snapshot();
+    let cold_detail = phase_timing::snapshot_detail();
+    let cold_zerofill = phase_timing::snapshot_contrib_zerofill();
     let cold_loop_us = prof.lock().map(|p| p.report().loop_us).unwrap_or(0);
 
     // Warm factor: numeric only (symbolic reused). Re-arm profiler and
@@ -202,6 +198,8 @@ fn run(iter: usize) {
     let st_warm = solver.factor(&csc, None);
     let warm_ms = t0.elapsed().as_secs_f64() * 1e3;
     let warm_phases = phase_timing::snapshot();
+    let warm_detail = phase_timing::snapshot_detail();
+    let warm_zerofill = phase_timing::snapshot_contrib_zerofill();
 
     let prof = match prof.lock() {
         Ok(p) => p.clone(),
@@ -217,8 +215,20 @@ fn run(iter: usize) {
          n_snodes={}",
         report.n_supernodes
     );
-    report_loop("COLD", cold_loop_us, cold_phases);
-    report_loop("WARM", report.loop_us, warm_phases);
+    report_loop(
+        "COLD",
+        cold_loop_us,
+        cold_phases,
+        cold_detail,
+        cold_zerofill,
+    );
+    report_loop(
+        "WARM",
+        report.loop_us,
+        warm_phases,
+        warm_detail,
+        warm_zerofill,
+    );
     println!("  supernode distribution by ncol (warm):");
     size_distribution(prof.timings());
     println!("  top 10 supernodes by time (warm):");
