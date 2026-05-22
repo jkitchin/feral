@@ -1,6 +1,6 @@
 use crate::dense::factor::{
     factor, factor_frontal_blocked_in_place_with_scratch, factor_frontal_diagonal_in_place,
-    BunchKaufmanParams, FactorScratch, FrontalFactors, ZeroPivotAction,
+    phase_timing, BunchKaufmanParams, FactorScratch, FrontalFactors, ZeroPivotAction,
 };
 use crate::dense::matrix::SymmetricMatrix;
 use crate::error::FeralError;
@@ -285,6 +285,24 @@ pub struct SupernodeTiming {
     pub nrow: usize,
     pub ncol: usize,
     pub us: u64,
+    /// Phase-breakdown deltas (issue #44 phase-probe). All zero unless
+    /// `dense::factor::PHASE_TIMING_ENABLED` is set. `assembly_us` covers
+    /// `build_row_indices` + original-entry scatter + child extend-add;
+    /// `densefactor_us` is the whole dense frontal factor and decomposes
+    /// into `panelfactor_us` (panel/diagonal BK) + `schur_us` (deferred
+    /// Schur trailing update) + `scalartail_us` (scalar pivot tail);
+    /// `densefactor_us - panel - schur - scalartail` is dense-factor
+    /// bookkeeping overhead.
+    #[serde(default)]
+    pub assembly_us: u64,
+    #[serde(default)]
+    pub densefactor_us: u64,
+    #[serde(default)]
+    pub panelfactor_us: u64,
+    #[serde(default)]
+    pub schur_us: u64,
+    #[serde(default)]
+    pub scalartail_us: u64,
 }
 
 /// Per-sub-phase wallclock breakdown of the numeric prologue —
@@ -1874,6 +1892,13 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
                             nrow: snode.nrow,
                             ncol: snode.ncol,
                             us: t.elapsed().as_micros() as u64,
+                            // Phase breakdown is not instrumented on the
+                            // small-leaf batch path (`factor_one_small_leaf`).
+                            assembly_us: 0,
+                            densefactor_us: 0,
+                            panelfactor_us: 0,
+                            schur_us: 0,
+                            scalartail_us: 0,
                         };
                         if let Ok(mut prof) = arc.lock() {
                             prof.timings.push(timing);
@@ -1893,6 +1918,11 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
         }
 
         let t_snode = params.profiler.as_ref().map(|_| Instant::now());
+        // Issue #44 phase-probe: snapshot the global phase counters
+        // before/after so each supernode's record carries its own delta.
+        // The counters are process-global `AtomicU64`s; this driver loop
+        // is single-threaded so before/after differencing is exact.
+        let phase_before = phase_timing::snapshot();
         let node = factor_one_supernode(
             snode_idx,
             symbolic,
@@ -1907,11 +1937,17 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
         )?;
         if let (Some(arc), Some(t)) = (params.profiler.as_ref(), t_snode) {
             let snode = &symbolic.supernodes[snode_idx];
+            let phase_after = phase_timing::snapshot();
             let timing = SupernodeTiming {
                 snode_idx,
                 nrow: snode.nrow,
                 ncol: snode.ncol,
                 us: t.elapsed().as_micros() as u64,
+                assembly_us: (phase_after.0 - phase_before.0) / 1000,
+                densefactor_us: (phase_after.1 - phase_before.1) / 1000,
+                panelfactor_us: (phase_after.2 - phase_before.2) / 1000,
+                schur_us: (phase_after.3 - phase_before.3) / 1000,
+                scalartail_us: (phase_after.4 - phase_before.4) / 1000,
             };
             if let Ok(mut prof) = arc.lock() {
                 prof.timings.push(timing);
@@ -2057,6 +2093,7 @@ fn factor_one_supernode(
 
     // Build the row indices for this frontal. The default layout is
     // [own native cols (own_ncol) | delayed cols from children (n_delayed_in) | trailing rows].
+    let _pt_asm = phase_timing::start();
     let mut row_indices = build_row_indices(
         snode,
         full_pattern,
@@ -2154,6 +2191,7 @@ fn factor_one_supernode(
             ws.factor_scratch.contrib_pool = Some(std::mem::take(&mut contrib.data));
         }
     }
+    phase_timing::stop(&phase_timing::ASSEMBLY_NS, _pt_asm);
 
     // Step 3: Factor the frontal in place (W-3a). `frontal.data`
     // content is undefined on return; the buffer goes back to the pool.
@@ -2226,6 +2264,7 @@ fn factor_one_supernode(
     // (no cascade-break logic applies since 2x2 pivots aren't formed).
     let trace = supernode_trace_enabled();
     let t_sn = trace.then(Instant::now);
+    let _pt_df = phase_timing::start();
     let mut ff = if params.sqd_mode {
         factor_frontal_diagonal_in_place(&mut frontal, eliminable, &params.bk)?
     } else {
@@ -2237,6 +2276,7 @@ fn factor_one_supernode(
             &mut ws.factor_scratch,
         )?
     };
+    phase_timing::stop(&phase_timing::DENSEFACTOR_NS, _pt_df);
     if let Some(t0) = t_sn {
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         eprintln!(

@@ -167,6 +167,82 @@ pub mod panel_diag {
     }
 }
 
+/// Issue #44 — wall-time attribution of the supernode numeric loop.
+///
+/// When `true`, the multifrontal driver and the dense frontal factor
+/// accumulate nanoseconds into [`phase_timing`] so a diagnostic binary
+/// can split the loop into frontal assembly, dense panel/diagonal
+/// factor, the deferred Schur trailing update, and the scalar pivot
+/// tail. Default `false`; gate cost is one relaxed load + a
+/// well-predicted branch, identical to [`PANEL_DIAG_ENABLED`].
+pub static PHASE_TIMING_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Process-global nanosecond counters for the issue #44 phase probe.
+///
+/// Populated only when [`PHASE_TIMING_ENABLED`] is set. All `Relaxed`
+/// — a diagnostic binary resets between matrices and reads totals at
+/// the end. With `parallel = false` (the probe's mode) the counters
+/// also support per-supernode deltas: snapshot before/after one
+/// `factor_one_supernode` call.
+pub mod phase_timing {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use std::time::Instant;
+
+    /// Frontal assembly: `build_row_indices` + original-entry scatter +
+    /// child contribution-block extend-add.
+    pub static ASSEMBLY_NS: AtomicU64 = AtomicU64::new(0);
+    /// The whole dense frontal factor (`factor_one_supernode` step 3).
+    pub static DENSEFACTOR_NS: AtomicU64 = AtomicU64::new(0);
+    /// Of the dense factor: the panel/diagonal factor
+    /// (`lblt_panel_frontal`).
+    pub static PANELFACTOR_NS: AtomicU64 = AtomicU64::new(0);
+    /// Of the dense factor: the deferred Schur trailing update
+    /// (`apply_blocked_schur`).
+    pub static SCHUR_NS: AtomicU64 = AtomicU64::new(0);
+    /// Of the dense factor: the scalar pivot tail (`scalar_pivot_step`).
+    pub static SCALARTAIL_NS: AtomicU64 = AtomicU64::new(0);
+
+    /// Zero all counters.
+    pub fn reset() {
+        for c in [
+            &ASSEMBLY_NS,
+            &DENSEFACTOR_NS,
+            &PANELFACTOR_NS,
+            &SCHUR_NS,
+            &SCALARTAIL_NS,
+        ] {
+            c.store(0, Relaxed);
+        }
+    }
+
+    /// `(assembly, densefactor, panelfactor, schur, scalartail)` ns.
+    pub fn snapshot() -> (u64, u64, u64, u64, u64) {
+        (
+            ASSEMBLY_NS.load(Relaxed),
+            DENSEFACTOR_NS.load(Relaxed),
+            PANELFACTOR_NS.load(Relaxed),
+            SCHUR_NS.load(Relaxed),
+            SCALARTAIL_NS.load(Relaxed),
+        )
+    }
+
+    /// Begin timing a phase — `Some(Instant)` iff timing is enabled.
+    #[inline]
+    pub fn start() -> Option<Instant> {
+        super::PHASE_TIMING_ENABLED.load(Relaxed).then(Instant::now)
+    }
+
+    /// End a phase started by [`start`], adding the elapsed time to
+    /// `counter`. A `None` token (timing disabled) is a no-op.
+    #[inline]
+    pub fn stop(counter: &AtomicU64, started: Option<Instant>) {
+        if let Some(t) = started {
+            counter.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+        }
+    }
+}
+
 /// Issue #13 Phase A + C — caller-supplied scratch.
 ///
 /// **Phase A**: two internal-only working buffers (`subdiag`, `d_panel`)
@@ -1748,7 +1824,8 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             // Reborrow `a` (a `&mut [f64]`) so the same binding can be
             // passed across multiple call sites.
             diag_inc(&panel_diag::SCALAR_TAIL_STEPS);
-            match scalar_pivot_step(
+            let _pt = phase_timing::start();
+            let step = scalar_pivot_step(
                 &mut *a,
                 nrow,
                 ncol_eff,
@@ -1763,7 +1840,9 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
                 &mut needs_refinement,
                 &mut n_rook_rescues,
                 &mut cached_maxfromm,
-            )? {
+            )?;
+            phase_timing::stop(&phase_timing::SCALARTAIL_NS, _pt);
+            match step {
                 PivotStepResult::Advanced(n) => {
                     diag_add(&panel_diag::PIVOTS_SCALAR, n as u64);
                     k += n;
@@ -1786,6 +1865,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         // column. Clear so the next scalar step falls back to a full
         // AMAX scan exactly as Plain would.
         cached_maxfromm = None;
+        let _pt = phase_timing::start();
         let (n_elim, status) = lblt_panel_frontal(
             &mut *a,
             nrow,
@@ -1802,6 +1882,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             &mut *subdiag,
             &mut perm,
         )?;
+        phase_timing::stop(&phase_timing::PANELFACTOR_NS, _pt);
         // On ScalarFallback and Delayed the panel peek-ahead'd column
         // `k+n_elim` (applied pivots 0..n_elim-1 to it) before deciding
         // it could not pivot. In scalar semantics that column's state at
@@ -1819,9 +1900,11 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             // both to avoid a double rank-1 update.
             PanelStatus::ScalarFallbackPeekedNext => k + n_elim + 2,
         };
+        let _pt = phase_timing::start();
         apply_blocked_schur(
             &mut *a, nrow, k, n_elim, j_start, &*d_panel, &*subdiag, params.fma,
         );
+        phase_timing::stop(&phase_timing::SCHUR_NS, _pt);
         k += n_elim;
 
         // Phase B-1.5 attribution: count panel outcome and committed pivots.

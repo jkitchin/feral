@@ -1,0 +1,189 @@
+#+TITLE: FERAL session journal 2026-05-22-02
+#+STARTUP: showall
+
+* Session 2026-05-22-02 — issue #44 NARX_CFy per-factor cost
+
+* 10:00 :issue44:narx:orient:
+Human re-opened #44 with fresh end-to-end numbers: POUNCE-feral
+346 s / 418 iters vs ipopt-MA57 32 s / 234 iters on NARX_CFy.
+"One part of this must be on the feral side."
+
+Decomposition of the gap (issue #18 recorded POUNCE-MA57 = 437
+iters / 82 s on the same problem):
+- Iteration count: 418 (POUNCE-feral) vs 234 (ipopt-MA57) is a
+  POUNCE-IPM vs ipopt-IPM difference — POUNCE-MA57 also takes 437.
+  feral is not inflating iters (418 < 437). NOT a feral problem.
+- Per-iter cost: POUNCE-feral 828 ms/iter vs POUNCE-MA57 188 ms/iter
+  — same IPM, only the linear solver swapped. That 4.4× IS feral.
+
+* 10:30 :issue44:narx:profile:bottleneck:
+=probe_rocket_profile NARX_CFy= + =probe_narx_factor= on the captured
+3-KKT corpus (current HEAD, default Solver):
+
+  NARX_CFy_0000  cold 1093ms  warm 839ms  factor_nnz 5.79M  loop 815ms
+  NARX_CFy_0001  cold  405ms  warm  87ms  factor_nnz 1.73M  loop  64ms
+  NARX_CFy_0002  cold  398ms  warm  84ms  factor_nnz 1.73M  loop  60ms
+
+Phase split (warm = numeric only): prologue ~8 ms, epilogue ~0 ms,
+loop = 99% of factor. Of the loop, 94.6% is in supernodes with
+nrow>128 (449 of them on iter0; up to nrow=1877 ncol=77).
+Symbolic ≈ 300 ms (cold−warm) but reused across iters when the
+pattern is stable; MC64 Hungarian only 24-29 ms. Scaling, symbolic,
+solve are all negligible. The cost is honest supernode arithmetic.
+
+parallel=true vs parallel=false on the warm sequence: 1565 ms vs
+1586 ms — identical. feral's tree-level rayon parallelism does not
+touch NARX: the cost piles into a near-root chain of large fronts
+and there is no intra-front parallelism.
+
+* 11:00 :issue44:narx:gflops:headline:
+New diag =diag_narx_kernel_gflops=: estimate dense-LDLᵀ flops per
+supernode from (nrow,ncol), divide by the profiler's per-supernode
+wall. Result:
+
+  NARX_CFy_0000  whole loop  6.93 GFLOP / 878 ms ->  7.9 GFLOP/s
+                 nrow>128    6.92 GFLOP / 834 ms ->  8.3 GFLOP/s
+  NARX_CFy_0001  whole loop  0.45 GFLOP /  67 ms ->  6.6 GFLOP/s
+  NARX_CFy_0002  whole loop  0.45 GFLOP /  66 ms ->  6.7 GFLOP/s
+
+Largest single front (snode 41453, nrow=1877 ncol=77): 0.26 GFLOP
+in 15.8 ms = ~16 GFLOP/s. Reference: a cache-blocked f64 GEMM is
+50-90 GFLOP/s single-core on this CPU class. **feral's supernode
+kernel runs ~3-10× below the blocked-GEMM ceiling.** That is the
+#44 bottleneck — confirmed, quantified, feral-side.
+
+Root cause (read of =src/dense/schur_kernel.rs=): the trailing
+Schur update is =schur_panel_minus_*_strided= — a rank-n_elim
+update done column-by-column (quad = 4 cols at once). No cache
+tiling of the trailing block, no resident rank-k panel. For a
+1800-wide trailing block that does not fit in cache the rank-k
+panel (~1.15 MB for the big front) is re-streamed once per
+4-column group → memory-bandwidth-bound. This is BLAS2.5, not a
+cache-blocked BLAS3 GEMM (cf. faer's =lblt_blocked_step=, research
+note faer-dense-speed-reference.md).
+
+Secondary anomaly: several medium fronts are overhead-dominated,
+not arithmetic-bound — e.g. snode 26043 (nrow=379 ncol=16) takes
+~9 ms for ~2 MFLOP = 0.25 GFLOP/s. Worth a separate look; per-front
+fixed overhead, not the kernel.
+
+* 11:20 :issue44:narx:corpus-gap:
+The captured corpus is only 3 KKTs (NARX_CFy_{0000,0001,0002}); the
+real run is 418 iterations. iter0000 is the slow one (5.79M nnz,
+878 ms); 0001/0002 are 10× cheaper. The trajectory shape — how many
+iters are 0000-class vs 0001-class — is unknown and determines how
+much a kernel speedup actually buys. tried-and-rejected (2026-05-21,
+B2/pinene) is explicit: "a per-factor profile of the named target's
+full iteration sequence ... should precede the plan." Need a
+full-trajectory per-factor profile before committing a kernel plan.
+
+* 12:00 :issue44:narx:kernel-read:correction:
+Read =src/dense/schur_kernel.rs= quad kernel + =factor_one_supernode=
+(=src/numeric/factorize.rs:1991=). Two corrections to the 11:00 entry.
+
+(1) The trailing-update kernel is NOT un-blocked BLAS2.5. The quad
+kernel =schur_panel_minus_nofma_strided_quad= holds an m_r×n_r dst
+tile (2 SIMD row-vectors × 4 cols = 8 accumulators) register-resident
+across the entire rank-q loop; dst is loaded/stored once per chunk,
+not once per q. It IS register-blocked, tuned for AVX2's 16 ymm.
+
+(2) FMA is not a lever. =probe_fma_kernel= (issue #35) on this
+aarch64 box: fma/nofma speedup 0.75-0.89 — the FMA path is a
+*regression* on Apple Silicon. nofma is already the fast path.
+Isolated kernel throughput: ~9-11 GFLOP/s (nofma, n_elim=64).
+
+Revised ceiling estimate: the nofma path issues mul+sub (2 ops/madd);
+M4 NEON nofma peak ≈ 30-35 GFLOP/s. Measured ~11 → ~1/3 of peak.
+Realistic pure-Rust micro-kernel headroom is ~2-3×, NOT the ~10×
+the GFLOP-vs-blocked-GEMM framing implied — feral cannot use BLAS
+(hard constraint) and MA57's speed here is Apple Accelerate dgemm.
+
+Remaining real levers, to be sized by microbench before planning:
+- src-panel L2 re-read: the quad kernel processes only 4 trailing
+  cols/call, so apply_blocked_schur_panel re-reads the whole rank-k
+  src panel (~920 KB for a big front) ~450× → ~410 MB L2 traffic on
+  one front. A wider n_r (8-12 cols/call) cuts that.
+- NEON has 32 registers; the tile is sized for AVX2's 16. Wider
+  m_r×n_r on aarch64 → more flops per src load.
+- Overhead-bound medium fronts (snode 26043: nrow=379 ncol=16, 9 ms
+  for ~2 MFLOP = 0.25 GFLOP/s) — 47× off the kernel rate. This is
+  per-front fixed overhead, a separate mechanism from the kernel;
+  needs its own probe.
+
+* 13:00 :issue44:narx:kernel:neon-tile:committed:
+Implemented the safe NEON-tile widening (plan
+=dev/plans/quad-schur-neon-tile-widen.md=). =schur_panel_minus_nofma_
+strided_quad= bulk loop now uses =const UNROLL = if cfg!(target_arch
+= "aarch64") { 4 } else { 2 }= — unroll-4 on aarch64 (16 acc + 4 src
++ 1 splat ≈ 21 live, fits the 32-NEON budget), unroll-2 unchanged on
+x86. Accumulators carried in =[S::f64s; UNROLL]= arrays; LLVM SROA
+scalarizes them back to registers. Bit-exact: the unroll factor only
+regroups body vectors into chunks, never reorders the q-ascending
+accumulation chain. =schur_panel_minus_nofma_strided_quad_is_bit_
+exact_vs_four_singles= passes (its len sweep hits body_len%4 ∈ 1,2,3).
+Committed 5f1661c.
+
+Microbench (=diag_narx_kernel_gflops=, thermally-controlled
+interleaved A/B): unroll-4 is 2.2-2.5× the quad kernel in isolation.
+End-to-end NARX_CFy: ~3-7%. The gap between 2.4× and 3-7% means the
+kernel is only a fraction of the loop — motivates the phase-probe.
+
+* 13:30 :issue44:thermal:false-alarm:
+=probe_narx_factor= after the kernel commit showed 1094→1460 ms — a
+seeming 28% end-to-end regression. Re-ran 4×: stable ~1395 ms. Then
+=git stash= reverted to baseline and re-measured: baseline itself had
+drifted to 1357 ms. Pure thermal throttling — the Apple Silicon box
+had warmed up between the before/after measurements. NOT a regression.
+Lesson re-confirmed (cf. 2026-05-21): never A/B absolute ms across
+time on this machine; interleave B/A/B/A in one thermal window, or
+compare thermal-invariant ratios.
+
+* 15:00 :issue44:narx:phase-probe:headline:
+Built =probe_narx_phases= + global phase counters =dense::factor::
+phase_timing= (gated by =PHASE_TIMING_ENABLED=, same pattern as
+=panel_diag=). Three brackets in =factor_frontal_blocked_in_place_
+with_scratch= (panel / schur / scalar-tail) + two in =factor_one_
+supernode= (assembly = build_row_indices+scatter+extend-add;
+densefactor = the whole Step-3 dense factor). Per-supernode deltas
+recorded on =SupernodeTiming= via snapshot-before/after.
+
+NARX_CFy_0000 (n=92229, 41609 supernodes), warm numeric loop:
+  assembly       28.9% ± 0.3
+  densefactor    71.6%
+    panelfactor   1.2%
+    schur        44.6% ± 0.6
+    scalartail    4.6%
+    df-overhead  21.3% ± 0.3
+  loop-overhead   ~0%
+Ranges are over 4 measurements (3 warm + 1 cold). Absolute loop time
+swung 1107-1412 ms (±13%, thermal) but the SPLIT held to ±0.6% — a
+ratio is thermal-invariant, which is exactly why this is trustworthy
+where the earlier absolute-ms A/B was not.
+
+Headline: the Schur kernel is ~45% of the loop, not 94.6% (the 11:00
+figure measured only nrow>128 fronts, not the whole loop). The kernel
+widening's 3-7% end-to-end is now consistent: 2.4× on 45% caps at
+~26%, and the unroll-4 win is smaller than 2.4× once the real front-
+shape mix (many narrow, tail-dominated fronts) is averaged in.
+
+* 15:20 :issue44:narx:phase-probe:amalgamation-refuted:
+=probe_narx_phases= ncol distribution (structural — from the etree,
+not a timing measurement):
+  ncol=1     5225 snodes   1.9% of loop
+  ncol=2-4  35430 snodes   0.2%
+  ncol=5-16   890 snodes  79.3%
+  ncol=17-64   61 snodes  13.9%
+  ncol=65+      ~2 snodes  ~4.6%
+35430 tiny fronts cost 0.2% — amalgamating them is NOT the #44 lever.
+93% of the loop is ~950 medium fronts (ncol 5-64), tall (nrow up to
+~1900). Those carry the Schur compute AND the assembly + df-overhead
+tax. Per-supernode top-10 numbers are noise-contaminated (snode 8588:
+a 4×2 front "took" 8 ms — an OS deschedule inside the Instant
+bracket; ~20 flops cannot cost 8 ms), so only the aggregate buckets
+are quoted.
+
+Soft spots flagged for the next probe: =assembly= is one bracket over
+build_row_indices + scatter + extend-add (can't yet split bookkeeping
+from O(nnz) work); =df-overhead= is a residual (densefactor − panel −
+schur − tail) — real wall time but its label is provisional until
+decomposed.
