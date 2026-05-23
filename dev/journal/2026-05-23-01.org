@@ -490,3 +490,25 @@ Reachable explicitly via =OrderingMethod::KahipND=.
 Research note: F12 in
 =dev/research/issue-50-metisnd-symbolic-cost.md=. Probe data:
 =dev/research/small-sparse-inventory.csv=.
+
+* 17:45 :bench:noise:discs:
+First post-amend bench run (after retiring the small-and-sparse
+KahipND branch) showed DISCS_0007 50.94x and DISCS_0006 26.66x
+at n=234 in the top-10 worst-ratio list, plus a small upward p90
+drift on all four exit-partition buckets (e.g. sparse p90 1.53
+-> 1.62). Suspect noise — the `Auto` dispatcher changes this
+session don't touch n=234 (still AMF before and after). Reran
+bench while the machine was idle.
+
+Rerun:
+- DISCS_0007, DISCS_0006 not in top-10
+- KIRBY2_0007 9.49x -> 7.92x (vs last session 8.03x)
+- CRESC132_0000 8.13x -> 6.77x (vs last session 7.13x)
+- Sparse p90s back to 1.54/1.54 (vs last session 1.53/1.53)
+- Dense small p90 1.36 -> 1.35; medium held at 1.78
+
+Confirmed: run #1 was co-tenant with the cargo clippy build that
+was finishing concurrently — small-n matrices are CPU-spike
+sensitive (54k cycles is 27us on a single matrix). Checkpoint
+amended to make the rerun the canonical numbers, run #1
+preserved as artifact-of-record.

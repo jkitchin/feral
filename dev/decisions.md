@@ -4338,3 +4338,75 @@ for any future revisit.
   zero-fill correction + close.
 - `dev/sessions/2026-05-22-02.md` — checkpoint.
 - `CHANGELOG.md` — Unreleased Performance entry.
+
+## 2026-05-23 — `Auto` dispatcher simplified to a single shape branch
+
+**Context.** Issue #50 (`powerflow22` symbolic 113.8 s under ScotchND
+via `Auto`) and its F11 side finding (KahipND num_nnz_l regressions
+on small chain-catch matrices, surfaced during the corpus replay)
+both pointed at the same code path: `src/symbolic/mod.rs::
+choose_adaptive` had three predicate-based branches stacked on top
+of `pick_default_method`. Two of them (ScotchND for
+very-large-and-sparse, KahipND for small-and-sparse) were calibrated
+against the pre-issue-#46 BK pivoting cascade, an amplifier that no
+longer exists.
+
+**Decision.** `choose_adaptive` keeps exactly one branch on top of
+`pick_default_method`: very-large-and-sparse (`n > 100_000 &&
+full_avg_deg < 5.0`) → `Amd`. Everything else delegates to
+`pick_default_method`.
+
+**Evidence.**
+
+- *Issue #50.* `powerflow22` (n=2.8 M, full_avg_deg ≈ 3.7): ScotchND
+  113.8 s symbolic / 15.8 M nnz_L; MetisND 117.4 s / 20.5 M nnz_L;
+  **AMD 55 s / 10.4 M nnz_L**. IPM-corpus numeric inventory
+  (`dev/research/issue-50-numeric-inventory.csv`) confirms AMD ≥ MetisND
+  on the [100k, 200k) bucket and is competitive at all sizes that
+  reach the post-#46 cascade-free numeric path. Corpus replay of
+  post-Fix `Auto` over the 258 chain-catch representatives:
+  0 failures, 0 num_nnz_l regressions for matrices that actually
+  reroute (4 n=10000 chain matrices gain on 3 / tie on 1).
+  See `dev/research/issue-50-metisnd-symbolic-cost.md` §F8–§F11.
+
+- *F11 follow-up.* 838-matrix 4-way inventory
+  (`dev/research/small-sparse-inventory.csv`) over the
+  small-and-sparse predicate (`n<10_000 && full_avg_deg<15`):
+
+  | metric | AMD | AMF | MetisND | KahipND |
+  |---|---:|---:|---:|---:|
+  | strict per-matrix wins | 58 | **169** | 21 | 16 |
+  | sum num_nnz_l / AMD | 1.000× | **0.870×** | 1.005× | 0.984× |
+  | sum factor_us / AMD | 1.000× | **0.832×** | 1.135× | 0.990× |
+
+  AMF dominates on every aggregate. The 41 cases where KahipND wins
+  are concentrated on high-avg-deg patterns (STEENBRD, HADAMARD,
+  TABLE8) and remain reachable via `OrderingMethod::KahipND`.
+  See `dev/research/issue-50-metisnd-symbolic-cost.md` §F12.
+
+**Consequences.**
+
+- `Auto` is now a thin wrapper around `pick_default_method` plus a
+  single guard for very-large-and-sparse matrices. The dispatcher
+  no longer reaches for `KahipND` or `ScotchND` implicitly; callers
+  who want those orderings must request them explicitly via
+  `with_ordering`. This matches the explicit guidance in
+  `OrderingMethod::Auto`'s doc comment: `Auto` is opt-in for known
+  IPM workloads, and the default `symbolic_factorize` still uses
+  `Amd`.
+
+- The 4-matrix `n=10000` chain reroute (Fix A side effect) and the
+  PDE2 + powerflow22 reroute are the entire observed behavior
+  delta on the IPM corpus — every other Auto pick is unchanged.
+
+- No correctness change: every reroute produced `Success`
+  inertia matching the pre-fix path.
+
+**References.**
+- Commits `c442a0c` (#50 Fix A), `3f8f6f6` (F11 follow-up: retire
+  small-and-sparse KahipND branch).
+- `dev/research/issue-50-metisnd-symbolic-cost.md` §F7–§F12.
+- `dev/sessions/2026-05-22-01.md` (Fix A research) and
+  `dev/sessions/2026-05-23-01.md` (corpus validation + small-and-
+  sparse retire).
+- `CHANGELOG.md` Unreleased entries.

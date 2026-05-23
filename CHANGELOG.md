@@ -4,6 +4,45 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `Auto` dispatcher rewrites ([#50][i50])
+
+The `OrderingMethod::Auto` dispatcher (`src/symbolic/mod.rs::
+choose_adaptive`) was simplified to two rules on top of
+`pick_default_method`: kept only the very-large-and-sparse catch
+(`n > 100_000 && full_avg_deg < 5.0 → Amd`); everything else
+delegates to `pick_default_method` (`n ≤ 10_000 → Amf`,
+`n > 10_000 → MetisND`).
+
+- **Fix A — large-and-sparse swap** (`c442a0c`). The pre-fix
+  `n > 100_000 && full_avg_deg < 5.0 → ScotchND` branch is swapped
+  to `Amd`. On `powerflow22` (n=2.8 M, full_avg_deg ≈ 3.7) prior
+  ScotchND took 113.8 s symbolic (15.8 M nnz_L); AMD takes 55 s
+  (10.4 M nnz_L). The ScotchND advantage at very large n had been
+  load-bearing against the same BK pivoting cascade that motivated
+  the chain catches; issue #46 eliminated that amplifier in May
+  2026 and removed the justification for routing very-large sparse
+  matrices through nested dissection. Corpus inventory:
+  `dev/research/issue-50-numeric-inventory.csv` shows the IPM
+  corpus's [100k, 200k) bucket has AMD/MetisND num_nnz_l ratio 1.00
+  on both representatives. Validation: 258 chain-catch corpus rows
+  under post-Fix Auto — 0 failures, 0 num_nnz_l regressions for
+  matrices that actually reroute. See
+  `dev/research/issue-50-metisnd-symbolic-cost.md` §F7–§F11.
+
+- **F11 follow-up — small-and-sparse retire** (`3f8f6f6`). The
+  pre-fix `n < 10_000 && full_avg_deg < 15.0 → KahipND` branch is
+  deleted entirely; the population now falls through to
+  `pick_default_method`'s `n ≤ 10_000 → Amf` default (MUMPS
+  `ana_set_ordering.F` SYM=2 N≤10000). Justified by an 838-matrix
+  4-way inventory (`dev/research/small-sparse-inventory.csv`): AMF
+  wins 169/838 strict per-matrix (KahipND 16); aggregate num_nnz_l
+  ratios to AMD are AMF 0.870×, KahipND 0.984×; aggregate factor_us
+  ratios are AMF 0.832×, KahipND 0.990×. KahipND remains reachable
+  via `OrderingMethod::KahipND` for the 41 high-avg-deg cases
+  (STEENBRD, HADAMARD, TABLE8) where it still wins — all sub-22k
+  nnz_L absolute. See `dev/research/issue-50-metisnd-symbolic-cost.md`
+  §F12.
+
 ## [0.5.0] - 2026-05-22
 
 ### Performance — Schur trailing-update kernel widened ([#44][i44])
@@ -169,6 +208,7 @@ the neighbour is structurally uncoupled. On the `cho` KKT: factor time
 [i47]: https://github.com/jkitchin/feral/issues/47
 [i48]: https://github.com/jkitchin/feral/issues/48
 [i49]: https://github.com/jkitchin/feral/issues/49
+[i50]: https://github.com/jkitchin/feral/issues/50
 
 ### Fixed — MC64 catastrophic-spread guard ([#45][i45])
 
