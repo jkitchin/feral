@@ -512,3 +512,53 @@ was finishing concurrently — small-n matrices are CPU-spike
 sensitive (54k cycles is 27us on a single matrix). Checkpoint
 amended to make the rerun the canonical numbers, run #1
 preserved as artifact-of-record.
+
+* 18:30 :issue-51:powerflow22:numeric:orientation:
+GitHub issue #51 (filed AFTER today's symbolic dispatcher work)
+is a SEPARATE bug: value-dependent 50× numeric-phase slowdown
+on `powerflow22` (n=2,813,976) with cached symbolic. Ran the
+reproducer at
+=pounce/gams/nlpbench/feral_repro/powerflow22/feral_repro=:
+
+#+begin_example
+factor      : 54.77s   (factor_4 values, AMD symbolic + numeric)
+refactor    : 1.00s    (factor_4 values, cached symbolic)
+factor(#2)  : 53.80s   (factor_5 values, cached symbolic)
+#+end_example
+
+So pure numeric on factor_4 values is 1s; pure numeric on
+factor_5 values is 53s. Same n, same nnz, same pattern.
+
+Issue body also reports `factor_5` refactor (same values, second
+call) is 60s vs first 54s — state mutates between calls.
+
+Suspect surfaces in =src/numeric/solver.rs= state retained
+across `factor()`:
+  - =mc64_scaling_cache=: Hungarian on 2.8M-dim is plausibly
+    ~50s. Cache should hit on factor_5 refactor (same values)
+    but issue says it doesn't (=mc64_cache_hit_count=0=
+    throughout the IPM run). The cache update path at
+    solver.rs:830-841 only writes when =mc64_ran && !scaling_cache_hit=
+    — need to confirm =mc64_ran= is true on the slow call.
+  - =workspace=: FactorWorkspace pooled across calls. Doc says
+    cleared at entry to factorize_multifrontal_with_workspace.
+    If a field is missed in clear, would explain "second call
+    slower than first" growth (54s -> 60s on same values).
+  - BK pivoting cascade with delayed pivots: issue #46 was
+    supposed to defang this. Could still bite with specific
+    value patterns producing many delayed pivots.
+
+Plan for next session (when picking up #51):
+  1. Add timing instrumentation around scaling / multifrontal
+     / inertia phases inside factor() for one experimental
+     build.
+  2. Run reproducer; report which phase is 50× slower.
+  3. If scaling: profile MC64 Hungarian iteration count;
+     compare factor_4 vs factor_5 matchings.
+  4. If multifrontal: dump per-supernode delayed-pivot histogram
+     factor_4 vs factor_5.
+  5. Investigate the "second call slower" state-leak separately
+     once primary phase identified.
+
+Not pursuing further this session — checkpoint already landed,
+amendment already pushed. Logged as task #17.
