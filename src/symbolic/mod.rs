@@ -74,19 +74,22 @@ pub enum OrderingMethod {
     /// Adaptive dispatcher: picks a concrete method per-matrix from
     /// cheap pattern features (n and average degree nnz/n).
     ///
-    /// Issue #50 (2026-05-23) collapsed the per-shape branches to a
-    /// single small-and-sparse rule on top of [`pick_default_method`]:
-    ///   - small-and-sparse (n < 10_000, full nnz/n < 15) → `KahipND`
+    /// Issue #50 plus its F11 follow-up (2026-05-23) collapsed the
+    /// per-shape branches to one very-large-and-sparse catch on top
+    /// of [`pick_default_method`]:
+    ///   - very-large-and-sparse (n > 100_000, full nnz/n < 5) → `Amd`
     ///   - everything else delegates to [`pick_default_method`]
     ///     (`n <= 10_000 → Amf`, `n > 10_000 → MetisND`).
     ///
     /// **Opt-in only.** The 154k-matrix IPM bench (2026-04-18) showed
     /// `Auto` regresses sparse factor/MUMPS geomean from 0.44 (AMD)
-    /// to 0.58 because the small-and-sparse branch routes thousands
-    /// of n<500 IPM iteration dumps to KaHIP, where K1 + multilevel
-    /// setup costs 2-3× per call vs AMD. The 0.988 fill geomean from
-    /// the shape bakeoff is real but does not translate to numeric
-    /// speedup when the corpus is dominated by tiny matrices.
+    /// to 0.58 because the (pre-F11) small-and-sparse branch routed
+    /// thousands of n<500 IPM iteration dumps to KaHIP, where K1 +
+    /// multilevel setup cost 2-3× per call vs AMD. That branch is
+    /// gone — `Auto`'s small-and-sparse path is now AMF via the
+    /// default — but the original `Auto` warning is preserved here
+    /// since the historical-bench regression evidence remains a
+    /// reason to default to `Amd` outside known IPM workloads.
     ///
     /// Use `Auto` only when the workload is known to be dominated by
     /// large or `cresc132`-class matrices where the per-call setup
@@ -123,10 +126,9 @@ pub enum OrderingMethod {
 /// Resolve an `Auto` ordering to a concrete method from cheap pattern
 /// features. Non-`Auto` inputs pass through unchanged.
 ///
-/// The rule set adds two shape-bakeoff branches on top of
+/// The rule set adds one shape-bakeoff branch on top of
 /// [`pick_default_method`]:
 ///   - very-large-and-sparse (`n > 100_000`, full avg_deg < 5.0) → `Amd`
-///   - small-and-sparse       (`n <  10_000`, full avg_deg < 15.0) → `KahipND`
 ///
 /// Anything else delegates to [`pick_default_method`], so `Auto` can't
 /// disagree with the no-arg `symbolic_factorize` default on the same
@@ -147,6 +149,20 @@ pub enum OrderingMethod {
 /// ratio 1.00 on both representatives. See
 /// `dev/research/issue-50-metisnd-symbolic-cost.md` §F7–F8.
 ///
+/// The small-and-sparse branch (`n < 10_000 && avg_deg < 15 →
+/// KahipND`) was deleted by the F11 side finding from issue #50
+/// (2026-05-23). The corpus inventory in
+/// `dev/research/small-sparse-inventory.csv` (838 IPM-corpus
+/// matrices factored under AMD/AMF/MetisND/KahipND) shows AMF
+/// dominates this population: AMF wins 169/838 per-matrix
+/// (vs KahipND's 16), aggregate AMF fill is 0.87× AMD vs KahipND's
+/// 0.98×, aggregate AMF time is 0.83× AMD vs KahipND's 0.99×. After
+/// deletion these matrices fall through to `pick_default_method`'s
+/// `n ≤ 10_000 → Amf` rule. KahipND retains 20 strict wins
+/// concentrated on high-avg-deg cases (STEENBRD, HADAMARD, TABLE8),
+/// all sub-22k nnz_L absolute and reachable explicitly via
+/// `OrderingMethod::KahipND` for callers who want them.
+///
 /// `pattern` is expected to be the matrix's full-symmetric pattern (the
 /// shape produced by `CscMatrix::symmetric_pattern`); the
 /// `pick_default_method` call below converts to a stored-nnz
@@ -163,9 +179,6 @@ fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMeth
     let avg_deg = full_nnz as f64 / n as f64;
     if n > 100_000 && avg_deg < 5.0 {
         return OrderingMethod::Amd;
-    }
-    if n < 10_000 && avg_deg < 15.0 {
-        return OrderingMethod::KahipND;
     }
     // Convert full-symmetric nnz back to a stored-lower-triangle
     // equivalent so `pick_default_method`'s thresholds (calibrated on
@@ -1571,7 +1584,15 @@ mod tests {
             choose_adaptive(&p, OrderingMethod::Auto),
             OrderingMethod::Amd
         );
-        // Small-and-sparse → KaHIP.
+        // Small-and-sparse (n<10_000, avg_deg<15) → delegates to
+        // pick_default_method, which routes n≤10_000 to AMF. The F11
+        // follow-up to issue #50 (2026-05-23) deleted the previous
+        // small-and-sparse KahipND branch after the 838-matrix
+        // inventory showed AMF aggregate fill 0.870× AMD vs KahipND
+        // 0.984× and AMF aggregate time 0.832× AMD vs KahipND 0.990×
+        // on that population; KahipND won only 16/838 matrices (1.9%)
+        // vs AMF's 169/838 (20.2%). See choose_adaptive's doc comment
+        // and dev/research/issue-50-metisnd-symbolic-cost.md §F12.
         let (cp, ri) = pat_bufs(500, 6);
         let p = CscPattern {
             n: 500,
@@ -1580,7 +1601,7 @@ mod tests {
         };
         assert_eq!(
             choose_adaptive(&p, OrderingMethod::Auto),
-            OrderingMethod::KahipND
+            OrderingMethod::Amf
         );
         // Everything else → delegate to pick_default_method. For
         // (n=50_000, avg_deg≥10) → MetisND via the n>10_000 fallback.
@@ -1913,10 +1934,11 @@ mod tests {
     #[test]
     fn issue_3_auto_on_kkt_routes_via_pick_default_method() {
         // Auto-path must defer to `pick_default_method` for shapes that
-        // don't match its own small-and-sparse rule. PoissonControl
+        // don't match its very-large-and-sparse branch. PoissonControl
         // K=58 (n=10092, stored avg_deg≈2.67) sits above
-        // choose_adaptive's n<10_000 KahipND branch, so it delegates
-        // to pick_default_method, which returns MetisND for n>10_000.
+        // choose_adaptive's only remaining catch (n>100_000 &&
+        // avg_deg<5 → Amd, post-#50), so it delegates to
+        // pick_default_method, which returns MetisND for n>10_000.
         let m = poisson_kkt_csc(58);
         let params = SupernodeParams::default();
         let auto = symbolic_factorize_with_method(&m, &params, OrderingMethod::Auto).unwrap();

@@ -448,3 +448,45 @@ gain AMF over MetisND (strict improvement on 3, tie on 1), and
 (b) PDE2 + powerflow22 routing from ScotchND to AMD. No
 factorization failures, no num_nnz_l regressions among the
 actually-affected matrices.
+
+* 15:30 :issue-50-f11:dispatcher:kahip:amf:
+F11 (pre-existing KahipND small-and-sparse regression) pursued
+as a follow-up to issue #50. Question: keep KahipND on the
+small-and-sparse branch, swap to AMD, split predicate, or
+delete?
+
+Added AMF column to the inventory probe
+(=src/bin/diag_small_sparse_inventory.rs=), reran over
+the IPM corpus. 838 matrices factored under
+AMD / AMF / MetisND / KahipND.
+
+Per-matrix strict wins:
+  - AMD     58 (6.9%)
+  - AMF    169 (20.2%)   <- clear winner
+  - MetisND 21 (2.5%)
+  - KahipND 16 (1.9%)
+  - ties   574 (68.5%)
+
+Pairwise AMF vs KahipND: AMF 243, Kahip 41, ties 554.
+
+Aggregate num_nnz_l normalized to AMD: AMF 0.870x, KahipND
+0.984x, MetisND 1.005x. Aggregate factor_us: AMF 0.832x,
+KahipND 0.990x, MetisND 1.135x.
+
+Decision: delete the small-and-sparse branch entirely. The
+population then falls through =pick_default_method=, which
+already routes n<=10_000 to AMF (MUMPS ana_set_ordering.F
+SYM=2 N<=10000 default).
+
+Code: =src/symbolic/mod.rs::choose_adaptive= now keeps only the
+very-large-and-sparse branch (n>100_000 && avg_deg<5 -> AMD)
+on top of =pick_default_method=. Test =choose_adaptive_rules=
+asserts =Amf= for the (n=500, avg_deg=6) case.
+
+Where KahipND still wins (41 cases): high-avg-deg patterns
+(STEENBRD, HADAMARD, TABLE8), all sub-22k nnz_L absolute.
+Reachable explicitly via =OrderingMethod::KahipND=.
+
+Research note: F12 in
+=dev/research/issue-50-metisnd-symbolic-cost.md=. Probe data:
+=dev/research/small-sparse-inventory.csv=.

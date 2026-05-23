@@ -512,3 +512,63 @@ touched. So these are **pre-existing** dispatcher quality
 issues, not Fix A regressions. They deserve a separate
 investigation (route small chain-catch matrices to AMD rather
 than KahipND?), tracked outside issue #50.
+
+### F12 — F11 follow-up: delete the small-and-sparse branch
+
+F11 flagged the small-and-sparse KahipND branch as a
+pre-existing dispatcher quality issue. To decide between
+(a) swap to AMD, (b) split predicate, (c) delete branch,
+ran `cargo run --release --bin diag_small_sparse_inventory`
+over the IPM corpus (extended to include AMF after the first
+pass). The probe filters to `n<10_000 && full_avg_deg<15.0`
+— the exact predicate the deleted branch matched — and
+factors each matrix four ways: AMD, AMF, MetisND, KahipND.
+
+Output: `dev/research/small-sparse-inventory.csv`,
+838 matrices with all four orderings ok.
+
+Per-matrix strict wins (by num_nnz_l):
+
+  AMD:     58  ( 6.9%)
+  AMF:    169  (20.2%)
+  MetisND: 21  ( 2.5%)
+  KahipND: 16  ( 1.9%)
+  ties:   574  (68.5%)
+
+Pairwise AMF vs KahipND:
+
+  AMF strictly better:    243
+  KahipND strictly better: 41
+  ties:                   554
+
+Aggregate num_nnz_l (lower is better; normalized to AMD):
+
+  AMD:     1.000x
+  AMF:     0.870x  ← winner
+  MetisND: 1.005x
+  KahipND: 0.984x
+
+Aggregate factor_us (lower is better; normalized to AMD):
+
+  AMD:     1.000x
+  AMF:     0.832x  ← winner
+  MetisND: 1.135x
+  KahipND: 0.990x
+
+The decision is unambiguous: **delete the small-and-sparse
+branch entirely** so this population falls through to
+`pick_default_method`'s existing `n ≤ 10_000 → Amf` rule
+(MUMPS ana_set_ordering.F SYM=2 N≤10000 default).
+
+Where KahipND still wins (the 41 cases): concentrated on
+high-avg-deg patterns (STEENBRD, HADAMARD, TABLE8) — all
+sub-22k nnz_L absolute, so the regression budget is tiny.
+KahipND remains reachable via
+`OrderingMethod::KahipND` for callers who profile and pick
+it explicitly.
+
+Code change: `src/symbolic/mod.rs::choose_adaptive` now keeps
+only the very-large-and-sparse branch (n>100_000, avg_deg<5
+→ Amd) on top of `pick_default_method`. Test
+`choose_adaptive_rules` updated: the small-and-sparse case
+now asserts `Amf` instead of `KahipND`.
