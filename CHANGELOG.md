@@ -4,6 +4,81 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-23
+
+### Added — `Solver::with_scaling()` builder ([#51][i51])
+
+New public builder method on `Solver` to pin the scaling strategy
+explicitly. Lets IPM hosts override `ScalingStrategy::Auto` when
+they already know what they want — recommended escape hatch when
+the picker's per-matrix heuristic is wrong for a problem class.
+Default (`Auto`) is now sticky on cached pattern (see "Fixed" below)
+so the picker no longer flaps; this builder is for callers that
+want full control.
+
+### Fixed — sticky `Auto` scaling on cached pattern ([#51][i51])
+
+Three coordinated fixes in `src/numeric/solver.rs` address a ~50×
+numeric-phase slowdown on IPM workloads when the picker re-routes
+across iters or `PartialSingular` outcomes drop the MC64 cache.
+
+Reproducer (`pounce/gams/nlpbench/feral_repro/powerflow22/`,
+n=2,813,976 IPM KKT, default `Auto`):
+
+| call | pre-fix | post-fix |
+|---|---:|---:|
+| factor (cold) | 54.77 s | 54.42 s |
+| refactor (cached symbolic, iter A values) | 1.00 s | 1.02 s |
+| factor #2 (cached symbolic, iter B values) | **53.80 s** | **1.07 s** |
+
+The three fixes:
+
+1. **Sticky Auto pick.** First `factor()` on a pattern runs the full
+   `compute_scaling_auto_with_cache` pipeline (preserves Policy-4
+   fallback semantics — InfNorm-spread guard, off-diag-ratio guard,
+   MC64 catastrophic-spread guard). Post-call we derive the resolved
+   strategy from `factors.scaling_info`
+   (`Mc64FallbackToInfnorm → InfNorm`,
+   `PartialSingular → Mc64Symmetric`, `NotApplied → Identity`,
+   `Applied → pick_scaling_strategy(matrix)`) and stash it on the
+   `Solver` as `auto_picked_strategy`. Every subsequent factor on
+   the same pattern uses the stashed strategy directly, bypassing
+   Auto. Pattern change clears it alongside the MC64 cache. Mirrors
+   MUMPS ICNTL(7) / SSIDS `options%ordering`: structural decision
+   once at first call, reuse every refactor.
+
+2. **MC64 cache gate widened to `PartialSingular`.** The Hungarian
+   on a structurally rank-deficient KKT still produced a real
+   scaling vector (unmatched positions land at 1.0 per
+   `mc64.rs:222`); the value-bound check still gates reuse, so
+   caching is correctness-safe. Pre-fix the post-#49 gate required
+   `ScalingInfo::Applied`, which dropped the cache on every IPM iter
+   over a structurally rank-deficient KKT and forced the Hungarian
+   to rerun from scratch.
+
+3. **`Solver::with_scaling()` builder** (see "Added" above).
+
+### Tests
+
+Three unit tests in `src/numeric/solver.rs`:
+
+- `issue_51_with_scaling_builder_overrides_default`
+- `issue_51_auto_pick_is_sticky_on_cached_pattern`
+- `issue_51_partial_singular_populates_cache`
+
+And one `#[ignore]`'d corpus regression test:
+`issue_51_corpus_sticky_auto_holds_across_ipm_iters` walks
+`tests/data/parity/<family>/*.mtx` for every family with ≥ 2 IPM
+iter snapshots, factors all iters against one `Solver::new()`, and
+asserts the sticky pick holds across every iter (13 families
+covered: acopp30, hatfldbne, hahn1, ssi, …).
+
+`mc64_fallback_surfaces_via_solver_api` was updated to reflect the
+new sticky semantics: iter 2 now asserts
+`mc64_fallback_count == 1` (sticky pin runs straight InfNorm; no
+fallback to surface) and locks
+`auto_picked_strategy = Some(InfNorm)`.
+
 ### Changed — `Auto` dispatcher rewrites ([#50][i50])
 
 The `OrderingMethod::Auto` dispatcher (`src/symbolic/mod.rs::
@@ -209,6 +284,7 @@ the neighbour is structurally uncoupled. On the `cho` KKT: factor time
 [i48]: https://github.com/jkitchin/feral/issues/48
 [i49]: https://github.com/jkitchin/feral/issues/49
 [i50]: https://github.com/jkitchin/feral/issues/50
+[i51]: https://github.com/jkitchin/feral/issues/51
 
 ### Fixed — MC64 catastrophic-spread guard ([#45][i45])
 
