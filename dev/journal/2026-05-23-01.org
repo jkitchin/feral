@@ -562,3 +562,83 @@ Plan for next session (when picking up #51):
 
 Not pursuing further this session — checkpoint already landed,
 amendment already pushed. Logged as task #17.
+
+* 19:15 :issue-51:powerflow22:scaling:mc64:root-cause:
+Root-cause identified. Modified the reproducer to take
+=FERAL_SCALING={identity,infnorm,mc64}= and reran on
+factor_4.bin + factor_5.bin. Results unambiguous:
+
+| scaling     | factor_4 first | factor_4 refactor | factor_5 |
+|-------------+----------------+-------------------+----------|
+| Auto (def.) | 54.77s         | 1.00s             | 53.80s   |
+| Identity    | 54.73s         | 0.87s             | 0.94s    |
+| InfNorm     | 54.85s         | 0.99s             | 1.04s    |
+| Mc64Sym.    | 54.41s         | 59.69s            | 53.34s   |
+
+Numeric multifrontal is ~1s either way. The 50× cost is
+**entirely in the scaling phase** (MC64 Hungarian).
+
+Two compounding causes:
+
+1. =pick_scaling_strategy= is VALUE-AWARE.
+   src/scaling/mod.rs:609 counts column nnz with
+   =if matrix.values[k] == 0.0 { continue }= (issue #47
+   fix). Different IPM iterates with the same structure
+   but different values can flip the strategy from
+   InfNorm to Mc64Symmetric depending on how many
+   explicit-zero entries each iterate's value array has.
+   For powerflow22, factor_4 routes to InfNorm (fast),
+   factor_5 routes to Mc64Symmetric (50s Hungarian).
+
+2. MC64 scaling cache cannot rescue this. The cache
+   only populates when =ScalingInfo::Applied= is
+   returned (src/numeric/solver.rs:817). For KKT systems
+   with structural singularity from active-set effects,
+   the matching returns =PartialSingular= and the cache
+   is cleared each call (solver.rs:840). Every IPM iter
+   rebuilds the matching from scratch.
+
+   This explains the issue body's =mc64_cache_hit_count=0=
+   throughout the IPM run despite =sym_calls=1=.
+
+The Hungarian on n=2.8M sparse takes ~50s per call. The
+"refactor 60s on same values" observation (issue body):
+on the same factor_5 values, second call also returns
+PartialSingular, also no cache, also redoes Hungarian.
+The small (54s → 60s) growth is secondary — possibly
+thread-pool cooldown or a real cumulative effect to
+investigate separately.
+
+Three candidate fixes (preference order):
+
+A. **Cache the matching even on =PartialSingular=.**
+   The matching + scaling vector is well-defined and
+   reusable across IPM iterates even when n_matched < n.
+   Track A in src/numeric/solver.rs:830-841 needs to
+   widen the =mc64_ran= gate to include PartialSingular,
+   *and* the value-bound check needs to account for the
+   unmatched diagonal slots.
+
+B. **Add =Solver::with_scaling=.** A builder so
+   pounce-feral can force =InfNorm= on known-KKT
+   workloads. Simpler than (A), unblocks the user
+   today, but doesn't generalize.
+
+C. **Make =pick_scaling_strategy= structure-only on
+   cached-pattern repeat calls.** The first factor on a
+   pattern picks based on values; subsequent factors
+   inherit the choice. Avoids the InfNorm↔MC64 flip
+   between IPM iterates that share a pattern. Doesn't
+   help the FIRST factor that lands on MC64.
+
+(A) is the most defensible — caches what's reusable,
+preserves MC64 quality on the *first* factor where it
+matters most. Need to verify scaling reuse on
+PartialSingular matrices is numerically safe (the
+value-bound validity check covers the matched part;
+unmatched diagonal slots use 1.0 in both old and new
+matrices by construction at mc64.rs:222-226).
+
+Reproducer changes left in place at
+=pounce/.../feral_repro/powerflow22/feral_repro/src/main.rs=
+(=FERAL_SCALING= env var). Not committed to feral repo.
