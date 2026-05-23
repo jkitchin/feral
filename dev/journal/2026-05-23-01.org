@@ -716,3 +716,52 @@ refactor case. Issue #51 root cause is now closed.
 
 cargo test --lib: 317 passed, 0 failed, 5 ignored. clippy clean.
 fmt clean (cargo fmt re-applied to normalise the new test block).
+
+* 22:30 :issue51:corpus-test:regression:
+Added corpus regression test for the issue #51 sticky-Auto pin —
+defends the cache tests' previously-unprobed surface (real IPM
+iter-to-iter value drift on shared pattern).
+
+New test in =src/numeric/solver.rs=:
+=issue_51_corpus_sticky_auto_holds_across_ipm_iters= (=#[ignore]=).
+Walks =tests/data/parity/<family>/*.mtx=, finds dirs with ≥ 2
+snapshots from the same IPM run, factors all iters against one
+=Solver::new()=, and asserts:
+
+- pattern fingerprint identical across iters (sanity skip if not)
+- =symbolic_call_count() == 1= after every factor (cache holds
+  across value drift on shared pattern)
+- =auto_picked_strategy= populated on iter 0 and *unchanged*
+  on every subsequent iter (the core issue #51 invariant — picker
+  flap caused the powerflow22 53 s slowdown)
+- =MC64 hit count= and =fallback bumps= reported but not asserted
+  (the value-bound check is *designed* to reject genuine drift,
+  and parity corpus dirs sample non-adjacent iters like HAHN1 4/6/23
+  where rejection is expected and correct)
+
+First version of the test had a too-strict =mc64_cache_hit_count >= 1=
+for MC64-resolved families. =hahn1= (iters 4, 6, 23) tripped it —
+genuine value-bound rejection, not a bug. Replaced with an
+informational eprintln and a guard that =tested >= 5= so corpus
+shrinkage cannot silently hollow out the test.
+
+Initial run (release, --ignored --nocapture) summary:
+:    issue #51 corpus regression: 13 families tested
+:    (23 singleton-skip, 1 pattern-drift-skip, 0 non-success-skip)
+:        InfNorm: 11
+:        Mc64Symmetric: 2
+:    test result: ok. 1 passed
+muonsine (adjacent iters) actually rides the MC64 cache (1 hit);
+hahn1 (sparse-sampled iters) doesn't but the sticky pick still
+holds.
+
+cargo test --lib: 317 passed, 0 failed, 6 ignored (the new
+test brings the ignored count from 5 to 6). clippy --all-targets
+-D warnings: clean. fmt: clean.
+
+Followup to consider: a denser-iter family in the parity corpus
+would let us assert =mc64_cache_hit_count >= 1= safely. The
+current set hits the InfNorm route on 11/13 (so MC64 path is
+under-tested) and the MC64-on-adjacent-iters path on 1 (muonsine).
+A targeted fixture or pulling more iters from an existing IPM run
+would tighten the test materially.

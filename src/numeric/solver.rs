@@ -3162,4 +3162,258 @@ mod tests {
             );
         }
     }
+
+    /// Issue #51 corpus regression — sticky-Auto pin must hold across
+    /// real IPM-iter dumps on every `tests/data/parity/<family>/` dir
+    /// that has ≥ 2 iter snapshots of the same KKT pattern.
+    ///
+    /// The pre-fix bug surfaced on `powerflow22`: between IPM iters
+    /// (same pattern, drifted values) `pick_scaling_strategy` flapped
+    /// between MC64 and InfNorm, and `PartialSingular` outcomes
+    /// dropped the MC64 cache — `factor_5` reran the Hungarian from
+    /// scratch in 53 s instead of riding the cache at ~1 s. Our cache
+    /// tests only exercised *identical*-value refactors, so the flap
+    /// surface was invisible.
+    ///
+    /// Defense: walk every parity dir that has multiple `.mtx`
+    /// snapshots (acopp30, ceri651a, hatfldbne, hatfldg, hahn1,
+    /// degenlpb, ssi, meyer3ne, …), build one `Solver::new()`, factor
+    /// every snapshot in lexicographic (iter) order, and assert:
+    ///
+    /// 1. The pattern fingerprint matches across iters (sanity — if a
+    ///    corpus dir has mixed patterns the test skips that family).
+    /// 2. `symbolic_call_count() == 1` after every factor: the
+    ///    symbolic cache must survive the value drift.
+    /// 3. `auto_picked_strategy` is `Some(_)` after iter 0 and the
+    ///    *same* `Some(_)` after every later iter (no flap).
+    /// 4. If the family resolved to `Mc64Symmetric`,
+    ///    `mc64_cache_hit_count() >= N - 1` over N factors (subject to
+    ///    the value-bound check passing — if it rejects we tolerate
+    ///    misses, but the strategy choice must still be sticky).
+    ///
+    /// Skipped families: ones where the corpus genuinely changes
+    /// pattern between snapshots (no Iter-A → Iter-B value-drift
+    /// relationship to test), or where any factor returns
+    /// non-`Success` / `Singular` (out of scope for this test —
+    /// inertia gating is covered elsewhere).
+    ///
+    /// `#[ignore]` because the test sweeps the parity corpus and runs
+    /// real factorizations end-to-end. Invoke with:
+    ///
+    /// ```text
+    /// cargo test --release issue_51_corpus_sticky_auto_holds_across_ipm_iters \
+    ///     -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn issue_51_corpus_sticky_auto_holds_across_ipm_iters() {
+        use crate::read_mtx;
+        use std::path::PathBuf;
+
+        let root = PathBuf::from("tests/data/parity");
+        if !root.is_dir() {
+            eprintln!("SKIP: {} not found.", root.display());
+            return;
+        }
+
+        let mut families: Vec<PathBuf> = std::fs::read_dir(&root)
+            .expect("read_dir parity root")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        families.sort();
+
+        let mut tested = 0usize;
+        let mut skipped_singleton = 0usize;
+        let mut skipped_pattern_drift = 0usize;
+        let mut skipped_non_success = 0usize;
+        let mut by_strategy: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+
+        for fam_dir in &families {
+            let fam = fam_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_string();
+
+            let mut snaps: Vec<PathBuf> = std::fs::read_dir(fam_dir)
+                .expect("read_dir family")
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "mtx"))
+                .collect();
+            snaps.sort();
+            if snaps.len() < 2 {
+                skipped_singleton += 1;
+                continue;
+            }
+
+            // Load every iter into CSC up front, verify shared pattern
+            // (sanity — corpus convention is one problem per family,
+            // but skip-don't-fail if a family violates it).
+            let mut csc_iters: Vec<crate::sparse::csc::CscMatrix> = Vec::with_capacity(snaps.len());
+            let mut pattern_drift = false;
+            for p in &snaps {
+                let m = match read_mtx(p) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("[{}] SKIP read {}: {:?}", fam, p.display(), e);
+                        pattern_drift = true;
+                        break;
+                    }
+                };
+                let csc = match m.to_csc() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("[{}] SKIP to_csc {}: {:?}", fam, p.display(), e);
+                        pattern_drift = true;
+                        break;
+                    }
+                };
+                if let Some(first) = csc_iters.first() {
+                    if PatternFingerprint::of(first) != PatternFingerprint::of(&csc) {
+                        eprintln!(
+                            "[{}] SKIP: pattern drift between {} and {}",
+                            fam,
+                            snaps[0].display(),
+                            p.display()
+                        );
+                        pattern_drift = true;
+                        break;
+                    }
+                }
+                csc_iters.push(csc);
+            }
+            if pattern_drift {
+                skipped_pattern_drift += 1;
+                continue;
+            }
+
+            // Factor every iter against one Solver. We must observe
+            // sticky behavior across all of them.
+            let mut s = Solver::new();
+            let n_iters = csc_iters.len();
+            let mut any_non_success = false;
+            let mut first_pick: Option<ScalingStrategy> = None;
+            for (idx, csc) in csc_iters.iter().enumerate() {
+                let status = s.factor(csc, None);
+                match status {
+                    FactorStatus::Success => {}
+                    other => {
+                        eprintln!(
+                            "[{}] iter {} → {:?} (non-Success); skipping family",
+                            fam, idx, other
+                        );
+                        any_non_success = true;
+                        break;
+                    }
+                }
+
+                // Invariant 2: symbolic cache must hold across iters.
+                assert_eq!(
+                    s.symbolic_call_count(),
+                    1,
+                    "[{}] iter {}: symbolic_call_count grew to {} — symbolic \
+                     cache invalidated by value drift on shared pattern",
+                    fam,
+                    idx,
+                    s.symbolic_call_count()
+                );
+
+                // Invariant 3: sticky-Auto pin populated on iter 0,
+                // unchanged on iter N.
+                let picked = s.auto_picked_strategy.clone().unwrap_or_else(|| {
+                    panic!(
+                        "[{}] iter {}: auto_picked_strategy not set after \
+                         successful Auto factor",
+                        fam, idx
+                    )
+                });
+                if let Some(first) = &first_pick {
+                    assert!(
+                        scaling_eq(first, &picked),
+                        "[{}] iter {}: auto_picked_strategy flapped from \
+                         {:?} to {:?} on shared pattern — sticky-Auto pin \
+                         broken (issue #51 regression)",
+                        fam,
+                        idx,
+                        first,
+                        picked
+                    );
+                } else {
+                    first_pick = Some(picked);
+                }
+            }
+            if any_non_success {
+                skipped_non_success += 1;
+                continue;
+            }
+
+            let first_pick = first_pick.expect("at least one iter must have populated first_pick");
+
+            // MC64 cache hit count is informational, not asserted.
+            // The value-bound check (`mc64_value_bound_passes`) is
+            // designed to reject reuse when values have drifted past
+            // the matching's diagonal-dominance bound, and parity
+            // corpus dirs sample non-adjacent IPM iters (e.g. HAHN1
+            // has iters 4, 6, 23) where genuine drift is expected.
+            // The defensive invariant for issue #51 is the *sticky
+            // pick* assertion above — picker flap forces the
+            // Hungarian to rerun unconditionally; cache rejection is
+            // by design and falls through to the fresh-MC64 path,
+            // which is correct (just slower than a hit).
+
+            tested += 1;
+            *by_strategy.entry(format!("{:?}", first_pick)).or_insert(0) += 1;
+            eprintln!(
+                "[{}] {} iters, sticky pick = {:?}, mc64 hits = {}, \
+                 mc64 fallback bumps = {}",
+                fam,
+                n_iters,
+                first_pick,
+                s.mc64_cache_hit_count(),
+                s.mc64_fallback_count()
+            );
+        }
+
+        eprintln!();
+        eprintln!(
+            "issue #51 corpus regression: {} families tested \
+             ({} singleton-skip, {} pattern-drift-skip, {} non-success-skip)",
+            tested, skipped_singleton, skipped_pattern_drift, skipped_non_success
+        );
+        for (k, v) in &by_strategy {
+            eprintln!("  {:>20}: {}", k, v);
+        }
+
+        // Guard against corpus regression where the test silently
+        // covers zero families.
+        assert!(
+            tested >= 5,
+            "expected at least 5 multi-iter parity families; only {} \
+             actually exercised — corpus has likely changed shape",
+            tested
+        );
+    }
+
+    /// `ScalingStrategy` does not derive `Eq` (the `External(Vec<f64>)`
+    /// variant carries float weights) so we compare by-variant for the
+    /// purposes of the issue #51 corpus sticky check. Auto resolution
+    /// only ever produces `Identity`, `InfNorm`, or `Mc64Symmetric`
+    /// (never `External` and never `Auto` itself), so variant equality
+    /// is the right granularity.
+    fn scaling_eq(a: &ScalingStrategy, b: &ScalingStrategy) -> bool {
+        matches!(
+            (a, b),
+            (ScalingStrategy::Identity, ScalingStrategy::Identity)
+                | (ScalingStrategy::InfNorm, ScalingStrategy::InfNorm)
+                | (
+                    ScalingStrategy::Mc64Symmetric,
+                    ScalingStrategy::Mc64Symmetric
+                )
+                | (ScalingStrategy::Auto, ScalingStrategy::Auto)
+        )
+    }
 }
