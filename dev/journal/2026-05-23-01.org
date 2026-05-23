@@ -642,3 +642,77 @@ matrices by construction at mc64.rs:222-226).
 Reproducer changes left in place at
 =pounce/.../feral_repro/powerflow22/feral_repro/src/main.rs=
 (=FERAL_SCALING= env var). Not committed to feral repo.
+
+* 21:40 :issue51:fix:sticky-pick:partial-singular:with-scaling:
+Landed the three-fix bundle for issue #51.
+
+Code changes in =src/numeric/solver.rs=:
+
+1. *Fix 3 — =with_scaling()= builder*. New method mirrors the
+   existing =with_ordering()= shape:
+   #+BEGIN_SRC rust
+     pub fn with_scaling(mut self, s: ScalingStrategy) -> Self { ... }
+   #+END_SRC
+   Lets IPM hosts pin the scaling strategy explicitly when they
+   already know what they want, sidestepping Auto entirely.
+
+2. *Fix 2 — widen mc64_ran gate to PartialSingular*. The cache
+   population gate at the post-factor branch now also engages on
+   =ScalingInfo::PartialSingular { .. }=. The Hungarian still
+   produced a real result (unmatched positions land at scaling=1.0
+   per =mc64.rs:222=); caching it is correctness-safe and is what
+   makes the IPM-on-rank-deficient-KKT case ride the cache.
+
+3. *Fix 1 — sticky Auto pick on cached pattern*. New Solver field
+   =auto_picked_strategy: Option<ScalingStrategy>=. First Auto
+   factor() on a pattern runs the full =compute_scaling_auto_with_cache=
+   pipeline (preserving Policy-4 fallback semantics). Post-call we
+   derive the resolved strategy from =factors.scaling_info=:
+   - =Mc64FallbackToInfnorm{*}= → InfNorm
+   - =PartialSingular{*}= → Mc64Symmetric
+   - =NotApplied= → Identity
+   - =Applied= → =pick_scaling_strategy(matrix)= (one final call)
+   That choice is stashed on the Solver and reused on every
+   subsequent factor() on the same pattern. Pattern change clears
+   it alongside =mc64_scaling_cache=.
+
+   First version of this fix made the *picker* sticky and was
+   wrong: it bypassed Auto's Policy-4 (InfNorm-spread guard,
+   off-diag-ratio guard, MC64 catastrophic-spread guard) entirely.
+   Test =mc64_fallback_surfaces_via_solver_api= caught it
+   immediately — the dense-arrow probe matrix wants
+   =Mc64FallbackToInfnorm{InfNormSpreadAcceptable}= and the
+   picker-only sticky reroute squashed that to a raw =Applied=.
+   Pivoted to making the *resolved* strategy sticky (post-call
+   ScalingInfo → concrete strategy) which preserves all four guard
+   paths on iter 1 and pins their outcome for iter 2+.
+
+Tests added (=src/numeric/solver.rs=):
+- =issue_51_with_scaling_builder_overrides_default=
+- =issue_51_auto_pick_is_sticky_on_cached_pattern=
+- =issue_51_partial_singular_populates_cache=
+
+Existing test updated:
+- =mc64_fallback_surfaces_via_solver_api= — second factor's
+  mc64_fallback_count assertion changed from 2 to 1 to reflect
+  the sticky semantics (iter 1 surfaces fallback once; iter 2
+  runs straight InfNorm with no fallback to count). Also asserts
+  =auto_picked_strategy = Some(InfNorm)= to lock the post-call
+  derivation rule.
+
+Validation on the powerflow22 reproducer (default Auto, default
+ordering):
+:    file       : ../factor_4.bin
+:    dim        : 2813976
+:    nnz        : 6732167  (triplets)
+:    factor      : 54.42s
+:    refactor    : 1.02s   (cached symbolic)
+:    ---- second dump: ../factor_5.bin
+:    factor(#2)  : 1.07s   (different values, same struct)
+
+Pre-fix factor(#2) was 53.80s; post-fix is 1.07s. ~50× speedup
+on the iter-N value drift, identical to the cached-symbolic
+refactor case. Issue #51 root cause is now closed.
+
+cargo test --lib: 317 passed, 0 failed, 5 ignored. clippy clean.
+fmt clean (cargo fmt re-applied to normalise the new test block).

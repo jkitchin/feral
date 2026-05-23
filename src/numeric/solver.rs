@@ -230,6 +230,26 @@ pub struct Solver {
     /// the value-bounded MC64 scaling cache. Exposed via
     /// [`Solver::mc64_cache_hit_count`].
     mc64_cache_hit_count: usize,
+    /// Issue #51: sticky `Auto` scaling pick. When the configured
+    /// scaling is `ScalingStrategy::Auto`, [`pick_scaling_strategy`] is
+    /// consulted exactly *once* per pattern (on the first `factor()`
+    /// after a fingerprint mismatch). The chosen concrete strategy is
+    /// cached here and reused on every subsequent `factor()` call as
+    /// long as the pattern is unchanged.
+    ///
+    /// Motivation: the picker is value-aware (issue #47 — it skips
+    /// explicit-zero entries when judging slack-mass) and can flap
+    /// between `Mc64Symmetric` and `InfNorm` across IPM iterations on
+    /// the same matrix structure. On `powerflow22` factor_4 → factor_5
+    /// this flap reran MC64 from scratch each iteration (~50 s),
+    /// because the MC64 cache only populates on `Applied` from a real
+    /// `Mc64Symmetric` resolution and the picker's value-driven
+    /// rerouting kept toggling away. Sticking with the first concrete
+    /// pick mirrors the MUMPS ICNTL(7) / SSIDS `options%ordering`
+    /// pattern: structural choice once, numeric reuse every iter.
+    ///
+    /// Cleared on pattern change alongside [`Solver::mc64_scaling_cache`].
+    auto_picked_strategy: Option<ScalingStrategy>,
 }
 
 impl Solver {
@@ -262,6 +282,7 @@ impl Solver {
             mc64_cache_enabled: true,
             mc64_scaling_cache: None,
             mc64_cache_hit_count: 0,
+            auto_picked_strategy: None,
         }
     }
 
@@ -388,6 +409,24 @@ impl Solver {
         if !on {
             self.mc64_scaling_cache = None;
         }
+        self
+    }
+
+    /// Override the scaling strategy. Default `ScalingStrategy::Auto`
+    /// lets [`pick_scaling_strategy`] route per-matrix; pass an
+    /// explicit variant (`Identity`, `InfNorm`, `Mc64Symmetric`, or
+    /// `External(v)`) to pin every `factor()` to that strategy.
+    ///
+    /// Pinning is the recommended escape hatch when an IPM driver
+    /// observes the picker flapping between MC64 and InfNorm on
+    /// successive iterations (issue #51): a fixed strategy stabilizes
+    /// the MC64 scaling cache and keeps numeric refactor cost
+    /// O(symbolic-reuse). The default `Auto` is sticky on cached
+    /// pattern (resolved once per pattern, reused on subsequent
+    /// `factor()` calls) which already prevents the flap; this builder
+    /// is for hosts that want full control of the choice.
+    pub fn with_scaling(mut self, scaling: ScalingStrategy) -> Self {
+        self.numeric_params.scaling = scaling;
         self
     }
 
@@ -571,6 +610,8 @@ impl Solver {
             // Track B2: the MC64 scaling cache is keyed on the
             // pattern fingerprint; a new pattern voids it.
             self.mc64_scaling_cache = None;
+            // Issue #51: sticky Auto pick is also pattern-bound.
+            self.auto_picked_strategy = None;
         }
 
         // Step 3: ensure symbolic is cached.
@@ -676,6 +717,29 @@ impl Solver {
             }
         }
 
+        // Step 3.75: Issue #51 — sticky Auto pick. The Auto pipeline
+        // (`compute_scaling_auto_with_cache`) is value-aware on two
+        // levels: the picker (`pick_scaling_strategy`, issue #47 skips
+        // explicit-zero entries) and Policy-4 post-fallback
+        // (InfNorm-spread / off-diag-ratio guards). Either can flap
+        // between IPM iterations on a fixed pattern, making MC64 rerun
+        // from scratch and turning `factor_5` on powerflow22 into a
+        // 53 s pure-numeric job (vs 1 s with sticky InfNorm).
+        //
+        // Strategy: let the first Auto call run the full pipeline to
+        // capture both picker and Policy-4 outcomes, then *stash the
+        // resolved strategy* in `auto_picked_strategy` (derived from
+        // `ScalingInfo` below in the success branch). Every subsequent
+        // factor on the same pattern bypasses Auto and uses the
+        // resolved strategy directly — mirrors MUMPS ICNTL(7) / SSIDS
+        // `options%ordering`: decide once at first call, persist for
+        // every refactor on the cached structure.
+        if matches!(effective_params.scaling, ScalingStrategy::Auto) {
+            if let Some(picked) = &self.auto_picked_strategy {
+                effective_params.scaling = picked.clone();
+            }
+        }
+
         // Step 3.8: Track B2 — value-bounded MC64 scaling cache. When
         // a prior factor on this exact pattern produced an MC64
         // scaling (`ScalingInfo::Applied`) and the current matrix's
@@ -770,6 +834,36 @@ impl Solver {
                     factors.scaling_info,
                     crate::scaling::ScalingInfo::PartialSingular { .. }
                 );
+                // Issue #51: derive the sticky-Auto pin from the
+                // resolved `ScalingInfo`. Runs only when the user
+                // configured `Auto` and we haven't stashed a pick yet
+                // — i.e. exactly once per pattern (the field clears on
+                // pattern change). Maps the Auto pipeline's actual
+                // outcome (picker output + Policy-4 fallback) to the
+                // concrete strategy that next factor()'s effective
+                // params should use.
+                if self.auto_picked_strategy.is_none()
+                    && matches!(self.numeric_params.scaling, ScalingStrategy::Auto)
+                {
+                    use crate::scaling::ScalingInfo;
+                    let resolved = match &factors.scaling_info {
+                        // Policy-4 fired: pin to InfNorm to preserve
+                        // the fallback decision on every refactor.
+                        ScalingInfo::Mc64FallbackToInfnorm { .. } => ScalingStrategy::InfNorm,
+                        // Partial Hungarian still produced a real MC64
+                        // result; keep dispatching through it.
+                        ScalingInfo::PartialSingular { .. } => ScalingStrategy::Mc64Symmetric,
+                        // No scaling applied → pin to Identity.
+                        ScalingInfo::NotApplied => ScalingStrategy::Identity,
+                        // The picker's choice survived Auto's checks.
+                        // Use `pick_scaling_strategy` once to recover
+                        // which concrete variant it was (Identity /
+                        // InfNorm / Mc64Symmetric); from here on it
+                        // never re-evaluates.
+                        ScalingInfo::Applied => pick_scaling_strategy(matrix),
+                    };
+                    self.auto_picked_strategy = Some(resolved);
+                }
                 // Issue #24: bump the MC64-fallback counter so callers
                 // can poll a single number to detect "Auto promised
                 // matching, actually got InfNorm" without inspecting
@@ -814,19 +908,32 @@ impl Solver {
                 // its own variant — both already excluded by requiring
                 // `Applied`. On any non-MC64 outcome drop the cache so
                 // a later genuine MC64 reinstalls it.
-                let mc64_ran = matches!(factors.scaling_info, crate::scaling::ScalingInfo::Applied)
-                    && match &effective_params.scaling {
-                        ScalingStrategy::Mc64Symmetric => true,
-                        ScalingStrategy::Auto => matches!(
-                            pick_scaling_strategy(matrix),
-                            ScalingStrategy::Mc64Symmetric
-                        ),
-                        // InfNorm, Identity, or a user-supplied External:
-                        // not an MC64 Hungarian result — never cache.
-                        ScalingStrategy::InfNorm
-                        | ScalingStrategy::Identity
-                        | ScalingStrategy::External(_) => false,
-                    };
+                // Issue #51: widen the gate to include
+                // `ScalingInfo::PartialSingular`. MC64 with a partial
+                // matching still produced a real Hungarian result —
+                // the unmatched positions land at `scaling[i] = 1.0`
+                // (mc64.rs:222) and the matched positions carry the
+                // true dual scaling. Caching this is correctness-safe
+                // (the value-bound check still gates reuse) and is
+                // what made factor_5 on powerflow22 take 53 s instead
+                // of 1 s before this widening: every IPM iter on a
+                // structurally rank-deficient KKT reran the Hungarian.
+                let mc64_ran = matches!(
+                    factors.scaling_info,
+                    crate::scaling::ScalingInfo::Applied
+                        | crate::scaling::ScalingInfo::PartialSingular { .. }
+                ) && match &effective_params.scaling {
+                    ScalingStrategy::Mc64Symmetric => true,
+                    ScalingStrategy::Auto => matches!(
+                        pick_scaling_strategy(matrix),
+                        ScalingStrategy::Mc64Symmetric
+                    ),
+                    // InfNorm, Identity, or a user-supplied External:
+                    // not an MC64 Hungarian result — never cache.
+                    ScalingStrategy::InfNorm
+                    | ScalingStrategy::Identity
+                    | ScalingStrategy::External(_) => false,
+                };
                 if self.mc64_cache_enabled && !scaling_cache_hit {
                     if mc64_ran {
                         let scaling = factors.scaling.clone();
@@ -1384,15 +1491,30 @@ mod tests {
         }
         assert_eq!(s.mc64_fallback_count(), 1);
 
-        // Re-factoring the same matrix bumps the counter again
-        // (every fallback fire is counted, not just unique
-        // patterns) — same pattern, so symbolic is cached.
+        // Issue #51: with sticky Auto pin, the first call resolves
+        // the Auto pipeline once (recording the `Mc64FallbackToInfnorm`
+        // outcome), then stashes `InfNorm` on the Solver. The second
+        // factor() bypasses Auto entirely and runs straight InfNorm —
+        // its `scaling_info` is `Applied`, not `Mc64FallbackToInfnorm`,
+        // so the fallback counter does NOT bump again. The fallback
+        // information is still preserved on iter 1; iter 2 is just a
+        // direct InfNorm with no fallback to surface.
         let _ = s.factor(&csc, None);
-        assert_eq!(s.mc64_fallback_count(), 2);
+        assert_eq!(
+            s.mc64_fallback_count(),
+            1,
+            "sticky Auto pin: iter 2 runs straight InfNorm, no \
+             fallback to count"
+        );
         assert_eq!(
             s.symbolic_call_count(),
             1,
             "symbolic must be cached across re-factor on same pattern"
+        );
+        assert!(
+            matches!(s.auto_picked_strategy, Some(ScalingStrategy::InfNorm)),
+            "Mc64FallbackToInfnorm must pin to InfNorm; got {:?}",
+            s.auto_picked_strategy
         );
     }
 
@@ -1666,6 +1788,126 @@ mod tests {
             s.mc64_cache_hit_count(),
             0,
             "value drift past the dominance bound must reject the stale cache"
+        );
+    }
+
+    /// Issue #51 — `with_scaling` overrides the configured strategy.
+    /// `Solver::new().with_scaling(InfNorm)` must store `InfNorm` in
+    /// `numeric_params.scaling`; subsequent factors must never touch
+    /// the MC64 cache (gate excludes `InfNorm` per issue #49).
+    #[test]
+    fn issue_51_with_scaling_builder_overrides_default() {
+        let a = tridiag(6, 10.0, 1.0);
+        let mut s = Solver::new().with_scaling(ScalingStrategy::InfNorm);
+        assert!(matches!(s.scaling_strategy(), ScalingStrategy::InfNorm));
+        for _ in 0..3 {
+            assert!(matches!(
+                s.factor(&a, Some(Inertia::new(6, 0, 0))),
+                FactorStatus::Success
+            ));
+        }
+        assert_eq!(
+            s.mc64_cache_hit_count(),
+            0,
+            "explicit InfNorm pin must never run MC64"
+        );
+        assert!(
+            s.mc64_scaling_cache.is_none(),
+            "InfNorm pin must leave the MC64 cache empty"
+        );
+    }
+
+    /// Issue #51 — sticky `Auto` pick: the picker runs *once* per
+    /// pattern. On the first `factor()` we resolve a concrete strategy
+    /// and cache it on the `Solver`; every subsequent `factor()` on
+    /// the same pattern reuses that pick without re-consulting the
+    /// (value-aware) picker. Pattern change clears the cached pick.
+    #[test]
+    fn issue_51_auto_pick_is_sticky_on_cached_pattern() {
+        let a = tridiag(6, 10.0, 1.0); // routes to InfNorm under Auto
+        let mut s = Solver::new(); // Auto, cache on
+        assert!(s.auto_picked_strategy.is_none(), "starts empty");
+        assert!(matches!(
+            s.factor(&a, Some(Inertia::new(6, 0, 0))),
+            FactorStatus::Success
+        ));
+        assert!(
+            matches!(s.auto_picked_strategy, Some(ScalingStrategy::InfNorm)),
+            "first Auto resolution must populate the sticky pick, got {:?}",
+            s.auto_picked_strategy
+        );
+        // Second factor: still InfNorm, sticky cache survives.
+        assert!(matches!(
+            s.factor(&a, Some(Inertia::new(6, 0, 0))),
+            FactorStatus::Success
+        ));
+        assert!(matches!(
+            s.auto_picked_strategy,
+            Some(ScalingStrategy::InfNorm)
+        ));
+
+        // Pattern change clears the sticky pick alongside the symbolic
+        // and MC64 caches.
+        let b = tridiag(8, 10.0, 1.0);
+        assert!(matches!(
+            s.factor(&b, Some(Inertia::new(8, 0, 0))),
+            FactorStatus::Success
+        ));
+        assert!(
+            matches!(s.auto_picked_strategy, Some(ScalingStrategy::InfNorm)),
+            "fresh pattern re-resolves the pick"
+        );
+    }
+
+    /// Issue #51 — `PartialSingular` populates the MC64 cache. The
+    /// pre-fix gate required `ScalingInfo::Applied`; a partial
+    /// matching reported its own variant and dropped the cache, which
+    /// caused the powerflow22 factor_5 50× slowdown (the IPM KKT was
+    /// structurally rank-deficient → every iter was `PartialSingular`
+    /// → cache never populated → Hungarian reran every iter).
+    ///
+    /// Builds a 4×4 matrix with one structurally zero diagonal so MC64
+    /// matches 3 of 4 rows. The cache must populate on call 1 and hit
+    /// on call 2.
+    #[test]
+    fn issue_51_partial_singular_populates_cache() {
+        // 4×4, lower triangle:
+        //   diag(2,0,2,2) + off (1,0) = 1 + off (3,2) = 1
+        // Row 1's diagonal is zero. MC64 cannot match column 1 to its
+        // own row (no nonzero), so it lands `PartialSingular { 1 }` but
+        // still produces a valid scaling vector.
+        let csc = CscMatrix::from_triplets(
+            4,
+            &[0, 1, 2, 3, 3],
+            &[0, 0, 2, 2, 3],
+            &[2.0, 1.0, 2.0, 1.0, 2.0],
+        )
+        .expect("valid CSC");
+        let mut s = mc64_solver();
+
+        // First factor: PartialSingular path. The Solver maps this to
+        // FactorStatus::Singular by design (see Step 5 in factor()),
+        // but the scaling_info on the stored factor is the real
+        // `PartialSingular { .. }` — which the widened gate uses to
+        // populate the cache.
+        let st1 = s.factor(&csc, None);
+        // We don't assert on FactorStatus here — the relevant signal
+        // is whether the gate populated the cache. The factor may
+        // come back Singular; that's fine.
+        let _ = st1;
+        assert!(
+            s.mc64_scaling_cache.is_some(),
+            "issue #51: PartialSingular must still populate the cache; \
+             on a structurally rank-deficient IPM KKT this kept \
+             factor_5 at 53 s before the fix"
+        );
+
+        // Second factor: same matrix, same pattern. Cache must hit.
+        let _ = s.factor(&csc, None);
+        assert_eq!(
+            s.mc64_cache_hit_count(),
+            1,
+            "PartialSingular cache must be hit on the warm refactor"
         );
     }
 
