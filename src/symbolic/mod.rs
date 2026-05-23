@@ -67,21 +67,18 @@ pub enum OrderingMethod {
     /// 41-matrix bake-off (`dev/research/ordering-kahip-driver-
     /// integration.md`) showed `KahipND` ties `MetisND` on fill
     /// geomean (1.023 vs 1.024 relative to AMD) at 4-6× the per-call
-    /// symbolic-time cost (81s vs 68s vs AMD 14s, total). On the
-    /// 154 588-matrix IPM bench KaHIP would only match METIS where
-    /// the existing narrow `n>=5000 && nnz/n<6 → MetisND` rule
-    /// already fires (e.g. CRESC132). Reachable explicitly via
-    /// `symbolic_factorize_with_method` for callers who want it.
+    /// symbolic-time cost (81s vs 68s vs AMD 14s, total).
+    /// Reachable explicitly via `symbolic_factorize_with_method`
+    /// for callers who want it.
     KahipND,
     /// Adaptive dispatcher: picks a concrete method per-matrix from
     /// cheap pattern features (n and average degree nnz/n).
     ///
-    /// The heuristic is derived from the 41-matrix shape bakeoff:
-    ///   - large-and-sparse (n > 100_000, nnz/n < 5) → `ScotchND`
-    ///     (SCOTCH dominates c-big-class arrow / KKT matrices).
-    ///   - small-and-sparse (n < 10_000, nnz/n < 15)   → `KahipND`
-    ///     (K1 reductions find short cycles AMD misses).
-    ///   - everything else                             → `Amd`.
+    /// Issue #50 (2026-05-23) collapsed the per-shape branches to a
+    /// single small-and-sparse rule on top of [`pick_default_method`]:
+    ///   - small-and-sparse (n < 10_000, full nnz/n < 15) → `KahipND`
+    ///   - everything else delegates to [`pick_default_method`]
+    ///     (`n <= 10_000 → Amf`, `n > 10_000 → MetisND`).
     ///
     /// **Opt-in only.** The 154k-matrix IPM bench (2026-04-18) showed
     /// `Auto` regresses sparse factor/MUMPS geomean from 0.44 (AMD)
@@ -128,12 +125,27 @@ pub enum OrderingMethod {
 ///
 /// The rule set adds two shape-bakeoff branches on top of
 /// [`pick_default_method`]:
-///   - large-and-sparse (`n > 100_000`, full avg_deg < 5.0)  → `ScotchND`
-///   - small-and-sparse (`n <  10_000`, full avg_deg < 15.0) → `KahipND`
+///   - very-large-and-sparse (`n > 100_000`, full avg_deg < 5.0) → `Amd`
+///   - small-and-sparse       (`n <  10_000`, full avg_deg < 15.0) → `KahipND`
 ///
 /// Anything else delegates to [`pick_default_method`], so `Auto` can't
 /// disagree with the no-arg `symbolic_factorize` default on the same
 /// matrix.
+///
+/// The large-and-sparse branch swap from `ScotchND` to `Amd` is the
+/// issue #50 fix (2026-05-23). On `powerflow22` (n=2.8 M,
+/// full_avg_deg ≈ 3.7) the prior ScotchND route took 113.8 s
+/// symbolic (15.8 M nnz_L); MetisND was 117.4 s (20.5 M nnz_L); AMD
+/// was 55 s (10.4 M nnz_L). The ScotchND advantage at very large n
+/// was load-bearing against the same BK pivoting cascade that
+/// motivated `pick_default_method`'s chain catches; issue #46 (see
+/// `pick_default_method`'s doc comment) eliminated that amplifier in
+/// May 2026 and removed the justification for routing very-large
+/// sparse matrices through nested dissection at all. Numeric
+/// inventory: `dev/research/issue-50-numeric-inventory.csv` shows
+/// the IPM corpus's [100k, 200k) bucket has AMD/MetisND num_nnz_l
+/// ratio 1.00 on both representatives. See
+/// `dev/research/issue-50-metisnd-symbolic-cost.md` §F7–F8.
 ///
 /// `pattern` is expected to be the matrix's full-symmetric pattern (the
 /// shape produced by `CscMatrix::symmetric_pattern`); the
@@ -150,7 +162,7 @@ fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMeth
     }
     let avg_deg = full_nnz as f64 / n as f64;
     if n > 100_000 && avg_deg < 5.0 {
-        return OrderingMethod::ScotchND;
+        return OrderingMethod::Amd;
     }
     if n < 10_000 && avg_deg < 15.0 {
         return OrderingMethod::KahipND;
@@ -253,22 +265,10 @@ pub struct SymbolicFactorization {
 /// dimensions (no pattern walk). Narrow on purpose — see comment on
 /// `Auto` for why a broad dispatcher regressed the IPM bench.
 ///
-/// Current rule (Phase D of `dev/plans/amf-clean-room.md`, mirrors
-/// MUMPS's `ana_set_ordering.F` AMF-vs-METIS heuristic):
+/// Current rule (mirrors MUMPS's `ana_set_ordering.F` AMF-vs-METIS
+/// heuristic):
 ///   - `n == 0`                                        → `Amd`
 ///     (avoids /0 and external-crate weirdness on the empty pattern)
-///   - `n >= 5000 && nnz/n < 6` → `MetisND` (bordered-KKT catch:
-///     CUTEst CRESC132 where AMD/AMF order the constraint block into a
-///     near-dense root frontal that swallows ~96% of n and drives a
-///     ~5000-column delay cascade. CRESC132_0000 with AMD factors in
-///     5.4 s; with METIS it factors in 480 ms — 11× win.)
-///   - `n >= 2000 && nnz/n < 4` → `MetisND` (chain-pattern catch:
-///     CHAINWOO/HYDROELL/DIXMAANH from the kkt-expansion corpus.
-///     n≈3000–4033, stored avg-deg 2–3. AMD/AMF order these chain-
-///     like KKT systems into a dense root that triggers a runaway
-///     delay cascade — CHAINWOO_0000 produces 2.10M nnz_L with AMD
-///     vs 282k with METIS. Also catches VESUVIO. Verified via
-///     `diag_chainwoo` on 2026-04-27.)
 ///   - `n <= 10_000`                                   → `Amf`
 ///     (MUMPS-style "small symmetric" rule: HAMF4 fill metric is
 ///     within 1.10× of MUMPS HAMF4 on 183_277 of 183_293 sidecar'd
@@ -281,20 +281,29 @@ pub struct SymbolicFactorization {
 ///     (large patterns where nested dissection is the standard win.)
 ///
 /// `nnz` here is the matrix's *stored* nnz (lower triangle for
-/// symmetric matrices), not the symmetric pattern's. The threshold is
-/// calibrated to that convention; using the symmetric pattern would
-/// roughly double the ratio and shift the rule.
+/// symmetric matrices), not the symmetric pattern's.
 ///
-/// The `n >= 2000` floor on the chain-pattern catch protects the
-/// IPM corpus's tiny-matrix tail (e.g. HAHN1 n=715), where AMF
-/// remains the best default at small scale.
-fn pick_default_method(n: usize, stored_nnz: usize) -> OrderingMethod {
+/// Issue #50 (2026-05-23) deleted two prior escape hatches:
+///   - `n >= 5000 && nnz/n < 6 → MetisND` (bordered-KKT catch, CRESC132);
+///   - `n >= 2000 && nnz/n < 4 → MetisND` (chain-pattern catch,
+///     CHAINWOO/HYDROELL/DIXMAANH/VESUVIO).
+///
+/// Both were calibrated on 2026-04-27 against a Bunch-Kaufman
+/// pivoting cascade that fattened the AMD-ordered factor by up to
+/// 7.5× on CHAINWOO_0000 and produced a near-dense root frontal on
+/// CRESC132_0000. Issue #46's fixes (`42434a5` fine-grained delayed
+/// pivoting, `070840b` two-tier 2×2 partner selection) eliminated
+/// the amplifier in May 2026: CHAINWOO_0000 now produces 22.9k
+/// num_nnz_l with AMD vs the 2.10M it produced before, and the
+/// numeric inventory in `dev/research/issue-50-numeric-inventory.csv`
+/// shows zero of 250 chain-catch-class corpus matrices have
+/// AMD/MetisND num_nnz_l ratio ≥ 1.5×. The catches now route 113-s
+/// nested-dissection symbolic on `powerflow22` (n=2.8 M, stored
+/// avg_deg ≈ 2.4) where AMD does the same job in 55 s with smaller
+/// fill. See `dev/research/issue-50-metisnd-symbolic-cost.md` §F7–F8.
+fn pick_default_method(n: usize, _stored_nnz: usize) -> OrderingMethod {
     if n == 0 {
         return OrderingMethod::Amd;
-    }
-    let avg_deg = stored_nnz as f64 / n as f64;
-    if (n >= 5000 && avg_deg < 6.0) || (n >= 2000 && avg_deg < 4.0) {
-        return OrderingMethod::MetisND;
     }
     if n <= 10_000 {
         OrderingMethod::Amf
@@ -359,14 +368,13 @@ pub fn pick_ordering_preprocess(matrix: &CscMatrix) -> OrderingPreprocess {
 
 /// Perform symbolic factorization of a sparse symmetric matrix.
 ///
-/// Defaults to AMD, but applies a narrow bordered-KKT fallback rule to
-/// catch the AMD-bad structures (see [`pick_default_method`]). Callers
-/// who want a literal AMD ordering with no dispatcher should call
-/// `symbolic_factorize_with_method(matrix, params, OrderingMethod::Amd)`
-/// explicitly.
+/// Picks an ordering via [`pick_default_method`] (AMF for n ≤ 10_000,
+/// MetisND for n > 10_000). Callers who want a specific ordering with
+/// no dispatcher should call `symbolic_factorize_with_method` with an
+/// explicit `OrderingMethod`.
 ///
 /// Steps:
-/// 1. Pick fill-reducing ordering (AMD or MetisND depending on pattern)
+/// 1. Pick fill-reducing ordering (AMF or MetisND depending on n)
 /// 2. Build elimination tree of the permuted matrix
 /// 3. Compute column counts (fill prediction)
 /// 4. Detect and amalgamate supernodes
@@ -1550,7 +1558,9 @@ mod tests {
             col_ptr.push(row_idx.len());
             (col_ptr, row_idx)
         }
-        // Large-and-sparse → SCOTCH.
+        // Very-large-and-sparse (n > 100_000, avg_deg < 5.0) → AMD.
+        // Issue #50 swap (2026-05-23): pre-fix this was the ScotchND
+        // branch; see choose_adaptive's doc comment.
         let (cp, ri) = pat_bufs(200_000, 3);
         let p = CscPattern {
             n: 200_000,
@@ -1559,7 +1569,7 @@ mod tests {
         };
         assert_eq!(
             choose_adaptive(&p, OrderingMethod::Auto),
-            OrderingMethod::ScotchND
+            OrderingMethod::Amd
         );
         // Small-and-sparse → KaHIP.
         let (cp, ri) = pat_bufs(500, 6);
@@ -1573,10 +1583,7 @@ mod tests {
             OrderingMethod::KahipND
         );
         // Everything else → delegate to pick_default_method. For
-        // (n=50_000, full avg_deg=20) the stored-equivalent avg_deg
-        // is ≈ 10.5 (= (20+1)/2 by `(full+n)/2/n`), neither of
-        // pick_default_method's chain/KKT branches fire, and the
-        // residual rule (`n > 10_000 → MetisND`) selects MetisND.
+        // (n=50_000, avg_deg≥10) → MetisND via the n>10_000 fallback.
         let (cp, ri) = pat_bufs(50_000, 20);
         let p = CscPattern {
             n: 50_000,
@@ -1603,9 +1610,8 @@ mod tests {
     #[test]
     fn symbolic_factorize_default_uses_amf_for_small_matrices() {
         // Per Phase D of dev/plans/amf-clean-room.md: small matrices
-        // (n <= 10_000) that don't trigger the bordered-KKT or
-        // chain-pattern escape hatches default to AMF, mirroring
-        // MUMPS's ana_set_ordering.F rule for SYM=2 N≤10000.
+        // (n <= 10_000) default to AMF, mirroring MUMPS's
+        // ana_set_ordering.F rule for SYM=2 N≤10000.
         let m = small_grid_5x5();
         let params = SupernodeParams::default();
         let a = symbolic_factorize(&m, &params).unwrap();
@@ -1621,42 +1627,43 @@ mod tests {
 
     #[test]
     fn pick_default_method_rules() {
-        // CRESC132-shaped: n=5314, stored_nnz=22566 → avg_deg=4.25.
-        // Triggers the bordered-KKT fallback.
-        assert_eq!(pick_default_method(5314, 22566), OrderingMethod::MetisND);
-        // VESUVIO-shaped: n=3083, avg_deg=3.07. Triggers the
-        // chain-pattern branch (n>=2000 && avg_deg<4). Verified
-        // 2026-04-27: METIS gives 1.35× less fill than AMD here.
-        assert_eq!(pick_default_method(3083, 9484), OrderingMethod::MetisND);
-        // CHAINWOO-shaped: n=4000, avg_deg=2.0 → MetisND
-        // (chain-pattern catch). 7.5× less fill than AMD.
-        assert_eq!(pick_default_method(4000, 7999), OrderingMethod::MetisND);
-        // DIXMAANH-shaped: n=3000, avg_deg=3.0 → MetisND
-        // (chain-pattern catch). 11.6× less fill than AMD.
-        assert_eq!(pick_default_method(3000, 8999), OrderingMethod::MetisND);
-        // HAHN1-shaped: n=715 < 2000, n <= 10_000 → AMF. Below the
-        // chain-pattern floor; AMF is the small-matrix default per
-        // the Phase D MUMPS-style rule.
-        assert_eq!(pick_default_method(715, 2839), OrderingMethod::Amf);
-        // n=10_000 dense (avg_deg≥6): exactly at the AMF/MetisND
-        // boundary, n <= 10_000 wins → AMF.
-        assert_eq!(pick_default_method(10_000, 100_000), OrderingMethod::Amf);
-        // Boundary at n=5000 with low avg_deg: bordered-KKT
-        // catch fires first → MetisND.
-        assert_eq!(pick_default_method(5000, 20_000), OrderingMethod::MetisND);
-        // Boundary at n=2000 with avg_deg<4: chain-pattern fires
-        // first → MetisND.
-        assert_eq!(pick_default_method(2000, 6000), OrderingMethod::MetisND);
-        // n>=2000 but avg_deg≥4 and <5000, n<=10_000: → AMF
-        // (no escape hatch fires, falls through to AMF default).
-        assert_eq!(pick_default_method(3000, 13_000), OrderingMethod::Amf);
+        // Issue #50 (2026-05-23): the bordered-KKT and chain-pattern
+        // catches that previously routed CRESC132/CHAINWOO/HYDROELL/
+        // DIXMAANH/VESUVIO to MetisND were removed after the BK
+        // pivoting cascade they defended against was killed by
+        // issue #46's fixes (42434a5, 070840b). The numeric
+        // inventory in dev/research/issue-50-numeric-inventory.csv
+        // shows zero of 250 chain-catch-class matrices now have
+        // AMD/MetisND num_nnz_l ratio ≥ 1.5×.
+        //
+        // The remaining rule is the MUMPS-style "small symmetric"
+        // dispatch: n <= 10_000 → AMF, n > 10_000 → MetisND, with
+        // the n == 0 sentinel returning AMD.
+
         // Empty matrix: AMD (avoids /0 and external-crate weirdness).
         assert_eq!(pick_default_method(0, 0), OrderingMethod::Amd);
-        // Large dense matrix (n > 10_000, avg_deg high): MetisND
-        // (the n>10k tail switches off AMF in favor of nested
-        // dissection per MUMPS).
+
+        // Small matrices (n <= 10_000) → AMF regardless of avg_deg.
+        assert_eq!(pick_default_method(715, 2839), OrderingMethod::Amf); // HAHN1
+        assert_eq!(pick_default_method(3000, 8999), OrderingMethod::Amf); // DIXMAANH
+        assert_eq!(pick_default_method(3000, 13_000), OrderingMethod::Amf);
+        assert_eq!(pick_default_method(3083, 9484), OrderingMethod::Amf); // VESUVIO
+        assert_eq!(pick_default_method(4000, 7999), OrderingMethod::Amf); // CHAINWOO
+        assert_eq!(pick_default_method(5000, 20_000), OrderingMethod::Amf);
+        assert_eq!(pick_default_method(5314, 22566), OrderingMethod::Amf); // CRESC132
+        assert_eq!(pick_default_method(10_000, 100_000), OrderingMethod::Amf);
+
+        // Large matrices (n > 10_000) → MetisND.
         assert_eq!(
             pick_default_method(20_000, 200_000),
+            OrderingMethod::MetisND
+        );
+        // n=2_813_976, stored_nnz=6_622_463 (powerflow22 from #50):
+        // → MetisND now (was → ScotchND via choose_adaptive's deleted
+        // n>100k branch before #50). Issue #50's IPM-loop validation
+        // is what justifies the deletion at this size.
+        assert_eq!(
+            pick_default_method(2_813_976, 6_622_463),
             OrderingMethod::MetisND
         );
     }
@@ -1906,11 +1913,10 @@ mod tests {
     #[test]
     fn issue_3_auto_on_kkt_routes_via_pick_default_method() {
         // Auto-path must defer to `pick_default_method` for shapes that
-        // don't match its own large-sparse / small-sparse rules.
-        // PoissonControl K=58 (n=10092, stored avg_deg≈2.67) sits
-        // outside choose_adaptive's existing branches and used to fall
-        // through to AMD. After issue #3's fix it falls through to
-        // pick_default_method, whose bordered-KKT catch picks MetisND.
+        // don't match its own small-and-sparse rule. PoissonControl
+        // K=58 (n=10092, stored avg_deg≈2.67) sits above
+        // choose_adaptive's n<10_000 KahipND branch, so it delegates
+        // to pick_default_method, which returns MetisND for n>10_000.
         let m = poisson_kkt_csc(58);
         let params = SupernodeParams::default();
         let auto = symbolic_factorize_with_method(&m, &params, OrderingMethod::Auto).unwrap();

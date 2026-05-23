@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-22T18:08:54Z
+Generated: 2026-05-23T16:26:42Z
 
 ## Latest Session
 File: dev/sessions/2026-05-22-02.md
@@ -59,22 +59,22 @@ in Pounce+feral than Ipopt+MA57 (Pounce 346 s / 418 iters; Ipopt
 
 ## Git Status
 ```
+407180e build: add release-checklist.sh to keep release versions in sync
+dfb5029 release: bump Python package feral-solver to 0.5.0
+33389bf release: v0.5.0
+6edfed4 docs(session): checkpoint 2026-05-22-02 — issue #44 closed (NARX/MA57 gap)
 2e9b1e0 perf(probe): drill the NARX numeric loop into measured sub-phases (#44)
-162b6ff probe(#44): phase-breakdown probe — Schur kernel is ~45% of the NARX loop
-5f1661c perf(schur): arch-gate quad-kernel unroll to 4 on aarch64 (#44)
-5dcaf7b diag(#44): add diag_narx_kernel_gflops — supernode-loop flop rate
-db96569 docs: retract the ULP-nondeterminism claim; close issue #49
 ```
 
 ## Test Status
 ```
 test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-06946b9447ae7dad)
+     Running tests/tiny_fast_path.rs (target/debug/deps/tiny_fast_path-9e332ca3d1a6e4dd)
 
 running 5 tests
-test test_gate_tiny_sparse_in ... ok
 test test_gate_just_outside_n_tiny ... ok
+test test_gate_tiny_sparse_in ... ok
 test test_gate_boundary_n_16 ... ok
 test test_determinism_tiny ... ok
 test test_solve_parity_tiny_real_matrix ... ok
@@ -214,6 +214,7 @@ src/bin/diag_fbrain3ls_pivtol_sweep.rs
 src/bin/diag_fill_parity.rs
 src/bin/diag_fill_tail.rs
 src/bin/diag_inertia_mismatch.rs
+src/bin/diag_issue50_symbolic.rs
 src/bin/diag_leaf_profile.rs
 src/bin/diag_max_ncol.rs
 src/bin/diag_mc64_cycles.rs
@@ -347,6 +348,5 @@ tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/column_renumbering_parity.rs
 tests/column_renumbering.rs
-tests/delayed_pivoting.rs
 
-(truncated from      389 lines to 350 line budget)
+(truncated from      390 lines to 350 line budget)

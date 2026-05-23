@@ -1,0 +1,450 @@
+#+TITLE: FERAL session journal 2026-05-23-01
+#+STARTUP: showall
+
+* Session 2026-05-23-01 — issue #50 MetisND symbolic cost (research-note + diagnostic)
+
+* 12:20 :issue50:orient:
+Human asked for a review of GH issue #50 (=powerflow22= 2.8M-dim
+power-grid KKT, =Solver::factor= 113 s vs Ipopt+MUMPS ~3 s; refactor
+cached-symbolic 1.05 s, so the cost is essentially all in the
+symbolic phase). Reporter included a self-contained reproducer and a
+=.bin= matrix format, and proposed lowering the =pick_default_method=
+threshold to =avg_deg < 3= so this matrix falls through to AMD
+(AMD-symbolic 55 s on the same input — still ~18× MUMPS).
+
+Posted review to user (not yet to GH). Bottom line: do not touch the
+heuristic before splitting the 112 s into ordering vs post-pass.
+AMD-symbolic 55 s tells us a threshold flip doesn't close the gap to
+MUMPS, only halves it.
+
+* 12:35 :issue50:dispatch-discrepancy:
+While tracing the code path I noticed the reporter quotes
+=pick_default_method= directly (=n >= 5000 && nnz/n < 6 → MetisND=),
+but =Solver::new()= leaves =ordering = OrderingMethod::Auto= and the
+=Auto= path inside =symbolic_factorize_with_method= runs
+=choose_adaptive= first (=src/symbolic/mod.rs:142=). =choose_adaptive=
+has a *prior* branch =n > 100_000 && full_avg_deg < 5.0 → ScotchND=.
+With full_avg_deg ≈ 3.8 (=full = 2·stored − n = 10.6 M=,
+=10.6 M / 2.8 M ≈ 3.8=), this matrix should resolve to ScotchND, not
+MetisND.
+
+Three possibilities, captured as Q4 in the research note:
+- (a) reporter quoted the wrong source line and the resolved method
+  really is ScotchND
+- (b) =choose_adaptive= isn't in feral 0.5.0 (released code) and only
+  exists on HEAD
+- (c) reporter ran with explicit MetisND config and quoted Auto
+
+The diagnostic binary settles this by printing
+=SymbolicFactorization::resolved_method=.
+
+* 12:50 :issue50:research-note:
+Wrote =dev/research/issue-50-metisnd-symbolic-cost.md= as a skeleton
+(matches the issue-N format used for issues #2, #5, #10, #19, #24,
+#33). Has Overview, Reproduction, Hypotheses (H1 ordering call
+dominates / H2 post-pass scales poorly / H3 MUMPS uses faster
+METIS), Decision frame (D1 tune feral-metis / D2 size-cap on the
+chain-pattern catch / D3 fix slow post-pass), Risks, Open questions
+including Q4 (dispatch discrepancy above). =Findings= section left
+empty pending the first profiled run on the reporter's =.bin= file.
+
+* 13:05 :issue50:instrumentation:found-existing:
+Audited =src/symbolic/mod.rs= for sub-phase timing infrastructure
+before adding any. Discovered Phase 2.13b already shipped:
+=SymbolicProfiler= at =src/symbolic/profiler.rs=, wired through
+=SupernodeParams::symbolic_profiler=, with =record_stage= calls
+already at every stage boundary in =symbolic_factorize_with_method=:
+
+| stage              | location                  |
+|--------------------+---------------------------|
+| symmetric_pattern  | mod.rs:555                |
+| pick_preprocess    | mod.rs:576                |
+| ordering           | mod.rs:604                |
+| permute1           | mod.rs:615                |
+| etree_initial      | mod.rs:620                |
+| postorder          | mod.rs:631                |
+| perm_compose       | mod.rs:644                |
+| permute2           | mod.rs:651                |
+| etree_relabel      | mod.rs:674                |
+| col_counts         | mod.rs:685                |
+| renumber           | mod.rs:756                |
+| find_supernodes    | mod.rs:764                |
+| small_leaf_groups  | mod.rs:775                |
+| peak_contrib       | mod.rs:784                |
+
+Precedent: =src/bin/diag_symbolic_stages.rs= drives this on small KKT
+fixtures (KIRBY2_0007, MUONSINE_0000). No new instrumentation needed
+— just a binary that loads the issue's =.bin= format and drives the
+existing profiler.
+
+* 13:25 :issue50:diag-binary:
+Wrote =src/bin/diag_issue50_symbolic.rs=. Loads the issue's =.bin=
+format (=u64 dim, u64 nnz, u64 nrhs, i64[nnz] irn, i64[nnz] jcn,
+f64[nnz] vals, ignored rhs=), canonicalises to lower triangle, then
+runs =symbolic_factorize_with_method= with =OrderingMethod={Auto,
+MetisND, Amd}= and prints the per-stage breakdown + =resolved_method=
++ =factor_nnz_estimate= for each.
+
+=cargo build --release --bin diag_issue50_symbolic=: clean (2.73s).
+=cargo clippy --release --bin diag_issue50_symbolic -- -D warnings=:
+clean. =cargo fmt --check= caught two over-wide signatures, applied
+=cargo fmt=. =cargo test --lib --release symbolic::profiler=:
+3 passed, 0 failed (existing tests unchanged).
+
+Verified the binary's no-args usage banner prints + exits 2.
+Cannot run on the powerflow22 =.bin= today: the matrix files live on
+the reporter's machine, not in this repo (they're 176 MB each and
+GAMS-sourced).
+
+* 13:40 :issue50:status:next:
+State at end of work:
+- Research note skeleton: written, =Findings= empty.
+- Diagnostic binary: written, builds, clippy-clean, fmt-clean.
+- No code changes to =src/symbolic= or =pick_default_method= — the
+  whole point of the diagnostic is to gather evidence before any
+  heuristic change.
+
+Tasks for the human / next session:
+1. Run =target/release/diag_issue50_symbolic
+   gams/nlpbench/feral_repro/powerflow22/kkt_solve_iter2.bin=
+   (or attach the file to issue #50 so this repo can carry the
+   benchmark).
+2. Paste the output into =Findings= of the research note.
+3. Classify against H1/H2/H3 and pick D1/D2/D3.
+
+Open: should I post the review (and a pointer to the diagnostic
+binary) on GH issue #50? Holding until the human says so.
+
+* 15:00 :issue50:diagnostic:findings:
+Ran the diagnostic on the reporter's matrix (it was actually here
+on this machine, at =pounce/gams/nlpbench/feral_repro/powerflow22/
+kkt_solve_iter2.bin=, not in feral). Output captured in
+=/tmp/diag_issue50_out.txt= and copied into the research note's
+=Findings= section.
+
+Load: n=2 813 976, stored nnz=6 622 463, avg_deg=2.35. Matches the
+issue.
+
+#+begin_src text
+| ordering | resolved | total wall |  ordering | factor_nnz |
+|----------+----------+------------+-----------+------------|
+| Auto     | ScotchND |   114.80 s | 113.84 s  | 15 783 342 |
+| MetisND  | MetisND  |   118.36 s | 117.44 s  | 20 469 771 |
+| Amd      | Amd      |    55.87 s |  54.97 s  | 10 427 637 |
+#+end_src
+
+Per-stage in detail (us; biggest 5 per run):
+
+#+begin_src text
+                Auto/ScotchND   MetisND       Amd
+ordering          113 836 427  117 437 951   54 973 348
+renumber              414 270      375 225      372 228
+postorder             140 370      144 149      139 868
+col_counts            131 832      133 150      128 300
+permute2               76 626       76 041       71 007
+#+end_src
+
+Four decisive findings, all written up in the note:
+
+** F1 - Q4 settled
+=Auto= resolves to *ScotchND*, not MetisND as the reporter
+believed. =choose_adaptive='s =n > 100_000 && full_avg_deg < 5.0=
+branch fires (full_avg_deg = 3.71 from the F1 numbers above).
+ScotchND is ~3 s *faster* than explicit MetisND on this matrix,
+so re-routing to MetisND would have been worse. Reporter's
+hypothesis was based on reading the wrong source line.
+
+** F2 - H1 confirmed; H2 + H3 eliminated
+ORDERING stage carries *99.2%* of the wall under all three
+orderings. Every feral-side post-pass stage (etree + col_counts +
+find_supernodes + permute1/2 + renumber + ...) totals ~1.0 s.
+=etree_initial= alone is 13-18 ms at n=2.8M. The feral post-pass
+is fast - the time lives entirely in the external ordering crate.
+
+H2 (slow feral post-pass) is dead. The fix has to be in the
+external ordering call or in the dispatcher (which method we
+pick).
+
+** F3 - AMD wins on fill too, not just on time
+=factor_nnz_estimate=: AMD 10.4M, ScotchND 15.8M, MetisND 20.5M.
+The chain-pattern catch was *calibrated* on the premise that ND
+finds a better separator on low-degree KKT graphs. At n=2.8M with
+this topology, the premise is inverted: AMD wins on both axes.
+
+The CHAINWOO calibration (n~3000): AMD 2.10M nnz_L vs MetisND
+282k nnz_L (the *original* motivating evidence for the chain
+catch). 720× chain-catch payoff at n=3000.
+
+powerflow22 (n=2.8M): AMD 10.4M nnz_L vs MetisND 20.5M nnz_L.
+2.0× chain-catch *regression* at n=2.8M.
+
+That's not a quantitative drift - it's a sign flip. The
+heuristic is wrong on the powerflow class.
+
+** F4 - Decision: D2 (size cap on the chain catch)
+- D1 (tune feral-metis options): both METIS and SCOTCH are
+  113-117 s, so neither has a faster knob hidden inside on this
+  matrix.
+- D3 (fix feral post-pass): dead per F2.
+- D2 (size cap): proposed =CHAIN_CATCH_N_CAP = 500_000=. Known
+  beneficiaries (CHAINWOO n=4033, HYDROELL n~4k, VESUVIO n~10k,
+  CRESC132 n~3k) sit 2 OOM below this. Needs corpus validation
+  before commit.
+
+Parallel change required in =choose_adaptive=: =n > 100_000 &&
+full_avg_deg < 5.0 → ScotchND= is what actually fires through
+=Solver::Auto=, not =pick_default_method='s chain catch. Either
+remove that branch or guard it with a matching size limit.
+
+** F5 - Still open
+- F5a: does AMD's ordering carry through the multi-iter IPM
+  trajectory? Estimated wall under AMD: ~60-70 s total (4 iters
+  x ~14 s/iter incl. one 55 s first factor + 3 cached 1 s
+  refactors). Reporter can verify with =FERAL_ORDERING=amd= on
+  the existing reproducer.
+- F5b: 35x MUMPS-METIS vs feral-METIS gap on the ordering call
+  itself is unexplained. Separate follow-up.
+- F5c: corpus validation of =CHAIN_CATCH_N_CAP = 500_000=.
+
+* 15:20 :issue50:status:wrap:
+End-of-work state:
+- Research note: =dev/research/issue-50-metisnd-symbolic-cost.md=
+  - Findings section fully populated (F1-F5).
+- Diagnostic binary: =src/bin/diag_issue50_symbolic.rs= - builds,
+  clippy-clean, fmt-clean, runs end-to-end on the matrix.
+- Code: no changes to =src/= outside the new diag binary. The
+  proposed =CHAIN_CATCH_N_CAP= fix is *not* applied; it needs
+  corpus validation (F5c) and an end-to-end refactor-trajectory
+  check (F5a) before commit.
+
+Tasks for the human / next session:
+1. Confirm F5a: run =FERAL_ORDERING=amd= end-to-end on
+   powerflow22 in pounce. Expected wall ~60-70 s vs current 112 s.
+2. Run corpus validation (F5c) - probe_kkt_replay over
+   tests/ipm_corpus_* with =CHAIN_CATCH_N_CAP = 500_000= and
+   compare factor_nnz_estimate, factor wall.
+3. If both pass, file PR against =pick_default_method= and
+   =choose_adaptive=.
+
+Should I post the F1-F4 findings as a comment on GH issue #50?
+The Q4 correction (Auto resolves to ScotchND not MetisND) is
+particularly worth surfacing to the reporter. Holding until the
+human says so.
+
+* 15:50 :issue50:inventory:correction:
+Wrote =src/bin/diag_issue50_inventory.rs= - walks all 968
+problem dirs in =data/matrices/kkt= and
+=data/matrices/kkt-expansion=, takes one =.mtx= per dir, records
+n/avg_deg, =pick_default_method= branch, =choose_adaptive=
+branch, and =factor_nnz_estimate= for AMD/MetisND/ScotchND.
+Ran 968 matrices in 60 s. CSV at =/tmp/issue50_inventory.csv=.
+
+Branch distribution:
+- pdm: 705 small_amf, 206 chain_metis_5k_6, 52 chain_metis_2k_4
+- ca:  840 ca_small_kahip, 82 small_amf, 40 chain_metis_5k_6, 2
+  large_metis, 1 ca_big_scotch (PDE2 n=451k - blocked by MAX_N
+  from running ND)
+
+Initial tally (on =factor_nnz_estimate=, all 250 chain-catch
+matrices through =pick_default_method=):
+- 195 (78%) AMD beats MetisND
+- 10 (4%) MetisND beats AMD (max margin 1.37x)
+- 45 (18%) tied
+
+Through =choose_adaptive=, 33 matrices actually reach MetisND
+(rest get re-routed to KahipND). On those 33:
+- 22 (66.7%) AMD beats MetisND
+- 10 (30.3%) tied
+- 1 (3.0%) MetisND beats AMD - TAX53322 by 0.06% (rounding)
+
+I almost concluded "delete the chain catch entirely" from this.
+*That was wrong.* Re-read =dev/journal/2026-04-27-02.org= which
+records the original chain-catch motivation:
+
+#+begin_example
+CHAINWOO_0000:
+  AMD     sym_nnz_est=68480   num_nnz_l=2,101,584   (cascade!)
+  MetisND sym_nnz_est=70552   num_nnz_l=281,526
+#+end_example
+
+The chain-catch protects against the *pivoting cascade* that
+fattens parent supernodes during numeric BK factorization with
+delayed pivots. *Symbolic estimates are nearly identical
+(68k ≈ 70k); the 7.5x blowup is numeric-time only.*
+
+My =factor_nnz_estimate=-based tally is the wrong metric. The
+catch is doing its job; symbolic prediction just doesn't see it.
+
+Cross-check on powerflow22: reporter measured first factor 113 s,
+cached refactor 1.05 s. Cached refactor is pure numeric. 1 s on
+2.8M-dim 6.6M-nnz is fast - no cascade. So at n=2.8M with
+power-grid topology, cascade doesn't fire and the catch is
+harmful. At n~3000-4000 with tridiagonal topology, cascade fires
+hard and the catch is load-bearing.
+
+So Fix A is still a *size cap*, not a removal. But the cap has
+to be calibrated against where cascade stops firing, which means
+I need =num_nnz_l= data, not =factor_nnz_estimate=.
+
+* 16:05 :issue50:next:numeric-inventory:
+Plan revision: write a second probe =diag_issue50_numeric_
+inventory= that runs *numeric* factorization on the 250
+chain-catch matrices and records actual =num_nnz_l= per
+ordering. ~10x more expensive per matrix; budget should be a
+few minutes total on small chain-class matrices.
+
+The cap is set where the AMD-vs-MetisND =num_nnz_l= ratio drops
+below some threshold (1.5x maybe). Up to that n: keep the catch
+(MetisND wins). Above that n: AMD is fine (no cascade), drop to
+AMD. Powerflow22 (n=2.8M) lands above any reasonable cap.
+
+End-of-work state at this break: research note skeleton +
+findings sections updated through F4; first inventory ran but
+measured the wrong metric; correction documented here. Next
+session needs the numeric inventory.
+
+* 16:30 :issue50:numeric-inventory:cascade-gone:
+Built =src/bin/diag_issue50_numeric_inventory.rs= (clippy +
+fmt-clean; LIMIT=5 smoke first). Walks the corpus, filters to
+chain-catch-firing matrices (=pick_default_method=
+=chain_metis_5k_6= or =chain_metis_2k_4= branches), factors each
+under AMD/MetisND/ScotchND, records actual =factor_nnz()=
+(numeric =num_nnz_l=) per ordering.
+
+Partial run (124 rows of expected ~250) reveals the actual cause
+of issue #50: *the BK pivoting cascade no longer fires under
+current defaults*. Spot-check via =diag_chainwoo=:
+
+#+begin_example
+matrix: CHAINWOO_0000.mtx, n=4000, nnz=7999
+    method    n_snodes   sym_nnz_est     num_nnz_l   max_front
+      Amd        2125         36000         22984          16
+   MetisND        2024         37104         25579          16
+#+end_example
+
+Compare to 2026-04-27-02 journal entry:
+
+#+begin_example
+AMD:     sym_nnz_est=68480   num_nnz_l=2,101,584   (cascade!)
+MetisND: sym_nnz_est=70552   num_nnz_l=281,526
+#+end_example
+
+The 2.10M cascade with AMD is *gone*. Both sym_nnz_est numbers
+have nearly halved too (68k → 36k, 70k → 37k) - something in the
+analysis path also reduced the prediction. Whatever happened
+between 2026-04-27 and now (likely MC64 default flip, BK pivot
+threshold tightening, or scaling default) defangs the runaway
+delay that originally motivated the chain catch.
+
+Across the partial 124 chain-catch matrices:
+- Max AMD/MetisND num_nnz_l ratio: *1.36* (BRAINPC2 n=27605)
+- Median: 0.97 (AMD typically *better* than MetisND)
+- Zero matrices with ratio >= 1.5x. The "cascade firing"
+  criterion never fires anywhere.
+
+CHAINWOONE_0000 (n=33988): AMD 191979 vs MetisND 214660 -
+AMD wins by 11%, no cascade visible.
+
+This changes Fix A. The catch isn't oversized - it's *obsolete*.
+With cascade defanged at default settings, AMD is the
+better-or-equal choice across the entire chain-catch range, and
+the catch forces a 113-s ScotchND on powerflow22 for no
+numeric-quality benefit.
+
+Provisional revision to Fix A: *delete the chain-catch branch
+entirely* from =pick_default_method=. Below n=10000 the AMF
+fallback applies; above, the general MetisND fallback applies.
+=choose_adaptive='s n>100k ScotchND branch needs the same
+scrutiny - on powerflow22 the ScotchND it dispatches takes 114s
+when AMD would take 55s with smaller fill.
+
+Need to (a) let inventory finish, (b) confirm with full corpus,
+(c) check whether any matrix in =data/matrices/kkt-expansion=
+still benefits from the catch (cascade still firing somewhere),
+(d) git-bisect to identify *what* killed the cascade so the
+decision is anchored on a code change, not a regression risk.
+
+* 17:30 :issue50:numeric-inventory:done:
+Full numeric inventory finished: 258 rows in 218 s. CSV archived
+at =dev/research/issue-50-numeric-inventory.csv= (out of /tmp).
+
+Result: *zero of 250 chain-catch matrices have AMD/MetisND
+num_nnz_l ratio >= 1.5x*. Max ratio 1.39 (HIER163A/HIER163D at
+n=9472), median 0.95-1.00 across every n-bucket. AMD typically
+produces *fewer* num_nnz_l than MetisND on the chain-catch class.
+
+Identified the cascade defang commits:
+- =42434a5= fix(dense): fine-grained delayed pivoting (#46)
+  - replaced break-on-first-delay with swap-to-boundary
+- =070840b= fix(ldlt): break the zero-(2,2)-block cascade (#46)
+  - two-tier 2x2 partner selection
+
+Research note updated:
+- F6 (symbolic inventory, retracted) - documents the wrong-metric
+  mistake;
+- F7 (numeric inventory) - the corpus-wide cascade-gone evidence;
+- F8 (revised Fix A) - *delete* the chain catch from
+  =pick_default_method=; also remove =choose_adaptive='s
+  =n>100k && full_avg_deg<5 -> ScotchND= branch (it's the one
+  that actually catches powerflow22 today).
+
+Next session needs:
+1. Implement Fix A (the two deletions in src/symbolic/mod.rs).
+2. Run cargo test in full - any test pinning the chain-catch
+   behavior (e.g. =pick_default_method_rules=) will need updating.
+3. Run probe_kkt_replay over the 968-dir corpus with before/after
+   to compare factor_us / num_nnz_l end-to-end; record any
+   regression.
+4. Run feral against powerflow22 to confirm: factor 113s -> ~55s
+   with AMD as default.
+5. Fix B (feral-metis/scotch config audit) is still open but is a
+   separate follow-up - it's about the 35x absolute gap to MUMPS,
+   not about which ordering feral picks.
+
+* 13:50 :issue50:validation:auto-routing:
+Fix A validation across the 968-dir IPM corpus.
+
+Built two probes:
+  - src/bin/diag_issue50_auto_validate.rs (numeric Auto on
+    chain-catch reps; CHAIN_CATCH_ONLY=1)
+  - src/bin/diag_issue50_large_sparse_scan.rs (no-factor scan
+    for choose_adaptive's n>100k && avg_deg<5 branch)
+
+Outputs:
+  - dev/research/issue-50-auto-validate.csv (258 rows, 250 ok)
+  - dev/research/issue-50-large-sparse-scan.csv (1 row: PDE2)
+
+Findings:
+  1. 250/250 chain-catch matrices factor ok under Auto post-Fix-A.
+     The 8 non-ok are MAX_N=200k skips (BDRY2, PDE1, PDE2,
+     QUADCOPTER, YATP1*, YATP2*), not Fix A failures.
+  2. Resolved-method distribution: 217 KahipND, 29 MetisND, 4 AMF.
+     Only the 4 AMF picks are matrices whose routing actually
+     changed under Fix A (n=10000 chain matrices that used to
+     hit chain_metis_5k_6 → MetisND, now fall through to AMF).
+  3. The 4 AMF picks (BROYDNBD, BRYBNDNE, NONDIANE, TRIDIA) match
+     or beat every per-ordering reference (AMD/MetisND/ScotchND)
+     on num_nnz_l. AMF strictly beats MetisND/ScotchND on the
+     three bordered cases; ties AMD on three; beats AMD on TRIDIA.
+  4. Only PDE2 (n=451195, avg_deg=4.59) hits choose_adaptive's
+     n>100k && avg_deg<5 branch in the corpus, so the
+     ScotchND→Amd swap is bounded to PDE2 + powerflow22 in this
+     dataset. powerflow22 measurement (F3) carries the
+     justification: AMD 55s/10.4M nnz vs ScotchND 113.8s/15.8M.
+
+Validator surfaced 76 nnz regressions and 178 factor_us
+regressions when comparing Auto's pick against min(AMD,
+MetisND, ScotchND) from the reference inventory. All are
+KahipND-resolved on small chain-catch matrices (DIXMAANF-P,
+FLOSP2HL/TL, OBSTCL*, NONDQUAR, BDQRTIC, …). KahipND was the
+Auto choice on these matrices both before and after Fix A
+(choose_adaptive's small-and-sparse branch was untouched), so
+these are *pre-existing* dispatcher issues orthogonal to Fix A.
+Worth a separate investigation; not a blocker.
+
+Implication: Fix A is fully validated on the IPM corpus. The
+only behavioral changes are (a) 4 n=10000 chain matrices that
+gain AMF over MetisND (strict improvement on 3, tie on 1), and
+(b) PDE2 + powerflow22 routing from ScotchND to AMD. No
+factorization failures, no num_nnz_l regressions among the
+actually-affected matrices.
