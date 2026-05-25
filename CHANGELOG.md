@@ -4,6 +4,49 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-25
+
+### Added — opt-in instrumentation accessors ([#52][i52])
+
+New public surface on `Solver` for pounce-side debugging of
+linear-solver behavior without re-running with `cargo flamegraph`
+or instrumenting forks.
+
+**Phase A — always-on snapshot.** `Solver::last_factor_stats()`
+returns `Option<FactorStats>` populated after every successful
+`factor()`. Fields: `nnz_a`, `nnz_l`, `fill_ratio`, `inertia`,
+`min_abs_pivot`, `max_abs_pivot`, `pattern_reused`, `scaling_info`.
+No gating flag — the two extra integer writes per `factor()` are
+cheaper than a gate check would be.
+
+**Phase B — opt-in profiler.** `Solver::with_profiling(true)`
+enables per-supernode numeric timings and one-shot symbolic timings,
+read back via `Solver::profile_report()` and
+`Solver::symbolic_profile_report()`. The symbolic report is
+populated only on cache-miss factors — `None` on cache hits is the
+unambiguous "did symbolic actually run" signal pounce asked for.
+Default is `false`; when off, no profiler arcs are allocated and
+the code path is byte-identical to a pre-issue-52 build.
+
+**Performance.** Measured by `benches/issue52_overhead.rs` on
+tridiagonal SPDs (n ∈ {64, 256, 1024}, sequential, 30 samples × 3 s):
+
+| n    | main baseline | default-off | profiling-on |
+|------|---------------|-------------|--------------|
+|   64 | 260.6 µs      | 257.6 µs    | 258.9 µs     |
+|  256 | 348.2 µs      | 345.2 µs    | 347.0 µs     |
+| 1024 | 719.6 µs      | 714.7 µs    | 709.1 µs     |
+
+Default-off vs `main` baseline: within ±1.2% (often faster — noise).
+Profiling-on vs default-off: within ±1%. Both deltas sit inside the
+criterion noise band on tridiagonal workloads.
+
+Parallel-driver profiler contention (B2b in the plan) is documented
+as the escape hatch but not engineered; revisit only if an IPM
+workload regresses with profiling on.
+
+[i52]: https://github.com/jkitchin/feral/issues/52
+
 ## [0.6.0] - 2026-05-23
 
 ### Added — `Solver::with_scaling()` builder ([#51][i51])

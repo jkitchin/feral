@@ -54,7 +54,13 @@ without the research note first.
   code inspection → plan → tests first → implement → benchmark
 - Commit frequently and atomically — one commit per logical change
 - Every commit message must have a body (what, why, evidence). No body = reject.
-- Run `cargo test` before every commit
+- Run `cargo test` before every commit that touches Rust source. For
+  commits that change only config, docs, lockfiles, or version
+  strings — and where CI on the most recent code commit was green —
+  the test gate is already satisfied; do not re-run locally just to
+  re-test unchanged code. `cargo fmt --check` and
+  `cargo clippy -- -D warnings` still run via the pre-commit hook on
+  every commit.
 - **Install `pre-commit` once per clone: `pre-commit install`**. After that
   `cargo fmt --check` and `cargo clippy -- -D warnings` run automatically
   on every `git commit` and CI uses the identical hooks via
@@ -133,7 +139,12 @@ Do not feed journal contents into `context.md` automatically. Query on demand.
   These are append-only logs.
 - **NEVER** use `unwrap()` or `expect()` in `src/`. Use proper `Result` error handling.
 - **NEVER** introduce `unsafe` without a safety comment explaining the invariant.
-- **NEVER** commit without running `cargo test` and `cargo clippy -- -D warnings`.
+- **NEVER** commit Rust source changes without running `cargo test` and
+  `cargo clippy -- -D warnings` (clippy is enforced by the pre-commit
+  hook). Non-source commits (config, docs, lockfile, version-string
+  bumps) are exempt from the test re-run when CI on the most recent
+  code commit was green — the bar is "the code is tested," not "tests
+  ran on this exact SHA."
 - **NEVER** write both the implementation and the test oracle in the same session
   without the oracle coming from an external source (hand calculation, reference
   solver, or the Bunch-Kaufman paper).
