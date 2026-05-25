@@ -25,6 +25,7 @@ exclude = [
     "/ref",
     "/scripts",
     "/assets",
+    "/book",
     "/examples",
     "/src/bin",
     "/tests",

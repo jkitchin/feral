@@ -1,0 +1,18 @@
+[book]
+title = "feral"
+description = "Sparse symmetric indefinite direct solver in pure Rust, with certified inertia counts."
+authors = ["John Kitchin"]
+language = "en"
+multilingual = false
+src = "src"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/jkitchin/feral"
+edit-url-template = "https://github.com/jkitchin/feral/edit/main/book/{path}"
+site-url = "/feral/"
+
+[output.html.fold]
+enable = true
+level = 1
