@@ -248,10 +248,16 @@ fn b1_profile_report_none_when_profiling_disabled() {
 /// to keep the test machine-independent.
 #[test]
 fn b2_profile_report_some_when_profiling_enabled() {
-    // n=16 is comfortably above the tiny / dense-fast-path gates so
-    // the multifrontal driver runs and at least one supernode is
-    // recorded.
-    let csc = tridiagonal_spd(16);
+    // n=64 escapes both the tiny path (n ≤ 16) and the dense
+    // fast-path density gate (tridiagonal nnz=127 vs cells=2080,
+    // density 6% < 25%), so the multifrontal driver actually runs
+    // and the per-supernode profiler records at least one timing.
+    // The profiler is wired into
+    // `factorize_multifrontal_supernodal_with_workspace` only;
+    // matrices that route through the tiny / dense fast path will
+    // produce a `Some(ProfileReport)` with `n_supernodes = 0`. That
+    // is correct behavior — the per-supernode loop did not run.
+    let csc = tridiagonal_spd(64);
     let mut solver = Solver::new()
         .with_scaling(ScalingStrategy::Identity)
         .with_profiling(true);
