@@ -1,21 +1,26 @@
-//! Phase A tests for issue #52: opt-in instrumentation accessors.
+//! Tests for issue #52: opt-in instrumentation accessors.
 //!
-//! Targets `Solver::last_factor_stats()` and the `FactorStats`
-//! snapshot type. These tests fail to compile against the current
-//! Solver surface and pin the API shape spelled out in
-//! `dev/plans/issue-52-opt-in-stats.md`.
+//! Phase A targets `Solver::last_factor_stats()` and the
+//! `FactorStats` snapshot type.
 //!
-//! Phase B (`with_profiling`, `profile_report()`) is in a separate
-//! test file added in a later commit.
+//! Phase B targets the opt-in profiler accessors
+//! `Solver::with_profiling`, `Solver::profile_report`, and
+//! `Solver::symbolic_profile_report`. The plan
+//! (`dev/plans/issue-52-opt-in-stats.md`) calls out that default-off
+//! must stay byte-identical to current behavior; B1 below pins that
+//! contract on the `Option<...>` return surface.
 //!
 //! Test catalogue:
 //! - A1: `last_factor_stats_returns_none_before_factor`
 //! - A2: `last_factor_stats_after_success_populates_all_fields`
 //! - A3: `pattern_reused_false_first_factor_true_second`
 //! - A4: `pattern_reused_false_after_pattern_change`
+//! - B1: `profile_report_none_when_profiling_disabled`
+//! - B2: `profile_report_some_when_profiling_enabled`
+//! - B3: `symbolic_profile_report_only_on_cache_miss_factor`
 
 use feral::scaling::ScalingStrategy;
-use feral::{CscMatrix, FactorStats, FactorStatus, Solver};
+use feral::{CscMatrix, FactorStats, FactorStatus, ProfileReport, Solver, SymbolicProfileReport};
 
 /// Build a 2×2 SPD diagonal matrix `diag(2, 2)` (lower-triangle CSC).
 fn diag2_spd() -> CscMatrix {
@@ -30,6 +35,28 @@ fn tri3_spd_with_off_diag() -> CscMatrix {
     // a_00 = 3, a_11 = 3, a_22 = 3, a_21 = 1.
     CscMatrix::from_triplets(3, &[0, 1, 2, 2], &[0, 1, 2, 1], &[3.0, 3.0, 3.0, 1.0])
         .expect("from_triplets")
+}
+
+/// Build an n×n SPD tridiagonal matrix: `4` on the diagonal, `-1` on
+/// the first sub/super-diagonal. Lower-triangle CSC. Diagonally
+/// dominant ⇒ strictly positive definite, factorises cleanly with
+/// no delays. Used by Phase B tests that need enough structure for
+/// the profiler to record at least one supernode timing.
+fn tridiagonal_spd(n: usize) -> CscMatrix {
+    let mut rows = Vec::with_capacity(2 * n);
+    let mut cols = Vec::with_capacity(2 * n);
+    let mut vals = Vec::with_capacity(2 * n);
+    for j in 0..n {
+        rows.push(j);
+        cols.push(j);
+        vals.push(4.0);
+        if j + 1 < n {
+            rows.push(j + 1);
+            cols.push(j);
+            vals.push(-1.0);
+        }
+    }
+    CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("from_triplets")
 }
 
 /// A1 — no factor has run, so `last_factor_stats()` must report
@@ -181,5 +208,110 @@ fn a4_pattern_reused_false_after_pattern_change() {
         solver.symbolic_call_count(),
         2,
         "symbolic must rerun on pattern change"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Phase B: opt-in profiler accessors
+// ---------------------------------------------------------------------
+
+/// B1 — default `Solver` (no `with_profiling`) must report `None`
+/// from both profile-report accessors regardless of how many factor
+/// calls have run. This is the contract that makes the "no
+/// noticeable performance loss when not debugging" guarantee
+/// observable from the API: if the caller hasn't opted in, the
+/// profiler `Arc<Mutex<...>>` is never constructed and therefore
+/// no report can be produced.
+#[test]
+fn b1_profile_report_none_when_profiling_disabled() {
+    let csc = tridiagonal_spd(8);
+    let mut solver = Solver::new().with_scaling(ScalingStrategy::Identity);
+
+    assert!(matches!(solver.factor(&csc, None), FactorStatus::Success));
+
+    let p: Option<ProfileReport> = solver.profile_report();
+    let s: Option<SymbolicProfileReport> = solver.symbolic_profile_report();
+    assert!(
+        p.is_none(),
+        "profile_report must be None when with_profiling not enabled"
+    );
+    assert!(
+        s.is_none(),
+        "symbolic_profile_report must be None when with_profiling not enabled"
+    );
+}
+
+/// B2 — once `with_profiling(true)` is set, the numeric profile
+/// report becomes available and records at least one supernode
+/// timing. We assert structural invariants (n_supernodes > 0,
+/// total_us > 0, no validation warnings) rather than exact numbers
+/// to keep the test machine-independent.
+#[test]
+fn b2_profile_report_some_when_profiling_enabled() {
+    // n=16 is comfortably above the tiny / dense-fast-path gates so
+    // the multifrontal driver runs and at least one supernode is
+    // recorded.
+    let csc = tridiagonal_spd(16);
+    let mut solver = Solver::new()
+        .with_scaling(ScalingStrategy::Identity)
+        .with_profiling(true);
+
+    assert!(matches!(solver.factor(&csc, None), FactorStatus::Success));
+
+    let report = solver
+        .profile_report()
+        .expect("profile_report must be Some when with_profiling(true)");
+    assert!(
+        report.n_supernodes >= 1,
+        "expected at least one supernode timing, got {}",
+        report.n_supernodes
+    );
+    assert!(
+        report.total_us > 0,
+        "expected nonzero total wallclock, got {}",
+        report.total_us
+    );
+    assert!(
+        report.validation_warnings.is_empty(),
+        "profile report flagged validation warnings: {:?}",
+        report.validation_warnings
+    );
+}
+
+/// B3 — symbolic profile is captured only on factor calls that
+/// re-run the symbolic analysis (cache miss). On a cache hit the
+/// symbolic phase is skipped entirely, and `symbolic_profile_report`
+/// must reflect that by returning `None` (or by reporting the most
+/// recent symbolic from the cache-miss factor — pinned here as
+/// "None on cache hit" to keep the signal unambiguous for pounce).
+#[test]
+fn b3_symbolic_profile_report_only_on_cache_miss_factor() {
+    let csc = tridiagonal_spd(8);
+    let mut solver = Solver::new()
+        .with_scaling(ScalingStrategy::Identity)
+        .with_profiling(true);
+
+    // Factor 1: cache miss — symbolic runs, report should be Some.
+    assert!(matches!(solver.factor(&csc, None), FactorStatus::Success));
+    let s1 = solver.symbolic_profile_report();
+    assert!(
+        s1.is_some(),
+        "first factor must produce a symbolic profile report"
+    );
+
+    // Factor 2: cache hit — symbolic skipped, report should be None.
+    assert!(matches!(solver.factor(&csc, None), FactorStatus::Success));
+    let s2 = solver.symbolic_profile_report();
+    assert!(
+        s2.is_none(),
+        "cache-hit factor must clear the symbolic profile report \
+         (symbolic phase never ran), got Some(_)"
+    );
+
+    // Sanity: the numeric profile is always available on each factor.
+    assert!(
+        solver.profile_report().is_some(),
+        "numeric profile_report should be Some on every factor when \
+         with_profiling(true), independent of symbolic cache state"
     );
 }
