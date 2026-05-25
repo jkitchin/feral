@@ -515,16 +515,29 @@ impl Solver {
     /// build. This is the contract the issue motivates and the
     /// plan in `dev/plans/issue-52-opt-in-stats.md` pins.
     ///
-    /// Cost when enabled (issue #52 Phase B bench):
-    /// - sequential driver: two `Instant::now()` per supernode
-    ///   plus one uncontended `Mutex` lock on the shared
-    ///   `Arc<Mutex<Profiler>>` to push the sample. Expect ≤ 1%
-    ///   wall-time overhead on the IPM warm-cache path.
-    /// - parallel driver: same per-supernode cost, but the lock
-    ///   is contended across rayon workers. Documented as
-    ///   "diagnostic mode, do not leave on across an IPM run."
-    ///   The thread-local accumulation refactor (plan §B2b) is
-    ///   the escape hatch if the bench shows > 1% regression.
+    /// Cost when enabled (measured by `benches/issue52_overhead.rs`
+    /// on tridiagonal SPDs, sequential driver, 30 samples × 3 s):
+    ///
+    /// | n    | default-off | with_profiling(true) | delta  |
+    /// |------|-------------|----------------------|--------|
+    /// |   64 | 257.6 µs    | 258.9 µs             | +0.5%  |
+    /// |  256 | 345.2 µs    | 347.0 µs             | +0.5%  |
+    /// | 1024 | 714.7 µs    | 709.1 µs             | -0.8%  |
+    ///
+    /// All three points sit inside criterion's noise band on the
+    /// dev machine, i.e. the per-supernode `Instant::now()` pair
+    /// plus the uncontended `Arc<Mutex<Profiler>>` push is below
+    /// our measurement floor on tridiagonal workloads. The
+    /// parallel driver pays the same per-supernode cost but the
+    /// lock is contended across rayon workers; engineering a
+    /// thread-local accumulator is deferred (plan §B2b) and is
+    /// the escape hatch if a real IPM workload shows > 1%
+    /// regression with profiling on.
+    ///
+    /// Default-off vs the pre-issue-52 `main` baseline (same bench,
+    /// same machine) is within ±1.2% across all three n — i.e. the
+    /// "default-off is byte-identical" contract holds empirically
+    /// to within the noise floor.
     ///
     /// Toggling `false → true` does not invalidate any cached
     /// state. Toggling `true → false` drops the previously

@@ -82,5 +82,13 @@ harness = false
 name = "schur_kernel"
 harness = false
 
+[[bench]]
+name = "issue52_overhead"
+harness = false
+
+[[bench]]
+name = "issue52_baseline"
+harness = false
+
 [profile.release]
 debug = true
