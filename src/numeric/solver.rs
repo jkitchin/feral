@@ -26,6 +26,46 @@ use crate::sparse::csc::CscMatrix;
 use crate::symbolic::supernode::SupernodeParams;
 use crate::symbolic::{symbolic_factorize_with_method, OrderingMethod, SymbolicFactorization};
 
+/// Snapshot of per-`factor()` diagnostic state for issue #52
+/// (opt-in instrumentation). Phase A surface — every field is read
+/// off state `Solver` already maintains, so producing this snapshot
+/// is O(1) work and the live code path that updates it costs two
+/// integer writes per `factor()` regardless of whether any caller
+/// ever reads it.
+///
+/// `None` returned by [`Solver::last_factor_stats`] until the first
+/// `factor()` call that ends with a stored factor (`Success`,
+/// `Singular`-with-partial, or `WrongInertia`). Hard failures
+/// (`FatalError`, `Err(NumericallyRankDeficient)`) clear the
+/// snapshot alongside the existing `last_factors` / `last_inertia`
+/// reset, so a stale stats blob cannot survive a failed retry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FactorStats {
+    /// `CscMatrix::nnz()` of the matrix passed to `factor()`.
+    pub nnz_a: usize,
+    /// `SparseFactors::factor_nnz()` — nnz of the stored `L` factor.
+    pub nnz_l: usize,
+    /// `nnz_l / nnz_a`. Quick fill-in proxy; values < 10 on KKT-style
+    /// systems indicate a healthy ordering.
+    pub fill_ratio: f64,
+    /// Inertia of the factored matrix. Mirrors [`Solver::inertia`].
+    pub inertia: Inertia,
+    /// Minimum `|pivot|` over eliminated 1×1 / 2×2 blocks. Mirrors
+    /// [`Solver::min_pivot_magnitude`].
+    pub min_abs_pivot: f64,
+    /// Maximum `|pivot|`. Mirrors [`Solver::max_pivot_magnitude`].
+    pub max_abs_pivot: f64,
+    /// `true` iff this `factor()` reused the cached symbolic
+    /// factorisation (the previous factor's pattern fingerprint
+    /// matched the current matrix). The first `factor()` on a
+    /// fresh `Solver`, and the first `factor()` after a pattern
+    /// change, both report `false`.
+    pub pattern_reused: bool,
+    /// Scaling outcome of the numeric phase. Mirrors
+    /// [`Solver::scaling_info`].
+    pub scaling_info: crate::scaling::ScalingInfo,
+}
+
 /// Result of a single `Solver::factor` attempt.
 #[derive(Debug)]
 pub enum FactorStatus {
@@ -250,6 +290,19 @@ pub struct Solver {
     ///
     /// Cleared on pattern change alongside [`Solver::mc64_scaling_cache`].
     auto_picked_strategy: Option<ScalingStrategy>,
+    /// Issue #52: `nnz_a` of the matrix passed to the most recent
+    /// `factor()` call that ended with a stored factor. `None`
+    /// before the first such call and after any hard-failure
+    /// `factor()`. Written unconditionally — Phase A of issue #52
+    /// has no runtime gate (the cost of one `usize` write is
+    /// cheaper than the gating check would be).
+    last_nnz_a: Option<usize>,
+    /// Issue #52: whether the most recent `factor()` reused the
+    /// cached symbolic factorisation (pattern fingerprint matched
+    /// the prior call's). Sampled at `factor()` entry, before the
+    /// cache-miss invalidation block. `None` until the first
+    /// `factor()` that stores a factor.
+    last_pattern_reused: Option<bool>,
 }
 
 impl Solver {
@@ -283,6 +336,8 @@ impl Solver {
             mc64_scaling_cache: None,
             mc64_cache_hit_count: 0,
             auto_picked_strategy: None,
+            last_nnz_a: None,
+            last_pattern_reused: None,
         }
     }
 
@@ -596,6 +651,18 @@ impl Solver {
         }
         // Step 1: pattern fingerprint.
         let fp = PatternFingerprint::of(matrix);
+
+        // Issue #52 (Phase A): sample the symbolic-cache-hit signal
+        // *before* the cache-miss invalidation below clears
+        // `last_pattern_fingerprint`. `last_symbolic` is kept in
+        // lockstep with `last_pattern_fingerprint` (both set together
+        // after a successful symbolic, both cleared together in the
+        // invalidation block and in `invalidate_symbolic_cache`), so a
+        // matching fingerprint guarantees the cached symbolic will be
+        // reused on this call. Sampling at entry — rather than at the
+        // success branch — keeps the signal honest even if downstream
+        // work fails after the symbolic has already been reused.
+        let pattern_reused = self.last_pattern_fingerprint == Some(fp);
 
         // Step 2: invalidate cache on pattern change.
         if self.last_pattern_fingerprint != Some(fp) {
@@ -949,6 +1016,10 @@ impl Solver {
                 }
                 self.last_factors = Some(factors);
                 self.last_inertia = Some(inertia.clone());
+                // Issue #52 (Phase A): record stats alongside the
+                // factor itself. Two unconditional integer writes.
+                self.last_nnz_a = Some(matrix.nnz());
+                self.last_pattern_reused = Some(pattern_reused);
                 if partial_singular {
                     FactorStatus::Singular
                 } else if let Some(expected) = check_inertia {
@@ -970,11 +1041,15 @@ impl Solver {
             Err(FeralError::NumericallyRankDeficient) => {
                 self.last_factors = None;
                 self.last_inertia = None;
+                self.last_nnz_a = None;
+                self.last_pattern_reused = None;
                 FactorStatus::Singular
             }
             Err(e) => {
                 self.last_factors = None;
                 self.last_inertia = None;
+                self.last_nnz_a = None;
+                self.last_pattern_reused = None;
                 FactorStatus::FatalError(e)
             }
         }
@@ -1254,6 +1329,47 @@ impl Solver {
     /// per-factor state. See `dev/plans/mc64-value-bounded-cache.md`.
     pub fn mc64_cache_hit_count(&self) -> usize {
         self.mc64_cache_hit_count
+    }
+
+    /// Issue #52 (Phase A): snapshot of per-`factor()` diagnostic
+    /// state. `None` until the first `factor()` call that ends with
+    /// a stored factor (`Success`, `WrongInertia`, or `Singular`
+    /// from a `PartialSingular` scaling).
+    ///
+    /// Returning by value rather than by reference because the
+    /// snapshot is assembled on demand from already-stored fields —
+    /// no `FactorStats` instance is held inside `Solver`. Cost is
+    /// one struct copy and `SparseFactors::factor_nnz()` (O(number
+    /// of supernodes), no allocation).
+    pub fn last_factor_stats(&self) -> Option<FactorStats> {
+        let nnz_a = self.last_nnz_a?;
+        let pattern_reused = self.last_pattern_reused?;
+        let factors = self.last_factors.as_ref()?;
+        let inertia = self.last_inertia.as_ref()?.clone();
+        let nnz_l = factors.factor_nnz();
+        // nnz_a == 0 ⇒ n == 0 (empty matrix). Pin fill_ratio to 0.0
+        // rather than NaN so downstream consumers can compare it
+        // without special-casing the empty case.
+        let fill_ratio = if nnz_a == 0 {
+            0.0
+        } else {
+            nnz_l as f64 / nnz_a as f64
+        };
+        // For min/max pivot, mirror the existing accessors' fallback
+        // (0.0 when no eliminated pivots exist — the n == 0 case).
+        let min_abs_pivot = factors.min_pivot_magnitude().unwrap_or(0.0);
+        let max_abs_pivot = factors.max_pivot_magnitude().unwrap_or(0.0);
+        let scaling_info = factors.scaling_info.clone();
+        Some(FactorStats {
+            nnz_a,
+            nnz_l,
+            fill_ratio,
+            inertia,
+            min_abs_pivot,
+            max_abs_pivot,
+            pattern_reused,
+            scaling_info,
+        })
     }
 
     /// Drop the cached symbolic factorisation and its associated

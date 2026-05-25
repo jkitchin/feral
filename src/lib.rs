@@ -35,5 +35,5 @@ pub use numeric::solve::{
     solve_sparse, solve_sparse_refined, solve_sparse_refined_with_diagnostics,
     RefinementDiagnostics, RefinementStep,
 };
-pub use numeric::solver::{FactorStatus, QualityLevel, Solver};
+pub use numeric::solver::{FactorStats, FactorStatus, QualityLevel, Solver};
 pub use sparse::csc::{CscMatrix, CscPattern};
