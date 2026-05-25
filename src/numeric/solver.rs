@@ -15,7 +15,7 @@ use crate::inertia::Inertia;
 use crate::numeric::condition::estimate_condition_1norm;
 use crate::numeric::factorize::{
     factorize_multifrontal_parallel_with_workspace, factorize_multifrontal_with_workspace,
-    FactorWorkspace, NumericParams, SparseFactors,
+    FactorWorkspace, NumericParams, ProfileReport, Profiler, SparseFactors,
 };
 use crate::numeric::solve::{solve_sparse, solve_sparse_many, solve_sparse_refined};
 use crate::scaling::{
@@ -24,7 +24,51 @@ use crate::scaling::{
 };
 use crate::sparse::csc::CscMatrix;
 use crate::symbolic::supernode::SupernodeParams;
-use crate::symbolic::{symbolic_factorize_with_method, OrderingMethod, SymbolicFactorization};
+use crate::symbolic::{
+    symbolic_factorize_with_method, OrderingMethod, SymbolicFactorization, SymbolicProfileReport,
+    SymbolicProfiler,
+};
+use std::sync::{Arc, Mutex};
+
+/// Snapshot of per-`factor()` diagnostic state for issue #52
+/// (opt-in instrumentation). Phase A surface — every field is read
+/// off state `Solver` already maintains, so producing this snapshot
+/// is O(1) work and the live code path that updates it costs two
+/// integer writes per `factor()` regardless of whether any caller
+/// ever reads it.
+///
+/// `None` returned by [`Solver::last_factor_stats`] until the first
+/// `factor()` call that ends with a stored factor (`Success`,
+/// `Singular`-with-partial, or `WrongInertia`). Hard failures
+/// (`FatalError`, `Err(NumericallyRankDeficient)`) clear the
+/// snapshot alongside the existing `last_factors` / `last_inertia`
+/// reset, so a stale stats blob cannot survive a failed retry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FactorStats {
+    /// `CscMatrix::nnz()` of the matrix passed to `factor()`.
+    pub nnz_a: usize,
+    /// `SparseFactors::factor_nnz()` — nnz of the stored `L` factor.
+    pub nnz_l: usize,
+    /// `nnz_l / nnz_a`. Quick fill-in proxy; values < 10 on KKT-style
+    /// systems indicate a healthy ordering.
+    pub fill_ratio: f64,
+    /// Inertia of the factored matrix. Mirrors [`Solver::inertia`].
+    pub inertia: Inertia,
+    /// Minimum `|pivot|` over eliminated 1×1 / 2×2 blocks. Mirrors
+    /// [`Solver::min_pivot_magnitude`].
+    pub min_abs_pivot: f64,
+    /// Maximum `|pivot|`. Mirrors [`Solver::max_pivot_magnitude`].
+    pub max_abs_pivot: f64,
+    /// `true` iff this `factor()` reused the cached symbolic
+    /// factorisation (the previous factor's pattern fingerprint
+    /// matched the current matrix). The first `factor()` on a
+    /// fresh `Solver`, and the first `factor()` after a pattern
+    /// change, both report `false`.
+    pub pattern_reused: bool,
+    /// Scaling outcome of the numeric phase. Mirrors
+    /// [`Solver::scaling_info`].
+    pub scaling_info: crate::scaling::ScalingInfo,
+}
 
 /// Result of a single `Solver::factor` attempt.
 #[derive(Debug)]
@@ -250,6 +294,40 @@ pub struct Solver {
     ///
     /// Cleared on pattern change alongside [`Solver::mc64_scaling_cache`].
     auto_picked_strategy: Option<ScalingStrategy>,
+    /// Issue #52: `nnz_a` of the matrix passed to the most recent
+    /// `factor()` call that ended with a stored factor. `None`
+    /// before the first such call and after any hard-failure
+    /// `factor()`. Written unconditionally — Phase A of issue #52
+    /// has no runtime gate (the cost of one `usize` write is
+    /// cheaper than the gating check would be).
+    last_nnz_a: Option<usize>,
+    /// Issue #52: whether the most recent `factor()` reused the
+    /// cached symbolic factorisation (pattern fingerprint matched
+    /// the prior call's). Sampled at `factor()` entry, before the
+    /// cache-miss invalidation block. `None` until the first
+    /// `factor()` that stores a factor.
+    last_pattern_reused: Option<bool>,
+    /// Issue #52 (Phase B): user opt-in for the diagnostic
+    /// profilers. Default `false`. Flipped on via
+    /// [`Solver::with_profiling`]. When `false`, neither
+    /// `last_profiler` nor `last_symbolic_profiler` is ever
+    /// constructed, the [`NumericParams::profiler`] field stays
+    /// `None`, and the existing zero-overhead `is_none()` gates in
+    /// the multifrontal driver fire as before.
+    profiling_enabled: bool,
+    /// Issue #52 (Phase B): numeric-phase profiler from the most
+    /// recent `factor()` call. `Some` only when
+    /// `profiling_enabled = true` and a `factor()` has run since
+    /// `with_profiling(true)` was set. Replaced (not appended to)
+    /// on every `factor()` call so the report reflects a single
+    /// invocation rather than accumulating across calls.
+    last_profiler: Option<Arc<Mutex<Profiler>>>,
+    /// Issue #52 (Phase B): symbolic-phase profiler from the most
+    /// recent `factor()` that re-ran symbolic analysis (cache miss).
+    /// Set to `None` on cache-hit factors so callers can disambiguate
+    /// "symbolic phase skipped" from "symbolic phase ran but produced
+    /// no data" — pinned by test `b3_symbolic_profile_report_only_on_cache_miss_factor`.
+    last_symbolic_profiler: Option<Arc<Mutex<SymbolicProfiler>>>,
 }
 
 impl Solver {
@@ -283,6 +361,11 @@ impl Solver {
             mc64_scaling_cache: None,
             mc64_cache_hit_count: 0,
             auto_picked_strategy: None,
+            last_nnz_a: None,
+            last_pattern_reused: None,
+            profiling_enabled: false,
+            last_profiler: None,
+            last_symbolic_profiler: None,
         }
     }
 
@@ -408,6 +491,64 @@ impl Solver {
         self.mc64_cache_enabled = on;
         if !on {
             self.mc64_scaling_cache = None;
+        }
+        self
+    }
+
+    /// Issue #52 (Phase B): opt into per-`factor()` diagnostic
+    /// profiling. Default `false`.
+    ///
+    /// When `true`, every subsequent [`Solver::factor`] call
+    /// allocates a fresh per-call `Arc<Mutex<Profiler>>`
+    /// (numeric phase) and — on symbolic cache miss only — a
+    /// `Arc<Mutex<SymbolicProfiler>>` (symbolic phase), wires them
+    /// through the existing `NumericParams::profiler` /
+    /// `SupernodeParams::symbolic_profiler` injection points, and
+    /// makes the resulting reports available via
+    /// [`Solver::profile_report`] and
+    /// [`Solver::symbolic_profile_report`].
+    ///
+    /// When `false` (the default), neither profiler is ever
+    /// constructed and the existing `is_none()` gates in the
+    /// multifrontal and symbolic drivers fire on the cold path —
+    /// the live code path is byte-identical to a pre-issue-52
+    /// build. This is the contract the issue motivates and the
+    /// plan in `dev/plans/issue-52-opt-in-stats.md` pins.
+    ///
+    /// Cost when enabled (measured by `benches/issue52_overhead.rs`
+    /// on tridiagonal SPDs, sequential driver, 30 samples × 3 s):
+    ///
+    /// | n    | default-off | with_profiling(true) | delta  |
+    /// |------|-------------|----------------------|--------|
+    /// |   64 | 257.6 µs    | 258.9 µs             | +0.5%  |
+    /// |  256 | 345.2 µs    | 347.0 µs             | +0.5%  |
+    /// | 1024 | 714.7 µs    | 709.1 µs             | -0.8%  |
+    ///
+    /// All three points sit inside criterion's noise band on the
+    /// dev machine, i.e. the per-supernode `Instant::now()` pair
+    /// plus the uncontended `Arc<Mutex<Profiler>>` push is below
+    /// our measurement floor on tridiagonal workloads. The
+    /// parallel driver pays the same per-supernode cost but the
+    /// lock is contended across rayon workers; engineering a
+    /// thread-local accumulator is deferred (plan §B2b) and is
+    /// the escape hatch if a real IPM workload shows > 1%
+    /// regression with profiling on.
+    ///
+    /// Default-off vs the pre-issue-52 `main` baseline (same bench,
+    /// same machine) is within ±1.2% across all three n — i.e. the
+    /// "default-off is byte-identical" contract holds empirically
+    /// to within the noise floor.
+    ///
+    /// Toggling `false → true` does not invalidate any cached
+    /// state. Toggling `true → false` drops the previously
+    /// recorded profilers, so a subsequent `profile_report()` call
+    /// returns `None`. This mirrors how `with_mc64_cache(false)`
+    /// drops the MC64 cache.
+    pub fn with_profiling(mut self, on: bool) -> Self {
+        self.profiling_enabled = on;
+        if !on {
+            self.last_profiler = None;
+            self.last_symbolic_profiler = None;
         }
         self
     }
@@ -597,6 +738,33 @@ impl Solver {
         // Step 1: pattern fingerprint.
         let fp = PatternFingerprint::of(matrix);
 
+        // Issue #52 (Phase B): rotate the per-call profiler arcs.
+        // Always reset `last_symbolic_profiler` (the symbolic block
+        // below may or may not run); it stays `None` on cache hits.
+        // The numeric `last_profiler` is replaced with a fresh arc
+        // when profiling is enabled — the report reflects this single
+        // `factor()` call, not the accumulation across calls. Both
+        // stay `None` when `profiling_enabled = false`, in which case
+        // every gate downstream short-circuits on the cold path.
+        self.last_symbolic_profiler = None;
+        self.last_profiler = if self.profiling_enabled {
+            Some(Arc::new(Mutex::new(Profiler::new())))
+        } else {
+            None
+        };
+
+        // Issue #52 (Phase A): sample the symbolic-cache-hit signal
+        // *before* the cache-miss invalidation below clears
+        // `last_pattern_fingerprint`. `last_symbolic` is kept in
+        // lockstep with `last_pattern_fingerprint` (both set together
+        // after a successful symbolic, both cleared together in the
+        // invalidation block and in `invalidate_symbolic_cache`), so a
+        // matching fingerprint guarantees the cached symbolic will be
+        // reused on this call. Sampling at entry — rather than at the
+        // success branch — keeps the signal honest even if downstream
+        // work fails after the symbolic has already been reused.
+        let pattern_reused = self.last_pattern_fingerprint == Some(fp);
+
         // Step 2: invalidate cache on pattern change.
         if self.last_pattern_fingerprint != Some(fp) {
             self.last_symbolic = None;
@@ -616,7 +784,25 @@ impl Solver {
 
         // Step 3: ensure symbolic is cached.
         if self.last_symbolic.is_none() {
-            match symbolic_factorize_with_method(matrix, &self.snode_params, self.ordering) {
+            // Issue #52 (Phase B): when profiling is enabled, inject
+            // a fresh `Arc<Mutex<SymbolicProfiler>>` into a per-call
+            // clone of `snode_params`. The clone is needed because
+            // `symbolic_factorize_with_method` takes `&SupernodeParams`
+            // and the field on `Solver` must keep its caller-supplied
+            // configuration intact across factor() calls. When
+            // profiling is off, we pass `&self.snode_params` directly
+            // — zero allocation, byte-identical to pre-issue-52
+            // behavior.
+            let result = if self.profiling_enabled {
+                let arc = Arc::new(Mutex::new(SymbolicProfiler::new()));
+                self.last_symbolic_profiler = Some(Arc::clone(&arc));
+                let mut sp = self.snode_params.clone();
+                sp.symbolic_profiler = Some(arc);
+                symbolic_factorize_with_method(matrix, &sp, self.ordering)
+            } else {
+                symbolic_factorize_with_method(matrix, &self.snode_params, self.ordering)
+            };
+            match result {
                 Ok(sym) => {
                     self.symbolic_call_count += 1;
                     self.last_symbolic = Some(sym);
@@ -770,6 +956,18 @@ impl Solver {
         };
         if scaling_cache_hit {
             self.mc64_cache_hit_count += 1;
+        }
+
+        // Issue #52 (Phase B): inject the per-call numeric profiler
+        // into `effective_params` so the multifrontal drivers
+        // accumulate per-supernode timings. Cloning the Arc bumps a
+        // refcount only; the underlying profiler stays at the
+        // `self.last_profiler` location so the report accessor can
+        // read it after factor() returns. No-op when profiling is off
+        // (`last_profiler` is `None`, the gate in the driver fires
+        // on the cold path).
+        if let Some(arc) = self.last_profiler.as_ref() {
+            effective_params.profiler = Some(Arc::clone(arc));
         }
 
         // Step 4: numeric factor via the pooled workspace; map errors.
@@ -949,6 +1147,10 @@ impl Solver {
                 }
                 self.last_factors = Some(factors);
                 self.last_inertia = Some(inertia.clone());
+                // Issue #52 (Phase A): record stats alongside the
+                // factor itself. Two unconditional integer writes.
+                self.last_nnz_a = Some(matrix.nnz());
+                self.last_pattern_reused = Some(pattern_reused);
                 if partial_singular {
                     FactorStatus::Singular
                 } else if let Some(expected) = check_inertia {
@@ -970,11 +1172,15 @@ impl Solver {
             Err(FeralError::NumericallyRankDeficient) => {
                 self.last_factors = None;
                 self.last_inertia = None;
+                self.last_nnz_a = None;
+                self.last_pattern_reused = None;
                 FactorStatus::Singular
             }
             Err(e) => {
                 self.last_factors = None;
                 self.last_inertia = None;
+                self.last_nnz_a = None;
+                self.last_pattern_reused = None;
                 FactorStatus::FatalError(e)
             }
         }
@@ -1254,6 +1460,91 @@ impl Solver {
     /// per-factor state. See `dev/plans/mc64-value-bounded-cache.md`.
     pub fn mc64_cache_hit_count(&self) -> usize {
         self.mc64_cache_hit_count
+    }
+
+    /// Issue #52 (Phase A): snapshot of per-`factor()` diagnostic
+    /// state. `None` until the first `factor()` call that ends with
+    /// a stored factor (`Success`, `WrongInertia`, or `Singular`
+    /// from a `PartialSingular` scaling).
+    ///
+    /// Returning by value rather than by reference because the
+    /// snapshot is assembled on demand from already-stored fields —
+    /// no `FactorStats` instance is held inside `Solver`. Cost is
+    /// one struct copy and `SparseFactors::factor_nnz()` (O(number
+    /// of supernodes), no allocation).
+    pub fn last_factor_stats(&self) -> Option<FactorStats> {
+        let nnz_a = self.last_nnz_a?;
+        let pattern_reused = self.last_pattern_reused?;
+        let factors = self.last_factors.as_ref()?;
+        let inertia = self.last_inertia.as_ref()?.clone();
+        let nnz_l = factors.factor_nnz();
+        // nnz_a == 0 ⇒ n == 0 (empty matrix). Pin fill_ratio to 0.0
+        // rather than NaN so downstream consumers can compare it
+        // without special-casing the empty case.
+        let fill_ratio = if nnz_a == 0 {
+            0.0
+        } else {
+            nnz_l as f64 / nnz_a as f64
+        };
+        // For min/max pivot, mirror the existing accessors' fallback
+        // (0.0 when no eliminated pivots exist — the n == 0 case).
+        let min_abs_pivot = factors.min_pivot_magnitude().unwrap_or(0.0);
+        let max_abs_pivot = factors.max_pivot_magnitude().unwrap_or(0.0);
+        let scaling_info = factors.scaling_info.clone();
+        Some(FactorStats {
+            nnz_a,
+            nnz_l,
+            fill_ratio,
+            inertia,
+            min_abs_pivot,
+            max_abs_pivot,
+            pattern_reused,
+            scaling_info,
+        })
+    }
+
+    /// Issue #52 (Phase B): numeric-phase profile report from the
+    /// most recent `factor()` call. Returns `None` if profiling is
+    /// disabled, if no `factor()` has run since `with_profiling(true)`
+    /// was set, or if the per-call `Mutex` is poisoned (the latter
+    /// only possible after a panic while the profiler is held — the
+    /// driver never panics under the lock, so this is a defensive
+    /// fall-through).
+    ///
+    /// The returned `ProfileReport` is a snapshot — repeated calls
+    /// against the same `factor()` produce identical reports.
+    ///
+    /// Note: the profiler is wired into
+    /// `factorize_multifrontal_supernodal_with_workspace` only.
+    /// Matrices that route through the tiny path (`n ≤ 16`) or the
+    /// dense fast path (density ≥ 25%, `n ≤ 128`) return
+    /// `Some(ProfileReport)` with `n_supernodes = 0` and
+    /// `total_us = 0` — the per-supernode loop did not run. A
+    /// `Some` with zero counters is the correct "took the fast
+    /// path" signal for callers who want to attribute solve time
+    /// across factor routes.
+    pub fn profile_report(&self) -> Option<ProfileReport> {
+        let arc = self.last_profiler.as_ref()?;
+        // No `unwrap()` per the CLAUDE.md hard rule on src/. Poisoned
+        // mutex is silently dropped — same policy the existing
+        // Profiler doc enshrines.
+        arc.lock().ok().map(|guard| guard.report())
+    }
+
+    /// Issue #52 (Phase B): symbolic-phase profile report from the
+    /// most recent `factor()` that re-ran the symbolic analysis
+    /// (cache miss). Returns `None` if profiling is disabled, if no
+    /// cache-miss `factor()` has run since `with_profiling(true)`
+    /// was set, or on a `factor()` whose symbolic was served from
+    /// the cache (the symbolic phase did not run, so there is
+    /// nothing to report). Cache-hit returning `None` is the
+    /// disambiguator pounce wants: "did the symbolic phase run, and
+    /// if so what did it cost?"
+    ///
+    /// Poisoned mutex policy matches [`Solver::profile_report`].
+    pub fn symbolic_profile_report(&self) -> Option<SymbolicProfileReport> {
+        let arc = self.last_symbolic_profiler.as_ref()?;
+        arc.lock().ok().map(|guard| guard.report())
     }
 
     /// Drop the cached symbolic factorisation and its associated
