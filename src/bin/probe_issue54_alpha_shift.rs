@@ -160,8 +160,8 @@ fn run_sweep(
     );
     np.scaling = scaling;
     println!(
-        " {:<10} {:<8} {:<8} {:<8} {:<10} {:<10} status        Δneg",
-        "alpha", "neg", "zero", "pos", "neg+zero", "rel_resid",
+        " {:<10} {:<8} {:<8} {:<8} {:<10} {:<10} {:<10} status        Δneg",
+        "alpha", "neg", "zero", "pos", "neg+zero", "rel_resid", "rel_resid_ir",
     );
     let mut last_neg: Option<isize> = None;
     let mut weyl_violations = 0;
@@ -184,6 +184,14 @@ fn run_sweep(
         }
         let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
         let rel_resid = match solver.solve(&b) {
+            Ok(x) => {
+                let ax = spmv_sym_lower(&a_shift, &x);
+                let r2: f64 = ax.iter().zip(&b).map(|(a, b)| (a - b).powi(2)).sum();
+                r2.sqrt() / b_norm.max(1e-300)
+            }
+            Err(_) => f64::NAN,
+        };
+        let rel_resid_ir = match solver.solve_refined(&a_shift, &b) {
             Ok(x) => {
                 let ax = spmv_sym_lower(&a_shift, &x);
                 let r2: f64 = ax.iter().zip(&b).map(|(a, b)| (a - b).powi(2)).sum();
@@ -220,13 +228,14 @@ fn run_sweep(
                     }
                 };
                 println!(
-                    " {:<10.1e} {:<8} {:<8} {:<8} {:<10} {:<10.3e} {:?}{}{}",
+                    " {:<10.1e} {:<8} {:<8} {:<8} {:<10} {:<10.3e} {:<10.3e} {:?}{}{}",
                     alpha,
                     inertia.negative,
                     inertia.zero,
                     inertia.positive,
                     inertia.negative + inertia.zero,
                     rel_resid,
+                    rel_resid_ir,
                     s,
                     neg_str,
                     nz_str,
@@ -337,6 +346,31 @@ fn main() {
         &alphas,
         ZeroPivotAction::ForceAccept,
         0.01,
+        default_scaling.clone(),
+    );
+
+    // (c2) Real NumericParams::default() pivot_threshold = 1e-8.
+    // This is the configuration pounce actually runs (issue #2 fix).
+    run_sweep(
+        "ForceAccept pivtol=1e-8 (true default)",
+        &a0,
+        "x-block α·diag(pos-diag rows)",
+        Some(&pos_mask),
+        &alphas,
+        ZeroPivotAction::ForceAccept,
+        1e-8,
+        default_scaling.clone(),
+    );
+
+    // (c3) Mid-strength pivot_threshold = 1e-4.
+    run_sweep(
+        "ForceAccept pivtol=1e-4 (mid)",
+        &a0,
+        "x-block α·diag(pos-diag rows)",
+        Some(&pos_mask),
+        &alphas,
+        ZeroPivotAction::ForceAccept,
+        1e-4,
         default_scaling.clone(),
     );
 

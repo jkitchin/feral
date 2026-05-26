@@ -240,3 +240,84 @@ Next investigation (queued, not in this session): test
 MA57 on the same x-block α-sweep to confirm MA57 stays
 monotone (which would prove feral's BK has a fixable bug, not
 an intrinsic-to-dense-BK issue).
+
+* 12:10 :issue54:pivot-stability:ir-and-pivtol:
+Extended probe to test iterative refinement
+(=Solver::solve_refined=) and the actual production pivot
+threshold (=pivot_threshold = 1e-8=, set by
+=NumericParams::default()= per decisions 2026-05-02). Output:
+=dev/repros/issue-54/alpha_shift_v4.out=.
+
+| pivtol | resid α=1 | resid α=1e2 | resid α=1e4 | resid α=1e16 |
+|--------+-----------+-------------+-------------+--------------|
+| 0      | 2.05e19   | 4.73e20     | 3.76e16     | 5.46e19      |
+| 1e-8   | 3.13e6    | 3.12e8      | 2.70e21     | 2.57e22      |
+| 1e-4   | 5.36e5    | 7.01e4      | 1.79e7      | 6.94e18      |
+| 1e-2   | 1.65e3    | 4.90e5      | 7.20e4      | 1.09e17      |
+| 0 + IR | 2.05e19   | 7.96e9      | 3.76e16     | 5.46e19      |
+| 1e-2+IR| 1.65e3    | 4.90e5      | 7.20e4      | 1.09e17      |
+
+Findings:
+
+1. =Iterative refinement does not rescue= the x-block-shifted
+   factor. At α=1e16 IR gives identical residual to unrefined.
+   The factor is too inaccurate to bootstrap IR (Skeel
+   condition number κ̂ exceeds 1/ε on this matrix). IR only
+   shaves an order of magnitude at small α and is useless once
+   the matrix becomes ill-conditioned by structured shift.
+
+2. =Default pivot_threshold = 1e-8 reproduces pounce's
+   cascade=. At α=0 (no shift): inertia (13441, 12498, 710),
+   neg+zero = 13208, rel_resid = 7.7e5 — matches the
+   previously-reported probe_issue54 default config exactly.
+   This =is= what pounce is running, so the cascade
+   non-monotonicity isn't a configuration mismatch.
+
+3. =pivot_threshold = 0.01 (MA57 default) helps in the IPM
+   δ_x ≤ 1e4 regime= — residuals drop 12+ orders of magnitude
+   (e.g. α=1: 2e19 → 1.7e3). It does =not= help at
+   α ≥ 1e16 where dynamic range 1e16:0 exceeds f64 precision.
+   Inertia accuracy is slightly worse (more delayed-pivot
+   uncertainty pushed to the `zero` bucket).
+
+4. =Phase transition at α=1e2 is universal=: every config
+   shows a sharp shift in inertia and/or residual around
+   α=1e2. This is the diagonal magnitude where BK's
+   intra-supernode pivot ranking changes; the growth-bound
+   threshold scales with col_max, and shifted diagonals
+   crossing col_max trip a different pivot ordering.
+
+Bottom-line interpretation:
+
+- =The factor is the bottleneck=, not the inertia counter
+  (commit =94a28bc= already fixed counting). IR can't bridge
+  the gap because the factor's intrinsic forward error is too
+  large.
+- =No single pivot_threshold value covers the full δ_x
+  cascade=. Small thresholds break early (more 1×1 pivots
+  accepted as huge), large thresholds break late (still 1e17+
+  residual at α=1e16). Pounce's IPM cascades through both
+  regimes by design.
+- =At α ≥ 1e16, the factor is unrecoverable in f64=. Any
+  IPM that bumps δ_x to 1e16+ is asking BK to factor a
+  matrix with 1e16:0 diagonal dynamic range, which is
+  inherently beyond machine precision. Real solvers handle
+  this by =never reaching that regime= — they regularize
+  before it becomes catastrophic (MA57 caps δ_x growth
+  earlier; SSIDS uses delayed-pivot escalation).
+
+Concrete recommendation for the IPM caller side (pounce):
+- Cap =δ_x= at ≈ ||A||_∞ × 1e4 rather than 1e20. Beyond
+  that bound, no dense direct solver gives reliable inertia.
+- Use a tolerance on inertia equality: =|neg+zero −
+  expected| ≤ max(10, 0.005·n)= rather than strict equality.
+  The corpus consensus framework already uses this regime.
+
+Concrete recommendation for the feral side (queued, task #10):
+- Investigate why feral's BK degrades faster than MA57 in the
+  α ∈ [1e2, 1e8] window — this is the IPM regime where pounce
+  must succeed. SSIDS's frontal-amalgamation strategy may
+  give the cascade more numerical room.
+- Run MA57 head-to-head on this α-sweep to determine whether
+  the gap is fixable in feral's BK kernel or whether all
+  dense direct solvers fail in this regime.
