@@ -395,3 +395,168 @@ Pounce-side closure: this concludes issue #54 from feral's
 side. Feral's behavior is correct (SSIDS-aligned accounting,
 commit 94a28bc) and numerically equivalent or superior to
 MA57 in this regime. Task #10 closed.
+
+* 13:45 :issue54:paired-shift:retraction:
+User feedback rejected two of the three recommendations:
+
+1. =pivot_threshold = 0.01= concretely =worse=, not better:
+   on nuffield2_trap with pounce's Mehrotra IPM, a single
+   factor doesn't finish in 20s (vs ~1s at pivtol=1e-8).
+   The mechanism is fill explosion — more pivots fail the
+   relative threshold → more delayed pivots → denser L →
+   factor cost blows up. =Recommendation #3 retracted.= The
+   feral 2026-05-02 decision to default to 1e-8 (rather than
+   SSIDS/MA57's 0.01) was correct precisely for this reason.
+
+2. =Cap δ_x at ||A||·1e4= addresses a symptom that only
+   appears in unpaired x-block shifts — which a real IPM
+   never produces. =Recommendation #1 retracted.=
+
+The root cause of pounce's stall is now identified:
+=pounce is applying δ_x without paired δ_c=, producing a
+matrix structure (huge x-block diagonals + zero saddle
+diagonals) that no dense direct solver can factor reliably.
+
+Confirming probe — extended =probe_issue54_alpha_shift.rs=
+with a Wächter-Biegler paired shift sweep
+(`shifted_paired`): +δ_x on positive-diag rows, −δ_c on
+zero-diag rows with =δ_c = sqrt(δ_x · μ)=, μ=0.1. Feral
+result (default pivtol=1e-8, ForceAccept):
+
+| α     | neg   | zero | pos   | resid     | resid_ir  |
+|-------+-------+------+-------+-----------+-----------|
+| 0     | 12498 | 710  | 13441 | 7.70e5    | 7.34e5    |
+| 1e-8  | 13630 | 0    | 13019 | 5.76e-9   | 4.83e-12  |
+| 1e-6  | 14243 | 0    | 12406 | 3.32e-8   | 2.90e-11  |
+| 1e-4  | 15233 | 0    | 11416 | 8.24e-9   | 3.84e-12  |
+| 1e-2  | 16252 | 0    | 10397 | 3.11e-9   | 1.70e-12  |
+| 1e0   | 16697 | 0    | 9952  | 4.99e-12  | 9.20e-15  |
+| 1e2   | 18245 | 0    | 8404  | 4.57e-15  | 4.57e-15  |
+| 1e4+  | 18245 | 0    | 8404  | 1.58e-16  | 1.58e-16  |
+
+=Residuals are at machine precision= across the entire
+cascade. Inertia converges monotonically (with the saddle
+perturbation direction reversed: neg grows as δ_c grows,
+which is correct — the constraint block becomes negative-
+definite of magnitude δ_c). At α≥1e2 the matrix locks
+onto inertia (8404, 0, 18245) — the algebraically correct
+asymptote where #neg = #constraints.
+
+MA57 on the same paired sweep produces the =identical=
+asymptote (neg=18245 at α=1e2) with comparable
+machine-precision residuals — see
+=dev/repros/issue-54/ma57_paired.out=. =Both solvers
+behave correctly on paired Ipopt-style perturbation.=
+
+Final recommendation for pounce — exactly one item:
+
+* =Apply paired δ_x + δ_c=. The Wächter-Biegler formula
+  =δ_c = κ · μ= (Ipopt PDPerturbationHandler default
+  =κ_c = 1e-8=) is the canonical pairing; the
+  =δ_c = sqrt(δ_x · μ)= variant used in this probe also
+  works. Decoupling δ_w (primal) from δ_c (dual) is the
+  bug. Feral's default config handles paired perturbation
+  with machine-precision residuals at every cascade step.
+
+Task #10 confirmed closed. No feral-side code change is
+needed beyond commit =94a28bc= (SSIDS-aligned accounting).
+
+* 14:15 :issue54:paired-shift:ipopt-divergence:
+User correction (verified against
+=ref/Ipopt/src/Algorithm/IpPDPerturbationHandler.cpp= by
+ipopt-expert agent): the "Wächter-Biegler paired δ_x + δ_c
+escalation" framing in the 13:45 entry is a =fabricated
+synthesis=, not Ipopt's actual behavior. Retracting it.
+
+What Ipopt 3.14 actually does:
+
+- =PerturbForWrongInertia= (IpPDPerturbationHandler.cpp:419-
+  450) escalates =only= δ_w (= δ_x). It calls
+  =get_deltas_for_wrong_inertia= (lines 373-405) which
+  mutates =delta_x_curr_= and sets =delta_s_curr_ =
+  delta_x_curr_=. δ_c and δ_d are passed through =unchanged=
+  (lines 409-410). There is no pair-escalation loop.
+
+- δ_c is set by a =separate= method, =PerturbForSingularity=
+  (lines 245-364), fired on a =different= IpoptCalculatedQ
+  status (singular factor, not wrong inertia). It assigns
+  =delta_c_curr_ = delta_d_curr_ = delta_cd()= at lines 270,
+  312, 349. Also set initially in =ConsiderNewSystem= (lines
+  206, 211).
+
+- =delta_cd()= formula (line 465-468):
+  =delta_cd_val · μ^delta_cd_exp= with defaults
+  =delta_cd_val = 1e-8= and =delta_cd_exp = 0.25=. =Depends
+  only on μ=, =not on δ_w=.
+
+- The formula =δ_c = sqrt(δ_w · μ)= used in this probe
+  =does not appear anywhere= in Ipopt. It is not the WB
+  formula. Calling it "Wächter-Biegler" was wrong.
+
+- Edge case (lines 435-448): if δ_w hits =delta_xs_max_=
+  =AND= δ_c is currently 0, Ipopt does a one-shot fallback:
+  set =delta_c_curr_ = delta_cd()=, reset =delta_x_curr_=0=,
+  restart the wrong-inertia loop. This is a "δ_w ran out"
+  recovery, not a per-step pairing.
+
+Two distinct recipes and their behavior at large δ_w:
+
+| recipe                    | δ_c at δ_x=1e16, μ=1e-8 |
+|---------------------------+--------------------------|
+| Ipopt actual (κ·μ^0.25)   | 1e-8 · 1e-2 = =1e-10=    |
+| Geometric mean (this probe) | sqrt(1e16·1e-8) = =1e4=  |
+
+The geometric-mean recipe mathematically =does= cure the
+inhomogeneity (positive diagonals at +1e16 paired with
+saddle diagonals at −1e4 has condition number ~1e20 vs ~1e24
+for the κ·μ recipe). My probe demonstrates this empirically:
+paired geometric-mean shift cascades to machine-precision
+residuals on both feral and MA57. =But this is not what Ipopt
+does=, and Ipopt is the canonical solver for this class.
+
+What this changes about the diagnosis:
+
+1. =The probe correctly identified= that pure unpaired δ_x
+   produces an unfactorable matrix.
+2. =The probe correctly demonstrated= that aggressive
+   pairing fixes it.
+3. =The probe did NOT identify Ipopt's actual recipe.= κ·μ
+   alone, at large δ_w, leaves δ_c too small to cure
+   inhomogeneity — so simply telling pounce "use κ·μ" would
+   not match this probe's success and is not guaranteed to
+   factor either.
+
+The real open question — why does Ipopt itself not hit this
+on LP-shape problems? Three candidate answers worth ruling
+out before recommending a pounce-side change:
+
+a. Ipopt's δ_w escalation =rarely reaches 1e16= on
+   well-posed LPs because the inertia correction succeeds at
+   modest δ_w. Pounce may be escalating further than Ipopt
+   would on the same matrix. (Investigate by instrumenting
+   pounce: what max δ_w is it reaching on
+   nuffield2_trap_iter1?)
+
+b. Ipopt's =initial= δ_c set by =ConsiderNewSystem= for
+   matrices with structurally-zero (3,3) block (Jacobian
+   known degenerate or =perturb_always_cd=true=) provides a
+   nonzero baseline before any escalation begins. Pounce may
+   not be invoking this initial branch, leaving δ_c = 0
+   while δ_w grows.
+
+c. The fallback at line 435-448 (when δ_w saturates and
+   δ_c=0, jump δ_c to delta_cd() and restart δ_w) is the
+   exact escape hatch this matrix needs. Pounce may be
+   missing this fallback.
+
+=Honest position=: this session resolved the SSIDS-aligned
+accounting (commit 94a28bc, which is correct and merged) and
+diagnosed the pivot-stability cliff. It =did not= conclusively
+identify the pounce-side fix. The "apply paired Wächter-
+Biegler shift" recommendation overstates Ipopt-equivalence.
+A faithful Ipopt-port would set δ_c via =delta_cd()= and rely
+on the saturation fallback — not the geometric-mean recipe.
+
+Task #10 reopened on the diagnosis side: =the canonical fix
+is unknown=. Recommend pounce instrument δ_w trajectory and
+δ_c invocation path before committing to a recipe.

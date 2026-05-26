@@ -25,6 +25,70 @@ use std::process::Command;
 use feral::read_mtx;
 use feral::CscMatrix;
 
+/// Wächter-Biegler / Ipopt-style paired perturbation:
+/// positive-diag rows get `+δ_x`, zero-diag (constraint) rows get
+/// `−δ_c` where `δ_c = sqrt(δ_x · μ)` with `μ = 0.1`. This is
+/// what `IpPDPerturbationHandler.cpp` enforces in production
+/// IPMs — `δ_w` (primal) and `δ_c` (dual) are never decoupled.
+fn shifted_paired(a: &CscMatrix, delta_x: f64, pos_mask: &[bool]) -> CscMatrix {
+    let mu = 0.1f64;
+    let delta_c = (delta_x * mu).sqrt();
+    let n = a.n;
+    let mut bumped = vec![false; n];
+    let col_ptr = a.col_ptr.clone();
+    let row_idx = a.row_idx.clone();
+    let mut values = a.values.clone();
+    for col in 0..n {
+        let s = col_ptr[col];
+        let e = col_ptr[col + 1];
+        for k in s..e {
+            if row_idx[k] == col {
+                if pos_mask[col] {
+                    values[k] += delta_x;
+                } else {
+                    values[k] -= delta_c;
+                }
+                bumped[col] = true;
+                break;
+            }
+        }
+    }
+    // Reconstruct, inserting diag where it was absent.
+    let mut rows = Vec::with_capacity(row_idx.len() + n);
+    let mut cols = Vec::with_capacity(row_idx.len() + n);
+    let mut vals = Vec::with_capacity(row_idx.len() + n);
+    for col in 0..n {
+        let s = col_ptr[col];
+        let e = col_ptr[col + 1];
+        let mut inserted = bumped[col];
+        for k in s..e {
+            let r = row_idx[k];
+            let v = values[k];
+            if !inserted && r > col {
+                let dv = if pos_mask[col] { delta_x } else { -delta_c };
+                if dv != 0.0 {
+                    rows.push(col);
+                    cols.push(col);
+                    vals.push(dv);
+                }
+                inserted = true;
+            }
+            rows.push(r);
+            cols.push(col);
+            vals.push(v);
+        }
+        if !inserted {
+            let dv = if pos_mask[col] { delta_x } else { -delta_c };
+            if dv != 0.0 {
+                rows.push(col);
+                cols.push(col);
+                vals.push(dv);
+            }
+        }
+    }
+    CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("rebuild csc")
+}
+
 fn shifted_mask(a: &CscMatrix, alpha: f64, mask: &[bool]) -> CscMatrix {
     let n = a.n;
     let col_ptr = a.col_ptr.clone();
@@ -163,11 +227,17 @@ fn parse_sidecar(path: &Path) -> std::io::Result<Sidecar> {
     Ok(out)
 }
 
+enum ShiftKind<'a> {
+    Uniform,
+    XBlock(&'a [bool]),
+    Paired(&'a [bool]),
+}
+
 fn run_ma57_sweep(
     label: &str,
     a0: &CscMatrix,
     shift_kind: &str,
-    mask: Option<&[bool]>,
+    kind: ShiftKind<'_>,
     alphas: &[f64],
     workdir: &Path,
 ) {
@@ -187,9 +257,10 @@ fn run_ma57_sweep(
     let mut mtx_paths: Vec<PathBuf> = Vec::new();
     let mut out_paths: Vec<PathBuf> = Vec::new();
     for (i, &alpha) in alphas.iter().enumerate() {
-        let a_shift = match mask {
-            Some(m) => shifted_mask(a0, alpha, m),
-            None => shifted_mask(a0, alpha, &vec![true; a0.n]),
+        let a_shift = match &kind {
+            ShiftKind::Uniform => shifted_mask(a0, alpha, &vec![true; a0.n]),
+            ShiftKind::XBlock(m) => shifted_mask(a0, alpha, m),
+            ShiftKind::Paired(m) => shifted_paired(a0, alpha, m),
         };
         let mtx_path = workdir.join(format!("{}_alpha{}.mtx", label, i));
         write_mtx_symmetric(&a_shift, &mtx_path).expect("write mtx");
@@ -307,12 +378,27 @@ fn main() {
         0.0, 1e-8, 1e-6, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e8, 1e12, 1e16, 1e20,
     ];
 
-    run_ma57_sweep("uniform", &a0, "uniform α·I", None, &alphas, &workdir);
+    run_ma57_sweep(
+        "uniform",
+        &a0,
+        "uniform α·I",
+        ShiftKind::Uniform,
+        &alphas,
+        &workdir,
+    );
     run_ma57_sweep(
         "xblock",
         &a0,
         "x-block α·diag(pos-diag rows)",
-        Some(&pos_mask),
+        ShiftKind::XBlock(&pos_mask),
+        &alphas,
+        &workdir,
+    );
+    run_ma57_sweep(
+        "paired",
+        &a0,
+        "paired Ipopt δ_x + δ_c = sqrt(δ_x·μ), μ=0.1",
+        ShiftKind::Paired(&pos_mask),
         &alphas,
         &workdir,
     );

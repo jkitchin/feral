@@ -1,0 +1,196 @@
+   Compiling feral v0.7.0 (/Users/jkitchin/projects/feral)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.54s
+     Running `target/release/probe_issue54_alpha_shift`
+matrix       = "dev/repros/issue-54/nuffield2_trap_iter1.mtx"
+n            = 26649
+|pos-diag|   = 8404
+|zero-diag|  = 18245
+
+=== ForceAccept pivtol=0 (default) | shift=uniform α·I | scaling=Auto ===
+ alpha      neg      zero     pos      neg+zero   rel_resid  rel_resid_ir status        Δneg
+ 0.0e0      12418    901      13330    13319      8.423e19   8.423e19   Success          
+ 1.0e-8     12382    0        14267    12382      8.800e-3   1.697e-9   Success Δ=  -36    Δnz= -937   
+ 1.0e-6     12267    0        14382    12267      1.207e-5   1.549e-10  Success Δ= -115    Δnz= -115   
+ 1.0e-4     11710    0        14939    11710      1.844e-8   2.945e-11  Success Δ= -557    Δnz= -557   
+ 1.0e-2     10697    0        15952    10697      5.760e-9   3.917e-12  Success Δ=-1013    Δnz=-1013   
+ 1.0e0      5000     0        21649    5000       7.906e-13  7.181e-14  Success Δ=-5697    Δnz=-5697   
+ 1.0e2      409      0        26240    409        8.893e-14  2.865e-15  Success Δ=-4591    Δnz=-4591   
+ 1.0e4      0        0        26649    0          1.818e-16  1.818e-16  Success Δ= -409    Δnz= -409   
+ 1.0e8      0        0        26649    0          1.758e-16  1.758e-16  Success Δ=   +0    Δnz=   +0   
+ 1.0e12     0        0        26649    0          1.491e-16  1.491e-16  Success Δ=   +0    Δnz=   +0   
+ 1.0e16     0        0        26649    0          1.321e-16  1.321e-16  Success Δ=   +0    Δnz=   +0   
+ 1.0e20     0        0        26649    0          1.069e-16  1.069e-16  Success Δ=   +0    Δnz=   +0   
+ summary: Weyl(neg-monotone) violations = 0, (neg+zero) violations = 0
+
+=== ForceAccept pivtol=0 (default) | shift=x-block α·diag(pos-diag rows) | scaling=Auto ===
+ alpha      neg      zero     pos      neg+zero   rel_resid  rel_resid_ir status        Δneg
+ 0.0e0      12418    901      13330    13319      8.423e19   8.423e19   Success          
+ 1.0e-8     12425    887      13337    13312      2.750e19   4.719e18   Success Δ=   +7 W! Δnz=   -7   
+ 1.0e-6     12422    893      13334    13315      9.839e17   6.092e17   Success Δ=   -3    Δnz=   +3 W!
+ 1.0e-4     12415    898      13336    13313      5.886e19   3.360e17   Success Δ=   -7    Δnz=   -2   
+ 1.0e-2     12430    891      13328    13321      1.784e18   1.784e18   Success Δ=  +15 W! Δnz=   +8 W!
+ 1.0e0      12420    890      13339    13310      2.051e19   2.051e19   Success Δ=  -10    Δnz=  -11   
+ 1.0e2      12483    820      13346    13303      4.730e20   7.962e9    Success Δ=  +63 W! Δnz=   -7   
+ 1.0e4      12412    895      13342    13307      3.763e16   3.763e16   Success Δ=  -71    Δnz=   +4 W!
+ 1.0e8      12406    916      13327    13322      2.202e23   1.129e12   Success Δ=   -6    Δnz=  +15 W!
+ 1.0e12     12398    922      13329    13320      2.092e26   2.092e26   Success Δ=   -8    Δnz=   -2   
+ 1.0e16     12437    886      13326    13323      5.456e19   5.456e19   Success Δ=  +39 W! Δnz=   +3 W!
+ 1.0e20     12391    918      13340    13309      1.573e36   2.266e25   Success Δ=  -46    Δnz=  -14   
+ summary: Weyl(neg-monotone) violations = 4, (neg+zero) violations = 5
+
+=== ForceAccept pivtol=1e-8 paired (Ipopt) | shift=paired δ_x + δ_c = sqrt(δ_x·μ), μ=0.1 | scaling=Auto ===
+ alpha      neg      zero     pos      neg+zero   rel_resid  rel_resid_ir status        Δneg
+ 0.0e0      12498    710      13441    13208      7.701e5    7.335e5    Success
+ 1.0e-8     13630    0        13019    13630      5.758e-9   4.825e-12  Success
+ 1.0e-6     14243    0        12406    14243      3.317e-8   2.899e-11  Success
+ 1.0e-4     15233    0        11416    15233      8.237e-9   3.843e-12  Success
+ 1.0e-2     16252    0        10397    16252      3.111e-9   1.697e-12  Success
+ 1.0e0      16697    0        9952     16697      4.992e-12  9.198e-15  Success
+ 1.0e2      18245    0        8404     18245      4.573e-15  4.573e-15  Success
+ 1.0e4      18245    0        8404     18245      3.788e-16  3.788e-16  Success
+ 1.0e8      18245    0        8404     18245      1.807e-16  1.807e-16  Success
+ 1.0e12     18245    0        8404     18245      1.683e-16  1.683e-16  Success
+ 1.0e16     18245    0        8404     18245      1.576e-16  1.576e-16  Success
+ 1.0e20     18245    0        8404     18245      1.535e-16  1.535e-16  Success
+
+=== PerturbToEps pivtol=0 abs_floor=1e-12 | shift=uniform α·I | scaling=Auto ===
+ alpha      neg      zero     pos      neg+zero   rel_resid  rel_resid_ir status        Δneg
+ 0.0e0      12547    0        14102    12547      8.423e19   8.423e19   Success          
+ 1.0e-8     12382    0        14267    12382      8.800e-3   1.697e-9   Success Δ= -165    Δnz= -165   
+ 1.0e-6     12267    0        14382    12267      1.207e-5   1.549e-10  Success Δ= -115    Δnz= -115   
+ 1.0e-4     11710    0        14939    11710      1.844e-8   2.945e-11  Success Δ= -557    Δnz= -557   
+ 1.0e-2     10697    0        15952    10697      5.760e-9   3.917e-12  Success Δ=-1013    Δnz=-1013   
+ 1.0e0      5000     0        21649    5000       7.906e-13  7.181e-14  Success Δ=-5697    Δnz=-5697   
+ 1.0e2      409      0        26240    409        8.893e-14  2.865e-15  Success Δ=-4591    Δnz=-4591   
+ 1.0e4      0        0        26649    0          1.818e-16  1.818e-16  Success Δ= -409    Δnz= -409   
+ 1.0e8      0        0        26649    0          1.758e-16  1.758e-16  Success Δ=   +0    Δnz=   +0   
+ 1.0e12     0        0        26649    0          1.491e-16  1.491e-16  Success Δ=   +0    Δnz=   +0   
+ 1.0e16     0        0        26649    0          1.321e-16  1.321e-16  Success Δ=   +0    Δnz=   +0   
+ 1.0e20     0        0        26649    0          1.069e-16  1.069e-16  Success Δ=   +0    Δnz=   +0   
+ summary: Weyl(neg-monotone) violations = 0, (neg+zero) violations = 0
+
+=== PerturbToEps pivtol=0 abs_floor=1e-12 | shift=x-block α·diag(pos-diag rows) | scaling=Auto ===
+ alpha      neg      zero     pos      neg+zero   rel_resid  rel_resid_ir status        Δneg
+ 0.0e0      12547    0        14102    12547      8.423e19   8.423e19   Success          
+ 1.0e-8     12534    0        14115    12534      2.750e19   5.290e18   Success Δ=  -13    Δnz=  -13   
+ 1.0e-6     12543    0        14106    12543      1.066e18   5.720e17   Success Δ=   +9 W! Δnz=   +9 W!
+ 1.0e-4     12553    0        14096    12553      5.886e19   3.349e17   Success Δ=  +10 W! Δnz=  +10 W!
+ 1.0e-2     12545    0        14104    12545      1.818e18   1.818e18   Success Δ=   -8    Δnz=   -8   
+ 1.0e0      12549    0        14100    12549      2.137e19   2.137e19   Success Δ=   +4 W! Δnz=   +4 W!
+ 1.0e2      12699    0        13950    12699      4.730e20   1.799e14   Success Δ= +150 W! Δnz= +150 W!
+ 1.0e4      12662    0        13987    12662      3.704e16   3.704e16   Success Δ=  -37    Δnz=  -37   
+ 1.0e8      12634    0        14015    12634      2.202e23   5.127e18   Success Δ=  -28    Δnz=  -28   
+ 1.0e12     12626    0        14023    12626      2.092e26   2.092e26   Success Δ=   -8    Δnz=   -8   
+ 1.0e16     13090    0        13559    13090      2.425e19   2.425e19   Success Δ= +464 W! Δnz= +464 W!
+ 1.0e20     12443    0        14206    12443      1.573e36   2.362e25   Success Δ= -647    Δnz= -647   
+ summary: Weyl(neg-monotone) violations = 5, (neg+zero) violations = 5
+
+=== ForceAccept pivtol=0.01 (MA57 default-ish) | shift=x-block α·diag(pos-diag rows) | scaling=Auto ===
+ alpha      neg      zero     pos      neg+zero   rel_resid  rel_resid_ir status        Δneg
+ 0.0e0      12503    664      13482    13167      1.502e3    1.494e3    Success          
+ 1.0e-8     12508    674      13467    13182      2.821e5    7.921e4    Success Δ=   +5 W! Δnz=  +15 W!
+ 1.0e-6     12495    679      13475    13174      4.011e3    3.606e3    Success Δ=  -13    Δnz=   -8   
+ 1.0e-4     12498    660      13491    13158      1.462e3    1.462e3    Success Δ=   +3 W! Δnz=  -16   
+ 1.0e-2     12501    681      13467    13182      1.249e3    1.230e3    Success Δ=   +3 W! Δnz=  +24 W!
+ 1.0e0      12502    680      13467    13182      1.653e3    1.651e3    Success Δ=   +1 W! Δnz=   +0   
+ 1.0e2      12648    457      13544    13105      4.902e5    4.902e5    Success Δ= +146 W! Δnz=  -77   
+ 1.0e4      12592    488      13569    13080      7.203e4    7.202e4    Success Δ=  -56    Δnz=  -25   
+ 1.0e8      12576    576      13497    13152      7.687e8    7.687e8    Success Δ=  -16    Δnz=  +72 W!
+ 1.0e12     12567    548      13534    13115      5.667e12   5.667e12   Success Δ=   -9    Δnz=  -37   
+ 1.0e16     12989    251      13409    13240      1.092e17   1.092e17   Success Δ= +422 W! Δnz= +125 W!
+ 1.0e20     12423    852      13374    13275      2.985e20   2.985e20   Success Δ= -566    Δnz=  +35 W!
+ summary: Weyl(neg-monotone) violations = 6, (neg+zero) violations = 5
+
+=== ForceAccept pivtol=0.01 (MA57 default-ish) | shift=uniform α·I | scaling=Auto ===
+ alpha      neg      zero     pos      neg+zero   rel_resid  rel_resid_ir status        Δneg
+ 0.0e0      12503    664      13482    13167      1.502e3    1.494e3    Success          
+ 1.0e-8     12382    0        14267    12382      1.691e-8   1.712e-9   Success Δ= -121    Δnz= -785   
+ 1.0e-6     12267    0        14382    12267      1.847e-9   1.442e-10  Success Δ= -115    Δnz= -115   
+ 1.0e-4     11710    0        14939    11710      4.166e-10  2.890e-11  Success Δ= -557    Δnz= -557   
+ 1.0e-2     10697    0        15952    10697      5.317e-11  3.943e-12  Success Δ=-1013    Δnz=-1013   
+ 1.0e0      5000     0        21649    5000       1.385e-12  7.178e-14  Success Δ=-5697    Δnz=-5697   
+ 1.0e2      409      0        26240    409        6.550e-14  2.909e-15  Success Δ=-4591    Δnz=-4591   
+ 1.0e4      0        0        26649    0          1.818e-16  1.818e-16  Success Δ= -409    Δnz= -409   
+ 1.0e8      0        0        26649    0          1.758e-16  1.758e-16  Success Δ=   +0    Δnz=   +0   
+ 1.0e12     0        0        26649    0          1.491e-16  1.491e-16  Success Δ=   +0    Δnz=   +0   
+ 1.0e16     0        0        26649    0          1.321e-16  1.321e-16  Success Δ=   +0    Δnz=   +0   
+ 1.0e20     0        0        26649    0          1.069e-16  1.069e-16  Success Δ=   +0    Δnz=   +0   
+ summary: Weyl(neg-monotone) violations = 0, (neg+zero) violations = 0
+
+=== ForceAccept pivtol=1e-8 (true default) | shift=x-block α·diag(pos-diag rows) | scaling=Auto ===
+ alpha      neg      zero     pos      neg+zero   rel_resid  rel_resid_ir status        Δneg
+ 0.0e0      12498    710      13441    13208      7.701e5    7.335e5    Success          
+ 1.0e-8     12491    708      13450    13199      4.446e7    4.446e7    Success Δ=   -7    Δnz=   -9   
+ 1.0e-6     12483    727      13439    13210      2.958e5    2.958e5    Success Δ=   -8    Δnz=  +11 W!
+ 1.0e-4     12499    692      13458    13191      1.930e7    1.212e7    Success Δ=  +16 W! Δnz=  -19   
+ 1.0e-2     12487    724      13438    13211      1.852e8    1.852e8    Success Δ=  -12    Δnz=  +20 W!
+ 1.0e0      12477    719      13453    13196      3.126e6    3.014e6    Success Δ=  -10    Δnz=  -15   
+ 1.0e2      12666    321      13662    12987      3.117e8    3.117e8    Success Δ= +189 W! Δnz= -209   
+ 1.0e4      12633    356      13660    12989      2.702e21   1.046e20   Success Δ=  -33    Δnz=   +2 W!
+ 1.0e8      12596    459      13594    13055      2.966e14   2.966e14   Success Δ=  -37    Δnz=  +66 W!
+ 1.0e12     12578    498      13573    13076      1.165e28   3.308e27   Success Δ=  -18    Δnz=  +21 W!
+ 1.0e16     13001    266      13382    13267      2.565e22   2.565e22   Success Δ= +423 W! Δnz= +191 W!
+ 1.0e20     12415    815      13419    13230      2.617e26   2.617e26   Success Δ= -586    Δnz=  -37   
+ summary: Weyl(neg-monotone) violations = 3, (neg+zero) violations = 6
+
+=== ForceAccept pivtol=1e-4 (mid) | shift=x-block α·diag(pos-diag rows) | scaling=Auto ===
+ alpha      neg      zero     pos      neg+zero   rel_resid  rel_resid_ir status        Δneg
+ 0.0e0      12497    690      13462    13187      4.942e4    4.942e4    Success          
+ 1.0e-8     12494    704      13451    13198      7.232e4    6.986e4    Success Δ=   -3    Δnz=  +11 W!
+ 1.0e-6     12483    714      13452    13197      6.907e4    6.325e4    Success Δ=  -11    Δnz=   -1   
+ 1.0e-4     12499    698      13452    13197      3.480e4    3.219e4    Success Δ=  +16 W! Δnz=   +0   
+ 1.0e-2     12492    713      13444    13205      3.776e5    3.776e5    Success Δ=   -7    Δnz=   +8 W!
+ 1.0e0      12470    724      13455    13194      5.361e5    4.361e5    Success Δ=  -22    Δnz=  -11   
+ 1.0e2      12664    390      13595    13054      7.008e4    7.008e4    Success Δ= +194 W! Δnz= -140   
+ 1.0e4      12624    380      13645    13004      1.785e7    1.548e7    Success Δ=  -40    Δnz=  -50   
+ 1.0e8      12598    509      13542    13107      4.394e10   4.394e10   Success Δ=  -26    Δnz= +103 W!
+ 1.0e12     12579    536      13534    13115      4.768e14   4.768e14   Success Δ=  -19    Δnz=   +8 W!
+ 1.0e16     13047    183      13419    13230      6.943e18   6.943e18   Success Δ= +468 W! Δnz= +115 W!
+ 1.0e20     12422    862      13365    13284      2.618e22   2.618e22   Success Δ= -625    Δnz=  +54 W!
+ summary: Weyl(neg-monotone) violations = 3, (neg+zero) violations = 6
+
+=== ForceAccept pivtol=0 scaling=Identity | shift=x-block α·diag(pos-diag rows) | scaling=Identity ===
+ alpha      neg      zero     pos      neg+zero   rel_resid  rel_resid_ir status        Δneg
+ 0.0e0      12399    925      13325    13324      6.892e17   2.643e17   Success          
+ 1.0e-8     12404    918      13327    13322      1.072e18   1.516e17   Success Δ=   +5 W! Δnz=   -2   
+ 1.0e-6     12403    912      13334    13315      1.194e18   9.327e16   Success Δ=   -1    Δnz=   -7   
+ 1.0e-4     12399    925      13325    13324      2.687e19   2.687e19   Success Δ=   -4    Δnz=   +9 W!
+ 1.0e-2     12402    927      13320    13329      5.270e17   2.953e17   Success Δ=   +3 W! Δnz=   +5 W!
+ 1.0e0      12399    923      13327    13322      3.519e18   1.082e18   Success Δ=   -3    Δnz=   -7   
+ 1.0e2      12419    903      13327    13322      9.417e20   1.447e15   Success Δ=  +20 W! Δnz=   +0   
+ 1.0e4      12402    905      13342    13307      2.164e21   2.100e17   Success Δ=  -17    Δnz=  -15   
+ 1.0e8      12408    871      13370    13279      2.146e6    8.917e4    Success Δ=   +6 W! Δnz=  -28   
+ 1.0e12     12172    1110     13367    13282      9.445e17   9.445e17   Success Δ= -236    Δnz=   +3 W!
+ 1.0e16     9442     3847     13360    13289      3.379e19   3.379e19   Success Δ=-2730    Δnz=   +7 W!
+ 1.0e20     8075     5212     13362    13287      5.915e21   5.915e21   Success Δ=-1367    Δnz=   -2   
+ summary: Weyl(neg-monotone) violations = 4, (neg+zero) violations = 4
+
+=== ForceAccept pivtol=0 scaling=Identity | shift=uniform α·I | scaling=Identity ===
+ alpha      neg      zero     pos      neg+zero   rel_resid  rel_resid_ir status        Δneg
+ 0.0e0      12399    925      13325    13324      6.892e17   2.643e17   Success          
+ 1.0e-8     12382    0        14267    12382      2.050e-2   1.723e-9   Success Δ=  -17    Δnz= -942   
+ 1.0e-6     12267    0        14382    12267      5.235e-5   1.413e-10  Success Δ= -115    Δnz= -115   
+ 1.0e-4     11710    0        14939    11710      2.288e-8   2.897e-11  Success Δ= -557    Δnz= -557   
+ 1.0e-2     10697    0        15952    10697      1.501e-9   3.878e-12  Success Δ=-1013    Δnz=-1013   
+ 1.0e0      5000     0        21649    5000       5.616e-13  7.554e-14  Success Δ=-5697    Δnz=-5697   
+ 1.0e2      409      0        26240    409        1.601e-13  2.882e-15  Success Δ=-4591    Δnz=-4591   
+ 1.0e4      0        0        26649    0          1.595e-16  1.595e-16  Success Δ= -409    Δnz= -409   
+ 1.0e8      0        0        26649    0          1.316e-16  1.316e-16  Success Δ=   +0    Δnz=   +0   
+ 1.0e12     0        0        26649    0          9.629e-17  9.629e-17  Success Δ=   +0    Δnz=   +0   
+ 1.0e16     0        0        26649    0          8.490e-17  8.490e-17  Success Δ=   +0    Δnz=   +0   
+ 1.0e20     0        0        26649    0          5.982e-17  5.982e-17  Success Δ=   +0    Δnz=   +0   
+ summary: Weyl(neg-monotone) violations = 0, (neg+zero) violations = 0
+
+Verdict legend:
+- 'W!' on Δneg = Weyl violation (neg increased as α grew).
+- 'W!' on Δnz  = (neg+zero) violation.
+- For uniform α·I: λ_i(A+αI) = λ_i(A)+α, so neg(α) must be
+non-increasing. Any Weyl violation = pivot-selection jitter
+that misclassifies an eigenvalue across the zero line.
+- For x-block-only α·diag(1_x): the additive perturbation is
+PSD on the x-block, so eigenvalues only move 'up' — neg
+must still be non-increasing as α → ∞.
+- rel_resid = ||A_shifted x - b|| / ||b|| with random b. If
+small (≲ 1e-6) at a Weyl-violation α, the L·D·L^T factor is
+correct and only the inertia counter is buggy. If large,
+the factor itself is wrong.

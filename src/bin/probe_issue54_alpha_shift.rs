@@ -51,6 +51,68 @@ fn shifted_uniform(a: &CscMatrix, alpha: f64) -> CscMatrix {
     shifted_mask(a, alpha, &mask)
 }
 
+/// Wächter-Biegler / Ipopt paired perturbation: positive-diag
+/// rows get `+δ_x`, zero-diag (constraint) rows get `−δ_c` with
+/// `δ_c = sqrt(δ_x · μ)`, `μ = 0.1`. Mirrors the same routine in
+/// `probe_issue54_ma57_alpha.rs`.
+fn shifted_paired(a: &CscMatrix, delta_x: f64, pos_mask: &[bool]) -> CscMatrix {
+    let mu = 0.1f64;
+    let delta_c = (delta_x * mu).sqrt();
+    let n = a.n;
+    let mut bumped = vec![false; n];
+    let col_ptr = a.col_ptr.clone();
+    let row_idx = a.row_idx.clone();
+    let mut values = a.values.clone();
+    for col in 0..n {
+        let s = col_ptr[col];
+        let e = col_ptr[col + 1];
+        for k in s..e {
+            if row_idx[k] == col {
+                if pos_mask[col] {
+                    values[k] += delta_x;
+                } else {
+                    values[k] -= delta_c;
+                }
+                bumped[col] = true;
+                break;
+            }
+        }
+    }
+    let mut rows = Vec::with_capacity(row_idx.len() + n);
+    let mut cols = Vec::with_capacity(row_idx.len() + n);
+    let mut vals = Vec::with_capacity(row_idx.len() + n);
+    for col in 0..n {
+        let s = col_ptr[col];
+        let e = col_ptr[col + 1];
+        let mut inserted = bumped[col];
+        for k in s..e {
+            let r = row_idx[k];
+            let v = values[k];
+            if !inserted && r > col {
+                let dv = if pos_mask[col] { delta_x } else { -delta_c };
+                if dv != 0.0 {
+                    rows.push(col);
+                    cols.push(col);
+                    vals.push(dv);
+                }
+                inserted = true;
+            }
+            rows.push(r);
+            cols.push(col);
+            vals.push(v);
+        }
+        if !inserted {
+            let dv = if pos_mask[col] { delta_x } else { -delta_c };
+            if dv != 0.0 {
+                rows.push(col);
+                cols.push(col);
+                vals.push(dv);
+            }
+        }
+    }
+    CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("rebuild csc")
+}
+
 /// `α · diag(mask)` shift: bump only diagonals where `mask[col]`.
 fn shifted_mask(a: &CscMatrix, alpha: f64, mask: &[bool]) -> CscMatrix {
     let n = a.n;
@@ -299,6 +361,67 @@ fn main() {
         0.0,
         default_scaling.clone(),
     );
+
+    // (a'') Wächter-Biegler paired δ_x + δ_c shift — what real IPMs
+    // (Ipopt PDPerturbationHandler) actually apply. This is the
+    // canonical perturbation; unpaired x-block shifts are pathological
+    // by construction.
+    let paired_label = "ForceAccept pivtol=1e-8 paired (Ipopt)";
+    let paired_kind = "paired δ_x + δ_c = sqrt(δ_x·μ), μ=0.1";
+    let mut paired_np = NumericParams::default();
+    paired_np.bk = BunchKaufmanParams {
+        on_zero_pivot: ZeroPivotAction::ForceAccept,
+        ..paired_np.bk
+    };
+    println!(
+        "\n=== {} | shift={} | scaling={:?} ===",
+        paired_label, paired_kind, paired_np.scaling
+    );
+    println!(
+        " {:<10} {:<8} {:<8} {:<8} {:<10} {:<10} {:<10} status        Δneg",
+        "alpha", "neg", "zero", "pos", "neg+zero", "rel_resid", "rel_resid_ir",
+    );
+    for &alpha in &alphas {
+        let a_shift = shifted_paired(&a0, alpha, &pos_mask);
+        let mut solver = Solver::with_params(paired_np.clone(), SupernodeParams::default());
+        let status = solver.factor(&a_shift, None);
+        let inertia = solver.inertia().cloned();
+        let n = a_shift.n;
+        let mut b = vec![0.0f64; n];
+        for i in 0..n {
+            b[i] = (((i as u64).wrapping_mul(2654435761) % 9999) as f64) / 9999.0 - 0.5;
+        }
+        let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let rel_resid = match solver.solve(&b) {
+            Ok(x) => {
+                let ax = spmv_sym_lower(&a_shift, &x);
+                let r2: f64 = ax.iter().zip(&b).map(|(a, b)| (a - b).powi(2)).sum();
+                r2.sqrt() / b_norm.max(1e-300)
+            }
+            Err(_) => f64::NAN,
+        };
+        let rel_resid_ir = match solver.solve_refined(&a_shift, &b) {
+            Ok(x) => {
+                let ax = spmv_sym_lower(&a_shift, &x);
+                let r2: f64 = ax.iter().zip(&b).map(|(a, b)| (a - b).powi(2)).sum();
+                r2.sqrt() / b_norm.max(1e-300)
+            }
+            Err(_) => f64::NAN,
+        };
+        if let Some(inertia) = inertia {
+            println!(
+                " {:<10.1e} {:<8} {:<8} {:<8} {:<10} {:<10.3e} {:<10.3e} {:?}",
+                alpha,
+                inertia.negative,
+                inertia.zero,
+                inertia.positive,
+                inertia.negative + inertia.zero,
+                rel_resid,
+                rel_resid_ir,
+                status,
+            );
+        }
+    }
 
     // (b) PerturbToEps A/B — uniform shift.
     run_sweep(

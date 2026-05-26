@@ -1,0 +1,75 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+     Running `target/release/probe_issue54_ma57_alpha`
+matrix       = "dev/repros/issue-54/nuffield2_trap_iter1.mtx"
+n            = 26649
+|pos-diag|   = 8404
+|zero-diag|  = 18245
+workdir      = "/var/folders/gq/k1kgbl7n539_4dl1md8x3jt80000gn/T/feral_issue54_ma57"
+
+=== MA57 | uniform | shift=uniform α·I ===
+Note: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG
+STOP 0
+ma57_bench done: 12 / 12 matrices succeeded
+ alpha      neg      zero     pos      neg+zero   rel_resid  status        Δneg
+ 0.0e0      12553    697      13399    13250      2.876e7    ok          
+ 1.0e-8     12382    0        14267    12382      1.699e-9   ok Δ= -171    Δnz= -868   
+ 1.0e-6     12267    0        14382    12267      1.348e-10  ok Δ= -115    Δnz= -115   
+ 1.0e-4     11710    0        14939    11710      2.496e-11  ok Δ= -557    Δnz= -557   
+ 1.0e-2     10697    0        15952    10697      3.107e-12  ok Δ=-1013    Δnz=-1013   
+ 1.0e0      5000     0        21649    5000       5.630e-14  ok Δ=-5697    Δnz=-5697   
+ 1.0e2      409      0        26240    409        2.506e-15  ok Δ=-4591    Δnz=-4591   
+ 1.0e4      0        0        26649    0          1.000e-16  ok Δ= -409    Δnz= -409   
+ 1.0e8      0        0        26649    0          1.000e-16  ok Δ=   +0    Δnz=   +0   
+ 1.0e12     0        0        26649    0          1.003e-16  ok Δ=   +0    Δnz=   +0   
+ 1.0e16     0        0        26649    0          1.055e-16  ok Δ=   +0    Δnz=   +0   
+ 1.0e20     0        0        26649    0          5.985e-17  ok Δ=   +0    Δnz=   +0   
+ summary: Weyl(neg-monotone) violations = 0, (neg+zero) violations = 0
+
+=== MA57 | xblock | shift=x-block α·diag(pos-diag rows) ===
+STOP 0
+ma57_bench done: 12 / 12 matrices succeeded
+ alpha      neg      zero     pos      neg+zero   rel_resid  status        Δneg
+ 0.0e0      12553    697      13399    13250      2.876e7    ok          
+ 1.0e-8     12556    686      13407    13242      2.371e7    ok Δ=   +3 W! Δnz=   -8   
+ 1.0e-6     12554    684      13411    13238      4.141e6    ok Δ=   -2    Δnz=   -4   
+ 1.0e-4     12561    683      13405    13244      1.104e9    ok Δ=   +7 W! Δnz=   +6 W!
+ 1.0e-2     12558    688      13403    13246      3.580e7    ok Δ=   -3    Δnz=   +2 W!
+ 1.0e0      12548    701      13400    13249      8.750e6    ok Δ=  -10    Δnz=   +3 W!
+ 1.0e2      12559    691      13399    13250      2.975e8    ok Δ=  +11 W! Δnz=   +1 W!
+ 1.0e4      12588    666      13395    13254      1.334e11   ok Δ=  +29 W! Δnz=   +4 W!
+ 1.0e8      12541    703      13405    13244      2.335e16   ok Δ=  -47    Δnz=  -10   
+ 1.0e12     12574    636      13439    13210      3.536e19   ok Δ=  +33 W! Δnz=  -34   
+ 1.0e16     12560    636      13453    13196      2.512e28   ok Δ=  -14    Δnz=  -14   
+ 1.0e20     12628    498      13523    13126      7.483e36   ok Δ=  +68 W! Δnz=  -70   
+ summary: Weyl(neg-monotone) violations = 6, (neg+zero) violations = 5
+
+=== MA57 | paired | shift=paired Ipopt δ_x + δ_c = sqrt(δ_x·μ), μ=0.1 ===
+Note: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG
+STOP 0
+ma57_bench done: 12 / 12 matrices succeeded
+ alpha      neg      zero     pos      neg+zero   rel_resid  status        Δneg
+ 0.0e0      12553    697      13399    13250      2.876e7    ok          
+ 1.0e-8     13630    0        13019    13630      4.565e-12  ok Δ=+1077 W! Δnz= +380 W!
+ 1.0e-6     14243    0        12406    14243      2.457e-11  ok Δ= +613 W! Δnz= +613 W!
+ 1.0e-4     15233    0        11416    15233      3.001e-12  ok Δ= +990 W! Δnz= +990 W!
+ 1.0e-2     16252    0        10397    16252      1.393e-12  ok Δ=+1019 W! Δnz=+1019 W!
+ 1.0e0      16697    0        9952     16697      6.742e-15  ok Δ= +445 W! Δnz= +445 W!
+ 1.0e2      18245    0        8404     18245      5.257e-16  ok Δ=+1548 W! Δnz=+1548 W!
+ 1.0e4      18245    0        8404     18245      1.478e-16  ok Δ=   +0    Δnz=   +0   
+ 1.0e8      18245    0        8404     18245      1.028e-16  ok Δ=   +0    Δnz=   +0   
+ 1.0e12     18245    0        8404     18245      1.005e-16  ok Δ=   +0    Δnz=   +0   
+ 1.0e16     18245    0        8404     18245      1.034e-16  ok Δ=   +0    Δnz=   +0   
+ 1.0e20     18245    0        8404     18245      9.331e-17  ok Δ=   +0    Δnz=   +0   
+ summary: Weyl(neg-monotone) violations = 6, (neg+zero) violations = 6
+
+Verdict legend:
+- 'W!' on Δneg / Δnz = Weyl monotonicity violation.
+- For uniform α·I shifts, neg must be non-increasing.
+- For x-block α·diag(1_x) shifts (PSD perturbation), neg
+must also be non-increasing.
+- Compare against feral output in alpha_shift_v4.out.
+- If MA57 stays monotone where feral does not, feral's BK
+kernel has a fixable bug. If MA57 also jitters, the
+matrix is beyond dense direct solver capability in the
+bad α regime.
+
