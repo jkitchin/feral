@@ -41,6 +41,7 @@ use std::path::PathBuf;
 use feral::numeric::factorize::NumericParams;
 use feral::numeric::solver::Solver;
 use feral::read_mtx;
+use feral::scaling::ScalingStrategy;
 use feral::symbolic::SupernodeParams;
 use feral::{BunchKaufmanParams, CscMatrix, ZeroPivotAction};
 
@@ -119,6 +120,24 @@ fn classify_pos_diag(a: &CscMatrix) -> Vec<bool> {
     mask
 }
 
+fn spmv_sym_lower(a: &CscMatrix, x: &[f64]) -> Vec<f64> {
+    let n = a.n;
+    let mut y = vec![0.0; n];
+    for j in 0..n {
+        let s = a.col_ptr[j];
+        let e = a.col_ptr[j + 1];
+        for k in s..e {
+            let i = a.row_idx[k];
+            let v = a.values[k];
+            y[i] += v * x[j];
+            if i != j {
+                y[j] += v * x[i];
+            }
+        }
+    }
+    y
+}
+
 fn run_sweep(
     label: &str,
     a0: &CscMatrix,
@@ -127,6 +146,7 @@ fn run_sweep(
     alphas: &[f64],
     zero_action: ZeroPivotAction,
     pivot_threshold: f64,
+    scaling: ScalingStrategy,
 ) {
     let mut np = NumericParams::default();
     np.bk = BunchKaufmanParams {
@@ -134,10 +154,14 @@ fn run_sweep(
         pivot_threshold,
         ..np.bk
     };
-    println!("\n=== {} | shift={} ===", label, shift_kind);
     println!(
-        " {:<10} {:<8} {:<8} {:<8} {:<10} status        Δneg",
-        "alpha", "neg", "zero", "pos", "neg+zero",
+        "\n=== {} | shift={} | scaling={:?} ===",
+        label, shift_kind, scaling
+    );
+    np.scaling = scaling;
+    println!(
+        " {:<10} {:<8} {:<8} {:<8} {:<10} {:<10} status        Δneg",
+        "alpha", "neg", "zero", "pos", "neg+zero", "rel_resid",
     );
     let mut last_neg: Option<isize> = None;
     let mut weyl_violations = 0;
@@ -152,6 +176,21 @@ fn run_sweep(
         let mut solver = Solver::with_params(np.clone(), SupernodeParams::default());
         let status = solver.factor(&a_shift, None);
         let inertia = solver.inertia().cloned();
+        // Residual check: factor correct iff ||A x - b|| / ||b|| small.
+        let n = a_shift.n;
+        let mut b = vec![0.0f64; n];
+        for i in 0..n {
+            b[i] = (((i as u64).wrapping_mul(2654435761) % 9999) as f64) / 9999.0 - 0.5;
+        }
+        let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let rel_resid = match solver.solve(&b) {
+            Ok(x) => {
+                let ax = spmv_sym_lower(&a_shift, &x);
+                let r2: f64 = ax.iter().zip(&b).map(|(a, b)| (a - b).powi(2)).sum();
+                r2.sqrt() / b_norm.max(1e-300)
+            }
+            Err(_) => f64::NAN,
+        };
         match (status, inertia) {
             (s, Some(inertia)) => {
                 let neg = inertia.negative as isize;
@@ -181,12 +220,13 @@ fn run_sweep(
                     }
                 };
                 println!(
-                    " {:<10.1e} {:<8} {:<8} {:<8} {:<10} {:?}{}{}",
+                    " {:<10.1e} {:<8} {:<8} {:<8} {:<10} {:<10.3e} {:?}{}{}",
                     alpha,
                     inertia.negative,
                     inertia.zero,
                     inertia.positive,
                     inertia.negative + inertia.zero,
+                    rel_resid,
                     s,
                     neg_str,
                     nz_str,
@@ -225,6 +265,8 @@ fn main() {
         0.0, 1e-8, 1e-6, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e8, 1e12, 1e16, 1e20,
     ];
 
+    let default_scaling = NumericParams::default().scaling;
+
     // (a) Uniform α·I sweep, ForceAccept (default), pivot_threshold=0.
     run_sweep(
         "ForceAccept pivtol=0 (default)",
@@ -234,6 +276,7 @@ fn main() {
         &alphas,
         ZeroPivotAction::ForceAccept,
         0.0,
+        default_scaling.clone(),
     );
 
     // (a') x-block-only α·diag(1_x, 0) sweep, ForceAccept.
@@ -245,6 +288,7 @@ fn main() {
         &alphas,
         ZeroPivotAction::ForceAccept,
         0.0,
+        default_scaling.clone(),
     );
 
     // (b) PerturbToEps A/B — uniform shift.
@@ -256,6 +300,7 @@ fn main() {
         &alphas,
         ZeroPivotAction::PerturbToEps { abs_floor: 1e-12 },
         0.0,
+        default_scaling.clone(),
     );
 
     // (b') PerturbToEps A/B — x-block-only shift.
@@ -267,6 +312,7 @@ fn main() {
         &alphas,
         ZeroPivotAction::PerturbToEps { abs_floor: 1e-12 },
         0.0,
+        default_scaling.clone(),
     );
 
     // (c) MA57-style threshold pivoting (pivot_threshold=0.01).
@@ -279,6 +325,7 @@ fn main() {
         &alphas,
         ZeroPivotAction::ForceAccept,
         0.01,
+        default_scaling.clone(),
     );
 
     // (c') uniform shift cross-check at pivtol=0.01.
@@ -290,6 +337,33 @@ fn main() {
         &alphas,
         ZeroPivotAction::ForceAccept,
         0.01,
+        default_scaling.clone(),
+    );
+
+    // (d) Identity-scaling rule-out: x-block shift, ForceAccept.
+    // If scaling silently changes the matrix across the sweep, this
+    // sweep should be more monotone than (a').
+    run_sweep(
+        "ForceAccept pivtol=0 scaling=Identity",
+        &a0,
+        "x-block α·diag(pos-diag rows)",
+        Some(&pos_mask),
+        &alphas,
+        ZeroPivotAction::ForceAccept,
+        0.0,
+        ScalingStrategy::Identity,
+    );
+
+    // (d') Identity-scaling rule-out: uniform shift, ForceAccept.
+    run_sweep(
+        "ForceAccept pivtol=0 scaling=Identity",
+        &a0,
+        "uniform α·I",
+        None,
+        &alphas,
+        ZeroPivotAction::ForceAccept,
+        0.0,
+        ScalingStrategy::Identity,
     );
 
     println!(
@@ -301,6 +375,10 @@ fn main() {
            that misclassifies an eigenvalue across the zero line.\n\
          - For x-block-only α·diag(1_x): the additive perturbation is\n\
            PSD on the x-block, so eigenvalues only move 'up' — neg\n\
-           must still be non-increasing as α → ∞."
+           must still be non-increasing as α → ∞.\n\
+         - rel_resid = ||A_shifted x - b|| / ||b|| with random b. If\n\
+           small (≲ 1e-6) at a Weyl-violation α, the L·D·L^T factor is\n\
+           correct and only the inertia counter is buggy. If large,\n\
+           the factor itself is wrong."
     );
 }

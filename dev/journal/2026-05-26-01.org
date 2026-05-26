@@ -166,3 +166,77 @@ Parked task 8 (=ForceAccept= MA57-style perturbation). It would
 fix NaN-on-solve hazards in unrelated workloads but does not
 address the pivot-stability finding. Will revisit after MA57
 head-to-head on α-sweep.
+
+* 11:30 :issue54:pivot-stability:residual:
+Extended =probe_issue54_alpha_shift.rs= with two axes:
+- =scaling=Identity= rule-out (does scaling silently change the
+  matrix across the sweep?)
+- per-α residual =||A_shifted · x - b|| / ||b||= with random b
+  (factor correct ⇔ small residual)
+
+Output in =/tmp/alpha_shift_v2.out=. Headline:
+
+| Config                                  | x-block shift              | uniform shift   |
+|-----------------------------------------+----------------------------+-----------------|
+| ForceAccept,  pivtol=0, Auto scaling    | 4/5 W!, resid ~1e17–1e36  | 0/0, resid ≤1e-3|
+| PerturbToEps, pivtol=0, Auto scaling    | 5/5 W!, resid ~1e17–1e36  | 0/0, resid ≤1e-3|
+| ForceAccept,  pivtol=0.01, Auto scaling | 6/5 W!, resid ~1e3–1e20   | 0/0, resid ≤1e-8|
+| ForceAccept,  pivtol=0, Identity scaling| 4/4 W!, resid ~1e17–1e21  | 0/0, resid ≤1e-2|
+
+Critical new datapoint: =rel_resid is enormous (1e17 to 1e36)
+for every x-block-shifted factorization=, including PerturbToEps
+which bypasses the strict-zero branch. The L·D·L^T factor itself
+is wrong — not just the inertia counter. =b_norm ≈ 153=, so an
+absolute residual of 1e19 means the solve produced numerical
+garbage. Compare against the uniform-shift sweep where residuals
+collapse from 8.8e-3 (α=1e-8) to 1e-16 (α≥1e4) — both factor
+and inertia are correct.
+
+Scaling-strategy rule-out: =Identity scaling shows the same
+violation pattern= (4/4 W! on x-block shift). So feral's
+Mc64-style symmetric scaling is not silently changing the matrix
+between α steps. The bug is in the kernel, not in the wrapper.
+
+α=1e16 phase transition is now clearer: in PerturbToEps Auto-
+scaling, neg jumps =+464= (12626 → 13090) and residual is
+=2.4e19=. In Identity scaling, neg drops =-2730=. The huge
+diagonal magnitudes (8404 entries at α=1e16) push DBK into a
+numerical breakdown regime where pivot selection and the actual
+factor both fail.
+
+Implication for pounce: =the δ_x cascade in pounce's IPM is a
+structured x-block shift=, not uniform. So it hits the broken
+regime by construction. The strict-zero accounting fix (commit
+94a28bc) tightened first-shot accuracy but cannot fix this —
+the underlying numerical issue is feral's BK kernel failing on
+matrices with extreme diagonal inhomogeneity.
+
+Pre-existing observation that re-surfaced: at α=0 (bare matrix,
+no shift), =rel_resid = 8.4e19 already=. The bare
+=nuffield2_trap_iter1= matrix is so close to singular that
+feral's solve is already numerical garbage (b_norm ≈ 153,
+||r||₂ ≈ 1.3e21). The Mc64-scaled probe_issue54 reported
+=rel_resid = 7.7e5= for default config; the residual jumps when
+the shifted_mask path reconstructs CSC via =from_triplets= (may
+collapse or reorder differently from the original mtx
+in-memory layout), but the qualitative finding holds: feral
+cannot factor this matrix to single-digit accuracy under
+structured shifts.
+
+Root cause classification (now confirmed):
+- =Not= a counter bug. The factor itself produces wrong L·D·L^T
+  when the diagonal is highly inhomogeneous.
+- =Not= a strict-zero-routing bug. PerturbToEps shows identical
+  pathology, confirming the strict-zero branch is not on the
+  hot path.
+- =Not= a scaling-strategy bug. Identity scaling shows the same.
+- =Likely= a Bunch-Kaufman growth/stability issue: when 8404
+  diagonals are α=1e16 and 18245 are 0, the 2×2 pivot test
+  =|A(k,k)| vs α·max_below_diag= becomes ill-defined and BK
+  picks numerically catastrophic pivot orderings.
+
+Next investigation (queued, not in this session): test
+=allow_delayed_pivots=true= more aggressively, and head-to-head
+MA57 on the same x-block α-sweep to confirm MA57 stays
+monotone (which would prove feral's BK has a fixable bug, not
+an intrinsic-to-dense-BK issue).
