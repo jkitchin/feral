@@ -94,3 +94,75 @@ bounded (not NaN). Update the
 (currently asserts =|d_diag[k]| <= zero_tol= for zero-bucket
 entries; will become non-trivial under the new design — the floor,
 not zero, is the new bound).
+
+* 10:30 :issue54:pivot-stability:diagnosis:
+Pounce comment (gh#54 4545468859) reported the SSIDS routing
+helped (12615..13256 → 12883..13255 range; off by +4 first-shot vs
+−54 previously) but cascade still non-monotone. Proposed
+diagnostic: α-sweep monotonicity.
+
+Built =src/bin/probe_issue54_alpha_shift.rs= with three axes:
+- shift kind: uniform =α·I= vs x-block-only =α·diag(1_x, 0)=
+- zero-pivot config: =ForceAccept= (default) vs =PerturbToEps { abs_floor: 1e-12 }=
+- BK threshold: =pivot_threshold= 0.0 (default) vs 0.01 (MA57-ish)
+
+Result table (full output in =/tmp/alpha_shift.out=):
+
+| Config                          | Uniform α·I | x-block α·diag |
+|---------------------------------+-------------+----------------|
+| ForceAccept,  pivtol=0          |       0 / 0 |          3 / 6 |
+| PerturbToEps, pivtol=0          |       0 / 0 |          5 / 5 |
+| ForceAccept,  pivtol=0.01       |       0 / 0 |          6 / 5 |
+
+(violations = Weyl on neg / Weyl on neg+zero)
+
+Three conclusions:
+
+1. =Pivot selection is perfectly stable under uniform shift=.
+   λ(A + αI) = λ(A) + α algebraically, and feral's reported inertia
+   tracks it bit-perfectly: 12498 → 12382 → ... → 0 as α grows
+   from 0 to 1e20.
+
+2. =The instability is intrinsic to the structured x-block shift=,
+   and it appears in *all three* configs — including =PerturbToEps=
+   which bypasses the zero-pivot branch entirely. So the
+   strict-zero accounting fix (commit 94a28bc) was correct but
+   addresses a different concern; it does *not* fix the cascade
+   monotonicity issue pounce is observing.
+
+3. =MA57-style pivot_threshold = 0.01 does not help=. Actually
+   slightly worse (6 vs 3 Weyl violations). Threshold pivoting is
+   not the lever.
+
+Phase-transition signature: large neg jumps at α=1e2 (+150 to +189)
+and α=1e16 (+422 to +464) regardless of config. These are
+deterministic BK 1×1-vs-2×2 acceptance flips where the shifted
+diagonal magnitude crosses one of feral's growth-bound thresholds.
+
+Hypothesis for root cause (not yet confirmed):
+- Feral's dense BK kernel ranks 1×1 vs 2×2 pivots using local
+  magnitudes. When only some rows are shifted, the global
+  ranking is structurally different from the uniform case, and
+  feral picks a different pivot order that yields a different
+  Sylvester signature for the trailing matrix. This is
+  algebraically wrong only insofar as the *trailing matrix's*
+  inertia differs from the original (it does — by Schur).
+- SSIDS / MA57 may handle this via more aggressive delayed-pivot
+  strategies (push the small/uncertain pivot into the contribution
+  block and try later in a larger frontal context). Feral has
+  =allow_delayed_pivots= but maybe its threshold is too tight for
+  IPM cascade shifts.
+
+Next investigation step (queued, not in this session): MA57
+head-to-head on the same α-sweep. If MA57 also jitters under
+structured shift, this is intrinsic to dense BK and the fix is a
+different KKT regularization strategy (e.g., the IPM should
+constrain its δ ladder to per-block-balanced shifts, or use
+ill-conditioning detection differently). If MA57 stays monotone,
+feral's BK has a fixable ordering bug.
+
+* 10:40 :issue54:next:
+Parked task 8 (=ForceAccept= MA57-style perturbation). It would
+fix NaN-on-solve hazards in unrelated workloads but does not
+address the pivot-stability finding. Will revisit after MA57
+head-to-head on α-sweep.
