@@ -357,13 +357,16 @@ fn test_force_accept_with_refinement() {
 
     let (factors, inertia) = factor(&mat, &params).ok().expect("factor failed");
     assert!(factors.needs_refinement, "should flag for refinement");
-    // Issue #42 (Option A): the rank-deficient block reduces to a
-    // bit-exact 0.0 pivot, counted by sign (+0.0 → negative). feral's
-    // reported inertia is the sign-count (1, 1, 0), not the
-    // mathematical eigenvalue-sign inertia (1, 0, 1).
-    assert_eq!(inertia.zero, 0, "Option A: zero pivot counted by sign");
+    // Issue #54 (SSIDS alignment): the rank-deficient block reduces to a
+    // bit-exact 0.0 pivot. SSIDS and MA57 route this to the `zero` bucket
+    // (and emit a rank-deficient warning), not to pos/neg by IEEE sign.
+    // Mathematical eigenvalue-sign inertia (1, 0, 1) is now reported.
+    assert_eq!(inertia.zero, 1, "strict-zero pivot → zero bucket (SSIDS)");
     assert_eq!(inertia.positive, 1, "the d=1 pivot is positive");
-    assert_eq!(inertia.negative, 1, "the +0.0 pivot routes to negative");
+    assert_eq!(
+        inertia.negative, 0,
+        "no negative pivot — the zero is in `zero`"
+    );
 
     // solve_refined should handle this without panicking
     let rhs = vec![1.0, 1.0];

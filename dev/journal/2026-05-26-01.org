@@ -1,0 +1,96 @@
+#+TITLE: FERAL session journal 2026-05-26-01
+#+STARTUP: showall
+
+* Session 2026-05-26-01 — issue #54 SSIDS-aligned strict-zero accounting
+
+* 07:30 :issue54:orient:
+Continuing from the prior session's reproducer work. Issue #54:
+pounce IPM stall (600 s timeout) on =nuffield2_trap_iter1.mtx= vs
+1.8 s with MA57. Oracle cross-check from the research note:
+- MA57 :: (13399, 12553, 697)
+- SSIDS :: (13648, 12707, 294)
+- MUMPS :: FAIL
+- Feral (Issue #42 sign-routing, pre-fix) :: (13501, 13148, 0)
+Pounce's strict =negative= compare against expected 13202 never
+converges through the δ cascade because Issue #42's sign rule splits
+bit-exact zero pivots by IEEE rounding noise rather than algebra.
+
+* 07:45 :issue54:plan:
+Decision: align feral with SSIDS — route strict-zero 1×1 pivots
+(=|d| <= zero_tol=) into =inertia.zero=, not pos/neg by =sign(d)=.
+Matches SSIDS =NumericSubtree.hxx:259-267= and MA57's INFO(24)/INFO(25)
+split. Four call sites in src/dense/factor.rs:
+- =factor= entry-point trailing 1×1 (~814)
+- =try_reject_1x1_frontal= (~3717)
+- =do_1x1_pivot= (~4276)
+- =count_1x1_inertia= (~4541)
+
+* 08:30 :issue54:impl:
+Changed all four sites: replace the =if d > 0.0 { pos += 1 } else
+{ neg += 1 }= block with =zero += 1=. Renamed =_zero= → =zero= in
+function signatures where the unused-mut hint was masking the
+counter. Updated doc comments to cite SSIDS / MA57 and to explain
+the prior #42 routing and why it broke the cascade.
+
+* 08:50 :issue54:tests:
+Tests touched by the count shift (each had a doc comment about
+Option A sign-routing — updated all):
+- =tests/dense_ldlt.rs::test_force_accept_with_refinement= → (1,0,1)
+- =tests/dense_fast_path.rs::test_zero_column_force_accept= → zero=1
+- =tests/pivot_rejection.rs::threshold_rejects_tiny_1x1_pivot_dense= → (1,0,2)
+- =tests/pounce_interface.rs::f03_default_force_accept_…= → (2,0,1)
+- =tests/pounce_interface.rs::f01_dyadic_rankdef…= renamed to
+  =_counts_zero_pivots_ssids_aligned=, expects (1, 0, n-1)
+- =tests/delayed_pivoting.rs::factor_frontal_root_force_accepts_without_delay= → (0,0,2)
+- =tests/threshold_consistency.rs::factor_inertia_force_accept_implies_solve_skip_invariant= → (2,0,2)
+
+Deleted =tests/pounce_interface.rs::issue_42_rankdef_10_3_inertia_matches_consensus_oracle=
+entirely — that test pinned the Option-A sign-routing workaround on a
+synthetic 10×10 stress matrix that does not represent NLP traffic.
+User confirmed the deletion ("Yes"). With #54 we report the SSIDS
+inertia (4, 0, 6) on rankdef_10_3, which also matches MA57's INFO(24/25)
+split.
+
+* 09:00 :issue54:probe:
+Probes confirm the fix. =cargo run --release --bin probe_issue54=
+default config now reports inertia =(13441, 12498, 710)= with
+=rel_resid = 7.701e5=. neg+zero = 13208 (off by +6 from pounce's
+expected 13202, within the same regime as SSIDS at 13001 and MA57 at
+13250). Singular-matrix residual at 7.7e5 is the same regime as SSIDS
+(2.23e5) and MA57 (1.40e5) — inherent to the matrix, not feral-specific.
+
+Added a δ-cascade probe =src/bin/probe_issue54_cascade.rs= that
+sweeps =δ_x ∈ {0, 1e-8, 1e-6, 1e-4, 2e-1, 1, 1e2, 1e6, 1e12, 6.99e19}=
+with =δ_c = √(δ_x · μ)=, μ=0.1, perturbing positive-diag rows by
+=+δ_x= and zero-diag rows by =−δ_c=. Result: **0 backwards jumps**
+in (neg+zero) across the full cascade. Compare to pounce's old
+report of =13042 → 12615= (–427 backwards jump) under Issue #42
+sign-routing. The fix makes the cascade monotonic.
+
+* 09:25 :issue54:test-results:
+=cargo test --test pounce_interface --test threshold_consistency
+--test dense_ldlt --test dense_fast_path --test delayed_pivoting
+--test pivot_rejection= all pass (4+16+20+5+5 tests; 1 ignored is
+the gated POLAK6 corpus test).
+
+* 09:30 :issue54:next:
+Commit 1 (this session): ship the SSIDS-aligned accounting as a
+single atomic commit, separately defensible from any caller-side
+hardening.
+
+Commit 2 (next): user's separate ask. Redefine
+=ZeroPivotAction::ForceAccept= so the strict-zero path perturbs d
+to =static_pivot_floor= (MA57 =cntl(4)= shape) and keeps the L
+column live, instead of zeroing L and D. Inertia still routes to
+the =zero= bucket (this commit's policy). The current ForceAccept
+implementation leaves a NaN-on-solve hazard unless the caller does
+an inertia retry on every force-accepted factor. Implementation
+sketch from the user: kernel fallback =2 · zero_tol=, Solver-level
+default =1e-12 · ||A||_∞= when =ForceAccept= and
+=static_pivot_floor == 0.0=. Add regression test that solves
+against a ForceAccept-perturbed factor and checks the residual is
+bounded (not NaN). Update the
+=factor_inertia_force_accept_implies_solve_skip_invariant= test
+(currently asserts =|d_diag[k]| <= zero_tol= for zero-bucket
+entries; will become non-trivial under the new design — the floor,
+not zero, is the new bound).

@@ -4,6 +4,38 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — strict-zero pivots route to `inertia.zero` (SSIDS-aligned, [#54][i54])
+
+When `ZeroPivotAction::ForceAccept` accepts a 1×1 pivot whose
+magnitude satisfies `|d| <= zero_tol`, the inertia now increments
+`zero` instead of routing by `sign(d)`. This matches SSIDS
+(`NumericSubtree.hxx:259-267`) and HSL MA57 (INFO(24) = `neig`,
+INFO(25) = number of zero pivots) and supersedes the Issue #42
+Option A sign-routing rule.
+
+Motivation: pounce's IPM δ-cascade on `nuffield2_trap_iter1.mtx`
+(LP-shaped KKT, n=26155) stalled for 600 s (vs 1.8 s on MA57)
+because Option A split bit-exact zero pivots by IEEE round-off and
+the counter jumped backwards mid-cascade (`13042 → 12615`). The new
+accounting restores monotonicity (probe confirms 0 backwards jumps
+across `δ_x ∈ {0 … 6.99e19}`).
+
+Behavior changes visible to callers:
+- `Solver::inertia()` and `factor()`'s `Inertia` field now report
+  the mathematical (Sylvester) inertia on matrices with rank
+  deficiency that lands in strict-zero pivots.
+- `num_negative_eigenvalues()` returns strict `inertia.negative`
+  only (unchanged convention). IPM callers comparing against an
+  expected oracle should now sum `negative + zero` to match
+  MA57's INFO(24)+INFO(25) convention.
+
+Tests updated to reflect the new convention; see
+`dev/decisions.md` (2026-05-26 entry) for the full trade-off
+analysis and `dev/research/issue-54-lp-kkt-inertia.md` for the
+oracle cross-check.
+
+[i54]: https://github.com/jkitchin/feral/issues/54
+
 ### Added — documentation site (mdBook + rustdoc on GitHub Pages)
 
 - `book/` — mdBook skeleton (`introduction`, `getting-started`,

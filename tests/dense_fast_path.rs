@@ -298,18 +298,18 @@ fn test_zero_column_force_accept() {
         Err(e) => panic!("dense_fast_factor on zero-column matrix failed: {}", e),
     };
     assert_eq!(factors.n, n, "factor n mismatch");
-    // Issue #42 (Option A): the forced zero-pivot column reduces to a
-    // bit-exact 0.0 pivot, counted by sign — +0.0 routes to `negative`
-    // (`0.0 > 0.0` is false) — so `zero` is structurally 0. The
-    // remaining n-1 diagonally-dominant pivots are all positive.
+    // Issue #54 (SSIDS alignment): a strict-zero forced pivot is recorded
+    // in the `zero` bucket, matching SSIDS `NumericSubtree.hxx:259-267`
+    // and MA57's `info(24/25)` accounting. The remaining n-1
+    // diagonally-dominant pivots are positive.
     assert_eq!(
-        inertia.zero, 0,
-        "Option A counts every pivot by sign; expected zero=0, got {}",
+        inertia.zero, 1,
+        "strict-zero forced pivot → `zero`; got {}",
         inertia.zero
     );
     assert_eq!(
-        inertia.negative, 1,
-        "the one forced +0.0 pivot routes to negative; got neg={}",
+        inertia.negative, 0,
+        "no negative pivots in this matrix; got neg={}",
         inertia.negative
     );
     assert_eq!(

@@ -814,19 +814,18 @@ pub fn factor(
             if d.abs() <= params.zero_tol {
                 match params.on_zero_pivot {
                     ZeroPivotAction::ForceAccept => {
-                        // Issue #42 (Option A): count every accepted pivot
-                        // by sign, including a bit-exact `0.0` one. The
-                        // sign rule `d > 0.0` routes `+0.0` to `neg`
-                        // (`0.0 > 0.0` is false). The `zero` inertia
-                        // component is therefore structurally 0 under
-                        // ForceAccept — see `dev/decisions.md` and
-                        // `dev/research/f01-rankdef-underreporting.md`.
+                        // Issue #54: SSIDS-aligned policy. A strict-zero
+                        // 1×1 pivot is recorded in the `zero` bucket, not
+                        // routed to `pos`/`neg` by `sign(d)`. SSIDS
+                        // (`NumericSubtree.hxx:259-267`) and MA57 both
+                        // place these pivots in `zero` and emit a
+                        // rank-deficient warning. The previous Issue #42
+                        // rule split them by IEEE sign — which is post-
+                        // Schur-update rounding noise, not algebra — and
+                        // destabilised the IPM δ cascade on
+                        // `nuffield2_trap` (#54).
                         needs_refinement = true;
-                        if d > 0.0 {
-                            pos += 1;
-                        } else {
-                            neg += 1;
-                        }
+                        zero += 1;
                     }
                     ZeroPivotAction::Fail => {
                         return Err(FeralError::NumericallyRankDeficient);
@@ -3653,10 +3652,9 @@ fn try_reject_1x1_frontal(
     params: &BunchKaufmanParams,
     pos: &mut usize,
     neg: &mut usize,
-    // Issue #42 (Option A): 1×1 paths now count every pivot by sign and
-    // never increment `zero`. Parameter retained for signature parity
-    // with `count_2x2_inertia` (still has a `*zero` write).
-    _zero: &mut usize,
+    // Issue #54: SSIDS-aligned. Strict-zero pivots (the ForceAccept
+    // branch below) increment `zero`, not pos/neg by sign.
+    zero: &mut usize,
     needs_refinement: &mut bool,
 ) -> Result<PivotOutcome, FeralError> {
     let d = a[k * nrow + k];
@@ -3717,20 +3715,15 @@ fn try_reject_1x1_frontal(
         if d.abs() <= params.zero_tol {
             match params.on_zero_pivot {
                 ZeroPivotAction::ForceAccept => {
-                    // Issue #42 (Option A): count the strict-zero pivot
-                    // by sign before the L-column / diagonal are zeroed.
-                    // `d` still holds the original (pre-zeroing) value;
-                    // `d > 0.0` routes `+0.0` to `neg`. Numerical
-                    // handling — L zeroing, diagonal zeroing, the
-                    // `Rejected` outcome, `needs_refinement` — is
-                    // unchanged; only the inertia counter moves from
-                    // `zero` to a sign bucket.
+                    // Issue #54: SSIDS-aligned. The strict-zero pivot is
+                    // accepted in place (`L_col = 0`, `D_kk = 0`) and
+                    // recorded as a zero eigenvalue, matching SSIDS
+                    // `ldlt_tpp.cxx:179-204` + `NumericSubtree.hxx:259-267`
+                    // (and MA57). Previous Issue #42 rule split by
+                    // `sign(d)` — IEEE rounding noise from the Schur
+                    // update, not algebra.
                     *needs_refinement = true;
-                    if d > 0.0 {
-                        *pos += 1;
-                    } else {
-                        *neg += 1;
-                    }
+                    *zero += 1;
                     for i in (k + 1)..nrow {
                         a[k * nrow + i] = 0.0;
                     }
@@ -4217,9 +4210,9 @@ fn do_1x1_pivot(
     params: &BunchKaufmanParams,
     pos: &mut usize,
     neg: &mut usize,
-    // Issue #42 (Option A): 1×1 paths count every pivot by sign and
-    // never increment `zero`. Parameter retained for signature parity.
-    _zero: &mut usize,
+    // Issue #54: SSIDS-aligned. Strict-zero pivots (the ForceAccept
+    // branch below) increment `zero`, not pos/neg by sign.
+    zero: &mut usize,
     needs_refinement: &mut bool,
 ) -> Result<(f64, usize), FeralError> {
     let mut d = a[k * n + k];
@@ -4282,22 +4275,15 @@ fn do_1x1_pivot(
             // Truly-zero path: zero L, route by on_zero_pivot.
             match params.on_zero_pivot {
                 ZeroPivotAction::ForceAccept => {
-                    // Issue #42 (Option A): count the strict-zero pivot
-                    // by sign before the L-column / diagonal are zeroed.
-                    // `d` still holds the original value here; `d > 0.0`
-                    // routes `+0.0` to `neg`. The L/diagonal zeroing and
-                    // the `(0.0, k+2)` return are unchanged.
+                    // Issue #54: SSIDS-aligned. Strict-zero pivot goes
+                    // into the `zero` bucket; L column and diagonal are
+                    // zeroed so `solve` skips this position. Matches
+                    // SSIDS `ldlt_tpp.cxx:179-204` and MA57.
                     *needs_refinement = true;
-                    if d > 0.0 {
-                        *pos += 1;
-                    } else {
-                        *neg += 1;
-                    }
+                    *zero += 1;
                     for i in (k + 1)..n {
                         a[k * n + i] = 0.0;
                     }
-                    // Also zero the diagonal so solve's `|d| > zero_tol`
-                    // check skips this position.
                     a[k * n + k] = 0.0;
                     return Ok((0.0, k + 2));
                 }
@@ -4527,9 +4513,9 @@ fn count_1x1_inertia(
     params: &BunchKaufmanParams,
     pos: &mut usize,
     neg: &mut usize,
-    // Issue #42 (Option A): 1×1 paths count every pivot by sign and
-    // never increment `zero`. Parameter retained for signature parity.
-    _zero: &mut usize,
+    // Issue #54: SSIDS-aligned. Strict-zero pivots (the ForceAccept
+    // branch below) increment `zero`, not pos/neg by sign.
+    zero: &mut usize,
     needs_refinement: &mut bool,
 ) -> Result<(), FeralError> {
     let d = a[k * stride + k];
@@ -4553,15 +4539,11 @@ fn count_1x1_inertia(
     if d.abs() <= params.zero_tol {
         match params.on_zero_pivot {
             ZeroPivotAction::ForceAccept => {
-                // Issue #42 (Option A): count the strict-zero pivot by
-                // sign. `d > 0.0` routes `+0.0` to `neg`; `zero` is
-                // structurally 0 under ForceAccept.
+                // Issue #54: SSIDS-aligned. Strict-zero pivot → `zero`
+                // bucket. See `count_2x2_inertia_val` siblings and
+                // `try_reject_1x1_frontal` for parallel changes.
                 *needs_refinement = true;
-                if d > 0.0 {
-                    *pos += 1;
-                } else {
-                    *neg += 1;
-                }
+                *zero += 1;
                 Ok(())
             }
             ZeroPivotAction::Fail => Err(FeralError::NumericallyRankDeficient),

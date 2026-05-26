@@ -136,9 +136,9 @@ fn factor_frontal_delays_first_pivot_when_may_delay() {
 /// Variant of `trailing_dominated_frontal` where the fully-summed
 /// diagonal is *exactly* zero. At the root (may_delay=false) these
 /// pivots are below `zero_tol = f64::EPSILON` and go through the
-/// strict-zero ForceAccept path. Issue #42 (Option A): that path now
-/// counts every pivot by sign — a bit-exact `0.0` routes to `negative`
-/// (`0.0 > 0.0` is false) — so `inertia.zero == 0`, `negative == 2`.
+/// strict-zero ForceAccept path. Issue #54 (SSIDS alignment): that
+/// path now routes both bit-exact `0.0` pivots into `inertia.zero`
+/// (matching SSIDS `NumericSubtree.hxx:259-267` and MA57).
 fn trailing_dominated_zero_frontal() -> SymmetricMatrix {
     let mut mat = SymmetricMatrix::zeros(4);
     // Fully-summed block is exactly zero — rank-deficient by construction.
@@ -158,8 +158,9 @@ fn factor_frontal_root_force_accepts_without_delay() {
 
     // may_delay = false is the root-supernode contract. With a
     // genuinely zero diagonal (below zero_tol), the strict-zero
-    // ForceAccept path fires. Issue #42 (Option A): both bit-exact
-    // 0.0 pivots are counted by sign — +0.0 routes to negative.
+    // ForceAccept path fires. Issue #54 (SSIDS alignment): both
+    // bit-exact 0.0 pivots are counted into `zero`, matching SSIDS /
+    // MA57.
     let ff = factor_frontal(&mat, 2, false, &params).expect("factor_frontal");
 
     assert_eq!(ff.nelim, 2, "root eliminates all attempted columns");
@@ -167,14 +168,13 @@ fn factor_frontal_root_force_accepts_without_delay() {
     assert_eq!(ff.n_delayed, 0, "no delay path taken");
     assert_eq!(ff.contrib_dim, 2, "contrib is the 2×2 trailing block");
     assert_eq!(
-        ff.inertia.zero, 0,
-        "issue #42 (Option A): bit-exact 0.0 pivots count by sign, \
-         not as zero"
+        ff.inertia.zero, 2,
+        "issue #54 (SSIDS): both bit-exact 0.0 pivots → `zero`",
     );
     assert_eq!(ff.inertia.positive, 0);
     assert_eq!(
-        ff.inertia.negative, 2,
-        "both +0.0 pivots route to negative (0.0 > 0.0 is false)"
+        ff.inertia.negative, 0,
+        "no negative pivots — zeros are in `zero`"
     );
     assert!(ff.needs_refinement, "ForceAccept must flag refinement");
     assert_eq!(ff.d_diag.len(), 2);

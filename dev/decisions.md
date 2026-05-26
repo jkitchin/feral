@@ -4410,3 +4410,99 @@ full_avg_deg < 5.0`) → `Amd`. Everything else delegates to
   `dev/sessions/2026-05-23-01.md` (corpus validation + small-and-
   sparse retire).
 - `CHANGELOG.md` Unreleased entries.
+
+## 2026-05-26 — Strict-zero pivots route to `zero`, not pos/neg by sign (#54, supersedes #42 Option A)
+
+**Decision.** A 1×1 pivot whose magnitude satisfies `|d| <= zero_tol`
+is now recorded in `inertia.zero` under `ZeroPivotAction::ForceAccept`.
+The Issue #42 sign-routing rule (`d > 0.0 ? pos : neg`, which sent
+`+0.0` to `neg` because `0.0 > 0.0` is false) is retired.
+
+**Context.** Issue #42 Option A (entry above, dated 2026-05-20)
+collapsed the strict-zero / tiny-pivot accounting onto a single
+sign-counting rule. The goal was bit-identity with SSIDS/MA57 on the
+synthetic `rankdef_10_3` stress matrix. It worked there.
+
+It did not work for pounce. Pounce's IPM perturbation handler runs a
+δ-cascade that escalates `δ_x` (diagonal additive perturbation on the
+primal block) and `δ_c = √(δ_x · μ)` (subtractive on the constraint
+block) and re-factors at each step, comparing
+`solver.num_negative_eigenvalues()` against an expected count to
+detect convergence to a stable inertia regime. On
+`nuffield2_trap_iter1.mtx` (n=26155 LP-shaped KKT), the cascade with
+Option A produced
+
+    δ_x =  0           neg = 13501  (off by +299 from expected 13202)
+    δ_x =  1e-8        neg = 13035
+    δ_x =  1e-4        neg = 13042
+    δ_x =  2e-1        neg = 12615  ← backwards jump –427
+    δ_x =  1e2         neg = 13218
+
+The mid-cascade backwards jump (`13042 → 12615`) drove pounce into a
+600 s timeout (vs 1.8 s on MA57). Root cause: under Option A, a
+strict-zero pivot that the previous δ shifted by IEEE rounding noise
+across the `+0.0 / -0.0` boundary moves between `neg` and `pos` — that
+is, the *floating-point sign of round-off* enters the inertia
+oracle.
+
+**Resolution.** Match SSIDS (`NumericSubtree.hxx:259-267`,
+`ldlt_tpp.cxx:179-204`) and MA57 (INFO(24)=`neig`, INFO(25)=zero
+pivots): a strict-zero pivot increments `zero`, not `pos` or `neg`.
+Sylvester's law is preserved (mathematical inertia is reported);
+δ-cascade monotonicity is restored (probe confirms 0 backwards jumps
+across `δ_x ∈ {0, 1e-8, 1e-6, 1e-4, 2e-1, 1, 1e2, 1e6, 1e12, 6.99e19}`).
+
+**Trade-off vs #42 Option A.** Option A's stress-test motivation
+remains a valid corner case: SSIDS/MA57 *also* sometimes hit
+`rankdef_10_3` with their 2×2 escape and report `(4, 6, 0)` rather
+than the mathematical `(4, 0, 6)`. Under #54 feral reports the
+mathematical inertia on that matrix (matching one of MA57's
+accounting choices, INFO(24)+INFO(25)=10, but not the
+"neg counts include zeros" historical alternative). The synthetic
+`issue_42_rankdef_10_3_inertia_matches_consensus_oracle` test was
+removed (user-confirmed): it pinned an oracle convention that
+disagrees with feral's stated inertia semantics under #54.
+
+**Pounce-side complement.** Pounce's `num_negative_eigenvalues()`
+read still compares strict `negative` only. The user is updating
+pounce to compare `negative + zero` against the expected count
+(MA57's INFO(24)+INFO(25) sum) so that the SSIDS-aligned accounting
+on the feral side maps cleanly onto pounce's convergence test.
+
+**Hard constraint check.** CLAUDE.md states "Inertia must be exactly
+correct on non-singular matrices. On matrices where the canonical
+Fortran direct solvers disagree, feral must agree with at least one
+of them." On `nuffield2_trap`, MUMPS fails and MA57 / SSIDS / Feral
+all disagree numerically (this is a singular LP-shape KKT — by the
+`external_benchmarks/consensus/compute_consensus.py` framework it
+would be tagged `excluded`, i.e. outside the inertia gate). The
+SSIDS-aligned convention satisfies the gate on the non-singular
+corpus and removes the round-off-driven non-monotonicity on
+singular inputs.
+
+**Follow-up (separate commit).** `ZeroPivotAction::ForceAccept`'s
+numerical handling is unchanged here (L column and D entry both
+zeroed). That leaves a NaN-on-solve hazard: any back-solve that
+loads from the zeroed column hits `0/0`. Pounce's IPM survives it
+because every force-accepted factor is followed by an inertia retry
+that re-factorizes with a different perturbation — but the inner
+solve still wastes a factorization per occurrence. The next change
+will redefine `ForceAccept` to perturb `d` to a static floor
+(MA57 `cntl(4)` shape) and keep the L column live, while continuing
+to route the inertia to `zero`. Recorded here so the two-commit
+sequence is auditable.
+
+**References.**
+- This commit (the four 1×1 strict-zero sites in
+  `src/dense/factor.rs`: `factor` ~814, `try_reject_1x1_frontal`
+  ~3717, `do_1x1_pivot` ~4276, `count_1x1_inertia` ~4541).
+- `dev/research/issue-54-lp-kkt-inertia.md` (oracle cross-check
+  and δ-cascade analysis).
+- `dev/repros/issue-54/nuffield2_trap_iter1.mtx` and the probe
+  binaries `src/bin/probe_issue54.rs`, `src/bin/probe_issue54_cascade.rs`.
+- SSIDS `src/ssids/cpu/NumericSubtree.hxx:259-267` and
+  `src/ssids/cpu/kernels/ldlt_tpp.cxx:179-204` (small-pivot routing
+  into `num_zero`).
+- HSL MA57 user documentation: INFO(24) = `neig`, INFO(25) = number
+  of zero pivots (rank deficiency surfaced separately from sign
+  inertia).

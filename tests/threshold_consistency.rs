@@ -249,9 +249,9 @@ fn polak6_0021_residual_after_threshold_fix() {
 #[test]
 fn factor_inertia_force_accept_implies_solve_skip_invariant() {
     // Invariant: every pivot counted as zero in inertia must satisfy
-    // |d_diag[k]| <= factors.zero_tol. Issue #42 (Option A): inertia.zero
-    // is now structurally 0, so the invariant holds vacuously; the
-    // d_diag/zero_tol check below is kept as a regression guard.
+    // |d_diag[k]| <= factors.zero_tol. Issue #54 (SSIDS alignment):
+    // strict-zero pivots are now routed to `zero`, so the invariant
+    // is non-vacuous.
     //
     // Use a 4x4 block-diagonal matrix with two rank-1 blocks of [[1,1],[1,1]].
     // Each block has eigenvalues 0 and 2 (mathematical inertia (2, 0, 2)).
@@ -264,10 +264,9 @@ fn factor_inertia_force_accept_implies_solve_skip_invariant() {
     mat.set(3, 3, 1.0);
 
     let (factors, inertia) = factor(&mat, &ldlt_params()).expect("factor");
-    // Issue #42 (Option A): each rank-1 block contributes one positive
-    // pivot (d=1) and one bit-exact 0.0 pivot counted by sign (+0.0 →
-    // negative). feral's reported inertia is the sign-count (2, 2, 0),
-    // not the mathematical inertia (2, 0, 2). The triple still sums to n.
+    // Issue #54 (SSIDS alignment): each rank-1 block contributes one
+    // positive pivot (d=1) and one bit-exact 0.0 pivot recorded in
+    // `zero`. Feral now reports the mathematical inertia (2, 0, 2).
     assert_eq!(
         inertia.positive + inertia.negative + inertia.zero,
         4,
@@ -275,8 +274,8 @@ fn factor_inertia_force_accept_implies_solve_skip_invariant() {
         inertia
     );
     assert_eq!(inertia.positive, 2, "got inertia {}", inertia);
-    assert_eq!(inertia.negative, 2, "got inertia {}", inertia);
-    assert_eq!(inertia.zero, 0, "got inertia {}", inertia);
+    assert_eq!(inertia.negative, 0, "got inertia {}", inertia);
+    assert_eq!(inertia.zero, 2, "got inertia {}", inertia);
 
     // Bulk invariant: the count of d_diag entries with |d| <= zero_tol
     // is at least inertia.zero.

@@ -248,11 +248,11 @@ fn i4_singular_under_fail_returns_singular_clears_factor() {
 
 /// F-03 regression — under the default `ZeroPivotAction::ForceAccept`,
 /// `diag(1, 0, 1)` factors cleanly and the factor is preserved.
-/// Issue #42 (Option A): the isolated 0.0 pivot is counted by sign
-/// (+0.0 → negative), so the reported inertia is (2, 1, 0). Matches
-/// MUMPS / MA57 behavior on matrices with isolated zero pivots (e.g.
-/// `GHS_indef/bloweybl`). See `dev/research/f03-bloweybl-rank-rejection.md`,
-/// `dev/decisions.md`, and issues #32 / #42.
+/// Issue #54 (SSIDS alignment, successor to #42): the isolated 0.0
+/// pivot is recorded in `inertia.zero`, matching SSIDS/MA57's
+/// Sylvester-signature accounting. Reported inertia is (2, 0, 1).
+/// See `dev/research/issue-54-lp-kkt-inertia.md`, `dev/decisions.md`,
+/// and issues #32 / #42 / #54.
 #[test]
 fn f03_default_force_accept_factors_isolated_zero_pivot() {
     let csc = CscMatrix::from_triplets(3, &[0, 1, 2], &[0, 1, 2], &[1.0, 0.0, 1.0]).unwrap();
@@ -275,11 +275,11 @@ fn f03_default_force_accept_factors_isolated_zero_pivot() {
         inertia,
         Inertia {
             positive: 2,
-            negative: 1,
-            zero: 0,
+            negative: 0,
+            zero: 1,
         },
-        "issue #42: diag(1, 0, 1) — the 0.0 pivot is sign-counted to \
-         negative, expected (2, 1, 0), got {:?}",
+        "issue #54: diag(1, 0, 1) — strict-zero pivot → `zero` bucket \
+         (SSIDS-aligned), expected (2, 0, 1), got {:?}",
         inertia
     );
 }
@@ -288,25 +288,20 @@ fn f03_default_force_accept_factors_isolated_zero_pivot() {
 /// the default `ZeroPivotAction::ForceAccept` counts every pivot by
 /// sign, so `inertia.zero == 0` structurally.
 ///
-/// Before issue #42, feral used a hybrid rule: pivots that reduced to
-/// a *bit-exact* `0.0` were counted into `inertia.zero`, while merely
-/// tiny pivots were counted by sign (#39 sign-fallback). That hybrid
-/// produced an inertia triple matching no canonical oracle on
-/// `synth/rankdef_10_3` (feral zero=1 vs SSIDS/MA57 zero=0). Option A
-/// (see `dev/decisions.md` and `dev/research/f01-rankdef-underreporting.md`)
-/// collapses the rule to pure sign-counting: `d > 0.0 ? pos : neg`,
-/// which routes bit-exact `+0.0` to `negative` (`0.0 > 0.0` is false).
+/// Issue #54 (SSIDS alignment) — successor to issue #42. Under SSIDS
+/// and MA57 conventions, a strict-zero pivot (`|d| <= zero_tol`) is
+/// recorded in `inertia.zero`, matching the matrix's Sylvester
+/// signature. The previous Issue #42 sign-routing rule (`d > 0.0
+/// ? pos : neg`) split bit-exact zeros by IEEE rounding noise — that
+/// was the cause of the inertia jitter in pounce's perturbation
+/// cascade (#54 stalled `nuffield2_trap` for 600s vs 1.8s on MA57).
 ///
 /// We use a rank-1 dyadic A = u uᵀ at n=5 with u = ones; eigenvalues
-/// are (5, 0, 0, 0, 0). Sylvester signature is (1, 0, 4), but under
-/// pure sign-counting the four exact-zero pivots are *not* reported as
-/// zero — they split between positive and negative by their stored
-/// sign. The invariant feral now guarantees: `zero == 0`, at least one
-/// `positive` (the rank-1 mass), and the triple sums to n. Rank
-/// deficiency is still surfaced via `min_pivot_magnitude` (continuous)
-/// and `ZeroPivotAction::Fail` (factor status), not the inertia triple.
+/// are (5, 0, 0, 0, 0). Sylvester signature is (1, 0, 4), which feral
+/// now reports verbatim. The factor still flags `needs_refinement`;
+/// status semantics (`Success` vs `Singular`) are unchanged here.
 #[test]
-fn f01_dyadic_rankdef_counts_pivots_by_sign() {
+fn f01_dyadic_rankdef_counts_zero_pivots_ssids_aligned() {
     // A = u uᵀ with u = (1, 1, 1, 1, 1). Rank 1, n=5. Under pure
     // sign-counting feral reports zero=0; the rank-1 positive mass
     // guarantees at least one positive pivot.
@@ -337,51 +332,20 @@ fn f01_dyadic_rankdef_counts_pivots_by_sign() {
         "inertia must sum to n"
     );
     assert_eq!(
-        inertia.zero, 0,
-        "issue #42: under pure sign-counting every pivot — including \
-         bit-exact 0.0 — is counted by sign, so zero must be 0, got {:?}",
+        inertia.zero,
+        n - 1,
+        "issue #54 (SSIDS): rank-1 dyadic has Sylvester signature \
+         (1, 0, n-1); strict-zero pivots → `zero`, got {:?}",
         inertia
     );
-    assert!(
-        inertia.positive >= 1,
-        "the rank-1 dyadic carries positive mass: at least one \
-         positive pivot expected, got {:?}",
-        inertia
-    );
-}
-
-/// issue #42 regression — the synthetic stress matrix
-/// `synth/rankdef_10_3` (n=10, constructed rank deficiency 3) must
-/// report the consensus-oracle inertia triple (4, 6, 0).
-///
-/// This matrix is the one that exposed feral's no-oracle-match hybrid
-/// count (feral reported (4, 5, 1)). SSIDS and MA57 both report
-/// (4, 6, 0); MUMPS with explicit null-pivot detection (ICNTL(24)=1)
-/// reports (3, 4, 3). Option A makes feral bit-identical to the
-/// SSIDS/MA57 consensus. Oracle triple frozen in
-/// `external_benchmarks/stress/oracles.json`.
-#[test]
-fn issue_42_rankdef_10_3_inertia_matches_consensus_oracle() {
-    use std::path::Path;
-    let mtx = feral::read_mtx(Path::new(
-        "external_benchmarks/stress/matrices/synth/rankdef_10_3.mtx",
-    ))
-    .expect("read rankdef_10_3.mtx");
-    let csc = mtx.to_csc().expect("rankdef_10_3 to CSC");
-
-    let mut solver = Solver::new();
-    let status = solver.factor(&csc, None);
-    assert!(
-        matches!(status, FactorStatus::Success),
-        "factor must succeed under default ForceAccept, got {:?}",
-        status
-    );
-    let inertia = solver.inertia().expect("inertia stored on Success").clone();
     assert_eq!(
-        (inertia.positive, inertia.negative, inertia.zero),
-        (4, 6, 0),
-        "issue #42: rankdef_10_3 must match the SSIDS/MA57 consensus \
-         oracle (4, 6, 0), got {:?}",
+        inertia.positive, 1,
+        "rank-1 positive mass = exactly one positive pivot, got {:?}",
+        inertia
+    );
+    assert_eq!(
+        inertia.negative, 0,
+        "rank-1 PSD dyadic has no negative pivots, got {:?}",
         inertia
     );
 }
