@@ -4,6 +4,36 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — symbolic-analysis-time delayed-pivot budget + CB rewire ([#55][i55])
+
+Per-supernode `delayed_capacity` is assigned during symbolic
+analysis. The numeric phase enforces the bound at the frontal
+expansion site: if more pivots delay into a supernode than its
+capacity, the factor returns the structured
+`FeralError::DelayBudgetExceeded { supernode, required, capacity }`
+(MUMPS `INFO(2)` workspace-overflow analog) rather than growing
+the front unboundedly. Cascade-break now triggers on budget
+exhaustion instead of the heuristic ratio gate, matching MUMPS's
+`dfac_front_aux.F:1251-1331` invariant that static perturbation
+fires only when delay is structurally impossible.
+
+Capacity formula:
+- `tight = max(4 * own_ncol, 16)`
+- `capacity = min(subtree_ncol(s) - own_ncol(s), tight)`
+
+Root-supernode cap (defensive, `n >= 1024`): declines amalgamations
+that would push the root past `min(0.05 * n, 2048)` columns.
+
+`FeralConfig::default()` now ships with cascade-break armed
+(`cascade_break_ratio = Some(0.5)`, `cascade_break_eps = Some(1e-10)`)
+as the budget-exhausted fallback. Pounce's per-problem `.opt`
+overrides for `nql180` / `pinene_3200` are no longer required.
+
+See `dev/research/symbolic-delay-budget-2026-05-27.md` and
+`dev/decisions.md` (2026-05-27 entry, frozen convention).
+
+[i55]: https://github.com/jkitchin/feral/issues/55
+
 ### Changed — strict-zero pivots route to `inertia.zero` (SSIDS-aligned, [#54][i54])
 
 When `ZeroPivotAction::ForceAccept` accepts a 1×1 pivot whose
