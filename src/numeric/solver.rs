@@ -68,6 +68,14 @@ pub struct FactorStats {
     /// Scaling outcome of the numeric phase. Mirrors
     /// [`Solver::scaling_info`].
     pub scaling_info: crate::scaling::ScalingInfo,
+    /// MUMPS `INFO(25)` / NBTINYW equivalent: count of pivots that
+    /// were statically perturbed to `sign(d)·floor` during this
+    /// factor() call, summed across all supernodes. Counts both 1×1
+    /// (`perturb_to_floor`) and 2×2 (`perturb_2x2_to_floor`) events.
+    /// Diagnostic only — does not affect inertia or solve behavior,
+    /// and is not gated on by any acceptance check. Mirrors
+    /// [`SparseFactors::n_tiny`](crate::numeric::factorize::SparseFactors::n_tiny).
+    pub n_tiny: usize,
 }
 
 /// Result of a single `Solver::factor` attempt.
@@ -1491,6 +1499,7 @@ impl Solver {
         let min_abs_pivot = factors.min_pivot_magnitude().unwrap_or(0.0);
         let max_abs_pivot = factors.max_pivot_magnitude().unwrap_or(0.0);
         let scaling_info = factors.scaling_info.clone();
+        let n_tiny = factors.n_tiny();
         Some(FactorStats {
             nnz_a,
             nnz_l,
@@ -1500,6 +1509,7 @@ impl Solver {
             max_abs_pivot,
             pattern_reused,
             scaling_info,
+            n_tiny,
         })
     }
 

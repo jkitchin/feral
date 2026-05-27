@@ -4506,3 +4506,88 @@ sequence is auditable.
 - HSL MA57 user documentation: INFO(24) = `neig`, INFO(25) = number
   of zero pivots (rank deficiency surfaced separately from sign
   inertia).
+
+## 2026-05-27 — MUMPS-aligned static-perturbation convention frozen, `n_tiny` counter exposed
+
+**Phase A of issue #55 (`/.claude/plans/feral-is-a-cached-raccoon.md`).**
+
+Two paired decisions, both append-only:
+
+1. **The `perturb_to_floor` / `count_1x1_inertia` PerturbToEps /
+   `perturb_2x2_to_floor` formulae and inertia-counting branches are
+   frozen** at their current implementation. They were audited
+   against MUMPS 5.8.2 (`dfac_front_aux.F` MUMPS_REPLACE_TINY_PIVOT
+   ~1251-1331, `dini_defaults.F` ~875-876 / 919-920) and found to
+   match exactly:
+   - $\tilde d = \mathrm{sign}(d)\cdot\max(|d|, \tau)$ with the
+     convention $\mathrm{sign}(0) = +1$.
+   - Inertia counted by sign of the *perturbed* value, never by
+     sign of the original near-zero, and never into the `zero`
+     bucket from the PerturbToEps path.
+   - 2×2 perturbation pushes $|\lambda_{\min}|$ to $\pm\tau$
+     preserving its current sign if nonzero; for
+     $\lambda_{\min} = 0$ use $\mathrm{sign}(\lambda_{\max})$; for
+     both zero, push positive (the `sign(0) = +1` 2×2 analogue).
+
+   `ForceAccept` is a *different* path — strict-zero pivot accepted as
+   zero, increments `zero` per the SSIDS / issue #54 convention — and
+   does *not* increment `n_tiny`. ForceAccept is the
+   "accept the singularity" path; PerturbToEps is the
+   "lift it to the floor" path. They are mutually exclusive at the
+   call site.
+
+   **Do not change any of these formulae or branches without first
+   re-running the MUMPS-alignment audit in**
+   `dev/research/mumps-perturbation-alignment-2026-05-27.md`.
+
+2. **`n_tiny` is added as a diagnostic counter** mirroring MUMPS
+   `INFO(25) = NBTINYW`. Plumbing:
+   `FrontalFactors::n_tiny` (`src/dense/factor.rs:1220`,
+   incremented at every `perturb_to_floor` / `perturb_2x2_to_floor`
+   call site) → `SparseFactors::n_tiny()` accessor
+   (`src/numeric/factorize.rs:1041`) → `FactorStats::n_tiny`
+   (`src/numeric/solver.rs:78`), reachable via
+   `Solver::last_factor_stats()`. Diagnostic only — *never* gated on
+   by any acceptance check, never used to short-circuit a factor,
+   not surfaced in error messages. Treated identically to MUMPS's
+   `INFO(25)`: the caller can read it for telemetry but the solver
+   itself ignores it.
+
+**Why this is a decision and not just a code change.** The PerturbToEps
+formula and the inertia-by-perturbed-sign convention are the *contract*
+under which FERAL claims MUMPS-equivalent behavior on the perturbation
+branch. Drift in either — for example, classifying a perturbed pivot as
+`zero` rather than by its perturbed sign — silently breaks the IPM
+caller's inertia gate without producing a test failure on rank-full
+problems. The corresponding test gate is the new positive case in
+`tests/issue_55_n_tiny_counter.rs`
+(`n_tiny_counts_perturbed_pivots_under_perturb_to_eps`), which asserts
+both `n_tiny == 2` *and* the perturbed inertia `(5, 0, 0)` on a
+diag(1,0,1,0,1) matrix — locking the formula and the sign convention
+together.
+
+**One remaining divergence with MUMPS is *not* in scope of this
+decision** and is documented in the audit note: the *trigger* condition
+for the perturbation branch. MUMPS perturbs only when delay is
+structurally exhausted; FERAL's cascade-break trigger
+(`src/numeric/factorize.rs:2248-2258`) fires on a numeric-time
+heuristic ratio. Closing that gap is Phase B (symbolic-time
+`delayed_capacity` on `Supernode` + CB rewire); the Phase 0
+re-validation evidence
+(`dev/research/cb-on-default-revalidation-2026-05-27.md`) shows two
+historical-regression failures that depend on it.
+
+**References.**
+- `dev/research/mumps-perturbation-alignment-2026-05-27.md` —
+  the audit note (Phase A3).
+- `dev/research/cb-on-default-revalidation-2026-05-27.md` —
+  Phase 0 evidence for the trigger-condition gap.
+- `tests/issue_55_n_tiny_counter.rs` — formula-and-sign lock
+  (Phase A5).
+- `tests/issue_17_robot_1600_cascade_off.rs` and
+  `tests/issue_18_narx_cfy_cascade_off.rs` — `n_tiny == 0` gate on
+  the CB-off default path (Phase A5 extension).
+- MUMPS 5.8.2 `dfac_front_aux.F` MUMPS_REPLACE_TINY_PIVOT;
+  `dini_defaults.F` INFO(25) accounting.
+- SSIDS `src/ssids/cpu/NumericSubtree.hxx` `num_zero` semantics
+  (referenced for the ForceAccept-vs-PerturbToEps boundary).

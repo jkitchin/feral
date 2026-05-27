@@ -775,6 +775,10 @@ pub fn factor(
     let mut neg = 0usize;
     let mut zero = 0usize;
     let mut needs_refinement = false;
+    // Local n_tiny sink — `factor()` returns the legacy top-level `Factors`
+    // which has no n_tiny field. Frontal entry points expose it via
+    // `FrontalFactors::n_tiny`.
+    let mut n_tiny = 0usize;
 
     let alpha = params.alpha;
     let mut k = 0;
@@ -802,6 +806,7 @@ pub fn factor(
                 d = perturb_to_floor(d, params.static_pivot_floor);
                 a[k * n + k] = d;
                 needs_refinement = true;
+                n_tiny += 1;
                 if d > 0.0 {
                     pos += 1;
                 } else {
@@ -834,6 +839,7 @@ pub fn factor(
                         let d_new = perturb_to_floor(d, abs_floor);
                         a[k * n + k] = d_new;
                         needs_refinement = true;
+                        n_tiny += 1;
                         if d_new > 0.0 {
                             pos += 1;
                         } else {
@@ -888,6 +894,7 @@ pub fn factor(
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
+                &mut n_tiny,
             )?;
             set_l_column_identity(&mut a, n, k);
             // No fused values — next column wasn't updated
@@ -909,6 +916,7 @@ pub fn factor(
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
+                &mut n_tiny,
             )?;
             fused_gamma0 = ng;
             fused_r = nr;
@@ -935,6 +943,7 @@ pub fn factor(
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
+                &mut n_tiny,
             )?;
             fused_gamma0 = ng;
             fused_r = nr;
@@ -956,6 +965,7 @@ pub fn factor(
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
+                &mut n_tiny,
             )?;
             fused_gamma0 = ng;
             fused_r = nr;
@@ -1007,6 +1017,7 @@ pub fn factor(
                 &mut neg,
                 &mut zero,
                 &mut needs_refinement,
+                &mut n_tiny,
             )?;
             fused_gamma0 = ng;
             fused_r = nr;
@@ -1025,6 +1036,7 @@ pub fn factor(
             &mut neg,
             &mut zero,
             &mut needs_refinement,
+            &mut n_tiny,
         )?;
         fused_gamma0 = ng;
         fused_r = nr;
@@ -1209,6 +1221,15 @@ pub struct FrontalFactors {
     /// well-conditioned matrices. Aggregated per-front; the multifrontal
     /// driver sums across supernodes.
     pub n_rook_rescues: usize,
+    /// Number of pivots perturbed to a static floor during this
+    /// factorization. MUMPS-aligned diagnostic counter
+    /// (`INFO(25) = NBTINYW` equivalent). Incremented at the three
+    /// `perturb_to_floor` / `perturb_sym2x2_to_floor` sites where the
+    /// kernel writes a perturbed value into the diagonal. Aggregated
+    /// per-front; the multifrontal driver sums across supernodes.
+    /// See `dev/research/mumps-perturbation-alignment-2026-05-27.md`
+    /// and the issue #55 Phase A plan.
+    pub n_tiny: usize,
     /// 1×1 pivot threshold from BunchKaufmanParams (see Factors::zero_tol).
     pub zero_tol: f64,
     /// 2×2 pivot threshold from BunchKaufmanParams.
@@ -1371,6 +1392,7 @@ pub fn factor_frontal_with_profile(
             },
             needs_refinement: false,
             n_rook_rescues: 0,
+            n_tiny: 0,
             zero_tol: params.zero_tol,
             zero_tol_2x2: params.zero_tol_2x2,
         });
@@ -1467,6 +1489,7 @@ fn factor_frontal_in_place_with_scratch_impl(
             },
             needs_refinement: false,
             n_rook_rescues: 0,
+            n_tiny: 0,
             zero_tol: params.zero_tol,
             zero_tol_2x2: params.zero_tol_2x2,
         });
@@ -1505,6 +1528,7 @@ fn factor_frontal_in_place_with_scratch_impl(
     let mut zero = 0usize;
     let mut needs_refinement = false;
     let mut n_rook_rescues = 0usize;
+    let mut n_tiny = 0usize;
     if let (Some(p), Some(t)) = (profile.as_deref_mut(), t0) {
         p.setup_ns += t.elapsed().as_nanos();
     }
@@ -1540,6 +1564,7 @@ fn factor_frontal_in_place_with_scratch_impl(
             &mut zero,
             &mut needs_refinement,
             &mut n_rook_rescues,
+            &mut n_tiny,
             &mut cached_maxfromm,
         )? {
             PivotStepResult::Advanced(n) => k += n,
@@ -1627,6 +1652,7 @@ fn factor_frontal_in_place_with_scratch_impl(
         inertia: Inertia::new(pos, neg, zero),
         needs_refinement,
         n_rook_rescues,
+        n_tiny,
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
     };
@@ -1762,6 +1788,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             },
             needs_refinement: false,
             n_rook_rescues: 0,
+            n_tiny: 0,
             zero_tol: params.zero_tol,
             zero_tol_2x2: params.zero_tol_2x2,
         });
@@ -1842,6 +1869,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     let mut zero = 0usize;
     let mut needs_refinement = false;
     let mut n_rook_rescues = 0usize;
+    let mut n_tiny = 0usize;
     // MAXFROMM cache: live across both scalar-tail steps and the
     // post-panel fallback step within this front. Panel paths do not
     // populate it (the panel processes its own AMAX); the cache is
@@ -1883,6 +1911,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
                 &mut zero,
                 &mut needs_refinement,
                 &mut n_rook_rescues,
+                &mut n_tiny,
                 &mut cached_maxfromm,
             )?;
             phase_timing::stop(&phase_timing::SCALARTAIL_NS, _pt);
@@ -1922,6 +1951,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             &mut neg,
             &mut zero,
             &mut needs_refinement,
+            &mut n_tiny,
             &mut *d_panel,
             &mut *subdiag,
             &mut perm,
@@ -1982,6 +2012,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
                     &mut zero,
                     &mut needs_refinement,
                     &mut n_rook_rescues,
+                    &mut n_tiny,
                     &mut cached_maxfromm,
                 )? {
                     PivotStepResult::Advanced(n) => {
@@ -2081,6 +2112,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         inertia: Inertia::new(pos, neg, zero),
         needs_refinement,
         n_rook_rescues,
+        n_tiny,
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
     })
@@ -2212,6 +2244,7 @@ pub fn factor_frontal_diagonal_in_place(
             },
             needs_refinement: false,
             n_rook_rescues: 0,
+            n_tiny: 0,
             zero_tol: params.zero_tol,
             zero_tol_2x2: params.zero_tol_2x2,
         });
@@ -2313,6 +2346,7 @@ pub fn factor_frontal_diagonal_in_place(
         inertia: Inertia::new(pos, neg, 0),
         needs_refinement,
         n_rook_rescues: 0,
+        n_tiny: 0,
         zero_tol: params.zero_tol,
         zero_tol_2x2: params.zero_tol_2x2,
     })
@@ -2345,6 +2379,7 @@ fn lblt_panel_frontal(
     neg: &mut usize,
     zero: &mut usize,
     needs_refinement: &mut bool,
+    n_tiny: &mut usize,
     d_panel: &mut [f64],
     subdiag: &mut [f64],
     // Phase A2 (`dev/plans/dense-kernel-w2-2x2-swap.md`): the panel
@@ -2380,7 +2415,17 @@ fn lblt_panel_frontal(
 
         if gamma0 == 0.0 {
             // Zero-column: matches scalar's gamma0==0 branch exactly.
-            count_1x1_inertia(a, nrow, col, params, pos, neg, zero, needs_refinement)?;
+            count_1x1_inertia(
+                a,
+                nrow,
+                col,
+                params,
+                pos,
+                neg,
+                zero,
+                needs_refinement,
+                n_tiny,
+            )?;
             set_l_column_identity(a, nrow, col);
             // The L column is all zeros (below diagonal); the diagonal is
             // unchanged (or perturbed in place by `count_1x1_inertia`
@@ -2600,6 +2645,7 @@ fn lblt_panel_frontal(
             neg,
             zero,
             needs_refinement,
+            n_tiny,
         )?;
         match outcome {
             PivotOutcome::Accepted => {
@@ -3155,6 +3201,7 @@ fn scalar_pivot_step(
     zero: &mut usize,
     needs_refinement: &mut bool,
     n_rook_rescues: &mut usize,
+    n_tiny: &mut usize,
     cached_maxfromm: &mut Option<f64>,
 ) -> Result<PivotStepResult, FeralError> {
     let alpha = params.alpha;
@@ -3192,6 +3239,7 @@ fn scalar_pivot_step(
             neg,
             zero,
             needs_refinement,
+            n_tiny,
         )?;
         match outcome {
             PivotOutcome::Accepted => do_1x1_update(a, nrow, k, params.fma),
@@ -3228,6 +3276,7 @@ fn scalar_pivot_step(
                     zero,
                     needs_refinement,
                     n_rook_rescues,
+                    n_tiny,
                 )?;
                 return Ok(finish_1x1_outcome(
                     outcome,
@@ -3273,7 +3322,7 @@ fn scalar_pivot_step(
     };
 
     if gamma0 == 0.0 {
-        count_1x1_inertia(a, nrow, k, params, pos, neg, zero, needs_refinement)?;
+        count_1x1_inertia(a, nrow, k, params, pos, neg, zero, needs_refinement, n_tiny)?;
         set_l_column_identity(a, nrow, k);
         return Ok(PivotStepResult::Advanced(1));
     }
@@ -3296,6 +3345,7 @@ fn scalar_pivot_step(
             zero,
             needs_refinement,
             n_rook_rescues,
+            n_tiny,
         )?;
         return Ok(finish_1x1_outcome(
             outcome,
@@ -3339,6 +3389,7 @@ fn scalar_pivot_step(
             zero,
             needs_refinement,
             n_rook_rescues,
+            n_tiny,
         )?;
         return Ok(finish_1x1_outcome(
             outcome,
@@ -3374,6 +3425,7 @@ fn scalar_pivot_step(
             zero,
             needs_refinement,
             n_rook_rescues,
+            n_tiny,
         )?;
         return Ok(finish_1x1_outcome(
             outcome,
@@ -3444,6 +3496,7 @@ fn scalar_pivot_step(
             a[k * nrow + k] = d11;
             a[(k + 1) * nrow + (k + 1)] = d22;
             *needs_refinement = true;
+            *n_tiny += 1;
         }
 
         let det = d11 * d22 - d21 * d21;
@@ -3559,6 +3612,7 @@ fn scalar_pivot_step(
                 zero,
                 needs_refinement,
                 n_rook_rescues,
+                n_tiny,
             )?;
             return Ok(finish_1x1_outcome(
                 outcome,
@@ -3608,6 +3662,7 @@ fn scalar_pivot_step(
             zero,
             needs_refinement,
             n_rook_rescues,
+            n_tiny,
         )?;
         Ok(finish_1x1_outcome(
             outcome,
@@ -3656,6 +3711,7 @@ fn try_reject_1x1_frontal(
     // branch below) increment `zero`, not pos/neg by sign.
     zero: &mut usize,
     needs_refinement: &mut bool,
+    n_tiny: &mut usize,
 ) -> Result<PivotOutcome, FeralError> {
     let d = a[k * nrow + k];
 
@@ -3671,6 +3727,7 @@ fn try_reject_1x1_frontal(
         let d_new = perturb_to_floor(d, params.static_pivot_floor);
         a[k * nrow + k] = d_new;
         *needs_refinement = true;
+        *n_tiny += 1;
         if d_new > 0.0 {
             *pos += 1;
         } else {
@@ -3735,6 +3792,7 @@ fn try_reject_1x1_frontal(
                     let d_new = perturb_to_floor(d, abs_floor);
                     a[k * nrow + k] = d_new;
                     *needs_refinement = true;
+                    *n_tiny += 1;
                     if d_new > 0.0 {
                         *pos += 1;
                     } else {
@@ -3822,6 +3880,7 @@ fn try_reject_1x1_with_rook_rescue(
     zero: &mut usize,
     needs_refinement: &mut bool,
     n_rook_rescues: &mut usize,
+    n_tiny: &mut usize,
 ) -> Result<PivotOutcome, FeralError> {
     let d = a[k * nrow + k];
     let threshold = (params.pivot_threshold * col_max).max(params.null_pivot_tol);
@@ -3840,6 +3899,7 @@ fn try_reject_1x1_with_rook_rescue(
             neg,
             zero,
             needs_refinement,
+            n_tiny,
         );
     }
 
@@ -3882,6 +3942,7 @@ fn try_reject_1x1_with_rook_rescue(
         neg,
         zero,
         needs_refinement,
+        n_tiny,
     )
 }
 
@@ -4214,6 +4275,7 @@ fn do_1x1_pivot(
     // branch below) increment `zero`, not pos/neg by sign.
     zero: &mut usize,
     needs_refinement: &mut bool,
+    n_tiny: &mut usize,
 ) -> Result<(f64, usize), FeralError> {
     let mut d = a[k * n + k];
 
@@ -4228,6 +4290,7 @@ fn do_1x1_pivot(
         d = perturb_to_floor(d, params.static_pivot_floor);
         a[k * n + k] = d;
         *needs_refinement = true;
+        *n_tiny += 1;
         if d > 0.0 {
             *pos += 1;
         } else {
@@ -4399,6 +4462,7 @@ fn do_2x2_pivot(
     neg: &mut usize,
     zero: &mut usize,
     needs_refinement: &mut bool,
+    n_tiny: &mut usize,
 ) -> Result<(f64, usize), FeralError> {
     let mut a00 = a[k * n + k];
     let a10 = a[k * n + (k + 1)];
@@ -4418,6 +4482,7 @@ fn do_2x2_pivot(
         a[k * n + k] = a00;
         a[(k + 1) * n + (k + 1)] = a11;
         *needs_refinement = true;
+        *n_tiny += 1;
     }
 
     // Store the 2×2 block subdiagonal
@@ -4429,7 +4494,18 @@ fn do_2x2_pivot(
     // done from `a10` via the cancellation-free discriminant form inside
     // `count_2x2_inertia`. See issue #38.
     let det = a00 * a11 - a10 * a10;
-    count_2x2_inertia(det, a00, a10, a11, params, pos, neg, zero, needs_refinement)?;
+    count_2x2_inertia(
+        det,
+        a00,
+        a10,
+        a11,
+        params,
+        pos,
+        neg,
+        zero,
+        needs_refinement,
+        n_tiny,
+    )?;
 
     if (k + 2) >= n {
         // No trailing submatrix to update
@@ -4517,6 +4593,9 @@ fn count_1x1_inertia(
     // branch below) increment `zero`, not pos/neg by sign.
     zero: &mut usize,
     needs_refinement: &mut bool,
+    // Issue #55 Phase A1: MUMPS `INFO(25) = NBTINYW` equivalent.
+    // Incremented at each `perturb_to_floor` call site below.
+    n_tiny: &mut usize,
 ) -> Result<(), FeralError> {
     let d = a[k * stride + k];
 
@@ -4528,6 +4607,7 @@ fn count_1x1_inertia(
         let d_new = perturb_to_floor(d, params.static_pivot_floor);
         a[k * stride + k] = d_new;
         *needs_refinement = true;
+        *n_tiny += 1;
         if d_new > 0.0 {
             *pos += 1;
         } else {
@@ -4551,6 +4631,7 @@ fn count_1x1_inertia(
                 let d_new = perturb_to_floor(d, abs_floor);
                 a[k * stride + k] = d_new;
                 *needs_refinement = true;
+                *n_tiny += 1;
                 if d_new > 0.0 {
                     *pos += 1;
                 } else {
@@ -4616,6 +4697,13 @@ fn count_2x2_inertia(
     neg: &mut usize,
     zero: &mut usize,
     needs_refinement: &mut bool,
+    // Reserved for issue #55 Phase A1: the 2×2 perturb_2x2_to_floor
+    // site lives in the *callers* of count_2x2_inertia (do_2x2_pivot,
+    // scalar_pivot_step), not here. This parameter is currently unused
+    // but kept in the signature to match count_1x1_inertia and to
+    // accommodate future near-singular bounded-Δ perturbations of the
+    // 2×2 determinant gate.
+    _n_tiny: &mut usize,
 ) -> Result<(), FeralError> {
     // 2026-04-27 (Fix B in dev/research/2x2-bk-inertia-accounting.md):
     // switched the same-sign branch from `a00 > 0` to `trace > 0`. KKT
@@ -4991,6 +5079,7 @@ mod sym2_inertia_tests {
         let mut neg = 0;
         let mut zero = 0;
         let mut needs_refinement = false;
+        let mut n_tiny = 0usize;
         count_2x2_inertia(
             det,
             1e-30,
@@ -5001,6 +5090,7 @@ mod sym2_inertia_tests {
             &mut neg,
             &mut zero,
             &mut needs_refinement,
+            &mut n_tiny,
         )
         .expect("non-singular 2×2 must classify without error");
         assert_eq!((pos, neg, zero), (2, 0, 0), "spurious zero in else branch");

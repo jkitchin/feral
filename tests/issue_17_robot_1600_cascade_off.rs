@@ -70,6 +70,18 @@ fn robot_1600_iter_3_matches_mumps_inertia_with_defaults() {
                 (expected.positive, expected.negative, expected.zero),
                 "robot_1600_0003 inertia must match MUMPS reference"
             );
+            // Phase A (issue #55): with CB disarmed by default, the
+            // MUMPS-style static-perturbation branch must not fire.
+            // `n_tiny` is the MUMPS `INFO(25)` / NBTINYW equivalent.
+            let stats = solver
+                .last_factor_stats()
+                .expect("FactorStats present after Success");
+            assert_eq!(
+                stats.n_tiny, 0,
+                "no pivot should be statically perturbed on robot_1600_0003 \
+                 with CB-off defaults (n_tiny={})",
+                stats.n_tiny,
+            );
         }
         FactorStatus::WrongInertia {
             actual,

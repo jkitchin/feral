@@ -1032,6 +1032,19 @@ impl SparseFactors {
         self.pivot_magnitude_extent().map(|(_min, max)| max)
     }
 
+    /// Sum of MUMPS-style static-perturbation events
+    /// (`INFO(25)` / NBTINYW equivalent) across every supernode.
+    /// Counts each time a pivot was rounded to `sign(d)·floor` via
+    /// `perturb_to_floor` (1×1) or `perturb_2x2_to_floor` (2×2).
+    /// Diagnostic only — does not affect inertia, solve behavior,
+    /// or any acceptance gate. See [`FrontalFactors::n_tiny`].
+    pub fn n_tiny(&self) -> usize {
+        self.node_factors
+            .iter()
+            .map(|nf| nf.frontal_factors.n_tiny)
+            .sum()
+    }
+
     /// Single pass over the D blocks returning `(min|λ|, max|λ|)`.
     /// Shared by [`min_pivot_magnitude`](Self::min_pivot_magnitude) and
     /// [`max_pivot_magnitude`](Self::max_pivot_magnitude). 2×2 detection
@@ -2066,6 +2079,7 @@ fn factor_one_supernode(
                 },
                 needs_refinement: false,
                 n_rook_rescues: 0,
+                n_tiny: 0,
                 zero_tol: params.bk.zero_tol,
                 zero_tol_2x2: params.bk.zero_tol_2x2,
             },
@@ -2288,8 +2302,13 @@ fn factor_one_supernode(
         eprintln!(
             "[sn-trace] sn={snode_idx} nrow={actual_nrow} exp_ncol={expanded_ncol} \
              elim={eliminable} n_del_in={n_delayed_in} may_del={may_delay} cb={cascade_break} \
-             nelim={} n_del_out={} rook_rescues={} ms={ms:.3}",
-            ff.nelim, ff.n_delayed, ff.n_rook_rescues,
+             nelim={} n_del_out={} rook_rescues={} pos={} neg={} zero={} ms={ms:.3}",
+            ff.nelim,
+            ff.n_delayed,
+            ff.n_rook_rescues,
+            ff.inertia.positive,
+            ff.inertia.negative,
+            ff.inertia.zero,
         );
     }
     ws.frontal_values = frontal.data;
@@ -2404,6 +2423,7 @@ fn factor_one_small_leaf(
                 },
                 needs_refinement: false,
                 n_rook_rescues: 0,
+                n_tiny: 0,
                 zero_tol: params.bk.zero_tol,
                 zero_tol_2x2: params.bk.zero_tol_2x2,
             },

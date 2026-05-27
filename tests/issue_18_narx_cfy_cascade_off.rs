@@ -59,6 +59,18 @@ fn check_iter(iter: usize) {
                 (expected.positive, expected.negative, expected.zero),
                 "iter {iter}: inertia must match oracle"
             );
+            // Phase A (issue #55): no static perturbation must fire on
+            // the cascade-off default path. `n_tiny` mirrors MUMPS
+            // `INFO(25)` / NBTINYW.
+            let stats = solver
+                .last_factor_stats()
+                .expect("FactorStats present after Success");
+            assert_eq!(
+                stats.n_tiny, 0,
+                "iter {iter}: no pivot should be statically perturbed under \
+                 CB-off defaults (n_tiny={})",
+                stats.n_tiny,
+            );
         }
         FactorStatus::WrongInertia {
             actual,
