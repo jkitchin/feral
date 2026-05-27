@@ -254,6 +254,18 @@ pub struct NumericParams {
     /// `Solver::with_partial_singular_warning(true)` or the
     /// `FERAL_WARN_PARTIAL_SINGULAR` env var (C ABI). Issue #43.
     pub warn_partial_singular: bool,
+
+    /// Issue #56 Lever A.2: when `true`, the numeric drivers consult
+    /// `FactorWorkspace::permute_cache` to skip the
+    /// `CscMatrix::from_triplets` rebuild inside `permute_csc_values`,
+    /// reusing the cached `(col_ptr, row_idx, value_map)` and scattering
+    /// only the values. Set by `Solver::factor` to `pattern_reused` —
+    /// the same fingerprint-equality signal that drives symbolic-cache
+    /// reuse, which guarantees the cached permute structure is still
+    /// valid. Default `false` keeps direct callers
+    /// (`factorize_multifrontal_supernodal_with_workspace` used without
+    /// `Solver`) on the canonical from-triplets path.
+    pub pattern_reused_hint: bool,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -587,6 +599,10 @@ impl Default for NumericParams {
             // `Solver::with_partial_singular_warning(true)` or
             // `FERAL_WARN_PARTIAL_SINGULAR` (C ABI).
             warn_partial_singular: false,
+            // Issue #56 Lever A.2: opt-in permute cache. Solver flips
+            // this on per-call when the symbolic cache reports
+            // `pattern_reused`.
+            pattern_reused_hint: false,
         }
     }
 }
@@ -616,6 +632,8 @@ impl NumericParams {
             static_pivot_threshold: None,
             // Quiet by default — see `Default::default()` and #43.
             warn_partial_singular: false,
+            // Issue #56 Lever A.2: opt-in permute cache.
+            pattern_reused_hint: false,
         }
     }
 }
@@ -1207,6 +1225,41 @@ pub struct FactorWorkspace {
     /// across supernodes within a single workspace lifetime; the
     /// kernel `clear()`s and `resize()`s on entry, preserving capacity.
     pub factor_scratch: FactorScratch,
+    /// Issue #56 Lever A.2: cached permute structure for fast warm
+    /// reconstruction of P·A·Pᵀ. Populated on the first cold call to
+    /// `permute_csc_values_with_cache`; consulted on subsequent calls
+    /// when `NumericParams::pattern_reused_hint` is `true` and the
+    /// input `(n, nnz)` matches. The warm path scatters values via a
+    /// precomputed `value_map` instead of rebuilding triplets and
+    /// re-sorting through `CscMatrix::from_triplets`.
+    pub(crate) permute_cache: Option<PermuteCache>,
+}
+
+/// Cached permute structure. See `FactorWorkspace::permute_cache`.
+///
+/// The structure (`col_ptr`, `row_idx`) of P·A·Pᵀ depends only on the
+/// input sparsity pattern and the permutation; both are invariant
+/// across IPM iterations that share a `Solver`. The `value_map`
+/// records, for each input value position `k`, which slot in the
+/// permuted `values` array that value occupies (summing duplicates
+/// when the input contains both `(i, j)` and `(j, i)`). Warm calls
+/// allocate only the output `values` buffer and run a single O(nnz)
+/// scatter pass — no triplet construction, no sort.
+#[derive(Debug, Default)]
+pub(crate) struct PermuteCache {
+    /// Input matrix order at cache build.
+    input_n: usize,
+    /// Input matrix nnz at cache build (`matrix.values.len()`).
+    input_nnz: usize,
+    /// `col_ptr` of the cached permuted CSC.
+    permuted_col_ptr: Vec<usize>,
+    /// `row_idx` of the cached permuted CSC.
+    permuted_row_idx: Vec<usize>,
+    /// `value_map[k]` is the index into the permuted `values` vector
+    /// where `matrix.values[k]` contributes (via `+=`). When the input
+    /// has duplicate `(i, j)` / `(j, i)` entries they map to the same
+    /// slot, matching `CscMatrix::from_triplets` duplicate-summing.
+    value_map: Vec<usize>,
 }
 
 impl FactorWorkspace {
@@ -1593,8 +1646,19 @@ fn factorize_multifrontal_with_schur_inner(
     let scaling_pivot_order: Vec<f64> =
         symbolic.perm.iter().map(|&old| scaling_user[old]).collect();
 
-    let (permuted, _) = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv, false)?;
-    let full_pattern = permuted.symmetric_pattern();
+    let (permuted, _) = permute_csc_values_with_cache(
+        matrix,
+        &symbolic.perm,
+        &symbolic.perm_inv,
+        false,
+        params.pattern_reused_hint,
+        &mut ws.permute_cache,
+    )?;
+    // Issue #56 Lever A.1: `symbolic.permuted_pattern` is the full
+    // symmetric pattern of P·A·Pᵀ — identical (up to sort, which
+    // `permute_pattern` enforces) to what `permuted.symmetric_pattern()`
+    // returns. Use it directly instead of recomputing every numeric call.
+    let full_pattern = &symbolic.permuted_pattern;
 
     let mut is_root = vec![true; n_snodes];
     for snode in &symbolic.supernodes {
@@ -1619,7 +1683,7 @@ fn factorize_multifrontal_with_schur_inner(
             snode_idx,
             symbolic,
             &permuted,
-            &full_pattern,
+            full_pattern,
             &scaling_pivot_order,
             &is_root,
             params,
@@ -1803,9 +1867,21 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // Permute the matrix values into the new ordering. The
     // `from_triplets` rebuild inside is timed separately (B1 prime
     // suspect) and returned as `from_triplets_us`.
+    //
+    // Issue #56 Lever A.2: when `params.pattern_reused_hint` is set
+    // (Solver flips it on per-call when the symbolic-cache fingerprint
+    // matches), the cached permute structure on `ws.permute_cache` is
+    // used to scatter values in O(nnz) — skipping the triplet sort
+    // that dominated the prologue on Thomson IPM trajectories.
     let t_phase = tic();
-    let (permuted, from_triplets_us) =
-        permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv, profiling)?;
+    let (permuted, from_triplets_us) = permute_csc_values_with_cache(
+        matrix,
+        &symbolic.perm,
+        &symbolic.perm_inv,
+        profiling,
+        params.pattern_reused_hint,
+        &mut ws.permute_cache,
+    )?;
     bd.permute_us = toc(t_phase);
     bd.permute_from_triplets_us = from_triplets_us;
 
@@ -1824,9 +1900,13 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     let params: &NumericParams = local_params.as_ref().unwrap_or(params);
     bd.infnorm_tol_us = toc(t_phase);
 
-    // Full symmetric pattern for correct row index computation
+    // Issue #56 Lever A.1: reuse `symbolic.permuted_pattern` (which is
+    // `permute_pattern(&matrix.symmetric_pattern(), &perm)`) instead of
+    // recomputing `permuted.symmetric_pattern()` here. Both produce the
+    // full symmetric pattern of P·A·Pᵀ with sorted columns. The recompute
+    // was ~5% of total factor wall on Thomson n=100 and ~4% at n=200.
     let t_phase = tic();
-    let full_pattern = permuted.symmetric_pattern();
+    let full_pattern = &symbolic.permuted_pattern;
     bd.symmetric_pattern_us = toc(t_phase);
 
     // Phase 2.3 Step 5: identify root supernodes (no parent in the etree
@@ -1943,7 +2023,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
             snode_idx,
             symbolic,
             &permuted,
-            &full_pattern,
+            full_pattern,
             &scaling_pivot_order,
             &is_root,
             params,
@@ -2763,8 +2843,10 @@ pub fn factorize_multifrontal_supernodal_parallel(
     );
     let params: &NumericParams = local_params.as_ref().unwrap_or(params);
 
+    // Issue #56 Lever A.1: reuse `symbolic.permuted_pattern` — see the
+    // sequential driver above for the rationale.
     let t_phase = telemetry.map(|_| std::time::Instant::now());
-    let full_pattern = permuted.symmetric_pattern();
+    let full_pattern = &symbolic.permuted_pattern;
     if let (Some(t), Some(start)) = (telemetry, t_phase) {
         t.phase_symmetric_pattern_ns
             .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -2873,7 +2955,7 @@ pub fn factorize_multifrontal_supernodal_parallel(
                 leaf_idx,
                 symbolic,
                 &permuted,
-                &full_pattern,
+                full_pattern,
                 &scaling_pivot_order,
                 &is_root,
                 params,
@@ -3305,6 +3387,123 @@ fn permute_csc_values(
     Ok((permuted, from_triplets_us))
 }
 
+/// Permute a CSC matrix into pivot order with an optional structural
+/// cache (issue #56 Lever A.2).
+///
+/// On the warm path (`pattern_reused_hint == true` and `cache` matches
+/// the input `(n, nnz)`), the cached `permuted_col_ptr` /
+/// `permuted_row_idx` / `value_map` are used to scatter values into a
+/// fresh `values` vector in a single O(nnz) pass — skipping the
+/// triplet construction and `CscMatrix::from_triplets` sort that
+/// dominate `permute_csc_values` for IPM-like workloads with thousands
+/// of factor calls on the same pattern.
+///
+/// On the cold path (cache empty, hint off, or `(n, nnz)` mismatch),
+/// falls through to `permute_csc_values` and then rebuilds the cache
+/// from the freshly-permuted matrix so the next warm call can take the
+/// fast path. Cache rebuild failures (e.g., a row index unexpectedly
+/// missing from the permuted column — should not occur with valid
+/// inputs) clear the cache rather than propagating — the canonical
+/// permuted matrix has already been produced.
+fn permute_csc_values_with_cache(
+    matrix: &CscMatrix,
+    perm: &[usize],
+    perm_inv: &[usize],
+    profile: bool,
+    pattern_reused_hint: bool,
+    cache: &mut Option<PermuteCache>,
+) -> Result<(CscMatrix, u64), FeralError> {
+    let n = matrix.n;
+    let nnz = matrix.nnz();
+
+    // Warm path: cache hit — scatter values into the cached structure.
+    if pattern_reused_hint {
+        if let Some(c) = cache.as_ref() {
+            if c.input_n == n && c.input_nnz == nnz && c.value_map.len() == nnz {
+                let permuted_nnz = c.permuted_row_idx.len();
+                let mut values = vec![0.0f64; permuted_nnz];
+                for k in 0..nnz {
+                    let dest = c.value_map[k];
+                    debug_assert!(dest < permuted_nnz);
+                    values[dest] += matrix.values[k];
+                }
+                let permuted = CscMatrix {
+                    n,
+                    col_ptr: c.permuted_col_ptr.clone(),
+                    row_idx: c.permuted_row_idx.clone(),
+                    values,
+                };
+                return Ok((permuted, 0));
+            }
+        }
+    }
+
+    // Cold path: canonical from-triplets rebuild.
+    let (permuted, from_triplets_us) = permute_csc_values(matrix, perm, perm_inv, profile)?;
+
+    // Refresh cache so the next warm call can take the fast path. Best
+    // effort — on the (unexpected) row-lookup failure the cache is
+    // cleared and subsequent calls take the cold path until the next
+    // successful refresh.
+    match build_permute_value_map(matrix, perm_inv, &permuted) {
+        Ok(value_map) => {
+            *cache = Some(PermuteCache {
+                input_n: n,
+                input_nnz: nnz,
+                permuted_col_ptr: permuted.col_ptr.clone(),
+                permuted_row_idx: permuted.row_idx.clone(),
+                value_map,
+            });
+        }
+        Err(_) => {
+            *cache = None;
+        }
+    }
+
+    Ok((permuted, from_triplets_us))
+}
+
+/// Build the `value_map` for `PermuteCache` by replaying the
+/// input-iteration logic of `permute_csc_values` and binary-searching
+/// each lower-triangle target `(lr, lc)` against the freshly-built
+/// permuted CSC's sorted column. One scan over input nnz, one binary
+/// search per nonzero — O(nnz · log(max_col_nnz)).
+fn build_permute_value_map(
+    matrix: &CscMatrix,
+    perm_inv: &[usize],
+    permuted: &CscMatrix,
+) -> Result<Vec<usize>, FeralError> {
+    let n = matrix.n;
+    let nnz = matrix.nnz();
+    let mut value_map = vec![0usize; nnz];
+    for old_j in 0..n {
+        let new_j = perm_inv[old_j];
+        #[allow(clippy::needless_range_loop)]
+        for k in matrix.col_ptr[old_j]..matrix.col_ptr[old_j + 1] {
+            let old_i = matrix.row_idx[k];
+            let new_i = perm_inv[old_i];
+            let (lr, lc) = if new_i >= new_j {
+                (new_i, new_j)
+            } else {
+                (new_j, new_i)
+            };
+            let col_start = permuted.col_ptr[lc];
+            let col_end = permuted.col_ptr[lc + 1];
+            let dest_off = permuted.row_idx[col_start..col_end]
+                .binary_search(&lr)
+                .map_err(|_| {
+                    FeralError::InvalidInput(format!(
+                        "permute cache build: row {} not found in permuted column {} \
+                         (col range {}..{}). Should not occur on valid CSC input.",
+                        lr, lc, col_start, col_end
+                    ))
+                })?;
+            value_map[k] = col_start + dest_off;
+        }
+    }
+    Ok(value_map)
+}
+
 /// Build row indices for a frontal matrix.
 ///
 /// Returns indices laid out as:
@@ -3726,6 +3925,7 @@ mod tests {
             sqd_mode: false,
             static_pivot_threshold: None,
             warn_partial_singular: false,
+            pattern_reused_hint: false,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
@@ -3741,6 +3941,7 @@ mod tests {
             sqd_mode: false,
             static_pivot_threshold: None,
             warn_partial_singular: false,
+            pattern_reused_hint: false,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
@@ -3799,6 +4000,7 @@ mod tests {
             sqd_mode: false,
             static_pivot_threshold: None,
             warn_partial_singular: false,
+            pattern_reused_hint: false,
         };
         let infnorm = NumericParams {
             scaling: ScalingStrategy::InfNorm,
@@ -4305,6 +4507,7 @@ mod tests {
             sqd_mode: false,
             static_pivot_threshold: None,
             warn_partial_singular: false,
+            pattern_reused_hint: false,
         };
 
         let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];

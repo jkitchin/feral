@@ -56,6 +56,7 @@ fn ldlt_params(profiler: Arc<Mutex<Profiler>>) -> NumericParams {
         sqd_mode: false,
         static_pivot_threshold: None,
         warn_partial_singular: false,
+        pattern_reused_hint: false,
     }
 }
 

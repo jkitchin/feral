@@ -177,6 +177,7 @@ fn ldlt_params() -> NumericParams {
         sqd_mode: false,
         static_pivot_threshold: None,
         warn_partial_singular: false,
+        pattern_reused_hint: false,
     }
 }
 

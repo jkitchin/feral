@@ -134,6 +134,7 @@ fn run_one_method(csc: &CscMatrix, method: OrderingMethod, scaling: ScalingStrat
         sqd_mode: false,
         static_pivot_threshold: None,
         warn_partial_singular: false,
+        pattern_reused_hint: false,
     };
     let scale_tag = match scaling {
         ScalingStrategy::InfNorm => "infnorm",

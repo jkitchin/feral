@@ -268,7 +268,59 @@ The Schur-kernel cargo-asm audit is still worth doing — but it's not
 the highest-impact lever. Address prologue caching and dense
 bookkeeping first.
 
-### Phase 3 — Implement the fix
+### Phase 3 — Lever A safe subset landed (2026-05-27)
+
+Implemented the **safe** part of Lever A: cache the permute structure
+(`col_ptr`, `row_idx`, value scatter map) when `pattern_reused=true`,
+and reuse `symbolic.permuted_pattern` instead of recomputing
+`permuted.symmetric_pattern()`.
+
+- **Lever A.1** (symbolic pattern reuse): `symbolic.permuted_pattern`
+  already holds `permute_pattern(&matrix.symmetric_pattern(), &perm)`,
+  which is bit-identical (up to sort, enforced by `permute_pattern`)
+  to `permuted.symmetric_pattern()`. Replaced three driver sites
+  (Schur, sequential supernodal, parallel) with the pre-built copy.
+- **Lever A.2** (permute structure cache): new
+  `permute_csc_values_with_cache` consults a per-`FactorWorkspace`
+  `PermuteCache { permuted_col_ptr, permuted_row_idx, value_map }`.
+  Warm calls (when `NumericParams::pattern_reused_hint = true`)
+  allocate a fresh values buffer and run a single O(nnz) scatter,
+  skipping triplet construction and the `from_triplets` sort. Solver
+  flips the hint on per-call from its existing `pattern_reused`
+  fingerprint signal. Cold calls fall through to the canonical
+  `permute_csc_values` path and refresh the cache for next time.
+
+Excluded as **risky** (left for follow-up): caching MC64/InfNorm
+scaling output. Scaling depends on numeric values; reusing iter-0
+matching on iter-N values silently produced incorrect inertia in
+issue #38. Track B2's `mc64_scaling_cache` (solver-side, value-bounded)
+already handles MC64 reuse; we don't duplicate it on the prologue.
+
+**Re-measured Thomson per-phase breakdown** (darwin/aarch64, 9 warm
+reps averaged, hint=true so the workspace cache fires):
+
+| phase                | n=50 before | n=50 after | n=100 before | n=100 after | n=200 before | n=200 after |
+|----------------------|-------------|------------|--------------|-------------|--------------|-------------|
+| total wall (µs)      | 533         | 577        | 2977         | 2767        | 17681        | 17825       |
+| prologue             | 288 (54%)   | **203 (35%)** | 1292 (43%) | **801 (29%)** | 5323 (30%) | **3311 (19%)** |
+| permute              | 102         | **10**     | 420          | **31**      | 1684         | **122**     |
+| ↪ from_triplets      | (sub of 102)| **0**      | (sub of 420) | **0**       | (sub of 1684)| **0**       |
+| symmetric_pattern    | 41          | **0**      | 151          | **0**       | 761          | **0**       |
+| scaling (MC64/InfN)  | 117         | 194 (noise)| 552          | (similar)   | 2458         | 2644        |
+| per-supernode loop   | 217         | 340        | 1630         | 1906        | 12246        | 14392       |
+
+Total wall is roughly flat or slightly noisier; the savings are
+concentrated in the prologue (permute + symmetric_pattern collapse to
+under 0.5% of total at every size). Loop time fluctuates within the
+rep-to-rep noise band — we did not change loop work.
+
+The remaining prologue cost is dominated by **scaling**: MC64/InfNorm
+runs every call because the safe subset deliberately does not cache
+value-derived state. The risky lever (scaling cache) would harvest
+this — the solver-side `mc64_scaling_cache` (issue #38 follow-up) is
+the principled place to do it under a value-bound gate.
+
+### Phase 3 — Future work (not landed in this branch)
 
 Driven by Phase 2 findings. Acceptance gates from #56:
 - elec50 ratio ≤ 1.1× (parity)

@@ -468,6 +468,7 @@ fn solver_identity_scaling() -> Solver {
         sqd_mode: false,
         static_pivot_threshold: None,
         warn_partial_singular: false,
+        pattern_reused_hint: false,
     };
     Solver::with_params(np, SupernodeParams::default())
 }

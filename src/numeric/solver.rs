@@ -978,6 +978,15 @@ impl Solver {
             effective_params.profiler = Some(Arc::clone(arc));
         }
 
+        // Issue #56 Lever A.2: hand the symbolic-cache reuse signal to
+        // the numeric drivers so they can take the permute-cache fast
+        // path. `pattern_reused` is computed above (line 774) at the
+        // same point the symbolic cache is consulted; both signals
+        // share the same fingerprint contract, so a `true` value here
+        // implies the workspace's cached permute structure is still
+        // valid for this matrix.
+        effective_params.pattern_reused_hint = pattern_reused;
+
         // Step 4: numeric factor via the pooled workspace; map errors.
         // Both drivers share the same signature and a bit-exact
         // contract; pick by the `use_parallel` toggle. When parallel
@@ -1633,6 +1642,7 @@ mod tests {
             sqd_mode: false,
             static_pivot_threshold: None,
             warn_partial_singular: false,
+            pattern_reused_hint: false,
         };
         Solver::with_params(np, SupernodeParams::default())
     }

@@ -467,6 +467,10 @@ fn per_phase_breakdown(matrix: &CscMatrix, bk: BunchKaufmanParams, sp: Supernode
         let prof = Arc::new(Mutex::new(Profiler::new()));
         let mut np = nparams.clone();
         np.profiler = Some(prof.clone());
+        // Issue #56 Lever A.2: simulate Solver's `pattern_reused` signal
+        // — the warm-up call above populated `ws.permute_cache`, so all
+        // timed reps can take the cache fast path.
+        np.pattern_reused_hint = true;
 
         let t0 = Instant::now();
         let result =

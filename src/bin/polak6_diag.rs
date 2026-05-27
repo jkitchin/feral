@@ -135,6 +135,7 @@ fn try_factor_and_solve(
         sqd_mode: false,
         static_pivot_threshold: None,
         warn_partial_singular: false,
+        pattern_reused_hint: false,
     };
     let sym = match symbolic_factorize_with_method(csc, &snode_params, OrderingMethod::Amd) {
         Ok(s) => s,
@@ -374,6 +375,7 @@ fn main() {
         sqd_mode: false,
         static_pivot_threshold: None,
         warn_partial_singular: false,
+        pattern_reused_hint: false,
     };
     let sym =
         symbolic_factorize_with_method(&csc, &snode_params, OrderingMethod::Amd).expect("symbolic");
