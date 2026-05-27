@@ -20,9 +20,16 @@
 //! dependency. It uses a Fibonacci-spiral point placement and
 //! lambda_i = 1 so the matrix is determined entirely by `n`.
 
-use feral::numeric::factorize::NumericParams;
+use feral::dense::factor::{phase_timing, PHASE_TIMING_ENABLED};
+use feral::numeric::factorize::{
+    factorize_multifrontal_supernodal_with_workspace, FactorWorkspace, NumericParams, Profiler,
+    SupernodeTiming,
+};
 use feral::symbolic::supernode::SupernodeParams;
+use feral::symbolic::{symbolic_factorize_with_method, OrderingMethod};
 use feral::{BunchKaufmanParams, CscMatrix, FactorStats, FactorStatus, Solver};
+use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 const N_REPS: usize = 9;
@@ -363,9 +370,260 @@ fn main() {
         "(7) Cold solver (fresh symbolic each rep)",
         &kkt,
         np_default,
-        sp,
+        sp.clone(),
         false,
         true,
         true,
     );
+
+    // ===== Phase 2: per-phase breakdown of the warm factor =====
+    //
+    // Pounce-side data (pounce#65) confirmed the symbolic cache reuses
+    // on 99.4–99.6% of per-iter factor calls, so the +50–65% cold-solver
+    // gap from above does NOT explain the per-iter Thomson penalty. The
+    // gap is therefore real kernel throughput at front-size 400-800.
+    // Localize it: split the warm `factor()` wall into prologue +
+    // per-supernode (assembly / panel / Schur / scalar-tail) + epilogue,
+    // run on the sequential driver with the existing Phase 2.10
+    // Profiler and the issue-#44 phase counters.
+    println!();
+    println!("==== Phase 2: per-phase breakdown (sequential, warm) ====");
+    per_phase_breakdown(
+        &kkt,
+        BunchKaufmanParams::default(),
+        SupernodeParams::default(),
+    );
+}
+
+/// Drop into the sequential multifrontal driver with a Profiler attached
+/// and `PHASE_TIMING_ENABLED=true`, then split the warm factor wall.
+fn per_phase_breakdown(matrix: &CscMatrix, bk: BunchKaufmanParams, sp: SupernodeParams) {
+    let symbolic = match symbolic_factorize_with_method(matrix, &sp, OrderingMethod::Auto) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("  symbolic_factorize_with_method failed: {:?}", e);
+            return;
+        }
+    };
+    println!(
+        "  symbolic: {} supernodes, max nrow {}, max ncol {}, sum nrow*ncol {}",
+        symbolic.supernodes.len(),
+        symbolic
+            .supernodes
+            .iter()
+            .map(|s| s.nrow)
+            .max()
+            .unwrap_or(0),
+        symbolic
+            .supernodes
+            .iter()
+            .map(|s| s.ncol)
+            .max()
+            .unwrap_or(0),
+        symbolic
+            .supernodes
+            .iter()
+            .map(|s| s.nrow * s.ncol)
+            .sum::<usize>(),
+    );
+
+    let nparams = NumericParams::with_bk(bk);
+    let mut ws = FactorWorkspace::new();
+
+    // Warm up workspace + branch predictors (matches the warm-up done
+    // by the config sweep above). Not timed.
+    {
+        let mut nparams_warm = nparams.clone();
+        nparams_warm.profiler = None;
+        let _ = factorize_multifrontal_supernodal_with_workspace(
+            matrix,
+            &symbolic,
+            &nparams_warm,
+            &mut ws,
+        );
+    }
+
+    // Aggregate per-supernode phase deltas across reps. The phase
+    // counters are process-global; the sequential driver snapshots
+    // them before/after each `factor_one_supernode` so the per-snode
+    // `assembly_us` / `panelfactor_us` / `schur_us` / `scalartail_us`
+    // fields are exact for the supernode that emitted them.
+    let mut sum_total: u128 = 0;
+    let mut sum_prologue: u128 = 0;
+    let mut sum_epilogue: u128 = 0;
+    let mut sum_loop_us: u128 = 0;
+    let mut sum_assembly: u128 = 0;
+    let mut sum_densefactor: u128 = 0;
+    let mut sum_panel: u128 = 0;
+    let mut sum_schur: u128 = 0;
+    let mut sum_scalartail: u128 = 0;
+    let mut last_timings: Vec<SupernodeTiming> = Vec::new();
+    let mut last_prologue_breakdown = feral::numeric::factorize::PrologueBreakdown::default();
+
+    PHASE_TIMING_ENABLED.store(true, AtomicOrdering::Relaxed);
+
+    for rep in 0..N_REPS {
+        phase_timing::reset();
+        let prof = Arc::new(Mutex::new(Profiler::new()));
+        let mut np = nparams.clone();
+        np.profiler = Some(prof.clone());
+
+        let t0 = Instant::now();
+        let result =
+            factorize_multifrontal_supernodal_with_workspace(matrix, &symbolic, &np, &mut ws);
+        let total_us = t0.elapsed().as_micros() as u64;
+        if let Err(e) = result {
+            println!("  numeric driver failed: {:?}", e);
+            PHASE_TIMING_ENABLED.store(false, AtomicOrdering::Relaxed);
+            return;
+        }
+
+        let prof_guard = prof.lock().expect("profiler poisoned");
+        let report = prof_guard.report();
+        let timings = prof_guard.timings();
+        let loop_us: u64 = timings.iter().map(|t| t.us).sum();
+        let assembly_us: u64 = timings.iter().map(|t| t.assembly_us).sum();
+        let densefactor_us: u64 = timings.iter().map(|t| t.densefactor_us).sum();
+        let panel_us: u64 = timings.iter().map(|t| t.panelfactor_us).sum();
+        let schur_us: u64 = timings.iter().map(|t| t.schur_us).sum();
+        let scalartail_us: u64 = timings.iter().map(|t| t.scalartail_us).sum();
+
+        sum_total += total_us as u128;
+        sum_prologue += report.prologue_us as u128;
+        sum_epilogue += report.epilogue_us as u128;
+        sum_loop_us += loop_us as u128;
+        sum_assembly += assembly_us as u128;
+        sum_densefactor += densefactor_us as u128;
+        sum_panel += panel_us as u128;
+        sum_schur += schur_us as u128;
+        sum_scalartail += scalartail_us as u128;
+
+        if rep == N_REPS - 1 {
+            last_timings = timings.to_vec();
+            last_prologue_breakdown = report.prologue_breakdown.clone();
+        }
+    }
+
+    PHASE_TIMING_ENABLED.store(false, AtomicOrdering::Relaxed);
+
+    let n = N_REPS as u128;
+    let avg = |s: u128| -> u64 { (s / n) as u64 };
+    let pct = |x: u128, total: u128| -> f64 {
+        if total == 0 {
+            0.0
+        } else {
+            100.0 * (x as f64) / (total as f64)
+        }
+    };
+
+    let total_avg = avg(sum_total);
+    let loop_avg = avg(sum_loop_us);
+    let prologue_avg = avg(sum_prologue);
+    let epilogue_avg = avg(sum_epilogue);
+    let assembly_avg = avg(sum_assembly);
+    let densefactor_avg = avg(sum_densefactor);
+    let panel_avg = avg(sum_panel);
+    let schur_avg = avg(sum_schur);
+    let scalartail_avg = avg(sum_scalartail);
+    let densefactor_other_avg =
+        densefactor_avg.saturating_sub(panel_avg + schur_avg + scalartail_avg);
+
+    println!(
+        "  averaged over {} warm reps (sequential driver, PHASE_TIMING_ENABLED):",
+        N_REPS
+    );
+    println!("    total wall              = {:>7} µs", total_avg);
+    println!(
+        "    prologue                = {:>7} µs   ({:>4.1}%)",
+        prologue_avg,
+        pct(sum_prologue, sum_total)
+    );
+    {
+        // Prologue sub-phase breakdown from the last rep — these
+        // fields are populated when a profiler is attached.
+        let pb = last_prologue_breakdown.clone();
+        println!("      row_map               = {:>7} µs", pb.row_map_us);
+        println!("      scaling (MC64/InfNorm)= {:>7} µs", pb.scaling_us);
+        println!(
+            "      scaling_pivot_order   = {:>7} µs",
+            pb.scaling_pivot_order_us
+        );
+        println!("      permute (P A P^T)     = {:>7} µs", pb.permute_us);
+        println!(
+            "        from_triplets       = {:>7} µs",
+            pb.permute_from_triplets_us
+        );
+        println!("      infnorm + tol         = {:>7} µs", pb.infnorm_tol_us);
+        println!(
+            "      symmetric_pattern     = {:>7} µs",
+            pb.symmetric_pattern_us
+        );
+        println!("      setup (alloc, is_root)= {:>7} µs", pb.setup_us);
+    }
+    println!(
+        "    epilogue                = {:>7} µs   ({:>4.1}%)",
+        epilogue_avg,
+        pct(sum_epilogue, sum_total)
+    );
+    println!(
+        "    per-supernode loop sum  = {:>7} µs   ({:>4.1}%)",
+        loop_avg,
+        pct(sum_loop_us, sum_total)
+    );
+    println!(
+        "      assembly              = {:>7} µs   ({:>4.1}% of loop)",
+        assembly_avg,
+        pct(sum_assembly, sum_loop_us)
+    );
+    println!(
+        "      dense factor          = {:>7} µs   ({:>4.1}% of loop)",
+        densefactor_avg,
+        pct(sum_densefactor, sum_loop_us)
+    );
+    println!(
+        "        panel/diag BK       = {:>7} µs   ({:>4.1}% of loop, {:>4.1}% of dense)",
+        panel_avg,
+        pct(sum_panel, sum_loop_us),
+        pct(sum_panel, sum_densefactor)
+    );
+    println!(
+        "        Schur trailing      = {:>7} µs   ({:>4.1}% of loop, {:>4.1}% of dense)",
+        schur_avg,
+        pct(sum_schur, sum_loop_us),
+        pct(sum_schur, sum_densefactor)
+    );
+    println!(
+        "        scalar tail         = {:>7} µs   ({:>4.1}% of loop, {:>4.1}% of dense)",
+        scalartail_avg,
+        pct(sum_scalartail, sum_loop_us),
+        pct(sum_scalartail, sum_densefactor)
+    );
+    println!(
+        "        dense bookkeeping   = {:>7} µs   (= dense - panel - schur - scalartail)",
+        densefactor_other_avg
+    );
+
+    // Top-3 slowest supernodes from the last rep — Thomson's KKT is
+    // dominated by one wide root supernode after AMD/METIS so this
+    // typically prints one giant entry + tiny tail.
+    let mut top: Vec<&SupernodeTiming> = last_timings.iter().collect();
+    top.sort_by_key(|t| std::cmp::Reverse(t.us));
+    println!("  top supernodes by wall (last rep):");
+    println!(
+        "    {:>5}  {:>5}  {:>5}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}",
+        "snode", "nrow", "ncol", "us", "asm_us", "panel", "schur", "tail"
+    );
+    for t in top.iter().take(3) {
+        println!(
+            "    {:>5}  {:>5}  {:>5}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}",
+            t.snode_idx,
+            t.nrow,
+            t.ncol,
+            t.us,
+            t.assembly_us,
+            t.panelfactor_us,
+            t.schur_us,
+            t.scalartail_us,
+        );
+    }
 }

@@ -169,23 +169,104 @@ solve excluded, `cargo run --release`.
   pattern fingerprint somehow), this fully accounts for the
   1.57×-2.34× gap reported in #56.
 
-## Next action
+## Pounce-side response (2026-05-27)
 
-This is a **pounce-side investigation** at this point. The kernel
-throughput on Thomson-shaped fronts looks fine — the only knob with
-significant effect is symbolic-reuse, which is the caller's contract
-to maintain. Recommended next step is to instrument
-`pounce-feral/src/lib.rs` (in the pounce repo) to log the
-`pattern_reused` flag from `last_factor_stats()` across IPM iters on
-elec50 / elec100, and confirm whether the symbolic cache is hitting
-each iter as expected. If it isn't, the fix is on the pounce side.
+Pounce ran the recommended pattern-reuse trace (pounce#65). Result:
 
-If pounce confirms `pattern_reused = true` on every iter past the
-first, then the gap is real kernel throughput and we re-open
-hypothesis (1) — likely needs a `cargo-asm` audit of the panel and
-trailing-update kernels at n=400/800 fronts to see whether they're
-emitting NEON FMA or scalar FMA or just vmla.
+| problem | total `factor()` calls | `pattern_reused=true` | % warm |
+|---|---:|---:|---:|
+| `elec50`  |   239 |   238 | 99.6% |
+| `elec100` | 1075 | 1069 | 99.4% |
 
+The 1 cold call on elec50 is the first iter (no cache yet). The 6 cold
+calls on elec100 are restoration-phase NLPs with distinct KKT shape
+(different fill_ratio). The +50-65% cold-solver penalty does NOT
+apply to pounce's IPM trajectory. **Per the disposition rule, the gap
+kicks back to FERAL as a real kernel-throughput question.**
+
+## Phase 2 results — per-phase breakdown (warm, sequential)
+
+Extended `src/bin/probe_thomson_hessian.rs` to drop into the sequential
+multifrontal driver with `Profiler` attached and
+`PHASE_TIMING_ENABLED=true`. The Profiler exposes prologue /
+per-supernode / epilogue, and `PHASE_TIMING_ENABLED` populates the
+per-supernode `assembly_us` / `panelfactor_us` / `schur_us` /
+`scalartail_us` fields via the issue-#44 phase counters.
+
+Averaged over 9 warm reps, darwin/aarch64:
+
+| phase | n=50 (µs / %) | n=100 (µs / %) | n=200 (µs / %) |
+|---|---|---|---|
+| total wall | 533 | 2977 | 17681 |
+| **prologue** | **288 (54.1%)** | **1292 (43.4%)** | **5323 (30.1%)** |
+|   ↪ scaling (MC64/InfNorm) | 117 | 552 | 2458 |
+|   ↪ permute (PAPᵀ) | 102 (72 in `from_triplets`) | 420 (299 in ft) | 1684 (1174 in ft) |
+|   ↪ infnorm + tol | 29 | 139 | 620 |
+|   ↪ symmetric_pattern | 41 | 151 | 761 |
+| epilogue | 0 | 0 | 0 |
+| per-supernode loop sum | 217 (40.9%) | 1630 (54.8%) | 12246 (69.3%) |
+|   ↪ assembly | 50 (9.4%) | 327 (11.0%) | 2338 (13.2%) |
+|   ↪ dense factor | 161 (30.2%) | 1290 (43.3%) | 9870 (55.8%) |
+|     panel/diag BK | 8 (1.5%) | 58 (1.9%) | 201 (1.1%) |
+|     **Schur trailing** | **39 (7.3%)** | **439 (14.7%)** | **2462 (13.9%)** |
+|     scalar tail | 27 (5.1%) | 132 (4.4%) | 2400 (13.6%) |
+|     **dense bookkeeping** | **87 (16.3%)** | **661 (22.2%)** | **4807 (27.2%)** |
+
+Symbolic shape: 57 / 113 / 232 supernodes at n=50 / 100 / 200; max
+ncol = 18 across all three — Thomson on AMD does NOT produce a single
+fat root supernode. The dense `3n × 3n` Lagrangian Hessian gets
+shredded by AMD into many narrow supernodes (max ncol 18 ≈ 6
+electrons × 3 coords) because the constraint A-block introduces
+pattern artifacts the ordering exploits.
+
+### Findings — where the time actually goes
+
+1. **Schur trailing is NOT the dominant phase.** It's only 7-15% of
+   total wall across n=50…200. The kernel-throughput-on-Schur framing
+   from Phase 1 mis-aimed.
+
+2. **Dense bookkeeping is the single biggest phase inside the loop**
+   at every size: 16-27% of total wall. This is `lextract` +
+   `contribextract` + zerofill inside `factor_one_supernode` — the
+   memory-shuffling that copies the in-place dense buffer into the
+   `NodeFactors` L block and the contribution block for the parent.
+   At n=200 it's 4807 µs vs 2462 µs for the Schur kernel — the
+   bookkeeping IS the cost.
+
+3. **Prologue is 30-54% of warm factor wall.** The cache reuses
+   symbolic — but every `factor()` re-runs scaling (MC64/InfNorm),
+   `permute_csc_values` (which rebuilds the matrix via
+   `from_triplets`), `symmetric_pattern`, and the infnorm-tol pass.
+   None of this depends on numeric values — it's pure pattern work
+   that could be cached across iters when `pattern_reused=true`.
+
+4. **Scalar tail grew to comparable with Schur at n=200** (2400 vs
+   2462 µs). The scalar-tail kernel handles the trailing rows that
+   the blocked Schur didn't fully cover. ncol=18 fronts with nrow
+   reaching 594 means a lot of trailing rows get scalar treatment.
+
+### Implications for the per-iter gap
+
+The 1.57× / 2.34× gap vs MUMPS on elec50 / elec100 likely decomposes
+into TWO levers, not one:
+
+- **Lever A — per-call prologue.** 288 µs / iter at n=50, 1292 µs /
+  iter at n=100. Over 239 / 1075 iters that's 69 ms / 1.39 s of pure
+  setup, on top of the IPM critical path. Most of this could be
+  cached when `pattern_reused=true`. **The pounce-side cache is
+  hitting on symbolic but FERAL is still re-running the scaled-matrix
+  build and pattern derivatives every call.**
+
+- **Lever B — dense bookkeeping > kernel flops.** Even with a perfect
+  Schur kernel, dense factor cost is dominated by L/contrib extraction
+  copies. A panel-blocked extraction would help, or eliminating the
+  zerofill pass entirely (per the `CONTRIBZEROFILL_NS` instrumentation
+  comment, the subsequent copy already overwrites every cell that's
+  later read).
+
+The Schur-kernel cargo-asm audit is still worth doing — but it's not
+the highest-impact lever. Address prologue caching and dense
+bookkeeping first.
 
 ### Phase 3 — Implement the fix
 
