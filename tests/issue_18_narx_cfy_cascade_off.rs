@@ -59,16 +59,18 @@ fn check_iter(iter: usize) {
                 (expected.positive, expected.negative, expected.zero),
                 "iter {iter}: inertia must match oracle"
             );
-            // Phase A (issue #55): no static perturbation must fire on
-            // the cascade-off default path. `n_tiny` mirrors MUMPS
-            // `INFO(25)` / NBTINYW.
+            // Phase B (issue #55): CB is now armed by default, but its
+            // trigger is "delay budget exhausted at supernode", not the
+            // legacy ratio heuristic. NARX_CFy's early-iter delay
+            // catchment sits well within `delayed_capacity`, so CB
+            // must not fire — `n_tiny == 0` mirrors MUMPS `INFO(25)`.
             let stats = solver
                 .last_factor_stats()
                 .expect("FactorStats present after Success");
             assert_eq!(
                 stats.n_tiny, 0,
-                "iter {iter}: no pivot should be statically perturbed under \
-                 CB-off defaults (n_tiny={})",
+                "iter {iter}: Phase B budget-based CB trigger must not fire on \
+                 NARX_CFy early-iter delay catchment (n_tiny={})",
                 stats.n_tiny,
             );
         }

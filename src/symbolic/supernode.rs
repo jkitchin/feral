@@ -137,6 +137,21 @@ pub struct Supernode {
     pub row_indices: Vec<usize>,
     /// Children supernode indices.
     pub children: Vec<usize>,
+    /// Issue #55 Phase B1: column-count budget for *incoming* delayed
+    /// pivots from descendants at numeric time. The numeric phase
+    /// enforces `n_delayed_in <= delayed_capacity` per supernode; on
+    /// overflow it can return `FeralError::DelayBudgetExceeded` (B3)
+    /// or — under the rewired CB trigger (B5) — fall back to
+    /// MUMPS-style static perturbation as a last-resort recovery.
+    ///
+    /// `usize::MAX` is the sentinel for "unbounded" — equivalent to
+    /// the pre-Phase-B behavior where the numeric phase grew its
+    /// frontal in place to accommodate any number of delays. The
+    /// symbolic phase replaces this with a finite estimate during
+    /// `find_supernodes` (Phase B2); any code path that constructs
+    /// a `Supernode` directly (tests, ad-hoc binary entrypoints) can
+    /// leave it at `usize::MAX` and observe pre-Phase-B behavior.
+    pub delayed_capacity: usize,
 }
 
 impl Supernode {
@@ -330,12 +345,38 @@ pub fn find_supernodes(
             // 2. Size-based: both have < nemin columns
             let size_based = child_ncol < params.nemin && parent_ncol < params.nemin;
 
-            if trivial_chain || size_based {
+            // Phase B4 (issue #55): defensive root-supernode width cap.
+            // On IPM-KKT matrices with a wide top-level Schur complement
+            // (e.g. nql180, pinene_3200), unrestricted amalgamation can
+            // grow the root supernode to many thousands of columns. The
+            // root frontal is then effectively dense AND receives all
+            // delayed-pivot catchment from the subtree — the worst
+            // possible combination for memory.
+            //
+            // The cap applies only above `ROOT_CAP_MIN_N` (small
+            // problems can amalgamate freely; the wide-front pathology
+            // only manifests at scale and the existing `nemin` logic
+            // is the right constraint for small trees). Above the
+            // threshold the merged root is capped at
+            // `min(0.05 * n, 2048)` columns — loose enough not to
+            // disturb non-pathological problems, tight enough that
+            // nql180-class KKTs cannot grow back to a dense root.
+            const ROOT_CAP_MIN_N: usize = 1024;
+            let parent_is_root = snode_parent[root_p].is_none();
+            let merged_ncol = child_ncol + parent_ncol;
+            let root_cap = if n >= ROOT_CAP_MIN_N {
+                (n / 20).min(2048)
+            } else {
+                usize::MAX
+            };
+            let root_cap_exceeded = parent_is_root && merged_ncol > root_cap;
+
+            if (trivial_chain || size_based) && !root_cap_exceeded {
                 merged_into[root_s] = Some(root_p);
                 // Transfer columns to parent and update first column.
                 // Adjacency invariant guarantees s_first < p_first,
                 // so the merged range is [s_first, p_first+p_ncol).
-                snode_ncols[root_p] = child_ncol + parent_ncol;
+                snode_ncols[root_p] = merged_ncol;
                 snode_first_col[root_p] = s_first;
             }
         }
@@ -371,6 +412,10 @@ pub fn find_supernodes(
             nrow,
             row_indices,
             children: Vec::new(),
+            // B1: pre-populate with the unbounded sentinel; B2 patches
+            // this with a real estimate after the supernode list is
+            // built and the tree relationships are wired.
+            delayed_capacity: usize::MAX,
         });
     }
 
@@ -390,6 +435,89 @@ pub fn find_supernodes(
     }
 
     final_snodes
+}
+
+/// Issue #55 Phase B2: multiplier on `own_ncol` that bounds the
+/// per-supernode incoming-delay budget.
+///
+/// `delayed_capacity(s) = min(subtree_ncol - own_ncol, K * own_ncol)`.
+/// With `K = 4` the frontal matrix at supernode `s` can grow by at
+/// most `(1 + K) = 5x` its own width before the budget trips at
+/// numeric time. This is the loose-but-defensible starting value
+/// for the cascade-victim corpus; A2.5 instrumentation (not yet
+/// run on the full corpus) would inform a tighter value. See
+/// `dev/research/symbolic-delay-budget-2026-05-27.md`.
+pub const DELAY_CAPACITY_MULTIPLIER: usize = 4;
+
+/// Issue #55 Phase B2: minimum capacity floor for small supernodes.
+///
+/// `DELAY_CAPACITY_MULTIPLIER * own_ncol` is too tight when `own_ncol`
+/// is very small (e.g. `nemin=1` stress runs that produce
+/// single-column supernodes), because a single-column supernode would
+/// otherwise have `capacity = 4`, which routinely under-shoots even
+/// modest non-pathological delay catchment. The floor ensures every
+/// supernode can absorb at least 16 incoming delays before the
+/// budget trips — generous for small supernodes, irrelevant for
+/// wide supernodes where `K * own_ncol >> 16`. The worst-case bound
+/// (`subtree_ncol - own_ncol`) still caps capacity for leaves and
+/// near-leaves, so the floor cannot create artificially-large
+/// budgets on shallow trees.
+pub const DELAY_CAPACITY_MIN_FLOOR: usize = 16;
+
+/// Issue #55 Phase B2: assign per-supernode incoming-delay budget
+/// (`Supernode::delayed_capacity`) to a freshly-built supernode
+/// list.
+///
+/// For each supernode `s`, sets
+/// `delayed_capacity(s) = min(subtree_ncol(s) - own_ncol(s),
+///                            DELAY_CAPACITY_MULTIPLIER * own_ncol(s))`
+/// where `subtree_ncol(s)` is the total `ncol` summed across `s`
+/// and all its descendants.
+///
+/// Rationale:
+/// - The first term is the loose worst-case upper bound: at most
+///   one delay per eliminable column anywhere below `s` can reach
+///   `s` (since delays are 1-for-1 fully-summed columns that
+///   children failed to eliminate).
+/// - The second term tightens that to a constant multiple of the
+///   supernode's own width, which is the quantity that drives
+///   frontal-matrix memory at numeric time (the frontal is sized
+///   as `(own_ncol + n_delayed_in) × nrow`).
+///
+/// The `min` of the two is the cap actually enforced. For leaves
+/// (no children, `subtree_ncol == own_ncol`) the first term is 0,
+/// so leaves always get `delayed_capacity == 0` — which is
+/// trivially correct (leaves have no children that could send
+/// delays). For interior nodes the K-bound is usually tighter
+/// than the worst-case bound; for tall thin chains the
+/// worst-case bound can be tighter.
+///
+/// Pre-condition: `snodes` is in postorder (children before parents),
+/// per [`find_supernodes`]'s contract.
+///
+/// Cost: two linear passes over `snodes`. O(n_snodes + sum of
+/// children-list lengths) = O(n_snodes) since children lists are a
+/// disjoint partition of non-root supernodes.
+pub fn assign_delayed_capacities(snodes: &mut [Supernode]) {
+    let n = snodes.len();
+    // Bottom-up subtree ncol sum. snodes[s].children are all strictly
+    // less than s in postorder, so one forward pass suffices.
+    let mut subtree_ncol: Vec<usize> = vec![0; n];
+    for s in 0..n {
+        let mut sum = snodes[s].ncol;
+        for &c in &snodes[s].children {
+            sum += subtree_ncol[c];
+        }
+        subtree_ncol[s] = sum;
+    }
+    for s in 0..n {
+        let own = snodes[s].ncol;
+        let worst = subtree_ncol[s].saturating_sub(own);
+        let tight = DELAY_CAPACITY_MULTIPLIER
+            .saturating_mul(own)
+            .max(DELAY_CAPACITY_MIN_FLOOR);
+        snodes[s].delayed_capacity = worst.min(tight);
+    }
 }
 
 /// Find the root of the merge chain for supernode s.

@@ -245,6 +245,7 @@ mod tests {
             nrow,
             row_indices: Vec::new(),
             children: Vec::new(),
+            delayed_capacity: usize::MAX,
         }
     }
 
@@ -255,6 +256,7 @@ mod tests {
             nrow,
             row_indices: Vec::new(),
             children: vec![0],
+            delayed_capacity: usize::MAX,
         }
     }
 

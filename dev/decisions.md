@@ -4591,3 +4591,75 @@ historical-regression failures that depend on it.
   `dini_defaults.F` INFO(25) accounting.
 - SSIDS `src/ssids/cpu/NumericSubtree.hxx` `num_zero` semantics
   (referenced for the ForceAccept-vs-PerturbToEps boundary).
+
+---
+
+## 2026-05-27 — Symbolic-analysis-time delay budget (Phase B, issue #55)
+
+**Decision.** FERAL bounds delayed-pivot catchment at symbolic analysis
+time via a per-supernode `delayed_capacity` field. Numeric-time
+cascade-break (CB) is rewired to engage only when this budget is
+exceeded — mirroring MUMPS's `dfac_front_aux.F:1251-1331` "delay
+capacity exhausted ⇒ static perturbation" branch. CB is armed by
+default with `cascade_break_ratio = Some(0.5)` and
+`cascade_break_eps = Some(1e-10)`.
+
+**Capacity formula.**
+`delayed_capacity(s) = min(subtree_col_count(s) - own_ncol(s),
+                          DELAY_CAPACITY_MULTIPLIER · own_ncol(s))`
+with `DELAY_CAPACITY_MULTIPLIER = 4`. The worst-case left term
+provides an unconditional upper bound (at most one delay per subtree
+column); the right term tightens to the empirical max-ratio observed
+in the cascade-victim corpus instrumented in Phase A.
+
+**Numeric-time disposition.**
+- `n_delayed_in ≤ capacity`: standard delayed-pivot path.
+- `n_delayed_in > capacity` AND CB armed: engage `perturb_to_floor`
+  at this supernode (sign-preserving static perturbation).
+- `n_delayed_in > capacity` AND CB disarmed AND not root: return
+  `FeralError::DelayBudgetExceeded { supernode, required, capacity }`
+  (mirrors MUMPS `INFO(2)`).
+- Root supernodes are exempt from the error path (frontal size is
+  already committed at root).
+
+**Root-supernode width cap.** Independently, amalgamation declines
+merges into the elimination-tree root that would push merged width
+above `min(0.05 * n, 2048)`. Defensive bound on the worst-case
+frontal allocation; loose enough not to disturb non-pathological
+problems.
+
+**Why.** Closes the trigger-condition gap identified in
+`dev/research/mumps-perturbation-alignment-2026-05-27.md` (Phase A3
+audit note). The numeric-time ratio heuristic was MUMPS-divergent —
+it perturbed pivots that MUMPS would delay (cause of Phase 0
+holdouts `marine_1600_0017` and `nuffield2_trap_iter1`). The symbolic
+budget makes the trigger structural rather than numeric: CB only
+fires when delay was structurally impossible, matching MUMPS's
+invariant. Resolves issue #55's primary cascade-overflow failure
+mode (nql180, pinene_3200) without re-introducing the inertia
+regressions of issues #17 / #18 / #48.
+
+**Convention frozen — do not change without re-running the Phase B
+acceptance criteria.** Notably:
+- `DELAY_CAPACITY_MULTIPLIER = 4` is the single tuning knob for
+  budget tightness; lower values trade safety for tighter front
+  bounds. Re-run the cascade-victim corpus before lowering.
+- Root cap `min(0.05 * n, 2048)` was chosen loose; tighten only
+  with corroborating telemetry.
+- `cascade_break_eps = 1e-10` is the per-pivot static perturbation
+  floor; the `dev/research/cascade-break-l-perturbation-2026-05-15.md`
+  Weyl-bound concern is mitigated by the structural trigger but not
+  eliminated. Pivots that delay could have absorbed are now absorbed
+  by delay; pivots that hit CB exhausted the structural delay
+  capacity.
+
+**References.**
+- `dev/research/symbolic-delay-budget-2026-05-27.md` — design,
+  capacity estimate, expected impact, acceptance map.
+- `dev/research/mumps-perturbation-alignment-2026-05-27.md` —
+  Phase A3 audit identifying the trigger-condition gap.
+- `dev/research/cb-on-default-revalidation-2026-05-27.md` — Phase 0
+  evidence motivating the structural fix.
+- Issue #55 — the tracked failure mode.
+- MUMPS 5.8.2 `dfac_front_aux.F:1251-1331` — reference perturbation
+  branch with delay-exhausted trigger.

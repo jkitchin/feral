@@ -546,27 +546,29 @@ impl Default for NumericParams {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
-            // Cascade-break is off by default. The mechanism (replace
-            // tiny pivots in cascade-overloaded supernodes with
-            // `sign(d) * max(|d|, eps)`) was previously auto-armed on
-            // the theory that `||Δ||_∞ <= eps` per perturbed pivot
-            // (Weyl). That bound does not hold: with L scaled by
-            // `1/d_new` the implicit Δ flows through the Schur update
-            // and grows with `||A[:,k]||² / d_new`. Empirically on
-            // IPM KKT matrices the unrefined residual stays small
-            // (~1e-5 on robot_1600 iter004 — fine after iterative
-            // refinement), but the feature is non-standard (MUMPS and
-            // MA57 don't have an equivalent) and was producing
-            // surprising downstream behavior. Callers that want the
-            // pinene_3200-style cascade-absorption speedup can opt in
-            // via `Solver::with_cascade_break_eps` /
-            // `Solver::with_cascade_break`. See
-            // `dev/research/cascade-break-l-perturbation-2026-05-15.md`
-            // for the analysis and
-            // `dev/tried-and-rejected.md` "cascade_break L-zeroing fix"
-            // for the rejected attempt at restoring the Weyl bound.
-            cascade_break_ratio: None,
-            cascade_break_eps: None,
+            // Phase B (issue #55): cascade-break is armed by default
+            // as the recovery path for symbolic-analysis-time delay
+            // budget exhaustion. The presence of
+            // `cascade_break_ratio = Some(_)` means "CB is armed";
+            // the numeric ratio value is only consulted on the legacy
+            // path (unbudgeted supernodes, `delayed_capacity ==
+            // usize::MAX`). On the budgeted path the trigger is
+            // `n_delayed_in > delayed_capacity`, mirroring MUMPS's
+            // `dfac_front_aux.F:1251-1331` "delay capacity exhausted"
+            // perturbation branch.
+            //
+            // The earlier disarm (cascade-break off by default) was
+            // motivated by the Weyl-bound concern documented in
+            // `dev/research/cascade-break-l-perturbation-2026-05-15.md`:
+            // per-pivot `||Δ||_∞ <= eps` does not hold strictly when
+            // L is scaled by `1/d_new`. Phase B closes that gap not
+            // by fixing the Weyl bound (it cannot be tightened
+            // without changing the L kernel) but by ensuring CB
+            // only fires when delay was structurally impossible —
+            // matching MUMPS's invariant. See issue #55 and
+            // `dev/research/symbolic-delay-budget-2026-05-27.md`.
+            cascade_break_ratio: Some(0.5),
+            cascade_break_eps: Some(1e-10),
             min_parallel_flops: None,
             // SQD fast-path off by default. Opt in via
             // `Solver::with_sqd_mode(true)`; see `sqd_mode` doc and
@@ -604,10 +606,11 @@ impl NumericParams {
             parallel_telemetry: None,
             fma: false,
             allow_delayed_pivots: true,
-            // Match `Default::default()` — cascade-break opt-in. See
-            // the comment there for rationale.
-            cascade_break_ratio: None,
-            cascade_break_eps: None,
+            // Match `Default::default()` — CB armed as the recovery
+            // path for delay-budget exhaustion. See the comment there
+            // for rationale.
+            cascade_break_ratio: Some(0.5),
+            cascade_break_eps: Some(1e-10),
             min_parallel_flops: None,
             sqd_mode: false,
             static_pivot_threshold: None,
@@ -2105,6 +2108,30 @@ fn factor_one_supernode(
         .sum();
     let expanded_ncol = own_ncol + n_delayed_in;
 
+    // Phase B3+B5 (issue #55): symbolic-analysis-time delay budget.
+    // When the supernode received more delayed pivots from its children
+    // than `delayed_capacity` permits, two dispositions are possible:
+    //   - CB armed (`cascade_break_ratio.is_some()`) → engage the
+    //     sign-preserving static-perturbation fallback at this
+    //     supernode, mirroring MUMPS's `INFO(2)` recovery path.
+    //   - CB disarmed → return `DelayBudgetExceeded` so the caller can
+    //     restart with a larger budget multiplier or fall back to a
+    //     different solver path.
+    // Root supernodes are exempt from the error path: by the time
+    // delays reach the root the frontal size is already committed and
+    // there is no further delay target — the root must factor what it
+    // received.
+    let budget_exceeded =
+        snode.delayed_capacity != usize::MAX && n_delayed_in > snode.delayed_capacity;
+    let cb_armed = params.cascade_break_ratio.is_some();
+    if budget_exceeded && !cb_armed && !is_root[snode_idx] {
+        return Err(FeralError::DelayBudgetExceeded {
+            supernode: snode_idx,
+            required: n_delayed_in,
+            capacity: snode.delayed_capacity,
+        });
+    }
+
     // Build the row indices for this frontal. The default layout is
     // [own native cols (own_ncol) | delayed cols from children (n_delayed_in) | trailing rows].
     let _pt_asm = phase_timing::start();
@@ -2229,30 +2256,30 @@ fn factor_one_supernode(
         "nvschur > 0 only valid at root supernodes (Schur tail invariant)"
     );
     debug_assert!(nvschur <= expanded_ncol);
-    // Adaptive cascade-break: at a non-root supernode whose front
-    // is mostly delayed columns from below, flip to may_delay=false
-    // with a locally-overridden ForceAccept policy. Absorbs the
-    // perturbation here instead of pushing 10^4-10^5 delays into
-    // the dense root front. See issue #8.
+    // Phase B5 (issue #55): cascade-break trigger is the symbolic
+    // delay budget. When `budget_exceeded` and CB is armed,
+    // perturb-in-place at this supernode rather than propagate the
+    // overflow upward — the structural analogue of MUMPS's "delay
+    // capacity exhausted ⇒ static perturbation" branch
+    // (`dfac_front_aux.F:1251-1331`). The legacy heuristic
+    // (`n_delayed_in/expanded_ncol ≥ ratio`) is retained as a
+    // secondary trigger only when the symbolic capacity is unbounded
+    // (`delayed_capacity == usize::MAX` — old / non-budgeted paths)
+    // so callers that hand-tune `cascade_break_ratio` retain
+    // backward-compatible behavior.
     //
-    // Symbolic-arm gate (issue #15): require symbolic.n >=
-    // CASCADE_BREAK_MIN_N. Below the threshold no front can grow
-    // large enough (via delay propagation) for cascade-break savings
-    // to outweigh the IPM perturbation tax — the gate makes the
-    // trigger a no-op for small problems whether or not it was armed.
-    //
-    // Defaults (`ratio=0.5`, `eps=1e-10`) when callers opt in are
-    // empirical, not derivable from a published criterion — see
-    // `dev/research/cascade-break.md` for the full citation review.
-    // Do not change without re-running `bench_issue8`.
+    // Defaults when callers opt in are empirical; the budget-based
+    // trigger removes the perf-tax on cascade-victim problems while
+    // ensuring CB never perturbs a pivot that MUMPS would delay
+    // (issue #55 Phase 0 evidence: marine_1600_0017, nuffield2_trap).
     let cascade_break = match params.cascade_break_ratio {
-        Some(r)
-            if !is_root[snode_idx]
-                && params.allow_delayed_pivots
-                && expanded_ncol > 0
-                && symbolic.n >= CASCADE_BREAK_MIN_N =>
-        {
-            (n_delayed_in as f64) / (expanded_ncol as f64) >= r
+        Some(r) if !is_root[snode_idx] && params.allow_delayed_pivots && expanded_ncol > 0 => {
+            if snode.delayed_capacity != usize::MAX {
+                budget_exceeded
+            } else {
+                symbolic.n >= CASCADE_BREAK_MIN_N
+                    && (n_delayed_in as f64) / (expanded_ncol as f64) >= r
+            }
         }
         _ => false,
     };
@@ -4472,6 +4499,7 @@ mod tests {
                 nrow,
                 row_indices: Vec::new(),
                 children: vec![0; n_children],
+                delayed_capacity: usize::MAX,
             })
             .collect()
     }

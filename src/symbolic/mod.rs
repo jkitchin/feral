@@ -780,7 +780,13 @@ pub fn symbolic_factorize_with_method(
 
     // Step 7: Supernode detection on the postordered etree
     let t_find = prof.map(|_| std::time::Instant::now());
-    let supernodes = find_supernodes(&etree, &col_counts, snode_params);
+    let mut supernodes = find_supernodes(&etree, &col_counts, snode_params);
+    // Issue #55 Phase B2: assign per-supernode incoming-delay budget.
+    // Bounded-cost postorder pass; runs once per symbolic factor and
+    // is cached in `SymbolicFactorization` for reuse across numeric
+    // refactors. No effect until the numeric-time enforcement (B3)
+    // and CB-rewire (B5) check `Supernode::delayed_capacity`.
+    supernode::assign_delayed_capacities(&mut supernodes);
     if let Some(t) = t_find {
         record_stage(prof, "find_supernodes", t);
     }
@@ -991,6 +997,11 @@ pub fn symbolic_factorize_with_schur(
     // invariant downstream code relies on.
     merge_schur_tail_supernodes(&mut supernodes, n, n_schur)?;
 
+    // Issue #55 Phase B2: assign per-supernode incoming-delay budget.
+    // Runs after the Schur-tail merge so the surviving root supernode
+    // gets a single budget computed from its post-merge subtree.
+    supernode::assign_delayed_capacities(&mut supernodes);
+
     // Step 9: small-leaf grouping (consumed at numeric time only when
     // the small_leaf gate is On). Same as the standard pipeline.
     let (small_leaf_groups, snode_group) =
@@ -1191,6 +1202,11 @@ fn merge_schur_tail_supernodes(
         nrow: merged_nrow,
         row_indices: merged_row_indices,
         children: merged_children,
+        // B1: merged supernode inherits the unbounded sentinel; the
+        // B2 capacity-estimate pass runs after all merges complete
+        // so it sees the post-merge tree and assigns a single
+        // estimate per surviving supernode.
+        delayed_capacity: usize::MAX,
     };
     supernodes.truncate(start + 1);
     Ok(())
@@ -1273,6 +1289,10 @@ fn split_straddling_supernode(
         nrow: nrow_total,
         row_indices: original.row_indices.clone(),
         children: original.children,
+        // B1: inherit the unbounded sentinel. The split happens
+        // before the B2 capacity-estimate pass, so the post-split
+        // supernodes get their real estimates uniformly.
+        delayed_capacity: usize::MAX,
     };
     let schur_half = Supernode {
         first_col: schur_lo,
@@ -1280,6 +1300,7 @@ fn split_straddling_supernode(
         nrow: nrow_total - ncol_ns,
         row_indices: original.row_indices[ncol_ns..].to_vec(),
         children: vec![b],
+        delayed_capacity: usize::MAX,
     };
     supernodes[b] = non_schur;
     supernodes.insert(b + 1, schur_half);

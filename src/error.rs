@@ -32,6 +32,17 @@ pub enum FeralError {
     /// SQD contract is not met at the reported column). See
     /// `dev/research/sqd-fast-path.md` and issue #34.
     SqdContractViolated { column: usize, pivot: f64 },
+
+    /// A supernode received more delayed pivots from its children at
+    /// numeric time than the symbolic-analysis phase budgeted for.
+    /// Mirrors MUMPS's `INFO(2)` workspace-overflow path: a predictable,
+    /// recoverable failure that bounds worst-case front growth.
+    /// See issue #55 and `dev/research/symbolic-delay-budget-2026-05-27.md`.
+    DelayBudgetExceeded {
+        supernode: usize,
+        required: usize,
+        capacity: usize,
+    },
 }
 
 impl std::fmt::Display for FeralError {
@@ -55,6 +66,18 @@ impl std::fmt::Display for FeralError {
                      the diagonal-LDL^T stability bound (near-zero pivot or \
                      L-column growth above 1/sqrt(EPS))",
                     column, pivot
+                )
+            }
+            FeralError::DelayBudgetExceeded {
+                supernode,
+                required,
+                capacity,
+            } => {
+                write!(
+                    f,
+                    "delayed-pivot budget exceeded at supernode {}: \
+                     required {} delayed columns, capacity {} (issue #55)",
+                    supernode, required, capacity
                 )
             }
         }

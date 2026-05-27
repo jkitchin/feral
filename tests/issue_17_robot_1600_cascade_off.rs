@@ -1,17 +1,30 @@
 //! Regression test for https://github.com/jkitchin/feral/issues/17.
 //!
-//! IPM solver loops (ipopt-feral / pounce-feral) on the Mittelmann
-//! `robot_1600` problem hit an inertia disagreement at iteration 3
-//! when feral's `NumericParams::default()` had cascade-break armed
-//! (`ratio=0.5, eps=1e-10`). 585d739 flipped the Rust-side default
-//! to `None`; da23d13 carried the same default into the C API used
-//! by ipopt-feral via `feral_new()`.
+//! History (Phase A → Phase B, issue #55):
+//!   - 585d739 disarmed CB by default (`cascade_break_ratio = None`)
+//!     after issue #17 showed IPM disagreement when the legacy
+//!     ratio-based CB trigger fired on robot_1600 pivots that
+//!     delay should have absorbed.
+//!   - 2026-05-27 (Phase B) re-arms CB by default but changes the
+//!     trigger from "delayed fraction ≥ ratio" to "symbolic
+//!     `delayed_capacity` exhausted". On budgeted supernodes CB
+//!     only fires when delay is structurally impossible, matching
+//!     MUMPS's `dfac_front_aux.F:1251-1331` invariant. The
+//!     numeric ratio value (`Some(0.5)`) is now used only on
+//!     unbudgeted legacy paths.
 //!
-//! This test locks both:
-//!   1. `NumericParams::default()` has cascade-break disarmed.
+//! This test locks the Phase B contract on robot_1600:
+//!   1. `NumericParams::default()` is the Phase B configuration —
+//!      CB armed with `ratio = Some(0.5)`, `eps = Some(1e-10)`,
+//!      budget-based trigger.
 //!   2. `robot_1600_0003` factors with default `Solver` settings
 //!      and the reported inertia matches the MUMPS 5.8.2 reference
 //!      oracle `(positive=14399, negative=9601, zero=0)`.
+//!   3. CB does *not* fire on robot_1600's delay catchment under
+//!      the budget-based trigger — `n_tiny == 0` (the original
+//!      issue-#17 regression no longer reproduces because the
+//!      budget gates CB to delay-exhausted supernodes, not to
+//!      the pivots that delay could have absorbed).
 //!
 //! Reference: data/matrices/kkt-mittelmann/robot_1600/robot_1600_0003.mumps.json
 //!
@@ -24,17 +37,20 @@ use feral::numeric::solver::{FactorStatus, Solver};
 use feral::{read_mtx, Inertia};
 
 #[test]
-fn default_numeric_params_have_cascade_break_disarmed() {
+fn default_numeric_params_have_phase_b_cb_armed() {
     let p = NumericParams::default();
-    assert!(
-        p.cascade_break_ratio.is_none(),
-        "cascade_break_ratio must default to None for ipopt-feral parity \
-         (see issue #17, commit 585d739)"
+    assert_eq!(
+        p.cascade_break_ratio,
+        Some(0.5),
+        "Phase B (issue #55): cascade_break_ratio must default to Some(0.5) — \
+         CB armed with budget-based trigger; legacy ratio value retained for \
+         unbudgeted paths"
     );
-    assert!(
-        p.cascade_break_eps.is_none(),
-        "cascade_break_eps must default to None for ipopt-feral parity \
-         (see issue #17, commit 585d739)"
+    assert_eq!(
+        p.cascade_break_eps,
+        Some(1e-10),
+        "Phase B (issue #55): cascade_break_eps must default to Some(1e-10) — \
+         per-pivot static perturbation floor"
     );
 }
 
@@ -70,16 +86,17 @@ fn robot_1600_iter_3_matches_mumps_inertia_with_defaults() {
                 (expected.positive, expected.negative, expected.zero),
                 "robot_1600_0003 inertia must match MUMPS reference"
             );
-            // Phase A (issue #55): with CB disarmed by default, the
-            // MUMPS-style static-perturbation branch must not fire.
-            // `n_tiny` is the MUMPS `INFO(25)` / NBTINYW equivalent.
+            // Phase B (issue #55): CB armed by default with budget-based
+            // trigger. robot_1600's delay catchment fits within
+            // `delayed_capacity`, so CB must not fire. `n_tiny == 0`
+            // mirrors MUMPS `INFO(25)` / NBTINYW.
             let stats = solver
                 .last_factor_stats()
                 .expect("FactorStats present after Success");
             assert_eq!(
                 stats.n_tiny, 0,
-                "no pivot should be statically perturbed on robot_1600_0003 \
-                 with CB-off defaults (n_tiny={})",
+                "Phase B budget-based CB trigger must not fire on \
+                 robot_1600_0003 (n_tiny={})",
                 stats.n_tiny,
             );
         }
