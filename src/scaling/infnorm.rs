@@ -54,19 +54,40 @@ pub fn compute_infnorm(matrix: &CscMatrix) -> (Vec<f64>, ScalingInfo) {
         }
 
         // Accumulate row maxes by scanning the lower triangle once.
-        // Each (i, j) entry with i >= j contributes to both row i and
-        // (by symmetry) row j, unless i == j.
+        // Each (i, j) entry with i >= j contributes to row i (via the
+        // explicit storage) and to row j (by symmetry).
+        //
+        // The row-j accumulation is hoisted to a register-resident
+        // `col_max` across the inner k-loop, then folded into
+        // `row_max[j]` once at column end. The diagonal entry (i == j)
+        // is folded into `col_max` only — its `row_max[i]` write would
+        // be overwritten by the end-of-column store, so we skip the
+        // memory traffic and rely on `col_max` to carry the diagonal's
+        // contribution. Off-diagonal entries (i > j) update both
+        // `row_max[i]` and `col_max`.
+        //
+        // Bit-identical to the prior formulation: max(·,·) is
+        // associative on non-NaN inputs (every `v` is `|·|` of finite
+        // products), so combining via a register accumulator then
+        // folding into `row_max[j]` produces the same value as in-place
+        // updates in any iteration order.
         for j in 0..n {
-            for k in matrix.col_ptr[j]..matrix.col_ptr[j + 1] {
+            let col_start = matrix.col_ptr[j];
+            let col_end = matrix.col_ptr[j + 1];
+            let dj = d[j];
+            let mut col_max = row_max[j];
+
+            for k in col_start..col_end {
                 let i = matrix.row_idx[k];
-                let v = (d[i] * matrix.values[k] * d[j]).abs();
-                if v > row_max[i] {
+                let v = (d[i] * matrix.values[k] * dj).abs();
+                if i != j && v > row_max[i] {
                     row_max[i] = v;
                 }
-                if i != j && v > row_max[j] {
-                    row_max[j] = v;
+                if v > col_max {
+                    col_max = v;
                 }
             }
+            row_max[j] = col_max;
         }
 
         // Update diagonal and check convergence.
@@ -134,23 +155,44 @@ pub fn compute_infnorm_dense(sym: &SymmetricMatrix) -> (Vec<f64>, ScalingInfo) {
             *r = 0.0;
         }
 
-        // Walk the lower triangle column-by-column — same traversal
-        // order the sparse CSC loop uses, so the floating-point max
-        // reduction sees entries in the same sequence. Entries above
-        // the lower-triangle gate are zero (set by `to_dense_into`)
-        // and contribute nothing to `row_max`.
+        // Walk the lower triangle column-by-column. Diagonal handled
+        // scalar; off-diagonal (i > j) handled via pulp-dispatched
+        // lane-wise multiply / abs / max, with `col_max` accumulated
+        // in a vector register and reduced once per column. Entries
+        // above the lower-triangle gate are zero (set by
+        // `to_dense_into`) and never read.
+        //
+        // Bit-exact with the prior scalar formulation: each lane's
+        // multiplies match the scalar order `((d[i] * data) * dj)`,
+        // `abs` is per-lane, and max of non-NaN finite values is
+        // associative (so a tree reduction over the SIMD lanes
+        // produces the same result as a left-fold).
         for j in 0..n {
             let col = j * n;
             let dj = d[j];
-            for i in j..n {
-                let v = (d[i] * sym.data[col + i] * dj).abs();
-                if v > row_max[i] {
-                    row_max[i] = v;
-                }
-                if i != j && v > row_max[j] {
-                    row_max[j] = v;
+
+            // Diagonal entry: `v_diag = |dj * data[col+j] * dj|`.
+            // In the prior code this updated `row_max[j]` via the
+            // i-branch (and never the j-branch, gated by `i != j`).
+            // Here we fold it into the local accumulator only — the
+            // end-of-column store overwrites `row_max[j]` anyway.
+            let v_diag = (dj * sym.data[col + j] * dj).abs();
+            let mut col_max = row_max[j].max(v_diag);
+
+            // Off-diagonal: lanes i in (j, n). Each lane updates
+            // `row_max[i]` (lane-wise max) and contributes to
+            // `col_max` (reduced after the sweep).
+            if j + 1 < n {
+                let d_off = &d[j + 1..n];
+                let data_off = &sym.data[col + j + 1..col + n];
+                let (_lhs, rm_rhs) = row_max.split_at_mut(j + 1);
+                let off_max = scan_offdiag_simd(d_off, data_off, dj, rm_rhs);
+                if off_max > col_max {
+                    col_max = off_max;
                 }
             }
+
+            row_max[j] = col_max;
         }
 
         let mut max_dev = 0.0f64;
@@ -171,6 +213,89 @@ pub fn compute_infnorm_dense(sym: &SymmetricMatrix) -> (Vec<f64>, ScalingInfo) {
     }
 
     (d, ScalingInfo::Applied)
+}
+
+/// SIMD inner kernel for [`compute_infnorm_dense`]. For each contiguous
+/// lane, computes `v = |d_off · data_off · dj|`, lane-wise updates
+/// `row_max_off ← max(row_max_off, v)`, and returns the max value over
+/// all lanes (the column-max contribution from the off-diagonal sweep).
+///
+/// Dispatched through `pulp::Arch::new()` — picks AVX-512 / AVX2+FMA /
+/// SSE2 / NEON / scalar fallback per host CPU. All three slices must
+/// be equal length; an empty input returns `0.0`.
+///
+/// Bit-exact with a scalar loop over the same slice: each lane's
+/// `mul → mul → abs` chain matches the scalar order, and the
+/// `reduce_max` over non-NaN finite values is associative.
+fn scan_offdiag_simd(d_off: &[f64], data_off: &[f64], dj: f64, row_max_off: &mut [f64]) -> f64 {
+    assert_eq!(d_off.len(), data_off.len());
+    assert_eq!(d_off.len(), row_max_off.len());
+    if d_off.is_empty() {
+        return 0.0;
+    }
+
+    struct K<'a> {
+        dj: f64,
+        d_off: &'a [f64],
+        data_off: &'a [f64],
+        row_max_off: &'a mut [f64],
+    }
+
+    impl pulp::WithSimd for K<'_> {
+        type Output = f64;
+
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) -> f64 {
+            let Self {
+                dj,
+                d_off,
+                data_off,
+                row_max_off,
+            } = self;
+            let dj_v = simd.splat_f64s(dj);
+            let mut col_max_v = simd.splat_f64s(0.0);
+
+            let (d_body, d_tail) = S::as_simd_f64s(d_off);
+            let (da_body, da_tail) = S::as_simd_f64s(data_off);
+            let (rm_body, rm_tail) = S::as_mut_simd_f64s(row_max_off);
+
+            for ((dv, dav), rmv) in d_body.iter().zip(da_body).zip(rm_body.iter_mut()) {
+                let prod = simd.mul_f64s(simd.mul_f64s(*dv, *dav), dj_v);
+                let v = simd.abs_f64s(prod);
+                *rmv = simd.max_f64s(*rmv, v);
+                col_max_v = simd.max_f64s(col_max_v, v);
+            }
+
+            let mut col_max = simd.reduce_max_f64s(col_max_v);
+
+            if !d_tail.is_empty() {
+                // `partial_load` zero-pads beyond the tail length;
+                // `partial_store` writes only the valid prefix. The
+                // out-of-range lanes compute `|0·0·dj| = 0`, which is
+                // the identity for max — safe to fold into `col_max`.
+                let dv = simd.partial_load_f64s(d_tail);
+                let dav = simd.partial_load_f64s(da_tail);
+                let rmv = simd.partial_load_f64s(rm_tail);
+                let prod = simd.mul_f64s(simd.mul_f64s(dv, dav), dj_v);
+                let v = simd.abs_f64s(prod);
+                let new_rm = simd.max_f64s(rmv, v);
+                simd.partial_store_f64s(rm_tail, new_rm);
+                let tail_max = simd.reduce_max_f64s(v);
+                if tail_max > col_max {
+                    col_max = tail_max;
+                }
+            }
+
+            col_max
+        }
+    }
+
+    pulp::Arch::new().dispatch(K {
+        dj,
+        d_off,
+        data_off,
+        row_max_off,
+    })
 }
 
 #[cfg(test)]
