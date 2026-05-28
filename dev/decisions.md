@@ -4663,3 +4663,57 @@ acceptance criteria.** Notably:
 - Issue #55 — the tracked failure mode.
 - MUMPS 5.8.2 `dfac_front_aux.F:1251-1331` — reference perturbation
   branch with delay-exhausted trigger.
+
+## 2026-05-28: InfNorm Knight-Ruiz inner-loop hoist + dense SIMD boundary
+
+**Decision.** The Knight-Ruiz `∞`-norm sweep in `src/scaling/infnorm.rs`
+hoists the loop-carried `row_max[j]` dependency to a register-resident
+`col_max` accumulator across each column's inner `k`-loop (or `i`-loop
+on the dense path), folded into `row_max[j]` once at column end. The
+diagonal entry's `row_max[i]` write is elided in favor of folding
+through `col_max` — the end-of-column store overwrites it anyway, so
+the explicit write is wasted memory traffic.
+
+Bit-identical to the prior formulation by associativity of `max(·,·)`
+on non-NaN finite inputs (every `v` in the sweep is `|·|` of finite
+products). Verified by the existing dense-vs-sparse bit-exact parity
+tests `dense_matches_sparse_on_arrow_6x6` and
+`dense_matches_sparse_on_dense_5x5` (`d[i].to_bits()` comparison).
+
+**Decision.** The dense path (`compute_infnorm_dense`) off-diagonal
+sweep is dispatched through `pulp::Arch::new()` via a single
+`WithSimd` boundary (`scan_offdiag_simd`). Same convention as
+`src/dense/schur_kernel.rs` (Phase 2.4.2 decision 2026-04-14): one
+boundary between scalar caller code and `pulp`, scalar fallback path
+covers non-SIMD architectures. Lane-wise `mul → mul → abs`,
+`max_f64s` into `row_max[i:i+W]`, vector-accumulated `col_max_v`
+reduced once per column via `reduce_max_f64s`. Tail via
+`partial_load_f64s` / `partial_store_f64s` — out-of-range lanes load
+zero, which is the identity for max-of-non-negatives.
+
+The sparse path (`compute_infnorm`) stays scalar. The `row_idx[k]`
+gather defeats NEON (no native gather instruction); on AVX2 / AVX-512
+the gather/scatter typically loses on the short columns sparse
+symmetric KKTs produce.
+
+**Why this matters.** Phase 3 instrumentation on Thomson n=200 showed
+the KR sweep does not converge within the 10-iter cap: `max_dev`
+decays geometrically at ratio 0.5/iter and plateaus at 6.77e-3, six
+orders shy of the 1e-8 tolerance. So all 10 iters fire every solve.
+The hoist + SIMD make each iter cheaper without changing iter count
+or scaling quality — no corpus-consensus inertia validation required.
+Per-iter wall reduction on Thomson n=200: scaling −19 %, total −5 %.
+
+**Frozen — do not change without preserving bit-exact parity.**
+The dense path's `dense_matches_sparse_on_*` tests are the contract.
+Any future SIMD rework (e.g. extending to the sparse path with
+gather, or restructuring the column loop) must keep those tests
+bit-exact at the `to_bits()` level.
+
+**References.**
+- `dev/research/issue-56-thomson-hessian-throughput-2026-05-27.md`
+  — Phase 2 localization, Phase 3 cache-hit verification, Lever B
+  / Lever C re-measurement.
+- `dev/sessions/2026-05-28-01.md` — session checkpoint.
+- Commits `c33f023` (Lever B), `5de817b` (Lever C) on `main`.
+- Issue #56 (closed) — tracked the underlying throughput gap.

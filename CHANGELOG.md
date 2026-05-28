@@ -4,6 +4,40 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — Thomson-Hessian per-iter throughput ([#56][i56])
+
+Three additive levers on the dense / wide-supernode IPM-KKT hot path,
+landed on `issue-56-thomson-hessian-throughput` and merged to `main`:
+
+- **Lever A** — pre-built `permuted_pattern` + permute structure cache.
+  Collapsed the symbolic `permute (P A P^T)` + `symmetric_pattern`
+  phases to <0.5 % of total wall on warm calls.
+- **Lever B** — fused single-pass `contribextract` write. Replaced
+  `resize(cdim², 0.0)` + lower-triangle overwrite with
+  `reserve + unsafe set_len` + write-each-cell-once. Bit-identical
+  contrib block (`extend_add` reads only `ci ≥ cj`; root-Schur
+  extractor canonicalizes via transpose; `parallel_corpus_parity`
+  binary-compares the full buffer). Roughly 33 % fewer writes.
+  Re-measurement at Thomson n=200 (sequential, 9 warm reps):
+  factor min −5.5 % (parallel ON), −10 % (parallel OFF).
+- **Lever C** — InfNorm Knight-Ruiz inner-loop vectorization. Hoisted
+  the loop-carried `row_max[j]` dependency to a register accumulator
+  (sparse and dense paths, bit-identical by associativity of max on
+  non-NaN finite inputs); added a pulp-dispatched SIMD off-diagonal
+  kernel on the dense path. Re-measurement at Thomson n=200:
+  scaling phase −19 %, total wall −5 %.
+
+No regression on the Phase 2.8.1 corpus partition gates; both
+small-frontal and medium buckets improved relative to the 2026-05-27
+baseline. KIRBY2 family worst-case sparse outlier improved from
+10.25× → 7.97× vs MUMPS.
+
+See `dev/sessions/2026-05-28-01.md` and
+`dev/research/issue-56-thomson-hessian-throughput-2026-05-27.md` for
+the localization data and re-measurement tables.
+
+[i56]: https://github.com/jkitchin/feral/issues/56
+
 ### Added — symbolic-analysis-time delayed-pivot budget + CB rewire ([#55][i55])
 
 Per-supernode `delayed_capacity` is assigned during symbolic
