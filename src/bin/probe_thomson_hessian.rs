@@ -475,6 +475,15 @@ fn per_phase_breakdown(matrix: &CscMatrix, bk: BunchKaufmanParams, sp: Supernode
     let mut last_timings: Vec<SupernodeTiming> = Vec::new();
     let mut last_prologue_breakdown = feral::numeric::factorize::PrologueBreakdown::default();
 
+    // Sub-phase counters (process-global; same accumulator each rep
+    // since `phase_timing::reset()` zeros them at the top of the loop).
+    let mut sum_buildrow: u128 = 0;
+    let mut sum_scatter: u128 = 0;
+    let mut sum_extendadd: u128 = 0;
+    let mut sum_lextract: u128 = 0;
+    let mut sum_contribextract: u128 = 0;
+    let mut sum_contribzerofill: u128 = 0;
+
     PHASE_TIMING_ENABLED.store(true, AtomicOrdering::Relaxed);
 
     for rep in 0..N_REPS {
@@ -521,6 +530,16 @@ fn per_phase_breakdown(matrix: &CscMatrix, bk: BunchKaufmanParams, sp: Supernode
             last_timings = timings.to_vec();
             last_prologue_breakdown = report.prologue_breakdown.clone();
         }
+
+        // Sample process-global sub-phase counters before
+        // `phase_timing::reset()` runs at the top of the next iter.
+        let detail = phase_timing::snapshot_detail();
+        sum_buildrow += detail.0 as u128;
+        sum_scatter += detail.1 as u128;
+        sum_extendadd += detail.2 as u128;
+        sum_lextract += detail.3 as u128;
+        sum_contribextract += detail.4 as u128;
+        sum_contribzerofill += phase_timing::snapshot_contrib_zerofill() as u128;
     }
 
     PHASE_TIMING_ENABLED.store(false, AtomicOrdering::Relaxed);
@@ -620,6 +639,27 @@ fn per_phase_breakdown(matrix: &CscMatrix, bk: BunchKaufmanParams, sp: Supernode
     println!(
         "        dense bookkeeping   = {:>7} µs   (= dense - panel - schur - scalartail)",
         densefactor_other_avg
+    );
+    // Sub-phase drill-down — these are process-global counters in
+    // nanoseconds; divide by 1000 to convert to µs, then by N_REPS.
+    let ns_to_us_avg = |s: u128| -> u64 { (s / 1000 / n) as u64 };
+    println!(
+        "          lextract          = {:>7} µs   (subset of dense bookkeeping)",
+        ns_to_us_avg(sum_lextract)
+    );
+    println!(
+        "          contribextract    = {:>7} µs   (subset of dense bookkeeping)",
+        ns_to_us_avg(sum_contribextract)
+    );
+    println!(
+        "            zerofill        = {:>7} µs   (subset of contribextract — dead work)",
+        ns_to_us_avg(sum_contribzerofill)
+    );
+    println!(
+        "        assembly drill-down: buildrow = {:>5} µs, scatter = {:>5} µs, extendadd = {:>5} µs",
+        ns_to_us_avg(sum_buildrow),
+        ns_to_us_avg(sum_scatter),
+        ns_to_us_avg(sum_extendadd),
     );
 
     // Top-3 slowest supernodes from the last rep — Thomson's KKT is

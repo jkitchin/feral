@@ -383,6 +383,66 @@ Probe extension committed: `src/bin/probe_thomson_hessian.rs` Phase 3
 section (`per_phase_breakdown_via_solver`). Result reproducible via
 `cargo run --release --bin probe_thomson_hessian -- {50,100,200}`.
 
+## Phase 4 — Lever B (fused contribextract write) (2026-05-27)
+
+Probe drill-down at n=100/200 (Phase 2 sub-phase counters now expose
+`lextract`, `contribextract`, `contribzerofill`, `buildrow`, `scatter`,
+`extendadd`) localized the `dense bookkeeping` residual:
+
+  n=200 (before): contribextract = 1435 µs (of 4622 µs dense bookkeeping)
+    - resize(cdim², 0.0) zerofill   = 289 µs   (dead — overwritten below)
+    - lower-triangle copy            = 1146 µs
+
+The prior code did `contrib.resize(cdim*cdim, 0.0)` then a loop that
+overwrote the lower triangle from `a`. Every lower-triangle cell was
+written twice (zero-fill + a-value); the upper triangle was written
+once (zero-fill) and never read afterwards.
+
+Both readers of `ContribBlock.data` restrict their access to `ci >= cj`:
+- `extend_add` in `numeric/factorize.rs:3671` iterates `ci in cj..cdim`.
+- The root-Schur extractor in `numeric/factorize.rs:1722-1736` reads
+  `[j*dim+i]` for `i >= j` and the transpose `[i*dim+j]` for `i < j`
+  (both lower-triangle slots).
+
+So the upper-triangle zero-fill is dead work in solve paths. The
+diagnostic `parallel_corpus_parity` binary does compare the full
+`contrib` buffer bit-for-bit, so the upper triangle still needs to
+contain deterministic zeros — but writing them once in the same loop
+as the lower-triangle copy is half the work of writing them once in
+`resize` and then writing the lower triangle again.
+
+Implementation: `contrib.reserve(cdim²)` + `unsafe { set_len(cdim²) }`
+(safety comment cites the f64-has-no-Drop invariant and the write-
+before-read contract), then a single-pass loop that writes each cell
+exactly once (zero for `ci < cj`, `a`-value for `ci >= cj`). Applied
+at both call sites in `dense/factor.rs`:
+- `factor_frontal` (scalar fallback path)
+- `factor_frontal_blocked_in_place_with_scratch` (panel/blocked path)
+
+Re-measurement (darwin/aarch64, 9 warm reps, n=200):
+
+  metric                     | before  | after  | delta
+  ----------------------------|---------|--------|---------
+  Phase B default factor min  | 19731   | 18648  | -1083 µs (-5.5%)
+  parallel OFF factor min     | 18528   | 16597  | -1931 µs (-10%)
+  contribextract              | 1435    | 850    | -585 µs (-41%)
+  contribzerofill             | 289     | 3      | -286 µs (≈ gone)
+  dense bookkeeping (residual)| 4622    | 4564   | -58 µs  (system noise)
+
+n=100 (Phase B default factor): 2977 → 2753-2983 µs — within noise.
+n=50: unchanged within noise — contribextract is small at this size.
+
+The remaining `dense bookkeeping` residual at n=200 (~4.5 ms) is
+dominated by per-supernode allocation and dispatch overhead (perm
+allocation, d_subdiag clone, FrontalFactors return), not by named
+phases. That's the next Lever B target if/when more headroom is
+needed; the contribextract fix is the safe, surgical first step.
+
+Verification:
+- cargo test --release: all 317 lib + integration tests pass.
+- cargo clippy --release --all-targets -- -D warnings clean.
+- cargo fmt --check clean.
+
 ## Reference matrix dump path
 
 If the synthetic Hessian misses something about the real iterate (e.g.
