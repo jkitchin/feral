@@ -328,6 +328,61 @@ Driven by Phase 2 findings. Acceptance gates from #56:
 - No regression on the #55 cascade-victim corpus (robot_1600, NARX_CFy,
   marine_1600, rocket_12800)
 
+## Phase 3 — Solver-path scaling-cache verification (2026-05-27)
+
+After Lever A landed, the remaining prologue cost in Phase 2 was
+dominated by `scaling (MC64/InfNorm)` (143 µs / 569 µs / ~3000 µs at
+n=50/100/200). The probe ran the raw multifrontal driver and therefore
+bypassed `Solver::mc64_scaling_cache` (issue #38 Track B2), so it was
+unclear whether the scaling line was real per-iter work or a probe
+artifact that the Solver-level cache absorbs on a warm IPM trajectory.
+
+Step 1 of the follow-up: extend the probe with a Phase 3 section that
+drives `Solver::factor()` with `with_profiling(true)` and reports
+per-rep `mc64_cache_hit_count`, `scaling_info`, and the same prologue
+breakdown shape as Phase 2.
+
+Result (darwin/aarch64, 9 warm reps, default Solver / Auto scaling):
+
+  n   | Phase 2 scaling_us | Phase 3 scaling_us | mc64 hits / 9 reps | scaling_info
+  ----|--------------------|---------------------|--------------------|--------------
+  50  | 153                | 143                 | 0                  | Applied
+  100 | 569                | 625                 | 0                  | Applied
+  200 | ~3000              | n/a (parallel)*     | 0                  | Applied
+
+*At n=200 the Solver routes through the parallel driver, which does
+not emit per-call profiler timings today; `total_us = 0` for those
+reports so the prologue average drops to 0 in the Phase 3 aggregate.
+The cache-hit and scaling_info signals are still valid.
+
+Conclusion: **the MC64 scaling cache is correctly inactive on Thomson**,
+not buggy. `Auto` resolves to InfNorm for this matrix (the gate at
+`solver.rs:1136-1151` requires the effective strategy to be `Mc64Symmetric`
+or `Auto`-routes-to-`Mc64Symmetric`; on Thomson it routes to InfNorm).
+InfNorm is deliberately not cached — issue #49 documents that caching
+an InfNorm vector across IPM iterations replays a stale iter-0 scaling
+on a drifted iter-N matrix.
+
+So the Phase 2 prologue `scaling_us` is real, recurring, per-iter
+FERAL work: InfNorm runs every factor call on Thomson. Options to
+reduce it (none in scope for the safe subset):
+
+1. Faster InfNorm — current implementation is O(nnz), well-cached.
+   Unlikely to find a constant-factor win without measurement.
+2. Per-IPM-iter delta InfNorm — recompute from values that changed,
+   reuse the rest. Needs caller-side instrumentation to identify
+   which columns changed; same staleness hazard as #49.
+3. Identity scaling as a config knob for well-conditioned IPM KKTs
+   (pounce-side `.opt`). Trades one cause of inertia drift for another;
+   not a safe default.
+4. Lever B (dense bookkeeping reduction) — still the biggest remaining
+   FERAL-side win at 27-32% of total wall at every size. Independent
+   of the scaling story.
+
+Probe extension committed: `src/bin/probe_thomson_hessian.rs` Phase 3
+section (`per_phase_breakdown_via_solver`). Result reproducible via
+`cargo run --release --bin probe_thomson_hessian -- {50,100,200}`.
+
 ## Reference matrix dump path
 
 If the synthetic Hessian misses something about the real iterate (e.g.

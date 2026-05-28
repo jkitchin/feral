@@ -393,6 +393,21 @@ fn main() {
         BunchKaufmanParams::default(),
         SupernodeParams::default(),
     );
+
+    // ===== Phase 3: per-phase breakdown via Solver =====
+    //
+    // Phase 2 drives the raw multifrontal driver, which bypasses
+    // `Solver::mc64_scaling_cache` (issue #38 Track B2). The remaining
+    // scaling cost in the Phase 2 prologue could either be (a) real
+    // FERAL work that no caching layer exists for, or (b) work that
+    // `Solver` already caches on warm IPM-trajectory calls. Phase 3
+    // exercises the same matrix through `Solver::factor()` with
+    // `with_profiling(true)` so we can read the Solver-level prologue
+    // breakdown + `mc64_cache_hit_count()` and compare scaling_us
+    // against Phase 2.
+    println!();
+    println!("==== Phase 3: per-phase breakdown via Solver (mc64_scaling_cache active) ====");
+    per_phase_breakdown_via_solver(&kkt);
 }
 
 /// Drop into the sequential multifrontal driver with a Profiler attached
@@ -630,4 +645,150 @@ fn per_phase_breakdown(matrix: &CscMatrix, bk: BunchKaufmanParams, sp: Supernode
             t.scalartail_us,
         );
     }
+}
+
+/// Phase 3: drive `factor()` through `Solver::with_profiling(true)` so the
+/// per-call MC64 scaling cache (issue #38 Track B2) is exercised. Reports
+/// the same prologue breakdown shape as Phase 2 plus aggregated cache hits,
+/// so the scaling line can be compared head-to-head with the raw-driver path.
+fn per_phase_breakdown_via_solver(matrix: &CscMatrix) {
+    let mut solver = Solver::new().with_profiling(true);
+
+    // Warm-up factor — primes symbolic cache, MC64 cache, workspace,
+    // branch predictors. Not timed.
+    match solver.factor(matrix, None) {
+        FactorStatus::Success => {}
+        FactorStatus::WrongInertia { .. } => {}
+        other => {
+            println!("  warm-up factor failed: {:?}", other);
+            return;
+        }
+    }
+    let baseline_hits = solver.mc64_cache_hit_count();
+
+    let mut sum_total: u128 = 0;
+    let mut sum_prologue: u128 = 0;
+    let mut sum_epilogue: u128 = 0;
+    let mut sum_row_map: u128 = 0;
+    let mut sum_scaling: u128 = 0;
+    let mut sum_scaling_pivot_order: u128 = 0;
+    let mut sum_permute: u128 = 0;
+    let mut sum_permute_triplets: u128 = 0;
+    let mut sum_infnorm_tol: u128 = 0;
+    let mut sum_sym_pattern: u128 = 0;
+    let mut sum_setup: u128 = 0;
+    let mut reps_with_report: usize = 0;
+    let mut last_pattern_reused: Option<bool> = None;
+    let mut last_scaling_info: Option<String> = None;
+
+    PHASE_TIMING_ENABLED.store(true, AtomicOrdering::Relaxed);
+
+    for _ in 0..N_REPS {
+        let t0 = Instant::now();
+        let status = solver.factor(matrix, None);
+        let total_us = t0.elapsed().as_micros() as u64;
+        if !matches!(
+            status,
+            FactorStatus::Success | FactorStatus::WrongInertia { .. }
+        ) {
+            println!("  factor failed mid-loop: {:?}", status);
+            PHASE_TIMING_ENABLED.store(false, AtomicOrdering::Relaxed);
+            return;
+        }
+
+        sum_total += total_us as u128;
+        if let Some(report) = solver.profile_report() {
+            // The Solver routes Thomson KKTs through the supernodal
+            // driver (well above the tiny-path / dense-fast-path
+            // thresholds), so `n_supernodes > 0` and `total_us > 0`
+            // here. Defensive guard: only aggregate prologue counters
+            // when the report actually represents a supernodal factor.
+            if report.total_us > 0 {
+                sum_prologue += report.prologue_us as u128;
+                sum_epilogue += report.epilogue_us as u128;
+                sum_row_map += report.prologue_breakdown.row_map_us as u128;
+                sum_scaling += report.prologue_breakdown.scaling_us as u128;
+                sum_scaling_pivot_order += report.prologue_breakdown.scaling_pivot_order_us as u128;
+                sum_permute += report.prologue_breakdown.permute_us as u128;
+                sum_permute_triplets += report.prologue_breakdown.permute_from_triplets_us as u128;
+                sum_infnorm_tol += report.prologue_breakdown.infnorm_tol_us as u128;
+                sum_sym_pattern += report.prologue_breakdown.symmetric_pattern_us as u128;
+                sum_setup += report.prologue_breakdown.setup_us as u128;
+                reps_with_report += 1;
+            }
+        }
+        if let Some(stats) = solver.last_factor_stats() {
+            last_pattern_reused = Some(stats.pattern_reused);
+        }
+        if let Some(info) = solver.scaling_info() {
+            last_scaling_info = Some(format!("{:?}", info));
+        }
+    }
+
+    PHASE_TIMING_ENABLED.store(false, AtomicOrdering::Relaxed);
+
+    let total_hits = solver.mc64_cache_hit_count();
+    let new_hits = total_hits.saturating_sub(baseline_hits);
+
+    let n = N_REPS as u128;
+    let avg = |s: u128| -> u64 { (s / n) as u64 };
+    let avg_r = |s: u128| -> u64 {
+        if reps_with_report == 0 {
+            0
+        } else {
+            (s / reps_with_report as u128) as u64
+        }
+    };
+    let pct = |x: u128, total: u128| -> f64 {
+        if total == 0 {
+            0.0
+        } else {
+            100.0 * (x as f64) / (total as f64)
+        }
+    };
+
+    println!(
+        "  averaged over {} warm reps (Solver::factor, with_profiling=true):",
+        N_REPS
+    );
+    println!("    total wall              = {:>7} µs", avg(sum_total));
+    println!(
+        "    prologue                = {:>7} µs   ({:>4.1}%)",
+        avg_r(sum_prologue),
+        pct(sum_prologue, sum_total)
+    );
+    println!("      row_map               = {:>7} µs", avg_r(sum_row_map));
+    println!("      scaling (MC64/InfNorm)= {:>7} µs", avg_r(sum_scaling));
+    println!(
+        "      scaling_pivot_order   = {:>7} µs",
+        avg_r(sum_scaling_pivot_order)
+    );
+    println!("      permute (P A P^T)     = {:>7} µs", avg_r(sum_permute));
+    println!(
+        "        from_triplets       = {:>7} µs",
+        avg_r(sum_permute_triplets)
+    );
+    println!(
+        "      infnorm + tol         = {:>7} µs",
+        avg_r(sum_infnorm_tol)
+    );
+    println!(
+        "      symmetric_pattern     = {:>7} µs",
+        avg_r(sum_sym_pattern)
+    );
+    println!("      setup (alloc, is_root)= {:>7} µs", avg_r(sum_setup));
+    println!(
+        "    epilogue                = {:>7} µs   ({:>4.1}%)",
+        avg_r(sum_epilogue),
+        pct(sum_epilogue, sum_total)
+    );
+    println!(
+        "  mc64_cache hits across {} reps: {} (baseline {} before, {} after)",
+        N_REPS, new_hits, baseline_hits, total_hits
+    );
+    println!(
+        "  last_factor_stats.pattern_reused = {:?}, reps_with_supernodal_report = {}/{}",
+        last_pattern_reused, reps_with_report, N_REPS
+    );
+    println!("  scaling_info = {:?}", last_scaling_info);
 }
