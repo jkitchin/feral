@@ -3,6 +3,8 @@
 ![FERAL banner](https://raw.githubusercontent.com/jkitchin/feral/main/assets/feral-banner.png)
 
 [![CI](https://github.com/jkitchin/feral/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/feral/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/feral.svg)](https://crates.io/crates/feral)
+[![PyPI](https://img.shields.io/pypi/v/feral-solver.svg)](https://pypi.org/project/feral-solver/)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20162687.svg)](https://doi.org/10.5281/zenodo.20162687)
 
 Feral is a pure-Rust sparse symmetric indefinite linear solver with certified inertia counts for use in interior-point optimization algorithms.
