@@ -4,8 +4,6 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-05-28
-
 ### Performance — Thomson-Hessian per-iter throughput ([#56][i56])
 
 Three additive levers on the dense / wide-supernode IPM-KKT hot path,
