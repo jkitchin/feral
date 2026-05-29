@@ -71,9 +71,15 @@ echo '```'
 echo ""
 
 # Cargo test summary
+# Run only `--lib` to skip the workspace's `src/bin/diag_*` probes.
+# Building and "running" those debug-mode binaries adds 30+ min on
+# this host (each is a corpus walk, not a real test), and they
+# provide no test signal beyond what the library `--lib` run already
+# covers. Pre-commit clippy + the lib tests + release-mode CI are
+# the actual gates; this section is a snapshot for context.md.
 echo "## Test Status"
 echo '```'
-cargo test 2>&1 | tail -20
+cargo test --lib 2>&1 | tail -20
 echo '```'
 echo ""
 
