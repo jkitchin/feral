@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-28
+
 ### Performance — Thomson-Hessian per-iter throughput ([#56][i56])
 
 Three additive levers on the dense / wide-supernode IPM-KKT hot path,
@@ -99,6 +101,18 @@ analysis and `dev/research/issue-54-lp-kkt-inertia.md` for the
 oracle cross-check.
 
 [i54]: https://github.com/jkitchin/feral/issues/54
+
+### Added — `DelayBudgetExceeded` exposed through Python bindings
+
+`feral-solver` (Python) now re-exports the #55 error as a named
+exception:
+
+- `feral.DelayBudgetExceeded` — subclass of `feral.FactorError`
+  (and transitively `feral.FeralError`), raised when
+  `factor()`/`refactor()` hits the symbolic-analysis-time
+  delayed-pivot budget. The message carries the supernode index,
+  required and capacity columns. Python callers no longer see this
+  routed through the generic `NumericFailure` wildcard.
 
 ### Added — documentation site (mdBook + rustdoc on GitHub Pages)
 

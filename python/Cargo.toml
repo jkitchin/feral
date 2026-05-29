@@ -2,7 +2,7 @@
 
 [package]
 name = "feral-python"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 description = "Python bindings for feral — sparse symmetric indefinite direct solver."

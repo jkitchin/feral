@@ -49,6 +49,7 @@ create_exception!(_feral, SingularError, FactorError);
 create_exception!(_feral, WrongInertiaError, FactorError);
 create_exception!(_feral, NumericFailure, FactorError);
 create_exception!(_feral, SqdContractViolated, FactorError);
+create_exception!(_feral, DelayBudgetExceeded, FactorError);
 create_exception!(_feral, SolveError, FeralError);
 create_exception!(_feral, PatternMismatch, FeralError);
 create_exception!(_feral, FeralIOError, FeralError);
@@ -69,6 +70,14 @@ fn map_feral_err(e: RustFeralError) -> PyErr {
         RustFeralError::SqdContractViolated { column, pivot } => SqdContractViolated::new_err(
             format!("SQD contract violated at column {column}: pivot = {pivot:e}"),
         ),
+        RustFeralError::DelayBudgetExceeded {
+            supernode,
+            required,
+            capacity,
+        } => DelayBudgetExceeded::new_err(format!(
+            "delayed-pivot budget exceeded at supernode {supernode}: \
+             required {required} delayed columns, capacity {capacity}"
+        )),
     }
 }
 
@@ -595,6 +604,9 @@ impl Solver {
                 RustFeralError::SqdContractViolated { .. } => {
                     SqdContractViolated::new_err(format!("{e}"))
                 }
+                RustFeralError::DelayBudgetExceeded { .. } => {
+                    DelayBudgetExceeded::new_err(format!("{e}"))
+                }
                 other => NumericFailure::new_err(format!("{other}")),
             }),
         }
@@ -873,6 +885,10 @@ fn _feral(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "SqdContractViolated",
         py.get_type_bound::<SqdContractViolated>(),
+    )?;
+    m.add(
+        "DelayBudgetExceeded",
+        py.get_type_bound::<DelayBudgetExceeded>(),
     )?;
     m.add("SolveError", py.get_type_bound::<SolveError>())?;
     m.add("PatternMismatch", py.get_type_bound::<PatternMismatch>())?;

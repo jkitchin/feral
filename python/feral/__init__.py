@@ -35,6 +35,7 @@ SingularError = _feral.SingularError
 WrongInertiaError = _feral.WrongInertiaError
 NumericFailure = _feral.NumericFailure
 SqdContractViolated = _feral.SqdContractViolated
+DelayBudgetExceeded = _feral.DelayBudgetExceeded
 SolveError = _feral.SolveError
 PatternMismatch = _feral.PatternMismatch
 FeralIOError = _feral.FeralIOError
@@ -156,6 +157,7 @@ __all__ = [
     "WrongInertiaError",
     "NumericFailure",
     "SqdContractViolated",
+    "DelayBudgetExceeded",
     "SolveError",
     "PatternMismatch",
     "FeralIOError",
