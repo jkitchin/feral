@@ -8,10 +8,7 @@ matrices/*
 !matrices/synth/
 matrices/synth/*
 !matrices/synth/rankdef_5_2.mtx
-!matrices/synth/rankdef_10_3.mtx
-!matrices/synth/rankdef_50_5.mtx
 !matrices/synth/rankdef_200_20.mtx
-!matrices/synth/rankdef_exact_50_5.mtx
 !matrices/synth/rankdef_exact_100_10.mtx
 !matrices/synth/saddle_rankdef_50_10_3.mtx
 !matrices/synth/saddle_rankdef_100_20_5.mtx

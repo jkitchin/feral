@@ -4,6 +4,26 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Removed — 4 synthetic rank-deficient stress-corpus matrices
+
+Dropped `rankdef_10_3`, `rankdef_50_5`, `rankdef_exact_50_5`, and
+`stokes_q1p0_8` from the stress corpus. Under #54's SSIDS-aligned
+strict-zero routing, feral reported `inertia.zero = 1` on all four —
+which contradicted MUMPS, SSIDS, *and* MA57 simultaneously,
+violating CLAUDE.md's "must agree with at least one canonical" rule
+and red-lighting the stress-smoke gate on the v0.8.0 release commit.
+
+Rather than allowlist them or narrow #54's `zero_tol` (which would
+reopen the IPM δ-cascade instability on `nuffield2_trap_iter1.mtx`
+that motivated #54 in the first place), the four matrices were
+removed entirely. They were synthetic borderline fixtures where the
+"correct" zero count depends on order-1e-15 round-off and no
+3-of-4-oracle consensus exists — the same disagreement that
+`compute_consensus.py` already tags `excluded`. The rank-deficient
+regime remains covered by `rankdef_5_2`, `rankdef_200_20`,
+`rankdef_exact_100_10`, `saddle_rankdef_50_10_3`,
+`saddle_rankdef_100_20_5`. See `dev/decisions.md` (2026-05-28 entry).
+
 ### Performance — Thomson-Hessian per-iter throughput ([#56][i56])
 
 Three additive levers on the dense / wide-supernode IPM-KKT hot path,

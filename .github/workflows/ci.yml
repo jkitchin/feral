@@ -28,11 +28,6 @@ jobs:
       # `#![cfg_attr(not(test), deny(clippy::unwrap_used))]` directive at
       # the top of src/lib.rs, so the clippy step above catches it. No
       # separate grep rule needed.
-      #
-      # The pounce_interface issue-#42 regression test reads the synth
-      # fixture matrices/synth/rankdef_10_3.mtx — committed to the repo
-      # (see external_benchmarks/stress/.gitignore), so `cargo test`
-      # needs no matrix generation step here.
       - name: test
         run: cargo test
       - name: amd-cleanroom

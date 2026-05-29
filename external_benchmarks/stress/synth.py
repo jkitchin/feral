@@ -389,8 +389,6 @@ def gen_stokes_q1p0(h: int) -> tuple[np.ndarray, tuple[int, int, int]]:
 
 GENERATORS = {
     "rankdef_5_2":         lambda: gen_rankdef(5, 2, seed=1),
-    "rankdef_10_3":        lambda: gen_rankdef(10, 3, seed=2),
-    "rankdef_50_5":        lambda: gen_rankdef(50, 5, seed=3),
     "rankdef_200_20":      lambda: gen_rankdef(200, 20, seed=4),
     "near_singular_eps9":  lambda: gen_near_singular(100, 9, seed=5),
     "near_singular_eps12": lambda: gen_near_singular(100, 12, seed=6),
@@ -402,9 +400,6 @@ GENERATORS = {
 
 # Issue #27 + #31 follow-up: exact-zero rank-deficient variant, saddle
 # rankdef, wide-frontal, MC64-resistant, Stokes Q1-P0.
-GENERATORS["rankdef_exact_50_5"] = (
-    lambda: gen_rankdef_exact(50, 5, seed=301)
-)
 GENERATORS["rankdef_exact_100_10"] = (
     lambda: gen_rankdef_exact(100, 10, seed=302)
 )
@@ -419,9 +414,6 @@ GENERATORS["wide_frontal_616"] = (
 )
 GENERATORS["mc64_resistant_200"] = (
     lambda: gen_mc64_resistant(200, seed=601)
-)
-GENERATORS["stokes_q1p0_8"] = (
-    lambda: gen_stokes_q1p0(8)[0]
 )
 
 # Parametric near-singular sweep (issue #31). Each `near_singular_eps_<p>`

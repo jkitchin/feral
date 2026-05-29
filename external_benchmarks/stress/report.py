@@ -113,15 +113,7 @@ def load_oracles(path: Path) -> dict[str, dict]:
 # underlying issue is tracked. Each entry must cite a GH issue and a
 # short reason. Remove the entry when the issue closes.
 #
-# Currently empty. Issues #40 and #42 — the borderline rank-deficient
-# synthetics rankdef_10_3 / rankdef_50_5 / rankdef_exact_50_5, whose
-# `zero` inertia count diverged from the canonical oracles (no
-# consensus match on #42, cross-arch divergence on #40) — were
-# resolved by Option A: feral now counts every pivot by sign, so the
-# `zero` component is structurally 0 under ForceAccept on every
-# architecture. feral reports the SSIDS/MA57 consensus triple on all
-# three matrices. See dev/decisions.md and
-# dev/research/f01-rankdef-underreporting.md.
+# Currently empty.
 #
 # Format: matrix_name -> (issue_url_or_number, reason).
 ALLOWLIST: dict[str, tuple[str, str]] = {}

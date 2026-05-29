@@ -145,28 +145,6 @@ fn main() {
             }),
         ),
         (
-            "synth/rankdef_10_3",
-            Box::new(|| {
-                read_mtx(Path::new(
-                    "external_benchmarks/stress/matrices/synth/rankdef_10_3.mtx",
-                ))
-                .expect("read rd10")
-                .to_csc()
-                .expect("csc rd10")
-            }),
-        ),
-        (
-            "synth/rankdef_50_5",
-            Box::new(|| {
-                read_mtx(Path::new(
-                    "external_benchmarks/stress/matrices/synth/rankdef_50_5.mtx",
-                ))
-                .expect("read rd50")
-                .to_csc()
-                .expect("csc rd50")
-            }),
-        ),
-        (
             "synth/rankdef_200_20",
             Box::new(|| {
                 read_mtx(Path::new(

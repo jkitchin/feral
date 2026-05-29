@@ -160,11 +160,7 @@ only ever be regenerated from the real solver binaries via
   CI while the fix is in flight. Each entry is keyed on the matrix
   `name` and carries `(issue, reason)`; both are mandatory and an
   allowlist entry without a GitHub issue reference is rejected in
-  review. The current entries split two ways: two `#40` (cross-arch
-  BK-pivot divergence) entries that flag on local aarch64 only — x86
-  CI matches a canonical oracle for those — and one `#42`
-  (`rankdef_10_3`) for a both-arch consensus miss that flags on every
-  architecture, CI included. Remove an entry when its issue closes.
+  review. Currently empty.
 
 ### Caching SuiteSparse downloads in CI
 
