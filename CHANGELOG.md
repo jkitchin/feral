@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-29
+
 ### Removed — 4 synthetic rank-deficient stress-corpus matrices
 
 Dropped `rankdef_10_3`, `rankdef_50_5`, `rankdef_exact_50_5`, and
