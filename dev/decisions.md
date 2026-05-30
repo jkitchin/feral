@@ -4814,3 +4814,68 @@ trigger gap is tracked separately (not blocking this decision).
   pivot, including the unrelated IPM δ-cascade evidence that gates
   this trade-off.
 - CLAUDE.md "Constraints" — corpus consensus framework reference.
+
+## 2026-05-30 — Multi-RHS solve internals: row-major `y`, fused forward+D-solve, BLAS-3 panel dispatch (#57 fix #2)
+
+**Context.** Issue #57 fix #1 (commit 80348f9) made the per-supernode
+`w` buffer row-major so the per-RHS inner loops vectorize, but measured
+only ~1.0–1.3× per-RHS amortization — far from the 5–10× a dense
+multi-RHS GETRS reaches. Fix #2 targets the gap.
+
+**Decision 1 — internal `y` working buffer is row-major.** The
+caller-visible `rhs`/`x_out` stay column-major `n × nrhs` (the
+MUMPS/SSIDS public contract — unchanged). Internally,
+`solve_sparse_core_many_into` now lays `y` out row-major
+(`y[node*nrhs + c]`). Rationale: the per-supernode gather/scatter
+previously read `y[c*n + src]` with stride `n`, three times per
+supernode. On power-of-two `n` (e.g. the n=1024 grid) consecutive RHS
+columns aliased into the same cache sets, producing a *regression*
+(batched slower than looping). Row-major `y` turns gather/scatter into
+contiguous memcpys and moves the only stride-`n` access to the
+one-time entry permute / exit unpermute. Bit-identical (same values,
+different memory order); benefits the rank-1 path too. This is the
+dominant win — it ~halved wide-solve time and removed the regression.
+
+**Decision 2 — fuse forward substitution and the D-block solve into
+one postorder pass.** A node's eliminated rows (`0..nelim`) are final
+once its own forward-sub completes; ancestor fronts contain only its
+*separator* rows, never its eliminated rows, so `D⁻¹` can be applied
+immediately. The old separate D-solve pass (a second postorder
+gather/scatter round) is removed. Bit-identical.
+
+**Decision 3 — BLAS-3 panel kernels behind an `nrhs ≥ 32` threshold.**
+At/above threshold, each supernode runs forward = TRSM(`L_11`) +
+register-tiled GEMM(`w_bot -= L_21 @ w_top`) and back = GEMM + TRSM,
+via one MR×NR (4×8) microkernel parameterised by a `PanelBlock` stride
+view. Below threshold (the IPM predictor/corrector hot path) the
+bit-identical rank-1 kernels run. Forward stays bit-identical to the
+cascade; back differs by float reassociation (~κ·eps), inside the
+1e-12 parity gate (observed ≤ 1.6e-15). The dual path isolates the new
+kernels from the single-RHS and small-`nrhs` paths.
+
+**Rejected alternatives.**
+- *Keep `y` column-major and only tune the GEMM* — leaves the
+  stride-`n` gather/scatter regression on power-of-two `n` and caps
+  every size; the GEMM was not the bottleneck.
+- *GEMM loop reorder (c-block outer) alone* — no measurable effect;
+  the bottleneck was the transpose, not B re-streaming at these sizes.
+- *Global BLAS-3 for all `nrhs`* — would route the IPM hot path (small
+  `nrhs`, bit-identical today) onto the non-bit-identical back-sub for
+  no benefit; threshold keeps it off.
+
+**Measured (idle, `bench_multirhs`, 2-D Laplacians, nrhs ∈ {64,256}).**
+Per-RHS batched/looped ratio: n=484 ~0.18–0.24 (~4–5×), n=1024
+~0.32–0.34 (~3×), n=2025 ~0.17–0.23 (~5–6×). Lib tests 317 pass;
+multi-RHS parity 10/10 at ≤ 1.6e-15.
+
+**Deferred.** Packing the column-major `L` panel into a contiguous
+buffer (BLIS-style) to remove the strided `L` access inside the GEMM —
+the next lever, most relevant to power-of-two front dimensions
+(n=1024). Not pursued until a workload demands it.
+
+**References.**
+- `dev/research/issue-57-blas3-panel.md` — design, bit-exactness
+  analysis, and the Results section with the regression diagnosis.
+- `dev/research/issue-57-multirhs-row-major.md` — fix #1 (row-major `w`).
+- `dev/journal/2026-05-30-01.org` — real-time work log.
+- Issue #57 — original report (column-major layout, 5–10× target).

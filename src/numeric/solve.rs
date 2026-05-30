@@ -5,6 +5,17 @@ use crate::error::FeralError;
 use crate::scaling::ScalingInfo;
 use crate::sparse::csc::CscMatrix;
 
+/// Multi-RHS dispatch crossover (issue #57 fix #2). At or above this
+/// `nrhs`, `solve_sparse_core_many_into` routes the per-supernode
+/// forward/back substitution through the register-blocked BLAS-3 panel
+/// kernels (`fwd_blas3`/`back_blas3`); below it, the fix-#1 row-major
+/// rank-1 kernels run (bit-identical to looping the single-RHS path).
+/// 32 keeps the IPM hot path (small `nrhs`) and the small-`nrhs` many
+/// path on the proven rank-1 code, and clears the `k ≈ 16` crossover
+/// from `dev/research/multi-rhs.md` D3 with margin for the microkernel
+/// setup. See `dev/research/issue-57-blas3-panel.md`.
+const BLAS3_NRHS_THRESHOLD: usize = 32;
+
 /// Solve A·x = b using the sparse multifrontal factorization.
 ///
 /// Three phases matching the multifrontal factorization:
@@ -297,19 +308,22 @@ fn solve_sparse_core_into(
 /// at construction time. Reuse across calls with the same `nrhs`
 /// avoids reallocation on the IPM hot path.
 ///
-/// See `dev/research/multi-rhs.md` (F1.0) for the layout decisions
-/// — y/w/scaled_rhs are all column-major and widened by a factor
-/// of `nrhs` relative to the single-RHS `SolveWorkspace`.
+/// See `dev/research/multi-rhs.md` (F1.0) for the layout decisions and
+/// `dev/research/issue-57-blas3-panel.md` for the row-major flip —
+/// y/w are row-major, scaled_rhs is column-major (caller layout), all
+/// widened by a factor of `nrhs` relative to the single-RHS
+/// `SolveWorkspace`.
 pub struct SolveManyWorkspace {
     /// Permuted RHS / working solution vector, length `n * nrhs`,
-    /// column-major (column `c` lives at `[c*n .. (c+1)*n]`).
+    /// **row-major**: node `k` lives at `[k*nrhs .. (k+1)*nrhs]`. Row-major
+    /// so the per-supernode gather/scatter is a contiguous memcpy
+    /// (issue #57); the caller-visible `rhs`/`x` stay column-major, with
+    /// the transpose absorbed by the one-time entry/exit (un)permute.
     y: Vec<f64>,
     /// Per-supernode gather/scatter buffer, length `max_nrow * nrhs`,
     /// **row-major**: element `(i, c)` lives at `w[i*nrhs + c]`.
     /// Row-major so the per-RHS inner loops in `solve_sparse_core_many_into`
-    /// are contiguous (stride-1) and auto-vectorize (issue #57). The
-    /// caller-visible `y`/`rhs`/`x` buffers stay column-major; the
-    /// per-supernode gather/scatter loops transpose between the two.
+    /// are contiguous (stride-1) and auto-vectorize (issue #57).
     w: Vec<f64>,
     /// Back-substitution dot-product accumulator, length `nrhs`. One
     /// slot per column, reused across pivots and nodes so the inner
@@ -457,14 +471,15 @@ pub fn solve_sparse_many_into(
 }
 
 /// Multi-RHS core solve: forward-sub, D-solve, backward-sub on
-/// `nrhs` columns. `rhs`, `x_out`, and the `y` working buffer are
-/// **column-major** `n × nrhs` (the caller-visible contract, matching
-/// MUMPS/SSIDS). The per-supernode working buffer `w` is **row-major**
-/// (`w[i*nrhs + c]`) so the per-RHS inner loops are contiguous and
-/// auto-vectorize (issue #57); the gather/scatter loops transpose
-/// between the column-major `y` and the row-major `w`. The single-RHS
-/// path (`solve_sparse_core_into`) is preserved unchanged so the
-/// iterative-refinement code path stays on a tested code path.
+/// `nrhs` columns. `rhs` and `x_out` are **column-major** `n × nrhs`
+/// (the caller-visible contract, matching MUMPS/SSIDS). The internal
+/// working buffers `y` and the per-supernode `w` are both **row-major**
+/// (`y[node*nrhs + c]`, `w[i*nrhs + c]`) so the per-RHS inner loops are
+/// contiguous and auto-vectorize and the per-supernode gather/scatter
+/// is a contiguous memcpy (issue #57). The column-major ↔ row-major
+/// transpose happens once each, in the entry permute and exit unpermute.
+/// The single-RHS path (`solve_sparse_core_into`) is preserved unchanged
+/// so the iterative-refinement code path stays on a tested code path.
 fn solve_sparse_core_many_into(
     factors: &SparseFactors,
     rhs: &[f64],
@@ -477,130 +492,64 @@ fn solve_sparse_core_many_into(
     let n = factors.n;
     let y = &mut y_buf[..n * nrhs];
 
-    // Permute every column of the RHS: y[c, new] = b[c, perm[new]]
-    // (y stays column-major).
-    for c in 0..nrhs {
-        let src_off = c * n;
-        let dst_off = c * n;
-        for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
-            y[dst_off + new_idx] = rhs[src_off + old_idx];
-        }
-    }
+    // Route wide solves through the BLAS-3 panel kernels (issue #57
+    // fix #2); narrow solves stay on the bit-identical rank-1 kernels.
+    let use_blas3 = nrhs >= BLAS3_NRHS_THRESHOLD;
 
-    // Phase 1: Forward substitution (postorder).
-    for node in &factors.node_factors {
-        let ff = &node.frontal_factors;
-        let nelim = ff.nelim;
-        let nrow = ff.nrow;
-        if nelim == 0 {
-            continue;
-        }
-
-        // Gather, transposing column-major `y` into row-major `w`:
-        // w[i, c] = y[c, row_indices[perm[i]]].
-        let w = &mut w_buf[..nrow * nrhs];
-        for i in 0..nrow {
-            let src = node.row_indices[ff.perm[i]];
-            let w_row = &mut w[i * nrhs..(i + 1) * nrhs];
-            for c in 0..nrhs {
-                w_row[c] = y[c * n + src];
-            }
-        }
-
-        // L-solve: for each eliminated column j, update rows below.
-        // The inner `c`-loop is a contiguous (stride-1) axpy over the
-        // row-major rows, so it auto-vectorizes (issue #57). Split the
-        // buffer so the reader row `j` and the writer rows `i > j` do
-        // not alias.
-        for j in 0..nelim {
-            let (head, tail) = w.split_at_mut((j + 1) * nrhs);
-            let w_j = &head[j * nrhs..(j + 1) * nrhs];
-            for i in (j + 1)..nrow {
-                let l_ij = ff.l[j * nrow + i];
-                let base = (i - j - 1) * nrhs;
-                let w_i = &mut tail[base..base + nrhs];
-                for c in 0..nrhs {
-                    w_i[c] -= l_ij * w_j[c];
-                }
-            }
-        }
-
-        // Scatter back (row-major `w` → column-major `y`), undoing the
-        // BK permutation.
-        for i in 0..nrow {
-            let dst = node.row_indices[ff.perm[i]];
-            let w_row = &w[i * nrhs..(i + 1) * nrhs];
-            for c in 0..nrhs {
-                y[c * n + dst] = w_row[c];
-            }
-        }
-    }
-
-    // Phase 2: D-block solve. Per-column, since the 2×2 logic
-    // depends on values inside the column.
-    for node in &factors.node_factors {
-        let ff = &node.frontal_factors;
-        let nelim = ff.nelim;
-        let nrow = ff.nrow;
-        if nelim == 0 {
-            continue;
-        }
-
-        let w = &mut w_buf[..nrow * nrhs];
-        for i in 0..nrow {
-            let src = node.row_indices[ff.perm[i]];
-            let w_row = &mut w[i * nrhs..(i + 1) * nrhs];
-            for c in 0..nrhs {
-                w_row[c] = y[c * n + src];
-            }
-        }
-
-        // D-solve per column. Arithmetic is identical to the single-RHS
-        // path (`solve_sparse_core_into`); only the element addresses
-        // change to the row-major layout `w[k*nrhs + c]`.
+    // Permute the RHS into the **row-major** working layout
+    // `y[new*nrhs + c] = rhs[c, perm[new]]`. The caller's `rhs` stays
+    // column-major; this one-time gather is the only stride-`n` read,
+    // and it lets every per-supernode gather/scatter below be a
+    // contiguous memcpy (issue #57: the stride-`n` transpose in the
+    // hot per-supernode loops was the multi-RHS bottleneck, badly so
+    // when `n` is a power of two and columns alias in cache).
+    for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
+        let dst = new_idx * nrhs;
         for c in 0..nrhs {
-            let mut k = 0;
-            while k < nelim {
-                if k + 1 < nelim && ff.d_subdiag[k] != 0.0 {
-                    let a = ff.d_diag[k];
-                    let b = ff.d_subdiag[k];
-                    let cc = ff.d_diag[k + 1];
-                    let det = a * cc - b * b;
+            y[dst + c] = rhs[c * n + old_idx];
+        }
+    }
 
-                    if det.abs() > ff.zero_tol_2x2 {
-                        let z1 = w[k * nrhs + c];
-                        let z2 = w[(k + 1) * nrhs + c];
-                        if b.abs() > f64::EPSILON * (a.abs() + cc.abs()).max(1.0) {
-                            let ak = a / b;
-                            let ck = cc / b;
-                            let denom = 1.0 / (ak * ck - 1.0);
-                            let z1k = z1 / b;
-                            let z2k = z2 / b;
-                            w[k * nrhs + c] = (ck * z1k - z2k) * denom;
-                            w[(k + 1) * nrhs + c] = (ak * z2k - z1k) * denom;
-                        } else {
-                            w[k * nrhs + c] = (cc * z1 - b * z2) / det;
-                            w[(k + 1) * nrhs + c] = (a * z2 - b * z1) / det;
-                        }
-                    }
-                    // else: 2×2 block force-accepted as singular; leave as-is.
-                    k += 2;
-                } else {
-                    if ff.d_diag[k].abs() > ff.zero_tol {
-                        w[k * nrhs + c] /= ff.d_diag[k];
-                    }
-                    // else: pivot force-accepted as zero; leave as-is.
-                    k += 1;
-                }
-            }
+    // Phase 1+2: Forward substitution and D-block solve, fused into a
+    // single postorder pass (postorder).
+    for node in &factors.node_factors {
+        let ff = &node.frontal_factors;
+        let nelim = ff.nelim;
+        let nrow = ff.nrow;
+        if nelim == 0 {
+            continue;
         }
 
+        // Gather the supernode's rows from `y` into `w` (both row-major):
+        // w[i, :] = y[row_indices[perm[i]], :], a contiguous memcpy.
+        let w = &mut w_buf[..nrow * nrhs];
         for i in 0..nrow {
-            let dst = node.row_indices[ff.perm[i]];
-            let w_row = &w[i * nrhs..(i + 1) * nrhs];
-            for c in 0..nrhs {
-                y[c * n + dst] = w_row[c];
-            }
+            let src = node.row_indices[ff.perm[i]] * nrhs;
+            w[i * nrhs..(i + 1) * nrhs].copy_from_slice(&y[src..src + nrhs]);
+        }
+
+        // L-solve. At small `nrhs` the row-major rank-1 cascade runs
+        // (bit-identical to looping single-RHS); at `nrhs >=
+        // BLAS3_NRHS_THRESHOLD` the register-blocked panel kernel runs
+        // (TRSM on L_11 + GEMM on L_21, issue #57 fix #2).
+        if use_blas3 {
+            fwd_blas3(w, &ff.l, nrow, nelim, nrhs);
+        } else {
+            fwd_rank1(w, &ff.l, nrow, nelim, nrhs);
+        }
+
+        // D-block solve, fused into the forward pass. A node's
+        // eliminated rows (0..nelim) are final once its forward-sub
+        // completes — ancestors only ever touch its separator rows — so
+        // D⁻¹ can be applied here instead of in a second postorder pass,
+        // saving one gather/scatter round trip per supernode (issue #57).
+        dsolve_node(w, ff, nelim, nrhs);
+
+        // Scatter back into `y` (both row-major), undoing the BK
+        // permutation: y[row_indices[perm[i]], :] = w[i, :].
+        for i in 0..nrow {
+            let dst = node.row_indices[ff.perm[i]] * nrhs;
+            y[dst..dst + nrhs].copy_from_slice(&w[i * nrhs..(i + 1) * nrhs]);
         }
     }
 
@@ -616,49 +565,317 @@ fn solve_sparse_core_many_into(
 
         let w = &mut w_buf[..nrow * nrhs];
         for i in 0..nrow {
-            let src = node.row_indices[ff.perm[i]];
-            let w_row = &mut w[i * nrhs..(i + 1) * nrhs];
-            for c in 0..nrhs {
-                w_row[c] = y[c * n + src];
-            }
+            // y is row-major (`y[node*nrhs + c]`), so each supernode row
+            // gathers a contiguous run — a memcpy, not a stride-`n` walk.
+            let src = node.row_indices[ff.perm[i]] * nrhs;
+            w[i * nrhs..(i + 1) * nrhs].copy_from_slice(&y[src..src + nrhs]);
         }
 
-        // L^T-solve. `acc[c]` accumulates `sum_{i>j} L[i,j] * w[i, c]`.
-        // Iterating `i` outer keeps the per-column accumulation order
-        // identical to the single-RHS path (so results are bit-identical)
-        // while the inner `c`-loop runs contiguous and vectorizes.
-        for j in (0..nelim).rev() {
-            for s in acc.iter_mut() {
-                *s = 0.0;
-            }
-            for i in (j + 1)..nrow {
-                let l_ij = ff.l[j * nrow + i];
-                let w_i = &w[i * nrhs..(i + 1) * nrhs];
-                for c in 0..nrhs {
-                    acc[c] += l_ij * w_i[c];
-                }
-            }
-            let w_j = &mut w[j * nrhs..(j + 1) * nrhs];
-            for c in 0..nrhs {
-                w_j[c] -= acc[c];
-            }
+        // L^T-solve (mirror of the forward dispatch).
+        if use_blas3 {
+            back_blas3(w, &ff.l, nrow, nelim, nrhs, acc);
+        } else {
+            back_rank1(w, &ff.l, nrow, nelim, nrhs, acc);
         }
 
         for i in 0..nrow {
-            let dst = node.row_indices[ff.perm[i]];
-            let w_row = &w[i * nrhs..(i + 1) * nrhs];
-            for c in 0..nrhs {
-                y[c * n + dst] = w_row[c];
-            }
+            let dst = node.row_indices[ff.perm[i]] * nrhs;
+            y[dst..dst + nrhs].copy_from_slice(&w[i * nrhs..(i + 1) * nrhs]);
         }
     }
 
-    // Unpermute every column: x[c, old] = y[c, new].
+    // Unpermute from the row-major `y` back to the caller's column-major
+    // `x_out`: x[c, old] = y[new*nrhs + c]. One-time scatter (mirror of
+    // the entry permute).
+    for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
+        let src = new_idx * nrhs;
+        for c in 0..nrhs {
+            x_out[c * n + old_idx] = y[src + c];
+        }
+    }
+}
+
+// === Per-supernode multi-RHS substitution kernels (issue #57) ========
+//
+// `w` is the row-major per-supernode buffer (`w[i*nrhs + c]`, `nrow`
+// rows × `nrhs` columns). `l` is the column-major panel `ff.l`
+// (`L[i,j] = l[j*nrow + i]`, unit lower-trapezoidal, `nelim` columns).
+// All four kernels operate purely on `w` in place; the caller handles
+// gather/scatter and the D-block solve.
+
+/// Forward L-solve, rank-1 cascade (fix #1). For each eliminated column
+/// `j`, broadcast `w[j, :]` into every trailing row `i > j`. The inner
+/// `c`-loop is a contiguous axpy. Bit-identical to looping single-RHS.
+fn fwd_rank1(w: &mut [f64], l: &[f64], nrow: usize, nelim: usize, nrhs: usize) {
+    for j in 0..nelim {
+        let (head, tail) = w.split_at_mut((j + 1) * nrhs);
+        let w_j = &head[j * nrhs..(j + 1) * nrhs];
+        for i in (j + 1)..nrow {
+            let l_ij = l[j * nrow + i];
+            let base = (i - j - 1) * nrhs;
+            let w_i = &mut tail[base..base + nrhs];
+            for c in 0..nrhs {
+                w_i[c] -= l_ij * w_j[c];
+            }
+        }
+    }
+}
+
+/// Backward Lᵀ-solve, rank-1 cascade (fix #1). For each column `j`
+/// (descending), `acc[c] = sum_{i>j} L[i,j]·w[i,c]`, then `w[j,:] -=
+/// acc`. Iterating `i` outer keeps the per-column accumulation order
+/// identical to the single-RHS path → bit-identical.
+fn back_rank1(w: &mut [f64], l: &[f64], nrow: usize, nelim: usize, nrhs: usize, acc: &mut [f64]) {
+    for j in (0..nelim).rev() {
+        for s in acc.iter_mut() {
+            *s = 0.0;
+        }
+        for i in (j + 1)..nrow {
+            let l_ij = l[j * nrow + i];
+            let w_i = &w[i * nrhs..(i + 1) * nrhs];
+            for c in 0..nrhs {
+                acc[c] += l_ij * w_i[c];
+            }
+        }
+        let w_j = &mut w[j * nrhs..(j + 1) * nrhs];
+        for c in 0..nrhs {
+            w_j[c] -= acc[c];
+        }
+    }
+}
+
+/// Forward L-solve, BLAS-3 panel form (fix #2): TRSM on the unit-lower
+/// triangle `L_11` (panel rows only) followed by a register-blocked
+/// GEMM `w_bot -= L_21 @ w_top` on the trailing rows. The TRSM updates
+/// rows in increasing `j` and the GEMM seeds its accumulator with the
+/// current `w` value and reduces in increasing `j`, so the whole
+/// forward solve stays **bit-identical** to the rank-1 cascade.
+fn fwd_blas3(w: &mut [f64], l: &[f64], nrow: usize, nelim: usize, nrhs: usize) {
+    // TRSM: L_11 (unit lower), update only panel rows i in (j+1)..nelim.
+    for j in 0..nelim {
+        let (head, tail) = w.split_at_mut((j + 1) * nrhs);
+        let w_j = &head[j * nrhs..(j + 1) * nrhs];
+        for i in (j + 1)..nelim {
+            let l_ij = l[j * nrow + i];
+            let base = (i - j - 1) * nrhs;
+            let w_i = &mut tail[base..base + nrhs];
+            for c in 0..nrhs {
+                w_i[c] -= l_ij * w_j[c];
+            }
+        }
+    }
+    // GEMM: w_bot -= L_21 @ w_top. L_21[i', j] = l[j*nrow + nelim + i'].
+    if nelim < nrow {
+        let (top, bot) = w.split_at_mut(nelim * nrhs);
+        let a = PanelBlock {
+            l,
+            base: nelim,
+            row_stride: 1,
+            col_stride: nrow,
+        };
+        gemm_panel_minus(bot, &a, top, nrow - nelim, nelim, nrhs);
+    }
+}
+
+/// Backward Lᵀ-solve, BLAS-3 panel form (fix #2): register-blocked GEMM
+/// `w_top -= L_21ᵀ @ w_bot` (trailing contribution to every panel
+/// column) followed by the TRSM back-solve of `L_11ᵀ` on the panel
+/// rows. The GEMM applies the trailing rows before the panel TRSM,
+/// whereas the cascade interleaves them per column, so the result
+/// differs from the rank-1 path only by floating-point reassociation
+/// (~κ·eps) — well inside the 1e-12 parity tolerance.
+fn back_blas3(w: &mut [f64], l: &[f64], nrow: usize, nelim: usize, nrhs: usize, acc: &mut [f64]) {
+    // GEMM: w_top -= L_21^T @ w_bot. (L_21^T)[j, i'] = l[j*nrow + nelim + i'].
+    if nelim < nrow {
+        let (top, bot) = w.split_at_mut(nelim * nrhs);
+        let a = PanelBlock {
+            l,
+            base: nelim,
+            row_stride: nrow,
+            col_stride: 1,
+        };
+        gemm_panel_minus(top, &a, bot, nelim, nrow - nelim, nrhs);
+    }
+    // TRSM: L_11^T, update only panel rows i in (j+1)..nelim.
+    for j in (0..nelim).rev() {
+        for s in acc.iter_mut() {
+            *s = 0.0;
+        }
+        for i in (j + 1)..nelim {
+            let l_ij = l[j * nrow + i];
+            let w_i = &w[i * nrhs..(i + 1) * nrhs];
+            for c in 0..nrhs {
+                acc[c] += l_ij * w_i[c];
+            }
+        }
+        let w_j = &mut w[j * nrhs..(j + 1) * nrhs];
+        for c in 0..nrhs {
+            w_j[c] -= acc[c];
+        }
+    }
+}
+
+/// D-block solve on the eliminated rows of one supernode, in place on
+/// the row-major `w` (`w[k*nrhs + c]`). Applies `D⁻¹` per column: 1×1
+/// pivots divide, 2×2 pivots solve the symmetric system. Arithmetic is
+/// identical to the single-RHS path (`solve_sparse_core_into`); only the
+/// element addresses change to the row-major layout. Force-accepted zero
+/// pivots (1×1) and singular 2×2 blocks are left untouched, matching the
+/// single-RHS path.
+fn dsolve_node(
+    w: &mut [f64],
+    ff: &crate::dense::factor::FrontalFactors,
+    nelim: usize,
+    nrhs: usize,
+) {
     for c in 0..nrhs {
-        let src_off = c * n;
-        let dst_off = c * n;
-        for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
-            x_out[dst_off + old_idx] = y[src_off + new_idx];
+        let mut k = 0;
+        while k < nelim {
+            if k + 1 < nelim && ff.d_subdiag[k] != 0.0 {
+                let a = ff.d_diag[k];
+                let b = ff.d_subdiag[k];
+                let cc = ff.d_diag[k + 1];
+                let det = a * cc - b * b;
+
+                if det.abs() > ff.zero_tol_2x2 {
+                    let z1 = w[k * nrhs + c];
+                    let z2 = w[(k + 1) * nrhs + c];
+                    if b.abs() > f64::EPSILON * (a.abs() + cc.abs()).max(1.0) {
+                        let ak = a / b;
+                        let ck = cc / b;
+                        let denom = 1.0 / (ak * ck - 1.0);
+                        let z1k = z1 / b;
+                        let z2k = z2 / b;
+                        w[k * nrhs + c] = (ck * z1k - z2k) * denom;
+                        w[(k + 1) * nrhs + c] = (ak * z2k - z1k) * denom;
+                    } else {
+                        w[k * nrhs + c] = (cc * z1 - b * z2) / det;
+                        w[(k + 1) * nrhs + c] = (a * z2 - b * z1) / det;
+                    }
+                }
+                // else: 2×2 block force-accepted as singular; leave as-is.
+                k += 2;
+            } else {
+                if ff.d_diag[k].abs() > ff.zero_tol {
+                    w[k * nrhs + c] /= ff.d_diag[k];
+                }
+                // else: pivot force-accepted as zero; leave as-is.
+                k += 1;
+            }
+        }
+    }
+}
+
+/// Column-major sub-block of the panel `ff.l`, viewed as a dense matrix
+/// `A` with `A[m, k] = l[base + m*row_stride + k*col_stride]`. Lets one
+/// GEMM microkernel serve both the forward (`L_21`) and the backward
+/// (`L_21ᵀ`) trailing update by swapping the strides.
+struct PanelBlock<'a> {
+    l: &'a [f64],
+    base: usize,
+    row_stride: usize,
+    col_stride: usize,
+}
+
+/// Register-blocked panel GEMM: `C[m, c] -= sum_k A[m, k] · B[k, c]`,
+/// `C` (`m_dim × nrhs`) and `B` (`k_dim × nrhs`) row-major with leading
+/// dimension `nrhs`, `A` an `m_dim × k_dim` view into the column-major
+/// panel. The MR×NR core holds the output tile in registers and reduces
+/// over `k`, seeding the accumulator with the current `C` value so the
+/// reduction is a left fold over increasing `k` (bit-identical to the
+/// cascade when the reduction axis matches). Tails fall back to a
+/// scalar block (same left-fold order).
+fn gemm_panel_minus(
+    c_rows: &mut [f64],
+    a: &PanelBlock,
+    b_rows: &[f64],
+    m_dim: usize,
+    k_dim: usize,
+    nrhs: usize,
+) {
+    const MR: usize = 4;
+    const NR: usize = 8;
+    let m_main = m_dim - m_dim % MR;
+    let c_main = nrhs - nrhs % NR;
+
+    let mut m0 = 0;
+    while m0 < m_main {
+        // Four contiguous output rows, disjoint so they can be held
+        // mutably at once.
+        let block = &mut c_rows[m0 * nrhs..(m0 + MR) * nrhs];
+        let (r0, rest) = block.split_at_mut(nrhs);
+        let (r1, rest) = rest.split_at_mut(nrhs);
+        let (r2, r3) = rest.split_at_mut(nrhs);
+        let ab0 = a.base + m0 * a.row_stride;
+        let ab1 = a.base + (m0 + 1) * a.row_stride;
+        let ab2 = a.base + (m0 + 2) * a.row_stride;
+        let ab3 = a.base + (m0 + 3) * a.row_stride;
+
+        let mut c0 = 0;
+        while c0 < c_main {
+            let mut acc0 = [0.0f64; NR];
+            let mut acc1 = [0.0f64; NR];
+            let mut acc2 = [0.0f64; NR];
+            let mut acc3 = [0.0f64; NR];
+            acc0.copy_from_slice(&r0[c0..c0 + NR]);
+            acc1.copy_from_slice(&r1[c0..c0 + NR]);
+            acc2.copy_from_slice(&r2[c0..c0 + NR]);
+            acc3.copy_from_slice(&r3[c0..c0 + NR]);
+            let mut bb = [0.0f64; NR];
+            for k in 0..k_dim {
+                bb.copy_from_slice(&b_rows[k * nrhs + c0..k * nrhs + c0 + NR]);
+                let kc = k * a.col_stride;
+                let a0 = a.l[ab0 + kc];
+                let a1 = a.l[ab1 + kc];
+                let a2 = a.l[ab2 + kc];
+                let a3 = a.l[ab3 + kc];
+                for s in 0..NR {
+                    let bv = bb[s];
+                    acc0[s] -= a0 * bv;
+                    acc1[s] -= a1 * bv;
+                    acc2[s] -= a2 * bv;
+                    acc3[s] -= a3 * bv;
+                }
+            }
+            r0[c0..c0 + NR].copy_from_slice(&acc0);
+            r1[c0..c0 + NR].copy_from_slice(&acc1);
+            r2[c0..c0 + NR].copy_from_slice(&acc2);
+            r3[c0..c0 + NR].copy_from_slice(&acc3);
+            c0 += NR;
+        }
+        m0 += MR;
+    }
+
+    // Column tail (nrhs % NR) for the MR-tiled rows.
+    gemm_scalar_block(c_rows, a, b_rows, 0, m_main, c_main, nrhs, k_dim, nrhs);
+    // Row tail (m_dim % MR), full column range.
+    gemm_scalar_block(c_rows, a, b_rows, m_main, m_dim, 0, nrhs, k_dim, nrhs);
+}
+
+/// Scalar fallback for the GEMM tails: `C[m, c] -= sum_k A[m, k]·B[k, c]`
+/// over `m ∈ [m_lo, m_hi)`, `c ∈ [c_lo, c_hi)`. Accumulates per `(m, c)`
+/// in increasing `k` (left fold), matching the core kernel's order.
+#[allow(clippy::too_many_arguments)]
+fn gemm_scalar_block(
+    c_rows: &mut [f64],
+    a: &PanelBlock,
+    b_rows: &[f64],
+    m_lo: usize,
+    m_hi: usize,
+    c_lo: usize,
+    c_hi: usize,
+    k_dim: usize,
+    nrhs: usize,
+) {
+    for m in m_lo..m_hi {
+        let ab = a.base + m * a.row_stride;
+        let row = &mut c_rows[m * nrhs..(m + 1) * nrhs];
+        for c in c_lo..c_hi {
+            let mut sum = row[c];
+            for k in 0..k_dim {
+                sum -= a.l[ab + k * a.col_stride] * b_rows[k * nrhs + c];
+            }
+            row[c] = sum;
         }
     }
 }

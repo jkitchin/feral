@@ -1,0 +1,62 @@
+#+TITLE: FERAL Journal 2026-05-30-01
+#+STARTUP: showeverything
+
+* 11:05 :issue-57:multi-rhs:commit:
+Committed issue #57 fix #1 (row-major per-supernode `w` buffer) as
+80348f9. Pre-commit clippy caught a `print_literal` in the new
+`bench_multirhs.rs` header (positional `{}` with a string literal);
+inlined the literal per clippy's suggestion and recommitted clean.
+Cleared two stale April WIP stashes at jrk's request (Phase A2 /
+dense-kernel work, long superseded by v0.8.0).
+
+* 11:40 :issue-57:blas3:research:
+Wrote `dev/research/issue-57-blas3-panel.md` for fix #2. Design:
+per-supernode forward = TRSM(L_11) + GEMM(w_bot -= L_21 @ w_top),
+back = GEMM(w_top -= L_21^T @ w_bot) + TRSM(L_11^T). One MR×NR (4×8)
+register-tiled GEMM microkernel serves both, parameterised by a
+`PanelBlock` stride view so forward uses (row_stride=1, col_stride=nrow)
+and back uses (row_stride=nrow, col_stride=1) into the column-major
+`ff.l`. Threshold dispatch at nrhs≥32 keeps the IPM hot path on the
+bit-identical rank-1 kernels. Forward GEMM seeds the accumulator from
+the current C and reduces in increasing k → bit-identical to the
+cascade; back reorders panel-vs-trailing → ~κ·eps, inside the 1e-12
+gate. Added parity tests at nrhs ∈ {31,32,37,64} (oracle = pre-existing
+single-RHS `solve_sparse`).
+
+* 12:00 :issue-57:blas3:benchmark:surprise:
+First BLAS-3 measurement: ~3× on n=484 and n=2025 but n=1024
+*regressed* to ratio 1.0–1.22 (slower than looping single-RHS), stable
+across runs. Absolute BLAS-3 time at n=1024 (~38 µs/RHS) was higher
+than the larger n=2025 (~25) — a smaller problem taking longer. A loop
+reorder (c-block outer) did nothing. Diagnosis: the regression is the
+gather/scatter, not the GEMM. It reads the column-major `y` at
+`y[c*n + src]` — stride `n`. At n=1024 (power of two) consecutive RHS
+columns map to the same cache sets → conflict misses. And that
+transpose runs 3× per supernode, so it also caps every size.
+
+* 12:10 :issue-57:blas3:fix:layout:
+Flipped the internal `y` buffer to row-major (`y[node*nrhs + c]`).
+Gather/scatter become contiguous `copy_from_slice` memcpys; the only
+stride-`n` access moves to the one-time entry permute / exit unpermute.
+Shared by both the rank-1 and BLAS-3 paths; bit-identical (same values,
+different memory order). Result: n=1024 regression gone (ratio 1.2 →
+0.33) and wide-solve time ~halved everywhere. This was the real win,
+larger than the GEMM itself. Parity still ≤1.6e-15 at machine precision.
+
+* 12:14 :issue-57:blas3:fix:fuse:
+Fused forward-sub + D-block solve into one postorder pass. A node's
+eliminated rows (0..nelim) are final once its own forward-sub
+completes — ancestors' fronts contain its *separator* rows, never its
+eliminated rows — so D⁻¹ can be applied immediately and the second
+postorder gather/scatter round (old phase 2) dropped. Extracted the
+D-solve into `dsolve_node`. Parity unchanged (10/10, ≤1.6e-15). Modest
+additional speedup.
+
+Final per-RHS batched/looped ratios (idle, bench_multirhs, nrhs∈{64,256}):
+n=484 ~0.18–0.24 (~4–5×), n=1024 ~0.32–0.34 (~3×), n=2025 ~0.17–0.23
+(~5–6×). Lib tests 317 pass. Issue #57's 5–10× target (vs a dense GETRS
+reference) reached at n=2025; the residual gap is irreducible sparse
+overhead (tree traversal, gather/scatter, D-solve, permute). n=1024
+stays lowest — power-of-two front dims strain the strided column-major
+L access in the GEMM; packing L (BLIS-style) is the next lever if a
+workload demands it.

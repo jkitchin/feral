@@ -161,6 +161,68 @@ fn solve_many_large_matches_single_rhs() {
     assert!(max_diff < tol, "max |many - single| = {max_diff:.3e}");
 }
 
+/// Assert `solve_sparse_many` agrees with `k` independent single-RHS
+/// solves on `mat` for the given `nrhs`, to `1e-12`. Returns the
+/// observed max abs diff so callers can report it.
+fn assert_many_parity(mat: &CscMatrix, nrhs: usize, seed: u64) -> f64 {
+    let factors = factor_for(mat);
+    let n = mat.n;
+    let rhs_packed = xorshift_fill(n * nrhs, seed);
+
+    let x_many = solve_sparse_many(&factors, &rhs_packed, nrhs).unwrap();
+    assert_eq!(x_many.len(), n * nrhs);
+
+    let tol = 1e-12;
+    let mut max_diff = 0.0_f64;
+    for c in 0..nrhs {
+        let x_single = solve_sparse(&factors, &rhs_packed[c * n..(c + 1) * n]).unwrap();
+        for i in 0..n {
+            let diff = (x_many[c * n + i] - x_single[i]).abs();
+            max_diff = max_diff.max(diff);
+            assert!(
+                diff < tol,
+                "nrhs {nrhs} column {c} row {i}: many = {} vs single = {} (diff {diff:.3e})",
+                x_many[c * n + i],
+                x_single[i],
+            );
+        }
+    }
+    max_diff
+}
+
+#[test]
+fn solve_many_blas3_path_matches_single_rhs() {
+    // nrhs >= BLAS3_NRHS_THRESHOLD (32) routes through the register-blocked
+    // BLAS-3 panel kernels (issue #57 fix #2). The single-RHS path is the
+    // external oracle. nrhs values straddle the MR=4 / NR=8 microkernel
+    // tiling: 32 (both aligned), 37 (NR tail, prime), 64 (both aligned,
+    // two NR vectors). m=16 -> n=256 gives genuinely large frontal panels
+    // (large trailing blocks) so the GEMM microkernel is exercised, not
+    // just the panel TRSM.
+    let mat = laplacian_2d(16); // n = 256, SPD, multiple supernodes
+    for (i, &nrhs) in [32usize, 37, 64].iter().enumerate() {
+        let max_diff = assert_many_parity(&mat, nrhs, 0x9E37_79B9_7F4A_7C15 ^ (i as u64));
+        // Forward solve is bit-identical; back-sub reorders the panel vs
+        // trailing reduction, so a ~1e-15 (kappa*eps) drift is expected.
+        // Far below the 1e-12 gate; assert it is at least that small.
+        assert!(
+            max_diff < 1e-12,
+            "nrhs {nrhs}: max |many - single| = {max_diff:.3e}"
+        );
+    }
+}
+
+#[test]
+fn solve_many_blas3_threshold_boundary_matches_single_rhs() {
+    // Guard the dispatch boundary: nrhs = 31 (row-major path) and
+    // nrhs = 32 (BLAS-3 path) must both match the oracle. Catches an
+    // off-by-one in the threshold comparison.
+    let mat = laplacian_2d(12); // n = 144
+    for &nrhs in &[31usize, 32] {
+        let _ = assert_many_parity(&mat, nrhs, 0xD1B5_4A32_D192_ED03);
+    }
+}
+
 #[test]
 fn solve_many_nrhs_zero_is_empty() {
     let m = small_indef_matrix();

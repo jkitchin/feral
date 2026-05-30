@@ -4,6 +4,37 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — multi-RHS sparse solve: BLAS-3 panel kernels (#57 fix #2)
+
+Wide multi-RHS solves (`nrhs ≥ 32`) now run each supernode's
+forward/backward substitution as a register-blocked dense panel solve
+— a TRSM on the unit-lower triangle `L_11` plus a MR×NR (4×8)
+register-tiled GEMM on the trailing block `L_21` — instead of a rank-1
+cascade. Narrow solves (the IPM hot path) stay on the rank-1 kernels.
+
+Two supporting layout changes, both internal (no public API/ABI change,
+RHS/solution stay column-major `n × nrhs`):
+
+- The internal `y` working buffer is now **row-major**, so every
+  per-supernode gather/scatter is a contiguous memcpy instead of a
+  stride-`n` transpose. This removed a cache-conflict pathology on
+  power-of-two `n` (the n=1024 grid had regressed) and roughly halved
+  the wide-solve time across the board.
+- The forward substitution and D-block solve are **fused into one
+  postorder pass** (a node's eliminated rows are final once its
+  forward-sub completes), saving one gather/scatter round trip per
+  supernode.
+
+Forward substitution stays bit-identical to looping single-RHS;
+back-substitution differs only by floating-point reassociation
+(~κ·eps). The multi-RHS parity suite (`nrhs` up to 64, MR/NR tail
+sizes) verifies `max|many − single| < 1e-12` against the independent
+single-RHS oracle (observed ≤ 1.6e-15).
+
+Measured per-RHS speedup vs looping single-RHS, on 2-D Laplacians
+(`cargo run --release --bin bench_multirhs`, `nrhs ∈ {64, 256}`):
+n=484 ~4–5×, n=1024 ~3×, n=2025 ~5–6×.
+
 ### Changed — multi-RHS sparse solve: row-major working buffer (#57)
 
 The per-supernode working buffer in `solve_sparse_core_many_into` now
