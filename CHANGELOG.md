@@ -27,6 +27,14 @@ per-column loop (the solve runs the rank-1 kernels there); for
 residual target. Measured (`bench_multirhs`, 2-D Laplacians): batched
 refined is ~2.5–3× faster per RHS than the per-column refined loop.
 
+The common case (every column already at the target after the direct
+solve, i.e. ~0 correction steps) now returns before allocating the wide
+`best_x`/residual buffers — it allocates only the solution and a
+length-`n` scratch. Those three `n × nrhs` allocations were cheap in the
+native binary but cost ~50 µs/RHS under the Python process's allocator,
+masking the win through `Solver.solve_refined` on 2-D inputs; with them
+gone the Python refined path shows the full ~2–3× too.
+
 ### Changed — multi-RHS sparse solve: BLAS-3 panel kernels (#57 fix #2)
 
 Wide multi-RHS solves (`nrhs ≥ 32`) now run each supernode's

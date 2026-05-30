@@ -117,3 +117,24 @@ reframed the refined section to usage + accuracy + correctness
 (max|batched - per-column refined| == 0.0 at nrhs=64) and attribute the
 perf number to the native bench. Reinforces the follow-up priority:
 batched residual SpMV would help the residual-bound (0-step) regime.
+
+* 18:30 :issue-58:python:performance:fix:
+Found the 53us. The Python solve_refined(2-D) batched path was ~87us/RHS
+while the Rust solve_sparse_many_refined is ~31us (bench_multirhs 0.34-
+0.41). Isolated with a probe: the Rust Solver path (Auto scaling) is also
+~31us, so NOT the factor/scaling/binding-marshaling — the 2-D wrappers
+for solve and solve_refined are byte-identical and inner() is a cheap
+ref. Root cause: solve_sparse_many_refined allocated three n*nrhs Vecs up
+front (best_x.clone + r + r_act ~= 3MB/call). In the standalone Rust
+binary the allocator reuses freed blocks (cheap); under the Python
+process the ~1MB blocks hit mmap/page-faults each call (~50us). Fix:
+compute the initial residual into a length-n scratch and RETURN EARLY in
+the 0-correction-step common case, before allocating best_x/r_act; size
+r_act to the active set. Result: Python refined batch 87->30us (matches
+Rust), and the win now shows through Python: 2.86x at n=2025, and the
+notebook (n=1600 heat sources) shows refined batch 2.19x (nrhs=64) /
+2.49x (nrhs=256). Rust bench_multirhs unchanged (0.30-0.42, no
+regression). multi_rhs 13 pass (bit-identical band still ==0). The 1x
+was removable overhead, not a fundamental limit; the remaining un-batched
+cost is the per-column residual SpMV (the single-pass batched SpMV
+follow-up, relevant to dense Hessians).

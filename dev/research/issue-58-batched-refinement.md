@@ -116,9 +116,37 @@ Oracle = the pre-existing single-RHS `solve_sparse_refined`.
 5. Bench: refined batched per-RHS time approaches unrefined batched (the
    issue's regression closes); report measured numbers.
 
+## Results (2026-05-30)
+
+Implemented as designed; `cargo test --test multi_rhs` 13 pass including
+the exact bit-identical band (`max|batched − per-column| == 0` at
+nrhs=24 SPD and nrhs=20 indefinite). Rust `bench_multirhs`: refined
+batched/per-column ratio ~0.30–0.42 (~2.5–3×).
+
+**Allocation overhead found and fixed (the "53 µs").** A notebook
+showcase exposed that the *Python* `Solver.solve_refined(2-D)` path
+showed ~1× while the Rust API showed ~2.5×, on the same matrix, RHS,
+scaling, and with 0 correction steps. A probe ruled out the factor,
+scaling, and the pyo3 marshaling (the `solve`/`solve_refined` 2-D
+wrappers are byte-identical; `inner()` is a cheap reference). Root cause:
+`solve_sparse_many_refined` allocated three `n × nrhs` Vecs up front
+(`best_x.clone` + `r` + `r_act` ≈ 3 MB/call). Cheap in the standalone
+binary (allocator reuse), but ~50 µs/RHS under the Python process where
+~1 MB blocks hit `mmap`/page-faults each call.
+
+Fix: compute the initial residual into a length-`n` scratch, build the
+active set, and **return early before allocating the wide buffers** when
+no column needs refinement (the common case); size the gather buffer to
+the active set. Python refined batch dropped 87 → 30 µs/RHS (matching
+the Rust API), and the win now surfaces through Python: ~2.86× at
+n=2025, and ~2.2–2.5× in the heat-conduction notebook (n=1600). The 1×
+was removable overhead, not a fundamental limit.
+
 ## Out of scope / follow-ups
 
-- Single-pass batched SpMV for the residual (helps dense inputs only).
+- **Single-pass batched SpMV for the residual.** The per-column residual
+  is now the only un-batched cost; on dense Hessians (matvec ≈ solve) it
+  caps the speedup. This is the remaining lever.
 - Reusing one `SolveManyWorkspace` across refinement steps (compaction
-  changes `nrhs` per step, so each step currently allocates; refinement
-  is 1–2 steps in practice, so this is minor).
+  changes `nrhs` per step, so each step still allocates a workspace;
+  refinement is 1–2 steps in practice, so this is minor).

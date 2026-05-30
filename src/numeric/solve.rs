@@ -1210,31 +1210,40 @@ pub fn solve_sparse_many_refined(
 
     // Initial batched solve.
     let mut x = solve_sparse_many(factors, rhs, nrhs)?;
-    let mut best_x = x.clone();
     let mut best_rn = vec![0.0f64; nrhs];
     let mut bnorm = vec![0.0f64; nrhs];
-    let mut stagnant = vec![0usize; nrhs];
-    let mut r = vec![0.0f64; n * nrhs];
 
-    // Initial per-column residual r_c = b_c - A·x_c, and active set
-    // (columns not already at the target).
-    let mut active: Vec<usize> = Vec::with_capacity(nrhs);
+    // Initial per-column residual r_c = b_c - A·x_c into a small reused
+    // scratch; build the active set (columns not yet at the target). The
+    // wide per-call buffers (best_x, the residual gather buffer) are NOT
+    // allocated yet — the well-conditioned common case, where the direct
+    // solve already meets the target for every column, returns below
+    // having allocated only `x` and the length-`n` scratch. (Allocating
+    // three `n × nrhs` Vecs up front was ~50 µs/RHS of the Python
+    // `solve_refined` overhead, issue #58.)
+    let mut rc = vec![0.0f64; n];
+    let mut active: Vec<usize> = Vec::new();
     for c in 0..nrhs {
-        let col = c * n..(c + 1) * n;
-        matrix.symv(&x[col.clone()], &mut r[col.clone()]);
+        matrix.symv(&x[c * n..(c + 1) * n], &mut rc);
         for i in 0..n {
-            r[c * n + i] = rhs[c * n + i] - r[c * n + i];
+            rc[i] = rhs[c * n + i] - rc[i];
         }
-        bnorm[c] = norm2(&rhs[col.clone()]);
-        best_rn[c] = norm2(&r[col]);
+        bnorm[c] = norm2(&rhs[c * n..(c + 1) * n]);
+        best_rn[c] = norm2(&rc);
         if !relative_reached(best_rn[c], bnorm[c]) {
             active.push(c);
         }
     }
+    if active.is_empty() {
+        return Ok(x);
+    }
 
-    // Reused gather buffer for the active residual columns; only the
-    // leading `n * active.len()` is touched each step.
-    let mut r_act = vec![0.0f64; n * nrhs];
+    // Refinement is needed for at least one column.
+    let mut best_x = x.clone();
+    let mut stagnant = vec![0usize; nrhs];
+    // Gather buffer sized to the (shrinking) active set; the leading
+    // `n * active.len()` is used each step.
+    let mut r_act = vec![0.0f64; n * active.len()];
 
     for _step in 1..=max_steps {
         if active.is_empty() {
@@ -1242,9 +1251,13 @@ pub fn solve_sparse_many_refined(
         }
         let na = active.len();
 
-        // Gather active residual columns, batched-solve the correction.
+        // Residual of each active column → gather buffer, then
+        // batched-solve the correction over just the active columns.
         for (k, &c) in active.iter().enumerate() {
-            r_act[k * n..(k + 1) * n].copy_from_slice(&r[c * n..(c + 1) * n]);
+            matrix.symv(&x[c * n..(c + 1) * n], &mut r_act[k * n..(k + 1) * n]);
+            for i in 0..n {
+                r_act[k * n + i] = rhs[c * n + i] - r_act[k * n + i];
+            }
         }
         let dx = solve_sparse_many(factors, &r_act[..n * na], na)?;
 
@@ -1254,17 +1267,16 @@ pub fn solve_sparse_many_refined(
             for i in 0..n {
                 x[c * n + i] += dx[k * n + i];
             }
-            // Recompute residual r_c = b_c - A·x_c.
-            let col = c * n..(c + 1) * n;
-            matrix.symv(&x[col.clone()], &mut r[col.clone()]);
+            // Residual of the updated column.
+            matrix.symv(&x[c * n..(c + 1) * n], &mut rc);
             for i in 0..n {
-                r[c * n + i] = rhs[c * n + i] - r[c * n + i];
+                rc[i] = rhs[c * n + i] - rc[i];
             }
-            let rn = norm2(&r[col.clone()]);
+            let rn = norm2(&rc);
 
             if rn < best_rn[c] {
                 best_rn[c] = rn;
-                best_x[col.clone()].copy_from_slice(&x[col]);
+                best_x[c * n..(c + 1) * n].copy_from_slice(&x[c * n..(c + 1) * n]);
                 stagnant[c] = 0;
             } else {
                 stagnant[c] += 1;
