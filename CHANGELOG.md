@@ -4,6 +4,29 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — batched iterative refinement for wide multi-RHS solves (#58)
+
+`Solver::solve_many_refined` looped the single-RHS refiner per column,
+which bypassed the BLAS-3 panel kernel — so with refinement on (the
+default) batched multi-RHS solves were 3–7× slower per RHS than the
+unrefined batched path, and could be slower than looping single-RHS.
+
+Wide refined solves (`nrhs ≥ 16`) now refine through a batched loop:
+the initial and per-step correction solves go through `solve_sparse_many`
+(one panel solve over the still-active columns), and the residual is a
+per-column SpMV. Per-column best-iterate tracking and the convergence
+predicates (`ε·√n` relative target, 2-strike plateau, 100× divergence)
+are preserved exactly, and each step compacts the active columns so the
+batched path never does more solve work than the per-column loop. Narrow
+solves (`nrhs < 16`, e.g. the IPM predictor-corrector) keep the
+per-column loop unchanged.
+
+For `16 ≤ nrhs < 32` the batched result is bit-identical to the
+per-column loop (the solve runs the rank-1 kernels there); for
+`nrhs ≥ 32` it agrees with the per-column oracle to the refinement
+residual target. Measured (`bench_multirhs`, 2-D Laplacians): batched
+refined is ~2.5–3× faster per RHS than the per-column refined loop.
+
 ### Changed — multi-RHS sparse solve: BLAS-3 panel kernels (#57 fix #2)
 
 Wide multi-RHS solves (`nrhs ≥ 32`) now run each supernode's

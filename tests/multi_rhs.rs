@@ -224,6 +224,108 @@ fn solve_many_blas3_threshold_boundary_matches_single_rhs() {
 }
 
 #[test]
+fn solve_many_refined_band_16_31_is_bit_identical_to_per_column() {
+    // nrhs in [BLAS3_REFINE_THRESHOLD=16, BLAS3_NRHS_THRESHOLD=32): the
+    // batched refiner runs, but solve_sparse_many uses the rank-1 path
+    // (nrhs < 32), whose per-column output is bit-identical to the
+    // single-RHS solve. With the per-column convergence logic mirrored
+    // exactly, batched-refined must equal per-column single-RHS refined
+    // BIT-FOR-BIT. (issue #58)
+    use feral::numeric::solve::{solve_sparse_many_refined, solve_sparse_refined};
+
+    let mat = laplacian_2d(12); // n = 144, SPD, well-conditioned
+    let n = mat.n;
+    let nrhs = 24;
+    let factors = factor_for(&mat);
+    let rhs = xorshift_fill(n * nrhs, 0x243F_6A88_85A3_08D3);
+
+    let x_batched = solve_sparse_many_refined(&mat, &factors, &rhs, nrhs).unwrap();
+
+    let mut max_diff = 0.0f64;
+    for c in 0..nrhs {
+        let x_single = solve_sparse_refined(&mat, &factors, &rhs[c * n..(c + 1) * n]).unwrap();
+        for i in 0..n {
+            max_diff = max_diff.max((x_batched[c * n + i] - x_single[i]).abs());
+        }
+    }
+    // Bit-identical: not merely "close". Tolerance is exact zero.
+    assert_eq!(max_diff, 0.0, "max |batched - per-column| = {max_diff:.3e}");
+}
+
+#[test]
+fn solve_many_refined_indef_band_is_bit_identical_to_per_column() {
+    // Same bit-identical guarantee on a small indefinite matrix (n=5),
+    // exercising 2x2 pivots and a non-SPD inertia in the refined batched
+    // path. nrhs=20 is in the rank-1 band.
+    use feral::numeric::solve::{solve_sparse_many_refined, solve_sparse_refined};
+
+    let mat = small_indef_matrix();
+    let n = mat.n;
+    let nrhs = 20;
+    let factors = factor_for(&mat);
+    let rhs = xorshift_fill(n * nrhs, 0xB7E1_5162_8AED_2A6B);
+
+    let x_batched = solve_sparse_many_refined(&mat, &factors, &rhs, nrhs).unwrap();
+    let mut max_diff = 0.0f64;
+    for c in 0..nrhs {
+        let x_single = solve_sparse_refined(&mat, &factors, &rhs[c * n..(c + 1) * n]).unwrap();
+        for i in 0..n {
+            max_diff = max_diff.max((x_batched[c * n + i] - x_single[i]).abs());
+        }
+    }
+    assert_eq!(max_diff, 0.0, "max |batched - per-column| = {max_diff:.3e}");
+}
+
+#[test]
+fn solve_many_refined_panel_band_matches_oracle_and_residual() {
+    // nrhs >= 32 routes the batched refiner through the BLAS-3 panel
+    // kernel, whose back-sub differs from single-RHS by float
+    // reassociation (~kappa*eps). Both refine to the same residual
+    // target, so the batched-refined solution (a) matches the per-column
+    // oracle closely and (b) has a small per-column residual. (issue #58)
+    use feral::numeric::solve::{solve_sparse_many_refined, solve_sparse_refined};
+
+    let mat = laplacian_2d(12); // n = 144
+    let n = mat.n;
+    let nrhs = 64;
+    let factors = factor_for(&mat);
+    let rhs = xorshift_fill(n * nrhs, 0x2545_F491_4F6C_DD1D);
+
+    let x_batched = solve_sparse_many_refined(&mat, &factors, &rhs, nrhs).unwrap();
+
+    let mut max_diff = 0.0f64;
+    let mut max_rel_res = 0.0f64;
+    let mut ax = vec![0.0f64; n];
+    for c in 0..nrhs {
+        let xb = &x_batched[c * n..(c + 1) * n];
+        let b = &rhs[c * n..(c + 1) * n];
+        // (a) agreement with the independent single-RHS refined oracle.
+        let x_single = solve_sparse_refined(&mat, &factors, b).unwrap();
+        for i in 0..n {
+            max_diff = max_diff.max((xb[i] - x_single[i]).abs());
+        }
+        // (b) the batched-refined residual ||b - A x|| / ||b|| is small.
+        mat.symv(xb, &mut ax);
+        let mut rn = 0.0f64;
+        let mut bn = 0.0f64;
+        for i in 0..n {
+            let ri = b[i] - ax[i];
+            rn += ri * ri;
+            bn += b[i] * b[i];
+        }
+        let rel = (rn.sqrt()) / (bn.sqrt().max(1e-300));
+        max_rel_res = max_rel_res.max(rel);
+    }
+    // Well-conditioned (kappa ~ O(n)); both paths converge to the same
+    // residual target, so they agree far inside this bound.
+    assert!(max_diff < 1e-10, "max |batched - oracle| = {max_diff:.3e}");
+    assert!(
+        max_rel_res < 1e-10,
+        "max relative residual = {max_rel_res:.3e}"
+    );
+}
+
+#[test]
 fn solve_many_nrhs_zero_is_empty() {
     let m = small_indef_matrix();
     let factors = factor_for(&m);

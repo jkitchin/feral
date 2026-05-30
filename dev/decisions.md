@@ -4879,3 +4879,57 @@ the next lever, most relevant to power-of-two front dimensions
 - `dev/research/issue-57-multirhs-row-major.md` — fix #1 (row-major `w`).
 - `dev/journal/2026-05-30-01.org` — real-time work log.
 - Issue #57 — original report (column-major layout, 5–10× target).
+
+## 2026-05-30 — Batched iterative refinement for the multi-RHS solve (#58)
+
+**Context.** Issue #57 fix #2 added BLAS-3 panel kernels to
+`solve_sparse_many`, but `Solver::solve_many_refined` looped the
+single-RHS `solve_sparse_refined` per column, so refinement (on by
+default) never reached the panel kernel — batched refined was 3–7×
+slower per RHS than unrefined batched.
+
+**Decision 1 — batch the refinement loop.** New
+`solve_sparse_many_refined` (numeric/solve.rs): the initial and per-step
+correction solves go through `solve_sparse_many` over the active columns;
+the residual is a per-column `CscMatrix::symv`. ~2.5–3× faster per RHS
+than the per-column loop (`bench_multirhs`).
+
+**Decision 2 — preserve per-column best-iterate, not a global-norm
+loop.** The issue's sketch used a single global residual norm and one
+break. We instead keep per-column best-iterate + per-column done-
+tracking with the *same* predicates as the single-RHS refiner
+(`max_steps=10`, 2-strike plateau, `ε·√n` relative target, 100×
+divergence). Rationale: best-iterate is a correctness guard — on
+near-singular columns refinement can amplify error, and a global loop
+would keep adding `dX` to already-converged columns, risking an accuracy
+regression. Preserving it per column means no column can come out worse
+than its unrefined solve.
+
+**Decision 3 — active-column compaction each step.** Each refinement step
+gathers only the un-converged columns into the batched solve. This bounds
+the batched path at ≤ the per-column work even for heterogeneous
+convergence (most columns done in 1 step, a few needing 10), where
+solving the full batch every step would otherwise regress.
+
+**Decision 4 — threshold dispatch at `BLAS3_REFINE_THRESHOLD = 16`.**
+`nrhs < 16` keeps the literal per-column loop (the IPM predictor-
+corrector, `nrhs = 2`, and other narrow refined solves stay on the
+proven, bit-identical path). 16 (below the 32 panel crossover) because
+the batched *solve* amortizes from ~16, and the batched refiner is
+provably bit-identical to the per-column loop for `16 ≤ nrhs < 32` (the
+rank-1 solve is bit-identical per column there), so there is no accuracy
+risk in that band.
+
+**Rejected.** Global-norm refinement loop (drops per-column best-iterate
+— accuracy regression risk on near-singular columns). No compaction
+(heterogeneous-convergence perf regression). Single-pass batched SpMV for
+the residual (deferred — helps dense inputs only; per-column symv is
+cache-friendly and reuses tested code).
+
+**Measured.** Bit-identical band verified (`max|batched − per-column| ==
+0` at nrhs=24 SPD and nrhs=20 indefinite). Panel band (nrhs=64) matches
+the oracle to ≤1e-15 with per-column relative residual ≤1e-15. Lib 317
+pass; bench_multirhs refined ratio ~0.34–0.40.
+
+**References.** `dev/research/issue-58-batched-refinement.md`,
+`dev/journal/2026-05-30-01.org`, issue #58.

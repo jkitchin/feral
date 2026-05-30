@@ -17,7 +17,10 @@ use crate::numeric::factorize::{
     factorize_multifrontal_parallel_with_workspace, factorize_multifrontal_with_workspace,
     FactorWorkspace, NumericParams, ProfileReport, Profiler, SparseFactors,
 };
-use crate::numeric::solve::{solve_sparse, solve_sparse_many, solve_sparse_refined};
+use crate::numeric::solve::{
+    solve_sparse, solve_sparse_many, solve_sparse_many_refined, solve_sparse_refined,
+    BLAS3_REFINE_THRESHOLD,
+};
 use crate::scaling::{
     mc64_value_bound_passes, pick_scaling_strategy, precompute_mc64_validity, Mc64CacheValidity,
     ScalingStrategy,
@@ -1264,6 +1267,12 @@ impl Solver {
                 expected: n * nrhs,
                 got: rhs.len(),
             });
+        }
+        // Wide solves refine through the batched panel kernel (issue
+        // #58); narrow solves (the IPM predictor-corrector, nrhs = 2)
+        // keep the proven per-column loop, bit-identical.
+        if nrhs >= BLAS3_REFINE_THRESHOLD {
+            return solve_sparse_many_refined(matrix, factors, rhs, nrhs);
         }
         let mut out = vec![0.0; n * nrhs];
         for c in 0..nrhs {

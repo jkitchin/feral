@@ -16,6 +16,18 @@ use crate::sparse::csc::CscMatrix;
 /// setup. See `dev/research/issue-57-blas3-panel.md`.
 const BLAS3_NRHS_THRESHOLD: usize = 32;
 
+/// Multi-RHS refinement dispatch crossover (issue #58). At or above this
+/// `nrhs`, `Solver::solve_many_refined` refines through the batched
+/// `solve_sparse_many_refined` (one panel solve per refinement step over
+/// the still-active columns) instead of looping the single-RHS refiner
+/// per column. Below it, the per-column loop runs — keeping the IPM
+/// predictor-corrector (`nrhs = 2`) and other narrow refined solves on
+/// the proven, bit-identical path. 16 captures the batched-solve
+/// amortization (it begins below the 32 panel-kernel crossover) while
+/// staying provably bit-identical to the per-column loop for
+/// `16 ≤ nrhs < 32`. See `dev/research/issue-58-batched-refinement.md`.
+pub(crate) const BLAS3_REFINE_THRESHOLD: usize = 16;
+
 /// Solve A·x = b using the sparse multifrontal factorization.
 ///
 /// Three phases matching the multifrontal factorization:
@@ -1151,6 +1163,126 @@ fn solve_sparse_refined_core(
         None
     };
     Ok((best_x, diag))
+}
+
+/// Multi-RHS solve with per-column iterative refinement, batched through
+/// the panel kernel (issue #58). The initial and per-step correction
+/// solves go through `solve_sparse_many` — one batched solve over the
+/// still-active columns — instead of `nrhs` single-RHS solves, so wide
+/// refined solves reach the BLAS-3 panel kernel that fix #2 added.
+///
+/// The per-column convergence logic mirrors `solve_sparse_refined_core`
+/// exactly (same `max_steps`, 2-strike plateau, `ε·√n` relative target,
+/// 100× divergence guard, and per-column best-iterate). Each step
+/// **compacts** the active (un-converged) columns into the batched
+/// solve, so the work never exceeds the per-column loop. `rhs` is
+/// column-major `n × nrhs`; the column-major best-iterate solution is
+/// returned. See `dev/research/issue-58-batched-refinement.md`.
+pub fn solve_sparse_many_refined(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+    nrhs: usize,
+) -> Result<Vec<f64>, FeralError> {
+    let n = factors.n;
+    if rhs.len() != n * nrhs {
+        return Err(FeralError::DimensionMismatch {
+            expected: n * nrhs,
+            got: rhs.len(),
+        });
+    }
+    if nrhs == 0 || n == 0 {
+        return Ok(vec![0.0; n * nrhs]);
+    }
+
+    // Same constants as the single-RHS refiner (solve_sparse_refined_core).
+    let max_steps = 10;
+    let max_stagnant_steps = 2;
+    let threshold = f64::EPSILON * (n as f64).sqrt();
+    let divergence_factor = 100.0;
+    let relative_reached = |r_norm: f64, b_norm: f64| -> bool {
+        if b_norm > 0.0 {
+            r_norm < threshold * b_norm
+        } else {
+            r_norm < threshold
+        }
+    };
+
+    // Initial batched solve.
+    let mut x = solve_sparse_many(factors, rhs, nrhs)?;
+    let mut best_x = x.clone();
+    let mut best_rn = vec![0.0f64; nrhs];
+    let mut bnorm = vec![0.0f64; nrhs];
+    let mut stagnant = vec![0usize; nrhs];
+    let mut r = vec![0.0f64; n * nrhs];
+
+    // Initial per-column residual r_c = b_c - A·x_c, and active set
+    // (columns not already at the target).
+    let mut active: Vec<usize> = Vec::with_capacity(nrhs);
+    for c in 0..nrhs {
+        let col = c * n..(c + 1) * n;
+        matrix.symv(&x[col.clone()], &mut r[col.clone()]);
+        for i in 0..n {
+            r[c * n + i] = rhs[c * n + i] - r[c * n + i];
+        }
+        bnorm[c] = norm2(&rhs[col.clone()]);
+        best_rn[c] = norm2(&r[col]);
+        if !relative_reached(best_rn[c], bnorm[c]) {
+            active.push(c);
+        }
+    }
+
+    // Reused gather buffer for the active residual columns; only the
+    // leading `n * active.len()` is touched each step.
+    let mut r_act = vec![0.0f64; n * nrhs];
+
+    for _step in 1..=max_steps {
+        if active.is_empty() {
+            break;
+        }
+        let na = active.len();
+
+        // Gather active residual columns, batched-solve the correction.
+        for (k, &c) in active.iter().enumerate() {
+            r_act[k * n..(k + 1) * n].copy_from_slice(&r[c * n..(c + 1) * n]);
+        }
+        let dx = solve_sparse_many(factors, &r_act[..n * na], na)?;
+
+        let mut still: Vec<usize> = Vec::with_capacity(na);
+        for (k, &c) in active.iter().enumerate() {
+            // x_c += dx_k
+            for i in 0..n {
+                x[c * n + i] += dx[k * n + i];
+            }
+            // Recompute residual r_c = b_c - A·x_c.
+            let col = c * n..(c + 1) * n;
+            matrix.symv(&x[col.clone()], &mut r[col.clone()]);
+            for i in 0..n {
+                r[c * n + i] = rhs[c * n + i] - r[c * n + i];
+            }
+            let rn = norm2(&r[col.clone()]);
+
+            if rn < best_rn[c] {
+                best_rn[c] = rn;
+                best_x[col.clone()].copy_from_slice(&x[col]);
+                stagnant[c] = 0;
+            } else {
+                stagnant[c] += 1;
+            }
+
+            // Stop this column on convergence, divergence, or plateau —
+            // identical predicates to the single-RHS refiner.
+            let done = relative_reached(best_rn[c], bnorm[c])
+                || rn > best_rn[c] * divergence_factor
+                || stagnant[c] >= max_stagnant_steps;
+            if !done {
+                still.push(c);
+            }
+        }
+        active = still;
+    }
+
+    Ok(best_x)
 }
 
 fn norm2(v: &[f64]) -> f64 {

@@ -13,7 +13,9 @@
 //! is caught immediately. Dependency-free (no BLAS, no rng crate).
 
 use feral::numeric::factorize::{factorize_multifrontal, NumericParams};
-use feral::numeric::solve::{solve_sparse, solve_sparse_many};
+use feral::numeric::solve::{
+    solve_sparse, solve_sparse_many, solve_sparse_many_refined, solve_sparse_refined,
+};
 use feral::sparse::csc::CscMatrix;
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use std::time::Instant;
@@ -128,6 +130,81 @@ fn main() {
             println!(
                 "{:>6} {:>6} {:>6} {:>14.3} {:>14.3} {:>8.3}   {:.3e}",
                 n, nrhs, reps, single_us, many_us, ratio, max_abs
+            );
+        }
+    }
+
+    // --- Refined path (issue #58) -------------------------------------
+    // Compare the OLD per-column refined behavior (loop
+    // `solve_sparse_refined`) against the NEW batched
+    // `solve_sparse_many_refined`. With refinement on, the old path
+    // bypassed the panel kernel entirely.
+    println!();
+    println!(
+        "{:>6} {:>6} {:>6} {:>14} {:>14} {:>8}   max|batch-loop|",
+        "n", "nrhs", "reps", "loop us/RHS", "batch us/RHS", "ratio"
+    );
+    for &g in &grids {
+        let n = g * g;
+        let m = build_laplacian_2d(g);
+        let sym = symbolic_factorize(&m, &SupernodeParams::default()).expect("symbolic");
+        let (factors, _) =
+            factorize_multifrontal(&m, &sym, &NumericParams::default()).expect("numeric");
+
+        for &nrhs in &nrhs_list {
+            let rhs = make_rhs(n, nrhs);
+            let reps = if n <= 600 {
+                10
+            } else if n <= 1200 {
+                4
+            } else {
+                2
+            };
+
+            // Correctness vs the per-column refined oracle.
+            let batch_x =
+                solve_sparse_many_refined(&m, &factors, &rhs, nrhs).expect("batch refine");
+            let mut max_abs = 0.0f64;
+            for c in 0..nrhs {
+                let single =
+                    solve_sparse_refined(&m, &factors, &rhs[c * n..(c + 1) * n]).expect("refine");
+                for i in 0..n {
+                    max_abs = max_abs.max((single[i] - batch_x[c * n + i]).abs());
+                }
+            }
+
+            // (a) Looped per-column refined solves (the old behavior).
+            let mut loop_sink = 0.0f64;
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                for c in 0..nrhs {
+                    let x = solve_sparse_refined(&m, &factors, &rhs[c * n..(c + 1) * n])
+                        .expect("refine");
+                    loop_sink += x[0];
+                }
+            }
+            let loop_total = t0.elapsed();
+
+            // (b) One batched refined solve.
+            let mut batch_sink = 0.0f64;
+            let t1 = Instant::now();
+            for _ in 0..reps {
+                let x = solve_sparse_many_refined(&m, &factors, &rhs, nrhs).expect("batch refine");
+                batch_sink += x[0];
+            }
+            let batch_total = t1.elapsed();
+
+            if loop_sink == f64::INFINITY || batch_sink == f64::INFINITY {
+                println!("(unreachable sink guard)");
+            }
+
+            let total_rhs = (reps * nrhs) as f64;
+            let loop_us = loop_total.as_secs_f64() * 1e6 / total_rhs;
+            let batch_us = batch_total.as_secs_f64() * 1e6 / total_rhs;
+            let ratio = batch_us / loop_us;
+            println!(
+                "{:>6} {:>6} {:>6} {:>14.3} {:>14.3} {:>8.3}   {:.3e}",
+                n, nrhs, reps, loop_us, batch_us, ratio, max_abs
             );
         }
     }

@@ -86,3 +86,17 @@ source). Ran the citation-verifier skill: 13 DOIs via CrossRef (all
 titles/years/authors match), Ruiz 2001 RAL URL (HTTP 200 application/pdf),
 George & Liu 1981 ISBN (OpenLibrary) — 15/15 valid, none hallucinated.
 Commit 401486e.
+
+* 16:30 :issue-58:multi-rhs:refinement:
+solve_many_refined looped single-RHS solve_sparse_refined per column →
+bypassed the #57 fix-#2 panel kernel; refined batched was 3-7x slower
+per RHS (issue #58). Implemented solve_sparse_many_refined: batched
+initial + per-step correction via solve_sparse_many over active columns,
+per-column symv residual, per-column best-iterate + done tracking
+(identical predicates to the single-RHS refiner), active-column
+compaction each step. Threshold dispatch BLAS3_REFINE_THRESHOLD=16
+(narrow stays per-column, bit-identical). Tests: max|batched -
+per-column|==0 at nrhs=24 (SPD) and nrhs=20 (indef) — exact bit-identical
+in the rank-1 band; nrhs=64 matches oracle <1e-10 + residual <1e-10.
+Lib 317 pass. bench_multirhs refined: batched/loop ratio 0.34-0.40
+(~2.5-3x faster), max|batch-loop| ~6.6e-16.
