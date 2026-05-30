@@ -60,3 +60,29 @@ overhead (tree traversal, gather/scatter, D-solve, permute). n=1024
 stays lowest — power-of-two front dims strain the strided column-major
 L access in the GEMM; packing L (BLIS-style) is the next lever if a
 workload demands it.
+
+* 13:30 :python:notebooks:docs:
+Confirmed the Python `Solver.solve` 2-D path already routes to
+`solve_many` (python/src/lib.rs ~640), so fix #2's speedup flows through
+with no API change. Rewrote `02_multi_rhs_batched` around a steady-state
+heat-conduction sweep (motivation + correctness + viz + timing). Built
+feral with `maturin develop --release` and executed all 4 notebooks via
+nbconvert: clean. nb02 numbers — batched==single to 8.9e-15, residual
+2.1e-14, speedup 3.61× (nrhs=64) / 3.05× (nrhs=256) at n=1600. Committed
+8908d32.
+
+* 14:30 :docs:book:
+mdBook completeness pass. Found the only code example was broken:
+`SymmetricMatrix::from_dense_lower` (real method is `from_lower_triangle`)
+and `let factors = factor(...)?` though `factor -> (Factors, Inertia)`;
+version pinned 0.7. Fixed getting-started (sparse Solver + multi-RHS +
+refinement + correct dense), added a Python bindings page, intro
+capability list. Commit 0fcb010.
+
+* 15:30 :docs:book:citations:
+Wrote Scaling and Fill-reducing ordering chapters against the verified
+public API (ScalingStrategy / OrderingMethod variants confirmed in
+source). Ran the citation-verifier skill: 13 DOIs via CrossRef (all
+titles/years/authors match), Ruiz 2001 RAL URL (HTTP 200 application/pdf),
+George & Liu 1981 ISBN (OpenLibrary) — 15/15 valid, none hallucinated.
+Commit 401486e.

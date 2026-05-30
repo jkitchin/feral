@@ -2171,3 +2171,31 @@ closed.
 **Lesson.** "Provably dead" requires grepping *all* consumers of the
 buffer, not the one obvious algorithmic reader. Diagnostic and test
 binaries that bit-compare whole buffers make "never read" false.
+
+## 2026-05-30 — Multi-RHS BLAS-3 GEMM loop reorder (c-block outer) — no effect, reverted (#57)
+
+While implementing the issue #57 fix #2 BLAS-3 panel kernel, the first
+draft of `gemm_panel_minus` tiled with the **row tile (MR) outer,
+column block (NR) inner**. The n=1024 grid regressed (batched slower
+than looping). Hypothesis: the m-outer order re-streams the large
+`B` panel (`k_dim × nrhs`) `m_dim/MR` times, and swapping to
+**c-block outer / m-tile inner** would keep a small `B`-block
+L1-resident and cut the dominant re-streaming by the factor `NR/MR = 2`.
+
+Tried the swap. **Measured: no improvement.** n=1024 stayed at ratio
+~1.0–1.2 (still a regression), and n=484/2025 were within noise of the
+m-outer order. The loop order was not the bottleneck at these sizes.
+
+Reverted to the simpler m-outer kernel (the comment claiming the swap
+fixed n=1024 would have been false). The actual n=1024 cause was the
+**stride-`n` gather/scatter** reading the column-major `y` — power-of-
+two `n` aliased RHS columns into the same cache sets. Flipping the
+internal `y` buffer to row-major (contiguous memcpy gather/scatter)
+fixed it (ratio 1.2 → 0.33) and ~halved wide-solve time everywhere.
+See `dev/research/issue-57-blas3-panel.md` Results and the
+`dev/decisions.md` 2026-05-30 entry.
+
+**Lesson.** Diagnose the bottleneck before micro-optimizing the kernel:
+the transpose in the gather/scatter dominated, not the GEMM's operand
+re-streaming. A loop-order change to the GEMM was wasted motion until
+the layout (row-major `y`) was fixed.

@@ -1,80 +1,80 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-29T10:32:44Z
+Generated: 2026-05-30T17:03:49Z
 
 ## Latest Session
-File: dev/sessions/2026-05-29-01.md
+File: dev/sessions/2026-05-30-01.md
 ```
-# Session 2026-05-29-01
+# Session 2026-05-30-01
 
 ## Goal
 
-Ship v0.8.0. Earlier attempt (commit 79d9e91 on 2026-05-28) was tagged
-and pushed but reverted (commit 462256f) after the stress-smoke gate
-went red on four synthetic borderline matrices. Resume by retiring
-those matrices from the corpus, re-bump, re-tag, and publish.
+Commit the in-progress issue #57 fix #1 (row-major `w` for the multi-RHS
+solve), then **finish the BLAS-3 implementation** (issue #57 fix #2) to
+reach the 5–10× per-RHS regime. Then, on request: surface the work in
+the Python interface and a motivating performance notebook, and do a
+completeness pass over the mdBook (including new Scaling and Ordering
+chapters with verified citations).
+
+## Benchmark Results
+
+**Unfavorable note (per the hard rule):** the **factor** benchmark's
+dense p90 ratios drifted up vs the previous session — small-frontal
+1.29 → 1.34, medium 1.67 → 1.74. This session changed **only the solve
+path** (`solve_sparse_core_many_into`), not factorization, so this is
+machine/measurement noise, not a regression. All gates still PASS.
+
+`cargo run --bin bench --release` (factor ratio vs MUMPS):
+
+```
+--- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     147982     1.34     <= 2.0     PASS
+medium (<500)            152145     1.74     <= 3.0     PASS
+
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.50     <= 2.0     PASS
+medium (<500)            153560     1.50     <= 3.0     PASS
+
+Top worst factor-ratio vs MUMPS: KIRBY2_0007 n=458 ratio 8.76,
+CRESC132_0000 n=5314 ratio 6.63, MUONSINE_0000 n=1537 ratio 5.63.
+```
+
+**The session's actual performance story** is the multi-RHS solve
+(`cargo run --release --bin bench_multirhs`, 2-D Laplacians, idle
+machine, per-RHS batched/looped ratio at nrhs ∈ {64, 256}):
+
+| n    | ratio        | speedup | before fix #2 (row-major w only) |
+|------|--------------|---------|----------------------------------|
+| 484  | 0.18–0.24    | ~4–5×   | ~0.34                            |
+| 1024 | 0.32–0.34    | ~3×     | ~1.0–1.2 (REGRESSION)            |
+| 2025 | 0.17–0.23    | ~5–6×   | ~0.35                            |
+
+Parity vs single-RHS oracle: `max|many − single| ≤ 1.6e-15` (machine
+precision; 1e-12 gate, tolerance untouched).
 
 ## Accomplished
-
-**Stress corpus trim → release prep → v0.8.0 published.**
-
-1. **Removed 4 synthetic rank-deficient stress-corpus matrices**
-   (`rankdef_10_3`, `rankdef_50_5`, `rankdef_exact_50_5`,
-   `stokes_q1p0_8`). Issue #54's SSIDS-aligned strict-zero routing
-   made feral report `inertia.zero = 1` on all four — contradicting
-   MUMPS, SSIDS, *and* MA57 simultaneously. No 3-of-4-oracle
-   consensus exists, so they belong in the `excluded` bucket per
-   the corpus consensus framework. Allowlisting was rejected
-   (erodes gate credibility); narrowing #54's `zero_tol` was
-   rejected (would reopen the 600 s IPM δ-cascade stall on
-   `nuffield2_trap_iter1.mtx` that motivated #54). Removal touched
-   `manifest.tsv`, `oracles.json`, `synth.py`, `.gitignore`,
-   `report.py` (ALLOWLIST comment), `README.md`, `.github/workflows/ci.yml`
-   (fixture-loading comment), `src/bin/probe_f01.rs` (F-01 probe
-   targets), plus `git rm` on three tracked `.mtx` files. Commit
-   `55ae808`. Full rationale appended to `dev/decisions.md`
-   (2026-05-28 entry).
-
-2. **CI green on 55ae808** — all three workflows (CI, Pages,
-   Python wheels) including stress-smoke. Local `report.py`:
-   `total 121: ok=65, flagged=0, missing=56, other=0`, exit 0.
-   `cargo test --release --lib`: 317 passed.
-
-3. **Re-bumped to v0.8.0** via `scripts/release-checklist.sh bump
-   0.8.0` — six version locations + CHANGELOG `## [0.8.0] - 2026-05-29`
-   stamp. Commit `6088078`. CLAUDE.md test-rerun exception applied
-   (version-string-only diff vs 55ae808 green CI).
-
-4. **Tagged v0.8.0** at 6088078, pushed main + tag. All three
-   workflows green on 6088078.
-
-5. **`gh release create v0.8.0`** at 01:40Z. Both release-triggered
-   workflows green:
-   - `Release` (release.yml) → crates.io: 7 crates published,
-     `feral` 0.8.0 verified live.
-   - `Python wheels` (python-wheels.yml) → PyPI:
-     `feral-solver` 0.8.0 verified live.
-
 ```
 
 ## Git Status
 ```
-6088078 release: v0.8.0
-55ae808 stress: drop 4 synthetic rank-deficient matrices from corpus
-462256f revert: defer v0.8.0 release — stress-smoke gate red on #54
-79d9e91 release: v0.8.0
-b007e41 session: 2026-05-28-01 checkpoint (issue #56 Levers B+C shipped, merged to main)
+401486e docs(book): add Scaling and Fill-reducing ordering chapters
+0fcb010 docs(book): complete the mdBook — fix stale examples, add sparse/multi-RHS/Python (#57)
+8908d32 docs(python): add example notebooks; motivate multi-RHS perf demo (#57)
+9c2c716 perf(solve): BLAS-3 panel kernels + row-major y for wide multi-RHS (#57 fix #2)
+80348f9 perf(solve): row-major working buffer for multi-RHS sparse solve (#57)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test scaling::tests::auto_falls_back_to_infnorm_on_mss1_0009 ... ok
 test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
@@ -86,101 +86,104 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 
-test result: ok. 317 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.42s
+test result: ok. 317 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.40s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-29-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-30-01.md)
 
 
-`cargo run --bin bench --release` (n=200 Thomson, dense + sparse
-phase 2.8.1 exit partitions):
+**Unfavorable note (per the hard rule):** the **factor** benchmark's
+dense p90 ratios drifted up vs the previous session — small-frontal
+1.29 → 1.34, medium 1.67 → 1.74. This session changed **only the solve
+path** (`solve_sparse_core_many_into`), not factorization, so this is
+machine/measurement noise, not a regression. All gates still PASS.
+
+`cargo run --bin bench --release` (factor ratio vs MUMPS):
 
 --- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.29     <= 2.0     PASS
-medium (<500)            152145     1.67     <= 3.0     PASS
+small-frontal (<200)     147982     1.34     <= 2.0     PASS
+medium (<500)            152145     1.74     <= 3.0     PASS
 
 --- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
 bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.51     <= 2.0     PASS
-medium (<500)            153560     1.52     <= 3.0     PASS
+small-frontal (<200)     153455     1.50     <= 2.0     PASS
+medium (<500)            153560     1.50     <= 3.0     PASS
 
-Top 10 worst factor-ratio vs MUMPS:
-KIRBY2_0007    n=458   1015μs  vs MUMPS 119μs   ratio 8.53
-KIRBY2_0006    n=458    935μs  vs MUMPS 127μs   ratio 7.36
-KIRBY2_0008    n=458    863μs  vs MUMPS 122μs   ratio 7.07
-CRESC132_0000  n=5314 83161μs  vs MUMPS 12266μs ratio 6.78
-KIRBY2_0009    n=458    793μs  vs MUMPS 128μs   ratio 6.20
-KIRBY2_0010    n=458    756μs  vs MUMPS 133μs   ratio 5.68
-MUONSINE_0000  n=1537  2104μs  vs MUMPS 376μs   ratio 5.60
-KIRBY2_0011    n=458    583μs  vs MUMPS 120μs   ratio 4.86
-GROUPING_0073  n=225    513μs  vs MUMPS 116μs   ratio 4.42
-GROUPING_0031  n=225    445μs  vs MUMPS 109μs   ratio 4.08
+Top worst factor-ratio vs MUMPS: KIRBY2_0007 n=458 ratio 8.76,
+CRESC132_0000 n=5314 ratio 6.63, MUONSINE_0000 n=1537 ratio 5.63.
 
-Phase 2.8.1 partition gates all PASS on both dense and sparse paths.
-KIRBY2 family worst-case sparse outlier improved from 10.25× (pre-#56)
-→ 8.53× post-#56 levers, vs prior session's 7.97× — small regression
-in the absolute top number (may be variance; same data partition all
-PASS). No action this session.
+**The session's actual performance story** is the multi-RHS solve
+(`cargo run --release --bin bench_multirhs`, 2-D Laplacians, idle
+machine, per-RHS batched/looped ratio at nrhs ∈ {64, 256}):
+
+| n    | ratio        | speedup | before fix #2 (row-major w only) |
+|------|--------------|---------|----------------------------------|
+| 484  | 0.18–0.24    | ~4–5×   | ~0.34                            |
+| 1024 | 0.32–0.34    | ~3×     | ~1.0–1.2 (REGRESSION)            |
+| 2025 | 0.17–0.23    | ~5–6×   | ~0.35                            |
+
+Parity vs single-RHS oracle: `max|many − single| ≤ 1.6e-15` (machine
+precision; 1e-12 gate, tolerance untouched).
 
 ```
 
 ## Recent Decisions
-regime via `rankdef_5_2`, `rankdef_200_20`, `rankdef_exact_100_10`,
-`saddle_rankdef_50_10_3`, `saddle_rankdef_100_20_5` — five matrices
-spanning n ∈ {5, 90, 100, 180, 200} with 2-of-3 oracle agreement
-(MUMPS/SSIDS/MA57). The F-01 invariant test that previously read
-the removed `.mtx` files (`f01_rankdef_surfaces_at_least_one_zero_pivot`)
-already exercises a synthetic dyadic `u·uᵀ` whose pivots are
-*exactly* 0.0 — independent of these four matrices.
+cascade; back differs by float reassociation (~κ·eps), inside the
+1e-12 parity gate (observed ≤ 1.6e-15). The dual path isolates the new
+kernels from the single-RHS and small-`nrhs` paths.
 
-**What is not changed.** Issue #54's `zero_tol` and the SSIDS-aligned
-inertia routing convention are untouched. The frozen 2026-05-26
-decision stands.
+**Rejected alternatives.**
+- *Keep `y` column-major and only tune the GEMM* — leaves the
+  stride-`n` gather/scatter regression on power-of-two `n` and caps
+  every size; the GEMM was not the bottleneck.
+- *GEMM loop reorder (c-block outer) alone* — no measurable effect;
+  the bottleneck was the transpose, not B re-streaming at these sizes.
+- *Global BLAS-3 for all `nrhs`* — would route the IPM hot path (small
+  `nrhs`, bit-identical today) onto the non-bit-identical back-sub for
+  no benefit; threshold keeps it off.
 
-**Local verification.** `python3 report.py` after the changes:
-`total 121: ok=65, flagged=0, missing=56, other=0` (missing = not
-downloaded SuiteSparse), exit 0. `cargo test --release --lib`:
-317 passed.
+**Measured (idle, `bench_multirhs`, 2-D Laplacians, nrhs ∈ {64,256}).**
+Per-RHS batched/looped ratio: n=484 ~0.18–0.24 (~4–5×), n=1024
+~0.32–0.34 (~3×), n=2025 ~0.17–0.23 (~5–6×). Lib tests 317 pass;
+multi-RHS parity 10/10 at ≤ 1.6e-15.
 
-**Process gap acknowledged.** No CI ran on the 18 commits between
-b312758 (May 25, last green CI) and the v0.8.0 commit (79d9e91,
-May 28), despite no `[skip ci]` markers. This let #54's regression
-sit undetected for two days and ten commits. Investigating CI
-trigger gap is tracked separately (not blocking this decision).
+**Deferred.** Packing the column-major `L` panel into a contiguous
+buffer (BLIS-style) to remove the strided `L` access inside the GEMM —
+the next lever, most relevant to power-of-two front dimensions
+(n=1024). Not pursued until a workload demands it.
 
 **References.**
-- `/tmp/feral-revert-v0.8.0-msg.txt` — revert rationale.
-- Issue #54 (closed, 2026-05-26) — strict-zero routing decision.
-- `dev/decisions.md` 2026-05-26 entry — Option A → SSIDS-aligned
-  pivot, including the unrelated IPM δ-cascade evidence that gates
-  this trade-off.
-- CLAUDE.md "Constraints" — corpus consensus framework reference.
+- `dev/research/issue-57-blas3-panel.md` — design, bit-exactness
+  analysis, and the Results section with the regression diagnosis.
+- `dev/research/issue-57-multirhs-row-major.md` — fix #1 (row-major `w`).
+- `dev/journal/2026-05-30-01.org` — real-time work log.
+- Issue #57 — original report (column-major layout, 5–10× target).
 
 ## Recent Tried-and-Rejected
-**Removing the contrib-block zero-fill — not free, not pursued.**
-The 16:00 journal claim "the `resize(cdim*cdim, 0.0)` is 100%
-removable, provably safe" was wrong: it checked only `extend_add` (a
-lower-triangle-only reader). Grepping every reader of `.contrib` found
-**three consumers that bit-compare the full contrib Vec including the
-upper triangle**: the `block_ldlt32` unit test (`to_bits()` per
-element), `parallel_corpus_parity.rs:70`, and `diag_par_firstdiff.rs`.
-The zero-fill is what makes the upper triangle deterministically
-`0.0`; deleting it naively regresses the test and breaks parity.
-Removing only its cost requires `unsafe Vec::set_len` — safe Rust
-cannot length a `Vec` without N initializing writes, and `src/` has no
-`unsafe` in the core numeric data path. The genuinely-wasted portion
-is ~2% (the lower-triangle zeros the copy overwrites anyway); the
-other half is load-bearing. Decision (jrk): not worth the first
-core-path `unsafe` for ~2% on an already-correct solver. Issue #44
-closed.
+**c-block outer / m-tile inner** would keep a small `B`-block
+L1-resident and cut the dominant re-streaming by the factor `NR/MR = 2`.
 
-**Lesson.** "Provably dead" requires grepping *all* consumers of the
-buffer, not the one obvious algorithmic reader. Diagnostic and test
-binaries that bit-compare whole buffers make "never read" false.
+Tried the swap. **Measured: no improvement.** n=1024 stayed at ratio
+~1.0–1.2 (still a regression), and n=484/2025 were within noise of the
+m-outer order. The loop order was not the bottleneck at these sizes.
+
+Reverted to the simpler m-outer kernel (the comment claiming the swap
+fixed n=1024 would have been false). The actual n=1024 cause was the
+**stride-`n` gather/scatter** reading the column-major `y` — power-of-
+two `n` aliased RHS columns into the same cache sets. Flipping the
+internal `y` buffer to row-major (contiguous memcpy gather/scatter)
+fixed it (ratio 1.2 → 0.33) and ~halved wide-solve time everywhere.
+See `dev/research/issue-57-blas3-panel.md` Results and the
+`dev/decisions.md` 2026-05-30 entry.
+
+**Lesson.** Diagnose the bottleneck before micro-optimizing the kernel:
+the transpose in the gather/scatter dominated, not the GEMM's operand
+re-streaming. A loop-order change to the GEMM was wasted motion until
+the layout (row-major `y`) was fixed.
 
 ## Source Files
 ```
@@ -188,6 +191,7 @@ src/bin/alloc_probe.rs
 src/bin/bench_axpy_small.rs
 src/bin/bench_fma_phase3.rs
 src/bin/bench_issue8.rs
+src/bin/bench_multirhs.rs
 src/bin/bench_one_matrix.rs
 src/bin/bench_orderings.rs
 src/bin/bench_solver_corpus.rs
@@ -344,9 +348,5 @@ src/ordering/mod.rs
 src/ordering/postorder.rs
 src/ordering/schur.rs
 src/scaling/hungarian.rs
-src/scaling/infnorm.rs
-src/scaling/mc64.rs
-src/scaling/mod.rs
-src/scaling/value_bound.rs
 
-(truncated from      411 lines to 350 line budget)
+(truncated from      415 lines to 350 line budget)
