@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-30T17:03:49Z
+Generated: 2026-05-30T17:53:15Z
 
 ## Latest Session
 File: dev/sessions/2026-05-30-01.md
@@ -59,11 +59,11 @@ precision; 1e-12 gate, tolerance untouched).
 
 ## Git Status
 ```
+92b8150 bench: add dense-Hessian multi-RHS probe (#58 repro)
+2369fce fix(solve): batched iterative refinement for wide multi-RHS (#58)
+f8f324b session: 2026-05-30-01 checkpoint (#57 multi-RHS BLAS-3 + docs)
 401486e docs(book): add Scaling and Fill-reducing ordering chapters
 0fcb010 docs(book): complete the mdBook — fix stale examples, add sparse/multi-RHS/Python (#57)
-8908d32 docs(python): add example notebooks; motivate multi-RHS perf demo (#57)
-9c2c716 perf(solve): BLAS-3 panel kernels + row-major y for wide multi-RHS (#57 fix #2)
-80348f9 perf(solve): row-major working buffer for multi-RHS sparse solve (#57)
 ```
 
 ## Test Status
@@ -71,10 +71,10 @@ precision; 1e-12 gate, tolerance untouched).
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test scaling::tests::auto_solves_below_guard_matrix_correctly ... ok
 test scaling::tests::auto_falls_back_to_infnorm_on_mss1_0009 ... ok
 test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
@@ -86,7 +86,7 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 
-test result: ok. 317 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.40s
+test result: ok. 317 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.41s
 
 ```
 
@@ -132,36 +132,36 @@ precision; 1e-12 gate, tolerance untouched).
 ```
 
 ## Recent Decisions
-cascade; back differs by float reassociation (~κ·eps), inside the
-1e-12 parity gate (observed ≤ 1.6e-15). The dual path isolates the new
-kernels from the single-RHS and small-`nrhs` paths.
+than its unrefined solve.
 
-**Rejected alternatives.**
-- *Keep `y` column-major and only tune the GEMM* — leaves the
-  stride-`n` gather/scatter regression on power-of-two `n` and caps
-  every size; the GEMM was not the bottleneck.
-- *GEMM loop reorder (c-block outer) alone* — no measurable effect;
-  the bottleneck was the transpose, not B re-streaming at these sizes.
-- *Global BLAS-3 for all `nrhs`* — would route the IPM hot path (small
-  `nrhs`, bit-identical today) onto the non-bit-identical back-sub for
-  no benefit; threshold keeps it off.
+**Decision 3 — active-column compaction each step.** Each refinement step
+gathers only the un-converged columns into the batched solve. This bounds
+the batched path at ≤ the per-column work even for heterogeneous
+convergence (most columns done in 1 step, a few needing 10), where
+solving the full batch every step would otherwise regress.
 
-**Measured (idle, `bench_multirhs`, 2-D Laplacians, nrhs ∈ {64,256}).**
-Per-RHS batched/looped ratio: n=484 ~0.18–0.24 (~4–5×), n=1024
-~0.32–0.34 (~3×), n=2025 ~0.17–0.23 (~5–6×). Lib tests 317 pass;
-multi-RHS parity 10/10 at ≤ 1.6e-15.
+**Decision 4 — threshold dispatch at `BLAS3_REFINE_THRESHOLD = 16`.**
+`nrhs < 16` keeps the literal per-column loop (the IPM predictor-
+corrector, `nrhs = 2`, and other narrow refined solves stay on the
+proven, bit-identical path). 16 (below the 32 panel crossover) because
+the batched *solve* amortizes from ~16, and the batched refiner is
+provably bit-identical to the per-column loop for `16 ≤ nrhs < 32` (the
+rank-1 solve is bit-identical per column there), so there is no accuracy
+risk in that band.
 
-**Deferred.** Packing the column-major `L` panel into a contiguous
-buffer (BLIS-style) to remove the strided `L` access inside the GEMM —
-the next lever, most relevant to power-of-two front dimensions
-(n=1024). Not pursued until a workload demands it.
+**Rejected.** Global-norm refinement loop (drops per-column best-iterate
+— accuracy regression risk on near-singular columns). No compaction
+(heterogeneous-convergence perf regression). Single-pass batched SpMV for
+the residual (deferred — helps dense inputs only; per-column symv is
+cache-friendly and reuses tested code).
 
-**References.**
-- `dev/research/issue-57-blas3-panel.md` — design, bit-exactness
-  analysis, and the Results section with the regression diagnosis.
-- `dev/research/issue-57-multirhs-row-major.md` — fix #1 (row-major `w`).
-- `dev/journal/2026-05-30-01.org` — real-time work log.
-- Issue #57 — original report (column-major layout, 5–10× target).
+**Measured.** Bit-identical band verified (`max|batched − per-column| ==
+0` at nrhs=24 SPD and nrhs=20 indefinite). Panel band (nrhs=64) matches
+the oracle to ≤1e-15 with per-column relative residual ≤1e-15. Lib 317
+pass; bench_multirhs refined ratio ~0.34–0.40.
+
+**References.** `dev/research/issue-58-batched-refinement.md`,
+`dev/journal/2026-05-30-01.org`, issue #58.
 
 ## Recent Tried-and-Rejected
 **c-block outer / m-tile inner** would keep a small `B`-block
@@ -189,6 +189,7 @@ the layout (row-major `y`) was fixed.
 ```
 src/bin/alloc_probe.rs
 src/bin/bench_axpy_small.rs
+src/bin/bench_dense_multirhs.rs
 src/bin/bench_fma_phase3.rs
 src/bin/bench_issue8.rs
 src/bin/bench_multirhs.rs
@@ -347,6 +348,5 @@ src/ordering/elimination_tree.rs
 src/ordering/mod.rs
 src/ordering/postorder.rs
 src/ordering/schur.rs
-src/scaling/hungarian.rs
 
-(truncated from      415 lines to 350 line budget)
+(truncated from      416 lines to 350 line budget)
