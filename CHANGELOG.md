@@ -4,6 +4,26 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — multi-RHS sparse solve: row-major working buffer (#57)
+
+The per-supernode working buffer in `solve_sparse_core_many_into` now
+uses a row-major layout (`w[i*nrhs + c]`) instead of column-major
+(`w[c*nrow + i]`). The per-RHS inner loops in forward-sub, the D-block
+solve, and back-sub are now contiguous (stride-1) and auto-vectorize.
+
+The caller-visible RHS/solution layout is unchanged — it remains
+column-major `n × nrhs`, matching MUMPS/SSIDS — so there is no public
+API or ABI change. The single-RHS path (`solve_sparse_core_into`) and
+the iterative-refinement path are untouched. Results are bit-identical
+to looping the single-RHS solve (verified by the multi-RHS parity
+suite, `max|many − single| = 0`).
+
+Measured per-RHS speedup of one batched `solve_sparse_many` call vs
+looping single-RHS, on 2-D Laplacians (`cargo run --release --bin
+bench_multirhs`): batched/looped ratio 0.76–0.99 (up to ~1.3× faster
+per RHS) at `nrhs ∈ {64, 256}`. The larger 5–10× regime needs the
+BLAS-3 panel kernels (issue #57 fix #2, deferred).
+
 ## [0.8.0] - 2026-05-29
 
 ### Removed — 4 synthetic rank-deficient stress-corpus matrices

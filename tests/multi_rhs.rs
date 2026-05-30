@@ -25,6 +25,53 @@ fn small_indef_matrix() -> CscMatrix {
     .unwrap()
 }
 
+/// 5-point Laplacian on an `m × m` grid: SPD, `n = m*m`, genuinely
+/// sparse with multiple supernodes. Returned as lower-triangle CSC.
+/// Used for the large-`nrhs` equivalence test, which exercises the
+/// vectorized inner loops of the multi-RHS core at a scale the 5×5
+/// arrow matrix cannot (issue #57 row-major buffer).
+fn laplacian_2d(m: usize) -> CscMatrix {
+    let n = m * m;
+    let mut rows = Vec::new();
+    let mut cols = Vec::new();
+    let mut vals = Vec::new();
+    for r in 0..m {
+        for c in 0..m {
+            let p = r * m + c;
+            rows.push(p);
+            cols.push(p);
+            vals.push(4.0);
+            // left neighbour (column c-1) has smaller index p-1
+            if c > 0 {
+                rows.push(p);
+                cols.push(p - 1);
+                vals.push(-1.0);
+            }
+            // upper neighbour (row r-1) has smaller index p-m
+            if r > 0 {
+                rows.push(p);
+                cols.push(p - m);
+                vals.push(-1.0);
+            }
+        }
+    }
+    CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap()
+}
+
+/// Deterministic xorshift64 → uniform in [-1, 1). Keeps the large
+/// test reproducible without pulling in `rand`.
+fn xorshift_fill(len: usize, seed: u64) -> Vec<f64> {
+    let mut state = seed | 1;
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.push((state as f64 / u64::MAX as f64) * 2.0 - 1.0);
+    }
+    out
+}
+
 fn factor_for(m: &CscMatrix) -> feral::numeric::factorize::SparseFactors {
     let sym = symbolic_factorize(m, &SupernodeParams::default()).unwrap();
     let params = NumericParams::default();
@@ -70,6 +117,48 @@ fn solve_many_matches_k_independent_solves() {
             );
         }
     }
+}
+
+#[test]
+fn solve_many_large_matches_single_rhs() {
+    // Large multiple-supernode SPD matrix with many RHS columns. This
+    // is the case that exercises the vectorized inner loops of the
+    // multi-RHS core (issue #57); the 5×5 arrow matrix is too small to
+    // catch a row-major indexing slip at scale. The single-RHS path is
+    // the independent oracle: batched == k independent solves, tightly.
+    let m = 12;
+    let mat = laplacian_2d(m); // n = 144, SPD, multiple supernodes
+    let factors = factor_for(&mat);
+    let n = mat.n;
+    let nrhs = 17; // > 16 and odd, to stress the c-loop tail
+
+    let rhs_packed = xorshift_fill(n * nrhs, 0x2545_F491_4F6C_DD1D);
+
+    let x_many = solve_sparse_many(&factors, &rhs_packed, nrhs).unwrap();
+    assert_eq!(x_many.len(), n * nrhs);
+
+    let tol = 1e-12;
+    let mut max_diff = 0.0_f64;
+    for c in 0..nrhs {
+        let rhs_c = &rhs_packed[c * n..(c + 1) * n];
+        let x_single = solve_sparse(&factors, rhs_c).unwrap();
+        for i in 0..n {
+            let diff = (x_many[c * n + i] - x_single[i]).abs();
+            max_diff = max_diff.max(diff);
+            assert!(
+                diff < tol,
+                "column {} row {}: many = {} vs single = {} (diff {:.3e})",
+                c,
+                i,
+                x_many[c * n + i],
+                x_single[i],
+                diff
+            );
+        }
+    }
+    // Batched and looped single-RHS solves run identical arithmetic per
+    // column, so they should agree to (near) machine precision.
+    assert!(max_diff < tol, "max |many - single| = {max_diff:.3e}");
 }
 
 #[test]

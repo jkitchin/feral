@@ -305,8 +305,16 @@ pub struct SolveManyWorkspace {
     /// column-major (column `c` lives at `[c*n .. (c+1)*n]`).
     y: Vec<f64>,
     /// Per-supernode gather/scatter buffer, length `max_nrow * nrhs`,
-    /// column-major.
+    /// **row-major**: element `(i, c)` lives at `w[i*nrhs + c]`.
+    /// Row-major so the per-RHS inner loops in `solve_sparse_core_many_into`
+    /// are contiguous (stride-1) and auto-vectorize (issue #57). The
+    /// caller-visible `y`/`rhs`/`x` buffers stay column-major; the
+    /// per-supernode gather/scatter loops transpose between the two.
     w: Vec<f64>,
+    /// Back-substitution dot-product accumulator, length `nrhs`. One
+    /// slot per column, reused across pivots and nodes so the inner
+    /// `c`-loop stays contiguous without a per-pivot allocation.
+    acc: Vec<f64>,
     /// Pre-scaled RHS storage when MC64 scaling is active, length
     /// `n * nrhs`. Empty when no scaling is applied.
     scaled_rhs: Vec<f64>,
@@ -335,6 +343,7 @@ impl SolveManyWorkspace {
         Self {
             y: vec![0.0; n * nrhs],
             w: vec![0.0; max_nrow * nrhs],
+            acc: vec![0.0; nrhs],
             scaled_rhs: vec![0.0; scaled_rhs_len],
             nrhs,
             n,
@@ -423,7 +432,15 @@ pub fn solve_sparse_many_into(
         rhs
     };
 
-    solve_sparse_core_many_into(factors, rhs_for_core, nrhs, x_out, &mut ws.y, &mut ws.w);
+    solve_sparse_core_many_into(
+        factors,
+        rhs_for_core,
+        nrhs,
+        x_out,
+        &mut ws.y,
+        &mut ws.w,
+        &mut ws.acc,
+    );
 
     // Post-scale every column with the same D vector (see
     // `solve_sparse_into_ws` for the cancellation argument).
@@ -440,10 +457,13 @@ pub fn solve_sparse_many_into(
 }
 
 /// Multi-RHS core solve: forward-sub, D-solve, backward-sub on
-/// `nrhs` columns laid out column-major in `rhs`. Mirrors
-/// `solve_sparse_core_into` with the inner update loops widened
-/// to `nrhs` columns. The single-RHS path
-/// (`solve_sparse_core_into`) is preserved unchanged so the
+/// `nrhs` columns. `rhs`, `x_out`, and the `y` working buffer are
+/// **column-major** `n × nrhs` (the caller-visible contract, matching
+/// MUMPS/SSIDS). The per-supernode working buffer `w` is **row-major**
+/// (`w[i*nrhs + c]`) so the per-RHS inner loops are contiguous and
+/// auto-vectorize (issue #57); the gather/scatter loops transpose
+/// between the column-major `y` and the row-major `w`. The single-RHS
+/// path (`solve_sparse_core_into`) is preserved unchanged so the
 /// iterative-refinement code path stays on a tested code path.
 fn solve_sparse_core_many_into(
     factors: &SparseFactors,
@@ -452,11 +472,13 @@ fn solve_sparse_core_many_into(
     x_out: &mut [f64],
     y_buf: &mut [f64],
     w_buf: &mut [f64],
+    acc_buf: &mut [f64],
 ) {
     let n = factors.n;
     let y = &mut y_buf[..n * nrhs];
 
     // Permute every column of the RHS: y[c, new] = b[c, perm[new]]
+    // (y stays column-major).
     for c in 0..nrhs {
         let src_off = c * n;
         let dst_off = c * n;
@@ -474,35 +496,42 @@ fn solve_sparse_core_many_into(
             continue;
         }
 
+        // Gather, transposing column-major `y` into row-major `w`:
+        // w[i, c] = y[c, row_indices[perm[i]]].
         let w = &mut w_buf[..nrow * nrhs];
-        // Gather every column with the BK permutation applied.
-        for c in 0..nrhs {
-            let w_col = &mut w[c * nrow..(c + 1) * nrow];
-            let y_col = &y[c * n..(c + 1) * n];
-            for i in 0..nrow {
-                w_col[i] = y_col[node.row_indices[ff.perm[i]]];
+        for i in 0..nrow {
+            let src = node.row_indices[ff.perm[i]];
+            let w_row = &mut w[i * nrhs..(i + 1) * nrhs];
+            for c in 0..nrhs {
+                w_row[c] = y[c * n + src];
             }
         }
 
         // L-solve: for each eliminated column j, update rows below.
-        // Inner loop is length-`nrhs` axpy; compiler auto-vectorizes
-        // for small constant or runtime `nrhs`.
+        // The inner `c`-loop is a contiguous (stride-1) axpy over the
+        // row-major rows, so it auto-vectorizes (issue #57). Split the
+        // buffer so the reader row `j` and the writer rows `i > j` do
+        // not alias.
         for j in 0..nelim {
+            let (head, tail) = w.split_at_mut((j + 1) * nrhs);
+            let w_j = &head[j * nrhs..(j + 1) * nrhs];
             for i in (j + 1)..nrow {
                 let l_ij = ff.l[j * nrow + i];
+                let base = (i - j - 1) * nrhs;
+                let w_i = &mut tail[base..base + nrhs];
                 for c in 0..nrhs {
-                    let off = c * nrow;
-                    w[off + i] -= l_ij * w[off + j];
+                    w_i[c] -= l_ij * w_j[c];
                 }
             }
         }
 
-        // Scatter back, undoing BK permutation.
-        for c in 0..nrhs {
-            let w_col = &w[c * nrow..(c + 1) * nrow];
-            let y_col = &mut y[c * n..(c + 1) * n];
-            for i in 0..nrow {
-                y_col[node.row_indices[ff.perm[i]]] = w_col[i];
+        // Scatter back (row-major `w` → column-major `y`), undoing the
+        // BK permutation.
+        for i in 0..nrow {
+            let dst = node.row_indices[ff.perm[i]];
+            let w_row = &w[i * nrhs..(i + 1) * nrhs];
+            for c in 0..nrhs {
+                y[c * n + dst] = w_row[c];
             }
         }
     }
@@ -518,16 +547,18 @@ fn solve_sparse_core_many_into(
         }
 
         let w = &mut w_buf[..nrow * nrhs];
-        for c in 0..nrhs {
-            let w_col = &mut w[c * nrow..(c + 1) * nrow];
-            let y_col = &y[c * n..(c + 1) * n];
-            for i in 0..nrow {
-                w_col[i] = y_col[node.row_indices[ff.perm[i]]];
+        for i in 0..nrow {
+            let src = node.row_indices[ff.perm[i]];
+            let w_row = &mut w[i * nrhs..(i + 1) * nrhs];
+            for c in 0..nrhs {
+                w_row[c] = y[c * n + src];
             }
         }
 
+        // D-solve per column. Arithmetic is identical to the single-RHS
+        // path (`solve_sparse_core_into`); only the element addresses
+        // change to the row-major layout `w[k*nrhs + c]`.
         for c in 0..nrhs {
-            let w_col = &mut w[c * nrow..(c + 1) * nrow];
             let mut k = 0;
             while k < nelim {
                 if k + 1 < nelim && ff.d_subdiag[k] != 0.0 {
@@ -537,26 +568,26 @@ fn solve_sparse_core_many_into(
                     let det = a * cc - b * b;
 
                     if det.abs() > ff.zero_tol_2x2 {
-                        let z1 = w_col[k];
-                        let z2 = w_col[k + 1];
+                        let z1 = w[k * nrhs + c];
+                        let z2 = w[(k + 1) * nrhs + c];
                         if b.abs() > f64::EPSILON * (a.abs() + cc.abs()).max(1.0) {
                             let ak = a / b;
                             let ck = cc / b;
                             let denom = 1.0 / (ak * ck - 1.0);
                             let z1k = z1 / b;
                             let z2k = z2 / b;
-                            w_col[k] = (ck * z1k - z2k) * denom;
-                            w_col[k + 1] = (ak * z2k - z1k) * denom;
+                            w[k * nrhs + c] = (ck * z1k - z2k) * denom;
+                            w[(k + 1) * nrhs + c] = (ak * z2k - z1k) * denom;
                         } else {
-                            w_col[k] = (cc * z1 - b * z2) / det;
-                            w_col[k + 1] = (a * z2 - b * z1) / det;
+                            w[k * nrhs + c] = (cc * z1 - b * z2) / det;
+                            w[(k + 1) * nrhs + c] = (a * z2 - b * z1) / det;
                         }
                     }
                     // else: 2×2 block force-accepted as singular; leave as-is.
                     k += 2;
                 } else {
                     if ff.d_diag[k].abs() > ff.zero_tol {
-                        w_col[k] /= ff.d_diag[k];
+                        w[k * nrhs + c] /= ff.d_diag[k];
                     }
                     // else: pivot force-accepted as zero; leave as-is.
                     k += 1;
@@ -564,16 +595,17 @@ fn solve_sparse_core_many_into(
             }
         }
 
-        for c in 0..nrhs {
-            let w_col = &w[c * nrow..(c + 1) * nrow];
-            let y_col = &mut y[c * n..(c + 1) * n];
-            for i in 0..nrow {
-                y_col[node.row_indices[ff.perm[i]]] = w_col[i];
+        for i in 0..nrow {
+            let dst = node.row_indices[ff.perm[i]];
+            let w_row = &w[i * nrhs..(i + 1) * nrhs];
+            for c in 0..nrhs {
+                y[c * n + dst] = w_row[c];
             }
         }
     }
 
     // Phase 3: Backward substitution (reverse postorder).
+    let acc = &mut acc_buf[..nrhs];
     for node in factors.node_factors.iter().rev() {
         let ff = &node.frontal_factors;
         let nelim = ff.nelim;
@@ -583,32 +615,40 @@ fn solve_sparse_core_many_into(
         }
 
         let w = &mut w_buf[..nrow * nrhs];
-        for c in 0..nrhs {
-            let w_col = &mut w[c * nrow..(c + 1) * nrow];
-            let y_col = &y[c * n..(c + 1) * n];
-            for i in 0..nrow {
-                w_col[i] = y_col[node.row_indices[ff.perm[i]]];
-            }
-        }
-
-        // L^T-solve: per column, dot the trailing entries of column j
-        // of L with the trailing entries of `w_col` and subtract.
-        for j in (0..nelim).rev() {
+        for i in 0..nrow {
+            let src = node.row_indices[ff.perm[i]];
+            let w_row = &mut w[i * nrhs..(i + 1) * nrhs];
             for c in 0..nrhs {
-                let off = c * nrow;
-                let mut sum = 0.0;
-                for i in (j + 1)..nrow {
-                    sum += ff.l[j * nrow + i] * w[off + i];
-                }
-                w[off + j] -= sum;
+                w_row[c] = y[c * n + src];
             }
         }
 
-        for c in 0..nrhs {
-            let w_col = &w[c * nrow..(c + 1) * nrow];
-            let y_col = &mut y[c * n..(c + 1) * n];
-            for i in 0..nrow {
-                y_col[node.row_indices[ff.perm[i]]] = w_col[i];
+        // L^T-solve. `acc[c]` accumulates `sum_{i>j} L[i,j] * w[i, c]`.
+        // Iterating `i` outer keeps the per-column accumulation order
+        // identical to the single-RHS path (so results are bit-identical)
+        // while the inner `c`-loop runs contiguous and vectorizes.
+        for j in (0..nelim).rev() {
+            for s in acc.iter_mut() {
+                *s = 0.0;
+            }
+            for i in (j + 1)..nrow {
+                let l_ij = ff.l[j * nrow + i];
+                let w_i = &w[i * nrhs..(i + 1) * nrhs];
+                for c in 0..nrhs {
+                    acc[c] += l_ij * w_i[c];
+                }
+            }
+            let w_j = &mut w[j * nrhs..(j + 1) * nrhs];
+            for c in 0..nrhs {
+                w_j[c] -= acc[c];
+            }
+        }
+
+        for i in 0..nrow {
+            let dst = node.row_indices[ff.perm[i]];
+            let w_row = &w[i * nrhs..(i + 1) * nrhs];
+            for c in 0..nrhs {
+                y[c * n + dst] = w_row[c];
             }
         }
     }
