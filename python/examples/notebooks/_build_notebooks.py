@@ -325,6 +325,45 @@ nb02 = _nb([
         "`Q` is all you write; `feral` picks the wide-`nrhs` panel kernels "
         "automatically."
     ),
+    md(
+        "## Recovering accuracy: refined batched solves\n"
+        "\n"
+        "`solve_refined` adds a few steps of **iterative refinement** against "
+        "the original matrix — cheap insurance that recovers digits on "
+        "ill-conditioned or near-singular systems (it returns the best iterate, "
+        "so a refined solve is never worse than the plain one). Pass it a 2-D "
+        "`B` and the wide refined solve runs through the **same panel kernel** "
+        "as `solve_many`: one batched solve per refinement step over the "
+        "still-unconverged columns, instead of looping a single-RHS refined "
+        "solve per column (GitHub issue #58). Before that fix the refined "
+        "multi-RHS path bypassed the panel kernel and could be 3–7× slower per "
+        "RHS than the unrefined batched solve.\n"
+        "\n"
+        "Same one-line call — `solver.solve_refined(L, Q)` with a 2-D `Q`:"
+    ),
+    code(
+        "Xr = solver.solve_refined(L, Q)        # (n, nrhs), refined AND batched\n"
+        "print('refined batch residual:', np.max(np.abs(L_sp @ Xr - Q)))\n"
+        "\n"
+        "# Matches looping the single-RHS refined solve, column by column.\n"
+        "max_col = max(\n"
+        "    np.max(np.abs(Xr[:, j] - solver.solve_refined(L, Q[:, j].copy())))\n"
+        "    for j in range(8)\n"
+        ")\n"
+        "print('max |batched - per-column refined| (first 8 cols):', max_col)"
+    ),
+    md(
+        "On this well-conditioned plate the direct solve is already accurate, so "
+        "refinement converges immediately — the win here is simply the shared "
+        "batched **initial** solve shown above. The per-RHS speedup of the "
+        "*batched* refinement loop over the per-column loop is largest when "
+        "refinement does real work (ill-conditioned or saddle-point KKT "
+        "systems, where the batched correction solves dominate); the native "
+        "`bench_multirhs` harness measures it at roughly **2.5–3×**. The point "
+        "of issue #58 is that the refined multi-RHS path — the **default** for "
+        "the solver and for pounce's KKT back-solves — no longer falls off the "
+        "panel kernel onto the slow per-column path."
+    ),
 ])
 
 

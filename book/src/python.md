@@ -56,6 +56,16 @@ single-RHS solve. The
 notebook walks through a steady-state heat-conduction example with a
 correctness check, a visualization, and a looped-vs-batched timing.
 
+Iterative refinement batches too: pass a 2-D `B` to
+`solver.solve_refined(A, B)` and each refinement step runs through the
+panel kernel over the still-unconverged columns (issue #58), so the
+refined path — the default for KKT back-solves — no longer falls onto
+the slow per-column loop. On systems where refinement does real work the
+batched refined path is ~2.5–3× faster per RHS than looping the
+single-RHS refined solve (measured by the native `bench_multirhs`). The
+notebook's final section demonstrates the batched refined call and its
+accuracy.
+
 ## scipy.sparse interop
 
 ```python

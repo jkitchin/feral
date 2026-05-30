@@ -100,3 +100,20 @@ per-column|==0 at nrhs=24 (SPD) and nrhs=20 (indef) — exact bit-identical
 in the rank-1 band; nrhs=64 matches oracle <1e-10 + residual <1e-10.
 Lib 317 pass. bench_multirhs refined: batched/loop ratio 0.34-0.40
 (~2.5-3x faster), max|batch-loop| ~6.6e-16.
+
+* 17:45 :issue-58:python:notebooks:finding:
+Adding a refined-batched showcase to nb02 surfaced a real nuance. At the
+Rust level (bench_multirhs) batched refined is 0.34-0.40 vs per-column
+loop, but through the Python Solver on the well-conditioned heat
+Laplacian the ratio is ~1.0. Root cause (probed, not the matrix —
+full vs tril identical): on well-conditioned SPD the unrefined solve
+already meets the eps*sqrt(n) target, so refinement does ~0 correction
+steps and the refined-path cost is dominated by the per-column residual
+SpMV (64 symv, un-batched) — exactly the deferred "single-pass batched
+SpMV" follow-up. The clean 2.5-3x shows when refinement does real work
+(ill-conditioned / KKT, where the batched correction solves dominate).
+Decision: do NOT put a misleading ~1.0x "speedup" in the notebook;
+reframed the refined section to usage + accuracy + correctness
+(max|batched - per-column refined| == 0.0 at nrhs=64) and attribute the
+perf number to the native bench. Reinforces the follow-up priority:
+batched residual SpMV would help the residual-bound (0-step) regime.

@@ -79,8 +79,13 @@ the best iterate:
 
 ```rust,ignore
 let x = solver.solve_refined(&a, &b)?;                       // single RHS
-let x_many = solver.solve_many_refined(&a, &b_many, nrhs)?;  // per-column
+let x_many = solver.solve_many_refined(&a, &b_many, nrhs)?;  // batched
 ```
+
+`solve_many_refined` keeps per-column best-iterate convergence but, for
+wide right-hand sides, refines through the same batched panel kernel as
+`solve_many` — one batched solve per refinement step over the still-
+unconverged columns — so the refined path amortizes too (issue #58).
 
 ## Dense path
 
