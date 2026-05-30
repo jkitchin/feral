@@ -67,6 +67,19 @@ for newton_iter in range(max_iter):
 See `examples/discopt_ipm_kkt.py` for an end-to-end Newton step
 against a small NLP.
 
+## Example notebooks
+
+Runnable notebooks live in `examples/notebooks/` (regenerate the
+`.ipynb` from `_build_notebooks.py`; execute with
+`jupyter nbconvert --execute` or open in Jupyter):
+
+- `01_basic_factor_solve` — factor, certified inertia, solve, refine, reuse.
+- `02_multi_rhs_batched` — **batched multi-RHS solve**, motivated by a
+  steady-state heat-conduction sweep, with a correctness check and a
+  looped-vs-batched timing showing the per-RHS speedup (issue #57).
+- `03_kkt_saddle_inertia` — indefinite KKT system with certified inertia.
+- `04_scipy_numpy_interop` — `scipy.sparse` round-trip vs `spsolve`.
+
 ## scipy.sparse interop
 
 ```python
