@@ -353,16 +353,43 @@ nb02 = _nb([
         "print('max |batched - per-column refined| (first 8 cols):', max_col)"
     ),
     md(
-        "On this well-conditioned plate the direct solve is already accurate, so "
-        "refinement converges immediately — the win here is simply the shared "
-        "batched **initial** solve shown above. The per-RHS speedup of the "
-        "*batched* refinement loop over the per-column loop is largest when "
-        "refinement does real work (ill-conditioned or saddle-point KKT "
-        "systems, where the batched correction solves dominate); the native "
-        "`bench_multirhs` harness measures it at roughly **2.5–3×**. The point "
-        "of issue #58 is that the refined multi-RHS path — the **default** for "
-        "the solver and for pounce's KKT back-solves — no longer falls off the "
-        "panel kernel onto the slow per-column path."
+        "### Does it pay off? Measure it\n"
+        "\n"
+        "Time the refined path the same way: looping `solve_refined` per column "
+        "vs one batched 2-D call."
+    ),
+    code(
+        "print(f'{\"nrhs\":>5}  {\"loop refined\":>15}  {\"batch refined\":>15}  {\"speedup\":>8}')\n"
+        "for k in (64, 256):\n"
+        "    Qk = np.stack(\n"
+        "        [gaussian_source(*c) for c in rng.integers(4, grid - 4, size=(k, 2))],\n"
+        "        axis=1,\n"
+        "    )\n"
+        "    cols = [Qk[:, j].copy() for j in range(k)]\n"
+        "    t_loop = bench(lambda: [solver.solve_refined(L, c) for c in cols])\n"
+        "    t_batch = bench(lambda: solver.solve_refined(L, Qk))\n"
+        "    print(\n"
+        "        f'{k:>5}  {t_loop / k * 1e6:12.2f} us  {t_batch / k * 1e6:12.2f} us  '\n"
+        "        f'{t_loop / t_batch:6.2f}x'\n"
+        "    )"
+    ),
+    md(
+        "The batched refined path is roughly **2–3× faster per RHS** than looping "
+        "the single-RHS refined solve — even on this well-conditioned plate, "
+        "where refinement does ~0 correction steps and the win is entirely the "
+        "shared batched **initial** solve. Before issue #58 this path looped the "
+        "single-RHS refiner and bypassed the panel kernel; it is the **default** "
+        "for the solver and for pounce's KKT back-solves.\n"
+        "\n"
+        "**The nuance — it is not a free lunch.** The batched path amortizes the "
+        "*solves*; the per-column **residual** `B − A·X` is still computed column "
+        "by column. On sparse systems that residual is cheap, so the solve "
+        "dominates and you see the full speedup. On a *dense* Hessian (where the "
+        "matrix–vector product is as expensive as the solve) the un-batched "
+        "residual caps the gain — a single-pass batched residual SpMV is the "
+        "next lever. The speedup also grows with `nrhs` and with how much "
+        "refinement actually has to do (ill-conditioned / saddle-point KKT "
+        "systems, where the batched correction solves carry the cost)."
     ),
 ])
 
