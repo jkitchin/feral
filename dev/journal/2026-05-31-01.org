@@ -1,0 +1,33 @@
+* 12:10 :perf-review:parallelism:determinism:
+Performed a library-wide performance review under the pure-Rust +
+bit-exact constraint. Mapped four hot paths (dense factor/schur kernel,
+parallel multifrontal driver, multi-RHS solve, symbolic) via three
+parallel Explore agents + direct reads.
+
+Key findings (evidence):
+- geomean factor-time already < 1.0 vs MUMPS (sparse ~0.36); the pain is
+  the tail. Worst: KIRBY2_0007 8.76, CRESC132_0000 6.63, MUONSINE_0000
+  5.63 (context.md 2026-05-30-01).
+- Two distinct tail populations: small matrices are SYMBOLIC-dominated
+  (KIRBY2 numeric sub-ms; LdltCompress ~17× symbolic per t-a-r
+  2026-04-23); large matrices are NUMERIC-serial (wide root supernode,
+  issue #8 pinene 87s).
+- Parallel driver is tree-level only; intra-front dense factor is
+  serial. cont-201 measured 1.44×@T=8 vs 4.83× critical-path bound
+  (t-a-r 2026-05-12) — the serial root is the ceiling.
+- FMA is ~0% on ARM (nofma 4-accumulator already saturates pipes,
+  decisions.md 2026-04-14 1.87→1.86) and flips inertia on ~30/154k
+  boundary matrices (t-a-r 2026-04-14) — correctly off.
+- Parallel inertia race (1-2%) was root-caused (double-spawn from
+  pending.load()==0 mid-seed) and FIXED 2026-04-21; parallel_parity
+  green, diag_par_repeat 0/38878 (decisions.md:1578).
+
+Conclusion: the single highest-leverage, determinism-FREE lever is
+intra-front (node-level) parallelism of the trailing Schur update in
+apply_blocked_schur_panel (factor.rs:2957). par_chunks_mut over trailing
+columns is bit-exact for any thread count (each a[i,j] reduced over the
+same q-order on one thread; no cross-thread reduction). Attacks both the
+worst-case ratios and the 1.44× ceiling. GPU recommended against
+(small-front corpus, serial BK pivot search, GPU FP non-determinism vs
+inertia guarantee). Full note: dev/research/perf-review-2026-05-31.md.
+No code changed this session — analysis only.
