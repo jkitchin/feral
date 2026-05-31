@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-30
+
 ### Fixed — batched iterative refinement for wide multi-RHS solves (#58)
 
 `Solver::solve_many_refined` looped the single-RHS refiner per column,
