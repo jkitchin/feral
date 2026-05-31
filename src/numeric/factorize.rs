@@ -3039,6 +3039,34 @@ pub fn factorize_multifrontal_supernodal_parallel(
 /// On completion, decrements the parent's pending counter and — if
 /// the parent becomes ready — recursively spawns the parent into the
 /// same scope. The top-level call seeds all leaf supernodes.
+///
+/// # Worker-stack depth is O(1) in tree height
+///
+/// The leaf→root climb is **trampolined through rayon's task queue**,
+/// not native call-stack recursion. The whole body of this function is
+/// a `scope.spawn(move |s| { … })`; the "recursive" call at the bottom
+/// (`run_parallel_task(s, parent_idx, …)`) only *enqueues* the parent's
+/// closure and returns — the parent's actual factorization runs in a
+/// freshly spawned task after the current task's frame has popped, never
+/// nested on top of it. So a deep / path-like elimination tree does
+/// **not** drive native stack depth proportional to tree height; each
+/// task uses a small constant frame plus per-front dense-kernel scratch
+/// (bounded by front size, also independent of height).
+///
+/// This is measured, not assumed: factoring the deepest corpus matrix
+/// (`c-big`, n = 345 241, supernode-tree height 1521) on this driver
+/// succeeds on a worker stack as small as 32 KiB — far below the rayon
+/// ~2 MiB default — and a synthetic tridiagonal chain (supernode-tree
+/// height ~500) factors likewise; see
+/// `tests/parallel_parity.rs::deep_chain_tree_no_stack_overflow` and
+/// `dev/research/parallel-stack-depth-pounce79.md`. As a consequence
+/// `ensure_parallel_pool` (src/numeric/solver.rs) does not need an
+/// enlarged `stack_size`; the default worker stack suffices regardless
+/// of tree shape. (The worker-stack overflow a downstream consumer once
+/// hit came from *oversubscription* — running this parallel driver
+/// nested inside the caller's own rayon `par_iter` — not from tree
+/// depth; the fix is a serial inner backend via
+/// `Solver::with_parallel(false)`, not a bigger stack.)
 #[allow(clippy::too_many_arguments)]
 fn run_parallel_task<'a>(
     scope: &rayon::Scope<'a>,

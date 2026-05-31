@@ -172,3 +172,64 @@ fn parallel_parity_lakes_1199() {
 fn parallel_parity_mss1_0009_delayed_pivots() {
     assert_parity("data/matrices/kkt/MSS1/MSS1_0009.mtx");
 }
+
+/// Regression guard (pounce#79): the parallel task-graph driver must
+/// keep worker-stack usage O(1) in elimination-tree height.
+///
+/// A tridiagonal SPD system has a chain-structured elimination tree.
+/// Under the default ordering it amalgamates into a deep supernode chain
+/// (measured: n = 8000 ⇒ ~500 supernodes, supernode-tree height ~500),
+/// which exercises `run_parallel_task`'s leaf→root climb over a long
+/// path. Because that climb is trampolined through rayon's task queue
+/// (each parent is *spawned*, not called on the child's stack frame),
+/// this factorizes on default rayon worker stacks without overflow. If a
+/// future refactor reintroduced native leaf→root recursion, a deep chain
+/// would blow the worker stack and crash this test (SIGSEGV/SIGABRT)
+/// rather than fail an assertion.
+///
+/// Measured during the pounce#79 investigation: the deepest corpus
+/// matrix `c-big` (n = 345 241, supernode-tree height 1521) factors on a
+/// 32 KiB worker stack — far below the rayon ~2 MiB default — confirming
+/// stack need is independent of tree height. See the doc comment on
+/// `run_parallel_task` and `dev/research/parallel-stack-depth-pounce79.md`.
+#[test]
+fn deep_chain_tree_no_stack_overflow() {
+    let n = 8000usize;
+    // Tridiagonal SPD, lower triangle only (CscMatrix stores row >=
+    // col): diagonal 4, subdiagonal -1. Strictly diagonally dominant ⇒
+    // SPD ⇒ LDLᵀ needs no pivoting, inertia (n, 0, 0).
+    let mut rows = Vec::with_capacity(2 * n);
+    let mut cols = Vec::with_capacity(2 * n);
+    let mut vals = Vec::with_capacity(2 * n);
+    for c in 0..n {
+        rows.push(c);
+        cols.push(c);
+        vals.push(4.0);
+        if c + 1 < n {
+            rows.push(c + 1);
+            cols.push(c);
+            vals.push(-1.0);
+        }
+    }
+    let a = CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("tridiagonal triplets");
+    let sym = symbolic_factorize(&a, &SupernodeParams::default()).expect("symbolic");
+
+    // Call the task-graph driver directly so the parallel path runs
+    // regardless of the size/flops gate in the public
+    // `factorize_multifrontal_parallel` wrapper (a thin tridiagonal
+    // would otherwise fall through to the sequential driver).
+    let (par_factors, par_inertia) =
+        factorize_multifrontal_supernodal_parallel(&a, &sym, &NumericParams::default())
+            .expect("parallel factor on deep chain");
+
+    assert_eq!(par_inertia.positive, n, "SPD: all positive");
+    assert_eq!(par_inertia.negative, 0, "SPD: none negative");
+    assert_eq!(par_inertia.zero, 0, "SPD: no zero pivots");
+
+    // Bit-exact parity with the sequential driver on the same deep tree
+    // — extends the parallel/sequential contract to this chain shape.
+    let (seq_factors, seq_inertia) =
+        factorize_multifrontal(&a, &sym, &NumericParams::default()).expect("sequential factor");
+    assert_inertia_eq(&seq_inertia, &par_inertia, "deep-chain/total");
+    assert_factors_equal(&seq_factors, &par_factors, "deep-chain");
+}

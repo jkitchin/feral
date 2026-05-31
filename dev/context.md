@@ -1,133 +1,104 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-31T11:29:42Z
+Generated: 2026-05-31T15:10:34Z
 
 ## Latest Session
-File: dev/sessions/2026-05-30-01.md
+File: dev/sessions/2026-05-31-02.md
 ```
-# Session 2026-05-30-01
+# Session 2026-05-31-02
 
 ## Goal
 
-Commit the in-progress issue #57 fix #1 (row-major `w` for the multi-RHS
-solve), then **finish the BLAS-3 implementation** (issue #57 fix #2) to
-reach the 5–10× per-RHS regime. Then, on request: surface the work in
-the Python interface and a motivating performance notebook, and do a
-completeness pass over the mdBook (including new Scaling and Ordering
-chapters with verified citations).
+Resolve the feral side of pounce#79: determine whether the parallel
+multifrontal driver `run_parallel_task` keeps worker-stack depth O(1) in
+elimination-tree height (or whether a deep/path-like tree can overflow a
+rayon worker's ~2 MiB stack), and either bound it or document + guard.
+Earlier in the session: review pounce#79, post the resolution comment,
+and merge feral PR #59.
+
+## Accomplished
+
+- **pounce#79 reviewed and answered.** The per-instance parallelism
+  toggle the issue asks for already exists (`Solver::with_parallel`,
+  per-instance, Rust + Python); the only `FERAL_PARALLEL` env read is the
+  C ABI (`capi.rs:134`). The env-var dance is a pounce-side fix
+  (per-worker `with_parallel(false)`); no feral API change needed.
+  Resolution comment posted to pounce#79.
+- **feral PR #59 merged** (squash, normal merge; "perf-review: analysis
+  and verification of intra-front parallelism" — docs + two probe bins,
+  no production code).
+- **Parallel worker-stack depth: investigated → O(1) in tree height →
+  documented + guarded, no behavioral change.** The leaf→root climb in
+  `run_parallel_task` (`factorize.rs:3232`) is trampolined through
+  rayon's task queue (`scope.spawn`), not native recursion, so native
+  stack depth is O(1) in tree height. Verified structurally and by
+  measurement:
+  - c-big (n=345 241, supernode-tree height 1521 — deepest in corpus):
+    parallel factor succeeds on worker stacks all the way down to
+    **32 KiB** (~64× under the ~2 MiB default).
+  - bratu3d (height 154): factors at a requested 1 KiB stack.
+  - Every optimization/KKT corpus matrix has supernode-tree height ≤ 9.
+  Changes landed: doc section on `run_parallel_task` (`factorize.rs`);
+  regression test `deep_chain_tree_no_stack_overflow`
+  (`tests/parallel_parity.rs`, tridiagonal SPD n=8000, default ordering →
+  deep supernode chain height ~500); research note
+  `dev/research/parallel-stack-depth-pounce79.md`.
 
 ## Benchmark Results
 
-**Unfavorable note (per the hard rule):** the **factor** benchmark's
-dense p90 ratios drifted up vs the previous session — small-frontal
-1.29 → 1.34, medium 1.67 → 1.74. This session changed **only the solve
-path** (`solve_sparse_core_many_into`), not factorization, so this is
-machine/measurement noise, not a regression. All gates still PASS.
+No benchmark-affecting change this session — the only source change is a
+doc comment plus a new test. `bench` numbers are unchanged from
+2026-05-31-01 (PR #59); not re-run (the test gate for doc/test-only
+changes is satisfied by the green gates below).
 
-`cargo run --bin bench --release` (factor ratio vs MUMPS):
+## Decisions Made
 
-```
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.34     <= 2.0     PASS
-medium (<500)            152145     1.74     <= 3.0     PASS
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.50     <= 2.0     PASS
-medium (<500)            153560     1.50     <= 3.0     PASS
-
-Top worst factor-ratio vs MUMPS: KIRBY2_0007 n=458 ratio 8.76,
-CRESC132_0000 n=5314 ratio 6.63, MUONSINE_0000 n=1537 ratio 5.63.
-```
-
-**The session's actual performance story** is the multi-RHS solve
-(`cargo run --release --bin bench_multirhs`, 2-D Laplacians, idle
-machine, per-RHS batched/looped ratio at nrhs ∈ {64, 256}):
-
-| n    | ratio        | speedup | before fix #2 (row-major w only) |
-|------|--------------|---------|----------------------------------|
-| 484  | 0.18–0.24    | ~4–5×   | ~0.34                            |
-| 1024 | 0.32–0.34    | ~3×     | ~1.0–1.2 (REGRESSION)            |
-| 2025 | 0.17–0.23    | ~5–6×   | ~0.35                            |
-
-Parity vs single-RHS oracle: `max|many − single| ≤ 1.6e-15` (machine
-precision; 1e-12 gate, tolerance untouched).
-
-## Accomplished
+- **No behavioral change for pounce#79's feral side.** Depth is already
+  O(1) in tree height; an enlarged `ensure_parallel_pool` `stack_size`
 ```
 
 ## Git Status
 ```
+8902f0f docs+test(parallel): document O(1) worker-stack depth, add deep-tree guard (pounce#79)
+14cff66 perf-review: analysis and verification of intra-front parallelism (#59)
 cd12735 release: v0.9.0
 c51ddfd docs: notebook + book now show the batched refined win (#58)
 2e096e9 perf(solve): drop the 0-step allocations in batched refinement (#58)
-91de86e docs: showcase the batched refined solve in the notebook + book (#58)
-1d26b9a session: 2026-05-30-01 checkpoint addendum (#58 batched refinement)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_supernodes_cover_n ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
-test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test dense::schur_kernel::tests::axpy_minus_length_mismatch_panics - should panic ... ok
+test numeric::solver::tests::mc64_fallback_surfaces_via_solver_api ... ok
+test scaling::tests::auto_falls_back_to_infnorm_on_mss1_0009 ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 
-test result: ok. 315 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.76s
+test result: ok. 317 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.43s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-30-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-31-02.md)
 
 
-**Unfavorable note (per the hard rule):** the **factor** benchmark's
-dense p90 ratios drifted up vs the previous session — small-frontal
-1.29 → 1.34, medium 1.67 → 1.74. This session changed **only the solve
-path** (`solve_sparse_core_many_into`), not factorization, so this is
-machine/measurement noise, not a regression. All gates still PASS.
-
-`cargo run --bin bench --release` (factor ratio vs MUMPS):
-
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.34     <= 2.0     PASS
-medium (<500)            152145     1.74     <= 3.0     PASS
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.50     <= 2.0     PASS
-medium (<500)            153560     1.50     <= 3.0     PASS
-
-Top worst factor-ratio vs MUMPS: KIRBY2_0007 n=458 ratio 8.76,
-CRESC132_0000 n=5314 ratio 6.63, MUONSINE_0000 n=1537 ratio 5.63.
-
-**The session's actual performance story** is the multi-RHS solve
-(`cargo run --release --bin bench_multirhs`, 2-D Laplacians, idle
-machine, per-RHS batched/looped ratio at nrhs ∈ {64, 256}):
-
-| n    | ratio        | speedup | before fix #2 (row-major w only) |
-|------|--------------|---------|----------------------------------|
-| 484  | 0.18–0.24    | ~4–5×   | ~0.34                            |
-| 1024 | 0.32–0.34    | ~3×     | ~1.0–1.2 (REGRESSION)            |
-| 2025 | 0.17–0.23    | ~5–6×   | ~0.35                            |
-
-Parity vs single-RHS oracle: `max|many − single| ≤ 1.6e-15` (machine
-precision; 1e-12 gate, tolerance untouched).
+No benchmark-affecting change this session — the only source change is a
+doc comment plus a new test. `bench` numbers are unchanged from
+2026-05-31-01 (PR #59); not re-run (the test gate for doc/test-only
+changes is satisfied by the green gates below).
 
 ```
 
@@ -188,7 +159,6 @@ the layout (row-major `y`) was fixed.
 ## Source Files
 ```
 src/bin/alloc_probe.rs
-src/bin/bench.rs
 src/bin/bench_axpy_small.rs
 src/bin/bench_dense_multirhs.rs
 src/bin/bench_fma_phase3.rs
@@ -199,6 +169,7 @@ src/bin/bench_orderings.rs
 src/bin/bench_solver_corpus.rs
 src/bin/bench_solver_reuse.rs
 src/bin/bench_sqd.rs
+src/bin/bench.rs
 src/bin/blas3_prototype.rs
 src/bin/calibrate_par_min_flops.rs
 src/bin/d3_probe.rs
@@ -211,8 +182,8 @@ src/bin/diag_amd_substages.rs
 src/bin/diag_amf_vs_amd.rs
 src/bin/diag_cascade_default_evidence.rs
 src/bin/diag_cascade_ratio_distribution.rs
-src/bin/diag_chainwoo.rs
 src/bin/diag_chainwoo_profile.rs
+src/bin/diag_chainwoo.rs
 src/bin/diag_clnlbeam_maxfromm.rs
 src/bin/diag_clnlbeam_slb.rs
 src/bin/diag_compress_costbenefit.rs
@@ -255,8 +226,8 @@ src/bin/diag_qcqp_knobs.rs
 src/bin/diag_qcqp_profile.rs
 src/bin/diag_robot1600_eigs.rs
 src/bin/diag_schur_parity.rs
-src/bin/diag_small_leaf.rs
 src/bin/diag_small_leaf_gate.rs
+src/bin/diag_small_leaf.rs
 src/bin/diag_small_sparse_inventory.rs
 src/bin/diag_sparse_memory.rs
 src/bin/diag_split_tail.rs
@@ -283,19 +254,21 @@ src/bin/probe_explicit_zeros.rs
 src/bin/probe_f01.rs
 src/bin/probe_fbrain.rs
 src/bin/probe_fma_kernel.rs
+src/bin/probe_front_concentration.rs
 src/bin/probe_hang_loop.rs
+src/bin/probe_intrafront_schur.rs
 src/bin/probe_ir_trajectory.rs
-src/bin/probe_issue45.rs
+src/bin/probe_issue_19.rs
 src/bin/probe_issue45_ordering.rs
-src/bin/probe_issue46.rs
+src/bin/probe_issue45.rs
 src/bin/probe_issue46_preprocess.rs
 src/bin/probe_issue46_supernode.rs
+src/bin/probe_issue46.rs
 src/bin/probe_issue49.rs
-src/bin/probe_issue54.rs
 src/bin/probe_issue54_alpha_shift.rs
 src/bin/probe_issue54_cascade.rs
 src/bin/probe_issue54_ma57_alpha.rs
-src/bin/probe_issue_19.rs
+src/bin/probe_issue54.rs
 src/bin/probe_kkt_replay.rs
 src/bin/probe_marine_shape.rs
 src/bin/probe_marine_time.rs
@@ -348,5 +321,32 @@ src/ordering/elimination_tree.rs
 src/ordering/mod.rs
 src/ordering/postorder.rs
 src/ordering/schur.rs
+src/scaling/hungarian.rs
+src/scaling/infnorm.rs
+src/scaling/mc64.rs
+src/scaling/mod.rs
+src/scaling/value_bound.rs
+src/sparse/csc.rs
+src/sparse/mod.rs
+src/symbolic/column_counts.rs
+src/symbolic/ldlt_compress.rs
+src/symbolic/mod.rs
+src/symbolic/profiler.rs
+src/symbolic/small_leaf.rs
+src/symbolic/supernode.rs
+```
 
-(truncated from 416 lines to 350 line budget)
+## Test Files
+```
+tests/amf_corpus_oracle.rs
+tests/auto_strategy.rs
+tests/blocked_ldlt.rs
+tests/build_row_indices_trailing_invariant.rs
+tests/column_renumbering_parity.rs
+tests/column_renumbering.rs
+tests/delayed_pivoting.rs
+tests/dense_fast_path.rs
+tests/dense_ldlt.rs
+tests/factor_scratch_parity.rs
+
+(truncated from      389 lines to 350 line budget)
