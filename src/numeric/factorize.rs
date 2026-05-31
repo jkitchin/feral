@@ -2801,6 +2801,30 @@ pub fn factorize_multifrontal_supernodal_parallel(
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
 
+    // Lever 1.1: enable intra-front (node-level) parallelism in the
+    // per-front dense Schur update. This is set ONLY here, on the
+    // parallel driver, so a serial backend — `Solver::with_parallel(false)`,
+    // which routes to `factorize_multifrontal_supernodal_with_workspace`
+    // — leaves `intrafront_parallel = false` and never spawns nested
+    // rayon work (the pounce#79 oversubscription guarantee). The dense
+    // kernel further gates on `INTRAFRONT_MIN_AREA`, so only wide fronts
+    // actually fork. Bit-exact regardless of thread count (see
+    // `apply_schur_panel_range`). See
+    // `dev/research/lever-1.1-intrafront-parallel-schur.md`.
+    // `FERAL_INTRAFRONT=0|off|false` disables Lever 1.1 for A/B
+    // benchmarking and as a safety override; default on. Read once per
+    // factorization (negligible beside the factor cost), mirroring the
+    // `FERAL_PARALLEL` diagnostic affordance.
+    let intrafront_on = !matches!(
+        std::env::var("FERAL_INTRAFRONT").as_deref(),
+        Ok("0") | Ok("off") | Ok("false") | Ok("no")
+    );
+    let params = &{
+        let mut p = params.clone();
+        p.bk.intrafront_parallel = intrafront_on;
+        p
+    };
+
     let n = symbolic.n;
     let n_snodes = symbolic.supernodes.len();
     let telemetry = params.parallel_telemetry.as_deref();

@@ -233,3 +233,66 @@ fn deep_chain_tree_no_stack_overflow() {
     assert_inertia_eq(&seq_inertia, &par_inertia, "deep-chain/total");
     assert_factors_equal(&seq_factors, &par_factors, "deep-chain");
 }
+
+/// Lever 1.1 gate: the intra-front parallel Schur update must be
+/// bit-exact with the serial path, and the parallel path must actually
+/// fire (a front wide enough to clear `INTRAFRONT_MIN_AREA = 256*256`).
+///
+/// A dense, diagonally dominant SPD matrix factorizes into a single wide
+/// root supernode of all-1×1 pivots — exactly the
+/// `apply_blocked_schur_panel` fast path that Lever 1.1 parallelizes.
+/// With `n = 1200`, the first 64-wide panel has trailing area
+/// `(1200 - 64) * 64 = 72_704 >= 65_536`, so the `par_chunks_mut` branch
+/// runs. We force a 4-thread pool so the split executes even on a
+/// single-core CI, then assert the parallel driver (intra-front ON, set
+/// internally) is byte-identical to the sequential driver (intra-front
+/// OFF) on L, D, and inertia. Bit-exactness is structural — each
+/// trailing column is reduced on one thread — so any thread count or
+/// chunk partition must match. See
+/// `dev/research/lever-1.1-intrafront-parallel-schur.md`.
+#[test]
+fn intrafront_parallel_schur_matches_serial() {
+    let n = 1200usize;
+    // Dense lower triangle (row >= col). Diagonally dominant ⇒ SPD ⇒
+    // all 1×1 pivots, no 2×2, no zero pivots — routes through the
+    // rank-`n_elim` panel fast path that Lever 1.1 parallelizes.
+    let mut rows = Vec::with_capacity(n * (n + 1) / 2);
+    let mut cols = Vec::with_capacity(n * (n + 1) / 2);
+    let mut vals = Vec::with_capacity(n * (n + 1) / 2);
+    for c in 0..n {
+        rows.push(c);
+        cols.push(c);
+        vals.push(n as f64 + 1.0); // diagonal dominates the n-1 unit off-diagonals
+        for r in (c + 1)..n {
+            rows.push(r);
+            cols.push(c);
+            vals.push(1.0);
+        }
+    }
+    let a = CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("dense SPD triplets");
+    let sym = symbolic_factorize(&a, &SupernodeParams::default()).expect("symbolic");
+
+    // Sequential driver: intra-front stays false (serial Schur).
+    let (seq_factors, seq_inertia) =
+        factorize_multifrontal(&a, &sym, &NumericParams::default()).expect("sequential factor");
+
+    // Parallel driver (sets intra-front true internally), forced onto a
+    // 4-thread pool so the `par_chunks_mut` split is actually exercised.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("4-thread pool");
+    let (par_factors, par_inertia) = pool.install(|| {
+        factorize_multifrontal_supernodal_parallel(&a, &sym, &NumericParams::default())
+            .expect("parallel factor")
+    });
+
+    assert_eq!(par_inertia.positive, n, "SPD: all positive");
+    assert_eq!(par_inertia.negative, 0, "SPD: none negative");
+    assert_eq!(par_inertia.zero, 0, "SPD: no zero pivots");
+    assert_inertia_eq(&seq_inertia, &par_inertia, "intrafront/total");
+    // `assert_factors_equal` -> `assert_node_eq` already checks L, d_diag,
+    // d_subdiag, and contrib bit-exact per supernode, so this single call
+    // covers the full factor (not just L).
+    assert_factors_equal(&seq_factors, &par_factors, "intrafront");
+}

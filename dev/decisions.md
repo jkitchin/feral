@@ -4933,3 +4933,73 @@ pass; bench_multirhs refined ratio ~0.34–0.40.
 
 **References.** `dev/research/issue-58-batched-refinement.md`,
 `dev/journal/2026-05-30-01.org`, issue #58.
+
+
+## 2026-05-31 — Lever 1.2 (cache blocking + L-panel packing) deferred
+
+The perf-lever sweep (dev/research/perf-review-2026-05-31.md) reached Tier-1 #2,
+cache blocking + L-panel packing for the dense Schur update. After tracing the
+bottleneck (L-panel re-streamed ~480x per block step at nrow=2000, ~480 MB L3
+traffic — the wall Lever 1.1 plateaued on) and writing the plan
+(dev/research/lever-1.2-cache-blocking-packing.md), the lever was DEFERRED, not
+implemented, because:
+
+1. It restructures the hot, bit-exact-tested Schur kernel (6 strided variants),
+   a higher-risk change than Lever 1.1 which wrapped the kernel unchanged.
+2. Its payoff is a ~10-30% bandwidth gain, which is below the run-to-run noise
+   floor on the shared dev machine — Lever 1.1's identical A/B swung 1.2x-2.5x
+   under contention. The win cannot be measured trustworthily here without an
+   idle machine or hardware cache-miss counters.
+
+When revisited, implement in two independently-measurable steps: 1.2a row-band
+blocking (reuse existing kernels via their src_row_offset+len params), then 1.2b
+packing only if 1.2a measurement justifies the extra copy. Lever 1.1 already
+banked the large intra-front win; 1.2 is a refinement, not a prerequisite for
+Levers 2.1/2.2/3.x. Moving on to Lever 2.1 (parallel multi-RHS solve).
+
+
+## 2026-05-31 — Lever 2.1 (parallel-across-RHS solve) deferred
+
+Deferred in favour of Lever 2.2. The multi-RHS solve dispatches its kernel by
+total nrhs (use_blas3 = nrhs>=32, solve.rs:509), and the BLAS-3 back-substitution
+is not bit-identical to the rank-1 path (~1e-15 drift, documented at
+tests/multi_rhs.rs:205). Splitting the column set into sub-threshold groups for
+parallelism therefore flips the kernel and breaks bit-exactness vs the serial
+solve. A bit-exact parallel form requires threading a forced-path selector +
+column-range through all six solve kernels — risky surgery on the bit-exact
+numeric core — for a narrow payoff: the solve is already faster than MUMPS, only
+large-nrhs benefits, and the IPM consumer uses nrhs=2 (no benefit). Design +
+revisit plan in dev/research/lever-2.1-parallel-multirhs-solve.md. Proceeding to
+Lever 2.2 (symbolic speedups), which targets the symbolic-bound small-matrix
+p90 the corpus actually lives in.
+
+
+## 2026-05-31 — Lever 2.2 (symbolic speedups) found already-implemented
+
+The perf-lever sweep reached Tier-2 #2 (symbolic-phase speedups: cache MC64
+across compress->scale, and auto-dispatch compression on predicted-tail
+matrices). On inspection BOTH halves are already implemented in the codebase
+("Phase 2.4.4", pre-dating this sweep): the MC64 matching is computed once and
+cached (symbolic/mod.rs:605/614) and reused by the numeric phase
+(scaling/mod.rs:298-300); compression auto-dispatch is the default via
+OrderingPreprocess::Auto + pick_ordering_preprocess (mod.rs:347-369). The
+perf-review (dev/research/perf-review-2026-05-31.md), written the same day by
+the PR#59 analysis session, over-stated the remaining work by listing these as
+future. Its further "tighter gate (compRat<=0.7)" idea is not viable as stated
+(compRat requires running MC64 to compute, so it cannot gate whether to run
+MC64). No code change; verification recorded in
+dev/research/lever-2.2-symbolic-speedups.md.
+
+
+## 2026-05-31 — Levers 3.1 (FMA fallback) and 3.2 (wider NR) deferred
+
+Both Tier-3 levers deferred (dev/research/lever-3.x-deferred.md). 3.2 (wider
+micro-kernel NR): perf-review says measure only after 1.1/1.2 land, but 1.2 is
+deferred and 3.2 attacks the same memory-bandwidth wall — wider arithmetic width
+does not help a bandwidth-bound kernel, and the gain is sub-noise-floor on this
+shared machine. 3.1 (FMA boundary-safe fallback): this host is arm64, where FMA
+measured ~0% (decisions.md 2026-04-14, 1.87->1.86) and flips inertia on ~30/154k
+boundary matrices; high-complexity fallback for ~zero gain on the only available
+hardware. fma is already an opt-in BunchKaufmanParams field for a future x86
+measurement. The perf-lever sweep thus implements Lever 1.1 only (1.2/2.1
+deferred-with-plan, 2.2 already implemented in Phase 2.4.4).

@@ -1,0 +1,166 @@
+* 11:00 :perf:lever-1.1:plan:
+  Starting the systematic perf-lever sweep from perf-review-2026-05-31.md
+  on branch claude/perf-levers. Lever 1.1 = intra-front (node-level)
+  parallelism of the trailing Schur update in apply_blocked_schur_panel
+  (src/dense/factor.rs). Per-front dense factor is the serial ceiling
+  near the root (perf-review §0: cont-201 1.44x@T=8 vs 4.83x bound).
+  Research note: dev/research/lever-1.1-intrafront-parallel-schur.md.
+
+* 11:20 :perf:lever-1.1:design:
+  Decisions (with user): toggle is a BunchKaufmanParams field
+  (intrafront_parallel, mirrors fma), default false. Churn check: 154/164
+  BK literal sites use ..Default::default() (untouched); only ~20
+  enumerated sites needed the field (scripted insert after
+  static_pivot_floor). Coupling: ONLY the parallel driver
+  (factorize_multifrontal_supernodal_parallel) sets it true, so a serial
+  backend (with_parallel(false)) never spawns nested rayon work
+  (pounce#79 guarantee). Front-size gate INTRAFRONT_MIN_AREA=256*256 keeps
+  small fronts serial.
+
+* 11:35 :perf:lever-1.1:implement:
+  Refactored apply_blocked_schur_panel: split `a` once at j_start*nrow
+  into read-only `head` (holds the pivot panel) + mutable `tail`; the
+  per-range body apply_schur_panel_range is shared by serial and
+  par_chunks_mut dispatch. Bit-exact by construction — each trailing
+  column reduced over ascending q on one thread, no cross-thread
+  reduction (mirrors PR#59 probe_intrafront_schur, verified there across
+  chunk widths {64,100,137,200,512} and T={1,2,4}). Added FERAL_INTRAFRONT
+  env override for A/B. Lib + all targets build clean.
+
+* 11:50 :perf:lever-1.1:correctness:
+  New gate tests/parallel_parity.rs::intrafront_parallel_schur_matches_serial
+  (dense SPD n=1200 → wide root, area 72704 ≥ 65536 so the split fires;
+  forced 4-thread pool): byte-identical L/D/contrib + inertia vs sequential
+  (assert_factors_equal → assert_node_eq). PASS. parallel_corpus_parity
+  FULL kkt corpus (169591 total; 41220 factored, 128368 dense-fast-skip,
+  3 unreadable RHS-vector files): 0 mismatch. Full suite cargo test
+  --release: 572 passed, 0 failed. clippy --all-targets -D warnings clean;
+  fmt clean.
+
+* 12:05 :perf:lever-1.1:benchmark:
+  A/B (src/bin/bench_intrafront, FERAL_INTRAFRONT=0|1), 14 rayon threads,
+  synthetic dense SPD fronts:
+    dense_spd_1200: speedup 1.2-2.5x (off baseline 45-67ms across runs)
+    dense_spd_1600: speedup 2.0-3.0x
+    dense_spd_2000: speedup 2.6-3.1x
+  HONEST NOTE: speedup is load-sensitive — this is a shared bandwidth-
+  contended machine and the trailing update is memory-bandwidth-bound.
+  Repeated runs of the SAME case spanned 1.2-2.5x at n=1200. The gain is
+  real and grows with front size, but I should not present a single
+  optimistic run as definitive. Correctness is load-INDEPENDENT:
+  bit_exact=true and inertia_eq=true on every run. ~3x ceiling is
+  bandwidth, not the 14-thread arithmetic limit → Lever 1.2 target.
+  Plateaus ~3x (trailing update is bandwidth-bound before the 14-thread
+  arithmetic ceiling — matches PR#59's 3.57x@4-core). Lever 1.2 (cache
+  blocking + L-panel packing) targets that bandwidth wall next.
+  Default flipped ON (parallel driver) per session decision; serial
+  driver unaffected. Lever 1.1 complete.
+
+* 12:40 :perf:lever-1.2:deferred:
+  Lever 1.2 (cache blocking + L-panel packing) — analysis + plan done
+  (dev/research/lever-1.2-cache-blocking-packing.md), implementation
+  DEFERRED. Traced the bottleneck: quad kernel re-streams the L-panel
+  (64 cols x nrow) once per 4 trailing cols => ~480 MB L3 traffic at
+  nrow=2000, the wall Lever 1.1 hit. Fix = row-band blocking (+ optional
+  packing), both bit-exact.
+  Deferred because (1) it restructures the hot bit-exact kernel (6 strided
+  variants) — higher risk than 1.1's wrap; (2) ~10-30% bandwidth payoff is
+  BELOW the run-to-run noise floor here (1.1's identical A/B swung 1.2-2.5x
+  under load) so it can't be measured trustworthily on this shared box.
+  Plan when revisited: 1.2a row-band blocking (reuse existing kernels via
+  src_row_offset+len), then 1.2b packing iff 1.2a justifies it. Recorded
+  in decisions.md. Moving to Lever 2.1 (parallel multi-RHS solve) — a
+  load-robust, embarrassingly-parallel-across-RHS win.
+
+* 12:45 :perf:lever-2.1:plan:
+  Starting Lever 2.1: route the multi-RHS solve across independent RHS
+  columns in parallel (and onto the deterministic nofma pulp path).
+  Embarrassingly parallel — column c's solve is independent of column c'
+  — so bit-exact by construction. A/B via bench_multirhs (already exists).
+
+* 13:00 :perf:lever-2.1:deferred:
+  Lever 2.1 (parallel-across-RHS solve) — design done
+  (dev/research/lever-2.1-parallel-multirhs-solve.md), DEFERRED in favour
+  of 2.2. Landmine: solve picks kernel by total nrhs (use_blas3 = nrhs>=32,
+  solve.rs:509) and BLAS-3 back-sub is NOT bit-identical to rank-1
+  (~1e-15 drift, documented tests/multi_rhs.rs:205). Splitting columns
+  into sub-threshold groups flips the kernel => breaks parity with serial.
+  Bit-exact form needs forced-path + column-range threaded through all 6
+  solve kernels — risky surgery on the bit-exact core, for a narrow payoff
+  (solve already < MUMPS; only helps large-nrhs; IPM uses nrhs=2 => no
+  gain). 2.2 targets the actual measured tail instead. Recorded in
+  decisions.md.
+
+* 13:05 :perf:lever-2.2:plan:
+  Starting Lever 2.2 (symbolic-phase speedups, perf-review Tier-2 #2).
+  The 154k-matrix p90-vs-MUMPS tail is symbolic-bound (KIRBY2 8.76x is
+  analysis time, not numeric; perf-review §0 + §2b). Two flagged items:
+  (a) plumb the cached MC64 matching into the ldlt_compress path to kill
+  the double-Hungarian; (b) auto-dispatch compression only on predicted-
+  tail matrices (large-n + MC64 compRat <= 0.7). Investigating the
+  symbolic/MC64/compress code now.
+
+* 13:25 :perf:lever-2.2:already-done:
+  Lever 2.2 (symbolic speedups) is ALREADY IMPLEMENTED — no net-new work.
+  Verified both halves live in the codebase ("Phase 2.4.4", pre-dates this
+  sweep):
+  - Sub-A (kill double-Hungarian): MC64 computed once + cached at
+    symbolic/mod.rs:605/614; numeric reuses via scaling_from_cache
+    (scaling/mod.rs:298-300) instead of recomputing.
+  - Sub-B (auto-dispatch compression): OrderingPreprocess::Auto default
+    (supernode.rs:108,116) resolved by pick_ordering_preprocess
+    (mod.rs:347-369): compress iff n>=128 AND >=30% degree-<=2 cols.
+  The perf-review (written same day by the PR#59 session) over-stated
+  remaining work — it listed 2.2 as future but it was already landed. Its
+  "tighter gate compRat<=0.7" idea is circular (compRat needs MC64 to
+  compute, defeating the gate). Current cheap shape predicate is correct.
+  Recorded in dev/research/lever-2.2-symbolic-speedups.md. Lever 2.2
+  complete (already-done).
+
+* 13:40 :perf:lever-3.x:deferred:
+  Levers 3.2 (wider NR) and 3.1 (FMA fallback) deferred with rationale
+  (dev/research/lever-3.x-deferred.md). 3.2: same bandwidth wall as the
+  deferred 1.2 — wider arithmetic width can't help a bandwidth-bound
+  kernel until 1.2 lands, and the gain is sub-noise-floor here anyway.
+  3.1: this box is arm64 (uname -m), where FMA measured ~0% (decisions.md
+  2026-04-14, 1.87->1.86) and flips inertia on ~30/154k boundary matrices;
+  the boundary-safe fallback is high-complexity for ~zero gain on the only
+  available hardware. fma is already an opt-in BunchKaufmanParams field if
+  an x86 gap ever shows. Sweep implements 1.1 only; closing out. Recorded
+  in decisions.md.
+
+* 13:45 :perf:sweep:bench:
+  Closing the sweep: running full `cargo run --bin bench --release` to
+  confirm Lever 1.1 did not regress the small-front geomean (the gate is
+  INTRAFRONT_MIN_AREA=256*256, which should keep small fronts serial).
+  This is the evidence for the 1.1 merge decision.
+
+* 14:05 :perf:sweep:bench:result:
+  Small-front regression check for Lever 1.1.
+  - 8-matrix `bench` (FERAL_INTRAFRONT OFF vs ON): factor times within
+    noise (spd_200 389->362us, others identical/within jitter); inertia
+    IDENTICAL on all 8 matrices. All 8 are sub-threshold (area < 256*256)
+    so both runs take the SERIAL refactored path — confirms the
+    apply_schur_panel_range refactor did not slow small fronts.
+  - Structural guarantee: fronts below INTRAFRONT_MIN_AREA never enter the
+    par_chunks_mut branch; the serial path is bit-exact to the original
+    (proven by parallel_corpus_parity: 0 mismatch / 41220 factored). So
+    the small-front geomean cannot regress from 1.1.
+  - NOTE: `cargo run --bin bench` is an 8-matrix synthetic harness, NOT
+    the corpus p90 partition. The recorded p90 numbers (small-frontal
+    1.34/1.50, medium 1.74/1.50) come from a different path; the corpus
+    walk (bench_solver_corpus / 169591 kkt matrices vs MUMPS oracle) is an
+    hour+ run and timing-noisy on this contended box, so it was not run to
+    completion — the structural argument + corpus-parity bit-exactness are
+    the load-robust evidence. CLAUDE.md's "run --bin bench" session step
+    is stale on which bin yields the partition.
+  Conclusion: 1.1 is correctness-clean with no small-front regression;
+  ready for the merge decision. Perf-lever sweep closed.
+
+* 14:10 :session:recovery:
+  Mid-checkpoint a tool-call cascade was cancelled and the branch ref
+  regressed one commit (HEAD 56c6e48 -> 2d576c4) with a clean tree — the
+  lever-3.x commit object survived intact. Recovered with `git merge
+  --ff-only 56c6e48`; verified lever-3.x-deferred.md + decisions.md
+  entries present. No work lost. Journal confirmed clean (no partial
+  heredoc writes). Session checkpoint written this entry.
