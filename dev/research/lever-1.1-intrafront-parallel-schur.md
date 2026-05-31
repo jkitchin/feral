@@ -95,15 +95,22 @@ A/B via `src/bin/bench_intrafront` (`FERAL_INTRAFRONT=0|1`), synthetic dense
 diagonally-dominant SPD fronts (one wide root supernode, all 1×1 pivots — the
 Lever-1.1 fast path). Off = serial trailing update; on = `par_chunks_mut`.
 
-| matrix          | n    | off (ms) | on (ms) | speedup | bit-exact |
-|-----------------|------|---------:|--------:|--------:|-----------|
-| dense_spd_1200  | 1200 |   44.93  |  17.97  | 2.50×   | yes       |
-| dense_spd_1600  | 1600 |   95.78  |  31.93  | 3.00×   | yes       |
-| dense_spd_2000  | 2000 |  183.86  |  62.18  | 3.08×   | yes       |
+Speedup is **load-sensitive** (this is a shared, bandwidth-contended machine and
+the trailing Schur update is memory-bandwidth-bound). Across repeated runs the
+same n=1200 case ranged 1.2×–2.5×; the off-baseline itself varied 45–67 ms. The
+gain grows with front size (larger fronts amortize the fork and have more
+parallel work). Representative bracket:
 
-(Idle machine; a concurrent-load run earlier showed 1.24–2.66× — the gain is
-real but contends for memory bandwidth, so absolute speedup depends on machine
-load. Correctness is load-independent: bit-exact on every run.)
+| matrix          | n    | speedup (range over runs) | bit-exact |
+|-----------------|------|---------------------------|-----------|
+| dense_spd_1200  | 1200 | 1.2× – 2.5×                | yes       |
+| dense_spd_1600  | 1600 | 2.0× – 3.0×                | yes       |
+| dense_spd_2000  | 2000 | 2.6× – 3.1×                | yes       |
+
+Speedup magnitude depends on machine load; **correctness is load-independent —
+bit-exact and inertia-equal on every run.** The ~3× ceiling (bandwidth, not the
+14-thread arithmetic limit) is what Lever 1.2 (cache blocking + L-panel packing)
+targets next.
 
 (Speedup plateaus ~3× because the trailing update becomes memory-bandwidth-bound
 well before the 14-thread arithmetic ceiling — consistent with PR #59's

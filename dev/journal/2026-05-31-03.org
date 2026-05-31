@@ -40,11 +40,16 @@
 * 12:05 :perf:lever-1.1:benchmark:
   A/B (src/bin/bench_intrafront, FERAL_INTRAFRONT=0|1), 14 rayon threads,
   synthetic dense SPD fronts:
-    dense_spd_1200: 44.93ms -> 17.97ms  2.50x  bit_exact
-    dense_spd_1600: 95.78ms -> 31.93ms  3.00x  bit_exact
-    dense_spd_2000: 183.86ms -> 62.18ms 3.08x  bit_exact
-  (idle machine; under concurrent load earlier the same A/B showed
-  1.24-2.66x — bandwidth-contended, but correctness is load-independent.)
+    dense_spd_1200: speedup 1.2-2.5x (off baseline 45-67ms across runs)
+    dense_spd_1600: speedup 2.0-3.0x
+    dense_spd_2000: speedup 2.6-3.1x
+  HONEST NOTE: speedup is load-sensitive — this is a shared bandwidth-
+  contended machine and the trailing update is memory-bandwidth-bound.
+  Repeated runs of the SAME case spanned 1.2-2.5x at n=1200. The gain is
+  real and grows with front size, but I should not present a single
+  optimistic run as definitive. Correctness is load-INDEPENDENT:
+  bit_exact=true and inertia_eq=true on every run. ~3x ceiling is
+  bandwidth, not the 14-thread arithmetic limit → Lever 1.2 target.
   Plateaus ~3x (trailing update is bandwidth-bound before the 14-thread
   arithmetic ceiling — matches PR#59's 3.57x@4-core). Lever 1.2 (cache
   blocking + L-panel packing) targets that bandwidth wall next.
