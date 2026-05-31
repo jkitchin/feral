@@ -135,6 +135,54 @@ that dominate, more remainder code. Measure only after 1.1/1.2 land.
 - Verdict: out of scope. The same effort spent on Tier-1 CPU intra-front
   parallelism yields a deterministic win on the matrices that actually hurt.
 
+## 2b. Verification (2026-05-31, this session)
+
+Two probes (excluded `src/bin`, not wired into the library) test the Tier-1 #1
+claims empirically on this 4-core container.
+
+**Correctness + scaling of the parallel Schur update**
+(`src/bin/probe_intrafront_schur.rs`): a representative dense front (nrow=2048,
+n_elim=64) updated by the *production* `schur_panel_minus_nofma_strided{,_dual,_quad}`
+kernels, sequentially vs `par_chunks_mut` over disjoint trailing-column chunks.
+
+- **Bit-exact: PASS.** Byte-identical (`f64::to_bits`) to the sequential pass
+  across chunk widths {64,100,137,200,512} and thread counts {1,2,4}. The
+  chunk widths are deliberately not multiples of 4, so the quad/dual/single
+  grouping *differs* between serial and parallel — yet every element matches.
+  This confirms the claim structurally: no cross-thread reduction, so
+  determinism does not depend on thread count or partitioning.
+- **Scaling: 3.57× on 4 cores** (89% efficiency). Absolute GFLOP/s is low
+  because this container is memory-bandwidth-starved (a 33 MB `clone` runs at
+  ~1.5 GB/s); the *relative* speedup is the verified quantity. A real
+  workstation would show higher absolute throughput and similar scaling.
+
+**Premise check — which matrices actually have a dominant large front?**
+(`src/bin/probe_front_concentration.rs`, per-front cost ≈ ncol·nrow², plus
+measured symbolic vs numeric wall time):
+
+| matrix | n | largest front | top-16 flop share | symbolic | numeric | sym share |
+|--------|--:|---------------|------------------:|---------:|--------:|----------:|
+| CRESC132_0000 | 5314 | 11×11   |  6.4% | 22.2 ms |  5.7 ms | **80%** |
+| VESUVIOU_0030 | 3083 | 18×18   | 18.7% |  4.0 ms |  3.4 ms |  54% |
+| nuffield2     |26649 | 87×501  | 43.5% |  242 ms |  966 ms |  20% |
+
+**This corrects the §0 targeting.** CRESC132 and the VESUVIO family — two of the
+named worst-case ratios — are **symbolic/analysis-bound**, not large-front-bound:
+their largest front is tiny (11×11, 18×18) and analysis is 54–80% of the cost.
+**Intra-front parallelism would not help them** (it only touches numeric, and the
+fronts are too small to parallelize). The right lever for *that* population is
+Tier-2 §2.2 (symbolic-phase speedups).
+
+Intra-front parallelism pays on the **numeric-bound, large-front** population:
+nuffield2 (501-row fronts, 80% numeric) and the documented pinene_3200 (issue
+#8: ~14k-column root → 87 s). The synthetic 2048-front probe models exactly that
+root and shows the win is real and bit-exact.
+
+**Net:** the two highest-value levers are *complementary and target different
+matrices* — symbolic speedups (Tier-2 §2.2) for the small symbolic-bound tail,
+intra-front parallelism (Tier-1 §1.1) for the large numeric-bound tail. The
+earlier note over-attributed CRESC132 to the latter; measurement reassigns it.
+
 ## 3. Recommended next step
 
 Tier-1 1.1 (intra-front parallel Schur update) — highest leverage, zero
