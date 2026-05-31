@@ -4972,3 +4972,20 @@ large-nrhs benefits, and the IPM consumer uses nrhs=2 (no benefit). Design +
 revisit plan in dev/research/lever-2.1-parallel-multirhs-solve.md. Proceeding to
 Lever 2.2 (symbolic speedups), which targets the symbolic-bound small-matrix
 p90 the corpus actually lives in.
+
+
+## 2026-05-31 — Lever 2.2 (symbolic speedups) found already-implemented
+
+The perf-lever sweep reached Tier-2 #2 (symbolic-phase speedups: cache MC64
+across compress->scale, and auto-dispatch compression on predicted-tail
+matrices). On inspection BOTH halves are already implemented in the codebase
+("Phase 2.4.4", pre-dating this sweep): the MC64 matching is computed once and
+cached (symbolic/mod.rs:605/614) and reused by the numeric phase
+(scaling/mod.rs:298-300); compression auto-dispatch is the default via
+OrderingPreprocess::Auto + pick_ordering_preprocess (mod.rs:347-369). The
+perf-review (dev/research/perf-review-2026-05-31.md), written the same day by
+the PR#59 analysis session, over-stated the remaining work by listing these as
+future. Its further "tighter gate (compRat<=0.7)" idea is not viable as stated
+(compRat requires running MC64 to compute, so it cannot gate whether to run
+MC64). No code change; verification recorded in
+dev/research/lever-2.2-symbolic-speedups.md.

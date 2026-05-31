@@ -99,3 +99,20 @@
   the double-Hungarian; (b) auto-dispatch compression only on predicted-
   tail matrices (large-n + MC64 compRat <= 0.7). Investigating the
   symbolic/MC64/compress code now.
+
+* 13:25 :perf:lever-2.2:already-done:
+  Lever 2.2 (symbolic speedups) is ALREADY IMPLEMENTED — no net-new work.
+  Verified both halves live in the codebase ("Phase 2.4.4", pre-dates this
+  sweep):
+  - Sub-A (kill double-Hungarian): MC64 computed once + cached at
+    symbolic/mod.rs:605/614; numeric reuses via scaling_from_cache
+    (scaling/mod.rs:298-300) instead of recomputing.
+  - Sub-B (auto-dispatch compression): OrderingPreprocess::Auto default
+    (supernode.rs:108,116) resolved by pick_ordering_preprocess
+    (mod.rs:347-369): compress iff n>=128 AND >=30% degree-<=2 cols.
+  The perf-review (written same day by the PR#59 session) over-stated
+  remaining work — it listed 2.2 as future but it was already landed. Its
+  "tighter gate compRat<=0.7" idea is circular (compRat needs MC64 to
+  compute, defeating the gate). Current cheap shape predicate is correct.
+  Recorded in dev/research/lever-2.2-symbolic-speedups.md. Lever 2.2
+  complete (already-done).
