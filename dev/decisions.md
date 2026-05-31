@@ -4933,3 +4933,26 @@ pass; bench_multirhs refined ratio ~0.34–0.40.
 
 **References.** `dev/research/issue-58-batched-refinement.md`,
 `dev/journal/2026-05-30-01.org`, issue #58.
+
+
+## 2026-05-31 — Lever 1.2 (cache blocking + L-panel packing) deferred
+
+The perf-lever sweep (dev/research/perf-review-2026-05-31.md) reached Tier-1 #2,
+cache blocking + L-panel packing for the dense Schur update. After tracing the
+bottleneck (L-panel re-streamed ~480x per block step at nrow=2000, ~480 MB L3
+traffic — the wall Lever 1.1 plateaued on) and writing the plan
+(dev/research/lever-1.2-cache-blocking-packing.md), the lever was DEFERRED, not
+implemented, because:
+
+1. It restructures the hot, bit-exact-tested Schur kernel (6 strided variants),
+   a higher-risk change than Lever 1.1 which wrapped the kernel unchanged.
+2. Its payoff is a ~10-30% bandwidth gain, which is below the run-to-run noise
+   floor on the shared dev machine — Lever 1.1's identical A/B swung 1.2x-2.5x
+   under contention. The win cannot be measured trustworthily here without an
+   idle machine or hardware cache-miss counters.
+
+When revisited, implement in two independently-measurable steps: 1.2a row-band
+blocking (reuse existing kernels via their src_row_offset+len params), then 1.2b
+packing only if 1.2a measurement justifies the extra copy. Lever 1.1 already
+banked the large intra-front win; 1.2 is a refinement, not a prerequisite for
+Levers 2.1/2.2/3.x. Moving on to Lever 2.1 (parallel multi-RHS solve).

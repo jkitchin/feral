@@ -55,3 +55,25 @@
   blocking + L-panel packing) targets that bandwidth wall next.
   Default flipped ON (parallel driver) per session decision; serial
   driver unaffected. Lever 1.1 complete.
+
+* 12:40 :perf:lever-1.2:deferred:
+  Lever 1.2 (cache blocking + L-panel packing) — analysis + plan done
+  (dev/research/lever-1.2-cache-blocking-packing.md), implementation
+  DEFERRED. Traced the bottleneck: quad kernel re-streams the L-panel
+  (64 cols x nrow) once per 4 trailing cols => ~480 MB L3 traffic at
+  nrow=2000, the wall Lever 1.1 hit. Fix = row-band blocking (+ optional
+  packing), both bit-exact.
+  Deferred because (1) it restructures the hot bit-exact kernel (6 strided
+  variants) — higher risk than 1.1's wrap; (2) ~10-30% bandwidth payoff is
+  BELOW the run-to-run noise floor here (1.1's identical A/B swung 1.2-2.5x
+  under load) so it can't be measured trustworthily on this shared box.
+  Plan when revisited: 1.2a row-band blocking (reuse existing kernels via
+  src_row_offset+len), then 1.2b packing iff 1.2a justifies it. Recorded
+  in decisions.md. Moving to Lever 2.1 (parallel multi-RHS solve) — a
+  load-robust, embarrassingly-parallel-across-RHS win.
+
+* 12:45 :perf:lever-2.1:plan:
+  Starting Lever 2.1: route the multi-RHS solve across independent RHS
+  columns in parallel (and onto the deterministic nofma pulp path).
+  Embarrassingly parallel — column c's solve is independent of column c'
+  — so bit-exact by construction. A/B via bench_multirhs (already exists).
