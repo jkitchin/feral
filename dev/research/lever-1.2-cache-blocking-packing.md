@@ -1,5 +1,59 @@
 # Lever 1.2 — cache blocking + L-panel packing for the dense Schur update
 
+**STATUS: 1.2a IMPLEMENTED, MEASURED, REJECTED (2026-05-31). Naive row-band
+blocking is bit-exact but a 0.74-0.95x REGRESSION, not a gain. Reverted, not
+shipped. See "Measured result" below.**
+
+## Measured result (2026-05-31) — supersedes the original prediction
+
+This note originally *predicted* a ~10-30% bandwidth gain that would be "below
+the noise floor." Prompted to verify rather than predict, 1.2a (row-band
+blocking) was implemented on branch `claude/lever-1.2a-row-band-blocking` and
+benchmarked A/B (`ROW_BAND_ENABLED` off vs on, sequential factor, dense SPD
+fronts). Both prior claims were WRONG:
+
+- **Measurable**: yes, clearly and repeatably (not noise).
+- **Slower, not faster**:
+
+  | matrix | off (ms) | on (ms) | speedup |
+  |--------|---------:|--------:|--------:|
+  | dense_spd_800  |  22-24 |  24-27 | 0.89x |
+  | dense_spd_1200 |  68-74 |  78-91 | 0.79-0.95x |
+  | dense_spd_1600 | 151-160 | 189-213 | 0.75-0.80x |
+  | dense_spd_2000 | 294-302 | 386-411 | 0.74-0.76x (3 runs) |
+
+  Monotonic with size; a real ~10-25% regression.
+
+- **Correctness prediction held**: the gate test
+  `row_band_blocking_matches_non_banded` passed byte-identically (factor +
+  inertia) at every size. The bit-exactness argument was sound; the performance
+  argument was wrong in sign and magnitude.
+
+### Why it regressed
+
+The non-banded path uses the SIMD quad kernel
+(`schur_panel_minus_nofma_strided_quad`), which shares each pivot-column `src`
+load across 4 destination columns (register blocking). The naive 1.2a loop
+replaced that with a per-column scalar-alpha `axpy_minus_unroll4`, trading 4x
+register reuse for cache reuse; the register-reuse loss dominated the bandwidth
+saving.
+
+### What a winning 1.2 would require
+
+Band WHILE preserving the quad kernel: within each row band `[r0, r1)`, call the
+strided quad/dual/single kernels on band sub-slices (`src_row_offset = r0`,
+`len = r1 - r0`), keeping register blocking AND adding cache blocking. Materially
+more code, fiddly at the diagonal band. Deferred as a larger evidence-backed
+effort; the cheap "reuse existing kernels via a scalar axpy" plan is disproven.
+
+### Methodological note
+
+The original "deferred because unmeasurable" rationale was unverified
+speculation. Implementing + measuring took ~30 min and gave a definite reject.
+Measure the cheap version before asserting a lever's magnitude or even its sign.
+
+---
+
 **STATUS: DEFERRED (2026-05-31).** Analysis + plan complete; implementation not
 started. Deferred for two reasons documented below under "Scope, risk, and
 measurement honesty": (1) it restructures the hot, bit-exact-tested Schur kernel
