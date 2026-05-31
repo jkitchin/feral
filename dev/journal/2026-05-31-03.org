@@ -1,0 +1,52 @@
+* 11:00 :perf:lever-1.1:plan:
+  Starting the systematic perf-lever sweep from perf-review-2026-05-31.md
+  on branch claude/perf-levers. Lever 1.1 = intra-front (node-level)
+  parallelism of the trailing Schur update in apply_blocked_schur_panel
+  (src/dense/factor.rs). Per-front dense factor is the serial ceiling
+  near the root (perf-review §0: cont-201 1.44x@T=8 vs 4.83x bound).
+  Research note: dev/research/lever-1.1-intrafront-parallel-schur.md.
+
+* 11:20 :perf:lever-1.1:design:
+  Decisions (with user): toggle is a BunchKaufmanParams field
+  (intrafront_parallel, mirrors fma), default false. Churn check: 154/164
+  BK literal sites use ..Default::default() (untouched); only ~20
+  enumerated sites needed the field (scripted insert after
+  static_pivot_floor). Coupling: ONLY the parallel driver
+  (factorize_multifrontal_supernodal_parallel) sets it true, so a serial
+  backend (with_parallel(false)) never spawns nested rayon work
+  (pounce#79 guarantee). Front-size gate INTRAFRONT_MIN_AREA=256*256 keeps
+  small fronts serial.
+
+* 11:35 :perf:lever-1.1:implement:
+  Refactored apply_blocked_schur_panel: split `a` once at j_start*nrow
+  into read-only `head` (holds the pivot panel) + mutable `tail`; the
+  per-range body apply_schur_panel_range is shared by serial and
+  par_chunks_mut dispatch. Bit-exact by construction — each trailing
+  column reduced over ascending q on one thread, no cross-thread
+  reduction (mirrors PR#59 probe_intrafront_schur, verified there across
+  chunk widths {64,100,137,200,512} and T={1,2,4}). Added FERAL_INTRAFRONT
+  env override for A/B. Lib + all targets build clean.
+
+* 11:50 :perf:lever-1.1:correctness:
+  New gate tests/parallel_parity.rs::intrafront_parallel_schur_matches_serial
+  (dense SPD n=1200 → wide root, area 72704 ≥ 65536 so the split fires;
+  forced 4-thread pool): byte-identical L/D/contrib + inertia vs sequential
+  (assert_factors_equal → assert_node_eq). PASS. parallel_corpus_parity
+  FULL kkt corpus (169591 total; 41220 factored, 128368 dense-fast-skip,
+  3 unreadable RHS-vector files): 0 mismatch. Full suite cargo test
+  --release: 572 passed, 0 failed. clippy --all-targets -D warnings clean;
+  fmt clean.
+
+* 12:05 :perf:lever-1.1:benchmark:
+  A/B (src/bin/bench_intrafront, FERAL_INTRAFRONT=0|1), 14 rayon threads,
+  synthetic dense SPD fronts:
+    dense_spd_1200: 44.93ms -> 17.97ms  2.50x  bit_exact
+    dense_spd_1600: 95.78ms -> 31.93ms  3.00x  bit_exact
+    dense_spd_2000: 183.86ms -> 62.18ms 3.08x  bit_exact
+  (idle machine; under concurrent load earlier the same A/B showed
+  1.24-2.66x — bandwidth-contended, but correctness is load-independent.)
+  Plateaus ~3x (trailing update is bandwidth-bound before the 14-thread
+  arithmetic ceiling — matches PR#59's 3.57x@4-core). Lever 1.2 (cache
+  blocking + L-panel packing) targets that bandwidth wall next.
+  Default flipped ON (parallel driver) per session decision; serial
+  driver unaffected. Lever 1.1 complete.

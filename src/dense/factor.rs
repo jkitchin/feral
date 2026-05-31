@@ -585,7 +585,33 @@ pub struct BunchKaufmanParams {
     ///
     /// See `dev/research/static-pivot-perturbation-2026-05-17.md`.
     pub static_pivot_floor: f64,
+
+    /// Opt-in intra-front (node-level) parallelism for the trailing
+    /// Schur update of a single dense front. Default `false` keeps the
+    /// serial trailing update. When `true` **and** the trailing work
+    /// clears `INTRAFRONT_MIN_AREA`, the all-1×1-pivot fast path
+    /// (`apply_blocked_schur_panel`) splits its trailing-column loop
+    /// across rayon workers with `par_chunks_mut`.
+    ///
+    /// Bit-exact regardless of thread count: each trailing column is
+    /// reduced over the same pivot order on a single thread, so there
+    /// is no cross-thread reduction (verified in
+    /// `src/bin/probe_intrafront_schur.rs`, PR #59). Mirrors `fma`: the
+    /// sparse multifrontal *parallel* driver copies a per-call value
+    /// here; the *sequential* driver leaves it `false`, so a serial
+    /// backend (`Solver::with_parallel(false)`) never spawns nested
+    /// rayon work (pounce#79 oversubscription guarantee). See
+    /// `dev/research/lever-1.1-intrafront-parallel-schur.md`.
+    pub intrafront_parallel: bool,
 }
+
+/// Minimum trailing-update area `(nrow - j_start) * n_elim` below which
+/// the intra-front parallel Schur path stays serial even when
+/// [`BunchKaufmanParams::intrafront_parallel`] is set. Small fronts do
+/// not amortize the rayon fork/join; this floor keeps them on the
+/// zero-overhead serial path. Calibrated in
+/// `dev/research/lever-1.1-intrafront-parallel-schur.md`.
+pub const INTRAFRONT_MIN_AREA: usize = 256 * 256;
 
 /// Action to take when a near-zero pivot is encountered.
 #[derive(Debug, Clone)]
@@ -709,6 +735,7 @@ impl Default for BunchKaufmanParams {
             fma: false,
             tpp_method: TppMethod::Plain,
             static_pivot_floor: 0.0,
+            intrafront_parallel: false,
         }
     }
 }
@@ -2002,7 +2029,15 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         };
         let _pt = phase_timing::start();
         apply_blocked_schur(
-            &mut *a, nrow, k, n_elim, j_start, &*d_panel, &*subdiag, params.fma,
+            &mut *a,
+            nrow,
+            k,
+            n_elim,
+            j_start,
+            &*d_panel,
+            &*subdiag,
+            params.fma,
+            params.intrafront_parallel,
         );
         phase_timing::stop(&phase_timing::SCHUR_NS, _pt);
         k += n_elim;
@@ -2855,6 +2890,7 @@ fn apply_blocked_schur(
     d_panel: &[f64],
     subdiag: &[f64],
     fma: bool,
+    intrafront_parallel: bool,
 ) {
     if n_elim == 0 || j_start >= nrow {
         return;
@@ -2873,7 +2909,16 @@ fn apply_blocked_schur(
     let has_2x2 = subdiag[k..k + n_elim].iter().any(|&s| s != 0.0);
 
     if !any_zero_d && !has_2x2 && n_elim >= W2_RANK_BS_MIN {
-        apply_blocked_schur_panel(a, nrow, k, n_elim, j_start, d_panel, fma);
+        apply_blocked_schur_panel(
+            a,
+            nrow,
+            k,
+            n_elim,
+            j_start,
+            d_panel,
+            fma,
+            intrafront_parallel,
+        );
         return;
     }
 
@@ -2954,6 +2999,7 @@ fn apply_blocked_schur(
 /// Bit-exactness contract: per-element, the SIMD body issues
 /// `acc <- round(acc - round(alpha_q * src_q[i]))` for q in ascending
 /// order, the same sequence as the rank-1 reference.
+#[allow(clippy::too_many_arguments)]
 fn apply_blocked_schur_panel(
     a: &mut [f64],
     nrow: usize,
@@ -2962,6 +3008,7 @@ fn apply_blocked_schur_panel(
     j_start: usize,
     d_panel: &[f64],
     fma: bool,
+    intrafront_parallel: bool,
 ) {
     // Stack-friendly upper bound on n_elim. Sized at 128 to cover
     // the default `params.block_size = 64` and the larger panels
@@ -2975,46 +3022,103 @@ fn apply_blocked_schur_panel(
     // panic from the `[..n_elim]` slice below. The named assertion
     // gives a clear failure mode if anyone ever raises block_size
     // past this new ceiling.
+    // The trailing columns [j_start, nrow) are each an independent
+    // rank-`n_elim` update reading only the pivot panel columns
+    // [k, k+n_elim) -- all of which precede `j_start` in column-major
+    // memory. Split once at `j_start * nrow`: `head` is the read-only
+    // source prefix (it contains the panel) and `tail` the mutable
+    // trailing block. The per-range body is bit-exact regardless of how
+    // `tail` is partitioned (each column reduced over ascending q on a
+    // single thread; no cross-thread reduction), so the serial pass and
+    // any `par_chunks_mut` split produce byte-identical results --
+    // verified in `src/bin/probe_intrafront_schur.rs` (PR #59).
+    let (head, tail) = a.split_at_mut(j_start * nrow);
+    let head: &[f64] = head;
+
+    let area = (nrow - j_start).saturating_mul(n_elim);
+    if intrafront_parallel && area >= INTRAFRONT_MIN_AREA {
+        use rayon::prelude::*;
+        let ncol = nrow - j_start;
+        let nthreads = rayon::current_num_threads().max(1);
+        // ~4 chunks per worker for load balance. Bit-exactness does not
+        // depend on chunk size (each column reduced on one thread), so
+        // this is purely a scheduling knob.
+        let chunk_cols = ncol.div_ceil(nthreads * 4).max(1);
+        tail.par_chunks_mut(chunk_cols * nrow)
+            .enumerate()
+            .for_each(|(ci, block)| {
+                let col_start = j_start + ci * chunk_cols;
+                apply_schur_panel_range(head, block, col_start, nrow, k, n_elim, d_panel, fma);
+            });
+    } else {
+        apply_schur_panel_range(head, tail, j_start, nrow, k, n_elim, d_panel, fma);
+    }
+}
+
+/// Apply the panel's deferred rank-`n_elim` updates to one contiguous
+/// block of trailing columns `[col_start, col_start + block.len()/nrow)`.
+///
+/// `head` is the read-only front prefix `a[0 .. j_start*nrow]` holding
+/// the pivot panel columns `[k, k+n_elim)`; `block` is the mutable slice
+/// of trailing columns to update. Shared per-range body for the serial
+/// and intra-front-parallel dispatch in [`apply_blocked_schur_panel`].
+///
+/// Bit-exact with the pre-refactor single-pass loop: identical alpha
+/// values (`l * d`, same order), identical quad/dual/single kernel
+/// dispatch, identical ascending-`q` accumulation, identical all-zero
+/// skip. Because `head` always covers the full panel
+/// (`col_start >= j_start >= k + n_elim`), the kernels read the same
+/// source bytes for every column regardless of which column is written --
+/// that is what makes any column partition valid.
+///
+/// `MAX_N_ELIM = 128` upper-bounds the on-stack alpha buffers. The
+/// `assert!` (not `debug_assert!`) is intentional: prior to issue #36 a
+/// release build with `block_size > 64` produced a cryptic out-of-range
+/// slice panic; the named assertion gives a clear failure mode if anyone
+/// ever raises `block_size` past this ceiling.
+#[allow(clippy::too_many_arguments)]
+fn apply_schur_panel_range(
+    head: &[f64],
+    block: &mut [f64],
+    col_start: usize,
+    nrow: usize,
+    k: usize,
+    n_elim: usize,
+    d_panel: &[f64],
+    fma: bool,
+) {
     const MAX_N_ELIM: usize = 128;
     assert!(
         n_elim <= MAX_N_ELIM,
-        "apply_blocked_schur_panel: n_elim {} exceeds MAX_N_ELIM {}",
+        "apply_schur_panel_range: n_elim {} exceeds MAX_N_ELIM {}",
         n_elim,
         MAX_N_ELIM
     );
+    let ncol = block.len() / nrow;
 
     let mut alphas0_buf = [0.0f64; MAX_N_ELIM];
     let mut alphas1_buf = [0.0f64; MAX_N_ELIM];
     let mut alphas2_buf = [0.0f64; MAX_N_ELIM];
     let mut alphas3_buf = [0.0f64; MAX_N_ELIM];
 
-    // Phase 2.4.3 (issue #9, re-scoped): walk trailing columns in
-    // groups of 4, dispatching the quad-column kernel that shares
-    // each src-vector load across 4 destination accumulators. Each
-    // quad is bit-exact with four sequential single-column dispatches
-    // (verified by the quad kernel's bit-exactness sweep).
-    //
-    // Fall-through: 2-or-3-column remainder uses dual + (optional)
-    // single; 0-or-1-column remainder uses single.
-    let mut j = j_start;
-    while j + 3 < nrow {
+    // Walk this block's trailing columns in groups of 4 (quad kernel),
+    // then a 2-column dual remainder, then a 1-column single remainder --
+    // the same fall-through as the original single-pass loop.
+    let mut lc = 0usize;
+    while lc + 3 < ncol {
+        let j = col_start + lc;
         let alphas0 = &mut alphas0_buf[..n_elim];
         let alphas1 = &mut alphas1_buf[..n_elim];
         let alphas2 = &mut alphas2_buf[..n_elim];
         let alphas3 = &mut alphas3_buf[..n_elim];
         let mut all_zero = true;
         for q in 0..n_elim {
-            let q_col = k + q;
-            let base = q_col * nrow;
-            let l_jk0 = a[base + j];
-            let l_jk1 = a[base + j + 1];
-            let l_jk2 = a[base + j + 2];
-            let l_jk3 = a[base + j + 3];
+            let base = (k + q) * nrow;
             let d_q = d_panel[q];
-            let alpha0 = l_jk0 * d_q;
-            let alpha1 = l_jk1 * d_q;
-            let alpha2 = l_jk2 * d_q;
-            let alpha3 = l_jk3 * d_q;
+            let alpha0 = head[base + j] * d_q;
+            let alpha1 = head[base + j + 1] * d_q;
+            let alpha2 = head[base + j + 2] * d_q;
+            let alpha3 = head[base + j + 3] * d_q;
             alphas0[q] = alpha0;
             alphas1[q] = alpha1;
             alphas2[q] = alpha2;
@@ -3024,12 +3128,7 @@ fn apply_blocked_schur_panel(
             }
         }
         if !all_zero {
-            // Carve out four disjoint mutable slices. The src pivot
-            // columns [k, k+n_elim) all precede column j in memory,
-            // so a single split at j*nrow gives src in `before`.
-            // Three nested splits inside `rest` separate columns
-            // j, j+1, j+2, j+3.
-            let (before, rest) = a.split_at_mut(j * nrow);
+            let (_done, rest) = block.split_at_mut(lc * nrow);
             let (col_j, rest1) = rest.split_at_mut(nrow);
             let (col_j1, rest2) = rest1.split_at_mut(nrow);
             let (col_j2, col_j3_and_after) = rest2.split_at_mut(nrow);
@@ -3039,32 +3138,29 @@ fn apply_blocked_schur_panel(
             let dst3 = &mut col_j3_and_after[(j + 3)..nrow];
             if fma {
                 schur_kernel::schur_panel_minus_fma_strided_quad(
-                    dst0, dst1, dst2, dst3, before, k, n_elim, nrow, j, alphas0, alphas1, alphas2,
+                    dst0, dst1, dst2, dst3, head, k, n_elim, nrow, j, alphas0, alphas1, alphas2,
                     alphas3,
                 );
             } else {
                 schur_kernel::schur_panel_minus_nofma_strided_quad(
-                    dst0, dst1, dst2, dst3, before, k, n_elim, nrow, j, alphas0, alphas1, alphas2,
+                    dst0, dst1, dst2, dst3, head, k, n_elim, nrow, j, alphas0, alphas1, alphas2,
                     alphas3,
                 );
             }
         }
-        j += 4;
+        lc += 4;
     }
 
-    // 2-or-3-column remainder: use dual to consume the next pair, if
-    // any. After this, at most 1 column remains.
-    if j + 1 < nrow {
+    if lc + 1 < ncol {
+        let j = col_start + lc;
         let alphas0 = &mut alphas0_buf[..n_elim];
         let alphas1 = &mut alphas1_buf[..n_elim];
         let mut all_zero = true;
         for q in 0..n_elim {
-            let q_col = k + q;
-            let l_jk0 = a[q_col * nrow + j];
-            let l_jk1 = a[q_col * nrow + j + 1];
+            let base = (k + q) * nrow;
             let d_q = d_panel[q];
-            let alpha0 = l_jk0 * d_q;
-            let alpha1 = l_jk1 * d_q;
+            let alpha0 = head[base + j] * d_q;
+            let alpha1 = head[base + j + 1] * d_q;
             alphas0[q] = alpha0;
             alphas1[q] = alpha1;
             if alpha0 != 0.0 || alpha1 != 0.0 {
@@ -3072,33 +3168,30 @@ fn apply_blocked_schur_panel(
             }
         }
         if !all_zero {
-            let (before, rest) = a.split_at_mut(j * nrow);
+            let (_done, rest) = block.split_at_mut(lc * nrow);
             let (col_j, after_j) = rest.split_at_mut(nrow);
             let dst0 = &mut col_j[j..];
             let dst1 = &mut after_j[(j + 1)..nrow];
             if fma {
                 schur_kernel::schur_panel_minus_fma_strided_dual(
-                    dst0, dst1, before, k, n_elim, nrow, j, alphas0, alphas1,
+                    dst0, dst1, head, k, n_elim, nrow, j, alphas0, alphas1,
                 );
             } else {
                 schur_kernel::schur_panel_minus_nofma_strided_dual(
-                    dst0, dst1, before, k, n_elim, nrow, j, alphas0, alphas1,
+                    dst0, dst1, head, k, n_elim, nrow, j, alphas0, alphas1,
                 );
             }
         }
-        j += 2;
+        lc += 2;
     }
 
-    if j < nrow {
-        // Odd remainder: one trailing column. Fall back to the
-        // single-column kernel.
+    if lc < ncol {
+        let j = col_start + lc;
         let alphas = &mut alphas0_buf[..n_elim];
         let mut all_zero_alpha = true;
         for q in 0..n_elim {
-            let q_col = k + q;
-            let l_jk = a[q_col * nrow + j];
-            let d_q = d_panel[q];
-            let alpha = l_jk * d_q;
+            let base = (k + q) * nrow;
+            let alpha = head[base + j] * d_panel[q];
             alphas[q] = alpha;
             if alpha != 0.0 {
                 all_zero_alpha = false;
@@ -3106,12 +3199,12 @@ fn apply_blocked_schur_panel(
         }
         if !all_zero_alpha {
             let trailing_len = nrow - j;
-            let (before, rest) = a.split_at_mut(j * nrow);
+            let (_done, rest) = block.split_at_mut(lc * nrow);
             let dst = &mut rest[j..nrow];
             if fma {
                 schur_kernel::schur_panel_minus_fma_strided(
                     dst,
-                    before,
+                    head,
                     k,
                     n_elim,
                     nrow,
@@ -3122,7 +3215,7 @@ fn apply_blocked_schur_panel(
             } else {
                 schur_kernel::schur_panel_minus_nofma_strided(
                     dst,
-                    before,
+                    head,
                     k,
                     n_elim,
                     nrow,
