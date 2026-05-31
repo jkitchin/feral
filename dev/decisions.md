@@ -4956,3 +4956,19 @@ blocking (reuse existing kernels via their src_row_offset+len params), then 1.2b
 packing only if 1.2a measurement justifies the extra copy. Lever 1.1 already
 banked the large intra-front win; 1.2 is a refinement, not a prerequisite for
 Levers 2.1/2.2/3.x. Moving on to Lever 2.1 (parallel multi-RHS solve).
+
+
+## 2026-05-31 — Lever 2.1 (parallel-across-RHS solve) deferred
+
+Deferred in favour of Lever 2.2. The multi-RHS solve dispatches its kernel by
+total nrhs (use_blas3 = nrhs>=32, solve.rs:509), and the BLAS-3 back-substitution
+is not bit-identical to the rank-1 path (~1e-15 drift, documented at
+tests/multi_rhs.rs:205). Splitting the column set into sub-threshold groups for
+parallelism therefore flips the kernel and breaks bit-exactness vs the serial
+solve. A bit-exact parallel form requires threading a forced-path selector +
+column-range through all six solve kernels — risky surgery on the bit-exact
+numeric core — for a narrow payoff: the solve is already faster than MUMPS, only
+large-nrhs benefits, and the IPM consumer uses nrhs=2 (no benefit). Design +
+revisit plan in dev/research/lever-2.1-parallel-multirhs-solve.md. Proceeding to
+Lever 2.2 (symbolic speedups), which targets the symbolic-bound small-matrix
+p90 the corpus actually lives in.

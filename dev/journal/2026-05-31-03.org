@@ -77,3 +77,25 @@
   columns in parallel (and onto the deterministic nofma pulp path).
   Embarrassingly parallel — column c's solve is independent of column c'
   — so bit-exact by construction. A/B via bench_multirhs (already exists).
+
+* 13:00 :perf:lever-2.1:deferred:
+  Lever 2.1 (parallel-across-RHS solve) — design done
+  (dev/research/lever-2.1-parallel-multirhs-solve.md), DEFERRED in favour
+  of 2.2. Landmine: solve picks kernel by total nrhs (use_blas3 = nrhs>=32,
+  solve.rs:509) and BLAS-3 back-sub is NOT bit-identical to rank-1
+  (~1e-15 drift, documented tests/multi_rhs.rs:205). Splitting columns
+  into sub-threshold groups flips the kernel => breaks parity with serial.
+  Bit-exact form needs forced-path + column-range threaded through all 6
+  solve kernels — risky surgery on the bit-exact core, for a narrow payoff
+  (solve already < MUMPS; only helps large-nrhs; IPM uses nrhs=2 => no
+  gain). 2.2 targets the actual measured tail instead. Recorded in
+  decisions.md.
+
+* 13:05 :perf:lever-2.2:plan:
+  Starting Lever 2.2 (symbolic-phase speedups, perf-review Tier-2 #2).
+  The 154k-matrix p90-vs-MUMPS tail is symbolic-bound (KIRBY2 8.76x is
+  analysis time, not numeric; perf-review §0 + §2b). Two flagged items:
+  (a) plumb the cached MC64 matching into the ldlt_compress path to kill
+  the double-Hungarian; (b) auto-dispatch compression only on predicted-
+  tail matrices (large-n + MC64 compRat <= 0.7). Investigating the
+  symbolic/MC64/compress code now.
