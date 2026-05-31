@@ -1,0 +1,64 @@
+* 09:30 :pounce79:investigation:
+  Investigating whether the parallel multifrontal driver
+  =run_parallel_task= (factorize.rs) keeps worker-stack depth O(1) in
+  elimination-tree height, or whether a deep/path-like tree drives
+  native stack depth ∝ height (→ rayon worker-stack overflow). Origin:
+  pounce's batched QP hit overflows running feral's parallel factor
+  nested inside its own par_iter; worked around with a 64 MiB pool, now
+  removed by switching the inner backend to with_parallel(false).
+
+* 09:45 :pounce79:structural:
+  Read the driver. The leaf→root climb is TRAMPOLINED through rayon's
+  task queue, not native recursion. The whole body of run_parallel_task
+  is =scope.spawn(move |s| { … })=; the "recursive" call
+  (=run_parallel_task(s, parent_idx, …)=) only ENQUEUES the parent and
+  returns — the parent factors in a freshly spawned task after the
+  child's frame has popped, never nested on it. So native stack depth is
+  a small constant per task (frame + per-front scratch, bounded by front
+  size), independent of tree height. Prediction: deep trees factor on
+  tiny worker stacks.
+
+* 10:05 :pounce79:measurement:
+  Throwaway probe (src/bin/probe_stack_need.rs): factor on the parallel
+  driver inside a rayon pool with CLI stack_size; exit 0 on success,
+  SIGSEGV if stack exhausted. Results confirm the prediction:
+  - bratu3d (n=27792, supernode-tree height 154): factors even at a
+    requested 1 KiB stack (OS rounds up to pthread min).
+  - c-big (n=345241, supernode-tree height 1521 — deepest in corpus):
+    full sweep 4096→32 KiB all OK; 32 KiB ≪ ~2 MiB rayon default.
+  Stack need tracks per-front frame size (O(1) in height), NOT height.
+  Corpus depth probe: every optimization/KKT matrix has supernode-tree
+  height ≤ 9; only large 3D/FEM (c-big, bratu3d) are deep, and even those
+  need a trivially small stack. Probes removed after use.
+
+* 10:15 :pounce79:correction:
+  Earlier in the session I had loosely repeated the issue's framing that
+  recursion depth ∝ tree height could overflow. The structural read +
+  measurement REFUTE that for this driver: the spawn-based scheduler is
+  already the iterative form. The real overflow pounce saw was
+  oversubscription (outer par_iter × inner parallel factor), not depth.
+
+* 10:18 :pounce79:guard:test:
+  Decision: depth is O(1) → document + guard, no behavioral change. The
+  offered iterative-worklist rewrite is unnecessary (would churn a
+  bit-exact-tested path for no gain).
+  - Doc comment on run_parallel_task: trampoline + O(1)-in-height +
+    measured evidence; notes ensure_parallel_pool needs no stack_size.
+  - New test deep_chain_tree_no_stack_overflow (tests/parallel_parity.rs):
+    tridiagonal SPD n=8000, default ordering. Measured: amalgamates to
+    n_snodes=501, supernode-tree height=500 (probe_chain_depth, removed).
+    Factors on default worker stacks; asserts SPD inertia (8000,0,0) and
+    bit-exact inertia+factor parity vs the sequential driver. Native
+    recursion would crash it (SIGSEGV) on a deep chain.
+  - NOTE: feral has no natural/identity ordering (OrderingMethod =
+    Amd/Amf/MetisND/ScotchND/KahipND/Auto/AutoRace); default AMD on a
+    tridiagonal still yields a deep chain (height ~500), sufficient to
+    exercise the climb.
+
+* 10:30 :pounce79:gates:
+  cargo test --release --test parallel_parity deep_chain_tree...: PASS.
+  solver_parallel_factor_matches_sequential: PASS.
+  cargo clippy --all-targets -- -D warnings: clean (exit 0) [run earlier
+  this session, unchanged source since].
+  Changes: factorize.rs (doc only), parallel_parity.rs (new test). No
+  production-logic change.
