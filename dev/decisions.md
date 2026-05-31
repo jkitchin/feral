@@ -5003,3 +5003,33 @@ boundary matrices; high-complexity fallback for ~zero gain on the only available
 hardware. fma is already an opt-in BunchKaufmanParams field for a future x86
 measurement. The perf-lever sweep thus implements Lever 1.1 only (1.2/2.1
 deferred-with-plan, 2.2 already implemented in Phase 2.4.4).
+
+
+## 2026-05-31 — Lever 1.2a (row-band blocking) measured and rejected
+
+Earlier this session Lever 1.2 was deferred with the rationale "its ~10-30%
+bandwidth gain is below the noise floor, so it can't be measured here." That
+rationale was unverified speculation. Prompted to actually measure rather than
+predict, 1.2a (row-band blocking) was implemented and benchmarked A/B
+(ROW_BAND_ENABLED off vs on, sequential factor, dense SPD fronts):
+
+  n=800 0.89x, n=1200 0.79-0.95x, n=1600 0.75-0.80x, n=2000 0.74-0.76x (3 runs).
+
+Both prior claims were wrong: the effect is clearly MEASURABLE (not noise) and
+it is a REGRESSION (~10-25% slower), not a gain. Correctness held — the
+bit-exact gate (row_band_blocking_matches_non_banded) passed byte-identically.
+
+Root cause: the naive banding replaced the SIMD quad kernel (one src load shared
+across 4 dst columns = register blocking) with per-column scalar-alpha axpy,
+trading 4x register reuse for cache reuse; register-reuse loss dominated.
+
+Decision: REJECTED, reverted (not shipped). A viable 1.2 must band WHILE
+preserving the quad kernel (call the strided quad/dual/single kernels on
+row-band sub-slices via src_row_offset/len) — more code, fiddly at the diagonal
+band; deferred as a larger evidence-backed effort. The cheap "reuse existing
+kernels" plan is disproven. Full writeup in
+dev/research/lever-1.2-cache-blocking-packing.md.
+
+Methodological note: measuring the cheap version took ~30 min and produced a
+definite reject; the prior deferral-by-speculation should have been a
+measurement from the start.

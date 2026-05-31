@@ -1,0 +1,27 @@
+* 14:55 :perf:lever-1.2a:measured:correction:
+  Implemented and MEASURED Lever 1.2a (row-band blocking) instead of
+  continuing to predict it — prompted by the user pointing out that both
+  my "unmeasurable" and "~20% gain" claims were unverified.
+  RESULT: both predictions were WRONG.
+  - Measurable: yes, clearly and repeatably (not noise).
+  - Direction: SLOWER, not faster. dense SPD sequential factor, A/B via
+    ROW_BAND_ENABLED off vs on, bit-exact every run:
+      n=800  0.89x   n=1200 0.79-0.95x
+      n=1600 0.75-0.80x   n=2000 0.74-0.76x (3 runs)
+    Monotonic ~0.75x at n=2000 — a real ~10-25% regression.
+  - Correctness prediction held: row_band_blocking_matches_non_banded test
+    passed, byte-identical factor+inertia every size.
+  Root cause: my cheap banding replaced the SIMD quad kernel (shares one
+  src load across 4 dst columns = register blocking) with per-column
+  scalar-alpha axpy, trading 4x register reuse for cache reuse; the
+  register-reuse loss dominated.
+  ACTION: reverted all 1.2a production code (factor.rs, test, bench) — a
+  measured regression does not ship. Recorded the measured result in
+  dev/research/lever-1.2-cache-blocking-packing.md. A winning 1.2 must
+  band WHILE preserving the quad kernel (call strided quad on band
+  sub-slices via src_row_offset/len) — more code, deferred as an
+  evidence-backed effort. Branch claude/lever-1.2a-row-band-blocking holds
+  only this docs update now.
+  Lesson: measuring the cheap version (~30 min) beat speculating about
+  sign and magnitude. Should have measured before deferring with a
+  confident rationale.
