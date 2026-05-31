@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-30T17:53:15Z
+Generated: 2026-05-31T11:29:42Z
 
 ## Latest Session
 File: dev/sessions/2026-05-30-01.md
@@ -59,34 +59,34 @@ precision; 1e-12 gate, tolerance untouched).
 
 ## Git Status
 ```
-92b8150 bench: add dense-Hessian multi-RHS probe (#58 repro)
-2369fce fix(solve): batched iterative refinement for wide multi-RHS (#58)
-f8f324b session: 2026-05-30-01 checkpoint (#57 multi-RHS BLAS-3 + docs)
-401486e docs(book): add Scaling and Fill-reducing ordering chapters
-0fcb010 docs(book): complete the mdBook — fix stale examples, add sparse/multi-RHS/Python (#57)
+cd12735 release: v0.9.0
+c51ddfd docs: notebook + book now show the batched refined win (#58)
+2e096e9 perf(solve): drop the 0-step allocations in batched refinement (#58)
+91de86e docs: showcase the batched refined solve in the notebook + book (#58)
+1d26b9a session: 2026-05-30-01 checkpoint addendum (#58 batched refinement)
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_supernodes_cover_n ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test scaling::tests::auto_solves_below_guard_matrix_correctly ... ok
-test scaling::tests::auto_falls_back_to_infnorm_on_mss1_0009 ... ok
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
+test dense::schur_kernel::tests::axpy_minus_length_mismatch_panics - should panic ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
-test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 
-test result: ok. 317 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.41s
+test result: ok. 315 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.76s
 
 ```
 
@@ -188,6 +188,7 @@ the layout (row-major `y`) was fixed.
 ## Source Files
 ```
 src/bin/alloc_probe.rs
+src/bin/bench.rs
 src/bin/bench_axpy_small.rs
 src/bin/bench_dense_multirhs.rs
 src/bin/bench_fma_phase3.rs
@@ -198,7 +199,6 @@ src/bin/bench_orderings.rs
 src/bin/bench_solver_corpus.rs
 src/bin/bench_solver_reuse.rs
 src/bin/bench_sqd.rs
-src/bin/bench.rs
 src/bin/blas3_prototype.rs
 src/bin/calibrate_par_min_flops.rs
 src/bin/d3_probe.rs
@@ -211,8 +211,8 @@ src/bin/diag_amd_substages.rs
 src/bin/diag_amf_vs_amd.rs
 src/bin/diag_cascade_default_evidence.rs
 src/bin/diag_cascade_ratio_distribution.rs
-src/bin/diag_chainwoo_profile.rs
 src/bin/diag_chainwoo.rs
+src/bin/diag_chainwoo_profile.rs
 src/bin/diag_clnlbeam_maxfromm.rs
 src/bin/diag_clnlbeam_slb.rs
 src/bin/diag_compress_costbenefit.rs
@@ -255,8 +255,8 @@ src/bin/diag_qcqp_knobs.rs
 src/bin/diag_qcqp_profile.rs
 src/bin/diag_robot1600_eigs.rs
 src/bin/diag_schur_parity.rs
-src/bin/diag_small_leaf_gate.rs
 src/bin/diag_small_leaf.rs
+src/bin/diag_small_leaf_gate.rs
 src/bin/diag_small_sparse_inventory.rs
 src/bin/diag_sparse_memory.rs
 src/bin/diag_split_tail.rs
@@ -285,17 +285,17 @@ src/bin/probe_fbrain.rs
 src/bin/probe_fma_kernel.rs
 src/bin/probe_hang_loop.rs
 src/bin/probe_ir_trajectory.rs
-src/bin/probe_issue_19.rs
-src/bin/probe_issue45_ordering.rs
 src/bin/probe_issue45.rs
+src/bin/probe_issue45_ordering.rs
+src/bin/probe_issue46.rs
 src/bin/probe_issue46_preprocess.rs
 src/bin/probe_issue46_supernode.rs
-src/bin/probe_issue46.rs
 src/bin/probe_issue49.rs
+src/bin/probe_issue54.rs
 src/bin/probe_issue54_alpha_shift.rs
 src/bin/probe_issue54_cascade.rs
 src/bin/probe_issue54_ma57_alpha.rs
-src/bin/probe_issue54.rs
+src/bin/probe_issue_19.rs
 src/bin/probe_kkt_replay.rs
 src/bin/probe_marine_shape.rs
 src/bin/probe_marine_time.rs
@@ -349,4 +349,4 @@ src/ordering/mod.rs
 src/ordering/postorder.rs
 src/ordering/schur.rs
 
-(truncated from      416 lines to 350 line budget)
+(truncated from 416 lines to 350 line budget)

@@ -1,0 +1,69 @@
+* 12:10 :perf-review:parallelism:determinism:
+Performed a library-wide performance review under the pure-Rust +
+bit-exact constraint. Mapped four hot paths (dense factor/schur kernel,
+parallel multifrontal driver, multi-RHS solve, symbolic) via three
+parallel Explore agents + direct reads.
+
+Key findings (evidence):
+- geomean factor-time already < 1.0 vs MUMPS (sparse ~0.36); the pain is
+  the tail. Worst: KIRBY2_0007 8.76, CRESC132_0000 6.63, MUONSINE_0000
+  5.63 (context.md 2026-05-30-01).
+- Two distinct tail populations: small matrices are SYMBOLIC-dominated
+  (KIRBY2 numeric sub-ms; LdltCompress ~17× symbolic per t-a-r
+  2026-04-23); large matrices are NUMERIC-serial (wide root supernode,
+  issue #8 pinene 87s).
+- Parallel driver is tree-level only; intra-front dense factor is
+  serial. cont-201 measured 1.44×@T=8 vs 4.83× critical-path bound
+  (t-a-r 2026-05-12) — the serial root is the ceiling.
+- FMA is ~0% on ARM (nofma 4-accumulator already saturates pipes,
+  decisions.md 2026-04-14 1.87→1.86) and flips inertia on ~30/154k
+  boundary matrices (t-a-r 2026-04-14) — correctly off.
+- Parallel inertia race (1-2%) was root-caused (double-spawn from
+  pending.load()==0 mid-seed) and FIXED 2026-04-21; parallel_parity
+  green, diag_par_repeat 0/38878 (decisions.md:1578).
+
+Conclusion: the single highest-leverage, determinism-FREE lever is
+intra-front (node-level) parallelism of the trailing Schur update in
+apply_blocked_schur_panel (factor.rs:2957). par_chunks_mut over trailing
+columns is bit-exact for any thread count (each a[i,j] reduced over the
+same q-order on one thread; no cross-thread reduction). Attacks both the
+worst-case ratios and the 1.44× ceiling. GPU recommended against
+(small-front corpus, serial BK pivot search, GPU FP non-determinism vs
+inertia guarantee). Full note: dev/research/perf-review-2026-05-31.md.
+No code changed this session — analysis only.
+
+* 13:05 :perf-review:verification:parallelism:correction:
+Verified the Tier-1 #1 claim (intra-front parallel Schur) empirically with
+two probes (src/bin, excluded from published crate).
+
+CORRECTNESS (probe_intrafront_schur): synthetic front nrow=2048 n_elim=64,
+production schur_panel_minus_nofma_strided{,_dual,_quad} kernels, seq vs
+par_chunks_mut over disjoint trailing-column chunks. Bit-identical
+(f64::to_bits) to sequential across chunk widths {64,100,137,200,512} and
+T={1,2,4}. Chunk widths intentionally not multiples of 4 -> quad/dual/single
+grouping differs between seq and par yet every element matches. Determinism
+is structural (no cross-thread reduction), confirmed. PASS.
+
+PERFORMANCE: 3.57x on 4 cores (89% eff). Absolute GFLOP/s low (0.43 seq /
+1.53 par) because this container is bandwidth-starved (33MB clone ~1.5 GB/s);
+relative speedup is the verified quantity.
+
+PREMISE CHECK (probe_front_concentration) -- CORRECTED MY OWN REVIEW. Per-front
+cost ~ncol*nrow^2 + measured sym vs num wall time:
+- CRESC132_0000 (worst ratio 6.63): largest front 11x11, symbolic 22.2ms vs
+  numeric 5.7ms = 80% symbolic. SYMBOLIC-BOUND, not large-front. Intra-front
+  parallelism would NOT help it.
+- VESUVIOU_0030: largest front 18x18, 54% symbolic. Mixed.
+- nuffield2 (n=26649): largest front 87x501, top-16 = 43.5% flop share, 80%
+  numeric. NUMERIC/large-front-bound -> intra-front + tree parallelism pays.
+
+Conclusion: the two top levers are COMPLEMENTARY and target different
+populations -- symbolic speedups (Tier-2 2.2) for the small symbolic-bound
+tail (CRESC132/VESUVIO), intra-front parallelism (Tier-1 1.1) for the large
+numeric-bound tail (nuffield2, documented pinene_3200 14k root / issue #8).
+The earlier note over-attributed CRESC132 to intra-front; measurement
+reassigns it. Research note updated with a Verification section.
+
+Gates: cargo fmt --check clean, cargo clippy --all-targets -D warnings clean,
+cargo test --lib 315/315 pass, parallel_parity 6/6 pass (existing tree-parallel
+determinism re-confirmed).
