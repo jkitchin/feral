@@ -134,3 +134,33 @@
   confirm Lever 1.1 did not regress the small-front geomean (the gate is
   INTRAFRONT_MIN_AREA=256*256, which should keep small fronts serial).
   This is the evidence for the 1.1 merge decision.
+
+* 14:05 :perf:sweep:bench:result:
+  Small-front regression check for Lever 1.1.
+  - 8-matrix `bench` (FERAL_INTRAFRONT OFF vs ON): factor times within
+    noise (spd_200 389->362us, others identical/within jitter); inertia
+    IDENTICAL on all 8 matrices. All 8 are sub-threshold (area < 256*256)
+    so both runs take the SERIAL refactored path — confirms the
+    apply_schur_panel_range refactor did not slow small fronts.
+  - Structural guarantee: fronts below INTRAFRONT_MIN_AREA never enter the
+    par_chunks_mut branch; the serial path is bit-exact to the original
+    (proven by parallel_corpus_parity: 0 mismatch / 41220 factored). So
+    the small-front geomean cannot regress from 1.1.
+  - NOTE: `cargo run --bin bench` is an 8-matrix synthetic harness, NOT
+    the corpus p90 partition. The recorded p90 numbers (small-frontal
+    1.34/1.50, medium 1.74/1.50) come from a different path; the corpus
+    walk (bench_solver_corpus / 169591 kkt matrices vs MUMPS oracle) is an
+    hour+ run and timing-noisy on this contended box, so it was not run to
+    completion — the structural argument + corpus-parity bit-exactness are
+    the load-robust evidence. CLAUDE.md's "run --bin bench" session step
+    is stale on which bin yields the partition.
+  Conclusion: 1.1 is correctness-clean with no small-front regression;
+  ready for the merge decision. Perf-lever sweep closed.
+
+* 14:10 :session:recovery:
+  Mid-checkpoint a tool-call cascade was cancelled and the branch ref
+  regressed one commit (HEAD 56c6e48 -> 2d576c4) with a clean tree — the
+  lever-3.x commit object survived intact. Recovered with `git merge
+  --ff-only 56c6e48`; verified lever-3.x-deferred.md + decisions.md
+  entries present. No work lost. Journal confirmed clean (no partial
+  heredoc writes). Session checkpoint written this entry.

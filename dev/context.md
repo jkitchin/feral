@@ -1,83 +1,83 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-31T15:10:34Z
+Generated: 2026-05-31T18:23:03Z
 
 ## Latest Session
-File: dev/sessions/2026-05-31-02.md
+File: dev/sessions/2026-05-31-03.md
 ```
-# Session 2026-05-31-02
+# Session 2026-05-31-03
 
 ## Goal
 
-Resolve the feral side of pounce#79: determine whether the parallel
-multifrontal driver `run_parallel_task` keeps worker-stack depth O(1) in
-elimination-tree height (or whether a deep/path-like tree can overflow a
-rayon worker's ~2 MiB stack), and either bound it or document + guard.
-Earlier in the session: review pounce#79, post the resolution comment,
-and merge feral PR #59.
+Work through the perf-review (`dev/research/perf-review-2026-05-31.md`) levers
+systematically on branch `claude/perf-levers`. For each lever: a research note,
+a with/without A/B (performance + correctness), all other tests green. User
+cadence: pause after each lever; default-ON once proven; git before/after for
+pure-kernel swaps.
 
 ## Accomplished
 
-- **pounce#79 reviewed and answered.** The per-instance parallelism
-  toggle the issue asks for already exists (`Solver::with_parallel`,
-  per-instance, Rust + Python); the only `FERAL_PARALLEL` env read is the
-  C ABI (`capi.rs:134`). The env-var dance is a pounce-side fix
-  (per-worker `with_parallel(false)`); no feral API change needed.
-  Resolution comment posted to pounce#79.
-- **feral PR #59 merged** (squash, normal merge; "perf-review: analysis
-  and verification of intra-front parallelism" — docs + two probe bins,
-  no production code).
-- **Parallel worker-stack depth: investigated → O(1) in tree height →
-  documented + guarded, no behavioral change.** The leaf→root climb in
-  `run_parallel_task` (`factorize.rs:3232`) is trampolined through
-  rayon's task queue (`scope.spawn`), not native recursion, so native
-  stack depth is O(1) in tree height. Verified structurally and by
-  measurement:
-  - c-big (n=345 241, supernode-tree height 1521 — deepest in corpus):
-    parallel factor succeeds on worker stacks all the way down to
-    **32 KiB** (~64× under the ~2 MiB default).
-  - bratu3d (height 154): factors at a requested 1 KiB stack.
-  - Every optimization/KKT corpus matrix has supernode-tree height ≤ 9.
-  Changes landed: doc section on `run_parallel_task` (`factorize.rs`);
-  regression test `deep_chain_tree_no_stack_overflow`
-  (`tests/parallel_parity.rs`, tridiagonal SPD n=8000, default ordering →
-  deep supernode chain height ~500); research note
-  `dev/research/parallel-stack-depth-pounce79.md`.
+Six levers triaged; **one implemented**, the rest deferred-with-rationale or
+found already-done. All on `claude/perf-levers` (NOT merged to main).
+
+- **Lever 1.1 — intra-front parallel Schur update: IMPLEMENTED** (`fbc3136`).
+  Parallelizes the trailing Schur update of a single dense front via
+  `tail.par_chunks_mut`, gated by `INTRAFRONT_MIN_AREA = 256*256` and a new
+  `BunchKaufmanParams::intrafront_parallel` flag (default ON on the parallel
+  driver only; the sequential driver is untouched → pounce#79
+  no-oversubscription preserved). Bit-exact by construction (each trailing
+  column reduced over ascending q on one thread; no cross-thread reduction).
+  - A/B (`bench_intrafront`, FERAL_INTRAFRONT 0 vs 1, dense SPD fronts): speedup
+    **1.2×–3.1×** (load-sensitive, bandwidth-bound), bit-exact every run.
+  - Correctness: new gate `intrafront_parallel_schur_matches_serial`;
+    `parallel_corpus_parity` full KKT corpus **0 mismatch / 41 220 factored**;
+    full suite **572 passed, 0 failed**; clippy + fmt clean.
+- **Lever 1.2 — cache blocking + L-panel packing: DEFERRED** (`eafd826`).
+  Analysis + plan complete; restructures the hot bit-exact kernel for a
+  ~10–30% bandwidth gain that is below the run-to-run noise floor on this shared
+  machine. Revisit on idle hardware: 1.2a row-band blocking, then 1.2b packing.
+- **Lever 2.1 — parallel-across-RHS solve: DEFERRED** (`5336914`). Design
+  complete; bit-exactness entangled with the nrhs≥32 kernel dispatch (BLAS-3
+  back-sub not bit-identical to rank-1), risky surgery for a narrow payoff
+  (solve already < MUMPS; IPM uses nrhs=2).
+- **Lever 2.2 — symbolic speedups: ALREADY IMPLEMENTED** (`2d576c4`, verify
+  only). Both halves live since Phase 2.4.4: MC64 cached once + reused
+  (symbolic/mod.rs:608/620, scaling/mod.rs:298-300); compression auto-dispatch
+  via `OrderingPreprocess::Auto` + `pick_ordering_preprocess`. Perf-review
+  over-stated remaining work; its "compRat≤0.7" gate is circular.
+- **Levers 3.1 (FMA fallback) + 3.2 (wider NR): DEFERRED** (`56c6e48`). 3.2 is
+  the same bandwidth wall as 1.2 (sub-noise-floor). 3.1 is ~0% on this arm64 host
+  (decisions.md 2026-04-14) and flips inertia on ~30/154k matrices; already an
+  opt-in `BunchKaufmanParams::fma` field for a future x86 measurement.
 
 ## Benchmark Results
 
-No benchmark-affecting change this session — the only source change is a
-doc comment plus a new test. `bench` numbers are unchanged from
-2026-05-31-01 (PR #59); not re-run (the test gate for doc/test-only
-changes is satisfied by the green gates below).
-
-## Decisions Made
-
-- **No behavioral change for pounce#79's feral side.** Depth is already
-  O(1) in tree height; an enlarged `ensure_parallel_pool` `stack_size`
+8-matrix `bench` (the small synthetic harness; the corpus p90 bench is the
+separate `bench_solver_corpus` walk), FERAL_INTRAFRONT OFF vs ON — all
+sub-threshold, so both take the serial refactored path:
 ```
 
 ## Git Status
 ```
-8902f0f docs+test(parallel): document O(1) worker-stack depth, add deep-tree guard (pounce#79)
-14cff66 perf-review: analysis and verification of intra-front parallelism (#59)
-cd12735 release: v0.9.0
-c51ddfd docs: notebook + book now show the batched refined win (#58)
-2e096e9 perf(solve): drop the 0-step allocations in batched refinement (#58)
+56c6e48 docs(lever-3.x): defer FMA fallback (3.1) and wider NR (3.2) with rationale
+2d576c4 docs(lever-2.2): verify symbolic speedups already implemented (Phase 2.4.4)
+5336914 docs(lever-2.1): defer parallel-across-RHS solve with design + rationale
+eafd826 docs(lever-1.2): defer cache-blocking/packing with analysis + rationale
+dc66907 docs(lever-1.1): report speedup as a load-sensitive range, not a best run
 ```
 
 ## Test Status
 ```
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
+test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test numeric::solver::tests::mc64_fallback_surfaces_via_solver_api ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test scaling::tests::auto_falls_back_to_infnorm_on_mss1_0009 ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
 test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
@@ -86,53 +86,65 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 
-test result: ok. 317 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.43s
+test result: ok. 317 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.42s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-31-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-31-03.md)
 
 
-No benchmark-affecting change this session — the only source change is a
-doc comment plus a new test. `bench` numbers are unchanged from
-2026-05-31-01 (PR #59); not re-run (the test gate for doc/test-only
-changes is satisfied by the green gates below).
+8-matrix `bench` (the small synthetic harness; the corpus p90 bench is the
+separate `bench_solver_corpus` walk), FERAL_INTRAFRONT OFF vs ON — all
+sub-threshold, so both take the serial refactored path:
+
+spd_10   off=35  on=29     kkt_10_3   off=3   on=3
+spd_50   off=20  on=20     kkt_30_10  off=25  on=25
+spd_100  off=78  on=68     kkt_50_15  off=47  on=47
+spd_200  off=389 on=362    kkt_100_30 off=130 on=130
+
+Within noise; **inertia identical** OFF vs ON on all 8. The small-front geomean
+cannot regress from 1.1: fronts below the 65 536-area gate never enter the
+parallel branch, and the serial path is the bit-exact refactor proven by
+`parallel_corpus_parity` (0 mismatch). The full corpus p90 walk
+(`bench_solver_corpus`, 169 591 matrices vs MUMPS oracle) is an hour+ run and
+timing-noisy on this contended box; not run to completion — the structural
+argument + corpus-parity bit-exactness are the load-robust evidence.
 
 ```
 
 ## Recent Decisions
-than its unrefined solve.
 
-**Decision 3 — active-column compaction each step.** Each refinement step
-gathers only the un-converged columns into the batched solve. This bounds
-the batched path at ≤ the per-column work even for heterogeneous
-convergence (most columns done in 1 step, a few needing 10), where
-solving the full batch every step would otherwise regress.
+## 2026-05-31 — Lever 2.2 (symbolic speedups) found already-implemented
 
-**Decision 4 — threshold dispatch at `BLAS3_REFINE_THRESHOLD = 16`.**
-`nrhs < 16` keeps the literal per-column loop (the IPM predictor-
-corrector, `nrhs = 2`, and other narrow refined solves stay on the
-proven, bit-identical path). 16 (below the 32 panel crossover) because
-the batched *solve* amortizes from ~16, and the batched refiner is
-provably bit-identical to the per-column loop for `16 ≤ nrhs < 32` (the
-rank-1 solve is bit-identical per column there), so there is no accuracy
-risk in that band.
+The perf-lever sweep reached Tier-2 #2 (symbolic-phase speedups: cache MC64
+across compress->scale, and auto-dispatch compression on predicted-tail
+matrices). On inspection BOTH halves are already implemented in the codebase
+("Phase 2.4.4", pre-dating this sweep): the MC64 matching is computed once and
+cached (symbolic/mod.rs:605/614) and reused by the numeric phase
+(scaling/mod.rs:298-300); compression auto-dispatch is the default via
+OrderingPreprocess::Auto + pick_ordering_preprocess (mod.rs:347-369). The
+perf-review (dev/research/perf-review-2026-05-31.md), written the same day by
+the PR#59 analysis session, over-stated the remaining work by listing these as
+future. Its further "tighter gate (compRat<=0.7)" idea is not viable as stated
+(compRat requires running MC64 to compute, so it cannot gate whether to run
+MC64). No code change; verification recorded in
+dev/research/lever-2.2-symbolic-speedups.md.
 
-**Rejected.** Global-norm refinement loop (drops per-column best-iterate
-— accuracy regression risk on near-singular columns). No compaction
-(heterogeneous-convergence perf regression). Single-pass batched SpMV for
-the residual (deferred — helps dense inputs only; per-column symv is
-cache-friendly and reuses tested code).
 
-**Measured.** Bit-identical band verified (`max|batched − per-column| ==
-0` at nrhs=24 SPD and nrhs=20 indefinite). Panel band (nrhs=64) matches
-the oracle to ≤1e-15 with per-column relative residual ≤1e-15. Lib 317
-pass; bench_multirhs refined ratio ~0.34–0.40.
+## 2026-05-31 — Levers 3.1 (FMA fallback) and 3.2 (wider NR) deferred
 
-**References.** `dev/research/issue-58-batched-refinement.md`,
-`dev/journal/2026-05-30-01.org`, issue #58.
+Both Tier-3 levers deferred (dev/research/lever-3.x-deferred.md). 3.2 (wider
+micro-kernel NR): perf-review says measure only after 1.1/1.2 land, but 1.2 is
+deferred and 3.2 attacks the same memory-bandwidth wall — wider arithmetic width
+does not help a bandwidth-bound kernel, and the gain is sub-noise-floor on this
+shared machine. 3.1 (FMA boundary-safe fallback): this host is arm64, where FMA
+measured ~0% (decisions.md 2026-04-14, 1.87->1.86) and flips inertia on ~30/154k
+boundary matrices; high-complexity fallback for ~zero gain on the only available
+hardware. fma is already an opt-in BunchKaufmanParams field for a future x86
+measurement. The perf-lever sweep thus implements Lever 1.1 only (1.2/2.1
+deferred-with-plan, 2.2 already implemented in Phase 2.4.4).
 
 ## Recent Tried-and-Rejected
 **c-block outer / m-tile inner** would keep a small `B`-block
@@ -162,6 +174,7 @@ src/bin/alloc_probe.rs
 src/bin/bench_axpy_small.rs
 src/bin/bench_dense_multirhs.rs
 src/bin/bench_fma_phase3.rs
+src/bin/bench_intrafront.rs
 src/bin/bench_issue8.rs
 src/bin/bench_multirhs.rs
 src/bin/bench_one_matrix.rs
@@ -336,17 +349,4 @@ src/symbolic/small_leaf.rs
 src/symbolic/supernode.rs
 ```
 
-## Test Files
-```
-tests/amf_corpus_oracle.rs
-tests/auto_strategy.rs
-tests/blocked_ldlt.rs
-tests/build_row_indices_trailing_invariant.rs
-tests/column_renumbering_parity.rs
-tests/column_renumbering.rs
-tests/delayed_pivoting.rs
-tests/dense_fast_path.rs
-tests/dense_ldlt.rs
-tests/factor_scratch_parity.rs
-
-(truncated from      389 lines to 350 line budget)
+(truncated from      402 lines to 350 line budget)
