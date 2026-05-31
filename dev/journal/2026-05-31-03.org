@@ -116,3 +116,21 @@
   compute, defeating the gate). Current cheap shape predicate is correct.
   Recorded in dev/research/lever-2.2-symbolic-speedups.md. Lever 2.2
   complete (already-done).
+
+* 13:40 :perf:lever-3.x:deferred:
+  Levers 3.2 (wider NR) and 3.1 (FMA fallback) deferred with rationale
+  (dev/research/lever-3.x-deferred.md). 3.2: same bandwidth wall as the
+  deferred 1.2 — wider arithmetic width can't help a bandwidth-bound
+  kernel until 1.2 lands, and the gain is sub-noise-floor here anyway.
+  3.1: this box is arm64 (uname -m), where FMA measured ~0% (decisions.md
+  2026-04-14, 1.87->1.86) and flips inertia on ~30/154k boundary matrices;
+  the boundary-safe fallback is high-complexity for ~zero gain on the only
+  available hardware. fma is already an opt-in BunchKaufmanParams field if
+  an x86 gap ever shows. Sweep implements 1.1 only; closing out. Recorded
+  in decisions.md.
+
+* 13:45 :perf:sweep:bench:
+  Closing the sweep: running full `cargo run --bin bench --release` to
+  confirm Lever 1.1 did not regress the small-front geomean (the gate is
+  INTRAFRONT_MIN_AREA=256*256, which should keep small fronts serial).
+  This is the evidence for the 1.1 merge decision.

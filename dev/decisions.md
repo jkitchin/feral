@@ -4989,3 +4989,17 @@ future. Its further "tighter gate (compRat<=0.7)" idea is not viable as stated
 (compRat requires running MC64 to compute, so it cannot gate whether to run
 MC64). No code change; verification recorded in
 dev/research/lever-2.2-symbolic-speedups.md.
+
+
+## 2026-05-31 — Levers 3.1 (FMA fallback) and 3.2 (wider NR) deferred
+
+Both Tier-3 levers deferred (dev/research/lever-3.x-deferred.md). 3.2 (wider
+micro-kernel NR): perf-review says measure only after 1.1/1.2 land, but 1.2 is
+deferred and 3.2 attacks the same memory-bandwidth wall — wider arithmetic width
+does not help a bandwidth-bound kernel, and the gain is sub-noise-floor on this
+shared machine. 3.1 (FMA boundary-safe fallback): this host is arm64, where FMA
+measured ~0% (decisions.md 2026-04-14, 1.87->1.86) and flips inertia on ~30/154k
+boundary matrices; high-complexity fallback for ~zero gain on the only available
+hardware. fma is already an opt-in BunchKaufmanParams field for a future x86
+measurement. The perf-lever sweep thus implements Lever 1.1 only (1.2/2.1
+deferred-with-plan, 2.2 already implemented in Phase 2.4.4).
