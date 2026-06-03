@@ -1,0 +1,128 @@
+#+TITLE: FERAL journal 2026-06-03-02
+#+STARTUP: showall
+
+* 07:20 :issue-63:near-singular:repro:setup:
+Starting issue #63: near-singular KKT factorization floors IPM feasibility at
+~2.3e-8 under amd/amf/Auto; metis/scotch reach optimal. Hypothesis in the issue:
+feral force-accepts a collapsing 1x1 pivot at the working-precision floor and
+the resulting solve backward error (~2e-8 under AMD, ~1e-8 under metis) leaks
+into the IPM primal-feasibility residual.
+
+Mapped the pivot code paths (Explore agent): ZeroPivotAction (ForceAccept/Fail/
+PerturbToEps) in src/dense/factor.rs ~616; 1x1 floor + delay/force-accept gate
+~3832-3980; BK alpha test + 2x2 growth/det bounds ~2464-2660; cascade-break in
+src/numeric/factorize.rs ~2355-2386; refinement caps in src/numeric/solve.rs
+~1069-1153 (max_steps=10, ε√n target, 100x divergence, 2-strike plateau).
+
+* 07:35 :issue-63:repro:pounce:
+Reproduced the pounce-level stall on scrs8-2c-8.nl (n=341 var/252 con):
+  default(Auto→AMF): EXIT Acceptable, constr.viol = 2.2999998941165188e-08
+  amd              : EXIT Acceptable, constr.viol = 2.2999998941165188e-08
+  metis            : EXIT Optimal,    constr.viol = 9.9999756785274591e-09
+  scotch           : EXIT Optimal,    constr.viol = 9.9999756785274244e-09
+Ordering lever is REAL in current pounce 0.3.1-dev + feral. NOTE the values are
+*bit-identical across orderings within each outcome class* (amd==default to 17
+digits; metis==scotch to 15) — the final feasibility lands on one of two
+discrete values, not a continuum of numerical noise. And metis clears tol=1e-8
+by a hair (9.99997e-9).
+
+Trace: iters 19-25 essentially feasible (inf_pr ~3e-11), μ collapses iter 24
+(lg mu -1.0→-8.6), regularization (lg rg) first turns on iter 26 and inf_pr
+jumps 2.91e-11 → 5.42e-8, freezing at 2.30e-8 from iter 30 on.
+
+* 07:50 :issue-63:repro:FAILS-TO-REPRODUCE:feral:
+Dumped iter-26 KKT (n=727, nnz=1710) — 3 solves: s001/s002 status=Singular
+(pre-regularization), s003 status=Success (the δ_w-regularized system pounce
+actually steps with). Built probe_issue63_nearsingular: factor+solve per
+ordering, measure ‖Ax−b‖/‖b‖.
+
+RESULT — the issue's FERAL-level hypothesis does NOT reproduce:
+
+s003 (regularized, the stepped system), Auto-scaling:
+  Amd     nnz_L=8105 min_piv=3.36e-2 max_piv=2.98e1  backward_err=2.2e-22
+  Amf     nnz_L=7849 min_piv=3.36e-2 max_piv=2.98e1  backward_err=7.7e-23
+  MetisND nnz_L=8158 min_piv=1.64e-2 max_piv=6.16e1  backward_err=1.0e-22
+  ScotchND backward_err=2.5e-16
+
+s003, NO scaling (forces the 1e16 raw-pivot regime):
+  Amd     min_piv=1.79e-9 max_piv=5.96e16  backward_err=1.2e-22
+  Amf     ...                              backward_err=2.0e-22
+  MetisND ...                              backward_err=1.1e-22
+
+feral solves the stepped system to ~1e-22 under EVERY ordering AND scaling,
+even with max_piv=6e16. The claimed "AMD backward error ~2e-8 vs metis ~1e-8"
+is NOT observed; max_abs_pivot in the Auto-scaled regime is ~30-60, not the
+issue's 9.68e10. So feral's linear-solve accuracy is NOT the IPM bottleneck.
+
+* 07:55 :issue-63:diagnosis:inertia-channel:
+What IS ordering-dependent: the inertia feral reports on the PRE-regularization
+singular matrices (s001):
+  Amd     inertia=(453,252,22)   ← 22 zero pivots force-accepted
+  Amf     inertia=(457,252,18)
+  MetisND inertia=(465,255,7)    ← negative=255, WRONG (expected 252)
+  ScotchND inertia=(410,253,64)
+On a genuinely rank-deficient matrix the zero count is inherently ambiguous,
+and it varies wildly by ordering. pounce uses the inertia to drive its δ_w
+regularization loop; different inertia → different δ_w path → different
+regularized system (s003) → different step → IPM lands at 2.3e-8 (amd/amf) vs
+1.0e-8 (metis). The lever is the *regularization path*, mediated by feral's
+inertia report on the singular matrix — NOT linear-solve backward error.
+
+Implication: the issue's suggested fix (stabilize pivots / bound growth / more
+refinement to cut backward error) targets a quantity that is already ~1e-22.
+Implementing it would not move the needle. The real mechanism is subtler and
+partly pounce-side (δ_w strategy responding to an inherently-ambiguous inertia
+on a singular KKT). IPOPT-MA57 reaching optimal shows it's solvable, but the
+locus is not the feral solve accuracy the issue names.
+
+Decision: STOP before implementing; report the non-reproduction + the
+inertia/regularization-channel diagnosis to the user and ask how to proceed
+(feral inertia-on-singular robustness vs pounce δ_w strategy vs joint).
+Evidence: src/bin/probe_issue63_nearsingular.rs, /tmp/scrs8out/*.
+
+* 08:15 :issue-63:static-pivot:backfires:
+Tested with_static_pivot_threshold(1e-8) (MA57-style, the issue's "fix
+direction 1/2") on the SINGULAR s001. Catastrophic: floor = 1e-8*||A||_inf with
+the μ→0 (1,1)-block blowup → ~510-542 of 727 pivots perturbed (n_tiny), max_piv
+5.96e8, backward_err = 1.0 (solve destroyed), inertia scrambled to
+(442,285,0)/(451,276,0) etc. So static pivoting on the raw singular matrix is
+WRONG here. Corollary: feral's current force-accept-and-report-zeros on s001 is
+USEFUL — it correctly signals singularity so pounce escalates δ_w. Hiding the
+singularity (zero=0, definite-but-wrong inertia) would mislead the IPM.
+
+* 08:25 :issue-63:mechanism:freeze-not-deltaw:
+Compared the inf_pr / lg(rg) trajectory amf(default) vs metis, iters 24-35:
+  AMF:   reg on at iter 26; inf_pr 5.42e-8 → FREEZES at 2.30e-8 (bit-identical
+         iters 30-57 while ||d|| grows to 1.8). δ_w escalates -4.0,-4.5,...
+  METIS: reg on at iter 25 (one earlier); inf_pr jumps to 2.56e-4 (4 orders
+         BIGGER) then steadily DECREASES 2.56e-4→1.25e-5→...→1e-8 (optimal).
+         δ_w escalates -4.0,-4.5,... (essentially the SAME schedule).
+
+Key facts that pin the mechanism:
+- The δ_w *schedule* is nearly identical between orderings → it is NOT a
+  different δ_w magnitude.
+- The regularized stepped system (s003) is full-rank (zero=0) and feral solves
+  it to ~1e-22 under every ordering. A full-rank solve is ordering-INDEPENDENT
+  in its answer (only fill/speed change). So feral's ordering cannot change the
+  step for a *fixed* regularized matrix.
+- Therefore the divergence must be that pounce builds a DIFFERENT regularized
+  matrix per ordering, because its δ_w-escalation loop terminates on feral's
+  INERTIA report — which differs by ordering on the near-singular s001
+  (amf (457,252,18) vs metis (465,255,7), and metis turns regularization on one
+  iteration earlier). Different inertia trajectory → different regularized
+  iterate path → AMF lands on a frozen 2.3e-8 fixed point; metis escapes.
+
+Paradox: metis's s001 inertia is *more wrong* (neg=255 ≠ 252 expected) yet it
+converges. "More regularization, earlier" helps here; it is not a principled
+"better inertia" signal. So there is no obvious principled feral-side inertia
+change that is known-correct AND fixes scrs8 — and static-pivot backfires.
+
+Conclusion for the maintainer: the feral linear solve is not at fault
+(~1e-22). The lever is the ordering's effect on the inertia report of the
+near-singular KKT, which steers pounce's δ_w/iterate path; the winning ordering
+(metis) wins by reporting a *more pessimistic* inertia, not a more accurate
+one. A purely-feral fix that is principled (not "prefer metis on this class")
+is not evident, and the one MA57-style lever the issue names (static pivot)
+makes this case strictly worse. Recommend: treat the durable fix as the δ_w /
+inertia-acceptance interaction (pounce-side or joint), and consider the
+ordering-class heuristic only as an explicit, documented symptom mitigation.
