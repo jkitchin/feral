@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-03T11:15:02Z
+Generated: 2026-06-03T11:28:06Z
 
 ## Latest Session
 File: dev/sessions/2026-06-03-01.md
@@ -59,26 +59,26 @@ goes green; full suite + clippy + fmt clean.
 
 ## Git Status
 ```
+72c05ee Merge pull request #66 from jkitchin/claude/issue-64-arrow-ordering
+b93446a docs(session): checkpoint 2026-06-03-01 — issue #64 arrow ordering catch
+4882313 fix(ordering): arrow/bordered-KKT catch — route MetisND→AMF on dense-border patterns (#64)
 8877a48 docs(lever-1.2): row-band blocking measured — bit-exact but a 0.74-0.95x regression (#62)
 55f6a70 perf(dense): intra-front parallel Schur (perf-review Lever 1.1) + lever-sweep docs (#61)
-8ffdb55 docs+test(parallel): O(1) worker-stack depth, deep-tree guard (pounce#79) (#60)
-14cff66 perf-review: analysis and verification of intra-front parallelism (#59)
-cd12735 release: v0.9.0
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
@@ -86,7 +86,7 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 
-test result: ok. 322 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.41s
+test result: ok. 322 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.43s
 
 ```
 
