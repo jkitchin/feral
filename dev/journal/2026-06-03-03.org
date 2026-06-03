@@ -1,0 +1,106 @@
+#+TITLE: FERAL journal 2026-06-03-03
+#+STARTUP: showall
+
+* 08:30 :issue-65:scaling:repro:setup:
+Issue #65: Auto scaling reports wrong inertia (spurious zero pivots) on
+ill-conditioned indefinite KKTs; Mc64Symmetric fixes it. Two repro problems:
+sawpath/discs (false-infeasible at iter 0) and twirism1 (wrong neg count
+throughout late iters → step starvation). Branch claude/issue-65-mc64-scaling
+off main.
+
+Router under test: pick_scaling_strategy (src/scaling/mod.rs:609) routes to
+Mc64Symmetric iff BOTH max_col_nnz>32 (arrow head) AND diag_only/n>=0.30
+(nonzero-diagonal slack mass); else InfNorm.
+
+* 08:40 :issue-65:repro:feral:
+Regenerated iter-0 KKTs from pounce (--dump kkt:0). probe_issue65_scaling
+factors each under Auto/InfNorm/Mc64Symmetric/Identity:
+
+sawpath (n=1575, nnz=5096; expected neg=786):
+  router: diag_only/n=0/1575=0.000  max_col_nnz=586  → Auto=InfNorm
+  Auto/InfNorm  (789,670,116) ✗  min|piv|=0.0      ← 116 spurious zeros
+  Mc64Symmetric (789,786,0)  ✓   min|piv|=0.0296   ← matches MA27/numpy
+  Identity      (797,712,66) ✗
+  → REPRODUCES the issue exactly. Auto fails because diag_only=0 (the (2,2)
+    dual block is explicit-zero, so there are no nonzero-diagonal slack cols),
+    so the slack-mass gate fails and it routes to InfNorm.
+
+twirism1 (n=745, nnz=8656; expected neg=313):
+  router: diag_only/n=0/745=0.000  max_col_nnz=85   → Auto=InfNorm
+  Auto/InfNorm  (432,313,0) ✓  min|piv|=8.88e-16   ← CORRECT
+  Mc64Symmetric (433,311,1) ✗  min|piv|=1.58e-17   ← WRONG
+  → OPPOSITE of sawpath: on twirism1 iter-0, InfNorm is RIGHT and MC64 is
+    WRONG. (twirism1's bug is at LATE iters, not iter 0.)
+
+discs (n=153): all four strategies give (79,74,0) at iter 0 — the bug is not
+in the iter-0 matrix.
+
+* 08:50 :issue-65:design:structural-router-cannot-work:
+Critical: sawpath and twirism1-iter0 have the SAME router signature
+(diag_only=0, max_col_nnz>32) but OPPOSITE needs (sawpath→MC64,
+twirism1→InfNorm). A purely STRUCTURAL router cannot separate them. Confirmed
+"make MC64 the default" / "route arrow-head alone to MC64" would REGRESS
+twirism1 iter-0 (and clnlbeam per the existing router docs).
+
+pounce-feral calls solver.factor(&matrix, None) — passes check_inertia=None
+(crates/pounce-feral/src/lib.rs:451) and compares the returned inertia
+itself. So feral's own check_inertia path never fires in production.
+
+Conclusion: the fix must be NUMERICAL, self-contained in feral. When the
+Auto-resolved scaling produces force-accepted zero pivots (inertia.zero>0 /
+min|piv|=0 → the matrix LOOKS singular), retry with Mc64Symmetric and adopt it
+if it yields a non-singular factor with a healthy smallest pivot. This trigger:
+  - FIRES on sawpath (min|piv|=0, zero=116) → retry → MC64 (789,786,0) healthy.
+  - does NOT fire on twirism1 iter-0 (min|piv|=8.9e-16, zero=0) → stays InfNorm
+    (correct), so twirism1's iter-0 is NOT regressed.
+  - is correctness-safe: MC64 cannot change rank, so on a GENUINELY singular
+    matrix the retry also reports zeros and the original is kept (only a wasted
+    factorization, no wrong "fix").
+Note: twirism1's LATE-iter wrong-neg-WITHOUT-zeros case is NOT covered by a
+zero-trigger (feral returns Success, no zeros) and would need expected-inertia
+(pounce passes None today) — out of scope for the zero-trigger fix; record as
+follow-up.
+
+* 09:20 :issue-65:implement:fallback:
+Implemented the inertia-guided MC64 fallback in Solver::factor
+(src/numeric/solver.rs, after the first numeric dispatch). Gate: user
+configured Auto AND resolved scaling != Mc64Symmetric AND inertia.zero>0 →
+re-run with Mc64Symmetric; adopt iff retry.zero < first.zero. On adoption: pin
+auto_picked_strategy=Mc64Symmetric (sticky, so subsequent refactors on the
+pattern skip the retry) and bump new counter mc64_scaling_fallback_count
+(+accessor). SparseFactors is owned (stored by value), so the retry overwriting
+the workspace does not invalidate the kept first factor.
+
+probe_issue65_scaling after the change:
+  sawpath Auto: (789,786,0) ✓ min|piv|=0.0296   (was (789,670,116), min=0)
+  twirism1 Auto: (432,313,0) ✓ min|piv|=8.9e-16  (unchanged — fallback did NOT
+                 fire because InfNorm zero=0; MC64's wrong (433,311,1) NOT adopted)
+  explicit InfNorm on sawpath: still (789,670,116) — gate is Auto-only, respected.
+
+Lib suite 322 passed/0 failed; full suite 0 failed; 3 new regression tests
+(tests/issue65_mc64_fallback.rs) pass.
+
+* 09:35 :issue-65:validate:corpus:
+probe_issue65_corpus walks data/matrices/kkt/**, factors under Auto (fallback
+ON), compares to .verdict.json consensus_inertia on definitive+strong matrices.
+1-in-20 sample (7698 strong matrices):
+  matched 7695/7698 = 99.96%; fallback fired 0; fallback-fired-AND-mismatch 0.
+The 3 mismatches (BATCH_0243/0263/0483, feral (47,74,0) vs consensus (48,73,0))
+have fallback=0 → PRE-EXISTING, untouched by this change (a known BATCH-family
+sign disagreement). So the fallback introduced ZERO new mismatches and fires
+rarely (negligible cost). Full-corpus sweep running in background for the
+definitive number.
+
+* 09:50 :issue-65:validate:corpus:full:
+Full corpus sweep (probe_issue65_corpus 0 1) complete:
+  definitive+strong checked: 153725
+  matched consensus:         153661  (99.9584%)
+  mismatched:                64  — ALL fallback=0 (pre-existing)
+  fallback fired:            0  (across the entire 153725-matrix corpus)
+  fallback fired AND mismatch: 0  → ZERO regressions from this change.
+The 64 mismatches are the known ACOPP30 (4) and BATCH (60) off-by-one sign
+disagreements, untouched by the fallback. The fallback never fires on the
+existing corpus — it is a surgical fix that activates only on the sawpath-class
+pathology (spurious zeros + MC64-recoverable), which this corpus does not
+contain. Strongest possible regression evidence: provably 0 inertia regressions
+on 154k matrices, and the targeted fix proven on sawpath.
