@@ -131,3 +131,113 @@ Docs updated: dev/research/issue-73-n100k-thin-regime.md (Finding 3 + Decision,
 with a read-this-first banner marking the fill-guard rejected), dev/decisions.md
 (unconditional-AMF decision + fill-guard rejection), dev/tried-and-rejected.md
 (fill-guarded reroute, nql180 standing counterexample), CHANGELOG.md Unreleased.
+
+* 02:30 :issue-76:repro:near-singular:nonreproducing:
+Checked out issue #76 (over-by-one negative inertia, 489 vs MA57's 488, on
+agg_iter162_kkt n=1103 nnz=3965, degenerate-LP KKT at mu~2.5e-9). The repro
+matrix is on this machine at /tmp/feral-repro/.
+
+FINDING: the posted standalone repro does NOT reproduce on current main
+(51f0472). feral robustly returns the CORRECT neg=488 (= MA57):
+- probe_issue65_scaling: Auto/InfNorm/Mc64Symmetric/Identity ALL -> (615,488,0)
+  Success, min|piv|=1.1974e-12. 12 repeated runs identical; RAYON_NUM_THREADS
+  1..16 identical (n=1103 is below the parallel threshold -> serial path).
+- probe_issue76_warmstate (new, crates/feral-diagnostics): cold Solver::new(),
+  auto_cascade_break(beta in {1e-3..0.25}), with_cascade_break(0.5/1.0),
+  refactor-x2-same-solver, with_params(defaults) -> ALL (615,488,0), min|piv|
+  1.1974e-12. No in-process warm-state config flips it to 489.
+
+ROOT CAUSE of the apparent contradiction:
+1. factor(_, None) can NEVER return WrongInertia (solver.rs:1271 gates it on
+   check_inertia=Some). The issue's "status=WrongInertia" came from pounce's
+   own inertia comparison, not the posted repro (which would print Success).
+2. Numeric code is byte-identical between the issue's cited 2ef751f and HEAD
+   (git diff 2ef751f..HEAD touches only src/symbolic/mod.rs, the n>100k #73
+   ordering change, irrelevant to n=1103). So "reproduces on 2ef751f" should
+   equal HEAD's 488. It does not -> the .mtx is not the exact thing pounce
+   factored.
+3. The .mtx is full-precision f64 (17 sig figs) but the matrix has dynamic
+   range 1.6e-9 .. 4.7e13 (cond ~1e22, the mu~2.5e-9 vertex). The smallest
+   SCALED pivot is 1.2e-12, i.e. ~2.5e-26 relative to ||A|| -- one eigenvalue
+   at computational zero whose SIGN is set by the last ULPs of the assembly.
+   A 1-ULP difference between pounce's live KKT assembly and the round-tripped
+   .mtx flips that pivot's sign -> 488 vs 489. Both are "defensible" reads of
+   a 0 eigenvalue; MA57 and feral-on-the-dump both say 488.
+
+CONCLUSION: not a reproducible feral bug as filed. feral AGREES with MA57
+(488) on the dumped matrix under every scaling/thread/warm-state config. The
+489 is a knife-edge sign flip in pounce's live assembly that the .mtx round
+trip does not preserve. To make progress we need pounce's EXACT in-memory
+matrix bits (or to repro inside pounce), not the dump. Chasing 488->489 by
+changing inertia classification on a ~1e-26-relative pivot would risk the
+inertia gate (cf. inertia-near-singular-certification.md: a single isolated
+~0 eigenvalue is provably invisible to BK pivot magnitude; the note already
+rejected a trailing-norm rank criterion for exactly this reason).
+
+Did NOT change any src/. New throwaway probe
+crates/feral-diagnostics/src/bin/probe_issue76_warmstate.rs (uncommitted).
+Reported to user; awaiting direction on whether to write this up on the issue
+or attempt an in-pounce repro.
+
+* 03:30 :issue-77:repro:dense-front:nonreproducing:debug-build:
+Issue #77 filed: `sensors` (n=1000 fully-dense indefinite Hessian, nnz=500500
+= complete lower triangle) reportedly UNSOLVABLE through FERAL -- first factor
+~45-55s, each refactor ~7-9s, so a 6-factor delta_w cascade at iter 0 blows the
+300s budget. IPOPT-MUMPS solves in 62 it (seconds). Three hypotheses in the
+issue: (1) dense symbolic walks full O(n^2) adjacency, (2) under-vectorized
+dense indefinite kernel, (3) no early dense detection.
+
+REPRO ON CURRENT MAIN (51f0472), release build, dumped matrix
+/tmp/feral-repro/sensors_iter0_kkt.mtx:
+  probe_issue77_densefront: FIRST factor 0.05s, SECOND (cached) 0.03s.
+    inertia=(388,612,0) -- 612 negs MATCHES the issue, so it IS the right
+    matrix. 1 supernode, numeric loop 0.030s.
+  probe_issue77_sweep: every ordering x scaling 0.044-0.080s:
+    Amd/Auto 0.054 Amd/Id 0.047 Amf/Auto 0.050 Amf/Id 0.046
+    MetisND/Auto 0.080 MetisND/Id 0.076 Auto/Auto 0.050 Auto/Id 0.044
+  Simulated 6-factor delta_w cascade (fresh Solver each): TOTAL 0.286s.
+  => The exact scenario the issue says "blows 300s" runs in 0.29 SECONDS.
+     ~1000x faster than reported. Issue does NOT reproduce against feral main.
+
+NOTE: D.3 dense fast-path gate is N_MAX=128 (factorize.rs:1296), so n=1000 does
+NOT take the fast path -- it goes through the MULTIFRONTAL path, which
+amalgamates the complete graph into ONE supernode and factors it with the
+blocked dense BK kernel in 0.03s. So hypothesis 1/3 (dense detection/bypass)
+are moot: the multifrontal path already handles a complete graph fast.
+
+HYPOTHESIS for the 1000x gap: pounce is running a DEBUG build of feral. The
+signature fits: ~40s first-factor-minus-refactor gap = unoptimized symbolic
+graph ops on a complete n=1000 graph; ~7-9s refactor = unoptimized dense BK
+kernel (no SIMD, bounds checks). Testing by building the probe in debug now.
+
+* 03:55 :issue-77:debug-build:resolved:
+Tested the debug-build hypothesis. probe_issue77_densefront built with plain
+`cargo build` (debug): FIRST 2.69s, SECOND 2.41s, symbolic 0.28s, numeric loop
+2.356s. So debug is 50-80x slower than release (0.05/0.03s) -- but still NOWHERE
+near the issue's 45-55s/7-9s. Debug symbolic is only 0.28s, so the issue's ~40s
+first-vs-refactor GAP is NOT feral symbolic in any build.
+
+Kernel throughput sanity: release numeric 0.03s for n=1000 indefinite ~= n^3/3
+/ 0.03 ~= 11 Gflop/s, within 2-4x of LAPACK dsytrf. Hypothesis 2 (10-100x off)
+refuted.
+
+pounce pins feral rev=2ef751f (Cargo.toml:81) -- numeric code byte-identical to
+HEAD (only symbolic/mod.rs changed for #73). Canonical bench runner
+benchmarks/run_nl_benchmark.py uses ./target/release/pounce. But pounce also
+ships a maturin Python ext (_pounce.abi3.so); plain `maturin develop` is DEBUG.
+Installed .so is 3.25MB (closer to release 4.2MB than debug 14MB dylib) -- build
+mode inconclusive from artifact size, and it's pounce-side anyway.
+
+CONCLUSION: not a feral perf bug. All 3 issue hypotheses refuted (dense symbolic
+0.02s; kernel 11 Gflop/s; multifrontal already amalgamates the complete graph to
+1 supernode -- D.3 gate N_MAX=128 means n=1000 takes the multifrontal path, not
+the dense fast-path, and it's fast anyway). The 45-55s is pounce-side: debug
+ext + first-touch AD assembly of the dense 1000x1000 Hessian + possible XProtect
+throttling, bundled into the "factorization" number. Issue's own numbers are
+inconsistent (45-55 + 5x8 = 85s > "6 factors in 60s cap").
+
+ACTION: posted findings to #77 (comment 4616483592), LEFT OPEN pending an
+isolated release-built feral::factor() timing on pounce's LIVE matrix. If that
+is ~0.05s the issue closes against feral; if >0.1s it becomes a real target with
+the live matrix attached. New throwaway probes (uncommitted):
+probe_issue77_densefront.rs, probe_issue77_sweep.rs.
