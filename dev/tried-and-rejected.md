@@ -2240,3 +2240,35 @@ dev/research/issue-63-nearsingular-ordering-diagnosis.md;
 dev/journal/2026-06-03-02.org; probe src/bin/probe_issue63_nearsingular.rs.
 Future sessions: do NOT re-attempt a FERAL-only fix for scrs8 without first
 re-checking these four dead ends.
+
+## 2026-06-03 — Fill-guarded AMF reroute above 100k (issue #73)
+
+The plan for extending the #67 AMF reroute past `AMF_BAND_MAX` (100k) was a
+**fill-guarded race**: above 100k, route a would-be-MetisND `Auto` matrix to
+AMF only when AMF's predicted fill `factor_nnz_estimate ≤ MetisND's`,
+otherwise keep MetisND. The appeal: the symbolic probe (`probe_issue73_symbolic`)
+showed nnz_L / flop_proxy already separated the AMF-wins families from the lone
+predicted-MetisND-win (nql180) at ~zero cost relative to the numeric factor, so
+a fill guard looked like it would capture the wins without an nql180 regression.
+This design is recorded in the #73 research note's "Recommendation" (option b)
+and was the originally-requested next step.
+
+Rejected by the real factor+solve A/B (`probe_issue67_thin --reps 1`). The
+guard's predicate is **anti-correlated with real speed on nql180**: MetisND has
+2% *smaller* fill (fill_r 0.98) yet AMF is **2.05× faster** on the actual
+factor+solve (fac_amf 1903 ms vs fac_met 3949 ms). The fill guard would have
+read "MetisND fill is smaller → keep MetisND" and **forfeited a 2× speedup**.
+nnz_L and the Σ ncol·nrow² flop_proxy do not predict factor+solve wall-time at
+this scale (the numeric phase's cache/critical-path behavior dominates), so any
+routing guard keyed on symbolic fill makes the wrong call exactly where it
+matters — and adds a per-solve symbolic-race cost to do it.
+
+Symptoms / evidence of the failure: on real factor+solve AMF wins ALL 5
+measured n>100k families (dtoc2 2.49×, pinene 1.18×, cont5_1_l 2.75×, nql180
+2.05×, YATP1NE 2.13×), including the matrix the guard would have demoted.
+Superseded by the **unconditional** AMF extension (drop `AMF_BAND_MAX`; route
+every would-be-MetisND decision to AMF), recorded in `dev/decisions.md`
+(2026-06-03, issue #73). Future sessions: do NOT reintroduce a fill / nnz_L /
+flop_proxy guard on the n>100k AMF reroute — nql180 is the standing
+counterexample. Data: dev/research/issue-73-n100k-thin-regime.md (Finding 3),
+dev/journal/2026-06-03-06.org (:issue-73:ab:factor-solve:surprise:).

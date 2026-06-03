@@ -4,6 +4,28 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `Auto` now prefers AMF over MetisND at every size (#73)
+
+Extends the #67 thin-large reroute past its `n ≤ 100_000` ceiling: the
+`AMF_BAND_MAX` bound is **removed**, so whenever the size rule would pick
+MetisND, `choose_adaptive` now routes to AMF at **every** `n`. The earlier
+`n > 100_000 && avg_deg < 5 → Amd` (#50 powerflow) and arrow → AMF (#64)
+catches still fire first, so the powerflow-class guardrail and dense-border
+catch are unchanged — only the uniformly-thin would-be-MetisND population
+above 100k is affected.
+
+#67 deferred this regime as under-sampled. The #73 investigation closed it
+with a real **factor + solve** A/B (`probe_issue67_thin`) on the n>100k
+families: AMF wins on **every measured matrix** — dtoc2 2.49×, pinene 1.18×,
+cont5_1_l 2.75×, nql180 2.05×, YATP1NE 2.13×. The decisive case is **nql180**,
+where MetisND has 2% *smaller* symbolic fill yet AMF is 2.05× faster on the
+real factor+solve — proving that fill (`factor_nnz_estimate` / flop_proxy) is
+not a reliable speed predictor at this scale. A fill-guarded race was
+therefore **rejected** in favor of the unconditional reroute (see
+`dev/tried-and-rejected.md`).
+
+See `dev/research/issue-73-n100k-thin-regime.md` and `dev/decisions.md`.
+
 ### Changed — diagnostic binaries moved out of the default build/test set (#71)
 
 The root `feral` package's `src/bin/` held 145 binaries, 144 of them
