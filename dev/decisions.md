@@ -5172,3 +5172,54 @@ Evidence: dev/research/issue-67-thin-large-ordering.md,
 dev/journal/2026-06-03-04.org, src/symbolic/mod.rs choose_adaptive +
 AMF_BAND_MAX, tests/issue67_thin_ordering.rs, src/bin/probe_issue67_thin.rs,
 src/bin/probe_issue67_race.rs.
+
+## 2026-06-03 — Diagnostic binaries live in a non-default workspace crate (issue #71)
+
+The root `feral` package carried 145 `src/bin` binaries (144 throwaway
+diagnostics: diag_*, probe_*, bench_*, profile_*; only bench.rs is a
+keeper). With `autobins = true` every root `cargo build`/`test`/`clippy`
+compiled all 145. On macOS each freshly-built binary is XProtect-scanned
+once (~10-40s wall, ~0 CPU), so a cold `cargo test` (~190 binaries) took
+~30 min locally; Linux CI was unaffected. Only 2 diagnostics carry a
+`#[test]`, and those are local JSON-sidecar parser unit tests, not
+solver-correctness gates.
+
+Decision: relocate the 144 diagnostics into a new workspace member crate
+`crates/feral-diagnostics/` (publish = false, depends on feral). Root
+commands without `-p`/`--workspace` operate on the `feral` package only
+(the diagnostics crate is a member but NOT a dependency of feral), so the
+default build/test set no longer compiles them. Run on demand with
+`cargo run -p feral-diagnostics --bin <name>`.
+
+Rejected alternatives:
+- Per-bin `required-features` feature-gating: `autobins` would have to be
+  disabled and all 144 binaries enumerated as explicit `[[bin]]` blocks
+  with `required-features` — verbose and brittle. A separate crate is the
+  idiomatic non-default-build mechanism.
+- Deleting the diagnostics: they are the audit trail behind shipped
+  decisions (probe_issue67_thin, probe_issue65_corpus, …) and are cheap to
+  keep once out of the default build.
+
+Constraints preserved:
+- `bench.rs` stays in the root package so `cargo run --bin bench --release`
+  (the session protocol command) is unchanged.
+- CI `stress-smoke` selects `bench_one_matrix` / `probe_fma_kernel` with
+  `-p feral-diagnostics`. The `check` job adds
+  `cargo clippy -p feral-diagnostics --all-targets -- -D warnings` and
+  `cargo test -p feral-diagnostics` so the diagnostics stay lint-clean and
+  their 2 test sets keep running — the bar is kept where it is cheap
+  (Linux CI) and dropped only on the slow local path (pre-commit clippy /
+  local `cargo test`).
+- `feral-diagnostics` is absent from the explicit release publish list and
+  is marked `publish = false`.
+
+No library or solver source changed; this is a build-layout change only.
+
+Evidence: crates/feral-diagnostics/Cargo.toml, root Cargo.toml workspace
+members, .github/workflows/ci.yml, dev/journal/2026-06-03-05.org. Verified:
+root `cargo build` compiles no diagnostics; `cargo build -p
+feral-diagnostics` compiles all 144 cleanly; `cargo clippy -p
+feral-diagnostics --all-targets -- -D warnings` clean; the 2 diag test sets
+pass (5 + 4); root `cargo clippy -- -D warnings` clean; `cargo run --bin
+bench` and `cargo run -p feral-diagnostics --bin probe_issue67_thin` both
+resolve.
