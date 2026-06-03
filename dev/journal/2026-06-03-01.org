@@ -1,0 +1,52 @@
+#+TITLE: FERAL journal 2026-06-03-01
+#+STARTUP: showall
+
+* 06:45 :issue-64:ordering:arrow:setup:
+Starting issue #64: Auto ordering picks MetisND on arrow/bordered KKTs
+→ ~7× fill blow-up on r05 LP. `pick_default_method` routes by size alone
+(n>10_000 → MetisND), ignoring structure.
+
+Decisions taken with the user up front:
+- Detection: cheap O(n) degree predicate (arrow → AMF), not AutoRace.
+- Fixture: regenerate-on-demand into gitignored tests/data/large/, the
+  regression test skips cleanly when absent (no blob in git). tests/data/large/
+  is already gitignored and fetched, so committing a 1.7 MB / 429 KB-gz blob
+  would break that convention; user chose not to.
+
+* 06:50 :issue-64:fixture:repro:
+Regenerated the r05 iter-0 KKT from pounce (release 0.3.1-dev):
+
+  pounce <bench-data>/lp/nl/r05.nl --dump kkt:0 --dump-dir /tmp/r05dump max_iter=1
+  jsonl_to_mtx.py /tmp/r05dump/iter_000/kkt_solve_001.jsonl r05
+
+Output: n=14842 nnz=118968 status=Success neg_evals expected=5171 actual=5171.
+Matches the issue exactly (n=14842, stored nnz=118968). Copied to
+tests/data/large/r05_kkt.mtx (gitignored, confirmed via git check-ignore).
+
+* 07:00 :issue-64:calibration:arrow:
+Probe (src/bin/probe_issue64_arrow.rs) over the full symmetric pattern,
+candidate predicate heavy = deg > max(64, 8*avg_deg):
+
+  r05_kkt:  n=14842 full_nnz=223094 avg_deg=15.0 max_deg=502 thr=121
+            heavy_count=171 (1.15% of n)  heavy_nnz=85842 (38.5% of full_nnz)
+            nnz_L: Amf=506210 Amd=607519 MetisND=4358715  (MetisND/Amf=8.61x)
+  bratu3d:  avg_deg=6.25 max_deg=7  heavy_count=0           MetisND/Amf=1.59x
+  cont-201: avg_deg=5.44 max_deg=6  heavy_count=0           MetisND/Amf=1.32x
+  bcsstk38: avg_deg=44.3 max_deg=614 heavy_count=2 (0.025%) heavy_nnz=0.3%
+            nnz_L: Amf=726471 Amd=736620 MetisND=876960     MetisND/Amf=1.21x
+
+Conclusions:
+- The (heavy_count < 0.05*n) AND (heavy_nnz/full_nnz >= ~0.20) gate fires on
+  r05 (38.5% share) and correctly REJECTS bcsstk38 (0.3% share, despite 2
+  deg-614 columns — the nnz-share guard is doing the discriminating work,
+  not the count guard). bratu3d/cont-201 have zero heavy columns.
+- Ranking matches the issue (MetisND ~8.6x worse than AMF). Absolute nnz_L
+  drifts vs the issue's numbers (Amf 506k vs 527k, MetisND 4.36M vs 3.59M) —
+  consistent with ordering-impl / METIS-seed drift; the `< 1.0e6` regression
+  threshold is robust (AMF/AMD ~0.5-0.6M, MetisND 4.36M).
+- Side note (OUT OF SCOPE): bratu3d/cont-201 also show MetisND losing to AMF
+  on fill (1.3-1.6x) with no arrow signature. Not touching — issue #64 is
+  specifically the arrow/bordered case.
+- Detector only ever needs to flip the would-be-MetisND decision (n>10_000)
+  to AMF; it never touches the n<=10_000 → AMF path. Natural placement is the
+  large branch of pick_default_method's decision, on the symmetric pattern.
