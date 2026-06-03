@@ -4,6 +4,35 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — thin-large default ordering now prefers AMF up to n ≤ 100k (#67)
+
+The size-only default routed every `n > 10_000` matrix to MetisND. On
+**uniformly-thin** large matrices (3-D-PDE-like discretizations with a flat
+degree distribution and no dense border — so the #64 arrow catch correctly
+does not fire) nested dissection is supposed to win, yet AMF produces both a
+smaller factor *and* a faster solve. A corpus-wide A/B (54 `n > 10_000`
+KKT/SuiteSparse families, measuring **factor + solve wall-time**, not nnz_L
+alone) found that across the entire `(10_000, 100_000]` band AMF wins or
+ties MetisND on **all 36/36** in-scope matrices — worst case 0.99× (run
+noise), median ~1.5×, tail to 4.5× (e.g. bratu3d 1.8×, cont-201 2.1×). The
+issue's hypothesis that MetisND trades fill for a shorter critical path
+never materialized at this scale.
+
+`choose_adaptive` now raises the AMF band ceiling: when the size rule would
+pick MetisND and `n <= AMF_BAND_MAX` (100_000), it routes to AMF instead.
+This is a static `n` threshold, deliberately **not** an average-degree
+predicate (the #50 powerflow hazard) and **not** an `AutoRace` (MetisND's
+nested-dissection symbolic ordering is 2–5× more expensive than AMF's, so
+racing it costs a measured 50–255% overhead for zero benefit). The
+`n > 100_000 && avg_deg < 5 → Amd` (#50) and `n > 100_000 && avg_deg ≥ 5 →
+MetisND` paths are untouched; genuinely-large 3-D problems keep nested
+dissection.
+
+See `dev/research/issue-67-thin-large-ordering.md`. Opt-in regression
+fixtures (gitignored, fetch with `dev/scripts/fetch_large_matrices.sh`):
+`tests/issue67_thin_ordering.rs` asserts `resolved_method == Amf` and an
+nnz_L ceiling on bratu3d (n=27792) and cont-201 (n=80595).
+
 ### Fixed — wrong inertia (spurious zero pivots) on ill-conditioned KKTs under Auto scaling (#65)
 
 On an ill-conditioned symmetric-indefinite KKT (e.g. the Vanderbei `sawpath`

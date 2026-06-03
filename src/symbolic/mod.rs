@@ -126,12 +126,17 @@ pub enum OrderingMethod {
 /// Resolve an `Auto` ordering to a concrete method from cheap pattern
 /// features. Non-`Auto` inputs pass through unchanged.
 ///
-/// The rule set adds one shape-bakeoff branch on top of
+/// The rule set adds shape-bakeoff branches on top of
 /// [`pick_default_method`]:
 ///   - very-large-and-sparse (`n > 100_000`, full avg_deg < 5.0) → `Amd`
 ///   - arrow/bordered (issue #64): whenever the size rule would pick
 ///     `MetisND` (`n > 10_000`) but [`is_arrow_bordered`] detects a
 ///     dense border concentrating the nonzeros, override to `Amf`.
+///   - thin-large (issue #67): whenever the size rule would pick `MetisND`
+///     and `n <= AMF_BAND_MAX` (100_000), override to `Amf`. A corpus A/B
+///     on factor+solve wall-time found AMF wins or ties MetisND across the
+///     entire `(10_000, 100_000]` band; the genuinely-large-dense
+///     `n > 100_000 && avg_deg >= 5` regime keeps `MetisND`.
 ///
 /// Anything else delegates to [`pick_default_method`]. `symbolic_factorize`
 /// routes through `Auto`, so the no-arg default and `Auto` resolve to the
@@ -203,8 +208,33 @@ fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMeth
     if base == OrderingMethod::MetisND && is_arrow_bordered(pattern) {
         return OrderingMethod::Amf;
     }
+    // Issue #67 thin-large catch. The size-only `pick_default_method` routes
+    // every `n > 10_000` matrix to MetisND, but a full corpus A/B (54 n>10_000
+    // KKT/SuiteSparse families, factor+solve wall-time, not nnz_L alone) found
+    // that across the entire `(10_000, 100_000]` band AMF wins or ties MetisND
+    // on factor+solve — 36/36 in-scope matrices with worst case 0.99× (noise),
+    // median ~1.5×, up to 4.5×. MetisND's separators do not pay off on these
+    // uniformly-thin discretization patterns at this scale, and its symbolic
+    // ordering is 2–5× more expensive than AMF's, so racing the two is a net
+    // loss (50–255% overhead). Raise the AMF band to `n <= 100_000`. Only the
+    // would-be-MetisND decision is touched; the `n > 100_000 && avg_deg < 5 →
+    // Amd` (above) path and the genuinely-large-dense `n > 100_000 &&
+    // avg_deg >= 5 → MetisND` regime (where the evidence is thin and #50 warns
+    // against broad reroutes) are left unchanged. See
+    // `dev/research/issue-67-thin-large-ordering.md`.
+    if base == OrderingMethod::MetisND && n <= AMF_BAND_MAX {
+        return OrderingMethod::Amf;
+    }
     base
 }
+
+/// Issue #67: upper bound on `n` for the non-arrow AMF band in
+/// [`choose_adaptive`]. Below this, `Auto` prefers AMF over MetisND; above
+/// it, the `pick_default_method` MetisND default (or the `n > 100_000 &&
+/// avg_deg < 5 → Amd` catch) stands. Calibrated on a corpus A/B — see the
+/// catch comment in `choose_adaptive` and
+/// `dev/research/issue-67-thin-large-ordering.md`.
+const AMF_BAND_MAX: usize = 100_000;
 
 /// Detect the **arrow / bordered-KKT** sparsity signature on a full
 /// symmetric pattern: a *small set* of very-high-degree "border" columns
@@ -1720,11 +1750,27 @@ mod tests {
             choose_adaptive(&p, OrderingMethod::Auto),
             OrderingMethod::Amf
         );
-        // Everything else → delegate to pick_default_method. For
-        // (n=50_000, avg_deg≥10) → MetisND via the n>10_000 fallback.
+        // Thin-large band (issue #67): n in (10_000, 100_000] that the
+        // size rule would send to MetisND is overridden to AMF. The corpus
+        // A/B (dev/research/issue-67-thin-large-ordering.md) found AMF wins
+        // or ties MetisND on factor+solve across this whole band. Here
+        // (n=50_000, avg_deg=20, uniform → not arrow) → AMF.
         let (cp, ri) = pat_bufs(50_000, 20);
         let p = CscPattern {
             n: 50_000,
+            col_ptr: cp,
+            row_idx: ri,
+        };
+        assert_eq!(
+            choose_adaptive(&p, OrderingMethod::Auto),
+            OrderingMethod::Amf
+        );
+        // Genuinely-large-dense (n > 100_000, avg_deg >= 5) is left on
+        // MetisND — above the #67 AMF band and above the #50 avg_deg < 5
+        // AMD catch. (n=150_000, avg_deg=10, uniform.)
+        let (cp, ri) = pat_bufs(150_000, 10);
+        let p = CscPattern {
+            n: 150_000,
             col_ptr: cp,
             row_idx: ri,
         };
@@ -1836,12 +1882,16 @@ mod tests {
             OrderingMethod::Amf,
             "arrow/bordered pattern (n>10_000) must route to Amf, not MetisND"
         );
-        // A uniform large pattern with the same n stays on MetisND.
-        let uniform = pattern_with_degrees(&vec![16usize; 12_000]);
+        // A uniform large-dense pattern *above* the #67 AMF band
+        // (n > 100_000, avg_deg >= 5) stays on MetisND — neither the arrow
+        // catch nor the #67 thin-large catch fires. (n=120_000 below the
+        // band would now route to AMF via #67; the point here is that the
+        // arrow catch itself does not over-fire on a non-arrow shape.)
+        let uniform = pattern_with_degrees(&vec![16usize; 120_000]);
         assert_eq!(
             choose_adaptive(&uniform, OrderingMethod::Auto),
             OrderingMethod::MetisND,
-            "uniform large pattern must remain on MetisND"
+            "uniform large-dense pattern (above #67 band) must remain on MetisND"
         );
         // The arrow override must NOT fire below the size floor: a small
         // arrow already routes to Amf via the n<=10_000 rule, but assert
@@ -2160,12 +2210,14 @@ mod tests {
 
     #[test]
     fn issue_3_auto_on_kkt_routes_via_pick_default_method() {
-        // Auto-path must defer to `pick_default_method` for shapes that
-        // don't match its very-large-and-sparse branch. PoissonControl
-        // K=58 (n=10092, stored avg_deg≈2.67) sits above
-        // choose_adaptive's only remaining catch (n>100_000 &&
-        // avg_deg<5 → Amd, post-#50), so it delegates to
-        // pick_default_method, which returns MetisND for n>10_000.
+        // Issue #3 invariant: the `Auto` path and the no-arg
+        // `symbolic_factorize` default must resolve to the *same* concrete
+        // ordering on every matrix. PoissonControl K=58 (n=10092, stored
+        // avg_deg≈2.67) is a uniformly-thin KKT just inside the #67
+        // thin-large AMF band ((10_000, 100_000], non-arrow), so both paths
+        // now resolve to AMF. (Before #67 this matrix resolved to MetisND
+        // via pick_default_method's n>10_000 rule; the MetisND delegation is
+        // still covered by the `choose_adaptive_rules` n=150_000 case.)
         let m = poisson_kkt_csc(58);
         let params = SupernodeParams::default();
         let auto = symbolic_factorize_with_method(&m, &params, OrderingMethod::Auto).unwrap();
@@ -2173,9 +2225,8 @@ mod tests {
         assert_eq!(
             auto.resolved_method, default.resolved_method,
             "Auto must resolve to the same concrete method as \
-             `symbolic_factorize` (which uses pick_default_method) when \
-             choose_adaptive's own rules don't fire"
+             `symbolic_factorize` (which also routes through choose_adaptive)"
         );
-        assert_eq!(auto.resolved_method, OrderingMethod::MetisND);
+        assert_eq!(auto.resolved_method, OrderingMethod::Amf);
     }
 }

@@ -1,0 +1,103 @@
+#+TITLE: FERAL journal 2026-06-03-04
+#+STARTUP: showall
+
+* 13:15 :issue-67:orient:
+Picked up #67: on uniformly-thin large matrices (n>10000, no arrow/border
+signature) MetisND (the n>10000 default) loses to AMF on fill — bratu3d 1.59x,
+cont-201 1.32x (from the #64 probe). Issue is explicit that this needs a
+corpus-wide A/B weighing numeric factor+solve WALL-TIME, not nnz_L alone, and
+must guard the large-3-D powerflow-class that #50 protects. Branch
+claude/issue-67-thin-ordering off main.
+
+Routing under test (src/symbolic/mod.rs): choose_adaptive →
+  n>100_000 && avg_deg<5  → Amd        (#50, powerflow-class)
+  n<=10_000               → Amf        (pick_default_method)
+  else (n>10_000)         → MetisND    ← the rule #67 questions
+  MetisND && is_arrow_bordered → Amf    (#64)
+So #67 targets the n in (10_000, 100_000] band (and n>100_000 with avg_deg>=5)
+that resolves to MetisND and is NOT an arrow.
+
+* 14:05 :issue-67:measure:band-sweep:
+probe_issue67_thin (new, src/bin/) factors each n>10000 family under
+Auto/Amf/MetisND via the full Solver path, median of 3, reporting post-pivot
+nnz_L and factor+solve wall-time. In-scope = matrices Auto resolves to MetisND
+(non-arrow). Restricted the sweep to the (10_000, 100_000] band: forcing
+MetisND on the n>100_000 && avg<5 families (BDRY2 n=501k etc.) is both
+out-of-scope (they route to AMD) and pathologically slow (#50 powerflow lesson;
+the first sweep stalled on BDRY2 under forced MetisND and was killed).
+
+Band result (54 representatives; 36 resolve to MetisND = in scope). Sorted by
+time_r = (factor+solve MetisND)/(factor+solve AMF), >1 means AMF faster:
+  worst:  clnlbeam  time_r 0.99 (MetisND 1% faster = noise), fill_r 1.16
+          qcqp1500* time_r 1.01-1.02 (tie), fill_r 1.00
+  then a continuum up to:
+          OSCIGRAD  4.48,  TABLE3 3.97,  svanberg 2.88, CHAINWOONE 2.46,
+          ex1/ex4 ~2.55, bratu3d 1.82, cont-201 2.13.
+  ALL 36 in-scope matrices have time_r >= 0.99: AMF wins or ties on
+  factor+solve wall-time on the ENTIRE band. The issue's "MetisND trades fill
+  for parallelism / shorter critical path" hypothesis does NOT materialize on
+  any in-scope matrix in this corpus. Fill is also never materially worse under
+  AMF (lowest fill_r among in-scope: READING9 0.82, gasoil 0.97 — and AMF is
+  STILL faster there, so fill doesn't even predict the time win; AMF's factor
+  structure is just faster for the numeric kernel).
+
+* 14:15 :issue-67:measure:large-guard:
+n>100_000 && avg>=5 cases (route to MetisND, the genuinely-large-dense guard):
+  pinene_3200 (n=127995, avg 9.42): fill_r 1.20, time_r 1.18 — AMF still wins.
+  RDW2D51U (n=195075, avg 9.62, 2D reaction-diffusion): did NOT complete a
+  single Auto+Amf+MetisND pass in ~10 min under the probe and was killed. The
+  n>100k regime is a qualitatively more expensive world; I have one data point
+  (pinene, AMF wins) and one pathological non-completion (RDW2D).
+
+* 14:20 :issue-67:decide:bounded-reroute:
+Decision: route the NON-ARROW MetisND band to AMF only for n <= 100_000.
+Rationale: 36/36 in-scope matrices in (10_000, 100_000] favor AMF on
+factor+solve wall-time (the issue's bratu3d n=27792 and cont-201 n=80595 are
+both in this band), so the fix is strongly evidenced there. The n>100_000
+&& avg>=5 regime (pinene/RDW2D/dtoc2) is left on MetisND: the evidence there is
+thin (one win, one non-completion) and #50 warns against broadly rerouting the
+genuinely-large class. Coherent dispatcher after the change:
+  n<=100_000               → Amf   (small/medium; was n<=10_000)
+  n>100_000 && avg<5       → Amd   (#50, unchanged)
+  n>100_000 && avg>=5      → MetisND (unchanged)
+  arrow                    → Amf   (#64, unchanged)
+
+* 14:40 :issue-67:measure:autorace-overhead:
+probe_issue67_race times symbolic-only per ordering vs numeric+solve, to cost
+an AutoRace(Amf,MetisND) for the band. Race overhead = the EXTRA losing
+candidate's symbolic time (MetisND), as a fraction of the bounded-approach
+total (sym_amf+num_amf+solve). median of 3:
+  matrix         n       sym_amf  sym_met  num_amf  slv_amf  race_ovh%
+  WOODSNE     13003       5315    13081     1603      198    183.8
+  arki0009    12144      16006    29631     9895     7428     88.9
+  HIER133A    12844     150110   165667   122815    15179     57.5
+  bratu3d     27792      21591    67064   367070    16675     16.5
+  ex1_160     75843      35149   187323    54010    34580    151.4
+  cont-201    80595      43349   165610    53485    43974    117.6
+  svanberg   100000      86073   431595    76603     6672    254.9
+KEY FINDING: AutoRace overhead is frequently >100% (median ~118%, up to 255%
+on svanberg). The cost is dominated by MetisND's SYMBOLIC ANALYSIS, which is
+2-5x more expensive than AMF's and on this band often exceeds the entire AMF
+factor+solve. The whole value of the bounded threshold is to NEVER run MetisND
+on the band; AutoRace defeats that by running MetisND symbolic on every
+factorization, even though AMF wins 36/36. (feral's symbolic_factorize_race is
+sequential, so this is real wall-time; even parallelized it burns the cores.)
+bratu3d is the exception (16.5%) only because its numeric factor dwarfs both
+symbolics.
+
+Conclusion: AutoRace is the WRONG tool for #67 — insuring against the
+hypothetical unseen MetisND-favoring matrix costs 50-255% on the common case.
+The bounded threshold is both faster (avoids MetisND's expensive ordering
+entirely) and simpler. If a counterexample is ever found, the threshold is
+trivially adjustable, and a regression test will guard the known wins.
+
+* 21:30 :checkpoint:issue-67:bench:
+Closing #67. Rebased the feature commit onto post-#68 main (5bcfecc);
+CHANGELOG.md + dev/decisions.md conflicts resolved (chronological append,
+no markers). Filtered bench on the in-scope band (FERAL_KKT_ROOTS=
+kkt-expansion,kkt-mittelmann; 137 matrices): 137/137 inertia match vs MUMPS,
+137/137 residual pass, worst residual 4.22e-12 (CBRATU3D_0000). OSCIGRAD
+(in-band) factor 0.18x MUMPS — AMF routing win is real. Full ~154k corpus
+bench skipped: routing-only change, multi-hour, cannot move inertia/residual.
+The "medium FAIL" exit-partition line is pre-existing CHAINWOO (n=4000, below
+the (10k,100k] band), not a #67 regression. Checkpoint written; PR next.

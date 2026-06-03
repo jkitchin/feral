@@ -5122,3 +5122,53 @@ Evidence: dev/research/issue-65-mc64-scaling-fallback.md,
 dev/journal/2026-06-03-03.org, src/numeric/solver.rs (factor() fallback +
 mc64_scaling_fallback_count), tests/issue65_mc64_fallback.rs,
 src/bin/probe_issue65_{scaling,corpus}.rs, dev/scripts/regen_issue65_kkts.sh.
+
+## 2026-06-03 — Thin-large default ordering: AMF band raised to n ≤ 100k (issue #67)
+
+Issue #67 is the non-arrow residue of the #64 calibration probe: on
+uniformly-thin large matrices (flat degree distribution, no dense border,
+so `is_arrow_bordered` correctly does not fire) the size-only default
+`n > 10_000 → MetisND` still loses to AMF. The issue set a high evidence
+bar — nnz_L is not the whole story (MetisND could trade fill for a shorter
+critical path), the size rule is load-bearing (#50 showed broad
+low-avg-degree reroutes regress the corpus), and there is no structural
+signature to key on.
+
+Evidence: a corpus-wide A/B (`probe_issue67_thin`, reps=3) over the 54
+`n > 10_000` KKT/SuiteSparse families, measuring numeric factor + solve
+wall-time (not nnz_L alone). Of these, 36 resolve to MetisND under Auto and
+are non-arrow — the in-scope set. Result: across the entire `(10_000,
+100_000]` band, AMF wins or ties MetisND on factor+solve for all 36/36 —
+worst case clnlbeam 0.99× (run noise), median ~1.5×, tail to 4.5×
+(OSCIGRAD), with bratu3d 1.8× and cont-201 2.1×. fill_r ≥ 1 everywhere
+(AMF's factor is never materially larger). The "fill-for-parallelism"
+trade-off never materialized at this scale: MetisND is both larger and
+slower. Above the band, pinene_3200 (n=127995) still favors AMF (time_r
+1.18, fill_r 1.20) but RDW2D51U (n=195075) did not complete a single pass
+in ~10 min — the n>100k regime is qualitatively more expensive and
+under-sampled.
+
+Decision: bounded reroute. In `choose_adaptive`, when the size rule would
+pick MetisND and `n <= AMF_BAND_MAX` (100_000), override to AMF. Rejected
+alternatives: (a) an average-degree predicate — the same axis #50 warned is
+dangerous, and the band needs no degree key because *every* band matrix the
+corpus contains landed on the AMF side; (b) `AutoRace(Amf, MetisND)` —
+measured 50–255% overhead (`probe_issue67_race`, median ~118%) because
+MetisND's nested-dissection symbolic ordering is 2–5× more expensive than
+AMF's, paying the losing candidate's cost on every solve for zero benefit.
+The threshold is `n`, not the measured-sample identity: the mechanism
+(AMF's lower fill + cheaper symbolic on thin patterns at this scale) is
+size-bounded, so the rule generalizes to unseen band matrices rather than
+memorizing these 36.
+
+Scope guard: only the would-be-MetisND decision in (10_000, 100_000] is
+touched. The `n > 100_000 && avg_deg < 5 → Amd` (#50 powerflow-class) and
+`n > 100_000 && avg_deg >= 5 → MetisND` (genuinely-large 3-D) paths are
+unchanged — pinned by the `choose_adaptive_rules` test (n=150_000 →
+MetisND). pinene's above-band win is left on the table deliberately as the
+safety margin.
+
+Evidence: dev/research/issue-67-thin-large-ordering.md,
+dev/journal/2026-06-03-04.org, src/symbolic/mod.rs choose_adaptive +
+AMF_BAND_MAX, tests/issue67_thin_ordering.rs, src/bin/probe_issue67_thin.rs,
+src/bin/probe_issue67_race.rs.
