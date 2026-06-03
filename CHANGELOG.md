@@ -4,6 +4,39 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — wrong inertia (spurious zero pivots) on ill-conditioned KKTs under Auto scaling (#65)
+
+On an ill-conditioned symmetric-indefinite KKT (e.g. the Vanderbei `sawpath`
+iter-0 system, cond ≈ 4e20 but effectively full rank), default `Auto` scaling
+routed to InfNorm, whose Bunch-Kaufman sequence collapsed ~100 pivots to the
+working-precision floor and reported a **wrong, rank-deficient inertia**
+(`(789,670,116)` vs the true `(789,786,0)` from MA27/numpy). Consuming IPMs read
+the spurious `zero` count as `Singular`, took a bad regularized step at
+iteration 0, and could falsely declare the problem infeasible.
+
+`Solver::factor` now applies an **inertia-guided MC64 fallback**: when the user
+configured `ScalingStrategy::Auto`, the resolved scaling was not MC64, and the
+factor force-accepted zero pivots (`inertia.zero > 0`), it re-runs with
+`Mc64Symmetric` and adopts that result iff it strictly reduces the zero count.
+MC64's symmetric matching pulls large entries onto the diagonal so the pivot
+sequence never hits the floor, recovering the true inertia (sawpath → exactly
+`(789,786,0)`, smallest pivot `0.03`). The fallback is correctness-safe — MC64
+cannot change rank, so a genuinely singular matrix keeps its original factor —
+and is gated on `Auto` only (explicit InfNorm/Identity/MC64 are respected).
+Adoption pins the sticky-Auto strategy to MC64 so subsequent refactors on the
+same pattern skip the retry. New `Solver::mc64_scaling_fallback_count()` reports
+how often it fired.
+
+A purely structural router fix was ruled out: `sawpath` (needs MC64) and
+`twirism1` iter-0 (needs InfNorm — MC64 gives it the *wrong* inertia there) have
+the identical router signature, so the deciding factor must be the numerical
+factorization outcome, not matrix shape. Corpus-validated against the KKT
+consensus oracle: no new inertia mismatches; the fallback fires rarely.
+
+See `dev/research/issue-65-mc64-scaling-fallback.md`. Regression fixtures
+(gitignored, regenerate with `dev/scripts/regen_issue65_kkts.sh`):
+`tests/issue65_mc64_fallback.rs`.
+
 ### Fixed — arrow/bordered-KKT ordering blow-up (#64)
 
 The default ordering routed by size alone (`n > 10_000 → MetisND`). On

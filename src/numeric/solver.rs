@@ -203,6 +203,13 @@ pub struct Solver {
     /// reaching into per-factor state. Increments once per
     /// `factor()` that fell back; resets on `Solver::new()`.
     mc64_fallback_count: usize,
+    /// Issue #65: count of `factor()` calls whose `Auto`-resolved
+    /// (non-MC64) scaling force-accepted zero pivots and were re-run
+    /// with `Mc64Symmetric`, which strictly reduced the zero count and
+    /// was adopted. Each such call recovers a (near-)full-rank inertia
+    /// that the InfNorm/Identity path mis-reported as singular. Mirrors
+    /// `mc64_fallback_count`'s diagnostic role; resets on `Solver::new()`.
+    mc64_scaling_fallback_count: usize,
     /// Pooled scratch for the numeric phase. Retained across
     /// `factor` calls so IPM-style re-factorizations (same
     /// pattern, new values; or bumped pivot threshold) do not
@@ -361,6 +368,7 @@ impl Solver {
             last_pattern_fingerprint: None,
             symbolic_call_count: 0,
             mc64_fallback_count: 0,
+            mc64_scaling_fallback_count: 0,
             workspace: FactorWorkspace::new(),
             use_parallel: true,
             parallel_pool: None,
@@ -1028,6 +1036,82 @@ impl Solver {
                 &mut self.workspace,
             )
         };
+
+        // Issue #65: inertia-guided MC64 scaling fallback. When the user
+        // configured `Auto`, the resolved scaling was NOT MC64, and the
+        // factor force-accepted zero pivots (`inertia.zero > 0` — the
+        // singular signature), re-run with `Mc64Symmetric` and adopt it
+        // iff it strictly reduces the zero count. On ill-conditioned but
+        // effectively full-rank indefinite KKTs (e.g. sawpath, cond≈4e20)
+        // the InfNorm/Identity BK sequence collapses ~100 pivots to the
+        // working-precision floor and reports a wrong, rank-deficient
+        // inertia; MC64's symmetric matching pulls large entries onto the
+        // diagonal so the sequence never hits the floor, recovering the
+        // true inertia. MC64 cannot change rank, so on a GENUINELY
+        // singular matrix the retry also force-accepts zeros, the
+        // strict-improvement gate fails, and the original factor is kept
+        // (cost: one wasted factorization). The gate is `Auto` only —
+        // explicit InfNorm/Identity/MC64 are respected as configured.
+        // Adoption pins the sticky-Auto strategy (below) to MC64 so every
+        // refactor on this pattern skips the retry. See
+        // `dev/research/issue-65-mc64-scaling-fallback.md`.
+        let mut mc64_fallback_adopted = false;
+        let result = match result {
+            Ok((factors, inertia))
+                if matches!(self.numeric_params.scaling, ScalingStrategy::Auto)
+                    && !matches!(effective_params.scaling, ScalingStrategy::Mc64Symmetric)
+                    && inertia.zero > 0 =>
+            {
+                let first_zero = inertia.zero;
+                let mut retry_params = effective_params.clone();
+                retry_params.scaling = ScalingStrategy::Mc64Symmetric;
+                if let Some(arc) = self.last_profiler.as_ref() {
+                    retry_params.profiler = Some(Arc::clone(arc));
+                }
+                let retry = if self.use_parallel {
+                    if let Some(p) = pool.as_ref() {
+                        p.install(|| {
+                            factorize_multifrontal_parallel_with_workspace(
+                                matrix,
+                                symbolic,
+                                &retry_params,
+                                &mut self.workspace,
+                            )
+                        })
+                    } else {
+                        factorize_multifrontal_parallel_with_workspace(
+                            matrix,
+                            symbolic,
+                            &retry_params,
+                            &mut self.workspace,
+                        )
+                    }
+                } else {
+                    factorize_multifrontal_with_workspace(
+                        matrix,
+                        symbolic,
+                        &retry_params,
+                        &mut self.workspace,
+                    )
+                };
+                match retry {
+                    Ok((rf, ri)) if ri.zero < first_zero => {
+                        effective_params.scaling = ScalingStrategy::Mc64Symmetric;
+                        mc64_fallback_adopted = true;
+                        Ok((rf, ri))
+                    }
+                    // MC64 did not improve the zero count (e.g. the matrix
+                    // is genuinely singular) or it errored — keep the
+                    // original factor.
+                    _ => Ok((factors, inertia)),
+                }
+            }
+            other => other,
+        };
+        if mc64_fallback_adopted {
+            self.mc64_scaling_fallback_count += 1;
+        }
+
         // Issue #38: invalidate the one-shot MC64 cache that the
         // symbolic phase populated for the immediately-following
         // numeric reuse. The cache stores the iter-0 Hungarian
@@ -1064,21 +1148,32 @@ impl Solver {
                     && matches!(self.numeric_params.scaling, ScalingStrategy::Auto)
                 {
                     use crate::scaling::ScalingInfo;
-                    let resolved = match &factors.scaling_info {
-                        // Policy-4 fired: pin to InfNorm to preserve
-                        // the fallback decision on every refactor.
-                        ScalingInfo::Mc64FallbackToInfnorm { .. } => ScalingStrategy::InfNorm,
-                        // Partial Hungarian still produced a real MC64
-                        // result; keep dispatching through it.
-                        ScalingInfo::PartialSingular { .. } => ScalingStrategy::Mc64Symmetric,
-                        // No scaling applied → pin to Identity.
-                        ScalingInfo::NotApplied => ScalingStrategy::Identity,
-                        // The picker's choice survived Auto's checks.
-                        // Use `pick_scaling_strategy` once to recover
-                        // which concrete variant it was (Identity /
-                        // InfNorm / Mc64Symmetric); from here on it
-                        // never re-evaluates.
-                        ScalingInfo::Applied => pick_scaling_strategy(matrix),
+                    let resolved = if mc64_fallback_adopted {
+                        // Issue #65: the picker's choice mis-factored
+                        // (spurious zeros) and the MC64 retry rescued it.
+                        // Pin MC64 so every refactor on this pattern uses
+                        // it directly and skips the retry. (Without this
+                        // the picker — `pick_scaling_strategy` — would
+                        // re-pin InfNorm and every iterate would re-pay
+                        // the retry.)
+                        ScalingStrategy::Mc64Symmetric
+                    } else {
+                        match &factors.scaling_info {
+                            // Policy-4 fired: pin to InfNorm to preserve
+                            // the fallback decision on every refactor.
+                            ScalingInfo::Mc64FallbackToInfnorm { .. } => ScalingStrategy::InfNorm,
+                            // Partial Hungarian still produced a real MC64
+                            // result; keep dispatching through it.
+                            ScalingInfo::PartialSingular { .. } => ScalingStrategy::Mc64Symmetric,
+                            // No scaling applied → pin to Identity.
+                            ScalingInfo::NotApplied => ScalingStrategy::Identity,
+                            // The picker's choice survived Auto's checks.
+                            // Use `pick_scaling_strategy` once to recover
+                            // which concrete variant it was (Identity /
+                            // InfNorm / Mc64Symmetric); from here on it
+                            // never re-evaluates.
+                            ScalingInfo::Applied => pick_scaling_strategy(matrix),
+                        }
                     };
                     self.auto_picked_strategy = Some(resolved);
                 }
@@ -1476,6 +1571,17 @@ impl Solver {
     /// [`Mc64FallbackReason`]: crate::scaling::Mc64FallbackReason
     pub fn mc64_fallback_count(&self) -> usize {
         self.mc64_fallback_count
+    }
+
+    /// Issue #65: number of `factor()` calls whose `Auto`-resolved
+    /// (non-MC64) scaling force-accepted zero pivots and were rescued by
+    /// re-running with `Mc64Symmetric` (which strictly reduced the zero
+    /// count and was adopted). A non-zero value means the matrix was
+    /// effectively full-rank but the InfNorm/Identity path mis-reported
+    /// it as singular — the symptom in issue #65 (false-infeasible IPM
+    /// exits). Resets on `Solver::new()`.
+    pub fn mc64_scaling_fallback_count(&self) -> usize {
+        self.mc64_scaling_fallback_count
     }
 
     /// Number of `factor()` calls on this `Solver` that reused the
