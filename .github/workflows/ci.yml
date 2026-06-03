@@ -30,6 +30,14 @@ jobs:
       # separate grep rule needed.
       - name: test
         run: cargo test
+      - name: diagnostics lint + test
+        # The feral-diagnostics crate (issue #71) is outside the root
+        # build/test set, so the pre-commit clippy hook and `cargo test`
+        # above do not cover it. Keep the bar where it is cheap (Linux CI):
+        # lint all its targets warning-free and run its 2 unit-test sets.
+        run: |
+          cargo clippy -p feral-diagnostics --all-targets -- -D warnings
+          cargo test -p feral-diagnostics
       - name: amd-cleanroom
         # feral-amd is a clean-room implementation of AMD. The external
         # `amd` crate (SuiteSparse port) must never enter the feral
@@ -89,7 +97,9 @@ jobs:
             !external_benchmarks/stress/matrices/synth
           key: stress-matrices-${{ hashFiles('external_benchmarks/stress/manifest.tsv') }}
       - name: build bench_one_matrix
-        run: cargo build --release --bin bench_one_matrix
+        # bench_one_matrix lives in the feral-diagnostics crate (issue #71),
+        # which root `cargo build` no longer compiles — select it explicitly.
+        run: cargo build --release -p feral-diagnostics --bin bench_one_matrix
       - name: synth matrices
         run: python3 external_benchmarks/stress/synth.py
       - name: run stress (n<=1000)
@@ -105,6 +115,7 @@ jobs:
       # not an invariant). Reuses the Swatinem/rust-cache layer so the
       # extra build is ~5 s warm.
       - name: probe FMA kernel (x86 measurement, #35)
+        # probe_fma_kernel moved to the feral-diagnostics crate (issue #71).
         run: |
-          cargo run --release --bin probe_fma_kernel
+          cargo run --release -p feral-diagnostics --bin probe_fma_kernel
         continue-on-error: true

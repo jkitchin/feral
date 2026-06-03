@@ -226,6 +226,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "feral-diagnostics"
+version = "0.0.0"
+dependencies = [
+ "feral",
+ "feral-amd",
+ "feral-amf",
+ "feral-kahip",
+ "feral-metis",
+ "feral-ordering-core",
+ "feral-scotch",
+ "pulp",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "feral-kahip"
 version = "0.2.0"
 dependencies = [

@@ -1,0 +1,59 @@
+#+TITLE: FERAL Journal 2026-06-03-05
+#+STARTUP: showall
+
+* 22:10 :issue-71:diagnostics-crate:orient:
+Picked up the session-04 "Next Session Should" item: relocate the 144
+throwaway src/bin diagnostics out of the default build/test set. Opened
+issue #71. Inventory: 145 src/bin/*.rs (61 diag_, 53 probe_, 12 bench_,
+plus profile_/misc); only bench.rs is a keeper. 2 diagnostics carry
+#[test] (diag_cond_parity, diag_schur_parity) — both are local
+JSON-sidecar parser unit tests, not solver gates.
+
+Constraints discovered by reading CI/hooks before touching anything:
+- Cargo.toml already a workspace; autobins=true on the root package is why
+  all 145 bins compile on every root cargo build/test/clippy.
+- ci.yml `stress-smoke` references two diagnostics directly:
+  `cargo build --release --bin bench_one_matrix` and
+  `cargo run --release --bin probe_fma_kernel`. These break on move unless
+  updated to `-p feral-diagnostics`.
+- pre-commit hook is `cargo clippy -- -D warnings` (root package, no
+  --workspace) → currently lints all 145 bins; moving them speeds up the
+  hook too, but drops their lint gate unless CI re-adds it.
+- release.yml publishes an explicit crate list (not workspace-wide), so a
+  new publish=false crate is simply absent from it.
+- No bin uses #[path]/include!/external `mod foo;` → the files are
+  self-contained single-file bins, mechanically safe to move.
+
+* 22:20 :issue-71:implement:
+Created crates/feral-diagnostics/ (publish=false, autobins=true). git mv'd
+all 144 src/bin/*.rs except bench.rs into it (history preserved). Added the
+crate to workspace members with a comment explaining root commands stay
+package-scoped. Updated ci.yml: the two stress-smoke refs now use
+`-p feral-diagnostics`; added a `check`-job step running
+`cargo clippy -p feral-diagnostics --all-targets -- -D warnings` and
+`cargo test -p feral-diagnostics` so the bar is kept where it is cheap.
+
+* 22:35 :issue-71:build:dep-fix:
+First `cargo build -p feral-diagnostics` failed:
+  error[E0433]: unresolved module `feral_amd` (diag_amd_substages)
+  error[E0432]: unresolved import `feral_amd`
+My initial dep scan used `^use` (line-anchored) and missed indented `use`
+statements inside fn bodies. Re-scanned with `grep -hoE 'use feral_(amd|
+amf|metis|scotch|kahip|ordering_core)'`: used set is feral_amd (5 refs),
+feral_metis (2), feral_ordering_core (3). Added all six ordering crates to
+the manifest (trivial path deps; future-proofs new probes). Rebuild: all
+144 bins compile, zero warnings.
+
+* 22:45 :issue-71:verify:
+- Root `cargo build`: compiles NO diagnostics (grep for diag_/probe_/
+  bench_one in the Compiling lines is empty). Goal met.
+- `cargo build -p feral-diagnostics`: all 144 compile clean.
+- `cargo clippy -p feral-diagnostics --all-targets -- -D warnings`: exit 0,
+  clean (the CI gate).
+- Diag tests (targeted, only the 2 test-bearing bins to avoid recompiling
+  all 144 in test cfg locally): diag_cond_parity 5 passed, diag_schur_parity
+  4 passed.
+- `cargo build --bin bench` from root: resolves (protocol cmd unchanged).
+- `cargo run -p feral-diagnostics --bin probe_issue67_thin`: prints usage —
+  a moved diagnostic still runs via -p.
+- Root `cargo clippy -- -D warnings`: clean and fast (now lib + bench only).

@@ -4,6 +4,36 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — diagnostic binaries moved out of the default build/test set (#71)
+
+The root `feral` package's `src/bin/` held 145 binaries, 144 of them
+throwaway diagnostics (`diag_*`, `probe_*`, `bench_*`, `profile_*`, …) and
+only `bench.rs` a real keeper. With `autobins = true`, every root
+`cargo build` / `cargo test` / `cargo clippy` compiled all 145 — and on
+macOS each fresh binary triggers a per-binary Gatekeeper/XProtect scan, so a
+cold `cargo test` built ~190 binaries and took ~30 min locally (Linux CI
+unaffected). Only 2 of the 144 carried a `#[test]` (local JSON-sidecar
+parser unit tests, not solver gates).
+
+The 144 diagnostics now live in a non-default workspace member crate,
+`crates/feral-diagnostics/` (depends on `feral`). Root `cargo build` /
+`cargo test` / `cargo clippy` operate on the `feral` package only — the
+diagnostics are no longer in the default build/test set. They remain
+buildable and runnable on demand:
+
+```
+cargo run -p feral-diagnostics --bin <name> [-- args...]
+cargo build -p feral-diagnostics            # compile all of them
+```
+
+`bench.rs` stays in the root package, so the protocol command
+`cargo run --bin bench --release` is unchanged. CI keeps the diagnostics
+lint-clean and runs their 2 test sets via explicit
+`cargo clippy -p feral-diagnostics --all-targets -- -D warnings` and
+`cargo test -p feral-diagnostics` steps (cheap on Linux); the `stress-smoke`
+job's `bench_one_matrix` / `probe_fma_kernel` references now select the
+crate with `-p feral-diagnostics`. No library or solver code changed.
+
 ### Changed — thin-large default ordering now prefers AMF up to n ≤ 100k (#67)
 
 The size-only default routed every `n > 10_000` matrix to MetisND. On

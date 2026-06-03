@@ -1,0 +1,37 @@
+# feral-diagnostics — throwaway diagnostic / probe / profiling binaries.
+#
+# These are NOT part of the published solver and NOT part of the default
+# build/test set. They live here (a non-default workspace member) so that
+# root `cargo build` / `cargo test` / `cargo clippy` operate on the `feral`
+# package only and do not compile ~144 one-off binaries on every invocation
+# (see issue #71). Run one with:
+#
+#     cargo run -p feral-diagnostics --bin <name> [-- args...]
+#
+# The session benchmark harness `bench` deliberately stays in the root
+# package so the protocol command `cargo run --bin bench --release` is
+# unchanged.
+[package]
+name = "feral-diagnostics"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+autobins = true
+
+[dependencies]
+feral = { path = "../.." }
+# Ordering crates: individual probes call these directly (feral_amd,
+# feral_metis, feral_ordering_core today). All six are listed so adding a
+# probe that reaches another ordering backend needs no manifest edit.
+feral-ordering-core = { path = "../feral-ordering-core" }
+feral-amd = { path = "../feral-amd" }
+feral-amf = { path = "../feral-amf" }
+feral-metis = { path = "../feral-metis" }
+feral-scotch = { path = "../feral-scotch" }
+feral-kahip = { path = "../feral-kahip" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Some probes call the SIMD Schur kernel / parallel driver directly.
+pulp = { version = "0.22.2", default-features = false, features = ["x86-v3"] }
+rayon = "1.10"

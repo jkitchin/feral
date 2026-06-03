@@ -1,5 +1,11 @@
 [workspace]
-members = [".", "crates/feral-ordering-core", "crates/feral-amd", "crates/feral-amf", "crates/feral-metis", "crates/feral-scotch", "crates/feral-kahip"]
+members = [".", "crates/feral-ordering-core", "crates/feral-amd", "crates/feral-amf", "crates/feral-metis", "crates/feral-scotch", "crates/feral-kahip", "crates/feral-diagnostics"]
+# Root commands (`cargo build`/`test`/`clippy` with no -p/--workspace) operate
+# on the `feral` package only. `feral-diagnostics` is a member so it shares the
+# lockfile and `cargo run -p feral-diagnostics --bin <name>` works, but it is
+# NOT a dependency of `feral`, so the default build/test set never compiles its
+# ~144 one-off binaries (issue #71). Build them explicitly with
+# `cargo build -p feral-diagnostics`.
 resolver = "2"
 
 [package]
