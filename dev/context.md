@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-03T12:58:54Z
+Generated: 2026-06-03T16:09:38Z
 
 ## Latest Session
 File: dev/sessions/2026-06-03-03.md
@@ -59,31 +59,31 @@ as follow-up; the sawpath/discs class is fixed.
 
 ## Git Status
 ```
-72c05ee Merge pull request #66 from jkitchin/claude/issue-64-arrow-ordering
-b93446a docs(session): checkpoint 2026-06-03-01 — issue #64 arrow ordering catch
-4882313 fix(ordering): arrow/bordered-KKT catch — route MetisND→AMF on dense-border patterns (#64)
-8877a48 docs(lever-1.2): row-band blocking measured — bit-exact but a 0.74-0.95x regression (#62)
-55f6a70 perf(dense): intra-front parallel Schur (perf-review Lever 1.1) + lever-sweep docs (#61)
+05f97fa fix(ordering): thin-large default prefers AMF up to n<=100k (#67)
+5bcfecc Merge pull request #68 from jkitchin/claude/issue-63-diagnosis
+892d7ef Merge remote-tracking branch 'origin/main' into claude/issue-63-diagnosis
+0673f1b Merge pull request #69 from jkitchin/claude/issue-65-mc64-scaling
+cfd8f68 docs(session): checkpoint 2026-06-03-03 — MC64 scaling fallback (#65)
 ```
 
 ## Test Status
 ```
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 
 test result: ok. 322 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.42s
@@ -113,58 +113,58 @@ Inertia exact on the 8 synthetic bench matrices.
 ```
 
 ## Recent Decisions
-`Mc64Symmetric` and adopt iff it strictly reduces the zero count. Pin
-`auto_picked_strategy = Mc64Symmetric` on adoption so refactors on the same
-pattern skip the retry. New counter `mc64_scaling_fallback_count()`.
+trade-off never materialized at this scale: MetisND is both larger and
+slower. Above the band, pinene_3200 (n=127995) still favors AMF (time_r
+1.18, fill_r 1.20) but RDW2D51U (n=195075) did not complete a single pass
+in ~10 min — the n>100k regime is qualitatively more expensive and
+under-sampled.
 
-Why numerical, not structural: sawpath (needs MC64) and twirism1 iter-0 (needs
-InfNorm — MC64 gives it the WRONG inertia (433,311,1)) have the IDENTICAL router
-signature (diag_only=0, max_col_nnz>32). A structural router cannot separate
-them; the deciding factor is whether the factorization hits the
-working-precision floor. pounce-feral passes `check_inertia=None`, so feral's
-own expected-inertia path never fires in production — the trigger must be a
-signal feral sees unaided, i.e. force-accepted zero pivots.
+Decision: bounded reroute. In `choose_adaptive`, when the size rule would
+pick MetisND and `n <= AMF_BAND_MAX` (100_000), override to AMF. Rejected
+alternatives: (a) an average-degree predicate — the same axis #50 warned is
+dangerous, and the band needs no degree key because *every* band matrix the
+corpus contains landed on the AMF side; (b) `AutoRace(Amf, MetisND)` —
+measured 50–255% overhead (`probe_issue67_race`, median ~118%) because
+MetisND's nested-dissection symbolic ordering is 2–5× more expensive than
+AMF's, paying the losing candidate's cost on every solve for zero benefit.
+The threshold is `n`, not the measured-sample identity: the mechanism
+(AMF's lower fill + cheaper symbolic on thin patterns at this scale) is
+size-bounded, so the rule generalizes to unseen band matrices rather than
+memorizing these 36.
 
-Correctness safety: MC64 is a diagonal/permutation rescaling and cannot change
-rank. On a genuinely singular matrix the retry also force-accepts zeros, the
-strict-improvement gate fails, and the original factor is kept (cost: one wasted
-factorization). So the fallback only moves feral TOWARD the MUMPS/SPRAL
-consensus on effectively-full-rank-but-ill-conditioned matrices, never away from
-a true singular classification. Corpus-validated (KKT consensus oracle): zero
-fallback-caused inertia mismatches; fires rarely.
+Scope guard: only the would-be-MetisND decision in (10_000, 100_000] is
+touched. The `n > 100_000 && avg_deg < 5 → Amd` (#50 powerflow-class) and
+`n > 100_000 && avg_deg >= 5 → MetisND` (genuinely-large 3-D) paths are
+unchanged — pinned by the `choose_adaptive_rules` test (n=150_000 →
+MetisND). pinene's above-band win is left on the table deliberately as the
+safety margin.
 
-Scope: covers the spurious-zero / `Singular`-misclassification class (sawpath/
-discs at iter 0). twirism1's LATE-iteration failure is a wrong NEGATIVE count
-WITHOUT zeros (feral returns Success), which a zero-trigger cannot see and which
-needs the expected inertia (pounce passes None today) — recorded as a follow-up,
-not covered here.
-
-Evidence: dev/research/issue-65-mc64-scaling-fallback.md,
-dev/journal/2026-06-03-03.org, src/numeric/solver.rs (factor() fallback +
-mc64_scaling_fallback_count), tests/issue65_mc64_fallback.rs,
-src/bin/probe_issue65_{scaling,corpus}.rs, dev/scripts/regen_issue65_kkts.sh.
+Evidence: dev/research/issue-67-thin-large-ordering.md,
+dev/journal/2026-06-03-04.org, src/symbolic/mod.rs choose_adaptive +
+AMF_BAND_MAX, tests/issue67_thin_ordering.rs, src/bin/probe_issue67_thin.rs,
+src/bin/probe_issue67_race.rs.
 
 ## Recent Tried-and-Rejected
-**c-block outer / m-tile inner** would keep a small `B`-block
-L1-resident and cut the dominant re-streaming by the factor `NR/MR = 2`.
+   destroyed), inertia scrambled. Strictly worse. Force-accept-and-report-zeros
+   is the useful behavior: it signals singularity so pounce escalates δ_w.
 
-Tried the swap. **Measured: no improvement.** n=1024 stayed at ratio
-~1.0–1.2 (still a regression), and n=484/2025 were within noise of the
-m-outer order. The loop order was not the bottleneck at these sizes.
+3. Any principled "better inertia" change. The ordering that wins (metis)
+   reports a MORE pessimistic, LESS correct inertia (neg 255 ≠ 252 expected) on
+   the singular matrix; that makes pounce regularize earlier and escape a frozen
+   2.30e-8 fixed point. There is no known-correct inertia change that fixes
+   scrs8 — "correct" inertia (amf) is what under-regularizes into the stall.
 
-Reverted to the simpler m-outer kernel (the comment claiming the swap
-fixed n=1024 would have been false). The actual n=1024 cause was the
-**stride-`n` gather/scatter** reading the column-major `y` — power-of-
-two `n` aliased RHS columns into the same cache sets. Flipping the
-internal `y` buffer to row-major (contiguous memcpy gather/scatter)
-fixed it (ratio 1.2 → 0.33) and ~halved wide-solve time everywhere.
-See `dev/research/issue-57-blas3-panel.md` Results and the
-`dev/decisions.md` 2026-05-30 entry.
+4. Ordering-class heuristic (route this KKT class to metis/scotch). Not pursued:
+   the issue itself calls it "papering over the symptom," and it risks the
+   cascade-break don't-regress set (robot_1600, NARX_CFy, marine_1600,
+   rocket_12800, pinene_3200).
 
-**Lesson.** Diagnose the bottleneck before micro-optimizing the kernel:
-the transpose in the gather/scatter dominated, not the GEMM's operand
-re-streaming. A loop-order change to the GEMM was wasted motion until
-the layout (row-major `y`) was fixed.
+Conclusion: the durable fix is the δ_w / inertia-acceptance interaction
+(pounce-side or joint), not FERAL factorization accuracy. Full analysis:
+dev/research/issue-63-nearsingular-ordering-diagnosis.md;
+dev/journal/2026-06-03-02.org; probe src/bin/probe_issue63_nearsingular.rs.
+Future sessions: do NOT re-attempt a FERAL-only fix for scrs8 without first
+re-checking these four dead ends.
 
 ## Source Files
 ```
@@ -280,9 +280,12 @@ src/bin/probe_issue54_alpha_shift.rs
 src/bin/probe_issue54_cascade.rs
 src/bin/probe_issue54_ma57_alpha.rs
 src/bin/probe_issue54.rs
+src/bin/probe_issue63_nearsingular.rs
 src/bin/probe_issue64_arrow.rs
 src/bin/probe_issue65_corpus.rs
 src/bin/probe_issue65_scaling.rs
+src/bin/probe_issue67_race.rs
+src/bin/probe_issue67_thin.rs
 src/bin/probe_kkt_replay.rs
 src/bin/probe_marine_shape.rs
 src/bin/probe_marine_time.rs
@@ -345,8 +348,5 @@ src/sparse/mod.rs
 src/symbolic/column_counts.rs
 src/symbolic/ldlt_compress.rs
 src/symbolic/mod.rs
-src/symbolic/profiler.rs
-src/symbolic/small_leaf.rs
-src/symbolic/supernode.rs
 
-(truncated from      405 lines to 350 line budget)
+(truncated from      409 lines to 350 line budget)

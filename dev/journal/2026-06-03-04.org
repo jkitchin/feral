@@ -90,3 +90,14 @@ hypothetical unseen MetisND-favoring matrix costs 50-255% on the common case.
 The bounded threshold is both faster (avoids MetisND's expensive ordering
 entirely) and simpler. If a counterexample is ever found, the threshold is
 trivially adjustable, and a regression test will guard the known wins.
+
+* 21:30 :checkpoint:issue-67:bench:
+Closing #67. Rebased the feature commit onto post-#68 main (5bcfecc);
+CHANGELOG.md + dev/decisions.md conflicts resolved (chronological append,
+no markers). Filtered bench on the in-scope band (FERAL_KKT_ROOTS=
+kkt-expansion,kkt-mittelmann; 137 matrices): 137/137 inertia match vs MUMPS,
+137/137 residual pass, worst residual 4.22e-12 (CBRATU3D_0000). OSCIGRAD
+(in-band) factor 0.18x MUMPS — AMF routing win is real. Full ~154k corpus
+bench skipped: routing-only change, multi-hour, cannot move inertia/residual.
+The "medium FAIL" exit-partition line is pre-existing CHAINWOO (n=4000, below
+the (10k,100k] band), not a #67 regression. Checkpoint written; PR next.
