@@ -5078,3 +5078,47 @@ real regenerated r05 KKT, gitignored and skip-if-absent.
 Evidence: dev/research/issue-64-arrow-bordered-ordering.md,
 dev/journal/2026-06-03-01.org, src/symbolic/mod.rs is_arrow_bordered +
 choose_adaptive, tests/issue64_arrow_ordering.rs, dev/scripts/regen_r05_kkt.sh.
+
+## 2026-06-03 — Inertia-guided MC64 scaling fallback (issue #65)
+
+On ill-conditioned symmetric-indefinite KKTs, default `Auto` scaling could
+report a wrong, rank-deficient inertia with ~100 spurious zero pivots where
+`Mc64Symmetric` recovers the exact full-rank inertia (sawpath iter-0:
+Auto/InfNorm (789,670,116) min|piv|=0 vs MC64 (789,786,0) min|piv|=0.03;
+MA27/numpy ground truth (789,786,0)). The consuming IPM reads the spurious
+zeros as Singular, takes a bad regularized step at iter 0, and can falsely
+declare infeasibility (discs/sawpath in pounce).
+
+Decision: add an inertia-guided MC64 fallback in `Solver::factor` rather than a
+structural router change. When (a) the user configured `Auto`, (b) the resolved
+scaling was not MC64, and (c) the factor reports `inertia.zero > 0`, re-run with
+`Mc64Symmetric` and adopt iff it strictly reduces the zero count. Pin
+`auto_picked_strategy = Mc64Symmetric` on adoption so refactors on the same
+pattern skip the retry. New counter `mc64_scaling_fallback_count()`.
+
+Why numerical, not structural: sawpath (needs MC64) and twirism1 iter-0 (needs
+InfNorm — MC64 gives it the WRONG inertia (433,311,1)) have the IDENTICAL router
+signature (diag_only=0, max_col_nnz>32). A structural router cannot separate
+them; the deciding factor is whether the factorization hits the
+working-precision floor. pounce-feral passes `check_inertia=None`, so feral's
+own expected-inertia path never fires in production — the trigger must be a
+signal feral sees unaided, i.e. force-accepted zero pivots.
+
+Correctness safety: MC64 is a diagonal/permutation rescaling and cannot change
+rank. On a genuinely singular matrix the retry also force-accepts zeros, the
+strict-improvement gate fails, and the original factor is kept (cost: one wasted
+factorization). So the fallback only moves feral TOWARD the MUMPS/SPRAL
+consensus on effectively-full-rank-but-ill-conditioned matrices, never away from
+a true singular classification. Corpus-validated (KKT consensus oracle): zero
+fallback-caused inertia mismatches; fires rarely.
+
+Scope: covers the spurious-zero / `Singular`-misclassification class (sawpath/
+discs at iter 0). twirism1's LATE-iteration failure is a wrong NEGATIVE count
+WITHOUT zeros (feral returns Success), which a zero-trigger cannot see and which
+needs the expected inertia (pounce passes None today) — recorded as a follow-up,
+not covered here.
+
+Evidence: dev/research/issue-65-mc64-scaling-fallback.md,
+dev/journal/2026-06-03-03.org, src/numeric/solver.rs (factor() fallback +
+mc64_scaling_fallback_count), tests/issue65_mc64_fallback.rs,
+src/bin/probe_issue65_{scaling,corpus}.rs, dev/scripts/regen_issue65_kkts.sh.

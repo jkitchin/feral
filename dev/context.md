@@ -1,81 +1,81 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-03T12:35:20Z
+Generated: 2026-06-03T12:58:54Z
 
 ## Latest Session
-File: dev/sessions/2026-06-03-01.md
+File: dev/sessions/2026-06-03-03.md
 ```
-# Session 2026-06-03-01
+# Session 2026-06-03-03
 
 ## Goal
 
-Fix issue #64: `Auto`/default ordering picks MetisND on arrow/bordered
-KKTs (a thin body plus a few very-high-degree border columns), blowing
-the LDLᵀ factor up ~7-9× vs AMF/AMD. Found via POUNCE on the LP `r05`
-(n=14842): ~16 s auto (→ MetisND) vs 0.84 s forcing AMF.
-
-User decisions up front: (1) detect with a cheap O(n) degree predicate
-(not AutoRace); (2) regenerate the r05 fixture on demand into the
-gitignored `tests/data/large/`, regression test skips when absent (no
-blob in git).
+Pick up **issue #65**: default `Auto` scaling reports a wrong inertia (spurious
+zero pivots) on ill-conditioned symmetric-indefinite KKTs; `Mc64Symmetric` fixes
+it exactly. Downstream the consuming IPM (pounce) reads the spurious zeros as
+`Singular` and falsely declares infeasibility (sawpath/discs).
 
 ## Accomplished
 
-Arrow/bordered detection implemented and shipped; r05 regression test
-goes green; full suite + clippy + fmt clean.
+Shipped an **inertia-guided MC64 scaling fallback** in `Solver::factor`, with a
+154k-matrix corpus validation showing **zero inertia regressions**.
 
-- **`is_arrow_bordered(pattern)`** (`src/symbolic/mod.rs`): O(n)
-  degree pass over the full symmetric pattern. A "heavy" column has
-  degree > max(64, 8·avg_deg); fire iff `1 ≤ heavy_count < 0.05·n` (small
-  set) AND `heavy_nnz ≥ 0.20·full_nnz` (large nnz share).
-- **Routing**: `choose_adaptive` overrides the would-be-MetisND decision
-  (`n > 10_000`) to AMF when the predicate fires. The `n ≤ 10_000 → AMF`
-  and `n > 100_000 && avg_deg < 5 → AMD` (#50) paths are untouched.
-- **Unification**: `symbolic_factorize` now resolves through
-  `OrderingMethod::Auto` instead of calling `pick_default_method`
-  directly, so the no-arg default and an explicit `Auto` caller resolve
-  to the same concrete ordering on every matrix. This also fixed a
-  latent inconsistency (only `choose_adaptive` had the #50 large-sparse
-  branch). `issue_3_auto_on_kkt_routes_via_pick_default_method` still
-  passes (PoissonControl K=58 → MetisND, uniform, no arrow).
-- **Calibration on real data** (`src/bin/probe_issue64_arrow.rs`):
+- **Root-cause / design.** Reproduced sawpath iter-0 (n=1575): Auto/InfNorm →
+  `(789,670,116)` ✗ (min|piv|=0, 116 spurious zeros); MC64 → `(789,786,0)` ✓
+  (min|piv|=0.03; matches MA27/numpy). Proved a **structural router fix cannot
+  work**: `twirism1` iter-0 has the *same* router signature (`diag_only=0,
+  max_col_nnz>32`) but the *opposite* need — InfNorm correct `(432,313,0)`, MC64
+  *wrong* `(433,311,1)`. pounce passes `check_inertia=None`, so feral's
+  expected-inertia path never fires in production. The deciding signal must be
+  numerical and feral-visible: **force-accepted zero pivots**.
+- **Fix.** When the user configured `Auto`, the resolved scaling was not MC64,
+  and the factor reports `inertia.zero > 0`, re-run with `Mc64Symmetric` and
+  adopt iff it strictly reduces the zero count. Pin `auto_picked_strategy=MC64`
+  on adoption (sticky — refactors skip the retry). New
+  `Solver::mc64_scaling_fallback_count()`. Correctness-safe: MC64 can't change
+  rank, so genuinely-singular matrices keep their original factor.
+- **Behavior:** sawpath Auto → `(789,786,0)` ✓ (fallback fires); twirism1 iter-0
+  → `(432,313,0)` ✓ (no fire, MC64's wrong inertia never adopted); explicit
+  InfNorm respected (gate is Auto-only).
+- **Tests:** `tests/issue65_mc64_fallback.rs` (3 tests, skip-if-absent; external
+  oracle = MA27/numpy from the issue). `dev/scripts/regen_issue65_kkts.sh`.
+- **Corpus validation** (`probe_issue65_corpus`, full KKT consensus corpus):
+  **153,725 definitive+strong checked, 99.96% match, 64 mismatches all
+  `fallback=0` (pre-existing ACOPP30/BATCH sign disagreements), fallback fired
+  AND mismatch = 0**. The fallback never fires on the existing corpus — it is a
+  surgical fix that activates only on the sawpath-class pathology and introduces
+  zero regressions.
+- Full suite green; clippy + fmt clean (see end).
 
-  | matrix | n | avg_deg | heavy_count | heavy_nnz% | predicate |
-  |---|---|---|---|---|---|
-  | r05_kkt | 14842 | 15.0 | 171 (1.15%) | 38.5% | **ARROW→Amf** |
-  | bratu3d | 27792 | 6.25 | 0 | 0% | no |
-  | cont-201 | 80595 | 5.44 | 0 | 0% | no |
-  | bcsstk38 | 8032 | 44.3 | 2 (0.03%) | 0.3% | no (share guard) |
+### Out of scope / follow-up
 
-  r05 nnz_L: Amf=506210 Amd=607519 MetisND=4358715 (MetisND/Amf=8.61×).
-  Absolute counts drift from the issue's numbers (ordering-impl / METIS
-  seed) but the ranking and the `<1e6` test threshold are robust.
-- **Tests**: 4 unit tests for the predicate (fires on synthetic arrow;
-  rejects uniform-sparse, many-hubs (count guard), low-share border
-  (share guard)); `choose_adaptive_routes_arrow_to_amf`; regression
-  `tests/issue64_arrow_ordering.rs` (skip-if-absent, asserts
-  `nnz_L < 1.0e6` and `resolved_method != MetisND`). Verified red→green.
+`twirism1`'s **late-iteration** failure is a wrong *negative* count *without*
+zeros (feral returns `Success`); a zero-trigger cannot see it, and it needs the
+expected inertia, which pounce passes as `None`. Covering it requires pounce
+passing expected inertia to `factor()` (then feral retries MC64 on
+`WrongInertia`) or a self-contained "suspicious neg count" heuristic. Recorded
+as follow-up; the sawpath/discs class is fixed.
+
 ```
 
 ## Git Status
 ```
-add8e4c diag(issue-63): near-singular KKT ordering stall — backward-error hypothesis disproven
 72c05ee Merge pull request #66 from jkitchin/claude/issue-64-arrow-ordering
 b93446a docs(session): checkpoint 2026-06-03-01 — issue #64 arrow ordering catch
 4882313 fix(ordering): arrow/bordered-KKT catch — route MetisND→AMF on dense-border patterns (#64)
 8877a48 docs(lever-1.2): row-band blocking measured — bit-exact but a 0.74-0.95x regression (#62)
+55f6a70 perf(dense): intra-front parallel Schur (perf-review Lever 1.1) + lever-sweep docs (#61)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
@@ -86,89 +86,85 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 
-test result: ok. 322 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.41s
+test result: ok. 322 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.42s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-03-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-03-03.md)
 
 
 name                n   factor(μs)    solve(μs)        inertia
 --------------------------------------------------------------
-spd_10             10           40            9     (10, 0, 0)
-spd_50             50           23            3     (50, 0, 0)
-spd_100           100           84            5    (100, 0, 0)
-spd_200           200          413           16    (200, 0, 0)
+spd_10             10           36           10     (10, 0, 0)
+spd_50             50           49            3     (50, 0, 0)
+spd_100           100          107            5    (100, 0, 0)
+spd_200           200          439           16    (200, 0, 0)
 kkt_10_3           13            3            0     (10, 3, 0)
-kkt_30_10          40           25            1    (30, 10, 0)
-kkt_50_15          65           49            2    (50, 15, 0)
-kkt_100_30        130          205            7   (100, 30, 0)
-
-The 8-matrix synthetic bench is all n ≤ 200 (sub-threshold → AMF), so it
-exercises none of the arrow path; numbers are within prior-session noise
-(spd_200 413µs vs 362–389 in 2026-05-31-03) and inertia is exact. The
-arrow catch only consults `is_arrow_bordered` on the would-be-MetisND
-branch (n > 10_000), so these matrices are bit-identical to before. The
-load-robust evidence for the fix is the r05 regression test and the
-real-data calibration table above, not this bench.
+kkt_30_10          40           21            1    (30, 10, 0)
+kkt_50_15          65           48            2    (50, 15, 0)
+kkt_100_30        130          327           15   (100, 30, 0)
+In line with prior sessions; inertia exact on all 8.
+No numeric kernel changed; the fallback only adds a conditional second factor
+on the rare `Auto` + `zero>0` path (never fires on the 154k-matrix corpus).
+Inertia exact on the 8 synthetic bench matrices.
 
 ```
 
 ## Recent Decisions
-degree > max(64, 8·avg_deg); fire iff 1 ≤ heavy_count < 0.05·n (a small
-set) AND heavy_nnz ≥ 0.20·full_nnz (a large nnz share). The share guard
-is the discriminator — it fires on r05 (38.5%) and rejects bcsstk38
-(0.3% share despite two degree-614 columns); the count guard rejects
-"many hub" patterns. Uniformly-thin matrices (PoissonControl,
-powerflow22, bratu3d, cont-201) have no heavy column and are untouched.
+`Mc64Symmetric` and adopt iff it strictly reduces the zero count. Pin
+`auto_picked_strategy = Mc64Symmetric` on adoption so refactors on the same
+pattern skip the retry. New counter `mc64_scaling_fallback_count()`.
 
-Routing target is AMF (the existing n≤10_000 default and the measured
-winner on r05), keeping the dispatcher coherent: small-or-arrow → AMF,
-large-uniform → MetisND, very-large-thin → AMD.
+Why numerical, not structural: sawpath (needs MC64) and twirism1 iter-0 (needs
+InfNorm — MC64 gives it the WRONG inertia (433,311,1)) have the IDENTICAL router
+signature (diag_only=0, max_col_nnz>32). A structural router cannot separate
+them; the deciding factor is whether the factorization hits the
+working-precision floor. pounce-feral passes `check_inertia=None`, so feral's
+own expected-inertia path never fires in production — the trigger must be a
+signal feral sees unaided, i.e. force-accepted zero pivots.
 
-Placement: the catch lives in `choose_adaptive`, and `symbolic_factorize`
-now resolves through `OrderingMethod::Auto` instead of calling
-`pick_default_method` directly. This unifies the two entry points — the
-no-arg default and an explicit `Auto` caller now resolve to the same
-concrete ordering on every matrix. Previously they could disagree on
-very-large-and-sparse patterns (only `choose_adaptive` had the #50
-`n>100_000 && avg_deg<5 → Amd` branch), a latent inconsistency the
-docstrings claimed did not exist.
+Correctness safety: MC64 is a diagonal/permutation rescaling and cannot change
+rank. On a genuinely singular matrix the retry also force-accepts zeros, the
+strict-improvement gate fails, and the original factor is kept (cost: one wasted
+factorization). So the fallback only moves feral TOWARD the MUMPS/SPRAL
+consensus on effectively-full-rank-but-ill-conditioned matrices, never away from
+a true singular classification. Corpus-validated (KKT consensus oracle): zero
+fallback-caused inertia mismatches; fires rarely.
 
-This is the *opposite* routing direction from issue #50, which deleted
-escape hatches that pushed low-avg-degree patterns *toward* MetisND. Here
-the body is not uniformly thin (full avg_deg ≈ 15); the problem is a few
-dense borders. A purely synthetic arrow did not faithfully reproduce the
-fill ranking (issue #64 reporter note), so the regression fixture is the
-real regenerated r05 KKT, gitignored and skip-if-absent.
+Scope: covers the spurious-zero / `Singular`-misclassification class (sawpath/
+discs at iter 0). twirism1's LATE-iteration failure is a wrong NEGATIVE count
+WITHOUT zeros (feral returns Success), which a zero-trigger cannot see and which
+needs the expected inertia (pounce passes None today) — recorded as a follow-up,
+not covered here.
 
-Evidence: dev/research/issue-64-arrow-bordered-ordering.md,
-dev/journal/2026-06-03-01.org, src/symbolic/mod.rs is_arrow_bordered +
-choose_adaptive, tests/issue64_arrow_ordering.rs, dev/scripts/regen_r05_kkt.sh.
+Evidence: dev/research/issue-65-mc64-scaling-fallback.md,
+dev/journal/2026-06-03-03.org, src/numeric/solver.rs (factor() fallback +
+mc64_scaling_fallback_count), tests/issue65_mc64_fallback.rs,
+src/bin/probe_issue65_{scaling,corpus}.rs, dev/scripts/regen_issue65_kkts.sh.
 
 ## Recent Tried-and-Rejected
-   destroyed), inertia scrambled. Strictly worse. Force-accept-and-report-zeros
-   is the useful behavior: it signals singularity so pounce escalates δ_w.
+**c-block outer / m-tile inner** would keep a small `B`-block
+L1-resident and cut the dominant re-streaming by the factor `NR/MR = 2`.
 
-3. Any principled "better inertia" change. The ordering that wins (metis)
-   reports a MORE pessimistic, LESS correct inertia (neg 255 ≠ 252 expected) on
-   the singular matrix; that makes pounce regularize earlier and escape a frozen
-   2.30e-8 fixed point. There is no known-correct inertia change that fixes
-   scrs8 — "correct" inertia (amf) is what under-regularizes into the stall.
+Tried the swap. **Measured: no improvement.** n=1024 stayed at ratio
+~1.0–1.2 (still a regression), and n=484/2025 were within noise of the
+m-outer order. The loop order was not the bottleneck at these sizes.
 
-4. Ordering-class heuristic (route this KKT class to metis/scotch). Not pursued:
-   the issue itself calls it "papering over the symptom," and it risks the
-   cascade-break don't-regress set (robot_1600, NARX_CFy, marine_1600,
-   rocket_12800, pinene_3200).
+Reverted to the simpler m-outer kernel (the comment claiming the swap
+fixed n=1024 would have been false). The actual n=1024 cause was the
+**stride-`n` gather/scatter** reading the column-major `y` — power-of-
+two `n` aliased RHS columns into the same cache sets. Flipping the
+internal `y` buffer to row-major (contiguous memcpy gather/scatter)
+fixed it (ratio 1.2 → 0.33) and ~halved wide-solve time everywhere.
+See `dev/research/issue-57-blas3-panel.md` Results and the
+`dev/decisions.md` 2026-05-30 entry.
 
-Conclusion: the durable fix is the δ_w / inertia-acceptance interaction
-(pounce-side or joint), not FERAL factorization accuracy. Full analysis:
-dev/research/issue-63-nearsingular-ordering-diagnosis.md;
-dev/journal/2026-06-03-02.org; probe src/bin/probe_issue63_nearsingular.rs.
-Future sessions: do NOT re-attempt a FERAL-only fix for scrs8 without first
-re-checking these four dead ends.
+**Lesson.** Diagnose the bottleneck before micro-optimizing the kernel:
+the transpose in the gather/scatter dominated, not the GEMM's operand
+re-streaming. A loop-order change to the GEMM was wasted motion until
+the layout (row-major `y`) was fixed.
 
 ## Source Files
 ```
@@ -284,8 +280,9 @@ src/bin/probe_issue54_alpha_shift.rs
 src/bin/probe_issue54_cascade.rs
 src/bin/probe_issue54_ma57_alpha.rs
 src/bin/probe_issue54.rs
-src/bin/probe_issue63_nearsingular.rs
 src/bin/probe_issue64_arrow.rs
+src/bin/probe_issue65_corpus.rs
+src/bin/probe_issue65_scaling.rs
 src/bin/probe_kkt_replay.rs
 src/bin/probe_marine_shape.rs
 src/bin/probe_marine_time.rs
@@ -348,5 +345,8 @@ src/sparse/mod.rs
 src/symbolic/column_counts.rs
 src/symbolic/ldlt_compress.rs
 src/symbolic/mod.rs
+src/symbolic/profiler.rs
+src/symbolic/small_leaf.rs
+src/symbolic/supernode.rs
 
-(truncated from      407 lines to 350 line budget)
+(truncated from      405 lines to 350 line budget)
