@@ -1,9 +1,20 @@
 # Issue #73 — Characterizing the n>100k thin regime above AMF_BAND_MAX
 
-**Status:** Step 1 (diagnose) and partial Step 2 (widen sample) complete on
-**symbolic predictors**. No code change made. A real factor+solve A/B is the
-required next step before touching `AMF_BAND_MAX`. Follow-up to #67.
+**Status:** RESOLVED. Real factor+solve A/B (Step 3) ran; it **contradicted the
+fill-guard design** and motivated the simpler **unconditional AMF extension**
+(drop `AMF_BAND_MAX`). Implemented in `choose_adaptive`. Follow-up to #67.
 **Date:** 2026-06-03 (session 06).
+
+> **Outcome (read this first):** The fill-guarded reroute proposed in the
+> "Recommendation" section below — option (b), route to AMF above 100k only
+> when AMF's `factor_nnz_estimate ≤ MetisND's` — is **WRONG and was rejected**.
+> The real factor+solve A/B (Finding 3) shows **nql180** has *smaller* MetisND
+> fill yet AMF is **2.05× faster** on the actual factor+solve. Fill (nnz_L) and
+> flop_proxy do **not** reliably predict speed, so a fill guard would forfeit a
+> 2× win. The shipped change routes **every** would-be-MetisND `Auto` decision
+> to AMF at all `n` (the avg_deg<5 → AMD #50 and arrow → AMF #64 catches still
+> fire first). The original-status/recommendation text below is preserved as
+> the pre-A/B reasoning; Finding 3 is the decisive evidence.
 
 ## Question
 
@@ -72,7 +83,54 @@ AMF wins clearly on 5, ties 1 (QUADCOPTER, identical predictors), loses on 1.
 **nql180** is the lone MetisND win: ~14% less flop_proxy, ~2% fewer nnz_L.
 nql180 is a known matrix (cascade-break Free-mode case, see `decisions.md`).
 
-## Why no code change yet
+## Finding 3 — real factor+solve A/B: AMF wins ALL, fill mispredicts nql180
+
+Step 3: the actual factor+solve A/B via `probe_issue67_thin --reps 1` on the
+MetisND-routed n>100k families. `fill_r = nnzL_met / nnzL_amf`;
+`time_r = (fac+slv)_met / (fac+slv)_amf` (>1 ⇒ AMF faster on the real workload):
+
+| matrix    |    n | fill_r | fac_amf | fac_met | time_r |
+|-----------|-----:|-------:|--------:|--------:|-------:|
+| dtoc2     | 104k |  1.92  |  264 ms |  671 ms |  2.49  |
+| pinene    | 128k |  1.20  |  896 ms | 1054 ms |  1.18  |
+| cont5_1_l | 181k |  1.35  |  215 ms |  620 ms |  2.75  |
+| nql180    | 260k |**0.98**| 1903 ms | 3949 ms |**2.05**|
+| YATP1NE   | 246k |  1.44  | 1922 ms | 4104 ms |  2.13  |
+
+(RDW2D51U + QUADCOPTER did not finish the A/B on the loaded test machine; their
+symbolic predictors from Finding 2 already favor AMF 1.55× / tie respectively,
+and RDW2D51U's symbolic is the cheaper ordering — see Finding 1. They do not
+change the conclusion.)
+
+**The design-breaker is nql180.** The symbolic probe (Finding 2) predicted
+MetisND *wins* nql180 (nnz_L 0.98×, flop_proxy 0.86× — MetisND has 2% smaller
+fill and ~14% less predicted work). On the **real** factor+solve, AMF is
+**2.05× faster** (fac 1.90 s vs 3.95 s). So nnz_L — and even the flop_proxy —
+**mispredict** nql180. A fill-guarded reroute (route to AMF only when AMF nnz_L
+≤ MetisND nnz_L) would have **kept nql180 on MetisND and forfeited the 2×**.
+
+Conclusion: AMF wins factor+solve on **every measured matrix** (1.18×–2.75×),
+including the lone fill "counterexample". Fill is not a speed proxy at this
+scale, so the correct change is the **unconditional** extension — not a race.
+
+## Decision — unconditional AMF, fill-guard rejected
+
+Drop `AMF_BAND_MAX` entirely. In `choose_adaptive`, the would-be-MetisND
+decision is overridden to AMF at **every** `n`:
+
+```rust
+if base == OrderingMethod::MetisND {
+    return OrderingMethod::Amf;
+}
+```
+
+The earlier `n > 100_000 && avg_deg < 5 → Amd` (#50 powerflow) and
+arrow → AMF (#64) catches fire first and are untouched — the powerflow-class
+guardrail still holds. The fill-guarded race (option (b) below) is rejected:
+nql180 proves the guard's predicate is anti-correlated with real speed there.
+See `dev/decisions.md` and `dev/tried-and-rejected.md`.
+
+## Why no code change yet *(pre-A/B reasoning — superseded by Finding 3)*
 
 1. `nnz_L_est` / `flop_proxy` are **predictions**, not measured factor+solve
    wall time. #67's methodology weighs the real number — e.g. pinene's

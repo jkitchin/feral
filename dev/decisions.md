@@ -5223,3 +5223,63 @@ feral-diagnostics --all-targets -- -D warnings` clean; the 2 diag test sets
 pass (5 + 4); root `cargo clippy -- -D warnings` clean; `cargo run --bin
 bench` and `cargo run -p feral-diagnostics --bin probe_issue67_thin` both
 resolve.
+
+## 2026-06-03 — Unconditional AMF above 100k: `AMF_BAND_MAX` dropped, fill-guard rejected (issue #73)
+
+Issue #73 is the n>100k follow-up to #67. #67 bounded the thin-large
+reroute at `n ≤ AMF_BAND_MAX = 100_000` because, just above the band,
+`RDW2D51U` (n≈195k) "did not complete a single Auto+AMF+MetisND pass in ~10
+min" on the full Solver path — an **unattributed** timeout. The open
+question: is the >100k regime an AMF *fill* blowup (keep the bound) or just
+expensive *numeric* cost (the bound is leaving wins on the table)?
+
+Evidence, three steps:
+1. **Symbolic diagnosis** (`probe_issue73_symbolic`): RDW2D51U's AMF
+   symbolic finishes in **167 ms** — the #67 timeout was the *numeric*
+   factor, not ordering, and AMF is the *cheaper* ordering there (1.26×
+   fewer nnz_L, 1.55× less flop_proxy than MetisND). The bound was guarding
+   nothing.
+2. **Symbolic sweep** over the affected population (`n>100k && avg_deg ≥ 5`,
+   non-arrow — the only matrices the bound moves): AMF wins or ties 6/7 on
+   nnz_L / flop_proxy. The lone exception was **nql180** (MetisND nnz_L
+   0.98×, flop_proxy 0.86× — predicted MetisND win).
+3. **Real factor+solve A/B** (`probe_issue67_thin --reps 1`, mirroring #67's
+   methodology): AMF wins factor+solve on **every measured matrix** —
+   dtoc2 2.49×, pinene 1.18×, cont5_1_l 2.75×, nql180 2.05×, YATP1NE 2.13×.
+   **nql180 is the design-breaker:** MetisND has 2% *smaller* fill yet AMF
+   is **2.05× faster** on the real factor+solve (fac 1.90 s vs 3.95 s). So
+   nnz_L and the flop_proxy **mispredict** real speed at this scale.
+
+Decision: drop `AMF_BAND_MAX` entirely. In `choose_adaptive`, the
+would-be-MetisND decision is overridden to AMF at **every** `n`:
+`if base == OrderingMethod::MetisND { return Amf; }`. The earlier
+`n > 100_000 && avg_deg < 5 → Amd` (#50 powerflow) and arrow → AMF (#64)
+catches fire first and are untouched, so the powerflow-class guardrail and
+the dense-border catch still hold; only the uniformly-thin would-be-MetisND
+population is rerouted.
+
+Rejected alternative — **fill-guarded reroute** (route above 100k to AMF
+only when AMF `factor_nnz_estimate ≤ MetisND's`): this was the design
+proposed in the #73 research note *before* the real A/B and the one
+originally requested. It is wrong: Finding 3 shows nql180's fill predicate
+is *anti-correlated* with real speed (MetisND smaller fill, AMF 2× faster),
+so the guard would have kept nql180 on MetisND and forfeited the 2× win.
+Fill is not a speed proxy here; a guard keyed on it adds a per-solve
+symbolic-race cost to make the *wrong* call. Logged in
+`dev/tried-and-rejected.md`.
+
+Scope / generalization: the mechanism is the same as #67 (AMF's cheaper
+symbolic + competitive-or-better numeric on uniformly-thin patterns), now
+shown to hold above 100k too. The `n>100k && avg_deg<5 → Amd` powerflow
+guardrail (#50) is the one place broad thin-matrix reroutes were shown to
+regress, and it is preserved by firing first. RDW2D51U + QUADCOPTER did not
+finish the real A/B on the loaded test machine; their symbolic predictors
+(AMF 1.55× cheaper / tie) and Finding 1 already favor AMF and do not change
+the conclusion.
+
+Evidence: dev/research/issue-73-n100k-thin-regime.md (Findings 1–3 +
+Decision), dev/journal/2026-06-03-06.org (:issue-73:ab:factor-solve:),
+src/symbolic/mod.rs choose_adaptive (AMF_BAND_MAX removed) +
+choose_adaptive_rules / choose_adaptive_routes_arrow_to_amf tests,
+crates/feral-diagnostics/src/bin/probe_issue73_symbolic.rs,
+crates/feral-diagnostics/src/bin/probe_issue67_thin.rs.

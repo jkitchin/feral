@@ -132,11 +132,14 @@ pub enum OrderingMethod {
 ///   - arrow/bordered (issue #64): whenever the size rule would pick
 ///     `MetisND` (`n > 10_000`) but [`is_arrow_bordered`] detects a
 ///     dense border concentrating the nonzeros, override to `Amf`.
-///   - thin-large (issue #67): whenever the size rule would pick `MetisND`
-///     and `n <= AMF_BAND_MAX` (100_000), override to `Amf`. A corpus A/B
-///     on factor+solve wall-time found AMF wins or ties MetisND across the
-///     entire `(10_000, 100_000]` band; the genuinely-large-dense
-///     `n > 100_000 && avg_deg >= 5` regime keeps `MetisND`.
+///   - thin-large (issues #67 + #73): whenever the size rule would still
+///     pick `MetisND` (after the avg_deg<5 → AMD and arrow → AMF catches),
+///     override to `Amf` at every `n`. Corpus A/Bs on real factor+solve
+///     wall-time found AMF wins or ties MetisND across the whole population
+///     — 36/36 in the `(10_000, 100_000]` band (#67) and every measured
+///     `n > 100_000 && avg_deg >= 5` non-arrow family (#73), including the
+///     one matrix (nql180) where MetisND has smaller fill but AMF is still
+///     2× faster on the real factor+solve.
 ///
 /// Anything else delegates to [`pick_default_method`]. `symbolic_factorize`
 /// routes through `Auto`, so the no-arg default and `Auto` resolve to the
@@ -208,33 +211,33 @@ fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMeth
     if base == OrderingMethod::MetisND && is_arrow_bordered(pattern) {
         return OrderingMethod::Amf;
     }
-    // Issue #67 thin-large catch. The size-only `pick_default_method` routes
-    // every `n > 10_000` matrix to MetisND, but a full corpus A/B (54 n>10_000
-    // KKT/SuiteSparse families, factor+solve wall-time, not nnz_L alone) found
-    // that across the entire `(10_000, 100_000]` band AMF wins or ties MetisND
-    // on factor+solve — 36/36 in-scope matrices with worst case 0.99× (noise),
-    // median ~1.5×, up to 4.5×. MetisND's separators do not pay off on these
-    // uniformly-thin discretization patterns at this scale, and its symbolic
-    // ordering is 2–5× more expensive than AMF's, so racing the two is a net
-    // loss (50–255% overhead). Raise the AMF band to `n <= 100_000`. Only the
-    // would-be-MetisND decision is touched; the `n > 100_000 && avg_deg < 5 →
-    // Amd` (above) path and the genuinely-large-dense `n > 100_000 &&
-    // avg_deg >= 5 → MetisND` regime (where the evidence is thin and #50 warns
-    // against broad reroutes) are left unchanged. See
-    // `dev/research/issue-67-thin-large-ordering.md`.
-    if base == OrderingMethod::MetisND && n <= AMF_BAND_MAX {
+    // Issue #67 + #73 thin-large catch. The size-only `pick_default_method`
+    // routes every `n > 10_000` matrix to MetisND, but corpus A/Bs on real
+    // factor+solve wall-time (not nnz_L alone) show AMF wins or ties MetisND
+    // across the whole would-be-MetisND population:
+    //   - #67: 36/36 in-scope `(10_000, 100_000]` families, worst case 0.99×
+    //     (noise), median ~1.5×, up to 4.5×.
+    //   - #73: the `n > 100_000 && avg_deg >= 5` non-arrow families — dtoc2
+    //     2.49×, pinene 1.18×, cont5_1_l 2.75×, nql180 2.05×, YATP1NE 2.13× —
+    //     AMF wins factor+solve on every measured matrix. Critically nql180 is
+    //     the lone case where MetisND has *smaller* symbolic fill (nnz_L 0.98×)
+    //     yet AMF is still 2.05× faster on real factor+solve, so fill (nnz_L /
+    //     flop_proxy) is NOT a reliable speed predictor and a fill-guarded race
+    //     would wrongly demote nql180. The simple unconditional reroute is the
+    //     one the evidence supports — see `dev/research/issue-73-n100k-thin-
+    //     regime.md` and `dev/research/issue-67-thin-large-ordering.md`.
+    //
+    // MetisND's separators do not pay off on these uniformly-thin discretization
+    // patterns, and its symbolic ordering is 2–5× more expensive than AMF's, so
+    // racing the two is a net loss. Route every would-be-MetisND decision to AMF
+    // outright. Only the would-be-MetisND decision is touched; the earlier
+    // `n > 100_000 && avg_deg < 5 → Amd` (#50 powerflow) and arrow → AMF (#64)
+    // catches fire first and are untouched.
+    if base == OrderingMethod::MetisND {
         return OrderingMethod::Amf;
     }
     base
 }
-
-/// Issue #67: upper bound on `n` for the non-arrow AMF band in
-/// [`choose_adaptive`]. Below this, `Auto` prefers AMF over MetisND; above
-/// it, the `pick_default_method` MetisND default (or the `n > 100_000 &&
-/// avg_deg < 5 → Amd` catch) stands. Calibrated on a corpus A/B — see the
-/// catch comment in `choose_adaptive` and
-/// `dev/research/issue-67-thin-large-ordering.md`.
-const AMF_BAND_MAX: usize = 100_000;
 
 /// Detect the **arrow / bordered-KKT** sparsity signature on a full
 /// symmetric pattern: a *small set* of very-high-degree "border" columns
@@ -1765,9 +1768,12 @@ mod tests {
             choose_adaptive(&p, OrderingMethod::Auto),
             OrderingMethod::Amf
         );
-        // Genuinely-large-dense (n > 100_000, avg_deg >= 5) is left on
-        // MetisND — above the #67 AMF band and above the #50 avg_deg < 5
-        // AMD catch. (n=150_000, avg_deg=10, uniform.)
+        // Large-dense (n > 100_000, avg_deg >= 5, non-arrow) now also routes
+        // to AMF (issue #73): the real factor+solve A/B found AMF wins on
+        // every measured matrix in this regime, so the would-be-MetisND
+        // decision is overridden to AMF at every n. The #50 avg_deg < 5 → AMD
+        // catch fires first and is unaffected. (n=150_000, avg_deg=10, uniform
+        // → not arrow.)
         let (cp, ri) = pat_bufs(150_000, 10);
         let p = CscPattern {
             n: 150_000,
@@ -1776,7 +1782,7 @@ mod tests {
         };
         assert_eq!(
             choose_adaptive(&p, OrderingMethod::Auto),
-            OrderingMethod::MetisND
+            OrderingMethod::Amf
         );
         // Non-Auto passes through.
         let (cp, ri) = pat_bufs(500, 6);
@@ -1882,16 +1888,17 @@ mod tests {
             OrderingMethod::Amf,
             "arrow/bordered pattern (n>10_000) must route to Amf, not MetisND"
         );
-        // A uniform large-dense pattern *above* the #67 AMF band
-        // (n > 100_000, avg_deg >= 5) stays on MetisND — neither the arrow
-        // catch nor the #67 thin-large catch fires. (n=120_000 below the
-        // band would now route to AMF via #67; the point here is that the
-        // arrow catch itself does not over-fire on a non-arrow shape.)
+        // A uniform large-dense pattern (n > 100_000, avg_deg >= 5,
+        // non-arrow) now routes to AMF via the #73 thin-large catch (the
+        // would-be-MetisND decision is overridden to AMF at every n). This
+        // does not exercise the arrow catch — the point is only that a
+        // non-arrow shape still lands on AMF, just through #73 rather than
+        // #64.
         let uniform = pattern_with_degrees(&vec![16usize; 120_000]);
         assert_eq!(
             choose_adaptive(&uniform, OrderingMethod::Auto),
-            OrderingMethod::MetisND,
-            "uniform large-dense pattern (above #67 band) must remain on MetisND"
+            OrderingMethod::Amf,
+            "uniform large-dense non-arrow pattern routes to AMF via the #73 catch"
         );
         // The arrow override must NOT fire below the size floor: a small
         // arrow already routes to Amf via the n<=10_000 rule, but assert
