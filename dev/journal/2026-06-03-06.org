@@ -1,0 +1,74 @@
+#+TITLE: FERAL Journal 2026-06-03-06
+#+STARTUP: showall
+
+* 23:30 :issue-73:followup:merge:
+Merged the two #67/#71 follow-ups from the session-05 checkpoint:
+- PR #74 (docs(readme): document feral-diagnostics crate invocation) —
+  CI green, squash-merged, main → caf4120. The optional README line for
+  the moved probes (#2 from the checkpoint follow-up list).
+- Opened issue #73 to track the n>100k thin-regime investigation (#1).
+
+* 23:45 :issue-73:diagnose:symbolic-only:
+Step 1 of #73: settle whether the #67 RDW2D51U ">10 min, did not complete"
+was an AMF *fill* blowup or raw *numeric* cost. The #67 A/B used the full
+Solver path (ordering+symbolic+numeric+solve, reps=1, all three orderings),
+so the timeout was unattributed.
+
+Wrote crates/feral-diagnostics/src/bin/probe_issue73_symbolic.rs —
+symbolic-only (no numeric factor, no solve). For AMF and MetisND it reports
+sym_ms, nnz_L_est (=factor_nnz_estimate), max_front (largest supernode nrow),
+flop_proxy (Σ ncol·nrow², dense-multifrontal work proxy), peak_MB.
+
+RDW2D51U (n=195075):
+  AMF:     sym 167ms  nnz_L 28.19M  max_front 1398  flop 1.147e10  peak 40.1MB
+  MetisND: sym 944ms  nnz_L 35.59M  max_front 1608  flop 1.782e10  peak 44.9MB
+  -> MetisND/AMF nnz_L 1.263x, flop 1.554x.
+pinene_3200 (n=127995):
+  AMF:     sym 608ms  nnz_L 2.00M   max_front  29   flop 3.39e7
+  MetisND: sym 1020ms nnz_L 2.42M   max_front 346   flop 8.24e7
+  -> MetisND/AMF nnz_L 1.207x, flop 2.433x.
+
+CONCLUSION: RDW2D51U symbolic finishes in 167ms — the #67 timeout was
+NUMERIC, not an AMF ordering/fill blowup. And AMF is the *cheaper* ordering
+on RDW2D51U (1.26x fewer nnz_L, 1.55x less flop_proxy than MetisND). The #67
+A/B blew its 10-min budget on MetisND's heavier numeric factor (35.6M nnz_L,
+1608-wide front), not on AMF. So above the band the bound is leaving AMF wins
+on the table, not guarding a blowup — at least here.
+
+* 00:05 :issue-73:sweep:symbolic:
+Step 2 (partial): symbolic-only sweep over the locally-available n>100k
+families, filtered to the MetisND-routed population (full_avg_deg >= 5; the
+n>100k && avg_deg<5 ones route to AMD and are unaffected by AMF_BAND_MAX).
+flop_proxy ratio = MetisND/AMF (>1 => AMF cheaper):
+
+  matrix      n      avg_deg  nnz_L M/A  flop M/A   verdict
+  dtoc2       104k   17.5     1.92       4.36       AMF wins big
+  pinene_3200 128k    9.42    1.21       2.43       AMF wins
+  cont5_1_l   181k    6.96    1.43       1.99       AMF wins
+  RDW2D51U    195k   18.24    1.26       1.55       AMF wins
+  RDW2D52U    195k   18.24    1.26       1.55       AMF wins (identical to 51U)
+  YATP1NE     246k    5.97    1.66      17.55       AMF wins big
+  QUADCOPTER  280k    5.14    1.00       1.00       tie (near-diagonal)
+  nql180      260k    5.74    0.98       0.86       MetisND wins  <-- counterexample
+  optmass     110k    3.55    (avg_deg<5 -> AMD-routed, unaffected)
+
+AMF wins or ties 6/7 of the affected population on symbolic predictors;
+nql180 is the lone MetisND win (MetisND ~14% less flop_proxy, ~2% fewer
+nnz_L). nql180 is a known matrix (cascade-break mode, decisions.md).
+
+CAVEATS before any AMF_BAND_MAX change:
+- nnz_L_est / flop_proxy are PREDICTIONS, not measured factor+solve wall
+  time. The #67 methodology weighs real factor+solve; e.g. pinene's measured
+  time_r was 1.18 while flop_proxy says 2.43 — direction agrees, magnitude
+  overstated. nql180 specifically needs the real number, not the proxy.
+- This is 8 families on one machine, one iterate each — under-sampled for a
+  routing-default change. #50's powerflow lesson warns against broad reroutes
+  on thin/low-avg-deg matrices.
+- avg_deg<5 (powerflow-class) stays AMD-routed regardless; an AMF_BAND_MAX
+  raise only moves avg_deg>=5 n>100k matrices from MetisND to AMF.
+
+DECISION: do NOT change AMF_BAND_MAX yet. Recorded the symbolic evidence in
+dev/research/issue-73-n100k-thin-regime.md and on issue #73. The next phase
+(if pursued) is a real factor+solve A/B on these 7 MetisND-routed families
+(esp. nql180) mirroring #67's validation, then decide. Logged as the open
+question on #73.
