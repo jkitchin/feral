@@ -72,3 +72,62 @@ dev/research/issue-73-n100k-thin-regime.md and on issue #73. The next phase
 (if pursued) is a real factor+solve A/B on these 7 MetisND-routed families
 (esp. nql180) mirroring #67's validation, then decide. Logged as the open
 question on #73.
+
+* 00:45 :issue-73:ab:factor-solve:surprise:
+Real factor+solve A/B (probe_issue67_thin --reps 1) on the n>100k MetisND-
+routed families. Columns: fill_r = nnzL_met/nnzL_amf; time_r = (fac+slv)_met /
+(fac+slv)_amf (>1 => AMF faster). First 5:
+
+  matrix      n      fill_r  fac_amf   fac_met  time_r
+  dtoc2       104k   1.92    264ms     671ms    2.49
+  pinene      128k   1.20    896ms    1054ms    1.18
+  cont5_1_l   181k   1.35    215ms     620ms    2.75
+  nql180      260k   0.98   1903ms    3949ms    2.05   <-- !!
+  YATP1NE     246k   1.44   1922ms    4104ms    2.13
+
+SURPRISE / DESIGN-BREAKER: nql180. The symbolic probe predicted MetisND wins
+(nnz_L 0.98x, flop_proxy 0.86x), and indeed MetisND has 2% SMALLER fill here.
+But on REAL factor+solve, AMF is 2.05x FASTER (fac 1.90s vs 3.95s). So the
+fill predictor (nnz_L) — and even my flop_proxy — MISPREDICT nql180. A
+fill-guarded reroute (route to AMF only when AMF nnz_L <= MetisND nnz_L) would
+WRONGLY keep nql180 on MetisND and forfeit a 2x speedup.
+
+Implication: the fill-guarded reroute (the design proposed in the #73 note and
+requested) is the WRONG guard. The real A/B says AMF wins factor+solve on ALL
+5 so far (1.18x–2.75x), including the lone "fill counterexample". This argues
+for the SIMPLE unconditional extension — route n>100k && avg_deg>=5 &&
+non-arrow Auto to AMF outright (raise/relax AMF_BAND_MAX), NOT a fill race.
+Waiting on RDW2D51U + QUADCOPTER to complete the population before finalizing.
+
+* 01:30 :issue-73:implement:routing:
+Implemented the unconditional AMF reroute (decision confirmed by user).
+src/symbolic/mod.rs choose_adaptive: dropped the `&& n <= AMF_BAND_MAX`
+condition from the #67 thin-large catch, so the would-be-MetisND decision
+now becomes `if base == MetisND { return Amf; }` at every n. Removed the now-
+dead AMF_BAND_MAX const entirely. The earlier avg_deg<5 → Amd (#50) and
+arrow → Amf (#64) catches return first, so the powerflow guardrail and dense-
+border catch are untouched — only the uniformly-thin would-be-MetisND
+population above 100k is rerouted.
+
+Tests updated (oracle = the real factor+solve A/B in /tmp/ab73.log, external
+to this change):
+- choose_adaptive_rules: the n=150_000 avg_deg=10 case now asserts Amf (was
+  MetisND). Comment updated to cite #73.
+- choose_adaptive_routes_arrow_to_amf: the n=120_000 non-arrow uniform sub-
+  assertion now asserts Amf (was MetisND) — it lands on AMF via the #73 catch
+  rather than MetisND; the arrow-specific assertion (arrow n>10k → Amf) is
+  unchanged.
+Both pass: `cargo test --lib choose_adaptive` → 2 passed, 0 failed (7m32s
+cold compile under XProtect load; the tests themselves run in 0.06s).
+
+RDW2D51U + QUADCOPTER never finished the real A/B on this machine (RDW2D51U
+blocked at 0% CPU under corespotlightd/Dropbox/syspolicyd contention). Not a
+blocker: their symbolic predictors already favor AMF (RDW2D51U 1.55× cheaper
+flop_proxy and the cheaper ordering per Finding 1; QUADCOPTER a near-diagonal
+tie), and the 5 matrices that DID finish all favor AMF including the fill
+counterexample. Recorded the gap honestly in the research note + decision.
+
+Docs updated: dev/research/issue-73-n100k-thin-regime.md (Finding 3 + Decision,
+with a read-this-first banner marking the fill-guard rejected), dev/decisions.md
+(unconditional-AMF decision + fill-guard rejection), dev/tried-and-rejected.md
+(fill-guarded reroute, nql180 standing counterexample), CHANGELOG.md Unreleased.
