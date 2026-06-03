@@ -1,82 +1,82 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-05-31T18:23:03Z
+Generated: 2026-06-03T11:15:02Z
 
 ## Latest Session
-File: dev/sessions/2026-05-31-03.md
+File: dev/sessions/2026-06-03-01.md
 ```
-# Session 2026-05-31-03
+# Session 2026-06-03-01
 
 ## Goal
 
-Work through the perf-review (`dev/research/perf-review-2026-05-31.md`) levers
-systematically on branch `claude/perf-levers`. For each lever: a research note,
-a with/without A/B (performance + correctness), all other tests green. User
-cadence: pause after each lever; default-ON once proven; git before/after for
-pure-kernel swaps.
+Fix issue #64: `Auto`/default ordering picks MetisND on arrow/bordered
+KKTs (a thin body plus a few very-high-degree border columns), blowing
+the LDLᵀ factor up ~7-9× vs AMF/AMD. Found via POUNCE on the LP `r05`
+(n=14842): ~16 s auto (→ MetisND) vs 0.84 s forcing AMF.
+
+User decisions up front: (1) detect with a cheap O(n) degree predicate
+(not AutoRace); (2) regenerate the r05 fixture on demand into the
+gitignored `tests/data/large/`, regression test skips when absent (no
+blob in git).
 
 ## Accomplished
 
-Six levers triaged; **one implemented**, the rest deferred-with-rationale or
-found already-done. All on `claude/perf-levers` (NOT merged to main).
+Arrow/bordered detection implemented and shipped; r05 regression test
+goes green; full suite + clippy + fmt clean.
 
-- **Lever 1.1 — intra-front parallel Schur update: IMPLEMENTED** (`fbc3136`).
-  Parallelizes the trailing Schur update of a single dense front via
-  `tail.par_chunks_mut`, gated by `INTRAFRONT_MIN_AREA = 256*256` and a new
-  `BunchKaufmanParams::intrafront_parallel` flag (default ON on the parallel
-  driver only; the sequential driver is untouched → pounce#79
-  no-oversubscription preserved). Bit-exact by construction (each trailing
-  column reduced over ascending q on one thread; no cross-thread reduction).
-  - A/B (`bench_intrafront`, FERAL_INTRAFRONT 0 vs 1, dense SPD fronts): speedup
-    **1.2×–3.1×** (load-sensitive, bandwidth-bound), bit-exact every run.
-  - Correctness: new gate `intrafront_parallel_schur_matches_serial`;
-    `parallel_corpus_parity` full KKT corpus **0 mismatch / 41 220 factored**;
-    full suite **572 passed, 0 failed**; clippy + fmt clean.
-- **Lever 1.2 — cache blocking + L-panel packing: DEFERRED** (`eafd826`).
-  Analysis + plan complete; restructures the hot bit-exact kernel for a
-  ~10–30% bandwidth gain that is below the run-to-run noise floor on this shared
-  machine. Revisit on idle hardware: 1.2a row-band blocking, then 1.2b packing.
-- **Lever 2.1 — parallel-across-RHS solve: DEFERRED** (`5336914`). Design
-  complete; bit-exactness entangled with the nrhs≥32 kernel dispatch (BLAS-3
-  back-sub not bit-identical to rank-1), risky surgery for a narrow payoff
-  (solve already < MUMPS; IPM uses nrhs=2).
-- **Lever 2.2 — symbolic speedups: ALREADY IMPLEMENTED** (`2d576c4`, verify
-  only). Both halves live since Phase 2.4.4: MC64 cached once + reused
-  (symbolic/mod.rs:608/620, scaling/mod.rs:298-300); compression auto-dispatch
-  via `OrderingPreprocess::Auto` + `pick_ordering_preprocess`. Perf-review
-  over-stated remaining work; its "compRat≤0.7" gate is circular.
-- **Levers 3.1 (FMA fallback) + 3.2 (wider NR): DEFERRED** (`56c6e48`). 3.2 is
-  the same bandwidth wall as 1.2 (sub-noise-floor). 3.1 is ~0% on this arm64 host
-  (decisions.md 2026-04-14) and flips inertia on ~30/154k matrices; already an
-  opt-in `BunchKaufmanParams::fma` field for a future x86 measurement.
+- **`is_arrow_bordered(pattern)`** (`src/symbolic/mod.rs`): O(n)
+  degree pass over the full symmetric pattern. A "heavy" column has
+  degree > max(64, 8·avg_deg); fire iff `1 ≤ heavy_count < 0.05·n` (small
+  set) AND `heavy_nnz ≥ 0.20·full_nnz` (large nnz share).
+- **Routing**: `choose_adaptive` overrides the would-be-MetisND decision
+  (`n > 10_000`) to AMF when the predicate fires. The `n ≤ 10_000 → AMF`
+  and `n > 100_000 && avg_deg < 5 → AMD` (#50) paths are untouched.
+- **Unification**: `symbolic_factorize` now resolves through
+  `OrderingMethod::Auto` instead of calling `pick_default_method`
+  directly, so the no-arg default and an explicit `Auto` caller resolve
+  to the same concrete ordering on every matrix. This also fixed a
+  latent inconsistency (only `choose_adaptive` had the #50 large-sparse
+  branch). `issue_3_auto_on_kkt_routes_via_pick_default_method` still
+  passes (PoissonControl K=58 → MetisND, uniform, no arrow).
+- **Calibration on real data** (`src/bin/probe_issue64_arrow.rs`):
 
-## Benchmark Results
+  | matrix | n | avg_deg | heavy_count | heavy_nnz% | predicate |
+  |---|---|---|---|---|---|
+  | r05_kkt | 14842 | 15.0 | 171 (1.15%) | 38.5% | **ARROW→Amf** |
+  | bratu3d | 27792 | 6.25 | 0 | 0% | no |
+  | cont-201 | 80595 | 5.44 | 0 | 0% | no |
+  | bcsstk38 | 8032 | 44.3 | 2 (0.03%) | 0.3% | no (share guard) |
 
-8-matrix `bench` (the small synthetic harness; the corpus p90 bench is the
-separate `bench_solver_corpus` walk), FERAL_INTRAFRONT OFF vs ON — all
-sub-threshold, so both take the serial refactored path:
+  r05 nnz_L: Amf=506210 Amd=607519 MetisND=4358715 (MetisND/Amf=8.61×).
+  Absolute counts drift from the issue's numbers (ordering-impl / METIS
+  seed) but the ranking and the `<1e6` test threshold are robust.
+- **Tests**: 4 unit tests for the predicate (fires on synthetic arrow;
+  rejects uniform-sparse, many-hubs (count guard), low-share border
+  (share guard)); `choose_adaptive_routes_arrow_to_amf`; regression
+  `tests/issue64_arrow_ordering.rs` (skip-if-absent, asserts
+  `nnz_L < 1.0e6` and `resolved_method != MetisND`). Verified red→green.
 ```
 
 ## Git Status
 ```
-56c6e48 docs(lever-3.x): defer FMA fallback (3.1) and wider NR (3.2) with rationale
-2d576c4 docs(lever-2.2): verify symbolic speedups already implemented (Phase 2.4.4)
-5336914 docs(lever-2.1): defer parallel-across-RHS solve with design + rationale
-eafd826 docs(lever-1.2): defer cache-blocking/packing with analysis + rationale
-dc66907 docs(lever-1.1): report speedup as a load-sensitive range, not a best run
+8877a48 docs(lever-1.2): row-band blocking measured — bit-exact but a 0.74-0.95x regression (#62)
+55f6a70 perf(dense): intra-front parallel Schur (perf-review Lever 1.1) + lever-sweep docs (#61)
+8ffdb55 docs+test(parallel): O(1) worker-stack depth, deep-tree guard (pounce#79) (#60)
+14cff66 perf-review: analysis and verification of intra-front parallelism (#59)
+cd12735 release: v0.9.0
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test scaling::tests::auto_falls_back_to_infnorm_on_mss1_0009 ... ok
 test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
@@ -86,65 +86,67 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 
-test result: ok. 317 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.42s
+test result: ok. 322 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.41s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-05-31-03.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-03-01.md)
 
 
-8-matrix `bench` (the small synthetic harness; the corpus p90 bench is the
-separate `bench_solver_corpus` walk), FERAL_INTRAFRONT OFF vs ON — all
-sub-threshold, so both take the serial refactored path:
+name                n   factor(μs)    solve(μs)        inertia
+--------------------------------------------------------------
+spd_10             10           40            9     (10, 0, 0)
+spd_50             50           23            3     (50, 0, 0)
+spd_100           100           84            5    (100, 0, 0)
+spd_200           200          413           16    (200, 0, 0)
+kkt_10_3           13            3            0     (10, 3, 0)
+kkt_30_10          40           25            1    (30, 10, 0)
+kkt_50_15          65           49            2    (50, 15, 0)
+kkt_100_30        130          205            7   (100, 30, 0)
 
-spd_10   off=35  on=29     kkt_10_3   off=3   on=3
-spd_50   off=20  on=20     kkt_30_10  off=25  on=25
-spd_100  off=78  on=68     kkt_50_15  off=47  on=47
-spd_200  off=389 on=362    kkt_100_30 off=130 on=130
-
-Within noise; **inertia identical** OFF vs ON on all 8. The small-front geomean
-cannot regress from 1.1: fronts below the 65 536-area gate never enter the
-parallel branch, and the serial path is the bit-exact refactor proven by
-`parallel_corpus_parity` (0 mismatch). The full corpus p90 walk
-(`bench_solver_corpus`, 169 591 matrices vs MUMPS oracle) is an hour+ run and
-timing-noisy on this contended box; not run to completion — the structural
-argument + corpus-parity bit-exactness are the load-robust evidence.
+The 8-matrix synthetic bench is all n ≤ 200 (sub-threshold → AMF), so it
+exercises none of the arrow path; numbers are within prior-session noise
+(spd_200 413µs vs 362–389 in 2026-05-31-03) and inertia is exact. The
+arrow catch only consults `is_arrow_bordered` on the would-be-MetisND
+branch (n > 10_000), so these matrices are bit-identical to before. The
+load-robust evidence for the fix is the r05 regression test and the
+real-data calibration table above, not this bench.
 
 ```
 
 ## Recent Decisions
+degree > max(64, 8·avg_deg); fire iff 1 ≤ heavy_count < 0.05·n (a small
+set) AND heavy_nnz ≥ 0.20·full_nnz (a large nnz share). The share guard
+is the discriminator — it fires on r05 (38.5%) and rejects bcsstk38
+(0.3% share despite two degree-614 columns); the count guard rejects
+"many hub" patterns. Uniformly-thin matrices (PoissonControl,
+powerflow22, bratu3d, cont-201) have no heavy column and are untouched.
 
-## 2026-05-31 — Lever 2.2 (symbolic speedups) found already-implemented
+Routing target is AMF (the existing n≤10_000 default and the measured
+winner on r05), keeping the dispatcher coherent: small-or-arrow → AMF,
+large-uniform → MetisND, very-large-thin → AMD.
 
-The perf-lever sweep reached Tier-2 #2 (symbolic-phase speedups: cache MC64
-across compress->scale, and auto-dispatch compression on predicted-tail
-matrices). On inspection BOTH halves are already implemented in the codebase
-("Phase 2.4.4", pre-dating this sweep): the MC64 matching is computed once and
-cached (symbolic/mod.rs:605/614) and reused by the numeric phase
-(scaling/mod.rs:298-300); compression auto-dispatch is the default via
-OrderingPreprocess::Auto + pick_ordering_preprocess (mod.rs:347-369). The
-perf-review (dev/research/perf-review-2026-05-31.md), written the same day by
-the PR#59 analysis session, over-stated the remaining work by listing these as
-future. Its further "tighter gate (compRat<=0.7)" idea is not viable as stated
-(compRat requires running MC64 to compute, so it cannot gate whether to run
-MC64). No code change; verification recorded in
-dev/research/lever-2.2-symbolic-speedups.md.
+Placement: the catch lives in `choose_adaptive`, and `symbolic_factorize`
+now resolves through `OrderingMethod::Auto` instead of calling
+`pick_default_method` directly. This unifies the two entry points — the
+no-arg default and an explicit `Auto` caller now resolve to the same
+concrete ordering on every matrix. Previously they could disagree on
+very-large-and-sparse patterns (only `choose_adaptive` had the #50
+`n>100_000 && avg_deg<5 → Amd` branch), a latent inconsistency the
+docstrings claimed did not exist.
 
+This is the *opposite* routing direction from issue #50, which deleted
+escape hatches that pushed low-avg-degree patterns *toward* MetisND. Here
+the body is not uniformly thin (full avg_deg ≈ 15); the problem is a few
+dense borders. A purely synthetic arrow did not faithfully reproduce the
+fill ranking (issue #64 reporter note), so the regression fixture is the
+real regenerated r05 KKT, gitignored and skip-if-absent.
 
-## 2026-05-31 — Levers 3.1 (FMA fallback) and 3.2 (wider NR) deferred
-
-Both Tier-3 levers deferred (dev/research/lever-3.x-deferred.md). 3.2 (wider
-micro-kernel NR): perf-review says measure only after 1.1/1.2 land, but 1.2 is
-deferred and 3.2 attacks the same memory-bandwidth wall — wider arithmetic width
-does not help a bandwidth-bound kernel, and the gain is sub-noise-floor on this
-shared machine. 3.1 (FMA boundary-safe fallback): this host is arm64, where FMA
-measured ~0% (decisions.md 2026-04-14, 1.87->1.86) and flips inertia on ~30/154k
-boundary matrices; high-complexity fallback for ~zero gain on the only available
-hardware. fma is already an opt-in BunchKaufmanParams field for a future x86
-measurement. The perf-lever sweep thus implements Lever 1.1 only (1.2/2.1
-deferred-with-plan, 2.2 already implemented in Phase 2.4.4).
+Evidence: dev/research/issue-64-arrow-bordered-ordering.md,
+dev/journal/2026-06-03-01.org, src/symbolic/mod.rs is_arrow_bordered +
+choose_adaptive, tests/issue64_arrow_ordering.rs, dev/scripts/regen_r05_kkt.sh.
 
 ## Recent Tried-and-Rejected
 **c-block outer / m-tile inner** would keep a small `B`-block
@@ -282,6 +284,7 @@ src/bin/probe_issue54_alpha_shift.rs
 src/bin/probe_issue54_cascade.rs
 src/bin/probe_issue54_ma57_alpha.rs
 src/bin/probe_issue54.rs
+src/bin/probe_issue64_arrow.rs
 src/bin/probe_kkt_replay.rs
 src/bin/probe_marine_shape.rs
 src/bin/probe_marine_time.rs
@@ -345,8 +348,5 @@ src/symbolic/column_counts.rs
 src/symbolic/ldlt_compress.rs
 src/symbolic/mod.rs
 src/symbolic/profiler.rs
-src/symbolic/small_leaf.rs
-src/symbolic/supernode.rs
-```
 
-(truncated from      402 lines to 350 line budget)
+(truncated from      406 lines to 350 line budget)

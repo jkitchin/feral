@@ -5033,3 +5033,48 @@ dev/research/lever-1.2-cache-blocking-packing.md.
 Methodological note: measuring the cheap version took ~30 min and produced a
 definite reject; the prior deferral-by-speculation should have been a
 measurement from the start.
+
+## 2026-06-03 — Arrow/bordered-KKT ordering catch (issue #64)
+
+`pick_default_method` routed the default ordering by size alone
+(`n > 10_000 → MetisND`), discarding the `_stored_nnz` it received. On
+arrow/bordered KKTs — a thin body plus a handful of very-high-degree
+border columns — nested dissection cannot isolate the dense border and
+the LDLᵀ factor blows up ~7-9× vs AMF/AMD. Measured on r05's iter-0 IPM
+KKT (n=14842, 171 of 14842 columns at degree 502 carrying 38.5% of the
+nonzeros): nnz_L Amf=506k Amd=608k MetisND=4.36M (8.6× AMF); POUNCE
+end-to-end ~16 s (auto→MetisND) vs 0.84 s (amf).
+
+Decision: detect the arrow signature with a cheap O(n) degree pass
+(`is_arrow_bordered`) on the full symmetric pattern and override the
+would-be-MetisND decision to AMF. Predicate: a heavy column has
+degree > max(64, 8·avg_deg); fire iff 1 ≤ heavy_count < 0.05·n (a small
+set) AND heavy_nnz ≥ 0.20·full_nnz (a large nnz share). The share guard
+is the discriminator — it fires on r05 (38.5%) and rejects bcsstk38
+(0.3% share despite two degree-614 columns); the count guard rejects
+"many hub" patterns. Uniformly-thin matrices (PoissonControl,
+powerflow22, bratu3d, cont-201) have no heavy column and are untouched.
+
+Routing target is AMF (the existing n≤10_000 default and the measured
+winner on r05), keeping the dispatcher coherent: small-or-arrow → AMF,
+large-uniform → MetisND, very-large-thin → AMD.
+
+Placement: the catch lives in `choose_adaptive`, and `symbolic_factorize`
+now resolves through `OrderingMethod::Auto` instead of calling
+`pick_default_method` directly. This unifies the two entry points — the
+no-arg default and an explicit `Auto` caller now resolve to the same
+concrete ordering on every matrix. Previously they could disagree on
+very-large-and-sparse patterns (only `choose_adaptive` had the #50
+`n>100_000 && avg_deg<5 → Amd` branch), a latent inconsistency the
+docstrings claimed did not exist.
+
+This is the *opposite* routing direction from issue #50, which deleted
+escape hatches that pushed low-avg-degree patterns *toward* MetisND. Here
+the body is not uniformly thin (full avg_deg ≈ 15); the problem is a few
+dense borders. A purely synthetic arrow did not faithfully reproduce the
+fill ranking (issue #64 reporter note), so the regression fixture is the
+real regenerated r05 KKT, gitignored and skip-if-absent.
+
+Evidence: dev/research/issue-64-arrow-bordered-ordering.md,
+dev/journal/2026-06-03-01.org, src/symbolic/mod.rs is_arrow_bordered +
+choose_adaptive, tests/issue64_arrow_ordering.rs, dev/scripts/regen_r05_kkt.sh.
