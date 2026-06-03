@@ -214,6 +214,19 @@ family-grouped failure analysis and dense ∩ sparse cross-comparison.
 The KKT matrices are not committed — generate them via ripopt's
 `collect_kkt` tool.
 
+### Diagnostic binaries
+
+The `bench` binary lives in the root `feral` package. The ~140
+throwaway investigation probes (`diag_*`, `probe_*`, `bench_*`, …)
+live in a separate non-default workspace crate, `feral-diagnostics`,
+so they are excluded from the default `cargo build` / `cargo test` /
+`cargo clippy`. Run one with `-p`:
+
+```sh
+cargo run -p feral-diagnostics --bin <name> [-- args...]
+cargo build -p feral-diagnostics            # compile them all
+```
+
 ## Using FERAL inside Ipopt
 
 FERAL ships with everything needed to build [Ipopt
