@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-03T11:28:06Z
+Generated: 2026-06-03T12:35:20Z
 
 ## Latest Session
 File: dev/sessions/2026-06-03-01.md
@@ -59,26 +59,26 @@ goes green; full suite + clippy + fmt clean.
 
 ## Git Status
 ```
+add8e4c diag(issue-63): near-singular KKT ordering stall — backward-error hypothesis disproven
 72c05ee Merge pull request #66 from jkitchin/claude/issue-64-arrow-ordering
 b93446a docs(session): checkpoint 2026-06-03-01 — issue #64 arrow ordering catch
 4882313 fix(ordering): arrow/bordered-KKT catch — route MetisND→AMF on dense-border patterns (#64)
 8877a48 docs(lever-1.2): row-band blocking measured — bit-exact but a 0.74-0.95x regression (#62)
-55f6a70 perf(dense): intra-front parallel Schur (perf-review Lever 1.1) + lever-sweep docs (#61)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
@@ -86,7 +86,7 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 
-test result: ok. 322 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.43s
+test result: ok. 322 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.41s
 
 ```
 
@@ -149,26 +149,26 @@ dev/journal/2026-06-03-01.org, src/symbolic/mod.rs is_arrow_bordered +
 choose_adaptive, tests/issue64_arrow_ordering.rs, dev/scripts/regen_r05_kkt.sh.
 
 ## Recent Tried-and-Rejected
-**c-block outer / m-tile inner** would keep a small `B`-block
-L1-resident and cut the dominant re-streaming by the factor `NR/MR = 2`.
+   destroyed), inertia scrambled. Strictly worse. Force-accept-and-report-zeros
+   is the useful behavior: it signals singularity so pounce escalates δ_w.
 
-Tried the swap. **Measured: no improvement.** n=1024 stayed at ratio
-~1.0–1.2 (still a regression), and n=484/2025 were within noise of the
-m-outer order. The loop order was not the bottleneck at these sizes.
+3. Any principled "better inertia" change. The ordering that wins (metis)
+   reports a MORE pessimistic, LESS correct inertia (neg 255 ≠ 252 expected) on
+   the singular matrix; that makes pounce regularize earlier and escape a frozen
+   2.30e-8 fixed point. There is no known-correct inertia change that fixes
+   scrs8 — "correct" inertia (amf) is what under-regularizes into the stall.
 
-Reverted to the simpler m-outer kernel (the comment claiming the swap
-fixed n=1024 would have been false). The actual n=1024 cause was the
-**stride-`n` gather/scatter** reading the column-major `y` — power-of-
-two `n` aliased RHS columns into the same cache sets. Flipping the
-internal `y` buffer to row-major (contiguous memcpy gather/scatter)
-fixed it (ratio 1.2 → 0.33) and ~halved wide-solve time everywhere.
-See `dev/research/issue-57-blas3-panel.md` Results and the
-`dev/decisions.md` 2026-05-30 entry.
+4. Ordering-class heuristic (route this KKT class to metis/scotch). Not pursued:
+   the issue itself calls it "papering over the symptom," and it risks the
+   cascade-break don't-regress set (robot_1600, NARX_CFy, marine_1600,
+   rocket_12800, pinene_3200).
 
-**Lesson.** Diagnose the bottleneck before micro-optimizing the kernel:
-the transpose in the gather/scatter dominated, not the GEMM's operand
-re-streaming. A loop-order change to the GEMM was wasted motion until
-the layout (row-major `y`) was fixed.
+Conclusion: the durable fix is the δ_w / inertia-acceptance interaction
+(pounce-side or joint), not FERAL factorization accuracy. Full analysis:
+dev/research/issue-63-nearsingular-ordering-diagnosis.md;
+dev/journal/2026-06-03-02.org; probe src/bin/probe_issue63_nearsingular.rs.
+Future sessions: do NOT re-attempt a FERAL-only fix for scrs8 without first
+re-checking these four dead ends.
 
 ## Source Files
 ```
@@ -284,6 +284,7 @@ src/bin/probe_issue54_alpha_shift.rs
 src/bin/probe_issue54_cascade.rs
 src/bin/probe_issue54_ma57_alpha.rs
 src/bin/probe_issue54.rs
+src/bin/probe_issue63_nearsingular.rs
 src/bin/probe_issue64_arrow.rs
 src/bin/probe_kkt_replay.rs
 src/bin/probe_marine_shape.rs
@@ -347,6 +348,5 @@ src/sparse/mod.rs
 src/symbolic/column_counts.rs
 src/symbolic/ldlt_compress.rs
 src/symbolic/mod.rs
-src/symbolic/profiler.rs
 
-(truncated from      406 lines to 350 line budget)
+(truncated from      407 lines to 350 line budget)

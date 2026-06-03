@@ -2199,3 +2199,44 @@ See `dev/research/issue-57-blas3-panel.md` Results and the
 the transpose in the gather/scatter dominated, not the GEMM's operand
 re-streaming. A loop-order change to the GEMM was wasted motion until
 the layout (row-major `y`) was fixed.
+
+## 2026-06-03 — FERAL-side fixes for issue #63 (near-singular KKT IPM stall)
+
+Context: scrs8-2c-8 stalls at "Acceptable" (constr.viol 2.30e-8) under
+amd/amf/Auto but reaches "Optimal" (1.00e-8) under metis/scotch. Issue #63
+hypothesised an ordering-dependent linear-solve backward error (~2e-8 AMD vs
+~1e-8 metis) flooring IPM feasibility, and suggested pivot stabilization /
+growth bounds / more refinement.
+
+REJECTED (disproven by measurement, not shipped):
+
+1. The premise. FERAL solves the iter-26 regularized stepped system (full rank)
+   to ~1e-22 backward error under EVERY ordering AND both scaling modes (Auto,
+   Identity), even at max_piv ~6e16. The claimed 2e-8/1e-8 gap and
+   max_abs_pivot ~9.68e10 are not observed (auto-scaled max_piv ~30-60). The
+   linear solve is not the bottleneck — so pivot stabilization / growth bounds /
+   more refinement target a backward error that is already ~1e-22.
+
+2. MA57-style static pivot (with_static_pivot_threshold(1e-8)). On the SINGULAR
+   pre-regularization matrix the floor is 1e-8*||A||_inf ≈ 1.0 (μ→0 (1,1)-block
+   blowup), perturbing ~510-542 of 727 pivots → backward error 1.0 (solve
+   destroyed), inertia scrambled. Strictly worse. Force-accept-and-report-zeros
+   is the useful behavior: it signals singularity so pounce escalates δ_w.
+
+3. Any principled "better inertia" change. The ordering that wins (metis)
+   reports a MORE pessimistic, LESS correct inertia (neg 255 ≠ 252 expected) on
+   the singular matrix; that makes pounce regularize earlier and escape a frozen
+   2.30e-8 fixed point. There is no known-correct inertia change that fixes
+   scrs8 — "correct" inertia (amf) is what under-regularizes into the stall.
+
+4. Ordering-class heuristic (route this KKT class to metis/scotch). Not pursued:
+   the issue itself calls it "papering over the symptom," and it risks the
+   cascade-break don't-regress set (robot_1600, NARX_CFy, marine_1600,
+   rocket_12800, pinene_3200).
+
+Conclusion: the durable fix is the δ_w / inertia-acceptance interaction
+(pounce-side or joint), not FERAL factorization accuracy. Full analysis:
+dev/research/issue-63-nearsingular-ordering-diagnosis.md;
+dev/journal/2026-06-03-02.org; probe src/bin/probe_issue63_nearsingular.rs.
+Future sessions: do NOT re-attempt a FERAL-only fix for scrs8 without first
+re-checking these four dead ends.
