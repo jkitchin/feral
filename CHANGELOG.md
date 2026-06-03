@@ -4,6 +4,33 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — arrow/bordered-KKT ordering blow-up (#64)
+
+The default ordering routed by size alone (`n > 10_000 → MetisND`). On
+**arrow / bordered-KKT** patterns — a thin body plus a handful of
+very-high-degree "border" columns (e.g. an IPM augmented system with a
+few dense inequality rows) — nested dissection cannot isolate the dense
+border and the LDLᵀ factor blows up ~7–9× vs AMF/AMD. On the LP `r05`
+iter-0 KKT (n=14842, 171 columns of degree 502 carrying 38.5% of the
+nonzeros) this was 4.4M nnz_L under the default (→ MetisND) vs 0.51M
+under AMF, and POUNCE end-to-end went from ~16 s to 0.84 s with AMF.
+
+`symbolic_factorize` now detects the arrow signature with a cheap O(n)
+degree-distribution pass (`is_arrow_bordered`): when a *small* set of
+columns (< 5% of n) concentrates a *large* share of the nonzeros
+(≥ 20%), it routes to AMF instead of MetisND. Uniformly-thin matrices
+(PoissonControl, powerflow22, bratu3d, cont-201) and matrices whose few
+high-degree columns carry a tiny nnz share (bcsstk38, 0.3%) are not
+flagged and keep their previous ordering. The detection lives in
+`choose_adaptive`, and `symbolic_factorize` now resolves through
+`OrderingMethod::Auto`, so the no-arg default and an explicit `Auto`
+caller resolve to the same concrete ordering on every matrix (they could
+previously disagree on very-large-and-sparse patterns).
+
+See `dev/research/issue-64-arrow-bordered-ordering.md`. Regression
+fixture (gitignored, regenerate with `dev/scripts/regen_r05_kkt.sh`):
+`tests/issue64_arrow_ordering.rs` asserts `nnz_L < 1.0e6` on r05's KKT.
+
 ## [0.9.0] - 2026-05-30
 
 ### Fixed — batched iterative refinement for wide multi-RHS solves (#58)

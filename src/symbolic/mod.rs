@@ -129,10 +129,15 @@ pub enum OrderingMethod {
 /// The rule set adds one shape-bakeoff branch on top of
 /// [`pick_default_method`]:
 ///   - very-large-and-sparse (`n > 100_000`, full avg_deg < 5.0) → `Amd`
+///   - arrow/bordered (issue #64): whenever the size rule would pick
+///     `MetisND` (`n > 10_000`) but [`is_arrow_bordered`] detects a
+///     dense border concentrating the nonzeros, override to `Amf`.
 ///
-/// Anything else delegates to [`pick_default_method`], so `Auto` can't
-/// disagree with the no-arg `symbolic_factorize` default on the same
-/// matrix.
+/// Anything else delegates to [`pick_default_method`]. `symbolic_factorize`
+/// routes through `Auto`, so the no-arg default and `Auto` resolve to the
+/// same concrete method on every matrix (issue #64 unified the two paths;
+/// previously the no-arg default skipped the very-large-and-sparse and
+/// arrow catches).
 ///
 /// The large-and-sparse branch swap from `ScotchND` to `Amd` is the
 /// issue #50 fix (2026-05-23). On `powerflow22` (n=2.8 M,
@@ -185,7 +190,94 @@ fn choose_adaptive(pattern: &CscPattern, method: OrderingMethod) -> OrderingMeth
     // stored nnz) apply: stored = (full + n) / 2 when the diagonal is
     // included once on each row of the symmetric pattern.
     let stored_nnz = (full_nnz + n) / 2;
-    pick_default_method(n, stored_nnz)
+    let base = pick_default_method(n, stored_nnz);
+    // Issue #64 arrow/bordered-KKT catch. The size-only
+    // `pick_default_method` routes every `n > 10_000` matrix to MetisND,
+    // but nested dissection cannot isolate a dense border (a handful of
+    // very-high-degree columns concentrating the nonzeros) and the LDLᵀ
+    // factor blows up ~7-9× vs AMF/AMD. Override MetisND → AMF on the
+    // arrow signature. Only the would-be-MetisND decision is touched;
+    // the `n <= 10_000 → AMF` and `n > 100_000 && avg_deg < 5 → AMD`
+    // (returned above) paths are untouched. See
+    // `dev/research/issue-64-arrow-bordered-ordering.md`.
+    if base == OrderingMethod::MetisND && is_arrow_bordered(pattern) {
+        return OrderingMethod::Amf;
+    }
+    base
+}
+
+/// Detect the **arrow / bordered-KKT** sparsity signature on a full
+/// symmetric pattern: a *small set* of very-high-degree "border" columns
+/// carrying a *large share* of the nonzeros, over an otherwise thin body.
+///
+/// This is the structural fingerprint of an IPM augmented system whose
+/// inequality block has a few dense constraint rows (issue #64: r05's
+/// iter-0 KKT has 171 of 14 842 columns at degree 502, carrying 38.5% of
+/// the nonzeros). On such patterns nested dissection smears the dense
+/// border across its separators and the factor blows up, whereas
+/// minimum-degree / min-fill orderings (AMD/AMF) defer the border to the
+/// end of the elimination where it costs one dense trailing block.
+///
+/// Predicate (all O(n), allocation-free), on the full symmetric pattern:
+///
+/// ```text
+/// avg_deg   = full_nnz / n
+/// heavy_thr = max(HEAVY_DEG_FLOOR, HEAVY_AVG_MULT * avg_deg)
+/// heavy     = { columns with degree > heavy_thr }
+/// arrow iff  1 <= heavy.count < ARROW_COUNT_FRAC * n   (a *small* set)
+///        AND heavy.nnz >= ARROW_NNZ_SHARE * full_nnz   (a *large* share)
+/// ```
+///
+/// The `ARROW_NNZ_SHARE` guard is the discriminating test: it fires on
+/// r05 (38.5% share) and rejects bcsstk38 (0.3% share, despite two
+/// degree-614 columns). The `ARROW_COUNT_FRAC` guard rejects "many hub"
+/// patterns where a large fraction of columns are high-degree (the matrix
+/// is then just dense and nested dissection is appropriate). Uniformly
+/// thin matrices (PoissonControl, powerflow22, bratu3d, cont-201) have no
+/// column above `heavy_thr` and are never flagged. Calibration and the
+/// false-positive table are in
+/// `dev/research/issue-64-arrow-bordered-ordering.md`.
+fn is_arrow_bordered(pattern: &CscPattern) -> bool {
+    /// A "heavy" column has degree above this absolute floor regardless
+    /// of `avg_deg`, so genuinely dense small matrices (high uniform
+    /// degree) are not flagged.
+    const HEAVY_DEG_FLOOR: usize = 64;
+    /// ...or above this multiple of the average degree.
+    const HEAVY_AVG_MULT: f64 = 8.0;
+    /// The heavy set must be a *handful* of columns: strictly fewer than
+    /// this fraction of `n`.
+    const ARROW_COUNT_FRAC: f64 = 0.05;
+    /// ...that *concentrate* at least this fraction of the nonzeros.
+    const ARROW_NNZ_SHARE: f64 = 0.20;
+
+    let n = pattern.n;
+    if n == 0 {
+        return false;
+    }
+    let full_nnz = pattern.row_idx.len();
+    if full_nnz == 0 {
+        return false;
+    }
+    let avg_deg = full_nnz as f64 / n as f64;
+    let heavy_thr = (HEAVY_AVG_MULT * avg_deg).ceil() as usize;
+    let heavy_thr = heavy_thr.max(HEAVY_DEG_FLOOR);
+
+    let mut heavy_count = 0usize;
+    let mut heavy_nnz = 0usize;
+    for j in 0..n {
+        let deg = pattern.col_ptr[j + 1] - pattern.col_ptr[j];
+        if deg > heavy_thr {
+            heavy_count += 1;
+            heavy_nnz += deg;
+        }
+    }
+
+    if heavy_count == 0 {
+        return false;
+    }
+    let count_ok = (heavy_count as f64) < ARROW_COUNT_FRAC * n as f64;
+    let share_ok = (heavy_nnz as f64) >= ARROW_NNZ_SHARE * full_nnz as f64;
+    count_ok && share_ok
 }
 
 /// The complete output of symbolic factorization.
@@ -274,9 +366,11 @@ pub struct SymbolicFactorization {
     pub is_schur_tail: Option<usize>,
 }
 
-/// Pick a default ordering for `symbolic_factorize` from cheap matrix
-/// dimensions (no pattern walk). Narrow on purpose — see comment on
-/// `Auto` for why a broad dispatcher regressed the IPM bench.
+/// Size-only base ordering rule from cheap matrix dimensions (no pattern
+/// walk). Narrow on purpose — see comment on `Auto` for why a broad
+/// dispatcher regressed the IPM bench. `choose_adaptive` calls this for
+/// the bulk of patterns, then layers the pattern-aware catches on top
+/// (very-large-and-sparse → AMD; arrow/bordered → AMF, issue #64).
 ///
 /// Current rule (mirrors MUMPS's `ana_set_ordering.F` AMF-vs-METIS
 /// heuristic):
@@ -381,13 +475,16 @@ pub fn pick_ordering_preprocess(matrix: &CscMatrix) -> OrderingPreprocess {
 
 /// Perform symbolic factorization of a sparse symmetric matrix.
 ///
-/// Picks an ordering via [`pick_default_method`] (AMF for n ≤ 10_000,
-/// MetisND for n > 10_000). Callers who want a specific ordering with
-/// no dispatcher should call `symbolic_factorize_with_method` with an
+/// Picks the fill-reducing ordering adaptively via [`OrderingMethod::Auto`]
+/// (resolved by [`choose_adaptive`]): AMF for n ≤ 10_000 or arrow/bordered
+/// patterns, AMD for very-large-and-sparse, MetisND otherwise. Routing
+/// through `Auto` keeps this no-arg default and the explicit `Auto` caller
+/// in exact agreement (issue #64). Callers who want a specific ordering
+/// with no dispatcher should call `symbolic_factorize_with_method` with an
 /// explicit `OrderingMethod`.
 ///
 /// Steps:
-/// 1. Pick fill-reducing ordering (AMF or MetisND depending on n)
+/// 1. Pick fill-reducing ordering (resolved from `Auto` by `choose_adaptive`)
 /// 2. Build elimination tree of the permuted matrix
 /// 3. Compute column counts (fill prediction)
 /// 4. Detect and amalgamate supernodes
@@ -396,8 +493,7 @@ pub fn symbolic_factorize(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
 ) -> Result<SymbolicFactorization, FeralError> {
-    let method = pick_default_method(matrix.n, matrix.row_idx.len());
-    symbolic_factorize_with_method(matrix, snode_params, method)
+    symbolic_factorize_with_method(matrix, snode_params, OrderingMethod::Auto)
 }
 
 /// Convert an owned-`usize` `CscPattern` into the contract's borrowed-`i32`
@@ -1646,6 +1742,116 @@ mod tests {
         assert_eq!(
             choose_adaptive(&p, OrderingMethod::MetisND),
             OrderingMethod::MetisND
+        );
+    }
+
+    /// Build a synthetic full-symmetric `CscPattern` with a prescribed
+    /// per-column degree distribution. Connectivity is irrelevant to the
+    /// degree-only arrow predicate, so row indices are filled with valid
+    /// in-range values without forming a true symmetric pattern.
+    fn pattern_with_degrees(degrees: &[usize]) -> CscPattern {
+        let n = degrees.len();
+        let mut col_ptr = Vec::with_capacity(n + 1);
+        let mut row_idx = Vec::new();
+        for (j, &d) in degrees.iter().enumerate() {
+            col_ptr.push(row_idx.len());
+            for t in 0..d {
+                row_idx.push((j + t) % n.max(1));
+            }
+        }
+        col_ptr.push(row_idx.len());
+        CscPattern {
+            n,
+            col_ptr,
+            row_idx,
+        }
+    }
+
+    #[test]
+    fn is_arrow_bordered_fires_on_synthetic_arrow() {
+        // Issue #64: a small set of very-high-degree border columns
+        // carrying a large nnz share = arrow. 11_900 body columns of
+        // degree 6 (71_400 nnz) + 100 border columns of degree 600
+        // (60_000 nnz). avg_deg≈10.95, heavy_thr=max(64,88)=88; border
+        // exceeds it. heavy_count=100 (0.83% of n < 5%); heavy_nnz share
+        // 60_000/131_400 = 45.7% >= 20% → arrow.
+        let mut degrees = vec![6usize; 11_900];
+        degrees.extend(std::iter::repeat_n(600usize, 100));
+        let pat = pattern_with_degrees(&degrees);
+        assert!(is_arrow_bordered(&pat), "r05-shaped arrow must be detected");
+    }
+
+    #[test]
+    fn is_arrow_bordered_rejects_uniform_sparse() {
+        // Uniformly thin (PoissonControl / powerflow22 / bratu3d shape):
+        // no column exceeds heavy_thr → not an arrow.
+        let pat = pattern_with_degrees(&vec![8usize; 12_000]);
+        assert!(
+            !is_arrow_bordered(&pat),
+            "uniform-sparse pattern must not be flagged as arrow"
+        );
+    }
+
+    #[test]
+    fn is_arrow_bordered_rejects_many_hubs() {
+        // Exercises the count guard: 1000 columns of degree 1000 (10% of
+        // n) carry 99% of the nnz, but a heavy set this large is not a
+        // thin border — nested dissection is not obviously wrong, so the
+        // arrow override must NOT fire. heavy_count=1000 = 10% > 5%.
+        let mut degrees = vec![1000usize; 1000];
+        degrees.extend(std::iter::repeat_n(1usize, 9000));
+        let pat = pattern_with_degrees(&degrees);
+        assert!(
+            !is_arrow_bordered(&pat),
+            "a large heavy set (10% of n) must be rejected by the count guard"
+        );
+    }
+
+    #[test]
+    fn is_arrow_bordered_rejects_low_nnz_share_border() {
+        // bcsstk38 shape: 2 very-high-degree columns but they carry a
+        // tiny nnz share (0.3%). The share guard rejects it. n must be
+        // small enough that 2 cols < 5%, which is always true here.
+        let mut degrees = vec![44usize; 8030];
+        degrees.extend([614usize, 614usize]);
+        let pat = pattern_with_degrees(&degrees);
+        // heavy_thr = max(64, 8*~44) = ~355; the two 614-degree columns
+        // are heavy but carry 1228 of ~354_548 nnz = 0.35% << 20%.
+        assert!(
+            !is_arrow_bordered(&pat),
+            "a heavy set carrying a tiny nnz share must be rejected by the share guard"
+        );
+    }
+
+    #[test]
+    fn choose_adaptive_routes_arrow_to_amf() {
+        // Issue #64: an arrow pattern with n>10_000 (which would
+        // otherwise route to MetisND via pick_default_method) must be
+        // overridden to Amf. Mirror the synthetic-arrow degree shape.
+        let mut degrees = vec![6usize; 11_900];
+        degrees.extend(std::iter::repeat_n(600usize, 100));
+        let pat = pattern_with_degrees(&degrees);
+        assert_eq!(
+            choose_adaptive(&pat, OrderingMethod::Auto),
+            OrderingMethod::Amf,
+            "arrow/bordered pattern (n>10_000) must route to Amf, not MetisND"
+        );
+        // A uniform large pattern with the same n stays on MetisND.
+        let uniform = pattern_with_degrees(&vec![16usize; 12_000]);
+        assert_eq!(
+            choose_adaptive(&uniform, OrderingMethod::Auto),
+            OrderingMethod::MetisND,
+            "uniform large pattern must remain on MetisND"
+        );
+        // The arrow override must NOT fire below the size floor: a small
+        // arrow already routes to Amf via the n<=10_000 rule, but assert
+        // the override doesn't accidentally change a non-MetisND base.
+        let mut small_arrow = vec![6usize; 4900];
+        small_arrow.extend(std::iter::repeat_n(600usize, 100));
+        let small = pattern_with_degrees(&small_arrow);
+        assert_eq!(
+            choose_adaptive(&small, OrderingMethod::Auto),
+            OrderingMethod::Amf
         );
     }
 
