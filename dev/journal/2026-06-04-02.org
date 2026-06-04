@@ -1,0 +1,49 @@
+#+TITLE: Journal 2026-06-04-02
+#+STARTUP: showall
+
+* 11:50 :release:versioning:
+Cut the 0.10.0 release. Pre-flight: GitHub issue tracker is clean (0 open).
+The three most-recently triaged issues are all closed — #76 (not-a-bug:
+near-singular cond~1e29 LP KKT has no well-defined inertia, excluded by the
+consensus framework), #77 (not reproducible: dense n=1000 KKT slow factor),
+#78 (not-a-bug: IPM trajectory sensitivity, not a feral scaling bug; see
+journal 2026-06-04-01). 20 commits since v0.9.0.
+
+Version decision — 0.10.0 (minor), not 0.9.1 (patch). Deciding factor: two of
+the five CHANGELOG entries are under =### Changed=, not =### Fixed=. The
+headline (#73/#67) is a deliberate change to default =Auto= ordering behavior:
+=choose_adaptive= now routes to AMF over MetisND at every size (=AMF_BAND_MAX=
+removed). Every user on the default ordering gets a different factorization
+path — different fill/perf/numeric trajectory. That fails the patch test
+("you'd never notice except it's more correct"). Repo precedent agrees: every
+tag is v0.x.0 (no patch release has ever existed), and 0.6.0 shipped the #50
+Auto-dispatcher behavior change as a minor. User confirmed 0.10.0.
+
+Scope of functional change confined to root =feral= package
+(src/symbolic/mod.rs routing, src/dense/factor.rs, src/numeric/{factorize,
+solver}.rs). =choose_adaptive= lives in src/symbolic/mod.rs, NOT the ordering
+crates — verified the only crate-level change since v0.9.0 was the #71
+diagnostic-binary relocation. Ordering plugin crates unchanged, stay at 0.2.0.
+
+Bumps: Cargo.toml feral 0.9.0->0.10.0; python/pyproject feral-solver
+0.9.0->0.10.0; Cargo.lock (=cargo update -p feral --precise 0.10.0=);
+CHANGELOG =[Unreleased]= -> =[0.10.0] - 2026-06-04= with a fresh empty
+=[Unreleased]= above. Commit 23ecfaf (pre-commit fmt/clippy skipped — no .rs
+files staged). Annotated tag v0.10.0 matching prior =feral vX.Y.Z= style.
+
+* 11:54 :release:ci:pypi:
+Pushed main + tag (d144ade..23ecfaf), created GitHub Release v0.10.0
+(notes-file, per the no-inline-body rule). Release event fired the
+=Python wheels= workflow; its =publish= job (=if: github.event_name ==
+'release'=, environment pypi, trusted publishing via
+pypa/gh-action-pypi-publish) publishes feral-solver 0.10.0 to PyPI. A plain
+tag/commit push does NOT publish (the build+publish jobs gate on the release
+event) — only the Release does. Monitoring the wheels run to confirm publish.
+
+CI evidence for the release: code was green at d144ade (CI + Pages success);
+23ecfaf/2f8d2f1 on top are docs/version-string only, so the tested-code bar
+holds without a re-run.
+
+No solver source changed this session, so the mandatory session-end bench was
+NOT re-run — it would re-measure unchanged code. Last recorded run is session
+2026-06-03-06 (both Phase 2.8.1 partition gates PASS); those numbers stand.

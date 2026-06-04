@@ -1,129 +1,105 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-03T19:36:56Z
+Generated: 2026-06-04T11:56:25Z
 
 ## Latest Session
-File: dev/sessions/2026-06-03-06.md
+File: dev/sessions/2026-06-04-02.md
 ```
-# Session 2026-06-03-06
+# Session 2026-06-04-02
 
 ## Goal
-Issue #73 (the n>100k thin-regime follow-up to #67, opened from session-05's
-"Next Session Should"): settle whether the regime above `AMF_BAND_MAX`
-(100_000) should keep MetisND or reroute to AMF, and implement the outcome.
-Also merged the two session-05 follow-ups (#67/#71 housekeeping) on the way in.
+Check for outstanding issues and, if clear, cut the next release.
 
 ## Accomplished
 
-### Housekeeping (start of session)
-- **PR #74** (docs(readme): document the `feral-diagnostics` crate invocation,
-  the session-05 follow-up #2) — CI green, squash-merged → main `caf4120`.
-- **Issue #73** opened to track the n>100k investigation (follow-up #1).
+### Pre-flight — issue tracker clean
+- `gh issue list --state open` → **0 open issues**. The three most-recently
+  triaged are all closed: #76 (not-a-bug, near-singular LP KKT with no
+  well-defined inertia, excluded by consensus framework), #77 (not
+  reproducible), #78 (not-a-bug, IPM trajectory sensitivity — see session
+  2026-06-04-01 journal). 20 commits since v0.9.0.
 
-### Issue #73 — investigation (3 steps)
-- **Step 1 — symbolic diagnosis** (`probe_issue73_symbolic`, committed
-  `49b153e`): the #67 RDW2D51U ">10 min, did not complete" was **numeric**,
-  not an AMF fill blowup. AMF's symbolic finishes in **167 ms** (n=195k) and
-  AMF is the *cheaper* ordering there (1.26× fewer nnz_L, 1.55× less flop_proxy
-  than MetisND). The band was guarding nothing.
-- **Step 2 — symbolic sweep:** over the affected `n>100k && avg_deg ≥ 5`
-  non-arrow population, AMF wins or ties 6/7 on nnz_L / flop_proxy; the lone
-  predicted MetisND win was **nql180** (nnz_L 0.98×, flop_proxy 0.86×).
-- **Step 3 — real factor+solve A/B** (`probe_issue67_thin --reps 1`): AMF wins
-  factor+solve on **every measured matrix** — dtoc2 2.49×, pinene 1.18×,
-  cont5_1_l 2.75×, nql180 2.05×, YATP1NE 2.13×. **nql180 is the
-  design-breaker:** MetisND has 2% *smaller* fill yet AMF is 2.05× faster
-  (fac 1903 ms vs 3949 ms). So nnz_L / flop_proxy mispredict real speed — a
-  fill-guarded race would have demoted nql180 and forfeited the 2×.
+### Release 0.10.0 (minor)
+- **Version decision: 0.10.0, not 0.9.1.** Two of the five `[Unreleased]`
+  CHANGELOG entries are `### Changed` (deliberate default-behavior changes),
+  not just fixes. The headline #73/#67 changes default `Auto` ordering for
+  every user (AMF over MetisND at every size; `AMF_BAND_MAX` removed) — fails
+  the patch test. Repo precedent: no patch release has ever existed (every tag
+  is `v0.x.0`); 0.6.0 shipped the analogous #50 `Auto`-dispatcher change as a
+  minor. User confirmed.
+- **Version bumps** (functional change confined to root `feral` package;
+  ordering crates unchanged at 0.2.0):
+  - `Cargo.toml`           `feral`        `0.9.0 → 0.10.0`
+  - `python/pyproject.toml` `feral-solver` `0.9.0 → 0.10.0`
+  - `Cargo.lock`           `feral`        `0.9.0 → 0.10.0`
+  - `CHANGELOG.md`         `[Unreleased] → [0.10.0] - 2026-06-04` + fresh
+    empty `[Unreleased]`
+- **Commit** `23ecfaf` `release: 0.10.0` (pre-commit fmt/clippy skipped — no
+  `.rs` staged). **Annotated tag** `v0.10.0` (matches prior `feral vX.Y.Z`
+  style).
+- **Published.** Pushed `main` + tag; created GitHub Release v0.10.0
+  (`--notes-file`). Release event triggered the `Python wheels` workflow whose
+  `publish` job (trusted publishing) pushes `feral-solver 0.10.0` to PyPI.
+  `Release` workflow: success. `Python wheels`: building/publishing at
+  checkpoint time — verify it reached PyPI.
 
-### Issue #73 — implementation (commit `4c49745`)
-- **Dropped `AMF_BAND_MAX`.** `choose_adaptive` now overrides every
-  would-be-MetisND `Auto` decision to AMF at **every** `n`. The
-  `n > 100_000 && avg_deg < 5 → Amd` (#50 powerflow) and arrow → AMF (#64)
-  catches fire first and are untouched.
-- **Tests updated** (oracle = the real A/B, external to the change):
-  `choose_adaptive_rules` n=150_000 → Amf (was MetisND);
-  `choose_adaptive_routes_arrow_to_amf` n=120_000 non-arrow → Amf.
-- **Verification:** `cargo test --lib` → **322 passed, 0 failed** (6 ignored);
-  `cargo clippy --lib -- -D warnings` → clean; pre-commit fmt+clippy passed.
-  CI is the authoritative gate (PR #75).
-- PR #75 reframed from "investigation only" to the full change, **closes #73**.
+### CI evidence
+Code was green at `d144ade` (CI + Pages success). `2f8d2f1` (docs triage) and
+`23ecfaf` (version strings) on top are non-source, so the tested-code bar holds
+without a re-run.
 
 ## Benchmark Results
-`cargo run --bin bench --release` (captured tail — the harness retains the
-final summary). Both Phase 2.8.1 partition gates **PASS**; worst factor-ratios
-are tiny-n fixed-cost-dominated matrices (KIRBY2 n=458, etc.) consistent with
-prior sessions. The bench corpus is dominated by small matrices (n ≤ ~5k), so
-the n>100k reroute is essentially orthogonal to it — this run is a
+Not re-run this session. No solver source changed (version strings + CHANGELOG
++ release artifacts only), so the bench would re-measure unchanged code. Last
+recorded run is session **2026-06-03-06**: both Phase 2.8.1 partition gates
+**PASS**; worst factor-ratios are tiny-n fixed-cost-dominated matrices
+(KIRBY2 n=458, CRESC132 n=5314), consistent with prior sessions. Those numbers
+stand for 0.10.0.
 ```
 
 ## Git Status
 ```
-4c49745 feat(ordering): route Auto to AMF at every size, drop AMF_BAND_MAX (#73)
-49b153e investigate(#73): symbolic-only AMF-vs-MetisND probe for the n>100k thin regime
+23ecfaf release: 0.10.0
+2f8d2f1 docs(triage): investigate #78 — trajectory sensitivity, not a feral bug
+d144ade docs(triage): close #76 (not-a-bug), investigate #77 (not reproducible)
+51f0472 feat(ordering): route Auto to AMF at every size, drop AMF_BAND_MAX (closes #73) (#75)
 caf4120 docs(readme): document the feral-diagnostics crate invocation (#74)
-2ef751f refactor(build): move 144 diagnostic binaries to crates/feral-diagnostics (closes #71) (#72)
-3391d6a fix(ordering): thin-large default prefers AMF up to n≤100k (closes #67) (#70)
 ```
 
 ## Test Status
 ```
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test scaling::tests::auto_falls_back_to_infnorm_on_mss1_0009 ... ok
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 
-test result: ok. 322 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.44s
+test result: ok. 322 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.41s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-03-06.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-04-02.md)
 
-`cargo run --bin bench --release` (captured tail — the harness retains the
-final summary). Both Phase 2.8.1 partition gates **PASS**; worst factor-ratios
-are tiny-n fixed-cost-dominated matrices (KIRBY2 n=458, etc.) consistent with
-prior sessions. The bench corpus is dominated by small matrices (n ≤ ~5k), so
-the n>100k reroute is essentially orthogonal to it — this run is a
-no-regression confirmation, not where the #73 win shows up (that is the
-factor+solve A/B above).
-
-Top 10 worst factor-ratio vs MUMPS:
-name                             n    feral(μs)    mumps(μs)      ratio
-KIRBY2_0007                    458          940          119       7.90
-KIRBY2_0006                    458          889          127       7.00
-CRESC132_0000                 5314        80529        12266       6.57
-KIRBY2_0008                    458          772          122       6.33
-KIRBY2_0009                    458          742          128       5.80
-MUONSINE_0000                 1537         1978          376       5.26
-KIRBY2_0010                    458          683          133       5.14
-KIRBY2_0011                    458          585          120       4.88
-GROUPING_0219                  225          525          114       4.61
-GROUPING_0179                  225          452          114       3.96
-
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.34     <= 2.0     PASS
-medium (<500)            152145     1.74     <= 3.0     PASS
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.50     <= 2.0     PASS
-medium (<500)            153560     1.51     <= 3.0     PASS
+Not re-run this session. No solver source changed (version strings + CHANGELOG
++ release artifacts only), so the bench would re-measure unchanged code. Last
+recorded run is session **2026-06-03-06**: both Phase 2.8.1 partition gates
+**PASS**; worst factor-ratios are tiny-n fixed-cost-dominated matrices
+(KIRBY2 n=458, CRESC132 n=5314), consistent with prior sessions. Those numbers
+stand for 0.10.0.
 
 ```
 
