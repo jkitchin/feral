@@ -1,0 +1,165 @@
+#+TITLE: Journal 2026-06-04-01
+#+STARTUP: showall
+
+* 06:06 :issue-78:scaling:router:triage:
+Triaged issue #78 (Auto scaling router picks InfNorm for ill-conditioned
+non-arrow KKT → wrong solve on discs.nl via pounce).
+
+Verified the report against =src/scaling/mod.rs= @ d144ade:
+- Code quotes are accurate. =pick_scaling_strategy= is purely structural:
+  =has_arrow_head = max_col_nnz > 32=, =has_slack_mass = diag_only/n >= 0.30=,
+  MC64 iff BOTH, else InfNorm (lines 609-656). It does NOT see entry magnitude.
+
+Corroborated in-corpus on the DISCS KKT family (=data/matrices/kkt/DISCS/=,
+n=234 — same problem family as the issue's iter-35 n=153, not the exact
+matrix):
+- DISCS_0000: entry[1e-4,2e14] drng=2.0e18, max_col_nnz=12, diag_only=28%
+  → both gates fail → InfNorm.
+- DISCS_0001: entry[1.98e-21,2.68e4] drng=1.36e25, max_col_nnz=155,
+  diag_only=28% → arrow gate passes, slack gate fails (28%<30%) → InfNorm.
+So extreme-dynamic-range DISCS KKTs DO route to InfNorm exactly as #78 claims.
+
+** CRITICAL counter-finding — the issue's suggested threshold is unsafe.
+#78 fix direction 1 proposes "entry dynamic range > 1e10–1e12 → prefer MC64",
+asserting this "should leave the clnlbeam-style banded cases ... routed to
+InfNorm." Measured clnlbeam directly:
+- clnlbeam_0000: entry[5.62e-9,1.00e5] entry_drng=1.78e13, diag_drng=1.78e13
+- clnlbeam_0001: entry_drng=9.18e12, diag_drng=9.18e12
+clnlbeam — the exact banded case the dense-column gate was ADDED to protect
+(MC64 hurts it 4.4× iters / 28× wall, journal 2026-05-17-01) — has entry AND
+diagonal dynamic range ~1e13, ABOVE the proposed 1e12 threshold. A pure
+magnitude gate at 1e12 would re-flip clnlbeam to MC64 and reintroduce that
+regression.
+
+discs (drng ~9.8e14) vs clnlbeam (~1.78e13) differ by only ~1.7 orders of
+magnitude on dynamic range — a pure magnitude gate has a thin, fragile margin
+and the issue's stated margin is simply wrong. They DO separate structurally:
+clnlbeam max_col_nnz=5 (1-D band) vs discs max_col_nnz=24. So a *combined*
+magnitude-AND-not-narrow-band gate is more promising than the pure magnitude
+gate suggested; pure magnitude cannot separate them.
+
+** Available oracle path
+=data/matrices/kkt/DISCS/*.mumps.json= and =*.ssids.json= sidecars exist —
+external inertia/solve oracles for any router change validation. But the exact
+iter-35 discs KKT (n=153) is not in-repo; #78 offers to attach the triplet.
+
+Conclusion: issue is VALID; fix direction sound in spirit but the proposed
+threshold is unsafe (clnlbeam counterexample). Recommend (a) pounce-side
+workaround #2 (request Mc64Symmetric for IPM KKTs) is safe + immediate;
+(b) any router-side magnitude gate needs combined magnitude+structure and
+full-corpus validation against the clnlbeam/discs overlap. Did not implement —
+needs research note + plan + external oracle per feature lifecycle.
+
+* 06:20 :issue-78:scaling:experiment:forward-error:
+Ran =probe_issue78_class= (new diagnostic): InfNorm vs MC64 vs Identity,
+reporting BOTH backward residual and forward error =||x-x_true||/||x_true||=
+on a synthesized rhs =A*x_true=, over the whole in-repo DISCS family + controls.
+
+Answering "is InfNorm generally better for this class except discs?":
+
+In-repo DISCS family (n=102 and n=234, entry_drng up to 9.1e25):
+- ALL of InfNorm/MC64/Identity give fwd ~1e-12 and IDENTICAL inertia
+  (168+/66- for n=234). The high entry_drng is a tiny off-diag coupling;
+  these snapshots are not forward-ill-conditioned at this rhs. So the in-repo
+  DISCS data does NOT reproduce the discs.nl iter-35 cond~2e20 failure —
+  that needs the actual iter-35 KKT (n=153) + the real IPM rhs (#78 offers it).
+
+Controls (the decisive ones):
+- ACOPP30_0064: entry_drng=7.4e14, non-arrow (max_col_nnz=29), Auto->InfNorm.
+  Genuinely hard — all fwd ~0.75-0.87. InfNorm BEST fwd (7.5e-1) AND the only
+  fully-correct inertia (72/137/0). MC64 produces a ZERO pivot -> wrong inertia
+  (71/137/1). A high-drng non-arrow where InfNorm strictly beats MC64.
+- clnlbeam_0000: all three fwd ~2-4e-10 (MC64 marginally best here). Confirms
+  clnlbeam's MC64 harm is a TRAJECTORY effect (4.4x IPM iters), invisible to a
+  single solve.
+- VESUVIO/MUONSINE/MSS1 (true arrows, Auto->MC64): single-solve doesn't
+  separate much; MSS1 MC64 slightly best on this rhs.
+
+Caveat (honest): single-solve synthetic-rhs forward error reproduces NEITHER
+the discs InfNorm failure NOR the clnlbeam MC64 blowup — both are IPM-loop
+phenomena. So the strongest evidence stays the documented IPM trajectories.
+
+Conclusion: YES — for the non-arrow class that routes to InfNorm, InfNorm is
+the empirically-correct/safe default; no measured corpus case beats it (and
+ACOPP30 shows it strictly better + correct inertia where MC64 fails). discs
+iter-35 is a genuine but (in this corpus) singular outlier, and its magnitude
+signature OVERLAPS clnlbeam's (both ~1e13-1e15 drng) -> a router magnitude
+gate cannot separate them. Proportionate fix = pounce-side workaround (caller
+requests Mc64Symmetric for late-iterate IPM KKTs); the router default should
+stay InfNorm for this class. Probe left uncommitted at
+crates/feral-diagnostics/src/bin/probe_issue78_class.rs.
+
+* 06:40 :issue-78:oracle:forward-error:ir-stall:
+Author attached the real iter-35 KKT at /Users/jkitchin/feral-repro-issue78/
+(discs-kkt-iter35.mtx, n=153, nnz=834, cond 1.97e20) and pushed back: caller-
+side MC64 label inherits the discrimination problem (ACOPP30 is ALSO a
+late-iterate high-drng IPM KKT but wants InfNorm). Proposed a RUNTIME fallback:
+solve InfNorm; if IR residual won't drop below tol OR inertia unstable across
+refinement, retry that solve with MC64.
+
+Ran the oracle through probe_issue78_class (synthetic rhs = A*x_true):
+  discs iter-35  drng=9.8e14 max_col_nnz=24 -> Auto picks InfNorm
+    InfNorm   back=3.36e-16  fwd=4.79e-9   inertia 84/69/0 (correct)
+    MC64      back=2.69e-21  fwd=9.46e-9   inertia 84/69/0 (correct)
+    Identity  back=1.68e-16  fwd=8.05e-9   inertia 84/69/0 (correct)
+
+Two decisive findings:
+1. A single solve with a GENERIC rhs does NOT reproduce the report's
+   InfNorm-loses split. InfNorm fwd (4.8e-9) is actually marginally BETTER than
+   MC64 (9.5e-9); the only big gap is backward stability (MC64 back 2.7e-21 vs
+   InfNorm 3.4e-16, 5 orders). All three get CORRECT inertia. So the 1.9e-6 step
+   split is rhs-ALIGNED (the IPM search-direction rhs hits the cond-2e20
+   singular direction); the .mtx/.json carry no rhs. Need the actual rhs +
+   the InfNorm vs MA57 step vectors to reproduce it.
+2. IR-stall is the WRONG observable. By the report's own framing this is a
+   "backward-stable solve of a forward-ill-conditioned system" — measured
+   back=3.36e-16, i.e. IR has nothing to remove, no stall. Iterative refinement
+   reduces BACKWARD error, not FORWARD error; it is blind to this failure for
+   exactly the same reason backward residual is. An IR-residual-stall detector
+   would see InfNorm-on-discs as healthy and never trigger the MC64 retry.
+   Inertia-across-refinement also won't fire: inertia is computed once from the
+   factor and is already correct (84/69/0).
+
+Also: the a-priori scaling-quality probe (scaled max|off|/|diag|) is DEGENERATE
+here — inf for BOTH InfNorm and MC64 (zero (2,2)-block diagonals), and inf for
+ACOPP30 too. So it can't discriminate discs from ACOPP30 either.
+
+Net: author is right that a-priori labels (router or caller) can't separate
+discs from ACOPP30 — but their proposed runtime signal (IR stall) can't either,
+because the failure is forward error under a backward-stable solve. The only
+signal that actually discriminates is comparing the InfNorm vs MC64 SOLUTIONS
+(they disagree by ~1.9e-6), which needs the second factorization the proposal
+was trying to avoid. A cheap a-posteriori proxy worth testing: LDLT pivot
+spread min|D|/max|D| (free, factor in hand) flags suspect solves -> retry &
+keep-better; but it flags ACOPP30 too, so resolution is compare-not-blind-
+switch. Requesting the rhs + step vectors to test candidate detectors against
+the real observable.
+
+* 07:05 :issue-78:resolved:verification:trajectory-sensitivity:
+Author walked back the issue: after fixing a duplicate-triplet summing bug in
+their OWN reconstruction (36 (i,j) entries must be summed, not overwritten —
+overwriting faked a ~1e-2 backward-error blowup), the corrected finding is that
+every feral solve (InfNorm and MC64) is backward-stable + forward-accurate on
+the real rhs at every iter incl. cond~2e20. The optimal-vs-infeasible split is
+sensitive dependence in the discs IPM trajectory, not a feral bug. Renamed
+iter-35 -> iter-33 (debugger counted restoration iters). Provided full per-iter
+K/rhs/sol dumps + divergence_curve.csv + analyze.py.
+
+Independently verified with feral's OWN solver on the real rhs (new diagnostic
+probe_issue78_realrhs, reads the jsonl dumps; from_triplets sums duplicates so
+feral handles the gotcha correctly). Over all 41 iterations of the infnorm_run,
+both scalings:
+- worst backward residual = 1.02e-11 (most ~1e-15..1e-16). Zero solves flagged
+  non-backward-stable. EVERY solve is backward-stable.
+- InfNorm vs MC64 on the SAME system agree to <= 7.12e-12 single-solve (iter 0;
+  matches the README divergence seed 4.45e-12), and to 1.67e-16 at iter 33
+  (cond 1.97e20). Neither scaling is better — they compute the same answer.
+So the cross-RUN state divergence growing to 1e-2 (divergence_curve.csv) is
+trajectory amplification of LSB-level seeds, confirmed.
+
+CONCLUSION: #78 is NOT a feral bug. Triage stands on every point (keep InfNorm
+default; magnitude gate unsafe vs clnlbeam overlap; ACOPP30 shows InfNorm
+strictly better; all scalings equal on a single solve). Author's IR-stall /
+pivot-spread proposals are moot (no bad solve to detect). Robustness follow-up,
+if any, is pounce-side (trajectory basins), not feral. Recommend closing
+not-a-bug. Posted independent confirmation to the issue.
