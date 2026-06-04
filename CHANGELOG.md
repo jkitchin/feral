@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-04
+
 ### Changed — `Auto` now prefers AMF over MetisND at every size (#73)
 
 Extends the #67 thin-large reroute past its `n ≤ 100_000` ceiling: the
