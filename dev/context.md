@@ -1,79 +1,79 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-06T16:33:38Z
+Generated: 2026-06-06T17:40:17Z
 
 ## Latest Session
-File: dev/sessions/2026-06-06-02.md
+File: dev/sessions/2026-06-06-03.md
 ```
-# Session 2026-06-06-02
+# Session 2026-06-06-03
 
 ## Goal
 
-Invest in a systematic super-linear (O(n²)) scaling audit across ordering,
-scaling, and the numeric/symbolic prologue — including verifying the recent
-MC64 heap-reuse fix (issue #80, commit 6699f09). Plan approved: full
-systematic sweep + a deterministic (CI-noise-immune) MC64 regression guard.
+Take on the MC64 dense-column fast path (scaling audit §8.1 option (a), the
+one real super-linear lead remaining from session -02). Mid-session, fix a
+reported CI failure.
 
 ## Accomplished
 
-**Step 0 — MC64 Hungarian regression guard (committed 767b0d9).**
-- Added `HungarianStats {heap_init_slots, augment_searches, touched_total,
-  phase3_inner_iters}` to `src/scaling/hungarian.rs`, threaded `&mut stats`
-  through `IndexHeap::new`/`reset` (counting `pos[]` slots zeroed) and the
-  phase-3 length-2 augmentation loop. `hungarian_match_instrumented()` returns
-  the counters; `hungarian_match()` is a thin wrapper (off the Dijkstra inner
-  loop → negligible overhead, bit-identical matchings).
-- Test `mc64_hungarian_no_quadratic_heap_realloc_regression`. Calibration
-  (gen_random_sparse deg=3, n=1k..8k) showed the legitimate `touched_total` is
-  itself ~quadratic on a hard matching (long augmenting paths), so a growth
-  ratio on total heap work is the wrong guard. The correct, threshold-free
-  guard is the exact structural invariant `heap_init_slots == n + touched_total`
-  (heap allocated once + incremental resets), which fires on the realloc revert
-  at any n. `phase3_inner_iters` IS linear (563→4609, 8.2× over 8× n) → a <16×
-  ratio guards the O(nnz²) phase-3 suspect.
-- Teeth verified: injecting a per-search `IndexHeap::new` → `heap_init` 254727
-  vs expected 53727 → test FAILS as designed; reverted. Full feral lib suite
-  317 passed/0 failed; clippy/fmt clean.
+**MC64 dense-column fast path — investigated, definitively closed with a
+negative result.**
 
-**Step 1 — `scaling_sweep` diagnostic binary (committed 1b2b21c).**
-- `crates/feral-diagnostics/src/bin/scaling_sweep.rs`. Modes `--family` /
-  `--manifest` / `--generated {spd,kkt} --sizes`. Per matrix: profiling-on
-  Solver, `invalidate_symbolic_cache()` before each of K factors (forces a
-  symbolic miss so the normally-cached symbolic phase is timed), per-field
-  median over K, CSV with the full prologue breakdown + all 17 symbolic stages
-  + `max_col_degree`/`sum_d_logd` control variates. `--scaling` pins the
-  strategy. Rust = data collection only; α-fits run in Python over the CSV.
-- Generators are constant-bandwidth (banded) so fill stays near-linear; on the
-  banded SPD/KKT ladders all phases scale α≈1.0 (good fittable baseline).
+- Re-grounded the cost in the production kernel: `O(searches × dense_deg)` —
+  the degree-38401 coupling column is matched in the main loop and rescanned
+  whenever its matched row is popped (hungarian.rs:585).
+- Traced the LdltCompress/scaling coupling (subagent). Key facts:
+  `pick_ordering_preprocess` (mod.rs:485) never inspects max_col_degree; the
+  symbolic `Mc64Cache` is reused for `Mc64Symmetric` scaling purely as an
+  optimization (not load-bearing for inertia/residual — numeric recomputes the
+  identical matching if absent). BUT `pick_scaling_strategy` (mod.rs:653)
+  routes rocket's dense column to MC64, so the symbolic-side skip (audit option
+  (b)) saves nothing for rocket. The only correctness-safe lever for rocket is
+  a behavior-preserving speedup of the matching itself.
+- **Implemented** a behavior-preserving column lower-bound skip (`u` is
+  monotone non-increasing ⇒ `lb[j]=min_k(cost[k]-u_init[i])` is a permanent
+  lower bound; `vj+lb[j2]≥csp` ⇒ skip the scan bit-identically). All 7
+  Hungarian tests + full 317-test lib suite green (behavior preserved).
+- **Measured: it fires 0 times** on rocket_12800_0000 (`skips=0`,
+  `edges_saved=0`, edge_scans 3.71e8 and wall 3958 ms both unchanged).
+- **Proved impossibility:** for the matched column of a popped row `q0`,
+  complementary slackness + dual feasibility make the tightest column bound
+  `lb_tight = cost[jperm[j2]]-u[q0]`, and `vj+lb_tight = dq0`; the skip fires
+  iff `dq0≥csp`, but `q0` was popped only because `dq0<csp`. So a column-level
+  reduced-cost bound can NEVER prune, at any tightness.
+- **SPRAL confirms** (spral-expert read scaling.f90:938-1171): the inner scan
+  walks the full matched column every settle, no range cut, no dense-column
+  special case, `dualv` computed once at the end. SPRAL has the identical
+  `O(searches × dense_deg)` cost; feral's port is faithful. No trick to adopt.
+- Reverted the lb-skip (dead weight). Wrote
+  `dev/research/mc64-dense-column-2026-06-06.md` (mechanism, impossibility
+  proof, SPRAL confirmation, recommendation).
 
-**Step 2 — rocket_12800 localization + #80 (committed in 1b2b21c; CORRECTED
-in journal 16:35).**
-- rocket_12800_0000 (n=89601, nnz=332793, **max_col_degree=38401**) with MC64:
-  `pb_scaling_us` = 4.3 ms (numeric), symbolic = 38.8 s of which
-  `sym_ldlt_compress` = 38.3 s (98.9%). `permute_us` = 64 ms (exonerated, as the
-  research note predicted).
-- **Correction:** `ldlt_compress` = `compute_mc64_cache` → `compute_matching`
-  → `hungarian_match`. So the 38.3 s IS the MC64 Hungarian, run in symbolic for
-  the LdltCompress ordering-compression preprocessor. The cheap 4.3 ms numeric
+**CI hotfix (commit 98f85e0, pushed).** User reported "gh actions failed". CI
+red since 1b2b21c: the `diagnostics lint + test` job runs
+`cargo clippy -p feral-diagnostics --all-targets -- -D warnings`, which the
+local pre-commit clippy hook does not cover (diagnostics crate is outside the
+root build set, ci.yml:34-39). Two diagonal-fill loops in scaling_sweep.rs
+tripped `needless_range_loop`. Fixed to `iter().enumerate()`; clippy clean,
+`cargo test -p feral-diagnostics` green.
 ```
 
 ## Git Status
 ```
+98f85e0 fix(diagnostics): clippy needless_range_loop in scaling_sweep generators
+2ef38d5 docs(research): scaling audit report — MC64 is the sole super-linear phase
+402630e feat(scaling): localize MC64 dense-column cost; resolve debug/release (#80)
+503af96 docs(session): checkpoint 2026-06-06-02 — scaling audit Steps 0-2 (#80)
 1b2b21c feat(diagnostics): scaling_sweep binary; verify #80 + find ldlt_compress O(n^2)
-767b0d9 test(scaling): deterministic MC64 Hungarian O(n^2) regression guard (#80)
-bc8496a docs(session): addendum — MC64 heap fix + dead-code removal (#80)
-10a3a1a refactor(ordering): remove dead amd_order, keep permute_pattern (#80)
-6699f09 perf(scaling): reuse MC64 Hungarian heap across columns (#80)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
@@ -86,26 +86,25 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 317 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.47s
+test result: ok. 317 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.45s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-06-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-06-03.md)
 
 
-Full corpus `bench --release` was **not** re-run this session. Rationale: no
-numeric hot-path code changed — Step 0 adds counters that live off the Dijkstra
-inner loop (in `IndexHeap::new`/`reset` and phase-3), and the new `scaling_sweep`
-binary is in the non-default `feral-diagnostics` crate. There is no performance
-delta to track. (CI on the most recent code commit covers correctness.)
+`bench --release` NOT re-run: no numeric hot-path code changed. The lb-skip
+experiment was reverted; the only landed Rust change is a clippy fix in the
+non-default `feral-diagnostics` crate (a diagnostic binary, not the solver).
+No performance delta to track.
 
-Targeted scaling_sweep numbers instead:
-banded SPD  (n 300→10000, 33×): loop 40× prologue 33× scaling 40× sym 32×  (all α≈1.0)
-banded KKT  (n 400→13333, 33×): loop 28× prologue 32× scaling 29× sym 30×  (all α≈1.0)
-rocket_12800_0000 (n=89601, max_col_deg=38401, MC64):
-  pb_scaling=4.3ms  sym_ldlt_compress=38.33s (98.9% of 38.8s symbolic)  loop=399ms
+Targeted measurement (the session's actual result):
+rocket_12800_0000  n=89601  max_col_degree=38401  (MC64, release)
+  baseline:     edge_scans=3.71e8  wall=3.69–3.96 s
+  with lb-skip: edge_scans=3.71e8  inner_scan_skips=0  edges_saved=0  wall=3.96 s
+  → behavior-preserving column-bound skip is inert (proven impossible)
 
 ```
 
@@ -142,26 +141,26 @@ crates/feral-diagnostics/src/bin/probe_issue73_symbolic.rs,
 crates/feral-diagnostics/src/bin/probe_issue67_thin.rs.
 
 ## Recent Tried-and-Rejected
-   `schur.rs:200`). Only `permute_pattern` from that file is still used. The
-   real `feral_amd` is already a bucketed quotient-graph AMD and orders pf22 in
-   **0.276s**. Implementing bucketed min-degree there would have fixed a
-   function nobody calls.
-2. The real ~53s is the **`LdltCompress` preprocessor's MC64 matching**
-   (`mc64::compute_matching`, ~O(n^1.9)), which the per-stage profiler folded
-   into the `ordering` stage timer. `preprocess=None` drops total symbolic
-   from 54.5s to 1.23s.
+3. **SPRAL confirms the cost is inherent.** `ref/spral/src/scaling.f90::
+   hungarian_match` (938-1171) walks the full matched column every settle with
+   only per-entry filters (no range cut, no dense-column special case),
+   computes `dualv` once at the end, and its only dense-aware logic is the
+   greedy-init claim guard (line 857) — which feral already mirrors. SPRAL has
+   the identical O(searches × dense_deg) cost; feral's port is faithful.
 
-Symptoms that revealed the false start: on real pf22 values
-`feral_amd::amd_order` = 0.276s while the full symbolic = 54.5s with `ordering`
-stage 53.6s; forcing `preprocess=None` collapsed it to 1.23s. With `vals=1.0`
-(MC64 trivial) symbolic was only 1.5s — the value-dependence is the tell that
-the cost is in MC64, not the structure-only ordering.
+Symptoms: the lb-skip compiled, kept all 7 Hungarian unit tests and the full
+317-test lib suite green (behavior preserved), but the counters showed it was
+inert. Reverted (dead weight: never fires, adds an O(nnz) pass + a branch per
+pop).
 
-Future sessions: do NOT "optimize" `src/ordering/amd.rs` for performance — it
-is not in the factorization path. The production AMD is `feral_amd`. For
-issue #80 the lever is MC64 (gate it on large arrow-signature KKTs), not AMD.
-Data: dev/research/issue-80-mc64-preprocessor-cost.md,
-dev/journal/2026-06-06-01.org.
+Future sessions: do NOT attempt to prune the MC64 inner column scan with any
+per-column reduced-cost bound — it is provably impossible. The dense-column
+MC64 cost is inherent to the sparse shortest-augmenting-path algorithm and
+matches the SPRAL reference. The only remaining lever is to AVOID MC64 scaling
+on single-dense-column KKTs (a scaling-policy change that alters the scaling
+vector → needs a corpus inertia/residual study + human approval per the
+constraints). Data: dev/research/mc64-dense-column-2026-06-06.md,
+dev/journal/2026-06-06-03.org.
 
 ## Source Files
 ```

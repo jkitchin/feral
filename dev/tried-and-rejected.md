@@ -2307,3 +2307,54 @@ is not in the factorization path. The production AMD is `feral_amd`. For
 issue #80 the lever is MC64 (gate it on large arrow-signature KKTs), not AMD.
 Data: dev/research/issue-80-mc64-preprocessor-cost.md,
 dev/journal/2026-06-06-01.org.
+
+---
+
+## 2026-06-06-03 — MC64 dense-column column-lower-bound inner-scan skip
+
+What was tried: a behavior-preserving fast path for the MC64 Hungarian
+dense-column cost (audit §8.1 option (a)). On rocket_12800 the matching is
+O(searches × dense_deg): the degree-38401 coupling column is matched in the
+main loop and rescanned every time its matched row is popped. The idea:
+because `u` is monotone non-increasing over the main loop (the only update,
+`u[i] += d[i]-csp` on rows popped with `d[i] < csp`, decreases it),
+`lb[j] = min_k(cost[k] - u_init[row(k)])` is a permanent lower bound on a
+column's minimum reduced cost. In the inner scan, `vj + lb[j2] >= csp` would
+imply every edge has `dnew >= csp`, so the whole column scan is a provable
+no-op and can be skipped bit-identically. Implemented (O(nnz) lb pass + a
+one-line guard + `inner_scan_skips`/`edges_saved` counters).
+
+Why rejected:
+1. **Measured zero firing.** On rocket_12800_0000: `inner_scan_skips=0`,
+   `edges_saved=0`, `edge_scans=3.71e8` unchanged, wall 3958 ms unchanged. The
+   `u_init` bound is the loosest valid bound and never beats `csp`.
+2. **Impossibility proof (any bound, any tightness).** For the matched column
+   `j2` of a popped row `q0`, complementary slackness gives
+   `v[j2] = cost[jperm[j2]] - u[q0]` and dual feasibility makes that edge the
+   column's reduced-cost minimum, so the tightest bound is
+   `lb_tight = cost[jperm[j2]] - u[q0]`. With `vj = dq0 - cost[jperm[j2]] +
+   u[q0]`, `vj + lb_tight = dq0`. The skip fires iff `dq0 >= csp`, but `q0`
+   was popped only because `dq0 < csp`. So a column-level reduced-cost bound
+   can NEVER prune. The matched edge always sits exactly at `dq0`; the scan
+   exists to find improving edges to *other* rows, about which a column
+   aggregate carries no information. Maintaining `v` live would not help.
+3. **SPRAL confirms the cost is inherent.** `ref/spral/src/scaling.f90::
+   hungarian_match` (938-1171) walks the full matched column every settle with
+   only per-entry filters (no range cut, no dense-column special case),
+   computes `dualv` once at the end, and its only dense-aware logic is the
+   greedy-init claim guard (line 857) — which feral already mirrors. SPRAL has
+   the identical O(searches × dense_deg) cost; feral's port is faithful.
+
+Symptoms: the lb-skip compiled, kept all 7 Hungarian unit tests and the full
+317-test lib suite green (behavior preserved), but the counters showed it was
+inert. Reverted (dead weight: never fires, adds an O(nnz) pass + a branch per
+pop).
+
+Future sessions: do NOT attempt to prune the MC64 inner column scan with any
+per-column reduced-cost bound — it is provably impossible. The dense-column
+MC64 cost is inherent to the sparse shortest-augmenting-path algorithm and
+matches the SPRAL reference. The only remaining lever is to AVOID MC64 scaling
+on single-dense-column KKTs (a scaling-policy change that alters the scaling
+vector → needs a corpus inertia/residual study + human approval per the
+constraints). Data: dev/research/mc64-dense-column-2026-06-06.md,
+dev/journal/2026-06-06-03.org.
