@@ -346,10 +346,10 @@ fn gen_spd(n: usize, deg: usize, seed: u64) -> Option<CscMatrix> {
             absrowsum[c] += v.abs();
         }
     }
-    for i in 0..n {
+    for (i, &s) in absrowsum.iter().enumerate() {
         rows.push(i);
         cols.push(i);
-        vals.push(absrowsum[i] + 1.0); // strict diagonal dominance
+        vals.push(s + 1.0); // strict diagonal dominance
     }
     CscMatrix::from_triplets(n, &rows, &cols, &vals).ok()
 }
@@ -384,10 +384,10 @@ fn gen_kkt(s: usize, deg: usize, seed: u64) -> Option<CscMatrix> {
             absrowsum[c] += v.abs();
         }
     }
-    for i in 0..n_var {
+    for (i, &s) in absrowsum.iter().enumerate() {
         rows.push(i);
         cols.push(i);
-        vals.push(absrowsum[i] + 1.0);
+        vals.push(s + 1.0);
     }
     // A block: constraint row (n_var + i) couples to deg+1 variables in
     // a local window, mirroring a discretized-PDE constraint Jacobian
