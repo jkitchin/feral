@@ -1,0 +1,50 @@
+* 09:30 :issue-80:diagnosis:amd:profiler:
+Investigating issue #80 "AMD ordering dominates first factor (~55s) on
+pf22 KKT (n=2.8M)". The issue blames the AMD minimum-degree ordering
+kernel and asks for a faster AMD / bucketed min-degree.
+
+First false trail: profiled `src/ordering/amd.rs::amd_order` and found
+it IS O(n^2) — a synthetic path-graph scaling test (examples, since
+deleted) showed 50k/100k/200k/400k -> 0.99s/4.13s/16.9s/64.7s, clean
+4x-per-2x quadratic from the linear min-degree selection scan
+(amd.rs:59-64). BUT this function is legacy/dead: production dispatches
+to `feral_amd::amd_order` (symbolic/mod.rs:569; schur.rs:200). Only
+`permute_pattern` from src/ordering/amd.rs is still used.
+
+Correct kernel: `feral_amd` is a full quotient-graph AMD
+(feral_ordering_core::quotient_graph) with degree buckets (head[deg],
+next/last, mindeg cursor), supervariable hashing, GC. On a synthetic
+path graph it is linear: 100k/200k/400k/800k -> 4/8/17/37 ms.
+
+Loaded the REAL pf22 matrix
+(pounce/gams/nlpbench/feral_repro/powerflow22/kkt_solve_iter2.bin,
+dim 2,813,976, triplet nnz 6,732,167). feral_amd::amd_order on its
+symmetric pattern: **0.276s**, ncmpa=0. So AMD is NOT the bottleneck.
+
+* 09:50 :issue-80:root-cause:mc64:ldlt-compress:profiler:
+Ran full symbolic_factorize_with_method(Amd) with the per-stage profiler
+on real pf22 values:
+  TOTAL symbolic: 54.46s; resolved_preprocess=LdltCompress
+  stage ordering 53.59s (98.4%)   <- matches issue #80's "amd 55.4s/98.3%"
+  all other stages < 0.4s
+With params.preprocess = None:
+  TOTAL symbolic: 1.23s; stage ordering 0.28s (= the AMD time)
+
+So the entire ~53s is the LdltCompress preprocessor, NOT the fill-reducing
+ordering. The "ordering" stage timer (symbolic/mod.rs:728-755) wraps the
+whole match arm, including LdltCompress -> crate::scaling::compute_mc64_cache
+-> mc64::compute_matching (SPRAL-style shortest-augmenting-path Hungarian
+with binary heap, hungarian.rs). MC64 on the 2.8M near-tree indefinite KKT
+is ~53s; the profiler mis-attributes it to "ordering".
+
+CRITICAL repro trap: MC64 only does real work on real values. My first
+probe used vals=1.0 everywhere -> MC64 trivial -> symbolic 1.47s. With the
+real f64 values from the .bin -> 54.5s. Anyone reproducing must use real
+values.
+
+Conclusion: issue #80's premise (slow AMD min-degree) is wrong. AMD =
+0.28s. The fix is NOT bucketed min-degree (already bucketed). Two real
+levers: (1) profiler mis-attribution (cheap fix); (2) whether
+LdltCompress/Mc64Symmetric should fire on large near-tree KKTs where MC64
+costs 53s and compression buys no fill (3.81x with or without per #80).
+User chose: land profiler fix + research the gating.

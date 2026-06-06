@@ -725,34 +725,61 @@ pub fn symbolic_factorize_with_method(
     if let Some(t) = t_pick {
         record_stage(prof, "pick_preprocess", t);
     }
-    let t_ord = prof.map(|_| std::time::Instant::now());
+    // The fill-reducing ordering and (when enabled) the LdltCompress
+    // preprocessor are timed under *separate* stages. The preprocessor's
+    // MC64 matching can dwarf the ordering itself — on the pf22 powerflow
+    // KKT (n=2.8M) MC64 is ~53s while `feral_amd::amd_order` is ~0.3s — so
+    // folding both into one "ordering" stage mis-attributes the cost and
+    // led to the wrong diagnosis in issue #80. `record_ordering` wraps the
+    // actual `run_external_ordering` call so every path records exactly one
+    // `ordering` stage.
+    let record_ordering = |pat: &CscPattern| -> Result<(Vec<usize>, OrderingMethod), FeralError> {
+        let t_ord = prof.map(|_| std::time::Instant::now());
+        let r = run_external_ordering(pat, method)?;
+        if let Some(t) = t_ord {
+            record_stage(prof, "ordering", t);
+        }
+        Ok(r)
+    };
     let (amd_perm, resolved_method): (Vec<usize>, OrderingMethod) = match resolved_preprocess {
-        OrderingPreprocess::None => run_external_ordering(&full_pattern, method)?,
+        OrderingPreprocess::None => record_ordering(&full_pattern)?,
         OrderingPreprocess::Auto => unreachable!("resolved above"),
         OrderingPreprocess::LdltCompress => {
             // Run the full MC64 pipeline once and keep the cache so the
             // numeric phase can reuse it for `Mc64Symmetric` scaling
             // (Phase 2.4.4: eliminates ~70% of compression symbolic
-            // overhead on matrices where scaling also runs MC64).
+            // overhead on matrices where scaling also runs MC64). MC64 is
+            // the expensive part — record it under its own `ldlt_compress`
+            // stage (issue #80).
+            let t_pre = prof.map(|_| std::time::Instant::now());
             let cache = crate::scaling::compute_mc64_cache(matrix)?;
             let map = build_supermap(&cache.perm);
+            if let Some(t) = t_pre {
+                record_stage(prof, "ldlt_compress", t);
+            }
             let pair = if map.ncmp() == n {
                 // Matching gives no compression leverage; fall through
                 // to the uncompressed path rather than build and walk
                 // an identical-size graph.
-                run_external_ordering(&full_pattern, method)?
+                record_ordering(&full_pattern)?
             } else {
+                let t_cmp = prof.map(|_| std::time::Instant::now());
                 let cpat = compress_pattern(&full_pattern, &map);
-                let (super_perm, resolved) = run_external_ordering(&cpat, method)?;
-                (expand_permutation(&super_perm, &map), resolved)
+                if let Some(t) = t_cmp {
+                    record_stage(prof, "compress_pattern", t);
+                }
+                let (super_perm, resolved) = record_ordering(&cpat)?;
+                let t_exp = prof.map(|_| std::time::Instant::now());
+                let expanded = expand_permutation(&super_perm, &map);
+                if let Some(t) = t_exp {
+                    record_stage(prof, "expand_perm", t);
+                }
+                (expanded, resolved)
             };
             cached_mc64 = Some(cache);
             pair
         }
     };
-    if let Some(t) = t_ord {
-        record_stage(prof, "ordering", t);
-    }
 
     // Step 2: Build the etree on the permuted pattern. This etree is
     // intermediate — we use it to compute the postorder and then discard it.

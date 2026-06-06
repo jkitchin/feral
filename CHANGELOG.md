@@ -4,6 +4,18 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — symbolic profiler attributes the LdltCompress/MC64 preprocessor to its own stage (#80)
+
+`symbolic_profile_report()` previously folded the `LdltCompress`
+preprocessor's MC64 matching into the `ordering` stage. On the pf22
+powerflow KKT (n=2.8M) this made the report blame the fill-reducing
+ordering for ~53s when the ordering itself is ~0.3s and the time is
+actually MC64 (`compute_mc64_cache`). The preprocessor is now recorded
+under a dedicated `ldlt_compress` stage (plus `compress_pattern` /
+`expand_perm` on the compressed-graph path), and `ordering` measures only
+`run_external_ordering`. No change to the produced factorization — this is
+a profiler-attribution fix only. See `dev/journal/2026-06-06-01.org`.
+
 ## [0.10.0] - 2026-06-04
 
 ### Changed — `Auto` now prefers AMF over MetisND at every size (#73)
