@@ -4,6 +4,23 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — on-disk dense-column regression fixture for issue #80
+
+`cargo run --bin bench` now regenerates two synthetic dense-coupling-column
+symmetric quasidefinite KKTs (`data/matrices/synthetic-regression/
+densecol_kkt_{300,1000}`) on every run and factors them through the sparse
+pipeline with the same inertia + residual checks as the corpus. They
+reproduce the near-dense coupling column behind the #80 MC64 cost classes,
+and `FERAL_SCALING=mc64` drives the symmetric MC64 matching on the dense
+column directly. The inertia oracle is the Vanderbei (1995) symmetric-
+quasidefinite theorem — `(n_var, n_con, 0)` for any off-diagonal block — not
+feral itself. Because `data/matrices/` is gitignored, the corpus matrices
+that exercised this path were never in the repo; these fixtures are
+deterministically regenerated from committed source (no committed matrix or
+result) so the path is checked on any clone, even with no corpus present. A
+`cargo test` structural guard (`densecol_kkt_is_dense_column_sqd`) asserts the
+generator keeps producing a genuine dense column and the SQD inertia.
+
 ### Removed — dead `ordering::amd::amd_order` (#80)
 
 Deleted the legacy O(n²) `feral::ordering::amd::amd_order` (and its tests /

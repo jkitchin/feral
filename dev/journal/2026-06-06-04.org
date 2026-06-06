@@ -53,3 +53,42 @@ inner-loop fast path (session -03) and option (b) scaling-aware skip are now
 closed with negative results. The real lever is an orthogonal compression
 cost/benefit gate (no cheap feature yet separates ROSEPETAL from ORTHREGF) — a
 separate workstream.
+
+* 15:40 :regression:bench:densecol:issue-80:
+Follow-up to closing #80: audited whether the benchmark actually covers the
+issues addressed. Found data/matrices/ is entirely gitignored (.gitignore:20)
+— git ls-files shows 0 tracked files for rocket_12800, ROSEPETAL, ORTHREGF,
+and kkt/. So the corpus exercising the #80 dense-column path exists only as
+local harvests; CI and fresh clones have none. The sole #80 guard surviving a
+clean checkout is the synthetic Hungarian unit test, which uses degree-3
+random-sparse and never sees a near-dense column. pf22 (n=2.8M) is too large
+to commit.
+
+User decision: "we don't need a committed result, but we need something on
+disk to check for regression" → bench synthetic tier.
+
+Added a deterministic dense-coupling-column symmetric quasidefinite KKT
+generator to bench.rs (gen_densecol_kkt). K = [[D1, A^T],[A,-D2]], D1/D2
+diagonal SPD → inertia exactly (n_var, n_con, 0) by Vanderbei 1995 SQD
+(vanderbei1995sqd) — an EXTERNAL oracle, no self-oracle. Dense constraint at
+index 0 so column 0 has a sub-diagonal entry to every variable: a genuine
+dense column (degree n_var+1) in the stored lower-triangle CSC (to_csc,
+mtx.rs:21, does not symmetrize). bench regenerates
+data/matrices/synthetic-regression/densecol_kkt_{300,1000}/*.{mtx,json} every
+run (gitignored, no committed matrix/result) and prepends them to kkt_entries
+unconditionally, so they run even with no corpus.
+
+Evidence: .mtx header "303 303 607", column 1 has 301 entries = n_var+1
+(dense column confirmed). Default (InfNorm): inertia 2/2, residual 2/2, worst
+1.26e-16. FERAL_SCALING=mc64 (drives symmetric MC64 on the degree-301/1001
+column — the exact #80 path): inertia 2/2, residual 2/2, worst 1.32e-16, no
+failures. Structural unit test (cargo test --bin bench
+densecol_kkt_is_dense_column_sqd) asserts col-0 degree = n_var+1,
+lower-triangle storage, SQD diagonal signs, and the inertia oracle — passes.
+Full cargo test green (0 failed). fmt + clippy --bin bench clean.
+
+Net: the fixed pf22 class stays guarded by the structural unit test; the
+dense-column class now has an on-disk, regenerable, correctness-checked
+fixture in the default bench run. ROSEPETAL/ORTHREGF compress cost/benefit is
+a numeric-fill question with no cheap structural predictor — left to the
+separate compress-gate workstream.
