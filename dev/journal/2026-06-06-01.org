@@ -211,3 +211,37 @@ find the offending loop in the ldlt_compress code path.
 Tooling note: ran builds/tests in CARGO_TARGET_DIR=/tmp/feral-iso throughout
 to avoid lock contention with the editor's background cargo check --workspace
 (rust-analyzer), which otherwise blocks every cargo invocation for minutes.
+
+* 16:35 :scaling:issue-80:CORRECTION:ldlt-compress:mc64:
+CORRECTION to the 16:10 entry. Traced the symbolic "ldlt_compress" stage:
+src/symbolic/mod.rs:756 calls scaling::compute_mc64_cache -> mc64::compute_matching
+-> hungarian_match. So the 38.3 s ldlt_compress IS the MC64 Hungarian matching,
+run in the SYMBOLIC phase for the LdltCompress ordering-compression preprocessor
+(not a new code path). Implications:
+
+1. The "#80 VERIFIED, pb_scaling_us=4.3ms" claim is MISLEADING. The numeric
+   scaling is cheap only because LdltCompress already built the MC64 cache in
+   symbolic (Phase 2.4.4 reuse) and the numeric phase just looks it up. rocket's
+   ACTUAL MC64 Hungarian cost is ~38 s, paid in symbolic.
+
+2. #80's heap-reuse fix does NOT help rocket_12800. pf22 (the #80 validation,
+   170x win) is near-tree -> per-column heap-realloc dominated. rocket has a
+   near-dense coupling column (degree 38401 = 43% of n) -> the Hungarian cost is
+   dense-column EDGE SCANS per augmenting search, orthogonal to the heap-realloc
+   that #80 fixed. So the regression guard (Step 0, near-tree random family) and
+   #80 both correctly target the heap-realloc class; rocket is a DIFFERENT MC64
+   cost class (dense-column) that remains unaddressed.
+
+3. OPEN DISCREPANCY: research note 2026-05-21 §10 measured
+   compute_scaling(Mc64Symmetric) = 4111 ms on rocket; I measure 38.3 s for the
+   same Hungarian on rocket_12800_0000. 9x difference, same matrix. Either (a) a
+   regression since 2026-05-21, (b) a measurement-context difference
+   (compute_scaling Auto-guard vs compute_matching forced), or (c) different
+   matrix instance. RESOLVE in Step 3: checkout 6699f09^ in a throwaway worktree,
+   re-measure compute_matching on rocket; and add instrumented stats
+   (augment_searches/touched_total/phase3) to localize whether the 38 s is edge
+   scans, heap, or phase-3 on the dense column.
+
+The Step 1 commit (1b2b21c) message carries the imprecise "new hotspot" framing;
+this entry is the correction (commits are local/unpushed; the accurate account
+lives here and in the checkpoint, per the append-only journal rule).
