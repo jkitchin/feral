@@ -61,6 +61,33 @@ pub(crate) struct Matching {
 /// Sentinel for "unmatched" in the working arrays.
 const NONE: usize = usize::MAX;
 
+/// Opt-in work counters for the Hungarian kernel, used by the
+/// deterministic scaling regression guard (issue #80). These count
+/// *algorithmic work*, not wall-clock, so the guard is immune to CI
+/// timing noise.
+///
+/// - `heap_init_slots`: total `pos[]` entries zeroed across the run —
+///   `m` for the single `IndexHeap::new` plus `|touched|` for each
+///   per-search `reset`. With the #80 fix this is `m + touched_total`
+///   (linear in `n + nnz`). If the heap were reallocated per
+///   unmatched column (the pre-#80 bug), every search would route a
+///   fresh `new(m)` through this counter, making it `≈ searches·m`
+///   (quadratic on near-tree KKTs). The structural invariant
+///   `heap_init_slots == m + touched_total` is what the guard checks.
+/// - `augment_searches`: number of shortest-augmenting-path searches
+///   run in the main loop (one per still-unmatched column).
+/// - `touched_total`: sum of `|touched|` over all searches.
+/// - `phase3_inner_iters`: iterations of the length-2 augmentation
+///   inner loop in `hungarian_init_heuristic`. O(nnz²) blow-up there
+///   shows up as super-linear growth of this counter vs nnz.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct HungarianStats {
+    pub heap_init_slots: u64,
+    pub augment_searches: u64,
+    pub touched_total: u64,
+    pub phase3_inner_iters: u64,
+}
+
 /// A large finite value used as "+∞" for shortest-path distances.
 /// We avoid `f64::INFINITY` in arithmetic to match SPRAL's `RINF`
 /// style (it uses `huge(1.0_wp)/10`, a large finite constant). Any
@@ -94,7 +121,11 @@ struct IndexHeap {
 }
 
 impl IndexHeap {
-    fn new(m: usize) -> Self {
+    fn new(m: usize, stats: &mut HungarianStats) -> Self {
+        // Zeroing the `pos` array is O(m); count it so that a revert to
+        // per-search allocation (issue #80) is observable as quadratic
+        // `heap_init_slots` growth regardless of where `new` is called.
+        stats.heap_init_slots += m as u64;
         IndexHeap {
             heap: vec![0; m + 1],
             pos: vec![0; m],
@@ -110,7 +141,8 @@ impl IndexHeap {
     /// with stale entries; `len = 0` makes them unreachable. This turns
     /// the per-iteration `IndexHeap::new(m)` (O(m) alloc+zero per
     /// unmatched column, i.e. O(n·m) overall) into O(|touched|).
-    fn reset(&mut self, rows: &[usize]) {
+    fn reset(&mut self, rows: &[usize], stats: &mut HungarianStats) {
+        stats.heap_init_slots += rows.len() as u64;
         for &i in rows {
             self.pos[i] = 0;
         }
@@ -252,6 +284,7 @@ fn hungarian_init_heuristic(
     iperm: &mut [usize],
     jperm: &mut [usize],
     u: &mut [f64],
+    stats: &mut HungarianStats,
 ) -> usize {
     let n = cost.n;
     let m = n;
@@ -356,6 +389,7 @@ fn hungarian_init_heuristic(
             }
             let jj_end = cost.col_ptr[jj + 1];
             for kk in search_from[jj]..jj_end {
+                stats.phase3_inner_iters += 1;
                 let ii = cost.row_idx[kk];
                 if iperm[ii] != NONE {
                     continue;
@@ -405,8 +439,18 @@ fn hungarian_init_heuristic(
 ///   accumulated `visited_rows` list for the post-update sweep).
 /// - `heap` is the open-set min-heap keyed on `d[i]`.
 pub(crate) fn hungarian_match(cost: &CostGraph) -> Matching {
+    hungarian_match_instrumented(cost).0
+}
+
+/// Same as [`hungarian_match`] but also returns [`HungarianStats`]
+/// work counters. The work-counting `+=` calls are off the Dijkstra
+/// inner loop (they live in `IndexHeap::new`/`reset` and the phase-3
+/// augmentation loop), so this carries negligible overhead and
+/// produces bit-identical matchings. Used by the #80 regression guard.
+pub(crate) fn hungarian_match_instrumented(cost: &CostGraph) -> (Matching, HungarianStats) {
     let n = cost.n;
     let m = n; // square cost graph
+    let mut stats = HungarianStats::default();
 
     let mut iperm: Vec<usize> = vec![NONE; m];
     let mut jperm: Vec<usize> = vec![NONE; n];
@@ -414,16 +458,19 @@ pub(crate) fn hungarian_match(cost: &CostGraph) -> Matching {
     let mut v: Vec<f64> = vec![0.0; n];
 
     if n == 0 {
-        return Matching {
-            perm: Vec::new(),
-            u,
-            v,
-            n_matched: 0,
-        };
+        return (
+            Matching {
+                perm: Vec::new(),
+                u,
+                v,
+                n_matched: 0,
+            },
+            stats,
+        );
     }
 
     // Greedy initialization.
-    let mut num = hungarian_init_heuristic(cost, &mut iperm, &mut jperm, &mut u);
+    let mut num = hungarian_init_heuristic(cost, &mut iperm, &mut jperm, &mut u, &mut stats);
 
     // Clamp any `u[i] == RINF` (set for empty rows) to 0 so that
     // the reduced-cost arithmetic below never produces `-RINF`.
@@ -436,7 +483,7 @@ pub(crate) fn hungarian_match(cost: &CostGraph) -> Matching {
 
     if num == n {
         finalize_duals(cost, &iperm, &jperm, &u, &mut v);
-        return build_matching(cost, iperm, jperm, u, v, num);
+        return (build_matching(cost, iperm, jperm, u, v, num), stats);
     }
 
     // Main loop: for each unmatched column, run a shortest-path
@@ -458,12 +505,13 @@ pub(crate) fn hungarian_match(cost: &CostGraph) -> Matching {
     // same way `d` and `visited` are. Previously this was reallocated
     // per unmatched column — O(n·m) alloc+zeroing that dominated MC64 on
     // large near-tree KKTs (issue #80).
-    let mut heap = IndexHeap::new(m);
+    let mut heap = IndexHeap::new(m, &mut stats);
 
     for jord in 0..n {
         if jperm[jord] != NONE {
             continue;
         }
+        stats.augment_searches += 1;
 
         // Per-iteration working state.
         let mut csp = RINF; // cost of the shortest augmenting path
@@ -594,11 +642,12 @@ pub(crate) fn hungarian_match(cost: &CostGraph) -> Matching {
         // Return the heap to empty for the next search. Every heap member
         // is in `touched`, so clearing their `pos` (plus `len = 0`) is a
         // complete reset.
-        heap.reset(&touched);
+        stats.touched_total += touched.len() as u64;
+        heap.reset(&touched, &mut stats);
     }
 
     finalize_duals(cost, &iperm, &jperm, &u, &mut v);
-    build_matching(cost, iperm, jperm, u, v, num)
+    (build_matching(cost, iperm, jperm, u, v, num), stats)
 }
 
 /// Compute column duals from the final matching. Mirrors
@@ -907,6 +956,144 @@ mod tests {
             "total matching cost should be 5, got {} with perm {:?}",
             total,
             m.perm
+        );
+    }
+
+    /// Deterministic LCG (Numerical Recipes constants) for building
+    /// reproducible synthetic cost graphs without an RNG dependency.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0
+        }
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next_u64() >> 33) as usize % bound
+        }
+    }
+
+    /// Build an n×n cost graph with `deg` distinct random rows per
+    /// column and random positive costs. With small constant `deg`,
+    /// the greedy init leaves a constant fraction of columns unmatched,
+    /// so the main augmenting loop runs Θ(n) shortest-path searches —
+    /// exactly the near-tree regime where the issue #80 per-column heap
+    /// reallocation was O(n·m). nnz = deg·n grows linearly in n.
+    fn gen_random_sparse(n: usize, deg: usize, seed: u64) -> CostGraph {
+        let mut rng = Lcg(seed);
+        let mut by_col: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        for col in by_col.iter_mut() {
+            let mut rows: Vec<usize> = Vec::with_capacity(deg);
+            while rows.len() < deg {
+                let r = rng.below(n);
+                if !rows.contains(&r) {
+                    rows.push(r);
+                }
+            }
+            for &r in &rows {
+                let c = 1.0 + (rng.below(100) as f64);
+                col.push((r, c));
+            }
+        }
+        let mut col_ptr = vec![0usize; n + 1];
+        let mut row_idx = Vec::new();
+        let mut cost = Vec::new();
+        for j in 0..n {
+            by_col[j].sort_by_key(|&(r, _)| r);
+            for &(r, v) in &by_col[j] {
+                row_idx.push(r);
+                cost.push(v);
+            }
+            col_ptr[j + 1] = row_idx.len();
+        }
+        CostGraph {
+            n,
+            col_ptr,
+            row_idx,
+            cost,
+        }
+    }
+
+    /// Deterministic scaling regression guard for MC64 (issue #80).
+    ///
+    /// Two independent O(n²) hazards in the Hungarian kernel are
+    /// pinned here without any reliance on wall-clock (CI-noise-immune):
+    ///
+    /// 1. **Per-column heap reallocation (the #80 bug).** Before the
+    ///    fix, `IndexHeap::new(m)` was called inside the per-unmatched-
+    ///    column loop, costing O(m) zeroing per search → O(searches·m)
+    ///    = O(n²) on near-tree KKTs. The fix allocates once and resets
+    ///    incrementally over `touched`. The exact structural invariant
+    ///    of the fix is `heap_init_slots == n + touched_total` (one
+    ///    O(n) allocation plus Σ|touched| reset work). A revert that
+    ///    re-allocates per search routes O(m) per search through the
+    ///    same counter, breaking the equality at every size. This is a
+    ///    stronger, threshold-free guard than a growth ratio — and
+    ///    necessary, because on a hard matching the *legitimate*
+    ///    `touched_total` is itself super-linear (long augmenting
+    ///    paths), so total heap work is not linear to begin with.
+    ///
+    /// 2. **Length-2 augmentation blow-up.** The phase-3 inner loop in
+    ///    `hungarian_init_heuristic` is O(nnz²) in the worst case. On
+    ///    this random-sparse family it is observed linear in nnz
+    ///    (~8.2× over an 8× size increase), so we assert the count
+    ///    grows sub-quadratically (8× ladder, quadratic ≈ 64×).
+    ///
+    /// The family is `gen_random_sparse(n, deg=3)`: with small constant
+    /// degree, greedy init leaves a constant fraction of columns
+    /// unmatched, so the main augmenting loop runs (searches > 0) — the
+    /// exact regime where the #80 realloc was the dominant cost.
+    #[test]
+    fn mc64_hungarian_no_quadratic_heap_realloc_regression() {
+        let sizes = [1000usize, 2000, 4000, 8000];
+        let mut phase3_first = 0u64;
+        let mut phase3_last = 0u64;
+        for (idx, &n) in sizes.iter().enumerate() {
+            let cost = gen_random_sparse(n, 3, 0x1234_5678);
+            let (m, stats) = hungarian_match_instrumented(&cost);
+
+            // The main loop must actually run, or the heap-lifecycle
+            // invariant below would hold vacuously.
+            assert!(
+                stats.augment_searches > 0,
+                "n={n}: greedy matched everything; guard not exercised"
+            );
+
+            // #80 structural invariant: heap allocated exactly once
+            // (O(n)) plus incremental resets totalling touched_total.
+            // Re-introducing per-column `IndexHeap::new(m)` breaks this.
+            assert_eq!(
+                stats.heap_init_slots,
+                n as u64 + stats.touched_total,
+                "n={n}: heap-init work {} != n + touched_total {} \
+                 (issue #80 per-column heap reallocation reintroduced?)",
+                stats.heap_init_slots,
+                n as u64 + stats.touched_total,
+            );
+
+            // Behavior preservation: instrumentation must not change
+            // the matching; it must still be LP-optimal.
+            assert_matching_optimal(&cost, &m);
+
+            if idx == 0 {
+                phase3_first = stats.phase3_inner_iters;
+            }
+            if idx == sizes.len() - 1 {
+                phase3_last = stats.phase3_inner_iters;
+            }
+        }
+
+        // Phase-3 length-2 augmentation must stay sub-quadratic across
+        // the 8× size ladder (linear ≈ 8×, quadratic ≈ 64×).
+        assert!(phase3_first > 0, "phase-3 augmentation never exercised");
+        assert!(
+            phase3_last < 16 * phase3_first,
+            "phase-3 inner iterations grew {}->{} ( >16x over 8x size ) \
+             — possible O(nnz^2) augmentation regression",
+            phase3_first,
+            phase3_last,
         );
     }
 

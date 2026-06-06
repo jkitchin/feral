@@ -121,3 +121,51 @@ profile_sparse_smallfront.rs). Kept permute_pattern (used by symbolic in 5
 places) + test_permute_pattern. This is the function that derailed the
 initial #80 diagnosis. cargo build --all-targets clean, ordering lib tests
 pass (30), clippy clean. Commit 10a3a1a.
+
+* 14:05 :scaling:issue-80:investigation:plan:
+Started a systematic super-linear (O(n^2)) scaling audit across ordering,
+scaling, and the numeric/symbolic prologue (plan approved). Key framing
+discovery from dev/research/per-factor-cost-cluster-2026-05-21.md §10:
+rocket_12800's "99.5%-prologue" factor cost was ALREADY root-caused to the
+MC64 Hungarian (4.1s on n=89601, rerun every IPM call) — the exact path
+the #80 heap-reuse fix optimized. So verifying #80 and resolving
+Mechanism B are the same task. Two independent discoveries of one O(n^2)
+trap motivate the broader sweep.
+
+Corpus reality (verified on disk): the suffixed mittelmann families
+(rocket_12800=2 mtx, robot_1600=7, marine_1600=18) are single-n IPM
+trajectories, NOT size ladders — usable for phase attribution and #80
+verification, not exponent fitting. Real size ladders: generated
+spd_*/kkt_*, plus ACOPP/ACOPR{14,30,118,300}, ex1_{160,320}, qcqp{500..1500}.
+
+* 14:40 :scaling:issue-80:guard:tdd:
+Step 0 done — MC64 Hungarian work counters + deterministic regression guard
+(src/scaling/hungarian.rs). Added HungarianStats {heap_init_slots,
+augment_searches, touched_total, phase3_inner_iters}, threaded &mut stats
+through IndexHeap::new/reset (counting pos[] slots zeroed) and the phase-3
+length-2 augmentation loop. New hungarian_match_instrumented() returns
+stats; hungarian_match() is a thin wrapper (zero behavior change, off the
+Dijkstra inner loop -> negligible overhead).
+
+Calibration probe (gen_random_sparse, deg=3, n=1k..8k):
+  n=1000 nnz=3000  searches=201  touched_total=52727   heap_init=53727   phase3=563
+  n=2000 nnz=6000  searches=413  touched_total=196695  heap_init=198695  phase3=1190
+  n=4000 nnz=12000 searches=769  touched_total=699687  heap_init=703687  phase3=2272
+  n=8000 nnz=24000 searches=1490 touched_total=2709747 heap_init=2717747 phase3=4609
+
+Finding: on this hard random family the FIX's touched_total is itself
+~quadratic (52727->2.7M, 51x over 8x n) — augmenting paths are long. So a
+growth-ratio guard on total heap work is WRONG here. The correct guard is
+the exact structural invariant heap_init_slots == n + touched_total (heap
+allocated once + incremental resets), which holds at every size and fires
+on the #80 realloc revert at ANY n. phase3_inner_iters IS linear (563->4609,
+8.2x) -> a sub-quadratic ratio guard (<16x over 8x) is appropriate there
+for the O(nnz^2) phase-3 suspect.
+
+Guard test mc64_hungarian_no_quadratic_heap_realloc_regression asserts:
+searches>0 (path exercised), heap_init_slots==n+touched_total (#80), matching
+LP-optimal (behavior preserved), phase3 ratio<16x. Teeth verified: injecting
+a per-search IndexHeap::new made heap_init 254727 vs expected 53727 -> test
+FAILS as designed; reverted. Full feral lib suite 317 passed/0 failed,
+clippy clean, fmt clean. (Ran in CARGO_TARGET_DIR=/tmp/feral-iso to avoid
+lock contention with the editor's background cargo check --workspace.)
