@@ -1,10 +1,11 @@
 # Issue #80 — MC64 preprocessor cost on large near-tree powerflow KKTs
 
 **Date:** 2026-06-06
-**Status:** Research / diagnosis. Profiler-attribution fix landed (`36d847a`).
-Routing gate **proposed, not yet implemented** — flipping the default for a
-matrix class is a `decisions.md`-level change and wants a validation sweep
-first (see §6).
+**Status:** **RESOLVED** by an MC64 kernel fix (§8), not the routing gate.
+The ~O(n^1.9) cost was an avoidable per-iteration heap allocation; fixing it
+drops MC64 on pf22 from 53s to 0.31s and the default first factor from 65.5s
+to 2.6s, behavior-preserving. The §6 routing gate is **no longer needed** —
+kept below for the record. Profiler-attribution fix landed (`36d847a`).
 **Repro matrices:** `pounce/gams/nlpbench/feral_repro/powerflow22/
 kkt_solve_iter2.bin` (pf22, n=2.8M) and `.../powerflow_profile_2026/
 pf01_iter2.bin` (pf01, n=366k).
@@ -179,3 +180,53 @@ the pragmatic near-term fix.
   a residual that is irrelevant to the IPM.
 - Land: profiler fix (done). Propose: a narrow large-powerflow MC64 gate,
   pending a corpus validation sweep before any default flip.
+
+---
+
+## 8. RESOLUTION — MC64 had an avoidable O(n·m) heap allocation
+
+The ~O(n^1.9) was **not** inherent to shortest-augmenting-path matching. In
+`hungarian_match` (`src/scaling/hungarian.rs`), the per-column augmenting loop
+allocated a fresh `IndexHeap::new(m)` **inside** the loop:
+
+```rust
+for jord in 0..n {                 // up to n unmatched columns
+    if jperm[jord] != NONE { continue; }
+    ...
+    let mut heap = IndexHeap::new(m);   // O(m) alloc + zero, EVERY iteration
+    ...
+}
+```
+
+`IndexHeap::new(m)` zeroes `2m+1` entries. Over up to `n` unmatched columns
+that is **O(n·m) ≈ O(n²)** of pure allocation/zeroing — independent of how
+short the actual augmenting paths are, and the one piece of per-iteration work
+that was not already incremental (`d` and `visited` were reset over a tracked
+`touched`/`visited_rows` set; only the heap was reallocated).
+
+**Fix:** allocate the heap once before the loop and reset it incrementally at
+iteration end via `IndexHeap::reset(touched)` — sets `pos[i] = 0` for the
+touched rows and `len = 0`. Every heap member is in `touched` (an index is only
+inserted right after `touched.push`), so this is a complete reset in
+O(|touched|).
+
+**Measured on real pf22** (`FERAL_MC64_TRACE=1`):
+
+| quantity | before | after |
+|---|---|---|
+| MC64 matching | ~53s | **0.309s** (~170×) |
+| default first factor (LdltCompress + Mc64Symmetric) | 65.5s | **2.594s** (~25×) |
+| inertia (n_neg) | 940248 | 940248 ✓ |
+| residual | 5.28e-13 | 5.28e-13 (identical) |
+
+The matching output is bit-identical (same inertia and residual) — purely a
+storage-reuse change. 48 scaling lib tests pass.
+
+**Consequence for the §6 gate:** unnecessary. The default config is now 2.6s on
+pf22 — as fast as the would-be-gated `None + InfNorm` path (2.42s) — while
+keeping `Mc64Symmetric`'s conditioning and the `2026-04-19` default. No
+default-behavior change, no corpus-validation risk. Do not implement the gate.
+
+(The §6 analysis stands as the evidence that inertia is correct without MC64,
+and the pf01 `Singular`-under-MC64 observation remains a separate latent issue
+worth a look, but it is not a performance lever anymore.)

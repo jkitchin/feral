@@ -102,6 +102,21 @@ impl IndexHeap {
         }
     }
 
+    /// Return the heap to the empty state for reuse across augmenting
+    /// searches without reallocating. `rows` must list every index whose
+    /// `pos` could be nonzero — in `hungarian_match` that is exactly the
+    /// `touched` set, since an index is only ever heap-inserted right
+    /// after being pushed to `touched`. The `heap` backing array is left
+    /// with stale entries; `len = 0` makes them unreachable. This turns
+    /// the per-iteration `IndexHeap::new(m)` (O(m) alloc+zero per
+    /// unmatched column, i.e. O(n·m) overall) into O(|touched|).
+    fn reset(&mut self, rows: &[usize]) {
+        for &i in rows {
+            self.pos[i] = 0;
+        }
+        self.len = 0;
+    }
+
     fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -438,6 +453,12 @@ pub(crate) fn hungarian_match(cost: &CostGraph) -> Matching {
     // can clear only what was changed rather than re-allocating.
     let mut touched: Vec<usize> = Vec::with_capacity(m);
     let mut visited_rows: Vec<usize> = Vec::with_capacity(m);
+    // Allocated once and reused across all augmenting searches; reset
+    // incrementally (over `touched`) at the end of each iteration, the
+    // same way `d` and `visited` are. Previously this was reallocated
+    // per unmatched column — O(n·m) alloc+zeroing that dominated MC64 on
+    // large near-tree KKTs (issue #80).
+    let mut heap = IndexHeap::new(m);
 
     for jord in 0..n {
         if jperm[jord] != NONE {
@@ -450,7 +471,6 @@ pub(crate) fn hungarian_match(cost: &CostGraph) -> Matching {
         let mut jsp: usize = NONE; // column that owns that edge
         visited_rows.clear();
         touched.clear();
-        let mut heap = IndexHeap::new(m);
 
         // Build the shortest-path tree from column `jord`.
         let j = jord;
@@ -571,6 +591,10 @@ pub(crate) fn hungarian_match(cost: &CostGraph) -> Matching {
         for &i in &visited_rows {
             visited[i] = false;
         }
+        // Return the heap to empty for the next search. Every heap member
+        // is in `touched`, so clearing their `pos` (plus `len = 0`) is a
+        // complete reset.
+        heap.reset(&touched);
     }
 
     finalize_duals(cost, &iperm, &jperm, &u, &mut v);

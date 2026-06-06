@@ -85,3 +85,30 @@ signature. Needs corpus validation + intermediate powerflow sizes before
 flipping default. Note: 2026-04-19 made Mc64Symmetric default for good
 reasons (8x tail compression, MSS1_0009) -> gate must stay narrow.
 Research note: dev/research/issue-80-mc64-preprocessor-cost.md.
+
+* 11:40 :issue-80:mc64:fix:perf:root-cause:
+Found the avoidable O(n^2) in MC64: hungarian_match allocated a fresh
+IndexHeap::new(m) (zeroes 2m+1 entries) INSIDE the per-unmatched-column
+augmenting loop (hungarian.rs:453). Up to n iterations x O(m) alloc =
+O(n*m) ~ O(n^2), independent of augmenting-path length. Everything else in
+the loop (d, visited scratch) was already incrementally reset; only the
+heap was reallocated.
+
+Fix: hoist IndexHeap out of the loop, allocate once, add reset(touched)
+that clears pos[i] for touched rows + len=0 (every heap member is in
+touched, since insert always follows a touched.push). Reset at iteration
+end alongside d/visited.
+
+Measured on real pf22 (FERAL_MC64_TRACE=1):
+  MC64 matching: 53s -> 0.309s  (~170x)
+  default first factor: 65.5s -> 2.594s  (~25x)
+  n_neg=940248 (correct), resid 5.28e-13 (UNCHANGED -> bit-identical
+  matching output, behavior-preserving).
+48 scaling lib tests pass.
+
+Implication: this SUPERSEDES the routing-gate proposal in
+dev/research/issue-80-mc64-preprocessor-cost.md. The default config
+(LdltCompress + Mc64Symmetric) is now 2.6s on pf22 — as fast as the gated
+"None + InfNorm" path (2.42s) — while keeping MC64's conditioning. No
+default-behavior change, no corpus-validation risk. The gate is no longer
+needed.

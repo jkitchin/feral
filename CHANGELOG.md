@@ -4,6 +4,18 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — MC64 matching no longer reallocates its heap per column (#80)
+
+`hungarian_match` allocated a fresh `IndexHeap::new(m)` inside the
+per-unmatched-column augmenting loop — O(m) zeroing on each of up to `n`
+iterations, i.e. an O(n·m) ≈ O(n²) term that dominated MC64 on large
+near-tree KKTs. The heap is now allocated once and reset incrementally over
+the touched-row set (matching how `d`/`visited` were already handled). On the
+pf22 powerflow KKT (n=2.8M) MC64 matching drops from ~53s to **0.31s** and the
+default first factor from ~65s to **2.6s**, with bit-identical matching
+output (inertia 940,248 and residual 5.28e-13 unchanged). This was the actual
+cost behind issue #80's reported ~55s first factor.
+
 ### Fixed — symbolic profiler attributes the LdltCompress/MC64 preprocessor to its own stage (#80)
 
 `symbolic_profile_report()` previously folded the `LdltCompress`
