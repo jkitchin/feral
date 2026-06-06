@@ -8,6 +8,14 @@
 # the CI static checks will pass too. The heavier `cargo test` still runs
 # as a separate step — it is too slow for a pre-commit hook but is
 # orchestrated alongside pre-commit in CI.
+#
+# The `cargo-clippy` hook only covers the root build set. The
+# `feral-diagnostics` crate is outside that set (issue #71), so CI lints it
+# in a *separate* step (`cargo clippy -p feral-diagnostics ...`). The
+# `cargo-clippy-diagnostics` hook below mirrors that step locally so a
+# diagnostics-only clippy lint cannot pass locally yet fail CI (as happened
+# on run 27070467555 — an `unnecessary_sort_by` lint present in the CI
+# toolchain but not the older local one).
 
 repos:
   - repo: local
@@ -24,6 +32,15 @@ repos:
         # `#![cfg_attr(not(test), deny(clippy::unwrap_used))]` directive
         # at the top of src/lib.rs. Clippy catches it below.
         entry: cargo clippy -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-clippy-diagnostics
+        name: cargo clippy -p feral-diagnostics --all-targets
+        # feral-diagnostics is outside the root build set (issue #71) so the
+        # hook above does not lint it. CI lints it as a separate step; this
+        # hook mirrors that step so the local/CI coverage gap is closed.
+        entry: cargo clippy -p feral-diagnostics --all-targets -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false
