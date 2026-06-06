@@ -4,6 +4,16 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Removed — dead `ordering::amd::amd_order` (#80)
+
+Deleted the legacy O(n²) `feral::ordering::amd::amd_order` (and its tests /
+`estimate_fill` helper). It was not in any factorization path — production
+ordering is the `feral_amd` quotient-graph crate (`symbolic`/`schur`
+dispatch to `feral_amd::amd_order`). Only `permute_pattern` from that module
+is still used and is retained. Two orphaned triage examples that referenced
+it were removed. This eliminates the misleading "this is the AMD" function
+that derailed the initial #80 diagnosis.
+
 ### Fixed — MC64 matching no longer reallocates its heap per column (#80)
 
 `hungarian_match` allocated a fresh `IndexHeap::new(m)` inside the
