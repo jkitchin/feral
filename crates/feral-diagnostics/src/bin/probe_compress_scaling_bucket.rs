@@ -131,7 +131,7 @@ fn main() {
         return;
     }
     // Sort target bucket by max_col_degree desc (worst MC64 cost first).
-    target_rows.sort_by(|a, b| b.2.cmp(&a.2));
+    target_rows.sort_by_key(|b| std::cmp::Reverse(b.2));
     println!(
         "{:<22} {:>10} {:>14} {:>14}",
         "family", "n", "max_col_deg", "scaling"
