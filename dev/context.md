@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-04T11:56:25Z
+Generated: 2026-06-06T14:22:21Z
 
 ## Latest Session
 File: dev/sessions/2026-06-04-02.md
@@ -59,11 +59,11 @@ stand for 0.10.0.
 
 ## Git Status
 ```
+48bb238 docs(research): issue #80 is MC64 preprocessor cost, not AMD (#80)
+36d847a fix(symbolic): give LdltCompress/MC64 its own profiler stage (#80)
+471b9e9 docs(session): checkpoint 2026-06-04-02 — 0.10.0 release
 23ecfaf release: 0.10.0
 2f8d2f1 docs(triage): investigate #78 — trajectory sensitivity, not a feral bug
-d144ade docs(triage): close #76 (not-a-bug), investigate #77 (not reproducible)
-51f0472 feat(ordering): route Auto to AMF at every size, drop AMF_BAND_MAX (closes #73) (#75)
-caf4120 docs(readme): document the feral-diagnostics crate invocation (#74)
 ```
 
 ## Test Status
@@ -71,11 +71,11 @@ caf4120 docs(readme): document the feral-diagnostics crate invocation (#74)
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
+test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
+test symbolic::tests::is_arrow_bordered_rejects_low_nnz_share_border ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 
-test result: ok. 322 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.41s
+test result: ok. 322 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.40s
 
 ```
 
@@ -136,26 +136,26 @@ crates/feral-diagnostics/src/bin/probe_issue73_symbolic.rs,
 crates/feral-diagnostics/src/bin/probe_issue67_thin.rs.
 
 ## Recent Tried-and-Rejected
+   `schur.rs:200`). Only `permute_pattern` from that file is still used. The
+   real `feral_amd` is already a bucketed quotient-graph AMD and orders pf22 in
+   **0.276s**. Implementing bucketed min-degree there would have fixed a
+   function nobody calls.
+2. The real ~53s is the **`LdltCompress` preprocessor's MC64 matching**
+   (`mc64::compute_matching`, ~O(n^1.9)), which the per-stage profiler folded
+   into the `ordering` stage timer. `preprocess=None` drops total symbolic
+   from 54.5s to 1.23s.
 
-Rejected by the real factor+solve A/B (`probe_issue67_thin --reps 1`). The
-guard's predicate is **anti-correlated with real speed on nql180**: MetisND has
-2% *smaller* fill (fill_r 0.98) yet AMF is **2.05× faster** on the actual
-factor+solve (fac_amf 1903 ms vs fac_met 3949 ms). The fill guard would have
-read "MetisND fill is smaller → keep MetisND" and **forfeited a 2× speedup**.
-nnz_L and the Σ ncol·nrow² flop_proxy do not predict factor+solve wall-time at
-this scale (the numeric phase's cache/critical-path behavior dominates), so any
-routing guard keyed on symbolic fill makes the wrong call exactly where it
-matters — and adds a per-solve symbolic-race cost to do it.
+Symptoms that revealed the false start: on real pf22 values
+`feral_amd::amd_order` = 0.276s while the full symbolic = 54.5s with `ordering`
+stage 53.6s; forcing `preprocess=None` collapsed it to 1.23s. With `vals=1.0`
+(MC64 trivial) symbolic was only 1.5s — the value-dependence is the tell that
+the cost is in MC64, not the structure-only ordering.
 
-Symptoms / evidence of the failure: on real factor+solve AMF wins ALL 5
-measured n>100k families (dtoc2 2.49×, pinene 1.18×, cont5_1_l 2.75×, nql180
-2.05×, YATP1NE 2.13×), including the matrix the guard would have demoted.
-Superseded by the **unconditional** AMF extension (drop `AMF_BAND_MAX`; route
-every would-be-MetisND decision to AMF), recorded in `dev/decisions.md`
-(2026-06-03, issue #73). Future sessions: do NOT reintroduce a fill / nnz_L /
-flop_proxy guard on the n>100k AMF reroute — nql180 is the standing
-counterexample. Data: dev/research/issue-73-n100k-thin-regime.md (Finding 3),
-dev/journal/2026-06-03-06.org (:issue-73:ab:factor-solve:surprise:).
+Future sessions: do NOT "optimize" `src/ordering/amd.rs` for performance — it
+is not in the factorization path. The production AMD is `feral_amd`. For
+issue #80 the lever is MC64 (gate it on large arrow-signature KKTs), not AMD.
+Data: dev/research/issue-80-mc64-preprocessor-cost.md,
+dev/journal/2026-06-06-01.org.
 
 ## Source Files
 ```

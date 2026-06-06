@@ -2272,3 +2272,38 @@ every would-be-MetisND decision to AMF), recorded in `dev/decisions.md`
 flop_proxy guard on the n>100k AMF reroute — nql180 is the standing
 counterexample. Data: dev/research/issue-73-n100k-thin-regime.md (Finding 3),
 dev/journal/2026-06-03-06.org (:issue-73:ab:factor-solve:surprise:).
+
+---
+
+## 2026-06-06 (issue #80): "Fix slow AMD / implement bucketed min-degree" — WRONG TARGET
+
+What was tried: issue #80 reports a ~55s "ordering" stage on the pf22
+powerflow KKT (n=2.8M) and asks for a faster AMD / bucketed min-degree. First
+investigation profiled `src/ordering/amd.rs::amd_order`, found it is genuinely
+O(n²) (linear min-degree selection scan; synthetic path graph 50k/100k/200k/
+400k → 0.99/4.13/16.9/64.7s, clean quadratic), and was about to implement
+degree buckets there.
+
+Why rejected:
+1. `src/ordering/amd.rs::amd_order` is **dead code**. Production dispatches
+   `OrderingMethod::Amd` to `feral_amd::amd_order` (`symbolic/mod.rs:569`,
+   `schur.rs:200`). Only `permute_pattern` from that file is still used. The
+   real `feral_amd` is already a bucketed quotient-graph AMD and orders pf22 in
+   **0.276s**. Implementing bucketed min-degree there would have fixed a
+   function nobody calls.
+2. The real ~53s is the **`LdltCompress` preprocessor's MC64 matching**
+   (`mc64::compute_matching`, ~O(n^1.9)), which the per-stage profiler folded
+   into the `ordering` stage timer. `preprocess=None` drops total symbolic
+   from 54.5s to 1.23s.
+
+Symptoms that revealed the false start: on real pf22 values
+`feral_amd::amd_order` = 0.276s while the full symbolic = 54.5s with `ordering`
+stage 53.6s; forcing `preprocess=None` collapsed it to 1.23s. With `vals=1.0`
+(MC64 trivial) symbolic was only 1.5s — the value-dependence is the tell that
+the cost is in MC64, not the structure-only ordering.
+
+Future sessions: do NOT "optimize" `src/ordering/amd.rs` for performance — it
+is not in the factorization path. The production AMD is `feral_amd`. For
+issue #80 the lever is MC64 (gate it on large arrow-signature KKTs), not AMD.
+Data: dev/research/issue-80-mc64-preprocessor-cost.md,
+dev/journal/2026-06-06-01.org.
