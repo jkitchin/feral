@@ -1,0 +1,55 @@
+#+TITLE: Journal 2026-06-06-04
+#+STARTUP: showall
+
+* 13:30 :mc64:symbolic-skip:design:
+Took on the dense-column follow-up "safe win" (audit §8.1 option (b), user
+request): skip the speculative MC64 in symbolic LdltCompress when the resolved
+scaling won't reuse the cache. Established two design facts by reading
+solver.rs + symbolic/mod.rs + ldlt_compress.rs:
+- Symbolic runs at factor() Step 3 (solver.rs:805), on a cache MISS only;
+  it is cached per pattern fingerprint, so LdltCompress MC64 runs ONCE per
+  pattern. Scaling resolves later (Step 3.75/3.8, lines 942/962). To make
+  symbolic scaling-aware we'd compute pick_scaling_strategy before the
+  symbolic call and plumb a will_reuse_mc64 bool in. Feasible.
+- BUT the MC64 in LdltCompress is LOAD-BEARING for compression, not
+  speculative: build_supermap (ldlt_compress.rs:39-77) walks the MC64 matching
+  permutation's cycle structure to form super-variables (MUMPS ICNTL(12)=2 /
+  Duff-Pralet). Skipping MC64 = skipping compression = changing the ordering.
+  So the win is only real if compression isn't worth its MC64 cost — an
+  empirical question. Decided to measure before implementing.
+
+* 13:45 :bucket:probe:
+Wrote probe_compress_scaling_bucket (first .mtx per family, pick_ordering_
+preprocess + pick_scaling_strategy, no factorization). All 3 roots, 1006
+families: 376 LdltCompress, 118 reuse MC64 (keep), 258 do NOT (target bucket).
+Target bucket is NOT vacuous and NOT all small: INDEFM (n=100000,
+max_col_deg=100000), SINQUAD2 (5000/5000), ex8_2_3 (18791/3132),
+ex8_2_2 (9453/1894), ORTHREGF (6405/1601), ROSEPETAL (3000/2001) — all
+InfNorm. Looked promising (rocket-like dense columns not reused by scaling).
+
+* 14:00 :cost-benefit:negative-result:
+Wrote probe_compress_costbenefit_argv (symbolic+numeric, None vs LdltCompress,
+5-run median, release). Measured the large dense-column + InfNorm bucket. The
+premise is REFUTED. Crux = ROSEPETAL vs ORTHREGF, both large near-dense-column
+InfNorm, opposite verdicts:
+- ROSEPETAL n=3000 deg=2001: tot_None=5.97s, tot_Compress=1.45s, -75.7%.
+  Compression pays 0.68s MC64 but the compressed ordering gives an 8x NUMERIC
+  speedup (5.72s -> 0.77s). Reproducible (-75.7%, -75.0%).
+- ORTHREGF n=6405 deg=1601: tot_None=6.2ms, tot_Compress=11.9ms, +91.8%.
+  MC64 pure overhead, zero numeric benefit. Reproducible (+91.8%, +89.4%).
+INDEFM/ex8_2_3 neutral (~+2%), ex8_2_2 -0.5%, SINQUAD2 +5.7%, small matrices
+sub-ms.
+Conclusion: the value of LdltCompress is its NUMERIC FILL REDUCTION, which is
+independent of the scaling choice and unpredicted by max_col_deg / MC64 cost /
+n (ROSEPETAL's MC64 is 68x ORTHREGF's, yet ROSEPETAL is the win). The
+scaling-reuse signal carries NO information about whether compression pays off.
+A gate keyed on it would regress the fill wins (ROSEPETAL ~4x, ex8_2_2) to save
+ms on the overhead-only losses. NOT a safe win. Rejected; not implemented.
+
+Wrote dev/research/mc64-symbolic-skip-2026-06-06.md (design facts + bucket +
+cost/benefit + impossibility-of-prediction). Appended tried-and-rejected.md
+(2026-06-06-04). This closes the dense-column follow-up: both option (a)
+inner-loop fast path (session -03) and option (b) scaling-aware skip are now
+closed with negative results. The real lever is an orthogonal compression
+cost/benefit gate (no cheap feature yet separates ROSEPETAL from ORTHREGF) — a
+separate workstream.
