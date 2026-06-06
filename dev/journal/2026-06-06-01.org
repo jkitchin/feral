@@ -112,3 +112,12 @@ dev/research/issue-80-mc64-preprocessor-cost.md. The default config
 "None + InfNorm" path (2.42s) — while keeping MC64's conditioning. No
 default-behavior change, no corpus-validation risk. The gate is no longer
 needed.
+
+* 12:10 :issue-80:cleanup:dead-code:
+Removed dead src/ordering/amd.rs::amd_order (legacy O(n²) exact-min-degree)
++ its tests + estimate_fill/arrow_matrix_5 helpers + two orphaned
+(unregistered) examples that referenced it (triage_discs_amd.rs,
+profile_sparse_smallfront.rs). Kept permute_pattern (used by symbolic in 5
+places) + test_permute_pattern. This is the function that derailed the
+initial #80 diagnosis. cargo build --all-targets clean, ordering lib tests
+pass (30), clippy clean. Commit 10a3a1a.
