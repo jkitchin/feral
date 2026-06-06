@@ -169,3 +169,45 @@ a per-search IndexHeap::new made heap_init 254727 vs expected 53727 -> test
 FAILS as designed; reverted. Full feral lib suite 317 passed/0 failed,
 clippy clean, fmt clean. (Ran in CARGO_TARGET_DIR=/tmp/feral-iso to avoid
 lock contention with the editor's background cargo check --workspace.)
+
+* 15:55 :scaling:issue-80:tooling:scaling-sweep:
+Step 1 done — new diagnostic binary crates/feral-diagnostics/src/bin/scaling_sweep.rs
+(phase-attributed scaling-law data collection, lifted from probe_rocket_profile.rs).
+Modes: --family / --manifest / --generated {spd,kkt} --sizes. Per matrix:
+Solver::new().with_profiling(true).with_parallel(false), invalidate_symbolic_cache()
+before each of K factors (forces symbolic miss so symbolic stages are timed),
+per-field median over K, CSV with full prologue breakdown + 17 symbolic stages
++ max_col_degree + sum_d_logd control variates. Pinned --scaling via with_scaling().
+Rust = data collection only; alpha-fitting is Python over the CSV.
+
+Generated families: first cut used full-range random off-diagonals -> numeric
+loop ~n^2.5 (pathological fill, a GENERATOR artifact not a solver property).
+Switched to constant-bandwidth (GEN_BAND=16) banded SPD/KKT -> all phases
+near-linear (SPD n 300->10000 ~33x: loop 40x, prologue 33x, scaling 40x,
+sym 32x; KKT similar). Good fittable baseline.
+
+* 16:10 :scaling:issue-80:VERIFIED:ldlt-compress:finding:
+Ran scaling_sweep on rocket_12800_0000 (n=89601, nnz=332793, max_col_degree=38401)
+with --scaling mc64. TWO results:
+
+(1) #80 VERIFIED. pb_scaling_us = 4.3 ms (was 4111 ms = 4.1 s pre-fix per research
+note 2026-05-21 §10) -> ~950x reduction. MC64 Hungarian is no longer the prologue
+bottleneck. pb_permute_us = 64 ms (from_triplets 31 ms) -> the note's permute
+suspicion stays exonerated.
+
+(2) NEW O(n^2)-CLASS HOTSPOT. With symbolic forced to re-run (it is normally
+CACHED across IPM iters, which is why no prior probe saw this), the symbolic
+phase is 38.8 s, of which sym_ldlt_compress_us = 38.33 s = 98.9%. Every other
+symbolic stage is <0.13 s. The matrix has a near-dense coupling column of
+degree 38401 (43% of n=89601) -> sum_d_logd=817352. This is the densest-column
+signature the control variate was built to catch: the LDLT-compress symbolic
+preprocessor (issue #56 LdltCompress, default-on for rocket) is super-linear in
+max_col_degree. Paid once per pattern (not per IPM iter), so its impact profile
+differs from the per-iter MC64 cost, but a ~38 s one-time analysis on a 90k KKT
+is a clear inefficiency. STRONG SUSPECT for Step 3 localization: need a
+dense-coupling-column size ladder to confirm the exponent in max_col_degree and
+find the offending loop in the ldlt_compress code path.
+
+Tooling note: ran builds/tests in CARGO_TARGET_DIR=/tmp/feral-iso throughout
+to avoid lock contention with the editor's background cargo check --workspace
+(rust-analyzer), which otherwise blocks every cargo invocation for minutes.
