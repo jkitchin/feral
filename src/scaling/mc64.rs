@@ -37,7 +37,9 @@
 //! and a hard failure would regress the current `ForceAccept`
 //! pathway.
 
-use super::hungarian::{hungarian_match, CostGraph, Matching};
+use super::hungarian::{
+    hungarian_match, hungarian_match_instrumented, CostGraph, HungarianStats, Matching,
+};
 use super::ScalingInfo;
 use crate::error::FeralError;
 use crate::sparse::csc::CscMatrix;
@@ -153,6 +155,23 @@ pub(crate) fn compute_matching(matrix: &CscMatrix) -> Result<Mc64Cache, FeralErr
 pub(crate) fn compute_symmetric(matrix: &CscMatrix) -> Result<(Vec<f64>, ScalingInfo), FeralError> {
     let cache = compute_matching(matrix)?;
     Ok(scaling_from_cache(&cache))
+}
+
+/// Diagnostic: build the cost graph and run the instrumented Hungarian,
+/// returning its work counters plus the cost-graph nnz. Used by the
+/// scaling audit to localize where the MC64 matching time goes
+/// (dense-column edge scans vs heap reset vs phase-3). Not on any hot
+/// path — no caching, no scaling-vector post-processing.
+pub(crate) fn compute_matching_stats(
+    matrix: &CscMatrix,
+) -> Result<(HungarianStats, usize), FeralError> {
+    if matrix.n == 0 {
+        return Ok((HungarianStats::default(), 0));
+    }
+    let (cost_graph, _cmax) = build_cost_graph(matrix)?;
+    let cost_nnz = cost_graph.row_idx.len();
+    let (_m, stats) = hungarian_match_instrumented(&cost_graph);
+    Ok((stats, cost_nnz))
 }
 
 /// Cheap O(n) post-processing that turns a cached MC64 matching into

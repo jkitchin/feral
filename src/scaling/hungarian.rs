@@ -80,12 +80,19 @@ const NONE: usize = usize::MAX;
 /// - `phase3_inner_iters`: iterations of the length-2 augmentation
 ///   inner loop in `hungarian_init_heuristic`. O(nnz²) blow-up there
 ///   shows up as super-linear growth of this counter vs nnz.
+/// - `main_loop_edge_scans`: total edges examined in the main
+///   shortest-path loop (root-column scan + each popped row's matched
+///   column). A near-dense coupling column makes each scan touching it
+///   O(degree), so on a dense-column matrix this counter — not the
+///   heap work — is the dominant cost. Counted once per column-scan
+///   (by column length), so the kernel overhead is O(1) per scan.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct HungarianStats {
     pub heap_init_slots: u64,
     pub augment_searches: u64,
     pub touched_total: u64,
     pub phase3_inner_iters: u64,
+    pub main_loop_edge_scans: u64,
 }
 
 /// A large finite value used as "+∞" for shortest-path distances.
@@ -527,6 +534,7 @@ pub(crate) fn hungarian_match_instrumented(cost: &CostGraph) -> (Matching, Hunga
         // Scan the root column: each entry is either a direct
         // augmenting-path terminator (if the row is unmatched) or
         // a seed for the open set (if the row is matched).
+        stats.main_loop_edge_scans += (cost.col_ptr[j + 1] - cost.col_ptr[j]) as u64;
         for k in cost.col_ptr[j]..cost.col_ptr[j + 1] {
             let i = cost.row_idx[k];
             let dnew = cost.cost[k] - u[i];
@@ -573,6 +581,7 @@ pub(crate) fn hungarian_match_instrumented(cost: &CostGraph) -> (Matching, Hunga
             // This is the accumulated reduced-cost offset to apply
             // to each outgoing edge.
             let vj = dq0 - cost.cost[jperm[j2]] + u[q0];
+            stats.main_loop_edge_scans += (cost.col_ptr[j2 + 1] - cost.col_ptr[j2]) as u64;
             for k in cost.col_ptr[j2]..cost.col_ptr[j2 + 1] {
                 let i = cost.row_idx[k];
                 if visited[i] {

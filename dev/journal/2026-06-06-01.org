@@ -245,3 +245,41 @@ run in the SYMBOLIC phase for the LdltCompress ordering-compression preprocessor
 The Step 1 commit (1b2b21c) message carries the imprecise "new hotspot" framing;
 this entry is the correction (commits are local/unpushed; the accurate account
 lives here and in the checkpoint, per the append-only journal rule).
+
+* 17:30 :scaling:issue-80:RESOLVED:debug-release:ldlt-compress:
+RESOLVED the 4.1s-vs-38s discrepancy from the 16:35 entry: it was DEBUG vs
+RELEASE, not a regression. Added edge_scans counter to the Hungarian main loop
+(O(1) per column-scan) + a pub diagnose_mc64_matching(matrix) -> Mc64MatchStats
+entry point (src/scaling/mod.rs) + probe_mc64_hungarian binary.
+
+rocket_12800_0000 (n=89601, max_deg=38401), instrumented Hungarian:
+  searches=29416  touched_total=2.238e8  heap_init=2.239e8 (= n + touched, invariant holds)
+  phase3=63299    edge_scans=3.710e8
+  wall: DEBUG 44052 ms  vs  RELEASE 3692 ms  (~12x). Release 3.7s ~= note §10's
+  4.1s -> NO REGRESSION; #80 is neutral-to-helpful on rocket.
+
+Mechanism (build-independent counters): rocket's MC64 cost is dense-column
+edge scans (3.7e8) + heap-reset/touched work (2.2e8), both O(searches *
+dense_deg) driven by the degree-38401 coupling column traversed across 29416
+main-loop searches. #80's heap fix cut heap work from searches*m = 29416*89601
+= 2.64e9 (pre-fix) to 2.24e8 (post-fix, ~12x), but edge scans (untouched by #80)
+co-dominate, so net rocket cost is ~unchanged by #80.
+
+DE-ESCALATION: the "38s ldlt_compress hotspot" (16:10/16:35 entries, Step 1
+commit 1b2b21c) was a DEBUG artifact. In release it is ~3.7s, a one-time
+symbolic analysis (cached across IPM iters). Still an O(searches*dense_deg)
+inefficiency worth a dense-column fast path eventually, but NOT the major
+hotspot the debug number suggested. All scaling_sweep absolute timings to date
+were debug; alpha exponents (ratios) are unaffected (the ~12x factor cancels),
+so the generated-ladder alpha~=1.0 conclusions stand.
+
+Synthetic exponent ladder: BLOCKED. gen_spd/gen_bordered are diagonally
+dominant, so MC64 matches the diagonal trivially (greedy succeeds, searches=0,
+main loop never runs). rocket's expensive matching needs a HARD matching from
+KKT structure (zero (2,2) diagonal block + dense coupling). This is itself a
+finding: MC64 is only expensive on hard, dense-coupled, non-diagonally-dominant
+matchings. Confirming the n-exponent would need a KKT-style hard generator;
+deferred (the rocket data point already establishes the mechanism).
+
+METHODOLOGY NOTE: run scaling_sweep in --release for absolute timings; debug
+inflates ~12x. alpha-fits are fine in either build.

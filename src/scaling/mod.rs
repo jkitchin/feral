@@ -83,6 +83,50 @@ pub(crate) fn compute_mc64_cache(matrix: &CscMatrix) -> Result<Mc64Cache, FeralE
     mc64::compute_matching(matrix)
 }
 
+/// Diagnostic snapshot of MC64 Hungarian matching work for the
+/// super-linear scaling audit. Counters are algorithmic (not
+/// wall-clock), so they localize *where* the matching time goes
+/// independent of machine speed: `main_loop_edge_scans` dominating
+/// means dense-column edge scans, `heap_init_slots` dominating means
+/// per-search heap work, `phase3_inner_iters` means the length-2
+/// augmentation. See [`diagnose_mc64_matching`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Mc64MatchStats {
+    pub n: usize,
+    pub cost_nnz: usize,
+    pub max_col_degree: usize,
+    pub augment_searches: u64,
+    pub touched_total: u64,
+    pub heap_init_slots: u64,
+    pub phase3_inner_iters: u64,
+    pub main_loop_edge_scans: u64,
+}
+
+/// Run the MC64 Hungarian matching with instrumentation and return its
+/// work counters (diagnostic-only: no caching, no scaling-vector
+/// post-processing). Used by the scaling audit to localize the matching
+/// cost on dense-coupling-column matrices like rocket_12800.
+pub fn diagnose_mc64_matching(matrix: &CscMatrix) -> Result<Mc64MatchStats, FeralError> {
+    let (s, cost_nnz) = mc64::compute_matching_stats(matrix)?;
+    let mut max_col_degree = 0usize;
+    for j in 0..matrix.n {
+        let d = matrix.col_ptr[j + 1] - matrix.col_ptr[j];
+        if d > max_col_degree {
+            max_col_degree = d;
+        }
+    }
+    Ok(Mc64MatchStats {
+        n: matrix.n,
+        cost_nnz,
+        max_col_degree,
+        augment_searches: s.augment_searches,
+        touched_total: s.touched_total,
+        heap_init_slots: s.heap_init_slots,
+        phase3_inner_iters: s.phase3_inner_iters,
+        main_loop_edge_scans: s.main_loop_edge_scans,
+    })
+}
+
 /// User-facing scaling strategy selector.
 ///
 /// Default is `Auto` — adaptive shape-based routing that picks
