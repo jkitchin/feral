@@ -48,3 +48,40 @@ levers: (1) profiler mis-attribution (cheap fix); (2) whether
 LdltCompress/Mc64Symmetric should fire on large near-tree KKTs where MC64
 costs 53s and compression buys no fill (3.81x with or without per #80).
 User chose: land profiler fix + research the gating.
+
+* 10:40 :issue-80:gating:mc64:experiment:inertia:
+Full-Solver A/B on real pf22 (n=2.8M, ref n_neg=940248) and pf01
+(n=366k). factor() = symbolic+numeric wall; resid = ||Ax-b||/||b||.
+
+pf22:
+  A default (LdltCompress + Mc64Symmetric): 65.5s  Success  n_neg=940248  resid 5.3e-13
+  B None + InfNorm:                          2.42s  Success  n_neg=940248  resid 3.8e-11
+  C None + Mc64Symmetric:                   63.4s  Success  n_neg=940248  resid 3.0e-10
+  D LdltCompress + InfNorm:                 62.3s  Success  n_neg=940248  resid 5.3e-13
+pf01:
+  A: 1.73s Singular n_neg=126744 resid 1.4e-9
+  B: 0.32s Success  n_neg=126744 resid 2.7e-9
+  C: 1.60s Singular n_neg=126744 resid 8.2e-9
+  D: 1.52s Success  n_neg=126744 resid 2.9e-10
+
+Findings:
+- Inertia EXACT in every config on both matrices. MC64 not needed for the
+  inertia hard rule on this class.
+- Config B (no preprocessor + InfNorm) is 27x faster on pf22 (2.42s vs
+  65.5s), residual 3.8e-11 (irrelevant to IPM tol ~1e-8).
+- MC64 invoked TWICE (LdltCompress preprocess + Mc64Symmetric scaling);
+  C and D show disabling only one leaves the cost. Must gate both.
+- pf01: MC64 scaling yields spurious Singular status; InfNorm gives clean
+  Success. Second mark against MC64 on powerflow.
+- MC64 cost: 1.3s@366k -> 63s@2.8M = 48x for 7.7x n ~= O(n^1.9).
+- pf01 avg_deg 5.76 > #50's avg_deg<5 yet still triggers LdltCompress
+  (arrow signature is degree-based) -> gate can't reuse #50's predicate.
+- Validated profiler fix on real matrix: config A shows ldlt_compress
+  63.06s as its own stage, ordering 0.237s.
+
+Proposed gate (NOT implemented; decisions.md-level): skip MC64 in BOTH
+pick_ordering_preprocess and pick_scaling_strategy when n > ~500k AND arrow
+signature. Needs corpus validation + intermediate powerflow sizes before
+flipping default. Note: 2026-04-19 made Mc64Symmetric default for good
+reasons (8x tail compression, MSS1_0009) -> gate must stay narrow.
+Research note: dev/research/issue-80-mc64-preprocessor-cost.md.
