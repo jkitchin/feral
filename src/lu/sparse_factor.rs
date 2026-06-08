@@ -3,14 +3,14 @@
 //! Factors `P A Q = L U` with threshold partial pivoting. `Q` is the
 //! fill-reducing column ordering from [`SparseLuSymbolic`]; `P` is the row
 //! permutation from pivoting. `L` is unit lower triangular (strict-lower stored
-//! CSC, unit diagonal implicit) and `U` is upper triangular (strict-upper
-//! stored CSC plus an explicit diagonal), both in pivot-position coordinates.
+//! CSC, unit diagonal implicit); `U` is upper triangular stored row-wise (CSR,
+//! strict-upper, plus an explicit diagonal) so the Forrest–Tomlin update can do
+//! row operations on it. Both are in pivot-position coordinates.
 //!
 //! Each column `k` (processing original column `qcol[k]`) is computed by a
-//! forward substitution `L w = A(:,qcol[k])` in pivot order; entries landing on
-//! already-pivoted rows form `U(:,k)`, and the largest remaining entry is the
-//! new pivot. This is correct but not yet output-sensitive — the depth-first
-//! symbolic reach that makes it O(flops) is a documented follow-up.
+//! forward substitution `L w = A(:,qcol[k])`, output-sensitive via a
+//! Gilbert–Peierls depth-first reach: the numeric solve runs only over the
+//! pivot positions reachable from the nonzeros of `A(:,qcol[k])`.
 
 use super::scaling::{compute_lu_scale, LuScale};
 use super::sparse_symbolic::SparseLuSymbolic;
@@ -38,9 +38,11 @@ pub struct SparseLu {
     pub(super) l_col_ptr: Vec<usize>,
     pub(super) l_row_idx: Vec<usize>,
     pub(super) l_val: Vec<f64>,
-    // U: strict-upper stored CSC (pivot-position rows) + explicit diagonal.
-    pub(super) u_col_ptr: Vec<usize>,
-    pub(super) u_row_idx: Vec<usize>,
+    // U: strict-upper stored row-wise (CSR, pivot-position rows, ascending
+    // column positions) + explicit diagonal. Row-wise so the Forrest–Tomlin
+    // update can do row operations on U.
+    pub(super) u_row_ptr: Vec<usize>,
+    pub(super) u_col_idx: Vec<usize>,
     pub(super) u_val: Vec<f64>,
     pub(super) u_diag: Vec<f64>,
     /// `perm[k]` = original row in pivot position `k` (`(P a)[k] = a[perm[k]]`).
@@ -247,13 +249,17 @@ impl SparseLu {
         let perm_inv: Vec<usize> = pinv.iter().map(|&p| p as usize).collect();
         remap_and_sort_l(&l_col_ptr, &mut l_row_idx, &mut l_val, &perm_inv, m);
 
+        // Transpose U from column-wise (built above) to row-wise CSR. Columns
+        // were emitted in increasing order, so each row ends up column-sorted.
+        let (u_row_ptr, u_col_idx, u_val) = transpose_to_csr(&u_col_ptr, &u_row_idx, &u_val, m);
+
         Ok(SparseLu {
             m,
             l_col_ptr,
             l_row_idx,
             l_val,
-            u_col_ptr,
-            u_row_idx,
+            u_row_ptr,
+            u_col_idx,
             u_val,
             u_diag,
             perm,
@@ -328,14 +334,50 @@ impl SparseLu {
         if i == j {
             return self.u_diag[j];
         }
-        let (s, e) = (self.u_col_ptr[j], self.u_col_ptr[j + 1]);
+        if i > j {
+            return 0.0;
+        }
+        let (s, e) = (self.u_row_ptr[i], self.u_row_ptr[i + 1]);
         for idx in s..e {
-            if self.u_row_idx[idx] == i {
+            if self.u_col_idx[idx] == j {
                 return self.u_val[idx];
             }
         }
         0.0
     }
+}
+
+/// Transpose a strict-upper `U` from column-wise CSC (`col_ptr` over columns,
+/// `row_idx` = pivot-row positions) to row-wise CSR. Columns are assumed
+/// emitted in ascending order, so each output row is column-sorted.
+fn transpose_to_csr(
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    val: &[f64],
+    m: usize,
+) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+    let nnz = val.len();
+    let mut row_cnt = vec![0usize; m];
+    for &r in row_idx.iter() {
+        row_cnt[r] += 1;
+    }
+    let mut row_ptr = vec![0usize; m + 1];
+    for i in 0..m {
+        row_ptr[i + 1] = row_ptr[i] + row_cnt[i];
+    }
+    let mut col_idx = vec![0usize; nnz];
+    let mut out_val = vec![0.0; nnz];
+    let mut next: Vec<usize> = row_ptr[..m].to_vec();
+    for k in 0..m {
+        for idx in col_ptr[k]..col_ptr[k + 1] {
+            let r = row_idx[idx];
+            let dst = next[r];
+            next[r] += 1;
+            col_idx[dst] = k;
+            out_val[dst] = val[idx];
+        }
+    }
+    (row_ptr, col_idx, out_val)
 }
 
 /// Remap L's original row indices to pivot positions and sort each column.

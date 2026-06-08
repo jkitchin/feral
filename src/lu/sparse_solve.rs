@@ -172,30 +172,30 @@ impl SparseLu {
         }
     }
 
-    /// Back solve `U w = s` (upper), in place.
+    /// Back solve `U w = s` (upper, row-wise CSR), in place.
     fn usolve(&self, s: &mut [f64]) {
         for k in (0..self.m).rev() {
-            let sk = s[k] / self.u_diag[k];
-            s[k] = sk;
-            if sk == 0.0 {
-                continue;
-            }
-            let (lo, hi) = (self.u_col_ptr[k], self.u_col_ptr[k + 1]);
+            let mut acc = s[k];
+            let (lo, hi) = (self.u_row_ptr[k], self.u_row_ptr[k + 1]);
             for idx in lo..hi {
-                s[self.u_row_idx[idx]] -= self.u_val[idx] * sk;
+                acc -= self.u_val[idx] * s[self.u_col_idx[idx]];
             }
+            s[k] = acc / self.u_diag[k];
         }
     }
 
-    /// Forward solve `Uᵀ z = s` (`Uᵀ` lower), in place.
+    /// Forward solve `Uᵀ z = s` (`Uᵀ` lower; scatter form on row-wise U).
     fn ut_solve(&self, s: &mut [f64]) {
-        for k in 0..self.m {
-            let mut acc = s[k];
-            let (lo, hi) = (self.u_col_ptr[k], self.u_col_ptr[k + 1]);
-            for idx in lo..hi {
-                acc -= self.u_val[idx] * s[self.u_row_idx[idx]];
+        for i in 0..self.m {
+            let si = s[i] / self.u_diag[i];
+            s[i] = si;
+            if si == 0.0 {
+                continue;
             }
-            s[k] = acc / self.u_diag[k];
+            let (lo, hi) = (self.u_row_ptr[i], self.u_row_ptr[i + 1]);
+            for idx in lo..hi {
+                s[self.u_col_idx[idx]] -= self.u_val[idx] * si;
+            }
         }
     }
 
