@@ -18,16 +18,51 @@ use super::{LuParams, LuScaling, LuSingularAction};
 use crate::error::FeralError;
 use crate::lu::sparse_matrix::SparseColMatrix;
 
-/// One product-form update of the `U` factor (issue #81 sparse rank-1 update).
-///
-/// Replacing column `q` of the current factorization by a new column yields
-/// `U' = U·F` with `F = I + (τ − e_q)e_qᵀ`, where `τ` is the transformed spike.
-/// We store `(q, τ)` and apply `F⁻¹` after the `U`-solve in `ftran` (and its
-/// transpose in `btran`). `τ[q]` is the update's pivot / stability monitor.
+/// One elementary operation of a Forrest–Tomlin update's bump elimination,
+/// recorded so it can be replayed on a solve vector (and transposed for btran).
 #[derive(Debug, Clone)]
-pub(super) struct EtaU {
-    pub q: usize,
-    pub tau: Vec<f64>,
+pub(super) enum FtOp {
+    /// Swap two pivot positions (partial-pivot row interchange in the bump).
+    Swap(usize, usize),
+    /// `target_row -= mult · src_row` (Gauss elimination of a sub-diagonal).
+    Axpy {
+        target: usize,
+        src: usize,
+        mult: f64,
+    },
+}
+
+/// One Forrest–Tomlin column-replacement update: the sequence of elementary row
+/// operations (partial-pivot swaps + eliminations) that re-triangularized `U`
+/// after the spike was inserted. The base `L` is never touched; these ops are
+/// replayed on the solve vector between the `L`-solve and the `U`-solve in
+/// `ftran` (transposed, in reverse, between `Uᵀ` and `Lᵀ` in `btran`). Because
+/// the bump is local and sparse, each eta is `O(bump)` — no dense `τ`.
+#[derive(Debug, Clone)]
+pub(super) struct FtEta {
+    pub ops: Vec<FtOp>,
+}
+
+impl FtEta {
+    /// Apply this elimination `E` forward to `y` (`y ← E y`).
+    pub(super) fn apply_forward(&self, y: &mut [f64]) {
+        for op in self.ops.iter() {
+            match *op {
+                FtOp::Swap(a, b) => y.swap(a, b),
+                FtOp::Axpy { target, src, mult } => y[target] -= mult * y[src],
+            }
+        }
+    }
+
+    /// Apply `Eᵀ` to `y` (reverse the ops, transpose each).
+    pub(super) fn apply_transpose(&self, y: &mut [f64]) {
+        for op in self.ops.iter().rev() {
+            match *op {
+                FtOp::Swap(a, b) => y.swap(a, b),
+                FtOp::Axpy { target, src, mult } => y[src] -= mult * y[target],
+            }
+        }
+    }
 }
 
 /// Sparse LU factorization of a square basis.
@@ -49,9 +84,11 @@ pub struct SparseLu {
     pub(super) qcol: Vec<usize>,
     /// Inverse of `qcol`: `qcol_inv[original_col] = column_position`.
     pub(super) qcol_inv: Vec<usize>,
-    /// Product-form `U`-updates applied since the last factor/refactor.
-    pub(super) etas: Vec<EtaU>,
-    /// Running growth monitor (max `1/|τ_q|` over the updates).
+    /// Forrest–Tomlin column-replacement updates applied since the last
+    /// factor/refactor. Each is a replayable bump elimination (`O(bump)`), so
+    /// warm solves stay sparse (no dense eta chain).
+    pub(super) etas: Vec<FtEta>,
+    /// Running growth monitor (max elimination multiplier over the updates).
     pub(super) growth: f64,
     /// Total Gilbert–Peierls reach nodes visited during the factor — a
     /// structural scalability witness (`O(nnz(U))`, not `O(n²)`).

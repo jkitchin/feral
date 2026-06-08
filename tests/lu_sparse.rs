@@ -222,6 +222,50 @@ fn sparse_update_single_residual() {
 }
 
 #[test]
+fn sparse_ft_long_chain_residual() {
+    // A long Forrest–Tomlin update chain on a sparse basis: every warm solve
+    // must stay correct (residual small) as the chain grows — and the etas are
+    // bump-local, so this also exercises partial pivoting in the bump.
+    let m = 30;
+    let mut cols = banded_basis(m, 0xFEED);
+    let params = LuParams {
+        max_updates: 1000,
+        ..LuParams::default()
+    };
+    let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+    let symbolic = SparseLuSymbolic::analyze(&a).expect("analyze");
+    let mut lu = SparseLu::factor(&a, &symbolic, params).expect("factor");
+    let rhs: Vec<f64> = (0..m).map(|i| 1.0 + (i % 5) as f64 * 0.5).collect();
+
+    let mut state = 0xC0FFEEu64;
+    let mut rng = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((state >> 33) as f64) / (1u64 << 31) as f64 - 1.0
+    };
+    for step in 0..25 {
+        let slot = (step * 7 + 3) % m;
+        // Diagonally-dominant replacement column keeps the basis nonsingular.
+        let mut nc = vec![0.0; m];
+        nc[slot] = 5.0 + rng().abs();
+        if slot > 0 {
+            nc[slot - 1] = rng();
+        }
+        if slot + 1 < m {
+            nc[slot + 1] = rng();
+        }
+        lu.update(slot, &nc).expect("ft update");
+        cols[slot] = nc;
+        let b_new = SparseColMatrix::from_dense_columns(m, &cols).expect("b_new");
+        let res = ftran_rel_residual(&b_new, &mut lu, &rhs);
+        assert!(res < 1e-7, "after FT update {step} (slot {slot}): {res:e}");
+        // btran must also stay correct.
+        let bres = btran_rel_residual(&b_new, &mut lu, &rhs);
+        assert!(bres < 1e-7, "btran after FT update {step}: {bres:e}");
+    }
+    assert_eq!(lu.updates_since_refactor(), 25);
+}
+
+#[test]
 fn sparse_update_budget_and_refactor() {
     let m = 8;
     let cols = banded_basis(m, 0x55);
