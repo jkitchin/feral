@@ -80,10 +80,18 @@ pub struct SparseLu {
     pub(super) u_rows: Vec<Vec<(usize, f64)>>,
     /// `perm[k]` = original row in pivot position `k` (`(P a)[k] = a[perm[k]]`).
     pub(super) perm: Vec<usize>,
+    /// Inverse of `perm`: `perm_inv[orig_row] = pivot_position`. Used to seed the
+    /// sparse spike solve in the Forrest–Tomlin update.
+    pub(super) perm_inv: Vec<usize>,
     /// Column order: factorization column `k` is original column `qcol[k]`.
     pub(super) qcol: Vec<usize>,
     /// Inverse of `qcol`: `qcol_inv[original_col] = column_position`.
     pub(super) qcol_inv: Vec<usize>,
+    /// Column-wise index of `U`'s strict-upper part: `u_above[c]` is the sorted
+    /// list of rows `i < c` with `U[i,c] != 0`. Lets the FT update find column
+    /// `r`'s existing entries (for in-place replacement) without scanning all
+    /// rows. Maintained across updates; not used by the solves.
+    pub(super) u_above: Vec<Vec<usize>>,
     /// Forrest–Tomlin column-replacement updates applied since the last
     /// factor/refactor. Each is a replayable bump elimination (`O(bump)`), so
     /// warm solves stay sparse (no dense eta chain).
@@ -97,6 +105,13 @@ pub struct SparseLu {
     /// Two-sided scaling of the factored matrix (identity when unscaled).
     pub(super) scale: LuScale,
     pub(super) scratch: Vec<f64>,
+    /// Reusable length-`m` boolean marker for the FT update's sparse spike
+    /// (tracks touched positions so they can be cleared in `O(touched)`).
+    pub(super) scratch_mark: Vec<bool>,
+    /// Dedicated length-`m` work buffer for the FT update's sparse spike, kept
+    /// zeroed between updates. Separate from `scratch` (which the solves dirty),
+    /// so `compute_spike`'s sparse scatter can assume a clean buffer.
+    pub(super) ft_work: Vec<f64>,
 }
 
 impl SparseLu {
@@ -297,6 +312,16 @@ impl SparseLu {
             }
             u_rows.push(row);
         }
+        // Column-wise index of U's strict-upper entries (rows added in
+        // increasing order, so each `u_above[c]` is sorted ascending).
+        let mut u_above: Vec<Vec<usize>> = vec![Vec::new(); m];
+        for (i, row) in u_rows.iter().enumerate() {
+            for &(c, _) in row.iter() {
+                if c > i {
+                    u_above[c].push(i);
+                }
+            }
+        }
 
         Ok(SparseLu {
             m,
@@ -305,14 +330,18 @@ impl SparseLu {
             l_val,
             u_rows,
             perm,
+            perm_inv,
             qcol,
             qcol_inv,
+            u_above,
             etas: Vec::new(),
             growth: 1.0,
             reach_visits,
             params,
             scale,
             scratch: vec![0.0; m],
+            scratch_mark: vec![false; m],
+            ft_work: vec![0.0; m],
         })
     }
 

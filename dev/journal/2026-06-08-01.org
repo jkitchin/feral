@@ -251,3 +251,30 @@ of issue #81's update machinery, now measured. (The update still carries an
 O(m) component from set_column's row scan and the lsolve loop; a fully
 output-sensitive update via the GP reach + bump-local set_column is a noted
 optimization, separate from the already-bump-local SOLVE/eta cost.)
+
+* 23:30 :lu:sparse:update:bump-local:
+Made the sparse FT update fully bump-local (user request: GP reach in lsolve +
+bump-local set_column). Three changes:
+1. Spike via Gilbert–Peierls depth-first reach over L (compute_spike): only the
+   reachable L-columns are touched, not the whole O(m) lsolve loop. Result is a
+   sparse spike in a dedicated zeroed work buffer.
+2. set_column via a new u_above column index (rows<col with an entry): finds
+   column r's existing entries without scanning all rows. u_above maintained
+   incrementally (unindex saved-old / index new) over the changed rows only.
+3. No more O(nnz) clone of U: save only the changed rows ([r,h] ∪ supp(ρ) ∪
+   u_above[r]); roll back on failure (u_above updated only on success).
+
+Debugging: hit a stale-buffer bug — compute_spike's SPARSE scatter assumes a
+zeroed buffer, but ftran/btran use self.scratch as their work buffer and leave
+it dirty (they overwrite via full gather, never re-zero). The old dense
+spike_space didn't care (full gather). Fix: dedicated ft_work buffer for the
+update, kept zeroed (cleared via the touched list each update); the solves keep
+using self.scratch. Found via a stale-w assertion at compute_spike entry.
+
+Result (criterion update_vs_refactor): ft_update 206→95µs at n=1000, 829→405µs
+at n=5000 — ~2× faster than the clone version, now ~14–17× faster than a full
+refactor (was 8–10×). ft_update_is_bump_local guard still passes (eta size
+independent of n). Full suite (635) green; clippy -D warnings clean.
+
+Remaining O(m): one scan of the dense entering column (inherent to the dense
+API) — not the heavy clone/lsolve/scan that was removed.
