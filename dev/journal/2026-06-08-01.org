@@ -125,3 +125,31 @@ correctness (residual < 1e-8) on a 16-orders-of-magnitude ill-scaled basis
 (dense + sparse), dense↔sparse agreement under MC64, equilibration drives all
 row/col ∞-norms into [0.1,10], and MC64 puts order-1 entries on the diagonal.
 Full suite green; clippy -D warnings clean.
+
+* 17:30 :lu:sparse:scalability:gilbert-peierls-reach:
+User asked to verify the sparse factor scales < O(n²). Wrote a scaling
+probe (crates/feral-diagnostics/src/bin/lu_scale_probe.rs) factoring
+tridiagonal (no-fill) and 2D 5-point grid (fill) bases at increasing n.
+
+BEFORE (the deferred-DFS O(m²) forward-substitution scan): factor time on
+tridiagonal went 203→558→2197→8167→31714→127004→513105 µs as n doubled
+500→32000, empirical exponent → 2.00. Confirmed quadratic.
+
+FIX: implemented the deferred Gilbert–Peierls depth-first reach. Per column,
+DFS over the graph of L from the nonzeros of A(:,qcol[k]) (edges col→pivot
+positions of its already-pivoted rows; all edges point to larger positions,
+so ascending position order is a valid topological order). Numeric solve now
+runs only over the reach (sorted ascending), not all p<k. Reuses w/touched
+logic unchanged; same numeric result (all reconstruction/residual/dense↔sparse
+tests still green).
+
+AFTER: tridiagonal factor 51→96→289→452→826→1692→3143→6281 µs for
+n=500..64000, exponent ~1.0 (156× faster at n=32000: 513ms→3.3ms). 2D grid
+(Lnnz growing ~n^1.33) factor ~O(n^1.6) overall — fill-dominated but firmly
+sub-quadratic. analyze and ftran were already ~linear.
+
+Added a deterministic (timing-free) regression guard: SparseLu.reach_visits()
+counts total reach nodes (O(nnz(U)), not O(n²)); test
+factor_traversal_is_subquadratic asserts doubling n on a tridiagonal less than
+triples the reach work (linear ≈ 2×; the old scan would 4×). Full suite (631)
+green; clippy -D warnings clean.

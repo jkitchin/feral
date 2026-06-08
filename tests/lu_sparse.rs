@@ -270,6 +270,48 @@ fn sparse_update_matches_dense() {
     assert!(diff < 1e-9, "post-update dense vs sparse diff {diff:e}");
 }
 
+/// Build a diagonally-dominant tridiagonal `n`×`n` basis (≈3n nonzeros).
+fn tridiagonal(n: usize) -> SparseColMatrix {
+    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for (j, col) in cols.iter_mut().enumerate() {
+        if j > 0 {
+            col.push((j - 1, -1.0));
+        }
+        col.push((j, 4.0));
+        if j + 1 < n {
+            col.push((j + 1, -1.0));
+        }
+    }
+    SparseColMatrix::from_sparse_columns(n, &cols).expect("tridiagonal")
+}
+
+#[test]
+fn factor_traversal_is_subquadratic() {
+    // Deterministic (timing-free) scalability guard: on a no-fill tridiagonal
+    // basis the Gilbert–Peierls reach work is O(nnz) = O(n). Doubling n must
+    // (well) less than quadruple the reach work; the pre-reach O(n²) scan would
+    // have quadrupled it. We allow a 3× margin (linear ≈ 2×).
+    let work = |n: usize| -> usize {
+        let a = tridiagonal(n);
+        let sym = SparseLuSymbolic::natural(n);
+        let lu = SparseLu::factor(&a, &sym, LuParams::default()).expect("factor");
+        // Sanity: tridiagonal has no fill.
+        assert_eq!(lu.factor_nnz(), a.nnz());
+        lu.reach_visits()
+    };
+    let w1 = work(2000);
+    let w2 = work(4000);
+    let w3 = work(8000);
+    assert!(
+        w2 < 3 * w1,
+        "2000→4000 reach work {w1} → {w2} not sub-quadratic"
+    );
+    assert!(
+        w3 < 3 * w2,
+        "4000→8000 reach work {w2} → {w3} not sub-quadratic"
+    );
+}
+
 #[test]
 fn sparse_refinement_converges() {
     let m = 11;

@@ -53,6 +53,9 @@ pub struct SparseLu {
     pub(super) etas: Vec<EtaU>,
     /// Running growth monitor (max `1/|τ_q|` over the updates).
     pub(super) growth: f64,
+    /// Total Gilbert–Peierls reach nodes visited during the factor — a
+    /// structural scalability witness (`O(nnz(U))`, not `O(n²)`).
+    pub(super) reach_visits: usize,
     pub(super) params: LuParams,
     /// Two-sided scaling of the factored matrix (identity when unscaled).
     pub(super) scale: LuScale,
@@ -103,8 +106,14 @@ impl SparseLu {
         u_col_ptr.push(0);
         let mut u_diag = vec![0.0_f64; m];
 
+        // Gilbert–Peierls symbolic workspace: depth-first reach of each column.
+        let mut reach_mark = vec![false; m];
+        let mut reach: Vec<usize> = Vec::new();
+        let mut dfs_stack: Vec<usize> = Vec::new();
+
         let utol = params.pivot_threshold;
         let ztol = params.zero_pivot_tol;
+        let mut reach_visits = 0usize;
 
         for k in 0..m {
             // Scatter A(:, qcol[k]) into w.
@@ -117,9 +126,39 @@ impl SparseLu {
                 }
             }
 
-            // Forward substitution in pivot order; collect U(:,k) entries.
-            let mut u_entries: Vec<(usize, f64)> = Vec::new();
-            for p in 0..k {
+            // Symbolic: depth-first reach of column k over the graph of L.
+            // A pivot position p < k contributes to column k iff its pivot row
+            // is reachable from the nonzeros of A(:,qcol[k]); edges run from a
+            // column to the pivot positions of its (already-pivoted) rows. All
+            // edges point to strictly larger positions, so ascending position
+            // order is a valid topological order for the numeric solve.
+            reach.clear();
+            for &i in rows.iter() {
+                let pp = pinv[i];
+                if pp >= 0 && !reach_mark[pp as usize] {
+                    reach_mark[pp as usize] = true;
+                    reach.push(pp as usize);
+                    dfs_stack.push(pp as usize);
+                }
+            }
+            while let Some(p) = dfs_stack.pop() {
+                let (ls, le) = (l_col_ptr[p], l_col_ptr[p + 1]);
+                for idx in ls..le {
+                    let pp = pinv[l_row_idx[idx]];
+                    if pp >= 0 && !reach_mark[pp as usize] {
+                        reach_mark[pp as usize] = true;
+                        reach.push(pp as usize);
+                        dfs_stack.push(pp as usize);
+                    }
+                }
+            }
+            reach.sort_unstable();
+            reach_visits += reach.len();
+
+            // Numeric forward substitution over the reach; collect U(:,k).
+            let mut u_entries: Vec<(usize, f64)> = Vec::with_capacity(reach.len());
+            for &p in reach.iter() {
+                reach_mark[p] = false; // clear for the next column
                 let r = perm[p];
                 let xp = w[r];
                 if xp == 0.0 {
@@ -129,8 +168,7 @@ impl SparseLu {
                 let (ls, le) = (l_col_ptr[p], l_col_ptr[p + 1]);
                 for idx in ls..le {
                     let i = l_row_idx[idx];
-                    let before = w[i];
-                    w[i] = before - xp * l_val[idx];
+                    w[i] -= xp * l_val[idx];
                     if !mark[i] {
                         mark[i] = true;
                         touched.push(i);
@@ -223,6 +261,7 @@ impl SparseLu {
             qcol_inv,
             etas: Vec::new(),
             growth: 1.0,
+            reach_visits,
             params,
             scale,
             scratch: vec![0.0; m],
@@ -261,6 +300,13 @@ impl SparseLu {
     /// Total stored nonzeros in `L` and `U` (including the `U` diagonal).
     pub fn factor_nnz(&self) -> usize {
         self.l_val.len() + self.u_val.len() + self.m
+    }
+
+    /// Total Gilbert–Peierls reach nodes visited during the factorization.
+    /// This is `O(nnz(U))` (output-sensitive); it would be `O(n²)` if the
+    /// factor scanned all prior columns. Used by the scalability guard test.
+    pub fn reach_visits(&self) -> usize {
+        self.reach_visits
     }
 
     /// Reconstruct dense entry `(i, j)` of `L` (pivot-position coordinates).
