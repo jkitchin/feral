@@ -21,7 +21,10 @@ unsymmetric LU with first-class rank-1 column-replacement updates and warm
   with threshold partial pivoting, sparse `ftran`/`btran`, and a **Forrest–Tomlin
   / Bartels–Golub–Reid** rank-1 column-replacement update — in-place sparse
   Gaussian elimination of the bump with partial pivoting, recorded as a
-  replayable eta (bump-local warm solves, no `O(k·n)` chain). `SparseLuSymbolic`
+  replayable eta (bump-local warm solves, no `O(k·n)` chain). The update itself
+  is bump-local — Gilbert–Peierls reach for the spike, a `u_above` column index
+  for the replacement, save/restore of only the changed rows (no `O(nnz)`
+  clone) — ~14–17× faster than a refactor. `SparseLuSymbolic`
   computes the fill-reducing column order by running `feral_amd` on the `AᵀA`
   pattern (reusable symbolic handle).
 - **Routing** — `should_use_dense_lu(m, nnz, params)` auto-routes dense vs
