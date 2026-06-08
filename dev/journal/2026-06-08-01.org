@@ -325,3 +325,38 @@ refresh fails — network policy), so the real corpus couldn't be downloaded
 here. The harness/scripts are ready; run fetch where outbound HTTPS is allowed,
 then `cargo run -p feral-diagnostics --release --bin lu_reference` and
 `python scripts/lu_reference_scipy.py` to compare.
+
+* 2026-06-08 review :review:lu:corpus:robustness:
+Code review of PR #82 + corpus run that the previous session's network policy
+blocked. sparse.tamu.edu IS reachable from this host, so fetched the full
+34-matrix corpus and ran both reference harnesses on the PR branch.
+
+feral lu_reference (MC64 + PerturbToEps + 2 refine steps):
+  32/34 OK, residual ‖Bx−a‖/‖a‖ at machine precision (≤~1e-12) on ALL 34.
+  Two non-OK: fs_183_1 (err=7.6e-5, resid=1.9e-16) and saylr3 (err=7.1e-1,
+  resid=9.5e-16) — both tiny residual + large forward error = conditioning,
+  not a solver fault.
+scipy SuperLU cross-check confirms: fs_183_1 also fails (err=2.3e-5) → ill-
+conditioned both engines; saylr3 → SuperLU "Factor is exactly singular" (feral
+degrades gracefully via MC64+PerturbToEps where SuperLU can't factor at all);
+sherman2 → feral OK (err=1.5e-11) but plain SuperLU err=1.7e-6 (feral's
+scaling+refinement wins). Net: feral 32/34 vs SuperLU 31/34.
+
+Fixed 5 review findings on the PR branch (all green: 333 lib tests + integration,
+clippy -D warnings, fmt):
+1. Stale research note §3.3 — it still described the dense update as an eta file
+   with in-bump pivoting + a `update_with_row_swap_residual` test; the impl (and
+   decisions.md 2026-06-08) is an in-place O(m²) L/U re-fold with NO in-bump
+   pivoting. Rewrote §3.3 to match reality.
+2. usolve/ut_solve (sparse_solve.rs) divided by the stored U diagonal with no
+   guard — a degenerate post-update bump pivot could emit silent ±Inf. Now
+   return SingularBasis on an absent/zero/non-finite diagonal; threaded Result
+   through solve_colspace/ftran_core/btran_core (scratch restored on the error
+   path). Added regression test zero_u_diagonal_errors_instead_of_inf.
+3. should_use_dense_lu: m*m / nnz*4 could overflow usize for a caller-set huge
+   dense_threshold → saturating_mul.
+4. lu_reference + scipy script: residual-aware verdict — large err with
+   resid<1e-8 now labels ILL (backward-stable, ill-conditioned), not BAD, so
+   conditioning isn't conflated with a solver bug. fs_183_1/saylr3 now ILL.
+5. sparse_matrix.rs module doc claimed a "transpose" method that doesn't exist
+   (only matvec_transpose + ata_pattern's internal row-wise pass) — corrected.

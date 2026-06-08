@@ -120,8 +120,10 @@ pub fn should_use_dense_lu(m: usize, nnz: usize, params: &LuParams) -> bool {
         return false;
     }
     // Density gate: dense when at least a quarter of the cells are nonzero.
-    let cells = m * m;
-    nnz * 4 >= cells
+    // Saturating arithmetic so a caller-set large `dense_threshold` (which bounds
+    // `m` above) can't overflow `usize` on `m*m` or `nnz*4`.
+    let cells = m.saturating_mul(m);
+    nnz.saturating_mul(4) >= cells
 }
 
 #[cfg(test)]

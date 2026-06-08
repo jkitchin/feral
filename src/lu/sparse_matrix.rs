@@ -3,8 +3,9 @@
 //! Unlike [`crate::sparse::csc::CscMatrix`], which stores only the lower
 //! triangle of a *symmetric* matrix, an LU basis is general and every entry is
 //! stored. Columns are compressed; row indices within a column are sorted
-//! ascending. This module also builds the patterns the column ordering needs:
-//! the transpose and the `AᵀA` (column-intersection) graph.
+//! ascending. This module also builds the `AᵀA` (column-intersection) graph the
+//! column ordering needs (`ata_pattern`, via an internal row-wise pass — there
+//! is no standalone transpose; `matvec_transpose` applies `Aᵀ` to a vector).
 
 use crate::error::FeralError;
 use crate::sparse::csc::CscPattern;

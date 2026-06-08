@@ -93,23 +93,29 @@ down to row m−1.
 ### 3.3 Re-triangularization (Bartels–Golub, citep:bartels1969stable)
 
 Cyclically shift columns `q+1..m−1` of `U` left by one and move the spike column to position
-m−1. The result is **upper-Hessenberg**: one nonzero subdiagonal on positions `q..m−1`. Sweep
-`k = q..m−1` eliminating each subdiagonal entry `H(k+1,k)` with a 2-row Gauss elimination and
-a threshold row interchange when `|H(k+1,k)| > u·|H(k,k)|`. Each elementary operation (the
-Gauss multiplier and whether a swap occurred) is recorded as one `EtaUpdate`. The updated
-factorization is implicitly
+m−1 (tracked in the explicit column permutation `Q = qcol`). The result is **upper-Hessenberg**:
+one nonzero subdiagonal on positions `q..m−1`. Sweep `k = q..m−2` eliminating each subdiagonal
+entry `H(k+1,k)` with a 2-row Gauss elimination.
 
-    B_new = P⁻¹ L (Π_t L_t⁻¹ ⋯ Π_1 L_1⁻¹) U_new
+**As implemented (supersedes the eta sketch above):** the dense path does **not** keep an
+eta-replay file. Each elimination is folded *in place* into the factors — the row op
+`row_{k+1} -= mult·row_k` on `U`, and the matching column op `col_k += mult·col_{k+1}` on `L`
+(this is `L ← L·M⁻¹`, `U ← M·U` for the elementary `M = I − mult·e_{k+1}e_kᵀ`). Because
+`col_{k+1}` of unit-lower `L` is supported on rows `≥ k+1`, the column op leaves `L`'s unit
+diagonal intact and keeps it unit-lower; `U` stays upper-triangular. The cost is therefore the
+dense `O(m²)` re-fold per update, not `O(m)` — still well below an `O(m³)` refactor, and the
+dense regime (tiny OBBT bases) does not need the sparser eta file that the **sparse** path (§4)
+uses. The work is done on clones of `L`, `U`, `Q`, committed only on success, so a
+`NeedsRefactor` leaves `self` unchanged. This choice is recorded in `dev/decisions.md`
+(2026-06-08, "Dense update representation").
 
-— L stays the *original* L, and the spike-elimination deltas live in the eta list. ftran
-replays the etas forward between the L-solve and U-solve; btran replays them transposed in
-reverse. Storing the deltas as etas (O(m) per update) rather than re-folding into the dense
-buffer (O(m²)) is exactly what makes the update cheap.
-
-**Correctness landmine — permutation composition.** Update-time row swaps must NOT be folded
-into `perm`: `perm` defines the original `PB Q = LU`, and folding would desynchronize the
-unmodified original `L`. Update swaps are recorded *inside the eta replay*. A dedicated test
-(`update_with_row_swap_residual`) exercises this.
+**No in-bump pivoting on the dense path.** The dense sweep takes the diagonal as the pivot with
+no threshold row interchange; instability is caught by the growth monitor (`max_growth`) and a
+vanishing bump pivot returns `NeedsRefactor`, rather than being repaired by a swap. Consequently
+the original `perm` is never touched by an update (it still defines the factor-time `P B Q = L U`),
+so the permutation-composition landmine that an eta-with-swaps scheme would face does not arise
+here. (The **sparse** Forrest–Tomlin path §4 *does* pivot inside the bump and records the swaps
+in its eta — see §4.3.)
 
 ### 3.4 Refactor trigger
 

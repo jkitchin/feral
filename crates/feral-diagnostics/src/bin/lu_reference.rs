@@ -184,7 +184,17 @@ fn check(path: &Path) -> String {
         Err(e) => format!("upd={e}"),
     };
 
-    let verdict = if err < 1e-6 { "OK " } else { "BAD" };
+    // A large forward error with a machine-precision residual is matrix
+    // conditioning, not a solver fault: the solve is backward-stable
+    // (‖Bx−a‖/‖a‖ tiny) but the near-singular matrix can't recover x_true.
+    // Label that ILL so it is not conflated with a genuine BAD solve.
+    let verdict = if err < 1e-6 {
+        "OK "
+    } else if resid < 1e-8 {
+        "ILL"
+    } else {
+        "BAD"
+    };
     format!(
         "{name:24}  n={n:<7} nnz={:<9} {verdict} err={err:.2e} resid={resid:.2e} ref={resid_ref:.2e} fill={fill:.1} {update_note} ({factor_us:.0}µs)",
         mtx.nnz
@@ -219,16 +229,27 @@ fn main() {
         return;
     }
     let mut ok = 0usize;
+    let mut ill = 0usize;
     let mut total = 0usize;
     for f in files.iter() {
         let line = check(f);
         if line.contains(" OK ") {
             ok += 1;
         }
-        if line.contains(" OK ") || line.contains(" BAD ") || line.contains("FAIL") {
+        if line.contains(" ILL ") {
+            ill += 1;
+        }
+        if line.contains(" OK ")
+            || line.contains(" ILL ")
+            || line.contains(" BAD ")
+            || line.contains("FAIL")
+        {
             total += 1;
         }
         println!("{line}");
     }
-    println!("\n{ok}/{total} solved to err < 1e-6 (known-x oracle).");
+    println!(
+        "\n{ok}/{total} solved to err < 1e-6 (known-x oracle); \
+         {ill} ILL (backward-stable, resid < 1e-8, but large forward error from conditioning)."
+    );
 }

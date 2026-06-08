@@ -48,7 +48,14 @@ def check(path: str) -> str:
         return f"{name:24}  n={n:<7} SUPERLU-FAIL {e}"
     err = np.max(np.abs(x - x_true)) / max(np.max(np.abs(x_true)), 1e-300)
     resid = np.max(np.abs(b @ x - a)) / max(np.max(np.abs(a)), 1e-300)
-    verdict = "OK " if err < 1e-6 else "BAD"
+    # ILL = backward-stable solve (tiny residual) whose large forward error is
+    # matrix conditioning, not a solver fault. Mirrors the Rust harness verdict.
+    if err < 1e-6:
+        verdict = "OK "
+    elif resid < 1e-8:
+        verdict = "ILL"
+    else:
+        verdict = "BAD"
     return f"{name:24}  n={n:<7} nnz={b.nnz:<9} {verdict} err={err:.2e} resid={resid:.2e}"
 
 
@@ -62,15 +69,20 @@ def main() -> int:
         print(f"no .mtx in {corpus} — run scripts/fetch_lu_corpus.py", file=sys.stderr)
         return 1
     print(f"SciPy SuperLU reference — corpus: {corpus}")
-    ok = total = 0
+    ok = ill = total = 0
     for f in files:
         line = check(f)
         if " OK " in line:
             ok += 1
-        if " OK " in line or " BAD " in line or "FAIL" in line:
+        if " ILL " in line:
+            ill += 1
+        if " OK " in line or " ILL " in line or " BAD " in line or "FAIL" in line:
             total += 1
         print(line)
-    print(f"\n{ok}/{total} solved to err < 1e-6 (SciPy SuperLU).")
+    print(
+        f"\n{ok}/{total} solved to err < 1e-6 (SciPy SuperLU); "
+        f"{ill} ILL (backward-stable but ill-conditioned)."
+    )
     return 0
 
 
