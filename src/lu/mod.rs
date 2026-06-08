@@ -15,9 +15,16 @@ pub mod dense_factor;
 pub mod dense_matrix;
 pub mod dense_solve;
 pub mod dense_update;
+pub mod sparse_factor;
+pub mod sparse_matrix;
+pub mod sparse_solve;
+pub mod sparse_symbolic;
 
 pub use dense_factor::DenseLu;
 pub use dense_matrix::GeneralMatrix;
+pub use sparse_factor::SparseLu;
+pub use sparse_matrix::SparseColMatrix;
+pub use sparse_symbolic::SparseLuSymbolic;
 
 /// What to do when the LU factorization hits a numerically null pivot column.
 ///

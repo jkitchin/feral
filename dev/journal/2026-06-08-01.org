@@ -53,3 +53,29 @@ update-with-row-swap (perm composition), refactor-matches-updated-factor
 parity < 1e-9, budget→NeedsRefactor with self unchanged < 1e-14, and
 ill-conditioned refinement < 1e-12. All green; full suite (55 bins) green;
 clippy -D warnings clean.
+
+* 13:30 :lu:sparse:gilbert-peierls:
+Implemented sparse LU: SparseColMatrix (general CSC, from_dense/sparse
+columns, matvec, ata_pattern = column-intersection graph), SparseLuSymbolic
+(column order Q via feral_amd::amd_order on the AᵀA pattern, i32-contract
+conversion à la symbolic/mod.rs:535-569; plus a natural() fallback), and
+SparseLu factor (left-looking, threshold partial pivoting, PAQ=LU) with
+sparse ftran/btran/ftran_partial and refinement.
+
+Factor stores L (unit lower, strict-lower CSC, pivot-position rows) and U
+(strict-upper CSC + explicit u_diag). Forward substitution in pivot order:
+processing p=0..k-1 in increasing order is correct because column p only
+fills rows that pivot at positions >p (proof: L(:,p) rows are unpivoted at
+step p). L stored with original rows, remapped to pivot positions via pinv
+after the factor completes. Note: this is correct but O(m²)-ish, not yet
+output-sensitive — the GP depth-first reach is a documented follow-up.
+
+btran reads Uᵀ/Lᵀ directly off the CSC columns (no explicit transpose).
+
+Verified tests/lu_sparse.rs (7 tests): ‖PAQ−LU‖ < 1e-10 reconstruction,
+ftran/btran residual < 1e-10, AMD and natural ordering both green,
+dense↔sparse agreement < 1e-9, singular→SingularBasis, PerturbToEps,
+refinement < 1e-12. Full suite green; clippy -D warnings clean.
+
+Deferred to next commit: the sparse rank-1 update (Forrest–Tomlin). The
+perm_inv/qcol_inv fields and update state land with it.
