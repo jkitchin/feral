@@ -153,3 +153,21 @@ counts total reach nodes (O(nnz(U)), not O(n²)); test
 factor_traversal_is_subquadratic asserts doubling n on a tridiagonal less than
 triples the reach work (linear ≈ 2×; the old scan would 4×). Full suite (631)
 green; clippy -D warnings clean.
+
+* 18:15 :lu:sparse:update:degradation-measured:
+Measured warm-solve scaling under update chains (lu_update_probe.rs), n=5000
+tridiagonal. The product-form update stores a DENSE τ (length n) per eta, so
+ftran is O(k·n) after k updates:
+
+  updates  ftran(µs)  eta_nnz
+        0      75       0
+       10     134       50000
+       50     412       250000
+      100     780       500000
+      400    3033      2000000
+
+Linear in k (≈7.4µs/update ≈ n ops), eta file = k·n. 40× slowdown at 400
+updates, unbounded until refactor. This is the PFI "eta chain grows" problem
+the issue cites as the reason to graduate to true Forrest–Tomlin, where the
+spike folds into U and only a SPARSE row-eta is stored, so solves stay cheap.
+Confirms the need; implementing FT next.
