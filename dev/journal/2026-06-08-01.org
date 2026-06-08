@@ -232,3 +232,22 @@ n=8000) and 40× solve degradation. Full suite green; clippy -D warnings clean.
 Honest note: for a DENSE-spike basis (tridiagonal, L⁻¹ dense) the bump spans
 the tail and FT degrades to product-form-like cost — inherent worst case; the
 FT win is for localized spikes (the realistic LP regime), as demonstrated.
+
+* 22:00 :lu:benchmark:criterion:
+Added benches/lu.rs (criterion, harness=false, registered [[bench]] name="lu").
+Groups: dense {factor,ftran,update} m∈{16,64,256}; sparse {factor,ftran,
+ft_update} on block-diagonal n∈{200,1000,5000}; and update_vs_refactor — the
+headline crossover.
+
+Numbers (release, this host; reduced-sample run):
+  dense  factor/256   ≈ 2.34 ms   ftran/256 ≈ 121 µs   update/256 ≈ 202 µs
+  sparse factor/5000  ≈ 318 µs    ftran/5000 ≈ 18 µs   ft_update/5000 ≈ 89 µs
+  update_vs_refactor (block-diag, within-block update):
+     n=1000:  ft_update 206 µs   vs  refactor 1.68 ms   → ~8.2× faster
+     n=5000:  ft_update 829 µs   vs  refactor 8.81 ms   → ~10.6× faster
+
+So the rank-1 FT update is ~8–11× cheaper than re-factoring — the whole point
+of issue #81's update machinery, now measured. (The update still carries an
+O(m) component from set_column's row scan and the lsolve loop; a fully
+output-sensitive update via the GP reach + bump-local set_column is a noted
+optimization, separate from the already-bump-local SOLVE/eta cost.)
