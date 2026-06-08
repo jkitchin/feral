@@ -1,9 +1,11 @@
 //! Sparse `ftran` / `btran` triangular solves and iterative refinement.
 //!
-//! Mirrors the dense path with `P A Q = L U`: `ftran` solves `B x = a`,
-//! `btran` solves `Bᵀ x = a`, and `ftran_partial` returns the spike `L⁻¹ P a`.
-//! All triangular solves operate directly on the CSC factors (no explicit
-//! transpose: `Uᵀ`/`Lᵀ` solves read the same column structure).
+//! Mirrors the dense path with `P A Q = L U F₁…Fₜ`, where the `Fᵢ` are the
+//! product-form `U`-updates (see [`super::sparse_update`]). `ftran` solves
+//! `B x = a`, `btran` solves `Bᵀ x = a`, and `ftran_partial` returns the spike
+//! `L⁻¹ P a`. Triangular solves operate directly on the CSC factors (no
+//! explicit transpose), and the eta updates are applied after the `U`-solve in
+//! `ftran` (transposed, in reverse, before the `Uᵀ`-solve in `btran`).
 
 use super::sparse_factor::SparseLu;
 use super::sparse_matrix::SparseColMatrix;
@@ -15,11 +17,7 @@ impl SparseLu {
         let m = self.m;
         check_len(rhs.len(), m)?;
         let mut s = std::mem::take(&mut self.scratch);
-        for (k, sk) in s.iter_mut().enumerate() {
-            *sk = rhs[self.perm[k]];
-        }
-        self.lsolve(&mut s);
-        self.usolve(&mut s);
+        self.solve_colspace(rhs, &mut s);
         for (k, &wk) in s.iter().enumerate() {
             rhs[self.qcol[k]] = wk;
         }
@@ -35,6 +33,7 @@ impl SparseLu {
         for (k, sk) in s.iter_mut().enumerate() {
             *sk = rhs[self.qcol[k]];
         }
+        self.apply_etas_transpose_reverse(&mut s);
         self.ut_solve(&mut s);
         self.lt_solve(&mut s);
         for (k, &vk) in s.iter().enumerate() {
@@ -44,7 +43,9 @@ impl SparseLu {
         Ok(())
     }
 
-    /// Compute the spike `L⁻¹ P a`, overwriting `rhs` (input to the FT update).
+    /// Compute the spike `L⁻¹ P a` (base factor only, no eta/`U`), overwriting
+    /// `rhs`. Exposed for inspection; the update computes its own transformed
+    /// spike internally.
     pub fn ftran_partial(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
         let m = self.m;
         check_len(rhs.len(), m)?;
@@ -80,6 +81,48 @@ impl SparseLu {
         let a = rhs.to_vec();
         self.btran(rhs)?;
         self.refine(b, &a, rhs, true)
+    }
+
+    /// Solve into column-position space: `out = F⁻¹ U⁻¹ L⁻¹ P · rhs` (the
+    /// `ftran` result before the final `Q` scatter). Shared by `ftran` and the
+    /// rank-1 update (which reads `out[qcol_inv[slot]]` as the update pivot).
+    pub(super) fn solve_colspace(&self, rhs: &[f64], out: &mut [f64]) {
+        for (k, ok) in out.iter_mut().enumerate() {
+            *ok = rhs[self.perm[k]];
+        }
+        self.lsolve(out);
+        self.usolve(out);
+        self.apply_etas_forward(out);
+    }
+
+    /// Apply all product-form updates `F₁⁻¹ … Fₜ⁻¹` (chronological order).
+    fn apply_etas_forward(&self, s: &mut [f64]) {
+        for eta in self.etas.iter() {
+            let q = eta.q;
+            let tq = eta.tau[q];
+            let zq = s[q] / tq;
+            for (j, &tj) in eta.tau.iter().enumerate() {
+                if j != q {
+                    s[j] -= tj * zq;
+                }
+            }
+            s[q] = zq;
+        }
+    }
+
+    /// Apply `(F₁⁻¹ … Fₜ⁻¹)ᵀ` in reverse: each `(Fᵢ⁻¹)ᵀ` changes only `s[q]`.
+    fn apply_etas_transpose_reverse(&self, s: &mut [f64]) {
+        for eta in self.etas.iter().rev() {
+            let q = eta.q;
+            let tq = eta.tau[q];
+            let mut dot = 0.0;
+            for (j, &tj) in eta.tau.iter().enumerate() {
+                if j != q {
+                    dot += tj * s[j];
+                }
+            }
+            s[q] = (s[q] - dot) / tq;
+        }
     }
 
     /// Forward solve `L y = s` (unit lower), in place.

@@ -17,6 +17,18 @@ use super::{LuParams, LuSingularAction};
 use crate::error::FeralError;
 use crate::lu::sparse_matrix::SparseColMatrix;
 
+/// One product-form update of the `U` factor (issue #81 sparse rank-1 update).
+///
+/// Replacing column `q` of the current factorization by a new column yields
+/// `U' = U·F` with `F = I + (τ − e_q)e_qᵀ`, where `τ` is the transformed spike.
+/// We store `(q, τ)` and apply `F⁻¹` after the `U`-solve in `ftran` (and its
+/// transpose in `btran`). `τ[q]` is the update's pivot / stability monitor.
+#[derive(Debug, Clone)]
+pub(super) struct EtaU {
+    pub q: usize,
+    pub tau: Vec<f64>,
+}
+
 /// Sparse LU factorization of a square basis.
 #[derive(Debug, Clone)]
 pub struct SparseLu {
@@ -34,6 +46,12 @@ pub struct SparseLu {
     pub(super) perm: Vec<usize>,
     /// Column order: factorization column `k` is original column `qcol[k]`.
     pub(super) qcol: Vec<usize>,
+    /// Inverse of `qcol`: `qcol_inv[original_col] = column_position`.
+    pub(super) qcol_inv: Vec<usize>,
+    /// Product-form `U`-updates applied since the last factor/refactor.
+    pub(super) etas: Vec<EtaU>,
+    /// Running growth monitor (max `1/|τ_q|` over the updates).
+    pub(super) growth: f64,
     pub(super) params: LuParams,
     pub(super) scratch: Vec<f64>,
 }
@@ -176,7 +194,6 @@ impl SparseLu {
         // Remap L's stored original rows to pivot positions, then sort columns.
         let perm_inv: Vec<usize> = pinv.iter().map(|&p| p as usize).collect();
         remap_and_sort_l(&l_col_ptr, &mut l_row_idx, &mut l_val, &perm_inv, m);
-        let _ = qcol_inv; // used by the update path (added with Forrest–Tomlin)
 
         Ok(SparseLu {
             m,
@@ -189,6 +206,9 @@ impl SparseLu {
             u_diag,
             perm,
             qcol,
+            qcol_inv,
+            etas: Vec::new(),
+            growth: 1.0,
             params,
             scratch: vec![0.0; m],
         })

@@ -187,6 +187,90 @@ fn sparse_perturb_succeeds() {
 }
 
 #[test]
+fn sparse_update_single_residual() {
+    let m = 12;
+    let mut cols = banded_basis(m, 0x33);
+    let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+    let symbolic = SparseLuSymbolic::analyze(&a).expect("analyze");
+    let mut lu = SparseLu::factor(&a, &symbolic, LuParams::default()).expect("factor");
+    let rhs: Vec<f64> = (0..m).map(|i| 1.0 + (i as f64) * 0.4).collect();
+    let new_col: Vec<f64> = (0..m).map(|i| 0.5 + ((i * 3) % 5) as f64).collect();
+    for &slot in &[0usize, 5, 11] {
+        let mut lu_k = lu.clone();
+        lu_k.update(slot, &new_col).expect("update");
+        let mut new_cols = cols.clone();
+        new_cols[slot] = new_col.clone();
+        let b_new = SparseColMatrix::from_dense_columns(m, &new_cols).expect("b_new");
+        assert!(
+            ftran_rel_residual(&b_new, &mut lu_k, &rhs) < 1e-8,
+            "slot {slot}"
+        );
+    }
+    // Chain of updates on the live factor.
+    let a0 = rhs.clone();
+    for (step, &slot) in [2usize, 7, 4, 9].iter().enumerate() {
+        let nc: Vec<f64> = (0..m)
+            .map(|i| 1.0 + ((step + i) % 6) as f64 * 0.3)
+            .collect();
+        lu.update(slot, &nc).expect("chain update");
+        cols[slot] = nc;
+        let b_new = SparseColMatrix::from_dense_columns(m, &cols).expect("b_new");
+        let res = ftran_rel_residual(&b_new, &mut lu, &a0);
+        assert!(res < 1e-7, "chain step {step}: {res:e}");
+    }
+    assert_eq!(lu.updates_since_refactor(), 4);
+}
+
+#[test]
+fn sparse_update_budget_and_refactor() {
+    let m = 8;
+    let cols = banded_basis(m, 0x55);
+    let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+    let symbolic = SparseLuSymbolic::analyze(&a).expect("analyze");
+    let params = LuParams {
+        max_updates: 2,
+        ..LuParams::default()
+    };
+    let mut lu = SparseLu::factor(&a, &symbolic, params).expect("factor");
+    let nc0: Vec<f64> = (0..m).map(|i| 1.0 + (i % 3) as f64).collect();
+    let nc1: Vec<f64> = (0..m).map(|i| 2.0 - (i % 4) as f64 * 0.5).collect();
+    let nc2: Vec<f64> = (0..m).map(|i| 0.5 + (i % 5) as f64 * 0.3).collect();
+    lu.update(0, &nc0).expect("u1");
+    lu.update(1, &nc1).expect("u2");
+    let err = lu.update(2, &nc2);
+    assert!(matches!(err, Err(FeralError::NeedsRefactor)));
+    assert_eq!(lu.updates_since_refactor(), 2);
+    // Refactor clears the eta chain.
+    lu.refactor(&a, &symbolic).expect("refactor");
+    assert_eq!(lu.updates_since_refactor(), 0);
+}
+
+#[test]
+fn sparse_update_matches_dense() {
+    // The same update through both engines must agree.
+    let m = 9;
+    let cols = banded_basis(m, 0xDD);
+    let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+    let symbolic = SparseLuSymbolic::analyze(&a).expect("analyze");
+    let mut sparse = SparseLu::factor(&a, &symbolic, LuParams::default()).expect("sparse");
+    let mut dense = DenseLu::factor(&cols, m, LuParams::default()).expect("dense");
+    let new_col: Vec<f64> = (0..m).map(|i| 2.0 - 0.25 * i as f64).collect();
+    sparse.update(3, &new_col).expect("sparse update");
+    dense.update(3, &new_col).expect("dense update");
+    let rhs: Vec<f64> = (0..m).map(|i| 1.0 + i as f64).collect();
+    let mut xs = rhs.clone();
+    let mut xd = rhs.clone();
+    sparse.ftran(&mut xs).expect("sparse ftran");
+    dense.ftran(&mut xd).expect("dense ftran");
+    let diff: f64 = xs
+        .iter()
+        .zip(&xd)
+        .map(|(&s, &d)| (s - d).abs())
+        .fold(0.0, f64::max);
+    assert!(diff < 1e-9, "post-update dense vs sparse diff {diff:e}");
+}
+
+#[test]
 fn sparse_refinement_converges() {
     let m = 11;
     let cols = banded_basis(m, 0xABCDEF);

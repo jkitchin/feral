@@ -138,10 +138,7 @@ fn do_update_residual(
     a: &[f64],
 ) -> f64 {
     let mut lu = DenseLu::factor(cols, m, LuParams::default()).expect("factor");
-    // spike = L⁻¹ P new_col
-    let mut spike = new_col.clone();
-    lu.ftran_partial(&mut spike).expect("ftran_partial");
-    lu.update(slot, &spike).expect("update");
+    lu.update(slot, &new_col).expect("update");
     // B_new
     let mut new_cols = cols.to_vec();
     new_cols[slot] = new_col;
@@ -168,9 +165,7 @@ fn update_with_row_swap_residual() {
     let mut lu = DenseLu::factor(&cols, m, LuParams::default()).expect("factor");
     assert_ne!(lu.perm(), &[0usize, 1, 2], "expected a pivot");
     let new_col = vec![2.0, 1.0, 3.0];
-    let mut spike = new_col.clone();
-    lu.ftran_partial(&mut spike).expect("ftran_partial");
-    lu.update(1, &spike).expect("update");
+    lu.update(1, &new_col).expect("update");
     let mut new_cols = cols.clone();
     new_cols[1] = new_col;
     let b_new = general_from_cols(&new_cols, m);
@@ -188,9 +183,7 @@ fn update_sequence_five_residual() {
         let new_col: Vec<f64> = (0..m)
             .map(|i| 1.0 + ((step * 31 + i * 7) % 11) as f64 * 0.1)
             .collect();
-        let mut spike = new_col.clone();
-        lu.ftran_partial(&mut spike).expect("ftran_partial");
-        lu.update(slot, &spike).expect("update");
+        lu.update(slot, &new_col).expect("update");
         cols[slot] = new_col;
         let b_new = general_from_cols(&cols, m);
         let res = ftran_rel_residual(&b_new, &mut lu, &a);
@@ -207,9 +200,7 @@ fn refactor_matches_updated_factor() {
     // Two updates.
     for slot in [2usize, 5] {
         let new_col: Vec<f64> = (0..m).map(|i| 0.5 + slot as f64 - i as f64 * 0.2).collect();
-        let mut spike = new_col.clone();
-        lu.ftran_partial(&mut spike).expect("ftran_partial");
-        lu.update(slot, &spike).expect("update");
+        lu.update(slot, &new_col).expect("update");
         cols[slot] = new_col;
     }
     let a: Vec<f64> = (0..m).map(|i| 3.0 - i as f64).collect();
@@ -239,9 +230,7 @@ fn update_budget_returns_needs_refactor() {
     let new_col = vec![1.0, 2.0, 1.0, 0.5, 3.0];
     // Two successful updates.
     for slot in [0usize, 1] {
-        let mut spike = new_col.clone();
-        lu.ftran_partial(&mut spike).expect("ftran_partial");
-        lu.update(slot, &spike).expect("update");
+        lu.update(slot, &new_col).expect("update");
     }
     // Third trips the budget; self must be unchanged.
     let before = {
@@ -249,9 +238,7 @@ fn update_budget_returns_needs_refactor() {
         lu.ftran(&mut a).expect("ftran");
         a
     };
-    let mut spike = new_col.clone();
-    lu.ftran_partial(&mut spike).expect("ftran_partial");
-    let err = lu.update(2, &spike);
+    let err = lu.update(2, &new_col);
     assert!(matches!(err, Err(FeralError::NeedsRefactor)));
     assert_eq!(lu.updates_since_refactor(), 2);
     let after = {

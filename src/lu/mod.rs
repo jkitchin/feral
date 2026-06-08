@@ -19,6 +19,7 @@ pub mod sparse_factor;
 pub mod sparse_matrix;
 pub mod sparse_solve;
 pub mod sparse_symbolic;
+pub mod sparse_update;
 
 pub use dense_factor::DenseLu;
 pub use dense_matrix::GeneralMatrix;

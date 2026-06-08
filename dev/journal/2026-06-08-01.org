@@ -79,3 +79,26 @@ refinement < 1e-12. Full suite green; clippy -D warnings clean.
 
 Deferred to next commit: the sparse rank-1 update (Forrest–Tomlin). The
 perm_inv/qcol_inv fields and update state land with it.
+
+* 15:00 :lu:sparse:update:forrest-tomlin:
+Implemented the sparse rank-1 column-replacement update. After deriving the
+algebra, chose a product-form update of U: replacing column q by the spike
+gives U' = U·F with F = I + (τ−e_q)e_qᵀ, τ = the ftran of the entering
+column in column-position space, so U'⁻¹ = F⁻¹U⁻¹. Each update stores one
+eta (q, τ) applied after the U-solve in ftran (transposed-reverse before the
+Uᵀ-solve in btran). τ[q] is the update pivot → SingularBasis if it vanishes;
+1/|τ[q]| feeds the growth monitor → NeedsRefactor on budget. This is a
+correct, genuinely sparse first-class rank-1 update; full Forrest–Tomlin
+row-eta sparsity (keeping the eta sparser than the dense τ) is documented as
+the optimization.
+
+Also unified the update API: both dense and sparse update() now take the raw
+entering column and compute the spike internally (cleaner, matches the
+simplex "swap column" op, self-contained). Refactored dense update + tests.
+
+Verified tests/lu_sparse.rs (10 tests): single-update residual < 1e-8,
+4-update chain < 1e-7, dense↔sparse post-update agreement < 1e-9,
+budget→NeedsRefactor + refactor clears the chain, singular update detected.
+Caught a self-inflicted bug: replacing two slots with the SAME column is
+genuinely singular (τ_q→0) — the engine correctly returned SingularBasis;
+fixed the test to use distinct columns. Full suite green; clippy clean.

@@ -21,19 +21,19 @@ use super::dense_factor::DenseLu;
 use crate::error::FeralError;
 
 impl DenseLu {
-    /// Replace basis slot `leaving_slot` with the column whose spike is
-    /// `spike = L⁻¹ P aₙₑw` (compute it with [`DenseLu::ftran_partial`] *before*
-    /// calling this). On success the factorization reflects the new basis.
+    /// Replace basis slot `leaving_slot` with `entering_col` (the new basis
+    /// column `aₙₑw`). The spike `L⁻¹ P aₙₑw` is computed internally, then folded
+    /// into the factorization. On success the factors reflect the new basis.
     ///
     /// Returns [`FeralError::NeedsRefactor`] (leaving `self` unchanged) when the
     /// update budget (`max_updates`) or growth budget (`max_growth`) is
     /// exceeded, and [`FeralError::SingularBasis`] when a bump pivot vanishes.
-    pub fn update(&mut self, leaving_slot: usize, spike: &[f64]) -> Result<(), FeralError> {
+    pub fn update(&mut self, leaving_slot: usize, entering_col: &[f64]) -> Result<(), FeralError> {
         let m = self.m;
-        if spike.len() != m {
+        if entering_col.len() != m {
             return Err(FeralError::DimensionMismatch {
                 expected: m,
-                got: spike.len(),
+                got: entering_col.len(),
             });
         }
         if leaving_slot >= m {
@@ -46,6 +46,10 @@ impl DenseLu {
         if self.updates_since_refactor + 1 > self.params.max_updates {
             return Err(FeralError::NeedsRefactor);
         }
+
+        // Spike = L⁻¹ P aₙₑw, in the current factor frame (no factor mutation).
+        let mut spike = entering_col.to_vec();
+        self.ftran_partial(&mut spike)?;
 
         let q = self.qcol_inv[leaving_slot];
         let ztol = self.params.zero_pivot_tol;
