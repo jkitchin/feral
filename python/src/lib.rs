@@ -78,6 +78,15 @@ fn map_feral_err(e: RustFeralError) -> PyErr {
             "delayed-pivot budget exceeded at supernode {supernode}: \
              required {required} delayed columns, capacity {capacity}"
         )),
+        // Unsymmetric LU basis-engine variants (issue #81). The LU engine is
+        // not yet exposed through the Python API, but the mapping must be
+        // exhaustive.
+        RustFeralError::SingularBasis { column } => {
+            SingularError::new_err(format!("LU basis is singular at column {column}"))
+        }
+        RustFeralError::NeedsRefactor => FactorError::new_err(
+            "LU basis update requires a refactor (update or stability budget reached)",
+        ),
     }
 }
 
