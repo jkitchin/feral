@@ -171,3 +171,33 @@ updates, unbounded until refactor. This is the PFI "eta chain grows" problem
 the issue cites as the reason to graduate to true Forrest–Tomlin, where the
 spike folds into U and only a SPARSE row-eta is stored, so solves stay cheap.
 Confirms the need; implementing FT next.
+
+* 19:30 :lu:sparse:forrest-tomlin:blocked-on-zero-pivots:
+Attempted the full FT in two stages. Stage 1 (convert U to row-wise CSR so
+the update can do row ops) landed cleanly, committed (23af110), all sparse +
+scaling tests still green — a pure storage change, and the right foundation
+for FT.
+
+Stage 2 (the in-place column-replacement update) hit a genuine correctness
+subtlety I had not accounted for. The naive column-shift Bartels–Golub
+(move the leaving column to the end → upper-Hessenberg → eliminate the
+subdiagonal) produces a Hessenberg whose DIAGONAL pivots are the OLD
+SUPERDIAGONAL entries U[k,k+1], and the subdiagonal to eliminate is the old
+DIAGONAL U[k+1,k+1]. In a DENSE U the superdiagonals are nonzero (so the
+dense update works without in-bump pivoting), but in a SPARSE U the
+superdiagonal is frequently zero → zero Hessenberg pivot → division by zero.
+
+This is the crux of sparse basis updates that production LP solvers engineer
+carefully: it needs either the symmetric-permutation FT (which then needs
+careful permutation-of-stored-state bookkeeping, since physically permuting U
+each update staleness the relation L σᵀ, not lower-triangular) OR in-bump
+partial pivoting with row-permutation tracking (Reid's sparse BGR). Both are
+substantial, delicate pieces; I will not ship a subtly-wrong factorization
+(correctness-first). Reverted the Stage-2 scaffolding (restored the working
+product-form on top of Stage-1 row-wise U); tree correct, tests green.
+
+Net for this session: Stage 1 (row-wise U) committed as the FT foundation;
+the correct Stage-2 update is scoped with the exact subtlety documented for a
+focused follow-up. The product-form update remains correct and bounded by
+max_updates; its O(k·n) warm-solve cost (measured, fbbcece) is the thing FT
+will fix once Stage 2 lands correctly.
