@@ -43,6 +43,21 @@ pub enum FeralError {
         required: usize,
         capacity: usize,
     },
+
+    /// An unsymmetric LU basis is numerically singular: pivot column
+    /// `column` had no candidate pivot above `LuParams::zero_pivot_tol`
+    /// and `LuSingularAction::Fail` was specified. Reported so a simplex
+    /// driver can repair the basis instead of receiving a garbage solve.
+    /// See issue #81 and `dev/research/unsymmetric-lu.md`.
+    SingularBasis { column: usize },
+
+    /// A rank-1 LU basis update (column replacement) could not be applied
+    /// within the stability / update-count budget (`LuParams::max_updates`
+    /// or `max_growth`), or a stability monitor tripped. The factorization
+    /// is left unchanged; the caller must call `refactor()` with the
+    /// current basic columns. The recoverable analogue of MUMPS's delayed-
+    /// pivot overflow. See issue #81.
+    NeedsRefactor,
 }
 
 impl std::fmt::Display for FeralError {
@@ -78,6 +93,15 @@ impl std::fmt::Display for FeralError {
                     "delayed-pivot budget exceeded at supernode {}: \
                      required {} delayed columns, capacity {} (issue #55)",
                     supernode, required, capacity
+                )
+            }
+            FeralError::SingularBasis { column } => {
+                write!(f, "LU basis is numerically singular at column {}", column)
+            }
+            FeralError::NeedsRefactor => {
+                write!(
+                    f,
+                    "LU basis update budget exceeded; refactor required (issue #81)"
                 )
             }
         }
