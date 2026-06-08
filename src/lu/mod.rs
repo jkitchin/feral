@@ -15,6 +15,7 @@ pub mod dense_factor;
 pub mod dense_matrix;
 pub mod dense_solve;
 pub mod dense_update;
+pub mod scaling;
 pub mod sparse_factor;
 pub mod sparse_matrix;
 pub mod sparse_solve;

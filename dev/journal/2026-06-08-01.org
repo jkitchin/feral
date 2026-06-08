@@ -102,3 +102,26 @@ budget→NeedsRefactor + refactor clears the chain, singular update detected.
 Caught a self-inflicted bug: replacing two slots with the SAME column is
 genuinely singular (τ_q→0) — the engine correctly returned SingularBasis;
 fixed the test to use distinct columns. Full suite green; clippy clean.
+
+* 16:30 :lu:scaling:robustness:
+Added the scaling robustness layer: src/lu/scaling.rs with LuScale {rperm,
+d_row, d_col}, two-sided ∞-norm equilibration (Knight–Ruiz), and unsymmetric
+MC64 as a thin driver over crate::scaling::hungarian_match (build the
+column-normalized log-cost CostGraph from the general basis, read rperm from
+the matching and d_row/d_col from the duals u,v; partial matching → InfNorm
+fallback). Mc64ThenInfNorm composes both.
+
+Integration: params.scaling drives factor() on both dense and sparse — they
+factor Ã = D_row Π B D_col (AᵀA pattern is invariant under row perm/scaling,
+so the column ordering still applies). ftran/btran wrap the scaling around a
+renamed core solve (ftran_core/btran_core); identity scaling short-circuits
+to the core (no overhead, existing tests unchanged). update() scales the
+entering column into the Ã frame first. Iterative refinement
+(ftran_refined/btran_refined) was already in place from the solve commits and
+calls the scaled wrappers against the original B.
+
+Verified tests/lu_scaling.rs (5 tests): InfNorm/Mc64/Mc64ThenInfNorm preserve
+correctness (residual < 1e-8) on a 16-orders-of-magnitude ill-scaled basis
+(dense + sparse), dense↔sparse agreement under MC64, equilibration drives all
+row/col ∞-norms into [0.1,10], and MC64 puts order-1 entries on the diagonal.
+Full suite green; clippy -D warnings clean.

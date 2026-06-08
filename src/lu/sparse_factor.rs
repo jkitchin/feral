@@ -12,8 +12,9 @@
 //! new pivot. This is correct but not yet output-sensitive — the depth-first
 //! symbolic reach that makes it O(flops) is a documented follow-up.
 
+use super::scaling::{compute_lu_scale, LuScale};
 use super::sparse_symbolic::SparseLuSymbolic;
-use super::{LuParams, LuSingularAction};
+use super::{LuParams, LuScaling, LuSingularAction};
 use crate::error::FeralError;
 use crate::lu::sparse_matrix::SparseColMatrix;
 
@@ -53,6 +54,8 @@ pub struct SparseLu {
     /// Running growth monitor (max `1/|τ_q|` over the updates).
     pub(super) growth: f64,
     pub(super) params: LuParams,
+    /// Two-sided scaling of the factored matrix (identity when unscaled).
+    pub(super) scale: LuScale,
     pub(super) scratch: Vec<f64>,
 }
 
@@ -70,6 +73,17 @@ impl SparseLu {
                 got: symbolic.m,
             });
         }
+        // Scaling: factor Ã = D_row Π A D_col (pattern is invariant under row
+        // permutation/scaling, so the column ordering `symbolic` still applies).
+        let (scale, scaled) = if params.scaling == LuScaling::None {
+            (LuScale::identity(m), None)
+        } else {
+            let scale = compute_lu_scale(a, params.scaling)?;
+            let mat = scale.apply_sparse(a)?;
+            (scale, Some(mat))
+        };
+        let a: &SparseColMatrix = scaled.as_ref().unwrap_or(a);
+
         let qcol = symbolic.qcol.clone();
         let qcol_inv = symbolic.qcol_inv.clone();
 
@@ -210,6 +224,7 @@ impl SparseLu {
             etas: Vec::new(),
             growth: 1.0,
             params,
+            scale,
             scratch: vec![0.0; m],
         })
     }

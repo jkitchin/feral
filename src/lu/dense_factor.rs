@@ -11,7 +11,9 @@
 //! The factorization kernel itself works in a packed buffer (the classic
 //! right-looking LAPACK layout) and is split into `L`/`U` at the end.
 
-use super::{LuParams, LuSingularAction};
+use super::scaling::{compute_lu_scale, LuScale};
+use super::sparse_matrix::SparseColMatrix;
+use super::{LuParams, LuScaling, LuSingularAction};
 use crate::error::FeralError;
 
 /// Dense LU factorization of a square basis, with rank-1 update support.
@@ -37,6 +39,8 @@ pub struct DenseLu {
     /// Running growth monitor; tripping `params.max_growth` forces a refactor.
     pub(super) growth: f64,
     pub(super) params: LuParams,
+    /// Two-sided scaling of the factored matrix (identity when unscaled).
+    pub(super) scale: LuScale,
     /// Reusable length-`m` scratch buffer (no per-call allocation in solves).
     pub(super) scratch_a: Vec<f64>,
 }
@@ -45,8 +49,10 @@ impl DenseLu {
     /// Factor the `m`×`m` basis given by its `m` columns (`cols[j]` is column
     /// `j`, length `m`). Computes `P B = L U` with threshold partial pivoting.
     pub fn factor(cols: &[Vec<f64>], m: usize, params: LuParams) -> Result<Self, FeralError> {
+        let (scale, scaled) = compute_scale(cols, m, params.scaling)?;
+        let factor_cols: &[Vec<f64>] = scaled.as_deref().unwrap_or(cols);
         let mut packed = vec![0.0; m * m];
-        copy_columns_into(&mut packed, cols, m)?;
+        copy_columns_into(&mut packed, factor_cols, m)?;
         let mut perm: Vec<usize> = (0..m).collect();
         factorize_packed(&mut packed, &mut perm, m, &params)?;
         let (l, u) = split_packed(&packed, m);
@@ -65,6 +71,7 @@ impl DenseLu {
             updates_since_refactor: 0,
             growth: 1.0,
             params,
+            scale,
             scratch_a: vec![0.0; m],
         })
     }
@@ -72,8 +79,11 @@ impl DenseLu {
     /// Discard all pending updates and re-factor from scratch on fresh columns.
     pub fn refactor(&mut self, cols: &[Vec<f64>]) -> Result<(), FeralError> {
         let m = self.m;
+        let (scale, scaled) = compute_scale(cols, m, self.params.scaling)?;
+        self.scale = scale;
+        let factor_cols: &[Vec<f64>] = scaled.as_deref().unwrap_or(cols);
         let mut packed = vec![0.0; m * m];
-        copy_columns_into(&mut packed, cols, m)?;
+        copy_columns_into(&mut packed, factor_cols, m)?;
         for (k, p) in self.perm.iter_mut().enumerate() {
             *p = k;
         }
@@ -133,6 +143,21 @@ impl DenseLu {
     pub fn u(&self, i: usize, j: usize) -> f64 {
         self.u[i + j * self.m]
     }
+}
+
+/// `(scale, optional scaled columns to factor)`.
+type ScaleResult = Result<(LuScale, Option<Vec<Vec<f64>>>), FeralError>;
+
+/// Compute the scaling for `cols` under `strategy`, returning the scale and
+/// (when non-identity) the scaled columns to factor.
+fn compute_scale(cols: &[Vec<f64>], m: usize, strategy: LuScaling) -> ScaleResult {
+    if strategy == LuScaling::None {
+        return Ok((LuScale::identity(m), None));
+    }
+    let b = SparseColMatrix::from_dense_columns(m, cols)?;
+    let scale = compute_lu_scale(&b, strategy)?;
+    let scaled = scale.scaled_dense_columns(&b);
+    Ok((scale, Some(scaled)))
 }
 
 /// Copy `m` columns (each length `m`) into a packed column-major buffer.

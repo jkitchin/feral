@@ -47,9 +47,17 @@ impl SparseLu {
             return Err(FeralError::NeedsRefactor);
         }
 
-        // τ = ftran of the entering column in column-position space.
+        // Scale the entering column into the factored frame Ã, then solve into
+        // column-position space: τ = F⁻¹ U⁻¹ L⁻¹ P ãₙₑw. Identity scaling leaves
+        // `entering_col` unchanged.
+        let mut scaled = vec![0.0_f64; m];
+        for (i, si) in scaled.iter_mut().enumerate() {
+            *si = self.scale.d_row[i]
+                * entering_col[self.scale.rperm[i]]
+                * self.scale.d_col[leaving_slot];
+        }
         let mut tau = vec![0.0_f64; m];
-        self.solve_colspace(entering_col, &mut tau);
+        self.solve_colspace(&scaled, &mut tau);
 
         let q = self.qcol_inv[leaving_slot];
         let tq = tau[q];

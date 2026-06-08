@@ -12,10 +12,45 @@ use super::sparse_matrix::SparseColMatrix;
 use crate::error::FeralError;
 
 impl SparseLu {
-    /// Solve `B x = a`, overwriting `rhs` with `x`.
+    /// Solve `B x = a`, overwriting `rhs` with `x` (scaling applied around the
+    /// core solve on `Ã = D_row Π B D_col`).
     pub fn ftran(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
         let m = self.m;
         check_len(rhs.len(), m)?;
+        if self.scale.is_identity() {
+            return self.ftran_core(rhs);
+        }
+        let mut bt = vec![0.0; m];
+        for (i, bi) in bt.iter_mut().enumerate() {
+            *bi = self.scale.d_row[i] * rhs[self.scale.rperm[i]];
+        }
+        self.ftran_core(&mut bt)?;
+        for (j, rj) in rhs.iter_mut().enumerate() {
+            *rj = self.scale.d_col[j] * bt[j];
+        }
+        Ok(())
+    }
+
+    /// Solve `Bᵀ x = a`, overwriting `rhs` with `x`.
+    pub fn btran(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
+        let m = self.m;
+        check_len(rhs.len(), m)?;
+        if self.scale.is_identity() {
+            return self.btran_core(rhs);
+        }
+        let mut bt = vec![0.0; m];
+        for (j, bj) in bt.iter_mut().enumerate() {
+            *bj = self.scale.d_col[j] * rhs[j];
+        }
+        self.btran_core(&mut bt)?;
+        for (i, &yi) in bt.iter().enumerate() {
+            rhs[self.scale.rperm[i]] = self.scale.d_row[i] * yi;
+        }
+        Ok(())
+    }
+
+    /// Core `ftran` on the (scaled) factored matrix, ignoring outer scaling.
+    pub(super) fn ftran_core(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
         let mut s = std::mem::take(&mut self.scratch);
         self.solve_colspace(rhs, &mut s);
         for (k, &wk) in s.iter().enumerate() {
@@ -25,10 +60,8 @@ impl SparseLu {
         Ok(())
     }
 
-    /// Solve `Bᵀ x = a`, overwriting `rhs` with `x`.
-    pub fn btran(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
-        let m = self.m;
-        check_len(rhs.len(), m)?;
+    /// Core `btran` on the (scaled) factored matrix, ignoring outer scaling.
+    pub(super) fn btran_core(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
         let mut s = std::mem::take(&mut self.scratch);
         for (k, sk) in s.iter_mut().enumerate() {
             *sk = rhs[self.qcol[k]];

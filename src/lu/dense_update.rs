@@ -47,8 +47,15 @@ impl DenseLu {
             return Err(FeralError::NeedsRefactor);
         }
 
-        // Spike = L⁻¹ P aₙₑw, in the current factor frame (no factor mutation).
-        let mut spike = entering_col.to_vec();
+        // Scale the entering column into the factored frame Ã, then form the
+        // spike L⁻¹ P ãₙₑw (no factor mutation). With identity scaling this is
+        // just `entering_col`.
+        let mut spike = vec![0.0; m];
+        for (i, si) in spike.iter_mut().enumerate() {
+            *si = self.scale.d_row[i]
+                * entering_col[self.scale.rperm[i]]
+                * self.scale.d_col[leaving_slot];
+        }
         self.ftran_partial(&mut spike)?;
 
         let q = self.qcol_inv[leaving_slot];

@@ -12,18 +12,55 @@ use super::dense_matrix::GeneralMatrix;
 use crate::error::FeralError;
 
 impl DenseLu {
-    /// Solve `B x = a`, overwriting `rhs` (= `a`) with `x`.
+    /// Solve `B x = a`, overwriting `rhs` (= `a`) with `x`. Applies scaling
+    /// around the core solve on the scaled matrix `Ã = D_row Π B D_col`:
+    /// `Ã x̃ = D_row Π a`, then `x = D_col x̃`.
     pub fn ftran(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
         let m = self.m;
         check_len(rhs.len(), m)?;
+        if self.scale.is_identity() {
+            return self.ftran_core(rhs);
+        }
+        let mut bt = vec![0.0; m];
+        for (i, bi) in bt.iter_mut().enumerate() {
+            *bi = self.scale.d_row[i] * rhs[self.scale.rperm[i]];
+        }
+        self.ftran_core(&mut bt)?;
+        for (j, rj) in rhs.iter_mut().enumerate() {
+            *rj = self.scale.d_col[j] * bt[j];
+        }
+        Ok(())
+    }
+
+    /// Solve `Bᵀ x = a`, overwriting `rhs` (= `a`) with `x`. With scaling:
+    /// `Ãᵀ ỹ = D_col a`, then `x[rperm[i]] = D_row[i] ỹ[i]`.
+    pub fn btran(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
+        let m = self.m;
+        check_len(rhs.len(), m)?;
+        if self.scale.is_identity() {
+            return self.btran_core(rhs);
+        }
+        let mut bt = vec![0.0; m];
+        for (j, bj) in bt.iter_mut().enumerate() {
+            *bj = self.scale.d_col[j] * rhs[j];
+        }
+        self.btran_core(&mut bt)?;
+        for (i, &yi) in bt.iter().enumerate() {
+            rhs[self.scale.rperm[i]] = self.scale.d_row[i] * yi;
+        }
+        Ok(())
+    }
+
+    /// Core `ftran` on the (scaled) factored matrix, ignoring outer scaling.
+    pub(super) fn ftran_core(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
+        let m = self.m;
+        check_len(rhs.len(), m)?;
         let mut s = std::mem::take(&mut self.scratch_a);
-        // s = P a
         for (k, sk) in s.iter_mut().enumerate() {
             *sk = rhs[self.perm[k]];
         }
         lsolve(&self.l, m, &mut s);
         usolve(&self.u, m, &mut s);
-        // x[qcol[k]] = w[k]
         for (k, &wk) in s.iter().enumerate() {
             rhs[self.qcol[k]] = wk;
         }
@@ -31,18 +68,16 @@ impl DenseLu {
         Ok(())
     }
 
-    /// Solve `Bᵀ x = a`, overwriting `rhs` (= `a`) with `x`.
-    pub fn btran(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
+    /// Core `btran` on the (scaled) factored matrix, ignoring outer scaling.
+    pub(super) fn btran_core(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
         let m = self.m;
         check_len(rhs.len(), m)?;
         let mut s = std::mem::take(&mut self.scratch_a);
-        // g = Q⁻¹ a : g[k] = a[qcol[k]]
         for (k, sk) in s.iter_mut().enumerate() {
             *sk = rhs[self.qcol[k]];
         }
         ut_solve(&self.u, m, &mut s); // Uᵀ z = g
         lt_solve(&self.l, m, &mut s); // Lᵀ v = z
-                                      // x[perm[k]] = v[k]
         for (k, &vk) in s.iter().enumerate() {
             rhs[self.perm[k]] = vk;
         }
