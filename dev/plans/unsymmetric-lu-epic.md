@@ -44,23 +44,22 @@ Correctness gate (all in this PR): hand-worked exact cases + equation-residuals 
 dense↔sparse agreement + scaling/refinement recovery + adversarial, in `tests/lu_dense.rs`
 and `tests/lu_sparse.rs`.
 
+### P6.5 Sparse Forrest–Tomlin update — DONE
+
+The sparse update is now a true Forrest–Tomlin / Bartels–Golub–Reid update: the spike is
+folded into `U`'s column `r` and the bump `[r,h]` is re-triangularized by **in-place sparse
+Gaussian elimination with partial pivoting**, recorded as a replayable `FtEta` (swaps +
+axpys) applied between the `L`- and `U`-solves. Partial pivoting resolved the zero-pivot
+landmine (the spiked column's diagonal pivot is often zero in a sparse `U`; a sub-diagonal
+spike entry is a nonzero pivot, and the swap goes into the eta so the base `L` is never
+permuted). `U` is updated in place; the base `L` is fixed; no dense `τ`, no `O(k·n)`
+chain. Warm-solve cost is **bump-local, independent of `n`** for localized spikes (probe:
+eta work flat ≈5100 and ftran overhead flat ≈10µs across n=1000..8000; guard test asserts
+n-independence). Worst case (dense spike, e.g. tridiagonal) degrades to product-form-like
+cost — inherent. Commits: 8738279 (storage), 0fc767c (update), 2b5a5f5 (proof).
+
 ### Deferred (follow-up sessions)
 
-- **P6.5 Sparse Forrest–Tomlin update (the warm-solve scalability fix).** The sparse update
-  is currently a product-form update of `U` storing a *dense* `τ` per eta, so warm `ftran`
-  degrades `O(k·n)` over `k` updates (measured: `crates/feral-diagnostics/src/bin/lu_update_probe.rs`,
-  75µs→3033µs at n=5000, k=0→400). **Stage 1 is done** (`U` stored row-wise CSR, commit
-  23af110) — the storage FT needs. **Stage 2 (the in-place update) is the hard part**, with a
-  documented correctness landmine: the naive column-shift Bartels–Golub produces an
-  upper-Hessenberg `U` whose diagonal pivots are the *old superdiagonal* `U[k,k+1]`, which are
-  frequently **zero in a sparse `U`** (a dense `U` always has them, which is why the dense
-  `DenseLu` update works without in-bump pivoting). A correct sparse update therefore needs
-  **either** the symmetric-permutation FT (pivots = the original nonzero `U` diagonals, but
-  the bottom-row elimination must be folded as an L-side row-eta and the accumulating
-  permutation tracked) **or** in-bump threshold partial pivoting with row-permutation tracking
-  (Reid sparse BGR, citep:reid1982sparsity). Both keep solves `O(nnz)` (no eta chain) and the
-  update `O(bump)`. This is the genuine graduation; the product-form remains correct and
-  `max_updates`-bounded until it lands.
 - **P7 Reference benchmarks.** SuiteSparse unsymmetric corpus; factor time + solve accuracy
   vs UMFPACK/KLU/SuperLU where licensing allows (the way the LDLᵀ side checks vs MUMPS). The
   update-vs-refactor crossover microbench (`m ∈ {10,100,1k,10k}`, sparsity sweep) is seeded

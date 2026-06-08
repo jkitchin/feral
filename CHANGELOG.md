@@ -17,8 +17,11 @@ unsymmetric LU with first-class rank-1 column-replacement updates and warm
   (dense Bartels–Golub: spike → upper-Hessenberg → Gauss sweep, maintaining an
   explicit column permutation).
 - **Sparse path** — `SparseColMatrix` (general CSC) and `SparseLu`: left-looking
-  Gilbert–Peierls LU with threshold partial pivoting, sparse `ftran`/`btran`,
-  and a product-form `U`-update rank-1 column replacement. `SparseLuSymbolic`
+  Gilbert–Peierls LU (output-sensitive depth-first reach, sub-quadratic factor)
+  with threshold partial pivoting, sparse `ftran`/`btran`, and a **Forrest–Tomlin
+  / Bartels–Golub–Reid** rank-1 column-replacement update — in-place sparse
+  Gaussian elimination of the bump with partial pivoting, recorded as a
+  replayable eta (bump-local warm solves, no `O(k·n)` chain). `SparseLuSymbolic`
   computes the fill-reducing column order by running `feral_amd` on the `AᵀA`
   pattern (reusable symbolic handle).
 - **Routing** — `should_use_dense_lu(m, nnz, params)` auto-routes dense vs

@@ -201,3 +201,34 @@ the correct Stage-2 update is scoped with the exact subtlety documented for a
 focused follow-up. The product-form update remains correct and bounded by
 max_updates; its O(k·n) warm-solve cost (measured, fbbcece) is the thing FT
 will fix once Stage 2 lands correctly.
+
+* 21:00 :lu:sparse:forrest-tomlin:complete:
+P6.5 DONE. Implemented the true sparse Forrest–Tomlin / Bartels–Golub–Reid
+update, resolving the zero-pivot landmine that blocked the earlier attempt.
+
+Staged: (1) U → mutable per-row vectors (diagonal first), product-form kept
+working, tests green, committed; (2) replaced product-form with in-place
+sparse Gaussian elimination of the bump WITH PARTIAL PIVOTING. The spike
+G⁻¹L⁻¹P·aₙₑw is set into U's column r; the bump [r,h] (h=max spike support) is
+re-triangularized; the zero-superdiagonal-pivot problem is solved by partial
+pivoting (a sub-diagonal spike entry is a nonzero pivot; the row swap goes
+into the eta, so the unit-lower base L is never permuted). The elimination
+ops (FtOp::Swap / Axpy) are stored as a replayable FtEta, applied between the
+L- and U-solves in ftran (transposed-reversed between Uᵀ and Lᵀ in btran). U
+updated in place. No dense τ.
+
+Maintained invariant: P A Q = L G U, G = E₁⁻¹…Eₜ⁻¹; ftran applies L⁻¹, etas
+forward (E₁..Eₜ), U⁻¹, Q; spike for the next update = spike_space (L⁻¹P + etas
+forward, no U-solve).
+
+Verified: tests/lu_sparse.rs (13) — 25-update FT chain with ftran AND btran
+residuals < 1e-7 after every update; dense↔sparse post-update agreement
+< 1e-9; ft_update_is_bump_local asserts the eta size is identical for n=24 vs
+n=400 and ≤ block² (independent of n). lu_update_probe (block-diagonal,
+localized spikes): eta_ops_total ≈ 5100 and per-chain ftran overhead ≈ 10µs
+FLAT for n=1000..8000 — vs the old product-form's k·n storage (400k at
+n=8000) and 40× solve degradation. Full suite green; clippy -D warnings clean.
+
+Honest note: for a DENSE-spike basis (tridiagonal, L⁻¹ dense) the bump spans
+the tail and FT degrades to product-form-like cost — inherent worst case; the
+FT win is for localized spikes (the realistic LP regime), as demonstrated.

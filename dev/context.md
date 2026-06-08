@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-08T01:07:37Z
+Generated: 2026-06-08T12:36:33Z
 
 ## Latest Session
 File: dev/sessions/2026-06-08-01.md
@@ -59,34 +59,34 @@ spd_10..spd_200, kkt_10_3..kkt_100_30 — 8 matrices, all inertia exact.
 
 ## Git Status
 ```
-a781ad4 feat(lu): scaling robustness layer — equilibration + unsymmetric MC64 (#81)
-258db84 feat(lu): sparse rank-1 update (product-form U update) + unified update API (#81)
-2128e1a feat(lu): sparse Gilbert–Peierls LU factor, solves, AMD-on-AᵀA ordering (#81)
-7d914e9 feat(lu): dense LU factor, solves, and rank-1 update (#81)
-f4bf2c2 feat(lu): LU module scaffold — GeneralMatrix, LuParams, router, errors (#81)
+2b5a5f5 test(lu): prove FT warm-solve is bump-local, independent of n (#81)
+0fc767c feat(lu): true sparse Forrest–Tomlin update with in-bump partial pivoting (#81)
+8738279 refactor(lu): store sparse U as mutable per-row vectors for FT (#81)
+9cbc8c1 docs(lu): scope sparse Forrest–Tomlin (P6.5) with the zero-pivot subtlety (#81)
+23af110 refactor(lu): store sparse U row-wise (CSR) for the Forrest–Tomlin update (#81)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_supernodes_cover_n ... ok
 test symbolic::tests::schur_symbolic_single_schur_index ... ok
+test symbolic::tests::schur_symbolic_supernodes_cover_n ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
 test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 324 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.51s
+test result: ok. 324 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.81s
 
 ```
 
@@ -109,36 +109,36 @@ changed no symmetric code path.)
 ```
 
 ## Recent Decisions
-  `U' = U·F`, `F = I + (τ−e_q)e_qᵀ`, so `U'⁻¹ = F⁻¹U⁻¹`; one eta `(q, τ)` per
-  update, applied after the `U`-solve (transposed-in-reverse in `btran`).
-  `τ[q]` is the stability pivot. This is correct and genuinely sparse with a
-  clean refactor budget; a full Forrest–Tomlin row-eta file (keeping the eta
-  sparser than the dense `τ`) is deferred as an optimization, not a correctness
-  gap.
+Decision and rationale:
 
-- **Sparse factor.** Gilbert–Peierls left-looking LU. The forward-substitution
-  variant used is correct but not yet output-sensitive (no DFS reach); the
-  depth-first symbolic reach that makes it O(flops) is deferred.
+- **In-place bump elimination with partial pivoting.** The spike `ρ = G⁻¹L⁻¹P·aₙₑw` is set
+  into `U`'s column `r`; the bump `[r, h]` (`h` = max spike support) is re-triangularized by
+  sparse Gaussian elimination. **Partial pivoting is mandatory** and is the resolution of the
+  zero-pivot landmine documented when this was deferred: the naive column-shift Bartels–Golub
+  makes the Hessenberg diagonal pivots the old superdiagonal `U[k,k+1]`, which are frequently
+  zero in a sparse `U`; partial pivoting instead uses a nonzero sub-diagonal spike entry as
+  the pivot via a row interchange.
 
-- **Column ordering.** Reuse `feral_amd::amd_order` on the explicitly-formed
-  `AᵀA` (column-intersection) pattern as a stand-in for COLAMD. The `AᵀA`
-  pattern is invariant under the row permutation/scaling, so the ordering is
-  also valid for the scaled matrix `Ã`.
+- **Swaps go into the eta, not the base `L`.** The unit-lower base `L` is never permuted
+  (permuting the fully-formed `L` would break its triangularity). The bump elimination's
+  elementary operations — `FtOp::Swap` (partial-pivot interchange) and `FtOp::Axpy`
+  (`row -= mult·row`) — are recorded as a `FtEta` and replayed on the solve vector between the
+  `L`-solve and `U`-solve in `ftran` (transposed, reversed, between `Uᵀ` and `Lᵀ` in `btran`).
+  `U` is updated in place. Maintained invariant: `P A Q = L G U`, `G = E₁⁻¹…Eₜ⁻¹`.
 
-- **Scaling.** Unsymmetric MC64 is a thin driver over the existing
-  `crate::scaling::hungarian_match` (already an unsymmetric bipartite matcher),
-  not a new algorithm; ∞-norm equilibration adapts the two-sided Knight–Ruiz
-  idea. `params.scaling` drives `factor()`, which factors
-  `Ã = D_row Π B D_col`; solves wrap the scaling around a core solve.
+- **`U` stored as mutable per-row vectors** (`Vec<Vec<(col,val)>>`, diagonal first) rather than
+  flat CSR, so the in-place row operations / swaps / merges are tractable.
 
-- **API.** `update(leaving_slot, entering_col)` takes the raw entering column
-  (computes the spike internally) on both paths, matching the simplex
-  "swap column" operation and the `BasisEngine` seam shape.
+- **Consequence.** Warm-solve cost is bump-local (`O(Σ bump)`), independent of `n` for
+  localized spikes (the realistic LP regime) — demonstrated flat across n=1000..8000. The
+  inherent worst case is a dense spike (e.g. tridiagonal, where `L⁻¹` is dense), where the
+  bump spans the tail and the cost degrades toward the old product-form; this is fundamental
+  to any update scheme and bounded by the `max_updates` refactor budget.
 
-- **Out of scope (deferred).** The `pounce-simplex` `BasisEngine` integration
-  and GLOBALLib/netlib end-to-end benchmarks cannot be done here (pounce is not
-  in this environment); reference (UMFPACK/KLU) benchmarks and the GP
-  reach / full FT optimizations are Phase 7 in `dev/plans/unsymmetric-lu-epic.md`.
+- **Stability/budget.** Growth monitor over elimination multipliers → `NeedsRefactor` on
+  `max_growth`; no acceptable bump pivot → `SingularBasis`; update count → `NeedsRefactor` on
+  `max_updates`. Work is done on a clone of `U`, committed only on success, so failures leave
+  `self` unchanged.
 
 ## Recent Tried-and-Rejected
    the scaling choice and unpredicted by max_col_deg / MC64 cost / n

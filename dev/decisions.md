@@ -5336,3 +5336,42 @@ Decisions made this session (rationale in `dev/research/unsymmetric-lu.md`):
   and GLOBALLib/netlib end-to-end benchmarks cannot be done here (pounce is not
   in this environment); reference (UMFPACK/KLU) benchmarks and the GP
   reach / full FT optimizations are Phase 7 in `dev/plans/unsymmetric-lu-epic.md`.
+
+---
+
+## 2026-06-08 — Sparse rank-1 update: Forrest–Tomlin via in-place bump elimination (issue #81, P6.5)
+
+The sparse `SparseLu` rank-1 column-replacement update is a true Forrest–Tomlin /
+Bartels–Golub–Reid update, replacing the interim product-form-on-`U` (which stored a dense
+`τ` per eta and degraded warm `ftran` as `O(k·n)` — measured).
+
+Decision and rationale:
+
+- **In-place bump elimination with partial pivoting.** The spike `ρ = G⁻¹L⁻¹P·aₙₑw` is set
+  into `U`'s column `r`; the bump `[r, h]` (`h` = max spike support) is re-triangularized by
+  sparse Gaussian elimination. **Partial pivoting is mandatory** and is the resolution of the
+  zero-pivot landmine documented when this was deferred: the naive column-shift Bartels–Golub
+  makes the Hessenberg diagonal pivots the old superdiagonal `U[k,k+1]`, which are frequently
+  zero in a sparse `U`; partial pivoting instead uses a nonzero sub-diagonal spike entry as
+  the pivot via a row interchange.
+
+- **Swaps go into the eta, not the base `L`.** The unit-lower base `L` is never permuted
+  (permuting the fully-formed `L` would break its triangularity). The bump elimination's
+  elementary operations — `FtOp::Swap` (partial-pivot interchange) and `FtOp::Axpy`
+  (`row -= mult·row`) — are recorded as a `FtEta` and replayed on the solve vector between the
+  `L`-solve and `U`-solve in `ftran` (transposed, reversed, between `Uᵀ` and `Lᵀ` in `btran`).
+  `U` is updated in place. Maintained invariant: `P A Q = L G U`, `G = E₁⁻¹…Eₜ⁻¹`.
+
+- **`U` stored as mutable per-row vectors** (`Vec<Vec<(col,val)>>`, diagonal first) rather than
+  flat CSR, so the in-place row operations / swaps / merges are tractable.
+
+- **Consequence.** Warm-solve cost is bump-local (`O(Σ bump)`), independent of `n` for
+  localized spikes (the realistic LP regime) — demonstrated flat across n=1000..8000. The
+  inherent worst case is a dense spike (e.g. tridiagonal, where `L⁻¹` is dense), where the
+  bump spans the tail and the cost degrades toward the old product-form; this is fundamental
+  to any update scheme and bounded by the `max_updates` refactor budget.
+
+- **Stability/budget.** Growth monitor over elimination multipliers → `NeedsRefactor` on
+  `max_growth`; no acceptable bump pivot → `SingularBasis`; update count → `NeedsRefactor` on
+  `max_updates`. Work is done on a clone of `U`, committed only on success, so failures leave
+  `self` unchanged.
