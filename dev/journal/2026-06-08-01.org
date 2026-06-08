@@ -298,3 +298,30 @@ ft_update_sparse ≈ equal: 462µs vs 462µs at n=5000). The benefit is asymptot
 (grows with the n/bump ratio — large n, tiny localized spike); here it's an
 API-completeness + correctness win, not a visible speedup. The update is now
 O(bump + nnz(aₙₑw)) with no O(n) term.
+
+* 01:30 :lu:reference:suitesparse-harness:
+Built the real-world LU validation harness (epic Phase 7 start), to close the
+"no external reference / no real matrices" gap.
+
+- scripts/fetch_lu_corpus.py: ssgetpy download of a curated set of square
+  UNSYMMETRIC SuiteSparse matrices into data/matrices/lu-corpus/ (gitignored).
+  Curated mix incl. bp_* (real LP simplex bases — the actual target), chemical
+  (west*, fs_*), circuit (add20/32, memplus), reservoir/fluid (sherman*,
+  saylr*, pores*, lns*), economic/powerflow (orani678, gre_*, gemat*).
+- crates/feral-diagnostics/src/bin/lu_reference: general-MTX parser (feral's
+  read_mtx only accepts 'symmetric'); known-x oracle a=B·x_true, solve, report
+  ‖x−x_true‖/‖x_true‖, ‖Bx−a‖/‖a‖, refined residual, fill ratio, + a
+  self-replace rank-1 update (must leave the basis unchanged). MC64 scaling +
+  PerturbToEps so near-singular reals survive.
+- scripts/lu_reference_scipy.py: independent scipy.sparse.linalg.splu (SuperLU)
+  cross-check, same x_true and metrics → external baseline.
+
+End-to-end verified on a synthetic 50×50 unsymmetric tridiag+: feral
+err=2.54e-16 resid=3.9e-16 upd=3.9e-16; scipy SuperLU err=2.54e-16 — bit
+identical, so feral matches the reference. clippy clean.
+
+LIMITATION: sparse.tamu.edu is unreachable from this sandbox (ssgetpy index
+refresh fails — network policy), so the real corpus couldn't be downloaded
+here. The harness/scripts are ready; run fetch where outbound HTTPS is allowed,
+then `cargo run -p feral-diagnostics --release --bin lu_reference` and
+`python scripts/lu_reference_scipy.py` to compare.

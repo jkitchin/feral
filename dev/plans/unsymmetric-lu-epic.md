@@ -60,11 +60,17 @@ cost — inherent. Commits: 8738279 (storage), 0fc767c (update), 2b5a5f5 (proof)
 
 ### Deferred (follow-up sessions)
 
-- **P7 Reference benchmarks.** SuiteSparse unsymmetric corpus; factor time + solve accuracy
-  vs UMFPACK/KLU/SuperLU where licensing allows (the way the LDLᵀ side checks vs MUMPS). The
-  update-vs-refactor crossover microbench (`m ∈ {10,100,1k,10k}`, sparsity sweep) is seeded
-  in P1–P6 and matured here. Also: faithful COLAMD (replace the AMD-on-AᵀA stand-in), and
-  optional Markowitz pivoting (citep:suhl1990computing) for fill on large bases.
+- **P7 Reference benchmarks — STARTED.** Real-world validation harness in place:
+  `scripts/fetch_lu_corpus.py` (ssgetpy → curated square unsymmetric SuiteSparse matrices,
+  incl. the `bp_*` LP simplex bases, into `data/matrices/lu-corpus/`),
+  `crates/feral-diagnostics/src/bin/lu_reference` (known-x oracle: `a = B x_true`, solve,
+  report `‖x−x_true‖`/`‖Bx−a‖`/refined/fill + a self-replace update), and
+  `scripts/lu_reference_scipy.py` (independent SciPy SuperLU cross-check, same metrics).
+  Verified end-to-end on a synthetic unsymmetric matrix (feral err 2.54e-16 == SciPy
+  2.54e-16). Remaining: run on the downloaded corpus where outbound network is allowed
+  (blocked in the dev sandbox), the update-vs-refactor crossover sparsity sweep, faithful
+  COLAMD (replace the AMD-on-AᵀA stand-in), and optional Markowitz pivoting
+  (citep:suhl1990computing) for fill on large bases.
 - **P8 Downstream (pounce repo, OUT OF SCOPE here).** Implement `BasisEngine` behind the
   feral LU engine; `DenseBasis` as the correctness oracle; no GLOBALLib small-regime
   regression; measured netlib large-regime win; peak fill + refactor-count reporting.
