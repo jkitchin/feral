@@ -38,13 +38,11 @@ pub struct SparseLu {
     pub(super) l_col_ptr: Vec<usize>,
     pub(super) l_row_idx: Vec<usize>,
     pub(super) l_val: Vec<f64>,
-    // U: strict-upper stored row-wise (CSR, pivot-position rows, ascending
-    // column positions) + explicit diagonal. Row-wise so the Forrest–Tomlin
-    // update can do row operations on U.
-    pub(super) u_row_ptr: Vec<usize>,
-    pub(super) u_col_idx: Vec<usize>,
-    pub(super) u_val: Vec<f64>,
-    pub(super) u_diag: Vec<f64>,
+    // U: upper triangular, one sorted row per pivot position, each row a list
+    // of `(column_position, value)` with column >= row and the diagonal entry
+    // FIRST (column == row). Mutable per-row storage so the Forrest–Tomlin
+    // update can do in-place row operations.
+    pub(super) u_rows: Vec<Vec<(usize, f64)>>,
     /// `perm[k]` = original row in pivot position `k` (`(P a)[k] = a[perm[k]]`).
     pub(super) perm: Vec<usize>,
     /// Column order: factorization column `k` is original column `qcol[k]`.
@@ -249,19 +247,26 @@ impl SparseLu {
         let perm_inv: Vec<usize> = pinv.iter().map(|&p| p as usize).collect();
         remap_and_sort_l(&l_col_ptr, &mut l_row_idx, &mut l_val, &perm_inv, m);
 
-        // Transpose U from column-wise (built above) to row-wise CSR. Columns
-        // were emitted in increasing order, so each row ends up column-sorted.
+        // Transpose U from column-wise (built above) to row-wise CSR, then into
+        // per-row vectors with the diagonal entry first. Columns were emitted in
+        // increasing order, so each row's strict-upper entries are sorted.
         let (u_row_ptr, u_col_idx, u_val) = transpose_to_csr(&u_col_ptr, &u_row_idx, &u_val, m);
+        let mut u_rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
+        for i in 0..m {
+            let mut row = Vec::with_capacity(1 + (u_row_ptr[i + 1] - u_row_ptr[i]));
+            row.push((i, u_diag[i])); // diagonal first
+            for idx in u_row_ptr[i]..u_row_ptr[i + 1] {
+                row.push((u_col_idx[idx], u_val[idx]));
+            }
+            u_rows.push(row);
+        }
 
         Ok(SparseLu {
             m,
             l_col_ptr,
             l_row_idx,
             l_val,
-            u_row_ptr,
-            u_col_idx,
-            u_val,
-            u_diag,
+            u_rows,
             perm,
             qcol,
             qcol_inv,
@@ -305,7 +310,7 @@ impl SparseLu {
 
     /// Total stored nonzeros in `L` and `U` (including the `U` diagonal).
     pub fn factor_nnz(&self) -> usize {
-        self.l_val.len() + self.u_val.len() + self.m
+        self.l_val.len() + self.u_rows.iter().map(|r| r.len()).sum::<usize>()
     }
 
     /// Total Gilbert–Peierls reach nodes visited during the factorization.
@@ -331,16 +336,12 @@ impl SparseLu {
 
     /// Reconstruct dense entry `(i, j)` of `U` (pivot-position coordinates).
     pub fn u_dense(&self, i: usize, j: usize) -> f64 {
-        if i == j {
-            return self.u_diag[j];
-        }
         if i > j {
             return 0.0;
         }
-        let (s, e) = (self.u_row_ptr[i], self.u_row_ptr[i + 1]);
-        for idx in s..e {
-            if self.u_col_idx[idx] == j {
-                return self.u_val[idx];
+        for &(c, v) in self.u_rows[i].iter() {
+            if c == j {
+                return v;
             }
         }
         0.0

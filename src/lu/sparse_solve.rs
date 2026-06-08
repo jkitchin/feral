@@ -172,29 +172,30 @@ impl SparseLu {
         }
     }
 
-    /// Back solve `U w = s` (upper, row-wise CSR), in place.
+    /// Back solve `U w = s` (upper; per-row storage, diagonal first), in place.
     fn usolve(&self, s: &mut [f64]) {
         for k in (0..self.m).rev() {
+            let row = &self.u_rows[k];
             let mut acc = s[k];
-            let (lo, hi) = (self.u_row_ptr[k], self.u_row_ptr[k + 1]);
-            for idx in lo..hi {
-                acc -= self.u_val[idx] * s[self.u_col_idx[idx]];
+            // Skip the diagonal (row[0], column == k); the rest are columns > k.
+            for &(c, v) in row[1..].iter() {
+                acc -= v * s[c];
             }
-            s[k] = acc / self.u_diag[k];
+            s[k] = acc / row[0].1;
         }
     }
 
-    /// Forward solve `Uᵀ z = s` (`Uᵀ` lower; scatter form on row-wise U).
+    /// Forward solve `Uᵀ z = s` (`Uᵀ` lower; scatter form on per-row U).
     fn ut_solve(&self, s: &mut [f64]) {
         for i in 0..self.m {
-            let si = s[i] / self.u_diag[i];
+            let row = &self.u_rows[i];
+            let si = s[i] / row[0].1;
             s[i] = si;
             if si == 0.0 {
                 continue;
             }
-            let (lo, hi) = (self.u_row_ptr[i], self.u_row_ptr[i + 1]);
-            for idx in lo..hi {
-                s[self.u_col_idx[idx]] -= self.u_val[idx] * si;
+            for &(c, v) in row[1..].iter() {
+                s[c] -= v * si;
             }
         }
     }
