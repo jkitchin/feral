@@ -350,6 +350,18 @@ impl SparseLu {
         self.l_val.len() + self.u_rows.iter().map(|r| r.len()).sum::<usize>()
     }
 
+    /// Total elementary operations across all Forrest–Tomlin update etas — the
+    /// work a warm solve replays for the update chain. For bump-local updates
+    /// this stays `O(Σ bump)`, not `O(k·n)` (the structural FT witness).
+    pub fn eta_ops(&self) -> usize {
+        self.etas.iter().map(|e| e.ops.len()).sum()
+    }
+
+    /// Operations in the most recent update's eta (its bump cost).
+    pub fn last_eta_ops(&self) -> usize {
+        self.etas.last().map(|e| e.ops.len()).unwrap_or(0)
+    }
+
     /// Total Gilbert–Peierls reach nodes visited during the factorization.
     /// This is `O(nnz(U))` (output-sensitive); it would be `O(n²)` if the
     /// factor scanned all prior columns. Used by the scalability guard test.

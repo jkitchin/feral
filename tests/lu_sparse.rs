@@ -221,6 +221,64 @@ fn sparse_update_single_residual() {
     assert_eq!(lu.updates_since_refactor(), 4);
 }
 
+/// Identical diagonally-dominant blocks of size `bs` down the diagonal.
+fn block_diag_fixed(nblocks: usize, bs: usize) -> SparseColMatrix {
+    let n = nblocks * bs;
+    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for b in 0..nblocks {
+        let base = b * bs;
+        for cc in 0..bs {
+            for rr in 0..bs {
+                let v = if rr == cc {
+                    5.0
+                } else if (rr + 2 * cc) % 4 == 0 {
+                    0.5
+                } else {
+                    0.0
+                };
+                if v != 0.0 {
+                    cols[base + cc].push((base + rr, v));
+                }
+            }
+        }
+    }
+    SparseColMatrix::from_sparse_columns(n, &cols).expect("block_diag")
+}
+
+#[test]
+fn ft_update_is_bump_local() {
+    // The FT eta replays the bump elimination; for a within-block update the
+    // bump is confined to that block, so the eta size is the SAME regardless of
+    // how many other blocks exist — i.e., independent of n (the win over the
+    // product-form's always-O(n) dense τ).
+    let bs = 8;
+    let do_block0_update = |nblocks: usize| -> usize {
+        let n = nblocks * bs;
+        let a = block_diag_fixed(nblocks, bs);
+        let sym = SparseLuSymbolic::natural(n);
+        let mut lu = SparseLu::factor(&a, &sym, LuParams::default()).expect("factor");
+        // Replace column 0 (in block 0) with a fixed within-block-0 column.
+        let mut col = vec![0.0; n];
+        col[0] = 6.0;
+        col[1] = 1.0;
+        col[2] = -0.5;
+        lu.update(0, &col).expect("update");
+        lu.last_eta_ops()
+    };
+    let ops_small = do_block0_update(3); // n = 24
+    let ops_big = do_block0_update(50); // n = 400
+    assert_eq!(
+        ops_small, ops_big,
+        "FT eta size must be independent of n for a block-local update"
+    );
+    // And bounded by the block, far below n.
+    assert!(
+        ops_big <= bs * bs,
+        "eta ops {ops_big} exceed block bound {}",
+        bs * bs
+    );
+}
+
 #[test]
 fn sparse_ft_long_chain_residual() {
     // A long Forrest–Tomlin update chain on a sparse basis: every warm solve
