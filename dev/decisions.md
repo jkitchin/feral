@@ -5283,3 +5283,95 @@ src/symbolic/mod.rs choose_adaptive (AMF_BAND_MAX removed) +
 choose_adaptive_rules / choose_adaptive_routes_arrow_to_amf tests,
 crates/feral-diagnostics/src/bin/probe_issue73_symbolic.rs,
 crates/feral-diagnostics/src/bin/probe_issue67_thin.rs.
+
+---
+
+## 2026-06-08 — Unsymmetric LU basis engine as a new factorization family (issue #81)
+
+feral grows a second, **separate** factorization family: an unsymmetric LU
+(`feral::lu`) designed as a revised-simplex basis engine. It is additive — the
+symmetric LDLᵀ / inertia solver and all its code paths are untouched (the bench
+confirms the symmetric corpus is unaffected). LU has no inertia.
+
+Decisions made this session (rationale in `dev/research/unsymmetric-lu.md`):
+
+- **Dense update representation.** The dense rank-1 update maintains the
+  invariant `P B Q = L U` with an *explicit column permutation* `Q` and
+  in-place Bartels–Golub re-triangularization (spike → cyclic column shift to
+  upper-Hessenberg → no-pivot Gauss sweep; row op on `U`, column op on `L`).
+  We deliberately did **not** use an eta-replay file on the dense path — it is
+  cleaner and provably keeps `L` unit-lower / `U` upper. In-bump instability or
+  budget overflow returns `NeedsRefactor` with `self` unchanged (work on
+  clones, commit on success).
+
+- **Sparse update representation.** The sparse rank-1 update is a **product-form
+  update of `U`**: replacing column `q` by the transformed spike `τ` gives
+  `U' = U·F`, `F = I + (τ−e_q)e_qᵀ`, so `U'⁻¹ = F⁻¹U⁻¹`; one eta `(q, τ)` per
+  update, applied after the `U`-solve (transposed-in-reverse in `btran`).
+  `τ[q]` is the stability pivot. This is correct and genuinely sparse with a
+  clean refactor budget; a full Forrest–Tomlin row-eta file (keeping the eta
+  sparser than the dense `τ`) is deferred as an optimization, not a correctness
+  gap.
+
+- **Sparse factor.** Gilbert–Peierls left-looking LU. The forward-substitution
+  variant used is correct but not yet output-sensitive (no DFS reach); the
+  depth-first symbolic reach that makes it O(flops) is deferred.
+
+- **Column ordering.** Reuse `feral_amd::amd_order` on the explicitly-formed
+  `AᵀA` (column-intersection) pattern as a stand-in for COLAMD. The `AᵀA`
+  pattern is invariant under the row permutation/scaling, so the ordering is
+  also valid for the scaled matrix `Ã`.
+
+- **Scaling.** Unsymmetric MC64 is a thin driver over the existing
+  `crate::scaling::hungarian_match` (already an unsymmetric bipartite matcher),
+  not a new algorithm; ∞-norm equilibration adapts the two-sided Knight–Ruiz
+  idea. `params.scaling` drives `factor()`, which factors
+  `Ã = D_row Π B D_col`; solves wrap the scaling around a core solve.
+
+- **API.** `update(leaving_slot, entering_col)` takes the raw entering column
+  (computes the spike internally) on both paths, matching the simplex
+  "swap column" operation and the `BasisEngine` seam shape.
+
+- **Out of scope (deferred).** The `pounce-simplex` `BasisEngine` integration
+  and GLOBALLib/netlib end-to-end benchmarks cannot be done here (pounce is not
+  in this environment); reference (UMFPACK/KLU) benchmarks and the GP
+  reach / full FT optimizations are Phase 7 in `dev/plans/unsymmetric-lu-epic.md`.
+
+---
+
+## 2026-06-08 — Sparse rank-1 update: Forrest–Tomlin via in-place bump elimination (issue #81, P6.5)
+
+The sparse `SparseLu` rank-1 column-replacement update is a true Forrest–Tomlin /
+Bartels–Golub–Reid update, replacing the interim product-form-on-`U` (which stored a dense
+`τ` per eta and degraded warm `ftran` as `O(k·n)` — measured).
+
+Decision and rationale:
+
+- **In-place bump elimination with partial pivoting.** The spike `ρ = G⁻¹L⁻¹P·aₙₑw` is set
+  into `U`'s column `r`; the bump `[r, h]` (`h` = max spike support) is re-triangularized by
+  sparse Gaussian elimination. **Partial pivoting is mandatory** and is the resolution of the
+  zero-pivot landmine documented when this was deferred: the naive column-shift Bartels–Golub
+  makes the Hessenberg diagonal pivots the old superdiagonal `U[k,k+1]`, which are frequently
+  zero in a sparse `U`; partial pivoting instead uses a nonzero sub-diagonal spike entry as
+  the pivot via a row interchange.
+
+- **Swaps go into the eta, not the base `L`.** The unit-lower base `L` is never permuted
+  (permuting the fully-formed `L` would break its triangularity). The bump elimination's
+  elementary operations — `FtOp::Swap` (partial-pivot interchange) and `FtOp::Axpy`
+  (`row -= mult·row`) — are recorded as a `FtEta` and replayed on the solve vector between the
+  `L`-solve and `U`-solve in `ftran` (transposed, reversed, between `Uᵀ` and `Lᵀ` in `btran`).
+  `U` is updated in place. Maintained invariant: `P A Q = L G U`, `G = E₁⁻¹…Eₜ⁻¹`.
+
+- **`U` stored as mutable per-row vectors** (`Vec<Vec<(col,val)>>`, diagonal first) rather than
+  flat CSR, so the in-place row operations / swaps / merges are tractable.
+
+- **Consequence.** Warm-solve cost is bump-local (`O(Σ bump)`), independent of `n` for
+  localized spikes (the realistic LP regime) — demonstrated flat across n=1000..8000. The
+  inherent worst case is a dense spike (e.g. tridiagonal, where `L⁻¹` is dense), where the
+  bump spans the tail and the cost degrades toward the old product-form; this is fundamental
+  to any update scheme and bounded by the `max_updates` refactor budget.
+
+- **Stability/budget.** Growth monitor over elimination multipliers → `NeedsRefactor` on
+  `max_growth`; no acceptable bump pivot → `SingularBasis`; update count → `NeedsRefactor` on
+  `max_updates`. Work is done on a clone of `U`, committed only on success, so failures leave
+  `self` unchanged.

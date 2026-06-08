@@ -4,6 +4,45 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — unsymmetric LU basis engine (`feral::lu`, issue #81)
+
+A new, separate factorization family for **simplex basis factorization** —
+unsymmetric LU with first-class rank-1 column-replacement updates and warm
+`ftran`/`btran` solves, built independently of the symmetric LDLᵀ solver
+(which is untouched). Module `feral::lu`:
+
+- **Dense path** — `GeneralMatrix` (general column-major dense) and `DenseLu`:
+  right-looking LU with threshold partial pivoting (`P B Q = L U`),
+  `ftran`/`btran`/`ftran_partial`, and a rank-1 column-replacement `update()`
+  (dense Bartels–Golub: spike → upper-Hessenberg → Gauss sweep, maintaining an
+  explicit column permutation).
+- **Sparse path** — `SparseColMatrix` (general CSC) and `SparseLu`: left-looking
+  Gilbert–Peierls LU (output-sensitive depth-first reach, sub-quadratic factor)
+  with threshold partial pivoting, sparse `ftran`/`btran`, and a **Forrest–Tomlin
+  / Bartels–Golub–Reid** rank-1 column-replacement update — in-place sparse
+  Gaussian elimination of the bump with partial pivoting, recorded as a
+  replayable eta (bump-local warm solves, no `O(k·n)` chain). The update itself
+  is bump-local — Gilbert–Peierls reach for the spike, a `u_above` column index
+  for the replacement, save/restore of only the changed rows (no `O(nnz)`
+  clone) — ~14–17× faster than a refactor. `SparseLuSymbolic`
+  computes the fill-reducing column order by running `feral_amd` on the `AᵀA`
+  pattern (reusable symbolic handle).
+- **Routing** — `should_use_dense_lu(m, nnz, params)` auto-routes dense vs
+  sparse (mirrors the LDLᵀ `should_use_dense_fast_path`), with a `LuParams`
+  override.
+- **Robustness** — two-sided ∞-norm equilibration and unsymmetric MC64 scaling
+  (`LuScaling`, reusing the existing `hungarian_match` kernel), plus iterative
+  refinement (`ftran_refined`/`btran_refined`). Singular bases report
+  `FeralError::SingularBasis`; the update budget reports
+  `FeralError::NeedsRefactor`.
+
+There is no inertia for LU (the basis is unsymmetric). Validated by
+`tests/lu_dense.rs`, `tests/lu_sparse.rs`, and `tests/lu_scaling.rs` with
+hand-worked exact factors, equation-residual property checks, dense↔sparse
+agreement, and adversarial/ill-scaled/ill-conditioned cases. The downstream
+`pounce-simplex` `BasisEngine` integration and reference (UMFPACK/KLU)
+benchmarks are deferred (see `dev/plans/unsymmetric-lu-epic.md`).
+
 ### Added — on-disk dense-column regression fixture for issue #80
 
 `cargo run --bin bench` now regenerates two synthetic dense-coupling-column

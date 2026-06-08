@@ -13,6 +13,7 @@ pub mod dense;
 pub mod error;
 pub mod inertia;
 pub mod io;
+pub mod lu;
 pub mod numeric;
 pub mod ordering;
 pub mod scaling;
@@ -29,6 +30,15 @@ pub use error::FeralError;
 pub use inertia::Inertia;
 pub use io::mtx::{parse_mtx, read_mtx, MtxMatrix};
 pub use io::sidecar::{read_sidecar, KktSidecar, SidecarInertia};
+// Unsymmetric LU basis engine (issue #81). LU operations are methods on the
+// factor structs, so the symmetric crate-root `factor`/`solve` names are
+// unaffected.
+pub use lu::dense_factor::DenseLu;
+pub use lu::dense_matrix::GeneralMatrix;
+pub use lu::sparse_factor::SparseLu;
+pub use lu::sparse_matrix::SparseColMatrix;
+pub use lu::sparse_symbolic::SparseLuSymbolic;
+pub use lu::{should_use_dense_lu, LuParams, LuScaling, LuSingularAction};
 pub use numeric::condition::{estimate_condition_1norm, estimate_inverse_norm_1, matrix_norm_1};
 pub use numeric::factorize::{
     factorize_multifrontal_with_schur, NumericParams, ProfileReport, SchurBlock,

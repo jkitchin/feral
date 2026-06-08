@@ -1,0 +1,362 @@
+#+TITLE: Session 2026-06-08-01 — Unsymmetric LU basis engine (issue #81)
+
+* 09:00 :lu:planning:issue-81:
+Started issue #81: a new unsymmetric LU factorization family for simplex
+bases. Confirmed feral is symmetric-only today (no LU/unsymmetric math to
+reuse). Confirmed pounce-simplex (the downstream BasisEngine consumer) is
+NOT in this environment — only /home/user/feral exists — so the end-to-end
+acceptance criteria (BasisEngine drop-in, GLOBALLib/netlib benchmarks) are
+out of scope here, deferred to a later pounce-repo phase.
+
+Scope agreed with user (expanded twice): this PR delivers the WHOLE solver
+substance — dense LU + Bartels–Golub update, sparse Gilbert–Peierls LU +
+Forrest–Tomlin update, AMD-on-AᵀA ordering, auto router, AND the full
+robustness layer (∞-norm equilibration + unsymmetric MC64 + iterative
+refinement). Only SuiteSparse benchmarking and the pounce integration are
+deferred.
+
+Key reuse finding: hungarian_match (src/scaling/hungarian.rs:448,
+pub(crate)) is ALREADY a general unsymmetric bipartite matcher returning
+perm[j]=row matched to col j plus duals u,v. So unsymmetric MC64 is a thin
+driver, not a new matching algorithm. feral_amd::amd_order is callable on
+any full-symmetric i32 CscPattern (conversion pattern at
+src/symbolic/mod.rs:535-569).
+
+* 09:30 :lu:docs:
+Wrote the mandatory research note dev/research/unsymmetric-lu.md and the
+epic plan dev/plans/unsymmetric-lu-epic.md, added 6 LU references to
+dev/references.bib (gilbert1988sparse, forrest1972updated, bartels1969stable,
+reid1982sparsity, suhl1990computing, davis2004colamd). duff2001mc64 and
+knight2014symmetry already present. Baseline `cargo build` green;
+pre-commit installed (pip install pre-commit) and hooks present.
+
+* 11:30 :lu:dense:implementation:
+Implemented the full dense LU path: GeneralMatrix, DenseLu factor/refactor
+(right-looking, threshold partial pivoting, separate explicit L/U storage),
+ftran/btran/ftran_partial, ftran_refined/btran_refined, and the rank-1
+column-replacement update.
+
+Design decision: dropped the eta-replay representation for the dense path
+in favor of maintaining the invariant P B Q = L U with an explicit column
+permutation Q (qcol/qcol_inv). The dense Bartels–Golub update overwrites
+column q with the spike, does a cyclic column shift to upper-Hessenberg,
+then a no-pivot Gauss sweep eliminating the subdiagonal — each step a row
+op on U and a column op on L (col_k += mult*col_{k+1}), which provably
+keeps L unit-lower and U upper. No in-bump pivoting; instability/budget →
+NeedsRefactor (work done on clones, committed only on success, so self is
+unchanged on failure). Eta files are deferred to the SPARSE Forrest–Tomlin
+path where they actually pay.
+
+Verified hand-derived update algebra with tests/lu_dense.rs (11 tests):
+equation residuals ‖Bx−a‖ < 1e-8 after single update, 5-update chains,
+update-with-row-swap (perm composition), refactor-matches-updated-factor
+parity < 1e-9, budget→NeedsRefactor with self unchanged < 1e-14, and
+ill-conditioned refinement < 1e-12. All green; full suite (55 bins) green;
+clippy -D warnings clean.
+
+* 13:30 :lu:sparse:gilbert-peierls:
+Implemented sparse LU: SparseColMatrix (general CSC, from_dense/sparse
+columns, matvec, ata_pattern = column-intersection graph), SparseLuSymbolic
+(column order Q via feral_amd::amd_order on the AᵀA pattern, i32-contract
+conversion à la symbolic/mod.rs:535-569; plus a natural() fallback), and
+SparseLu factor (left-looking, threshold partial pivoting, PAQ=LU) with
+sparse ftran/btran/ftran_partial and refinement.
+
+Factor stores L (unit lower, strict-lower CSC, pivot-position rows) and U
+(strict-upper CSC + explicit u_diag). Forward substitution in pivot order:
+processing p=0..k-1 in increasing order is correct because column p only
+fills rows that pivot at positions >p (proof: L(:,p) rows are unpivoted at
+step p). L stored with original rows, remapped to pivot positions via pinv
+after the factor completes. Note: this is correct but O(m²)-ish, not yet
+output-sensitive — the GP depth-first reach is a documented follow-up.
+
+btran reads Uᵀ/Lᵀ directly off the CSC columns (no explicit transpose).
+
+Verified tests/lu_sparse.rs (7 tests): ‖PAQ−LU‖ < 1e-10 reconstruction,
+ftran/btran residual < 1e-10, AMD and natural ordering both green,
+dense↔sparse agreement < 1e-9, singular→SingularBasis, PerturbToEps,
+refinement < 1e-12. Full suite green; clippy -D warnings clean.
+
+Deferred to next commit: the sparse rank-1 update (Forrest–Tomlin). The
+perm_inv/qcol_inv fields and update state land with it.
+
+* 15:00 :lu:sparse:update:forrest-tomlin:
+Implemented the sparse rank-1 column-replacement update. After deriving the
+algebra, chose a product-form update of U: replacing column q by the spike
+gives U' = U·F with F = I + (τ−e_q)e_qᵀ, τ = the ftran of the entering
+column in column-position space, so U'⁻¹ = F⁻¹U⁻¹. Each update stores one
+eta (q, τ) applied after the U-solve in ftran (transposed-reverse before the
+Uᵀ-solve in btran). τ[q] is the update pivot → SingularBasis if it vanishes;
+1/|τ[q]| feeds the growth monitor → NeedsRefactor on budget. This is a
+correct, genuinely sparse first-class rank-1 update; full Forrest–Tomlin
+row-eta sparsity (keeping the eta sparser than the dense τ) is documented as
+the optimization.
+
+Also unified the update API: both dense and sparse update() now take the raw
+entering column and compute the spike internally (cleaner, matches the
+simplex "swap column" op, self-contained). Refactored dense update + tests.
+
+Verified tests/lu_sparse.rs (10 tests): single-update residual < 1e-8,
+4-update chain < 1e-7, dense↔sparse post-update agreement < 1e-9,
+budget→NeedsRefactor + refactor clears the chain, singular update detected.
+Caught a self-inflicted bug: replacing two slots with the SAME column is
+genuinely singular (τ_q→0) — the engine correctly returned SingularBasis;
+fixed the test to use distinct columns. Full suite green; clippy clean.
+
+* 16:30 :lu:scaling:robustness:
+Added the scaling robustness layer: src/lu/scaling.rs with LuScale {rperm,
+d_row, d_col}, two-sided ∞-norm equilibration (Knight–Ruiz), and unsymmetric
+MC64 as a thin driver over crate::scaling::hungarian_match (build the
+column-normalized log-cost CostGraph from the general basis, read rperm from
+the matching and d_row/d_col from the duals u,v; partial matching → InfNorm
+fallback). Mc64ThenInfNorm composes both.
+
+Integration: params.scaling drives factor() on both dense and sparse — they
+factor Ã = D_row Π B D_col (AᵀA pattern is invariant under row perm/scaling,
+so the column ordering still applies). ftran/btran wrap the scaling around a
+renamed core solve (ftran_core/btran_core); identity scaling short-circuits
+to the core (no overhead, existing tests unchanged). update() scales the
+entering column into the Ã frame first. Iterative refinement
+(ftran_refined/btran_refined) was already in place from the solve commits and
+calls the scaled wrappers against the original B.
+
+Verified tests/lu_scaling.rs (5 tests): InfNorm/Mc64/Mc64ThenInfNorm preserve
+correctness (residual < 1e-8) on a 16-orders-of-magnitude ill-scaled basis
+(dense + sparse), dense↔sparse agreement under MC64, equilibration drives all
+row/col ∞-norms into [0.1,10], and MC64 puts order-1 entries on the diagonal.
+Full suite green; clippy -D warnings clean.
+
+* 17:30 :lu:sparse:scalability:gilbert-peierls-reach:
+User asked to verify the sparse factor scales < O(n²). Wrote a scaling
+probe (crates/feral-diagnostics/src/bin/lu_scale_probe.rs) factoring
+tridiagonal (no-fill) and 2D 5-point grid (fill) bases at increasing n.
+
+BEFORE (the deferred-DFS O(m²) forward-substitution scan): factor time on
+tridiagonal went 203→558→2197→8167→31714→127004→513105 µs as n doubled
+500→32000, empirical exponent → 2.00. Confirmed quadratic.
+
+FIX: implemented the deferred Gilbert–Peierls depth-first reach. Per column,
+DFS over the graph of L from the nonzeros of A(:,qcol[k]) (edges col→pivot
+positions of its already-pivoted rows; all edges point to larger positions,
+so ascending position order is a valid topological order). Numeric solve now
+runs only over the reach (sorted ascending), not all p<k. Reuses w/touched
+logic unchanged; same numeric result (all reconstruction/residual/dense↔sparse
+tests still green).
+
+AFTER: tridiagonal factor 51→96→289→452→826→1692→3143→6281 µs for
+n=500..64000, exponent ~1.0 (156× faster at n=32000: 513ms→3.3ms). 2D grid
+(Lnnz growing ~n^1.33) factor ~O(n^1.6) overall — fill-dominated but firmly
+sub-quadratic. analyze and ftran were already ~linear.
+
+Added a deterministic (timing-free) regression guard: SparseLu.reach_visits()
+counts total reach nodes (O(nnz(U)), not O(n²)); test
+factor_traversal_is_subquadratic asserts doubling n on a tridiagonal less than
+triples the reach work (linear ≈ 2×; the old scan would 4×). Full suite (631)
+green; clippy -D warnings clean.
+
+* 18:15 :lu:sparse:update:degradation-measured:
+Measured warm-solve scaling under update chains (lu_update_probe.rs), n=5000
+tridiagonal. The product-form update stores a DENSE τ (length n) per eta, so
+ftran is O(k·n) after k updates:
+
+  updates  ftran(µs)  eta_nnz
+        0      75       0
+       10     134       50000
+       50     412       250000
+      100     780       500000
+      400    3033      2000000
+
+Linear in k (≈7.4µs/update ≈ n ops), eta file = k·n. 40× slowdown at 400
+updates, unbounded until refactor. This is the PFI "eta chain grows" problem
+the issue cites as the reason to graduate to true Forrest–Tomlin, where the
+spike folds into U and only a SPARSE row-eta is stored, so solves stay cheap.
+Confirms the need; implementing FT next.
+
+* 19:30 :lu:sparse:forrest-tomlin:blocked-on-zero-pivots:
+Attempted the full FT in two stages. Stage 1 (convert U to row-wise CSR so
+the update can do row ops) landed cleanly, committed (23af110), all sparse +
+scaling tests still green — a pure storage change, and the right foundation
+for FT.
+
+Stage 2 (the in-place column-replacement update) hit a genuine correctness
+subtlety I had not accounted for. The naive column-shift Bartels–Golub
+(move the leaving column to the end → upper-Hessenberg → eliminate the
+subdiagonal) produces a Hessenberg whose DIAGONAL pivots are the OLD
+SUPERDIAGONAL entries U[k,k+1], and the subdiagonal to eliminate is the old
+DIAGONAL U[k+1,k+1]. In a DENSE U the superdiagonals are nonzero (so the
+dense update works without in-bump pivoting), but in a SPARSE U the
+superdiagonal is frequently zero → zero Hessenberg pivot → division by zero.
+
+This is the crux of sparse basis updates that production LP solvers engineer
+carefully: it needs either the symmetric-permutation FT (which then needs
+careful permutation-of-stored-state bookkeeping, since physically permuting U
+each update staleness the relation L σᵀ, not lower-triangular) OR in-bump
+partial pivoting with row-permutation tracking (Reid's sparse BGR). Both are
+substantial, delicate pieces; I will not ship a subtly-wrong factorization
+(correctness-first). Reverted the Stage-2 scaffolding (restored the working
+product-form on top of Stage-1 row-wise U); tree correct, tests green.
+
+Net for this session: Stage 1 (row-wise U) committed as the FT foundation;
+the correct Stage-2 update is scoped with the exact subtlety documented for a
+focused follow-up. The product-form update remains correct and bounded by
+max_updates; its O(k·n) warm-solve cost (measured, fbbcece) is the thing FT
+will fix once Stage 2 lands correctly.
+
+* 21:00 :lu:sparse:forrest-tomlin:complete:
+P6.5 DONE. Implemented the true sparse Forrest–Tomlin / Bartels–Golub–Reid
+update, resolving the zero-pivot landmine that blocked the earlier attempt.
+
+Staged: (1) U → mutable per-row vectors (diagonal first), product-form kept
+working, tests green, committed; (2) replaced product-form with in-place
+sparse Gaussian elimination of the bump WITH PARTIAL PIVOTING. The spike
+G⁻¹L⁻¹P·aₙₑw is set into U's column r; the bump [r,h] (h=max spike support) is
+re-triangularized; the zero-superdiagonal-pivot problem is solved by partial
+pivoting (a sub-diagonal spike entry is a nonzero pivot; the row swap goes
+into the eta, so the unit-lower base L is never permuted). The elimination
+ops (FtOp::Swap / Axpy) are stored as a replayable FtEta, applied between the
+L- and U-solves in ftran (transposed-reversed between Uᵀ and Lᵀ in btran). U
+updated in place. No dense τ.
+
+Maintained invariant: P A Q = L G U, G = E₁⁻¹…Eₜ⁻¹; ftran applies L⁻¹, etas
+forward (E₁..Eₜ), U⁻¹, Q; spike for the next update = spike_space (L⁻¹P + etas
+forward, no U-solve).
+
+Verified: tests/lu_sparse.rs (13) — 25-update FT chain with ftran AND btran
+residuals < 1e-7 after every update; dense↔sparse post-update agreement
+< 1e-9; ft_update_is_bump_local asserts the eta size is identical for n=24 vs
+n=400 and ≤ block² (independent of n). lu_update_probe (block-diagonal,
+localized spikes): eta_ops_total ≈ 5100 and per-chain ftran overhead ≈ 10µs
+FLAT for n=1000..8000 — vs the old product-form's k·n storage (400k at
+n=8000) and 40× solve degradation. Full suite green; clippy -D warnings clean.
+
+Honest note: for a DENSE-spike basis (tridiagonal, L⁻¹ dense) the bump spans
+the tail and FT degrades to product-form-like cost — inherent worst case; the
+FT win is for localized spikes (the realistic LP regime), as demonstrated.
+
+* 22:00 :lu:benchmark:criterion:
+Added benches/lu.rs (criterion, harness=false, registered [[bench]] name="lu").
+Groups: dense {factor,ftran,update} m∈{16,64,256}; sparse {factor,ftran,
+ft_update} on block-diagonal n∈{200,1000,5000}; and update_vs_refactor — the
+headline crossover.
+
+Numbers (release, this host; reduced-sample run):
+  dense  factor/256   ≈ 2.34 ms   ftran/256 ≈ 121 µs   update/256 ≈ 202 µs
+  sparse factor/5000  ≈ 318 µs    ftran/5000 ≈ 18 µs   ft_update/5000 ≈ 89 µs
+  update_vs_refactor (block-diag, within-block update):
+     n=1000:  ft_update 206 µs   vs  refactor 1.68 ms   → ~8.2× faster
+     n=5000:  ft_update 829 µs   vs  refactor 8.81 ms   → ~10.6× faster
+
+So the rank-1 FT update is ~8–11× cheaper than re-factoring — the whole point
+of issue #81's update machinery, now measured. (The update still carries an
+O(m) component from set_column's row scan and the lsolve loop; a fully
+output-sensitive update via the GP reach + bump-local set_column is a noted
+optimization, separate from the already-bump-local SOLVE/eta cost.)
+
+* 23:30 :lu:sparse:update:bump-local:
+Made the sparse FT update fully bump-local (user request: GP reach in lsolve +
+bump-local set_column). Three changes:
+1. Spike via Gilbert–Peierls depth-first reach over L (compute_spike): only the
+   reachable L-columns are touched, not the whole O(m) lsolve loop. Result is a
+   sparse spike in a dedicated zeroed work buffer.
+2. set_column via a new u_above column index (rows<col with an entry): finds
+   column r's existing entries without scanning all rows. u_above maintained
+   incrementally (unindex saved-old / index new) over the changed rows only.
+3. No more O(nnz) clone of U: save only the changed rows ([r,h] ∪ supp(ρ) ∪
+   u_above[r]); roll back on failure (u_above updated only on success).
+
+Debugging: hit a stale-buffer bug — compute_spike's SPARSE scatter assumes a
+zeroed buffer, but ftran/btran use self.scratch as their work buffer and leave
+it dirty (they overwrite via full gather, never re-zero). The old dense
+spike_space didn't care (full gather). Fix: dedicated ft_work buffer for the
+update, kept zeroed (cleared via the touched list each update); the solves keep
+using self.scratch. Found via a stale-w assertion at compute_spike entry.
+
+Result (criterion update_vs_refactor): ft_update 206→95µs at n=1000, 829→405µs
+at n=5000 — ~2× faster than the clone version, now ~14–17× faster than a full
+refactor (was 8–10×). ft_update_is_bump_local guard still passes (eta size
+independent of n). Full suite (635) green; clippy -D warnings clean.
+
+Remaining O(m): one scan of the dense entering column (inherent to the dense
+API) — not the heavy clone/lsolve/scan that was removed.
+
+* 00:30 :lu:sparse:update:sparse-entering-column-api:
+Added the sparse entering-column API to remove the last O(n) term in the FT
+update. SparseLu::update_sparse(leaving_slot, &[(row,val)]) seeds the spike
+directly from the entering column's nonzeros (no O(n) scan). The dense
+update() is now a thin wrapper: scans aₙₑw once for nonzeros, delegates.
+Needed scale_rperm_inv (inverse of the scaling row permutation, precomputed at
+factor) to map an original row → scaled-row position without scanning;
+identity for the unscaled case.
+
+Verified: sparse_update_api_matches_dense_update — update_sparse on unsorted
+(row,val) pairs gives bit-identical solves to dense update() (diff < 1e-14)
+across all RHS. Full suite (634) green; clippy clean.
+
+Honest perf note: in the AMD-ordered block-diagonal crossover bench the BUMP
+dominates, so removing the O(n) scan is within noise (ft_update vs
+ft_update_sparse ≈ equal: 462µs vs 462µs at n=5000). The benefit is asymptotic
+(grows with the n/bump ratio — large n, tiny localized spike); here it's an
+API-completeness + correctness win, not a visible speedup. The update is now
+O(bump + nnz(aₙₑw)) with no O(n) term.
+
+* 01:30 :lu:reference:suitesparse-harness:
+Built the real-world LU validation harness (epic Phase 7 start), to close the
+"no external reference / no real matrices" gap.
+
+- scripts/fetch_lu_corpus.py: ssgetpy download of a curated set of square
+  UNSYMMETRIC SuiteSparse matrices into data/matrices/lu-corpus/ (gitignored).
+  Curated mix incl. bp_* (real LP simplex bases — the actual target), chemical
+  (west*, fs_*), circuit (add20/32, memplus), reservoir/fluid (sherman*,
+  saylr*, pores*, lns*), economic/powerflow (orani678, gre_*, gemat*).
+- crates/feral-diagnostics/src/bin/lu_reference: general-MTX parser (feral's
+  read_mtx only accepts 'symmetric'); known-x oracle a=B·x_true, solve, report
+  ‖x−x_true‖/‖x_true‖, ‖Bx−a‖/‖a‖, refined residual, fill ratio, + a
+  self-replace rank-1 update (must leave the basis unchanged). MC64 scaling +
+  PerturbToEps so near-singular reals survive.
+- scripts/lu_reference_scipy.py: independent scipy.sparse.linalg.splu (SuperLU)
+  cross-check, same x_true and metrics → external baseline.
+
+End-to-end verified on a synthetic 50×50 unsymmetric tridiag+: feral
+err=2.54e-16 resid=3.9e-16 upd=3.9e-16; scipy SuperLU err=2.54e-16 — bit
+identical, so feral matches the reference. clippy clean.
+
+LIMITATION: sparse.tamu.edu is unreachable from this sandbox (ssgetpy index
+refresh fails — network policy), so the real corpus couldn't be downloaded
+here. The harness/scripts are ready; run fetch where outbound HTTPS is allowed,
+then `cargo run -p feral-diagnostics --release --bin lu_reference` and
+`python scripts/lu_reference_scipy.py` to compare.
+
+* 2026-06-08 review :review:lu:corpus:robustness:
+Code review of PR #82 + corpus run that the previous session's network policy
+blocked. sparse.tamu.edu IS reachable from this host, so fetched the full
+34-matrix corpus and ran both reference harnesses on the PR branch.
+
+feral lu_reference (MC64 + PerturbToEps + 2 refine steps):
+  32/34 OK, residual ‖Bx−a‖/‖a‖ at machine precision (≤~1e-12) on ALL 34.
+  Two non-OK: fs_183_1 (err=7.6e-5, resid=1.9e-16) and saylr3 (err=7.1e-1,
+  resid=9.5e-16) — both tiny residual + large forward error = conditioning,
+  not a solver fault.
+scipy SuperLU cross-check confirms: fs_183_1 also fails (err=2.3e-5) → ill-
+conditioned both engines; saylr3 → SuperLU "Factor is exactly singular" (feral
+degrades gracefully via MC64+PerturbToEps where SuperLU can't factor at all);
+sherman2 → feral OK (err=1.5e-11) but plain SuperLU err=1.7e-6 (feral's
+scaling+refinement wins). Net: feral 32/34 vs SuperLU 31/34.
+
+Fixed 5 review findings on the PR branch (all green: 333 lib tests + integration,
+clippy -D warnings, fmt):
+1. Stale research note §3.3 — it still described the dense update as an eta file
+   with in-bump pivoting + a `update_with_row_swap_residual` test; the impl (and
+   decisions.md 2026-06-08) is an in-place O(m²) L/U re-fold with NO in-bump
+   pivoting. Rewrote §3.3 to match reality.
+2. usolve/ut_solve (sparse_solve.rs) divided by the stored U diagonal with no
+   guard — a degenerate post-update bump pivot could emit silent ±Inf. Now
+   return SingularBasis on an absent/zero/non-finite diagonal; threaded Result
+   through solve_colspace/ftran_core/btran_core (scratch restored on the error
+   path). Added regression test zero_u_diagonal_errors_instead_of_inf.
+3. should_use_dense_lu: m*m / nnz*4 could overflow usize for a caller-set huge
+   dense_threshold → saturating_mul.
+4. lu_reference + scipy script: residual-aware verdict — large err with
+   resid<1e-8 now labels ILL (backward-stable, ill-conditioned), not BAD, so
+   conditioning isn't conflated with a solver bug. fs_183_1/saylr3 now ILL.
+5. sparse_matrix.rs module doc claimed a "transpose" method that doesn't exist
+   (only matvec_transpose + ata_pattern's internal row-wise pass) — corrected.

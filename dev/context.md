@@ -1,148 +1,144 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-06T18:06:39Z
+Generated: 2026-06-08T12:36:33Z
 
 ## Latest Session
-File: dev/sessions/2026-06-06-04.md
+File: dev/sessions/2026-06-08-01.md
 ```
-# Session 2026-06-06-04
+# Session 2026-06-08-01
 
 ## Goal
 
-Implement the dense-column follow-up "safe win" (scaling audit §8.1 option
-(b)): skip the speculative MC64 in symbolic `LdltCompress` when the resolved
-numeric scaling will not reuse the cache.
+Implement issue #81: a new **unsymmetric LU factorization family** for feral,
+designed as a revised-simplex basis engine — dense + sparse LU with first-class
+rank-1 column-replacement updates, `ftran`/`btran`, auto routing, and the full
+robustness layer (equilibration + unsymmetric MC64 + iterative refinement).
 
 ## Accomplished
 
-**Investigated the proposed scaling-aware gate and rejected it on empirical
-evidence — the premise is refuted. No `src/` change landed.**
+All six in-scope phases landed, each with green oracle tests and clippy clean.
+The symmetric LDLᵀ solver is untouched (additive `feral::lu` module).
 
-Two design facts established first (by reading solver.rs + symbolic/mod.rs +
-ldlt_compress.rs):
+- **Docs first (mandatory).** Research note `dev/research/unsymmetric-lu.md` and
+  epic plan `dev/plans/unsymmetric-lu-epic.md`; 6 LU references added to
+  `dev/references.bib`.
+- **Dense path** (`src/lu/dense_*`). `GeneralMatrix`; `DenseLu` right-looking
+  LU with threshold partial pivoting (`P B Q = L U`, explicit `L`/`U`);
+  `ftran`/`btran`/`ftran_partial`; refinement; rank-1 Bartels–Golub `update()`
+  maintaining `P B Q = L U` via an explicit column permutation.
+  `tests/lu_dense.rs` (11 tests).
+- **Sparse path** (`src/lu/sparse_*`). `SparseColMatrix` (general CSC) +
+  `ata_pattern`; `SparseLuSymbolic` (AMD-on-AᵀA via `feral_amd`); `SparseLu`
+  Gilbert–Peierls factor; sparse solves + refinement; product-form `U`-update
+  rank-1 column replacement. `tests/lu_sparse.rs` (10 tests).
+- **Router.** `should_use_dense_lu` mirroring `should_use_dense_fast_path`.
+- **Scaling** (`src/lu/scaling.rs`). Two-sided ∞-norm equilibration +
+  unsymmetric MC64 (over the existing `hungarian_match`); `params.scaling`
+  drives `factor()`; solves wrap scaling around a core solve.
+  `tests/lu_scaling.rs` (5 tests).
+- **Errors.** `FeralError::SingularBasis { column }` and `NeedsRefactor`.
 
-1. Symbolic runs at `factor()` Step 3 (solver.rs:805), **on a cache miss
-   only**, and is cached per pattern fingerprint — so the `LdltCompress` MC64
-   runs **once per pattern**. Scaling resolves later (Steps 3.75/3.8). Making
-   symbolic scaling-aware is feasible (compute `pick_scaling_strategy` before
-   the symbolic call), but —
-2. **The MC64 in `LdltCompress` is load-bearing for compression, not
-   speculative.** `build_supermap` (ldlt_compress.rs:39-77) walks the MC64
-   matching permutation's cycle structure to form super-variables (MUMPS
-   `ICNTL(12)=2` / Duff-Pralet). Skipping MC64 = skipping compression =
-   **changing the ordering**. So the win is real only if compression is not
-   worth its MC64 cost — an empirical question.
+Test evidence (all green): equation residuals `‖Bx−a‖/‖a‖` < 1e-8 after
+single/chained updates (dense and sparse), update-with-row-swap (perm
+composition), reconstruction `‖PAQ−LU‖` < 1e-10, dense↔sparse agreement < 1e-9
+(factor + post-update), budget→`NeedsRefactor` with `self` unchanged,
+ill-conditioned refinement < 1e-12, and ill-scaled (16 orders) correctness
+under InfNorm/Mc64 with the matrix equilibrated into [0.1,10] and MC64 placing
+order-1 entries on the diagonal. `cargo clippy --all-targets -- -D warnings`
+clean throughout; `pre-commit` installed and enforcing fmt/clippy on every
+commit.
 
-Empirical findings (two new diagnostic probes):
+## Benchmark Results
 
-- `probe_compress_scaling_bucket` (3 roots, 1006 families): 376 `LdltCompress`,
-  of which 118 reuse MC64 (keep) and **258 do not** (target bucket). The target
-  bucket is **not vacuous and not all small**: it includes large dense-column
-  matrices — INDEFM (n=100000, deg=100000), SINQUAD2 (5000/5000),
-  ex8_2_3 (18791/3132), ex8_2_2 (9453/1894), ORTHREGF (6405/1601),
-  ROSEPETAL (3000/2001), all `InfNorm`.
-- `probe_compress_costbenefit_argv` (symbolic+numeric, None vs LdltCompress,
-  5-run median, release) refutes the premise. Crux = **ROSEPETAL vs ORTHREGF**,
-  both large near-dense-column `InfNorm` (won't-reuse), opposite verdicts:
-  - **ROSEPETAL** −75.7% (5.97 s → 1.45 s): pays 0.68 s MC64 but the compressed
-    ordering gives an **8× numeric speedup** (5.72 s → 0.77 s). Reproducible.
-  - **ORTHREGF** +91.8% (6.2 ms → 11.9 ms): MC64 pure overhead, zero numeric
-    benefit. Reproducible.
+The LU module is additive; the symmetric LDLᵀ corpus is unaffected. `cargo run
+--bin bench --release` (no external corpus present — synthetic SPD/KKT only):
 
-**Conclusion:** the value of `LdltCompress` is its numeric fill reduction,
-which is independent of the scaling choice and unpredicted by max_col_deg /
-MC64 cost / n (ROSEPETAL's MC64 is 68× ORTHREGF's, yet ROSEPETAL is the win).
-The scaling-reuse signal carries no information about whether compression pays
-off. A gate keyed on it would regress the fill-reduction wins (ROSEPETAL ~4×,
-ex8_2_2) to save milliseconds on the overhead-only losses. **Not a safe win.**
+```
+spd_10..spd_200, kkt_10_3..kkt_100_30 — 8 matrices, all inertia exact.
 ```
 
 ## Git Status
 ```
-bb74821 docs(research): MC64 dense-column fast path — definitive negative result
-98f85e0 fix(diagnostics): clippy needless_range_loop in scaling_sweep generators
-2ef38d5 docs(research): scaling audit report — MC64 is the sole super-linear phase
-402630e feat(scaling): localize MC64 dense-column cost; resolve debug/release (#80)
-503af96 docs(session): checkpoint 2026-06-06-02 — scaling audit Steps 0-2 (#80)
+2b5a5f5 test(lu): prove FT warm-solve is bump-local, independent of n (#81)
+0fc767c feat(lu): true sparse Forrest–Tomlin update with in-bump partial pivoting (#81)
+8738279 refactor(lu): store sparse U as mutable per-row vectors for FT (#81)
+9cbc8c1 docs(lu): scope sparse Forrest–Tomlin (P6.5) with the zero-pivot subtlety (#81)
+23af110 refactor(lu): store sparse U row-wise (CSR) for the Forrest–Tomlin update (#81)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::schur_symbolic_single_schur_index ... ok
+test symbolic::tests::schur_symbolic_supernodes_cover_n ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
-test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
-test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 317 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.48s
+test result: ok. 324 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.81s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-06-04.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-08-01.md)
 
 
-`bench --release` NOT re-run: no `src/` (solver) code changed this session.
-The only additions are two diagnostic binaries in the non-default
-`feral-diagnostics` crate plus docs. No performance delta to track.
+The LU module is additive; the symmetric LDLᵀ corpus is unaffected. `cargo run
+--bin bench --release` (no external corpus present — synthetic SPD/KKT only):
 
-Targeted measurement (the session's actual result):
-probe_compress_costbenefit_argv (None vs LdltCompress, 5-run median, release)
-matrix       n      deg   tot_None     tot_Compress   delta%   verdict
-ROSEPETAL   3000   2001   5 965 926us  1 452 187us    -75.7%   compress WINS
-ex8_2_2     9453   1894     215 758us    214 777us     -0.5%   compress
-ex8_2_3    18791   3132     957 786us    968 299us     +1.1%   neutral
-INDEFM    100000 100000   5 030 355us  5 147 508us     +2.3%   neutral
-SINQUAD2    5000   5000      17 232us     18 210us     +5.7%   None
-ORTHREGF    6405   1601       6 224us     11 936us    +91.8%   None wins
-  → scaling-reuse does NOT predict the verdict; gate is unsafe
+spd_10..spd_200, kkt_10_3..kkt_100_30 — 8 matrices, all inertia exact.
+KKT summary: Inertia match 1/1, Residual pass 1/1, worst 1.14e-15.
+Sparse solver: 2/2 inertia match vs MUMPS, 2/2 residual pass, worst 1.26e-16.
+Dense/Sparse failure analysis: no failures.
+
+(No prior-session comparison applies — this session added a disjoint module and
+changed no symmetric code path.)
 
 ```
 
 ## Recent Decisions
-`n > 100_000 && avg_deg < 5 → Amd` (#50 powerflow) and arrow → AMF (#64)
-catches fire first and are untouched, so the powerflow-class guardrail and
-the dense-border catch still hold; only the uniformly-thin would-be-MetisND
-population is rerouted.
+Decision and rationale:
 
-Rejected alternative — **fill-guarded reroute** (route above 100k to AMF
-only when AMF `factor_nnz_estimate ≤ MetisND's`): this was the design
-proposed in the #73 research note *before* the real A/B and the one
-originally requested. It is wrong: Finding 3 shows nql180's fill predicate
-is *anti-correlated* with real speed (MetisND smaller fill, AMF 2× faster),
-so the guard would have kept nql180 on MetisND and forfeited the 2× win.
-Fill is not a speed proxy here; a guard keyed on it adds a per-solve
-symbolic-race cost to make the *wrong* call. Logged in
-`dev/tried-and-rejected.md`.
+- **In-place bump elimination with partial pivoting.** The spike `ρ = G⁻¹L⁻¹P·aₙₑw` is set
+  into `U`'s column `r`; the bump `[r, h]` (`h` = max spike support) is re-triangularized by
+  sparse Gaussian elimination. **Partial pivoting is mandatory** and is the resolution of the
+  zero-pivot landmine documented when this was deferred: the naive column-shift Bartels–Golub
+  makes the Hessenberg diagonal pivots the old superdiagonal `U[k,k+1]`, which are frequently
+  zero in a sparse `U`; partial pivoting instead uses a nonzero sub-diagonal spike entry as
+  the pivot via a row interchange.
 
-Scope / generalization: the mechanism is the same as #67 (AMF's cheaper
-symbolic + competitive-or-better numeric on uniformly-thin patterns), now
-shown to hold above 100k too. The `n>100k && avg_deg<5 → Amd` powerflow
-guardrail (#50) is the one place broad thin-matrix reroutes were shown to
-regress, and it is preserved by firing first. RDW2D51U + QUADCOPTER did not
-finish the real A/B on the loaded test machine; their symbolic predictors
-(AMF 1.55× cheaper / tie) and Finding 1 already favor AMF and do not change
-the conclusion.
+- **Swaps go into the eta, not the base `L`.** The unit-lower base `L` is never permuted
+  (permuting the fully-formed `L` would break its triangularity). The bump elimination's
+  elementary operations — `FtOp::Swap` (partial-pivot interchange) and `FtOp::Axpy`
+  (`row -= mult·row`) — are recorded as a `FtEta` and replayed on the solve vector between the
+  `L`-solve and `U`-solve in `ftran` (transposed, reversed, between `Uᵀ` and `Lᵀ` in `btran`).
+  `U` is updated in place. Maintained invariant: `P A Q = L G U`, `G = E₁⁻¹…Eₜ⁻¹`.
 
-Evidence: dev/research/issue-73-n100k-thin-regime.md (Findings 1–3 +
-Decision), dev/journal/2026-06-03-06.org (:issue-73:ab:factor-solve:),
-src/symbolic/mod.rs choose_adaptive (AMF_BAND_MAX removed) +
-choose_adaptive_rules / choose_adaptive_routes_arrow_to_amf tests,
-crates/feral-diagnostics/src/bin/probe_issue73_symbolic.rs,
-crates/feral-diagnostics/src/bin/probe_issue67_thin.rs.
+- **`U` stored as mutable per-row vectors** (`Vec<Vec<(col,val)>>`, diagonal first) rather than
+  flat CSR, so the in-place row operations / swaps / merges are tractable.
+
+- **Consequence.** Warm-solve cost is bump-local (`O(Σ bump)`), independent of `n` for
+  localized spikes (the realistic LP regime) — demonstrated flat across n=1000..8000. The
+  inherent worst case is a dense spike (e.g. tridiagonal, where `L⁻¹` is dense), where the
+  bump spans the tail and the cost degrades toward the old product-form; this is fundamental
+  to any update scheme and bounded by the `max_updates` refactor budget.
+
+- **Stability/budget.** Growth monitor over elimination multipliers → `NeedsRefactor` on
+  `max_growth`; no acceptable bump pivot → `SingularBasis`; update count → `NeedsRefactor` on
+  `max_updates`. Work is done on a clone of `U`, committed only on success, so failures leave
+  `self` unchanged.
 
 ## Recent Tried-and-Rejected
    the scaling choice and unpredicted by max_col_deg / MC64 cost / n
@@ -184,6 +180,17 @@ src/io/mod.rs
 src/io/mtx.rs
 src/io/sidecar.rs
 src/lib.rs
+src/lu/dense_factor.rs
+src/lu/dense_matrix.rs
+src/lu/dense_solve.rs
+src/lu/dense_update.rs
+src/lu/mod.rs
+src/lu/scaling.rs
+src/lu/sparse_factor.rs
+src/lu/sparse_matrix.rs
+src/lu/sparse_solve.rs
+src/lu/sparse_symbolic.rs
+src/lu/sparse_update.rs
 src/numeric/condition.rs
 src/numeric/factorize.rs
 src/numeric/mod.rs
@@ -215,8 +222,8 @@ tests/amf_corpus_oracle.rs
 tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
-tests/column_renumbering_parity.rs
 tests/column_renumbering.rs
+tests/column_renumbering_parity.rs
 tests/delayed_pivoting.rs
 tests/dense_fast_path.rs
 tests/dense_ldlt.rs
@@ -225,6 +232,10 @@ tests/factor_workspace_parity.rs
 tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/growth_flag.rs
+tests/issue52_stats.rs
+tests/issue64_arrow_ordering.rs
+tests/issue65_mc64_fallback.rs
+tests/issue67_thin_ordering.rs
 tests/issue_15_cascade_arm_gate.rs
 tests/issue_17_robot_1600_cascade_off.rs
 tests/issue_18_narx_cfy_cascade_off.rs
@@ -233,14 +244,13 @@ tests/issue_38_static_pivot.rs
 tests/issue_46_saddle_kkt_cascade.rs
 tests/issue_55_delay_budget.rs
 tests/issue_55_n_tiny_counter.rs
-tests/issue52_stats.rs
-tests/issue64_arrow_ordering.rs
-tests/issue65_mc64_fallback.rs
-tests/issue67_thin_ordering.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
+tests/lu_dense.rs
+tests/lu_scaling.rs
+tests/lu_sparse.rs
 tests/maxfromm_parity.rs
 tests/mc64_end_to_end.rs
 tests/mc64_scaling.rs
@@ -251,8 +261,8 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/rook_rescue_kkt.rs
 tests/rook_rescue.rs
+tests/rook_rescue_kkt.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
