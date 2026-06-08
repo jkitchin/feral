@@ -11,8 +11,12 @@
 //! solves, not just one-shot factor/solve. See `dev/research/unsymmetric-lu.md`
 //! and `dev/plans/unsymmetric-lu-epic.md`.
 
+pub mod dense_factor;
 pub mod dense_matrix;
+pub mod dense_solve;
+pub mod dense_update;
 
+pub use dense_factor::DenseLu;
 pub use dense_matrix::GeneralMatrix;
 
 /// What to do when the LU factorization hits a numerically null pivot column.

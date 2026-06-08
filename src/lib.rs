@@ -33,6 +33,7 @@ pub use io::sidecar::{read_sidecar, KktSidecar, SidecarInertia};
 // Unsymmetric LU basis engine (issue #81). LU operations are methods on the
 // factor structs, so the symmetric crate-root `factor`/`solve` names are
 // unaffected.
+pub use lu::dense_factor::DenseLu;
 pub use lu::dense_matrix::GeneralMatrix;
 pub use lu::{should_use_dense_lu, LuParams, LuScaling, LuSingularAction};
 pub use numeric::condition::{estimate_condition_1norm, estimate_inverse_norm_1, matrix_norm_1};

@@ -29,3 +29,27 @@ dev/references.bib (gilbert1988sparse, forrest1972updated, bartels1969stable,
 reid1982sparsity, suhl1990computing, davis2004colamd). duff2001mc64 and
 knight2014symmetry already present. Baseline `cargo build` green;
 pre-commit installed (pip install pre-commit) and hooks present.
+
+* 11:30 :lu:dense:implementation:
+Implemented the full dense LU path: GeneralMatrix, DenseLu factor/refactor
+(right-looking, threshold partial pivoting, separate explicit L/U storage),
+ftran/btran/ftran_partial, ftran_refined/btran_refined, and the rank-1
+column-replacement update.
+
+Design decision: dropped the eta-replay representation for the dense path
+in favor of maintaining the invariant P B Q = L U with an explicit column
+permutation Q (qcol/qcol_inv). The dense Bartels–Golub update overwrites
+column q with the spike, does a cyclic column shift to upper-Hessenberg,
+then a no-pivot Gauss sweep eliminating the subdiagonal — each step a row
+op on U and a column op on L (col_k += mult*col_{k+1}), which provably
+keeps L unit-lower and U upper. No in-bump pivoting; instability/budget →
+NeedsRefactor (work done on clones, committed only on success, so self is
+unchanged on failure). Eta files are deferred to the SPARSE Forrest–Tomlin
+path where they actually pay.
+
+Verified hand-derived update algebra with tests/lu_dense.rs (11 tests):
+equation residuals ‖Bx−a‖ < 1e-8 after single update, 5-update chains,
+update-with-row-swap (perm composition), refactor-matches-updated-factor
+parity < 1e-9, budget→NeedsRefactor with self unchanged < 1e-14, and
+ill-conditioned refinement < 1e-12. All green; full suite (55 bins) green;
+clippy -D warnings clean.
