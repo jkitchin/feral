@@ -278,3 +278,23 @@ independent of n). Full suite (635) green; clippy -D warnings clean.
 
 Remaining O(m): one scan of the dense entering column (inherent to the dense
 API) — not the heavy clone/lsolve/scan that was removed.
+
+* 00:30 :lu:sparse:update:sparse-entering-column-api:
+Added the sparse entering-column API to remove the last O(n) term in the FT
+update. SparseLu::update_sparse(leaving_slot, &[(row,val)]) seeds the spike
+directly from the entering column's nonzeros (no O(n) scan). The dense
+update() is now a thin wrapper: scans aₙₑw once for nonzeros, delegates.
+Needed scale_rperm_inv (inverse of the scaling row permutation, precomputed at
+factor) to map an original row → scaled-row position without scanning;
+identity for the unscaled case.
+
+Verified: sparse_update_api_matches_dense_update — update_sparse on unsorted
+(row,val) pairs gives bit-identical solves to dense update() (diff < 1e-14)
+across all RHS. Full suite (634) green; clippy clean.
+
+Honest perf note: in the AMD-ordered block-diagonal crossover bench the BUMP
+dominates, so removing the O(n) scan is within noise (ft_update vs
+ft_update_sparse ≈ equal: 462µs vs 462µs at n=5000). The benefit is asymptotic
+(grows with the n/bump ratio — large n, tiny localized spike); here it's an
+API-completeness + correctness win, not a visible speedup. The update is now
+O(bump + nnz(aₙₑw)) with no O(n) term.

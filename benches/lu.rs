@@ -167,11 +167,26 @@ fn bench_update_vs_refactor(c: &mut Criterion) {
         let slot = n / 2;
         let col = within_block_col(n, bs, slot, 31);
 
+        let sparse_col: Vec<(usize, f64)> = col
+            .iter()
+            .enumerate()
+            .filter(|&(_, &v)| v != 0.0)
+            .map(|(i, &v)| (i, v))
+            .collect();
         g.bench_with_input(BenchmarkId::new("ft_update", n), &n, |b, _| {
             b.iter_batched(
                 || lu.clone(),
                 |mut lu| {
                     let _ = lu.update(black_box(slot), black_box(&col));
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_with_input(BenchmarkId::new("ft_update_sparse", n), &n, |b, _| {
+            b.iter_batched(
+                || lu.clone(),
+                |mut lu| {
+                    let _ = lu.update_sparse(black_box(slot), black_box(&sparse_col));
                 },
                 BatchSize::SmallInput,
             )

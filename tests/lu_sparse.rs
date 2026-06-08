@@ -246,6 +246,49 @@ fn block_diag_fixed(nblocks: usize, bs: usize) -> SparseColMatrix {
 }
 
 #[test]
+fn sparse_update_api_matches_dense_update() {
+    // update_sparse(&[(row,val)]) must produce the same factorization as the
+    // dense update() given the same column.
+    let m = 14;
+    let cols = banded_basis(m, 0x2024);
+    let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+    let symbolic = SparseLuSymbolic::analyze(&a).expect("analyze");
+    let lu0 = SparseLu::factor(&a, &symbolic, LuParams::default()).expect("factor");
+
+    // A genuinely sparse entering column.
+    let dense_col: Vec<f64> = {
+        let mut c = vec![0.0; m];
+        c[6] = 4.0;
+        c[7] = -1.0;
+        c[9] = 0.5;
+        c
+    };
+    let sparse_col = vec![(6usize, 4.0), (9usize, 0.5), (7usize, -1.0)]; // unsorted on purpose
+
+    let mut lu_dense = lu0.clone();
+    lu_dense.update(8, &dense_col).expect("dense update");
+    let mut lu_sparse = lu0.clone();
+    lu_sparse
+        .update_sparse(8, &sparse_col)
+        .expect("sparse update");
+
+    // Both factorizations must give identical solves.
+    for rhs_seed in 0..m {
+        let rhs: Vec<f64> = (0..m).map(|i| 1.0 + ((i + rhs_seed) % 5) as f64).collect();
+        let mut xd = rhs.clone();
+        let mut xs = rhs.clone();
+        lu_dense.ftran(&mut xd).expect("ftran d");
+        lu_sparse.ftran(&mut xs).expect("ftran s");
+        let diff: f64 = xd
+            .iter()
+            .zip(&xs)
+            .map(|(&d, &s)| (d - s).abs())
+            .fold(0.0, f64::max);
+        assert!(diff < 1e-14, "dense vs sparse update solve diff {diff:e}");
+    }
+}
+
+#[test]
 fn ft_update_is_bump_local() {
     // The FT eta replays the bump elimination; for a within-block update the
     // bump is confined to that block, so the eta size is the SAME regardless of

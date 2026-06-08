@@ -104,6 +104,10 @@ pub struct SparseLu {
     pub(super) params: LuParams,
     /// Two-sided scaling of the factored matrix (identity when unscaled).
     pub(super) scale: LuScale,
+    /// Inverse of `scale.rperm` (original row -> scaled-row position), so the
+    /// sparse FT update can map an entering column's nonzeros into spike space
+    /// without an `O(n)` scan.
+    pub(super) scale_rperm_inv: Vec<usize>,
     pub(super) scratch: Vec<f64>,
     /// Reusable length-`m` boolean marker for the FT update's sparse spike
     /// (tracks touched positions so they can be cleared in `O(touched)`).
@@ -323,6 +327,12 @@ impl SparseLu {
             }
         }
 
+        // Inverse of the scaling row permutation, for sparse-spike seeding.
+        let mut scale_rperm_inv = vec![0usize; m];
+        for (i, &o) in scale.rperm.iter().enumerate() {
+            scale_rperm_inv[o] = i;
+        }
+
         Ok(SparseLu {
             m,
             l_col_ptr,
@@ -339,6 +349,7 @@ impl SparseLu {
             reach_visits,
             params,
             scale,
+            scale_rperm_inv,
             scratch: vec![0.0; m],
             scratch_mark: vec![false; m],
             ft_work: vec![0.0; m],
