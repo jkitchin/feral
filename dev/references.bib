@@ -1001,3 +1001,120 @@
                1e-10 constant is derived; this is a framing reference.
                No local copy in dev/refs/.}
 }
+
+% ─────────────────────────────────────────────────────────────────────
+% Unsymmetric LU factorization and simplex basis updates (issue #81)
+% ─────────────────────────────────────────────────────────────────────
+
+@article{gilbert1988sparse,
+  author    = {Gilbert, John R. and Peierls, Tim},
+  title     = {Sparse Partial Pivoting in Time Proportional to Arithmetic
+               Operations},
+  journal   = {{SIAM} Journal on Scientific and Statistical Computing},
+  year      = {1988},
+  volume    = {9},
+  number    = {5},
+  pages     = {862--874},
+  doi       = {10.1137/0909058},
+  url       = {https://doi.org/10.1137/0909058},
+  note      = {The left-looking sparse LU with partial pivoting used by
+               SuperLU/KLU. Key idea: for each column j, the nonzero pattern
+               of the column of L is the set of vertices reachable from the
+               nonzeros of A(:,j) in the directed graph of L (a depth-first
+               search / topological order), so the sparse triangular solve
+               and the symbolic prediction cost O(flops). This is the
+               factorization kernel for feral's sparse LU. Read sections 2-3.}
+}
+
+@article{forrest1972updated,
+  author    = {Forrest, J. J. H. and Tomlin, J. A.},
+  title     = {Updated Triangular Factors of the Basis to Maintain Sparsity
+               in the Product Form Simplex Method},
+  journal   = {Mathematical Programming},
+  year      = {1972},
+  volume    = {2},
+  number    = {1},
+  pages     = {263--278},
+  doi       = {10.1007/BF01584548},
+  url       = {https://doi.org/10.1007/BF01584548},
+  note      = {The Forrest-Tomlin update. On a column replacement, the entering
+               column's spike enters U; the spike column is permuted to the end
+               of the bump and its row to the bottom, leaving an upper-Hessenberg
+               bump whose single subdiagonal is eliminated by ONE row eta appended
+               to a row-eta file. ftran replays etas forward, btran transposed in
+               reverse. Maintains sparsity far better than product-form eta.
+               This is the sparse rank-1 update for feral's simplex basis.}
+}
+
+@article{bartels1969stable,
+  author    = {Bartels, Richard H. and Golub, Gene H.},
+  title     = {The Simplex Method of Linear Programming Using {LU}
+               Decomposition},
+  journal   = {Communications of the {ACM}},
+  year      = {1969},
+  volume    = {12},
+  number    = {5},
+  pages     = {266--268},
+  doi       = {10.1145/362946.362974},
+  url       = {https://doi.org/10.1145/362946.362974},
+  note      = {The Bartels-Golub basis update: keep PA = LU; on a column swap,
+               re-triangularize the spiked U by eliminating the resulting
+               Hessenberg subdiagonal with row operations and stability-driven
+               row interchanges. The dense analogue feral uses for the dense
+               LU path's rank-1 update (Forrest-Tomlin is its sparsity-preserving
+               specialization).}
+}
+
+@article{reid1982sparsity,
+  author    = {Reid, J. K.},
+  title     = {A Sparsity-Exploiting Variant of the {Bartels--Golub}
+               Decomposition for Linear Programming Bases},
+  journal   = {Mathematical Programming},
+  year      = {1982},
+  volume    = {24},
+  number    = {1},
+  pages     = {55--69},
+  doi       = {10.1007/BF01585094},
+  url       = {https://doi.org/10.1007/BF01585094},
+  note      = {Reid's sparse Bartels-Golub-Reid (BGR) update: a sparsity- and
+               stability-aware variant that chooses among permissible row/column
+               permutations to limit fill in the bump while bounding growth.
+               The reference for feral's refactor-budget heuristics (fill and
+               round-off triggers) on the sparse update chain.}
+}
+
+@article{suhl1990computing,
+  author    = {Suhl, Uwe H. and Suhl, Leena M.},
+  title     = {Computing Sparse {LU} Factorizations for Large-Scale Linear
+               Programming Bases},
+  journal   = {{ORSA} Journal on Computing},
+  year      = {1990},
+  volume    = {2},
+  number    = {4},
+  pages     = {325--335},
+  doi       = {10.1287/ijoc.2.4.325},
+  url       = {https://doi.org/10.1287/ijoc.2.4.325},
+  note      = {Practical engineering of LP-basis LU factor/refactor: Markowitz
+               pivoting for fill, threshold stability tests, and the refactor
+               cadence relative to the update chain. Background for feral's
+               dense/sparse routing and refactorization policy.}
+}
+
+@article{davis2004colamd,
+  author    = {Davis, Timothy A. and Gilbert, John R. and Larimore, Stefan I.
+               and Ng, Esmond G.},
+  title     = {A Column Approximate Minimum Degree Ordering Algorithm},
+  journal   = {{ACM} Transactions on Mathematical Software},
+  year      = {2004},
+  volume    = {30},
+  number    = {3},
+  pages     = {353--376},
+  doi       = {10.1145/1024074.1024079},
+  url       = {https://doi.org/10.1145/1024074.1024079},
+  note      = {COLAMD: approximate minimum degree on the column-intersection
+               graph (the pattern of A^T A) without forming A^T A explicitly,
+               for fill reduction in unsymmetric LU with partial pivoting.
+               feral's first sparse-LU ordering reuses the in-tree symmetric
+               feral-amd run on the explicitly formed A^T A pattern as a
+               stand-in; this paper is the faithful target for a later phase.}
+}

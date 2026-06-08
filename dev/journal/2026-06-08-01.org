@@ -1,0 +1,31 @@
+#+TITLE: Session 2026-06-08-01 — Unsymmetric LU basis engine (issue #81)
+
+* 09:00 :lu:planning:issue-81:
+Started issue #81: a new unsymmetric LU factorization family for simplex
+bases. Confirmed feral is symmetric-only today (no LU/unsymmetric math to
+reuse). Confirmed pounce-simplex (the downstream BasisEngine consumer) is
+NOT in this environment — only /home/user/feral exists — so the end-to-end
+acceptance criteria (BasisEngine drop-in, GLOBALLib/netlib benchmarks) are
+out of scope here, deferred to a later pounce-repo phase.
+
+Scope agreed with user (expanded twice): this PR delivers the WHOLE solver
+substance — dense LU + Bartels–Golub update, sparse Gilbert–Peierls LU +
+Forrest–Tomlin update, AMD-on-AᵀA ordering, auto router, AND the full
+robustness layer (∞-norm equilibration + unsymmetric MC64 + iterative
+refinement). Only SuiteSparse benchmarking and the pounce integration are
+deferred.
+
+Key reuse finding: hungarian_match (src/scaling/hungarian.rs:448,
+pub(crate)) is ALREADY a general unsymmetric bipartite matcher returning
+perm[j]=row matched to col j plus duals u,v. So unsymmetric MC64 is a thin
+driver, not a new matching algorithm. feral_amd::amd_order is callable on
+any full-symmetric i32 CscPattern (conversion pattern at
+src/symbolic/mod.rs:535-569).
+
+* 09:30 :lu:docs:
+Wrote the mandatory research note dev/research/unsymmetric-lu.md and the
+epic plan dev/plans/unsymmetric-lu-epic.md, added 6 LU references to
+dev/references.bib (gilbert1988sparse, forrest1972updated, bartels1969stable,
+reid1982sparsity, suhl1990computing, davis2004colamd). duff2001mc64 and
+knight2014symmetry already present. Baseline `cargo build` green;
+pre-commit installed (pip install pre-commit) and hooks present.
