@@ -19,6 +19,9 @@ and functions.
   `nrhs`.
 - **Iterative refinement** and optional **MC64 scaling** for
   ill-conditioned and near-singular systems.
+- **Unsymmetric LU basis engine** (`feral::lu`) — a separate factorization
+  family for revised-simplex bases, with cheap rank-1 column-replacement
+  updates and warm `ftran`/`btran` solves (no inertia).
 - **Python bindings** (`feral-solver` on PyPI) and `scipy.sparse` interop.
 
 ## Where to go next
@@ -27,6 +30,8 @@ and functions.
   batched, and dense solves.
 - [Inertia semantics](./inertia.md) — what `Inertia` means and what feral
   guarantees on singular matrices.
+- [Unsymmetric LU basis engine](./lu.md) — the separate `feral::lu` family
+  for simplex bases: `P B Q = L U`, rank-1 updates, and warm solves.
 - [Python bindings](./python.md) — install, quickstart, and batched solves
   from Python.
 - [API reference](./api.md) — the rustdoc output for the `feral` crate and

@@ -6,5 +6,6 @@
 - [Inertia semantics](./inertia.md)
 - [Scaling](./scaling.md)
 - [Fill-reducing ordering](./ordering.md)
+- [Unsymmetric LU basis engine](./lu.md)
 - [Python bindings](./python.md)
 - [API reference](./api.md)
