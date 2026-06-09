@@ -1,0 +1,50 @@
+* 2026-06-09 D1 fix session (PR #83 branch)
+
+** HH:MM :review:d1:dense-ldlt:force-accept:bugfix:
+Verified the 4 high-severity findings in PR #83's review document
+(repo-review-2026-06-09.md) against the source by independent sub-agents.
+All 4 (D1, L1, N1, S1) confirmed CORRECT; D1 was empirically reproduced
+(reconstruction error 1.535 on a 7×7 zero-diagonal matrix).
+
+Then fixed D1 on the PR branch, tests-first.
+
+Bug: legacy dense factor() — do_1x1_pivot strict-zero ForceAccept branch
+(factor.rs:4471-4482) and the degenerate 2×2 twin in do_2x2_pivot
+(factor.rs:4649-4655) zero their L column(s) and return WITHOUT running
+the rank-1/rank-2 update, but returned a fabricated fused next-column
+argmax (0.0, k+2)/(0.0, k+3). The caller (factor.rs:936-1071) stores the
+fused value and the next iteration sees gamma0==0.0, takes the
+"zero off-diagonal column" fast path (factor.rs:913-930), and discards
+the next column's real off-diagonals via set_l_column_identity + skipped
+trailing update. Silent factor corruption + risk of wrong inertia.
+
+Key observation: since the degenerate branch ran NO update, the trailing
+submatrix is unchanged, so the genuine next-column off-diagonal max is
+recoverable with column_offdiag_max. Fix = return
+column_offdiag_max(a, n, k+1) (1×1) / (a, n, k+2) (2×2) instead of the
+fabricated value. do_1x1_pivot is only called for remaining>=2 so k+1<n;
+the 2×2 branch is past the (k+2)>=n early return so k+2<n.
+
+Test: tests/dense_ldlt.rs::test_d1_force_accept_does_not_corrupt_next_column.
+Oracle = mathematical reconstruction identity P·L·D·Lᵀ·Pᵀ = D_eq·A·D_eq
+(external, implementation-independent). First attempt used the existing
+verify_factorization helper but its RELATIVE tolerance (scale floor 1e-15)
+tripped on 1e-16 rounding against the matrix's many exact-zero entries —
+spurious failure at (2,2), err/scale=0.11, NOT the real bug. Rewrote with
+an ABSOLUTE tolerance (1e-9): all entries are O(1) so rounding (~1e-13)
+and the D1 corruption (1.534) are cleanly separated.
+
+Evidence:
+- Pre-fix: test FAILS "reconstruction error 1.5340490574090062 exceeds 1e-9".
+- Post-fix: test passes (reconstruction exact).
+- Full suite: 57 test binaries green, 0 failures. cargo fmt --check exit 0;
+  cargo clippy --all-targets -D warnings clean.
+
+The strict-zero pivot here is a genuine zero Schur column, so dropping it
+loses nothing and a correct factorization reconstructs the equilibrated
+matrix exactly — which is why the absolute-reconstruction oracle is valid.
+
+Remaining high-severity findings still open: L1 (dense LU singular-basis
+guards), N1 (dead FMA opt-in), S1 (O(n²logn) default postorder). Per the
+review's triage order, L1 is the next to fix (silent Inf/NaN into simplex
+solves).

@@ -4479,7 +4479,17 @@ fn do_1x1_pivot(
                         a[k * n + i] = 0.0;
                     }
                     a[k * n + k] = 0.0;
-                    return Ok((0.0, k + 2));
+                    // D1 (dev/research/repo-review-2026-06-09.md): no
+                    // rank-1 update ran (column k was zeroed), so the
+                    // trailing submatrix is unchanged. Returning a
+                    // fabricated fused `(0.0, k+2)` would make the caller's
+                    // next iteration see `gamma0 == 0.0`, take the
+                    // "zero off-diagonal column" fast path, and discard
+                    // column k+1's real off-diagonals. Report the genuine
+                    // off-diagonal max of the (unmodified) next column
+                    // instead. `do_1x1_pivot` is only called for
+                    // remaining >= 2, so `k+1 < n`.
+                    return Ok(column_offdiag_max(a, n, k + 1));
                 }
                 ZeroPivotAction::Fail => return Err(FeralError::NumericallyRankDeficient),
                 ZeroPivotAction::PerturbToEps { abs_floor } => {
@@ -4652,7 +4662,14 @@ fn do_2x2_pivot(
             a[k * n + i] = 0.0;
             a[(k + 1) * n + i] = 0.0;
         }
-        return Ok((0.0, k + 3));
+        // D1 (dev/research/repo-review-2026-06-09.md): no rank-2 update
+        // ran, so the trailing submatrix is unchanged. As in the 1×1
+        // strict-zero branch, returning a fabricated `(0.0, k+3)` would
+        // make the caller discard column k+2's real off-diagonals via the
+        // "zero off-diagonal column" fast path. Report the genuine
+        // off-diagonal max of the (unmodified) next column. The
+        // `(k+2) >= n` early return above guarantees `k+2 < n`.
+        return Ok(column_offdiag_max(a, n, k + 2));
     }
 
     let d00 = a00 / d10_abs;

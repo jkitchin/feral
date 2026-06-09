@@ -43,6 +43,22 @@ agreement, and adversarial/ill-scaled/ill-conditioned cases. The downstream
 `pounce-simplex` `BasisEngine` integration and reference (UMFPACK/KLU)
 benchmarks are deferred (see `dev/plans/unsymmetric-lu-epic.md`).
 
+### Fixed — legacy dense `factor()` no longer corrupts the column after a force-accepted zero pivot (D1)
+
+In the legacy dense `factor()` path, a strict-zero pivot routed through
+`ZeroPivotAction::ForceAccept` (and the degenerate 2×2 twin) zeroed its own L
+column but ran no rank-1/rank-2 update, then returned a *fabricated* fused
+next-column argmax of `(0.0, k+2)` / `(0.0, k+3)`. The caller stored that, so
+the next iteration saw `gamma0 == 0.0`, took the "zero off-diagonal column"
+fast path, and silently discarded the **real off-diagonals of the following
+column** — corrupting L (a full-magnitude reconstruction error, ~1.5 on the
+regression matrix) and risking wrong inertia, the project's hard contract.
+Both branches now report the genuine off-diagonal max of the (unmodified) next
+column via `column_offdiag_max`. Regression test
+`tests/dense_ldlt.rs::test_d1_force_accept_does_not_corrupt_next_column`
+asserts exact `P·L·D·Lᵀ·Pᵀ = D_eq·A·D_eq` reconstruction. Finding D1 from
+`dev/research/repo-review-2026-06-09.md`.
+
 ### Added — on-disk dense-column regression fixture for issue #80
 
 `cargo run --bin bench` now regenerates two synthetic dense-coupling-column
