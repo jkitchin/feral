@@ -277,3 +277,40 @@ files before committing so pre-commit has nothing to stash.
 
 Second medium-severity finding done (N2). Next per triage: D3 (rook
 rescue bypasses strict-zero/band inertia accounting).
+
+* 13:20 :D3:rook:inertia:rejected:acopp30:
+D3 (rook rescue bypasses strict-zero/band inertia accounting) —
+REPRODUCED as a divergence, REJECTED as a fix. Wrote a self-consistency
+test (rook vs no-rook by Sylvester) on A=[[1e-3,1e-4],[1e-4,1.0]] with
+zero_tol=1e-2: rook sign-counts -> (2,0,0), floored reference -> (1,0,1).
+Divergence is real. BUT A is SPD (det=1e-3-1e-8>0), so true inertia is
+(2,0,0) — rook is CORRECT and the floored reference is the artifact. The
+Sylvester premise is flawed: zero_tol is a deliberate floor the two paths
+apply differently; exact-inertia invariance does not bind once a floor is
+imposed.
+
+Two fix attempts, both regressed parity_acopp30_0001 (non-singular KKT,
+mumps=(72,137,0) ssids=(71,138,0), both zero=0):
+  (1) inline zero-bucketing -> feral=(71,137,1) spurious zero.
+  (2) decline-strict-zero + fall through to delay/force-accept (option B)
+      -> feral=(71,137,1) again. The rook-rescued pivot on ACOPP30 has
+      |d|<=EPS yet the matrix is non-singular; oracles resolve that DOF to
+      a definite sign and rook recovers the matching sign. ANY path that
+      doesn't sign-count it (zero-bucket at root, or delay-then-zero)
+      yields the spurious singular result.
+
+Both violate the hard inertia constraint (must agree with >=1 oracle on
+non-singular). On the only corpus matrix where this branch fires, the
+current floor-less sign-count is the one that matches the oracles. Fix
+direction is wrong — trades correct-but-unconventional for
+conventional-but-wrong. Reverted src/dense/factor.rs to original (git
+checkout), removed tests/d3_rook_inertia_accounting.rs, recorded full
+analysis in dev/tried-and-rejected.md citing D3. parity 21/0 and
+rook_rescue 4/0 green after revert.
+
+Note for future: a needs_refinement *flag* on a band-rescued rook 1×1
+(zero_tol,null_pivot_tol] is additive (no inertia change, cannot regress
+ACOPP30) and could be revisited separately — NOT the D3 accounting change.
+
+Next per triage: D4 (solve-time 2×2 gate inconsistent with factor-side
+acceptance, src/dense/solve.rs:193-205).

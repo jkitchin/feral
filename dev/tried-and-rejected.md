@@ -2409,3 +2409,79 @@ feature yet separates ROSEPETAL (win) from ORTHREGF (loss). Data:
 dev/research/mc64-symbolic-skip-2026-06-06.md, dev/journal/2026-06-06-04.org.
 This closes the dense-column follow-up: both option (a) (inner-loop fast path)
 and option (b) (scaling-aware skip) are now closed with negative results.
+
+---
+
+## 2026-06-09 — D3: zero-bucket rook-rescued sub-floor 1×1 pivots (finding D3, repo-review-2026-06-09.md)
+
+**Finding (D3):** the rook-rescue 1×1 accept branch in
+`try_reject_1x1_with_rook_rescue` (`src/dense/factor.rs`) sign-counts the
+rescued pivot with no `zero_tol` / `null_pivot_tol` floor. Rook's 1×1 gate
+(`|a_rr| >= u·gamma_r`) is purely *relative*, so when the whole column is
+noise it can "rescue" a strict-zero pivot (`|d| <= zero_tol`) and count it by
+sign with no `needs_refinement` and no zero bucket — contradicting the
+issue-#54 SSIDS strict-zero rule and the F-01 band rule that
+`try_reject_1x1_frontal` implements. The finding's implied fix: make the
+rook-rescued sub-floor pivot follow the same floor convention (zero bucket /
+`needs_refinement`) the rook-free path uses.
+
+**Reproduced as a divergence, rejected as a fix — the corpus shows the
+current behavior is the *correct* one.**
+
+A synthetic self-consistency test (rook vs no-rook on the same 2×2 by
+Sylvester's law) did reproduce a ±1 inertia divergence. The 2×2 used was
+`A = [[1e-3, 1e-4], [1e-4, 1.0]]` with a wide floor `zero_tol = 1e-2`:
+- rook path (sign-count): `(2, 0, 0)`
+- rook-free reference (floors the `1e-3` pivot to zero): `(1, 0, 1)`
+
+But `A` is symmetric positive definite (`det = 1e-3 - 1e-8 > 0`, leading
+minor `1e-3 > 0`), so the **true** inertia is `(2, 0, 0)`. Rook's sign-count
+is correct; the "reference" `(1, 0, 1)` is a floor-induced artifact. The
+premise that the two paths must agree by Sylvester is flawed: Sylvester's law
+governs *exact* inertia, and `zero_tol` is a deliberate numerical floor that
+the two paths apply at different points. They legitimately differ — and the
+rook path is the more accurate of the two here.
+
+**The implied fix violates the hard inertia constraint on the real corpus.**
+Two fix attempts were tried, both regressing `parity_acopp30_0001`
+(ACOPP30, a non-singular KKT where MUMPS=`(72,137,0)` and SSIDS=`(71,138,0)`,
+both `zero=0`):
+
+1. *Inline zero-bucketing* (count a strict-zero rook rescue in the zero bucket,
+   return `Rejected`): feral → `(71, 137, 1)` — a **spurious zero**,
+   disagreeing with *both* oracles. Violates "inertia must be exactly correct
+   on non-singular matrices; on disagreement, agree with at least one oracle."
+
+2. *Decline-and-fall-through* ("option B": peek the candidate diagonal before
+   the swaps; if `|d| <= zero_tol` decline the rescue and route to the standard
+   delay / force-accept path, so non-root fronts delay to the parent and only
+   the root force-accepts as zero): feral → `(71, 137, 1)` again — same
+   spurious zero. The pivot rook was sign-counting on ACOPP30 has `|d| <= EPS`
+   (a near-exact zero in feral's elimination order), yet the matrix is
+   non-singular: the oracles resolve that DOF to a definite sign via their own
+   pivoting/delays, and feral's rook happens to recover the matching sign. Any
+   path that does *not* sign-count it (zero-bucket at root, or delay-then-zero)
+   produces the spurious singular result.
+
+**Conclusion.** On the only corpus matrix where this branch fires (ACOPP30),
+the current floor-less rook sign-count produces the inertia that *matches the
+oracles*, and every attempt to impose the floor convention regresses it to a
+spurious zero that matches *neither* oracle. The divergence the synthetic test
+exposes is real but is by design (conservative `zero_tol` floor vs. rook
+recovering the true sign of a borderline-but-nonsingular pivot). The fix
+direction is wrong: it trades a correct-but-unconventional result for a
+conventional-but-wrong one. No change made; `src/dense/factor.rs` rook branch
+left as-is.
+
+Evidence: parity 21/0 with original code (`acopp30_0001` green); the two fix
+attempts each produced `acopp30_0001 feral=(71,137,1)` vs `mumps=(72,137,0)`
+`ssids=(71,138,0)`. The synthetic SPD `(2,0,0)` vs floored `(1,0,1)` divergence
+is a floor artifact, not a bug. Journal: dev/journal/2026-06-09-01.org.
+
+*Possible future work (separate, not D3):* the rook 1×1 branch could set
+`needs_refinement = true` when the rescued pivot lands in the band
+`(zero_tol, null_pivot_tol]` — a refinement *flag* only, no inertia change, so
+it cannot regress ACOPP30. That is an additive diagnostic improvement, not the
+inertia-accounting change D3 asks for, and was not pursued here to keep the
+rejection clean. Anyone picking it up must verify it does not perturb the
+`needs_refinement` expectations of the existing `rook_rescue` tests.
