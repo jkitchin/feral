@@ -43,6 +43,25 @@ agreement, and adversarial/ill-scaled/ill-conditioned cases. The downstream
 `pounce-simplex` `BasisEngine` integration and reference (UMFPACK/KLU)
 benchmarks are deferred (see `dev/plans/unsymmetric-lu-epic.md`).
 
+### Fixed — default `postorder()` is now linear, not O(n²·log n), on star etrees (S1)
+
+The default elimination-tree `postorder` (in the standard symbolic pipeline)
+re-cloned and re-sorted `children[node]` on **every** DFS stack visit. A node
+with `c` children sits on top of the stack `c+1` times, so it paid
+O(c²·log c); on a star etree — one root with `n-1` children, the shape AMD
+produces for an arrow/bordered-KKT matrix with a dense *trailing* border —
+the whole traversal was O(n²·log n). It now carries each node's sorted child
+list on the stack (a `(node, sorted_children, cursor)` layout matching the
+already-correct `biased_postorder` / `EliminationTree::postorder`), so each
+node is sorted exactly once and the traversal is O(n·log n).
+
+New regression `test_postorder_star_sort_work_is_linear` reproduces the blow-up
+deterministically (no flaky timing) via a `#[cfg(test)]` work counter: on an
+`n = 2000` star the old code materialized ~`n²` child-list elements (3,998,000);
+the fix materializes ~`n` (≤ `4n`). Output is unchanged — the existing
+topological-order, inverse-roundtrip, and Schur-parity tests still pass.
+Finding S1 from `dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — `with_fma(true)` now actually dispatches the FMA kernels (N1)
 
 `Solver::with_fma(true)` was a silent no-op. It set `NumericParams::fma`,

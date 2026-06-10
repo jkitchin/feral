@@ -131,3 +131,41 @@ Evidence:
 
 Remaining high-severity finding still open: S1 (O(n²·log n) default
 postorder on star etrees). Next per the triage order.
+
+** HH:MM :ordering:postorder:complexity:perf:bugfix:s1:
+Fixed S1 (repo-review-2026-06-09.md): default postorder() was O(n²·log n)
+on star-shaped etrees (arrow / bordered-KKT with a dense TRAILING border —
+AMD makes node n-1 the root of n-1 leaves).
+
+Root cause: the iterative DFS re-cloned AND re-sorted children[node] on
+every stack visit. For the root of a star with n-1 children, each of the
+n-1 push/pop transitions re-sorted the full (n-1)-element child list →
+O(n²·log n) sort work, O(n²) clone bytes. The three Schur-aware sibling
+traversals already carried sorted children on the stack (sorted once per
+node); the default path was the lone O(n²) outlier.
+
+Fix: carry the sorted child list and a cursor index on the DFS stack as
+(node, Vec<sorted_children>, child_idx), sorting each node's children
+EXACTLY ONCE via a sorted_children_by_size helper — copying the stack
+layout of the three correct siblings. Output order is byte-identical
+(verified by the existing topological / inverse-roundtrip / schur-parity
+tests, all still green).
+
+Reproduction (tests-first, deterministic — no flaky wall-clock):
+ordering::postorder::tests::test_postorder_star_sort_work_is_linear.
+A #[cfg(test)] thread_local SORT_WORK counter accumulates
+children.len() on every sorted_children_by_size call. star_etree(2000)
+builds an arrow matrix (diagonal + (row n-1, col i) for i<n-1) whose
+etree has node n-1 as the sole root with n-1 children. Asserts total
+sort work <= 4n.
+
+Evidence:
+- Pre-fix (instrumented buggy code): work = 3,998,000 vs the 8,000 bound
+  at n=2000 — i.e. ~(n-1)² — test FAILS.
+- Post-fix: work linear, test passes. All 11 postorder tests green;
+  symbolic 67/0, ordering 31/0; clippy -D warnings clean; fmt --check
+  clean; full lib suite exit 0.
+
+All four high-severity findings (D1, L1, N1, S1) from PR #83's review are
+now fixed. Next per the triage order: the medium-severity batch, starting
+with D2 (panel inline 2×2 path skips static_pivot_floor).
