@@ -1191,3 +1191,28 @@ mod.rs:1331. No code change, no CHANGELOG. tried-and-rejected.md updated.
 
 Next per /loop: do NOT start the next issue (S9). Continue in-turn per the live
 "speed this up" directive.
+
+* S9 :sparse:csc:symv:validation:s9:defensive:api-hygiene:deferred:
+S9: CscMatrix::symv (csc.rs:314) validates nothing — panics on short x/y, leaves
+y[n..] stale for oversized y (zeroing uses .take(self.n)). Finding: inconsistent
+with the scrupulous from_triplets/validate on the same type.
+
+Analysis. For x.len()==y.len()==n (the only contract "y = A*x" implies) the output
+is correct. Both failure modes are precondition violations, and every internal
+caller passes exactly-length-n buffers (solve.rs:1092/1160/1274/1304/1318/1374,
+dense/solve.rs:88/124, scaling/mod.rs:1493 — multi-RHS sites slice precisely). So
+the panic/stale-tail paths are unreachable from production; only external misuse
+of the pub method hits them. Same class as S6.
+
+Verdict: deferred citing S9. A Result signature is a breaking change unjustified
+by a low/certain hygiene item with no output change; the non-breaking debug_assert
++ doc fix has no RED (release behavior unchanged); a should_panic test only pins
+the current panic. Recommended: document x.len()==y.len()==n and add a
+debug_assert!, plus an optional separate try_symv -> Result.
+
+Evidence: csc.rs:314-328; exact-length callers solve.rs:1092..1374,
+dense/solve.rs:88/124, scaling/mod.rs:1493. No code change, no CHANGELOG.
+tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (S10). Continue in-turn per the live
+"speed this up" directive.

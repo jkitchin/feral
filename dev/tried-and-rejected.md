@@ -3480,3 +3480,52 @@ sort), `src/ordering/elimination_tree.rs:66-74` (children Vec<Vec>),
 `src/symbolic/ldlt_compress.rs:161-166` (two-element Vecs),
 `src/symbolic/mod.rs:1331` (HashSet range test). All perf-only, correct output.
 Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S9: symv validates nothing (finding S9, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> `symv` validates nothing (`csc.rs:258`): panics on short x/y, silently
+> zero-fills only the first n of an oversized y — inconsistent with the
+> scrupulous from_triplets/validate on the same type. low/certain.
+
+### Why this is recorded here rather than fixed
+
+1. **For correct-length inputs symv is already correct.** `CscMatrix::symv`
+   (csc.rs:314) zeros `y[..n]` and computes `y = A·x` over `0..n`. When
+   `x.len() == y.len() == n` — the only contract the doc "y = A * x" implies —
+   the result is correct. The two failure modes the finding cites are both
+   precondition violations: a too-short `x`/`y` panics on slice indexing, and an
+   oversized `y` leaves `y[n..]` at stale values (only `y[..n]` is written).
+
+2. **Production never violates the precondition.** Every internal caller passes
+   exactly-length-`n` buffers: `solve.rs:1092/1160/1374`, `dense/solve.rs:88/124`,
+   `scaling/mod.rs:1493`, and the multi-RHS sites slice precisely
+   (`solve.rs:1274` `&x[c*n..(c+1)*n]`, `&mut r_act[k*n..(k+1)*n]`). The
+   panic/stale-tail paths are unreachable from the crate's own usage; only an
+   external misuse of the `pub` method could hit them. Same class as S6 (unchecked
+   documented invariants).
+
+3. **No non-breaking fix is reproducible.** Making `symv` return
+   `Result<(), FeralError>` is a breaking API change unjustified by a "low/certain"
+   hygiene item and produces no different output for correct usage. The
+   non-breaking alternative — a `debug_assert!(x.len() == self.n && y.len() ==
+   self.n)` plus a documented precondition — does not change release behavior, so
+   it has no RED test. A `#[should_panic]` test would merely pin the current panic,
+   not reproduce a defect in correct operation.
+
+### Disposition
+
+No code change and no new test. Recommended as harmless future hardening
+(API-consistency, not a bug fix, carrying no failing test):
+document the `x.len() == y.len() == n` precondition on `symv` and add a
+`debug_assert!` guard so misuse fails loudly in debug builds, matching the
+type's otherwise-scrupulous validation. If a fallible variant is ever wanted,
+add a separate `try_symv -> Result` rather than breaking `symv`.
+
+Evidence: `src/sparse/csc.rs:314-328` (symv, no validation, `.take(self.n)`
+zeroing); exact-length callers `src/numeric/solve.rs:1092,1160,1274,1304,1318,1374`,
+`src/dense/solve.rs:88,124`, `src/scaling/mod.rs:1493`. No incorrect output for
+correct usage. Journal: dev/journal/2026-06-10-01.org.
