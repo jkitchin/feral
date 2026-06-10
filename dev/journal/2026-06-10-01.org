@@ -868,3 +868,35 @@ API change — so NO CHANGELOG entry.
 
 Next per /loop: do NOT start the next issue (N8). Continue in-turn per the
 live "speed this up" directive.
+
+* 17:05 :numeric:factorize:supernode:n8:unreachable:deferred:
+N8 (repo-review-2026-06-09.md §4): the empty-supernode early return in
+`factor_one_supernode` (factorize.rs:2138, fires on `nrow==0 || own_ncol==0`)
+returns without draining `contrib_blocks[child]`, so a child's Schur data +
+delayed-pivot inertia would be silently dropped IF an empty supernode ever had
+contributing children.
+
+Verdict: unreachable, route to tried-and-rejected citing N8. Reasons: (1) the
+symbolic layer never emits an empty supernode — every supernode has ncol≥1 and
+nrow≥ncol≥1 (symbolic/supernode.rs), so the branch is dead defensive code; (2)
+the twin site `factor_one_small_leaf` (factorize.rs:2506) is ALREADY guarded by
+`debug_assert!(snode.children.is_empty())` at :2497-2501 — a leaf has no
+children, so N8 reduces to the single factor_one_supernode site; (3) no
+admissible reproducing test — entering the branch requires hand-building a
+SymbolicFactorization (20+ fields incl. EliminationTree/CscPattern) with a
+forbidden empty-supernode-with-contrib-child state plus a FactorWorkspace and
+calling the private fn directly; a debug_assert firing on that fabricated state
+tests the guard, not a real defect, and would be the impl's own oracle
+(forbidden — no impl+oracle in one session; inertia must be externally
+validated). Finding itself says "Unreachable today" / low severity.
+
+Contrast with N7 (just fixed): N7's wasted-cache state is observable via real
+one-shot calls, so it had a clean RED→GREEN. N8 has no real input that reaches
+the branch, so it's deferred like D11/D12/D13.
+
+Evidence: factorize.rs:2138-2175 (live, no drain), :2496-2543 (twin, guarded),
+symbolic/supernode.rs:126-162 (nrow≥ncol≥1). No CHANGELOG (no user-visible
+change; nothing fixed). tried-and-rejected.md updated with full reasoning.
+
+Next per /loop: do NOT start the next issue (N9). Continue in-turn per the live
+"speed this up" directive.

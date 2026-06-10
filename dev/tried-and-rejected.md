@@ -2892,3 +2892,57 @@ existing characterization test `:544-555`, production caller chain via
 `do_2x2_update` (`factor.rs:4220-4222`) which only forwards n==32. Related: D5
 (legacy factor() singular 2×2), D1 (legacy path removal). Journal:
 dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — N8: empty-supernode early return does not drain child contribs (finding N8, repo-review-2026-06-09.md)
+
+**Finding (verbatim).** "Empty-supernode early return (`factorize.rs:2138-2175`,
+twin at `:2506-2543`) does not drain `contrib_blocks[child]`; if the symbolic
+layer ever emits an empty supernode with contributing children, their Schur
+data and delayed-pivot inertia are silently dropped. Unreachable today; add a
+drain or `debug_assert!(children have no contribs)`. low/possible."
+
+### Why this is recorded here rather than fixed
+
+1. **The triggering state is unreachable through any real input.** The early
+   return at `factor_one_supernode` (`factorize.rs:2138`) fires only when
+   `nrow == 0 || own_ncol == 0`. The symbolic layer never emits such a
+   supernode: every supernode carries ≥1 eliminated column (`ncol ≥ 1`) and a
+   frontal with `nrow ≥ ncol ≥ 1` (`Supernode`/`find_supernodes`,
+   `symbolic/supernode.rs`). So the branch is dead defensive code; no matrix the
+   solver can be handed drives it. The finding itself classifies this
+   "Unreachable today" / severity low.
+
+2. **The twin site is already guarded.** `factor_one_small_leaf`
+   (`factorize.rs:2496`) carries `debug_assert!(snode.children.is_empty(), …)`
+   at `:2497-2501` *before* its identical early return at `:2506-2543`. A leaf
+   has no children, hence no `contrib_blocks[child]` to drain — the twin's N8
+   concern cannot arise. N8 reduces to the single `factor_one_supernode` site.
+
+3. **No admissible reproducing test.** A test "whose failure is the bug" would
+   have to exhibit dropped Schur data / wrong delayed-pivot inertia from a
+   committed factorization — but no input reaches the branch. The only way to
+   enter it is to hand-construct a `SymbolicFactorization` (20+ fields, incl.
+   `EliminationTree`, `CscPattern`, `col_counts`, postordered `supernodes`)
+   holding an empty supernode whose `children` reference a slot with a
+   `Some(ContribBlock { n_delayed > 0, … })`, plus a matching `FactorWorkspace`,
+   then call the private `factor_one_supernode` directly. That fabricates an
+   internal state the symbolic invariant forbids; a `debug_assert!` firing on it
+   tests the guard, not a real defect, and the construction would be the impl's
+   own oracle (forbidden by CLAUDE.md: no impl + oracle in one session). The
+   numeric correctness this protects (inertia exactness) has no external
+   reference here because there is no admissible input to validate against.
+
+### Disposition
+
+No code change and no new test this iteration. N8 is dead-branch defensive
+hardening, not a live defect — the recommended `debug_assert!(children have no
+contribs)` guards a state the symbolic layer guarantees never occurs, and the
+twin path is already guarded. Revisit if/when the symbolic layer is ever changed
+to emit zero-column supernodes (e.g. a future Schur/elimination-skip feature):
+at that point the drain (not merely the assert) becomes a real numeric
+requirement and a reproducing test would have a real input to exercise it.
+
+Evidence: `src/numeric/factorize.rs:2138-2175` (live site, no drain),
+`:2496-2543` (twin, already guarded by `debug_assert!(snode.children.is_empty())`
+at :2497-2501), `Supernode`/`ncol()` (`symbolic/supernode.rs:126-162`,
+`nrow ≥ ncol ≥ 1`). Journal: dev/journal/2026-06-10-01.org.
