@@ -143,3 +143,39 @@ params.small_leaf (benign today). Those two facets are NOT addressed here.
 Evidence: n3 1/1, profiler_smoke 7/0, parallel_parity 8/0 (bit-parity intact),
 issue52_stats 5/0, lib 330/0. clippy -D warnings clean, fmt clean. Profiler
 is None by default so zero overhead on the hot path is preserved.
+
+** 03:42 :N4:mc64:issue-65:scaling:latch:fixed:
+N4 (repo-review-2026-06-09.md): the issue-#65 MC64 scaling retry had no
+"tried and not adopted" latch. The adoption path self-latches (it pins
+auto_picked_strategy + effective_params.scaling to Mc64Symmetric, which the
+retry gate's `!matches!(..Mc64Symmetric)` clause already suppresses), but the
+non-adoption arm (`_ => Ok((factors, inertia))`, solver.rs) set nothing. The
+gate keys on self.numeric_params.scaling==Auto (user config, immutable) and on
+the resolved scaling staying non-MC64 (the picker re-pins InfNorm on a small
+matrix). So a genuinely singular Auto pattern re-paid a full Hungarian + a
+complete second factorization on EVERY subsequent factor() — the issue-#65
+comment's "one wasted factorization" was actually one per call, indefinitely.
+
+Reproduction (tests/n4_mc64_retry_latch.rs, no fixture needed): A =
+[[1,1,0],[1,1,0],[0,0,1]] lower-tri, rank 2, inertia (2,0,1). Small ⇒ Auto→
+InfNorm, which force-accepts the zero pivot (zero=1) ⇒ retry fires; MC64
+cannot change rank ⇒ retry also zero=1 ⇒ strict-improvement gate fails ⇒
+non-adoption. Added an observable counter mc64_retry_attempt_count() (counts
+every retry that RAN, vs mc64_scaling_fallback_count which counts adoptions).
+Factor the same pattern 3×.
+
+RED (latch gate clause removed): call 1 count=1, call 2 count=2 — confirmed
+left:2 right:1. GREEN (per-pattern bool mc64_retry_not_adopted, set in the
+non-adoption arm, checked in the gate, cleared on pattern change at
+solver.rs alongside auto_picked_strategy): count stays 1 across all 3 calls.
+
+Tradeoff (per the finding's prescribed "per-pattern-fingerprint flag"): the
+latch is pattern-keyed, so if a later iterate on the SAME pattern became the
+ill-conditioned-but-full-rank case MC64 *could* rescue, the latch would
+suppress the rescue. Accepted: non-adoption only happens when MC64 failed to
+reduce zero on this pattern, and the finding explicitly prescribes a
+per-pattern latch. Cleared on pattern change.
+
+Evidence: n4 1/1, issue65_mc64_fallback 3/0 (adoption path intact —
+sawpath still rescues, twirism1 still no spurious fire), lib 330/0. clippy
+-D warnings clean, fmt clean.

@@ -4,6 +4,28 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — MC64 scaling retry on a genuinely singular pattern is no longer re-paid every `factor()` (N4)
+
+The issue-#65 inertia-guided MC64 scaling retry had no "tried and not adopted"
+latch. When `Auto` scaling force-accepts zero pivots, `Solver::factor` re-runs
+the factorization with `Mc64Symmetric` and adopts it only if it strictly
+reduces the zero count. On *adoption* this self-latches (the sticky-`Auto`
+pick pins `Mc64Symmetric`, which the retry gate already skips). But on
+*non-adoption* — a genuinely singular matrix, where MC64 cannot change rank,
+the strict-improvement gate fails, and the original factor is kept — nothing
+was recorded. The gate keys on the user's configured scaling (`Auto`, which
+never changes) and on the resolved scaling staying non-MC64 (the picker
+re-pins `InfNorm`), so every subsequent `factor()` on the same pattern re-paid
+a full Hungarian plus a complete second factorization. An IPM that repeatedly
+factors a singular KKT without regularizing it paid this wasted retry on every
+iteration. `Solver` now carries a per-pattern latch that records the
+non-adoption and suppresses the retry on subsequent same-pattern factors; the
+latch clears on pattern change (alongside the issue-#51 sticky-`Auto` pick). A
+new `Solver::mc64_retry_attempt_count()` accessor reports how many retries
+actually ran (distinct from `mc64_scaling_fallback_count()`, which counts only
+adoptions). Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
 ### Fixed — parallel multifrontal driver now honors `NumericParams::profiler` (N3)
 
 The parallel multifrontal driver (`factorize_multifrontal_supernodal_parallel`)

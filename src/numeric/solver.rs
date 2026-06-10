@@ -210,6 +210,27 @@ pub struct Solver {
     /// that the InfNorm/Identity path mis-reported as singular. Mirrors
     /// `mc64_fallback_count`'s diagnostic role; resets on `Solver::new()`.
     mc64_scaling_fallback_count: usize,
+    /// N4 (`dev/research/repo-review-2026-06-09.md`): count of `factor()`
+    /// calls that actually *ran* the issue-#65 MC64 retry factorization
+    /// (whether or not it was adopted). Distinct from
+    /// `mc64_scaling_fallback_count`, which counts only adoptions. Exposed
+    /// so callers — and the N4 regression test — can observe that a
+    /// genuinely-singular pattern does not re-pay the full Hungarian +
+    /// second factorization on every subsequent `factor()`. The
+    /// `mc64_retry_not_adopted` latch below caps this at one per pattern
+    /// on the non-adoption path. Resets on `Solver::new()`.
+    mc64_retry_attempts: usize,
+    /// N4: per-pattern latch. Set once the issue-#65 MC64 retry ran and was
+    /// *not* adopted (the matrix is genuinely singular — MC64 cannot change
+    /// rank, so the strict-zero-improvement gate failed). While set, the
+    /// retry gate is skipped, so a singular pattern factored repeatedly
+    /// (e.g. an IPM that never regularizes) pays the wasted second
+    /// factorization once, not once per call. Cleared on pattern change
+    /// alongside `auto_picked_strategy`. The *adoption* path self-latches
+    /// without this flag: adoption pins `auto_picked_strategy` and
+    /// `effective_params.scaling` to `Mc64Symmetric`, which the gate's
+    /// `!matches!(..Mc64Symmetric)` clause already suppresses.
+    mc64_retry_not_adopted: bool,
     /// Pooled scratch for the numeric phase. Retained across
     /// `factor` calls so IPM-style re-factorizations (same
     /// pattern, new values; or bumped pivot threshold) do not
@@ -369,6 +390,8 @@ impl Solver {
             symbolic_call_count: 0,
             mc64_fallback_count: 0,
             mc64_scaling_fallback_count: 0,
+            mc64_retry_attempts: 0,
+            mc64_retry_not_adopted: false,
             workspace: FactorWorkspace::new(),
             use_parallel: true,
             parallel_pool: None,
@@ -799,6 +822,10 @@ impl Solver {
             self.mc64_scaling_cache = None;
             // Issue #51: sticky Auto pick is also pattern-bound.
             self.auto_picked_strategy = None;
+            // N4: the "MC64 retry tried and not adopted" latch is keyed on
+            // the pattern fingerprint — a new pattern may not be singular,
+            // so the retry is allowed to run again.
+            self.mc64_retry_not_adopted = false;
         }
 
         // Step 3: ensure symbolic is cached.
@@ -1060,12 +1087,22 @@ impl Solver {
         // refactor on this pattern skips the retry. See
         // `dev/research/issue-65-mc64-scaling-fallback.md`.
         let mut mc64_fallback_adopted = false;
+        // N4: did the retry factorization run this call, and did it end in
+        // non-adoption? Mirror the `mc64_fallback_adopted` pattern — set
+        // locals inside the move-consuming `match`, apply to `self` after.
+        let mut mc64_retry_ran = false;
+        let mut mc64_retry_not_adopted_now = false;
         let result = match result {
             Ok((factors, inertia))
                 if matches!(self.numeric_params.scaling, ScalingStrategy::Auto)
                     && !matches!(effective_params.scaling, ScalingStrategy::Mc64Symmetric)
+                    // N4: per-pattern latch — once the retry ran and was not
+                    // adopted (genuinely singular), do not re-pay it on every
+                    // subsequent same-pattern factor().
+                    && !self.mc64_retry_not_adopted
                     && inertia.zero > 0 =>
             {
+                mc64_retry_ran = true;
                 let first_zero = inertia.zero;
                 let mut retry_params = effective_params.clone();
                 retry_params.scaling = ScalingStrategy::Mc64Symmetric;
@@ -1106,14 +1143,27 @@ impl Solver {
                     }
                     // MC64 did not improve the zero count (e.g. the matrix
                     // is genuinely singular) or it errored — keep the
-                    // original factor.
-                    _ => Ok((factors, inertia)),
+                    // original factor. N4: latch so subsequent same-pattern
+                    // factor()s skip this wasted retry entirely.
+                    _ => {
+                        mc64_retry_not_adopted_now = true;
+                        Ok((factors, inertia))
+                    }
                 }
             }
             other => other,
         };
         if mc64_fallback_adopted {
             self.mc64_scaling_fallback_count += 1;
+        }
+        // N4: observability + latch. Count every retry that ran; arm the
+        // per-pattern latch when the retry was not adopted so a genuinely
+        // singular pattern pays the wasted second factorization at most once.
+        if mc64_retry_ran {
+            self.mc64_retry_attempts += 1;
+        }
+        if mc64_retry_not_adopted_now {
+            self.mc64_retry_not_adopted = true;
         }
 
         // Issue #38: invalidate the one-shot MC64 cache that the
@@ -1586,6 +1636,22 @@ impl Solver {
     /// exits). Resets on `Solver::new()`.
     pub fn mc64_scaling_fallback_count(&self) -> usize {
         self.mc64_scaling_fallback_count
+    }
+
+    /// N4 (`dev/research/repo-review-2026-06-09.md`): number of `factor()`
+    /// calls that actually *ran* the issue-#65 MC64 retry factorization,
+    /// whether or not it was adopted. Differs from
+    /// [`Solver::mc64_scaling_fallback_count`] (adoptions only) on the
+    /// non-adoption path: a genuinely singular matrix runs the retry, fails
+    /// the strict-zero-improvement gate, and keeps the original factor.
+    ///
+    /// Before the N4 fix this incremented on *every* same-pattern
+    /// `factor()` (the non-adoption arm set no latch), so an IPM that never
+    /// regularizes re-paid a full Hungarian + second factorization
+    /// indefinitely. With the per-pattern latch this is capped at one per
+    /// pattern on the non-adoption path. Resets on `Solver::new()`.
+    pub fn mc64_retry_attempt_count(&self) -> usize {
+        self.mc64_retry_attempts
     }
 
     /// Number of `factor()` calls on this `Solver` that reused the
