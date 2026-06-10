@@ -1216,3 +1216,31 @@ tried-and-rejected.md updated.
 
 Next per /loop: do NOT start the next issue (S10). Continue in-turn per the live
 "speed this up" directive.
+
+* S10 :symbolic:supernode:predict-merges:amalgamation:s10:heuristic:load-bearing:deferred:
+S10: predict_merges (supernode.rs:628-671) drifts from find_supernodes — ignores
+the Phase-B4 root cap and uses original fundamental-supernode ncols instead of the
+real pass's cumulative ones.
+
+Analysis. predict_merges is a heuristic returning a Vec<bool> bias that only drives
+the merge-biased postorder; its doc (612-627) says it does NOT enforce adjacency —
+find_supernodes does the real adjacency-checked merge on the re-postordered etree.
+So the factorization is correct for any prediction; the drift only shifts which
+subtrees get biased late (amalgamation quality, not output). The finding notes the
+MUONSINE over-merge analysis suggests the root-cap omission is LOAD-BEARING —
+aligning to find_supernodes could re-introduce the MUONSINE regression
+(5.5x→1.4x MUMPS), so it's not a safe surgical change.
+
+Verdict: deferred citing S10. No incorrect output ⇒ no RED (bias vector assertion
+= impl-as-own-oracle; merge-quality = benchmark). Same class as S2/S8. Recommended:
+document the deliberate root-cap omission + original-ncols choice citing MUONSINE;
+gate any alignment behind a full corpus bench with MUONSINE watched.
+
+Evidence: supernode.rs:612-627,628-671 (648-649,658,664-666). No code change, no
+CHANGELOG. tried-and-rejected.md updated.
+
+This closes the S-findings (S2-S10): S7 fixed (AutoRace profiler isolation),
+S2/S3/S4/S5/S6/S8/S9/S10 deferred.
+
+Next per /loop: do NOT start the next issue (L7). Continue in-turn per the live
+"speed this up" directive.

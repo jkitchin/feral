@@ -3529,3 +3529,56 @@ Evidence: `src/sparse/csc.rs:314-328` (symv, no validation, `.take(self.n)`
 zeroing); exact-length callers `src/numeric/solve.rs:1092,1160,1274,1304,1318,1374`,
 `src/dense/solve.rs:88,124`, `src/scaling/mod.rs:1493`. No incorrect output for
 correct usage. Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S10: predict_merges vs find_supernodes drift (finding S10, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> `predict_merges` vs `find_supernodes` drift (`supernode.rs:628-671`): prediction
+> ignores the Phase-B4 root cap and uses original parent ncols vs the real pass's
+> cumulative ones. Harmless heuristic bias, but the root-cap omission is
+> undocumented and the MUONSINE over-merge analysis suggests it's load-bearing.
+> low/certain.
+
+### Why this is recorded here rather than fixed
+
+1. **predict_merges is a heuristic that never determines the final structure.**
+   Its own doc (supernode.rs:612-627) is explicit: it "does not enforce
+   adjacency — the caller uses the merge predictions to drive a merge-biased
+   postorder that *makes* the merges adjacent." It returns a `Vec<bool>` bias
+   (supernode.rs:634, :664-666); the real, adjacency-checked amalgamation is done
+   afterward by `find_supernodes` on the re-postordered etree. The factorization
+   is therefore correct for *any* prediction — a drift only shifts which subtrees
+   get biased late, i.e. amalgamation quality, not output.
+
+2. **The drift is perf-only and possibly load-bearing.** Using original
+   fundamental-supernode ncols (supernode.rs:648-649,658) instead of the real
+   pass's cumulative ncols, and omitting the Phase-B4 root cap, change *which*
+   merges are predicted — a heuristic bias. The finding itself notes the MUONSINE
+   over-merge analysis suggests the root-cap omission is *load-bearing*: aligning
+   predict_merges to find_supernodes could re-introduce the MUONSINE over-merge
+   regression (5.5× → 1.4× MUMPS, per the AmalgamationStrategy::Auto rationale).
+   So this is not a safe surgical change.
+
+3. **Not reproducible as a failing test.** There is no incorrect output to assert.
+   Pinning the predicted bias vector tests the impl against itself
+   (impl-as-own-oracle, forbidden); a merge-quality/fill assertion is a benchmark,
+   not a unit test. Same class as S2/S8 (perf/heuristic, no incorrect output).
+
+### Disposition
+
+No code change and no new test. Recommended (documentation + a benchmarked study,
+not a reproduce-first loop fix):
+(a) document in `predict_merges` that it deliberately omits the Phase-B4 root cap
+    and uses original (not cumulative) ncols, citing the MUONSINE over-merge
+    analysis so the divergence is a recorded design choice rather than silent
+    drift;
+(b) if alignment is ever attempted, gate it behind a full corpus bench with
+    MUONSINE in the watch set, since the omission may be load-bearing.
+
+Evidence: `src/symbolic/supernode.rs:612-627` (doc: no adjacency enforced),
+`:628-671` (predict_merges, original ncols at :648-649, size rule :658, bias
+:664-666); the real merge is `find_supernodes` on the biased postorder. No
+incorrect output. Journal: dev/journal/2026-06-10-01.org.
