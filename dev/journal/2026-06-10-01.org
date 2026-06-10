@@ -753,3 +753,27 @@ Evidence: equilibrate.rs:8-45; SymmetricMatrix::get matrix.rs:85-91; callers
 factor.rs:832,1207,2332. No code change, no CHANGELOG (not user-visible).
 
 Next per /loop: do NOT start the next issue (D12). Schedule it.
+
+* 15:50 :dense:refinement:perf:d12:not-reproducible:deferred:
+D12 (repo-review-2026-06-09.md): flag_growth_for_refinement (factor.rs:409-419)
+walks the entire extracted L slice (O(nrow*nelim)) at every dense-factor exit
+(call sites 1160, 1772, 2267, 2501) to set needs_refinement when any
+|v|>L_GROWTH_THRESHOLD; finding says the scan "could be fused into the L-extract
+loop." Pure perf (low/certain perf), no correctness claim.
+
+Function is correct (early-returns if already flagged; short-circuits on first
+over-threshold entry) and already pinned by characterization tests at 5061-5112.
+No wrong output to reproduce; timing assertions flaky/forbidden; the fusion is a
+behavior-preserving refactor whose only oracle is the current impl (forbidden in
+one session) and touches 4 production hot-path exits with no failing test ->
+contradicts "correctness before performance."
+
+-> Routed to tried-and-rejected.md citing D12. Fusion is safe in principle (the
+flag is a monotonic OR over |L_ij|>threshold, computable as each entry is written
+during extraction) — deferred to a dense-factor perf pass with before/after
+benchmark, re-verified against the existing characterization tests.
+
+Evidence: factor.rs:409-419, call sites 1160/1772/2267/2501, tests 5061-5112.
+No code change, no CHANGELOG (not user-visible).
+
+Next per /loop: do NOT start the next issue (D13). Schedule it.

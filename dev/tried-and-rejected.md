@@ -2797,3 +2797,41 @@ Evidence: `src/dense/equilibrate.rs:8-45`; `SymmetricMatrix::get`
 (`src/dense/matrix.rs:85-91`) reads lower-triangle storage for both branches;
 callers at `src/dense/factor.rs:832, 1207, 2332`. Journal:
 dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — D12: `flag_growth_for_refinement` extra O(nrow·nelim) pass over L (finding D12, repo-review-2026-06-09.md)
+
+Finding D12 reports that `flag_growth_for_refinement` (`src/dense/factor.rs:409-419`)
+walks the entire extracted `L` slice (`O(nrow·nelim)`) at every dense-factor exit
+(`factor.rs:1160, 1772, 2267, 2501`) checking `|v| > L_GROWTH_THRESHOLD`, and
+that this scan "could be fused into the L-extract loop." Severity: low/certain
+(**perf**).
+
+### Why this is recorded here rather than fixed
+
+Pure performance observation — there is no incorrect behavior to reproduce.
+The function is correct (it early-returns once `needs_refinement` is already set
+and short-circuits on the first over-threshold entry) and is already pinned by
+existing characterization tests (`factor.rs:5061-5112`). The finding is purely
+"this is a redundant second pass that could be fused."
+
+A test whose *failure is the bug* cannot be written: there is no wrong output,
+and a timing assertion is flaky and not an acceptable gate. The only "fix" —
+fusing the threshold check into the L-extract loop — is a behavior-preserving
+refactor with no RED state, and its only available oracle would be the current
+implementation's output, which the hard rule forbids producing in the same
+session (CLAUDE.md: no impl + oracle together). It also touches the hot path of
+every dense-factor exit (four production call sites) with no failing test to
+guard a regression, against the "correctness before performance, always"
+constraint.
+
+### Disposition
+
+No code change this iteration. The fusion is safe in principle — the growth
+flag is a monotonic OR over `|L_ij| > threshold`, so evaluating it as each L
+entry is written during extraction yields the identical flag while removing the
+separate pass. Deferred to a dedicated dense-factor performance pass that can
+benchmark before/after and re-verify the flag against the existing
+characterization tests. This entry is the flag to revisit then.
+
+Evidence: `src/dense/factor.rs:409-419` (impl), call sites `:1160, 1772, 2267,
+2501`, existing tests `:5061-5112`. Journal: dev/journal/2026-06-10-01.org.
