@@ -624,3 +624,31 @@ Evidence: feral-kahip lib 62 passed (+1), clippy -p feral-kahip --all-targets
 O2 was the last of the 28 high+medium findings (Sections 1-3) in the PR #83
 review. Loop COMPLETE — per "When done do not start the next issue", stop here;
 no further ScheduleWakeup.
+
+* 11:55 :dense:bunch-kaufman:d8:doc-drift:fixed:
+D8 (repo-review-2026-06-09.md, §4 low): the doc comment on
+symmetric_row_offdiag_max (factor.rs) claimed it EXCLUDES position (r,k), but the
+loop `for j in k..r` includes it. The code is correct — it matches LAPACK dsytf2
+ROWMAX (which includes A(IMAX,K)) — the comment was wrong and load-bearing: a
+"fix" toward the comment (narrowing to (k+1)..r) would drop A(r,k) from the
+Bunch-Kaufman pivot-selection max and corrupt pivot choice.
+
+Reproducing/characterization test (tests-first):
+row_offdiag_tests::row_offdiag_max_includes_position_r_k. Column-major 4x4 with
+the only nonzero off-diagonal in row r=2's window (k=0) at exactly (r,k)=(2,0)
+stored at a[k*n+r]=a[2]=7.0; the returned max must equal 7.0. Oracle = LAPACK
+dsytf2 ROWMAX semantics (external).
+
+RED: temporarily narrowed the loop to (k+1)..r (the comment's claimed behavior),
+test FAILED left:0.0 right:7.0 — A(r,k) dropped, exactly the regression the
+comment would invite. Restored from /tmp/factor_D8.bak. GREEN: restored code +
+corrected comment, test ok.
+
+Fix: rewrote the comment to state the range INCLUDES (r,k), why (LAPACK ROWMAX,
+A(r,k) is the candidate pivot's partner entry), and cite the pinning test + D8.
+Code unchanged (it was already correct). Not user-visible -> no CHANGELOG entry.
+
+Evidence: feral lib dense::factor 32 passed (+1), clippy -p feral --lib
+-D warnings clean, fmt clean.
+
+Next per /loop: do NOT start the next issue (D9). Schedule it.

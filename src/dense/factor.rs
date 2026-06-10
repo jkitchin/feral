@@ -4340,9 +4340,16 @@ fn column_offdiag_max(a: &[f64], n: usize, k: usize) -> (f64, usize) {
 /// Compute the max off-diagonal magnitude in the full symmetric row/column r,
 /// restricted to the trailing submatrix starting at column k.
 /// This searches both below the diagonal (column r, rows > r) and
-/// to the left of the diagonal (row r, columns k..r), excluding
-/// position (r, k) which is not part of the "off-diagonal of r" in
-/// the context of pivot selection — we want max over i != r.
+/// to the left of the diagonal (row r, columns `k..r`, i.e. `k` through
+/// `r-1` inclusive).
+///
+/// IMPORTANT: the left-of-diagonal range **includes** position (r, k).
+/// This is deliberate and load-bearing — it matches LAPACK dsytf2's
+/// ROWMAX, which includes A(IMAX, K). A(r, k) is the candidate pivot's
+/// partner entry; dropping it (e.g. narrowing the loop to `(k+1)..r`)
+/// would corrupt Bunch-Kaufman pivot selection. Pinned by
+/// `row_offdiag_tests::row_offdiag_max_includes_position_r_k` (finding
+/// D8, dev/research/repo-review-2026-06-09.md).
 fn symmetric_row_offdiag_max(a: &[f64], n: usize, k: usize, r: usize) -> f64 {
     let mut max_val = 0.0;
 
@@ -5381,4 +5388,37 @@ mod static_pivot_tests {
     // perturbation helpers above (`perturb_2x2_to_floor`,
     // `perturb_to_floor`) plus the sparse-solver integration tests
     // cover the full pipeline.
+}
+
+#[cfg(test)]
+mod row_offdiag_tests {
+    use super::*;
+
+    /// D8 (repo-review-2026-06-09.md): the doc comment on
+    /// `symmetric_row_offdiag_max` claimed it *excludes* position (r, k),
+    /// but the loop `for j in k..r` includes it — and that inclusion is
+    /// load-bearing: it matches LAPACK dsytf2's ROWMAX, which includes
+    /// A(IMAX, K). A "fix" toward the (wrong) comment — narrowing the loop
+    /// to `(k + 1)..r` — would drop A(r, k) from the pivot-selection max
+    /// and corrupt Bunch-Kaufman pivot choice. This test pins the true
+    /// behavior so the comment can never again tempt that regression.
+    ///
+    /// Construction: column-major 4×4, the ONLY nonzero off-diagonal in
+    /// row r = 2's search window (k = 0) sits exactly at (r, k) = (2, 0),
+    /// stored at `a[k * n + r] = a[2]`. The returned max must therefore
+    /// equal that value; if (r, k) were excluded the window would be empty
+    /// and the result 0.0. Oracle: LAPACK dsytf2 ROWMAX semantics — A(r, k)
+    /// is part of the row-r off-diagonal max.
+    #[test]
+    fn row_offdiag_max_includes_position_r_k() {
+        let n = 4;
+        let mut a = vec![0.0f64; n * n];
+        // entry (r = 2, k = 0): column-major a[k * n + r] = a[0 * 4 + 2].
+        a[0 * n + 2] = 7.0;
+        let got = symmetric_row_offdiag_max(&a, n, 0, 2);
+        assert_eq!(
+            got, 7.0,
+            "A(r, k) must be included in the row-r off-diagonal max (LAPACK ROWMAX)"
+        );
+    }
 }
