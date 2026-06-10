@@ -2750,3 +2750,50 @@ Evidence: `do_1x1_pivot` / `try_reject_1x1_frontal` / `count_1x1_inertia` /
 `scalar_pivot_step` / `do_2x2_pivot` in `src/dense/factor.rs`; sibling n_tiny
 contract at `factor.rs` (count_1x1_inertia `n_tiny` doc). Companion commit fixes
 (a)/(d)/(e). Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — D11: `equilibrate_scaling` O(10·n²) branchy/stride-n access (finding D11, repo-review-2026-06-09.md)
+
+Finding D11 reports that `equilibrate_scaling` (`src/dense/equilibrate.rs:8-45`)
+runs up to 10 sweeps of an `n×n` double loop calling `matrix.get(i, j)` per
+element, with a branch inside `get` and stride-n access for one half of each
+row, and that it runs on every `factor()` / `factor_single_front` call
+(`factor.rs:832, 1207, 2332`). Severity: low/certain (**perf**).
+
+### Why this is recorded here rather than fixed
+
+This is a pure performance observation, not a correctness defect, so it cannot
+be turned into a reproducing test whose *failure is the bug* — the loop's gating
+methodology. Two things were checked before concluding that:
+
+1. **No stale-data correctness bug.** `get(i, j)` for `i < j` returns
+   `data[i*n + j]`, which is the *lower-triangle* storage of the symmetric
+   entry `(j, i)` (row `j` ≥ col `i`), not the strict upper triangle that
+   `SymmetricMatrix::from_pooled_buf` leaves stale (cf. D10). So every read is
+   valid lower-triangle data; equilibration produces correct scalings even on
+   pooled-buffer fronts. There is no wrong-output behavior to reproduce.
+
+2. **No admissible RED gate exists.** A timing assertion is flaky and is not an
+   acceptable test gate. The only other "test-first" option would be a
+   characterization test that pins the current scaling output and then refactors
+   the loop to be faster while keeping it green — but that makes the *current
+   implementation its own oracle*, which the hard rule forbids (CLAUDE.md:
+   "NEVER write both the implementation and the test oracle in the same session
+   without the oracle coming from an external source"). The refactor would also
+   touch the hot path of every `factor()` call with no failing test to catch a
+   regression, contradicting "correctness before performance, always."
+
+### Disposition
+
+No code change this iteration. The optimization is real and safe in principle —
+the max-reduction over `j` is order-independent (associative/commutative max),
+so splitting the inner loop into the contiguous `j ∈ (i, n)` half (stride-1 in
+column `i`) and the strided `j ∈ [0, i]` half, or hoisting `d[i]` out of the
+inner loop, would preserve the result bit-for-bit. It is deferred to a dedicated
+dense-factor performance pass that can (a) bring an external/hand oracle for the
+scaling vector and (b) benchmark the hot path before/after. This entry is the
+flag to revisit when that pass happens.
+
+Evidence: `src/dense/equilibrate.rs:8-45`; `SymmetricMatrix::get`
+(`src/dense/matrix.rs:85-91`) reads lower-triangle storage for both branches;
+callers at `src/dense/factor.rs:832, 1207, 2332`. Journal:
+dev/journal/2026-06-10-01.org.

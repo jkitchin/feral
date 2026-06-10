@@ -726,3 +726,30 @@ CHANGELOG: not user-visible (contrib upper triangle is internal scratch read
 only by lower-triangle consumers) -> no CHANGELOG entry.
 
 Next per /loop: do NOT start the next issue (D11). Schedule it.
+
+* 15:18 :dense:equilibrate:perf:d11:not-reproducible:deferred:
+D11 (repo-review-2026-06-09.md): equilibrate_scaling (equilibrate.rs:8-45) is
+flagged as O(10*n^2) with branchy matrix.get() per element and a stride-n half
+per row, on the hot path of every factor()/factor_single_front call. Pure perf
+finding (low/certain perf) — no correctness claim.
+
+Checked for a hidden correctness angle before deferring: get(i,j) for i<j
+returns data[i*n+j], which is the LOWER-triangle storage of the symmetric entry
+(j,i) (row j >= col i), NOT the strict upper triangle that from_pooled_buf
+leaves stale (cf. D10). So every read is valid; equilibration is correct even on
+pooled-buffer fronts. No wrong output to reproduce.
+
+No admissible RED gate: a timing assertion is flaky/forbidden; a characterization
+test that pins current output and then refactors makes the current impl its own
+oracle, which the hard rule forbids (no impl+oracle in one session). Refactoring
+the hot path with no failing test contradicts "correctness before performance."
+
+-> Routed to tried-and-rejected.md citing D11. The optimization is real and safe
+in principle (max-reduction over j is order-independent; split inner loop into
+contiguous j>i half and strided j<i half, hoist d[i]) — deferred to a dedicated
+dense-factor perf pass that brings an external oracle + before/after benchmark.
+
+Evidence: equilibrate.rs:8-45; SymmetricMatrix::get matrix.rs:85-91; callers
+factor.rs:832,1207,2332. No code change, no CHANGELOG (not user-visible).
+
+Next per /loop: do NOT start the next issue (D12). Schedule it.
