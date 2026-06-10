@@ -43,6 +43,23 @@ agreement, and adversarial/ill-scaled/ill-conditioned cases. The downstream
 `pounce-simplex` `BasisEngine` integration and reference (UMFPACK/KLU)
 benchmarks are deferred (see `dev/plans/unsymmetric-lu-epic.md`).
 
+### Fixed — `with_fma(true)` now actually dispatches the FMA kernels (N1)
+
+`Solver::with_fma(true)` was a silent no-op. It set `NumericParams::fma`,
+but every Bunch-Kaufman call site consumes `&params.bk`, whose `fma` field
+stayed at its `false` default — so the documented ~2× FMA dense kernels
+(`schur_panel_minus_fma_strided*`, `axpy_minus_unroll4`, `axpy2_minus_unroll4`,
+issue #8) never engaged through the public API. The solver factor funnel now
+syncs `bk.fma = fma` into the params handed to both the sequential and parallel
+multifrontal drivers, and the stale doc on `BunchKaufmanParams::fma` (which
+claimed the *driver* copied the flag) is corrected.
+
+New regression `fma_opt_in_actually_dispatches_fma_kernels` asserts that
+enabling FMA changes the factorization at the bit level (proving dispatch)
+while keeping the solution within the documented within-ulps bound; the
+pre-existing "same inertia + small residual" test could not catch a dead
+toggle. Finding N1 from `dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — dense LU update/solve no longer commits singular bases or emits silent Inf/NaN (L1)
 
 The dense LU column-replacement path could commit a numerically singular

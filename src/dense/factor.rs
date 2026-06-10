@@ -552,9 +552,11 @@ pub struct BunchKaufmanParams {
     /// kernels. Default `false` keeps the cross-arch bit-exact non-FMA
     /// path; `true` switches to the FMA siblings for ~2x arithmetic
     /// throughput on aarch64 NEON and x86 V3 AVX2+FMA. Mirrors
-    /// `NumericParams::fma`; the sparse multifrontal driver copies
-    /// `NumericParams::fma` here when constructing per-supernode BK
-    /// params. See `dev/research/fma-kernel-opt-in.md`, issue #8.
+    /// `NumericParams::fma`; the `Solver` factor funnel
+    /// (`solver.rs`, `effective_params`) copies `NumericParams::fma`
+    /// into this field before handing `&params.bk` to the multifrontal
+    /// drivers (N1, `dev/research/repo-review-2026-06-09.md`). See
+    /// `dev/research/fma-kernel-opt-in.md`, issue #8.
     pub fma: bool,
 
     /// Threshold-partial-pivoting acceleration. See [`TppMethod`].

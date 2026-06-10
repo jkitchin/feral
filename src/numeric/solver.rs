@@ -912,6 +912,18 @@ impl Solver {
         // own knobs, and AFTER non-finite validation (Step 0 above
         // already ran) so the norm scan is well-defined.
         let mut effective_params = effective_params;
+
+        // N1 (dev/research/repo-review-2026-06-09.md): sync the user-facing
+        // FMA opt-in (`NumericParams::fma`, set by `with_fma`) into the BK
+        // params the dense kernels actually read (`bk.fma`). Without this the
+        // toggle was a silent no-op: `with_fma(true)` set `numeric_params.fma`
+        // but every BK call site consumes `&params.bk`, whose `fma` field
+        // stayed at its `false` default, so the documented ~2× FMA kernels
+        // (issue #8) never dispatched through the public API. `effective_params`
+        // is the single funnel feeding both the sequential and parallel
+        // multifrontal drivers, so syncing here covers every factor() path.
+        effective_params.bk.fma = effective_params.fma;
+
         if let Some(t) = effective_params.static_pivot_threshold {
             if t > 0.0 {
                 let norm_inf = matrix_inf_norm(matrix);

@@ -87,3 +87,47 @@ update last-diagonal check to match the existing in-bump check in the
 same function. The doc comment already claims SingularBasis for a
 vanishing bump pivot while the code returns NeedsRefactor — that
 doc/code drift is finding L8, deferred to its own iteration.
+
+** HH:MM :numeric:fma:opt-in:dead-feature:bugfix:n1:
+Fixed N1 (repo-review-2026-06-09.md): with_fma / NumericParams::fma was
+a silent no-op — the documented ~2× FMA dense kernels never dispatched
+through the public API.
+
+Root cause: NumericParams carries BOTH a top-level `fma: bool` (set by
+Solver::with_fma) AND `bk: BunchKaufmanParams` whose own `fma` field is
+the one the dense kernels actually read (do_1x1_update/do_2x2_update
+dispatch axpy_minus_unroll4 vs _nofma on `params.fma` where params is the
+BK struct; factor.rs:4108). Nothing ever copied NumericParams::fma into
+bk.fma, so every BK call site (factorize.rs:1419/2385/2576/…) passed
+&params.bk with fma=false regardless of the toggle. The doc at
+factor.rs:555-557 even claimed "the sparse multifrontal driver copies
+NumericParams::fma here" — false.
+
+Fix: sync `effective_params.bk.fma = effective_params.fma` in the Solver
+factor funnel (solver.rs, the single effective_params chokepoint that
+feeds BOTH the sequential and parallel drivers). NumericParams::fma is
+only ever set to true via with_fma → Solver, so this one point covers
+100% of real usage. Also corrected the stale factor.rs doc to name the
+Solver funnel as the copier.
+
+Test (tests-first, strengthened existing fma_opt_in_roundtrip.rs):
+fma_opt_in_actually_dispatches_fma_kernels. Oracle = the documented
+FMA/non-FMA bit-inequality contract (mul_add single-rounding ≠ separate
+mul+sub; see schur_kernel::fma_vs_nofma_panel_kernels_within_n_elim_ulps).
+Asserts (a) with_fma(true) changes ≥1 solution component at the bit level
+(proving dispatch) and (b) the FMA/non-FMA solutions agree to rel<1e-9
+(correctness preserved). The pre-existing test could not catch this — it
+only checked "same inertia + small residual", trivially true when FMA
+never engages.
+
+Evidence:
+- Pre-fix: FAILS "with_fma(true) produced a bit-identical solution to the
+  non-FMA path … never dispatched (N1 dead-feature signature)" — bit-exact
+  proof the toggle was dead.
+- Post-fix: both fma tests pass; bits diverge, solutions agree to <1e-9.
+- numeric lib suite 73 passed / 0 failed; clippy -D warnings exit 0;
+  cargo fmt --check exit 0. Default path is fma=false, so all other tests
+  are unaffected by construction.
+
+Remaining high-severity finding still open: S1 (O(n²·log n) default
+postorder on star etrees). Next per the triage order.
