@@ -1136,3 +1136,34 @@ updated.
 
 Next per /loop: do NOT start the next issue (S7). Continue in-turn per the live
 "speed this up" directive.
+
+* S7 :symbolic:autorace:profiler:s7:diagnostics:fixed:
+S7: AutoRace (symbolic_factorize_race, mod.rs:629-656) passed the caller's single
+SymbolicProfiler Arc to all four RACE_CANDIDATES. record() appends, set_total()
+overwrites ⇒ shared profiler ends with one full stage list per candidate (~4x)
+against a 1x total. report() then lists every stage 4x, sums pct_of_total past
+100%, and always emits "stage sum exceeds total".
+
+REPRODUCED (unlike N9, this is observable and deterministic): test
+autorace_does_not_quadruple_symbolic_profiler_stages — attach a profiler, run
+symbolic_factorize_with_method(.., AutoRace) on a 16-node tridiagonal, assert
+each stage name appears at most once. RED: panic at mod.rs:1583, all 14 stages
+×4 = 56 records ["symmetric_pattern","pick_preprocess",... ×4]. The duplicate-
+name assertion is timing-independent (record() pushes even 0 µs samples), so the
+RED signal does not depend on machine speed.
+
+FIX: symbolic_factorize_race now gives each candidate its own fresh profiler Arc
+(clone snode_params with symbolic_profiler overridden) and copies only the
+winning candidate's SymbolicProfiler into the caller's shared one at the end
+(*p = winner). GREEN: test passes; full lib suite 352 passed (was 351),
+clippy -D warnings clean, fmt clean.
+
+Diagnostics-only — factorization perm/inertia/structure unaffected. CHANGELOG
+Unreleased "Fixed — AutoRace no longer quadruples symbolic-profiler stages (S7)".
+
+Evidence: mod.rs:629-680 (race fix), profiler.rs:51-75 (record/set_total/warning),
+test mod.rs ~1540. SupernodeParams derives Clone (supernode.rs:13),
+SymbolicProfiler derives Clone (profiler.rs:40).
+
+Next per /loop: do NOT start the next issue (S8). Continue in-turn per the live
+"speed this up" directive.

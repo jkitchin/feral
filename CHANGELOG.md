@@ -4,6 +4,22 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — AutoRace no longer quadruples symbolic-profiler stages (S7)
+
+When a `SymbolicProfiler` was attached and the ordering method was
+`OrderingMethod::AutoRace`, the race dispatcher (`symbolic_factorize_race`)
+passed the caller's single profiler `Arc` to all four `RACE_CANDIDATES`. Because
+`SymbolicProfiler::record` appends and `set_total` overwrites, the shared
+profiler ended with one full stage list per candidate (~4×) measured against a
+single candidate's `total_us`. The resulting `SymbolicProfileReport` therefore
+listed every stage four times, summed `pct_of_total` past 100%, and always
+emitted the "stage sum exceeds total" validation warning — misattributing the
+symbolic cost breakdown. Each candidate now gets its own fresh profiler and only
+the winning candidate's run is copied into the caller's shared profiler, so the
+report reflects exactly one ordering. Factorization results (perm, inertia,
+factor structure) were never affected — this is a diagnostics-only fix. Finding
+from `dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — `solve_sparse_many_into` validates workspace scaling state (N6)
 
 `solve_sparse_many_into` checked that the caller-owned `SolveManyWorkspace`

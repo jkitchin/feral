@@ -631,9 +631,26 @@ fn symbolic_factorize_race(
     snode_params: &SupernodeParams,
 ) -> Result<SymbolicFactorization, FeralError> {
     let mut best: Option<SymbolicFactorization> = None;
+    // S7: when a symbolic profiler is attached, give each candidate its
+    // own fresh profiler instead of letting all RACE_CANDIDATES append
+    // into the caller's shared one. Sharing accumulated one full stage
+    // list per candidate (~4x) against a single candidate's `total_us`,
+    // tripping the "stage sum exceeds total" warning and inflating every
+    // pct_of_total. We keep the winning candidate's profiler and copy it
+    // into the caller's shared profiler at the end, so the report
+    // reflects exactly one ordering run.
+    let mut best_prof: Option<SymbolicProfiler> = None;
     let mut last_err: Option<FeralError> = None;
     for &cand in RACE_CANDIDATES {
-        match symbolic_factorize_with_method(matrix, snode_params, cand) {
+        let cand_prof = snode_params
+            .symbolic_profiler
+            .as_ref()
+            .map(|_| std::sync::Arc::new(std::sync::Mutex::new(SymbolicProfiler::new())));
+        let cand_params = SupernodeParams {
+            symbolic_profiler: cand_prof.clone(),
+            ..snode_params.clone()
+        };
+        match symbolic_factorize_with_method(matrix, &cand_params, cand) {
             Ok(sym) => {
                 let is_better = best
                     .as_ref()
@@ -641,11 +658,19 @@ fn symbolic_factorize_race(
                     .unwrap_or(true);
                 if is_better {
                     best = Some(sym);
+                    best_prof = cand_prof.and_then(|a| a.lock().ok().map(|g| g.clone()));
                 }
             }
             Err(e) => {
                 last_err = Some(e);
             }
+        }
+    }
+    // Copy the winning candidate's stage timings into the caller's shared
+    // profiler so `report()` reflects one run, not all four concatenated.
+    if let (Some(shared), Some(winner)) = (snode_params.symbolic_profiler.as_ref(), best_prof) {
+        if let Ok(mut p) = shared.lock() {
+            *p = winner;
         }
     }
     best.ok_or_else(|| {
@@ -1535,6 +1560,67 @@ mod tests {
         // Total supernode columns = n
         let total_cols: usize = sym.supernodes.iter().map(|s| s.ncol()).sum();
         assert_eq!(total_cols, 4);
+    }
+
+    #[test]
+    fn autorace_does_not_quadruple_symbolic_profiler_stages() {
+        // S7 (repo-review-2026-06-09.md): AutoRace runs every
+        // RACE_CANDIDATE against the *same* profiler Arc. Because
+        // `SymbolicProfiler::record` appends and `set_total` overwrites,
+        // the shared profiler ends with one full stage list per candidate
+        // (~4x) measured against a single candidate's total. That yields
+        // duplicate stage names and a spurious "stage sum exceeds total"
+        // warning, and percentages that sum past 100%. The fix isolates
+        // each candidate's profiler and copies only the winner's run into
+        // the caller's shared profiler.
+        let n = 16;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..n {
+            rows.push(j);
+            cols.push(j);
+            vals.push(2.0);
+            if j + 1 < n {
+                rows.push(j + 1);
+                cols.push(j);
+                vals.push(-1.0);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+
+        let prof = std::sync::Arc::new(std::sync::Mutex::new(SymbolicProfiler::new()));
+        let params = SupernodeParams {
+            symbolic_profiler: Some(prof.clone()),
+            ..Default::default()
+        };
+        let _ = symbolic_factorize_with_method(&m, &params, OrderingMethod::AutoRace).unwrap();
+
+        let report = prof.lock().unwrap().report();
+
+        // Timing-independent invariant: the shared profiler must reflect
+        // exactly one ordering run, so each instrumented stage name must
+        // appear at most once. Pre-fix, ~RACE_CANDIDATES.len() copies of
+        // each common-path stage are present regardless of how fast the
+        // machine is (record() pushes even for 0 µs samples).
+        let mut seen = std::collections::HashSet::new();
+        for s in &report.stages {
+            assert!(
+                seen.insert(s.name),
+                "stage '{}' recorded more than once — AutoRace leaked {} candidates' \
+                 stages into the shared profiler (stages: {:?})",
+                s.name,
+                RACE_CANDIDATES.len(),
+                report.stages.iter().map(|s| s.name).collect::<Vec<_>>(),
+            );
+        }
+        // The stage-sum-exceeds-total warning must not fire for a single
+        // ordering run.
+        assert!(
+            report.validation_warnings.is_empty(),
+            "spurious profiler warnings: {:?}",
+            report.validation_warnings
+        );
     }
 
     #[test]
