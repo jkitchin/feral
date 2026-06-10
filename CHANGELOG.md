@@ -4,6 +4,20 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `solve_sparse_many_into` validates workspace scaling state (N6)
+
+`solve_sparse_many_into` checked that the caller-owned `SolveManyWorkspace`
+matched the factors in `nrhs` and `n`, but not that its `scaled_rhs` buffer was
+sized for the factors' scaling state. The buffer is sized at `for_factors` time
+from the factors it was built against — `n * nrhs` when scaling is applied,
+empty otherwise. A workspace built for *unscaled* factors then reused with
+*scaled* factors of the same `(n, nrhs)` shape (or vice versa) indexed the
+empty `scaled_rhs` out of bounds at the pre-scale step, panicking in a crate
+that otherwise returns `Result`. The function now validates `scaled_rhs.len()`
+against the factors' scaling state up front and returns
+`FeralError::DimensionMismatch` on a mismatch. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
 ### Fixed — KaHIP twin reduction now produces deterministic permutations (O2)
 
 The KaHIP data-reduction twin pass (`feral-kahip`) grouped vertices by signature

@@ -806,3 +806,32 @@ factor.rs:4220-4222 (forwards n==32 only). No CHANGELOG (not user-visible).
 
 That completes the Dense (D8-D13) section of repo-review §4.
 Next per /loop: do NOT start the next issue (N6). Schedule it.
+
+* 16:05 :numeric:solve:multi-rhs:n6:oob-panic:scaling:fixed:
+N6 (repo-review-2026-06-09.md): solve_sparse_many_into (solve.rs:447) validated
+ws.nrhs/ws.n but not ws.scaled_rhs sizing vs the factors' scaling state.
+SolveManyWorkspace::for_factors sizes scaled_rhs = n*nrhs when scaling applied,
+empty (len 0) otherwise. A workspace built for unscaled factors (scaled_rhs
+empty) reused with scaled factors of the same (n,nrhs) shape hit the pre-scale
+loop (:487 ws.scaled_rhs[off+i] = rhs[off+i]*scaling[i]) -> OOB panic, in a
+crate that otherwise returns Result.
+
+Reproduced: solve_many_into_rejects_scaling_mismatched_workspace. Factor an SPD
+tridiagonal twice off one symbolic factorization — once Identity (NotApplied,
+scaled_rhs empty), once External(vec![1.0;n]) (always reports Applied ->
+needs_scaling true). Build ws from the unscaled factors, call _into with the
+scaled factors. RED: "index out of bounds: the len is 0 but the index is 0" at
+solve.rs:487:30. GREEN: returns Err(DimensionMismatch).
+
+Fix: after the existing nrhs/n/rhs/x_out checks, compute needs_scaling and the
+expected scaled_rhs len (n*nrhs if scaling, else 0), and return
+DimensionMismatch if ws.scaled_rhs.len() differs. Reused needs_scaling at the
+pre-scale site (removed the duplicate let). Single-RHS solve_sparse_into_ws is
+pub(super) and only ever called with a matching workspace from solve_sparse, so
+no external misuse path there — left unchanged (N6 is specific to the public
+_into form).
+
+Evidence: feral lib 350 passed (+1) / 0 failed; clippy -p feral --lib clean;
+fmt clean. User-visible (panic -> Result on a public fn) -> CHANGELOG entry added.
+
+Next per /loop: do NOT start the next issue (N7). Schedule it.

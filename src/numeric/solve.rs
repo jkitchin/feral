@@ -473,13 +473,26 @@ pub fn solve_sparse_many_into(
             got: x_out.len(),
         });
     }
+    // N6: `ws.scaled_rhs` is sized from the scaling state of the factors the
+    // workspace was built against (`for_factors`): `n * nrhs` when scaling is
+    // applied, empty otherwise. A workspace built for unscaled factors reused
+    // with scaled factors of the same `(n, nrhs)` shape (or vice versa) would
+    // otherwise index `scaled_rhs` out of bounds at the pre-scale step below.
+    // Validate it here so the crate returns `Result` rather than panicking.
+    let needs_scaling = !matches!(factors.scaling_info, ScalingInfo::NotApplied);
+    let expected_scaled_len = if needs_scaling { n * nrhs } else { 0 };
+    if ws.scaled_rhs.len() != expected_scaled_len {
+        return Err(FeralError::DimensionMismatch {
+            expected: expected_scaled_len,
+            got: ws.scaled_rhs.len(),
+        });
+    }
     if n == 0 {
         return Ok(());
     }
 
     // Pre-scale every column by D (MC64 congruence). Skipped when
     // ScalingInfo::NotApplied (the scaling vector is all-ones).
-    let needs_scaling = !matches!(factors.scaling_info, ScalingInfo::NotApplied);
     let rhs_for_core: &[f64] = if needs_scaling {
         for c in 0..nrhs {
             let off = c * n;
@@ -1618,5 +1631,60 @@ mod tests {
         // Wrong-length RHS must surface as DimensionMismatch.
         let r = solve_sparse_refined_with_diagnostics(&m, &factors, &[1.0, 2.0]);
         assert!(r.is_err());
+    }
+
+    /// N6 (repo-review-2026-06-09.md): `solve_sparse_many_into` validated
+    /// `ws.nrhs` / `ws.n` but not whether `ws.scaled_rhs` was sized for the
+    /// factors' scaling state. A workspace built for *unscaled* factors
+    /// (`scaled_rhs` empty) reused with *scaled* factors of the same
+    /// `(n, nrhs)` shape would index the empty `scaled_rhs` out of bounds at
+    /// the pre-scale step — a panic in a crate that otherwise returns
+    /// `Result`. The validation must surface this as `DimensionMismatch`.
+    #[test]
+    fn solve_many_into_rejects_scaling_mismatched_workspace() {
+        use crate::scaling::ScalingStrategy;
+
+        // SPD tridiagonal; factorizes cleanly under either scaling choice.
+        let m = CscMatrix::from_triplets(
+            3,
+            &[0, 1, 1, 2, 2],
+            &[0, 0, 1, 1, 2],
+            &[2.0, -1.0, 2.0, -1.0, 2.0],
+        )
+        .unwrap();
+        let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
+        let nrhs = 2;
+
+        // Unscaled factors -> ScalingInfo::NotApplied -> ws.scaled_rhs empty.
+        let mut params_unscaled = make_params();
+        params_unscaled.scaling = ScalingStrategy::Identity;
+        let (factors_unscaled, _) = factorize_multifrontal(&m, &sym, &params_unscaled).unwrap();
+        assert!(matches!(
+            factors_unscaled.scaling_info,
+            ScalingInfo::NotApplied
+        ));
+        let mut ws = SolveManyWorkspace::for_factors(&factors_unscaled, nrhs);
+        assert_eq!(ws.scaled_rhs.len(), 0);
+
+        // Scaled factors of the SAME (n, nrhs) shape. External always reports
+        // ScalingInfo::Applied (even all-ones), so needs_scaling is true and
+        // the pre-scale step writes into ws.scaled_rhs.
+        let mut params_scaled = make_params();
+        params_scaled.scaling = ScalingStrategy::External(vec![1.0; m.n]);
+        let (factors_scaled, _) = factorize_multifrontal(&m, &sym, &params_scaled).unwrap();
+        assert!(!matches!(
+            factors_scaled.scaling_info,
+            ScalingInfo::NotApplied
+        ));
+
+        let rhs = vec![1.0; m.n * nrhs];
+        let mut x = vec![0.0; m.n * nrhs];
+        // Before the fix this panicked (OOB on the empty scaled_rhs); it must
+        // now return DimensionMismatch instead.
+        let result = solve_sparse_many_into(&factors_scaled, &rhs, nrhs, &mut x, &mut ws);
+        assert!(
+            matches!(result, Err(FeralError::DimensionMismatch { .. })),
+            "expected DimensionMismatch for a scaling-mismatched workspace, got {result:?}"
+        );
     }
 }
