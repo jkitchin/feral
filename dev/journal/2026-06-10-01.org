@@ -777,3 +777,32 @@ Evidence: factor.rs:409-419, call sites 1160/1772/2267/2501, tests 5061-5112.
 No code change, no CHANGELOG (not user-visible).
 
 Next per /loop: do NOT start the next issue (D13). Schedule it.
+
+* 15:56 :dense:block32:2x2:d13:intentional-contract:not-reproducible:deferred:
+D13 (repo-review-2026-06-09.md): update_2x2_block32 (block_ldlt32.rs:247-279)
+returns early on det.abs()==0.0 (:252-254), leaving trailing L columns (p+2)..n
+holding raw A values; "unreachable through gated frontal paths, only via D5
+legacy path." low/certain.
+
+Decisive: the det==0 no-op is an INTENTIONAL, tested contract, not a bug. Existing
+test update_2x2_block32_singular_is_noop (block_ldlt32.rs:544-555) drives
+(d11,d21,d22)=(1,1,1) (det=0) through both do_2x2_update and update_2x2_block32
+and asserts byte-identical no-op ("Singular 2x2 (det==0) is a no-op in both
+paths"). The leftover raw A is the defined consequence — no valid inverse to
+normalize by. Adding debug_assert or zero-fill would break this tested contract
+(loosening an existing test needs human approval).
+
+Impact gated entirely behind legacy D5 path: frontal path applies det floor +
+issue-#46 partner fallback upstream so det==0 never reaches the kernel; only
+legacy scalar factor() (D5, flagged for removal D1/D5) can deliver a singular
+2x2 here. A failing-on-the-bug test would have to show wrong inertia/solve on
+the legacy path = D5's deferred scenario needing a MUMPS/SSIDS oracle.
+
+-> Routed to tried-and-rejected.md citing D13. No code change. Subsumed by the
+D1/D5 legacy-path removal/oracle decision; revisit then.
+
+Evidence: block_ldlt32.rs:247-279 + test :544-555; caller do_2x2_update
+factor.rs:4220-4222 (forwards n==32 only). No CHANGELOG (not user-visible).
+
+That completes the Dense (D8-D13) section of repo-review §4.
+Next per /loop: do NOT start the next issue (N6). Schedule it.

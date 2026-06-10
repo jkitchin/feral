@@ -2835,3 +2835,60 @@ characterization tests. This entry is the flag to revisit then.
 
 Evidence: `src/dense/factor.rs:409-419` (impl), call sites `:1160, 1772, 2267,
 2501`, existing tests `:5061-5112`. Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — D13: `update_2x2_block32` det==0 no-op leaves raw A in L (finding D13, repo-review-2026-06-09.md)
+
+Finding D13 observes that `update_2x2_block32` (`src/dense/block_ldlt32.rs:247-279`)
+returns early when `det.abs() == 0.0` (`:252-254`), leaving the trailing L
+columns `(p+2)..n` holding their raw A values instead of normalized factors;
+"unreachable through gated frontal paths, only via the D5 legacy path."
+Severity: low/certain.
+
+### Why this is recorded here rather than fixed
+
+Three independent reasons, all pointing to "not a reproducible, safely-fixable
+bug this iteration":
+
+1. **The det==0 no-op is an intentional, characterized contract — not a bug.**
+   An existing test, `update_2x2_block32_singular_is_noop`
+   (`block_ldlt32.rs:544-555`), deliberately drives `(d11,d21,d22)=(1,1,1)`
+   (det=0) through *both* `do_2x2_update` and `update_2x2_block32` and asserts
+   they are byte-identical no-ops ("Singular 2×2 (det == 0) is a no-op in both
+   paths."). The leftover raw A values the finding describes are the *defined*
+   consequence of that no-op: there is no valid 2×2 inverse to normalize by, so
+   the columns are intentionally left untouched. Adding a `debug_assert!` or a
+   zero-fill — the only "fixes" — would directly contradict and break this
+   tested contract. Loosening/replacing an existing test to chase the finding is
+   not permitted without human approval.
+
+2. **The impact is gated entirely behind the legacy D5 path.** The production
+   frontal path applies a determinant floor + issue-#46 partner fallback before
+   any 2×2 update, so det==0 never reaches `update_2x2_block32` there. The only
+   route that delivers a singular 2×2 to this kernel is the legacy scalar
+   `factor()` path — the same path as finding D5 (exactly-singular 2×2 → 1/0 →
+   NaN), already recorded here and flagged for removal (D1, D5).
+
+3. **No admissible reproducing test.** A test whose *failure is the bug* would
+   have to drive the legacy `factor()` API to a state where raw-A-in-L corrupts
+   a committed result — i.e., demonstrate a *wrong inertia / wrong solve* on the
+   legacy path. That is exactly D5's deferred scenario and needs a MUMPS/SSIDS
+   reference oracle to validate, which this iteration cannot produce (CLAUDE.md:
+   inertia must be exactly correct; no impl + oracle in one session). A unit
+   test that merely re-confirms the no-op is not a failing-on-the-bug test —
+   `update_2x2_block32_singular_is_noop` already pins that behavior.
+
+### Disposition
+
+No code change and no new test. D13 is a latent symptom of the legacy scalar
+`factor()` path (the det==0 no-op is correct for the production block path,
+which never reaches it). It is subsumed by the D1/D5 decision to remove or
+oracle-validate the legacy path; revisit D13 when that happens — at which point
+the question becomes whether the legacy path should reject/delay a singular 2×2
+upstream (as the frontal path does) rather than what the block kernel does on a
+precondition it should never be handed.
+
+Evidence: `src/dense/block_ldlt32.rs:247-279` (impl + det==0 early return),
+existing characterization test `:544-555`, production caller chain via
+`do_2x2_update` (`factor.rs:4220-4222`) which only forwards n==32. Related: D5
+(legacy factor() singular 2×2), D1 (legacy path removal). Journal:
+dev/journal/2026-06-10-01.org.
