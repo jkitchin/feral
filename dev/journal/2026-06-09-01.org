@@ -224,3 +224,56 @@ Evidence:
 First medium-severity finding done. Next per triage: N2 (static-pivot
 floor computed in user space, enforced in scaled space) or D3 (rook
 rescue bypasses strict-zero/band inertia accounting).
+
+* 21:40 :n2:static-pivot:scaling:scale-invariance:repro-test:
+N2 (PR #83 review): the MA57-style static-pivot floor was computed in
+=Solver::factor= from the UNSCALED user matrix (=floor = t·‖A‖∞=, via
+=matrix_inf_norm(matrix)=) but enforced by the BK kernels on pivots of
+the SCALED matrix =D·A·D=. Under a norm-normalizing scaling (InfNorm /
+MC64) the unscaled and scaled ∞-norms differ by the scaling ratio, so
+the *relative* threshold t behaves like a different value in pivot space
+— and depends on a global scalar γ that the scaling otherwise normalizes
+out completely. The F-01 null-pivot floor already does this correctly
+(scaled ∞-norm, =factorize::scaled_matrix_infnorm=).
+
+Oracle (self-consistency, no external solver): scale invariance under
+InfNorm. Knight-Ruiz InfNorm normalizes a global scalar: A and γ·A
+equilibrate to the IDENTICAL scaled matrix (D' = D/√γ ⇒ D'(γA)D' = DAD).
+Choosing γ = 2³⁰ (power of two ⇒ γ·A and √γ exactly representable) makes
+the scaled matrices bit-identical, so the ONLY thing that can differ
+between the two factorizations is the static-pivot floor. Therefore the
+static-pivot decision (needs_refinement, inertia) MUST be identical for
+A and γ·A. Test =n2_static_pivot_floor_is_scale_invariant_under_infnorm=
+on an indefinite 3×3 saddle KKT, t=1e-6.
+
+Evidence:
+- Pre-fix: A → (refine=false, 2+,1−,0z); γ·A → (refine=true, 2+,1−,0z).
+  Unscaled floor differs by γ: floor(A)=t·O(1)≈1e-6 (no pivot that
+  small → no perturbation) vs floor(γA)=t·2³⁰·O(1)≈1e3 (every O(1)
+  scaled pivot perturbed). Assertion fails — reproduction confirmed.
+- Fix: move the floor into =factorize::apply_post_scaling_overrides=
+  (renamed from =override_null_pivot_tol=, extended). It now ALSO
+  derives =static_pivot_floor = t·‖D·A·D‖∞= from the scaled ∞-norm
+  already computed for F-01, at all 3 override sites (dense 1401, seq
+  1895, parallel 2863). Static floor applies regardless of
+  =on_zero_pivot= (unlike the null-pivot override which no-ops under
+  Fail). Removed the solver's unscaled block (solver.rs:927-935) and
+  the now-dead =matrix_inf_norm= fn (solver.rs:1711-1736).
+- Post-fix: N2 test passes (both A and γ·A → refine=false, agree).
+  issue_38_static_pivot 5/5 green (Identity scaling ⇒ ‖D·A·D‖∞=‖A‖∞,
+  same floor — no behavior change on the Identity-scaled contract).
+  lib 330/0; parity 21/0, threshold_consistency 5/0, issue_55 2/0,
+  delayed_pivoting 6/0, kkt_hardening 8/0, pivot_rejection 5/0,
+  dense_ldlt 17/0, blocked_ldlt 21/0. clippy -D warnings clean; fmt clean.
+
+Process note (lost work): an earlier in-flight D2 =git commit= (from
+before compaction) and a second =git commit= I launched ran
+concurrently. =pre-commit= stashes unstaged changes while running hooks;
+the two concurrent stash/restore cycles collided and silently dropped my
+unstaged N2 edits to factorize.rs/solver.rs (working tree reset to HEAD,
+git diff empty, N2 test back to old name). Re-applied all edits from
+context. Lesson: never run two commits concurrently, and stage ALL
+files before committing so pre-commit has nothing to stash.
+
+Second medium-severity finding done (N2). Next per triage: D3 (rook
+rescue bypasses strict-zero/band inertia accounting).

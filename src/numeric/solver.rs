@@ -902,15 +902,17 @@ impl Solver {
         };
 
         // Step 3.7: issue #38 — MA57-style static-pivot perturbation.
-        // When `static_pivot_threshold = Some(t)`, compute `||A||_∞`
-        // once (cost: O(nnz)) and propagate the absolute floor
-        // `static_pivot_floor = t * ||A||_∞` to the BK params for
-        // this factor call. The dense pivot kernels then enforce the
-        // floor on every accepted 1×1 / 2×2 pivot. We compute this
-        // AFTER effective_params is built so cascade-break auto-arm
-        // (which may overwrite BK fields) takes precedence on its
-        // own knobs, and AFTER non-finite validation (Step 0 above
-        // already ran) so the norm scan is well-defined.
+        // `static_pivot_threshold = Some(t)` is a *relative* threshold;
+        // the absolute floor `static_pivot_floor = t · ‖·‖∞` it implies
+        // is applied by the BK pivot kernels to pivots of the SCALED
+        // matrix `D·A·D`. Finding N2 (`dev/research/repo-review-2026-06-09.md`):
+        // the floor must therefore be derived from `‖D·A·D‖∞`, not the
+        // unscaled user `‖A‖∞` — under a norm-normalizing scaling
+        // (InfNorm / MC64) the two norms differ by the scaling ratio, so
+        // an unscaled floor made `t` behave like a different value in
+        // pivot space. The conversion now lives in
+        // `factorize::apply_post_scaling_overrides`, alongside the F-01
+        // null-pivot floor, where the scaled ∞-norm is already in hand.
         let mut effective_params = effective_params;
 
         // N1 (dev/research/repo-review-2026-06-09.md): sync the user-facing
@@ -923,16 +925,6 @@ impl Solver {
         // is the single funnel feeding both the sequential and parallel
         // multifrontal drivers, so syncing here covers every factor() path.
         effective_params.bk.fma = effective_params.fma;
-
-        if let Some(t) = effective_params.static_pivot_threshold {
-            if t > 0.0 {
-                let norm_inf = matrix_inf_norm(matrix);
-                let floor = t * norm_inf;
-                if floor.is_finite() && floor > 0.0 {
-                    effective_params.bk.static_pivot_floor = floor;
-                }
-            }
-        }
 
         // Step 3.75: Issue #51 — sticky Auto pick. The Auto pipeline
         // (`compute_scaling_auto_with_cache`) is value-aware on two
@@ -1708,39 +1700,6 @@ impl Solver {
         self.last_symbolic = None;
         self.last_pattern_fingerprint = None;
     }
-}
-
-/// Compute `||A||_∞` for a symmetric matrix stored as a CSC lower
-/// (or upper) triangle. Uses the symmetric definition:
-/// `||A||_∞ = max_i Σ_j |a_ij|`. Iterates the stored half once and
-/// reflects off-diagonal entries to the opposite row sum. Returns
-/// `0.0` for `n = 0`. Used by `Solver::factor` to derive the
-/// absolute floor for `NumericParams::static_pivot_threshold`.
-fn matrix_inf_norm(matrix: &CscMatrix) -> f64 {
-    let n = matrix.n;
-    if n == 0 {
-        return 0.0;
-    }
-    let mut row_sums = vec![0.0_f64; n];
-    for j in 0..n {
-        let start = matrix.col_ptr[j];
-        let end = matrix.col_ptr[j + 1];
-        for p in start..end {
-            let i = matrix.row_idx[p];
-            let v = matrix.values[p].abs();
-            row_sums[i] += v;
-            if i != j {
-                row_sums[j] += v;
-            }
-        }
-    }
-    let mut m = 0.0_f64;
-    for s in row_sums {
-        if s > m {
-            m = s;
-        }
-    }
-    m
 }
 
 impl Default for Solver {

@@ -43,6 +43,28 @@ agreement, and adversarial/ill-scaled/ill-conditioned cases. The downstream
 `pounce-simplex` `BasisEngine` integration and reference (UMFPACK/KLU)
 benchmarks are deferred (see `dev/plans/unsymmetric-lu-epic.md`).
 
+### Fixed — static-pivot floor now scale-invariant (computed in scaled space) (N2)
+
+The MA57-style static-pivot floor implied by `static_pivot_threshold = Some(t)`
+was computed in the solver from the **unscaled** user matrix
+(`floor = t · ‖A‖∞`) but enforced by the Bunch-Kaufman kernels on pivots of the
+**scaled** matrix `D·A·D`. Under a norm-normalizing scaling (`InfNorm` /
+`MC64`) the unscaled and scaled ∞-norms differ by the scaling ratio, so the
+*relative* threshold `t` behaved like a wildly different value in pivot space —
+breaking the documented MA57 `cntl(1)` analogy and making the static-pivot
+decision depend on a global scalar `γ` that the scaling otherwise normalizes
+out. The conversion now lives in `factorize::apply_post_scaling_overrides`
+(renamed from `override_null_pivot_tol`), alongside the F-01 null-pivot floor,
+where the scaled ∞-norm `‖D·A·D‖∞` is already in hand; the solver's unscaled
+`matrix_inf_norm` scan is removed.
+
+New regression `n2_static_pivot_floor_is_scale_invariant_under_infnorm` factors
+an indefinite saddle KKT under `InfNorm` scaling with `t = 1e-6`, then again
+scaled by `γ = 2³⁰`, and asserts the static-pivot decision (`needs_refinement`,
+inertia) is identical — because `A` and `γ·A` equilibrate to the same scaled
+matrix. Pre-fix `A → (refine=false)` but `γ·A → (refine=true)`; post-fix they
+agree. Finding N2 from `dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — panel inline 2×2 now applies the static-pivot floor (D2)
 
 The blocked dense LDLᵀ panel's inline 2×2 accept path skipped the MA57-style

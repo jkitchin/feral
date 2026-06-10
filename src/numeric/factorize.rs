@@ -340,7 +340,7 @@ pub struct PrologueBreakdown {
     /// The `CscMatrix::from_triplets` sub-call inside `permute_csc_values`.
     /// Subset of `permute_us`; the prime suspect for the prologue cost.
     pub permute_from_triplets_us: u64,
-    /// `scaled_matrix_infnorm` + `override_null_pivot_tol`.
+    /// `scaled_matrix_infnorm` + `apply_post_scaling_overrides`.
     pub infnorm_tol_us: u64,
     /// `CscMatrix::symmetric_pattern` (full pattern for row indices).
     pub symmetric_pattern_us: u64,
@@ -1398,7 +1398,7 @@ pub fn dense_fast_factor_with_workspace(
     // abort-on-zero callers). See
     // `dev/research/f01-rankdef-underreporting.md`.
     let local_params =
-        override_null_pivot_tol(params, scaled_matrix_infnorm_dense(&sym.data, n), n);
+        apply_post_scaling_overrides(params, scaled_matrix_infnorm_dense(&sym.data, n), n);
     let params: &NumericParams = local_params.as_ref().unwrap_or(params);
 
     // Factor the full n columns. `may_delay = false` matches the
@@ -1892,7 +1892,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // `on_zero_pivot == Fail`. See
     // `dev/research/f01-rankdef-underreporting.md`.
     let t_phase = tic();
-    let local_params = override_null_pivot_tol(
+    let local_params = apply_post_scaling_overrides(
         params,
         scaled_matrix_infnorm(&permuted, &scaling_pivot_order),
         n,
@@ -2860,7 +2860,7 @@ pub fn factorize_multifrontal_supernodal_parallel(
     // F-01: raise the per-supernode BK `zero_tol` to the Wilkinson
     // backward error floor `n · EPS · ||A_scaled||_inf`. See sequential
     // driver above and `dev/research/f01-rankdef-underreporting.md`.
-    let local_params = override_null_pivot_tol(
+    let local_params = apply_post_scaling_overrides(
         params,
         scaled_matrix_infnorm(&permuted, &scaling_pivot_order),
         n,
@@ -3353,12 +3353,15 @@ fn null_pivot_floor(scaled_infnorm: f64, n: usize) -> f64 {
     (n as f64).sqrt() * f64::EPSILON * scaled_infnorm
 }
 
-/// Apply the F-01 post-scaling null-pivot tolerance override.
+/// Apply the post-scaling pivot-tolerance overrides (F-01 null-pivot
+/// floor and N2 static-pivot floor), both derived from the scaled
+/// ∞-norm `‖D·A·D‖∞` the BK kernels actually operate on.
 ///
 /// Returns `Some(local)` when the caller should use a cloned
 /// `NumericParams` with raised `bk.null_pivot_tol` /
-/// `bk.null_pivot_tol_2x2`, or `None` when the original `params` is
-/// sufficient (either the floor is below the existing
+/// `bk.null_pivot_tol_2x2` and/or a scaled `bk.static_pivot_floor`, or
+/// `None` when the original `params` is sufficient (no static threshold
+/// set, and either the null-pivot floor is below the existing
 /// `null_pivot_tol`, or `on_zero_pivot == Fail` preserves the
 /// absolute-threshold contract for abort-on-zero callers).
 ///
@@ -3376,21 +3379,54 @@ fn null_pivot_floor(scaled_infnorm: f64, n: usize) -> f64 {
 /// `floor²` would only catch blocks with *both* eigenvalues at the
 /// floor — orders of magnitude smaller than the actual
 /// rank-deficiency signature.
-fn override_null_pivot_tol(
+fn apply_post_scaling_overrides(
     params: &NumericParams,
     scaled_infnorm: f64,
     n: usize,
 ) -> Option<NumericParams> {
-    if matches!(params.bk.on_zero_pivot, ZeroPivotAction::Fail) {
-        return None;
-    }
-    let floor = null_pivot_floor(scaled_infnorm, n);
-    if floor <= params.bk.null_pivot_tol {
+    // N2 (`dev/research/repo-review-2026-06-09.md`): the MA57-style
+    // static-pivot floor must be derived from the SCALED matrix the BK
+    // kernels actually operate on (`D·A·D`), not the unscaled user
+    // matrix. `static_pivot_threshold = t` is a *relative* threshold;
+    // the absolute floor enforced on scaled pivots is `t · ‖D·A·D‖∞`.
+    // The solver funnel previously computed `t · ‖A‖∞` from the
+    // unscaled matrix, so under a norm-normalizing scaling (InfNorm /
+    // MC64) `t` behaved like a different value in pivot space by the
+    // scaling-induced norm ratio — e.g. `γ·A` equilibrates to the same
+    // matrix as `A` under InfNorm yet received a `γ`× larger floor.
+    // Unlike the F-01 null-pivot override below, the static floor
+    // applies regardless of `on_zero_pivot` (static pivoting is
+    // independent of the abort-on-zero contract).
+    let static_floor = params
+        .static_pivot_threshold
+        .filter(|t| *t > 0.0)
+        .map(|t| t * scaled_infnorm)
+        .filter(|f| f.is_finite() && *f > 0.0);
+
+    // F-01: raise the BK kernel's null-pivot tolerance to the Wilkinson
+    // backward-error floor `sqrt(n) · EPS · ‖A_scaled‖∞`. No-op under
+    // `on_zero_pivot == Fail` (preserves the absolute-tolerance contract
+    // for abort-on-zero callers) or when the floor is already at/below
+    // the configured `null_pivot_tol`. See
+    // `dev/research/f01-rankdef-underreporting.md`.
+    let null_floor = if matches!(params.bk.on_zero_pivot, ZeroPivotAction::Fail) {
+        None
+    } else {
+        let floor = null_pivot_floor(scaled_infnorm, n);
+        (floor > params.bk.null_pivot_tol).then_some(floor)
+    };
+
+    if static_floor.is_none() && null_floor.is_none() {
         return None;
     }
     let mut local = params.clone();
-    local.bk.null_pivot_tol = floor;
-    local.bk.null_pivot_tol_2x2 = (floor * scaled_infnorm).max(floor * floor);
+    if let Some(sf) = static_floor {
+        local.bk.static_pivot_floor = sf;
+    }
+    if let Some(floor) = null_floor {
+        local.bk.null_pivot_tol = floor;
+        local.bk.null_pivot_tol_2x2 = (floor * scaled_infnorm).max(floor * floor);
+    }
     Some(local)
 }
 
