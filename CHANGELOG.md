@@ -43,6 +43,25 @@ agreement, and adversarial/ill-scaled/ill-conditioned cases. The downstream
 `pounce-simplex` `BasisEngine` integration and reference (UMFPACK/KLU)
 benchmarks are deferred (see `dev/plans/unsymmetric-lu-epic.md`).
 
+### Fixed — dense LU update/solve no longer commits singular bases or emits silent Inf/NaN (L1)
+
+The dense LU column-replacement path could commit a numerically singular
+replacement basis and then divide by a ~0 pivot in the back-solves, emitting
+silent `±Inf`/`NaN` (whereas the sparse path already guarded both ends). Two
+fixes, mirroring `sparse_update.rs` / `sparse_solve.rs`:
+
+- **Update** (`DenseLu::update`): the bump-elimination loop validated only
+  pivots `q..m-2`; the final diagonal `u[m-1,m-1]` was never checked, and when
+  the leaving slot was the last column (`q == m-1`) the loop never ran at all. A
+  vanishing final pivot is now rejected (`NeedsRefactor`) before commit.
+- **Solve** (`usolve`/`ut_solve`): the dense back-solves now error with
+  `SingularBasis { column }` on a zero or non-finite `U` diagonal instead of
+  dividing into an `Inf`/`NaN`.
+
+Regression tests `dense_zero_u_diagonal_errors_instead_of_inf` (solve) and
+`update_singular_last_pivot_does_not_commit` (update). Finding L1 from
+`dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — legacy dense `factor()` no longer corrupts the column after a force-accepted zero pivot (D1)
 
 In the legacy dense `factor()` path, a strict-zero pivot routed through

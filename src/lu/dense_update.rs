@@ -107,6 +107,17 @@ impl DenseLu {
             }
         }
 
+        // L1 (dev/research/repo-review-2026-06-09.md): the loop above validates
+        // pivots `q..m-2`; the final diagonal `u[m-1,m-1]` — the new last pivot,
+        // or (when `q == m-1`) the spike's last entry with no loop iteration at
+        // all — was never checked. Committing a vanishing final pivot would let
+        // the next `ftran`/`btran` divide by ~0 and emit a silent `Inf`/`NaN`.
+        // Reject before commit (consistent with the in-bump check above).
+        let last = m - 1;
+        if u[last + last * m].abs() <= ztol {
+            return Err(FeralError::NeedsRefactor);
+        }
+
         // Commit.
         self.u = u;
         self.l = l;
@@ -134,4 +145,37 @@ fn cyclic_shift_columns(buf: &mut [f64], m: usize, q: usize) {
     }
     let last = (m - 1) * m;
     buf[last..last + m].copy_from_slice(&saved);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lu::dense_factor::DenseLu;
+    use crate::lu::LuParams;
+
+    /// L1 (dev/research/repo-review-2026-06-09.md): the bump-elimination loop
+    /// only validates pivots `q..m-2`; the final diagonal `u[m-1,m-1]` is never
+    /// checked, and when the leaving slot is the last column (`q == m-1`) the
+    /// loop body never runs at all. Replacing the last slot of the 2×2 identity
+    /// basis with `e_0` makes the new basis `[e_0, e_0]` singular and drives the
+    /// new last `U` diagonal to exactly 0. Pre-fix this committed `Ok(())` and
+    /// the next `ftran` divided by 0; the fix rejects it before commit.
+    #[test]
+    fn update_singular_last_pivot_does_not_commit() {
+        let cols = vec![vec![1.0, 0.0], vec![0.0, 1.0]]; // identity basis
+        let mut lu = DenseLu::factor(&cols, 2, LuParams::default()).expect("factor");
+
+        // Replace slot 1 (the last column) with e_0 → q == m-1 == 1.
+        let err = lu.update(1, &[1.0, 0.0]);
+        assert!(
+            matches!(err, Err(FeralError::NeedsRefactor)),
+            "singular replacement basis must be rejected, got {err:?}"
+        );
+
+        // And `self` is left unchanged/usable: a solve against the original
+        // (still-committed) basis stays finite.
+        let mut rhs = vec![1.0, 1.0];
+        lu.ftran(&mut rhs).expect("ftran after rejected update");
+        assert!(rhs.iter().all(|x| x.is_finite()));
+    }
 }

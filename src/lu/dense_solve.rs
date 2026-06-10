@@ -60,12 +60,17 @@ impl DenseLu {
             *sk = rhs[self.perm[k]];
         }
         lsolve(&self.l, m, &mut s);
-        usolve(&self.u, m, &mut s);
-        for (k, &wk) in s.iter().enumerate() {
-            rhs[self.qcol[k]] = wk;
+        // Restore the scratch buffer on every path (it was `mem::take`n, so an
+        // early `?` would otherwise leave `self.scratch_a` empty and panic the
+        // next call). Only write `rhs` on success.
+        let res = usolve(&self.u, m, &mut s);
+        if res.is_ok() {
+            for (k, &wk) in s.iter().enumerate() {
+                rhs[self.qcol[k]] = wk;
+            }
         }
         self.scratch_a = s;
-        Ok(())
+        res
     }
 
     /// Core `btran` on the (scaled) factored matrix, ignoring outer scaling.
@@ -76,13 +81,16 @@ impl DenseLu {
         for (k, sk) in s.iter_mut().enumerate() {
             *sk = rhs[self.qcol[k]];
         }
-        ut_solve(&self.u, m, &mut s); // Uᵀ z = g
-        lt_solve(&self.l, m, &mut s); // Lᵀ v = z
-        for (k, &vk) in s.iter().enumerate() {
-            rhs[self.perm[k]] = vk;
+        // Restore scratch on every path; only finish + write `rhs` on success.
+        let res = ut_solve(&self.u, m, &mut s); // Uᵀ z = g
+        if res.is_ok() {
+            lt_solve(&self.l, m, &mut s); // Lᵀ v = z
+            for (k, &vk) in s.iter().enumerate() {
+                rhs[self.perm[k]] = vk;
+            }
         }
         self.scratch_a = s;
-        Ok(())
+        res
     }
 
     /// Compute the spike `L⁻¹ P a`, overwriting `rhs` (= `a`). This is `ftran`
@@ -142,25 +150,43 @@ fn lsolve(l: &[f64], m: usize, s: &mut [f64]) {
 }
 
 /// Back solve `U w = s` (upper triangular), in place.
-fn usolve(u: &[f64], m: usize, s: &mut [f64]) {
+///
+/// Errors with [`FeralError::SingularBasis`] if a diagonal is zero or
+/// non-finite: a degenerate post-update bump pivot can leave `u[k,k] == 0`,
+/// and dividing by it would otherwise emit a silent `±Inf`/`NaN`. Mirrors the
+/// sparse path (`sparse_solve.rs`). L1, dev/research/repo-review-2026-06-09.md.
+fn usolve(u: &[f64], m: usize, s: &mut [f64]) -> Result<(), FeralError> {
     for k in (0..m).rev() {
+        let d = u[k + k * m];
+        if d == 0.0 || !d.is_finite() {
+            return Err(FeralError::SingularBasis { column: k });
+        }
         let mut acc = s[k];
         for i in k + 1..m {
             acc -= u[k + i * m] * s[i];
         }
-        s[k] = acc / u[k + k * m];
+        s[k] = acc / d;
     }
+    Ok(())
 }
 
 /// Forward solve `Uᵀ z = s` (`Uᵀ` is lower triangular), in place.
-fn ut_solve(u: &[f64], m: usize, s: &mut [f64]) {
+///
+/// Errors with [`FeralError::SingularBasis`] on a zero/non-finite diagonal,
+/// for the same reason as [`usolve`].
+fn ut_solve(u: &[f64], m: usize, s: &mut [f64]) -> Result<(), FeralError> {
     for k in 0..m {
+        let d = u[k + k * m];
+        if d == 0.0 || !d.is_finite() {
+            return Err(FeralError::SingularBasis { column: k });
+        }
         let mut acc = s[k];
         for i in 0..k {
             acc -= u[i + k * m] * s[i]; // Uᵀ[k,i] = U[i,k]
         }
-        s[k] = acc / u[k + k * m];
+        s[k] = acc / d;
     }
+    Ok(())
 }
 
 /// Back solve `Lᵀ v = s` (`Lᵀ` is unit upper triangular), in place.
@@ -220,4 +246,40 @@ fn refine(
 
 fn inf_norm(v: &[f64]) -> f64 {
     v.iter().fold(0.0_f64, |acc, &x| acc.max(x.abs()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lu::LuParams;
+
+    /// L1 (dev/research/repo-review-2026-06-09.md): a zero `U` diagonal (as a
+    /// degenerate post-update bump pivot could leave) must surface as
+    /// `SingularBasis`, not a silent `±Inf` out of the dense back-solve divide.
+    /// Mirrors the sparse regression `zero_u_diagonal_errors_instead_of_inf`.
+    #[test]
+    fn dense_zero_u_diagonal_errors_instead_of_inf() {
+        let cols = vec![vec![2.0, 0.0], vec![1.0, 3.0]]; // nonsingular 2x2
+        let mut lu = DenseLu::factor(&cols, 2, LuParams::default()).expect("factor");
+
+        // Sanity: a clean solve has no NaN/Inf.
+        let mut rhs = vec![1.0, 1.0];
+        lu.ftran(&mut rhs).expect("clean ftran");
+        assert!(rhs.iter().all(|x| x.is_finite()));
+
+        // Corrupt the stored diagonal of pivot position 1 (row 1, col 1 of the
+        // column-major 2×2 `U`, index `1 + 1*2 = 3`) to an exact zero.
+        lu.u[3] = 0.0;
+
+        let mut bad = vec![1.0, 1.0];
+        assert!(matches!(
+            lu.ftran(&mut bad),
+            Err(FeralError::SingularBasis { column: 1 })
+        ));
+        let mut bad_t = vec![1.0, 1.0];
+        assert!(matches!(
+            lu.btran(&mut bad_t),
+            Err(FeralError::SingularBasis { column: 1 })
+        ));
+    }
 }

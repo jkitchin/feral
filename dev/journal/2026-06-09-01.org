@@ -48,3 +48,42 @@ Remaining high-severity findings still open: L1 (dense LU singular-basis
 guards), N1 (dead FMA opt-in), S1 (O(n²logn) default postorder). Per the
 review's triage order, L1 is the next to fix (silent Inf/NaN into simplex
 solves).
+
+** HH:MM :lu:dense:singular-basis:guard:bugfix:l1:
+Fixed L1 (repo-review-2026-06-09.md): dense LU update commits singular
+bases; dense U-solves emit Inf/NaN silently.
+
+Two fixes, mirroring the already-guarded sparse path:
+1. dense_solve.rs usolve/ut_solve now return Result and error
+   SingularBasis{column} on a zero/non-finite U diagonal (was: silent
+   division -> Inf). ftran_core/btran_core restructured to restore the
+   mem::take'n scratch_a on every path (an early ? would otherwise leave
+   scratch_a empty and panic the next solve) and write rhs only on success.
+2. dense_update.rs: after the bump-elimination loop, validate the final
+   diagonal u[m-1,m-1] against ztol before commit. The loop only checked
+   pivots q..m-2; when q==m-1 it never ran at all. Vanishing final pivot
+   -> NeedsRefactor (consistent with the in-bump check).
+
+Tests-first (both failed pre-fix, pass post-fix):
+- dense_solve::tests::dense_zero_u_diagonal_errors_instead_of_inf —
+  corrupt U[1,1]=0, assert ftran/btran -> SingularBasis{column:1}.
+  Pre-fix: ftran returned Ok with Inf.
+- dense_update::tests::update_singular_last_pivot_does_not_commit —
+  replace last slot of 2x2 identity with e_0 (q==m-1 case, new basis
+  [e_0,e_0] singular, U[1,1]=0). Pre-fix: Ok(()). Post-fix: NeedsRefactor.
+
+Regression surfaced + fixed: tests/lu_dense.rs::update_budget_returns_needs_refactor
+was relying on the bug. It updated slots 0 and 1 to the SAME new_col,
+making cols 0,1 identical -> singular intermediate basis, silently
+committed pre-fix. The fix correctly rejects the 2nd update (panic
+"update: NeedsRefactor" at the .expect). The test's real intent is the
+max_updates=2 budget tripping on the 3rd update; changed it to use two
+DISTINCT columns so the basis stays nonsingular. Not a tolerance change —
+degenerate input corrected.
+
+Evidence: cargo test full suite ALL PASS; fmt + clippy pending hook.
+Decision note: returned NeedsRefactor (not SingularBasis) from the
+update last-diagonal check to match the existing in-bump check in the
+same function. The doc comment already claims SingularBasis for a
+vanishing bump pivot while the code returns NeedsRefactor — that
+doc/code drift is finding L8, deferred to its own iteration.
