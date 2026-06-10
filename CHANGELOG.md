@@ -4,6 +4,19 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Scalability — dense-row guard in the sparse LU column ordering (L4)
+
+`SparseColMatrix::ata_pattern` built the explicit AᵀA column-intersection graph
+that the fill-reducing column ordering needs. A single dense row — common in
+LPs, where a budget or convexity constraint touches every column — is adjacent
+to every other column and made the graph complete, costing O(m²) time and
+memory in `SparseLuSymbolic::analyze` before AMD even ran. Following COLAMD,
+rows whose population exceeds `max(16, 10·√ncol)` are now excluded from the
+adjacency build; they carry no useful ordering information and the diagonal is
+always retained, so AMD still orders all columns. On matrices with no dense row
+the ordering is unchanged. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
 ### Performance — scaled LU solves and iterative refinement reuse pooled scratch buffers (L3)
 
 With scaling enabled, the scaled `ftran`/`btran` wrappers and iterative

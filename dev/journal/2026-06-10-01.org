@@ -272,3 +272,29 @@ cargo harness runs tests concurrently and atomics would race.
 
 Evidence: 334 lib tests green, dense+sparse L3 tests 2/2, clippy --all-targets
 -D warnings clean, fmt clean. Counter is #[cfg(test)] only.
+
+* 06:41 :scalability:lu:l4:ata-pattern:dense-row:colamd:fixed:
+L4 (repo-review-2026-06-09.md:425-433): SparseColMatrix::ata_pattern built the
+explicit AᵀA column-intersection graph with no dense-row guard. One dense row
+(LP budget/convexity constraint touches every column) makes every column pair
+adjacent -> complete graph -> O(m²) time + memory in SparseLuSymbolic::analyze
+before AMD runs.
+
+Fix: COLAMD-style dense-row guard. Compute threshold = max(16, ceil(10·√ncol));
+when walking column j's rows, skip any row i whose population row_cols[i].len()
+exceeds the threshold (it would connect ~all columns and carries no useful
+ordering info). The diagonal self-loop adj[j].push(j) is always kept, so every
+column still appears -> AMD still permutes all m columns and the pattern stays
+symmetric with full diagonal. Safe because ata_pattern only feeds AMD's
+fill-reducing permutation (sparse_symbolic.rs:35), a heuristic, not a
+correctness input.
+
+Reproduction: ata_pattern_dense_row_does_not_blow_up (sparse_matrix tests mod)
+builds m=256 with column j = {(0, dense-row), (j, diagonal)} so row 0 touches
+all columns. Asserts pat.row_idx.len() <= 4m. RED: 65536 == 256² (complete
+graph). GREEN: 256 (diagonal only — columns share only the dropped dense row).
+Guard-rail test ata_pattern_keeps_sparse_structure: tridiagonal m=64 has no
+dense row; interior column keeps all 5 pentadiagonal neighbours (no false drop).
+
+Evidence: 336 lib tests green (+2 new), clippy --all-targets -D warnings clean,
+fmt clean. No existing symbolic/ordering test changed.

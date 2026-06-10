@@ -208,6 +208,14 @@ impl SparseColMatrix {
                 row_cols[i].push(j);
             }
         }
+        // Dense-row guard (cf. COLAMD). A single dense row — an LP
+        // budget/convexity constraint hits every column — is adjacent to every
+        // other column and would make the AᵀA graph complete: O(m²) time and
+        // memory before AMD even runs. Such rows carry no useful ordering
+        // information, so exclude them from the adjacency build. Threshold
+        // mirrors COLAMD's default dense-row knob: max(16, 10·√ncol). On small
+        // or genuinely sparse matrices nothing is dropped.
+        let dense_threshold = 16usize.max((10.0 * (m as f64).sqrt()).ceil() as usize);
         // Adjacency sets (use a marker array to dedup per column).
         let mut adj: Vec<Vec<usize>> = vec![Vec::new(); m];
         let mut mark = vec![usize::MAX; m];
@@ -216,6 +224,9 @@ impl SparseColMatrix {
             adj[j].push(j);
             let (rows, _) = self.column(j);
             for &i in rows {
+                if row_cols[i].len() > dense_threshold {
+                    continue; // dense row: would connect (nearly) all columns
+                }
                 for &c in row_cols[i].iter() {
                     if mark[c] != j {
                         mark[c] = j;
@@ -237,5 +248,78 @@ impl SparseColMatrix {
             col_ptr,
             row_idx,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L4: a single dense row (e.g. an LP budget/convexity constraint) is
+    /// adjacent to every column, so an unguarded `ata_pattern` builds the
+    /// complete AᵀA graph — O(m²) entries. With the COLAMD-style dense-row
+    /// guard the dense row is excluded, so the pattern stays O(nnz).
+    #[test]
+    fn ata_pattern_dense_row_does_not_blow_up() {
+        let m = 256;
+        // Column j: a diagonal entry at row j plus an entry in the dense row 0.
+        // Row 0 therefore touches every column; rows 1..m touch one column each.
+        let mut cols: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
+        for j in 0..m {
+            let mut col = vec![(0usize, 1.0_f64)]; // dense-row entry
+            if j != 0 {
+                col.push((j, 2.0)); // diagonal
+            }
+            cols.push(col);
+        }
+        let a = SparseColMatrix::from_sparse_columns(m, &cols).expect("build");
+        let pat = a.ata_pattern();
+
+        // Without the guard every column pair is adjacent: row_idx.len() == m*m.
+        // With the guard, the dense row is dropped, so adjacency comes only from
+        // the diagonal self-loops: exactly one entry per column.
+        assert!(
+            pat.row_idx.len() <= 4 * m,
+            "dense row must be guarded; got {} entries (m={}, m^2={})",
+            pat.row_idx.len(),
+            m,
+            m * m
+        );
+        // Every column still appears (diagonal preserved) — pattern is a valid
+        // permutation input: col_ptr is monotone and length m+1.
+        assert_eq!(pat.col_ptr.len(), m + 1);
+        assert_eq!(pat.n, m);
+        for w in pat.col_ptr.windows(2) {
+            assert!(w[1] >= w[0]);
+        }
+        // Each column keeps at least its own diagonal.
+        for j in 0..m {
+            assert!(pat.col_ptr[j + 1] > pat.col_ptr[j], "col {} empty", j);
+        }
+    }
+
+    /// The guard must NOT drop legitimately moderate rows: a tridiagonal matrix
+    /// has no dense row, so every shared-row adjacency is preserved.
+    #[test]
+    fn ata_pattern_keeps_sparse_structure() {
+        let m = 64;
+        let mut cols: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
+        for j in 0..m {
+            let mut col = vec![(j, 2.0_f64)];
+            if j > 0 {
+                col.push((j - 1, -1.0));
+            }
+            if j + 1 < m {
+                col.push((j + 1, -1.0));
+            }
+            cols.push(col);
+        }
+        let a = SparseColMatrix::from_sparse_columns(m, &cols).expect("build");
+        let pat = a.ata_pattern();
+        // Tridiagonal AᵀA is pentadiagonal: column j is adjacent to j-2..=j+2.
+        // Interior columns therefore have 5 neighbours.
+        let interior = m / 2;
+        let deg = pat.col_ptr[interior + 1] - pat.col_ptr[interior];
+        assert_eq!(deg, 5, "interior column should keep all 5 neighbours");
     }
 }
