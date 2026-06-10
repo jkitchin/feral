@@ -590,3 +590,37 @@ Existing AMD path (MinDegree) is untouched: it never reads/writes wf, and the
 Metric trait (Score=i32) is unchanged.
 
 Next per /loop: do NOT start the next issue (O2). Schedule it.
+
+* 11:20 :kahip:data-reduction:o2:determinism:fixed:
+O2 (repo-review-2026-06-09.md): KaHIP twin reduction iterated HashMaps
+(closed_groups, open_groups in data_reduction.rs:425/466) to emit Twin ops, so
+the per-instance RandomState seed decided the op-stack order — and therefore the
+final permutation — violating the crate's determinism contract. Latent today
+(default ReduceOptions::conservative() runs Rule 1 only) but a landmine for the
+planned Rules 2-4 rollout.
+
+Reproducing test (tests-first): apply_twins_op_order_is_deterministic. 12
+disjoint triangles {3i,3i+1,3i+2}; each is a closed-twin group emitting two Twin
+ops, all groups independent so map iteration order is the only thing deciding op
+order. Build a fresh MutAdj and run apply_twins 33x; assert byte-identical ops.
+Sanity: ops.len()==2*K==24 (reduction fired). External oracle = determinism
+(same input must give same output), no impl-authored expected values.
+
+RED (current HashMap code): FAILED at line 855, two runs diverged — left started
+[Twin{rep:18,..}, Twin{rep:18,..}, Twin{rep:0,..}], right started
+[Twin{rep:30,..}, Twin{rep:30,..}, Twin{rep:0,..}]. Same multiset, different
+order — exactly the contract violation.
+
+Fix: closed_groups/open_groups HashMap -> BTreeMap (key Vec<usize> is Ord and
+already sorted), added BTreeMap to the line-28 import. Groups now visited in
+signature-sorted order, identical run-to-run. GREEN: test ok. Vetted the third
+map (line 686 `group`): safe to leave HashMap — consumed only via keyed
+group.remove(&old) in deterministic reduced_perm order, never iterated for
+output; added a comment saying so.
+
+Evidence: feral-kahip lib 62 passed (+1), clippy -p feral-kahip --all-targets
+-D warnings clean, fmt clean.
+
+O2 was the last of the 28 high+medium findings (Sections 1-3) in the PR #83
+review. Loop COMPLETE — per "When done do not start the next issue", stop here;
+no further ScheduleWakeup.

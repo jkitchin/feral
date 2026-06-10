@@ -4,6 +4,20 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — KaHIP twin reduction now produces deterministic permutations (O2)
+
+The KaHIP data-reduction twin pass (`feral-kahip`) grouped vertices by signature
+in `HashMap`s (`closed_groups`, `open_groups`) and iterated them directly to emit
+`ReductionOp::Twin` operations. Because a `HashMap` iterates in per-instance
+`RandomState`-seed order, the twin op-stack order — and therefore the final
+elimination permutation — varied run-to-run, violating the crate's documented
+determinism contract. The merge *result* was unaffected, but the *order* was
+not reproducible. Both maps are now `BTreeMap`s keyed by the (already-sorted)
+signature, so groups are visited in a stable, signature-sorted order and the
+permutation is byte-identical across runs. Latent today (the default
+`ReduceOptions::conservative()` preset runs Rule 1 only), but a correctness
+landmine for the planned Rules 2–4 rollout.
+
 ### Fixed — AMF fill-score arithmetic no longer overflows `i32` for large `n` (O1)
 
 The Approximate Minimum Fill ordering (`feral-ordering-core`) computed its
