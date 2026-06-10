@@ -3582,3 +3582,60 @@ Evidence: `src/symbolic/supernode.rs:612-627` (doc: no adjacency enforced),
 `:628-671` (predict_merges, original ncols at :648-649, size rule :658, bias
 :664-666); the real merge is `find_supernodes` on the biased postorder. No
 incorrect output. Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — L7: stale column scaling on entering columns (finding L7, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> Stale column scaling on entering columns (`dense_update.rs:55-57`,
+> `sparse_update.rs:174`): entering column scaled by `d_col[leaving_slot]`
+> computed for the old column. Algebraically consistent but equilibration quality
+> decays arbitrarily over an update chain, inflating bump multipliers (interacts
+> with L5). low/certain (mechanism) / possible (severity).
+
+### Why this is recorded here rather than fixed
+
+1. **The output is algebraically correct.** Both update paths scale the entering
+   column by the leaving slot's column factor — dense_update.rs:55-57
+   (`* self.scale.d_col[leaving_slot]`) and sparse_update.rs:195
+   (`let dcol = self.scale.d_col[leaving_slot]`). The factorization maintains
+   `P B̃ Q = L U` in the *scaled* frame, and the solve un-scales with the same
+   `d_col`, so the replacement is consistent and the computed solution is correct
+   to working precision. The finding itself classifies the mechanism as
+   "algebraically consistent."
+
+2. **The defect is numerical conditioning, not a wrong answer.** Applying the old
+   column's scale to a new column with a different natural magnitude gives poor
+   equilibration, which can inflate bump multipliers and the growth factor *over a
+   chain of updates*. Severity is "possible": within the growth budget
+   (`max_growth`, which triggers `NeedsRefactor`) the solve stays accurate; the
+   decay only costs earlier refactors.
+
+3. **Not reproducible as a clean RED test.** Demonstrating "equilibration quality
+   decays" is a conditioning study — measuring growth-factor / residual trend
+   across a long, matrix-specific update chain against an arbitrary threshold — not
+   a deterministic unit assertion. There is no single input that yields a *wrong*
+   output to assert against.
+
+4. **The fix is a scoped, L5-coupled algorithmic change.** Correcting it means
+   re-equilibrating the entering column with its *own* `d_col` (and reconciling the
+   solve's un-scaling), which changes the scaling frame mid-update and, per the
+   finding, "interacts with L5." That is research-plus-benchmark work, not a
+   surgical reproduce-first fix.
+
+### Disposition
+
+No code change and no new test. Recommended as a tracked numerical study jointly
+with L5: (a) instrument the bump-multiplier / growth-factor trend over synthetic
+update chains to quantify the decay; (b) design an entering-column
+re-equilibration (own `d_col`) with a matching solve un-scale; (c) validate
+refactor frequency and accuracy against the corpus bench. Until then the behavior
+is correct-but-suboptimally-conditioned, bounded by the `max_growth` refactor
+trigger.
+
+Evidence: `src/lu/dense_update.rs:50-58` (spike scaled by d_col[leaving_slot]),
+`src/lu/sparse_update.rs:183` (doc), `:195` (`d_col[leaving_slot]`). Output
+algebraically correct; growth bounded by `max_growth`/`NeedsRefactor`. Journal:
+dev/journal/2026-06-10-01.org.

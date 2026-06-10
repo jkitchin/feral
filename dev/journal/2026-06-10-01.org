@@ -1244,3 +1244,32 @@ S2/S3/S4/S5/S6/S8/S9/S10 deferred.
 
 Next per /loop: do NOT start the next issue (L7). Continue in-turn per the live
 "speed this up" directive.
+
+* L7 :lu:update:scaling:equilibration:l7:numerical:deferred:
+L7: both LU update paths scale the entering column by d_col[leaving_slot] — the
+LEAVING column's scale factor (dense_update.rs:55-57, sparse_update.rs:195).
+Finding: algebraically consistent but equilibration quality decays over an update
+chain, inflating bump multipliers (interacts with L5).
+
+Analysis. Output is algebraically correct — the factorization is maintained in the
+scaled frame P B̃ Q = L U and the solve un-scales with the same d_col, so the
+solution is correct to working precision (finding agrees: "algebraically
+consistent"). The defect is conditioning: the old column's scale applied to a
+new column of different magnitude gives poor equilibration, growing bump
+multipliers over a chain. Severity "possible" — within max_growth the solve stays
+accurate; decay only costs earlier refactors (max_growth → NeedsRefactor bounds
+it).
+
+Verdict: deferred citing L7. Not RED-reproducible — "decay" is a conditioning
+study (growth-factor/residual trend over a matrix-specific chain vs an arbitrary
+threshold), not a deterministic unit assertion; no input yields a wrong output.
+The fix (re-equilibrate the entering column with its own d_col + matching solve
+un-scale) is a scoped, L5-coupled algorithmic change needing a bench. Recommended:
+track jointly with L5 — instrument the multiplier/growth trend, design the
+re-equilibration, validate refactor frequency + accuracy on the corpus.
+
+Evidence: dense_update.rs:50-58; sparse_update.rs:183,195. No code change, no
+CHANGELOG. tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (L8). Continue in-turn per the live
+"speed this up" directive.
