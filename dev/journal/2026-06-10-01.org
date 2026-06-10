@@ -383,3 +383,42 @@ regression; the absolute 1e-13 was not load-bearing anywhere.
 
 Evidence: 340 lib tests green (+2 new), clippy --all-targets -D warnings clean,
 fmt clean.
+
+* 08:10 :harness:bench:x3:pivot-threshold:not-reproducible:tried-and-rejected:
+X3 (repo-review-2026-06-09.md): bench dense-KKT loop (bench.rs:1569, resample
+:1622) uses params_kkt_sparse (pivot_threshold 0.01) while the rationale block
+(:1356-1375) mandates params_kkt_dense (0.0), claiming 0.01 "zeros out structural
+pivots on HYDCAR20, METHANL8, DEGENLPA, HS118" -> depressed dense pass rates.
+
+The MISMATCH is real by inspection. The harmful CONSEQUENCE is not reproducible.
+Three escalating attempts:
+  1. 4 synthetic small indefinite matrices with tiny structural pivots: identical
+     inertia, maxL=1.0, nr=false under both params. Equilibration normalizes
+     magnitude + BK picks 2×2 pivots, so threshold never bites.
+  2. The two NAMED matrices from tests/data/parity/: HYDCAR20_0000 (n=198, oracle
+     (99,99,0), num_delay=60 — a real delayed-pivot matrix) and DEGENLPA_0065
+     (n=35, oracle (20,15,0)). Both params hit the EXACT oracle, identical maxL
+     (3.59/10.6), identical nr=false. No corruption.
+  3. Full parity sweep: all 50 ssids-oracle matrices, n≤600, both params ->
+     TOTAL=50 DIVERGE=0. Zero matrices diverge.
+
+Root cause of non-divergence: pivot_threshold is immaterial to INERTIA on the
+dense single-front path. The structural-zeroing branch in do_1x1_pivot
+(factor.rs:4521-4545) keys on |d| <= zero_tol (strict zero), NOT on
+pivot_threshold·col_max. The band (zero_tol, threshold·col_max] routes to "small
+but real — count by sign" (:4585), same inertia as the 0.0 "accept by sign"
+branch (:4594). Threshold only flips needs_refinement + pivot-selection swaps,
+neither of which changed committed inertia on any of the 50 matrices. The
+rationale's HYDCAR20 claim describes pre-equilibration / pre-issue-#54 behavior
+the current code no longer exhibits — the "comment is stale" branch of the
+finding's own disjunction is reality.
+
+Disposition: per /loop protocol (can't-reproduce -> tried-and-rejected citing
+finding ID), recorded in tried-and-rejected.md, NOT fixed. The one-line wiring
+change is a verified no-op on every matrix tested, so applying it blind (no
+discriminating test) would be speculative; deferred. The stale rationale comment
+is the real defect, left for a docs pass. No code change, no CHANGELOG entry.
+
+Evidence: synthetic (4 identical), named (HYDCAR20/DEGENLPA both match oracle
+under both params), parity sweep TOTAL=50 DIVERGE=0. Experiment via throwaway
+tests/x3_experiment.rs (removed, not committed).

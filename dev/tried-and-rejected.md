@@ -2616,3 +2616,77 @@ flag to add that guard at the same time.
 Evidence: proof above; sweep `runs=20000 total_2x2_blocks=31092 any_nan=0`;
 `do_2x2_pivot` at `src/dense/factor.rs` (`t = 1.0/(d00*d11-1.0)`), selection
 steps at `factor.rs:977-1047`. Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — X3: bench dense-KKT loop uses sparse pivot params (finding X3, repo-review-2026-06-09.md)
+
+The finding (severity medium, confidence "certain (mismatch) / likely (bug rather
+than undocumented change)") is that the dense KKT validation loop
+(`src/bin/bench.rs:1569`, plus the resample at `:1622`) calls
+`factor_single_front(&matrix, &params_kkt_sparse)` with `pivot_threshold = 0.01`,
+while the rationale block (`:1356-1375`) mandates `pivot_threshold = 0.0` for the
+dense path — "a non-zero threshold here sends rejected pivots through ForceAccept
+and zeros out structural pivots on e.g. HYDCAR20, METHANL8, DEGENLPA, HS118."
+`params_kkt_dense` (threshold 0.0) is built but only the synthetic micro-benchmarks
+use it. The claim: either dense pass rates are quietly depressed, or the comment is
+stale; both corrupt dense-vs-sparse triage.
+
+### The mismatch is real; the claimed consequence is NOT reproducible
+
+The mismatch itself is real by inspection (the dense loop reads `params_kkt_sparse`,
+contradicting its own rationale). But the *harmful consequence* — that threshold
+0.01 corrupts inertia / depresses pass rates on the dense single-front path — could
+not be reproduced on any available matrix, including the two the rationale names by
+name.
+
+Reproduction attempt 1 (synthetic): four small symmetric indefinite matrices with
+deliberately small structural pivots (`3x3_small_diag`, `3x3_tiny`, `4x4_kkt`,
+`2x2_indef`) factored under both param sets. Result: identical inertia, identical
+`max|L| = 1.0`, identical `needs_refinement = false` on all four. Equilibration
+(`factor_single_front` applies `equilibrate_scaling` first) normalizes magnitude,
+and BK selects 2×2 pivots for small-diagonal cases, so `pivot_threshold` never bites.
+
+Reproduction attempt 2 (named real matrices): HYDCAR20_0000 (n=198, SSIDS oracle
+inertia (99,99,0), `num_delay=60` — a genuine delayed-pivot matrix) and DEGENLPA_0065
+(n=35, oracle (20,15,0)) from `tests/data/parity/`. Both param sets give the EXACT
+oracle inertia (99,99,0) and (20,15,0) respectively, with identical `max|L|`
+(3.59 / 10.6) and identical `needs_refinement = false`. No corruption, no depressed
+pass rate.
+
+Reproduction attempt 3 (full parity sweep): all 50 parity matrices with SSIDS
+oracles and `n <= 600` factored under both `params_kkt_dense` (0.0) and
+`params_kkt_sparse` (0.01). Result: `TOTAL=50 DIVERGE=0`. Zero matrices produce
+different inertia between the two thresholds on the dense single-front path.
+
+### Root cause of the non-divergence
+
+`pivot_threshold` is immaterial to *inertia* on the dense single-front path because
+the structural-pivot-zeroing branch in `do_1x1_pivot` (`factor.rs:4521-4545`) keys on
+`|d| <= zero_tol` (strict zero), NOT on `pivot_threshold * col_max`. The band
+`zero_tol < |d| <= pivot_threshold·col_max` routes to "small but real — count by
+sign" (`:4585-4592`), which produces the same inertia as the threshold-0.0 "accept by
+sign" branch (`:4594-4600`). The threshold only flips `needs_refinement` and pivot
+*selection* swaps; on the equilibrated corpus neither changed the committed inertia
+on any of the 50 matrices. The rationale's "zeros out structural pivots on HYDCAR20"
+describes behavior that the current code (post-equilibration, post-issue-#54
+inertia-bucketing) no longer exhibits — i.e. the "comment is stale" branch of the
+finding's own disjunction is the reality.
+
+### Disposition
+
+No fix and no reproducing test. Per the /loop protocol ("anything that can't be
+reproduced goes to tried-and-rejected citing the finding ID"), X3 is recorded here
+rather than fixed: the behavioral consequence the finding asserts does not occur on
+any available matrix, so there is no failing test to drive a fix, and changing the
+harness wiring blind — with no observable difference to validate against — would be
+speculative. The one-line wiring change (`params_kkt_sparse` → `params_kkt_dense` at
+`:1569`/`:1622`) is harmless and would align code with comment, but it is a no-op on
+every matrix tested, so it is deferred rather than applied without a discriminating
+test. The stale rationale comment is the real defect; left for a documentation pass.
+If a future BK pivot-selection change ever makes the two thresholds diverge on the
+dense path, this entry is the flag to revisit both the wiring and the comment.
+
+Evidence: synthetic sweep (4 matrices, all identical); named-matrix check
+(HYDCAR20 (99,99,0), DEGENLPA (20,15,0) — both match oracle under both params); full
+parity sweep `TOTAL=50 DIVERGE=0`; `do_1x1_pivot` band logic at
+`src/dense/factor.rs:4513-4600`; bench mismatch at `src/bin/bench.rs:1569,1622` vs
+rationale `:1356-1375`. Journal: dev/journal/2026-06-10-01.org.
