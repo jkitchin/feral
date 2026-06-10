@@ -28,6 +28,11 @@ pub const FERAL_FATAL: i32 = 3;
 pub struct FeralSolver {
     solver: Solver,
     matrix: Option<CscMatrix>,
+    /// Negative-eigenvalue count of the *current* valid factor, or `-1` when
+    /// no valid factor exists (fresh handle, after `feral_set_structure`, or
+    /// after a `feral_factor` that returned `FERAL_SINGULAR`/`FERAL_FATAL`).
+    /// The sentinel keeps a failed re-factor from leaking the previous
+    /// matrix's inertia through `feral_num_neg` (X1).
     neg_evals: i32,
 }
 
@@ -141,7 +146,8 @@ pub extern "C" fn feral_new() -> *mut FeralSolver {
         Box::into_raw(Box::new(FeralSolver {
             solver,
             matrix: None,
-            neg_evals: 0,
+            // -1 = no valid factor yet (X1).
+            neg_evals: -1,
         }))
     })
     .unwrap_or(std::ptr::null_mut())
@@ -232,7 +238,8 @@ pub unsafe extern "C" fn feral_set_structure(
         }
 
         s.matrix = Some(matrix);
-        s.neg_evals = 0;
+        // New structure invalidates any prior factor's inertia (X1).
+        s.neg_evals = -1;
         FERAL_SUCCESS
     }))
     .unwrap_or(FERAL_FATAL)
@@ -345,7 +352,12 @@ pub unsafe extern "C" fn feral_factor(
                     FERAL_SUCCESS
                 }
             }
-            FactorStatus::Singular => FERAL_SINGULAR,
+            FactorStatus::Singular => {
+                // No valid inertia — invalidate so feral_num_neg cannot leak
+                // the previous factor's count on a failed re-factor (X1).
+                s.neg_evals = -1;
+                FERAL_SINGULAR
+            }
             FactorStatus::WrongInertia { actual, .. } => {
                 // Solver::factor returns WrongInertia only when we
                 // pass check_inertia=Some, which we don't above.
@@ -354,7 +366,11 @@ pub unsafe extern "C" fn feral_factor(
                 s.neg_evals = actual.negative as i32;
                 FERAL_WRONG_INERTIA
             }
-            FactorStatus::FatalError(_) => FERAL_FATAL,
+            FactorStatus::FatalError(_) => {
+                // No valid inertia — invalidate (see Singular branch, X1).
+                s.neg_evals = -1;
+                FERAL_FATAL
+            }
         }
     }))
     .unwrap_or(FERAL_FATAL)
@@ -418,8 +434,11 @@ pub unsafe extern "C" fn feral_solve(s: *mut FeralSolver, nrhs: i32, rhs: *mut f
     .unwrap_or(FERAL_FATAL)
 }
 
-/// Number of negative eigenvalues of the most recently factored
-/// matrix. Returns -1 if no factor is available.
+/// Number of negative eigenvalues of the current valid factor. Returns -1
+/// when no valid factor is available: a fresh handle, after a structure
+/// change, or after a `feral_factor` that returned `FERAL_SINGULAR` or
+/// `FERAL_FATAL` (so a failed re-factor never leaks the previous matrix's
+/// count, X1).
 ///
 /// # Safety
 /// `s` must come from `feral_new`.
@@ -558,6 +577,74 @@ mod tests {
             assert!((rhs[0] - 1.0).abs() < 1e-12, "x0 = {}", rhs[0]);
             assert!((rhs[1] - 1.0).abs() < 1e-12, "x1 = {}", rhs[1]);
 
+            feral_free(s);
+        }
+    }
+
+    /// X1 (dev/research/repo-review-2026-06-09.md): the documented contract is
+    /// "Returns -1 if no factor is available." `neg_evals` initialized to 0, so
+    /// a fresh handle reported 0 (a plausible "no negative eigenvalues") instead
+    /// of the -1 sentinel — an IPM host cannot distinguish "not factored yet"
+    /// from "definite matrix."
+    #[test]
+    fn num_neg_is_minus_one_before_any_factor() {
+        unsafe {
+            let s = feral_new();
+            assert!(!s.is_null());
+            assert_eq!(
+                feral_num_neg(s),
+                -1,
+                "a fresh solver has no factor; must report the -1 sentinel, not 0 (X1)"
+            );
+            feral_free(s);
+        }
+    }
+
+    /// X1: after a *failed* re-factor (`FERAL_FATAL`/`FERAL_SINGULAR`) the stale
+    /// negative-eigenvalue count from the previous successful factor must not
+    /// leak through `feral_num_neg`. An IPM host re-factors the same structure
+    /// with new values every iteration; a silent stale count is a
+    /// plausible-but-wrong inertia signal. Oracle: the first matrix
+    /// `[[1,2],[2,1]]` (eigenvalues 3, -1) has exactly one negative eigenvalue;
+    /// the re-factor injects a non-finite value (a NaN, as a diverging upstream
+    /// iterate would), which `factor()` rejects as `FERAL_FATAL` — so there is
+    /// no valid inertia and the contract value is the -1 sentinel. Pre-fix
+    /// `feral_num_neg` still returned the previous matrix's count (1).
+    #[test]
+    fn num_neg_invalidated_after_failed_refactor() {
+        unsafe {
+            let s = feral_new();
+            assert!(!s.is_null());
+            let ia: [i32; 3] = [0, 2, 3];
+            let ja: [i32; 3] = [0, 1, 1];
+            assert_eq!(
+                feral_set_structure(s, 2, 3, ia.as_ptr(), ja.as_ptr()),
+                FERAL_SUCCESS
+            );
+
+            // First factor: indefinite [[1,2],[2,1]] => one negative eigenvalue.
+            let vp = feral_values_ptr(s);
+            assert!(!vp.is_null());
+            std::ptr::copy_nonoverlapping([1.0_f64, 2.0, 1.0].as_ptr(), vp, 3);
+            assert_eq!(feral_factor(s, 0, 0), FERAL_SUCCESS);
+            assert_eq!(feral_num_neg(s), 1);
+
+            // Re-factor the SAME structure with a non-finite value — no
+            // set_structure, exactly as an IPM host re-factors each iteration.
+            // factor() rejects the NaN as FERAL_FATAL.
+            let vp = feral_values_ptr(s);
+            std::ptr::copy_nonoverlapping([f64::NAN, 2.0, 1.0].as_ptr(), vp, 3);
+            let status = feral_factor(s, 0, 0);
+            assert_eq!(
+                status, FERAL_FATAL,
+                "a non-finite value must make the re-factor fail fatally"
+            );
+            assert_eq!(
+                feral_num_neg(s),
+                -1,
+                "a failed re-factor must invalidate the stale count, not report \
+                 the previous matrix's inertia (X1)"
+            );
             feral_free(s);
         }
     }

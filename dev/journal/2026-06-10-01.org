@@ -489,3 +489,24 @@ diagonal preference there. Reconciled the docs instead: LuParams::pivot_threshol
 doc now scopes the knob to the initial factorization and states the bump uses
 strict pivoting; added a comment at the bump site. (Project value: correctness
 before performance.)
+
+* 09:40 :capi:inertia:x1:fixed:
+X1 (repo-review-2026-06-09.md): feral_num_neg returned a stale/wrong inertia.
+neg_evals was initialized to 0, reset to 0 on feral_set_structure, and never
+touched on FERAL_SINGULAR/FERAL_FATAL — so (a) a fresh handle reported 0 (looks
+like "definite"), never the documented -1; and (b) after a failed re-factor it
+silently reported the PREVIOUS matrix's count.
+Reproduction: two C-ABI tests. (a) num_neg_is_minus_one_before_any_factor —
+fresh handle returned 0, want -1 (RED). (b) num_neg_invalidated_after_failed_refactor
+— factor [[1,2],[2,1]] (neg=1), then re-factor the SAME structure with a NaN value
+(no set_structure, as an IPM host does); factor() rejects the non-finite value as
+FERAL_FATAL, yet feral_num_neg still returned the stale 1, want -1 (RED).
+Probe: a structurally-full singular 2x2 ([[1,0],[0,0]], [[1,2],[2,4]], all-zero)
+all map to FactorStatus::Success (zero pivots counted as zero inertia, not failed)
+— so the original singular-matrix test design could not produce a non-Success
+status. A non-finite value is the reliable, realistic failure trigger:
+FactorStatus::FatalError(InvalidInput("... non-finite (NaN) ...")) -> FERAL_FATAL.
+Fix: -1 sentinel for "no valid factor" at init (capi.rs), on set_structure, and in
+the Singular and FatalError branches of feral_factor. Field + feral_num_neg docs
+updated to state the sentinel covers fresh/structure-change/failed-refactor. Both
+tests GREEN; full lib suite 344 passed; clippy -D warnings clean; fmt clean.

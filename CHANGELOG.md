@@ -4,6 +4,21 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `feral_num_neg` no longer reports a stale or wrong inertia (X1)
+
+The C-ABI negative-eigenvalue accessor (`feral_num_neg`) could return a
+plausible-but-wrong inertia. The backing count was initialized to `0`, reset to
+`0` on `feral_set_structure`, and never invalidated when `feral_factor` returned
+`FERAL_SINGULAR` or `FERAL_FATAL`. So a fresh handle reported `0` (indistinguishable
+from a genuinely definite matrix) instead of the documented `-1` sentinel, and —
+more dangerously — after a failed re-factor on the same structure (as an IPM host
+does every iteration, e.g. when a diverging iterate produces a non-finite Hessian
+entry) it silently reported the *previous* matrix's negative-eigenvalue count. The
+count is now `-1` ("no valid factor") on a fresh handle, after a structure change,
+and after any `FERAL_SINGULAR`/`FERAL_FATAL` factor; it is only set to a real count
+on a successful factor. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
 ### Numerics — the sparse LU now honors `pivot_threshold` (L2)
 
 The sparse unsymmetric LU path (`src/lu/sparse_factor.rs`) computed the
