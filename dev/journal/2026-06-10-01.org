@@ -1453,3 +1453,30 @@ perturbation matches the dense path (L13)".
 
 Next per /loop: do NOT start the next issue (X8). Continue in-turn per the live
 "speed this up" directive.
+
+* 19:12 :x8:capi:doc-drift:ipopt:tried-and-rejected:
+X8 (repo-review §X8, low/likely): capi.rs:13-14 claimed FERAL_* status
+codes "mirror Ipopt's ESymSolverStatus"; FERAL_FATAL=3 collides with
+SYMSOLVER_CALL_AGAIN (Ipopt value 3), while Ipopt's fatal is value 4.
+Review's risk: "a numerically pass-through shim would turn fatal errors
+into call-again loops."
+
+Investigated the shim: feral-ipopt-shim/src/IpFeralSolverInterface.cpp:11-15
+translates EXPLICITLY (case FERAL_FATAL/default: return SYMSOLVER_FATAL_ERROR),
+not a pass-through cast. Header IpFeralSolverInterface.hpp:11 documents intent
+("no SYMSOLVER_CALL_AGAIN"). So the hypothesized call-again loop CANNOT occur in
+the real integration — it is conditioned on a pass-through shim that does not exist.
+
+Non-reproducible as a failing Rust test: the FERAL C ABI is a self-consistent
+4-value contract (pinning the values = characterization, forbidden as a RED
+oracle); the only place the values meet Ipopt's enum is the C++ shim (correct,
+and outside the Rust harness). The actionable core is the inaccurate comment.
+Corrected capi.rs:13-14 to state precisely that codes 0-2 share Ipopt values,
+FERAL has no CALL_AGAIN, FERAL_FATAL reuses value 3, and the shim MUST translate
+(not cast) it to SYMSOLVER_FATAL_ERROR.
+
+Disposition: doc-only fix + tried-and-rejected entry citing X8 (behavioral risk
+non-reproducible). Not user-visible (internal doc) -> no CHANGELOG. Evidence:
+capi.rs:13-14,22-25; IpFeralSolverInterface.cpp:11-15; IpSymLinearSolver.hpp:19-33.
+Next per /loop: do NOT start the next issue (X9). Continue in-turn per the live
+'speed this up' directive.

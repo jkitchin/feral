@@ -10,8 +10,18 @@
 //! shim hands us Ipopt's `ia`/`ja` arrays unchanged. See
 //! `dev/research/feral-ipopt-c-shim.md` §"Matrix format".
 //!
-//! Status codes mirror Ipopt's `ESymSolverStatus` enum at
-//! `ref/Ipopt/src/Algorithm/LinearSolvers/IpSymLinearSolver.hpp:19-33`.
+//! Status codes are NOT a numeric mirror of Ipopt's `ESymSolverStatus`
+//! enum (`ref/Ipopt/src/Algorithm/LinearSolvers/IpSymLinearSolver.hpp:19-33`).
+//! Only codes 0-2 share Ipopt's values — `SYMSOLVER_SUCCESS`,
+//! `SYMSOLVER_SINGULAR`, `SYMSOLVER_WRONG_INERTIA`. FERAL has no
+//! `CALL_AGAIN` analog (Ipopt's enum value 3), so `FERAL_FATAL` reuses
+//! value 3 and collides with `SYMSOLVER_CALL_AGAIN` — Ipopt's own fatal
+//! code is `SYMSOLVER_FATAL_ERROR` (value 4). The shim MUST therefore
+//! translate `FERAL_FATAL`, not cast it: `feral-ipopt-shim/src/
+//! IpFeralSolverInterface.cpp:11-15` maps `FERAL_FATAL` →
+//! `SYMSOLVER_FATAL_ERROR` explicitly. A pass-through cast would
+//! mis-report fatal errors as call-again and loop. See X8 in
+//! `dev/research/repo-review-2026-06-09.md`.
 
 use crate::numeric::factorize::NumericParams;
 use crate::scaling::ScalingStrategy;

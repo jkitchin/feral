@@ -3765,3 +3765,56 @@ Evidence: `src/lu/sparse_factor.rs:236,318,350-352,537`;
 `src/lu/sparse_update.rs:340,346,429`; `src/lu/dense_update.rs:75-77`. Output
 unaffected; reproduction vehicle is allocation count (L3 pattern), not a
 correctness assertion. Journal: dev/journal/2026-06-10-01.org.
+
+## X8 — C-ABI status-code "mirror" comment (capi.rs:13-14): non-reproducible behavioral risk; doc corrected (2026-06-10)
+
+**Finding (repo-review-2026-06-09.md §X8, low/likely):** the comment at
+`src/capi.rs:13-14` claims the `FERAL_*` status codes "mirror Ipopt's
+`ESymSolverStatus` enum," but `FERAL_FATAL = 3` collides with Ipopt's
+`SYMSOLVER_CALL_AGAIN` (also enum value 3); Ipopt's fatal code is
+`SYMSOLVER_FATAL_ERROR = 4`. The review's stated risk: "a numerically
+pass-through shim would turn fatal errors into call-again loops."
+
+### Why the behavioral risk is non-reproducible
+
+The shim does **not** pass the integer through. `feral-ipopt-shim/src/
+IpFeralSolverInterface.cpp:11-15` translates explicitly:
+
+    case FERAL_SUCCESS:        return SYMSOLVER_SUCCESS;
+    case FERAL_SINGULAR:       return SYMSOLVER_SINGULAR;
+    case FERAL_WRONG_INERTIA:  return SYMSOLVER_WRONG_INERTIA;
+    case FERAL_FATAL:
+    default:                   return SYMSOLVER_FATAL_ERROR;
+
+`FERAL_FATAL` maps to `SYMSOLVER_FATAL_ERROR` (the correct enum value 4),
+not to value 3. The shim header even documents the intent
+(`include/IpFeralSolverInterface.hpp:11`: "no SYMSOLVER_CALL_AGAIN").
+So the "call-again loop" the review hypothesizes ("*would* turn …")
+cannot occur in the real integration — it is conditioned on a
+pass-through shim that does not exist.
+
+There is therefore no input that produces a wrong status at any FERAL or
+shim boundary for a RED test to assert against:
+- The FERAL C ABI is a self-consistent four-value contract
+  (`FERAL_SUCCESS=0, FERAL_SINGULAR=1, FERAL_WRONG_INERTIA=2,
+  FERAL_FATAL=3`). Asserting those values in a Rust test would pin the
+  implementation against itself (characterization), not reproduce a bug.
+- The only place the values meet Ipopt's enum is the C++ shim, which is
+  correct (translates, not casts) and outside the Rust test harness.
+
+### Disposition
+
+The actionable core of X8 is the inaccurate comment, not a code defect.
+Corrected `src/capi.rs:13-14` in the same change to state precisely:
+codes 0-2 share Ipopt's `SUCCESS/SINGULAR/WRONG_INERTIA` values; FERAL
+has no `CALL_AGAIN` analog (Ipopt value 3), so `FERAL_FATAL` reuses value
+3 and the shim must **translate** it to `SYMSOLVER_FATAL_ERROR` (value 4)
+— it is not a numeric pass-through. No failing test exists or is added,
+per the non-reproducibility above. Not user-visible behavior (internal
+doc comment) → no CHANGELOG entry.
+
+Evidence: `src/capi.rs:13-14,22-25`;
+`feral-ipopt-shim/src/IpFeralSolverInterface.cpp:11-15`;
+`feral-ipopt-shim/include/IpFeralSolverInterface.hpp:11`;
+`ref/Ipopt/src/Algorithm/LinearSolvers/IpSymLinearSolver.hpp:19-33`.
+Journal: dev/journal/2026-06-10-01.org.
