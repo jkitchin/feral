@@ -70,12 +70,44 @@ pub fn solve_sparse(factors: &SparseFactors, rhs: &[f64]) -> Result<Vec<f64>, Fe
     Ok(x)
 }
 
+// N5 (`dev/research/repo-review-2026-06-09.md`) reproducing-test
+// instrumentation: counts `SolveWorkspace` constructions so a white-box
+// test can prove the condition estimator pools one workspace across its
+// internal solves instead of building a fresh one per `solve_sparse`
+// call. `#[cfg(test)]` only — zero production footprint.
+//
+// Thread-local, not a global atomic: the cargo test harness runs tests
+// concurrently and several `condition` tests call the estimator, so a
+// shared counter would race. The estimator's internal solves all run on
+// the calling thread, so a per-thread counter measures exactly its own
+// workspace builds regardless of what other test threads are doing.
+#[cfg(test)]
+thread_local! {
+    pub(super) static SOLVE_WORKSPACE_BUILDS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// N5: reset the current thread's `SolveWorkspace`-construction counter
+/// before a measured region. Test-only.
+#[cfg(test)]
+pub(super) fn reset_solve_workspace_builds() {
+    SOLVE_WORKSPACE_BUILDS.with(|c| c.set(0));
+}
+
+/// N5: read the current thread's `SolveWorkspace`-construction counter.
+/// Test-only.
+#[cfg(test)]
+pub(super) fn solve_workspace_builds() -> usize {
+    SOLVE_WORKSPACE_BUILDS.with(|c| c.get())
+}
+
 /// Workspace holding the per-call scratch buffers used by the sparse
 /// solve. Allowing the caller to own this lets us amortize the
 /// allocations across many solves — see `solve_sparse_refined`, which
 /// performs up to 11 solves per call (1 initial + 10 refinement steps)
-/// against the same factors.
-struct SolveWorkspace {
+/// against the same factors, and `estimate_inverse_norm_1` (N5), which
+/// pools one across its ~11 internal Hager-iteration solves.
+pub(super) struct SolveWorkspace {
     /// Permuted RHS / working solution vector, length `n`.
     y: Vec<f64>,
     /// Per-supernode gather/scatter buffer, length `max_nrow`.
@@ -86,7 +118,9 @@ struct SolveWorkspace {
 }
 
 impl SolveWorkspace {
-    fn for_factors(factors: &SparseFactors) -> Self {
+    pub(super) fn for_factors(factors: &SparseFactors) -> Self {
+        #[cfg(test)]
+        SOLVE_WORKSPACE_BUILDS.with(|c| c.set(c.get() + 1));
         let n = factors.n;
         let max_nrow = factors
             .node_factors
@@ -107,7 +141,7 @@ impl SolveWorkspace {
     }
 }
 
-fn solve_sparse_into_ws(
+pub(super) fn solve_sparse_into_ws(
     factors: &SparseFactors,
     rhs: &[f64],
     x_out: &mut [f64],

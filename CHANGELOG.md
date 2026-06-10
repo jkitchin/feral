@@ -4,6 +4,21 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — condition-number estimator pools one solve workspace across its internal solves (N5)
+
+`estimate_inverse_norm_1` (the Hager–Higham 1-norm condition estimator) runs up
+to `2·MAX_ITER + 1` solves against the stored factor. Each went through
+`solve_sparse`, which allocates a fresh `SolveWorkspace` (three vectors) plus a
+result vector per call — so a single `estimate_condition_1norm` paid that
+allocation ~11×. The estimator now builds one `SolveWorkspace` and one output
+buffer up front and reuses them across every internal solve via
+`solve_sparse_into_ws`. The arithmetic is bit-identical (the existing diagonal
+and Hilbert condition-number oracles are unchanged). This addresses the
+condition-estimator facet of N5; the parallel-driver per-thread
+`FactorWorkspace` allocation and the warm-permute structure clone that N5 also
+cites are not yet addressed. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
 ### Fixed — MC64 scaling retry on a genuinely singular pattern is no longer re-paid every `factor()` (N4)
 
 The issue-#65 inertia-guided MC64 scaling retry had no "tried and not adopted"

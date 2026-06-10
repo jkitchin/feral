@@ -179,3 +179,42 @@ per-pattern latch. Cleared on pattern change.
 Evidence: n4 1/1, issue65_mc64_fallback 3/0 (adoption path intact —
 sawpath still rescues, twirism1 still no spurious fire), lib 330/0. clippy
 -D warnings clean, fmt clean.
+
+** 04:33 :N5:condition:solve-workspace:allocation:perf:fixed:partial:
+N5 (repo-review-2026-06-09.md): per-call allocation churn on factor + solve
+paths. Three cited sub-sites: (a) parallel driver builds num_threads+1 fresh
+FactorWorkspaces per factor (factorize.rs:2930-2942); (b) the condition
+estimator's solves each allocate a fresh SolveWorkspace + result vec
+(solve.rs solve_sparse, compounded ~11x by estimate_inverse_norm_1); (c) warm
+permute path clones col_ptr+row_idx every warm factor (factorize.rs:3482).
+
+This iteration fixes facet (b) — the cleanest, lowest-risk, fully-local one.
+estimate_inverse_norm_1 (condition.rs) ran up to 2*MAX_ITER+1 solves, each via
+solve_sparse which builds a SolveWorkspace (three vecs: y, w, scaled_rhs) plus
+a result vec. Now it builds ONE SolveWorkspace + one output buffer `sol` + one
+`xi` buffer and reuses them across every internal solve via the (newly
+pub(super)) solve_sparse_into_ws. Reuse is safe: solve_sparse_core_into fully
+overwrites its output (x_out at :314-316, y at :178-180) and gathers w per
+node before use; and `sol` (the "y" output) is fully consumed into `xi` before
+the "z" solve overwrites it. Math is bit-identical (existing
+condition_diagonal_spectrum / hilbert_n4 / hilbert_n6 correctness tests pass
+unchanged).
+
+Reproduction: added a #[cfg(test)] THREAD-LOCAL counter SOLVE_WORKSPACE_BUILDS
+incremented in SolveWorkspace::for_factors (thread-local, not a global atomic —
+the cargo harness runs the condition tests concurrently and a shared atomic
+raced: first GREEN attempt read 5 because sibling tests' solves leaked into the
+count). White-box test estimate_pools_one_solve_workspace_across_internal_solves
+(condition.rs tests mod) factors diag([1,2,4,8]), resets the counter, runs the
+estimator, asserts builds == 1. RED pre-fix: 5 (one per solve_sparse). GREEN
+post-fix: 1. The estimator runs all solves on the calling thread (no rayon), so
+the thread-local count is exactly its own.
+
+Deferred facets (a) and (c): the parallel-driver FactorWorkspace pooling and
+the warm-permute structure cache are cross-call-state changes on the Solver
+with stale-data risk; not addressed here. Same scoping discipline as the N3
+profiler facet.
+
+Evidence: condition 9/0 (incl. the 3 correctness oracles unchanged), lib
+331/0, clippy -D warnings clean, fmt clean. Counter is #[cfg(test)] only — zero
+production footprint.

@@ -19,7 +19,7 @@
 //! - LAPACK auxiliary routine DLACON.
 
 use super::factorize::SparseFactors;
-use super::solve::solve_sparse;
+use super::solve::{solve_sparse_into_ws, SolveWorkspace};
 use crate::error::FeralError;
 use crate::sparse::csc::CscMatrix;
 
@@ -64,6 +64,19 @@ pub fn estimate_inverse_norm_1(factors: &SparseFactors) -> Result<f64, FeralErro
         return Ok(0.0);
     }
 
+    // N5 (`dev/research/repo-review-2026-06-09.md`): pool one solve
+    // workspace and one output buffer across the up-to 2·MAX_ITER + 1
+    // internal solves. `solve_sparse` allocates a fresh `SolveWorkspace`
+    // (three vecs) plus a result vec per call, and this estimator calls it
+    // ~11× — the cited allocation churn. Reuse is safe: `solve_sparse_into_ws`
+    // fully overwrites both its output (`sol`) and its scratch on every call
+    // (see solve.rs), and `sol` (the "y" output) is fully consumed into `xi`
+    // before it is overwritten by the "z" solve. The arithmetic is
+    // bit-identical to the old per-call `solve_sparse`.
+    let mut ws = SolveWorkspace::for_factors(factors);
+    let mut sol = vec![0.0f64; n];
+    let mut xi = vec![0.0f64; n];
+
     // x_0 = (1/n, ..., 1/n)
     let mut x = vec![1.0 / (n as f64); n];
     let mut est_old = 0.0f64;
@@ -73,9 +86,9 @@ pub fn estimate_inverse_norm_1(factors: &SparseFactors) -> Result<f64, FeralErro
     let mut prev_j: Option<usize> = None;
 
     for _iter in 0..MAX_ITER {
-        // y = A^{-1} x
-        let y = solve_sparse(factors, &x)?;
-        est = y.iter().map(|v| v.abs()).sum();
+        // y = A^{-1} x  (written into `sol`)
+        solve_sparse_into_ws(factors, &x, &mut sol, &mut ws)?;
+        est = sol.iter().map(|v| v.abs()).sum();
 
         // Termination: estimate stopped growing.
         if _iter > 0 && est <= est_old {
@@ -84,18 +97,18 @@ pub fn estimate_inverse_norm_1(factors: &SparseFactors) -> Result<f64, FeralErro
         }
 
         // xi = sign(y), with sign(0) = +1 (LAPACK convention).
-        let xi: Vec<f64> = y
-            .iter()
-            .map(|&v| if v >= 0.0 { 1.0 } else { -1.0 })
-            .collect();
+        for (slot, &v) in xi.iter_mut().zip(sol.iter()) {
+            *slot = if v >= 0.0 { 1.0 } else { -1.0 };
+        }
 
-        // z = A^{-T} xi = A^{-1} xi (symmetry).
-        let z = solve_sparse(factors, &xi)?;
+        // z = A^{-T} xi = A^{-1} xi (symmetry), reusing `sol` — the "y"
+        // values are already folded into `xi` above, so overwriting is safe.
+        solve_sparse_into_ws(factors, &xi, &mut sol, &mut ws)?;
 
         // Termination: ||z||_inf <= z . x  =>  current estimate is
         // a local maximum on the cube {x: ||x||_1 <= 1}.
-        let zx: f64 = z.iter().zip(x.iter()).map(|(zi, xi)| zi * xi).sum();
-        let z_inf = z.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
+        let zx: f64 = sol.iter().zip(x.iter()).map(|(zi, xv)| zi * xv).sum();
+        let z_inf = sol.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
         if z_inf <= zx {
             break;
         }
@@ -103,7 +116,7 @@ pub fn estimate_inverse_norm_1(factors: &SparseFactors) -> Result<f64, FeralErro
         // x = e_j with j = argmax |z_i|.
         let mut j = 0usize;
         let mut zmax = 0.0f64;
-        for (i, &zi) in z.iter().enumerate() {
+        for (i, &zi) in sol.iter().enumerate() {
             let zabs = zi.abs();
             if zabs > zmax {
                 zmax = zabs;
@@ -138,8 +151,8 @@ pub fn estimate_inverse_norm_1(factors: &SparseFactors) -> Result<f64, FeralErro
             *slot = sign * mag;
         }
     }
-    let yb = solve_sparse(factors, &b)?;
-    let yb_l1: f64 = yb.iter().map(|v| v.abs()).sum();
+    solve_sparse_into_ws(factors, &b, &mut sol, &mut ws)?;
+    let yb_l1: f64 = sol.iter().map(|v| v.abs()).sum();
     let refined = 2.0 * yb_l1 / (3.0 * n as f64);
     if refined > est {
         est = refined;
@@ -195,6 +208,47 @@ mod tests {
         let rows: Vec<usize> = (0..n).collect();
         let cols: Vec<usize> = (0..n).collect();
         CscMatrix::from_triplets(n, &rows, &cols, values).unwrap()
+    }
+
+    /// N5 (`dev/research/repo-review-2026-06-09.md`): `estimate_inverse_norm_1`
+    /// drives up to 2·MAX_ITER + 1 internal solves. Pre-fix each went
+    /// through `solve_sparse`, which constructs a fresh `SolveWorkspace`
+    /// (three vecs) plus a result vec on every call — the cited ~11×
+    /// allocation churn. The fix pools one workspace and one output buffer
+    /// across all the internal solves.
+    ///
+    /// `SOLVE_WORKSPACE_BUILDS` counts `SolveWorkspace` constructions
+    /// (`#[cfg(test)]` only).
+    ///   * Pre-fix: one build per internal `solve_sparse` (≥ 3 here) — RED.
+    ///   * Post-fix: exactly one build, reused across every solve — GREEN.
+    #[test]
+    fn estimate_pools_one_solve_workspace_across_internal_solves() {
+        use crate::numeric::solve::{reset_solve_workspace_builds, solve_workspace_builds};
+
+        // A non-trivial diagonal spectrum: the Hager iteration runs its
+        // initial solve, at least one sign-vector solve, and the Higham
+        // refinement solve, so the pre-fix path constructs several
+        // workspaces. Math is unaffected by the pooling.
+        let m = diag(&[1.0, 2.0, 4.0, 8.0]);
+        let f = factor(&m);
+
+        reset_solve_workspace_builds();
+        let est = estimate_inverse_norm_1(&f).expect("estimate");
+        let builds = solve_workspace_builds();
+
+        // Sanity: the estimate is still finite and positive (the pooling
+        // must not change the result).
+        assert!(
+            est.is_finite() && est > 0.0,
+            "estimate must stay valid: {est}"
+        );
+
+        assert_eq!(
+            builds, 1,
+            "N5: estimate_inverse_norm_1 must construct exactly ONE \
+             SolveWorkspace and reuse it across all internal solves; pre-fix \
+             it built one per solve_sparse call ({builds} here)",
+        );
     }
 
     #[test]
