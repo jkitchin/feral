@@ -1086,3 +1086,26 @@ CHANGELOG. tried-and-rejected.md updated.
 
 Next per /loop: do NOT start the next issue (S5). Continue in-turn per the live
 "speed this up" directive.
+
+* S5 :symbolic:column-counts:s5:complexity:doc-drift:deferred:
+S5: reference column_counts (column_counts.rs:56-65) is O(n³)-class (contains +
+sort/dedup per eliminated column) but mod.rs:855 documents it "O(n²) elimination
+simulation"; it is pub and "burdens tests."
+
+Analysis. Output is correct — it is the bit-exact oracle for the production GNP
+path (verified 169585 matrices, mod.rs:857). The propagation loop (:55-65) does a
+linear contains() per propagated row plus a full sort_unstable+dedup per column,
+which is O(n³)-class on dense-ish patterns, contradicting the O(n²) doc claim.
+Neither the cost nor the doc claim is RED-testable (asymptotics need flaky timing
+or an impl-exposed counter = impl-as-own-oracle).
+
+Verdict: deferred citing S5. Same class as N10 (doc drift) and S2 (perf-only).
+Recommended doc-truth + hygiene fix: correct mod.rs:855 to "O(n³)-class", and
+demote column_counts to pub(crate) since production uses column_counts_gnp
+everywhere (mod.rs:860).
+
+Evidence: column_counts.rs:55-65,20; mod.rs:855-857,860. No code change, no
+CHANGELOG. tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (S6). Continue in-turn per the live
+"speed this up" directive.

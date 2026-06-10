@@ -3322,3 +3322,49 @@ Evidence: `src/ordering/schur.rs:186-214` (run_amd, no length check), `:206`
 (per-element range check), `:104,110,116` (consumer lift + debug_assert),
 `src/symbolic/mod.rs:591-597` (the length check run_amd lacks). Bijectivity
 unchecked in both. Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S5: reference column_counts is O(n³)-class but documented O(n²) (finding S5, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> Reference `column_counts` (`symbolic/column_counts.rs:56-65`) is O(n³)-class
+> (`contains` + re-sort per eliminated column) but documented "O(n²) elimination
+> simulation" (`mod.rs:855-857`) and publicly re-exported. Production uses GNP
+> everywhere; burdens tests. low/certain.
+
+### Why this is recorded here rather than fixed
+
+1. **No incorrect output.** `column_counts` is the bit-exact reference oracle for
+   the production Gilbert-Ng-Peyton path; equivalence is verified on 169585 KKT
+   matrices (mod.rs:857, `dev/validation/phase-2.5.1-*`). The finding is about its
+   *cost* and a *false complexity claim*, not its result.
+
+2. **The complexity claim is genuinely wrong.** The propagation step
+   (column_counts.rs:55-65) does a linear `col_rows[min_row].contains(&row)` per
+   propagated row plus a `sort_unstable` + `dedup` of the whole inherited list per
+   eliminated column. On dense-ish patterns that is O(n³)-class, not the
+   "O(n²) elimination simulation" mod.rs:855 advertises.
+
+3. **Neither consequence is reproducible as a failing test.** A complexity claim
+   in a doc comment cannot be made RED — asserting asymptotic class needs timing
+   (flaky) or a counter the impl doesn't expose (impl-as-own-oracle). "Burdens
+   tests" is wall-clock, not a correctness assertion. This is exactly N10's
+   doc-drift category and S2's perf-only category.
+
+### Disposition
+
+No code change and no new test. Recommended (a doc-truth + hygiene fix, not a bug
+fix, carrying no failing test):
+(a) correct mod.rs:855 to call the reference "O(n³)-class elimination simulation"
+    (or similar) so it no longer claims O(n²);
+(b) if the public re-export is unnecessary, demote `column_counts` to
+    `pub(crate)` so it is a test-only oracle and stops appearing in the public
+    surface — production already uses `column_counts_gnp` everywhere (mod.rs:860).
+Both are non-functional and out of scope for a reproduce-first loop fix.
+
+Evidence: `src/symbolic/column_counts.rs:55-65` (contains + sort/dedup per
+column), `:20` (`pub fn`), `src/symbolic/mod.rs:855-857` (the "O(n²)" claim),
+`:860` (production uses GNP). No incorrect output. Journal:
+dev/journal/2026-06-10-01.org.
