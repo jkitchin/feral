@@ -930,3 +930,37 @@ Evidence: factorize.rs:2017-2050, :2217-2406, :1217/:1943; dense/factor.rs:
 
 Next per /loop: do NOT start the next issue (N10). Continue in-turn per the
 live "speed this up" directive.
+
+* 17:45 :numeric:condition:solve:factorize:scaling:n10:doc-drift:deferred:
+N10 (repo-review-2026-06-09.md §4): a bundle of four doc/code drifts. Read all
+four sites and confirmed each has CORRECT runtime behavior — only prose/naming
+or a latent gap drifts:
+(a) condition.rs:7,166 "3-5 solves" is stale — estimator does up to
+    2·MAX_ITER+1 = 11 solves (MAX_ITER=5 at :27; solves at :90/:106/:154;
+    code's own :68-69/:214 already says ~11). Code correct, comment stale.
+(b) solve.rs:389-391 describes an nrhs==1 thin-wrapper dispatch that doesn't
+    exist; finding says "bit-identical anyway". Doc only.
+(c) BucketStats.pct_of_total (factorize.rs:443) = sum_us·100/loop_us. That is
+    the CORRECT denominator — buckets partition the loop and sum to 100% of
+    loop_us; total_us would exclude prologue/epilogue. Only the field NAME
+    misleads. A RED test would have to assert % of total_us = assert WRONG
+    behavior; not honest.
+(d) Schur driver (factorize.rs:1645) uses compute_scaling, mains (:1839/:2836)
+    use compute_scaling_with_cache(.., cached_mc64). BUT
+    symbolic_factorize_with_schur sets cached_mc64: None (symbolic/mod.rs:1186)
+    — the Schur path NEVER has a cache. So _with_cache(.., None) is
+    byte-identical to compute_scaling today: latent gap, no output change, no
+    RED. Would only bite if the Schur symbolic path ever populates the cache.
+
+Verdict: deferred to tried-and-rejected citing N10. Every sub-item is
+doc/naming/latent drift over already-correct behavior; none reproducible as a
+failing test (a constant-arithmetic assert or a bit-identical/100%-sum assert is
+GREEN today, not RED). Consistent with the reproduce-first loop discipline used
+for D11-D13/N8/N9. Recommended a future dedicated docs-accuracy pass (outside the
+loop) to correct the prose + align the Schur call for consistency.
+
+Evidence as above. No CHANGELOG (nothing user-visible changed; no fix applied).
+tried-and-rejected.md updated with per-sub-item evidence.
+
+Next per /loop: do NOT start the next issue (N11). Continue in-turn per the live
+"speed this up" directive.

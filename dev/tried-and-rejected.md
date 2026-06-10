@@ -3010,3 +3010,78 @@ delta + single-threaded comment), `:2217-2406` (counter writes inside
 `factor_one_supernode` on workers), `src/dense/factor.rs:178-250`
 (`PHASE_TIMING_ENABLED` default false; process-global counters + `snapshot()`).
 Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — N10: doc/code drift bundle (finding N10, repo-review-2026-06-09.md)
+
+**Finding (verbatim).** "Doc/code drift: `condition.rs:7,27` "3-5 solves"
+(actually up to ~11); `solve.rs:389-391` claims an nrhs==1 thin-wrapper dispatch
+that doesn't exist (bit-identical anyway); `BucketStats.pct_of_total`
+(`factorize.rs:441-447`) is percent of loop_us, not total_us; the Schur inner
+driver (`factorize.rs:1645`) uses `compute_scaling`, not
+`compute_scaling_with_cache` — MC64 cache reuse silently doesn't apply on the
+Schur path. low/certain."
+
+### Why this is recorded here rather than fixed
+
+N10 bundles four drifts. In every one the *runtime behavior is already correct*;
+the drift is stale prose, a misleading field name, or a latent (not live)
+consistency gap. None admits a test "whose failure is the bug," so per the loop
+discipline (reproduce-first, else defer) all four are recorded here with the
+code evidence that confirms each.
+
+1. **`condition.rs:7,27` "3-5 solves" → actually up to 11 (doc only).** The
+   estimator loops `for _iter in 0..MAX_ITER` (`condition.rs:88`) with
+   `MAX_ITER = 5` (`:27`) and performs `2·MAX_ITER + 1 = 11` internal solves
+   (two per iteration at `:90`/`:106` plus the final at `:154`); the code's own
+   comment at `:68-69` and `:214` already says "up to 2·MAX_ITER + 1 … ~11×".
+   The module-doc "3-5 solves" (`:7`, `:166`) is stale prose. The code is
+   correct; there is no failing-on-the-bug test (a constant-arithmetic assert
+   `2*MAX_ITER+1 == 11` is trivially green, not a RED, and counting solves would
+   require instrumenting production for a comment fix).
+
+2. **`solve.rs:389-391` phantom nrhs==1 dispatch (doc only).** The comment
+   describes an `nrhs == 1` thin-wrapper dispatch that does not exist; the
+   finding itself notes the result is "bit-identical anyway." Behavior is
+   correct — only the comment describes a code path that was never written.
+   A test asserting nrhs==1 equals the many-RHS path passes today (it is
+   bit-identical), so it is GREEN, not a reproduction of any defect.
+
+3. **`BucketStats.pct_of_total` is % of loop_us (correct; name misleads).**
+   `factorize.rs:443` computes `b.pct_of_total = sum_us·100/loop_us`. This is
+   the *correct* denominator: the front-size buckets partition the supernode
+   loop, so percentages sum to 100% of `loop_us`; using `total_us` would
+   exclude prologue/epilogue and the buckets would not sum to 100%. The field
+   name (`pct_of_total`, `:476`) is the only thing that misleads. A RED test
+   would have to assert "% of total_us" — i.e. assert *wrong* behavior — so
+   there is no honest reproduction; the runtime value is right.
+
+4. **`factorize.rs:1645` Schur driver uses `compute_scaling` — latent, not
+   live.** The main drivers (`:1839`, `:2836`) call
+   `compute_scaling_with_cache(matrix, &params.scaling,
+   symbolic.cached_mc64.as_ref())`; the Schur inner driver calls plain
+   `compute_scaling`. But `symbolic_factorize_with_schur` sets `cached_mc64:
+   None` (`symbolic/mod.rs:1186`) — the Schur path *never populates* an MC64
+   cache. So `compute_scaling_with_cache(.., None)` would be byte-identical to
+   `compute_scaling(..)` today: there is no cache to reuse and no output change
+   to observe or test. The drift is latent — it would only bite if the Schur
+   symbolic path were later changed to populate `cached_mc64`, at which point
+   the numeric Schur driver would silently ignore it. Aligning the call is safe
+   future-proofing, but it is behavior-preserving with no RED gate today; and
+   changing it to reuse a cache (were one ever present) trades a recomputed
+   numeric-time matching for a symbolic-time one — a semantic choice that would
+   need a MUMPS/SSIDS oracle, not a same-session self-comparison.
+
+### Disposition
+
+No code change and no new test. All four sub-items are doc/naming/latent-
+consistency drift over already-correct runtime behavior; none is reproducible as
+a failing test. Revisit as a dedicated documentation-accuracy pass (correct the
+`condition.rs` "3-5 solves" prose, drop the `solve.rs` phantom-dispatch comment,
+document `pct_of_total` as "percent of `loop_us`", and align the Schur
+`compute_scaling_with_cache` call for consistency) if/when a docs sweep is
+scheduled — explicitly outside the reproduce-first loop.
+
+Evidence: `src/numeric/condition.rs:7,27,68-69,88,90,106,154,166,214`;
+`src/numeric/solve.rs:389-391`; `src/numeric/factorize.rs:441-448,476,1645,
+1839,2836`; `src/symbolic/mod.rs:1041,1186` (Schur `cached_mc64: None`). Journal:
+dev/journal/2026-06-10-01.org.
