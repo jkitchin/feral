@@ -1355,6 +1355,21 @@ impl Solver {
         }
     }
 
+    /// Drop any stored numeric factor (and its inertia), so the next
+    /// `solve*` returns `FeralError::NoFactor` until `factor()` runs
+    /// again. Used by the C ABI when the matrix structure is replaced
+    /// (X9): a protocol-violating `set_structure` → `solve` that skips
+    /// `factor` must fail cleanly rather than reuse the previous
+    /// structure's factor.
+    ///
+    /// The cached symbolic analysis and pattern fingerprint are left in
+    /// place, so a same-structure re-initialization still reuses the
+    /// symbolic factorization on the next `factor()`.
+    pub fn invalidate_factors(&mut self) {
+        self.last_factors = None;
+        self.last_inertia = None;
+    }
+
     /// Solve `A x = b` against the most recent stored factor.
     /// Returns `FeralError::NoFactor` if no factor is stored.
     /// `WrongInertia` does *not* clear the factor, so this remains

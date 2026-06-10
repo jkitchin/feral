@@ -1480,3 +1480,29 @@ non-reproducible). Not user-visible (internal doc) -> no CHANGELOG. Evidence:
 capi.rs:13-14,22-25; IpFeralSolverInterface.cpp:11-15; IpSymLinearSolver.hpp:19-33.
 Next per /loop: do NOT start the next issue (X9). Continue in-turn per the live
 'speed this up' directive.
+
+* 19:33 :x9:capi:stale-factor:ipopt:fixed:
+X9 (repo-review §X9, low/certain gap, possible impact): feral_set_structure
+(capi.rs) replaced s.matrix and reset neg_evals=-1 but left Solver::last_factors
+holding the previous structure's numeric factor. A host that changes structure
+then solves WITHOUT re-factoring (protocol: set_structure->factor->solve) got the
+stale factor refined against the new matrix and FERAL_SUCCESS — plausible-but-wrong.
+
+RED: new src/capi.rs test set_structure_invalidates_stale_factor — factor
+A1=[[1,2],[2,1]] (nnz3), then set_structure to identity-2x2 (nnz2, different
+structure), solve WITHOUT factor. Pre-fix: "got 0" (FERAL_SUCCESS off stale A1
+factor) at capi.rs:810 — assertion left:0 right:3 (FERAL_FATAL).
+
+FIX: added Solver::invalidate_factors() (solver.rs ~1358) — drops last_factors +
+last_inertia, KEEPS last_symbolic/pattern fingerprint so a same-structure re-init
+still reuses the symbolic analysis. Called it from feral_set_structure after
+neg_evals=-1. solve_many/solve_many_refined then hit None last_factors ->
+FeralError::NoFactor -> FERAL_FATAL.
+
+GREEN: capi::tests 8/8 (incl. new), lib full 354 passed (was 353), clippy -p
+feral --lib -D warnings clean, fmt clean. Normal IPM usage unaffected
+(set_structure called once, always followed by factor before solve).
+User-visible (C-ABI robustness for embedders) -> CHANGELOG Fixed entry.
+Evidence: capi.rs:250-256 (call site), 759-811 (test); solver.rs:1358-1370
+(invalidate_factors). Next per /loop: do NOT start the next issue (X10).
+Continue in-turn per the live 'speed this up' directive.

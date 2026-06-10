@@ -4,6 +4,21 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `feral_set_structure` invalidates the stale factor (X9)
+
+The C-ABI embedding protocol is `feral_set_structure` → fill values →
+`feral_factor` → `feral_solve`. `feral_set_structure` replaced the stored
+matrix and reset the cached inertia sentinel but left `Solver`'s numeric
+factor in place. A host that changed the matrix structure and then solved
+*without* re-factoring got that stale factor (refined against the new
+matrix) and `FERAL_SUCCESS` — a plausible-but-wrong solution rather than a
+clean error. `feral_set_structure` now drops the stored factor (new
+`Solver::invalidate_factors`, which keeps the cached symbolic analysis so a
+same-structure re-init still reuses it), so a solve with no current factor
+returns `FERAL_FATAL`. Normal usage is unaffected: `set_structure` is
+called once and is always followed by `factor` before `solve`. Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — sparse singular-column perturbation matches the dense path (L13)
 
 Under `LuSingularAction::PerturbToEps`, the sparse factor perturbed the

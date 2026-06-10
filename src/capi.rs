@@ -250,6 +250,10 @@ pub unsafe extern "C" fn feral_set_structure(
         s.matrix = Some(matrix);
         // New structure invalidates any prior factor's inertia (X1).
         s.neg_evals = -1;
+        // ...and the stored numeric factor itself (X9): a host that
+        // replaces the structure and then solves without re-factoring
+        // must fail cleanly, not reuse the previous structure's factor.
+        s.solver.invalidate_factors();
         FERAL_SUCCESS
     }))
     .unwrap_or(FERAL_FATAL)
@@ -753,6 +757,68 @@ mod tests {
                 Some(v) => std::env::set_var("FERAL_SCALING", v),
                 None => std::env::remove_var("FERAL_SCALING"),
             }
+        }
+    }
+
+    /// X9 (dev/research/repo-review-2026-06-09.md): `feral_set_structure`
+    /// must invalidate any stored numeric factor. The Ipopt embedding
+    /// protocol is set_structure → fill values → factor → solve; a host
+    /// that replaces the structure and then solves WITHOUT re-factoring
+    /// must not silently get the *previous* structure's factor. Before the
+    /// fix `feral_set_structure` left `Solver::last_factors` in place, so
+    /// the solve ran off the stale factor (refined against the new matrix)
+    /// and returned `FERAL_SUCCESS` — a plausible-but-wrong solution. The
+    /// correct behavior is a clean error: with no current factor the solve
+    /// fails (`FERAL_FATAL`).
+    ///
+    /// Oracle is the protocol contract, not the implementation: after a
+    /// structure change with no intervening `feral_factor`, there is no
+    /// valid factor for the new matrix, so a solve must not succeed. A1 is
+    /// the 2×2 indefinite `[[1,2],[2,1]]` (nnz=3); A2 is the 2×2 identity
+    /// (diagonal-only, nnz=2) — a genuinely different structure.
+    #[test]
+    fn set_structure_invalidates_stale_factor() {
+        unsafe {
+            let s = feral_new();
+            assert!(!s.is_null());
+
+            // A1 = [[1,2],[2,1]] — factor and solve to populate last_factors.
+            let ia1: [i32; 3] = [0, 2, 3];
+            let ja1: [i32; 3] = [0, 1, 1];
+            assert_eq!(
+                feral_set_structure(s, 2, 3, ia1.as_ptr(), ja1.as_ptr()),
+                FERAL_SUCCESS
+            );
+            let vp = feral_values_ptr(s);
+            assert!(!vp.is_null());
+            std::ptr::copy_nonoverlapping([1.0_f64, 2.0, 1.0].as_ptr(), vp, 3);
+            assert_eq!(feral_factor(s, 0, 0), FERAL_SUCCESS);
+            let mut rhs1 = [3.0_f64, 3.0];
+            assert_eq!(feral_solve(s, 1, rhs1.as_mut_ptr()), FERAL_SUCCESS);
+
+            // A2 = identity 2×2 — different structure (diagonal-only, nnz=2).
+            let ia2: [i32; 3] = [0, 1, 2];
+            let ja2: [i32; 2] = [0, 1];
+            assert_eq!(
+                feral_set_structure(s, 2, 2, ia2.as_ptr(), ja2.as_ptr()),
+                FERAL_SUCCESS
+            );
+            let vp2 = feral_values_ptr(s);
+            assert!(!vp2.is_null());
+            std::ptr::copy_nonoverlapping([1.0_f64, 1.0].as_ptr(), vp2, 2);
+
+            // Solve WITHOUT a new factor. The stale A1 factor must not be
+            // used: the protocol requires a factor for the current structure.
+            let mut rhs2 = [3.0_f64, 3.0];
+            let status = feral_solve(s, 1, rhs2.as_mut_ptr());
+            assert_eq!(
+                status, FERAL_FATAL,
+                "solve after a structure change with no re-factor must fail \
+                 cleanly (X9), not reuse the previous structure's factor; got {}",
+                status
+            );
+
+            feral_free(s);
         }
     }
 
