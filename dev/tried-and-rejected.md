@@ -3639,3 +3639,57 @@ Evidence: `src/lu/dense_update.rs:50-58` (spike scaled by d_col[leaving_slot]),
 `src/lu/sparse_update.rs:183` (doc), `:195` (`d_col[leaving_slot]`). Output
 algebraically correct; growth bounded by `max_growth`/`NeedsRefactor`. Journal:
 dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — L11: DenseLu::perm_inv is dead state (finding L11, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **L11** `DenseLu::perm_inv` is dead state — built and maintained
+> (`dense_factor.rs:31,59-61,94-96`), never read. low/certain.
+
+### Why this is recorded here rather than fixed
+
+1. **The finding is accurate — confirmed by static analysis.** `DenseLu::perm_inv`
+   (`src/lu/dense_factor.rs:31`, the `perm_inv[orig_row] = pivot_position`
+   inverse) is *written* in the constructor (`:75-84`) and *re-maintained* on every
+   `refactor()` (`:115-117`), but is never *read*: a crate-wide grep for
+   `perm_inv` as an rvalue finds zero readers in `src/lu/` outside the writes in
+   `dense_factor.rs`. `dense_update.rs` and `dense_solve.rs` contain no reference
+   to it at all. (The sibling `qcol_inv` is read for the Q-scatter; the *sparse*
+   `SparseLu::perm_inv` is read for sparse-spike seeding — only the *dense* row
+   `perm_inv` is dead.) The line numbers in the finding (`59-61`, `94-96`) are
+   stale — the file has shifted since the review — but the substance holds at the
+   current `:75-84` / `:115-117`.
+
+2. **Dead state has no runtime behavior to reproduce with a RED test.** Its
+   presence does not affect any output of any valid call; removing it would change
+   no result, only eliminate the maintenance writes. There is no input that yields
+   a *wrong* answer to assert against, so the reproduce-first lifecycle the /loop
+   mandates does not apply. This places L11 in the same "no test can fail on the
+   bug" bucket as the other non-reproducible findings in this log.
+
+3. **Removing maintained state I did not author warrants human approval, not a
+   silent unilateral delete.** `perm_inv` is deliberately re-maintained inside
+   `refactor()` (`:116`), which reads as a field a prior author intends to consume
+   (e.g. a planned dense FT-update or row-permutation-aware path). Per the project
+   guidance to "look at the target before deleting — if you didn't create it,
+   surface that rather than proceed," excising another developer's intentionally-
+   maintained field is a judgment call about whether that intended use is still
+   coming, which belongs to a human reviewer.
+
+### Disposition
+
+No code change and no new test. Recommended as a trivial, safe cleanup *pending a
+human decision*: if no dense path will consume the row-permutation inverse, delete
+the field at `dense_factor.rs:31`, the constructor build at `:75-84`, and the
+`refactor()` maintenance at `:115-117` (the compiler's dead-code / unused-field
+analysis is the oracle — removal must still compile and pass the full suite). If a
+future dense update path is planned, leave it and annotate the intent. Until that
+decision, the field is harmless dead state (a few `usize` writes per factor /
+refactor, never read).
+
+Evidence: `src/lu/dense_factor.rs:31` (field), `:75-84` (constructor build),
+`:115-117` (`refactor()` maintenance); zero rvalue readers across `src/lu/`
+(grep). Journal: dev/journal/2026-06-10-01.org.

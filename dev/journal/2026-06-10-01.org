@@ -1374,3 +1374,27 @@ an error in release builds (L10)".
 
 Next per /loop: do NOT start the next issue (L11). Continue in-turn per the live
 "speed this up" directive.
+
+* 10:42 :lu:dead-code:L11:deferred:
+L11 (repo-review-2026-06-09.md): DenseLu::perm_inv is dead state — built and
+maintained, never read. Confirmed accurate by static analysis: written in the
+constructor (dense_factor.rs:75-84) and re-maintained in refactor() (:115-117),
+but a crate-wide grep finds zero rvalue readers in src/lu/ outside those writes;
+dense_update.rs and dense_solve.rs reference it nowhere. (qcol_inv IS read for
+the Q-scatter; the SPARSE perm_inv IS read for spike seeding — only the dense
+row perm_inv is dead.) Finding's cited lines (59-61, 94-96) are stale; substance
+holds at current :75-84 / :115-117.
+
+Disposition: deferred to tried-and-rejected, not fixed. (1) Dead state has no
+runtime behavior — no input yields a wrong output, so the RED-test-first
+lifecycle does not apply ("no test can fail on the bug" bucket). (2) The field is
+deliberately re-maintained in refactor(), reading as intended-for-future-use;
+deleting another author's maintained state is a human-approval call per the
+"look before deleting / didn't create it -> surface it" guidance, not a silent
+unilateral delete. Recommended as a trivial safe cleanup pending that decision
+(compiler dead-code analysis is the removal oracle).
+
+No code change, no CHANGELOG (not user-visible). tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (L12). Continue in-turn per the live
+"speed this up" directive.
