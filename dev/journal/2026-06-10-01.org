@@ -549,3 +549,44 @@ Oracle: the standard CSC contract (col_ptr non-decreasing). RED: validate() retu
 Ok. Fix: an up-front loop rejecting col_ptr[j+1] < col_ptr[j] with an InvalidInput
 naming the offending column, placed before the start..end ranges are used so they
 are well-formed. GREEN; sparse::csc suite 12 passed.
+
+* 10:55 :ordering:amf:o1:i32-overflow:fixed:
+O1 (repo-review-2026-06-09.md): AMF fill-score i32 overflow for n ≳ 46k.
+crates/feral-ordering-core/src/quotient_graph/algo.rs computed the AMF
+working-fill (wf) surface contribution dext*(2*deg(e)-dext-1) (lines 948/969)
+and the per-supervariable accumulation wf4 + 2*nvi*wf3 (line 1020) entirely in
+i32, then stored the result in the i32 ws.wf field. Both factors are O(n), so
+the products reach ~n² and overflow i32 for n ≳ 46k. i32::MAX = 2_147_483_647;
+46342*46341 = 2_147_534_622 (50_975 over). The RMF score then read ws.wf[i] as
+f64 and drove pivot selection with wrapped/negative garbage (bucket clamp keeps
+it in-bounds, so the symptom is pure ordering-quality degradation in release and
+a debug-build panic). MUMPS computes the RMF in DBLE.
+
+Reproduction (tests-first, amf_wf_kernels_do_not_overflow_i32 in
+algo::tests): can't drive n≳46k AMF end-to-end (the trigger needs an element of
+external degree ≳46k, which dense-deferral / mass-elimination / min-fill's own
+fill-avoidance all conspire to keep from forming on a feasibly-sized input, and
+a genuine 46k front needs ~1e9 input edges). So extracted the two cited
+overflow-prone formulas into pure i64 helpers amf_wf_surface(dext,degree) and
+amf_wf_combine(wf4,nvi,wf3) and unit-tested them at the i32 boundary. Oracle =
+exact hand-computed i64 values of the Amestoy 1999 formulas (ana_orderings.F:4810):
+amf_wf_surface(46342,46342)=2_147_534_622, amf_wf_combine(0,46342,46342)=
+4_295_161_928 (over u32::MAX too). RED demonstrated by perl-narrowing both helper
+bodies to compute internally in i32 (cp backup, restore after): debug panicked
+"attempt to multiply with overflow" at algo.rs:657. GREEN: i64 helpers pass.
+
+Fix (finding's prescription, "compute wf in f64 or i64"): widened the ws.wf
+field from Vec<i32> to Vec<i64> (workspace.rs), the wf3/wf4 accumulators to i64,
+amf_bucket_of's score param to i64, and routed the two formulas through the i64
+helpers. The post-quantization RMF score later stored in wf is bounded by
+i32::MAX-1, cast in on store (qscore.max(1) as i64). degree stays i32 (bounded by
+n); only the products widen. wf is pub but has NO external readers (grep across
+crates/+src/), and order()'s public signature is unchanged, so the change is
+fully self-contained.
+
+Evidence: feral-ordering-core lib 57 passed (+1), invariants integration 10
+passed, clippy -p feral-ordering-core --all-targets -D warnings clean, fmt clean.
+Existing AMD path (MinDegree) is untouched: it never reads/writes wf, and the
+Metric trait (Score=i32) is unchanged.
+
+Next per /loop: do NOT start the next issue (O2). Schedule it.

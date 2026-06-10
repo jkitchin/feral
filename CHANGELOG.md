@@ -4,6 +4,20 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — AMF fill-score arithmetic no longer overflows `i32` for large `n` (O1)
+
+The Approximate Minimum Fill ordering (`feral-ordering-core`) computed its
+working-fill (`wf`) quantities — the surface contribution
+`dext * (2*deg - dext - 1)` and the accumulation `wf4 + 2*nvi*wf3` — in `i32`,
+and stored them in an `i32` field. Both factors are `O(n)`, so the products
+reach `~n²` and overflow `i32` for `n` ≳ 46k (`46342 * 46341 = 2_147_534_622`
+exceeds `i32::MAX`). The wrapped value then fed the RMF pivot score as `f64`,
+silently degrading ordering quality on exactly the large KKTs AMF exists for
+(and panicking in debug builds). The `wf` field and its accumulators are now
+`i64`, matching MUMPS, which computes the RMF in double precision. The
+minimum-degree (AMD) path is unaffected (it never touches `wf`). Finding from
+PR #83's review (`dev/research/repo-review-2026-06-09.md`).
+
 ### Fixed — `CscMatrix::validate` now rejects a non-monotone `col_ptr` (X6)
 
 `CscMatrix::validate` checked `col_ptr.len() == n + 1`, `row_idx.len() ==

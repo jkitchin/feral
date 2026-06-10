@@ -85,7 +85,14 @@ pub struct Workspace {
     /// `i`, holds the running quantized RMF score; for element indices
     /// `e`, holds the lazily-cached `dext * (2*deg(e) - dext - 1)`
     /// surface contribution (sentinel `0` = "first touch this iter").
-    pub wf: Vec<i32>,
+    ///
+    /// `i64` (not `i32`): the un-quantized surface contribution has
+    /// both factors `O(n)`, so it reaches ~`n^2` and overflows `i32`
+    /// for `n` ≳ 46k before being consumed as `f64` in the RMF score
+    /// (O1, `dev/research/repo-review-2026-06-09.md`). MUMPS computes
+    /// the RMF in DBLE for the same reason. The post-quantization RMF
+    /// score stored here later is bounded by `i32::MAX - 1`.
+    pub wf: Vec<i64>,
 
     /// Generation counter for the mark array `w`.
     pub wflg: i32,
@@ -217,7 +224,7 @@ impl Workspace {
         let mut head: Vec<i32> = vec![NONE; n_buckets];
         let mut next: Vec<i32> = vec![NONE; n];
         let mut last: Vec<i32> = vec![NONE; n];
-        let mut wf: Vec<i32> = vec![0; n];
+        let mut wf: Vec<i64> = vec![0; n];
 
         let wbig = i32::MAX - n as i32;
         let wflg = 0; // clear_flag will lift to 2 on first use.
@@ -253,7 +260,7 @@ impl Workspace {
                 }
                 next[i] = inext;
                 head[deg] = i as i32;
-                wf[i] = deg as i32;
+                wf[i] = deg as i64;
             }
         }
 
