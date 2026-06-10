@@ -108,3 +108,38 @@ fix only.
 
 Next per triage: D7 was the last of the queued dense/numeric batch in this
 loop; continue to the next finding in dev/research/repo-review-2026-06-09.md.
+
+** 02:30 :N3:profiler:parallel-driver:diagnostics:fixed:partial:
+N3 (dev/research/repo-review-2026-06-09.md): the parallel multifrontal
+driver (factorize_multifrontal_supernodal_parallel) — the Solver default
+whenever should_parallelize_assembly fires — ignored NumericParams::profiler.
+The sequential driver records one SupernodeTiming per supernode
+(profiler_smoke.rs guards it at factorize.rs:1972-2051), but run_parallel_task
+never touched params.profiler, so Solver::with_profiling(true) returned an
+EMPTY report on the default parallel dispatch, contradicting the
+with_profiling/profile_report docs in solver.rs.
+
+Reproduction (tests-first, tests/n3_parallel_profiler.rs): attach a fresh
+Profiler, drive factorize_multifrontal_supernodal_parallel directly (gate
+bypass, same trick as parallel_parity::deep_chain_tree_*) on a tridiagonal
+SPD n=2000 (126 supernodes), assert report.n_supernodes ==
+sym.supernodes.len(). RED pre-fix: left:0 right:126. GREEN post-fix.
+
+Fix: in run_parallel_task, time the factor_one_supernode body under a
+profiler-gated Instant (independent of parallel_telemetry, which measures
+lock/wait costs) and, on Ok, push a SupernodeTiming under the profiler mutex.
+Timings land in completion order (not postorder) — report() buckets by nrow
+so it is order-independent. Phase-breakdown fields (assembly/densefactor/
+panelfactor/schur/scalartail) left zero: they derive from process-global
+phase atomics that cannot be safely differenced across concurrent tasks
+(finding N9), so only wall `us` is meaningful on the parallel path — matching
+the small-leaf path's choice (factorize.rs:1993-1997).
+
+Scope honesty: this closes only the PROFILER facet of N3. N3 also flags that
+the parallel driver uses plain permute_csc_values (issue-56 Lever A.2 warm
+permute cache never engages — overlaps N5's warm-permute clone) and ignores
+params.small_leaf (benign today). Those two facets are NOT addressed here.
+
+Evidence: n3 1/1, profiler_smoke 7/0, parallel_parity 8/0 (bit-parity intact),
+issue52_stats 5/0, lib 330/0. clippy -D warnings clean, fmt clean. Profiler
+is None by default so zero overhead on the hot path is preserved.

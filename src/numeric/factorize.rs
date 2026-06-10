@@ -3146,6 +3146,13 @@ fn run_parallel_task<'a>(
         let thread_idx = thread_idx.min(thread_ws.len() - 1);
         let ws_mtx = &thread_ws[thread_idx];
 
+        // N3: per-supernode profiler wall time. Independent of
+        // `parallel_telemetry` (which measures driver-internal lock/wait
+        // costs) — this mirrors the sequential driver's
+        // `params.profiler` recording so `Solver::with_profiling(true)`
+        // yields a populated report on the parallel dispatch too. Set
+        // inside the factor block, consumed in the `Ok` arm below.
+        let mut prof_us: Option<u64> = None;
         let (result, own_contrib) = {
             let t_ws_wait = telemetry.map(|_| std::time::Instant::now());
             let mut ws_guard = match ws_mtx.lock() {
@@ -3191,6 +3198,7 @@ fn run_parallel_task<'a>(
             }
 
             let factor_start = telemetry.map(|_| std::time::Instant::now());
+            let prof_start = params.profiler.as_ref().map(|_| std::time::Instant::now());
             let res = factor_one_supernode(
                 snode_idx,
                 symbolic,
@@ -3207,6 +3215,9 @@ fn run_parallel_task<'a>(
                 t.factor_body_ns
                     .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
             }
+            if let Some(start) = prof_start {
+                prof_us = Some(start.elapsed().as_micros() as u64);
+            }
 
             let own = local_contribs[snode_idx].take();
             // Return the pooled vec to the workspace. All slots are
@@ -3218,6 +3229,28 @@ fn run_parallel_task<'a>(
 
         match result {
             Ok(node) => {
+                // N3: record this supernode's profiler timing (completion
+                // order, not postorder — the bucketed `report()` is
+                // order-independent). The phase-breakdown fields are left
+                // zero: they are derived from process-global phase atomics
+                // that cannot be safely differenced across concurrent tasks
+                // (finding N9), so only the wall `us` is meaningful here.
+                if let (Some(arc), Some(us)) = (params.profiler.as_ref(), prof_us) {
+                    let timing = SupernodeTiming {
+                        snode_idx,
+                        nrow: snode.nrow,
+                        ncol: snode.ncol,
+                        us,
+                        assembly_us: 0,
+                        densefactor_us: 0,
+                        panelfactor_us: 0,
+                        schur_us: 0,
+                        scalartail_us: 0,
+                    };
+                    if let Ok(mut prof) = arc.lock() {
+                        prof.timings.push(timing);
+                    }
+                }
                 {
                     let t_wait_start = telemetry.map(|_| std::time::Instant::now());
                     let mut shared = match contrib_blocks.lock() {

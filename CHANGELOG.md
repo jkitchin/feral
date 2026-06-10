@@ -4,6 +4,25 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — parallel multifrontal driver now honors `NumericParams::profiler` (N3)
+
+The parallel multifrontal driver (`factorize_multifrontal_supernodal_parallel`)
+— the `Solver` default whenever `should_parallelize_assembly` fires — ignored
+`NumericParams::profiler`. The sequential driver records one supernode timing
+per node, but the parallel driver never touched the profiler, so
+`Solver::with_profiling(true)` returned an **empty** `profile_report()` on the
+default dispatch, contradicting the `with_profiling`/`profile_report`
+documentation. `run_parallel_task` now records one per-supernode wall-time
+timing under the profiler mutex (in completion order; the bucketed report is
+order-independent). The phase-breakdown sub-fields are left zero on the
+parallel path because they derive from process-global phase counters that
+cannot be safely differenced across concurrent tasks (see finding N9); only
+the wall time is recorded, matching the small-leaf path. Profiling stays off
+by default, so the hot path is unchanged. This addresses the profiler facet of
+N3; the permute-cache and `small_leaf` facets it also notes are not yet
+addressed. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
 ### Performance — 32×32 front dispatch now reuses the caller's pooled scratch (D7)
 
 The 32×32 fully-summed-front dispatch inside
