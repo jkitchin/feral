@@ -43,6 +43,31 @@ agreement, and adversarial/ill-scaled/ill-conditioned cases. The downstream
 `pounce-simplex` `BasisEngine` integration and reference (UMFPACK/KLU)
 benchmarks are deferred (see `dev/plans/unsymmetric-lu-epic.md`).
 
+### Fixed — solve-time 2×2 D-block gate now matches factor-side acceptance (D4)
+
+The solve-time 2×2 D-block gate in `d_block_solve` decided whether to invert a
+stored 2×2 pivot block with the naive determinant `a·c − b·b` tested against the
+**absolute** floor `zero_tol_2x2 ≈ EPS²`, while the factor side accepts a 2×2
+block via the **scale-invariant** SSIDS determinant floor. Under `Identity` /
+`External` scaling a well-conditioned block at small absolute scale (true
+`|det|` below `EPS²`) was validly accepted and stored by the factorization but
+then silently **skipped** at solve time — leaving its solution components
+untouched and returning a wrong solution with no error and no flag. Both sides
+now share a single `ssids_det_floor_fail` predicate, so a 2×2 block the
+factorization inverts is exactly a block the solve inverts. (`zero_tol_2x2` is
+retained on `Factors` for the legacy `count_2x2_inertia` accounting but no
+longer gates the solve.)
+
+New regression `tests/d4_solve_2x2_gate.rs` hand-builds a `Factors` with `L = I`
+and a single small-scale 2×2 block and solves `D·x = D·[1,1]`: pre-fix the gate
+skips the block and returns `x ≈ [1.1e-16, 1.1e-16]` (off by 16 orders);
+post-fix `x ≈ [1, 1]`. The finding's second facet (a nonsingular block whose
+*naive* determinant rounds to exactly `0.0` being skipped) is not independently
+reachable — such a block has condition `≳ 2⁵²` and the same SSIDS floor rejects
+it, so the factor never stores it; this is recorded in `dev/tried-and-rejected.md`
+and pinned as a consistency guard. Finding D4 from
+`dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — static-pivot floor now scale-invariant (computed in scaled space) (N2)
 
 The MA57-style static-pivot floor implied by `static_pivot_threshold = Some(t)`

@@ -314,3 +314,42 @@ ACOPP30) and could be revisited separately — NOT the D3 accounting change.
 
 Next per triage: D4 (solve-time 2×2 gate inconsistent with factor-side
 acceptance, src/dense/solve.rs:193-205).
+
+* 13:55 :D4:solve:2x2:ssids-floor:fixed:
+D4 (solve-time 2×2 gate inconsistent with factor-side acceptance) — FIXED
+(facet b), facet a recorded in tried-and-rejected. The solve gate in
+d_block_solve used naive det=a*c-b*b vs ABSOLUTE zero_tol_2x2≈EPS², while
+the factor accepts 2×2 blocks via the SSIDS SCALE-INVARIANT floor. So a
+well-conditioned block at small absolute scale (|det|<EPS²) that the factor
+validly stored was silently skipped at solve -> wrong solution, no error.
+
+Repro (tests-first, hand-built Factors with L=I, identity perm/d_eq, single
+2×2; oracle = rhs=D·x_true so true x=x_true by construction, external):
+  - facet (b): D=[[1e-16,1e-17],[1e-16... ]], rhs=D·[1,1]. Pre-fix solve
+    skipped (|det|=9.9e-33 < zero_tol_2x2=4.93e-32) -> x=[1.1e-16,1.1e-16]
+    (= rhs, off by 16 orders). Post-fix x=[1,1].
+Both d4 tests FAILED pre-fix exactly as predicted, pass post-fix.
+
+Fix: extracted the duplicated SSIDS floor (factor.rs:2670 and :3709,
+byte-identical) into shared pub(crate) ssids_det_floor_fail(d11,d21,d22).
+Both factor 2×2 gates and d_block_solve now call it -> a block the factor
+inverts is exactly a block the solve inverts. zero_tol_2x2 kept on Factors
+for legacy count_2x2_inertia accounting but no longer gates the solve.
+
+Facet (a) [naive det rounds to 0.0 -> skip a nonsingular block] is NOT
+independently reproducible: naive-cancel-to-0 requires cond≳2^52, and the
+SAME SSIDS floor rejects all such blocks, so the factor never stores them
+(verified /tmp/check_a.py: D=[[2^53+1,2^53],[2^53,2^53]], true det=2^53,
+detpiv rescaled=0 -> rejected). Pinned as a consistency guard
+(d4_rejected_block_is_skipped_like_factor: must skip, matching factor).
+det_sym2x2 stays load-bearing for factor-time inertia SIGN of borderline
+blocks — separate concern, unchanged.
+
+Evidence: d4 2/2, lib 330/0, parity 21/0, kkt_hardening 8/0, dense_ldlt
+17/0, blocked_ldlt 21/0, delayed_pivoting 6/0, pivot_rejection 5/0,
+issue_38 5/0, threshold_consistency 5/0, rook_rescue 4/0, issue_55 2/0.
+clippy -D warnings + fmt clean. The factor-site refactor is byte-identical
+(all factor-path suites green).
+
+Next per triage: D5 (legacy factor() + ForceAccept + exactly singular 2×2
+-> 1/0 -> NaN, factor.rs ~4658).

@@ -2485,3 +2485,57 @@ it cannot regress ACOPP30. That is an additive diagnostic improvement, not the
 inertia-accounting change D3 asks for, and was not pursued here to keep the
 rejection clean. Anyone picking it up must verify it does not perturb the
 `needs_refinement` expectations of the existing `rook_rescue` tests.
+
+---
+
+## 2026-06-09 — D4 facet (a): naive-det-cancellation as an independent solve bug (finding D4, repo-review-2026-06-09.md)
+
+Finding D4 lists two facets of the solve-time 2×2 gate (`d_block_solve`,
+`src/dense/solve.rs`): (a) the gate uses the naive `a*c - b*b`, so a
+*genuinely nonsingular* block whose naive determinant rounds to exactly
+`0.0` is silently skipped; (b) the gate's floor is absolute
+(`zero_tol_2x2 ≈ EPS²`) where the factor side accepts via the SSIDS
+scale-invariant floor, so a well-conditioned block at small absolute scale
+is skipped.
+
+Facet (b) reproduced and was fixed (see the D4 commit; both sides now share
+`ssids_det_floor_fail`). **Facet (a) could not be reproduced as a
+factor-accepted-then-skipped bug and is recorded here.**
+
+A naive `a*c - b*b` rounds to exactly `0.0` only when `fl(a*c) = fl(b*b)`,
+which requires `|det| = |a·c - b·b| ≲ ULP(a*c) ≈ a·c·2⁻⁵²` — i.e. block
+condition `≳ 2⁵²`. But the SSIDS scale-invariant floor the factor side uses
+for *acceptance* rejects exactly those blocks: it tests
+`|detpiv| = |det|/maxpiv` against `½·max(|detpiv0|, |detpiv1|)`, which a
+condition-`2⁵²` block fails by a wide margin. Concretely
+`D = [[2⁵³+1, 2⁵³], [2⁵³, 2⁵³]]` has true `det = 2⁵³ > 0` (nonsingular) yet
+`detpiv = detpiv0 - detpiv1 = 2⁵³ - (2⁵³-1) = 1` rescaled, far below
+`cancel_floor = 2⁵² ≈ 4.5e15` ⇒ `ssids_det_floor_fail = true`. Verified
+numerically (`/tmp/check_a.py`): case (a) `detpiv = 0.0` (rejected); the
+genuinely-reachable small-scale case (b) `detpiv = 9.9e-17 > 5e-17`
+(accepted).
+
+So any block whose naive determinant cancels to `0.0` is ill-conditioned
+enough that the factor side never stores it as an invertible 2×2 (it delays
+or falls back to 1×1). The solve never sees such a block, so the naive
+cancellation cannot, on its own, cause a *validly-accepted* block to be
+wrongly skipped. There is no inertia/solution divergence to reproduce on
+that axis distinct from facet (b).
+
+The fix routes the solve gate through the *same* `ssids_det_floor_fail`
+predicate the factor uses, which makes solve/factor agree on this axis by
+construction (a rejected block is skipped on both sides). A hand-built
+`Factors` *can* exhibit naive-det-cancellation (the test
+`d4_rejected_block_is_skipped_like_factor` builds exactly the `2⁵³` block
+above), but that state is unreachable through the real factorization, so it
+is pinned as a *consistency* guard (the block must be skipped, matching the
+factor), not as a "should-have-been-solved" bug.
+
+Note: the cancellation-free `det_sym2x2` (fma-based) remains necessary at
+*factor* time for the inertia *sign* of borderline blocks
+(`count_2x2_inertia`), where getting `sign(det)` right on a block near the
+floor matters even though the block is rejected for inversion. That is a
+separate concern from the solve gate and is unchanged.
+
+Evidence: tests/d4_solve_2x2_gate.rs (facet b reproduced+fixed; facet a
+pinned as consistency guard), /tmp/check_a.py, dev/journal/2026-06-09-01.org.

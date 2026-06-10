@@ -341,6 +341,47 @@ fn diag_add(counter: &std::sync::atomic::AtomicU64, n: u64) {
 /// handles stability via ratios against the local block max.
 const SSIDS_DET_SMALL: f64 = 1e-20;
 
+/// SSIDS scale-invariant 2×2 determinant floor — the single predicate
+/// that decides whether a symmetric 2×2 block `[[d11, d21], [d21, d22]]`
+/// is *too singular to invert*. Ported from SSIDS
+/// `src/ssids/cpu/kernels/ldlt_tpp.cxx:98-106`:
+///
+/// ```text
+///   maxpiv   = max(|d11|, |d21|, |d22|)
+///   detscale = 1 / maxpiv
+///   detpiv0  = (d11 * detscale) * d22
+///   detpiv1  = (d21 * detscale) * d21
+///   detpiv   = detpiv0 - detpiv1          (== det / maxpiv)
+///   fail iff maxpiv < SSIDS_DET_SMALL
+///         OR |detpiv| < max(SSIDS_DET_SMALL, |detpiv0|/2, |detpiv1|/2)
+/// ```
+///
+/// Returns `true` when the block must be rejected (factor side: delay /
+/// fall back to 1×1; solve side: skip the block, leaving its solution
+/// components untouched). The test is scale-invariant by construction —
+/// the ratio of `|detpiv|` to fractions of `|detpiv0|`, `|detpiv1|` is
+/// independent of the block's absolute magnitude — so a well-conditioned
+/// block at any scale passes, unlike an absolute `|det| <= zero_tol_2x2`
+/// floor. This is the **shared** acceptance predicate: the factor 2×2
+/// gates and `d_block_solve` both call it, so a block the factorization
+/// accepts is exactly a block the solve inverts (finding D4).
+/// See dev/research/ssids-scale-invariant-det-floor.md.
+#[inline]
+pub(crate) fn ssids_det_floor_fail(d11: f64, d21: f64, d22: f64) -> bool {
+    let max_piv = d11.abs().max(d21.abs()).max(d22.abs());
+    if max_piv < SSIDS_DET_SMALL {
+        return true;
+    }
+    let det_scale = 1.0 / max_piv;
+    let detpiv0 = (d11 * det_scale) * d22;
+    let detpiv1 = (d21 * det_scale) * d21;
+    let detpiv = detpiv0 - detpiv1;
+    let cancel_floor = SSIDS_DET_SMALL
+        .max(detpiv0.abs() * 0.5)
+        .max(detpiv1.abs() * 0.5);
+    detpiv.abs() < cancel_floor
+}
+
 /// Pivot-growth threshold above which a factor is flagged for iterative
 /// refinement. A well-pivoted BK factor with unit-diagonal L satisfies
 /// |L_ij| ≤ 1/(1 − α) ≈ 2.78; values substantially above this indicate
@@ -2664,21 +2705,9 @@ fn lblt_panel_frontal(
             let growth_fail = (d22.abs() * rmax + amax * tmax) * u > absdet
                 || (d11.abs() * tmax + amax * rmax) * u > absdet;
 
-            // SSIDS scale-invariant det floor — same predicate as
-            // scalar_pivot_step:1776-1788.
-            let max_piv = d11.abs().max(d21.abs()).max(d22.abs());
-            let det_floor_fail = if max_piv < SSIDS_DET_SMALL {
-                true
-            } else {
-                let det_scale = 1.0 / max_piv;
-                let detpiv0 = (d11 * det_scale) * d22;
-                let detpiv1 = (d21 * det_scale) * d21;
-                let detpiv = detpiv0 - detpiv1;
-                let cancel_floor = SSIDS_DET_SMALL
-                    .max(detpiv0.abs() * 0.5)
-                    .max(detpiv1.abs() * 0.5);
-                detpiv.abs() < cancel_floor
-            };
+            // SSIDS scale-invariant det floor — shared with the solve
+            // gate (`d_block_solve`) via `ssids_det_floor_fail`.
+            let det_floor_fail = ssids_det_floor_fail(d11, d21, d22);
 
             if growth_fail || det_floor_fail {
                 // Rejection means scalar will run its
@@ -3688,36 +3717,13 @@ fn scalar_pivot_step(
             || (d11.abs() * tmax + amax * rmax) * u > absdet;
 
         // Scale-invariant cancellation-aware determinant floor, ported
-        // from SSIDS `src/ssids/cpu/kernels/ldlt_tpp.cxx:98-106`:
-        //
-        //   maxpiv    = max(|a11|, |a21|, |a22|)
-        //   detscale  = 1 / maxpiv
-        //   detpiv0   = (a11 * detscale) * a22
-        //   detpiv1   = (a21 * detscale) * a21
-        //   detpiv    = detpiv0 - detpiv1      (== det / maxpiv)
-        //   reject iff maxpiv < small
-        //           OR |detpiv| < max(small, |detpiv0|/2, |detpiv1|/2)
-        //
-        // This replaces the prior absolute `|det| <= zero_tol_2x2` floor,
-        // which was only meaningful on equilibrated matrices. The test
-        // is scale-invariant by construction: the ratio `|detpiv|` vs
-        // fractions of `|detpiv0|`, `|detpiv1|` does not depend on
-        // the absolute magnitude of the block. `SSIDS_DET_SMALL = 1e-20`
-        // is a dead-zero underflow floor, NOT a stability threshold.
-        // See dev/research/ssids-scale-invariant-det-floor.md.
-        let max_piv = d11.abs().max(d21.abs()).max(d22.abs());
-        let det_floor_fail = if max_piv < SSIDS_DET_SMALL {
-            true
-        } else {
-            let det_scale = 1.0 / max_piv;
-            let detpiv0 = (d11 * det_scale) * d22;
-            let detpiv1 = (d21 * det_scale) * d21;
-            let detpiv = detpiv0 - detpiv1;
-            let cancel_floor = SSIDS_DET_SMALL
-                .max(detpiv0.abs() * 0.5)
-                .max(detpiv1.abs() * 0.5);
-            detpiv.abs() < cancel_floor
-        };
+        // from SSIDS `src/ssids/cpu/kernels/ldlt_tpp.cxx:98-106`. This
+        // replaces the prior absolute `|det| <= zero_tol_2x2` floor,
+        // which was only meaningful on equilibrated matrices. Shared with
+        // the solve gate (`d_block_solve`) via `ssids_det_floor_fail` so
+        // a block the factor accepts is exactly a block the solve inverts
+        // (finding D4).
+        let det_floor_fail = ssids_det_floor_fail(d11, d21, d22);
 
         if growth_fail || det_floor_fail {
             // 2×2 rejected. SSIDS-style delayed pivoting: when

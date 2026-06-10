@@ -176,10 +176,22 @@ fn backward_substitute(factors: &Factors, v: &mut [f64]) {
 /// Handles both 1×1 and 2×2 blocks using the normalized formulation.
 ///
 /// Pivots that were force-accepted as numerically zero during factorization
-/// (`|d| <= factors.zero_tol` for 1×1, `|det| <= factors.zero_tol_2x2` for
-/// 2×2) are skipped — `w[k]` is left untouched, producing a least-squares-
-/// like solution where the corresponding row was rank-deficient. Dividing by
-/// such pivots produces catastrophic error; see dev/plans/threshold-mismatch-fix.md.
+/// are skipped — `w[k]` is left untouched, producing a least-squares-like
+/// solution where the corresponding row was rank-deficient. Dividing by such
+/// pivots produces catastrophic error; see dev/plans/threshold-mismatch-fix.md.
+///
+/// **Finding D4:** the skip decision must match the factor side exactly,
+/// otherwise a 2×2 block the factorization validly accepted and stored can be
+/// silently skipped at solve time (wrong solution, no error, no flag). For
+/// 1×1 pivots the `|d| <= zero_tol` floor matches the scalar acceptance gate.
+/// For 2×2 pivots the gate previously used the *naive* `a*c - b*b` against the
+/// *absolute* `zero_tol_2x2 ≈ EPS²`, while the factor side accepts via the
+/// *scale-invariant* SSIDS floor (`ssids_det_floor_fail`) — so a
+/// well-conditioned block at small absolute scale (true `|det|` below `EPS²`)
+/// was accepted by the factor but skipped by the solve. Both sides now call
+/// the shared `ssids_det_floor_fail`, so a block the factor inverts the solve
+/// inverts. (`zero_tol_2x2` is retained on `Factors` for the legacy
+/// `count_2x2_inertia` accounting but no longer gates the solve.)
 fn d_block_solve(factors: &Factors, w: &mut [f64]) {
     let n = factors.n;
     let mut k = 0;
@@ -189,9 +201,8 @@ fn d_block_solve(factors: &Factors, w: &mut [f64]) {
             let a = factors.d_diag[k];
             let b = factors.d_subdiag[k];
             let c = factors.d_diag[k + 1];
-            let det = a * c - b * b;
 
-            if det.abs() > factors.zero_tol_2x2 {
+            if !crate::dense::factor::ssids_det_floor_fail(a, b, c) {
                 // Normalized formulation (faer's approach)
                 let b_inv = 1.0 / b;
                 let ak = a * b_inv;
@@ -202,7 +213,9 @@ fn d_block_solve(factors: &Factors, w: &mut [f64]) {
                 w[k] = (ck * z0k - z1k) * denom;
                 w[k + 1] = (ak * z1k - z0k) * denom;
             }
-            // else: 2×2 block was force-accepted as singular; leave w[k], w[k+1] alone
+            // else: 2×2 block rejected by the shared SSIDS floor (the
+            // factor side would not have stored it as invertible); leave
+            // w[k], w[k+1] untouched.
             k += 2;
         } else {
             // 1×1 block
