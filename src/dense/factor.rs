@@ -1434,6 +1434,27 @@ pub fn factor_frontal(
     factor_frontal_with_profile(matrix, ncol, may_delay, params, None)
 }
 
+/// Build the contribution-block buffer for a front that eliminated nothing
+/// (`ncol == 0`): the whole `n×n` matrix is the Schur complement passed up
+/// to the parent. This mirrors the normal contribution-extraction
+/// convention used by the `factor_frontal_*` elimination paths — the strict
+/// upper triangle is zero-filled and the lower triangle (`ci >= cj`) carries
+/// the matrix values. Cloning `matrix.data` wholesale would instead carry
+/// the strict upper triangle's stale bytes, which
+/// `SymmetricMatrix::from_pooled_buf` explicitly leaves uninitialized,
+/// making full-buffer bit-compares nondeterministic (D10,
+/// dev/research/repo-review-2026-06-09.md).
+fn contrib_zeroed_upper(data: &[f64], n: usize) -> Vec<f64> {
+    let mut contrib = vec![0.0f64; n * n];
+    for cj in 0..n {
+        let col_base = cj * n;
+        // Lower triangle (ci >= cj) copies the matrix; the strict upper
+        // triangle keeps its zero initialization.
+        contrib[col_base + cj..col_base + n].copy_from_slice(&data[col_base + cj..col_base + n]);
+    }
+    contrib
+}
+
 #[doc(hidden)]
 pub fn factor_frontal_with_profile(
     matrix: &crate::dense::matrix::SymmetricMatrix,
@@ -1461,7 +1482,7 @@ pub fn factor_frontal_with_profile(
             d_subdiag: Vec::new(),
             perm: (0..nrow).collect(),
             perm_inv: (0..nrow).collect(),
-            contrib: matrix.data.clone(),
+            contrib: contrib_zeroed_upper(&matrix.data, nrow),
             contrib_dim: nrow,
             n_delayed: 0,
             inertia: Inertia {
@@ -1558,7 +1579,7 @@ fn factor_frontal_in_place_with_scratch_impl(
             d_subdiag: Vec::new(),
             perm: (0..nrow).collect(),
             perm_inv: (0..nrow).collect(),
-            contrib: matrix.data.clone(),
+            contrib: contrib_zeroed_upper(&matrix.data, nrow),
             contrib_dim: nrow,
             n_delayed: 0,
             inertia: Inertia {
@@ -1891,7 +1912,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             d_subdiag: Vec::new(),
             perm: (0..nrow).collect(),
             perm_inv: (0..nrow).collect(),
-            contrib: matrix.data.clone(),
+            contrib: contrib_zeroed_upper(&matrix.data, nrow),
             contrib_dim: nrow,
             n_delayed: 0,
             inertia: Inertia {
@@ -2382,7 +2403,7 @@ pub fn factor_frontal_diagonal_in_place(
             d_subdiag: Vec::new(),
             perm: (0..nrow).collect(),
             perm_inv: (0..nrow).collect(),
-            contrib: matrix.data.clone(),
+            contrib: contrib_zeroed_upper(&matrix.data, nrow),
             contrib_dim: nrow,
             n_delayed: 0,
             inertia: Inertia {
@@ -5496,5 +5517,50 @@ mod zero_pivot_n_tiny_tests {
         assert!(needs_refinement, "a perturbed pivot must flag refinement");
         // Perturbed to +abs_floor → counted as a positive eigenvalue.
         assert_eq!((pos, neg, zero), (1, 0, 0));
+    }
+}
+
+#[cfg(test)]
+mod ncol_zero_contrib_tests {
+    use super::*;
+
+    /// D10 (repo-review-2026-06-09.md): a front with `ncol == 0` eliminates
+    /// nothing — the whole matrix is the contribution block. The early
+    /// returns cloned `matrix.data` wholesale, carrying the strict
+    /// upper-triangle bytes, which `SymmetricMatrix::from_pooled_buf`
+    /// explicitly leaves uninitialized/stale ("callers must not depend on
+    /// the strict upper triangle being zero"). The normal extraction path
+    /// zero-fills the upper triangle, so full-buffer bit-compares (the
+    /// block32 harness) saw nondeterministic data on the `ncol == 0` path.
+    ///
+    /// Reproduction: build the front matrix from a pooled buffer poisoned
+    /// with a sentinel everywhere; `from_pooled_buf` zeros only the lower
+    /// triangle, leaving the sentinel in the strict upper triangle (the
+    /// exact stale-pooled-buffer scenario). Factor with `ncol == 0` and
+    /// assert the returned contrib's strict upper triangle is exactly zero.
+    /// Oracle: the normal extraction convention — a contrib block's strict
+    /// upper triangle is always zero-normalized (factor.rs contrib extract).
+    #[test]
+    fn ncol_zero_contrib_has_zeroed_upper_triangle() {
+        let n = 3;
+        // Pooled buffer pre-poisoned with a sentinel; from_pooled_buf zeros
+        // only the lower triangle, leaving the sentinel in the strict upper.
+        let buf = vec![99.0f64; n * n];
+        let matrix = crate::dense::matrix::SymmetricMatrix::from_pooled_buf(n, buf);
+        let params = BunchKaufmanParams::default();
+        let f = factor_frontal_with_profile(&matrix, 0, false, &params, None)
+            .expect("ncol==0 front must succeed");
+        assert_eq!(f.contrib_dim, n);
+        assert_eq!(f.contrib.len(), n * n);
+        // Strict upper triangle (ci < cj) must be exactly zero-normalized.
+        for cj in 0..n {
+            for ci in 0..cj {
+                assert_eq!(
+                    f.contrib[cj * n + ci],
+                    0.0,
+                    "contrib strict upper triangle ({ci},{cj}) must be zero, not stale pooled-buffer data"
+                );
+            }
+        }
     }
 }

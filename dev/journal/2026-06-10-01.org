@@ -696,3 +696,33 @@ diagnostic on the frontal stats struct; the defect was on a path whose n_tiny is
 discarded) -> no CHANGELOG entry.
 
 Next per /loop: do NOT start the next issue (D10). Schedule it.
+
+* 14:25 :dense:contrib:pooled-buffer:d10:asymmetry:fixed:
+D10 (repo-review-2026-06-09.md): the four `ncol == 0` early returns in the
+frontal factorizers (factor_frontal_with_profile, *_in_place_with_scratch_impl,
+*_blocked_in_place_with_scratch, *_diagonal_in_place) handed back
+`contrib: matrix.data.clone()`. When the front's matrix came from a pooled
+buffer (SymmetricMatrix::from_pooled_buf zeros ONLY the lower triangle, leaving
+the strict upper triangle stale), that clone carried nondeterministic garbage in
+the strict upper triangle. The normal extraction path zero-fills the upper
+triangle (:1674-1683), so the two paths produced contrib buffers with different
+upper-triangle content. Bit-compares of the FULL contrib buffer (the block32
+harness does exactly this) saw nondeterministic data on ncol==0 fronts.
+
+Reproduced: ncol_zero_contrib_has_zeroed_upper_triangle builds a 3x3 front from
+a pooled buffer pre-filled with 99.0, factors it (ncol==0 -> diagonal-only
+front), and asserts contrib's strict upper triangle is all-zero. RED: observed
+99.0 in the upper triangle (stale pooled data). GREEN after the fix: 0.0.
+
+Fix: added shared helper contrib_zeroed_upper(data, n) that copies only the
+lower triangle (col cj rows cj..n) into a zero-initialized n*n buffer, matching
+the normal-path convention. Replaced all 4 clone sites with it. No numeric
+impact: downstream contrib consumers read only the lower triangle; this only
+normalizes dead memory so full-buffer bit-compares are deterministic.
+
+Evidence: feral lib dense::factor 34 passed (+1), full feral lib suite 349
+passed / 0 failed, clippy -p feral --lib -D warnings clean, fmt clean.
+CHANGELOG: not user-visible (contrib upper triangle is internal scratch read
+only by lower-triangle consumers) -> no CHANGELOG entry.
+
+Next per /loop: do NOT start the next issue (D11). Schedule it.
