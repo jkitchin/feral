@@ -1338,3 +1338,39 @@ CHANGELOG "Fixed — SingularBasis { column } names the original basis column (L
 
 Next per /loop: do NOT start the next issue (L10). Continue in-turn per the live
 "speed this up" directive.
+
+* 10:18 :lu:solve:invariant:hardening:L10:reproduced:fixed:
+L10 (repo-review-2026-06-09.md): the diagonal-first u_rows invariant in the
+sparse triangular solves (sparse_solve.rs usolve:228, ut_solve:250) was
+enforced only by debug_assert_eq!(dc, k). Compiled out in release, a violated
+invariant would make usolve/ut_solve silently take an off-diagonal as the pivot
+(divide by it) and treat the real diagonal as a regular row[1..] term — a silent
+wrong solve, no error.
+
+RED test (src/lu/sparse_solve.rs #[cfg(test)], after
+zero_u_diagonal_errors_instead_of_inf):
+misplaced_u_diagonal_errors_instead_of_silent_wrong_pivot — factor [[2,0],[1,3]]
+(so u_rows[0] = diagonal + one off-diagonal), then swap(0,1) to push the
+diagonal off the front, and assert ftran (usolve) and btran (ut_solve) both
+return SingularBasis{column:0}. Pre-fix panic (debug):
+  "assertion `left == right` failed: U row 0 must store its diagonal first
+   left: 1 right: 0" (sparse_solve.rs:228)
+— exactly the gap: debug panics (CI-protected), release would be silently wrong.
+
+Fix: replaced both debug_assert_eq! with an always-on guard folding `dc != k`
+into the existing per-row pivot check: `if dc != k || d == 0.0 || !d.is_finite()
+{ return Err(SingularBasis{column}) }`. The comparison sits in the per-row
+preamble (already a branch), NOT the inner accumulation loop, so the hot solve
+path is unchanged. Reuses SingularBasis with the column-POSITION index, matching
+the pre-existing solve-path contract (zero_u_diagonal_errors_instead_of_inf
+asserts SingularBasis{column:1}, a position); the solve path was out of L9's
+cited scope (factor/update only) and deliberately reports positions.
+
+GREEN: lib full suite 353 passed, lu::sparse_solve 5 passed (incl. new + the
+zero-diagonal precedent), lu_sparse 16 + lu_dense 11 integration passed. clippy
+-D warnings clean, fmt clean (re-ran cargo fmt to wrap the matches!). User-visible
+(release error contract) -> CHANGELOG "Fixed — misplaced U diagonal surfaces as
+an error in release builds (L10)".
+
+Next per /loop: do NOT start the next issue (L11). Continue in-turn per the live
+"speed this up" directive.

@@ -4,6 +4,20 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — misplaced U diagonal surfaces as an error in release builds (L10)
+
+The sparse triangular solves (`usolve` / `ut_solve`) take the first stored
+entry of each `u_rows[k]` as the pivot, relying on the diagonal-first
+invariant. That invariant was enforced only by a `debug_assert_eq!`, compiled
+out in release — so a violated invariant (e.g. introduced by a future change)
+would make a release build silently divide by an off-diagonal entry and treat
+the real diagonal as an ordinary off-diagonal term: a silent wrong solve. The
+position check is now folded into the always-on pivot guard, so a U row whose
+first entry is not its diagonal returns `FeralError::SingularBasis` in every
+build mode, alongside the existing absent/zero/non-finite-diagonal guard. The
+check is outside the inner accumulation loop, so the hot solve path is
+unchanged. Finding from `dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — `SingularBasis { column }` names the original basis column (L9)
 
 When the sparse LU factor path hit a singular column under

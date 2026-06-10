@@ -217,16 +217,18 @@ impl SparseLu {
     /// Back solve `U w = s` (upper; per-row storage, diagonal first), in place.
     ///
     /// Errors with [`FeralError::SingularBasis`] if a row's stored diagonal is
-    /// absent, zero, or non-finite: after a Forrest–Tomlin update the diagonal
-    /// of `u_rows[k]` is the bump pivot, and dividing by an exact zero would
-    /// otherwise emit a silent `±Inf`. (A fresh factor floors pivots to `±ztol`,
-    /// so this only guards the updated path.)
+    /// absent, zero, non-finite, or stored out of diagonal-first order: after a
+    /// Forrest–Tomlin update the diagonal of `u_rows[k]` is the bump pivot, and
+    /// dividing by an exact zero would otherwise emit a silent `±Inf`. (A fresh
+    /// factor floors pivots to `±ztol`, so the zero guard only bites the updated
+    /// path.) The `dc != k` check is an always-on hardening of the diagonal-first
+    /// invariant (L10): without it, a violated invariant would make release-mode
+    /// solves silently take an off-diagonal as the pivot.
     fn usolve(&self, s: &mut [f64]) -> Result<(), FeralError> {
         for k in (0..self.m).rev() {
             let row = &self.u_rows[k];
             let &(dc, d) = row.first().ok_or(FeralError::SingularBasis { column: k })?;
-            debug_assert_eq!(dc, k, "U row {k} must store its diagonal first");
-            if d == 0.0 || !d.is_finite() {
+            if dc != k || d == 0.0 || !d.is_finite() {
                 return Err(FeralError::SingularBasis { column: k });
             }
             let mut acc = s[k];
@@ -242,13 +244,13 @@ impl SparseLu {
     /// Forward solve `Uᵀ z = s` (`Uᵀ` lower; scatter form on per-row U).
     ///
     /// Errors with [`FeralError::SingularBasis`] on an absent/zero/non-finite
-    /// stored diagonal, for the same reason as [`SparseLu::usolve`].
+    /// or out-of-order stored diagonal, for the same reason as
+    /// [`SparseLu::usolve`].
     fn ut_solve(&self, s: &mut [f64]) -> Result<(), FeralError> {
         for i in 0..self.m {
             let row = &self.u_rows[i];
             let &(dc, d) = row.first().ok_or(FeralError::SingularBasis { column: i })?;
-            debug_assert_eq!(dc, i, "U row {i} must store its diagonal first");
-            if d == 0.0 || !d.is_finite() {
+            if dc != i || d == 0.0 || !d.is_finite() {
                 return Err(FeralError::SingularBasis { column: i });
             }
             let si = s[i] / d;
@@ -511,5 +513,52 @@ mod tests {
             lu.btran(&mut bad_t),
             Err(FeralError::SingularBasis { column: 1 })
         ));
+    }
+
+    /// L10 (dev/research/repo-review-2026-06-09.md): the diagonal-first
+    /// `u_rows` invariant was enforced only by a `debug_assert_eq!`, compiled
+    /// out in release. A violated invariant would make release-mode `usolve` /
+    /// `ut_solve` silently take an off-diagonal entry as the pivot (and treat
+    /// the real diagonal as a regular `row[1..]` term) — a silent wrong solve.
+    /// The guard is now always-on: a U row whose first entry is not its
+    /// diagonal surfaces as `SingularBasis` in every build mode, matching the
+    /// absent/zero/non-finite diagonal guard. Pre-fix this test panics on the
+    /// `debug_assert_eq!` (a debug build) rather than returning a clean `Err`.
+    #[test]
+    fn misplaced_u_diagonal_errors_instead_of_silent_wrong_pivot() {
+        let cols = vec![vec![2.0, 0.0], vec![1.0, 3.0]]; // nonsingular 2x2
+        let mut lu = SparseLu::factor_dense_columns(2, &cols, LuParams::default()).expect("factor");
+        // u_rows[0] stores its diagonal (column 0) first, then an off-diagonal.
+        assert!(
+            lu.u_rows[0].len() >= 2,
+            "test needs an off-diagonal to misplace the diagonal behind"
+        );
+        assert_eq!(lu.u_rows[0][0].0, 0, "diagonal of row 0 must start first");
+        // Corrupt the invariant: move the diagonal off the front of row 0.
+        lu.u_rows[0].swap(0, 1);
+
+        // usolve (via ftran) must reject the misplaced diagonal, not divide by
+        // the off-diagonal value as the pivot.
+        let mut bad = vec![1.0, 1.0];
+        assert!(
+            matches!(
+                lu.ftran(&mut bad),
+                Err(FeralError::SingularBasis { column: 0 })
+            ),
+            "usolve must reject a misplaced diagonal (L10)"
+        );
+
+        // ut_solve (via btran) on a fresh, equally-corrupted factor.
+        let mut lu_t =
+            SparseLu::factor_dense_columns(2, &cols, LuParams::default()).expect("factor");
+        lu_t.u_rows[0].swap(0, 1);
+        let mut bad_t = vec![1.0, 1.0];
+        assert!(
+            matches!(
+                lu_t.btran(&mut bad_t),
+                Err(FeralError::SingularBasis { column: 0 })
+            ),
+            "ut_solve must reject a misplaced diagonal (L10)"
+        );
     }
 }
