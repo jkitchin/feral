@@ -4,6 +4,20 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — sparse and dense LU update report the same failure signal (L8)
+
+`SparseLu::update` returned `FeralError::SingularBasis` when the spike support
+was deficient or a bump pivot vanished, while `DenseLu::update` returns
+`FeralError::NeedsRefactor` for the identical events. A driver that switched
+between the two factorization paths got different error variants for the same
+underlying condition — a singular replacement basis encountered mid-update.
+Both update paths now return `NeedsRefactor` on any update failure; the
+authoritative singularity verdict comes from a fresh factorization (where the
+factor path still returns `SingularBasis`), not the incremental update. The
+stale `DenseLu::update` doc comment that claimed `SingularBasis` on a vanishing
+bump pivot was corrected to match the actual `NeedsRefactor` contract. Finding
+from `dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — AutoRace no longer quadruples symbolic-profiler stages (S7)
 
 When a `SymbolicProfiler` was attached and the ordering method was

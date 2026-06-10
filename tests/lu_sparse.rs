@@ -174,6 +174,43 @@ fn sparse_singular_fails() {
 }
 
 #[test]
+fn sparse_update_singular_replacement_matches_dense_needs_refactor() {
+    // L8 (dev/research/repo-review-2026-06-09.md): a singular update
+    // replacement must produce the SAME error signal from the dense and
+    // sparse paths. The dense path returns NeedsRefactor (see
+    // dense_update.rs `update_singular_last_pivot_does_not_commit`): a
+    // vanishing update pivot is recoverable by a refactor, which then
+    // reports SingularBasis only if the basis is genuinely singular. The
+    // sparse update previously returned SingularBasis directly,
+    // over-claiming singularity and handing drivers a different signal for
+    // the same event.
+    //
+    // Replace slot 1 of the 2x2 identity basis with e_0: the new basis
+    // [e_0, e_0] is structurally singular and drives the update pivot to 0
+    // — the exact scenario the dense unit test uses.
+    let (cols, m) = cols_from_rows(&[&[1.0, 0.0], &[0.0, 1.0]]); // identity
+    let entering = vec![1.0, 0.0]; // e_0
+
+    // Dense reference: NeedsRefactor (the established contract).
+    let mut dense = DenseLu::factor(&cols, m, LuParams::default()).expect("dense factor");
+    let dense_err = dense.update(1, &entering);
+    assert!(
+        matches!(dense_err, Err(FeralError::NeedsRefactor)),
+        "dense: expected NeedsRefactor, got {dense_err:?}"
+    );
+
+    // Sparse must agree.
+    let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+    let symbolic = SparseLuSymbolic::natural(m);
+    let mut sparse = SparseLu::factor(&a, &symbolic, LuParams::default()).expect("sparse factor");
+    let sparse_err = sparse.update(1, &entering);
+    assert!(
+        matches!(sparse_err, Err(FeralError::NeedsRefactor)),
+        "sparse: expected NeedsRefactor to match dense, got {sparse_err:?}"
+    );
+}
+
+#[test]
 fn sparse_perturb_succeeds() {
     let (cols, m) = cols_from_rows(&[&[1.0, 1.0, 0.0], &[2.0, 2.0, 0.0], &[0.0, 0.0, 3.0]]);
     let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");

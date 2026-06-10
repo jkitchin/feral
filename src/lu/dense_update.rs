@@ -27,7 +27,11 @@ impl DenseLu {
     ///
     /// Returns [`FeralError::NeedsRefactor`] (leaving `self` unchanged) when the
     /// update budget (`max_updates`) or growth budget (`max_growth`) is
-    /// exceeded, and [`FeralError::SingularBasis`] when a bump pivot vanishes.
+    /// exceeded, or when a bump pivot vanishes (a singular replacement basis).
+    /// In every failure mode the update signals NeedsRefactor rather than
+    /// SingularBasis — the authoritative singularity verdict comes from a fresh
+    /// factorization, not the incremental update. The sparse update path
+    /// ([`super::SparseLu::update`]) follows the identical contract.
     pub fn update(&mut self, leaving_slot: usize, entering_col: &[f64]) -> Result<(), FeralError> {
         let m = self.m;
         if entering_col.len() != m {

@@ -35,8 +35,11 @@ impl SparseLu {
     /// the scan.
     ///
     /// Returns [`FeralError::NeedsRefactor`] (leaving `self` unchanged) when the
-    /// update or growth budget is exceeded, and [`FeralError::SingularBasis`]
-    /// when the bump has no acceptable pivot (the new basis is singular).
+    /// update or growth budget is exceeded, or when the bump has no acceptable
+    /// pivot (a singular replacement basis). In every failure mode the update
+    /// signals NeedsRefactor rather than SingularBasis — matching the dense
+    /// update path ([`super::DenseLu::update`]); the authoritative singularity
+    /// verdict comes from a fresh factorization, not the incremental update.
     pub fn update(&mut self, leaving_slot: usize, entering_col: &[f64]) -> Result<(), FeralError> {
         if entering_col.len() != self.m {
             return Err(FeralError::DimensionMismatch {
@@ -57,8 +60,8 @@ impl SparseLu {
     /// nonzeros `(row, value)` (rows need not be sorted; duplicates are summed).
     /// Fully bump-local: cost is `O(bump + nnz(aₙₑw))`, with no `O(n)` term.
     ///
-    /// Returns [`FeralError::NeedsRefactor`] / [`FeralError::SingularBasis`] as
-    /// for [`SparseLu::update`].
+    /// Returns [`FeralError::NeedsRefactor`] on any failure, as for
+    /// [`SparseLu::update`].
     pub fn update_sparse(
         &mut self,
         leaving_slot: usize,
@@ -97,7 +100,14 @@ impl SparseLu {
             _ => {
                 clear(&mut w, &touched);
                 self.ft_work = w;
-                return Err(FeralError::SingularBasis { column: r });
+                // Spike support deficient: the replacement basis is singular as
+                // far as the incremental update can tell. Signal NeedsRefactor
+                // so the driver refactors from scratch — matching the dense
+                // update path (see DenseLu::update), which also returns
+                // NeedsRefactor for a vanishing/missing pivot rather than
+                // SingularBasis. The authoritative singularity verdict comes
+                // from the fresh factorization, not the update.
+                return Err(FeralError::NeedsRefactor);
             }
         };
 
@@ -317,7 +327,11 @@ impl SparseLu {
                 }
             }
             if pivot_abs <= ztol {
-                return Err(FeralError::SingularBasis { column: k });
+                // Bump pivot vanished: the incremental update cannot continue.
+                // Signal NeedsRefactor (not SingularBasis) so the driver gets
+                // the same contract as the dense update path — update failures
+                // always mean "refactor from scratch."
+                return Err(FeralError::NeedsRefactor);
             }
             if pivot_row != k {
                 self.u_rows.swap(k, pivot_row);

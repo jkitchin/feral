@@ -1273,3 +1273,36 @@ CHANGELOG. tried-and-rejected.md updated.
 
 Next per /loop: do NOT start the next issue (L8). Continue in-turn per the live
 "speed this up" directive.
+
+* 09:20 :lu:update:error-contract:L8:reproduced:fixed:
+L8 (repo-review-2026-06-09.md): DenseLu::update doc claimed SingularBasis on a
+vanishing bump pivot but the code returns NeedsRefactor (deliberate, tested by
+update_singular_last_pivot_does_not_commit); the SPARSE update path actually
+DID return SingularBasis (sparse_update.rs:100 spike-support deficient, :320
+eliminate_bump vanishing pivot). A driver switching paths got different error
+variants for the same event — a singular replacement basis mid-update.
+
+RED test (tests/lu_sparse.rs, after sparse_singular_fails):
+sparse_update_singular_replacement_matches_dense_needs_refactor — replace slot 1
+of the 2x2 identity with e_0, assert BOTH dense and sparse update return
+NeedsRefactor. Pre-fix panic:
+  "sparse: expected NeedsRefactor to match dense, got Err(SingularBasis { column: 1 })"
+(tests/lu_sparse.rs:207). Dense already returned NeedsRefactor — confirms the
+asymmetry was sparse-only.
+
+Fix: both sparse update-failure sites (sparse_update.rs:100, :320 and the two
+stale doc blocks at :38, :60) now return/Document NeedsRefactor. Rationale: an
+update failure means "refactor from scratch"; the authoritative singularity
+verdict comes from the fresh factorization (factor path sparse_factor.rs:274/280
+and dense_factor.rs:284 STILL return SingularBasis — untouched, verified by
+grep + sparse_singular_fails green). Corrected the stale DenseLu::update doc
+(dense_update.rs:28-32) to state NeedsRefactor on a vanishing bump pivot.
+
+GREEN: lu_sparse 15 passed (incl. new test + sparse_singular_fails factor-path),
+lu_dense 11 passed (incl. update_singular_last_pivot_does_not_commit), lib lu
+54 passed. clippy -D warnings clean, fmt clean. User-visible (FeralError
+contract) → CHANGELOG "Fixed — sparse and dense LU update report the same
+failure signal (L8)".
+
+Next per /loop: do NOT start the next issue (L9). Continue in-turn per the live
+"speed this up" directive.
