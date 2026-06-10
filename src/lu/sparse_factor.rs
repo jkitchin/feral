@@ -96,8 +96,13 @@ pub struct SparseLu {
     /// factor/refactor. Each is a replayable bump elimination (`O(bump)`), so
     /// warm solves stay sparse (no dense eta chain).
     pub(super) etas: Vec<FtEta>,
-    /// Running growth monitor (max elimination multiplier over the updates).
+    /// Running growth monitor: the ‖U‖∞ element-growth high-water ratio
+    /// (largest `max|U|` over the updates ÷ [`Self::u_max0`]). Compounds across
+    /// a chain of updates, unlike a max-single-multiplier monitor (L5).
     pub(super) growth: f64,
+    /// `max|U|` immediately after factor — denominator of the element-growth
+    /// monitor. Floored away from zero.
+    pub(super) u_max0: f64,
     /// Total Gilbert–Peierls reach nodes visited during the factor — a
     /// structural scalability witness (`O(nnz(U))`, not `O(n²)`).
     pub(super) reach_visits: usize,
@@ -342,6 +347,15 @@ impl SparseLu {
             scale_rperm_inv[o] = i;
         }
 
+        // `max|U|` at factor: denominator of the element-growth monitor (L5).
+        let mut u_max0 = 0.0_f64;
+        for row in u_rows.iter() {
+            for &(_, v) in row.iter() {
+                u_max0 = u_max0.max(v.abs());
+            }
+        }
+        let u_max0 = u_max0.max(f64::MIN_POSITIVE);
+
         Ok(SparseLu {
             m,
             l_col_ptr,
@@ -355,6 +369,7 @@ impl SparseLu {
             u_above,
             etas: Vec::new(),
             growth: 1.0,
+            u_max0,
             reach_visits,
             params,
             scale,

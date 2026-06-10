@@ -81,7 +81,6 @@ impl DenseLu {
         qcol[m - 1] = leaving;
 
         // 3. Eliminate the Hessenberg subdiagonal on positions q..m-2.
-        let mut growth = self.growth;
         for k in q..m.saturating_sub(1) {
             let piv = u[k + k * m];
             if piv.abs() <= ztol {
@@ -92,10 +91,6 @@ impl DenseLu {
                 continue;
             }
             let mult = sub / piv;
-            growth = growth.max(mult.abs());
-            if growth > max_growth {
-                return Err(FeralError::NeedsRefactor);
-            }
             // Row op on U: row_{k+1} -= mult · row_k, columns k..m-1.
             for j in k..m {
                 u[k + 1 + j * m] -= mult * u[k + j * m];
@@ -105,6 +100,17 @@ impl DenseLu {
             for i in 0..m {
                 l[i + k * m] += mult * l[i + (k + 1) * m];
             }
+        }
+
+        // L5 (dev/research/repo-review-2026-06-09.md): monitor element growth,
+        // not the largest single multiplier. The high-water `max|U|/u_max0`
+        // compounds across a chain of updates, where a per-multiplier max sat
+        // at the largest step and missed the accumulation. Measured on the
+        // clone (uncommitted), so an over-budget update leaves `self` intact.
+        let umax = u.iter().fold(0.0_f64, |a, &x| a.max(x.abs()));
+        let growth = self.growth.max(umax / self.u_max0);
+        if growth > max_growth {
+            return Err(FeralError::NeedsRefactor);
         }
 
         // L1 (dev/research/repo-review-2026-06-09.md): the loop above validates
@@ -177,5 +183,64 @@ mod tests {
         let mut rhs = vec![1.0, 1.0];
         lu.ftran(&mut rhs).expect("ftran after rejected update");
         assert!(rhs.iter().all(|x| x.is_finite()));
+    }
+
+    /// L5 (dev/research/repo-review-2026-06-09.md): the growth monitor recorded
+    /// only the largest single elimination multiplier, so compounded element
+    /// growth in `U` across a chain of updates went unmonitored. After the fix
+    /// `growth` is the ‖U‖∞ high-water ratio (max|U| over update history ÷
+    /// max|U| at factor), which compounds. This pins that semantics: the
+    /// monitor must equal the element-growth ratio recomputed independently
+    /// from the committed `U`. Oracle is the independent recomputation, not the
+    /// monitor's own bookkeeping. Pre-fix `growth` is the max single multiplier
+    /// and does not match.
+    #[test]
+    fn growth_monitor_tracks_compounded_element_growth() {
+        let cols = vec![
+            vec![4.0, 1.0, 0.0, 0.0],
+            vec![1.0, 3.0, 1.0, 0.0],
+            vec![0.0, 1.0, 2.0, 1.0],
+            vec![0.0, 0.0, 1.0, 5.0],
+        ];
+        let m = 4;
+        let params = LuParams {
+            max_updates: 20,
+            max_growth: 1e12, // large: updates commit on both old and new code
+            ..LuParams::default()
+        };
+        let mut lu = DenseLu::factor(&cols, m, params).expect("factor");
+
+        let umax = |lu: &DenseLu| {
+            let mut mx = 0.0_f64;
+            for j in 0..m {
+                for i in 0..m {
+                    mx = mx.max(lu.u(i, j).abs());
+                }
+            }
+            mx
+        };
+        let u_max0 = umax(&lu);
+        let mut hw = 1.0_f64; // independent high-water of max|U| / u_max0
+
+        // Replace the LAST slot each time: no Hessenberg bump forms (q == m-1),
+        // so every update commits cleanly while raising max|U| in that column,
+        // making the element-growth ratio compound across the chain.
+        let updates = [
+            (3usize, vec![0.0, 0.0, 1.0, 20.0]),
+            (3usize, vec![0.0, 0.0, 1.0, 60.0]),
+            (3usize, vec![0.0, 0.0, 1.0, 180.0]),
+        ];
+        for (i, (slot, col)) in updates.iter().enumerate() {
+            lu.update(*slot, col)
+                .unwrap_or_else(|e| panic!("update {i} should commit: {e:?}"));
+            hw = hw.max(umax(&lu) / u_max0);
+            assert!(
+                (lu.growth - hw).abs() <= 1e-9 * hw,
+                "growth monitor {} must equal element-growth high-water {}",
+                lu.growth,
+                hw
+            );
+        }
+        assert!(hw > 1.0, "test must exercise genuine element growth");
     }
 }

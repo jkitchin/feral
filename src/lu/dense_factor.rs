@@ -37,7 +37,13 @@ pub struct DenseLu {
     /// Updates applied since the last `factor`/`refactor`.
     pub(super) updates_since_refactor: usize,
     /// Running growth monitor; tripping `params.max_growth` forces a refactor.
+    /// Element-growth (‖U‖∞) high-water ratio: the largest `max|U|` seen across
+    /// all updates divided by [`Self::u_max0`]. Unlike a max-single-multiplier
+    /// monitor this compounds across a chain of updates (L5).
     pub(super) growth: f64,
+    /// `max|U|` immediately after the last factor/refactor — the denominator of
+    /// the element-growth monitor. Floored away from zero.
+    pub(super) u_max0: f64,
     pub(super) params: LuParams,
     /// Two-sided scaling of the factored matrix (identity when unscaled).
     pub(super) scale: LuScale,
@@ -65,6 +71,7 @@ impl DenseLu {
         let mut perm: Vec<usize> = (0..m).collect();
         factorize_packed(&mut packed, &mut perm, m, &params)?;
         let (l, u) = split_packed(&packed, m);
+        let u_max0 = umax(&u);
         let mut perm_inv = vec![0usize; m];
         for (k, &p) in perm.iter().enumerate() {
             perm_inv[p] = k;
@@ -79,6 +86,7 @@ impl DenseLu {
             qcol_inv: (0..m).collect(),
             updates_since_refactor: 0,
             growth: 1.0,
+            u_max0,
             params,
             scale,
             scratch_a: vec![0.0; m],
@@ -101,6 +109,7 @@ impl DenseLu {
         }
         factorize_packed(&mut packed, &mut self.perm, m, &self.params)?;
         let (l, u) = split_packed(&packed, m);
+        self.u_max0 = umax(&u);
         self.l = l;
         self.u = u;
         for (k, &p) in self.perm.iter().enumerate() {
@@ -213,6 +222,15 @@ fn split_packed(packed: &[f64], m: usize) -> (Vec<f64>, Vec<f64>) {
         l[j + j * m] = 1.0;
     }
     (l, u)
+}
+
+/// `max|U|` over the packed column-major buffer, floored away from zero so it
+/// is a safe denominator for the element-growth monitor (L5).
+#[inline]
+fn umax(u: &[f64]) -> f64 {
+    u.iter()
+        .fold(0.0_f64, |a, &x| a.max(x.abs()))
+        .max(f64::MIN_POSITIVE)
 }
 
 /// Right-looking outer-product LU with threshold partial pivoting, in place on

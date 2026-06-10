@@ -4,6 +4,23 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Numerics — the LU update growth monitor tracks element growth, not the largest single multiplier (L5)
+
+Both the dense (`src/lu/dense_update.rs`) and sparse (`src/lu/sparse_update.rs`)
+Forrest–Tomlin/Bartels–Golub update paths recorded `growth` as the largest
+single elimination multiplier ever seen. A chain of updates each with a
+multiplier of, say, ~100 compounds element growth in `U` to ~100ᵏ while the
+monitor sat flat at 100 — so an ill-conditioned basis could accumulate large
+entries in `U` and silently lose accuracy without ever tripping `max_growth` and
+forcing a refactor. The monitor is now the ‖U‖∞ element-growth high-water ratio
+`max|U| over the update history ÷ max|U| at the last factor`, which compounds
+across updates exactly as standard FT/BG implementations require. This makes the
+monitor strictly stricter (it can only trip earlier, never later), so a basis
+that would have drifted now refactors in time. The sparse path keeps the update
+cheap by scanning only the rows that changed this update — provably equal to the
+true high-water, since every changed `U` entry lives in a changed row. Finding
+from PR #83's review (`dev/research/repo-review-2026-06-09.md`).
+
 ### Scalability — dense-row guard in the sparse LU column ordering (L4)
 
 `SparseColMatrix::ata_pattern` built the explicit AᵀA column-intersection graph

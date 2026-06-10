@@ -298,3 +298,46 @@ dense row; interior column keeps all 5 pentadiagonal neighbours (no false drop).
 
 Evidence: 336 lib tests green (+2 new), clippy --all-targets -D warnings clean,
 fmt clean. No existing symbolic/ordering test changed.
+
+* 07:05 :numerics:lu:l5:growth-monitor:element-growth:fixed:
+L5 (repo-review-2026-06-09.md:435+): dense_update.rs and sparse_update.rs both
+recorded `growth` as the largest single elimination multiplier ever seen
+(growth = growth.max(mult.abs())). A chain of updates with multipliers ~100 each
+compounds element growth in U to ~100^k while the monitor sits flat at 100 — so
+an ill-conditioned basis accumulates large U entries and silently loses accuracy
+without ever tripping max_growth -> no refactor forced. Standard FT/BG monitor
+‖U‖-type growth, which compounds.
+
+Fix: replace the max-single-multiplier with the ‖U‖∞ element-growth high-water
+ratio: growth = max over update history of (max|U|) / u_max0, where
+u_max0 = max|U| immediately after the last factor/refactor (floored to
+f64::MIN_POSITIVE as a safe denominator). New u_max0 field on both DenseLu and
+SparseLu, set in factor + refactor. Dense recomputes max|U| over the cloned U
+before commit (cheap, dense is small). Sparse keeps the update cheap by scanning
+only `changed` rows: every U entry that changes in an update lives in a changed
+row, so self.growth.max(changed_max/u_max0) equals the true high-water — proven
+equal, O(changed) not O(nnz). The change is strictly stricter (growth can only
+trip earlier, never later); not a tolerance loosening.
+
+Decision (real fix, not tried-and-rejected): the deficiency IS reproducible —
+the code literally tracks only the max multiplier — and the fix makes the
+monitor catch compounding the old one missed. Did the fix.
+
+Reproduction: growth_monitor_tracks_compounded_element_growth in BOTH
+dense_update::tests and sparse_update::tests. 4×4 SPD-ish basis, max_growth=1e12
+(large so updates commit on old AND new code). Apply 3 LAST-slot replacements
+(slot 3, columns [0,0,1,20]/[0,0,1,60]/[0,0,1,180]) — q==m-1 forms no Hessenberg
+bump so every update commits cleanly while raising max|U| in that column. Oracle
+is INDEPENDENT recomputation: read committed U via lu.u(i,j)/lu.u_dense(i,j),
+compute hw = max(max|U|/u_max0), assert lu.growth ≈ hw each iteration and hw>1.
+RED: pre-fix growth = max single multiplier ≠ element ratio (both tests fail via
+TEMP revert to `growth = self.growth`). GREEN: monitor == element high-water.
+
+First test attempts used slot-0 replacements; the bump elimination tripped
+NeedsRefactor on a small in-bump pivot (no in-bump pivoting by design) so the
+update never committed. Switched to last-slot (no bump) — commits, still grows.
+
+Evidence: 342 lib tests green (+2 new), clippy --all-targets -D warnings clean,
+fmt clean (umax one-liner wrapped to 3 lines by rustfmt). growth has no external
+consumers (read/written only in the update paths), so the semantics change is
+self-contained.
