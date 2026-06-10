@@ -4,6 +4,23 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Numerics — the LU zero-pivot tolerance is relative to the matrix magnitude (L6)
+
+The singularity / zero-pivot test compared each pivot against the absolute
+`zero_pivot_tol` (default `1e-13`), independent of the basis scale and of the
+default `LuScaling::None`. A uniformly small but perfectly conditioned basis —
+e.g. `diag(1e-14)`, condition number 1, exact inverse `diag(1e14)` — was wrongly
+declared `SingularBasis { column: 0 }`, while a large-magnitude basis got
+effectively no singularity detection. The factor paths
+(`src/lu/dense_factor.rs`, `src/lu/sparse_factor.rs`) now use
+`zero_pivot_tol · max|A|`, and the Forrest–Tomlin/Bartels–Golub update paths
+(`src/lu/dense_update.rs`, `src/lu/sparse_update.rs`) use
+`zero_pivot_tol · max|U|` at the last factor — both matrix-relative, matching
+LAPACK's norm-relative convention. For the zero matrix (`max|A| == 0`) only an
+exact-zero pivot trips, which remains correct. On bases whose magnitude is `O(1)`
+the threshold is unchanged. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
 ### Numerics — the LU update growth monitor tracks element growth, not the largest single multiplier (L5)
 
 Both the dense (`src/lu/dense_update.rs`) and sparse (`src/lu/sparse_update.rs`)

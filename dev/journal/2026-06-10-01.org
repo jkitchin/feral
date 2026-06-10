@@ -341,3 +341,45 @@ Evidence: 342 lib tests green (+2 new), clippy --all-targets -D warnings clean,
 fmt clean (umax one-liner wrapped to 3 lines by rustfmt). growth has no external
 consumers (read/written only in the update paths), so the semantics change is
 self-contained.
+
+* 07:40 :numerics:lu:l6:zero-pivot-tol:relative-tolerance:fixed:
+L6 (repo-review-2026-06-09.md:435+ next section): the zero-pivot test compared
+the pivot against the ABSOLUTE zero_pivot_tol (1e-13) with default scaling None.
+dense_factor.rs:245, sparse_factor.rs:185, both update paths. A uniformly small
+but perfectly conditioned basis is wrongly declared SingularBasis; a
+large-magnitude basis gets effectively no singularity detection.
+
+Reproducible (confidence in finding was "likely" — confirmed). diag(1e-14) has
+cond₂ = 1 and exact inverse diag(1e14), so it is trivially invertible, yet every
+pivot 1e-14 ≤ 1e-13 -> SingularBasis{column:0}. (The finding cited ~1e-10; that
+value is actually > 1e-13 so it would NOT trip — the real threshold for the bug
+is entries ≲ 1e-13. Phenomenon is real, magnitude in the finding was loose.)
+
+Fix: scale the tolerance by the matrix magnitude. factorize_packed computes
+a_max = max|packed| and uses ztol = zero_pivot_tol · a_max; sparse factor uses
+a_max = max|a.values|. Update paths (dense_update, sparse_update eliminate_bump)
+use ztol = zero_pivot_tol · u_max0, where u_max0 = max|U| at the last factor
+(already computed + floored for L5) — the natural scale reference for U-entry
+bump pivots. For a_max == 0 (the zero matrix, genuinely singular) only an
+exact-zero pivot trips — still correct. Relative-to-global-max matches LAPACK's
+norm-relative singularity convention.
+
+Reproduction: factor_tiny_well_conditioned_basis_not_singular in BOTH
+dense_factor::tests and sparse_solve::tests. Oracle = hand-computed exact
+solution of B x = b for B = s·I (x = [1,2] for b = s·[1,2]). RED: pre-fix the
+factor expect() panics with SingularBasis{column:0} (verified on both — dense
+directly, sparse by perl-reverting the one-line fix, running, restoring from
+/tmp/sparse_factor_L6.bak). GREEN: both factor and solve to the exact answer.
+
+Decision (real fix, not document-only): the deficiency IS reproducible, and
+relative tolerance is strictly more correct (cond=1 matrices no longer rejected;
+relatively-singular large matrices now detected). The finding offered "make
+relative OR document" — did the stronger option.
+
+Risk considered: making ztol relative changes singularity behavior for matrices
+with a_max ≠ 1. Full suite (340 pass, 6 ignored, 0 fail) — including all update,
+L1 final-pivot, L5 growth, and singular-detection tests — unchanged. No
+regression; the absolute 1e-13 was not load-bearing anywhere.
+
+Evidence: 340 lib tests green (+2 new), clippy --all-targets -D warnings clean,
+fmt clean.

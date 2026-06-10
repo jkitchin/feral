@@ -293,7 +293,11 @@ impl SparseLu {
     /// recorded eta ops and the updated growth monitor. Operates in place on
     /// `self.u_rows`; the caller is responsible for rollback on `Err`.
     fn eliminate_bump(&mut self, r: usize, h: usize) -> Result<Vec<FtOp>, FeralError> {
-        let ztol = self.params.zero_pivot_tol;
+        // L6 (dev/research/repo-review-2026-06-09.md): the bump-pivot zero test
+        // is relative to the basis magnitude, not an absolute 1e-13. `u_max0`
+        // (max|U| at the last factor, floored away from zero for L5) is the scale
+        // reference, consistent with the dense update and the factor paths.
+        let ztol = self.params.zero_pivot_tol * self.u_max0;
         let mut ops: Vec<FtOp> = Vec::new();
 
         for k in r..=h {

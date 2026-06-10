@@ -399,6 +399,25 @@ mod tests {
         }
     }
 
+    /// L6 (dev/research/repo-review-2026-06-09.md): the sparse twin of the dense
+    /// tiny-basis test. `diag(1e-14)` is perfectly conditioned (cond₂ = 1, exact
+    /// inverse `diag(1e14)`) but every pivot 1e-14 ≤ the absolute `zero_pivot_tol`
+    /// (1e-13), so the sparse factor declared `SingularBasis { column: 0 }`. With
+    /// the relative tolerance `zero_pivot_tol · max|A|` it factors. Oracle: the
+    /// hand-computed exact solution of `B x = b`. Pre-fix this `expect` panics.
+    #[test]
+    fn factor_tiny_well_conditioned_basis_not_singular() {
+        let s = 1e-14;
+        let cols = vec![vec![s, 0.0], vec![0.0, s]];
+        let mut lu =
+            SparseLu::factor_dense_columns(2, &cols, LuParams::default()).expect("tiny basis");
+        // B = s·I, b = s·[1, 2]  =>  x = [1, 2] exactly.
+        let mut rhs = vec![s, 2.0 * s];
+        lu.ftran(&mut rhs).expect("ftran");
+        assert!((rhs[0] - 1.0).abs() < 1e-6, "x0 = {}", rhs[0]);
+        assert!((rhs[1] - 2.0).abs() < 1e-6, "x1 = {}", rhs[1]);
+    }
+
     /// A zero `U` diagonal (as a degenerate post-update bump pivot could leave)
     /// must surface as `SingularBasis`, not a silent `±Inf` out of the divide.
     #[test]

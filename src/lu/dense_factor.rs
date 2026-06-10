@@ -242,7 +242,15 @@ fn factorize_packed(
     params: &LuParams,
 ) -> Result<(), FeralError> {
     let u = params.pivot_threshold;
-    let ztol = params.zero_pivot_tol;
+    // L6 (dev/research/repo-review-2026-06-09.md): scale the zero-pivot tolerance
+    // by the matrix magnitude. An absolute `zero_pivot_tol` declared a uniformly
+    // small but perfectly conditioned basis (e.g. `diag(1e-14)`) singular and
+    // gave a large-magnitude basis effectively no singularity detection. The
+    // relative tolerance `zero_pivot_tol · max|A|` tracks the basis scale; for a
+    // zero matrix `a_max == 0`, so only an exact-zero pivot is rejected — still
+    // correct, since the zero matrix is singular.
+    let a_max = packed.iter().fold(0.0_f64, |a, &x| a.max(x.abs()));
+    let ztol = params.zero_pivot_tol * a_max;
     for k in 0..m {
         // Pivot search: max-magnitude entry in column k over rows k..m.
         let mut amax = 0.0_f64;
@@ -400,6 +408,27 @@ mod tests {
         };
         let lu = DenseLu::factor(&cols, m, params).expect("perturbed factor");
         assert!(lu.u(1, 1).abs() >= 1e-10);
+    }
+
+    /// L6 (dev/research/repo-review-2026-06-09.md): the zero-pivot test compared
+    /// the pivot against the absolute `zero_pivot_tol` (1e-13). `diag(1e-14)` is
+    /// perfectly conditioned — cond₂ = 1, exact inverse `diag(1e14)` — yet every
+    /// pivot 1e-14 ≤ 1e-13, so it was declared `SingularBasis { column: 0 }` even
+    /// though it is trivially invertible. The fix scales the tolerance by the
+    /// matrix magnitude (`zero_pivot_tol · max|A|`), so a uniformly small but
+    /// well-conditioned basis factors. Oracle: the hand-computed exact solution
+    /// of `B x = b`. Pre-fix this `expect` panics on `SingularBasis`.
+    #[test]
+    fn factor_tiny_well_conditioned_basis_not_singular() {
+        let s = 1e-14;
+        let (cols, m) = cols_from_rows(&[&[s, 0.0], &[0.0, s]]);
+        let mut lu = DenseLu::factor(&cols, m, LuParams::default())
+            .expect("tiny but well-conditioned basis must factor");
+        // B = s·I, b = s·[1, 2]  =>  x = [1, 2] exactly.
+        let mut rhs = vec![s, 2.0 * s];
+        lu.ftran(&mut rhs).expect("ftran");
+        assert!((rhs[0] - 1.0).abs() < 1e-6, "x0 = {}", rhs[0]);
+        assert!((rhs[1] - 2.0).abs() < 1e-6, "x1 = {}", rhs[1]);
     }
 
     #[test]

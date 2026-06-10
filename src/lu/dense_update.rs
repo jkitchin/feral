@@ -59,7 +59,12 @@ impl DenseLu {
         self.ftran_partial(&mut spike)?;
 
         let q = self.qcol_inv[leaving_slot];
-        let ztol = self.params.zero_pivot_tol;
+        // L6 (dev/research/repo-review-2026-06-09.md): the bump-pivot and
+        // final-pivot zero tests must be relative to the basis magnitude, not an
+        // absolute 1e-13. `u_max0` (max|U| at the last factor, already floored
+        // away from zero for L5) is the natural scale reference, consistent with
+        // the factor path's `zero_pivot_tol · max|A|`.
+        let ztol = self.params.zero_pivot_tol * self.u_max0;
         let max_growth = self.params.max_growth;
 
         // Work on clones; commit only on success.

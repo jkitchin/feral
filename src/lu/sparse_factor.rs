@@ -182,7 +182,14 @@ impl SparseLu {
         let mut dfs_stack: Vec<usize> = Vec::new();
 
         let utol = params.pivot_threshold;
-        let ztol = params.zero_pivot_tol;
+        // L6 (dev/research/repo-review-2026-06-09.md): scale the zero-pivot
+        // tolerance by the matrix magnitude, matching the dense path. An absolute
+        // `zero_pivot_tol` declared a uniformly small but perfectly conditioned
+        // basis singular and gave a large-magnitude basis effectively no
+        // singularity detection. `a_max == 0` only for the (genuinely singular)
+        // zero matrix, where the exact-zero test still fires.
+        let a_max = a.values.iter().fold(0.0_f64, |acc, &x| acc.max(x.abs()));
+        let ztol = params.zero_pivot_tol * a_max;
         let mut reach_visits = 0usize;
 
         for k in 0..m {
