@@ -835,3 +835,36 @@ Evidence: feral lib 350 passed (+1) / 0 failed; clippy -p feral --lib clean;
 fmt clean. User-visible (panic -> Result on a public fn) -> CHANGELOG entry added.
 
 Next per /loop: do NOT start the next issue (N7). Schedule it.
+
+* 16:40 :numeric:factorize:permute:cache:n7:perf:fixed:
+N7 (repo-review-2026-06-09.md §4): the cold path of
+`permute_csc_values_with_cache` (factorize.rs ~3562) rebuilt the value-map
+cache unconditionally — an O(nnz·log) binary-search scan plus three O(nnz)
+vectors — even when `pattern_reused_hint == false`. The warm fast path that
+consumes the cache is itself gated on `pattern_reused_hint`, so a cache built
+on a hint=false (one-shot) call is never read: pure wasted work for every
+direct/one-shot caller.
+
+Fix: wrap the cache build (`build_permute_value_map` + `*cache = Some(..)`)
+in `if pattern_reused_hint { .. }`. One-shot callers now skip the build
+entirely; the warm-reuse caller (Solver::factor, hint=true) still pays the
+build exactly once on its first cold call and reaps it on every subsequent
+reuse — the optimization is preserved, only the wasted build is dropped.
+
+Reproducing test `permute_cache_not_built_for_one_shot_caller` (n=4,
+identity perm): calls with hint=false + empty cache, asserts (a) the
+permuted matrix equals the input (identity perm ⇒ no-op) and (b) the cache
+stays `None`. A second call with hint=true asserts the cache IS built, so
+the gating is conditional not a blanket disable.
+
+RED demonstrated by temporarily forcing the guard to `if true`: panic at
+factorize.rs:5118 "one-shot caller (hint=false) should not build the
+value-map cache" (cold path populated Some). GREEN after restoring the
+`pattern_reused_hint` guard.
+
+Evidence: feral lib 351 passed (+1) / 0 failed / 6 ignored; clippy -p feral
+--lib clean; fmt clean. Internal perf only — no numeric change, no public
+API change — so NO CHANGELOG entry.
+
+Next per /loop: do NOT start the next issue (N8). Continue in-turn per the
+live "speed this up" directive.

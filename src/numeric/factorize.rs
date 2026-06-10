@@ -3562,22 +3562,32 @@ fn permute_csc_values_with_cache(
     // Cold path: canonical from-triplets rebuild.
     let (permuted, from_triplets_us) = permute_csc_values(matrix, perm, perm_inv, profile)?;
 
-    // Refresh cache so the next warm call can take the fast path. Best
-    // effort — on the (unexpected) row-lookup failure the cache is
-    // cleared and subsequent calls take the cold path until the next
-    // successful refresh.
-    match build_permute_value_map(matrix, perm_inv, &permuted) {
-        Ok(value_map) => {
-            *cache = Some(PermuteCache {
-                input_n: n,
-                input_nnz: nnz,
-                permuted_col_ptr: permuted.col_ptr.clone(),
-                permuted_row_idx: permuted.row_idx.clone(),
-                value_map,
-            });
-        }
-        Err(_) => {
-            *cache = None;
+    // N7: only build the value-map cache when a warm reuse is actually
+    // anticipated. `pattern_reused_hint == false` is the one-shot path —
+    // the warm branch above is gated on the same hint, so a cache built
+    // here would never be read. Building it anyway costs an O(nnz · log)
+    // scan plus three O(nnz) vectors per factorization that are thrown
+    // away. Skip the build for one-shot callers; the warm-reuse caller
+    // (hint == true) still pays the build exactly once on its first,
+    // cache-cold call and reaps it on every subsequent reuse.
+    if pattern_reused_hint {
+        // Refresh cache so the next warm call can take the fast path. Best
+        // effort — on the (unexpected) row-lookup failure the cache is
+        // cleared and subsequent calls take the cold path until the next
+        // successful refresh.
+        match build_permute_value_map(matrix, perm_inv, &permuted) {
+            Ok(value_map) => {
+                *cache = Some(PermuteCache {
+                    input_n: n,
+                    input_nnz: nnz,
+                    permuted_col_ptr: permuted.col_ptr.clone(),
+                    permuted_row_idx: permuted.row_idx.clone(),
+                    value_map,
+                });
+            }
+            Err(_) => {
+                *cache = None;
+            }
         }
     }
 
@@ -5070,6 +5080,55 @@ mod tests {
             "prologue sub-phases sum to {} us, exceeding prologue {} us",
             subphase_sum,
             report.prologue_us
+        );
+    }
+
+    /// N7: a one-shot caller (`pattern_reused_hint == false`) must not
+    /// pay to build the value-map cache — the warm fast path is gated on
+    /// the same hint, so a cache built on a cold one-shot call would
+    /// never be read. The cold path must still produce the correct
+    /// permuted matrix; only the (wasted) cache build is skipped.
+    #[test]
+    fn permute_cache_not_built_for_one_shot_caller() {
+        // Lower-triangular SPD-ish pattern, identity permutation so the
+        // permuted matrix equals the input and is trivial to verify.
+        let n = 4usize;
+        let rows = vec![0usize, 1, 1, 2, 2, 3, 3];
+        let cols = vec![0usize, 0, 1, 1, 2, 2, 3];
+        let vals = vec![4.0f64, -1.0, 4.0, -1.0, 4.0, -1.0, 4.0];
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let perm: Vec<usize> = (0..n).collect();
+        let perm_inv: Vec<usize> = (0..n).collect();
+
+        // One-shot: hint off, empty cache.
+        let mut cache: Option<PermuteCache> = None;
+        let (permuted, _us) =
+            permute_csc_values_with_cache(&m, &perm, &perm_inv, false, false, &mut cache).unwrap();
+
+        // Permuted matrix is correct (identity perm ⇒ equals input).
+        assert_eq!(permuted.n, m.n);
+        assert_eq!(permuted.col_ptr, m.col_ptr);
+        assert_eq!(permuted.row_idx, m.row_idx);
+        assert_eq!(permuted.values, m.values);
+
+        // N7: the cache must remain unbuilt for a one-shot caller.
+        // Pre-fix this is `Some(..)` (the cold path populated it
+        // unconditionally); post-fix it stays `None`.
+        assert!(
+            cache.is_none(),
+            "one-shot caller (hint=false) should not build the value-map cache"
+        );
+
+        // Sanity: a warm-reuse caller (hint=true) still builds the cache
+        // on its first cold call, so the gating is conditional, not a
+        // blanket disable.
+        let mut warm_cache: Option<PermuteCache> = None;
+        let (_permuted2, _us2) =
+            permute_csc_values_with_cache(&m, &perm, &perm_inv, true, true, &mut warm_cache)
+                .unwrap();
+        assert!(
+            warm_cache.is_some(),
+            "warm-reuse caller (hint=true) should build the value-map cache on its cold call"
         );
     }
 }
