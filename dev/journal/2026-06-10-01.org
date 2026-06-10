@@ -532,3 +532,20 @@ witness, exact match).
 Fix: build a row_matched bitset from perm (O(n)), then fall back to identity when
 perm[i]==MAX OR !row_matched[i]. Updated module step-9 doc and the inline comment.
 GREEN; full lib suite 345 passed; clippy -D warnings clean; fmt clean.
+
+* 10:20 :sparse:csc:validate:x6:fixed:
+X6 (repo-review-2026-06-09.md): CscMatrix::validate lacked a col_ptr monotonicity
+check. It verified col_ptr.len()==n+1, row_idx.len()==values.len(), col_ptr[n]==nnz,
+per-entry in-bounds/lower-triangle, and within-column sorting — but never that
+col_ptr is monotonically non-decreasing. A non-monotone ia whose endpoints line up
+(col_ptr[0]==0, col_ptr[n]==nnz) passes every check yet produces empty/overlapping
+column ranges: entries silently dropped, the wrong matrix factored, FERAL_SUCCESS
+returned. (Negative i32 entries sign-extend to huge usize and are caught as out-of-
+bounds, so the monotonicity hole is the silent one.)
+Reproduction: validate_rejects_non_monotone_col_ptr. n=3, nnz=2,
+col_ptr=[0,2,1,2], row_idx=[0,2], values=[1,1]. col_ptr[3]=2==nnz, all rows
+in-bounds/lower-tri/sorted within non-empty ranges, but col_ptr[1]=2 > col_ptr[2]=1.
+Oracle: the standard CSC contract (col_ptr non-decreasing). RED: validate() returned
+Ok. Fix: an up-front loop rejecting col_ptr[j+1] < col_ptr[j] with an InvalidInput
+naming the offending column, placed before the start..end ranges are used so they
+are well-formed. GREEN; sparse::csc suite 12 passed.

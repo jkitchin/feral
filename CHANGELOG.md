@@ -4,6 +4,21 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `CscMatrix::validate` now rejects a non-monotone `col_ptr` (X6)
+
+`CscMatrix::validate` checked `col_ptr.len() == n + 1`, `row_idx.len() ==
+values.len()`, `col_ptr[n] == nnz`, per-entry bounds/lower-triangle, and
+within-column sorting — but never that `col_ptr` is monotonically
+non-decreasing. A non-monotone `col_ptr` whose endpoints happen to line up
+(`col_ptr[0] == 0`, `col_ptr[n] == nnz`) passed every check yet produced
+empty or overlapping column ranges, so entries were silently dropped, the
+wrong matrix was factored, and `FERAL_SUCCESS` was returned. (Negative `i32`
+column counts sign-extend to a huge `usize` and are already caught as
+out-of-bounds, so the monotonicity gap was the silent one.) `validate` now
+rejects any `col_ptr[j + 1] < col_ptr[j]` with an `InvalidInput` naming the
+offending column. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
 ### Fixed — MC64 partial-singular fallback now covers unmatched rows, not just unmatched columns (X4)
 
 On a partial (structurally singular) matching the MC64 symmetric scaling fell

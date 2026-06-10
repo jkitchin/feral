@@ -203,6 +203,23 @@ impl CscMatrix {
         if self.col_ptr[self.n] != self.row_idx.len() {
             return Err(FeralError::InvalidInput("col_ptr[n] != nnz".to_string()));
         }
+        // col_ptr must be monotonically non-decreasing (X6). Without this a
+        // non-monotone `ia` whose endpoints line up (col_ptr[0] == 0,
+        // col_ptr[n] == nnz) passes every check below — in-bounds, sorted,
+        // lower-triangle — yet `col_ptr[j] > col_ptr[j+1]` makes column j's
+        // range empty and overlaps adjacent columns, silently dropping entries
+        // and factoring the wrong matrix. Checked up front so the `start..end`
+        // ranges used below are well-formed.
+        for j in 0..self.n {
+            if self.col_ptr[j + 1] < self.col_ptr[j] {
+                return Err(FeralError::InvalidInput(format!(
+                    "col_ptr not monotonically non-decreasing at column {} ({} > {})",
+                    j,
+                    self.col_ptr[j],
+                    self.col_ptr[j + 1]
+                )));
+            }
+        }
         for j in 0..self.n {
             let start = self.col_ptr[j];
             let end = self.col_ptr[j + 1];
@@ -512,5 +529,39 @@ mod tests {
         assert!((y[0] - 3.0).abs() < 1e-14); // 2 + 0 + 1
         assert!((y[1] - 4.0).abs() < 1e-14); // 0 + 3 + 1
         assert!((y[2] - (2.0 - 1e-8)).abs() < 1e-14); // 1 + 1 - 1e-8
+    }
+
+    /// X6 (dev/research/repo-review-2026-06-09.md): `validate()` must reject a
+    /// non-monotone `col_ptr`. A valid CSC requires `col_ptr` to be
+    /// monotonically non-decreasing (the standard column-pointer contract);
+    /// without that check a non-monotone `ia` whose endpoints line up
+    /// (`col_ptr[0] == 0`, `col_ptr[n] == nnz`) passes every other check yet
+    /// produces empty/overlapping column ranges, so entries are silently
+    /// dropped and the wrong matrix is factored.
+    ///
+    /// Witness: n = 3, nnz = 2, `col_ptr = [0, 2, 1, 2]`. The endpoints line up
+    /// (`col_ptr[3] == 2 == nnz`), every row index is in-bounds, lower-triangle
+    /// and sorted within its (non-empty) range, but `col_ptr[1] = 2 >
+    /// col_ptr[2] = 1`, so column 1's range `[2, 1)` is empty and column 2
+    /// re-reads index 1. Pre-fix `validate()` returned `Ok`.
+    #[test]
+    fn validate_rejects_non_monotone_col_ptr() {
+        let m = CscMatrix {
+            n: 3,
+            col_ptr: vec![0, 2, 1, 2],
+            // index 0 -> (row 0, col 0); index 1 -> (row 2, col 0 and re-read
+            // as col 2). Both lower-triangle and in-bounds.
+            row_idx: vec![0, 2],
+            values: vec![1.0, 1.0],
+        };
+        let err = m
+            .validate()
+            .expect_err("non-monotone col_ptr must be rejected (X6)");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("col_ptr") && msg.contains("monoton"),
+            "error should mention non-monotone col_ptr, got: {}",
+            msg
+        );
     }
 }
