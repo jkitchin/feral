@@ -4,6 +4,24 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Numerics — the sparse LU now honors `pivot_threshold` (L2)
+
+The sparse unsymmetric LU path (`src/lu/sparse_factor.rs`) computed the
+threshold-partial-pivoting parameter `u` and then discarded it (`let _ = utol`),
+always taking the strict max-magnitude pivot row. So `pivot_threshold = 0.1`
+changed the dense path but silently changed nothing on the sparse path,
+contradicting the module doc ("threshold partial pivoting"), the `LuParams`
+doc, and the dense path. The sparse factorization now implements
+diagonal-preference threshold partial pivoting matching CSparse `cs_lu`: when the
+natural diagonal row is still unpivoted and within `u·max` of the column max, it
+is preferred (a sparser, structure-preserving pivot). `u = 1.0` (the default)
+recovers strict partial pivoting exactly, so all default factorizations are
+unchanged. The Forrest–Tomlin bump elimination in `update()` deliberately keeps
+strict partial pivoting (the bump structure is fixed, so a relaxed threshold buys
+no fill reduction and only costs stability); the `LuParams::pivot_threshold` doc
+now scopes the knob accordingly. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
 ### Harness/C-ABI — `FERAL_SCALING` vocabulary unified across the shim and bench (X5)
 
 The two `FERAL_SCALING` parsers had drifted apart. The C-ABI shim (`src/capi.rs`)

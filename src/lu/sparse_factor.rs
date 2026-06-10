@@ -284,9 +284,23 @@ impl SparseLu {
                     }
                 }
             } else {
-                // Threshold partial pivoting: take the max (u=1 default).
-                let _ = utol;
-                pivot_row = ipiv as usize;
+                // L2 (dev/research/repo-review-2026-06-09.md): threshold partial
+                // pivoting. The strict max-magnitude row `ipiv` is the stability
+                // baseline; but if the natural diagonal of this column — original
+                // row `qcol[k]` — is still unpivoted and is within `utol·amax` of
+                // that max, prefer it. The diagonal pivot preserves structure
+                // (less fill) without sacrificing more than a factor `utol` of
+                // stability. `utol == 1.0` (the default) recovers strict partial
+                // pivoting, since the diagonal must then equal the max to qualify.
+                // This matches CSparse `cs_lu` (Davis, *Direct Methods for Sparse
+                // Linear Systems*, §6.3): `if (pinv[col] < 0 && |x[col]| >= a*tol)
+                // ipiv = col`.
+                let diag = qcol[k];
+                pivot_row = if pinv[diag] < 0 && w[diag].abs() >= utol * amax {
+                    diag
+                } else {
+                    ipiv as usize
+                };
                 piv = w[pivot_row];
                 if piv.abs() <= ztol {
                     piv = if piv < 0.0 { -ztol } else { ztol };

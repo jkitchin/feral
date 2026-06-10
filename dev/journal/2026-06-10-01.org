@@ -454,3 +454,38 @@ External oracle for the alias mapping: the ScalingStrategy::Auto docstring
 (scaling/mod.rs:176-183) — "adaptive shape-based routing", the documented intent
 both spellings name. GREEN: 3 new tests pass; full suite 341 lib + 3 bin bench
 pass, 0 regressions.
+
+* 09:05 :numerics:lu:sparse:l2:pivot-threshold:tpp:fixed:
+L2 (repo-review-2026-06-09.md): the sparse LU silently ignored pivot_threshold.
+sparse_factor.rs:288 had `let _ = utol; pivot_row = ipiv` — always the strict
+max-magnitude row, regardless of the threshold. So a user setting
+pivot_threshold=0.1 changed the dense path but was a silent no-op on the sparse
+path, contradicting the header doc ("threshold partial pivoting"), the LuParams
+doc (mod.rs:67-70), and the dense path.
+
+Reproduced (RED): src/lu/sparse_solve.rs sparse_lu_honors_pivot_threshold.
+Matrix A=[[1,0],[2,1]] (col0=[1,2], col1=[0,1]), natural column order. Column 0
+diagonal w[0]=1, off-diagonal w[1]=2. u=1.0 -> strict picks row 1 (perm[0]=1);
+u=0.5 -> |w[0]|=1 >= 0.5*2=1.0 so diagonal within threshold -> row 0 (perm[0]=0).
+RED: u=0.5 gave perm[0]=1 (left:1 right:0) because utol was discarded.
+
+Fix: implemented diagonal-preference TPP matching CSparse cs_lu (Davis, Direct
+Methods §6.3): in the else branch, if the natural diagonal row qcol[k] is still
+unpivoted and |w[qcol[k]]| >= utol*amax, pivot on it, else fall back to the
+strict-max ipiv. u=1.0 (the LuParams default) recovers strict partial pivoting
+exactly (diagonal must equal the max to qualify), so all existing factorizations
+are unchanged — full suite 342 lib pass (was 341 + this test), 0 regressions.
+
+External oracle: cs_lu's `if (pinv[col]<0 && |x[col]| >= a*tol) ipiv = col`
+(behavioral witness) + the hand-computed solve A x=[1,4] => x=[1,2] (numeric
+correctness). GREEN after fix.
+
+Bump-elimination path (sparse_update.rs:303-314): the finding also flagged its
+strict-max pivoting. DELIBERATELY left strict. In a Forrest-Tomlin bump
+elimination the bump's structure is already fixed, so a relaxed threshold buys
+no fill reduction and only trades away stability — strict partial pivoting is the
+standard stability-optimal choice and I have no external oracle prescribing
+diagonal preference there. Reconciled the docs instead: LuParams::pivot_threshold
+doc now scopes the knob to the initial factorization and states the bump uses
+strict pivoting; added a comment at the bump site. (Project value: correctness
+before performance.)

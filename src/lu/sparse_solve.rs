@@ -418,6 +418,75 @@ mod tests {
         assert!((rhs[1] - 2.0).abs() < 1e-6, "x1 = {}", rhs[1]);
     }
 
+    /// L2 (dev/research/repo-review-2026-06-09.md): the sparse LU must honor
+    /// `pivot_threshold` (threshold partial pivoting), matching the dense path
+    /// and the documented contract at `lu/mod.rs:67-69`. Before the fix `utol`
+    /// was discarded (`let _ = utol`) and the sparse path always took the
+    /// strict-max-magnitude row, so a sub-1.0 threshold silently changed
+    /// nothing.
+    ///
+    /// Matrix A = [[1,0],[2,1]] (col0 = [1,2], col1 = [0,1]), natural column
+    /// order: column 0 has diagonal `w[0] = 1` and off-diagonal `w[1] = 2`.
+    /// With u = 1.0 (strict) `|2| > |1|`, so the pivot is row 1 and perm[0] = 1.
+    /// With u = 0.5 (threshold) `|w[0]| = 1 >= 0.5*2 = 1.0`, so the diagonal is
+    /// within threshold and the structure-preserving row is taken: perm[0] = 0.
+    /// Both factorizations must still solve A x = b exactly. External oracle:
+    /// the hand-computed solution of A x = [1, 4] is x = [1, 2]. The pivot-row
+    /// divergence is the behavioral witness; pre-fix both perms are [1, 0].
+    /// The diagonal-preference rule matches CSparse `cs_lu`
+    /// (Davis, Direct Methods for Sparse Linear Systems, section 6.3).
+    #[test]
+    fn sparse_lu_honors_pivot_threshold() {
+        use crate::lu::SparseLuSymbolic;
+        let cols = vec![vec![1.0, 2.0], vec![0.0, 1.0]];
+        let a = SparseColMatrix::from_dense_columns(2, &cols).expect("matrix");
+        let symbolic = SparseLuSymbolic::natural(2);
+
+        // Strict partial pivoting (u = 1.0): the max-magnitude row wins.
+        let strict = SparseLu::factor(
+            &a,
+            &symbolic,
+            LuParams {
+                pivot_threshold: 1.0,
+                ..LuParams::default()
+            },
+        )
+        .expect("strict factor");
+        assert_eq!(strict.perm()[0], 1, "u=1.0 must pivot the larger row 1");
+
+        // Threshold partial pivoting (u = 0.5): the diagonal is within
+        // threshold, so it is preferred over the larger off-diagonal entry.
+        let mut relaxed = SparseLu::factor(
+            &a,
+            &symbolic,
+            LuParams {
+                pivot_threshold: 0.5,
+                ..LuParams::default()
+            },
+        )
+        .expect("relaxed factor");
+        assert_eq!(
+            relaxed.perm()[0],
+            0,
+            "u=0.5 must prefer the within-threshold diagonal row 0 (L2)"
+        );
+
+        // Both must solve correctly. Oracle: A x = [1, 4]  =>  x = [1, 2].
+        let mut strict = strict;
+        let mut rhs = vec![1.0, 4.0];
+        strict.ftran(&mut rhs).expect("strict ftran");
+        assert!(
+            (rhs[0] - 1.0).abs() < 1e-12 && (rhs[1] - 2.0).abs() < 1e-12,
+            "strict solve {rhs:?}"
+        );
+        let mut rhs = vec![1.0, 4.0];
+        relaxed.ftran(&mut rhs).expect("relaxed ftran");
+        assert!(
+            (rhs[0] - 1.0).abs() < 1e-12 && (rhs[1] - 2.0).abs() < 1e-12,
+            "relaxed solve {rhs:?}"
+        );
+    }
+
     /// A zero `U` diagonal (as a degenerate post-update bump pivot could leave)
     /// must surface as `SingularBasis`, not a silent `±Inf` out of the divide.
     #[test]

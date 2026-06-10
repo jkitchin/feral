@@ -301,7 +301,11 @@ impl SparseLu {
         let mut ops: Vec<FtOp> = Vec::new();
 
         for k in r..=h {
-            // Partial pivot among rows [k, h] with a column-k entry.
+            // Strict partial pivoting among rows [k, h] with a column-k entry.
+            // Unlike the initial factorization (which honors `pivot_threshold`
+            // to trade stability for fill, L2), the bump's structure is already
+            // fixed here, so a relaxed threshold buys no fill reduction and only
+            // trades away stability — we always take the max-magnitude row.
             let mut pivot_row = k;
             let mut pivot_abs = 0.0_f64;
             for i in k..=h {

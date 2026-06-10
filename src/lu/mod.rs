@@ -67,6 +67,13 @@ pub struct LuParams {
     /// Threshold partial-pivoting parameter `u ∈ (0, 1]`. `1.0` is strict
     /// partial pivoting (max stability); smaller values permit a sparser /
     /// closer-to-diagonal pivot when it is within `u·max` of the column max.
+    ///
+    /// Governs the **initial factorization** (both the dense and sparse paths
+    /// honor it: the sparse path prefers the within-threshold diagonal row,
+    /// matching CSparse `cs_lu`). The Forrest–Tomlin bump elimination in
+    /// `update()` always uses strict partial pivoting (`u = 1`) for stability —
+    /// the bump's structure is already fixed there, so a relaxed threshold buys
+    /// no fill reduction and only trades away stability.
     pub pivot_threshold: f64,
     /// A pivot column with all candidates `≤ zero_pivot_tol` is singular.
     pub zero_pivot_tol: f64,
