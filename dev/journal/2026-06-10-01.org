@@ -72,3 +72,39 @@ set_len would be caught if it ever makes the uninit observable.
 
 Next per triage: N2 already done; D7 (next finding in
 dev/research/repo-review-2026-06-09.md).
+
+** 01:20 :D7:block32:dispatch:pooled-scratch:perf:fixed:
+D7 (dev/research/repo-review-2026-06-09.md): the 32x32 fully-summed-front
+dispatch inside factor_frontal_blocked_in_place_with_scratch routed through
+factor_block32, which delegated to the PUBLIC factor_frontal. That public
+entry re-runs matrix.validate() (full NaN scan), allocates an n*n working
+copy, and builds a throwaway FactorScratch -- bypassing the caller's pooled
+scratch which the whole W-3a in-place path (issue #13) exists to reuse, on
+the self-described dominant 32x32 KKT front size. Pure overhead.
+
+Reproduction (tests-first, tests/d7_block32_dispatch_pooled.rs): the in-place
+pooled path resizes scratch.subdiag to nrow (factor.rs:1593-1595); the
+factor_frontal detour leaves the caller's scratch pristine. So after a 32x32
+dispatch with a fresh FactorScratch, scratch.subdiag.len() == nrow iff the
+pooled path ran (post-fix) and == 0 iff it took the allocating detour
+(pre-fix). RED pre-fix: assert subdiag.len()==32 -> left:0 right:32. GREEN
+post-fix. Companion test pins bit-parity vs the factor_frontal oracle
+(to_bits on l/d_diag/d_subdiag/contrib + nelim/n_delayed/inertia/perm) so the
+overhead removal cannot change numerics.
+
+Fix: collapsed factor_block32 to a SINGLE in-place pooled signature
+(&mut SymmetricMatrix + ncol + may_delay + params + &mut FactorScratch),
+keeping the n != BLOCK_SIZE guard then delegating to
+factor_frontal_in_place_with_scratch. Dispatch routes to it; the module's own
+parity tests call the same production entry (no dead code -- a first attempt
+that added a SEPARATE in-place fn left immutable factor_block32 uncalled and
+tripped clippy -D dead-code). First-attempt symptom recorded for honesty:
+"function factor_block32 is never used".
+
+Evidence: d7 2/2 (pooled-scratch repro + bit-parity oracle), block32 lib
+10/0, blocked_ldlt 21/0, dense_ldlt 17/0, delayed_pivoting 6/0, lib 330/0.
+clippy -D warnings clean, fmt clean. Byte-identical output; perf/overhead
+fix only.
+
+Next per triage: D7 was the last of the queued dense/numeric batch in this
+loop; continue to the next finding in dev/research/repo-review-2026-06-09.md.

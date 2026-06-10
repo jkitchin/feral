@@ -4,6 +4,22 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — 32×32 front dispatch now reuses the caller's pooled scratch (D7)
+
+The 32×32 fully-summed-front dispatch inside
+`factor_frontal_blocked_in_place_with_scratch` (the self-described dominant KKT
+front size) routed through `factor_block32`, which delegated to the **public**
+`factor_frontal`. That public entry re-runs `matrix.validate()` (a full NaN
+scan), allocates an `n×n` working copy, and builds a throwaway `FactorScratch`
+— defeating the in-place W-3a path (issue #13) whose whole purpose is to reuse
+the caller's pooled buffers. `factor_block32` is now a single in-place entry
+(`&mut SymmetricMatrix` + caller's `FactorScratch`) that delegates to
+`factor_frontal_in_place_with_scratch`, so the 32×32 dispatch skips the
+validate, the copy, and the throwaway allocation. Output is **byte-identical**
+(guarded by a `to_bits` parity test against the `factor_frontal` oracle); this
+is a pure overhead removal with no behavior change. Seventh finding from PR
+#83's review (`dev/research/repo-review-2026-06-09.md`).
+
 ### Added — unsymmetric LU basis engine (`feral::lu`, issue #81)
 
 A new, separate factorization family for **simplex basis factorization** —

@@ -1907,20 +1907,30 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         return factor_frontal(matrix, ncol, may_delay, params);
     }
 
-    // Issue #9 Step 2 dispatch: 32×32 fully-summed fronts go through
-    // `factor_block32`. That function delegates to `factor_frontal`,
-    // whose eager `do_1x1_update` / `do_2x2_update` now route to the
-    // block-32 SIMD body (`update_1x1_block32` quad/dual/single tiling)
-    // at n==32. The panel path (`lblt_panel_frontal`) was leaving the
-    // batched-source quad kernel unused at bs==ncol==32 because
+    // Issue #9 Step 2 dispatch: 32×32 fully-summed fronts go through the
+    // block-32 entry, whose eager `do_1x1_update` / `do_2x2_update` route
+    // to the block-32 SIMD body (`update_1x1_block32` quad/dual/single
+    // tiling) at n==32. The panel path (`lblt_panel_frontal`) was leaving
+    // the batched-source quad kernel unused at bs==ncol==32 because
     // `j_start = k + n_elim == nrow` skips `apply_blocked_schur_panel`;
-    // the eager-update path uses the quad kernel for every trailing
-    // tile of 4 columns. Bit-parity: factor_frontal is the documented
-    // oracle for both lblt_panel_frontal and the block-32 SIMD body.
+    // the eager-update path uses the quad kernel for every trailing tile
+    // of 4 columns.
+    //
+    // D7: use the in-place, pooled-scratch entry
+    // (`factor_block32_in_place_with_scratch`) rather than the immutable
+    // `factor_block32`. The latter delegates to the public `factor_frontal`,
+    // which re-runs `validate()`, allocates an n×n working copy, and builds
+    // a throwaway `FactorScratch` — defeating the whole purpose of this
+    // W-3a in-place path (issue #13). The in-place entry factors directly
+    // into `matrix.data` reusing `scratch`, and is bit-exact with
+    // `factor_frontal` (the documented oracle for both lblt_panel_frontal
+    // and the block-32 SIMD body).
     if nrow == crate::dense::block_ldlt32::BLOCK_SIZE
         && ncol == crate::dense::block_ldlt32::BLOCK_SIZE
     {
-        return crate::dense::block_ldlt32::factor_block32(matrix, ncol, may_delay, params);
+        return crate::dense::block_ldlt32::factor_block32(
+            matrix, ncol, may_delay, params, scratch,
+        );
     }
 
     // Fallback conditions where the panel offers no advantage.
