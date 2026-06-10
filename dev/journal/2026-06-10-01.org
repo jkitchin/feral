@@ -900,3 +900,33 @@ change; nothing fixed). tried-and-rejected.md updated with full reasoning.
 
 Next per /loop: do NOT start the next issue (N9). Continue in-turn per the live
 "speed this up" directive.
+
+* 17:20 :numeric:factorize:profiler:n9:diagnostics:global-atomic:deferred:
+N9 (repo-review-2026-06-09.md §4): sequential per-supernode phase deltas
+(factorize.rs:2021/2036) snapshot process-global AtomicU64 counters
+(ASSEMBLY_NS etc., dense/factor.rs:188) before/after one factor_one_supernode
+call. Two solvers factoring concurrently in one process cross-contaminate the
+deltas.
+
+Verdict: deferred to tried-and-rejected citing N9. Diagnostics only — counters
+only written when PHASE_TIMING_ENABLED (default false). The probe site is
+single-threaded by design (comment at :2017-2020 says so). Critically, the
+SAME global counters are written from factor_one_supernode's assembly/dense
+helpers (:2217-2406), and factor_one_supernode is spawned on rayon WORKER
+threads by the parallel driver (scope.spawn at :1217, :1943); the diagnostic
+binary reads whole-run totals via snapshot() from the main thread. So the
+process-global design is load-bearing: a thread-local "fix" would isolate
+concurrent solvers but drop every increment done on rayon workers = systematic
+undercount on the parallel path. The only correctness-preserving fix is
+per-solver counters threaded through the whole dense-factor chain — an invasive
+diagnostics-only refactor, and impl+own-oracle in one session. Severity
+low/certain, "diagnostics only" by the finding's own words.
+
+Contrast N7 (fixed: observable wasted work, clean RED→GREEN) vs N8/N9
+(unreachable / intentional-design diagnostics, deferred like D11/D12/D13).
+
+Evidence: factorize.rs:2017-2050, :2217-2406, :1217/:1943; dense/factor.rs:
+178-250. No CHANGELOG (nothing user-visible). tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (N10). Continue in-turn per the
+live "speed this up" directive.

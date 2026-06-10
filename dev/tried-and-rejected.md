@@ -2946,3 +2946,67 @@ Evidence: `src/numeric/factorize.rs:2138-2175` (live site, no drain),
 `:2496-2543` (twin, already guarded by `debug_assert!(snode.children.is_empty())`
 at :2497-2501), `Supernode`/`ncol()` (`symbolic/supernode.rs:126-162`,
 `nrow ≥ ncol ≥ 1`). Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — N9: per-supernode phase deltas read process-global atomics (finding N9, repo-review-2026-06-09.md)
+
+**Finding (verbatim).** "Sequential profiler per-supernode phase deltas read
+process-global atomics (`factorize.rs:2020-2047`); two solvers factoring
+concurrently in one process cross-contaminate the deltas. Diagnostics only.
+low/certain."
+
+### Why this is recorded here rather than fixed
+
+1. **The contamination is real but confined to a default-off diagnostic flag.**
+   The per-supernode `SupernodeTiming` deltas (`factorize.rs:2021`/`:2036`)
+   snapshot `phase_timing::snapshot()` before/after one `factor_one_supernode`
+   call. Those counters (`ASSEMBLY_NS`, `DENSEFACTOR_NS`, … in
+   `dense/factor.rs:188`) are process-global `AtomicU64`s, written only when
+   `PHASE_TIMING_ENABLED` (default `false`, `dense/factor.rs:178`) is set — a
+   diagnostic binary's mode, never production solve/inertia. Two *separate*
+   solvers factoring concurrently in one process would interleave increments,
+   inflating each other's deltas.
+
+2. **The probe site is single-threaded by design and already documents it.**
+   The comment at `factorize.rs:2017-2020` states: "this driver loop is
+   single-threaded so before/after differencing is exact." The contamination
+   needs a *second* solver on another thread, which the probe's own mode does
+   not create.
+
+3. **The process-global design is load-bearing — a thread-local "fix" breaks
+   the parallel path.** The same counters are written from inside
+   `factor_one_supernode`'s assembly/dense helpers
+   (`factorize.rs:2217-2406`), and `factor_one_supernode` is spawned on
+   *rayon worker threads* by the parallel driver (`scope.spawn`,
+   `factorize.rs:1217`, `:1943`). The diagnostic binary reads totals via
+   `snapshot()` from the main thread after the run. Making the counters
+   thread-local would isolate concurrent solvers but silently drop every
+   counter increment performed on rayon workers — turning a rare diagnostic
+   inaccuracy into a systematic undercount on the parallel path. The only
+   correctness-preserving fix is to thread a per-solver counter set through
+   the entire dense-factor call chain (assembly → panel → Schur → scalar
+   tail), an invasive refactor of diagnostics-only plumbing.
+
+4. **No admissible reproduce-first fix this iteration.** A deterministic
+   barrier-synchronized two-thread test could demonstrate the shared-global
+   contamination, but the only fix it would gate (per-solver counters) is the
+   invasive refactor in (3) — impl plus its own timing oracle in one session,
+   with no external reference, on a default-off diagnostic path. Severity is
+   low/certain and "diagnostics only" by the finding's own classification.
+
+### Disposition
+
+No code change and no new test. N9 is an intentional consequence of the
+process-global phase-probe design: the counters are deliberately global so the
+diagnostic binary can read whole-run totals across rayon workers. The
+cross-solver contamination only arises when two solvers factor concurrently in
+one process with the default-off `PHASE_TIMING_ENABLED` flag set, and never
+affects numeric results. Revisit only if a per-solver diagnostic profile is
+ever required, at which point per-solver counters threaded through the dense
+factor chain (preserving parallel-worker aggregation) become the real task.
+
+Evidence: `src/numeric/factorize.rs:2017-2050` (sequential per-supernode
+delta + single-threaded comment), `:2217-2406` (counter writes inside
+`factor_one_supernode`), `:1217`/`:1943` (rayon `scope.spawn` of
+`factor_one_supernode` on workers), `src/dense/factor.rs:178-250`
+(`PHASE_TIMING_ENABLED` default false; process-global counters + `snapshot()`).
+Journal: dev/journal/2026-06-10-01.org.
