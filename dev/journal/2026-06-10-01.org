@@ -1030,3 +1030,33 @@ updated.
 
 Next per /loop: do NOT start the next issue (S3). Continue in-turn per the live
 "speed this up" directive.
+
+* S3 :symbolic:small-leaf:leaf-rows:s3:defensive:unreachable:deferred:
+S3: compute_leaf_rows (small_leaf.rs:208-217) lacks the defensive r < own_last
+filter that its numeric twin build_row_indices (factorize.rs:3716) applies.
+Finding: if the leaf invariant cracks, batched small-leaf path diverges silently
+from per-supernode path.
+
+Analysis. build_row_indices skips rows r < own_last (own_last = first_col +
+own_ncol) — entries coupling to earlier-eliminated columns r < first_col.
+compute_leaf_rows collects every scanned row with no such skip. The divergence
+requires a leaf column to couple to some r < first_col. By the elimination-tree
+property a leaf has NO descendants, so no own column can couple to an
+earlier-eliminated column ⇒ no scanned r satisfies r < first_col ⇒ the filter
+removes nothing ⇒ the two paths produce identical row sets for every valid leaf.
+Confirmed against existing test compute_leaf_rows_with_offdiagonal_nonzeros
+(small_leaf.rs:391): its leaf at cols 2..4 has rows {2,3,5,7}, all >= first_col.
+
+Verdict: deferred to tried-and-rejected citing S3. Same class as N8 — a
+defensive guard for an unreachable state. A test would have to fabricate an
+invariant-violating "leaf" with a sub-diagonal coupling that find_supernodes
+never emits; asserting on that tests the guard against a pipeline-forbidden
+state (impl-as-own-oracle, forbidden). Recommended harmless future hardening:
+add the one-line `if r < own_last { continue; }` to compute_leaf_rows to keep it
+textually identical to build_row_indices.
+
+Evidence: small_leaf.rs:193-229,138-140; factorize.rs:3656,3716. No CHANGELOG
+(not user-visible, no fix). tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (S4). Continue in-turn per the live
+"speed this up" directive.

@@ -3214,3 +3214,55 @@ from col_counts), `:939` (find_supernodes args), `:963-965`
 `src/symbolic/small_leaf.rs:138-140` (gate on nrow≤16),
 `src/numeric/factorize.rs:3656` (build_row_indices recomputes true rows).
 Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S3: compute_leaf_rows lacks defensive `r < own_last` filter (finding S3, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> `compute_leaf_rows` (small_leaf.rs:208-217) lacks the defensive `r < own_last`
+> filter its numeric twin (`build_row_indices`, factorize.rs:3632-3645) applies;
+> if the leaf invariant ever cracks, the batched small-leaf path diverges
+> silently from the per-supernode path. One-line guard. medium-low/possible.
+
+### Why this is recorded here rather than fixed
+
+1. **No RED for any valid input.** `compute_leaf_rows` (small_leaf.rs:193-229)
+   scans the permuted pattern of a leaf supernode's own columns and collects
+   every row index it sees. `build_row_indices` (factorize.rs:3656) does the same
+   but skips rows `r < own_last` (`own_last = first_col + own_ncol`,
+   factorize.rs:3716) — those are entries above the supernode's own column block,
+   i.e. couplings to *earlier-eliminated* columns `r < first_col`.
+
+2. **The elimination-tree property makes the filter a no-op for true leaves.** A
+   leaf supernode has no descendants in the etree. A column `j` of the leaf can
+   only couple to an earlier-eliminated column `r < first_col` if some descendant
+   of `j` was eliminated first — but a leaf has none. Therefore for every *valid*
+   leaf, no scanned `r` satisfies `r < first_col`, the `r < own_last` filter
+   removes nothing, and `compute_leaf_rows` and `build_row_indices` produce
+   identical row sets. The divergence the finding describes requires the leaf
+   invariant to be violated upstream — a pipeline-forbidden state.
+
+3. **A test would have to fabricate an invariant-violating leaf.** To make the two
+   paths diverge you must hand a "leaf" with a sub-diagonal coupling to an
+   earlier column — a structure `find_supernodes` never emits. Asserting on that
+   fabricated input tests the guard against a state the pipeline cannot produce;
+   it does not reproduce a real defect. This is exactly N8's category (a defensive
+   guard for an unreachable state) and the same impl-as-own-oracle problem as
+   D11/D12.
+
+### Disposition
+
+No code change and no new test. For all valid leaves the missing filter changes
+nothing (proved above via the etree leaf property). Recommended as harmless
+future hardening: add the one-line `if r < own_last { continue; }` guard to
+`compute_leaf_rows` so the batched small-leaf path is textually identical to
+`build_row_indices` and stays robust if an upstream invariant ever cracks — but
+this is defensive alignment, not a bug fix, and carries no failing test.
+
+Evidence: `src/symbolic/small_leaf.rs:193-229` (`compute_leaf_rows`, no filter),
+`:138-140` (small_leaf gate), `src/numeric/factorize.rs:3656` (`build_row_indices`),
+`:3716` (`if r < own_last { continue; }`). Etree leaf property: a leaf has no
+descendants ⇒ no own column couples to `r < first_col` ⇒ filter is a no-op.
+Journal: dev/journal/2026-06-10-01.org.
