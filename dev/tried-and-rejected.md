@@ -3138,3 +3138,79 @@ Evidence: `src/numeric/solve.rs:268-303` (single-RHS D-block, force-accepted-zer
 skip at :300-303), `:815-821` (multi-RHS twin),
 `dev/plans/threshold-mismatch-fix.md:71,85,94` (documented deliberate behavior).
 Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — S2: placeholder Supernode.nrow undercounts amalgamated frontals (finding S2, repo-review-2026-06-09.md)
+
+**Finding (verbatim).** "Placeholder `Supernode.nrow =
+col_counts[first_col].max(ncol)` (`symbolic/supernode.rs:399-405`) undercounts
+amalgamated frontals (size-based merges need not nest). Downstream bias:
+`contrib_sizes`/`peak_contrib_bytes` (`mod.rs:963-965`) underestimate pool
+needs; `factor_nnz_estimate` (`mod.rs:935`) excludes amalgamation-induced zeros
+and AutoRace (`mod.rs:640`) ranks on the biased metric; `find_small_leaf_groups`
+(`small_leaf.rs:138-140`) gates on placeholder nrow ≤ 16 while sizing the arena
+on actual rows.len(). Numeric correctness unaffected (`build_row_indices`
+recomputes). medium/likely."
+
+### Why this is recorded here rather than fixed
+
+1. **No incorrect output — confirmed by the finding and by the code.** The
+   placeholder `nrow = col_counts[first_col].max(ncol)` (`supernode.rs:399`) is
+   never reassigned in the symbolic phase; the *true* frontal row set is
+   recomputed at numeric time by `build_row_indices` (`factorize.rs:3656`),
+   which is what factorization/solve/inertia actually use. So no numeric or
+   inertia result is wrong — the finding states this explicitly ("Numeric
+   correctness unaffected") and it holds. With no incorrect output, there is no
+   test "whose failure is the bug": a pool-size or nrow-estimate assertion would
+   either be flaky or a characterization test that pins internal state, making
+   the implementation its own oracle (forbidden). This is the same disposition
+   class as D11/D12 (perf/estimate-only, no RED gate).
+
+2. **The blast radius is perf-estimate only — and narrower than the finding
+   states.** The placeholder `nrow` feeds exactly two consumers via
+   `contrib_size() = (nrow-ncol)²` (`supernode.rs:172-175`):
+   - `contrib_sizes` / `peak_contrib_bytes` (`mod.rs:963-965`) — the
+     contribution-pool pre-allocation estimate. An undercount means the pool may
+     grow/reallocate at numeric time: a one-time perf cost, not a wrong answer.
+   - `find_small_leaf_groups` (`small_leaf.rs:138-140`) — gates the batched
+     small-leaf path on `nrow ≤ 16`. Both batched and per-supernode paths are
+     numerically equivalent (cf. finding S3), so this only shifts which path
+     runs: again perf, not correctness.
+
+   The finding's claim that "AutoRace (`mod.rs:640`) ranks on the biased metric"
+   is **inaccurate for the placeholder nrow**: AutoRace ranks candidates by
+   `factor_nnz_estimate` (`mod.rs:640`), which is computed from `col_counts`
+   (`mod.rs:935`, `total_factor_nnz(&col_counts)`) — independent of
+   `Supernode.nrow`. Fixing the placeholder nrow does **not** change AutoRace's
+   ranking, the selected ordering, or therefore any inertia result. (The
+   separate `factor_nnz_estimate` "excludes amalgamation-induced zeros" bias the
+   finding also mentions lives in `col_counts`, not in the nrow placeholder, and
+   is a different issue.)
+
+3. **The proper fix is a feature-sized symbolic pass, benchmark-gated.** Setting
+   the true amalgamated `nrow` requires a new symbolic row-union pass over
+   `permuted_pattern` after `find_supernodes` (the full pattern is not available
+   inside `find_supernodes`, which receives only `etree` + `col_counts`,
+   `mod.rs:939`) — essentially the symbolic analogue of `build_row_indices`.
+   That shifts the benchmark-sensitive `small_leaf` gate and the pool-size
+   estimate, so it must be validated against the full benchmark per the
+   session protocol. It is a scoped feature, not a surgical reproduce-first bug
+   fix, and it changes no output.
+
+### Disposition
+
+No code change and no new test. S2 produces no incorrect output (numeric and
+inertia results are unaffected — `build_row_indices` recomputes the true rows);
+its only consequences are an internal pool-size underestimate and a
+small_leaf-gate shift, both perf-only and untestable as a failing-on-the-bug
+test. Recommended as a dedicated, benchmarked work item: add a symbolic
+row-union pass after `find_supernodes` to set the true amalgamated `nrow`, then
+validate the small_leaf-gate / pool-size shift against the bench. Inertia gate
+is not at risk (AutoRace ranks on `factor_nnz_estimate`, not nrow).
+
+Evidence: `src/symbolic/supernode.rs:399-405` (placeholder), `:166-175`
+(`contrib_size` uses nrow), `src/symbolic/mod.rs:935` (`factor_nnz_estimate`
+from col_counts), `:939` (find_supernodes args), `:963-965`
+(contrib_sizes/peak), `:640` (AutoRace ranks on factor_nnz_estimate, not nrow),
+`src/symbolic/small_leaf.rs:138-140` (gate on nrow≤16),
+`src/numeric/factorize.rs:3656` (build_row_indices recomputes true rows).
+Journal: dev/journal/2026-06-10-01.org.

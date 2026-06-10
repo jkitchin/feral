@@ -994,3 +994,39 @@ deferred (unreachable / diagnostics-design / doc-drift / deliberate-documented).
 
 Next per /loop: do NOT start the next issue (S2). Continue in-turn per the live
 "speed this up" directive.
+
+* 18:25 :symbolic:supernode:nrow:estimate:s2:perf:deferred:
+S2 (repo-review-2026-06-09.md §4): placeholder Supernode.nrow =
+col_counts[first_col].max(ncol) (supernode.rs:399) undercounts amalgamated
+frontals (size-based merges need not nest). medium/likely.
+
+Investigated the full consumer graph. The placeholder nrow is never reassigned
+in symbolic; build_row_indices (factorize.rs:3656) recomputes the TRUE rows at
+numeric time — so numeric + inertia results are unaffected (finding agrees).
+The placeholder feeds only contrib_size()=(nrow-ncol)² →
+contrib_sizes/peak_contrib_bytes (pool pre-alloc estimate, mod.rs:963-965) and
+the small_leaf gate (nrow≤16, small_leaf.rs:138). Both are perf-only:
+under-sized pool reallocs at numeric time; small_leaf path is numerically
+equivalent to per-supernode (cf S3).
+
+CORRECTION to the finding: it claims AutoRace (mod.rs:640) "ranks on the biased
+metric" implying nrow. False — AutoRace ranks on factor_nnz_estimate, computed
+from col_counts (mod.rs:935 total_factor_nnz(&col_counts)), independent of
+Supernode.nrow. So fixing the placeholder nrow does NOT change ordering
+selection or any inertia result. The inertia gate is not at risk.
+
+Verdict: deferred to tried-and-rejected citing S2. No incorrect output ⇒ no
+failing-on-the-bug test (a pool-size/estimate assertion pins internal state =
+impl as own oracle, forbidden) — same class as D11/D12. The proper fix is a
+feature-sized new symbolic row-union pass over permuted_pattern after
+find_supernodes (the full pattern isn't available inside find_supernodes, which
+gets only etree+col_counts), and it shifts the benchmark-sensitive small_leaf
+gate, so it needs full-bench validation — a scoped work item, not a surgical
+loop fix.
+
+Evidence: supernode.rs:399-405,166-175; mod.rs:935,939,963-965,640;
+small_leaf.rs:138-140; factorize.rs:3656. No CHANGELOG. tried-and-rejected.md
+updated.
+
+Next per /loop: do NOT start the next issue (S3). Continue in-turn per the live
+"speed this up" directive.
