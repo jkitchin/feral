@@ -1167,3 +1167,27 @@ SymbolicProfiler derives Clone (profiler.rs:40).
 
 Next per /loop: do NOT start the next issue (S8). Continue in-turn per the live
 "speed this up" directive.
+
+* S8 :sparse:symbolic:allocation:perf:s8:deferred:
+S8: allocation-in-loop cluster — per-column pairs Vec in sort_and_sum_duplicates
+(csc.rs:142-160), redundant per-column sort in symmetric_pattern (csc.rs:301),
+children() Vec<Vec> where GNP needs only a leaf flag (elimination_tree.rs:66-74),
+~n two-element Vecs in compress_pattern (ldlt_compress.rs:161-166), HashSet for a
+contiguous-range test (mod.rs:1331).
+
+Analysis. All perf-only; correct output. Verified anchors: the per-column pairs
+Vec produces a correctly summed/sorted matrix; symmetric_pattern's sort is
+redundant only because rows are already sorted (removing it changes nothing). No
+RED possible — allocation counts = impl-as-own-oracle, timing = flaky. Same class
+as S2; contrast N7 which had observable cache state to reproduce, these don't.
+
+Verdict: deferred citing S8. Recommended benchmarked perf items: reuse a scratch
+Vec across columns; delete the redundant sort; leaf-flag bitset for children();
+preallocate compress_pattern Vecs; bounds-compare instead of HashSet. Each
+touches hot symbolic paths ⇒ needs corpus-bench validation.
+
+Evidence: csc.rs:142-160,301; elimination_tree.rs:66-74; ldlt_compress.rs:161-166;
+mod.rs:1331. No code change, no CHANGELOG. tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (S9). Continue in-turn per the live
+"speed this up" directive.

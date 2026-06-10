@@ -3427,3 +3427,56 @@ see only the full pattern), `:1092-1098` (schur postorder debug_assert);
 `src/symbolic/column_counts.rs:16` (documented full-symmetric precondition);
 `src/ordering/elimination_tree.rs:82-85` (subtree_sizes parent>j comment). No
 incorrect output for correct usage. Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S8: allocation-in-loop cluster (finding S8, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> Allocation-in-loop cluster: per-column Vec in `sort_and_sum_duplicates`
+> (`csc.rs:121`); provably redundant final per-column sort in `symmetric_pattern`
+> (`csc.rs:242-246`); `children()` builds Vec<Vec> per postorder variant and in
+> GNP which only needs a leaf flag (`elimination_tree.rs:66-74`);
+> `compress_pattern` builds ~n two-element Vecs (`ldlt_compress.rs:161-166`);
+> HashSet for a contiguous range test (`mod.rs:1331`). low/certain.
+
+### Why this is recorded here rather than fixed
+
+1. **Every item is perf-only; none produces incorrect output.** Verified the two
+   anchor sites: `sort_and_sum_duplicates` allocates a fresh `pairs: Vec<(usize,
+   f64)>` per column (csc.rs:160) but the summed/sorted matrix it produces is
+   correct; `symmetric_pattern`'s per-column `sort_unstable` (csc.rs:301) is
+   redundant only because the rows are *already* sorted, so removing it changes no
+   output. The `children()` Vec<Vec>, the `compress_pattern` two-element Vecs, and
+   the HashSet-for-range-test are likewise allocation-strategy choices with
+   correct results.
+
+2. **No reproducing test is possible.** A perf/allocation pattern has no failing
+   output to assert. Pinning allocation counts would test the impl against itself
+   (impl-as-own-oracle, forbidden); asserting wall-clock is flaky. This is exactly
+   S2's perf-only category and the same reason N7's perf fix had to be reproduced
+   via *observable cache state* — these S8 items expose no analogous observable
+   state.
+
+### Disposition
+
+No code change and no new test. Recommended as benchmarked perf work items (not
+reproduce-first loop fixes):
+- reuse a single scratch `Vec` across columns in `sort_and_sum_duplicates`
+  (csc.rs:142-160);
+- delete the provably-redundant per-column sort in `symmetric_pattern`
+  (csc.rs:301) — the merge preserves the already-sorted order;
+- replace `children()`'s `Vec<Vec>` with a leaf-flag bitset where GNP/postorder
+  only need leaf detection (elimination_tree.rs:66-74);
+- preallocate / inline the `compress_pattern` two-element Vecs
+  (ldlt_compress.rs:161-166);
+- replace the HashSet contiguous-range test with a bounds comparison (mod.rs:1331).
+Each should be validated against the corpus bench since they touch hot symbolic
+paths.
+
+Evidence: `src/sparse/csc.rs:142-160` (per-column pairs Vec), `:301` (redundant
+sort), `src/ordering/elimination_tree.rs:66-74` (children Vec<Vec>),
+`src/symbolic/ldlt_compress.rs:161-166` (two-element Vecs),
+`src/symbolic/mod.rs:1331` (HashSet range test). All perf-only, correct output.
+Journal: dev/journal/2026-06-10-01.org.
