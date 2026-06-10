@@ -4,6 +4,22 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Harness/C-ABI — `FERAL_SCALING` vocabulary unified across the shim and bench (X5)
+
+The two `FERAL_SCALING` parsers had drifted apart. The C-ABI shim (`src/capi.rs`)
+accepted `identity`/`infnorm`/`mc64`/`auto` and *silently* ignored anything else;
+the bench harness (`src/bin/bench.rs`) accepted `identity`/`infnorm`/`mc64`/`adaptive`
+and warned on unknown values. So `FERAL_SCALING=adaptive` selected adaptive
+routing in bench but was a silent no-op in the shim, and `FERAL_SCALING=auto`
+worked in the shim but warned and fell back to the default in bench — a cross-tool
+experiment with one spelling silently measured different configurations. Both
+`auto` and `adaptive` now select `ScalingStrategy::Auto` in both tools,
+case-insensitively. Relatedly, the bench `FERAL_ORDERING` parser previously
+coerced any unrecognized value (typos included) to forced AMD with no warning; it
+now accepts an explicit `amd` and warns + falls back to the default heuristic on
+unrecognized values. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
 ### Numerics — the LU zero-pivot tolerance is relative to the matrix magnitude (L6)
 
 The singularity / zero-pivot test compared each pivot against the absolute

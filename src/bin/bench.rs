@@ -1246,17 +1246,32 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
 /// AMD on every matrix — useful for measuring the heuristic's net
 /// impact.
 fn ordering_method_from_env() -> Option<OrderingMethod> {
-    match std::env::var("FERAL_ORDERING")
-        .unwrap_or_default()
-        .to_lowercase()
-        .as_str()
-    {
+    ordering_method_from_str(&std::env::var("FERAL_ORDERING").unwrap_or_default())
+}
+
+/// Pure parser behind [`ordering_method_from_env`], split out so the
+/// vocabulary is unit-testable without mutating process env (X5,
+/// dev/research/repo-review-2026-06-09.md).
+fn ordering_method_from_str(s: &str) -> Option<OrderingMethod> {
+    match s.to_lowercase().as_str() {
         "" => None,
         "auto" => Some(OrderingMethod::Auto),
+        "amd" => Some(OrderingMethod::Amd),
         "metis" => Some(OrderingMethod::MetisND),
         "scotch" => Some(OrderingMethod::ScotchND),
         "kahip" => Some(OrderingMethod::KahipND),
-        _ => Some(OrderingMethod::Amd),
+        other => {
+            // X5: previously any unrecognized value (typos included) was
+            // silently coerced to forced AMD, which silently invalidated
+            // an experiment meant to exercise the default heuristic. Warn
+            // and fall back to the documented default instead.
+            eprintln!(
+                "warning: FERAL_ORDERING=\"{}\" not recognized; using the default \
+                 symbolic_factorize heuristic (set FERAL_ORDERING=amd to force AMD)",
+                other
+            );
+            None
+        }
     }
 }
 
@@ -1283,15 +1298,20 @@ fn bench_dump_path_from_env() -> Option<PathBuf> {
 /// `dev/research/lever-c-adaptive-scaling.md` and
 /// `dev/plans/lever-c-adaptive-scaling.md`.
 fn scaling_strategy_from_env() -> Option<ScalingStrategy> {
-    match std::env::var("FERAL_SCALING")
-        .unwrap_or_default()
-        .to_lowercase()
-        .as_str()
-    {
+    scaling_strategy_from_str(&std::env::var("FERAL_SCALING").unwrap_or_default())
+}
+
+/// Pure parser behind [`scaling_strategy_from_env`], split out so the
+/// vocabulary is unit-testable and stays in lockstep with the C-ABI
+/// shim's parser (X5, dev/research/repo-review-2026-06-09.md).
+fn scaling_strategy_from_str(s: &str) -> Option<ScalingStrategy> {
+    match s.to_lowercase().as_str() {
         "" => None,
         "infnorm" => Some(ScalingStrategy::InfNorm),
         "mc64" => Some(ScalingStrategy::Mc64Symmetric),
-        "adaptive" => Some(ScalingStrategy::Auto),
+        // `auto` and `adaptive` both select adaptive routing; the C-ABI
+        // shim spells it `auto`, so accept both here too (X5).
+        "auto" | "adaptive" => Some(ScalingStrategy::Auto),
         "identity" => Some(ScalingStrategy::Identity),
         other => {
             eprintln!(
@@ -2050,6 +2070,53 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X5 (dev/research/repo-review-2026-06-09.md): the bench harness must
+    /// accept the same `FERAL_SCALING` vocabulary as the C-ABI shim
+    /// (`src/capi.rs::scaling_strategy_from_env_value`). The shim accepts
+    /// `auto` for `ScalingStrategy::Auto`; before this fix bench warned on
+    /// `auto` and fell back to default, so `FERAL_SCALING=auto` selected
+    /// adaptive routing in the shim but the production default in bench.
+    #[test]
+    fn scaling_vocabulary_matches_capi_shim() {
+        assert_eq!(
+            scaling_strategy_from_str("auto"),
+            Some(ScalingStrategy::Auto),
+            "`auto` must alias Auto to match the C-ABI shim"
+        );
+        assert_eq!(
+            scaling_strategy_from_str("adaptive"),
+            Some(ScalingStrategy::Auto)
+        );
+        assert_eq!(
+            scaling_strategy_from_str("AUTO"),
+            Some(ScalingStrategy::Auto)
+        );
+        assert_eq!(
+            scaling_strategy_from_str("identity"),
+            Some(ScalingStrategy::Identity)
+        );
+        assert_eq!(scaling_strategy_from_str(""), None);
+        assert_eq!(scaling_strategy_from_str("nope"), None);
+    }
+
+    /// X5: an unrecognized `FERAL_ORDERING` (a typo) must NOT silently
+    /// force AMD — that would silently invalidate an experiment meant to
+    /// run the default heuristic. Explicit `amd` still forces AMD; typos
+    /// fall back to the documented default (`None` → heuristic).
+    #[test]
+    fn ordering_typo_falls_back_to_default_not_amd() {
+        assert_eq!(ordering_method_from_str("amd"), Some(OrderingMethod::Amd));
+        assert_eq!(ordering_method_from_str("auto"), Some(OrderingMethod::Auto));
+        assert_eq!(
+            ordering_method_from_str("metis"),
+            Some(OrderingMethod::MetisND)
+        );
+        assert_eq!(ordering_method_from_str(""), None);
+        // Typo: must be the default heuristic, not forced AMD.
+        assert_eq!(ordering_method_from_str("amdd"), None);
+        assert_eq!(ordering_method_from_str("metsi"), None);
+    }
 
     /// Structural guard on the issue-#80 dense-column fixture generator: the
     /// inertia oracle is the Vanderbei (1995) SQD theorem (external), and the

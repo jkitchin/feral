@@ -422,3 +422,35 @@ is the real defect, left for a docs pass. No code change, no CHANGELOG entry.
 Evidence: synthetic (4 identical), named (HYDCAR20/DEGENLPA both match oracle
 under both params), parity sweep TOTAL=50 DIVERGE=0. Experiment via throwaway
 tests/x3_experiment.rs (removed, not committed).
+
+* 08:45 :harness:capi:env-vars:x5:vocabulary-drift:fixed:
+X5 (repo-review-2026-06-09.md): FERAL_SCALING vocabulary drifted between the two
+parsers. capi.rs (feral_new) accepted identity/infnorm/mc64/auto and SILENTLY
+ignored anything else; bench.rs accepted identity/infnorm/mc64/adaptive and
+WARNED on unknown. Net effect: FERAL_SCALING=adaptive was a silent no-op in the
+C-ABI shim (→ default) but selected Auto in bench; FERAL_SCALING=auto warned and
+fell back to default in bench but selected Auto in the shim. A cross-tool
+experiment with one spelling measured DIFFERENT configurations in each tool —
+silent experiment invalidation. Secondary: ordering_method_from_env mapped any
+unrecognized FERAL_ORDERING (typos included) to forced AMD with no warning.
+
+Reproduced with three RED unit tests (no env-var mutation — extracted pure
+string parsers first):
+- src/bin/bench.rs scaling_strategy_from_str("auto"): RED was None ("auto" not
+  recognized; falling back to default), want Some(Auto).
+- src/bin/bench.rs ordering_method_from_str("amdd"): RED was Some(Amd), want None.
+- src/capi.rs scaling_strategy_from_env_value("adaptive"): RED was None, want
+  Some(Auto).
+
+Fix: extracted both bench parsers (scaling_strategy_from_str /
+ordering_method_from_str) and the capi parser (scaling_strategy_from_env_value)
+as pure, unit-testable helpers. Unified the scaling vocabulary so auto AND
+adaptive both → ScalingStrategy::Auto in BOTH tools, case-insensitive. Added an
+explicit `amd` arm to the ordering parser and made unknown values warn + fall
+back to the default heuristic (None) instead of silently forcing AMD. Updated the
+FERAL_SCALING doc comment in capi.rs to document the alias + lockstep guarantee.
+
+External oracle for the alias mapping: the ScalingStrategy::Auto docstring
+(scaling/mod.rs:176-183) — "adaptive shape-based routing", the documented intent
+both spellings name. GREEN: 3 new tests pass; full suite 341 lib + 3 bin bench
+pass, 0 regressions.

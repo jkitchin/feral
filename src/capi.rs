@@ -38,10 +38,15 @@ pub struct FeralSolver {
 ///     legacy `ratio=0.5, eps=1e-10` cascade-break configuration
 ///     (off by default after 585d739). Required for ipopt-feral
 ///     parity with pounce-feral.
-///   - `FERAL_SCALING` = `identity`/`infnorm`/`mc64`/`auto` — override
-///     the default scaling strategy. Used for task #68 (clnlbeam
-///     IPM iter bloat investigation) to test whether MC64-vs-other
-///     scaling changes the IPM trajectory.
+///   - `FERAL_SCALING` = `identity`/`infnorm`/`mc64`/`auto` (alias
+///     `adaptive`) — override the default scaling strategy.
+///     Case-insensitive. The vocabulary is kept in lockstep with the
+///     bench harness (`src/bin/bench.rs`), which spells adaptive
+///     routing `adaptive`; both spellings select
+///     `ScalingStrategy::Auto` here so a cross-tool experiment with one
+///     spelling measures the same configuration. Used for task #68
+///     (clnlbeam IPM iter bloat investigation) to test whether
+///     MC64-vs-other scaling changes the IPM trajectory.
 ///   - `FERAL_PARALLEL` = `0`/`off`/`false` — disable parallel
 ///     multifrontal factorization (single-threaded). Used to test
 ///     parallel-reduction-order non-reproducibility.
@@ -75,14 +80,10 @@ pub extern "C" fn feral_new() -> *mut FeralSolver {
         );
 
         let mut np = NumericParams::default();
-        if let Ok(s) = std::env::var("FERAL_SCALING") {
-            match s.as_str() {
-                "identity" => np.scaling = ScalingStrategy::Identity,
-                "infnorm" => np.scaling = ScalingStrategy::InfNorm,
-                "mc64" => np.scaling = ScalingStrategy::Mc64Symmetric,
-                "auto" => np.scaling = ScalingStrategy::Auto,
-                _ => {} // silently ignore unknown values, keep default
-            }
+        if let Some(strategy) =
+            scaling_strategy_from_env_value(&std::env::var("FERAL_SCALING").unwrap_or_default())
+        {
+            np.scaling = strategy;
         }
         if let Ok(s) = std::env::var("FERAL_PIVTOL") {
             if let Ok(v) = s.parse::<f64>() {
@@ -144,6 +145,26 @@ pub extern "C" fn feral_new() -> *mut FeralSolver {
         }))
     })
     .unwrap_or(std::ptr::null_mut())
+}
+
+/// Parse a `FERAL_SCALING` value into a scaling-strategy override,
+/// returning `None` for the empty string or an unrecognized value (the
+/// caller then keeps the default). Split out as a pure helper so the
+/// C-ABI shim's vocabulary is unit-testable and stays in lockstep with
+/// the bench harness's parser (`src/bin/bench.rs`).
+///
+/// X5 (`dev/research/repo-review-2026-06-09.md`).
+fn scaling_strategy_from_env_value(s: &str) -> Option<ScalingStrategy> {
+    match s.to_lowercase().as_str() {
+        "" => None,
+        "identity" => Some(ScalingStrategy::Identity),
+        "infnorm" => Some(ScalingStrategy::InfNorm),
+        "mc64" => Some(ScalingStrategy::Mc64Symmetric),
+        // `auto` and `adaptive` are two spellings of the same adaptive
+        // routing; bench accepts `adaptive`, so accept both here (X5).
+        "auto" | "adaptive" => Some(ScalingStrategy::Auto),
+        _ => None, // unknown values keep the default (no override)
+    }
 }
 
 /// Free a solver handle. Null pointer is a no-op.
@@ -465,6 +486,47 @@ pub unsafe extern "C" fn feral_max_pivot(s: *const FeralSolver) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X5 (dev/research/repo-review-2026-06-09.md): the C-ABI shim must
+    /// accept the same `FERAL_SCALING` vocabulary as the bench harness
+    /// (`src/bin/bench.rs::scaling_strategy_from_str`), so a cross-tool
+    /// experiment with one spelling measures the same configuration in
+    /// both. `adaptive` is bench's spelling for `ScalingStrategy::Auto`;
+    /// before this fix the shim silently dropped it (→ default), so a
+    /// run with `FERAL_SCALING=adaptive` measured a *different* strategy
+    /// in the shim than in bench.
+    #[test]
+    fn scaling_vocabulary_matches_bench_harness() {
+        assert_eq!(
+            scaling_strategy_from_env_value("adaptive"),
+            Some(ScalingStrategy::Auto),
+            "`adaptive` must alias Auto to match bench"
+        );
+        assert_eq!(
+            scaling_strategy_from_env_value("auto"),
+            Some(ScalingStrategy::Auto)
+        );
+        // Case-insensitive, like bench's `to_lowercase()` parser.
+        assert_eq!(
+            scaling_strategy_from_env_value("ADAPTIVE"),
+            Some(ScalingStrategy::Auto)
+        );
+        assert_eq!(
+            scaling_strategy_from_env_value("identity"),
+            Some(ScalingStrategy::Identity)
+        );
+        assert_eq!(
+            scaling_strategy_from_env_value("infnorm"),
+            Some(ScalingStrategy::InfNorm)
+        );
+        assert_eq!(
+            scaling_strategy_from_env_value("mc64"),
+            Some(ScalingStrategy::Mc64Symmetric)
+        );
+        // Unset and typos fall through to the default (None override).
+        assert_eq!(scaling_strategy_from_env_value(""), None);
+        assert_eq!(scaling_strategy_from_env_value("mc46"), None);
+    }
 
     /// 2x2 indefinite `[[1,2],[2,1]]` (eigenvalues 3, -1) — RHS (3,3),
     /// expected `x = (1, 1)`. CSR upper-triangle with 0-based indices:
