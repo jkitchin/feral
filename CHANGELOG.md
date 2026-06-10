@@ -4,6 +4,19 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — scaled LU solves and iterative refinement reuse pooled scratch buffers (L3)
+
+With scaling enabled, the scaled `ftran`/`btran` wrappers and iterative
+refinement allocated and zeroed fresh `Vec<f64>` buffers on every call
+(`src/lu/dense_solve.rs`, `src/lu/sparse_solve.rs`) — once or twice per simplex
+iteration — contradicting the factorization's "no per-call allocation in solves"
+guarantee. Both `DenseLu` and `SparseLu` now carry three additional pooled
+buffers (scaled right-hand side, refinement residual, and refinement
+right-hand-side snapshot) that are taken via `std::mem::take`, reused in place
+when already sized, and restored on every return path. After warm-up, scaled
+solves and refinement allocate nothing. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
 ### Performance — `feral_factor` borrows the stored matrix instead of cloning it each call (X7)
 
 The C ABI `feral_factor` (`src/capi.rs`) cloned the whole `CscMatrix` on every

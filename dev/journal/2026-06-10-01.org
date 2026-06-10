@@ -242,3 +242,33 @@ in feral_factor.
 
 Evidence: capi 4/0, lib full suite 63 binaries all green, clippy -D warnings
 clean, fmt clean. Counter is #[cfg(test)] only — zero production footprint.
+
+* 06:30 :perf:lu:l3:pooled-scratch:scaled-solve:refine:fixed:
+L3 (repo-review-2026-06-09.md:416-423): scaled ftran/btran and iterative
+refine allocated fresh vectors per call (dense_solve.rs:24,43,110,195;
+sparse_solve.rs:23,41,107,234), contradicting the struct's "no per-call
+allocation in solves" claim (dense_factor.rs:44-45). With scaling enabled,
+every simplex-iteration solve allocated and zeroed a fresh Vec.
+
+Fix: three pooled buffers on BOTH DenseLu and SparseLu — scratch_b (scaled
+rhs `bt`), scratch_c (refine residual `r`), scratch_d (refine rhs snapshot
+`a`). They must be mutually non-aliasing because the inner solve dirties
+scratch_a/scratch + scratch_b while refine's r and a are live. Each is taken
+via `take_zeroed(pool, m)` (std::mem::take + reuse-if-sized, else clear/resize)
+and restored on ALL paths (a `result`/`res` var + assign-back before return —
+an early `?` would leave the pool empty and force a realloc next call). factor
+inits all three vec![0.0; m]; refactor preserves m so buffers stay sized;
+sparse refactor re-runs factor so re-inits.
+
+Reproduction: #[cfg(test)] thread-local SOLVE_SCRATCH_ALLOCS counter,
+incremented only inside take_zeroed's resize branch (steady state after warm-up
+= 0). Test scaled_solves_and_refine_reuse_pooled_scratch in BOTH dense_solve
+and sparse_solve tests mods: InfNorm scaling + refine_steps:2, warm up then
+reset counter, 5x ftran/btran + ftran_refined/btran_refined, assert
+solve_scratch_allocs()==0 AND B·x≈a (tol 1e-9, so the buffer reuse didn't
+corrupt the math). RED (pool init -> Vec::new() / restore commented): dense
+nonzero, sparse 3. GREEN post-fix: 0,0. Thread-local (not atomic) because the
+cargo harness runs tests concurrently and atomics would race.
+
+Evidence: 334 lib tests green, dense+sparse L3 tests 2/2, clippy --all-targets
+-D warnings clean, fmt clean. Counter is #[cfg(test)] only.

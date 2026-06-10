@@ -43,6 +43,15 @@ pub struct DenseLu {
     pub(super) scale: LuScale,
     /// Reusable length-`m` scratch buffer (no per-call allocation in solves).
     pub(super) scratch_a: Vec<f64>,
+    /// Pooled length-`m` buffer for the scaled `ftran`/`btran` wrappers' inner
+    /// RHS (`bt`); distinct from `scratch_a`, which the core solve dirties (L3).
+    pub(super) scratch_b: Vec<f64>,
+    /// Pooled length-`m` residual buffer for iterative refinement (`r`);
+    /// distinct from `scratch_a`/`scratch_b`, which the inner solve uses (L3).
+    pub(super) scratch_c: Vec<f64>,
+    /// Pooled length-`m` buffer holding the refinement's original-RHS snapshot
+    /// (`a`); live across the whole refine loop, so it cannot reuse the others.
+    pub(super) scratch_d: Vec<f64>,
 }
 
 impl DenseLu {
@@ -73,6 +82,9 @@ impl DenseLu {
             params,
             scale,
             scratch_a: vec![0.0; m],
+            scratch_b: vec![0.0; m],
+            scratch_c: vec![0.0; m],
+            scratch_d: vec![0.0; m],
         })
     }
 
