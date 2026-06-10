@@ -1422,3 +1422,34 @@ No code change, no CHANGELOG (not user-visible). tried-and-rejected.md updated.
 
 Next per /loop: do NOT start the next issue (L13). Continue in-turn per the live
 "speed this up" directive.
+
+* 11:30 :lu:factor:perturb:cross-path:L13:reproduced:fixed:
+L13 (repo-review-2026-06-09.md): the sparse perturbation branch (PerturbToEps)
+picked the first unpivoted row by O(m) index scan (sparse_factor.rs:283-285),
+both (a) O(m^2) on heavily rank-deficient bases and (b) index-first rather than
+largest-|w| — a drift from the dense path, which perturbs the threshold-selected
+(argmax) row (dense_factor.rs:268-289: select pivot_row via partial pivoting,
+swap in, then floor THAT row's pivot).
+
+RED test (tests/lu_sparse.rs, cross-path consistency after the L9 test):
+perturb_chooses_largest_magnitude_row_matching_dense — col0=[0,0,1e-14] (only
+nonzero at row 2, below ztol=zero_pivot_tol*max|A|=1e-13*1), cols 1,2 = e_1,e_0.
+Largest-|w| unpivoted row = 2; index-first = 0. Dense perm[0]=2 (oracle). Pre-fix
+panic:
+  "sparse perturb row must match dense (L13): got 0 vs dense 2" (lu_sparse.rs:287).
+
+Fix: sparse perturb branch now uses ipiv (the argmax already computed in the
+selection loop) when ipiv>=0, falling back to the (0..m) scan only when ipiv<0
+(column structurally empty in all unpivoted rows, where w is zero and any row is
+equivalent). This (b) aligns the perturbation row with the dense path AND (a)
+removes the O(m) scan in the common case — the scan survives only for the
+genuinely-empty-unpivoted-column fallback, so heavily rank-deficient bases whose
+singular columns still have a touched nonzero no longer pay O(m^2).
+
+GREEN: lu_sparse 17 passed (incl. new + sparse_perturb_succeeds), lu_dense 11,
+lib full 353. clippy -D warnings clean, fmt clean. User-visible (perturbation
+row / regularized factorization) -> CHANGELOG "Fixed — sparse singular-column
+perturbation matches the dense path (L13)".
+
+Next per /loop: do NOT start the next issue (X8). Continue in-turn per the live
+"speed this up" directive.

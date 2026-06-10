@@ -279,10 +279,22 @@ impl SparseLu {
                         return Err(FeralError::SingularBasis { column: qcol[k] });
                     }
                     LuSingularAction::PerturbToEps { abs_floor } => {
-                        // Choose any still-unpivoted row and floor the pivot.
-                        let r = (0..m)
-                            .find(|&i| pinv[i] < 0)
-                            .ok_or(FeralError::SingularBasis { column: qcol[k] })?;
+                        // L13 (dev/research/repo-review-2026-06-09.md): perturb the
+                        // largest-|w| unpivoted row `ipiv` (the same row threshold
+                        // partial pivoting would select), matching the dense path,
+                        // which perturbs its partial-pivoting-selected row — not the
+                        // index-first unpivoted row. Reusing `ipiv` also avoids the
+                        // O(m) scan whenever the column has any touched unpivoted
+                        // entry; the scan remains only as the fallback for a column
+                        // that is structurally empty in every unpivoted row
+                        // (`ipiv < 0`), where `w` is zero and any row will do.
+                        let r = if ipiv >= 0 {
+                            ipiv as usize
+                        } else {
+                            (0..m)
+                                .find(|&i| pinv[i] < 0)
+                                .ok_or(FeralError::SingularBasis { column: qcol[k] })?
+                        };
                         pivot_row = r;
                         let s = if w[r] < 0.0 { -1.0 } else { 1.0 };
                         piv = s * abs_floor.max(w[r].abs());

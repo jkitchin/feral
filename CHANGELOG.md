@@ -4,6 +4,20 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — sparse singular-column perturbation matches the dense path (L13)
+
+Under `LuSingularAction::PerturbToEps`, the sparse factor perturbed the
+*index-first* still-unpivoted row of a singular column, while the dense factor
+perturbs the *threshold-selected* (largest-|w|) row — so the two paths
+regularized the same singular basis differently (different permutation and
+different regularized solve). The sparse path now perturbs the largest-|w|
+unpivoted row (`ipiv`, the row threshold partial pivoting already selected),
+matching the dense reference. As a side benefit this reuses the pivot already
+found in the selection loop, so the O(m) "find first unpivoted row" scan is
+skipped whenever the singular column has any touched unpivoted entry; the scan
+remains only as a fallback for a column that is structurally empty in every
+unpivoted row. Finding from `dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — misplaced U diagonal surfaces as an error in release builds (L10)
 
 The sparse triangular solves (`usolve` / `ut_solve`) take the first stored

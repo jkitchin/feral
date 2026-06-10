@@ -248,6 +248,52 @@ fn singular_basis_reports_original_column_not_factorization_position() {
 }
 
 #[test]
+fn perturb_chooses_largest_magnitude_row_matching_dense() {
+    // L13 (dev/research/repo-review-2026-06-09.md): when a column is singular
+    // under PerturbToEps, the dense path perturbs the threshold-selected
+    // (largest-|w|) row, but the sparse path perturbed the *index-first*
+    // unpivoted row — a cross-path drift (and an O(m) scan). The sparse path
+    // must perturb the same original row the dense path does.
+    //
+    // Column 0 = [0, 0, 1e-14]: its only nonzero is in row 2 and is below the
+    // relative zero-pivot tolerance (zero_pivot_tol · max|A| = 1e-13 · 1), so
+    // position 0 is singular. The largest-|w| unpivoted row is row 2; the
+    // index-first unpivoted row is row 0. Dense perturbs row 2 (oracle); the
+    // sparse path must agree, not perturb row 0.
+    let cols = vec![
+        vec![0.0, 0.0, 1e-14], // col 0: tiny entry at row 2 -> singular
+        vec![0.0, 1.0, 0.0],   // col 1: e_1
+        vec![1.0, 0.0, 0.0],   // col 2: e_0
+    ];
+    let m = 3;
+    let params = LuParams {
+        on_singular: LuSingularAction::PerturbToEps { abs_floor: 1e-10 },
+        ..LuParams::default()
+    };
+
+    // Dense reference: threshold partial pivoting selects the largest-|w| row
+    // (row 2) at position 0, and perturbs that row.
+    let dense = DenseLu::factor(&cols, m, params.clone()).expect("dense perturbed factor");
+    assert_eq!(
+        dense.perm()[0],
+        2,
+        "dense must perturb the largest-|w| row (row 2) (sanity)"
+    );
+
+    // Sparse must perturb the same original row at position 0.
+    let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+    let symbolic = SparseLuSymbolic::natural(m);
+    let sparse = SparseLu::factor(&a, &symbolic, params).expect("sparse perturbed factor");
+    assert_eq!(
+        sparse.perm()[0],
+        dense.perm()[0],
+        "sparse perturb row must match dense (L13): got {} vs dense {}",
+        sparse.perm()[0],
+        dense.perm()[0]
+    );
+}
+
+#[test]
 fn sparse_perturb_succeeds() {
     let (cols, m) = cols_from_rows(&[&[1.0, 1.0, 0.0], &[2.0, 2.0, 0.0], &[0.0, 0.0, 3.0]]);
     let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
