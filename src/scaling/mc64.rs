@@ -24,8 +24,10 @@
 //!      `s[i] = exp((rscaling[i] + cscaling[i]) / 2)`.
 //!   8. Safety guards: clamp the exponent to avoid overflow,
 //!      rewrite any `s[i] == 0` or non-finite result to `1.0`.
-//!   9. On partial matching, set `s[i] = 1.0` for unmatched indices
-//!      and return `ScalingInfo::PartialSingular { n_unmatched }`.
+//!   9. On partial matching, set `s[i] = 1.0` for any index whose row
+//!      OR column is unmatched (the two sets can differ even on a
+//!      symmetric pattern) and return
+//!      `ScalingInfo::PartialSingular { n_unmatched }`.
 //!
 //! The partial-singular path deviates from SPRAL, which runs a
 //! second Hungarian pass on the full-rank submatrix and then
@@ -198,6 +200,19 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
     //               = exp((u[i] + v[i] - cmax[i]) / 2)
     //
     // Matches SPRAL scaling.f90:681-682 followed by :169.
+    //
+    // The matched-ROW set: `perm[j]` is the row matched to column `j`, so a
+    // row appears here iff some column matched it. On a partial matching the
+    // matched-row and matched-column sets can differ even for a symmetric
+    // pattern (index i may have its column matched while its row is
+    // unmatched), so both must be consulted below (X4).
+    let mut row_matched = vec![false; n];
+    for &r in perm.iter() {
+        if r != usize::MAX {
+            row_matched[r] = true;
+        }
+    }
+
     let mut scaling = vec![1.0_f64; n];
     for i in 0..n {
         // If the column had no usable entries at all, cmax[i] is
@@ -211,10 +226,14 @@ pub(crate) fn scaling_from_cache(cache: &Mc64Cache) -> (Vec<f64>, ScalingInfo) {
             continue;
         }
 
-        // For unmatched columns, fall back to identity scaling
-        // rather than using the dual variables (which are
-        // meaningless on the unmatched part of the graph).
-        if perm[i] == usize::MAX {
+        // For an unmatched column (`perm[i] == MAX`) OR an unmatched row
+        // (`!row_matched[i]`), fall back to identity scaling rather than
+        // using the dual variables, which are meaningless on the unmatched
+        // part of the graph. The row check is what fixes X4: a matched column
+        // with an unmatched row has `u[i]` zeroed by `build_matching`, so the
+        // symmetric average would otherwise fold a meaningless zero half-dual
+        // into `s[i]`.
+        if perm[i] == usize::MAX || !row_matched[i] {
             scaling[i] = 1.0;
             continue;
         }
@@ -410,6 +429,54 @@ mod tests {
                 expected[i]
             );
         }
+    }
+
+    /// X4 (dev/research/repo-review-2026-06-09.md): on a partial matching an
+    /// index `i` can have its COLUMN matched while its ROW is unmatched — the
+    /// matched-row and matched-column sets differ even on symmetric patterns.
+    /// `build_matching` zeroes `u[i]` for an unmatched row, so the symmetric
+    /// average `s[i] = exp((u[i] + v[i] - cmax[i]) / 2)` folds a meaningless
+    /// zero half-dual into the scaling — exactly the "duals are meaningless on
+    /// the unmatched part" condition the adjacent comments warn about. The
+    /// documented contract (step 9 in the module header,
+    /// `dev/research/mc64-scaling.md`) is identity scaling for any index whose
+    /// row OR column is unmatched.
+    ///
+    /// Synthetic cache for n = 2: column 0 is matched to row 1
+    /// (`perm[0] = 1`), column 1 is unmatched (`perm[1] = usize::MAX`). The
+    /// matched-row set is therefore {1}, so ROW 0 is unmatched and `u[0] = 0`
+    /// (as `build_matching` leaves it). Both columns are non-empty (finite
+    /// `cmax`). The contract requires `s[0] = 1.0` (row 0 unmatched) and
+    /// `s[1] = 1.0` (column 1 unmatched). Pre-fix the code only skipped on an
+    /// unmatched COLUMN, so index 0 took `exp((0 + v[0] - cmax[0]) / 2)
+    /// = exp((0 + 2 - 1) / 2) = exp(0.5) ≈ 1.6487` — the witness.
+    #[test]
+    fn unmatched_row_with_matched_column_falls_back_to_identity() {
+        let cache = Mc64Cache {
+            // col 0 -> row 1; col 1 unmatched.
+            perm: vec![1, usize::MAX],
+            // row 0 unmatched => u[0] zeroed by build_matching; row 1's dual
+            // is irrelevant to index 0's scaling.
+            u: vec![0.0, 0.0],
+            // col 0 matched dual; col 1 unmatched => 0.
+            v: vec![2.0, 0.0],
+            // both columns non-empty (finite max).
+            cmax: vec![1.0, 1.0],
+            n_matched: 1,
+        };
+        let (s, info) = scaling_from_cache(&cache);
+        assert_eq!(info, ScalingInfo::PartialSingular { n_unmatched: 1 });
+        assert!(
+            (s[0] - 1.0).abs() < 1e-12,
+            "index 0's ROW is unmatched; the contract requires identity \
+             scaling, got {} (X4)",
+            s[0]
+        );
+        assert!(
+            (s[1] - 1.0).abs() < 1e-12,
+            "index 1's column is unmatched; must be identity, got {}",
+            s[1]
+        );
     }
 
     /// Empty 0×0 matrix returns an empty scaling vector.

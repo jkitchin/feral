@@ -510,3 +510,25 @@ Fix: -1 sentinel for "no valid factor" at init (capi.rs), on set_structure, and 
 the Singular and FatalError branches of feral_factor. Field + feral_num_neg docs
 updated to state the sentinel covers fresh/structure-change/failed-refactor. Both
 tests GREEN; full lib suite 344 passed; clippy -D warnings clean; fmt clean.
+
+* 10:05 :scaling:mc64:partial-singular:x4:fixed:
+X4 (repo-review-2026-06-09.md): MC64 partial-singular fallback covered unmatched
+COLUMNS but not unmatched ROWS. scaling_from_cache skipped to identity only when
+perm[i]==usize::MAX (column i unmatched). But on a partial matching the matched-row
+and matched-column sets differ even on symmetric patterns: index i can have column i
+matched (perm[i]!=MAX) while row i is unmatched. build_matching (hungarian.rs:703-707)
+zeroes u[i] for an unmatched row, so s[i]=exp((u[i]+v[i]-cmax[i])/2)=exp((0+v[i]-cmax[i])/2)
+folded a meaningless zero half-dual into the symmetric average — the exact condition
+the adjacent comment warns about. Affects PartialSingular matrices (routine for
+rank-deficient KKTs, issue #43); D·A·D quality could be badly asymmetric.
+Reproduction: deterministic unit test on scaling_from_cache with a synthetic
+Mc64Cache (perm=[1,MAX], u=[0,0], v=[2,0], cmax=[1,1], n_matched=1). End-to-end
+forcing of the asymmetric matching is fragile because the input is symmetric
+(lower-tri expanded, values necessarily symmetric) so the min-cost max matching ties
+and the Hungarian tie-break is implementation-dependent. The unit-level oracle is the
+documented contract (step 9 / mc64-scaling.md): identity for any index whose row OR
+column is unmatched. RED: index 0 returned exp(0.5)=1.6487212707001282 (predicted
+witness, exact match). 
+Fix: build a row_matched bitset from perm (O(n)), then fall back to identity when
+perm[i]==MAX OR !row_matched[i]. Updated module step-9 doc and the inline comment.
+GREEN; full lib suite 345 passed; clippy -D warnings clean; fmt clean.

@@ -4,6 +4,22 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — MC64 partial-singular fallback now covers unmatched rows, not just unmatched columns (X4)
+
+On a partial (structurally singular) matching the MC64 symmetric scaling fell
+back to identity only for unmatched *columns* (`perm[i] == MAX`). But the
+matched-row and matched-column sets can differ even on a symmetric pattern:
+an index `i` can have its column matched while its row is unmatched. The
+Hungarian kernel zeroes the row dual `u[i]` for an unmatched row, so the
+symmetric average `s[i] = exp((u[i] + v[i] - cmax[i]) / 2)` folded a
+meaningless zero half-dual into the scaling — the exact "duals are meaningless
+on the unmatched part" condition the surrounding code warns about, producing a
+badly asymmetric `D·A·D` on rank-deficient KKTs. `scaling_from_cache` now
+derives the matched-row set from the matching and falls back to identity for
+any index whose row *or* column is unmatched. Matrices with a full matching
+are unaffected. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
 ### Fixed — `feral_num_neg` no longer reports a stale or wrong inertia (X1)
 
 The C-ABI negative-eigenvalue accessor (`feral_num_neg`) could return a
