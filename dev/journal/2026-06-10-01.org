@@ -1,0 +1,34 @@
+* 2026-06-10 PR #83 review loop — D5 (continued session, post-midnight)
+
+** 00:05 :D5:bk-selection:unreachable:not-reproduced:proof:
+D5 (legacy factor() do_2x2_pivot: exactly-singular 2×2 -> t=1/(d00*d11-1)
+=1/0 -> inf/NaN poisons trailing block) — NOT REPRODUCIBLE. The code path
+exists and is unguarded (the frontal do_2x2_update guards det==0; legacy
+does not), but Bunch-Kaufman pivot selection cannot feed it a singular 2×2.
+
+Proof: a 2×2 is selected at step 7 only after steps 3/5/6 fail
+(factor.rs:977-1045): akk<α·γ0, arr<α·γr, akk·γr<α·γ0². Block is
+[[akk,d21],[d21,arr]] with |d21|=γ0 (r=argmax of col k). Exactly singular ⇒
+akk·arr=γ0² ⇒ akk=γ0²/arr. Sub into step-6-fail: γr/arr<α ⇒ arr>γr/α. But
+step-5-fail: arr<α·γr. Together γr/α<arr<α·γr ⇒ 1/α<α ⇒ α²>1, false
+(α=(1+√17)/8≈0.640). Contradiction. Stronger: akk·arr<α²γ0² ⇒
+det<(α²−1)γ0²≈−0.59γ0² — every BK-selected 2×2 is bounded away from
+singular, so d00*d11−1=det/γ0²≤−0.59 and t∈[−1.7,0). No 1/0, no overflow.
+perturb_2x2_to_floor only lifts eigenvalues away from 0 (and is a no-op at
+default static_pivot_floor=0), so it can't create singularity either.
+
+Empirical corroboration: deterministic LCG sweep (no rand/Date), 20000
+factor() calls under ForceAccept, n∈{3..8}, small-diagonal bias +
+6667 adversarial near-singular [[a,g],[g,g²/a]] embeddings with big
+third-column coupling to inflate γr. Selected 31092 ACTUAL 2×2 blocks,
+produced ZERO NaN/inf across d_diag/d_subdiag/l. (runs=20000
+total_2x2_blocks=31092 any_nan=0.) Scratch sweep removed after the run.
+
+Disposition: tried-and-rejected.md citing D5 (full proof + sweep). No fix,
+no reproducing test (unreachable = untestable). A defensive det==0 guard
+mirroring do_2x2_update is possible but would be unreachable speculative
+hardening; deferred with a note to add it if a future pivot-selection /
+rook / threshold change ever makes a singular 2×2 selectable.
+
+Next per triage: D6 (unsafe set_len over uninitialized memory, library UB,
+factor.rs:1668-1670 and :2148-2150).

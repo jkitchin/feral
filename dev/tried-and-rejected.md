@@ -2539,3 +2539,80 @@ separate concern from the solve gate and is unchanged.
 
 Evidence: tests/d4_solve_2x2_gate.rs (facet b reproduced+fixed; facet a
 pinned as consistency guard), /tmp/check_a.py, dev/journal/2026-06-09-01.org.
+
+---
+
+## 2026-06-10 — D5: exactly-singular 2×2 → 1/0 → NaN in legacy `factor()` (finding D5, repo-review-2026-06-09.md)
+
+Finding D5 (`src/dense/factor.rs`, `do_2x2_pivot`): under `factor()` +
+`ForceAccept`, an *exactly singular* 2×2 pivot block makes
+`t = 1.0 / (d00*d11 - 1.0)` divide by zero → `±inf`, the rank-2 weights
+`w0/w1` become `inf`/`NaN`, and the NaN is subtracted into the entire
+trailing block. The frontal path is guarded (`do_2x2_update` early-returns
+on `det == 0`); the legacy `do_2x2_pivot` is not. Confidence in the review
+was "certain (path) / **likely** (triggering)".
+
+**The code path exists but is unreachable through `factor()`'s
+Bunch-Kaufman pivot selection — the bug cannot be triggered.** Recorded
+here per the loop's "anything that can't be reproduced" rule.
+
+### Proof of unreachability
+
+A 2×2 is selected only at step 7, after steps 3/5/6 all fail
+(`factor.rs:977-1045`). Let `γ0 = max|A[i,k]|` (col `k` off-diagonal,
+attained at row `r`), `γr = max|A[i,r]|` (row `r` off-diagonal). The
+selected block is `[[akk, d21], [d21, arr]]` with `|d21| = γ0` (since `r`
+is the argmax row of column `k`), `akk = |A[k,k]|`, `arr = |A[r,r]|`.
+
+The three rejection conditions that *force* step 7:
+- step 3 fail: `akk < α·γ0`
+- step 5 fail: `arr < α·γr`
+- step 6 fail: `akk·γr < α·γ0²`
+
+For the block to be exactly singular, `det = akk·arr − γ0² = 0`, i.e.
+`akk·arr = γ0²` (taking `arr ≠ 0`; if `arr = 0` then `det = −γ0² < 0`,
+not singular, since `γ0 ≠ 0` is guaranteed by the `gamma0 == 0` branch at
+`factor.rs:956`).
+
+From `det = 0`: `akk = γ0² / arr`. Substituting into step-6-fail:
+`(γ0²/arr)·γr < α·γ0²  ⟹  γr/arr < α  ⟹  arr > γr/α`.
+But step-5-fail says `arr < α·γr`. Together:
+`γr/α < arr < α·γr  ⟹  1/α < α  ⟹  α² > 1`.
+This is false: `α = (1+√17)/8 ≈ 0.6404 < 1`. **Contradiction.** No exactly
+singular 2×2 block can satisfy the step-5 and step-6 rejection
+conditions simultaneously, so BK never feeds one to `do_2x2_pivot`.
+
+Stronger bound (near-singular is also safe): from step-6-fail
+`akk < α·γ0²/γr` and step-5-fail `arr < α·γr`, the product
+`akk·arr < α²·γ0²`, so
+`det = akk·arr − γ0² < (α² − 1)·γ0² ≈ −0.59·γ0² < 0`.
+Every BK-selected 2×2 block is comfortably indefinite — its determinant is
+bounded *away* from zero by `(1−α²)·γ0² ≈ 0.59·γ0²`. Hence the normalized
+`d00·d11 − 1 = det/γ0² ≤ −0.59`, and `t = 1/(d00·d11−1) ∈ [−1.7, 0)` — no
+division by zero, no overflow, no NaN. The static-pivot perturbation
+(`perturb_2x2_to_floor`) only *lifts* eigenvalues away from zero, so it
+cannot create singularity either; with the default `static_pivot_floor = 0`
+it is a no-op.
+
+### Empirical corroboration
+
+A deterministic sweep (LCG-seeded, no `rand`/`Date`) of 20,000 `factor()`
+calls under `ForceAccept` — sizes n ∈ {3,4,5,6,8}, small-diagonal bias to
+provoke 2×2 pivots, and 6,667 adversarial near-singular `[[a, g],[g,
+g²/a]]` embeddings with large third-column coupling to push `γr` up —
+selected **31,092 actual 2×2 blocks** and produced **zero NaN/inf** in any
+output (`d_diag`, `d_subdiag`, `l`). Matches the proof.
+
+### Disposition
+
+No fix and no reproducing test (the path is dead code in practice). A
+defensive `if (d00*d11 - 1.0) == 0.0 { /* degenerate */ }` guard mirroring
+`do_2x2_update` is *possible* and harmless, but it would be untestable
+(unreachable) speculative hardening; deferred rather than added blind. If a
+future change to the pivot-selection α-test, the rook rescue, or the
+threshold logic ever makes a singular 2×2 selectable, this entry is the
+flag to add that guard at the same time.
+
+Evidence: proof above; sweep `runs=20000 total_2x2_blocks=31092 any_nan=0`;
+`do_2x2_pivot` at `src/dense/factor.rs` (`t = 1.0/(d00*d11-1.0)`), selection
+steps at `factor.rs:977-1047`. Journal: dev/journal/2026-06-10-01.org.
