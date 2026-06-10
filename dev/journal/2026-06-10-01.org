@@ -1398,3 +1398,27 @@ No code change, no CHANGELOG (not user-visible). tried-and-rejected.md updated.
 
 Next per /loop: do NOT start the next issue (L12). Continue in-turn per the live
 "speed this up" directive.
+
+* 11:05 :lu:perf:allocation:L12:deferred:
+L12 (repo-review-2026-06-09.md): allocation cluster — u_entries Vec per column
+in the factor loop, scratch Vecs in remap_and_sort_l, pivot_data clone +
+per-op row_sub alloc in bump elimination, full L/U/qcol clones for rollback on
+every dense update; reviewer suggests an undo log. Confirmed accurate at the
+current (drifted) line numbers: sparse_factor.rs:236,318,350-352,537;
+sparse_update.rs:340,346,429; dense_update.rs:75-77.
+
+Disposition: deferred to tried-and-rejected, not fixed. Reasoning: (1) correct
+output — these are allocation-efficiency issues, no wrong answer, so no RED
+correctness assertion; the reproduction vehicle is an allocation COUNT (L3
+thread-local-counter pattern), making L12 reproducible-in-principle but only as
+a non-functional contract. (2) The flagship fix (undo-log replacing the dense
+rollback clones) reworks the basis-update commit/rollback mechanism on the
+critical path — correctness-sensitive, and bench-gated per the project lifecycle
+(research->plan->tests->implement->benchmark) and the "correctness before
+performance" mandate. (3) It is a 4-site cluster best done as one tuned
+optimization pass with allocation-count regression tests, not piecemeal mid-loop.
+
+No code change, no CHANGELOG (not user-visible). tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (L13). Continue in-turn per the live
+"speed this up" directive.

@@ -3693,3 +3693,75 @@ refactor, never read).
 Evidence: `src/lu/dense_factor.rs:31` (field), `:75-84` (constructor build),
 `:115-117` (`refactor()` maintenance); zero rvalue readers across `src/lu/`
 (grep). Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — L12: allocation cluster in factor / bump-elim / dense rollback (finding L12, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **L12** Allocation cluster: `u_entries` Vec per column in the factor loop
+> (`sparse_factor.rs:215`); two Vecs per column in `remap_and_sort_l`
+> (`:490-491`); `pivot_data` clone + per-op row allocation in bump elimination
+> (`sparse_update.rs:299,309`); full L/U/qcol clones for rollback on every dense
+> update (`dense_update.rs:66-68`) — an undo log of touched entries would be far
+> cheaper on the success path. low/certain.
+
+### Why this is recorded here rather than fixed
+
+1. **The finding is accurate — confirmed at the current (drifted) line numbers.**
+   The cited lines have shifted since the review, but every site is real today:
+   - factor loop: `let mut u_entries: Vec<(usize, f64)> = Vec::with_capacity(reach.len())`
+     allocated *per column* (`src/lu/sparse_factor.rs:236`, consumed via
+     `into_iter()` at `:318`); plus the per-row `u_rows`/`row` Vecs at `:350-352`;
+   - `remap_and_sort_l`: `let mut order: Vec<usize> = Vec::new()`
+     (`src/lu/sparse_factor.rs:537`);
+   - bump elimination: `let pivot_data = self.u_rows[k].clone()`
+     (`src/lu/sparse_update.rs:340`) and the per-op `row_sub` allocation
+     (`:346` → `Vec::with_capacity` at `:429`);
+   - dense update rollback: `self.u.clone()` / `self.l.clone()` /
+     `self.qcol.clone()` on *every* update (`src/lu/dense_update.rs:75-77`).
+
+2. **Correct output — this is allocation efficiency, not a wrong answer.** None of
+   these sites changes any computed result; they only allocate more than a tuned
+   implementation would. So there is no input that yields a *wrong* output for a
+   RED test to assert against. The reproduction vehicle here is an allocation
+   *count* (the L3 thread-local-counter pattern in `sparse_solve.rs`, which pins
+   "zero per-call allocations"), not a correctness assertion — i.e. L12 is
+   reproducible-in-principle, unlike the timing-flaky findings, but only as a
+   non-functional allocation-count contract.
+
+3. **The flagship fix is a correctness-sensitive, bench-gated rewrite.** Replacing
+   the dense rollback clones with an undo log means recording every touched
+   `(index, old_value)` during the in-place update and replaying it on the
+   `NeedsRefactor` path, instead of cloning `u`/`l`/`qcol` up front and committing
+   on success. That reworks the update's commit/rollback mechanism on the
+   basis-update critical path — exactly where a subtle rollback bug would corrupt
+   the factorization silently. The project mandate is "correctness before
+   performance, always," and the feature lifecycle requires perf changes to go
+   through research → plan → tests → implement → **benchmark**. That does not fit
+   the surgical reproduce-first-then-commit cadence of this pass.
+
+4. **It is a cluster, best addressed coherently.** Four distinct sites with one
+   shared theme (reuse scratch / avoid clones). Fixing one in isolation (e.g.
+   hoisting `u_entries` to a reused buffer cleared each column) would leave the
+   headline item — the dense rollback clones — open, and would add factor-path
+   allocation instrumentation for a fractional gain. These belong in one tuned
+   optimization pass with allocation-count regression tests, not piecemeal.
+
+### Disposition
+
+No code change and no new test. Recommended as a tracked optimization task: (a)
+add allocation-count instrumentation on the factor and update paths (extend the
+L3 thread-local counter); (b) hoist the per-column/per-row scratch Vecs
+(`u_entries`, `remap_and_sort_l` `order`, bump-elim `row_sub` scratch) to reused
+buffers cleared per iteration; (c) replace the dense rollback clones with a
+touched-entry undo log replayed on `NeedsRefactor`; (d) pin each with an
+allocation-count test and validate net speedup on the LU bench before committing.
+Until then the behavior is correct but allocates more than necessary on the
+factor and update hot paths.
+
+Evidence: `src/lu/sparse_factor.rs:236,318,350-352,537`;
+`src/lu/sparse_update.rs:340,346,429`; `src/lu/dense_update.rs:75-77`. Output
+unaffected; reproduction vehicle is allocation count (L3 pattern), not a
+correctness assertion. Journal: dev/journal/2026-06-10-01.org.
