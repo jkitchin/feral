@@ -652,3 +652,47 @@ Evidence: feral lib dense::factor 32 passed (+1), clippy -p feral --lib
 -D warnings clean, fmt clean.
 
 Next per /loop: do NOT start the next issue (D9). Schedule it.
+
+* 13:50 :dense:zero-pivot:d9:n-tiny:doc-drift:fixed:partial:
+D9 (repo-review-2026-06-09.md, §4 low): drift catalog across the four duplicated
+1x1/2x2 zero-pivot impls in factor.rs. Five facets; three fixed, two -> t-a-r.
+
+Fixed (a) code defect: do_1x1_pivot's ZeroPivotAction::PerturbToEps arm called
+perturb_to_floor (line 4556) without `*n_tiny += 1`, violating the documented
+n_tiny contract ("MUMPS INFO(25)=NBTINYW, incremented at each perturb_to_floor
+call site", count_1x1_inertia:4804-4806). The three siblings (do_1x1_pivot
+static-floor path, try_reject_1x1_frontal both perturb arms, count_1x1_inertia
+both perturb arms) all bump it. Reproducing unit test (tests-first):
+zero_pivot_n_tiny_tests::do_1x1_pivot_perturb_to_eps_counts_n_tiny calls
+do_1x1_pivot directly with d=0 (|d|<=zero_tol), static floor off,
+on_zero_pivot=PerturbToEps{abs_floor:1e-10}; asserts n_tiny==1, (pos,neg,zero)=
+(1,0,0). Oracle = documented contract + sibling impls (external). RED: n_tiny
+left:0 right:1. GREEN after adding the increment. do_1x1_pivot is only called
+from legacy factor() whose n_tiny is a discarded local sink, so the defect is not
+observable via the public API -> direct unit test is the reproduction.
+
+Fixed (d) doc: stale F-01 overview comment in try_reject_1x1_frontal (case (a')
+"Count as zero in inertia") contradicted the code (sign-counts, 2026-05-17
+sign-fallback) and the correct inline comment at the code site. Rewrote to say
+the band collapses into case (b) by sign.
+
+Fixed (e) doc: both needs_refinement field docs said "when ForceAccept fired";
+the flag is also set by PerturbToEps, F-01 band pivots, static-pivot flooring,
+and growth flagging. Corrected both (FrontalFactors + the second struct).
+
+Deferred (b)/(c) -> tried-and-rejected.md citing D9: (b) factor() runs the
+Duff-Reid 2x2 bound on the unperturbed block while scalar_pivot_step perturbs
+before the gates; (c) factor()'s do_2x2_pivot lacks the SSIDS det floor +
+issue-#46 partner fallback the frontal path has. Both are inertia-affecting
+changes to the LEGACY factor() path; per the hard rule (inertia exactly correct;
+no impl+oracle in one session) they need a MUMPS/SSIDS reference oracle to
+validate, which this iteration can't produce. A test that only exhibits a path
+divergence isn't a failing-on-the-bug test. Legacy factor() is flagged for
+removal (D1, D5).
+
+Evidence: feral lib dense::factor 33 passed (+1), clippy -p feral --lib
+-D warnings clean, fmt clean. CHANGELOG: not user-visible (n_tiny is an internal
+diagnostic on the frontal stats struct; the defect was on a path whose n_tiny is
+discarded) -> no CHANGELOG entry.
+
+Next per /loop: do NOT start the next issue (D10). Schedule it.

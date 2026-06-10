@@ -801,7 +801,12 @@ pub struct Factors {
     pub perm_inv: Vec<usize>,
     /// Equilibration scaling diagonal D_eq. Length n.
     pub d_eq: Vec<f64>,
-    /// True when ZeroPivotAction::ForceAccept fired during factorization.
+    /// True when the factor is approximate and a residual check / iterative
+    /// refinement is advised. Set by any of: a `ForceAccept`'d zero pivot,
+    /// a `PerturbToEps` perturbation, an F-01 rank-deficiency band pivot
+    /// (sign-fallback), an MA57-style static-pivot floor perturbation, or
+    /// growth flagging (`|L_ij| > L_GROWTH_THRESHOLD`). (D9,
+    /// repo-review-2026-06-09.md: previously documented as ForceAccept-only.)
     pub needs_refinement: bool,
     /// 1×1 pivot threshold copied from BunchKaufmanParams at factor time.
     /// `solve` consults this to decide whether to divide by `d_diag[k]`:
@@ -1284,7 +1289,11 @@ pub struct FrontalFactors {
     pub n_delayed: usize,
     /// Inertia of the `nelim` eliminated pivots.
     pub inertia: Inertia,
-    /// Whether ForceAccept fired during factorization.
+    /// Whether the factor is approximate and a residual check / iterative
+    /// refinement is advised. Set by any of: a `ForceAccept`'d zero pivot,
+    /// a `PerturbToEps` perturbation, an F-01 rank-deficiency band pivot,
+    /// a static-pivot floor perturbation, or growth flagging — not just
+    /// ForceAccept (D9, repo-review-2026-06-09.md).
     pub needs_refinement: bool,
     /// Number of pivots rescued by rook search after BK-partial's column-
     /// relative threshold test rejected them (Phase 2.4.3). Zero on
@@ -3942,11 +3951,15 @@ fn try_reject_1x1_frontal(
         //       the strict floor (default EPS).
         //
         //  (a') zero_tol < |d| <= null_pivot_tol — rank-deficiency
-        //       band per Wilkinson's backward error bound. Count as
-        //       zero in inertia (F-01) but leave d_diag and L intact
-        //       so the solve can still divide by `d` (its strict
-        //       `factors.zero_tol` check on the divide stays at EPS).
-        //       `needs_refinement = true` guards the residual.
+        //       band per Wilkinson's backward error bound. As of the
+        //       2026-05-17 sign-fallback this band collapses into case
+        //       (b): the pivot is counted *by sign*, not as zero (the
+        //       pre-2026-05-17 rule counted it zero — see the inline
+        //       comment at the case (a') code below for the full
+        //       rationale; D9, repo-review-2026-06-09.md). d_diag and L
+        //       stay intact so the solve can still divide by `d` (its
+        //       strict `factors.zero_tol` check on the divide stays at
+        //       EPS); `needs_refinement = true` guards the residual.
         //
         //  (b)  null_pivot_tol < |d| <= u*col_max — small but clearly
         //       nonzero by the relative-scale test. Accept with
@@ -4556,6 +4569,12 @@ fn do_1x1_pivot(
                     d = perturb_to_floor(d, abs_floor);
                     a[k * n + k] = d;
                     *needs_refinement = true;
+                    // D9 (repo-review-2026-06-09.md): count the perturbed
+                    // pivot as tiny, matching the `n_tiny` contract ("bump
+                    // at each `perturb_to_floor` call site") honored by the
+                    // static-floor path above and the sibling
+                    // `try_reject_1x1_frontal` / `count_1x1_inertia`.
+                    *n_tiny += 1;
                     if d > 0.0 {
                         *pos += 1;
                     } else {
@@ -5420,5 +5439,62 @@ mod row_offdiag_tests {
             got, 7.0,
             "A(r, k) must be included in the row-r off-diagonal max (LAPACK ROWMAX)"
         );
+    }
+}
+
+#[cfg(test)]
+mod zero_pivot_n_tiny_tests {
+    use super::*;
+
+    /// D9 (repo-review-2026-06-09.md): `n_tiny` (the MUMPS INFO(25) =
+    /// NBTINYW analogue) is documented and implemented as "incremented at
+    /// each `perturb_to_floor` call site" — its three sibling zero-pivot
+    /// implementations (`do_1x1_pivot`'s static-floor path,
+    /// `try_reject_1x1_frontal`, `count_1x1_inertia`) all bump it on both
+    /// the static-floor and the `PerturbToEps` perturbation. But
+    /// `do_1x1_pivot`'s `ZeroPivotAction::PerturbToEps` arm called
+    /// `perturb_to_floor` without incrementing `n_tiny`, undercounting
+    /// perturbed pivots on that path.
+    ///
+    /// Reproduction: drive `do_1x1_pivot` directly with an exactly-zero
+    /// pivot (`|d| = 0 <= zero_tol`), `static_pivot_floor` disabled, and
+    /// `on_zero_pivot = PerturbToEps`. That routes through the truly-zero
+    /// match into the `PerturbToEps` arm, which perturbs the pivot to
+    /// `+abs_floor` and must therefore count one tiny pivot. Oracle: the
+    /// documented n_tiny contract plus the three sibling implementations
+    /// (MUMPS NBTINYW semantics) — every `perturb_to_floor` is one tiny
+    /// pivot.
+    #[test]
+    fn do_1x1_pivot_perturb_to_eps_counts_n_tiny() {
+        let n = 2;
+        // Column-major 2×2: A(0,0)=0 (the zero pivot), A(1,0)=0, A(1,1)=1.
+        let mut a = vec![0.0f64, 0.0f64, 0.0f64, 1.0f64];
+        let params = BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 },
+            ..Default::default()
+        };
+        let (mut pos, mut neg, mut zero, mut n_tiny) = (0usize, 0usize, 0usize, 0usize);
+        let mut needs_refinement = false;
+        let col_max = 0.0; // max |A[i,0]| for i>0 — the (1,0) entry is 0.
+        let res = do_1x1_pivot(
+            &mut a,
+            n,
+            0,
+            col_max,
+            &params,
+            &mut pos,
+            &mut neg,
+            &mut zero,
+            &mut needs_refinement,
+            &mut n_tiny,
+        );
+        assert!(res.is_ok(), "PerturbToEps path must accept, not error");
+        assert_eq!(
+            n_tiny, 1,
+            "PerturbToEps perturbs the pivot via perturb_to_floor — it must count as one tiny pivot (MUMPS NBTINYW)"
+        );
+        assert!(needs_refinement, "a perturbed pivot must flag refinement");
+        // Perturbed to +abs_floor → counted as a positive eigenvalue.
+        assert_eq!((pos, neg, zero), (1, 0, 0));
     }
 }

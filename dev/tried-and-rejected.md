@@ -2690,3 +2690,63 @@ Evidence: synthetic sweep (4 matrices, all identical); named-matrix check
 parity sweep `TOTAL=50 DIVERGE=0`; `do_1x1_pivot` band logic at
 `src/dense/factor.rs:4513-4600`; bench mismatch at `src/bin/bench.rs:1569,1622` vs
 rationale `:1356-1375`. Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — D9 facets (b)/(c): legacy `factor()` 2×2 pivot-gate parity gaps (finding D9, repo-review-2026-06-09.md)
+
+Finding D9 is a drift catalog across the four duplicated 1×1/2×2 zero-pivot
+implementations in `src/dense/factor.rs`. Three facets were **fixed** in the
+companion commit (a reproducing unit test for the code defect, doc corrections
+for the two stale comments):
+
+- **(a)** `do_1x1_pivot`'s `ZeroPivotAction::PerturbToEps` arm called
+  `perturb_to_floor` without incrementing `n_tiny`, violating the documented
+  "bump at each `perturb_to_floor` call site" contract honored by its three
+  siblings. Fixed + pinned by
+  `zero_pivot_n_tiny_tests::do_1x1_pivot_perturb_to_eps_counts_n_tiny`.
+- **(d)** Stale F-01 overview comment in `try_reject_1x1_frontal` said case
+  (a') "Count as zero in inertia"; the code sign-counts (2026-05-17
+  sign-fallback) and the inline comment at the code site is correct. Comment
+  corrected.
+- **(e)** Both `needs_refinement` field docs said "when ForceAccept fired";
+  the flag is also set by `PerturbToEps`, F-01 band pivots, static-pivot
+  flooring, and growth flagging. Docs corrected.
+
+Two facets are **recorded here rather than fixed**, because they cannot be
+reproduced into a failing test without an external reference-solver oracle, and
+"fixing" them blind would change the inertia committed by the legacy scalar
+`factor()` path — which the hard constraint "inertia must be exactly correct"
+forbids without an external oracle to validate against (CLAUDE.md: never write
+both impl and oracle in the same session).
+
+### (b) `factor()` evaluates the Duff-Reid 2×2 bound on the *unperturbed* block, while `scalar_pivot_step` perturbs before the gates
+
+The legacy `factor()` 2×2 path runs the BK/Duff-Reid acceptance test on the raw
+block, whereas the frontal `scalar_pivot_step` applies the static-pivot floor
+*before* the acceptance gates. When `static_pivot_floor > 0.0` the two paths can
+therefore make different 2×2-vs-1×1 pivot decisions on the same block. This is a
+*pivot-selection* divergence; whether it changes committed *inertia* on any real
+matrix is exactly what cannot be asserted without an oracle. Like D5/X3 before
+it, the divergence is on the legacy `factor()` path (other findings — D1, D5 —
+flag this path for eventual removal); the frontal path is the production path.
+
+### (c) `factor()` lacks the SSIDS det floor and the issue-#46 partner fallback
+
+The frontal 2×2 logic carries an SSIDS-style determinant floor and the issue-#46
+partner-column fallback; the legacy `factor()` 2×2 path (`do_2x2_pivot`) does
+not. This is a real feature gap, but adding either to `factor()` changes which
+blocks it accepts and how it counts their inertia — again a change that needs a
+MUMPS/SSIDS reference inertia to validate, and again on the legacy path.
+
+### Disposition
+
+No code change and no reproducing test for (b)/(c). A test that merely *exhibits*
+a path divergence is not enough — the loop requires a test whose *failure* is the
+bug, and the bug here is "wrong inertia", which needs an external oracle this
+iteration cannot produce. Deferred to a dedicated legacy-`factor()` parity effort
+(or its removal), validated against the SSIDS/MUMPS corpus. This entry is the flag
+to revisit (b)/(c) when that effort happens.
+
+Evidence: `do_1x1_pivot` / `try_reject_1x1_frontal` / `count_1x1_inertia` /
+`scalar_pivot_step` / `do_2x2_pivot` in `src/dense/factor.rs`; sibling n_tiny
+contract at `factor.rs` (count_1x1_inertia `n_tiny` doc). Companion commit fixes
+(a)/(d)/(e). Journal: dev/journal/2026-06-10-01.org.
