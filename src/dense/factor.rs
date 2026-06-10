@@ -1698,32 +1698,40 @@ fn factor_frontal_in_place_with_scratch_impl(
     let mut contrib = scratch.contrib_pool.take().unwrap_or_default();
     contrib.clear();
     contrib.reserve(cdim2);
+    // Issue #56 Lever B (single write per cell) preserved, but the
+    // initialization now happens through the Vec's spare capacity as
+    // `MaybeUninit<f64>` *before* the length is grown. The prior code
+    // called `set_len(cdim2)` first and then wrote through a `&mut [f64]`
+    // materialized over still-uninitialized memory: that exposes
+    // uninitialized elements as live `f64`s, violating `Vec::set_len`'s
+    // documented precondition (D6, dev/research/repo-review-2026-06-09.md).
+    // "Every cell is written before read" is a real property but it is not
+    // the property `set_len` requires (the elements must be initialized
+    // *at the call*). Writing via `MaybeUninit` and calling `set_len`
+    // afterwards satisfies the contract with the same single-pass cost.
+    {
+        let spare = contrib.spare_capacity_mut();
+        for cj in 0..cdim {
+            let col_base = cj * cdim;
+            for ci in 0..cj {
+                spare[col_base + ci].write(0.0);
+            }
+            for ci in cj..cdim {
+                spare[col_base + ci].write(a[(nelim + cj) * nrow + (nelim + ci)]);
+            }
+        }
+    }
     let _pt_zf = phase_timing::start();
-    // SAFETY: every cell in 0..cdim2 is written exactly once by the
-    // loop below before any read. f64 has no Drop, so dropping a Vec
-    // whose bytes were briefly uninitialized between `set_len` and the
-    // loop body is sound (no destructor reads them). The pool's prior
-    // contents (when `take()` returned `Some`) and any newly-reserved
-    // capacity are both overwritten by the loop. CONTRIBZEROFILL_NS
-    // brackets the `set_len` so the probe still reports a non-zero
-    // counter — its meaning is now "the cost of carving out the
-    // contrib region", which is O(1) instead of O(cdim²).
+    // SAFETY: the loop above initialized every element in 0..cdim2 of the
+    // spare capacity (which `reserve(cdim2)` guaranteed exists), so
+    // growing the length to cdim2 exposes only fully-initialized values.
+    // CONTRIBZEROFILL_NS brackets only this O(1) length carve-out, as
+    // before; the O(cdim²) initialization is counted under
+    // CONTRIBEXTRACT_NS via `_pt_cx`.
     unsafe {
         contrib.set_len(cdim2);
     }
     phase_timing::stop(&phase_timing::CONTRIBZEROFILL_NS, _pt_zf);
-    {
-        let slice: &mut [f64] = contrib.as_mut_slice();
-        for cj in 0..cdim {
-            let col_base = cj * cdim;
-            for ci in 0..cj {
-                slice[col_base + ci] = 0.0;
-            }
-            for ci in cj..cdim {
-                slice[col_base + ci] = a[(nelim + cj) * nrow + (nelim + ci)];
-            }
-        }
-    }
     phase_timing::stop(&phase_timing::CONTRIBEXTRACT_NS, _pt_cx);
 
     let mut perm_inv = vec![0usize; nrow];
@@ -2184,26 +2192,31 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     let mut contrib = scratch.contrib_pool.take().unwrap_or_default();
     contrib.clear();
     contrib.reserve(cdim2);
+    // Initialize through the spare capacity as `MaybeUninit<f64>` before
+    // growing the length, so `set_len` never exposes uninitialized
+    // elements. See the matching long-form safety comment in
+    // `factor_frontal_in_place_with_scratch_impl` (D6,
+    // dev/research/repo-review-2026-06-09.md).
+    {
+        let spare = contrib.spare_capacity_mut();
+        for cj in 0..cdim {
+            let col_base = cj * cdim;
+            for ci in 0..cj {
+                spare[col_base + ci].write(0.0);
+            }
+            for ci in cj..cdim {
+                spare[col_base + ci].write(a[(nelim + cj) * nrow + (nelim + ci)]);
+            }
+        }
+    }
     let _pt_zf = phase_timing::start();
-    // SAFETY: every cell in 0..cdim2 is written exactly once by the
-    // loop below before any read. f64 has no Drop. See the matching
-    // safety comment in `factor_frontal` for the long form.
+    // SAFETY: the loop above initialized every element in 0..cdim2 of the
+    // spare capacity that `reserve(cdim2)` guaranteed exists; `f64` has no
+    // Drop, so growing the length exposes only initialized values.
     unsafe {
         contrib.set_len(cdim2);
     }
     phase_timing::stop(&phase_timing::CONTRIBZEROFILL_NS, _pt_zf);
-    {
-        let slice: &mut [f64] = contrib.as_mut_slice();
-        for cj in 0..cdim {
-            let col_base = cj * cdim;
-            for ci in 0..cj {
-                slice[col_base + ci] = 0.0;
-            }
-            for ci in cj..cdim {
-                slice[col_base + ci] = a[(nelim + cj) * nrow + (nelim + ci)];
-            }
-        }
-    }
     phase_timing::stop(&phase_timing::CONTRIBEXTRACT_NS, _pt_cx);
 
     let mut perm_inv = vec![0usize; nrow];

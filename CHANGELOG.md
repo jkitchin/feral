@@ -68,6 +68,22 @@ it, so the factor never stores it; this is recorded in `dev/tried-and-rejected.m
 and pinned as a consistency guard. Finding D4 from
 `dev/research/repo-review-2026-06-09.md`.
 
+### Fixed — contribution-block extraction no longer violates `Vec::set_len`'s init contract (D6)
+
+The contribution-block extraction in `factor_frontal_in_place_with_scratch_impl`
+and `factor_frontal_blocked_in_place_with_scratch` (`src/dense/factor.rs`)
+called `contrib.set_len(cdim²)` **before** writing the cells, then materialized
+a `&mut [f64]` over the still-uninitialized tail. Every cell is written before
+read, so results were correct, but calling `set_len` to expose uninitialized
+elements violates its documented safety precondition (the "write before read"
+property is not the property `set_len` requires). Both sites now initialize the
+region through `spare_capacity_mut()` as `MaybeUninit<f64>` and call `set_len`
+only after all `cdim²` elements are initialized — satisfying the contract at the
+same single-write-per-cell cost (issue #56 Lever B preserved). Output is
+byte-identical (the `blocked_ldlt` scalar-vs-blocked equality suite is
+unchanged). No observable behavior change. Guarded by `tests/d6_contrib_uninit.rs`
+under Miri. Finding D6 from `dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — static-pivot floor now scale-invariant (computed in scaled space) (N2)
 
 The MA57-style static-pivot floor implied by `static_pivot_threshold = Some(t)`

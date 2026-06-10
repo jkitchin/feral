@@ -32,3 +32,43 @@ rook / threshold change ever makes a singular 2×2 selectable.
 
 Next per triage: D6 (unsafe set_len over uninitialized memory, library UB,
 factor.rs:1668-1670 and :2148-2150).
+
+** 00:40 :D6:unsafe:set_len:miri:soundness:fixed:
+D6 (contribution-block extraction: contrib.set_len(cdim2) BEFORE writing,
+then &mut [f64] over uninitialized tail — violates Vec::set_len init
+contract). FIXED both sites (factor_frontal_in_place_with_scratch_impl
+~1700, factor_frontal_blocked_in_place_with_scratch ~2185).
+
+Reproducing test tests/d6_contrib_uninit.rs drives both extraction sites
+with ncol<nrow (forces cdim>0 contribution block) and reads back every
+cell; meant to run under Miri.
+
+IMPORTANT honesty note: the finding's "(Miri flags it)" parenthetical is
+WRONG under default Miri. Installed miri (nightly beae781308 2026-06-09),
+ran `cargo +nightly miri test --test d6_contrib_uninit` on the UNFIXED
+code: 3/3 PASS, NO UB reported. Reason: forming &mut [f64] over uninit f64
+is not language UB Miri catches — f64 has no validity invariant, and every
+cell is written before any read, so no uninitialized *read* occurs. What is
+violated is the *library* precondition of Vec::set_len ("elements
+old_len..new_len must be initialized"), which Miri does not police (it only
+catches language UB). So the finding's PRIMARY claim (contract violation)
+is correct by inspection; its tooling claim is not.
+
+Disposition: fixed anyway — a set_len whose stated invariant does not match
+the contract is exactly the "unsafe must carry a correct invariant" bar.
+Fix = finding's recommendation: spare_capacity_mut() -> &mut
+[MaybeUninit<f64>], .write() every cell (same single-pass issue-#56 Lever B
+write, zero upper-tri + a-value lower-tri), THEN set_len once all cdim2
+elements are genuinely initialized. set_len's SAFETY comment is now true.
+Probe semantics preserved: moved _pt_zf (CONTRIBZEROFILL) to bracket only
+the O(1) set_len; the O(cdim2) init stays under CONTRIBEXTRACT (_pt_cx).
+
+Evidence: blocked_ldlt 21/0 (scalar-vs-blocked BYTE-IDENTICAL guard — proves
+contrib contents unchanged), dense_ldlt 17/0, lib 330/0, d6 3/3. Miri on
+FIXED code 3/3 clean. clippy -D warnings clean, fmt clean. The test is a
+Miri soundness guard (not a red->green repro, since default Miri was already
+green); it locks in that a future refactor reintroducing an uninit-exposing
+set_len would be caught if it ever makes the uninit observable.
+
+Next per triage: N2 already done; D7 (next finding in
+dev/research/repo-review-2026-06-09.md).
