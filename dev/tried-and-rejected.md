@@ -3085,3 +3085,56 @@ Evidence: `src/numeric/condition.rs:7,27,68-69,88,90,106,154,166,214`;
 `src/numeric/solve.rs:389-391`; `src/numeric/factorize.rs:441-448,476,1645,
 1839,2836`; `src/symbolic/mod.rs:1041,1186` (Schur `cached_mc64: None`). Journal:
 dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — N11: solve-time null-pivot semantics (finding N11, repo-review-2026-06-09.md)
+
+**Finding (verbatim).** "Solve-time null-pivot semantics: a force-accepted zero
+pivot is skipped, leaving the forward-substituted RHS value in `w[k]`
+(`solve.rs:266-271`, `:770-775`) rather than zeroing the null-space component
+(MUMPS ICNTL(25)=0 convention). Documented as deliberate
+(`dev/plans/threshold-mismatch-fix.md`); flagged for awareness — the unrefined
+`Solver::solve()` exposes it directly. low/certain (behavior) / possible (that
+it's wrong)."
+
+### Why this is recorded here rather than fixed
+
+1. **It is documented, deliberate behavior — not a defect.** The D-block solve
+   leaves `w[k]` untouched when the pivot was force-accepted as zero
+   (`solve.rs:300-303` single-RHS: `if d_diag[k].abs() > zero_tol { w[k] /=
+   d_diag[k]; } // else: leave w[k] alone`; twin at `:818-821` multi-RHS). The
+   comment at `:271-272` and the design doc `dev/plans/threshold-mismatch-fix.md`
+   (`:71`, `:85`, `:94`) record this as the intended outcome of the
+   "store `zero_tol` and skip in solve" fix. The finding itself classifies the
+   *wrongness* as only "possible," and flags it "for awareness," not for repair.
+
+2. **No admissible RED.** A reproducing test would have to assert the *alternative*
+   convention — zero the null-space component (MUMPS ICNTL(25)=0) — and show the
+   current output is wrong. But which convention is correct on a singular system
+   is exactly the open question, and `Solver::solve()` on a force-accepted-zero
+   (genuinely singular) system has no unique right answer without choosing a
+   convention. Validating the alternative requires a MUMPS/SSIDS reference oracle
+   for the specific singular case, which this iteration cannot produce. Writing a
+   test that pins the *current* behavior would make the implementation its own
+   oracle and would not be failing-on-the-bug.
+
+3. **Changing it needs human approval.** This alters documented, deliberate solve
+   semantics on singular systems and would touch both the single- and multi-RHS
+   D-block solves. The project's correctness rule requires inertia/solve
+   behavior on such matrices to be validated against the canonical Fortran
+   solvers; flipping the convention without that oracle and without sign-off is
+   exactly the kind of change the hard rules forbid doing unilaterally.
+
+### Disposition
+
+No code change and no new test. N11 is a deliberate, documented design choice
+(skip force-accepted-zero pivots, leaving the forward-substituted value in
+`w[k]`), flagged for awareness. Revisit only as a human-approved decision to
+adopt the MUMPS ICNTL(25)=0 null-space convention, gated on a MUMPS/SSIDS
+reference oracle for the singular-system output — at which point both the
+single-RHS (`solve.rs:300-303`) and multi-RHS (`:818-821`) D-block solves, plus
+the design doc, would be updated together.
+
+Evidence: `src/numeric/solve.rs:268-303` (single-RHS D-block, force-accepted-zero
+skip at :300-303), `:815-821` (multi-RHS twin),
+`dev/plans/threshold-mismatch-fix.md:71,85,94` (documented deliberate behavior).
+Journal: dev/journal/2026-06-10-01.org.

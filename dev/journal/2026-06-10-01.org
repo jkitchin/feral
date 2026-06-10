@@ -964,3 +964,33 @@ tried-and-rejected.md updated with per-sub-item evidence.
 
 Next per /loop: do NOT start the next issue (N11). Continue in-turn per the live
 "speed this up" directive.
+
+* 18:00 :numeric:solve:null-pivot:n11:deliberate:deferred:
+N11 (repo-review-2026-06-09.md §4): the D-block solve skips force-accepted-zero
+pivots, leaving the forward-substituted RHS value in w[k] rather than zeroing
+the null-space component (MUMPS ICNTL(25)=0 convention). Confirmed both sites:
+single-RHS solve.rs:300-303 (`if d_diag[k].abs() > zero_tol { w[k] /= d_diag[k]
+} // else leave w[k] alone`), multi-RHS twin :818-821. Documented as deliberate
+in the inline comment (:271-272) and dev/plans/threshold-mismatch-fix.md
+(:71,:85,:94).
+
+Verdict: deferred to tried-and-rejected citing N11. It is documented, deliberate
+behavior flagged "for awareness", and the finding itself rates the wrongness
+only "possible". No admissible RED: a reproducing test would have to assert the
+ALTERNATIVE convention (zero the null-space component) is correct, but which
+convention is right on a singular system is the open question and needs a
+MUMPS/SSIDS oracle for the specific singular case (which this iteration can't
+produce); pinning the current behavior would make the impl its own oracle.
+Flipping the convention also alters documented deliberate solve semantics on
+singular systems and needs human approval per the correctness hard rule.
+
+Evidence: solve.rs:268-303, :815-821; dev/plans/threshold-mismatch-fix.md:
+71,85,94. No CHANGELOG (no fix; deliberate behavior unchanged).
+tried-and-rejected.md updated.
+
+This completes the N-series (N6-N11) of §4. N6 fixed (workspace scaling
+validation); N7 fixed (one-shot permute cache build skipped); N8/N9/N10/N11
+deferred (unreachable / diagnostics-design / doc-drift / deliberate-documented).
+
+Next per /loop: do NOT start the next issue (S2). Continue in-turn per the live
+"speed this up" directive.
