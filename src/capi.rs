@@ -263,8 +263,13 @@ pub unsafe extern "C" fn feral_factor(
         }
         // SAFETY: caller contract.
         let s = &mut *s;
+        // Borrow the stored matrix rather than cloning it. `matrix` and
+        // `solver` are disjoint fields of `*s`, so `&s.matrix` coexists
+        // with `&mut s.solver` below — no O(nnz) clone per IPM iteration
+        // (X7). The earlier clone was a borrow-checker workaround that a
+        // split field borrow makes unnecessary.
         let matrix = match &s.matrix {
-            Some(m) => m.clone(),
+            Some(m) => m,
             None => return FERAL_FATAL,
         };
         // Pass None for check_inertia — Ipopt only constrains
@@ -279,7 +284,7 @@ pub unsafe extern "C" fn feral_factor(
         } else {
             None
         };
-        let status = s.solver.factor(&matrix, None);
+        let status = s.solver.factor(matrix, None);
         if let Some(t0) = solve_t0 {
             let ms = t0.elapsed().as_secs_f64() * 1e3;
             let (sum_delayed, max_delayed, n_snodes) = match s.solver.factors() {
@@ -589,6 +594,46 @@ mod tests {
                 Some(v) => std::env::set_var("FERAL_SCALING", v),
                 None => std::env::remove_var("FERAL_SCALING"),
             }
+        }
+    }
+
+    /// X7: `feral_factor` must not clone the whole matrix on every call.
+    /// In an IPM loop it is invoked once per iteration on an O(nnz)
+    /// matrix, so a per-call `CscMatrix::clone` is pure waste. The
+    /// factorization path borrows the matrix and clones only the small
+    /// CSC component vectors it needs internally — it never clones a
+    /// whole `CscMatrix`. So the correct invariant for `feral_factor`
+    /// is: zero `CscMatrix::clone` calls.
+    #[test]
+    fn capi_factor_does_not_clone_matrix() {
+        use crate::sparse::csc::{csc_matrix_clones, reset_csc_matrix_clones};
+        unsafe {
+            let s = feral_new();
+            assert!(!s.is_null());
+
+            // 2x2 indefinite `[[1,2],[2,1]]`, same as capi_factor tests.
+            let ia: [i32; 3] = [0, 2, 3];
+            let ja: [i32; 3] = [0, 1, 1];
+            assert_eq!(
+                feral_set_structure(s, 2, 3, ia.as_ptr(), ja.as_ptr()),
+                FERAL_SUCCESS
+            );
+            let vp = feral_values_ptr(s);
+            std::ptr::copy_nonoverlapping([1.0_f64, 2.0, 1.0].as_ptr(), vp, 3);
+
+            // Count clones across exactly the factor call.
+            reset_csc_matrix_clones();
+            assert_eq!(feral_factor(s, 0, 0), FERAL_SUCCESS);
+            let clones = csc_matrix_clones();
+
+            feral_free(s);
+
+            assert_eq!(
+                clones, 0,
+                "feral_factor cloned the whole CscMatrix {} time(s); \
+                 it must borrow s.matrix, not clone it (X7)",
+                clones
+            );
         }
     }
 }

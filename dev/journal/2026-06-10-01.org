@@ -218,3 +218,27 @@ profiler facet.
 Evidence: condition 9/0 (incl. the 3 correctness oracles unchanged), lib
 331/0, clippy -D warnings clean, fmt clean. Counter is #[cfg(test)] only — zero
 production footprint.
+
+* 05:40 :perf:capi:x7:clone-elimination:
+X7 (repo-review-2026-06-09.md:410-414): feral_factor (src/capi.rs) cloned the
+whole CscMatrix on every call — O(nnz) alloc + memcpy per IPM iteration, a
+borrow-checker workaround for holding &s.matrix while calling &mut s.solver.
+
+Fix: split field borrow. matrix and solver are DISJOINT fields of *s, so
+`let matrix = match &s.matrix { Some(m) => m, None => .. };` coexists with
+`s.solver.factor(matrix, None)` — no clone. (Also dropped the now-needless
+`&matrix` → `matrix`, clippy needless_borrow.)
+
+Reproduction: instrumented CscMatrix with a manual `impl Clone` (replacing
+#[derive(Clone)]) that bumps a #[cfg(test)] thread-local CSC_MATRIX_CLONES
+counter; explicit field literal so a future field addition fails to compile and
+forces the impl in sync. Test capi_factor_does_not_clone_matrix (capi tests mod)
+sets up the 2x2 indefinite matrix via the C ABI, resets the counter, calls
+feral_factor, asserts 0 clones. RED pre-fix: 1. GREEN post-fix: 0. The 0 (not
+baseline-delta) assertion is valid because the grep + RED both confirm the
+factorization path clones only the small CSC component vecs (col_ptr/row_idx),
+never a whole CscMatrix — so the only CscMatrix::clone in the path was the one
+in feral_factor.
+
+Evidence: capi 4/0, lib full suite 63 binaries all green, clippy -D warnings
+clean, fmt clean. Counter is #[cfg(test)] only — zero production footprint.

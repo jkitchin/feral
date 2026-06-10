@@ -4,6 +4,19 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — `feral_factor` borrows the stored matrix instead of cloning it each call (X7)
+
+The C ABI `feral_factor` (`src/capi.rs`) cloned the whole `CscMatrix` on every
+call — an O(nnz) allocation plus memcpy paid once per IPM iteration. The clone
+was a borrow-checker workaround for holding `&s.matrix` while calling
+`&mut s.solver`. Because `matrix` and `solver` are disjoint fields of the
+handle, a split field borrow lets the immutable matrix borrow coexist with the
+mutable solver borrow, so the factorization now reads the matrix in place with
+no per-call copy. The factorization path itself was already clone-free at the
+`CscMatrix` level (it clones only the small CSC component vectors it needs), so
+this removes the last whole-matrix clone from the hot path. Finding from PR
+#83's review (`dev/research/repo-review-2026-06-09.md`).
+
 ### Performance — condition-number estimator pools one solve workspace across its internal solves (N5)
 
 `estimate_inverse_norm_1` (the Hager–Higham 1-norm condition estimator) runs up

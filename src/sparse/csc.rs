@@ -1,16 +1,55 @@
 use crate::error::FeralError;
 
+// Test-only instrumentation: counts how many times `CscMatrix::clone` runs
+// on the calling thread. Used to prove clone-elimination fixes (e.g. X7,
+// the C API `feral_factor` clone). Thread-local rather than a global atomic
+// because the cargo harness runs tests concurrently and a shared atomic
+// would race across sibling tests.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CSC_MATRIX_CLONES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Reset the per-thread `CscMatrix::clone` counter to zero. Test-only.
+#[cfg(test)]
+pub(crate) fn reset_csc_matrix_clones() {
+    CSC_MATRIX_CLONES.with(|c| c.set(0));
+}
+
+/// Read the per-thread `CscMatrix::clone` counter. Test-only.
+#[cfg(test)]
+pub(crate) fn csc_matrix_clones() -> usize {
+    CSC_MATRIX_CLONES.with(|c| c.get())
+}
+
 /// Compressed Sparse Column (CSC) matrix storage for symmetric matrices.
 ///
 /// Only the lower triangle is stored. `col_ptr[j]..col_ptr[j+1]` gives the
 /// range of entries in column j. Row indices within each column are sorted
 /// in ascending order.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CscMatrix {
     pub n: usize,
     pub col_ptr: Vec<usize>,
     pub row_idx: Vec<usize>,
     pub values: Vec<f64>,
+}
+
+// Manual `Clone` so test builds can count clones (see `CSC_MATRIX_CLONES`).
+// The explicit field literal is intentional: adding a field to `CscMatrix`
+// will fail to compile here, forcing this impl to be kept in sync.
+impl Clone for CscMatrix {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        CSC_MATRIX_CLONES.with(|c| c.set(c.get() + 1));
+        Self {
+            n: self.n,
+            col_ptr: self.col_ptr.clone(),
+            row_idx: self.row_idx.clone(),
+            values: self.values.clone(),
+        }
+    }
 }
 
 /// Symmetric sparsity pattern (full, not just lower triangle).
