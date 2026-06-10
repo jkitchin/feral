@@ -1060,3 +1060,29 @@ Evidence: small_leaf.rs:193-229,138-140; factorize.rs:3656,3716. No CHANGELOG
 
 Next per /loop: do NOT start the next issue (S4). Continue in-turn per the live
 "speed this up" directive.
+
+* S4 :ordering:schur:run-amd:s4:defensive:drift:deferred:
+S4: run_amd (schur.rs:186-214) omits the perm-length check run_external_ordering
+(mod.rs:591-597) performs; only debug_assert_eq!(perm.len(), n) (schur.rs:116,
+release-absent) guards downstream; neither path checks bijectivity.
+
+Analysis. run_amd keeps the per-element range check u >= pattern.n (:206) but
+drops the explicit length check. Divergence from run_external_ordering requires
+feral_amd::amd_order to return a wrong-length or duplicate-bearing perm —
+unreachable for valid CSC (AMD eliminates every vertex once). Consumer
+compute_schur_aware_perm lifts via non_schur_indices[sub_idx] (:110), safe
+because sub_idx < n_f is guaranteed by :206; the only release gap is a
+wrong-length sub_perm (caught only by the debug_assert) and a non-bijective
+sub_perm (unchecked in BOTH paths). All require a malfunctioning backend.
+
+Verdict: deferred citing S4. Same class as S3/N8 — defensive check, no-op for
+valid input, no RED without mocking the AMD crate (impl-as-own-oracle).
+Recommended harmless hardening: add `if perm_i32.len() != pattern.n` to run_amd
+mirroring mod.rs:591-597, and a duplicate-index bitset to both paths to close the
+shared bijectivity gap.
+
+Evidence: schur.rs:186-214,206,104,110,116; mod.rs:591-597. No code change, no
+CHANGELOG. tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (S5). Continue in-turn per the live
+"speed this up" directive.

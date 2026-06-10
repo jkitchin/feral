@@ -3266,3 +3266,59 @@ Evidence: `src/symbolic/small_leaf.rs:193-229` (`compute_leaf_rows`, no filter),
 `:3716` (`if r < own_last { continue; }`). Etree leaf property: a leaf has no
 descendants ⇒ no own column couples to `r < first_col` ⇒ filter is a no-op.
 Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S4: run_amd skips the perm-length / bijectivity check (finding S4, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> `schur.rs::run_amd` (`ordering/schur.rs:186-214`) skips the perm-length check
+> `run_external_ordering` (`symbolic/mod.rs:591-597`) performs; only a
+> debug_assert stands before `permute_pattern` corruption in release. Neither
+> path checks bijectivity. medium-low/certain (drift) / possible (impact).
+
+### Why this is recorded here rather than fixed
+
+1. **The drift is real but the missing check is a no-op for valid input.**
+   `run_external_ordering` (mod.rs:591-597) rejects a backend permutation whose
+   length ≠ `pattern.n`. `run_amd` (schur.rs:186-214) omits that length check; it
+   keeps only the per-element range check `u >= pattern.n` (schur.rs:206). The two
+   paths therefore diverge *only* when the ordering backend returns a permutation
+   of the wrong length or with duplicate entries.
+
+2. **The backend cannot be forced to misbehave from any reachable input.**
+   `feral_amd::amd_order` always returns a full-length permutation of `0..n` for a
+   valid CSC pattern (every vertex, connected or not, is eliminated exactly once).
+   To make `run_amd` emit a wrong-length or non-bijective perm I would have to mock
+   or corrupt `amd_order`'s output, which no public/private call path does.
+
+3. **The downstream consumer is already protected against the range failure.**
+   `compute_schur_aware_perm` lifts the sub-perm via `non_schur_indices[sub_idx]`
+   (schur.rs:110); `sub_idx < n_f` is guaranteed by run_amd's `u >= pattern.n`
+   check, so there is no index-out-of-bounds panic. The remaining gap is a
+   wrong-*length* sub_perm, caught only by `debug_assert_eq!(perm.len(), n)`
+   (schur.rs:116) — absent in release — and a duplicate-entry sub_perm
+   (bijectivity), which *neither* run_amd nor run_external_ordering checks. Both
+   gaps require a malfunctioning backend.
+
+4. **A test would assert the guard against an unproducible state.** Same class as
+   S3/N8: a unit test would have to fabricate a malfunctioning AMD (impossible
+   without mocking the crate) or feed a hand-built invalid perm to an internal
+   helper — testing the guard against a pipeline-forbidden state
+   (impl-as-own-oracle, forbidden).
+
+### Disposition
+
+No code change and no new test. For every valid input `run_amd` and
+`run_external_ordering` behave identically. Recommended as harmless future
+hardening (a drift fix, not a bug fix, carrying no failing test):
+add `if perm_i32.len() != pattern.n { return Err(InvalidInput(...)); }` to
+`run_amd` to mirror mod.rs:591-597, and — to close the bijectivity gap the
+finding correctly notes is shared — add a duplicate-index check to *both*
+paths (a `seen` bitset over `0..n`).
+
+Evidence: `src/ordering/schur.rs:186-214` (run_amd, no length check), `:206`
+(per-element range check), `:104,110,116` (consumer lift + debug_assert),
+`src/symbolic/mod.rs:591-597` (the length check run_amd lacks). Bijectivity
+unchecked in both. Journal: dev/journal/2026-06-10-01.org.
