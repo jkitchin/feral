@@ -44,11 +44,13 @@ pub enum FeralError {
         capacity: usize,
     },
 
-    /// An unsymmetric LU basis is numerically singular: pivot column
+    /// An unsymmetric LU basis is numerically singular: the basis column
     /// `column` had no candidate pivot above `LuParams::zero_pivot_tol`
-    /// and `LuSingularAction::Fail` was specified. Reported so a simplex
-    /// driver can repair the basis instead of receiving a garbage solve.
-    /// See issue #81 and `dev/research/unsymmetric-lu.md`.
+    /// and `LuSingularAction::Fail` was specified. `column` is the *original*
+    /// basis column index (the index the caller supplied), not an internal
+    /// factorization/pivot position, so a simplex driver can repair the basis
+    /// instead of receiving a garbage solve. See issue #81 and
+    /// `dev/research/unsymmetric-lu.md`.
     SingularBasis { column: usize },
 
     /// A rank-1 LU basis update (column replacement) could not be applied

@@ -1306,3 +1306,35 @@ failure signal (L8)".
 
 Next per /loop: do NOT start the next issue (L9). Continue in-turn per the live
 "speed this up" directive.
+
+* 09:48 :lu:error-contract:L9:reproduced:fixed:
+L9 (repo-review-2026-06-09.md): SingularBasis{column} from the sparse factor
+path reported the internal factorization position k, but k corresponds to
+original column qcol[k]. error.rs doc says the value lets a simplex driver
+"repair the basis" — but drivers know original basis columns, not the
+AMD-dependent processing order. L9's other cited sites (sparse_update.rs:100,293)
+were already neutralized by L8 (they now return NeedsRefactor with no column),
+so the only live instance was the factor path (sparse_factor.rs:274,280).
+
+RED test (tests/lu_sparse.rs, after the L8 test):
+singular_basis_reports_original_column_not_factorization_position — constructs
+an explicit non-identity column order qcol=[2,1,0] (fields are pub, so no
+dependence on AMD output) over a 3x3 basis whose ORIGINAL column 0 is the zero
+(singular) column. Under qcol=[2,1,0] col 0 is processed at position k=2.
+Pre-fix panic:
+  "expected SingularBasis reporting original column 0, got Err(SingularBasis { column: 2 })"
+(tests/lu_sparse.rs:244). Confirms position 2 was reported, not original col 0.
+
+Fix: sparse_factor.rs:274 (Fail) and :280 (PerturbToEps ok_or) now report
+qcol[k]. error.rs SingularBasis doc updated: "the *original* basis column index
+(the index the caller supplied), not an internal factorization/pivot position."
+Dense factor path left as-is — dense LU has no column permutation, so k is
+already the original column.
+
+GREEN: lu_sparse 16 passed (incl. new test + sparse_singular_fails, natural
+ordering where k==qcol[k] so unchanged), lu_dense 11 passed, lib lu 54 passed.
+clippy -D warnings clean, fmt clean. User-visible (reported column index) ->
+CHANGELOG "Fixed — SingularBasis { column } names the original basis column (L9)".
+
+Next per /loop: do NOT start the next issue (L10). Continue in-turn per the live
+"speed this up" directive.

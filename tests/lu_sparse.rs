@@ -211,6 +211,43 @@ fn sparse_update_singular_replacement_matches_dense_needs_refactor() {
 }
 
 #[test]
+fn singular_basis_reports_original_column_not_factorization_position() {
+    // L9 (dev/research/repo-review-2026-06-09.md): on a singular basis the
+    // factor path reported the *factorization position* `k` in
+    // SingularBasis{column}, but `k` corresponds to original column `qcol[k]`.
+    // A simplex driver knows original basis columns, not internal
+    // (AMD-dependent) factorization positions, so the reported index was the
+    // wrong one to repair. The error must name the original basis column.
+    //
+    // Construct a column order where position != original column: qcol=[2,1,0]
+    // processes original col 2 first, col 1 second, col 0 last. Original
+    // column 0 is the zero (singular) column, so it fails at factorization
+    // position k=2. The error must report original column 0, not position 2.
+    let cols = vec![
+        vec![0.0, 0.0, 0.0], // col 0: zero column (singular)
+        vec![0.0, 1.0, 0.0], // col 1: e_1
+        vec![1.0, 0.0, 0.0], // col 2: e_0
+    ];
+    let m = 3;
+    let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+    // Explicit non-identity column order: position k -> original column qcol[k].
+    let symbolic = SparseLuSymbolic {
+        m,
+        qcol: vec![2, 1, 0],
+        qcol_inv: vec![2, 1, 0],
+    };
+    let params = LuParams {
+        on_singular: LuSingularAction::Fail,
+        ..LuParams::default()
+    };
+    let err = SparseLu::factor(&a, &symbolic, params);
+    assert!(
+        matches!(err, Err(FeralError::SingularBasis { column: 0 })),
+        "expected SingularBasis reporting original column 0, got {err:?}"
+    );
+}
+
+#[test]
 fn sparse_perturb_succeeds() {
     let (cols, m) = cols_from_rows(&[&[1.0, 1.0, 0.0], &[2.0, 2.0, 0.0], &[0.0, 0.0, 3.0]]);
     let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");

@@ -4,6 +4,21 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `SingularBasis { column }` names the original basis column (L9)
+
+When the sparse LU factor path hit a singular column under
+`LuSingularAction::Fail` (or found no unpivoted row under `PerturbToEps`), it
+reported `FeralError::SingularBasis { column: k }` where `k` is the internal
+*factorization position* — original column `qcol[k]` under the
+(AMD-dependent) column order. A caller such as a simplex driver knows the
+original basis columns it supplied, not the internal processing order, so the
+reported index pointed at the wrong column to repair whenever the column order
+was non-identity. The factor path now reports `qcol[k]`, the original basis
+column, and the `SingularBasis` doc was updated to state this contract
+explicitly. With natural ordering `k == qcol[k]`, so this is a no-op there; it
+only changes the reported index for reordered factorizations. Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — sparse and dense LU update report the same failure signal (L8)
 
 `SparseLu::update` returned `FeralError::SingularBasis` when the spike support

@@ -271,13 +271,18 @@ impl SparseLu {
             if amax <= ztol {
                 match params.on_singular {
                     LuSingularAction::Fail => {
-                        return Err(FeralError::SingularBasis { column: k });
+                        // L9 (dev/research/repo-review-2026-06-09.md): report the
+                        // ORIGINAL basis column `qcol[k]`, not the internal
+                        // factorization position `k`. The caller (e.g. a simplex
+                        // driver) knows original columns, not the AMD-dependent
+                        // processing order, so `qcol[k]` is the index it can act on.
+                        return Err(FeralError::SingularBasis { column: qcol[k] });
                     }
                     LuSingularAction::PerturbToEps { abs_floor } => {
                         // Choose any still-unpivoted row and floor the pivot.
                         let r = (0..m)
                             .find(|&i| pinv[i] < 0)
-                            .ok_or(FeralError::SingularBasis { column: k })?;
+                            .ok_or(FeralError::SingularBasis { column: qcol[k] })?;
                         pivot_row = r;
                         let s = if w[r] < 0.0 { -1.0 } else { 1.0 };
                         piv = s * abs_floor.max(w[r].abs());
