@@ -3368,3 +3368,62 @@ Evidence: `src/symbolic/column_counts.rs:55-65` (contains + sort/dedup per
 column), `:20` (`pub fn`), `src/symbolic/mod.rs:855-857` (the "O(n²)" claim),
 `:860` (production uses GNP). No incorrect output. Journal:
 dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S6: unchecked documented invariants (validate/subtree_sizes/schur postorder) (finding S6, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> Unchecked documented invariants: no `CscPattern::validate()` (etree wants
+> upper-triangle entries, GNP wants lower — both silently require full-symmetric;
+> a lower-only pattern yields an edgeless forest with counts of 1 and no error);
+> `subtree_sizes` assumes `parent[j] > j` (comment only, fields pub);
+> `schur_constrained_postorder` correctness leans on parent>child within the
+> Schur set, guarded only by a debug_assert tail check (`symbolic/mod.rs:1092-1098`).
+> low/certain.
+
+### Why this is recorded here rather than fixed
+
+All three sub-items are defensive gaps against states the production pipeline
+never produces; none yields incorrect output under correct usage.
+
+1. **Lower-only pattern is unreachable in production.** The solver always builds
+   the etree on a *symmetrized* pattern: mod.rs:703 calls
+   `matrix.symmetric_pattern()`, and the etree (mod.rs:795
+   `EliminationTree::from_pattern`) / GNP (mod.rs:860) only ever see that full
+   pattern. The "edgeless forest, counts of 1, no error" behavior requires calling
+   `from_pattern`/`column_counts` directly on a lower-only pattern — a violation
+   of their *documented* precondition ("Input `pattern` should be the full
+   symmetric pattern", column_counts.rs:16), not a defect in correct operation.
+
+2. **`parent[j] > j` is a structural guarantee, not just a comment.** The real
+   elimination-tree builder always emits `parent[j] > j` (an elimination tree
+   orders every node before its parent). `subtree_sizes`
+   (elimination_tree.rs:82-85) processing `0..n` in order is therefore correct for
+   every etree the pipeline builds; the invariant only "cracks" for a hand-built
+   etree the pipeline never emits.
+
+3. **`schur_constrained_postorder` parent>child is likewise guaranteed**, and is
+   additionally backed by the debug_assert tail check (mod.rs:1092-1098). Same
+   unreachable-state category.
+
+4. **A RED test would assert behavior on a precondition-violating input** — a
+   lower-only pattern, or a fabricated etree with `parent[j] <= j` — i.e. it would
+   test garbage-in handling, not reproduce a defect under correct usage. Same
+   class as S3/S4/N8.
+
+### Disposition
+
+No code change and no new test. Recommended as harmless future hardening (a
+robustness improvement, not a bug fix, carrying no failing test): add a
+`CscPattern::is_symmetric()` (or `validate()`) debug-only assertion at the etree
+/ GNP entry points, and promote the `parent[j] > j` comment in
+`subtree_sizes` to a `debug_assert!`. These make the documented preconditions
+self-checking in debug builds without changing release behavior or output.
+
+Evidence: `src/symbolic/mod.rs:703` (symmetric_pattern), `:795`/`:860` (etree/GNP
+see only the full pattern), `:1092-1098` (schur postorder debug_assert);
+`src/symbolic/column_counts.rs:16` (documented full-symmetric precondition);
+`src/ordering/elimination_tree.rs:82-85` (subtree_sizes parent>j comment). No
+incorrect output for correct usage. Journal: dev/journal/2026-06-10-01.org.

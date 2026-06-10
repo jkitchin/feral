@@ -1109,3 +1109,30 @@ CHANGELOG. tried-and-rejected.md updated.
 
 Next per /loop: do NOT start the next issue (S6). Continue in-turn per the live
 "speed this up" directive.
+
+* S6 :symbolic:invariants:validate:subtree-sizes:schur-postorder:s6:defensive:unreachable:deferred:
+S6: three unchecked documented invariants — (a) no CscPattern::validate(): a
+lower-only pattern fed to etree/GNP yields an edgeless forest with counts of 1,
+no error; (b) subtree_sizes assumes parent[j] > j (comment only); (c)
+schur_constrained_postorder leans on parent>child, guarded only by a debug_assert
+tail check (mod.rs:1092-1098).
+
+Analysis. Production never reaches any bad state. The etree is always built on a
+symmetrized pattern (mod.rs:703 symmetric_pattern → :795 from_pattern, :860 GNP),
+so lower-only is a documented-precondition violation (column_counts.rs:16), not a
+correct-usage defect. parent[j] > j is a structural guarantee of every elimination
+tree the builder emits, so subtree_sizes' 0..n scan is always correct;
+schur_constrained_postorder's parent>child likewise holds and is debug_asserted.
+All three "crack" only for inputs the pipeline cannot produce.
+
+Verdict: deferred citing S6. Same class as S3/S4/N8 — defensive gaps, no incorrect
+output for correct usage, RED would assert garbage-in handling. Recommended
+hardening: add CscPattern::is_symmetric() debug assertion at etree/GNP entry, and
+promote the parent[j]>j comment to a debug_assert!.
+
+Evidence: mod.rs:703,795,860,1092-1098; column_counts.rs:16;
+elimination_tree.rs:82-85. No code change, no CHANGELOG. tried-and-rejected.md
+updated.
+
+Next per /loop: do NOT start the next issue (S7). Continue in-turn per the live
+"speed this up" directive.
