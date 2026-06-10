@@ -43,6 +43,26 @@ agreement, and adversarial/ill-scaled/ill-conditioned cases. The downstream
 `pounce-simplex` `BasisEngine` integration and reference (UMFPACK/KLU)
 benchmarks are deferred (see `dev/plans/unsymmetric-lu-epic.md`).
 
+### Fixed — panel inline 2×2 now applies the static-pivot floor (D2)
+
+The blocked dense LDLᵀ panel's inline 2×2 accept path skipped the MA57-style
+static-pivot perturbation (`perturb_2x2_to_floor`) that the scalar path
+(`scalar_pivot_step`) applies *before* the growth/det gates and inertia count.
+With `static_pivot_floor > 0` (wired from `NumericParams::static_pivot_threshold`),
+a sub-floor 2×2 block accepted inline was accepted **unperturbed** — diverging
+from the scalar path in `D`, `L`, `needs_refinement`, `n_tiny`, and even
+**inertia**, violating the module's documented panel/scalar bit-parity contract
+and the MA57 `cntl`-style static-pivot semantics. The panel now mirrors the
+scalar perturbation (lift the smaller |eigenvalue| to the floor, set
+`needs_refinement`, bump `n_tiny`) so both paths stay byte-identical.
+
+New regression `test_d2_panel_inline_2x2_static_pivot_floor_parity` builds an
+isolated antidiagonal 2×2 (eigenvalues ±δ, δ = 1e-3) below the floor (1e-1) in
+an 80×80 front (crossing the 64-column panel boundary) and asserts byte-identity
+against the scalar oracle. Pre-fix the panel reported inertia `(79+, 1−)` for
+the unperturbed ±δ block where the perturbed scalar path reports `(80+)`;
+post-fix they agree. Finding D2 from `dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — default `postorder()` is now linear, not O(n²·log n), on star etrees (S1)
 
 The default elimination-tree `postorder` (in the standard symbolic pipeline)

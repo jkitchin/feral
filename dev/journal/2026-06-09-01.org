@@ -169,3 +169,58 @@ Evidence:
 All four high-severity findings (D1, L1, N1, S1) from PR #83's review are
 now fixed. Next per the triage order: the medium-severity batch, starting
 with D2 (panel inline 2×2 path skips static_pivot_floor).
+
+** HH:MM :dense:panel:static-pivot:parity:inertia:bugfix:d2:
+Fixed D2 (repo-review-2026-06-09.md): the blocked panel's inline 2×2
+accept path skipped the MA57 static-pivot perturbation the scalar path
+applies, so with static_pivot_floor > 0 a sub-floor 2×2 accepted inline
+diverged from scalar in D, L, needs_refinement, n_tiny, and INERTIA.
+
+Root cause: scalar_pivot_step calls perturb_2x2_to_floor(d11,d21,d22,
+params.static_pivot_floor) BEFORE the Duff-Reid growth + SSIDS det gates
+(factor.rs:3647, was 3624) — lifting the smaller |eigenvalue| to the
+floor, writing the shifted diagonals back, setting needs_refinement and
+n_tiny. The panel inline 2×2 accept (factor.rs:2618) had no such call —
+grep confirmed perturb_2x2_to_floor's only production sites were scalar
+(3624) and legacy factor (4609); the panel was the missing third site.
+
+Reproduction (tests-first): blocked_ldlt::tests::
+test_d2_panel_inline_2x2_static_pivot_floor_parity. Oracle = the scalar
+factor_frontal path (which already perturbs), compared byte-for-byte via
+the existing assert_frontals_byte_identical. Matrix = an ISOLATED
+antidiagonal 2×2 at (0,1): A[0,0]=A[1,1]=0, A[1,0]=δ=1e-3 (eigenvalues
+±δ), decoupled from a strictly diag-dominant SPD trailing block on
+columns 2..79 (n=80 crosses the 64-col panel boundary). Verified the
+block actually reaches the inline accept: BK selects 2×2 (akk=0 <
+α·γ0=α·δ); gamma_r picks up the block off-diagonal δ via
+symmetric_row_offdiag_max's left-of-diagonal sweep, so arr=0 < α·δ (no
+swap-1×1 bail); isolation gives rmax=tmax=0 so growth passes; det floor
+passes (|detpiv|=δ ≥ cancel_floor=δ/2). static_pivot_floor=1e-1 > δ so
+scalar perturbs.
+
+Subtle correction during test authoring: perturb_2x2_to_floor lifts the
+EIGENVALUE to the floor by shifting both diagonals by τ=floor−δ, so the
+scalar d_diag[0] lands at 0.099 (= floor−δ), NOT at the floor. My first
+sanity assert (d_diag[0] >= floor) wrongly tripped on this correct
+behavior; relaxed to >= floor/2 (still proves lifting away from the
+unperturbed 0.0).
+
+Evidence:
+- Pre-fix: test FAILS on inertia — scalar (perturbed) = (80+,0−,0z),
+  panel (unperturbed ±δ) = (79+,1−,0z). The unperturbed antidiagonal
+  block is counted indefinite (1+,1−) where the perturbed block (eigs
+  0.1, 0.098, both > 0) is (2+) — a genuinely WRONG inertia in the panel
+  path, the worst-case D2 consequence.
+- Fix: insert the identical perturbation block into the panel inline
+  path before computing det (factor.rs:2620-2640), mirroring scalar
+  exactly (mut d11/d22, write-back, needs_refinement=true, n_tiny+=1).
+- Post-fix: D2 test passes; ALL 21 blocked_ldlt parity tests green
+  (existing parity unaffected — default static_pivot_floor=0 makes the
+  new branch a no-op by construction). dense lib 72/0; integration
+  parity suites all green (parity 21/0, parallel_parity 8/0,
+  factor_workspace 8/0, maxfromm 5/0, small_leaf 7/0, rook 4/0,
+  factor_scratch 2/0); clippy -D warnings clean; fmt --check clean.
+
+First medium-severity finding done. Next per triage: N2 (static-pivot
+floor computed in user space, enforced in scaled space) or D3 (rook
+rescue bypasses strict-zero/band inertia accounting).

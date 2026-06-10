@@ -2617,9 +2617,31 @@ fn lblt_panel_frontal(
 
             // 2×2 accepted at (col, col+1) with no swap. Apply the
             // same growth + det-floor checks scalar applies.
-            let d11 = a[col * nrow + col];
+            let mut d11 = a[col * nrow + col];
             let d21 = a[col * nrow + (col + 1)];
-            let d22 = a[(col + 1) * nrow + (col + 1)];
+            let mut d22 = a[(col + 1) * nrow + (col + 1)];
+
+            // Finding D2: mirror scalar_pivot_step's MA57-style
+            // static-pivot perturbation (factor.rs:3624-3633). Push the
+            // smaller |eigenvalue| up to `static_pivot_floor` *before*
+            // the growth/det gates and inertia count, so a sub-floor
+            // block is accepted at the floor (with the same
+            // `needs_refinement` / `n_tiny` / inertia the scalar path
+            // records) rather than accepted unperturbed. Without this
+            // the panel and scalar paths diverge in D, L, the refinement
+            // flag, and even inertia whenever the knob is on, breaking
+            // the documented panel/scalar bit-parity contract.
+            if let Some((new_d11, new_d22)) =
+                perturb_2x2_to_floor(d11, d21, d22, params.static_pivot_floor)
+            {
+                d11 = new_d11;
+                d22 = new_d22;
+                a[col * nrow + col] = d11;
+                a[(col + 1) * nrow + (col + 1)] = d22;
+                *needs_refinement = true;
+                *n_tiny += 1;
+            }
+
             let det = d11 * d22 - d21 * d21;
 
             // Duff-Reid 2×2 growth bound — same predicate as
