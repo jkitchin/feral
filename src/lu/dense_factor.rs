@@ -64,6 +64,7 @@ impl DenseLu {
     /// Factor the `m`×`m` basis given by its `m` columns (`cols[j]` is column
     /// `j`, length `m`). Computes `P B = L U` with threshold partial pivoting.
     pub fn factor(cols: &[Vec<f64>], m: usize, params: LuParams) -> Result<Self, FeralError> {
+        params.validate()?;
         let (scale, scaled) = compute_scale(cols, m, params.scaling)?;
         let factor_cols: &[Vec<f64>] = scaled.as_deref().unwrap_or(cols);
         let mut packed = vec![0.0; m * m];
@@ -98,6 +99,7 @@ impl DenseLu {
 
     /// Discard all pending updates and re-factor from scratch on fresh columns.
     pub fn refactor(&mut self, cols: &[Vec<f64>]) -> Result<(), FeralError> {
+        self.params.validate()?;
         let m = self.m;
         let (scale, scaled) = compute_scale(cols, m, self.params.scaling)?;
         self.scale = scale;

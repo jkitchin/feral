@@ -4,6 +4,23 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — sparse LU diagonal preference clears the singularity floor; `LuParams` range-validated (L2)
+
+The sparse LU threshold-partial-pivoting rule preferred the natural diagonal
+when `|w[diag]| >= pivot_threshold·amax`, but — unlike the dense path — it
+lacked the `&& |w[diag]| > ztol` conjunct (`ztol = zero_pivot_tol·max|A|`).
+With a loose `pivot_threshold` (at or below `zero_pivot_tol`) a sub-`ztol`
+diagonal could therefore be preferred over a sound max-magnitude row and then
+silently clamped to `±ztol` — a sub-tolerance pivot perturbation that bypassed
+`on_singular` (so `Fail` did not error) and drifted from the dense path. The
+sparse rule now carries the same `> ztol` conjunct, and the formerly-silent
+clamp is replaced with `on_singular` routing for defensive parity. Separately,
+`LuParams::pivot_threshold` (documented `u ∈ (0, 1]`) and `zero_pivot_tol`
+(relative floor, `[0, 1)`) are now range-validated on every factor path,
+rejecting nonsensical or `NaN` inputs with `InvalidInput` instead of producing
+a degenerate pivot rule. Finding L2 from
+`dev/research/repo-review-2026-06-09-verification.md`.
+
 ### Fixed — MTX reader validates declared nnz and sums duplicate coordinates consistently (REG-4 / X2)
 
 `parse_mtx` parsed the size line's `nnz` field but never checked it against the

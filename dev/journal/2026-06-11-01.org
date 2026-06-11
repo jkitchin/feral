@@ -162,3 +162,36 @@ RED->GREEN evidence:
   col_ptr[2]==nnz==2, entry 0 dropped) → was Ok, now Err.
 All other mtx tests have no duplicates and declare correct nnz, so unaffected.
 Full workspace suite green.
+
+* 09:40 :lu:pivoting:dense-sparse-parity:validation:
+L2 residual (repo-review-2026-06-09-verification.md #2): the sparse LU
+diagonal-preference rule (sparse_factor.rs:316) preferred the natural diagonal
+on `pinv[diag] < 0 && |w[diag]| >= utol*amax` but, unlike the dense path
+(dense_factor.rs:268 `diag >= u*amax && diag > ztol`), lacked the `> ztol`
+conjunct. With `utol <= zero_pivot_tol` a sub-ztol diagonal could be preferred
+over the sound max-magnitude row (amax > ztol always in that branch), then the
+silent `±ztol` clamp (322-324) perturbed it without consulting on_singular — a
+sub-tolerance perturbation under Fail and a dense/sparse drift.
+
+Fix: (a) added `&& w[diag].abs() > ztol` to the diagonal-preference condition;
+(b) replaced the silent clamp with on_singular routing mirroring the dense path
+(Fail -> SingularBasis{column: qcol[k]}; PerturbToEps -> sign*abs_floor.max(|piv|)).
+With the conjunct + `amax > ztol`, both pivot choices give `|piv| > ztol`, so the
+routed guard is unreachable in practice — kept as defensive parity (loud error if
+a future change breaks the invariant, not a silent clamp).
+
+Also added LuParams::validate() (mod.rs): pivot_threshold in (0,1], zero_pivot_tol
+in [0,1) (both reject NaN/Inf via negated range test), wired into DenseLu::factor,
+DenseLu::refactor, SparseLu::factor (sparse refactor + factor_dense_columns
+delegate to factor). Verifier flagged "utol never range-validated on either path."
+
+RED->GREEN evidence:
+- sparse_diagonal_preference_respects_zero_pivot_floor: A=[[1e-14,1],[1,1]],
+  utol=1e-14, ztol=1e-13. Pre-fix perm[0]=0 (diagonal preferred, piv clamped
+  1e-14->1e-13); post-fix perm[0]=1 (max row), matching dense (oracle:
+  DenseLu::factor pivots row 1) and the hand solve A x=[2,3] -> x~=[1,2].
+- pivot_threshold_out_of_range_is_rejected: {0.0,-0.5,1.5,NaN,Inf} now Err
+  InvalidInput on both dense and sparse; u=1.0 still Ok. Pre-fix 0.0 returned Ok.
+- existing L2 test sparse_lu_honors_pivot_threshold (u=0.5, |w[diag]|=1.0 >>
+  ztol=2e-13) unchanged — conjunct doesn't alter its outcome.
+Full workspace suite: 63 result groups, 0 failures.

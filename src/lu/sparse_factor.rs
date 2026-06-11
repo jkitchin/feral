@@ -139,6 +139,7 @@ impl SparseLu {
         symbolic: &SparseLuSymbolic,
         params: LuParams,
     ) -> Result<Self, FeralError> {
+        params.validate()?;
         let m = a.m;
         if symbolic.m != m {
             return Err(FeralError::DimensionMismatch {
@@ -313,14 +314,39 @@ impl SparseLu {
                 // Linear Systems*, §6.3): `if (pinv[col] < 0 && |x[col]| >= a*tol)
                 // ipiv = col`.
                 let diag = qcol[k];
-                pivot_row = if pinv[diag] < 0 && w[diag].abs() >= utol * amax {
-                    diag
-                } else {
-                    ipiv as usize
-                };
+                // The diagonal must also clear the singularity floor `ztol`,
+                // not merely the threshold `utol·amax` (repo-review verification
+                // residual #2). With a loose `utol` (≤ `zero_pivot_tol`) a
+                // sub-`ztol` diagonal could otherwise satisfy `|w[diag]| ≥
+                // utol·amax` and be preferred over the sound max-magnitude row
+                // (`amax > ztol` always holds in this branch), then be silently
+                // clamped below — a sub-tolerance perturbation that bypasses
+                // `on_singular`. The dense path carries the same `&& diag > ztol`
+                // conjunct (`dense_factor.rs`); this keeps the two paths in step.
+                pivot_row =
+                    if pinv[diag] < 0 && w[diag].abs() >= utol * amax && w[diag].abs() > ztol {
+                        diag
+                    } else {
+                        ipiv as usize
+                    };
                 piv = w[pivot_row];
+                // With the `> ztol` conjunct above and `amax > ztol` in this
+                // branch, both pivot choices satisfy `|piv| > ztol`, so this
+                // guard is unreachable in practice. It remains as defensive
+                // parity with the dense path: should the invariant ever be
+                // broken by a future change, a sub-floor pivot is routed through
+                // `on_singular` (a loud `SingularBasis` under `Fail`, or an
+                // accountable perturbation) rather than silently clamped.
                 if piv.abs() <= ztol {
-                    piv = if piv < 0.0 { -ztol } else { ztol };
+                    match params.on_singular {
+                        LuSingularAction::Fail => {
+                            return Err(FeralError::SingularBasis { column: qcol[k] });
+                        }
+                        LuSingularAction::PerturbToEps { abs_floor } => {
+                            let s = if piv < 0.0 { -1.0 } else { 1.0 };
+                            piv = s * abs_floor.max(piv.abs());
+                        }
+                    }
                 }
             }
 

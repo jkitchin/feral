@@ -94,6 +94,33 @@ pub struct LuParams {
     pub refine_tol: f64,
 }
 
+impl LuParams {
+    /// Reject parameters outside their documented ranges before any
+    /// factorization consumes them. `pivot_threshold` must lie in `(0, 1]` (its
+    /// documented `u` range): `0` would disable pivoting (always prefer the
+    /// diagonal), `> 1` is meaningless, and `NaN` poisons every threshold
+    /// comparison. `zero_pivot_tol` is a relative floor and must be finite and
+    /// in `[0, 1)`: negative is nonsensical and `≥ 1` would declare every
+    /// pivot singular. Validating here keeps the dense and sparse factor paths
+    /// from drifting on the same bad input.
+    pub(crate) fn validate(&self) -> Result<(), crate::error::FeralError> {
+        use crate::error::FeralError;
+        if !(self.pivot_threshold > 0.0 && self.pivot_threshold <= 1.0) {
+            return Err(FeralError::InvalidInput(format!(
+                "LuParams::pivot_threshold must be in (0, 1], got {}",
+                self.pivot_threshold
+            )));
+        }
+        if !(self.zero_pivot_tol >= 0.0 && self.zero_pivot_tol < 1.0) {
+            return Err(FeralError::InvalidInput(format!(
+                "LuParams::zero_pivot_tol must be in [0, 1), got {}",
+                self.zero_pivot_tol
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl Default for LuParams {
     fn default() -> Self {
         LuParams {

@@ -489,6 +489,110 @@ mod tests {
         );
     }
 
+    /// L2 follow-up (repo-review-2026-06-09-verification.md, residual #2): the
+    /// sparse diagonal-preference rule must also require the diagonal to clear
+    /// the singularity floor `ztol`, matching the dense path's `&& diag > ztol`
+    /// conjunct (`dense_factor.rs`). Without that conjunct a `pivot_threshold`
+    /// at or below `zero_pivot_tol` lets a sub-`ztol` diagonal be *preferred*
+    /// over a sound max-magnitude row (it is "within threshold": `1e-14 >=
+    /// u·amax` for `u = 1e-14`), then the old silent `±ztol` clamp perturbed it
+    /// to `±ztol` without consulting `on_singular` — a sub-tolerance pivot
+    /// perturbation under `Fail` and a drift from the dense path, which routes
+    /// the same matrix through its max-magnitude row.
+    ///
+    /// Matrix A = [[1e-14, 1.0], [1.0, 1.0]] is well conditioned (det = 1e-14 −
+    /// 1 ≈ −1), but the (0,0) diagonal `1e-14` is two orders below
+    /// `ztol = zero_pivot_tol·max|A| = 1e-13`. The sound pivot is the
+    /// max-magnitude row 1, NOT the sub-floor diagonal. External oracle: the
+    /// dense LU on the same matrix (which pivots row 1) and the hand-computed
+    /// solution of A x = [2, 3], x ≈ [1, 2]. Pre-fix the sparse path pivots
+    /// row 0 with a silently clamped pivot (`perm()[0] == 0`); post-fix it
+    /// matches the dense path (`perm()[0] == 1`).
+    #[test]
+    fn sparse_diagonal_preference_respects_zero_pivot_floor() {
+        use super::super::DenseLu;
+        use crate::lu::SparseLuSymbolic;
+
+        let cols = vec![vec![1e-14, 1.0], vec![1.0, 1.0]];
+        // pivot_threshold == zero_pivot_tol/amax-scale region: a *valid*
+        // (in (0, 1]) but tiny threshold that makes the sub-floor diagonal
+        // "within threshold". The conjunct, not range validation, must catch it.
+        let params = LuParams {
+            pivot_threshold: 1e-14,
+            ..LuParams::default()
+        };
+
+        let a = SparseColMatrix::from_dense_columns(2, &cols).expect("matrix");
+        let symbolic = SparseLuSymbolic::natural(2);
+        let mut sparse = SparseLu::factor(&a, &symbolic, params.clone()).expect("sparse factor");
+        assert_eq!(
+            sparse.perm()[0],
+            1,
+            "a sub-ztol diagonal must not be preferred over the max-magnitude row (L2)"
+        );
+
+        // Dense parity: the dense LU pivots the same row on the same matrix.
+        let dense = DenseLu::factor(&cols, 2, params).expect("dense factor");
+        assert_eq!(
+            sparse.perm()[0],
+            dense.perm()[0],
+            "dense/sparse diagonal-preference parity"
+        );
+
+        // And the solve is correct. Oracle: A x = [2, 3]  =>  x ≈ [1, 2].
+        let mut rhs = vec![2.0, 3.0];
+        sparse.ftran(&mut rhs).expect("sparse ftran");
+        assert!(
+            (rhs[0] - 1.0).abs() < 1e-9 && (rhs[1] - 2.0).abs() < 1e-9,
+            "sparse solve {rhs:?}"
+        );
+    }
+
+    /// `pivot_threshold` outside `(0, 1]` (the documented `u` range at
+    /// `lu/mod.rs`) is now rejected with `InvalidInput` on both factor paths,
+    /// rather than silently producing a degenerate pivot rule. `0.0` would
+    /// disable pivoting entirely (always prefer the diagonal); `> 1.0` is
+    /// meaningless; `NaN` poisons every comparison. Oracle: the documented
+    /// contract `u ∈ (0, 1]`.
+    #[test]
+    fn pivot_threshold_out_of_range_is_rejected() {
+        use super::super::DenseLu;
+        use crate::lu::SparseLuSymbolic;
+
+        let cols = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let a = SparseColMatrix::from_dense_columns(2, &cols).expect("matrix");
+        let symbolic = SparseLuSymbolic::natural(2);
+
+        for bad in [0.0, -0.5, 1.5, f64::NAN, f64::INFINITY] {
+            let params = LuParams {
+                pivot_threshold: bad,
+                ..LuParams::default()
+            };
+            assert!(
+                matches!(
+                    SparseLu::factor(&a, &symbolic, params.clone()),
+                    Err(FeralError::InvalidInput(_))
+                ),
+                "sparse factor must reject pivot_threshold = {bad}"
+            );
+            assert!(
+                matches!(
+                    DenseLu::factor(&cols, 2, params),
+                    Err(FeralError::InvalidInput(_))
+                ),
+                "dense factor must reject pivot_threshold = {bad}"
+            );
+        }
+
+        // A valid boundary value (u = 1.0, strict partial pivoting) still works.
+        let ok = LuParams {
+            pivot_threshold: 1.0,
+            ..LuParams::default()
+        };
+        assert!(SparseLu::factor(&a, &symbolic, ok.clone()).is_ok());
+        assert!(DenseLu::factor(&cols, 2, ok).is_ok());
+    }
+
     /// A zero `U` diagonal (as a degenerate post-update bump pivot could leave)
     /// must surface as `SingularBasis`, not a silent `±Inf` out of the divide.
     #[test]
