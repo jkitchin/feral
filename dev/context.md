@@ -1,79 +1,79 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-11T15:49:42Z
+Generated: 2026-06-11T19:42:44Z
 
 ## Latest Session
-File: dev/sessions/2026-06-11-01.md
+File: dev/sessions/2026-06-11-02.md
 ```
-# Session 2026-06-11-01
+# Session 2026-06-11-02
 
 ## Goal
 
-Clear the four low-priority residuals left open by the repo-review fix
-campaign, as catalogued in
-`dev/research/repo-review-2026-06-09-verification.md`. In strict priority
-order, each as its own atomic commit with full discipline (RED→GREEN
-reproducing test where code changes, external oracle, what/why/evidence
-commit body, journal entry, push):
+Make feral's Python interface more complete, in four areas requested by
+the user, under a hard backward-compatibility constraint (every change
+purely additive — no existing signature, name, or default changed; the
+prior pytest suite must pass unmodified):
 
-1. **L2** (code + test) — the sparse LU diagonal preference lacked the
-   dense path's `> ztol` singularity-floor conjunct, and silently clamped
-   sub-`ztol` pivots instead of routing through `on_singular`; also range-
-   validate `LuParams`.
-2. **capi `FERAL_SCALING`** — the C-ABI shim was silent on unrecognized
-   values while bench warns (the unfinished half of X5).
-3. **N3/N4/N5 log entries** — record the N4 MC64-retry-latch inertia
-   tradeoff in `decisions.md` + field doc; add tracking entries for the
-   deferred N3/N5 parallel-driver facets. Append-only, no behavior change.
-4. **Doc batch (~10 sites)** — mechanical doc/comment corrections (verifier
-   item 4).
+1. Expose the unsymmetric LU basis engine (`src/lu/`).
+2. Surface the unexposed LDLᵀ tuning knobs (ordering, mc64-cache,
+   profiling, partial-singular warning, auto-cascade-break).
+3. Give access to the factored L/D (numeric) and the symbolic structure.
+4. Add introspection (pivot magnitudes, mc64 counters, factor stats,
+   profile reports, scaling info, cache invalidation) and conversion
+   conveniences.
 
-Also: write this checkpoint (mandatory at session end).
+Rust-core support (`SparseFactors::ldlt_export`, `Solver::symbolic`
+accessor) landed in the previous session as commit ce37da9; this session
+is the Python binding on top of it.
 
 ## Accomplished
 
-All four residuals landed and pushed on branch
-`claude/elegant-hawking-0nmp2y`.
+Split the single-file binding into internal modules
+`python/src/{common,errors,matrix,solver,factors,symbolic,lu,introspect}.rs`
+(extension still `feral._feral`, public surface unchanged), then added:
 
-- **L2 — `7d13232`** `fix(lu): clear singularity floor in sparse diagonal
-  preference; validate LuParams`. Added the `&& w[diag].abs() > ztol`
-  conjunct so the diagonal can only be *preferred* when it clears the
-  relative singularity floor; replaced the silent `±ztol` clamp with the
-  same `on_singular` routing the dense path uses (`Fail` →
-  `SingularBasis`, `PerturbToEps` → signed floor); added
-  `LuParams::validate()` rejecting `pivot_threshold ∉ (0,1]` and
-  `zero_pivot_tol ∉ [0,1)`, called at the top of dense/sparse
-  `factor`/`refactor`. RED: new test `sparse_…respects_zero_pivot_floor`
-  showed `perm()[0]` diverged from the `DenseLu` oracle pre-fix; GREEN
-  post-fix (`sparse.perm()[0] == 1 == dense.perm()[0]`, solve
-  `Ax=[2,3] → x≈[1,2]`). Full workspace: 63 result groups, 0 failures.
-
-- **capi `FERAL_SCALING` — `87d5688`** `fix(capi): warn on unrecognized
-  FERAL_SCALING, matching bench (X5 follow-up)`. Added the pure predicate
-  `scaling_value_is_unrecognized` (defined via the single shared
-  vocabulary parser so it can't drift from what the shim accepts) and made
-  `feral_new` emit bench's byte-for-byte warning on a non-empty
-  unrecognized value before keeping the default. Warn-not-error is
-  deliberate (the C ABI's only construction failure channel is a null
+- **LU basis engine** (`lu.rs`): `LuMatrix` (general square CSC;
+  `from_dense`/`from_triplet`/`from_columns`/raw CSC ctor; `matvec`/
+  `matvec_transpose`) and `LuFactor`, an auto-routing dense/sparse
+  factor (`should_use_dense_lu`, `force_dense` override). `ftran`/`btran`,
+  product-form `update`/`update_sparse`/`refactor`, and the `P A Q = L U`
+  factor (`perm`, `qcol`, `l_array`/`u_array`, `factor_nnz`, `eta_ops`).
+  New exceptions `SingularBasisError` (`<FactorError`) and
+  `NeedsRefactorError` (`<FeralError`).
+- **Numeric factor access** (`factors.rs`): `Solver.factors()` →
+  `Factors` snapshot with `l_csc()`, `d_blocks()`, `to_scipy_l()`, and
+  `perm`/`perm_inv`/`scaling`/`needs_refinement`/`ordering`.
+- **Symbolic** (`symbolic.rs`): `Solver.symbolic()` → `SymbolicAnalysis`
+  and the standalone `feral.analyze(a, ordering=...)` (no numeric work),
+  exposing resolved ordering, `etree_parent` (roots `-1`),
+  `num_supernodes`, `col_counts`, `factor_nnz_estimate`.
+- **Knobs** (`solver.rs`): `Solver(...)` kwargs `ordering`, `mc64_cache`,
+  `profiling`, `partial_singular_warning`, `auto_cascade_break` (each an
+  `Option` sentinel — when unset the builder is not invoked, so the
+  default constructor reproduces prior behavior exactly) + an `ordering`
+  getter (resolved method via `symbolic()`/`factors()`).
+- **Introspection** (`introspect.rs`): `min_pivot_magnitude`/
+  `max_pivot_magnitude`, the four MC64 counters, `scaling_info`
+  (`ScalingInfo`), `last_factor_stats` (`FactorStats`), `profile_report`
 ```
 
 ## Git Status
 ```
+ce37da9 feat(core): add LDLt factor export and symbolic accessor
+9148ec6 Merge pull request #83 from jkitchin/claude/elegant-hawking-0nmp2y
+079aebe docs(session): checkpoint 2026-06-11-01 — repo-review residuals cleared
 b99abdd docs: correct ~10 stale doc/comment sites (repo-review item 4)
 995456f docs(n4): record MC64-retry latch inertia tradeoff; track deferred N3/N5 facets
-87d5688 fix(capi): warn on unrecognized FERAL_SCALING, matching bench (X5 follow-up)
-7d13232 fix(lu): clear singularity floor in sparse diagonal preference; validate LuParams (L2)
-8066e93 fix(io): validate MTX nnz, sum duplicates, reject col_ptr[0]!=0 (REG-4/X2/X6)
 ```
 
 ## Test Status
 ```
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::is_arrow_bordered_rejects_low_nnz_share_border ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
+test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
@@ -86,44 +86,19 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 371 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.50s
+test result: ok. 371 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.51s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-11-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-11-02.md)
 
 
-=== Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
-
-ratio               count    geomean        p50        p90        p99        max
-factor/MUMPS       153560       0.40       0.30       1.44       2.24       8.52
-solve/MUMPS        153560       0.08       0.08       0.15       0.69       2.44
-factor/SSIDS       154500       0.04       0.03       0.28       0.67       1.86
-solve/SSIDS        154500       0.94       1.00       2.50       8.67      31.00
-nnzL/MUMPS         153560       0.61       0.58       0.75       4.50      23.11
-nnzL/SSIDS         154500       0.88       1.00       1.00       4.50       5.00
-
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.38     <= 2.0     PASS
-medium (<500)            152145     1.87     <= 3.0     PASS
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.44     <= 2.0     PASS
-medium (<500)            153560     1.44     <= 3.0     PASS
-
-Top 10 worst factor-ratio vs MUMPS: KIRBY2_* family (n=458, ratio
-3.80–8.52), CRESC132_0000 (n=5314, 5.99), MUONSINE_0000 (4.43),
-GROUPING_0083 (4.25) — unchanged from prior sessions; these are doc/log
-commits with no perf-affecting behavior change.
-
-All exit-partition verdicts PASS. No regression vs the 2026-06-10-01
-checkpoint — this session changed only the sparse LU diagonal-preference
-guard (correctness, not the dominant front kernels), the capi env-var
-warning path, and documentation/log text.
+Not re-run this session. No Rust-core source changed (the core support
+landed in ce37da9 last session); all work was in the standalone python/
+workspace and docs. The numeric bench is unchanged from session
+2026-06-11-01.
 
 ```
 
@@ -251,6 +226,7 @@ tests/dense_fast_path.rs
 tests/dense_ldlt.rs
 tests/factor_scratch_parity.rs
 tests/factor_workspace_parity.rs
+tests/factors_ld_export.rs
 tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/growth_flag.rs

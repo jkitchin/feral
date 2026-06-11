@@ -287,3 +287,37 @@ documentation/comment corrections, no behavior change. Sites fixed:
   constraint. Scoped the claim to K3.
 Docs-commit exemption applies (CI green on last code commit 87d5688);
 fmt+clippy still run via the pre-commit hook.
+
+* 15:41 :python:lu:factors:symbolic:introspection:
+Completed the additive Python-interface expansion (branch
+feat/python-interface-expansion, on top of rust-core commit ce37da9 which
+added SparseFactors::ldlt_export + Solver::symbolic accessor).
+
+Split the single-file binding into modules
+python/src/{common,errors,matrix,solver,factors,symbolic,lu,introspect}.rs
+and added four capability groups, all purely additive (no existing
+signature changed):
+- LU basis engine: LuMatrix + auto-routing LuFactor (dense/sparse via
+  should_use_dense_lu, force_dense override). ftran/btran residuals at
+  machine precision (dense 2.2e-16, sparse 2.2e-15 on n=120). New
+  exceptions SingularBasisError(<FactorError), NeedsRefactorError(<FeralError).
+- Factors snapshot: l_csc/d_blocks/to_scipy_l + perm/perm_inv/scaling.
+  Reconstruction L D L^T == P(SAS)P^T verified to 5.6e-17 max err.
+- Symbolic: Solver.symbolic() + standalone feral.analyze() (no numeric
+  factorization), exposing ordering/etree_parent/supernodes/nnz estimate.
+- Knobs (ordering/mc64_cache/profiling/partial_singular_warning/
+  auto_cascade_break, all Option sentinels so default reproduces prior
+  behavior) + introspection (pivot magnitudes, 4 mc64 counters,
+  scaling_info, last_factor_stats, profile_report, symbolic_profile_report,
+  invalidate_factors/invalidate_symbolic_cache).
+- Conversions: CscMatrix.to_dense / from_dense(triangle=...) / symmetric_pattern.
+
+Evidence: 80 pytest pass (43 pre-existing unchanged = backward-compat gate,
+37 new across test_lu/test_factors/test_symbolic/test_introspection/
+test_conversions, all external oracles). quickstart.py, discopt_ipm_kkt.py
+(symbolic_call_count stays 1 across Newton iters) still run. cargo fmt
+--check clean on both python and root workspaces. Python crate is not
+clippy-gated; remaining warnings are macro-inherent (gil-refs,
+useless_conversion) plus pre-existing patterns; added targeted allows for
+type_complexity (Factors::l_csc) and large_enum_variant (LuInner, sparse
+variant kept inline as the hot path).
