@@ -1831,3 +1831,30 @@ removed the dead `mark` Vec + its `let _ = &mut mark;` lint-silencer + stale
 comment. Pure cleanup, no behaviour change; existing two-hop tests are the
 regression guard. Not user-visible => no CHANGELOG. Next per /loop: do NOT
 start O10; continuing in-turn per 'finish tonight'.
+
+* O10 :ordering:metis:initial-partition:ggp:reproduced:
+O10 (repo-review): initial_bisect_ggp (initial_partition.rs) selected
+boundary vertices by argmax(edges_to_A) while documenting the gain as
+(edges_to_A - edges_to_B). The push_neighbors closure took an
+`adding_to_a: bool` that was hard-coded true at all call sites, so the
+subtraction never happened. Effect: GGP biased toward high-degree
+vertices, which inflates the cut (their many still-in-B edges all
+become cut edges on the move into A).
+
+REPRODUCED as RED/GREEN. /tmp/o10-probe/ggp.rs replicates both
+variants on a weighted graph: s (idx0) -- w(idx1, wt3) and
+s -- u(idx2, wt5) with u also joined to b1..b4 (wt1 each), so
+W[w]=3, W[u]=9. After seeding s (SplitMix seed 1 -> gen_range(7)=0):
+  buggy  -> labels=[0,1,0,1,1,1,1], pulls u, cut=7
+  fixed  -> labels=[0,0,1,1,1,1,1], pulls w, cut=5
+Oracle = published GGP definition (max edges_to_A - edges_to_B), an
+external source; matches the hand calc 2*edges_to_A - W.
+
+Fix: select on 2*gain[v] - wtot[v] (i64) where gain is the existing
+edges-to-A accumulator and wtot is per-vertex total incident weight
+precomputed in O(nnz). Removed the dead always-true `adding_to_a`
+param and rewrote the gain comments. New test
+`ggp_uses_true_gain_not_edges_to_a` is the regression guard; existing
+valid/balance/determinism tests unaffected. User-visible -> CHANGELOG.
+Next per /loop: do NOT start O11; continuing in-turn per 'finish
+tonight'.

@@ -4,6 +4,22 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `feral-metis` GGP initial bisection uses the true greedy gain (O10)
+
+`initial_bisect_ggp` documented its greedy gain as
+"(edges to part 0) - (edges to part 1)", but the code only accumulated
+edges-to-A: the `push_neighbors` helper took an `adding_to_a` flag that was
+hard-coded `true` at every call site, so the `- edges_to_B` term never existed
+and the boundary scan selected `argmax(edges_to_A)`. That biases growth toward
+high-degree vertices — exactly the wrong choice, since a vertex with many edges
+still on the B side drags all of them into the cut when it moves into A. The
+selection now uses the true Greedy-Graph-Growing gain
+`edges_to_A - edges_to_B = 2*edges_to_A - wtot` (with `wtot` the per-vertex
+total incident edge weight, precomputed in `O(nnz)`), so it minimises the added
+cut as intended. On the new regression graph this picks the low-degree vertex
+(cut 5) instead of the high-degree one (cut 7). Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — `feral-metis` keeps a stalled coarsening level only when it shrank (O8)
 
 `coarsen`'s stall branch pushed the just-computed level whenever earlier levels
