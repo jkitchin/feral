@@ -1597,3 +1597,28 @@ comment wrong). Per X8 precedent: corrected the comment in-code + tried-and-
 rejected entry citing X13. fmt clean. Not user-visible => no CHANGELOG. Next per
 /loop: do NOT start the next issue (X14). Continue in-turn per the live 'speed
 this up' directive.
+
+* 21:32 :x14:bench:factor-nnz:false-comment:convention-skew:not-reproducible:tried-and-rejected:
+X14 (repo-review §X14, low/certain): dense-bench factor_nnz = n² with a comment
+calling it "strictly-lower-triangle (matches multifrontal single-supernode)".
+Both clauses false: n² is neither n(n-1)/2 nor the multifrontal accounting. The
+real SparseFactors::factor_nnz() (factorize.rs:959-969) is TRIANGULAR
+(nelim(nelim+1)/2 + (nrow-nelim)*nelim = n(n+1)/2 for a single full front), ~2x
+smaller than n². Deeper than the review: n² is the RECTANGULAR nrow·nelim count,
+which matches the factor_nnz FIELD DOC (bench.rs:1009 "total nrow*nelim") but NOT
+factor_nnz()'s actual triangular code. So the two bench paths use different
+conventions -- dense rectangular (n², :1665), sparse triangular
+(sp_factors.factor_nnz(), :1951) -- mixing conventions in the fill-parity report
+(:487-494). Field doc also wrongly said "None on dense path" (dense sets Some(n²)).
+Dense Factors (dense/factor.rs:788) has no factor_nnz() method, so n² is a
+deliberate hard-code, not a missed method call.
+=> Not reproducible as a solver defect: factor_nnz is diagnostic-only (no inertia/
+residual impact); the "right" unified convention is an unsettled design choice
+with no external oracle (codebase itself split: field-doc rectangular vs
+factor_nnz() triangular); changing n² would move historical baselines. Per X8/X13
+precedent: corrected BOTH comments to accurately state the rectangular n² count,
+contrast it with the triangular sparse-path factor_nnz(), warn fill-parity readers
+they're not comparable, and fix the "None on dense path" error. Value left
+unchanged. tried-and-rejected citing X14. fmt clean, bench compiles. Not
+user-visible => no CHANGELOG. Next per /loop: do NOT start the next issue (X15).
+Continue in-turn per the live 'speed this up' directive.

@@ -3945,3 +3945,95 @@ behavioral change; no failing test exists or is added. Not user-visible
 Evidence: `src/scaling/value_bound.rs:175-196` (precompute, defensive
 arm), `:212-227` (length gate `:218-220`, conditions `:222-226`),
 `:169-174` (caller contract). Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — X14: dense-bench factor_nnz convention vs comments (finding X14, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **X14** `factor_nnz` for the dense bench path is n² with a comment
+> claiming strictly-lower-triangle count (`bench.rs:1642-1645`); the
+> code matches the multifrontal nrow·nelim convention, so the comment is
+> what's wrong — but fill-parity readers need to know which.
+> low/certain.
+
+(The current tree puts the dense-path `factor_nnz` at `bench.rs:1662-1665`
+and the field doc at `:1009-1013`.)
+
+### What is actually there (deeper than the finding states)
+
+The dense path sets `factor_nnz: Some(n²)` for a single fully-eliminated
+`n×n` front (`nrow = nelim = n`). The old inline comment called this "the
+strictly-lower-triangle entries (matches the multifrontal accounting on a
+single supernode of size n)". Both clauses are wrong:
+
+- `n²` is not the strictly-lower-triangle count (`n(n−1)/2`).
+- The actual multifrontal accounting, `SparseFactors::factor_nnz()`
+  (`src/numeric/factorize.rs:959-969`), is the *triangular*
+  `Σ nelim·(nelim+1)/2 + (nrow−nelim)·nelim`. For a single full front of
+  size n that is `n(n+1)/2`, not `n²`. So `n²` does **not** match the
+  multifrontal accounting on a single supernode of size n; it is ~2× it.
+
+`n²` is in fact the *rectangular* `nrow·nelim` product — which is the
+convention the `factor_nnz` field doc (`bench.rs:1009`) literally states
+("total `nrow * nelim` across supernodes"). So the real situation is a
+convention split inside the bench harness:
+
+| path        | code                                   | convention            |
+|-------------|----------------------------------------|-----------------------|
+| dense       | `n²` (`:1665`)                          | rectangular nrow·nelim |
+| sparse      | `sp_factors.factor_nnz()` (`:1951`)     | triangular            |
+
+The field doc matches the dense path; `factor_nnz()`'s implementation
+matches the sparse path; the doc and the implementation disagree with
+each other. The fill-parity report (`bench.rs:487-494`) therefore counts
+dense-path matrices rectangularly and sparse-path matrices triangularly —
+a ~2× convention skew between rows of the same report. The old field doc
+also wrongly claimed `factor_nnz` is "`None` on the dense path"; the dense
+path sets `Some(n²)`.
+
+### Why this is not reproducible as a defect fix here
+
+`factor_nnz` is a *diagnostic* metric feeding the fill-parity report; it
+has no bearing on solver correctness (inertia, residuals, factor values
+are all independent of it). Unifying the two paths to one convention is a
+deliberate design choice with no external oracle:
+
+- the codebase is internally split (field doc = rectangular,
+  `factor_nnz()` = triangular), so there is no single in-repo "truth" to
+  assert against;
+- the right cross-solver convention to compare against MUMPS / SSIDS
+  `factor_nnz` is a separate, unsettled question;
+- changing the dense-path value would silently move historical
+  fill-parity baselines for every dense-path matrix.
+
+A test could only pin one arbitrary convention against itself
+(characterization), not reproduce a defect. Out of scope for a bug-fix
+loop anchored on reproducing solver defects.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected
+citing the finding ID). Following the X8 / X13 precedent for misleading
+comments, both inaccurate comments were corrected in the same change:
+
+- `bench.rs:1662-1665` now states the dense path reports the rectangular
+  `nrow·nelim = n²` front-cell count, explicitly contrasts it with the
+  triangular `SparseFactors::factor_nnz()` (`n(n+1)/2` for a single full
+  front, used by the sparse path), and warns fill-parity readers the two
+  paths are not directly comparable.
+- `bench.rs:1009-1013` field doc corrected to describe both conventions
+  and to state `factor_nnz` is `Some` on both paths (it is not `None` on
+  the dense path).
+
+The underlying convention split (dense rectangular vs sparse triangular,
+and the field-doc-vs-`factor_nnz()` disagreement) is documented here for a
+future deliberate decision; the `n²` value itself is left unchanged (no
+oracle, diagnostic-only, would move baselines). Not user-visible (bench
+diagnostic + internal comments) → no CHANGELOG entry.
+
+Evidence: `src/bin/bench.rs:1009-1013` (field doc), `:1662-1665`
+(dense-path value), `:1951` (sparse-path value), `:487-494` (fill-parity
+report); `src/numeric/factorize.rs:959-969` (`factor_nnz()` triangular
+formula); `src/dense/factor.rs:788,1247-1256` (dense `Factors` has no
+`factor_nnz()`; `nrow`/`nelim` fields). Journal:
+dev/journal/2026-06-10-01.org.

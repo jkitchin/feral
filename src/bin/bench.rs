@@ -1006,10 +1006,15 @@ struct MatrixTiming {
     max_front: usize,
     factor_us: u128,
     solve_us: u128,
-    /// feral `SparseFactors::factor_nnz()` — total `nrow * nelim`
-    /// across supernodes. `None` on the dense path (no supernodes).
-    /// Used by the fill-parity report against MUMPS / SSIDS oracle
-    /// `factor_nnz`.
+    /// Factor entry count for the fill-parity report against the
+    /// MUMPS / SSIDS oracle `factor_nnz`. `Some` on both paths. NOTE the
+    /// two feral paths use *different* conventions (see X14 in
+    /// dev/tried-and-rejected.md): the sparse path stores the triangular
+    /// `SparseFactors::factor_nnz()`
+    /// (Σ nelim·(nelim+1)/2 + (nrow−nelim)·nelim), the dense path stores
+    /// the rectangular `nrow·nelim = n²` single-front cell count
+    /// (≈ 2× the triangular count). The two are therefore not directly
+    /// comparable across rows of the report.
     factor_nnz: Option<u64>,
 }
 
@@ -1659,9 +1664,17 @@ fn main() {
             max_front: n,
             factor_us: factor_us_final,
             solve_us: solve_us_final,
-            // Dense path: a single n×n front, no supernodes. Counts the
-            // strictly-lower-triangle entries (matches the multifrontal
-            // accounting on a single supernode of size n).
+            // Dense path: a single fully-eliminated n×n front
+            // (nrow = nelim = n). This reports the *rectangular*
+            // nrow·nelim = n² front-cell count — the convention stated in
+            // the `factor_nnz` field doc above. NOTE this is a different
+            // convention from the sparse path (`:1951`), which stores the
+            // *triangular* `SparseFactors::factor_nnz()`
+            // (Σ nelim·(nelim+1)/2 + (nrow−nelim)·nelim; n(n+1)/2 ≈ n²/2
+            // for a single full front). Fill-parity readers: dense-path
+            // rows use the rectangular count, sparse-path rows the
+            // triangular one — the two are not directly comparable. See
+            // dev/tried-and-rejected.md (X14).
             factor_nnz: Some((n as u64).saturating_mul(n as u64)),
         });
 
