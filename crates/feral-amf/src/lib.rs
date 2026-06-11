@@ -44,10 +44,12 @@ use std::time::Instant;
 #[derive(Debug, Clone)]
 pub struct AmfOptions {
     /// Dense-row threshold multiplier. A variable with initial
-    /// degree exceeding `max(16, min(n, dense_alpha * sqrt(n)))` is
-    /// deferred to the end of the ordering. A negative value sets
-    /// the threshold to `n - 2`, suppressing deferral for all but
-    /// true hubs of degree `n - 1`.
+    /// degree exceeding `min(max(16, floor(dense_alpha * sqrt(n))), n)`
+    /// is deferred to the end of the ordering — the `max(16)` floor is
+    /// applied before the `min(n)` cap, matching faer `amd.rs:173-179`.
+    /// A negative value uses a raw threshold of `n - 2` with the same
+    /// clamps; for `n >= 18` that is exactly `n - 2`, suppressing
+    /// deferral for all but true hubs of degree `n - 1`.
     pub dense_alpha: f64,
 }
 

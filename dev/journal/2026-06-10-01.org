@@ -1730,3 +1730,27 @@ feral-ordering-core 59, feral-amd 12+3, feral-amf 7, feral-metis 51, feral-scotc
 -p feral-ordering-core --all-targets -D warnings clean. tried-and-rejected citing
 O4. Not user-visible (internal debug guard) => no CHANGELOG. Next per /loop: do NOT
 start the next issue (O5). Continue in-turn per the live 'speed this up' directive.
+
+* 12:05 :o5:ordering:dense-threshold:doc:faer-verified:non-reproducible:
+O5 (repo-review-2026-06-09.md): dense_alpha doc says threshold
+max(16,min(n,dense_alpha*sqrt(n))) and negative alpha "sets threshold to n-2",
+but code (workspace.rs:212-217) is dense.max(16).min(n) = min(max(16,raw),n) with
+both clamps on BOTH branches. Doc nests min/max in the wrong order and omits the
+clamps on the n-2 branch.
+=> Code is canonical-correct, NOT a defect. Verified via faer-expert agent reading
+faer 0.24.0 (exact version feral references) sparse/linalg/amd.rs:173-179:
+  dense = if alpha<0 {n-2} else {(alpha*sqrt(n)) as usize};
+  dense = max(dense,16); dense = min(dense,n);
+i.e. min(max(16,raw),n), max BEFORE min, both clamps unconditional -- identical to
+feral. Order is load-bearing: faer's form guarantees dense<=n; doc's
+max(16,min(n,raw)) would give 16>n for n<16. No behavioral defect: positive branch
+agrees for n>=16, diverges only for n<16 where threshold already exceeds max
+degree n-1; negative branch matches the reference. Non-reproducible (code matches
+external oracle). Per X8/X13/X14/X16 precedent: corrected the 3 dense_alpha doc
+sites (feral-amd lib.rs, feral-amf lib.rs, feral-ordering-core quotient_graph/
+mod.rs) to min(max(16,floor(dense_alpha*sqrt(n))),n) citing faer amd.rs:173-179,
+clarified negative branch = raw n-2 w/ same clamps (exactly n-2 for n>=18). No
+code change. fmt clean; cargo doc clean on my edits (pre-existing unrelated
+broken-link warning in feral-amf/stats.rs:5, not touched). tried-and-rejected
+citing O5. Not user-visible (doc comments) => no CHANGELOG. Next per /loop: do NOT
+start the next issue (O6). Continue in-turn per the live 'speed this up' directive.

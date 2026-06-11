@@ -4155,3 +4155,76 @@ Evidence:
 non-aggressive branch), `:990-1006` (AMF non-aggressive branch), `:966-988`
 (aggressive AMF branch already guarded by `if dext > 0` at `:972`). Journal:
 dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — O5: dense-threshold formula in `dense_alpha` docs (finding O5, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O5** Dense-threshold formula deviates from its own doc for small n
+> / negative alpha (`workspace.rs:204-210`): `.max(16)` overrides the
+> documented n−2 for n < 18; `min(max(16,x),n)` ≠ documented
+> `max(16,min(n,x))`. No practical effect. low/certain.
+
+### What is there
+
+`crates/feral-ordering-core/src/quotient_graph/workspace.rs:212-217`:
+
+    let dense = if opts.dense_alpha < 0.0 {
+        n.saturating_sub(2)                          // n - 2
+    } else {
+        (opts.dense_alpha * (n as f64).sqrt()) as usize
+    };
+    let dense = dense.max(16).min(n);                // min(max(16, raw), n)
+
+The three `dense_alpha` doc comments
+(`feral-amd/src/lib.rs:40-45`, `feral-amf/src/lib.rs:46-50`,
+`feral-ordering-core/src/quotient_graph/mod.rs:50-55`) describe this as
+`max(16, min(n, dense_alpha * sqrt(n)))` and say a negative value "sets the
+threshold to `n - 2`". Two inaccuracies: (1) the clamp nesting is reversed —
+code is `min(max(16, raw), n)`, doc is `max(16, min(n, raw))`; (2) the
+negative-alpha branch is also passed through `max(16)`/`min(n)`, so it is not
+a bare `n - 2` for `n < 18`.
+
+### Why this is not reproducible as a defect — the code is canonical-correct
+
+The code matches the faer / SuiteSparse AMD reference exactly. Verified
+against faer 0.24.0 (the version feral references), `amd.rs:173-179`
+(confirmed by the faer-expert agent reading the cargo-registry source):
+
+    let dense = if alpha < 0.0 { n - 2 } else { (alpha * sqrt(n)) as usize };
+    let dense = Ord::max(dense, 16);     // max(16) first
+    let dense = Ord::min(dense, n);      // min(n) second
+
+i.e. `min(max(16, raw), n)`, with both clamps applied unconditionally to both
+branches — identical to feral's `dense.max(16).min(n)`. The nesting order is
+load-bearing: faer's form guarantees `dense <= n`, whereas the doc's
+`max(16, min(n, raw))` would give `16 > n` for `n < 16`.
+
+So the implementation is the canonical one and the doc transcription is the
+artifact that is wrong. There is no behavioral defect to reproduce:
+
+- positive branch: `min(max(16, x), n)` and `max(16, min(n, x))` agree for
+  all `n >= 16`; they diverge only for `n < 16`, where the threshold (>= 16)
+  already exceeds the maximum possible vertex degree `n - 1`, so no vertex is
+  ever classified dense differently;
+- negative branch: the code matches the faer reference, which is the oracle.
+
+A test could only characterize the code against itself or against faer
+(confirming correct behavior), not drive a RED defect.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected citing
+the finding ID). Per the X8/X13/X14/X16 precedent for inaccurate docs, the
+three `dense_alpha` doc comments are corrected to the actual formula
+`min(max(16, floor(dense_alpha * sqrt(n))), n)`, noting the clamp order
+matches faer `amd.rs:173-179` and that the negative-alpha branch uses a raw
+`n - 2` with the same clamps (exactly `n - 2` for `n >= 18`). No code change
+(the implementation is canonical-correct). Not user-visible (doc comments
+only) → no CHANGELOG entry.
+
+Evidence: `crates/feral-ordering-core/src/quotient_graph/workspace.rs:212-217`
+(code); doc sites `feral-amd/src/lib.rs:40-45`, `feral-amf/src/lib.rs:46-50`,
+`feral-ordering-core/src/quotient_graph/mod.rs:50-55`; faer 0.24.0
+`sparse/linalg/amd.rs:173-179` (external oracle, faer-expert verified).
+Journal: dev/journal/2026-06-10-01.org.
