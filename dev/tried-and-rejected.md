@@ -4499,3 +4499,66 @@ mod band_fm;`), empty `grep band crates/feral-scotch/src/node_nd.rs`,
 `band_fm.rs:76-81` (projection loop), `band_fm.rs:138-140` (orig_of_sub
 contract), `band_fm.rs:488-511` (`out_of_band_labels_preserved` guard).
 Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-11 — O15: scotch AMD leaves ignore supervariable weights on compressed graphs (finding O15, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O15** scotch AMD leaves on the compressed graph ignore
+> supervariable weights (`node_nd.rs:54-62`, `amd_leaf:281-302`):
+> weight-7 supervariables treated as unit vertices, skewing
+> degree-based pivots on heavily compressed inputs. Expansion still a
+> valid permutation. medium-low/certain (code) / possible (impact).
+
+### Why this is not reproducible as a correctness test
+
+The code defect is real and certain: with `opts.compress` on,
+`scotch_nd_order` builds `cg.graph` whose `vwgt` carries supervariable
+sizes (node_nd.rs:54-62), those weights ride down through bisection
+into leaf subgraphs, and `amd_leaf` (node_nd.rs:281-302) hands the leaf
+to `feral_amd::amd_order` via `graph_to_csc_pattern`, which emits only
+the adjacency structure and drops `vwgt` entirely (node_nd.rs:308-331).
+AMD therefore scores a weight-7 supervariable as a unit vertex.
+
+But there is no RED→GREEN cycle available:
+
+1. **No correctness defect.** The finding itself notes "expansion still
+   a valid permutation" — the leaf still emits a bijection over its
+   vertices and `expand_perm` lifts it to a valid permutation of the
+   original matrix. There is no invariant to violate, so no assertion
+   can be made RED on the current code.
+2. **No oracle for the quality loss.** The only effect is suboptimal
+   degree-based pivoting (more fill) on heavily-compressed inputs. To
+   assert "this ordering is worse than the weight-aware one" requires a
+   weight-aware AMD to compare against — and `feral_amd` exposes no
+   weighted entry point: every public function (`amd_order`,
+   `amd_order_opts`, `amd_order_full`, …) takes a bare `CscPattern`
+   plus `AmdOptions { dense_alpha, aggressive }`, with no `vwgt`
+   parameter. AMD does its *own* internal supervariable merging
+   (`n_supervar_merge`) but starts from unit mass and cannot know a
+   leaf vertex already stands for 7 original rows.
+
+The proper fix — a weight-aware AMD leaf (threading `vwgt` into the
+minimum-degree metric) — is a cross-crate feature addition to
+`feral_amd` that needs its own research note, tests, and benchmarks per
+the FERAL feature lifecycle. That is out of proportion to a
+medium-low/certain finding whose impact is rated only "possible," and
+is out of scope for a single review-fix iteration.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected
+citing the finding ID). Per the X16/O4/O5/O6/O9 precedent, the safe
+low-risk sub-fix is applied: `amd_leaf` gains a doc comment recording
+that supervariable weights from top-level compression are intentionally
+dropped at the leaf, why correctness still holds (valid permutation),
+the quality caveat on heavily-compressed inputs, and that a weighted
+AMD leaf is the future fix (pointing back here). No behaviour change, no
+public-API surface change → no CHANGELOG. No test is added: there is no
+violated invariant to pin, and the quality oracle (weighted AMD) does
+not yet exist.
+
+Evidence: `node_nd.rs:54-62` (compressed-graph dispatch carries vwgt),
+`node_nd.rs:281-302` (`amd_leaf`), `node_nd.rs:308-331`
+(`graph_to_csc_pattern` drops vwgt), `feral-amd/src/lib.rs:68-176` (no
+weighted entry point). Journal: dev/journal/2026-06-10-01.org.

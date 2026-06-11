@@ -278,6 +278,21 @@ fn multilevel_node_bisection(
     labels
 }
 
+/// Order a leaf subgraph with AMD and write its slice of `iperm`.
+///
+/// Finding O15: when top-level graph compression is enabled,
+/// `subgraph.vwgt` can carry supervariable weights (one vertex standing
+/// for several original rows), and those weights ride down through
+/// bisection into the leaves. `graph_to_csc_pattern` emits only the
+/// adjacency *structure*, so the AMD call below orders on the pattern
+/// alone — `feral_amd` exposes no weighted entry point — and a
+/// weight-7 supervariable is scored as a unit vertex. This can skew
+/// AMD's degree-based pivot choice on heavily-compressed inputs, but
+/// the leaf still emits a valid bijection over its vertices, so
+/// `expand_perm` lifts it to a valid permutation of the original
+/// matrix (correctness holds; only pivot quality is affected). A
+/// weight-aware AMD leaf is future work; see dev/tried-and-rejected.md
+/// (O15).
 fn amd_leaf(
     subgraph: &Graph,
     vtx_map: &[i32],

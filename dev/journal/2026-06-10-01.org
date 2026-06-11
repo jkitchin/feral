@@ -1954,3 +1954,27 @@ as implemented-but-not-yet-wired. Module kept (tested + research note
 dev/research/scotch-band-fm.md); wiring it in is out of scope. No
 behaviour/API change => no CHANGELOG. feral-scotch suite green. Next per
 /loop: do NOT start O15; continuing in-turn per 'finish tonight'.
+
+* O15 :ordering:scotch:amd:compression:non-reproducible:doc:
+O15 (repo-review): with opts.compress on, scotch_nd_order builds
+cg.graph carrying supervariable vwgt (node_nd.rs:54-62); those weights
+ride down through bisection into leaf subgraphs, but amd_leaf
+(:281-302) calls feral_amd::amd_order via graph_to_csc_pattern
+(:308-331) which emits adjacency only and drops vwgt — so a weight-7
+supervariable is scored as a unit vertex, skewing AMD degree pivots on
+heavily-compressed inputs. Verified feral_amd has NO weighted entry
+point: amd_order / amd_order_opts / amd_order_full / amd_order_substages
+all take a bare CscPattern + AmdOptions{dense_alpha, aggressive}; AMD
+does its own internal supervar merge but starts from unit mass. Not
+reproducible as RED/GREEN: finding states "expansion still a valid
+permutation" => no correctness invariant to break; and the only effect
+(fill quality) has no oracle without a weight-aware AMD to compare to.
+Proper fix = weighted AMD leaf, a cross-crate feature with its own
+research/tests/benchmarks — out of scope for a medium-low/possible
+finding. Routed to tried-and-rejected citing O15. Applied low-risk
+sub-fix per X16/O4/O5/O6/O9 precedent: doc comment on amd_leaf recording
+the dropped weights, the valid-permutation correctness rationale, the
+quality caveat, and the future weighted-AMD fix. No behaviour/API change
+=> no CHANGELOG. No test added (no invariant violated; quality oracle
+absent). Next per /loop: do NOT start O16; continuing in-turn per
+'finish tonight'.
