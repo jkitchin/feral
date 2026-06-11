@@ -1978,3 +1978,29 @@ quality caveat, and the future weighted-AMD fix. No behaviour/API change
 => no CHANGELOG. No test added (no invariant violated; quality oracle
 absent). Next per /loop: do NOT start O16; continuing in-turn per
 'finish tonight'.
+
+* 01:10 :scotch:o13:issue-3:regression:test:workspace:
+Full `cargo test --workspace` (run before committing O16) surfaced a
+RED feral-crate test: symbolic::tests::
+issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates
+panicked at src/symbolic/mod.rs:2323 — `left: ScotchND, right: Amd`.
+Confirmed via `git stash` that it fails at HEAD (274e4cf) WITHOUT the
+O16 working-tree changes => it is an O13 aftershock, not caused by O16.
+Root cause: O13 (eaa3436) fixed SCOTCH's vertex-separator FM early stop,
+so ScotchND now finds a real separator on the poisson_kkt_csc(20)
+bordered-KKT pattern instead of degenerating to amd_leaf; resolved_method
+therefore reports ScotchND, not Amd. The O13 session only ran
+`-p feral-scotch` (where I DID rewrite the scotch-crate's own issue_3
+test) and never ran the full workspace, so this downstream feral-level
+test — which pinned the OLD degenerate behavior — slipped through.
+Fix (test-only, honest): renamed to issue_3_scotchnd_on_kkt_recurses_after_o13
+and rewrote it to guard the post-O13 reality — resolved_method ==
+ScotchND, perm is a valid bijection over 0..n, and perm != AMD's perm
+(proving genuine ND recursion, not the relabelled AMD leaf). Oracle is
+the already-committed+verified O13 behavior (scotch-crate test asserts
+n_separator_vertices>0 and perm!=AMD). Evidence: `-p feral --lib` now
+359 passed / 0 failed / 6 ignored. No behaviour change (O13 already
+shipped the behavior) => no CHANGELOG. Committed separately from O16 as
+an O13 follow-up since it concerns scotch, not kahip. Lesson: run the
+FULL workspace suite, not just the touched crate, when a fix changes
+observable ordering output other crates assert on.

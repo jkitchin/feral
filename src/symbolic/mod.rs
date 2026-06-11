@@ -2303,17 +2303,26 @@ mod tests {
     }
 
     #[test]
-    fn issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates() {
-        // SCOTCH bisection produces no separator on bordered-KKT
-        // patterns (verified directly in
-        // `crates/feral-scotch/tests/issue_3_kkt_repro.rs`); the
-        // recursion falls into amd_leaf for the entire graph and the
-        // returned permutation is bit-identical to AMD's.
-        // `resolved_method` must reflect what ran, not what was asked.
+    fn issue_3_scotchnd_on_kkt_recurses_after_o13() {
+        // History: SCOTCH bisection used to produce no separator on
+        // bordered-KKT patterns — its vertex-separator FM stopped the
+        // whole pass the first time both PQ heads were imbalance-
+        // rejected, abandoning feasible queued moves — so the recursion
+        // collapsed into amd_leaf for the entire graph and
+        // `resolved_method` reported `Amd`.
+        //
+        // Finding O13 fixed that early stop. SCOTCH now finds a real
+        // separator on this KKT pattern (verified directly in
+        // `crates/feral-scotch/tests/issue_3_kkt_repro.rs`:
+        // `issue_3_scotch_recurses_on_kkt_after_o13`), so ScotchND no
+        // longer degenerates: `resolved_method` reports the requested
+        // ScotchND, and the ordering is genuinely SCOTCH's — not a
+        // relabelled AMD leaf. This test guards that post-O13 behavior
+        // at the `feral` symbolic boundary.
         //
         // Preprocess is pinned to None so SCOTCH sees the raw KKT
-        // pattern; with LdltCompress the compressed graph is small
-        // enough that bisection sometimes succeeds.
+        // pattern (LdltCompress would shrink it past the point the
+        // degeneracy ever exercised).
         let m = poisson_kkt_csc(20);
         let params = SupernodeParams {
             preprocess: OrderingPreprocess::None,
@@ -2322,9 +2331,29 @@ mod tests {
         let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::ScotchND).unwrap();
         assert_eq!(
             sym.resolved_method,
-            OrderingMethod::Amd,
-            "ScotchND degenerated to AMD-leaf-only on this KKT pattern; \
-             resolved_method must report Amd, not ScotchND"
+            OrderingMethod::ScotchND,
+            "post-O13 SCOTCH recurses on this KKT pattern; resolved_method \
+             must report ScotchND, not the AMD-leaf fallback"
+        );
+
+        // The permutation must be a valid bijection over 0..n.
+        let n = m.n;
+        assert_eq!(sym.perm.len(), n);
+        let mut seen = vec![false; n];
+        for &p in &sym.perm {
+            assert!(p < n, "perm entry out of range");
+            assert!(!seen[p], "perm is not a bijection");
+            seen[p] = true;
+        }
+
+        // And it must differ from AMD's ordering — proof the recursion
+        // ran SCOTCH nested dissection rather than collapsing to the
+        // AMD leaf (which would return AMD's permutation verbatim).
+        let amd = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd).unwrap();
+        assert_ne!(
+            sym.perm, amd.perm,
+            "ScotchND ordering must not be bit-identical to AMD's; \
+             that would indicate the degenerate AMD-leaf fallback"
         );
     }
 
