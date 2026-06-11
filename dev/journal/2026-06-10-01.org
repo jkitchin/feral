@@ -1876,3 +1876,18 @@ METIS boundary-only + lazy-reinsertion is the Ω(boundary) alternative).
 Comment-only, no behaviour change; existing FM tests guard it. Not
 user-visible => no CHANGELOG. Next per /loop: do NOT start O12;
 continuing in-turn per 'finish tonight'.
+
+* O12 :ordering:metis:doc-drift:non-reproducible:
+O12 (repo-review): the inline `// Fix A` comment in metis_order_full
+(lib.rs:218-220) still called the dense-quotient path the "Same
+technique as HSL_MC68 / MUMPS ICNTL(6) / SSIDS", contradicting the
+audited MetisOptions::dense_quotient_enabled doc (lib.rs:105-121) where
+a 2026-04-27 source audit recorded that belief as wrong (ICNTL(6)=MC64
+matching; MUMPS defers dense rows in QAMD; SSIDS doesn't special-case
+them; neither pre-strips). Doc drift, no runtime behaviour to assert =>
+not reproducible as RED/GREEN. Routed to tried-and-rejected citing O12.
+Applied the O6-style doc correction: rewrote the comment to flag the
+equivalence as audited-and-wrong and point to the canonical doc, so the
+two sites agree. Comment-only, no behaviour change, no public API =>
+no CHANGELOG. Next per /loop: do NOT start O13; continuing in-turn per
+'finish tonight'.

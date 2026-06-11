@@ -4404,3 +4404,40 @@ tests remain the regression guard.
 
 Evidence: `fm_refine.rs:56-61` (heap seeding loop). Journal:
 dev/journal/2026-06-10-01.org.
+
+## 2026-06-11 — O12: metis dense-quotient comment cites debunked HSL_MC68/ICNTL(6)/SSIDS basis (finding O12, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O12** metis doc drift: `lib.rs:219` still cites HSL_MC68/ICNTL(6)/
+> SSIDS for the dense-quotient path while the `MetisOptions` doc
+> (`lib.rs:105-121`) explains that belief was audited and found wrong.
+> low/certain.
+
+### Why this is not reproducible as a correctness test
+
+O12 is documentation drift, not a behavioural defect. The inline
+`// Fix A` comment in `metis_order_full` (lib.rs:218-220) asserted the
+dense-quotient path is the "Same technique as HSL_MC68 / MUMPS
+ICNTL(6) / SSIDS", but the canonical `MetisOptions::dense_quotient_enabled`
+doc (lib.rs:105-121) already records a 2026-04-27 audit of the MUMPS and
+SPRAL sources that found that belief wrong: ICNTL(6) is MC64 matching,
+MUMPS defers dense rows inside QAMD (`MUMPS_QAMD`, THRESM/HEAD(N)), and
+SSIDS does not special-case dense rows at all — neither solver
+pre-strips the graph. There is no runtime behaviour to assert here (the
+two doc sites describe the same `dense_quotient_enabled` code path,
+which is unchanged and default-off); a unit test cannot pin prose.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible -> tried-and-rejected
+citing the finding ID). Per the O6 doc-correction precedent, the
+recommended low-risk sub-fix is applied: the stale inline comment is
+rewritten to state that the HSL_MC68/ICNTL(6)/SSIDS equivalence was
+audited and found wrong, and to point at
+`MetisOptions::dense_quotient_enabled` for the full finding, so the two
+doc sites no longer contradict each other. Comment-only; no behaviour
+change, no public-API surface change -> no CHANGELOG.
+
+Evidence: `lib.rs:218-220` (old comment) vs `lib.rs:105-121` (audited
+finding). Journal: dev/journal/2026-06-10-01.org.
