@@ -4744,3 +4744,74 @@ scotch `:433-450` / kahip `:328-345` (the dup check metis lacked), metis
 `:254-279` (sortedness reliance), kahip `:219-228` (defensive sort).
 `cargo test -p feral-metis` green with the new test. Journal:
 dev/journal/2026-06-10-01.org.
+## 2026-06-11 — O21: AMD/AMF inner-loop `wf = 0` sentinel ambiguity (finding O21, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O21** AMD/AMF inner-loop duplication (documented decision, ~600 LoC) is
+> already asymmetric: AMF writes `wf = 0` for dead elements, indistinguishable
+> from the first-touch sentinel 0, so a live element with true contribution 0 is
+> recomputed every iteration (`algo.rs:968`). Harmless; illustrates the drift
+> risk. low/certain.
+
+### Code
+
+`crates/feral-ordering-core/src/quotient_graph/algo.rs`, `finalize_step_amf`.
+Pass-1 (line 955) resets `ws.wf[e] = 0` on first touch — the lazy-cache "not yet
+computed this iteration" sentinel. Pass-2 element sub-pass (aggressive 983-988,
+non-aggressive 1015-1018) computes `if ws.wf[e] == 0 { ws.wf[e] =
+amf_wf_surface(dext, degree[e]) }` then `wf4 += ws.wf[e]`, where
+`amf_wf_surface(dext, degree) = dext*(2*degree - dext - 1)` (line 664-666).
+
+### Why the core finding is not reproducible as a defect
+
+A live element with `dext > 0` has a genuine surface of 0 exactly when
+`dext == 2*degree(e) - 1` (e.g. `dext = 1, degree = 1` → `1*(2-1-1) = 0`).
+`amf_wf_surface` then returns 0, so `wf[e]` stays 0. The next member that
+touches `e` in the same Pass-2 sees `wf[e] == 0`, treats it as uncached, and
+recomputes `amf_wf_surface` — obtaining the **same** 0. `wf4 += 0` is unchanged.
+`amf_wf_surface` is a pure function of `(dext, degree[e])`, both stable across a
+single Pass-2, so the recompute is deterministically equal to the cached value.
+
+Therefore the accumulated triple `(deg, wf3, wf4)`, the quantized RMF score, and
+the resulting elimination permutation are **identical** whether the value is
+cached or recomputed. No input produces a wrong answer, and no observable
+(output / permutation / flop-accounted result) distinguishes "cached once" from
+"recomputed per touch". The only effect is a handful of extra integer multiplies
+on the rare `dext == 2*deg-1` element. This is a missed micro-optimization, not a
+correctness defect — the same disposition as the O9 / O11 / O17 performance
+findings: there is no RED state to write, so it is non-reproducible and routed
+here per the /loop rule (citing the finding ID).
+
+### Why a distinguishing sentinel was rejected (not applied)
+
+The obvious "fix" — use a sentinel such as `-1` for "uncached" so a genuine 0 is
+distinguishable — was rejected. The same `wf` array is reused for variable
+scores: the supervariable merge takes `wf[i] = max(wf[i], wf[j])` (doc item 5)
+and re-insertion quantizes `wf[i]` into the RMF bucket (item 6). A `-1` sentinel
+would have to be guaranteed never to leak into either the `max` or the bucket
+quantization for any index, across both the AMD and AMF code paths. That adds
+real correctness risk to the working ordering to save a few integer ops on a rare
+element. "Correctness before performance, always" (CLAUDE.md constraint) settles
+it against the change.
+
+The broader finding framing — that the ~600 LoC of duplicated AMD/AMF inner-loop
+code is itself a drift hazard — is a structural-refactor observation (the same
+class as O20's cross-crate consolidation), not a defect with a reproducing test,
+and is likewise deferred rather than undertaken inside a single /loop iteration.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible core → tried-and-rejected citing
+the finding ID). Per the X16 / O4 / O5 / O6 / O9 / O17 sub-fix precedent, the
+safe behaviour-neutral slice is applied: a comment block at the Pass-1 sentinel
+reset documenting that `0` is deliberately overloaded as both "uncached" and a
+possible genuine surface value, that the resulting recompute is benign (same
+value), and why a distinguishing sentinel was rejected; plus a one-line pointer
+at each of the two Pass-2 cache-check sites. No behaviour change.
+
+Evidence: `algo.rs:955` (first-touch `wf[e] = 0` sentinel), `:983-988` /
+`:1015-1018` (the `if wf[e] == 0` recompute sites), `:664-666`
+(`amf_wf_surface`, zero at `dext == 2*deg-1`). `cargo test -p
+feral-ordering-core` green (comment-only, proves no behaviour change). Journal:
+dev/journal/2026-06-10-01.org.

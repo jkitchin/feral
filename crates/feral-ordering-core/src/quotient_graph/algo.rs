@@ -952,6 +952,28 @@ pub fn finalize_step_amf(
                     we -= nvi;
                 } else if we != 0 {
                     we = ws.degree[e] + wnvi;
+                    // O21 (repo-review-2026-06-09): `wf[e] = 0` is the
+                    // lazy-cache "surface not yet computed this iteration"
+                    // sentinel for Pass-2 below. It is intentionally NOT
+                    // distinct from a genuine surface contribution of 0:
+                    // `amf_wf_surface(dext, deg) = dext*(2*deg - dext - 1)`
+                    // is 0 for a live element whenever `dext == 2*deg(e)-1`
+                    // (e.g. dext=1, deg=1). When that happens `wf[e]` stays
+                    // 0, so the Pass-2 `if wf[e] == 0` check re-treats it as
+                    // uncached and recomputes the surface for every member
+                    // that touches `e`. This is benign: `amf_wf_surface` is
+                    // pure in (dext, degree[e]) — both stable across one
+                    // Pass-2 — so the recompute yields the same 0 and the
+                    // accumulated `wf4` (hence the RMF score and the
+                    // permutation) is unchanged; only a few integer multiplies
+                    // are redundant. A distinguishing sentinel (e.g. -1) was
+                    // rejected: `wf` is reused for variable scores
+                    // (supervariable-merge `max`, re-insertion bucket
+                    // quantization), so -1 would have to be proven never to
+                    // leak into either across the AMD and AMF paths — added
+                    // correctness risk for a handful of saved ops.
+                    // "Correctness before performance." See
+                    // dev/tried-and-rejected.md (O21).
                     ws.wf[e] = 0;
                 }
                 ws.w[e] = we;
@@ -980,6 +1002,9 @@ pub fn finalize_step_amf(
                 if we != 0 {
                     let dext = we - ws.wflg;
                     if dext > 0 {
+                        // `wf[e] == 0` means "uncached this iter" OR a genuine
+                        // 0 surface (O21) — recompute on the latter is benign
+                        // (same value). See the Pass-1 reset comment above.
                         if ws.wf[e] == 0 {
                             // First touch this iter: cache the surface
                             // contribution dext*(2*deg(e) - dext - 1).
@@ -1012,6 +1037,9 @@ pub fn finalize_step_amf(
                         "stale mark: w[e]={we} < wflg={} would wrap as usize",
                         ws.wflg
                     );
+                    // `wf[e] == 0` means "uncached this iter" OR a genuine 0
+                    // surface (O21) — recompute on the latter is benign (same
+                    // value). See the Pass-1 reset comment above.
                     if ws.wf[e] == 0 {
                         ws.wf[e] = amf_wf_surface(dext as i64, ws.degree[e] as i64);
                     }

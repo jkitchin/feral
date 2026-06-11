@@ -2130,3 +2130,26 @@ test invert_iperm_rejects_duplicate_positions: [2,0,1]->[1,2,0] ok; [0,0,2]->Err
 cargo test -p feral-metis green. Internal fn -> no CHANGELOG. Cross-crate
 consolidation remains open in tried-and-rejected.
 Next per /loop: do NOT start O21; continuing in-turn per 'finish tonight'.
+
+* 03:35 :amf:o21:quotient-graph:wf-sentinel:non-reproducible:tried-rejected:
+O21 (repo-review, FINAL O-series finding): AMF finalize_step_amf
+(feral-ordering-core/src/quotient_graph/algo.rs) overloads wf[e]=0 as the
+lazy-cache "uncached this iter" sentinel (Pass-1 line 955). Pass-2 (983-988
+aggressive / 1015-1018 non-agg) does `if wf[e]==0 { wf[e]=amf_wf_surface(...) }`
+then wf4+=wf[e]. amf_wf_surface(dext,deg)=dext*(2*deg-dext-1) is genuinely 0 when
+dext==2*deg-1 (e.g. dext=1,deg=1), so a LIVE element with true surface 0 leaves
+wf[e]=0 and is recomputed by every later member that touches it. NON-REPRODUCIBLE
+as a defect: amf_wf_surface is pure in (dext,degree[e]), both stable across one
+Pass-2, so recompute == cached value (0); the triple (deg,wf3,wf4), RMF score and
+permutation are identical. Only effect = a few extra int muls => missed
+micro-opt, same class as O9/O11/O17 perf findings, no RED constructible.
+Distinguishing sentinel (-1) REJECTED: wf is reused for variable scores
+(supervariable merge max, re-insertion bucket quantize), so -1 would have to be
+proven never to leak into either across AMD+AMF paths — added correctness risk
+for a few ops; "correctness before performance". Routed to tried-and-rejected
+citing O21. Safe sub-fix (O17 precedent): comment block at line 955 documenting
+the intentional overload + benign recompute + why no sentinel; one-line pointers
+at the two check sites. No behavior change. cargo test -p feral-ordering-core
+green. Not user-visible -> no CHANGELOG.
+Per /loop "When done do not start the next issue": O21 is the LAST O-series
+finding -> the loop STOPS after this commit. Session-end checkpoint follows.
