@@ -5375,3 +5375,29 @@ Decision and rationale:
   `max_growth`; no acceptable bump pivot → `SingularBasis`; update count → `NeedsRefactor` on
   `max_updates`. Work is done on a clone of `U`, committed only on success, so failures leave
   `self` unchanged.
+
+## 2026-06-11 — MTX duplicate coordinates are summed on both conversion paths (REG-4 / X2)
+
+The Matrix Market `coordinate` format permits a coordinate to appear more than
+once; the de-facto convention (the NIST `mmio` ecosystem, `scipy.sparse`'s
+`coo_matrix`, and MATLAB's `sparse`) is that duplicate `(i, j)` entries are
+**summed**. `MtxMatrix::to_csc` already followed this via
+`CscMatrix::from_triplets` (which accumulates), but `MtxMatrix::to_dense` routed
+through `SymmetricMatrix::from_lower_triangle`, whose `set` **overwrites**
+(last-wins). The same file therefore produced two different matrices depending
+on the conversion path — finding X2 in the repo-review.
+
+**Decision:** both paths sum duplicates. `to_dense` now accumulates into a
+zeroed `SymmetricMatrix` with `get`/`set` (`prev + v`) rather than overwriting,
+matching `to_csc` and the COO convention. The alternative — *erroring* on any
+duplicate coordinate — was rejected: it would impose a stricter contract than
+the format requires and could reject otherwise-valid corpus files, and it would
+have meant changing `to_csc`'s established (and separately tested) summing
+behavior rather than aligning the cheaper-to-fix path. Summing is the
+lower-surprise, spec-aligned choice.
+
+Relatedly (same commit), `parse_mtx` now validates the declared `nnz` against
+the actual data-line count: the size line's third field is, per the spec, the
+number of entries that follow, so a mismatch is a malformed file and is rejected
+rather than silently read as a smaller matrix. This counts *physical* data lines
+(before duplicate summing), which is what the header declares.

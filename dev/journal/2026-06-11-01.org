@@ -122,3 +122,43 @@ start inverting blocks the factor rejects. Full workspace (63 result groups) 0
 failures, so accepted-block bit-parity holds on every existing solve test.
 Only these 2 sites used zero_tol_2x2 (grep-confirmed). User-visible silent
 wrong answer → CHANGELOG Fixed entry.
+
+* 08:55 :reg4:x2:x6:mtx:csc:validate:disposition:
+REG-4 (medium, process+harness integrity): X2 was the ONLY repo-review finding
+with no fix, no tried-and-rejected entry, no journal mention — both halves live,
+and the X10 fix had enshrined the unvalidated behavior in a passing test
+(huge_nnz_header_does_not_abort asserted Ok with entries.len()==2 for a 10^17-nnz
+header). Gave it a real disposition (not a deferral — the irony of deferring "the
+finding with no disposition" was the point).
+
+Three fixes (one commit, REG-4/X2 + X6 residual):
+1. parse_mtx: validate declared nnz == actual data-line count (mtx.rs, after the
+   parse loop). Pre-fix nnz was parsed (line 113) and used only as an alloc HINT
+   (clamped nnz.min(contents.len()) per X10) but NEVER checked, so a truncated/
+   corrupt file read as a valid smaller matrix. Oracle: MTX spec — the size
+   line's 3rd field IS the count of entries that follow.
+2. to_dense: sum duplicate coordinates instead of overwrite. to_csc already sums
+   (from_triplets), to_dense used from_lower_triangle->set (last-wins), so the
+   SAME file produced two different matrices by path. to_dense now builds via
+   zeros()+get/set-accumulate. Oracle: COO duplicate-summing convention (MTX /
+   scipy.sparse / MATLAB sparse). Decision recorded in decisions.md.
+3. CscMatrix::validate: reject col_ptr[0] != 0 (X6 residual). A monotone col_ptr
+   starting at k>0 with col_ptr[n]==nnz passed length/monotone/in-bounds/sorted/
+   lower-tri while row_idx/values[0..k] were never covered by any column range —
+   silently dropped. One-line check after the length check.
+
+X10 test revised: the 10^17-nnz file now returns a recoverable Err (count
+mismatch) instead of Ok — the no-ABORT property X10 protects still holds (the
+clamp prevents the multi-exabyte alloc; the test gets an Err back, not a process
+abort). Allowed: tests are not append-only and the verifier explicitly said the
+X2 fix "must revise that test."
+
+RED->GREEN evidence:
+- declared_nnz_must_match_entry_count: "3 3 4" + 2 lines → was Ok(len 2), now Err
+  "declared nnz 4 does not match the 2 entries".
+- duplicate_entries_summed_consistently_by_both_paths: (1,1)=2.0 then 1.0 → was
+  to_dense.get(0,0)=1.0 (last-wins) vs to_csc=3.0 (disagree); now both 3.0.
+- validate_rejects_nonzero_col_ptr_start: n=2 col_ptr=[1,1,2] (monotone,
+  col_ptr[2]==nnz==2, entry 0 dropped) → was Ok, now Err.
+All other mtx tests have no duplicates and declare correct nnz, so unaffected.
+Full workspace suite green.

@@ -13,8 +13,20 @@ pub struct MtxMatrix {
 
 impl MtxMatrix {
     /// Convert to a dense symmetric matrix.
+    ///
+    /// X2 (REG-4): duplicate coordinates are **summed**, matching `to_csc`
+    /// (which sums via `CscMatrix::from_triplets`) and the Matrix Market /
+    /// COO convention used by scipy and MATLAB. The previous
+    /// `from_lower_triangle` path *overwrote* duplicates (last-wins), so the
+    /// same file produced two different matrices depending on the conversion
+    /// path. See `dev/decisions.md` (2026-06-11) for the rationale.
     pub fn to_dense(&self) -> SymmetricMatrix {
-        SymmetricMatrix::from_lower_triangle(self.n, &self.entries)
+        let mut mat = SymmetricMatrix::zeros(self.n);
+        for &(i, j, v) in &self.entries {
+            let prev = mat.get(i, j);
+            mat.set(i, j, prev + v);
+        }
+        mat
     }
 
     /// Convert to a CSC sparse matrix (lower triangle).
@@ -213,6 +225,27 @@ pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix, FeralError> 
         }
     }
 
+    // X2 (REG-4, repo-review-2026-06-09-verification.md): the size line's
+    // `nnz` field was parsed but used only as an allocation hint (clamped
+    // by X10) and never validated against the actual entry count. The
+    // Matrix Market spec defines that field as the number of entries that
+    // follow, so a body with more or fewer data lines than the header
+    // declares is a malformed file — previously it parsed silently into a
+    // matrix that did not match its own declaration (a truncated file read
+    // as a valid smaller matrix). Validate it now. This also turns the
+    // bogus-huge-nnz case (X10) from an `Ok` carrying the unvalidated
+    // entries into a recoverable count-mismatch `Err`; the no-abort
+    // property X10 protects still holds (the reservation above stays
+    // clamped to the source byte length, so no multi-exabyte allocation).
+    if entries.len() != nnz {
+        return Err(FeralError::IoError(format!(
+            "{}: declared nnz {} does not match the {} entries in the file",
+            source,
+            nnz,
+            entries.len()
+        )));
+    }
+
     Ok(MtxMatrix { n, entries })
 }
 
@@ -249,13 +282,18 @@ mod tests {
     /// into a multi-exabyte allocation request; the allocator returns null
     /// and Rust's `handle_alloc_error` ABORTS the process — a hard crash,
     /// not a recoverable `FeralError`, on malformed input a library caller
-    /// cannot guard against. `nnz` is only an allocation hint here
-    /// (`parse_mtx` never validates it against the real entry count), so
-    /// the reservation is now clamped to the source byte length — a hard
-    /// upper bound on the true entry count. This file declares 10^17
-    /// entries but has two real ones; pre-fix it aborted at the
-    /// `with_capacity` call ("memory allocation of 2400000000000000000
-    /// bytes failed"), post-fix it parses to the two entries.
+    /// cannot guard against. The reservation is clamped to the source byte
+    /// length — a hard upper bound on the true entry count — so the parse
+    /// runs to completion instead of aborting.
+    ///
+    /// Revised for X2 (REG-4): the declared nnz is now also *validated*
+    /// against the real entry count, so this file (10^17 declared, two
+    /// real) returns a recoverable count-mismatch `Err` rather than an `Ok`
+    /// carrying the unvalidated entries. The property X10 protects — a
+    /// bogus huge nnz must not *abort the process* — still holds: the call
+    /// RETURNS an `Err`, which it could only do by surviving the clamped
+    /// `with_capacity` (an unclamped reservation would abort here before any
+    /// count check could run).
     #[test]
     fn huge_nnz_header_does_not_abort() {
         let mtx = "\
@@ -264,12 +302,84 @@ mod tests {
 1 1 2.0
 2 1 -1.0
 ";
-        let m = parse_mtx(mtx, "test").expect("a bogus huge nnz must not abort or error");
-        assert_eq!(m.n, 3);
+        let err = parse_mtx(mtx, "test")
+            .expect_err("a bogus huge nnz must return a recoverable Err, not abort the process");
+        match err {
+            FeralError::IoError(msg) => assert!(
+                msg.contains("declared nnz") && msg.contains("does not match"),
+                "expected an nnz-count-mismatch error, got: {msg}"
+            ),
+            other => panic!("expected FeralError::IoError, got {other:?}"),
+        }
+    }
+
+    /// X2 / REG-4 (repo-review-2026-06-09-verification.md): the size line's
+    /// declared nnz was parsed but never checked against the actual number
+    /// of data lines, so a truncated or corrupt file parsed silently into a
+    /// matrix that did not match its own declaration. The count is now
+    /// validated. Oracle: the Matrix Market spec — the size line's third
+    /// field is the number of entries that follow. Here the header declares
+    /// 4 entries but the body has 2; pre-fix this returned `Ok` with
+    /// `entries.len() == 2`, post-fix it is rejected.
+    #[test]
+    fn declared_nnz_must_match_entry_count() {
+        let mtx = "\
+%%MatrixMarket matrix coordinate real symmetric
+3 3 4
+1 1 2.0
+2 2 3.0
+";
+        let err = parse_mtx(mtx, "test").expect_err(
+            "a declared nnz that disagrees with the actual entry count must be rejected (X2)",
+        );
+        match err {
+            FeralError::IoError(msg) => assert!(
+                msg.contains("declared nnz") && msg.contains("does not match"),
+                "expected an nnz-count-mismatch error, got: {msg}"
+            ),
+            other => panic!("expected FeralError::IoError, got {other:?}"),
+        }
+    }
+
+    /// X2 / REG-4: duplicate coordinates must be summed by BOTH conversion
+    /// paths. `to_csc` summed them (via `from_triplets`) while `to_dense`
+    /// overwrote them (last-wins), so the same file produced two different
+    /// matrices. Oracle: the Matrix Market / COO duplicate-summing
+    /// convention (scipy, MATLAB). Here (1,1) is listed as 2.0 then 1.0;
+    /// pre-fix `to_dense.get(0,0)` was 1.0 while `to_csc` summed to 3.0,
+    /// post-fix both are 3.0.
+    #[test]
+    fn duplicate_entries_summed_consistently_by_both_paths() {
+        let mtx = "\
+%%MatrixMarket matrix coordinate real symmetric
+2 2 3
+1 1 2.0
+1 1 1.0
+2 2 5.0
+";
+        let m = parse_mtx(mtx, "test").expect("valid file with a duplicate coordinate");
+
+        let dense = m.to_dense();
         assert_eq!(
-            m.entries.len(),
-            2,
-            "only the two real entries are present; nnz is an untrusted hint (X10)"
+            dense.get(0, 0),
+            3.0,
+            "to_dense must sum duplicate (1,1) = 2.0 + 1.0"
+        );
+        assert_eq!(dense.get(1, 1), 5.0);
+
+        // to_csc collapses the duplicate to a single summed entry too.
+        let csc = m.to_csc().expect("to_csc");
+        // Column 0 holds (row 0, col 0); find its value.
+        let mut v00 = None;
+        for k in csc.col_ptr[0]..csc.col_ptr[1] {
+            if csc.row_idx[k] == 0 {
+                v00 = Some(csc.values[k]);
+            }
+        }
+        assert_eq!(
+            v00,
+            Some(3.0),
+            "to_csc must sum duplicate (1,1); both paths must agree"
         );
     }
 

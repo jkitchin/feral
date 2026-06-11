@@ -4,6 +4,31 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — MTX reader validates declared nnz and sums duplicate coordinates consistently (REG-4 / X2)
+
+`parse_mtx` parsed the size line's `nnz` field but never checked it against the
+actual number of data lines, so a truncated or corrupt file (body shorter or
+longer than the header claims) parsed silently into a matrix that did not match
+its own declaration. The declared `nnz` is now validated against the entry
+count. Separately, `to_csc` summed duplicate coordinates (the Matrix Market /
+COO convention, matching scipy and MATLAB) while `to_dense` overwrote them
+(last-wins), so the same file produced two different matrices depending on the
+conversion path; `to_dense` now sums duplicates as well. The X10 huge-nnz
+guard is unaffected in spirit — a bogus 10^17 nnz still does not abort the
+process (the allocation remains clamped to the source byte length); it now
+returns a recoverable count-mismatch `Err` instead of an `Ok` carrying the
+unvalidated entries. Finding REG-4 / X2 from
+`dev/research/repo-review-2026-06-09-verification.md`.
+
+### Fixed — `CscMatrix::validate` now rejects a non-zero `col_ptr[0]` (X6)
+
+A monotone `col_ptr` starting at `k > 0` with `col_ptr[n] == nnz` passed every
+existing check (length, monotonicity, `col_ptr[n] == nnz`, in-bounds, sorted,
+lower-triangle) while positions `0..k` of `row_idx`/`values` were never covered
+by any column range — silently dropped and never factored. `validate` now
+requires `col_ptr[0] == 0`, completing the column-pointer contract the X6
+monotonicity check began.
+
 ### Fixed — sparse D-block solves now use the same SSIDS determinant floor as the factor (REG-3)
 
 The sparse forward and multi-RHS 2×2 D-block solves (`solve_sparse_core_into`,

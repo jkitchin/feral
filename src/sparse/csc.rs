@@ -200,6 +200,19 @@ impl CscMatrix {
                 "row_idx and values length mismatch".to_string(),
             ));
         }
+        // X6 residual (repo-review-2026-06-09-verification.md): `col_ptr`
+        // must start at 0. A monotone `col_ptr` beginning at `k > 0` with
+        // `col_ptr[n] == nnz` passes every other check (length, monotone,
+        // in-bounds, sorted, lower-triangle) while positions `0..k` of
+        // `row_idx`/`values` are never covered by any column range —
+        // silently dropped and never factored. Completes the column-pointer
+        // contract the monotonicity check below began.
+        if self.col_ptr[0] != 0 {
+            return Err(FeralError::InvalidInput(format!(
+                "col_ptr[0] must be 0, got {}",
+                self.col_ptr[0]
+            )));
+        }
         if self.col_ptr[self.n] != self.row_idx.len() {
             return Err(FeralError::InvalidInput("col_ptr[n] != nnz".to_string()));
         }
@@ -561,6 +574,37 @@ mod tests {
         assert!(
             msg.contains("col_ptr") && msg.contains("monoton"),
             "error should mention non-monotone col_ptr, got: {}",
+            msg
+        );
+    }
+
+    /// X6 residual (repo-review-2026-06-09-verification.md): `validate()`
+    /// must reject a `col_ptr` that does not start at 0. A monotone
+    /// `col_ptr` beginning at `k > 0` with `col_ptr[n] == nnz` passes the
+    /// length, monotonicity, `col_ptr[n] == nnz`, in-bounds, sorted and
+    /// lower-triangle checks, yet positions `0..k` of `row_idx`/`values`
+    /// fall outside every column range and are silently dropped — the
+    /// matrix factored is missing those entries.
+    ///
+    /// Witness: n = 2, nnz = 2, `col_ptr = [1, 1, 2]`. Monotone,
+    /// `col_ptr[2] == 2 == nnz`; column 0's range `[1, 1)` is empty and
+    /// column 1's range `[1, 2)` reads only index 1, so `row_idx[0]` /
+    /// `values[0]` are never covered. Pre-fix `validate()` returned `Ok`.
+    #[test]
+    fn validate_rejects_nonzero_col_ptr_start() {
+        let m = CscMatrix {
+            n: 2,
+            col_ptr: vec![1, 1, 2],
+            row_idx: vec![0, 1],
+            values: vec![1.0, 1.0],
+        };
+        let err = m
+            .validate()
+            .expect_err("a col_ptr that does not start at 0 must be rejected (X6)");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("col_ptr[0]"),
+            "error should mention col_ptr[0], got: {}",
             msg
         );
     }
