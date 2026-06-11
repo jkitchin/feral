@@ -3818,3 +3818,72 @@ Evidence: `src/capi.rs:13-14,22-25`;
 `feral-ipopt-shim/include/IpFeralSolverInterface.hpp:11`;
 `ref/Ipopt/src/Algorithm/LinearSolvers/IpSymLinearSolver.hpp:19-33`.
 Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — X12: build_cost_graph per-column sort is dead work / micro-allocations (finding X12, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **X12** `build_cost_graph` per-column sort is dead work with O(n)
+> per-run allocations (`mc64.rs:342-351`): the two-pass expansion
+> already emits rows ascending. MC64 is documented as the dominant
+> symbolic cost. low/likely (ordering argument) / certain
+> (allocations).
+
+(The cited lines correspond to `src/scaling/mc64.rs`; in the current
+tree the per-column sort is at `mc64.rs:357-370` and the two-pass
+expansion at `:307-355`.)
+
+### Why this is not reproducible as a failing test
+
+X12 is a performance / dead-work observation, not a correctness defect.
+There is no input for which the present code produces a wrong result, so
+no RED test can be written against it.
+
+1. **The sort never changes the factorization result.** `build_cost_graph`
+   feeds the Hungarian matching kernel and the column-max normalization.
+   Column-max normalization (`mc64.rs:372-394`) computes a per-column
+   maximum and subtracts it — order-independent. The Hungarian kernel
+   consumes the column as a set of (row, cost) pairs; its matching and the
+   resulting scaling do not depend on the within-column row order. The
+   in-code comment says as much: "Hungarian kernel does not strictly
+   require this … a predictable order makes the greedy initialization
+   deterministic and matches SPRAL's behaviour after `half_to_full`." So
+   the sort is at most a determinism/parity nicety, never a correctness
+   input.
+
+2. **On the maintained invariant the sort is provably a no-op (the
+   "ordering argument").** feral's CSC columns are row-sorted ascending
+   (the documented `CscPattern` invariant — see also finding O3). Under
+   that invariant the expansion already emits each column ascending:
+   - Transpose entries `(j, i)` for `j < i` are appended to column `i` as
+     the outer loop runs `j = 0,1,…`, so they land in ascending `j`, and
+     every such row is `< i`.
+   - Own-column entries `(i', i)` with `i' >= i` are appended when the
+     outer loop reaches `j = i`, in the ascending CSC row order, every row
+     `>= i`.
+   The concatenation `[rows < i ascending] ++ [rows >= i ascending]` is
+   globally ascending, so `pairs.sort_by_key` reorders nothing. A test
+   asserting "columns come out ascending" therefore PASSES on the current
+   code — it confirms the sort is dead, it does not reproduce a bug.
+
+3. **The O(n) per-run allocations are micro-overhead, not a defect.** The
+   per-column `Vec<(usize, f64)>` in the sort loop and the `offsets`
+   clone are extra allocations, but they change neither the output nor the
+   asymptotic cost of the surrounding MC64 work. Removing them is a pure
+   optimization with no observable behavioral change to assert.
+
+### Disposition
+
+Routed here per the /loop rule ("anything that can't be reproduced goes
+to dev/tried-and-rejected.md citing the finding ID"). X12 describes
+redundant work, not incorrect behavior: the sort is correctness-neutral
+(the kernel and column-max normalization are order-invariant) and, on the
+maintained row-sorted-CSC invariant, provably a no-op; the allocations
+are micro-overhead. No failing test exists or is added. Removing the sort
+and the per-run allocations would be a performance change with no output
+delta — deliberately left out of this bug-fix loop, which is anchored on
+reproducing defects. Not user-visible → no CHANGELOG entry.
+
+Evidence: `src/scaling/mc64.rs:294-394` (build_cost_graph: expansion
+`:307-355`, sort `:357-370`, column-max normalization `:372-394`).
+Journal: dev/journal/2026-06-10-01.org.

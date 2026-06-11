@@ -1562,3 +1562,21 @@ reject (token mismatch); existing valid-parse tests unaffected. User-visible
 CHANGELOG Fixed entry. Evidence: mtx.rs banner+non-finite hunks, 4 tests in the
 tests module. Next per /loop: do NOT start the next issue (X12). Continue
 in-turn per the live 'speed this up' directive.
+
+* 21:05 :x12:mc64:scaling:dead-work:perf:not-reproducible:tried-and-rejected:
+X12 (repo-review §X12, low/likely ordering arg + certain allocations):
+build_cost_graph per-column sort (src/scaling/mc64.rs:357-370) is dead work,
+plus O(n) per-run allocations. Investigated for a reproducing test; none exists.
+(1) The sort is correctness-neutral: column-max normalization (:372-394) and
+the Hungarian kernel are both within-column-order-invariant; the in-code comment
+already says the kernel "does not strictly require this" (it's a determinism/
+SPRAL-parity nicety). (2) On the maintained row-sorted-CSC invariant the
+expansion already emits each column ascending -- transpose rows j<i land first
+in ascending j, own-column rows i'>=i next in ascending order, concatenation is
+globally ascending -- so sort_by_key reorders nothing. A test "columns come out
+ascending" PASSES on current code (confirms dead, not a bug). (3) Allocations
+are micro-overhead, no output delta. => No RED test possible. Routed to
+dev/tried-and-rejected.md citing X12. Removing the sort would be a pure perf
+optimization, deliberately out of scope for this bug-fix loop. Not user-visible
+=> no CHANGELOG. Next per /loop: do NOT start the next issue (X13). Continue
+in-turn per the live 'speed this up' directive.
