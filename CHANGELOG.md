@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-11
+
 ### Added — Python interface: LU basis engine, factor/symbolic access, knobs, introspection
 
 The Python binding (`feral-solver`) gains a large, **purely additive** surface
