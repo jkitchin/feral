@@ -4037,3 +4037,62 @@ report); `src/numeric/factorize.rs:959-969` (`factor_nnz()` triangular
 formula); `src/dense/factor.rs:788,1247-1256` (dense `Factors` has no
 `factor_nnz()`; `nrow`/`nelim` fields). Journal:
 dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — X16: Inertia struct "invariant: pos+neg+zero == n" doc (finding X16, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **X16** `Inertia::new` (`inertia.rs:12-18`) doesn't enforce the
+> documented `pos+neg+zero == n` invariant; doc reads like a guarantee.
+> low/certain.
+
+### Why this is not reproducible as a defect
+
+`Inertia` is a plain triple of `usize` counts (`positive`, `negative`,
+`zero`). `Inertia::new(positive, negative, zero)` stores exactly what it is
+given. There is no defective behavior to reproduce:
+
+1. **`new` takes no `n`.** Its signature is
+   `new(positive, negative, zero)` — there is no matrix dimension in scope,
+   so it is structurally impossible for `new` to check `pos+neg+zero == n`.
+   The "invariant" references an external `n` the constructor never sees.
+
+2. **The "== n" invariant is violated by design for sub-blocks.** `Inertia`
+   is intentionally used to describe sub-blocks, not just whole matrices.
+   The 2×2 pivot classifier `classify_2x2_inertia`
+   (`src/dense/factor.rs:4313-4332`) returns `Inertia::new(1,1,0)`,
+   `Inertia::new(2,0,0)`, `Inertia::new(0,0,2)`, etc. — every one has
+   `total() == 2`, the order of the 2×2 block, **not** the global matrix
+   order `n`. `count_2x2_inertia_val` (`:4259`) does likewise. So adding
+   `assert!(pos+neg+zero == n)` to `new` is not just impossible (no `n`) but
+   semantically wrong: it would reject the type's legitimate sub-block use.
+
+3. **No caller relies on a false guarantee.** Every whole-matrix
+   construction site (`src/dense/factor.rs:1158,1786,2281,2515`, the bench
+   harness, etc.) passes counts that already sum to the relevant dimension;
+   `total()` (`inertia.rs:21-23`) recomputes the sum on demand. Nothing reads
+   back an enforced invariant that could be wrong.
+
+A test could only assert that `new` stores what it is given
+(`Inertia::new(1,1,1).total() == 3`) — which passes, i.e. characterizes
+correct behavior; it cannot go RED on a defect. The real issue is purely a
+doc-comment that *reads* like an enforced guarantee when the relationship is
+a caller-upheld contract (and a tautology with `total()` for whatever
+(sub)matrix the inertia describes).
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected citing
+the finding ID). Following the X8 / X13 / X14 precedent for misleading
+comments, the doc was corrected in place (`src/inertia.rs:1-9`, `:11-13`):
+the struct doc now states `total()` equals the dimension of whatever
+(sub)matrix the inertia describes, explicitly notes the 2×2-block use where
+`total() == 2`, and that counts are caller-supplied and unvalidated; the
+`new` doc states the counts are stored as given and not validated against any
+dimension. No behavioral change; no enforcement added (it would break the
+sub-block use). Not user-visible (internal doc) → no CHANGELOG entry.
+
+Evidence: `src/inertia.rs:1-30`; `src/dense/factor.rs:4259,4313-4332`
+(2×2-block inertias with `total()==2`); whole-matrix sites
+`src/dense/factor.rs:1158,1786,2281,2515`. Journal:
+dev/journal/2026-06-10-01.org.

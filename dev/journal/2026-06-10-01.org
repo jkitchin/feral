@@ -1656,3 +1656,24 @@ tests/comments); fmt clean. This is a real fix with a reproducing test, so it do
 NOT go to tried-and-rejected. Bench-harness-only (no library/API surface) =>
 no CHANGELOG entry. Next per /loop: do NOT start the next issue (X16). Continue
 in-turn per the live 'speed this up' directive.
+
+* 10:05 :x16:inertia:false-comment:non-reproducible:
+X16 (repo-review-2026-06-09.md): Inertia struct doc (inertia.rs:2) claimed
+"Invariant: positive + negative + zero == n", but Inertia::new(pos,neg,zero) takes
+no n and stores counts verbatim, so it cannot enforce anything. Decisive: Inertia
+is used for 2x2 pivot SUB-blocks -- classify_2x2_inertia (dense/factor.rs:4313-4332)
+returns Inertia::new(1,1,0)/(2,0,0)/(0,0,2)/... all with total()==2 (block order),
+NOT the global matrix n. So "== n" is violated by design and adding
+assert(pos+neg+zero==n) to new would be both impossible (no n) and wrong (rejects
+legitimate sub-block use). No caller reads back a false guarantee; total()
+(inertia.rs:21) recomputes the sum on demand. A test could only assert new stores
+what it's given (Inertia::new(1,1,1).total()==3) -- passes, characterizes correct
+behavior, cannot go RED on a defect.
+=> Non-reproducible (misleading doc, not a defect). Per X8/X13/X14 precedent:
+corrected the doc in place (inertia.rs:1-9 struct, :11-13 new) to state total()
+equals the described (sub)matrix dimension, note the 2x2-block use (total()==2),
+and that counts are caller-supplied/unvalidated. No enforcement added (would break
+sub-block use), no behavioral change. tried-and-rejected citing X16. fmt clean,
+feral builds. Not user-visible (internal doc) => no CHANGELOG. Next per /loop: do
+NOT start the next issue (O3). Continue in-turn per the live 'speed this up'
+directive.

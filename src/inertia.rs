@@ -1,5 +1,12 @@
 /// Inertia of a symmetric matrix: counts of positive, negative, zero eigenvalues.
-/// Invariant: positive + negative + zero == n.
+///
+/// This is a plain triple of counts. `total()` returns their sum, which equals
+/// the dimension of whatever (sub)matrix the inertia describes. The type is
+/// also used for sub-blocks — e.g. the 2×2 pivot classification in
+/// `dense::factor` returns inertias with `total() == 2` — so the sum is the
+/// described block's order, not necessarily the global matrix order `n`. The
+/// counts are caller-supplied and not validated against any dimension; keeping
+/// them consistent is the caller's responsibility (see `new`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Inertia {
     pub positive: usize,
@@ -8,7 +15,9 @@ pub struct Inertia {
 }
 
 impl Inertia {
-    /// Create a new Inertia with explicit counts.
+    /// Create a new Inertia from explicit counts. The counts are stored as
+    /// given and are not validated against any matrix dimension; `total()`
+    /// will return their sum.
     pub fn new(positive: usize, negative: usize, zero: usize) -> Self {
         Self {
             positive,
