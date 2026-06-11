@@ -136,9 +136,12 @@ either triangle; `CscMatrix.symmetric_pattern()` returns the full
 
 ## Example notebooks
 
-Runnable notebooks live in `examples/notebooks/` (regenerate the
-`.ipynb` from `_build_notebooks.py`; execute with
-`jupyter nbconvert --execute` or open in Jupyter):
+Runnable notebooks live in `examples/notebooks/`. Regenerate them from
+the reviewable `_build_notebooks.py` generator: `python _build_notebooks.py`
+re-executes each notebook and commits its cell outputs (the embedded
+assertions double as a smoke test), or pass `--no-execute` for
+source-only `.ipynb` when `feral` is not installed in the running
+interpreter.
 
 - `01_basic_factor_solve` — factor, certified inertia, solve, refine, reuse.
 - `02_multi_rhs_batched` — **batched multi-RHS solve**, motivated by a
@@ -146,6 +149,10 @@ Runnable notebooks live in `examples/notebooks/` (regenerate the
   looped-vs-batched timing showing the per-RHS speedup (issue #57).
 - `03_kkt_saddle_inertia` — indefinite KKT system with certified inertia.
 - `04_scipy_numpy_interop` — `scipy.sparse` round-trip vs `spsolve`.
+- `05_lu_and_introspection` — the **LU basis engine** (`ftran`/`btran`,
+  product-form updates, `P A Q = L U`), **factor access** (`L`/`D`
+  reconstruction, `feral.analyze`), and **introspection** (knobs, factor
+  stats, pivot range, scaling info) added in 0.11.0.
 
 ## scipy.sparse interop
 

@@ -6,6 +6,18 @@ All notable changes to FERAL will be documented in this file.
 
 ## [0.11.0] - 2026-06-11
 
+### Documentation
+
+- The mdBook Python chapter (`book/src/python.md`) now documents the new
+  0.11.0 surface: the LU basis engine, factor/symbolic access (`Factors`,
+  `feral.analyze`/`SymbolicAnalysis`), the `Solver` tuning knobs, the
+  introspection getters, and the `CscMatrix` conversion conveniences.
+- New executed example notebook `05_lu_and_introspection`, generated from the
+  reviewable `_build_notebooks.py`. The generator now re-executes every
+  notebook by default and commits its cell outputs (each cell's embedded
+  assertion against an external oracle doubles as a smoke test); pass
+  `--no-execute` for source-only `.ipynb`.
+
 ### Added — Python interface: LU basis engine, factor/symbolic access, knobs, introspection
 
 The Python binding (`feral-solver`) gains a large, **purely additive** surface
