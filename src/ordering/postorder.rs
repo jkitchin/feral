@@ -1,5 +1,16 @@
 use super::elimination_tree::EliminationTree;
 
+#[cfg(test)]
+thread_local! {
+    /// S1 (dev/research/repo-review-2026-06-09.md) work counter: total
+    /// number of child-list elements materialized+sorted across all
+    /// per-node sorts in [`postorder`]. Linear in `n` for the fixed
+    /// (sort-once-per-node) traversal; quadratic for the old
+    /// sort-on-every-stack-visit version. Test-only; compiled out of
+    /// production builds.
+    static SORT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Compute a postorder traversal of the elimination tree.
 ///
 /// Returns `(postorder, inv_postorder)` where:
@@ -20,29 +31,38 @@ pub fn postorder(etree: &EliminationTree) -> (Vec<usize>, Vec<usize>) {
 
     let mut order = Vec::with_capacity(n);
 
-    // DFS stack: (node, child_index) — iterative DFS to avoid stack overflow
-    let mut stack: Vec<(usize, usize)> = Vec::new();
+    // DFS stack carries each node's already-sorted child list plus a cursor:
+    // `(node, sorted_children, child_idx)`. The sort runs exactly once per
+    // node — when the node is first pushed — not once per stack visit.
+    //
+    // The previous version stored only `(node, child_idx)` and re-cloned and
+    // re-sorted `children[node]` on every `stack.last_mut()` iteration. A node
+    // with `c` children sits on top of the stack `c+1` times (once per child
+    // push + once for the final pop), so it paid `O(c²·log c)`. On a star
+    // etree (one root with `n-1` children — the arrow/bordered-KKT shape AMD
+    // produces for a dense trailing border) that made the default symbolic
+    // pipeline `O(n²·log n)`. See S1, dev/research/repo-review-2026-06-09.md,
+    // and the matching cursor layout in `biased_postorder` /
+    // `EliminationTree::postorder`.
+    let mut stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
 
     // Process roots in ascending subtree size order
     let mut sorted_roots = roots;
     sorted_roots.sort_unstable_by_key(|&r| sizes[r]);
 
     for &root in &sorted_roots {
-        stack.push((root, 0));
+        stack.push((root, sorted_children_by_size(&children[root], &sizes), 0));
 
-        while let Some((node, child_idx)) = stack.last_mut() {
-            // Sort children by subtree size (smallest first) on first visit
-            let node = *node;
-            let mut sorted_children = children[node].clone();
-            sorted_children.sort_unstable_by_key(|&c| sizes[c]);
-
+        while let Some((node, sorted_children, child_idx)) = stack.last_mut() {
+            let node_id = *node;
             if *child_idx < sorted_children.len() {
                 let child = sorted_children[*child_idx];
                 *child_idx += 1;
-                stack.push((child, 0));
+                let next = sorted_children_by_size(&children[child], &sizes);
+                stack.push((child, next, 0));
             } else {
                 // All children visited — emit this node (postorder)
-                order.push(node);
+                order.push(node_id);
                 stack.pop();
             }
         }
@@ -240,6 +260,18 @@ fn schur_partition_children(children: &[usize], sizes: &[usize], is_schur: &[boo
     schur.sort_unstable();
     nonschur.extend(schur);
     nonschur
+}
+
+/// Sort a node's children by ascending subtree size (smallest first), the
+/// peak-memory-minimizing visit order used by [`postorder`]. Factored out so
+/// the clone+sort runs exactly once per node (see S1,
+/// `dev/research/repo-review-2026-06-09.md`).
+fn sorted_children_by_size(children: &[usize], sizes: &[usize]) -> Vec<usize> {
+    #[cfg(test)]
+    SORT_WORK.with(|w| w.set(w.get() + children.len()));
+    let mut v = children.to_vec();
+    v.sort_unstable_by_key(|&c| sizes[c]);
+    v
 }
 
 /// Order a parent's children for the merge-biased postorder.
@@ -509,5 +541,71 @@ mod tests {
         let (order, inv) = postorder(&etree);
         assert!(order.is_empty());
         assert!(inv.is_empty());
+    }
+
+    /// Build a star elimination tree: nodes `0..n-1` are leaves whose only
+    /// parent is the last node `n-1` (the root). This is the etree of an
+    /// arrow/bordered matrix whose dense border sits at the *trailing*
+    /// index (`A[n-1, i] != 0` for every `i < n-1`) — exactly the shape
+    /// AMD produces for the dense-border KKT rows in this codebase's tests.
+    fn star_etree(n: usize) -> EliminationTree {
+        // Lower-triangle: diagonal + a dense trailing column n-1.
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i); // diagonal
+            if i < n - 1 {
+                rows.push(n - 1);
+                cols.push(i); // (row n-1, col i): border in the lower triangle
+            }
+        }
+        let vals = vec![1.0; rows.len()];
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let pat = m.symmetric_pattern();
+        EliminationTree::from_pattern(&pat)
+    }
+
+    /// S1 (dev/research/repo-review-2026-06-09.md): the previous `postorder`
+    /// re-cloned and re-sorted `children[node]` on every stack visit, so a
+    /// node with `c` children (on top of the stack `c+1` times) paid
+    /// O(c²·log c). On a star etree (one root with `n-1` children) that is
+    /// O(n²·log n) — quadratic — in the default symbolic pipeline.
+    ///
+    /// Reproduction is deterministic via the `SORT_WORK` counter (total
+    /// child-list elements materialized across all per-node sorts), so no
+    /// flaky wall-clock timing is needed. Pre-fix the root's `(n-1)`-element
+    /// child list is materialized `n` times → `~n²` elements. Post-fix it is
+    /// materialized exactly once → `~n` elements. The assertion `work ≤ 4·n`
+    /// fails on the quadratic version and passes on the linear fix.
+    #[test]
+    fn test_postorder_star_sort_work_is_linear() {
+        let n = 2000;
+        let etree = star_etree(n);
+
+        // Sanity: this really is a star (root n-1, all others its children).
+        assert_eq!(etree.children()[n - 1].len(), n - 1);
+        assert_eq!(etree.roots(), vec![n - 1]);
+
+        SORT_WORK.with(|w| w.set(0));
+        let (order, inv) = postorder(&etree);
+        let work = SORT_WORK.with(|w| w.get());
+
+        // Output correctness still holds (every child before its parent).
+        assert_eq!(order.len(), n);
+        for j in 0..n {
+            if let Some(p) = etree.parent[j] {
+                assert!(inv[j] < inv[p], "child {j} must precede parent {p}");
+            }
+        }
+
+        // The fix: child-sorting work is linear, not quadratic. The old
+        // sort-on-every-visit code materializes ~n² elements here.
+        assert!(
+            work <= 4 * n,
+            "postorder sort work {work} exceeds the linear bound {} (n={n}); \
+             the O(n²·log n) sort-on-every-stack-visit regression is back",
+            4 * n
+        );
     }
 }

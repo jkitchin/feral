@@ -25,7 +25,7 @@
 //! proofs, and test-oracle construction.
 
 use feral_ordering_core::{CscPattern, OrderingError};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// One entry in the reduction operation stack.
 ///
@@ -304,8 +304,25 @@ fn apply_degree2(g: &mut MutAdj, ops: &mut Vec<ReductionOp>, allow_nonsimplicial
     // single branch, or wholly-enclosed cycle). We skip them for the
     // rest of this pass so subsequent seeds can find other chains.
     let mut skip = vec![false; n];
+    // O17 (repo-review-2026-06-09): the seed scan below restarts from index 0
+    // on every outer iteration, so a graph that is one long degree-2 chain
+    // costs O(n^2) in seed-scanning alone. A non-rewinding cursor is NOT a safe
+    // drop-in replacement: the simplicial collapse below (lines ~399-405) adds
+    // no compensating (u, w) edge when `u ~ w` already, so removing the chain
+    // interior drops each branch endpoint by one degree — a degree-3 endpoint
+    // can become a fresh degree-2 seed at an index *below* the current `seed`.
+    // The from-0 scan always picks the lowest-index eligible vertex, so it
+    // collapses that endpoint within this same call; a cursor advanced past it
+    // would instead defer the collapse to the next fixed-point round (the
+    // `reduce_graph` loop), reordering the emitted `Degree2Path` ops and thus
+    // changing the reconstructed permutation (`expand_permutation` replays the
+    // op stack in reverse). The order-preserving O(n log n) fix is a min-index
+    // worklist (a binary heap keyed by vertex index, with a lazy
+    // alive/!skip/degree==2 staleness check on pop), not a cursor. Left as-is
+    // for now: Rule 2 is test-only — the driver runs
+    // `ReduceOptions::conservative()` (Rule 1 only), so this cost is latent.
     'outer: loop {
-        // Find any unskipped degree-2 vertex.
+        // Find any unskipped degree-2 vertex (lowest index first).
         let start = (0..n).find(|&v| g.alive[v] && !skip[v] && g.degree(v) == 2);
         let Some(seed) = start else { break };
 
@@ -422,7 +439,11 @@ fn apply_twins(g: &mut MutAdj, ops: &mut Vec<ReductionOp>) -> usize {
     let n = g.adj.len();
 
     // Closed twins first: group by closed signature, merge within group.
-    let mut closed_groups: HashMap<Vec<usize>, Vec<usize>> = HashMap::new();
+    // `BTreeMap` (not `HashMap`) so the group iteration order — and therefore
+    // the emitted `Twin` op-stack order — is sorted by signature and identical
+    // run-to-run; a `HashMap` here iterates in `RandomState`-seed order and
+    // breaks the crate's determinism contract (O2, repo-review-2026-06-09.md).
+    let mut closed_groups: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     for v in 0..n {
         if !g.alive[v] {
             continue;
@@ -462,8 +483,9 @@ fn apply_twins(g: &mut MutAdj, ops: &mut Vec<ReductionOp>) -> usize {
     }
 
     // Open twins: group by open signature, then within group find
-    // pairs that are mutually non-adjacent.
-    let mut open_groups: HashMap<Vec<usize>, Vec<usize>> = HashMap::new();
+    // pairs that are mutually non-adjacent. `BTreeMap` for the same
+    // determinism reason as `closed_groups` above (O2).
+    let mut open_groups: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     for v in 0..n {
         if !g.alive[v] {
             continue;
@@ -678,6 +700,9 @@ pub(crate) fn expand_permutation(
     // Implementation: walk the op stack in forward order and append
     // eliminated vertices to their group. Each group's vertex list
     // is then the desired pre-anchor elimination sequence.
+    // `HashMap` is safe here (unlike `closed_groups`/`open_groups`, O2): this
+    // map is only consumed via keyed `group.remove(&old)` in the deterministic
+    // `reduced_perm` order below — it is never iterated for output order.
     let mut group: HashMap<usize, Vec<usize>> = HashMap::new();
     for op in &reduced.ops {
         match op {
@@ -805,6 +830,55 @@ mod tests {
             seen[v as usize] = true;
         }
         true
+    }
+
+    // ---- Rule 3: twin-merge determinism (O2) ----
+
+    /// O2 (repo-review-2026-06-09.md): twin reduction grouped vertices in
+    /// `HashMap`s (`closed_groups`, `open_groups`) and iterated them
+    /// directly, so the order twin groups were merged — and therefore the
+    /// `ReductionOp::Twin` stack order — varied run-to-run with the
+    /// per-instance `RandomState` seed, violating the crate's determinism
+    /// contract. With independent twin groups, the map iteration order is
+    /// the only thing deciding the op order.
+    ///
+    /// Reproduction: 12 disjoint triangles. Each triangle
+    /// `{3i, 3i+1, 3i+2}` is a closed-twin group (all three share the
+    /// closed signature), so `apply_twins` emits two `Twin` ops per
+    /// triangle. The merge *result* is order-independent, but the op-stack
+    /// *order* is whatever order the group map iterates. Running
+    /// `apply_twins` on fresh graphs must produce byte-identical ops every
+    /// time. Pre-fix (`HashMap`) the orders diverge across runs; post-fix
+    /// (`BTreeMap`) they are sorted by signature and identical. Oracle:
+    /// determinism — same input must give the same output.
+    #[test]
+    fn apply_twins_op_order_is_deterministic() {
+        const K: usize = 12;
+        let n = 3 * K;
+        let mut edges = Vec::new();
+        for i in 0..K {
+            let (a, b, c) = (3 * i, 3 * i + 1, 3 * i + 2);
+            edges.push((a, b));
+            edges.push((b, c));
+            edges.push((a, c));
+        }
+        let (cp, ri) = make_pattern(n, &edges);
+        let pat = CscPattern::new(n, &cp, &ri).expect("valid");
+
+        let run = || {
+            let mut g = MutAdj::from_pattern(&pat).expect("valid");
+            let mut ops = Vec::new();
+            apply_twins(&mut g, &mut ops);
+            ops
+        };
+
+        let baseline = run();
+        // Sanity: the reduction actually fired (two Twin dups per triangle).
+        assert_eq!(baseline.len(), 2 * K, "each triangle merges two dups");
+        // Determinism contract: every independent run is byte-identical.
+        for _ in 0..32 {
+            assert_eq!(run(), baseline, "twin op order must be deterministic");
+        }
     }
 
     // ---- Rule 1: degree-1 cascading ----

@@ -499,3 +499,107 @@ fn test_kkt_5x2() {
     let x = solve(&factors, &rhs).ok().expect("solve failed");
     verify_solve(&mat, &x, &rhs, 1e-4);
 }
+
+// =======================================================================
+// Test 17: D1 regression — ForceAccept strict-zero 1×1 pivot must not
+// corrupt the following column.
+// =======================================================================
+//
+// Finding D1 (dev/research/repo-review-2026-06-09.md): in the legacy
+// `factor()` path, a strict-zero pivot routed through
+// `ZeroPivotAction::ForceAccept` zeros its own L column but runs no
+// rank-1 update, then returned a *fabricated* fused next-column argmax
+// of `(0.0, k+2)`. The caller stored that, so the next iteration saw
+// `gamma0 == 0.0`, took the "zero off-diagonal column" fast path, and
+// silently discarded the real off-diagonals of column k+1 — corrupting
+// L and the factorization (and risking wrong inertia, the project's hard
+// contract).
+//
+// This 7×7 matrix (zero diagonal, found by random search during the PR
+// #83 finding verification) drives the strict-zero ForceAccept 1×1
+// branch at an interior column k. Because the zeroed pivot is a genuine
+// zero Schur column, a *correct* factorization reconstructs
+// `D_eq·A·D_eq` exactly via `P·L·D·Lᵀ·Pᵀ`; the bug produces a
+// full-magnitude reconstruction error (~1.5) in the column after the
+// zeroed pivot. The reconstruction identity is the external oracle —
+// it does not depend on the implementation under test.
+#[test]
+fn test_d1_force_accept_does_not_corrupt_next_column() {
+    let mat = sym_from_dense(&[
+        &[0.0],
+        &[0.0, 0.0],
+        &[0.0, 0.0, 0.0],
+        &[-0.852, 0.0, 0.0, 0.0],
+        &[-0.758, -0.599, -0.877, -0.858, 0.0],
+        &[-0.500, 0.0, 0.0, -0.967, -0.846, 0.0],
+        &[-0.417, 0.0, 0.0, -0.431, -0.360, 0.0, 0.0],
+    ]);
+
+    let params = BunchKaufmanParams {
+        on_zero_pivot: ZeroPivotAction::ForceAccept,
+        ..BunchKaufmanParams::default()
+    };
+
+    let (factors, inertia) = factor(&mat, &params).ok().expect("factor failed");
+
+    // Inertia must still sum to n (no count leaks from the corrupted column).
+    assert_eq!(inertia.total(), 7, "inertia must sum to n=7");
+
+    // The load-bearing assertion: the factorization must reconstruct the
+    // (equilibrated) matrix `D_eq·A·D_eq` via `P·L·D·Lᵀ·Pᵀ`. All matrix
+    // entries are O(1), so an *absolute* tolerance cleanly separates
+    // rounding (~1e-13) from the D1 corruption (~1.5 at position (6,5)).
+    // (The relative-tolerance `verify_factorization` is unusable here: the
+    // matrix has many exact-zero entries, against which 1e-16 rounding
+    // reads as a 0.1 relative error.)
+    let n = factors.n;
+    let mut d_full = vec![0.0; n * n];
+    let mut k = 0;
+    while k < n {
+        if k + 1 < n && factors.d_subdiag[k] != 0.0 {
+            d_full[k * n + k] = factors.d_diag[k];
+            d_full[k * n + (k + 1)] = factors.d_subdiag[k];
+            d_full[(k + 1) * n + k] = factors.d_subdiag[k];
+            d_full[(k + 1) * n + (k + 1)] = factors.d_diag[k + 1];
+            k += 2;
+        } else {
+            d_full[k * n + k] = factors.d_diag[k];
+            k += 1;
+        }
+    }
+    let mut ld = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut sum = 0.0;
+            for p in 0..n {
+                sum += factors.l[p * n + i] * d_full[p * n + j];
+            }
+            ld[j * n + i] = sum;
+        }
+    }
+    let mut ldlt = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut sum = 0.0;
+            for p in 0..n {
+                sum += ld[p * n + i] * factors.l[p * n + j];
+            }
+            ldlt[j * n + i] = sum;
+        }
+    }
+    let mut max_err = 0.0f64;
+    for i in 0..n {
+        for j in 0..=i {
+            let pi = factors.perm[i];
+            let pj = factors.perm[j];
+            let expected = factors.d_eq[pi] * mat.get(pi, pj) * factors.d_eq[pj];
+            let got = ldlt[j * n + i];
+            max_err = max_err.max((expected - got).abs());
+        }
+    }
+    assert!(
+        max_err < 1e-9,
+        "reconstruction error {max_err} exceeds 1e-9 — D1 corruption of the \
+         column following a ForceAccept'd strict-zero pivot"
+    );
+}

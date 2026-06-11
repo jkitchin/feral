@@ -404,6 +404,16 @@ pub fn finalize_step(
                 let e = ws.iw[p] as usize;
                 let we = ws.w[e];
                 if we != 0 {
+                    // Invariant (O4): a live element in the non-aggressive pass
+                    // always has `we >= ws.wflg`, so the difference is
+                    // non-negative. Guard the unchecked `as usize` cast — a
+                    // future regression that broke the invariant would
+                    // sign-extend a negative difference to ~2^64 here.
+                    debug_assert!(
+                        we >= ws.wflg,
+                        "stale mark: w[e]={we} < wflg={} would wrap as usize",
+                        ws.wflg
+                    );
                     let dext = (we - ws.wflg) as usize;
                     deg += dext;
                     ws.iw[pn] = e as i32;
@@ -625,7 +635,7 @@ pub fn finalize_step(
 /// free function here so `algo.rs` does not need a back-edge to
 /// `metric.rs` (which itself imports from `algo`). Inlined.
 #[inline(always)]
-fn amf_bucket_of(score: i32, n: usize) -> usize {
+fn amf_bucket_of(score: i64, n: usize) -> usize {
     if score <= 0 {
         return 0;
     }
@@ -636,6 +646,34 @@ fn amf_bucket_of(score: i32, n: usize) -> usize {
     let pas = (n / 8).max(1);
     let nbbuck = 2 * n;
     ((s - n) / pas + n).min(nbbuck)
+}
+
+/// AMF working-fill *surface contribution* of an element with current
+/// external degree `dext` and total degree `degree`:
+/// `dext * (2*degree - dext - 1)` (Amestoy 1999 thesis; MUMPS
+/// `ana_orderings.F:4810`).
+///
+/// Computed in `i64`: both factors are `O(n)`, so the product reaches
+/// ~`n^2` and overflows `i32` for `n` ≳ 46k (`i32::MAX` is
+/// 2_147_483_647 and `46342 * 46341 = 2_147_534_622` already exceeds
+/// it). In release the old `i32` form wrapped silently, feeding garbage
+/// into the RMF pivot score; in debug it panicked. The value is later
+/// consumed as `f64`, so widening loses no precision (O1,
+/// `dev/research/repo-review-2026-06-09.md`).
+#[inline(always)]
+fn amf_wf_surface(dext: i64, degree: i64) -> i64 {
+    dext * (2 * degree - dext - 1)
+}
+
+/// AMF per-supervariable working-fill accumulation
+/// `wf4 + 2 * nvi * wf3` (Amestoy 1999 eq. for the B3 contribution;
+/// MUMPS `ana_orderings.F:4810`). Computed in `i64` for the same
+/// `O(n^2)` overflow reason as [`amf_wf_surface`]: `nvi` (supervariable
+/// size) and `wf3` (sum of neighbour supervariable sizes) are each
+/// `O(n)` (O1, `dev/research/repo-review-2026-06-09.md`).
+#[inline(always)]
+fn amf_wf_combine(wf4: i64, nvi: i64, wf3: i64) -> i64 {
+    wf4 + 2 * nvi * wf3
 }
 
 /// Saturation cap used when quantizing the AMF RMF score into `i32`.
@@ -914,6 +952,28 @@ pub fn finalize_step_amf(
                     we -= nvi;
                 } else if we != 0 {
                     we = ws.degree[e] + wnvi;
+                    // O21 (repo-review-2026-06-09): `wf[e] = 0` is the
+                    // lazy-cache "surface not yet computed this iteration"
+                    // sentinel for Pass-2 below. It is intentionally NOT
+                    // distinct from a genuine surface contribution of 0:
+                    // `amf_wf_surface(dext, deg) = dext*(2*deg - dext - 1)`
+                    // is 0 for a live element whenever `dext == 2*deg(e)-1`
+                    // (e.g. dext=1, deg=1). When that happens `wf[e]` stays
+                    // 0, so the Pass-2 `if wf[e] == 0` check re-treats it as
+                    // uncached and recomputes the surface for every member
+                    // that touches `e`. This is benign: `amf_wf_surface` is
+                    // pure in (dext, degree[e]) — both stable across one
+                    // Pass-2 — so the recompute yields the same 0 and the
+                    // accumulated `wf4` (hence the RMF score and the
+                    // permutation) is unchanged; only a few integer multiplies
+                    // are redundant. A distinguishing sentinel (e.g. -1) was
+                    // rejected: `wf` is reused for variable scores
+                    // (supervariable-merge `max`, re-insertion bucket
+                    // quantization), so -1 would have to be proven never to
+                    // leak into either across the AMD and AMF paths — added
+                    // correctness risk for a handful of saved ops.
+                    // "Correctness before performance." See
+                    // dev/tried-and-rejected.md (O21).
                     ws.wf[e] = 0;
                 }
                 ws.w[e] = we;
@@ -930,8 +990,8 @@ pub fn finalize_step_amf(
         let mut pn = p1;
         let mut deg: usize = 0;
         let mut hash: usize = 0;
-        let mut wf3: i32 = 0;
-        let mut wf4: i32 = 0;
+        let mut wf3: i64 = 0;
+        let mut wf4: i64 = 0;
         let nvi = -ws.nv[i];
 
         // Element sub-pass.
@@ -942,10 +1002,13 @@ pub fn finalize_step_amf(
                 if we != 0 {
                     let dext = we - ws.wflg;
                     if dext > 0 {
+                        // `wf[e] == 0` means "uncached this iter" OR a genuine
+                        // 0 surface (O21) — recompute on the latter is benign
+                        // (same value). See the Pass-1 reset comment above.
                         if ws.wf[e] == 0 {
                             // First touch this iter: cache the surface
                             // contribution dext*(2*deg(e) - dext - 1).
-                            ws.wf[e] = dext * (2 * ws.degree[e] - dext - 1);
+                            ws.wf[e] = amf_wf_surface(dext as i64, ws.degree[e] as i64);
                         }
                         wf4 += ws.wf[e];
                         deg += dext as usize;
@@ -965,8 +1028,20 @@ pub fn finalize_step_amf(
                 let we = ws.w[e];
                 if we != 0 {
                     let dext = we - ws.wflg;
+                    // Invariant (O4): non-aggressive pass keeps `we >= ws.wflg`,
+                    // so `dext >= 0`. Guard the `dext as usize` cast below
+                    // against a future regression wrapping a negative dext to
+                    // ~2^64.
+                    debug_assert!(
+                        dext >= 0,
+                        "stale mark: w[e]={we} < wflg={} would wrap as usize",
+                        ws.wflg
+                    );
+                    // `wf[e] == 0` means "uncached this iter" OR a genuine 0
+                    // surface (O21) — recompute on the latter is benign (same
+                    // value). See the Pass-1 reset comment above.
                     if ws.wf[e] == 0 {
-                        ws.wf[e] = dext * (2 * ws.degree[e] - dext - 1);
+                        ws.wf[e] = amf_wf_surface(dext as i64, ws.degree[e] as i64);
                     }
                     wf4 += ws.wf[e];
                     deg += dext as usize;
@@ -986,7 +1061,7 @@ pub fn finalize_step_amf(
             let nvj = ws.nv[j];
             if nvj > 0 {
                 deg += nvj as usize;
-                wf3 += nvj;
+                wf3 += nvj as i64;
                 ws.iw[pn] = j as i32;
                 pn += 1;
                 hash = hash.wrapping_add(j);
@@ -1017,7 +1092,7 @@ pub fn finalize_step_amf(
             }
             // wf[i] = wf4 + 2 * nvi * wf3 (Amestoy 1999 eq. for B3
             // contribution; see ana_orderings.F:4810).
-            ws.wf[i] = wf4 + 2 * nvi * wf3;
+            ws.wf[i] = amf_wf_combine(wf4, nvi as i64, wf3);
 
             // Swap-dance to put `me` at the head of i's element list.
             if p1 != pn {
@@ -1154,7 +1229,7 @@ pub fn finalize_step_amf(
             } else {
                 AMF_DUMMY_I32
             };
-            ws.wf[i] = qscore.max(1);
+            ws.wf[i] = qscore.max(1) as i64;
 
             let d = amf_bucket_of(ws.wf[i], n);
             let inext = ws.head[d];
@@ -1494,6 +1569,31 @@ mod tests {
     fn ws_for<'a>(n: usize, cp: &'a [i32], ri: &'a [i32]) -> Workspace {
         let p = CscPattern::new(n, cp, ri).unwrap();
         Workspace::new(&p, &WorkspaceOptions::default()).unwrap()
+    }
+
+    /// O1 (repo-review-2026-06-09.md): the AMF working-fill kernels must
+    /// be computed in `i64`. Both factors are `O(n)`, so for `n` ≳ 46k
+    /// the products exceed `i32::MAX` (2_147_483_647) and wrap silently
+    /// in release / panic in debug, feeding garbage into the RMF pivot
+    /// score. Oracle: the exact hand-computed `i64` value of the
+    /// Amestoy 1999 formulas (`ana_orderings.F:4810`).
+    #[test]
+    fn amf_wf_kernels_do_not_overflow_i32() {
+        // Surface contribution dext*(2*degree - dext - 1).
+        // dext = degree = 46342  ->  46342 * 46341 = 2_147_534_622,
+        // which is 50_975 above i32::MAX. Hand-computed external oracle.
+        assert!(2_147_534_622_i64 > i32::MAX as i64);
+        assert_eq!(amf_wf_surface(46342, 46342), 2_147_534_622_i64);
+        // Small-value sanity: dext=3, degree=4 -> 3*(8-3-1) = 12.
+        assert_eq!(amf_wf_surface(3, 4), 12);
+
+        // Combine wf4 + 2*nvi*wf3.
+        // nvi = wf3 = 46342, wf4 = 0  ->  2 * 46342 * 46342
+        // = 4_295_161_928, which exceeds both i32::MAX and u32::MAX.
+        assert!(4_295_161_928_i64 > u32::MAX as i64);
+        assert_eq!(amf_wf_combine(0, 46342, 46342), 4_295_161_928_i64);
+        // Small-value sanity: 5 + 2*3*4 = 29.
+        assert_eq!(amf_wf_combine(5, 3, 4), 29);
     }
 
     #[test]

@@ -1,9 +1,12 @@
 //! Multilevel coarsening.
 //!
-//! Sorted Heavy-Edge Matching (SHEM): iterate vertices in a seeded
-//! random permutation and, for each unmatched vertex, pair it with
-//! its unmatched neighbor of maximum edge weight (ties broken by
-//! lower vertex id). If the reduction ratio falls below the
+//! Sorted Heavy-Edge Matching (SHEM): iterate vertices in ascending
+//! degree order (ties broken by a seeded random permutation) and, for
+//! each unmatched vertex, pair it with its unmatched neighbor of
+//! maximum edge weight (ties broken by lower vertex id). Visiting
+//! low-degree vertices first — the "sorted" in SHEM — keeps a leaf
+//! from being stranded when its sole neighbor is claimed by a
+//! higher-degree vertex. If the reduction ratio falls below the
 //! configured threshold (default 0.85 per METIS 5.2.0), a simple
 //! 2-hop fallback pairs unmatched vertices that share a common
 //! neighbor. This keeps power-law-degree KKT graphs from stalling
@@ -57,8 +60,19 @@ pub fn coarsen_level(
     let mut cmap: Vec<i32> = vec![-1; n];
 
     // --- Pass 1: SHEM ---
+    // Sorted Heavy-Edge Matching: visit vertices in ascending degree
+    // order, breaking ties by the seeded random permutation. METIS
+    // Match_SHEM bucket-sorts the random permutation by degree so that
+    // low-degree vertices — which have the fewest matching options —
+    // are matched before their few neighbors are claimed by a
+    // higher-degree vertex. Plain shuffle order (HEM) strands those
+    // leaves as self-matches, inflating the coarse graph on the
+    // irregular / power-law inputs SHEM is meant for. `sort_by_key` is
+    // stable, so the random shuffle survives as the within-degree
+    // tie-break, preserving seed determinism. [O7]
     let mut order: Vec<i32> = (0..fine.nvtxs).collect();
     rng.shuffle(&mut order);
+    order.sort_by_key(|&v| fine.xadj[v as usize + 1] - fine.xadj[v as usize]);
 
     let mut cnvtxs: i32 = 0;
     for &v in &order {
@@ -128,9 +142,13 @@ pub fn coarsen(
         let level = coarsen_level(cur, rng, opts.two_hop_ratio_threshold, counters);
         let new_nvtxs = level.graph.nvtxs;
         if new_nvtxs == 0 || new_nvtxs as f64 > 0.95 * prev_nvtxs as f64 {
-            // Stalled — further coarsening won't help.
-            if !levels.is_empty() {
-                // Accept the last level only if it actually shrank.
+            // Stalled: this level made <5% progress, so stop. Keep it
+            // only if it actually shrank, independent of whether earlier
+            // levels exist. The old `!levels.is_empty()` gate both
+            // discarded a *first* level that genuinely shrank (returning
+            // an empty hierarchy) and pushed a zero-progress later level
+            // (breaking the strictly-decreasing-nvtxs invariant). [O8]
+            if new_nvtxs > 0 && new_nvtxs < prev_nvtxs {
                 levels.push(level);
             }
             break;
@@ -146,11 +164,6 @@ pub fn coarsen(
 /// with another self-matched vertex that shares a common neighbor.
 /// Rebuilds `cmap` and returns the new `cnvtxs`.
 fn two_hop_pass(fine: &Graph, match_: &mut [i32], cmap: &mut [i32]) -> i32 {
-    let n = fine.nvtxs as usize;
-    // `mark[u]` = unmatched vertex seen via a previous 2-hop candidate.
-    // Re-used per outer iteration by resetting after each v.
-    let mut mark: Vec<i32> = vec![-1; n];
-
     for v in 0..fine.nvtxs {
         let vu = v as usize;
         if match_[vu] != v {
@@ -180,9 +193,6 @@ fn two_hop_pass(fine: &Graph, match_: &mut [i32], cmap: &mut [i32]) -> i32 {
             match_[vu] = partner;
             match_[partner as usize] = v;
         }
-        // Leave mark untouched — it's not reset per outer here, but
-        // no state is carried across iterations.
-        let _ = &mut mark; // silence unused lint across edits
     }
 
     // Rebuild cmap contiguous from the (possibly updated) match_.
@@ -388,6 +398,43 @@ mod tests {
     }
 
     #[test]
+    fn shem_matches_low_degree_before_hub() {
+        // Chorded path 0-1-2-3 plus the extra edge 0-2. Degrees:
+        // 0:2, 1:2, 2:3 (hub), 3:1 (leaf). Plain heavy-edge matching
+        // in shuffle order (seed 1 visits the hub 2 first) pairs
+        // 2<->0, stranding both the leaf 3 and vertex 1 as
+        // self-matches -> 3 coarse vertices. Sorted heavy-edge
+        // matching (SHEM) visits the degree-1 leaf 3 first, pairing
+        // 3<->2, then 0<->1 -> 2 coarse vertices. Ascending-degree
+        // visitation is the defining property of METIS Match_SHEM
+        // (Karypis & Kumar Sec. 3.1); plain shuffle order is HEM,
+        // not the advertised SHEM. [O7]
+        let t = [
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (0, 2),
+        ];
+        let (cp, ri) = csc_from_triples(4, &t);
+        let pat = CscPattern::new(4, &cp, &ri).unwrap();
+        let g = Graph::from_csc_pattern(&pat).unwrap();
+        let mut rng = SplitMix::new(1);
+        let mut ctr = CoarsenCounters::default();
+        let cg = coarsen_level(&g, &mut rng, 0.85, &mut ctr);
+        assert_valid_coarse(&g, &cg);
+        assert_eq!(
+            cg.graph.nvtxs, 2,
+            "SHEM must match the degree-1 leaf with the hub and pair \
+             the remaining two vertices for 2 coarse vertices; got {}",
+            cg.graph.nvtxs
+        );
+    }
+
+    #[test]
     fn coarsen_tridiag_10() {
         let g = tridiag(10);
         let mut rng = SplitMix::new(1);
@@ -439,6 +486,39 @@ mod tests {
             prev <= opts.coarsen_floor as i32
                 || levels.last().expect("non-empty").graph.nvtxs < g.nvtxs
         );
+    }
+
+    #[test]
+    fn stall_keeps_first_level_that_shrank() {
+        // Star K_{1,24}: center 0 with 24 degree-1 leaves. SHEM matches
+        // exactly one leaf to the center, leaving 23 self-matched
+        // leaves, so the first level coarsens 25 -> 24 -- a real shrink
+        // that still trips the <5% "stall" branch. The two-hop fallback
+        // is disabled (threshold > 1) so nothing rescues the leaves and
+        // the stall branch is the only exit. The level genuinely shrank
+        // and must be kept; the old code discarded it because `levels`
+        // was still empty, returning an empty hierarchy. [O8]
+        let mut t: Vec<(usize, usize)> = vec![(0, 0)];
+        for l in 1..=24usize {
+            t.push((l, l));
+            t.push((0, l));
+        }
+        let (cp, ri) = csc_from_triples(25, &t);
+        let pat = CscPattern::new(25, &cp, &ri).unwrap();
+        let g = Graph::from_csc_pattern(&pat).unwrap();
+        let opts = MetisOptions {
+            coarsen_floor: 4,
+            two_hop_ratio_threshold: 10.0,
+            ..Default::default()
+        };
+        let mut rng = SplitMix::new(1);
+        let mut ctr = CoarsenCounters::default();
+        let levels = coarsen(&g, &opts, &mut rng, &mut ctr);
+        assert!(
+            !levels.is_empty(),
+            "a first level that shrank 25->24 must be kept, not discarded"
+        );
+        assert_eq!(levels.last().expect("non-empty").graph.nvtxs, 24);
     }
 
     #[test]

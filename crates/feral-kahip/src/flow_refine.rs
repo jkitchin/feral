@@ -222,15 +222,20 @@ pub(crate) fn flow_refine_bisection(
     ];
 
     // Score candidates: pick the one with lower cut weight that
-    // satisfies the balance constraint.
-    let n = graph.n;
-    let half_up = n.div_ceil(2);
-    let slack = ((1.0 + max_imbalance) * half_up as f64).floor() as usize;
+    // satisfies the balance constraint. Balance is on vertex *weight*,
+    // not count: on a coarse multilevel graph a vertex stands for a
+    // supervertex whose mass ≫ 1, so a count-balanced min-cut can be
+    // badly weight-imbalanced and hand the finer level's FM a violating
+    // start (finding O16). The constraint mirrors KaHIP / Sanders &
+    // Schulz 2011: max(weight(part0), weight(part1)) ≤ (1+ε)·⌈W/2⌉.
+    let total_w = graph.total_weight();
+    let half_w = total_w.div_euclid(2) + (total_w % 2); // ⌈W/2⌉
+    let slack_w = ((1.0 + max_imbalance) * half_w as f64).floor() as i64;
     let mut best: Option<(i64, &Vec<u8>)> = None;
     for cand in candidates.iter() {
-        let (cnt0, cnt1) = count_parts(cand);
+        let (w0, w1) = graph.part_weights(cand);
         let cw = graph.cut_weight(cand);
-        if cnt0.max(cnt1) > slack {
+        if w0.max(w1) > slack_w {
             continue;
         }
         if cw >= old_cut {
@@ -277,6 +282,7 @@ fn build_candidate(
     out
 }
 
+#[cfg(test)]
 fn count_parts(w: &[u8]) -> (usize, usize) {
     let mut c0 = 0usize;
     let mut c1 = 0usize;
@@ -321,6 +327,7 @@ mod tests {
             xadj,
             adjncy,
             eweight,
+            vweight: vec![1; n],
         }
     }
 
@@ -483,6 +490,74 @@ mod tests {
             "K3 must not worsen: before={} after={}",
             before,
             after
+        );
+    }
+
+    #[test]
+    fn respects_vertex_weight_balance_on_weighted_graph() {
+        // O16 reproduction. 7×7 grid with a deliberately bad diagonal
+        // bisection (lower-left triangle r+c<7 in part 0). Flow
+        // refinement strictly improves the cut by pulling a handful of
+        // part-1 vertices — including vertex 13 — into part 0, leaving
+        // counts 33|16. With ε = 0.4 the COUNT slack is ⌊1.4·25⌋ = 35,
+        // so a count-based balance check accepts the move.
+        //
+        // Vertex weights are NON-UNIT, as on a coarse multilevel graph:
+        // vertex 13 (which the min-cut moves *into* part 0) carries
+        // mass 20, every other vertex mass 1. Vertex weights never enter
+        // the max-flow (it is driven by edge weights), so the moved set
+        // is identical to the unit-weight case. Total weight 68,
+        // ⌈68/2⌉ = 34, so the WEIGHT slack is ⌊1.4·34⌋ = 47.
+        //
+        //   start  part0 = {r+c<7}, weight 28 | part1 weight 40  → ≤47 OK
+        //   refined part0 weight 52 (32 unit + vertex-13's 20) | 16 → 52 > 47
+        //
+        // Oracle: the KaHIP balance constraint (Sanders & Schulz 2011)
+        // is on vertex *weight*, not count:
+        //   max(weight(part0), weight(part1)) ≤ (1+ε)·⌈total_weight/2⌉.
+        // A weight-aware refiner must never leave `where_` in a state
+        // that violates this; a count-based one leaves 52|16 here.
+        let g = {
+            let mut g = grid(7);
+            g.vweight[13] = 20;
+            g
+        };
+        let mut w = vec![0u8; 49];
+        for r in 0..7 {
+            for c in 0..7 {
+                w[r * 7 + c] = if r + c < 7 { 0 } else { 1 };
+            }
+        }
+
+        let eps = 0.4;
+        let total_w = g.total_weight();
+        let half_w = total_w.div_euclid(2) + (total_w % 2); // ⌈total/2⌉
+        let slack_w = ((1.0 + eps) * half_w as f64).floor() as i64;
+
+        // Sanity: the starting partition already respects the weight
+        // balance, so the only way to violate the invariant below is to
+        // accept a weight-imbalanced candidate.
+        let (sw0, sw1) = g.part_weights(&w);
+        assert!(
+            sw0.max(sw1) <= slack_w,
+            "start must be weight-balanced: {}|{} slack {}",
+            sw0,
+            sw1,
+            slack_w
+        );
+
+        flow_refine_bisection(&g, &mut w, 2, eps);
+
+        // The invariant: whatever flow_refine left behind must respect
+        // the *weight* balance constraint.
+        let (w0, w1) = g.part_weights(&w);
+        assert!(
+            w0.max(w1) <= slack_w,
+            "weight balance violated: {}|{} exceeds slack {} (cut={})",
+            w0,
+            w1,
+            slack_w,
+            g.cut_weight(&w)
         );
     }
 

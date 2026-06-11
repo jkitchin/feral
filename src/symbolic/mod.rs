@@ -631,9 +631,26 @@ fn symbolic_factorize_race(
     snode_params: &SupernodeParams,
 ) -> Result<SymbolicFactorization, FeralError> {
     let mut best: Option<SymbolicFactorization> = None;
+    // S7: when a symbolic profiler is attached, give each candidate its
+    // own fresh profiler instead of letting all RACE_CANDIDATES append
+    // into the caller's shared one. Sharing accumulated one full stage
+    // list per candidate (~4x) against a single candidate's `total_us`,
+    // tripping the "stage sum exceeds total" warning and inflating every
+    // pct_of_total. We keep the winning candidate's profiler and copy it
+    // into the caller's shared profiler at the end, so the report
+    // reflects exactly one ordering run.
+    let mut best_prof: Option<SymbolicProfiler> = None;
     let mut last_err: Option<FeralError> = None;
     for &cand in RACE_CANDIDATES {
-        match symbolic_factorize_with_method(matrix, snode_params, cand) {
+        let cand_prof = snode_params
+            .symbolic_profiler
+            .as_ref()
+            .map(|_| std::sync::Arc::new(std::sync::Mutex::new(SymbolicProfiler::new())));
+        let cand_params = SupernodeParams {
+            symbolic_profiler: cand_prof.clone(),
+            ..snode_params.clone()
+        };
+        match symbolic_factorize_with_method(matrix, &cand_params, cand) {
             Ok(sym) => {
                 let is_better = best
                     .as_ref()
@@ -641,11 +658,19 @@ fn symbolic_factorize_race(
                     .unwrap_or(true);
                 if is_better {
                     best = Some(sym);
+                    best_prof = cand_prof.and_then(|a| a.lock().ok().map(|g| g.clone()));
                 }
             }
             Err(e) => {
                 last_err = Some(e);
             }
+        }
+    }
+    // Copy the winning candidate's stage timings into the caller's shared
+    // profiler so `report()` reflects one run, not all four concatenated.
+    if let (Some(shared), Some(winner)) = (snode_params.symbolic_profiler.as_ref(), best_prof) {
+        if let Ok(mut p) = shared.lock() {
+            *p = winner;
         }
     }
     best.ok_or_else(|| {
@@ -1538,6 +1563,67 @@ mod tests {
     }
 
     #[test]
+    fn autorace_does_not_quadruple_symbolic_profiler_stages() {
+        // S7 (repo-review-2026-06-09.md): AutoRace runs every
+        // RACE_CANDIDATE against the *same* profiler Arc. Because
+        // `SymbolicProfiler::record` appends and `set_total` overwrites,
+        // the shared profiler ends with one full stage list per candidate
+        // (~4x) measured against a single candidate's total. That yields
+        // duplicate stage names and a spurious "stage sum exceeds total"
+        // warning, and percentages that sum past 100%. The fix isolates
+        // each candidate's profiler and copies only the winner's run into
+        // the caller's shared profiler.
+        let n = 16;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for j in 0..n {
+            rows.push(j);
+            cols.push(j);
+            vals.push(2.0);
+            if j + 1 < n {
+                rows.push(j + 1);
+                cols.push(j);
+                vals.push(-1.0);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+
+        let prof = std::sync::Arc::new(std::sync::Mutex::new(SymbolicProfiler::new()));
+        let params = SupernodeParams {
+            symbolic_profiler: Some(prof.clone()),
+            ..Default::default()
+        };
+        let _ = symbolic_factorize_with_method(&m, &params, OrderingMethod::AutoRace).unwrap();
+
+        let report = prof.lock().unwrap().report();
+
+        // Timing-independent invariant: the shared profiler must reflect
+        // exactly one ordering run, so each instrumented stage name must
+        // appear at most once. Pre-fix, ~RACE_CANDIDATES.len() copies of
+        // each common-path stage are present regardless of how fast the
+        // machine is (record() pushes even for 0 µs samples).
+        let mut seen = std::collections::HashSet::new();
+        for s in &report.stages {
+            assert!(
+                seen.insert(s.name),
+                "stage '{}' recorded more than once — AutoRace leaked {} candidates' \
+                 stages into the shared profiler (stages: {:?})",
+                s.name,
+                RACE_CANDIDATES.len(),
+                report.stages.iter().map(|s| s.name).collect::<Vec<_>>(),
+            );
+        }
+        // The stage-sum-exceeds-total warning must not fire for a single
+        // ordering run.
+        assert!(
+            report.validation_warnings.is_empty(),
+            "spurious profiler warnings: {:?}",
+            report.validation_warnings
+        );
+    }
+
+    #[test]
     fn test_symbolic_factorize_dense() {
         let m = CscMatrix::from_triplets(3, &[0, 1, 2, 1, 2, 2], &[0, 0, 0, 1, 1, 2], &[1.0; 6])
             .unwrap();
@@ -2217,17 +2303,26 @@ mod tests {
     }
 
     #[test]
-    fn issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates() {
-        // SCOTCH bisection produces no separator on bordered-KKT
-        // patterns (verified directly in
-        // `crates/feral-scotch/tests/issue_3_kkt_repro.rs`); the
-        // recursion falls into amd_leaf for the entire graph and the
-        // returned permutation is bit-identical to AMD's.
-        // `resolved_method` must reflect what ran, not what was asked.
+    fn issue_3_scotchnd_on_kkt_recurses_after_o13() {
+        // History: SCOTCH bisection used to produce no separator on
+        // bordered-KKT patterns — its vertex-separator FM stopped the
+        // whole pass the first time both PQ heads were imbalance-
+        // rejected, abandoning feasible queued moves — so the recursion
+        // collapsed into amd_leaf for the entire graph and
+        // `resolved_method` reported `Amd`.
+        //
+        // Finding O13 fixed that early stop. SCOTCH now finds a real
+        // separator on this KKT pattern (verified directly in
+        // `crates/feral-scotch/tests/issue_3_kkt_repro.rs`:
+        // `issue_3_scotch_recurses_on_kkt_after_o13`), so ScotchND no
+        // longer degenerates: `resolved_method` reports the requested
+        // ScotchND, and the ordering is genuinely SCOTCH's — not a
+        // relabelled AMD leaf. This test guards that post-O13 behavior
+        // at the `feral` symbolic boundary.
         //
         // Preprocess is pinned to None so SCOTCH sees the raw KKT
-        // pattern; with LdltCompress the compressed graph is small
-        // enough that bisection sometimes succeeds.
+        // pattern (LdltCompress would shrink it past the point the
+        // degeneracy ever exercised).
         let m = poisson_kkt_csc(20);
         let params = SupernodeParams {
             preprocess: OrderingPreprocess::None,
@@ -2236,9 +2331,29 @@ mod tests {
         let sym = symbolic_factorize_with_method(&m, &params, OrderingMethod::ScotchND).unwrap();
         assert_eq!(
             sym.resolved_method,
-            OrderingMethod::Amd,
-            "ScotchND degenerated to AMD-leaf-only on this KKT pattern; \
-             resolved_method must report Amd, not ScotchND"
+            OrderingMethod::ScotchND,
+            "post-O13 SCOTCH recurses on this KKT pattern; resolved_method \
+             must report ScotchND, not the AMD-leaf fallback"
+        );
+
+        // The permutation must be a valid bijection over 0..n.
+        let n = m.n;
+        assert_eq!(sym.perm.len(), n);
+        let mut seen = vec![false; n];
+        for &p in &sym.perm {
+            assert!(p < n, "perm entry out of range");
+            assert!(!seen[p], "perm is not a bijection");
+            seen[p] = true;
+        }
+
+        // And it must differ from AMD's ordering — proof the recursion
+        // ran SCOTCH nested dissection rather than collapsing to the
+        // AMD leaf (which would return AMD's permutation verbatim).
+        let amd = symbolic_factorize_with_method(&m, &params, OrderingMethod::Amd).unwrap();
+        assert_ne!(
+            sym.perm, amd.perm,
+            "ScotchND ordering must not be bit-identical to AMD's; \
+             that would indicate the degenerate AMD-leaf fallback"
         );
     }
 

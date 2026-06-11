@@ -43,10 +43,10 @@ impl Graph {
     ///
     /// Diagonal entries are dropped. The input is assumed to be
     /// already structurally symmetric per the contract (debug-
-    /// asserted elsewhere). Row indices within each CSC column
-    /// must be strictly increasing — `CscPattern::new` does not
-    /// currently enforce this, so we defensively drop duplicates
-    /// via a running "last seen" check rather than a hash.
+    /// asserted elsewhere). Row indices within each CSC column are
+    /// sorted ascending — `CscPattern::new` enforces this — so any
+    /// duplicates are adjacent and a running "last seen" check drops
+    /// all of them without needing a hash set.
     ///
     /// Complexity: `O(nnz)` time, `O(nnz + n)` space.
     pub fn from_csc_pattern(pattern: &CscPattern<'_>) -> Result<Self, OrderingError> {
@@ -75,7 +75,8 @@ impl Graph {
                     return Err(OrderingError::MalformedInput);
                 }
                 if r == last {
-                    // drop duplicate; CscPattern::new does not yet reject these
+                    // drop duplicate; rows are sorted (CscPattern::new enforces
+                    // it), so duplicates are adjacent and this catches them all
                     continue;
                 }
                 adjncy.push(r);

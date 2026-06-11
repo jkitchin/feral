@@ -1,0 +1,2155 @@
+* 2026-06-10 PR #83 review loop — D5 (continued session, post-midnight)
+
+** 00:05 :D5:bk-selection:unreachable:not-reproduced:proof:
+D5 (legacy factor() do_2x2_pivot: exactly-singular 2×2 -> t=1/(d00*d11-1)
+=1/0 -> inf/NaN poisons trailing block) — NOT REPRODUCIBLE. The code path
+exists and is unguarded (the frontal do_2x2_update guards det==0; legacy
+does not), but Bunch-Kaufman pivot selection cannot feed it a singular 2×2.
+
+Proof: a 2×2 is selected at step 7 only after steps 3/5/6 fail
+(factor.rs:977-1045): akk<α·γ0, arr<α·γr, akk·γr<α·γ0². Block is
+[[akk,d21],[d21,arr]] with |d21|=γ0 (r=argmax of col k). Exactly singular ⇒
+akk·arr=γ0² ⇒ akk=γ0²/arr. Sub into step-6-fail: γr/arr<α ⇒ arr>γr/α. But
+step-5-fail: arr<α·γr. Together γr/α<arr<α·γr ⇒ 1/α<α ⇒ α²>1, false
+(α=(1+√17)/8≈0.640). Contradiction. Stronger: akk·arr<α²γ0² ⇒
+det<(α²−1)γ0²≈−0.59γ0² — every BK-selected 2×2 is bounded away from
+singular, so d00*d11−1=det/γ0²≤−0.59 and t∈[−1.7,0). No 1/0, no overflow.
+perturb_2x2_to_floor only lifts eigenvalues away from 0 (and is a no-op at
+default static_pivot_floor=0), so it can't create singularity either.
+
+Empirical corroboration: deterministic LCG sweep (no rand/Date), 20000
+factor() calls under ForceAccept, n∈{3..8}, small-diagonal bias +
+6667 adversarial near-singular [[a,g],[g,g²/a]] embeddings with big
+third-column coupling to inflate γr. Selected 31092 ACTUAL 2×2 blocks,
+produced ZERO NaN/inf across d_diag/d_subdiag/l. (runs=20000
+total_2x2_blocks=31092 any_nan=0.) Scratch sweep removed after the run.
+
+Disposition: tried-and-rejected.md citing D5 (full proof + sweep). No fix,
+no reproducing test (unreachable = untestable). A defensive det==0 guard
+mirroring do_2x2_update is possible but would be unreachable speculative
+hardening; deferred with a note to add it if a future pivot-selection /
+rook / threshold change ever makes a singular 2×2 selectable.
+
+Next per triage: D6 (unsafe set_len over uninitialized memory, library UB,
+factor.rs:1668-1670 and :2148-2150).
+
+** 00:40 :D6:unsafe:set_len:miri:soundness:fixed:
+D6 (contribution-block extraction: contrib.set_len(cdim2) BEFORE writing,
+then &mut [f64] over uninitialized tail — violates Vec::set_len init
+contract). FIXED both sites (factor_frontal_in_place_with_scratch_impl
+~1700, factor_frontal_blocked_in_place_with_scratch ~2185).
+
+Reproducing test tests/d6_contrib_uninit.rs drives both extraction sites
+with ncol<nrow (forces cdim>0 contribution block) and reads back every
+cell; meant to run under Miri.
+
+IMPORTANT honesty note: the finding's "(Miri flags it)" parenthetical is
+WRONG under default Miri. Installed miri (nightly beae781308 2026-06-09),
+ran `cargo +nightly miri test --test d6_contrib_uninit` on the UNFIXED
+code: 3/3 PASS, NO UB reported. Reason: forming &mut [f64] over uninit f64
+is not language UB Miri catches — f64 has no validity invariant, and every
+cell is written before any read, so no uninitialized *read* occurs. What is
+violated is the *library* precondition of Vec::set_len ("elements
+old_len..new_len must be initialized"), which Miri does not police (it only
+catches language UB). So the finding's PRIMARY claim (contract violation)
+is correct by inspection; its tooling claim is not.
+
+Disposition: fixed anyway — a set_len whose stated invariant does not match
+the contract is exactly the "unsafe must carry a correct invariant" bar.
+Fix = finding's recommendation: spare_capacity_mut() -> &mut
+[MaybeUninit<f64>], .write() every cell (same single-pass issue-#56 Lever B
+write, zero upper-tri + a-value lower-tri), THEN set_len once all cdim2
+elements are genuinely initialized. set_len's SAFETY comment is now true.
+Probe semantics preserved: moved _pt_zf (CONTRIBZEROFILL) to bracket only
+the O(1) set_len; the O(cdim2) init stays under CONTRIBEXTRACT (_pt_cx).
+
+Evidence: blocked_ldlt 21/0 (scalar-vs-blocked BYTE-IDENTICAL guard — proves
+contrib contents unchanged), dense_ldlt 17/0, lib 330/0, d6 3/3. Miri on
+FIXED code 3/3 clean. clippy -D warnings clean, fmt clean. The test is a
+Miri soundness guard (not a red->green repro, since default Miri was already
+green); it locks in that a future refactor reintroducing an uninit-exposing
+set_len would be caught if it ever makes the uninit observable.
+
+Next per triage: N2 already done; D7 (next finding in
+dev/research/repo-review-2026-06-09.md).
+
+** 01:20 :D7:block32:dispatch:pooled-scratch:perf:fixed:
+D7 (dev/research/repo-review-2026-06-09.md): the 32x32 fully-summed-front
+dispatch inside factor_frontal_blocked_in_place_with_scratch routed through
+factor_block32, which delegated to the PUBLIC factor_frontal. That public
+entry re-runs matrix.validate() (full NaN scan), allocates an n*n working
+copy, and builds a throwaway FactorScratch -- bypassing the caller's pooled
+scratch which the whole W-3a in-place path (issue #13) exists to reuse, on
+the self-described dominant 32x32 KKT front size. Pure overhead.
+
+Reproduction (tests-first, tests/d7_block32_dispatch_pooled.rs): the in-place
+pooled path resizes scratch.subdiag to nrow (factor.rs:1593-1595); the
+factor_frontal detour leaves the caller's scratch pristine. So after a 32x32
+dispatch with a fresh FactorScratch, scratch.subdiag.len() == nrow iff the
+pooled path ran (post-fix) and == 0 iff it took the allocating detour
+(pre-fix). RED pre-fix: assert subdiag.len()==32 -> left:0 right:32. GREEN
+post-fix. Companion test pins bit-parity vs the factor_frontal oracle
+(to_bits on l/d_diag/d_subdiag/contrib + nelim/n_delayed/inertia/perm) so the
+overhead removal cannot change numerics.
+
+Fix: collapsed factor_block32 to a SINGLE in-place pooled signature
+(&mut SymmetricMatrix + ncol + may_delay + params + &mut FactorScratch),
+keeping the n != BLOCK_SIZE guard then delegating to
+factor_frontal_in_place_with_scratch. Dispatch routes to it; the module's own
+parity tests call the same production entry (no dead code -- a first attempt
+that added a SEPARATE in-place fn left immutable factor_block32 uncalled and
+tripped clippy -D dead-code). First-attempt symptom recorded for honesty:
+"function factor_block32 is never used".
+
+Evidence: d7 2/2 (pooled-scratch repro + bit-parity oracle), block32 lib
+10/0, blocked_ldlt 21/0, dense_ldlt 17/0, delayed_pivoting 6/0, lib 330/0.
+clippy -D warnings clean, fmt clean. Byte-identical output; perf/overhead
+fix only.
+
+Next per triage: D7 was the last of the queued dense/numeric batch in this
+loop; continue to the next finding in dev/research/repo-review-2026-06-09.md.
+
+** 02:30 :N3:profiler:parallel-driver:diagnostics:fixed:partial:
+N3 (dev/research/repo-review-2026-06-09.md): the parallel multifrontal
+driver (factorize_multifrontal_supernodal_parallel) — the Solver default
+whenever should_parallelize_assembly fires — ignored NumericParams::profiler.
+The sequential driver records one SupernodeTiming per supernode
+(profiler_smoke.rs guards it at factorize.rs:1972-2051), but run_parallel_task
+never touched params.profiler, so Solver::with_profiling(true) returned an
+EMPTY report on the default parallel dispatch, contradicting the
+with_profiling/profile_report docs in solver.rs.
+
+Reproduction (tests-first, tests/n3_parallel_profiler.rs): attach a fresh
+Profiler, drive factorize_multifrontal_supernodal_parallel directly (gate
+bypass, same trick as parallel_parity::deep_chain_tree_*) on a tridiagonal
+SPD n=2000 (126 supernodes), assert report.n_supernodes ==
+sym.supernodes.len(). RED pre-fix: left:0 right:126. GREEN post-fix.
+
+Fix: in run_parallel_task, time the factor_one_supernode body under a
+profiler-gated Instant (independent of parallel_telemetry, which measures
+lock/wait costs) and, on Ok, push a SupernodeTiming under the profiler mutex.
+Timings land in completion order (not postorder) — report() buckets by nrow
+so it is order-independent. Phase-breakdown fields (assembly/densefactor/
+panelfactor/schur/scalartail) left zero: they derive from process-global
+phase atomics that cannot be safely differenced across concurrent tasks
+(finding N9), so only wall `us` is meaningful on the parallel path — matching
+the small-leaf path's choice (factorize.rs:1993-1997).
+
+Scope honesty: this closes only the PROFILER facet of N3. N3 also flags that
+the parallel driver uses plain permute_csc_values (issue-56 Lever A.2 warm
+permute cache never engages — overlaps N5's warm-permute clone) and ignores
+params.small_leaf (benign today). Those two facets are NOT addressed here.
+
+Evidence: n3 1/1, profiler_smoke 7/0, parallel_parity 8/0 (bit-parity intact),
+issue52_stats 5/0, lib 330/0. clippy -D warnings clean, fmt clean. Profiler
+is None by default so zero overhead on the hot path is preserved.
+
+** 03:42 :N4:mc64:issue-65:scaling:latch:fixed:
+N4 (repo-review-2026-06-09.md): the issue-#65 MC64 scaling retry had no
+"tried and not adopted" latch. The adoption path self-latches (it pins
+auto_picked_strategy + effective_params.scaling to Mc64Symmetric, which the
+retry gate's `!matches!(..Mc64Symmetric)` clause already suppresses), but the
+non-adoption arm (`_ => Ok((factors, inertia))`, solver.rs) set nothing. The
+gate keys on self.numeric_params.scaling==Auto (user config, immutable) and on
+the resolved scaling staying non-MC64 (the picker re-pins InfNorm on a small
+matrix). So a genuinely singular Auto pattern re-paid a full Hungarian + a
+complete second factorization on EVERY subsequent factor() — the issue-#65
+comment's "one wasted factorization" was actually one per call, indefinitely.
+
+Reproduction (tests/n4_mc64_retry_latch.rs, no fixture needed): A =
+[[1,1,0],[1,1,0],[0,0,1]] lower-tri, rank 2, inertia (2,0,1). Small ⇒ Auto→
+InfNorm, which force-accepts the zero pivot (zero=1) ⇒ retry fires; MC64
+cannot change rank ⇒ retry also zero=1 ⇒ strict-improvement gate fails ⇒
+non-adoption. Added an observable counter mc64_retry_attempt_count() (counts
+every retry that RAN, vs mc64_scaling_fallback_count which counts adoptions).
+Factor the same pattern 3×.
+
+RED (latch gate clause removed): call 1 count=1, call 2 count=2 — confirmed
+left:2 right:1. GREEN (per-pattern bool mc64_retry_not_adopted, set in the
+non-adoption arm, checked in the gate, cleared on pattern change at
+solver.rs alongside auto_picked_strategy): count stays 1 across all 3 calls.
+
+Tradeoff (per the finding's prescribed "per-pattern-fingerprint flag"): the
+latch is pattern-keyed, so if a later iterate on the SAME pattern became the
+ill-conditioned-but-full-rank case MC64 *could* rescue, the latch would
+suppress the rescue. Accepted: non-adoption only happens when MC64 failed to
+reduce zero on this pattern, and the finding explicitly prescribes a
+per-pattern latch. Cleared on pattern change.
+
+Evidence: n4 1/1, issue65_mc64_fallback 3/0 (adoption path intact —
+sawpath still rescues, twirism1 still no spurious fire), lib 330/0. clippy
+-D warnings clean, fmt clean.
+
+** 04:33 :N5:condition:solve-workspace:allocation:perf:fixed:partial:
+N5 (repo-review-2026-06-09.md): per-call allocation churn on factor + solve
+paths. Three cited sub-sites: (a) parallel driver builds num_threads+1 fresh
+FactorWorkspaces per factor (factorize.rs:2930-2942); (b) the condition
+estimator's solves each allocate a fresh SolveWorkspace + result vec
+(solve.rs solve_sparse, compounded ~11x by estimate_inverse_norm_1); (c) warm
+permute path clones col_ptr+row_idx every warm factor (factorize.rs:3482).
+
+This iteration fixes facet (b) — the cleanest, lowest-risk, fully-local one.
+estimate_inverse_norm_1 (condition.rs) ran up to 2*MAX_ITER+1 solves, each via
+solve_sparse which builds a SolveWorkspace (three vecs: y, w, scaled_rhs) plus
+a result vec. Now it builds ONE SolveWorkspace + one output buffer `sol` + one
+`xi` buffer and reuses them across every internal solve via the (newly
+pub(super)) solve_sparse_into_ws. Reuse is safe: solve_sparse_core_into fully
+overwrites its output (x_out at :314-316, y at :178-180) and gathers w per
+node before use; and `sol` (the "y" output) is fully consumed into `xi` before
+the "z" solve overwrites it. Math is bit-identical (existing
+condition_diagonal_spectrum / hilbert_n4 / hilbert_n6 correctness tests pass
+unchanged).
+
+Reproduction: added a #[cfg(test)] THREAD-LOCAL counter SOLVE_WORKSPACE_BUILDS
+incremented in SolveWorkspace::for_factors (thread-local, not a global atomic —
+the cargo harness runs the condition tests concurrently and a shared atomic
+raced: first GREEN attempt read 5 because sibling tests' solves leaked into the
+count). White-box test estimate_pools_one_solve_workspace_across_internal_solves
+(condition.rs tests mod) factors diag([1,2,4,8]), resets the counter, runs the
+estimator, asserts builds == 1. RED pre-fix: 5 (one per solve_sparse). GREEN
+post-fix: 1. The estimator runs all solves on the calling thread (no rayon), so
+the thread-local count is exactly its own.
+
+Deferred facets (a) and (c): the parallel-driver FactorWorkspace pooling and
+the warm-permute structure cache are cross-call-state changes on the Solver
+with stale-data risk; not addressed here. Same scoping discipline as the N3
+profiler facet.
+
+Evidence: condition 9/0 (incl. the 3 correctness oracles unchanged), lib
+331/0, clippy -D warnings clean, fmt clean. Counter is #[cfg(test)] only — zero
+production footprint.
+
+* 05:40 :perf:capi:x7:clone-elimination:
+X7 (repo-review-2026-06-09.md:410-414): feral_factor (src/capi.rs) cloned the
+whole CscMatrix on every call — O(nnz) alloc + memcpy per IPM iteration, a
+borrow-checker workaround for holding &s.matrix while calling &mut s.solver.
+
+Fix: split field borrow. matrix and solver are DISJOINT fields of *s, so
+`let matrix = match &s.matrix { Some(m) => m, None => .. };` coexists with
+`s.solver.factor(matrix, None)` — no clone. (Also dropped the now-needless
+`&matrix` → `matrix`, clippy needless_borrow.)
+
+Reproduction: instrumented CscMatrix with a manual `impl Clone` (replacing
+#[derive(Clone)]) that bumps a #[cfg(test)] thread-local CSC_MATRIX_CLONES
+counter; explicit field literal so a future field addition fails to compile and
+forces the impl in sync. Test capi_factor_does_not_clone_matrix (capi tests mod)
+sets up the 2x2 indefinite matrix via the C ABI, resets the counter, calls
+feral_factor, asserts 0 clones. RED pre-fix: 1. GREEN post-fix: 0. The 0 (not
+baseline-delta) assertion is valid because the grep + RED both confirm the
+factorization path clones only the small CSC component vecs (col_ptr/row_idx),
+never a whole CscMatrix — so the only CscMatrix::clone in the path was the one
+in feral_factor.
+
+Evidence: capi 4/0, lib full suite 63 binaries all green, clippy -D warnings
+clean, fmt clean. Counter is #[cfg(test)] only — zero production footprint.
+
+* 06:30 :perf:lu:l3:pooled-scratch:scaled-solve:refine:fixed:
+L3 (repo-review-2026-06-09.md:416-423): scaled ftran/btran and iterative
+refine allocated fresh vectors per call (dense_solve.rs:24,43,110,195;
+sparse_solve.rs:23,41,107,234), contradicting the struct's "no per-call
+allocation in solves" claim (dense_factor.rs:44-45). With scaling enabled,
+every simplex-iteration solve allocated and zeroed a fresh Vec.
+
+Fix: three pooled buffers on BOTH DenseLu and SparseLu — scratch_b (scaled
+rhs `bt`), scratch_c (refine residual `r`), scratch_d (refine rhs snapshot
+`a`). They must be mutually non-aliasing because the inner solve dirties
+scratch_a/scratch + scratch_b while refine's r and a are live. Each is taken
+via `take_zeroed(pool, m)` (std::mem::take + reuse-if-sized, else clear/resize)
+and restored on ALL paths (a `result`/`res` var + assign-back before return —
+an early `?` would leave the pool empty and force a realloc next call). factor
+inits all three vec![0.0; m]; refactor preserves m so buffers stay sized;
+sparse refactor re-runs factor so re-inits.
+
+Reproduction: #[cfg(test)] thread-local SOLVE_SCRATCH_ALLOCS counter,
+incremented only inside take_zeroed's resize branch (steady state after warm-up
+= 0). Test scaled_solves_and_refine_reuse_pooled_scratch in BOTH dense_solve
+and sparse_solve tests mods: InfNorm scaling + refine_steps:2, warm up then
+reset counter, 5x ftran/btran + ftran_refined/btran_refined, assert
+solve_scratch_allocs()==0 AND B·x≈a (tol 1e-9, so the buffer reuse didn't
+corrupt the math). RED (pool init -> Vec::new() / restore commented): dense
+nonzero, sparse 3. GREEN post-fix: 0,0. Thread-local (not atomic) because the
+cargo harness runs tests concurrently and atomics would race.
+
+Evidence: 334 lib tests green, dense+sparse L3 tests 2/2, clippy --all-targets
+-D warnings clean, fmt clean. Counter is #[cfg(test)] only.
+
+* 06:41 :scalability:lu:l4:ata-pattern:dense-row:colamd:fixed:
+L4 (repo-review-2026-06-09.md:425-433): SparseColMatrix::ata_pattern built the
+explicit AᵀA column-intersection graph with no dense-row guard. One dense row
+(LP budget/convexity constraint touches every column) makes every column pair
+adjacent -> complete graph -> O(m²) time + memory in SparseLuSymbolic::analyze
+before AMD runs.
+
+Fix: COLAMD-style dense-row guard. Compute threshold = max(16, ceil(10·√ncol));
+when walking column j's rows, skip any row i whose population row_cols[i].len()
+exceeds the threshold (it would connect ~all columns and carries no useful
+ordering info). The diagonal self-loop adj[j].push(j) is always kept, so every
+column still appears -> AMD still permutes all m columns and the pattern stays
+symmetric with full diagonal. Safe because ata_pattern only feeds AMD's
+fill-reducing permutation (sparse_symbolic.rs:35), a heuristic, not a
+correctness input.
+
+Reproduction: ata_pattern_dense_row_does_not_blow_up (sparse_matrix tests mod)
+builds m=256 with column j = {(0, dense-row), (j, diagonal)} so row 0 touches
+all columns. Asserts pat.row_idx.len() <= 4m. RED: 65536 == 256² (complete
+graph). GREEN: 256 (diagonal only — columns share only the dropped dense row).
+Guard-rail test ata_pattern_keeps_sparse_structure: tridiagonal m=64 has no
+dense row; interior column keeps all 5 pentadiagonal neighbours (no false drop).
+
+Evidence: 336 lib tests green (+2 new), clippy --all-targets -D warnings clean,
+fmt clean. No existing symbolic/ordering test changed.
+
+* 07:05 :numerics:lu:l5:growth-monitor:element-growth:fixed:
+L5 (repo-review-2026-06-09.md:435+): dense_update.rs and sparse_update.rs both
+recorded `growth` as the largest single elimination multiplier ever seen
+(growth = growth.max(mult.abs())). A chain of updates with multipliers ~100 each
+compounds element growth in U to ~100^k while the monitor sits flat at 100 — so
+an ill-conditioned basis accumulates large U entries and silently loses accuracy
+without ever tripping max_growth -> no refactor forced. Standard FT/BG monitor
+‖U‖-type growth, which compounds.
+
+Fix: replace the max-single-multiplier with the ‖U‖∞ element-growth high-water
+ratio: growth = max over update history of (max|U|) / u_max0, where
+u_max0 = max|U| immediately after the last factor/refactor (floored to
+f64::MIN_POSITIVE as a safe denominator). New u_max0 field on both DenseLu and
+SparseLu, set in factor + refactor. Dense recomputes max|U| over the cloned U
+before commit (cheap, dense is small). Sparse keeps the update cheap by scanning
+only `changed` rows: every U entry that changes in an update lives in a changed
+row, so self.growth.max(changed_max/u_max0) equals the true high-water — proven
+equal, O(changed) not O(nnz). The change is strictly stricter (growth can only
+trip earlier, never later); not a tolerance loosening.
+
+Decision (real fix, not tried-and-rejected): the deficiency IS reproducible —
+the code literally tracks only the max multiplier — and the fix makes the
+monitor catch compounding the old one missed. Did the fix.
+
+Reproduction: growth_monitor_tracks_compounded_element_growth in BOTH
+dense_update::tests and sparse_update::tests. 4×4 SPD-ish basis, max_growth=1e12
+(large so updates commit on old AND new code). Apply 3 LAST-slot replacements
+(slot 3, columns [0,0,1,20]/[0,0,1,60]/[0,0,1,180]) — q==m-1 forms no Hessenberg
+bump so every update commits cleanly while raising max|U| in that column. Oracle
+is INDEPENDENT recomputation: read committed U via lu.u(i,j)/lu.u_dense(i,j),
+compute hw = max(max|U|/u_max0), assert lu.growth ≈ hw each iteration and hw>1.
+RED: pre-fix growth = max single multiplier ≠ element ratio (both tests fail via
+TEMP revert to `growth = self.growth`). GREEN: monitor == element high-water.
+
+First test attempts used slot-0 replacements; the bump elimination tripped
+NeedsRefactor on a small in-bump pivot (no in-bump pivoting by design) so the
+update never committed. Switched to last-slot (no bump) — commits, still grows.
+
+Evidence: 342 lib tests green (+2 new), clippy --all-targets -D warnings clean,
+fmt clean (umax one-liner wrapped to 3 lines by rustfmt). growth has no external
+consumers (read/written only in the update paths), so the semantics change is
+self-contained.
+
+* 07:40 :numerics:lu:l6:zero-pivot-tol:relative-tolerance:fixed:
+L6 (repo-review-2026-06-09.md:435+ next section): the zero-pivot test compared
+the pivot against the ABSOLUTE zero_pivot_tol (1e-13) with default scaling None.
+dense_factor.rs:245, sparse_factor.rs:185, both update paths. A uniformly small
+but perfectly conditioned basis is wrongly declared SingularBasis; a
+large-magnitude basis gets effectively no singularity detection.
+
+Reproducible (confidence in finding was "likely" — confirmed). diag(1e-14) has
+cond₂ = 1 and exact inverse diag(1e14), so it is trivially invertible, yet every
+pivot 1e-14 ≤ 1e-13 -> SingularBasis{column:0}. (The finding cited ~1e-10; that
+value is actually > 1e-13 so it would NOT trip — the real threshold for the bug
+is entries ≲ 1e-13. Phenomenon is real, magnitude in the finding was loose.)
+
+Fix: scale the tolerance by the matrix magnitude. factorize_packed computes
+a_max = max|packed| and uses ztol = zero_pivot_tol · a_max; sparse factor uses
+a_max = max|a.values|. Update paths (dense_update, sparse_update eliminate_bump)
+use ztol = zero_pivot_tol · u_max0, where u_max0 = max|U| at the last factor
+(already computed + floored for L5) — the natural scale reference for U-entry
+bump pivots. For a_max == 0 (the zero matrix, genuinely singular) only an
+exact-zero pivot trips — still correct. Relative-to-global-max matches LAPACK's
+norm-relative singularity convention.
+
+Reproduction: factor_tiny_well_conditioned_basis_not_singular in BOTH
+dense_factor::tests and sparse_solve::tests. Oracle = hand-computed exact
+solution of B x = b for B = s·I (x = [1,2] for b = s·[1,2]). RED: pre-fix the
+factor expect() panics with SingularBasis{column:0} (verified on both — dense
+directly, sparse by perl-reverting the one-line fix, running, restoring from
+/tmp/sparse_factor_L6.bak). GREEN: both factor and solve to the exact answer.
+
+Decision (real fix, not document-only): the deficiency IS reproducible, and
+relative tolerance is strictly more correct (cond=1 matrices no longer rejected;
+relatively-singular large matrices now detected). The finding offered "make
+relative OR document" — did the stronger option.
+
+Risk considered: making ztol relative changes singularity behavior for matrices
+with a_max ≠ 1. Full suite (340 pass, 6 ignored, 0 fail) — including all update,
+L1 final-pivot, L5 growth, and singular-detection tests — unchanged. No
+regression; the absolute 1e-13 was not load-bearing anywhere.
+
+Evidence: 340 lib tests green (+2 new), clippy --all-targets -D warnings clean,
+fmt clean.
+
+* 08:10 :harness:bench:x3:pivot-threshold:not-reproducible:tried-and-rejected:
+X3 (repo-review-2026-06-09.md): bench dense-KKT loop (bench.rs:1569, resample
+:1622) uses params_kkt_sparse (pivot_threshold 0.01) while the rationale block
+(:1356-1375) mandates params_kkt_dense (0.0), claiming 0.01 "zeros out structural
+pivots on HYDCAR20, METHANL8, DEGENLPA, HS118" -> depressed dense pass rates.
+
+The MISMATCH is real by inspection. The harmful CONSEQUENCE is not reproducible.
+Three escalating attempts:
+  1. 4 synthetic small indefinite matrices with tiny structural pivots: identical
+     inertia, maxL=1.0, nr=false under both params. Equilibration normalizes
+     magnitude + BK picks 2×2 pivots, so threshold never bites.
+  2. The two NAMED matrices from tests/data/parity/: HYDCAR20_0000 (n=198, oracle
+     (99,99,0), num_delay=60 — a real delayed-pivot matrix) and DEGENLPA_0065
+     (n=35, oracle (20,15,0)). Both params hit the EXACT oracle, identical maxL
+     (3.59/10.6), identical nr=false. No corruption.
+  3. Full parity sweep: all 50 ssids-oracle matrices, n≤600, both params ->
+     TOTAL=50 DIVERGE=0. Zero matrices diverge.
+
+Root cause of non-divergence: pivot_threshold is immaterial to INERTIA on the
+dense single-front path. The structural-zeroing branch in do_1x1_pivot
+(factor.rs:4521-4545) keys on |d| <= zero_tol (strict zero), NOT on
+pivot_threshold·col_max. The band (zero_tol, threshold·col_max] routes to "small
+but real — count by sign" (:4585), same inertia as the 0.0 "accept by sign"
+branch (:4594). Threshold only flips needs_refinement + pivot-selection swaps,
+neither of which changed committed inertia on any of the 50 matrices. The
+rationale's HYDCAR20 claim describes pre-equilibration / pre-issue-#54 behavior
+the current code no longer exhibits — the "comment is stale" branch of the
+finding's own disjunction is reality.
+
+Disposition: per /loop protocol (can't-reproduce -> tried-and-rejected citing
+finding ID), recorded in tried-and-rejected.md, NOT fixed. The one-line wiring
+change is a verified no-op on every matrix tested, so applying it blind (no
+discriminating test) would be speculative; deferred. The stale rationale comment
+is the real defect, left for a docs pass. No code change, no CHANGELOG entry.
+
+Evidence: synthetic (4 identical), named (HYDCAR20/DEGENLPA both match oracle
+under both params), parity sweep TOTAL=50 DIVERGE=0. Experiment via throwaway
+tests/x3_experiment.rs (removed, not committed).
+
+* 08:45 :harness:capi:env-vars:x5:vocabulary-drift:fixed:
+X5 (repo-review-2026-06-09.md): FERAL_SCALING vocabulary drifted between the two
+parsers. capi.rs (feral_new) accepted identity/infnorm/mc64/auto and SILENTLY
+ignored anything else; bench.rs accepted identity/infnorm/mc64/adaptive and
+WARNED on unknown. Net effect: FERAL_SCALING=adaptive was a silent no-op in the
+C-ABI shim (→ default) but selected Auto in bench; FERAL_SCALING=auto warned and
+fell back to default in bench but selected Auto in the shim. A cross-tool
+experiment with one spelling measured DIFFERENT configurations in each tool —
+silent experiment invalidation. Secondary: ordering_method_from_env mapped any
+unrecognized FERAL_ORDERING (typos included) to forced AMD with no warning.
+
+Reproduced with three RED unit tests (no env-var mutation — extracted pure
+string parsers first):
+- src/bin/bench.rs scaling_strategy_from_str("auto"): RED was None ("auto" not
+  recognized; falling back to default), want Some(Auto).
+- src/bin/bench.rs ordering_method_from_str("amdd"): RED was Some(Amd), want None.
+- src/capi.rs scaling_strategy_from_env_value("adaptive"): RED was None, want
+  Some(Auto).
+
+Fix: extracted both bench parsers (scaling_strategy_from_str /
+ordering_method_from_str) and the capi parser (scaling_strategy_from_env_value)
+as pure, unit-testable helpers. Unified the scaling vocabulary so auto AND
+adaptive both → ScalingStrategy::Auto in BOTH tools, case-insensitive. Added an
+explicit `amd` arm to the ordering parser and made unknown values warn + fall
+back to the default heuristic (None) instead of silently forcing AMD. Updated the
+FERAL_SCALING doc comment in capi.rs to document the alias + lockstep guarantee.
+
+External oracle for the alias mapping: the ScalingStrategy::Auto docstring
+(scaling/mod.rs:176-183) — "adaptive shape-based routing", the documented intent
+both spellings name. GREEN: 3 new tests pass; full suite 341 lib + 3 bin bench
+pass, 0 regressions.
+
+* 09:05 :numerics:lu:sparse:l2:pivot-threshold:tpp:fixed:
+L2 (repo-review-2026-06-09.md): the sparse LU silently ignored pivot_threshold.
+sparse_factor.rs:288 had `let _ = utol; pivot_row = ipiv` — always the strict
+max-magnitude row, regardless of the threshold. So a user setting
+pivot_threshold=0.1 changed the dense path but was a silent no-op on the sparse
+path, contradicting the header doc ("threshold partial pivoting"), the LuParams
+doc (mod.rs:67-70), and the dense path.
+
+Reproduced (RED): src/lu/sparse_solve.rs sparse_lu_honors_pivot_threshold.
+Matrix A=[[1,0],[2,1]] (col0=[1,2], col1=[0,1]), natural column order. Column 0
+diagonal w[0]=1, off-diagonal w[1]=2. u=1.0 -> strict picks row 1 (perm[0]=1);
+u=0.5 -> |w[0]|=1 >= 0.5*2=1.0 so diagonal within threshold -> row 0 (perm[0]=0).
+RED: u=0.5 gave perm[0]=1 (left:1 right:0) because utol was discarded.
+
+Fix: implemented diagonal-preference TPP matching CSparse cs_lu (Davis, Direct
+Methods §6.3): in the else branch, if the natural diagonal row qcol[k] is still
+unpivoted and |w[qcol[k]]| >= utol*amax, pivot on it, else fall back to the
+strict-max ipiv. u=1.0 (the LuParams default) recovers strict partial pivoting
+exactly (diagonal must equal the max to qualify), so all existing factorizations
+are unchanged — full suite 342 lib pass (was 341 + this test), 0 regressions.
+
+External oracle: cs_lu's `if (pinv[col]<0 && |x[col]| >= a*tol) ipiv = col`
+(behavioral witness) + the hand-computed solve A x=[1,4] => x=[1,2] (numeric
+correctness). GREEN after fix.
+
+Bump-elimination path (sparse_update.rs:303-314): the finding also flagged its
+strict-max pivoting. DELIBERATELY left strict. In a Forrest-Tomlin bump
+elimination the bump's structure is already fixed, so a relaxed threshold buys
+no fill reduction and only trades away stability — strict partial pivoting is the
+standard stability-optimal choice and I have no external oracle prescribing
+diagonal preference there. Reconciled the docs instead: LuParams::pivot_threshold
+doc now scopes the knob to the initial factorization and states the bump uses
+strict pivoting; added a comment at the bump site. (Project value: correctness
+before performance.)
+
+* 09:40 :capi:inertia:x1:fixed:
+X1 (repo-review-2026-06-09.md): feral_num_neg returned a stale/wrong inertia.
+neg_evals was initialized to 0, reset to 0 on feral_set_structure, and never
+touched on FERAL_SINGULAR/FERAL_FATAL — so (a) a fresh handle reported 0 (looks
+like "definite"), never the documented -1; and (b) after a failed re-factor it
+silently reported the PREVIOUS matrix's count.
+Reproduction: two C-ABI tests. (a) num_neg_is_minus_one_before_any_factor —
+fresh handle returned 0, want -1 (RED). (b) num_neg_invalidated_after_failed_refactor
+— factor [[1,2],[2,1]] (neg=1), then re-factor the SAME structure with a NaN value
+(no set_structure, as an IPM host does); factor() rejects the non-finite value as
+FERAL_FATAL, yet feral_num_neg still returned the stale 1, want -1 (RED).
+Probe: a structurally-full singular 2x2 ([[1,0],[0,0]], [[1,2],[2,4]], all-zero)
+all map to FactorStatus::Success (zero pivots counted as zero inertia, not failed)
+— so the original singular-matrix test design could not produce a non-Success
+status. A non-finite value is the reliable, realistic failure trigger:
+FactorStatus::FatalError(InvalidInput("... non-finite (NaN) ...")) -> FERAL_FATAL.
+Fix: -1 sentinel for "no valid factor" at init (capi.rs), on set_structure, and in
+the Singular and FatalError branches of feral_factor. Field + feral_num_neg docs
+updated to state the sentinel covers fresh/structure-change/failed-refactor. Both
+tests GREEN; full lib suite 344 passed; clippy -D warnings clean; fmt clean.
+
+* 10:05 :scaling:mc64:partial-singular:x4:fixed:
+X4 (repo-review-2026-06-09.md): MC64 partial-singular fallback covered unmatched
+COLUMNS but not unmatched ROWS. scaling_from_cache skipped to identity only when
+perm[i]==usize::MAX (column i unmatched). But on a partial matching the matched-row
+and matched-column sets differ even on symmetric patterns: index i can have column i
+matched (perm[i]!=MAX) while row i is unmatched. build_matching (hungarian.rs:703-707)
+zeroes u[i] for an unmatched row, so s[i]=exp((u[i]+v[i]-cmax[i])/2)=exp((0+v[i]-cmax[i])/2)
+folded a meaningless zero half-dual into the symmetric average — the exact condition
+the adjacent comment warns about. Affects PartialSingular matrices (routine for
+rank-deficient KKTs, issue #43); D·A·D quality could be badly asymmetric.
+Reproduction: deterministic unit test on scaling_from_cache with a synthetic
+Mc64Cache (perm=[1,MAX], u=[0,0], v=[2,0], cmax=[1,1], n_matched=1). End-to-end
+forcing of the asymmetric matching is fragile because the input is symmetric
+(lower-tri expanded, values necessarily symmetric) so the min-cost max matching ties
+and the Hungarian tie-break is implementation-dependent. The unit-level oracle is the
+documented contract (step 9 / mc64-scaling.md): identity for any index whose row OR
+column is unmatched. RED: index 0 returned exp(0.5)=1.6487212707001282 (predicted
+witness, exact match). 
+Fix: build a row_matched bitset from perm (O(n)), then fall back to identity when
+perm[i]==MAX OR !row_matched[i]. Updated module step-9 doc and the inline comment.
+GREEN; full lib suite 345 passed; clippy -D warnings clean; fmt clean.
+
+* 10:20 :sparse:csc:validate:x6:fixed:
+X6 (repo-review-2026-06-09.md): CscMatrix::validate lacked a col_ptr monotonicity
+check. It verified col_ptr.len()==n+1, row_idx.len()==values.len(), col_ptr[n]==nnz,
+per-entry in-bounds/lower-triangle, and within-column sorting — but never that
+col_ptr is monotonically non-decreasing. A non-monotone ia whose endpoints line up
+(col_ptr[0]==0, col_ptr[n]==nnz) passes every check yet produces empty/overlapping
+column ranges: entries silently dropped, the wrong matrix factored, FERAL_SUCCESS
+returned. (Negative i32 entries sign-extend to huge usize and are caught as out-of-
+bounds, so the monotonicity hole is the silent one.)
+Reproduction: validate_rejects_non_monotone_col_ptr. n=3, nnz=2,
+col_ptr=[0,2,1,2], row_idx=[0,2], values=[1,1]. col_ptr[3]=2==nnz, all rows
+in-bounds/lower-tri/sorted within non-empty ranges, but col_ptr[1]=2 > col_ptr[2]=1.
+Oracle: the standard CSC contract (col_ptr non-decreasing). RED: validate() returned
+Ok. Fix: an up-front loop rejecting col_ptr[j+1] < col_ptr[j] with an InvalidInput
+naming the offending column, placed before the start..end ranges are used so they
+are well-formed. GREEN; sparse::csc suite 12 passed.
+
+* 10:55 :ordering:amf:o1:i32-overflow:fixed:
+O1 (repo-review-2026-06-09.md): AMF fill-score i32 overflow for n ≳ 46k.
+crates/feral-ordering-core/src/quotient_graph/algo.rs computed the AMF
+working-fill (wf) surface contribution dext*(2*deg(e)-dext-1) (lines 948/969)
+and the per-supervariable accumulation wf4 + 2*nvi*wf3 (line 1020) entirely in
+i32, then stored the result in the i32 ws.wf field. Both factors are O(n), so
+the products reach ~n² and overflow i32 for n ≳ 46k. i32::MAX = 2_147_483_647;
+46342*46341 = 2_147_534_622 (50_975 over). The RMF score then read ws.wf[i] as
+f64 and drove pivot selection with wrapped/negative garbage (bucket clamp keeps
+it in-bounds, so the symptom is pure ordering-quality degradation in release and
+a debug-build panic). MUMPS computes the RMF in DBLE.
+
+Reproduction (tests-first, amf_wf_kernels_do_not_overflow_i32 in
+algo::tests): can't drive n≳46k AMF end-to-end (the trigger needs an element of
+external degree ≳46k, which dense-deferral / mass-elimination / min-fill's own
+fill-avoidance all conspire to keep from forming on a feasibly-sized input, and
+a genuine 46k front needs ~1e9 input edges). So extracted the two cited
+overflow-prone formulas into pure i64 helpers amf_wf_surface(dext,degree) and
+amf_wf_combine(wf4,nvi,wf3) and unit-tested them at the i32 boundary. Oracle =
+exact hand-computed i64 values of the Amestoy 1999 formulas (ana_orderings.F:4810):
+amf_wf_surface(46342,46342)=2_147_534_622, amf_wf_combine(0,46342,46342)=
+4_295_161_928 (over u32::MAX too). RED demonstrated by perl-narrowing both helper
+bodies to compute internally in i32 (cp backup, restore after): debug panicked
+"attempt to multiply with overflow" at algo.rs:657. GREEN: i64 helpers pass.
+
+Fix (finding's prescription, "compute wf in f64 or i64"): widened the ws.wf
+field from Vec<i32> to Vec<i64> (workspace.rs), the wf3/wf4 accumulators to i64,
+amf_bucket_of's score param to i64, and routed the two formulas through the i64
+helpers. The post-quantization RMF score later stored in wf is bounded by
+i32::MAX-1, cast in on store (qscore.max(1) as i64). degree stays i32 (bounded by
+n); only the products widen. wf is pub but has NO external readers (grep across
+crates/+src/), and order()'s public signature is unchanged, so the change is
+fully self-contained.
+
+Evidence: feral-ordering-core lib 57 passed (+1), invariants integration 10
+passed, clippy -p feral-ordering-core --all-targets -D warnings clean, fmt clean.
+Existing AMD path (MinDegree) is untouched: it never reads/writes wf, and the
+Metric trait (Score=i32) is unchanged.
+
+Next per /loop: do NOT start the next issue (O2). Schedule it.
+
+* 11:20 :kahip:data-reduction:o2:determinism:fixed:
+O2 (repo-review-2026-06-09.md): KaHIP twin reduction iterated HashMaps
+(closed_groups, open_groups in data_reduction.rs:425/466) to emit Twin ops, so
+the per-instance RandomState seed decided the op-stack order — and therefore the
+final permutation — violating the crate's determinism contract. Latent today
+(default ReduceOptions::conservative() runs Rule 1 only) but a landmine for the
+planned Rules 2-4 rollout.
+
+Reproducing test (tests-first): apply_twins_op_order_is_deterministic. 12
+disjoint triangles {3i,3i+1,3i+2}; each is a closed-twin group emitting two Twin
+ops, all groups independent so map iteration order is the only thing deciding op
+order. Build a fresh MutAdj and run apply_twins 33x; assert byte-identical ops.
+Sanity: ops.len()==2*K==24 (reduction fired). External oracle = determinism
+(same input must give same output), no impl-authored expected values.
+
+RED (current HashMap code): FAILED at line 855, two runs diverged — left started
+[Twin{rep:18,..}, Twin{rep:18,..}, Twin{rep:0,..}], right started
+[Twin{rep:30,..}, Twin{rep:30,..}, Twin{rep:0,..}]. Same multiset, different
+order — exactly the contract violation.
+
+Fix: closed_groups/open_groups HashMap -> BTreeMap (key Vec<usize> is Ord and
+already sorted), added BTreeMap to the line-28 import. Groups now visited in
+signature-sorted order, identical run-to-run. GREEN: test ok. Vetted the third
+map (line 686 `group`): safe to leave HashMap — consumed only via keyed
+group.remove(&old) in deterministic reduced_perm order, never iterated for
+output; added a comment saying so.
+
+Evidence: feral-kahip lib 62 passed (+1), clippy -p feral-kahip --all-targets
+-D warnings clean, fmt clean.
+
+O2 was the last of the 28 high+medium findings (Sections 1-3) in the PR #83
+review. Loop COMPLETE — per "When done do not start the next issue", stop here;
+no further ScheduleWakeup.
+
+* 11:55 :dense:bunch-kaufman:d8:doc-drift:fixed:
+D8 (repo-review-2026-06-09.md, §4 low): the doc comment on
+symmetric_row_offdiag_max (factor.rs) claimed it EXCLUDES position (r,k), but the
+loop `for j in k..r` includes it. The code is correct — it matches LAPACK dsytf2
+ROWMAX (which includes A(IMAX,K)) — the comment was wrong and load-bearing: a
+"fix" toward the comment (narrowing to (k+1)..r) would drop A(r,k) from the
+Bunch-Kaufman pivot-selection max and corrupt pivot choice.
+
+Reproducing/characterization test (tests-first):
+row_offdiag_tests::row_offdiag_max_includes_position_r_k. Column-major 4x4 with
+the only nonzero off-diagonal in row r=2's window (k=0) at exactly (r,k)=(2,0)
+stored at a[k*n+r]=a[2]=7.0; the returned max must equal 7.0. Oracle = LAPACK
+dsytf2 ROWMAX semantics (external).
+
+RED: temporarily narrowed the loop to (k+1)..r (the comment's claimed behavior),
+test FAILED left:0.0 right:7.0 — A(r,k) dropped, exactly the regression the
+comment would invite. Restored from /tmp/factor_D8.bak. GREEN: restored code +
+corrected comment, test ok.
+
+Fix: rewrote the comment to state the range INCLUDES (r,k), why (LAPACK ROWMAX,
+A(r,k) is the candidate pivot's partner entry), and cite the pinning test + D8.
+Code unchanged (it was already correct). Not user-visible -> no CHANGELOG entry.
+
+Evidence: feral lib dense::factor 32 passed (+1), clippy -p feral --lib
+-D warnings clean, fmt clean.
+
+Next per /loop: do NOT start the next issue (D9). Schedule it.
+
+* 13:50 :dense:zero-pivot:d9:n-tiny:doc-drift:fixed:partial:
+D9 (repo-review-2026-06-09.md, §4 low): drift catalog across the four duplicated
+1x1/2x2 zero-pivot impls in factor.rs. Five facets; three fixed, two -> t-a-r.
+
+Fixed (a) code defect: do_1x1_pivot's ZeroPivotAction::PerturbToEps arm called
+perturb_to_floor (line 4556) without `*n_tiny += 1`, violating the documented
+n_tiny contract ("MUMPS INFO(25)=NBTINYW, incremented at each perturb_to_floor
+call site", count_1x1_inertia:4804-4806). The three siblings (do_1x1_pivot
+static-floor path, try_reject_1x1_frontal both perturb arms, count_1x1_inertia
+both perturb arms) all bump it. Reproducing unit test (tests-first):
+zero_pivot_n_tiny_tests::do_1x1_pivot_perturb_to_eps_counts_n_tiny calls
+do_1x1_pivot directly with d=0 (|d|<=zero_tol), static floor off,
+on_zero_pivot=PerturbToEps{abs_floor:1e-10}; asserts n_tiny==1, (pos,neg,zero)=
+(1,0,0). Oracle = documented contract + sibling impls (external). RED: n_tiny
+left:0 right:1. GREEN after adding the increment. do_1x1_pivot is only called
+from legacy factor() whose n_tiny is a discarded local sink, so the defect is not
+observable via the public API -> direct unit test is the reproduction.
+
+Fixed (d) doc: stale F-01 overview comment in try_reject_1x1_frontal (case (a')
+"Count as zero in inertia") contradicted the code (sign-counts, 2026-05-17
+sign-fallback) and the correct inline comment at the code site. Rewrote to say
+the band collapses into case (b) by sign.
+
+Fixed (e) doc: both needs_refinement field docs said "when ForceAccept fired";
+the flag is also set by PerturbToEps, F-01 band pivots, static-pivot flooring,
+and growth flagging. Corrected both (FrontalFactors + the second struct).
+
+Deferred (b)/(c) -> tried-and-rejected.md citing D9: (b) factor() runs the
+Duff-Reid 2x2 bound on the unperturbed block while scalar_pivot_step perturbs
+before the gates; (c) factor()'s do_2x2_pivot lacks the SSIDS det floor +
+issue-#46 partner fallback the frontal path has. Both are inertia-affecting
+changes to the LEGACY factor() path; per the hard rule (inertia exactly correct;
+no impl+oracle in one session) they need a MUMPS/SSIDS reference oracle to
+validate, which this iteration can't produce. A test that only exhibits a path
+divergence isn't a failing-on-the-bug test. Legacy factor() is flagged for
+removal (D1, D5).
+
+Evidence: feral lib dense::factor 33 passed (+1), clippy -p feral --lib
+-D warnings clean, fmt clean. CHANGELOG: not user-visible (n_tiny is an internal
+diagnostic on the frontal stats struct; the defect was on a path whose n_tiny is
+discarded) -> no CHANGELOG entry.
+
+Next per /loop: do NOT start the next issue (D10). Schedule it.
+
+* 14:25 :dense:contrib:pooled-buffer:d10:asymmetry:fixed:
+D10 (repo-review-2026-06-09.md): the four `ncol == 0` early returns in the
+frontal factorizers (factor_frontal_with_profile, *_in_place_with_scratch_impl,
+*_blocked_in_place_with_scratch, *_diagonal_in_place) handed back
+`contrib: matrix.data.clone()`. When the front's matrix came from a pooled
+buffer (SymmetricMatrix::from_pooled_buf zeros ONLY the lower triangle, leaving
+the strict upper triangle stale), that clone carried nondeterministic garbage in
+the strict upper triangle. The normal extraction path zero-fills the upper
+triangle (:1674-1683), so the two paths produced contrib buffers with different
+upper-triangle content. Bit-compares of the FULL contrib buffer (the block32
+harness does exactly this) saw nondeterministic data on ncol==0 fronts.
+
+Reproduced: ncol_zero_contrib_has_zeroed_upper_triangle builds a 3x3 front from
+a pooled buffer pre-filled with 99.0, factors it (ncol==0 -> diagonal-only
+front), and asserts contrib's strict upper triangle is all-zero. RED: observed
+99.0 in the upper triangle (stale pooled data). GREEN after the fix: 0.0.
+
+Fix: added shared helper contrib_zeroed_upper(data, n) that copies only the
+lower triangle (col cj rows cj..n) into a zero-initialized n*n buffer, matching
+the normal-path convention. Replaced all 4 clone sites with it. No numeric
+impact: downstream contrib consumers read only the lower triangle; this only
+normalizes dead memory so full-buffer bit-compares are deterministic.
+
+Evidence: feral lib dense::factor 34 passed (+1), full feral lib suite 349
+passed / 0 failed, clippy -p feral --lib -D warnings clean, fmt clean.
+CHANGELOG: not user-visible (contrib upper triangle is internal scratch read
+only by lower-triangle consumers) -> no CHANGELOG entry.
+
+Next per /loop: do NOT start the next issue (D11). Schedule it.
+
+* 15:18 :dense:equilibrate:perf:d11:not-reproducible:deferred:
+D11 (repo-review-2026-06-09.md): equilibrate_scaling (equilibrate.rs:8-45) is
+flagged as O(10*n^2) with branchy matrix.get() per element and a stride-n half
+per row, on the hot path of every factor()/factor_single_front call. Pure perf
+finding (low/certain perf) — no correctness claim.
+
+Checked for a hidden correctness angle before deferring: get(i,j) for i<j
+returns data[i*n+j], which is the LOWER-triangle storage of the symmetric entry
+(j,i) (row j >= col i), NOT the strict upper triangle that from_pooled_buf
+leaves stale (cf. D10). So every read is valid; equilibration is correct even on
+pooled-buffer fronts. No wrong output to reproduce.
+
+No admissible RED gate: a timing assertion is flaky/forbidden; a characterization
+test that pins current output and then refactors makes the current impl its own
+oracle, which the hard rule forbids (no impl+oracle in one session). Refactoring
+the hot path with no failing test contradicts "correctness before performance."
+
+-> Routed to tried-and-rejected.md citing D11. The optimization is real and safe
+in principle (max-reduction over j is order-independent; split inner loop into
+contiguous j>i half and strided j<i half, hoist d[i]) — deferred to a dedicated
+dense-factor perf pass that brings an external oracle + before/after benchmark.
+
+Evidence: equilibrate.rs:8-45; SymmetricMatrix::get matrix.rs:85-91; callers
+factor.rs:832,1207,2332. No code change, no CHANGELOG (not user-visible).
+
+Next per /loop: do NOT start the next issue (D12). Schedule it.
+
+* 15:50 :dense:refinement:perf:d12:not-reproducible:deferred:
+D12 (repo-review-2026-06-09.md): flag_growth_for_refinement (factor.rs:409-419)
+walks the entire extracted L slice (O(nrow*nelim)) at every dense-factor exit
+(call sites 1160, 1772, 2267, 2501) to set needs_refinement when any
+|v|>L_GROWTH_THRESHOLD; finding says the scan "could be fused into the L-extract
+loop." Pure perf (low/certain perf), no correctness claim.
+
+Function is correct (early-returns if already flagged; short-circuits on first
+over-threshold entry) and already pinned by characterization tests at 5061-5112.
+No wrong output to reproduce; timing assertions flaky/forbidden; the fusion is a
+behavior-preserving refactor whose only oracle is the current impl (forbidden in
+one session) and touches 4 production hot-path exits with no failing test ->
+contradicts "correctness before performance."
+
+-> Routed to tried-and-rejected.md citing D12. Fusion is safe in principle (the
+flag is a monotonic OR over |L_ij|>threshold, computable as each entry is written
+during extraction) — deferred to a dense-factor perf pass with before/after
+benchmark, re-verified against the existing characterization tests.
+
+Evidence: factor.rs:409-419, call sites 1160/1772/2267/2501, tests 5061-5112.
+No code change, no CHANGELOG (not user-visible).
+
+Next per /loop: do NOT start the next issue (D13). Schedule it.
+
+* 15:56 :dense:block32:2x2:d13:intentional-contract:not-reproducible:deferred:
+D13 (repo-review-2026-06-09.md): update_2x2_block32 (block_ldlt32.rs:247-279)
+returns early on det.abs()==0.0 (:252-254), leaving trailing L columns (p+2)..n
+holding raw A values; "unreachable through gated frontal paths, only via D5
+legacy path." low/certain.
+
+Decisive: the det==0 no-op is an INTENTIONAL, tested contract, not a bug. Existing
+test update_2x2_block32_singular_is_noop (block_ldlt32.rs:544-555) drives
+(d11,d21,d22)=(1,1,1) (det=0) through both do_2x2_update and update_2x2_block32
+and asserts byte-identical no-op ("Singular 2x2 (det==0) is a no-op in both
+paths"). The leftover raw A is the defined consequence — no valid inverse to
+normalize by. Adding debug_assert or zero-fill would break this tested contract
+(loosening an existing test needs human approval).
+
+Impact gated entirely behind legacy D5 path: frontal path applies det floor +
+issue-#46 partner fallback upstream so det==0 never reaches the kernel; only
+legacy scalar factor() (D5, flagged for removal D1/D5) can deliver a singular
+2x2 here. A failing-on-the-bug test would have to show wrong inertia/solve on
+the legacy path = D5's deferred scenario needing a MUMPS/SSIDS oracle.
+
+-> Routed to tried-and-rejected.md citing D13. No code change. Subsumed by the
+D1/D5 legacy-path removal/oracle decision; revisit then.
+
+Evidence: block_ldlt32.rs:247-279 + test :544-555; caller do_2x2_update
+factor.rs:4220-4222 (forwards n==32 only). No CHANGELOG (not user-visible).
+
+That completes the Dense (D8-D13) section of repo-review §4.
+Next per /loop: do NOT start the next issue (N6). Schedule it.
+
+* 16:05 :numeric:solve:multi-rhs:n6:oob-panic:scaling:fixed:
+N6 (repo-review-2026-06-09.md): solve_sparse_many_into (solve.rs:447) validated
+ws.nrhs/ws.n but not ws.scaled_rhs sizing vs the factors' scaling state.
+SolveManyWorkspace::for_factors sizes scaled_rhs = n*nrhs when scaling applied,
+empty (len 0) otherwise. A workspace built for unscaled factors (scaled_rhs
+empty) reused with scaled factors of the same (n,nrhs) shape hit the pre-scale
+loop (:487 ws.scaled_rhs[off+i] = rhs[off+i]*scaling[i]) -> OOB panic, in a
+crate that otherwise returns Result.
+
+Reproduced: solve_many_into_rejects_scaling_mismatched_workspace. Factor an SPD
+tridiagonal twice off one symbolic factorization — once Identity (NotApplied,
+scaled_rhs empty), once External(vec![1.0;n]) (always reports Applied ->
+needs_scaling true). Build ws from the unscaled factors, call _into with the
+scaled factors. RED: "index out of bounds: the len is 0 but the index is 0" at
+solve.rs:487:30. GREEN: returns Err(DimensionMismatch).
+
+Fix: after the existing nrhs/n/rhs/x_out checks, compute needs_scaling and the
+expected scaled_rhs len (n*nrhs if scaling, else 0), and return
+DimensionMismatch if ws.scaled_rhs.len() differs. Reused needs_scaling at the
+pre-scale site (removed the duplicate let). Single-RHS solve_sparse_into_ws is
+pub(super) and only ever called with a matching workspace from solve_sparse, so
+no external misuse path there — left unchanged (N6 is specific to the public
+_into form).
+
+Evidence: feral lib 350 passed (+1) / 0 failed; clippy -p feral --lib clean;
+fmt clean. User-visible (panic -> Result on a public fn) -> CHANGELOG entry added.
+
+Next per /loop: do NOT start the next issue (N7). Schedule it.
+
+* 16:40 :numeric:factorize:permute:cache:n7:perf:fixed:
+N7 (repo-review-2026-06-09.md §4): the cold path of
+`permute_csc_values_with_cache` (factorize.rs ~3562) rebuilt the value-map
+cache unconditionally — an O(nnz·log) binary-search scan plus three O(nnz)
+vectors — even when `pattern_reused_hint == false`. The warm fast path that
+consumes the cache is itself gated on `pattern_reused_hint`, so a cache built
+on a hint=false (one-shot) call is never read: pure wasted work for every
+direct/one-shot caller.
+
+Fix: wrap the cache build (`build_permute_value_map` + `*cache = Some(..)`)
+in `if pattern_reused_hint { .. }`. One-shot callers now skip the build
+entirely; the warm-reuse caller (Solver::factor, hint=true) still pays the
+build exactly once on its first cold call and reaps it on every subsequent
+reuse — the optimization is preserved, only the wasted build is dropped.
+
+Reproducing test `permute_cache_not_built_for_one_shot_caller` (n=4,
+identity perm): calls with hint=false + empty cache, asserts (a) the
+permuted matrix equals the input (identity perm ⇒ no-op) and (b) the cache
+stays `None`. A second call with hint=true asserts the cache IS built, so
+the gating is conditional not a blanket disable.
+
+RED demonstrated by temporarily forcing the guard to `if true`: panic at
+factorize.rs:5118 "one-shot caller (hint=false) should not build the
+value-map cache" (cold path populated Some). GREEN after restoring the
+`pattern_reused_hint` guard.
+
+Evidence: feral lib 351 passed (+1) / 0 failed / 6 ignored; clippy -p feral
+--lib clean; fmt clean. Internal perf only — no numeric change, no public
+API change — so NO CHANGELOG entry.
+
+Next per /loop: do NOT start the next issue (N8). Continue in-turn per the
+live "speed this up" directive.
+
+* 17:05 :numeric:factorize:supernode:n8:unreachable:deferred:
+N8 (repo-review-2026-06-09.md §4): the empty-supernode early return in
+`factor_one_supernode` (factorize.rs:2138, fires on `nrow==0 || own_ncol==0`)
+returns without draining `contrib_blocks[child]`, so a child's Schur data +
+delayed-pivot inertia would be silently dropped IF an empty supernode ever had
+contributing children.
+
+Verdict: unreachable, route to tried-and-rejected citing N8. Reasons: (1) the
+symbolic layer never emits an empty supernode — every supernode has ncol≥1 and
+nrow≥ncol≥1 (symbolic/supernode.rs), so the branch is dead defensive code; (2)
+the twin site `factor_one_small_leaf` (factorize.rs:2506) is ALREADY guarded by
+`debug_assert!(snode.children.is_empty())` at :2497-2501 — a leaf has no
+children, so N8 reduces to the single factor_one_supernode site; (3) no
+admissible reproducing test — entering the branch requires hand-building a
+SymbolicFactorization (20+ fields incl. EliminationTree/CscPattern) with a
+forbidden empty-supernode-with-contrib-child state plus a FactorWorkspace and
+calling the private fn directly; a debug_assert firing on that fabricated state
+tests the guard, not a real defect, and would be the impl's own oracle
+(forbidden — no impl+oracle in one session; inertia must be externally
+validated). Finding itself says "Unreachable today" / low severity.
+
+Contrast with N7 (just fixed): N7's wasted-cache state is observable via real
+one-shot calls, so it had a clean RED→GREEN. N8 has no real input that reaches
+the branch, so it's deferred like D11/D12/D13.
+
+Evidence: factorize.rs:2138-2175 (live, no drain), :2496-2543 (twin, guarded),
+symbolic/supernode.rs:126-162 (nrow≥ncol≥1). No CHANGELOG (no user-visible
+change; nothing fixed). tried-and-rejected.md updated with full reasoning.
+
+Next per /loop: do NOT start the next issue (N9). Continue in-turn per the live
+"speed this up" directive.
+
+* 17:20 :numeric:factorize:profiler:n9:diagnostics:global-atomic:deferred:
+N9 (repo-review-2026-06-09.md §4): sequential per-supernode phase deltas
+(factorize.rs:2021/2036) snapshot process-global AtomicU64 counters
+(ASSEMBLY_NS etc., dense/factor.rs:188) before/after one factor_one_supernode
+call. Two solvers factoring concurrently in one process cross-contaminate the
+deltas.
+
+Verdict: deferred to tried-and-rejected citing N9. Diagnostics only — counters
+only written when PHASE_TIMING_ENABLED (default false). The probe site is
+single-threaded by design (comment at :2017-2020 says so). Critically, the
+SAME global counters are written from factor_one_supernode's assembly/dense
+helpers (:2217-2406), and factor_one_supernode is spawned on rayon WORKER
+threads by the parallel driver (scope.spawn at :1217, :1943); the diagnostic
+binary reads whole-run totals via snapshot() from the main thread. So the
+process-global design is load-bearing: a thread-local "fix" would isolate
+concurrent solvers but drop every increment done on rayon workers = systematic
+undercount on the parallel path. The only correctness-preserving fix is
+per-solver counters threaded through the whole dense-factor chain — an invasive
+diagnostics-only refactor, and impl+own-oracle in one session. Severity
+low/certain, "diagnostics only" by the finding's own words.
+
+Contrast N7 (fixed: observable wasted work, clean RED→GREEN) vs N8/N9
+(unreachable / intentional-design diagnostics, deferred like D11/D12/D13).
+
+Evidence: factorize.rs:2017-2050, :2217-2406, :1217/:1943; dense/factor.rs:
+178-250. No CHANGELOG (nothing user-visible). tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (N10). Continue in-turn per the
+live "speed this up" directive.
+
+* 17:45 :numeric:condition:solve:factorize:scaling:n10:doc-drift:deferred:
+N10 (repo-review-2026-06-09.md §4): a bundle of four doc/code drifts. Read all
+four sites and confirmed each has CORRECT runtime behavior — only prose/naming
+or a latent gap drifts:
+(a) condition.rs:7,166 "3-5 solves" is stale — estimator does up to
+    2·MAX_ITER+1 = 11 solves (MAX_ITER=5 at :27; solves at :90/:106/:154;
+    code's own :68-69/:214 already says ~11). Code correct, comment stale.
+(b) solve.rs:389-391 describes an nrhs==1 thin-wrapper dispatch that doesn't
+    exist; finding says "bit-identical anyway". Doc only.
+(c) BucketStats.pct_of_total (factorize.rs:443) = sum_us·100/loop_us. That is
+    the CORRECT denominator — buckets partition the loop and sum to 100% of
+    loop_us; total_us would exclude prologue/epilogue. Only the field NAME
+    misleads. A RED test would have to assert % of total_us = assert WRONG
+    behavior; not honest.
+(d) Schur driver (factorize.rs:1645) uses compute_scaling, mains (:1839/:2836)
+    use compute_scaling_with_cache(.., cached_mc64). BUT
+    symbolic_factorize_with_schur sets cached_mc64: None (symbolic/mod.rs:1186)
+    — the Schur path NEVER has a cache. So _with_cache(.., None) is
+    byte-identical to compute_scaling today: latent gap, no output change, no
+    RED. Would only bite if the Schur symbolic path ever populates the cache.
+
+Verdict: deferred to tried-and-rejected citing N10. Every sub-item is
+doc/naming/latent drift over already-correct behavior; none reproducible as a
+failing test (a constant-arithmetic assert or a bit-identical/100%-sum assert is
+GREEN today, not RED). Consistent with the reproduce-first loop discipline used
+for D11-D13/N8/N9. Recommended a future dedicated docs-accuracy pass (outside the
+loop) to correct the prose + align the Schur call for consistency.
+
+Evidence as above. No CHANGELOG (nothing user-visible changed; no fix applied).
+tried-and-rejected.md updated with per-sub-item evidence.
+
+Next per /loop: do NOT start the next issue (N11). Continue in-turn per the live
+"speed this up" directive.
+
+* 18:00 :numeric:solve:null-pivot:n11:deliberate:deferred:
+N11 (repo-review-2026-06-09.md §4): the D-block solve skips force-accepted-zero
+pivots, leaving the forward-substituted RHS value in w[k] rather than zeroing
+the null-space component (MUMPS ICNTL(25)=0 convention). Confirmed both sites:
+single-RHS solve.rs:300-303 (`if d_diag[k].abs() > zero_tol { w[k] /= d_diag[k]
+} // else leave w[k] alone`), multi-RHS twin :818-821. Documented as deliberate
+in the inline comment (:271-272) and dev/plans/threshold-mismatch-fix.md
+(:71,:85,:94).
+
+Verdict: deferred to tried-and-rejected citing N11. It is documented, deliberate
+behavior flagged "for awareness", and the finding itself rates the wrongness
+only "possible". No admissible RED: a reproducing test would have to assert the
+ALTERNATIVE convention (zero the null-space component) is correct, but which
+convention is right on a singular system is the open question and needs a
+MUMPS/SSIDS oracle for the specific singular case (which this iteration can't
+produce); pinning the current behavior would make the impl its own oracle.
+Flipping the convention also alters documented deliberate solve semantics on
+singular systems and needs human approval per the correctness hard rule.
+
+Evidence: solve.rs:268-303, :815-821; dev/plans/threshold-mismatch-fix.md:
+71,85,94. No CHANGELOG (no fix; deliberate behavior unchanged).
+tried-and-rejected.md updated.
+
+This completes the N-series (N6-N11) of §4. N6 fixed (workspace scaling
+validation); N7 fixed (one-shot permute cache build skipped); N8/N9/N10/N11
+deferred (unreachable / diagnostics-design / doc-drift / deliberate-documented).
+
+Next per /loop: do NOT start the next issue (S2). Continue in-turn per the live
+"speed this up" directive.
+
+* 18:25 :symbolic:supernode:nrow:estimate:s2:perf:deferred:
+S2 (repo-review-2026-06-09.md §4): placeholder Supernode.nrow =
+col_counts[first_col].max(ncol) (supernode.rs:399) undercounts amalgamated
+frontals (size-based merges need not nest). medium/likely.
+
+Investigated the full consumer graph. The placeholder nrow is never reassigned
+in symbolic; build_row_indices (factorize.rs:3656) recomputes the TRUE rows at
+numeric time — so numeric + inertia results are unaffected (finding agrees).
+The placeholder feeds only contrib_size()=(nrow-ncol)² →
+contrib_sizes/peak_contrib_bytes (pool pre-alloc estimate, mod.rs:963-965) and
+the small_leaf gate (nrow≤16, small_leaf.rs:138). Both are perf-only:
+under-sized pool reallocs at numeric time; small_leaf path is numerically
+equivalent to per-supernode (cf S3).
+
+CORRECTION to the finding: it claims AutoRace (mod.rs:640) "ranks on the biased
+metric" implying nrow. False — AutoRace ranks on factor_nnz_estimate, computed
+from col_counts (mod.rs:935 total_factor_nnz(&col_counts)), independent of
+Supernode.nrow. So fixing the placeholder nrow does NOT change ordering
+selection or any inertia result. The inertia gate is not at risk.
+
+Verdict: deferred to tried-and-rejected citing S2. No incorrect output ⇒ no
+failing-on-the-bug test (a pool-size/estimate assertion pins internal state =
+impl as own oracle, forbidden) — same class as D11/D12. The proper fix is a
+feature-sized new symbolic row-union pass over permuted_pattern after
+find_supernodes (the full pattern isn't available inside find_supernodes, which
+gets only etree+col_counts), and it shifts the benchmark-sensitive small_leaf
+gate, so it needs full-bench validation — a scoped work item, not a surgical
+loop fix.
+
+Evidence: supernode.rs:399-405,166-175; mod.rs:935,939,963-965,640;
+small_leaf.rs:138-140; factorize.rs:3656. No CHANGELOG. tried-and-rejected.md
+updated.
+
+Next per /loop: do NOT start the next issue (S3). Continue in-turn per the live
+"speed this up" directive.
+
+* S3 :symbolic:small-leaf:leaf-rows:s3:defensive:unreachable:deferred:
+S3: compute_leaf_rows (small_leaf.rs:208-217) lacks the defensive r < own_last
+filter that its numeric twin build_row_indices (factorize.rs:3716) applies.
+Finding: if the leaf invariant cracks, batched small-leaf path diverges silently
+from per-supernode path.
+
+Analysis. build_row_indices skips rows r < own_last (own_last = first_col +
+own_ncol) — entries coupling to earlier-eliminated columns r < first_col.
+compute_leaf_rows collects every scanned row with no such skip. The divergence
+requires a leaf column to couple to some r < first_col. By the elimination-tree
+property a leaf has NO descendants, so no own column can couple to an
+earlier-eliminated column ⇒ no scanned r satisfies r < first_col ⇒ the filter
+removes nothing ⇒ the two paths produce identical row sets for every valid leaf.
+Confirmed against existing test compute_leaf_rows_with_offdiagonal_nonzeros
+(small_leaf.rs:391): its leaf at cols 2..4 has rows {2,3,5,7}, all >= first_col.
+
+Verdict: deferred to tried-and-rejected citing S3. Same class as N8 — a
+defensive guard for an unreachable state. A test would have to fabricate an
+invariant-violating "leaf" with a sub-diagonal coupling that find_supernodes
+never emits; asserting on that tests the guard against a pipeline-forbidden
+state (impl-as-own-oracle, forbidden). Recommended harmless future hardening:
+add the one-line `if r < own_last { continue; }` to compute_leaf_rows to keep it
+textually identical to build_row_indices.
+
+Evidence: small_leaf.rs:193-229,138-140; factorize.rs:3656,3716. No CHANGELOG
+(not user-visible, no fix). tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (S4). Continue in-turn per the live
+"speed this up" directive.
+
+* S4 :ordering:schur:run-amd:s4:defensive:drift:deferred:
+S4: run_amd (schur.rs:186-214) omits the perm-length check run_external_ordering
+(mod.rs:591-597) performs; only debug_assert_eq!(perm.len(), n) (schur.rs:116,
+release-absent) guards downstream; neither path checks bijectivity.
+
+Analysis. run_amd keeps the per-element range check u >= pattern.n (:206) but
+drops the explicit length check. Divergence from run_external_ordering requires
+feral_amd::amd_order to return a wrong-length or duplicate-bearing perm —
+unreachable for valid CSC (AMD eliminates every vertex once). Consumer
+compute_schur_aware_perm lifts via non_schur_indices[sub_idx] (:110), safe
+because sub_idx < n_f is guaranteed by :206; the only release gap is a
+wrong-length sub_perm (caught only by the debug_assert) and a non-bijective
+sub_perm (unchecked in BOTH paths). All require a malfunctioning backend.
+
+Verdict: deferred citing S4. Same class as S3/N8 — defensive check, no-op for
+valid input, no RED without mocking the AMD crate (impl-as-own-oracle).
+Recommended harmless hardening: add `if perm_i32.len() != pattern.n` to run_amd
+mirroring mod.rs:591-597, and a duplicate-index bitset to both paths to close the
+shared bijectivity gap.
+
+Evidence: schur.rs:186-214,206,104,110,116; mod.rs:591-597. No code change, no
+CHANGELOG. tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (S5). Continue in-turn per the live
+"speed this up" directive.
+
+* S5 :symbolic:column-counts:s5:complexity:doc-drift:deferred:
+S5: reference column_counts (column_counts.rs:56-65) is O(n³)-class (contains +
+sort/dedup per eliminated column) but mod.rs:855 documents it "O(n²) elimination
+simulation"; it is pub and "burdens tests."
+
+Analysis. Output is correct — it is the bit-exact oracle for the production GNP
+path (verified 169585 matrices, mod.rs:857). The propagation loop (:55-65) does a
+linear contains() per propagated row plus a full sort_unstable+dedup per column,
+which is O(n³)-class on dense-ish patterns, contradicting the O(n²) doc claim.
+Neither the cost nor the doc claim is RED-testable (asymptotics need flaky timing
+or an impl-exposed counter = impl-as-own-oracle).
+
+Verdict: deferred citing S5. Same class as N10 (doc drift) and S2 (perf-only).
+Recommended doc-truth + hygiene fix: correct mod.rs:855 to "O(n³)-class", and
+demote column_counts to pub(crate) since production uses column_counts_gnp
+everywhere (mod.rs:860).
+
+Evidence: column_counts.rs:55-65,20; mod.rs:855-857,860. No code change, no
+CHANGELOG. tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (S6). Continue in-turn per the live
+"speed this up" directive.
+
+* S6 :symbolic:invariants:validate:subtree-sizes:schur-postorder:s6:defensive:unreachable:deferred:
+S6: three unchecked documented invariants — (a) no CscPattern::validate(): a
+lower-only pattern fed to etree/GNP yields an edgeless forest with counts of 1,
+no error; (b) subtree_sizes assumes parent[j] > j (comment only); (c)
+schur_constrained_postorder leans on parent>child, guarded only by a debug_assert
+tail check (mod.rs:1092-1098).
+
+Analysis. Production never reaches any bad state. The etree is always built on a
+symmetrized pattern (mod.rs:703 symmetric_pattern → :795 from_pattern, :860 GNP),
+so lower-only is a documented-precondition violation (column_counts.rs:16), not a
+correct-usage defect. parent[j] > j is a structural guarantee of every elimination
+tree the builder emits, so subtree_sizes' 0..n scan is always correct;
+schur_constrained_postorder's parent>child likewise holds and is debug_asserted.
+All three "crack" only for inputs the pipeline cannot produce.
+
+Verdict: deferred citing S6. Same class as S3/S4/N8 — defensive gaps, no incorrect
+output for correct usage, RED would assert garbage-in handling. Recommended
+hardening: add CscPattern::is_symmetric() debug assertion at etree/GNP entry, and
+promote the parent[j]>j comment to a debug_assert!.
+
+Evidence: mod.rs:703,795,860,1092-1098; column_counts.rs:16;
+elimination_tree.rs:82-85. No code change, no CHANGELOG. tried-and-rejected.md
+updated.
+
+Next per /loop: do NOT start the next issue (S7). Continue in-turn per the live
+"speed this up" directive.
+
+* S7 :symbolic:autorace:profiler:s7:diagnostics:fixed:
+S7: AutoRace (symbolic_factorize_race, mod.rs:629-656) passed the caller's single
+SymbolicProfiler Arc to all four RACE_CANDIDATES. record() appends, set_total()
+overwrites ⇒ shared profiler ends with one full stage list per candidate (~4x)
+against a 1x total. report() then lists every stage 4x, sums pct_of_total past
+100%, and always emits "stage sum exceeds total".
+
+REPRODUCED (unlike N9, this is observable and deterministic): test
+autorace_does_not_quadruple_symbolic_profiler_stages — attach a profiler, run
+symbolic_factorize_with_method(.., AutoRace) on a 16-node tridiagonal, assert
+each stage name appears at most once. RED: panic at mod.rs:1583, all 14 stages
+×4 = 56 records ["symmetric_pattern","pick_preprocess",... ×4]. The duplicate-
+name assertion is timing-independent (record() pushes even 0 µs samples), so the
+RED signal does not depend on machine speed.
+
+FIX: symbolic_factorize_race now gives each candidate its own fresh profiler Arc
+(clone snode_params with symbolic_profiler overridden) and copies only the
+winning candidate's SymbolicProfiler into the caller's shared one at the end
+(*p = winner). GREEN: test passes; full lib suite 352 passed (was 351),
+clippy -D warnings clean, fmt clean.
+
+Diagnostics-only — factorization perm/inertia/structure unaffected. CHANGELOG
+Unreleased "Fixed — AutoRace no longer quadruples symbolic-profiler stages (S7)".
+
+Evidence: mod.rs:629-680 (race fix), profiler.rs:51-75 (record/set_total/warning),
+test mod.rs ~1540. SupernodeParams derives Clone (supernode.rs:13),
+SymbolicProfiler derives Clone (profiler.rs:40).
+
+Next per /loop: do NOT start the next issue (S8). Continue in-turn per the live
+"speed this up" directive.
+
+* S8 :sparse:symbolic:allocation:perf:s8:deferred:
+S8: allocation-in-loop cluster — per-column pairs Vec in sort_and_sum_duplicates
+(csc.rs:142-160), redundant per-column sort in symmetric_pattern (csc.rs:301),
+children() Vec<Vec> where GNP needs only a leaf flag (elimination_tree.rs:66-74),
+~n two-element Vecs in compress_pattern (ldlt_compress.rs:161-166), HashSet for a
+contiguous-range test (mod.rs:1331).
+
+Analysis. All perf-only; correct output. Verified anchors: the per-column pairs
+Vec produces a correctly summed/sorted matrix; symmetric_pattern's sort is
+redundant only because rows are already sorted (removing it changes nothing). No
+RED possible — allocation counts = impl-as-own-oracle, timing = flaky. Same class
+as S2; contrast N7 which had observable cache state to reproduce, these don't.
+
+Verdict: deferred citing S8. Recommended benchmarked perf items: reuse a scratch
+Vec across columns; delete the redundant sort; leaf-flag bitset for children();
+preallocate compress_pattern Vecs; bounds-compare instead of HashSet. Each
+touches hot symbolic paths ⇒ needs corpus-bench validation.
+
+Evidence: csc.rs:142-160,301; elimination_tree.rs:66-74; ldlt_compress.rs:161-166;
+mod.rs:1331. No code change, no CHANGELOG. tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (S9). Continue in-turn per the live
+"speed this up" directive.
+
+* S9 :sparse:csc:symv:validation:s9:defensive:api-hygiene:deferred:
+S9: CscMatrix::symv (csc.rs:314) validates nothing — panics on short x/y, leaves
+y[n..] stale for oversized y (zeroing uses .take(self.n)). Finding: inconsistent
+with the scrupulous from_triplets/validate on the same type.
+
+Analysis. For x.len()==y.len()==n (the only contract "y = A*x" implies) the output
+is correct. Both failure modes are precondition violations, and every internal
+caller passes exactly-length-n buffers (solve.rs:1092/1160/1274/1304/1318/1374,
+dense/solve.rs:88/124, scaling/mod.rs:1493 — multi-RHS sites slice precisely). So
+the panic/stale-tail paths are unreachable from production; only external misuse
+of the pub method hits them. Same class as S6.
+
+Verdict: deferred citing S9. A Result signature is a breaking change unjustified
+by a low/certain hygiene item with no output change; the non-breaking debug_assert
++ doc fix has no RED (release behavior unchanged); a should_panic test only pins
+the current panic. Recommended: document x.len()==y.len()==n and add a
+debug_assert!, plus an optional separate try_symv -> Result.
+
+Evidence: csc.rs:314-328; exact-length callers solve.rs:1092..1374,
+dense/solve.rs:88/124, scaling/mod.rs:1493. No code change, no CHANGELOG.
+tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (S10). Continue in-turn per the live
+"speed this up" directive.
+
+* S10 :symbolic:supernode:predict-merges:amalgamation:s10:heuristic:load-bearing:deferred:
+S10: predict_merges (supernode.rs:628-671) drifts from find_supernodes — ignores
+the Phase-B4 root cap and uses original fundamental-supernode ncols instead of the
+real pass's cumulative ones.
+
+Analysis. predict_merges is a heuristic returning a Vec<bool> bias that only drives
+the merge-biased postorder; its doc (612-627) says it does NOT enforce adjacency —
+find_supernodes does the real adjacency-checked merge on the re-postordered etree.
+So the factorization is correct for any prediction; the drift only shifts which
+subtrees get biased late (amalgamation quality, not output). The finding notes the
+MUONSINE over-merge analysis suggests the root-cap omission is LOAD-BEARING —
+aligning to find_supernodes could re-introduce the MUONSINE regression
+(5.5x→1.4x MUMPS), so it's not a safe surgical change.
+
+Verdict: deferred citing S10. No incorrect output ⇒ no RED (bias vector assertion
+= impl-as-own-oracle; merge-quality = benchmark). Same class as S2/S8. Recommended:
+document the deliberate root-cap omission + original-ncols choice citing MUONSINE;
+gate any alignment behind a full corpus bench with MUONSINE watched.
+
+Evidence: supernode.rs:612-627,628-671 (648-649,658,664-666). No code change, no
+CHANGELOG. tried-and-rejected.md updated.
+
+This closes the S-findings (S2-S10): S7 fixed (AutoRace profiler isolation),
+S2/S3/S4/S5/S6/S8/S9/S10 deferred.
+
+Next per /loop: do NOT start the next issue (L7). Continue in-turn per the live
+"speed this up" directive.
+
+* L7 :lu:update:scaling:equilibration:l7:numerical:deferred:
+L7: both LU update paths scale the entering column by d_col[leaving_slot] — the
+LEAVING column's scale factor (dense_update.rs:55-57, sparse_update.rs:195).
+Finding: algebraically consistent but equilibration quality decays over an update
+chain, inflating bump multipliers (interacts with L5).
+
+Analysis. Output is algebraically correct — the factorization is maintained in the
+scaled frame P B̃ Q = L U and the solve un-scales with the same d_col, so the
+solution is correct to working precision (finding agrees: "algebraically
+consistent"). The defect is conditioning: the old column's scale applied to a
+new column of different magnitude gives poor equilibration, growing bump
+multipliers over a chain. Severity "possible" — within max_growth the solve stays
+accurate; decay only costs earlier refactors (max_growth → NeedsRefactor bounds
+it).
+
+Verdict: deferred citing L7. Not RED-reproducible — "decay" is a conditioning
+study (growth-factor/residual trend over a matrix-specific chain vs an arbitrary
+threshold), not a deterministic unit assertion; no input yields a wrong output.
+The fix (re-equilibrate the entering column with its own d_col + matching solve
+un-scale) is a scoped, L5-coupled algorithmic change needing a bench. Recommended:
+track jointly with L5 — instrument the multiplier/growth trend, design the
+re-equilibration, validate refactor frequency + accuracy on the corpus.
+
+Evidence: dense_update.rs:50-58; sparse_update.rs:183,195. No code change, no
+CHANGELOG. tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (L8). Continue in-turn per the live
+"speed this up" directive.
+
+* 09:20 :lu:update:error-contract:L8:reproduced:fixed:
+L8 (repo-review-2026-06-09.md): DenseLu::update doc claimed SingularBasis on a
+vanishing bump pivot but the code returns NeedsRefactor (deliberate, tested by
+update_singular_last_pivot_does_not_commit); the SPARSE update path actually
+DID return SingularBasis (sparse_update.rs:100 spike-support deficient, :320
+eliminate_bump vanishing pivot). A driver switching paths got different error
+variants for the same event — a singular replacement basis mid-update.
+
+RED test (tests/lu_sparse.rs, after sparse_singular_fails):
+sparse_update_singular_replacement_matches_dense_needs_refactor — replace slot 1
+of the 2x2 identity with e_0, assert BOTH dense and sparse update return
+NeedsRefactor. Pre-fix panic:
+  "sparse: expected NeedsRefactor to match dense, got Err(SingularBasis { column: 1 })"
+(tests/lu_sparse.rs:207). Dense already returned NeedsRefactor — confirms the
+asymmetry was sparse-only.
+
+Fix: both sparse update-failure sites (sparse_update.rs:100, :320 and the two
+stale doc blocks at :38, :60) now return/Document NeedsRefactor. Rationale: an
+update failure means "refactor from scratch"; the authoritative singularity
+verdict comes from the fresh factorization (factor path sparse_factor.rs:274/280
+and dense_factor.rs:284 STILL return SingularBasis — untouched, verified by
+grep + sparse_singular_fails green). Corrected the stale DenseLu::update doc
+(dense_update.rs:28-32) to state NeedsRefactor on a vanishing bump pivot.
+
+GREEN: lu_sparse 15 passed (incl. new test + sparse_singular_fails factor-path),
+lu_dense 11 passed (incl. update_singular_last_pivot_does_not_commit), lib lu
+54 passed. clippy -D warnings clean, fmt clean. User-visible (FeralError
+contract) → CHANGELOG "Fixed — sparse and dense LU update report the same
+failure signal (L8)".
+
+Next per /loop: do NOT start the next issue (L9). Continue in-turn per the live
+"speed this up" directive.
+
+* 09:48 :lu:error-contract:L9:reproduced:fixed:
+L9 (repo-review-2026-06-09.md): SingularBasis{column} from the sparse factor
+path reported the internal factorization position k, but k corresponds to
+original column qcol[k]. error.rs doc says the value lets a simplex driver
+"repair the basis" — but drivers know original basis columns, not the
+AMD-dependent processing order. L9's other cited sites (sparse_update.rs:100,293)
+were already neutralized by L8 (they now return NeedsRefactor with no column),
+so the only live instance was the factor path (sparse_factor.rs:274,280).
+
+RED test (tests/lu_sparse.rs, after the L8 test):
+singular_basis_reports_original_column_not_factorization_position — constructs
+an explicit non-identity column order qcol=[2,1,0] (fields are pub, so no
+dependence on AMD output) over a 3x3 basis whose ORIGINAL column 0 is the zero
+(singular) column. Under qcol=[2,1,0] col 0 is processed at position k=2.
+Pre-fix panic:
+  "expected SingularBasis reporting original column 0, got Err(SingularBasis { column: 2 })"
+(tests/lu_sparse.rs:244). Confirms position 2 was reported, not original col 0.
+
+Fix: sparse_factor.rs:274 (Fail) and :280 (PerturbToEps ok_or) now report
+qcol[k]. error.rs SingularBasis doc updated: "the *original* basis column index
+(the index the caller supplied), not an internal factorization/pivot position."
+Dense factor path left as-is — dense LU has no column permutation, so k is
+already the original column.
+
+GREEN: lu_sparse 16 passed (incl. new test + sparse_singular_fails, natural
+ordering where k==qcol[k] so unchanged), lu_dense 11 passed, lib lu 54 passed.
+clippy -D warnings clean, fmt clean. User-visible (reported column index) ->
+CHANGELOG "Fixed — SingularBasis { column } names the original basis column (L9)".
+
+Next per /loop: do NOT start the next issue (L10). Continue in-turn per the live
+"speed this up" directive.
+
+* 10:18 :lu:solve:invariant:hardening:L10:reproduced:fixed:
+L10 (repo-review-2026-06-09.md): the diagonal-first u_rows invariant in the
+sparse triangular solves (sparse_solve.rs usolve:228, ut_solve:250) was
+enforced only by debug_assert_eq!(dc, k). Compiled out in release, a violated
+invariant would make usolve/ut_solve silently take an off-diagonal as the pivot
+(divide by it) and treat the real diagonal as a regular row[1..] term — a silent
+wrong solve, no error.
+
+RED test (src/lu/sparse_solve.rs #[cfg(test)], after
+zero_u_diagonal_errors_instead_of_inf):
+misplaced_u_diagonal_errors_instead_of_silent_wrong_pivot — factor [[2,0],[1,3]]
+(so u_rows[0] = diagonal + one off-diagonal), then swap(0,1) to push the
+diagonal off the front, and assert ftran (usolve) and btran (ut_solve) both
+return SingularBasis{column:0}. Pre-fix panic (debug):
+  "assertion `left == right` failed: U row 0 must store its diagonal first
+   left: 1 right: 0" (sparse_solve.rs:228)
+— exactly the gap: debug panics (CI-protected), release would be silently wrong.
+
+Fix: replaced both debug_assert_eq! with an always-on guard folding `dc != k`
+into the existing per-row pivot check: `if dc != k || d == 0.0 || !d.is_finite()
+{ return Err(SingularBasis{column}) }`. The comparison sits in the per-row
+preamble (already a branch), NOT the inner accumulation loop, so the hot solve
+path is unchanged. Reuses SingularBasis with the column-POSITION index, matching
+the pre-existing solve-path contract (zero_u_diagonal_errors_instead_of_inf
+asserts SingularBasis{column:1}, a position); the solve path was out of L9's
+cited scope (factor/update only) and deliberately reports positions.
+
+GREEN: lib full suite 353 passed, lu::sparse_solve 5 passed (incl. new + the
+zero-diagonal precedent), lu_sparse 16 + lu_dense 11 integration passed. clippy
+-D warnings clean, fmt clean (re-ran cargo fmt to wrap the matches!). User-visible
+(release error contract) -> CHANGELOG "Fixed — misplaced U diagonal surfaces as
+an error in release builds (L10)".
+
+Next per /loop: do NOT start the next issue (L11). Continue in-turn per the live
+"speed this up" directive.
+
+* 10:42 :lu:dead-code:L11:deferred:
+L11 (repo-review-2026-06-09.md): DenseLu::perm_inv is dead state — built and
+maintained, never read. Confirmed accurate by static analysis: written in the
+constructor (dense_factor.rs:75-84) and re-maintained in refactor() (:115-117),
+but a crate-wide grep finds zero rvalue readers in src/lu/ outside those writes;
+dense_update.rs and dense_solve.rs reference it nowhere. (qcol_inv IS read for
+the Q-scatter; the SPARSE perm_inv IS read for spike seeding — only the dense
+row perm_inv is dead.) Finding's cited lines (59-61, 94-96) are stale; substance
+holds at current :75-84 / :115-117.
+
+Disposition: deferred to tried-and-rejected, not fixed. (1) Dead state has no
+runtime behavior — no input yields a wrong output, so the RED-test-first
+lifecycle does not apply ("no test can fail on the bug" bucket). (2) The field is
+deliberately re-maintained in refactor(), reading as intended-for-future-use;
+deleting another author's maintained state is a human-approval call per the
+"look before deleting / didn't create it -> surface it" guidance, not a silent
+unilateral delete. Recommended as a trivial safe cleanup pending that decision
+(compiler dead-code analysis is the removal oracle).
+
+No code change, no CHANGELOG (not user-visible). tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (L12). Continue in-turn per the live
+"speed this up" directive.
+
+* 11:05 :lu:perf:allocation:L12:deferred:
+L12 (repo-review-2026-06-09.md): allocation cluster — u_entries Vec per column
+in the factor loop, scratch Vecs in remap_and_sort_l, pivot_data clone +
+per-op row_sub alloc in bump elimination, full L/U/qcol clones for rollback on
+every dense update; reviewer suggests an undo log. Confirmed accurate at the
+current (drifted) line numbers: sparse_factor.rs:236,318,350-352,537;
+sparse_update.rs:340,346,429; dense_update.rs:75-77.
+
+Disposition: deferred to tried-and-rejected, not fixed. Reasoning: (1) correct
+output — these are allocation-efficiency issues, no wrong answer, so no RED
+correctness assertion; the reproduction vehicle is an allocation COUNT (L3
+thread-local-counter pattern), making L12 reproducible-in-principle but only as
+a non-functional contract. (2) The flagship fix (undo-log replacing the dense
+rollback clones) reworks the basis-update commit/rollback mechanism on the
+critical path — correctness-sensitive, and bench-gated per the project lifecycle
+(research->plan->tests->implement->benchmark) and the "correctness before
+performance" mandate. (3) It is a 4-site cluster best done as one tuned
+optimization pass with allocation-count regression tests, not piecemeal mid-loop.
+
+No code change, no CHANGELOG (not user-visible). tried-and-rejected.md updated.
+
+Next per /loop: do NOT start the next issue (L13). Continue in-turn per the live
+"speed this up" directive.
+
+* 11:30 :lu:factor:perturb:cross-path:L13:reproduced:fixed:
+L13 (repo-review-2026-06-09.md): the sparse perturbation branch (PerturbToEps)
+picked the first unpivoted row by O(m) index scan (sparse_factor.rs:283-285),
+both (a) O(m^2) on heavily rank-deficient bases and (b) index-first rather than
+largest-|w| — a drift from the dense path, which perturbs the threshold-selected
+(argmax) row (dense_factor.rs:268-289: select pivot_row via partial pivoting,
+swap in, then floor THAT row's pivot).
+
+RED test (tests/lu_sparse.rs, cross-path consistency after the L9 test):
+perturb_chooses_largest_magnitude_row_matching_dense — col0=[0,0,1e-14] (only
+nonzero at row 2, below ztol=zero_pivot_tol*max|A|=1e-13*1), cols 1,2 = e_1,e_0.
+Largest-|w| unpivoted row = 2; index-first = 0. Dense perm[0]=2 (oracle). Pre-fix
+panic:
+  "sparse perturb row must match dense (L13): got 0 vs dense 2" (lu_sparse.rs:287).
+
+Fix: sparse perturb branch now uses ipiv (the argmax already computed in the
+selection loop) when ipiv>=0, falling back to the (0..m) scan only when ipiv<0
+(column structurally empty in all unpivoted rows, where w is zero and any row is
+equivalent). This (b) aligns the perturbation row with the dense path AND (a)
+removes the O(m) scan in the common case — the scan survives only for the
+genuinely-empty-unpivoted-column fallback, so heavily rank-deficient bases whose
+singular columns still have a touched nonzero no longer pay O(m^2).
+
+GREEN: lu_sparse 17 passed (incl. new + sparse_perturb_succeeds), lu_dense 11,
+lib full 353. clippy -D warnings clean, fmt clean. User-visible (perturbation
+row / regularized factorization) -> CHANGELOG "Fixed — sparse singular-column
+perturbation matches the dense path (L13)".
+
+Next per /loop: do NOT start the next issue (X8). Continue in-turn per the live
+"speed this up" directive.
+
+* 19:12 :x8:capi:doc-drift:ipopt:tried-and-rejected:
+X8 (repo-review §X8, low/likely): capi.rs:13-14 claimed FERAL_* status
+codes "mirror Ipopt's ESymSolverStatus"; FERAL_FATAL=3 collides with
+SYMSOLVER_CALL_AGAIN (Ipopt value 3), while Ipopt's fatal is value 4.
+Review's risk: "a numerically pass-through shim would turn fatal errors
+into call-again loops."
+
+Investigated the shim: feral-ipopt-shim/src/IpFeralSolverInterface.cpp:11-15
+translates EXPLICITLY (case FERAL_FATAL/default: return SYMSOLVER_FATAL_ERROR),
+not a pass-through cast. Header IpFeralSolverInterface.hpp:11 documents intent
+("no SYMSOLVER_CALL_AGAIN"). So the hypothesized call-again loop CANNOT occur in
+the real integration — it is conditioned on a pass-through shim that does not exist.
+
+Non-reproducible as a failing Rust test: the FERAL C ABI is a self-consistent
+4-value contract (pinning the values = characterization, forbidden as a RED
+oracle); the only place the values meet Ipopt's enum is the C++ shim (correct,
+and outside the Rust harness). The actionable core is the inaccurate comment.
+Corrected capi.rs:13-14 to state precisely that codes 0-2 share Ipopt values,
+FERAL has no CALL_AGAIN, FERAL_FATAL reuses value 3, and the shim MUST translate
+(not cast) it to SYMSOLVER_FATAL_ERROR.
+
+Disposition: doc-only fix + tried-and-rejected entry citing X8 (behavioral risk
+non-reproducible). Not user-visible (internal doc) -> no CHANGELOG. Evidence:
+capi.rs:13-14,22-25; IpFeralSolverInterface.cpp:11-15; IpSymLinearSolver.hpp:19-33.
+Next per /loop: do NOT start the next issue (X9). Continue in-turn per the live
+'speed this up' directive.
+
+* 19:33 :x9:capi:stale-factor:ipopt:fixed:
+X9 (repo-review §X9, low/certain gap, possible impact): feral_set_structure
+(capi.rs) replaced s.matrix and reset neg_evals=-1 but left Solver::last_factors
+holding the previous structure's numeric factor. A host that changes structure
+then solves WITHOUT re-factoring (protocol: set_structure->factor->solve) got the
+stale factor refined against the new matrix and FERAL_SUCCESS — plausible-but-wrong.
+
+RED: new src/capi.rs test set_structure_invalidates_stale_factor — factor
+A1=[[1,2],[2,1]] (nnz3), then set_structure to identity-2x2 (nnz2, different
+structure), solve WITHOUT factor. Pre-fix: "got 0" (FERAL_SUCCESS off stale A1
+factor) at capi.rs:810 — assertion left:0 right:3 (FERAL_FATAL).
+
+FIX: added Solver::invalidate_factors() (solver.rs ~1358) — drops last_factors +
+last_inertia, KEEPS last_symbolic/pattern fingerprint so a same-structure re-init
+still reuses the symbolic analysis. Called it from feral_set_structure after
+neg_evals=-1. solve_many/solve_many_refined then hit None last_factors ->
+FeralError::NoFactor -> FERAL_FATAL.
+
+GREEN: capi::tests 8/8 (incl. new), lib full 354 passed (was 353), clippy -p
+feral --lib -D warnings clean, fmt clean. Normal IPM usage unaffected
+(set_structure called once, always followed by factor before solve).
+User-visible (C-ABI robustness for embedders) -> CHANGELOG Fixed entry.
+Evidence: capi.rs:250-256 (call site), 759-811 (test); solver.rs:1358-1370
+(invalidate_factors). Next per /loop: do NOT start the next issue (X10).
+Continue in-turn per the live 'speed this up' directive.
+
+* 19:52 :x10:mtx:io:alloc-abort:hardening:fixed:
+X10 (repo-review §X10, low-medium/certain): parse_mtx reserved entries with
+Vec::with_capacity(nnz) from the untrusted MTX size line (src/io/mtx.rs:114).
+A corrupt header with enormous nnz -> multi-exabyte alloc request -> allocator
+returns null -> handle_alloc_error ABORTS the process (not a recoverable Err).
+
+RED: new src/io/mtx.rs test huge_nnz_header_does_not_abort parses a 3-line MTX
+declaring nnz=100000000000000000 with 2 real entries. Pre-fix, isolated single-
+test run aborted: "memory allocation of 2400000000000000000 bytes failed"
+(signal 6, SIGABRT) at the with_capacity call. Confirmed RED.
+
+Key: parse_mtx NEVER validates nnz against the actual entry count — it's purely
+an allocation hint, then returns Ok(MtxMatrix{n, entries}) with the real entries.
+So clamping the reservation has zero effect on valid files.
+
+FIX: let mut entries = Vec::with_capacity(nnz.min(contents.len())) (mtx.rs:114).
+Each entry occupies >=1 byte in the source, so contents.len() is a hard upper
+bound on the true count ("clamp to file size" per the finding). Valid files
+(nnz << contents.len()) get the same exact reservation.
+
+GREEN: mtx::tests 13/13 (incl. new), lib full 355 passed (was 354), clippy -p
+feral --lib -D warnings clean, fmt clean. User-visible (parse_mtx/read_mtx are
+pub; malformed-input abort -> graceful) -> CHANGELOG Fixed entry. Evidence:
+mtx.rs:113-123 (fix), test in tests module. Next per /loop: do NOT start the next
+issue (X11). Continue in-turn per the live 'speed this up' directive.
+
+* 20:18 :x11:mtx:io:input-validation:banner:non-finite:fixed:
+X11 (repo-review §X11, low/certain): three sub-parts in the MTX reader.
+(a) Banner over-strictness: parse_mtx compared the header against the exact
+single-space string "%%matrixmarket matrix coordinate real symmetric"
+(mtx.rs:48). A legal banner with multiple spaces or tabs between fields (which
+NIST mmio accepts via sscanf tokenization) was rejected "unsupported header".
+(c) Non-finite values: parts[2].parse::<f64>() accepts "nan"/"inf"/"-inf"
+silently (mtx.rs:155), building an MtxMatrix carrying a poison value; bench
+filters these, library callers via parse_mtx/read_mtx did not.
+(b) Post-size '%' comments: erroring on them is spec-correct (comments only
+legal between banner and size line) and matches mmio -> documented, NOT changed.
+
+RED (rigorous): saved fixed mtx.rs to /tmp, reverted both fix hunks in place,
+ran the 4 new tests against unfixed code -> all 4 FAILED:
+multispace_banner_is_accepted, tab_separated_banner_is_accepted (both got the
+"unsupported header" Err), nan_value_is_rejected, inf_value_is_rejected (both
+got Ok carrying a non-finite entry). Confirmed RED. Restored fixed version.
+
+FIX: (a) compare banner token-by-token, case-insensitive, exactly 5 tokens
+(const BANNER, split_whitespace, eq_ignore_ascii_case). (c) after the v parse,
+`if !v.is_finite() { return Err(IoError("non-finite value")) }`.
+
+GREEN: io::mtx 17/17 (4 new), lib full 359 passed (was 355), clippy -p feral
+--lib -D warnings clean, cargo fmt clean. Existing reject-* header tests still
+reject (token mismatch); existing valid-parse tests unaffected. User-visible
+(parse_mtx/read_mtx are pub; reject legal files / accept poison -> fixed) ->
+CHANGELOG Fixed entry. Evidence: mtx.rs banner+non-finite hunks, 4 tests in the
+tests module. Next per /loop: do NOT start the next issue (X12). Continue
+in-turn per the live 'speed this up' directive.
+
+* 21:05 :x12:mc64:scaling:dead-work:perf:not-reproducible:tried-and-rejected:
+X12 (repo-review §X12, low/likely ordering arg + certain allocations):
+build_cost_graph per-column sort (src/scaling/mc64.rs:357-370) is dead work,
+plus O(n) per-run allocations. Investigated for a reproducing test; none exists.
+(1) The sort is correctness-neutral: column-max normalization (:372-394) and
+the Hungarian kernel are both within-column-order-invariant; the in-code comment
+already says the kernel "does not strictly require this" (it's a determinism/
+SPRAL-parity nicety). (2) On the maintained row-sorted-CSC invariant the
+expansion already emits each column ascending -- transpose rows j<i land first
+in ascending j, own-column rows i'>=i next in ascending order, concatenation is
+globally ascending -- so sort_by_key reorders nothing. A test "columns come out
+ascending" PASSES on current code (confirms dead, not a bug). (3) Allocations
+are micro-overhead, no output delta. => No RED test possible. Routed to
+dev/tried-and-rejected.md citing X12. Removing the sort would be a pure perf
+optimization, deliberately out of scope for this bug-fix loop. Not user-visible
+=> no CHANGELOG. Next per /loop: do NOT start the next issue (X13). Continue
+in-turn per the live 'speed this up' directive.
+
+* 21:10 :x13:value-bound:scaling:false-comment:not-reproducible:tried-and-rejected:
+X13 (repo-review §X13, low/certain): the defensive all-zero fingerprint comment
+in precompute_mc64_validity (src/scaling/value_bound.rs:180-182) claimed it
+"makes the subsequent check reject (r0=1, mean=0)". False on two counts: (1) the
+all-zero fingerprint is produced only when scaling.len()!=n, and the sole
+consumer mc64_value_bound_passes opens with a length gate (:218-220) that returns
+false BEFORE any condition runs -- so the fingerprint values never drive the
+decision on those inputs. (2) mean_diag_0=0 makes condition 3
+(min_diag >= EPS_DIAG*mean_diag_0 = 0) VACUOUS (passes for any non-negative
+diagonal), the opposite of "reject"; r0=1 doesn't force cond 1 to fail either.
+Also the else arm is unreachable in practice (callers pass SparseFactors::scaling,
+len n by construction). => No reproducible defect (behavior correct, only the
+comment wrong). Per X8 precedent: corrected the comment in-code + tried-and-
+rejected entry citing X13. fmt clean. Not user-visible => no CHANGELOG. Next per
+/loop: do NOT start the next issue (X14). Continue in-turn per the live 'speed
+this up' directive.
+
+* 21:32 :x14:bench:factor-nnz:false-comment:convention-skew:not-reproducible:tried-and-rejected:
+X14 (repo-review §X14, low/certain): dense-bench factor_nnz = n² with a comment
+calling it "strictly-lower-triangle (matches multifrontal single-supernode)".
+Both clauses false: n² is neither n(n-1)/2 nor the multifrontal accounting. The
+real SparseFactors::factor_nnz() (factorize.rs:959-969) is TRIANGULAR
+(nelim(nelim+1)/2 + (nrow-nelim)*nelim = n(n+1)/2 for a single full front), ~2x
+smaller than n². Deeper than the review: n² is the RECTANGULAR nrow·nelim count,
+which matches the factor_nnz FIELD DOC (bench.rs:1009 "total nrow*nelim") but NOT
+factor_nnz()'s actual triangular code. So the two bench paths use different
+conventions -- dense rectangular (n², :1665), sparse triangular
+(sp_factors.factor_nnz(), :1951) -- mixing conventions in the fill-parity report
+(:487-494). Field doc also wrongly said "None on dense path" (dense sets Some(n²)).
+Dense Factors (dense/factor.rs:788) has no factor_nnz() method, so n² is a
+deliberate hard-code, not a missed method call.
+=> Not reproducible as a solver defect: factor_nnz is diagnostic-only (no inertia/
+residual impact); the "right" unified convention is an unsettled design choice
+with no external oracle (codebase itself split: field-doc rectangular vs
+factor_nnz() triangular); changing n² would move historical baselines. Per X8/X13
+precedent: corrected BOTH comments to accurately state the rectangular n² count,
+contrast it with the triangular sparse-path factor_nnz(), warn fill-parity readers
+they're not comparable, and fix the "None on dense path" error. Value left
+unchanged. tried-and-rejected citing X14. fmt clean, bench compiles. Not
+user-visible => no CHANGELOG. Next per /loop: do NOT start the next issue (X15).
+Continue in-turn per the live 'speed this up' directive.
+
+* 09:40 :x15:bench:panic-path:lint:tests-first:
+X15 (repo-review-2026-06-09.md): src/bin/bench.rs escaped the no-unwrap lint
+(lib.rs lint covers the lib crate only). .unwrap()/.expect() at bench.rs:606,
+1192, 1599, 1623, 1627, 1910-1916. The actionable core (verbatim): "The resample
+.expects are a real panic path that would lose a multi-hour corpus run." A
+transient failure on a cold replicate (factor/solve returning Err after the
+single-shot run already succeeded) would .expect()-panic the whole bench process,
+discarding every result accumulated so far in a corpus sweep.
+RED: extracted the reduction into a Result-returning helper
+resample_or_fallback<E>(fallback, rep) and added resample_falls_back_on_error
+(closure Errs on the 3rd of 5 reps). With the helper temporarily wired to the old
+behavior (panic!/.expect on Err) the test PANICKED:
+  thread 'tests::resample_falls_back_on_error' panicked at src/bin/bench.rs:1073:
+  resample failed: simulated transient resample failure (single-shot already
+  succeeded)  -> test result: FAILED (1 failed).
+GREEN: with the graceful arm (eprintln warning + return fallback) both tests pass
+-- resample_falls_back_on_error (asserts out==fallback, exactly 3 closure calls
+i.e. stops at first Err) and resample_reduces_to_min_factor_median_solve
+(factors[50,30,40,60,20]->20 min, solves[5,3,4,6,2]->4 median; also pins
+RESAMPLE_COLD_REPS==5). 2 passed; 0 failed.
+Fix: (1) added crate-level #![cfg_attr(not(test), deny(clippy::unwrap_used))] +
+expect_used to bench.rs so the bin no longer escapes the lint; (2) rewrote both
+resample blocks (dense :1693, sparse :1979) to call resample_or_fallback with
+Result-returning closures (factor_single_front/solve_refined and
+symbolic_factorize/factorize_multifrontal/solve_sparse_refined now propagate via
+?, mapping to FeralError) -- the 5 .expects are gone; (3) converted the 3 other
+guarded unwraps to let-else+continue (row.mumps at 613, mtx_path.file_stem at
+~1237, sidecar.finite_rhs at ~1664). Verified: cargo clippy --bin bench -D
+warnings clean in NON-test mode (deny lints satisfied -> no unwrap/expect outside
+tests/comments); fmt clean. This is a real fix with a reproducing test, so it does
+NOT go to tried-and-rejected. Bench-harness-only (no library/API surface) =>
+no CHANGELOG entry. Next per /loop: do NOT start the next issue (X16). Continue
+in-turn per the live 'speed this up' directive.
+
+* 10:05 :x16:inertia:false-comment:non-reproducible:
+X16 (repo-review-2026-06-09.md): Inertia struct doc (inertia.rs:2) claimed
+"Invariant: positive + negative + zero == n", but Inertia::new(pos,neg,zero) takes
+no n and stores counts verbatim, so it cannot enforce anything. Decisive: Inertia
+is used for 2x2 pivot SUB-blocks -- classify_2x2_inertia (dense/factor.rs:4313-4332)
+returns Inertia::new(1,1,0)/(2,0,0)/(0,0,2)/... all with total()==2 (block order),
+NOT the global matrix n. So "== n" is violated by design and adding
+assert(pos+neg+zero==n) to new would be both impossible (no n) and wrong (rejects
+legitimate sub-block use). No caller reads back a false guarantee; total()
+(inertia.rs:21) recomputes the sum on demand. A test could only assert new stores
+what it's given (Inertia::new(1,1,1).total()==3) -- passes, characterizes correct
+behavior, cannot go RED on a defect.
+=> Non-reproducible (misleading doc, not a defect). Per X8/X13/X14 precedent:
+corrected the doc in place (inertia.rs:1-9 struct, :11-13 new) to state total()
+equals the described (sub)matrix dimension, note the 2x2-block use (total()==2),
+and that counts are caller-supplied/unvalidated. No enforcement added (would break
+sub-block use), no behavioral change. tried-and-rejected citing X16. fmt clean,
+feral builds. Not user-visible (internal doc) => no CHANGELOG. Next per /loop: do
+NOT start the next issue (O3). Continue in-turn per the live 'speed this up'
+directive.
+
+* 10:55 :o3:ordering-core:csc-pattern:invariant:tests-first:metis:
+O3 (repo-review-2026-06-09.md): feral-ordering-core CscPattern docs require
+"row indices within each column sorted ascending" (lib.rs:50-52) but
+CscPattern::new (:78-112) never checked it -- validated col_ptr lengths/
+monotonicity and row-index range only. Reproducible defect downstream: metis
+Graph::from_pattern (graph.rs:68-83) dedups ONLY adjacent duplicates via a
+running "last seen" check, with the builder's own comment admitting
+"CscPattern::new does not yet reject these". An unsorted column [3,5,3] -> 3
+appears twice in adjncy (5 != last when the 2nd 3 arrives) -> spurious edge ->
+corrupt graph/ordering. scotch compress also uses partition_point assuming sorted.
+RED: added rejects_unsorted_rows_within_column (col 0 rows [1,0] descending,
+asserts new()==None). Against unfixed new it FAILED:
+  panicked at lib.rs:255: assertion failed: CscPattern::new(2,&cp,&ri).is_none()
+(new returned Some). Companion accepts_sorted_rows_with_adjacent_duplicate pins
+the boundary (sorted [0,0,1] with adjacent dup still accepted -- enforce
+sortedness, NOT strict-increase, since metis drops adjacent dups).
+Fix: CscPattern::new now checks each column's rows are non-decreasing
+(col_ptr.windows(2) -> row_idx[lo..hi].windows(2).any(p[1]<p[0]) -> None), O(nnz)
+same order as the existing range loop, once-per-ordering constructor (not hot).
+Added the bullet to the checked-invariants doc list. Updated 2 now-stale metis
+comments (graph.rs:46-49 doc, :77-79 inline): sortedness is enforced so adjacent-
+only dedup is sound, not a defensive workaround.
+GREEN/regression: feral-ordering-core 59 (was 57, +2), feral-metis 51,
+feral-scotch 43, feral-amd 12, integration tests all pass -- confirms NO in-tree
+caller passes unsorted rows (CscMatrix::symmetric_pattern sorts each column,
+src/sparse/csc.rs:297-302; AMD/Schur derive from it). fmt clean; clippy
+-p feral-ordering-core -p feral-metis --all-targets -D warnings clean.
+=> Reproducible -> real fix with test, NOT tried-and-rejected. User-visible
+(stricter validation in published feral-ordering-core v0.2.0 public constructor,
+prevents silent graph corruption) -> CHANGELOG Fixed entry added. Next per /loop:
+do NOT start the next issue (O4). Continue in-turn per the live 'speed this up'
+directive.
+
+* 11:30 :o4:ordering-core:quotient-graph:debug-assert:non-reproducible:
+O4 (repo-review-2026-06-09.md): non-aggressive Pass-2 element sub-pass casts
+we-ws.wflg (both i32) to usize without guarding we>=ws.wflg -- algo.rs:407 (AMD
+accumulator), :1000 (AMF accumulator). A negative diff would sign-extend to ~2^64
+and corrupt deg. Aggressive AMF branch (:972) already guards via `if dext > 0`.
+=> Non-reproducible: the algorithm maintains we>=ws.wflg for every live element in
+the non-aggressive pass (review: "the invariant holds today", low/possible).
+Violating it needs direct corruption of private workspace (ws.w/ws.wflg), which no
+public ordering entry point exposes -- producers take a CscPattern and own the
+workspace privately. No test can drive the wrap on a real input. Per O4's explicit
+recommendation + X12/X16 precedent (non-reproducible w/ concrete low-risk
+hardening): added debug_assert!(we>=ws.wflg) / debug_assert!(dext>=0) at both
+non-aggressive cast sites documenting the invariant. Debug/test-only (compiled out
+in release), no behavioral change. Verified the asserts never fire on real inputs:
+feral-ordering-core 59, feral-amd 12+3, feral-amf 7, feral-metis 51, feral-scotch
+43 + integration all pass (debug build, asserts active). fmt clean; clippy
+-p feral-ordering-core --all-targets -D warnings clean. tried-and-rejected citing
+O4. Not user-visible (internal debug guard) => no CHANGELOG. Next per /loop: do NOT
+start the next issue (O5). Continue in-turn per the live 'speed this up' directive.
+
+* 12:05 :o5:ordering:dense-threshold:doc:faer-verified:non-reproducible:
+O5 (repo-review-2026-06-09.md): dense_alpha doc says threshold
+max(16,min(n,dense_alpha*sqrt(n))) and negative alpha "sets threshold to n-2",
+but code (workspace.rs:212-217) is dense.max(16).min(n) = min(max(16,raw),n) with
+both clamps on BOTH branches. Doc nests min/max in the wrong order and omits the
+clamps on the n-2 branch.
+=> Code is canonical-correct, NOT a defect. Verified via faer-expert agent reading
+faer 0.24.0 (exact version feral references) sparse/linalg/amd.rs:173-179:
+  dense = if alpha<0 {n-2} else {(alpha*sqrt(n)) as usize};
+  dense = max(dense,16); dense = min(dense,n);
+i.e. min(max(16,raw),n), max BEFORE min, both clamps unconditional -- identical to
+feral. Order is load-bearing: faer's form guarantees dense<=n; doc's
+max(16,min(n,raw)) would give 16>n for n<16. No behavioral defect: positive branch
+agrees for n>=16, diverges only for n<16 where threshold already exceeds max
+degree n-1; negative branch matches the reference. Non-reproducible (code matches
+external oracle). Per X8/X13/X14/X16 precedent: corrected the 3 dense_alpha doc
+sites (feral-amd lib.rs, feral-amf lib.rs, feral-ordering-core quotient_graph/
+mod.rs) to min(max(16,floor(dense_alpha*sqrt(n))),n) citing faer amd.rs:173-179,
+clarified negative branch = raw n-2 w/ same clamps (exactly n-2 for n>=18). No
+code change. fmt clean; cargo doc clean on my edits (pre-existing unrelated
+broken-link warning in feral-amf/stats.rs:5, not touched). tried-and-rejected
+citing O5. Not user-visible (doc comments) => no CHANGELOG. Next per /loop: do NOT
+start the next issue (O6). Continue in-turn per the live 'speed this up' directive.
+
+* O6 :ordering:amd:amf:stats:docs:non-reproducible:
+O6 (repo-review): n_clear_flag stat hard-coded 0 in feral-amd (lib.rs:119) and
+feral-amf (lib.rs:123) while AmdStats struct doc claimed "every field is
+populated" in debug builds. Non-reproducible as a defect: the shared
+OrderDiagnostics (quotient_graph/mod.rs:73-79) has no clear-flag field, so the
+stat has no backing counter -- it is a disconnected constant 0. The reset it
+would count (clear_flag, workspace.rs:49-59) only fires at wflg<2 (one-time
+init lift) or wflg>=wbig=i32::MAX-n (workspace.rs:99-100); wflg grows <=lemax<=n
+per pivot over <=n pivots (~n^2), so the ~2^31 ceiling needs n~tens-of-thousands.
+On every unit-testable input the true count is 0 => no RED state distinguishes
+hard-coded 0 from computed 0. Feral-specific counter (SuiteSparse/faer AMD don't
+expose it) => no external oracle; wiring it + asserting would be self-impl +
+self-oracle in one session (forbidden) and would change clear_flag's signature
+across 4 hot-loop sites (algo.rs:280,501,891,1101) for a ~always-0 value.
+Per X16/O4/O5 precedent: corrected docs instead of code. feral-amd/stats.rs and
+feral-amf/stats.rs n_clear_flag field docs now state always-0/not-wired with the
+wbig ceiling rationale; AmdStats struct doc amended to carve out n_clear_flag.
+No code change. fmt clean. tried-and-rejected citing O6. Not user-visible (doc
+comments) => no CHANGELOG. Next per /loop: do NOT start the next issue (O7).
+Continue in-turn per the live 'speed this up' directive.
+
+* O7 :ordering:metis:coarsen:shem:reproduced:fixed:
+O7 (repo-review): feral-metis coarsen.rs:59-98 advertised SHEM (Sorted
+Heavy-Edge Matching, cites METIS Match_SHEM) but Pass 1 visited vertices in
+plain rng.shuffle order -- no ascending-degree sort. That is HEM, not SHEM.
+REPRODUCED with an external oracle (METIS Match_SHEM = bucket-sort the random
+perm by ascending degree, Karypis & Kumar Sec 3.1). Built a /tmp probe
+replicating SplitMix + Pass-1 matching over seeds 0..200 on a 4-vertex chorded
+path (edges 0-1,1-2,2-3,0-2; degrees 0:2,1:2,2:3 hub,3:1 leaf). seed=1 (the
+seed the existing tests use) -> shuffle order [2,1,0,3]: hub 2 visited first,
+grabs 0, stranding leaf 3 and vertex 1 as self-matches => cnvtxs=3. SHEM order
+(degree-sorted [3,1,0,2]) matches leaf 3<->hub 2 then 0<->1 => cnvtxs=2.
+RED: new test shem_matches_low_degree_before_hub asserted coarse nvtxs==2, got
+3 (coarsen.rs:419). FIX: after rng.shuffle, order.sort_by_key by ascending
+degree (xadj[v+1]-xadj[v]); sort_by_key is stable so the shuffle survives as
+the within-degree tie-break (determinism preserved). Updated header doc to
+describe ascending-degree visitation. GREEN: full feral-metis suite 52 passed
+(incl. coarsen_grid_8x8 <=0.70, coarsen_tridiag_10 <=6, determinism, hierarchy
+monotonic) + dense_quotient integration 4 passed. fmt clean. User-visible
+(ordering quality) => CHANGELOG entry added. Next per /loop: do NOT start O8;
+continuing in-turn per the live 'speed this up'/'finish tonight' directive.
+
+* O8 :ordering:metis:coarsen:stall:reproduced:fixed:
+O8 (repo-review): coarsen.rs:130-137 stall branch pushed the stalled level
+whenever !levels.is_empty(), with a comment claiming "Accept the last level
+only if it actually shrank" -- but it never checked shrinkage. Two defects:
+(1) a FIRST level that genuinely shrank (0%<s<5%) was discarded (levels still
+empty) => empty hierarchy despite real progress; (2) a later 0%-progress level
+was pushed just because earlier levels existed, risking the strictly-shrinking
+invariant. REPRODUCED: star K_{1,24} (center+24 leaves), two-hop disabled via
+two_hop_ratio_threshold=10.0. SHEM matches one leaf to the center, 23 leaves
+self-match => first level 25->24 (4% shrink, trips <5% stall). /tmp probe:
+prev=25 new=24 shrank=true stalled=true; current keeps=false, corrected
+keeps=true. RED: stall_keeps_first_level_that_shrank asserted non-empty
+hierarchy w/ 24-vtx level; got empty. FIX: push iff new_nvtxs>0 &&
+new_nvtxs<prev_nvtxs, independent of prior levels; makes comment true. GREEN +
+full feral-metis suite (grids/tridiag unaffected -- they shrink well above the
+stall threshold). User-visible => CHANGELOG. Next per /loop: do NOT start O9;
+continuing in-turn per 'finish tonight'.
+
+* O9 :ordering:metis:coarsen:two-hop:perf:non-reproducible:
+O9 (repo-review): two_hop_pass (coarsen.rs:148-204) is O(n^2) on hub graphs
+(each self-matched spoke rescans its hub neighbour's full adjacency from the
+start to find a partner) and allocates a `mark` array that is never used.
+Perf finding, not a wrong-answer defect => no RED/GREEN correctness test
+(quadratic-vs-linear needs a timing oracle, which is flaky and not part of the
+tests-first lifecycle). A faithful O(nnz) rewrite (METIS Match_2Hop bucketing)
+would change which partners are chosen => different cmap/coarse graph/perm,
+breaking coarsen_is_deterministic_with_seed and the determinism contract;
+out of scope for a low-severity opportunistic fix, and the pass only fires on
+the rare levels where SHEM reduction ratio > two_hop threshold. Routed to
+tried-and-rejected citing O9. Applied the safe recommended sub-fix only:
+removed the dead `mark` Vec + its `let _ = &mut mark;` lint-silencer + stale
+comment. Pure cleanup, no behaviour change; existing two-hop tests are the
+regression guard. Not user-visible => no CHANGELOG. Next per /loop: do NOT
+start O10; continuing in-turn per 'finish tonight'.
+
+* O10 :ordering:metis:initial-partition:ggp:reproduced:
+O10 (repo-review): initial_bisect_ggp (initial_partition.rs) selected
+boundary vertices by argmax(edges_to_A) while documenting the gain as
+(edges_to_A - edges_to_B). The push_neighbors closure took an
+`adding_to_a: bool` that was hard-coded true at all call sites, so the
+subtraction never happened. Effect: GGP biased toward high-degree
+vertices, which inflates the cut (their many still-in-B edges all
+become cut edges on the move into A).
+
+REPRODUCED as RED/GREEN. /tmp/o10-probe/ggp.rs replicates both
+variants on a weighted graph: s (idx0) -- w(idx1, wt3) and
+s -- u(idx2, wt5) with u also joined to b1..b4 (wt1 each), so
+W[w]=3, W[u]=9. After seeding s (SplitMix seed 1 -> gen_range(7)=0):
+  buggy  -> labels=[0,1,0,1,1,1,1], pulls u, cut=7
+  fixed  -> labels=[0,0,1,1,1,1,1], pulls w, cut=5
+Oracle = published GGP definition (max edges_to_A - edges_to_B), an
+external source; matches the hand calc 2*edges_to_A - W.
+
+Fix: select on 2*gain[v] - wtot[v] (i64) where gain is the existing
+edges-to-A accumulator and wtot is per-vertex total incident weight
+precomputed in O(nnz). Removed the dead always-true `adding_to_a`
+param and rewrote the gain comments. New test
+`ggp_uses_true_gain_not_edges_to_a` is the regression guard; existing
+valid/balance/determinism tests unaffected. User-visible -> CHANGELOG.
+Next per /loop: do NOT start O11; continuing in-turn per 'finish
+tonight'.
+
+* O11 :ordering:metis:fm-refine:perf:non-reproducible:
+O11 (repo-review): refine_bisection seeds the FM gain heap with all n
+vertices each pass (fm_refine.rs:56-61), Ω(n log n) inserts where
+boundary-only seeding (METIS) pays Ω(boundary). Cost finding, reviewer
+calls it an acknowledged trade => not reproducible as a RED/GREEN
+correctness test (needs a timing oracle). Boundary-only seeding is not
+a drop-in: it needs lazy re-insertion of newly-boundary vertices, which
+reorders equal-gain visits and changes the FM trajectory / final labels
+=> breaks the determinism contract. Out of scope for a low-severity
+opportunistic fix. Routed to tried-and-rejected citing O11. Applied the
+safe sub-fix only (X16/O4/O5/O6/O9 precedent): documented the all-n
+seeding cost trade in the code at the seeding loop (interior vertices
+have gain ≤ 0, so they pop after the cut-reducing boundary moves;
+METIS boundary-only + lazy-reinsertion is the Ω(boundary) alternative).
+Comment-only, no behaviour change; existing FM tests guard it. Not
+user-visible => no CHANGELOG. Next per /loop: do NOT start O12;
+continuing in-turn per 'finish tonight'.
+
+* O12 :ordering:metis:doc-drift:non-reproducible:
+O12 (repo-review): the inline `// Fix A` comment in metis_order_full
+(lib.rs:218-220) still called the dense-quotient path the "Same
+technique as HSL_MC68 / MUMPS ICNTL(6) / SSIDS", contradicting the
+audited MetisOptions::dense_quotient_enabled doc (lib.rs:105-121) where
+a 2026-04-27 source audit recorded that belief as wrong (ICNTL(6)=MC64
+matching; MUMPS defers dense rows in QAMD; SSIDS doesn't special-case
+them; neither pre-strips). Doc drift, no runtime behaviour to assert =>
+not reproducible as RED/GREEN. Routed to tried-and-rejected citing O12.
+Applied the O6-style doc correction: rewrote the comment to flag the
+equivalence as audited-and-wrong and point to the canonical doc, so the
+two sites agree. Comment-only, no behaviour change, no public API =>
+no CHANGELOG. Next per /loop: do NOT start O13; continuing in-turn per
+'finish tonight'.
+
+* O13 :ordering:scotch:fm:reproduced:bugfix:surprise:
+O13 (repo-review): scotch vertex-separator fm_pass tries only the
+post-drain head of each PQ per outer iteration; when BOTH heads are
+imbalance-rejected it pops them, leaves moved_this_iter=false, and the
+`if !moved_this_iter { break; }` guard (vertex_separator.rs:464-466)
+kills the whole pass with feasible lower-gain moves still queued. The
+reject comment (:319-327) also falsely claimed it "locked" the vertex
+(it only pop()s). RED: added fm_pass-level unit test
+fm_pass_continues_past_imbalance_rejected_heads — 6-vertex weighted
+graph (A=8,B=9,S=6; vwgt overwritten on a unit-weight build), max_side
+10. s1->A (post A=11) and s2->B (post B=11) are the heads, both
+rejected; s3->A (post A=9) is feasible but sits below s1 in pq_to_a.
+Pre-fix returns sep_w=6 (asserts ==5) => RED confirmed at runtime
+(got 6). Oracle = hand calc from FM/SCOTCH "skip and continue"
+definition. FIX: added `rejected_this_iter` flag, set it in the
+imbalance-reject branch, changed the guard to
+`if !moved_this_iter && !rejected_this_iter { break; }`, and corrected
+the misleading "lock" comment. Termination still holds: each rejection
+pops one PQ entry (monotone heap shrink) and moves bump move_cap, so the
+top `(None,None) => break` always fires. GREEN: new test passes; lib
+suite 44/44.
+
+SURPRISE / positive side effect: the pre-existing characterization test
+issue_3_scotch_bisection_degenerates_on_kkt FAILED after the fix —
+n_separator_vertices went 0 -> 188 on the n=1200 PoissonControl KKT
+pattern. That test *locked in* the degeneracy (FM early-stop left a
+one-sided bisection => node_nd `a_verts.is_empty()||b_verts.is_empty()`
+guard => whole-graph amd_leaf => perm byte-equal to AMD). O13 lets FM
+finish refining, so the top-level bisection balances and real ND runs
+(26 levels, 188 sep vtxs, 12 leaf calls). The test's own message
+invited this re-check ("if this fires, the SCOTCH driver has improved").
+Rewrote it as issue_3_scotch_recurses_on_kkt_after_o13: asserts
+n_separator_vertices>0 and scotch_perm != amd_perm, with module-doc
+history. Did NOT claim issue #3 closed — the upper-layer
+visibility/fallback machinery is untouched; only the KKT degeneracy that
+motivated it no longer reproduces here. Full feral-scotch suite green.
+User-visible (separator quality) => CHANGELOG entry added. Reproduced =>
+no tried-and-rejected entry. Next per /loop: do NOT start O14;
+continuing in-turn per 'finish tonight'.
+
+* O14 :ordering:scotch:band-fm:dead-code:non-reproducible:doc:
+O14 (repo-review): scotch band_fm.rs is dead code (mod band_fm is
+#[allow(dead_code)], lib.rs:36-37; node_nd.rs has zero `band`
+references) yet the crate doc (lib.rs:10-12) advertised "Adaptive
+refinement (boundary / halo / band FM)" as if band FM were live.
+Separately, the label-projection loop (band_fm.rs:76-81) bound
+`band.orig_of_sub.iter().enumerate()` as `(orig_v, &sub_v)` — backwards:
+orig_of_sub is sub-indexed and yields the ORIG vertex (struct doc
+:138-140), so enumerate gives (sub_index, orig_vertex). Body
+`labels[sub_v]=sub_labels[orig_v]` still computes the correct
+`labels[orig_vertex]=sub_labels[sub_index]` — an editor trap, not a bug.
+Not reproducible as RED/GREEN: dead code can't be driven by a lib test,
+and the existing `out_of_band_labels_preserved` test already proves the
+projection is correct (passes). Routed to tried-and-rejected citing O14.
+Applied low-risk sub-fixes per X16/O4/O5/O6/O9 precedent: (1) renamed
+the loop to `(sub_i, &orig_v)` / `labels[orig_v]=sub_labels[sub_i]` with
+the anchor guard on sub_i (pure rename, identical codegen); (2) reworded
+lib.rs:10-12 so it lists only the in-pipeline refiners and flags band FM
+as implemented-but-not-yet-wired. Module kept (tested + research note
+dev/research/scotch-band-fm.md); wiring it in is out of scope. No
+behaviour/API change => no CHANGELOG. feral-scotch suite green. Next per
+/loop: do NOT start O15; continuing in-turn per 'finish tonight'.
+
+* O15 :ordering:scotch:amd:compression:non-reproducible:doc:
+O15 (repo-review): with opts.compress on, scotch_nd_order builds
+cg.graph carrying supervariable vwgt (node_nd.rs:54-62); those weights
+ride down through bisection into leaf subgraphs, but amd_leaf
+(:281-302) calls feral_amd::amd_order via graph_to_csc_pattern
+(:308-331) which emits adjacency only and drops vwgt — so a weight-7
+supervariable is scored as a unit vertex, skewing AMD degree pivots on
+heavily-compressed inputs. Verified feral_amd has NO weighted entry
+point: amd_order / amd_order_opts / amd_order_full / amd_order_substages
+all take a bare CscPattern + AmdOptions{dense_alpha, aggressive}; AMD
+does its own internal supervar merge but starts from unit mass. Not
+reproducible as RED/GREEN: finding states "expansion still a valid
+permutation" => no correctness invariant to break; and the only effect
+(fill quality) has no oracle without a weight-aware AMD to compare to.
+Proper fix = weighted AMD leaf, a cross-crate feature with its own
+research/tests/benchmarks — out of scope for a medium-low/possible
+finding. Routed to tried-and-rejected citing O15. Applied low-risk
+sub-fix per X16/O4/O5/O6/O9 precedent: doc comment on amd_leaf recording
+the dropped weights, the valid-permutation correctness rationale, the
+quality caveat, and the future weighted-AMD fix. No behaviour/API change
+=> no CHANGELOG. No test added (no invariant violated; quality oracle
+absent). Next per /loop: do NOT start O16; continuing in-turn per
+'finish tonight'.
+
+* 01:10 :scotch:o13:issue-3:regression:test:workspace:
+Full `cargo test --workspace` (run before committing O16) surfaced a
+RED feral-crate test: symbolic::tests::
+issue_3_scotchnd_on_kkt_resolves_to_amd_when_bisection_degenerates
+panicked at src/symbolic/mod.rs:2323 — `left: ScotchND, right: Amd`.
+Confirmed via `git stash` that it fails at HEAD (274e4cf) WITHOUT the
+O16 working-tree changes => it is an O13 aftershock, not caused by O16.
+Root cause: O13 (eaa3436) fixed SCOTCH's vertex-separator FM early stop,
+so ScotchND now finds a real separator on the poisson_kkt_csc(20)
+bordered-KKT pattern instead of degenerating to amd_leaf; resolved_method
+therefore reports ScotchND, not Amd. The O13 session only ran
+`-p feral-scotch` (where I DID rewrite the scotch-crate's own issue_3
+test) and never ran the full workspace, so this downstream feral-level
+test — which pinned the OLD degenerate behavior — slipped through.
+Fix (test-only, honest): renamed to issue_3_scotchnd_on_kkt_recurses_after_o13
+and rewrote it to guard the post-O13 reality — resolved_method ==
+ScotchND, perm is a valid bijection over 0..n, and perm != AMD's perm
+(proving genuine ND recursion, not the relabelled AMD leaf). Oracle is
+the already-committed+verified O13 behavior (scotch-crate test asserts
+n_separator_vertices>0 and perm!=AMD). Evidence: `-p feral --lib` now
+359 passed / 0 failed / 6 ignored. No behaviour change (O13 already
+shipped the behavior) => no CHANGELOG. Committed separately from O16 as
+an O13 follow-up since it concerns scotch, not kahip. Lesson: run the
+FULL workspace suite, not just the touched crate, when a fix changes
+observable ordering output other crates assert on.
+
+* 01:25 :kahip:o16:flow-refine:balance:weighted:RED-GREEN:
+O16 (repo-review): K3 flow_refine_bisection scored candidates with a
+COUNT-based balance check (count_parts + slack from vertex count n,
+flow_refine.rs:226-244), and graph_to_undirected (cycle.rs:174-201)
+dropped the coarse Graph's vwgt (set unit weights). On Eco/Strong,
+do_flow runs at EVERY uncoarsen level where coarse vwgt >> 1, so a
+count-balanced min-cut can be badly weight-imbalanced -> finer FM starts
+from a violating state. REAL + reproducible.
+Repro (RED): instrumented the existing grid_7x7 improving case ->
+flow moves {13,19,20,37,43,44}->p0, {24}->p1, leaving count 33|16
+(count slack 35 at eps=0.4 -> accepted). vweight never enters
+push_relabel (flow uses EDGE weights), so the moved set is fixed under
+any vertex weighting. Set g.vweight[13]=20 (rest 1): start {r+c<7} is
+weight-balanced (28|40, slack 47), but the accepted refined cut is 52|16
+-> violates. Test respects_vertex_weight_balance_on_weighted_graph
+asserts max(part_weight) <= (1+eps)*ceil(W/2); RED pre-fix
+("weight balance violated: 52|16 exceeds slack 47 (cut=8)").
+Fix: added pub vweight:Vec<i64> to UndirectedGraph (+ part_weights/
+total_weight helpers); from_csc_unit_weights and all test build helpers
+set vec![1;n]; graph_to_undirected carries g.vwgt[v] as i64 (max 1);
+flow_refine balance check now uses part_weights + weight slack
+floor((1+eps)*ceil(W/2)). count_parts gated #[cfg(test)] (only test use
+left). GREEN: feral-kahip 63/63. Oracle = KaHIP/Sanders-Schulz weight
+balance constraint (a generalization of the existing count formula),
+not derived from the impl. User-visible (partition balance quality on
+weighted/coarse levels) -> CHANGELOG entry added.
+ASIDE: the pre-O16 `cargo test --workspace` also exposed an O13
+aftershock (feral issue_3 KKT test pinned the old AMD-degeneracy);
+fixed + committed separately (see prior journal entry) before O16 so
+O16 lands on a green tree.
+Next per /loop: do NOT start O17; continuing in-turn per 'finish tonight'.
+
+* 01:55 :kahip:o17:data-reduction:degree2:perf:tried-rejected:
+O17 (repo-review): apply_degree2 (data_reduction.rs:299) seed scan at :309
+does (0..n).find(alive && !skip && degree==2) every outer iteration -> O(n^2)
+on one long degree-2 chain. Perf finding, no wrong answer.
+NOT reproducible as a test: quadratic-vs-linear needs a timing oracle (flaky,
+disallowed) -> no RED. Mirrors O9.
+Code reading killed the obvious fix (a non-rewinding cursor): the SIMPLICIAL
+collapse (:399-405) removes the chain interior with NO compensating (u,w) edge
+when u~w already, so endpoint u drops one degree -> a degree-3 endpoint at
+index < seed becomes a fresh degree-2 seed. from-0 scan picks lowest-index
+eligible each iter and collapses it THIS call; a cursor past it defers to the
+next fixed-point round (driver loop :215-230), reordering the Degree2Path op
+stack -> different reconstructed permutation (expand replays stack in reverse).
+So a cursor is NOT behavior-preserving. Order-preserving O(n log n) fix is a
+min-index worklist (heap keyed by index, lazy staleness recheck on pop); left
+for whoever enables Rule 2. Rule 2 is test-only today: driver (node_nd.rs:45)
+uses ReduceOptions::conservative() (Rule 1 only); full() is #[cfg(test)]. So
+the O(n^2) is latent, never on a prod path.
+Disposition: tried-and-rejected citing O17 + safe sub-fix = a code comment at
+:307 documenting the O(n^2), the simplicial-degree-drop trap, and the correct
+worklist fix. Pure doc change, no behavior change; existing Rule 2 tests
+(path_n5_collapses_to_branch_endpoints, degree2_compression_fires_on_isolated_chain,
+k_2_3_collapses_via_degree2_then_closed_twins,
+triangle_with_tail_collapses_via_rule1_then_closed_twins) are the guard.
+cargo test -p feral-kahip green. Not user-visible -> no CHANGELOG.
+Next per /loop: do NOT start O18; continuing in-turn per 'finish tonight'.
+
+* 02:20 :kahip:o18:stats:n-components:cycles:RED-GREEN:
+O18 (repo-review): kahip stats drift, two facets.
+(1) n_components computed in run_top (node_nd.rs:89-102) then thrown away via
+two `let _ =` sinks (ncc and a redundant nonempty counter); KahipStats had no
+field, unlike MetisStats/ScotchStats which both expose pub n_components:u32,
+populate `stats.n_components = ncc as u32` (metis node_nd.rs:41, scotch :82)
+and test assert_eq!(.,2) (metis:504, scotch:640). REPRODUCIBLE: the existing
+handles_disconnected_components test (two 8x8 grids, 128 v) already threads
+stats but never asserted n_components. Added assert_eq!(stats.n_components, 2);
+RED pre-fix (field absent -> compile error / 0). Added pub n_components:u32 to
+KahipStats; run_top now sets stats.n_components = ncc as u32 (removed both
+`let _ =` and the redundant local counter). GREEN.
+(2) cycles doc drift: struct doc "V-cycles completed" is right in aggregate
+(one multilevel_bisection = one V-cycle), but the inline comment cycle.rs:56
+"Coarsening levels observed at this bisection attempt" was WRONG (next line
+adds 1, not the level count, and it's not levels). Corrected the inline
+comment and tightened the struct doc (dropped the "(or F-cycles)" ambiguity;
+stated it counts multilevel bisections, one per node-separator computation).
+Doc-only facet, no behavior change; folded into the same O18 commit since
+O18 overall IS reproducible -> not tried-and-rejected.
+New public field on KahipStats = user-visible -> CHANGELOG. cargo test
+-p feral-kahip green (64 incl. the new assert).
+Next per /loop: do NOT start O19; continuing in-turn per 'finish tonight'.
+
+* 02:45 :kahip:o19:flow:push-relabel:gap-histogram:dead-code:tried-rejected:
+O19 (repo-review): flow.rs:271-279 stranded-vertex branch sets height[u]=2n and
+returns WITHOUT height_count[old_h] -= 1 (the normal relabel path does it at
+286-287) -> would corrupt the gap histogram. But it's UNREACHABLE: discharge
+reaches relabel only past `if excess[u]==0 return` (:254), so excess[u]>0; an
+active vertex always has a residual reverse edge (reverse of whatever delivered
+its excess), so the relabel scan (265-269) always finds a finite new_height ->
+new_height==usize::MAX (271) never happens. The old inline comment ("can happen
+for vertices that can't reach sink") was WRONG for an active vertex.
+NOT reproducible (dead branch, no RED constructible) -> tried-and-rejected
+citing O19. Safe sub-fix (finding says "add a debug_assert or comment" — did
+both): debug_assert_ne!(new_height, usize::MAX, ...) after the relabel scan
+pins the invariant; replaced the misleading branch comment with an
+"unreachable defensive fallback" note flagging the latent histogram corruption.
+Did NOT add the height_count decrement — unreachable => untestable dead-code
+behavior, tests-first forbids. Guard = existing flow suite (~15 tests driving
+push_relabel); green => assert never fires. debug_assert_ne! on a runtime var,
+no clippy assertions_on_constants. Internal -> no CHANGELOG.
+cargo test -p feral-kahip green.
+Next per /loop: do NOT start O20; continuing in-turn per 'finish tonight'.
+
+* 03:05 :metis:o20:node-nd:invert-iperm:harmonize:RED-GREEN:tried-rejected:
+O20 (repo-review): 6 ND helper fns copied across metis/scotch/kahip node_nd.rs,
+drifted. CORE (consolidate into feral-ordering-core) = structural refactor, no
+defect, no RED, multi-crate risk -> deferred to tried-and-rejected citing O20.
+Two named drifts assessed:
+ (A) sortedness: metis graph_to_csc_pattern (:254-279) splices diagonal at first
+     nbr>v relying on sorted adjncy; kahip (:219-228) sorts defensively. Benign:
+     build_induced keeps sorted order + CscPattern::new rejects unsorted (O3) ->
+     fails loudly not silently. Documented only; no dead defensive sort added.
+ (B) dup check: metis inverted iperm INLINE in nd_order (54-61): perm=vec![0;n],
+     range check only, NO duplicate-position check. scotch (invert_iperm 433-450)
+     and kahip (328-345) init -1 and reject perm[np]>=0. metis would SILENTLY
+     emit a non-bijection on a duplicate position (0-init undetectable). TESTABLE.
+Fix (B): extracted metis fn invert_iperm mirroring siblings (init -1, range +
+"metis nd produced duplicate position" check); nd_order now calls it. Behavior-
+neutral on reachable inputs (valid bijection writes each pos once). RED->GREEN
+test invert_iperm_rejects_duplicate_positions: [2,0,1]->[1,2,0] ok; [0,0,2]->Err;
+[3,0,1]->Err. RED pre-fix = no invert_iperm fn (compile error).
+cargo test -p feral-metis green. Internal fn -> no CHANGELOG. Cross-crate
+consolidation remains open in tried-and-rejected.
+Next per /loop: do NOT start O21; continuing in-turn per 'finish tonight'.
+
+* 03:35 :amf:o21:quotient-graph:wf-sentinel:non-reproducible:tried-rejected:
+O21 (repo-review, FINAL O-series finding): AMF finalize_step_amf
+(feral-ordering-core/src/quotient_graph/algo.rs) overloads wf[e]=0 as the
+lazy-cache "uncached this iter" sentinel (Pass-1 line 955). Pass-2 (983-988
+aggressive / 1015-1018 non-agg) does `if wf[e]==0 { wf[e]=amf_wf_surface(...) }`
+then wf4+=wf[e]. amf_wf_surface(dext,deg)=dext*(2*deg-dext-1) is genuinely 0 when
+dext==2*deg-1 (e.g. dext=1,deg=1), so a LIVE element with true surface 0 leaves
+wf[e]=0 and is recomputed by every later member that touches it. NON-REPRODUCIBLE
+as a defect: amf_wf_surface is pure in (dext,degree[e]), both stable across one
+Pass-2, so recompute == cached value (0); the triple (deg,wf3,wf4), RMF score and
+permutation are identical. Only effect = a few extra int muls => missed
+micro-opt, same class as O9/O11/O17 perf findings, no RED constructible.
+Distinguishing sentinel (-1) REJECTED: wf is reused for variable scores
+(supervariable merge max, re-insertion bucket quantize), so -1 would have to be
+proven never to leak into either across AMD+AMF paths — added correctness risk
+for a few ops; "correctness before performance". Routed to tried-and-rejected
+citing O21. Safe sub-fix (O17 precedent): comment block at line 955 documenting
+the intentional overload + benign recompute + why no sentinel; one-line pointers
+at the two check sites. No behavior change. cargo test -p feral-ordering-core
+green. Not user-visible -> no CHANGELOG.
+Per /loop "When done do not start the next issue": O21 is the LAST O-series
+finding -> the loop STOPS after this commit. Session-end checkpoint follows.

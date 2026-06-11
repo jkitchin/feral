@@ -741,3 +741,83 @@ fn test_issue36_block_size_128_no_panic() {
     assert_eq!(blocked.nelim, n, "issue36 nelim should be full n");
     assert_eq!(blocked.inertia.zero, 0, "issue36 SPD has no zero pivots");
 }
+
+/// Finding D2 (`dev/research/repo-review-2026-06-09.md`): the panel's
+/// inline 2×2 accept path skipped the MA57 static-pivot perturbation
+/// (`perturb_2x2_to_floor`) that `scalar_pivot_step` applies before the
+/// growth/det gates, so with `static_pivot_floor > 0` a sub-floor 2×2
+/// accepted inline diverged from the scalar path in `d_diag`,
+/// `needs_refinement`, and possibly inertia — violating the module's
+/// documented panel/scalar bit-parity contract.
+///
+/// Construction: an isolated antidiagonal 2×2 block
+///   A[0,0] = A[1,1] = 0, A[1,0] = δ  (eigenvalues ±δ)
+/// decoupled from a strictly diagonally-dominant SPD trailing block
+/// (columns 2..n). BK selects a 2×2 at column 0 (akk = 0 < α·γ₀ with
+/// γ₀ = δ); `gamma_r` picks up the block off-diagonal δ via
+/// `symmetric_row_offdiag_max`'s left-of-diagonal sweep, so the no-swap
+/// inline path is reached (arr = 0 < α·δ). The isolated block makes
+/// rmax = tmax = 0, so the Duff-Reid growth bound passes; the SSIDS det
+/// floor passes too (|detpiv| = δ ≥ cancel_floor = δ/2). With
+/// δ = 1e-3 < static_pivot_floor = 1e-1 the scalar path perturbs the
+/// block to the floor (and sets `needs_refinement`); pre-fix the panel
+/// accepted it unperturbed.
+///
+/// Oracle: the scalar `factor_frontal` path, which already perturbs.
+/// Pre-fix this fails on `d_diag[0]` (0.0 vs the perturbed floor) and
+/// `needs_refinement` (false vs true); post-fix it is byte-identical.
+/// `n=80` crosses the 64-column block boundary so the blocked kernel
+/// genuinely uses the panel for column 0.
+#[test]
+fn test_d2_panel_inline_2x2_static_pivot_floor_parity() {
+    let n = 80usize;
+    let delta = 1e-3f64;
+    let floor = 1e-1f64;
+    let params = BunchKaufmanParams {
+        on_zero_pivot: ZeroPivotAction::ForceAccept,
+        pivot_threshold: 0.01,
+        static_pivot_floor: floor,
+        ..BunchKaufmanParams::default()
+    };
+
+    // Lower-triangle, column-major: data[j*n + i] = A[i, j] for i >= j.
+    let mut data = vec![0.0f64; n * n];
+    // Isolated antidiagonal 2×2 at (0,1): eigenvalues ±δ, both |·| < floor.
+    data[1] = delta; // A[1,0] = δ; A[0,0] = A[1,1] = 0 already.
+                     // Strictly diagonally-dominant SPD trailing block on columns 2..n,
+                     // fully decoupled from columns 0 and 1 (A[i,0] = A[i,1] = 0, i ≥ 2).
+    let mut state = 0xD2_0000_1234u64;
+    for j in 2..n {
+        for i in (j + 1)..n {
+            data[j * n + i] = rng_scalar(&mut state, i * n + j) * 0.01;
+        }
+        data[j * n + j] = (n as f64) + 1.0;
+    }
+    let mat = SymmetricMatrix { n, data };
+
+    let scalar = factor_frontal(&mat, n, false, &params).unwrap();
+    let blocked = factor_frontal_blocked(&mat, n, false, &params).unwrap();
+
+    // Sanity: the construction must actually exercise the inline 2×2 with
+    // a perturbed sub-floor block on the scalar (oracle) side, otherwise
+    // the test proves nothing.
+    assert_eq!(scalar.nelim, n, "scalar should eliminate all columns");
+    assert!(
+        scalar.needs_refinement,
+        "scalar oracle must have perturbed the sub-floor 2×2 \
+         (needs_refinement); construction no longer triggers D2"
+    );
+    // The perturbation lifts the small *eigenvalue* to the floor by
+    // shifting both diagonals by τ = floor − δ, so the diagonal entry
+    // lands at floor − δ (≈ 0.099), comfortably above the unperturbed
+    // 0.0 the panel produced pre-fix.
+    assert!(
+        scalar.d_diag[0].abs() >= floor / 2.0,
+        "scalar oracle d_diag[0]={} should be lifted well above 0 \
+         (floor {}); construction no longer triggers D2",
+        scalar.d_diag[0],
+        floor
+    );
+
+    assert_frontals_byte_identical(&scalar, &blocked, "d2_static_pivot_floor");
+}

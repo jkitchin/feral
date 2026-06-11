@@ -60,22 +60,41 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
     labels[seed] = PART_A;
     let mut a_weight: i64 = graph.vwgt[seed] as i64;
 
-    // Track each unassigned vertex's "gain" = (edges to part 0) - (edges to part 1).
-    // A priority-ish structure without a full PQ: we pick the vertex
-    // with largest gain via linear scan over the boundary set. On
-    // coarsest graphs (n <= coarsen_floor = 120) this is fine.
+    // GGP gain of pulling a boundary vertex v (still in B) into A is
+    //   (edges to A) - (edges to B),
+    // i.e. the reduction in cut. Since every neighbour of an in-B
+    // vertex is in A or B, edges_to_B(v) = wtot[v] - edges_to_A(v), so
+    // the gain equals 2*edges_to_A(v) - wtot[v]. We accumulate the
+    // edges-to-A term in `gain` and apply the `- wtot` correction in
+    // the selection scan below; selecting on edges-to-A alone would
+    // bias toward high-degree vertices and inflate the cut.
+    //
+    // No full PQ: pick the max-gain vertex via a linear scan over the
+    // boundary set. On coarsest graphs (n <= coarsen_floor = 120) this
+    // is fine.
     let mut gain: Vec<i32> = vec![0; n];
     let mut in_boundary: Vec<bool> = vec![false; n];
     let mut boundary: Vec<i32> = Vec::new();
 
-    // Populate gains for seed's neighbors.
+    // Per-vertex total incident edge weight (constant). Turns the
+    // edges-to-A accumulator into the true GGP gain in the scan below.
+    let mut wtot: Vec<i32> = vec![0; n];
+    for (v, wt) in wtot.iter_mut().enumerate() {
+        let lo = graph.xadj[v] as usize;
+        let hi = graph.xadj[v + 1] as usize;
+        for k in lo..hi {
+            *wt = wt.saturating_add(graph.adjwgt[k]);
+        }
+    }
+
+    // Add v's still-in-B neighbours to the boundary and credit each
+    // with the v–u edge weight on the A side.
     let push_neighbors = |v: usize,
                           graph: &Graph,
                           labels: &[u8],
                           gain: &mut [i32],
                           in_boundary: &mut [bool],
-                          boundary: &mut Vec<i32>,
-                          adding_to_a: bool| {
+                          boundary: &mut Vec<i32>| {
         let lo = graph.xadj[v] as usize;
         let hi = graph.xadj[v + 1] as usize;
         for k in lo..hi {
@@ -83,12 +102,9 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
             if labels[u] != PART_B {
                 continue;
             }
-            // v is in A, u is in B. Edge (v,u) contributes +adjwgt to
-            // u's gain to move into A (one more edge on the A side).
-            let w = graph.adjwgt[k];
-            if adding_to_a {
-                gain[u] = gain[u].saturating_add(w);
-            }
+            // v is in A, u is in B: edge (v,u) is one more edge on u's
+            // A side.
+            gain[u] = gain[u].saturating_add(graph.adjwgt[k]);
             if !in_boundary[u] {
                 in_boundary[u] = true;
                 boundary.push(u as i32);
@@ -103,18 +119,18 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
         &mut gain,
         &mut in_boundary,
         &mut boundary,
-        true,
     );
 
     while a_weight < target_a && !boundary.is_empty() {
         // Pick best-gain boundary vertex.
         let mut best_i: usize = 0;
-        let mut best_g: i32 = i32::MIN;
+        let mut best_g: i64 = i64::MIN;
         for (i, &v) in boundary.iter().enumerate() {
             if labels[v as usize] != PART_B {
                 continue;
             }
-            let g = gain[v as usize];
+            // True GGP gain: edges_to_A - edges_to_B = 2*edges_to_A - wtot.
+            let g = 2 * gain[v as usize] as i64 - wtot[v as usize] as i64;
             if g > best_g {
                 best_g = g;
                 best_i = i;
@@ -137,7 +153,6 @@ pub fn initial_bisect_ggp(graph: &Graph, rng: &mut SplitMix, target_a: i64) -> V
             &mut gain,
             &mut in_boundary,
             &mut boundary,
-            true,
         );
     }
     labels
@@ -307,5 +322,47 @@ mod tests {
         let a = initial_bisect_ggp(&g, &mut r1, target);
         let b = initial_bisect_ggp(&g, &mut r2, target);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn ggp_uses_true_gain_not_edges_to_a() {
+        // Weighted graph that separates the *true* GGP gain
+        // (edges_to_A - edges_to_B) from edges-to-A alone. Selecting on
+        // edges-to-A would pull in a high-degree vertex that inflates
+        // the cut; the documented GGP gain must not.
+        //
+        //   index 0 = s  (seed; SplitMix seed 1 makes gen_range(7) == 0)
+        //   index 1 = w : s--w weight 3                 (W[w] = 3)
+        //   index 2 = u : s--u weight 5, u--b1..b4 wt 1  (W[u] = 9)
+        //   index 3..6  = b1..b4 : each only u--bi weight 1
+        //
+        // After seeding s the boundary is {w, u}:
+        //   edges_to_A:  w = 3, u = 5  -> max-edges-to-A picks u (wrong).
+        //   true gain (2*edges_to_A - W): w = 6-3 = 3, u = 10-9 = 1
+        //     -> GGP must pick w. Pulling u gives cut 7; w gives cut 5.
+        let g = Graph {
+            nvtxs: 7,
+            xadj: vec![0, 2, 3, 8, 9, 10, 11, 12],
+            adjncy: vec![1, 2, 0, 0, 3, 4, 5, 6, 2, 2, 2, 2],
+            adjwgt: vec![3, 5, 3, 5, 1, 1, 1, 1, 1, 1, 1, 1],
+            vwgt: vec![1; 7],
+        };
+        let mut rng = SplitMix::new(1);
+        // target_a = 2: seed (weight 1) plus exactly one pulled vertex.
+        let labels = initial_bisect_ggp(&g, &mut rng, 2);
+        assert_eq!(labels[0], PART_A, "seed s must be in A");
+        assert_eq!(
+            labels[1], PART_A,
+            "true GGP pulls low-degree w (gain 3) into A, not high-degree u (gain 1)"
+        );
+        assert_eq!(
+            labels[2], PART_B,
+            "high-degree u must stay in B under the true GGP gain"
+        );
+        assert_eq!(
+            cut_size(&g, &labels),
+            5,
+            "correct GGP cut is 5, not the buggy 7"
+        );
     }
 }

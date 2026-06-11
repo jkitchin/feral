@@ -216,8 +216,14 @@ pub fn metis_order_full(
     // `dense_quotient_threshold` (default `max(40, 10*sqrt(n))`) out
     // of the ND input graph, run M1–M7 ND on the *sparse-induced*
     // subgraph, and append the dense columns at the end of the
-    // returned permutation. Same technique as HSL_MC68 / MUMPS
-    // ICNTL(6) / SSIDS. See `MetisOptions::dense_quotient_enabled`.
+    // returned permutation. This was originally modelled on a belief
+    // that HSL_MC68 / MUMPS ICNTL(6) / SSIDS pre-strip dense rows, but
+    // a 2026-04-27 audit of the MUMPS and SPRAL sources found that
+    // belief wrong: ICNTL(6) is MC64 matching, MUMPS defers dense rows
+    // inside QAMD, and SSIDS does not special-case them — neither
+    // pre-strips the graph. See `MetisOptions::dense_quotient_enabled`
+    // for the full finding. The path is kept opt-in (default off) for
+    // diagnostic use only.
     let (sparse_pat_storage, dense_cols, sparse_to_orig) =
         if opts.dense_quotient_enabled && pattern.n > 0 {
             split_dense_columns(pattern, opts)?

@@ -1,14 +1,24 @@
-//! Reproducer for issue #3: ScotchND silently falls back to AMD on
-//! KKT-shaped matrices.
+//! Regression test for issue #3: ScotchND used to silently fall back
+//! to AMD on KKT-shaped matrices, then was fixed by O13.
 //!
 //! Builds a small PoissonControl KKT *pattern* (n_kkt = 3K²), runs
 //! `feral_scotch::scotch_order_full` and `feral_amd::amd_order` on the
-//! same full-symmetric pattern, and asserts what each branch produced.
-//! The interesting assertion is `n_amd_leaf_calls` in `ScotchStats`:
-//! if the entire ND recursion bottoms out in AMD leaves (or even one
-//! top-level degenerate-bisection fallback), the resulting permutation
-//! is byte-equal to AMD's, while `resolved_method` (in the caller)
-//! still says `ScotchND`.
+//! same full-symmetric pattern, and compares them.
+//!
+//! History: originally this test *locked in* the degenerate symptom —
+//! the vertex-separator FM stopped as soon as both priority-queue heads
+//! were imbalance-rejected (the O13 bug), leaving a one-sided bisection;
+//! `node_nd` then hit its `a_verts.is_empty() || b_verts.is_empty()`
+//! guard and emitted a whole-graph `amd_leaf`, so the ScotchND
+//! permutation was byte-equal to AMD's (`n_separator_vertices == 0`)
+//! while the caller still reported `ScotchND`.
+//!
+//! O13 lets FM skip the infeasible heads and keep refining, so the
+//! bisection is now balanced and genuine nested dissection proceeds.
+//! This test now guards against regressing back to that degenerate
+//! path. (It does not by itself close issue #3 — the upper-layer
+//! visibility/fallback machinery is unaffected — but the specific KKT
+//! degeneracy that motivated the issue no longer reproduces here.)
 
 use feral_amd::amd_order;
 use feral_ordering_core::CscPattern;
@@ -82,11 +92,12 @@ fn poisson_kkt_pattern(k: usize) -> (Vec<i32>, Vec<i32>, usize) {
 }
 
 #[test]
-fn issue_3_scotch_bisection_degenerates_on_kkt() {
-    // Locks in the bisection-degenerate symptom on a KKT pattern.
-    // Independent of how the upper layer surfaces the fact, this
-    // asserts that scotch_nd never produces a separator on this
-    // shape — which is *why* the upper-layer fallback fires.
+fn issue_3_scotch_recurses_on_kkt_after_o13() {
+    // Guards the post-O13 behavior on a KKT pattern: the
+    // vertex-separator FM no longer stops early at imbalance-rejected
+    // heads, so the top-level bisection is balanced and genuine nested
+    // dissection runs instead of degenerating into a whole-graph AMD
+    // leaf. See the module doc for the pre-O13 history.
     let k = 20; // n_kkt = 1200; nnz_per_row ~ 4.9 on full-symmetric
     let (col_ptr, row_idx, n) = poisson_kkt_pattern(k);
     let pat = CscPattern::new(n, &col_ptr, &row_idx).expect("pattern valid");
@@ -95,22 +106,20 @@ fn issue_3_scotch_bisection_degenerates_on_kkt() {
     let (scotch_perm, _ostats, sstats) =
         scotch_order_full(&pat, &ScotchOptions::default()).expect("scotch ok");
 
-    eprintln!("issue #3 reproducer: n={}, scotch stats={:?}", n, sstats);
+    eprintln!("issue #3 (post-O13): n={}, scotch stats={:?}", n, sstats);
 
-    // Bisection produced no separator → recursion bottomed out in
-    // amd_leaf for the entire graph → permutation matches AMD's.
-    assert_eq!(
-        sstats.n_separator_vertices, 0,
-        "ScotchND was expected to degenerate (no separator) on KKT; \
-         if this fires, the SCOTCH driver has improved and the \
-         visibility-fix rationale should be re-checked"
-    );
+    // Post-O13: bisection is no longer degenerate, so ND produces a
+    // genuine separator. (Pre-O13 this was 0 — a whole-graph fallback.)
     assert!(
-        sstats.n_amd_leaf_calls >= 1,
-        "expected at least one amd_leaf fallback on a degenerate-bisection KKT"
+        sstats.n_separator_vertices > 0,
+        "post-O13 ScotchND must produce a real separator on KKT (no \
+         degenerate one-sided bisection); got {}",
+        sstats.n_separator_vertices
     );
-    assert_eq!(
+    // Because real ND ran, the permutation diverges from the pure-AMD
+    // fallback the degenerate path used to emit byte-for-byte.
+    assert_ne!(
         amd_perm, scotch_perm,
-        "if bisection produced no separator, the perm must equal AMD's exactly"
+        "post-O13 ScotchND should no longer be byte-equal to AMD on KKT"
     );
 }

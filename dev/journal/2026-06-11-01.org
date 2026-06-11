@@ -1,0 +1,289 @@
+#+TITLE: FERAL session journal 2026-06-11-01
+#+STARTUP: showall
+
+* Session goal :meta:
+Fix the four regressions (REG-1..REG-4) found in
+dev/research/repo-review-2026-06-09-verification.md — the independent audit
+of the 85-commit repo-review fix campaign. Each fix starts with a reproducing
+test; one atomic commit per regression; verifier's suggested order
+(REG-1, REG-2 + revisit D13, REG-3, REG-4 + X6 one-liner). These are
+numeric-core/harness bugs from earlier campaign sessions, distinct from the
+now-complete per-finding /loop (O-series).
+
+* 03:10 :reg1:permute-cache:silent-wrong-answer:
+REG-1 (high): the N7 one-shot PermuteCache (131a6de) keyed its warm-path
+validation on (input_n, input_nnz, value_map.len()) only — not the input
+*pattern* (col_ptr + row_idx) or perm_inv. So on one Solver: factor pattern A
+twice (call 2 builds A's value_map cache), then factor a *different* pattern B
+with the same (n, nnz) — B-call-2 warm-hits A's stale value_map and scatters
+B's values through A's structure, returning Success with a silently wrong
+factorization. Verifier measured solve residual 2.1e+2 (vs 5.7e-14 cold).
+Second route: same pattern, different AutoRace permutation after
+invalidate_symbolic_cache(). Live on default sequential + Schur reuse paths.
+
+Fix (durable, exceeds the verifier's "minimal" suggestion): PermuteCache now
+stores build-time input_col_ptr, input_row_idx, input_perm_inv; the warm path
+(factorize.rs ~3543) accepts the cache only when all three match byte-for-byte
+(O(n+nnz) compare — still cheaper than the skipped from_triplets sort).
+Chose exact stored comparison over a hash deliberately: a fingerprint
+collision would reintroduce the exact silent-wrong-answer this fixes, and the
+compare is not on the asymptotic hot path. Plus defence-in-depth: a one-shot
+(pattern_reused_hint == false) call clears any existing cache (else { *cache =
+None }) so a later warm call cannot trust a stale entry.
+
+Two RED→GREEN tests, both oracled against the canonical cold-path
+permute_csc_values (factorize.rs:3474, uses only perm_inv — the established
+oracle): permute_cache_rejects_stale_pattern_same_n_nnz (pattern A then a
+distinct same-(n,nnz) pattern B; asserts B warm == canonical B) and
+permute_cache_rejects_stale_permutation (arrow pattern, identity perm builds
+cache, reversed perm warm call; asserts == canonical). First draft of the
+perm test PASSED at HEAD (should have been RED) — the probe was a constant
+tridiagonal matrix, invariant under index reversal, so stale and canonical
+structures coincided and hid the bug; switched to an arrow pattern (dense
+first column) whose permuted structure genuinely changes under reversal, then
+both went RED ([0,4,5,6,7] stale vs [0,2,4,6,7] canonical) → GREEN after fix.
+Existing N7 test (permute_cache_not_built_for_one_shot_caller) still green.
+cargo test --lib permute_cache: 3 passed. cargo test --workspace: 0 failures.
+User-visible (silent wrong answer on default path) → CHANGELOG Fixed entry.
+
+* 08:14 :reg2:static-pivot:nan:do-2x2-pivot:
+REG-2 (high, knob-gated): perturb_2x2_to_floor (factor.rs:733) lifts the
+smaller-|eigenvalue| of a 2×2 block to the floor by adding the SAME τ to both
+diagonals (a00+τ, a11+τ) — a scalar shift τI, which moves BOTH eigenvalues by
+τ. A BK-selected 2×2 is always indefinite (opposite-sign eigenvalues), so when
+the small one is pushed OUT to +floor the other (negative) one moves TOWARD
+zero. Verifier example: block [[-0.5,1],[1,-0.5]], eig {0.5,-1.5}; floor=2.0 →
+τ=1.5 → perturbed [[1,1],[1,1]], eig {2,0} → det exactly 0. The unblocked
+factor() kernel's do_2x2_pivot then computes t = 1/(d00·d11−1) = d10²/det
+(factor.rs:4777) with det=0 → t=inf → rank-2 update writes NaN to D, ±inf to L,
+returns Success with wrong inertia. The frontal (factor.rs:2763) and scalar
+(factor.rs:3779) paths re-gate the PERTURBED block via ssids_det_floor_fail and
+fall back to 1×1; the unblocked path did not. This is the live half of D5
+(whose rejection was sound only at the DEFAULT floor=0, where the perturbation
+never fires and a BK 2×2 has det ≤ −0.59γ₀²).
+
+Fix: in factor()'s 2×2 branch, before calling do_2x2_pivot, if
+static_pivot_floor > 0 and perturb_2x2_to_floor would fire, re-check the
+perturbed block with ssids_det_floor_fail; if it fails, fall back to
+do_1x1_pivot at k (Fail → error; ForceAccept/PerturbToEps → needs_refinement +
+1×1). Mirrors scalar_pivot_step exactly. Byte-identical at floor=0 (guarded by
+the static_pivot_floor > 0 check). RED→GREEN test
+perturb_singular_2x2_does_not_produce_nan_factor: with the guard neutralized
+(> f64::INFINITY) d_diag=[1.0,1.0,NaN] (factor.rs panic at the assert); with the
+guard restored all of D and L finite, inertia sums to 3. External oracle = "a
+valid LDLᵀ factor never contains NaN/inf." 6 static_pivot_tests pass; full
+workspace test (63 result groups) 0 failures.
+
+D13 revisit (verifier asked to revisit it with REG-2): D13 is about a DIFFERENT
+path. D13 = update_2x2_block32 / do_2x2_update's det==0 EARLY-RETURN no-op
+(factor.rs:4225, block_ldlt32.rs:252) leaving raw A in L — a characterized,
+tested contract (update_2x2_block32_singular_is_noop), NOT a NaN. REG-2 is
+do_2x2_pivot's SEPARATE inline rank-2 update (factor.rs:4756-4824) whose
+t=1/(d00·d11−1) is UNguarded → NaN. Verified by caller analysis: do_2x2_pivot
+has exactly one production caller (factor()'s unblocked loop, line 1104) and
+never calls do_2x2_update/update_2x2_block32; the scalar/frontal paths call
+do_2x2_update but re-gate via ssids_det_floor_fail first (so a singular block is
+diverted to 1×1 before the no-op is reached). So: do_2x2_update and
+update_2x2_block32 already no-op on det==0 (no NaN); their gated callers divert
+upstream; my REG-2 fix adds the same upstream divert to the one path that
+lacked it (do_2x2_pivot). D13's deferral remains accurate and is unchanged by
+this fix — its no-op is correct for the block path, never handed a singular
+block from a gated caller. No D13 code change.
+
+* 08:33 :reg3:sparse-solve:det-floor:d4:silent-wrong-answer:
+REG-3 (medium): the sparse 2×2 D-block solves gated inversion on the NAIVE
+absolute floor det.abs() > zero_tol_2x2 at two sites — solve_sparse_core_into
+(solve.rs:281) and dsolve_node (solve.rs:799). Finding D4 had already replaced
+exactly this absolute test on the DENSE solve path (dense/solve.rs:d_block_solve)
+with the scale-invariant ssids_det_floor_fail, but the port never reached the
+sparse solves. Consequence: a well-conditioned 2×2 at small absolute scale (true
+|det| < zero_tol_2x2 ≈ EPS²) is ACCEPTED + stored invertible by the factor
+(SSIDS floor) but SILENTLY SKIPPED by the sparse solve — that RHS segment is left
+untouched, wrong solution, no error, no flag.
+
+Fix: extracted a shared module-level helper solve_2x2_dblock(a,b,c,z0,z1) ->
+Option<(f64,f64)> gated on !ssids_det_floor_fail; routed both sparse sites
+through it. Accepted-block arithmetic is the prior normalized/b-tiny-direct
+kernel verbatim → bit-parity on accepted blocks; only the GATE changed (naive
+absolute → scale-invariant SSIDS). dense and sparse solve gates now agree, and a
+block the factor stores is a block the solve inverts.
+
+RED→GREEN (oracle = rhs = D·x_true hand-computed, pure linear algebra,
+independent of solver, mirrors tests/d4_solve_2x2_gate.rs):
+reg3_sparse_dsolve_small_scale_2x2_inverted through dsolve_node with
+D=[[1e-16,1e-17],[1e-17,1e-16]] (det 9.9e-33 < zero_tol_2x2 4.93e-32 → naive
+skips; ssids accepts: max_piv 1e-16, detpiv 9.9e-17 > cancel_floor 5e-17). With
+the helper's gate temporarily reverted to the naive absolute floor the test went
+RED — w = [1.1e-16, 1.1e-16] (block skipped, off from [1,1] by 16 orders) and
+reg3_helper_inverts_small_scale_block also RED; restoring ssids_det_floor_fail →
+all GREEN. reg3_rejected_block_skipped_by_helper (ill-conditioned [[2^53+1,2^53],
+[2^53,2^53]], detpiv 0) returns None under BOTH gates — pins that the fix did not
+start inverting blocks the factor rejects. Full workspace (63 result groups) 0
+failures, so accepted-block bit-parity holds on every existing solve test.
+Only these 2 sites used zero_tol_2x2 (grep-confirmed). User-visible silent
+wrong answer → CHANGELOG Fixed entry.
+
+* 08:55 :reg4:x2:x6:mtx:csc:validate:disposition:
+REG-4 (medium, process+harness integrity): X2 was the ONLY repo-review finding
+with no fix, no tried-and-rejected entry, no journal mention — both halves live,
+and the X10 fix had enshrined the unvalidated behavior in a passing test
+(huge_nnz_header_does_not_abort asserted Ok with entries.len()==2 for a 10^17-nnz
+header). Gave it a real disposition (not a deferral — the irony of deferring "the
+finding with no disposition" was the point).
+
+Three fixes (one commit, REG-4/X2 + X6 residual):
+1. parse_mtx: validate declared nnz == actual data-line count (mtx.rs, after the
+   parse loop). Pre-fix nnz was parsed (line 113) and used only as an alloc HINT
+   (clamped nnz.min(contents.len()) per X10) but NEVER checked, so a truncated/
+   corrupt file read as a valid smaller matrix. Oracle: MTX spec — the size
+   line's 3rd field IS the count of entries that follow.
+2. to_dense: sum duplicate coordinates instead of overwrite. to_csc already sums
+   (from_triplets), to_dense used from_lower_triangle->set (last-wins), so the
+   SAME file produced two different matrices by path. to_dense now builds via
+   zeros()+get/set-accumulate. Oracle: COO duplicate-summing convention (MTX /
+   scipy.sparse / MATLAB sparse). Decision recorded in decisions.md.
+3. CscMatrix::validate: reject col_ptr[0] != 0 (X6 residual). A monotone col_ptr
+   starting at k>0 with col_ptr[n]==nnz passed length/monotone/in-bounds/sorted/
+   lower-tri while row_idx/values[0..k] were never covered by any column range —
+   silently dropped. One-line check after the length check.
+
+X10 test revised: the 10^17-nnz file now returns a recoverable Err (count
+mismatch) instead of Ok — the no-ABORT property X10 protects still holds (the
+clamp prevents the multi-exabyte alloc; the test gets an Err back, not a process
+abort). Allowed: tests are not append-only and the verifier explicitly said the
+X2 fix "must revise that test."
+
+RED->GREEN evidence:
+- declared_nnz_must_match_entry_count: "3 3 4" + 2 lines → was Ok(len 2), now Err
+  "declared nnz 4 does not match the 2 entries".
+- duplicate_entries_summed_consistently_by_both_paths: (1,1)=2.0 then 1.0 → was
+  to_dense.get(0,0)=1.0 (last-wins) vs to_csc=3.0 (disagree); now both 3.0.
+- validate_rejects_nonzero_col_ptr_start: n=2 col_ptr=[1,1,2] (monotone,
+  col_ptr[2]==nnz==2, entry 0 dropped) → was Ok, now Err.
+All other mtx tests have no duplicates and declare correct nnz, so unaffected.
+Full workspace suite green.
+
+* 09:40 :lu:pivoting:dense-sparse-parity:validation:
+L2 residual (repo-review-2026-06-09-verification.md #2): the sparse LU
+diagonal-preference rule (sparse_factor.rs:316) preferred the natural diagonal
+on `pinv[diag] < 0 && |w[diag]| >= utol*amax` but, unlike the dense path
+(dense_factor.rs:268 `diag >= u*amax && diag > ztol`), lacked the `> ztol`
+conjunct. With `utol <= zero_pivot_tol` a sub-ztol diagonal could be preferred
+over the sound max-magnitude row (amax > ztol always in that branch), then the
+silent `±ztol` clamp (322-324) perturbed it without consulting on_singular — a
+sub-tolerance perturbation under Fail and a dense/sparse drift.
+
+Fix: (a) added `&& w[diag].abs() > ztol` to the diagonal-preference condition;
+(b) replaced the silent clamp with on_singular routing mirroring the dense path
+(Fail -> SingularBasis{column: qcol[k]}; PerturbToEps -> sign*abs_floor.max(|piv|)).
+With the conjunct + `amax > ztol`, both pivot choices give `|piv| > ztol`, so the
+routed guard is unreachable in practice — kept as defensive parity (loud error if
+a future change breaks the invariant, not a silent clamp).
+
+Also added LuParams::validate() (mod.rs): pivot_threshold in (0,1], zero_pivot_tol
+in [0,1) (both reject NaN/Inf via negated range test), wired into DenseLu::factor,
+DenseLu::refactor, SparseLu::factor (sparse refactor + factor_dense_columns
+delegate to factor). Verifier flagged "utol never range-validated on either path."
+
+RED->GREEN evidence:
+- sparse_diagonal_preference_respects_zero_pivot_floor: A=[[1e-14,1],[1,1]],
+  utol=1e-14, ztol=1e-13. Pre-fix perm[0]=0 (diagonal preferred, piv clamped
+  1e-14->1e-13); post-fix perm[0]=1 (max row), matching dense (oracle:
+  DenseLu::factor pivots row 1) and the hand solve A x=[2,3] -> x~=[1,2].
+- pivot_threshold_out_of_range_is_rejected: {0.0,-0.5,1.5,NaN,Inf} now Err
+  InvalidInput on both dense and sparse; u=1.0 still Ok. Pre-fix 0.0 returned Ok.
+- existing L2 test sparse_lu_honors_pivot_threshold (u=0.5, |w[diag]|=1.0 >>
+  ztol=2e-13) unchanged — conjunct doesn't alter its outcome.
+Full workspace suite: 63 result groups, 0 failures.
+
+* 10:25 :capi:scaling:bench-parity:x5:
+X5 follow-up (repo-review-2026-06-09-verification.md residual): the C-ABI shim
+(feral_new) read FERAL_SCALING via scaling_strategy_from_env_value, which maps
+both "" and an unknown spelling to None — so an unrecognized value (typo) was
+silently ignored and the default strategy ran. The bench harness, by contrast,
+warns on a non-empty unrecognized value (bench.rs scaling_strategy_from_str
+`other` arm). So bench and the shim diverged on identical input, and an operator
+running FERAL_SCALING=mc46 measured the default while believing mc46 was active.
+
+Fix: added pure predicate scaling_value_is_unrecognized(s) = !s.is_empty() &&
+scaling_strategy_from_env_value(s).is_none() (single vocabulary source, can't
+drift), and feral_new now eprintln!s the same warning bench uses (byte-identical
+message) before falling back to default. Warn-not-error is correct here: the C
+ABI's only failure channel at construction is a null return, and aborting solver
+creation on a typo'd env var would be hostile; bench also warns-and-continues.
+
+RED->GREEN: unrecognized_scaling_value_is_flagged_for_warning — "" and the six
+recognized spellings (incl. ADAPTIVE, case-insensitive) are NOT flagged; mc46/
+infnrom/garbage ARE. Pre-impl: compile error (cannot find function
+scaling_value_is_unrecognized). Post-impl: green. Existing X5 vocabulary-parity
+test (scaling_vocabulary_matches_bench_harness) unchanged (return values intact).
+Full workspace: 63 result groups, 0 failures.
+
+* 10:55 :n4:n3:n5:decisions:inertia:tracking:
+Residual item 3 + 6 (repo-review-2026-06-09-verification.md): recorded the N4
+MC64-retry latch tradeoff and the deferred N3/N5 facets as append-only log
+entries (no behavior change).
+
+N4: the mc64_retry_not_adopted latch (solver.rs) is pattern-keyed but MC64 acts
+on values, so a pattern singular at iterate k (retry not adopted, latch set)
+that becomes MC64-rescuable at k+1 on the same pattern (different values) has
+its retry suppressed -> potentially wrong inertia where the pre-latch code
+recovered. Verifier flagged this was acknowledged in the commit message only;
+given the inertia hard rule it now lives in decisions.md AND the field doc
+(solver.rs:223-247). Bound: MC64 cannot change rank, so a structurally
+rank-deficient KKT (the issue-#43 routine case the latch targets) is exactly
+safe; residual risk is a numerically-only-singular iterate. Disposition if ever
+seen to break the inertia gate: make the latch values-aware, not remove it.
+
+N3/N5 deferred facets (item 6): tracking entry in decisions.md. N3 open on the
+parallel driver — permute cache (pattern_reused_hint) never engages on the large
+matrices it targets (plain permute_csc_values), and params.small_leaf ignored
+(drift trap). N5 open — parallel-workspace churn (num_threads+1 FactorWorkspaces
+per call vs sequential pooling) and warm-permute O(nnz) col_ptr/row_idx clone.
+These are deferred perf work, not rejected approaches; guarded by the existing
+sequential/parallel bit-exactness tests. No reproducing test is meaningful for
+pure allocation churn.
+
+Docs/log-only change (doc comment + append-only decisions.md); docs-commit
+exemption applies (CI green on last code commit 87d5688). fmt+clippy still run
+via the pre-commit hook.
+
+* 11:25 :docs:repo-review:doc-batch:
+Residual 4 (verifier item 4): the ~10-site doc-residue batch. All
+documentation/comment corrections, no behavior change. Sites fixed:
+- feral-ipopt-shim/include/feral_capi.h: header claimed status codes
+  "mirror Ipopt's ESymSolverStatus" (the exact false claim X8 corrected
+  on the Rust side); rewrote to match capi.rs:13-24 — only codes 0-2
+  share Ipopt's values, FERAL_FATAL=3 collides with SYMSOLVER_CALL_AGAIN,
+  shim must translate to SYMSOLVER_FATAL_ERROR. Also documented
+  feral_num_neg's -1 sentinel (no valid factor / NULL).
+- factorize.rs + solver.rs + capi.rs static-pivot docs: "t * ||A||_inf"
+  was stale post-N2; the floor is t * ||D.A.D||_inf from the *scaled*
+  norm (scaled_matrix_infnorm + apply_post_scaling_overrides).
+- factorize.rs pattern_reused_hint: qualified "the numeric drivers" to
+  sequential+Schur only; parallel driver always rebuilds via
+  permute_csc_values regardless of the flag (open N3 facet).
+- bench.rs dense-KKT rationale: the comment mandated pivot_threshold=0.0
+  for the dense path and claimed 0.01 "zeros out structural pivots on
+  HYDCAR20/...", but the validation loop deliberately uses
+  params_kkt_sparse (0.01); per X3 (tried-and-rejected) the claim is
+  stale (DIVERGE=0 across 50 parity matrices). Rewrote to say so.
+- error.rs SingularBasis: "original basis column" is only true at factor
+  time (qcol[k], L9); solve/update paths report the pivot position —
+  qualified. NeedsRefactor: added the vanishing-bump-pivot / singular-
+  replacement-update case (L8).
+- dense/factor.rs D7 dispatch comment: named the nonexistent
+  factor_block32_in_place_with_scratch and inverted which entry is
+  in-place; factor_block32 IS the in-place pooled-scratch entry
+  delegating to factor_frontal_in_place_with_scratch. Rewrote.
+- tests/d6_contrib_uninit.rs header: claimed Miri "reports UB at the
+  extraction site" / "actual reproducing oracle", contradicting the D6
+  commit's own honesty note (Miri reports NO UB on unfixed code — f64 has
+  no validity invariant, the set_len library contract is what's violated
+  and Miri does not police it). Rewrote to a soundness/finiteness guard.
+- crates/feral-kahip/src/graph.rs vweight: "Balance constraints (K3, K4)
+  are measured against these weights" overstated K4; per
+  ordering-kahip-k4.md K4 consumes vweight but enforces no balance
+  constraint. Scoped the claim to K3.
+Docs-commit exemption applies (CI green on last code commit 87d5688);
+fmt+clippy still run via the pre-commit hook.

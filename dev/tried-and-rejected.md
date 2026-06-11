@@ -2409,3 +2409,2409 @@ feature yet separates ROSEPETAL (win) from ORTHREGF (loss). Data:
 dev/research/mc64-symbolic-skip-2026-06-06.md, dev/journal/2026-06-06-04.org.
 This closes the dense-column follow-up: both option (a) (inner-loop fast path)
 and option (b) (scaling-aware skip) are now closed with negative results.
+
+---
+
+## 2026-06-09 — D3: zero-bucket rook-rescued sub-floor 1×1 pivots (finding D3, repo-review-2026-06-09.md)
+
+**Finding (D3):** the rook-rescue 1×1 accept branch in
+`try_reject_1x1_with_rook_rescue` (`src/dense/factor.rs`) sign-counts the
+rescued pivot with no `zero_tol` / `null_pivot_tol` floor. Rook's 1×1 gate
+(`|a_rr| >= u·gamma_r`) is purely *relative*, so when the whole column is
+noise it can "rescue" a strict-zero pivot (`|d| <= zero_tol`) and count it by
+sign with no `needs_refinement` and no zero bucket — contradicting the
+issue-#54 SSIDS strict-zero rule and the F-01 band rule that
+`try_reject_1x1_frontal` implements. The finding's implied fix: make the
+rook-rescued sub-floor pivot follow the same floor convention (zero bucket /
+`needs_refinement`) the rook-free path uses.
+
+**Reproduced as a divergence, rejected as a fix — the corpus shows the
+current behavior is the *correct* one.**
+
+A synthetic self-consistency test (rook vs no-rook on the same 2×2 by
+Sylvester's law) did reproduce a ±1 inertia divergence. The 2×2 used was
+`A = [[1e-3, 1e-4], [1e-4, 1.0]]` with a wide floor `zero_tol = 1e-2`:
+- rook path (sign-count): `(2, 0, 0)`
+- rook-free reference (floors the `1e-3` pivot to zero): `(1, 0, 1)`
+
+But `A` is symmetric positive definite (`det = 1e-3 - 1e-8 > 0`, leading
+minor `1e-3 > 0`), so the **true** inertia is `(2, 0, 0)`. Rook's sign-count
+is correct; the "reference" `(1, 0, 1)` is a floor-induced artifact. The
+premise that the two paths must agree by Sylvester is flawed: Sylvester's law
+governs *exact* inertia, and `zero_tol` is a deliberate numerical floor that
+the two paths apply at different points. They legitimately differ — and the
+rook path is the more accurate of the two here.
+
+**The implied fix violates the hard inertia constraint on the real corpus.**
+Two fix attempts were tried, both regressing `parity_acopp30_0001`
+(ACOPP30, a non-singular KKT where MUMPS=`(72,137,0)` and SSIDS=`(71,138,0)`,
+both `zero=0`):
+
+1. *Inline zero-bucketing* (count a strict-zero rook rescue in the zero bucket,
+   return `Rejected`): feral → `(71, 137, 1)` — a **spurious zero**,
+   disagreeing with *both* oracles. Violates "inertia must be exactly correct
+   on non-singular matrices; on disagreement, agree with at least one oracle."
+
+2. *Decline-and-fall-through* ("option B": peek the candidate diagonal before
+   the swaps; if `|d| <= zero_tol` decline the rescue and route to the standard
+   delay / force-accept path, so non-root fronts delay to the parent and only
+   the root force-accepts as zero): feral → `(71, 137, 1)` again — same
+   spurious zero. The pivot rook was sign-counting on ACOPP30 has `|d| <= EPS`
+   (a near-exact zero in feral's elimination order), yet the matrix is
+   non-singular: the oracles resolve that DOF to a definite sign via their own
+   pivoting/delays, and feral's rook happens to recover the matching sign. Any
+   path that does *not* sign-count it (zero-bucket at root, or delay-then-zero)
+   produces the spurious singular result.
+
+**Conclusion.** On the only corpus matrix where this branch fires (ACOPP30),
+the current floor-less rook sign-count produces the inertia that *matches the
+oracles*, and every attempt to impose the floor convention regresses it to a
+spurious zero that matches *neither* oracle. The divergence the synthetic test
+exposes is real but is by design (conservative `zero_tol` floor vs. rook
+recovering the true sign of a borderline-but-nonsingular pivot). The fix
+direction is wrong: it trades a correct-but-unconventional result for a
+conventional-but-wrong one. No change made; `src/dense/factor.rs` rook branch
+left as-is.
+
+Evidence: parity 21/0 with original code (`acopp30_0001` green); the two fix
+attempts each produced `acopp30_0001 feral=(71,137,1)` vs `mumps=(72,137,0)`
+`ssids=(71,138,0)`. The synthetic SPD `(2,0,0)` vs floored `(1,0,1)` divergence
+is a floor artifact, not a bug. Journal: dev/journal/2026-06-09-01.org.
+
+*Possible future work (separate, not D3):* the rook 1×1 branch could set
+`needs_refinement = true` when the rescued pivot lands in the band
+`(zero_tol, null_pivot_tol]` — a refinement *flag* only, no inertia change, so
+it cannot regress ACOPP30. That is an additive diagnostic improvement, not the
+inertia-accounting change D3 asks for, and was not pursued here to keep the
+rejection clean. Anyone picking it up must verify it does not perturb the
+`needs_refinement` expectations of the existing `rook_rescue` tests.
+
+---
+
+## 2026-06-09 — D4 facet (a): naive-det-cancellation as an independent solve bug (finding D4, repo-review-2026-06-09.md)
+
+Finding D4 lists two facets of the solve-time 2×2 gate (`d_block_solve`,
+`src/dense/solve.rs`): (a) the gate uses the naive `a*c - b*b`, so a
+*genuinely nonsingular* block whose naive determinant rounds to exactly
+`0.0` is silently skipped; (b) the gate's floor is absolute
+(`zero_tol_2x2 ≈ EPS²`) where the factor side accepts via the SSIDS
+scale-invariant floor, so a well-conditioned block at small absolute scale
+is skipped.
+
+Facet (b) reproduced and was fixed (see the D4 commit; both sides now share
+`ssids_det_floor_fail`). **Facet (a) could not be reproduced as a
+factor-accepted-then-skipped bug and is recorded here.**
+
+A naive `a*c - b*b` rounds to exactly `0.0` only when `fl(a*c) = fl(b*b)`,
+which requires `|det| = |a·c - b·b| ≲ ULP(a*c) ≈ a·c·2⁻⁵²` — i.e. block
+condition `≳ 2⁵²`. But the SSIDS scale-invariant floor the factor side uses
+for *acceptance* rejects exactly those blocks: it tests
+`|detpiv| = |det|/maxpiv` against `½·max(|detpiv0|, |detpiv1|)`, which a
+condition-`2⁵²` block fails by a wide margin. Concretely
+`D = [[2⁵³+1, 2⁵³], [2⁵³, 2⁵³]]` has true `det = 2⁵³ > 0` (nonsingular) yet
+`detpiv = detpiv0 - detpiv1 = 2⁵³ - (2⁵³-1) = 1` rescaled, far below
+`cancel_floor = 2⁵² ≈ 4.5e15` ⇒ `ssids_det_floor_fail = true`. Verified
+numerically (`/tmp/check_a.py`): case (a) `detpiv = 0.0` (rejected); the
+genuinely-reachable small-scale case (b) `detpiv = 9.9e-17 > 5e-17`
+(accepted).
+
+So any block whose naive determinant cancels to `0.0` is ill-conditioned
+enough that the factor side never stores it as an invertible 2×2 (it delays
+or falls back to 1×1). The solve never sees such a block, so the naive
+cancellation cannot, on its own, cause a *validly-accepted* block to be
+wrongly skipped. There is no inertia/solution divergence to reproduce on
+that axis distinct from facet (b).
+
+The fix routes the solve gate through the *same* `ssids_det_floor_fail`
+predicate the factor uses, which makes solve/factor agree on this axis by
+construction (a rejected block is skipped on both sides). A hand-built
+`Factors` *can* exhibit naive-det-cancellation (the test
+`d4_rejected_block_is_skipped_like_factor` builds exactly the `2⁵³` block
+above), but that state is unreachable through the real factorization, so it
+is pinned as a *consistency* guard (the block must be skipped, matching the
+factor), not as a "should-have-been-solved" bug.
+
+Note: the cancellation-free `det_sym2x2` (fma-based) remains necessary at
+*factor* time for the inertia *sign* of borderline blocks
+(`count_2x2_inertia`), where getting `sign(det)` right on a block near the
+floor matters even though the block is rejected for inversion. That is a
+separate concern from the solve gate and is unchanged.
+
+Evidence: tests/d4_solve_2x2_gate.rs (facet b reproduced+fixed; facet a
+pinned as consistency guard), /tmp/check_a.py, dev/journal/2026-06-09-01.org.
+
+---
+
+## 2026-06-10 — D5: exactly-singular 2×2 → 1/0 → NaN in legacy `factor()` (finding D5, repo-review-2026-06-09.md)
+
+Finding D5 (`src/dense/factor.rs`, `do_2x2_pivot`): under `factor()` +
+`ForceAccept`, an *exactly singular* 2×2 pivot block makes
+`t = 1.0 / (d00*d11 - 1.0)` divide by zero → `±inf`, the rank-2 weights
+`w0/w1` become `inf`/`NaN`, and the NaN is subtracted into the entire
+trailing block. The frontal path is guarded (`do_2x2_update` early-returns
+on `det == 0`); the legacy `do_2x2_pivot` is not. Confidence in the review
+was "certain (path) / **likely** (triggering)".
+
+**The code path exists but is unreachable through `factor()`'s
+Bunch-Kaufman pivot selection — the bug cannot be triggered.** Recorded
+here per the loop's "anything that can't be reproduced" rule.
+
+### Proof of unreachability
+
+A 2×2 is selected only at step 7, after steps 3/5/6 all fail
+(`factor.rs:977-1045`). Let `γ0 = max|A[i,k]|` (col `k` off-diagonal,
+attained at row `r`), `γr = max|A[i,r]|` (row `r` off-diagonal). The
+selected block is `[[akk, d21], [d21, arr]]` with `|d21| = γ0` (since `r`
+is the argmax row of column `k`), `akk = |A[k,k]|`, `arr = |A[r,r]|`.
+
+The three rejection conditions that *force* step 7:
+- step 3 fail: `akk < α·γ0`
+- step 5 fail: `arr < α·γr`
+- step 6 fail: `akk·γr < α·γ0²`
+
+For the block to be exactly singular, `det = akk·arr − γ0² = 0`, i.e.
+`akk·arr = γ0²` (taking `arr ≠ 0`; if `arr = 0` then `det = −γ0² < 0`,
+not singular, since `γ0 ≠ 0` is guaranteed by the `gamma0 == 0` branch at
+`factor.rs:956`).
+
+From `det = 0`: `akk = γ0² / arr`. Substituting into step-6-fail:
+`(γ0²/arr)·γr < α·γ0²  ⟹  γr/arr < α  ⟹  arr > γr/α`.
+But step-5-fail says `arr < α·γr`. Together:
+`γr/α < arr < α·γr  ⟹  1/α < α  ⟹  α² > 1`.
+This is false: `α = (1+√17)/8 ≈ 0.6404 < 1`. **Contradiction.** No exactly
+singular 2×2 block can satisfy the step-5 and step-6 rejection
+conditions simultaneously, so BK never feeds one to `do_2x2_pivot`.
+
+Stronger bound (near-singular is also safe): from step-6-fail
+`akk < α·γ0²/γr` and step-5-fail `arr < α·γr`, the product
+`akk·arr < α²·γ0²`, so
+`det = akk·arr − γ0² < (α² − 1)·γ0² ≈ −0.59·γ0² < 0`.
+Every BK-selected 2×2 block is comfortably indefinite — its determinant is
+bounded *away* from zero by `(1−α²)·γ0² ≈ 0.59·γ0²`. Hence the normalized
+`d00·d11 − 1 = det/γ0² ≤ −0.59`, and `t = 1/(d00·d11−1) ∈ [−1.7, 0)` — no
+division by zero, no overflow, no NaN. The static-pivot perturbation
+(`perturb_2x2_to_floor`) only *lifts* eigenvalues away from zero, so it
+cannot create singularity either; with the default `static_pivot_floor = 0`
+it is a no-op.
+
+### Empirical corroboration
+
+A deterministic sweep (LCG-seeded, no `rand`/`Date`) of 20,000 `factor()`
+calls under `ForceAccept` — sizes n ∈ {3,4,5,6,8}, small-diagonal bias to
+provoke 2×2 pivots, and 6,667 adversarial near-singular `[[a, g],[g,
+g²/a]]` embeddings with large third-column coupling to push `γr` up —
+selected **31,092 actual 2×2 blocks** and produced **zero NaN/inf** in any
+output (`d_diag`, `d_subdiag`, `l`). Matches the proof.
+
+### Disposition
+
+No fix and no reproducing test (the path is dead code in practice). A
+defensive `if (d00*d11 - 1.0) == 0.0 { /* degenerate */ }` guard mirroring
+`do_2x2_update` is *possible* and harmless, but it would be untestable
+(unreachable) speculative hardening; deferred rather than added blind. If a
+future change to the pivot-selection α-test, the rook rescue, or the
+threshold logic ever makes a singular 2×2 selectable, this entry is the
+flag to add that guard at the same time.
+
+Evidence: proof above; sweep `runs=20000 total_2x2_blocks=31092 any_nan=0`;
+`do_2x2_pivot` at `src/dense/factor.rs` (`t = 1.0/(d00*d11-1.0)`), selection
+steps at `factor.rs:977-1047`. Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — X3: bench dense-KKT loop uses sparse pivot params (finding X3, repo-review-2026-06-09.md)
+
+The finding (severity medium, confidence "certain (mismatch) / likely (bug rather
+than undocumented change)") is that the dense KKT validation loop
+(`src/bin/bench.rs:1569`, plus the resample at `:1622`) calls
+`factor_single_front(&matrix, &params_kkt_sparse)` with `pivot_threshold = 0.01`,
+while the rationale block (`:1356-1375`) mandates `pivot_threshold = 0.0` for the
+dense path — "a non-zero threshold here sends rejected pivots through ForceAccept
+and zeros out structural pivots on e.g. HYDCAR20, METHANL8, DEGENLPA, HS118."
+`params_kkt_dense` (threshold 0.0) is built but only the synthetic micro-benchmarks
+use it. The claim: either dense pass rates are quietly depressed, or the comment is
+stale; both corrupt dense-vs-sparse triage.
+
+### The mismatch is real; the claimed consequence is NOT reproducible
+
+The mismatch itself is real by inspection (the dense loop reads `params_kkt_sparse`,
+contradicting its own rationale). But the *harmful consequence* — that threshold
+0.01 corrupts inertia / depresses pass rates on the dense single-front path — could
+not be reproduced on any available matrix, including the two the rationale names by
+name.
+
+Reproduction attempt 1 (synthetic): four small symmetric indefinite matrices with
+deliberately small structural pivots (`3x3_small_diag`, `3x3_tiny`, `4x4_kkt`,
+`2x2_indef`) factored under both param sets. Result: identical inertia, identical
+`max|L| = 1.0`, identical `needs_refinement = false` on all four. Equilibration
+(`factor_single_front` applies `equilibrate_scaling` first) normalizes magnitude,
+and BK selects 2×2 pivots for small-diagonal cases, so `pivot_threshold` never bites.
+
+Reproduction attempt 2 (named real matrices): HYDCAR20_0000 (n=198, SSIDS oracle
+inertia (99,99,0), `num_delay=60` — a genuine delayed-pivot matrix) and DEGENLPA_0065
+(n=35, oracle (20,15,0)) from `tests/data/parity/`. Both param sets give the EXACT
+oracle inertia (99,99,0) and (20,15,0) respectively, with identical `max|L|`
+(3.59 / 10.6) and identical `needs_refinement = false`. No corruption, no depressed
+pass rate.
+
+Reproduction attempt 3 (full parity sweep): all 50 parity matrices with SSIDS
+oracles and `n <= 600` factored under both `params_kkt_dense` (0.0) and
+`params_kkt_sparse` (0.01). Result: `TOTAL=50 DIVERGE=0`. Zero matrices produce
+different inertia between the two thresholds on the dense single-front path.
+
+### Root cause of the non-divergence
+
+`pivot_threshold` is immaterial to *inertia* on the dense single-front path because
+the structural-pivot-zeroing branch in `do_1x1_pivot` (`factor.rs:4521-4545`) keys on
+`|d| <= zero_tol` (strict zero), NOT on `pivot_threshold * col_max`. The band
+`zero_tol < |d| <= pivot_threshold·col_max` routes to "small but real — count by
+sign" (`:4585-4592`), which produces the same inertia as the threshold-0.0 "accept by
+sign" branch (`:4594-4600`). The threshold only flips `needs_refinement` and pivot
+*selection* swaps; on the equilibrated corpus neither changed the committed inertia
+on any of the 50 matrices. The rationale's "zeros out structural pivots on HYDCAR20"
+describes behavior that the current code (post-equilibration, post-issue-#54
+inertia-bucketing) no longer exhibits — i.e. the "comment is stale" branch of the
+finding's own disjunction is the reality.
+
+### Disposition
+
+No fix and no reproducing test. Per the /loop protocol ("anything that can't be
+reproduced goes to tried-and-rejected citing the finding ID"), X3 is recorded here
+rather than fixed: the behavioral consequence the finding asserts does not occur on
+any available matrix, so there is no failing test to drive a fix, and changing the
+harness wiring blind — with no observable difference to validate against — would be
+speculative. The one-line wiring change (`params_kkt_sparse` → `params_kkt_dense` at
+`:1569`/`:1622`) is harmless and would align code with comment, but it is a no-op on
+every matrix tested, so it is deferred rather than applied without a discriminating
+test. The stale rationale comment is the real defect; left for a documentation pass.
+If a future BK pivot-selection change ever makes the two thresholds diverge on the
+dense path, this entry is the flag to revisit both the wiring and the comment.
+
+Evidence: synthetic sweep (4 matrices, all identical); named-matrix check
+(HYDCAR20 (99,99,0), DEGENLPA (20,15,0) — both match oracle under both params); full
+parity sweep `TOTAL=50 DIVERGE=0`; `do_1x1_pivot` band logic at
+`src/dense/factor.rs:4513-4600`; bench mismatch at `src/bin/bench.rs:1569,1622` vs
+rationale `:1356-1375`. Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — D9 facets (b)/(c): legacy `factor()` 2×2 pivot-gate parity gaps (finding D9, repo-review-2026-06-09.md)
+
+Finding D9 is a drift catalog across the four duplicated 1×1/2×2 zero-pivot
+implementations in `src/dense/factor.rs`. Three facets were **fixed** in the
+companion commit (a reproducing unit test for the code defect, doc corrections
+for the two stale comments):
+
+- **(a)** `do_1x1_pivot`'s `ZeroPivotAction::PerturbToEps` arm called
+  `perturb_to_floor` without incrementing `n_tiny`, violating the documented
+  "bump at each `perturb_to_floor` call site" contract honored by its three
+  siblings. Fixed + pinned by
+  `zero_pivot_n_tiny_tests::do_1x1_pivot_perturb_to_eps_counts_n_tiny`.
+- **(d)** Stale F-01 overview comment in `try_reject_1x1_frontal` said case
+  (a') "Count as zero in inertia"; the code sign-counts (2026-05-17
+  sign-fallback) and the inline comment at the code site is correct. Comment
+  corrected.
+- **(e)** Both `needs_refinement` field docs said "when ForceAccept fired";
+  the flag is also set by `PerturbToEps`, F-01 band pivots, static-pivot
+  flooring, and growth flagging. Docs corrected.
+
+Two facets are **recorded here rather than fixed**, because they cannot be
+reproduced into a failing test without an external reference-solver oracle, and
+"fixing" them blind would change the inertia committed by the legacy scalar
+`factor()` path — which the hard constraint "inertia must be exactly correct"
+forbids without an external oracle to validate against (CLAUDE.md: never write
+both impl and oracle in the same session).
+
+### (b) `factor()` evaluates the Duff-Reid 2×2 bound on the *unperturbed* block, while `scalar_pivot_step` perturbs before the gates
+
+The legacy `factor()` 2×2 path runs the BK/Duff-Reid acceptance test on the raw
+block, whereas the frontal `scalar_pivot_step` applies the static-pivot floor
+*before* the acceptance gates. When `static_pivot_floor > 0.0` the two paths can
+therefore make different 2×2-vs-1×1 pivot decisions on the same block. This is a
+*pivot-selection* divergence; whether it changes committed *inertia* on any real
+matrix is exactly what cannot be asserted without an oracle. Like D5/X3 before
+it, the divergence is on the legacy `factor()` path (other findings — D1, D5 —
+flag this path for eventual removal); the frontal path is the production path.
+
+### (c) `factor()` lacks the SSIDS det floor and the issue-#46 partner fallback
+
+The frontal 2×2 logic carries an SSIDS-style determinant floor and the issue-#46
+partner-column fallback; the legacy `factor()` 2×2 path (`do_2x2_pivot`) does
+not. This is a real feature gap, but adding either to `factor()` changes which
+blocks it accepts and how it counts their inertia — again a change that needs a
+MUMPS/SSIDS reference inertia to validate, and again on the legacy path.
+
+### Disposition
+
+No code change and no reproducing test for (b)/(c). A test that merely *exhibits*
+a path divergence is not enough — the loop requires a test whose *failure* is the
+bug, and the bug here is "wrong inertia", which needs an external oracle this
+iteration cannot produce. Deferred to a dedicated legacy-`factor()` parity effort
+(or its removal), validated against the SSIDS/MUMPS corpus. This entry is the flag
+to revisit (b)/(c) when that effort happens.
+
+Evidence: `do_1x1_pivot` / `try_reject_1x1_frontal` / `count_1x1_inertia` /
+`scalar_pivot_step` / `do_2x2_pivot` in `src/dense/factor.rs`; sibling n_tiny
+contract at `factor.rs` (count_1x1_inertia `n_tiny` doc). Companion commit fixes
+(a)/(d)/(e). Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — D11: `equilibrate_scaling` O(10·n²) branchy/stride-n access (finding D11, repo-review-2026-06-09.md)
+
+Finding D11 reports that `equilibrate_scaling` (`src/dense/equilibrate.rs:8-45`)
+runs up to 10 sweeps of an `n×n` double loop calling `matrix.get(i, j)` per
+element, with a branch inside `get` and stride-n access for one half of each
+row, and that it runs on every `factor()` / `factor_single_front` call
+(`factor.rs:832, 1207, 2332`). Severity: low/certain (**perf**).
+
+### Why this is recorded here rather than fixed
+
+This is a pure performance observation, not a correctness defect, so it cannot
+be turned into a reproducing test whose *failure is the bug* — the loop's gating
+methodology. Two things were checked before concluding that:
+
+1. **No stale-data correctness bug.** `get(i, j)` for `i < j` returns
+   `data[i*n + j]`, which is the *lower-triangle* storage of the symmetric
+   entry `(j, i)` (row `j` ≥ col `i`), not the strict upper triangle that
+   `SymmetricMatrix::from_pooled_buf` leaves stale (cf. D10). So every read is
+   valid lower-triangle data; equilibration produces correct scalings even on
+   pooled-buffer fronts. There is no wrong-output behavior to reproduce.
+
+2. **No admissible RED gate exists.** A timing assertion is flaky and is not an
+   acceptable test gate. The only other "test-first" option would be a
+   characterization test that pins the current scaling output and then refactors
+   the loop to be faster while keeping it green — but that makes the *current
+   implementation its own oracle*, which the hard rule forbids (CLAUDE.md:
+   "NEVER write both the implementation and the test oracle in the same session
+   without the oracle coming from an external source"). The refactor would also
+   touch the hot path of every `factor()` call with no failing test to catch a
+   regression, contradicting "correctness before performance, always."
+
+### Disposition
+
+No code change this iteration. The optimization is real and safe in principle —
+the max-reduction over `j` is order-independent (associative/commutative max),
+so splitting the inner loop into the contiguous `j ∈ (i, n)` half (stride-1 in
+column `i`) and the strided `j ∈ [0, i]` half, or hoisting `d[i]` out of the
+inner loop, would preserve the result bit-for-bit. It is deferred to a dedicated
+dense-factor performance pass that can (a) bring an external/hand oracle for the
+scaling vector and (b) benchmark the hot path before/after. This entry is the
+flag to revisit when that pass happens.
+
+Evidence: `src/dense/equilibrate.rs:8-45`; `SymmetricMatrix::get`
+(`src/dense/matrix.rs:85-91`) reads lower-triangle storage for both branches;
+callers at `src/dense/factor.rs:832, 1207, 2332`. Journal:
+dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — D12: `flag_growth_for_refinement` extra O(nrow·nelim) pass over L (finding D12, repo-review-2026-06-09.md)
+
+Finding D12 reports that `flag_growth_for_refinement` (`src/dense/factor.rs:409-419`)
+walks the entire extracted `L` slice (`O(nrow·nelim)`) at every dense-factor exit
+(`factor.rs:1160, 1772, 2267, 2501`) checking `|v| > L_GROWTH_THRESHOLD`, and
+that this scan "could be fused into the L-extract loop." Severity: low/certain
+(**perf**).
+
+### Why this is recorded here rather than fixed
+
+Pure performance observation — there is no incorrect behavior to reproduce.
+The function is correct (it early-returns once `needs_refinement` is already set
+and short-circuits on the first over-threshold entry) and is already pinned by
+existing characterization tests (`factor.rs:5061-5112`). The finding is purely
+"this is a redundant second pass that could be fused."
+
+A test whose *failure is the bug* cannot be written: there is no wrong output,
+and a timing assertion is flaky and not an acceptable gate. The only "fix" —
+fusing the threshold check into the L-extract loop — is a behavior-preserving
+refactor with no RED state, and its only available oracle would be the current
+implementation's output, which the hard rule forbids producing in the same
+session (CLAUDE.md: no impl + oracle together). It also touches the hot path of
+every dense-factor exit (four production call sites) with no failing test to
+guard a regression, against the "correctness before performance, always"
+constraint.
+
+### Disposition
+
+No code change this iteration. The fusion is safe in principle — the growth
+flag is a monotonic OR over `|L_ij| > threshold`, so evaluating it as each L
+entry is written during extraction yields the identical flag while removing the
+separate pass. Deferred to a dedicated dense-factor performance pass that can
+benchmark before/after and re-verify the flag against the existing
+characterization tests. This entry is the flag to revisit then.
+
+Evidence: `src/dense/factor.rs:409-419` (impl), call sites `:1160, 1772, 2267,
+2501`, existing tests `:5061-5112`. Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — D13: `update_2x2_block32` det==0 no-op leaves raw A in L (finding D13, repo-review-2026-06-09.md)
+
+Finding D13 observes that `update_2x2_block32` (`src/dense/block_ldlt32.rs:247-279`)
+returns early when `det.abs() == 0.0` (`:252-254`), leaving the trailing L
+columns `(p+2)..n` holding their raw A values instead of normalized factors;
+"unreachable through gated frontal paths, only via the D5 legacy path."
+Severity: low/certain.
+
+### Why this is recorded here rather than fixed
+
+Three independent reasons, all pointing to "not a reproducible, safely-fixable
+bug this iteration":
+
+1. **The det==0 no-op is an intentional, characterized contract — not a bug.**
+   An existing test, `update_2x2_block32_singular_is_noop`
+   (`block_ldlt32.rs:544-555`), deliberately drives `(d11,d21,d22)=(1,1,1)`
+   (det=0) through *both* `do_2x2_update` and `update_2x2_block32` and asserts
+   they are byte-identical no-ops ("Singular 2×2 (det == 0) is a no-op in both
+   paths."). The leftover raw A values the finding describes are the *defined*
+   consequence of that no-op: there is no valid 2×2 inverse to normalize by, so
+   the columns are intentionally left untouched. Adding a `debug_assert!` or a
+   zero-fill — the only "fixes" — would directly contradict and break this
+   tested contract. Loosening/replacing an existing test to chase the finding is
+   not permitted without human approval.
+
+2. **The impact is gated entirely behind the legacy D5 path.** The production
+   frontal path applies a determinant floor + issue-#46 partner fallback before
+   any 2×2 update, so det==0 never reaches `update_2x2_block32` there. The only
+   route that delivers a singular 2×2 to this kernel is the legacy scalar
+   `factor()` path — the same path as finding D5 (exactly-singular 2×2 → 1/0 →
+   NaN), already recorded here and flagged for removal (D1, D5).
+
+3. **No admissible reproducing test.** A test whose *failure is the bug* would
+   have to drive the legacy `factor()` API to a state where raw-A-in-L corrupts
+   a committed result — i.e., demonstrate a *wrong inertia / wrong solve* on the
+   legacy path. That is exactly D5's deferred scenario and needs a MUMPS/SSIDS
+   reference oracle to validate, which this iteration cannot produce (CLAUDE.md:
+   inertia must be exactly correct; no impl + oracle in one session). A unit
+   test that merely re-confirms the no-op is not a failing-on-the-bug test —
+   `update_2x2_block32_singular_is_noop` already pins that behavior.
+
+### Disposition
+
+No code change and no new test. D13 is a latent symptom of the legacy scalar
+`factor()` path (the det==0 no-op is correct for the production block path,
+which never reaches it). It is subsumed by the D1/D5 decision to remove or
+oracle-validate the legacy path; revisit D13 when that happens — at which point
+the question becomes whether the legacy path should reject/delay a singular 2×2
+upstream (as the frontal path does) rather than what the block kernel does on a
+precondition it should never be handed.
+
+Evidence: `src/dense/block_ldlt32.rs:247-279` (impl + det==0 early return),
+existing characterization test `:544-555`, production caller chain via
+`do_2x2_update` (`factor.rs:4220-4222`) which only forwards n==32. Related: D5
+(legacy factor() singular 2×2), D1 (legacy path removal). Journal:
+dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — N8: empty-supernode early return does not drain child contribs (finding N8, repo-review-2026-06-09.md)
+
+**Finding (verbatim).** "Empty-supernode early return (`factorize.rs:2138-2175`,
+twin at `:2506-2543`) does not drain `contrib_blocks[child]`; if the symbolic
+layer ever emits an empty supernode with contributing children, their Schur
+data and delayed-pivot inertia are silently dropped. Unreachable today; add a
+drain or `debug_assert!(children have no contribs)`. low/possible."
+
+### Why this is recorded here rather than fixed
+
+1. **The triggering state is unreachable through any real input.** The early
+   return at `factor_one_supernode` (`factorize.rs:2138`) fires only when
+   `nrow == 0 || own_ncol == 0`. The symbolic layer never emits such a
+   supernode: every supernode carries ≥1 eliminated column (`ncol ≥ 1`) and a
+   frontal with `nrow ≥ ncol ≥ 1` (`Supernode`/`find_supernodes`,
+   `symbolic/supernode.rs`). So the branch is dead defensive code; no matrix the
+   solver can be handed drives it. The finding itself classifies this
+   "Unreachable today" / severity low.
+
+2. **The twin site is already guarded.** `factor_one_small_leaf`
+   (`factorize.rs:2496`) carries `debug_assert!(snode.children.is_empty(), …)`
+   at `:2497-2501` *before* its identical early return at `:2506-2543`. A leaf
+   has no children, hence no `contrib_blocks[child]` to drain — the twin's N8
+   concern cannot arise. N8 reduces to the single `factor_one_supernode` site.
+
+3. **No admissible reproducing test.** A test "whose failure is the bug" would
+   have to exhibit dropped Schur data / wrong delayed-pivot inertia from a
+   committed factorization — but no input reaches the branch. The only way to
+   enter it is to hand-construct a `SymbolicFactorization` (20+ fields, incl.
+   `EliminationTree`, `CscPattern`, `col_counts`, postordered `supernodes`)
+   holding an empty supernode whose `children` reference a slot with a
+   `Some(ContribBlock { n_delayed > 0, … })`, plus a matching `FactorWorkspace`,
+   then call the private `factor_one_supernode` directly. That fabricates an
+   internal state the symbolic invariant forbids; a `debug_assert!` firing on it
+   tests the guard, not a real defect, and the construction would be the impl's
+   own oracle (forbidden by CLAUDE.md: no impl + oracle in one session). The
+   numeric correctness this protects (inertia exactness) has no external
+   reference here because there is no admissible input to validate against.
+
+### Disposition
+
+No code change and no new test this iteration. N8 is dead-branch defensive
+hardening, not a live defect — the recommended `debug_assert!(children have no
+contribs)` guards a state the symbolic layer guarantees never occurs, and the
+twin path is already guarded. Revisit if/when the symbolic layer is ever changed
+to emit zero-column supernodes (e.g. a future Schur/elimination-skip feature):
+at that point the drain (not merely the assert) becomes a real numeric
+requirement and a reproducing test would have a real input to exercise it.
+
+Evidence: `src/numeric/factorize.rs:2138-2175` (live site, no drain),
+`:2496-2543` (twin, already guarded by `debug_assert!(snode.children.is_empty())`
+at :2497-2501), `Supernode`/`ncol()` (`symbolic/supernode.rs:126-162`,
+`nrow ≥ ncol ≥ 1`). Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — N9: per-supernode phase deltas read process-global atomics (finding N9, repo-review-2026-06-09.md)
+
+**Finding (verbatim).** "Sequential profiler per-supernode phase deltas read
+process-global atomics (`factorize.rs:2020-2047`); two solvers factoring
+concurrently in one process cross-contaminate the deltas. Diagnostics only.
+low/certain."
+
+### Why this is recorded here rather than fixed
+
+1. **The contamination is real but confined to a default-off diagnostic flag.**
+   The per-supernode `SupernodeTiming` deltas (`factorize.rs:2021`/`:2036`)
+   snapshot `phase_timing::snapshot()` before/after one `factor_one_supernode`
+   call. Those counters (`ASSEMBLY_NS`, `DENSEFACTOR_NS`, … in
+   `dense/factor.rs:188`) are process-global `AtomicU64`s, written only when
+   `PHASE_TIMING_ENABLED` (default `false`, `dense/factor.rs:178`) is set — a
+   diagnostic binary's mode, never production solve/inertia. Two *separate*
+   solvers factoring concurrently in one process would interleave increments,
+   inflating each other's deltas.
+
+2. **The probe site is single-threaded by design and already documents it.**
+   The comment at `factorize.rs:2017-2020` states: "this driver loop is
+   single-threaded so before/after differencing is exact." The contamination
+   needs a *second* solver on another thread, which the probe's own mode does
+   not create.
+
+3. **The process-global design is load-bearing — a thread-local "fix" breaks
+   the parallel path.** The same counters are written from inside
+   `factor_one_supernode`'s assembly/dense helpers
+   (`factorize.rs:2217-2406`), and `factor_one_supernode` is spawned on
+   *rayon worker threads* by the parallel driver (`scope.spawn`,
+   `factorize.rs:1217`, `:1943`). The diagnostic binary reads totals via
+   `snapshot()` from the main thread after the run. Making the counters
+   thread-local would isolate concurrent solvers but silently drop every
+   counter increment performed on rayon workers — turning a rare diagnostic
+   inaccuracy into a systematic undercount on the parallel path. The only
+   correctness-preserving fix is to thread a per-solver counter set through
+   the entire dense-factor call chain (assembly → panel → Schur → scalar
+   tail), an invasive refactor of diagnostics-only plumbing.
+
+4. **No admissible reproduce-first fix this iteration.** A deterministic
+   barrier-synchronized two-thread test could demonstrate the shared-global
+   contamination, but the only fix it would gate (per-solver counters) is the
+   invasive refactor in (3) — impl plus its own timing oracle in one session,
+   with no external reference, on a default-off diagnostic path. Severity is
+   low/certain and "diagnostics only" by the finding's own classification.
+
+### Disposition
+
+No code change and no new test. N9 is an intentional consequence of the
+process-global phase-probe design: the counters are deliberately global so the
+diagnostic binary can read whole-run totals across rayon workers. The
+cross-solver contamination only arises when two solvers factor concurrently in
+one process with the default-off `PHASE_TIMING_ENABLED` flag set, and never
+affects numeric results. Revisit only if a per-solver diagnostic profile is
+ever required, at which point per-solver counters threaded through the dense
+factor chain (preserving parallel-worker aggregation) become the real task.
+
+Evidence: `src/numeric/factorize.rs:2017-2050` (sequential per-supernode
+delta + single-threaded comment), `:2217-2406` (counter writes inside
+`factor_one_supernode`), `:1217`/`:1943` (rayon `scope.spawn` of
+`factor_one_supernode` on workers), `src/dense/factor.rs:178-250`
+(`PHASE_TIMING_ENABLED` default false; process-global counters + `snapshot()`).
+Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — N10: doc/code drift bundle (finding N10, repo-review-2026-06-09.md)
+
+**Finding (verbatim).** "Doc/code drift: `condition.rs:7,27` "3-5 solves"
+(actually up to ~11); `solve.rs:389-391` claims an nrhs==1 thin-wrapper dispatch
+that doesn't exist (bit-identical anyway); `BucketStats.pct_of_total`
+(`factorize.rs:441-447`) is percent of loop_us, not total_us; the Schur inner
+driver (`factorize.rs:1645`) uses `compute_scaling`, not
+`compute_scaling_with_cache` — MC64 cache reuse silently doesn't apply on the
+Schur path. low/certain."
+
+### Why this is recorded here rather than fixed
+
+N10 bundles four drifts. In every one the *runtime behavior is already correct*;
+the drift is stale prose, a misleading field name, or a latent (not live)
+consistency gap. None admits a test "whose failure is the bug," so per the loop
+discipline (reproduce-first, else defer) all four are recorded here with the
+code evidence that confirms each.
+
+1. **`condition.rs:7,27` "3-5 solves" → actually up to 11 (doc only).** The
+   estimator loops `for _iter in 0..MAX_ITER` (`condition.rs:88`) with
+   `MAX_ITER = 5` (`:27`) and performs `2·MAX_ITER + 1 = 11` internal solves
+   (two per iteration at `:90`/`:106` plus the final at `:154`); the code's own
+   comment at `:68-69` and `:214` already says "up to 2·MAX_ITER + 1 … ~11×".
+   The module-doc "3-5 solves" (`:7`, `:166`) is stale prose. The code is
+   correct; there is no failing-on-the-bug test (a constant-arithmetic assert
+   `2*MAX_ITER+1 == 11` is trivially green, not a RED, and counting solves would
+   require instrumenting production for a comment fix).
+
+2. **`solve.rs:389-391` phantom nrhs==1 dispatch (doc only).** The comment
+   describes an `nrhs == 1` thin-wrapper dispatch that does not exist; the
+   finding itself notes the result is "bit-identical anyway." Behavior is
+   correct — only the comment describes a code path that was never written.
+   A test asserting nrhs==1 equals the many-RHS path passes today (it is
+   bit-identical), so it is GREEN, not a reproduction of any defect.
+
+3. **`BucketStats.pct_of_total` is % of loop_us (correct; name misleads).**
+   `factorize.rs:443` computes `b.pct_of_total = sum_us·100/loop_us`. This is
+   the *correct* denominator: the front-size buckets partition the supernode
+   loop, so percentages sum to 100% of `loop_us`; using `total_us` would
+   exclude prologue/epilogue and the buckets would not sum to 100%. The field
+   name (`pct_of_total`, `:476`) is the only thing that misleads. A RED test
+   would have to assert "% of total_us" — i.e. assert *wrong* behavior — so
+   there is no honest reproduction; the runtime value is right.
+
+4. **`factorize.rs:1645` Schur driver uses `compute_scaling` — latent, not
+   live.** The main drivers (`:1839`, `:2836`) call
+   `compute_scaling_with_cache(matrix, &params.scaling,
+   symbolic.cached_mc64.as_ref())`; the Schur inner driver calls plain
+   `compute_scaling`. But `symbolic_factorize_with_schur` sets `cached_mc64:
+   None` (`symbolic/mod.rs:1186`) — the Schur path *never populates* an MC64
+   cache. So `compute_scaling_with_cache(.., None)` would be byte-identical to
+   `compute_scaling(..)` today: there is no cache to reuse and no output change
+   to observe or test. The drift is latent — it would only bite if the Schur
+   symbolic path were later changed to populate `cached_mc64`, at which point
+   the numeric Schur driver would silently ignore it. Aligning the call is safe
+   future-proofing, but it is behavior-preserving with no RED gate today; and
+   changing it to reuse a cache (were one ever present) trades a recomputed
+   numeric-time matching for a symbolic-time one — a semantic choice that would
+   need a MUMPS/SSIDS oracle, not a same-session self-comparison.
+
+### Disposition
+
+No code change and no new test. All four sub-items are doc/naming/latent-
+consistency drift over already-correct runtime behavior; none is reproducible as
+a failing test. Revisit as a dedicated documentation-accuracy pass (correct the
+`condition.rs` "3-5 solves" prose, drop the `solve.rs` phantom-dispatch comment,
+document `pct_of_total` as "percent of `loop_us`", and align the Schur
+`compute_scaling_with_cache` call for consistency) if/when a docs sweep is
+scheduled — explicitly outside the reproduce-first loop.
+
+Evidence: `src/numeric/condition.rs:7,27,68-69,88,90,106,154,166,214`;
+`src/numeric/solve.rs:389-391`; `src/numeric/factorize.rs:441-448,476,1645,
+1839,2836`; `src/symbolic/mod.rs:1041,1186` (Schur `cached_mc64: None`). Journal:
+dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — N11: solve-time null-pivot semantics (finding N11, repo-review-2026-06-09.md)
+
+**Finding (verbatim).** "Solve-time null-pivot semantics: a force-accepted zero
+pivot is skipped, leaving the forward-substituted RHS value in `w[k]`
+(`solve.rs:266-271`, `:770-775`) rather than zeroing the null-space component
+(MUMPS ICNTL(25)=0 convention). Documented as deliberate
+(`dev/plans/threshold-mismatch-fix.md`); flagged for awareness — the unrefined
+`Solver::solve()` exposes it directly. low/certain (behavior) / possible (that
+it's wrong)."
+
+### Why this is recorded here rather than fixed
+
+1. **It is documented, deliberate behavior — not a defect.** The D-block solve
+   leaves `w[k]` untouched when the pivot was force-accepted as zero
+   (`solve.rs:300-303` single-RHS: `if d_diag[k].abs() > zero_tol { w[k] /=
+   d_diag[k]; } // else: leave w[k] alone`; twin at `:818-821` multi-RHS). The
+   comment at `:271-272` and the design doc `dev/plans/threshold-mismatch-fix.md`
+   (`:71`, `:85`, `:94`) record this as the intended outcome of the
+   "store `zero_tol` and skip in solve" fix. The finding itself classifies the
+   *wrongness* as only "possible," and flags it "for awareness," not for repair.
+
+2. **No admissible RED.** A reproducing test would have to assert the *alternative*
+   convention — zero the null-space component (MUMPS ICNTL(25)=0) — and show the
+   current output is wrong. But which convention is correct on a singular system
+   is exactly the open question, and `Solver::solve()` on a force-accepted-zero
+   (genuinely singular) system has no unique right answer without choosing a
+   convention. Validating the alternative requires a MUMPS/SSIDS reference oracle
+   for the specific singular case, which this iteration cannot produce. Writing a
+   test that pins the *current* behavior would make the implementation its own
+   oracle and would not be failing-on-the-bug.
+
+3. **Changing it needs human approval.** This alters documented, deliberate solve
+   semantics on singular systems and would touch both the single- and multi-RHS
+   D-block solves. The project's correctness rule requires inertia/solve
+   behavior on such matrices to be validated against the canonical Fortran
+   solvers; flipping the convention without that oracle and without sign-off is
+   exactly the kind of change the hard rules forbid doing unilaterally.
+
+### Disposition
+
+No code change and no new test. N11 is a deliberate, documented design choice
+(skip force-accepted-zero pivots, leaving the forward-substituted value in
+`w[k]`), flagged for awareness. Revisit only as a human-approved decision to
+adopt the MUMPS ICNTL(25)=0 null-space convention, gated on a MUMPS/SSIDS
+reference oracle for the singular-system output — at which point both the
+single-RHS (`solve.rs:300-303`) and multi-RHS (`:818-821`) D-block solves, plus
+the design doc, would be updated together.
+
+Evidence: `src/numeric/solve.rs:268-303` (single-RHS D-block, force-accepted-zero
+skip at :300-303), `:815-821` (multi-RHS twin),
+`dev/plans/threshold-mismatch-fix.md:71,85,94` (documented deliberate behavior).
+Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — S2: placeholder Supernode.nrow undercounts amalgamated frontals (finding S2, repo-review-2026-06-09.md)
+
+**Finding (verbatim).** "Placeholder `Supernode.nrow =
+col_counts[first_col].max(ncol)` (`symbolic/supernode.rs:399-405`) undercounts
+amalgamated frontals (size-based merges need not nest). Downstream bias:
+`contrib_sizes`/`peak_contrib_bytes` (`mod.rs:963-965`) underestimate pool
+needs; `factor_nnz_estimate` (`mod.rs:935`) excludes amalgamation-induced zeros
+and AutoRace (`mod.rs:640`) ranks on the biased metric; `find_small_leaf_groups`
+(`small_leaf.rs:138-140`) gates on placeholder nrow ≤ 16 while sizing the arena
+on actual rows.len(). Numeric correctness unaffected (`build_row_indices`
+recomputes). medium/likely."
+
+### Why this is recorded here rather than fixed
+
+1. **No incorrect output — confirmed by the finding and by the code.** The
+   placeholder `nrow = col_counts[first_col].max(ncol)` (`supernode.rs:399`) is
+   never reassigned in the symbolic phase; the *true* frontal row set is
+   recomputed at numeric time by `build_row_indices` (`factorize.rs:3656`),
+   which is what factorization/solve/inertia actually use. So no numeric or
+   inertia result is wrong — the finding states this explicitly ("Numeric
+   correctness unaffected") and it holds. With no incorrect output, there is no
+   test "whose failure is the bug": a pool-size or nrow-estimate assertion would
+   either be flaky or a characterization test that pins internal state, making
+   the implementation its own oracle (forbidden). This is the same disposition
+   class as D11/D12 (perf/estimate-only, no RED gate).
+
+2. **The blast radius is perf-estimate only — and narrower than the finding
+   states.** The placeholder `nrow` feeds exactly two consumers via
+   `contrib_size() = (nrow-ncol)²` (`supernode.rs:172-175`):
+   - `contrib_sizes` / `peak_contrib_bytes` (`mod.rs:963-965`) — the
+     contribution-pool pre-allocation estimate. An undercount means the pool may
+     grow/reallocate at numeric time: a one-time perf cost, not a wrong answer.
+   - `find_small_leaf_groups` (`small_leaf.rs:138-140`) — gates the batched
+     small-leaf path on `nrow ≤ 16`. Both batched and per-supernode paths are
+     numerically equivalent (cf. finding S3), so this only shifts which path
+     runs: again perf, not correctness.
+
+   The finding's claim that "AutoRace (`mod.rs:640`) ranks on the biased metric"
+   is **inaccurate for the placeholder nrow**: AutoRace ranks candidates by
+   `factor_nnz_estimate` (`mod.rs:640`), which is computed from `col_counts`
+   (`mod.rs:935`, `total_factor_nnz(&col_counts)`) — independent of
+   `Supernode.nrow`. Fixing the placeholder nrow does **not** change AutoRace's
+   ranking, the selected ordering, or therefore any inertia result. (The
+   separate `factor_nnz_estimate` "excludes amalgamation-induced zeros" bias the
+   finding also mentions lives in `col_counts`, not in the nrow placeholder, and
+   is a different issue.)
+
+3. **The proper fix is a feature-sized symbolic pass, benchmark-gated.** Setting
+   the true amalgamated `nrow` requires a new symbolic row-union pass over
+   `permuted_pattern` after `find_supernodes` (the full pattern is not available
+   inside `find_supernodes`, which receives only `etree` + `col_counts`,
+   `mod.rs:939`) — essentially the symbolic analogue of `build_row_indices`.
+   That shifts the benchmark-sensitive `small_leaf` gate and the pool-size
+   estimate, so it must be validated against the full benchmark per the
+   session protocol. It is a scoped feature, not a surgical reproduce-first bug
+   fix, and it changes no output.
+
+### Disposition
+
+No code change and no new test. S2 produces no incorrect output (numeric and
+inertia results are unaffected — `build_row_indices` recomputes the true rows);
+its only consequences are an internal pool-size underestimate and a
+small_leaf-gate shift, both perf-only and untestable as a failing-on-the-bug
+test. Recommended as a dedicated, benchmarked work item: add a symbolic
+row-union pass after `find_supernodes` to set the true amalgamated `nrow`, then
+validate the small_leaf-gate / pool-size shift against the bench. Inertia gate
+is not at risk (AutoRace ranks on `factor_nnz_estimate`, not nrow).
+
+Evidence: `src/symbolic/supernode.rs:399-405` (placeholder), `:166-175`
+(`contrib_size` uses nrow), `src/symbolic/mod.rs:935` (`factor_nnz_estimate`
+from col_counts), `:939` (find_supernodes args), `:963-965`
+(contrib_sizes/peak), `:640` (AutoRace ranks on factor_nnz_estimate, not nrow),
+`src/symbolic/small_leaf.rs:138-140` (gate on nrow≤16),
+`src/numeric/factorize.rs:3656` (build_row_indices recomputes true rows).
+Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S3: compute_leaf_rows lacks defensive `r < own_last` filter (finding S3, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> `compute_leaf_rows` (small_leaf.rs:208-217) lacks the defensive `r < own_last`
+> filter its numeric twin (`build_row_indices`, factorize.rs:3632-3645) applies;
+> if the leaf invariant ever cracks, the batched small-leaf path diverges
+> silently from the per-supernode path. One-line guard. medium-low/possible.
+
+### Why this is recorded here rather than fixed
+
+1. **No RED for any valid input.** `compute_leaf_rows` (small_leaf.rs:193-229)
+   scans the permuted pattern of a leaf supernode's own columns and collects
+   every row index it sees. `build_row_indices` (factorize.rs:3656) does the same
+   but skips rows `r < own_last` (`own_last = first_col + own_ncol`,
+   factorize.rs:3716) — those are entries above the supernode's own column block,
+   i.e. couplings to *earlier-eliminated* columns `r < first_col`.
+
+2. **The elimination-tree property makes the filter a no-op for true leaves.** A
+   leaf supernode has no descendants in the etree. A column `j` of the leaf can
+   only couple to an earlier-eliminated column `r < first_col` if some descendant
+   of `j` was eliminated first — but a leaf has none. Therefore for every *valid*
+   leaf, no scanned `r` satisfies `r < first_col`, the `r < own_last` filter
+   removes nothing, and `compute_leaf_rows` and `build_row_indices` produce
+   identical row sets. The divergence the finding describes requires the leaf
+   invariant to be violated upstream — a pipeline-forbidden state.
+
+3. **A test would have to fabricate an invariant-violating leaf.** To make the two
+   paths diverge you must hand a "leaf" with a sub-diagonal coupling to an
+   earlier column — a structure `find_supernodes` never emits. Asserting on that
+   fabricated input tests the guard against a state the pipeline cannot produce;
+   it does not reproduce a real defect. This is exactly N8's category (a defensive
+   guard for an unreachable state) and the same impl-as-own-oracle problem as
+   D11/D12.
+
+### Disposition
+
+No code change and no new test. For all valid leaves the missing filter changes
+nothing (proved above via the etree leaf property). Recommended as harmless
+future hardening: add the one-line `if r < own_last { continue; }` guard to
+`compute_leaf_rows` so the batched small-leaf path is textually identical to
+`build_row_indices` and stays robust if an upstream invariant ever cracks — but
+this is defensive alignment, not a bug fix, and carries no failing test.
+
+Evidence: `src/symbolic/small_leaf.rs:193-229` (`compute_leaf_rows`, no filter),
+`:138-140` (small_leaf gate), `src/numeric/factorize.rs:3656` (`build_row_indices`),
+`:3716` (`if r < own_last { continue; }`). Etree leaf property: a leaf has no
+descendants ⇒ no own column couples to `r < first_col` ⇒ filter is a no-op.
+Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S4: run_amd skips the perm-length / bijectivity check (finding S4, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> `schur.rs::run_amd` (`ordering/schur.rs:186-214`) skips the perm-length check
+> `run_external_ordering` (`symbolic/mod.rs:591-597`) performs; only a
+> debug_assert stands before `permute_pattern` corruption in release. Neither
+> path checks bijectivity. medium-low/certain (drift) / possible (impact).
+
+### Why this is recorded here rather than fixed
+
+1. **The drift is real but the missing check is a no-op for valid input.**
+   `run_external_ordering` (mod.rs:591-597) rejects a backend permutation whose
+   length ≠ `pattern.n`. `run_amd` (schur.rs:186-214) omits that length check; it
+   keeps only the per-element range check `u >= pattern.n` (schur.rs:206). The two
+   paths therefore diverge *only* when the ordering backend returns a permutation
+   of the wrong length or with duplicate entries.
+
+2. **The backend cannot be forced to misbehave from any reachable input.**
+   `feral_amd::amd_order` always returns a full-length permutation of `0..n` for a
+   valid CSC pattern (every vertex, connected or not, is eliminated exactly once).
+   To make `run_amd` emit a wrong-length or non-bijective perm I would have to mock
+   or corrupt `amd_order`'s output, which no public/private call path does.
+
+3. **The downstream consumer is already protected against the range failure.**
+   `compute_schur_aware_perm` lifts the sub-perm via `non_schur_indices[sub_idx]`
+   (schur.rs:110); `sub_idx < n_f` is guaranteed by run_amd's `u >= pattern.n`
+   check, so there is no index-out-of-bounds panic. The remaining gap is a
+   wrong-*length* sub_perm, caught only by `debug_assert_eq!(perm.len(), n)`
+   (schur.rs:116) — absent in release — and a duplicate-entry sub_perm
+   (bijectivity), which *neither* run_amd nor run_external_ordering checks. Both
+   gaps require a malfunctioning backend.
+
+4. **A test would assert the guard against an unproducible state.** Same class as
+   S3/N8: a unit test would have to fabricate a malfunctioning AMD (impossible
+   without mocking the crate) or feed a hand-built invalid perm to an internal
+   helper — testing the guard against a pipeline-forbidden state
+   (impl-as-own-oracle, forbidden).
+
+### Disposition
+
+No code change and no new test. For every valid input `run_amd` and
+`run_external_ordering` behave identically. Recommended as harmless future
+hardening (a drift fix, not a bug fix, carrying no failing test):
+add `if perm_i32.len() != pattern.n { return Err(InvalidInput(...)); }` to
+`run_amd` to mirror mod.rs:591-597, and — to close the bijectivity gap the
+finding correctly notes is shared — add a duplicate-index check to *both*
+paths (a `seen` bitset over `0..n`).
+
+Evidence: `src/ordering/schur.rs:186-214` (run_amd, no length check), `:206`
+(per-element range check), `:104,110,116` (consumer lift + debug_assert),
+`src/symbolic/mod.rs:591-597` (the length check run_amd lacks). Bijectivity
+unchecked in both. Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S5: reference column_counts is O(n³)-class but documented O(n²) (finding S5, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> Reference `column_counts` (`symbolic/column_counts.rs:56-65`) is O(n³)-class
+> (`contains` + re-sort per eliminated column) but documented "O(n²) elimination
+> simulation" (`mod.rs:855-857`) and publicly re-exported. Production uses GNP
+> everywhere; burdens tests. low/certain.
+
+### Why this is recorded here rather than fixed
+
+1. **No incorrect output.** `column_counts` is the bit-exact reference oracle for
+   the production Gilbert-Ng-Peyton path; equivalence is verified on 169585 KKT
+   matrices (mod.rs:857, `dev/validation/phase-2.5.1-*`). The finding is about its
+   *cost* and a *false complexity claim*, not its result.
+
+2. **The complexity claim is genuinely wrong.** The propagation step
+   (column_counts.rs:55-65) does a linear `col_rows[min_row].contains(&row)` per
+   propagated row plus a `sort_unstable` + `dedup` of the whole inherited list per
+   eliminated column. On dense-ish patterns that is O(n³)-class, not the
+   "O(n²) elimination simulation" mod.rs:855 advertises.
+
+3. **Neither consequence is reproducible as a failing test.** A complexity claim
+   in a doc comment cannot be made RED — asserting asymptotic class needs timing
+   (flaky) or a counter the impl doesn't expose (impl-as-own-oracle). "Burdens
+   tests" is wall-clock, not a correctness assertion. This is exactly N10's
+   doc-drift category and S2's perf-only category.
+
+### Disposition
+
+No code change and no new test. Recommended (a doc-truth + hygiene fix, not a bug
+fix, carrying no failing test):
+(a) correct mod.rs:855 to call the reference "O(n³)-class elimination simulation"
+    (or similar) so it no longer claims O(n²);
+(b) if the public re-export is unnecessary, demote `column_counts` to
+    `pub(crate)` so it is a test-only oracle and stops appearing in the public
+    surface — production already uses `column_counts_gnp` everywhere (mod.rs:860).
+Both are non-functional and out of scope for a reproduce-first loop fix.
+
+Evidence: `src/symbolic/column_counts.rs:55-65` (contains + sort/dedup per
+column), `:20` (`pub fn`), `src/symbolic/mod.rs:855-857` (the "O(n²)" claim),
+`:860` (production uses GNP). No incorrect output. Journal:
+dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S6: unchecked documented invariants (validate/subtree_sizes/schur postorder) (finding S6, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> Unchecked documented invariants: no `CscPattern::validate()` (etree wants
+> upper-triangle entries, GNP wants lower — both silently require full-symmetric;
+> a lower-only pattern yields an edgeless forest with counts of 1 and no error);
+> `subtree_sizes` assumes `parent[j] > j` (comment only, fields pub);
+> `schur_constrained_postorder` correctness leans on parent>child within the
+> Schur set, guarded only by a debug_assert tail check (`symbolic/mod.rs:1092-1098`).
+> low/certain.
+
+### Why this is recorded here rather than fixed
+
+All three sub-items are defensive gaps against states the production pipeline
+never produces; none yields incorrect output under correct usage.
+
+1. **Lower-only pattern is unreachable in production.** The solver always builds
+   the etree on a *symmetrized* pattern: mod.rs:703 calls
+   `matrix.symmetric_pattern()`, and the etree (mod.rs:795
+   `EliminationTree::from_pattern`) / GNP (mod.rs:860) only ever see that full
+   pattern. The "edgeless forest, counts of 1, no error" behavior requires calling
+   `from_pattern`/`column_counts` directly on a lower-only pattern — a violation
+   of their *documented* precondition ("Input `pattern` should be the full
+   symmetric pattern", column_counts.rs:16), not a defect in correct operation.
+
+2. **`parent[j] > j` is a structural guarantee, not just a comment.** The real
+   elimination-tree builder always emits `parent[j] > j` (an elimination tree
+   orders every node before its parent). `subtree_sizes`
+   (elimination_tree.rs:82-85) processing `0..n` in order is therefore correct for
+   every etree the pipeline builds; the invariant only "cracks" for a hand-built
+   etree the pipeline never emits.
+
+3. **`schur_constrained_postorder` parent>child is likewise guaranteed**, and is
+   additionally backed by the debug_assert tail check (mod.rs:1092-1098). Same
+   unreachable-state category.
+
+4. **A RED test would assert behavior on a precondition-violating input** — a
+   lower-only pattern, or a fabricated etree with `parent[j] <= j` — i.e. it would
+   test garbage-in handling, not reproduce a defect under correct usage. Same
+   class as S3/S4/N8.
+
+### Disposition
+
+No code change and no new test. Recommended as harmless future hardening (a
+robustness improvement, not a bug fix, carrying no failing test): add a
+`CscPattern::is_symmetric()` (or `validate()`) debug-only assertion at the etree
+/ GNP entry points, and promote the `parent[j] > j` comment in
+`subtree_sizes` to a `debug_assert!`. These make the documented preconditions
+self-checking in debug builds without changing release behavior or output.
+
+Evidence: `src/symbolic/mod.rs:703` (symmetric_pattern), `:795`/`:860` (etree/GNP
+see only the full pattern), `:1092-1098` (schur postorder debug_assert);
+`src/symbolic/column_counts.rs:16` (documented full-symmetric precondition);
+`src/ordering/elimination_tree.rs:82-85` (subtree_sizes parent>j comment). No
+incorrect output for correct usage. Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S8: allocation-in-loop cluster (finding S8, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> Allocation-in-loop cluster: per-column Vec in `sort_and_sum_duplicates`
+> (`csc.rs:121`); provably redundant final per-column sort in `symmetric_pattern`
+> (`csc.rs:242-246`); `children()` builds Vec<Vec> per postorder variant and in
+> GNP which only needs a leaf flag (`elimination_tree.rs:66-74`);
+> `compress_pattern` builds ~n two-element Vecs (`ldlt_compress.rs:161-166`);
+> HashSet for a contiguous range test (`mod.rs:1331`). low/certain.
+
+### Why this is recorded here rather than fixed
+
+1. **Every item is perf-only; none produces incorrect output.** Verified the two
+   anchor sites: `sort_and_sum_duplicates` allocates a fresh `pairs: Vec<(usize,
+   f64)>` per column (csc.rs:160) but the summed/sorted matrix it produces is
+   correct; `symmetric_pattern`'s per-column `sort_unstable` (csc.rs:301) is
+   redundant only because the rows are *already* sorted, so removing it changes no
+   output. The `children()` Vec<Vec>, the `compress_pattern` two-element Vecs, and
+   the HashSet-for-range-test are likewise allocation-strategy choices with
+   correct results.
+
+2. **No reproducing test is possible.** A perf/allocation pattern has no failing
+   output to assert. Pinning allocation counts would test the impl against itself
+   (impl-as-own-oracle, forbidden); asserting wall-clock is flaky. This is exactly
+   S2's perf-only category and the same reason N7's perf fix had to be reproduced
+   via *observable cache state* — these S8 items expose no analogous observable
+   state.
+
+### Disposition
+
+No code change and no new test. Recommended as benchmarked perf work items (not
+reproduce-first loop fixes):
+- reuse a single scratch `Vec` across columns in `sort_and_sum_duplicates`
+  (csc.rs:142-160);
+- delete the provably-redundant per-column sort in `symmetric_pattern`
+  (csc.rs:301) — the merge preserves the already-sorted order;
+- replace `children()`'s `Vec<Vec>` with a leaf-flag bitset where GNP/postorder
+  only need leaf detection (elimination_tree.rs:66-74);
+- preallocate / inline the `compress_pattern` two-element Vecs
+  (ldlt_compress.rs:161-166);
+- replace the HashSet contiguous-range test with a bounds comparison (mod.rs:1331).
+Each should be validated against the corpus bench since they touch hot symbolic
+paths.
+
+Evidence: `src/sparse/csc.rs:142-160` (per-column pairs Vec), `:301` (redundant
+sort), `src/ordering/elimination_tree.rs:66-74` (children Vec<Vec>),
+`src/symbolic/ldlt_compress.rs:161-166` (two-element Vecs),
+`src/symbolic/mod.rs:1331` (HashSet range test). All perf-only, correct output.
+Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S9: symv validates nothing (finding S9, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> `symv` validates nothing (`csc.rs:258`): panics on short x/y, silently
+> zero-fills only the first n of an oversized y — inconsistent with the
+> scrupulous from_triplets/validate on the same type. low/certain.
+
+### Why this is recorded here rather than fixed
+
+1. **For correct-length inputs symv is already correct.** `CscMatrix::symv`
+   (csc.rs:314) zeros `y[..n]` and computes `y = A·x` over `0..n`. When
+   `x.len() == y.len() == n` — the only contract the doc "y = A * x" implies —
+   the result is correct. The two failure modes the finding cites are both
+   precondition violations: a too-short `x`/`y` panics on slice indexing, and an
+   oversized `y` leaves `y[n..]` at stale values (only `y[..n]` is written).
+
+2. **Production never violates the precondition.** Every internal caller passes
+   exactly-length-`n` buffers: `solve.rs:1092/1160/1374`, `dense/solve.rs:88/124`,
+   `scaling/mod.rs:1493`, and the multi-RHS sites slice precisely
+   (`solve.rs:1274` `&x[c*n..(c+1)*n]`, `&mut r_act[k*n..(k+1)*n]`). The
+   panic/stale-tail paths are unreachable from the crate's own usage; only an
+   external misuse of the `pub` method could hit them. Same class as S6 (unchecked
+   documented invariants).
+
+3. **No non-breaking fix is reproducible.** Making `symv` return
+   `Result<(), FeralError>` is a breaking API change unjustified by a "low/certain"
+   hygiene item and produces no different output for correct usage. The
+   non-breaking alternative — a `debug_assert!(x.len() == self.n && y.len() ==
+   self.n)` plus a documented precondition — does not change release behavior, so
+   it has no RED test. A `#[should_panic]` test would merely pin the current panic,
+   not reproduce a defect in correct operation.
+
+### Disposition
+
+No code change and no new test. Recommended as harmless future hardening
+(API-consistency, not a bug fix, carrying no failing test):
+document the `x.len() == y.len() == n` precondition on `symv` and add a
+`debug_assert!` guard so misuse fails loudly in debug builds, matching the
+type's otherwise-scrupulous validation. If a fallible variant is ever wanted,
+add a separate `try_symv -> Result` rather than breaking `symv`.
+
+Evidence: `src/sparse/csc.rs:314-328` (symv, no validation, `.take(self.n)`
+zeroing); exact-length callers `src/numeric/solve.rs:1092,1160,1274,1304,1318,1374`,
+`src/dense/solve.rs:88,124`, `src/scaling/mod.rs:1493`. No incorrect output for
+correct usage. Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — S10: predict_merges vs find_supernodes drift (finding S10, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> `predict_merges` vs `find_supernodes` drift (`supernode.rs:628-671`): prediction
+> ignores the Phase-B4 root cap and uses original parent ncols vs the real pass's
+> cumulative ones. Harmless heuristic bias, but the root-cap omission is
+> undocumented and the MUONSINE over-merge analysis suggests it's load-bearing.
+> low/certain.
+
+### Why this is recorded here rather than fixed
+
+1. **predict_merges is a heuristic that never determines the final structure.**
+   Its own doc (supernode.rs:612-627) is explicit: it "does not enforce
+   adjacency — the caller uses the merge predictions to drive a merge-biased
+   postorder that *makes* the merges adjacent." It returns a `Vec<bool>` bias
+   (supernode.rs:634, :664-666); the real, adjacency-checked amalgamation is done
+   afterward by `find_supernodes` on the re-postordered etree. The factorization
+   is therefore correct for *any* prediction — a drift only shifts which subtrees
+   get biased late, i.e. amalgamation quality, not output.
+
+2. **The drift is perf-only and possibly load-bearing.** Using original
+   fundamental-supernode ncols (supernode.rs:648-649,658) instead of the real
+   pass's cumulative ncols, and omitting the Phase-B4 root cap, change *which*
+   merges are predicted — a heuristic bias. The finding itself notes the MUONSINE
+   over-merge analysis suggests the root-cap omission is *load-bearing*: aligning
+   predict_merges to find_supernodes could re-introduce the MUONSINE over-merge
+   regression (5.5× → 1.4× MUMPS, per the AmalgamationStrategy::Auto rationale).
+   So this is not a safe surgical change.
+
+3. **Not reproducible as a failing test.** There is no incorrect output to assert.
+   Pinning the predicted bias vector tests the impl against itself
+   (impl-as-own-oracle, forbidden); a merge-quality/fill assertion is a benchmark,
+   not a unit test. Same class as S2/S8 (perf/heuristic, no incorrect output).
+
+### Disposition
+
+No code change and no new test. Recommended (documentation + a benchmarked study,
+not a reproduce-first loop fix):
+(a) document in `predict_merges` that it deliberately omits the Phase-B4 root cap
+    and uses original (not cumulative) ncols, citing the MUONSINE over-merge
+    analysis so the divergence is a recorded design choice rather than silent
+    drift;
+(b) if alignment is ever attempted, gate it behind a full corpus bench with
+    MUONSINE in the watch set, since the omission may be load-bearing.
+
+Evidence: `src/symbolic/supernode.rs:612-627` (doc: no adjacency enforced),
+`:628-671` (predict_merges, original ncols at :648-649, size rule :658, bias
+:664-666); the real merge is `find_supernodes` on the biased postorder. No
+incorrect output. Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — L7: stale column scaling on entering columns (finding L7, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> Stale column scaling on entering columns (`dense_update.rs:55-57`,
+> `sparse_update.rs:174`): entering column scaled by `d_col[leaving_slot]`
+> computed for the old column. Algebraically consistent but equilibration quality
+> decays arbitrarily over an update chain, inflating bump multipliers (interacts
+> with L5). low/certain (mechanism) / possible (severity).
+
+### Why this is recorded here rather than fixed
+
+1. **The output is algebraically correct.** Both update paths scale the entering
+   column by the leaving slot's column factor — dense_update.rs:55-57
+   (`* self.scale.d_col[leaving_slot]`) and sparse_update.rs:195
+   (`let dcol = self.scale.d_col[leaving_slot]`). The factorization maintains
+   `P B̃ Q = L U` in the *scaled* frame, and the solve un-scales with the same
+   `d_col`, so the replacement is consistent and the computed solution is correct
+   to working precision. The finding itself classifies the mechanism as
+   "algebraically consistent."
+
+2. **The defect is numerical conditioning, not a wrong answer.** Applying the old
+   column's scale to a new column with a different natural magnitude gives poor
+   equilibration, which can inflate bump multipliers and the growth factor *over a
+   chain of updates*. Severity is "possible": within the growth budget
+   (`max_growth`, which triggers `NeedsRefactor`) the solve stays accurate; the
+   decay only costs earlier refactors.
+
+3. **Not reproducible as a clean RED test.** Demonstrating "equilibration quality
+   decays" is a conditioning study — measuring growth-factor / residual trend
+   across a long, matrix-specific update chain against an arbitrary threshold — not
+   a deterministic unit assertion. There is no single input that yields a *wrong*
+   output to assert against.
+
+4. **The fix is a scoped, L5-coupled algorithmic change.** Correcting it means
+   re-equilibrating the entering column with its *own* `d_col` (and reconciling the
+   solve's un-scaling), which changes the scaling frame mid-update and, per the
+   finding, "interacts with L5." That is research-plus-benchmark work, not a
+   surgical reproduce-first fix.
+
+### Disposition
+
+No code change and no new test. Recommended as a tracked numerical study jointly
+with L5: (a) instrument the bump-multiplier / growth-factor trend over synthetic
+update chains to quantify the decay; (b) design an entering-column
+re-equilibration (own `d_col`) with a matching solve un-scale; (c) validate
+refactor frequency and accuracy against the corpus bench. Until then the behavior
+is correct-but-suboptimally-conditioned, bounded by the `max_growth` refactor
+trigger.
+
+Evidence: `src/lu/dense_update.rs:50-58` (spike scaled by d_col[leaving_slot]),
+`src/lu/sparse_update.rs:183` (doc), `:195` (`d_col[leaving_slot]`). Output
+algebraically correct; growth bounded by `max_growth`/`NeedsRefactor`. Journal:
+dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — L11: DenseLu::perm_inv is dead state (finding L11, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **L11** `DenseLu::perm_inv` is dead state — built and maintained
+> (`dense_factor.rs:31,59-61,94-96`), never read. low/certain.
+
+### Why this is recorded here rather than fixed
+
+1. **The finding is accurate — confirmed by static analysis.** `DenseLu::perm_inv`
+   (`src/lu/dense_factor.rs:31`, the `perm_inv[orig_row] = pivot_position`
+   inverse) is *written* in the constructor (`:75-84`) and *re-maintained* on every
+   `refactor()` (`:115-117`), but is never *read*: a crate-wide grep for
+   `perm_inv` as an rvalue finds zero readers in `src/lu/` outside the writes in
+   `dense_factor.rs`. `dense_update.rs` and `dense_solve.rs` contain no reference
+   to it at all. (The sibling `qcol_inv` is read for the Q-scatter; the *sparse*
+   `SparseLu::perm_inv` is read for sparse-spike seeding — only the *dense* row
+   `perm_inv` is dead.) The line numbers in the finding (`59-61`, `94-96`) are
+   stale — the file has shifted since the review — but the substance holds at the
+   current `:75-84` / `:115-117`.
+
+2. **Dead state has no runtime behavior to reproduce with a RED test.** Its
+   presence does not affect any output of any valid call; removing it would change
+   no result, only eliminate the maintenance writes. There is no input that yields
+   a *wrong* answer to assert against, so the reproduce-first lifecycle the /loop
+   mandates does not apply. This places L11 in the same "no test can fail on the
+   bug" bucket as the other non-reproducible findings in this log.
+
+3. **Removing maintained state I did not author warrants human approval, not a
+   silent unilateral delete.** `perm_inv` is deliberately re-maintained inside
+   `refactor()` (`:116`), which reads as a field a prior author intends to consume
+   (e.g. a planned dense FT-update or row-permutation-aware path). Per the project
+   guidance to "look at the target before deleting — if you didn't create it,
+   surface that rather than proceed," excising another developer's intentionally-
+   maintained field is a judgment call about whether that intended use is still
+   coming, which belongs to a human reviewer.
+
+### Disposition
+
+No code change and no new test. Recommended as a trivial, safe cleanup *pending a
+human decision*: if no dense path will consume the row-permutation inverse, delete
+the field at `dense_factor.rs:31`, the constructor build at `:75-84`, and the
+`refactor()` maintenance at `:115-117` (the compiler's dead-code / unused-field
+analysis is the oracle — removal must still compile and pass the full suite). If a
+future dense update path is planned, leave it and annotate the intent. Until that
+decision, the field is harmless dead state (a few `usize` writes per factor /
+refactor, never read).
+
+Evidence: `src/lu/dense_factor.rs:31` (field), `:75-84` (constructor build),
+`:115-117` (`refactor()` maintenance); zero rvalue readers across `src/lu/`
+(grep). Journal: dev/journal/2026-06-10-01.org.
+
+---
+
+## 2026-06-10 — L12: allocation cluster in factor / bump-elim / dense rollback (finding L12, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **L12** Allocation cluster: `u_entries` Vec per column in the factor loop
+> (`sparse_factor.rs:215`); two Vecs per column in `remap_and_sort_l`
+> (`:490-491`); `pivot_data` clone + per-op row allocation in bump elimination
+> (`sparse_update.rs:299,309`); full L/U/qcol clones for rollback on every dense
+> update (`dense_update.rs:66-68`) — an undo log of touched entries would be far
+> cheaper on the success path. low/certain.
+
+### Why this is recorded here rather than fixed
+
+1. **The finding is accurate — confirmed at the current (drifted) line numbers.**
+   The cited lines have shifted since the review, but every site is real today:
+   - factor loop: `let mut u_entries: Vec<(usize, f64)> = Vec::with_capacity(reach.len())`
+     allocated *per column* (`src/lu/sparse_factor.rs:236`, consumed via
+     `into_iter()` at `:318`); plus the per-row `u_rows`/`row` Vecs at `:350-352`;
+   - `remap_and_sort_l`: `let mut order: Vec<usize> = Vec::new()`
+     (`src/lu/sparse_factor.rs:537`);
+   - bump elimination: `let pivot_data = self.u_rows[k].clone()`
+     (`src/lu/sparse_update.rs:340`) and the per-op `row_sub` allocation
+     (`:346` → `Vec::with_capacity` at `:429`);
+   - dense update rollback: `self.u.clone()` / `self.l.clone()` /
+     `self.qcol.clone()` on *every* update (`src/lu/dense_update.rs:75-77`).
+
+2. **Correct output — this is allocation efficiency, not a wrong answer.** None of
+   these sites changes any computed result; they only allocate more than a tuned
+   implementation would. So there is no input that yields a *wrong* output for a
+   RED test to assert against. The reproduction vehicle here is an allocation
+   *count* (the L3 thread-local-counter pattern in `sparse_solve.rs`, which pins
+   "zero per-call allocations"), not a correctness assertion — i.e. L12 is
+   reproducible-in-principle, unlike the timing-flaky findings, but only as a
+   non-functional allocation-count contract.
+
+3. **The flagship fix is a correctness-sensitive, bench-gated rewrite.** Replacing
+   the dense rollback clones with an undo log means recording every touched
+   `(index, old_value)` during the in-place update and replaying it on the
+   `NeedsRefactor` path, instead of cloning `u`/`l`/`qcol` up front and committing
+   on success. That reworks the update's commit/rollback mechanism on the
+   basis-update critical path — exactly where a subtle rollback bug would corrupt
+   the factorization silently. The project mandate is "correctness before
+   performance, always," and the feature lifecycle requires perf changes to go
+   through research → plan → tests → implement → **benchmark**. That does not fit
+   the surgical reproduce-first-then-commit cadence of this pass.
+
+4. **It is a cluster, best addressed coherently.** Four distinct sites with one
+   shared theme (reuse scratch / avoid clones). Fixing one in isolation (e.g.
+   hoisting `u_entries` to a reused buffer cleared each column) would leave the
+   headline item — the dense rollback clones — open, and would add factor-path
+   allocation instrumentation for a fractional gain. These belong in one tuned
+   optimization pass with allocation-count regression tests, not piecemeal.
+
+### Disposition
+
+No code change and no new test. Recommended as a tracked optimization task: (a)
+add allocation-count instrumentation on the factor and update paths (extend the
+L3 thread-local counter); (b) hoist the per-column/per-row scratch Vecs
+(`u_entries`, `remap_and_sort_l` `order`, bump-elim `row_sub` scratch) to reused
+buffers cleared per iteration; (c) replace the dense rollback clones with a
+touched-entry undo log replayed on `NeedsRefactor`; (d) pin each with an
+allocation-count test and validate net speedup on the LU bench before committing.
+Until then the behavior is correct but allocates more than necessary on the
+factor and update hot paths.
+
+Evidence: `src/lu/sparse_factor.rs:236,318,350-352,537`;
+`src/lu/sparse_update.rs:340,346,429`; `src/lu/dense_update.rs:75-77`. Output
+unaffected; reproduction vehicle is allocation count (L3 pattern), not a
+correctness assertion. Journal: dev/journal/2026-06-10-01.org.
+
+## X8 — C-ABI status-code "mirror" comment (capi.rs:13-14): non-reproducible behavioral risk; doc corrected (2026-06-10)
+
+**Finding (repo-review-2026-06-09.md §X8, low/likely):** the comment at
+`src/capi.rs:13-14` claims the `FERAL_*` status codes "mirror Ipopt's
+`ESymSolverStatus` enum," but `FERAL_FATAL = 3` collides with Ipopt's
+`SYMSOLVER_CALL_AGAIN` (also enum value 3); Ipopt's fatal code is
+`SYMSOLVER_FATAL_ERROR = 4`. The review's stated risk: "a numerically
+pass-through shim would turn fatal errors into call-again loops."
+
+### Why the behavioral risk is non-reproducible
+
+The shim does **not** pass the integer through. `feral-ipopt-shim/src/
+IpFeralSolverInterface.cpp:11-15` translates explicitly:
+
+    case FERAL_SUCCESS:        return SYMSOLVER_SUCCESS;
+    case FERAL_SINGULAR:       return SYMSOLVER_SINGULAR;
+    case FERAL_WRONG_INERTIA:  return SYMSOLVER_WRONG_INERTIA;
+    case FERAL_FATAL:
+    default:                   return SYMSOLVER_FATAL_ERROR;
+
+`FERAL_FATAL` maps to `SYMSOLVER_FATAL_ERROR` (the correct enum value 4),
+not to value 3. The shim header even documents the intent
+(`include/IpFeralSolverInterface.hpp:11`: "no SYMSOLVER_CALL_AGAIN").
+So the "call-again loop" the review hypothesizes ("*would* turn …")
+cannot occur in the real integration — it is conditioned on a
+pass-through shim that does not exist.
+
+There is therefore no input that produces a wrong status at any FERAL or
+shim boundary for a RED test to assert against:
+- The FERAL C ABI is a self-consistent four-value contract
+  (`FERAL_SUCCESS=0, FERAL_SINGULAR=1, FERAL_WRONG_INERTIA=2,
+  FERAL_FATAL=3`). Asserting those values in a Rust test would pin the
+  implementation against itself (characterization), not reproduce a bug.
+- The only place the values meet Ipopt's enum is the C++ shim, which is
+  correct (translates, not casts) and outside the Rust test harness.
+
+### Disposition
+
+The actionable core of X8 is the inaccurate comment, not a code defect.
+Corrected `src/capi.rs:13-14` in the same change to state precisely:
+codes 0-2 share Ipopt's `SUCCESS/SINGULAR/WRONG_INERTIA` values; FERAL
+has no `CALL_AGAIN` analog (Ipopt value 3), so `FERAL_FATAL` reuses value
+3 and the shim must **translate** it to `SYMSOLVER_FATAL_ERROR` (value 4)
+— it is not a numeric pass-through. No failing test exists or is added,
+per the non-reproducibility above. Not user-visible behavior (internal
+doc comment) → no CHANGELOG entry.
+
+Evidence: `src/capi.rs:13-14,22-25`;
+`feral-ipopt-shim/src/IpFeralSolverInterface.cpp:11-15`;
+`feral-ipopt-shim/include/IpFeralSolverInterface.hpp:11`;
+`ref/Ipopt/src/Algorithm/LinearSolvers/IpSymLinearSolver.hpp:19-33`.
+Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — X12: build_cost_graph per-column sort is dead work / micro-allocations (finding X12, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **X12** `build_cost_graph` per-column sort is dead work with O(n)
+> per-run allocations (`mc64.rs:342-351`): the two-pass expansion
+> already emits rows ascending. MC64 is documented as the dominant
+> symbolic cost. low/likely (ordering argument) / certain
+> (allocations).
+
+(The cited lines correspond to `src/scaling/mc64.rs`; in the current
+tree the per-column sort is at `mc64.rs:357-370` and the two-pass
+expansion at `:307-355`.)
+
+### Why this is not reproducible as a failing test
+
+X12 is a performance / dead-work observation, not a correctness defect.
+There is no input for which the present code produces a wrong result, so
+no RED test can be written against it.
+
+1. **The sort never changes the factorization result.** `build_cost_graph`
+   feeds the Hungarian matching kernel and the column-max normalization.
+   Column-max normalization (`mc64.rs:372-394`) computes a per-column
+   maximum and subtracts it — order-independent. The Hungarian kernel
+   consumes the column as a set of (row, cost) pairs; its matching and the
+   resulting scaling do not depend on the within-column row order. The
+   in-code comment says as much: "Hungarian kernel does not strictly
+   require this … a predictable order makes the greedy initialization
+   deterministic and matches SPRAL's behaviour after `half_to_full`." So
+   the sort is at most a determinism/parity nicety, never a correctness
+   input.
+
+2. **On the maintained invariant the sort is provably a no-op (the
+   "ordering argument").** feral's CSC columns are row-sorted ascending
+   (the documented `CscPattern` invariant — see also finding O3). Under
+   that invariant the expansion already emits each column ascending:
+   - Transpose entries `(j, i)` for `j < i` are appended to column `i` as
+     the outer loop runs `j = 0,1,…`, so they land in ascending `j`, and
+     every such row is `< i`.
+   - Own-column entries `(i', i)` with `i' >= i` are appended when the
+     outer loop reaches `j = i`, in the ascending CSC row order, every row
+     `>= i`.
+   The concatenation `[rows < i ascending] ++ [rows >= i ascending]` is
+   globally ascending, so `pairs.sort_by_key` reorders nothing. A test
+   asserting "columns come out ascending" therefore PASSES on the current
+   code — it confirms the sort is dead, it does not reproduce a bug.
+
+3. **The O(n) per-run allocations are micro-overhead, not a defect.** The
+   per-column `Vec<(usize, f64)>` in the sort loop and the `offsets`
+   clone are extra allocations, but they change neither the output nor the
+   asymptotic cost of the surrounding MC64 work. Removing them is a pure
+   optimization with no observable behavioral change to assert.
+
+### Disposition
+
+Routed here per the /loop rule ("anything that can't be reproduced goes
+to dev/tried-and-rejected.md citing the finding ID"). X12 describes
+redundant work, not incorrect behavior: the sort is correctness-neutral
+(the kernel and column-max normalization are order-invariant) and, on the
+maintained row-sorted-CSC invariant, provably a no-op; the allocations
+are micro-overhead. No failing test exists or is added. Removing the sort
+and the per-run allocations would be a performance change with no output
+delta — deliberately left out of this bug-fix loop, which is anchored on
+reproducing defects. Not user-visible → no CHANGELOG entry.
+
+Evidence: `src/scaling/mc64.rs:294-394` (build_cost_graph: expansion
+`:307-355`, sort `:357-370`, column-max normalization `:372-394`).
+Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — X13: value_bound defensive-fingerprint comment is false (finding X13, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **X13** `value_bound.rs:180-189,222-226`: the defensive-fingerprint
+> comment ("makes the subsequent check reject") is false — with
+> mean_diag_0 = 0, condition 3 is vacuous; impact nil today only
+> because the length gate rejects first. low/certain.
+
+### Why this is not reproducible as a failing test
+
+X13 is a false *comment*, not a behavioral defect. The cited code path
+(`src/scaling/value_bound.rs:180-189`, the `else` arm of
+`precompute_mc64_validity`) builds an all-zero `DominanceStats` when
+`scaling.len() != matrix.n`, yielding the fingerprint `r0 = 1`,
+`n_off_dominant_0 = 0`, `mean_diag_0 = 0`. The old comment claimed this
+"makes the subsequent check reject (r0 = 1, mean = 0)". That is wrong on
+two counts:
+
+1. **The length gate rejects first.** This fingerprint is produced *only*
+   when `scaling.len() != matrix.n`. Its sole consumer,
+   `mc64_value_bound_passes` (`:212-227`), opens with
+   `if scaling.len() != n || validity.qualifying.len() != n { return false; }`
+   (`:218-220`) and returns `false` before evaluating any of conditions
+   1-3. So the fingerprint values never drive the decision on the very
+   inputs that produce them.
+
+2. **`mean_diag_0 = 0` makes condition 3 vacuous, not rejecting.** Were the
+   conditions evaluated, condition 3 is
+   `min_diag >= EPS_DIAG * mean_diag_0 = EPS_DIAG * 0 = 0`, satisfied for
+   any non-negative scaled diagonal — it *passes*, the opposite of the
+   comment's "reject". And `r0 = 1` does not force condition 1 to fail.
+   Only condition 2 (`n_off_dominant <= GROWTH_COUNT * 0`) would reject,
+   and only when off-dominant rows exist.
+
+Furthermore the `else` arm is unreachable in practice: callers pass
+`SparseFactors::scaling`, whose length is `matrix.n` by construction
+(documented at `:172-174`). The branch is dead defensive code whose only
+job is to avoid an out-of-bounds index; it never reaches a value-bound
+decision. There is thus no input for which behavior is wrong, so no RED
+test can be written.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected
+citing the finding ID), and — following the X8 precedent for misleading
+comments — the inaccurate comment was corrected in the same change.
+`src/scaling/value_bound.rs:180-189` now states that the all-zero
+fingerprint is a never-consulted placeholder, that rejection on a length
+mismatch comes from the length gate (not the fingerprint), and that
+`mean_diag_0 = 0` makes condition 3 vacuous rather than rejecting. No
+behavioral change; no failing test exists or is added. Not user-visible
+(internal comment) → no CHANGELOG entry.
+
+Evidence: `src/scaling/value_bound.rs:175-196` (precompute, defensive
+arm), `:212-227` (length gate `:218-220`, conditions `:222-226`),
+`:169-174` (caller contract). Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — X14: dense-bench factor_nnz convention vs comments (finding X14, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **X14** `factor_nnz` for the dense bench path is n² with a comment
+> claiming strictly-lower-triangle count (`bench.rs:1642-1645`); the
+> code matches the multifrontal nrow·nelim convention, so the comment is
+> what's wrong — but fill-parity readers need to know which.
+> low/certain.
+
+(The current tree puts the dense-path `factor_nnz` at `bench.rs:1662-1665`
+and the field doc at `:1009-1013`.)
+
+### What is actually there (deeper than the finding states)
+
+The dense path sets `factor_nnz: Some(n²)` for a single fully-eliminated
+`n×n` front (`nrow = nelim = n`). The old inline comment called this "the
+strictly-lower-triangle entries (matches the multifrontal accounting on a
+single supernode of size n)". Both clauses are wrong:
+
+- `n²` is not the strictly-lower-triangle count (`n(n−1)/2`).
+- The actual multifrontal accounting, `SparseFactors::factor_nnz()`
+  (`src/numeric/factorize.rs:959-969`), is the *triangular*
+  `Σ nelim·(nelim+1)/2 + (nrow−nelim)·nelim`. For a single full front of
+  size n that is `n(n+1)/2`, not `n²`. So `n²` does **not** match the
+  multifrontal accounting on a single supernode of size n; it is ~2× it.
+
+`n²` is in fact the *rectangular* `nrow·nelim` product — which is the
+convention the `factor_nnz` field doc (`bench.rs:1009`) literally states
+("total `nrow * nelim` across supernodes"). So the real situation is a
+convention split inside the bench harness:
+
+| path        | code                                   | convention            |
+|-------------|----------------------------------------|-----------------------|
+| dense       | `n²` (`:1665`)                          | rectangular nrow·nelim |
+| sparse      | `sp_factors.factor_nnz()` (`:1951`)     | triangular            |
+
+The field doc matches the dense path; `factor_nnz()`'s implementation
+matches the sparse path; the doc and the implementation disagree with
+each other. The fill-parity report (`bench.rs:487-494`) therefore counts
+dense-path matrices rectangularly and sparse-path matrices triangularly —
+a ~2× convention skew between rows of the same report. The old field doc
+also wrongly claimed `factor_nnz` is "`None` on the dense path"; the dense
+path sets `Some(n²)`.
+
+### Why this is not reproducible as a defect fix here
+
+`factor_nnz` is a *diagnostic* metric feeding the fill-parity report; it
+has no bearing on solver correctness (inertia, residuals, factor values
+are all independent of it). Unifying the two paths to one convention is a
+deliberate design choice with no external oracle:
+
+- the codebase is internally split (field doc = rectangular,
+  `factor_nnz()` = triangular), so there is no single in-repo "truth" to
+  assert against;
+- the right cross-solver convention to compare against MUMPS / SSIDS
+  `factor_nnz` is a separate, unsettled question;
+- changing the dense-path value would silently move historical
+  fill-parity baselines for every dense-path matrix.
+
+A test could only pin one arbitrary convention against itself
+(characterization), not reproduce a defect. Out of scope for a bug-fix
+loop anchored on reproducing solver defects.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected
+citing the finding ID). Following the X8 / X13 precedent for misleading
+comments, both inaccurate comments were corrected in the same change:
+
+- `bench.rs:1662-1665` now states the dense path reports the rectangular
+  `nrow·nelim = n²` front-cell count, explicitly contrasts it with the
+  triangular `SparseFactors::factor_nnz()` (`n(n+1)/2` for a single full
+  front, used by the sparse path), and warns fill-parity readers the two
+  paths are not directly comparable.
+- `bench.rs:1009-1013` field doc corrected to describe both conventions
+  and to state `factor_nnz` is `Some` on both paths (it is not `None` on
+  the dense path).
+
+The underlying convention split (dense rectangular vs sparse triangular,
+and the field-doc-vs-`factor_nnz()` disagreement) is documented here for a
+future deliberate decision; the `n²` value itself is left unchanged (no
+oracle, diagnostic-only, would move baselines). Not user-visible (bench
+diagnostic + internal comments) → no CHANGELOG entry.
+
+Evidence: `src/bin/bench.rs:1009-1013` (field doc), `:1662-1665`
+(dense-path value), `:1951` (sparse-path value), `:487-494` (fill-parity
+report); `src/numeric/factorize.rs:959-969` (`factor_nnz()` triangular
+formula); `src/dense/factor.rs:788,1247-1256` (dense `Factors` has no
+`factor_nnz()`; `nrow`/`nelim` fields). Journal:
+dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — X16: Inertia struct "invariant: pos+neg+zero == n" doc (finding X16, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **X16** `Inertia::new` (`inertia.rs:12-18`) doesn't enforce the
+> documented `pos+neg+zero == n` invariant; doc reads like a guarantee.
+> low/certain.
+
+### Why this is not reproducible as a defect
+
+`Inertia` is a plain triple of `usize` counts (`positive`, `negative`,
+`zero`). `Inertia::new(positive, negative, zero)` stores exactly what it is
+given. There is no defective behavior to reproduce:
+
+1. **`new` takes no `n`.** Its signature is
+   `new(positive, negative, zero)` — there is no matrix dimension in scope,
+   so it is structurally impossible for `new` to check `pos+neg+zero == n`.
+   The "invariant" references an external `n` the constructor never sees.
+
+2. **The "== n" invariant is violated by design for sub-blocks.** `Inertia`
+   is intentionally used to describe sub-blocks, not just whole matrices.
+   The 2×2 pivot classifier `classify_2x2_inertia`
+   (`src/dense/factor.rs:4313-4332`) returns `Inertia::new(1,1,0)`,
+   `Inertia::new(2,0,0)`, `Inertia::new(0,0,2)`, etc. — every one has
+   `total() == 2`, the order of the 2×2 block, **not** the global matrix
+   order `n`. `count_2x2_inertia_val` (`:4259`) does likewise. So adding
+   `assert!(pos+neg+zero == n)` to `new` is not just impossible (no `n`) but
+   semantically wrong: it would reject the type's legitimate sub-block use.
+
+3. **No caller relies on a false guarantee.** Every whole-matrix
+   construction site (`src/dense/factor.rs:1158,1786,2281,2515`, the bench
+   harness, etc.) passes counts that already sum to the relevant dimension;
+   `total()` (`inertia.rs:21-23`) recomputes the sum on demand. Nothing reads
+   back an enforced invariant that could be wrong.
+
+A test could only assert that `new` stores what it is given
+(`Inertia::new(1,1,1).total() == 3`) — which passes, i.e. characterizes
+correct behavior; it cannot go RED on a defect. The real issue is purely a
+doc-comment that *reads* like an enforced guarantee when the relationship is
+a caller-upheld contract (and a tautology with `total()` for whatever
+(sub)matrix the inertia describes).
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected citing
+the finding ID). Following the X8 / X13 / X14 precedent for misleading
+comments, the doc was corrected in place (`src/inertia.rs:1-9`, `:11-13`):
+the struct doc now states `total()` equals the dimension of whatever
+(sub)matrix the inertia describes, explicitly notes the 2×2-block use where
+`total() == 2`, and that counts are caller-supplied and unvalidated; the
+`new` doc states the counts are stored as given and not validated against any
+dimension. No behavioral change; no enforcement added (it would break the
+sub-block use). Not user-visible (internal doc) → no CHANGELOG entry.
+
+Evidence: `src/inertia.rs:1-30`; `src/dense/factor.rs:4259,4313-4332`
+(2×2-block inertias with `total()==2`); whole-matrix sites
+`src/dense/factor.rs:1158,1786,2281,2515`. Journal:
+dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — O4: non-aggressive Pass-2 stale-mark `as usize` cast (finding O4, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O4** Non-aggressive Pass-2 casts a possibly-stale mark difference
+> straight to usize with no guard (`algo.rs:407`, AMF branch
+> `:962-977`); the invariant holds today, but a regression wraps to
+> ~2⁶⁴. Add `debug_assert!(we >= ws.wflg)`. low/possible.
+
+### What is there
+
+In `crates/feral-ordering-core/src/quotient_graph/algo.rs`, the
+non-aggressive element sub-pass of Pass-2 computes the external degree
+contribution of a live element `e` as `we - ws.wflg`, where
+`we = ws.w[e]` and `ws.wflg` are both `i32`:
+
+- AMD accumulator, `:406-408`:
+  `let dext = (we - ws.wflg) as usize; deg += dext;`
+- AMF accumulator, `:995-1000`:
+  `let dext = we - ws.wflg; ... deg += dext as usize;`
+
+If a live element (`we != 0`) ever had `we < ws.wflg`, the `i32`
+subtraction is negative and the `as usize` cast sign-extends it to ~2^64,
+corrupting `deg`.
+
+### Why this is not reproducible as a defect
+
+The algorithm maintains the invariant `we >= ws.wflg` for every live
+element in the non-aggressive pass; the review confirms "the invariant
+holds today" and rates the finding "low/possible". `ws.wflg` is the current
+flag baseline and live elements carry a mark `>=` it by construction.
+Driving `we < ws.wflg` requires directly corrupting the internal workspace
+(`ws.w`, `ws.wflg`), which no public ordering entry point exposes — the
+producers take a `CscPattern` and own the workspace privately. So no test
+can reproduce the wrap on a real input; a test could only manufacture the
+violation by reaching into private state, which characterizes the guard,
+not a defect. (The aggressive AMF branch is already safe: `:972` guards
+`if dext > 0` before using `dext`.)
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected citing
+the finding ID). Per the finding's explicit recommendation and the X12/X16
+precedent (non-reproducible findings with a concrete low-risk in-code
+hardening), a `debug_assert!` documenting the `we >= ws.wflg` invariant was
+added at both non-aggressive cast sites (AMD `:407`, AMF `:1000`). It is
+debug/test-only (compiled out in release), changes no behavior, and never
+fires on current inputs — the full feral-ordering-core / feral-amd /
+feral-amf / feral-metis / feral-scotch test suites pass with it in place. It
+converts a silent ~2^64 wrap on a future regression into an immediate,
+located assertion failure. Not user-visible (internal debug guard) → no
+CHANGELOG entry.
+
+Evidence:
+`crates/feral-ordering-core/src/quotient_graph/algo.rs:402-413` (AMD
+non-aggressive branch), `:990-1006` (AMF non-aggressive branch), `:966-988`
+(aggressive AMF branch already guarded by `if dext > 0` at `:972`). Journal:
+dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — O5: dense-threshold formula in `dense_alpha` docs (finding O5, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O5** Dense-threshold formula deviates from its own doc for small n
+> / negative alpha (`workspace.rs:204-210`): `.max(16)` overrides the
+> documented n−2 for n < 18; `min(max(16,x),n)` ≠ documented
+> `max(16,min(n,x))`. No practical effect. low/certain.
+
+### What is there
+
+`crates/feral-ordering-core/src/quotient_graph/workspace.rs:212-217`:
+
+    let dense = if opts.dense_alpha < 0.0 {
+        n.saturating_sub(2)                          // n - 2
+    } else {
+        (opts.dense_alpha * (n as f64).sqrt()) as usize
+    };
+    let dense = dense.max(16).min(n);                // min(max(16, raw), n)
+
+The three `dense_alpha` doc comments
+(`feral-amd/src/lib.rs:40-45`, `feral-amf/src/lib.rs:46-50`,
+`feral-ordering-core/src/quotient_graph/mod.rs:50-55`) describe this as
+`max(16, min(n, dense_alpha * sqrt(n)))` and say a negative value "sets the
+threshold to `n - 2`". Two inaccuracies: (1) the clamp nesting is reversed —
+code is `min(max(16, raw), n)`, doc is `max(16, min(n, raw))`; (2) the
+negative-alpha branch is also passed through `max(16)`/`min(n)`, so it is not
+a bare `n - 2` for `n < 18`.
+
+### Why this is not reproducible as a defect — the code is canonical-correct
+
+The code matches the faer / SuiteSparse AMD reference exactly. Verified
+against faer 0.24.0 (the version feral references), `amd.rs:173-179`
+(confirmed by the faer-expert agent reading the cargo-registry source):
+
+    let dense = if alpha < 0.0 { n - 2 } else { (alpha * sqrt(n)) as usize };
+    let dense = Ord::max(dense, 16);     // max(16) first
+    let dense = Ord::min(dense, n);      // min(n) second
+
+i.e. `min(max(16, raw), n)`, with both clamps applied unconditionally to both
+branches — identical to feral's `dense.max(16).min(n)`. The nesting order is
+load-bearing: faer's form guarantees `dense <= n`, whereas the doc's
+`max(16, min(n, raw))` would give `16 > n` for `n < 16`.
+
+So the implementation is the canonical one and the doc transcription is the
+artifact that is wrong. There is no behavioral defect to reproduce:
+
+- positive branch: `min(max(16, x), n)` and `max(16, min(n, x))` agree for
+  all `n >= 16`; they diverge only for `n < 16`, where the threshold (>= 16)
+  already exceeds the maximum possible vertex degree `n - 1`, so no vertex is
+  ever classified dense differently;
+- negative branch: the code matches the faer reference, which is the oracle.
+
+A test could only characterize the code against itself or against faer
+(confirming correct behavior), not drive a RED defect.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected citing
+the finding ID). Per the X8/X13/X14/X16 precedent for inaccurate docs, the
+three `dense_alpha` doc comments are corrected to the actual formula
+`min(max(16, floor(dense_alpha * sqrt(n))), n)`, noting the clamp order
+matches faer `amd.rs:173-179` and that the negative-alpha branch uses a raw
+`n - 2` with the same clamps (exactly `n - 2` for `n >= 18`). No code change
+(the implementation is canonical-correct). Not user-visible (doc comments
+only) → no CHANGELOG entry.
+
+Evidence: `crates/feral-ordering-core/src/quotient_graph/workspace.rs:212-217`
+(code); doc sites `feral-amd/src/lib.rs:40-45`, `feral-amf/src/lib.rs:46-50`,
+`feral-ordering-core/src/quotient_graph/mod.rs:50-55`; faer 0.24.0
+`sparse/linalg/amd.rs:173-179` (external oracle, faer-expert verified).
+Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — O6: `n_clear_flag` stat hard-coded 0 vs "every field populated" doc (finding O6, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O6** `n_clear_flag` stat hard-coded 0 in both feral-amd
+> (`lib.rs:115`) and feral-amf (`lib.rs:121`) while the stats docs
+> claim "every field is populated" in debug builds. low/certain.
+
+(Current tree: the hard-coded `0` is at `feral-amd/src/lib.rs:119` and
+`feral-amf/src/lib.rs:123`.)
+
+### What is there
+
+`AmdStats` / `AmfStats` expose `pub n_clear_flag: u32`, documented as
+"Number of mark-array generation-counter resets"; `AmdStats`'s struct doc
+(`feral-amd/src/stats.rs:5-7`) claims "In debug builds every field is
+populated". Both `amd_order_full` and the AMF equivalent set
+`n_clear_flag: 0` literally. The shared `OrderDiagnostics`
+(`quotient_graph/mod.rs:73-79`) carries `ncmpa`, `n_mass_elim`,
+`n_supervar_merge`, `ndense`, `flops` — there is no clear-flag field, so the
+stat has nothing to read from and is a disconnected constant.
+
+### Why this is not reproducible as a defect
+
+The reset it would count (`clear_flag`, `quotient_graph/workspace.rs:49-59`)
+fires only when `wflg < 2` (the one-time lift from the initial `wflg = 0`,
+over an all-ones `w`) or `wflg >= wbig`, where `wbig = i32::MAX - n`
+(`workspace.rs:99-100`). During elimination `wflg` increases by at most
+`lemax <= n` per pivot across at most `n` pivots (~`n^2` total), so reaching
+the `~2^31` ceiling requires `n` on the order of tens of thousands. On every
+practically unit-testable input the true reset count is `0`.
+
+Consequences:
+
+- A black-box test cannot distinguish a hard-coded `0` from a correctly
+  computed `0`; both are `0` for all testable inputs. No RED state exists.
+- Forcing a non-zero value needs an `n ~ 46k` matrix with the right fill —
+  not a unit test.
+- The counter is feral-specific; SuiteSparse / faer AMD do not expose it, so
+  there is no external oracle for its value. Wiring it up and asserting a
+  value would be self-authored impl + self-authored oracle in one session
+  (forbidden by the project rule), and would require changing `clear_flag`'s
+  signature across its four hot-loop call sites (algo.rs:280, 501, 891, 1101)
+  for a value that is ~always `0`.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected citing
+the finding ID). Per the X16/O4/O5 precedent for non-reproducible findings
+with an inaccurate doc, the docs are corrected rather than the code:
+
+- `feral-amd/src/stats.rs`: the `n_clear_flag` field doc now states the
+  field is currently always `0` and not wired to a backing counter, with the
+  `wbig = i32::MAX - n` ceiling explaining why the reset is a near-never
+  event; the struct-level "every field is populated" claim is amended to
+  carve out `n_clear_flag`.
+- `feral-amf/src/stats.rs`: the `n_clear_flag` field doc gets the same
+  correction.
+
+No code change; the hard-coded `0` is left as-is (it is the correct value on
+every input the crate can be tested against). Not user-visible (doc comments
+only) → no CHANGELOG entry.
+
+Evidence: `feral-amd/src/lib.rs:117-126` and `feral-amf/src/lib.rs` (stats
+assembly, `n_clear_flag: 0`); `feral-amd/src/stats.rs:5-13`,
+`feral-amf/src/stats.rs:5-13` (docs); `quotient_graph/mod.rs:73-79`
+(`OrderDiagnostics` has no clear-flag field);
+`quotient_graph/workspace.rs:49-59` (`clear_flag`), `:99-100`
+(`wbig = i32::MAX - n`). Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — O9: metis `two_hop_pass` O(n^2) on hubs (finding O9, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O9** metis `two_hop_pass` is O(n²) on hub graphs
+> (`coarsen.rs:148-204`) — its own motivating case; rescans
+> neighbor-of-neighbor lists from the start per spoke; `mark` allocated
+> and never used. medium-low/certain (perf).
+
+### Why this is not reproducible as a correctness test
+
+O9 is a performance finding, not a wrong-answer defect. `two_hop_pass`
+produces a correct matching; the complaint is that on a star/hub graph each
+self-matched spoke `v` rescans its hub neighbour's entire adjacency from the
+start to find a self-matched partner, so ~n spokes each scan ~n hub-neighbours
+=> O(n^2). A unit test cannot turn "quadratic instead of linear" into a
+deterministic pass/fail without a timing/benchmark oracle, which the spec's
+tests-first lifecycle does not provide for this kind of finding (and timing
+assertions are flaky). So there is no RED state to write.
+
+### Why the O(n^2) rescan is not rewritten here
+
+The current algorithm pairs each self-matched `v` (in increasing vertex
+order) with the *first* self-matched 2-hop neighbour found while scanning
+`v`'s neighbours in adjacency order and each neighbour's adjacency in order.
+The pairing is therefore order-sensitive and deterministic. A genuinely
+O(nnz) rewrite (METIS Match_2Hop buckets unmatched vertices by a
+representative neighbour and pairs within buckets) would choose *different*
+partners, changing `cmap`, the coarse graph, and the final permutation. That
+would break the crate's determinism contract and the
+`coarsen_is_deterministic_with_seed` test, and shift ordering quality on
+every input — far out of proportion to an opportunistic low-severity perf
+fix. The two-hop pass also only fires when SHEM's reduction ratio exceeds the
+two-hop threshold (default 0.85), i.e. on the already-rare hard-to-match
+levels, bounding the practical impact.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible -> tried-and-rejected citing
+the finding ID). Per the X16/O4/O5/O6 precedent, the finding's safe, explicitly
+recommended sub-fix is applied: the dead `mark` array — allocated `vec![-1; n]`
+and only ever touched by a `let _ = &mut mark;` lint-silencer — is removed,
+along with the stale comment describing its non-use. This is a pure cleanup
+with no behaviour change; the existing two-hop tests
+(`coarsen_grid_8x8_halves_vertices`, `coarsen_is_deterministic_with_seed`,
+`coarsen_hierarchy_shrinks_monotonically`) remain the regression guard. The
+O(n^2) scan structure is left as-is.
+
+Evidence: `coarsen.rs:148-204` (two_hop_pass); the `mark` declaration and the
+`let _ = &mut mark;` no-op were the only references to it. Journal:
+dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — O11: metis FM heap seeded with all n vertices (finding O11, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O11** metis FM heap seeded with all n vertices each pass
+> (`fm_refine.rs:56-61`): Ω(n log n) per pass × 10 passes × every
+> level, boundary-only seeding is the standard. Acknowledged trade;
+> flagged for cost. low/certain.
+
+### Why this is not reproducible as a correctness test
+
+O11 is a cost finding, not a wrong-answer defect — the reviewer marks
+it "Acknowledged trade; flagged for cost." `refine_bisection` produces
+a correct, balance-respecting FM result; the complaint is that it seeds
+the gain heap with every vertex (`for (v, &g) in gain.iter()...`)
+instead of only the current boundary, so each pass pays Ω(n log n) heap
+inserts where METIS pays Ω(boundary). A unit test cannot turn
+"asymptotically more heap work" into a deterministic pass/fail without a
+timing/benchmark oracle, which the tests-first lifecycle does not
+provide for this kind of finding (and timing assertions are flaky).
+There is no RED state to write.
+
+### Why boundary-only seeding is not adopted here
+
+METIS-style boundary-only seeding is not a drop-in: it requires lazily
+re-inserting a vertex the first time a neighbour move makes it a
+boundary vertex. That changes the order in which equal-gain vertices
+are visited (the heap no longer contains the interior vertices that
+currently tie-break by index), so it changes the FM move trajectory and
+therefore the final labels on inputs where the best-balanced prefix is
+reached through a different sequence. That would shift ordering output
+and break the crate's determinism contract and the FM/ND determinism
+tests — out of proportion to a low/certain cost finding the reviewer
+already flagged as an acknowledged trade. Interior vertices are not
+free correctness risk in the current code: they have
+gain = -internal_degree ≤ 0, so they sit at the bottom of the max-heap
+and are popped only after the positive-gain boundary moves that reduce
+the cut.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible -> tried-and-rejected
+citing the finding ID). Per the X16/O4/O5/O6/O9 precedent, the safe
+low-risk sub-fix is applied: the all-n seeding cost trade — previously
+documented only in this review — is now acknowledged in the code at the
+seeding loop (`fm_refine.rs`), noting METIS's boundary-only +
+lazy-reinsertion alternative, the Ω(boundary) vs Ω(n log n) cost, why
+interior vertices are harmless (gain ≤ 0), and the simplicity-over-speed
+rationale at FERAL's target sizes. No behaviour change; existing FM
+tests remain the regression guard.
+
+Evidence: `fm_refine.rs:56-61` (heap seeding loop). Journal:
+dev/journal/2026-06-10-01.org.
+
+## 2026-06-11 — O12: metis dense-quotient comment cites debunked HSL_MC68/ICNTL(6)/SSIDS basis (finding O12, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O12** metis doc drift: `lib.rs:219` still cites HSL_MC68/ICNTL(6)/
+> SSIDS for the dense-quotient path while the `MetisOptions` doc
+> (`lib.rs:105-121`) explains that belief was audited and found wrong.
+> low/certain.
+
+### Why this is not reproducible as a correctness test
+
+O12 is documentation drift, not a behavioural defect. The inline
+`// Fix A` comment in `metis_order_full` (lib.rs:218-220) asserted the
+dense-quotient path is the "Same technique as HSL_MC68 / MUMPS
+ICNTL(6) / SSIDS", but the canonical `MetisOptions::dense_quotient_enabled`
+doc (lib.rs:105-121) already records a 2026-04-27 audit of the MUMPS and
+SPRAL sources that found that belief wrong: ICNTL(6) is MC64 matching,
+MUMPS defers dense rows inside QAMD (`MUMPS_QAMD`, THRESM/HEAD(N)), and
+SSIDS does not special-case dense rows at all — neither solver
+pre-strips the graph. There is no runtime behaviour to assert here (the
+two doc sites describe the same `dense_quotient_enabled` code path,
+which is unchanged and default-off); a unit test cannot pin prose.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible -> tried-and-rejected
+citing the finding ID). Per the O6 doc-correction precedent, the
+recommended low-risk sub-fix is applied: the stale inline comment is
+rewritten to state that the HSL_MC68/ICNTL(6)/SSIDS equivalence was
+audited and found wrong, and to point at
+`MetisOptions::dense_quotient_enabled` for the full finding, so the two
+doc sites no longer contradict each other. Comment-only; no behaviour
+change, no public-API surface change -> no CHANGELOG.
+
+Evidence: `lib.rs:218-220` (old comment) vs `lib.rs:105-121` (audited
+finding). Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-11 — O14: scotch band FM is dead code while the crate doc advertises it (finding O14, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O14** scotch band FM is dead code while `lib.rs:12-13` advertises
+> it; `band_fm.rs` is `#[allow(dead_code)]`, unreachable from
+> `node_nd.rs`; projection-loop variable names swapped
+> (`band_fm.rs:76-81` — functionally correct, editor trap).
+> low/certain.
+
+### Why this is not reproducible as a correctness test
+
+O14 has no behavioural defect to pin with a RED→GREEN test:
+
+1. The `band_fm` module is unreachable from the production ND path —
+   `node_nd.rs` contains no reference to it (`grep band` is empty), and
+   `mod band_fm;` carries `#[allow(dead_code)]` (lib.rs:36-37). Dead
+   code cannot be exercised by a library test, so there is nothing for
+   a new test to drive.
+2. The projection-loop variable names at `band_fm.rs:76-81` are
+   *swapped but functionally correct*. `BandGraph::orig_of_sub` is
+   indexed by sub-vertex and yields the original-graph vertex (struct
+   doc, band_fm.rs:138-140), so `.enumerate()` produces
+   `(sub_index, orig_vertex)` — yet the loop bound them as
+   `(orig_v, &sub_v)`. The body `labels[sub_v] = sub_labels[orig_v]`
+   therefore reads `labels[orig_vertex] = sub_labels[sub_index]`, which
+   is exactly the intended projection. The existing module test
+   `out_of_band_labels_preserved` already asserts the projection is
+   correct and passes, so there is no failing behaviour to reproduce —
+   only a naming trap that misleads a human reader.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected
+citing the finding ID). Per the X16/O4/O5/O6/O9 precedent, the safe
+low-risk sub-fixes are applied:
+
+- `band_fm.rs:76-81`: the projection loop is renamed to
+  `(sub_i, &orig_v)` with the body `labels[orig_v] = sub_labels[sub_i]`
+  and the anchor guard keyed on `sub_i`. Pure rename — the generated
+  code is identical, and all six `band_fm` tests still pass.
+- `lib.rs:10-12`: the "Adaptive refinement (boundary / halo / band FM)"
+  bullet is corrected so it no longer advertises band FM as part of the
+  active pipeline; band FM is noted as implemented and unit-tested but
+  not yet wired into the default ND driver.
+
+The module itself is kept (it is tested and backed by the research note
+`dev/research/scotch-band-fm.md`); wiring it into `node_nd` is a
+behavioural change with its own benchmarking and is out of scope for a
+low/certain documentation finding. Comment/rename only; no behaviour
+change, no public-API surface change → no CHANGELOG.
+
+Evidence: `crates/feral-scotch/src/lib.rs:36-37` (`#[allow(dead_code)]
+mod band_fm;`), empty `grep band crates/feral-scotch/src/node_nd.rs`,
+`band_fm.rs:76-81` (projection loop), `band_fm.rs:138-140` (orig_of_sub
+contract), `band_fm.rs:488-511` (`out_of_band_labels_preserved` guard).
+Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-11 — O15: scotch AMD leaves ignore supervariable weights on compressed graphs (finding O15, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O15** scotch AMD leaves on the compressed graph ignore
+> supervariable weights (`node_nd.rs:54-62`, `amd_leaf:281-302`):
+> weight-7 supervariables treated as unit vertices, skewing
+> degree-based pivots on heavily compressed inputs. Expansion still a
+> valid permutation. medium-low/certain (code) / possible (impact).
+
+### Why this is not reproducible as a correctness test
+
+The code defect is real and certain: with `opts.compress` on,
+`scotch_nd_order` builds `cg.graph` whose `vwgt` carries supervariable
+sizes (node_nd.rs:54-62), those weights ride down through bisection
+into leaf subgraphs, and `amd_leaf` (node_nd.rs:281-302) hands the leaf
+to `feral_amd::amd_order` via `graph_to_csc_pattern`, which emits only
+the adjacency structure and drops `vwgt` entirely (node_nd.rs:308-331).
+AMD therefore scores a weight-7 supervariable as a unit vertex.
+
+But there is no RED→GREEN cycle available:
+
+1. **No correctness defect.** The finding itself notes "expansion still
+   a valid permutation" — the leaf still emits a bijection over its
+   vertices and `expand_perm` lifts it to a valid permutation of the
+   original matrix. There is no invariant to violate, so no assertion
+   can be made RED on the current code.
+2. **No oracle for the quality loss.** The only effect is suboptimal
+   degree-based pivoting (more fill) on heavily-compressed inputs. To
+   assert "this ordering is worse than the weight-aware one" requires a
+   weight-aware AMD to compare against — and `feral_amd` exposes no
+   weighted entry point: every public function (`amd_order`,
+   `amd_order_opts`, `amd_order_full`, …) takes a bare `CscPattern`
+   plus `AmdOptions { dense_alpha, aggressive }`, with no `vwgt`
+   parameter. AMD does its *own* internal supervariable merging
+   (`n_supervar_merge`) but starts from unit mass and cannot know a
+   leaf vertex already stands for 7 original rows.
+
+The proper fix — a weight-aware AMD leaf (threading `vwgt` into the
+minimum-degree metric) — is a cross-crate feature addition to
+`feral_amd` that needs its own research note, tests, and benchmarks per
+the FERAL feature lifecycle. That is out of proportion to a
+medium-low/certain finding whose impact is rated only "possible," and
+is out of scope for a single review-fix iteration.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected
+citing the finding ID). Per the X16/O4/O5/O6/O9 precedent, the safe
+low-risk sub-fix is applied: `amd_leaf` gains a doc comment recording
+that supervariable weights from top-level compression are intentionally
+dropped at the leaf, why correctness still holds (valid permutation),
+the quality caveat on heavily-compressed inputs, and that a weighted
+AMD leaf is the future fix (pointing back here). No behaviour change, no
+public-API surface change → no CHANGELOG. No test is added: there is no
+violated invariant to pin, and the quality oracle (weighted AMD) does
+not yet exist.
+
+Evidence: `node_nd.rs:54-62` (compressed-graph dispatch carries vwgt),
+`node_nd.rs:281-302` (`amd_leaf`), `node_nd.rs:308-331`
+(`graph_to_csc_pattern` drops vwgt), `feral-amd/src/lib.rs:68-176` (no
+weighted entry point). Journal: dev/journal/2026-06-10-01.org.
+## 2026-06-11 — O17: kahip `apply_degree2` rescans from vertex 0 per chain (finding O17, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O17** kahip `apply_degree2` rescans from vertex 0 per chain
+> (`data_reduction.rs:307-309`): O(n²) worst case on long paths. Off by
+> default (Rule 1 only); will bite when Rule 2 is enabled. low-medium/certain.
+
+### Why this is not reproducible as a correctness test
+
+O17 is a performance finding, not a wrong-answer defect. `apply_degree2`
+collapses degree-2 chains correctly; the complaint is that the seed scan
+`(0..n).find(|v| alive && !skip && degree==2)` restarts from index 0 on every
+outer iteration, so a graph that is one long degree-2 chain pays ~n scans of
+~n vertices => O(n²). A unit test cannot turn "quadratic instead of linear"
+into a deterministic pass/fail without a timing/benchmark oracle, which the
+spec's tests-first lifecycle does not provide for this kind of finding (and
+timing assertions are flaky). So there is no RED state to write. This mirrors
+the O9 disposition (metis `two_hop_pass` O(n²)).
+
+### Why the O(n²) scan is not rewritten here
+
+The finding's implied fix — a non-rewinding scan cursor (start the next seed
+search at the previous seed instead of 0) — is **not** a behaviour-preserving
+drop-in, and code inspection proves it:
+
+The simplicial collapse branch (`data_reduction.rs:399-405`) removes the chain
+interior and, when `u ∼ w` already (`simplicial == true`), adds **no**
+compensating `(u, w)` edge. Removing `path[0]` deletes the `u–path[0]` edge, so
+endpoint `u`'s degree drops by one — a degree-3 branch endpoint becomes degree
+2. The backward walk from `seed` can land on such a `u` at an index *below*
+`seed`. The current from-0 scan always picks the lowest-index eligible vertex,
+so it collapses that newly-degree-2 `u` *within the same `apply_degree2` call*;
+a cursor that had advanced past `u` would instead defer it to the next
+fixed-point round (`reduce_graph` loop, `data_reduction.rs:215-230`). The
+chain still collapses eventually, but the `Degree2Path` ops are emitted in a
+**different order**, and op-stack order determines the reconstructed
+permutation (`expand_permutation` replays the stack in reverse). So a naive
+cursor changes the produced ordering — out of proportion to an opportunistic
+low-severity perf fix, and against "correctness before performance."
+
+The order-preserving O(n log n) fix is a min-index worklist: a binary heap
+keyed by vertex index, push a vertex when its degree falls to 2, pop the
+lowest index with a lazy `alive && !skip && degree==2` staleness recheck. That
+reproduces "lowest-index eligible seed every iteration" exactly while avoiding
+the rescan. It is deferred because Rule 2 is **test-only** today — the driver
+(`node_nd.rs:45`) runs `ReduceOptions::conservative()` (Rule 1 only);
+`ReduceOptions::full()` is `#[cfg(test)]`. The O(n²) cost is therefore latent
+and never on a production path.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible -> tried-and-rejected citing
+the finding ID). Per the X16/O4/O5/O6/O9 precedent, the finding's safe
+sub-fix is applied: a code comment at the seed-scan site documenting the
+O(n²), proving why a cursor is unsafe (the simplicial degree-drop above), and
+recording the correct min-index-worklist fix for whoever enables Rule 2. This
+is a pure documentation change with no behaviour change; the existing Rule 2
+tests (`path_n5_collapses_to_branch_endpoints`,
+`degree2_compression_fires_on_isolated_chain`,
+`k_2_3_collapses_via_degree2_then_closed_twins`,
+`triangle_with_tail_collapses_via_rule1_then_closed_twins`) remain the
+regression guard. The O(n²) scan structure is left as-is.
+
+Evidence: `data_reduction.rs:307-309` (from-0 seed scan), `:399-405`
+(simplicial collapse drops endpoint degree, no compensating edge),
+`:215-230` (fixed-point driver), `:166-184` (conservative vs full presets),
+`node_nd.rs:45` (driver uses conservative). Journal:
+dev/journal/2026-06-10-01.org.
+## 2026-06-11 — O19: kahip flow stranded-vertex branch corrupts gap histogram (finding O19, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O19** kahip `flow.rs:271-279` stranded-vertex branch would corrupt
+> the gap histogram (sets height without decrementing height_count) —
+> unreachable today (excess implies a residual reverse edge); add a
+> debug_assert or comment. low/certain (code) / dead (impact).
+
+### Why this is not reproducible as a correctness test
+
+The branch is dead code. `discharge` reaches the relabel step only after the
+`if excess[u] == 0 { return }` guard (`flow.rs:254`), so `excess[u] > 0` holds.
+An active vertex always has at least one residual out-edge: the edge that
+delivered its excess left a residual *reverse* edge `u -> v` in `adj[u]` with
+`residual() > 0`. The relabel scan (`flow.rs:265-269`) therefore always finds a
+finite `new_height`, so the `new_height == usize::MAX` branch at `:271` cannot
+be entered while the vertex is active. No input can drive an active vertex to
+have zero residual out-edges, so there is no RED state to construct — this is a
+"dead impact" finding, as the reviewer marks it.
+
+### What the branch would do if reached
+
+It sets `height[u] = 2 * n` and returns *without* the
+`height_count[old_h] -= 1` that the normal relabel path performs at
+`flow.rs:286-287`. That would over-count `old_h` in the gap histogram and
+corrupt gap detection. The pre-existing inline comment ("This can happen for
+vertices that can't reach sink") was also wrong: it cannot happen for an
+*active* vertex.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible -> tried-and-rejected citing
+the finding ID). Per the finding's explicit recommendation ("add a debug_assert
+or comment") and the X16/O4/O5/O6/O9 sub-fix precedent, the safe in-code
+improvement is applied: a `debug_assert_ne!(new_height, usize::MAX, ...)` after
+the relabel scan pins the active-vertex invariant (it fires in debug builds if
+the "unreachable" branch is ever about to be taken), and the misleading inline
+comment is replaced with one stating the branch is an unreachable defensive
+fallback and noting the latent histogram-corruption it would cause. The
+`height_count` decrement is deliberately *not* added: the branch is unreachable,
+so adding bookkeeping there would be untestable dead-code behaviour, which the
+tests-first lifecycle forbids. The existing flow test suite (`flow.rs:333+`,
+~15 tests driving `push_relabel`) is the guard — a green run proves the
+debug_assert never fires.
+
+Evidence: `flow.rs:254` (active-vertex guard), `:265-269` (relabel scan),
+`:271-279` (stranded branch, no `height_count` decrement), `:286-287` (the
+decrement the normal path performs). `cargo test -p feral-kahip` green with the
+debug_assert in place. Journal: dev/journal/2026-06-10-01.org.
+## 2026-06-11 — O20: thrice-copied ND driver scaffolding (finding O20, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O20** Thrice-copied ND driver scaffolding
+> (recurse/connected_components/extract_by_*/build_induced/
+> graph_to_csc_pattern/invert_iperm) across the metis/scotch/kahip
+> `node_nd.rs`, already drifted: kahip sorts neighbors before the
+> diagonal splice, metis/scotch rely on induced sortedness; metis
+> validates the inverse perm inline, scotch/kahip have a duplicate-
+> position check metis lacks. Consolidate into feral-ordering-core.
+> medium-low/certain.
+
+### Why the consolidation itself is not reproducible / not done here
+
+The core recommendation — move six near-identical helper functions out of the
+three `node_nd.rs` files into `feral-ordering-core` — is a structural refactor,
+not a wrong-answer defect. There is no input that produces an incorrect result
+today, so there is no RED state to write. A blind multi-crate move also risks
+introducing the very drift it removes (the three copies have already diverged
+in small ways), and the per-finding atomic-commit discipline plus
+"correctness before performance" weigh against a large behaviour-touching
+refactor of three working drivers inside one /loop iteration. The consolidation
+is therefore deferred and recorded here.
+
+### The two named drift points
+
+**Drift A — sortedness (benign, documented only).** metis `graph_to_csc_pattern`
+(`node_nd.rs:254-279`) splices the diagonal in at the first neighbour `> v`,
+relying on `adjncy[lo..hi]` being sorted; kahip (`:219-228`) calls
+`neighbors.sort_unstable()` defensively. This is benign today: `build_induced`
+preserves sorted adjacency for metis/scotch, and `CscPattern::new` rejects
+unsorted rows (O3), so any violation fails loudly rather than silently. No code
+change — adding a defensive sort to metis/scotch would be untestable dead
+defence.
+
+**Drift B — duplicate-position check (harmonized, the testable slice).** metis
+inverted `iperm → perm` *inline* in `nd_order` (old lines 54-61): it
+initialised `perm = vec![0; n]`, range-checked `new_pos`, and wrote
+`perm[new_pos] = old` — with **no** duplicate-position check. scotch
+(`invert_iperm`, `:433-450`) and kahip (`:328-345`) initialise `vec![-1; n]`
+and reject `perm[np] >= 0` ("… produced duplicate position"). So metis would
+silently emit a non-bijection if upstream ever produced a duplicate position
+(and its `0`-init makes the corruption undetectable post-hoc). This was
+harmonized: metis now has an `invert_iperm` mirroring its siblings exactly
+(crate name aside), with the range and duplicate-position checks. It is
+behaviour-neutral on every reachable input (a valid bijection writes each
+position once) and is a strict step toward the eventual consolidation.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible core -> tried-and-rejected
+citing the finding ID). Per the X16/O4/O5/O6/O9 sub-fix precedent, the safe,
+testable slice is applied: the metis `invert_iperm` extraction + duplicate
+check, guarded by a new RED->GREEN unit test
+(`invert_iperm_rejects_duplicate_positions`). Drift A is documented as benign.
+The cross-crate consolidation into `feral-ordering-core` remains open.
+
+Evidence: metis `node_nd.rs:54-61` (old inline inversion, no dup check),
+scotch `:433-450` / kahip `:328-345` (the dup check metis lacked), metis
+`:254-279` (sortedness reliance), kahip `:219-228` (defensive sort).
+`cargo test -p feral-metis` green with the new test. Journal:
+dev/journal/2026-06-10-01.org.
+## 2026-06-11 — O21: AMD/AMF inner-loop `wf = 0` sentinel ambiguity (finding O21, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O21** AMD/AMF inner-loop duplication (documented decision, ~600 LoC) is
+> already asymmetric: AMF writes `wf = 0` for dead elements, indistinguishable
+> from the first-touch sentinel 0, so a live element with true contribution 0 is
+> recomputed every iteration (`algo.rs:968`). Harmless; illustrates the drift
+> risk. low/certain.
+
+### Code
+
+`crates/feral-ordering-core/src/quotient_graph/algo.rs`, `finalize_step_amf`.
+Pass-1 (line 955) resets `ws.wf[e] = 0` on first touch — the lazy-cache "not yet
+computed this iteration" sentinel. Pass-2 element sub-pass (aggressive 983-988,
+non-aggressive 1015-1018) computes `if ws.wf[e] == 0 { ws.wf[e] =
+amf_wf_surface(dext, degree[e]) }` then `wf4 += ws.wf[e]`, where
+`amf_wf_surface(dext, degree) = dext*(2*degree - dext - 1)` (line 664-666).
+
+### Why the core finding is not reproducible as a defect
+
+A live element with `dext > 0` has a genuine surface of 0 exactly when
+`dext == 2*degree(e) - 1` (e.g. `dext = 1, degree = 1` → `1*(2-1-1) = 0`).
+`amf_wf_surface` then returns 0, so `wf[e]` stays 0. The next member that
+touches `e` in the same Pass-2 sees `wf[e] == 0`, treats it as uncached, and
+recomputes `amf_wf_surface` — obtaining the **same** 0. `wf4 += 0` is unchanged.
+`amf_wf_surface` is a pure function of `(dext, degree[e])`, both stable across a
+single Pass-2, so the recompute is deterministically equal to the cached value.
+
+Therefore the accumulated triple `(deg, wf3, wf4)`, the quantized RMF score, and
+the resulting elimination permutation are **identical** whether the value is
+cached or recomputed. No input produces a wrong answer, and no observable
+(output / permutation / flop-accounted result) distinguishes "cached once" from
+"recomputed per touch". The only effect is a handful of extra integer multiplies
+on the rare `dext == 2*deg-1` element. This is a missed micro-optimization, not a
+correctness defect — the same disposition as the O9 / O11 / O17 performance
+findings: there is no RED state to write, so it is non-reproducible and routed
+here per the /loop rule (citing the finding ID).
+
+### Why a distinguishing sentinel was rejected (not applied)
+
+The obvious "fix" — use a sentinel such as `-1` for "uncached" so a genuine 0 is
+distinguishable — was rejected. The same `wf` array is reused for variable
+scores: the supervariable merge takes `wf[i] = max(wf[i], wf[j])` (doc item 5)
+and re-insertion quantizes `wf[i]` into the RMF bucket (item 6). A `-1` sentinel
+would have to be guaranteed never to leak into either the `max` or the bucket
+quantization for any index, across both the AMD and AMF code paths. That adds
+real correctness risk to the working ordering to save a few integer ops on a rare
+element. "Correctness before performance, always" (CLAUDE.md constraint) settles
+it against the change.
+
+The broader finding framing — that the ~600 LoC of duplicated AMD/AMF inner-loop
+code is itself a drift hazard — is a structural-refactor observation (the same
+class as O20's cross-crate consolidation), not a defect with a reproducing test,
+and is likewise deferred rather than undertaken inside a single /loop iteration.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible core → tried-and-rejected citing
+the finding ID). Per the X16 / O4 / O5 / O6 / O9 / O17 sub-fix precedent, the
+safe behaviour-neutral slice is applied: a comment block at the Pass-1 sentinel
+reset documenting that `0` is deliberately overloaded as both "uncached" and a
+possible genuine surface value, that the resulting recompute is benign (same
+value), and why a distinguishing sentinel was rejected; plus a one-line pointer
+at each of the two Pass-2 cache-check sites. No behaviour change.
+
+Evidence: `algo.rs:955` (first-touch `wf[e] = 0` sentinel), `:983-988` /
+`:1015-1018` (the `if wf[e] == 0` recompute sites), `:664-666`
+(`amf_wf_surface`, zero at `dext == 2*deg-1`). `cargo test -p
+feral-ordering-core` green (comment-only, proves no behaviour change). Journal:
+dev/journal/2026-06-10-01.org.

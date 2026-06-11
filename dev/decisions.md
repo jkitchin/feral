@@ -5375,3 +5375,105 @@ Decision and rationale:
   `max_growth`; no acceptable bump pivot → `SingularBasis`; update count → `NeedsRefactor` on
   `max_updates`. Work is done on a clone of `U`, committed only on success, so failures leave
   `self` unchanged.
+
+## 2026-06-11 — MTX duplicate coordinates are summed on both conversion paths (REG-4 / X2)
+
+The Matrix Market `coordinate` format permits a coordinate to appear more than
+once; the de-facto convention (the NIST `mmio` ecosystem, `scipy.sparse`'s
+`coo_matrix`, and MATLAB's `sparse`) is that duplicate `(i, j)` entries are
+**summed**. `MtxMatrix::to_csc` already followed this via
+`CscMatrix::from_triplets` (which accumulates), but `MtxMatrix::to_dense` routed
+through `SymmetricMatrix::from_lower_triangle`, whose `set` **overwrites**
+(last-wins). The same file therefore produced two different matrices depending
+on the conversion path — finding X2 in the repo-review.
+
+**Decision:** both paths sum duplicates. `to_dense` now accumulates into a
+zeroed `SymmetricMatrix` with `get`/`set` (`prev + v`) rather than overwriting,
+matching `to_csc` and the COO convention. The alternative — *erroring* on any
+duplicate coordinate — was rejected: it would impose a stricter contract than
+the format requires and could reject otherwise-valid corpus files, and it would
+have meant changing `to_csc`'s established (and separately tested) summing
+behavior rather than aligning the cheaper-to-fix path. Summing is the
+lower-surprise, spec-aligned choice.
+
+Relatedly (same commit), `parse_mtx` now validates the declared `nnz` against
+the actual data-line count: the size line's third field is, per the spec, the
+number of entries that follow, so a mismatch is a malformed file and is rejected
+rather than silently read as a smaller matrix. This counts *physical* data lines
+(before duplicate summing), which is what the header declares.
+
+## 2026-06-11 — N4 MC64-retry latch is pattern-keyed; the values-dependent rescue tradeoff (accepted, bounded)
+
+The issue-#65 MC64 *retry* (a second factorization under `Mc64Symmetric`
+scaling, attempted when the first factorization reports a numerically null
+pivot the InfNorm/Identity path may have mis-scaled) is gated by two latches so
+a repeatedly-factored pattern does not re-pay a full Hungarian + second
+factorization on every `factor()`:
+
+- **Adoption path** self-latches: adopting the retry pins
+  `auto_picked_strategy` and `effective_params.scaling` to `Mc64Symmetric`,
+  which the gate's `!matches!(.., Mc64Symmetric)` clause already suppresses.
+- **Non-adoption path** uses `mc64_retry_not_adopted` (`solver.rs`): set once
+  the retry ran and was *not* adopted (the strict-zero-improvement gate failed,
+  i.e. MC64 did not reduce the null-pivot count — the matrix is singular at that
+  iterate). While set, the retry gate is skipped. Both latches clear on pattern
+  change, alongside `auto_picked_strategy`.
+
+**The tradeoff.** The non-adoption latch is keyed on the *pattern*, but MC64
+acts on *values*. A pattern that is genuinely singular at iterate `k` (retry
+ran, not adopted, latch set) and then suffers a *values-dependent* pivot
+collapse at iterate `k+1` on the **same pattern with different values** that MC64
+*could* now rescue would have its retry suppressed — feral would report the
+unrescued (potentially wrong) inertia where the pre-latch code would have re-run
+the retry and recovered. This interacts with the inertia hard rule, so it is
+recorded here rather than left only in the N4 commit message (the verifier's
+N4 item 3).
+
+**Why accepted, and the bound.** MC64 cannot change *rank*. For a
+*structurally* rank-deficient KKT — the issue-#43 routine case the latch was
+built for (IPM hosts factoring rank-deficient KKTs every iteration) — no later
+iterate on the identical pattern can become MC64-rescuable, so the latch is
+exactly safe on its high-frequency target. The residual risk is confined to a
+pattern that is only *numerically* (not structurally) singular at iterate `k`
+yet MC64-rescuable at `k+1`. The latch clears on any pattern change, so a
+structural edit re-arms the retry. **If this edge is ever observed to violate
+the inertia gate on a real corpus matrix, the fix is to make the non-adoption
+latch values-aware** (e.g. key it on a coarse magnitude fingerprint, or drop it
+in favor of bounding the retry by an absolute call budget) rather than to remove
+it — the per-call retry cost it eliminates is real (a full Hungarian + second
+factorization, indefinitely, on every repeated `factor()`). No such violation
+is currently observed; the latch's keying and reset were verified correct.
+
+## 2026-06-11 — Deferred N3 / N5 parallel-driver facets (tracking entry, no code)
+
+Several N3 and N5 facets were honestly scoped out of their fix commits but had
+no tracking entry; recording them here so future sessions can find them (the
+verifier's item 6). These are open performance facets, not rejected approaches.
+
+**N3 (parallel driver, `factorize.rs`).** The profiler facet was fixed (the
+default parallel dispatch no longer silently returns an empty
+`with_profiling(true)` report). Still open on the parallel driver — the
+`Solver` default:
+- `pattern_reused_hint` / the issue-56 Lever A.2 warm-refactor **permute
+  cache** never engages: the parallel driver uses plain `permute_csc_values`,
+  so the cache built for *large* matrices is bypassed on exactly those matrices.
+- `params.small_leaf` is ignored by the parallel driver (benign today since the
+  default is off, but a drift trap if a caller sets it and silently gets the
+  sequential-only behavior).
+
+**N5 (per-call allocation churn).** One facet was addressed; still open:
+- **Parallel-workspace churn** (`factorize.rs`, ~the `num_threads + 1` fresh
+  `FactorWorkspace` construction): the parallel driver allocates per-thread
+  workspaces (row_map `n×usize`, build_seen `n` bools, per-snode contrib
+  options) plus two mutex-wrapped stores per `factor()`; the sequential path
+  pools all of this. `phase_thread_ws_ns` telemetry measures the cost but
+  nothing amortizes it.
+- **Warm-permute clone** (`factorize.rs`, ~the warm permute path): clones
+  `col_ptr` + `row_idx` (`O(nnz)` memcpy) on every warm factor, though the
+  structure is immutable per pattern.
+
+These are deferred, not rejected: the correct fix is to pool the parallel
+workspaces on the `Solver` (mirroring the sequential pooling) and to borrow the
+immutable structure in the warm path rather than clone it. No reproducing test
+is meaningful for a pure allocation-churn change; they are guarded by the
+existing bit-exactness tests between the sequential and parallel drivers.

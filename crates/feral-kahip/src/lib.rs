@@ -91,9 +91,15 @@ pub struct KahipStats {
     /// Largest max-flow subproblem size, in vertices, encountered
     /// during flow-based refinement. `0` while scaffolded.
     pub max_flow_vertices: usize,
-    /// Number of V-cycles (or F-cycles) completed. `0` while
+    /// Number of multilevel bisections performed — one per node-separator
+    /// computation across the nested-dissection tree. Each is a single
+    /// V-cycle (one coarsen followed by one uncoarsen). `0` while
     /// scaffolded.
     pub cycles: usize,
+    /// Number of top-level connected components encountered by the
+    /// nested-dissection driver. `0` while scaffolded. Matches the
+    /// `n_components` field on `MetisStats` / `ScotchStats`.
+    pub n_components: u32,
 }
 
 /// Quality / speed tradeoff modes for the KaHIP driver.

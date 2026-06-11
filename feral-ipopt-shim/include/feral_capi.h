@@ -1,12 +1,20 @@
 /* feral C ABI — minimum POC surface for Ipopt's
  * SparseSymLinearSolverInterface plug-in shape.
  *
- * Status codes mirror Ipopt's ESymSolverStatus enum
- * (IpSymLinearSolver.hpp:19-33). Matrix format matches
- * Ipopt's CSR_Format_0_Offset (upper-triangle CSR,
- * 0-based, sorted/deduplicated within row), which is
- * byte-identical to feral's CscMatrix layout for
- * symmetric matrices.
+ * Status codes are NOT a numeric mirror of Ipopt's
+ * ESymSolverStatus enum (IpSymLinearSolver.hpp:19-33).
+ * Only codes 0-2 share Ipopt's values (SUCCESS,
+ * SINGULAR, WRONG_INERTIA); FERAL has no CALL_AGAIN
+ * analog, so FERAL_FATAL=3 collides with
+ * SYMSOLVER_CALL_AGAIN (Ipopt's own fatal code is
+ * SYMSOLVER_FATAL_ERROR=4). The shim MUST therefore
+ * translate FERAL_FATAL -> SYMSOLVER_FATAL_ERROR, not
+ * cast it; see IpFeralSolverInterface.cpp and the X8
+ * note in capi.rs. Matrix format matches Ipopt's
+ * CSR_Format_0_Offset (upper-triangle CSR, 0-based,
+ * sorted/deduplicated within row), which is byte-
+ * identical to feral's CscMatrix layout for symmetric
+ * matrices.
  *
  * Hand-written for POC. Will be cbindgen-generated once
  * the ABI stabilizes.
@@ -40,7 +48,8 @@ double* feral_values_ptr(FeralSolver* s);
 int feral_factor(FeralSolver* s, int check_neg, int expected_neg);
 int feral_solve(FeralSolver* s, int nrhs, double* rhs);
 
-/* Query. */
+/* Query. Returns the number of negative eigenvalues (inertia count) of
+ * the last factor, or -1 when no valid factor is available or s is NULL. */
 int feral_num_neg(const FeralSolver* s);
 
 /* Near-singularity signal — the analog of MA57's CNTL(2) small-pivot

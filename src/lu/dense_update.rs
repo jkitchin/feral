@@ -27,7 +27,11 @@ impl DenseLu {
     ///
     /// Returns [`FeralError::NeedsRefactor`] (leaving `self` unchanged) when the
     /// update budget (`max_updates`) or growth budget (`max_growth`) is
-    /// exceeded, and [`FeralError::SingularBasis`] when a bump pivot vanishes.
+    /// exceeded, or when a bump pivot vanishes (a singular replacement basis).
+    /// In every failure mode the update signals NeedsRefactor rather than
+    /// SingularBasis — the authoritative singularity verdict comes from a fresh
+    /// factorization, not the incremental update. The sparse update path
+    /// ([`super::SparseLu::update`]) follows the identical contract.
     pub fn update(&mut self, leaving_slot: usize, entering_col: &[f64]) -> Result<(), FeralError> {
         let m = self.m;
         if entering_col.len() != m {
@@ -59,7 +63,12 @@ impl DenseLu {
         self.ftran_partial(&mut spike)?;
 
         let q = self.qcol_inv[leaving_slot];
-        let ztol = self.params.zero_pivot_tol;
+        // L6 (dev/research/repo-review-2026-06-09.md): the bump-pivot and
+        // final-pivot zero tests must be relative to the basis magnitude, not an
+        // absolute 1e-13. `u_max0` (max|U| at the last factor, already floored
+        // away from zero for L5) is the natural scale reference, consistent with
+        // the factor path's `zero_pivot_tol · max|A|`.
+        let ztol = self.params.zero_pivot_tol * self.u_max0;
         let max_growth = self.params.max_growth;
 
         // Work on clones; commit only on success.
@@ -81,7 +90,6 @@ impl DenseLu {
         qcol[m - 1] = leaving;
 
         // 3. Eliminate the Hessenberg subdiagonal on positions q..m-2.
-        let mut growth = self.growth;
         for k in q..m.saturating_sub(1) {
             let piv = u[k + k * m];
             if piv.abs() <= ztol {
@@ -92,10 +100,6 @@ impl DenseLu {
                 continue;
             }
             let mult = sub / piv;
-            growth = growth.max(mult.abs());
-            if growth > max_growth {
-                return Err(FeralError::NeedsRefactor);
-            }
             // Row op on U: row_{k+1} -= mult · row_k, columns k..m-1.
             for j in k..m {
                 u[k + 1 + j * m] -= mult * u[k + j * m];
@@ -105,6 +109,28 @@ impl DenseLu {
             for i in 0..m {
                 l[i + k * m] += mult * l[i + (k + 1) * m];
             }
+        }
+
+        // L5 (dev/research/repo-review-2026-06-09.md): monitor element growth,
+        // not the largest single multiplier. The high-water `max|U|/u_max0`
+        // compounds across a chain of updates, where a per-multiplier max sat
+        // at the largest step and missed the accumulation. Measured on the
+        // clone (uncommitted), so an over-budget update leaves `self` intact.
+        let umax = u.iter().fold(0.0_f64, |a, &x| a.max(x.abs()));
+        let growth = self.growth.max(umax / self.u_max0);
+        if growth > max_growth {
+            return Err(FeralError::NeedsRefactor);
+        }
+
+        // L1 (dev/research/repo-review-2026-06-09.md): the loop above validates
+        // pivots `q..m-2`; the final diagonal `u[m-1,m-1]` — the new last pivot,
+        // or (when `q == m-1`) the spike's last entry with no loop iteration at
+        // all — was never checked. Committing a vanishing final pivot would let
+        // the next `ftran`/`btran` divide by ~0 and emit a silent `Inf`/`NaN`.
+        // Reject before commit (consistent with the in-bump check above).
+        let last = m - 1;
+        if u[last + last * m].abs() <= ztol {
+            return Err(FeralError::NeedsRefactor);
         }
 
         // Commit.
@@ -134,4 +160,96 @@ fn cyclic_shift_columns(buf: &mut [f64], m: usize, q: usize) {
     }
     let last = (m - 1) * m;
     buf[last..last + m].copy_from_slice(&saved);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lu::dense_factor::DenseLu;
+    use crate::lu::LuParams;
+
+    /// L1 (dev/research/repo-review-2026-06-09.md): the bump-elimination loop
+    /// only validates pivots `q..m-2`; the final diagonal `u[m-1,m-1]` is never
+    /// checked, and when the leaving slot is the last column (`q == m-1`) the
+    /// loop body never runs at all. Replacing the last slot of the 2×2 identity
+    /// basis with `e_0` makes the new basis `[e_0, e_0]` singular and drives the
+    /// new last `U` diagonal to exactly 0. Pre-fix this committed `Ok(())` and
+    /// the next `ftran` divided by 0; the fix rejects it before commit.
+    #[test]
+    fn update_singular_last_pivot_does_not_commit() {
+        let cols = vec![vec![1.0, 0.0], vec![0.0, 1.0]]; // identity basis
+        let mut lu = DenseLu::factor(&cols, 2, LuParams::default()).expect("factor");
+
+        // Replace slot 1 (the last column) with e_0 → q == m-1 == 1.
+        let err = lu.update(1, &[1.0, 0.0]);
+        assert!(
+            matches!(err, Err(FeralError::NeedsRefactor)),
+            "singular replacement basis must be rejected, got {err:?}"
+        );
+
+        // And `self` is left unchanged/usable: a solve against the original
+        // (still-committed) basis stays finite.
+        let mut rhs = vec![1.0, 1.0];
+        lu.ftran(&mut rhs).expect("ftran after rejected update");
+        assert!(rhs.iter().all(|x| x.is_finite()));
+    }
+
+    /// L5 (dev/research/repo-review-2026-06-09.md): the growth monitor recorded
+    /// only the largest single elimination multiplier, so compounded element
+    /// growth in `U` across a chain of updates went unmonitored. After the fix
+    /// `growth` is the ‖U‖∞ high-water ratio (max|U| over update history ÷
+    /// max|U| at factor), which compounds. This pins that semantics: the
+    /// monitor must equal the element-growth ratio recomputed independently
+    /// from the committed `U`. Oracle is the independent recomputation, not the
+    /// monitor's own bookkeeping. Pre-fix `growth` is the max single multiplier
+    /// and does not match.
+    #[test]
+    fn growth_monitor_tracks_compounded_element_growth() {
+        let cols = vec![
+            vec![4.0, 1.0, 0.0, 0.0],
+            vec![1.0, 3.0, 1.0, 0.0],
+            vec![0.0, 1.0, 2.0, 1.0],
+            vec![0.0, 0.0, 1.0, 5.0],
+        ];
+        let m = 4;
+        let params = LuParams {
+            max_updates: 20,
+            max_growth: 1e12, // large: updates commit on both old and new code
+            ..LuParams::default()
+        };
+        let mut lu = DenseLu::factor(&cols, m, params).expect("factor");
+
+        let umax = |lu: &DenseLu| {
+            let mut mx = 0.0_f64;
+            for j in 0..m {
+                for i in 0..m {
+                    mx = mx.max(lu.u(i, j).abs());
+                }
+            }
+            mx
+        };
+        let u_max0 = umax(&lu);
+        let mut hw = 1.0_f64; // independent high-water of max|U| / u_max0
+
+        // Replace the LAST slot each time: no Hessenberg bump forms (q == m-1),
+        // so every update commits cleanly while raising max|U| in that column,
+        // making the element-growth ratio compound across the chain.
+        let updates = [
+            (3usize, vec![0.0, 0.0, 1.0, 20.0]),
+            (3usize, vec![0.0, 0.0, 1.0, 60.0]),
+            (3usize, vec![0.0, 0.0, 1.0, 180.0]),
+        ];
+        for (i, (slot, col)) in updates.iter().enumerate() {
+            lu.update(*slot, col)
+                .unwrap_or_else(|e| panic!("update {i} should commit: {e:?}"));
+            hw = hw.max(umax(&lu) / u_max0);
+            assert!(
+                (lu.growth - hw).abs() <= 1e-9 * hw,
+                "growth monitor {} must equal element-growth high-water {}",
+                lu.growth,
+                hw
+            );
+        }
+        assert!(hw > 1.0, "test must exercise genuine element growth");
+    }
 }

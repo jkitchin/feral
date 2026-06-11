@@ -227,18 +227,21 @@ fn update_budget_returns_needs_refactor() {
         ..LuParams::default()
     };
     let mut lu = DenseLu::factor(&cols, m, params).expect("factor");
-    let new_col = vec![1.0, 2.0, 1.0, 0.5, 3.0];
-    // Two successful updates.
-    for slot in [0usize, 1] {
-        lu.update(slot, &new_col).expect("update");
-    }
+    // Two successful updates with *distinct* columns. (Using the same column
+    // for both slots would make columns 0 and 1 identical → a singular basis,
+    // which the update now correctly rejects before the budget is reached; see
+    // L1, dev/research/repo-review-2026-06-09.md.)
+    let new_col0 = vec![1.0, 2.0, 1.0, 0.5, 3.0];
+    let new_col1 = vec![0.5, 3.0, 2.0, 1.0, 0.25];
+    lu.update(0, &new_col0).expect("update 0");
+    lu.update(1, &new_col1).expect("update 1");
     // Third trips the budget; self must be unchanged.
     let before = {
         let mut a = vec![1.0, 1.0, 1.0, 1.0, 1.0];
         lu.ftran(&mut a).expect("ftran");
         a
     };
-    let err = lu.update(2, &new_col);
+    let err = lu.update(2, &new_col0);
     assert!(matches!(err, Err(FeralError::NeedsRefactor)));
     assert_eq!(lu.updates_since_refactor(), 2);
     let after = {

@@ -73,11 +73,13 @@ pub fn band_fm_refine(
 
     // 5. Project labels back. Out-of-band vertices keep their old
     //    labels; in-band vertices take the sub-graph's verdict.
-    for (orig_v, &sub_v) in band.orig_of_sub.iter().enumerate() {
-        if orig_v == band.anchor_a as usize || orig_v == band.anchor_b as usize {
+    // `orig_of_sub` is sub-indexed and yields the original-graph
+    // vertex, so `enumerate()` gives `(sub_index, orig_vertex)`.
+    for (sub_i, &orig_v) in band.orig_of_sub.iter().enumerate() {
+        if sub_i == band.anchor_a as usize || sub_i == band.anchor_b as usize {
             continue;
         }
-        labels[sub_v as usize] = sub_labels[orig_v];
+        labels[orig_v as usize] = sub_labels[sub_i];
     }
 
     cut_size(graph, labels)

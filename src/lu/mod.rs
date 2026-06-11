@@ -67,6 +67,13 @@ pub struct LuParams {
     /// Threshold partial-pivoting parameter `u ∈ (0, 1]`. `1.0` is strict
     /// partial pivoting (max stability); smaller values permit a sparser /
     /// closer-to-diagonal pivot when it is within `u·max` of the column max.
+    ///
+    /// Governs the **initial factorization** (both the dense and sparse paths
+    /// honor it: the sparse path prefers the within-threshold diagonal row,
+    /// matching CSparse `cs_lu`). The Forrest–Tomlin bump elimination in
+    /// `update()` always uses strict partial pivoting (`u = 1`) for stability —
+    /// the bump's structure is already fixed there, so a relaxed threshold buys
+    /// no fill reduction and only trades away stability.
     pub pivot_threshold: f64,
     /// A pivot column with all candidates `≤ zero_pivot_tol` is singular.
     pub zero_pivot_tol: f64,
@@ -85,6 +92,33 @@ pub struct LuParams {
     pub refine_steps: usize,
     /// Stop refinement when `‖r‖/‖a‖ < refine_tol`.
     pub refine_tol: f64,
+}
+
+impl LuParams {
+    /// Reject parameters outside their documented ranges before any
+    /// factorization consumes them. `pivot_threshold` must lie in `(0, 1]` (its
+    /// documented `u` range): `0` would disable pivoting (always prefer the
+    /// diagonal), `> 1` is meaningless, and `NaN` poisons every threshold
+    /// comparison. `zero_pivot_tol` is a relative floor and must be finite and
+    /// in `[0, 1)`: negative is nonsensical and `≥ 1` would declare every
+    /// pivot singular. Validating here keeps the dense and sparse factor paths
+    /// from drifting on the same bad input.
+    pub(crate) fn validate(&self) -> Result<(), crate::error::FeralError> {
+        use crate::error::FeralError;
+        if !(self.pivot_threshold > 0.0 && self.pivot_threshold <= 1.0) {
+            return Err(FeralError::InvalidInput(format!(
+                "LuParams::pivot_threshold must be in (0, 1], got {}",
+                self.pivot_threshold
+            )));
+        }
+        if !(self.zero_pivot_tol >= 0.0 && self.zero_pivot_tol < 1.0) {
+            return Err(FeralError::InvalidInput(format!(
+                "LuParams::zero_pivot_tol must be in [0, 1), got {}",
+                self.zero_pivot_tol
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Default for LuParams {

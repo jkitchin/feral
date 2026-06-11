@@ -1,3 +1,10 @@
+// X15: the no-unwrap lint in src/lib.rs covers only the library crate;
+// this binary crate root escaped it, so `.unwrap()`/`.expect()` here were
+// unchecked. Mirror the library's gate (deny in normal builds, allow in
+// tests) so future panicking calls in the bench harness are caught.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -11,7 +18,7 @@ use feral::symbolic::{
 };
 use feral::{
     factor, factor_single_front, read_mtx, read_sidecar, solve, solve_refined,
-    solve_sparse_refined, BunchKaufmanParams, Inertia, KktSidecar, SymmetricMatrix,
+    solve_sparse_refined, BunchKaufmanParams, FeralError, Inertia, KktSidecar, SymmetricMatrix,
     ZeroPivotAction,
 };
 
@@ -603,7 +610,10 @@ fn print_perf_comparison(label: &str, timings: &[MatrixTiming], entries: &[KktEn
         "name", "n", "feral(μs)", "mumps(μs)", "ratio"
     );
     for (r, row) in worst.iter().take(10) {
-        let m = row.mumps.unwrap();
+        // `worst` is built by `filter_map(|r| r.mumps.map(...))`, so every
+        // row here has `mumps == Some`; `continue` is unreachable but keeps
+        // this lint-clean without an unwrap.
+        let Some(m) = row.mumps else { continue };
         println!(
             "{:<28} {:>5} {:>12} {:>12} {:>10.2}",
             row.timing.name, row.timing.n, row.timing.factor_us, m.factor_us, r
@@ -1006,10 +1016,15 @@ struct MatrixTiming {
     max_front: usize,
     factor_us: u128,
     solve_us: u128,
-    /// feral `SparseFactors::factor_nnz()` — total `nrow * nelim`
-    /// across supernodes. `None` on the dense path (no supernodes).
-    /// Used by the fill-parity report against MUMPS / SSIDS oracle
-    /// `factor_nnz`.
+    /// Factor entry count for the fill-parity report against the
+    /// MUMPS / SSIDS oracle `factor_nnz`. `Some` on both paths. NOTE the
+    /// two feral paths use *different* conventions (see X14 in
+    /// dev/tried-and-rejected.md): the sparse path stores the triangular
+    /// `SparseFactors::factor_nnz()`
+    /// (Σ nelim·(nelim+1)/2 + (nrow−nelim)·nelim), the dense path stores
+    /// the rectangular `nrow·nelim = n²` single-front cell count
+    /// (≈ 2× the triangular count). The two are therefore not directly
+    /// comparable across rows of the report.
     factor_nnz: Option<u64>,
 }
 
@@ -1030,6 +1045,39 @@ fn should_resample(entry: &KktEntry) -> bool {
         .as_ref()
         .map(|t| (t.factor_us as u128) < RESAMPLE_MUMPS_US_THRESHOLD)
         .unwrap_or(false)
+}
+
+/// Run `RESAMPLE_COLD_REPS` cold replicates of one matrix and reduce them to
+/// `(min factor_us, median solve_us)`, or fall back to `fallback` (the
+/// single-shot timing) if any replicate errors.
+///
+/// X15: the replicate body used to `.expect()` on `factor`/`solve` errors,
+/// on the assumption that "the single-shot pass already succeeded". That
+/// turned a transient resample failure into a process panic that would lose
+/// an entire multi-hour corpus run. Degrade to the single-shot timing
+/// instead — a denoised reading is a nice-to-have, never worth aborting the
+/// run. Each replicate returns `Ok((factor_us, solve_us))` or `Err`.
+fn resample_or_fallback<E: std::fmt::Display>(
+    fallback: (u128, u128),
+    mut rep: impl FnMut() -> Result<(u128, u128), E>,
+) -> (u128, u128) {
+    let mut fs: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
+    let mut ss: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
+    for _ in 0..RESAMPLE_COLD_REPS {
+        match rep() {
+            Ok((f, s)) => {
+                fs.push(f);
+                ss.push(s);
+            }
+            Err(e) => {
+                eprintln!("  resample failed ({e}); keeping single-shot timing");
+                return fallback;
+            }
+        }
+    }
+    fs.sort_unstable();
+    ss.sort_unstable();
+    (fs[0], ss[RESAMPLE_COLD_REPS / 2])
 }
 
 /// Parse `factor_us` and `solve_us` from a canonical-oracle JSON sidecar.
@@ -1189,7 +1237,10 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
 
         for mtx_entry in mtx_files {
             let mtx_path = mtx_entry.path();
-            let stem = mtx_path.file_stem().unwrap().to_string_lossy().to_string();
+            let Some(stem) = mtx_path.file_stem() else {
+                continue;
+            };
+            let stem = stem.to_string_lossy().to_string();
 
             if !filter_patterns.is_empty()
                 && !filter_patterns.iter().any(|p| stem.contains(p.as_str()))
@@ -1246,17 +1297,32 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
 /// AMD on every matrix — useful for measuring the heuristic's net
 /// impact.
 fn ordering_method_from_env() -> Option<OrderingMethod> {
-    match std::env::var("FERAL_ORDERING")
-        .unwrap_or_default()
-        .to_lowercase()
-        .as_str()
-    {
+    ordering_method_from_str(&std::env::var("FERAL_ORDERING").unwrap_or_default())
+}
+
+/// Pure parser behind [`ordering_method_from_env`], split out so the
+/// vocabulary is unit-testable without mutating process env (X5,
+/// dev/research/repo-review-2026-06-09.md).
+fn ordering_method_from_str(s: &str) -> Option<OrderingMethod> {
+    match s.to_lowercase().as_str() {
         "" => None,
         "auto" => Some(OrderingMethod::Auto),
+        "amd" => Some(OrderingMethod::Amd),
         "metis" => Some(OrderingMethod::MetisND),
         "scotch" => Some(OrderingMethod::ScotchND),
         "kahip" => Some(OrderingMethod::KahipND),
-        _ => Some(OrderingMethod::Amd),
+        other => {
+            // X5: previously any unrecognized value (typos included) was
+            // silently coerced to forced AMD, which silently invalidated
+            // an experiment meant to exercise the default heuristic. Warn
+            // and fall back to the documented default instead.
+            eprintln!(
+                "warning: FERAL_ORDERING=\"{}\" not recognized; using the default \
+                 symbolic_factorize heuristic (set FERAL_ORDERING=amd to force AMD)",
+                other
+            );
+            None
+        }
     }
 }
 
@@ -1283,15 +1349,20 @@ fn bench_dump_path_from_env() -> Option<PathBuf> {
 /// `dev/research/lever-c-adaptive-scaling.md` and
 /// `dev/plans/lever-c-adaptive-scaling.md`.
 fn scaling_strategy_from_env() -> Option<ScalingStrategy> {
-    match std::env::var("FERAL_SCALING")
-        .unwrap_or_default()
-        .to_lowercase()
-        .as_str()
-    {
+    scaling_strategy_from_str(&std::env::var("FERAL_SCALING").unwrap_or_default())
+}
+
+/// Pure parser behind [`scaling_strategy_from_env`], split out so the
+/// vocabulary is unit-testable and stays in lockstep with the C-ABI
+/// shim's parser (X5, dev/research/repo-review-2026-06-09.md).
+fn scaling_strategy_from_str(s: &str) -> Option<ScalingStrategy> {
+    match s.to_lowercase().as_str() {
         "" => None,
         "infnorm" => Some(ScalingStrategy::InfNorm),
         "mc64" => Some(ScalingStrategy::Mc64Symmetric),
-        "adaptive" => Some(ScalingStrategy::Auto),
+        // `auto` and `adaptive` both select adaptive routing; the C-ABI
+        // shim spells it `auto`, so accept both here too (X5).
+        "auto" | "adaptive" => Some(ScalingStrategy::Auto),
         "identity" => Some(ScalingStrategy::Identity),
         other => {
             eprintln!(
@@ -1353,11 +1424,16 @@ fn main() {
     // Built-in dense benchmarks
     let mut rng = Rng::new(42);
     let params_spd = BunchKaufmanParams::default();
-    // Dense KKT path: pivot_threshold = 0.0 because the dense
-    // kernel does not implement delayed pivoting — a non-zero
-    // threshold here sends rejected pivots through ForceAccept
-    // and zeros out structural pivots on e.g. HYDCAR20, METHANL8,
-    // DEGENLPA, HS118.
+    // `params_kkt_dense` (pivot_threshold = 0.0) is used ONLY by the
+    // synthetic dense micro-benchmarks below. The dense-KKT *validation*
+    // loop deliberately uses `params_kkt_sparse` (0.01): pivot_threshold
+    // is immaterial to inertia on the dense single-front path because
+    // structural-pivot zeroing keys on strict-zero |d| <= zero_tol, not
+    // on pivot_threshold·col_max (in-band pivots count by sign either
+    // way). Verified DIVERGE=0 across all 50 parity matrices under both
+    // thresholds — the old "zeros out structural pivots on HYDCAR20/
+    // METHANL8/DEGENLPA/HS118" claim is stale post-equilibration and
+    // issue-#54 inertia-bucketing. See X3 in tried-and-rejected.md.
     let params_kkt_dense = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         ..BunchKaufmanParams::default()
@@ -1595,8 +1671,12 @@ fn main() {
             n_inertia_pass += 1;
         }
 
-        // Solve with sidecar RHS (guaranteed finite by load_kkt_dir filter)
-        let rhs = entry.sidecar.finite_rhs().unwrap();
+        // Solve with sidecar RHS (guaranteed finite by load_kkt_dir filter);
+        // skip gracefully rather than unwrap if that invariant ever breaks.
+        let Some(rhs) = entry.sidecar.finite_rhs() else {
+            eprintln!("  {}: sidecar RHS not finite, skipping", entry.name);
+            continue;
+        };
         // Phase 1b solve convention (FERAL-PROJECT-SPEC.md §1709): use
         // solve_refined for all KKT solves to recover machine precision on
         // matrices flagged with needs_refinement under ForceAccept.
@@ -1615,21 +1695,15 @@ fn main() {
         // single-shot noise floor; otherwise the first reading already dominates
         // whatever cold-cache jitter we would see.
         let (factor_us_final, solve_us_final) = if should_resample(entry) {
-            let mut fs: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
-            let mut ss: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
-            for _ in 0..RESAMPLE_COLD_REPS {
+            resample_or_fallback((factor_us, solve_us), || {
                 let t0 = Instant::now();
-                let (rs_factors, _) = factor_single_front(&matrix, &params_kkt_sparse)
-                    .expect("resample: factor_single_front (single-shot already succeeded)");
-                fs.push(t0.elapsed().as_micros());
+                let (rs_factors, _) = factor_single_front(&matrix, &params_kkt_sparse)?;
+                let f = t0.elapsed().as_micros();
                 let t1 = Instant::now();
-                let _ = solve_refined(&matrix, &rs_factors, &rhs)
-                    .expect("resample: solve_refined (single-shot already succeeded)");
-                ss.push(t1.elapsed().as_micros());
-            }
-            fs.sort_unstable();
-            ss.sort_unstable();
-            (fs[0], ss[RESAMPLE_COLD_REPS / 2])
+                solve_refined(&matrix, &rs_factors, &rhs)?;
+                let s = t1.elapsed().as_micros();
+                Ok::<(u128, u128), FeralError>((f, s))
+            })
         } else {
             (factor_us, solve_us)
         };
@@ -1639,9 +1713,17 @@ fn main() {
             max_front: n,
             factor_us: factor_us_final,
             solve_us: solve_us_final,
-            // Dense path: a single n×n front, no supernodes. Counts the
-            // strictly-lower-triangle entries (matches the multifrontal
-            // accounting on a single supernode of size n).
+            // Dense path: a single fully-eliminated n×n front
+            // (nrow = nelim = n). This reports the *rectangular*
+            // nrow·nelim = n² front-cell count — the convention stated in
+            // the `factor_nnz` field doc above. NOTE this is a different
+            // convention from the sparse path (`:1951`), which stores the
+            // *triangular* `SparseFactors::factor_nnz()`
+            // (Σ nelim·(nelim+1)/2 + (nrow−nelim)·nelim; n(n+1)/2 ≈ n²/2
+            // for a single full front). Fill-parity readers: dense-path
+            // rows use the rectangular count, sparse-path rows the
+            // triangular one — the two are not directly comparable. See
+            // dev/tried-and-rejected.md (X14).
             factor_nnz: Some((n as u64).saturating_mul(n as u64)),
         });
 
@@ -1899,26 +1981,20 @@ fn main() {
         // single-shot pass so the semantics of `factor_us` (sym + numeric) match
         // MUMPS/SSIDS.
         let (sp_factor_us_final, sp_solve_us_final) = if should_resample(entry) {
-            let mut fs: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
-            let mut ss: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
-            for _ in 0..RESAMPLE_COLD_REPS {
+            resample_or_fallback((sp_factor_us, sp_solve_us), || {
                 let tf = Instant::now();
                 let rs_sym = match ordering_override {
                     Some(m) => symbolic_factorize_with_method(&csc, &snode_params, m),
                     None => symbolic_factorize(&csc, &snode_params),
-                }
-                .expect("resample: symbolic_factorize (single-shot already succeeded)");
-                let (rs_factors, _) = factorize_multifrontal(&csc, &rs_sym, &sparse_numeric_params)
-                    .expect("resample: factorize_multifrontal (single-shot already succeeded)");
-                fs.push(tf.elapsed().as_micros());
+                }?;
+                let (rs_factors, _) =
+                    factorize_multifrontal(&csc, &rs_sym, &sparse_numeric_params)?;
+                let f = tf.elapsed().as_micros();
                 let ts = Instant::now();
-                let _ = solve_sparse_refined(&csc, &rs_factors, &rhs)
-                    .expect("resample: solve_sparse_refined (single-shot already succeeded)");
-                ss.push(ts.elapsed().as_micros());
-            }
-            fs.sort_unstable();
-            ss.sort_unstable();
-            (fs[0], ss[RESAMPLE_COLD_REPS / 2])
+                solve_sparse_refined(&csc, &rs_factors, &rhs)?;
+                let s = ts.elapsed().as_micros();
+                Ok::<(u128, u128), FeralError>((f, s))
+            })
         } else {
             (sp_factor_us, sp_solve_us)
         };
@@ -2050,6 +2126,103 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X15 (dev/research/repo-review-2026-06-09.md): a resample replicate
+    /// that errors must degrade to the single-shot `fallback`, never panic.
+    /// Before the fix the replicate body `.expect()`ed the factor/solve
+    /// results ("single-shot already succeeded"), so one transient failure
+    /// aborted the whole (potentially multi-hour) corpus run. The helper
+    /// now returns the fallback on the first erroring replicate.
+    #[test]
+    fn resample_falls_back_on_error() {
+        let fallback = (111_u128, 222_u128);
+        let calls = std::cell::Cell::new(0usize);
+        let out = resample_or_fallback(fallback, || {
+            let i = calls.get();
+            calls.set(i + 1);
+            if i == 2 {
+                Err("simulated transient resample failure")
+            } else {
+                Ok((10, 20))
+            }
+        });
+        assert_eq!(
+            out, fallback,
+            "an erroring replicate must yield the fallback"
+        );
+        assert_eq!(
+            calls.get(),
+            3,
+            "should stop at the first error (rep index 2)"
+        );
+    }
+
+    /// X15: with every replicate succeeding, the helper reduces the reads to
+    /// `(min factor_us, median solve_us)` over `RESAMPLE_COLD_REPS` samples.
+    #[test]
+    fn resample_reduces_to_min_factor_median_solve() {
+        assert_eq!(
+            RESAMPLE_COLD_REPS, 5,
+            "reduction expectations assume 5 reps"
+        );
+        let factors = [50_u128, 30, 40, 60, 20];
+        let solves = [5_u128, 3, 4, 6, 2];
+        let calls = std::cell::Cell::new(0usize);
+        let out = resample_or_fallback((999, 999), || {
+            let i = calls.get();
+            calls.set(i + 1);
+            Ok::<_, &str>((factors[i], solves[i]))
+        });
+        // min factor = 20; median solve = sorted [2,3,4,5,6] -> index 2 -> 4.
+        assert_eq!(out, (20, 4));
+    }
+
+    /// X5 (dev/research/repo-review-2026-06-09.md): the bench harness must
+    /// accept the same `FERAL_SCALING` vocabulary as the C-ABI shim
+    /// (`src/capi.rs::scaling_strategy_from_env_value`). The shim accepts
+    /// `auto` for `ScalingStrategy::Auto`; before this fix bench warned on
+    /// `auto` and fell back to default, so `FERAL_SCALING=auto` selected
+    /// adaptive routing in the shim but the production default in bench.
+    #[test]
+    fn scaling_vocabulary_matches_capi_shim() {
+        assert_eq!(
+            scaling_strategy_from_str("auto"),
+            Some(ScalingStrategy::Auto),
+            "`auto` must alias Auto to match the C-ABI shim"
+        );
+        assert_eq!(
+            scaling_strategy_from_str("adaptive"),
+            Some(ScalingStrategy::Auto)
+        );
+        assert_eq!(
+            scaling_strategy_from_str("AUTO"),
+            Some(ScalingStrategy::Auto)
+        );
+        assert_eq!(
+            scaling_strategy_from_str("identity"),
+            Some(ScalingStrategy::Identity)
+        );
+        assert_eq!(scaling_strategy_from_str(""), None);
+        assert_eq!(scaling_strategy_from_str("nope"), None);
+    }
+
+    /// X5: an unrecognized `FERAL_ORDERING` (a typo) must NOT silently
+    /// force AMD — that would silently invalidate an experiment meant to
+    /// run the default heuristic. Explicit `amd` still forces AMD; typos
+    /// fall back to the documented default (`None` → heuristic).
+    #[test]
+    fn ordering_typo_falls_back_to_default_not_amd() {
+        assert_eq!(ordering_method_from_str("amd"), Some(OrderingMethod::Amd));
+        assert_eq!(ordering_method_from_str("auto"), Some(OrderingMethod::Auto));
+        assert_eq!(
+            ordering_method_from_str("metis"),
+            Some(OrderingMethod::MetisND)
+        );
+        assert_eq!(ordering_method_from_str(""), None);
+        // Typo: must be the default heuristic, not forced AMD.
+        assert_eq!(ordering_method_from_str("amdd"), None);
+        assert_eq!(ordering_method_from_str("metsi"), None);
+    }
 
     /// Structural guard on the issue-#80 dense-column fixture generator: the
     /// inertia oracle is the Vanderbei (1995) SQD theorem (external), and the

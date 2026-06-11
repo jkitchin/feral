@@ -1,0 +1,355 @@
+* 2026-06-09 D1 fix session (PR #83 branch)
+
+** HH:MM :review:d1:dense-ldlt:force-accept:bugfix:
+Verified the 4 high-severity findings in PR #83's review document
+(repo-review-2026-06-09.md) against the source by independent sub-agents.
+All 4 (D1, L1, N1, S1) confirmed CORRECT; D1 was empirically reproduced
+(reconstruction error 1.535 on a 7×7 zero-diagonal matrix).
+
+Then fixed D1 on the PR branch, tests-first.
+
+Bug: legacy dense factor() — do_1x1_pivot strict-zero ForceAccept branch
+(factor.rs:4471-4482) and the degenerate 2×2 twin in do_2x2_pivot
+(factor.rs:4649-4655) zero their L column(s) and return WITHOUT running
+the rank-1/rank-2 update, but returned a fabricated fused next-column
+argmax (0.0, k+2)/(0.0, k+3). The caller (factor.rs:936-1071) stores the
+fused value and the next iteration sees gamma0==0.0, takes the
+"zero off-diagonal column" fast path (factor.rs:913-930), and discards
+the next column's real off-diagonals via set_l_column_identity + skipped
+trailing update. Silent factor corruption + risk of wrong inertia.
+
+Key observation: since the degenerate branch ran NO update, the trailing
+submatrix is unchanged, so the genuine next-column off-diagonal max is
+recoverable with column_offdiag_max. Fix = return
+column_offdiag_max(a, n, k+1) (1×1) / (a, n, k+2) (2×2) instead of the
+fabricated value. do_1x1_pivot is only called for remaining>=2 so k+1<n;
+the 2×2 branch is past the (k+2)>=n early return so k+2<n.
+
+Test: tests/dense_ldlt.rs::test_d1_force_accept_does_not_corrupt_next_column.
+Oracle = mathematical reconstruction identity P·L·D·Lᵀ·Pᵀ = D_eq·A·D_eq
+(external, implementation-independent). First attempt used the existing
+verify_factorization helper but its RELATIVE tolerance (scale floor 1e-15)
+tripped on 1e-16 rounding against the matrix's many exact-zero entries —
+spurious failure at (2,2), err/scale=0.11, NOT the real bug. Rewrote with
+an ABSOLUTE tolerance (1e-9): all entries are O(1) so rounding (~1e-13)
+and the D1 corruption (1.534) are cleanly separated.
+
+Evidence:
+- Pre-fix: test FAILS "reconstruction error 1.5340490574090062 exceeds 1e-9".
+- Post-fix: test passes (reconstruction exact).
+- Full suite: 57 test binaries green, 0 failures. cargo fmt --check exit 0;
+  cargo clippy --all-targets -D warnings clean.
+
+The strict-zero pivot here is a genuine zero Schur column, so dropping it
+loses nothing and a correct factorization reconstructs the equilibrated
+matrix exactly — which is why the absolute-reconstruction oracle is valid.
+
+Remaining high-severity findings still open: L1 (dense LU singular-basis
+guards), N1 (dead FMA opt-in), S1 (O(n²logn) default postorder). Per the
+review's triage order, L1 is the next to fix (silent Inf/NaN into simplex
+solves).
+
+** HH:MM :lu:dense:singular-basis:guard:bugfix:l1:
+Fixed L1 (repo-review-2026-06-09.md): dense LU update commits singular
+bases; dense U-solves emit Inf/NaN silently.
+
+Two fixes, mirroring the already-guarded sparse path:
+1. dense_solve.rs usolve/ut_solve now return Result and error
+   SingularBasis{column} on a zero/non-finite U diagonal (was: silent
+   division -> Inf). ftran_core/btran_core restructured to restore the
+   mem::take'n scratch_a on every path (an early ? would otherwise leave
+   scratch_a empty and panic the next solve) and write rhs only on success.
+2. dense_update.rs: after the bump-elimination loop, validate the final
+   diagonal u[m-1,m-1] against ztol before commit. The loop only checked
+   pivots q..m-2; when q==m-1 it never ran at all. Vanishing final pivot
+   -> NeedsRefactor (consistent with the in-bump check).
+
+Tests-first (both failed pre-fix, pass post-fix):
+- dense_solve::tests::dense_zero_u_diagonal_errors_instead_of_inf —
+  corrupt U[1,1]=0, assert ftran/btran -> SingularBasis{column:1}.
+  Pre-fix: ftran returned Ok with Inf.
+- dense_update::tests::update_singular_last_pivot_does_not_commit —
+  replace last slot of 2x2 identity with e_0 (q==m-1 case, new basis
+  [e_0,e_0] singular, U[1,1]=0). Pre-fix: Ok(()). Post-fix: NeedsRefactor.
+
+Regression surfaced + fixed: tests/lu_dense.rs::update_budget_returns_needs_refactor
+was relying on the bug. It updated slots 0 and 1 to the SAME new_col,
+making cols 0,1 identical -> singular intermediate basis, silently
+committed pre-fix. The fix correctly rejects the 2nd update (panic
+"update: NeedsRefactor" at the .expect). The test's real intent is the
+max_updates=2 budget tripping on the 3rd update; changed it to use two
+DISTINCT columns so the basis stays nonsingular. Not a tolerance change —
+degenerate input corrected.
+
+Evidence: cargo test full suite ALL PASS; fmt + clippy pending hook.
+Decision note: returned NeedsRefactor (not SingularBasis) from the
+update last-diagonal check to match the existing in-bump check in the
+same function. The doc comment already claims SingularBasis for a
+vanishing bump pivot while the code returns NeedsRefactor — that
+doc/code drift is finding L8, deferred to its own iteration.
+
+** HH:MM :numeric:fma:opt-in:dead-feature:bugfix:n1:
+Fixed N1 (repo-review-2026-06-09.md): with_fma / NumericParams::fma was
+a silent no-op — the documented ~2× FMA dense kernels never dispatched
+through the public API.
+
+Root cause: NumericParams carries BOTH a top-level `fma: bool` (set by
+Solver::with_fma) AND `bk: BunchKaufmanParams` whose own `fma` field is
+the one the dense kernels actually read (do_1x1_update/do_2x2_update
+dispatch axpy_minus_unroll4 vs _nofma on `params.fma` where params is the
+BK struct; factor.rs:4108). Nothing ever copied NumericParams::fma into
+bk.fma, so every BK call site (factorize.rs:1419/2385/2576/…) passed
+&params.bk with fma=false regardless of the toggle. The doc at
+factor.rs:555-557 even claimed "the sparse multifrontal driver copies
+NumericParams::fma here" — false.
+
+Fix: sync `effective_params.bk.fma = effective_params.fma` in the Solver
+factor funnel (solver.rs, the single effective_params chokepoint that
+feeds BOTH the sequential and parallel drivers). NumericParams::fma is
+only ever set to true via with_fma → Solver, so this one point covers
+100% of real usage. Also corrected the stale factor.rs doc to name the
+Solver funnel as the copier.
+
+Test (tests-first, strengthened existing fma_opt_in_roundtrip.rs):
+fma_opt_in_actually_dispatches_fma_kernels. Oracle = the documented
+FMA/non-FMA bit-inequality contract (mul_add single-rounding ≠ separate
+mul+sub; see schur_kernel::fma_vs_nofma_panel_kernels_within_n_elim_ulps).
+Asserts (a) with_fma(true) changes ≥1 solution component at the bit level
+(proving dispatch) and (b) the FMA/non-FMA solutions agree to rel<1e-9
+(correctness preserved). The pre-existing test could not catch this — it
+only checked "same inertia + small residual", trivially true when FMA
+never engages.
+
+Evidence:
+- Pre-fix: FAILS "with_fma(true) produced a bit-identical solution to the
+  non-FMA path … never dispatched (N1 dead-feature signature)" — bit-exact
+  proof the toggle was dead.
+- Post-fix: both fma tests pass; bits diverge, solutions agree to <1e-9.
+- numeric lib suite 73 passed / 0 failed; clippy -D warnings exit 0;
+  cargo fmt --check exit 0. Default path is fma=false, so all other tests
+  are unaffected by construction.
+
+Remaining high-severity finding still open: S1 (O(n²·log n) default
+postorder on star etrees). Next per the triage order.
+
+** HH:MM :ordering:postorder:complexity:perf:bugfix:s1:
+Fixed S1 (repo-review-2026-06-09.md): default postorder() was O(n²·log n)
+on star-shaped etrees (arrow / bordered-KKT with a dense TRAILING border —
+AMD makes node n-1 the root of n-1 leaves).
+
+Root cause: the iterative DFS re-cloned AND re-sorted children[node] on
+every stack visit. For the root of a star with n-1 children, each of the
+n-1 push/pop transitions re-sorted the full (n-1)-element child list →
+O(n²·log n) sort work, O(n²) clone bytes. The three Schur-aware sibling
+traversals already carried sorted children on the stack (sorted once per
+node); the default path was the lone O(n²) outlier.
+
+Fix: carry the sorted child list and a cursor index on the DFS stack as
+(node, Vec<sorted_children>, child_idx), sorting each node's children
+EXACTLY ONCE via a sorted_children_by_size helper — copying the stack
+layout of the three correct siblings. Output order is byte-identical
+(verified by the existing topological / inverse-roundtrip / schur-parity
+tests, all still green).
+
+Reproduction (tests-first, deterministic — no flaky wall-clock):
+ordering::postorder::tests::test_postorder_star_sort_work_is_linear.
+A #[cfg(test)] thread_local SORT_WORK counter accumulates
+children.len() on every sorted_children_by_size call. star_etree(2000)
+builds an arrow matrix (diagonal + (row n-1, col i) for i<n-1) whose
+etree has node n-1 as the sole root with n-1 children. Asserts total
+sort work <= 4n.
+
+Evidence:
+- Pre-fix (instrumented buggy code): work = 3,998,000 vs the 8,000 bound
+  at n=2000 — i.e. ~(n-1)² — test FAILS.
+- Post-fix: work linear, test passes. All 11 postorder tests green;
+  symbolic 67/0, ordering 31/0; clippy -D warnings clean; fmt --check
+  clean; full lib suite exit 0.
+
+All four high-severity findings (D1, L1, N1, S1) from PR #83's review are
+now fixed. Next per the triage order: the medium-severity batch, starting
+with D2 (panel inline 2×2 path skips static_pivot_floor).
+
+** HH:MM :dense:panel:static-pivot:parity:inertia:bugfix:d2:
+Fixed D2 (repo-review-2026-06-09.md): the blocked panel's inline 2×2
+accept path skipped the MA57 static-pivot perturbation the scalar path
+applies, so with static_pivot_floor > 0 a sub-floor 2×2 accepted inline
+diverged from scalar in D, L, needs_refinement, n_tiny, and INERTIA.
+
+Root cause: scalar_pivot_step calls perturb_2x2_to_floor(d11,d21,d22,
+params.static_pivot_floor) BEFORE the Duff-Reid growth + SSIDS det gates
+(factor.rs:3647, was 3624) — lifting the smaller |eigenvalue| to the
+floor, writing the shifted diagonals back, setting needs_refinement and
+n_tiny. The panel inline 2×2 accept (factor.rs:2618) had no such call —
+grep confirmed perturb_2x2_to_floor's only production sites were scalar
+(3624) and legacy factor (4609); the panel was the missing third site.
+
+Reproduction (tests-first): blocked_ldlt::tests::
+test_d2_panel_inline_2x2_static_pivot_floor_parity. Oracle = the scalar
+factor_frontal path (which already perturbs), compared byte-for-byte via
+the existing assert_frontals_byte_identical. Matrix = an ISOLATED
+antidiagonal 2×2 at (0,1): A[0,0]=A[1,1]=0, A[1,0]=δ=1e-3 (eigenvalues
+±δ), decoupled from a strictly diag-dominant SPD trailing block on
+columns 2..79 (n=80 crosses the 64-col panel boundary). Verified the
+block actually reaches the inline accept: BK selects 2×2 (akk=0 <
+α·γ0=α·δ); gamma_r picks up the block off-diagonal δ via
+symmetric_row_offdiag_max's left-of-diagonal sweep, so arr=0 < α·δ (no
+swap-1×1 bail); isolation gives rmax=tmax=0 so growth passes; det floor
+passes (|detpiv|=δ ≥ cancel_floor=δ/2). static_pivot_floor=1e-1 > δ so
+scalar perturbs.
+
+Subtle correction during test authoring: perturb_2x2_to_floor lifts the
+EIGENVALUE to the floor by shifting both diagonals by τ=floor−δ, so the
+scalar d_diag[0] lands at 0.099 (= floor−δ), NOT at the floor. My first
+sanity assert (d_diag[0] >= floor) wrongly tripped on this correct
+behavior; relaxed to >= floor/2 (still proves lifting away from the
+unperturbed 0.0).
+
+Evidence:
+- Pre-fix: test FAILS on inertia — scalar (perturbed) = (80+,0−,0z),
+  panel (unperturbed ±δ) = (79+,1−,0z). The unperturbed antidiagonal
+  block is counted indefinite (1+,1−) where the perturbed block (eigs
+  0.1, 0.098, both > 0) is (2+) — a genuinely WRONG inertia in the panel
+  path, the worst-case D2 consequence.
+- Fix: insert the identical perturbation block into the panel inline
+  path before computing det (factor.rs:2620-2640), mirroring scalar
+  exactly (mut d11/d22, write-back, needs_refinement=true, n_tiny+=1).
+- Post-fix: D2 test passes; ALL 21 blocked_ldlt parity tests green
+  (existing parity unaffected — default static_pivot_floor=0 makes the
+  new branch a no-op by construction). dense lib 72/0; integration
+  parity suites all green (parity 21/0, parallel_parity 8/0,
+  factor_workspace 8/0, maxfromm 5/0, small_leaf 7/0, rook 4/0,
+  factor_scratch 2/0); clippy -D warnings clean; fmt --check clean.
+
+First medium-severity finding done. Next per triage: N2 (static-pivot
+floor computed in user space, enforced in scaled space) or D3 (rook
+rescue bypasses strict-zero/band inertia accounting).
+
+* 21:40 :n2:static-pivot:scaling:scale-invariance:repro-test:
+N2 (PR #83 review): the MA57-style static-pivot floor was computed in
+=Solver::factor= from the UNSCALED user matrix (=floor = t·‖A‖∞=, via
+=matrix_inf_norm(matrix)=) but enforced by the BK kernels on pivots of
+the SCALED matrix =D·A·D=. Under a norm-normalizing scaling (InfNorm /
+MC64) the unscaled and scaled ∞-norms differ by the scaling ratio, so
+the *relative* threshold t behaves like a different value in pivot space
+— and depends on a global scalar γ that the scaling otherwise normalizes
+out completely. The F-01 null-pivot floor already does this correctly
+(scaled ∞-norm, =factorize::scaled_matrix_infnorm=).
+
+Oracle (self-consistency, no external solver): scale invariance under
+InfNorm. Knight-Ruiz InfNorm normalizes a global scalar: A and γ·A
+equilibrate to the IDENTICAL scaled matrix (D' = D/√γ ⇒ D'(γA)D' = DAD).
+Choosing γ = 2³⁰ (power of two ⇒ γ·A and √γ exactly representable) makes
+the scaled matrices bit-identical, so the ONLY thing that can differ
+between the two factorizations is the static-pivot floor. Therefore the
+static-pivot decision (needs_refinement, inertia) MUST be identical for
+A and γ·A. Test =n2_static_pivot_floor_is_scale_invariant_under_infnorm=
+on an indefinite 3×3 saddle KKT, t=1e-6.
+
+Evidence:
+- Pre-fix: A → (refine=false, 2+,1−,0z); γ·A → (refine=true, 2+,1−,0z).
+  Unscaled floor differs by γ: floor(A)=t·O(1)≈1e-6 (no pivot that
+  small → no perturbation) vs floor(γA)=t·2³⁰·O(1)≈1e3 (every O(1)
+  scaled pivot perturbed). Assertion fails — reproduction confirmed.
+- Fix: move the floor into =factorize::apply_post_scaling_overrides=
+  (renamed from =override_null_pivot_tol=, extended). It now ALSO
+  derives =static_pivot_floor = t·‖D·A·D‖∞= from the scaled ∞-norm
+  already computed for F-01, at all 3 override sites (dense 1401, seq
+  1895, parallel 2863). Static floor applies regardless of
+  =on_zero_pivot= (unlike the null-pivot override which no-ops under
+  Fail). Removed the solver's unscaled block (solver.rs:927-935) and
+  the now-dead =matrix_inf_norm= fn (solver.rs:1711-1736).
+- Post-fix: N2 test passes (both A and γ·A → refine=false, agree).
+  issue_38_static_pivot 5/5 green (Identity scaling ⇒ ‖D·A·D‖∞=‖A‖∞,
+  same floor — no behavior change on the Identity-scaled contract).
+  lib 330/0; parity 21/0, threshold_consistency 5/0, issue_55 2/0,
+  delayed_pivoting 6/0, kkt_hardening 8/0, pivot_rejection 5/0,
+  dense_ldlt 17/0, blocked_ldlt 21/0. clippy -D warnings clean; fmt clean.
+
+Process note (lost work): an earlier in-flight D2 =git commit= (from
+before compaction) and a second =git commit= I launched ran
+concurrently. =pre-commit= stashes unstaged changes while running hooks;
+the two concurrent stash/restore cycles collided and silently dropped my
+unstaged N2 edits to factorize.rs/solver.rs (working tree reset to HEAD,
+git diff empty, N2 test back to old name). Re-applied all edits from
+context. Lesson: never run two commits concurrently, and stage ALL
+files before committing so pre-commit has nothing to stash.
+
+Second medium-severity finding done (N2). Next per triage: D3 (rook
+rescue bypasses strict-zero/band inertia accounting).
+
+* 13:20 :D3:rook:inertia:rejected:acopp30:
+D3 (rook rescue bypasses strict-zero/band inertia accounting) —
+REPRODUCED as a divergence, REJECTED as a fix. Wrote a self-consistency
+test (rook vs no-rook by Sylvester) on A=[[1e-3,1e-4],[1e-4,1.0]] with
+zero_tol=1e-2: rook sign-counts -> (2,0,0), floored reference -> (1,0,1).
+Divergence is real. BUT A is SPD (det=1e-3-1e-8>0), so true inertia is
+(2,0,0) — rook is CORRECT and the floored reference is the artifact. The
+Sylvester premise is flawed: zero_tol is a deliberate floor the two paths
+apply differently; exact-inertia invariance does not bind once a floor is
+imposed.
+
+Two fix attempts, both regressed parity_acopp30_0001 (non-singular KKT,
+mumps=(72,137,0) ssids=(71,138,0), both zero=0):
+  (1) inline zero-bucketing -> feral=(71,137,1) spurious zero.
+  (2) decline-strict-zero + fall through to delay/force-accept (option B)
+      -> feral=(71,137,1) again. The rook-rescued pivot on ACOPP30 has
+      |d|<=EPS yet the matrix is non-singular; oracles resolve that DOF to
+      a definite sign and rook recovers the matching sign. ANY path that
+      doesn't sign-count it (zero-bucket at root, or delay-then-zero)
+      yields the spurious singular result.
+
+Both violate the hard inertia constraint (must agree with >=1 oracle on
+non-singular). On the only corpus matrix where this branch fires, the
+current floor-less sign-count is the one that matches the oracles. Fix
+direction is wrong — trades correct-but-unconventional for
+conventional-but-wrong. Reverted src/dense/factor.rs to original (git
+checkout), removed tests/d3_rook_inertia_accounting.rs, recorded full
+analysis in dev/tried-and-rejected.md citing D3. parity 21/0 and
+rook_rescue 4/0 green after revert.
+
+Note for future: a needs_refinement *flag* on a band-rescued rook 1×1
+(zero_tol,null_pivot_tol] is additive (no inertia change, cannot regress
+ACOPP30) and could be revisited separately — NOT the D3 accounting change.
+
+Next per triage: D4 (solve-time 2×2 gate inconsistent with factor-side
+acceptance, src/dense/solve.rs:193-205).
+
+* 13:55 :D4:solve:2x2:ssids-floor:fixed:
+D4 (solve-time 2×2 gate inconsistent with factor-side acceptance) — FIXED
+(facet b), facet a recorded in tried-and-rejected. The solve gate in
+d_block_solve used naive det=a*c-b*b vs ABSOLUTE zero_tol_2x2≈EPS², while
+the factor accepts 2×2 blocks via the SSIDS SCALE-INVARIANT floor. So a
+well-conditioned block at small absolute scale (|det|<EPS²) that the factor
+validly stored was silently skipped at solve -> wrong solution, no error.
+
+Repro (tests-first, hand-built Factors with L=I, identity perm/d_eq, single
+2×2; oracle = rhs=D·x_true so true x=x_true by construction, external):
+  - facet (b): D=[[1e-16,1e-17],[1e-16... ]], rhs=D·[1,1]. Pre-fix solve
+    skipped (|det|=9.9e-33 < zero_tol_2x2=4.93e-32) -> x=[1.1e-16,1.1e-16]
+    (= rhs, off by 16 orders). Post-fix x=[1,1].
+Both d4 tests FAILED pre-fix exactly as predicted, pass post-fix.
+
+Fix: extracted the duplicated SSIDS floor (factor.rs:2670 and :3709,
+byte-identical) into shared pub(crate) ssids_det_floor_fail(d11,d21,d22).
+Both factor 2×2 gates and d_block_solve now call it -> a block the factor
+inverts is exactly a block the solve inverts. zero_tol_2x2 kept on Factors
+for legacy count_2x2_inertia accounting but no longer gates the solve.
+
+Facet (a) [naive det rounds to 0.0 -> skip a nonsingular block] is NOT
+independently reproducible: naive-cancel-to-0 requires cond≳2^52, and the
+SAME SSIDS floor rejects all such blocks, so the factor never stores them
+(verified /tmp/check_a.py: D=[[2^53+1,2^53],[2^53,2^53]], true det=2^53,
+detpiv rescaled=0 -> rejected). Pinned as a consistency guard
+(d4_rejected_block_is_skipped_like_factor: must skip, matching factor).
+det_sym2x2 stays load-bearing for factor-time inertia SIGN of borderline
+blocks — separate concern, unchanged.
+
+Evidence: d4 2/2, lib 330/0, parity 21/0, kkt_hardening 8/0, dense_ldlt
+17/0, blocked_ldlt 21/0, delayed_pivoting 6/0, pivot_rejection 5/0,
+issue_38 5/0, threshold_consistency 5/0, rook_rescue 4/0, issue_55 2/0.
+clippy -D warnings + fmt clean. The factor-site refactor is byte-identical
+(all factor-path suites green).
+
+Next per triage: D5 (legacy factor() + ForceAccept + exactly singular 2×2
+-> 1/0 -> NaN, factor.rs ~4658).

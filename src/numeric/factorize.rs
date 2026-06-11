@@ -211,9 +211,10 @@ pub struct NumericParams {
     pub sqd_mode: bool,
 
     /// MA57-style static-pivot perturbation threshold (issue #38).
-    /// When `Some(t)`, `Solver::factor` computes `||A||_∞` once per
-    /// call and propagates an absolute floor
-    /// `static_pivot_floor = t * ||A||_∞` into
+    /// When `Some(t)`, `Solver::factor` derives an absolute floor
+    /// `static_pivot_floor = t * ||D·A·D||_∞` from the *scaled* matrix
+    /// norm (post-scaling, via `scaled_matrix_infnorm` +
+    /// `apply_post_scaling_overrides`; N2) and propagates it into
     /// `BunchKaufmanParams.static_pivot_floor` for that factor call.
     /// Every accepted 1×1 / 2×2 pivot whose magnitude (for 2×2:
     /// smallest |eigenvalue|) is below the floor is perturbed up to
@@ -255,8 +256,8 @@ pub struct NumericParams {
     /// `FERAL_WARN_PARTIAL_SINGULAR` env var (C ABI). Issue #43.
     pub warn_partial_singular: bool,
 
-    /// Issue #56 Lever A.2: when `true`, the numeric drivers consult
-    /// `FactorWorkspace::permute_cache` to skip the
+    /// Issue #56 Lever A.2: when `true`, the sequential and Schur numeric
+    /// drivers consult `FactorWorkspace::permute_cache` to skip the
     /// `CscMatrix::from_triplets` rebuild inside `permute_csc_values`,
     /// reusing the cached `(col_ptr, row_idx, value_map)` and scattering
     /// only the values. Set by `Solver::factor` to `pattern_reused` —
@@ -264,7 +265,11 @@ pub struct NumericParams {
     /// reuse, which guarantees the cached permute structure is still
     /// valid. Default `false` keeps direct callers
     /// (`factorize_multifrontal_supernodal_with_workspace` used without
-    /// `Solver`) on the canonical from-triplets path.
+    /// `Solver`) on the canonical from-triplets path. NOTE: the parallel
+    /// driver (the default on the large matrices this targets) does not
+    /// engage the cache regardless of this flag — it always rebuilds via
+    /// `permute_csc_values`; closing that gap is the open N3 facet tracked
+    /// in `dev/decisions.md`.
     pub pattern_reused_hint: bool,
 }
 
@@ -340,7 +345,7 @@ pub struct PrologueBreakdown {
     /// The `CscMatrix::from_triplets` sub-call inside `permute_csc_values`.
     /// Subset of `permute_us`; the prime suspect for the prologue cost.
     pub permute_from_triplets_us: u64,
-    /// `scaled_matrix_infnorm` + `override_null_pivot_tol`.
+    /// `scaled_matrix_infnorm` + `apply_post_scaling_overrides`.
     pub infnorm_tol_us: u64,
     /// `CscMatrix::symmetric_pattern` (full pattern for row indices).
     pub symmetric_pattern_us: u64,
@@ -1251,6 +1256,22 @@ pub(crate) struct PermuteCache {
     input_n: usize,
     /// Input matrix nnz at cache build (`matrix.values.len()`).
     input_nnz: usize,
+    /// Input `col_ptr` at cache build. The permuted structure and
+    /// `value_map` are a pure function of the input *pattern*
+    /// (`col_ptr` + `row_idx`) and `perm_inv`; the warm path is valid
+    /// only if all three are byte-identical to the build-time inputs.
+    /// REG-1: `(n, nnz)` alone is NOT a sufficient key — two distinct
+    /// patterns sharing `(n, nnz)`, or the same pattern under a changed
+    /// permutation, would otherwise scatter values through a stale
+    /// structure and return a wrong factorization. Stored (not hashed)
+    /// so a fingerprint collision can never reintroduce that silent
+    /// wrong answer; the compare is O(n + nnz), still strictly cheaper
+    /// than the `from_triplets` sort the warm path skips.
+    input_col_ptr: Vec<usize>,
+    /// Input `row_idx` at cache build (see `input_col_ptr`).
+    input_row_idx: Vec<usize>,
+    /// `perm_inv` at cache build (see `input_col_ptr`).
+    input_perm_inv: Vec<usize>,
     /// `col_ptr` of the cached permuted CSC.
     permuted_col_ptr: Vec<usize>,
     /// `row_idx` of the cached permuted CSC.
@@ -1398,7 +1419,7 @@ pub fn dense_fast_factor_with_workspace(
     // abort-on-zero callers). See
     // `dev/research/f01-rankdef-underreporting.md`.
     let local_params =
-        override_null_pivot_tol(params, scaled_matrix_infnorm_dense(&sym.data, n), n);
+        apply_post_scaling_overrides(params, scaled_matrix_infnorm_dense(&sym.data, n), n);
     let params: &NumericParams = local_params.as_ref().unwrap_or(params);
 
     // Factor the full n columns. `may_delay = false` matches the
@@ -1892,7 +1913,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
     // `on_zero_pivot == Fail`. See
     // `dev/research/f01-rankdef-underreporting.md`.
     let t_phase = tic();
-    let local_params = override_null_pivot_tol(
+    let local_params = apply_post_scaling_overrides(
         params,
         scaled_matrix_infnorm(&permuted, &scaling_pivot_order),
         n,
@@ -2860,7 +2881,7 @@ pub fn factorize_multifrontal_supernodal_parallel(
     // F-01: raise the per-supernode BK `zero_tol` to the Wilkinson
     // backward error floor `n · EPS · ||A_scaled||_inf`. See sequential
     // driver above and `dev/research/f01-rankdef-underreporting.md`.
-    let local_params = override_null_pivot_tol(
+    let local_params = apply_post_scaling_overrides(
         params,
         scaled_matrix_infnorm(&permuted, &scaling_pivot_order),
         n,
@@ -3146,6 +3167,13 @@ fn run_parallel_task<'a>(
         let thread_idx = thread_idx.min(thread_ws.len() - 1);
         let ws_mtx = &thread_ws[thread_idx];
 
+        // N3: per-supernode profiler wall time. Independent of
+        // `parallel_telemetry` (which measures driver-internal lock/wait
+        // costs) — this mirrors the sequential driver's
+        // `params.profiler` recording so `Solver::with_profiling(true)`
+        // yields a populated report on the parallel dispatch too. Set
+        // inside the factor block, consumed in the `Ok` arm below.
+        let mut prof_us: Option<u64> = None;
         let (result, own_contrib) = {
             let t_ws_wait = telemetry.map(|_| std::time::Instant::now());
             let mut ws_guard = match ws_mtx.lock() {
@@ -3191,6 +3219,7 @@ fn run_parallel_task<'a>(
             }
 
             let factor_start = telemetry.map(|_| std::time::Instant::now());
+            let prof_start = params.profiler.as_ref().map(|_| std::time::Instant::now());
             let res = factor_one_supernode(
                 snode_idx,
                 symbolic,
@@ -3207,6 +3236,9 @@ fn run_parallel_task<'a>(
                 t.factor_body_ns
                     .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
             }
+            if let Some(start) = prof_start {
+                prof_us = Some(start.elapsed().as_micros() as u64);
+            }
 
             let own = local_contribs[snode_idx].take();
             // Return the pooled vec to the workspace. All slots are
@@ -3218,6 +3250,28 @@ fn run_parallel_task<'a>(
 
         match result {
             Ok(node) => {
+                // N3: record this supernode's profiler timing (completion
+                // order, not postorder — the bucketed `report()` is
+                // order-independent). The phase-breakdown fields are left
+                // zero: they are derived from process-global phase atomics
+                // that cannot be safely differenced across concurrent tasks
+                // (finding N9), so only the wall `us` is meaningful here.
+                if let (Some(arc), Some(us)) = (params.profiler.as_ref(), prof_us) {
+                    let timing = SupernodeTiming {
+                        snode_idx,
+                        nrow: snode.nrow,
+                        ncol: snode.ncol,
+                        us,
+                        assembly_us: 0,
+                        densefactor_us: 0,
+                        panelfactor_us: 0,
+                        schur_us: 0,
+                        scalartail_us: 0,
+                    };
+                    if let Ok(mut prof) = arc.lock() {
+                        prof.timings.push(timing);
+                    }
+                }
                 {
                     let t_wait_start = telemetry.map(|_| std::time::Instant::now());
                     let mut shared = match contrib_blocks.lock() {
@@ -3353,12 +3407,15 @@ fn null_pivot_floor(scaled_infnorm: f64, n: usize) -> f64 {
     (n as f64).sqrt() * f64::EPSILON * scaled_infnorm
 }
 
-/// Apply the F-01 post-scaling null-pivot tolerance override.
+/// Apply the post-scaling pivot-tolerance overrides (F-01 null-pivot
+/// floor and N2 static-pivot floor), both derived from the scaled
+/// ∞-norm `‖D·A·D‖∞` the BK kernels actually operate on.
 ///
 /// Returns `Some(local)` when the caller should use a cloned
 /// `NumericParams` with raised `bk.null_pivot_tol` /
-/// `bk.null_pivot_tol_2x2`, or `None` when the original `params` is
-/// sufficient (either the floor is below the existing
+/// `bk.null_pivot_tol_2x2` and/or a scaled `bk.static_pivot_floor`, or
+/// `None` when the original `params` is sufficient (no static threshold
+/// set, and either the null-pivot floor is below the existing
 /// `null_pivot_tol`, or `on_zero_pivot == Fail` preserves the
 /// absolute-threshold contract for abort-on-zero callers).
 ///
@@ -3376,21 +3433,54 @@ fn null_pivot_floor(scaled_infnorm: f64, n: usize) -> f64 {
 /// `floor²` would only catch blocks with *both* eigenvalues at the
 /// floor — orders of magnitude smaller than the actual
 /// rank-deficiency signature.
-fn override_null_pivot_tol(
+fn apply_post_scaling_overrides(
     params: &NumericParams,
     scaled_infnorm: f64,
     n: usize,
 ) -> Option<NumericParams> {
-    if matches!(params.bk.on_zero_pivot, ZeroPivotAction::Fail) {
-        return None;
-    }
-    let floor = null_pivot_floor(scaled_infnorm, n);
-    if floor <= params.bk.null_pivot_tol {
+    // N2 (`dev/research/repo-review-2026-06-09.md`): the MA57-style
+    // static-pivot floor must be derived from the SCALED matrix the BK
+    // kernels actually operate on (`D·A·D`), not the unscaled user
+    // matrix. `static_pivot_threshold = t` is a *relative* threshold;
+    // the absolute floor enforced on scaled pivots is `t · ‖D·A·D‖∞`.
+    // The solver funnel previously computed `t · ‖A‖∞` from the
+    // unscaled matrix, so under a norm-normalizing scaling (InfNorm /
+    // MC64) `t` behaved like a different value in pivot space by the
+    // scaling-induced norm ratio — e.g. `γ·A` equilibrates to the same
+    // matrix as `A` under InfNorm yet received a `γ`× larger floor.
+    // Unlike the F-01 null-pivot override below, the static floor
+    // applies regardless of `on_zero_pivot` (static pivoting is
+    // independent of the abort-on-zero contract).
+    let static_floor = params
+        .static_pivot_threshold
+        .filter(|t| *t > 0.0)
+        .map(|t| t * scaled_infnorm)
+        .filter(|f| f.is_finite() && *f > 0.0);
+
+    // F-01: raise the BK kernel's null-pivot tolerance to the Wilkinson
+    // backward-error floor `sqrt(n) · EPS · ‖A_scaled‖∞`. No-op under
+    // `on_zero_pivot == Fail` (preserves the absolute-tolerance contract
+    // for abort-on-zero callers) or when the floor is already at/below
+    // the configured `null_pivot_tol`. See
+    // `dev/research/f01-rankdef-underreporting.md`.
+    let null_floor = if matches!(params.bk.on_zero_pivot, ZeroPivotAction::Fail) {
+        None
+    } else {
+        let floor = null_pivot_floor(scaled_infnorm, n);
+        (floor > params.bk.null_pivot_tol).then_some(floor)
+    };
+
+    if static_floor.is_none() && null_floor.is_none() {
         return None;
     }
     let mut local = params.clone();
-    local.bk.null_pivot_tol = floor;
-    local.bk.null_pivot_tol_2x2 = (floor * scaled_infnorm).max(floor * floor);
+    if let Some(sf) = static_floor {
+        local.bk.static_pivot_floor = sf;
+    }
+    if let Some(floor) = null_floor {
+        local.bk.null_pivot_tol = floor;
+        local.bk.null_pivot_tol_2x2 = (floor * scaled_infnorm).max(floor * floor);
+    }
     Some(local)
 }
 
@@ -3469,9 +3559,21 @@ fn permute_csc_values_with_cache(
     let nnz = matrix.nnz();
 
     // Warm path: cache hit — scatter values into the cached structure.
+    // REG-1: the cache is keyed on the full input pattern AND `perm_inv`,
+    // not just `(n, nnz)`. A different pattern sharing `(n, nnz)`, or the
+    // same pattern under a changed permutation (e.g. AutoRace reselecting
+    // an ordering after a symbolic-cache invalidation), must fall through
+    // to the cold rebuild rather than scatter values through a stale
+    // structure.
     if pattern_reused_hint {
         if let Some(c) = cache.as_ref() {
-            if c.input_n == n && c.input_nnz == nnz && c.value_map.len() == nnz {
+            if c.input_n == n
+                && c.input_nnz == nnz
+                && c.value_map.len() == nnz
+                && c.input_col_ptr == matrix.col_ptr
+                && c.input_row_idx == matrix.row_idx
+                && c.input_perm_inv.as_slice() == perm_inv
+            {
                 let permuted_nnz = c.permuted_row_idx.len();
                 let mut values = vec![0.0f64; permuted_nnz];
                 for k in 0..nnz {
@@ -3493,23 +3595,43 @@ fn permute_csc_values_with_cache(
     // Cold path: canonical from-triplets rebuild.
     let (permuted, from_triplets_us) = permute_csc_values(matrix, perm, perm_inv, profile)?;
 
-    // Refresh cache so the next warm call can take the fast path. Best
-    // effort — on the (unexpected) row-lookup failure the cache is
-    // cleared and subsequent calls take the cold path until the next
-    // successful refresh.
-    match build_permute_value_map(matrix, perm_inv, &permuted) {
-        Ok(value_map) => {
-            *cache = Some(PermuteCache {
-                input_n: n,
-                input_nnz: nnz,
-                permuted_col_ptr: permuted.col_ptr.clone(),
-                permuted_row_idx: permuted.row_idx.clone(),
-                value_map,
-            });
+    // N7: only build the value-map cache when a warm reuse is actually
+    // anticipated. `pattern_reused_hint == false` is the one-shot path —
+    // the warm branch above is gated on the same hint, so a cache built
+    // here would never be read. Building it anyway costs an O(nnz · log)
+    // scan plus three O(nnz) vectors per factorization that are thrown
+    // away. Skip the build for one-shot callers; the warm-reuse caller
+    // (hint == true) still pays the build exactly once on its first,
+    // cache-cold call and reaps it on every subsequent reuse.
+    if pattern_reused_hint {
+        // Refresh cache so the next warm call can take the fast path. Best
+        // effort — on the (unexpected) row-lookup failure the cache is
+        // cleared and subsequent calls take the cold path until the next
+        // successful refresh.
+        match build_permute_value_map(matrix, perm_inv, &permuted) {
+            Ok(value_map) => {
+                *cache = Some(PermuteCache {
+                    input_n: n,
+                    input_nnz: nnz,
+                    input_col_ptr: matrix.col_ptr.clone(),
+                    input_row_idx: matrix.row_idx.clone(),
+                    input_perm_inv: perm_inv.to_vec(),
+                    permuted_col_ptr: permuted.col_ptr.clone(),
+                    permuted_row_idx: permuted.row_idx.clone(),
+                    value_map,
+                });
+            }
+            Err(_) => {
+                *cache = None;
+            }
         }
-        Err(_) => {
-            *cache = None;
-        }
+    } else {
+        // N7/REG-1 defence in depth: a one-shot (hint == false) call must
+        // not leave a stale cache from a previous pattern that a later
+        // warm call could trust. Clear it (O(1)). The warm path also
+        // validates the pattern+perm fingerprint, so this is belt-and-
+        // suspenders, not the sole guard.
+        *cache = None;
     }
 
     Ok((permuted, from_triplets_us))
@@ -5002,5 +5124,147 @@ mod tests {
             subphase_sum,
             report.prologue_us
         );
+    }
+
+    /// N7: a one-shot caller (`pattern_reused_hint == false`) must not
+    /// pay to build the value-map cache — the warm fast path is gated on
+    /// the same hint, so a cache built on a cold one-shot call would
+    /// never be read. The cold path must still produce the correct
+    /// permuted matrix; only the (wasted) cache build is skipped.
+    #[test]
+    fn permute_cache_not_built_for_one_shot_caller() {
+        // Lower-triangular SPD-ish pattern, identity permutation so the
+        // permuted matrix equals the input and is trivial to verify.
+        let n = 4usize;
+        let rows = vec![0usize, 1, 1, 2, 2, 3, 3];
+        let cols = vec![0usize, 0, 1, 1, 2, 2, 3];
+        let vals = vec![4.0f64, -1.0, 4.0, -1.0, 4.0, -1.0, 4.0];
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let perm: Vec<usize> = (0..n).collect();
+        let perm_inv: Vec<usize> = (0..n).collect();
+
+        // One-shot: hint off, empty cache.
+        let mut cache: Option<PermuteCache> = None;
+        let (permuted, _us) =
+            permute_csc_values_with_cache(&m, &perm, &perm_inv, false, false, &mut cache).unwrap();
+
+        // Permuted matrix is correct (identity perm ⇒ equals input).
+        assert_eq!(permuted.n, m.n);
+        assert_eq!(permuted.col_ptr, m.col_ptr);
+        assert_eq!(permuted.row_idx, m.row_idx);
+        assert_eq!(permuted.values, m.values);
+
+        // N7: the cache must remain unbuilt for a one-shot caller.
+        // Pre-fix this is `Some(..)` (the cold path populated it
+        // unconditionally); post-fix it stays `None`.
+        assert!(
+            cache.is_none(),
+            "one-shot caller (hint=false) should not build the value-map cache"
+        );
+
+        // Sanity: a warm-reuse caller (hint=true) still builds the cache
+        // on its first cold call, so the gating is conditional, not a
+        // blanket disable.
+        let mut warm_cache: Option<PermuteCache> = None;
+        let (_permuted2, _us2) =
+            permute_csc_values_with_cache(&m, &perm, &perm_inv, true, true, &mut warm_cache)
+                .unwrap();
+        assert!(
+            warm_cache.is_some(),
+            "warm-reuse caller (hint=true) should build the value-map cache on its cold call"
+        );
+    }
+
+    /// REG-1 (repo-review-2026-06-09-verification.md): a stale
+    /// `PermuteCache` left by an earlier pattern must NOT be reused for a
+    /// different input pattern that merely shares `(n, nnz)`. N7
+    /// (`131a6de`) made the cold-path rebuild conditional on
+    /// `hint == true`, so a `hint == false` call no longer refreshes the
+    /// cache; combined with the warm path validating only
+    /// `(n, nnz, value_map.len())` this let a later warm call scatter new
+    /// values through the previous pattern's structure and return Success
+    /// with a wrong factorization. The warm path must validate the actual
+    /// input pattern before it fires.
+    #[test]
+    fn permute_cache_rejects_stale_pattern_same_n_nnz() {
+        let n = 4usize;
+        let perm: Vec<usize> = (0..n).collect();
+        let perm_inv: Vec<usize> = (0..n).collect();
+
+        // Pattern A and pattern B share (n, nnz) = (4, 7) but differ
+        // structurally (different row_idx / col_ptr).
+        let a = CscMatrix::from_triplets(
+            n,
+            &[0, 1, 1, 2, 2, 3, 3],
+            &[0, 0, 1, 1, 2, 2, 3],
+            &[4.0, -1.0, 4.0, -1.0, 4.0, -1.0, 4.0],
+        )
+        .unwrap();
+        let b = CscMatrix::from_triplets(
+            n,
+            &[0, 1, 2, 2, 3, 3, 3],
+            &[0, 1, 0, 2, 1, 3, 0],
+            &[4.0, 4.0, -1.0, 4.0, -1.0, 4.0, -2.0],
+        )
+        .unwrap();
+        assert_eq!(a.nnz(), b.nnz(), "patterns must share nnz for the probe");
+
+        // Warm-reuse caller builds A's cache (hint=true cold call).
+        let mut cache: Option<PermuteCache> = None;
+        permute_csc_values_with_cache(&a, &perm, &perm_inv, false, true, &mut cache).unwrap();
+        assert!(cache.is_some());
+
+        // A one-shot (hint=false) call on pattern B follows.
+        permute_csc_values_with_cache(&b, &perm, &perm_inv, false, false, &mut cache).unwrap();
+
+        // Warm call on pattern B must equal the canonical permutation of
+        // B — NOT B's values scattered through A's structure.
+        let (warm_b, _) =
+            permute_csc_values_with_cache(&b, &perm, &perm_inv, false, true, &mut cache).unwrap();
+        let (canon_b, _) = permute_csc_values(&b, &perm, &perm_inv, false).unwrap();
+        assert_eq!(warm_b.col_ptr, canon_b.col_ptr, "stale-pattern col_ptr");
+        assert_eq!(warm_b.row_idx, canon_b.row_idx, "stale-pattern row_idx");
+        assert_eq!(warm_b.values, canon_b.values, "stale-pattern values");
+    }
+
+    /// REG-1 second route: the same input pattern but a changed
+    /// permutation (AutoRace selecting a different ordering after a
+    /// symbolic-cache invalidation) must also bypass the stale cache —
+    /// `hint` stays `true` throughout, so the cold-path clear does not
+    /// help; the stored `perm_inv` is what guards it.
+    #[test]
+    fn permute_cache_rejects_stale_permutation() {
+        let n = 4usize;
+        // Arrow pattern (dense first column): its permuted structure is
+        // NOT invariant under reordering, so a stale-perm warm hit is
+        // structurally visible. (A constant tridiagonal matrix would be
+        // reversal-invariant and hide the bug.)
+        let m = CscMatrix::from_triplets(
+            n,
+            &[0, 1, 2, 3, 1, 2, 3],
+            &[0, 0, 0, 0, 1, 2, 3],
+            &[10.0, 2.0, 3.0, 4.0, 20.0, 30.0, 40.0],
+        )
+        .unwrap();
+
+        // Permutation 1 (identity) builds the cache.
+        let perm1: Vec<usize> = (0..n).collect();
+        let perm1_inv: Vec<usize> = (0..n).collect();
+        let mut cache: Option<PermuteCache> = None;
+        permute_csc_values_with_cache(&m, &perm1, &perm1_inv, false, true, &mut cache).unwrap();
+        assert!(cache.is_some());
+
+        // Permutation 2 (reversal) on the SAME pattern, hint still true.
+        let perm2: Vec<usize> = vec![3, 2, 1, 0];
+        let mut perm2_inv = vec![0usize; n];
+        for (i, &p) in perm2.iter().enumerate() {
+            perm2_inv[p] = i;
+        }
+        let (warm, _) =
+            permute_csc_values_with_cache(&m, &perm2, &perm2_inv, false, true, &mut cache).unwrap();
+        let (canon, _) = permute_csc_values(&m, &perm2, &perm2_inv, false).unwrap();
+        assert_eq!(warm.col_ptr, canon.col_ptr, "stale-perm col_ptr");
+        assert_eq!(warm.row_idx, canon.row_idx, "stale-perm row_idx");
+        assert_eq!(warm.values, canon.values, "stale-perm values");
     }
 }

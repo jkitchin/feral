@@ -1,16 +1,55 @@
 use crate::error::FeralError;
 
+// Test-only instrumentation: counts how many times `CscMatrix::clone` runs
+// on the calling thread. Used to prove clone-elimination fixes (e.g. X7,
+// the C API `feral_factor` clone). Thread-local rather than a global atomic
+// because the cargo harness runs tests concurrently and a shared atomic
+// would race across sibling tests.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CSC_MATRIX_CLONES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Reset the per-thread `CscMatrix::clone` counter to zero. Test-only.
+#[cfg(test)]
+pub(crate) fn reset_csc_matrix_clones() {
+    CSC_MATRIX_CLONES.with(|c| c.set(0));
+}
+
+/// Read the per-thread `CscMatrix::clone` counter. Test-only.
+#[cfg(test)]
+pub(crate) fn csc_matrix_clones() -> usize {
+    CSC_MATRIX_CLONES.with(|c| c.get())
+}
+
 /// Compressed Sparse Column (CSC) matrix storage for symmetric matrices.
 ///
 /// Only the lower triangle is stored. `col_ptr[j]..col_ptr[j+1]` gives the
 /// range of entries in column j. Row indices within each column are sorted
 /// in ascending order.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CscMatrix {
     pub n: usize,
     pub col_ptr: Vec<usize>,
     pub row_idx: Vec<usize>,
     pub values: Vec<f64>,
+}
+
+// Manual `Clone` so test builds can count clones (see `CSC_MATRIX_CLONES`).
+// The explicit field literal is intentional: adding a field to `CscMatrix`
+// will fail to compile here, forcing this impl to be kept in sync.
+impl Clone for CscMatrix {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        CSC_MATRIX_CLONES.with(|c| c.set(c.get() + 1));
+        Self {
+            n: self.n,
+            col_ptr: self.col_ptr.clone(),
+            row_idx: self.row_idx.clone(),
+            values: self.values.clone(),
+        }
+    }
 }
 
 /// Symmetric sparsity pattern (full, not just lower triangle).
@@ -161,8 +200,38 @@ impl CscMatrix {
                 "row_idx and values length mismatch".to_string(),
             ));
         }
+        // X6 residual (repo-review-2026-06-09-verification.md): `col_ptr`
+        // must start at 0. A monotone `col_ptr` beginning at `k > 0` with
+        // `col_ptr[n] == nnz` passes every other check (length, monotone,
+        // in-bounds, sorted, lower-triangle) while positions `0..k` of
+        // `row_idx`/`values` are never covered by any column range —
+        // silently dropped and never factored. Completes the column-pointer
+        // contract the monotonicity check below began.
+        if self.col_ptr[0] != 0 {
+            return Err(FeralError::InvalidInput(format!(
+                "col_ptr[0] must be 0, got {}",
+                self.col_ptr[0]
+            )));
+        }
         if self.col_ptr[self.n] != self.row_idx.len() {
             return Err(FeralError::InvalidInput("col_ptr[n] != nnz".to_string()));
+        }
+        // col_ptr must be monotonically non-decreasing (X6). Without this a
+        // non-monotone `ia` whose endpoints line up (col_ptr[0] == 0,
+        // col_ptr[n] == nnz) passes every check below — in-bounds, sorted,
+        // lower-triangle — yet `col_ptr[j] > col_ptr[j+1]` makes column j's
+        // range empty and overlaps adjacent columns, silently dropping entries
+        // and factoring the wrong matrix. Checked up front so the `start..end`
+        // ranges used below are well-formed.
+        for j in 0..self.n {
+            if self.col_ptr[j + 1] < self.col_ptr[j] {
+                return Err(FeralError::InvalidInput(format!(
+                    "col_ptr not monotonically non-decreasing at column {} ({} > {})",
+                    j,
+                    self.col_ptr[j],
+                    self.col_ptr[j + 1]
+                )));
+            }
         }
         for j in 0..self.n {
             let start = self.col_ptr[j];
@@ -473,5 +542,70 @@ mod tests {
         assert!((y[0] - 3.0).abs() < 1e-14); // 2 + 0 + 1
         assert!((y[1] - 4.0).abs() < 1e-14); // 0 + 3 + 1
         assert!((y[2] - (2.0 - 1e-8)).abs() < 1e-14); // 1 + 1 - 1e-8
+    }
+
+    /// X6 (dev/research/repo-review-2026-06-09.md): `validate()` must reject a
+    /// non-monotone `col_ptr`. A valid CSC requires `col_ptr` to be
+    /// monotonically non-decreasing (the standard column-pointer contract);
+    /// without that check a non-monotone `ia` whose endpoints line up
+    /// (`col_ptr[0] == 0`, `col_ptr[n] == nnz`) passes every other check yet
+    /// produces empty/overlapping column ranges, so entries are silently
+    /// dropped and the wrong matrix is factored.
+    ///
+    /// Witness: n = 3, nnz = 2, `col_ptr = [0, 2, 1, 2]`. The endpoints line up
+    /// (`col_ptr[3] == 2 == nnz`), every row index is in-bounds, lower-triangle
+    /// and sorted within its (non-empty) range, but `col_ptr[1] = 2 >
+    /// col_ptr[2] = 1`, so column 1's range `[2, 1)` is empty and column 2
+    /// re-reads index 1. Pre-fix `validate()` returned `Ok`.
+    #[test]
+    fn validate_rejects_non_monotone_col_ptr() {
+        let m = CscMatrix {
+            n: 3,
+            col_ptr: vec![0, 2, 1, 2],
+            // index 0 -> (row 0, col 0); index 1 -> (row 2, col 0 and re-read
+            // as col 2). Both lower-triangle and in-bounds.
+            row_idx: vec![0, 2],
+            values: vec![1.0, 1.0],
+        };
+        let err = m
+            .validate()
+            .expect_err("non-monotone col_ptr must be rejected (X6)");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("col_ptr") && msg.contains("monoton"),
+            "error should mention non-monotone col_ptr, got: {}",
+            msg
+        );
+    }
+
+    /// X6 residual (repo-review-2026-06-09-verification.md): `validate()`
+    /// must reject a `col_ptr` that does not start at 0. A monotone
+    /// `col_ptr` beginning at `k > 0` with `col_ptr[n] == nnz` passes the
+    /// length, monotonicity, `col_ptr[n] == nnz`, in-bounds, sorted and
+    /// lower-triangle checks, yet positions `0..k` of `row_idx`/`values`
+    /// fall outside every column range and are silently dropped — the
+    /// matrix factored is missing those entries.
+    ///
+    /// Witness: n = 2, nnz = 2, `col_ptr = [1, 1, 2]`. Monotone,
+    /// `col_ptr[2] == 2 == nnz`; column 0's range `[1, 1)` is empty and
+    /// column 1's range `[1, 2)` reads only index 1, so `row_idx[0]` /
+    /// `values[0]` are never covered. Pre-fix `validate()` returned `Ok`.
+    #[test]
+    fn validate_rejects_nonzero_col_ptr_start() {
+        let m = CscMatrix {
+            n: 2,
+            col_ptr: vec![1, 1, 2],
+            row_idx: vec![0, 1],
+            values: vec![1.0, 1.0],
+        };
+        let err = m
+            .validate()
+            .expect_err("a col_ptr that does not start at 0 must be rejected (X6)");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("col_ptr[0]"),
+            "error should mention col_ptr[0], got: {}",
+            msg
+        );
     }
 }

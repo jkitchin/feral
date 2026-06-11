@@ -87,19 +87,16 @@ fn run_top(
 ) -> Result<(), OrderingError> {
     let n = graph.nvtxs as usize;
     let (cc_label, ncc) = connected_components(graph);
-    let _ = ncc;
+    stats.n_components = ncc as u32;
     let mut offset: usize = 0;
-    let mut n_components: u32 = 0;
     for c in 0..ncc {
         let (sub, vtx_map) = extract_by_label(graph, &cc_label, c as i32);
         let count = sub.nvtxs as usize;
         if count > 0 {
-            n_components += 1;
             recurse(&sub, &vtx_map, offset, iperm, opts, rng, stats)?;
         }
         offset += count;
     }
-    let _ = n_components;
     debug_assert_eq!(offset, n);
     Ok(())
 }
@@ -469,6 +466,10 @@ mod tests {
         let perm = kahip_nd_order(&pat, &opts, &mut stats).unwrap();
         assert_eq!(perm.len(), 128);
         assert_permutation(&perm);
+        // Two disjoint 8×8 grids ⇒ exactly two top-level components.
+        // Mirrors metis (`node_nd.rs` `nd_order_handles_disconnected_graph`)
+        // and scotch, which assert the same on their stats (O18).
+        assert_eq!(stats.n_components, 2);
     }
 
     #[test]

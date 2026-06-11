@@ -52,14 +52,7 @@ pub(crate) fn nd_order(
     debug_assert_eq!(offset, n);
 
     // Invert iperm → perm.
-    let mut perm: Vec<i32> = vec![0; n];
-    for (old, &new_pos) in iperm.iter().enumerate() {
-        if new_pos < 0 || (new_pos as usize) >= n {
-            return Err(OrderingError::Internal("invalid permutation produced"));
-        }
-        perm[new_pos as usize] = old as i32;
-    }
-    Ok(perm)
+    invert_iperm(&iperm, n)
 }
 
 fn recurse(
@@ -278,6 +271,31 @@ fn graph_to_csc_pattern(graph: &Graph) -> (Vec<i32>, Vec<i32>) {
     (col_ptr, row_idx)
 }
 
+/// Invert the new→old position map `iperm` (where `iperm[old] = new_pos`)
+/// into the old→new permutation `perm` (where `perm[new_pos] = old`).
+///
+/// Rejects an out-of-range or duplicated target position rather than
+/// silently emitting a non-bijection — parity with the scotch/kahip
+/// `invert_iperm` helpers (O20).
+fn invert_iperm(iperm: &[i32], n: usize) -> Result<Vec<i32>, OrderingError> {
+    let mut perm: Vec<i32> = vec![-1; n];
+    for (old, &new_pos) in iperm.iter().enumerate() {
+        if new_pos < 0 || (new_pos as usize) >= n {
+            return Err(OrderingError::Internal(
+                "metis nd produced invalid permutation",
+            ));
+        }
+        let np = new_pos as usize;
+        if perm[np] >= 0 {
+            return Err(OrderingError::Internal(
+                "metis nd produced duplicate position",
+            ));
+        }
+        perm[np] = old as i32;
+    }
+    Ok(perm)
+}
+
 /// Connected-component labeling via BFS. Returns `(cc_label, ncc)`
 /// where `cc_label[v] ∈ 0..ncc`.
 fn connected_components(graph: &Graph) -> (Vec<i32>, usize) {
@@ -423,6 +441,25 @@ mod tests {
             assert!(!seen[p], "duplicate {}", p);
             seen[p] = true;
         }
+    }
+
+    #[test]
+    fn invert_iperm_rejects_duplicate_positions() {
+        // A valid new→old inversion of a bijection.
+        // iperm[old] = new_pos: old0→2, old1→0, old2→1 ⇒ perm = [1, 2, 0].
+        assert_eq!(invert_iperm(&[2, 0, 1], 3).unwrap(), vec![1, 2, 0]);
+        // Two olds claiming the same position must be rejected, not
+        // silently overwritten into a non-bijection (parity with the
+        // scotch/kahip duplicate-position check; O20).
+        assert!(matches!(
+            invert_iperm(&[0, 0, 2], 3),
+            Err(OrderingError::Internal(_))
+        ));
+        // Out-of-range target position is rejected.
+        assert!(matches!(
+            invert_iperm(&[3, 0, 1], 3),
+            Err(OrderingError::Internal(_))
+        ));
     }
 
     #[test]

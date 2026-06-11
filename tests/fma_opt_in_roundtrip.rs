@@ -150,3 +150,74 @@ fn fma_opt_in_matches_nofma_inertia_and_solves_accurately() {
     );
     assert!(res_fma < tol, "fma residual {res_fma} exceeds gate {tol}");
 }
+
+/// N1 (dev/research/repo-review-2026-06-09.md): `with_fma(true)` must
+/// actually flip the dense kernels onto the FMA path. The FMA siblings fuse
+/// the multiply-accumulate into a single rounding, so their output is *not*
+/// bit-identical to the non-FMA path — that is the documented contract (see
+/// `dense::schur_kernel::fma_vs_nofma_panel_kernels_within_n_elim_ulps`).
+///
+/// Hence enabling FMA must change the factorization at the bit level (proving
+/// the kernels dispatched), while the solution stays within a few ulps·n of
+/// the non-FMA solution (proving correctness is preserved). The pre-existing
+/// `fma_opt_in_matches_nofma_inertia_and_solves_accurately` test could not
+/// catch the N1 bug: it only checks "same inertia + small residual", which
+/// holds *trivially* when FMA never engages and both paths are bit-identical.
+///
+/// Pre-fix, `NumericParams::fma` (set by `with_fma`) was never copied into
+/// `BunchKaufmanParams::fma`, so the kernels always took the `*_nofma` path
+/// regardless of the toggle: the two solutions were bit-identical and the
+/// engagement assertion below FAILED — the dead-feature signature. Post-fix
+/// the solver syncs `bk.fma = fma`, FMA dispatches, and the bits diverge.
+#[test]
+fn fma_opt_in_actually_dispatches_fma_kernels() {
+    use feral::numeric::solver::FactorStatus;
+
+    let kkt = build_saddle_kkt();
+    let n = kkt.n;
+    let rhs: Vec<f64> = (0..n).map(|i| (i as f64) * 0.125 + 1.0).collect();
+
+    let mut solver_nofma = Solver::new().with_fma(false);
+    assert!(
+        matches!(solver_nofma.factor(&kkt, None), FactorStatus::Success),
+        "nofma factor failed"
+    );
+    let x_nofma = solver_nofma.solve(&rhs).expect("nofma solve");
+
+    let mut solver_fma = Solver::new().with_fma(true);
+    assert!(
+        matches!(solver_fma.factor(&kkt, None), FactorStatus::Success),
+        "fma factor failed"
+    );
+    let x_fma = solver_fma.solve(&rhs).expect("fma solve");
+
+    // Engagement: enabling FMA must change at least one solution component at
+    // the bit level. If every component is bit-identical, the FMA kernels
+    // never ran — the N1 dead-feature signature.
+    let any_bitdiff = x_nofma
+        .iter()
+        .zip(&x_fma)
+        .any(|(a, b)| a.to_bits() != b.to_bits());
+    assert!(
+        any_bitdiff,
+        "with_fma(true) produced a bit-identical solution to the non-FMA \
+         path: the FMA kernels never dispatched (N1 dead-feature signature)"
+    );
+
+    // Correctness preserved: the FMA and non-FMA solutions still agree to a
+    // tight relative tolerance (the documented within-ulps·n bound).
+    let max_abs = x_nofma.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
+    let max_diff = x_nofma
+        .iter()
+        .zip(&x_fma)
+        .fold(0.0f64, |m, (&a, &b)| m.max((a - b).abs()));
+    let rel = if max_abs > 0.0 {
+        max_diff / max_abs
+    } else {
+        max_diff
+    };
+    assert!(
+        rel < 1e-9,
+        "FMA vs non-FMA solutions diverged beyond the within-ulps bound: rel={rel}"
+    );
+}

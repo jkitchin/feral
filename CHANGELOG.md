@@ -4,6 +4,602 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — C-ABI shim warns on an unrecognized `FERAL_SCALING` value (X5 follow-up)
+
+The bench harness warns and falls back to the default when `FERAL_SCALING` is
+set to a non-empty value outside the recognized vocabulary, but the C-ABI shim
+(`feral_new`) silently collapsed unset and typo'd values into the same `None`
+override — so a run with e.g. `FERAL_SCALING=mc46` measured the *default*
+strategy while the operator believed `mc46` was active, and bench and the shim
+diverged on identical input. The shim now emits the same warning (byte-for-byte
+with bench's message) on a non-empty unrecognized value and keeps the default,
+via a pure `scaling_value_is_unrecognized` predicate defined in terms of the
+single shared vocabulary parser (so it cannot drift from what the shim accepts).
+X5 follow-up from `dev/research/repo-review-2026-06-09-verification.md`.
+
+### Fixed — sparse LU diagonal preference clears the singularity floor; `LuParams` range-validated (L2)
+
+The sparse LU threshold-partial-pivoting rule preferred the natural diagonal
+when `|w[diag]| >= pivot_threshold·amax`, but — unlike the dense path — it
+lacked the `&& |w[diag]| > ztol` conjunct (`ztol = zero_pivot_tol·max|A|`).
+With a loose `pivot_threshold` (at or below `zero_pivot_tol`) a sub-`ztol`
+diagonal could therefore be preferred over a sound max-magnitude row and then
+silently clamped to `±ztol` — a sub-tolerance pivot perturbation that bypassed
+`on_singular` (so `Fail` did not error) and drifted from the dense path. The
+sparse rule now carries the same `> ztol` conjunct, and the formerly-silent
+clamp is replaced with `on_singular` routing for defensive parity. Separately,
+`LuParams::pivot_threshold` (documented `u ∈ (0, 1]`) and `zero_pivot_tol`
+(relative floor, `[0, 1)`) are now range-validated on every factor path,
+rejecting nonsensical or `NaN` inputs with `InvalidInput` instead of producing
+a degenerate pivot rule. Finding L2 from
+`dev/research/repo-review-2026-06-09-verification.md`.
+
+### Fixed — MTX reader validates declared nnz and sums duplicate coordinates consistently (REG-4 / X2)
+
+`parse_mtx` parsed the size line's `nnz` field but never checked it against the
+actual number of data lines, so a truncated or corrupt file (body shorter or
+longer than the header claims) parsed silently into a matrix that did not match
+its own declaration. The declared `nnz` is now validated against the entry
+count. Separately, `to_csc` summed duplicate coordinates (the Matrix Market /
+COO convention, matching scipy and MATLAB) while `to_dense` overwrote them
+(last-wins), so the same file produced two different matrices depending on the
+conversion path; `to_dense` now sums duplicates as well. The X10 huge-nnz
+guard is unaffected in spirit — a bogus 10^17 nnz still does not abort the
+process (the allocation remains clamped to the source byte length); it now
+returns a recoverable count-mismatch `Err` instead of an `Ok` carrying the
+unvalidated entries. Finding REG-4 / X2 from
+`dev/research/repo-review-2026-06-09-verification.md`.
+
+### Fixed — `CscMatrix::validate` now rejects a non-zero `col_ptr[0]` (X6)
+
+A monotone `col_ptr` starting at `k > 0` with `col_ptr[n] == nnz` passed every
+existing check (length, monotonicity, `col_ptr[n] == nnz`, in-bounds, sorted,
+lower-triangle) while positions `0..k` of `row_idx`/`values` were never covered
+by any column range — silently dropped and never factored. `validate` now
+requires `col_ptr[0] == 0`, completing the column-pointer contract the X6
+monotonicity check began.
+
+### Fixed — sparse D-block solves now use the same SSIDS determinant floor as the factor (REG-3)
+
+The sparse forward and multi-RHS 2×2 D-block solves (`solve_sparse_core_into`,
+`dsolve_node`) gated block inversion on the *naive* absolute floor
+`det.abs() > zero_tol_2x2` — the same absolute test that finding D4 had already
+replaced on the *dense* solve path with the scale-invariant
+`ssids_det_floor_fail`. A well-conditioned 2×2 block at small absolute scale
+(true `|det| < zero_tol_2x2 ≈ EPS²`) is accepted and stored as invertible by
+the factor (which uses the SSIDS floor) but was silently *skipped* by the sparse
+solve, leaving that segment of the RHS unchanged — a wrong solution with no error
+and no flag. Both sparse sites now route through a shared `solve_2x2_dblock`
+helper gated on `ssids_det_floor_fail`, so a block the factor stores as
+invertible is exactly a block the solve inverts, and the dense and sparse solve
+gates agree. Accepted blocks invert bit-for-bit as before. Finding REG-3 from
+`dev/research/repo-review-2026-06-09-verification.md`.
+
+### Fixed — unblocked dense 2×2 pivot no longer divides by a singular perturbed block (REG-2)
+
+When `static_pivot_floor > 0`, the MA57-style static-pivot perturbation
+(`perturb_2x2_to_floor`) lifts the smaller-magnitude eigenvalue of a 2×2 block
+up to the floor by adding the same `τ` to both diagonals. A Bunch-Kaufman 2×2
+block is always indefinite (opposite-sign eigenvalues), so that shift moves the
+negative eigenvalue *toward* zero — and a floor tuned to land it on exactly zero
+makes the perturbed block singular. The public dense `factor()` unblocked kernel
+then computed the rank-2 update factor `t = 1/(d00·d11 − 1) = d10²/det` with
+`det == 0`, writing `NaN` to `D` and `±inf` to `L` while still returning
+`Success` (a wrong inertia and an unusable factor). The frontal and scalar pivot
+paths already re-gate the perturbed block through `ssids_det_floor_fail` and fall
+back to a 1×1 pivot; the unblocked path now does the same. The default
+`static_pivot_floor == 0` path is unchanged (the perturbation never fires).
+Finding REG-2 from `dev/research/repo-review-2026-06-09-verification.md`.
+
+### Fixed — permute-cache warm path no longer trusts a stale pattern/permutation (REG-1)
+
+The `PermuteCache` introduced by the N7 one-shot optimization keyed its warm-path
+validation on `(input_n, input_nnz, value_map.len())` only — not the input
+*pattern* (`col_ptr` + `row_idx`) or `perm_inv`. Re-factoring a second matrix
+with the same `(n, nnz)` but a different sparsity pattern on the same `Solver`,
+or re-factoring the same pattern under a different AutoRace-selected permutation,
+warm-hit the stale `value_map` and scattered the new values through the old
+structure — returning `Success` with a silently wrong factorization (solve
+residual `2.1e+2` vs `5.7e-14` on a cold build). This was a live hazard on the
+default sequential and Schur reuse paths. `PermuteCache` now stores the
+build-time `input_col_ptr`, `input_row_idx`, and `input_perm_inv`, and the warm
+path accepts the cache only when all three match byte-for-byte (an `O(n + nnz)`
+compare — still cheaper than the skipped `from_triplets` sort, exact rather than
+hashed so a fingerprint collision can never reintroduce the wrong answer). A
+one-shot (`pattern_reused_hint == false`) call also clears any existing cache so
+a later warm call cannot trust it. Finding REG-1 from
+`dev/research/repo-review-2026-06-09-verification.md`.
+
+### Added — `feral-kahip` now reports `KahipStats::n_components` (O18)
+
+`KahipStats` gains a `pub n_components: u32` field — the number of top-level
+connected components encountered by the nested-dissection driver — matching the
+existing `MetisStats::n_components` / `ScotchStats::n_components`. The KaHIP
+driver already computed this count in `run_top` but discarded it; it is now
+surfaced for parity with the sibling crates. The `KahipStats::cycles`
+documentation was also tightened: it counts multilevel bisections (one per
+node-separator computation; each a single V-cycle), and the stale inline
+comment that described it as a per-level coarsening counter was corrected.
+Finding O18 from `dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — `feral-kahip` flow refinement now balances by vertex weight on coarse graphs (O16)
+
+K3 flow-based refinement (`flow_refine_bisection`) scored candidate cuts against
+a *vertex-count* balance constraint (`max(|part0|, |part1|) ≤ (1+ε)·⌈n/2⌉`),
+and the `Graph → UndirectedGraph` bridge (`graph_to_undirected`) discarded the
+coarse graph's vertex weights by assigning unit weights. On Eco/Strong runs flow
+refinement executes at *every* uncoarsening level, where each coarse vertex
+stands for a supervertex whose mass is ≫ 1, so a count-balanced min-cut could be
+badly *weight*-imbalanced — and the finer level's FM then started from a
+constraint-violating partition. `UndirectedGraph` now carries a `vweight` field
+(populated from `Graph::vwgt`, unit on finest-level inputs), and the balance
+check measures `max(weight(part0), weight(part1)) ≤ (1+ε)·⌈W/2⌉` against those
+weights, matching the KaHIP/Sanders-Schulz constraint. On a 7×7 grid whose
+min-cut pulls a mass-20 supervertex into one side, the count-based check accepted
+a 52|16 weight split (slack 47); the weight-aware check rejects it. Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — `feral-scotch` vertex-separator FM no longer stops at imbalance-rejected heads (O13)
+
+The single-pass vertex-separator FM (`fm_pass`) tried only the post-drain head
+of each priority queue per outer iteration. When *both* heads were
+imbalance-rejected, it popped them, set no `moved_this_iter`, and the
+`if !moved_this_iter { break; }` guard terminated the whole pass — abandoning
+feasible lower-gain moves still queued below the rejected heads. Under a tight
+`max_imbalance`, separators stopped improving early (and a comment falsely
+claimed the rejected vertex was "locked" when it was only popped). The pass now
+records imbalance rejections and only terminates when the frontier is truly
+exhausted (no move *and* no rejection), so it skips infeasible heads and keeps
+refining — matching SCOTCH. Concrete impact: on the issue-#3 PoissonControl KKT
+pattern (`n = 1200`) ScotchND previously degenerated into a one-sided bisection
+and fell back to a whole-graph AMD leaf (separator weight 0, permutation
+byte-equal to AMD); it now produces a genuine 188-vertex separator across 26
+levels and performs real nested dissection. Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — `feral-metis` GGP initial bisection uses the true greedy gain (O10)
+
+`initial_bisect_ggp` documented its greedy gain as
+"(edges to part 0) - (edges to part 1)", but the code only accumulated
+edges-to-A: the `push_neighbors` helper took an `adding_to_a` flag that was
+hard-coded `true` at every call site, so the `- edges_to_B` term never existed
+and the boundary scan selected `argmax(edges_to_A)`. That biases growth toward
+high-degree vertices — exactly the wrong choice, since a vertex with many edges
+still on the B side drags all of them into the cut when it moves into A. The
+selection now uses the true Greedy-Graph-Growing gain
+`edges_to_A - edges_to_B = 2*edges_to_A - wtot` (with `wtot` the per-vertex
+total incident edge weight, precomputed in `O(nnz)`), so it minimises the added
+cut as intended. On the new regression graph this picks the low-degree vertex
+(cut 5) instead of the high-degree one (cut 7). Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — `feral-metis` keeps a stalled coarsening level only when it shrank (O8)
+
+`coarsen`'s stall branch pushed the just-computed level whenever earlier levels
+existed, with a comment claiming it accepted the level "only if it actually
+shrank" — but it never checked shrinkage. Two consequences: a *first* level
+that genuinely shrank (between 0% and the 5% stall threshold) was discarded
+because no earlier level existed yet, so the whole coarsening hierarchy came
+back empty despite real progress; and a later zero-progress level was kept
+merely because earlier levels existed, which can break the strictly-decreasing
+vertex-count invariant. The branch now pushes the level iff it actually shrank
+(`0 < new_nvtxs < prev_nvtxs`), independent of prior levels. Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — `feral-metis` coarsening now performs real SHEM, not plain HEM (O7)
+
+The coarsening header advertised Sorted Heavy-Edge Matching and cited METIS
+`Match_SHEM`, but Pass 1 visited vertices in plain seeded-shuffle order with no
+ascending-degree sort — that is unsorted Heavy-Edge Matching (HEM). The
+"sorted" step matters: a degree-1 leaf whose sole neighbour is claimed first by
+a higher-degree vertex is stranded as a self-match, inflating the coarse graph
+on the irregular / power-law inputs SHEM exists for. Pass 1 now stable-sorts the
+shuffled visit order by ascending vertex degree (`sort_by_key`, so the seeded
+shuffle survives as the within-degree tie-break and determinism is preserved),
+matching METIS `Match_SHEM` (Karypis & Kumar §3.1). On a 4-vertex chorded path
+(one hub, one leaf) this turns a 3-coarse-vertex matching into the optimal
+2-coarse-vertex matching. Finding from `dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — `CscPattern::new` enforces its documented sorted-rows invariant (O3)
+
+`feral-ordering-core`'s `CscPattern` documents that row indices within each
+column must be sorted ascending, but `CscPattern::new` never checked it — it
+validated column-pointer lengths/monotonicity and row-index range only.
+Consumers silently depended on the unchecked invariant: `feral-metis`'s
+adjacency builder dedups only *adjacent* duplicates, so an unsorted column
+(e.g. `[3, 5, 3]`) let a non-adjacent duplicate survive as a spurious edge,
+corrupting the graph and the resulting ordering; `feral-scotch`'s compress
+step inserts neighbours with `partition_point`, which assumes sorted runs.
+`CscPattern::new` now verifies, per column, that row indices are
+non-decreasing (`O(nnz)`) and returns `None` otherwise. All in-tree callers
+already pass sorted rows (`CscMatrix::symmetric_pattern` sorts each column),
+so the `feral` solver is unaffected; only inputs that already violated the
+documented contract are now rejected. Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — MTX reader accepts whitespace-flexible banners, rejects non-finite values (X11)
+
+`parse_mtx` / `read_mtx` compared the Matrix Market banner against the exact
+single-space string `%%matrixmarket matrix coordinate real symmetric`, so a
+legal banner whose fields are separated by multiple spaces or tabs was
+rejected with "unsupported header" even though the NIST `mmio` reference
+accepts it. The banner is now compared token by token (case-insensitive).
+Separately, entry values were parsed with `f64::from_str`, which silently
+accepts `nan`/`inf`/`-inf`; such a file produced an `MtxMatrix` carrying a
+non-finite value that poisons any downstream factorization. Non-finite entry
+values now return `FeralError::IoError`. (Comment lines after the size line
+remain an error, matching the spec and `mmio` — comments are only legal
+between the banner and the size line.) Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — MTX reader no longer aborts on a corrupt `nnz` header (X10)
+
+`parse_mtx` / `read_mtx` reserved the entries buffer with
+`Vec::with_capacity(nnz)`, taking `nnz` straight from the untrusted Matrix
+Market size line. A corrupt or hostile header (e.g. `nnz = 10^17`) made
+that a multi-exabyte allocation request; the allocator returned null and
+the process aborted (`handle_alloc_error`) — a hard crash rather than a
+recoverable `FeralError::IoError`. The reservation is now clamped to the
+source byte length, a hard upper bound on the true entry count, so a bogus
+header is parsed gracefully. `nnz` was only ever an allocation hint (never
+validated against the actual entry count), so valid files are unaffected.
+Finding from `dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — `feral_set_structure` invalidates the stale factor (X9)
+
+The C-ABI embedding protocol is `feral_set_structure` → fill values →
+`feral_factor` → `feral_solve`. `feral_set_structure` replaced the stored
+matrix and reset the cached inertia sentinel but left `Solver`'s numeric
+factor in place. A host that changed the matrix structure and then solved
+*without* re-factoring got that stale factor (refined against the new
+matrix) and `FERAL_SUCCESS` — a plausible-but-wrong solution rather than a
+clean error. `feral_set_structure` now drops the stored factor (new
+`Solver::invalidate_factors`, which keeps the cached symbolic analysis so a
+same-structure re-init still reuses it), so a solve with no current factor
+returns `FERAL_FATAL`. Normal usage is unaffected: `set_structure` is
+called once and is always followed by `factor` before `solve`. Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — sparse singular-column perturbation matches the dense path (L13)
+
+Under `LuSingularAction::PerturbToEps`, the sparse factor perturbed the
+*index-first* still-unpivoted row of a singular column, while the dense factor
+perturbs the *threshold-selected* (largest-|w|) row — so the two paths
+regularized the same singular basis differently (different permutation and
+different regularized solve). The sparse path now perturbs the largest-|w|
+unpivoted row (`ipiv`, the row threshold partial pivoting already selected),
+matching the dense reference. As a side benefit this reuses the pivot already
+found in the selection loop, so the O(m) "find first unpivoted row" scan is
+skipped whenever the singular column has any touched unpivoted entry; the scan
+remains only as a fallback for a column that is structurally empty in every
+unpivoted row. Finding from `dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — misplaced U diagonal surfaces as an error in release builds (L10)
+
+The sparse triangular solves (`usolve` / `ut_solve`) take the first stored
+entry of each `u_rows[k]` as the pivot, relying on the diagonal-first
+invariant. That invariant was enforced only by a `debug_assert_eq!`, compiled
+out in release — so a violated invariant (e.g. introduced by a future change)
+would make a release build silently divide by an off-diagonal entry and treat
+the real diagonal as an ordinary off-diagonal term: a silent wrong solve. The
+position check is now folded into the always-on pivot guard, so a U row whose
+first entry is not its diagonal returns `FeralError::SingularBasis` in every
+build mode, alongside the existing absent/zero/non-finite-diagonal guard. The
+check is outside the inner accumulation loop, so the hot solve path is
+unchanged. Finding from `dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — `SingularBasis { column }` names the original basis column (L9)
+
+When the sparse LU factor path hit a singular column under
+`LuSingularAction::Fail` (or found no unpivoted row under `PerturbToEps`), it
+reported `FeralError::SingularBasis { column: k }` where `k` is the internal
+*factorization position* — original column `qcol[k]` under the
+(AMD-dependent) column order. A caller such as a simplex driver knows the
+original basis columns it supplied, not the internal processing order, so the
+reported index pointed at the wrong column to repair whenever the column order
+was non-identity. The factor path now reports `qcol[k]`, the original basis
+column, and the `SingularBasis` doc was updated to state this contract
+explicitly. With natural ordering `k == qcol[k]`, so this is a no-op there; it
+only changes the reported index for reordered factorizations. Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — sparse and dense LU update report the same failure signal (L8)
+
+`SparseLu::update` returned `FeralError::SingularBasis` when the spike support
+was deficient or a bump pivot vanished, while `DenseLu::update` returns
+`FeralError::NeedsRefactor` for the identical events. A driver that switched
+between the two factorization paths got different error variants for the same
+underlying condition — a singular replacement basis encountered mid-update.
+Both update paths now return `NeedsRefactor` on any update failure; the
+authoritative singularity verdict comes from a fresh factorization (where the
+factor path still returns `SingularBasis`), not the incremental update. The
+stale `DenseLu::update` doc comment that claimed `SingularBasis` on a vanishing
+bump pivot was corrected to match the actual `NeedsRefactor` contract. Finding
+from `dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — AutoRace no longer quadruples symbolic-profiler stages (S7)
+
+When a `SymbolicProfiler` was attached and the ordering method was
+`OrderingMethod::AutoRace`, the race dispatcher (`symbolic_factorize_race`)
+passed the caller's single profiler `Arc` to all four `RACE_CANDIDATES`. Because
+`SymbolicProfiler::record` appends and `set_total` overwrites, the shared
+profiler ended with one full stage list per candidate (~4×) measured against a
+single candidate's `total_us`. The resulting `SymbolicProfileReport` therefore
+listed every stage four times, summed `pct_of_total` past 100%, and always
+emitted the "stage sum exceeds total" validation warning — misattributing the
+symbolic cost breakdown. Each candidate now gets its own fresh profiler and only
+the winning candidate's run is copied into the caller's shared profiler, so the
+report reflects exactly one ordering. Factorization results (perm, inertia,
+factor structure) were never affected — this is a diagnostics-only fix. Finding
+from `dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — `solve_sparse_many_into` validates workspace scaling state (N6)
+
+`solve_sparse_many_into` checked that the caller-owned `SolveManyWorkspace`
+matched the factors in `nrhs` and `n`, but not that its `scaled_rhs` buffer was
+sized for the factors' scaling state. The buffer is sized at `for_factors` time
+from the factors it was built against — `n * nrhs` when scaling is applied,
+empty otherwise. A workspace built for *unscaled* factors then reused with
+*scaled* factors of the same `(n, nrhs)` shape (or vice versa) indexed the
+empty `scaled_rhs` out of bounds at the pre-scale step, panicking in a crate
+that otherwise returns `Result`. The function now validates `scaled_rhs.len()`
+against the factors' scaling state up front and returns
+`FeralError::DimensionMismatch` on a mismatch. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
+### Fixed — KaHIP twin reduction now produces deterministic permutations (O2)
+
+The KaHIP data-reduction twin pass (`feral-kahip`) grouped vertices by signature
+in `HashMap`s (`closed_groups`, `open_groups`) and iterated them directly to emit
+`ReductionOp::Twin` operations. Because a `HashMap` iterates in per-instance
+`RandomState`-seed order, the twin op-stack order — and therefore the final
+elimination permutation — varied run-to-run, violating the crate's documented
+determinism contract. The merge *result* was unaffected, but the *order* was
+not reproducible. Both maps are now `BTreeMap`s keyed by the (already-sorted)
+signature, so groups are visited in a stable, signature-sorted order and the
+permutation is byte-identical across runs. Latent today (the default
+`ReduceOptions::conservative()` preset runs Rule 1 only), but a correctness
+landmine for the planned Rules 2–4 rollout.
+
+### Fixed — AMF fill-score arithmetic no longer overflows `i32` for large `n` (O1)
+
+The Approximate Minimum Fill ordering (`feral-ordering-core`) computed its
+working-fill (`wf`) quantities — the surface contribution
+`dext * (2*deg - dext - 1)` and the accumulation `wf4 + 2*nvi*wf3` — in `i32`,
+and stored them in an `i32` field. Both factors are `O(n)`, so the products
+reach `~n²` and overflow `i32` for `n` ≳ 46k (`46342 * 46341 = 2_147_534_622`
+exceeds `i32::MAX`). The wrapped value then fed the RMF pivot score as `f64`,
+silently degrading ordering quality on exactly the large KKTs AMF exists for
+(and panicking in debug builds). The `wf` field and its accumulators are now
+`i64`, matching MUMPS, which computes the RMF in double precision. The
+minimum-degree (AMD) path is unaffected (it never touches `wf`). Finding from
+PR #83's review (`dev/research/repo-review-2026-06-09.md`).
+
+### Fixed — `CscMatrix::validate` now rejects a non-monotone `col_ptr` (X6)
+
+`CscMatrix::validate` checked `col_ptr.len() == n + 1`, `row_idx.len() ==
+values.len()`, `col_ptr[n] == nnz`, per-entry bounds/lower-triangle, and
+within-column sorting — but never that `col_ptr` is monotonically
+non-decreasing. A non-monotone `col_ptr` whose endpoints happen to line up
+(`col_ptr[0] == 0`, `col_ptr[n] == nnz`) passed every check yet produced
+empty or overlapping column ranges, so entries were silently dropped, the
+wrong matrix was factored, and `FERAL_SUCCESS` was returned. (Negative `i32`
+column counts sign-extend to a huge `usize` and are already caught as
+out-of-bounds, so the monotonicity gap was the silent one.) `validate` now
+rejects any `col_ptr[j + 1] < col_ptr[j]` with an `InvalidInput` naming the
+offending column. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
+### Fixed — MC64 partial-singular fallback now covers unmatched rows, not just unmatched columns (X4)
+
+On a partial (structurally singular) matching the MC64 symmetric scaling fell
+back to identity only for unmatched *columns* (`perm[i] == MAX`). But the
+matched-row and matched-column sets can differ even on a symmetric pattern:
+an index `i` can have its column matched while its row is unmatched. The
+Hungarian kernel zeroes the row dual `u[i]` for an unmatched row, so the
+symmetric average `s[i] = exp((u[i] + v[i] - cmax[i]) / 2)` folded a
+meaningless zero half-dual into the scaling — the exact "duals are meaningless
+on the unmatched part" condition the surrounding code warns about, producing a
+badly asymmetric `D·A·D` on rank-deficient KKTs. `scaling_from_cache` now
+derives the matched-row set from the matching and falls back to identity for
+any index whose row *or* column is unmatched. Matrices with a full matching
+are unaffected. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
+### Fixed — `feral_num_neg` no longer reports a stale or wrong inertia (X1)
+
+The C-ABI negative-eigenvalue accessor (`feral_num_neg`) could return a
+plausible-but-wrong inertia. The backing count was initialized to `0`, reset to
+`0` on `feral_set_structure`, and never invalidated when `feral_factor` returned
+`FERAL_SINGULAR` or `FERAL_FATAL`. So a fresh handle reported `0` (indistinguishable
+from a genuinely definite matrix) instead of the documented `-1` sentinel, and —
+more dangerously — after a failed re-factor on the same structure (as an IPM host
+does every iteration, e.g. when a diverging iterate produces a non-finite Hessian
+entry) it silently reported the *previous* matrix's negative-eigenvalue count. The
+count is now `-1` ("no valid factor") on a fresh handle, after a structure change,
+and after any `FERAL_SINGULAR`/`FERAL_FATAL` factor; it is only set to a real count
+on a successful factor. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
+### Numerics — the sparse LU now honors `pivot_threshold` (L2)
+
+The sparse unsymmetric LU path (`src/lu/sparse_factor.rs`) computed the
+threshold-partial-pivoting parameter `u` and then discarded it (`let _ = utol`),
+always taking the strict max-magnitude pivot row. So `pivot_threshold = 0.1`
+changed the dense path but silently changed nothing on the sparse path,
+contradicting the module doc ("threshold partial pivoting"), the `LuParams`
+doc, and the dense path. The sparse factorization now implements
+diagonal-preference threshold partial pivoting matching CSparse `cs_lu`: when the
+natural diagonal row is still unpivoted and within `u·max` of the column max, it
+is preferred (a sparser, structure-preserving pivot). `u = 1.0` (the default)
+recovers strict partial pivoting exactly, so all default factorizations are
+unchanged. The Forrest–Tomlin bump elimination in `update()` deliberately keeps
+strict partial pivoting (the bump structure is fixed, so a relaxed threshold buys
+no fill reduction and only costs stability); the `LuParams::pivot_threshold` doc
+now scopes the knob accordingly. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
+### Harness/C-ABI — `FERAL_SCALING` vocabulary unified across the shim and bench (X5)
+
+The two `FERAL_SCALING` parsers had drifted apart. The C-ABI shim (`src/capi.rs`)
+accepted `identity`/`infnorm`/`mc64`/`auto` and *silently* ignored anything else;
+the bench harness (`src/bin/bench.rs`) accepted `identity`/`infnorm`/`mc64`/`adaptive`
+and warned on unknown values. So `FERAL_SCALING=adaptive` selected adaptive
+routing in bench but was a silent no-op in the shim, and `FERAL_SCALING=auto`
+worked in the shim but warned and fell back to the default in bench — a cross-tool
+experiment with one spelling silently measured different configurations. Both
+`auto` and `adaptive` now select `ScalingStrategy::Auto` in both tools,
+case-insensitively. Relatedly, the bench `FERAL_ORDERING` parser previously
+coerced any unrecognized value (typos included) to forced AMD with no warning; it
+now accepts an explicit `amd` and warns + falls back to the default heuristic on
+unrecognized values. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
+### Numerics — the LU zero-pivot tolerance is relative to the matrix magnitude (L6)
+
+The singularity / zero-pivot test compared each pivot against the absolute
+`zero_pivot_tol` (default `1e-13`), independent of the basis scale and of the
+default `LuScaling::None`. A uniformly small but perfectly conditioned basis —
+e.g. `diag(1e-14)`, condition number 1, exact inverse `diag(1e14)` — was wrongly
+declared `SingularBasis { column: 0 }`, while a large-magnitude basis got
+effectively no singularity detection. The factor paths
+(`src/lu/dense_factor.rs`, `src/lu/sparse_factor.rs`) now use
+`zero_pivot_tol · max|A|`, and the Forrest–Tomlin/Bartels–Golub update paths
+(`src/lu/dense_update.rs`, `src/lu/sparse_update.rs`) use
+`zero_pivot_tol · max|U|` at the last factor — both matrix-relative, matching
+LAPACK's norm-relative convention. For the zero matrix (`max|A| == 0`) only an
+exact-zero pivot trips, which remains correct. On bases whose magnitude is `O(1)`
+the threshold is unchanged. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
+### Numerics — the LU update growth monitor tracks element growth, not the largest single multiplier (L5)
+
+Both the dense (`src/lu/dense_update.rs`) and sparse (`src/lu/sparse_update.rs`)
+Forrest–Tomlin/Bartels–Golub update paths recorded `growth` as the largest
+single elimination multiplier ever seen. A chain of updates each with a
+multiplier of, say, ~100 compounds element growth in `U` to ~100ᵏ while the
+monitor sat flat at 100 — so an ill-conditioned basis could accumulate large
+entries in `U` and silently lose accuracy without ever tripping `max_growth` and
+forcing a refactor. The monitor is now the ‖U‖∞ element-growth high-water ratio
+`max|U| over the update history ÷ max|U| at the last factor`, which compounds
+across updates exactly as standard FT/BG implementations require. This makes the
+monitor strictly stricter (it can only trip earlier, never later), so a basis
+that would have drifted now refactors in time. The sparse path keeps the update
+cheap by scanning only the rows that changed this update — provably equal to the
+true high-water, since every changed `U` entry lives in a changed row. Finding
+from PR #83's review (`dev/research/repo-review-2026-06-09.md`).
+
+### Scalability — dense-row guard in the sparse LU column ordering (L4)
+
+`SparseColMatrix::ata_pattern` built the explicit AᵀA column-intersection graph
+that the fill-reducing column ordering needs. A single dense row — common in
+LPs, where a budget or convexity constraint touches every column — is adjacent
+to every other column and made the graph complete, costing O(m²) time and
+memory in `SparseLuSymbolic::analyze` before AMD even ran. Following COLAMD,
+rows whose population exceeds `max(16, 10·√ncol)` are now excluded from the
+adjacency build; they carry no useful ordering information and the diagonal is
+always retained, so AMD still orders all columns. On matrices with no dense row
+the ordering is unchanged. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
+### Performance — scaled LU solves and iterative refinement reuse pooled scratch buffers (L3)
+
+With scaling enabled, the scaled `ftran`/`btran` wrappers and iterative
+refinement allocated and zeroed fresh `Vec<f64>` buffers on every call
+(`src/lu/dense_solve.rs`, `src/lu/sparse_solve.rs`) — once or twice per simplex
+iteration — contradicting the factorization's "no per-call allocation in solves"
+guarantee. Both `DenseLu` and `SparseLu` now carry three additional pooled
+buffers (scaled right-hand side, refinement residual, and refinement
+right-hand-side snapshot) that are taken via `std::mem::take`, reused in place
+when already sized, and restored on every return path. After warm-up, scaled
+solves and refinement allocate nothing. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
+### Performance — `feral_factor` borrows the stored matrix instead of cloning it each call (X7)
+
+The C ABI `feral_factor` (`src/capi.rs`) cloned the whole `CscMatrix` on every
+call — an O(nnz) allocation plus memcpy paid once per IPM iteration. The clone
+was a borrow-checker workaround for holding `&s.matrix` while calling
+`&mut s.solver`. Because `matrix` and `solver` are disjoint fields of the
+handle, a split field borrow lets the immutable matrix borrow coexist with the
+mutable solver borrow, so the factorization now reads the matrix in place with
+no per-call copy. The factorization path itself was already clone-free at the
+`CscMatrix` level (it clones only the small CSC component vectors it needs), so
+this removes the last whole-matrix clone from the hot path. Finding from PR
+#83's review (`dev/research/repo-review-2026-06-09.md`).
+
+### Performance — condition-number estimator pools one solve workspace across its internal solves (N5)
+
+`estimate_inverse_norm_1` (the Hager–Higham 1-norm condition estimator) runs up
+to `2·MAX_ITER + 1` solves against the stored factor. Each went through
+`solve_sparse`, which allocates a fresh `SolveWorkspace` (three vectors) plus a
+result vector per call — so a single `estimate_condition_1norm` paid that
+allocation ~11×. The estimator now builds one `SolveWorkspace` and one output
+buffer up front and reuses them across every internal solve via
+`solve_sparse_into_ws`. The arithmetic is bit-identical (the existing diagonal
+and Hilbert condition-number oracles are unchanged). This addresses the
+condition-estimator facet of N5; the parallel-driver per-thread
+`FactorWorkspace` allocation and the warm-permute structure clone that N5 also
+cites are not yet addressed. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
+### Fixed — MC64 scaling retry on a genuinely singular pattern is no longer re-paid every `factor()` (N4)
+
+The issue-#65 inertia-guided MC64 scaling retry had no "tried and not adopted"
+latch. When `Auto` scaling force-accepts zero pivots, `Solver::factor` re-runs
+the factorization with `Mc64Symmetric` and adopts it only if it strictly
+reduces the zero count. On *adoption* this self-latches (the sticky-`Auto`
+pick pins `Mc64Symmetric`, which the retry gate already skips). But on
+*non-adoption* — a genuinely singular matrix, where MC64 cannot change rank,
+the strict-improvement gate fails, and the original factor is kept — nothing
+was recorded. The gate keys on the user's configured scaling (`Auto`, which
+never changes) and on the resolved scaling staying non-MC64 (the picker
+re-pins `InfNorm`), so every subsequent `factor()` on the same pattern re-paid
+a full Hungarian plus a complete second factorization. An IPM that repeatedly
+factors a singular KKT without regularizing it paid this wasted retry on every
+iteration. `Solver` now carries a per-pattern latch that records the
+non-adoption and suppresses the retry on subsequent same-pattern factors; the
+latch clears on pattern change (alongside the issue-#51 sticky-`Auto` pick). A
+new `Solver::mc64_retry_attempt_count()` accessor reports how many retries
+actually ran (distinct from `mc64_scaling_fallback_count()`, which counts only
+adoptions). Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
+### Fixed — parallel multifrontal driver now honors `NumericParams::profiler` (N3)
+
+The parallel multifrontal driver (`factorize_multifrontal_supernodal_parallel`)
+— the `Solver` default whenever `should_parallelize_assembly` fires — ignored
+`NumericParams::profiler`. The sequential driver records one supernode timing
+per node, but the parallel driver never touched the profiler, so
+`Solver::with_profiling(true)` returned an **empty** `profile_report()` on the
+default dispatch, contradicting the `with_profiling`/`profile_report`
+documentation. `run_parallel_task` now records one per-supernode wall-time
+timing under the profiler mutex (in completion order; the bucketed report is
+order-independent). The phase-breakdown sub-fields are left zero on the
+parallel path because they derive from process-global phase counters that
+cannot be safely differenced across concurrent tasks (see finding N9); only
+the wall time is recorded, matching the small-leaf path. Profiling stays off
+by default, so the hot path is unchanged. This addresses the profiler facet of
+N3; the permute-cache and `small_leaf` facets it also notes are not yet
+addressed. Finding from PR #83's review
+(`dev/research/repo-review-2026-06-09.md`).
+
+### Performance — 32×32 front dispatch now reuses the caller's pooled scratch (D7)
+
+The 32×32 fully-summed-front dispatch inside
+`factor_frontal_blocked_in_place_with_scratch` (the self-described dominant KKT
+front size) routed through `factor_block32`, which delegated to the **public**
+`factor_frontal`. That public entry re-runs `matrix.validate()` (a full NaN
+scan), allocates an `n×n` working copy, and builds a throwaway `FactorScratch`
+— defeating the in-place W-3a path (issue #13) whose whole purpose is to reuse
+the caller's pooled buffers. `factor_block32` is now a single in-place entry
+(`&mut SymmetricMatrix` + caller's `FactorScratch`) that delegates to
+`factor_frontal_in_place_with_scratch`, so the 32×32 dispatch skips the
+validate, the copy, and the throwaway allocation. Output is **byte-identical**
+(guarded by a `to_bits` parity test against the `factor_frontal` oracle); this
+is a pure overhead removal with no behavior change. Seventh finding from PR
+#83's review (`dev/research/repo-review-2026-06-09.md`).
+
 ### Added — unsymmetric LU basis engine (`feral::lu`, issue #81)
 
 A new, separate factorization family for **simplex basis factorization** —
@@ -42,6 +638,160 @@ hand-worked exact factors, equation-residual property checks, dense↔sparse
 agreement, and adversarial/ill-scaled/ill-conditioned cases. The downstream
 `pounce-simplex` `BasisEngine` integration and reference (UMFPACK/KLU)
 benchmarks are deferred (see `dev/plans/unsymmetric-lu-epic.md`).
+
+### Fixed — solve-time 2×2 D-block gate now matches factor-side acceptance (D4)
+
+The solve-time 2×2 D-block gate in `d_block_solve` decided whether to invert a
+stored 2×2 pivot block with the naive determinant `a·c − b·b` tested against the
+**absolute** floor `zero_tol_2x2 ≈ EPS²`, while the factor side accepts a 2×2
+block via the **scale-invariant** SSIDS determinant floor. Under `Identity` /
+`External` scaling a well-conditioned block at small absolute scale (true
+`|det|` below `EPS²`) was validly accepted and stored by the factorization but
+then silently **skipped** at solve time — leaving its solution components
+untouched and returning a wrong solution with no error and no flag. Both sides
+now share a single `ssids_det_floor_fail` predicate, so a 2×2 block the
+factorization inverts is exactly a block the solve inverts. (`zero_tol_2x2` is
+retained on `Factors` for the legacy `count_2x2_inertia` accounting but no
+longer gates the solve.)
+
+New regression `tests/d4_solve_2x2_gate.rs` hand-builds a `Factors` with `L = I`
+and a single small-scale 2×2 block and solves `D·x = D·[1,1]`: pre-fix the gate
+skips the block and returns `x ≈ [1.1e-16, 1.1e-16]` (off by 16 orders);
+post-fix `x ≈ [1, 1]`. The finding's second facet (a nonsingular block whose
+*naive* determinant rounds to exactly `0.0` being skipped) is not independently
+reachable — such a block has condition `≳ 2⁵²` and the same SSIDS floor rejects
+it, so the factor never stores it; this is recorded in `dev/tried-and-rejected.md`
+and pinned as a consistency guard. Finding D4 from
+`dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — contribution-block extraction no longer violates `Vec::set_len`'s init contract (D6)
+
+The contribution-block extraction in `factor_frontal_in_place_with_scratch_impl`
+and `factor_frontal_blocked_in_place_with_scratch` (`src/dense/factor.rs`)
+called `contrib.set_len(cdim²)` **before** writing the cells, then materialized
+a `&mut [f64]` over the still-uninitialized tail. Every cell is written before
+read, so results were correct, but calling `set_len` to expose uninitialized
+elements violates its documented safety precondition (the "write before read"
+property is not the property `set_len` requires). Both sites now initialize the
+region through `spare_capacity_mut()` as `MaybeUninit<f64>` and call `set_len`
+only after all `cdim²` elements are initialized — satisfying the contract at the
+same single-write-per-cell cost (issue #56 Lever B preserved). Output is
+byte-identical (the `blocked_ldlt` scalar-vs-blocked equality suite is
+unchanged). No observable behavior change. Guarded by `tests/d6_contrib_uninit.rs`
+under Miri. Finding D6 from `dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — static-pivot floor now scale-invariant (computed in scaled space) (N2)
+
+The MA57-style static-pivot floor implied by `static_pivot_threshold = Some(t)`
+was computed in the solver from the **unscaled** user matrix
+(`floor = t · ‖A‖∞`) but enforced by the Bunch-Kaufman kernels on pivots of the
+**scaled** matrix `D·A·D`. Under a norm-normalizing scaling (`InfNorm` /
+`MC64`) the unscaled and scaled ∞-norms differ by the scaling ratio, so the
+*relative* threshold `t` behaved like a wildly different value in pivot space —
+breaking the documented MA57 `cntl(1)` analogy and making the static-pivot
+decision depend on a global scalar `γ` that the scaling otherwise normalizes
+out. The conversion now lives in `factorize::apply_post_scaling_overrides`
+(renamed from `override_null_pivot_tol`), alongside the F-01 null-pivot floor,
+where the scaled ∞-norm `‖D·A·D‖∞` is already in hand; the solver's unscaled
+`matrix_inf_norm` scan is removed.
+
+New regression `n2_static_pivot_floor_is_scale_invariant_under_infnorm` factors
+an indefinite saddle KKT under `InfNorm` scaling with `t = 1e-6`, then again
+scaled by `γ = 2³⁰`, and asserts the static-pivot decision (`needs_refinement`,
+inertia) is identical — because `A` and `γ·A` equilibrate to the same scaled
+matrix. Pre-fix `A → (refine=false)` but `γ·A → (refine=true)`; post-fix they
+agree. Finding N2 from `dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — panel inline 2×2 now applies the static-pivot floor (D2)
+
+The blocked dense LDLᵀ panel's inline 2×2 accept path skipped the MA57-style
+static-pivot perturbation (`perturb_2x2_to_floor`) that the scalar path
+(`scalar_pivot_step`) applies *before* the growth/det gates and inertia count.
+With `static_pivot_floor > 0` (wired from `NumericParams::static_pivot_threshold`),
+a sub-floor 2×2 block accepted inline was accepted **unperturbed** — diverging
+from the scalar path in `D`, `L`, `needs_refinement`, `n_tiny`, and even
+**inertia**, violating the module's documented panel/scalar bit-parity contract
+and the MA57 `cntl`-style static-pivot semantics. The panel now mirrors the
+scalar perturbation (lift the smaller |eigenvalue| to the floor, set
+`needs_refinement`, bump `n_tiny`) so both paths stay byte-identical.
+
+New regression `test_d2_panel_inline_2x2_static_pivot_floor_parity` builds an
+isolated antidiagonal 2×2 (eigenvalues ±δ, δ = 1e-3) below the floor (1e-1) in
+an 80×80 front (crossing the 64-column panel boundary) and asserts byte-identity
+against the scalar oracle. Pre-fix the panel reported inertia `(79+, 1−)` for
+the unperturbed ±δ block where the perturbed scalar path reports `(80+)`;
+post-fix they agree. Finding D2 from `dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — default `postorder()` is now linear, not O(n²·log n), on star etrees (S1)
+
+The default elimination-tree `postorder` (in the standard symbolic pipeline)
+re-cloned and re-sorted `children[node]` on **every** DFS stack visit. A node
+with `c` children sits on top of the stack `c+1` times, so it paid
+O(c²·log c); on a star etree — one root with `n-1` children, the shape AMD
+produces for an arrow/bordered-KKT matrix with a dense *trailing* border —
+the whole traversal was O(n²·log n). It now carries each node's sorted child
+list on the stack (a `(node, sorted_children, cursor)` layout matching the
+already-correct `biased_postorder` / `EliminationTree::postorder`), so each
+node is sorted exactly once and the traversal is O(n·log n).
+
+New regression `test_postorder_star_sort_work_is_linear` reproduces the blow-up
+deterministically (no flaky timing) via a `#[cfg(test)]` work counter: on an
+`n = 2000` star the old code materialized ~`n²` child-list elements (3,998,000);
+the fix materializes ~`n` (≤ `4n`). Output is unchanged — the existing
+topological-order, inverse-roundtrip, and Schur-parity tests still pass.
+Finding S1 from `dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — `with_fma(true)` now actually dispatches the FMA kernels (N1)
+
+`Solver::with_fma(true)` was a silent no-op. It set `NumericParams::fma`,
+but every Bunch-Kaufman call site consumes `&params.bk`, whose `fma` field
+stayed at its `false` default — so the documented ~2× FMA dense kernels
+(`schur_panel_minus_fma_strided*`, `axpy_minus_unroll4`, `axpy2_minus_unroll4`,
+issue #8) never engaged through the public API. The solver factor funnel now
+syncs `bk.fma = fma` into the params handed to both the sequential and parallel
+multifrontal drivers, and the stale doc on `BunchKaufmanParams::fma` (which
+claimed the *driver* copied the flag) is corrected.
+
+New regression `fma_opt_in_actually_dispatches_fma_kernels` asserts that
+enabling FMA changes the factorization at the bit level (proving dispatch)
+while keeping the solution within the documented within-ulps bound; the
+pre-existing "same inertia + small residual" test could not catch a dead
+toggle. Finding N1 from `dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — dense LU update/solve no longer commits singular bases or emits silent Inf/NaN (L1)
+
+The dense LU column-replacement path could commit a numerically singular
+replacement basis and then divide by a ~0 pivot in the back-solves, emitting
+silent `±Inf`/`NaN` (whereas the sparse path already guarded both ends). Two
+fixes, mirroring `sparse_update.rs` / `sparse_solve.rs`:
+
+- **Update** (`DenseLu::update`): the bump-elimination loop validated only
+  pivots `q..m-2`; the final diagonal `u[m-1,m-1]` was never checked, and when
+  the leaving slot was the last column (`q == m-1`) the loop never ran at all. A
+  vanishing final pivot is now rejected (`NeedsRefactor`) before commit.
+- **Solve** (`usolve`/`ut_solve`): the dense back-solves now error with
+  `SingularBasis { column }` on a zero or non-finite `U` diagonal instead of
+  dividing into an `Inf`/`NaN`.
+
+Regression tests `dense_zero_u_diagonal_errors_instead_of_inf` (solve) and
+`update_singular_last_pivot_does_not_commit` (update). Finding L1 from
+`dev/research/repo-review-2026-06-09.md`.
+
+### Fixed — legacy dense `factor()` no longer corrupts the column after a force-accepted zero pivot (D1)
+
+In the legacy dense `factor()` path, a strict-zero pivot routed through
+`ZeroPivotAction::ForceAccept` (and the degenerate 2×2 twin) zeroed its own L
+column but ran no rank-1/rank-2 update, then returned a *fabricated* fused
+next-column argmax of `(0.0, k+2)` / `(0.0, k+3)`. The caller stored that, so
+the next iteration saw `gamma0 == 0.0`, took the "zero off-diagonal column"
+fast path, and silently discarded the **real off-diagonals of the following
+column** — corrupting L (a full-magnitude reconstruction error, ~1.5 on the
+regression matrix) and risking wrong inertia, the project's hard contract.
+Both branches now report the genuine off-diagonal max of the (unmodified) next
+column via `column_offdiag_max`. Regression test
+`tests/dense_ldlt.rs::test_d1_force_accept_does_not_corrupt_next_column`
+asserts exact `P·L·D·Lᵀ·Pᵀ = D_eq·A·D_eq` reconstruction. Finding D1 from
+`dev/research/repo-review-2026-06-09.md`.
 
 ### Added — on-disk dense-column regression fixture for issue #80
 

@@ -174,6 +174,126 @@ fn sparse_singular_fails() {
 }
 
 #[test]
+fn sparse_update_singular_replacement_matches_dense_needs_refactor() {
+    // L8 (dev/research/repo-review-2026-06-09.md): a singular update
+    // replacement must produce the SAME error signal from the dense and
+    // sparse paths. The dense path returns NeedsRefactor (see
+    // dense_update.rs `update_singular_last_pivot_does_not_commit`): a
+    // vanishing update pivot is recoverable by a refactor, which then
+    // reports SingularBasis only if the basis is genuinely singular. The
+    // sparse update previously returned SingularBasis directly,
+    // over-claiming singularity and handing drivers a different signal for
+    // the same event.
+    //
+    // Replace slot 1 of the 2x2 identity basis with e_0: the new basis
+    // [e_0, e_0] is structurally singular and drives the update pivot to 0
+    // — the exact scenario the dense unit test uses.
+    let (cols, m) = cols_from_rows(&[&[1.0, 0.0], &[0.0, 1.0]]); // identity
+    let entering = vec![1.0, 0.0]; // e_0
+
+    // Dense reference: NeedsRefactor (the established contract).
+    let mut dense = DenseLu::factor(&cols, m, LuParams::default()).expect("dense factor");
+    let dense_err = dense.update(1, &entering);
+    assert!(
+        matches!(dense_err, Err(FeralError::NeedsRefactor)),
+        "dense: expected NeedsRefactor, got {dense_err:?}"
+    );
+
+    // Sparse must agree.
+    let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+    let symbolic = SparseLuSymbolic::natural(m);
+    let mut sparse = SparseLu::factor(&a, &symbolic, LuParams::default()).expect("sparse factor");
+    let sparse_err = sparse.update(1, &entering);
+    assert!(
+        matches!(sparse_err, Err(FeralError::NeedsRefactor)),
+        "sparse: expected NeedsRefactor to match dense, got {sparse_err:?}"
+    );
+}
+
+#[test]
+fn singular_basis_reports_original_column_not_factorization_position() {
+    // L9 (dev/research/repo-review-2026-06-09.md): on a singular basis the
+    // factor path reported the *factorization position* `k` in
+    // SingularBasis{column}, but `k` corresponds to original column `qcol[k]`.
+    // A simplex driver knows original basis columns, not internal
+    // (AMD-dependent) factorization positions, so the reported index was the
+    // wrong one to repair. The error must name the original basis column.
+    //
+    // Construct a column order where position != original column: qcol=[2,1,0]
+    // processes original col 2 first, col 1 second, col 0 last. Original
+    // column 0 is the zero (singular) column, so it fails at factorization
+    // position k=2. The error must report original column 0, not position 2.
+    let cols = vec![
+        vec![0.0, 0.0, 0.0], // col 0: zero column (singular)
+        vec![0.0, 1.0, 0.0], // col 1: e_1
+        vec![1.0, 0.0, 0.0], // col 2: e_0
+    ];
+    let m = 3;
+    let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+    // Explicit non-identity column order: position k -> original column qcol[k].
+    let symbolic = SparseLuSymbolic {
+        m,
+        qcol: vec![2, 1, 0],
+        qcol_inv: vec![2, 1, 0],
+    };
+    let params = LuParams {
+        on_singular: LuSingularAction::Fail,
+        ..LuParams::default()
+    };
+    let err = SparseLu::factor(&a, &symbolic, params);
+    assert!(
+        matches!(err, Err(FeralError::SingularBasis { column: 0 })),
+        "expected SingularBasis reporting original column 0, got {err:?}"
+    );
+}
+
+#[test]
+fn perturb_chooses_largest_magnitude_row_matching_dense() {
+    // L13 (dev/research/repo-review-2026-06-09.md): when a column is singular
+    // under PerturbToEps, the dense path perturbs the threshold-selected
+    // (largest-|w|) row, but the sparse path perturbed the *index-first*
+    // unpivoted row — a cross-path drift (and an O(m) scan). The sparse path
+    // must perturb the same original row the dense path does.
+    //
+    // Column 0 = [0, 0, 1e-14]: its only nonzero is in row 2 and is below the
+    // relative zero-pivot tolerance (zero_pivot_tol · max|A| = 1e-13 · 1), so
+    // position 0 is singular. The largest-|w| unpivoted row is row 2; the
+    // index-first unpivoted row is row 0. Dense perturbs row 2 (oracle); the
+    // sparse path must agree, not perturb row 0.
+    let cols = vec![
+        vec![0.0, 0.0, 1e-14], // col 0: tiny entry at row 2 -> singular
+        vec![0.0, 1.0, 0.0],   // col 1: e_1
+        vec![1.0, 0.0, 0.0],   // col 2: e_0
+    ];
+    let m = 3;
+    let params = LuParams {
+        on_singular: LuSingularAction::PerturbToEps { abs_floor: 1e-10 },
+        ..LuParams::default()
+    };
+
+    // Dense reference: threshold partial pivoting selects the largest-|w| row
+    // (row 2) at position 0, and perturbs that row.
+    let dense = DenseLu::factor(&cols, m, params.clone()).expect("dense perturbed factor");
+    assert_eq!(
+        dense.perm()[0],
+        2,
+        "dense must perturb the largest-|w| row (row 2) (sanity)"
+    );
+
+    // Sparse must perturb the same original row at position 0.
+    let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+    let symbolic = SparseLuSymbolic::natural(m);
+    let sparse = SparseLu::factor(&a, &symbolic, params).expect("sparse perturbed factor");
+    assert_eq!(
+        sparse.perm()[0],
+        dense.perm()[0],
+        "sparse perturb row must match dense (L13): got {} vs dense {}",
+        sparse.perm()[0],
+        dense.perm()[0]
+    );
+}
+
+#[test]
 fn sparse_perturb_succeeds() {
     let (cols, m) = cols_from_rows(&[&[1.0, 1.0, 0.0], &[2.0, 2.0, 0.0], &[0.0, 0.0, 3.0]]);
     let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");

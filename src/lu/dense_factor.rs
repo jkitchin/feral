@@ -37,18 +37,34 @@ pub struct DenseLu {
     /// Updates applied since the last `factor`/`refactor`.
     pub(super) updates_since_refactor: usize,
     /// Running growth monitor; tripping `params.max_growth` forces a refactor.
+    /// Element-growth (‖U‖∞) high-water ratio: the largest `max|U|` seen across
+    /// all updates divided by [`Self::u_max0`]. Unlike a max-single-multiplier
+    /// monitor this compounds across a chain of updates (L5).
     pub(super) growth: f64,
+    /// `max|U|` immediately after the last factor/refactor — the denominator of
+    /// the element-growth monitor. Floored away from zero.
+    pub(super) u_max0: f64,
     pub(super) params: LuParams,
     /// Two-sided scaling of the factored matrix (identity when unscaled).
     pub(super) scale: LuScale,
     /// Reusable length-`m` scratch buffer (no per-call allocation in solves).
     pub(super) scratch_a: Vec<f64>,
+    /// Pooled length-`m` buffer for the scaled `ftran`/`btran` wrappers' inner
+    /// RHS (`bt`); distinct from `scratch_a`, which the core solve dirties (L3).
+    pub(super) scratch_b: Vec<f64>,
+    /// Pooled length-`m` residual buffer for iterative refinement (`r`);
+    /// distinct from `scratch_a`/`scratch_b`, which the inner solve uses (L3).
+    pub(super) scratch_c: Vec<f64>,
+    /// Pooled length-`m` buffer holding the refinement's original-RHS snapshot
+    /// (`a`); live across the whole refine loop, so it cannot reuse the others.
+    pub(super) scratch_d: Vec<f64>,
 }
 
 impl DenseLu {
     /// Factor the `m`×`m` basis given by its `m` columns (`cols[j]` is column
     /// `j`, length `m`). Computes `P B = L U` with threshold partial pivoting.
     pub fn factor(cols: &[Vec<f64>], m: usize, params: LuParams) -> Result<Self, FeralError> {
+        params.validate()?;
         let (scale, scaled) = compute_scale(cols, m, params.scaling)?;
         let factor_cols: &[Vec<f64>] = scaled.as_deref().unwrap_or(cols);
         let mut packed = vec![0.0; m * m];
@@ -56,6 +72,7 @@ impl DenseLu {
         let mut perm: Vec<usize> = (0..m).collect();
         factorize_packed(&mut packed, &mut perm, m, &params)?;
         let (l, u) = split_packed(&packed, m);
+        let u_max0 = umax(&u);
         let mut perm_inv = vec![0usize; m];
         for (k, &p) in perm.iter().enumerate() {
             perm_inv[p] = k;
@@ -70,14 +87,19 @@ impl DenseLu {
             qcol_inv: (0..m).collect(),
             updates_since_refactor: 0,
             growth: 1.0,
+            u_max0,
             params,
             scale,
             scratch_a: vec![0.0; m],
+            scratch_b: vec![0.0; m],
+            scratch_c: vec![0.0; m],
+            scratch_d: vec![0.0; m],
         })
     }
 
     /// Discard all pending updates and re-factor from scratch on fresh columns.
     pub fn refactor(&mut self, cols: &[Vec<f64>]) -> Result<(), FeralError> {
+        self.params.validate()?;
         let m = self.m;
         let (scale, scaled) = compute_scale(cols, m, self.params.scaling)?;
         self.scale = scale;
@@ -89,6 +111,7 @@ impl DenseLu {
         }
         factorize_packed(&mut packed, &mut self.perm, m, &self.params)?;
         let (l, u) = split_packed(&packed, m);
+        self.u_max0 = umax(&u);
         self.l = l;
         self.u = u;
         for (k, &p) in self.perm.iter().enumerate() {
@@ -203,6 +226,15 @@ fn split_packed(packed: &[f64], m: usize) -> (Vec<f64>, Vec<f64>) {
     (l, u)
 }
 
+/// `max|U|` over the packed column-major buffer, floored away from zero so it
+/// is a safe denominator for the element-growth monitor (L5).
+#[inline]
+fn umax(u: &[f64]) -> f64 {
+    u.iter()
+        .fold(0.0_f64, |a, &x| a.max(x.abs()))
+        .max(f64::MIN_POSITIVE)
+}
+
 /// Right-looking outer-product LU with threshold partial pivoting, in place on
 /// the packed buffer. `perm` starts as identity and accumulates row swaps.
 fn factorize_packed(
@@ -212,7 +244,15 @@ fn factorize_packed(
     params: &LuParams,
 ) -> Result<(), FeralError> {
     let u = params.pivot_threshold;
-    let ztol = params.zero_pivot_tol;
+    // L6 (dev/research/repo-review-2026-06-09.md): scale the zero-pivot tolerance
+    // by the matrix magnitude. An absolute `zero_pivot_tol` declared a uniformly
+    // small but perfectly conditioned basis (e.g. `diag(1e-14)`) singular and
+    // gave a large-magnitude basis effectively no singularity detection. The
+    // relative tolerance `zero_pivot_tol · max|A|` tracks the basis scale; for a
+    // zero matrix `a_max == 0`, so only an exact-zero pivot is rejected — still
+    // correct, since the zero matrix is singular.
+    let a_max = packed.iter().fold(0.0_f64, |a, &x| a.max(x.abs()));
+    let ztol = params.zero_pivot_tol * a_max;
     for k in 0..m {
         // Pivot search: max-magnitude entry in column k over rows k..m.
         let mut amax = 0.0_f64;
@@ -370,6 +410,27 @@ mod tests {
         };
         let lu = DenseLu::factor(&cols, m, params).expect("perturbed factor");
         assert!(lu.u(1, 1).abs() >= 1e-10);
+    }
+
+    /// L6 (dev/research/repo-review-2026-06-09.md): the zero-pivot test compared
+    /// the pivot against the absolute `zero_pivot_tol` (1e-13). `diag(1e-14)` is
+    /// perfectly conditioned — cond₂ = 1, exact inverse `diag(1e14)` — yet every
+    /// pivot 1e-14 ≤ 1e-13, so it was declared `SingularBasis { column: 0 }` even
+    /// though it is trivially invertible. The fix scales the tolerance by the
+    /// matrix magnitude (`zero_pivot_tol · max|A|`), so a uniformly small but
+    /// well-conditioned basis factors. Oracle: the hand-computed exact solution
+    /// of `B x = b`. Pre-fix this `expect` panics on `SingularBasis`.
+    #[test]
+    fn factor_tiny_well_conditioned_basis_not_singular() {
+        let s = 1e-14;
+        let (cols, m) = cols_from_rows(&[&[s, 0.0], &[0.0, s]]);
+        let mut lu = DenseLu::factor(&cols, m, LuParams::default())
+            .expect("tiny but well-conditioned basis must factor");
+        // B = s·I, b = s·[1, 2]  =>  x = [1, 2] exactly.
+        let mut rhs = vec![s, 2.0 * s];
+        lu.ftran(&mut rhs).expect("ftran");
+        assert!((rhs[0] - 1.0).abs() < 1e-6, "x0 = {}", rhs[0]);
+        assert!((rhs[1] - 2.0).abs() < 1e-6, "x1 = {}", rhs[1]);
     }
 
     #[test]

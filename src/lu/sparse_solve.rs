@@ -11,6 +11,48 @@ use super::sparse_factor::SparseLu;
 use super::sparse_matrix::SparseColMatrix;
 use crate::error::FeralError;
 
+// Test-only: counts heap (re)allocations of the pooled scaled-solve / refine
+// scratch buffers on the calling thread. Proves the buffers reach steady state
+// with zero per-call allocation (L3, dev/research/repo-review-2026-06-09.md).
+// Thread-local, not a global atomic, because the cargo harness runs solve tests
+// concurrently and a shared atomic would race across sibling tests.
+#[cfg(test)]
+thread_local! {
+    pub(super) static SOLVE_SCRATCH_ALLOCS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_solve_scratch_allocs() {
+    SOLVE_SCRATCH_ALLOCS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn solve_scratch_allocs() -> usize {
+    SOLVE_SCRATCH_ALLOCS.with(|c| c.get())
+}
+
+/// Take a pooled buffer out of `pool`, sized to `m` and zeroed. Counts one
+/// (re)allocation (test builds) only when the pooled buffer was not already
+/// length `m` — a pre-sized pool reaches steady state at zero. The caller MUST
+/// restore the buffer to `pool` after use: `mem::take` leaves `pool` empty, so
+/// failing to restore turns the next call into a fresh allocation.
+#[inline]
+fn take_zeroed(pool: &mut Vec<f64>, m: usize) -> Vec<f64> {
+    let mut b = std::mem::take(pool);
+    if b.len() != m {
+        #[cfg(test)]
+        SOLVE_SCRATCH_ALLOCS.with(|c| c.set(c.get() + 1));
+        b.clear();
+        b.resize(m, 0.0);
+    } else {
+        for x in b.iter_mut() {
+            *x = 0.0;
+        }
+    }
+    b
+}
+
 impl SparseLu {
     /// Solve `B x = a`, overwriting `rhs` with `x` (scaling applied around the
     /// core solve on `Ã = D_row Π B D_col`).
@@ -20,15 +62,19 @@ impl SparseLu {
         if self.scale.is_identity() {
             return self.ftran_core(rhs);
         }
-        let mut bt = vec![0.0; m];
+        let mut bt = take_zeroed(&mut self.scratch_b, m);
         for (i, bi) in bt.iter_mut().enumerate() {
             *bi = self.scale.d_row[i] * rhs[self.scale.rperm[i]];
         }
-        self.ftran_core(&mut bt)?;
-        for (j, rj) in rhs.iter_mut().enumerate() {
-            *rj = self.scale.d_col[j] * bt[j];
+        // Restore the pooled buffer on every path; only write `rhs` on success.
+        let res = self.ftran_core(&mut bt);
+        if res.is_ok() {
+            for (j, rj) in rhs.iter_mut().enumerate() {
+                *rj = self.scale.d_col[j] * bt[j];
+            }
         }
-        Ok(())
+        self.scratch_b = bt;
+        res
     }
 
     /// Solve `Bᵀ x = a`, overwriting `rhs` with `x`.
@@ -38,15 +84,19 @@ impl SparseLu {
         if self.scale.is_identity() {
             return self.btran_core(rhs);
         }
-        let mut bt = vec![0.0; m];
+        let mut bt = take_zeroed(&mut self.scratch_b, m);
         for (j, bj) in bt.iter_mut().enumerate() {
             *bj = self.scale.d_col[j] * rhs[j];
         }
-        self.btran_core(&mut bt)?;
-        for (i, &yi) in bt.iter().enumerate() {
-            rhs[self.scale.rperm[i]] = self.scale.d_row[i] * yi;
+        // Restore the pooled buffer on every path; only write `rhs` on success.
+        let res = self.btran_core(&mut bt);
+        if res.is_ok() {
+            for (i, &yi) in bt.iter().enumerate() {
+                rhs[self.scale.rperm[i]] = self.scale.d_row[i] * yi;
+            }
         }
-        Ok(())
+        self.scratch_b = bt;
+        res
     }
 
     /// Core `ftran` on the (scaled) factored matrix, ignoring outer scaling.
@@ -104,9 +154,14 @@ impl SparseLu {
         rhs: &mut [f64],
     ) -> Result<(), FeralError> {
         check_len(rhs.len(), self.m)?;
-        let a = rhs.to_vec();
-        self.ftran(rhs)?;
-        self.refine(b, &a, rhs, false)
+        let mut a = take_zeroed(&mut self.scratch_d, self.m);
+        a.copy_from_slice(rhs);
+        let res = match self.ftran(rhs) {
+            Ok(()) => self.refine(b, &a, rhs, false),
+            Err(e) => Err(e),
+        };
+        self.scratch_d = a;
+        res
     }
 
     /// `btran` with iterative refinement against the original basis `b`.
@@ -116,9 +171,14 @@ impl SparseLu {
         rhs: &mut [f64],
     ) -> Result<(), FeralError> {
         check_len(rhs.len(), self.m)?;
-        let a = rhs.to_vec();
-        self.btran(rhs)?;
-        self.refine(b, &a, rhs, true)
+        let mut a = take_zeroed(&mut self.scratch_d, self.m);
+        a.copy_from_slice(rhs);
+        let res = match self.btran(rhs) {
+            Ok(()) => self.refine(b, &a, rhs, true),
+            Err(e) => Err(e),
+        };
+        self.scratch_d = a;
+        res
     }
 
     /// Spike `G⁻¹ L⁻¹ P · rhs` (apply P, `L`-solve, replay the FT etas forward),
@@ -157,16 +217,18 @@ impl SparseLu {
     /// Back solve `U w = s` (upper; per-row storage, diagonal first), in place.
     ///
     /// Errors with [`FeralError::SingularBasis`] if a row's stored diagonal is
-    /// absent, zero, or non-finite: after a Forrest–Tomlin update the diagonal
-    /// of `u_rows[k]` is the bump pivot, and dividing by an exact zero would
-    /// otherwise emit a silent `±Inf`. (A fresh factor floors pivots to `±ztol`,
-    /// so this only guards the updated path.)
+    /// absent, zero, non-finite, or stored out of diagonal-first order: after a
+    /// Forrest–Tomlin update the diagonal of `u_rows[k]` is the bump pivot, and
+    /// dividing by an exact zero would otherwise emit a silent `±Inf`. (A fresh
+    /// factor floors pivots to `±ztol`, so the zero guard only bites the updated
+    /// path.) The `dc != k` check is an always-on hardening of the diagonal-first
+    /// invariant (L10): without it, a violated invariant would make release-mode
+    /// solves silently take an off-diagonal as the pivot.
     fn usolve(&self, s: &mut [f64]) -> Result<(), FeralError> {
         for k in (0..self.m).rev() {
             let row = &self.u_rows[k];
             let &(dc, d) = row.first().ok_or(FeralError::SingularBasis { column: k })?;
-            debug_assert_eq!(dc, k, "U row {k} must store its diagonal first");
-            if d == 0.0 || !d.is_finite() {
+            if dc != k || d == 0.0 || !d.is_finite() {
                 return Err(FeralError::SingularBasis { column: k });
             }
             let mut acc = s[k];
@@ -182,13 +244,13 @@ impl SparseLu {
     /// Forward solve `Uᵀ z = s` (`Uᵀ` lower; scatter form on per-row U).
     ///
     /// Errors with [`FeralError::SingularBasis`] on an absent/zero/non-finite
-    /// stored diagonal, for the same reason as [`SparseLu::usolve`].
+    /// or out-of-order stored diagonal, for the same reason as
+    /// [`SparseLu::usolve`].
     fn ut_solve(&self, s: &mut [f64]) -> Result<(), FeralError> {
         for i in 0..self.m {
             let row = &self.u_rows[i];
             let &(dc, d) = row.first().ok_or(FeralError::SingularBasis { column: i })?;
-            debug_assert_eq!(dc, i, "U row {i} must store its diagonal first");
-            if d == 0.0 || !d.is_finite() {
+            if dc != i || d == 0.0 || !d.is_finite() {
                 return Err(FeralError::SingularBasis { column: i });
             }
             let si = s[i] / d;
@@ -231,7 +293,8 @@ impl SparseLu {
         if anorm == 0.0 {
             return Ok(());
         }
-        let mut r = vec![0.0; self.m];
+        let mut r = take_zeroed(&mut self.scratch_c, self.m);
+        let mut result = Ok(());
         for _ in 0..steps {
             if transpose {
                 b.matvec_transpose(x, &mut r);
@@ -244,16 +307,22 @@ impl SparseLu {
             if inf_norm(&r) / anorm < tol {
                 break;
             }
-            if transpose {
-                self.btran(&mut r)?;
+            // Restore the pooled residual buffer on every path before returning.
+            let step = if transpose {
+                self.btran(&mut r)
             } else {
-                self.ftran(&mut r)?;
+                self.ftran(&mut r)
+            };
+            if let Err(e) = step {
+                result = Err(e);
+                break;
             }
             for (xi, &dxi) in x.iter_mut().zip(r.iter()) {
                 *xi += dxi;
             }
         }
-        Ok(())
+        self.scratch_c = r;
+        result
     }
 }
 
@@ -272,7 +341,257 @@ fn inf_norm(v: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lu::LuParams;
+    use crate::lu::{LuParams, LuScaling};
+
+    /// L3 (dev/research/repo-review-2026-06-09.md): the sparse twin of the dense
+    /// pooling guard. With scaling enabled the `ftran`/`btran` wrappers and the
+    /// refine loop must reuse pooled struct buffers, not allocate a fresh
+    /// `vec![0.0; m]` per call. `SOLVE_SCRATCH_ALLOCS` counts a (re)allocation
+    /// only when a pooled buffer is taken at the wrong length, so steady-state
+    /// must be exactly zero.
+    #[test]
+    fn scaled_solves_and_refine_reuse_pooled_scratch() {
+        let cols = vec![
+            vec![10.0, 1.0, 0.0],
+            vec![1.0, 8.0, 2.0],
+            vec![0.0, 1.0, 5.0],
+        ];
+        let m = 3;
+        let params = LuParams {
+            scaling: LuScaling::InfNorm,
+            refine_steps: 2,
+            ..LuParams::default()
+        };
+        let mut lu = SparseLu::factor_dense_columns(m, &cols, params).expect("factor");
+        assert!(
+            !lu.scale.is_identity(),
+            "InfNorm scaling should be non-identity for this matrix"
+        );
+        let b = SparseColMatrix::from_dense_columns(m, &cols).expect("sparse matrix");
+
+        reset_solve_scratch_allocs();
+        for _ in 0..5 {
+            let mut x = vec![1.0, 2.0, 3.0];
+            lu.ftran(&mut x).expect("ftran");
+            assert!(x.iter().all(|v| v.is_finite()));
+            let mut y = vec![3.0, 2.0, 1.0];
+            lu.btran(&mut y).expect("btran");
+            assert!(y.iter().all(|v| v.is_finite()));
+        }
+        let mut xr = vec![1.0, 1.0, 1.0];
+        lu.ftran_refined(&b, &mut xr).expect("ftran_refined");
+        let mut yr = vec![1.0, 1.0, 1.0];
+        lu.btran_refined(&b, &mut yr).expect("btran_refined");
+
+        assert_eq!(
+            solve_scratch_allocs(),
+            0,
+            "scaled ftran/btran + refine must reuse pooled buffers, not \
+             allocate per call (L3)"
+        );
+
+        // Correctness: the pooling must not change the math — B x = a.
+        let a = vec![2.0, -1.0, 4.0];
+        let mut x = a.clone();
+        lu.ftran(&mut x).expect("ftran");
+        let mut bx = vec![0.0; m];
+        b.matvec(&x, &mut bx);
+        for (bxi, ai) in bx.iter().zip(a.iter()) {
+            assert!((bxi - ai).abs() < 1e-9, "B x != a: {bxi} vs {ai}");
+        }
+    }
+
+    /// L6 (dev/research/repo-review-2026-06-09.md): the sparse twin of the dense
+    /// tiny-basis test. `diag(1e-14)` is perfectly conditioned (cond₂ = 1, exact
+    /// inverse `diag(1e14)`) but every pivot 1e-14 ≤ the absolute `zero_pivot_tol`
+    /// (1e-13), so the sparse factor declared `SingularBasis { column: 0 }`. With
+    /// the relative tolerance `zero_pivot_tol · max|A|` it factors. Oracle: the
+    /// hand-computed exact solution of `B x = b`. Pre-fix this `expect` panics.
+    #[test]
+    fn factor_tiny_well_conditioned_basis_not_singular() {
+        let s = 1e-14;
+        let cols = vec![vec![s, 0.0], vec![0.0, s]];
+        let mut lu =
+            SparseLu::factor_dense_columns(2, &cols, LuParams::default()).expect("tiny basis");
+        // B = s·I, b = s·[1, 2]  =>  x = [1, 2] exactly.
+        let mut rhs = vec![s, 2.0 * s];
+        lu.ftran(&mut rhs).expect("ftran");
+        assert!((rhs[0] - 1.0).abs() < 1e-6, "x0 = {}", rhs[0]);
+        assert!((rhs[1] - 2.0).abs() < 1e-6, "x1 = {}", rhs[1]);
+    }
+
+    /// L2 (dev/research/repo-review-2026-06-09.md): the sparse LU must honor
+    /// `pivot_threshold` (threshold partial pivoting), matching the dense path
+    /// and the documented contract at `lu/mod.rs:67-69`. Before the fix `utol`
+    /// was discarded (`let _ = utol`) and the sparse path always took the
+    /// strict-max-magnitude row, so a sub-1.0 threshold silently changed
+    /// nothing.
+    ///
+    /// Matrix A = [[1,0],[2,1]] (col0 = [1,2], col1 = [0,1]), natural column
+    /// order: column 0 has diagonal `w[0] = 1` and off-diagonal `w[1] = 2`.
+    /// With u = 1.0 (strict) `|2| > |1|`, so the pivot is row 1 and perm[0] = 1.
+    /// With u = 0.5 (threshold) `|w[0]| = 1 >= 0.5*2 = 1.0`, so the diagonal is
+    /// within threshold and the structure-preserving row is taken: perm[0] = 0.
+    /// Both factorizations must still solve A x = b exactly. External oracle:
+    /// the hand-computed solution of A x = [1, 4] is x = [1, 2]. The pivot-row
+    /// divergence is the behavioral witness; pre-fix both perms are [1, 0].
+    /// The diagonal-preference rule matches CSparse `cs_lu`
+    /// (Davis, Direct Methods for Sparse Linear Systems, section 6.3).
+    #[test]
+    fn sparse_lu_honors_pivot_threshold() {
+        use crate::lu::SparseLuSymbolic;
+        let cols = vec![vec![1.0, 2.0], vec![0.0, 1.0]];
+        let a = SparseColMatrix::from_dense_columns(2, &cols).expect("matrix");
+        let symbolic = SparseLuSymbolic::natural(2);
+
+        // Strict partial pivoting (u = 1.0): the max-magnitude row wins.
+        let strict = SparseLu::factor(
+            &a,
+            &symbolic,
+            LuParams {
+                pivot_threshold: 1.0,
+                ..LuParams::default()
+            },
+        )
+        .expect("strict factor");
+        assert_eq!(strict.perm()[0], 1, "u=1.0 must pivot the larger row 1");
+
+        // Threshold partial pivoting (u = 0.5): the diagonal is within
+        // threshold, so it is preferred over the larger off-diagonal entry.
+        let mut relaxed = SparseLu::factor(
+            &a,
+            &symbolic,
+            LuParams {
+                pivot_threshold: 0.5,
+                ..LuParams::default()
+            },
+        )
+        .expect("relaxed factor");
+        assert_eq!(
+            relaxed.perm()[0],
+            0,
+            "u=0.5 must prefer the within-threshold diagonal row 0 (L2)"
+        );
+
+        // Both must solve correctly. Oracle: A x = [1, 4]  =>  x = [1, 2].
+        let mut strict = strict;
+        let mut rhs = vec![1.0, 4.0];
+        strict.ftran(&mut rhs).expect("strict ftran");
+        assert!(
+            (rhs[0] - 1.0).abs() < 1e-12 && (rhs[1] - 2.0).abs() < 1e-12,
+            "strict solve {rhs:?}"
+        );
+        let mut rhs = vec![1.0, 4.0];
+        relaxed.ftran(&mut rhs).expect("relaxed ftran");
+        assert!(
+            (rhs[0] - 1.0).abs() < 1e-12 && (rhs[1] - 2.0).abs() < 1e-12,
+            "relaxed solve {rhs:?}"
+        );
+    }
+
+    /// L2 follow-up (repo-review-2026-06-09-verification.md, residual #2): the
+    /// sparse diagonal-preference rule must also require the diagonal to clear
+    /// the singularity floor `ztol`, matching the dense path's `&& diag > ztol`
+    /// conjunct (`dense_factor.rs`). Without that conjunct a `pivot_threshold`
+    /// at or below `zero_pivot_tol` lets a sub-`ztol` diagonal be *preferred*
+    /// over a sound max-magnitude row (it is "within threshold": `1e-14 >=
+    /// u·amax` for `u = 1e-14`), then the old silent `±ztol` clamp perturbed it
+    /// to `±ztol` without consulting `on_singular` — a sub-tolerance pivot
+    /// perturbation under `Fail` and a drift from the dense path, which routes
+    /// the same matrix through its max-magnitude row.
+    ///
+    /// Matrix A = [[1e-14, 1.0], [1.0, 1.0]] is well conditioned (det = 1e-14 −
+    /// 1 ≈ −1), but the (0,0) diagonal `1e-14` is two orders below
+    /// `ztol = zero_pivot_tol·max|A| = 1e-13`. The sound pivot is the
+    /// max-magnitude row 1, NOT the sub-floor diagonal. External oracle: the
+    /// dense LU on the same matrix (which pivots row 1) and the hand-computed
+    /// solution of A x = [2, 3], x ≈ [1, 2]. Pre-fix the sparse path pivots
+    /// row 0 with a silently clamped pivot (`perm()[0] == 0`); post-fix it
+    /// matches the dense path (`perm()[0] == 1`).
+    #[test]
+    fn sparse_diagonal_preference_respects_zero_pivot_floor() {
+        use super::super::DenseLu;
+        use crate::lu::SparseLuSymbolic;
+
+        let cols = vec![vec![1e-14, 1.0], vec![1.0, 1.0]];
+        // pivot_threshold == zero_pivot_tol/amax-scale region: a *valid*
+        // (in (0, 1]) but tiny threshold that makes the sub-floor diagonal
+        // "within threshold". The conjunct, not range validation, must catch it.
+        let params = LuParams {
+            pivot_threshold: 1e-14,
+            ..LuParams::default()
+        };
+
+        let a = SparseColMatrix::from_dense_columns(2, &cols).expect("matrix");
+        let symbolic = SparseLuSymbolic::natural(2);
+        let mut sparse = SparseLu::factor(&a, &symbolic, params.clone()).expect("sparse factor");
+        assert_eq!(
+            sparse.perm()[0],
+            1,
+            "a sub-ztol diagonal must not be preferred over the max-magnitude row (L2)"
+        );
+
+        // Dense parity: the dense LU pivots the same row on the same matrix.
+        let dense = DenseLu::factor(&cols, 2, params).expect("dense factor");
+        assert_eq!(
+            sparse.perm()[0],
+            dense.perm()[0],
+            "dense/sparse diagonal-preference parity"
+        );
+
+        // And the solve is correct. Oracle: A x = [2, 3]  =>  x ≈ [1, 2].
+        let mut rhs = vec![2.0, 3.0];
+        sparse.ftran(&mut rhs).expect("sparse ftran");
+        assert!(
+            (rhs[0] - 1.0).abs() < 1e-9 && (rhs[1] - 2.0).abs() < 1e-9,
+            "sparse solve {rhs:?}"
+        );
+    }
+
+    /// `pivot_threshold` outside `(0, 1]` (the documented `u` range at
+    /// `lu/mod.rs`) is now rejected with `InvalidInput` on both factor paths,
+    /// rather than silently producing a degenerate pivot rule. `0.0` would
+    /// disable pivoting entirely (always prefer the diagonal); `> 1.0` is
+    /// meaningless; `NaN` poisons every comparison. Oracle: the documented
+    /// contract `u ∈ (0, 1]`.
+    #[test]
+    fn pivot_threshold_out_of_range_is_rejected() {
+        use super::super::DenseLu;
+        use crate::lu::SparseLuSymbolic;
+
+        let cols = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let a = SparseColMatrix::from_dense_columns(2, &cols).expect("matrix");
+        let symbolic = SparseLuSymbolic::natural(2);
+
+        for bad in [0.0, -0.5, 1.5, f64::NAN, f64::INFINITY] {
+            let params = LuParams {
+                pivot_threshold: bad,
+                ..LuParams::default()
+            };
+            assert!(
+                matches!(
+                    SparseLu::factor(&a, &symbolic, params.clone()),
+                    Err(FeralError::InvalidInput(_))
+                ),
+                "sparse factor must reject pivot_threshold = {bad}"
+            );
+            assert!(
+                matches!(
+                    DenseLu::factor(&cols, 2, params),
+                    Err(FeralError::InvalidInput(_))
+                ),
+                "dense factor must reject pivot_threshold = {bad}"
+            );
+        }
+
+        // A valid boundary value (u = 1.0, strict partial pivoting) still works.
+        let ok = LuParams {
+            pivot_threshold: 1.0,
+            ..LuParams::default()
+        };
+        assert!(SparseLu::factor(&a, &symbolic, ok.clone()).is_ok());
+        assert!(DenseLu::factor(&cols, 2, ok).is_ok());
+    }
 
     /// A zero `U` diagonal (as a degenerate post-update bump pivot could leave)
     /// must surface as `SingularBasis`, not a silent `±Inf` out of the divide.
@@ -298,5 +617,52 @@ mod tests {
             lu.btran(&mut bad_t),
             Err(FeralError::SingularBasis { column: 1 })
         ));
+    }
+
+    /// L10 (dev/research/repo-review-2026-06-09.md): the diagonal-first
+    /// `u_rows` invariant was enforced only by a `debug_assert_eq!`, compiled
+    /// out in release. A violated invariant would make release-mode `usolve` /
+    /// `ut_solve` silently take an off-diagonal entry as the pivot (and treat
+    /// the real diagonal as a regular `row[1..]` term) — a silent wrong solve.
+    /// The guard is now always-on: a U row whose first entry is not its
+    /// diagonal surfaces as `SingularBasis` in every build mode, matching the
+    /// absent/zero/non-finite diagonal guard. Pre-fix this test panics on the
+    /// `debug_assert_eq!` (a debug build) rather than returning a clean `Err`.
+    #[test]
+    fn misplaced_u_diagonal_errors_instead_of_silent_wrong_pivot() {
+        let cols = vec![vec![2.0, 0.0], vec![1.0, 3.0]]; // nonsingular 2x2
+        let mut lu = SparseLu::factor_dense_columns(2, &cols, LuParams::default()).expect("factor");
+        // u_rows[0] stores its diagonal (column 0) first, then an off-diagonal.
+        assert!(
+            lu.u_rows[0].len() >= 2,
+            "test needs an off-diagonal to misplace the diagonal behind"
+        );
+        assert_eq!(lu.u_rows[0][0].0, 0, "diagonal of row 0 must start first");
+        // Corrupt the invariant: move the diagonal off the front of row 0.
+        lu.u_rows[0].swap(0, 1);
+
+        // usolve (via ftran) must reject the misplaced diagonal, not divide by
+        // the off-diagonal value as the pivot.
+        let mut bad = vec![1.0, 1.0];
+        assert!(
+            matches!(
+                lu.ftran(&mut bad),
+                Err(FeralError::SingularBasis { column: 0 })
+            ),
+            "usolve must reject a misplaced diagonal (L10)"
+        );
+
+        // ut_solve (via btran) on a fresh, equally-corrupted factor.
+        let mut lu_t =
+            SparseLu::factor_dense_columns(2, &cols, LuParams::default()).expect("factor");
+        lu_t.u_rows[0].swap(0, 1);
+        let mut bad_t = vec![1.0, 1.0];
+        assert!(
+            matches!(
+                lu_t.btran(&mut bad_t),
+                Err(FeralError::SingularBasis { column: 0 })
+            ),
+            "ut_solve must reject a misplaced diagonal (L10)"
+        );
     }
 }

@@ -96,8 +96,13 @@ pub struct SparseLu {
     /// factor/refactor. Each is a replayable bump elimination (`O(bump)`), so
     /// warm solves stay sparse (no dense eta chain).
     pub(super) etas: Vec<FtEta>,
-    /// Running growth monitor (max elimination multiplier over the updates).
+    /// Running growth monitor: the ‖U‖∞ element-growth high-water ratio
+    /// (largest `max|U|` over the updates ÷ [`Self::u_max0`]). Compounds across
+    /// a chain of updates, unlike a max-single-multiplier monitor (L5).
     pub(super) growth: f64,
+    /// `max|U|` immediately after factor — denominator of the element-growth
+    /// monitor. Floored away from zero.
+    pub(super) u_max0: f64,
     /// Total Gilbert–Peierls reach nodes visited during the factor — a
     /// structural scalability witness (`O(nnz(U))`, not `O(n²)`).
     pub(super) reach_visits: usize,
@@ -116,6 +121,15 @@ pub struct SparseLu {
     /// zeroed between updates. Separate from `scratch` (which the solves dirty),
     /// so `compute_spike`'s sparse scatter can assume a clean buffer.
     pub(super) ft_work: Vec<f64>,
+    /// Pooled length-`m` buffer for the scaled `ftran`/`btran` wrappers' inner
+    /// RHS (`bt`); distinct from `scratch`, which the core solve dirties (L3).
+    pub(super) scratch_b: Vec<f64>,
+    /// Pooled length-`m` residual buffer for iterative refinement (`r`);
+    /// distinct from `scratch`/`scratch_b`, which the inner solve uses (L3).
+    pub(super) scratch_c: Vec<f64>,
+    /// Pooled length-`m` buffer holding the refinement's original-RHS snapshot
+    /// (`a`); live across the whole refine loop, so it cannot reuse the others.
+    pub(super) scratch_d: Vec<f64>,
 }
 
 impl SparseLu {
@@ -125,6 +139,7 @@ impl SparseLu {
         symbolic: &SparseLuSymbolic,
         params: LuParams,
     ) -> Result<Self, FeralError> {
+        params.validate()?;
         let m = a.m;
         if symbolic.m != m {
             return Err(FeralError::DimensionMismatch {
@@ -168,7 +183,14 @@ impl SparseLu {
         let mut dfs_stack: Vec<usize> = Vec::new();
 
         let utol = params.pivot_threshold;
-        let ztol = params.zero_pivot_tol;
+        // L6 (dev/research/repo-review-2026-06-09.md): scale the zero-pivot
+        // tolerance by the matrix magnitude, matching the dense path. An absolute
+        // `zero_pivot_tol` declared a uniformly small but perfectly conditioned
+        // basis singular and gave a large-magnitude basis effectively no
+        // singularity detection. `a_max == 0` only for the (genuinely singular)
+        // zero matrix, where the exact-zero test still fires.
+        let a_max = a.values.iter().fold(0.0_f64, |acc, &x| acc.max(x.abs()));
+        let ztol = params.zero_pivot_tol * a_max;
         let mut reach_visits = 0usize;
 
         for k in 0..m {
@@ -250,25 +272,81 @@ impl SparseLu {
             if amax <= ztol {
                 match params.on_singular {
                     LuSingularAction::Fail => {
-                        return Err(FeralError::SingularBasis { column: k });
+                        // L9 (dev/research/repo-review-2026-06-09.md): report the
+                        // ORIGINAL basis column `qcol[k]`, not the internal
+                        // factorization position `k`. The caller (e.g. a simplex
+                        // driver) knows original columns, not the AMD-dependent
+                        // processing order, so `qcol[k]` is the index it can act on.
+                        return Err(FeralError::SingularBasis { column: qcol[k] });
                     }
                     LuSingularAction::PerturbToEps { abs_floor } => {
-                        // Choose any still-unpivoted row and floor the pivot.
-                        let r = (0..m)
-                            .find(|&i| pinv[i] < 0)
-                            .ok_or(FeralError::SingularBasis { column: k })?;
+                        // L13 (dev/research/repo-review-2026-06-09.md): perturb the
+                        // largest-|w| unpivoted row `ipiv` (the same row threshold
+                        // partial pivoting would select), matching the dense path,
+                        // which perturbs its partial-pivoting-selected row — not the
+                        // index-first unpivoted row. Reusing `ipiv` also avoids the
+                        // O(m) scan whenever the column has any touched unpivoted
+                        // entry; the scan remains only as the fallback for a column
+                        // that is structurally empty in every unpivoted row
+                        // (`ipiv < 0`), where `w` is zero and any row will do.
+                        let r = if ipiv >= 0 {
+                            ipiv as usize
+                        } else {
+                            (0..m)
+                                .find(|&i| pinv[i] < 0)
+                                .ok_or(FeralError::SingularBasis { column: qcol[k] })?
+                        };
                         pivot_row = r;
                         let s = if w[r] < 0.0 { -1.0 } else { 1.0 };
                         piv = s * abs_floor.max(w[r].abs());
                     }
                 }
             } else {
-                // Threshold partial pivoting: take the max (u=1 default).
-                let _ = utol;
-                pivot_row = ipiv as usize;
+                // L2 (dev/research/repo-review-2026-06-09.md): threshold partial
+                // pivoting. The strict max-magnitude row `ipiv` is the stability
+                // baseline; but if the natural diagonal of this column — original
+                // row `qcol[k]` — is still unpivoted and is within `utol·amax` of
+                // that max, prefer it. The diagonal pivot preserves structure
+                // (less fill) without sacrificing more than a factor `utol` of
+                // stability. `utol == 1.0` (the default) recovers strict partial
+                // pivoting, since the diagonal must then equal the max to qualify.
+                // This matches CSparse `cs_lu` (Davis, *Direct Methods for Sparse
+                // Linear Systems*, §6.3): `if (pinv[col] < 0 && |x[col]| >= a*tol)
+                // ipiv = col`.
+                let diag = qcol[k];
+                // The diagonal must also clear the singularity floor `ztol`,
+                // not merely the threshold `utol·amax` (repo-review verification
+                // residual #2). With a loose `utol` (≤ `zero_pivot_tol`) a
+                // sub-`ztol` diagonal could otherwise satisfy `|w[diag]| ≥
+                // utol·amax` and be preferred over the sound max-magnitude row
+                // (`amax > ztol` always holds in this branch), then be silently
+                // clamped below — a sub-tolerance perturbation that bypasses
+                // `on_singular`. The dense path carries the same `&& diag > ztol`
+                // conjunct (`dense_factor.rs`); this keeps the two paths in step.
+                pivot_row =
+                    if pinv[diag] < 0 && w[diag].abs() >= utol * amax && w[diag].abs() > ztol {
+                        diag
+                    } else {
+                        ipiv as usize
+                    };
                 piv = w[pivot_row];
+                // With the `> ztol` conjunct above and `amax > ztol` in this
+                // branch, both pivot choices satisfy `|piv| > ztol`, so this
+                // guard is unreachable in practice. It remains as defensive
+                // parity with the dense path: should the invariant ever be
+                // broken by a future change, a sub-floor pivot is routed through
+                // `on_singular` (a loud `SingularBasis` under `Fail`, or an
+                // accountable perturbation) rather than silently clamped.
                 if piv.abs() <= ztol {
-                    piv = if piv < 0.0 { -ztol } else { ztol };
+                    match params.on_singular {
+                        LuSingularAction::Fail => {
+                            return Err(FeralError::SingularBasis { column: qcol[k] });
+                        }
+                        LuSingularAction::PerturbToEps { abs_floor } => {
+                            let s = if piv < 0.0 { -1.0 } else { 1.0 };
+                            piv = s * abs_floor.max(piv.abs());
+                        }
+                    }
                 }
             }
 
@@ -333,6 +411,15 @@ impl SparseLu {
             scale_rperm_inv[o] = i;
         }
 
+        // `max|U|` at factor: denominator of the element-growth monitor (L5).
+        let mut u_max0 = 0.0_f64;
+        for row in u_rows.iter() {
+            for &(_, v) in row.iter() {
+                u_max0 = u_max0.max(v.abs());
+            }
+        }
+        let u_max0 = u_max0.max(f64::MIN_POSITIVE);
+
         Ok(SparseLu {
             m,
             l_col_ptr,
@@ -346,6 +433,7 @@ impl SparseLu {
             u_above,
             etas: Vec::new(),
             growth: 1.0,
+            u_max0,
             reach_visits,
             params,
             scale,
@@ -353,6 +441,9 @@ impl SparseLu {
             scratch: vec![0.0; m],
             scratch_mark: vec![false; m],
             ft_work: vec![0.0; m],
+            scratch_b: vec![0.0; m],
+            scratch_c: vec![0.0; m],
+            scratch_d: vec![0.0; m],
         })
     }
 

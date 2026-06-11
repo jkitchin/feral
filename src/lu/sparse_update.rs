@@ -35,8 +35,11 @@ impl SparseLu {
     /// the scan.
     ///
     /// Returns [`FeralError::NeedsRefactor`] (leaving `self` unchanged) when the
-    /// update or growth budget is exceeded, and [`FeralError::SingularBasis`]
-    /// when the bump has no acceptable pivot (the new basis is singular).
+    /// update or growth budget is exceeded, or when the bump has no acceptable
+    /// pivot (a singular replacement basis). In every failure mode the update
+    /// signals NeedsRefactor rather than SingularBasis — matching the dense
+    /// update path ([`super::DenseLu::update`]); the authoritative singularity
+    /// verdict comes from a fresh factorization, not the incremental update.
     pub fn update(&mut self, leaving_slot: usize, entering_col: &[f64]) -> Result<(), FeralError> {
         if entering_col.len() != self.m {
             return Err(FeralError::DimensionMismatch {
@@ -57,8 +60,8 @@ impl SparseLu {
     /// nonzeros `(row, value)` (rows need not be sorted; duplicates are summed).
     /// Fully bump-local: cost is `O(bump + nnz(aₙₑw))`, with no `O(n)` term.
     ///
-    /// Returns [`FeralError::NeedsRefactor`] / [`FeralError::SingularBasis`] as
-    /// for [`SparseLu::update`].
+    /// Returns [`FeralError::NeedsRefactor`] on any failure, as for
+    /// [`SparseLu::update`].
     pub fn update_sparse(
         &mut self,
         leaving_slot: usize,
@@ -97,7 +100,14 @@ impl SparseLu {
             _ => {
                 clear(&mut w, &touched);
                 self.ft_work = w;
-                return Err(FeralError::SingularBasis { column: r });
+                // Spike support deficient: the replacement basis is singular as
+                // far as the incremental update can tell. Signal NeedsRefactor
+                // so the driver refactors from scratch — matching the dense
+                // update path (see DenseLu::update), which also returns
+                // NeedsRefactor for a vanishing/missing pivot rather than
+                // SingularBasis. The authoritative singularity verdict comes
+                // from the fresh factorization, not the update.
+                return Err(FeralError::NeedsRefactor);
             }
         };
 
@@ -126,7 +136,28 @@ impl SparseLu {
         self.ft_work = w;
 
         match result {
-            Ok((ops, growth)) => {
+            Ok(ops) => {
+                // L5 (dev/research/repo-review-2026-06-09.md): monitor element
+                // growth, not the largest single multiplier. Every U entry that
+                // changed this update lives in a `changed` row, so the high-water
+                // `max|U|/u_max0` is maintained by scanning only those rows —
+                // O(changed), keeping the update cheap — and it compounds across
+                // a chain of updates (a per-multiplier max did not).
+                let mut changed_max = 0.0_f64;
+                for &i in changed.iter() {
+                    for &(_, v) in self.u_rows[i].iter() {
+                        changed_max = changed_max.max(v.abs());
+                    }
+                }
+                let growth = self.growth.max(changed_max / self.u_max0);
+                if growth > self.params.max_growth {
+                    // Over budget: roll back exactly like the elimination-error
+                    // path (u_above was not yet modified) and force a refactor.
+                    for (i, row) in saved {
+                        self.u_rows[i] = row;
+                    }
+                    return Err(FeralError::NeedsRefactor);
+                }
                 // Commit: refresh the u_above index for every changed row.
                 for (i, old_row) in saved.iter() {
                     self.unindex_above(*i, old_row);
@@ -271,14 +302,20 @@ impl SparseLu {
     /// Eliminate the bump `[r, h]` of `U` with partial pivoting, returning the
     /// recorded eta ops and the updated growth monitor. Operates in place on
     /// `self.u_rows`; the caller is responsible for rollback on `Err`.
-    fn eliminate_bump(&mut self, r: usize, h: usize) -> Result<(Vec<FtOp>, f64), FeralError> {
-        let ztol = self.params.zero_pivot_tol;
-        let max_growth = self.params.max_growth;
+    fn eliminate_bump(&mut self, r: usize, h: usize) -> Result<Vec<FtOp>, FeralError> {
+        // L6 (dev/research/repo-review-2026-06-09.md): the bump-pivot zero test
+        // is relative to the basis magnitude, not an absolute 1e-13. `u_max0`
+        // (max|U| at the last factor, floored away from zero for L5) is the scale
+        // reference, consistent with the dense update and the factor paths.
+        let ztol = self.params.zero_pivot_tol * self.u_max0;
         let mut ops: Vec<FtOp> = Vec::new();
-        let mut growth = self.growth;
 
         for k in r..=h {
-            // Partial pivot among rows [k, h] with a column-k entry.
+            // Strict partial pivoting among rows [k, h] with a column-k entry.
+            // Unlike the initial factorization (which honors `pivot_threshold`
+            // to trade stability for fill, L2), the bump's structure is already
+            // fixed here, so a relaxed threshold buys no fill reduction and only
+            // trades away stability — we always take the max-magnitude row.
             let mut pivot_row = k;
             let mut pivot_abs = 0.0_f64;
             for i in k..=h {
@@ -290,7 +327,11 @@ impl SparseLu {
                 }
             }
             if pivot_abs <= ztol {
-                return Err(FeralError::SingularBasis { column: k });
+                // Bump pivot vanished: the incremental update cannot continue.
+                // Signal NeedsRefactor (not SingularBasis) so the driver gets
+                // the same contract as the dense update path — update failures
+                // always mean "refactor from scratch."
+                return Err(FeralError::NeedsRefactor);
             }
             if pivot_row != k {
                 self.u_rows.swap(k, pivot_row);
@@ -302,10 +343,6 @@ impl SparseLu {
             for i in k + 1..=h {
                 if let Some(vik) = get_col(&self.u_rows[i], k) {
                     let mult = vik / pivot;
-                    growth = growth.max(mult.abs());
-                    if growth > max_growth {
-                        return Err(FeralError::NeedsRefactor);
-                    }
                     self.u_rows[i] = row_sub(&self.u_rows[i], &pivot_data, mult, k);
                     ops.push(FtOp::Axpy {
                         target: i,
@@ -315,7 +352,7 @@ impl SparseLu {
                 }
             }
         }
-        Ok((ops, growth))
+        Ok(ops)
     }
 
     /// Remove row `i`'s strict-upper entries from the `u_above` column index
@@ -430,4 +467,67 @@ fn row_sub(
         j += 1;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::lu::sparse_factor::SparseLu;
+    use crate::lu::LuParams;
+
+    /// L5 (dev/research/repo-review-2026-06-09.md): the sparse growth monitor
+    /// recorded only the largest single elimination multiplier, so compounded
+    /// element growth across a chain of updates went unmonitored. After the fix
+    /// `growth` is the ‖U‖∞ high-water ratio (max|U| over update history ÷
+    /// max|U| at factor), which compounds. Oracle is the independent
+    /// recomputation of that ratio from the committed `U` (via `u_dense`), not
+    /// the monitor's own bookkeeping; pre-fix `growth` is the max single
+    /// multiplier and does not match.
+    #[test]
+    fn growth_monitor_tracks_compounded_element_growth() {
+        let cols = vec![
+            vec![4.0, 1.0, 0.0, 0.0],
+            vec![1.0, 3.0, 1.0, 0.0],
+            vec![0.0, 1.0, 2.0, 1.0],
+            vec![0.0, 0.0, 1.0, 5.0],
+        ];
+        let m = 4;
+        let params = LuParams {
+            max_updates: 20,
+            max_growth: 1e12,
+            ..LuParams::default()
+        };
+        let mut lu = SparseLu::factor_dense_columns(m, &cols, params).expect("factor");
+
+        let umax = |lu: &SparseLu| {
+            let mut mx = 0.0_f64;
+            for i in 0..m {
+                for j in 0..m {
+                    mx = mx.max(lu.u_dense(i, j).abs());
+                }
+            }
+            mx
+        };
+        let u_max0 = umax(&lu);
+        let mut hw = 1.0_f64;
+
+        // Replace the last slot each time: no bump forms (the spike lands in the
+        // last column), every update commits, and max|U| in that column grows.
+        let updates = [
+            (3usize, vec![0.0, 0.0, 1.0, 20.0]),
+            (3usize, vec![0.0, 0.0, 1.0, 60.0]),
+            (3usize, vec![0.0, 0.0, 1.0, 180.0]),
+        ];
+        for (i, (slot, col)) in updates.iter().enumerate() {
+            lu.update(*slot, col)
+                .unwrap_or_else(|e| panic!("update {i} should commit: {e:?}"));
+            hw = hw.max(umax(&lu) / u_max0);
+            assert!(
+                (lu.growth - hw).abs() <= 1e-9 * hw,
+                "growth monitor {} must equal element-growth high-water {}",
+                lu.growth,
+                hw
+            );
+        }
+        assert!(hw > 1.0, "test must exercise genuine element growth");
+    }
 }

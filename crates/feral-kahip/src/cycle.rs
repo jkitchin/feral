@@ -53,7 +53,8 @@ pub(crate) fn multilevel_bisection(
 
     let mut counters = CoarsenCounters::default();
     let levels = coarsen(graph, &metis_opts, rng, &mut counters);
-    // Coarsening levels observed at this bisection attempt (for diagnostics).
+    // One multilevel bisection is a single V-cycle (one coarsen followed by
+    // one uncoarsen); count it. Not a per-coarsening-level counter.
     stats.cycles = stats.cycles.saturating_add(1);
 
     let coarsest: &Graph = match levels.last() {
@@ -168,14 +169,18 @@ fn tune(mode: KahipMode) -> ModeParams {
 }
 
 /// Bridge feral-metis's `i32`-indexed [`Graph`] to the `usize`-indexed
-/// [`UndirectedGraph`] that K3/K4 consume. Unit vertex weights; edge
-/// weights carried through. Each undirected edge is already stored
-/// twice in `Graph::adjncy`, so the conversion is a direct copy.
+/// [`UndirectedGraph`] that K3/K4 consume. Vertex weights are carried
+/// from `Graph::vwgt`; on a coarse graph these are supervertex masses
+/// `≫ 1`, and K3/K4 measure balance against them (a count-balanced cut
+/// here would be weight-imbalanced). Edge weights carried through. Each
+/// undirected edge is already stored twice in `Graph::adjncy`, so the
+/// conversion is a direct copy.
 pub(crate) fn graph_to_undirected(g: &Graph) -> UndirectedGraph {
     let n = g.nvtxs as usize;
     let mut xadj: Vec<usize> = Vec::with_capacity(n + 1);
     let mut adjncy: Vec<usize> = Vec::with_capacity(g.adjncy.len());
     let mut eweight: Vec<i64> = Vec::with_capacity(g.adjncy.len());
+    let vweight: Vec<i64> = (0..n).map(|v| (g.vwgt[v] as i64).max(1)).collect();
     xadj.push(0);
     for v in 0..n {
         let lo = g.xadj[v] as usize;
@@ -197,6 +202,7 @@ pub(crate) fn graph_to_undirected(g: &Graph) -> UndirectedGraph {
         xadj,
         adjncy,
         eweight,
+        vweight,
     }
 }
 

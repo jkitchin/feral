@@ -56,6 +56,18 @@ pub fn refine_bisection(
         let mut heap: BinaryHeap<(i32, Reverse<i32>, i32)> = BinaryHeap::new();
         // (gain, Reverse(vertex), stamp): stamp is the gain snapshot
         // stored alongside the entry so stale entries can be skipped.
+        //
+        // NOTE: every vertex is seeded here, not just the current
+        // boundary. METIS seeds only boundary vertices and lazily
+        // re-inserts a vertex the first time a neighbour move makes it
+        // a boundary vertex, costing Ω(boundary) per pass rather than
+        // the Ω(n log n) below. Interior vertices have
+        // gain = -internal_degree ≤ 0, so they sit at the bottom of
+        // this max-heap and are only popped after the positive-gain
+        // boundary moves that actually reduce the cut. Seeding all n is
+        // a deliberate simplicity-over-speed trade at FERAL's target
+        // sizes (≤ 100k vertices, where FM rarely dominates runtime);
+        // see dev/tried-and-rejected.md (O11).
         for (v, &g) in gain.iter().enumerate().take(n) {
             heap.push((g, Reverse(v as i32), g));
         }

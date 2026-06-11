@@ -210,6 +210,38 @@ pub struct Solver {
     /// that the InfNorm/Identity path mis-reported as singular. Mirrors
     /// `mc64_fallback_count`'s diagnostic role; resets on `Solver::new()`.
     mc64_scaling_fallback_count: usize,
+    /// N4 (`dev/research/repo-review-2026-06-09.md`): count of `factor()`
+    /// calls that actually *ran* the issue-#65 MC64 retry factorization
+    /// (whether or not it was adopted). Distinct from
+    /// `mc64_scaling_fallback_count`, which counts only adoptions. Exposed
+    /// so callers — and the N4 regression test — can observe that a
+    /// genuinely-singular pattern does not re-pay the full Hungarian +
+    /// second factorization on every subsequent `factor()`. The
+    /// `mc64_retry_not_adopted` latch below caps this at one per pattern
+    /// on the non-adoption path. Resets on `Solver::new()`.
+    mc64_retry_attempts: usize,
+    /// N4: per-pattern latch. Set once the issue-#65 MC64 retry ran and was
+    /// *not* adopted (the matrix is genuinely singular — MC64 cannot change
+    /// rank, so the strict-zero-improvement gate failed). While set, the
+    /// retry gate is skipped, so a singular pattern factored repeatedly
+    /// (e.g. an IPM that never regularizes) pays the wasted second
+    /// factorization once, not once per call. Cleared on pattern change
+    /// alongside `auto_picked_strategy`. The *adoption* path self-latches
+    /// without this flag: adoption pins `auto_picked_strategy` and
+    /// `effective_params.scaling` to `Mc64Symmetric`, which the gate's
+    /// `!matches!(..Mc64Symmetric)` clause already suppresses.
+    ///
+    /// Tradeoff (interacts with the inertia hard rule; see `dev/decisions.md`
+    /// 2026-06-11): this latch is keyed on the *pattern*, but MC64 acts on
+    /// *values*. A pattern singular at iterate `k` (retry not adopted, latch
+    /// set) that becomes MC64-rescuable at `k+1` on the *same pattern with
+    /// different values* has its retry suppressed — reporting unrescued inertia
+    /// where the pre-latch code recovered. Bounded: MC64 cannot change rank, so
+    /// a *structurally* rank-deficient KKT (the issue-#43 routine case this was
+    /// built for) is exactly safe; the residual risk is a *numerically*-only
+    /// singular iterate. If ever seen to violate the inertia gate, make the
+    /// latch values-aware rather than remove it.
+    mc64_retry_not_adopted: bool,
     /// Pooled scratch for the numeric phase. Retained across
     /// `factor` calls so IPM-style re-factorizations (same
     /// pattern, new values; or bumped pivot threshold) do not
@@ -369,6 +401,8 @@ impl Solver {
             symbolic_call_count: 0,
             mc64_fallback_count: 0,
             mc64_scaling_fallback_count: 0,
+            mc64_retry_attempts: 0,
+            mc64_retry_not_adopted: false,
             workspace: FactorWorkspace::new(),
             use_parallel: true,
             parallel_pool: None,
@@ -622,9 +656,10 @@ impl Solver {
     }
 
     /// Enable MA57-style static-pivot perturbation (issue #38). On
-    /// every `factor()` call the solver computes `||A||_∞` once and
-    /// propagates an absolute floor
-    /// `static_pivot_floor = t * ||A||_∞` into the BK pivot kernels.
+    /// every `factor()` call the solver derives an absolute floor
+    /// `static_pivot_floor = t * ||D·A·D||_∞` from the *scaled* matrix
+    /// norm (post-scaling; N2) and propagates it into the BK pivot
+    /// kernels.
     /// Every accepted 1×1 / 2×2 pivot whose magnitude (for 2×2:
     /// smallest |eigenvalue|) is below the floor is perturbed up to
     /// the floor and counted by sign. The factor satisfies
@@ -799,6 +834,10 @@ impl Solver {
             self.mc64_scaling_cache = None;
             // Issue #51: sticky Auto pick is also pattern-bound.
             self.auto_picked_strategy = None;
+            // N4: the "MC64 retry tried and not adopted" latch is keyed on
+            // the pattern fingerprint — a new pattern may not be singular,
+            // so the retry is allowed to run again.
+            self.mc64_retry_not_adopted = false;
         }
 
         // Step 3: ensure symbolic is cached.
@@ -902,25 +941,29 @@ impl Solver {
         };
 
         // Step 3.7: issue #38 — MA57-style static-pivot perturbation.
-        // When `static_pivot_threshold = Some(t)`, compute `||A||_∞`
-        // once (cost: O(nnz)) and propagate the absolute floor
-        // `static_pivot_floor = t * ||A||_∞` to the BK params for
-        // this factor call. The dense pivot kernels then enforce the
-        // floor on every accepted 1×1 / 2×2 pivot. We compute this
-        // AFTER effective_params is built so cascade-break auto-arm
-        // (which may overwrite BK fields) takes precedence on its
-        // own knobs, and AFTER non-finite validation (Step 0 above
-        // already ran) so the norm scan is well-defined.
+        // `static_pivot_threshold = Some(t)` is a *relative* threshold;
+        // the absolute floor `static_pivot_floor = t · ‖·‖∞` it implies
+        // is applied by the BK pivot kernels to pivots of the SCALED
+        // matrix `D·A·D`. Finding N2 (`dev/research/repo-review-2026-06-09.md`):
+        // the floor must therefore be derived from `‖D·A·D‖∞`, not the
+        // unscaled user `‖A‖∞` — under a norm-normalizing scaling
+        // (InfNorm / MC64) the two norms differ by the scaling ratio, so
+        // an unscaled floor made `t` behave like a different value in
+        // pivot space. The conversion now lives in
+        // `factorize::apply_post_scaling_overrides`, alongside the F-01
+        // null-pivot floor, where the scaled ∞-norm is already in hand.
         let mut effective_params = effective_params;
-        if let Some(t) = effective_params.static_pivot_threshold {
-            if t > 0.0 {
-                let norm_inf = matrix_inf_norm(matrix);
-                let floor = t * norm_inf;
-                if floor.is_finite() && floor > 0.0 {
-                    effective_params.bk.static_pivot_floor = floor;
-                }
-            }
-        }
+
+        // N1 (dev/research/repo-review-2026-06-09.md): sync the user-facing
+        // FMA opt-in (`NumericParams::fma`, set by `with_fma`) into the BK
+        // params the dense kernels actually read (`bk.fma`). Without this the
+        // toggle was a silent no-op: `with_fma(true)` set `numeric_params.fma`
+        // but every BK call site consumes `&params.bk`, whose `fma` field
+        // stayed at its `false` default, so the documented ~2× FMA kernels
+        // (issue #8) never dispatched through the public API. `effective_params`
+        // is the single funnel feeding both the sequential and parallel
+        // multifrontal drivers, so syncing here covers every factor() path.
+        effective_params.bk.fma = effective_params.fma;
 
         // Step 3.75: Issue #51 — sticky Auto pick. The Auto pipeline
         // (`compute_scaling_auto_with_cache`) is value-aware on two
@@ -1056,12 +1099,22 @@ impl Solver {
         // refactor on this pattern skips the retry. See
         // `dev/research/issue-65-mc64-scaling-fallback.md`.
         let mut mc64_fallback_adopted = false;
+        // N4: did the retry factorization run this call, and did it end in
+        // non-adoption? Mirror the `mc64_fallback_adopted` pattern — set
+        // locals inside the move-consuming `match`, apply to `self` after.
+        let mut mc64_retry_ran = false;
+        let mut mc64_retry_not_adopted_now = false;
         let result = match result {
             Ok((factors, inertia))
                 if matches!(self.numeric_params.scaling, ScalingStrategy::Auto)
                     && !matches!(effective_params.scaling, ScalingStrategy::Mc64Symmetric)
+                    // N4: per-pattern latch — once the retry ran and was not
+                    // adopted (genuinely singular), do not re-pay it on every
+                    // subsequent same-pattern factor().
+                    && !self.mc64_retry_not_adopted
                     && inertia.zero > 0 =>
             {
+                mc64_retry_ran = true;
                 let first_zero = inertia.zero;
                 let mut retry_params = effective_params.clone();
                 retry_params.scaling = ScalingStrategy::Mc64Symmetric;
@@ -1102,14 +1155,27 @@ impl Solver {
                     }
                     // MC64 did not improve the zero count (e.g. the matrix
                     // is genuinely singular) or it errored — keep the
-                    // original factor.
-                    _ => Ok((factors, inertia)),
+                    // original factor. N4: latch so subsequent same-pattern
+                    // factor()s skip this wasted retry entirely.
+                    _ => {
+                        mc64_retry_not_adopted_now = true;
+                        Ok((factors, inertia))
+                    }
                 }
             }
             other => other,
         };
         if mc64_fallback_adopted {
             self.mc64_scaling_fallback_count += 1;
+        }
+        // N4: observability + latch. Count every retry that ran; arm the
+        // per-pattern latch when the retry was not adopted so a genuinely
+        // singular pattern pays the wasted second factorization at most once.
+        if mc64_retry_ran {
+            self.mc64_retry_attempts += 1;
+        }
+        if mc64_retry_not_adopted_now {
+            self.mc64_retry_not_adopted = true;
         }
 
         // Issue #38: invalidate the one-shot MC64 cache that the
@@ -1299,6 +1365,21 @@ impl Solver {
                 FactorStatus::FatalError(e)
             }
         }
+    }
+
+    /// Drop any stored numeric factor (and its inertia), so the next
+    /// `solve*` returns `FeralError::NoFactor` until `factor()` runs
+    /// again. Used by the C ABI when the matrix structure is replaced
+    /// (X9): a protocol-violating `set_structure` → `solve` that skips
+    /// `factor` must fail cleanly rather than reuse the previous
+    /// structure's factor.
+    ///
+    /// The cached symbolic analysis and pattern fingerprint are left in
+    /// place, so a same-structure re-initialization still reuses the
+    /// symbolic factorization on the next `factor()`.
+    pub fn invalidate_factors(&mut self) {
+        self.last_factors = None;
+        self.last_inertia = None;
     }
 
     /// Solve `A x = b` against the most recent stored factor.
@@ -1584,6 +1665,22 @@ impl Solver {
         self.mc64_scaling_fallback_count
     }
 
+    /// N4 (`dev/research/repo-review-2026-06-09.md`): number of `factor()`
+    /// calls that actually *ran* the issue-#65 MC64 retry factorization,
+    /// whether or not it was adopted. Differs from
+    /// [`Solver::mc64_scaling_fallback_count`] (adoptions only) on the
+    /// non-adoption path: a genuinely singular matrix runs the retry, fails
+    /// the strict-zero-improvement gate, and keeps the original factor.
+    ///
+    /// Before the N4 fix this incremented on *every* same-pattern
+    /// `factor()` (the non-adoption arm set no latch), so an IPM that never
+    /// regularizes re-paid a full Hungarian + second factorization
+    /// indefinitely. With the per-pattern latch this is capped at one per
+    /// pattern on the non-adoption path. Resets on `Solver::new()`.
+    pub fn mc64_retry_attempt_count(&self) -> usize {
+        self.mc64_retry_attempts
+    }
+
     /// Number of `factor()` calls on this `Solver` that reused the
     /// value-bounded MC64 scaling cache (Track B2) instead of
     /// rerunning the Hungarian. Resets on `Solver::new()`; stays `0`
@@ -1696,39 +1793,6 @@ impl Solver {
         self.last_symbolic = None;
         self.last_pattern_fingerprint = None;
     }
-}
-
-/// Compute `||A||_∞` for a symmetric matrix stored as a CSC lower
-/// (or upper) triangle. Uses the symmetric definition:
-/// `||A||_∞ = max_i Σ_j |a_ij|`. Iterates the stored half once and
-/// reflects off-diagonal entries to the opposite row sum. Returns
-/// `0.0` for `n = 0`. Used by `Solver::factor` to derive the
-/// absolute floor for `NumericParams::static_pivot_threshold`.
-fn matrix_inf_norm(matrix: &CscMatrix) -> f64 {
-    let n = matrix.n;
-    if n == 0 {
-        return 0.0;
-    }
-    let mut row_sums = vec![0.0_f64; n];
-    for j in 0..n {
-        let start = matrix.col_ptr[j];
-        let end = matrix.col_ptr[j + 1];
-        for p in start..end {
-            let i = matrix.row_idx[p];
-            let v = matrix.values[p].abs();
-            row_sums[i] += v;
-            if i != j {
-                row_sums[j] += v;
-            }
-        }
-    }
-    let mut m = 0.0_f64;
-    for s in row_sums {
-        if s > m {
-            m = s;
-        }
-    }
-    m
 }
 
 impl Default for Solver {

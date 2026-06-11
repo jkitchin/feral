@@ -341,6 +341,47 @@ fn diag_add(counter: &std::sync::atomic::AtomicU64, n: u64) {
 /// handles stability via ratios against the local block max.
 const SSIDS_DET_SMALL: f64 = 1e-20;
 
+/// SSIDS scale-invariant 2×2 determinant floor — the single predicate
+/// that decides whether a symmetric 2×2 block `[[d11, d21], [d21, d22]]`
+/// is *too singular to invert*. Ported from SSIDS
+/// `src/ssids/cpu/kernels/ldlt_tpp.cxx:98-106`:
+///
+/// ```text
+///   maxpiv   = max(|d11|, |d21|, |d22|)
+///   detscale = 1 / maxpiv
+///   detpiv0  = (d11 * detscale) * d22
+///   detpiv1  = (d21 * detscale) * d21
+///   detpiv   = detpiv0 - detpiv1          (== det / maxpiv)
+///   fail iff maxpiv < SSIDS_DET_SMALL
+///         OR |detpiv| < max(SSIDS_DET_SMALL, |detpiv0|/2, |detpiv1|/2)
+/// ```
+///
+/// Returns `true` when the block must be rejected (factor side: delay /
+/// fall back to 1×1; solve side: skip the block, leaving its solution
+/// components untouched). The test is scale-invariant by construction —
+/// the ratio of `|detpiv|` to fractions of `|detpiv0|`, `|detpiv1|` is
+/// independent of the block's absolute magnitude — so a well-conditioned
+/// block at any scale passes, unlike an absolute `|det| <= zero_tol_2x2`
+/// floor. This is the **shared** acceptance predicate: the factor 2×2
+/// gates and `d_block_solve` both call it, so a block the factorization
+/// accepts is exactly a block the solve inverts (finding D4).
+/// See dev/research/ssids-scale-invariant-det-floor.md.
+#[inline]
+pub(crate) fn ssids_det_floor_fail(d11: f64, d21: f64, d22: f64) -> bool {
+    let max_piv = d11.abs().max(d21.abs()).max(d22.abs());
+    if max_piv < SSIDS_DET_SMALL {
+        return true;
+    }
+    let det_scale = 1.0 / max_piv;
+    let detpiv0 = (d11 * det_scale) * d22;
+    let detpiv1 = (d21 * det_scale) * d21;
+    let detpiv = detpiv0 - detpiv1;
+    let cancel_floor = SSIDS_DET_SMALL
+        .max(detpiv0.abs() * 0.5)
+        .max(detpiv1.abs() * 0.5);
+    detpiv.abs() < cancel_floor
+}
+
 /// Pivot-growth threshold above which a factor is flagged for iterative
 /// refinement. A well-pivoted BK factor with unit-diagonal L satisfies
 /// |L_ij| ≤ 1/(1 − α) ≈ 2.78; values substantially above this indicate
@@ -552,9 +593,11 @@ pub struct BunchKaufmanParams {
     /// kernels. Default `false` keeps the cross-arch bit-exact non-FMA
     /// path; `true` switches to the FMA siblings for ~2x arithmetic
     /// throughput on aarch64 NEON and x86 V3 AVX2+FMA. Mirrors
-    /// `NumericParams::fma`; the sparse multifrontal driver copies
-    /// `NumericParams::fma` here when constructing per-supernode BK
-    /// params. See `dev/research/fma-kernel-opt-in.md`, issue #8.
+    /// `NumericParams::fma`; the `Solver` factor funnel
+    /// (`solver.rs`, `effective_params`) copies `NumericParams::fma`
+    /// into this field before handing `&params.bk` to the multifrontal
+    /// drivers (N1, `dev/research/repo-review-2026-06-09.md`). See
+    /// `dev/research/fma-kernel-opt-in.md`, issue #8.
     pub fma: bool,
 
     /// Threshold-partial-pivoting acceleration. See [`TppMethod`].
@@ -758,7 +801,12 @@ pub struct Factors {
     pub perm_inv: Vec<usize>,
     /// Equilibration scaling diagonal D_eq. Length n.
     pub d_eq: Vec<f64>,
-    /// True when ZeroPivotAction::ForceAccept fired during factorization.
+    /// True when the factor is approximate and a residual check / iterative
+    /// refinement is advised. Set by any of: a `ForceAccept`'d zero pivot,
+    /// a `PerturbToEps` perturbation, an F-01 rank-deficiency band pivot
+    /// (sign-fallback), an MA57-style static-pivot floor perturbation, or
+    /// growth flagging (`|L_ij| > L_GROWTH_THRESHOLD`). (D9,
+    /// repo-review-2026-06-09.md: previously documented as ForceAccept-only.)
     pub needs_refinement: bool,
     /// 1×1 pivot threshold copied from BunchKaufmanParams at factor time.
     /// `solve` consults this to decide whether to divide by `d_diag[k]`:
@@ -1053,6 +1101,51 @@ pub fn factor(
             continue;
         }
 
+        // REG-2 (repo-review-2026-06-09-verification.md): the static-pivot
+        // perturbation in `do_2x2_pivot` adds the same τ to *both*
+        // diagonals, so for a BK-selected (opposite-sign) 2×2 block it
+        // shifts the negative eigenvalue *toward* zero and can land it on
+        // exactly zero — a singular perturbed block whose rank-2 update
+        // divides by `det == 0` (`t = 1/(d00·d11 − 1)`), writing NaN to D
+        // and ±inf to L. Re-gate the *perturbed* block exactly as the
+        // frontal/scalar paths do (`ssids_det_floor_fail`, factor.rs:2763
+        // / :3779) and fall back to a 1×1 pivot when it fails. No-op at the
+        // default `static_pivot_floor == 0` (perturbation never fires), so
+        // the BK 2×2 path is byte-identical there.
+        if params.static_pivot_floor > 0.0 {
+            if let Some((pd11, pd22)) =
+                perturb_2x2_to_floor(d11_v, d21_v, d22_v, params.static_pivot_floor)
+            {
+                if ssids_det_floor_fail(pd11, d21_v, pd22) {
+                    match params.on_zero_pivot {
+                        ZeroPivotAction::Fail => {
+                            return Err(FeralError::NumericallyRankDeficient);
+                        }
+                        ZeroPivotAction::ForceAccept | ZeroPivotAction::PerturbToEps { .. } => {
+                            needs_refinement = true;
+                        }
+                    }
+                    let (ng, nr) = do_1x1_pivot(
+                        &mut a,
+                        n,
+                        k,
+                        gamma0,
+                        params,
+                        &mut pos,
+                        &mut neg,
+                        &mut zero,
+                        &mut needs_refinement,
+                        &mut n_tiny,
+                    )?;
+                    fused_gamma0 = ng;
+                    fused_r = nr;
+                    have_fused = k + 1 < n;
+                    k += 1;
+                    continue;
+                }
+            }
+        }
+
         let (ng, nr) = do_2x2_pivot(
             &mut a,
             n,
@@ -1241,7 +1334,11 @@ pub struct FrontalFactors {
     pub n_delayed: usize,
     /// Inertia of the `nelim` eliminated pivots.
     pub inertia: Inertia,
-    /// Whether ForceAccept fired during factorization.
+    /// Whether the factor is approximate and a residual check / iterative
+    /// refinement is advised. Set by any of: a `ForceAccept`'d zero pivot,
+    /// a `PerturbToEps` perturbation, an F-01 rank-deficiency band pivot,
+    /// a static-pivot floor perturbation, or growth flagging — not just
+    /// ForceAccept (D9, repo-review-2026-06-09.md).
     pub needs_refinement: bool,
     /// Number of pivots rescued by rook search after BK-partial's column-
     /// relative threshold test rejected them (Phase 2.4.3). Zero on
@@ -1382,6 +1479,27 @@ pub fn factor_frontal(
     factor_frontal_with_profile(matrix, ncol, may_delay, params, None)
 }
 
+/// Build the contribution-block buffer for a front that eliminated nothing
+/// (`ncol == 0`): the whole `n×n` matrix is the Schur complement passed up
+/// to the parent. This mirrors the normal contribution-extraction
+/// convention used by the `factor_frontal_*` elimination paths — the strict
+/// upper triangle is zero-filled and the lower triangle (`ci >= cj`) carries
+/// the matrix values. Cloning `matrix.data` wholesale would instead carry
+/// the strict upper triangle's stale bytes, which
+/// `SymmetricMatrix::from_pooled_buf` explicitly leaves uninitialized,
+/// making full-buffer bit-compares nondeterministic (D10,
+/// dev/research/repo-review-2026-06-09.md).
+fn contrib_zeroed_upper(data: &[f64], n: usize) -> Vec<f64> {
+    let mut contrib = vec![0.0f64; n * n];
+    for cj in 0..n {
+        let col_base = cj * n;
+        // Lower triangle (ci >= cj) copies the matrix; the strict upper
+        // triangle keeps its zero initialization.
+        contrib[col_base + cj..col_base + n].copy_from_slice(&data[col_base + cj..col_base + n]);
+    }
+    contrib
+}
+
 #[doc(hidden)]
 pub fn factor_frontal_with_profile(
     matrix: &crate::dense::matrix::SymmetricMatrix,
@@ -1409,7 +1527,7 @@ pub fn factor_frontal_with_profile(
             d_subdiag: Vec::new(),
             perm: (0..nrow).collect(),
             perm_inv: (0..nrow).collect(),
-            contrib: matrix.data.clone(),
+            contrib: contrib_zeroed_upper(&matrix.data, nrow),
             contrib_dim: nrow,
             n_delayed: 0,
             inertia: Inertia {
@@ -1506,7 +1624,7 @@ fn factor_frontal_in_place_with_scratch_impl(
             d_subdiag: Vec::new(),
             perm: (0..nrow).collect(),
             perm_inv: (0..nrow).collect(),
-            contrib: matrix.data.clone(),
+            contrib: contrib_zeroed_upper(&matrix.data, nrow),
             contrib_dim: nrow,
             n_delayed: 0,
             inertia: Inertia {
@@ -1655,32 +1773,40 @@ fn factor_frontal_in_place_with_scratch_impl(
     let mut contrib = scratch.contrib_pool.take().unwrap_or_default();
     contrib.clear();
     contrib.reserve(cdim2);
+    // Issue #56 Lever B (single write per cell) preserved, but the
+    // initialization now happens through the Vec's spare capacity as
+    // `MaybeUninit<f64>` *before* the length is grown. The prior code
+    // called `set_len(cdim2)` first and then wrote through a `&mut [f64]`
+    // materialized over still-uninitialized memory: that exposes
+    // uninitialized elements as live `f64`s, violating `Vec::set_len`'s
+    // documented precondition (D6, dev/research/repo-review-2026-06-09.md).
+    // "Every cell is written before read" is a real property but it is not
+    // the property `set_len` requires (the elements must be initialized
+    // *at the call*). Writing via `MaybeUninit` and calling `set_len`
+    // afterwards satisfies the contract with the same single-pass cost.
+    {
+        let spare = contrib.spare_capacity_mut();
+        for cj in 0..cdim {
+            let col_base = cj * cdim;
+            for ci in 0..cj {
+                spare[col_base + ci].write(0.0);
+            }
+            for ci in cj..cdim {
+                spare[col_base + ci].write(a[(nelim + cj) * nrow + (nelim + ci)]);
+            }
+        }
+    }
     let _pt_zf = phase_timing::start();
-    // SAFETY: every cell in 0..cdim2 is written exactly once by the
-    // loop below before any read. f64 has no Drop, so dropping a Vec
-    // whose bytes were briefly uninitialized between `set_len` and the
-    // loop body is sound (no destructor reads them). The pool's prior
-    // contents (when `take()` returned `Some`) and any newly-reserved
-    // capacity are both overwritten by the loop. CONTRIBZEROFILL_NS
-    // brackets the `set_len` so the probe still reports a non-zero
-    // counter — its meaning is now "the cost of carving out the
-    // contrib region", which is O(1) instead of O(cdim²).
+    // SAFETY: the loop above initialized every element in 0..cdim2 of the
+    // spare capacity (which `reserve(cdim2)` guaranteed exists), so
+    // growing the length to cdim2 exposes only fully-initialized values.
+    // CONTRIBZEROFILL_NS brackets only this O(1) length carve-out, as
+    // before; the O(cdim²) initialization is counted under
+    // CONTRIBEXTRACT_NS via `_pt_cx`.
     unsafe {
         contrib.set_len(cdim2);
     }
     phase_timing::stop(&phase_timing::CONTRIBZEROFILL_NS, _pt_zf);
-    {
-        let slice: &mut [f64] = contrib.as_mut_slice();
-        for cj in 0..cdim {
-            let col_base = cj * cdim;
-            for ci in 0..cj {
-                slice[col_base + ci] = 0.0;
-            }
-            for ci in cj..cdim {
-                slice[col_base + ci] = a[(nelim + cj) * nrow + (nelim + ci)];
-            }
-        }
-    }
     phase_timing::stop(&phase_timing::CONTRIBEXTRACT_NS, _pt_cx);
 
     let mut perm_inv = vec![0usize; nrow];
@@ -1831,7 +1957,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             d_subdiag: Vec::new(),
             perm: (0..nrow).collect(),
             perm_inv: (0..nrow).collect(),
-            contrib: matrix.data.clone(),
+            contrib: contrib_zeroed_upper(&matrix.data, nrow),
             contrib_dim: nrow,
             n_delayed: 0,
             inertia: Inertia {
@@ -1856,20 +1982,30 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
         return factor_frontal(matrix, ncol, may_delay, params);
     }
 
-    // Issue #9 Step 2 dispatch: 32×32 fully-summed fronts go through
-    // `factor_block32`. That function delegates to `factor_frontal`,
-    // whose eager `do_1x1_update` / `do_2x2_update` now route to the
-    // block-32 SIMD body (`update_1x1_block32` quad/dual/single tiling)
-    // at n==32. The panel path (`lblt_panel_frontal`) was leaving the
-    // batched-source quad kernel unused at bs==ncol==32 because
+    // Issue #9 Step 2 dispatch: 32×32 fully-summed fronts go through the
+    // block-32 entry, whose eager `do_1x1_update` / `do_2x2_update` route
+    // to the block-32 SIMD body (`update_1x1_block32` quad/dual/single
+    // tiling) at n==32. The panel path (`lblt_panel_frontal`) was leaving
+    // the batched-source quad kernel unused at bs==ncol==32 because
     // `j_start = k + n_elim == nrow` skips `apply_blocked_schur_panel`;
-    // the eager-update path uses the quad kernel for every trailing
-    // tile of 4 columns. Bit-parity: factor_frontal is the documented
-    // oracle for both lblt_panel_frontal and the block-32 SIMD body.
+    // the eager-update path uses the quad kernel for every trailing tile
+    // of 4 columns.
+    //
+    // D7: route the 32×32 front through `factor_block32`, the in-place
+    // pooled-scratch production entry. It factors directly into
+    // `matrix.data` reusing the caller's `scratch` and delegates to
+    // `factor_frontal_in_place_with_scratch` (bit-exact with the
+    // `factor_frontal` oracle for both lblt_panel_frontal and the block-32
+    // SIMD body), paying none of the public `factor_frontal` entry's
+    // overhead — a `validate()` re-scan, an n×n working copy, and a
+    // throwaway `FactorScratch` — which would defeat the whole purpose of
+    // this W-3a in-place path (issue #13).
     if nrow == crate::dense::block_ldlt32::BLOCK_SIZE
         && ncol == crate::dense::block_ldlt32::BLOCK_SIZE
     {
-        return crate::dense::block_ldlt32::factor_block32(matrix, ncol, may_delay, params);
+        return crate::dense::block_ldlt32::factor_block32(
+            matrix, ncol, may_delay, params, scratch,
+        );
     }
 
     // Fallback conditions where the panel offers no advantage.
@@ -2141,26 +2277,31 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     let mut contrib = scratch.contrib_pool.take().unwrap_or_default();
     contrib.clear();
     contrib.reserve(cdim2);
+    // Initialize through the spare capacity as `MaybeUninit<f64>` before
+    // growing the length, so `set_len` never exposes uninitialized
+    // elements. See the matching long-form safety comment in
+    // `factor_frontal_in_place_with_scratch_impl` (D6,
+    // dev/research/repo-review-2026-06-09.md).
+    {
+        let spare = contrib.spare_capacity_mut();
+        for cj in 0..cdim {
+            let col_base = cj * cdim;
+            for ci in 0..cj {
+                spare[col_base + ci].write(0.0);
+            }
+            for ci in cj..cdim {
+                spare[col_base + ci].write(a[(nelim + cj) * nrow + (nelim + ci)]);
+            }
+        }
+    }
     let _pt_zf = phase_timing::start();
-    // SAFETY: every cell in 0..cdim2 is written exactly once by the
-    // loop below before any read. f64 has no Drop. See the matching
-    // safety comment in `factor_frontal` for the long form.
+    // SAFETY: the loop above initialized every element in 0..cdim2 of the
+    // spare capacity that `reserve(cdim2)` guaranteed exists; `f64` has no
+    // Drop, so growing the length exposes only initialized values.
     unsafe {
         contrib.set_len(cdim2);
     }
     phase_timing::stop(&phase_timing::CONTRIBZEROFILL_NS, _pt_zf);
-    {
-        let slice: &mut [f64] = contrib.as_mut_slice();
-        for cj in 0..cdim {
-            let col_base = cj * cdim;
-            for ci in 0..cj {
-                slice[col_base + ci] = 0.0;
-            }
-            for ci in cj..cdim {
-                slice[col_base + ci] = a[(nelim + cj) * nrow + (nelim + ci)];
-            }
-        }
-    }
     phase_timing::stop(&phase_timing::CONTRIBEXTRACT_NS, _pt_cx);
 
     let mut perm_inv = vec![0usize; nrow];
@@ -2307,7 +2448,7 @@ pub fn factor_frontal_diagonal_in_place(
             d_subdiag: Vec::new(),
             perm: (0..nrow).collect(),
             perm_inv: (0..nrow).collect(),
-            contrib: matrix.data.clone(),
+            contrib: contrib_zeroed_upper(&matrix.data, nrow),
             contrib_dim: nrow,
             n_delayed: 0,
             inertia: Inertia {
@@ -2615,9 +2756,31 @@ fn lblt_panel_frontal(
 
             // 2×2 accepted at (col, col+1) with no swap. Apply the
             // same growth + det-floor checks scalar applies.
-            let d11 = a[col * nrow + col];
+            let mut d11 = a[col * nrow + col];
             let d21 = a[col * nrow + (col + 1)];
-            let d22 = a[(col + 1) * nrow + (col + 1)];
+            let mut d22 = a[(col + 1) * nrow + (col + 1)];
+
+            // Finding D2: mirror scalar_pivot_step's MA57-style
+            // static-pivot perturbation (factor.rs:3624-3633). Push the
+            // smaller |eigenvalue| up to `static_pivot_floor` *before*
+            // the growth/det gates and inertia count, so a sub-floor
+            // block is accepted at the floor (with the same
+            // `needs_refinement` / `n_tiny` / inertia the scalar path
+            // records) rather than accepted unperturbed. Without this
+            // the panel and scalar paths diverge in D, L, the refinement
+            // flag, and even inertia whenever the knob is on, breaking
+            // the documented panel/scalar bit-parity contract.
+            if let Some((new_d11, new_d22)) =
+                perturb_2x2_to_floor(d11, d21, d22, params.static_pivot_floor)
+            {
+                d11 = new_d11;
+                d22 = new_d22;
+                a[col * nrow + col] = d11;
+                a[(col + 1) * nrow + (col + 1)] = d22;
+                *needs_refinement = true;
+                *n_tiny += 1;
+            }
+
             let det = d11 * d22 - d21 * d21;
 
             // Duff-Reid 2×2 growth bound — same predicate as
@@ -2640,21 +2803,9 @@ fn lblt_panel_frontal(
             let growth_fail = (d22.abs() * rmax + amax * tmax) * u > absdet
                 || (d11.abs() * tmax + amax * rmax) * u > absdet;
 
-            // SSIDS scale-invariant det floor — same predicate as
-            // scalar_pivot_step:1776-1788.
-            let max_piv = d11.abs().max(d21.abs()).max(d22.abs());
-            let det_floor_fail = if max_piv < SSIDS_DET_SMALL {
-                true
-            } else {
-                let det_scale = 1.0 / max_piv;
-                let detpiv0 = (d11 * det_scale) * d22;
-                let detpiv1 = (d21 * det_scale) * d21;
-                let detpiv = detpiv0 - detpiv1;
-                let cancel_floor = SSIDS_DET_SMALL
-                    .max(detpiv0.abs() * 0.5)
-                    .max(detpiv1.abs() * 0.5);
-                detpiv.abs() < cancel_floor
-            };
+            // SSIDS scale-invariant det floor — shared with the solve
+            // gate (`d_block_solve`) via `ssids_det_floor_fail`.
+            let det_floor_fail = ssids_det_floor_fail(d11, d21, d22);
 
             if growth_fail || det_floor_fail {
                 // Rejection means scalar will run its
@@ -3664,36 +3815,13 @@ fn scalar_pivot_step(
             || (d11.abs() * tmax + amax * rmax) * u > absdet;
 
         // Scale-invariant cancellation-aware determinant floor, ported
-        // from SSIDS `src/ssids/cpu/kernels/ldlt_tpp.cxx:98-106`:
-        //
-        //   maxpiv    = max(|a11|, |a21|, |a22|)
-        //   detscale  = 1 / maxpiv
-        //   detpiv0   = (a11 * detscale) * a22
-        //   detpiv1   = (a21 * detscale) * a21
-        //   detpiv    = detpiv0 - detpiv1      (== det / maxpiv)
-        //   reject iff maxpiv < small
-        //           OR |detpiv| < max(small, |detpiv0|/2, |detpiv1|/2)
-        //
-        // This replaces the prior absolute `|det| <= zero_tol_2x2` floor,
-        // which was only meaningful on equilibrated matrices. The test
-        // is scale-invariant by construction: the ratio `|detpiv|` vs
-        // fractions of `|detpiv0|`, `|detpiv1|` does not depend on
-        // the absolute magnitude of the block. `SSIDS_DET_SMALL = 1e-20`
-        // is a dead-zero underflow floor, NOT a stability threshold.
-        // See dev/research/ssids-scale-invariant-det-floor.md.
-        let max_piv = d11.abs().max(d21.abs()).max(d22.abs());
-        let det_floor_fail = if max_piv < SSIDS_DET_SMALL {
-            true
-        } else {
-            let det_scale = 1.0 / max_piv;
-            let detpiv0 = (d11 * det_scale) * d22;
-            let detpiv1 = (d21 * det_scale) * d21;
-            let detpiv = detpiv0 - detpiv1;
-            let cancel_floor = SSIDS_DET_SMALL
-                .max(detpiv0.abs() * 0.5)
-                .max(detpiv1.abs() * 0.5);
-            detpiv.abs() < cancel_floor
-        };
+        // from SSIDS `src/ssids/cpu/kernels/ldlt_tpp.cxx:98-106`. This
+        // replaces the prior absolute `|det| <= zero_tol_2x2` floor,
+        // which was only meaningful on equilibrated matrices. Shared with
+        // the solve gate (`d_block_solve`) via `ssids_det_floor_fail` so
+        // a block the factor accepts is exactly a block the solve inverts
+        // (finding D4).
+        let det_floor_fail = ssids_det_floor_fail(d11, d21, d22);
 
         if growth_fail || det_floor_fail {
             // 2×2 rejected. SSIDS-style delayed pivoting: when
@@ -3889,11 +4017,15 @@ fn try_reject_1x1_frontal(
         //       the strict floor (default EPS).
         //
         //  (a') zero_tol < |d| <= null_pivot_tol — rank-deficiency
-        //       band per Wilkinson's backward error bound. Count as
-        //       zero in inertia (F-01) but leave d_diag and L intact
-        //       so the solve can still divide by `d` (its strict
-        //       `factors.zero_tol` check on the divide stays at EPS).
-        //       `needs_refinement = true` guards the residual.
+        //       band per Wilkinson's backward error bound. As of the
+        //       2026-05-17 sign-fallback this band collapses into case
+        //       (b): the pivot is counted *by sign*, not as zero (the
+        //       pre-2026-05-17 rule counted it zero — see the inline
+        //       comment at the case (a') code below for the full
+        //       rationale; D9, repo-review-2026-06-09.md). d_diag and L
+        //       stay intact so the solve can still divide by `d` (its
+        //       strict `factors.zero_tol` check on the divide stays at
+        //       EPS); `needs_refinement = true` guards the residual.
         //
         //  (b)  null_pivot_tol < |d| <= u*col_max — small but clearly
         //       nonzero by the relative-scale test. Accept with
@@ -4287,9 +4419,16 @@ fn column_offdiag_max(a: &[f64], n: usize, k: usize) -> (f64, usize) {
 /// Compute the max off-diagonal magnitude in the full symmetric row/column r,
 /// restricted to the trailing submatrix starting at column k.
 /// This searches both below the diagonal (column r, rows > r) and
-/// to the left of the diagonal (row r, columns k..r), excluding
-/// position (r, k) which is not part of the "off-diagonal of r" in
-/// the context of pivot selection — we want max over i != r.
+/// to the left of the diagonal (row r, columns `k..r`, i.e. `k` through
+/// `r-1` inclusive).
+///
+/// IMPORTANT: the left-of-diagonal range **includes** position (r, k).
+/// This is deliberate and load-bearing — it matches LAPACK dsytf2's
+/// ROWMAX, which includes A(IMAX, K). A(r, k) is the candidate pivot's
+/// partner entry; dropping it (e.g. narrowing the loop to `(k+1)..r`)
+/// would corrupt Bunch-Kaufman pivot selection. Pinned by
+/// `row_offdiag_tests::row_offdiag_max_includes_position_r_k` (finding
+/// D8, dev/research/repo-review-2026-06-09.md).
 fn symmetric_row_offdiag_max(a: &[f64], n: usize, k: usize, r: usize) -> f64 {
     let mut max_val = 0.0;
 
@@ -4479,13 +4618,29 @@ fn do_1x1_pivot(
                         a[k * n + i] = 0.0;
                     }
                     a[k * n + k] = 0.0;
-                    return Ok((0.0, k + 2));
+                    // D1 (dev/research/repo-review-2026-06-09.md): no
+                    // rank-1 update ran (column k was zeroed), so the
+                    // trailing submatrix is unchanged. Returning a
+                    // fabricated fused `(0.0, k+2)` would make the caller's
+                    // next iteration see `gamma0 == 0.0`, take the
+                    // "zero off-diagonal column" fast path, and discard
+                    // column k+1's real off-diagonals. Report the genuine
+                    // off-diagonal max of the (unmodified) next column
+                    // instead. `do_1x1_pivot` is only called for
+                    // remaining >= 2, so `k+1 < n`.
+                    return Ok(column_offdiag_max(a, n, k + 1));
                 }
                 ZeroPivotAction::Fail => return Err(FeralError::NumericallyRankDeficient),
                 ZeroPivotAction::PerturbToEps { abs_floor } => {
                     d = perturb_to_floor(d, abs_floor);
                     a[k * n + k] = d;
                     *needs_refinement = true;
+                    // D9 (repo-review-2026-06-09.md): count the perturbed
+                    // pivot as tiny, matching the `n_tiny` contract ("bump
+                    // at each `perturb_to_floor` call site") honored by the
+                    // static-floor path above and the sibling
+                    // `try_reject_1x1_frontal` / `count_1x1_inertia`.
+                    *n_tiny += 1;
                     if d > 0.0 {
                         *pos += 1;
                     } else {
@@ -4652,7 +4807,14 @@ fn do_2x2_pivot(
             a[k * n + i] = 0.0;
             a[(k + 1) * n + i] = 0.0;
         }
-        return Ok((0.0, k + 3));
+        // D1 (dev/research/repo-review-2026-06-09.md): no rank-2 update
+        // ran, so the trailing submatrix is unchanged. As in the 1×1
+        // strict-zero branch, returning a fabricated `(0.0, k+3)` would
+        // make the caller discard column k+2's real off-diagonals via the
+        // "zero off-diagonal column" fast path. Report the genuine
+        // off-diagonal max of the (unmodified) next column. The
+        // `(k+2) >= n` early return above guarantees `k+2 < n`.
+        return Ok(column_offdiag_max(a, n, k + 2));
     }
 
     let d00 = a00 / d10_abs;
@@ -5311,4 +5473,190 @@ mod static_pivot_tests {
     // perturbation helpers above (`perturb_2x2_to_floor`,
     // `perturb_to_floor`) plus the sparse-solver integration tests
     // cover the full pipeline.
+
+    /// REG-2 (repo-review-2026-06-09-verification.md): a BK-selected 2×2
+    /// block whose static-pivot perturbation drives the block to exactly
+    /// singular must not produce a NaN/inf factor. `perturb_2x2_to_floor`
+    /// adds the same τ to *both* diagonals, so for an indefinite
+    /// (opposite-sign) block it shifts the negative eigenvalue *toward*
+    /// zero; with the floor tuned so it lands on exactly zero, the legacy
+    /// unblocked `do_2x2_pivot` divided by `det == 0`
+    /// (`t = 1/(d00·d11 − 1)`) and wrote NaN to D / ±inf to L. A valid
+    /// LDLᵀ factor never contains NaN/inf. The frontal/scalar paths
+    /// already re-gate the perturbed block via `ssids_det_floor_fail`;
+    /// this pins the unblocked `factor()` path to the same guard.
+    #[test]
+    fn perturb_singular_2x2_does_not_produce_nan_factor() {
+        // Leading 2×2 block [[-0.5, 1.0], [1.0, -0.5]] (eigenvalues
+        // 0.5, −1.5), plus A[2,0] = 0.25, A[2,2] = 1.0. Every row's
+        // ∞-norm is 1.0, so Knight-Ruiz equilibration is ≈ identity
+        // (dyadic values) and the BK kernel sees the block as written.
+        let a = crate::dense::matrix::SymmetricMatrix::from_lower_triangle(
+            3,
+            &[
+                (0, 0, -0.5),
+                (1, 0, 1.0),
+                (1, 1, -0.5),
+                (2, 0, 0.25),
+                (2, 2, 1.0),
+            ],
+        );
+        let params = BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            // floor 2.0 sends the small eigenvalue 0.5 → +2.0 (τ = 1.5),
+            // which drives the −1.5 eigenvalue to exactly 0.0.
+            static_pivot_floor: 2.0,
+            ..Default::default()
+        };
+        let (factors, inertia) = factor(&a, &params).expect("factor must not error");
+        assert!(
+            factors.d_diag.iter().all(|x| x.is_finite()),
+            "D has non-finite entries: {:?}",
+            factors.d_diag
+        );
+        assert!(
+            factors.l.iter().all(|x| x.is_finite()),
+            "L has non-finite entries"
+        );
+        assert_eq!(
+            inertia.positive + inertia.negative + inertia.zero,
+            3,
+            "inertia must account for all 3 pivots"
+        );
+    }
+}
+
+#[cfg(test)]
+mod row_offdiag_tests {
+    use super::*;
+
+    /// D8 (repo-review-2026-06-09.md): the doc comment on
+    /// `symmetric_row_offdiag_max` claimed it *excludes* position (r, k),
+    /// but the loop `for j in k..r` includes it — and that inclusion is
+    /// load-bearing: it matches LAPACK dsytf2's ROWMAX, which includes
+    /// A(IMAX, K). A "fix" toward the (wrong) comment — narrowing the loop
+    /// to `(k + 1)..r` — would drop A(r, k) from the pivot-selection max
+    /// and corrupt Bunch-Kaufman pivot choice. This test pins the true
+    /// behavior so the comment can never again tempt that regression.
+    ///
+    /// Construction: column-major 4×4, the ONLY nonzero off-diagonal in
+    /// row r = 2's search window (k = 0) sits exactly at (r, k) = (2, 0),
+    /// stored at `a[k * n + r] = a[2]`. The returned max must therefore
+    /// equal that value; if (r, k) were excluded the window would be empty
+    /// and the result 0.0. Oracle: LAPACK dsytf2 ROWMAX semantics — A(r, k)
+    /// is part of the row-r off-diagonal max.
+    #[test]
+    fn row_offdiag_max_includes_position_r_k() {
+        let n = 4;
+        let mut a = vec![0.0f64; n * n];
+        // entry (r = 2, k = 0): column-major a[k * n + r] = a[0 * 4 + 2] = a[2].
+        a[2] = 7.0;
+        let got = symmetric_row_offdiag_max(&a, n, 0, 2);
+        assert_eq!(
+            got, 7.0,
+            "A(r, k) must be included in the row-r off-diagonal max (LAPACK ROWMAX)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod zero_pivot_n_tiny_tests {
+    use super::*;
+
+    /// D9 (repo-review-2026-06-09.md): `n_tiny` (the MUMPS INFO(25) =
+    /// NBTINYW analogue) is documented and implemented as "incremented at
+    /// each `perturb_to_floor` call site" — its three sibling zero-pivot
+    /// implementations (`do_1x1_pivot`'s static-floor path,
+    /// `try_reject_1x1_frontal`, `count_1x1_inertia`) all bump it on both
+    /// the static-floor and the `PerturbToEps` perturbation. But
+    /// `do_1x1_pivot`'s `ZeroPivotAction::PerturbToEps` arm called
+    /// `perturb_to_floor` without incrementing `n_tiny`, undercounting
+    /// perturbed pivots on that path.
+    ///
+    /// Reproduction: drive `do_1x1_pivot` directly with an exactly-zero
+    /// pivot (`|d| = 0 <= zero_tol`), `static_pivot_floor` disabled, and
+    /// `on_zero_pivot = PerturbToEps`. That routes through the truly-zero
+    /// match into the `PerturbToEps` arm, which perturbs the pivot to
+    /// `+abs_floor` and must therefore count one tiny pivot. Oracle: the
+    /// documented n_tiny contract plus the three sibling implementations
+    /// (MUMPS NBTINYW semantics) — every `perturb_to_floor` is one tiny
+    /// pivot.
+    #[test]
+    fn do_1x1_pivot_perturb_to_eps_counts_n_tiny() {
+        let n = 2;
+        // Column-major 2×2: A(0,0)=0 (the zero pivot), A(1,0)=0, A(1,1)=1.
+        let mut a = vec![0.0f64, 0.0f64, 0.0f64, 1.0f64];
+        let params = BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::PerturbToEps { abs_floor: 1e-10 },
+            ..Default::default()
+        };
+        let (mut pos, mut neg, mut zero, mut n_tiny) = (0usize, 0usize, 0usize, 0usize);
+        let mut needs_refinement = false;
+        let col_max = 0.0; // max |A[i,0]| for i>0 — the (1,0) entry is 0.
+        let res = do_1x1_pivot(
+            &mut a,
+            n,
+            0,
+            col_max,
+            &params,
+            &mut pos,
+            &mut neg,
+            &mut zero,
+            &mut needs_refinement,
+            &mut n_tiny,
+        );
+        assert!(res.is_ok(), "PerturbToEps path must accept, not error");
+        assert_eq!(
+            n_tiny, 1,
+            "PerturbToEps perturbs the pivot via perturb_to_floor — it must count as one tiny pivot (MUMPS NBTINYW)"
+        );
+        assert!(needs_refinement, "a perturbed pivot must flag refinement");
+        // Perturbed to +abs_floor → counted as a positive eigenvalue.
+        assert_eq!((pos, neg, zero), (1, 0, 0));
+    }
+}
+
+#[cfg(test)]
+mod ncol_zero_contrib_tests {
+    use super::*;
+
+    /// D10 (repo-review-2026-06-09.md): a front with `ncol == 0` eliminates
+    /// nothing — the whole matrix is the contribution block. The early
+    /// returns cloned `matrix.data` wholesale, carrying the strict
+    /// upper-triangle bytes, which `SymmetricMatrix::from_pooled_buf`
+    /// explicitly leaves uninitialized/stale ("callers must not depend on
+    /// the strict upper triangle being zero"). The normal extraction path
+    /// zero-fills the upper triangle, so full-buffer bit-compares (the
+    /// block32 harness) saw nondeterministic data on the `ncol == 0` path.
+    ///
+    /// Reproduction: build the front matrix from a pooled buffer poisoned
+    /// with a sentinel everywhere; `from_pooled_buf` zeros only the lower
+    /// triangle, leaving the sentinel in the strict upper triangle (the
+    /// exact stale-pooled-buffer scenario). Factor with `ncol == 0` and
+    /// assert the returned contrib's strict upper triangle is exactly zero.
+    /// Oracle: the normal extraction convention — a contrib block's strict
+    /// upper triangle is always zero-normalized (factor.rs contrib extract).
+    #[test]
+    fn ncol_zero_contrib_has_zeroed_upper_triangle() {
+        let n = 3;
+        // Pooled buffer pre-poisoned with a sentinel; from_pooled_buf zeros
+        // only the lower triangle, leaving the sentinel in the strict upper.
+        let buf = vec![99.0f64; n * n];
+        let matrix = crate::dense::matrix::SymmetricMatrix::from_pooled_buf(n, buf);
+        let params = BunchKaufmanParams::default();
+        let f = factor_frontal_with_profile(&matrix, 0, false, &params, None)
+            .expect("ncol==0 front must succeed");
+        assert_eq!(f.contrib_dim, n);
+        assert_eq!(f.contrib.len(), n * n);
+        // Strict upper triangle (ci < cj) must be exactly zero-normalized.
+        for cj in 0..n {
+            for ci in 0..cj {
+                assert_eq!(
+                    f.contrib[cj * n + ci],
+                    0.0,
+                    "contrib strict upper triangle ({ci},{cj}) must be zero, not stale pooled-buffer data"
+                );
+            }
+        }
+    }
 }
