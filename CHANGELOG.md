@@ -4,6 +4,22 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — unblocked dense 2×2 pivot no longer divides by a singular perturbed block (REG-2)
+
+When `static_pivot_floor > 0`, the MA57-style static-pivot perturbation
+(`perturb_2x2_to_floor`) lifts the smaller-magnitude eigenvalue of a 2×2 block
+up to the floor by adding the same `τ` to both diagonals. A Bunch-Kaufman 2×2
+block is always indefinite (opposite-sign eigenvalues), so that shift moves the
+negative eigenvalue *toward* zero — and a floor tuned to land it on exactly zero
+makes the perturbed block singular. The public dense `factor()` unblocked kernel
+then computed the rank-2 update factor `t = 1/(d00·d11 − 1) = d10²/det` with
+`det == 0`, writing `NaN` to `D` and `±inf` to `L` while still returning
+`Success` (a wrong inertia and an unusable factor). The frontal and scalar pivot
+paths already re-gate the perturbed block through `ssids_det_floor_fail` and fall
+back to a 1×1 pivot; the unblocked path now does the same. The default
+`static_pivot_floor == 0` path is unchanged (the perturbation never fires).
+Finding REG-2 from `dev/research/repo-review-2026-06-09-verification.md`.
+
 ### Fixed — permute-cache warm path no longer trusts a stale pattern/permutation (REG-1)
 
 The `PermuteCache` introduced by the N7 one-shot optimization keyed its warm-path

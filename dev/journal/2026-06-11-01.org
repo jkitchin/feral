@@ -45,3 +45,47 @@ both went RED ([0,4,5,6,7] stale vs [0,2,4,6,7] canonical) → GREEN after fix.
 Existing N7 test (permute_cache_not_built_for_one_shot_caller) still green.
 cargo test --lib permute_cache: 3 passed. cargo test --workspace: 0 failures.
 User-visible (silent wrong answer on default path) → CHANGELOG Fixed entry.
+
+* 08:14 :reg2:static-pivot:nan:do-2x2-pivot:
+REG-2 (high, knob-gated): perturb_2x2_to_floor (factor.rs:733) lifts the
+smaller-|eigenvalue| of a 2×2 block to the floor by adding the SAME τ to both
+diagonals (a00+τ, a11+τ) — a scalar shift τI, which moves BOTH eigenvalues by
+τ. A BK-selected 2×2 is always indefinite (opposite-sign eigenvalues), so when
+the small one is pushed OUT to +floor the other (negative) one moves TOWARD
+zero. Verifier example: block [[-0.5,1],[1,-0.5]], eig {0.5,-1.5}; floor=2.0 →
+τ=1.5 → perturbed [[1,1],[1,1]], eig {2,0} → det exactly 0. The unblocked
+factor() kernel's do_2x2_pivot then computes t = 1/(d00·d11−1) = d10²/det
+(factor.rs:4777) with det=0 → t=inf → rank-2 update writes NaN to D, ±inf to L,
+returns Success with wrong inertia. The frontal (factor.rs:2763) and scalar
+(factor.rs:3779) paths re-gate the PERTURBED block via ssids_det_floor_fail and
+fall back to 1×1; the unblocked path did not. This is the live half of D5
+(whose rejection was sound only at the DEFAULT floor=0, where the perturbation
+never fires and a BK 2×2 has det ≤ −0.59γ₀²).
+
+Fix: in factor()'s 2×2 branch, before calling do_2x2_pivot, if
+static_pivot_floor > 0 and perturb_2x2_to_floor would fire, re-check the
+perturbed block with ssids_det_floor_fail; if it fails, fall back to
+do_1x1_pivot at k (Fail → error; ForceAccept/PerturbToEps → needs_refinement +
+1×1). Mirrors scalar_pivot_step exactly. Byte-identical at floor=0 (guarded by
+the static_pivot_floor > 0 check). RED→GREEN test
+perturb_singular_2x2_does_not_produce_nan_factor: with the guard neutralized
+(> f64::INFINITY) d_diag=[1.0,1.0,NaN] (factor.rs panic at the assert); with the
+guard restored all of D and L finite, inertia sums to 3. External oracle = "a
+valid LDLᵀ factor never contains NaN/inf." 6 static_pivot_tests pass; full
+workspace test (63 result groups) 0 failures.
+
+D13 revisit (verifier asked to revisit it with REG-2): D13 is about a DIFFERENT
+path. D13 = update_2x2_block32 / do_2x2_update's det==0 EARLY-RETURN no-op
+(factor.rs:4225, block_ldlt32.rs:252) leaving raw A in L — a characterized,
+tested contract (update_2x2_block32_singular_is_noop), NOT a NaN. REG-2 is
+do_2x2_pivot's SEPARATE inline rank-2 update (factor.rs:4756-4824) whose
+t=1/(d00·d11−1) is UNguarded → NaN. Verified by caller analysis: do_2x2_pivot
+has exactly one production caller (factor()'s unblocked loop, line 1104) and
+never calls do_2x2_update/update_2x2_block32; the scalar/frontal paths call
+do_2x2_update but re-gate via ssids_det_floor_fail first (so a singular block is
+diverted to 1×1 before the no-op is reached). So: do_2x2_update and
+update_2x2_block32 already no-op on det==0 (no NaN); their gated callers divert
+upstream; my REG-2 fix adds the same upstream divert to the one path that
+lacked it (do_2x2_pivot). D13's deferral remains accurate and is unchanged by
+this fix — its no-op is correct for the block path, never handed a singular
+block from a gated caller. No D13 code change.

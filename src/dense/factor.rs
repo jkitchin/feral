@@ -1101,6 +1101,51 @@ pub fn factor(
             continue;
         }
 
+        // REG-2 (repo-review-2026-06-09-verification.md): the static-pivot
+        // perturbation in `do_2x2_pivot` adds the same τ to *both*
+        // diagonals, so for a BK-selected (opposite-sign) 2×2 block it
+        // shifts the negative eigenvalue *toward* zero and can land it on
+        // exactly zero — a singular perturbed block whose rank-2 update
+        // divides by `det == 0` (`t = 1/(d00·d11 − 1)`), writing NaN to D
+        // and ±inf to L. Re-gate the *perturbed* block exactly as the
+        // frontal/scalar paths do (`ssids_det_floor_fail`, factor.rs:2763
+        // / :3779) and fall back to a 1×1 pivot when it fails. No-op at the
+        // default `static_pivot_floor == 0` (perturbation never fires), so
+        // the BK 2×2 path is byte-identical there.
+        if params.static_pivot_floor > 0.0 {
+            if let Some((pd11, pd22)) =
+                perturb_2x2_to_floor(d11_v, d21_v, d22_v, params.static_pivot_floor)
+            {
+                if ssids_det_floor_fail(pd11, d21_v, pd22) {
+                    match params.on_zero_pivot {
+                        ZeroPivotAction::Fail => {
+                            return Err(FeralError::NumericallyRankDeficient);
+                        }
+                        ZeroPivotAction::ForceAccept | ZeroPivotAction::PerturbToEps { .. } => {
+                            needs_refinement = true;
+                        }
+                    }
+                    let (ng, nr) = do_1x1_pivot(
+                        &mut a,
+                        n,
+                        k,
+                        gamma0,
+                        params,
+                        &mut pos,
+                        &mut neg,
+                        &mut zero,
+                        &mut needs_refinement,
+                        &mut n_tiny,
+                    )?;
+                    fused_gamma0 = ng;
+                    fused_r = nr;
+                    have_fused = k + 1 < n;
+                    k += 1;
+                    continue;
+                }
+            }
+        }
+
         let (ng, nr) = do_2x2_pivot(
             &mut a,
             n,
@@ -5428,6 +5473,57 @@ mod static_pivot_tests {
     // perturbation helpers above (`perturb_2x2_to_floor`,
     // `perturb_to_floor`) plus the sparse-solver integration tests
     // cover the full pipeline.
+
+    /// REG-2 (repo-review-2026-06-09-verification.md): a BK-selected 2×2
+    /// block whose static-pivot perturbation drives the block to exactly
+    /// singular must not produce a NaN/inf factor. `perturb_2x2_to_floor`
+    /// adds the same τ to *both* diagonals, so for an indefinite
+    /// (opposite-sign) block it shifts the negative eigenvalue *toward*
+    /// zero; with the floor tuned so it lands on exactly zero, the legacy
+    /// unblocked `do_2x2_pivot` divided by `det == 0`
+    /// (`t = 1/(d00·d11 − 1)`) and wrote NaN to D / ±inf to L. A valid
+    /// LDLᵀ factor never contains NaN/inf. The frontal/scalar paths
+    /// already re-gate the perturbed block via `ssids_det_floor_fail`;
+    /// this pins the unblocked `factor()` path to the same guard.
+    #[test]
+    fn perturb_singular_2x2_does_not_produce_nan_factor() {
+        // Leading 2×2 block [[-0.5, 1.0], [1.0, -0.5]] (eigenvalues
+        // 0.5, −1.5), plus A[2,0] = 0.25, A[2,2] = 1.0. Every row's
+        // ∞-norm is 1.0, so Knight-Ruiz equilibration is ≈ identity
+        // (dyadic values) and the BK kernel sees the block as written.
+        let a = crate::dense::matrix::SymmetricMatrix::from_lower_triangle(
+            3,
+            &[
+                (0, 0, -0.5),
+                (1, 0, 1.0),
+                (1, 1, -0.5),
+                (2, 0, 0.25),
+                (2, 2, 1.0),
+            ],
+        );
+        let params = BunchKaufmanParams {
+            on_zero_pivot: ZeroPivotAction::ForceAccept,
+            // floor 2.0 sends the small eigenvalue 0.5 → +2.0 (τ = 1.5),
+            // which drives the −1.5 eigenvalue to exactly 0.0.
+            static_pivot_floor: 2.0,
+            ..Default::default()
+        };
+        let (factors, inertia) = factor(&a, &params).expect("factor must not error");
+        assert!(
+            factors.d_diag.iter().all(|x| x.is_finite()),
+            "D has non-finite entries: {:?}",
+            factors.d_diag
+        );
+        assert!(
+            factors.l.iter().all(|x| x.is_finite()),
+            "L has non-finite entries"
+        );
+        assert_eq!(
+            inertia.positive + inertia.negative + inertia.zero,
+            3,
+            "inertia must account for all 3 pivots"
+        );
+    }
 }
 
 #[cfg(test)]
