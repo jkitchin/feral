@@ -1,3 +1,10 @@
+// X15: the no-unwrap lint in src/lib.rs covers only the library crate;
+// this binary crate root escaped it, so `.unwrap()`/`.expect()` here were
+// unchecked. Mirror the library's gate (deny in normal builds, allow in
+// tests) so future panicking calls in the bench harness are caught.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -11,7 +18,7 @@ use feral::symbolic::{
 };
 use feral::{
     factor, factor_single_front, read_mtx, read_sidecar, solve, solve_refined,
-    solve_sparse_refined, BunchKaufmanParams, Inertia, KktSidecar, SymmetricMatrix,
+    solve_sparse_refined, BunchKaufmanParams, FeralError, Inertia, KktSidecar, SymmetricMatrix,
     ZeroPivotAction,
 };
 
@@ -603,7 +610,10 @@ fn print_perf_comparison(label: &str, timings: &[MatrixTiming], entries: &[KktEn
         "name", "n", "feral(μs)", "mumps(μs)", "ratio"
     );
     for (r, row) in worst.iter().take(10) {
-        let m = row.mumps.unwrap();
+        // `worst` is built by `filter_map(|r| r.mumps.map(...))`, so every
+        // row here has `mumps == Some`; `continue` is unreachable but keeps
+        // this lint-clean without an unwrap.
+        let Some(m) = row.mumps else { continue };
         println!(
             "{:<28} {:>5} {:>12} {:>12} {:>10.2}",
             row.timing.name, row.timing.n, row.timing.factor_us, m.factor_us, r
@@ -1037,6 +1047,39 @@ fn should_resample(entry: &KktEntry) -> bool {
         .unwrap_or(false)
 }
 
+/// Run `RESAMPLE_COLD_REPS` cold replicates of one matrix and reduce them to
+/// `(min factor_us, median solve_us)`, or fall back to `fallback` (the
+/// single-shot timing) if any replicate errors.
+///
+/// X15: the replicate body used to `.expect()` on `factor`/`solve` errors,
+/// on the assumption that "the single-shot pass already succeeded". That
+/// turned a transient resample failure into a process panic that would lose
+/// an entire multi-hour corpus run. Degrade to the single-shot timing
+/// instead — a denoised reading is a nice-to-have, never worth aborting the
+/// run. Each replicate returns `Ok((factor_us, solve_us))` or `Err`.
+fn resample_or_fallback<E: std::fmt::Display>(
+    fallback: (u128, u128),
+    mut rep: impl FnMut() -> Result<(u128, u128), E>,
+) -> (u128, u128) {
+    let mut fs: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
+    let mut ss: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
+    for _ in 0..RESAMPLE_COLD_REPS {
+        match rep() {
+            Ok((f, s)) => {
+                fs.push(f);
+                ss.push(s);
+            }
+            Err(e) => {
+                eprintln!("  resample failed ({e}); keeping single-shot timing");
+                return fallback;
+            }
+        }
+    }
+    fs.sort_unstable();
+    ss.sort_unstable();
+    (fs[0], ss[RESAMPLE_COLD_REPS / 2])
+}
+
 /// Parse `factor_us` and `solve_us` from a canonical-oracle JSON sidecar.
 ///
 /// Returns `None` if the file does not exist, cannot be parsed, or is missing
@@ -1194,7 +1237,10 @@ fn load_kkt_dir(dir: &Path) -> Vec<KktEntry> {
 
         for mtx_entry in mtx_files {
             let mtx_path = mtx_entry.path();
-            let stem = mtx_path.file_stem().unwrap().to_string_lossy().to_string();
+            let Some(stem) = mtx_path.file_stem() else {
+                continue;
+            };
+            let stem = stem.to_string_lossy().to_string();
 
             if !filter_patterns.is_empty()
                 && !filter_patterns.iter().any(|p| stem.contains(p.as_str()))
@@ -1620,8 +1666,12 @@ fn main() {
             n_inertia_pass += 1;
         }
 
-        // Solve with sidecar RHS (guaranteed finite by load_kkt_dir filter)
-        let rhs = entry.sidecar.finite_rhs().unwrap();
+        // Solve with sidecar RHS (guaranteed finite by load_kkt_dir filter);
+        // skip gracefully rather than unwrap if that invariant ever breaks.
+        let Some(rhs) = entry.sidecar.finite_rhs() else {
+            eprintln!("  {}: sidecar RHS not finite, skipping", entry.name);
+            continue;
+        };
         // Phase 1b solve convention (FERAL-PROJECT-SPEC.md §1709): use
         // solve_refined for all KKT solves to recover machine precision on
         // matrices flagged with needs_refinement under ForceAccept.
@@ -1640,21 +1690,15 @@ fn main() {
         // single-shot noise floor; otherwise the first reading already dominates
         // whatever cold-cache jitter we would see.
         let (factor_us_final, solve_us_final) = if should_resample(entry) {
-            let mut fs: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
-            let mut ss: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
-            for _ in 0..RESAMPLE_COLD_REPS {
+            resample_or_fallback((factor_us, solve_us), || {
                 let t0 = Instant::now();
-                let (rs_factors, _) = factor_single_front(&matrix, &params_kkt_sparse)
-                    .expect("resample: factor_single_front (single-shot already succeeded)");
-                fs.push(t0.elapsed().as_micros());
+                let (rs_factors, _) = factor_single_front(&matrix, &params_kkt_sparse)?;
+                let f = t0.elapsed().as_micros();
                 let t1 = Instant::now();
-                let _ = solve_refined(&matrix, &rs_factors, &rhs)
-                    .expect("resample: solve_refined (single-shot already succeeded)");
-                ss.push(t1.elapsed().as_micros());
-            }
-            fs.sort_unstable();
-            ss.sort_unstable();
-            (fs[0], ss[RESAMPLE_COLD_REPS / 2])
+                solve_refined(&matrix, &rs_factors, &rhs)?;
+                let s = t1.elapsed().as_micros();
+                Ok::<(u128, u128), FeralError>((f, s))
+            })
         } else {
             (factor_us, solve_us)
         };
@@ -1932,26 +1976,20 @@ fn main() {
         // single-shot pass so the semantics of `factor_us` (sym + numeric) match
         // MUMPS/SSIDS.
         let (sp_factor_us_final, sp_solve_us_final) = if should_resample(entry) {
-            let mut fs: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
-            let mut ss: Vec<u128> = Vec::with_capacity(RESAMPLE_COLD_REPS);
-            for _ in 0..RESAMPLE_COLD_REPS {
+            resample_or_fallback((sp_factor_us, sp_solve_us), || {
                 let tf = Instant::now();
                 let rs_sym = match ordering_override {
                     Some(m) => symbolic_factorize_with_method(&csc, &snode_params, m),
                     None => symbolic_factorize(&csc, &snode_params),
-                }
-                .expect("resample: symbolic_factorize (single-shot already succeeded)");
-                let (rs_factors, _) = factorize_multifrontal(&csc, &rs_sym, &sparse_numeric_params)
-                    .expect("resample: factorize_multifrontal (single-shot already succeeded)");
-                fs.push(tf.elapsed().as_micros());
+                }?;
+                let (rs_factors, _) =
+                    factorize_multifrontal(&csc, &rs_sym, &sparse_numeric_params)?;
+                let f = tf.elapsed().as_micros();
                 let ts = Instant::now();
-                let _ = solve_sparse_refined(&csc, &rs_factors, &rhs)
-                    .expect("resample: solve_sparse_refined (single-shot already succeeded)");
-                ss.push(ts.elapsed().as_micros());
-            }
-            fs.sort_unstable();
-            ss.sort_unstable();
-            (fs[0], ss[RESAMPLE_COLD_REPS / 2])
+                solve_sparse_refined(&csc, &rs_factors, &rhs)?;
+                let s = ts.elapsed().as_micros();
+                Ok::<(u128, u128), FeralError>((f, s))
+            })
         } else {
             (sp_factor_us, sp_solve_us)
         };
@@ -2083,6 +2121,56 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X15 (dev/research/repo-review-2026-06-09.md): a resample replicate
+    /// that errors must degrade to the single-shot `fallback`, never panic.
+    /// Before the fix the replicate body `.expect()`ed the factor/solve
+    /// results ("single-shot already succeeded"), so one transient failure
+    /// aborted the whole (potentially multi-hour) corpus run. The helper
+    /// now returns the fallback on the first erroring replicate.
+    #[test]
+    fn resample_falls_back_on_error() {
+        let fallback = (111_u128, 222_u128);
+        let calls = std::cell::Cell::new(0usize);
+        let out = resample_or_fallback(fallback, || {
+            let i = calls.get();
+            calls.set(i + 1);
+            if i == 2 {
+                Err("simulated transient resample failure")
+            } else {
+                Ok((10, 20))
+            }
+        });
+        assert_eq!(
+            out, fallback,
+            "an erroring replicate must yield the fallback"
+        );
+        assert_eq!(
+            calls.get(),
+            3,
+            "should stop at the first error (rep index 2)"
+        );
+    }
+
+    /// X15: with every replicate succeeding, the helper reduces the reads to
+    /// `(min factor_us, median solve_us)` over `RESAMPLE_COLD_REPS` samples.
+    #[test]
+    fn resample_reduces_to_min_factor_median_solve() {
+        assert_eq!(
+            RESAMPLE_COLD_REPS, 5,
+            "reduction expectations assume 5 reps"
+        );
+        let factors = [50_u128, 30, 40, 60, 20];
+        let solves = [5_u128, 3, 4, 6, 2];
+        let calls = std::cell::Cell::new(0usize);
+        let out = resample_or_fallback((999, 999), || {
+            let i = calls.get();
+            calls.set(i + 1);
+            Ok::<_, &str>((factors[i], solves[i]))
+        });
+        // min factor = 20; median solve = sorted [2,3,4,5,6] -> index 2 -> 4.
+        assert_eq!(out, (20, 4));
+    }
 
     /// X5 (dev/research/repo-review-2026-06-09.md): the bench harness must
     /// accept the same `FERAL_SCALING` vocabulary as the C-ABI shim

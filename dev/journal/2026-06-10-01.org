@@ -1622,3 +1622,37 @@ they're not comparable, and fix the "None on dense path" error. Value left
 unchanged. tried-and-rejected citing X14. fmt clean, bench compiles. Not
 user-visible => no CHANGELOG. Next per /loop: do NOT start the next issue (X15).
 Continue in-turn per the live 'speed this up' directive.
+
+* 09:40 :x15:bench:panic-path:lint:tests-first:
+X15 (repo-review-2026-06-09.md): src/bin/bench.rs escaped the no-unwrap lint
+(lib.rs lint covers the lib crate only). .unwrap()/.expect() at bench.rs:606,
+1192, 1599, 1623, 1627, 1910-1916. The actionable core (verbatim): "The resample
+.expects are a real panic path that would lose a multi-hour corpus run." A
+transient failure on a cold replicate (factor/solve returning Err after the
+single-shot run already succeeded) would .expect()-panic the whole bench process,
+discarding every result accumulated so far in a corpus sweep.
+RED: extracted the reduction into a Result-returning helper
+resample_or_fallback<E>(fallback, rep) and added resample_falls_back_on_error
+(closure Errs on the 3rd of 5 reps). With the helper temporarily wired to the old
+behavior (panic!/.expect on Err) the test PANICKED:
+  thread 'tests::resample_falls_back_on_error' panicked at src/bin/bench.rs:1073:
+  resample failed: simulated transient resample failure (single-shot already
+  succeeded)  -> test result: FAILED (1 failed).
+GREEN: with the graceful arm (eprintln warning + return fallback) both tests pass
+-- resample_falls_back_on_error (asserts out==fallback, exactly 3 closure calls
+i.e. stops at first Err) and resample_reduces_to_min_factor_median_solve
+(factors[50,30,40,60,20]->20 min, solves[5,3,4,6,2]->4 median; also pins
+RESAMPLE_COLD_REPS==5). 2 passed; 0 failed.
+Fix: (1) added crate-level #![cfg_attr(not(test), deny(clippy::unwrap_used))] +
+expect_used to bench.rs so the bin no longer escapes the lint; (2) rewrote both
+resample blocks (dense :1693, sparse :1979) to call resample_or_fallback with
+Result-returning closures (factor_single_front/solve_refined and
+symbolic_factorize/factorize_multifrontal/solve_sparse_refined now propagate via
+?, mapping to FeralError) -- the 5 .expects are gone; (3) converted the 3 other
+guarded unwraps to let-else+continue (row.mumps at 613, mtx_path.file_stem at
+~1237, sidecar.finite_rhs at ~1664). Verified: cargo clippy --bin bench -D
+warnings clean in NON-test mode (deny lints satisfied -> no unwrap/expect outside
+tests/comments); fmt clean. This is a real fix with a reproducing test, so it does
+NOT go to tried-and-rejected. Bench-harness-only (no library/API surface) =>
+no CHANGELOG entry. Next per /loop: do NOT start the next issue (X16). Continue
+in-turn per the live 'speed this up' directive.
