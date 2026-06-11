@@ -656,9 +656,10 @@ impl Solver {
     }
 
     /// Enable MA57-style static-pivot perturbation (issue #38). On
-    /// every `factor()` call the solver computes `||A||_∞` once and
-    /// propagates an absolute floor
-    /// `static_pivot_floor = t * ||A||_∞` into the BK pivot kernels.
+    /// every `factor()` call the solver derives an absolute floor
+    /// `static_pivot_floor = t * ||D·A·D||_∞` from the *scaled* matrix
+    /// norm (post-scaling; N2) and propagates it into the BK pivot
+    /// kernels.
     /// Every accepted 1×1 / 2×2 pivot whose magnitude (for 2×2:
     /// smallest |eigenvalue|) is below the floor is perturbed up to
     /// the floor and counted by sign. The factor satisfies

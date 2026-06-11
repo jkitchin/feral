@@ -1991,15 +1991,15 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     // the eager-update path uses the quad kernel for every trailing tile
     // of 4 columns.
     //
-    // D7: use the in-place, pooled-scratch entry
-    // (`factor_block32_in_place_with_scratch`) rather than the immutable
-    // `factor_block32`. The latter delegates to the public `factor_frontal`,
-    // which re-runs `validate()`, allocates an n×n working copy, and builds
-    // a throwaway `FactorScratch` — defeating the whole purpose of this
-    // W-3a in-place path (issue #13). The in-place entry factors directly
-    // into `matrix.data` reusing `scratch`, and is bit-exact with
-    // `factor_frontal` (the documented oracle for both lblt_panel_frontal
-    // and the block-32 SIMD body).
+    // D7: route the 32×32 front through `factor_block32`, the in-place
+    // pooled-scratch production entry. It factors directly into
+    // `matrix.data` reusing the caller's `scratch` and delegates to
+    // `factor_frontal_in_place_with_scratch` (bit-exact with the
+    // `factor_frontal` oracle for both lblt_panel_frontal and the block-32
+    // SIMD body), paying none of the public `factor_frontal` entry's
+    // overhead — a `validate()` re-scan, an n×n working copy, and a
+    // throwaway `FactorScratch` — which would defeat the whole purpose of
+    // this W-3a in-place path (issue #13).
     if nrow == crate::dense::block_ldlt32::BLOCK_SIZE
         && ncol == crate::dense::block_ldlt32::BLOCK_SIZE
     {

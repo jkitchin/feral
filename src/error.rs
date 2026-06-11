@@ -46,19 +46,26 @@ pub enum FeralError {
 
     /// An unsymmetric LU basis is numerically singular: the basis column
     /// `column` had no candidate pivot above `LuParams::zero_pivot_tol`
-    /// and `LuSingularAction::Fail` was specified. `column` is the *original*
-    /// basis column index (the index the caller supplied), not an internal
-    /// factorization/pivot position, so a simplex driver can repair the basis
-    /// instead of receiving a garbage solve. See issue #81 and
+    /// and `LuSingularAction::Fail` was specified. At *factor* time
+    /// `column` is the original basis column index the caller supplied
+    /// (`qcol[k]`, L9), so a simplex driver can repair the basis instead
+    /// of receiving a garbage solve. NOTE: the solve and update paths
+    /// (`sparse_solve.rs` and the column-replacement update) raise this
+    /// with the internal pivot *position* rather than the original column;
+    /// callers needing the original index in those paths must map it back
+    /// through the column permutation. See issue #81 and
     /// `dev/research/unsymmetric-lu.md`.
     SingularBasis { column: usize },
 
     /// A rank-1 LU basis update (column replacement) could not be applied
     /// within the stability / update-count budget (`LuParams::max_updates`
-    /// or `max_growth`), or a stability monitor tripped. The factorization
-    /// is left unchanged; the caller must call `refactor()` with the
-    /// current basic columns. The recoverable analogue of MUMPS's delayed-
-    /// pivot overflow. See issue #81.
+    /// or `max_growth`), a stability monitor tripped, or the replacement
+    /// produced a vanishing bump pivot (a singular update — the incoming
+    /// column is linearly dependent on the retained basis; L8, see the
+    /// `dense_update.rs` method docs). The factorization is left
+    /// unchanged; the caller must call `refactor()` with the current basic
+    /// columns. The recoverable analogue of MUMPS's delayed-pivot
+    /// overflow. See issue #81.
     NeedsRefactor,
 }
 

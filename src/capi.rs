@@ -71,9 +71,10 @@ pub struct FeralSolver {
 ///     IPM trajectory.
 ///   - `FERAL_STATIC_PIVOT` = `<float>` — enable MA57-style static-
 ///     pivot perturbation (issue #38). Sets
-///     `NumericParams::static_pivot_threshold`; the solver computes
-///     `||A||_∞` per `factor()` and applies an absolute floor
-///     `t * ||A||_∞` to every accepted 1×1 / 2×2 pivot. Off by
+///     `NumericParams::static_pivot_threshold`; the solver derives an
+///     absolute floor `t * ||D·A·D||_∞` from the *scaled* matrix norm
+///     (post-scaling; N2) and applies it to every accepted 1×1 / 2×2
+///     pivot. Off by
 ///     default; recommended starting value `1e-8`. Bends small
 ///     pivots toward the IPM's expected inertia and cuts
 ///     PDPerturbationHandler δ_w escalation cost on problems like

@@ -211,9 +211,10 @@ pub struct NumericParams {
     pub sqd_mode: bool,
 
     /// MA57-style static-pivot perturbation threshold (issue #38).
-    /// When `Some(t)`, `Solver::factor` computes `||A||_∞` once per
-    /// call and propagates an absolute floor
-    /// `static_pivot_floor = t * ||A||_∞` into
+    /// When `Some(t)`, `Solver::factor` derives an absolute floor
+    /// `static_pivot_floor = t * ||D·A·D||_∞` from the *scaled* matrix
+    /// norm (post-scaling, via `scaled_matrix_infnorm` +
+    /// `apply_post_scaling_overrides`; N2) and propagates it into
     /// `BunchKaufmanParams.static_pivot_floor` for that factor call.
     /// Every accepted 1×1 / 2×2 pivot whose magnitude (for 2×2:
     /// smallest |eigenvalue|) is below the floor is perturbed up to
@@ -255,8 +256,8 @@ pub struct NumericParams {
     /// `FERAL_WARN_PARTIAL_SINGULAR` env var (C ABI). Issue #43.
     pub warn_partial_singular: bool,
 
-    /// Issue #56 Lever A.2: when `true`, the numeric drivers consult
-    /// `FactorWorkspace::permute_cache` to skip the
+    /// Issue #56 Lever A.2: when `true`, the sequential and Schur numeric
+    /// drivers consult `FactorWorkspace::permute_cache` to skip the
     /// `CscMatrix::from_triplets` rebuild inside `permute_csc_values`,
     /// reusing the cached `(col_ptr, row_idx, value_map)` and scattering
     /// only the values. Set by `Solver::factor` to `pattern_reused` —
@@ -264,7 +265,11 @@ pub struct NumericParams {
     /// reuse, which guarantees the cached permute structure is still
     /// valid. Default `false` keeps direct callers
     /// (`factorize_multifrontal_supernodal_with_workspace` used without
-    /// `Solver`) on the canonical from-triplets path.
+    /// `Solver`) on the canonical from-triplets path. NOTE: the parallel
+    /// driver (the default on the large matrices this targets) does not
+    /// engage the cache regardless of this flag — it always rebuilds via
+    /// `permute_csc_values`; closing that gap is the open N3 facet tracked
+    /// in `dev/decisions.md`.
     pub pattern_reused_hint: bool,
 }
 

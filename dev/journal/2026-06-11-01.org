@@ -247,3 +247,43 @@ pure allocation churn.
 Docs/log-only change (doc comment + append-only decisions.md); docs-commit
 exemption applies (CI green on last code commit 87d5688). fmt+clippy still run
 via the pre-commit hook.
+
+* 11:25 :docs:repo-review:doc-batch:
+Residual 4 (verifier item 4): the ~10-site doc-residue batch. All
+documentation/comment corrections, no behavior change. Sites fixed:
+- feral-ipopt-shim/include/feral_capi.h: header claimed status codes
+  "mirror Ipopt's ESymSolverStatus" (the exact false claim X8 corrected
+  on the Rust side); rewrote to match capi.rs:13-24 — only codes 0-2
+  share Ipopt's values, FERAL_FATAL=3 collides with SYMSOLVER_CALL_AGAIN,
+  shim must translate to SYMSOLVER_FATAL_ERROR. Also documented
+  feral_num_neg's -1 sentinel (no valid factor / NULL).
+- factorize.rs + solver.rs + capi.rs static-pivot docs: "t * ||A||_inf"
+  was stale post-N2; the floor is t * ||D.A.D||_inf from the *scaled*
+  norm (scaled_matrix_infnorm + apply_post_scaling_overrides).
+- factorize.rs pattern_reused_hint: qualified "the numeric drivers" to
+  sequential+Schur only; parallel driver always rebuilds via
+  permute_csc_values regardless of the flag (open N3 facet).
+- bench.rs dense-KKT rationale: the comment mandated pivot_threshold=0.0
+  for the dense path and claimed 0.01 "zeros out structural pivots on
+  HYDCAR20/...", but the validation loop deliberately uses
+  params_kkt_sparse (0.01); per X3 (tried-and-rejected) the claim is
+  stale (DIVERGE=0 across 50 parity matrices). Rewrote to say so.
+- error.rs SingularBasis: "original basis column" is only true at factor
+  time (qcol[k], L9); solve/update paths report the pivot position —
+  qualified. NeedsRefactor: added the vanishing-bump-pivot / singular-
+  replacement-update case (L8).
+- dense/factor.rs D7 dispatch comment: named the nonexistent
+  factor_block32_in_place_with_scratch and inverted which entry is
+  in-place; factor_block32 IS the in-place pooled-scratch entry
+  delegating to factor_frontal_in_place_with_scratch. Rewrote.
+- tests/d6_contrib_uninit.rs header: claimed Miri "reports UB at the
+  extraction site" / "actual reproducing oracle", contradicting the D6
+  commit's own honesty note (Miri reports NO UB on unfixed code — f64 has
+  no validity invariant, the set_len library contract is what's violated
+  and Miri does not police it). Rewrote to a soundness/finiteness guard.
+- crates/feral-kahip/src/graph.rs vweight: "Balance constraints (K3, K4)
+  are measured against these weights" overstated K4; per
+  ordering-kahip-k4.md K4 consumes vweight but enforces no balance
+  constraint. Scoped the claim to K3.
+Docs-commit exemption applies (CI green on last code commit 87d5688);
+fmt+clippy still run via the pre-commit hook.

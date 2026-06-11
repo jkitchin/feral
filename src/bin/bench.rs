@@ -1424,11 +1424,16 @@ fn main() {
     // Built-in dense benchmarks
     let mut rng = Rng::new(42);
     let params_spd = BunchKaufmanParams::default();
-    // Dense KKT path: pivot_threshold = 0.0 because the dense
-    // kernel does not implement delayed pivoting — a non-zero
-    // threshold here sends rejected pivots through ForceAccept
-    // and zeros out structural pivots on e.g. HYDCAR20, METHANL8,
-    // DEGENLPA, HS118.
+    // `params_kkt_dense` (pivot_threshold = 0.0) is used ONLY by the
+    // synthetic dense micro-benchmarks below. The dense-KKT *validation*
+    // loop deliberately uses `params_kkt_sparse` (0.01): pivot_threshold
+    // is immaterial to inertia on the dense single-front path because
+    // structural-pivot zeroing keys on strict-zero |d| <= zero_tol, not
+    // on pivot_threshold·col_max (in-band pivots count by sign either
+    // way). Verified DIVERGE=0 across all 50 parity matrices under both
+    // thresholds — the old "zeros out structural pivots on HYDCAR20/
+    // METHANL8/DEGENLPA/HS118" claim is stale post-equilibration and
+    // issue-#54 inertia-bucketing. See X3 in tried-and-rejected.md.
     let params_kkt_dense = BunchKaufmanParams {
         on_zero_pivot: ZeroPivotAction::ForceAccept,
         ..BunchKaufmanParams::default()

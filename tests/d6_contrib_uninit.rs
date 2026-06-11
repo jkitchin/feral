@@ -4,17 +4,19 @@
 //! `contrib.reserve(cdim²)` then `unsafe { contrib.set_len(cdim²) }` and
 //! materialized a `&mut [f64]` over the not-yet-initialized tail. Every
 //! cell is written before read, so it produces correct results, but
-//! calling `Vec::set_len` to expose elements that have not been
-//! initialized violates the documented safety contract — exactly the kind
-//! of thing Miri's uninitialized-memory tracking is meant to catch.
+//! calling `Vec::set_len` to expose not-yet-initialized elements violates
+//! the *library* precondition of `Vec::set_len`. The fix initializes the
+//! region through `spare_capacity_mut()` before growing the length.
 //!
-//! This test drives both extraction sites with `ncol < nrow`, which forces
-//! a non-empty contribution block (`cdim = nrow - nelim > 0`), and then
-//! reads back **every** cell of `contrib`. Under a plain `cargo test` it is
-//! a cheap finiteness regression guard; under
-//! `cargo +nightly miri test --test d6_contrib_uninit` it is the actual
-//! reproducing oracle — Miri reports UB at the extraction site if the
-//! buffer's bytes are observed while still carved out as uninitialized.
+//! NOTE: this is NOT a Miri-reproducible UB. Per the D6 commit's honesty
+//! note, `cargo +nightly miri test --test d6_contrib_uninit` reports NO UB
+//! on the *unfixed* code (3/3 pass): `f64` has no validity invariant and
+//! every cell is written before any read, so no uninitialized *read*
+//! occurs; what is violated is the `Vec::set_len` library contract, which
+//! Miri does not police. This test is therefore a soundness/finiteness
+//! guard, not a red→green reproduction. It drives both extraction sites
+//! with `ncol < nrow` (forcing a non-empty contribution block,
+//! `cdim = nrow - nelim > 0`) and reads back **every** cell of `contrib`.
 
 use feral::dense::factor::{factor_frontal, factor_frontal_blocked};
 use feral::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
