@@ -4,6 +4,20 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `feral-metis` coarsening now performs real SHEM, not plain HEM (O7)
+
+The coarsening header advertised Sorted Heavy-Edge Matching and cited METIS
+`Match_SHEM`, but Pass 1 visited vertices in plain seeded-shuffle order with no
+ascending-degree sort — that is unsorted Heavy-Edge Matching (HEM). The
+"sorted" step matters: a degree-1 leaf whose sole neighbour is claimed first by
+a higher-degree vertex is stranded as a self-match, inflating the coarse graph
+on the irregular / power-law inputs SHEM exists for. Pass 1 now stable-sorts the
+shuffled visit order by ascending vertex degree (`sort_by_key`, so the seeded
+shuffle survives as the within-degree tie-break and determinism is preserved),
+matching METIS `Match_SHEM` (Karypis & Kumar §3.1). On a 4-vertex chorded path
+(one hub, one leaf) this turns a 3-coarse-vertex matching into the optimal
+2-coarse-vertex matching. Finding from `dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — `CscPattern::new` enforces its documented sorted-rows invariant (O3)
 
 `feral-ordering-core`'s `CscPattern` documents that row indices within each

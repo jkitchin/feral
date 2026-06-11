@@ -1775,3 +1775,24 @@ wbig ceiling rationale; AmdStats struct doc amended to carve out n_clear_flag.
 No code change. fmt clean. tried-and-rejected citing O6. Not user-visible (doc
 comments) => no CHANGELOG. Next per /loop: do NOT start the next issue (O7).
 Continue in-turn per the live 'speed this up' directive.
+
+* O7 :ordering:metis:coarsen:shem:reproduced:fixed:
+O7 (repo-review): feral-metis coarsen.rs:59-98 advertised SHEM (Sorted
+Heavy-Edge Matching, cites METIS Match_SHEM) but Pass 1 visited vertices in
+plain rng.shuffle order -- no ascending-degree sort. That is HEM, not SHEM.
+REPRODUCED with an external oracle (METIS Match_SHEM = bucket-sort the random
+perm by ascending degree, Karypis & Kumar Sec 3.1). Built a /tmp probe
+replicating SplitMix + Pass-1 matching over seeds 0..200 on a 4-vertex chorded
+path (edges 0-1,1-2,2-3,0-2; degrees 0:2,1:2,2:3 hub,3:1 leaf). seed=1 (the
+seed the existing tests use) -> shuffle order [2,1,0,3]: hub 2 visited first,
+grabs 0, stranding leaf 3 and vertex 1 as self-matches => cnvtxs=3. SHEM order
+(degree-sorted [3,1,0,2]) matches leaf 3<->hub 2 then 0<->1 => cnvtxs=2.
+RED: new test shem_matches_low_degree_before_hub asserted coarse nvtxs==2, got
+3 (coarsen.rs:419). FIX: after rng.shuffle, order.sort_by_key by ascending
+degree (xadj[v+1]-xadj[v]); sort_by_key is stable so the shuffle survives as
+the within-degree tie-break (determinism preserved). Updated header doc to
+describe ascending-degree visitation. GREEN: full feral-metis suite 52 passed
+(incl. coarsen_grid_8x8 <=0.70, coarsen_tridiag_10 <=6, determinism, hierarchy
+monotonic) + dense_quotient integration 4 passed. fmt clean. User-visible
+(ordering quality) => CHANGELOG entry added. Next per /loop: do NOT start O8;
+continuing in-turn per the live 'speed this up'/'finish tonight' directive.

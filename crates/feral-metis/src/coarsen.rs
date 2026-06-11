@@ -1,9 +1,12 @@
 //! Multilevel coarsening.
 //!
-//! Sorted Heavy-Edge Matching (SHEM): iterate vertices in a seeded
-//! random permutation and, for each unmatched vertex, pair it with
-//! its unmatched neighbor of maximum edge weight (ties broken by
-//! lower vertex id). If the reduction ratio falls below the
+//! Sorted Heavy-Edge Matching (SHEM): iterate vertices in ascending
+//! degree order (ties broken by a seeded random permutation) and, for
+//! each unmatched vertex, pair it with its unmatched neighbor of
+//! maximum edge weight (ties broken by lower vertex id). Visiting
+//! low-degree vertices first — the "sorted" in SHEM — keeps a leaf
+//! from being stranded when its sole neighbor is claimed by a
+//! higher-degree vertex. If the reduction ratio falls below the
 //! configured threshold (default 0.85 per METIS 5.2.0), a simple
 //! 2-hop fallback pairs unmatched vertices that share a common
 //! neighbor. This keeps power-law-degree KKT graphs from stalling
@@ -57,8 +60,19 @@ pub fn coarsen_level(
     let mut cmap: Vec<i32> = vec![-1; n];
 
     // --- Pass 1: SHEM ---
+    // Sorted Heavy-Edge Matching: visit vertices in ascending degree
+    // order, breaking ties by the seeded random permutation. METIS
+    // Match_SHEM bucket-sorts the random permutation by degree so that
+    // low-degree vertices — which have the fewest matching options —
+    // are matched before their few neighbors are claimed by a
+    // higher-degree vertex. Plain shuffle order (HEM) strands those
+    // leaves as self-matches, inflating the coarse graph on the
+    // irregular / power-law inputs SHEM is meant for. `sort_by_key` is
+    // stable, so the random shuffle survives as the within-degree
+    // tie-break, preserving seed determinism. [O7]
     let mut order: Vec<i32> = (0..fine.nvtxs).collect();
     rng.shuffle(&mut order);
+    order.sort_by_key(|&v| fine.xadj[v as usize + 1] - fine.xadj[v as usize]);
 
     let mut cnvtxs: i32 = 0;
     for &v in &order {
@@ -384,6 +398,43 @@ mod tests {
             "reduction ratio on 8x8 grid should be <= 0.70, got {}/{}",
             cg.graph.nvtxs,
             g.nvtxs
+        );
+    }
+
+    #[test]
+    fn shem_matches_low_degree_before_hub() {
+        // Chorded path 0-1-2-3 plus the extra edge 0-2. Degrees:
+        // 0:2, 1:2, 2:3 (hub), 3:1 (leaf). Plain heavy-edge matching
+        // in shuffle order (seed 1 visits the hub 2 first) pairs
+        // 2<->0, stranding both the leaf 3 and vertex 1 as
+        // self-matches -> 3 coarse vertices. Sorted heavy-edge
+        // matching (SHEM) visits the degree-1 leaf 3 first, pairing
+        // 3<->2, then 0<->1 -> 2 coarse vertices. Ascending-degree
+        // visitation is the defining property of METIS Match_SHEM
+        // (Karypis & Kumar Sec. 3.1); plain shuffle order is HEM,
+        // not the advertised SHEM. [O7]
+        let t = [
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (0, 2),
+        ];
+        let (cp, ri) = csc_from_triples(4, &t);
+        let pat = CscPattern::new(4, &cp, &ri).unwrap();
+        let g = Graph::from_csc_pattern(&pat).unwrap();
+        let mut rng = SplitMix::new(1);
+        let mut ctr = CoarsenCounters::default();
+        let cg = coarsen_level(&g, &mut rng, 0.85, &mut ctr);
+        assert_valid_coarse(&g, &cg);
+        assert_eq!(
+            cg.graph.nvtxs, 2,
+            "SHEM must match the degree-1 leaf with the hub and pair \
+             the remaining two vertices for 2 coarse vertices; got {}",
+            cg.graph.nvtxs
         );
     }
 
