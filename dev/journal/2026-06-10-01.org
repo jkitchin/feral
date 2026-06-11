@@ -1506,3 +1506,29 @@ User-visible (C-ABI robustness for embedders) -> CHANGELOG Fixed entry.
 Evidence: capi.rs:250-256 (call site), 759-811 (test); solver.rs:1358-1370
 (invalidate_factors). Next per /loop: do NOT start the next issue (X10).
 Continue in-turn per the live 'speed this up' directive.
+
+* 19:52 :x10:mtx:io:alloc-abort:hardening:fixed:
+X10 (repo-review §X10, low-medium/certain): parse_mtx reserved entries with
+Vec::with_capacity(nnz) from the untrusted MTX size line (src/io/mtx.rs:114).
+A corrupt header with enormous nnz -> multi-exabyte alloc request -> allocator
+returns null -> handle_alloc_error ABORTS the process (not a recoverable Err).
+
+RED: new src/io/mtx.rs test huge_nnz_header_does_not_abort parses a 3-line MTX
+declaring nnz=100000000000000000 with 2 real entries. Pre-fix, isolated single-
+test run aborted: "memory allocation of 2400000000000000000 bytes failed"
+(signal 6, SIGABRT) at the with_capacity call. Confirmed RED.
+
+Key: parse_mtx NEVER validates nnz against the actual entry count — it's purely
+an allocation hint, then returns Ok(MtxMatrix{n, entries}) with the real entries.
+So clamping the reservation has zero effect on valid files.
+
+FIX: let mut entries = Vec::with_capacity(nnz.min(contents.len())) (mtx.rs:114).
+Each entry occupies >=1 byte in the source, so contents.len() is a hard upper
+bound on the true count ("clamp to file size" per the finding). Valid files
+(nnz << contents.len()) get the same exact reservation.
+
+GREEN: mtx::tests 13/13 (incl. new), lib full 355 passed (was 354), clippy -p
+feral --lib -D warnings clean, fmt clean. User-visible (parse_mtx/read_mtx are
+pub; malformed-input abort -> graceful) -> CHANGELOG Fixed entry. Evidence:
+mtx.rs:113-123 (fix), test in tests module. Next per /loop: do NOT start the next
+issue (X11). Continue in-turn per the live 'speed this up' directive.

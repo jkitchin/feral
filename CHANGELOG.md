@@ -4,6 +4,19 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — MTX reader no longer aborts on a corrupt `nnz` header (X10)
+
+`parse_mtx` / `read_mtx` reserved the entries buffer with
+`Vec::with_capacity(nnz)`, taking `nnz` straight from the untrusted Matrix
+Market size line. A corrupt or hostile header (e.g. `nnz = 10^17`) made
+that a multi-exabyte allocation request; the allocator returned null and
+the process aborted (`handle_alloc_error`) — a hard crash rather than a
+recoverable `FeralError::IoError`. The reservation is now clamped to the
+source byte length, a hard upper bound on the true entry count, so a bogus
+header is parsed gracefully. `nnz` was only ever an allocation hint (never
+validated against the actual entry count), so valid files are unaffected.
+Finding from `dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — `feral_set_structure` invalidates the stale factor (X9)
 
 The C-ABI embedding protocol is `feral_set_structure` → fill values →

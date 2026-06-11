@@ -110,8 +110,18 @@ pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix, FeralError> 
     }
     let n = rows;
 
-    // Parse entries
-    let mut entries = Vec::with_capacity(nnz);
+    // Parse entries.
+    //
+    // X10: do not trust the header's `nnz` for the up-front allocation. A
+    // corrupt header (e.g. nnz = 10^17) would make this a multi-exabyte
+    // request; the allocator returns null and `handle_alloc_error` aborts
+    // the process instead of returning an `Err`. `nnz` is only a hint here
+    // (never validated against the actual entry count), so clamp the
+    // reservation to the source byte length — each entry occupies at least
+    // one byte in the file, so that is a hard upper bound on the true
+    // count. Valid files (where `nnz <= contents.len()` always holds) get
+    // the same exact reservation as before.
+    let mut entries = Vec::with_capacity(nnz.min(contents.len()));
     for (line_no, line) in lines {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -201,6 +211,36 @@ mod tests {
         assert_eq!(dense.get(1, 1), 3.0);
         assert_eq!(dense.get(2, 2), 1.5);
         assert_eq!(dense.get(2, 0), 0.0); // not set
+    }
+
+    /// X10 (dev/research/repo-review-2026-06-09.md): the entries Vec was
+    /// reserved with `Vec::with_capacity(nnz)` straight from the untrusted
+    /// MTX size line. A corrupt header declaring an enormous nnz turns that
+    /// into a multi-exabyte allocation request; the allocator returns null
+    /// and Rust's `handle_alloc_error` ABORTS the process — a hard crash,
+    /// not a recoverable `FeralError`, on malformed input a library caller
+    /// cannot guard against. `nnz` is only an allocation hint here
+    /// (`parse_mtx` never validates it against the real entry count), so
+    /// the reservation is now clamped to the source byte length — a hard
+    /// upper bound on the true entry count. This file declares 10^17
+    /// entries but has two real ones; pre-fix it aborted at the
+    /// `with_capacity` call ("memory allocation of 2400000000000000000
+    /// bytes failed"), post-fix it parses to the two entries.
+    #[test]
+    fn huge_nnz_header_does_not_abort() {
+        let mtx = "\
+%%MatrixMarket matrix coordinate real symmetric
+3 3 100000000000000000
+1 1 2.0
+2 1 -1.0
+";
+        let m = parse_mtx(mtx, "test").expect("a bogus huge nnz must not abort or error");
+        assert_eq!(m.n, 3);
+        assert_eq!(
+            m.entries.len(),
+            2,
+            "only the two real entries are present; nnz is an untrusted hint (X10)"
+        );
     }
 
     #[test]
