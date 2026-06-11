@@ -4,6 +4,24 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `feral-scotch` vertex-separator FM no longer stops at imbalance-rejected heads (O13)
+
+The single-pass vertex-separator FM (`fm_pass`) tried only the post-drain head
+of each priority queue per outer iteration. When *both* heads were
+imbalance-rejected, it popped them, set no `moved_this_iter`, and the
+`if !moved_this_iter { break; }` guard terminated the whole pass — abandoning
+feasible lower-gain moves still queued below the rejected heads. Under a tight
+`max_imbalance`, separators stopped improving early (and a comment falsely
+claimed the rejected vertex was "locked" when it was only popped). The pass now
+records imbalance rejections and only terminates when the frontier is truly
+exhausted (no move *and* no rejection), so it skips infeasible heads and keeps
+refining — matching SCOTCH. Concrete impact: on the issue-#3 PoissonControl KKT
+pattern (`n = 1200`) ScotchND previously degenerated into a one-sided bisection
+and fell back to a whole-graph AMD leaf (separator weight 0, permutation
+byte-equal to AMD); it now produces a genuine 188-vertex separator across 26
+levels and performs real nested dissection. Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — `feral-metis` GGP initial bisection uses the true greedy gain (O10)
 
 `initial_bisect_ggp` documented its greedy gain as

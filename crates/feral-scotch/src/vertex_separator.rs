@@ -250,6 +250,11 @@ fn fm_pass(
         // Try the chosen side; if its move is rejected (imbalance,
         // stale, locked), we'll fall through and try the other side.
         let mut moved_this_iter = false;
+        // An imbalance-rejected head is popped, not abandoned: feasible
+        // lower-gain moves may still sit below it in either PQ, so a
+        // rejection must NOT terminate the pass (O13). Only a genuinely
+        // empty/stale frontier (no move and no rejection) ends it.
+        let mut rejected_this_iter = false;
         for attempt in 0..2 {
             let pick_a = if attempt == 0 {
                 pick_a_first
@@ -317,12 +322,18 @@ fn fm_pass(
                 (new_a_w - opp_load, new_b_w)
             };
             if post_a_w.max(post_b_w) > max_side {
-                // Reject this move and lock it for the rest of the pass
-                // to avoid spinning. (Don't pop the peek from the other
-                // side — that's a separate move.)
-                // Pop the current PQ entry first.
+                // Infeasible: pop this head and try the next candidate.
+                // The pop drains the heap monotonically, so the pass
+                // still terminates; but we must keep going this outer
+                // iteration (and across iterations) because a feasible
+                // lower-gain move may sit below this head — SCOTCH skips
+                // the infeasible head and continues (O13). Record the
+                // rejection so the post-loop break does not mistake "no
+                // move" for "frontier exhausted". (Don't pop the other
+                // side's peek — that's a separate, independent move.)
                 let pq2 = if pick_a { &mut pq_to_a } else { &mut pq_to_b };
                 pq2.pop();
+                rejected_this_iter = true;
                 continue;
             }
 
@@ -461,7 +472,11 @@ fn fm_pass(
             }
             break;
         }
-        if !moved_this_iter {
+        // End the pass only when the frontier is truly exhausted: no
+        // move committed AND nothing was merely imbalance-rejected. A
+        // rejection means feasible lower-gain moves may remain queued
+        // (O13), so we keep going.
+        if !moved_this_iter && !rejected_this_iter {
             break;
         }
     }
@@ -726,5 +741,59 @@ mod tests {
             .collect();
         let s = compute_vertex_separator(&g, &mut labels, 0.30, 200, 32);
         assert_eq!(s, sep_w(&g, &labels));
+    }
+
+    #[test]
+    fn fm_pass_continues_past_imbalance_rejected_heads() {
+        // O13 regression: when BOTH PQ heads are imbalance-rejected in
+        // one outer FM iteration, the pass must keep trying the
+        // next-lower feasible moves, not break with feasible moves
+        // still queued (SCOTCH skips infeasible heads and continues).
+        //
+        // Weighted graph; each S vertex is adjacent to exactly one
+        // side, so moving it pulls nothing — fully predictable:
+        //   0=a1 (A, w4) - 3=s1 (S, w3)
+        //   1=a3 (A, w4) - 5=s3 (S, w1)
+        //   2=b2 (B, w9) - 4=s2 (S, w2)
+        // Initial: A={a1,a3}=8, B={b2}=9, S={s1,s2,s3}=6.
+        // With max_side=10:
+        //   s1->A: post A=11 > 10  reject  (pq_to_a head, gain 3)
+        //   s2->B: post B=11 > 10  reject  (pq_to_b head, gain 2)
+        //   s3->A: post A= 9 <=10  FEASIBLE (pq_to_a, gain 1) sep 6->5
+        // Pre-fix code rejects both heads in iter 1, sets
+        // moved_this_iter=false, and breaks — never reaching s3, so it
+        // returns sep_w=6. The fix continues to s3 for sep_w=5.
+        let mut g = build(6, &[(0, 3), (1, 5), (2, 4)]);
+        g.vwgt = vec![4, 4, 9, 3, 2, 1];
+        let mut labels = vec![PART_A, PART_A, PART_B, PART_SEP, PART_SEP, PART_SEP];
+        let mut load_a = vec![0i64; 6];
+        let mut load_b = vec![0i64; 6];
+        recompute_loads(&g, &labels, &mut load_a, &mut load_b);
+        // Loads as expected (each S vertex sees only one side).
+        assert_eq!((load_a[3], load_b[3]), (4, 0), "s1 sees A only");
+        assert_eq!((load_a[4], load_b[4]), (0, 9), "s2 sees B only");
+        assert_eq!((load_a[5], load_b[5]), (4, 0), "s3 sees A only");
+
+        let (sep_w_out, _a, _b) = fm_pass(
+            &g,
+            &mut labels,
+            &mut load_a,
+            &mut load_b,
+            6,   // init_sep_w
+            8,   // init_a_w
+            9,   // init_b_w
+            10,  // max_side
+            200, // move_cap
+        );
+
+        assert_eq!(
+            sep_w_out, 5,
+            "FM must skip the imbalance-rejected heads and reach the \
+             feasible lower-gain move s3->A; got sep_w={}",
+            sep_w_out
+        );
+        assert_eq!(labels[5], PART_A, "s3 should have moved into A");
+        assert_eq!(labels[3], PART_SEP, "s1 stays in S (infeasible)");
+        assert_eq!(labels[4], PART_SEP, "s2 stays in S (infeasible)");
     }
 }

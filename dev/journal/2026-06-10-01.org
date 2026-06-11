@@ -1891,3 +1891,43 @@ equivalence as audited-and-wrong and point to the canonical doc, so the
 two sites agree. Comment-only, no behaviour change, no public API =>
 no CHANGELOG. Next per /loop: do NOT start O13; continuing in-turn per
 'finish tonight'.
+
+* O13 :ordering:scotch:fm:reproduced:bugfix:surprise:
+O13 (repo-review): scotch vertex-separator fm_pass tries only the
+post-drain head of each PQ per outer iteration; when BOTH heads are
+imbalance-rejected it pops them, leaves moved_this_iter=false, and the
+`if !moved_this_iter { break; }` guard (vertex_separator.rs:464-466)
+kills the whole pass with feasible lower-gain moves still queued. The
+reject comment (:319-327) also falsely claimed it "locked" the vertex
+(it only pop()s). RED: added fm_pass-level unit test
+fm_pass_continues_past_imbalance_rejected_heads — 6-vertex weighted
+graph (A=8,B=9,S=6; vwgt overwritten on a unit-weight build), max_side
+10. s1->A (post A=11) and s2->B (post B=11) are the heads, both
+rejected; s3->A (post A=9) is feasible but sits below s1 in pq_to_a.
+Pre-fix returns sep_w=6 (asserts ==5) => RED confirmed at runtime
+(got 6). Oracle = hand calc from FM/SCOTCH "skip and continue"
+definition. FIX: added `rejected_this_iter` flag, set it in the
+imbalance-reject branch, changed the guard to
+`if !moved_this_iter && !rejected_this_iter { break; }`, and corrected
+the misleading "lock" comment. Termination still holds: each rejection
+pops one PQ entry (monotone heap shrink) and moves bump move_cap, so the
+top `(None,None) => break` always fires. GREEN: new test passes; lib
+suite 44/44.
+
+SURPRISE / positive side effect: the pre-existing characterization test
+issue_3_scotch_bisection_degenerates_on_kkt FAILED after the fix —
+n_separator_vertices went 0 -> 188 on the n=1200 PoissonControl KKT
+pattern. That test *locked in* the degeneracy (FM early-stop left a
+one-sided bisection => node_nd `a_verts.is_empty()||b_verts.is_empty()`
+guard => whole-graph amd_leaf => perm byte-equal to AMD). O13 lets FM
+finish refining, so the top-level bisection balances and real ND runs
+(26 levels, 188 sep vtxs, 12 leaf calls). The test's own message
+invited this re-check ("if this fires, the SCOTCH driver has improved").
+Rewrote it as issue_3_scotch_recurses_on_kkt_after_o13: asserts
+n_separator_vertices>0 and scotch_perm != amd_perm, with module-doc
+history. Did NOT claim issue #3 closed — the upper-layer
+visibility/fallback machinery is untouched; only the KKT degeneracy that
+motivated it no longer reproduces here. Full feral-scotch suite green.
+User-visible (separator quality) => CHANGELOG entry added. Reproduced =>
+no tried-and-rejected entry. Next per /loop: do NOT start O14;
+continuing in-turn per 'finish tonight'.
