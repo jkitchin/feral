@@ -4441,3 +4441,61 @@ change, no public-API surface change -> no CHANGELOG.
 
 Evidence: `lib.rs:218-220` (old comment) vs `lib.rs:105-121` (audited
 finding). Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-11 — O14: scotch band FM is dead code while the crate doc advertises it (finding O14, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O14** scotch band FM is dead code while `lib.rs:12-13` advertises
+> it; `band_fm.rs` is `#[allow(dead_code)]`, unreachable from
+> `node_nd.rs`; projection-loop variable names swapped
+> (`band_fm.rs:76-81` — functionally correct, editor trap).
+> low/certain.
+
+### Why this is not reproducible as a correctness test
+
+O14 has no behavioural defect to pin with a RED→GREEN test:
+
+1. The `band_fm` module is unreachable from the production ND path —
+   `node_nd.rs` contains no reference to it (`grep band` is empty), and
+   `mod band_fm;` carries `#[allow(dead_code)]` (lib.rs:36-37). Dead
+   code cannot be exercised by a library test, so there is nothing for
+   a new test to drive.
+2. The projection-loop variable names at `band_fm.rs:76-81` are
+   *swapped but functionally correct*. `BandGraph::orig_of_sub` is
+   indexed by sub-vertex and yields the original-graph vertex (struct
+   doc, band_fm.rs:138-140), so `.enumerate()` produces
+   `(sub_index, orig_vertex)` — yet the loop bound them as
+   `(orig_v, &sub_v)`. The body `labels[sub_v] = sub_labels[orig_v]`
+   therefore reads `labels[orig_vertex] = sub_labels[sub_index]`, which
+   is exactly the intended projection. The existing module test
+   `out_of_band_labels_preserved` already asserts the projection is
+   correct and passes, so there is no failing behaviour to reproduce —
+   only a naming trap that misleads a human reader.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected
+citing the finding ID). Per the X16/O4/O5/O6/O9 precedent, the safe
+low-risk sub-fixes are applied:
+
+- `band_fm.rs:76-81`: the projection loop is renamed to
+  `(sub_i, &orig_v)` with the body `labels[orig_v] = sub_labels[sub_i]`
+  and the anchor guard keyed on `sub_i`. Pure rename — the generated
+  code is identical, and all six `band_fm` tests still pass.
+- `lib.rs:10-12`: the "Adaptive refinement (boundary / halo / band FM)"
+  bullet is corrected so it no longer advertises band FM as part of the
+  active pipeline; band FM is noted as implemented and unit-tested but
+  not yet wired into the default ND driver.
+
+The module itself is kept (it is tested and backed by the research note
+`dev/research/scotch-band-fm.md`); wiring it into `node_nd` is a
+behavioural change with its own benchmarking and is out of scope for a
+low/certain documentation finding. Comment/rename only; no behaviour
+change, no public-API surface change → no CHANGELOG.
+
+Evidence: `crates/feral-scotch/src/lib.rs:36-37` (`#[allow(dead_code)]
+mod band_fm;`), empty `grep band crates/feral-scotch/src/node_nd.rs`,
+`band_fm.rs:76-81` (projection loop), `band_fm.rs:138-140` (orig_of_sub
+contract), `band_fm.rs:488-511` (`out_of_band_labels_preserved` guard).
+Journal: dev/journal/2026-06-10-01.org.

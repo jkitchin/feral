@@ -9,7 +9,9 @@
 //! - Graph compression (supervariable merging before partitioning).
 //! - Direct vertex-separator FM (tighter separators than edge-cut
 //!   conversion on structured meshes).
-//! - Adaptive refinement (boundary / halo / band FM).
+//! - Adaptive refinement (boundary / halo FM). A band-FM refiner
+//!   (`band_fm`) is implemented and unit-tested but is not yet wired
+//!   into the default ND driver.
 //!
 //! The public surface conforms to the FERAL ordering-crate contract
 //! (`dev/plans/ordering-crate-contract.md`): [`CscPattern`],

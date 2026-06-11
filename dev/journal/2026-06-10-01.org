@@ -1931,3 +1931,26 @@ motivated it no longer reproduces here. Full feral-scotch suite green.
 User-visible (separator quality) => CHANGELOG entry added. Reproduced =>
 no tried-and-rejected entry. Next per /loop: do NOT start O14;
 continuing in-turn per 'finish tonight'.
+
+* O14 :ordering:scotch:band-fm:dead-code:non-reproducible:doc:
+O14 (repo-review): scotch band_fm.rs is dead code (mod band_fm is
+#[allow(dead_code)], lib.rs:36-37; node_nd.rs has zero `band`
+references) yet the crate doc (lib.rs:10-12) advertised "Adaptive
+refinement (boundary / halo / band FM)" as if band FM were live.
+Separately, the label-projection loop (band_fm.rs:76-81) bound
+`band.orig_of_sub.iter().enumerate()` as `(orig_v, &sub_v)` — backwards:
+orig_of_sub is sub-indexed and yields the ORIG vertex (struct doc
+:138-140), so enumerate gives (sub_index, orig_vertex). Body
+`labels[sub_v]=sub_labels[orig_v]` still computes the correct
+`labels[orig_vertex]=sub_labels[sub_index]` — an editor trap, not a bug.
+Not reproducible as RED/GREEN: dead code can't be driven by a lib test,
+and the existing `out_of_band_labels_preserved` test already proves the
+projection is correct (passes). Routed to tried-and-rejected citing O14.
+Applied low-risk sub-fixes per X16/O4/O5/O6/O9 precedent: (1) renamed
+the loop to `(sub_i, &orig_v)` / `labels[orig_v]=sub_labels[sub_i]` with
+the anchor guard on sub_i (pure rename, identical codegen); (2) reworded
+lib.rs:10-12 so it lists only the in-pipeline refiners and flags band FM
+as implemented-but-not-yet-wired. Module kept (tested + research note
+dev/research/scotch-band-fm.md); wiring it in is out of scope. No
+behaviour/API change => no CHANGELOG. feral-scotch suite green. Next per
+/loop: do NOT start O15; continuing in-turn per 'finish tonight'.
