@@ -4298,3 +4298,55 @@ assembly, `n_clear_flag: 0`); `feral-amd/src/stats.rs:5-13`,
 (`OrderDiagnostics` has no clear-flag field);
 `quotient_graph/workspace.rs:49-59` (`clear_flag`), `:99-100`
 (`wbig = i32::MAX - n`). Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — O9: metis `two_hop_pass` O(n^2) on hubs (finding O9, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O9** metis `two_hop_pass` is O(n²) on hub graphs
+> (`coarsen.rs:148-204`) — its own motivating case; rescans
+> neighbor-of-neighbor lists from the start per spoke; `mark` allocated
+> and never used. medium-low/certain (perf).
+
+### Why this is not reproducible as a correctness test
+
+O9 is a performance finding, not a wrong-answer defect. `two_hop_pass`
+produces a correct matching; the complaint is that on a star/hub graph each
+self-matched spoke `v` rescans its hub neighbour's entire adjacency from the
+start to find a self-matched partner, so ~n spokes each scan ~n hub-neighbours
+=> O(n^2). A unit test cannot turn "quadratic instead of linear" into a
+deterministic pass/fail without a timing/benchmark oracle, which the spec's
+tests-first lifecycle does not provide for this kind of finding (and timing
+assertions are flaky). So there is no RED state to write.
+
+### Why the O(n^2) rescan is not rewritten here
+
+The current algorithm pairs each self-matched `v` (in increasing vertex
+order) with the *first* self-matched 2-hop neighbour found while scanning
+`v`'s neighbours in adjacency order and each neighbour's adjacency in order.
+The pairing is therefore order-sensitive and deterministic. A genuinely
+O(nnz) rewrite (METIS Match_2Hop buckets unmatched vertices by a
+representative neighbour and pairs within buckets) would choose *different*
+partners, changing `cmap`, the coarse graph, and the final permutation. That
+would break the crate's determinism contract and the
+`coarsen_is_deterministic_with_seed` test, and shift ordering quality on
+every input — far out of proportion to an opportunistic low-severity perf
+fix. The two-hop pass also only fires when SHEM's reduction ratio exceeds the
+two-hop threshold (default 0.85), i.e. on the already-rare hard-to-match
+levels, bounding the practical impact.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible -> tried-and-rejected citing
+the finding ID). Per the X16/O4/O5/O6 precedent, the finding's safe, explicitly
+recommended sub-fix is applied: the dead `mark` array — allocated `vec![-1; n]`
+and only ever touched by a `let _ = &mut mark;` lint-silencer — is removed,
+along with the stale comment describing its non-use. This is a pure cleanup
+with no behaviour change; the existing two-hop tests
+(`coarsen_grid_8x8_halves_vertices`, `coarsen_is_deterministic_with_seed`,
+`coarsen_hierarchy_shrinks_monotonically`) remain the regression guard. The
+O(n^2) scan structure is left as-is.
+
+Evidence: `coarsen.rs:148-204` (two_hop_pass); the `mark` declaration and the
+`let _ = &mut mark;` no-op were the only references to it. Journal:
+dev/journal/2026-06-10-01.org.

@@ -164,11 +164,6 @@ pub fn coarsen(
 /// with another self-matched vertex that shares a common neighbor.
 /// Rebuilds `cmap` and returns the new `cnvtxs`.
 fn two_hop_pass(fine: &Graph, match_: &mut [i32], cmap: &mut [i32]) -> i32 {
-    let n = fine.nvtxs as usize;
-    // `mark[u]` = unmatched vertex seen via a previous 2-hop candidate.
-    // Re-used per outer iteration by resetting after each v.
-    let mut mark: Vec<i32> = vec![-1; n];
-
     for v in 0..fine.nvtxs {
         let vu = v as usize;
         if match_[vu] != v {
@@ -198,9 +193,6 @@ fn two_hop_pass(fine: &Graph, match_: &mut [i32], cmap: &mut [i32]) -> i32 {
             match_[vu] = partner;
             match_[partner as usize] = v;
         }
-        // Leave mark untouched — it's not reset per outer here, but
-        // no state is carried across iterations.
-        let _ = &mut mark; // silence unused lint across edits
     }
 
     // Rebuild cmap contiguous from the (possibly updated) match_.

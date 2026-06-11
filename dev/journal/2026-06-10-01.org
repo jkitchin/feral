@@ -1814,3 +1814,20 @@ new_nvtxs<prev_nvtxs, independent of prior levels; makes comment true. GREEN +
 full feral-metis suite (grids/tridiag unaffected -- they shrink well above the
 stall threshold). User-visible => CHANGELOG. Next per /loop: do NOT start O9;
 continuing in-turn per 'finish tonight'.
+
+* O9 :ordering:metis:coarsen:two-hop:perf:non-reproducible:
+O9 (repo-review): two_hop_pass (coarsen.rs:148-204) is O(n^2) on hub graphs
+(each self-matched spoke rescans its hub neighbour's full adjacency from the
+start to find a partner) and allocates a `mark` array that is never used.
+Perf finding, not a wrong-answer defect => no RED/GREEN correctness test
+(quadratic-vs-linear needs a timing oracle, which is flaky and not part of the
+tests-first lifecycle). A faithful O(nnz) rewrite (METIS Match_2Hop bucketing)
+would change which partners are chosen => different cmap/coarse graph/perm,
+breaking coarsen_is_deterministic_with_seed and the determinism contract;
+out of scope for a low-severity opportunistic fix, and the pass only fires on
+the rare levels where SHEM reduction ratio > two_hop threshold. Routed to
+tried-and-rejected citing O9. Applied the safe recommended sub-fix only:
+removed the dead `mark` Vec + its `let _ = &mut mark;` lint-silencer + stale
+comment. Pure cleanup, no behaviour change; existing two-hop tests are the
+regression guard. Not user-visible => no CHANGELOG. Next per /loop: do NOT
+start O10; continuing in-turn per 'finish tonight'.
