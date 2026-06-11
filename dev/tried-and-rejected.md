@@ -4096,3 +4096,62 @@ Evidence: `src/inertia.rs:1-30`; `src/dense/factor.rs:4259,4313-4332`
 (2×2-block inertias with `total()==2`); whole-matrix sites
 `src/dense/factor.rs:1158,1786,2281,2515`. Journal:
 dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — O4: non-aggressive Pass-2 stale-mark `as usize` cast (finding O4, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O4** Non-aggressive Pass-2 casts a possibly-stale mark difference
+> straight to usize with no guard (`algo.rs:407`, AMF branch
+> `:962-977`); the invariant holds today, but a regression wraps to
+> ~2⁶⁴. Add `debug_assert!(we >= ws.wflg)`. low/possible.
+
+### What is there
+
+In `crates/feral-ordering-core/src/quotient_graph/algo.rs`, the
+non-aggressive element sub-pass of Pass-2 computes the external degree
+contribution of a live element `e` as `we - ws.wflg`, where
+`we = ws.w[e]` and `ws.wflg` are both `i32`:
+
+- AMD accumulator, `:406-408`:
+  `let dext = (we - ws.wflg) as usize; deg += dext;`
+- AMF accumulator, `:995-1000`:
+  `let dext = we - ws.wflg; ... deg += dext as usize;`
+
+If a live element (`we != 0`) ever had `we < ws.wflg`, the `i32`
+subtraction is negative and the `as usize` cast sign-extends it to ~2^64,
+corrupting `deg`.
+
+### Why this is not reproducible as a defect
+
+The algorithm maintains the invariant `we >= ws.wflg` for every live
+element in the non-aggressive pass; the review confirms "the invariant
+holds today" and rates the finding "low/possible". `ws.wflg` is the current
+flag baseline and live elements carry a mark `>=` it by construction.
+Driving `we < ws.wflg` requires directly corrupting the internal workspace
+(`ws.w`, `ws.wflg`), which no public ordering entry point exposes — the
+producers take a `CscPattern` and own the workspace privately. So no test
+can reproduce the wrap on a real input; a test could only manufacture the
+violation by reaching into private state, which characterizes the guard,
+not a defect. (The aggressive AMF branch is already safe: `:972` guards
+`if dext > 0` before using `dext`.)
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected citing
+the finding ID). Per the finding's explicit recommendation and the X12/X16
+precedent (non-reproducible findings with a concrete low-risk in-code
+hardening), a `debug_assert!` documenting the `we >= ws.wflg` invariant was
+added at both non-aggressive cast sites (AMD `:407`, AMF `:1000`). It is
+debug/test-only (compiled out in release), changes no behavior, and never
+fires on current inputs — the full feral-ordering-core / feral-amd /
+feral-amf / feral-metis / feral-scotch test suites pass with it in place. It
+converts a silent ~2^64 wrap on a future regression into an immediate,
+located assertion failure. Not user-visible (internal debug guard) → no
+CHANGELOG entry.
+
+Evidence:
+`crates/feral-ordering-core/src/quotient_graph/algo.rs:402-413` (AMD
+non-aggressive branch), `:990-1006` (AMF non-aggressive branch), `:966-988`
+(aggressive AMF branch already guarded by `if dext > 0` at `:972`). Journal:
+dev/journal/2026-06-10-01.org.

@@ -404,6 +404,16 @@ pub fn finalize_step(
                 let e = ws.iw[p] as usize;
                 let we = ws.w[e];
                 if we != 0 {
+                    // Invariant (O4): a live element in the non-aggressive pass
+                    // always has `we >= ws.wflg`, so the difference is
+                    // non-negative. Guard the unchecked `as usize` cast — a
+                    // future regression that broke the invariant would
+                    // sign-extend a negative difference to ~2^64 here.
+                    debug_assert!(
+                        we >= ws.wflg,
+                        "stale mark: w[e]={we} < wflg={} would wrap as usize",
+                        ws.wflg
+                    );
                     let dext = (we - ws.wflg) as usize;
                     deg += dext;
                     ws.iw[pn] = e as i32;
@@ -993,6 +1003,15 @@ pub fn finalize_step_amf(
                 let we = ws.w[e];
                 if we != 0 {
                     let dext = we - ws.wflg;
+                    // Invariant (O4): non-aggressive pass keeps `we >= ws.wflg`,
+                    // so `dext >= 0`. Guard the `dext as usize` cast below
+                    // against a future regression wrapping a negative dext to
+                    // ~2^64.
+                    debug_assert!(
+                        dext >= 0,
+                        "stale mark: w[e]={we} < wflg={} would wrap as usize",
+                        ws.wflg
+                    );
                     if ws.wf[e] == 0 {
                         ws.wf[e] = amf_wf_surface(dext as i64, ws.degree[e] as i64);
                     }

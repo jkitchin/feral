@@ -1710,3 +1710,23 @@ src/sparse/csc.rs:297-302; AMD/Schur derive from it). fmt clean; clippy
 prevents silent graph corruption) -> CHANGELOG Fixed entry added. Next per /loop:
 do NOT start the next issue (O4). Continue in-turn per the live 'speed this up'
 directive.
+
+* 11:30 :o4:ordering-core:quotient-graph:debug-assert:non-reproducible:
+O4 (repo-review-2026-06-09.md): non-aggressive Pass-2 element sub-pass casts
+we-ws.wflg (both i32) to usize without guarding we>=ws.wflg -- algo.rs:407 (AMD
+accumulator), :1000 (AMF accumulator). A negative diff would sign-extend to ~2^64
+and corrupt deg. Aggressive AMF branch (:972) already guards via `if dext > 0`.
+=> Non-reproducible: the algorithm maintains we>=ws.wflg for every live element in
+the non-aggressive pass (review: "the invariant holds today", low/possible).
+Violating it needs direct corruption of private workspace (ws.w/ws.wflg), which no
+public ordering entry point exposes -- producers take a CscPattern and own the
+workspace privately. No test can drive the wrap on a real input. Per O4's explicit
+recommendation + X12/X16 precedent (non-reproducible w/ concrete low-risk
+hardening): added debug_assert!(we>=ws.wflg) / debug_assert!(dext>=0) at both
+non-aggressive cast sites documenting the invariant. Debug/test-only (compiled out
+in release), no behavioral change. Verified the asserts never fire on real inputs:
+feral-ordering-core 59, feral-amd 12+3, feral-amf 7, feral-metis 51, feral-scotch
+43 + integration all pass (debug build, asserts active). fmt clean; clippy
+-p feral-ordering-core --all-targets -D warnings clean. tried-and-rejected citing
+O4. Not user-visible (internal debug guard) => no CHANGELOG. Next per /loop: do NOT
+start the next issue (O5). Continue in-turn per the live 'speed this up' directive.
