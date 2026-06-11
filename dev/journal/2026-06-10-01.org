@@ -1580,3 +1580,20 @@ dev/tried-and-rejected.md citing X12. Removing the sort would be a pure perf
 optimization, deliberately out of scope for this bug-fix loop. Not user-visible
 => no CHANGELOG. Next per /loop: do NOT start the next issue (X13). Continue
 in-turn per the live 'speed this up' directive.
+
+* 21:10 :x13:value-bound:scaling:false-comment:not-reproducible:tried-and-rejected:
+X13 (repo-review §X13, low/certain): the defensive all-zero fingerprint comment
+in precompute_mc64_validity (src/scaling/value_bound.rs:180-182) claimed it
+"makes the subsequent check reject (r0=1, mean=0)". False on two counts: (1) the
+all-zero fingerprint is produced only when scaling.len()!=n, and the sole
+consumer mc64_value_bound_passes opens with a length gate (:218-220) that returns
+false BEFORE any condition runs -- so the fingerprint values never drive the
+decision on those inputs. (2) mean_diag_0=0 makes condition 3
+(min_diag >= EPS_DIAG*mean_diag_0 = 0) VACUOUS (passes for any non-negative
+diagonal), the opposite of "reject"; r0=1 doesn't force cond 1 to fail either.
+Also the else arm is unreachable in practice (callers pass SparseFactors::scaling,
+len n by construction). => No reproducible defect (behavior correct, only the
+comment wrong). Per X8 precedent: corrected the comment in-code + tried-and-
+rejected entry citing X13. fmt clean. Not user-visible => no CHANGELOG. Next per
+/loop: do NOT start the next issue (X14). Continue in-turn per the live 'speed
+this up' directive.

@@ -177,9 +177,21 @@ pub(crate) fn precompute_mc64_validity(matrix: &CscMatrix, scaling: &[f64]) -> M
     let stats = if scaling.len() == matrix.n {
         scaled_dominance_stats(matrix, scaling, &qualifying)
     } else {
-        // Defensive: a length mismatch should be impossible here,
-        // but never index out of bounds. An all-zero fingerprint
-        // makes the subsequent check reject (r0 = 1, mean = 0).
+        // Defensive: a length mismatch should be impossible here
+        // (callers pass `SparseFactors::scaling`, length `n` by
+        // construction), but never index out of bounds. This all-zero
+        // fingerprint is a safe placeholder that is never actually
+        // consulted to make a decision: it is produced only when
+        // `scaling.len() != matrix.n`, and `mc64_value_bound_passes`
+        // tests that *same* length mismatch first — its length gate
+        // returns `false` before any condition is evaluated. The
+        // fingerprint values do NOT by themselves force a reject: with
+        // `mean_diag_0 = 0` the diagonal-collapse threshold
+        // `EPS_DIAG * mean_diag_0` is `0`, so condition 3 becomes
+        // vacuous (it passes for any non-negative scaled diagonal), and
+        // `r0 = 1` does not force condition 1 to fail either. Rejection
+        // on a length mismatch comes from the length gate, not from
+        // these values.
         DominanceStats {
             max_ratio: 0.0,
             n_off_dominant: 0,

@@ -3887,3 +3887,61 @@ reproducing defects. Not user-visible → no CHANGELOG entry.
 Evidence: `src/scaling/mc64.rs:294-394` (build_cost_graph: expansion
 `:307-355`, sort `:357-370`, column-max normalization `:372-394`).
 Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — X13: value_bound defensive-fingerprint comment is false (finding X13, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **X13** `value_bound.rs:180-189,222-226`: the defensive-fingerprint
+> comment ("makes the subsequent check reject") is false — with
+> mean_diag_0 = 0, condition 3 is vacuous; impact nil today only
+> because the length gate rejects first. low/certain.
+
+### Why this is not reproducible as a failing test
+
+X13 is a false *comment*, not a behavioral defect. The cited code path
+(`src/scaling/value_bound.rs:180-189`, the `else` arm of
+`precompute_mc64_validity`) builds an all-zero `DominanceStats` when
+`scaling.len() != matrix.n`, yielding the fingerprint `r0 = 1`,
+`n_off_dominant_0 = 0`, `mean_diag_0 = 0`. The old comment claimed this
+"makes the subsequent check reject (r0 = 1, mean = 0)". That is wrong on
+two counts:
+
+1. **The length gate rejects first.** This fingerprint is produced *only*
+   when `scaling.len() != matrix.n`. Its sole consumer,
+   `mc64_value_bound_passes` (`:212-227`), opens with
+   `if scaling.len() != n || validity.qualifying.len() != n { return false; }`
+   (`:218-220`) and returns `false` before evaluating any of conditions
+   1-3. So the fingerprint values never drive the decision on the very
+   inputs that produce them.
+
+2. **`mean_diag_0 = 0` makes condition 3 vacuous, not rejecting.** Were the
+   conditions evaluated, condition 3 is
+   `min_diag >= EPS_DIAG * mean_diag_0 = EPS_DIAG * 0 = 0`, satisfied for
+   any non-negative scaled diagonal — it *passes*, the opposite of the
+   comment's "reject". And `r0 = 1` does not force condition 1 to fail.
+   Only condition 2 (`n_off_dominant <= GROWTH_COUNT * 0`) would reject,
+   and only when off-dominant rows exist.
+
+Furthermore the `else` arm is unreachable in practice: callers pass
+`SparseFactors::scaling`, whose length is `matrix.n` by construction
+(documented at `:172-174`). The branch is dead defensive code whose only
+job is to avoid an out-of-bounds index; it never reaches a value-bound
+decision. There is thus no input for which behavior is wrong, so no RED
+test can be written.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected
+citing the finding ID), and — following the X8 precedent for misleading
+comments — the inaccurate comment was corrected in the same change.
+`src/scaling/value_bound.rs:180-189` now states that the all-zero
+fingerprint is a never-consulted placeholder, that rejection on a length
+mismatch comes from the length gate (not the fingerprint), and that
+`mean_diag_0 = 0` makes condition 3 vacuous rather than rejecting. No
+behavioral change; no failing test exists or is added. Not user-visible
+(internal comment) → no CHANGELOG entry.
+
+Evidence: `src/scaling/value_bound.rs:175-196` (precompute, defensive
+arm), `:212-227` (length gate `:218-220`, conditions `:222-226`),
+`:169-174` (caller contract). Journal: dev/journal/2026-06-10-01.org.
