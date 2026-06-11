@@ -1,0 +1,47 @@
+#+TITLE: FERAL session journal 2026-06-11-01
+#+STARTUP: showall
+
+* Session goal :meta:
+Fix the four regressions (REG-1..REG-4) found in
+dev/research/repo-review-2026-06-09-verification.md — the independent audit
+of the 85-commit repo-review fix campaign. Each fix starts with a reproducing
+test; one atomic commit per regression; verifier's suggested order
+(REG-1, REG-2 + revisit D13, REG-3, REG-4 + X6 one-liner). These are
+numeric-core/harness bugs from earlier campaign sessions, distinct from the
+now-complete per-finding /loop (O-series).
+
+* 03:10 :reg1:permute-cache:silent-wrong-answer:
+REG-1 (high): the N7 one-shot PermuteCache (131a6de) keyed its warm-path
+validation on (input_n, input_nnz, value_map.len()) only — not the input
+*pattern* (col_ptr + row_idx) or perm_inv. So on one Solver: factor pattern A
+twice (call 2 builds A's value_map cache), then factor a *different* pattern B
+with the same (n, nnz) — B-call-2 warm-hits A's stale value_map and scatters
+B's values through A's structure, returning Success with a silently wrong
+factorization. Verifier measured solve residual 2.1e+2 (vs 5.7e-14 cold).
+Second route: same pattern, different AutoRace permutation after
+invalidate_symbolic_cache(). Live on default sequential + Schur reuse paths.
+
+Fix (durable, exceeds the verifier's "minimal" suggestion): PermuteCache now
+stores build-time input_col_ptr, input_row_idx, input_perm_inv; the warm path
+(factorize.rs ~3543) accepts the cache only when all three match byte-for-byte
+(O(n+nnz) compare — still cheaper than the skipped from_triplets sort).
+Chose exact stored comparison over a hash deliberately: a fingerprint
+collision would reintroduce the exact silent-wrong-answer this fixes, and the
+compare is not on the asymptotic hot path. Plus defence-in-depth: a one-shot
+(pattern_reused_hint == false) call clears any existing cache (else { *cache =
+None }) so a later warm call cannot trust a stale entry.
+
+Two RED→GREEN tests, both oracled against the canonical cold-path
+permute_csc_values (factorize.rs:3474, uses only perm_inv — the established
+oracle): permute_cache_rejects_stale_pattern_same_n_nnz (pattern A then a
+distinct same-(n,nnz) pattern B; asserts B warm == canonical B) and
+permute_cache_rejects_stale_permutation (arrow pattern, identity perm builds
+cache, reversed perm warm call; asserts == canonical). First draft of the
+perm test PASSED at HEAD (should have been RED) — the probe was a constant
+tridiagonal matrix, invariant under index reversal, so stale and canonical
+structures coincided and hid the bug; switched to an arrow pattern (dense
+first column) whose permuted structure genuinely changes under reversal, then
+both went RED ([0,4,5,6,7] stale vs [0,2,4,6,7] canonical) → GREEN after fix.
+Existing N7 test (permute_cache_not_built_for_one_shot_caller) still green.
+cargo test --lib permute_cache: 3 passed. cargo test --workspace: 0 failures.
+User-visible (silent wrong answer on default path) → CHANGELOG Fixed entry.

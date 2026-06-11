@@ -4,6 +4,25 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — permute-cache warm path no longer trusts a stale pattern/permutation (REG-1)
+
+The `PermuteCache` introduced by the N7 one-shot optimization keyed its warm-path
+validation on `(input_n, input_nnz, value_map.len())` only — not the input
+*pattern* (`col_ptr` + `row_idx`) or `perm_inv`. Re-factoring a second matrix
+with the same `(n, nnz)` but a different sparsity pattern on the same `Solver`,
+or re-factoring the same pattern under a different AutoRace-selected permutation,
+warm-hit the stale `value_map` and scattered the new values through the old
+structure — returning `Success` with a silently wrong factorization (solve
+residual `2.1e+2` vs `5.7e-14` on a cold build). This was a live hazard on the
+default sequential and Schur reuse paths. `PermuteCache` now stores the
+build-time `input_col_ptr`, `input_row_idx`, and `input_perm_inv`, and the warm
+path accepts the cache only when all three match byte-for-byte (an `O(n + nnz)`
+compare — still cheaper than the skipped `from_triplets` sort, exact rather than
+hashed so a fingerprint collision can never reintroduce the wrong answer). A
+one-shot (`pattern_reused_hint == false`) call also clears any existing cache so
+a later warm call cannot trust it. Finding REG-1 from
+`dev/research/repo-review-2026-06-09-verification.md`.
+
 ### Added — `feral-kahip` now reports `KahipStats::n_components` (O18)
 
 `KahipStats` gains a `pub n_components: u32` field — the number of top-level

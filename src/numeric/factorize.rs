@@ -1251,6 +1251,22 @@ pub(crate) struct PermuteCache {
     input_n: usize,
     /// Input matrix nnz at cache build (`matrix.values.len()`).
     input_nnz: usize,
+    /// Input `col_ptr` at cache build. The permuted structure and
+    /// `value_map` are a pure function of the input *pattern*
+    /// (`col_ptr` + `row_idx`) and `perm_inv`; the warm path is valid
+    /// only if all three are byte-identical to the build-time inputs.
+    /// REG-1: `(n, nnz)` alone is NOT a sufficient key — two distinct
+    /// patterns sharing `(n, nnz)`, or the same pattern under a changed
+    /// permutation, would otherwise scatter values through a stale
+    /// structure and return a wrong factorization. Stored (not hashed)
+    /// so a fingerprint collision can never reintroduce that silent
+    /// wrong answer; the compare is O(n + nnz), still strictly cheaper
+    /// than the `from_triplets` sort the warm path skips.
+    input_col_ptr: Vec<usize>,
+    /// Input `row_idx` at cache build (see `input_col_ptr`).
+    input_row_idx: Vec<usize>,
+    /// `perm_inv` at cache build (see `input_col_ptr`).
+    input_perm_inv: Vec<usize>,
     /// `col_ptr` of the cached permuted CSC.
     permuted_col_ptr: Vec<usize>,
     /// `row_idx` of the cached permuted CSC.
@@ -3538,9 +3554,21 @@ fn permute_csc_values_with_cache(
     let nnz = matrix.nnz();
 
     // Warm path: cache hit — scatter values into the cached structure.
+    // REG-1: the cache is keyed on the full input pattern AND `perm_inv`,
+    // not just `(n, nnz)`. A different pattern sharing `(n, nnz)`, or the
+    // same pattern under a changed permutation (e.g. AutoRace reselecting
+    // an ordering after a symbolic-cache invalidation), must fall through
+    // to the cold rebuild rather than scatter values through a stale
+    // structure.
     if pattern_reused_hint {
         if let Some(c) = cache.as_ref() {
-            if c.input_n == n && c.input_nnz == nnz && c.value_map.len() == nnz {
+            if c.input_n == n
+                && c.input_nnz == nnz
+                && c.value_map.len() == nnz
+                && c.input_col_ptr == matrix.col_ptr
+                && c.input_row_idx == matrix.row_idx
+                && c.input_perm_inv.as_slice() == perm_inv
+            {
                 let permuted_nnz = c.permuted_row_idx.len();
                 let mut values = vec![0.0f64; permuted_nnz];
                 for k in 0..nnz {
@@ -3580,6 +3608,9 @@ fn permute_csc_values_with_cache(
                 *cache = Some(PermuteCache {
                     input_n: n,
                     input_nnz: nnz,
+                    input_col_ptr: matrix.col_ptr.clone(),
+                    input_row_idx: matrix.row_idx.clone(),
+                    input_perm_inv: perm_inv.to_vec(),
                     permuted_col_ptr: permuted.col_ptr.clone(),
                     permuted_row_idx: permuted.row_idx.clone(),
                     value_map,
@@ -3589,6 +3620,13 @@ fn permute_csc_values_with_cache(
                 *cache = None;
             }
         }
+    } else {
+        // N7/REG-1 defence in depth: a one-shot (hint == false) call must
+        // not leave a stale cache from a previous pattern that a later
+        // warm call could trust. Clear it (O(1)). The warm path also
+        // validates the pattern+perm fingerprint, so this is belt-and-
+        // suspenders, not the sole guard.
+        *cache = None;
     }
 
     Ok((permuted, from_triplets_us))
@@ -5130,5 +5168,98 @@ mod tests {
             warm_cache.is_some(),
             "warm-reuse caller (hint=true) should build the value-map cache on its cold call"
         );
+    }
+
+    /// REG-1 (repo-review-2026-06-09-verification.md): a stale
+    /// `PermuteCache` left by an earlier pattern must NOT be reused for a
+    /// different input pattern that merely shares `(n, nnz)`. N7
+    /// (`131a6de`) made the cold-path rebuild conditional on
+    /// `hint == true`, so a `hint == false` call no longer refreshes the
+    /// cache; combined with the warm path validating only
+    /// `(n, nnz, value_map.len())` this let a later warm call scatter new
+    /// values through the previous pattern's structure and return Success
+    /// with a wrong factorization. The warm path must validate the actual
+    /// input pattern before it fires.
+    #[test]
+    fn permute_cache_rejects_stale_pattern_same_n_nnz() {
+        let n = 4usize;
+        let perm: Vec<usize> = (0..n).collect();
+        let perm_inv: Vec<usize> = (0..n).collect();
+
+        // Pattern A and pattern B share (n, nnz) = (4, 7) but differ
+        // structurally (different row_idx / col_ptr).
+        let a = CscMatrix::from_triplets(
+            n,
+            &[0, 1, 1, 2, 2, 3, 3],
+            &[0, 0, 1, 1, 2, 2, 3],
+            &[4.0, -1.0, 4.0, -1.0, 4.0, -1.0, 4.0],
+        )
+        .unwrap();
+        let b = CscMatrix::from_triplets(
+            n,
+            &[0, 1, 2, 2, 3, 3, 3],
+            &[0, 1, 0, 2, 1, 3, 0],
+            &[4.0, 4.0, -1.0, 4.0, -1.0, 4.0, -2.0],
+        )
+        .unwrap();
+        assert_eq!(a.nnz(), b.nnz(), "patterns must share nnz for the probe");
+
+        // Warm-reuse caller builds A's cache (hint=true cold call).
+        let mut cache: Option<PermuteCache> = None;
+        permute_csc_values_with_cache(&a, &perm, &perm_inv, false, true, &mut cache).unwrap();
+        assert!(cache.is_some());
+
+        // A one-shot (hint=false) call on pattern B follows.
+        permute_csc_values_with_cache(&b, &perm, &perm_inv, false, false, &mut cache).unwrap();
+
+        // Warm call on pattern B must equal the canonical permutation of
+        // B — NOT B's values scattered through A's structure.
+        let (warm_b, _) =
+            permute_csc_values_with_cache(&b, &perm, &perm_inv, false, true, &mut cache).unwrap();
+        let (canon_b, _) = permute_csc_values(&b, &perm, &perm_inv, false).unwrap();
+        assert_eq!(warm_b.col_ptr, canon_b.col_ptr, "stale-pattern col_ptr");
+        assert_eq!(warm_b.row_idx, canon_b.row_idx, "stale-pattern row_idx");
+        assert_eq!(warm_b.values, canon_b.values, "stale-pattern values");
+    }
+
+    /// REG-1 second route: the same input pattern but a changed
+    /// permutation (AutoRace selecting a different ordering after a
+    /// symbolic-cache invalidation) must also bypass the stale cache —
+    /// `hint` stays `true` throughout, so the cold-path clear does not
+    /// help; the stored `perm_inv` is what guards it.
+    #[test]
+    fn permute_cache_rejects_stale_permutation() {
+        let n = 4usize;
+        // Arrow pattern (dense first column): its permuted structure is
+        // NOT invariant under reordering, so a stale-perm warm hit is
+        // structurally visible. (A constant tridiagonal matrix would be
+        // reversal-invariant and hide the bug.)
+        let m = CscMatrix::from_triplets(
+            n,
+            &[0, 1, 2, 3, 1, 2, 3],
+            &[0, 0, 0, 0, 1, 2, 3],
+            &[10.0, 2.0, 3.0, 4.0, 20.0, 30.0, 40.0],
+        )
+        .unwrap();
+
+        // Permutation 1 (identity) builds the cache.
+        let perm1: Vec<usize> = (0..n).collect();
+        let perm1_inv: Vec<usize> = (0..n).collect();
+        let mut cache: Option<PermuteCache> = None;
+        permute_csc_values_with_cache(&m, &perm1, &perm1_inv, false, true, &mut cache).unwrap();
+        assert!(cache.is_some());
+
+        // Permutation 2 (reversal) on the SAME pattern, hint still true.
+        let perm2: Vec<usize> = vec![3, 2, 1, 0];
+        let mut perm2_inv = vec![0usize; n];
+        for (i, &p) in perm2.iter().enumerate() {
+            perm2_inv[p] = i;
+        }
+        let (warm, _) =
+            permute_csc_values_with_cache(&m, &perm2, &perm2_inv, false, true, &mut cache).unwrap();
+        let (canon, _) = permute_csc_values(&m, &perm2, &perm2_inv, false).unwrap();
+        assert_eq!(warm.col_ptr, canon.col_ptr, "stale-perm col_ptr");
+        assert_eq!(warm.row_idx, canon.row_idx, "stale-perm row_idx");
+        assert_eq!(warm.values, canon.values, "stale-perm values");
     }
 }
