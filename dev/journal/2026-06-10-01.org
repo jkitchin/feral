@@ -2036,3 +2036,30 @@ aftershock (feral issue_3 KKT test pinned the old AMD-degeneracy);
 fixed + committed separately (see prior journal entry) before O16 so
 O16 lands on a green tree.
 Next per /loop: do NOT start O17; continuing in-turn per 'finish tonight'.
+
+* 01:55 :kahip:o17:data-reduction:degree2:perf:tried-rejected:
+O17 (repo-review): apply_degree2 (data_reduction.rs:299) seed scan at :309
+does (0..n).find(alive && !skip && degree==2) every outer iteration -> O(n^2)
+on one long degree-2 chain. Perf finding, no wrong answer.
+NOT reproducible as a test: quadratic-vs-linear needs a timing oracle (flaky,
+disallowed) -> no RED. Mirrors O9.
+Code reading killed the obvious fix (a non-rewinding cursor): the SIMPLICIAL
+collapse (:399-405) removes the chain interior with NO compensating (u,w) edge
+when u~w already, so endpoint u drops one degree -> a degree-3 endpoint at
+index < seed becomes a fresh degree-2 seed. from-0 scan picks lowest-index
+eligible each iter and collapses it THIS call; a cursor past it defers to the
+next fixed-point round (driver loop :215-230), reordering the Degree2Path op
+stack -> different reconstructed permutation (expand replays stack in reverse).
+So a cursor is NOT behavior-preserving. Order-preserving O(n log n) fix is a
+min-index worklist (heap keyed by index, lazy staleness recheck on pop); left
+for whoever enables Rule 2. Rule 2 is test-only today: driver (node_nd.rs:45)
+uses ReduceOptions::conservative() (Rule 1 only); full() is #[cfg(test)]. So
+the O(n^2) is latent, never on a prod path.
+Disposition: tried-and-rejected citing O17 + safe sub-fix = a code comment at
+:307 documenting the O(n^2), the simplicial-degree-drop trap, and the correct
+worklist fix. Pure doc change, no behavior change; existing Rule 2 tests
+(path_n5_collapses_to_branch_endpoints, degree2_compression_fires_on_isolated_chain,
+k_2_3_collapses_via_degree2_then_closed_twins,
+triangle_with_tail_collapses_via_rule1_then_closed_twins) are the guard.
+cargo test -p feral-kahip green. Not user-visible -> no CHANGELOG.
+Next per /loop: do NOT start O18; continuing in-turn per 'finish tonight'.

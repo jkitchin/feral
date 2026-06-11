@@ -304,8 +304,25 @@ fn apply_degree2(g: &mut MutAdj, ops: &mut Vec<ReductionOp>, allow_nonsimplicial
     // single branch, or wholly-enclosed cycle). We skip them for the
     // rest of this pass so subsequent seeds can find other chains.
     let mut skip = vec![false; n];
+    // O17 (repo-review-2026-06-09): the seed scan below restarts from index 0
+    // on every outer iteration, so a graph that is one long degree-2 chain
+    // costs O(n^2) in seed-scanning alone. A non-rewinding cursor is NOT a safe
+    // drop-in replacement: the simplicial collapse below (lines ~399-405) adds
+    // no compensating (u, w) edge when `u ~ w` already, so removing the chain
+    // interior drops each branch endpoint by one degree — a degree-3 endpoint
+    // can become a fresh degree-2 seed at an index *below* the current `seed`.
+    // The from-0 scan always picks the lowest-index eligible vertex, so it
+    // collapses that endpoint within this same call; a cursor advanced past it
+    // would instead defer the collapse to the next fixed-point round (the
+    // `reduce_graph` loop), reordering the emitted `Degree2Path` ops and thus
+    // changing the reconstructed permutation (`expand_permutation` replays the
+    // op stack in reverse). The order-preserving O(n log n) fix is a min-index
+    // worklist (a binary heap keyed by vertex index, with a lazy
+    // alive/!skip/degree==2 staleness check on pop), not a cursor. Left as-is
+    // for now: Rule 2 is test-only — the driver runs
+    // `ReduceOptions::conservative()` (Rule 1 only), so this cost is latent.
     'outer: loop {
-        // Find any unskipped degree-2 vertex.
+        // Find any unskipped degree-2 vertex (lowest index first).
         let start = (0..n).find(|&v| g.alive[v] && !skip[v] && g.degree(v) == 2);
         let Some(seed) = start else { break };
 

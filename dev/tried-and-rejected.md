@@ -4562,3 +4562,72 @@ Evidence: `node_nd.rs:54-62` (compressed-graph dispatch carries vwgt),
 `node_nd.rs:281-302` (`amd_leaf`), `node_nd.rs:308-331`
 (`graph_to_csc_pattern` drops vwgt), `feral-amd/src/lib.rs:68-176` (no
 weighted entry point). Journal: dev/journal/2026-06-10-01.org.
+## 2026-06-11 — O17: kahip `apply_degree2` rescans from vertex 0 per chain (finding O17, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O17** kahip `apply_degree2` rescans from vertex 0 per chain
+> (`data_reduction.rs:307-309`): O(n²) worst case on long paths. Off by
+> default (Rule 1 only); will bite when Rule 2 is enabled. low-medium/certain.
+
+### Why this is not reproducible as a correctness test
+
+O17 is a performance finding, not a wrong-answer defect. `apply_degree2`
+collapses degree-2 chains correctly; the complaint is that the seed scan
+`(0..n).find(|v| alive && !skip && degree==2)` restarts from index 0 on every
+outer iteration, so a graph that is one long degree-2 chain pays ~n scans of
+~n vertices => O(n²). A unit test cannot turn "quadratic instead of linear"
+into a deterministic pass/fail without a timing/benchmark oracle, which the
+spec's tests-first lifecycle does not provide for this kind of finding (and
+timing assertions are flaky). So there is no RED state to write. This mirrors
+the O9 disposition (metis `two_hop_pass` O(n²)).
+
+### Why the O(n²) scan is not rewritten here
+
+The finding's implied fix — a non-rewinding scan cursor (start the next seed
+search at the previous seed instead of 0) — is **not** a behaviour-preserving
+drop-in, and code inspection proves it:
+
+The simplicial collapse branch (`data_reduction.rs:399-405`) removes the chain
+interior and, when `u ∼ w` already (`simplicial == true`), adds **no**
+compensating `(u, w)` edge. Removing `path[0]` deletes the `u–path[0]` edge, so
+endpoint `u`'s degree drops by one — a degree-3 branch endpoint becomes degree
+2. The backward walk from `seed` can land on such a `u` at an index *below*
+`seed`. The current from-0 scan always picks the lowest-index eligible vertex,
+so it collapses that newly-degree-2 `u` *within the same `apply_degree2` call*;
+a cursor that had advanced past `u` would instead defer it to the next
+fixed-point round (`reduce_graph` loop, `data_reduction.rs:215-230`). The
+chain still collapses eventually, but the `Degree2Path` ops are emitted in a
+**different order**, and op-stack order determines the reconstructed
+permutation (`expand_permutation` replays the stack in reverse). So a naive
+cursor changes the produced ordering — out of proportion to an opportunistic
+low-severity perf fix, and against "correctness before performance."
+
+The order-preserving O(n log n) fix is a min-index worklist: a binary heap
+keyed by vertex index, push a vertex when its degree falls to 2, pop the
+lowest index with a lazy `alive && !skip && degree==2` staleness recheck. That
+reproduces "lowest-index eligible seed every iteration" exactly while avoiding
+the rescan. It is deferred because Rule 2 is **test-only** today — the driver
+(`node_nd.rs:45`) runs `ReduceOptions::conservative()` (Rule 1 only);
+`ReduceOptions::full()` is `#[cfg(test)]`. The O(n²) cost is therefore latent
+and never on a production path.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible -> tried-and-rejected citing
+the finding ID). Per the X16/O4/O5/O6/O9 precedent, the finding's safe
+sub-fix is applied: a code comment at the seed-scan site documenting the
+O(n²), proving why a cursor is unsafe (the simplicial degree-drop above), and
+recording the correct min-index-worklist fix for whoever enables Rule 2. This
+is a pure documentation change with no behaviour change; the existing Rule 2
+tests (`path_n5_collapses_to_branch_endpoints`,
+`degree2_compression_fires_on_isolated_chain`,
+`k_2_3_collapses_via_degree2_then_closed_twins`,
+`triangle_with_tail_collapses_via_rule1_then_closed_twins`) remain the
+regression guard. The O(n²) scan structure is left as-is.
+
+Evidence: `data_reduction.rs:307-309` (from-0 seed scan), `:399-405`
+(simplicial collapse drops endpoint degree, no compensating edge),
+`:215-230` (fixed-point driver), `:166-184` (conservative vs full presets),
+`node_nd.rs:45` (driver uses conservative). Journal:
+dev/journal/2026-06-10-01.org.
