@@ -4,6 +4,23 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `CscPattern::new` enforces its documented sorted-rows invariant (O3)
+
+`feral-ordering-core`'s `CscPattern` documents that row indices within each
+column must be sorted ascending, but `CscPattern::new` never checked it — it
+validated column-pointer lengths/monotonicity and row-index range only.
+Consumers silently depended on the unchecked invariant: `feral-metis`'s
+adjacency builder dedups only *adjacent* duplicates, so an unsorted column
+(e.g. `[3, 5, 3]`) let a non-adjacent duplicate survive as a spurious edge,
+corrupting the graph and the resulting ordering; `feral-scotch`'s compress
+step inserts neighbours with `partition_point`, which assumes sorted runs.
+`CscPattern::new` now verifies, per column, that row indices are
+non-decreasing (`O(nnz)`) and returns `None` otherwise. All in-tree callers
+already pass sorted rows (`CscMatrix::symmetric_pattern` sorts each column),
+so the `feral` solver is unaffected; only inputs that already violated the
+documented contract are now rejected. Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — MTX reader accepts whitespace-flexible banners, rejects non-finite values (X11)
 
 `parse_mtx` / `read_mtx` compared the Matrix Market banner against the exact

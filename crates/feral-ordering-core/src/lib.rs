@@ -57,6 +57,7 @@ pub const CONTRACT_VERSION: u32 = 1;
 /// - `col_ptr[0] == 0`, `col_ptr` is non-decreasing
 /// - `row_idx.len() == col_ptr[n]`
 /// - every row index is in `0..n` (non-negative and `< n`)
+/// - row indices within each column are sorted ascending
 ///
 /// Structural symmetry is the caller's responsibility and is not
 /// checked here; individual ordering crates may debug-assert it.
@@ -101,6 +102,20 @@ impl<'a> CscPattern<'a> {
         };
         for &r in row_idx {
             if r < 0 || r >= n_i32 {
+                return None;
+            }
+        }
+        // Row indices within each column must be sorted ascending. This is a
+        // documented precondition that downstream consumers silently rely on:
+        // feral-metis's adjacency builder dedups only *adjacent* duplicates
+        // (graph.rs), and feral-scotch's compress step inserts neighbours with
+        // `partition_point` assuming sorted runs. Unsorted rows would let a
+        // non-adjacent duplicate survive as a spurious edge, corrupting the
+        // graph. Enforce it here (O(nnz)) so every consumer can trust it.
+        for w in col_ptr.windows(2) {
+            let lo = w[0] as usize;
+            let hi = w[1] as usize;
+            if row_idx[lo..hi].windows(2).any(|p| p[1] < p[0]) {
                 return None;
             }
         }
@@ -242,6 +257,27 @@ mod tests {
         let cp = [0i32, 1, 2];
         let ri = [0i32];
         assert!(CscPattern::new(2, &cp, &ri).is_none());
+    }
+
+    #[test]
+    fn rejects_unsorted_rows_within_column() {
+        // Column 0 has rows [1, 0] — descending, violating the documented
+        // ascending-order invariant. `new` must reject it: feral-metis's
+        // adjacency builder dedups only *adjacent* duplicates, so unsorted
+        // rows would let a non-adjacent duplicate survive as a spurious edge.
+        let cp = [0i32, 2, 2];
+        let ri = [1i32, 0];
+        assert!(CscPattern::new(2, &cp, &ri).is_none());
+    }
+
+    #[test]
+    fn accepts_sorted_rows_with_adjacent_duplicate() {
+        // Ascending order permits adjacent duplicates; feral-metis drops them
+        // in its adjacency builder. `new` enforces sortedness, not
+        // strict-increase, so this must still be accepted.
+        let cp = [0i32, 3, 3];
+        let ri = [0i32, 0, 1];
+        assert!(CscPattern::new(2, &cp, &ri).is_some());
     }
 
     #[test]

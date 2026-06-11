@@ -1677,3 +1677,36 @@ sub-block use), no behavioral change. tried-and-rejected citing X16. fmt clean,
 feral builds. Not user-visible (internal doc) => no CHANGELOG. Next per /loop: do
 NOT start the next issue (O3). Continue in-turn per the live 'speed this up'
 directive.
+
+* 10:55 :o3:ordering-core:csc-pattern:invariant:tests-first:metis:
+O3 (repo-review-2026-06-09.md): feral-ordering-core CscPattern docs require
+"row indices within each column sorted ascending" (lib.rs:50-52) but
+CscPattern::new (:78-112) never checked it -- validated col_ptr lengths/
+monotonicity and row-index range only. Reproducible defect downstream: metis
+Graph::from_pattern (graph.rs:68-83) dedups ONLY adjacent duplicates via a
+running "last seen" check, with the builder's own comment admitting
+"CscPattern::new does not yet reject these". An unsorted column [3,5,3] -> 3
+appears twice in adjncy (5 != last when the 2nd 3 arrives) -> spurious edge ->
+corrupt graph/ordering. scotch compress also uses partition_point assuming sorted.
+RED: added rejects_unsorted_rows_within_column (col 0 rows [1,0] descending,
+asserts new()==None). Against unfixed new it FAILED:
+  panicked at lib.rs:255: assertion failed: CscPattern::new(2,&cp,&ri).is_none()
+(new returned Some). Companion accepts_sorted_rows_with_adjacent_duplicate pins
+the boundary (sorted [0,0,1] with adjacent dup still accepted -- enforce
+sortedness, NOT strict-increase, since metis drops adjacent dups).
+Fix: CscPattern::new now checks each column's rows are non-decreasing
+(col_ptr.windows(2) -> row_idx[lo..hi].windows(2).any(p[1]<p[0]) -> None), O(nnz)
+same order as the existing range loop, once-per-ordering constructor (not hot).
+Added the bullet to the checked-invariants doc list. Updated 2 now-stale metis
+comments (graph.rs:46-49 doc, :77-79 inline): sortedness is enforced so adjacent-
+only dedup is sound, not a defensive workaround.
+GREEN/regression: feral-ordering-core 59 (was 57, +2), feral-metis 51,
+feral-scotch 43, feral-amd 12, integration tests all pass -- confirms NO in-tree
+caller passes unsorted rows (CscMatrix::symmetric_pattern sorts each column,
+src/sparse/csc.rs:297-302; AMD/Schur derive from it). fmt clean; clippy
+-p feral-ordering-core -p feral-metis --all-targets -D warnings clean.
+=> Reproducible -> real fix with test, NOT tried-and-rejected. User-visible
+(stricter validation in published feral-ordering-core v0.2.0 public constructor,
+prevents silent graph corruption) -> CHANGELOG Fixed entry added. Next per /loop:
+do NOT start the next issue (O4). Continue in-turn per the live 'speed this up'
+directive.
