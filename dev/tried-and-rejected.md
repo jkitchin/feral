@@ -4631,3 +4631,53 @@ Evidence: `data_reduction.rs:307-309` (from-0 seed scan), `:399-405`
 `:215-230` (fixed-point driver), `:166-184` (conservative vs full presets),
 `node_nd.rs:45` (driver uses conservative). Journal:
 dev/journal/2026-06-10-01.org.
+## 2026-06-11 — O19: kahip flow stranded-vertex branch corrupts gap histogram (finding O19, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O19** kahip `flow.rs:271-279` stranded-vertex branch would corrupt
+> the gap histogram (sets height without decrementing height_count) —
+> unreachable today (excess implies a residual reverse edge); add a
+> debug_assert or comment. low/certain (code) / dead (impact).
+
+### Why this is not reproducible as a correctness test
+
+The branch is dead code. `discharge` reaches the relabel step only after the
+`if excess[u] == 0 { return }` guard (`flow.rs:254`), so `excess[u] > 0` holds.
+An active vertex always has at least one residual out-edge: the edge that
+delivered its excess left a residual *reverse* edge `u -> v` in `adj[u]` with
+`residual() > 0`. The relabel scan (`flow.rs:265-269`) therefore always finds a
+finite `new_height`, so the `new_height == usize::MAX` branch at `:271` cannot
+be entered while the vertex is active. No input can drive an active vertex to
+have zero residual out-edges, so there is no RED state to construct — this is a
+"dead impact" finding, as the reviewer marks it.
+
+### What the branch would do if reached
+
+It sets `height[u] = 2 * n` and returns *without* the
+`height_count[old_h] -= 1` that the normal relabel path performs at
+`flow.rs:286-287`. That would over-count `old_h` in the gap histogram and
+corrupt gap detection. The pre-existing inline comment ("This can happen for
+vertices that can't reach sink") was also wrong: it cannot happen for an
+*active* vertex.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible -> tried-and-rejected citing
+the finding ID). Per the finding's explicit recommendation ("add a debug_assert
+or comment") and the X16/O4/O5/O6/O9 sub-fix precedent, the safe in-code
+improvement is applied: a `debug_assert_ne!(new_height, usize::MAX, ...)` after
+the relabel scan pins the active-vertex invariant (it fires in debug builds if
+the "unreachable" branch is ever about to be taken), and the misleading inline
+comment is replaced with one stating the branch is an unreachable defensive
+fallback and noting the latent histogram-corruption it would cause. The
+`height_count` decrement is deliberately *not* added: the branch is unreachable,
+so adding bookkeeping there would be untestable dead-code behaviour, which the
+tests-first lifecycle forbids. The existing flow test suite (`flow.rs:333+`,
+~15 tests driving `push_relabel`) is the guard — a green run proves the
+debug_assert never fires.
+
+Evidence: `flow.rs:254` (active-vertex guard), `:265-269` (relabel scan),
+`:271-279` (stranded branch, no `height_count` decrement), `:286-287` (the
+decrement the normal path performs). `cargo test -p feral-kahip` green with the
+debug_assert in place. Journal: dev/journal/2026-06-10-01.org.

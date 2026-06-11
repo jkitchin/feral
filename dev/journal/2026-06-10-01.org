@@ -2087,3 +2087,24 @@ O18 overall IS reproducible -> not tried-and-rejected.
 New public field on KahipStats = user-visible -> CHANGELOG. cargo test
 -p feral-kahip green (64 incl. the new assert).
 Next per /loop: do NOT start O19; continuing in-turn per 'finish tonight'.
+
+* 02:45 :kahip:o19:flow:push-relabel:gap-histogram:dead-code:tried-rejected:
+O19 (repo-review): flow.rs:271-279 stranded-vertex branch sets height[u]=2n and
+returns WITHOUT height_count[old_h] -= 1 (the normal relabel path does it at
+286-287) -> would corrupt the gap histogram. But it's UNREACHABLE: discharge
+reaches relabel only past `if excess[u]==0 return` (:254), so excess[u]>0; an
+active vertex always has a residual reverse edge (reverse of whatever delivered
+its excess), so the relabel scan (265-269) always finds a finite new_height ->
+new_height==usize::MAX (271) never happens. The old inline comment ("can happen
+for vertices that can't reach sink") was WRONG for an active vertex.
+NOT reproducible (dead branch, no RED constructible) -> tried-and-rejected
+citing O19. Safe sub-fix (finding says "add a debug_assert or comment" — did
+both): debug_assert_ne!(new_height, usize::MAX, ...) after the relabel scan
+pins the invariant; replaced the misleading branch comment with an
+"unreachable defensive fallback" note flagging the latent histogram corruption.
+Did NOT add the height_count decrement — unreachable => untestable dead-code
+behavior, tests-first forbids. Guard = existing flow suite (~15 tests driving
+push_relabel); green => assert never fires. debug_assert_ne! on a runtime var,
+no clippy assertions_on_constants. Internal -> no CHANGELOG.
+cargo test -p feral-kahip green.
+Next per /loop: do NOT start O20; continuing in-turn per 'finish tonight'.

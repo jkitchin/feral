@@ -268,12 +268,25 @@ fn discharge(
                 new_height = height[e.to] + 1;
             }
         }
+        // An active vertex always has a residual reverse edge — the reverse
+        // of whichever edge delivered its excess — so the relabel scan above
+        // always finds a finite height. The branch below is therefore
+        // unreachable while `excess[u] > 0`, which holds here: we did not
+        // return at the `excess[u] == 0` check above. The debug_assert pins
+        // that invariant against future changes (O19, repo-review-2026-06-09).
+        debug_assert_ne!(
+            new_height,
+            usize::MAX,
+            "push-relabel: active vertex {u} (excess {}) has no residual \
+             out-edge; the reverse of its in-flow edge must be residual",
+            excess[u]
+        );
         if new_height == usize::MAX {
-            // No residual out-edge — u is stranded. Mark unreachable
-            // and drop. This can happen for vertices that can't reach
-            // sink; they'll end up on the source side of the cut
-            // once we push excess back toward source (heights beyond
-            // n make that happen).
+            // Unreachable defensive fallback (see the debug_assert above).
+            // NOTE: this returns *without* the `height_count[old_h] -= 1`
+            // that the normal relabel path performs below, so reaching it
+            // would corrupt the gap histogram — another reason to assert
+            // entry rather than silently proceed on a bad count.
             height[u] = 2 * n;
             return;
         }
