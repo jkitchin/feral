@@ -2108,3 +2108,25 @@ push_relabel); green => assert never fires. debug_assert_ne! on a runtime var,
 no clippy assertions_on_constants. Internal -> no CHANGELOG.
 cargo test -p feral-kahip green.
 Next per /loop: do NOT start O20; continuing in-turn per 'finish tonight'.
+
+* 03:05 :metis:o20:node-nd:invert-iperm:harmonize:RED-GREEN:tried-rejected:
+O20 (repo-review): 6 ND helper fns copied across metis/scotch/kahip node_nd.rs,
+drifted. CORE (consolidate into feral-ordering-core) = structural refactor, no
+defect, no RED, multi-crate risk -> deferred to tried-and-rejected citing O20.
+Two named drifts assessed:
+ (A) sortedness: metis graph_to_csc_pattern (:254-279) splices diagonal at first
+     nbr>v relying on sorted adjncy; kahip (:219-228) sorts defensively. Benign:
+     build_induced keeps sorted order + CscPattern::new rejects unsorted (O3) ->
+     fails loudly not silently. Documented only; no dead defensive sort added.
+ (B) dup check: metis inverted iperm INLINE in nd_order (54-61): perm=vec![0;n],
+     range check only, NO duplicate-position check. scotch (invert_iperm 433-450)
+     and kahip (328-345) init -1 and reject perm[np]>=0. metis would SILENTLY
+     emit a non-bijection on a duplicate position (0-init undetectable). TESTABLE.
+Fix (B): extracted metis fn invert_iperm mirroring siblings (init -1, range +
+"metis nd produced duplicate position" check); nd_order now calls it. Behavior-
+neutral on reachable inputs (valid bijection writes each pos once). RED->GREEN
+test invert_iperm_rejects_duplicate_positions: [2,0,1]->[1,2,0] ok; [0,0,2]->Err;
+[3,0,1]->Err. RED pre-fix = no invert_iperm fn (compile error).
+cargo test -p feral-metis green. Internal fn -> no CHANGELOG. Cross-crate
+consolidation remains open in tried-and-rejected.
+Next per /loop: do NOT start O21; continuing in-turn per 'finish tonight'.

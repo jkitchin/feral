@@ -4681,3 +4681,66 @@ Evidence: `flow.rs:254` (active-vertex guard), `:265-269` (relabel scan),
 `:271-279` (stranded branch, no `height_count` decrement), `:286-287` (the
 decrement the normal path performs). `cargo test -p feral-kahip` green with the
 debug_assert in place. Journal: dev/journal/2026-06-10-01.org.
+## 2026-06-11 — O20: thrice-copied ND driver scaffolding (finding O20, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O20** Thrice-copied ND driver scaffolding
+> (recurse/connected_components/extract_by_*/build_induced/
+> graph_to_csc_pattern/invert_iperm) across the metis/scotch/kahip
+> `node_nd.rs`, already drifted: kahip sorts neighbors before the
+> diagonal splice, metis/scotch rely on induced sortedness; metis
+> validates the inverse perm inline, scotch/kahip have a duplicate-
+> position check metis lacks. Consolidate into feral-ordering-core.
+> medium-low/certain.
+
+### Why the consolidation itself is not reproducible / not done here
+
+The core recommendation — move six near-identical helper functions out of the
+three `node_nd.rs` files into `feral-ordering-core` — is a structural refactor,
+not a wrong-answer defect. There is no input that produces an incorrect result
+today, so there is no RED state to write. A blind multi-crate move also risks
+introducing the very drift it removes (the three copies have already diverged
+in small ways), and the per-finding atomic-commit discipline plus
+"correctness before performance" weigh against a large behaviour-touching
+refactor of three working drivers inside one /loop iteration. The consolidation
+is therefore deferred and recorded here.
+
+### The two named drift points
+
+**Drift A — sortedness (benign, documented only).** metis `graph_to_csc_pattern`
+(`node_nd.rs:254-279`) splices the diagonal in at the first neighbour `> v`,
+relying on `adjncy[lo..hi]` being sorted; kahip (`:219-228`) calls
+`neighbors.sort_unstable()` defensively. This is benign today: `build_induced`
+preserves sorted adjacency for metis/scotch, and `CscPattern::new` rejects
+unsorted rows (O3), so any violation fails loudly rather than silently. No code
+change — adding a defensive sort to metis/scotch would be untestable dead
+defence.
+
+**Drift B — duplicate-position check (harmonized, the testable slice).** metis
+inverted `iperm → perm` *inline* in `nd_order` (old lines 54-61): it
+initialised `perm = vec![0; n]`, range-checked `new_pos`, and wrote
+`perm[new_pos] = old` — with **no** duplicate-position check. scotch
+(`invert_iperm`, `:433-450`) and kahip (`:328-345`) initialise `vec![-1; n]`
+and reject `perm[np] >= 0` ("… produced duplicate position"). So metis would
+silently emit a non-bijection if upstream ever produced a duplicate position
+(and its `0`-init makes the corruption undetectable post-hoc). This was
+harmonized: metis now has an `invert_iperm` mirroring its siblings exactly
+(crate name aside), with the range and duplicate-position checks. It is
+behaviour-neutral on every reachable input (a valid bijection writes each
+position once) and is a strict step toward the eventual consolidation.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible core -> tried-and-rejected
+citing the finding ID). Per the X16/O4/O5/O6/O9 sub-fix precedent, the safe,
+testable slice is applied: the metis `invert_iperm` extraction + duplicate
+check, guarded by a new RED->GREEN unit test
+(`invert_iperm_rejects_duplicate_positions`). Drift A is documented as benign.
+The cross-crate consolidation into `feral-ordering-core` remains open.
+
+Evidence: metis `node_nd.rs:54-61` (old inline inversion, no dup check),
+scotch `:433-450` / kahip `:328-345` (the dup check metis lacked), metis
+`:254-279` (sortedness reliance), kahip `:219-228` (defensive sort).
+`cargo test -p feral-metis` green with the new test. Journal:
+dev/journal/2026-06-10-01.org.
