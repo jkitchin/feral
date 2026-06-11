@@ -4,6 +4,43 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Python interface: LU basis engine, factor/symbolic access, knobs, introspection
+
+The Python binding (`feral-solver`) gains a large, **purely additive** surface
+— no existing class, method, or keyword argument changed, and the prior test
+suite passes unmodified:
+
+- **Unsymmetric LU basis engine.** `LuMatrix` (general square CSC) and
+  `LuFactor` (auto-routing dense/sparse via `should_use_dense_lu`, overridable
+  with `force_dense`) expose `ftran`/`btran`, product-form `update` /
+  `update_sparse` / `refactor`, and the `P A Q = L U` factor (`perm`, `qcol`,
+  `l_array`/`u_array`, `factor_nnz`, `eta_ops`). New exceptions
+  `SingularBasisError` (a `FactorError`) and `NeedsRefactorError` (a
+  `FeralError`) surface the basis-engine failure modes.
+- **Numeric factor access.** `Solver.factors()` returns a `Factors` snapshot
+  with the assembled unit-lower `L` (`l_csc()`, optional `to_scipy_l()`),
+  block-diagonal `D` (`d_blocks()`), and the `perm`/`perm_inv`/`scaling`
+  vectors, satisfying `L D Lᵀ = P (S A S) Pᵀ`.
+- **Symbolic structure.** `Solver.symbolic()` and the standalone
+  `feral.analyze(a, ordering=...)` (no numeric factorization) return a
+  `SymbolicAnalysis` with the resolved ordering, elimination-tree parent
+  array, supernode count, column counts, and nnz prediction.
+- **Solver knobs.** New keyword arguments `ordering`, `mc64_cache`,
+  `profiling`, `partial_singular_warning`, and `auto_cascade_break`, plus an
+  `ordering` getter reporting the resolved method.
+- **Introspection.** `min_pivot_magnitude`/`max_pivot_magnitude`, the four
+  MC64 counters, `scaling_info` (`ScalingInfo`), `last_factor_stats`
+  (`FactorStats`), `profile_report` (`ProfileReport`),
+  `symbolic_profile_report` (`SymbolicProfileReport`), and
+  `invalidate_factors()` / `invalidate_symbolic_cache()`.
+- **Conversion conveniences.** `CscMatrix.to_dense()`,
+  `from_dense(..., triangle=...)` (lower/upper/full ingest), and
+  `symmetric_pattern()`.
+
+The single-file binding was also split into internal modules
+(`python/src/{common,errors,matrix,solver,factors,symbolic,lu,introspect}.rs`);
+the compiled extension is still `feral._feral` with an unchanged public surface.
+
 ### Fixed — C-ABI shim warns on an unrecognized `FERAL_SCALING` value (X5 follow-up)
 
 The bench harness warns and falls back to the default when `FERAL_SCALING` is

@@ -7,6 +7,15 @@ Public API:
 - :class:`CscMatrix` — symmetric matrix in lower-triangular CSC.
 - :class:`Inertia` — `(n_pos, n_neg, n_zero)` triple returned by `factor`.
 - :class:`FactorStatus`, :class:`QualityLevel` — IntEnums.
+- :class:`LuMatrix`, :class:`LuFactor` — the unsymmetric LU basis
+  engine (auto-routing dense/sparse), for `A x = b` / `A^T y = c` solves
+  with product-form updates.
+- :class:`Factors` — assembled `L`/`D` snapshot of a numeric factor;
+  :class:`SymbolicAnalysis` and :func:`analyze` — the symbolic
+  structure (ordering, elimination tree, supernodes, nnz prediction).
+- :class:`FactorStats`, :class:`ProfileReport`,
+  :class:`SymbolicProfileReport`, :class:`ScalingInfo` — introspection
+  value types.
 - Exception hierarchy rooted at :class:`FeralError`.
 
 The :mod:`feral.ipm` submodule provides the Wächter–Biegler-style
@@ -28,6 +37,24 @@ CscMatrix = _feral.CscMatrix
 Solver = _feral.Solver
 Inertia = _feral.Inertia
 
+# Unsymmetric LU basis engine.
+LuMatrix = _feral.LuMatrix
+LuFactor = _feral.LuFactor
+
+# Factor / symbolic / introspection value types.
+Factors = _feral.Factors
+SymbolicAnalysis = _feral.SymbolicAnalysis
+FactorStats = _feral.FactorStats
+ProfileReport = _feral.ProfileReport
+PrologueBreakdown = _feral.PrologueBreakdown
+BucketStats = _feral.BucketStats
+SymbolicProfileReport = _feral.SymbolicProfileReport
+StagePct = _feral.StagePct
+ScalingInfo = _feral.ScalingInfo
+
+# Standalone symbolic-analysis entry point.
+analyze = _feral.analyze
+
 # Exception hierarchy.
 FeralError = _feral.FeralError
 FactorError = _feral.FactorError
@@ -39,6 +66,8 @@ DelayBudgetExceeded = _feral.DelayBudgetExceeded
 SolveError = _feral.SolveError
 PatternMismatch = _feral.PatternMismatch
 FeralIOError = _feral.FeralIOError
+SingularBasisError = _feral.SingularBasisError
+NeedsRefactorError = _feral.NeedsRefactorError
 
 __version__ = _feral.__version__
 
@@ -149,6 +178,18 @@ __all__ = [
     "CscMatrix",
     "Solver",
     "Inertia",
+    "LuMatrix",
+    "LuFactor",
+    "Factors",
+    "SymbolicAnalysis",
+    "FactorStats",
+    "ProfileReport",
+    "PrologueBreakdown",
+    "BucketStats",
+    "SymbolicProfileReport",
+    "StagePct",
+    "ScalingInfo",
+    "analyze",
     "FactorStatus",
     "QualityLevel",
     "FeralError",
@@ -161,6 +202,8 @@ __all__ = [
     "SolveError",
     "PatternMismatch",
     "FeralIOError",
+    "SingularBasisError",
+    "NeedsRefactorError",
     "from_scipy",
     "to_scipy",
     "__version__",

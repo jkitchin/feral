@@ -67,6 +67,73 @@ for newton_iter in range(max_iter):
 See `examples/discopt_ipm_kkt.py` for an end-to-end Newton step
 against a small NLP.
 
+## Unsymmetric LU basis engine
+
+`LuFactor` factors a general square matrix and solves `A x = b`
+(`ftran`) / `Aᵀ y = c` (`btran`), with simplex-style product-form
+`update`s. It auto-routes to a dense or sparse engine via the same
+`should_use_dense_lu` heuristic the Rust core uses; pass
+`force_dense=True`/`False` to override.
+
+```python
+import numpy as np
+import feral
+
+A = np.array([[2.0, 1.0, 0.0], [0.0, 3.0, 1.0], [1.0, 0.0, 4.0]])
+lu = feral.LuFactor(feral.LuMatrix.from_dense(A))
+x = lu.ftran(np.array([1.0, 2.0, 3.0]))     # solve A x = b
+y = lu.btran(np.array([1.0, 0.0, 0.0]))     # solve Aᵀ y = c
+lu.update(1, np.array([0.0, 5.0, 1.0]))     # replace basis column 1
+# P A Q = L U :  A[perm][:, qcol] == l_array() @ u_array()
+```
+
+A singular basis raises `SingularBasisError` (a `FactorError`); an
+exhausted update budget raises `NeedsRefactorError` — call
+`lu.refactor(new_matrix)`.
+
+## Factor access and introspection
+
+After `Solver.factor`, the assembled factor and its statistics are
+available without re-solving:
+
+```python
+s = feral.Solver(ordering="amd", profiling=True)
+s.factor(A_csc)
+
+fac = s.factors()                  # Factors snapshot
+indptr, indices, data = fac.l_csc()   # unit-lower L as CSC (factorization order)
+d_diag, d_subdiag = fac.d_blocks()    # block-diagonal D (2×2 where d_subdiag != 0)
+L_scipy = fac.to_scipy_l()            # optional scipy.sparse.csc_matrix
+
+# Reconstruction identity (factorization order):
+#   L @ D @ L.T  ==  P (S A S) Pᵀ
+# with fac.perm and the per-row fac.scaling vector.
+
+stats = s.last_factor_stats()      # nnz, fill_ratio, inertia, pivot range, ...
+print(s.min_pivot_magnitude, s.max_pivot_magnitude)
+print(s.scaling_info.kind)         # "applied" | "mc64_fallback_to_infnorm" | ...
+print(s.profile_report())          # populated when profiling=True
+```
+
+`Solver.symbolic()` (and the standalone `feral.analyze(A_csc,
+ordering=...)`, which runs **no** numeric factorization) return a
+`SymbolicAnalysis` with the resolved `ordering`, `perm`/`perm_inv`,
+`num_supernodes`, `factor_nnz_estimate`, `col_counts`, and the
+elimination-tree `etree_parent` array (roots marked `-1`).
+
+New `Solver(...)` keyword arguments — all optional, defaulting to the
+prior behavior — expose the tuning knobs: `ordering` (`"amd"`, `"amf"`,
+`"metis"`, `"scotch"`, `"kahip"`, `"auto"`, `"auto_race"`),
+`mc64_cache`, `profiling`, `partial_singular_warning`, and
+`auto_cascade_break`.
+
+## Conversion conveniences
+
+`CscMatrix.to_dense()` returns the full symmetric matrix as a 2-D numpy
+array; `CscMatrix.from_dense(a, triangle="lower"|"upper"|"full")` ingests
+either triangle; `CscMatrix.symmetric_pattern()` returns the full
+`(indptr, indices)` structural pattern.
+
 ## Example notebooks
 
 Runnable notebooks live in `examples/notebooks/` (regenerate the

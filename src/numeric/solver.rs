@@ -1618,6 +1618,19 @@ impl Solver {
         self.last_factors.as_ref()
     }
 
+    /// Borrow the cached symbolic factorization, if any.
+    ///
+    /// Populated on the first `factor()` (or `refactor()`) call for a
+    /// given sparsity pattern and reused across subsequent calls on
+    /// structurally identical matrices. Exposes the fill-reducing
+    /// ordering, elimination tree, supernode partition, and predicted
+    /// L nonzero count without a back-pointer through `factors()`.
+    /// Returns `None` before the first factorization or after
+    /// `invalidate_symbolic_cache()`.
+    pub fn symbolic(&self) -> Option<&SymbolicFactorization> {
+        self.last_symbolic.as_ref()
+    }
+
     /// Current quality-escalation level.
     pub fn quality_level(&self) -> QualityLevel {
         self.quality_level
