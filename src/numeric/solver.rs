@@ -230,6 +230,17 @@ pub struct Solver {
     /// without this flag: adoption pins `auto_picked_strategy` and
     /// `effective_params.scaling` to `Mc64Symmetric`, which the gate's
     /// `!matches!(..Mc64Symmetric)` clause already suppresses.
+    ///
+    /// Tradeoff (interacts with the inertia hard rule; see `dev/decisions.md`
+    /// 2026-06-11): this latch is keyed on the *pattern*, but MC64 acts on
+    /// *values*. A pattern singular at iterate `k` (retry not adopted, latch
+    /// set) that becomes MC64-rescuable at `k+1` on the *same pattern with
+    /// different values* has its retry suppressed — reporting unrescued inertia
+    /// where the pre-latch code recovered. Bounded: MC64 cannot change rank, so
+    /// a *structurally* rank-deficient KKT (the issue-#43 routine case this was
+    /// built for) is exactly safe; the residual risk is a *numerically*-only
+    /// singular iterate. If ever seen to violate the inertia gate, make the
+    /// latch values-aware rather than remove it.
     mc64_retry_not_adopted: bool,
     /// Pooled scratch for the numeric phase. Retained across
     /// `factor` calls so IPM-style re-factorizations (same

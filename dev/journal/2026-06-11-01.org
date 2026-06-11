@@ -218,3 +218,32 @@ infnrom/garbage ARE. Pre-impl: compile error (cannot find function
 scaling_value_is_unrecognized). Post-impl: green. Existing X5 vocabulary-parity
 test (scaling_vocabulary_matches_bench_harness) unchanged (return values intact).
 Full workspace: 63 result groups, 0 failures.
+
+* 10:55 :n4:n3:n5:decisions:inertia:tracking:
+Residual item 3 + 6 (repo-review-2026-06-09-verification.md): recorded the N4
+MC64-retry latch tradeoff and the deferred N3/N5 facets as append-only log
+entries (no behavior change).
+
+N4: the mc64_retry_not_adopted latch (solver.rs) is pattern-keyed but MC64 acts
+on values, so a pattern singular at iterate k (retry not adopted, latch set)
+that becomes MC64-rescuable at k+1 on the same pattern (different values) has
+its retry suppressed -> potentially wrong inertia where the pre-latch code
+recovered. Verifier flagged this was acknowledged in the commit message only;
+given the inertia hard rule it now lives in decisions.md AND the field doc
+(solver.rs:223-247). Bound: MC64 cannot change rank, so a structurally
+rank-deficient KKT (the issue-#43 routine case the latch targets) is exactly
+safe; residual risk is a numerically-only-singular iterate. Disposition if ever
+seen to break the inertia gate: make the latch values-aware, not remove it.
+
+N3/N5 deferred facets (item 6): tracking entry in decisions.md. N3 open on the
+parallel driver — permute cache (pattern_reused_hint) never engages on the large
+matrices it targets (plain permute_csc_values), and params.small_leaf ignored
+(drift trap). N5 open — parallel-workspace churn (num_threads+1 FactorWorkspaces
+per call vs sequential pooling) and warm-permute O(nnz) col_ptr/row_idx clone.
+These are deferred perf work, not rejected approaches; guarded by the existing
+sequential/parallel bit-exactness tests. No reproducing test is meaningful for
+pure allocation churn.
+
+Docs/log-only change (doc comment + append-only decisions.md); docs-commit
+exemption applies (CI green on last code commit 87d5688). fmt+clippy still run
+via the pre-commit hook.
