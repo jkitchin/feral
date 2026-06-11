@@ -4,6 +4,19 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `feral-metis` keeps a stalled coarsening level only when it shrank (O8)
+
+`coarsen`'s stall branch pushed the just-computed level whenever earlier levels
+existed, with a comment claiming it accepted the level "only if it actually
+shrank" — but it never checked shrinkage. Two consequences: a *first* level
+that genuinely shrank (between 0% and the 5% stall threshold) was discarded
+because no earlier level existed yet, so the whole coarsening hierarchy came
+back empty despite real progress; and a later zero-progress level was kept
+merely because earlier levels existed, which can break the strictly-decreasing
+vertex-count invariant. The branch now pushes the level iff it actually shrank
+(`0 < new_nvtxs < prev_nvtxs`), independent of prior levels. Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — `feral-metis` coarsening now performs real SHEM, not plain HEM (O7)
 
 The coarsening header advertised Sorted Heavy-Edge Matching and cited METIS

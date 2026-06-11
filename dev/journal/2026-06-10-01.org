@@ -1796,3 +1796,21 @@ describe ascending-degree visitation. GREEN: full feral-metis suite 52 passed
 monotonic) + dense_quotient integration 4 passed. fmt clean. User-visible
 (ordering quality) => CHANGELOG entry added. Next per /loop: do NOT start O8;
 continuing in-turn per the live 'speed this up'/'finish tonight' directive.
+
+* O8 :ordering:metis:coarsen:stall:reproduced:fixed:
+O8 (repo-review): coarsen.rs:130-137 stall branch pushed the stalled level
+whenever !levels.is_empty(), with a comment claiming "Accept the last level
+only if it actually shrank" -- but it never checked shrinkage. Two defects:
+(1) a FIRST level that genuinely shrank (0%<s<5%) was discarded (levels still
+empty) => empty hierarchy despite real progress; (2) a later 0%-progress level
+was pushed just because earlier levels existed, risking the strictly-shrinking
+invariant. REPRODUCED: star K_{1,24} (center+24 leaves), two-hop disabled via
+two_hop_ratio_threshold=10.0. SHEM matches one leaf to the center, 23 leaves
+self-match => first level 25->24 (4% shrink, trips <5% stall). /tmp probe:
+prev=25 new=24 shrank=true stalled=true; current keeps=false, corrected
+keeps=true. RED: stall_keeps_first_level_that_shrank asserted non-empty
+hierarchy w/ 24-vtx level; got empty. FIX: push iff new_nvtxs>0 &&
+new_nvtxs<prev_nvtxs, independent of prior levels; makes comment true. GREEN +
+full feral-metis suite (grids/tridiag unaffected -- they shrink well above the
+stall threshold). User-visible => CHANGELOG. Next per /loop: do NOT start O9;
+continuing in-turn per 'finish tonight'.

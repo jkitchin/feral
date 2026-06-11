@@ -142,9 +142,13 @@ pub fn coarsen(
         let level = coarsen_level(cur, rng, opts.two_hop_ratio_threshold, counters);
         let new_nvtxs = level.graph.nvtxs;
         if new_nvtxs == 0 || new_nvtxs as f64 > 0.95 * prev_nvtxs as f64 {
-            // Stalled — further coarsening won't help.
-            if !levels.is_empty() {
-                // Accept the last level only if it actually shrank.
+            // Stalled: this level made <5% progress, so stop. Keep it
+            // only if it actually shrank, independent of whether earlier
+            // levels exist. The old `!levels.is_empty()` gate both
+            // discarded a *first* level that genuinely shrank (returning
+            // an empty hierarchy) and pushed a zero-progress later level
+            // (breaking the strictly-decreasing-nvtxs invariant). [O8]
+            if new_nvtxs > 0 && new_nvtxs < prev_nvtxs {
                 levels.push(level);
             }
             break;
@@ -490,6 +494,39 @@ mod tests {
             prev <= opts.coarsen_floor as i32
                 || levels.last().expect("non-empty").graph.nvtxs < g.nvtxs
         );
+    }
+
+    #[test]
+    fn stall_keeps_first_level_that_shrank() {
+        // Star K_{1,24}: center 0 with 24 degree-1 leaves. SHEM matches
+        // exactly one leaf to the center, leaving 23 self-matched
+        // leaves, so the first level coarsens 25 -> 24 -- a real shrink
+        // that still trips the <5% "stall" branch. The two-hop fallback
+        // is disabled (threshold > 1) so nothing rescues the leaves and
+        // the stall branch is the only exit. The level genuinely shrank
+        // and must be kept; the old code discarded it because `levels`
+        // was still empty, returning an empty hierarchy. [O8]
+        let mut t: Vec<(usize, usize)> = vec![(0, 0)];
+        for l in 1..=24usize {
+            t.push((l, l));
+            t.push((0, l));
+        }
+        let (cp, ri) = csc_from_triples(25, &t);
+        let pat = CscPattern::new(25, &cp, &ri).unwrap();
+        let g = Graph::from_csc_pattern(&pat).unwrap();
+        let opts = MetisOptions {
+            coarsen_floor: 4,
+            two_hop_ratio_threshold: 10.0,
+            ..Default::default()
+        };
+        let mut rng = SplitMix::new(1);
+        let mut ctr = CoarsenCounters::default();
+        let levels = coarsen(&g, &opts, &mut rng, &mut ctr);
+        assert!(
+            !levels.is_empty(),
+            "a first level that shrank 25->24 must be kept, not discarded"
+        );
+        assert_eq!(levels.last().expect("non-empty").graph.nvtxs, 24);
     }
 
     #[test]
