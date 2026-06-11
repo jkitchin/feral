@@ -95,9 +95,17 @@ pub extern "C" fn feral_new() -> *mut FeralSolver {
         );
 
         let mut np = NumericParams::default();
-        if let Some(strategy) =
-            scaling_strategy_from_env_value(&std::env::var("FERAL_SCALING").unwrap_or_default())
-        {
+        let scaling_raw = std::env::var("FERAL_SCALING").unwrap_or_default();
+        if scaling_value_is_unrecognized(&scaling_raw) {
+            // Match the bench harness, which warns and keeps the default on a
+            // non-empty unrecognized value (X5 follow-up). Silent fallthrough
+            // would make a typo'd strategy look active.
+            eprintln!(
+                "warning: FERAL_SCALING=\"{}\" not recognized; falling back to default",
+                scaling_raw
+            );
+        }
+        if let Some(strategy) = scaling_strategy_from_env_value(&scaling_raw) {
             np.scaling = strategy;
         }
         if let Ok(s) = std::env::var("FERAL_PIVTOL") {
@@ -181,6 +189,17 @@ fn scaling_strategy_from_env_value(s: &str) -> Option<ScalingStrategy> {
         "auto" | "adaptive" => Some(ScalingStrategy::Auto),
         _ => None, // unknown values keep the default (no override)
     }
+}
+
+/// True when `FERAL_SCALING` is set to a *non-empty* value the shim does not
+/// recognize. The bench harness warns and falls back to default in this case
+/// (`scaling_strategy_from_str`'s `other` arm); the shim must do the same
+/// rather than silently ignore a typo'd strategy — otherwise an experiment
+/// measures the default while the operator believes a strategy is active, and
+/// the two tools diverge on identical input. Defined in terms of the single
+/// vocabulary source above, so it can never drift from what the shim accepts.
+fn scaling_value_is_unrecognized(s: &str) -> bool {
+    !s.is_empty() && scaling_strategy_from_env_value(s).is_none()
 }
 
 /// Free a solver handle. Null pointer is a no-op.
@@ -559,6 +578,37 @@ mod tests {
         // Unset and typos fall through to the default (None override).
         assert_eq!(scaling_strategy_from_env_value(""), None);
         assert_eq!(scaling_strategy_from_env_value("mc46"), None);
+    }
+
+    /// X5 follow-up (repo-review-2026-06-09-verification.md residual): a
+    /// *non-empty* `FERAL_SCALING` outside the vocabulary must be flagged so
+    /// the shim warns and falls back to default, exactly as the bench harness
+    /// does (`scaling_strategy_from_str`'s `other` arm). Before this the shim
+    /// collapsed unset and typo'd values into the same silent `None`, so a
+    /// `FERAL_SCALING=mc46` experiment ran the default strategy while the
+    /// operator believed `mc46` was active — and bench (which warns) and the
+    /// shim (which was silent) diverged on the same input. Oracle: bench's
+    /// recognized/unrecognized partition of the vocabulary.
+    #[test]
+    fn unrecognized_scaling_value_is_flagged_for_warning() {
+        // Unset → not a warning case (keep the default silently).
+        assert!(!scaling_value_is_unrecognized(""));
+        // Every recognized spelling → not a warning case.
+        for ok in [
+            "identity", "infnorm", "mc64", "auto", "adaptive", "ADAPTIVE",
+        ] {
+            assert!(
+                !scaling_value_is_unrecognized(ok),
+                "`{ok}` is recognized; must not warn"
+            );
+        }
+        // A non-empty typo → flagged (the shim warns, like bench).
+        for bad in ["mc46", "infnrom", "garbage"] {
+            assert!(
+                scaling_value_is_unrecognized(bad),
+                "`{bad}` is unrecognized; must be flagged for a warning"
+            );
+        }
     }
 
     /// 2x2 indefinite `[[1,2],[2,1]]` (eigenvalues 3, -1) — RHS (3,3),

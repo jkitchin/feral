@@ -4,6 +4,19 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — C-ABI shim warns on an unrecognized `FERAL_SCALING` value (X5 follow-up)
+
+The bench harness warns and falls back to the default when `FERAL_SCALING` is
+set to a non-empty value outside the recognized vocabulary, but the C-ABI shim
+(`feral_new`) silently collapsed unset and typo'd values into the same `None`
+override — so a run with e.g. `FERAL_SCALING=mc46` measured the *default*
+strategy while the operator believed `mc46` was active, and bench and the shim
+diverged on identical input. The shim now emits the same warning (byte-for-byte
+with bench's message) on a non-empty unrecognized value and keeps the default,
+via a pure `scaling_value_is_unrecognized` predicate defined in terms of the
+single shared vocabulary parser (so it cannot drift from what the shim accepts).
+X5 follow-up from `dev/research/repo-review-2026-06-09-verification.md`.
+
 ### Fixed — sparse LU diagonal preference clears the singularity floor; `LuParams` range-validated (L2)
 
 The sparse LU threshold-partial-pivoting rule preferred the natural diagonal

@@ -195,3 +195,26 @@ RED->GREEN evidence:
 - existing L2 test sparse_lu_honors_pivot_threshold (u=0.5, |w[diag]|=1.0 >>
   ztol=2e-13) unchanged — conjunct doesn't alter its outcome.
 Full workspace suite: 63 result groups, 0 failures.
+
+* 10:25 :capi:scaling:bench-parity:x5:
+X5 follow-up (repo-review-2026-06-09-verification.md residual): the C-ABI shim
+(feral_new) read FERAL_SCALING via scaling_strategy_from_env_value, which maps
+both "" and an unknown spelling to None — so an unrecognized value (typo) was
+silently ignored and the default strategy ran. The bench harness, by contrast,
+warns on a non-empty unrecognized value (bench.rs scaling_strategy_from_str
+`other` arm). So bench and the shim diverged on identical input, and an operator
+running FERAL_SCALING=mc46 measured the default while believing mc46 was active.
+
+Fix: added pure predicate scaling_value_is_unrecognized(s) = !s.is_empty() &&
+scaling_strategy_from_env_value(s).is_none() (single vocabulary source, can't
+drift), and feral_new now eprintln!s the same warning bench uses (byte-identical
+message) before falling back to default. Warn-not-error is correct here: the C
+ABI's only failure channel at construction is a null return, and aborting solver
+creation on a typo'd env var would be hostile; bench also warns-and-continues.
+
+RED->GREEN: unrecognized_scaling_value_is_flagged_for_warning — "" and the six
+recognized spellings (incl. ADAPTIVE, case-insensitive) are NOT flagged; mc46/
+infnrom/garbage ARE. Pre-impl: compile error (cannot find function
+scaling_value_is_unrecognized). Post-impl: green. Existing X5 vocabulary-parity
+test (scaling_vocabulary_matches_bench_harness) unchanged (return values intact).
+Full workspace: 63 result groups, 0 failures.
