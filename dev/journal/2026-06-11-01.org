@@ -89,3 +89,36 @@ upstream; my REG-2 fix adds the same upstream divert to the one path that
 lacked it (do_2x2_pivot). D13's deferral remains accurate and is unchanged by
 this fix — its no-op is correct for the block path, never handed a singular
 block from a gated caller. No D13 code change.
+
+* 08:33 :reg3:sparse-solve:det-floor:d4:silent-wrong-answer:
+REG-3 (medium): the sparse 2×2 D-block solves gated inversion on the NAIVE
+absolute floor det.abs() > zero_tol_2x2 at two sites — solve_sparse_core_into
+(solve.rs:281) and dsolve_node (solve.rs:799). Finding D4 had already replaced
+exactly this absolute test on the DENSE solve path (dense/solve.rs:d_block_solve)
+with the scale-invariant ssids_det_floor_fail, but the port never reached the
+sparse solves. Consequence: a well-conditioned 2×2 at small absolute scale (true
+|det| < zero_tol_2x2 ≈ EPS²) is ACCEPTED + stored invertible by the factor
+(SSIDS floor) but SILENTLY SKIPPED by the sparse solve — that RHS segment is left
+untouched, wrong solution, no error, no flag.
+
+Fix: extracted a shared module-level helper solve_2x2_dblock(a,b,c,z0,z1) ->
+Option<(f64,f64)> gated on !ssids_det_floor_fail; routed both sparse sites
+through it. Accepted-block arithmetic is the prior normalized/b-tiny-direct
+kernel verbatim → bit-parity on accepted blocks; only the GATE changed (naive
+absolute → scale-invariant SSIDS). dense and sparse solve gates now agree, and a
+block the factor stores is a block the solve inverts.
+
+RED→GREEN (oracle = rhs = D·x_true hand-computed, pure linear algebra,
+independent of solver, mirrors tests/d4_solve_2x2_gate.rs):
+reg3_sparse_dsolve_small_scale_2x2_inverted through dsolve_node with
+D=[[1e-16,1e-17],[1e-17,1e-16]] (det 9.9e-33 < zero_tol_2x2 4.93e-32 → naive
+skips; ssids accepts: max_piv 1e-16, detpiv 9.9e-17 > cancel_floor 5e-17). With
+the helper's gate temporarily reverted to the naive absolute floor the test went
+RED — w = [1.1e-16, 1.1e-16] (block skipped, off from [1,1] by 16 orders) and
+reg3_helper_inverts_small_scale_block also RED; restoring ssids_det_floor_fail →
+all GREEN. reg3_rejected_block_skipped_by_helper (ill-conditioned [[2^53+1,2^53],
+[2^53,2^53]], detpiv 0) returns None under BOTH gates — pins that the fix did not
+start inverting blocks the factor rejects. Full workspace (63 result groups) 0
+failures, so accepted-block bit-parity holds on every existing solve test.
+Only these 2 sites used zero_tol_2x2 (grep-confirmed). User-visible silent
+wrong answer → CHANGELOG Fixed entry.

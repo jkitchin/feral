@@ -190,6 +190,41 @@ pub(super) fn solve_sparse_into_ws(
     Ok(())
 }
 
+/// Solve the symmetric 2×2 D-block system `[[a,b],[b,c]] · [x0,x1] = [z0,z1]`,
+/// returning `Some((x0, x1))`, or `None` when the shared SSIDS determinant
+/// floor rejects the block.
+///
+/// REG-3 (`dev/research/repo-review-2026-06-09-verification.md`): the sparse
+/// forward and multi-RHS D-block solves previously gated on the *naive*
+/// `det.abs() > zero_tol_2x2` — the absolute floor that finding D4 already
+/// replaced on the *dense* solve path (`dense/solve.rs`) with the
+/// scale-invariant `ssids_det_floor_fail`. A well-conditioned 2×2 block at
+/// small absolute scale (true `|det| < zero_tol_2x2 ≈ EPS²`) is accepted by
+/// the factor (which uses the SSIDS floor) but was silently *skipped* by the
+/// sparse solve — wrong solution, no error, no flag. Both sparse sites now
+/// route through this helper, so a block the factor stores as invertible the
+/// solve inverts, and the dense and sparse solve gates agree.
+#[inline]
+fn solve_2x2_dblock(a: f64, b: f64, c: f64, z0: f64, z1: f64) -> Option<(f64, f64)> {
+    if crate::dense::factor::ssids_det_floor_fail(a, b, c) {
+        return None;
+    }
+    // `b != 0` for a stored 2×2 (`d_subdiag != 0`). The normalized form
+    // (faer) avoids cancellation; the b-tiny direct branch is retained for
+    // bit-parity with the prior sparse kernel on accepted blocks.
+    if b.abs() > f64::EPSILON * (a.abs() + c.abs()).max(1.0) {
+        let ak = a / b;
+        let ck = c / b;
+        let denom = 1.0 / (ak * ck - 1.0);
+        let z0k = z0 / b;
+        let z1k = z1 / b;
+        Some(((ck * z0k - z1k) * denom, (ak * z1k - z0k) * denom))
+    } else {
+        let det = a * c - b * b;
+        Some(((c * z0 - b * z1) / det, (a * z1 - b * z0) / det))
+    }
+}
+
 /// Core sparse solve: runs forward-sub, D-solve, backward-sub on an
 /// RHS that is assumed to already be in the pre-scaled coordinate
 /// system of `M = D · A · D`. Callers other than `solve_sparse` (e.g.,
@@ -276,25 +311,16 @@ fn solve_sparse_core_into(
                 let a = ff.d_diag[k];
                 let b = ff.d_subdiag[k];
                 let c = ff.d_diag[k + 1];
-                let det = a * c - b * b;
-
-                if det.abs() > ff.zero_tol_2x2 {
-                    let z1 = w[k];
-                    let z2 = w[k + 1];
-                    if b.abs() > f64::EPSILON * (a.abs() + c.abs()).max(1.0) {
-                        let ak = a / b;
-                        let ck = c / b;
-                        let denom = 1.0 / (ak * ck - 1.0);
-                        let z1k = z1 / b;
-                        let z2k = z2 / b;
-                        w[k] = (ck * z1k - z2k) * denom;
-                        w[k + 1] = (ak * z2k - z1k) * denom;
-                    } else {
-                        w[k] = (c * z1 - b * z2) / det;
-                        w[k + 1] = (a * z2 - b * z1) / det;
-                    }
+                // REG-3: gate on the shared scale-invariant SSIDS floor
+                // (matching the factor side and the dense solve — finding
+                // D4), not the naive absolute `det.abs() > zero_tol_2x2`.
+                if let Some((x0, x1)) = solve_2x2_dblock(a, b, c, w[k], w[k + 1]) {
+                    w[k] = x0;
+                    w[k + 1] = x1;
                 }
-                // else: 2×2 block force-accepted as singular; leave w[k], w[k+1]
+                // else: 2×2 block rejected by the shared SSIDS floor (the
+                // factor side would not have stored it as invertible);
+                // leave w[k], w[k + 1] untouched.
                 k += 2;
             } else {
                 if ff.d_diag[k].abs() > ff.zero_tol {
@@ -794,25 +820,15 @@ fn dsolve_node(
                 let a = ff.d_diag[k];
                 let b = ff.d_subdiag[k];
                 let cc = ff.d_diag[k + 1];
-                let det = a * cc - b * b;
-
-                if det.abs() > ff.zero_tol_2x2 {
-                    let z1 = w[k * nrhs + c];
-                    let z2 = w[(k + 1) * nrhs + c];
-                    if b.abs() > f64::EPSILON * (a.abs() + cc.abs()).max(1.0) {
-                        let ak = a / b;
-                        let ck = cc / b;
-                        let denom = 1.0 / (ak * ck - 1.0);
-                        let z1k = z1 / b;
-                        let z2k = z2 / b;
-                        w[k * nrhs + c] = (ck * z1k - z2k) * denom;
-                        w[(k + 1) * nrhs + c] = (ak * z2k - z1k) * denom;
-                    } else {
-                        w[k * nrhs + c] = (cc * z1 - b * z2) / det;
-                        w[(k + 1) * nrhs + c] = (a * z2 - b * z1) / det;
-                    }
+                // REG-3: shared scale-invariant SSIDS gate (see
+                // `solve_2x2_dblock`), not the naive absolute floor.
+                if let Some((x0, x1)) =
+                    solve_2x2_dblock(a, b, cc, w[k * nrhs + c], w[(k + 1) * nrhs + c])
+                {
+                    w[k * nrhs + c] = x0;
+                    w[(k + 1) * nrhs + c] = x1;
                 }
-                // else: 2×2 block force-accepted as singular; leave as-is.
+                // else: rejected by the shared SSIDS floor; leave as-is.
                 k += 2;
             } else {
                 if ff.d_diag[k].abs() > ff.zero_tol {
@@ -1686,5 +1702,75 @@ mod tests {
             matches!(result, Err(FeralError::DimensionMismatch { .. })),
             "expected DimensionMismatch for a scaling-mismatched workspace, got {result:?}"
         );
+    }
+
+    /// REG-3 (`repo-review-2026-06-09-verification.md`): a well-conditioned
+    /// 2×2 D-block at small absolute scale that the factor side accepts
+    /// (scale-invariant SSIDS floor) must be inverted by the sparse solve,
+    /// not skipped by the old naive `det.abs() > zero_tol_2x2` absolute
+    /// floor. Mirrors `tests/d4_solve_2x2_gate.rs` on the sparse multi-RHS
+    /// D-block path (`dsolve_node`). Oracle: `rhs = D · x_true`
+    /// hand-computed (pure linear algebra), independent of the solver.
+    /// Pre-fix the block is skipped (w ≈ rhs, off by 16 orders); post-fix
+    /// w ≈ x_true.
+    #[test]
+    fn reg3_sparse_dsolve_small_scale_2x2_inverted() {
+        // D = [[1e-16, 1e-17],[1e-17, 1e-16]]: det = 9.9e-33 < zero_tol_2x2
+        // (≈4.9e-32) → naive gate skips; ssids_det_floor_fail accepts
+        // (max_piv 1e-16, detpiv ≈ 9.9e-17 > cancel_floor 5e-17).
+        let (a, b, c) = (1e-16, 1e-17, 1e-16);
+        let x_true = [1.0_f64, 1.0_f64];
+        let rhs = [a * x_true[0] + b * x_true[1], b * x_true[0] + c * x_true[1]];
+
+        let ff = crate::dense::factor::FrontalFactors {
+            nrow: 2,
+            ncol: 2,
+            nelim: 2,
+            l: vec![1.0, 0.0, 0.0, 1.0],
+            d_diag: vec![a, c],
+            d_subdiag: vec![b, 0.0],
+            perm: vec![0, 1],
+            perm_inv: vec![0, 1],
+            contrib: vec![],
+            contrib_dim: 0,
+            n_delayed: 0,
+            inertia: crate::inertia::Inertia::new(1, 1, 0),
+            needs_refinement: false,
+            n_rook_rescues: 0,
+            n_tiny: 0,
+            zero_tol: f64::EPSILON,
+            zero_tol_2x2: f64::EPSILON * f64::EPSILON,
+        };
+
+        let mut w = vec![rhs[0], rhs[1]]; // nrhs = 1, row-major w[k*nrhs+0]
+        dsolve_node(&mut w, &ff, 2, 1);
+
+        assert!(
+            (w[0] - x_true[0]).abs() < 1e-6 && (w[1] - x_true[1]).abs() < 1e-6,
+            "REG-3: small-scale 2×2 must be inverted by sparse dsolve, not \
+             skipped; got w = {w:?}, expected ≈ {x_true:?}"
+        );
+    }
+
+    /// `solve_2x2_dblock` inverts a small-scale well-conditioned block (the
+    /// single source of truth shared by both sparse D-solve sites).
+    #[test]
+    fn reg3_helper_inverts_small_scale_block() {
+        let (a, b, c) = (1e-16, 1e-17, 1e-16);
+        let x = [1.0_f64, 1.0_f64];
+        let (z0, z1) = (a * x[0] + b * x[1], b * x[0] + c * x[1]);
+        let (x0, x1) = solve_2x2_dblock(a, b, c, z0, z1).expect("accepted");
+        assert!((x0 - 1.0).abs() < 1e-6 && (x1 - 1.0).abs() < 1e-6);
+    }
+
+    /// REG-3 consistency guard: an ill-conditioned block the factor-side
+    /// SSIDS floor rejects (detpiv = 0) must be skipped by the sparse solve
+    /// too. D = [[2^53+1, 2^53],[2^53, 2^53]] (true det = 2^53, condition
+    /// ~2^53). `solve_2x2_dblock` returns None so the caller leaves the RHS
+    /// untouched — pins that the fix did not start inverting rejected blocks.
+    #[test]
+    fn reg3_rejected_block_skipped_by_helper() {
+        let p = (1u64 << 53) as f64;
+        assert!(solve_2x2_dblock(p + 1.0, p, p, 1.0, 2.0).is_none());
     }
 }

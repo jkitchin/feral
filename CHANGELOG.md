@@ -4,6 +4,22 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — sparse D-block solves now use the same SSIDS determinant floor as the factor (REG-3)
+
+The sparse forward and multi-RHS 2×2 D-block solves (`solve_sparse_core_into`,
+`dsolve_node`) gated block inversion on the *naive* absolute floor
+`det.abs() > zero_tol_2x2` — the same absolute test that finding D4 had already
+replaced on the *dense* solve path with the scale-invariant
+`ssids_det_floor_fail`. A well-conditioned 2×2 block at small absolute scale
+(true `|det| < zero_tol_2x2 ≈ EPS²`) is accepted and stored as invertible by
+the factor (which uses the SSIDS floor) but was silently *skipped* by the sparse
+solve, leaving that segment of the RHS unchanged — a wrong solution with no error
+and no flag. Both sparse sites now route through a shared `solve_2x2_dblock`
+helper gated on `ssids_det_floor_fail`, so a block the factor stores as
+invertible is exactly a block the solve inverts, and the dense and sparse solve
+gates agree. Accepted blocks invert bit-for-bit as before. Finding REG-3 from
+`dev/research/repo-review-2026-06-09-verification.md`.
+
 ### Fixed — unblocked dense 2×2 pivot no longer divides by a singular perturbed block (REG-2)
 
 When `static_pivot_floor > 0`, the MA57-style static-pivot perturbation
