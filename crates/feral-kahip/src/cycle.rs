@@ -53,7 +53,8 @@ pub(crate) fn multilevel_bisection(
 
     let mut counters = CoarsenCounters::default();
     let levels = coarsen(graph, &metis_opts, rng, &mut counters);
-    // Coarsening levels observed at this bisection attempt (for diagnostics).
+    // One multilevel bisection is a single V-cycle (one coarsen followed by
+    // one uncoarsen); count it. Not a per-coarsening-level counter.
     stats.cycles = stats.cycles.saturating_add(1);
 
     let coarsest: &Graph = match levels.last() {

@@ -2063,3 +2063,27 @@ k_2_3_collapses_via_degree2_then_closed_twins,
 triangle_with_tail_collapses_via_rule1_then_closed_twins) are the guard.
 cargo test -p feral-kahip green. Not user-visible -> no CHANGELOG.
 Next per /loop: do NOT start O18; continuing in-turn per 'finish tonight'.
+
+* 02:20 :kahip:o18:stats:n-components:cycles:RED-GREEN:
+O18 (repo-review): kahip stats drift, two facets.
+(1) n_components computed in run_top (node_nd.rs:89-102) then thrown away via
+two `let _ =` sinks (ncc and a redundant nonempty counter); KahipStats had no
+field, unlike MetisStats/ScotchStats which both expose pub n_components:u32,
+populate `stats.n_components = ncc as u32` (metis node_nd.rs:41, scotch :82)
+and test assert_eq!(.,2) (metis:504, scotch:640). REPRODUCIBLE: the existing
+handles_disconnected_components test (two 8x8 grids, 128 v) already threads
+stats but never asserted n_components. Added assert_eq!(stats.n_components, 2);
+RED pre-fix (field absent -> compile error / 0). Added pub n_components:u32 to
+KahipStats; run_top now sets stats.n_components = ncc as u32 (removed both
+`let _ =` and the redundant local counter). GREEN.
+(2) cycles doc drift: struct doc "V-cycles completed" is right in aggregate
+(one multilevel_bisection = one V-cycle), but the inline comment cycle.rs:56
+"Coarsening levels observed at this bisection attempt" was WRONG (next line
+adds 1, not the level count, and it's not levels). Corrected the inline
+comment and tightened the struct doc (dropped the "(or F-cycles)" ambiguity;
+stated it counts multilevel bisections, one per node-separator computation).
+Doc-only facet, no behavior change; folded into the same O18 commit since
+O18 overall IS reproducible -> not tried-and-rejected.
+New public field on KahipStats = user-visible -> CHANGELOG. cargo test
+-p feral-kahip green (64 incl. the new assert).
+Next per /loop: do NOT start O19; continuing in-turn per 'finish tonight'.

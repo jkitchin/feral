@@ -4,6 +4,18 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — `feral-kahip` now reports `KahipStats::n_components` (O18)
+
+`KahipStats` gains a `pub n_components: u32` field — the number of top-level
+connected components encountered by the nested-dissection driver — matching the
+existing `MetisStats::n_components` / `ScotchStats::n_components`. The KaHIP
+driver already computed this count in `run_top` but discarded it; it is now
+surfaced for parity with the sibling crates. The `KahipStats::cycles`
+documentation was also tightened: it counts multilevel bisections (one per
+node-separator computation; each a single V-cycle), and the stale inline
+comment that described it as a per-level coarsening counter was corrected.
+Finding O18 from `dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — `feral-kahip` flow refinement now balances by vertex weight on coarse graphs (O16)
 
 K3 flow-based refinement (`flow_refine_bisection`) scored candidate cuts against
