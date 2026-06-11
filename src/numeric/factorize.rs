@@ -878,7 +878,135 @@ pub struct SparseFactors {
     pub resolved_preprocess: crate::symbolic::OrderingPreprocess,
 }
 
+/// A flat, factorization-order export of the LDLᵀ factors.
+///
+/// Produced by [`SparseFactors::ldlt_export`]. The supernodal frontal
+/// factors are reassembled into a single global unit-lower-triangular
+/// `L` (CSC) and a block-diagonal `D` (`d_diag` + `d_subdiag`), both
+/// indexed by **factorization order** `e ∈ [0, n)` — the order in which
+/// pivots are eliminated (postorder over supernodes, Bunch-Kaufman pivot
+/// order within each front). In this order `L` is genuinely
+/// unit-lower-triangular (`L[e,e] = 1`, entries only for row > col) and
+/// every 2×2 `D` block occupies consecutive positions `(e, e+1)` with
+/// `d_subdiag[e] ≠ 0`.
+///
+/// `perm` maps factorization order to the original matrix index:
+/// `perm[e]` is the user-space row/column eliminated at position `e`.
+/// `perm_inv` is its inverse. The reconstruction identity, with the
+/// global symmetric scaling `s = SparseFactors::scaling` (user-order),
+/// is
+///
+/// ```text
+/// M = L · D · Lᵀ            (in factorization order)
+/// A[perm[i], perm[j]] = M[i, j] / (s[perm[i]] · s[perm[j]])
+/// ```
+///
+/// i.e. `L D Lᵀ` reconstructs the *scaled, permuted* input matrix, and
+/// undoing the permutation and scaling recovers the original `A`.
+#[derive(Debug, Clone)]
+pub struct LdltExport {
+    /// Factorization order → original matrix index (length `n`).
+    pub perm: Vec<usize>,
+    /// Original matrix index → factorization order (length `n`).
+    pub perm_inv: Vec<usize>,
+    /// CSC column pointers of `L` (length `n + 1`).
+    pub l_indptr: Vec<usize>,
+    /// CSC row indices of `L`, sorted within each column.
+    pub l_indices: Vec<usize>,
+    /// CSC values of `L` (unit diagonal stored explicitly).
+    pub l_values: Vec<f64>,
+    /// Block-diagonal of `D` in factorization order (length `n`).
+    pub d_diag: Vec<f64>,
+    /// Sub-diagonal of `D` (length `n`); `d_subdiag[e] ≠ 0` marks the
+    /// top-left of a 2×2 block coupling positions `e` and `e + 1`.
+    pub d_subdiag: Vec<f64>,
+}
+
 impl SparseFactors {
+    /// Reassemble the supernodal frontal factors into a single global
+    /// `L` (CSC) and `D`, in factorization order. See [`LdltExport`]
+    /// for the layout and the reconstruction identity.
+    ///
+    /// O(nnz(L)) time and memory. Each global pivot is eliminated in
+    /// exactly one supernode (where it is fully summed), so its `L`
+    /// column is produced exactly once; trailing-row entries scatter
+    /// into the columns of the fronts that own them. The
+    /// factorization-order index `e` is assigned by a first pass over
+    /// `node_factors` (postorder) and the within-front BK permutation
+    /// `frontal_factors.perm`, so a second pass can emit CSC columns in
+    /// strictly increasing order with sorted rows.
+    pub fn ldlt_export(&self) -> LdltExport {
+        let n = self.n;
+
+        // Pass 1: assign factorization order. `e_of_g[g]` is the
+        // factorization position of permuted-global index `g`; each `g`
+        // is eliminated exactly once across all supernodes.
+        let mut e_of_g = vec![usize::MAX; n];
+        let mut perm = vec![0usize; n];
+        let mut perm_inv = vec![0usize; n];
+        let mut d_diag = vec![0.0f64; n];
+        let mut d_subdiag = vec![0.0f64; n];
+        let mut e = 0usize;
+        for node in &self.node_factors {
+            let ff = &node.frontal_factors;
+            for j in 0..ff.nelim {
+                let g = node.row_indices[ff.perm[j]];
+                e_of_g[g] = e;
+                // `self.perm` is fill-reducing new→old; `g` is the
+                // permuted index, so `self.perm[g]` is the original.
+                perm[e] = self.perm[g];
+                perm_inv[self.perm[g]] = e;
+                d_diag[e] = ff.d_diag[j];
+                d_subdiag[e] = ff.d_subdiag[j];
+                e += 1;
+            }
+        }
+        debug_assert_eq!(e, n, "every index eliminated exactly once");
+
+        // Pass 2: build L columns in factorization order. A supernode's
+        // eliminated columns form a contiguous, increasing `e` range, so
+        // iterating nodes in order then `j` in `0..nelim` emits columns
+        // in ascending order — exactly CSC column order.
+        let mut l_indptr = Vec::with_capacity(n + 1);
+        l_indptr.push(0);
+        let mut l_indices = Vec::new();
+        let mut l_values = Vec::new();
+        let mut col: Vec<(usize, f64)> = Vec::new();
+        for node in &self.node_factors {
+            let ff = &node.frontal_factors;
+            let nrow = ff.nrow;
+            for j in 0..ff.nelim {
+                col.clear();
+                // Unit diagonal, stored explicitly.
+                let diag_e = e_of_g[node.row_indices[ff.perm[j]]];
+                col.push((diag_e, 1.0));
+                for i in (j + 1)..nrow {
+                    let v = ff.l[j * nrow + i];
+                    if v != 0.0 {
+                        let row_e = e_of_g[node.row_indices[ff.perm[i]]];
+                        col.push((row_e, v));
+                    }
+                }
+                col.sort_unstable_by_key(|&(r, _)| r);
+                for &(r, v) in &col {
+                    l_indices.push(r);
+                    l_values.push(v);
+                }
+                l_indptr.push(l_indices.len());
+            }
+        }
+
+        LdltExport {
+            perm,
+            perm_inv,
+            l_indptr,
+            l_indices,
+            l_values,
+            d_diag,
+            d_subdiag,
+        }
+    }
+
     /// One-line diagnostic summary of the strategies and pivot counts
     /// that produced these factors. Suitable for logging one record
     /// per factorization in monitoring drivers.
