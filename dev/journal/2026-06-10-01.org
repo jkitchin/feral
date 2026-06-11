@@ -2004,3 +2004,35 @@ shipped the behavior) => no CHANGELOG. Committed separately from O16 as
 an O13 follow-up since it concerns scotch, not kahip. Lesson: run the
 FULL workspace suite, not just the touched crate, when a fix changes
 observable ordering output other crates assert on.
+
+* 01:25 :kahip:o16:flow-refine:balance:weighted:RED-GREEN:
+O16 (repo-review): K3 flow_refine_bisection scored candidates with a
+COUNT-based balance check (count_parts + slack from vertex count n,
+flow_refine.rs:226-244), and graph_to_undirected (cycle.rs:174-201)
+dropped the coarse Graph's vwgt (set unit weights). On Eco/Strong,
+do_flow runs at EVERY uncoarsen level where coarse vwgt >> 1, so a
+count-balanced min-cut can be badly weight-imbalanced -> finer FM starts
+from a violating state. REAL + reproducible.
+Repro (RED): instrumented the existing grid_7x7 improving case ->
+flow moves {13,19,20,37,43,44}->p0, {24}->p1, leaving count 33|16
+(count slack 35 at eps=0.4 -> accepted). vweight never enters
+push_relabel (flow uses EDGE weights), so the moved set is fixed under
+any vertex weighting. Set g.vweight[13]=20 (rest 1): start {r+c<7} is
+weight-balanced (28|40, slack 47), but the accepted refined cut is 52|16
+-> violates. Test respects_vertex_weight_balance_on_weighted_graph
+asserts max(part_weight) <= (1+eps)*ceil(W/2); RED pre-fix
+("weight balance violated: 52|16 exceeds slack 47 (cut=8)").
+Fix: added pub vweight:Vec<i64> to UndirectedGraph (+ part_weights/
+total_weight helpers); from_csc_unit_weights and all test build helpers
+set vec![1;n]; graph_to_undirected carries g.vwgt[v] as i64 (max 1);
+flow_refine balance check now uses part_weights + weight slack
+floor((1+eps)*ceil(W/2)). count_parts gated #[cfg(test)] (only test use
+left). GREEN: feral-kahip 63/63. Oracle = KaHIP/Sanders-Schulz weight
+balance constraint (a generalization of the existing count formula),
+not derived from the impl. User-visible (partition balance quality on
+weighted/coarse levels) -> CHANGELOG entry added.
+ASIDE: the pre-O16 `cargo test --workspace` also exposed an O13
+aftershock (feral issue_3 KKT test pinned the old AMD-degeneracy);
+fixed + committed separately (see prior journal entry) before O16 so
+O16 lands on a green tree.
+Next per /loop: do NOT start O17; continuing in-turn per 'finish tonight'.

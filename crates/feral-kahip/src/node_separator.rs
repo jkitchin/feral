@@ -201,6 +201,7 @@ mod tests {
             xadj,
             adjncy,
             eweight,
+            vweight: vec![1; n],
         }
     }
 

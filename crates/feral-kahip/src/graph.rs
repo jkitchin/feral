@@ -23,6 +23,15 @@ pub(crate) struct UndirectedGraph {
     pub adjncy: Vec<usize>,
     /// Edge weights parallel to `adjncy`. Always `> 0`.
     pub eweight: Vec<i64>,
+    /// Vertex weights, length `n`, every entry `> 0`. On a finest-level
+    /// graph these are all `1`; on a coarse graph produced by
+    /// multilevel coarsening each vertex stands for a supervertex and
+    /// carries the summed mass of the original vertices it absorbed.
+    /// Balance constraints (K3 flow refinement, K4 separator) are
+    /// measured against these weights, not against vertex counts — a
+    /// count-balanced cut on a graph with `vweight ≫ 1` can be badly
+    /// weight-imbalanced.
+    pub vweight: Vec<i64>,
 }
 
 impl UndirectedGraph {
@@ -36,6 +45,28 @@ impl UndirectedGraph {
     #[inline]
     pub fn eweights(&self, v: usize) -> &[i64] {
         &self.eweight[self.xadj[v]..self.xadj[v + 1]]
+    }
+
+    /// Summed vertex weight of each side of a bisection
+    /// `where_[v] ∈ {0, 1}`. Vertices with any other label contribute
+    /// to neither side.
+    pub fn part_weights(&self, where_: &[u8]) -> (i64, i64) {
+        debug_assert_eq!(where_.len(), self.n);
+        let mut w0: i64 = 0;
+        let mut w1: i64 = 0;
+        for (v, &p) in where_.iter().enumerate() {
+            match p {
+                0 => w0 += self.vweight[v],
+                1 => w1 += self.vweight[v],
+                _ => {}
+            }
+        }
+        (w0, w1)
+    }
+
+    /// Total vertex weight of the graph (`Σ vweight`).
+    pub fn total_weight(&self) -> i64 {
+        self.vweight.iter().sum()
     }
 
     /// Total weighted cut of a bisection `where_[v] ∈ {0, 1}`.
@@ -104,6 +135,7 @@ pub(crate) fn from_csc_unit_weights(
         xadj,
         adjncy,
         eweight,
+        vweight: vec![1; n],
     })
 }
 
@@ -137,6 +169,7 @@ mod tests {
             xadj,
             adjncy,
             eweight,
+            vweight: vec![1; n],
         }
     }
 

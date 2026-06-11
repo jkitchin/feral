@@ -4,6 +4,23 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `feral-kahip` flow refinement now balances by vertex weight on coarse graphs (O16)
+
+K3 flow-based refinement (`flow_refine_bisection`) scored candidate cuts against
+a *vertex-count* balance constraint (`max(|part0|, |part1|) ≤ (1+ε)·⌈n/2⌉`),
+and the `Graph → UndirectedGraph` bridge (`graph_to_undirected`) discarded the
+coarse graph's vertex weights by assigning unit weights. On Eco/Strong runs flow
+refinement executes at *every* uncoarsening level, where each coarse vertex
+stands for a supervertex whose mass is ≫ 1, so a count-balanced min-cut could be
+badly *weight*-imbalanced — and the finer level's FM then started from a
+constraint-violating partition. `UndirectedGraph` now carries a `vweight` field
+(populated from `Graph::vwgt`, unit on finest-level inputs), and the balance
+check measures `max(weight(part0), weight(part1)) ≤ (1+ε)·⌈W/2⌉` against those
+weights, matching the KaHIP/Sanders-Schulz constraint. On a 7×7 grid whose
+min-cut pulls a mass-20 supervertex into one side, the count-based check accepted
+a 52|16 weight split (slack 47); the weight-aware check rejects it. Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — `feral-scotch` vertex-separator FM no longer stops at imbalance-rejected heads (O13)
 
 The single-pass vertex-separator FM (`fm_pass`) tried only the post-drain head
