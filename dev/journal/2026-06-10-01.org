@@ -1754,3 +1754,24 @@ code change. fmt clean; cargo doc clean on my edits (pre-existing unrelated
 broken-link warning in feral-amf/stats.rs:5, not touched). tried-and-rejected
 citing O5. Not user-visible (doc comments) => no CHANGELOG. Next per /loop: do NOT
 start the next issue (O6). Continue in-turn per the live 'speed this up' directive.
+
+* O6 :ordering:amd:amf:stats:docs:non-reproducible:
+O6 (repo-review): n_clear_flag stat hard-coded 0 in feral-amd (lib.rs:119) and
+feral-amf (lib.rs:123) while AmdStats struct doc claimed "every field is
+populated" in debug builds. Non-reproducible as a defect: the shared
+OrderDiagnostics (quotient_graph/mod.rs:73-79) has no clear-flag field, so the
+stat has no backing counter -- it is a disconnected constant 0. The reset it
+would count (clear_flag, workspace.rs:49-59) only fires at wflg<2 (one-time
+init lift) or wflg>=wbig=i32::MAX-n (workspace.rs:99-100); wflg grows <=lemax<=n
+per pivot over <=n pivots (~n^2), so the ~2^31 ceiling needs n~tens-of-thousands.
+On every unit-testable input the true count is 0 => no RED state distinguishes
+hard-coded 0 from computed 0. Feral-specific counter (SuiteSparse/faer AMD don't
+expose it) => no external oracle; wiring it + asserting would be self-impl +
+self-oracle in one session (forbidden) and would change clear_flag's signature
+across 4 hot-loop sites (algo.rs:280,501,891,1101) for a ~always-0 value.
+Per X16/O4/O5 precedent: corrected docs instead of code. feral-amd/stats.rs and
+feral-amf/stats.rs n_clear_flag field docs now state always-0/not-wired with the
+wbig ceiling rationale; AmdStats struct doc amended to carve out n_clear_flag.
+No code change. fmt clean. tried-and-rejected citing O6. Not user-visible (doc
+comments) => no CHANGELOG. Next per /loop: do NOT start the next issue (O7).
+Continue in-turn per the live 'speed this up' directive.

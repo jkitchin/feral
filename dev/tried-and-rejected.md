@@ -4228,3 +4228,73 @@ Evidence: `crates/feral-ordering-core/src/quotient_graph/workspace.rs:212-217`
 `feral-ordering-core/src/quotient_graph/mod.rs:50-55`; faer 0.24.0
 `sparse/linalg/amd.rs:173-179` (external oracle, faer-expert verified).
 Journal: dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — O6: `n_clear_flag` stat hard-coded 0 vs "every field populated" doc (finding O6, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O6** `n_clear_flag` stat hard-coded 0 in both feral-amd
+> (`lib.rs:115`) and feral-amf (`lib.rs:121`) while the stats docs
+> claim "every field is populated" in debug builds. low/certain.
+
+(Current tree: the hard-coded `0` is at `feral-amd/src/lib.rs:119` and
+`feral-amf/src/lib.rs:123`.)
+
+### What is there
+
+`AmdStats` / `AmfStats` expose `pub n_clear_flag: u32`, documented as
+"Number of mark-array generation-counter resets"; `AmdStats`'s struct doc
+(`feral-amd/src/stats.rs:5-7`) claims "In debug builds every field is
+populated". Both `amd_order_full` and the AMF equivalent set
+`n_clear_flag: 0` literally. The shared `OrderDiagnostics`
+(`quotient_graph/mod.rs:73-79`) carries `ncmpa`, `n_mass_elim`,
+`n_supervar_merge`, `ndense`, `flops` — there is no clear-flag field, so the
+stat has nothing to read from and is a disconnected constant.
+
+### Why this is not reproducible as a defect
+
+The reset it would count (`clear_flag`, `quotient_graph/workspace.rs:49-59`)
+fires only when `wflg < 2` (the one-time lift from the initial `wflg = 0`,
+over an all-ones `w`) or `wflg >= wbig`, where `wbig = i32::MAX - n`
+(`workspace.rs:99-100`). During elimination `wflg` increases by at most
+`lemax <= n` per pivot across at most `n` pivots (~`n^2` total), so reaching
+the `~2^31` ceiling requires `n` on the order of tens of thousands. On every
+practically unit-testable input the true reset count is `0`.
+
+Consequences:
+
+- A black-box test cannot distinguish a hard-coded `0` from a correctly
+  computed `0`; both are `0` for all testable inputs. No RED state exists.
+- Forcing a non-zero value needs an `n ~ 46k` matrix with the right fill —
+  not a unit test.
+- The counter is feral-specific; SuiteSparse / faer AMD do not expose it, so
+  there is no external oracle for its value. Wiring it up and asserting a
+  value would be self-authored impl + self-authored oracle in one session
+  (forbidden by the project rule), and would require changing `clear_flag`'s
+  signature across its four hot-loop call sites (algo.rs:280, 501, 891, 1101)
+  for a value that is ~always `0`.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible → tried-and-rejected citing
+the finding ID). Per the X16/O4/O5 precedent for non-reproducible findings
+with an inaccurate doc, the docs are corrected rather than the code:
+
+- `feral-amd/src/stats.rs`: the `n_clear_flag` field doc now states the
+  field is currently always `0` and not wired to a backing counter, with the
+  `wbig = i32::MAX - n` ceiling explaining why the reset is a near-never
+  event; the struct-level "every field is populated" claim is amended to
+  carve out `n_clear_flag`.
+- `feral-amf/src/stats.rs`: the `n_clear_flag` field doc gets the same
+  correction.
+
+No code change; the hard-coded `0` is left as-is (it is the correct value on
+every input the crate can be tested against). Not user-visible (doc comments
+only) → no CHANGELOG entry.
+
+Evidence: `feral-amd/src/lib.rs:117-126` and `feral-amf/src/lib.rs` (stats
+assembly, `n_clear_flag: 0`); `feral-amd/src/stats.rs:5-13`,
+`feral-amf/src/stats.rs:5-13` (docs); `quotient_graph/mod.rs:73-79`
+(`OrderDiagnostics` has no clear-flag field);
+`quotient_graph/workspace.rs:49-59` (`clear_flag`), `:99-100`
+(`wbig = i32::MAX - n`). Journal: dev/journal/2026-06-10-01.org.
