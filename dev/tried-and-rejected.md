@@ -4350,3 +4350,57 @@ O(n^2) scan structure is left as-is.
 Evidence: `coarsen.rs:148-204` (two_hop_pass); the `mark` declaration and the
 `let _ = &mut mark;` no-op were the only references to it. Journal:
 dev/journal/2026-06-10-01.org.
+
+## 2026-06-10 — O11: metis FM heap seeded with all n vertices (finding O11, repo-review-2026-06-09.md)
+
+### Finding (verbatim)
+
+> **O11** metis FM heap seeded with all n vertices each pass
+> (`fm_refine.rs:56-61`): Ω(n log n) per pass × 10 passes × every
+> level, boundary-only seeding is the standard. Acknowledged trade;
+> flagged for cost. low/certain.
+
+### Why this is not reproducible as a correctness test
+
+O11 is a cost finding, not a wrong-answer defect — the reviewer marks
+it "Acknowledged trade; flagged for cost." `refine_bisection` produces
+a correct, balance-respecting FM result; the complaint is that it seeds
+the gain heap with every vertex (`for (v, &g) in gain.iter()...`)
+instead of only the current boundary, so each pass pays Ω(n log n) heap
+inserts where METIS pays Ω(boundary). A unit test cannot turn
+"asymptotically more heap work" into a deterministic pass/fail without a
+timing/benchmark oracle, which the tests-first lifecycle does not
+provide for this kind of finding (and timing assertions are flaky).
+There is no RED state to write.
+
+### Why boundary-only seeding is not adopted here
+
+METIS-style boundary-only seeding is not a drop-in: it requires lazily
+re-inserting a vertex the first time a neighbour move makes it a
+boundary vertex. That changes the order in which equal-gain vertices
+are visited (the heap no longer contains the interior vertices that
+currently tie-break by index), so it changes the FM move trajectory and
+therefore the final labels on inputs where the best-balanced prefix is
+reached through a different sequence. That would shift ordering output
+and break the crate's determinism contract and the FM/ND determinism
+tests — out of proportion to a low/certain cost finding the reviewer
+already flagged as an acknowledged trade. Interior vertices are not
+free correctness risk in the current code: they have
+gain = -internal_degree ≤ 0, so they sit at the bottom of the max-heap
+and are popped only after the positive-gain boundary moves that reduce
+the cut.
+
+### Disposition
+
+Routed here per the /loop rule (non-reproducible -> tried-and-rejected
+citing the finding ID). Per the X16/O4/O5/O6/O9 precedent, the safe
+low-risk sub-fix is applied: the all-n seeding cost trade — previously
+documented only in this review — is now acknowledged in the code at the
+seeding loop (`fm_refine.rs`), noting METIS's boundary-only +
+lazy-reinsertion alternative, the Ω(boundary) vs Ω(n log n) cost, why
+interior vertices are harmless (gain ≤ 0), and the simplicity-over-speed
+rationale at FERAL's target sizes. No behaviour change; existing FM
+tests remain the regression guard.
+
+Evidence: `fm_refine.rs:56-61` (heap seeding loop). Journal:
+dev/journal/2026-06-10-01.org.

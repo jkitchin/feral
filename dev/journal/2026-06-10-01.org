@@ -1858,3 +1858,21 @@ param and rewrote the gain comments. New test
 valid/balance/determinism tests unaffected. User-visible -> CHANGELOG.
 Next per /loop: do NOT start O11; continuing in-turn per 'finish
 tonight'.
+
+* O11 :ordering:metis:fm-refine:perf:non-reproducible:
+O11 (repo-review): refine_bisection seeds the FM gain heap with all n
+vertices each pass (fm_refine.rs:56-61), Ω(n log n) inserts where
+boundary-only seeding (METIS) pays Ω(boundary). Cost finding, reviewer
+calls it an acknowledged trade => not reproducible as a RED/GREEN
+correctness test (needs a timing oracle). Boundary-only seeding is not
+a drop-in: it needs lazy re-insertion of newly-boundary vertices, which
+reorders equal-gain visits and changes the FM trajectory / final labels
+=> breaks the determinism contract. Out of scope for a low-severity
+opportunistic fix. Routed to tried-and-rejected citing O11. Applied the
+safe sub-fix only (X16/O4/O5/O6/O9 precedent): documented the all-n
+seeding cost trade in the code at the seeding loop (interior vertices
+have gain ≤ 0, so they pop after the cut-reducing boundary moves;
+METIS boundary-only + lazy-reinsertion is the Ω(boundary) alternative).
+Comment-only, no behaviour change; existing FM tests guard it. Not
+user-visible => no CHANGELOG. Next per /loop: do NOT start O12;
+continuing in-turn per 'finish tonight'.
