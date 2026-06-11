@@ -5453,8 +5453,8 @@ mod row_offdiag_tests {
     fn row_offdiag_max_includes_position_r_k() {
         let n = 4;
         let mut a = vec![0.0f64; n * n];
-        // entry (r = 2, k = 0): column-major a[k * n + r] = a[0 * 4 + 2].
-        a[0 * n + 2] = 7.0;
+        // entry (r = 2, k = 0): column-major a[k * n + r] = a[0 * 4 + 2] = a[2].
+        a[2] = 7.0;
         let got = symmetric_row_offdiag_max(&a, n, 0, 2);
         assert_eq!(
             got, 7.0,
