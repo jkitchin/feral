@@ -1532,3 +1532,33 @@ feral --lib -D warnings clean, fmt clean. User-visible (parse_mtx/read_mtx are
 pub; malformed-input abort -> graceful) -> CHANGELOG Fixed entry. Evidence:
 mtx.rs:113-123 (fix), test in tests module. Next per /loop: do NOT start the next
 issue (X11). Continue in-turn per the live 'speed this up' directive.
+
+* 20:18 :x11:mtx:io:input-validation:banner:non-finite:fixed:
+X11 (repo-review §X11, low/certain): three sub-parts in the MTX reader.
+(a) Banner over-strictness: parse_mtx compared the header against the exact
+single-space string "%%matrixmarket matrix coordinate real symmetric"
+(mtx.rs:48). A legal banner with multiple spaces or tabs between fields (which
+NIST mmio accepts via sscanf tokenization) was rejected "unsupported header".
+(c) Non-finite values: parts[2].parse::<f64>() accepts "nan"/"inf"/"-inf"
+silently (mtx.rs:155), building an MtxMatrix carrying a poison value; bench
+filters these, library callers via parse_mtx/read_mtx did not.
+(b) Post-size '%' comments: erroring on them is spec-correct (comments only
+legal between banner and size line) and matches mmio -> documented, NOT changed.
+
+RED (rigorous): saved fixed mtx.rs to /tmp, reverted both fix hunks in place,
+ran the 4 new tests against unfixed code -> all 4 FAILED:
+multispace_banner_is_accepted, tab_separated_banner_is_accepted (both got the
+"unsupported header" Err), nan_value_is_rejected, inf_value_is_rejected (both
+got Ok carrying a non-finite entry). Confirmed RED. Restored fixed version.
+
+FIX: (a) compare banner token-by-token, case-insensitive, exactly 5 tokens
+(const BANNER, split_whitespace, eq_ignore_ascii_case). (c) after the v parse,
+`if !v.is_finite() { return Err(IoError("non-finite value")) }`.
+
+GREEN: io::mtx 17/17 (4 new), lib full 359 passed (was 355), clippy -p feral
+--lib -D warnings clean, cargo fmt clean. Existing reject-* header tests still
+reject (token mismatch); existing valid-parse tests unaffected. User-visible
+(parse_mtx/read_mtx are pub; reject legal files / accept poison -> fixed) ->
+CHANGELOG Fixed entry. Evidence: mtx.rs banner+non-finite hunks, 4 tests in the
+tests module. Next per /loop: do NOT start the next issue (X12). Continue
+in-turn per the live 'speed this up' directive.

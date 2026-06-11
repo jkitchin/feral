@@ -4,6 +4,21 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — MTX reader accepts whitespace-flexible banners, rejects non-finite values (X11)
+
+`parse_mtx` / `read_mtx` compared the Matrix Market banner against the exact
+single-space string `%%matrixmarket matrix coordinate real symmetric`, so a
+legal banner whose fields are separated by multiple spaces or tabs was
+rejected with "unsupported header" even though the NIST `mmio` reference
+accepts it. The banner is now compared token by token (case-insensitive).
+Separately, entry values were parsed with `f64::from_str`, which silently
+accepts `nan`/`inf`/`-inf`; such a file produced an `MtxMatrix` carrying a
+non-finite value that poisons any downstream factorization. Non-finite entry
+values now return `FeralError::IoError`. (Comment lines after the size line
+remain an error, matching the spec and `mmio` — comments are only legal
+between the banner and the size line.) Finding from
+`dev/research/repo-review-2026-06-09.md`.
+
 ### Fixed — MTX reader no longer aborts on a corrupt `nnz` header (X10)
 
 `parse_mtx` / `read_mtx` reserved the entries buffer with

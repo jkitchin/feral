@@ -45,8 +45,25 @@ pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix, FeralError> 
     let (_, header) = lines
         .next()
         .ok_or_else(|| FeralError::IoError(format!("{}: empty file", source)))?;
-    let header_lower = header.trim().to_ascii_lowercase();
-    if header_lower != "%%matrixmarket matrix coordinate real symmetric" {
+    // X11: compare the banner token by token (case-insensitive) rather than
+    // against one exact single-space string. The Matrix Market spec and the
+    // reference NIST `mmio` reader tokenize the banner on arbitrary
+    // whitespace, so a legal banner whose fields are separated by multiple
+    // spaces or tabs must be accepted, not rejected as "unsupported header".
+    const BANNER: [&str; 5] = [
+        "%%matrixmarket",
+        "matrix",
+        "coordinate",
+        "real",
+        "symmetric",
+    ];
+    let mut header_tokens = header.split_whitespace();
+    let banner_ok = BANNER.iter().all(|expected| {
+        header_tokens
+            .next()
+            .is_some_and(|tok| tok.eq_ignore_ascii_case(expected))
+    }) && header_tokens.next().is_none();
+    if !banner_ok {
         return Err(FeralError::IoError(format!(
             "{}: unsupported header '{}' (expected: %%MatrixMarket matrix coordinate real symmetric)",
             source, header.trim()
@@ -160,6 +177,19 @@ pub fn parse_mtx(contents: &str, source: &str) -> Result<MtxMatrix, FeralError> 
                 parts[2]
             ))
         })?;
+        // X11: f64::from_str silently accepts "nan", "inf", "-inf". Such a
+        // value would build an MtxMatrix carrying a non-finite entry that
+        // poisons any downstream factorization; reject it here so library
+        // callers (parse_mtx / read_mtx) get a clean error like the bench
+        // harness already enforces.
+        if !v.is_finite() {
+            return Err(FeralError::IoError(format!(
+                "{}: line {}: non-finite value '{}'",
+                source,
+                line_no + 1,
+                parts[2]
+            )));
+        }
 
         // Validate bounds (1-indexed in MTX)
         if i == 0 || j == 0 || i > n || j > n {
@@ -241,6 +271,78 @@ mod tests {
             2,
             "only the two real entries are present; nnz is an untrusted hint (X10)"
         );
+    }
+
+    /// X11 (dev/research/repo-review-2026-06-09.md): the banner was compared
+    /// against the exact single-space string. A legal MTX banner separates
+    /// its five fields with arbitrary whitespace; the NIST `mmio` reference
+    /// tokenizes it. Pre-fix this multi-space banner failed the exact-string
+    /// compare and returned "unsupported header"; post-fix the token-by-token
+    /// compare accepts it.
+    #[test]
+    fn multispace_banner_is_accepted() {
+        let mtx = "\
+%%MatrixMarket   matrix    coordinate real   symmetric
+2 2 2
+1 1 4.0
+2 2 5.0
+";
+        let m = parse_mtx(mtx, "test")
+            .expect("a banner separated by multiple spaces is legal and must parse (X11)");
+        assert_eq!(m.n, 2);
+        assert_eq!(m.entries.len(), 2);
+    }
+
+    /// X11: a banner whose fields are separated by tabs is equally legal.
+    /// Pre-fix the exact-string compare rejected it; post-fix it parses.
+    #[test]
+    fn tab_separated_banner_is_accepted() {
+        let mtx = "%%MatrixMarket\tmatrix\tcoordinate\treal\tsymmetric\n2 2 1\n1 1 7.0\n";
+        let m =
+            parse_mtx(mtx, "test").expect("a tab-separated banner is legal and must parse (X11)");
+        assert_eq!(m.n, 2);
+        assert_eq!(m.entries.len(), 1);
+    }
+
+    /// X11: `f64::from_str` accepts "nan", so pre-fix this file parsed to an
+    /// `Ok(MtxMatrix)` carrying a NaN entry that silently poisons any
+    /// downstream factorization. Post-fix a non-finite value is rejected.
+    #[test]
+    fn nan_value_is_rejected() {
+        let mtx = "\
+%%MatrixMarket matrix coordinate real symmetric
+2 2 1
+1 1 nan
+";
+        let err = parse_mtx(mtx, "test")
+            .expect_err("a NaN entry value must be rejected, not read through (X11)");
+        match err {
+            FeralError::IoError(msg) => assert!(
+                msg.contains("non-finite"),
+                "expected a non-finite error, got: {msg}"
+            ),
+            other => panic!("expected FeralError::IoError, got {other:?}"),
+        }
+    }
+
+    /// X11: likewise "inf" is accepted by `f64::from_str`. Pre-fix it built an
+    /// `MtxMatrix` carrying +inf; post-fix it is rejected.
+    #[test]
+    fn inf_value_is_rejected() {
+        let mtx = "\
+%%MatrixMarket matrix coordinate real symmetric
+2 2 1
+1 1 inf
+";
+        let err = parse_mtx(mtx, "test")
+            .expect_err("an inf entry value must be rejected, not read through (X11)");
+        match err {
+            FeralError::IoError(msg) => assert!(
+                msg.contains("non-finite"),
+                "expected a non-finite error, got: {msg}"
+            ),
+            other => panic!("expected FeralError::IoError, got {other:?}"),
+        }
     }
 
     #[test]
