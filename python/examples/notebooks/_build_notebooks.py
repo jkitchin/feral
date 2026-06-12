@@ -1,6 +1,6 @@
 """Generate the feral example notebooks from source-of-truth cell lists.
 
-Run ``python _build_notebooks.py`` to (re)write the four ``.ipynb`` files
+Run ``python _build_notebooks.py`` to (re)write the five ``.ipynb`` files
 in this directory. Keeping the cells in a plain ``.py`` generator makes
 them reviewable in diffs; the ``.ipynb`` files are the executable
 artifacts (run them with ``jupyter nbconvert --execute`` or open in
@@ -12,6 +12,7 @@ Notebooks
 02_multi_rhs_batched      batched multi-RHS solve + amortization timing
 03_kkt_saddle_inertia     indefinite KKT system, certified inertia
 04_scipy_numpy_interop    scipy.sparse <-> feral round-trip vs spsolve
+05_lu_and_introspection   LU engine, L/D + symbolic access, introspection
 """
 
 from __future__ import annotations
@@ -571,23 +572,239 @@ nb04 = _nb([
 ])
 
 
+# --------------------------------------------------------------------------
+# 05 — LU basis engine, factor access, introspection  (0.11.0)
+# --------------------------------------------------------------------------
+nb05 = _nb([
+    md(
+        "# feral — LU engine, factor access & introspection\n"
+        "\n"
+        "The 0.11.0 Python surface is **purely additive**: the original "
+        "`Solver`/`CscMatrix` workflow is unchanged, and these features sit "
+        "alongside it. This notebook covers three additions:\n"
+        "\n"
+        "1. the unsymmetric **LU basis engine** (`LuFactor` / `LuMatrix`),\n"
+        "2. **factor access** — the assembled `L` and `D`, and the symbolic "
+        "analysis, and\n"
+        "3. **introspection** — tuning knobs, pivot magnitudes, factor stats, "
+        "and scaling info.\n"
+        "\n"
+        "Every cell carries its own external oracle (a dense `numpy` solve or a "
+        "reconstruction identity), so the notebook self-checks when executed."
+    ),
+    code(
+        "import numpy as np\n"
+        "import feral\n"
+        "\n"
+        "print('feral', feral.__version__)"
+    ),
+    md(
+        "## 1. Unsymmetric LU basis engine\n"
+        "\n"
+        "`LuFactor` factors a **general** (unsymmetric) square matrix and solves "
+        "`A x = b` with `ftran` and `Aᵀ y = c` with `btran`. It auto-routes "
+        "between a dense and a sparse engine; the oracle here is "
+        "`numpy.linalg.solve`."
+    ),
+    code(
+        "A = np.array([[2.0, 1.0, 0.0],\n"
+        "              [0.0, 3.0, 1.0],\n"
+        "              [1.0, 0.0, 4.0]])\n"
+        "lu = feral.LuFactor(feral.LuMatrix.from_dense(A))\n"
+        "print('dense engine:', lu.is_dense)\n"
+        "\n"
+        "b = np.array([1.0, 2.0, 3.0])\n"
+        "x = lu.ftran(b)                       # solve A x = b\n"
+        "print('ftran residual:', f'{np.max(np.abs(A @ x - b)):.2e}')\n"
+        "assert np.allclose(x, np.linalg.solve(A, b))\n"
+        "\n"
+        "c = np.array([1.0, 0.0, 0.0])\n"
+        "y = lu.btran(c)                       # solve Aᵀ y = c\n"
+        "assert np.allclose(y, np.linalg.solve(A.T, c))"
+    ),
+    md(
+        "### Factor identity and product-form updates\n"
+        "\n"
+        "The returned permutations satisfy `P A Q = L U`. A simplex-style "
+        "`update` replaces one basis column in product form; `refactor` rebuilds "
+        "from scratch and resets the update counter."
+    ),
+    code(
+        "L = lu.l_array()\n"
+        "U = lu.u_array()\n"
+        "lhs = A[np.ix_(lu.perm, lu.qcol)]     # P A Q\n"
+        "print('|P A Q - L U|inf:', f'{np.max(np.abs(lhs - L @ U)):.2e}')\n"
+        "assert np.allclose(lhs, L @ U)\n"
+        "\n"
+        "new_col = np.array([0.0, 5.0, 1.0])\n"
+        "lu.update(1, new_col)                 # replace basis column 1\n"
+        "A2 = A.copy(); A2[:, 1] = new_col\n"
+        "print('updates_since_refactor:', lu.updates_since_refactor)\n"
+        "assert np.allclose(lu.ftran(b), np.linalg.solve(A2, b))\n"
+        "\n"
+        "lu.refactor(feral.LuMatrix.from_dense(A))\n"
+        "assert lu.updates_since_refactor == 0"
+    ),
+    md(
+        "A singular basis raises `SingularBasisError` — a subclass of "
+        "`FactorError`, so existing `except FactorError` handlers keep working."
+    ),
+    code(
+        "singular = np.array([[1.0, 2.0], [2.0, 4.0]])   # rank 1\n"
+        "try:\n"
+        "    feral.LuFactor(feral.LuMatrix.from_dense(singular), force_dense=True)\n"
+        "except feral.SingularBasisError as e:\n"
+        "    print('caught SingularBasisError:', e)\n"
+        "    assert isinstance(e, feral.FactorError)"
+    ),
+    md(
+        "## 2. Factor access — L, D, and the symbolic structure\n"
+        "\n"
+        "After a symmetric `Solver.factor`, `Solver.factors()` exposes the "
+        "assembled unit-lower `L` and block-diagonal `D` in **factorization "
+        "order**. The reconstruction identity is the oracle:\n"
+        "\n"
+        "$$ L\\,D\\,L^{\\top} = P\\,(S A S)\\,P^{\\top} $$\n"
+        "\n"
+        "with the permutation `fac.perm` and the per-row scaling `fac.scaling`."
+    ),
+    code(
+        "M = np.array([\n"
+        "    [2.0, 1.0, 0.0, 0.0],\n"
+        "    [1.0, -3.0, 1.0, 0.0],\n"
+        "    [0.0, 1.0, 4.0, 1.0],\n"
+        "    [0.0, 0.0, 1.0, -2.0],\n"
+        "])\n"
+        "csc = feral.CscMatrix.from_dense(M)\n"
+        "s = feral.Solver()\n"
+        "status, inertia = s.factor(csc)\n"
+        "print('inertia:', inertia)\n"
+        "\n"
+        "fac = s.factors()\n"
+        "indptr, indices, data = fac.l_csc()\n"
+        "d_diag, d_sub = fac.d_blocks()"
+    ),
+    code(
+        "n = fac.n\n"
+        "L = np.zeros((n, n))\n"
+        "for j in range(n):\n"
+        "    for k in range(indptr[j], indptr[j + 1]):\n"
+        "        L[indices[k], j] = data[k]\n"
+        "\n"
+        "D = np.zeros((n, n))\n"
+        "i = 0\n"
+        "while i < n:\n"
+        "    if i + 1 < n and d_sub[i] != 0.0:        # 2x2 pivot block\n"
+        "        D[i, i] = d_diag[i]; D[i + 1, i + 1] = d_diag[i + 1]\n"
+        "        D[i, i + 1] = D[i + 1, i] = d_sub[i]\n"
+        "        i += 2\n"
+        "    else:\n"
+        "        D[i, i] = d_diag[i]; i += 1\n"
+        "\n"
+        "perm, sc = fac.perm, fac.scaling\n"
+        "lhs = L @ D @ L.T\n"
+        "rhs = np.array([[sc[perm[a]] * M[perm[a], perm[b]] * sc[perm[b]]\n"
+        "                 for b in range(n)] for a in range(n)])\n"
+        "print('|L D Lᵀ - P(SAS)Pᵀ|inf:', f'{np.max(np.abs(lhs - rhs)):.2e}')\n"
+        "assert np.allclose(lhs, rhs)"
+    ),
+    md(
+        "### Symbolic analysis without a numeric factor\n"
+        "\n"
+        "`feral.analyze` runs the ordering + symbolic factorization with **no** "
+        "numeric work. On a larger system the predicted `factor_nnz_estimate` is "
+        "a (slack-inflated) upper bound on the realized factor nnz — provided the "
+        "numeric factor uses the **same ordering** as the analysis."
+    ),
+    code(
+        "rng = np.random.default_rng(2)\n"
+        "B = rng.standard_normal((15, 15))\n"
+        "spd = feral.CscMatrix.from_dense(B @ B.T + 15 * np.eye(15))\n"
+        "\n"
+        "sym = feral.analyze(spd, ordering='amd')\n"
+        "snum = feral.Solver(ordering='amd')\n"
+        "snum.factor(spd)\n"
+        "\n"
+        "print('ordering        :', sym.ordering)\n"
+        "print('num_supernodes  :', sym.num_supernodes)\n"
+        "print('nnz estimate    :', sym.factor_nnz_estimate)\n"
+        "print('realized nnz    :', snum.factor_nnz)\n"
+        "assert sorted(sym.perm) == list(range(sym.n))      # perm is a permutation\n"
+        "assert sym.factor_nnz_estimate >= snum.factor_nnz"
+    ),
+    md(
+        "## 3. Introspection — knobs, pivots, stats, scaling\n"
+        "\n"
+        "Different fill-reducing orderings must agree on the certified inertia. "
+        "Turning on `profiling` populates a `ProfileReport`; `last_factor_stats` "
+        "and the pivot-magnitude getters summarize the numeric factor."
+    ),
+    code(
+        "rng = np.random.default_rng(0)\n"
+        "G = rng.standard_normal((14, 14)); G = G + G.T\n"
+        "G += np.diag(rng.standard_normal(14))\n"
+        "Gc = feral.CscMatrix.from_dense(G)\n"
+        "\n"
+        "inertias = set()\n"
+        "for ordering in ('auto', 'amd', 'amf'):\n"
+        "    st = feral.Solver(ordering=ordering)\n"
+        "    _, inrt = st.factor(Gc)\n"
+        "    inertias.add(inrt.as_tuple())\n"
+        "print('distinct inertias across orderings:', inertias)\n"
+        "assert len(inertias) == 1                          # ordering-invariant"
+    ),
+    code(
+        "sp = feral.Solver(profiling=True)\n"
+        "sp.factor(Gc)\n"
+        "fs = sp.last_factor_stats()\n"
+        "print('nnz_a / nnz_l :', fs.nnz_a, '/', fs.nnz_l)\n"
+        "print('fill_ratio    :', f'{fs.fill_ratio:.2f}')\n"
+        "print('pivot range   :', f'{sp.min_pivot_magnitude:.2e}',\n"
+        "      '..', f'{sp.max_pivot_magnitude:.2e}')\n"
+        "print('scaling kind  :', sp.scaling_info.kind)\n"
+        "print('profile total :', sp.profile_report().total_us, 'us')\n"
+        "assert fs.fill_ratio >= 1.0\n"
+        "assert 0.0 < sp.min_pivot_magnitude <= sp.max_pivot_magnitude"
+    ),
+])
+
+
 NOTEBOOKS = {
     "01_basic_factor_solve.ipynb": nb01,
     "02_multi_rhs_batched.ipynb": nb02,
     "03_kkt_saddle_inertia.ipynb": nb03,
     "04_scipy_numpy_interop.ipynb": nb04,
+    "05_lu_and_introspection.ipynb": nb05,
 }
 
 
 def main():
+    """(Re)write the notebooks. By default they are executed in place so the
+    committed ``.ipynb`` carry their cell outputs; pass ``--no-execute`` to
+    write source-only notebooks (faster, and what you want if ``feral`` is not
+    installed in the running interpreter).
+
+    Each notebook's cells embed their own assertions against an external
+    oracle, so a clean execution is also a smoke test — any failure aborts
+    with the offending traceback rather than committing a broken notebook.
+    """
     import os
+    import sys
+
+    execute = "--no-execute" not in sys.argv[1:]
+    if execute:
+        from nbconvert.preprocessors import ExecutePreprocessor
+
+        ep = ExecutePreprocessor(timeout=300, kernel_name="python3")
 
     here = os.path.dirname(os.path.abspath(__file__))
     for name, nb in NOTEBOOKS.items():
         path = os.path.join(here, name)
+        if execute:
+            ep.preprocess(nb, {"metadata": {"path": here}})
         with open(path, "w") as f:
             nbf.write(nb, f)
-        print("wrote", path)
+        print(("executed" if execute else "wrote"), path)
 
 
 if __name__ == "__main__":
