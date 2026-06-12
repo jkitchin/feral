@@ -1,6 +1,6 @@
 [package]
 name = "feral-amd"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 description = "Approximate Minimum Degree (AMD) fill-reducing ordering, quotient-graph algorithm (Amestoy, Davis & Duff 1996, 2004). Pure Rust, standalone."

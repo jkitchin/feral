@@ -213,14 +213,14 @@ dependencies = [
 
 [[package]]
 name = "feral-amd"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "feral-ordering-core",
 ]
 
 [[package]]
 name = "feral-amf"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "feral-ordering-core",
 ]
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "feral-kahip"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "feral-amd",
  "feral-metis",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "feral-metis"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "feral-amd",
  "feral-ordering-core",
@@ -261,11 +261,11 @@ dependencies = [
 
 [[package]]
 name = "feral-ordering-core"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "feral-scotch"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "feral-amd",
  "feral-metis",
