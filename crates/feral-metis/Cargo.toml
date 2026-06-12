@@ -1,6 +1,6 @@
 [package]
 name = "feral-metis"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 description = "Multilevel nested-dissection fill-reducing ordering (Karypis & Kumar 1998). Pure Rust, clean-room, standalone. Implements the FERAL ordering-crate contract."

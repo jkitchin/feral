@@ -6,6 +6,23 @@ All notable changes to FERAL will be documented in this file.
 
 ## [0.11.0] - 2026-06-11
 
+### Packaging — ordering crates bumped to 0.2.1
+
+The six fill-reducing ordering crates (`feral-ordering-core`, `feral-amd`,
+`feral-amf`, `feral-metis`, `feral-scotch`, `feral-kahip`) are bumped from
+`0.2.0` to `0.2.1` so the published crates.io artifacts pick up the
+API-compatible fixes, perf work, and refactors accumulated since `0.2.0` was
+first published — notably the `feral-metis` (real SHEM coarsening, true GGP
+gain in initial bisection), `feral-kahip` (vertex-weight flow balancing,
+`n_components`), `feral-scotch` (vertex-separator FM past imbalance-rejected
+heads), and `feral-ordering-core` (sorted-rows invariant) changes from the
+repo-review campaign. They had been left at `0.2.0` across the `0.3.0`–`0.10.0`
+feral releases, so `cargo publish` silently skipped them (the version already
+existed) and consumers linked stale ordering code. The changes are
+semver-compatible (the ordering-crate API contract is fixed; see
+`dev/decisions.md` 2026-04-17), so `feral`'s `version = "0.2"` requirement is
+unchanged and resolves to `0.2.1`.
+
 ### Documentation
 
 - The mdBook Python chapter (`book/src/python.md`) now documents the new
