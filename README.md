@@ -57,8 +57,8 @@ by 5–8× on a tiny-IPM-KKT class where SSIDS itself trails MUMPS by
 4–8×; that gap is acknowledged and deferred, with the proper
 investigation queued in the reference-solver note.
 
-The full test suite is **534 tests passing, 0 failed** (lib +
-integration, 19 ignored); CI runs the same `pre-commit` hook set
+The full test suite is **705 tests passing, 0 failed** (lib +
+integration, 20 ignored); CI runs the same `pre-commit` hook set
 used locally so local and CI cannot drift.
 
 The Phase 2 plan lives in
@@ -77,6 +77,13 @@ phase-by-phase decisions are in
   CHOLMOD-style analysis pipeline (AMD → postorder → column counts →
   supernode amalgamation with SSIDS nemin merge rule) feeding a
   postorder multifrontal factorization that wraps the dense BK kernel.
+- **Unsymmetric LU basis engine** (`src/lu/`): a general (non-symmetric)
+  square `A = P L U Q` factorization with `ftran`/`btran` solves and
+  simplex-style product-form column updates, for basis-matrix workloads
+  that the symmetric LDLᵀ path does not cover. It auto-routes between a
+  dense (`DenseLu`) and a sparse (`SparseLu`) engine via
+  `should_use_dense_lu`. Re-exported at the crate root and surfaced in
+  the Python bindings as `LuFactor`.
 - **External benchmark oracles** (`external_benchmarks/`): native
   Fortran MUMPS 5.8.2 and SPRAL/SSIDS drivers that run on the same KKT
   corpus and produce per-matrix sidecar JSONs. The consensus framework
@@ -185,9 +192,29 @@ For interior-point KKT solves, `feral.ipm.KktSolver` wraps
 `feral.Solver` with the Wächter–Biegler 2006 §3.1 perturbation-
 escalation loop; symbolic analysis is cached across an entire Newton
 run. `feral.from_scipy(...)` / `feral.to_scipy(...)` round-trip with
-`scipy.sparse` matrices. See [`python/README.md`](python/README.md)
-for the full API and IPM usage, and `python/examples/` for an end-to-
-end Newton step.
+`scipy.sparse` matrices.
+
+As of 0.11.0 the bindings also expose (all additive — existing code is
+unaffected):
+
+- **The unsymmetric LU basis engine** as `feral.LuFactor` — `ftran`
+  (`A x = b`) / `btran` (`Aᵀ y = c`), product-form `update`s, and the
+  `P A Q = L U` factors, auto-routing dense/sparse like the Rust core.
+- **Factor access** — `Solver.factors()` returns the assembled unit-
+  lower `L` (CSC, optionally as `scipy.sparse`) and block-diagonal `D`,
+  plus `perm`/`scaling` for the `L D Lᵀ = P (S A S) Pᵀ` reconstruction.
+- **Symbolic analysis** — `feral.analyze(A, ordering=...)` (no numeric
+  factorization) and `Solver.symbolic()` return the resolved ordering,
+  permutation, elimination tree, supernode count, and nnz estimate.
+- **Introspection + tuning knobs** — new `Solver(...)` keyword args
+  (`ordering`, `profiling`, `mc64_cache`, …), pivot-magnitude and MC64
+  counters, `last_factor_stats()`, `profile_report()`, and
+  `scaling_info`.
+
+See [`python/README.md`](python/README.md) for the full API and IPM
+usage, and `python/examples/notebooks/` (notebooks `01`–`05`, with
+`05` walking through the LU engine, factor access, and introspection)
+plus `python/examples/` for an end-to-end Newton step.
 
 Build the bindings from source:
 

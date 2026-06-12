@@ -34,6 +34,11 @@ unchanged and resolves to `0.2.1`.
   notebook by default and commits its cell outputs (each cell's embedded
   assertion against an external oracle doubles as a smoke test); pass
   `--no-execute` for source-only `.ipynb`.
+- Refreshed the top-level `README.md`: added the unsymmetric LU basis engine
+  to "What's in the box", expanded the Python-bindings section to cover the
+  0.11.0 LU/factor-access/symbolic/introspection surface and the `01`–`05`
+  notebooks, and corrected the test count to 705 passing / 0 failed / 20
+  ignored.
 
 ### Added — Python interface: LU basis engine, factor/symbolic access, knobs, introspection
 
