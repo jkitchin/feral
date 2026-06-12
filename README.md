@@ -5,7 +5,7 @@
 [![CI](https://github.com/jkitchin/feral/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/feral/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/feral.svg)](https://crates.io/crates/feral)
 [![PyPI](https://img.shields.io/pypi/v/feral-solver.svg)](https://pypi.org/project/feral-solver/)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20162687.svg)](https://doi.org/10.5281/zenodo.20162687)
+[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.20162687-blue.svg)](https://doi.org/10.5281/zenodo.20162687)
 
 Feral is a pure-Rust sparse symmetric indefinite linear solver with certified inertia counts for use in interior-point optimization algorithms.
 
@@ -13,58 +13,58 @@ The name is a pun. **Fe** is iron's chemical symbol. Iron rusts. Rust is the lan
 
 ## Status
 
-Feral is research-grade, pre-1.0. **Phase 1 closed via a multi-source
-consensus oracle (feral + canonical Fortran MUMPS 5.8.2 + SPRAL/SSIDS);
-Phase 2 has shipped scaling, ordering, pivoting, and amalgamation
-work, and is ongoing.** The corpus-wide sidecar migration to
-MUMPS+SSIDS consensus inertia
-(`consensus_mumps_ssids_feralsparse_2026-04-25`, see
-[`dev/decisions.md`](dev/decisions.md)) replaced the prior rmumps-only
-ground truth and is the basis for current validation.
+Feral is production-ready for its target use: sparse symmetric-indefinite
+factorization with **certified inertia counts** for interior-point
+optimization. It is published on
+[crates.io](https://crates.io/crates/feral) and
+[PyPI](https://pypi.org/project/feral-solver/), runs end-to-end on the
+**full ~183k-matrix KKT corpus** with no n-size filter (matrices up to
+n ≈ 5×10⁵, ~14k above n = 500 and ~10k above n = 1000; residuals at
+machine precision on the well-conditioned majority), and passes
+**705 tests, 0 failed** (lib + integration, 20 ignored).
 
-The sparse multifrontal path runs end-to-end on the **full
-~183k-matrix KKT corpus** with no n-size filter (matrices range up to
-n ≈ 5×10⁵, with ~14k above n = 500 and ~10k above n = 1000;
-residuals are at machine precision on the well-conditioned majority).
-Major Phase 2 capabilities now in `main`:
+Inertia correctness is validated against a multi-source consensus oracle —
+feral + canonical Fortran **MUMPS 5.8.2** + **SPRAL/SSIDS** — via
+`external_benchmarks/consensus/compute_consensus.py`, which votes across the
+three solvers to classify each matrix as Definitive, Borderline, Numerically
+Intractable, or Excluded. On Definitive matrices inertia must be exactly
+correct, with no tolerance.
 
-- **MC64 symmetric scaling** (`ScalingStrategy::Mc64Symmetric`) with
-  an `Auto` strategy that picks MC64 only when its predicates fire.
-- **LDLᵀ-aware ordering** (Duff–Pralet symmetric matching + quotient-
-  graph compression, port of MUMPS `ICNTL(12) = 2`) with an `Auto`
-  default that resolves to `LdltCompress` only on arrow-KKT-shaped
-  inputs.
-- **SSIDS-style delayed pivoting** in the sparse path
-  (`may_delay = true` on non-root supernodes; rejected pivots are
-  carried forward to the parent front).
-- **Rook-rescue fallback** for pivots rejected by the column-relative
-  threshold test, splicing into `try_reject_1x1_frontal` before
-  delaying.
+It remains 0.x: minor, additive API changes may land before 1.0, but the
+core factor / solve / inertia surface is stable.
+
+### Capabilities
+
+- **MC64 symmetric scaling** (`ScalingStrategy::Mc64Symmetric`) with an
+  `Auto` strategy that engages MC64 only when its predicates fire.
+- **LDLᵀ-aware ordering** (Duff–Pralet symmetric matching + quotient-graph
+  compression, a port of MUMPS `ICNTL(12) = 2`) with an `Auto` default that
+  resolves to `LdltCompress` only on arrow-KKT-shaped inputs.
+- **SSIDS-style delayed pivoting** in the sparse path (rejected pivots
+  carried forward to the parent front), plus a **rook-rescue fallback** for
+  pivots rejected by the column-relative threshold test.
 - **SSIDS-style column renumbering** (`AmalgamationStrategy::Renumber`,
   default-on) — cuts factor time 30–67% on IPM-KKT tail matrices
   (ACOPR30 / CRESC100 / LAKES / NELSON / SWOPF) at ~10% cost on the
   small-CUTEst-Hessian median.
+- **Unsymmetric LU basis engine** (`src/lu/`) for general square
+  `A = P L U Q` solves with product-form updates, alongside the symmetric
+  LDLᵀ path.
 
-**Reference-solver positioning** (per
-[`dev/research/reference-solver-comparison.md`](dev/research/reference-solver-comparison.md),
-which supersedes the earlier "10× vs MUMPS" framing): on the
-archetype tail slice, FERAL matches or beats SPRAL/SSIDS on every
+### Reference-solver positioning
+
+Per [`dev/research/reference-solver-comparison.md`](dev/research/reference-solver-comparison.md):
+on the archetype tail slice, FERAL matches or beats SPRAL/SSIDS on every
 matrix where both ran (BATCH 0.14×, HAHN1 0.13×, HAIFAM_0082 0.47×,
-ACOPR30_0067 1.11×, CRESC100 1.22×, VESUVIO 1.41×) — and SSIDS links
-vendor BLAS while FERAL does not. Versus canonical MUMPS, FERAL
-matches on most matrices (BATCH 0.84×, HAIFAM_0000 1.33×) and trails
-by 5–8× on a tiny-IPM-KKT class where SSIDS itself trails MUMPS by
-4–8×; that gap is acknowledged and deferred, with the proper
-investigation queued in the reference-solver note.
+ACOPR30_0067 1.11×, CRESC100 1.22×, VESUVIO 1.41×) — and SSIDS links vendor
+BLAS while FERAL does not. Versus canonical MUMPS, FERAL matches on most
+matrices (BATCH 0.84×, HAIFAM_0000 1.33×) and trails by 5–8× on a
+tiny-IPM-KKT class where SSIDS itself trails MUMPS by 4–8×; that gap is
+acknowledged and tracked (see "Known limitations" below).
 
-The full test suite is **705 tests passing, 0 failed** (lib +
-integration, 20 ignored); CI runs the same `pre-commit` hook set
-used locally so local and CI cannot drift.
-
-The Phase 2 plan lives in
-[`dev/plans/phase-2-planning.md`](dev/plans/phase-2-planning.md);
-phase-by-phase decisions are in
-[`dev/decisions.md`](dev/decisions.md); the Phase 1 story is in the
+CI runs the same `pre-commit` hook set used locally, so local and CI cannot
+drift. Design rationale and development history are in
+[`dev/decisions.md`](dev/decisions.md) and the
 [Phase 1 retrospective](dev/phase1-retrospective.org).
 
 ## What's in the box

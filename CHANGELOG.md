@@ -38,7 +38,11 @@ unchanged and resolves to `0.2.1`.
   to "What's in the box", expanded the Python-bindings section to cover the
   0.11.0 LU/factor-access/symbolic/introspection surface and the `01`–`05`
   notebooks, and corrected the test count to 705 passing / 0 failed / 20
-  ignored.
+  ignored. Rewrote the "Status" section to a production-ready framing
+  (dropping the Phase 1/Phase 2 in-progress narrative) while preserving the
+  consensus-oracle validation and reference-solver positioning. Switched the
+  DOI badge from the Zenodo-hosted SVG to a shields.io badge that renders
+  reliably through GitHub's image proxy (link target unchanged).
 
 ### Added — Python interface: LU basis engine, factor/symbolic access, knobs, introspection
 
