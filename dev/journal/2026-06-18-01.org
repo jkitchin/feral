@@ -1,0 +1,60 @@
+#+TITLE: FERAL Journal 2026-06-18-01
+#+STARTUP: showall
+
+* 09:10 :lu:sparse:update:perf:discopt:review:
+Reviewed discopt#229 (filed against discopt, fix belongs in feral). Claim: feral
+`SparseLu::update` is ~750× slower than HiGHS on the casctanks McCormick LP node
+solve — 6.0 s (94%) inside the FT bump update, bump width avg ≈ 750, max = 2144 ≈ m.
+Result is correct (optimum −167.751 to 1e-12); purely perf.
+
+Verified the diagnosis against source (rev 5ab8074, src/lu/sparse_update.rs):
+- eliminate_bump:321-327 — pivot scan iterates ALL rows [k,h] with get_col binary
+  search per pivot column ⇒ O(bump²·log) of pure overhead independent of fill (~5.4 s).
+- eliminate_bump:343-353 / row_sub:423 — sparse-merge elimination, O(bump) per row ×
+  O(bump) rows on a densifying bump (~5.7 s).
+Allocation already ruled out (L12, journal 2026-06-10) — consistent with the issue's
+"row_sub scratch → <1% change".
+
+* 09:18 :lu:sparse:update:prior-art:correctness:
+PRIOR-ART GATE FIRED. The "asymptotic fix = textbook FT cyclic permutation
+(Hessenberg, eliminate single subdiagonal)" was ALREADY TRIED AND REVERTED — journal
+2026-06-08-01.org (19:00 + 21:00). Evidence: in a sparse U the Hessenberg's diagonal
+pivots are the OLD superdiagonal entries U[k,k+1], frequently zero → zero pivot →
+division by zero. The current in-place + partial-pivoting eliminate_bump exists
+PRECISELY to dodge that landmine (sub-diagonal spike entry is a nonzero pivot; swap
+goes into the eta so unit-lower L is never permuted).
+
+Also already documented (2026-06-08, lines 232-234): the O(bump²) DENSE-spike case is
+the "inherent worst case; the FT win is for localized spikes (the realistic LP
+regime)." casctanks McCormick relaxations are the non-localized counterexample.
+
+Implication: cannot naively implement the cyclic permutation. The two correct
+asymptotic routes (journal) are symmetric-permutation FT (stored-state bookkeeping —
+permuting U staleness the L σᵀ relation) or sparse BGR (Reid 1982) — both "substantial,
+delicate." That is a research spike, not a recipe.
+
+* 09:24 :lu:sparse:update:plan:decision:
+With the user (remote-control), re-scoped to: ship the two CORRECTNESS-SAFE
+optimizations now, open a separate spike for the asymptotic route.
+- Step 1: sub-diagonal pivot index — selects the SAME max-magnitude pivot from the
+  SAME candidate set, just skips empty rows ⇒ identical FtOp sequence, removes the
+  ~5.4 s scan. (Existing u_above index is strict-upper, does NOT cover sub-diagonal
+  candidates i>k — a new bump-local index is needed.)
+- Step 2: dense bump workspace — same partial-pivoting math, contiguous SAXPY,
+  width-gated so narrow bumps stay on the cheap sparse path.
+- Step 3 (cyclic perm): OFF the table; deferred to the spike.
+Wrote dev/research/bump-elimination-speedup-2026-06-18.md (steps 1+2 + reproducer +
+validation) and dev/research/asymptotic-bump-update-spike-2026-06-18.md (the spike).
+
+* 09:25 :lu:repro:discopt:extraction:
+Reproducer must be the UPDATE TRACE (initial basis + ordered (leaving_slot,
+entering_col) stream), not a single matrix — the O(bump²) cost is in the chain.
+casctanks is Python-only reachable (python/tests/data/minlplib_nl/casctanks.nl →
+MccormickLPRelaxer(backend="simplex") → primal.rs). Single Rust hook:
+primal.rs:529 self.lu.update(slot,&col), plus refactorize (:203/:278) for the basis.
+discopt code lives only on unmerged claude/* branches (NOT main); the integration +
+feral dep (pinned at 5ab8074, our HEAD) is on claude/root-setup-perf. Set up a git
+worktree at ../discopt-rsp on that branch; cargo build -p discopt-core green (feral
+dep cached). Extraction harness (instrument behind FERAL_DUMP_LU_TRACE env var, run
+casctanks via Python, serialize trace to tests/data/lu_trace/casctanks/) is the next
+heavy step — not yet started.
