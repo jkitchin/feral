@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-11T19:42:44Z
+Generated: 2026-06-18T14:56:41Z
 
 ## Latest Session
 File: dev/sessions/2026-06-11-02.md
@@ -59,34 +59,34 @@ Split the single-file binding into internal modules
 
 ## Git Status
 ```
-ce37da9 feat(core): add LDLt factor export and symbolic accessor
-9148ec6 Merge pull request #83 from jkitchin/claude/elegant-hawking-0nmp2y
-079aebe docs(session): checkpoint 2026-06-11-01 — repo-review residuals cleared
-b99abdd docs: correct ~10 stale doc/comment sites (repo-review item 4)
-995456f docs(n4): record MC64-retry latch inertia tradeoff; track deferred N3/N5 facets
+2724cd7 docs(lu): reject Step 2 (dense bump workspace) — bumps are wide but ultra-sparse
+902e5d7 perf(lu): sub-diagonal pivot index removes O(bump²) scan in eliminate_bump
+efd9d8d docs(lu): plan for Step 1 sub-diagonal pivot index
+4b54b22 test(lu): casctanks FT-update replay harness + perf baseline (discopt#229)
+512de03 docs(lu): research notes for bump-elim speedup + asymptotic spike
 ```
 
 ## Test Status
 ```
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
+test numeric::factorize::tests::schur_multi_supernode_tail_matches_oracle ... ok
+test numeric::solver::tests::solver_reuses_thread_pool_across_factors ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
-test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
-test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 371 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.51s
+test result: ok. 371 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 3.03s
 
 ```
 
@@ -135,26 +135,26 @@ is meaningful for a pure allocation-churn change; they are guarded by the
 existing bit-exactness tests between the sequential and parallel drivers.
 
 ## Recent Tried-and-Rejected
-The broader finding framing — that the ~600 LoC of duplicated AMD/AMF inner-loop
-code is itself a drift hazard — is a structural-refactor observation (the same
-class as O20's cross-crate consolidation), not a defect with a reproducing test,
-and is likewise deferred rather than undertaken inside a single /loop iteration.
+more work.** Step 2's premise (dense-spike bump, contiguous SAXPY) does not hold
+for this workload; implementing it would **regress** casctanks, not speed it up.
 
-### Disposition
+This also explains Step 1's 15.8×: the old O(bump²) **scan** probed ~731²/2 ≈ 267k
+cells per update to find the ~24 that needed work. Removing the scan (Step 1) was
+the correct and sufficient fix for the sparse-wide-bump regime; the residual
+elimination work is already near-minimal.
 
-Routed here per the /loop rule (non-reproducible core → tried-and-rejected citing
-the finding ID). Per the X16 / O4 / O5 / O6 / O9 / O17 sub-fix precedent, the
-safe behaviour-neutral slice is applied: a comment block at the Pass-1 sentinel
-reset documenting that `0` is deliberately overloaded as both "uncached" and a
-possible genuine surface value, that the resulting recompute is benign (same
-value), and why a distinguishing sentinel was rejected; plus a one-line pointer
-at each of the two Pass-2 cache-check sites. No behaviour change.
+**Not generally rejected.** A dense path could still help a genuinely *dense*-spike
+basis (the journal's 2026-06-08 tridiagonal/`L⁻¹`-dense worst case). If such a
+workload appears, Step 2 should be width-AND-density gated (dense path only when
+block density exceeds a threshold), never width-only. For the McCormick LP regime
+that motivated discopt#229, Step 1 stands alone.
 
-Evidence: `algo.rs:955` (first-touch `wf[e] = 0` sentinel), `:983-988` /
-`:1015-1018` (the `if wf[e] == 0` recompute sites), `:664-666`
-(`amf_wf_surface`, zero at `dext == 2*deg-1`). `cargo test -p
-feral-ordering-core` green (comment-only, proves no behaviour change). Journal:
-dev/journal/2026-06-10-01.org.
+**Evidence.** `FERAL_BUMP_STATS` aggregate over
+`FERAL_LU_TRACE=.../casctanks_trace.txt` (full trace): avg_width=731.3,
+max_width=2157, avg_density=0.1346 (all bumps) / 0.0023 (width>500),
+avg_axpy=23.9, avg_merge_work=233.4. Step 1 end-to-end: casctanks LP solve
+82.4 s → 5.2 s debug (15.8×), optimum −167.751 unchanged. Journal:
+dev/journal/2026-06-18-01.org.
 
 ## Source Files
 ```
@@ -249,6 +249,7 @@ tests/ldlt_compress.rs
 tests/lu_dense.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
+tests/lu_update_casctanks.rs
 tests/maxfromm_parity.rs
 tests/mc64_end_to_end.rs
 tests/mc64_scaling.rs

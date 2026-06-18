@@ -4,6 +4,17 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — sparse LU Forrest–Tomlin update on wide bases
+
+`SparseLu::update`'s bump re-triangularization (`eliminate_bump`) gains a
+bump-local sub-diagonal pivot index that removes an O(bump²) pivot-selection
+scan. On wide, sparse "non-localized-spike" bases — e.g. lifted McCormick LP
+relaxations driving a spatial branch-and-bound node solve (discopt#229) — this
+is a large speedup: the casctanks root LP solve dropped ~15.8× end-to-end
+(82.4 s → 5.2 s, debug build) with the optimum and all factorization numerics
+**bit-identical** (the index preserves the original strict-partial-pivoting
+choice and the `FtOp` eta sequence exactly). No API change.
+
 ## [0.11.0] - 2026-06-11
 
 ### Packaging — ordering crates bumped to 0.2.1

@@ -5477,3 +5477,29 @@ workspaces on the `Solver` (mirroring the sequential pooling) and to borrow the
 immutable structure in the warm path rather than clone it. No reproducing test
 is meaningful for a pure allocation-churn change; they are guarded by the
 existing bit-exactness tests between the sequential and parallel drivers.
+
+## 2026-06-18 — Sparse FT bump update: sub-diagonal index, not dense workspace or cyclic permutation (discopt#229)
+
+**Context.** discopt#229: `SparseLu::update`'s `eliminate_bump` is the dominant
+cost (~94%) of a casctanks McCormick-LP node solve, O(bump²) on wide bases.
+
+**Decision.** Fix the McCormick LP regime with a bump-local **sub-diagonal pivot
+index** (Step 1, 902e5d7) that removes the O(bump²) pivot-selection scan with
+bit-identical numerics. Do **not** adopt a dense bump workspace, and do **not**
+revive the textbook FT cyclic-permutation Hessenberg approach.
+
+**Why.**
+- The wide bumps are **ultra-sparse** (measured 0.23% block density, ~24
+  row_subs/update on the real trace), so the cost was the *scan over zeros*, not
+  the elimination. Removing the scan gave 15.8× end-to-end (82.4 s → 5.2 s debug),
+  optimum −167.751 unchanged. A dense workspace would touch the full bump block
+  (~534k cells) and regress ~100–1000× (`dev/tried-and-rejected.md` 2026-06-18).
+- The cyclic-permutation Hessenberg route was already tried and reverted
+  (2026-06-08) for a sparse-U zero-superdiagonal-pivot bug; the in-place
+  partial-pivoting scheme exists specifically to avoid it.
+
+**Scope.** A dense path remains admissible only for a genuinely dense-spike basis
+and must be width-AND-density gated. The asymptotic O(bump²)-fill route (sparse
+BGR / symmetric-permutation FT) stays a parked research spike
+(`dev/research/asymptotic-bump-update-spike-2026-06-18.md`) pending a workload
+that needs it and a correctness story for the zero-pivot / stored-state hazards.
