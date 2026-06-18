@@ -82,7 +82,15 @@ max-magnitude entry among rows `[k, h]` with a column-`k` entry. The index lists
 **identical `FtOp` sequence**. The change only skips rows whose column-`k` entry is
 absent (where `get_col` returns `None` today anyway).
 
-### Step 2 — dense bump workspace (replaces sparse-merge elimination)
+### Step 2 — dense bump workspace (REJECTED for this workload — 2026-06-18)
+
+**Status: rejected** for the McCormick LP regime; see `dev/tried-and-rejected.md`
+(2026-06-18). Measurement on the real casctanks trace showed the wide bumps are
+**ultra-sparse** (width ~731 but block density 0.23%, only ~24 row_subs/update),
+so a dense workspace would touch ~534k cells instead of ~24 sparse ops — a
+~100–1000× regression. Step 1 (the scan removal) was the correct and sufficient
+fix here. A dense path remains viable only for a genuinely *dense*-spike basis and
+must be width-AND-density gated. Original premise (kept for the record):
 
 Scatter the bump rows into a reused dense workspace, run the *same* partial-pivoting
 elimination with contiguous SAXPY, gather back to column-sorted sparse rows. Record

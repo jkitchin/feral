@@ -105,3 +105,23 @@ Speedup:
 Full `cargo test` green; clippy --all-targets + fmt clean. Step 2 (dense bump
 workspace) is next for the remaining elimination cost; the asymptotic O(bump²)
 fill remains (parked spike).
+
+* 11:40 :lu:sparse:update:step2:measure:rejected:
+End-to-end [patch]-override measurement (discopt-rsp, debug): casctanks
+solve_lp_py 82.4 s (stock feral 5ab8074) -> 5.2 s (Step 1, 902e5d7) = 15.8x,
+optimum -167.751 unchanged, status=optimal. Better than the isolated 11x bench
+because the LP solve is update-chain-dominated and the full chain has wider bumps
+than the committed fixture.
+
+Then measured bump DENSITY (temporary FERAL_BUMP_STATS in eliminate_bump, since
+reverted) before implementing Step 2 (dense workspace). Full trace, 1702 updates:
+avg_width=731, max=2157; but for wide bumps (>500, 924 updates) block density =
+0.23%; avg row_subs/update = 23.9; avg merge_work = 233. The wide bump is a
+far-reaching but nearly-empty spike (~1230 entries over 731²), NOT a dense block.
+
+=> Step 2 (dense workspace) would touch all ~534k cells vs the current ~24 sparse
+row_subs — a ~100-1000x REGRESSION. Its premise (dense-spike, contiguous SAXPY)
+does not hold for the McCormick LP regime. REJECTED (dev/tried-and-rejected.md
+2026-06-18); Step 1 stands alone. This also explains the 15.8x: the old O(bump²)
+scan probed ~267k cells/update to find ~24 that needed work. Instrumentation
+reverted; src back to clean 902e5d7 (git diff empty); tests green.

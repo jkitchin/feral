@@ -4815,3 +4815,46 @@ Evidence: `algo.rs:955` (first-touch `wf[e] = 0` sentinel), `:983-988` /
 (`amf_wf_surface`, zero at `dext == 2*deg-1`). `cargo test -p
 feral-ordering-core` green (comment-only, proves no behaviour change). Journal:
 dev/journal/2026-06-10-01.org.
+
+## 2026-06-18 — Step 2 (dense bump workspace) rejected for the McCormick LP regime — bumps are wide but ultra-sparse
+
+**Context.** discopt#229 / `dev/research/bump-elimination-speedup-2026-06-18.md`
+proposed two speedups for `SparseLu::eliminate_bump`: Step 1 (sub-diagonal pivot
+index, shipped 902e5d7, 15.8× end-to-end) and Step 2 (scatter the bump into a
+dense workspace and do contiguous SAXPY elimination). The issue framed Step 2 as
+"replace sparse-merge elimination with contiguous SAXPY work," premised on a
+dense-spike bump.
+
+**Why rejected.** Measured the actual bump structure on the real casctanks update
+trace (1702 updates) via temporary `FERAL_BUMP_STATS` instrumentation in
+`eliminate_bump` (now reverted):
+
+- avg bump width = 731 (max 2157 ≈ m) — wide, as the issue reported;
+- but for wide bumps (width > 500, 924 of 1702 updates) the `[r,h]×[r,h]` block
+  **density = 0.23%** (`block_nnz / width²`);
+- only **~23.9 row_subs (Axpy ops) per update**, total merge work ~233 entries.
+
+So a "wide" bump is a far-reaching but nearly-empty spike — ~1230 scattered
+entries over a 731×731 region, with only ~24 columns actually needing
+elimination. A dense workspace would scatter that into a 731×731 = 534k-cell
+dense array and touch all of it, vs the current ~24 sparse row_subs — **~100–1000×
+more work.** Step 2's premise (dense-spike bump, contiguous SAXPY) does not hold
+for this workload; implementing it would **regress** casctanks, not speed it up.
+
+This also explains Step 1's 15.8×: the old O(bump²) **scan** probed ~731²/2 ≈ 267k
+cells per update to find the ~24 that needed work. Removing the scan (Step 1) was
+the correct and sufficient fix for the sparse-wide-bump regime; the residual
+elimination work is already near-minimal.
+
+**Not generally rejected.** A dense path could still help a genuinely *dense*-spike
+basis (the journal's 2026-06-08 tridiagonal/`L⁻¹`-dense worst case). If such a
+workload appears, Step 2 should be width-AND-density gated (dense path only when
+block density exceeds a threshold), never width-only. For the McCormick LP regime
+that motivated discopt#229, Step 1 stands alone.
+
+**Evidence.** `FERAL_BUMP_STATS` aggregate over
+`FERAL_LU_TRACE=.../casctanks_trace.txt` (full trace): avg_width=731.3,
+max_width=2157, avg_density=0.1346 (all bumps) / 0.0023 (width>500),
+avg_axpy=23.9, avg_merge_work=233.4. Step 1 end-to-end: casctanks LP solve
+82.4 s → 5.2 s debug (15.8×), optimum −167.751 unchanged. Journal:
+dev/journal/2026-06-18-01.org.
