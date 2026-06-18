@@ -82,3 +82,26 @@ benches/lu_update_trace.rs (criterion, isolates the update chain; BASELINE =
 fmt clean. This is tests-first: the correctness guard passes NOW (behavior is
 correct, just slow) and must keep passing after steps 1+2 (numerics unchanged);
 the benchmark is the red→green for the speedup. Step 1 (sub-diagonal index) is next.
+
+* 11:00 :lu:sparse:update:step1:perf:done:
+Step 1 (sub-diagonal pivot index) implemented in eliminate_bump
+(src/lu/sparse_update.rs). col_rows[c-r] = sorted bump rows with a column-c
+entry, built once O(bump nnz), maintained across the partial-pivot row swap
+(swap_membership) and row_sub fill (reindex_after_rowsub). Pivot search and
+elimination now iterate real entries instead of probing every row in k..=h —
+the old O(bump²) scan is gone. Sorted lists preserve the lowest-index tie-break
+of the original scan exactly, so the FtOp sequence is bit-identical.
+
+Numerics preserved (the whole point): full-trace replay worst_true_residual
+=1.819e-12 — IDENTICAL to pre-change; refactor_signals=0 unchanged; dense
+cross-oracle on the committed fixture =2.764e-15 unchanged; committed-fixture
+true residual 9.095e-13 unchanged.
+
+Speedup:
+- benches/lu_update_trace.rs (committed fixture, 144 updates): 136 ms -> 12.3 ms
+  = 11x.
+- full trace (1702 updates, sparse-only release): 2.14 s -> 0.22 s ≈ 10x.
+- committed correctness test (debug): 4.77 s -> 0.22 s.
+Full `cargo test` green; clippy --all-targets + fmt clean. Step 2 (dense bump
+workspace) is next for the remaining elimination cost; the asymptotic O(bump²)
+fill remains (parked spike).

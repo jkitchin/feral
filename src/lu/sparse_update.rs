@@ -310,15 +310,43 @@ impl SparseLu {
         let ztol = self.params.zero_pivot_tol * self.u_max0;
         let mut ops: Vec<FtOp> = Vec::new();
 
+        // Sub-diagonal pivot index (Step 1, dev/plans/bump-elim-step1-subdiagonal-index.md):
+        // `col_rows[c - r]` is the sorted list of bump rows `i ∈ [r, h]` that
+        // currently hold a column-`c` entry. It mirrors the actual nonzero
+        // pattern of columns `[r, h]` over the bump rows, so the pivot search
+        // and the elimination iterate only real entries instead of probing
+        // every row in `k..=h` (the old O(bump²) scan). Rows are pushed in
+        // increasing `i`, so each list stays sorted ascending — preserving the
+        // lowest-index tie-break of the original scan exactly.
+        let width = h - r + 1;
+        let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); width];
+        for i in r..=h {
+            for &(c, _) in self.u_rows[i].iter() {
+                if c < r {
+                    continue;
+                }
+                if c > h {
+                    break;
+                }
+                col_rows[c - r].push(i);
+            }
+        }
+
         for k in r..=h {
+            let kc = k - r;
             // Strict partial pivoting among rows [k, h] with a column-k entry.
             // Unlike the initial factorization (which honors `pivot_threshold`
             // to trade stability for fill, L2), the bump's structure is already
             // fixed here, so a relaxed threshold buys no fill reduction and only
             // trades away stability — we always take the max-magnitude row.
+            // Candidates come from the index; `i < k` entries are upper-triangle
+            // (not pivot candidates) and are skipped, matching `i in k..=h`.
             let mut pivot_row = k;
             let mut pivot_abs = 0.0_f64;
-            for i in k..=h {
+            for &i in col_rows[kc].iter() {
+                if i < k {
+                    continue;
+                }
                 if let Some(v) = get_col(&self.u_rows[i], k) {
                     if v.abs() > pivot_abs {
                         pivot_abs = v.abs();
@@ -336,14 +364,23 @@ impl SparseLu {
             if pivot_row != k {
                 self.u_rows.swap(k, pivot_row);
                 ops.push(FtOp::Swap(k, pivot_row));
+                // Relabel the index: the two rows' contents swapped, so for every
+                // column either now touches, fix membership of `k` and `pivot_row`.
+                swap_membership(&mut col_rows, r, h, k, pivot_row, &self.u_rows);
             }
             let pivot_data = self.u_rows[k].clone();
             let pivot = get_col(&pivot_data, k).unwrap_or(0.0);
 
-            for i in k + 1..=h {
+            // Targets: rows below the pivot (i > k) with a column-k entry, in
+            // ascending order — identical to the old `i in k+1..=h` order.
+            let targets: Vec<usize> = col_rows[kc].iter().copied().filter(|&i| i > k).collect();
+            for i in targets {
                 if let Some(vik) = get_col(&self.u_rows[i], k) {
                     let mult = vik / pivot;
-                    self.u_rows[i] = row_sub(&self.u_rows[i], &pivot_data, mult, k);
+                    let old_row = std::mem::take(&mut self.u_rows[i]);
+                    let new_row = row_sub(&old_row, &pivot_data, mult, k);
+                    reindex_after_rowsub(&mut col_rows, r, h, i, &old_row, &new_row);
+                    self.u_rows[i] = new_row;
                     ops.push(FtOp::Axpy {
                         target: i,
                         src: k,
@@ -382,6 +419,84 @@ impl SparseLu {
 fn clear(w: &mut [f64], touched: &[usize]) {
     for &k in touched.iter() {
         w[k] = 0.0;
+    }
+}
+
+/// Sorted insert/remove of row `i` in a column's bump-row list (`eliminate_bump`
+/// sub-diagonal index). Keeps the list sorted ascending and duplicate-free.
+fn set_member(list: &mut Vec<usize>, i: usize, present: bool) {
+    match list.binary_search(&i) {
+        Ok(pos) => {
+            if !present {
+                list.remove(pos);
+            }
+        }
+        Err(pos) => {
+            if present {
+                list.insert(pos, i);
+            }
+        }
+    }
+}
+
+/// After swapping the contents of rows `k` and `p`, fix the sub-diagonal index:
+/// for every column in `[r, h]` that either row now touches, set membership of
+/// `k` and `p` from their (post-swap) content. The union of the two rows'
+/// columns is unchanged by the swap, so every column whose membership could
+/// change is visited; processing a shared column twice is idempotent.
+fn swap_membership(
+    col_rows: &mut [Vec<usize>],
+    r: usize,
+    h: usize,
+    k: usize,
+    p: usize,
+    u_rows: &[Vec<(usize, f64)>],
+) {
+    for &src in &[k, p] {
+        for &(c, _) in u_rows[src].iter() {
+            if c < r {
+                continue;
+            }
+            if c > h {
+                break;
+            }
+            let cc = c - r;
+            set_member(&mut col_rows[cc], k, get_col(&u_rows[k], c).is_some());
+            set_member(&mut col_rows[cc], p, get_col(&u_rows[p], c).is_some());
+        }
+    }
+}
+
+/// After `row i` is rewritten by `row_sub`, update the sub-diagonal index over
+/// `[r, h]`: drop `i` from columns it lost (including the eliminated pivot
+/// column) and add `i` to columns it gained (fill).
+fn reindex_after_rowsub(
+    col_rows: &mut [Vec<usize>],
+    r: usize,
+    h: usize,
+    i: usize,
+    old_row: &[(usize, f64)],
+    new_row: &[(usize, f64)],
+) {
+    for &(c, _) in old_row {
+        if c < r {
+            continue;
+        }
+        if c > h {
+            break;
+        }
+        if get_col(new_row, c).is_none() {
+            set_member(&mut col_rows[c - r], i, false);
+        }
+    }
+    for &(c, _) in new_row {
+        if c < r {
+            continue;
+        }
+        if c > h {
+            break;
+        }
+        set_member(&mut col_rows[c - r], i, true);
     }
 }
 
