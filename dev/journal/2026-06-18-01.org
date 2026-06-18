@@ -58,3 +58,27 @@ worktree at ../discopt-rsp on that branch; cargo build -p discopt-core green (fe
 dep cached). Extraction harness (instrument behind FERAL_DUMP_LU_TRACE env var, run
 casctanks via Python, serialize trace to tests/data/lu_trace/casctanks/) is the next
 heavy step — not yet started.
+
+* 10:05 :lu:repro:test:bench:tests-first:
+Reproducer extracted and the feral-side tests-first harness landed. The discopt
+extraction agent (worktree ../discopt-rsp, primal.rs instrumented behind
+FERAL_DUMP_LU_TRACE) produced casctanks_trace.txt: M=2169, 36 segments, 1702
+updates, avg bump width 574 / max 2154, optimum −167.75100. Format: M / REFACTOR /
+BCOL (full basis per refactor) / UPDATE (slot + sparse entering col), {:.17e}.
+
+Replay verified against the FULL trace (release): worst true residual 1.819e-12,
+sparse-vs-dense 5.541e-14, refactor_signals=0 (every update is a genuine
+incremental FT update — faithful). Timing: sparse-only chain = 2.14 s release for
+1702 updates (~1.3 ms/update — the O(bump²) regime); the earlier 48 s run was
+almost entirely the DenseLu O(m³) oracle factors, so the dense cross-oracle is now
+opt-in (FERAL_LU_TRACE_DENSE=1) and the always-on check is the cheap oracle-free
+true residual ‖B·ftran(rhs)−rhs‖.
+
+Committed fixture tests/data/lu_trace/casctanks.txt = 3 late segments (28-30),
+144 wide-bump updates, 640 K. tests/lu_update_casctanks.rs (correctness regression
+guard, debug 4.77 s, true residual 9.095e-13, dense cross-oracle 2.764e-15) and
+benches/lu_update_trace.rs (criterion, isolates the update chain; BASELINE =
+136 ms / 144 updates on the committed fixture). Full `cargo test` green; clippy +
+fmt clean. This is tests-first: the correctness guard passes NOW (behavior is
+correct, just slow) and must keep passing after steps 1+2 (numerics unchanged);
+the benchmark is the red→green for the speedup. Step 1 (sub-diagonal index) is next.

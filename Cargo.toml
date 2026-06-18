@@ -101,5 +101,9 @@ harness = false
 name = "issue52_baseline"
 harness = false
 
+[[bench]]
+name = "lu_update_trace"
+harness = false
+
 [profile.release]
 debug = true
