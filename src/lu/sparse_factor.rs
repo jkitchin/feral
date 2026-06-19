@@ -130,6 +130,17 @@ pub struct SparseLu {
     /// Pooled length-`m` buffer holding the refinement's original-RHS snapshot
     /// (`a`); live across the whole refine loop, so it cannot reuse the others.
     pub(super) scratch_d: Vec<f64>,
+    /// FT-update bump-loop scratch pools (see
+    /// `dev/research/lu-update-alloc-pooling-2026-06-19.md`). All hold *churn*
+    /// buffers — allocated and freed within an update — so reusing them removes
+    /// per-pivot / per-axpy allocator traffic from `eliminate_bump`. Taken via
+    /// `mem::take` into locals at the top of the update and restored on every
+    /// return path; contents are cleared and refilled, never read across calls.
+    /// `row_pool` is a free-list of `U`-row buffers recycled by `row_sub_into`.
+    pub(super) pivot_scratch: Vec<(usize, f64)>,
+    pub(super) targets_scratch: Vec<usize>,
+    pub(super) row_pool: Vec<Vec<(usize, f64)>>,
+    pub(super) col_rows_pool: Vec<Vec<usize>>,
 }
 
 impl SparseLu {
@@ -444,6 +455,10 @@ impl SparseLu {
             scratch_b: vec![0.0; m],
             scratch_c: vec![0.0; m],
             scratch_d: vec![0.0; m],
+            pivot_scratch: Vec::new(),
+            targets_scratch: Vec::new(),
+            row_pool: Vec::new(),
+            col_rows_pool: Vec::new(),
         })
     }
 

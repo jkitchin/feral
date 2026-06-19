@@ -310,6 +310,16 @@ impl SparseLu {
         let ztol = self.params.zero_pivot_tol * self.u_max0;
         let mut ops: Vec<FtOp> = Vec::new();
 
+        // Churn-buffer pools, taken into locals for the duration of the bump
+        // (restored on every return path). See
+        // `dev/research/lu-update-alloc-pooling-2026-06-19.md`. Reusing these
+        // removes the per-pivot / per-axpy allocator traffic; contents are
+        // cleared and rebuilt here, never read across updates.
+        let mut col_rows = std::mem::take(&mut self.col_rows_pool);
+        let mut pivot_scratch = std::mem::take(&mut self.pivot_scratch);
+        let mut targets = std::mem::take(&mut self.targets_scratch);
+        let mut row_pool = std::mem::take(&mut self.row_pool);
+
         // Sub-diagonal pivot index (Step 1, dev/plans/bump-elim-step1-subdiagonal-index.md):
         // `col_rows[c - r]` is the sorted list of bump rows `i ∈ [r, h]` that
         // currently hold a column-`c` entry. It mirrors the actual nonzero
@@ -319,7 +329,12 @@ impl SparseLu {
         // increasing `i`, so each list stays sorted ascending — preserving the
         // lowest-index tie-break of the original scan exactly.
         let width = h - r + 1;
-        let mut col_rows: Vec<Vec<usize>> = vec![Vec::new(); width];
+        while col_rows.len() < width {
+            col_rows.push(Vec::new());
+        }
+        for c in col_rows.iter_mut().take(width) {
+            c.clear();
+        }
         for i in r..=h {
             for &(c, _) in self.u_rows[i].iter() {
                 if c < r {
@@ -359,6 +374,7 @@ impl SparseLu {
                 // Signal NeedsRefactor (not SingularBasis) so the driver gets
                 // the same contract as the dense update path — update failures
                 // always mean "refactor from scratch."
+                self.restore_bump_pools(col_rows, pivot_scratch, targets, row_pool);
                 return Err(FeralError::NeedsRefactor);
             }
             if pivot_row != k {
@@ -368,19 +384,31 @@ impl SparseLu {
                 // column either now touches, fix membership of `k` and `pivot_row`.
                 swap_membership(&mut col_rows, r, h, k, pivot_row, &self.u_rows);
             }
-            let pivot_data = self.u_rows[k].clone();
-            let pivot = get_col(&pivot_data, k).unwrap_or(0.0);
+            // Copy the pivot row into the pooled scratch (was a fresh clone): it
+            // is read as `dst − mult·pivot` below while other rows are written,
+            // so it must be a buffer separate from `u_rows`. `extend_from_slice`
+            // reuses the scratch's capacity — same bytes, no allocation.
+            pivot_scratch.clear();
+            pivot_scratch.extend_from_slice(&self.u_rows[k]);
+            let pivot = get_col(&pivot_scratch, k).unwrap_or(0.0);
 
             // Targets: rows below the pivot (i > k) with a column-k entry, in
-            // ascending order — identical to the old `i in k+1..=h` order.
-            let targets: Vec<usize> = col_rows[kc].iter().copied().filter(|&i| i > k).collect();
-            for i in targets {
+            // ascending order — identical to the old `i in k+1..=h` order. A
+            // pooled snapshot: the inner loop mutates `col_rows[kc]` via
+            // `reindex_after_rowsub`, so it cannot iterate the live list.
+            targets.clear();
+            targets.extend(col_rows[kc].iter().copied().filter(|&i| i > k));
+            for &i in &targets {
                 if let Some(vik) = get_col(&self.u_rows[i], k) {
                     let mult = vik / pivot;
                     let old_row = std::mem::take(&mut self.u_rows[i]);
-                    let new_row = row_sub(&old_row, &pivot_data, mult, k);
+                    // Build the new row into a recycled buffer; hand the old
+                    // row's buffer back to the pool for the next axpy.
+                    let mut new_row = row_pool.pop().unwrap_or_default();
+                    row_sub_into(&old_row, &pivot_scratch, mult, k, &mut new_row);
                     reindex_after_rowsub(&mut col_rows, r, h, i, &old_row, &new_row);
                     self.u_rows[i] = new_row;
+                    row_pool.push(old_row);
                     ops.push(FtOp::Axpy {
                         target: i,
                         src: k,
@@ -389,7 +417,23 @@ impl SparseLu {
                 }
             }
         }
+        self.restore_bump_pools(col_rows, pivot_scratch, targets, row_pool);
         Ok(ops)
+    }
+
+    /// Return the bump-loop churn buffers to their `SparseLu` pools. Called on
+    /// every `eliminate_bump` exit so the next update finds them warm.
+    fn restore_bump_pools(
+        &mut self,
+        col_rows: Vec<Vec<usize>>,
+        pivot_scratch: Vec<(usize, f64)>,
+        targets: Vec<usize>,
+        row_pool: Vec<Vec<(usize, f64)>>,
+    ) {
+        self.col_rows_pool = col_rows;
+        self.pivot_scratch = pivot_scratch;
+        self.targets_scratch = targets;
+        self.row_pool = row_pool;
     }
 
     /// Remove row `i`'s strict-upper entries from the `u_above` column index
@@ -534,14 +578,18 @@ fn insert_or_set(row: &mut Vec<(usize, f64)>, c: usize, v: f64) {
 }
 
 /// `dst − mult·src` over two column-sorted sparse rows, dropping the eliminated
-/// column `drop_col` and any exact zeros. Result stays column-sorted.
-fn row_sub(
+/// column `drop_col` and any exact zeros, written into `out` (cleared first).
+/// Result stays column-sorted. `out` is a recycled buffer from `row_pool`, so
+/// the merge reuses its capacity — identical contents to the old allocating
+/// `row_sub`, no per-axpy allocation once the pool is warm.
+fn row_sub_into(
     dst: &[(usize, f64)],
     src: &[(usize, f64)],
     mult: f64,
     drop_col: usize,
-) -> Vec<(usize, f64)> {
-    let mut out = Vec::with_capacity(dst.len() + src.len());
+    out: &mut Vec<(usize, f64)>,
+) {
+    out.clear();
     let (mut i, mut j) = (0usize, 0usize);
     while i < dst.len() && j < src.len() {
         let (dc, dv) = dst[i];
@@ -581,7 +629,6 @@ fn row_sub(
         }
         j += 1;
     }
-    out
 }
 
 #[cfg(test)]
