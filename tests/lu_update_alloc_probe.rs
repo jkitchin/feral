@@ -1,13 +1,19 @@
-//! Phase-0 measurement probe (dev/plans/...measure-then-pool): quantify the
-//! heap-allocation churn of the Forrest–Tomlin update chain on the real
-//! `casctanks` trace (discopt#229), the wide-bump workload v0.11.1 optimized.
+//! Allocation probe + regression guard for the Forrest–Tomlin update chain on
+//! the real `casctanks` trace (discopt#229), the wide-bump workload v0.11.1
+//! optimized.
 //!
-//! This is NOT a correctness test (that is `lu_update_casctanks.rs`); it is an
-//! instrument. A counting `#[global_allocator]` wraps `System` so we can snapshot
+//! A counting `#[global_allocator]` wraps `System` so we can snapshot
 //! alloc / realloc / byte counts in a window around *only the update loop* — the
-//! per-segment factorization is excluded. The output (run with `--nocapture`)
-//! drives the Phase-0 gate decision: pool the update path only if allocations
-//! are both numerous per update and a plausible share of update wall-time.
+//! per-segment factorization is excluded. It began as the Phase-0 gate
+//! instrument (`dev/research/lu-update-alloc-pooling-2026-06-19.md`): baseline
+//! was ~1804 allocs/update against an 85.8 µs/update budget. After pooling the
+//! bump-loop buffers and the `saved` snapshot, it is ~82 allocs/update.
+//!
+//! It now also *guards* that gain: the bump elimination must not re-introduce
+//! per-pivot / per-axpy / per-changed-row allocation (which would push the count
+//! back into the hundreds–thousands). The bound below is generous — the residual
+//! ~82 is the irreducible floor (the retained `ops`→`etas` growth plus the
+//! handful of O(1) spike buffers left unpooled), not zero.
 //!
 //! Default fixture: the in-tree reduced `casctanks.txt` (3 widest-bump segments,
 //! 144 updates). Point `FERAL_LU_TRACE` at the full extracted trace for the
@@ -157,7 +163,8 @@ fn fixture_text() -> Option<String> {
 
 /// Measure allocations attributable ONLY to the update loop (each segment's
 /// factorization happens outside the snapshot window). Prints a per-update
-/// breakdown; always passes — it is an instrument, not a guard.
+/// breakdown and guards against regressing the pooling: per-update allocations
+/// must stay far below the ~1804 pre-pooling baseline.
 #[test]
 fn casctanks_update_chain_alloc_probe() {
     let Some(text) = fixture_text() else {
@@ -168,7 +175,8 @@ fn casctanks_update_chain_alloc_probe() {
     assert!(m > 0 && !segments.is_empty(), "empty/invalid trace");
 
     // Pre-densify entering columns OUTSIDE the measured window.
-    let prepared: Vec<(SparseLu, Vec<(usize, Vec<f64>)>)> = segments
+    type Prepared = (SparseLu, Vec<(usize, Vec<f64>)>);
+    let prepared: Vec<Prepared> = segments
         .iter()
         .map(|seg| {
             let a = SparseColMatrix::from_sparse_columns(m, &seg.basis).expect("matrix");
@@ -220,4 +228,16 @@ fn casctanks_update_chain_alloc_probe() {
     );
 
     assert!(applied > 0, "no updates applied");
+
+    // Regression guard. Measured ~82 allocs/update after pooling (down from
+    // ~1804); the bound is generous so it tolerates fixture/allocator variation
+    // while still failing loudly if a future change re-introduces the per-pivot
+    // `pivot_data` clone, per-axpy `row_sub` allocation, or per-changed-row
+    // `saved` clone (each of which would push the count back into the hundreds).
+    let allocs_per_update = da as f64 / n;
+    assert!(
+        allocs_per_update < 250.0,
+        "per-update allocations regressed to {allocs_per_update:.1} (was ~82 after \
+         pooling, ~1804 before); the FT-update buffer pools may have been broken"
+    );
 }

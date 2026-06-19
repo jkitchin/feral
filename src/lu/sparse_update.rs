@@ -120,11 +120,18 @@ impl SparseLu {
         changed.sort_unstable();
         changed.dedup();
 
-        // Save the changed rows so a mid-elimination failure can roll back.
-        let saved: Vec<(usize, Vec<(usize, f64)>)> = changed
-            .iter()
-            .map(|&i| (i, self.u_rows[i].clone()))
-            .collect();
+        // Save the changed rows so a mid-elimination failure can roll back (and
+        // so the commit can refresh `u_above` from the old content). Snapshot
+        // buffers come from the pooled free-list — was a fresh clone per row,
+        // the dominant per-update allocation after the bump-loop pools.
+        let mut saved = std::mem::take(&mut self.saved_scratch);
+        saved.clear();
+        for &i in changed.iter() {
+            let mut buf = self.saved_pool.pop().unwrap_or_default();
+            buf.clear();
+            buf.extend_from_slice(&self.u_rows[i]);
+            saved.push((i, buf));
+        }
 
         // Overwrite column r of U with the spike ρ (= w).
         self.set_column_r(r, &w, &supp);
@@ -153,9 +160,13 @@ impl SparseLu {
                 if growth > self.params.max_growth {
                     // Over budget: roll back exactly like the elimination-error
                     // path (u_above was not yet modified) and force a refactor.
-                    for (i, row) in saved {
+                    // The saved buffers move back into u_rows; the caller's
+                    // NeedsRefactor rebuilds the whole SparseLu, so the shrunk
+                    // pool is irrelevant.
+                    for (i, row) in saved.drain(..) {
                         self.u_rows[i] = row;
                     }
+                    self.saved_scratch = saved;
                     return Err(FeralError::NeedsRefactor);
                 }
                 // Commit: refresh the u_above index for every changed row.
@@ -165,15 +176,22 @@ impl SparseLu {
                     self.index_above(*i, &new_row);
                     self.u_rows[*i] = new_row;
                 }
+                // Recycle the snapshot buffers and the outer vec for the next
+                // update (steady state: zero per-update snapshot allocation).
+                for (_, buf) in saved.drain(..) {
+                    self.saved_pool.push(buf);
+                }
+                self.saved_scratch = saved;
                 self.etas.push(FtEta { ops });
                 self.growth = growth;
                 Ok(())
             }
             Err(e) => {
                 // Roll back the changed rows (u_above was not yet modified).
-                for (i, row) in saved {
+                for (i, row) in saved.drain(..) {
                     self.u_rows[i] = row;
                 }
+                self.saved_scratch = saved;
                 Err(e)
             }
         }

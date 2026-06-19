@@ -141,6 +141,15 @@ pub struct SparseLu {
     pub(super) targets_scratch: Vec<usize>,
     pub(super) row_pool: Vec<Vec<(usize, f64)>>,
     pub(super) col_rows_pool: Vec<Vec<usize>>,
+    /// FT-update rollback/reindex snapshot pools. `saved_scratch` is the reused
+    /// outer `(row, old_content)` vec; `saved_pool` is a free-list of the inner
+    /// row buffers. The per-changed-row clone at the top of `update_sparse` was
+    /// the dominant remaining per-update allocation after the bump-loop pools;
+    /// recycling these buffers across updates removes it. On the rare rollback
+    /// path the saved buffers move back into `u_rows` and a `NeedsRefactor`
+    /// rebuilds the whole `SparseLu` (pools included), so no leak accumulates.
+    pub(super) saved_scratch: Vec<(usize, Vec<(usize, f64)>)>,
+    pub(super) saved_pool: Vec<Vec<(usize, f64)>>,
 }
 
 impl SparseLu {
@@ -459,6 +468,8 @@ impl SparseLu {
             targets_scratch: Vec::new(),
             row_pool: Vec::new(),
             col_rows_pool: Vec::new(),
+            saved_scratch: Vec::new(),
+            saved_pool: Vec::new(),
         })
     }
 
