@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-06-19
+
 ### Performance — sparse LU Forrest–Tomlin update allocation pooling
 
 `SparseLu::update`'s Forrest–Tomlin bump elimination and rollback snapshot no
