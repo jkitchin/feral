@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-06-19
+
 ### Performance — sparse LU Forrest–Tomlin update on wide bases
 
 `SparseLu::update`'s bump re-triangularization (`eliminate_bump`) gains a
