@@ -4,6 +4,22 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — sparse LU Forrest–Tomlin update allocation pooling
+
+`SparseLu::update`'s Forrest–Tomlin bump elimination and rollback snapshot no
+longer allocate per pivot, per axpy, or per changed row. New reusable scratch
+pools on `SparseLu` (`pivot_scratch`, `targets_scratch`, `row_pool`,
+`col_rows_pool`, plus `saved_scratch`/`saved_pool` for the rollback/`u_above`
+reindex snapshot) recycle the bump-loop and snapshot buffers across updates;
+`row_sub` becomes `row_sub_into`, writing into a recycled row buffer. On the
+casctanks wide-bump trace (discopt#229) per-update heap allocations drop
+~1804 → ~82 (−95%) and the 144-update replay chain runs ~31% faster
+(12.35 ms → 8.55 ms on the `lu_update_trace` criterion bench). Numerics are
+**bit-identical** — pooling changes only where buffers come from, not pivot
+choices, multipliers, fill, or the `FtOp` eta sequence. No API change. A new
+`tests/lu_update_alloc_probe.rs` (counting `#[global_allocator]`) guards the
+gain against regression.
+
 ## [0.11.1] - 2026-06-19
 
 ### Performance — sparse LU Forrest–Tomlin update on wide bases

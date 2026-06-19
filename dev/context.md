@@ -1,138 +1,158 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-18T14:56:41Z
+Generated: 2026-06-19T18:04:26Z
 
 ## Latest Session
-File: dev/sessions/2026-06-11-02.md
+File: dev/sessions/2026-06-19-01.md
 ```
-# Session 2026-06-11-02
+# Session 2026-06-19-01
 
 ## Goal
 
-Make feral's Python interface more complete, in four areas requested by
-the user, under a hard backward-compatibility constraint (every change
-purely additive — no existing signature, name, or default changed; the
-prior pytest suite must pass unmodified):
+Two pieces of work:
 
-1. Expose the unsymmetric LU basis engine (`src/lu/`).
-2. Surface the unexposed LDLᵀ tuning knobs (ordering, mc64-cache,
-   profiling, partial-singular warning, auto-cascade-break).
-3. Give access to the factored L/D (numeric) and the symbolic structure.
-4. Add introspection (pivot magnitudes, mc64 counters, factor stats,
-   profile reports, scaling info, cache invalidation) and conversion
-   conveniences.
-
-Rust-core support (`SparseFactors::ldlt_export`, `Solver::symbolic`
-accessor) landed in the previous session as commit ce37da9; this session
-is the Python binding on top of it.
+1. Cut release **v0.11.1** (patch) for the sparse LU Forrest–Tomlin
+   bump-elimination perf already on `main`.
+2. Answer "is there any reason to think memory allocation would speed up
+   performance anywhere?" — and, since the answer was yes, act on it under a
+   measure-then-pool gate.
 
 ## Accomplished
 
-Split the single-file binding into internal modules
-`python/src/{common,errors,matrix,solver,factors,symbolic,lu,introspect}.rs`
-(extension still `feral._feral`, public surface unchanged), then added:
+### v0.11.1 release
 
-- **LU basis engine** (`lu.rs`): `LuMatrix` (general square CSC;
-  `from_dense`/`from_triplet`/`from_columns`/raw CSC ctor; `matvec`/
-  `matvec_transpose`) and `LuFactor`, an auto-routing dense/sparse
-  factor (`should_use_dense_lu`, `force_dense` override). `ftran`/`btran`,
-  product-form `update`/`update_sparse`/`refactor`, and the `P A Q = L U`
-  factor (`perm`, `qcol`, `l_array`/`u_array`, `factor_nnz`, `eta_ops`).
-  New exceptions `SingularBasisError` (`<FactorError`) and
-  `NeedsRefactorError` (`<FeralError`).
-- **Numeric factor access** (`factors.rs`): `Solver.factors()` →
-  `Factors` snapshot with `l_csc()`, `d_blocks()`, `to_scipy_l()`, and
-  `perm`/`perm_inv`/`scaling`/`needs_refinement`/`ordering`.
-- **Symbolic** (`symbolic.rs`): `Solver.symbolic()` → `SymbolicAnalysis`
-  and the standalone `feral.analyze(a, ordering=...)` (no numeric work),
-  exposing resolved ordering, `etree_parent` (roots `-1`),
-  `num_supernodes`, `col_counts`, `factor_nnz_estimate`.
-- **Knobs** (`solver.rs`): `Solver(...)` kwargs `ordering`, `mc64_cache`,
-  `profiling`, `partial_singular_warning`, `auto_cascade_break` (each an
-  `Option` sentinel — when unset the builder is not invoked, so the
-  default constructor reproduces prior behavior exactly) + an `ordering`
-  getter (resolved method via `symbolic()`/`factors()`).
-- **Introspection** (`introspect.rs`): `min_pivot_magnitude`/
-  `max_pivot_magnitude`, the four MC64 counters, `scaling_info`
-  (`ScalingInfo`), `last_factor_stats` (`FactorStats`), `profile_report`
+- Bumped all six version strings via `scripts/release-checklist.sh bump 0.11.1`;
+  cut `CHANGELOG [0.11.1] - 2026-06-19` from `[Unreleased]`.
+- Committed (`e5587b3`), tagged `v0.11.1`, pushed, created the GitHub release.
+- `release.yml` (crates.io) and `python-wheels.yml` (PyPI) both green; verified
+  crates.io `feral` max_version = 0.11.1 and PyPI `feral-solver` = 0.11.1.
+
+### LU-update allocation pooling (the allocation question)
+
+Investigation found the multifrontal **factor** path is already
+allocation-optimized (FactorWorkspace etc.; two further pooling attempts were
+falsified there), but the **LU basis-update** path (`src/lu/sparse_update.rs`)
+— the code v0.11.1 touched — pooled nothing, unlike its sibling
+`sparse_solve.rs`.
+
+**Phase 0 (measure):** new `tests/lu_update_alloc_probe.rs` (counting
+`#[global_allocator]`) on the casctanks wide-bump trace (discopt#229, in-tree
+fixture m=2169, 144 updates): **~1804 allocs + 176 reallocs per update** against
+an **85.8 µs/update** budget (`lu_update_trace` bench 12.351 ms / 144). Gate
+passed; the bench delta was the arbiter (pooling has been falsified here before
+when bookkeeping > malloc saved).
+
+**Phase 1 Step 1 — bump-loop pools** (`9cf5a96`): `pivot_scratch`,
+`targets_scratch`, `row_pool` (+`row_sub`→`row_sub_into`), `col_rows_pool`.
+allocs/update 1804 → 636 (−65%); bench 12.351 → 9.955 ms (**−19.0%**, p<0.05).
+
+**Phase 1 Step 2 — saved-row snapshot pool** (`edf1f0f`): `saved_scratch` +
+`saved_pool`. allocs/update 636 → 82.5 (−95% vs baseline); bench 9.955 →
+8.545 ms (**−14.8%**). Hardened the probe into a regression guard (<250
+allocs/update).
+
+**Cumulative:** 1804 → 82.5 allocs/update (−95%); **12.351 → 8.545 ms = −30.8%**
+on the casctanks replay. Numerics **bit-identical** at every step
+(`worst_true_residual=9.095e-13`, `worst_sparse_vs_dense=0.000e0`; `FtOp` eta
+sequence and pivot choices unchanged). Full suite green; `cargo fmt` +
 ```
 
 ## Git Status
 ```
+edf1f0f perf(lu): pool FT-update saved-row snapshot (-15% more on casctanks)
+9cf5a96 perf(lu): pool FT-update bump-loop buffers (-19% on casctanks)
+e5587b3 release: feral v0.11.1
+ee0ef33 docs(session): 2026-06-18-01 checkpoint — bump-elim Step 1 (15.8×), Step 2 rejected
 2724cd7 docs(lu): reject Step 2 (dense bump workspace) — bumps are wide but ultra-sparse
-902e5d7 perf(lu): sub-diagonal pivot index removes O(bump²) scan in eliminate_bump
-efd9d8d docs(lu): plan for Step 1 sub-diagonal pivot index
-4b54b22 test(lu): casctanks FT-update replay harness + perf baseline (discopt#229)
-512de03 docs(lu): research notes for bump-elim speedup + asymptotic spike
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
-test symbolic::tests::test_symbolic_factorize_basic ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test numeric::factorize::tests::schur_multi_supernode_tail_matches_oracle ... ok
-test numeric::solver::tests::solver_reuses_thread_pool_across_factors ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
+test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 371 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 3.03s
+test result: ok. 371 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.52s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-11-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-19-01.md)
 
 
-Not re-run this session. No Rust-core source changed (the core support
-landed in ce37da9 last session); all work was in the standalone python/
-workspace and docs. The numeric bench is unchanged from session
-2026-06-11-01.
+lu_update_trace (casctanks FT-update chain, 144 updates, m=2169):
+  baseline (v0.11.1):  12.351 ms
+  after Step 1:         9.955 ms   (-19.0%)
+  after Step 2:         8.545 ms   (-14.8%; -30.8% cumulative)
+
+alloc probe (allocs / reallocs / bytes per update):
+  baseline:  1804.2 / 176.3 / 128610
+  Step 1:     636.5 /  68.7 /  63428
+  Step 2:      82.5 /  80.7 /  23560
+
+`cargo run --bin bench --release` (full KKT corpus; factorization path,
+unaffected by the LU-update pooling — confirms no regression):
+
+--- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     147982     1.58     <= 2.0     PASS
+medium (<500)            152145     2.09     <= 3.0     PASS
+
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.48     <= 2.0     PASS
+medium (<500)            153560     1.48     <= 3.0     PASS
+
+Top worst factor-ratio vs MUMPS unchanged (KIRBY2_0007 9.95, CRESC132 6.69, …).
 
 ```
 
 ## Recent Decisions
-no tracking entry; recording them here so future sessions can find them (the
-verifier's item 6). These are open performance facets, not rejected approaches.
-
-**N3 (parallel driver, `factorize.rs`).** The profiler facet was fixed (the
-default parallel dispatch no longer silently returns an empty
-`with_profiling(true)` report). Still open on the parallel driver — the
-`Solver` default:
-- `pattern_reused_hint` / the issue-56 Lever A.2 warm-refactor **permute
-  cache** never engages: the parallel driver uses plain `permute_csc_values`,
-  so the cache built for *large* matrices is bypassed on exactly those matrices.
-- `params.small_leaf` is ignored by the parallel driver (benign today since the
-  default is off, but a drift trap if a caller sets it and silently gets the
-  sequential-only behavior).
-
-**N5 (per-call allocation churn).** One facet was addressed; still open:
-- **Parallel-workspace churn** (`factorize.rs`, ~the `num_threads + 1` fresh
-  `FactorWorkspace` construction): the parallel driver allocates per-thread
-  workspaces (row_map `n×usize`, build_seen `n` bools, per-snode contrib
-  options) plus two mutex-wrapped stores per `factor()`; the sequential path
-  pools all of this. `phase_thread_ws_ns` telemetry measures the cost but
-  nothing amortizes it.
-- **Warm-permute clone** (`factorize.rs`, ~the warm permute path): clones
-  `col_ptr` + `row_idx` (`O(nnz)` memcpy) on every warm factor, though the
-  structure is immutable per pattern.
-
-These are deferred, not rejected: the correct fix is to pool the parallel
 workspaces on the `Solver` (mirroring the sequential pooling) and to borrow the
 immutable structure in the warm path rather than clone it. No reproducing test
 is meaningful for a pure allocation-churn change; they are guarded by the
 existing bit-exactness tests between the sequential and parallel drivers.
+
+## 2026-06-18 — Sparse FT bump update: sub-diagonal index, not dense workspace or cyclic permutation (discopt#229)
+
+**Context.** discopt#229: `SparseLu::update`'s `eliminate_bump` is the dominant
+cost (~94%) of a casctanks McCormick-LP node solve, O(bump²) on wide bases.
+
+**Decision.** Fix the McCormick LP regime with a bump-local **sub-diagonal pivot
+index** (Step 1, 902e5d7) that removes the O(bump²) pivot-selection scan with
+bit-identical numerics. Do **not** adopt a dense bump workspace, and do **not**
+revive the textbook FT cyclic-permutation Hessenberg approach.
+
+**Why.**
+- The wide bumps are **ultra-sparse** (measured 0.23% block density, ~24
+  row_subs/update on the real trace), so the cost was the *scan over zeros*, not
+  the elimination. Removing the scan gave 15.8× end-to-end (82.4 s → 5.2 s debug),
+  optimum −167.751 unchanged. A dense workspace would touch the full bump block
+  (~534k cells) and regress ~100–1000× (`dev/tried-and-rejected.md` 2026-06-18).
+- The cyclic-permutation Hessenberg route was already tried and reverted
+  (2026-06-08) for a sparse-U zero-superdiagonal-pivot bug; the in-place
+  partial-pivoting scheme exists specifically to avoid it.
+
+**Scope.** A dense path remains admissible only for a genuinely dense-spike basis
+and must be width-AND-density gated. The asymptotic O(bump²)-fill route (sparse
+BGR / symmetric-permutation FT) stays a parked research spike
+(`dev/research/asymptotic-bump-update-spike-2026-06-18.md`) pending a workload
+that needs it and a correctness story for the zero-pivot / stored-state hazards.
 
 ## Recent Tried-and-Rejected
 more work.** Step 2's premise (dense-spike bump, contiguous SAXPY) does not hold
@@ -249,6 +269,7 @@ tests/ldlt_compress.rs
 tests/lu_dense.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
+tests/lu_update_alloc_probe.rs
 tests/lu_update_casctanks.rs
 tests/maxfromm_parity.rs
 tests/mc64_end_to_end.rs

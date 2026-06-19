@@ -1,0 +1,90 @@
+#+TITLE: Session journal 2026-06-19-01
+#+STARTUP: showall
+
+* 14:05 :release:
+Cut v0.11.1 (patch): sparse LU Forrest–Tomlin bump-elimination perf
+(sub-diagonal pivot index, ~15.8× on casctanks). All six version strings
+synced via scripts/release-checklist.sh, CHANGELOG [0.11.1] cut, tag +
+GitHub release. crates.io max_version=0.11.1, PyPI feral-solver=0.11.1
+verified. Release.yml + python-wheels.yml both green.
+
+* 14:40 :alloc:lu-update:measurement:
+Phase 0 of "does reducing allocation speed up the LU update path"
+(dev/plans, measure-then-pool). Wrote tests/lu_update_alloc_probe.rs: a
+counting #[global_allocator] wrapping System, snapshotting alloc/realloc/
+byte counts in a window around ONLY the update loop (per-segment factor
+excluded).
+
+Result on in-tree casctanks fixture (m=2169, 3 widest-bump segments, 144
+updates, 0 needs_refactor):
+
+  total:      allocs=259808  reallocs=25382  bytes=18519872
+  per-update: allocs=1804.2  reallocs=176.3  bytes=128610
+
+Baseline wall-time (cargo bench --bench lu_update_trace): 12.351 ms for the
+144-update chain = 85.8 us/update. (criterion's "-93.6%" is vs a stale saved
+baseline from before v0.11.1 — irrelevant; the 12.35 ms absolute is the
+number.)
+
+Conclusion: ~1980 alloc-ops per update against an 85.8 us budget. Even at a
+conservative 20–40 ns/op that is roughly half-to-most of the update time —
+two orders of magnitude more alloc-heavy per unit work than the multifrontal
+factorization churn (~17–23 allocs/supernode) the project already pooled
+(FactorWorkspace). Unlike its sibling sparse_solve.rs (pooled via take_zeroed,
+zero steady-state allocs), the update path pools nothing. GATE PASSED.
+
+Caveat carried forward: pooling has been falsified twice here (multi-slot
+contrib pool, arena refactor) when bookkeeping cost exceeded the malloc saved.
+The decisive arbiter is the Phase-1 bench delta, not the count — so Phase 1
+lands the highest-frequency sites first (per-pivot pivot_data clone :371,
+per-target row_sub new_row :381) and measures the bench immediately; revert
++ record as falsified if it washes.
+
+* 15:30 :alloc:lu-update:win:
+Phase 1 Step 1 (bump-loop pooling) landed. Added SparseLu pools
+pivot_scratch / targets_scratch / row_pool / col_rows_pool; eliminate_bump
+takes them into locals, restores on every return (restore_bump_pools).
+row_sub -> row_sub_into(.., &mut out) writing into a recycled row_pool
+buffer; the mem::take-n old_row is pushed back to the pool per axpy.
+
+Evidence (in-tree casctanks, 144 updates):
+- correctness: lu_update_casctanks worst_true_residual=9.095e-13,
+  worst_sparse_vs_dense=0.000e0 — bit-identical, eta sequence unchanged.
+- allocs/update: 1804.2 -> 636.5 (-65%); reallocs 176.3 -> 68.7;
+  bytes 128610 -> 63428.
+- bench lu_update_trace: 12.351 ms -> 9.955 ms = -19.0% (p<0.05).
+
+This is the decisive arbiter the plan demanded: pooling PAYS here (not the
+bookkeeping-wash that sank the arena/multi-slot attempts on the factor
+corpus). Allocation was genuinely ~1/5 of update wall-time. Proceeding to
+Step 2: the remaining ~636 allocs/update are update-level churn, dominated
+by the per-changed-row `saved` rollback clones (:124).
+
+* 16:10 :alloc:lu-update:win:
+Phase 1 Step 2 (saved-row snapshot pooling) landed. Added SparseLu
+saved_scratch (reused outer vec) + saved_pool (free-list of inner row
+buffers); the per-changed-row clone at update_sparse top now draws from
+the pool (clear + extend_from_slice). On commit the buffers recycle into
+saved_pool; on rollback they move into u_rows (NeedsRefactor rebuilds the
+SparseLu, so no leak). Hardened tests/lu_update_alloc_probe.rs into a
+regression guard (allocs/update must stay < 250).
+
+Evidence (in-tree casctanks, 144 updates):
+- correctness: worst_true_residual=9.095e-13, worst_sparse_vs_dense=0.000e0
+  — still bit-identical.
+- allocs/update: 636.5 -> 82.5 (95% below the 1804 baseline);
+  bytes 63428 -> 23560.
+- bench lu_update_trace: 9.955 ms -> 8.545 ms = -14.8% (p<0.05).
+
+Cumulative across Steps 1+2: 1804 -> 82 allocs/update (-95%);
+12.351 ms -> 8.545 ms = -30.8% on the casctanks replay. The residual ~82
+allocs/update is the irreducible floor: the retained ops -> etas growth
+plus the handful of O(1) spike buffers (touched/supp/changed/reach/stack/
+old_above) left unpooled — each O(1)/update, not worth the exit-point
+complexity. Commits: 9cf5a96 (Step 1), edf1f0f (Step 2).
+
+Note: hit a recurring local snag — the pre-commit feral-diagnostics
+--all-targets clippy step deadlocked once against rust-analyzer's
+background `cargo check` on the shared target build-lock (killed the RA
+check to free it), and was slow another time from cold-cache thrash after
+back-to-back test/bench/clippy runs. Not a code issue.
