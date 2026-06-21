@@ -44,3 +44,30 @@ Wrote dev/research/ft-row-elimination-design-2026-06-21.md (closes the open spik
 asymptotic-bump-update-spike-2026-06-18) and dev/plans/ft-row-elimination-2026-06-21.md
 (phased P0..P5). Added schork2017permuting + huangfu2015novel to references.bib.
 BASICLU is GPL -> paper-only clean-room.
+
+* 17:30 :lu:issue-87:ft-row-elimination:implemented:
+Implemented the logical-permutation Forrest-Tomlin update (P1+P2).
+P1: added uperm/uperm_inv (pivot-position <-> triangular rank); usolve/ut_solve
+walk U in uperm order (identity at factor -> byte-identical). P2: rewrote
+sparse_update.rs — set_column_r inserts the spike into other rows only,
+shift_uperm does the symmetric cyclic shift of the bump rank range (O(bump)
+index bookkeeping), eliminate_pivot_row sparse-forward-solves the single pivotal
+row in increasing rank order (min-heap), recording one FtOp::Axpy per cleared
+sub-diagonal. Widened u_above to all off-diagonal holders; made the row helpers
+diagonal-first-aware (row[0]=diagonal, row[1..] column-sorted). Removed FtOp::Swap
+(FT has no in-bump swaps; instability -> growth monitor -> refactor).
+
+BUG found + fixed: the eliminated pivot column's residual `vrc - mult*piv` is not
+exactly 0 in floating point, so the column kept re-crossing zero and re-enqueuing
+-> infinite loop -> OOM (probe killed, exit 137; reproduced at m=8). Fix: clear
+rw[c]=0 exactly and skip the pivot's own diagonal in the scatter.
+
+Evidence (wide_bump_probe, dense-spike tridiagonal, AFTER vs BEFORE):
+  m=250   us/update 4476 -> 102    (44x)   eta_ops 30752 -> 52
+  m=1000  us/update 80407 -> 675   (119x)  eta_ops 402980 -> 116
+  m=4000  us/update 10.2e6 -> 69415 (148x) eta_ops 2.09M -> ~120
+eta went O(m^2) -> O(m) (the tridiagonal pivotal row cascades the chain; for
+realistic LP bases it is far smaller). casctanks_ft_update 144-chain: 16.88 ms ->
+1.66 ms (10.2x). Full suite 370 lib + all integration green; clippy clean. New
+tests: tests/lu_ft_widebump.rs (ftran+btran residual chain, sub-quadratic eta)
+and the uperm-triangularity unit invariant.

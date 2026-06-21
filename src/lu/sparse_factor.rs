@@ -18,12 +18,12 @@ use super::{LuParams, LuScaling, LuSingularAction};
 use crate::error::FeralError;
 use crate::lu::sparse_matrix::SparseColMatrix;
 
-/// One elementary operation of a Forrest–Tomlin update's bump elimination,
+/// One elementary operation of a Forrest–Tomlin update's row elimination,
 /// recorded so it can be replayed on a solve vector (and transposed for btran).
+/// The logical permutation lives in `uperm`, not here, so the only operation is
+/// the row axpy that clears one sub-diagonal of the pivotal row.
 #[derive(Debug, Clone)]
 pub(super) enum FtOp {
-    /// Swap two pivot positions (partial-pivot row interchange in the bump).
-    Swap(usize, usize),
     /// `target_row -= mult · src_row` (Gauss elimination of a sub-diagonal).
     Axpy {
         target: usize,
@@ -48,7 +48,6 @@ impl FtEta {
     pub(super) fn apply_forward(&self, y: &mut [f64]) {
         for op in self.ops.iter() {
             match *op {
-                FtOp::Swap(a, b) => y.swap(a, b),
                 FtOp::Axpy { target, src, mult } => y[target] -= mult * y[src],
             }
         }
@@ -58,7 +57,6 @@ impl FtEta {
     pub(super) fn apply_transpose(&self, y: &mut [f64]) {
         for op in self.ops.iter().rev() {
             match *op {
-                FtOp::Swap(a, b) => y.swap(a, b),
                 FtOp::Axpy { target, src, mult } => y[src] -= mult * y[target],
             }
         }
@@ -89,17 +87,23 @@ pub struct SparseLu {
     /// each column-replacement update composes one cyclic shift of a bump's rank
     /// range into it (`dev/research/ft-row-elimination-design-2026-06-21.md`). The
     /// solves walk `U` in `uperm_inv` order; `L`, `P`, `Q`, and the etas stay in
-    /// fixed pivot-position coordinates and are never relabeled. The forward map
-    /// `uperm` (position -> rank) is added with the update that first reads it.
+    /// fixed pivot-position coordinates and are never relabeled.
     pub(super) uperm_inv: Vec<usize>,
+    /// Forward triangular order: `uperm[pos]` is the rank of pivot position `pos`
+    /// (inverse of `uperm_inv`). The update reads it to place the leaving column
+    /// and the spike support in rank space. Identity at factor time.
+    pub(super) uperm: Vec<usize>,
     /// Column order: factorization column `k` is original column `qcol[k]`.
     pub(super) qcol: Vec<usize>,
     /// Inverse of `qcol`: `qcol_inv[original_col] = column_position`.
     pub(super) qcol_inv: Vec<usize>,
-    /// Column-wise index of `U`'s strict-upper part: `u_above[c]` is the sorted
-    /// list of rows `i < c` with `U[i,c] != 0`. Lets the FT update find column
-    /// `r`'s existing entries (for in-place replacement) without scanning all
-    /// rows. Maintained across updates; not used by the solves.
+    /// Column-wise index of `U`'s off-diagonal entries: `u_above[c]` is the
+    /// sorted list of pivot positions `i != c` with `U[i,c] != 0`. Lets the FT
+    /// update find column `r`'s existing entries (for in-place replacement)
+    /// without scanning all rows. Indexes *all* off-diagonal holders (not just
+    /// rows `i < c`): after a Forrest–Tomlin symmetric permutation a column can
+    /// hold entries at positions whose rank is above it but whose position index
+    /// is below it. Maintained across updates; not used by the solves.
     pub(super) u_above: Vec<Vec<usize>>,
     /// Forrest–Tomlin column-replacement updates applied since the last
     /// factor/refactor. Each is a replayable bump elimination (`O(bump)`), so
@@ -139,17 +143,18 @@ pub struct SparseLu {
     /// Pooled length-`m` buffer holding the refinement's original-RHS snapshot
     /// (`a`); live across the whole refine loop, so it cannot reuse the others.
     pub(super) scratch_d: Vec<f64>,
-    /// FT-update bump-loop scratch pools (see
-    /// `dev/research/lu-update-alloc-pooling-2026-06-19.md`). All hold *churn*
-    /// buffers — allocated and freed within an update — so reusing them removes
-    /// per-pivot / per-axpy allocator traffic from `eliminate_bump`. Taken via
-    /// `mem::take` into locals at the top of the update and restored on every
-    /// return path; contents are cleared and refilled, never read across calls.
-    /// `row_pool` is a free-list of `U`-row buffers recycled by `row_sub_into`.
-    pub(super) pivot_scratch: Vec<(usize, f64)>,
+    /// FT-update row-elimination scratch (see
+    /// `dev/research/ft-row-elimination-design-2026-06-21.md`). `ft_rw` is a
+    /// length-`m` dense scatter of the pivotal row during the single-row
+    /// elimination, kept zeroed between updates (cleared via `targets_scratch`,
+    /// which doubles as its touched-position list). `row_pool` is a free-list of
+    /// `U`-row buffers recycled when rebuilding changed rows. All are *churn*
+    /// buffers: taken via `mem::take` into locals at the top of the update and
+    /// restored on every return path; contents are cleared and refilled, never
+    /// read across calls.
+    pub(super) ft_rw: Vec<f64>,
     pub(super) targets_scratch: Vec<usize>,
     pub(super) row_pool: Vec<Vec<(usize, f64)>>,
-    pub(super) col_rows_pool: Vec<Vec<usize>>,
     /// FT-update rollback/reindex snapshot pools. `saved_scratch` is the reused
     /// outer `(row, old_content)` vec; `saved_pool` is a free-list of the inner
     /// row buffers. The per-changed-row clone at the top of `update_sparse` was
@@ -423,12 +428,14 @@ impl SparseLu {
             }
             u_rows.push(row);
         }
-        // Column-wise index of U's strict-upper entries (rows added in
-        // increasing order, so each `u_above[c]` is sorted ascending).
+        // Column-wise index of U's off-diagonal entries (rows added in
+        // increasing order, so each `u_above[c]` is sorted ascending). At factor
+        // time U is upper triangular, so this is exactly the strict-upper rows;
+        // it widens to all off-diagonal holders only as FT updates permute U.
         let mut u_above: Vec<Vec<usize>> = vec![Vec::new(); m];
         for (i, row) in u_rows.iter().enumerate() {
             for &(c, _) in row.iter() {
-                if c > i {
+                if c != i {
                     u_above[c].push(i);
                 }
             }
@@ -458,6 +465,7 @@ impl SparseLu {
             perm,
             perm_inv,
             uperm_inv: (0..m).collect(),
+            uperm: (0..m).collect(),
             qcol,
             qcol_inv,
             u_above,
@@ -474,10 +482,9 @@ impl SparseLu {
             scratch_b: vec![0.0; m],
             scratch_c: vec![0.0; m],
             scratch_d: vec![0.0; m],
-            pivot_scratch: Vec::new(),
+            ft_rw: vec![0.0; m],
             targets_scratch: Vec::new(),
             row_pool: Vec::new(),
-            col_rows_pool: Vec::new(),
             saved_scratch: Vec::new(),
             saved_pool: Vec::new(),
         })
