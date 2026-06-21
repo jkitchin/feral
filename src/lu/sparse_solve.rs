@@ -225,14 +225,19 @@ impl SparseLu {
     /// invariant (L10): without it, a violated invariant would make release-mode
     /// solves silently take an off-diagonal as the pivot.
     fn usolve(&self, s: &mut [f64]) -> Result<(), FeralError> {
-        for k in (0..self.m).rev() {
+        // Back-substitution in `uperm` order: process positions by *decreasing*
+        // triangular rank. Each row's pivot is its diagonal entry (column == its
+        // own position, stored first); its off-diagonal columns all have strictly
+        // greater rank, so they are already solved. At identity `uperm`
+        // (`uperm_inv[rank] == rank`) this is the plain reverse-position sweep.
+        for rank in (0..self.m).rev() {
+            let k = self.uperm_inv[rank];
             let row = &self.u_rows[k];
             let &(dc, d) = row.first().ok_or(FeralError::SingularBasis { column: k })?;
             if dc != k || d == 0.0 || !d.is_finite() {
                 return Err(FeralError::SingularBasis { column: k });
             }
             let mut acc = s[k];
-            // Skip the diagonal (row[0], column == k); the rest are columns > k.
             for &(c, v) in row[1..].iter() {
                 acc -= v * s[c];
             }
@@ -247,7 +252,11 @@ impl SparseLu {
     /// or out-of-order stored diagonal, for the same reason as
     /// [`SparseLu::usolve`].
     fn ut_solve(&self, s: &mut [f64]) -> Result<(), FeralError> {
-        for i in 0..self.m {
+        // Forward solve in `uperm` order: process positions by *increasing*
+        // triangular rank (the transpose of `usolve`). At identity `uperm` this
+        // is the plain ascending-position sweep.
+        for rank in 0..self.m {
+            let i = self.uperm_inv[rank];
             let row = &self.u_rows[i];
             let &(dc, d) = row.first().ok_or(FeralError::SingularBasis { column: i })?;
             if dc != i || d == 0.0 || !d.is_finite() {

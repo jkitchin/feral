@@ -1118,3 +1118,39 @@
                feral-amd run on the explicitly formed A^T A pattern as a
                stand-in; this paper is the faithful target for a later phase.}
 }
+
+@techreport{schork2017permuting,
+  author      = {Schork, Lukas and Gondzio, Jacek},
+  title       = {Permuting Spiked Matrices to Triangular Form and its
+                 Application to the {Forrest--Tomlin} Update},
+  institution = {School of Mathematics, University of Edinburgh},
+  number      = {ERGO-17-002},
+  year        = {2017},
+  url         = {https://www.maths.ed.ac.uk/ergo/},
+  note        = {The modern sparse Forrest--Tomlin update: re-triangularize the
+                 spiked matrix by symmetric permutation alone whenever the
+                 spiked digraph is acyclic, falling back to a single-row
+                 elimination otherwise. The symmetric permutation places the old
+                 (nonzero) U diagonals on the bump diagonal, dodging the
+                 zero-pivot landmine of the column-shift Bartels--Golub. This is
+                 the algorithm feral implements for issue #87 (clean-room from
+                 the paper; the authors' BASICLU code is GPL and is NOT
+                 consulted). See dev/research/ft-row-elimination-design-2026-06-21.md.}
+}
+
+@article{huangfu2015novel,
+  author    = {Huangfu, Qi and Hall, J. A. J.},
+  title     = {Novel Update Techniques for the Revised Simplex Method},
+  journal   = {Computational Optimization and Applications},
+  year      = {2015},
+  volume    = {60},
+  number    = {3},
+  pages     = {587--608},
+  doi       = {10.1007/s10589-014-9689-1},
+  url       = {https://doi.org/10.1007/s10589-014-9689-1},
+  note      = {HiGHS update technology. Corroborates that the Forrest--Tomlin
+               update stores a single sparse row-eta per update (deleting one row
+               and one column from the eta file), giving much smaller eta files
+               and cheaper warm solves than the product-form update on LP bases.
+               Background for issue #87's eta-size argument.}
+}

@@ -51,6 +51,15 @@ name = "feral"
 # continue to use the `rlib`. See dev/decisions.md 2026-05-13.
 crate-type = ["staticlib", "rlib"]
 
+[features]
+# Opt-in O(m) structural self-check after every sparse-LU Forrest–Tomlin update
+# (uperm bijection, diagonal-first rows, upper-triangular-in-uperm order, and the
+# u_above index matching U's off-diagonal pattern). Off by default: it is a
+# debugging aid that allocates per update, so it must not run in normal builds or
+# pollute the allocation-regression probe. Enable with
+# `cargo test --features lu-ft-invariant-check`.
+lu-ft-invariant-check = []
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,19 +1,27 @@
-//! Sparse rank-1 column-replacement update — Forrest–Tomlin / Bartels–Golub–Reid.
+//! Sparse rank-1 column-replacement update — Forrest–Tomlin.
 //!
 //! Replacing basis slot `leaving_slot` (column position `r`) by a new column
-//! folds the spike `ρ = G⁻¹ L⁻¹ P aₙₑw` into `U`'s column `r`, then
-//! re-triangularizes the resulting *bump* by sparse Gaussian elimination with
-//! partial pivoting (partial pivoting is what makes this correct on a sparse
-//! `U`: a zero diagonal pivot is replaced by a nonzero sub-diagonal spike entry
-//! via a row interchange; the swap goes into the eta so the base `L` is never
-//! permuted).
+//! folds the spike `ρ = G⁻¹ L⁻¹ P aₙₑw` into `U`'s column `r`, then restores the
+//! triangular factor by the **Forrest–Tomlin** scheme: a *symmetric permutation*
+//! moves column `r` and row `r` to the bottom of the bump (so the bump's diagonal
+//! pivots are the old, nonzero `U` diagonals — dodging the zero-superdiagonal
+//! landmine of the column-shift Bartels–Golub), and then the single resulting
+//! pivotal row is eliminated by one sparse forward sweep (one row-eta).
 //!
-//! The work is **bump-local**: the spike is computed by a Gilbert–Peierls
-//! depth-first reach (only the reachable `L`-columns are touched, not all `n`),
-//! column `r` is located via the `u_above` index (no full-row scan), and the
-//! "unchanged on failure" guarantee is provided by saving/restoring only the
-//! changed rows (no `O(nnz)` clone of `U`). Apart from one `O(n)` read of the
-//! dense entering column, the cost is `O(bump)`.
+//! The permutation is *logical*: an evolving `uperm` (pivot-position ↔ triangular
+//! rank) carried by `SparseLu` and applied once per solve. `U`'s stored indices,
+//! the base `L`, `P`, `Q`, and all prior etas stay in fixed pivot-position
+//! coordinates and are never relabeled. So one update is `O(bump)` for sparse
+//! `U` — the cyclic shift of the rank range plus the elimination of one row — and
+//! records an `O(bump)` eta, not the `O(bump²)` of a full bump re-triangularization
+//! (`dev/research/ft-row-elimination-design-2026-06-21.md`, issue #87).
+//!
+//! The work is otherwise bump-local: the spike is computed by a Gilbert–Peierls
+//! depth-first reach, and the "unchanged on failure" guarantee saves/restores only
+//! the changed rows and the bump's `uperm` range (no `O(nnz)` clone of `U`).
+
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 use super::sparse_factor::{FtEta, FtOp, SparseLu};
 use super::sparse_symbolic::SparseLuSymbolic;
@@ -92,38 +100,39 @@ impl SparseLu {
         self.compute_spike(entering, leaving_slot, &mut w, &mut touched);
 
         let r = self.qcol_inv[leaving_slot];
+        let r_rank = self.uperm[r];
+
+        // Spike support (pivot positions) and the bump's bottom rank: the deepest
+        // rank at which the spike has an entry. The bump is the rank range
+        // `[r_rank, h_rank]`; `h_rank < r_rank` means the new column has nothing at
+        // or below its own diagonal in rank order ⇒ singular replacement.
         let mut supp: Vec<usize> = touched.iter().copied().filter(|&k| w[k] != 0.0).collect();
         supp.sort_unstable();
         supp.dedup();
-        let h = match supp.last().copied() {
-            Some(h) if h >= r => h,
+        let h_rank = supp.iter().map(|&p| self.uperm[p]).max();
+        let h_rank = match h_rank {
+            Some(hr) if hr >= r_rank => hr,
             _ => {
                 clear(&mut w, &touched);
                 self.ft_work = w;
-                // Spike support deficient: the replacement basis is singular as
-                // far as the incremental update can tell. Signal NeedsRefactor
-                // so the driver refactors from scratch — matching the dense
-                // update path (see DenseLu::update), which also returns
-                // NeedsRefactor for a vanishing/missing pivot rather than
-                // SingularBasis. The authoritative singularity verdict comes
-                // from the fresh factorization, not the update.
+                // Singular as far as the incremental update can tell; refactor
+                // from scratch for the authoritative verdict (see DenseLu::update).
                 return Err(FeralError::NeedsRefactor);
             }
         };
 
-        // --- Rows whose U content will change (all <= h): bump + spike support
-        // + old column-r entries (above-diagonal rows from u_above, plus r). ---
-        let mut changed: Vec<usize> = (r..=h).collect();
+        // --- Rows whose U content changes: row `r` (rebuilt by the elimination),
+        // the spike support (gains a column-`r` entry), and the old column-`r`
+        // holders (lose theirs). The other bump rows are NOT touched — that is the
+        // Forrest–Tomlin win. ---
+        let mut changed: Vec<usize> = Vec::with_capacity(1 + supp.len() + self.u_above[r].len());
+        changed.push(r);
         changed.extend(supp.iter().copied());
         changed.extend(self.u_above[r].iter().copied());
-        changed.push(r);
         changed.sort_unstable();
         changed.dedup();
 
-        // Save the changed rows so a mid-elimination failure can roll back (and
-        // so the commit can refresh `u_above` from the old content). Snapshot
-        // buffers come from the pooled free-list — was a fresh clone per row,
-        // the dominant per-update allocation after the bump-loop pools.
+        // Save the changed rows (pooled buffers) for rollback / u_above refresh.
         let mut saved = std::mem::take(&mut self.saved_scratch);
         saved.clear();
         for &i in changed.iter() {
@@ -132,24 +141,26 @@ impl SparseLu {
             buf.extend_from_slice(&self.u_rows[i]);
             saved.push((i, buf));
         }
+        // Save the bump's `uperm` range so the cyclic shift can be rolled back.
+        let saved_uperm_inv: Vec<usize> = self.uperm_inv[r_rank..=h_rank].to_vec();
 
-        // Overwrite column r of U with the spike ρ (= w).
+        // Replace column `r` of U with the spike in every row but `r` (row `r`'s
+        // column-`r` value is the spike diagonal `w[r]`, handled by the elimination).
         self.set_column_r(r, &w, &supp);
+        // Symmetric cyclic shift: move rank `r_rank` to `h_rank` (column `r` and
+        // row `r` to the bottom of the bump). Pure index bookkeeping, O(bump).
+        self.shift_uperm(r, r_rank, h_rank);
 
-        // Re-triangularize the bump [r, h] with partial pivoting.
-        let result = self.eliminate_bump(r, h);
+        // Eliminate the single pivotal row `r` (now at rank `h_rank`).
+        let result = self.eliminate_pivot_row(r, h_rank, w[r]);
 
         clear(&mut w, &touched);
         self.ft_work = w;
 
         match result {
             Ok(ops) => {
-                // L5 (dev/research/repo-review-2026-06-09.md): monitor element
-                // growth, not the largest single multiplier. Every U entry that
-                // changed this update lives in a `changed` row, so the high-water
-                // `max|U|/u_max0` is maintained by scanning only those rows —
-                // O(changed), keeping the update cheap — and it compounds across
-                // a chain of updates (a per-multiplier max did not).
+                // Element-growth high-water over the changed rows (L5): only row
+                // `r` and the spike rows changed values, so this stays O(changed).
                 let mut changed_max = 0.0_f64;
                 for &i in changed.iter() {
                     for &(_, v) in self.u_rows[i].iter() {
@@ -158,15 +169,7 @@ impl SparseLu {
                 }
                 let growth = self.growth.max(changed_max / self.u_max0);
                 if growth > self.params.max_growth {
-                    // Over budget: roll back exactly like the elimination-error
-                    // path (u_above was not yet modified) and force a refactor.
-                    // The saved buffers move back into u_rows; the caller's
-                    // NeedsRefactor rebuilds the whole SparseLu, so the shrunk
-                    // pool is irrelevant.
-                    for (i, row) in saved.drain(..) {
-                        self.u_rows[i] = row;
-                    }
-                    self.saved_scratch = saved;
+                    self.rollback(saved, &saved_uperm_inv, r_rank);
                     return Err(FeralError::NeedsRefactor);
                 }
                 // Commit: refresh the u_above index for every changed row.
@@ -176,24 +179,40 @@ impl SparseLu {
                     self.index_above(*i, &new_row);
                     self.u_rows[*i] = new_row;
                 }
-                // Recycle the snapshot buffers and the outer vec for the next
-                // update (steady state: zero per-update snapshot allocation).
                 for (_, buf) in saved.drain(..) {
                     self.saved_pool.push(buf);
                 }
                 self.saved_scratch = saved;
                 self.etas.push(FtEta { ops });
                 self.growth = growth;
+                #[cfg(feature = "lu-ft-invariant-check")]
+                self.debug_check_invariants();
                 Ok(())
             }
             Err(e) => {
-                // Roll back the changed rows (u_above was not yet modified).
-                for (i, row) in saved.drain(..) {
-                    self.u_rows[i] = row;
-                }
-                self.saved_scratch = saved;
+                self.rollback(saved, &saved_uperm_inv, r_rank);
                 Err(e)
             }
+        }
+    }
+
+    /// Restore `u_rows` (from the saved snapshots) and the bump's `uperm` range
+    /// after a failed update — leaving `self` exactly as it was. `u_above` was not
+    /// yet modified (it is refreshed only on commit), so it needs no restore.
+    fn rollback(
+        &mut self,
+        mut saved: Vec<(usize, Vec<(usize, f64)>)>,
+        saved_uperm_inv: &[usize],
+        r_rank: usize,
+    ) {
+        for (i, row) in saved.drain(..) {
+            self.u_rows[i] = row;
+        }
+        self.saved_scratch = saved;
+        for (off, &pos) in saved_uperm_inv.iter().enumerate() {
+            let rank = r_rank + off;
+            self.uperm_inv[rank] = pos;
+            self.uperm[pos] = rank;
         }
     }
 
@@ -275,15 +294,6 @@ impl SparseLu {
         for eta in self.etas.iter() {
             for op in eta.ops.iter() {
                 match *op {
-                    FtOp::Swap(a, b) => {
-                        w.swap(a, b);
-                        for x in [a, b] {
-                            if w[x] != 0.0 && !mark[x] {
-                                mark[x] = true;
-                                touched.push(x);
-                            }
-                        }
-                    }
                     FtOp::Axpy { target, src, mult } => {
                         w[target] -= mult * w[src];
                         if w[target] != 0.0 && !mark[target] {
@@ -302,163 +312,229 @@ impl SparseLu {
         self.scratch_mark = mark;
     }
 
-    /// Overwrite column `r` of `U` with the spike (`w` at positions `supp`),
-    /// removing any old column-`r` entries. Old above-diagonal rows are located
-    /// via `u_above[r]` (read only — `u_above` is refreshed wholesale in the
-    /// commit phase via unindex/reindex of the changed rows).
+    /// Replace column `r` of `U` with the spike (`w` at positions `supp`) in every
+    /// row except `r`. Old column-`r` entries (located via the `u_above` index,
+    /// read only — refreshed wholesale on commit) are removed; the new spike
+    /// entries are inserted into the off-diagonal part of each support row. Row
+    /// `r`'s own column-`r` value is the spike diagonal `w[r]`, consumed directly
+    /// by [`Self::eliminate_pivot_row`], so row `r` is not touched here.
     fn set_column_r(&mut self, r: usize, w: &[f64], supp: &[usize]) {
-        let old_above = self.u_above[r].clone();
-        for &i in old_above.iter() {
-            remove_col(&mut self.u_rows[i], r);
+        let old_holders = self.u_above[r].clone();
+        for &i in old_holders.iter() {
+            remove_offdiag(&mut self.u_rows[i], r);
         }
-        remove_col(&mut self.u_rows[r], r); // old diagonal
-        for &i in supp.iter() {
-            insert_or_set(&mut self.u_rows[i], r, w[i]);
+        for &p in supp.iter() {
+            if p != r {
+                insert_offdiag(&mut self.u_rows[p], r, w[p]);
+            }
         }
     }
 
-    /// Eliminate the bump `[r, h]` of `U` with partial pivoting, returning the
-    /// recorded eta ops and the updated growth monitor. Operates in place on
-    /// `self.u_rows`; the caller is responsible for rollback on `Err`.
-    fn eliminate_bump(&mut self, r: usize, h: usize) -> Result<Vec<FtOp>, FeralError> {
-        // L6 (dev/research/repo-review-2026-06-09.md): the bump-pivot zero test
-        // is relative to the basis magnitude, not an absolute 1e-13. `u_max0`
-        // (max|U| at the last factor, floored away from zero for L5) is the scale
-        // reference, consistent with the dense update and the factor paths.
+    /// Symmetric cyclic shift of the rank range `[r_rank, h_rank]`: move the
+    /// leaving column's position `r` from rank `r_rank` to rank `h_rank`, sliding
+    /// every other position in the range down one rank. Pure `uperm`/`uperm_inv`
+    /// bookkeeping (`O(bump)`); `U`'s stored entries and the etas are untouched.
+    fn shift_uperm(&mut self, r: usize, r_rank: usize, h_rank: usize) {
+        for rank in r_rank..h_rank {
+            let pos = self.uperm_inv[rank + 1];
+            self.uperm_inv[rank] = pos;
+            self.uperm[pos] = rank;
+        }
+        self.uperm_inv[h_rank] = r;
+        self.uperm[r] = h_rank;
+    }
+
+    /// Forrest–Tomlin elimination of the single pivotal row `r` (now at rank
+    /// `h_rank`, the bottom of the bump after [`Self::shift_uperm`]). Its
+    /// sub-diagonal entries — columns whose new rank is `< h_rank` — are cleared by
+    /// a sparse forward sweep against the (unmodified) upper-triangular bump rows,
+    /// in increasing rank order. Each eliminated column contributes one
+    /// `FtOp::Axpy{target: r, ..}` to the returned eta. Only row `r` is rewritten;
+    /// `diag0 = w[r]` seeds its column-`r` value.
+    ///
+    /// Returns [`FeralError::NeedsRefactor`] if the resulting diagonal pivot
+    /// vanishes (singular replacement). `touched` accumulates the dense-scatter
+    /// positions so the caller clears them.
+    fn eliminate_pivot_row(
+        &mut self,
+        r: usize,
+        h_rank: usize,
+        diag0: f64,
+    ) -> Result<Vec<FtOp>, FeralError> {
         let ztol = self.params.zero_pivot_tol * self.u_max0;
         let mut ops: Vec<FtOp> = Vec::new();
 
-        // Churn-buffer pools, taken into locals for the duration of the bump
-        // (restored on every return path). See
-        // `dev/research/lu-update-alloc-pooling-2026-06-19.md`. Reusing these
-        // removes the per-pivot / per-axpy allocator traffic; contents are
-        // cleared and rebuilt here, never read across updates.
-        let mut col_rows = std::mem::take(&mut self.col_rows_pool);
-        let mut pivot_scratch = std::mem::take(&mut self.pivot_scratch);
-        let mut targets = std::mem::take(&mut self.targets_scratch);
-        let mut row_pool = std::mem::take(&mut self.row_pool);
+        let mut rw = std::mem::take(&mut self.ft_rw); // dense scatter, zero on entry
+        let mut rw_touched = std::mem::take(&mut self.targets_scratch);
+        rw_touched.clear();
+        let mut queued = std::mem::take(&mut self.scratch_mark); // all-false on entry
+        let mut heap: BinaryHeap<Reverse<usize>> = BinaryHeap::new();
 
-        // Sub-diagonal pivot index (Step 1, dev/plans/bump-elim-step1-subdiagonal-index.md):
-        // `col_rows[c - r]` is the sorted list of bump rows `i ∈ [r, h]` that
-        // currently hold a column-`c` entry. It mirrors the actual nonzero
-        // pattern of columns `[r, h]` over the bump rows, so the pivot search
-        // and the elimination iterate only real entries instead of probing
-        // every row in `k..=h` (the old O(bump²) scan). Rows are pushed in
-        // increasing `i`, so each list stays sorted ascending — preserving the
-        // lowest-index tie-break of the original scan exactly.
-        let width = h - r + 1;
-        while col_rows.len() < width {
-            col_rows.push(Vec::new());
-        }
-        for c in col_rows.iter_mut().take(width) {
-            c.clear();
-        }
-        for i in r..=h {
-            for &(c, _) in self.u_rows[i].iter() {
-                if c < r {
-                    continue;
-                }
-                if c > h {
-                    break;
-                }
-                col_rows[c - r].push(i);
+        // Seed: row r off-diagonals (column `r` excluded — its value is `diag0`),
+        // pushing the sub-diagonal columns onto the heap.
+        let row_r = std::mem::take(&mut self.u_rows[r]);
+        for &(c, v) in row_r.iter() {
+            if c == r {
+                continue; // old diagonal discarded; replaced by the spike value
             }
+            scatter_into(
+                &mut rw,
+                &mut rw_touched,
+                &mut queued,
+                &mut heap,
+                c,
+                v,
+                &self.uperm,
+                h_rank,
+            );
         }
+        // Column r is the bump diagonal (rank h_rank): never sub-diagonal, so it is
+        // not pushed to the heap; just record its starting value.
+        if rw[r] == 0.0 {
+            rw_touched.push(r);
+        }
+        rw[r] += diag0;
+        self.row_pool.push(row_r); // recycle the old row's buffer
 
-        for k in r..=h {
-            let kc = k - r;
-            // Strict partial pivoting among rows [k, h] with a column-k entry.
-            // Unlike the initial factorization (which honors `pivot_threshold`
-            // to trade stability for fill, L2), the bump's structure is already
-            // fixed here, so a relaxed threshold buys no fill reduction and only
-            // trades away stability — we always take the max-magnitude row.
-            // Candidates come from the index; `i < k` entries are upper-triangle
-            // (not pivot candidates) and are skipped, matching `i in k..=h`.
-            let mut pivot_row = k;
-            let mut pivot_abs = 0.0_f64;
-            for &i in col_rows[kc].iter() {
-                if i < k {
-                    continue;
-                }
-                if let Some(v) = get_col(&self.u_rows[i], k) {
-                    if v.abs() > pivot_abs {
-                        pivot_abs = v.abs();
-                        pivot_row = i;
-                    }
-                }
+        // Sweep sub-diagonal columns of row r in increasing rank order.
+        while let Some(Reverse(rank)) = heap.pop() {
+            let c = self.uperm_inv[rank];
+            queued[c] = false;
+            let vrc = rw[c];
+            if vrc == 0.0 {
+                continue;
             }
-            if pivot_abs <= ztol {
-                // Bump pivot vanished: the incremental update cannot continue.
-                // Signal NeedsRefactor (not SingularBasis) so the driver gets
-                // the same contract as the dense update path — update failures
-                // always mean "refactor from scratch."
-                self.restore_bump_pools(col_rows, pivot_scratch, targets, row_pool);
+            let prow = &self.u_rows[c];
+            let &(dc, piv) = match prow.first() {
+                Some(p) => p,
+                None => {
+                    self.restore_elim_pools(rw, rw_touched, queued);
+                    return Err(FeralError::NeedsRefactor);
+                }
+            };
+            if dc != c || piv == 0.0 || !piv.is_finite() {
+                self.restore_elim_pools(rw, rw_touched, queued);
                 return Err(FeralError::NeedsRefactor);
             }
-            if pivot_row != k {
-                self.u_rows.swap(k, pivot_row);
-                ops.push(FtOp::Swap(k, pivot_row));
-                // Relabel the index: the two rows' contents swapped, so for every
-                // column either now touches, fix membership of `k` and `pivot_row`.
-                swap_membership(&mut col_rows, r, h, k, pivot_row, &self.u_rows);
-            }
-            // Copy the pivot row into the pooled scratch (was a fresh clone): it
-            // is read as `dst − mult·pivot` below while other rows are written,
-            // so it must be a buffer separate from `u_rows`. `extend_from_slice`
-            // reuses the scratch's capacity — same bytes, no allocation.
-            pivot_scratch.clear();
-            pivot_scratch.extend_from_slice(&self.u_rows[k]);
-            let pivot = get_col(&pivot_scratch, k).unwrap_or(0.0);
-
-            // Targets: rows below the pivot (i > k) with a column-k entry, in
-            // ascending order — identical to the old `i in k+1..=h` order. A
-            // pooled snapshot: the inner loop mutates `col_rows[kc]` via
-            // `reindex_after_rowsub`, so it cannot iterate the live list.
-            targets.clear();
-            targets.extend(col_rows[kc].iter().copied().filter(|&i| i > k));
-            for &i in &targets {
-                if let Some(vik) = get_col(&self.u_rows[i], k) {
-                    let mult = vik / pivot;
-                    let old_row = std::mem::take(&mut self.u_rows[i]);
-                    // Build the new row into a recycled buffer; hand the old
-                    // row's buffer back to the pool for the next axpy.
-                    let mut new_row = row_pool.pop().unwrap_or_default();
-                    row_sub_into(&old_row, &pivot_scratch, mult, k, &mut new_row);
-                    reindex_after_rowsub(&mut col_rows, r, h, i, &old_row, &new_row);
-                    self.u_rows[i] = new_row;
-                    row_pool.push(old_row);
-                    ops.push(FtOp::Axpy {
-                        target: i,
-                        src: k,
-                        mult,
-                    });
+            let mult = vrc / piv;
+            ops.push(FtOp::Axpy {
+                target: r,
+                src: c,
+                mult,
+            });
+            // row_r -= mult · row_c. Clear column `c` *exactly* (it equals
+            // `vrc - mult·piv = 0` mathematically, but the floating-point residual
+            // would otherwise re-cross zero and re-enqueue `c` — an infinite loop);
+            // skip the pivot's own diagonal in the scatter accordingly. Fill at
+            // strictly higher ranks may enqueue further sub-diagonal columns.
+            rw[c] = 0.0;
+            for &(cc, v) in self.u_rows[c].iter() {
+                if cc == c {
+                    continue;
                 }
+                scatter_into(
+                    &mut rw,
+                    &mut rw_touched,
+                    &mut queued,
+                    &mut heap,
+                    cc,
+                    -mult * v,
+                    &self.uperm,
+                    h_rank,
+                );
             }
         }
-        self.restore_bump_pools(col_rows, pivot_scratch, targets, row_pool);
+
+        // Diagonal pivot check, then gather the rebuilt row r (diagonal first).
+        let diag = rw[r];
+        if diag.abs() <= ztol || !diag.is_finite() {
+            self.restore_elim_pools(rw, rw_touched, queued);
+            return Err(FeralError::NeedsRefactor);
+        }
+        let mut new_row = self.row_pool.pop().unwrap_or_default();
+        new_row.clear();
+        new_row.push((r, diag));
+        let mut offdiag: Vec<(usize, f64)> = rw_touched
+            .iter()
+            .filter(|&&c| c != r && rw[c] != 0.0)
+            .map(|&c| (c, rw[c]))
+            .collect();
+        offdiag.sort_unstable_by_key(|&(c, _)| c);
+        // `rw_touched` may list a column more than once (its scatter value crossed
+        // zero and back), so drop duplicate columns — each carries the same final
+        // `rw[c]`. Leaving them would put duplicate entries in the row and corrupt
+        // `U` / `u_above`.
+        offdiag.dedup_by_key(|&mut (c, _)| c);
+        new_row.extend_from_slice(&offdiag);
+        self.u_rows[r] = new_row;
+
+        // Clear the dense scatter and hand the pools back.
+        self.restore_elim_pools(rw, rw_touched, queued);
         Ok(ops)
     }
 
-    /// Return the bump-loop churn buffers to their `SparseLu` pools. Called on
-    /// every `eliminate_bump` exit so the next update finds them warm.
-    fn restore_bump_pools(
+    /// Clear the dense scatter `rw` and the `queued` marker over their touched
+    /// positions (so both reach all-zero / all-false for the next update, on every
+    /// exit path — including a mid-sweep error where the heap still held columns)
+    /// and return the row-elimination churn buffers to their `SparseLu` pools.
+    fn restore_elim_pools(
         &mut self,
-        col_rows: Vec<Vec<usize>>,
-        pivot_scratch: Vec<(usize, f64)>,
-        targets: Vec<usize>,
-        row_pool: Vec<Vec<(usize, f64)>>,
+        mut rw: Vec<f64>,
+        mut rw_touched: Vec<usize>,
+        mut queued: Vec<bool>,
     ) {
-        self.col_rows_pool = col_rows;
-        self.pivot_scratch = pivot_scratch;
-        self.targets_scratch = targets;
-        self.row_pool = row_pool;
+        for &c in rw_touched.iter() {
+            rw[c] = 0.0;
+            queued[c] = false;
+        }
+        rw_touched.clear();
+        self.ft_rw = rw;
+        self.targets_scratch = rw_touched;
+        self.scratch_mark = queued;
     }
 
-    /// Remove row `i`'s strict-upper entries from the `u_above` column index
+    /// Structural self-check (opt-in via the `lu-ft-invariant-check` feature, off
+    /// by default because it allocates `O(m)` per update): `uperm` bijection,
+    /// diagonal-first rows, upper-triangular-in-`uperm` order, and `u_above`
+    /// matching `U`'s off-diagonal pattern exactly. Catches FT-update bookkeeping
+    /// drift at its source.
+    #[cfg(feature = "lu-ft-invariant-check")]
+    fn debug_check_invariants(&self) {
+        let m = self.m;
+        for k in 0..m {
+            debug_assert_eq!(self.uperm[self.uperm_inv[k]], k, "uperm not a bijection");
+        }
+        // Rebuild the expected off-diagonal column index from U.
+        let mut expect: Vec<Vec<usize>> = vec![Vec::new(); m];
+        for (i, row) in self.u_rows.iter().enumerate() {
+            debug_assert!(!row.is_empty(), "row {i} empty (no diagonal)");
+            debug_assert_eq!(row[0].0, i, "row {i} diagonal not stored first");
+            for &(c, _) in row[1..].iter() {
+                debug_assert!(
+                    self.uperm[c] > self.uperm[i],
+                    "row {i} (rank {}) off-diagonal column {c} (rank {}) not upper in uperm",
+                    self.uperm[i],
+                    self.uperm[c]
+                );
+                expect[c].push(i);
+            }
+        }
+        for (c, (exp, idx)) in expect.iter_mut().zip(self.u_above.iter()).enumerate() {
+            exp.sort_unstable();
+            let mut got = idx.clone();
+            got.sort_unstable();
+            debug_assert_eq!(
+                &got, exp,
+                "u_above[{c}] mismatch (duplicate or stale entry)"
+            );
+        }
+    }
+
+    /// Remove row `i`'s off-diagonal entries from the `u_above` column index
     /// (using its pre-update content `old_row`).
     fn unindex_above(&mut self, i: usize, old_row: &[(usize, f64)]) {
         for &(c, _) in old_row.iter() {
-            if c > i {
+            if c != i {
                 if let Ok(pos) = self.u_above[c].binary_search(&i) {
                     self.u_above[c].remove(pos);
                 }
@@ -466,10 +542,10 @@ impl SparseLu {
         }
     }
 
-    /// Add row `i`'s strict-upper entries to the `u_above` column index.
+    /// Add row `i`'s off-diagonal entries to the `u_above` column index.
     fn index_above(&mut self, i: usize, new_row: &[(usize, f64)]) {
         for &(c, _) in new_row.iter() {
-            if c > i {
+            if c != i {
                 if let Err(pos) = self.u_above[c].binary_search(&i) {
                     self.u_above[c].insert(pos, i);
                 }
@@ -484,168 +560,89 @@ fn clear(w: &mut [f64], touched: &[usize]) {
     }
 }
 
-/// Sorted insert/remove of row `i` in a column's bump-row list (`eliminate_bump`
-/// sub-diagonal index). Keeps the list sorted ascending and duplicate-free.
-fn set_member(list: &mut Vec<usize>, i: usize, present: bool) {
-    match list.binary_search(&i) {
-        Ok(pos) => {
-            if !present {
-                list.remove(pos);
-            }
-        }
-        Err(pos) => {
-            if present {
-                list.insert(pos, i);
-            }
-        }
-    }
-}
-
-/// After swapping the contents of rows `k` and `p`, fix the sub-diagonal index:
-/// for every column in `[r, h]` that either row now touches, set membership of
-/// `k` and `p` from their (post-swap) content. The union of the two rows'
-/// columns is unchanged by the swap, so every column whose membership could
-/// change is visited; processing a shared column twice is idempotent.
-fn swap_membership(
-    col_rows: &mut [Vec<usize>],
-    r: usize,
-    h: usize,
-    k: usize,
-    p: usize,
-    u_rows: &[Vec<(usize, f64)>],
+/// Add `v` to the dense scatter `rw[c]` of the pivotal row, recording `c` as
+/// touched on its first nonzero and enqueuing it (by triangular rank) when it is
+/// a not-yet-queued sub-diagonal column (`uperm[c] < h_rank`). `queued` dedups the
+/// heap; a column is re-enqueueable only after it is popped (rank order guarantees
+/// fill lands at strictly higher ranks, so no column is processed twice).
+#[allow(clippy::too_many_arguments)]
+fn scatter_into(
+    rw: &mut [f64],
+    rw_touched: &mut Vec<usize>,
+    queued: &mut [bool],
+    heap: &mut BinaryHeap<Reverse<usize>>,
+    c: usize,
+    v: f64,
+    uperm: &[usize],
+    h_rank: usize,
 ) {
-    for &src in &[k, p] {
-        for &(c, _) in u_rows[src].iter() {
-            if c < r {
-                continue;
-            }
-            if c > h {
-                break;
-            }
-            let cc = c - r;
-            set_member(&mut col_rows[cc], k, get_col(&u_rows[k], c).is_some());
-            set_member(&mut col_rows[cc], p, get_col(&u_rows[p], c).is_some());
-        }
+    if rw[c] == 0.0 {
+        rw_touched.push(c);
+    }
+    rw[c] += v;
+    if uperm[c] < h_rank && !queued[c] && rw[c] != 0.0 {
+        queued[c] = true;
+        heap.push(Reverse(uperm[c]));
     }
 }
 
-/// After `row i` is rewritten by `row_sub`, update the sub-diagonal index over
-/// `[r, h]`: drop `i` from columns it lost (including the eliminated pivot
-/// column) and add `i` to columns it gained (fill).
-fn reindex_after_rowsub(
-    col_rows: &mut [Vec<usize>],
-    r: usize,
-    h: usize,
-    i: usize,
-    old_row: &[(usize, f64)],
-    new_row: &[(usize, f64)],
-) {
-    for &(c, _) in old_row {
-        if c < r {
-            continue;
-        }
-        if c > h {
-            break;
-        }
-        if get_col(new_row, c).is_none() {
-            set_member(&mut col_rows[c - r], i, false);
-        }
-    }
-    for &(c, _) in new_row {
-        if c < r {
-            continue;
-        }
-        if c > h {
-            break;
-        }
-        set_member(&mut col_rows[c - r], i, true);
-    }
-}
-
-/// Look up the value at column `c` in a column-sorted sparse row.
+/// Look up the value at column `c` in a row stored diagonal-first with a
+/// column-sorted off-diagonal tail (`row[0]` is the diagonal; `row[1..]` is
+/// sorted ascending by column). After a Forrest–Tomlin symmetric permutation the
+/// diagonal column need not be the row's minimum column, so the diagonal is
+/// checked separately from the binary-searched tail.
+#[cfg(test)]
 fn get_col(row: &[(usize, f64)], c: usize) -> Option<f64> {
-    row.binary_search_by_key(&c, |&(col, _)| col)
+    if let Some(&(dc, dv)) = row.first() {
+        if dc == c {
+            return Some(dv);
+        }
+    }
+    if row.len() <= 1 {
+        return None;
+    }
+    row[1..]
+        .binary_search_by_key(&c, |&(col, _)| col)
         .ok()
-        .map(|pos| row[pos].1)
+        .map(|pos| row[1 + pos].1)
 }
 
-/// Remove column `c` from a column-sorted sparse row, if present.
-fn remove_col(row: &mut Vec<(usize, f64)>, c: usize) {
-    if let Ok(pos) = row.binary_search_by_key(&c, |&(col, _)| col) {
-        row.remove(pos);
+/// Remove off-diagonal column `c` from a diagonal-first row, if present. Never
+/// removes the diagonal (`row[0]`).
+fn remove_offdiag(row: &mut Vec<(usize, f64)>, c: usize) {
+    if row.len() <= 1 {
+        return;
+    }
+    if let Ok(pos) = row[1..].binary_search_by_key(&c, |&(col, _)| col) {
+        row.remove(1 + pos);
     }
 }
 
-/// Set column `c` of a column-sorted sparse row to `v` (insert/replace; remove
-/// if `v == 0`).
-fn insert_or_set(row: &mut Vec<(usize, f64)>, c: usize, v: f64) {
-    match row.binary_search_by_key(&c, |&(col, _)| col) {
+/// Insert/replace off-diagonal column `c` = `v` in a diagonal-first row (the tail
+/// `row[1..]` stays column-sorted); remove it if `v == 0`. `c` must not be the
+/// row's own diagonal column.
+fn insert_offdiag(row: &mut Vec<(usize, f64)>, c: usize, v: f64) {
+    // Empty row (no diagonal) should not occur for a valid pivot position, but be
+    // defensive: fall back to a plain insert.
+    if row.is_empty() {
+        if v != 0.0 {
+            row.push((c, v));
+        }
+        return;
+    }
+    match row[1..].binary_search_by_key(&c, |&(col, _)| col) {
         Ok(pos) => {
             if v != 0.0 {
-                row[pos].1 = v;
+                row[1 + pos].1 = v;
             } else {
-                row.remove(pos);
+                row.remove(1 + pos);
             }
         }
         Err(pos) => {
             if v != 0.0 {
-                row.insert(pos, (c, v));
+                row.insert(1 + pos, (c, v));
             }
         }
-    }
-}
-
-/// `dst − mult·src` over two column-sorted sparse rows, dropping the eliminated
-/// column `drop_col` and any exact zeros, written into `out` (cleared first).
-/// Result stays column-sorted. `out` is a recycled buffer from `row_pool`, so
-/// the merge reuses its capacity — identical contents to the old allocating
-/// `row_sub`, no per-axpy allocation once the pool is warm.
-fn row_sub_into(
-    dst: &[(usize, f64)],
-    src: &[(usize, f64)],
-    mult: f64,
-    drop_col: usize,
-    out: &mut Vec<(usize, f64)>,
-) {
-    out.clear();
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < dst.len() && j < src.len() {
-        let (dc, dv) = dst[i];
-        let (sc, sv) = src[j];
-        if dc < sc {
-            if dc != drop_col {
-                out.push((dc, dv));
-            }
-            i += 1;
-        } else if dc > sc {
-            let v = -mult * sv;
-            if sc != drop_col && v != 0.0 {
-                out.push((sc, v));
-            }
-            j += 1;
-        } else {
-            let v = dv - mult * sv;
-            if dc != drop_col && v != 0.0 {
-                out.push((dc, v));
-            }
-            i += 1;
-            j += 1;
-        }
-    }
-    while i < dst.len() {
-        let (dc, dv) = dst[i];
-        if dc != drop_col {
-            out.push((dc, dv));
-        }
-        i += 1;
-    }
-    while j < src.len() {
-        let (sc, sv) = src[j];
-        let v = -mult * sv;
-        if sc != drop_col && v != 0.0 {
-            out.push((sc, v));
-        }
-        j += 1;
     }
 }
 
@@ -709,5 +706,81 @@ mod tests {
             );
         }
         assert!(hw > 1.0, "test must exercise genuine element growth");
+    }
+
+    /// After a chain of wide-bump dense-column updates, `U` must stay upper
+    /// triangular *in `uperm` order* (every off-diagonal entry's column outranks
+    /// its row) and diagonal-first — the structural invariant the row-ordered
+    /// solves and the FT elimination both rely on. Tridiagonal base ⇒ dense spike
+    /// ⇒ full-width bump (the issue #87 regime).
+    #[test]
+    fn uperm_triangular_invariant_holds_after_wide_bump_chain() {
+        let m = 12;
+        let mut cols: Vec<Vec<f64>> = vec![vec![0.0; m]; m];
+        for (j, col) in cols.iter_mut().enumerate() {
+            col[j] = 4.0;
+            if j > 0 {
+                col[j - 1] = -1.0;
+            }
+            if j + 1 < m {
+                col[j + 1] = -1.0;
+            }
+        }
+        let params = LuParams {
+            max_updates: 1000,
+            max_growth: 1e30,
+            ..LuParams::default()
+        };
+        let mut lu = SparseLu::factor_dense_columns(m, &cols, params).expect("factor");
+
+        for s in 0..15usize {
+            let slot = s % 4;
+            let mut col = vec![0.0; m];
+            for (i, ci) in col.iter_mut().enumerate() {
+                *ci = 0.5 + ((i * 5 + s * 3) % 7) as f64 * 0.25;
+            }
+            col[slot] = 40.0 + s as f64;
+            if lu.update(slot, &col).is_err() {
+                continue; // a legitimately singular/over-budget step; skip
+            }
+            // Invariant 1: diagonal-first.
+            for (i, row) in lu.u_rows.iter().enumerate() {
+                assert_eq!(row[0].0, i, "row {i} diagonal must be stored first");
+            }
+            // Invariant 2: upper-triangular in `uperm` order.
+            for (i, row) in lu.u_rows.iter().enumerate() {
+                for &(c, _) in row[1..].iter() {
+                    assert!(
+                        lu.uperm[c] > lu.uperm[i],
+                        "update {s}: off-diagonal U[{i},{c}] has rank {} <= row rank {}",
+                        lu.uperm[c],
+                        lu.uperm[i]
+                    );
+                }
+            }
+            // Invariant 3: uperm and uperm_inv are mutual inverses.
+            for k in 0..m {
+                assert_eq!(lu.uperm[lu.uperm_inv[k]], k);
+            }
+        }
+    }
+
+    /// The diagonal-first row helpers must round-trip a value at the diagonal
+    /// column and at an off-diagonal column whose index is *below* the diagonal's
+    /// (the post-permutation case the binary-searched tail must handle).
+    #[test]
+    fn diagonal_first_row_helpers() {
+        // Row for position 5: diagonal at column 5, off-diagonals at 2 and 8.
+        let mut row = vec![(5usize, 3.0)];
+        super::insert_offdiag(&mut row, 8, 7.0);
+        super::insert_offdiag(&mut row, 2, -1.0);
+        assert_eq!(super::get_col(&row, 5), Some(3.0)); // diagonal
+        assert_eq!(super::get_col(&row, 2), Some(-1.0)); // below diagonal column
+        assert_eq!(super::get_col(&row, 8), Some(7.0));
+        assert_eq!(super::get_col(&row, 4), None);
+        assert_eq!(row[0], (5, 3.0), "diagonal stays first");
+        super::remove_offdiag(&mut row, 2);
+        assert_eq!(super::get_col(&row, 2), None);
+        assert_eq!(row[0], (5, 3.0), "diagonal still first after remove");
     }
 }
