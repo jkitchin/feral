@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-19T18:04:26Z
+Generated: 2026-06-21T15:43:20Z
 
 ## Latest Session
 File: dev/sessions/2026-06-19-01.md
@@ -59,34 +59,34 @@ sequence and pivot choices unchanged). Full suite green; `cargo fmt` +
 
 ## Git Status
 ```
-edf1f0f perf(lu): pool FT-update saved-row snapshot (-15% more on casctanks)
-9cf5a96 perf(lu): pool FT-update bump-loop buffers (-19% on casctanks)
-e5587b3 release: feral v0.11.1
-ee0ef33 docs(session): 2026-06-18-01 checkpoint — bump-elim Step 1 (15.8×), Step 2 rejected
-2724cd7 docs(lu): reject Step 2 (dense bump workspace) — bumps are wide but ultra-sparse
+ebaeca6 issue #87 P2: Forrest-Tomlin row-elimination update (O(bump²) → O(bump))
+a676aaf issue #87 P1: add uperm_inv logical-permutation order, route U-solves through it
+a34367e issue #87: diagnose O(bump²) FT update, choose logical-permutation FT, add baseline probe
+75b0322 release: feral v0.11.2
+2ed962d docs(session): 2026-06-19-01 checkpoint — LU-update allocation pooling
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_supernodes_cover_n ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
-test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
-test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 371 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.52s
+test result: ok. 371 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.43s
 
 ```
 
@@ -123,36 +123,36 @@ Top worst factor-ratio vs MUMPS unchanged (KIRBY2_0007 9.95, CRESC132 6.69, …)
 ```
 
 ## Recent Decisions
-workspaces on the `Solver` (mirroring the sequential pooling) and to borrow the
-immutable structure in the warm path rather than clone it. No reproducing test
-is meaningful for a pure allocation-churn change; they are guarded by the
-existing bit-exactness tests between the sequential and parallel drivers.
+once per solve; `U`'s stored indices, `L`, `P`, `Q`, and prior etas stay in fixed
+pivot-position coordinates and are never relabeled. Removed `FtOp::Swap` — the FT
+update does no in-bump magnitude pivoting.
 
-## 2026-06-18 — Sparse FT bump update: sub-diagonal index, not dense workspace or cyclic permutation (discopt#229)
+**Why this over the alternatives.**
+- The old scheme eliminated the dense spike *column*, touching O(bump) rows with
+  cascading fill ⇒ O(bump²) work **and** an O(bump²) eta (which then slows every
+  warm solve). Eliminating the pivotal *row* is O(bump) for sparse `U`, with an
+  O(bump) eta.
+- The symmetric permutation places the **old nonzero `U` diagonals** on the bump
+  diagonal, so it dodges the zero-superdiagonal-pivot landmine that reverted the
+  2026-06-08 column-shift Hessenberg attempt. This is the distinction that makes
+  the route correct on a sparse `U`.
+- A *physical* permutation was rejected: relabeling prior etas is O(k²·bump) over
+  a chain, and encoding the cyclic shift as per-eta swaps reintroduces the PFI
+  O(k·bump) solve blow-up. The logical `uperm` applied once per solve avoids both.
+- The column-ordering lever (discopt#229's other suggestion) changes no
+  asymptotic and is workload-specific; kept as a possible complement, not the fix.
 
-**Context.** discopt#229: `SparseLu::update`'s `eliminate_bump` is the dominant
-cost (~94%) of a casctanks McCormick-LP node solve, O(bump²) on wide bases.
+**Stability.** FT has no in-bump pivoting, so a small bump diagonal can grow
+elements; this is caught by the existing `growth`/`max_growth` monitor and routed
+to `NeedsRefactor` (authoritative verdict = fresh factor). A Schork–Gondzio
+"permute-when-possible" stability/sparsity refinement is recorded as future work,
+not required for correctness.
 
-**Decision.** Fix the McCormick LP regime with a bump-local **sub-diagonal pivot
-index** (Step 1, 902e5d7) that removes the O(bump²) pivot-selection scan with
-bit-identical numerics. Do **not** adopt a dense bump workspace, and do **not**
-revive the textbook FT cyclic-permutation Hessenberg approach.
-
-**Why.**
-- The wide bumps are **ultra-sparse** (measured 0.23% block density, ~24
-  row_subs/update on the real trace), so the cost was the *scan over zeros*, not
-  the elimination. Removing the scan gave 15.8× end-to-end (82.4 s → 5.2 s debug),
-  optimum −167.751 unchanged. A dense workspace would touch the full bump block
-  (~534k cells) and regress ~100–1000× (`dev/tried-and-rejected.md` 2026-06-18).
-- The cyclic-permutation Hessenberg route was already tried and reverted
-  (2026-06-08) for a sparse-U zero-superdiagonal-pivot bug; the in-place
-  partial-pivoting scheme exists specifically to avoid it.
-
-**Scope.** A dense path remains admissible only for a genuinely dense-spike basis
-and must be width-AND-density gated. The asymptotic O(bump²)-fill route (sparse
-BGR / symmetric-permutation FT) stays a parked research spike
-(`dev/research/asymptotic-bump-update-spike-2026-06-18.md`) pending a workload
-that needs it and a correctness story for the zero-pivot / stored-state hazards.
+**Evidence.** `lu_wide_bump_probe` dense-spike: per-update 44–148× faster
+(m=4000: 10.2 s → 69 ms), eta O(m²)→O(m) (2.09M → ~120). `casctanks_ft_update`
+144-chain: 16.88 ms → 1.66 ms (10.2×). Localized-spike (`lu_update_probe`) and
+the full suite unchanged/green. Clean-room from Forrest–Tomlin 1972, Reid 1982,
+Schork–Gondzio ERGO-17-002 (`BASICLU` is GPL — paper only).
 
 ## Recent Tried-and-Rejected
 more work.** Step 2's premise (dense-spike bump, contiguous SAXPY) does not hold
@@ -236,8 +236,8 @@ tests/amf_corpus_oracle.rs
 tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
-tests/column_renumbering_parity.rs
 tests/column_renumbering.rs
+tests/column_renumbering_parity.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -250,6 +250,10 @@ tests/factors_ld_export.rs
 tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/growth_flag.rs
+tests/issue52_stats.rs
+tests/issue64_arrow_ordering.rs
+tests/issue65_mc64_fallback.rs
+tests/issue67_thin_ordering.rs
 tests/issue_15_cascade_arm_gate.rs
 tests/issue_17_robot_1600_cascade_off.rs
 tests/issue_18_narx_cfy_cascade_off.rs
@@ -258,15 +262,12 @@ tests/issue_38_static_pivot.rs
 tests/issue_46_saddle_kkt_cascade.rs
 tests/issue_55_delay_budget.rs
 tests/issue_55_n_tiny_counter.rs
-tests/issue52_stats.rs
-tests/issue64_arrow_ordering.rs
-tests/issue65_mc64_fallback.rs
-tests/issue67_thin_ordering.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_dense.rs
+tests/lu_ft_widebump.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
 tests/lu_update_alloc_probe.rs
@@ -284,8 +285,8 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/rook_rescue_kkt.rs
 tests/rook_rescue.rs
+tests/rook_rescue_kkt.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs

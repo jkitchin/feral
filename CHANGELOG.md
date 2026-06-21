@@ -4,6 +4,29 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — sparse LU Forrest–Tomlin update: O(bump²) → O(bump) on wide spikes
+
+`SparseLu::update` now performs a true **Forrest–Tomlin** update instead of a
+full bump re-triangularization. After folding the spike into `U`, a logical
+symmetric permutation (`uperm`, pivot-position ↔ triangular rank, applied once
+per solve) moves the leaving column and row to the bottom of the bump, and only
+the **single** resulting pivotal row is re-eliminated — one `FtOp::Axpy` per
+cleared sub-diagonal. The old code eliminated the dense spike *column*, touching
+`O(bump)` rows with cascading fill, so both the work and the recorded eta were
+`O(bump²)` on a dense entering column (issue #87, the `autocorr_bern` /
+`casctanks` McCormick-LP regime); eliminating the *row* is `O(bump)` for sparse
+`U` and records an `O(bump)` eta, so warm solves stay cheap too.
+
+On the `lu_wide_bump_probe` dense-spike worst case the per-update cost drops
+44–148× (e.g. m=4000: 10.2 s → 69 ms) and the per-update eta drops from `O(m²)`
+(~2.1M ops) to `O(m)` (~120). On the realistic `casctanks_ft_update` 144-update
+trace (m=2169) the chain runs 16.88 ms → 1.66 ms (10.2×). Localized-spike updates
+(the common LP case) are unchanged. Numerics are validated by `ftran`/`btran`
+residuals over dense-column update chains, dense↔sparse parity, and a
+`uperm`-triangularity invariant; instability without in-bump pivoting is caught by
+the existing growth monitor → `NeedsRefactor`. No public API change.
+`FtOp::Swap` is removed (the FT update records only row axpys).
+
 ## [0.11.2] - 2026-06-19
 
 ### Performance — sparse LU Forrest–Tomlin update allocation pooling

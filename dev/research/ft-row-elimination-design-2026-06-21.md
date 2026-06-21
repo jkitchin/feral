@@ -1,9 +1,21 @@
 # Forrest–Tomlin row-elimination: design & route selection (issue #87)
 
 Date: 2026-06-21
-Status: **design chosen — closes the open spike**
+Status: **implemented (P1+P2) — closes the open spike**
 [[asymptotic-bump-update-spike-2026-06-18]]. Implementation plan:
 `dev/plans/ft-row-elimination-2026-06-21.md`.
+
+**Result (2026-06-21).** Landed in `ebaeca6` (P2) on top of `a676aaf` (P1).
+AFTER vs BEFORE on `lu_wide_bump_probe` (dense-spike tridiagonal): per-update
+44–148× faster (m=4000: 10.2 s → 69 ms), eta `O(m²)→O(m)` (2.09M → ~120);
+`casctanks_ft_update` 144-chain 16.88 ms → 1.66 ms (10.2×); localized-spike
+(`lu_update_probe`) and the full suite unchanged/green. One FP subtlety bit during
+bring-up: the eliminated pivot column's residual `vrc − mult·piv` is not exactly
+zero, so it re-crossed zero and re-enqueued forever (infinite loop / OOM) — fixed
+by clearing `rw[c]` exactly and skipping the pivot's own diagonal in the scatter.
+The Schork–Gondzio "permute-when-possible" fast path (§4, plan P3) and in-bump
+stability pivoting remain future work; the growth-monitor → `NeedsRefactor`
+fallback covers correctness without them.
 
 Resolves the open question in `dev/research/asymptotic-bump-update-spike-2026-06-18.md`
 ("pick and land one route") for the residual **O(bump²)** FT row-elimination on

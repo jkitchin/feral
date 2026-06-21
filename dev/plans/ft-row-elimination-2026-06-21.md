@@ -24,7 +24,12 @@ relabeled.
 - Keep `casctanks_ft_update` bench as the realistic before/after.
 - BEFORE captured: probe exp≈2.8, casctanks 144-chain 16.88 ms.
 
-### P1 — `uperm` plumbing, identity-only (pure refactor, zero behavior change)
+**Status (2026-06-21):** P1 ✅ (`a676aaf`), P2 ✅ (`ebaeca6`), P4 ✅ (probes +
+casctanks bench + new differential/invariant tests). P3 (permute-when-possible)
+and in-bump stability pivoting deferred — growth-monitor → `NeedsRefactor` covers
+correctness. P5 checkpoint in progress.
+
+### P1 — `uperm` plumbing, identity-only (pure refactor, zero behavior change) ✅
 - Add `uperm`, `uperm_inv` fields (identity at factor; cloned in refactor).
 - Rewrite `usolve`/`ut_solve` to walk rows in `uperm` order and take each row's
   `uperm`-diagonal as pivot, with a fast path when `uperm` is identity (the

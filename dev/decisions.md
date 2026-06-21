@@ -5503,3 +5503,51 @@ and must be width-AND-density gated. The asymptotic O(bump²)-fill route (sparse
 BGR / symmetric-permutation FT) stays a parked research spike
 (`dev/research/asymptotic-bump-update-spike-2026-06-18.md`) pending a workload
 that needs it and a correctness story for the zero-pivot / stored-state hazards.
+
+---
+
+## 2026-06-21 — Sparse LU update: logical-permutation Forrest–Tomlin (issue #87)
+
+**Context.** The 2026-06-18 decision parked the asymptotic O(bump²) fix as a
+research spike, having ruled the wide bumps "ultra-sparse" on `casctanks`. Issue
+#87 produced a cleaner reproducer (`autocorr_bern20-05`) where the spike is
+genuinely **dense** but `U` stays sparse, and timing showed `SparseLu::update`
+was 89% of solve time — a single update ≈ a full refactor. The residual cost is
+the bump **row elimination**, and it is real fill, not a scan artifact.
+
+**Decision.** Replace the full-bump re-triangularization with a true
+**Forrest–Tomlin** update carrying a *logical* permutation `uperm`
+(pivot-position ↔ triangular rank): fold the spike into `U`'s column `r`,
+symmetrically shift the bump's rank range so column `r` and row `r` go to the
+bump bottom, then eliminate the **single** resulting pivotal row by one sparse
+forward sweep (one `FtOp::Axpy` per cleared sub-diagonal). `uperm` is applied
+once per solve; `U`'s stored indices, `L`, `P`, `Q`, and prior etas stay in fixed
+pivot-position coordinates and are never relabeled. Removed `FtOp::Swap` — the FT
+update does no in-bump magnitude pivoting.
+
+**Why this over the alternatives.**
+- The old scheme eliminated the dense spike *column*, touching O(bump) rows with
+  cascading fill ⇒ O(bump²) work **and** an O(bump²) eta (which then slows every
+  warm solve). Eliminating the pivotal *row* is O(bump) for sparse `U`, with an
+  O(bump) eta.
+- The symmetric permutation places the **old nonzero `U` diagonals** on the bump
+  diagonal, so it dodges the zero-superdiagonal-pivot landmine that reverted the
+  2026-06-08 column-shift Hessenberg attempt. This is the distinction that makes
+  the route correct on a sparse `U`.
+- A *physical* permutation was rejected: relabeling prior etas is O(k²·bump) over
+  a chain, and encoding the cyclic shift as per-eta swaps reintroduces the PFI
+  O(k·bump) solve blow-up. The logical `uperm` applied once per solve avoids both.
+- The column-ordering lever (discopt#229's other suggestion) changes no
+  asymptotic and is workload-specific; kept as a possible complement, not the fix.
+
+**Stability.** FT has no in-bump pivoting, so a small bump diagonal can grow
+elements; this is caught by the existing `growth`/`max_growth` monitor and routed
+to `NeedsRefactor` (authoritative verdict = fresh factor). A Schork–Gondzio
+"permute-when-possible" stability/sparsity refinement is recorded as future work,
+not required for correctness.
+
+**Evidence.** `lu_wide_bump_probe` dense-spike: per-update 44–148× faster
+(m=4000: 10.2 s → 69 ms), eta O(m²)→O(m) (2.09M → ~120). `casctanks_ft_update`
+144-chain: 16.88 ms → 1.66 ms (10.2×). Localized-spike (`lu_update_probe`) and
+the full suite unchanged/green. Clean-room from Forrest–Tomlin 1972, Reid 1982,
+Schork–Gondzio ERGO-17-002 (`BASICLU` is GPL — paper only).

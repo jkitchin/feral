@@ -103,6 +103,50 @@ fn wide_bump_dense_update_chain_ftran_btran_residuals() {
     );
 }
 
+/// A wide-bump update that trips the growth budget must roll back cleanly —
+/// restoring both `U` and the `uperm` rank order — so the factorization is
+/// unchanged and still solves the pre-update basis correctly.
+#[test]
+fn wide_bump_growth_rollback_leaves_self_solvable() {
+    let m = 40;
+    let cols = tridiag_cols(m);
+    let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+    let sym = SparseLuSymbolic::natural(m);
+    // A tiny growth budget so a dense-spike update is rejected.
+    let params = LuParams {
+        max_updates: 100_000,
+        max_growth: 1.0 + 1e-9,
+        ..LuParams::default()
+    };
+    let mut lu = SparseLu::factor(&a, &sym, params).expect("factor");
+
+    // Baseline solve on the original basis.
+    let rhs: Vec<f64> = (0..m).map(|i| 1.0 + (i % 4) as f64).collect();
+    let mut x0 = rhs.clone();
+    lu.ftran(&mut x0).expect("ftran");
+    let base_res = max_abs_diff(&matvec(&cols, &x0), &rhs);
+    assert!(base_res < 1e-9, "baseline ftran residual {base_res:.3e}");
+
+    // A dense-spike update that should exceed the growth budget.
+    let mut col = vec![0.0; m];
+    for (i, ci) in col.iter_mut().enumerate() {
+        *ci = 1.0 + (i % 3) as f64;
+    }
+    col[0] = 5.0;
+    let err = lu.update(0, &col);
+    assert!(
+        matches!(err, Err(feral::error::FeralError::NeedsRefactor)),
+        "tiny growth budget should reject the wide-bump update, got {err:?}"
+    );
+
+    // Self unchanged: the original basis still solves to the same answer.
+    let mut x1 = rhs.clone();
+    lu.ftran(&mut x1).expect("ftran after rollback");
+    let res = max_abs_diff(&matvec(&cols, &x1), &rhs);
+    assert!(res < 1e-9, "post-rollback ftran residual {res:.3e}");
+    assert_eq!(x0, x1, "rollback must leave the factor bit-identical");
+}
+
 /// The FT update records a *pivotal-row-local* eta, not the O(bump²) eta of a
 /// full bump re-triangularization. For a tridiagonal base the dense spike folds
 /// into the chain factor, so the eta is O(m) (the pivotal row cascades the whole
