@@ -185,7 +185,7 @@ impl SparseLu {
                 self.saved_scratch = saved;
                 self.etas.push(FtEta { ops });
                 self.growth = growth;
-                #[cfg(debug_assertions)]
+                #[cfg(feature = "lu-ft-invariant-check")]
                 self.debug_check_invariants();
                 Ok(())
             }
@@ -493,10 +493,12 @@ impl SparseLu {
         self.scratch_mark = queued;
     }
 
-    /// Debug-only structural self-check: `uperm` bijection, diagonal-first rows,
-    /// upper-triangular-in-`uperm` order, and `u_above` matching `U`'s off-diagonal
-    /// pattern exactly. Catches FT-update bookkeeping drift at its source.
-    #[cfg(debug_assertions)]
+    /// Structural self-check (opt-in via the `lu-ft-invariant-check` feature, off
+    /// by default because it allocates `O(m)` per update): `uperm` bijection,
+    /// diagonal-first rows, upper-triangular-in-`uperm` order, and `u_above`
+    /// matching `U`'s off-diagonal pattern exactly. Catches FT-update bookkeeping
+    /// drift at its source.
+    #[cfg(feature = "lu-ft-invariant-check")]
     fn debug_check_invariants(&self) {
         let m = self.m;
         for k in 0..m {

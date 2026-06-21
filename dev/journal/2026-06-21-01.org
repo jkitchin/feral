@@ -92,3 +92,14 @@ AFTER fix: casctanks worst_resid 1.299e-12 with 0 refactors (FT is stable here, 
 pivoting needed — the earlier instability worry was wrong). Full debug suite 371
 lib + integration green; clippy clean. wide_bump probe unchanged (44-148×). Kept
 debug_check_invariants as a permanent debug-only guard.
+
+* 19:10 :lu:issue-87:alloc-probe:ci:
+Second CI failure (different test): tests/lu_update_alloc_probe.rs — per-update
+allocs regressed to 1499.8 (threshold <250). Cause: debug_check_invariants
+allocates an m-length Vec<Vec> + m clones every update in debug builds, and the
+alloc probe runs in debug. Gated the check behind an off-by-default cargo feature
+`lu-ft-invariant-check` (it is a debugging aid, not a hot-path guard). With it off,
+the FT update's real profile is 11.2 allocs/update — BETTER than the old ~82 (FT
+touches fewer rows). casctanks correctness is guarded by the residual test; the
+invariant check stays available via `cargo test --features lu-ft-invariant-check`.
+Full debug suite green; clippy clean both with and without the feature.
