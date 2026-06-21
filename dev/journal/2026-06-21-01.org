@@ -1,0 +1,46 @@
+#+TITLE: Session 2026-06-21-01 — issue #87: residual O(bump²) FT row-elimination
+
+* 14:50 :lu:issue-87:diagnosis:
+Read issue #87 and the code. The current SparseLu::update eliminate_bump
+(src/lu/sparse_update.rs) is NOT a Forrest-Tomlin update — it sets the spike
+into U's column r and runs full left-to-right partial-pivoting Gaussian
+elimination over the whole bump [r,h] (a Bartels-Golub re-triangularization in
+fixed pivot order). It eliminates the dense spike COLUMN, subtracting the pivot
+row from O(bump) rows and cascading fill -> O(bump²), and the recorded eta is
+also O(bump²) so every later solve pays too.
+
+True FT (Forrest-Tomlin 1972, Reid 1982, Schork-Gondzio ERGO-17-002) eliminates
+the single pivotal ROW after a symmetric permutation: the permuted diagonal
+pivots are the old (nonzero) U diagonals, dodging the zero-pivot landmine that
+killed the 2026-06-08 column-shift attempt (which used the old superdiagonal as
+pivot). Cost O(bump) for sparse U; eta = one row + spike column.
+
+* 15:20 :lu:issue-87:baseline:wide-bump-probe:
+Wrote crates/feral-diagnostics/src/bin/lu_wide_bump_probe.rs: tridiagonal basis
+(L,U bidiagonal = sparse), replace an early slot with a dense column -> dense
+spike, full-width bump, sparse U. The autocorr_bern regime with no external dep.
+
+BEFORE (release, this host), 20 updates each:
+  m=250   us/update=4476     /m=17.9    eta_ops/upd=30752
+  m=500   us/update=20286    /m=40.6    eta_ops/upd=124002   exp≈2.18
+  m=1000  us/update=80407    /m=80.4    eta_ops/upd=402980   exp≈1.99
+  m=2000  us/update=1693684  /m=846.8   eta_ops/upd=964895
+  m=4000  us/update=10246482 /m=2561.6  eta_ops/upd=2089427
+
+16x in m -> 2290x in time (≈ m^2.8). factor_nnz stays O(m) (≈3m): the fill is NOT
+in U, it is the transient elimination + the eta. Confirms issue #87 fingerprint.
+casctanks_ft_update bench (144 updates, m=2169): 16.88 ms BEFORE.
+
+* 15:40 :lu:issue-87:route-decision:
+Chose the logical-permutation Forrest-Tomlin (Route 2 ∪ Route 3-logical): carry
+one evolving permutation uperm (pivot-position <-> triangular rank), applied ONCE
+per solve; never relabel U's stored indices or prior etas. Rejected: Route 1
+(column ordering, workload-specific, no asymptotic change) and Route 3-physical
+(relabeling prior etas -> O(k²·bump); cyclic shift as per-eta swaps -> O(k·bump)
+solve blow-up, the PFI problem FT exists to avoid; and the dense-spike eta is
+already 2.09M ops -> we must shrink it, not grow it).
+
+Wrote dev/research/ft-row-elimination-design-2026-06-21.md (closes the open spike
+asymptotic-bump-update-spike-2026-06-18) and dev/plans/ft-row-elimination-2026-06-21.md
+(phased P0..P5). Added schork2017permuting + huangfu2015novel to references.bib.
+BASICLU is GPL -> paper-only clean-room.
