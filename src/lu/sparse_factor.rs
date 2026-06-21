@@ -83,6 +83,15 @@ pub struct SparseLu {
     /// Inverse of `perm`: `perm_inv[orig_row] = pivot_position`. Used to seed the
     /// sparse spike solve in the Forrest–Tomlin update.
     pub(super) perm_inv: Vec<usize>,
+    /// Forrest–Tomlin triangular order. `U` is upper triangular **in `uperm`
+    /// order**: `uperm_inv[rank]` is the pivot position at triangular rank `rank`.
+    /// Identity at factor time (so the whole pre-update world is byte-identical);
+    /// each column-replacement update composes one cyclic shift of a bump's rank
+    /// range into it (`dev/research/ft-row-elimination-design-2026-06-21.md`). The
+    /// solves walk `U` in `uperm_inv` order; `L`, `P`, `Q`, and the etas stay in
+    /// fixed pivot-position coordinates and are never relabeled. The forward map
+    /// `uperm` (position -> rank) is added with the update that first reads it.
+    pub(super) uperm_inv: Vec<usize>,
     /// Column order: factorization column `k` is original column `qcol[k]`.
     pub(super) qcol: Vec<usize>,
     /// Inverse of `qcol`: `qcol_inv[original_col] = column_position`.
@@ -448,6 +457,7 @@ impl SparseLu {
             u_rows,
             perm,
             perm_inv,
+            uperm_inv: (0..m).collect(),
             qcol,
             qcol_inv,
             u_above,
