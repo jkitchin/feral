@@ -185,6 +185,8 @@ impl SparseLu {
                 self.saved_scratch = saved;
                 self.etas.push(FtEta { ops });
                 self.growth = growth;
+                #[cfg(debug_assertions)]
+                self.debug_check_invariants();
                 Ok(())
             }
             Err(e) => {
@@ -458,6 +460,11 @@ impl SparseLu {
             .map(|&c| (c, rw[c]))
             .collect();
         offdiag.sort_unstable_by_key(|&(c, _)| c);
+        // `rw_touched` may list a column more than once (its scatter value crossed
+        // zero and back), so drop duplicate columns — each carries the same final
+        // `rw[c]`. Leaving them would put duplicate entries in the row and corrupt
+        // `U` / `u_above`.
+        offdiag.dedup_by_key(|&mut (c, _)| c);
         new_row.extend_from_slice(&offdiag);
         self.u_rows[r] = new_row;
 
@@ -484,6 +491,41 @@ impl SparseLu {
         self.ft_rw = rw;
         self.targets_scratch = rw_touched;
         self.scratch_mark = queued;
+    }
+
+    /// Debug-only structural self-check: `uperm` bijection, diagonal-first rows,
+    /// upper-triangular-in-`uperm` order, and `u_above` matching `U`'s off-diagonal
+    /// pattern exactly. Catches FT-update bookkeeping drift at its source.
+    #[cfg(debug_assertions)]
+    fn debug_check_invariants(&self) {
+        let m = self.m;
+        for k in 0..m {
+            debug_assert_eq!(self.uperm[self.uperm_inv[k]], k, "uperm not a bijection");
+        }
+        // Rebuild the expected off-diagonal column index from U.
+        let mut expect: Vec<Vec<usize>> = vec![Vec::new(); m];
+        for (i, row) in self.u_rows.iter().enumerate() {
+            debug_assert!(!row.is_empty(), "row {i} empty (no diagonal)");
+            debug_assert_eq!(row[0].0, i, "row {i} diagonal not stored first");
+            for &(c, _) in row[1..].iter() {
+                debug_assert!(
+                    self.uperm[c] > self.uperm[i],
+                    "row {i} (rank {}) off-diagonal column {c} (rank {}) not upper in uperm",
+                    self.uperm[i],
+                    self.uperm[c]
+                );
+                expect[c].push(i);
+            }
+        }
+        for (c, (exp, idx)) in expect.iter_mut().zip(self.u_above.iter()).enumerate() {
+            exp.sort_unstable();
+            let mut got = idx.clone();
+            got.sort_unstable();
+            debug_assert_eq!(
+                &got, exp,
+                "u_above[{c}] mismatch (duplicate or stale entry)"
+            );
+        }
     }
 
     /// Remove row `i`'s off-diagonal entries from the `u_above` column index

@@ -71,3 +71,24 @@ realistic LP bases it is far smaller). casctanks_ft_update 144-chain: 16.88 ms -
 1.66 ms (10.2x). Full suite 370 lib + all integration green; clippy clean. New
 tests: tests/lu_ft_widebump.rs (ftran+btran residual chain, sub-quadratic eta)
 and the uperm-triangularity unit invariant.
+
+* 18:40 :lu:issue-87:bug:ci-caught:
+CI failed on tests/lu_update_casctanks.rs (NOT run in my local --release grep —
+process lesson: grep-based pass detection was unreliable; the test had failed).
+casctanks 144-update replay: worst_true_residual=5.040e3, refactor_signals=0,
+sparse_vs_dense=0. A fresh factor each step gave 1e-12, so factor/ftran correct —
+the UPDATE chain drifted. Growth monitor never fired even at max_growth=1e4, so it
+was a correctness bug, not instability.
+
+Added a #[cfg(debug_assertions)] debug_check_invariants() (uperm bijection,
+diagonal-first, upper-tri-in-uperm, u_above == U off-diagonal pattern) called at
+the end of each committed update. It fired at u_above[2139] with empty
+missing/extra → a DUPLICATE entry. Root cause: rw_touched can list a column twice
+(its scatter value crossed zero and back), so eliminate_pivot_row's gather emitted
+duplicate columns in the rebuilt row r, corrupting U and u_above, compounding over
+updates. Fix: offdiag.dedup_by_key(column) after the sort.
+
+AFTER fix: casctanks worst_resid 1.299e-12 with 0 refactors (FT is stable here, no
+pivoting needed — the earlier instability worry was wrong). Full debug suite 371
+lib + integration green; clippy clean. wide_bump probe unchanged (44-148×). Kept
+debug_check_invariants as a permanent debug-only guard.
