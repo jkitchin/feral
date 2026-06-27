@@ -44,3 +44,44 @@ column adds nnz(row)>=1 to work but 1 to eta. Both pass; full lib suite 375 pass
 clippy clean, fmt clean.
 
 Research note: `dev/research/ft-dense-bump-cost-2026-06-27.md`.
+
+* 19:20 :issue-89:ft-update:perf:u_above:profiling:
+Followed up on "is there room for improvement" by PROFILING instead of
+speculating (had guessed wrong twice on the theory). Added temp per-phase
+timers (atomics) around compute_spike / set_column_r / eliminate_pivot_row /
+commit. Dense reproducer, m=2048, per update:
+
+  spike=1.3ms  setcol=1.8ms  elim=2.8ms  commit=537ms
+
+i.e. the u_above reindex on commit was 99% of the time and scaled 1.7->13.6->76
+->537ms over m=256..2048 (~m^2.7, toward O(m^3)), while the real elimination
+arithmetic stayed at ~Theta(factor_nnz). This was a GENUINE BUG, not the
+fundamental dense cost I'd claimed.
+
+Root cause: commit re-indexed EVERY changed row wholesale (unindex_above +
+index_above over the full row), O(bump*rowlen*shift) ~ O(m^3) of sorted-Vec
+memmoves, almost all for entries that didn't change. Of the O(m) changed rows,
+only row r is rebuilt; the rest just gained/lost their single column-r entry.
+
+Fix: incremental u_above maintenance. set_column_r only rewrites column r (its
+holders = spike support exactly), eliminate_pivot_row only rebuilds row r, no
+other row's column membership changes (the FT win). So commit does just:
+  (a) u_above[r] = supp \ {r}   (clear+extend, O(|supp|))
+  (b) unindex/index row r alone against its old/new column set
+Drops commit O(m^3) -> O(m^2) = arithmetic order. Rollback unchanged (u_above
+still only mutated in the Ok branch, so failures stay consistent).
+
+Oracle: lu-ft-invariant-check rebuilds expected u_above from U and asserts exact
+equality after every update. All 28 lu tests pass with the feature on => the
+incremental index is byte-identical to a full rebuild.
+
+Measured (release, dense reproducer): 13-62x faster per update (m=256 1.46ms->
+0.11ms; m=2048 350ms->5.6ms). Scaling ~m^2.7 -> ~m^2; constant 2.6 ns per
+counted multiply-add at every m => update now sits on the Theta(factor_nnz)
+floor. Full lib suite 375 pass, fmt clean.
+
+Also corrected the over-stated "no asymptotically cheaper FT path" claim in the
+research note + CHANGELOG: dense INVERSE != dense FACTOR. The real sc bases have
+sparse factors (factor_nnz/m=2-39), update is Theta(factor_nnz) << Theta(m^2),
+linear in fill (matches the issue's own 0.01->0.72ms table). Only a genuinely
+dense FACTOR has the Theta(m^2) floor.

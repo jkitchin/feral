@@ -177,13 +177,37 @@ impl SparseLu {
                     self.rollback(saved, &saved_uperm_inv, r_rank);
                     return Err(FeralError::NeedsRefactor);
                 }
-                // Commit: refresh the u_above index for every changed row.
-                for (i, old_row) in saved.iter() {
-                    self.unindex_above(*i, old_row);
-                    let new_row = std::mem::take(&mut self.u_rows[*i]);
-                    self.index_above(*i, &new_row);
-                    self.u_rows[*i] = new_row;
-                }
+                // Commit: refresh the `u_above` column index *incrementally*. Only
+                // two things changed structurally (issue #89): `set_column_r`
+                // rewrote column `r` (its holders are now exactly the spike
+                // support), and `eliminate_pivot_row` rebuilt row `r`. Every other
+                // "changed" row only gained or lost its single column-`r` entry —
+                // already captured by column `r`'s holder list — so its membership
+                // in *other* columns is untouched and must NOT be re-indexed. The
+                // old code re-indexed every changed row wholesale, an
+                // `O(bump · rowlen · shift)` (≈ `O(m³)` on a dense bump) churn that
+                // dwarfed the elimination's `O(factor_nnz)` arithmetic.
+                //
+                // (a) Column `r`'s holders = spike support minus `r`. `supp` is
+                //     already sorted+deduped and `p != r` preserves order, so the
+                //     list stays sorted.
+                self.u_above[r].clear();
+                self.u_above[r].extend(supp.iter().copied().filter(|&p| p != r));
+                // (b) Row `r` changed its column set: drop `r` from its old
+                //     columns' holder lists and add it to the new ones. (Both skip
+                //     column `r` itself — that is the diagonal, not a `u_above`
+                //     entry — so this never touches the list rebuilt in (a).)
+                //     `saved` is a local moved out of `self`, so borrowing the
+                //     snapshot while mutating `self` is sound (no clone needed).
+                let old_row_r: &[(usize, f64)] = saved
+                    .iter()
+                    .find(|(i, _)| *i == r)
+                    .map(|(_, b)| b.as_slice())
+                    .unwrap_or(&[]);
+                self.unindex_above(r, old_row_r);
+                let new_row_r = std::mem::take(&mut self.u_rows[r]);
+                self.index_above(r, &new_row_r);
+                self.u_rows[r] = new_row_r;
                 for (_, buf) in saved.drain(..) {
                     self.saved_pool.push(buf);
                 }

@@ -4,6 +4,27 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — sparse LU update: O(m³) → O(m²) `u_above` reindex on filled bumps (issue #89)
+
+`SparseLu::update` re-indexed the `u_above` column index for *every* changed row
+on commit (`unindex_above` + `index_above` over each row), an
+`O(bump · rowlen · shift)` ≈ `O(m³)` sorted-`Vec` memmove churn on dense/filled
+bumps. Profiling a single update on a dense-inverse (set-covering) basis showed
+this commit step was **99% of the update time** (m=2048: 537 ms of 545 ms), while
+the actual elimination arithmetic was ~3 ms. The reindex is now incremental: only
+column `r` (whose holders are exactly the spike support) and row `r` (the only
+rebuilt row) change — every other "changed" row only gains/loses its single
+column-`r` entry, already captured by column `r`'s holder list, so it is no longer
+re-indexed. This drops the commit to `O(m²)` = the elimination's own order.
+
+Measured on the `ft_dense_bump` reproducer (release): **13–62× faster** per update
+(m=256: 1.46 ms → 0.11 ms; m=2048: 350 ms → 5.6 ms), and the per-update scaling
+falls from ~m^2.7 to ~m² — a constant 2.6 ns per counted multiply-add at every
+size, i.e. the update now sits on the `Θ(factor_nnz)` arithmetic floor. Validated
+by the `lu-ft-invariant-check` feature (rebuilds expected `u_above` from `U` and
+asserts exact equality after every update): all `lu` tests pass with it enabled.
+No public API or numerical change.
+
 ### Added — true per-update cost counter for refactorization scheduling (issue #89)
 
 `SparseLu` now exposes `last_update_work()` (scalar multiply-adds of the most
@@ -14,11 +35,12 @@ factor/refactor), and the advisory `should_refactor()` predicate
 *solve-replay* ops (O(1) each) and is the right witness for warm-solve cost — the
 new counter is proportional to the factor fill and grows O(factor_nnz) per update
 on dense-inverse (set-covering) bases. On those bases a single Forrest–Tomlin
-update is intrinsically O(factor_nnz) — the spike `B⁻¹aₙₑw` is itself dense, so
-the small entering-column nnz does not bound the work, and there is no
-asymptotically cheaper FT path; the correct response is to refactor aggressively,
-which `should_refactor()` now lets callers schedule on the true cost instead of
-the undercounting `eta_ops()`. No change to `update()`'s behaviour; `eta_ops()`
+update is intrinsically Ω(factor_nnz) — the spike `B⁻¹aₙₑw` is itself dense, so
+the small entering-column nnz does not bound the work (for a genuinely *dense
+factor* that floor is Θ(m²); for the sparse-factor/dense-inverse bases in the
+issue it is Θ(factor_nnz) ≪ Θ(m²)). Past that floor the correct response is to
+refactor aggressively, which `should_refactor()` now lets callers schedule on the
+true cost instead of the undercounting `eta_ops()`. No change to `update()`'s behaviour; `eta_ops()`
 is retained unchanged. See `dev/research/ft-dense-bump-cost-2026-06-27.md` and the
 standalone reproducer `examples/ft_dense_bump.rs`.
 
