@@ -4,6 +4,24 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — true per-update cost counter for refactorization scheduling (issue #89)
+
+`SparseLu` now exposes `last_update_work()` (scalar multiply-adds of the most
+recent committed column-replacement update: the spike solve plus the
+row-elimination scatters), `update_work()` (cumulative since the last
+factor/refactor), and the advisory `should_refactor()` predicate
+(`update_work() >= factor_nnz()`). Unlike `eta_ops()` — which counts
+*solve-replay* ops (O(1) each) and is the right witness for warm-solve cost — the
+new counter is proportional to the factor fill and grows O(factor_nnz) per update
+on dense-inverse (set-covering) bases. On those bases a single Forrest–Tomlin
+update is intrinsically O(factor_nnz) — the spike `B⁻¹aₙₑw` is itself dense, so
+the small entering-column nnz does not bound the work, and there is no
+asymptotically cheaper FT path; the correct response is to refactor aggressively,
+which `should_refactor()` now lets callers schedule on the true cost instead of
+the undercounting `eta_ops()`. No change to `update()`'s behaviour; `eta_ops()`
+is retained unchanged. See `dev/research/ft-dense-bump-cost-2026-06-27.md` and the
+standalone reproducer `examples/ft_dense_bump.rs`.
+
 ### Performance — sparse LU Forrest–Tomlin update: O(bump²) → O(bump) on wide spikes
 
 `SparseLu::update` now performs a true **Forrest–Tomlin** update instead of a

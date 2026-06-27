@@ -164,6 +164,18 @@ pub struct SparseLu {
     /// rebuilds the whole `SparseLu` (pools included), so no leak accumulates.
     pub(super) saved_scratch: Vec<(usize, Vec<(usize, f64)>)>,
     pub(super) saved_pool: Vec<Vec<(usize, f64)>>,
+    /// True per-update **build** cost (scalar multiply-adds) of the most recent
+    /// committed column-replacement update: the spike solve (`compute_spike`)
+    /// plus the row-elimination scatters (`eliminate_pivot_row`). Unlike
+    /// [`Self::last_eta_ops`] (a *solve-replay* op count, O(1) per op), this
+    /// tracks the work proportional to the factor fill — the cost that grows
+    /// O(factor_nnz) on dense-inverse bases (issue #89). Zero after factor.
+    pub(super) last_update_work: usize,
+    /// Cumulative [`Self::last_update_work`] across all updates since the last
+    /// factor/refactor. The signal callers use to schedule refactorization
+    /// (`update_work() >= factor_nnz()` ⇒ the update chain has cost about one
+    /// refactor; see [`Self::should_refactor`]). Reset to zero by factor.
+    pub(super) update_work_total: usize,
 }
 
 impl SparseLu {
@@ -487,6 +499,8 @@ impl SparseLu {
             row_pool: Vec::new(),
             saved_scratch: Vec::new(),
             saved_pool: Vec::new(),
+            last_update_work: 0,
+            update_work_total: 0,
         })
     }
 
@@ -534,6 +548,37 @@ impl SparseLu {
     /// Operations in the most recent update's eta (its bump cost).
     pub fn last_eta_ops(&self) -> usize {
         self.etas.last().map(|e| e.ops.len()).unwrap_or(0)
+    }
+
+    /// True **build** cost (scalar multiply-adds) of the most recent committed
+    /// column-replacement update: the spike solve plus the row-elimination
+    /// scatters. Unlike [`Self::last_eta_ops`] (the O(1)-per-op *solve-replay*
+    /// count), this is proportional to the factor fill and grows O(factor_nnz)
+    /// on dense-inverse bases — the cost the warm `update()` path actually pays
+    /// (issue #89). Zero immediately after a factor/refactor.
+    pub fn last_update_work(&self) -> usize {
+        self.last_update_work
+    }
+
+    /// Cumulative [`Self::last_update_work`] over all updates since the last
+    /// factor/refactor. This — not [`Self::eta_ops`] — is the signal for
+    /// scheduling refactorization: it tracks the real work the update chain has
+    /// spent, which on dense-inverse bases climbs far faster than the eta op
+    /// count. See [`Self::should_refactor`].
+    pub fn update_work(&self) -> usize {
+        self.update_work_total
+    }
+
+    /// Advisory: has the update chain since the last factor/refactor cost about
+    /// as much as a fresh factorization? True once cumulative
+    /// [`Self::update_work`] reaches [`Self::factor_nnz`] — the point past which
+    /// continuing to update is no cheaper than refactoring (and keeps getting
+    /// more expensive as the bumps fill). Purely advisory: it does **not** change
+    /// [`SparseLu::update`]'s behaviour; callers decide when to call
+    /// [`SparseLu::refactor`]. On sparse bases (where updates stay cheap) this
+    /// stays `false` for many updates; on dense-inverse bases it trips quickly.
+    pub fn should_refactor(&self) -> bool {
+        self.update_work_total >= self.factor_nnz()
     }
 
     /// Total Gilbert–Peierls reach nodes visited during the factorization.

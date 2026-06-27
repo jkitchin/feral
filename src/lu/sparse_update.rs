@@ -94,10 +94,15 @@ impl SparseLu {
             return Err(FeralError::NeedsRefactor);
         }
 
+        // True per-update build cost (scalar multiply-adds): the spike solve plus
+        // the row-elimination scatters. Folded into the public `last_update_work`
+        // / `update_work` counters only on commit (issue #89).
+        let mut work: usize = 0;
+
         // --- Sparse spike ρ = G⁻¹ L⁻¹ P (scaled aₙₑw) via Gilbert–Peierls reach ---
         let mut w = std::mem::take(&mut self.ft_work); // dedicated buffer, zero on entry
         let mut touched: Vec<usize> = Vec::new(); // positions made nonzero in w
-        self.compute_spike(entering, leaving_slot, &mut w, &mut touched);
+        self.compute_spike(entering, leaving_slot, &mut w, &mut touched, &mut work);
 
         let r = self.qcol_inv[leaving_slot];
         let r_rank = self.uperm[r];
@@ -152,7 +157,7 @@ impl SparseLu {
         self.shift_uperm(r, r_rank, h_rank);
 
         // Eliminate the single pivotal row `r` (now at rank `h_rank`).
-        let result = self.eliminate_pivot_row(r, h_rank, w[r]);
+        let result = self.eliminate_pivot_row(r, h_rank, w[r], &mut work);
 
         clear(&mut w, &touched);
         self.ft_work = w;
@@ -185,6 +190,8 @@ impl SparseLu {
                 self.saved_scratch = saved;
                 self.etas.push(FtEta { ops });
                 self.growth = growth;
+                self.last_update_work = work;
+                self.update_work_total += work;
                 #[cfg(feature = "lu-ft-invariant-check")]
                 self.debug_check_invariants();
                 Ok(())
@@ -238,6 +245,7 @@ impl SparseLu {
         leaving_slot: usize,
         w: &mut [f64],
         touched: &mut Vec<usize>,
+        work: &mut usize,
     ) {
         let dcol = self.scale.d_col[leaving_slot];
         let mut mark = std::mem::take(&mut self.scratch_mark);
@@ -285,6 +293,7 @@ impl SparseLu {
                 continue;
             }
             let (lo, hi) = (self.l_col_ptr[k], self.l_col_ptr[k + 1]);
+            *work += hi - lo;
             for idx in lo..hi {
                 w[self.l_row_idx[idx]] -= self.l_val[idx] * yk;
             }
@@ -292,6 +301,7 @@ impl SparseLu {
 
         // Replay the FT etas forward (G⁻¹), tracking newly touched positions.
         for eta in self.etas.iter() {
+            *work += eta.ops.len();
             for op in eta.ops.iter() {
                 match *op {
                     FtOp::Axpy { target, src, mult } => {
@@ -360,6 +370,7 @@ impl SparseLu {
         r: usize,
         h_rank: usize,
         diag0: f64,
+        work: &mut usize,
     ) -> Result<Vec<FtOp>, FeralError> {
         let ztol = self.params.zero_pivot_tol * self.u_max0;
         let mut ops: Vec<FtOp> = Vec::new();
@@ -373,6 +384,7 @@ impl SparseLu {
         // Seed: row r off-diagonals (column `r` excluded — its value is `diag0`),
         // pushing the sub-diagonal columns onto the heap.
         let row_r = std::mem::take(&mut self.u_rows[r]);
+        *work += row_r.len();
         for &(c, v) in row_r.iter() {
             if c == r {
                 continue; // old diagonal discarded; replaced by the spike value
@@ -428,6 +440,10 @@ impl SparseLu {
             // skip the pivot's own diagonal in the scatter accordingly. Fill at
             // strictly higher ranks may enqueue further sub-diagonal columns.
             rw[c] = 0.0;
+            // One scatter per off-diagonal of the eliminated row — the
+            // fill-proportional term that makes the update O(factor_nnz) on a
+            // dense bump (issue #89).
+            *work += self.u_rows[c].len();
             for &(cc, v) in self.u_rows[c].iter() {
                 if cc == c {
                     continue;
@@ -649,6 +665,8 @@ fn insert_offdiag(row: &mut Vec<(usize, f64)>, c: usize, v: f64) {
 #[cfg(test)]
 mod tests {
     use crate::lu::sparse_factor::SparseLu;
+    use crate::lu::sparse_matrix::SparseColMatrix;
+    use crate::lu::sparse_symbolic::SparseLuSymbolic;
     use crate::lu::LuParams;
 
     /// L5 (dev/research/repo-review-2026-06-09.md): the sparse growth monitor
@@ -763,6 +781,114 @@ mod tests {
                 assert_eq!(lu.uperm[lu.uperm_inv[k]], k);
             }
         }
+    }
+
+    /// `last_update_work`/`update_work` accounting (issue #89): zero after factor,
+    /// strictly positive and equal to `last_update_work` after the first commit,
+    /// accumulating across updates, and reset by `refactor`. Oracle is the
+    /// definitional bookkeeping (no external solver needed): the cumulative
+    /// counter is the running sum of the per-update counter.
+    #[test]
+    fn update_work_accumulates_and_resets() {
+        let cols = vec![
+            vec![4.0, 1.0, 0.0, 0.0],
+            vec![1.0, 3.0, 1.0, 0.0],
+            vec![0.0, 1.0, 2.0, 1.0],
+            vec![0.0, 0.0, 1.0, 5.0],
+        ];
+        let m = 4;
+        let params = LuParams {
+            max_updates: 20,
+            max_growth: 1e12,
+            ..LuParams::default()
+        };
+        let mut lu = SparseLu::factor_dense_columns(m, &cols, params).expect("factor");
+        assert_eq!(lu.last_update_work(), 0, "no work before any update");
+        assert_eq!(lu.update_work(), 0);
+        assert!(!lu.should_refactor(), "fresh factor never needs refactor");
+
+        let mut running = 0usize;
+        for (slot, col) in [
+            (1usize, vec![0.5, 6.0, 0.5, 0.0]),
+            (2usize, vec![0.0, 0.5, 4.0, 0.5]),
+        ] {
+            lu.update(slot, &col).expect("update commits");
+            let w = lu.last_update_work();
+            assert!(w > 0, "a committed update must record positive work");
+            running += w;
+            assert_eq!(lu.update_work(), running, "cumulative = running sum");
+        }
+
+        // Rebuild from the *current* basis columns; refactor must zero the work.
+        let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
+        let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+        lu.refactor(&a, &sym).expect("refactor");
+        assert_eq!(lu.last_update_work(), 0, "refactor resets per-update work");
+        assert_eq!(lu.update_work(), 0, "refactor resets cumulative work");
+    }
+
+    /// The new counter must reflect the *fill-proportional build* cost that
+    /// `eta_ops` (a solve-replay op count) cannot. External oracle (FT structure,
+    /// not the counter's own bookkeeping): each eliminated sub-diagonal column `c`
+    /// of the pivotal row contributes `nnz(U row c) >= 1` to the build work but
+    /// exactly 1 to the eta op-count, so `last_update_work >= last_eta_ops` always
+    /// — and on a dense bump (tridiagonal base ⇒ dense spike, the issue #87/#89
+    /// regime) the U rows are long, so the gap is wide. A counter that merely
+    /// re-counted eta ops could not satisfy the strict inequality.
+    #[test]
+    fn update_work_exceeds_eta_ops_on_dense_bump() {
+        let m = 12;
+        let mut cols: Vec<Vec<f64>> = vec![vec![0.0; m]; m];
+        for (j, col) in cols.iter_mut().enumerate() {
+            col[j] = 4.0;
+            if j > 0 {
+                col[j - 1] = -1.0;
+            }
+            if j + 1 < m {
+                col[j + 1] = -1.0;
+            }
+        }
+        let params = LuParams {
+            max_updates: 1000,
+            max_growth: 1e30,
+            ..LuParams::default()
+        };
+        let mut lu = SparseLu::factor_dense_columns(m, &cols, params).expect("factor");
+
+        let mut saw_wide_bump = false;
+        for s in 0..15usize {
+            let slot = s % 4;
+            let mut col = vec![0.0; m];
+            for (i, ci) in col.iter_mut().enumerate() {
+                *ci = 0.5 + ((i * 5 + s * 3) % 7) as f64 * 0.25;
+            }
+            col[slot] = 40.0 + s as f64;
+            if lu.update(slot, &col).is_err() {
+                continue;
+            }
+            // General invariant: build work never undercounts the eta op-count.
+            assert!(
+                lu.last_update_work() >= lu.last_eta_ops(),
+                "update {s}: build work {} must be >= eta ops {}",
+                lu.last_update_work(),
+                lu.last_eta_ops()
+            );
+            // On a genuine wide bump the gap is large — the density factor the old
+            // `eta_ops` signal misses.
+            if lu.last_eta_ops() >= 3 {
+                saw_wide_bump = true;
+                assert!(
+                    lu.last_update_work() >= 2 * lu.last_eta_ops(),
+                    "update {s}: dense bump build work {} should dwarf eta ops {}",
+                    lu.last_update_work(),
+                    lu.last_eta_ops()
+                );
+            }
+        }
+        assert!(
+            saw_wide_bump,
+            "test must exercise at least one wide (dense) bump"
+        );
     }
 
     /// The diagonal-first row helpers must round-trip a value at the diagonal

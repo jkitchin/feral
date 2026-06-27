@@ -1,124 +1,112 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-21T15:43:20Z
+Generated: 2026-06-27T22:16:46Z
 
 ## Latest Session
-File: dev/sessions/2026-06-19-01.md
+File: dev/sessions/2026-06-21-01.md
 ```
-# Session 2026-06-19-01
+# Session 2026-06-21-01
 
 ## Goal
 
-Two pieces of work:
-
-1. Cut release **v0.11.1** (patch) for the sparse LU Forrest–Tomlin
-   bump-elimination perf already on `main`.
-2. Answer "is there any reason to think memory allocation would speed up
-   performance anywhere?" — and, since the answer was yes, act on it under a
-   measure-then-pool gate.
+Issue #87: eliminate the residual **O(bump²)** Forrest–Tomlin row-elimination on
+wide (dense-spike) McCormick simplex bases — the Step-2 follow-up of discopt#229
+that was parked as a research spike. The user asked for the **most robust and
+performant** solution, chosen after digging into the code and the literature, and
+verified with before/after timing + scaling experiments.
 
 ## Accomplished
 
-### v0.11.1 release
+### Diagnosis (the key insight)
 
-- Bumped all six version strings via `scripts/release-checklist.sh bump 0.11.1`;
-  cut `CHANGELOG [0.11.1] - 2026-06-19` from `[Unreleased]`.
-- Committed (`e5587b3`), tagged `v0.11.1`, pushed, created the GitHub release.
-- `release.yml` (crates.io) and `python-wheels.yml` (PyPI) both green; verified
-  crates.io `feral` max_version = 0.11.1 and PyPI `feral-solver` = 0.11.1.
+The current `SparseLu::update`/`eliminate_bump` is **not** a Forrest–Tomlin update
+— it sets the spike into `U`'s column `r` and runs a full partial-pivoting bump
+re-triangularization in fixed pivot order. It eliminates the dense spike
+**column**, touching `O(bump)` rows with cascading fill, so both the work **and**
+the recorded eta are `O(bump²)` on a dense spike. True FT eliminates the single
+pivotal **row** after a symmetric permutation (the permuted diagonal pivots are
+the old nonzero `U` diagonals — dodging the zero-superdiagonal landmine that
+reverted the 2026-06-08 column-shift attempt), which is `O(bump)` for sparse `U`.
 
-### LU-update allocation pooling (the allocation question)
+### Route chosen: logical-permutation Forrest–Tomlin
 
-Investigation found the multifrontal **factor** path is already
-allocation-optimized (FactorWorkspace etc.; two further pooling attempts were
-falsified there), but the **LU basis-update** path (`src/lu/sparse_update.rs`)
-— the code v0.11.1 touched — pooled nothing, unlike its sibling
-`sparse_solve.rs`.
+Carry one evolving `uperm` (pivot-position ↔ triangular rank), applied once per
+solve; never relabel `U`'s indices or prior etas. Rejected the column-ordering
+lever (no asymptotic change) and physical permutation (stales prior etas →
+`O(k²·bump)`; cyclic shift as per-eta swaps → `O(k·bump)` solve blow-up).
+Clean-room from Forrest–Tomlin 1972, Reid 1982, Schork–Gondzio ERGO-17-002
+(`BASICLU` is GPL — paper only). Docs: `dev/research/ft-row-elimination-design-2026-06-21.md`,
+`dev/plans/ft-row-elimination-2026-06-21.md`, `dev/decisions.md`.
 
-**Phase 0 (measure):** new `tests/lu_update_alloc_probe.rs` (counting
-`#[global_allocator]`) on the casctanks wide-bump trace (discopt#229, in-tree
-fixture m=2169, 144 updates): **~1804 allocs + 176 reallocs per update** against
-an **85.8 µs/update** budget (`lu_update_trace` bench 12.351 ms / 144). Gate
-passed; the bench delta was the arbiter (pooling has been falsified here before
-when bookkeeping > malloc saved).
+### Implementation (P1+P2)
 
-**Phase 1 Step 1 — bump-loop pools** (`9cf5a96`): `pivot_scratch`,
-`targets_scratch`, `row_pool` (+`row_sub`→`row_sub_into`), `col_rows_pool`.
-allocs/update 1804 → 636 (−65%); bench 12.351 → 9.955 ms (**−19.0%**, p<0.05).
+- **P1** (`a676aaf`): `uperm`/`uperm_inv`; `usolve`/`ut_solve` walk `U` in rank
+  order (identity at factor ⇒ byte-identical).
+- **P2** (`ebaeca6`): rewrote `sparse_update.rs` — `set_column_r` (spike into
+  other rows), `shift_uperm` (symmetric cyclic shift, `O(bump)`),
+  `eliminate_pivot_row` (single-row sparse forward sweep via a rank min-heap, one
+  `FtOp::Axpy` per sub-diagonal). Widened `u_above` to all off-diagonal holders;
+  diagonal-first-aware row helpers; removed `FtOp::Swap`.
+- **Bug fixed during bring-up**: the eliminated pivot column's FP residual
+  `vrc − mult·piv ≠ 0` re-enqueued the column forever (infinite loop / OOM, exit
+  137). Fixed by clearing `rw[c]` exactly and skipping the pivot's own diagonal.
 
-**Phase 1 Step 2 — saved-row snapshot pool** (`edf1f0f`): `saved_scratch` +
-`saved_pool`. allocs/update 636 → 82.5 (−95% vs baseline); bench 9.955 →
-8.545 ms (**−14.8%**). Hardened the probe into a regression guard (<250
-allocs/update).
+### Evidence (before → after, release, this host)
 
-**Cumulative:** 1804 → 82.5 allocs/update (−95%); **12.351 → 8.545 ms = −30.8%**
-on the casctanks replay. Numerics **bit-identical** at every step
-(`worst_true_residual=9.095e-13`, `worst_sparse_vs_dense=0.000e0`; `FtOp` eta
-sequence and pivot choices unchanged). Full suite green; `cargo fmt` +
+| probe | metric | BEFORE | AFTER |
+|---|---|---:|---:|
 ```
 
 ## Git Status
 ```
+a9cea82 issue #87: Forrest–Tomlin row-elimination LU update (O(bump²) → O(bump)) (#88)
+380459c issue #87: gate FT invariant self-check behind off-by-default feature (CI: alloc probe)
+47a3d66 issue #87: fix duplicate-column bug in FT row gather (CI: casctanks drift)
+1808467 issue #87 P5: checkpoint — FT row-elimination session docs
 ebaeca6 issue #87 P2: Forrest-Tomlin row-elimination update (O(bump²) → O(bump))
-a676aaf issue #87 P1: add uperm_inv logical-permutation order, route U-solves through it
-a34367e issue #87: diagnose O(bump²) FT update, choose logical-permutation FT, add baseline probe
-75b0322 release: feral v0.11.2
-2ed962d docs(session): 2026-06-19-01 checkpoint — LU-update allocation pooling
 ```
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_supernodes_cover_n ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
-test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
+test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 371 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.43s
+test result: ok. 373 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.56s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-19-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-21-01.md)
 
 
-lu_update_trace (casctanks FT-update chain, 144 updates, m=2169):
-  baseline (v0.11.1):  12.351 ms
-  after Step 1:         9.955 ms   (-19.0%)
-  after Step 2:         8.545 ms   (-14.8%; -30.8% cumulative)
+cargo run --bin bench --release  (symmetric indefinite gate — unaffected)
+  Residual pass: 2/2 (100.0%)   Worst residual: 1.26e-16
+  Dense/Sparse failure analysis: no failures
 
-alloc probe (allocs / reallocs / bytes per update):
-  baseline:  1804.2 / 176.3 / 128610
-  Step 1:     636.5 /  68.7 /  63428
-  Step 2:      82.5 /  80.7 /  23560
+casctanks_ft_update/chain_144_updates_m2169
+  BEFORE: 16.770–17.036 ms   AFTER: 1.6413–1.6748 ms   (10.2×)
 
-`cargo run --bin bench --release` (full KKT corpus; factorization path,
-unaffected by the LU-update pooling — confirms no regression):
-
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.58     <= 2.0     PASS
-medium (<500)            152145     2.09     <= 3.0     PASS
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.48     <= 2.0     PASS
-medium (<500)            153560     1.48     <= 3.0     PASS
-
-Top worst factor-ratio vs MUMPS unchanged (KIRBY2_0007 9.95, CRESC132 6.69, …).
+lu_wide_bump_probe (dense-spike tridiagonal, AFTER):
+   m    us/update   us/update/m   eta_ops/upd
+  250     102.11       0.41           52
+ 1000     675.41       0.68          116
+ 4000   69415.61      17.35         ~120
 
 ```
 
@@ -236,8 +224,8 @@ tests/amf_corpus_oracle.rs
 tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
-tests/column_renumbering.rs
 tests/column_renumbering_parity.rs
+tests/column_renumbering.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -250,10 +238,6 @@ tests/factors_ld_export.rs
 tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/growth_flag.rs
-tests/issue52_stats.rs
-tests/issue64_arrow_ordering.rs
-tests/issue65_mc64_fallback.rs
-tests/issue67_thin_ordering.rs
 tests/issue_15_cascade_arm_gate.rs
 tests/issue_17_robot_1600_cascade_off.rs
 tests/issue_18_narx_cfy_cascade_off.rs
@@ -262,6 +246,10 @@ tests/issue_38_static_pivot.rs
 tests/issue_46_saddle_kkt_cascade.rs
 tests/issue_55_delay_budget.rs
 tests/issue_55_n_tiny_counter.rs
+tests/issue52_stats.rs
+tests/issue64_arrow_ordering.rs
+tests/issue65_mc64_fallback.rs
+tests/issue67_thin_ordering.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
@@ -285,8 +273,8 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/rook_rescue.rs
 tests/rook_rescue_kkt.rs
+tests/rook_rescue.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
