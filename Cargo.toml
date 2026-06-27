@@ -114,5 +114,8 @@ harness = false
 name = "lu_update_trace"
 harness = false
 
+[[example]]
+name = "ft_dense_bump"
+
 [profile.release]
 debug = true

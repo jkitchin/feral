@@ -1,0 +1,87 @@
+* 18:41 :issue-89:ft-update:cost-counter:
+Investigated and confirmed issue #89: `SparseLu::update()` cost scales with the
+factor fill, not the entering-column nnz, on dense-inverse (set-covering) bases.
+
+Built standalone reproducer B (`examples/ft_dense_bump.rs`, autoexamples=false so
+added an `[[example]]` entry). Covering columns (~8 nnz, random values ⇒ dense
+inverse) over m=256..2048, 50 updates each, release:
+
+| m    | factor_nnz/m | update_avg (us) | avg_last_eta_ops | us/eta-op |
+|------|--------------|-----------------|------------------|-----------|
+|  256 |        146   |          1461   |             210  |    7.0    |
+|  512 |        292   |          9647   |             414  |   23.3    |
+| 1024 |        548   |         49620   |             765  |   65.0    |
+| 2048 |       1115   |        349883   |            1516  |  230.8    |
+
+Entering nnz fixed at 8. update_avg ~ m^2.6 ~ factor_nnz^1.3; eta_ops only ~O(m).
+So us-per-recorded-eta-op grows ~m ⇒ `eta_ops()` undercounts true build cost by
+exactly the row density. Both claims in the issue confirmed.
+
+Root cause (fundamental, not a bug): `eliminate_pivot_row` is a single-row sparse
+forward sweep; per eliminated sub-diagonal column c it scatters
+`row_r -= mult·u_rows[c]`, cost nnz(u_rows[c]). On a dense U that is O(m) per
+column over O(m) columns ⇒ O(m²)=O(factor_nnz). The spike B⁻¹aₙₑw is itself dense,
+so even computing it is O(factor_nnz). There is no cheaper FT path on a dense
+bump (answer to issue Q1: refactor aggressively).
+
+Fix (answer to Q2): added a true per-update *build*-cost counter. Threaded a
+`&mut usize work` accumulator through `compute_spike` (L-solve flops + eta-replay
+flops) and `eliminate_pivot_row` (row_r seed len + Σ nnz(u_rows[c]) over
+eliminated c). Folded into new fields on commit: `last_update_work`,
+`update_work_total`. Exposed `last_update_work()`, `update_work()`,
+`should_refactor()` (advisory: update_work() >= factor_nnz()). `eta_ops()` left
+unchanged (correct solve-replay witness; used by the scalability guard test).
+
+Re-ran the reproducer with the counter: avg_last_update_work ≈ factor_nnz per
+update (42380 vs 37478 at m=256; 2.12M vs 2.28M at m=2048) and work/eta climbs
+202→1398 — captures exactly the density factor eta_ops misses.
+
+Tests: `update_work_accumulates_and_resets` (zero after factor; cumulative =
+running sum; refactor resets) and `update_work_exceeds_eta_ops_on_dense_bump`
+(invariant last_update_work >= last_eta_ops always, with >=2× gap on the
+tridiagonal-base wide bump). External oracle = FT structure: each eliminated
+column adds nnz(row)>=1 to work but 1 to eta. Both pass; full lib suite 375 pass,
+clippy clean, fmt clean.
+
+Research note: `dev/research/ft-dense-bump-cost-2026-06-27.md`.
+
+* 19:20 :issue-89:ft-update:perf:u_above:profiling:
+Followed up on "is there room for improvement" by PROFILING instead of
+speculating (had guessed wrong twice on the theory). Added temp per-phase
+timers (atomics) around compute_spike / set_column_r / eliminate_pivot_row /
+commit. Dense reproducer, m=2048, per update:
+
+  spike=1.3ms  setcol=1.8ms  elim=2.8ms  commit=537ms
+
+i.e. the u_above reindex on commit was 99% of the time and scaled 1.7->13.6->76
+->537ms over m=256..2048 (~m^2.7, toward O(m^3)), while the real elimination
+arithmetic stayed at ~Theta(factor_nnz). This was a GENUINE BUG, not the
+fundamental dense cost I'd claimed.
+
+Root cause: commit re-indexed EVERY changed row wholesale (unindex_above +
+index_above over the full row), O(bump*rowlen*shift) ~ O(m^3) of sorted-Vec
+memmoves, almost all for entries that didn't change. Of the O(m) changed rows,
+only row r is rebuilt; the rest just gained/lost their single column-r entry.
+
+Fix: incremental u_above maintenance. set_column_r only rewrites column r (its
+holders = spike support exactly), eliminate_pivot_row only rebuilds row r, no
+other row's column membership changes (the FT win). So commit does just:
+  (a) u_above[r] = supp \ {r}   (clear+extend, O(|supp|))
+  (b) unindex/index row r alone against its old/new column set
+Drops commit O(m^3) -> O(m^2) = arithmetic order. Rollback unchanged (u_above
+still only mutated in the Ok branch, so failures stay consistent).
+
+Oracle: lu-ft-invariant-check rebuilds expected u_above from U and asserts exact
+equality after every update. All 28 lu tests pass with the feature on => the
+incremental index is byte-identical to a full rebuild.
+
+Measured (release, dense reproducer): 13-62x faster per update (m=256 1.46ms->
+0.11ms; m=2048 350ms->5.6ms). Scaling ~m^2.7 -> ~m^2; constant 2.6 ns per
+counted multiply-add at every m => update now sits on the Theta(factor_nnz)
+floor. Full lib suite 375 pass, fmt clean.
+
+Also corrected the over-stated "no asymptotically cheaper FT path" claim in the
+research note + CHANGELOG: dense INVERSE != dense FACTOR. The real sc bases have
+sparse factors (factor_nnz/m=2-39), update is Theta(factor_nnz) << Theta(m^2),
+linear in fill (matches the issue's own 0.01->0.72ms table). Only a genuinely
+dense FACTOR has the Theta(m^2) floor.
