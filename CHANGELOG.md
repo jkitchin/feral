@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-06-28
+
 ### Performance — sparse LU update: O(m³) → O(m²) `u_above` reindex on filled bumps (issue #89)
 
 `SparseLu::update` re-indexed the `u_above` column index for *every* changed row
