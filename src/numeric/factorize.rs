@@ -3304,14 +3304,38 @@ fn run_parallel_task<'a>(
         let mut prof_us: Option<u64> = None;
         let (result, own_contrib) = {
             let t_ws_wait = telemetry.map(|_| std::time::Instant::now());
-            let mut ws_guard = match ws_mtx.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
+            // Issue #102: `thread_ws[i]` is only ever locked by the rayon
+            // worker whose `current_thread_index()` is `i` (or the donated
+            // caller, for the last slot), so cross-thread contention never
+            // happens. A `try_lock` that WOULD block therefore means *this
+            // same thread already holds it* via an outer front whose
+            // intra-front `par_chunks_mut` blocked and stole this task back
+            // onto the same worker — a re-entrant self-deadlock. Instead of
+            // blocking (0 %-CPU hang, issue #102), fall back to a throwaway
+            // workspace: the factor result is written to
+            // `contrib_blocks`/`node_factors_out`, not the workspace, so a
+            // fresh scratch is fully correct — only the pooled buffers differ.
+            // Non-nested calls take the fast `Some` arm exactly as before.
+            let mut fallback_ws: Option<FactorWorkspace> = None;
+            let mut ws_guard_opt = match ws_mtx.try_lock() {
+                Ok(g) => Some(g),
+                Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
             };
             if let (Some(t), Some(start)) = (telemetry, t_ws_wait) {
                 t.ws_lock_wait_ns
                     .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
             }
+            let ws: &mut FactorWorkspace = match ws_guard_opt.as_deref_mut() {
+                Some(g) => g,
+                None => {
+                    let mut w = FactorWorkspace::new();
+                    w.row_map.resize(symbolic.n, usize::MAX);
+                    w.build_seen.resize(symbolic.n, false);
+                    w.local_contribs.resize_with(n_snodes, || None);
+                    fallback_ws.insert(w)
+                }
+            };
 
             // Move the pooled local_contribs out of the workspace so
             // we can hand `&mut FactorWorkspace` and `&mut Vec<...>`
@@ -3320,7 +3344,7 @@ fn run_parallel_task<'a>(
             // guaranteed `None` going in (postcondition of the prior
             // task on this worker took both children's slots and the
             // own_contrib slot below).
-            let mut local_contribs = std::mem::take(&mut ws_guard.local_contribs);
+            let mut local_contribs = std::mem::take(&mut ws.local_contribs);
 
             // Stage child contributions: shared lock held only for
             // the drain, not across the factor body.
@@ -3356,7 +3380,7 @@ fn run_parallel_task<'a>(
                 scaling_pivot_order,
                 is_root,
                 params,
-                &mut ws_guard,
+                ws,
                 &mut local_contribs,
                 0, // nvschur: parallel path is not used by Schur API
             );
@@ -3371,8 +3395,10 @@ fn run_parallel_task<'a>(
             let own = local_contribs[snode_idx].take();
             // Return the pooled vec to the workspace. All slots are
             // `None` (children were taken into us above; own was just
-            // taken out), so no clearing is needed.
-            ws_guard.local_contribs = local_contribs;
+            // taken out), so no clearing is needed. (On the issue-#102
+            // fallback path this writes into the throwaway workspace, which
+            // is then dropped — harmless.)
+            ws.local_contribs = local_contribs;
             (res, own)
         };
 
