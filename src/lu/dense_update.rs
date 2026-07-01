@@ -18,6 +18,7 @@
 //! so a `NeedsRefactor` return leaves `self` unchanged and recoverable.
 
 use super::dense_factor::DenseLu;
+use super::RefactorCause;
 use crate::error::FeralError;
 
 impl DenseLu {
@@ -48,6 +49,8 @@ impl DenseLu {
         }
         // Update-count budget (checked before doing any work).
         if self.updates_since_refactor + 1 > self.params.max_updates {
+            self.last_refactor =
+                Some((RefactorCause::UpdateBudget, self.params.max_updates as f64));
             return Err(FeralError::NeedsRefactor);
         }
 
@@ -93,6 +96,7 @@ impl DenseLu {
         for k in q..m.saturating_sub(1) {
             let piv = u[k + k * m];
             if piv.abs() <= ztol {
+                self.last_refactor = Some((RefactorCause::TinyPivot, piv.abs()));
                 return Err(FeralError::NeedsRefactor);
             }
             let sub = u[k + 1 + k * m];
@@ -119,6 +123,7 @@ impl DenseLu {
         let umax = u.iter().fold(0.0_f64, |a, &x| a.max(x.abs()));
         let growth = self.growth.max(umax / self.u_max0);
         if growth > max_growth {
+            self.last_refactor = Some((RefactorCause::Growth, growth));
             return Err(FeralError::NeedsRefactor);
         }
 
@@ -130,6 +135,7 @@ impl DenseLu {
         // Reject before commit (consistent with the in-bump check above).
         let last = m - 1;
         if u[last + last * m].abs() <= ztol {
+            self.last_refactor = Some((RefactorCause::TinyPivot, u[last + last * m].abs()));
             return Err(FeralError::NeedsRefactor);
         }
 
@@ -281,5 +287,126 @@ mod tests {
             "getter mirrors internal after update"
         );
         assert_eq!(lu.u_max0(), lu.u_max0, "u_max0 unchanged by update");
+    }
+
+    /// Issue #95: `last_refactor()` is `None` on a fresh factor and each
+    /// `NeedsRefactor` return records the cause + a magnitude. Update-count trip:
+    /// with `max_updates = 1` the second update fails as `UpdateBudget`, and the
+    /// magnitude is the cap that was hit.
+    #[test]
+    fn last_refactor_reports_update_budget() {
+        // Tridiagonal base; last-slot replacements commit (no Hessenberg bump).
+        let cols = vec![
+            vec![4.0, 1.0, 0.0, 0.0],
+            vec![1.0, 3.0, 1.0, 0.0],
+            vec![0.0, 1.0, 2.0, 1.0],
+            vec![0.0, 0.0, 1.0, 5.0],
+        ];
+        let params = LuParams {
+            max_updates: 1,
+            ..LuParams::default()
+        };
+        let mut lu = DenseLu::factor(&cols, 4, params).expect("factor");
+        assert_eq!(lu.last_refactor(), None, "fresh factor: no cause");
+
+        lu.update(3, &[0.0, 0.0, 1.0, 7.0])
+            .expect("first update within budget");
+        assert_eq!(lu.last_refactor(), None, "successful update leaves it None");
+
+        let err = lu.update(3, &[0.0, 0.0, 1.0, 8.0]);
+        assert!(matches!(err, Err(FeralError::NeedsRefactor)));
+        assert_eq!(
+            lu.last_refactor(),
+            Some((RefactorCause::UpdateBudget, 1.0)),
+            "second update trips the count cap (max_updates = 1)"
+        );
+    }
+
+    /// Issue #95: a dependent replacement drives the final `U` diagonal to ~0 and
+    /// is reported as `TinyPivot` (the dense path has no distinct `Singular`), with
+    /// the offending `|pivot|` as magnitude. Reuses the `[e_0, e_0]` scenario.
+    #[test]
+    fn last_refactor_reports_tiny_pivot() {
+        let cols = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let mut lu = DenseLu::factor(&cols, 2, LuParams::default()).expect("factor");
+        let err = lu.update(1, &[1.0, 0.0]); // new basis [e0, e0] singular
+        assert!(matches!(err, Err(FeralError::NeedsRefactor)));
+        let (cause, mag) = lu.last_refactor().expect("cause recorded");
+        assert_eq!(cause, RefactorCause::TinyPivot);
+        let ztol = lu.params.zero_pivot_tol * lu.u_max0;
+        assert!(mag <= ztol, "magnitude {mag} is the ~0 offending pivot");
+    }
+
+    /// Issue #95: a growth trip records `Growth` with the ratio that exceeded the
+    /// cap as magnitude. Uses the same compounding last-slot updates as
+    /// `growth_monitor_tracks_compounded_element_growth`, but with a small
+    /// `max_growth` so one commits then the next trips.
+    #[test]
+    fn last_refactor_reports_growth() {
+        let cols = vec![
+            vec![4.0, 1.0, 0.0, 0.0],
+            vec![1.0, 3.0, 1.0, 0.0],
+            vec![0.0, 1.0, 2.0, 1.0],
+            vec![0.0, 0.0, 1.0, 5.0],
+        ];
+        let params = LuParams {
+            max_updates: 20,
+            max_growth: 5.0, // small: a compounding update soon exceeds it
+            ..LuParams::default()
+        };
+        let mut lu = DenseLu::factor(&cols, 4, params).expect("factor");
+        let updates = [
+            vec![0.0, 0.0, 1.0, 20.0],
+            vec![0.0, 0.0, 1.0, 60.0],
+            vec![0.0, 0.0, 1.0, 180.0],
+        ];
+        let mut tripped = None;
+        for col in updates.iter() {
+            if let Err(FeralError::NeedsRefactor) = lu.update(3, col) {
+                tripped = lu.last_refactor();
+                break;
+            }
+        }
+        let (cause, mag) = tripped.expect("some update trips the growth cap");
+        assert_eq!(cause, RefactorCause::Growth);
+        assert!(mag > 5.0, "growth magnitude {mag} exceeds max_growth = 5.0");
+    }
+
+    /// Issue #95 parity: dense `should_refactor()` (cost-based, `>= m` updates)
+    /// and `should_refactor_growth()` (pre-empts a growth trip). Fresh factor
+    /// recommends neither.
+    #[test]
+    fn dense_refactor_recommendations() {
+        let cols = vec![
+            vec![4.0, 1.0, 0.0, 0.0],
+            vec![1.0, 3.0, 1.0, 0.0],
+            vec![0.0, 1.0, 2.0, 1.0],
+            vec![0.0, 0.0, 1.0, 5.0],
+        ];
+        let m = 4;
+        let params = LuParams {
+            max_updates: 100,
+            max_growth: 1e8,
+            ..LuParams::default()
+        };
+        let mut lu = DenseLu::factor(&cols, m, params).expect("factor");
+        assert!(!lu.should_refactor(), "fresh: no cost-based recommendation");
+        assert!(!lu.should_refactor_growth(), "fresh: growth == 1");
+
+        // Repeated identical last-slot replacements commit with bounded growth;
+        // the cost-based recommendation fires only once the count reaches m.
+        for k in 1..=m {
+            lu.update(3, &[0.0, 0.0, 1.0, 7.0])
+                .unwrap_or_else(|e| panic!("update {k} should commit: {e:?}"));
+            assert_eq!(
+                lu.should_refactor(),
+                k >= m,
+                "should_refactor must fire exactly at updates_since_refactor >= m (k = {k})"
+            );
+        }
+        assert!(
+            !lu.should_refactor_growth(),
+            "bounded growth: no growth-based recommendation"
+        );
     }
 }

@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-01T01:00:54Z
+Generated: 2026-07-01T01:38:26Z
 
 ## Latest Session
-File: dev/sessions/2026-07-01-01.md
+File: dev/sessions/2026-07-01-02.md
 ```
-# Session 2026-07-01-01
+# Session 2026-07-01-02
 
 ## Goal
-Issue #93: expose the LU element-growth factor via public getters on both
-`SparseLu` and `DenseLu`, so downstream callers (discopt's spatial B&B
-"NumericFocus"-style escalation) can threshold on a continuous conditioning
-signal instead of the binary `NeedsRefactor` verdict.
+
+Issue #95: enrich the LU rank-1 `update()` failure signal so a caller can tell an
+ill-conditioning failure (refine and retry) from a bookkeeping-budget trip (just
+refactor), and close the `should_refactor()` sparse/dense parity gap. discopt#364
+needs the *why* behind a `NeedsRefactor`, and discopt forces the dense LU for
+small bases (`m ≤ 256`).
 
 ## Accomplished
-- Added `pub fn growth(&self) -> f64` and `pub fn u_max0(&self) -> f64` to:
-  - `SparseLu` (`src/lu/sparse_factor.rs`, after `reach_visits()`)
-  - `DenseLu` (`src/lu/dense_factor.rs`, after `updates_since_refactor()`)
-  Purely additive — the `growth`/`u_max0` fields already existed as
-  `pub(super)`; this only widens their visibility. No field, algorithm, or
-  behavior change.
-- Added a getter test on each side
-  (`growth_getters_expose_internal_fields`): fresh factor reports
-  `growth() == 1.0`; getters equal the internal fields before and after a
-  committed update; `u_max0() > 0` (floored away from zero). Oracle is the
-  existing internal field, itself already pinned to an independent
-  element-growth recomputation by
-  `growth_monitor_tracks_compounded_element_growth` — so no new numerical
-  oracle was authored this session (satisfies the same-session oracle rule).
-- Updated `CHANGELOG.md` Unreleased with the additive-getters entry.
 
-Evidence:
-- `cargo test --lib growth_getters` → 2 passed, 0 failed.
-- `cargo test --lib lu::` → 30 passed, 0 failed.
-- `cargo clippy --all-targets -- -D warnings` → clean.
-- `cargo fmt` reformatted the two test files (long assert lines only).
+Chose the issue's **preferred additive (non-breaking)** design: keep the
+payload-free `Err(NeedsRefactor)`, record cause + magnitude alongside.
 
-## Benchmark Results
-```
---- Dense solver validation ---
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
---- Sparse solver validation ---
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Dense failure analysis: no failures
-Sparse failure analysis: no failures
-```
-(No perf regression possible — no code path changed; getters are field reads.)
+- New public enum `RefactorCause { Growth, UpdateBudget, TinyPivot, Singular }`
+  (`src/lu/mod.rs`, re-exported from the crate root via `src/lib.rs`).
+- `last_refactor() -> Option<(RefactorCause, f64)>` on both `SparseLu` and
+  `DenseLu`. Set on **every** `NeedsRefactor` return path (update-count budget,
+  singular/empty-support, growth, tiny/zero/non-finite pivot). `None` after a
+  fresh factor/refactor; untouched by a successful update (read only after `Err`).
+- `growth()` getter on both (exposes the element-growth high-water monitor).
+- `should_refactor_growth()` on both: growth-aware recommendation firing once
+  `growth >= sqrt(max_growth)` (finite, > 1) — the geometric midpoint in log
+  space — so a caller can pre-empt a growth trip.
+- `should_refactor()` parity on `DenseLu` (cost-based: `updates_since_refactor >= m`;
+  dense update is O(m²), fresh factor O(m³)), mirroring the sparse cost-based
+  `should_refactor()`. `updates_since_refactor()` already existed on both.
+- Docs: `src/error.rs` `NeedsRefactor` variant now points at the accessor;
+  `CHANGELOG.md` Unreleased; design note `dev/research/refactor-signal-2026-07-01.md`.
 
-## Decisions Made
-- None. Additive API only.
+**Magnitude semantics** — Growth: the growth ratio that tripped (> max_growth);
+UpdateBudget: the update count that hit the cap (= max_updates); TinyPivot:
+|offending pivot| (≤ zero_pivot_tol·u_max0); Singular: 0.0.
 
-## Abandoned Approaches
-- None.
+**Dense/sparse asymmetry (inherent, documented):** the dense path has no distinct
+`Singular` branch — a linearly dependent replacement drives the final `U` diagonal
+to ~0 and reports `TinyPivot`. Only the sparse path can cheaply detect the
+empty-support case (`h_rank < r_rank`) *before* eliminating, so `Singular` is
+sparse-only.
+
+### Evidence
+
+- 9 new unit tests (5 sparse, 4 dense): each cause reached via a deterministically
+  constructed input, plus the two recommendation getters. Assertions are
+  behavioral (which cause) and self-consistent (the magnitude relation the path
+  itself guarantees) — no external numerical oracle required.
+  - Note: the naive identity-basis update `update(0, e0/[1,1])` trips a
+    `TinyPivot` (after the cyclic shift `u[0,0]` = the identity's off-diagonal 0),
+    *not* a clean commit — so the budget/recommendation tests use the tridiagonal
 ```
 
 ## Git Status
 ```
+daa058f issue #95: richer update() instability signal + refactor recommendations
+f9398fd issue #94: one-norm condition estimate for the unsymmetric LU factor (#98)
+f114b5d issue #93: expose the LU element-growth factor via public getters (#96)
 f037285 release: feral v0.11.3
 a5c789f issue #89: FT update u_above reindex O(m³)→O(m²) + true per-update cost counter (#90)
-a9cea82 issue #87: Forrest–Tomlin row-elimination LU update (O(bump²) → O(bump)) (#88)
-380459c issue #87: gate FT invariant self-check behind off-by-default feature (CI: alloc probe)
-47a3d66 issue #87: fix duplicate-column bug in FT row gather (CI: casctanks drift)
 ```
 
 ## Test Status
@@ -86,58 +86,58 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 375 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.16s
+test result: ok. 391 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.40s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-01-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-01-02.md)
 
---- Dense solver validation ---
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
---- Sparse solver validation ---
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+
+Residual pass: 2/2 (100.0%)
+Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 Dense failure analysis: no failures
 Sparse failure analysis: no failures
-(No perf regression possible — no code path changed; getters are field reads.)
+Dense ∩ Sparse failure overlap: 0 / 0 / 0
+(no oracle timings loaded in this environment; perf partitions N/A)
+
+Purely additive API + metadata on the error path (a single `Option` write only on
+a `NeedsRefactor` return); no factorization or solve arithmetic changed.
 
 ```
 
 ## Recent Decisions
-once per solve; `U`'s stored indices, `L`, `P`, `Q`, and prior etas stay in fixed
-pivot-position coordinates and are never relabeled. Removed `FtOp::Swap` — the FT
-update does no in-bump magnitude pivoting.
+accessor, not a breaking error-variant change. `SparseLu::update`/`DenseLu::update`
+keep returning the payload-free `Err(FeralError::NeedsRefactor)`; the cause +
+magnitude are recorded on `self` and read back via
+`last_refactor() -> Option<(RefactorCause, f64)>`. New public enum
+`RefactorCause { Growth, UpdateBudget, TinyPivot, Singular }`.
 
-**Why this over the alternatives.**
-- The old scheme eliminated the dense spike *column*, touching O(bump) rows with
-  cascading fill ⇒ O(bump²) work **and** an O(bump²) eta (which then slows every
-  warm solve). Eliminating the pivotal *row* is O(bump) for sparse `U`, with an
-  O(bump) eta.
-- The symmetric permutation places the **old nonzero `U` diagonals** on the bump
-  diagonal, so it dodges the zero-superdiagonal-pivot landmine that reverted the
-  2026-06-08 column-shift Hessenberg attempt. This is the distinction that makes
-  the route correct on a sparse `U`.
-- A *physical* permutation was rejected: relabeling prior etas is O(k²·bump) over
-  a chain, and encoding the cyclic shift as per-eta swaps reintroduces the PFI
-  O(k·bump) solve blow-up. The logical `uperm` applied once per solve avoids both.
-- The column-ordering lever (discopt#229's other suggestion) changes no
-  asymptotic and is workload-specific; kept as a possible complement, not the fix.
+**Why.** discopt#364 needs to distinguish an ill-conditioning failure
+(Growth/TinyPivot/Singular → refine-and-retry) from a mere update-count budget
+trip (UpdateBudget → refactor). The additive route (the issue's stated
+preference) leaves every existing caller compiling unchanged.
 
-**Stability.** FT has no in-bump pivoting, so a small bump diagonal can grow
-elements; this is caught by the existing `growth`/`max_growth` monitor and routed
-to `NeedsRefactor` (authoritative verdict = fresh factor). A Schork–Gondzio
-"permute-when-possible" stability/sparsity refinement is recorded as future work,
-not required for correctness.
+**Magnitude semantics.** Growth = growth ratio that tripped; UpdateBudget =
+update count that hit the cap (= max_updates); TinyPivot = |offending pivot|;
+Singular = 0.0. `last_refactor()` is `None` after factor/refactor, untouched by a
+successful update.
 
-**Evidence.** `lu_wide_bump_probe` dense-spike: per-update 44–148× faster
-(m=4000: 10.2 s → 69 ms), eta O(m²)→O(m) (2.09M → ~120). `casctanks_ft_update`
-144-chain: 16.88 ms → 1.66 ms (10.2×). Localized-spike (`lu_update_probe`) and
-the full suite unchanged/green. Clean-room from Forrest–Tomlin 1972, Reid 1982,
-Schork–Gondzio ERGO-17-002 (`BASICLU` is GPL — paper only).
+**Dense/sparse asymmetry (accepted, not a gap).** The dense path has no distinct
+`Singular` cause — a dependent replacement drives the final `U` diagonal to ~0 and
+reports `TinyPivot`. Only the sparse path detects the empty-support case
+(`h_rank < r_rank`) before eliminating, so `Singular` is sparse-only.
+
+**Refactor recommendations.** `should_refactor_growth()` (both types) fires at
+`growth >= sqrt(max_growth)` — the log-space midpoint between the floor 1 and the
+cap — to pre-empt a growth trip. Dense `should_refactor()` (cost-based parity) =
+`updates_since_refactor() >= m` (O(m²) update vs O(m³) factor), the dense analogue
+of sparse's `update_work_total >= factor_nnz()`.
+
+**Evidence.** +9 unit tests (each cause + both recommendation getters), 381 lib
+tests green, fmt/clippy clean, no numerical change (bench: no failures). Design
+note: `dev/research/refactor-signal-2026-07-01.md`.
 
 ## Recent Tried-and-Rejected
 more work.** Step 2's premise (dense-spike bump, contiguous SAXPY) does not hold
@@ -179,6 +179,7 @@ src/io/mod.rs
 src/io/mtx.rs
 src/io/sidecar.rs
 src/lib.rs
+src/lu/condition.rs
 src/lu/dense_factor.rs
 src/lu/dense_matrix.rs
 src/lu/dense_solve.rs

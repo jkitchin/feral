@@ -14,7 +14,7 @@
 
 use super::scaling::{compute_lu_scale, LuScale};
 use super::sparse_symbolic::SparseLuSymbolic;
-use super::{LuParams, LuScaling, LuSingularAction};
+use super::{LuParams, LuScaling, LuSingularAction, RefactorCause};
 use crate::error::FeralError;
 use crate::lu::sparse_matrix::SparseColMatrix;
 
@@ -176,6 +176,11 @@ pub struct SparseLu {
     /// (`update_work() >= factor_nnz()` ⇒ the update chain has cost about one
     /// refactor; see [`Self::should_refactor`]). Reset to zero by factor.
     pub(super) update_work_total: usize,
+    /// Cause + magnitude of the most recent [`SparseLu::update`] that returned
+    /// [`FeralError::NeedsRefactor`]. `None` after a fresh factor/refactor;
+    /// untouched by a successful update (read only after an `Err`). The magnitude
+    /// is a growth ratio, update count, or `|pivot|` per the cause. See issue #95.
+    pub(super) last_refactor: Option<(RefactorCause, f64)>,
 }
 
 impl SparseLu {
@@ -501,6 +506,7 @@ impl SparseLu {
             saved_pool: Vec::new(),
             last_update_work: 0,
             update_work_total: 0,
+            last_refactor: None,
         })
     }
 
@@ -579,6 +585,34 @@ impl SparseLu {
     /// stays `false` for many updates; on dense-inverse bases it trips quickly.
     pub fn should_refactor(&self) -> bool {
         self.update_work_total >= self.factor_nnz()
+    }
+
+    /// Cause + magnitude of the most recent [`SparseLu::update`] that returned
+    /// [`FeralError::NeedsRefactor`], or `None` if no update has failed since the
+    /// last factor/refactor. `update()` itself still returns the payload-free
+    /// `Err(NeedsRefactor)`; this accessor carries the *why* (issue #95).
+    ///
+    /// The `f64` is a cause-specific magnitude: the growth ratio
+    /// ([`RefactorCause::Growth`]), the update count that hit the cap
+    /// ([`RefactorCause::UpdateBudget`]), the offending `|pivot|`
+    /// ([`RefactorCause::TinyPivot`]), or `0.0` for a dependent replacement
+    /// ([`RefactorCause::Singular`]).
+    #[inline]
+    pub fn last_refactor(&self) -> Option<(RefactorCause, f64)> {
+        self.last_refactor
+    }
+
+    /// Advisory (growth-aware): is the element-growth high-water close enough to
+    /// [`LuParams::max_growth`] that the next update is at risk of tripping it?
+    /// True once [`Self::growth`] reaches the geometric midpoint (log-space)
+    /// between `1` and `max_growth`, i.e. `growth >= sqrt(max_growth)` (only when
+    /// `max_growth` is finite and `> 1`). Complements the cost-based
+    /// [`Self::should_refactor`]: it lets a caller refactor pre-emptively instead
+    /// of discovering the growth trip on the update that fails (issue #95).
+    #[inline]
+    pub fn should_refactor_growth(&self) -> bool {
+        let cap = self.params.max_growth;
+        cap.is_finite() && cap > 1.0 && self.growth >= cap.sqrt()
     }
 
     /// Total Gilbert–Peierls reach nodes visited during the factorization.
