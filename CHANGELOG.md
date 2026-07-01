@@ -4,6 +4,27 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — one-norm condition estimate for the unsymmetric LU basis (issue #94)
+
+`SparseLu::condition_estimate_1(&mut self, b: &SparseColMatrix)` and
+`DenseLu::condition_estimate_1(&mut self, b: &GeneralMatrix)` return a
+Hager–Higham one-norm condition estimate `κ₁ ≈ ‖B‖₁·‖B⁻¹‖₁` for the LU basis,
+running the estimator's inverse-norm solves through the factor's own
+`ftran`/`btran` (the LU is unsymmetric, so each iteration is one `ftran` for
+`B⁻¹` and one `btran` for `B⁻ᵀ`, dropping the symmetric `A⁻ᵀ = A⁻¹` shortcut).
+`b` is the original basis (supplies `‖B‖₁` as the max absolute column sum;
+the factor does not retain it, mirroring `ftran_refined`); the result is a lower
+bound on the true `κ₁`. This is the LP-engine enabler for deciding
+"ill-conditioned node → iteratively refine / re-solve with perturbation" inside
+one solver instead of swapping engines (discopt#364).
+
+The Hager–Higham iteration is now factored into a shared driver
+`numeric::condition::hager_higham_inverse_norm_1` over a new
+`HagerHighamOperator` trait (both re-exported at the crate root); the symmetric
+LDLᵀ path (`estimate_inverse_norm_1`) and the new LU path share the estimator
+loop, differing only in the solve callback. The symmetric path is numerically
+unchanged (same pooled `SolveWorkspace`, bit-identical arithmetic). Also adds
+`SparseColMatrix::one_norm` / `GeneralMatrix::one_norm` (max absolute column sum).
 ### Added — public getters for the LU element-growth monitor (issue #93)
 
 `SparseLu` and `DenseLu` now expose the ‖U‖∞ element-growth monitor they already

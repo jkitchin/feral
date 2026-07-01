@@ -39,7 +39,10 @@ pub use lu::sparse_factor::SparseLu;
 pub use lu::sparse_matrix::SparseColMatrix;
 pub use lu::sparse_symbolic::SparseLuSymbolic;
 pub use lu::{should_use_dense_lu, LuParams, LuScaling, LuSingularAction};
-pub use numeric::condition::{estimate_condition_1norm, estimate_inverse_norm_1, matrix_norm_1};
+pub use numeric::condition::{
+    estimate_condition_1norm, estimate_inverse_norm_1, hager_higham_inverse_norm_1, matrix_norm_1,
+    HagerHighamOperator,
+};
 pub use numeric::factorize::{
     factorize_multifrontal_with_schur, LdltExport, NumericParams, ProfileReport, SchurBlock,
 };
