@@ -646,6 +646,27 @@ pub struct BunchKaufmanParams {
     /// rayon work (pounce#79 oversubscription guarantee). See
     /// `dev/research/lever-1.1-intrafront-parallel-schur.md`.
     pub intrafront_parallel: bool,
+
+    /// Opt-in per-front FMA size gate (issue #99, Lever 3). Default
+    /// `None`. When `Some(t)`, a front whose trailing-update area
+    /// `nrow * ncol >= t` uses the FMA trailing-Schur kernels **even
+    /// when [`fma`](Self::fma) is `false`**; fronts below the threshold
+    /// keep the bit-exact `*_nofma` kernels. This lets one factorization
+    /// run the fast (single-rounding) FMA path on its large roots while
+    /// small fronts — where FMA rounding can perturb Bunch-Kaufman pivot
+    /// classification on sensitive KKTs (`dev/tried-and-rejected.md`
+    /// 2026-04-14) — stay on the reference kernels.
+    ///
+    /// `None` (default) is a strict no-op: every front honors `fma` as
+    /// before, so the production cross-arch bit-exactness contract is
+    /// untouched. Enabling this changes cross-arch bit patterns on the
+    /// gated large fronts (single vs double rounding), so it is a
+    /// deliberate opt-in, not a default. Inertia is preserved on
+    /// well-conditioned fronts (the FMA path is one ULP per accumulate
+    /// off nofma; see
+    /// `schur_kernel::fma_vs_nofma_panel_kernels_within_n_elim_ulps`).
+    /// See `dev/research/issue-99-dense-front-fma-gate.md`.
+    pub fma_min_front_area: Option<usize>,
 }
 
 /// Minimum trailing-update area `(nrow - j_start) * n_elim` below which
@@ -779,8 +800,24 @@ impl Default for BunchKaufmanParams {
             tpp_method: TppMethod::Plain,
             static_pivot_floor: 0.0,
             intrafront_parallel: false,
+            fma_min_front_area: None,
         }
     }
+}
+
+/// Resolve the effective FMA flag for a front of `nrow` rows and `ncol`
+/// fully-summed columns under `params`. Returns `true` when the global
+/// [`BunchKaufmanParams::fma`] is set, or when the per-front size gate
+/// [`BunchKaufmanParams::fma_min_front_area`] is armed and this front's
+/// trailing-update area `nrow * ncol` reaches the threshold. The `nrow *
+/// ncol` product saturates so a pathological front cannot wrap. Issue
+/// #99 Lever 3.
+#[inline]
+pub(crate) fn effective_front_fma(params: &BunchKaufmanParams, nrow: usize, ncol: usize) -> bool {
+    params.fma
+        || params
+            .fma_min_front_area
+            .is_some_and(|t| nrow.saturating_mul(ncol) >= t)
 }
 
 /// Factorization result: P·L·D_bk·Lᵀ·Pᵀ = D_eq·A·D_eq.
@@ -1940,6 +1977,27 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     scratch: &mut FactorScratch,
 ) -> Result<FrontalFactors, FeralError> {
     let nrow = matrix.n;
+
+    // Issue #99 Lever 3: opt-in per-front FMA size gate. When
+    // `fma_min_front_area` is armed and this front's trailing area is
+    // large enough, factor it with the FMA trailing-Schur kernels even
+    // if the global `fma` flag is off. Shadow `params` with a local
+    // clone only when the gate actually changes the flag, so the common
+    // (unarmed) path pays nothing; everything downstream reads
+    // `params.fma` unchanged.
+    let gated_params;
+    let params: &BunchKaufmanParams = {
+        let eff = effective_front_fma(params, nrow, ncol);
+        if eff != params.fma {
+            gated_params = BunchKaufmanParams {
+                fma: eff,
+                ..params.clone()
+            };
+            &gated_params
+        } else {
+            params
+        }
+    };
 
     if ncol > nrow {
         return Err(FeralError::InvalidInput(format!(

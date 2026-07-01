@@ -469,6 +469,31 @@ impl Solver {
         self
     }
 
+    /// Opt into the FMA trailing-Schur kernels on **large fronts only**
+    /// (issue #99, Lever 3). Every front whose trailing-update area
+    /// `nrow * ncol >= min_area` uses the single-rounding FMA kernels
+    /// (~1.7× measured per-core on a 2955-row indefinite root, x86 V3);
+    /// smaller fronts keep the bit-exact `*_nofma` path. This lets one
+    /// factorization run the fast path on its throughput-dominant roots
+    /// while sensitive small KKT fronts — where FMA rounding can perturb
+    /// Bunch-Kaufman pivot classification — stay on the reference
+    /// kernels.
+    ///
+    /// Unlike [`with_fma`](Self::with_fma) (all-or-nothing), this leaves
+    /// small fronts bit-exact. It still changes cross-arch bit patterns
+    /// on the gated large fronts, so it is a deliberate opt-in. Inertia
+    /// is preserved on well-conditioned fronts. A reasonable starting
+    /// `min_area` is `256 * 256`. See
+    /// `dev/research/issue-99-dense-front-fma-gate.md`.
+    pub fn with_fma_large_fronts(mut self, min_area: usize) -> Self {
+        // Written straight to `bk` — the params the dense front factor
+        // reads — so no separate `NumericParams` field or funnel is
+        // needed (contrast `with_fma`, kept separate for historical
+        // reasons). Both multifrontal drivers pass `bk` per front.
+        self.numeric_params.bk.fma_min_front_area = Some(min_area);
+        self
+    }
+
     /// Disable delayed pivoting. When `on = true`, every supernode
     /// runs as if it were the root: pivots failing the BK threshold
     /// or 2×2 Duff–Reid test are force-accepted in place via
