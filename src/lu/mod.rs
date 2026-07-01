@@ -43,6 +43,37 @@ pub enum LuSingularAction {
     },
 }
 
+/// Why a rank-1 [`SparseLu::update`]/[`DenseLu::update`] gave up and returned
+/// [`FeralError::NeedsRefactor`](crate::error::FeralError::NeedsRefactor).
+///
+/// `update()` still returns the payload-free `Err(NeedsRefactor)` (additive,
+/// non-breaking); the cause and a magnitude are recorded separately and read
+/// back via [`SparseLu::last_refactor`]/[`DenseLu::last_refactor`]. This lets a
+/// caller distinguish an **ill-conditioning** failure (`Growth`, `TinyPivot`,
+/// `Singular`) — where iterative refine-and-retry is the right response — from a
+/// mere **bookkeeping-budget** trip (`UpdateBudget`), where a plain refactor
+/// suffices and refine-and-retry is wasted work (discopt#364). See issue #95.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefactorCause {
+    /// The element-growth high-water ratio `‖U‖∞ / ‖U₀‖∞` exceeded
+    /// [`LuParams::max_growth`]. Magnitude = the growth ratio that tripped.
+    Growth,
+    /// The update-count budget [`LuParams::max_updates`] was reached before this
+    /// update. Magnitude = the update count that hit the cap (`= max_updates`).
+    UpdateBudget,
+    /// A bump/final diagonal pivot fell at or below `zero_pivot_tol · ‖U₀‖∞`, or
+    /// was non-finite. Magnitude = `|pivot|` of the offending diagonal. On the
+    /// dense path a linearly dependent replacement also surfaces here (it drives
+    /// the final `U` diagonal to ~0); only the sparse path can report `Singular`
+    /// distinctly.
+    TinyPivot,
+    /// The replacement column is linearly dependent on the retained basis: the
+    /// sparse spike has no entry at or below its own diagonal in triangular-rank
+    /// order, so no bump pivot exists. Magnitude = `0.0`. Sparse-only (the dense
+    /// path reports this as `TinyPivot`).
+    Singular,
+}
+
 /// Two-sided scaling strategy for the LU basis (issue #81 robustness layer).
 ///
 /// Mirrors the spirit of [`crate::scaling::ScalingStrategy`] but keeps the row

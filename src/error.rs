@@ -66,6 +66,15 @@ pub enum FeralError {
     /// unchanged; the caller must call `refactor()` with the current basic
     /// columns. The recoverable analogue of MUMPS's delayed-pivot
     /// overflow. See issue #81.
+    ///
+    /// This variant is payload-free, but the *cause* and a magnitude are
+    /// recorded and read back via
+    /// [`SparseLu::last_refactor`](crate::SparseLu::last_refactor) /
+    /// [`DenseLu::last_refactor`](crate::DenseLu::last_refactor)
+    /// ([`RefactorCause`](crate::RefactorCause) = `Growth` | `UpdateBudget` |
+    /// `TinyPivot` | `Singular`), so a caller can distinguish an
+    /// ill-conditioning failure (refine and retry) from a mere update-count
+    /// budget trip (just refactor). See issue #95.
     NeedsRefactor,
 }
 

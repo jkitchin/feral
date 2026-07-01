@@ -62,6 +62,30 @@ their visibility so downstream callers can threshold on a continuous conditionin
 signal rather than the binary refactor-or-not verdict. No algorithm or behavior
 change.
 
+### Added — richer LU `update()` instability signal + growth-aware/dense-parity refactor recommendations (issue #95)
+
+`SparseLu::update` / `DenseLu::update` still return the payload-free
+`Err(FeralError::NeedsRefactor)` (additive, non-breaking), but the *cause* and a
+magnitude are now recorded and read back via a new accessor
+`last_refactor() -> Option<(RefactorCause, f64)>` on both types. The new public
+enum `RefactorCause` (`Growth` | `UpdateBudget` | `TinyPivot` | `Singular`) lets a
+caller distinguish an ill-conditioning failure (`Growth`/`TinyPivot`/`Singular` —
+where iterative refine-and-retry is the right response) from a mere update-count
+budget trip (`UpdateBudget` — where a plain refactor suffices). The magnitude is
+the growth ratio, the update count that hit the cap, or the offending `|pivot|`,
+per the cause. `last_refactor()` is `None` after a fresh factor/refactor and is
+left untouched by a successful update. The dense path never reports `Singular` (a
+dependent replacement surfaces as `TinyPivot` when the final `U` diagonal
+collapses to ~0); only the sparse path detects it distinctly.
+
+Also added: `should_refactor_growth()` on both types — a growth-aware
+recommendation that fires once `growth() >= sqrt(max_growth)` (building on the
+`growth()` getter from #93), letting a caller pre-empt a growth trip instead of
+discovering it on the update that fails; and `should_refactor()` parity on
+`DenseLu` (cost-based: `updates_since_refactor() >= m`, since a dense update is
+`O(m²)` and a fresh factor is `O(m³)`), mirroring the existing sparse
+`should_refactor()`. No numerical change.
+
 ## [0.11.3] - 2026-06-28
 
 ### Performance — sparse LU update: O(m³) → O(m²) `u_above` reindex on filled bumps (issue #89)

@@ -5595,3 +5595,36 @@ regression). Regression guard: `tests/issue91_preprocess_misfire.rs` (gitignored
 fixture `tests/data/large/qap15_kkt.mtx`, regen via
 `dev/scripts/regen_qap15_kkt.sh`). Research note:
 `dev/research/issue-91-preprocess-misfire.md`.
+## 2026-07-01 — LU update() richer instability signal: additive, not breaking (issue #95)
+
+**Decision.** Enrich the LU rank-1 `update()` failure signal via an **additive**
+accessor, not a breaking error-variant change. `SparseLu::update`/`DenseLu::update`
+keep returning the payload-free `Err(FeralError::NeedsRefactor)`; the cause +
+magnitude are recorded on `self` and read back via
+`last_refactor() -> Option<(RefactorCause, f64)>`. New public enum
+`RefactorCause { Growth, UpdateBudget, TinyPivot, Singular }`.
+
+**Why.** discopt#364 needs to distinguish an ill-conditioning failure
+(Growth/TinyPivot/Singular → refine-and-retry) from a mere update-count budget
+trip (UpdateBudget → refactor). The additive route (the issue's stated
+preference) leaves every existing caller compiling unchanged.
+
+**Magnitude semantics.** Growth = growth ratio that tripped; UpdateBudget =
+update count that hit the cap (= max_updates); TinyPivot = |offending pivot|;
+Singular = 0.0. `last_refactor()` is `None` after factor/refactor, untouched by a
+successful update.
+
+**Dense/sparse asymmetry (accepted, not a gap).** The dense path has no distinct
+`Singular` cause — a dependent replacement drives the final `U` diagonal to ~0 and
+reports `TinyPivot`. Only the sparse path detects the empty-support case
+(`h_rank < r_rank`) before eliminating, so `Singular` is sparse-only.
+
+**Refactor recommendations.** `should_refactor_growth()` (both types) fires at
+`growth >= sqrt(max_growth)` — the log-space midpoint between the floor 1 and the
+cap — to pre-empt a growth trip. Dense `should_refactor()` (cost-based parity) =
+`updates_since_refactor() >= m` (O(m²) update vs O(m³) factor), the dense analogue
+of sparse's `update_work_total >= factor_nnz()`.
+
+**Evidence.** +9 unit tests (each cause + both recommendation getters), 381 lib
+tests green, fmt/clippy clean, no numerical change (bench: no failures). Design
+note: `dev/research/refactor-signal-2026-07-01.md`.
