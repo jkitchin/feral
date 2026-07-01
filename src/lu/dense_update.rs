@@ -252,4 +252,34 @@ mod tests {
         }
         assert!(hw > 1.0, "test must exercise genuine element growth");
     }
+
+    /// Issue #93: the public `growth`/`u_max0` getters must expose exactly the
+    /// internal fields (no divergence). Fresh factor reports `growth == 1.0`;
+    /// after a committed update the getter tracks the internal high-water field.
+    #[test]
+    fn growth_getters_expose_internal_fields() {
+        let cols = vec![vec![4.0, 1.0], vec![1.0, 3.0]];
+        let params = LuParams {
+            max_updates: 20,
+            max_growth: 1e12,
+            ..LuParams::default()
+        };
+        let mut lu = DenseLu::factor(&cols, 2, params).expect("factor");
+
+        assert_eq!(lu.growth(), 1.0, "fresh factor growth is 1.0");
+        assert_eq!(lu.growth(), lu.growth, "getter mirrors internal field");
+        assert_eq!(lu.u_max0(), lu.u_max0, "getter mirrors internal field");
+        assert!(
+            lu.u_max0() > 0.0,
+            "reference max|U| is floored away from zero"
+        );
+
+        lu.update(1, &[0.0, 40.0]).expect("update commits");
+        assert_eq!(
+            lu.growth(),
+            lu.growth,
+            "getter mirrors internal after update"
+        );
+        assert_eq!(lu.u_max0(), lu.u_max0, "u_max0 unchanged by update");
+    }
 }
