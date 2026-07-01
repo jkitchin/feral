@@ -750,6 +750,43 @@ mod tests {
         assert!(hw > 1.0, "test must exercise genuine element growth");
     }
 
+    /// Issue #93: the public `growth`/`u_max0` getters must expose exactly the
+    /// internal fields. Fresh factor reports `growth == 1.0`; after a committed
+    /// update the getter tracks the internal high-water field.
+    #[test]
+    fn growth_getters_expose_internal_fields() {
+        let cols = vec![
+            vec![4.0, 1.0, 0.0, 0.0],
+            vec![1.0, 3.0, 1.0, 0.0],
+            vec![0.0, 1.0, 2.0, 1.0],
+            vec![0.0, 0.0, 1.0, 5.0],
+        ];
+        let m = 4;
+        let params = LuParams {
+            max_updates: 20,
+            max_growth: 1e12,
+            ..LuParams::default()
+        };
+        let mut lu = SparseLu::factor_dense_columns(m, &cols, params).expect("factor");
+
+        assert_eq!(lu.growth(), 1.0, "fresh factor growth is 1.0");
+        assert_eq!(lu.growth(), lu.growth, "getter mirrors internal field");
+        assert_eq!(lu.u_max0(), lu.u_max0, "getter mirrors internal field");
+        assert!(
+            lu.u_max0() > 0.0,
+            "reference max|U| is floored away from zero"
+        );
+
+        lu.update(3, &[0.0, 0.0, 1.0, 60.0])
+            .expect("update commits");
+        assert_eq!(
+            lu.growth(),
+            lu.growth,
+            "getter mirrors internal after update"
+        );
+        assert_eq!(lu.u_max0(), lu.u_max0, "u_max0 unchanged by update");
+    }
+
     /// After a chain of wide-bump dense-column updates, `U` must stay upper
     /// triangular *in `uperm` order* (every off-diagonal entry's column outranks
     /// its row) and diagonal-first — the structural invariant the row-ordered

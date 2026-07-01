@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-01T01:13:24Z
+Generated: 2026-07-01T01:00:54Z
 
 ## Latest Session
-File: dev/sessions/2026-06-21-01.md
+File: dev/sessions/2026-07-01-01.md
 ```
-# Session 2026-06-21-01
+# Session 2026-07-01-01
 
 ## Goal
-
-Issue #87: eliminate the residual **O(bump²)** Forrest–Tomlin row-elimination on
-wide (dense-spike) McCormick simplex bases — the Step-2 follow-up of discopt#229
-that was parked as a research spike. The user asked for the **most robust and
-performant** solution, chosen after digging into the code and the literature, and
-verified with before/after timing + scaling experiments.
+Issue #93: expose the LU element-growth factor via public getters on both
+`SparseLu` and `DenseLu`, so downstream callers (discopt's spatial B&B
+"NumericFocus"-style escalation) can threshold on a continuous conditioning
+signal instead of the binary `NeedsRefactor` verdict.
 
 ## Accomplished
+- Added `pub fn growth(&self) -> f64` and `pub fn u_max0(&self) -> f64` to:
+  - `SparseLu` (`src/lu/sparse_factor.rs`, after `reach_visits()`)
+  - `DenseLu` (`src/lu/dense_factor.rs`, after `updates_since_refactor()`)
+  Purely additive — the `growth`/`u_max0` fields already existed as
+  `pub(super)`; this only widens their visibility. No field, algorithm, or
+  behavior change.
+- Added a getter test on each side
+  (`growth_getters_expose_internal_fields`): fresh factor reports
+  `growth() == 1.0`; getters equal the internal fields before and after a
+  committed update; `u_max0() > 0` (floored away from zero). Oracle is the
+  existing internal field, itself already pinned to an independent
+  element-growth recomputation by
+  `growth_monitor_tracks_compounded_element_growth` — so no new numerical
+  oracle was authored this session (satisfies the same-session oracle rule).
+- Updated `CHANGELOG.md` Unreleased with the additive-getters entry.
 
-### Diagnosis (the key insight)
+Evidence:
+- `cargo test --lib growth_getters` → 2 passed, 0 failed.
+- `cargo test --lib lu::` → 30 passed, 0 failed.
+- `cargo clippy --all-targets -- -D warnings` → clean.
+- `cargo fmt` reformatted the two test files (long assert lines only).
 
-The current `SparseLu::update`/`eliminate_bump` is **not** a Forrest–Tomlin update
-— it sets the spike into `U`'s column `r` and runs a full partial-pivoting bump
-re-triangularization in fixed pivot order. It eliminates the dense spike
-**column**, touching `O(bump)` rows with cascading fill, so both the work **and**
-the recorded eta are `O(bump²)` on a dense spike. True FT eliminates the single
-pivotal **row** after a symmetric permutation (the permuted diagonal pivots are
-the old nonzero `U` diagonals — dodging the zero-superdiagonal landmine that
-reverted the 2026-06-08 column-shift attempt), which is `O(bump)` for sparse `U`.
+## Benchmark Results
+```
+--- Dense solver validation ---
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+Dense failure analysis: no failures
+Sparse failure analysis: no failures
+```
+(No perf regression possible — no code path changed; getters are field reads.)
 
-### Route chosen: logical-permutation Forrest–Tomlin
+## Decisions Made
+- None. Additive API only.
 
-Carry one evolving `uperm` (pivot-position ↔ triangular rank), applied once per
-solve; never relabel `U`'s indices or prior etas. Rejected the column-ordering
-lever (no asymptotic change) and physical permutation (stales prior etas →
-`O(k²·bump)`; cyclic shift as per-eta swaps → `O(k·bump)` solve blow-up).
-Clean-room from Forrest–Tomlin 1972, Reid 1982, Schork–Gondzio ERGO-17-002
-(`BASICLU` is GPL — paper only). Docs: `dev/research/ft-row-elimination-design-2026-06-21.md`,
-`dev/plans/ft-row-elimination-2026-06-21.md`, `dev/decisions.md`.
-
-### Implementation (P1+P2)
-
-- **P1** (`a676aaf`): `uperm`/`uperm_inv`; `usolve`/`ut_solve` walk `U` in rank
-  order (identity at factor ⇒ byte-identical).
-- **P2** (`ebaeca6`): rewrote `sparse_update.rs` — `set_column_r` (spike into
-  other rows), `shift_uperm` (symmetric cyclic shift, `O(bump)`),
-  `eliminate_pivot_row` (single-row sparse forward sweep via a rank min-heap, one
-  `FtOp::Axpy` per sub-diagonal). Widened `u_above` to all off-diagonal holders;
-  diagonal-first-aware row helpers; removed `FtOp::Swap`.
-- **Bug fixed during bring-up**: the eliminated pivot column's FP residual
-  `vrc − mult·piv ≠ 0` re-enqueued the column forever (infinite loop / OOM, exit
-  137). Fixed by clearing `rw[c]` exactly and skipping the pivot's own diagonal.
-
-### Evidence (before → after, release, this host)
-
-| probe | metric | BEFORE | AFTER |
-|---|---|---:|---:|
+## Abandoned Approaches
+- None.
 ```
 
 ## Git Status
 ```
-7b4669b issue #94: LU-basis one-norm condition estimate via ftran/btran
-01a1527 issue #94: extract shared Hager–Higham driver + HagerHighamOperator trait
 f037285 release: feral v0.11.3
 a5c789f issue #89: FT update u_above reindex O(m³)→O(m²) + true per-update cost counter (#90)
 a9cea82 issue #87: Forrest–Tomlin row-elimination LU update (O(bump²) → O(bump)) (#88)
+380459c issue #87: gate FT invariant self-check behind off-by-default feature (CI: alloc probe)
+47a3d66 issue #87: fix duplicate-column bug in FT row gather (CI: casctanks drift)
 ```
 
 ## Test Status
@@ -86,27 +86,24 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 381 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.90s
+test result: ok. 375 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.16s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-06-21-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-01-01.md)
 
-
-cargo run --bin bench --release  (symmetric indefinite gate — unaffected)
-  Residual pass: 2/2 (100.0%)   Worst residual: 1.26e-16
-  Dense/Sparse failure analysis: no failures
-
-casctanks_ft_update/chain_144_updates_m2169
-  BEFORE: 16.770–17.036 ms   AFTER: 1.6413–1.6748 ms   (10.2×)
-
-lu_wide_bump_probe (dense-spike tridiagonal, AFTER):
-   m    us/update   us/update/m   eta_ops/upd
-  250     102.11       0.41           52
- 1000     675.41       0.68          116
- 4000   69415.61      17.35         ~120
+--- Dense solver validation ---
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+Dense failure analysis: no failures
+Sparse failure analysis: no failures
+(No perf regression possible — no code path changed; getters are field reads.)
 
 ```
 
@@ -182,7 +179,6 @@ src/io/mod.rs
 src/io/mtx.rs
 src/io/sidecar.rs
 src/lib.rs
-src/lu/condition.rs
 src/lu/dense_factor.rs
 src/lu/dense_matrix.rs
 src/lu/dense_solve.rs
