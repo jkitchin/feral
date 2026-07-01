@@ -285,6 +285,19 @@ pub struct Solver {
     /// 1D-banded KKTs (#33 suggested action §3, supernode-shape
     /// thesis).
     ordering: OrderingMethod,
+    /// Issue #102 follow-up: pivot-growth ceiling above which `factor()`
+    /// escalates the ordering. When `OrderingPreprocess::Auto` dropped an
+    /// available `LdltCompress` (predicate fired but the fill verify chose
+    /// `None`), a factor whose pivot growth `max|piv|/min|piv|` exceeds this
+    /// bound is numerically inadequate (the MC64 matching `LdltCompress`
+    /// provides was needed) — feral re-factors with `LdltCompress`. `None`
+    /// disables. Default sits in the measured gap between healthy
+    /// (≤7.5e19: qap15, cont5 early) and broken (4.1e32: cont5 late).
+    ordering_escalation_growth: Option<f64>,
+    /// Runtime latch: once a factor on this pattern has escalated to
+    /// `LdltCompress` (above), every subsequent factor on the same pattern
+    /// forces `LdltCompress` directly (no re-probe). Reset on pattern change.
+    ordering_escalated: bool,
     /// Warm cascade-break auto-arm threshold. `Some(β)` means: at the
     /// start of `factor()`, if the previous factor on this pattern
     /// generated a supernode with `n_delayed_in >= β·n`, locally set
@@ -407,6 +420,8 @@ impl Solver {
             use_parallel: true,
             parallel_pool: None,
             ordering: OrderingMethod::Auto,
+            ordering_escalation_growth: Some(1e24),
+            ordering_escalated: false,
             auto_cascade_break_beta: None,
             prev_max_n_delayed_in: None,
             auto_arm_latched: false,
@@ -466,6 +481,18 @@ impl Solver {
     /// detailed on [`NumericParams::fma`].
     pub fn with_fma(mut self, fma: bool) -> Self {
         self.numeric_params.fma = fma;
+        self
+    }
+
+    /// Set the pivot-growth ceiling for ordering escalation (issue #102
+    /// follow-up), or `None` to disable it. When `OrderingPreprocess::Auto`
+    /// drops an available `LdltCompress` on symbolic fill but the resulting
+    /// factor has `max|piv|/min|piv|` above this bound, `factor()` re-factors
+    /// with `LdltCompress` (the MC64 matching the near-singular pivots
+    /// needed). Default `Some(1e24)`. Only affects `Auto`; an explicit
+    /// `None`/`LdltCompress` preprocess request is respected as-is.
+    pub fn with_ordering_escalation(mut self, growth_ceiling: Option<f64>) -> Self {
+        self.ordering_escalation_growth = growth_ceiling;
         self
     }
 
@@ -857,6 +884,9 @@ impl Solver {
             // means the prior n_delayed observation no longer applies.
             self.prev_max_n_delayed_in = None;
             self.auto_arm_latched = false;
+            // Issue #102 follow-up: a new pattern re-tries the fill-preferred
+            // (fast) ordering; escalation is re-decided from its pivot growth.
+            self.ordering_escalated = false;
             // Track B2: the MC64 scaling cache is keyed on the
             // pattern fingerprint; a new pattern voids it.
             self.mc64_scaling_cache = None;
@@ -879,11 +909,20 @@ impl Solver {
             // profiling is off, we pass `&self.snode_params` directly
             // — zero allocation, byte-identical to pre-issue-52
             // behavior.
-            let result = if self.profiling_enabled {
-                let arc = Arc::new(Mutex::new(SymbolicProfiler::new()));
-                self.last_symbolic_profiler = Some(Arc::clone(&arc));
+            // Issue #102 follow-up: after escalation, force `LdltCompress`
+            // (its MC64 matching stabilizes the near-singular pivots the fast
+            // `None` ordering mishandled). Otherwise use the caller's config.
+            let escalated = self.ordering_escalated;
+            let result = if self.profiling_enabled || escalated {
                 let mut sp = self.snode_params.clone();
-                sp.symbolic_profiler = Some(arc);
+                if self.profiling_enabled {
+                    let arc = Arc::new(Mutex::new(SymbolicProfiler::new()));
+                    self.last_symbolic_profiler = Some(Arc::clone(&arc));
+                    sp.symbolic_profiler = Some(arc);
+                }
+                if escalated {
+                    sp.preprocess = crate::symbolic::OrderingPreprocess::LdltCompress;
+                }
                 symbolic_factorize_with_method(matrix, &sp, self.ordering)
             } else {
                 symbolic_factorize_with_method(matrix, &self.snode_params, self.ordering)
@@ -1360,6 +1399,42 @@ impl Solver {
                 // factor itself. Two unconditional integer writes.
                 self.last_nnz_a = Some(matrix.nnz());
                 self.last_pattern_reused = Some(pattern_reused);
+
+                // Issue #102 follow-up: escalate the ordering on catastrophic
+                // pivot growth. `OrderingPreprocess::Auto`'s fill verify can
+                // drop a `LdltCompress` the matrix numerically *needs* (its
+                // MC64 matching stabilizes near-singular ±ε diagonals); this
+                // is invisible to symbolic fill but shows as huge pivot growth
+                // in the resulting factor (e.g. cont5_2_4_l's late IPM KKTs:
+                // ~4e32 with None vs ~1e15 with LdltCompress, breaking IPM
+                // convergence). When growth exceeds the ceiling and Auto did
+                // drop an available LdltCompress, re-factor with LdltCompress.
+                // Growth is checked first (cheap); the O(nnz) predicate probe
+                // only runs in the rare high-growth case. Clears just the
+                // symbolic cache (keeps the pattern fingerprint, so the
+                // escalation latch survives the recursive re-factor).
+                if !self.ordering_escalated
+                    && self.snode_params.preprocess == crate::symbolic::OrderingPreprocess::Auto
+                {
+                    if let Some(limit) = self.ordering_escalation_growth {
+                        let growth = match (self.min_pivot_magnitude(), self.max_pivot_magnitude())
+                        {
+                            (Some(mn), Some(mx)) if mn > 0.0 => mx / mn,
+                            _ => 0.0,
+                        };
+                        if growth > limit
+                            && self.last_symbolic.as_ref().is_some_and(|s| {
+                                s.resolved_preprocess == crate::symbolic::OrderingPreprocess::None
+                            })
+                            && crate::symbolic::pick_ordering_preprocess(matrix)
+                                == crate::symbolic::OrderingPreprocess::LdltCompress
+                        {
+                            self.ordering_escalated = true;
+                            self.last_symbolic = None;
+                            return self.factor(matrix, check_inertia);
+                        }
+                    }
+                }
                 if partial_singular {
                     FactorStatus::Singular
                 } else if let Some(expected) = check_inertia {

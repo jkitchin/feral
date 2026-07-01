@@ -190,6 +190,22 @@ fn main() {
             reps,
         );
     }
+    if has("ldlt") {
+        run(
+            "force LdltCompress",
+            &csc,
+            || {
+                Solver::with_params(
+                    NumericParams::default(),
+                    SupernodeParams {
+                        preprocess: OrderingPreprocess::LdltCompress,
+                        ..SupernodeParams::default()
+                    },
+                )
+            },
+            reps,
+        );
+    }
     if has("fma") {
         run("default+fma", &csc, || Solver::new().with_fma(true), reps);
     }
