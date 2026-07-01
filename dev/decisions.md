@@ -5551,3 +5551,47 @@ not required for correctness.
 144-chain: 16.88 ms → 1.66 ms (10.2×). Localized-spike (`lu_update_probe`) and
 the full suite unchanged/green. Clean-room from Forrest–Tomlin 1972, Reid 1982,
 Schork–Gondzio ERGO-17-002 (`BASICLU` is GPL — paper only).
+
+## 2026-06-30 — `OrderingPreprocess::Auto` resolves by verified fill race, not structural prediction (issue #91)
+
+**Decision.** When `OrderingPreprocess::Auto` is selected (the default),
+resolve it by *verifying* fill rather than trusting `pick_ordering_preprocess`
+alone. If the structural predicate recommends `LdltCompress`, run the symbolic
+pipeline both ways and keep `LdltCompress` only if its `factor_nnz_estimate`
+does not exceed `PREPROCESS_FILL_INFLATION_LIMIT = 2.0×` the `None` baseline;
+otherwise fall back to `None`. If the predicate declines, use `None` directly
+(no race). Implemented in `symbolic_factorize_preprocess_auto`
+(`src/symbolic/mod.rs`).
+
+**Why.** `pick_ordering_preprocess` fires `LdltCompress` when ≥30 % of columns
+have ≤2 nonzeros — a property regularized quasi-definite IPM KKTs have in
+abundance (their diagonal regularization rows). On the qap15 conic KKT
+(n=50880) MC64 compression *inflated* simplicial fill 6.3× (7.16M → 45.4M) and
+factor time ~20× (0.77 s → 15.4 s). The predicate is a one-way structural proxy
+and cannot know whether compression actually helps; verifying fill makes `Auto`
+robust to this and any future misfire.
+
+**Why a 2× threshold, not "smaller fill wins".** An initial pure-fill race
+(keep `LdltCompress` only on ties/improvements) regressed inertia on
+near-singular corpus KKTs: twirism1's `LdltCompress` ordering is +15 % fill but
+its MC64-matched 2×2 pivots produce the **oracle-correct** inertia (432,313,0),
+where the leaner `None` ordering misclassifies two near-zero pivots
+(434,311,0); sawpath similarly. `LdltCompress` (MUMPS ICNTL(12)=2 for SYM=2)
+carries a numerical benefit that symbolic fill does not capture, so the guard
+must only fire on a *catastrophic* inflation. 2× sits well above the normal
+~1.1–1.2× compression overhead and well below qap15's 6.3×.
+
+**Alternatives rejected.**
+- *Blanket-disable `LdltCompress`*: kills its inertia benefit on twirism1/sawpath
+  and any other SYM=2 case it exists to serve.
+- *Fix the predicate's threshold*: still a one-way proxy; would need re-tuning per
+  pathology and cannot account for the numerical benefit.
+- *Smaller-fill-wins race*: regresses the `issue65_mc64_fallback` inertia gate
+  (above).
+
+**Evidence.** qap15 default factor 15.4 s → 0.77 s (20×), nnz_L 40.9M → 9.25M,
+inertia (+22275,−28605,0) unchanged. Full corpus suite green (no inertia
+regression). Regression guard: `tests/issue91_preprocess_misfire.rs` (gitignored
+fixture `tests/data/large/qap15_kkt.mtx`, regen via
+`dev/scripts/regen_qap15_kkt.sh`). Research note:
+`dev/research/issue-91-preprocess-misfire.md`.

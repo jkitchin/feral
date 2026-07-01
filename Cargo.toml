@@ -117,5 +117,8 @@ harness = false
 [[example]]
 name = "ft_dense_bump"
 
+[[example]]
+name = "bench_qap15"
+
 [profile.release]
 debug = true
