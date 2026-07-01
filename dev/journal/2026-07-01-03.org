@@ -1,0 +1,61 @@
+* 2026-07-01-03 :issue99:dense-front:fma:performance:
+
+* 09:00 :orientation:blocker:
+Task: "loop over all levers until faer-level performance" on issue #99
+(dense-front throughput, ~3.5× gap to faer on qap15 conic KKT).
+Discovered the issue's premises are not reproducible on this branch:
+- PR #92 (the OrderingPreprocess::Auto fix that made qap15 tractable, and
+  the qap15 fixture generator + bench harnesses) is OPEN/UNMERGED
+  (branch issue-91-preprocess-misfire). This branch is off current main
+  and lacks it: INTRAFRONT_MIN_AREA is still 256*256 (not #92's 256*128).
+- The qap15 fixture (tests/data/large/qap15_kkt.mtx, gitignored), its
+  generator, examples/{profile,bench}_qap15.rs, and the two research
+  notes the issue cites all exist on NO remote branch.
+- This container has 4 cores; the issue's numbers are 10-core.
+Conclusion: end-to-end qap15 cannot be reproduced; parallel-scaling levers
+(1 assembly, 2 schur) cannot be validated vs the 10-core target here.
+Tried to ask the owner the fixture + policy questions via AskUserQuestion;
+the tool failed ("permission stream closed"). Proceeded autonomously with
+the defensible subset: byte-exact / additive / measurable-here work only.
+
+* 10:30 :harness:measurement:
+Built examples/bench_dense_front.rs — self-contained synthetic indefinite
+front (SplitMix64, alternating-sign dominant diagonal → 1×1-pivot W-2 fast
+path), factored via the real factor_frontal_blocked path, timing
+nofma/FMA × serial/intrafront with an inertia-equality gate.
+n=2955 (qap15 root size), 4 threads, best of 5:
+  nofma serial     25586 ms  0.34 GFLOP/s  1.00x
+  nofma intrafront  8632 ms  1.00 GFLOP/s  2.96x
+  fma   serial     15423 ms  0.56 GFLOP/s  1.66x
+  fma   intrafront  5143 ms  1.67 GFLOP/s  4.98x
+inertia (+1478,-1477,0) identical across all four. FMA = real 1.66x
+per-core win, inertia-preserving. But 1.67 GFLOP/s ceiling is ~50x below a
+tuned BLAS-3 core → the deep gap is the memory-bandwidth-bound rank-panel
+update vs 2-D tiled GEMM (dense-kernel-blas3.md), not any single lever.
+
+* 12:00 :implement:fma-gate:
+Lever 3 as an opt-in, default-off knob: BunchKaufmanParams::fma_min_front_area
+= Option<usize>; effective_front_fma(params,nrow,ncol) helper; gated at the
+single dense-front entry factor_frontal_blocked_in_place_with_scratch by
+shadowing params with an fma-flipped clone only when the gate fires (unarmed
+path pays nothing). Solver::with_fma_large_fronts writes straight to
+numeric_params.bk (no NumericParams field/funnel — first tried the
+NumericParams-field-mirror-of-fma approach but it broke ~dozens of
+fully-enumerated NumericParams literals across tests/examples/diagnostics;
+the bk-only design is lower churn since bk is nearly always ..default()).
+
+* 13:15 :verify:
+tests/issue99_fma_front_gate.rs (4 tests): gate>=threshold bit-identical to
+fma=true; below-threshold bit-identical to nofma default; inertia preserved;
+threshold is exactly nrow*ncol with >=. Full suite: 734 passed, 0 failed.
+cargo fmt + clippy --all-targets -D warnings clean. bench --release: no
+failures (default path byte-for-byte unchanged since gate defaults None).
+
+* 13:40 :scope:handoff:
+Delivered: FMA size gate + Solver setter + bench harness + tests + research
+note. Deferred (blocked, documented): Lever 1 adaptive INTRAFRONT_MIN_AREA
+(needs bench corpus + representative cores to prove no-regression), Lever 2
+assembly parallelism (parallel-scaling, unvalidatable at 4 cores),
+default-on FMA / Lever 4 static-SQD (owner policy call), BLAS-3 GEMM
+(the only route to faer-class GFLOP/s). No byte-exact lever closes 3.5×,
+as the issue itself states.

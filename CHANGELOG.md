@@ -4,6 +4,30 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — opt-in per-front FMA size gate for large dense fronts (issue #99)
+
+`Solver::with_fma_large_fronts(min_area)` and the underlying
+`BunchKaufmanParams::fma_min_front_area: Option<usize>` (default `None`) route a
+dense front to the single-rounding FMA trailing-Schur kernels when its
+trailing-update area `nrow * ncol >= min_area`, **while leaving smaller fronts on
+the bit-exact `*_nofma` path**. Unlike the existing all-or-nothing
+`with_fma`/`NumericParams::fma`, this lets one factorization run the fast kernel
+on its throughput-dominant roots while sensitive small KKT fronts — where FMA
+rounding can perturb Bunch-Kaufman pivot classification (`dev/tried-and-rejected.md`
+2026-04-14) — keep the reference kernels. `None` is a strict no-op, so the
+default cross-arch bit-exactness contract is unchanged; enabling the gate
+changes cross-arch bit patterns only on the gated large fronts.
+
+Measured on a synthetic 2955×2955 indefinite root (the qap15 root size) on a
+4-core x86_64 box via the new `examples/bench_dense_front` harness: FMA is
+**1.66× faster per-core** (25.6 s → 15.4 s serial) and **1.67×** inside the
+intra-front-parallel path (8.6 s → 5.1 s), with **identical inertia**
+`(+1478, −1477, 0)` across all four nofma/FMA × serial/intrafront variants.
+This is issue #99's Lever 3 (per-core kernel throughput) delivered as an opt-in;
+reaching faer-class GFLOP/s additionally needs the 2-D tiled BLAS-3 GEMM
+(`dev/plans/dense-kernel-blas3.md`). See
+`dev/research/issue-99-dense-front-fma-gate.md`.
+
 ### Added — one-norm condition estimate for the unsymmetric LU basis (issue #94)
 
 `SparseLu::condition_estimate_1(&mut self, b: &SparseColMatrix)` and

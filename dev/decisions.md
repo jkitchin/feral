@@ -5585,3 +5585,48 @@ of sparse's `update_work_total >= factor_nnz()`.
 **Evidence.** +9 unit tests (each cause + both recommendation getters), 381 lib
 tests green, fmt/clippy clean, no numerical change (bench: no failures). Design
 note: `dev/research/refactor-signal-2026-07-01.md`.
+
+## 2026-07-01 — Opt-in per-front FMA size gate (issue #99, Lever 3)
+
+**Decision.** Add `BunchKaufmanParams::fma_min_front_area: Option<usize>`
+(default `None`) and `Solver::with_fma_large_fronts(min_area)`. When armed, a
+dense front whose trailing-update area `nrow * ncol >= min_area` uses the FMA
+trailing-Schur kernels even when the global `fma` flag is off; smaller fronts
+keep the bit-exact `*_nofma` kernels. The gate lives on `BunchKaufmanParams`
+(read directly by the dense front factor) and is set straight into
+`numeric_params.bk` by the builder — no new `NumericParams` field and no funnel,
+so the change is low-churn (every `..Default::default()` site is unaffected) and
+`None` is a strict no-op.
+
+**Why.** Issue #99's Lever 3: the trailing-update kernel is nofma (bit-exact) and
+~1.3–2× below FMA peak; large indefinite roots dominate the factor loop but the 4
+small-front pivot-drift KKTs (ACOPP14_0001, ACOPP30_0004, FBRAIN3LS_0848/0851)
+need nofma to keep their Bunch-Kaufman pivot classification. The existing `fma`
+flag is all-or-nothing, so it cannot serve both. A front-size gate does: fast
+kernel on the roots, reference kernel on the sensitive small fronts.
+
+**Why opt-in / default `None`.** Enabling FMA changes cross-arch bit patterns
+(single vs double rounding) on the gated fronts — the reproducibility policy the
+owner deliberately kept opt-in (`dev/tried-and-rejected.md` 2026-04-14). This
+session had no authorization to flip a default (the interactive policy question
+could not be delivered — harness permission-stream failure), so the lever is
+shipped as a knob with measured evidence, leaving the default-on decision to the
+owner.
+
+**Evidence.** `examples/bench_dense_front 2955 5` (4-core x86_64): FMA 1.66×
+per-core serial (25.6 s → 15.4 s), 1.67× inside intrafront (8.6 s → 5.1 s),
+inertia `(+1478,−1477,0)` identical across all four nofma/FMA × serial/intrafront
+variants. `tests/issue99_fma_front_gate.rs` (4 tests): gate above threshold is
+bit-identical to `fma=true`, below threshold bit-identical to nofma default,
+inertia preserved, threshold is exactly `nrow*ncol` with `>=`. Full suite 734
+passed / 0 failed; fmt + clippy `-D warnings` clean; bench residual gate
+unchanged (default path byte-for-byte identical). Note:
+`dev/research/issue-99-dense-front-fma-gate.md`.
+
+**Not closed.** This does not reach faer-class throughput — the best variant is
+1.67 GFLOP/s vs ~50–100 for a tuned BLAS-3 core. The structural gap is feral's
+memory-bandwidth-bound rank-panel update vs a 2-D register-tiled GEMM
+(`dev/plans/dense-kernel-blas3.md`), a multi-session rewrite. Levers 1 (adaptive
+`INTRAFRONT_MIN_AREA`) and 2 (assembly parallelism) are parallel-scaling levers
+that need the bench corpus + a representative core count to validate no-regression
+— not possible on this 4-core box without the (unmerged-PR-#92) qap15 fixtures.

@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-01T01:38:26Z
+Generated: 2026-07-01T10:55:37Z
 
 ## Latest Session
-File: dev/sessions/2026-07-01-02.md
+File: dev/sessions/2026-07-01-03.md
 ```
-# Session 2026-07-01-02
+# Session 2026-07-01-03
 
 ## Goal
 
-Issue #95: enrich the LU rank-1 `update()` failure signal so a caller can tell an
-ill-conditioning failure (refine and retry) from a bookkeeping-budget trip (just
-refactor), and close the `should_refactor()` sparse/dense parity gap. discopt#364
-needs the *why* behind a `NeedsRefactor`, and discopt forces the dense LU for
-small bases (`m ≤ 256`).
+Issue #99: "loop over all levers until faer-level performance" on the dense-front
+factorization throughput gap (~3.5× to faer on the qap15 conic KKT, dominated by
+a 2955×2955 indefinite root).
+
+## Reality check (reported up-front, per protocol)
+
+The issue's premises are **not reproducible on this branch**, and I established
+this before writing code:
+
+- **PR #92 is open/unmerged.** It (issue #91) contains the `OrderingPreprocess::Auto`
+  fill-verification fix that made qap15 tractable *and* the qap15 fixture
+  generator + `bench_qap15` harness. This branch is cut from current `main` and
+  lacks all of it — `INTRAFRONT_MIN_AREA` is still `256*256`, not #92's `256*128`.
+- **The qap15 fixture, its generator, `examples/{profile,bench}_qap15.rs`, and the
+  two research notes the issue cites for "the full diagnosis" exist on no remote
+  branch** (unpushed/lost work). The end-to-end qap15 number that defines the
+  target cannot be reproduced here.
+- **This container has 4 cores; the issue's numbers are 10-core.** The
+  parallel-scaling levers (1 assembly, 2 schur scaling) cannot be validated
+  against the issue's targets here.
+- The issue itself states **no byte-exact lever closes 3.5×**; faer-class needs a
+  policy decision (default-on FMA / static-SQD) the owner deliberately deferred.
+
+I attempted to ask the owner the fixture-strategy and policy questions via
+`AskUserQuestion`; the harness failed to deliver it (permission-stream error).
+Told to continue, I proceeded autonomously with the **defensible subset**:
+additive, default-off, byte-exact-preserving, measurable-here work only — no
+unilateral default flips, no unvalidatable parallel retunes.
 
 ## Accomplished
 
-Chose the issue's **preferred additive (non-breaking)** design: keep the
-payload-free `Err(NeedsRefactor)`, record cause + magnitude alongside.
+**Issue #99 Lever 3 (per-core kernel throughput) — delivered as an opt-in knob.**
 
-- New public enum `RefactorCause { Growth, UpdateBudget, TinyPivot, Singular }`
-  (`src/lu/mod.rs`, re-exported from the crate root via `src/lib.rs`).
-- `last_refactor() -> Option<(RefactorCause, f64)>` on both `SparseLu` and
-  `DenseLu`. Set on **every** `NeedsRefactor` return path (update-count budget,
-  singular/empty-support, growth, tiny/zero/non-finite pivot). `None` after a
-  fresh factor/refactor; untouched by a successful update (read only after `Err`).
-- `growth()` getter on both (exposes the element-growth high-water monitor).
-- `should_refactor_growth()` on both: growth-aware recommendation firing once
-  `growth >= sqrt(max_growth)` (finite, > 1) — the geometric midpoint in log
-  space — so a caller can pre-empt a growth trip.
-- `should_refactor()` parity on `DenseLu` (cost-based: `updates_since_refactor >= m`;
-  dense update is O(m²), fresh factor O(m³)), mirroring the sparse cost-based
-  `should_refactor()`. `updates_since_refactor()` already existed on both.
-- Docs: `src/error.rs` `NeedsRefactor` variant now points at the accessor;
-  `CHANGELOG.md` Unreleased; design note `dev/research/refactor-signal-2026-07-01.md`.
-
-**Magnitude semantics** — Growth: the growth ratio that tripped (> max_growth);
-UpdateBudget: the update count that hit the cap (= max_updates); TinyPivot:
-|offending pivot| (≤ zero_pivot_tol·u_max0); Singular: 0.0.
-
-**Dense/sparse asymmetry (inherent, documented):** the dense path has no distinct
-`Singular` branch — a linearly dependent replacement drives the final `U` diagonal
-to ~0 and reports `TinyPivot`. Only the sparse path can cheaply detect the
-empty-support case (`h_rank < r_rank`) *before* eliminating, so `Singular` is
-sparse-only.
-
-### Evidence
-
-- 9 new unit tests (5 sparse, 4 dense): each cause reached via a deterministically
-  constructed input, plus the two recommendation getters. Assertions are
-  behavioral (which cause) and self-consistent (the magnitude relation the path
-  itself guarantees) — no external numerical oracle required.
-  - Note: the naive identity-basis update `update(0, e0/[1,1])` trips a
-    `TinyPivot` (after the cyclic shift `u[0,0]` = the identity's off-diagonal 0),
-    *not* a clean commit — so the budget/recommendation tests use the tridiagonal
+- New `examples/bench_dense_front.rs`: self-contained synthetic indefinite front
+  (no external fixture), factored through the real `factor_frontal_blocked` path,
+  timing nofma/FMA × serial/intrafront with an inertia-equality gate. Fills the
+  measurement-harness hole the issue's (missing) `bench_qap15` left.
+- New `BunchKaufmanParams::fma_min_front_area: Option<usize>` (default `None`) +
+  `effective_front_fma(params, nrow, ncol)` helper. Gated at the single dense
+  front-factor entry `factor_frontal_blocked_in_place_with_scratch` by shadowing
+  `params` with an fma-flipped clone **only when the gate fires** (unarmed path
+  pays nothing). Both multifrontal drivers funnel through this entry, so one
+  insertion covers all.
+- New `Solver::with_fma_large_fronts(min_area)` — writes straight to
+  `numeric_params.bk` (no `NumericParams` field / funnel needed; low churn).
+- `None` default ⇒ strict no-op: the production cross-arch bit-exact contract is
 ```
 
 ## Git Status
 ```
-daa058f issue #95: richer update() instability signal + refactor recommendations
+b25f3f8 issue #99: opt-in per-front FMA size gate for large dense fronts (Lever 3)
+a17fb7a issue #95: richer update() instability signal + growth-aware/dense-parity refactor recommendations (#97)
 f9398fd issue #94: one-norm condition estimate for the unsymmetric LU factor (#98)
 f114b5d issue #93: expose the LU element-growth factor via public getters (#96)
 f037285 release: feral v0.11.3
-a5c789f issue #89: FT update u_above reindex O(m³)→O(m²) + true per-update cost counter (#90)
 ```
 
 ## Test Status
@@ -86,58 +86,61 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 391 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.40s
+test result: ok. 391 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.38s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-01-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-01-03.md)
 
 
-Residual pass: 2/2 (100.0%)
-Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Dense failure analysis: no failures
-Sparse failure analysis: no failures
+cargo run --bin bench --release  →  Sparse failure analysis: no failures
 Dense ∩ Sparse failure overlap: 0 / 0 / 0
 (no oracle timings loaded in this environment; perf partitions N/A)
+Default path unchanged (gate defaults None) → residual gate identical to the
+2026-07-01-02 baseline (2/2, worst residual 1.26e-16).
 
-Purely additive API + metadata on the error path (a single `Option` write only on
-a `NeedsRefactor` return); no factorization or solve arithmetic changed.
+examples/bench_dense_front 2955 5 (the new issue-99 harness):
+  nofma serial     25586.15 ms  0.34 GFLOP/s  1.00×
+  nofma intrafront  8631.85 ms  1.00 GFLOP/s  2.96×
+  fma   serial     15422.96 ms  0.56 GFLOP/s  1.66×
+  fma   intrafront  5142.82 ms  1.67 GFLOP/s  4.98×
+  inertia (+1478,−1477,0) identical across all four variants ✓
 
 ```
 
 ## Recent Decisions
-accessor, not a breaking error-variant change. `SparseLu::update`/`DenseLu::update`
-keep returning the payload-free `Err(FeralError::NeedsRefactor)`; the cause +
-magnitude are recorded on `self` and read back via
-`last_refactor() -> Option<(RefactorCause, f64)>`. New public enum
-`RefactorCause { Growth, UpdateBudget, TinyPivot, Singular }`.
+small-front pivot-drift KKTs (ACOPP14_0001, ACOPP30_0004, FBRAIN3LS_0848/0851)
+need nofma to keep their Bunch-Kaufman pivot classification. The existing `fma`
+flag is all-or-nothing, so it cannot serve both. A front-size gate does: fast
+kernel on the roots, reference kernel on the sensitive small fronts.
 
-**Why.** discopt#364 needs to distinguish an ill-conditioning failure
-(Growth/TinyPivot/Singular → refine-and-retry) from a mere update-count budget
-trip (UpdateBudget → refactor). The additive route (the issue's stated
-preference) leaves every existing caller compiling unchanged.
+**Why opt-in / default `None`.** Enabling FMA changes cross-arch bit patterns
+(single vs double rounding) on the gated fronts — the reproducibility policy the
+owner deliberately kept opt-in (`dev/tried-and-rejected.md` 2026-04-14). This
+session had no authorization to flip a default (the interactive policy question
+could not be delivered — harness permission-stream failure), so the lever is
+shipped as a knob with measured evidence, leaving the default-on decision to the
+owner.
 
-**Magnitude semantics.** Growth = growth ratio that tripped; UpdateBudget =
-update count that hit the cap (= max_updates); TinyPivot = |offending pivot|;
-Singular = 0.0. `last_refactor()` is `None` after factor/refactor, untouched by a
-successful update.
+**Evidence.** `examples/bench_dense_front 2955 5` (4-core x86_64): FMA 1.66×
+per-core serial (25.6 s → 15.4 s), 1.67× inside intrafront (8.6 s → 5.1 s),
+inertia `(+1478,−1477,0)` identical across all four nofma/FMA × serial/intrafront
+variants. `tests/issue99_fma_front_gate.rs` (4 tests): gate above threshold is
+bit-identical to `fma=true`, below threshold bit-identical to nofma default,
+inertia preserved, threshold is exactly `nrow*ncol` with `>=`. Full suite 734
+passed / 0 failed; fmt + clippy `-D warnings` clean; bench residual gate
+unchanged (default path byte-for-byte identical). Note:
+`dev/research/issue-99-dense-front-fma-gate.md`.
 
-**Dense/sparse asymmetry (accepted, not a gap).** The dense path has no distinct
-`Singular` cause — a dependent replacement drives the final `U` diagonal to ~0 and
-reports `TinyPivot`. Only the sparse path detects the empty-support case
-(`h_rank < r_rank`) before eliminating, so `Singular` is sparse-only.
-
-**Refactor recommendations.** `should_refactor_growth()` (both types) fires at
-`growth >= sqrt(max_growth)` — the log-space midpoint between the floor 1 and the
-cap — to pre-empt a growth trip. Dense `should_refactor()` (cost-based parity) =
-`updates_since_refactor() >= m` (O(m²) update vs O(m³) factor), the dense analogue
-of sparse's `update_work_total >= factor_nnz()`.
-
-**Evidence.** +9 unit tests (each cause + both recommendation getters), 381 lib
-tests green, fmt/clippy clean, no numerical change (bench: no failures). Design
-note: `dev/research/refactor-signal-2026-07-01.md`.
+**Not closed.** This does not reach faer-class throughput — the best variant is
+1.67 GFLOP/s vs ~50–100 for a tuned BLAS-3 core. The structural gap is feral's
+memory-bandwidth-bound rank-panel update vs a 2-D register-tiled GEMM
+(`dev/plans/dense-kernel-blas3.md`), a multi-session rewrite. Levers 1 (adaptive
+`INTRAFRONT_MIN_AREA`) and 2 (assembly parallelism) are parallel-scaling levers
+that need the bench corpus + a representative core count to validate no-regression
+— not possible on this 4-core box without the (unmerged-PR-#92) qap15 fixtures.
 
 ## Recent Tried-and-Rejected
 more work.** Step 2's premise (dense-spike bump, contiguous SAXPY) does not hold
@@ -240,6 +243,7 @@ tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
+tests/issue99_fma_front_gate.rs
 tests/issue_15_cascade_arm_gate.rs
 tests/issue_17_robot_1600_cascade_off.rs
 tests/issue_18_narx_cfy_cascade_off.rs
