@@ -163,7 +163,8 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(2);
     // Comma-separated config selector via CONFIGS env (default: all).
-    let want = std::env::var("CONFIGS").unwrap_or_else(|_| "default,sqd,sqdfma,static,fma".into());
+    let want = std::env::var("CONFIGS")
+        .unwrap_or_else(|_| "default,sqd,sqdfma,static,fma,fmalarge".into());
     let want: Vec<&str> = want.split(',').collect();
     let has = |k: &str| want.contains(&k);
 
@@ -191,6 +192,16 @@ fn main() {
     }
     if has("fma") {
         run("default+fma", &csc, || Solver::new().with_fma(true), reps);
+    }
+    if has("fmalarge") {
+        // Issue #99 Lever 3: FMA only on fronts with >= 256 rows;
+        // small fronts stay bit-exact nofma.
+        run(
+            "default+fma_large(256rows)",
+            &csc,
+            || Solver::new().with_fma_large_fronts(256),
+            reps,
+        );
     }
     if has("noprep") {
         run(

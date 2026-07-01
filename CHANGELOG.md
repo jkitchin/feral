@@ -4,6 +4,79 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — packed BLAS-3 dense trailing update, byte-exact ~8–10× on dense fronts (issue #99)
+
+The dense trailing Schur update (~94 % of a dense factor) ran at only
+~0.35 GFLOP/s — ~10× below scalar peak on an AVX2/FMA CPU — because the strided
+per-column kernels re-read the eliminated panel at column-stride `nrow` every
+elimination step, thrashing cache. A new packed, register-tiled (`MR=8 × NR=4`)
+trailing update (`apply_schur_panel_range_packed`) packs the panel into
+`q`-contiguous micro-panels so the inner loop is L1-resident. It is **byte-exact**
+with the strided kernels (each `A[i,j]`, `i≥j`, reduced over ascending `q` with
+the identical `mul → sub` / `mul_add`; packing changes only memory layout) and
+runs ~22–26× faster in isolation (`examples/bench_schur_micro`), giving **10.2×**
+on a dense-1500 front's schur phase and **8.0×** on a 2955 front (0.34 → 2.69
+GFLOP/s, nofma). Default on; `FERAL_PACKED_SCHUR=0` restores the strided path.
+
+The packed path handles a **mixed 1×1 / 2×2 / zero-d pivot stream** (Phase B-2):
+each element walks the stream in `q` order, emitting `mul → sub` for a 1×1 pivot
+and the fused `dl0·L_q + dl1·L_{q+1}` add-then-sub (or two chained FMAs) for a 2×2
+pivot — byte-exact with the scalar `do_1x1_update` / `do_2x2_update` and the
+strided `axpy`/`axpy2` fallback. So **strongly-indefinite fronts** now get the
+packed win too, not only definite / quasi-definite (SQD, regularized KKT) / SPD
+fronts. Combined with the shape-aware intra-front gate, the synthetic qap15
+stand-in factors **9.25 s → 2.03 s (4.56×), byte-exact**, inertia
+`(+30000, −2000, 0)` unchanged. Correctness: the full byte-exact factor-parity
+suite (incl. indefinite/2×2 KKT suites) green with packed default, plus a
+`packed_matches_scalar_reference_bit_for_bit` unit test covering 1×1/2×2/zero-d
+streams in both `fma` modes. See `dev/research/issue-99-dense-front-fma-gate.md`.
+
+### Performance — shape-aware intra-front parallel gate for tall, thin fronts (issue #99, Lever 1, byte-exact)
+
+The intra-front parallel Schur update fired only when a front's
+`(nrow - j_start) * n_elim` **area** cleared `INTRAFRONT_MIN_AREA`. That area
+metric is blind to *tall, thin* fronts — large trailing width, small elimination
+depth — whose parallelizable work is `~n_elim * trailing_cols²` (large) even
+though their area is small. On real conic KKTs these dominate: the synthetic
+qap15 stand-in factors its dense border as ~117 fronts of `2000 × 16` (area
+31 744, just under the 32 768 floor), so intra-front parallelism never fired and
+99.9 % of the schur loop ran serially even on the parallel driver.
+
+A new **shape-aware trigger** additionally fires when a front is wide enough to
+split (`trailing_cols >= INTRAFRONT_TALL_MIN_COLS = 512`) AND deep enough to
+amortize the fork (`n_elim >= INTRAFRONT_TALL_MIN_ELIM = 8`), **OR-ed** with the
+area gate so no front that parallelized before regresses. Pure scheduling —
+**byte-exact** (each trailing column is still reduced on a single thread;
+`parallel_parity` holds). Measured on the synthetic KKT (32000², 4-core x86_64):
+end-to-end factor **9.25 s → 3.46 s (2.68×)**, inertia `(+30000, −2000, 0)`
+unchanged. See `dev/research/issue-99-dense-front-fma-gate.md`.
+
+### Added — opt-in per-front FMA gate for tall dense fronts (issue #99, Lever 3)
+
+`Solver::with_fma_large_fronts(min_rows)` and the underlying
+`BunchKaufmanParams::fma_min_front_rows: Option<usize>` (default `None`) route a
+dense front to the single-rounding FMA trailing-Schur kernels when it has at
+least `min_rows` rows (`nrow >= min_rows`), **while leaving smaller fronts on the
+bit-exact `*_nofma` path**. The gate is on **rows**, not `nrow * ncol` area,
+because the throughput-dominant fronts on real conic KKTs are tall and thin (an
+area gate silently misses them — the same blindness fixed in the intra-front gate
+above). Unlike the all-or-nothing `with_fma`/`NumericParams::fma`, this lets one
+factorization run the fast kernel on its dominant fronts while sensitive small
+KKT fronts — where FMA rounding can perturb Bunch-Kaufman pivot classification
+(`dev/tried-and-rejected.md` 2026-04-14) — keep the reference kernels. `None` is
+a strict no-op, so the default cross-arch bit-exactness contract is unchanged;
+enabling the gate changes cross-arch bit patterns only on the gated fronts.
+
+Measured (4-core x86_64): **1.66× per-core** on a synthetic 2955×2955 indefinite
+root (`examples/bench_dense_front`), and **1.47× on top of the byte-exact
+intra-front win** end-to-end on the synthetic qap15 stand-in (`bench_qap15`:
+3.46 s → 2.35 s, `with_fma_large_fronts(256)` matching global FMA), inertia
+identical throughout. Issue #99 Lever 3, opt-in; reaching faer-class per-core
+GFLOP/s additionally needs the 2-D tiled BLAS-3 GEMM
+(`dev/plans/dense-kernel-blas3.md`). See
+`dev/research/issue-99-dense-front-fma-gate.md`.
+
+
 ### Performance — `OrderingPreprocess::Auto` no longer inflates fill on conic KKTs (issue #91)
 
 feral factorized a 50,880×50,880 quasi-definite conic KKT (the qap15 QAP
