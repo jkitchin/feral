@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-01
+
 ### Fixed — ordering-quality regression: escalate to LdltCompress on pivot growth (issue #102 follow-up)
 
 After the #102 deadlock fix, cont5_2_4_l still failed to converge: PR #92's
