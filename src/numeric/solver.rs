@@ -469,28 +469,31 @@ impl Solver {
         self
     }
 
-    /// Opt into the FMA trailing-Schur kernels on **large fronts only**
-    /// (issue #99, Lever 3). Every front whose trailing-update area
-    /// `nrow * ncol >= min_area` uses the single-rounding FMA kernels
-    /// (~1.7× measured per-core on a 2955-row indefinite root, x86 V3);
+    /// Opt into the FMA trailing-Schur kernels on **tall fronts only**
+    /// (issue #99, Lever 3). Every front with at least `min_rows` rows
+    /// (`nrow >= min_rows`) uses the single-rounding FMA kernels (~1.6×
+    /// measured end-to-end on the synthetic qap15 stand-in, x86 V3);
     /// smaller fronts keep the bit-exact `*_nofma` path. This lets one
-    /// factorization run the fast path on its throughput-dominant roots
+    /// factorization run the fast path on its throughput-dominant fronts
     /// while sensitive small KKT fronts — where FMA rounding can perturb
     /// Bunch-Kaufman pivot classification — stay on the reference
     /// kernels.
     ///
-    /// Unlike [`with_fma`](Self::with_fma) (all-or-nothing), this leaves
-    /// small fronts bit-exact. It still changes cross-arch bit patterns
-    /// on the gated large fronts, so it is a deliberate opt-in. Inertia
-    /// is preserved on well-conditioned fronts. A reasonable starting
-    /// `min_area` is `256 * 256`. See
+    /// The gate is on **rows**, not `nrow * ncol` area: real conic-KKT
+    /// factorizations spend their time in *tall, thin* fronts (large
+    /// `nrow`, small `ncol` — e.g. `2000 × 16`), which an area gate
+    /// misses entirely. Unlike [`with_fma`](Self::with_fma)
+    /// (all-or-nothing), this leaves small fronts bit-exact. It still
+    /// changes cross-arch bit patterns on the gated fronts, so it is a
+    /// deliberate opt-in. Inertia is preserved on well-conditioned
+    /// fronts. A reasonable starting `min_rows` is `256`. See
     /// `dev/research/issue-99-dense-front-fma-gate.md`.
-    pub fn with_fma_large_fronts(mut self, min_area: usize) -> Self {
+    pub fn with_fma_large_fronts(mut self, min_rows: usize) -> Self {
         // Written straight to `bk` — the params the dense front factor
         // reads — so no separate `NumericParams` field or funnel is
         // needed (contrast `with_fma`, kept separate for historical
         // reasons). Both multifrontal drivers pass `bk` per front.
-        self.numeric_params.bk.fma_min_front_area = Some(min_area);
+        self.numeric_params.bk.fma_min_front_rows = Some(min_rows);
         self
     }
 

@@ -4,27 +4,48 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
-### Added — opt-in per-front FMA size gate for large dense fronts (issue #99)
+### Performance — shape-aware intra-front parallel gate for tall, thin fronts (issue #99, Lever 1, byte-exact)
 
-`Solver::with_fma_large_fronts(min_area)` and the underlying
-`BunchKaufmanParams::fma_min_front_area: Option<usize>` (default `None`) route a
-dense front to the single-rounding FMA trailing-Schur kernels when its
-trailing-update area `nrow * ncol >= min_area`, **while leaving smaller fronts on
-the bit-exact `*_nofma` path**. Unlike the existing all-or-nothing
-`with_fma`/`NumericParams::fma`, this lets one factorization run the fast kernel
-on its throughput-dominant roots while sensitive small KKT fronts — where FMA
-rounding can perturb Bunch-Kaufman pivot classification (`dev/tried-and-rejected.md`
-2026-04-14) — keep the reference kernels. `None` is a strict no-op, so the
-default cross-arch bit-exactness contract is unchanged; enabling the gate
-changes cross-arch bit patterns only on the gated large fronts.
+The intra-front parallel Schur update fired only when a front's
+`(nrow - j_start) * n_elim` **area** cleared `INTRAFRONT_MIN_AREA`. That area
+metric is blind to *tall, thin* fronts — large trailing width, small elimination
+depth — whose parallelizable work is `~n_elim * trailing_cols²` (large) even
+though their area is small. On real conic KKTs these dominate: the synthetic
+qap15 stand-in factors its dense border as ~117 fronts of `2000 × 16` (area
+31 744, just under the 32 768 floor), so intra-front parallelism never fired and
+99.9 % of the schur loop ran serially even on the parallel driver.
 
-Measured on a synthetic 2955×2955 indefinite root (the qap15 root size) on a
-4-core x86_64 box via the new `examples/bench_dense_front` harness: FMA is
-**1.66× faster per-core** (25.6 s → 15.4 s serial) and **1.67×** inside the
-intra-front-parallel path (8.6 s → 5.1 s), with **identical inertia**
-`(+1478, −1477, 0)` across all four nofma/FMA × serial/intrafront variants.
-This is issue #99's Lever 3 (per-core kernel throughput) delivered as an opt-in;
-reaching faer-class GFLOP/s additionally needs the 2-D tiled BLAS-3 GEMM
+A new **shape-aware trigger** additionally fires when a front is wide enough to
+split (`trailing_cols >= INTRAFRONT_TALL_MIN_COLS = 512`) AND deep enough to
+amortize the fork (`n_elim >= INTRAFRONT_TALL_MIN_ELIM = 8`), **OR-ed** with the
+area gate so no front that parallelized before regresses. Pure scheduling —
+**byte-exact** (each trailing column is still reduced on a single thread;
+`parallel_parity` holds). Measured on the synthetic KKT (32000², 4-core x86_64):
+end-to-end factor **9.25 s → 3.46 s (2.68×)**, inertia `(+30000, −2000, 0)`
+unchanged. See `dev/research/issue-99-dense-front-fma-gate.md`.
+
+### Added — opt-in per-front FMA gate for tall dense fronts (issue #99, Lever 3)
+
+`Solver::with_fma_large_fronts(min_rows)` and the underlying
+`BunchKaufmanParams::fma_min_front_rows: Option<usize>` (default `None`) route a
+dense front to the single-rounding FMA trailing-Schur kernels when it has at
+least `min_rows` rows (`nrow >= min_rows`), **while leaving smaller fronts on the
+bit-exact `*_nofma` path**. The gate is on **rows**, not `nrow * ncol` area,
+because the throughput-dominant fronts on real conic KKTs are tall and thin (an
+area gate silently misses them — the same blindness fixed in the intra-front gate
+above). Unlike the all-or-nothing `with_fma`/`NumericParams::fma`, this lets one
+factorization run the fast kernel on its dominant fronts while sensitive small
+KKT fronts — where FMA rounding can perturb Bunch-Kaufman pivot classification
+(`dev/tried-and-rejected.md` 2026-04-14) — keep the reference kernels. `None` is
+a strict no-op, so the default cross-arch bit-exactness contract is unchanged;
+enabling the gate changes cross-arch bit patterns only on the gated fronts.
+
+Measured (4-core x86_64): **1.66× per-core** on a synthetic 2955×2955 indefinite
+root (`examples/bench_dense_front`), and **1.47× on top of the byte-exact
+intra-front win** end-to-end on the synthetic qap15 stand-in (`bench_qap15`:
+3.46 s → 2.35 s, `with_fma_large_fronts(256)` matching global FMA), inertia
+identical throughout. Issue #99 Lever 3, opt-in; reaching faer-class per-core
+GFLOP/s additionally needs the 2-D tiled BLAS-3 GEMM
 (`dev/plans/dense-kernel-blas3.md`). See
 `dev/research/issue-99-dense-front-fma-gate.md`.
 

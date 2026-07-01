@@ -648,25 +648,33 @@ pub struct BunchKaufmanParams {
     pub intrafront_parallel: bool,
 
     /// Opt-in per-front FMA size gate (issue #99, Lever 3). Default
-    /// `None`. When `Some(t)`, a front whose trailing-update area
-    /// `nrow * ncol >= t` uses the FMA trailing-Schur kernels **even
-    /// when [`fma`](Self::fma) is `false`**; fronts below the threshold
-    /// keep the bit-exact `*_nofma` kernels. This lets one factorization
-    /// run the fast (single-rounding) FMA path on its large roots while
+    /// `None`. When `Some(t)`, a front with at least `t` rows
+    /// (`nrow >= t`) uses the FMA trailing-Schur kernels **even when
+    /// [`fma`](Self::fma) is `false`**; smaller fronts keep the bit-exact
+    /// `*_nofma` kernels. This lets one factorization run the fast
+    /// (single-rounding) FMA path on its throughput-dominant fronts while
     /// small fronts — where FMA rounding can perturb Bunch-Kaufman pivot
     /// classification on sensitive KKTs (`dev/tried-and-rejected.md`
     /// 2026-04-14) — stay on the reference kernels.
     ///
+    /// The gate is on `nrow` (the front's row count = the size of its
+    /// trailing update), **not** `nrow * ncol` area: on real conic KKTs
+    /// the throughput-dominant fronts are *tall and thin* — e.g. the
+    /// synthetic qap15 stand-in factors its dense border as ~117 fronts
+    /// of `2000 × 16`, whose trailing-update cost (`~ncol * nrow²`) is
+    /// large even though their area is small. An area gate silently
+    /// misses exactly these fronts; a row gate catches them while still
+    /// protecting genuinely small fronts. See
+    /// `dev/research/issue-99-dense-front-fma-gate.md`.
+    ///
     /// `None` (default) is a strict no-op: every front honors `fma` as
     /// before, so the production cross-arch bit-exactness contract is
     /// untouched. Enabling this changes cross-arch bit patterns on the
-    /// gated large fronts (single vs double rounding), so it is a
-    /// deliberate opt-in, not a default. Inertia is preserved on
-    /// well-conditioned fronts (the FMA path is one ULP per accumulate
-    /// off nofma; see
+    /// gated fronts (single vs double rounding), so it is a deliberate
+    /// opt-in, not a default. Inertia is preserved on well-conditioned
+    /// fronts (the FMA path is one ULP per accumulate off nofma; see
     /// `schur_kernel::fma_vs_nofma_panel_kernels_within_n_elim_ulps`).
-    /// See `dev/research/issue-99-dense-front-fma-gate.md`.
-    pub fma_min_front_area: Option<usize>,
+    pub fma_min_front_rows: Option<usize>,
 }
 
 /// Minimum trailing-update area `(nrow - j_start) * n_elim` below which
@@ -698,6 +706,37 @@ fn intrafront_min_area() -> usize {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(INTRAFRONT_MIN_AREA)
+}
+
+/// Issue #99 Lever 1 — shape-aware intra-front trigger for *tall, thin*
+/// fronts. The [`INTRAFRONT_MIN_AREA`] gate is `trailing_cols * n_elim`,
+/// which under-counts fronts with a large trailing width but small
+/// elimination depth: their parallelizable trailing update costs
+/// `~n_elim * trailing_cols²` (each of `trailing_cols` independent
+/// columns does an `n_elim`-deep rank update over a length that scales
+/// with the width), yet their *area* is small. On the qap15 conic-KKT
+/// stand-in the throughput-dominant fronts are ~`2000 × 16`: area 31 744,
+/// just under the 32 768 floor, so intra-front parallelism never fired and
+/// 99.9 % of the schur loop ran serially.
+///
+/// This trigger fires when the front is both wide enough to split across
+/// workers ([`INTRAFRONT_TALL_MIN_COLS`]) and deep enough per column to
+/// amortize the fork ([`INTRAFRONT_TALL_MIN_ELIM`]). It is **OR-ed** with
+/// the area gate, so every front that parallelized before still does —
+/// this can only *add* parallelism to large-work fronts, never remove it,
+/// which is why it cannot regress the area gate's measured calibration.
+/// Byte-exact (pure scheduling; each trailing column is still reduced on a
+/// single thread). See `dev/research/issue-99-dense-front-fma-gate.md`.
+pub const INTRAFRONT_TALL_MIN_COLS: usize = 512;
+/// Companion depth floor for [`INTRAFRONT_TALL_MIN_COLS`]; see there.
+pub const INTRAFRONT_TALL_MIN_ELIM: usize = 8;
+
+/// Whether the tall-front intra-front trigger fires for a trailing update
+/// of `trailing_cols` columns at elimination depth `n_elim`. Issue #99
+/// Lever 1.
+#[inline]
+fn intrafront_tall_gate(trailing_cols: usize, n_elim: usize) -> bool {
+    trailing_cols >= INTRAFRONT_TALL_MIN_COLS && n_elim >= INTRAFRONT_TALL_MIN_ELIM
 }
 
 /// Action to take when a near-zero pivot is encountered.
@@ -823,24 +862,22 @@ impl Default for BunchKaufmanParams {
             tpp_method: TppMethod::Plain,
             static_pivot_floor: 0.0,
             intrafront_parallel: false,
-            fma_min_front_area: None,
+            fma_min_front_rows: None,
         }
     }
 }
 
-/// Resolve the effective FMA flag for a front of `nrow` rows and `ncol`
-/// fully-summed columns under `params`. Returns `true` when the global
-/// [`BunchKaufmanParams::fma`] is set, or when the per-front size gate
-/// [`BunchKaufmanParams::fma_min_front_area`] is armed and this front's
-/// trailing-update area `nrow * ncol` reaches the threshold. The `nrow *
-/// ncol` product saturates so a pathological front cannot wrap. Issue
-/// #99 Lever 3.
+/// Resolve the effective FMA flag for a front of `nrow` rows under
+/// `params`. Returns `true` when the global [`BunchKaufmanParams::fma`]
+/// is set, or when the per-front size gate
+/// [`BunchKaufmanParams::fma_min_front_rows`] is armed and this front is
+/// at least that tall (`nrow >= t`). Gating on `nrow` (not `nrow * ncol`
+/// area) is deliberate: the throughput-dominant fronts on real conic
+/// KKTs are tall and thin (large `nrow`, small `ncol`), so an area gate
+/// misses them. Issue #99 Lever 3.
 #[inline]
-pub(crate) fn effective_front_fma(params: &BunchKaufmanParams, nrow: usize, ncol: usize) -> bool {
-    params.fma
-        || params
-            .fma_min_front_area
-            .is_some_and(|t| nrow.saturating_mul(ncol) >= t)
+pub(crate) fn effective_front_fma(params: &BunchKaufmanParams, nrow: usize) -> bool {
+    params.fma || params.fma_min_front_rows.is_some_and(|t| nrow >= t)
 }
 
 /// Factorization result: P·L·D_bk·Lᵀ·Pᵀ = D_eq·A·D_eq.
@@ -2010,7 +2047,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     // `params.fma` unchanged.
     let gated_params;
     let params: &BunchKaufmanParams = {
-        let eff = effective_front_fma(params, nrow, ncol);
+        let eff = effective_front_fma(params, nrow);
         if eff != params.fma {
             gated_params = BunchKaufmanParams {
                 fma: eff,
@@ -3267,8 +3304,14 @@ fn apply_blocked_schur_panel(
     let (head, tail) = a.split_at_mut(j_start * nrow);
     let head: &[f64] = head;
 
-    let area = (nrow - j_start).saturating_mul(n_elim);
-    if intrafront_parallel && area >= intrafront_min_area() {
+    let trailing_cols = nrow - j_start;
+    let area = trailing_cols.saturating_mul(n_elim);
+    // Fire on the classic area gate OR the shape-aware tall-front gate
+    // (issue #99 Lever 1) — the latter catches wide, shallow fronts the
+    // area metric misses. OR means no already-parallel front regresses.
+    if intrafront_parallel
+        && (area >= intrafront_min_area() || intrafront_tall_gate(trailing_cols, n_elim))
+    {
         use rayon::prelude::*;
         let ncol = nrow - j_start;
         let nthreads = rayon::current_num_threads().max(1);

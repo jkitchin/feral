@@ -1,7 +1,7 @@
 //! Issue #99, Lever 3: opt-in per-front FMA size gate.
 //!
-//! `BunchKaufmanParams::fma_min_front_area = Some(t)` routes a front to
-//! the FMA trailing-Schur kernels when `nrow * ncol >= t`, even when the
+//! `BunchKaufmanParams::fma_min_front_rows = Some(t)` routes a front to
+//! the FMA trailing-Schur kernels when `nrow >= t`, even when the
 //! global `fma` flag is off — while leaving smaller fronts on the
 //! bit-exact `*_nofma` path. These tests pin that behavior:
 //!
@@ -82,12 +82,12 @@ fn gate_on_large_front_matches_explicit_fma() {
     let n = 96;
     let matrix = build_front(n);
 
-    // Gate armed with a threshold this front clears (n*n = 9216 >= 1).
+    // Gate armed with a threshold this front clears (nrow = 96 >= 1).
     let gated = factor(
         &matrix,
         &BunchKaufmanParams {
             fma: false,
-            fma_min_front_area: Some(1),
+            fma_min_front_rows: Some(1),
             ..BunchKaufmanParams::default()
         },
     );
@@ -112,7 +112,7 @@ fn gate_below_threshold_matches_nofma_default() {
         &matrix,
         &BunchKaufmanParams {
             fma: false,
-            fma_min_front_area: Some(usize::MAX),
+            fma_min_front_rows: Some(usize::MAX),
             ..BunchKaufmanParams::default()
         },
     );
@@ -133,7 +133,7 @@ fn gate_preserves_inertia() {
         &matrix,
         &BunchKaufmanParams {
             fma: false,
-            fma_min_front_area: Some(1),
+            fma_min_front_rows: Some(1),
             ..BunchKaufmanParams::default()
         },
     );
@@ -145,19 +145,19 @@ fn gate_preserves_inertia() {
     assert!(nofma.inertia.positive > 0 && nofma.inertia.negative > 0);
 }
 
-/// The threshold is on `nrow * ncol`, so a boundary value must gate
-/// exactly: area == t fires (>=), area == t+1'th smaller front does not.
+/// The threshold is on `nrow`, so a boundary value must gate exactly:
+/// `nrow == t` fires (`>=`), `nrow == t+1` (threshold one past nrow) does
+/// not.
 #[test]
-fn gate_threshold_is_area_nrow_times_ncol() {
+fn gate_threshold_is_front_rows() {
     let n = 96;
     let matrix = build_front(n);
-    let area = n * n; // ncol == nrow == n for a root front.
 
-    // Exactly at the boundary: `>=` means it fires → matches fma=true.
+    // Exactly at the boundary: nrow == t → `>=` fires → matches fma=true.
     let at_boundary = factor(
         &matrix,
         &BunchKaufmanParams {
-            fma_min_front_area: Some(area),
+            fma_min_front_rows: Some(n),
             ..BunchKaufmanParams::default()
         },
     );
@@ -168,16 +168,16 @@ fn gate_threshold_is_area_nrow_times_ncol() {
             ..BunchKaufmanParams::default()
         },
     );
-    assert_factors_bit_identical(&at_boundary, &explicit_fma, "area==t boundary fires");
+    assert_factors_bit_identical(&at_boundary, &explicit_fma, "nrow==t boundary fires");
 
-    // One above the area: does not fire → matches nofma.
+    // One row past nrow: does not fire → matches nofma.
     let just_above = factor(
         &matrix,
         &BunchKaufmanParams {
-            fma_min_front_area: Some(area + 1),
+            fma_min_front_rows: Some(n + 1),
             ..BunchKaufmanParams::default()
         },
     );
     let nofma_default = factor(&matrix, &BunchKaufmanParams::default());
-    assert_factors_bit_identical(&just_above, &nofma_default, "area<t does not fire");
+    assert_factors_bit_identical(&just_above, &nofma_default, "nrow<t does not fire");
 }
