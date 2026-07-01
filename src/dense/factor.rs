@@ -646,6 +646,35 @@ pub struct BunchKaufmanParams {
     /// rayon work (pounce#79 oversubscription guarantee). See
     /// `dev/research/lever-1.1-intrafront-parallel-schur.md`.
     pub intrafront_parallel: bool,
+
+    /// Opt-in per-front FMA size gate (issue #99, Lever 3). Default
+    /// `None`. When `Some(t)`, a front with at least `t` rows
+    /// (`nrow >= t`) uses the FMA trailing-Schur kernels **even when
+    /// [`fma`](Self::fma) is `false`**; smaller fronts keep the bit-exact
+    /// `*_nofma` kernels. This lets one factorization run the fast
+    /// (single-rounding) FMA path on its throughput-dominant fronts while
+    /// small fronts — where FMA rounding can perturb Bunch-Kaufman pivot
+    /// classification on sensitive KKTs (`dev/tried-and-rejected.md`
+    /// 2026-04-14) — stay on the reference kernels.
+    ///
+    /// The gate is on `nrow` (the front's row count = the size of its
+    /// trailing update), **not** `nrow * ncol` area: on real conic KKTs
+    /// the throughput-dominant fronts are *tall and thin* — e.g. the
+    /// synthetic qap15 stand-in factors its dense border as ~117 fronts
+    /// of `2000 × 16`, whose trailing-update cost (`~ncol * nrow²`) is
+    /// large even though their area is small. An area gate silently
+    /// misses exactly these fronts; a row gate catches them while still
+    /// protecting genuinely small fronts. See
+    /// `dev/research/issue-99-dense-front-fma-gate.md`.
+    ///
+    /// `None` (default) is a strict no-op: every front honors `fma` as
+    /// before, so the production cross-arch bit-exactness contract is
+    /// untouched. Enabling this changes cross-arch bit patterns on the
+    /// gated fronts (single vs double rounding), so it is a deliberate
+    /// opt-in, not a default. Inertia is preserved on well-conditioned
+    /// fronts (the FMA path is one ULP per accumulate off nofma; see
+    /// `schur_kernel::fma_vs_nofma_panel_kernels_within_n_elim_ulps`).
+    pub fma_min_front_rows: Option<usize>,
 }
 
 /// Minimum trailing-update area `(nrow - j_start) * n_elim` below which
@@ -677,6 +706,37 @@ fn intrafront_min_area() -> usize {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(INTRAFRONT_MIN_AREA)
+}
+
+/// Issue #99 Lever 1 — shape-aware intra-front trigger for *tall, thin*
+/// fronts. The [`INTRAFRONT_MIN_AREA`] gate is `trailing_cols * n_elim`,
+/// which under-counts fronts with a large trailing width but small
+/// elimination depth: their parallelizable trailing update costs
+/// `~n_elim * trailing_cols²` (each of `trailing_cols` independent
+/// columns does an `n_elim`-deep rank update over a length that scales
+/// with the width), yet their *area* is small. On the qap15 conic-KKT
+/// stand-in the throughput-dominant fronts are ~`2000 × 16`: area 31 744,
+/// just under the 32 768 floor, so intra-front parallelism never fired and
+/// 99.9 % of the schur loop ran serially.
+///
+/// This trigger fires when the front is both wide enough to split across
+/// workers ([`INTRAFRONT_TALL_MIN_COLS`]) and deep enough per column to
+/// amortize the fork ([`INTRAFRONT_TALL_MIN_ELIM`]). It is **OR-ed** with
+/// the area gate, so every front that parallelized before still does —
+/// this can only *add* parallelism to large-work fronts, never remove it,
+/// which is why it cannot regress the area gate's measured calibration.
+/// Byte-exact (pure scheduling; each trailing column is still reduced on a
+/// single thread). See `dev/research/issue-99-dense-front-fma-gate.md`.
+pub const INTRAFRONT_TALL_MIN_COLS: usize = 512;
+/// Companion depth floor for [`INTRAFRONT_TALL_MIN_COLS`]; see there.
+pub const INTRAFRONT_TALL_MIN_ELIM: usize = 8;
+
+/// Whether the tall-front intra-front trigger fires for a trailing update
+/// of `trailing_cols` columns at elimination depth `n_elim`. Issue #99
+/// Lever 1.
+#[inline]
+fn intrafront_tall_gate(trailing_cols: usize, n_elim: usize) -> bool {
+    trailing_cols >= INTRAFRONT_TALL_MIN_COLS && n_elim >= INTRAFRONT_TALL_MIN_ELIM
 }
 
 /// Action to take when a near-zero pivot is encountered.
@@ -802,8 +862,22 @@ impl Default for BunchKaufmanParams {
             tpp_method: TppMethod::Plain,
             static_pivot_floor: 0.0,
             intrafront_parallel: false,
+            fma_min_front_rows: None,
         }
     }
+}
+
+/// Resolve the effective FMA flag for a front of `nrow` rows under
+/// `params`. Returns `true` when the global [`BunchKaufmanParams::fma`]
+/// is set, or when the per-front size gate
+/// [`BunchKaufmanParams::fma_min_front_rows`] is armed and this front is
+/// at least that tall (`nrow >= t`). Gating on `nrow` (not `nrow * ncol`
+/// area) is deliberate: the throughput-dominant fronts on real conic
+/// KKTs are tall and thin (large `nrow`, small `ncol`), so an area gate
+/// misses them. Issue #99 Lever 3.
+#[inline]
+pub(crate) fn effective_front_fma(params: &BunchKaufmanParams, nrow: usize) -> bool {
+    params.fma || params.fma_min_front_rows.is_some_and(|t| nrow >= t)
 }
 
 /// Factorization result: P·L·D_bk·Lᵀ·Pᵀ = D_eq·A·D_eq.
@@ -1964,6 +2038,27 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
 ) -> Result<FrontalFactors, FeralError> {
     let nrow = matrix.n;
 
+    // Issue #99 Lever 3: opt-in per-front FMA size gate. When
+    // `fma_min_front_area` is armed and this front's trailing area is
+    // large enough, factor it with the FMA trailing-Schur kernels even
+    // if the global `fma` flag is off. Shadow `params` with a local
+    // clone only when the gate actually changes the flag, so the common
+    // (unarmed) path pays nothing; everything downstream reads
+    // `params.fma` unchanged.
+    let gated_params;
+    let params: &BunchKaufmanParams = {
+        let eff = effective_front_fma(params, nrow);
+        if eff != params.fma {
+            gated_params = BunchKaufmanParams {
+                fma: eff,
+                ..params.clone()
+            };
+            &gated_params
+        } else {
+            params
+        }
+    };
+
     if ncol > nrow {
         return Err(FeralError::InvalidInput(format!(
             "ncol {} > nrow {}",
@@ -3070,14 +3165,39 @@ fn apply_blocked_schur(
         return;
     }
 
-    // W-2 fast path: when the panel produced n_elim 1×1 pivots all
-    // with non-zero d AND no 2×2 pivots, run the rank-`n_elim`
-    // accumulator. The 2×2 gate is a correctness requirement (Phase
-    // A, dev/plans/dense-kernel-blas3.md): the rank-bs kernel
-    // accumulates contributions per-q sequentially (`acc -= a_q *
-    // s_q`), which is bit-exact with sequential rank-1 axpys but NOT
-    // with axpy2's fused `(a_0*s_0 + a_1*s_1)` add-then-sub
-    // ordering. Lifting this gate is Phase B-2.
+    // Issue #99 Phase B-2: the packed trailing update
+    // (`apply_schur_panel_range_packed`) handles a **mixed** 1×1 / 2×2 /
+    // zero-d pivot stream byte-exactly — each element walks the pivot
+    // stream in order, applying `mul → sub` for 1×1 and the fused
+    // `(dl0·L_q + dl1·L_{q+1})` add-then-sub for 2×2, matching the scalar
+    // reference and the strided fallback below. So when packing is
+    // enabled route **every** panel through it (not only all-1×1),
+    // extending the ~8–10× dense-front win to strongly-indefinite fronts
+    // and the FMA path (whose rounding drifts more pivots to 2×2).
+    if packed_schur_enabled() {
+        apply_blocked_schur_panel(
+            a,
+            nrow,
+            k,
+            n_elim,
+            j_start,
+            d_panel,
+            subdiag,
+            fma,
+            intrafront_parallel,
+        );
+        return;
+    }
+
+    // --- Strided path (`FERAL_PACKED_SCHUR=0`) ---
+    // W-2 fast path: when the panel produced n_elim 1×1 pivots all with
+    // non-zero d AND no 2×2 pivots, run the rank-`n_elim` accumulator.
+    // The 2×2 gate is a correctness requirement for the *strided* kernel:
+    // `schur_panel_minus_*_strided` accumulates per-q sequentially
+    // (`acc -= a_q · s_q`), bit-exact with sequential rank-1 axpys but
+    // NOT with axpy2's fused `(a_0·s_0 + a_1·s_1)` add-then-sub. (The
+    // packed path above lifts this because it walks the stream and emits
+    // the fused form for 2×2 pairs.)
     const W2_RANK_BS_MIN: usize = 2;
     let any_zero_d = d_panel.iter().take(n_elim).any(|&d| d.abs() == 0.0);
     let has_2x2 = subdiag[k..k + n_elim].iter().any(|&s| s != 0.0);
@@ -3090,6 +3210,7 @@ fn apply_blocked_schur(
             n_elim,
             j_start,
             d_panel,
+            subdiag,
             fma,
             intrafront_parallel,
         );
@@ -3181,6 +3302,7 @@ fn apply_blocked_schur_panel(
     n_elim: usize,
     j_start: usize,
     d_panel: &[f64],
+    subdiag: &[f64],
     fma: bool,
     intrafront_parallel: bool,
 ) {
@@ -3209,8 +3331,14 @@ fn apply_blocked_schur_panel(
     let (head, tail) = a.split_at_mut(j_start * nrow);
     let head: &[f64] = head;
 
-    let area = (nrow - j_start).saturating_mul(n_elim);
-    if intrafront_parallel && area >= intrafront_min_area() {
+    let trailing_cols = nrow - j_start;
+    let area = trailing_cols.saturating_mul(n_elim);
+    // Fire on the classic area gate OR the shape-aware tall-front gate
+    // (issue #99 Lever 1) — the latter catches wide, shallow fronts the
+    // area metric misses. OR means no already-parallel front regresses.
+    if intrafront_parallel
+        && (area >= intrafront_min_area() || intrafront_tall_gate(trailing_cols, n_elim))
+    {
         use rayon::prelude::*;
         let ncol = nrow - j_start;
         let nthreads = rayon::current_num_threads().max(1);
@@ -3222,10 +3350,12 @@ fn apply_blocked_schur_panel(
             .enumerate()
             .for_each(|(ci, block)| {
                 let col_start = j_start + ci * chunk_cols;
-                apply_schur_panel_range(head, block, col_start, nrow, k, n_elim, d_panel, fma);
+                apply_schur_panel_range(
+                    head, block, col_start, nrow, k, n_elim, d_panel, subdiag, fma,
+                );
             });
     } else {
-        apply_schur_panel_range(head, tail, j_start, nrow, k, n_elim, d_panel, fma);
+        apply_schur_panel_range(head, tail, j_start, nrow, k, n_elim, d_panel, subdiag, fma);
     }
 }
 
@@ -3259,6 +3389,7 @@ fn apply_schur_panel_range(
     k: usize,
     n_elim: usize,
     d_panel: &[f64],
+    subdiag: &[f64],
     fma: bool,
 ) {
     const MAX_N_ELIM: usize = 128;
@@ -3269,6 +3400,26 @@ fn apply_schur_panel_range(
         MAX_N_ELIM
     );
     let ncol = block.len() / nrow;
+
+    // Issue #99 BLAS-3: the packed, register-tiled trailing update is
+    // ~25× faster than the strided per-column kernels below on this
+    // hardware (measured `examples/bench_schur_micro`) and **byte-exact**
+    // with them — each `A[i,j]` (i>=j) is reduced over ascending q with
+    // the identical `mul → sub` (nofma) or `mul_add` (fma). The strided
+    // kernels re-read the panel at column-stride `nrow` every q, which
+    // cache-thrashes; the packed path reads L1-resident micro-panels.
+    // Default on; `FERAL_PACKED_SCHUR=0` restores the strided path for
+    // A/B benchmarking and as a safety override.
+    if packed_schur_enabled() {
+        apply_schur_panel_range_packed(
+            head, block, col_start, nrow, k, n_elim, d_panel, subdiag, fma,
+        );
+        return;
+    }
+    // Strided path below handles 1×1 pivots only; the caller
+    // (`apply_blocked_schur`) guarantees an all-1×1 panel here, so
+    // `subdiag` is unused on this path.
+    let _ = subdiag;
 
     let mut alphas0_buf = [0.0f64; MAX_N_ELIM];
     let mut alphas1_buf = [0.0f64; MAX_N_ELIM];
@@ -3397,6 +3548,235 @@ fn apply_schur_panel_range(
                     trailing_len,
                     alphas,
                 );
+            }
+        }
+    }
+}
+
+/// Whether the packed BLAS-3 trailing update (issue #99) is enabled.
+/// Default `true`; `FERAL_PACKED_SCHUR=0|off|false|no` restores the
+/// strided per-column kernels for A/B benchmarking or as a safety
+/// override. Byte-exact either way. Read once per panel dispatch (a
+/// relaxed env read, negligible beside the trailing-update cost).
+#[inline]
+fn packed_schur_enabled() -> bool {
+    !matches!(
+        std::env::var("FERAL_PACKED_SCHUR").as_deref(),
+        Ok("0") | Ok("off") | Ok("false") | Ok("no")
+    )
+}
+
+/// Packed, register-tiled equivalent of [`apply_schur_panel_range`]
+/// (issue #99, BLAS-3 — Phase B-2). Computes the same lower-triangular
+/// rank-`n_elim` trailing update for `i >= j`, packing the panel into
+/// `q`-contiguous `MR`/`NR` micro-panels so the inner loop reads
+/// L1-resident memory instead of the strided `col_stride = nrow` access
+/// that bottlenecks the strided kernels (~25× isolated,
+/// `examples/bench_schur_micro`).
+///
+/// Handles a **mixed 1×1 / 2×2 / zero-d pivot stream**: each element
+/// walks the stream in `q` order and emits, per step,
+/// - **1×1** (`subdiag[k+q] == 0`): `acc -= (L[j,q]·d_q)·L[i,q]`
+///   (`mul → sub` nofma / `mul_add` fma), skipping `d_q == 0` exactly as
+///   the fallback does;
+/// - **2×2** (`subdiag[k+q] != 0`, `q+1 < n_elim`): the fused rank-2
+///   contribution `acc -= dl0·L[i,q] + dl1·L[i,q+1]` with
+///   `dl0 = d11·L[j,q] + d21·L[j,q+1]`, `dl1 = d21·L[j,q] + d22·L[j,q+1]`
+///   (`d11=d_panel[q]`, `d22=d_panel[q+1]`, `d21=subdiag[k+q]`), and
+///   advances two.
+///
+/// **Byte-exact** with the strided kernels and the scalar reference:
+/// packing changes only memory layout; the per-element rounding
+/// sequence — `mul → sub` for 1×1 and add-then-sub / two-FMA for 2×2 —
+/// matches `axpy_minus_unroll4*` / `axpy2_minus_unroll4*`
+/// (`do_1x1_update` / `do_2x2_update`) exactly. Verified by the
+/// `packed_matches_scalar_reference_bit_for_bit` unit test (mixed
+/// streams) and the byte-exact factor-parity suite.
+#[allow(clippy::too_many_arguments)]
+fn apply_schur_panel_range_packed(
+    head: &[f64],
+    block: &mut [f64],
+    col_start: usize,
+    nrow: usize,
+    k: usize,
+    n_elim: usize,
+    d_panel: &[f64],
+    subdiag: &[f64],
+    fma: bool,
+) {
+    let ncol = block.len() / nrow;
+    if ncol == 0 || n_elim == 0 {
+        return;
+    }
+    // Register-tile dimensions. MR rows × NR cols per tile; the MR (row)
+    // axis is the contiguous SIMD axis the compiler autovectorizes.
+    const MR: usize = 8;
+    const NR: usize = 4;
+
+    // A 2×2 pivot pair starts at `q` when `subdiag[k+q] != 0` and `q+1`
+    // is still in-panel. Same predicate as the strided fallback; the
+    // walk below consumes such pairs two-at-a-time so the second element
+    // (`q+1`) is never re-entered as a start.
+    let is_2x2_start = |q: usize| q + 1 < n_elim && subdiag[k + q] != 0.0;
+
+    // Column j (absolute) updates rows [j, nrow); the lowest column is
+    // `col_start`, so the source/destination rows span [col_start, nrow).
+    let row0 = col_start;
+    let rowspan = nrow - row0;
+    let col_end = col_start + ncol;
+    let npanels_i = rowspan.div_ceil(MR);
+    let npanels_j = ncol.div_ceil(NR);
+
+    // Pack A (source rows): `apack[pi][q][ir] = L[row0+pi*MR+ir, k+q]`,
+    // `L[x, k+q] = head[(k+q)*nrow + x]`.
+    let mut apack = vec![0.0f64; npanels_i * n_elim * MR];
+    for pi in 0..npanels_i {
+        let i0 = row0 + pi * MR;
+        for q in 0..n_elim {
+            let base = (k + q) * nrow;
+            let out = &mut apack[pi * (n_elim * MR) + q * MR..][..MR];
+            for (ir, o) in out.iter_mut().enumerate() {
+                let i = i0 + ir;
+                *o = if i < nrow { head[base + i] } else { 0.0 };
+            }
+        }
+    }
+    // Pack B0 and B1 (D-scaled source columns). At a 1×1 step,
+    // `B0 = L[j,q]·d_q` (`B1` unused). At a 2×2 start, `B0 = dl0`,
+    // `B1 = dl1` (the block-scaled coefficients above). 2×2-second and
+    // zero-d-1×1 positions carry a value that the accumulation walk
+    // never reads.
+    let mut bpack0 = vec![0.0f64; npanels_j * n_elim * NR];
+    let mut bpack1 = vec![0.0f64; npanels_j * n_elim * NR];
+    for pj in 0..npanels_j {
+        let j0 = col_start + pj * NR;
+        for q in 0..n_elim {
+            let base = (k + q) * nrow;
+            let off = pj * (n_elim * NR) + q * NR;
+            if is_2x2_start(q) {
+                let d11 = d_panel[q];
+                let d22 = d_panel[q + 1];
+                let d21 = subdiag[k + q];
+                let base1 = (k + q + 1) * nrow;
+                for jr in 0..NR {
+                    let j = j0 + jr;
+                    if j < col_end {
+                        let l_jq = head[base + j];
+                        let l_jq1 = head[base1 + j];
+                        bpack0[off + jr] = d11 * l_jq + d21 * l_jq1;
+                        bpack1[off + jr] = d21 * l_jq + d22 * l_jq1;
+                    }
+                }
+            } else {
+                let dq = d_panel[q];
+                for jr in 0..NR {
+                    let j = j0 + jr;
+                    if j < col_end {
+                        bpack0[off + jr] = head[base + j] * dq;
+                    }
+                }
+            }
+        }
+    }
+
+    // Tiled update over the lower triangle (i >= j).
+    for pj in 0..npanels_j {
+        let j0 = col_start + pj * NR;
+        let bbase = pj * (n_elim * NR);
+        for pi in 0..npanels_i {
+            let i0 = row0 + pi * MR;
+            // Skip tiles entirely in the strict upper triangle: the
+            // largest row `i0 + MR - 1` is still below the smallest
+            // column `j0`, so no element satisfies i >= j.
+            if i0 + MR <= j0 {
+                continue;
+            }
+            let abase = pi * (n_elim * MR);
+
+            // Load the C tile (lower-triangle, in-range elements only;
+            // out-of-range/upper stay 0 and are never stored).
+            let mut acc = [[0.0f64; MR]; NR];
+            for (jr, accj) in acc.iter_mut().enumerate() {
+                let j = j0 + jr;
+                if j >= col_end {
+                    continue;
+                }
+                let colblk = (j - col_start) * nrow;
+                for (ir, a) in accj.iter_mut().enumerate() {
+                    let i = i0 + ir;
+                    if i < nrow && i >= j {
+                        *a = block[colblk + i];
+                    }
+                }
+            }
+
+            // Walk the pivot stream in `q` order. Out-of-range column
+            // lanes carry packed 0 coefficients (0·L = 0), so they are
+            // inert and never stored.
+            let mut q = 0usize;
+            while q < n_elim {
+                if is_2x2_start(q) {
+                    let a0 = &apack[abase + q * MR..][..MR];
+                    let a1 = &apack[abase + (q + 1) * MR..][..MR];
+                    let b0 = &bpack0[bbase + q * NR..][..NR];
+                    let b1 = &bpack1[bbase + q * NR..][..NR];
+                    if fma {
+                        for (jr, accj) in acc.iter_mut().enumerate() {
+                            let n0 = -b0[jr];
+                            let n1 = -b1[jr];
+                            for (ir, acci) in accj.iter_mut().enumerate() {
+                                // Two FMAs, matching axpy2_minus_unroll4.
+                                *acci = n1.mul_add(a1[ir], n0.mul_add(a0[ir], *acci));
+                            }
+                        }
+                    } else {
+                        for (jr, accj) in acc.iter_mut().enumerate() {
+                            let (d0, d1) = (b0[jr], b1[jr]);
+                            for (ir, acci) in accj.iter_mut().enumerate() {
+                                // Add-then-sub, matching axpy2_minus_unroll4_nofma.
+                                *acci -= d0 * a0[ir] + d1 * a1[ir];
+                            }
+                        }
+                    }
+                    q += 2;
+                } else {
+                    // 1×1; skip a zero pivot exactly as the fallback does.
+                    if d_panel[q] != 0.0 {
+                        let a0 = &apack[abase + q * MR..][..MR];
+                        let b0 = &bpack0[bbase + q * NR..][..NR];
+                        if fma {
+                            for (jr, accj) in acc.iter_mut().enumerate() {
+                                let nb = -b0[jr];
+                                for (ir, acci) in accj.iter_mut().enumerate() {
+                                    *acci = nb.mul_add(a0[ir], *acci);
+                                }
+                            }
+                        } else {
+                            for (jr, accj) in acc.iter_mut().enumerate() {
+                                let bj = b0[jr];
+                                for (ir, acci) in accj.iter_mut().enumerate() {
+                                    *acci -= bj * a0[ir];
+                                }
+                            }
+                        }
+                    }
+                    q += 1;
+                }
+            }
+
+            // Store back the lower-triangle, in-range elements.
+            for (jr, accj) in acc.iter().enumerate() {
+                let j = j0 + jr;
+                if j >= col_end {
+                    continue;
+                }
+                let colblk = (j - col_start) * nrow;
+                for (ir, a) in accj.iter().enumerate() {
+                    let i = i0 + ir;
+                    if i < nrow && i >= j {
+                        block[colblk + i] = *a;
+                    }
+                }
             }
         }
     }
@@ -5679,6 +6059,153 @@ mod ncol_zero_contrib_tests {
                     0.0,
                     "contrib strict upper triangle ({ci},{cj}) must be zero, not stale pooled-buffer data"
                 );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod packed_schur_tests {
+    use super::*;
+
+    /// Scalar reference for the mixed 1×1 / 2×2 / zero-d trailing update,
+    /// walking the pivot stream in `q` order with the exact per-element
+    /// rounding the kernels must reproduce:
+    /// - 1×1 (`subdiag[k+q]==0`, `d_q!=0`): `acc -= (L[j,q]·d_q)·L[i,q]`,
+    ///   as `mul→sub` (nofma) or a single `mul_add` (fma);
+    /// - 2×2 (`subdiag[k+q]!=0`): `acc -= dl0·L[i,q] + dl1·L[i,q+1]` as
+    ///   add-then-sub (nofma) or two chained FMAs (fma).
+    ///
+    /// This mirrors `axpy_minus_unroll4*` / `axpy2_minus_unroll4*` exactly,
+    /// so the packed kernel must be **byte-identical** for both `fma`
+    /// modes.
+    #[allow(clippy::too_many_arguments)]
+    fn scalar_ref(
+        head: &[f64],
+        block: &mut [f64],
+        col_start: usize,
+        nrow: usize,
+        k: usize,
+        n_elim: usize,
+        d_panel: &[f64],
+        subdiag: &[f64],
+        fma: bool,
+    ) {
+        let ncol = block.len() / nrow;
+        for lc in 0..ncol {
+            let j = col_start + lc;
+            for i in j..nrow {
+                let mut acc = block[lc * nrow + i];
+                let mut q = 0usize;
+                while q < n_elim {
+                    if q + 1 < n_elim && subdiag[k + q] != 0.0 {
+                        let d11 = d_panel[q];
+                        let d22 = d_panel[q + 1];
+                        let d21 = subdiag[k + q];
+                        let b0 = (k + q) * nrow;
+                        let b1 = (k + q + 1) * nrow;
+                        let dl0 = d11 * head[b0 + j] + d21 * head[b1 + j];
+                        let dl1 = d21 * head[b0 + j] + d22 * head[b1 + j];
+                        if fma {
+                            acc = (-dl1).mul_add(head[b1 + i], (-dl0).mul_add(head[b0 + i], acc));
+                        } else {
+                            acc -= dl0 * head[b0 + i] + dl1 * head[b1 + i];
+                        }
+                        q += 2;
+                    } else {
+                        if d_panel[q] != 0.0 {
+                            let base = (k + q) * nrow;
+                            let alpha = head[base + j] * d_panel[q];
+                            if fma {
+                                acc = (-alpha).mul_add(head[base + i], acc);
+                            } else {
+                                acc -= alpha * head[base + i];
+                            }
+                        }
+                        q += 1;
+                    }
+                }
+                block[lc * nrow + i] = acc;
+            }
+        }
+    }
+
+    /// `apply_schur_panel_range_packed` is byte-identical to the scalar
+    /// reference across a size sweep — for both `fma` modes and for pivot
+    /// streams mixing 1×1, 2×2, and zero-d pivots — including
+    /// non-multiple-of-MR/NR row/col counts and `col_start > k+n_elim`
+    /// chunk offsets.
+    #[test]
+    fn packed_matches_scalar_reference_bit_for_bit() {
+        // Deterministic pseudo-random front data.
+        let mut s = 0x51ED_270B_5A11_CE17u64;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+        };
+        // (nrow, k, n_elim, col_start, subdiag-pattern). Patterns:
+        //   "1x1"  — all 1×1
+        //   "2x2"  — 2×2 pairs at q = 2 and q = 5 (where they fit)
+        //   "zero" — a zero-d 1×1 at q = 1
+        for &(nrow, k, n_elim, col_start, pat) in &[
+            (40usize, 0usize, 8usize, 8usize, "1x1"),
+            (37, 0, 5, 5, "1x1"),
+            (64, 0, 16, 16, "2x2"),
+            (100, 0, 12, 30, "2x2"), // chunk offset > k+n_elim, with 2×2
+            (23, 0, 8, 3, "2x2"),
+            (40, 0, 8, 8, "zero"),
+            (50, 0, 10, 10, "2x2"),
+            (9, 0, 2, 2, "1x1"),
+        ] {
+            let head: Vec<f64> = (0..nrow * (k + n_elim)).map(|_| next()).collect();
+            let mut d_panel: Vec<f64> = (0..n_elim).map(|_| 0.5 + next().abs()).collect();
+            let mut subdiag = vec![0.0f64; k + n_elim];
+            match pat {
+                "2x2" => {
+                    if 2 + 1 < n_elim {
+                        subdiag[k + 2] = 0.3 + next().abs();
+                    }
+                    if 5 + 1 < n_elim {
+                        subdiag[k + 5] = -(0.3 + next().abs());
+                    }
+                }
+                "zero" => {
+                    d_panel[1] = 0.0;
+                }
+                _ => {}
+            }
+            let ncol = nrow - col_start;
+            let block0: Vec<f64> = (0..ncol * nrow).map(|_| next()).collect();
+
+            for fma in [false, true] {
+                let mut b_ref = block0.clone();
+                scalar_ref(
+                    &head, &mut b_ref, col_start, nrow, k, n_elim, &d_panel, &subdiag, fma,
+                );
+                let mut b_packed = block0.clone();
+                apply_schur_panel_range_packed(
+                    &head,
+                    &mut b_packed,
+                    col_start,
+                    nrow,
+                    k,
+                    n_elim,
+                    &d_panel,
+                    &subdiag,
+                    fma,
+                );
+                for lc in 0..ncol {
+                    let j = col_start + lc;
+                    for i in j..nrow {
+                        assert_eq!(
+                            b_packed[lc * nrow + i].to_bits(),
+                            b_ref[lc * nrow + i].to_bits(),
+                            "packed != scalar (fma={fma}, pat={pat}) at (i={i},j={j}) nrow={nrow} n_elim={n_elim}"
+                        );
+                    }
+                }
             }
         }
     }

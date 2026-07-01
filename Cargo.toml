@@ -118,6 +118,12 @@ harness = false
 name = "ft_dense_bump"
 
 [[example]]
+name = "bench_dense_front"
+
+[[example]]
+name = "bench_schur_micro"
+
+[[example]]
 name = "bench_qap15"
 
 [[example]]
