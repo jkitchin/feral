@@ -120,5 +120,8 @@ name = "ft_dense_bump"
 [[example]]
 name = "bench_qap15"
 
+[[example]]
+name = "profile_qap15"
+
 [profile.release]
 debug = true
