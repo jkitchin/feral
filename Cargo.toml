@@ -131,3 +131,6 @@ name = "profile_qap15"
 
 [profile.release]
 debug = true
+
+[[example]]
+name = "cmp_ordering_accuracy"

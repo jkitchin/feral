@@ -4,6 +4,21 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — ordering-quality regression: escalate to LdltCompress on pivot growth (issue #102 follow-up)
+
+After the #102 deadlock fix, cont5_2_4_l still failed to converge: PR #92's
+`OrderingPreprocess::Auto` verify drops `LdltCompress` on symbolic *fill*, but its
+value is *numerical* — MC64 matching of near-singular ±ε diagonals into stable
+2×2 pivots. On cont5's late IPM KKTs (μ→0) the fill-preferred `None` ordering
+yields ~1e-16 1×1 pivots with pivot growth ~4e32; iterative refinement floors at
+~1e-2, breaking convergence. `Solver::factor` now escalates: when `Auto` dropped
+an available `LdltCompress` and the factor's `max|piv|/min|piv|` exceeds
+`ordering_escalation_growth` (default 1e24), it re-factors with `LdltCompress`
+and latches it for the pattern. Per-factor and free (growth is in `FactorStats`);
+qap15/dirichlet120 and cont5's early iterations keep the fast `None` path.
+Configurable via `Solver::with_ordering_escalation`. Byte-exact for the
+non-escalated path. See `dev/research/issue-102-ordering-escalation.md`.
+
 ### Fixed — parallel dense-front re-entrant deadlock on some conic KKTs (issue #102)
 
 PR #92 regressed two POUNCE mittelmann problems (cont5_2_4_l, dirichlet120) from

@@ -5824,3 +5824,38 @@ oversubscription; `try_lock` is minimal and byte-exact.
 **Evidence.** dirichlet120 KKT: STALL → ~0.4 s factor, inertia (+54122,−241,0).
 Byte-exact: parallel_parity 8/8, blocked_ldlt 21, parity 8, factor_workspace_parity
 21, lib 394/0. Regression guard `tests/issue102_intrafront_deadlock.rs`.
+
+## 2026-07-01 — Ordering escalation on pivot growth (issue #102 follow-up)
+
+**Decision.** `Solver::factor` monitors per-factor pivot growth
+(`max|piv|/min|piv|`). When the caller requested `OrderingPreprocess::Auto`, the
+resolved preprocess was `None` (i.e. Auto dropped an available `LdltCompress` on
+fill), the predicate wanted `LdltCompress`, and growth exceeds
+`ordering_escalation_growth` (default `1e24`), it re-factors with `LdltCompress`
+and latches that for the pattern (reset on pattern change).
+`Solver::with_ordering_escalation(Option<f64>)` tunes/disables it.
+
+**Why.** PR #92 gates `LdltCompress` on symbolic fill, but `LdltCompress`'s value
+is numerical stability (MC64 matching of near-singular diagonals → 2×2 pivots),
+which fill cannot see. On cont5_2_4_l's late IPM KKTs, dropping it leaves `None`
+with pivot growth ~4e32 (min-pivot ~1e-16); refinement floors at ~1e-2 → IPM
+non-convergence. LdltCompress: growth ~1e15, refined resid ~1e-16.
+
+**Why growth, per-factor, Auto-only.** No symbolic/first-KKT signal separates
+"None fine" (qap15, cont5 iter 0) from "None broken" (cont5 late): all fire the
+predicate, all have large growth, all first-KKTs refine cleanly. Only the
+late-iteration factor's growth distinguishes them (12-order gap: ≤7.5e19 healthy
+vs 4.1e32 broken), so the check must be per-factor and numeric. Escalating only
+`Auto` respects explicit `None`/`LdltCompress`. Latching keeps early iters fast.
+
+**Alternatives rejected.** Reverting #92 (always LdltCompress) re-breaks qap15
+(13.7s vs 0.7s, even with the #103 packed kernel — measured). Fill-ratio
+threshold tuning is fragile (cont5's ratio flips 1.81×/>2× by ordering method).
+A refined-residual probe is more direct but needs a per-factor solve + RHS;
+growth is free and separates the known corpus with wide margin (a residual gate
+is a possible future refinement).
+
+**Evidence.** late cont5 Auto: growth 4e32→1.4e15, refined 1.4e-2→3.2e-16;
+qap15/cont5-iter0/dirichlet120 unchanged. Byte-exact non-escalated path; lib
+394/0, parallel_parity/issue91/issue65/ldlt_compress/symbolic_profiler green.
+Guard `tests/issue102_ordering_escalation.rs`.
