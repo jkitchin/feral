@@ -32,13 +32,36 @@ reduced over ascending `q` with the identical `mul → sub` (nofma) / `mul_add`
 | dense 2955 front, nofma serial | 25586 ms | 3202 ms | **8.0×** (0.34→2.69 GFLOP/s) | inertia identical |
 | synth qap15 stand-in end-to-end (+ intra-front) | 3379 ms | 2029 ms | **1.67×** on top | inertia identical |
 
-**Scope / limit.** The packed path is reached only for **all-1×1-pivot panels**
-(the W-2 fast path in `apply_blocked_schur`). Panels with a 2×2 pivot fall to the
-un-packed `axpy2` fallback — so *strongly indefinite* fronts (and, notably, the
-`fma` path, whose rounding drifts more pivots to 2×2) see less benefit. Definite,
-quasi-definite (SQD/regularized KKT), and SPD fronts — a large and important
-class, including the synthetic qap15 border — get the full win. Packing the 2×2
-fallback is **Phase B-2**, the clear next step.
+**Scope (B-1).** As shipped in B-1 the packed path was reached only for
+**all-1×1-pivot panels**; panels with a 2×2 pivot fell to the un-packed `axpy2`
+fallback. **Phase B-2 (below) lifted this** — the packed kernel now handles a
+mixed 1×1/2×2/zero-d stream byte-exactly, so strongly-indefinite fronts get the
+win too.
+
+## UPDATE 4 — Phase B-2: packed mixed 1×1/2×2/zero-d streams (byte-exact)
+
+`apply_schur_panel_range_packed` now walks the pivot stream per element: 1×1 →
+`acc -= (L[j,q]·d_q)·L[i,q]` (`mul→sub` / `mul_add`, skipping `d_q==0`); 2×2 →
+the fused `acc -= dl0·L[i,q] + dl1·L[i,q+1]` (add-then-sub nofma / two chained
+FMAs) with `dl0=d11·L[j,q]+d21·L[j,q+1]`, `dl1=d21·L[j,q]+d22·L[j,q+1]`. Byte-exact
+with `do_1x1_update`/`do_2x2_update` and the strided `axpy`/`axpy2` fallback.
+`subdiag` is threaded through the panel dispatch; `apply_blocked_schur` routes
+**every** panel through packed when enabled (strided fast-path + fallback stay
+under `FERAL_PACKED_SCHUR=0`).
+
+- Correctness: full suite **736 / 0**, incl. the indefinite/2×2 KKT parity gates
+  byte-exact with packed default; `packed_matches_scalar_reference_bit_for_bit`
+  sweeps 1×1/2×2/zero-d in both fma modes.
+- Perf: indefinite 2955 front nofma serial **25586 → 2780 ms (9.2×**, 0.34 →
+  3.09 GFLOP/s).
+- FMA note: on the degenerate ±n-diagonal `bench_dense_front` synthetic, fma is
+  ~5× slower than nofma at equal inertia — a matrix-specific BK pivoting
+  interaction (fma rounding shifts 1×1-vs-2×2 choices), not a kernel effect (both
+  packed). Not a regression. Reinforces FMA opt-in.
+
+Remaining headroom (untuned): 8×4 tile, L2 cache-blocking, explicit-SIMD (pulp)
+packed kernel, FMA-in-packed — re-tune on target hardware; and re-validate on the
+real qap15 KKT (needs POUNCE) at 10 cores.
 
 **Full byte-exact stack on the synth qap15 stand-in (32000², 4 cores):**
 `9247 → 3457 (intra-front) → 2029 ms (+packed)` = **4.56× byte-exact**, inertia
