@@ -145,3 +145,40 @@ proven bit-exact vs the scalar reference). Benchmark on qap15 + corpus.
 `examples/bench_qap15.rs` (configs incl. block-size A/B), `examples/profile_qap15.rs`
 (per-front buckets, nofma vs fma). Fixture `tests/data/large/qap15_kkt.mtx`
 (gitignored; `dev/scripts/regen_qap15_kkt.sh`).
+
+## Update — Lever A premise REFUTED by direct measurement (step 1)
+
+Instrumented the aggregate phase split via the existing `phase_timing` counters
+(`examples/profile_qap15.rs::phase_split`, sequential factor):
+
+```
+panelfactor :    41.0 ms   (2%)   serial — the supposed look-ahead target
+scalartail  :    28.3 ms   (1.5%) serial — ramp-down
+schur       :  1426.0 ms   (75%)  parallelizable trailing update
+assembly    :   194.3 ms   (10%)  serial multifrontal scatter + extend-add
+serial fraction ≈ 0.25  → Amdahl ceiling ~3.1× on 10 cores
+```
+
+**The serial Bunch–Kaufman panel factorization is only 41 ms (2%).** Lever A
+(look-ahead to overlap it) would hide ~nothing — the premise ("serial panel
+factor is the Amdahl cap") is wrong. Do NOT build look-ahead. This is why step 1
+existed; the earlier ~0.41 Amdahl inference conflated the whole factor and
+mis-attributed the cause.
+
+Corrected diagnosis: the trailing update (schur, 75%) is *already* parallel but
+scales only ~4.7× on 10 cores (measured 2.06× overall < the 3.1× ceiling ⇒ schur
+itself is sub-linear). Revised levers, all **byte-exact** (no numerics/policy
+change):
+
+- **B (now primary) — trailing-update parallel efficiency.** Attack the ~4.7×:
+  (i) load imbalance on the triangular trailing block (equal-width column chunks
+  give the first chunk ~2× the last — use finer chunks / 2-D tiles + work
+  stealing); (ii) ramp-down — trailing blocks below `INTRAFRONT_MIN_AREA=256²`
+  run serial (measure how much of schur that is; lower the floor / parallelize
+  the panel's L21 solve); (iii) per-front fork-join overhead across ~13k fronts.
+- **Assembly parallelism** — the 194 ms (10%) serial scatter + extend-add.
+- **C — per-core kernel throughput** (FMA / wider microkernel), orthogonal.
+
+Lever D (static/SQD) still stands as the highest-ceiling path, but the cheap
+byte-exact win is now clearly Lever B (schur scaling), not A. Next: instrument
+schur's parallel-vs-serial (ramp-down) split to target B precisely.
