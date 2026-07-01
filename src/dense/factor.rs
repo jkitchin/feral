@@ -673,9 +673,32 @@ pub struct BunchKaufmanParams {
 /// the intra-front parallel Schur path stays serial even when
 /// [`BunchKaufmanParams::intrafront_parallel`] is set. Small fronts do
 /// not amortize the rayon fork/join; this floor keeps them on the
-/// zero-overhead serial path. Calibrated in
-/// `dev/research/lever-1.1-intrafront-parallel-schur.md`.
-pub const INTRAFRONT_MIN_AREA: usize = 256 * 256;
+/// zero-overhead serial path.
+///
+/// Lever B (issue #91): lowered from the original `256*256` to `256*128`.
+/// On large-fill conic KKTs (qap15's 2955² root) the original floor left
+/// the tail of each front's trailing update — and whole medium fronts —
+/// on the serial path, capping schur scaling. Halving the floor pushes
+/// that work onto the (byte-exact) parallel path for a measured **~17%**
+/// end-to-end factor speedup on qap15 (interleaved: ~887 ms → ~739 ms,
+/// 10 cores), with no correctness change (per-column reduction is
+/// thread-independent). Going lower (≤ 16384) regressed — fork/join
+/// overhead on genuinely tiny fronts — so `256*128` is the measured sweet
+/// spot, not a floor-to-zero. See
+/// `dev/research/issue-91-parallel-dense-front-2026-06-30.md` and the
+/// original calibration `dev/research/lever-1.1-intrafront-parallel-schur.md`.
+pub const INTRAFRONT_MIN_AREA: usize = 256 * 128;
+
+/// Env override for [`INTRAFRONT_MIN_AREA`] (issue #91 Lever B tuning knob,
+/// mirroring `FERAL_INTRAFRONT`/`FERAL_PARALLEL`). Byte-exact (pure
+/// scheduling). Read once per parallel dispatch — a relaxed env read is
+/// negligible beside the front's factor cost.
+fn intrafront_min_area() -> usize {
+    std::env::var("FERAL_INTRAFRONT_MIN_AREA")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(INTRAFRONT_MIN_AREA)
+}
 
 /// Action to take when a near-zero pivot is encountered.
 #[derive(Debug, Clone)]
@@ -3245,11 +3268,11 @@ fn apply_blocked_schur_panel(
     let head: &[f64] = head;
 
     let area = (nrow - j_start).saturating_mul(n_elim);
-    if intrafront_parallel && area >= INTRAFRONT_MIN_AREA {
+    if intrafront_parallel && area >= intrafront_min_area() {
         use rayon::prelude::*;
         let ncol = nrow - j_start;
         let nthreads = rayon::current_num_threads().max(1);
-        // ~4 chunks per worker for load balance. Bit-exactness does not
+        // ~N chunks per worker for load balance. Bit-exactness does not
         // depend on chunk size (each column reduced on one thread), so
         // this is purely a scheduling knob.
         let chunk_cols = ncol.div_ceil(nthreads * 4).max(1);

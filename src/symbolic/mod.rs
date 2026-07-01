@@ -680,6 +680,108 @@ fn symbolic_factorize_race(
     })
 }
 
+/// Resolve [`OrderingPreprocess::Auto`] by verifying fill rather than
+/// trusting [`pick_ordering_preprocess`] alone.
+///
+/// The predicate is a structural one-way proxy and can recommend
+/// `LdltCompress` on patterns where MC64 symmetric-matching compression
+/// *inflates* fill instead of reducing it (issue #91). To make `Auto`
+/// safe on every input we:
+///
+/// - keep `None` with no extra work when the predicate declines — `None`
+///   is the baseline, so no regression is possible; and
+/// - when the predicate recommends `LdltCompress`, run the symbolic
+///   pipeline both ways and keep whichever has the smaller
+///   `factor_nnz_estimate`.
+///
+/// This guarantees `Auto` fill ≤ `None` fill for every matrix while
+/// preserving `LdltCompress`'s wins where it genuinely helps (cf. MUMPS
+/// `ICNTL(12)=2`). The extra pipeline runs only when `LdltCompress` was
+/// going to be applied anyway; its MC64 matching (the dominant cost)
+/// runs regardless.
+///
+/// Profiler handling mirrors [`symbolic_factorize_race`]: each candidate
+/// gets a fresh profiler and the winner's is copied into the caller's
+/// shared one, so the report reflects exactly one run.
+fn symbolic_factorize_preprocess_auto(
+    matrix: &CscMatrix,
+    snode_params: &SupernodeParams,
+    method: OrderingMethod,
+) -> Result<SymbolicFactorization, FeralError> {
+    debug_assert_eq!(snode_params.preprocess, OrderingPreprocess::Auto);
+
+    // Run one concrete preprocessor with an isolated profiler. Returns
+    // `(symbolic, profiler-snapshot)` so the caller can keep the winner's.
+    let run = |pp: OrderingPreprocess| -> Result<(SymbolicFactorization, Option<SymbolicProfiler>), FeralError> {
+        let cand_prof = snode_params
+            .symbolic_profiler
+            .as_ref()
+            .map(|_| std::sync::Arc::new(std::sync::Mutex::new(SymbolicProfiler::new())));
+        let cand_params = SupernodeParams {
+            preprocess: pp,
+            symbolic_profiler: cand_prof.clone(),
+            ..snode_params.clone()
+        };
+        let sym = symbolic_factorize_with_method(matrix, &cand_params, method)?;
+        let snap = cand_prof.and_then(|a| a.lock().ok().map(|g| g.clone()));
+        Ok((sym, snap))
+    };
+
+    let copy_profiler = |snap: Option<SymbolicProfiler>| {
+        if let (Some(shared), Some(winner)) = (snode_params.symbolic_profiler.as_ref(), snap) {
+            if let Ok(mut p) = shared.lock() {
+                *p = winner;
+            }
+        }
+    };
+
+    // The predicate is the *only* thing that could recommend compression;
+    // when it declines, `None` is the baseline and there is nothing to
+    // verify against.
+    if pick_ordering_preprocess(matrix) == OrderingPreprocess::None {
+        let (sym, snap) = run(OrderingPreprocess::None)?;
+        copy_profiler(snap);
+        return Ok(sym);
+    }
+
+    // Predicate recommends compression — honor it *unless* it inflates
+    // fill catastrophically. LdltCompress (MUMPS ICNTL(12)=2 for SYM=2)
+    // carries a numerical benefit — MC64-matched 2×2 pivots that give the
+    // oracle-correct inertia on near-singular KKTs (e.g. twirism1, where
+    // LdltCompress is +15 % fill but its ordering is the inertia-correct
+    // one) — that symbolic `factor_nnz_estimate` does not capture. So a
+    // modest fill increase keeps it; only a runaway inflation (the qap15
+    // pathology: 6.3× fill, 20× slower factor) overrides the predicate and
+    // falls back to None. `PREPROCESS_FILL_INFLATION_LIMIT` sits well above
+    // the normal ~1.1–1.2× compression overhead and well below qap15's
+    // 6.3×. Validated by the full corpus suite (no inertia regression) plus
+    // `tests/issue91_preprocess_misfire.rs`.
+    let none = run(OrderingPreprocess::None)?;
+    let none_limit = (none.0.factor_nnz_estimate as f64) * PREPROCESS_FILL_INFLATION_LIMIT;
+    match run(OrderingPreprocess::LdltCompress) {
+        Ok((comp_sym, comp_snap)) if (comp_sym.factor_nnz_estimate as f64) <= none_limit => {
+            copy_profiler(comp_snap);
+            Ok(comp_sym)
+        }
+        // LdltCompress inflates fill past the catastrophe limit (or failed)
+        // — use None.
+        _ => {
+            copy_profiler(none.1);
+            Ok(none.0)
+        }
+    }
+}
+
+/// Fill-inflation ceiling for the [`OrderingPreprocess::Auto`] race. When
+/// the structural predicate recommends `LdltCompress`, the verified race
+/// keeps it unless its symbolic `factor_nnz_estimate` exceeds this
+/// multiple of the `None` baseline — i.e. compression must not more than
+/// double the fill. Above this it is treated as a predicate misfire
+/// (issue #91: qap15 conic KKT inflates 6.3×) and `None` is used instead.
+/// Set generously above the normal ~1.1–1.2× compression overhead so the
+/// inertia benefit of `LdltCompress` on near-singular KKTs is preserved.
+const PREPROCESS_FILL_INFLATION_LIMIT: f64 = 2.0;
+
 /// Like [`symbolic_factorize`] but lets the caller pick the
 /// fill-reducing ordering via [`OrderingMethod`].
 ///
@@ -696,6 +798,17 @@ pub fn symbolic_factorize_with_method(
     // `OrderingMethod`, so there is no infinite loop.
     if method == OrderingMethod::AutoRace {
         return symbolic_factorize_race(matrix, snode_params);
+    }
+    // `OrderingPreprocess::Auto` is resolved by *verifying* fill, not by
+    // trusting the structural predicate alone. `pick_ordering_preprocess`
+    // is a one-way proxy ("many low-degree columns ⇒ compression helps")
+    // that mis-fires on regularized quasi-definite IPM KKTs — their
+    // diagonal regularization rows are degree-≤2 columns, so the proxy
+    // recommends `LdltCompress` exactly where MC64 compression *inflates*
+    // fill (issue #91: qap15 conic KKT, 7.16M → 45.4M, 0.77s → 15.4s).
+    // Race None vs LdltCompress on symbolic fill and keep the smaller.
+    if snode_params.preprocess == OrderingPreprocess::Auto {
+        return symbolic_factorize_preprocess_auto(matrix, snode_params, method);
     }
     let n = matrix.n;
 

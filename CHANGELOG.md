@@ -28,6 +28,28 @@ reaching faer-class GFLOP/s additionally needs the 2-D tiled BLAS-3 GEMM
 (`dev/plans/dense-kernel-blas3.md`). See
 `dev/research/issue-99-dense-front-fma-gate.md`.
 
+### Performance — `OrderingPreprocess::Auto` no longer inflates fill on conic KKTs (issue #91)
+
+feral factorized a 50,880×50,880 quasi-definite conic KKT (the qap15 QAP
+LP-relaxation system from POUNCE's convex IPM) in ~15 s, vs faer's ~0.22 s.
+The cause was a single mis-firing ordering heuristic: `pick_ordering_preprocess`
+turns on MC64 `LdltCompress` whenever ≥30 % of columns have ≤2 nonzeros — a
+property a regularized quasi-definite IPM KKT has in abundance (its diagonal
+regularization rows). On qap15 that compression *inflated* fill 6.3× (simplicial
+nnz_L 7.16M → 45.4M) and factor time ~20× (0.77 s → 15.4 s). feral's AMD ordering
+itself is excellent here (7.16M, below faer's 13.4M); the blowup was entirely the
+preprocessing trigger — not AMD quality, amalgamation, or delayed pivots (nnz_L is
+identical across pivot strategies, inertia clean).
+
+`OrderingPreprocess::Auto` now **verifies** rather than predicts: when the
+predicate recommends `LdltCompress`, the symbolic pipeline is run both ways and
+`LdltCompress` is kept only if it does not inflate fill past 2× the `None`
+baseline. This catches the qap15 misfire (→ **0.77 s, 20×**) while preserving
+`LdltCompress`'s genuine wins, including the near-singular KKTs (twirism1, sawpath)
+where its MC64-matched 2×2 pivots are needed for the oracle-correct inertia.
+Default-on; no public API change. Inertia unchanged across the corpus suite.
+See `dev/research/issue-91-preprocess-misfire.md`.
+
 ### Added — one-norm condition estimate for the unsymmetric LU basis (issue #94)
 
 `SparseLu::condition_estimate_1(&mut self, b: &SparseColMatrix)` and
