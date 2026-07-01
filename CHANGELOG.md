@@ -4,6 +4,22 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — public getters for the LU element-growth monitor (issue #93)
+
+`SparseLu` and `DenseLu` now expose the ‖U‖∞ element-growth monitor they already
+track internally:
+
+- `growth() -> f64` — current element-growth high-water ratio since the last
+  factorize (`1.0` on a fresh factor); the continuous conditioning signal that,
+  when it trips `params.max_growth`, forces `update()` to return `NeedsRefactor`.
+- `u_max0() -> f64` — the reference `max|U|` captured at factorize time (the
+  denominator of `growth()`).
+
+Purely additive — the fields already existed as `pub(super)`; this only widens
+their visibility so downstream callers can threshold on a continuous conditioning
+signal rather than the binary refactor-or-not verdict. No algorithm or behavior
+change.
+
 ## [0.11.3] - 2026-06-28
 
 ### Performance — sparse LU update: O(m³) → O(m²) `u_above` reindex on filled bumps (issue #89)
