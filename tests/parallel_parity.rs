@@ -236,7 +236,7 @@ fn deep_chain_tree_no_stack_overflow() {
 
 /// Lever 1.1 gate: the intra-front parallel Schur update must be
 /// bit-exact with the serial path, and the parallel path must actually
-/// fire (a front wide enough to clear `INTRAFRONT_MIN_AREA = 256*256`).
+/// fire (a front wide enough to clear `INTRAFRONT_MIN_AREA = 256*128`).
 ///
 /// A dense, diagonally dominant SPD matrix factorizes into a single wide
 /// root supernode of all-1×1 pivots — exactly the

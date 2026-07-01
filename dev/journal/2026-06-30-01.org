@@ -1,0 +1,91 @@
+#+TITLE: Session journal 2026-06-30-01
+#+STARTUP: showall
+
+* 18:30 :issue-91:ordering:preprocess:qap15:perf:
+Investigating issue #91 ("catastrophic factorization slowdown on a QAP-style
+KKT vs faer, 12s -> 0.2s"). Reproduced the exact matrix and root-caused it.
+
+** Reproduction
+Generated the real qap15 conic KKT via pounce-convex: parsed
+~/projects/pounce/benchmarks/lpopt/mps/qap15.mps.bz2 with HiGHS, rebuilt the
+LP as (A,b,G,h,lb,ub), ran pounce.qp.solve_qp with POUNCE_DBG_KKT_DUMP set
+(env hook in pounce-linsol/src/t_sym_solver.rs). Dump matches the issue
+*exactly*: dim=50880, nnz=168105. 1-based lower triangle. Converted to
+symmetric .mtx. Diagonal sign structure: 22275 positive (all ~1e-10), 28605
+negative (down to -1.0), 0 zero -> quasi-definite with *tiny* primal
+regularization (delta ~ 1e-10).
+
+** Numbers (feral, release, example bench_qap15)
+| config                | factor time | nnz_L  | inertia            |
+| default (Auto prep)   | 15,400 ms   | 40.9M  | (+22275,-28605,0)  |
+| default + fma         | 13,300 ms   | 40.9M  | same               |
+| static_pivot(1e-8)    | 14,300 ms   | 40.9M  | same               |
+| sqd_mode              | TRIPS col 0 | --     | SqdContractViolated{pivot:1e-10} |
+| preprocess=None       |    771 ms   | 9.25M  | (+22275,-28605,0)  |
+| preprocess=None + fma |    671 ms   | 9.25M  | same               |
+| faer AMD (issue)      | ~220 ms     | 13.4M (symbolic) | -- |
+
+** Root cause: OrderingPreprocess::Auto mis-fires LdltCompress
+Symbolic-only fill (col_counts sum, amalgamation-independent):
+- AMD + Auto preprocessing : 45,376,046  <-- the bug
+- AMD + preprocess=None    :  7,155,773  <-- BETTER than faer's 13.4M
+nemin / amalgamation_strategy change *nothing* in simplicial fill. AMF+None
+= 7.64M, MetisND+None = 19.0M. So feral-amd ordering is excellent; the whole
+3-4x "fill gap" and the 20x time blowup come from
+`pick_ordering_preprocess` (src/symbolic/mod.rs:485) firing
+`OrderingPreprocess::LdltCompress` whenever >=30% of columns have <=2
+nonzeros. A regularized quasi-definite IPM KKT is *full* of degree-<=2
+columns (the diagonal regularization rows), so the heuristic fires exactly
+where MC64 symmetric-matching compression destroys the elimination order.
+
+Disabling preprocessing: 15.4s -> 0.77s (20x), nnz_L 40.9M -> 9.25M,
+inertia unchanged and correct. FMA on top: -> 0.67s. Residual vs faer
+(~0.22s) is dense-kernel throughput (FMA/GEMM), the secondary lever.
+
+** Hypotheses refuted along the way
+- "delayed pivots inflate fill" : NO. nnz_L identical (40.9M) across
+  default / +fma / static_pivot. Inertia clean, no cascade.
+- "supernode amalgamation padding" : NO. nemin=1 vs 16 -> identical
+  simplicial fill; amalgamated_est tracks simplicial.
+- "feral-amd worse than faer-amd" : NO. AMD+None = 7.16M < faer 13.4M.
+- "needs SQD fast-path" : the existing SQD mode is unusable here anyway --
+  trips SqdContractViolated at col 0 because the legit pivot is 1e-10 <
+  zero_tol. (Separate robustness issue, not the perf cause.)
+
+** Proposed fix (robust, future-proof)
+Make OrderingPreprocess::Auto *verify* rather than *predict*: cheaply race
+None vs LdltCompress on symbolic factor_nnz_estimate and pick the smaller
+fill (mirrors existing OrderingMethod::AutoRace). Guarantees Auto never
+produces worse fill than None on qap15 or any future pattern, while keeping
+LdltCompress wins where it genuinely helps. Must verify no corpus
+regression (LdltCompress exists because it helps some matrices -- MUMPS
+ICNTL(12)=2). Do NOT blanket-disable.
+
+Harness: examples/bench_qap15.rs (+ Cargo.toml [[example]]). Matrix not yet
+committed as a fixture -- candidate for external_benchmarks/ / tests/data.
+
+* 20:10 :issue-91:fix:preprocess:inertia:corpus:
+Implemented the fix: OrderingPreprocess::Auto now verifies fill instead of
+trusting pick_ordering_preprocess. `symbolic_factorize_preprocess_auto`
+(src/symbolic/mod.rs): if predicate says None, use None; if it says
+LdltCompress, run both and keep LdltCompress unless est fill > 2x None
+(PREPROCESS_FILL_INFLATION_LIMIT).
+
+First attempt was "smaller-fill-wins" (keep LdltCompress only on
+ties/improvements). Full suite caught 2 regressions in
+issue65_mc64_fallback: twirism1 (432,313,0)->(434,311,0) and sawpath
+(789,670,116)->(789,671,115). Root cause: LdltCompress's MC64 2x2 pivots
+give the oracle-correct inertia on near-singular KKTs even at +15% fill
+(twirism1 26683->30782 est); smaller-fill-wins discarded that benefit.
+Measured None vs LdltCompress est on both fixtures + qap15:
+  qap15    8.59M vs 54.45M = 6.34x  (misfire -> None)
+  twirism1 26683 vs 30782  = 1.15x  (keep LdltCompress)
+  sawpath   7548 vs  7557  = 1.00x  (keep)
+2x ceiling separates them cleanly. After the change: issue65 green,
+issue91 green, symbolic_profiler/ldlt_compress green, full corpus suite
+green (68 test result: ok, 0 failed).
+
+Result on qap15 (default, verified Auto): 15.4s -> 0.77s (20x), nnz_L
+40.9M -> 9.25M, inertia (+22275,-28605,0) unchanged. Docs: research note,
+decisions.md, tried-and-rejected.md, CHANGELOG all updated. Fixture
+tests/data/large/qap15_kkt.mtx (gitignored) + regen script added.
