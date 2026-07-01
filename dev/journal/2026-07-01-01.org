@@ -1,0 +1,43 @@
+#+TITLE: FERAL Journal — 2026-07-01-01
+
+* 09:00 :issue-94:condition:lu:orient:
+Goal: issue #94 — one-norm condition estimate (rcond/κ₁) for the unsymmetric LU
+factor. Existing Hager–Higham estimator (=src/numeric/condition.rs=) is bound to
+the symmetric =SparseFactors= and drives solves through =numeric::solve=,
+exploiting =A⁻ᵀ = A⁻¹= (1 solve/iter). Unreachable for an LU basis. Journal
+sub-agent confirmed: greenfield, no prior attempts, no plan/tried-and-rejected
+entry. Wrote =dev/research/lu-condition-estimate.md=.
+
+* 09:30 :issue-94:refactor:
+Factored the Hager loop out of =estimate_inverse_norm_1= into a shared driver
+=hager_higham_inverse_norm_1<O: HagerHighamOperator>= (trait: =dim=,
+=apply_inverse=, =apply_inverse_transpose=). Symmetric path now builds a
+=SymmetricHager= adapter (pools one =SolveWorkspace= + one in-buffer;
+=apply_inverse_transpose= delegates to =apply_inverse=) and calls the driver.
+The driver operates in-place on =rhs=; the symmetric adapter copies rhs→inbuf
+then uses the out-of-place =solve_sparse_into_ws=. Math is bit-identical (same
+op order). Evidence: all 9 pre-existing =numeric::condition= tests pass,
+including =estimate_pools_one_solve_workspace_across_internal_solves= (N5:
+exactly ONE SolveWorkspace build) — the pooling contract is preserved.
+
+* 09:50 :issue-94:lu:implement:
+New =src/lu/condition.rs=: =SparseLuHager=/=DenseLuHager= adapters wire
+=ftran=/=btran= into the driver; =SparseLu::condition_estimate_1(&b)= /
+=DenseLu::condition_estimate_1(&b)= multiply the driver result by =b.one_norm()=
+(=‖B‖₁= = max absolute column sum, new method on both matrix types). Deviated
+from issue's sketched =-> f64= to =-> Result<f64, FeralError>= (solves are
+fallible; crate forbids unwrap/expect in src). Dim-mismatch guarded before any
+solve.
+
+* 10:10 :issue-94:test:evidence:
+8 new unit tests, all external hand-calc oracles:
+- =one_norm= hand values (6 for [[1,2],[3,4]]; abs handling → 5).
+- identity I₅ → κ ≈ 1; diag(1,1e3,1e6) → κ₁ = 1e6 (within 2×).
+- =B=[[1,2],[3,4]]=: det −2, B⁻¹=[[−2,1],[1.5,−0.5]], ‖B‖₁=6, ‖B⁻¹‖₁=3.5,
+  κ₁=21 (hand). Estimate is a lower bound → assert κ_est ∈ [10.5, 21·(1+1e-6)].
+  Both dense and sparse paths hit it.
+- dense/sparse parity on a well-conditioned 3×3 (rel < 1e-6).
+- dim-mismatch → Err on both paths.
+Result: =cargo test= 381 lib passed (was 373; +8), 0 failed. fmt + clippy
+(-D warnings) clean. Re-exported =hager_higham_inverse_norm_1= +
+=HagerHighamOperator= at crate root.

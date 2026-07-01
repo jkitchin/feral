@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-06-27T22:16:46Z
+Generated: 2026-07-01T01:13:24Z
 
 ## Latest Session
 File: dev/sessions/2026-06-21-01.md
@@ -59,34 +59,34 @@ Clean-room from Forrest–Tomlin 1972, Reid 1982, Schork–Gondzio ERGO-17-002
 
 ## Git Status
 ```
+7b4669b issue #94: LU-basis one-norm condition estimate via ftran/btran
+01a1527 issue #94: extract shared Hager–Higham driver + HagerHighamOperator trait
+f037285 release: feral v0.11.3
+a5c789f issue #89: FT update u_above reindex O(m³)→O(m²) + true per-update cost counter (#90)
 a9cea82 issue #87: Forrest–Tomlin row-elimination LU update (O(bump²) → O(bump)) (#88)
-380459c issue #87: gate FT invariant self-check behind off-by-default feature (CI: alloc probe)
-47a3d66 issue #87: fix duplicate-column bug in FT row gather (CI: casctanks drift)
-1808467 issue #87 P5: checkpoint — FT row-elimination session docs
-ebaeca6 issue #87 P2: Forrest-Tomlin row-elimination update (O(bump²) → O(bump))
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_supernodes_cover_n ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
-test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
-test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 373 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.56s
+test result: ok. 381 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.90s
 
 ```
 
@@ -182,6 +182,7 @@ src/io/mod.rs
 src/io/mtx.rs
 src/io/sidecar.rs
 src/lib.rs
+src/lu/condition.rs
 src/lu/dense_factor.rs
 src/lu/dense_matrix.rs
 src/lu/dense_solve.rs
@@ -224,8 +225,8 @@ tests/amf_corpus_oracle.rs
 tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
-tests/column_renumbering_parity.rs
 tests/column_renumbering.rs
+tests/column_renumbering_parity.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -238,6 +239,10 @@ tests/factors_ld_export.rs
 tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/growth_flag.rs
+tests/issue52_stats.rs
+tests/issue64_arrow_ordering.rs
+tests/issue65_mc64_fallback.rs
+tests/issue67_thin_ordering.rs
 tests/issue_15_cascade_arm_gate.rs
 tests/issue_17_robot_1600_cascade_off.rs
 tests/issue_18_narx_cfy_cascade_off.rs
@@ -246,10 +251,6 @@ tests/issue_38_static_pivot.rs
 tests/issue_46_saddle_kkt_cascade.rs
 tests/issue_55_delay_budget.rs
 tests/issue_55_n_tiny_counter.rs
-tests/issue52_stats.rs
-tests/issue64_arrow_ordering.rs
-tests/issue65_mc64_fallback.rs
-tests/issue67_thin_ordering.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
@@ -273,8 +274,8 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/rook_rescue_kkt.rs
 tests/rook_rescue.rs
+tests/rook_rescue_kkt.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
