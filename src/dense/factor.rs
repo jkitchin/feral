@@ -3371,6 +3371,20 @@ fn apply_schur_panel_range(
     );
     let ncol = block.len() / nrow;
 
+    // Issue #99 BLAS-3: the packed, register-tiled trailing update is
+    // ~25× faster than the strided per-column kernels below on this
+    // hardware (measured `examples/bench_schur_micro`) and **byte-exact**
+    // with them — each `A[i,j]` (i>=j) is reduced over ascending q with
+    // the identical `mul → sub` (nofma) or `mul_add` (fma). The strided
+    // kernels re-read the panel at column-stride `nrow` every q, which
+    // cache-thrashes; the packed path reads L1-resident micro-panels.
+    // Default on; `FERAL_PACKED_SCHUR=0` restores the strided path for
+    // A/B benchmarking and as a safety override.
+    if packed_schur_enabled() {
+        apply_schur_panel_range_packed(head, block, col_start, nrow, k, n_elim, d_panel, fma);
+        return;
+    }
+
     let mut alphas0_buf = [0.0f64; MAX_N_ELIM];
     let mut alphas1_buf = [0.0f64; MAX_N_ELIM];
     let mut alphas2_buf = [0.0f64; MAX_N_ELIM];
@@ -3498,6 +3512,172 @@ fn apply_schur_panel_range(
                     trailing_len,
                     alphas,
                 );
+            }
+        }
+    }
+}
+
+/// Whether the packed BLAS-3 trailing update (issue #99) is enabled.
+/// Default `true`; `FERAL_PACKED_SCHUR=0|off|false|no` restores the
+/// strided per-column kernels for A/B benchmarking or as a safety
+/// override. Byte-exact either way. Read once per panel dispatch (a
+/// relaxed env read, negligible beside the trailing-update cost).
+#[inline]
+fn packed_schur_enabled() -> bool {
+    !matches!(
+        std::env::var("FERAL_PACKED_SCHUR").as_deref(),
+        Ok("0") | Ok("off") | Ok("false") | Ok("no")
+    )
+}
+
+/// Packed, register-tiled equivalent of [`apply_schur_panel_range`]
+/// (issue #99, BLAS-3). Computes the same lower-triangular rank-`n_elim`
+/// trailing update `A[i,j] -= Σ_q (L[j,q]·d_q)·L[i,q]` for `i >= j`, but
+/// packs the panel into `q`-contiguous `MR`/`NR` micro-panels so the
+/// inner `q` loop reads L1-resident memory instead of the strided
+/// `col_stride = nrow` access that bottlenecks the strided kernels.
+///
+/// **Byte-exact** with [`apply_schur_panel_range`]: every element is
+/// reduced over ascending `q` with the same `mul → sub` (nofma) or
+/// `mul_add` (fma) as the reference — packing changes only memory
+/// layout, not arithmetic order (verified bit-for-bit in
+/// `examples/bench_schur_micro` and by the byte-exact factor parity
+/// suite). A zero `alpha` contributes `acc − round(0·L) = acc` for
+/// finite `L`, matching the strided kernels' explicit zero-skip; the
+/// packed path (reached only for all-1×1 panels with non-zero `d`) never
+/// sees a non-finite `L`, so no skip is needed.
+#[allow(clippy::too_many_arguments)]
+fn apply_schur_panel_range_packed(
+    head: &[f64],
+    block: &mut [f64],
+    col_start: usize,
+    nrow: usize,
+    k: usize,
+    n_elim: usize,
+    d_panel: &[f64],
+    fma: bool,
+) {
+    let ncol = block.len() / nrow;
+    if ncol == 0 || n_elim == 0 {
+        return;
+    }
+    // Register-tile dimensions. MR rows × NR cols per tile; the MR (row)
+    // axis is the contiguous SIMD axis the compiler autovectorizes.
+    const MR: usize = 8;
+    const NR: usize = 4;
+
+    // Column j (absolute) updates rows [j, nrow); the lowest column is
+    // `col_start`, so the source/destination rows span [col_start, nrow).
+    let row0 = col_start;
+    let rowspan = nrow - row0;
+    let col_end = col_start + ncol;
+    let npanels_i = rowspan.div_ceil(MR);
+    let npanels_j = ncol.div_ceil(NR);
+
+    // Pack A (source rows) and B (D-scaled source columns) into
+    // `q`-contiguous micro-panels. `L[x, k+q] = head[(k+q)*nrow + x]`.
+    //   apack[pi*(n_elim*MR) + q*MR + ir] = L[row0 + pi*MR + ir, k+q]
+    //   bpack[pj*(n_elim*NR) + q*NR + jr] = L[col_start + pj*NR + jr, k+q] * d_q
+    let mut apack = vec![0.0f64; npanels_i * n_elim * MR];
+    for pi in 0..npanels_i {
+        let i0 = row0 + pi * MR;
+        for q in 0..n_elim {
+            let base = (k + q) * nrow;
+            let out = &mut apack[pi * (n_elim * MR) + q * MR..][..MR];
+            for (ir, o) in out.iter_mut().enumerate() {
+                let i = i0 + ir;
+                *o = if i < nrow { head[base + i] } else { 0.0 };
+            }
+        }
+    }
+    let mut bpack = vec![0.0f64; npanels_j * n_elim * NR];
+    for pj in 0..npanels_j {
+        let j0 = col_start + pj * NR;
+        for q in 0..n_elim {
+            let base = (k + q) * nrow;
+            let dq = d_panel[q];
+            let out = &mut bpack[pj * (n_elim * NR) + q * NR..][..NR];
+            for (jr, o) in out.iter_mut().enumerate() {
+                let j = j0 + jr;
+                *o = if j < col_end {
+                    head[base + j] * dq
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+
+    // Tiled update over the lower triangle (i >= j).
+    for pj in 0..npanels_j {
+        let j0 = col_start + pj * NR;
+        let bbase = pj * (n_elim * NR);
+        for pi in 0..npanels_i {
+            let i0 = row0 + pi * MR;
+            // Skip tiles entirely in the strict upper triangle: the
+            // largest row `i0 + MR - 1` is still below the smallest
+            // column `j0`, so no element satisfies i >= j.
+            if i0 + MR <= j0 {
+                continue;
+            }
+            let abase = pi * (n_elim * MR);
+
+            // Load the C tile (lower-triangle, in-range elements only;
+            // out-of-range/upper stay 0 and are never stored).
+            let mut acc = [[0.0f64; MR]; NR];
+            for (jr, accj) in acc.iter_mut().enumerate() {
+                let j = j0 + jr;
+                if j >= col_end {
+                    continue;
+                }
+                let colblk = (j - col_start) * nrow;
+                for (ir, a) in accj.iter_mut().enumerate() {
+                    let i = i0 + ir;
+                    if i < nrow && i >= j {
+                        *a = block[colblk + i];
+                    }
+                }
+            }
+
+            // Accumulate over the whole q range. Out-of-range lanes carry
+            // packed zeros (0·L = 0), so they are inert and never stored.
+            if fma {
+                for q in 0..n_elim {
+                    let a = &apack[abase + q * MR..][..MR];
+                    let b = &bpack[bbase + q * NR..][..NR];
+                    for (jr, accj) in acc.iter_mut().enumerate() {
+                        let nb = -b[jr];
+                        for (ir, acci) in accj.iter_mut().enumerate() {
+                            *acci = nb.mul_add(a[ir], *acci);
+                        }
+                    }
+                }
+            } else {
+                for q in 0..n_elim {
+                    let a = &apack[abase + q * MR..][..MR];
+                    let b = &bpack[bbase + q * NR..][..NR];
+                    for (jr, accj) in acc.iter_mut().enumerate() {
+                        let bj = b[jr];
+                        for (ir, acci) in accj.iter_mut().enumerate() {
+                            *acci -= bj * a[ir];
+                        }
+                    }
+                }
+            }
+
+            // Store back the lower-triangle, in-range elements.
+            for (jr, accj) in acc.iter().enumerate() {
+                let j = j0 + jr;
+                if j >= col_end {
+                    continue;
+                }
+                let colblk = (j - col_start) * nrow;
+                for (ir, a) in accj.iter().enumerate() {
+                    let i = i0 + ir;
+                    if i < nrow && i >= j {
+                        block[colblk + i] = *a;
+                    }
+                }
             }
         }
     }
@@ -5780,6 +5960,113 @@ mod ncol_zero_contrib_tests {
                     0.0,
                     "contrib strict upper triangle ({ci},{cj}) must be zero, not stale pooled-buffer data"
                 );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod packed_schur_tests {
+    use super::*;
+
+    /// Scalar reference for the lower-triangular rank-`n_elim` trailing
+    /// update: `A[i,j] -= Σ_q (L[j,q]·d_q)·L[i,q]` for `i >= j`, ascending
+    /// q, explicit `mul → sub` (nofma) — the exact per-element contract
+    /// every dense kernel must reproduce bit-for-bit.
+    fn scalar_ref(
+        head: &[f64],
+        block: &mut [f64],
+        col_start: usize,
+        nrow: usize,
+        k: usize,
+        n_elim: usize,
+        d_panel: &[f64],
+    ) {
+        let ncol = block.len() / nrow;
+        for lc in 0..ncol {
+            let j = col_start + lc;
+            for i in j..nrow {
+                let mut acc = block[lc * nrow + i];
+                for q in 0..n_elim {
+                    let base = (k + q) * nrow;
+                    let alpha = head[base + j] * d_panel[q];
+                    acc -= alpha * head[base + i];
+                }
+                block[lc * nrow + i] = acc;
+            }
+        }
+    }
+
+    /// `apply_schur_panel_range_packed` is byte-identical to the scalar
+    /// reference across a size sweep (including non-multiple-of-MR/NR
+    /// row/col counts, and `col_start > k + n_elim` chunk offsets).
+    #[test]
+    fn packed_matches_scalar_reference_bit_for_bit() {
+        // Deterministic pseudo-random front data.
+        let mut s = 0x51ED_270B_5A11_CE17u64;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+        };
+        for &(nrow, k, n_elim, col_start) in &[
+            (40usize, 0usize, 8usize, 8usize),
+            (37, 0, 5, 5),
+            (64, 0, 16, 16),
+            (100, 0, 12, 30), // chunk offset > k+n_elim
+            (23, 0, 3, 3),
+            (9, 0, 2, 2),
+        ] {
+            let head: Vec<f64> = (0..nrow * (k + n_elim)).map(|_| next()).collect();
+            let d_panel: Vec<f64> = (0..n_elim).map(|_| 0.5 + next().abs()).collect();
+            let ncol = nrow - col_start;
+            let block0: Vec<f64> = (0..ncol * nrow).map(|_| next()).collect();
+
+            let mut b_ref = block0.clone();
+            scalar_ref(&head, &mut b_ref, col_start, nrow, k, n_elim, &d_panel);
+
+            for fma in [false, true] {
+                let mut b_packed = block0.clone();
+                apply_schur_panel_range_packed(
+                    &head,
+                    &mut b_packed,
+                    col_start,
+                    nrow,
+                    k,
+                    n_elim,
+                    &d_panel,
+                    fma,
+                );
+                if !fma {
+                    // nofma packed must be byte-identical to the scalar
+                    // mul→sub reference on the lower triangle.
+                    for lc in 0..ncol {
+                        let j = col_start + lc;
+                        for i in j..nrow {
+                            assert_eq!(
+                                b_packed[lc * nrow + i].to_bits(),
+                                b_ref[lc * nrow + i].to_bits(),
+                                "nofma packed != scalar at (i={i},j={j}) nrow={nrow} n_elim={n_elim}"
+                            );
+                        }
+                    }
+                } else {
+                    // fma packed is within n_elim ULPs (single vs double
+                    // rounding); just assert it stays close and finite.
+                    for lc in 0..ncol {
+                        let j = col_start + lc;
+                        for i in j..nrow {
+                            let p = b_packed[lc * nrow + i];
+                            let r = b_ref[lc * nrow + i];
+                            assert!(p.is_finite());
+                            assert!(
+                                (p - r).abs() <= 1e-9 * (1.0 + r.abs()),
+                                "fma packed drifted too far at (i={i},j={j}): {p} vs {r}"
+                            );
+                        }
+                    }
+                }
             }
         }
     }

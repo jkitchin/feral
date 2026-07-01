@@ -4,6 +4,30 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — packed BLAS-3 dense trailing update, byte-exact ~8–10× on dense fronts (issue #99)
+
+The dense trailing Schur update (~94 % of a dense factor) ran at only
+~0.35 GFLOP/s — ~10× below scalar peak on an AVX2/FMA CPU — because the strided
+per-column kernels re-read the eliminated panel at column-stride `nrow` every
+elimination step, thrashing cache. A new packed, register-tiled (`MR=8 × NR=4`)
+trailing update (`apply_schur_panel_range_packed`) packs the panel into
+`q`-contiguous micro-panels so the inner loop is L1-resident. It is **byte-exact**
+with the strided kernels (each `A[i,j]`, `i≥j`, reduced over ascending `q` with
+the identical `mul → sub` / `mul_add`; packing changes only memory layout) and
+runs ~22–26× faster in isolation (`examples/bench_schur_micro`), giving **10.2×**
+on a dense-1500 front's schur phase and **8.0×** on a 2955 front (0.34 → 2.69
+GFLOP/s, nofma). Default on; `FERAL_PACKED_SCHUR=0` restores the strided path.
+
+Reached for **all-1×1-pivot panels** (the `apply_blocked_schur` fast path), so
+definite / quasi-definite (SQD, regularized KKT) / SPD fronts get the full win;
+strongly-indefinite fronts whose panels carry 2×2 pivots fall to the un-packed
+fallback (packing that path is future work). Combined with the shape-aware
+intra-front gate, the synthetic qap15 stand-in factors **9.25 s → 2.03 s (4.56×),
+byte-exact**, inertia `(+30000, −2000, 0)` unchanged. Correctness: the full
+byte-exact factor-parity suite green with packed default, plus a dedicated
+`packed_matches_scalar_reference_bit_for_bit` unit test. See
+`dev/research/issue-99-dense-front-fma-gate.md`.
+
 ### Performance — shape-aware intra-front parallel gate for tall, thin fronts (issue #99, Lever 1, byte-exact)
 
 The intra-front parallel Schur update fired only when a front's

@@ -1,3 +1,57 @@
+# Issue #99 — dense-front throughput: packed BLAS-3 kernel + shape-aware intra-front + FMA gate
+
+## UPDATE 3 (2026-07-01) — packed BLAS-3 trailing update: byte-exact ~8–10× on dense fronts
+
+The maintainer asked to take on the BLAS-3 GEMM as a dedicated follow-up. The
+result is a **byte-exact** win, bigger than expected.
+
+**Diagnosis.** A full dense-front profile attributes ~94 % of factor time to the
+trailing Schur update, yet it measured only **0.33–0.39 GFLOP/s** — ~10× below
+even scalar peak, on a CPU with AVX2/AVX-512/FMA. An isolated kernel microbench
+(`examples/bench_schur_micro`) pinned the cause: the production strided kernels
+re-read the eliminated panel at **column-stride `nrow` every `q`**, so the inner
+rank-`n_elim` loop touches `n_elim` cache lines spread across memory — cache
+latency, not compute or DST bandwidth. (The 2026-06-30 "DST-bandwidth-bound"
+conclusion, reached from a *source-panel-pack-into-same-strided-kernel* variant,
+does not hold for a proper packed micro-kernel on this hardware.)
+
+**Fix.** A packed, register-tiled (`MR=8 × NR=4`) trailing update
+(`apply_schur_panel_range_packed`): pack the panel into `q`-contiguous MR/NR
+micro-panels so the inner `q` loop is L1-resident, then a plain register-tiled
+kernel the compiler autovectorizes. **Byte-exact** — each `A[i,j]` (i≥j) is still
+reduced over ascending `q` with the identical `mul → sub` (nofma) / `mul_add`
+(fma); packing changes only memory layout, not arithmetic order. Default on;
+`FERAL_PACKED_SCHUR=0` restores the strided path.
+
+**Measured (4-core x86_64):**
+
+| case | strided | packed | speedup | correctness |
+|---|---:|---:|---:|---|
+| isolated kernel `bench_schur_micro` (any size) | 0.38 GFLOP/s | 9–10.5 GFLOP/s | **22–26×** | byte-exact ✓ |
+| dense 1500 front, schur phase | 3165 ms | 309 ms | **10.2×** | byte-exact |
+| dense 2955 front, nofma serial | 25586 ms | 3202 ms | **8.0×** (0.34→2.69 GFLOP/s) | inertia identical |
+| synth qap15 stand-in end-to-end (+ intra-front) | 3379 ms | 2029 ms | **1.67×** on top | inertia identical |
+
+**Scope / limit.** The packed path is reached only for **all-1×1-pivot panels**
+(the W-2 fast path in `apply_blocked_schur`). Panels with a 2×2 pivot fall to the
+un-packed `axpy2` fallback — so *strongly indefinite* fronts (and, notably, the
+`fma` path, whose rounding drifts more pivots to 2×2) see less benefit. Definite,
+quasi-definite (SQD/regularized KKT), and SPD fronts — a large and important
+class, including the synthetic qap15 border — get the full win. Packing the 2×2
+fallback is **Phase B-2**, the clear next step.
+
+**Full byte-exact stack on the synth qap15 stand-in (32000², 4 cores):**
+`9247 → 3457 (intra-front) → 2029 ms (+packed)` = **4.56× byte-exact**, inertia
+`(+30000,−2000,0)` unchanged; stacks further with opt-in FMA on all-1×1 fronts.
+
+Correctness gates: the byte-exact factor-parity suite (`blocked_ldlt` 21,
+`dense_ldlt` 17, `parallel_parity` 8, `parity` 8, `factor_workspace_parity` 21)
+all green with packed as default, plus a dedicated
+`packed_matches_scalar_reference_bit_for_bit` unit test (size sweep incl.
+non-multiple-of-tile and chunk-offset cases).
+
+---
+
 # Issue #99 — dense-front throughput: shape-aware intra-front gate (Lever 1) + FMA row gate (Lever 3)
 
 ## UPDATE 2 (2026-07-01, session -03 cont.) — PR #92 merged, and the real win found
