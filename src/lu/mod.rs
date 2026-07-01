@@ -11,6 +11,7 @@
 //! solves, not just one-shot factor/solve. See `dev/research/unsymmetric-lu.md`
 //! and `dev/plans/unsymmetric-lu-epic.md`.
 
+pub mod condition;
 pub mod dense_factor;
 pub mod dense_matrix;
 pub mod dense_solve;
