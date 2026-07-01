@@ -4910,3 +4910,21 @@ cache-sized trailing tile across many panels) or a larger panel width (more
 flops per DST stream). A source-side pack (B-1a) is off the table. FMA remains a
 +23% option but is a reproducibility-policy change (kept opt-in), not a
 bit-exact win.
+
+## 2026-07-01 — UPDATE: packed micro-kernel succeeds where B-1a source-pack failed (issue #99)
+
+The 2026-06-30 "B-1a panel packing" entry above rejected source-panel packing as a
+net slowdown and concluded the root front is DST-bandwidth-bound. That conclusion
+was **specific to the variant tried** — packing the source into a tighter stride
+but *feeding the same strided kernels*, which keep the per-`q` `as_simd` + strided
+access. It does **not** generalize to a proper packed micro-kernel.
+
+A different design — pack the panel into `q`-contiguous MR=8×NR=4 micro-panels and
+run a register-tiled kernel with a **contiguous inner `q`-loop**
+(`apply_schur_panel_range_packed`) — is **22–26× faster in isolation and
+byte-exact** (`examples/bench_schur_micro`), and gives 8–10× on real dense fronts.
+So the bottleneck was strided-`q` cache latency, not DST bandwidth, on this
+hardware. Not a rejection — a correction of scope. See
+`dev/research/issue-99-dense-front-fma-gate.md` UPDATE 3 and `dev/decisions.md`
+2026-07-01 (packed BLAS-3). The B-1a *source-into-strided-kernel* variant remains
+rejected; the packed micro-kernel is the shipped design.

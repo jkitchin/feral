@@ -5719,3 +5719,47 @@ scheduling bug affecting *both* gates. The synthetic fixture is a stand-in — t
 real qap15 KKT needs POUNCE (unavailable here); the tall-thin-front phenomenon and
 its 10-core behavior should be re-validated on the real matrix before promoting
 the thresholds to a hard default. See `dev/research/issue-99-dense-front-fma-gate.md`.
+
+## 2026-07-01 — Packed BLAS-3 dense trailing update (issue #99, byte-exact)
+
+**Decision.** Add `apply_schur_panel_range_packed` — a packed, register-tiled
+(MR=8×NR=4) implementation of the dense rank-`n_elim` trailing Schur update — and
+make it the default (env `FERAL_PACKED_SCHUR=0` restores the strided kernels).
+Byte-exact with the strided path.
+
+**Why.** The trailing update is ~94% of a dense factor yet ran at ~0.35 GFLOP/s
+(~10× below scalar peak on an AVX2/FMA CPU). An isolated microbench
+(`examples/bench_schur_micro`) showed the strided per-column kernels re-read the
+eliminated panel at column-stride `nrow` every `q`, touching `n_elim` scattered
+cache lines — cache latency, not compute or DST bandwidth. Packing the panel into
+`q`-contiguous MR/NR micro-panels makes the inner loop L1-resident; a plain
+register-tiled kernel then autovectorizes to 9–10.5 GFLOP/s (22–26× isolated).
+
+**Supersedes** the 2026-06-30 `tried-and-rejected` "DST-bandwidth-bound"
+conclusion for this hardware: that came from packing the source into the *same
+strided kernel* (which kept the strided `q`-access and only shrank the stride).
+A proper packed micro-kernel with a contiguous `q`-loop is a different design and
+wins decisively. Recorded there, not overwriting the prior entry.
+
+**Byte-exactness.** Each `A[i,j]` (i≥j) is reduced over ascending `q` with the
+identical `mul → sub` (nofma) / `mul_add` (fma) as the reference — packing changes
+only memory layout, not arithmetic order. A zero alpha gives `acc − round(0·L) =
+acc` for finite `L`, matching the strided zero-skip. Validated: full byte-exact
+factor-parity suite green with packed default + `packed_matches_scalar_reference_
+bit_for_bit` unit test.
+
+**Scope.** Reached only for all-1×1-pivot panels (the `apply_blocked_schur` W-2
+fast path). 2×2-pivot panels fall to the un-packed `axpy2` fallback, so strongly
+indefinite fronts — and the `fma` path, whose rounding drifts more pivots to 2×2 —
+benefit less. Definite / quasi-definite (SQD, regularized KKT) / SPD fronts get
+the full win. Packing the 2×2 fallback (Phase B-2) is the next step.
+
+**Evidence.** dense-1500 schur 3165→309 ms (10.2×); dense-2955 nofma serial
+25586→3202 ms (8.0×, 0.34→2.69 GFLOP/s); synth qap15 stand-in end-to-end
+3379→2029 ms; full byte-exact stack (intra-front + packed) 9247→2029 ms (4.56×),
+inertia `(+30000,−2000,0)` unchanged. Suite 736 passed / 0 failed; clippy clean.
+
+**Caveat.** Absolute GFLOP/s (packed ~10, vs a fully-tuned BLAS-3 core ~30–50) is
+partly this 4-core container; the tile (8×4) and the lack of L2 cache-blocking /
+FMA-in-packed leave headroom. Re-tune on target hardware. The `fma` packed path
+exists (bit-matches the fma reference) but is not the default.

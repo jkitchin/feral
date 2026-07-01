@@ -105,3 +105,36 @@ Key finding: the BIGGEST lever was byte-exact (shape-aware scheduling),
 not the rule-breaking FMA. The area metric bug hit both gates identically.
 Caveat: synthetic fixture; re-validate tall-thin phenomenon + thresholds on
 the real qap15 + 10 cores before promoting to a hard default.
+
+* 17:30 :blas3:packed:breakthrough:byte-exact:
+Maintainer: take on the BLAS-3 GEMM. Read dev/plans/dense-kernel-blas3.md
+(Phase B-1 = register-blocked MR x NR DSYRK, byte-exact by design).
+faer-expert couldn't read faer source (not in sandbox) but confirmed #1:
+faer defers rank-bs into workspace W, flushes one triangular GEMM per
+panel (bs=64).
+
+Profiled dense-1500 front: schur = 94% at 0.33 GFLOP/s, ~10x below scalar
+peak on AVX2/AVX512/FMA CPU. Wrote examples/bench_schur_micro isolating the
+kernel: current strided kernel 0.38 GFLOP/s; a plain packed MR=8 NR=4
+register-tiled kernel = 9-10.5 GFLOP/s = 22-26x, BYTE-EXACT (0 mismatches),
+robust across sizes 512..2955, ke 16..128. Root cause: strided kernels
+re-read panel at col-stride nrow per q => n_elim scattered cache lines.
+(Refutes the 2026-06-30 'DST-bandwidth-bound' note, which packed into the
+SAME strided kernel.)
+
+Wired apply_schur_panel_range_packed into production (default on,
+FERAL_PACKED_SCHUR=0 fallback). GOTCHA: 'cargo build --release' does NOT
+rebuild examples -> my first 'packed' profile runs used STALE example
+binaries and showed no speedup. After 'cargo build --release --examples':
+dense-1500 schur 3165 -> 309 ms (10.2x); dense-2955 nofma serial 25586 ->
+3202 ms (8.0x); synth_arrow end-to-end 3379 -> 2029 ms.
+
+Byte-exact validated: full suite 736 passed / 0 failed (blocked_ldlt +
+parallel_parity + all factor parity gates green with packed default) +
+packed_matches_scalar_reference_bit_for_bit unit test.
+
+Scope: only all-1x1 panels (apply_blocked_schur fast path). 2x2 panels use
+the un-packed axpy2 fallback -> strongly indefinite fronts and the fma path
+(rounding drifts pivots to 2x2) benefit less. Phase B-2 = pack the 2x2
+fallback. Full byte-exact stack: intra-front + packed = 9247 -> 2029 ms
+(4.56x) on the synth qap15 stand-in.
