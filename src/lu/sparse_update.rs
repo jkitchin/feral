@@ -25,6 +25,7 @@ use std::collections::BinaryHeap;
 
 use super::sparse_factor::{FtEta, FtOp, SparseLu};
 use super::sparse_symbolic::SparseLuSymbolic;
+use super::RefactorCause;
 use crate::error::FeralError;
 use crate::lu::sparse_matrix::SparseColMatrix;
 
@@ -91,6 +92,8 @@ impl SparseLu {
             }
         }
         if self.updates_since_refactor() + 1 > self.params.max_updates {
+            self.last_refactor =
+                Some((RefactorCause::UpdateBudget, self.params.max_updates as f64));
             return Err(FeralError::NeedsRefactor);
         }
 
@@ -122,6 +125,7 @@ impl SparseLu {
                 self.ft_work = w;
                 // Singular as far as the incremental update can tell; refactor
                 // from scratch for the authoritative verdict (see DenseLu::update).
+                self.last_refactor = Some((RefactorCause::Singular, 0.0));
                 return Err(FeralError::NeedsRefactor);
             }
         };
@@ -175,6 +179,7 @@ impl SparseLu {
                 let growth = self.growth.max(changed_max / self.u_max0);
                 if growth > self.params.max_growth {
                     self.rollback(saved, &saved_uperm_inv, r_rank);
+                    self.last_refactor = Some((RefactorCause::Growth, growth));
                     return Err(FeralError::NeedsRefactor);
                 }
                 // Commit: refresh the `u_above` column index *incrementally*. Only
@@ -445,11 +450,14 @@ impl SparseLu {
                 Some(p) => p,
                 None => {
                     self.restore_elim_pools(rw, rw_touched, queued);
+                    // No diagonal in the pivot column ⇒ effectively a zero pivot.
+                    self.last_refactor = Some((RefactorCause::TinyPivot, 0.0));
                     return Err(FeralError::NeedsRefactor);
                 }
             };
             if dc != c || piv == 0.0 || !piv.is_finite() {
                 self.restore_elim_pools(rw, rw_touched, queued);
+                self.last_refactor = Some((RefactorCause::TinyPivot, piv.abs()));
                 return Err(FeralError::NeedsRefactor);
             }
             let mult = vrc / piv;
@@ -489,6 +497,7 @@ impl SparseLu {
         let diag = rw[r];
         if diag.abs() <= ztol || !diag.is_finite() {
             self.restore_elim_pools(rw, rw_touched, queued);
+            self.last_refactor = Some((RefactorCause::TinyPivot, diag.abs()));
             return Err(FeralError::NeedsRefactor);
         }
         let mut new_row = self.row_pool.pop().unwrap_or_default();
@@ -969,5 +978,117 @@ mod tests {
         super::remove_offdiag(&mut row, 2);
         assert_eq!(super::get_col(&row, 2), None);
         assert_eq!(row[0], (5, 3.0), "diagonal still first after remove");
+    }
+
+    use crate::error::FeralError;
+    use crate::lu::RefactorCause;
+
+    /// Issue #95: `last_refactor()` is `None` on a fresh factor and each
+    /// `NeedsRefactor` return records the cause + magnitude. Update-count trip
+    /// (`max_updates = 1`): the second update fails as `UpdateBudget`, magnitude =
+    /// the cap that was hit; a successful update leaves the accessor `None`.
+    #[test]
+    fn last_refactor_reports_update_budget() {
+        let cols = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let params = LuParams {
+            max_updates: 1,
+            ..LuParams::default()
+        };
+        let mut lu = SparseLu::factor_dense_columns(2, &cols, params).expect("factor");
+        assert_eq!(lu.last_refactor(), None, "fresh factor: no cause");
+
+        lu.update(0, &[1.0, 1.0])
+            .expect("first update within budget");
+        assert_eq!(lu.last_refactor(), None, "successful update leaves it None");
+
+        let err = lu.update(0, &[1.0, 2.0]);
+        assert!(matches!(err, Err(FeralError::NeedsRefactor)));
+        assert_eq!(
+            lu.last_refactor(),
+            Some((RefactorCause::UpdateBudget, 1.0)),
+            "second update trips the count cap (max_updates = 1)"
+        );
+    }
+
+    /// Issue #95: replacing a slot with the **zero** column gives an empty spike
+    /// support (nothing at or below its own diagonal in rank order), which the
+    /// sparse path detects as `Singular` (magnitude `0.0`) before any elimination.
+    #[test]
+    fn last_refactor_reports_singular_on_zero_column() {
+        let cols = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let mut lu = SparseLu::factor_dense_columns(2, &cols, LuParams::default()).expect("factor");
+        let err = lu.update(0, &[0.0, 0.0]); // zero entering column ⇒ dependent
+        assert!(matches!(err, Err(FeralError::NeedsRefactor)));
+        assert_eq!(lu.last_refactor(), Some((RefactorCause::Singular, 0.0)));
+    }
+
+    /// Issue #95: a growth trip records `Growth` with the ratio that exceeded the
+    /// cap. Same compounding last-slot updates as the growth-monitor test but with
+    /// a small `max_growth` so an early update trips.
+    #[test]
+    fn last_refactor_reports_growth() {
+        let cols = vec![
+            vec![4.0, 1.0, 0.0, 0.0],
+            vec![1.0, 3.0, 1.0, 0.0],
+            vec![0.0, 1.0, 2.0, 1.0],
+            vec![0.0, 0.0, 1.0, 5.0],
+        ];
+        let params = LuParams {
+            max_updates: 20,
+            max_growth: 5.0,
+            ..LuParams::default()
+        };
+        let mut lu = SparseLu::factor_dense_columns(4, &cols, params).expect("factor");
+        let updates = [
+            vec![0.0, 0.0, 1.0, 20.0],
+            vec![0.0, 0.0, 1.0, 60.0],
+            vec![0.0, 0.0, 1.0, 180.0],
+        ];
+        let mut tripped = None;
+        for col in updates.iter() {
+            if let Err(FeralError::NeedsRefactor) = lu.update(3, col) {
+                tripped = lu.last_refactor();
+                break;
+            }
+        }
+        let (cause, mag) = tripped.expect("some update trips the growth cap");
+        assert_eq!(cause, RefactorCause::Growth);
+        assert!(mag > 5.0, "growth magnitude {mag} exceeds max_growth = 5.0");
+    }
+
+    /// Issue #95: growth-aware recommendation. `should_refactor_growth()` fires
+    /// once the growth high-water reaches `sqrt(max_growth)`, pre-empting the trip.
+    /// With `max_growth = 100`, the recommendation must fire while updates are
+    /// still committing (growth in `[10, 100)`), before any `NeedsRefactor`.
+    #[test]
+    fn should_refactor_growth_preempts_trip() {
+        let cols = vec![
+            vec![4.0, 1.0, 0.0, 0.0],
+            vec![1.0, 3.0, 1.0, 0.0],
+            vec![0.0, 1.0, 2.0, 1.0],
+            vec![0.0, 0.0, 1.0, 5.0],
+        ];
+        let params = LuParams {
+            max_updates: 20,
+            max_growth: 100.0, // sqrt = 10: recommend once growth >= 10
+            ..LuParams::default()
+        };
+        let mut lu = SparseLu::factor_dense_columns(4, &cols, params).expect("factor");
+        assert!(!lu.should_refactor_growth(), "fresh: growth == 1");
+
+        // First commit raises max|U| to ~20 (u_max0 ≈ 5) ⇒ growth ≈ 3.6 < 10.
+        lu.update(3, &[0.0, 0.0, 1.0, 20.0]).expect("commit 1");
+        // Second commit raises it to ~60 ⇒ growth ≈ 11 ≥ 10: the pre-emptive
+        // recommendation fires while the update itself still committed cleanly.
+        lu.update(3, &[0.0, 0.0, 1.0, 60.0]).expect("commit 2");
+        assert!(
+            lu.should_refactor_growth(),
+            "growth {} should reach sqrt(max_growth) = 10 and recommend refactor",
+            lu.growth()
+        );
+        assert!(
+            lu.last_refactor().is_none(),
+            "no trip yet, only a recommendation"
+        );
     }
 }

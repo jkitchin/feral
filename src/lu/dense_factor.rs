@@ -13,7 +13,7 @@
 
 use super::scaling::{compute_lu_scale, LuScale};
 use super::sparse_matrix::SparseColMatrix;
-use super::{LuParams, LuScaling, LuSingularAction};
+use super::{LuParams, LuScaling, LuSingularAction, RefactorCause};
 use crate::error::FeralError;
 
 /// Dense LU factorization of a square basis, with rank-1 update support.
@@ -44,6 +44,10 @@ pub struct DenseLu {
     /// `max|U|` immediately after the last factor/refactor — the denominator of
     /// the element-growth monitor. Floored away from zero.
     pub(super) u_max0: f64,
+    /// Cause + magnitude of the most recent [`Self::update`] that returned
+    /// [`FeralError::NeedsRefactor`]. `None` after a fresh factor/refactor;
+    /// untouched by a successful update (read only after an `Err`). See issue #95.
+    pub(super) last_refactor: Option<(RefactorCause, f64)>,
     pub(super) params: LuParams,
     /// Two-sided scaling of the factored matrix (identity when unscaled).
     pub(super) scale: LuScale,
@@ -88,6 +92,7 @@ impl DenseLu {
             updates_since_refactor: 0,
             growth: 1.0,
             u_max0,
+            last_refactor: None,
             params,
             scale,
             scratch_a: vec![0.0; m],
@@ -128,6 +133,7 @@ impl DenseLu {
         }
         self.updates_since_refactor = 0;
         self.growth = 1.0;
+        self.last_refactor = None;
         Ok(())
     }
 
@@ -147,7 +153,7 @@ impl DenseLu {
     /// the largest `max|U|` seen across all updates divided by [`Self::u_max0`].
     /// A continuous conditioning signal (`1.0` on a fresh factor); tripping
     /// `params.max_growth` is what forces [`DenseLu::update`] to return
-    /// `NeedsRefactor`.
+    /// `NeedsRefactor`. Exposing it lets a caller pre-empt a growth trip (issue #95).
     #[inline]
     pub fn growth(&self) -> f64 {
         self.growth
@@ -158,6 +164,45 @@ impl DenseLu {
     #[inline]
     pub fn u_max0(&self) -> f64 {
         self.u_max0
+    }
+
+    /// Cause + magnitude of the most recent [`Self::update`] that returned
+    /// [`FeralError::NeedsRefactor`], or `None` if no update has failed since the
+    /// last factor/refactor. `update()` itself still returns the payload-free
+    /// `Err(NeedsRefactor)`; this accessor carries the *why* (issue #95).
+    ///
+    /// The `f64` is a cause-specific magnitude: the growth ratio ([`RefactorCause::Growth`]),
+    /// the update count that hit the cap ([`RefactorCause::UpdateBudget`]), or the
+    /// offending `|pivot|` ([`RefactorCause::TinyPivot`]). The dense path never
+    /// reports [`RefactorCause::Singular`] — a dependent replacement surfaces as
+    /// `TinyPivot` (the final `U` diagonal collapses to ~0).
+    #[inline]
+    pub fn last_refactor(&self) -> Option<(RefactorCause, f64)> {
+        self.last_refactor
+    }
+
+    /// Advisory (cost-based): has the update chain since the last factor/refactor
+    /// cost about as much as a fresh factorization? A dense update is `O(m²)`
+    /// (Hessenberg elimination plus the `O(m²)` factor clones) and a fresh factor
+    /// is `O(m³)`, so ~`m` updates cost about one refactor. True once
+    /// [`Self::updates_since_refactor`] `>= m`. Purely advisory: it does **not**
+    /// change [`Self::update`]'s behaviour. The dense analogue of
+    /// [`SparseLu::should_refactor`](super::SparseLu::should_refactor) (issue #95).
+    #[inline]
+    pub fn should_refactor(&self) -> bool {
+        self.updates_since_refactor >= self.m
+    }
+
+    /// Advisory (growth-aware): is the element-growth high-water close enough to
+    /// [`LuParams::max_growth`] that the next update is at risk of tripping it?
+    /// True once [`Self::growth`] reaches the geometric midpoint (log-space)
+    /// between `1` and `max_growth`, i.e. `growth >= sqrt(max_growth)` (only when
+    /// `max_growth` is finite and `> 1`). Lets a caller refactor pre-emptively
+    /// instead of discovering the trip on the update that fails (issue #95).
+    #[inline]
+    pub fn should_refactor_growth(&self) -> bool {
+        let cap = self.params.max_growth;
+        cap.is_finite() && cap > 1.0 && self.growth >= cap.sqrt()
     }
 
     /// The row permutation `perm` (`perm[k]` = original row in pivot row `k`).
