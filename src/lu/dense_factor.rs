@@ -143,6 +143,23 @@ impl DenseLu {
         self.updates_since_refactor
     }
 
+    /// Current ‖U‖∞ element-growth high-water ratio since the last factorize:
+    /// the largest `max|U|` seen across all updates divided by [`Self::u_max0`].
+    /// A continuous conditioning signal (`1.0` on a fresh factor); tripping
+    /// `params.max_growth` is what forces [`DenseLu::update`] to return
+    /// `NeedsRefactor`.
+    #[inline]
+    pub fn growth(&self) -> f64 {
+        self.growth
+    }
+
+    /// Reference `max|U|` captured immediately after the last factor/refactor —
+    /// the denominator of [`Self::growth`]. Floored away from zero.
+    #[inline]
+    pub fn u_max0(&self) -> f64 {
+        self.u_max0
+    }
+
     /// The row permutation `perm` (`perm[k]` = original row in pivot row `k`).
     #[inline]
     pub fn perm(&self) -> &[usize] {

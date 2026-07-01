@@ -588,6 +588,21 @@ impl SparseLu {
         self.reach_visits
     }
 
+    /// Current ‖U‖∞ element-growth high-water ratio since the last factorize:
+    /// the largest `max|U|` seen across all updates divided by [`Self::u_max0`].
+    /// A continuous conditioning signal (`1.0` on a fresh factor); tripping
+    /// `params.max_growth` is what forces [`SparseLu::update`] to return
+    /// `NeedsRefactor`.
+    pub fn growth(&self) -> f64 {
+        self.growth
+    }
+
+    /// Reference `max|U|` captured immediately after the last factor/refactor —
+    /// the denominator of [`Self::growth`]. Floored away from zero.
+    pub fn u_max0(&self) -> f64 {
+        self.u_max0
+    }
+
     /// Reconstruct dense entry `(i, j)` of `L` (pivot-position coordinates).
     pub fn l_dense(&self, i: usize, j: usize) -> f64 {
         if i == j {

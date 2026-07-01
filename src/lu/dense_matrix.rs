@@ -104,6 +104,18 @@ impl GeneralMatrix {
         Ok(())
     }
 
+    /// `‖A‖₁ = max_j Σ_i |A_ij|`, the maximum absolute column sum.
+    pub fn one_norm(&self) -> f64 {
+        let mut best = 0.0f64;
+        for j in 0..self.m {
+            let s: f64 = self.col(j).iter().map(|v| v.abs()).sum();
+            if s > best {
+                best = s;
+            }
+        }
+        best
+    }
+
     /// `y = A · x`. `x` and `y` must have length `m`.
     pub fn matvec(&self, x: &[f64], y: &mut [f64]) {
         for yi in y.iter_mut() {

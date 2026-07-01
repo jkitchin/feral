@@ -25,6 +25,42 @@ baseline. This catches the qap15 misfire (→ **0.77 s, 20×**) while preserving
 where its MC64-matched 2×2 pivots are needed for the oracle-correct inertia.
 Default-on; no public API change. Inertia unchanged across the corpus suite.
 See `dev/research/issue-91-preprocess-misfire.md`.
+### Added — one-norm condition estimate for the unsymmetric LU basis (issue #94)
+
+`SparseLu::condition_estimate_1(&mut self, b: &SparseColMatrix)` and
+`DenseLu::condition_estimate_1(&mut self, b: &GeneralMatrix)` return a
+Hager–Higham one-norm condition estimate `κ₁ ≈ ‖B‖₁·‖B⁻¹‖₁` for the LU basis,
+running the estimator's inverse-norm solves through the factor's own
+`ftran`/`btran` (the LU is unsymmetric, so each iteration is one `ftran` for
+`B⁻¹` and one `btran` for `B⁻ᵀ`, dropping the symmetric `A⁻ᵀ = A⁻¹` shortcut).
+`b` is the original basis (supplies `‖B‖₁` as the max absolute column sum;
+the factor does not retain it, mirroring `ftran_refined`); the result is a lower
+bound on the true `κ₁`. This is the LP-engine enabler for deciding
+"ill-conditioned node → iteratively refine / re-solve with perturbation" inside
+one solver instead of swapping engines (discopt#364).
+
+The Hager–Higham iteration is now factored into a shared driver
+`numeric::condition::hager_higham_inverse_norm_1` over a new
+`HagerHighamOperator` trait (both re-exported at the crate root); the symmetric
+LDLᵀ path (`estimate_inverse_norm_1`) and the new LU path share the estimator
+loop, differing only in the solve callback. The symmetric path is numerically
+unchanged (same pooled `SolveWorkspace`, bit-identical arithmetic). Also adds
+`SparseColMatrix::one_norm` / `GeneralMatrix::one_norm` (max absolute column sum).
+### Added — public getters for the LU element-growth monitor (issue #93)
+
+`SparseLu` and `DenseLu` now expose the ‖U‖∞ element-growth monitor they already
+track internally:
+
+- `growth() -> f64` — current element-growth high-water ratio since the last
+  factorize (`1.0` on a fresh factor); the continuous conditioning signal that,
+  when it trips `params.max_growth`, forces `update()` to return `NeedsRefactor`.
+- `u_max0() -> f64` — the reference `max|U|` captured at factorize time (the
+  denominator of `growth()`).
+
+Purely additive — the fields already existed as `pub(super)`; this only widens
+their visibility so downstream callers can threshold on a continuous conditioning
+signal rather than the binary refactor-or-not verdict. No algorithm or behavior
+change.
 
 ## [0.11.3] - 2026-06-28
 

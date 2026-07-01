@@ -50,31 +50,45 @@ pub fn matrix_norm_1(matrix: &CscMatrix) -> f64 {
     col_sums.into_iter().fold(0.0f64, f64::max)
 }
 
-/// Hager-Higham estimate of `||A^{-1}||_1` given a factor of `A`.
+/// A factored operator exposing the two solves the Hager–Higham iteration
+/// needs: `apply_inverse` (`A⁻¹·rhs`) and `apply_inverse_transpose`
+/// (`A⁻ᵀ·rhs`), each overwriting `rhs` in place.
 ///
-/// Uses the symmetric specialization `A^{-T} = A^{-1}`, so each iteration
-/// performs one solve (not two as in the general nonsymmetric case).
+/// For a **symmetric** factor `A⁻ᵀ = A⁻¹`, so both methods are the same solve
+/// and one Hager iteration costs one solve. For an **unsymmetric** LU basis the
+/// two differ — `apply_inverse` is `ftran`, `apply_inverse_transpose` is
+/// `btran` — so each iteration costs ~2 solves (still O(1) factorizations).
+pub trait HagerHighamOperator {
+    /// Dimension `n` of the operator (`rhs` slices must have this length).
+    fn dim(&self) -> usize;
+    /// Overwrite `rhs` with `A⁻¹·rhs`.
+    fn apply_inverse(&mut self, rhs: &mut [f64]) -> Result<(), FeralError>;
+    /// Overwrite `rhs` with `A⁻ᵀ·rhs`.
+    fn apply_inverse_transpose(&mut self, rhs: &mut [f64]) -> Result<(), FeralError>;
+}
+
+/// Hager–Higham estimate of `‖A⁻¹‖₁`, driving the iteration through `op`'s
+/// `apply_inverse` / `apply_inverse_transpose` solves.
 ///
-/// Returns `Ok(0.0)` for `n == 0`. Returns `Err(DimensionMismatch)` if
-/// the factor's `n` is inconsistent with itself (should not happen in
-/// well-formed factors).
-pub fn estimate_inverse_norm_1(factors: &SparseFactors) -> Result<f64, FeralError> {
-    let n = factors.n;
+/// This is the shared estimator loop: Hager's 1984 power iteration on the cube
+/// `{x : ‖x‖₁ ≤ 1}`, Higham's 1988 alternating-sign refinement, LAPACK DLACON
+/// conventions (`sign(0)=+1`, `MAX_ITER` cap, cycle guard). The symmetric factor
+/// path (`estimate_inverse_norm_1`) and the unsymmetric LU path
+/// (`SparseLu`/`DenseLu::condition_estimate_1`) both call it, differing only in
+/// the two solve callbacks — one solve per iteration in the symmetric case, two
+/// in the unsymmetric case.
+///
+/// Returns `Ok(0.0)` for `n == 0`.
+pub fn hager_higham_inverse_norm_1<O: HagerHighamOperator>(op: &mut O) -> Result<f64, FeralError> {
+    let n = op.dim();
     if n == 0 {
         return Ok(0.0);
     }
 
-    // N5 (`dev/research/repo-review-2026-06-09.md`): pool one solve
-    // workspace and one output buffer across the up-to 2·MAX_ITER + 1
-    // internal solves. `solve_sparse` allocates a fresh `SolveWorkspace`
-    // (three vecs) plus a result vec per call, and this estimator calls it
-    // ~11× — the cited allocation churn. Reuse is safe: `solve_sparse_into_ws`
-    // fully overwrites both its output (`sol`) and its scratch on every call
-    // (see solve.rs), and `sol` (the "y" output) is fully consumed into `xi`
-    // before it is overwritten by the "z" solve. The arithmetic is
-    // bit-identical to the old per-call `solve_sparse`.
-    let mut ws = SolveWorkspace::for_factors(factors);
-    let mut sol = vec![0.0f64; n];
+    // `y` holds `A⁻¹x` (the "y" solve), then is reused for `A⁻ᵀξ` (the "z"
+    // solve): the "y" values are folded into `xi` before the "z" solve
+    // overwrites them, so the reuse is safe.
+    let mut y = vec![0.0f64; n];
     let mut xi = vec![0.0f64; n];
 
     // x_0 = (1/n, ..., 1/n)
@@ -86,9 +100,10 @@ pub fn estimate_inverse_norm_1(factors: &SparseFactors) -> Result<f64, FeralErro
     let mut prev_j: Option<usize> = None;
 
     for _iter in 0..MAX_ITER {
-        // y = A^{-1} x  (written into `sol`)
-        solve_sparse_into_ws(factors, &x, &mut sol, &mut ws)?;
-        est = sol.iter().map(|v| v.abs()).sum();
+        // y = A^{-1} x
+        y.copy_from_slice(&x);
+        op.apply_inverse(&mut y)?;
+        est = y.iter().map(|v| v.abs()).sum();
 
         // Termination: estimate stopped growing.
         if _iter > 0 && est <= est_old {
@@ -97,18 +112,19 @@ pub fn estimate_inverse_norm_1(factors: &SparseFactors) -> Result<f64, FeralErro
         }
 
         // xi = sign(y), with sign(0) = +1 (LAPACK convention).
-        for (slot, &v) in xi.iter_mut().zip(sol.iter()) {
+        for (slot, &v) in xi.iter_mut().zip(y.iter()) {
             *slot = if v >= 0.0 { 1.0 } else { -1.0 };
         }
 
-        // z = A^{-T} xi = A^{-1} xi (symmetry), reusing `sol` — the "y"
-        // values are already folded into `xi` above, so overwriting is safe.
-        solve_sparse_into_ws(factors, &xi, &mut sol, &mut ws)?;
+        // z = A^{-T} xi, reusing `y` — the "y" values are already folded into
+        // `xi` above, so overwriting is safe.
+        y.copy_from_slice(&xi);
+        op.apply_inverse_transpose(&mut y)?;
 
         // Termination: ||z||_inf <= z . x  =>  current estimate is
         // a local maximum on the cube {x: ||x||_1 <= 1}.
-        let zx: f64 = sol.iter().zip(x.iter()).map(|(zi, xv)| zi * xv).sum();
-        let z_inf = sol.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
+        let zx: f64 = y.iter().zip(x.iter()).map(|(zi, xv)| zi * xv).sum();
+        let z_inf = y.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
         if z_inf <= zx {
             break;
         }
@@ -116,7 +132,7 @@ pub fn estimate_inverse_norm_1(factors: &SparseFactors) -> Result<f64, FeralErro
         // x = e_j with j = argmax |z_i|.
         let mut j = 0usize;
         let mut zmax = 0.0f64;
-        for (i, &zi) in sol.iter().enumerate() {
+        for (i, &zi) in y.iter().enumerate() {
             let zabs = zi.abs();
             if zabs > zmax {
                 zmax = zabs;
@@ -151,14 +167,65 @@ pub fn estimate_inverse_norm_1(factors: &SparseFactors) -> Result<f64, FeralErro
             *slot = sign * mag;
         }
     }
-    solve_sparse_into_ws(factors, &b, &mut sol, &mut ws)?;
-    let yb_l1: f64 = sol.iter().map(|v| v.abs()).sum();
+    op.apply_inverse(&mut b)?;
+    let yb_l1: f64 = b.iter().map(|v| v.abs()).sum();
     let refined = 2.0 * yb_l1 / (3.0 * n as f64);
     if refined > est {
         est = refined;
     }
 
     Ok(est)
+}
+
+/// Symmetric-factor adapter for [`hager_higham_inverse_norm_1`]. Exploits
+/// `A⁻ᵀ = A⁻¹`, so `apply_inverse_transpose` delegates to `apply_inverse`, and
+/// pools one [`SolveWorkspace`] plus one input buffer across every internal
+/// solve (N5, `dev/research/repo-review-2026-06-09.md`).
+struct SymmetricHager<'a> {
+    factors: &'a SparseFactors,
+    ws: SolveWorkspace,
+    /// `solve_sparse_into_ws` is out-of-place (`rhs` in, `x_out` out); this
+    /// pooled buffer holds the input copy so the driver's in-place contract is
+    /// met without a per-solve allocation.
+    inbuf: Vec<f64>,
+}
+
+impl HagerHighamOperator for SymmetricHager<'_> {
+    fn dim(&self) -> usize {
+        self.factors.n
+    }
+
+    fn apply_inverse(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
+        self.inbuf.copy_from_slice(rhs);
+        solve_sparse_into_ws(self.factors, &self.inbuf, rhs, &mut self.ws)
+    }
+
+    fn apply_inverse_transpose(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
+        // Symmetric factor: A^{-T} = A^{-1}.
+        self.apply_inverse(rhs)
+    }
+}
+
+/// Hager-Higham estimate of `||A^{-1}||_1` given a symmetric factor of `A`.
+///
+/// Uses the symmetric specialization `A^{-T} = A^{-1}`, so each iteration
+/// performs one solve (not two as in the general nonsymmetric case). Delegates
+/// to the shared [`hager_higham_inverse_norm_1`] driver via [`SymmetricHager`].
+///
+/// Returns `Ok(0.0)` for `n == 0`.
+pub fn estimate_inverse_norm_1(factors: &SparseFactors) -> Result<f64, FeralError> {
+    let n = factors.n;
+    if n == 0 {
+        return Ok(0.0);
+    }
+    // One pooled `SolveWorkspace` (N5): the driver reuses `op` across every
+    // internal solve, so the workspace is built exactly once.
+    let mut op = SymmetricHager {
+        factors,
+        ws: SolveWorkspace::for_factors(factors),
+        inbuf: vec![0.0f64; n],
+    };
+    hager_higham_inverse_norm_1(&mut op)
 }
 
 /// Estimate `kappa_1(A) = ||A||_1 * ||A^{-1}||_1`.

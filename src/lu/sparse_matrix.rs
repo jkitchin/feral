@@ -166,6 +166,22 @@ impl SparseColMatrix {
         (&self.row_idx[s..e], &self.values[s..e])
     }
 
+    /// `‖A‖₁ = max_j Σ_i |A_ij|`, the maximum absolute column sum. For a
+    /// general (unsymmetric) matrix this is a straight per-column sum — unlike
+    /// [`crate::numeric::condition::matrix_norm_1`], which doubles off-diagonal
+    /// contributions to reflect symmetric lower-triangular storage.
+    pub fn one_norm(&self) -> f64 {
+        let mut best = 0.0f64;
+        for j in 0..self.m {
+            let (_, vals) = self.column(j);
+            let s: f64 = vals.iter().map(|v| v.abs()).sum();
+            if s > best {
+                best = s;
+            }
+        }
+        best
+    }
+
     /// `y = A · x`.
     pub fn matvec(&self, x: &[f64], y: &mut [f64]) {
         for yi in y.iter_mut() {
