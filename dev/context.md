@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-01T11:51:27Z
+Generated: 2026-07-01T12:08:47Z
 
 ## Latest Session
 File: dev/sessions/2026-07-01-03.md
@@ -59,11 +59,11 @@ unilateral default flips, no unvalidatable parallel retunes.
 
 ## Git Status
 ```
+f35f22f issue #99: Phase B-2 — packed trailing update handles mixed 1x1/2x2/zero-d streams
+99fe666 issue #99: checkpoint — packed BLAS-3 trailing update (byte-exact ~8-10x)
 efb205b issue #99: packed BLAS-3 dense trailing update — byte-exact ~8-10x on dense fronts
 45777c0 issue #99: checkpoint update — PR #92 merge + byte-exact intra-front win
 ad70b5b issue #99: shape-aware intra-front gate (Lever 1, byte-exact 2.68x) + FMA row gate
-c1d00a2 Merge PR #92 (issue #91) into issue-99 branch: qap15 ordering fix + harness + Lever B
-1286297 issue #99: session 2026-07-01-03 checkpoint (FMA size gate)
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 392 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.33s
+test result: ok. 392 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.34s
 
 ```
 
@@ -111,36 +111,36 @@ examples/bench_dense_front 2955 5 (the new issue-99 harness):
 ```
 
 ## Recent Decisions
-register-tiled kernel then autovectorizes to 9–10.5 GFLOP/s (22–26× isolated).
+**Decision.** Extend `apply_schur_panel_range_packed` to handle a mixed
+1×1/2×2/zero-d pivot stream, and route **every** panel through the packed path
+when packing is enabled (previously only all-1×1 panels; 2×2 panels used the
+un-packed `axpy2` fallback). `subdiag` is threaded
+`apply_blocked_schur → apply_blocked_schur_panel → apply_schur_panel_range → packed`.
 
-**Supersedes** the 2026-06-30 `tried-and-rejected` "DST-bandwidth-bound"
-conclusion for this hardware: that came from packing the source into the *same
-strided kernel* (which kept the strided `q`-access and only shrank the stride).
-A proper packed micro-kernel with a contiguous `q`-loop is a different design and
-wins decisively. Recorded there, not overwriting the prior entry.
+**Why.** The B-1 packed kernel gave ~8–10× on all-1×1 panels but strongly
+indefinite fronts (and the fma path, whose rounding drifts more pivots to 2×2)
+fell to the slow strided fallback for their 2×2 panels. B-2 closes that gap.
 
-**Byte-exactness.** Each `A[i,j]` (i≥j) is reduced over ascending `q` with the
-identical `mul → sub` (nofma) / `mul_add` (fma) as the reference — packing changes
-only memory layout, not arithmetic order. A zero alpha gives `acc − round(0·L) =
-acc` for finite `L`, matching the strided zero-skip. Validated: full byte-exact
-factor-parity suite green with packed default + `packed_matches_scalar_reference_
-bit_for_bit` unit test.
+**Byte-exactness.** Each element walks the stream in `q` order: 1×1 →
+`acc -= (L[j,q]·d_q)·L[i,q]` (`mul→sub` / `mul_add`), skipping `d_q==0` as the
+fallback does; 2×2 → the fused `acc -= dl0·L[i,q] + dl1·L[i,q+1]` (add-then-sub
+nofma / two chained FMAs) with `dl0=d11·L[j,q]+d21·L[j,q+1]`,
+`dl1=d21·L[j,q]+d22·L[j,q+1]`. This matches `do_1x1_update`/`do_2x2_update` and
+`axpy`/`axpy2_minus_unroll4*` exactly. Validated: full suite 736/0 incl. the
+indefinite/2×2 KKT parity gates green with packed default, plus the
+`packed_matches_scalar_reference_bit_for_bit` unit test sweeping 1×1/2×2/zero-d
+in both fma modes.
 
-**Scope.** Reached only for all-1×1-pivot panels (the `apply_blocked_schur` W-2
-fast path). 2×2-pivot panels fall to the un-packed `axpy2` fallback, so strongly
-indefinite fronts — and the `fma` path, whose rounding drifts more pivots to 2×2 —
-benefit less. Definite / quasi-definite (SQD, regularized KKT) / SPD fronts get
-the full win. Packing the 2×2 fallback (Phase B-2) is the next step.
+**Evidence.** Indefinite 2955 front nofma serial 25586 → 2780 ms (9.2×, 0.34 →
+3.09 GFLOP/s). Note: on the degenerate ±n-diagonal `bench_dense_front` synthetic,
+the fma factorization is ~5× slower than nofma at equal inertia — a matrix-specific
+BK pivoting interaction (fma rounding shifts 1×1-vs-2×2 choices), *not* a kernel
+effect (both use packed). Reinforces keeping FMA opt-in.
 
-**Evidence.** dense-1500 schur 3165→309 ms (10.2×); dense-2955 nofma serial
-25586→3202 ms (8.0×, 0.34→2.69 GFLOP/s); synth qap15 stand-in end-to-end
-3379→2029 ms; full byte-exact stack (intra-front + packed) 9247→2029 ms (4.56×),
-inertia `(+30000,−2000,0)` unchanged. Suite 736 passed / 0 failed; clippy clean.
-
-**Caveat.** Absolute GFLOP/s (packed ~10, vs a fully-tuned BLAS-3 core ~30–50) is
-partly this 4-core container; the tile (8×4) and the lack of L2 cache-blocking /
-FMA-in-packed leave headroom. Re-tune on target hardware. The `fma` packed path
-exists (bit-matches the fma reference) but is not the default.
+**Remaining headroom (not done).** Absolute packed throughput (~3–10 GFLOP/s) is
+still below a fully-tuned BLAS-3 core; the 8×4 tile, L2 cache-blocking, an
+explicit-SIMD (pulp) packed kernel, and FMA-in-packed are untuned, and this is a
+4-core container. Re-tune on target hardware.
 
 ## Recent Tried-and-Rejected
 +23% option but is a reproducibility-policy change (kept opt-in), not a

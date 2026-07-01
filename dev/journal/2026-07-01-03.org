@@ -138,3 +138,26 @@ the un-packed axpy2 fallback -> strongly indefinite fronts and the fma path
 (rounding drifts pivots to 2x2) benefit less. Phase B-2 = pack the 2x2
 fallback. Full byte-exact stack: intra-front + packed = 9247 -> 2029 ms
 (4.56x) on the synth qap15 stand-in.
+
+* 19:00 :blas3:phaseB2:packed:2x2:byte-exact:
+Maintainer: take on Phase B-2 (pack the 2x2 fallback). Extended
+apply_schur_panel_range_packed to a mixed 1x1/2x2/zero-d pivot stream:
+per element, walk q; 1x1 -> mul-sub / mul_add (skip d==0); 2x2 -> fused
+dl0*L_q + dl1*L_{q+1} add-then-sub (nofma) / two chained FMAs (fma), with
+dl0=d11*L[j,q]+d21*L[j,q+1], dl1=d21*L[j,q]+d22*L[j,q+1]. Byte-exact with
+do_1x1_update/do_2x2_update + axpy/axpy2. Threaded subdiag through
+apply_blocked_schur -> panel -> range -> packed; apply_blocked_schur now
+routes EVERY panel through packed when enabled (strided fast+fallback under
+FERAL_PACKED_SCHUR=0).
+
+Validated: full suite 736/0 incl. indefinite/2x2 gates (blocked_ldlt,
+kkt_matrices, delayed_pivoting, rook_rescue, parallel_parity) byte-exact
+with packed default; packed_matches_scalar_reference_bit_for_bit unit test
+now sweeps 1x1/2x2/zero-d in both fma modes.
+
+Perf: indefinite 2955 front nofma serial 25586 -> 2780 ms (9.2x, 3.09
+GFLOP/s). fma-serial STILL 14188 ms (clean, not contention) vs nofma 2780
+at SAME inertia -> confirmed a matrix-specific BK pivoting interaction of
+fma rounding on the degenerate +-n-diagonal synthetic (both paths packed),
+not a kernel effect. Not a regression (fma was ~15s here at session start).
+Reinforces FMA opt-in.

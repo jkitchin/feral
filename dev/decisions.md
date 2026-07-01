@@ -5763,3 +5763,36 @@ inertia `(+30000,−2000,0)` unchanged. Suite 736 passed / 0 failed; clippy clea
 partly this 4-core container; the tile (8×4) and the lack of L2 cache-blocking /
 FMA-in-packed leave headroom. Re-tune on target hardware. The `fma` packed path
 exists (bit-matches the fma reference) but is not the default.
+
+## 2026-07-01 — Packed trailing update: Phase B-2 mixed 1×1/2×2 streams (issue #99, byte-exact)
+
+**Decision.** Extend `apply_schur_panel_range_packed` to handle a mixed
+1×1/2×2/zero-d pivot stream, and route **every** panel through the packed path
+when packing is enabled (previously only all-1×1 panels; 2×2 panels used the
+un-packed `axpy2` fallback). `subdiag` is threaded
+`apply_blocked_schur → apply_blocked_schur_panel → apply_schur_panel_range → packed`.
+
+**Why.** The B-1 packed kernel gave ~8–10× on all-1×1 panels but strongly
+indefinite fronts (and the fma path, whose rounding drifts more pivots to 2×2)
+fell to the slow strided fallback for their 2×2 panels. B-2 closes that gap.
+
+**Byte-exactness.** Each element walks the stream in `q` order: 1×1 →
+`acc -= (L[j,q]·d_q)·L[i,q]` (`mul→sub` / `mul_add`), skipping `d_q==0` as the
+fallback does; 2×2 → the fused `acc -= dl0·L[i,q] + dl1·L[i,q+1]` (add-then-sub
+nofma / two chained FMAs) with `dl0=d11·L[j,q]+d21·L[j,q+1]`,
+`dl1=d21·L[j,q]+d22·L[j,q+1]`. This matches `do_1x1_update`/`do_2x2_update` and
+`axpy`/`axpy2_minus_unroll4*` exactly. Validated: full suite 736/0 incl. the
+indefinite/2×2 KKT parity gates green with packed default, plus the
+`packed_matches_scalar_reference_bit_for_bit` unit test sweeping 1×1/2×2/zero-d
+in both fma modes.
+
+**Evidence.** Indefinite 2955 front nofma serial 25586 → 2780 ms (9.2×, 0.34 →
+3.09 GFLOP/s). Note: on the degenerate ±n-diagonal `bench_dense_front` synthetic,
+the fma factorization is ~5× slower than nofma at equal inertia — a matrix-specific
+BK pivoting interaction (fma rounding shifts 1×1-vs-2×2 choices), *not* a kernel
+effect (both use packed). Reinforces keeping FMA opt-in.
+
+**Remaining headroom (not done).** Absolute packed throughput (~3–10 GFLOP/s) is
+still below a fully-tuned BLAS-3 core; the 8×4 tile, L2 cache-blocking, an
+explicit-SIMD (pulp) packed kernel, and FMA-in-packed are untuned, and this is a
+4-core container. Re-tune on target hardware.
