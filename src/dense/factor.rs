@@ -3165,14 +3165,39 @@ fn apply_blocked_schur(
         return;
     }
 
-    // W-2 fast path: when the panel produced n_elim 1×1 pivots all
-    // with non-zero d AND no 2×2 pivots, run the rank-`n_elim`
-    // accumulator. The 2×2 gate is a correctness requirement (Phase
-    // A, dev/plans/dense-kernel-blas3.md): the rank-bs kernel
-    // accumulates contributions per-q sequentially (`acc -= a_q *
-    // s_q`), which is bit-exact with sequential rank-1 axpys but NOT
-    // with axpy2's fused `(a_0*s_0 + a_1*s_1)` add-then-sub
-    // ordering. Lifting this gate is Phase B-2.
+    // Issue #99 Phase B-2: the packed trailing update
+    // (`apply_schur_panel_range_packed`) handles a **mixed** 1×1 / 2×2 /
+    // zero-d pivot stream byte-exactly — each element walks the pivot
+    // stream in order, applying `mul → sub` for 1×1 and the fused
+    // `(dl0·L_q + dl1·L_{q+1})` add-then-sub for 2×2, matching the scalar
+    // reference and the strided fallback below. So when packing is
+    // enabled route **every** panel through it (not only all-1×1),
+    // extending the ~8–10× dense-front win to strongly-indefinite fronts
+    // and the FMA path (whose rounding drifts more pivots to 2×2).
+    if packed_schur_enabled() {
+        apply_blocked_schur_panel(
+            a,
+            nrow,
+            k,
+            n_elim,
+            j_start,
+            d_panel,
+            subdiag,
+            fma,
+            intrafront_parallel,
+        );
+        return;
+    }
+
+    // --- Strided path (`FERAL_PACKED_SCHUR=0`) ---
+    // W-2 fast path: when the panel produced n_elim 1×1 pivots all with
+    // non-zero d AND no 2×2 pivots, run the rank-`n_elim` accumulator.
+    // The 2×2 gate is a correctness requirement for the *strided* kernel:
+    // `schur_panel_minus_*_strided` accumulates per-q sequentially
+    // (`acc -= a_q · s_q`), bit-exact with sequential rank-1 axpys but
+    // NOT with axpy2's fused `(a_0·s_0 + a_1·s_1)` add-then-sub. (The
+    // packed path above lifts this because it walks the stream and emits
+    // the fused form for 2×2 pairs.)
     const W2_RANK_BS_MIN: usize = 2;
     let any_zero_d = d_panel.iter().take(n_elim).any(|&d| d.abs() == 0.0);
     let has_2x2 = subdiag[k..k + n_elim].iter().any(|&s| s != 0.0);
@@ -3185,6 +3210,7 @@ fn apply_blocked_schur(
             n_elim,
             j_start,
             d_panel,
+            subdiag,
             fma,
             intrafront_parallel,
         );
@@ -3276,6 +3302,7 @@ fn apply_blocked_schur_panel(
     n_elim: usize,
     j_start: usize,
     d_panel: &[f64],
+    subdiag: &[f64],
     fma: bool,
     intrafront_parallel: bool,
 ) {
@@ -3323,10 +3350,12 @@ fn apply_blocked_schur_panel(
             .enumerate()
             .for_each(|(ci, block)| {
                 let col_start = j_start + ci * chunk_cols;
-                apply_schur_panel_range(head, block, col_start, nrow, k, n_elim, d_panel, fma);
+                apply_schur_panel_range(
+                    head, block, col_start, nrow, k, n_elim, d_panel, subdiag, fma,
+                );
             });
     } else {
-        apply_schur_panel_range(head, tail, j_start, nrow, k, n_elim, d_panel, fma);
+        apply_schur_panel_range(head, tail, j_start, nrow, k, n_elim, d_panel, subdiag, fma);
     }
 }
 
@@ -3360,6 +3389,7 @@ fn apply_schur_panel_range(
     k: usize,
     n_elim: usize,
     d_panel: &[f64],
+    subdiag: &[f64],
     fma: bool,
 ) {
     const MAX_N_ELIM: usize = 128;
@@ -3381,9 +3411,15 @@ fn apply_schur_panel_range(
     // Default on; `FERAL_PACKED_SCHUR=0` restores the strided path for
     // A/B benchmarking and as a safety override.
     if packed_schur_enabled() {
-        apply_schur_panel_range_packed(head, block, col_start, nrow, k, n_elim, d_panel, fma);
+        apply_schur_panel_range_packed(
+            head, block, col_start, nrow, k, n_elim, d_panel, subdiag, fma,
+        );
         return;
     }
+    // Strided path below handles 1×1 pivots only; the caller
+    // (`apply_blocked_schur`) guarantees an all-1×1 panel here, so
+    // `subdiag` is unused on this path.
+    let _ = subdiag;
 
     let mut alphas0_buf = [0.0f64; MAX_N_ELIM];
     let mut alphas1_buf = [0.0f64; MAX_N_ELIM];
@@ -3531,21 +3567,31 @@ fn packed_schur_enabled() -> bool {
 }
 
 /// Packed, register-tiled equivalent of [`apply_schur_panel_range`]
-/// (issue #99, BLAS-3). Computes the same lower-triangular rank-`n_elim`
-/// trailing update `A[i,j] -= Σ_q (L[j,q]·d_q)·L[i,q]` for `i >= j`, but
-/// packs the panel into `q`-contiguous `MR`/`NR` micro-panels so the
-/// inner `q` loop reads L1-resident memory instead of the strided
-/// `col_stride = nrow` access that bottlenecks the strided kernels.
+/// (issue #99, BLAS-3 — Phase B-2). Computes the same lower-triangular
+/// rank-`n_elim` trailing update for `i >= j`, packing the panel into
+/// `q`-contiguous `MR`/`NR` micro-panels so the inner loop reads
+/// L1-resident memory instead of the strided `col_stride = nrow` access
+/// that bottlenecks the strided kernels (~25× isolated,
+/// `examples/bench_schur_micro`).
 ///
-/// **Byte-exact** with [`apply_schur_panel_range`]: every element is
-/// reduced over ascending `q` with the same `mul → sub` (nofma) or
-/// `mul_add` (fma) as the reference — packing changes only memory
-/// layout, not arithmetic order (verified bit-for-bit in
-/// `examples/bench_schur_micro` and by the byte-exact factor parity
-/// suite). A zero `alpha` contributes `acc − round(0·L) = acc` for
-/// finite `L`, matching the strided kernels' explicit zero-skip; the
-/// packed path (reached only for all-1×1 panels with non-zero `d`) never
-/// sees a non-finite `L`, so no skip is needed.
+/// Handles a **mixed 1×1 / 2×2 / zero-d pivot stream**: each element
+/// walks the stream in `q` order and emits, per step,
+/// - **1×1** (`subdiag[k+q] == 0`): `acc -= (L[j,q]·d_q)·L[i,q]`
+///   (`mul → sub` nofma / `mul_add` fma), skipping `d_q == 0` exactly as
+///   the fallback does;
+/// - **2×2** (`subdiag[k+q] != 0`, `q+1 < n_elim`): the fused rank-2
+///   contribution `acc -= dl0·L[i,q] + dl1·L[i,q+1]` with
+///   `dl0 = d11·L[j,q] + d21·L[j,q+1]`, `dl1 = d21·L[j,q] + d22·L[j,q+1]`
+///   (`d11=d_panel[q]`, `d22=d_panel[q+1]`, `d21=subdiag[k+q]`), and
+///   advances two.
+///
+/// **Byte-exact** with the strided kernels and the scalar reference:
+/// packing changes only memory layout; the per-element rounding
+/// sequence — `mul → sub` for 1×1 and add-then-sub / two-FMA for 2×2 —
+/// matches `axpy_minus_unroll4*` / `axpy2_minus_unroll4*`
+/// (`do_1x1_update` / `do_2x2_update`) exactly. Verified by the
+/// `packed_matches_scalar_reference_bit_for_bit` unit test (mixed
+/// streams) and the byte-exact factor-parity suite.
 #[allow(clippy::too_many_arguments)]
 fn apply_schur_panel_range_packed(
     head: &[f64],
@@ -3555,6 +3601,7 @@ fn apply_schur_panel_range_packed(
     k: usize,
     n_elim: usize,
     d_panel: &[f64],
+    subdiag: &[f64],
     fma: bool,
 ) {
     let ncol = block.len() / nrow;
@@ -3566,6 +3613,12 @@ fn apply_schur_panel_range_packed(
     const MR: usize = 8;
     const NR: usize = 4;
 
+    // A 2×2 pivot pair starts at `q` when `subdiag[k+q] != 0` and `q+1`
+    // is still in-panel. Same predicate as the strided fallback; the
+    // walk below consumes such pairs two-at-a-time so the second element
+    // (`q+1`) is never re-entered as a start.
+    let is_2x2_start = |q: usize| q + 1 < n_elim && subdiag[k + q] != 0.0;
+
     // Column j (absolute) updates rows [j, nrow); the lowest column is
     // `col_start`, so the source/destination rows span [col_start, nrow).
     let row0 = col_start;
@@ -3574,10 +3627,8 @@ fn apply_schur_panel_range_packed(
     let npanels_i = rowspan.div_ceil(MR);
     let npanels_j = ncol.div_ceil(NR);
 
-    // Pack A (source rows) and B (D-scaled source columns) into
-    // `q`-contiguous micro-panels. `L[x, k+q] = head[(k+q)*nrow + x]`.
-    //   apack[pi*(n_elim*MR) + q*MR + ir] = L[row0 + pi*MR + ir, k+q]
-    //   bpack[pj*(n_elim*NR) + q*NR + jr] = L[col_start + pj*NR + jr, k+q] * d_q
+    // Pack A (source rows): `apack[pi][q][ir] = L[row0+pi*MR+ir, k+q]`,
+    // `L[x, k+q] = head[(k+q)*nrow + x]`.
     let mut apack = vec![0.0f64; npanels_i * n_elim * MR];
     for pi in 0..npanels_i {
         let i0 = row0 + pi * MR;
@@ -3590,20 +3641,40 @@ fn apply_schur_panel_range_packed(
             }
         }
     }
-    let mut bpack = vec![0.0f64; npanels_j * n_elim * NR];
+    // Pack B0 and B1 (D-scaled source columns). At a 1×1 step,
+    // `B0 = L[j,q]·d_q` (`B1` unused). At a 2×2 start, `B0 = dl0`,
+    // `B1 = dl1` (the block-scaled coefficients above). 2×2-second and
+    // zero-d-1×1 positions carry a value that the accumulation walk
+    // never reads.
+    let mut bpack0 = vec![0.0f64; npanels_j * n_elim * NR];
+    let mut bpack1 = vec![0.0f64; npanels_j * n_elim * NR];
     for pj in 0..npanels_j {
         let j0 = col_start + pj * NR;
         for q in 0..n_elim {
             let base = (k + q) * nrow;
-            let dq = d_panel[q];
-            let out = &mut bpack[pj * (n_elim * NR) + q * NR..][..NR];
-            for (jr, o) in out.iter_mut().enumerate() {
-                let j = j0 + jr;
-                *o = if j < col_end {
-                    head[base + j] * dq
-                } else {
-                    0.0
-                };
+            let off = pj * (n_elim * NR) + q * NR;
+            if is_2x2_start(q) {
+                let d11 = d_panel[q];
+                let d22 = d_panel[q + 1];
+                let d21 = subdiag[k + q];
+                let base1 = (k + q + 1) * nrow;
+                for jr in 0..NR {
+                    let j = j0 + jr;
+                    if j < col_end {
+                        let l_jq = head[base + j];
+                        let l_jq1 = head[base1 + j];
+                        bpack0[off + jr] = d11 * l_jq + d21 * l_jq1;
+                        bpack1[off + jr] = d21 * l_jq + d22 * l_jq1;
+                    }
+                }
+            } else {
+                let dq = d_panel[q];
+                for jr in 0..NR {
+                    let j = j0 + jr;
+                    if j < col_end {
+                        bpack0[off + jr] = head[base + j] * dq;
+                    }
+                }
             }
         }
     }
@@ -3639,29 +3710,57 @@ fn apply_schur_panel_range_packed(
                 }
             }
 
-            // Accumulate over the whole q range. Out-of-range lanes carry
-            // packed zeros (0·L = 0), so they are inert and never stored.
-            if fma {
-                for q in 0..n_elim {
-                    let a = &apack[abase + q * MR..][..MR];
-                    let b = &bpack[bbase + q * NR..][..NR];
-                    for (jr, accj) in acc.iter_mut().enumerate() {
-                        let nb = -b[jr];
-                        for (ir, acci) in accj.iter_mut().enumerate() {
-                            *acci = nb.mul_add(a[ir], *acci);
+            // Walk the pivot stream in `q` order. Out-of-range column
+            // lanes carry packed 0 coefficients (0·L = 0), so they are
+            // inert and never stored.
+            let mut q = 0usize;
+            while q < n_elim {
+                if is_2x2_start(q) {
+                    let a0 = &apack[abase + q * MR..][..MR];
+                    let a1 = &apack[abase + (q + 1) * MR..][..MR];
+                    let b0 = &bpack0[bbase + q * NR..][..NR];
+                    let b1 = &bpack1[bbase + q * NR..][..NR];
+                    if fma {
+                        for (jr, accj) in acc.iter_mut().enumerate() {
+                            let n0 = -b0[jr];
+                            let n1 = -b1[jr];
+                            for (ir, acci) in accj.iter_mut().enumerate() {
+                                // Two FMAs, matching axpy2_minus_unroll4.
+                                *acci = n1.mul_add(a1[ir], n0.mul_add(a0[ir], *acci));
+                            }
+                        }
+                    } else {
+                        for (jr, accj) in acc.iter_mut().enumerate() {
+                            let (d0, d1) = (b0[jr], b1[jr]);
+                            for (ir, acci) in accj.iter_mut().enumerate() {
+                                // Add-then-sub, matching axpy2_minus_unroll4_nofma.
+                                *acci -= d0 * a0[ir] + d1 * a1[ir];
+                            }
                         }
                     }
-                }
-            } else {
-                for q in 0..n_elim {
-                    let a = &apack[abase + q * MR..][..MR];
-                    let b = &bpack[bbase + q * NR..][..NR];
-                    for (jr, accj) in acc.iter_mut().enumerate() {
-                        let bj = b[jr];
-                        for (ir, acci) in accj.iter_mut().enumerate() {
-                            *acci -= bj * a[ir];
+                    q += 2;
+                } else {
+                    // 1×1; skip a zero pivot exactly as the fallback does.
+                    if d_panel[q] != 0.0 {
+                        let a0 = &apack[abase + q * MR..][..MR];
+                        let b0 = &bpack0[bbase + q * NR..][..NR];
+                        if fma {
+                            for (jr, accj) in acc.iter_mut().enumerate() {
+                                let nb = -b0[jr];
+                                for (ir, acci) in accj.iter_mut().enumerate() {
+                                    *acci = nb.mul_add(a0[ir], *acci);
+                                }
+                            }
+                        } else {
+                            for (jr, accj) in acc.iter_mut().enumerate() {
+                                let bj = b0[jr];
+                                for (ir, acci) in accj.iter_mut().enumerate() {
+                                    *acci -= bj * a0[ir];
+                                }
+                            }
                         }
                     }
+                    q += 1;
                 }
             }
 
@@ -5969,10 +6068,18 @@ mod ncol_zero_contrib_tests {
 mod packed_schur_tests {
     use super::*;
 
-    /// Scalar reference for the lower-triangular rank-`n_elim` trailing
-    /// update: `A[i,j] -= Σ_q (L[j,q]·d_q)·L[i,q]` for `i >= j`, ascending
-    /// q, explicit `mul → sub` (nofma) — the exact per-element contract
-    /// every dense kernel must reproduce bit-for-bit.
+    /// Scalar reference for the mixed 1×1 / 2×2 / zero-d trailing update,
+    /// walking the pivot stream in `q` order with the exact per-element
+    /// rounding the kernels must reproduce:
+    /// - 1×1 (`subdiag[k+q]==0`, `d_q!=0`): `acc -= (L[j,q]·d_q)·L[i,q]`,
+    ///   as `mul→sub` (nofma) or a single `mul_add` (fma);
+    /// - 2×2 (`subdiag[k+q]!=0`): `acc -= dl0·L[i,q] + dl1·L[i,q+1]` as
+    ///   add-then-sub (nofma) or two chained FMAs (fma).
+    ///
+    /// This mirrors `axpy_minus_unroll4*` / `axpy2_minus_unroll4*` exactly,
+    /// so the packed kernel must be **byte-identical** for both `fma`
+    /// modes.
+    #[allow(clippy::too_many_arguments)]
     fn scalar_ref(
         head: &[f64],
         block: &mut [f64],
@@ -5981,16 +6088,42 @@ mod packed_schur_tests {
         k: usize,
         n_elim: usize,
         d_panel: &[f64],
+        subdiag: &[f64],
+        fma: bool,
     ) {
         let ncol = block.len() / nrow;
         for lc in 0..ncol {
             let j = col_start + lc;
             for i in j..nrow {
                 let mut acc = block[lc * nrow + i];
-                for q in 0..n_elim {
-                    let base = (k + q) * nrow;
-                    let alpha = head[base + j] * d_panel[q];
-                    acc -= alpha * head[base + i];
+                let mut q = 0usize;
+                while q < n_elim {
+                    if q + 1 < n_elim && subdiag[k + q] != 0.0 {
+                        let d11 = d_panel[q];
+                        let d22 = d_panel[q + 1];
+                        let d21 = subdiag[k + q];
+                        let b0 = (k + q) * nrow;
+                        let b1 = (k + q + 1) * nrow;
+                        let dl0 = d11 * head[b0 + j] + d21 * head[b1 + j];
+                        let dl1 = d21 * head[b0 + j] + d22 * head[b1 + j];
+                        if fma {
+                            acc = (-dl1).mul_add(head[b1 + i], (-dl0).mul_add(head[b0 + i], acc));
+                        } else {
+                            acc -= dl0 * head[b0 + i] + dl1 * head[b1 + i];
+                        }
+                        q += 2;
+                    } else {
+                        if d_panel[q] != 0.0 {
+                            let base = (k + q) * nrow;
+                            let alpha = head[base + j] * d_panel[q];
+                            if fma {
+                                acc = (-alpha).mul_add(head[base + i], acc);
+                            } else {
+                                acc -= alpha * head[base + i];
+                            }
+                        }
+                        q += 1;
+                    }
                 }
                 block[lc * nrow + i] = acc;
             }
@@ -5998,8 +6131,10 @@ mod packed_schur_tests {
     }
 
     /// `apply_schur_panel_range_packed` is byte-identical to the scalar
-    /// reference across a size sweep (including non-multiple-of-MR/NR
-    /// row/col counts, and `col_start > k + n_elim` chunk offsets).
+    /// reference across a size sweep — for both `fma` modes and for pivot
+    /// streams mixing 1×1, 2×2, and zero-d pivots — including
+    /// non-multiple-of-MR/NR row/col counts and `col_start > k+n_elim`
+    /// chunk offsets.
     #[test]
     fn packed_matches_scalar_reference_bit_for_bit() {
         // Deterministic pseudo-random front data.
@@ -6010,23 +6145,45 @@ mod packed_schur_tests {
                 .wrapping_add(1442695040888963407);
             ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
         };
-        for &(nrow, k, n_elim, col_start) in &[
-            (40usize, 0usize, 8usize, 8usize),
-            (37, 0, 5, 5),
-            (64, 0, 16, 16),
-            (100, 0, 12, 30), // chunk offset > k+n_elim
-            (23, 0, 3, 3),
-            (9, 0, 2, 2),
+        // (nrow, k, n_elim, col_start, subdiag-pattern). Patterns:
+        //   "1x1"  — all 1×1
+        //   "2x2"  — 2×2 pairs at q = 2 and q = 5 (where they fit)
+        //   "zero" — a zero-d 1×1 at q = 1
+        for &(nrow, k, n_elim, col_start, pat) in &[
+            (40usize, 0usize, 8usize, 8usize, "1x1"),
+            (37, 0, 5, 5, "1x1"),
+            (64, 0, 16, 16, "2x2"),
+            (100, 0, 12, 30, "2x2"), // chunk offset > k+n_elim, with 2×2
+            (23, 0, 8, 3, "2x2"),
+            (40, 0, 8, 8, "zero"),
+            (50, 0, 10, 10, "2x2"),
+            (9, 0, 2, 2, "1x1"),
         ] {
             let head: Vec<f64> = (0..nrow * (k + n_elim)).map(|_| next()).collect();
-            let d_panel: Vec<f64> = (0..n_elim).map(|_| 0.5 + next().abs()).collect();
+            let mut d_panel: Vec<f64> = (0..n_elim).map(|_| 0.5 + next().abs()).collect();
+            let mut subdiag = vec![0.0f64; k + n_elim];
+            match pat {
+                "2x2" => {
+                    if 2 + 1 < n_elim {
+                        subdiag[k + 2] = 0.3 + next().abs();
+                    }
+                    if 5 + 1 < n_elim {
+                        subdiag[k + 5] = -(0.3 + next().abs());
+                    }
+                }
+                "zero" => {
+                    d_panel[1] = 0.0;
+                }
+                _ => {}
+            }
             let ncol = nrow - col_start;
             let block0: Vec<f64> = (0..ncol * nrow).map(|_| next()).collect();
 
-            let mut b_ref = block0.clone();
-            scalar_ref(&head, &mut b_ref, col_start, nrow, k, n_elim, &d_panel);
-
             for fma in [false, true] {
+                let mut b_ref = block0.clone();
+                scalar_ref(
+                    &head, &mut b_ref, col_start, nrow, k, n_elim, &d_panel, &subdiag, fma,
+                );
                 let mut b_packed = block0.clone();
                 apply_schur_panel_range_packed(
                     &head,
@@ -6036,35 +6193,17 @@ mod packed_schur_tests {
                     k,
                     n_elim,
                     &d_panel,
+                    &subdiag,
                     fma,
                 );
-                if !fma {
-                    // nofma packed must be byte-identical to the scalar
-                    // mul→sub reference on the lower triangle.
-                    for lc in 0..ncol {
-                        let j = col_start + lc;
-                        for i in j..nrow {
-                            assert_eq!(
-                                b_packed[lc * nrow + i].to_bits(),
-                                b_ref[lc * nrow + i].to_bits(),
-                                "nofma packed != scalar at (i={i},j={j}) nrow={nrow} n_elim={n_elim}"
-                            );
-                        }
-                    }
-                } else {
-                    // fma packed is within n_elim ULPs (single vs double
-                    // rounding); just assert it stays close and finite.
-                    for lc in 0..ncol {
-                        let j = col_start + lc;
-                        for i in j..nrow {
-                            let p = b_packed[lc * nrow + i];
-                            let r = b_ref[lc * nrow + i];
-                            assert!(p.is_finite());
-                            assert!(
-                                (p - r).abs() <= 1e-9 * (1.0 + r.abs()),
-                                "fma packed drifted too far at (i={i},j={j}): {p} vs {r}"
-                            );
-                        }
+                for lc in 0..ncol {
+                    let j = col_start + lc;
+                    for i in j..nrow {
+                        assert_eq!(
+                            b_packed[lc * nrow + i].to_bits(),
+                            b_ref[lc * nrow + i].to_bits(),
+                            "packed != scalar (fma={fma}, pat={pat}) at (i={i},j={j}) nrow={nrow} n_elim={n_elim}"
+                        );
                     }
                 }
             }

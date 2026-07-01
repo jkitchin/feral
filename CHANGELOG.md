@@ -18,15 +18,18 @@ runs ~22–26× faster in isolation (`examples/bench_schur_micro`), giving **10.
 on a dense-1500 front's schur phase and **8.0×** on a 2955 front (0.34 → 2.69
 GFLOP/s, nofma). Default on; `FERAL_PACKED_SCHUR=0` restores the strided path.
 
-Reached for **all-1×1-pivot panels** (the `apply_blocked_schur` fast path), so
-definite / quasi-definite (SQD, regularized KKT) / SPD fronts get the full win;
-strongly-indefinite fronts whose panels carry 2×2 pivots fall to the un-packed
-fallback (packing that path is future work). Combined with the shape-aware
-intra-front gate, the synthetic qap15 stand-in factors **9.25 s → 2.03 s (4.56×),
-byte-exact**, inertia `(+30000, −2000, 0)` unchanged. Correctness: the full
-byte-exact factor-parity suite green with packed default, plus a dedicated
-`packed_matches_scalar_reference_bit_for_bit` unit test. See
-`dev/research/issue-99-dense-front-fma-gate.md`.
+The packed path handles a **mixed 1×1 / 2×2 / zero-d pivot stream** (Phase B-2):
+each element walks the stream in `q` order, emitting `mul → sub` for a 1×1 pivot
+and the fused `dl0·L_q + dl1·L_{q+1}` add-then-sub (or two chained FMAs) for a 2×2
+pivot — byte-exact with the scalar `do_1x1_update` / `do_2x2_update` and the
+strided `axpy`/`axpy2` fallback. So **strongly-indefinite fronts** now get the
+packed win too, not only definite / quasi-definite (SQD, regularized KKT) / SPD
+fronts. Combined with the shape-aware intra-front gate, the synthetic qap15
+stand-in factors **9.25 s → 2.03 s (4.56×), byte-exact**, inertia
+`(+30000, −2000, 0)` unchanged. Correctness: the full byte-exact factor-parity
+suite (incl. indefinite/2×2 KKT suites) green with packed default, plus a
+`packed_matches_scalar_reference_bit_for_bit` unit test covering 1×1/2×2/zero-d
+streams in both `fma` modes. See `dev/research/issue-99-dense-front-fma-gate.md`.
 
 ### Performance — shape-aware intra-front parallel gate for tall, thin fronts (issue #99, Lever 1, byte-exact)
 
