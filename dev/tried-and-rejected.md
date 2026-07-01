@@ -4884,3 +4884,29 @@ inertia benefit on the +15 % cases, still catches qap15's 6.3× misfire.
 The numerical benefit of `LdltCompress` is not visible in symbolic fill, so a
 fill-only race is the wrong criterion; only a *runaway* fill increase signals a
 predicate misfire.
+
+## 2026-06-30 — B-1a panel packing for the dense trailing update (issue #91)
+
+**Tried.** Pack the eliminated panel (columns `k..k+n_elim` of `head`, column
+stride `nrow`) into a contiguous `[n_elim × span]` buffer once per
+`apply_schur_panel_range`, then feed the *same* strided kernels from it (tight
+stride `span`), gated to large fronts (`nrow>128`). Byte-exact by construction.
+
+**Rejected — net slowdown on qap15.** Byte-exact parity held (blocked_ldlt
+21/21, inertia/nnz_L unchanged) but it was *slower* everywhere: sequential
+factor loop 1747 → 1976 ms (+13%), the 2955×2955 root front 736 → 818 ms
+(+11%), parallel default 771 → 945 ms (+22%).
+
+**Why.** The root's early panels have `span ≈ nrow`, so packing does not reduce
+the K-stride — it just adds an alloc + copy. More fundamentally, profiling of
+the root shows it is **DST-bandwidth-bound, not panel-bound**: the ~70 MB
+trailing block (2955×2955 f64) is streamed ~46 times (once per rank-64 panel),
+which dwarfs the ~1.5 MB panel (already L2-resident). Packing the *source* panel
+optimizes the wrong operand.
+
+**Implication for the plan.** The effective lever is reducing DST traffic:
+cache-blocked / recursive dense-root factorization (Phase C — reuse a
+cache-sized trailing tile across many panels) or a larger panel width (more
+flops per DST stream). A source-side pack (B-1a) is off the table. FMA remains a
++23% option but is a reproducibility-policy change (kept opt-in), not a
+bit-exact win.

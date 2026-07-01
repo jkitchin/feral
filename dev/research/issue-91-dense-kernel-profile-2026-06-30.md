@@ -87,3 +87,30 @@ kernel is preferred as the durable, inertia-safe win.
 Harness: `examples/profile_qap15.rs` (per-front buckets + top fronts, nofma vs
 fma). Note the numbers above are the *sequential* driver (~1.75 s); the parallel
 default factor is ~0.67–0.77 s, but the per-front *attribution* is what matters.
+
+## Update (same day) — B-1a packing measured and rejected; root is DST-bandwidth-bound
+
+Implemented B-1a (pack the L panel, feed the existing kernels, byte-exact) and
+measured: **net slowdown** — sequential loop 1747 → 1976 ms (+13%), the 2955²
+root 736 → 818 ms (+11%), parallel default 771 → 945 ms (+22%). Byte-exact
+parity held (blocked_ldlt 21/21, inertia/nnz_L unchanged). Reverted. See
+`dev/tried-and-rejected.md` 2026-06-30.
+
+**Corrected model of the bottleneck.** The panel (~1.5 MB) is already
+L2-resident; packing it optimizes the wrong operand. The 2955×2955 root is
+**DST-bandwidth-bound**: right-looking blocked factorization streams the ~70 MB
+trailing block once per rank-`bs` panel (~46 passes at `bs=64`), so total DST
+traffic ≈ Σ trailing-sizes ≫ panel size. The lever is reducing DST passes:
+
+- **Phase C — cache-blocked / recursive dense-root** (`nrow==ncol && ncol large`,
+  e.g. the 2955² front): factor in cache-sized tiles so a trailing tile is
+  reused across many panels before eviction — O(n³/√cache) bandwidth instead of
+  O(n³). Bit-exact (same arithmetic, reordered blocking). This is the real,
+  durable win and the correct next build.
+- **Larger panel width** (`bs` 64 → 96/128, capped by `MAX_N_ELIM=128`): more
+  flops per DST stream, fewer passes. Cheaper to try; bounded by the panel
+  factorization cost and 2×2-pivot handling. Worth a quick A/B before Phase C.
+- **FMA-on-large**: still +23%, but a reproducibility-policy change (opt-in),
+  not bit-exact — separate decision.
+
+Source-side packing (B-1a/B-1b as originally scoped) is off the table.

@@ -11,8 +11,18 @@ use feral::symbolic::{
     pick_ordering_preprocess, symbolic_factorize_with_method, total_factor_nnz,
     AmalgamationStrategy, OrderingMethod, OrderingPreprocess, SupernodeParams,
 };
-use feral::{read_mtx, CscMatrix, NumericParams, Solver};
+use feral::{read_mtx, BunchKaufmanParams, CscMatrix, NumericParams, Solver};
 use std::path::Path;
+
+fn np_with_block_size(bs: usize) -> NumericParams {
+    NumericParams {
+        bk: BunchKaufmanParams {
+            block_size: bs,
+            ..BunchKaufmanParams::default()
+        },
+        ..NumericParams::default()
+    }
+}
 use std::time::Instant;
 
 /// Symbolic-only fill report: isolates AMD ordering quality (simplicial
@@ -214,6 +224,16 @@ fn main() {
             },
             reps,
         );
+    }
+    for bs in [96usize, 128, 160, 192] {
+        if has(&format!("bs{bs}")) {
+            run(
+                &format!("block_size={bs}"),
+                &csc,
+                || Solver::with_params(np_with_block_size(bs), SupernodeParams::default()),
+                reps,
+            );
+        }
     }
     if has("nemin1") {
         run(
