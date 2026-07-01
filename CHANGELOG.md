@@ -4,6 +4,20 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — parallel dense-front re-entrant deadlock on some conic KKTs (issue #102)
+
+PR #92 regressed two POUNCE mittelmann problems (cont5_2_4_l, dirichlet120) from
+converged to a 300 s timeout at ~0 % CPU. The parallel multifrontal driver held
+a per-thread workspace `Mutex` across the intra-front `par_chunks_mut`; the
+nested rayon let the blocked worker steal another `process_one_supernode` task
+onto the same thread, which re-locked the already-held mutex → self-deadlock.
+The driver now `try_lock`s the per-thread workspace (which is only ever locked by
+its own worker, so `WouldBlock` uniquely means nested re-entry) and factors with
+a throwaway workspace on re-entry — byte-exact (results go to separate output
+mutexes), and independent of the ordering choice. Latent since intra-front
+parallelism was introduced; #92 exposed it. See
+`dev/research/issue-102-intrafront-deadlock.md`.
+
 ### Performance — packed BLAS-3 dense trailing update, byte-exact ~8–10× on dense fronts (issue #99)
 
 The dense trailing Schur update (~94 % of a dense factor) ran at only

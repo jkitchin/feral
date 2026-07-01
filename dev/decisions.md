@@ -5796,3 +5796,31 @@ effect (both use packed). Reinforces keeping FMA opt-in.
 still below a fully-tuned BLAS-3 core; the 8×4 tile, L2 cache-blocking, an
 explicit-SIMD (pulp) packed kernel, and FMA-in-packed are untuned, and this is a
 4-core container. Re-tune on target hardware.
+
+## 2026-07-01 — Parallel driver `try_lock`s the per-thread workspace (issue #102)
+
+**Decision.** In `factorize_multifrontal_supernodal_parallel`, acquire the
+per-thread `thread_ws[i]` workspace with `try_lock` rather than `lock`, and on
+`WouldBlock` factor with a fresh throwaway `FactorWorkspace`.
+
+**Why.** The mutex was held across `factor_one_supernode` → `factor_frontal` →
+the intra-front `par_chunks_mut`. That nested rayon lets the blocked worker steal
+another `process_one_supernode` onto the same thread, which re-locks
+`thread_ws[i]` (already held by the outer frame) → non-reentrant `std::sync::Mutex`
+self-deadlock at 0 % CPU (issue #102: cont5_2_4_l / dirichlet120 converged → 300 s
+timeout). Each `thread_ws` slot is only ever locked by its own worker, so a
+`WouldBlock` uniquely identifies nested re-entry; the throwaway workspace is
+correct because the factor writes results to the separate `contrib_blocks` /
+`node_factors_out` mutexes, not the workspace (only pooled scratch differs).
+
+**Why not the alternatives.** Reverting Lever B does not help — the old 256²
+intra-front floor deadlocks on these problems too (it is not Lever-B-specific).
+Gating the ordering on a dense-front cost signal (issue #102 direction #1) only
+avoids *selecting* a stall-prone front; the deadlock is latent for any ordering
+that clears the intra-front area gate, so fixing the mutex is the robust fix. A
+separate rayon pool for intra-front would also work but adds a pool and
+oversubscription; `try_lock` is minimal and byte-exact.
+
+**Evidence.** dirichlet120 KKT: STALL → ~0.4 s factor, inertia (+54122,−241,0).
+Byte-exact: parallel_parity 8/8, blocked_ldlt 21, parity 8, factor_workspace_parity
+21, lib 394/0. Regression guard `tests/issue102_intrafront_deadlock.rs`.
