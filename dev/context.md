@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-01T10:55:37Z
+Generated: 2026-07-01T11:25:52Z
 
 ## Latest Session
 File: dev/sessions/2026-07-01-03.md
@@ -59,11 +59,11 @@ unilateral default flips, no unvalidatable parallel retunes.
 
 ## Git Status
 ```
+ad70b5b issue #99: shape-aware intra-front gate (Lever 1, byte-exact 2.68x) + FMA row gate
+c1d00a2 Merge PR #92 (issue #91) into issue-99 branch: qap15 ordering fix + harness + Lever B
+1286297 issue #99: session 2026-07-01-03 checkpoint (FMA size gate)
 b25f3f8 issue #99: opt-in per-front FMA size gate for large dense fronts (Lever 3)
-a17fb7a issue #95: richer update() instability signal + growth-aware/dense-parity refactor recommendations (#97)
-f9398fd issue #94: one-norm condition estimate for the unsymmetric LU factor (#98)
-f114b5d issue #93: expose the LU element-growth factor via public getters (#96)
-f037285 release: feral v0.11.3
+9f80362 Merge current main into issue #91 branch (resolve decisions.md conflict)
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 391 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.38s
+test result: ok. 391 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.22s
 
 ```
 
@@ -111,58 +111,58 @@ examples/bench_dense_front 2955 5 (the new issue-99 harness):
 ```
 
 ## Recent Decisions
-small-front pivot-drift KKTs (ACOPP14_0001, ACOPP30_0004, FBRAIN3LS_0848/0851)
-need nofma to keep their Bunch-Kaufman pivot classification. The existing `fma`
-flag is all-or-nothing, so it cannot serve both. A front-size gate does: fast
-kernel on the roots, reference kernel on the sensitive small fronts.
+large-work fronts, so it cannot regress the area gate's measured calibration.
+Pure scheduling ⇒ byte-exact (each trailing column reduced on one thread).
 
-**Why opt-in / default `None`.** Enabling FMA changes cross-arch bit patterns
-(single vs double rounding) on the gated fronts — the reproducibility policy the
-owner deliberately kept opt-in (`dev/tried-and-rejected.md` 2026-04-14). This
-session had no authorization to flip a default (the interactive policy question
-could not be delivered — harness permission-stream failure), so the lever is
-shipped as a knob with measured evidence, leaving the default-on decision to the
-owner.
+**Decision 2 (opt-in, Lever 3).** The FMA gate had the identical area blind spot
+(`nrow*ncol`); rename `BunchKaufmanParams::fma_min_front_area` →
+`fma_min_front_rows` and gate on `nrow >= t` (front rows = trailing-update size).
+`Solver::with_fma_large_fronts(min_rows)` accordingly. Same opt-in / default-None
+policy as before.
 
-**Evidence.** `examples/bench_dense_front 2955 5` (4-core x86_64): FMA 1.66×
-per-core serial (25.6 s → 15.4 s), 1.67× inside intrafront (8.6 s → 5.1 s),
-inertia `(+1478,−1477,0)` identical across all four nofma/FMA × serial/intrafront
-variants. `tests/issue99_fma_front_gate.rs` (4 tests): gate above threshold is
-bit-identical to `fma=true`, below threshold bit-identical to nofma default,
-inertia preserved, threshold is exactly `nrow*ncol` with `>=`. Full suite 734
-passed / 0 failed; fmt + clippy `-D warnings` clean; bench residual gate
-unchanged (default path byte-for-byte identical). Note:
-`dev/research/issue-99-dense-front-fma-gate.md`.
+**Why rows/shape, not area.** On real conic KKTs the time is in tall-thin fronts
+(large `nrow`, small `ncol`), created when regularization leaves break supernode
+amalgamation of a dense block. An area gate silently misses them; a
+rows/width-based gate catches them while still protecting genuinely small fronts.
 
-**Not closed.** This does not reach faer-class throughput — the best variant is
-1.67 GFLOP/s vs ~50–100 for a tuned BLAS-3 core. The structural gap is feral's
-memory-bandwidth-bound rank-panel update vs a 2-D register-tiled GEMM
-(`dev/plans/dense-kernel-blas3.md`), a multi-session rewrite. Levers 1 (adaptive
-`INTRAFRONT_MIN_AREA`) and 2 (assembly parallelism) are parallel-scaling levers
-that need the bench corpus + a representative core count to validate no-regression
-— not possible on this 4-core box without the (unmerged-PR-#92) qap15 fixtures.
+**Evidence (synthetic KKT, 32000², 2000×16 fronts, 4-core x86_64, `bench_qap15`).**
+Original default 9.25 s → **3.46 s (2.68×) byte-exact** with the shape-aware
+intra-front gate → **2.35 s (3.94× total)** adding opt-in FMA. Inertia
+`(+30000, −2000, 0)` identical across every config. Confirmed the intra-front
+diagnosis first via `FERAL_INTRAFRONT_MIN_AREA=16384` (9.25 → 4.35 s byte-exact).
+Full suite **735 passed / 0 failed** — `parallel_parity` (parallel==sequential
+bit-for-bit) green, so the intra-front change is byte-exact as claimed. clippy
+`-D warnings` clean.
+
+**Note.** The largest lever on this workload was **byte-exact** (the shape-aware
+gate), not the rule-breaking FMA. The maintainer authorized breaking
+bit-exactness/inertia to explore; the exploration instead surfaced a byte-exact
+scheduling bug affecting *both* gates. The synthetic fixture is a stand-in — the
+real qap15 KKT needs POUNCE (unavailable here); the tall-thin-front phenomenon and
+its 10-core behavior should be re-validated on the real matrix before promoting
+the thresholds to a hard default. See `dev/research/issue-99-dense-front-fma-gate.md`.
 
 ## Recent Tried-and-Rejected
-more work.** Step 2's premise (dense-spike bump, contiguous SAXPY) does not hold
-for this workload; implementing it would **regress** casctanks, not speed it up.
+stride `span`), gated to large fronts (`nrow>128`). Byte-exact by construction.
 
-This also explains Step 1's 15.8×: the old O(bump²) **scan** probed ~731²/2 ≈ 267k
-cells per update to find the ~24 that needed work. Removing the scan (Step 1) was
-the correct and sufficient fix for the sparse-wide-bump regime; the residual
-elimination work is already near-minimal.
+**Rejected — net slowdown on qap15.** Byte-exact parity held (blocked_ldlt
+21/21, inertia/nnz_L unchanged) but it was *slower* everywhere: sequential
+factor loop 1747 → 1976 ms (+13%), the 2955×2955 root front 736 → 818 ms
+(+11%), parallel default 771 → 945 ms (+22%).
 
-**Not generally rejected.** A dense path could still help a genuinely *dense*-spike
-basis (the journal's 2026-06-08 tridiagonal/`L⁻¹`-dense worst case). If such a
-workload appears, Step 2 should be width-AND-density gated (dense path only when
-block density exceeds a threshold), never width-only. For the McCormick LP regime
-that motivated discopt#229, Step 1 stands alone.
+**Why.** The root's early panels have `span ≈ nrow`, so packing does not reduce
+the K-stride — it just adds an alloc + copy. More fundamentally, profiling of
+the root shows it is **DST-bandwidth-bound, not panel-bound**: the ~70 MB
+trailing block (2955×2955 f64) is streamed ~46 times (once per rank-64 panel),
+which dwarfs the ~1.5 MB panel (already L2-resident). Packing the *source* panel
+optimizes the wrong operand.
 
-**Evidence.** `FERAL_BUMP_STATS` aggregate over
-`FERAL_LU_TRACE=.../casctanks_trace.txt` (full trace): avg_width=731.3,
-max_width=2157, avg_density=0.1346 (all bumps) / 0.0023 (width>500),
-avg_axpy=23.9, avg_merge_work=233.4. Step 1 end-to-end: casctanks LP solve
-82.4 s → 5.2 s debug (15.8×), optimum −167.751 unchanged. Journal:
-dev/journal/2026-06-18-01.org.
+**Implication for the plan.** The effective lever is reducing DST traffic:
+cache-blocked / recursive dense-root factorization (Phase C — reuse a
+cache-sized trailing tile across many panels) or a larger panel width (more
+flops per DST stream). A source-side pack (B-1a) is off the table. FMA remains a
++23% option but is a reproducibility-policy change (kept opt-in), not a
+bit-exact win.
 
 ## Source Files
 ```
@@ -243,6 +243,7 @@ tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
+tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
 tests/issue_15_cascade_arm_gate.rs
 tests/issue_17_robot_1600_cascade_off.rs

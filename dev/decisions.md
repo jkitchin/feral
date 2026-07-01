@@ -5673,3 +5673,49 @@ memory-bandwidth-bound rank-panel update vs a 2-D register-tiled GEMM
 `INTRAFRONT_MIN_AREA`) and 2 (assembly parallelism) are parallel-scaling levers
 that need the bench corpus + a representative core count to validate no-regression
 — not possible on this 4-core box without the (unmerged-PR-#92) qap15 fixtures.
+
+## 2026-07-01 — Shape-aware intra-front gate + FMA row gate (issue #99, Levers 1 & 3)
+
+**Context.** After merging PR #92 (issue #91 ordering fix + qap15 harness) onto
+this branch at the maintainer's request, profiling the synthetic qap15 stand-in
+(`dev/scripts/gen_synth_kkt.py`) exposed that the dense border factors as ~117
+*tall, thin* fronts of `2000 × 16` carrying 99.9% of the schur loop — not one
+wide root. Both per-front gates key on **area** and miss exactly this shape.
+
+**Decision 1 (byte-exact, Lever 1).** Add a shape-aware intra-front trigger
+`intrafront_tall_gate(trailing_cols, n_elim) = trailing_cols >=
+INTRAFRONT_TALL_MIN_COLS(512) && n_elim >= INTRAFRONT_TALL_MIN_ELIM(8)`, OR-ed
+with the existing `(nrow-j_start)*n_elim >= INTRAFRONT_MIN_AREA` gate. The area
+metric under-counts tall-thin fronts whose parallelizable work is
+`~n_elim * trailing_cols²`; `2000×16` has area 31744, just under the 32768 floor,
+so intra-front parallelism never fired. OR-ing can only *add* parallelism to
+large-work fronts, so it cannot regress the area gate's measured calibration.
+Pure scheduling ⇒ byte-exact (each trailing column reduced on one thread).
+
+**Decision 2 (opt-in, Lever 3).** The FMA gate had the identical area blind spot
+(`nrow*ncol`); rename `BunchKaufmanParams::fma_min_front_area` →
+`fma_min_front_rows` and gate on `nrow >= t` (front rows = trailing-update size).
+`Solver::with_fma_large_fronts(min_rows)` accordingly. Same opt-in / default-None
+policy as before.
+
+**Why rows/shape, not area.** On real conic KKTs the time is in tall-thin fronts
+(large `nrow`, small `ncol`), created when regularization leaves break supernode
+amalgamation of a dense block. An area gate silently misses them; a
+rows/width-based gate catches them while still protecting genuinely small fronts.
+
+**Evidence (synthetic KKT, 32000², 2000×16 fronts, 4-core x86_64, `bench_qap15`).**
+Original default 9.25 s → **3.46 s (2.68×) byte-exact** with the shape-aware
+intra-front gate → **2.35 s (3.94× total)** adding opt-in FMA. Inertia
+`(+30000, −2000, 0)` identical across every config. Confirmed the intra-front
+diagnosis first via `FERAL_INTRAFRONT_MIN_AREA=16384` (9.25 → 4.35 s byte-exact).
+Full suite **735 passed / 0 failed** — `parallel_parity` (parallel==sequential
+bit-for-bit) green, so the intra-front change is byte-exact as claimed. clippy
+`-D warnings` clean.
+
+**Note.** The largest lever on this workload was **byte-exact** (the shape-aware
+gate), not the rule-breaking FMA. The maintainer authorized breaking
+bit-exactness/inertia to explore; the exploration instead surfaced a byte-exact
+scheduling bug affecting *both* gates. The synthetic fixture is a stand-in — the
+real qap15 KKT needs POUNCE (unavailable here); the tall-thin-front phenomenon and
+its 10-core behavior should be re-validated on the real matrix before promoting
+the thresholds to a hard default. See `dev/research/issue-99-dense-front-fma-gate.md`.

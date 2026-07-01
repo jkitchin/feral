@@ -59,3 +59,49 @@ assembly parallelism (parallel-scaling, unvalidatable at 4 cores),
 default-on FMA / Lever 4 static-SQD (owner policy call), BLAS-3 GEMM
 (the only route to faer-class GFLOP/s). No byte-exact lever closes 3.5×,
 as the issue itself states.
+
+* 15:00 :merge:pr92:intrafront:breakthrough:
+Maintainer: rebase PR #92 (qap15 ordering fix + harness) onto this branch;
+"take chances / break rules." Merged origin refs/pull/92/head (merge-base =
+current main, clean) — brings OrderingPreprocess::Auto fix, qap15
+gen/bench/profile harnesses, dense-front research notes, and Lever B
+(INTRAFRONT_MIN_AREA 256^2 -> 256x128). Conflicts: Cargo.toml (kept all 3
+example targets), CHANGELOG (kept both Unreleased entries).
+
+Real qap15 fixture unobtainable (gen needs POUNCE+highspy+qap15.mps, absent).
+Wrote dev/scripts/gen_synth_kkt.py: arrowhead stand-in, dense K=2000 border
+(root front) + L=30000 degree-2 leaves (LdltCompress signature). 32000^2,
+2.06M nnz. Runs end-to-end via bench_qap15.
+
+END-TO-END (bench_qap15, 4 cores, REPS=2):
+  default              9686 ms   inertia (+30000,-2000,0)
+  static_pivot(1e-8)   8746 ms   1.11x
+  sqd_mode             8293 ms   1.17x
+  default+fma          5763 ms   1.68x
+  sqd_mode+fma         5543 ms   1.75x
+All inertia identical. FMA end-to-end (1.68x) matches single-front (1.66x).
+
+But default+fma_large(256^2 area) gave NO speedup while global fma did.
+=> gate not firing. profile_qap15 revealed why: the dense border factors as
+~117 tall-thin fronts of 2000x16 (99.9% of schur loop), NOT one 2000 front
+(leaves break amalgamation). nrow*ncol = 32000 < 65536 (fma gate) AND
+(nrow-j)*n_elim = 31744 < 32768 (intrafront gate). BOTH area gates blind to
+tall-thin fronts (work ~ n_elim*trailing_cols^2, large despite small area).
+
+Confirmed intrafront hypothesis with env override:
+  FERAL_INTRAFRONT_MIN_AREA=16384 default: 9247 -> 4354 ms (2.1x) BYTE-EXACT.
+
+Fixes:
+- Lever 1 (byte-exact): intrafront_tall_gate(cols>=512 && n_elim>=8) OR-ed
+  with area gate. default 9247 -> 3457 ms (2.68x), inertia unchanged.
+- Lever 3: fma_min_front_area -> fma_min_front_rows, gate nrow>=t. Now fires;
+  default+fma_large(256rows) = 2350 ms == global fma (2347). 3.94x total.
+
+Correctness: full suite 735 passed / 0 failed. parallel_parity (parallel ==
+sequential bit-for-bit) GREEN => intrafront change byte-exact as claimed.
+clippy -D warnings clean.
+
+Key finding: the BIGGEST lever was byte-exact (shape-aware scheduling),
+not the rule-breaking FMA. The area metric bug hit both gates identically.
+Caveat: synthetic fixture; re-validate tall-thin phenomenon + thresholds on
+the real qap15 + 10 cores before promoting to a hard default.
