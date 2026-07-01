@@ -182,3 +182,14 @@ change):
 Lever D (static/SQD) still stands as the highest-ceiling path, but the cheap
 byte-exact win is now clearly Lever B (schur scaling), not A. Next: instrument
 schur's parallel-vs-serial (ramp-down) split to target B precisely.
+
+## Update — Lever B partial landed (ramp-down floor)
+
+`INTRAFRONT_MIN_AREA` 256² → 256×128 (`src/dense/factor.rs`). The original floor
+left each large front's trailing-update tail — and whole medium fronts — on the
+serial path. Halving it: **~17% end-to-end on qap15** (interleaved ~887 → ~739 ms,
+10 cores), byte-exact (parallel_parity 8/8, lib 375/0). A/B: lower (≤16384)
+regresses (fork/join on tiny fronts), higher (131072) regresses; 256×128 is the
+sweet spot. `FERAL_INTRAFRONT_MIN_AREA` env override retained for tuning.
+Remaining schur scaling, assembly parallelism, per-core FMA, and Lever D tracked
+in the follow-up issue.
