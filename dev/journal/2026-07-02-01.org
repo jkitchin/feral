@@ -1,0 +1,44 @@
+* 11:30 :issue-107:ordering:api:
+Implemented `OrderingMethod::External(Vec<usize>)` (issue #107): a caller-supplied
+0-based new-to-old fill-reducing permutation, mirroring the existing
+`ScalingStrategy::External(Vec<f64>)`. Injection point is the single
+`run_external_ordering` function — for `External` it returns the user perm
+directly instead of calling an ordering crate; the rest of the pipeline
+(postorder → etree → column counts → supernodes) is byte-identical to any
+other method.
+
+Design notes:
+- `OrderingMethod` had to drop `Copy` (a `Vec` field is not `Copy`), kept
+  `Clone` — same as `ScalingStrategy`. Added a hand-written `Debug` so
+  `External` prints as `External { len: N }` (not a full-perm dump) in
+  `NumericFactorization::summary`.
+- `External` forces `OrderingPreprocess::None`: `LdltCompress` reorders a
+  compressed super-graph (dim `ncmp ≤ n`) and cannot consume a full-length user
+  perm. Guarded so `External` skips the preprocess-`Auto` race entirely.
+- Validation up front (`validate_external_perm`): wrong length / out-of-range /
+  duplicate → `FeralError::InvalidInput`, never a panic.
+
+`Copy` removal fallout (all mechanical `.clone()`s): `AutoRace` race loop,
+preprocess-`Auto` `run` closure, `Solver::factor` (2 sites), three numeric
+constructors (`symbolic.resolved_method.clone()`), `src/bin/bench.rs` (3 match
+sites), `examples/bench_qap15.rs`, `python/src/*` (`ordering_to_str` now takes
+`&OrderingMethod`, +`External` arm), and ~9 `feral-diagnostics` bins that reused
+a `method` binding by value.
+
+Evidence: `tests/issue107_external_ordering.rs` — 6 tests green. Oracles are
+external (hand): saddle-point KKT inertia (2,1,0) by the saddle inertia theorem
+(Nocedal & Wright Lemma 16.1), SPD tridiag inertia (n,0,0), RHS `b = K·x_true`
+so the solution is known. Identity and reversed external orderings both solve to
+the oracle and report identical inertia — ordering changes fill, not the answer.
+Unit tests pin the bijection perm + forced `None` preprocess, the three
+validation rejections, and the compact Debug. Full suite: feral 395 lib + all
+integration green; `feral-diagnostics` builds + tests green; clippy
+`--all-targets -- -D warnings` clean on both packages; `cargo fmt --check` clean.
+Default (non-External) path unchanged.
+
+Notes for future work: `resolved_method` faithfully reports `External(perm)`,
+which duplicates the length-`n` perm already in `sym.perm`; this is negligible
+beside the `perm`/`perm_inv`/`node_factors` clones the numeric constructor
+already does, but if it ever matters a lighter marker could replace it. The
+companion `pounce`/`FeralConfig` plumbing (issue mentions it) is downstream and
+out of scope for the feral crate.

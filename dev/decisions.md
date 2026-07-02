@@ -5859,3 +5859,49 @@ is a possible future refinement).
 qap15/cont5-iter0/dirichlet120 unchanged. Byte-exact non-escalated path; lib
 394/0, parallel_parity/issue91/issue65/ldlt_compress/symbolic_profiler green.
 Guard `tests/issue102_ordering_escalation.rs`.
+
+## 2026-07-02 — `OrderingMethod::External(Vec<usize>)`: user-supplied ordering (issue #107)
+
+**Decision.** Add `OrderingMethod::External(Vec<usize>)` carrying a caller-supplied
+0-based new-to-old fill-reducing permutation of `0..n`. It replaces the internal
+AMD/METIS/etc. pass at the single `run_external_ordering` injection point; the rest
+of the symbolic pipeline (postorder, etree, column counts, supernodes) is unchanged.
+`OrderingMethod` drops `Copy` and keeps `Clone` (a `Vec` field is not `Copy`),
+exactly as `ScalingStrategy` already does for its `External(Vec<f64>)` variant. A
+hand-written `Debug` prints the variant as `External { len: N }` so diagnostic
+one-liners (`NumericFactorization::summary`) don't dump the whole permutation.
+
+**Why an enum variant (not a side-channel field).** The issue asks for parity with
+`ScalingStrategy::External`, whose vector rides on the strategy enum and threads
+through `Solver::with_ordering`/`FeralConfig` as one value. A separate
+`SupernodeParams` field would split the "how to order" decision across two knobs and
+diverge from the scaling precedent. The `Copy` loss is mechanical (clone at the
+`AutoRace` race loop, the preprocess-`Auto` race, `Solver::factor`, the three
+numeric constructors, and the `feral-diagnostics` bins that reuse a `method`
+binding) and was absorbed.
+
+**Why `External` forces `OrderingPreprocess::None`.** `LdltCompress` reorders an
+MC64-compressed super-graph of dimension `ncmp ≤ n`; a full-length user permutation
+cannot be applied to it. So `External` bypasses the preprocess-`Auto` fill race and
+pins `resolved_preprocess = None`, regardless of the requested (or default `Auto`)
+preprocess. Scaling is unaffected — it is computed independently in the numeric
+phase from `ScalingStrategy`; only the MC64 *cache-reuse* symbolic-time shortcut is
+skipped, which is a performance optimization, not a correctness input.
+
+**Soundness.** Numeric factorization, pivoting, and inertia are untouched — a
+factorization under any valid ordering is exact. A bad user ordering only costs
+fill/time. The permutation is validated as a bijection of `0..n` up front
+(`validate_external_perm`): wrong length, out-of-range index, or duplicate returns
+`FeralError::InvalidInput` (never a panic, no `unwrap`). Programmatic-only: no
+string parsing, matching scaling's `External`.
+
+**Evidence.** `tests/issue107_external_ordering.rs` (identity + reversed orderings
+solve to the hand oracle with saddle-point inertia (2,1,0) and SPD inertia (n,0,0);
+validation rejects the three malformed inputs); `src/symbolic` units
+(`symbolic_factorize_external_produces_valid_perm` pins the bijection + forced
+`None` preprocess; `external_perm_validation_rejects_bad_input`;
+`ordering_method_external_debug_is_compact`). Full suite green: feral 395 lib + all
+integration, `feral-diagnostics` builds/tests, clippy `--all-targets` clean on both,
+`cargo fmt --check` clean. Default (non-External) path unchanged. See
+`dev/research/issue-107-external-ordering.md` and
+`dev/plans/issue-107-external-ordering.md`.
