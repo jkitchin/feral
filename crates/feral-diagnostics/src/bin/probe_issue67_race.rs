@@ -37,7 +37,7 @@ fn sym_us(
     let mut t = Vec::with_capacity(reps);
     for _ in 0..reps.max(1) {
         let t0 = Instant::now();
-        symbolic_factorize_with_method(m, sp, method).ok()?;
+        symbolic_factorize_with_method(m, sp, method.clone()).ok()?;
         t.push(t0.elapsed().as_micros());
     }
     Some(median(t))

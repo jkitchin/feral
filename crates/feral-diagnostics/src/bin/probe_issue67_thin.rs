@@ -43,10 +43,10 @@ fn measure(
     let mut factor_t = Vec::with_capacity(reps);
     let mut solve_t = Vec::with_capacity(reps);
     let mut nnz_l = 0usize;
-    let mut resolved = method;
+    let mut resolved = method.clone();
     let mut inertia_s = String::new();
     for _ in 0..reps.max(1) {
-        let mut s = Solver::new().with_ordering(method);
+        let mut s = Solver::new().with_ordering(method.clone());
         let t = Instant::now();
         let st = s.factor(m, None);
         factor_t.push(t.elapsed().as_micros());
@@ -58,7 +58,7 @@ fn measure(
         }
         let f = s.factors()?;
         nnz_l = f.factor_nnz();
-        resolved = f.resolved_method;
+        resolved = f.resolved_method.clone();
         if let Some(i) = s.inertia() {
             inertia_s = format!("({},{},{})", i.positive, i.negative, i.zero);
         }

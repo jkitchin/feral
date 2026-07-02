@@ -1,79 +1,79 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-01T01:38:26Z
+Generated: 2026-07-02T11:32:41Z
 
 ## Latest Session
-File: dev/sessions/2026-07-01-02.md
+File: dev/sessions/2026-07-02-01.md
 ```
-# Session 2026-07-01-02
+# Session 2026-07-02-01
 
 ## Goal
-
-Issue #95: enrich the LU rank-1 `update()` failure signal so a caller can tell an
-ill-conditioning failure (refine and retry) from a bookkeeping-budget trip (just
-refactor), and close the `should_refactor()` sparse/dense parity gap. discopt#364
-needs the *why* behind a `NeedsRefactor`, and discopt forces the dense LU for
-small bases (`m ≤ 256`).
+Implement issue #107: add `OrderingMethod::External(Vec<usize>)` so callers can
+inject a precomputed fill-reducing permutation into symbolic factorization,
+instead of only selecting an ordering *algorithm*. Mirror the existing
+`ScalingStrategy::External(Vec<f64>)`.
 
 ## Accomplished
+- **Research + plan first** (`dev/research/issue-107-external-ordering.md`,
+  `dev/plans/issue-107-external-ordering.md`), then tests, then implementation.
+- **`OrderingMethod::External(Vec<usize>)`**: a 0-based new-to-old permutation
+  of `0..n` (same convention as `SymbolicFactorization::perm`). Injected at the
+  single `run_external_ordering` point — for `External` it returns the user perm
+  directly instead of calling an ordering crate; the rest of the pipeline
+  (postorder → etree → column counts → supernodes) is byte-identical to any
+  other method.
+- **`Copy` → `Clone`.** A `Vec` field is not `Copy`, so `OrderingMethod` drops
+  `Copy` (kept `Clone`), matching `ScalingStrategy`. Hand-written `Debug` prints
+  `External { len: N }` so `NumericFactorization::summary` doesn't dump the perm.
+- **Validation up front** (`validate_external_perm`): wrong length /
+  out-of-range / duplicate → `FeralError::InvalidInput`, never a panic, no
+  `unwrap`.
+- **`External` forces `OrderingPreprocess::None`.** `LdltCompress` reorders a
+  compressed super-graph (dim `ncmp ≤ n`) and cannot consume a full-length user
+  perm; guarded so `External` also skips the preprocess-`Auto` fill race.
+- **`Copy`-removal fallout** (mechanical clones): `AutoRace` race loop,
+  preprocess-`Auto` `run` closure, `Solver::factor` (2), the three numeric
+  constructors, `src/bin/bench.rs` (3 match sites), `examples/bench_qap15.rs`,
+  `python/src/*` (`ordering_to_str` now takes `&OrderingMethod` + `External`
+  arm), and ~9 `feral-diagnostics` bins that reused a `method` binding.
+- **Tests** (oracles external/hand): `tests/issue107_external_ordering.rs` — 6
+  green. Saddle-point KKT inertia (2,1,0) by the saddle inertia theorem
+  (Nocedal & Wright Lemma 16.1); SPD tridiag inertia (n,0,0); RHS `b = K·x_true`
+  so the solution is known; identity and reversed external orderings both solve
+  to the oracle with identical inertia (ordering changes fill, not the answer);
+  validation rejects the three malformed inputs. `src/symbolic` units pin the
+  bijection perm + forced `None` preprocess, the validation rejections, and the
+  compact Debug.
+- **Suite green:** feral **395 lib** + all integration tests pass;
+  `cargo test -p feral-diagnostics` green; `cargo clippy --all-targets -- -D
+  warnings` clean on both feral and `feral-diagnostics`; `cargo fmt --check`
+  clean. Default (non-External) path unchanged.
 
-Chose the issue's **preferred additive (non-breaking)** design: keep the
-payload-free `Err(NeedsRefactor)`, record cause + magnitude alongside.
-
-- New public enum `RefactorCause { Growth, UpdateBudget, TinyPivot, Singular }`
-  (`src/lu/mod.rs`, re-exported from the crate root via `src/lib.rs`).
-- `last_refactor() -> Option<(RefactorCause, f64)>` on both `SparseLu` and
-  `DenseLu`. Set on **every** `NeedsRefactor` return path (update-count budget,
-  singular/empty-support, growth, tiny/zero/non-finite pivot). `None` after a
-  fresh factor/refactor; untouched by a successful update (read only after `Err`).
-- `growth()` getter on both (exposes the element-growth high-water monitor).
-- `should_refactor_growth()` on both: growth-aware recommendation firing once
-  `growth >= sqrt(max_growth)` (finite, > 1) — the geometric midpoint in log
-  space — so a caller can pre-empt a growth trip.
-- `should_refactor()` parity on `DenseLu` (cost-based: `updates_since_refactor >= m`;
-  dense update is O(m²), fresh factor O(m³)), mirroring the sparse cost-based
-  `should_refactor()`. `updates_since_refactor()` already existed on both.
-- Docs: `src/error.rs` `NeedsRefactor` variant now points at the accessor;
-  `CHANGELOG.md` Unreleased; design note `dev/research/refactor-signal-2026-07-01.md`.
-
-**Magnitude semantics** — Growth: the growth ratio that tripped (> max_growth);
-UpdateBudget: the update count that hit the cap (= max_updates); TinyPivot:
-|offending pivot| (≤ zero_pivot_tol·u_max0); Singular: 0.0.
-
-**Dense/sparse asymmetry (inherent, documented):** the dense path has no distinct
-`Singular` branch — a linearly dependent replacement drives the final `U` diagonal
-to ~0 and reports `TinyPivot`. Only the sparse path can cheaply detect the
-empty-support case (`h_rank < r_rank`) *before* eliminating, so `Singular` is
-sparse-only.
-
-### Evidence
-
-- 9 new unit tests (5 sparse, 4 dense): each cause reached via a deterministically
-  constructed input, plus the two recommendation getters. Assertions are
-  behavioral (which cause) and self-consistent (the magnitude relation the path
-  itself guarantees) — no external numerical oracle required.
-  - Note: the naive identity-basis update `update(0, e0/[1,1])` trips a
-    `TinyPivot` (after the cyclic shift `u[0,0]` = the identity's off-diagonal 0),
-    *not* a clean commit — so the budget/recommendation tests use the tridiagonal
+## Benchmark Results
+```
+cargo run --bin bench --release (built-in fixtures; no data/ corpus present)
+  KKT dense: Inertia match 1/1 (100%), Residual pass 1/1, worst 1.14e-15
+  vs MUMPS:  Inertia match 2/2 (100%), Residual pass 2/2, worst 1.26e-16
+  8 matrices benchmarked; no failures (dense or sparse).
 ```
 
 ## Git Status
 ```
-daa058f issue #95: richer update() instability signal + refactor recommendations
-f9398fd issue #94: one-norm condition estimate for the unsymmetric LU factor (#98)
-f114b5d issue #93: expose the LU element-growth factor via public getters (#96)
-f037285 release: feral v0.11.3
-a5c789f issue #89: FT update u_above reindex O(m³)→O(m²) + true per-update cost counter (#90)
+a1dd7b5 release: feral v0.12.0 (#106)
+1165d4d issue #102 follow-up: escalate ordering to LdltCompress on pivot growth (#105)
+d6fe546 issue #102: fix parallel dense-front re-entrant deadlock (0% CPU stall) (#104)
+bc24fc9 issue #99: packed BLAS-3 dense trailing update (byte-exact) + opt-in FMA-large-fronts gate (#103)
+f54b335 docs: session checkpoint 2026-07-01-03 (issue #91 dense-kernel follow-up) (#100)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_supernodes_cover_n ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
 test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
@@ -86,80 +86,76 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 391 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.40s
+test result: ok. 395 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.95s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-01-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-02-01.md)
 
-
-Residual pass: 2/2 (100.0%)
-Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Dense failure analysis: no failures
-Sparse failure analysis: no failures
-Dense ∩ Sparse failure overlap: 0 / 0 / 0
-(no oracle timings loaded in this environment; perf partitions N/A)
-
-Purely additive API + metadata on the error path (a single `Option` write only on
-a `NeedsRefactor` return); no factorization or solve arithmetic changed.
+cargo run --bin bench --release (built-in fixtures; no data/ corpus present)
+  KKT dense: Inertia match 1/1 (100%), Residual pass 1/1, worst 1.14e-15
+  vs MUMPS:  Inertia match 2/2 (100%), Residual pass 2/2, worst 1.26e-16
+  8 matrices benchmarked; no failures (dense or sparse).
+No performance change expected or observed: `External` is a new opt-in ordering
+source; the default `Auto` path is byte-exact.
 
 ```
 
 ## Recent Decisions
-accessor, not a breaking error-variant change. `SparseLu::update`/`DenseLu::update`
-keep returning the payload-free `Err(FeralError::NeedsRefactor)`; the cause +
-magnitude are recorded on `self` and read back via
-`last_refactor() -> Option<(RefactorCause, f64)>`. New public enum
-`RefactorCause { Growth, UpdateBudget, TinyPivot, Singular }`.
+diverge from the scaling precedent. The `Copy` loss is mechanical (clone at the
+`AutoRace` race loop, the preprocess-`Auto` race, `Solver::factor`, the three
+numeric constructors, and the `feral-diagnostics` bins that reuse a `method`
+binding) and was absorbed.
 
-**Why.** discopt#364 needs to distinguish an ill-conditioning failure
-(Growth/TinyPivot/Singular → refine-and-retry) from a mere update-count budget
-trip (UpdateBudget → refactor). The additive route (the issue's stated
-preference) leaves every existing caller compiling unchanged.
+**Why `External` forces `OrderingPreprocess::None`.** `LdltCompress` reorders an
+MC64-compressed super-graph of dimension `ncmp ≤ n`; a full-length user permutation
+cannot be applied to it. So `External` bypasses the preprocess-`Auto` fill race and
+pins `resolved_preprocess = None`, regardless of the requested (or default `Auto`)
+preprocess. Scaling is unaffected — it is computed independently in the numeric
+phase from `ScalingStrategy`; only the MC64 *cache-reuse* symbolic-time shortcut is
+skipped, which is a performance optimization, not a correctness input.
 
-**Magnitude semantics.** Growth = growth ratio that tripped; UpdateBudget =
-update count that hit the cap (= max_updates); TinyPivot = |offending pivot|;
-Singular = 0.0. `last_refactor()` is `None` after factor/refactor, untouched by a
-successful update.
+**Soundness.** Numeric factorization, pivoting, and inertia are untouched — a
+factorization under any valid ordering is exact. A bad user ordering only costs
+fill/time. The permutation is validated as a bijection of `0..n` up front
+(`validate_external_perm`): wrong length, out-of-range index, or duplicate returns
+`FeralError::InvalidInput` (never a panic, no `unwrap`). Programmatic-only: no
+string parsing, matching scaling's `External`.
 
-**Dense/sparse asymmetry (accepted, not a gap).** The dense path has no distinct
-`Singular` cause — a dependent replacement drives the final `U` diagonal to ~0 and
-reports `TinyPivot`. Only the sparse path detects the empty-support case
-(`h_rank < r_rank`) before eliminating, so `Singular` is sparse-only.
-
-**Refactor recommendations.** `should_refactor_growth()` (both types) fires at
-`growth >= sqrt(max_growth)` — the log-space midpoint between the floor 1 and the
-cap — to pre-empt a growth trip. Dense `should_refactor()` (cost-based parity) =
-`updates_since_refactor() >= m` (O(m²) update vs O(m³) factor), the dense analogue
-of sparse's `update_work_total >= factor_nnz()`.
-
-**Evidence.** +9 unit tests (each cause + both recommendation getters), 381 lib
-tests green, fmt/clippy clean, no numerical change (bench: no failures). Design
-note: `dev/research/refactor-signal-2026-07-01.md`.
+**Evidence.** `tests/issue107_external_ordering.rs` (identity + reversed orderings
+solve to the hand oracle with saddle-point inertia (2,1,0) and SPD inertia (n,0,0);
+validation rejects the three malformed inputs); `src/symbolic` units
+(`symbolic_factorize_external_produces_valid_perm` pins the bijection + forced
+`None` preprocess; `external_perm_validation_rejects_bad_input`;
+`ordering_method_external_debug_is_compact`). Full suite green: feral 395 lib + all
+integration, `feral-diagnostics` builds/tests, clippy `--all-targets` clean on both,
+`cargo fmt --check` clean. Default (non-External) path unchanged. See
+`dev/research/issue-107-external-ordering.md` and
+`dev/plans/issue-107-external-ordering.md`.
 
 ## Recent Tried-and-Rejected
-more work.** Step 2's premise (dense-spike bump, contiguous SAXPY) does not hold
-for this workload; implementing it would **regress** casctanks, not speed it up.
++23% option but is a reproducibility-policy change (kept opt-in), not a
+bit-exact win.
 
-This also explains Step 1's 15.8×: the old O(bump²) **scan** probed ~731²/2 ≈ 267k
-cells per update to find the ~24 that needed work. Removing the scan (Step 1) was
-the correct and sufficient fix for the sparse-wide-bump regime; the residual
-elimination work is already near-minimal.
+## 2026-07-01 — UPDATE: packed micro-kernel succeeds where B-1a source-pack failed (issue #99)
 
-**Not generally rejected.** A dense path could still help a genuinely *dense*-spike
-basis (the journal's 2026-06-08 tridiagonal/`L⁻¹`-dense worst case). If such a
-workload appears, Step 2 should be width-AND-density gated (dense path only when
-block density exceeds a threshold), never width-only. For the McCormick LP regime
-that motivated discopt#229, Step 1 stands alone.
+The 2026-06-30 "B-1a panel packing" entry above rejected source-panel packing as a
+net slowdown and concluded the root front is DST-bandwidth-bound. That conclusion
+was **specific to the variant tried** — packing the source into a tighter stride
+but *feeding the same strided kernels*, which keep the per-`q` `as_simd` + strided
+access. It does **not** generalize to a proper packed micro-kernel.
 
-**Evidence.** `FERAL_BUMP_STATS` aggregate over
-`FERAL_LU_TRACE=.../casctanks_trace.txt` (full trace): avg_width=731.3,
-max_width=2157, avg_density=0.1346 (all bumps) / 0.0023 (width>500),
-avg_axpy=23.9, avg_merge_work=233.4. Step 1 end-to-end: casctanks LP solve
-82.4 s → 5.2 s debug (15.8×), optimum −167.751 unchanged. Journal:
-dev/journal/2026-06-18-01.org.
+A different design — pack the panel into `q`-contiguous MR=8×NR=4 micro-panels and
+run a register-tiled kernel with a **contiguous inner `q`-loop**
+(`apply_schur_panel_range_packed`) — is **22–26× faster in isolation and
+byte-exact** (`examples/bench_schur_micro`), and gives 8–10× on real dense fronts.
+So the bottleneck was strided-`q` cache latency, not DST bandwidth, on this
+hardware. Not a rejection — a correction of scope. See
+`dev/research/issue-99-dense-front-fma-gate.md` UPDATE 3 and `dev/decisions.md`
+2026-07-01 (packed BLAS-3). The B-1a *source-into-strided-kernel* variant remains
+rejected; the packed micro-kernel is the shipped design.
 
 ## Source Files
 ```
@@ -236,10 +232,15 @@ tests/factors_ld_export.rs
 tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/growth_flag.rs
+tests/issue102_intrafront_deadlock.rs
+tests/issue102_ordering_escalation.rs
+tests/issue107_external_ordering.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
+tests/issue91_preprocess_misfire.rs
+tests/issue99_fma_front_gate.rs
 tests/issue_15_cascade_arm_gate.rs
 tests/issue_17_robot_1600_cascade_off.rs
 tests/issue_18_narx_cfy_cascade_off.rs

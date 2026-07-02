@@ -53,7 +53,7 @@ fn arrow_stats(pat: &CscPattern) -> ArrowStats {
 
 fn nnz_l(m: &CscMatrix, method: OrderingMethod) -> usize {
     let sp = SupernodeParams::default();
-    match symbolic_factorize_with_method(m, &sp, method) {
+    match symbolic_factorize_with_method(m, &sp, method.clone()) {
         Ok(s) => s.col_counts.iter().sum(),
         Err(e) => {
             eprintln!("  {:?} FAILED: {:?}", method, e);

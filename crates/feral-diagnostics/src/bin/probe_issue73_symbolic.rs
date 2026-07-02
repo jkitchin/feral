@@ -52,7 +52,7 @@ fn measure(
 ) -> Result<SymStats, feral::FeralError> {
     let params = SupernodeParams::default();
     let t = Instant::now();
-    let sym = symbolic_factorize_with_method(m, &params, method)?;
+    let sym = symbolic_factorize_with_method(m, &params, method.clone())?;
     let sym_ms = t.elapsed().as_secs_f64() * 1e3;
 
     let mut max_front = 0usize;

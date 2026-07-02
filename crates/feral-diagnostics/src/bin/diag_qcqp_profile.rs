@@ -40,7 +40,7 @@ fn run(
         amalgamation_strategy: amalg,
         ..SupernodeParams::default()
     };
-    let sym = match symbolic_factorize_with_method(csc, &snode, method) {
+    let sym = match symbolic_factorize_with_method(csc, &snode, method.clone()) {
         Ok(s) => s,
         Err(e) => {
             println!("\n=== {} === SYM_ERR {}", label, e);

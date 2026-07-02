@@ -107,7 +107,7 @@ fn main() {
             ..SupernodeParams::default()
         };
         let t0 = Instant::now();
-        let sym = match symbolic_factorize_with_method(&csc, &snode, method) {
+        let sym = match symbolic_factorize_with_method(&csc, &snode, method.clone()) {
             Ok(s) => s,
             Err(e) => {
                 println!("{:<46} SYM_ERR {}", name, e);

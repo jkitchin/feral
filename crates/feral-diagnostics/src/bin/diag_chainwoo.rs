@@ -35,9 +35,9 @@ fn main() {
         "{:>10}  {:>10}  {:>12}  {:>12}  {:>10}  {:>10}  {:>10}",
         "method", "n_snodes", "sym_nnz_est", "num_nnz_l", "max_front", "sym_us", "num_us"
     );
-    for &m in &methods {
+    for m in &methods {
         let t_sym = Instant::now();
-        let sym = match symbolic_factorize_with_method(&csc, &snode_params, m) {
+        let sym = match symbolic_factorize_with_method(&csc, &snode_params, m.clone()) {
             Ok(s) => s,
             Err(e) => {
                 println!("{:>10}  symbolic failed: {}", format!("{:?}", m), e);

@@ -162,7 +162,7 @@ fn process_family(family: &str) {
             continue;
         };
         for (mi, (mname, method)) in METHODS.iter().enumerate() {
-            let sym = match symbolic_factorize_with_method(&csc, &snode_params, *method) {
+            let sym = match symbolic_factorize_with_method(&csc, &snode_params, method.clone()) {
                 Ok(s) => s,
                 Err(e) => {
                     println!("{label:>20}  {mname:>8}  symbolic FAIL: {e}");

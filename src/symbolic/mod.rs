@@ -24,7 +24,11 @@ pub use supernode::{
 /// All methods produce a permutation; the downstream postorder
 /// composition, etree construction, column counts, supernode detection,
 /// and memory planning are identical regardless of method.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Note: this enum is `Clone` but **not** `Copy` — the `External` variant
+/// carries a `Vec<usize>`. This mirrors [`crate::scaling::ScalingStrategy`],
+/// whose `External(Vec<f64>)` variant is likewise `Clone`-only. Callers that
+/// previously relied on implicit copies now `.clone()` explicitly.
+#[derive(Default, Clone, PartialEq, Eq)]
 pub enum OrderingMethod {
     /// Approximate Minimum Degree (`feral-amd` crate: approximate
     /// external degree with aggressive element absorption and
@@ -121,6 +125,88 @@ pub enum OrderingMethod {
     /// produces a valid symbolic factorization. `resolved_method` on
     /// the returned `SymbolicFactorization` records the actual winner.
     AutoRace,
+    /// Caller-supplied fill-reducing permutation (issue #107). The vector
+    /// is a **0-based, new-to-old permutation of `0..n`** — the same
+    /// convention FERAL returns in [`SymbolicFactorization::perm`]:
+    /// `perm[k]` is the original column that becomes column `k`. Length
+    /// must equal the matrix dimension.
+    ///
+    /// Use this to inject an ordering that a generic algorithm cannot see —
+    /// block-triangular / Schur KKT reuse (Parker, Garcia & Bent,
+    /// arXiv:2602.17968) or tearing orderings from equation-oriented
+    /// decomposition (Baharev et al., ACM JEA 26, 2021). The supplied
+    /// permutation replaces the internal AMD/METIS/etc. pass; the downstream
+    /// postorder composition, etree, column counts, and supernode detection
+    /// are identical to every other method, so a *valid but poor* ordering
+    /// only costs fill/time, never correctness.
+    ///
+    /// The permutation is validated as a bijection of `0..n` at the top of
+    /// [`symbolic_factorize_with_method`]; a wrong length, out-of-range
+    /// index, or duplicate returns [`FeralError::InvalidInput`] (never a
+    /// panic).
+    ///
+    /// **Programmatic-only** — the string option `feral_ordering` cannot
+    /// express a vector, exactly as with `ScalingStrategy::External`.
+    ///
+    /// **Forces [`OrderingPreprocess::None`].** The `LdltCompress`
+    /// preprocessor reorders an MC64-compressed super-graph of dimension
+    /// `ncmp ≤ n`, which cannot consume a full-length user permutation, so
+    /// `External` always runs the ordering directly on the full pattern
+    /// regardless of the requested (or default `Auto`) preprocess. Scaling
+    /// is unaffected — it is computed independently in the numeric phase.
+    External(Vec<usize>),
+}
+
+impl core::fmt::Debug for OrderingMethod {
+    /// Hand-written so the `External` arm prints compactly
+    /// (`External { len: N }`) instead of dumping the whole permutation into
+    /// diagnostic one-liners such as `NumericFactorization::summary`. The
+    /// unit variants match the names `#[derive(Debug)]` would produce.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            OrderingMethod::Amd => f.write_str("Amd"),
+            OrderingMethod::Amf => f.write_str("Amf"),
+            OrderingMethod::MetisND => f.write_str("MetisND"),
+            OrderingMethod::ScotchND => f.write_str("ScotchND"),
+            OrderingMethod::KahipND => f.write_str("KahipND"),
+            OrderingMethod::Auto => f.write_str("Auto"),
+            OrderingMethod::AutoRace => f.write_str("AutoRace"),
+            OrderingMethod::External(perm) => {
+                write!(f, "External {{ len: {} }}", perm.len())
+            }
+        }
+    }
+}
+
+/// Validate that `perm` is a bijection of `0..n` (a valid permutation).
+/// Used by [`symbolic_factorize_with_method`] for
+/// [`OrderingMethod::External`]. Returns [`FeralError::InvalidInput`] on any
+/// violation — never panics.
+fn validate_external_perm(perm: &[usize], n: usize) -> Result<(), FeralError> {
+    if perm.len() != n {
+        return Err(FeralError::InvalidInput(format!(
+            "external ordering has length {} but matrix has n={}",
+            perm.len(),
+            n
+        )));
+    }
+    let mut seen = vec![false; n];
+    for &p in perm {
+        if p >= n {
+            return Err(FeralError::InvalidInput(format!(
+                "external ordering index {} out of range for n={}",
+                p, n
+            )));
+        }
+        if seen[p] {
+            return Err(FeralError::InvalidInput(format!(
+                "external ordering is not a permutation: index {} repeated",
+                p
+            )));
+        }
+        seen[p] = true;
+    }
+    Ok(())
 }
 
 /// Resolve an `Auto` ordering to a concrete method from cheap pattern
@@ -551,20 +637,35 @@ fn to_contract_pattern_bufs(pattern: &CscPattern) -> Result<(Vec<i32>, Vec<i32>)
 /// when `method == Auto` is resolved adaptively).
 fn run_external_ordering(
     pattern: &CscPattern,
-    method: OrderingMethod,
+    method: &OrderingMethod,
 ) -> Result<(Vec<usize>, OrderingMethod), FeralError> {
+    // Caller-supplied ordering (issue #107): no ordering-crate call. The
+    // permutation is validated as a bijection of `0..n` by
+    // `symbolic_factorize_with_method` before it reaches here; re-check the
+    // length defensively (it must match the pattern being ordered, which for
+    // `External` is always the full uncompressed pattern).
+    if let OrderingMethod::External(perm) = method {
+        if perm.len() != pattern.n {
+            return Err(FeralError::InvalidInput(format!(
+                "external ordering has length {} but pattern has n={}",
+                perm.len(),
+                pattern.n
+            )));
+        }
+        return Ok((perm.clone(), OrderingMethod::External(perm.clone())));
+    }
     let (col_buf, row_buf) = to_contract_pattern_bufs(pattern)?;
     let pat = feral_ordering_core::CscPattern::new(pattern.n, &col_buf, &row_buf)
         .ok_or_else(|| FeralError::InvalidInput("malformed CSC pattern".to_string()))?;
     // `method` is expected to be concrete here — `Auto` is resolved
     // upstream by `symbolic_factorize_with_method` against the
     // original matrix's pattern, before any preprocessing.
-    debug_assert_ne!(method, OrderingMethod::Auto);
+    debug_assert!(!matches!(method, OrderingMethod::Auto));
     // `actual` diverges from `method` only when ScotchND silently
     // falls back to amd_leaf for every recursion (issue #3): the
     // returned permutation is bit-identical to AMD's, so the
     // `resolved_method` field must report Amd, not ScotchND.
-    let mut actual = method;
+    let mut actual = method.clone();
     let perm_i32 = match method {
         OrderingMethod::Amd => feral_amd::amd_order(&pat),
         OrderingMethod::Amf => feral_amf::amf_order(&pat),
@@ -579,6 +680,9 @@ fn run_external_ordering(
             })
         }
         OrderingMethod::KahipND => feral_kahip::kahip_order(&pat),
+        OrderingMethod::External(_) => {
+            unreachable!("External is returned before this match")
+        }
         OrderingMethod::Auto => {
             unreachable!("Auto is resolved by symbolic_factorize_with_method")
         }
@@ -641,7 +745,7 @@ fn symbolic_factorize_race(
     // reflects exactly one ordering run.
     let mut best_prof: Option<SymbolicProfiler> = None;
     let mut last_err: Option<FeralError> = None;
-    for &cand in RACE_CANDIDATES {
+    for cand in RACE_CANDIDATES {
         let cand_prof = snode_params
             .symbolic_profiler
             .as_ref()
@@ -650,7 +754,10 @@ fn symbolic_factorize_race(
             symbolic_profiler: cand_prof.clone(),
             ..snode_params.clone()
         };
-        match symbolic_factorize_with_method(matrix, &cand_params, cand) {
+        // `cand: &OrderingMethod` — `OrderingMethod` is no longer `Copy`
+        // (the `External` variant carries a `Vec`); clone the concrete
+        // candidate (all `RACE_CANDIDATES` are payload-free unit variants).
+        match symbolic_factorize_with_method(matrix, &cand_params, cand.clone()) {
             Ok(sym) => {
                 let is_better = best
                     .as_ref()
@@ -722,7 +829,11 @@ fn symbolic_factorize_preprocess_auto(
             symbolic_profiler: cand_prof.clone(),
             ..snode_params.clone()
         };
-        let sym = symbolic_factorize_with_method(matrix, &cand_params, method)?;
+        // `method` is captured by this closure and used across up to two
+        // runs (None vs LdltCompress); `OrderingMethod` is no longer `Copy`,
+        // so clone. `External` never reaches here — it is guarded to
+        // `OrderingPreprocess::None` before the preprocess-`Auto` race.
+        let sym = symbolic_factorize_with_method(matrix, &cand_params, method.clone())?;
         let snap = cand_prof.and_then(|a| a.lock().ok().map(|g| g.clone()));
         Ok((sym, snap))
     };
@@ -799,6 +910,17 @@ pub fn symbolic_factorize_with_method(
     if method == OrderingMethod::AutoRace {
         return symbolic_factorize_race(matrix, snode_params);
     }
+    // Issue #107: a caller-supplied external ordering. Validate the
+    // permutation is a bijection of `0..n` up front (a wrong length /
+    // out-of-range / duplicate is `InvalidInput`, never a panic). `External`
+    // forces `OrderingPreprocess::None` (see the variant docs and the
+    // `resolved_preprocess` computation below), so it also bypasses the
+    // preprocess-`Auto` fill race — that race would reorder a compressed
+    // super-graph, which cannot consume a full-length user permutation.
+    let is_external = matches!(method, OrderingMethod::External(_));
+    if let OrderingMethod::External(perm) = &method {
+        validate_external_perm(perm, matrix.n)?;
+    }
     // `OrderingPreprocess::Auto` is resolved by *verifying* fill, not by
     // trusting the structural predicate alone. `pick_ordering_preprocess`
     // is a one-way proxy ("many low-degree columns ⇒ compression helps")
@@ -807,7 +929,7 @@ pub fn symbolic_factorize_with_method(
     // recommends `LdltCompress` exactly where MC64 compression *inflates*
     // fill (issue #91: qap15 conic KKT, 7.16M → 45.4M, 0.77s → 15.4s).
     // Race None vs LdltCompress on symbolic fill and keep the smaller.
-    if snode_params.preprocess == OrderingPreprocess::Auto {
+    if snode_params.preprocess == OrderingPreprocess::Auto && !is_external {
         return symbolic_factorize_preprocess_auto(matrix, snode_params, method);
     }
     let n = matrix.n;
@@ -856,9 +978,16 @@ pub fn symbolic_factorize_with_method(
     // dispatch. Keeps the match below exhaustive on the two concrete
     // variants and keeps the dispatcher logic in one testable place.
     let t_pick = prof.map(|_| std::time::Instant::now());
-    let resolved_preprocess = match snode_params.preprocess {
-        OrderingPreprocess::Auto => pick_ordering_preprocess(matrix),
-        other => other,
+    // Issue #107: `External` forces `None` — its full-length permutation
+    // cannot be applied to a compressed super-graph. Any other requested
+    // preprocess is honored; `Auto` resolves via the structural predicate.
+    let resolved_preprocess = if is_external {
+        OrderingPreprocess::None
+    } else {
+        match snode_params.preprocess {
+            OrderingPreprocess::Auto => pick_ordering_preprocess(matrix),
+            other => other,
+        }
     };
     if let Some(t) = t_pick {
         record_stage(prof, "pick_preprocess", t);
@@ -873,7 +1002,7 @@ pub fn symbolic_factorize_with_method(
     // `ordering` stage.
     let record_ordering = |pat: &CscPattern| -> Result<(Vec<usize>, OrderingMethod), FeralError> {
         let t_ord = prof.map(|_| std::time::Instant::now());
-        let r = run_external_ordering(pat, method)?;
+        let r = run_external_ordering(pat, &method)?;
         if let Some(t) = t_ord {
             record_stage(prof, "ordering", t);
         }
@@ -1914,6 +2043,55 @@ mod tests {
         for i in 0..25 {
             assert_eq!(sym.perm[sym.perm_inv[i]], i);
         }
+    }
+
+    #[test]
+    fn symbolic_factorize_external_produces_valid_perm() {
+        // Issue #107: a caller-supplied permutation must flow through the
+        // full pipeline (postorder composition, etree, column counts,
+        // supernodes) and yield a valid bijection perm, and must force
+        // `OrderingPreprocess::None` even though the default params request
+        // `Auto`.
+        let m = small_grid_5x5();
+        let params = SupernodeParams::default();
+        assert_eq!(params.preprocess, OrderingPreprocess::Auto);
+        // A non-identity valid permutation (reverse).
+        let rev: Vec<usize> = (0..25).rev().collect();
+        let sym =
+            symbolic_factorize_with_method(&m, &params, OrderingMethod::External(rev)).unwrap();
+        assert_eq!(sym.n, 25);
+        let mut sorted = sym.perm.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0..25).collect::<Vec<_>>(), "perm is a bijection");
+        for i in 0..25 {
+            assert_eq!(sym.perm[sym.perm_inv[i]], i);
+        }
+        assert!(matches!(sym.resolved_method, OrderingMethod::External(_)));
+        assert_eq!(
+            sym.resolved_preprocess,
+            OrderingPreprocess::None,
+            "External must force preprocess None"
+        );
+    }
+
+    #[test]
+    fn external_perm_validation_rejects_bad_input() {
+        // Length mismatch, out-of-range, and duplicate are all InvalidInput.
+        assert!(validate_external_perm(&[0, 1], 3).is_err());
+        assert!(validate_external_perm(&[0, 1, 3], 3).is_err());
+        assert!(validate_external_perm(&[0, 1, 1], 3).is_err());
+        // A valid bijection passes.
+        assert!(validate_external_perm(&[2, 0, 1], 3).is_ok());
+        assert!(validate_external_perm(&[], 0).is_ok());
+    }
+
+    #[test]
+    fn ordering_method_external_debug_is_compact() {
+        // The hand-written Debug must not dump the whole permutation.
+        let m = OrderingMethod::External(vec![0; 1000]);
+        assert_eq!(format!("{:?}", m), "External { len: 1000 }");
+        // Unit variants still print their bare name.
+        assert_eq!(format!("{:?}", OrderingMethod::Amd), "Amd");
     }
 
     #[test]

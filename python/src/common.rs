@@ -80,7 +80,9 @@ pub(crate) fn ordering_from_str(name: &str) -> PyResult<OrderingMethod> {
     }
 }
 
-pub(crate) fn ordering_to_str(m: OrderingMethod) -> &'static str {
+// Takes `&OrderingMethod` because the enum is no longer `Copy` (the
+// `External` variant carries a `Vec<usize>`, issue #107).
+pub(crate) fn ordering_to_str(m: &OrderingMethod) -> &'static str {
     match m {
         OrderingMethod::Amd => "amd",
         OrderingMethod::Amf => "amf",
@@ -89,6 +91,9 @@ pub(crate) fn ordering_to_str(m: OrderingMethod) -> &'static str {
         OrderingMethod::KahipND => "kahip",
         OrderingMethod::Auto => "auto",
         OrderingMethod::AutoRace => "auto_race",
+        // Programmatic-only ordering supplied via the Rust API; a Python
+        // string round-trip can only report it, not construct it.
+        OrderingMethod::External(_) => "external",
     }
 }
 

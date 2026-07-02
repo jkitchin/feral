@@ -37,7 +37,7 @@ fn run(path: &Path) {
 
     let mut fnnz: Vec<(String, usize)> = Vec::with_capacity(3);
     for (tag, m) in methods.iter() {
-        match symbolic_factorize_with_method(&csc, &params, *m) {
+        match symbolic_factorize_with_method(&csc, &params, m.clone()) {
             Ok(sym) => {
                 let raw = sym.col_counts.iter().sum::<usize>();
                 fnnz.push((tag.to_string(), raw));

@@ -54,7 +54,7 @@ fn symbolic_report(csc: &CscMatrix) {
                 },
             ),
         ] {
-            match symbolic_factorize_with_method(csc, &sn, method) {
+            match symbolic_factorize_with_method(csc, &sn, method.clone()) {
                 Ok(sym) => {
                     let simplicial = total_factor_nnz(&sym.col_counts);
                     println!(

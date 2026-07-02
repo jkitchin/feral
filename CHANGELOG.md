@@ -4,6 +4,24 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — user-supplied fill-reducing ordering: `OrderingMethod::External` (issue #107)
+
+`OrderingMethod` gains an `External(Vec<usize>)` variant so callers can inject a
+precomputed fill-reducing permutation (block-triangular / Schur KKT reuse per
+Parker, Garcia & Bent arXiv:2602.17968; tearing orderings from equation-oriented
+decomposition) instead of only selecting an ordering *algorithm*. This mirrors
+the existing `ScalingStrategy::External(Vec<f64>)`. The permutation is a 0-based,
+new-to-old permutation of `0..n` (the same convention `SymbolicFactorization::perm`
+uses); it is validated as a bijection up front (wrong length / out-of-range /
+duplicate → `FeralError::InvalidInput`, never a panic) and fed to the existing
+symbolic pipeline unchanged, so a valid-but-poor ordering only costs fill/time,
+never correctness. `External` forces `OrderingPreprocess::None` (the `LdltCompress`
+preprocessor reorders a compressed super-graph and cannot consume a full-length
+user permutation). Reachable via `Solver::with_ordering(OrderingMethod::External(..))`
+and `symbolic_factorize_with_method`; programmatic-only (a string option cannot
+express a vector). `OrderingMethod` is now `Clone` but no longer `Copy`. See
+`dev/research/issue-107-external-ordering.md`.
+
 ## [0.12.0] - 2026-07-01
 
 ### Fixed — ordering-quality regression: escalate to LdltCompress on pivot growth (issue #102 follow-up)

@@ -48,7 +48,7 @@ fn rel_residual_2norm(csc: &CscMatrix, x: &[f64], b: &[f64]) -> f64 {
 fn run(label: &str, csc: &CscMatrix, rhs: &[f64], oracle: &Inertia, method: OrderingMethod) {
     let snode = SupernodeParams::default();
     let t_sym = Instant::now();
-    let sym = match symbolic_factorize_with_method(csc, &snode, method) {
+    let sym = match symbolic_factorize_with_method(csc, &snode, method.clone()) {
         Ok(s) => s,
         Err(e) => {
             println!("  [{label:<10}]  symbolic FAILED: {e:?}");
@@ -57,7 +57,7 @@ fn run(label: &str, csc: &CscMatrix, rhs: &[f64], oracle: &Inertia, method: Orde
     };
     let sym_s = t_sym.elapsed().as_secs_f64();
     let nnz_l = sym.factor_nnz_estimate;
-    let resolved = sym.resolved_method;
+    let resolved = sym.resolved_method.clone();
 
     let params = NumericParams::default();
     let mut ws = FactorWorkspace::new();

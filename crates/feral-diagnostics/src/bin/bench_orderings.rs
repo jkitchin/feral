@@ -42,7 +42,7 @@ fn measure(
     method: OrderingMethod,
 ) -> Option<(u64, u128)> {
     let t = Instant::now();
-    let sym = symbolic_factorize_with_method(matrix, params, method).ok()?;
+    let sym = symbolic_factorize_with_method(matrix, params, method.clone()).ok()?;
     let us = t.elapsed().as_micros();
     Some((sym.factor_nnz_estimate as u64, us))
 }

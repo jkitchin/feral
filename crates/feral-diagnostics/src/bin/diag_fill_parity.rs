@@ -153,7 +153,7 @@ fn factor_under(
     np: &NumericParams,
 ) -> Option<u64> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let sym = symbolic_factorize_with_method(csc, snode, method)?;
+        let sym = symbolic_factorize_with_method(csc, snode, method.clone())?;
         factorize_multifrontal(csc, &sym, np)
     }));
     match result {
@@ -261,7 +261,7 @@ fn run_one(mtx_path: &Path, po: &mut PerOrdering, max_n: usize, verbose: bool) {
         (OrderingMethod::Amd, &mut po.amd),
         (OrderingMethod::MetisND, &mut po.metis),
     ] {
-        match factor_under(&csc, method, &snode, &np) {
+        match factor_under(&csc, method.clone(), &snode, &np) {
             Some(nnz_l) => record(agg, &name, nnz_a, nnz_l, nnz_l_mumps, nnz_l_ssids),
             None => {
                 // Cannot distinguish panic vs Err without a second match,
