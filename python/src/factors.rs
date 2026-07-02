@@ -54,7 +54,7 @@ impl Factors {
             perm_inv: f.perm_inv.clone(),
             scaling: f.scaling.clone(),
             needs_refinement: f.needs_refinement,
-            ordering: ordering_to_str(f.resolved_method),
+            ordering: ordering_to_str(&f.resolved_method),
             l_indptr: export.l_indptr,
             l_indices: export.l_indices,
             l_values: export.l_values,

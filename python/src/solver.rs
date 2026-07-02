@@ -437,8 +437,8 @@ impl Solver {
     fn ordering(&self) -> Option<&'static str> {
         self.inner
             .symbolic()
-            .map(|s| s.resolved_method)
-            .or_else(|| self.inner.factors().map(|f| f.resolved_method))
+            .map(|s| &s.resolved_method)
+            .or_else(|| self.inner.factors().map(|f| &f.resolved_method))
             .map(ordering_to_str)
     }
 

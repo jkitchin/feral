@@ -202,8 +202,8 @@ fn run_one_method(matrix: &CscMatrix, method: OrderingMethod) -> Result<(usize, 
         ..SupernodeParams::default()
     };
     let t = Instant::now();
-    let sym =
-        symbolic_factorize_with_method(matrix, &params, method).map_err(|e| format!("{e:?}"))?;
+    let sym = symbolic_factorize_with_method(matrix, &params, method.clone())
+        .map_err(|e| format!("{e:?}"))?;
     let us = t.elapsed().as_micros() as u64;
     Ok((sym.factor_nnz_estimate, us))
 }

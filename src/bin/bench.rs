@@ -1377,7 +1377,7 @@ fn scaling_strategy_from_str(s: &str) -> Option<ScalingStrategy> {
 fn main() {
     println!("FERAL benchmark harness");
     let ordering_override = ordering_method_from_env();
-    match ordering_override {
+    match &ordering_override {
         Some(m) => println!("  ordering: {:?} (forced via FERAL_ORDERING)", m),
         None => println!("  ordering: default (symbolic_factorize heuristic)"),
     }
@@ -1926,8 +1926,8 @@ fn main() {
         // the reported `factor_us` is apples-to-apples with the single
         // `factor_us` field MUMPS and SSIDS emit for their equivalent work.
         let tf = Instant::now();
-        let sym_result = match ordering_override {
-            Some(m) => symbolic_factorize_with_method(&csc, &snode_params, m),
+        let sym_result = match &ordering_override {
+            Some(m) => symbolic_factorize_with_method(&csc, &snode_params, m.clone()),
             None => symbolic_factorize(&csc, &snode_params),
         };
         let sym = match sym_result {
@@ -1983,8 +1983,8 @@ fn main() {
         let (sp_factor_us_final, sp_solve_us_final) = if should_resample(entry) {
             resample_or_fallback((sp_factor_us, sp_solve_us), || {
                 let tf = Instant::now();
-                let rs_sym = match ordering_override {
-                    Some(m) => symbolic_factorize_with_method(&csc, &snode_params, m),
+                let rs_sym = match &ordering_override {
+                    Some(m) => symbolic_factorize_with_method(&csc, &snode_params, m.clone()),
                     None => symbolic_factorize(&csc, &snode_params),
                 }?;
                 let (rs_factors, _) =

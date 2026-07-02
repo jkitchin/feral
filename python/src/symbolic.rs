@@ -58,7 +58,7 @@ impl SymbolicAnalysis {
             peak_contrib_bytes: s.peak_contrib_bytes,
             col_counts: s.col_counts.clone(),
             etree_parent,
-            ordering: ordering_to_str(s.resolved_method),
+            ordering: ordering_to_str(&s.resolved_method),
         }
     }
 }

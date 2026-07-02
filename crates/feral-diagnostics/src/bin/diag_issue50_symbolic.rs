@@ -102,7 +102,7 @@ fn run(
         symbolic_profiler: Some(Arc::clone(&prof)),
         ..SupernodeParams::default()
     };
-    let sym = symbolic_factorize_with_method(matrix, &params, method)
+    let sym = symbolic_factorize_with_method(matrix, &params, method.clone())
         .map_err(|e| format!("symbolic_factorize_with_method({method:?}): {e:?}"))?;
     let report = prof
         .lock()
@@ -178,15 +178,15 @@ fn main() -> ExitCode {
     ];
 
     let mut any_failure = false;
-    for &(label, method) in cases {
+    for (label, method) in cases {
         let t = Instant::now();
-        match run(&matrix, method) {
+        match run(&matrix, method.clone()) {
             Ok((report, resolved, factor_nnz)) => {
                 eprintln!(
                     "[{label}] symbolic done in {:.2} s wall",
                     t.elapsed().as_secs_f64()
                 );
-                print_report(label, method, resolved, factor_nnz, &report);
+                print_report(label, method.clone(), resolved, factor_nnz, &report);
             }
             Err(e) => {
                 eprintln!("[{label}] FAILED: {e}");

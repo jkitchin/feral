@@ -1892,7 +1892,7 @@ fn factorize_multifrontal_with_schur_inner(
         needs_refinement,
         scaling: scaling_user,
         scaling_info,
-        resolved_method: symbolic.resolved_method,
+        resolved_method: symbolic.resolved_method.clone(),
         resolved_amalgamation: symbolic.resolved_amalgamation,
         resolved_preprocess: symbolic.resolved_preprocess,
     };
@@ -2226,7 +2226,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
             // at assembly time.
             scaling: scaling_user,
             scaling_info,
-            resolved_method: symbolic.resolved_method,
+            resolved_method: symbolic.resolved_method.clone(),
             resolved_amalgamation: symbolic.resolved_amalgamation,
             resolved_preprocess: symbolic.resolved_preprocess,
         },
@@ -3199,7 +3199,7 @@ pub fn factorize_multifrontal_supernodal_parallel(
             needs_refinement,
             scaling: scaling_user,
             scaling_info,
-            resolved_method: symbolic.resolved_method,
+            resolved_method: symbolic.resolved_method.clone(),
             resolved_amalgamation: symbolic.resolved_amalgamation,
             resolved_preprocess: symbolic.resolved_preprocess,
         },

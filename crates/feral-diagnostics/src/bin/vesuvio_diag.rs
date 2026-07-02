@@ -145,7 +145,7 @@ fn run_one_method(csc: &CscMatrix, method: OrderingMethod, scaling: ScalingStrat
     };
 
     let t_sym = Instant::now();
-    let sym = match symbolic_factorize_with_method(csc, &snode_params, method) {
+    let sym = match symbolic_factorize_with_method(csc, &snode_params, method.clone()) {
         Ok(s) => s,
         Err(e) => {
             println!("  {:?}: symbolic FAILED: {:?}", method, e);

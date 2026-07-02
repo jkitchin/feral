@@ -923,9 +923,11 @@ impl Solver {
                 if escalated {
                     sp.preprocess = crate::symbolic::OrderingPreprocess::LdltCompress;
                 }
-                symbolic_factorize_with_method(matrix, &sp, self.ordering)
+                // `OrderingMethod` is no longer `Copy` (the `External`
+                // variant carries a `Vec`); clone the configured ordering.
+                symbolic_factorize_with_method(matrix, &sp, self.ordering.clone())
             } else {
-                symbolic_factorize_with_method(matrix, &self.snode_params, self.ordering)
+                symbolic_factorize_with_method(matrix, &self.snode_params, self.ordering.clone())
             };
             match result {
                 Ok(sym) => {

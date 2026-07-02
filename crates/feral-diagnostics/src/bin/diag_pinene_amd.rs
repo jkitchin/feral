@@ -54,7 +54,7 @@ fn rel_residual_2norm(csc: &CscMatrix, x: &[f64], b: &[f64]) -> f64 {
 fn run(label: &str, csc: &CscMatrix, rhs: &[f64], oracle: &Inertia, method: OrderingMethod) {
     let snode = SupernodeParams::default();
     let t_sym = Instant::now();
-    let sym = match symbolic_factorize_with_method(csc, &snode, method) {
+    let sym = match symbolic_factorize_with_method(csc, &snode, method.clone()) {
         Ok(s) => s,
         Err(e) => {
             println!("  [{label}]  symbolic FAILED: {e:?}");

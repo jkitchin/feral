@@ -235,7 +235,7 @@ fn main() {
         snode_params.nemin = n;
     }
     let t0 = Instant::now();
-    let symbolic = match symbolic_factorize_with_method(&csc, &snode_params, method) {
+    let symbolic = match symbolic_factorize_with_method(&csc, &snode_params, method.clone()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("symbolic failed: {}", e);
