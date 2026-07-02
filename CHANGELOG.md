@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-02
+
 ### Added — user-supplied fill-reducing ordering: `OrderingMethod::External` (issue #107)
 
 `OrderingMethod` gains an `External(Vec<usize>)` variant so callers can inject a
