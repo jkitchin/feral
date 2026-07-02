@@ -1,105 +1,111 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-02T11:32:41Z
+Generated: 2026-07-02T12:19:04Z
 
 ## Latest Session
-File: dev/sessions/2026-07-02-01.md
+File: dev/sessions/2026-07-02-02.md
 ```
-# Session 2026-07-02-01
+# Session 2026-07-02-02
 
 ## Goal
-Implement issue #107: add `OrderingMethod::External(Vec<usize>)` so callers can
-inject a precomputed fill-reducing permutation into symbolic factorization,
-instead of only selecting an ordering *algorithm*. Mirror the existing
-`ScalingStrategy::External(Vec<f64>)`.
+Cut and publish the **v0.13.0** release, shipping issue #107
+(`OrderingMethod::External`) landed since v0.12.0.
 
 ## Accomplished
-- **Research + plan first** (`dev/research/issue-107-external-ordering.md`,
-  `dev/plans/issue-107-external-ordering.md`), then tests, then implementation.
-- **`OrderingMethod::External(Vec<usize>)`**: a 0-based new-to-old permutation
-  of `0..n` (same convention as `SymbolicFactorization::perm`). Injected at the
-  single `run_external_ordering` point — for `External` it returns the user perm
-  directly instead of calling an ordering crate; the rest of the pipeline
-  (postorder → etree → column counts → supernodes) is byte-identical to any
-  other method.
-- **`Copy` → `Clone`.** A `Vec` field is not `Copy`, so `OrderingMethod` drops
-  `Copy` (kept `Clone`), matching `ScalingStrategy`. Hand-written `Debug` prints
-  `External { len: N }` so `NumericFactorization::summary` doesn't dump the perm.
-- **Validation up front** (`validate_external_perm`): wrong length /
-  out-of-range / duplicate → `FeralError::InvalidInput`, never a panic, no
-  `unwrap`.
-- **`External` forces `OrderingPreprocess::None`.** `LdltCompress` reorders a
-  compressed super-graph (dim `ncmp ≤ n`) and cannot consume a full-length user
-  perm; guarded so `External` also skips the preprocess-`Auto` fill race.
-- **`Copy`-removal fallout** (mechanical clones): `AutoRace` race loop,
-  preprocess-`Auto` `run` closure, `Solver::factor` (2), the three numeric
-  constructors, `src/bin/bench.rs` (3 match sites), `examples/bench_qap15.rs`,
-  `python/src/*` (`ordering_to_str` now takes `&OrderingMethod` + `External`
-  arm), and ~9 `feral-diagnostics` bins that reused a `method` binding.
-- **Tests** (oracles external/hand): `tests/issue107_external_ordering.rs` — 6
-  green. Saddle-point KKT inertia (2,1,0) by the saddle inertia theorem
-  (Nocedal & Wright Lemma 16.1); SPD tridiag inertia (n,0,0); RHS `b = K·x_true`
-  so the solution is known; identity and reversed external orderings both solve
-  to the oracle with identical inertia (ordering changes fill, not the answer);
-  validation rejects the three malformed inputs. `src/symbolic` units pin the
-  bijection perm + forced `None` preprocess, the validation rejections, and the
-  compact Debug.
-- **Suite green:** feral **395 lib** + all integration tests pass;
-  `cargo test -p feral-diagnostics` green; `cargo clippy --all-targets -- -D
-  warnings` clean on both feral and `feral-diagnostics`; `cargo fmt --check`
-  clean. Default (non-External) path unchanged.
+- Bumped all six version strings `0.12.0` → `0.13.0` via
+  `scripts/release-checklist.sh bump 0.13.0` (root `Cargo.toml`/lock,
+  `python/Cargo.toml`/`pyproject.toml`/lock). `check` reports all six agree on
+  0.13.0; no ordering crate stale (all unchanged since v0.12.0 at v0.2.1).
+- Cut `CHANGELOG.md` `## [0.13.0] - 2026-07-02` from `[Unreleased]` (contents:
+  #107 `OrderingMethod::External`).
+- Re-executed all five example notebooks against the 0.13.0 wheel
+  (`maturin build --release` → `feral_solver-0.13.0` abi3): 0 error outputs,
+  version output `feral 0.12.0` → `feral 0.13.0`.
+- Root `cargo test --release` green (all binaries 0 failed).
+- PR #109 opened, all CI green (check, stress-smoke, linux wheel tests
+  py3.10/3.12/3.13), squash-merged to main as `36da100`.
+- Tagged `v0.13.0`, published the GitHub release. `release.yml` (crates.io)
+  and `python-wheels.yml` (PyPI) both completed **success**.
+- Verified live: crates.io `feral` = **0.13.0**; PyPI `feral-solver` = **0.13.0**.
 
 ## Benchmark Results
+No solver code changed this session (release-only: version strings, CHANGELOG,
+re-executed notebooks), so numbers are unchanged from 2026-07-02-01. End-of-session
+run for the record:
 ```
-cargo run --bin bench --release (built-in fixtures; no data/ corpus present)
-  KKT dense: Inertia match 1/1 (100%), Residual pass 1/1, worst 1.14e-15
-  vs MUMPS:  Inertia match 2/2 (100%), Residual pass 2/2, worst 1.26e-16
-  8 matrices benchmarked; no failures (dense or sparse).
+--- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     147982     1.71     <= 2.0     PASS
+medium (<500)            152145     2.09     <= 3.0     PASS
+
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.52     <= 2.0     PASS
+medium (<500)            153560     1.52     <= 3.0     PASS
+```
+All exit-partition buckets PASS, unchanged from the prior session.
+
+## Decisions Made
+- None (release-only session).
+
+## Abandoned Approaches
+- None.
+
+## Next Session Should
+- Return to the open engineering backlog (LU / ordering / dense-kernel follow-ups);
+  no release-blocking items outstanding.
 ```
 
 ## Git Status
 ```
+36da100 release: feral v0.13.0 (#109)
+9d05f75 issue #107: add OrderingMethod::External for user-supplied orderings (#108)
 a1dd7b5 release: feral v0.12.0 (#106)
 1165d4d issue #102 follow-up: escalate ordering to LdltCompress on pivot growth (#105)
 d6fe546 issue #102: fix parallel dense-front re-entrant deadlock (0% CPU stall) (#104)
-bc24fc9 issue #99: packed BLAS-3 dense trailing update (byte-exact) + opt-in FMA-large-fronts gate (#103)
-f54b335 docs: session checkpoint 2026-07-01-03 (issue #91 dense-kernel follow-up) (#100)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
-test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
+test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 395 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.95s
+test result: ok. 397 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.50s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-02-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-02-02.md)
 
-cargo run --bin bench --release (built-in fixtures; no data/ corpus present)
-  KKT dense: Inertia match 1/1 (100%), Residual pass 1/1, worst 1.14e-15
-  vs MUMPS:  Inertia match 2/2 (100%), Residual pass 2/2, worst 1.26e-16
-  8 matrices benchmarked; no failures (dense or sparse).
-No performance change expected or observed: `External` is a new opt-in ordering
-source; the default `Auto` path is byte-exact.
+No solver code changed this session (release-only: version strings, CHANGELOG,
+re-executed notebooks), so numbers are unchanged from 2026-07-02-01. End-of-session
+run for the record:
+--- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     147982     1.71     <= 2.0     PASS
+medium (<500)            152145     2.09     <= 3.0     PASS
+
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.52     <= 2.0     PASS
+medium (<500)            153560     1.52     <= 3.0     PASS
+All exit-partition buckets PASS, unchanged from the prior session.
 
 ```
 
@@ -218,8 +224,8 @@ tests/amf_corpus_oracle.rs
 tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
-tests/column_renumbering.rs
 tests/column_renumbering_parity.rs
+tests/column_renumbering.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -232,6 +238,14 @@ tests/factors_ld_export.rs
 tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/growth_flag.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -241,14 +255,6 @@ tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
@@ -272,8 +278,8 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/rook_rescue.rs
 tests/rook_rescue_kkt.rs
+tests/rook_rescue.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
