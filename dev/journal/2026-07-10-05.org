@@ -117,3 +117,26 @@ Verification: lazy-bpack1 is bit-identical (parity suite) and removes an
 allocation + O(len) zero-fill per all-1×1 packed panel — self-evident from
 the code (Vec::new() branch). Wall-clock unmeasurable at these front sizes
 (noise >> the saved memset). Full suite 76 binaries green, clippy/fmt clean.
+
+** 14:25 :issue-129:panel-fragmentation:measure-first:not-justified:
+Measure-first per the 2026-05-13 decision. Built src/bin/probe_panel_frag.rs
+(PANEL_DIAG_ENABLED + PHASE_TIMING_ENABLED, sequential driver for clean phase
+attribution) and ran the indefinite corpus (saddle_rankdef_*, rankdef_*,
+ACOPP30, AVION2, VESUVIO, CRESC132, nuffield2).
+
+Result (time-weighted aggregate): panels fragment 99.9% (partial=24190 vs
+full=14) and 66% of pivots go scalar — BUT the Schur trailing update (the
+only thing fragmentation inflates via truncated-width re-traversal) is only
+4.1% of dense-front time; panel-factor 0.2%, scalar-tail 8.4%. The two
+matrices that cost anything (nuffield2 13.3s schur=4.1%, VESUVIO 1.2s
+schur=0.8%) have LOW schur%. High-schur% matrices (ACOPP30 19%, saddle 28%)
+are all sub-2ms.
+
+Conclusion: fragmentation's addressable Schur cost (4.1%) is below the issue's
+own 10-15% close threshold. Large dense fronts (where blocking matters) don't
+fragment expensively; the fragmentation count is dominated by nuffield2's tiny
+path-like fronts where a panel is barely wider than scalar. The swapped-row
+replay primitive is NOT justified — deferred. Separate finding: ~87% of
+dense-front time is the small-front diagonal/scalar path, not the blocked
+panel/Schur machinery, so future dense-kernel effort should target that.
+Recorded in dev/research/panel-fragmentation-2026-07-10.md. Close #129.
