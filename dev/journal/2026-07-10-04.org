@@ -1,0 +1,42 @@
+#+TITLE: Session 2026-07-10-04 journal
+#+STARTUP: showall
+
+* Round: correctness-edge issues #120–#123
+
+** 11:11 :issue-120:cascade-break:scaling:
+Committed d6f8ebd. apply_post_scaling_overrides now multiplies
+cascade_break_eps by ||D.A.D||_inf (mirroring the N2 static_pivot_floor
+fix), so the cascade-break supernode's PerturbToEps floor is RELATIVE to
+the scaled matrix the BK kernel operates on. Root cause: default-armed
+1e-10 was an ABSOLUTE per-pivot floor, but kernels work on D.A.D; under
+Identity scaling on gamma*K (gamma=1e-12) every pivot ~gamma*||K|| << 1e-10
+was bent to +/-1e-10 (~1e2*||A|| perturbation), silently returning the
+inertia of A+Delta with ||Delta|| >> ||A||. Unit test
+cascade_break_eps_scaled_by_matrix_norm guards the None-in/None-out and
+norm-tracking cases. Full suite green.
+
+** 11:21 :issue-121:symbolic-cache:hash-collision:
+Symbolic-cache hit was gated on the PatternFingerprint only — a u64 hash.
+Two distinct patterns sharing (n, nnz) collide with probability 2^-64;
+a hash-only check would then scatter the new values through the OLD
+pattern's perm, silently corrupting the factor and inertia with no error
+(same failure mode REG-1 closed for the permute cache with a stored
+pattern). Fix in Solver::factor: added a `last_pattern:
+Option<(Vec<usize>, Vec<usize>)>` field kept in lockstep with
+last_pattern_fingerprint; `cache_valid` now requires the fingerprint match
+AND an exact O(n+nnz) (col_ptr, row_idx) compare. Fingerprint stays the
+fast reject; the exact compare confirms. Stored only on a cache miss
+(clone cost paid exactly when symbolic is (re)built), cleared everywhere
+the fingerprint is cleared (invalidate path + invalidate_symbolic_cache).
+
+Test f4_forged_fingerprint_collision_does_not_reuse_stale_symbolic:
+reproduces the 2^-64 event DETERMINISTICALLY — factor A (SPD tridiag,
+inertia (3,0,0)), overwrite last_pattern_fingerprint with B's while
+last_pattern still holds A's exact pattern, then factor B (3x3 arrow,
+same (n,nnz)=(3,5) and same col_ptr as A but different row_idx; hand
+oracle: eigvals {0.1, 0.1+-sqrt2} = {0.1, 1.514, -1.314} -> (2,1,0)).
+Post-fix: symbolic_call_count 1->2 (fresh symbolic forced) and B's inertia
+== untainted-Solver oracle (2,1,0). Verified pre-fix FAILS: with the
+guard reverted to hash-only the count stays at 1 (stale reuse) —
+"left: 1, right: 2". Full suite (75 test binaries) green,
+clippy --all-targets -D warnings clean, fmt clean.

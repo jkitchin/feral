@@ -192,6 +192,15 @@ pub struct Solver {
     last_factors: Option<SparseFactors>,
     last_inertia: Option<Inertia>,
     last_pattern_fingerprint: Option<PatternFingerprint>,
+    /// The exact `(col_ptr, row_idx)` of the pattern the cached symbolic was
+    /// built for, kept in lockstep with `last_pattern_fingerprint`. The
+    /// fingerprint is only a `u64` hash, so a collision between two distinct
+    /// patterns sharing `(n, nnz)` would silently reuse a stale symbolic —
+    /// its `perm` scatters the new values into fronts whose `row_map` lookups
+    /// miss, dropping entries and corrupting the factor/inertia with no error.
+    /// The exact `O(n + nnz)` compare on a fingerprint hit forecloses that
+    /// (issue #121), mirroring the permute-cache's REG-1 stored-pattern rule.
+    last_pattern: Option<(Vec<usize>, Vec<usize>)>,
     /// Diagnostic counter: number of times `symbolic_factorize` was
     /// called from this `Solver`. Used by integration tests to
     /// verify the cache-reuse property and by future telemetry.
@@ -411,6 +420,7 @@ impl Solver {
             last_factors: None,
             last_inertia: None,
             last_pattern_fingerprint: None,
+            last_pattern: None,
             symbolic_call_count: 0,
             mc64_fallback_count: 0,
             mc64_scaling_fallback_count: 0,
@@ -872,11 +882,20 @@ impl Solver {
         // reused on this call. Sampling at entry — rather than at the
         // success branch — keeps the signal honest even if downstream
         // work fails after the symbolic has already been reused.
-        let pattern_reused = self.last_pattern_fingerprint == Some(fp);
+        // The cache is valid only when the fingerprint matches AND the exact
+        // stored pattern matches (issue #121): the fingerprint is a fast
+        // reject; an equal fingerprint is confirmed by the O(n + nnz) compare
+        // so a hash collision can never reuse a stale symbolic.
+        let cache_valid = self.last_pattern_fingerprint == Some(fp)
+            && self.last_pattern.as_ref().is_some_and(|(cp, ri)| {
+                cp.as_slice() == matrix.col_ptr && ri.as_slice() == matrix.row_idx
+            });
+        let pattern_reused = cache_valid;
 
         // Step 2: invalidate cache on pattern change.
-        if self.last_pattern_fingerprint != Some(fp) {
+        if !cache_valid {
             self.last_symbolic = None;
+            self.last_pattern = None;
             self.last_factors = None;
             self.last_inertia = None;
             self.last_pattern_fingerprint = None;
@@ -934,6 +953,10 @@ impl Solver {
                     self.symbolic_call_count += 1;
                     self.last_symbolic = Some(sym);
                     self.last_pattern_fingerprint = Some(fp);
+                    // Store the exact pattern (issue #121) so a future
+                    // fingerprint hit is confirmed by an exact compare, never
+                    // reused on a hash collision. Cloned only on a cache miss.
+                    self.last_pattern = Some((matrix.col_ptr.clone(), matrix.row_idx.clone()));
                 }
                 Err(e) => return FactorStatus::FatalError(e),
             }
@@ -1910,6 +1933,7 @@ impl Solver {
     pub fn invalidate_symbolic_cache(&mut self) {
         self.last_symbolic = None;
         self.last_pattern_fingerprint = None;
+        self.last_pattern = None;
     }
 }
 
@@ -2678,6 +2702,86 @@ mod tests {
             PatternFingerprint::of(&a),
             PatternFingerprint::of(&b),
             "different col_ptr distribution must fingerprint differently"
+        );
+    }
+
+    /// F4 — issue #121: a forged fingerprint collision must NOT reuse the
+    /// stale symbolic. The fingerprint is a `u64`, so two distinct patterns
+    /// sharing `(n, nnz)` can (with probability 2⁻⁶⁴) collide; a hash-only
+    /// cache check would then scatter the new values through the old pattern's
+    /// `perm`, silently corrupting the factor and inertia. The exact
+    /// `(col_ptr, row_idx)` compare on a fingerprint hit closes that.
+    ///
+    /// We reproduce the 2⁻⁶⁴ event deterministically by overwriting the stored
+    /// fingerprint with B's while `last_pattern` still holds A's exact pattern.
+    #[test]
+    fn f4_forged_fingerprint_collision_does_not_reuse_stale_symbolic() {
+        // A: SPD tridiagonal → inertia (3,0,0). col_ptr=[0,2,4,5],
+        // row_idx=[0,1,1,2,2].
+        let a = tridiag(3, 10.0, 1.0);
+        // B: 3×3 arrow, small diagonal, indefinite. SAME (n, nnz)=(3,5) and
+        // SAME col_ptr as A, but a DIFFERENT row_idx (the arrow tail in cols
+        // 0/1 hits row 2, not the sub-diagonal). Hand oracle: (1,-1,0) gives
+        // λ=0.1; the orthogonal 2×2 block [[0.1,√2],[√2,0.1]] gives
+        // 0.1±√2 = {1.514, −1.314} → inertia (2,1,0).
+        let b = CscMatrix::from_triplets(
+            3,
+            &[0, 2, 1, 2, 2],
+            &[0, 0, 1, 1, 2],
+            &[0.1, 1.0, 0.1, 1.0, 0.1],
+        )
+        .expect("valid CSC");
+        // Precondition: A and B share (n, nnz) and col_ptr but differ in
+        // row_idx, so a stale-symbolic reuse would silently corrupt B.
+        assert_eq!(a.n, b.n);
+        assert_eq!(a.col_ptr, b.col_ptr, "same col_ptr — collision realistic");
+        assert_ne!(a.row_idx, b.row_idx, "different pattern — must not reuse");
+
+        // Oracle for B from an untainted Solver (no forged collision).
+        let mut fresh = Solver::new();
+        let st = fresh.factor(&b, None);
+        assert!(
+            matches!(st, FactorStatus::Success),
+            "fresh B factor: {:?}",
+            st
+        );
+        assert_eq!(
+            *fresh.inertia().expect("B inertia"),
+            Inertia::new(2, 1, 0),
+            "hand oracle: B is indefinite (2,1,0)"
+        );
+
+        // Collision scenario on a single Solver: factor A, then forge B's
+        // fingerprint over the stored one.
+        let mut s = Solver::new();
+        let st = s.factor(&a, Some(Inertia::new(3, 0, 0)));
+        assert!(matches!(st, FactorStatus::Success), "A factor: {:?}", st);
+        let calls_after_a = s.symbolic_call_count();
+        assert_eq!(calls_after_a, 1);
+
+        // Forge the collision: overwrite the stored fingerprint with B's so
+        // the fast-reject passes, while `last_pattern` still holds A's exact
+        // pattern.
+        s.last_pattern_fingerprint = Some(PatternFingerprint::of(&b));
+
+        let st = s.factor(&b, None);
+        assert!(
+            matches!(st, FactorStatus::Success),
+            "B factor after forged collision: {:?}",
+            st
+        );
+        // The exact-compare guard must reject the collision and rebuild the
+        // symbolic — a hash-only check would keep this at 1 and corrupt B.
+        assert_eq!(
+            s.symbolic_call_count(),
+            calls_after_a + 1,
+            "forged fingerprint collision must force a fresh symbolic (issue #121)"
+        );
+        // And B's inertia matches the untainted oracle — no silent corruption.
+        assert_eq!(
+            *s.inertia().expect("B inertia after collision"),
+            Inertia::new(2, 1, 0),
+            "B inertia must be correct despite the forged collision"
         );
     }
 
