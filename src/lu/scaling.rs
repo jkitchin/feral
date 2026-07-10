@@ -123,12 +123,12 @@ pub fn equilibrate_infnorm(b: &SparseColMatrix, iters: usize) -> LuScale {
         }
         for (dr, &rm) in d_row.iter_mut().zip(row_max.iter()) {
             if rm > 0.0 {
-                *dr /= rm.sqrt();
+                *dr = crate::scaling::kr_guarded_update(*dr, rm);
             }
         }
         for (dc, &cm) in d_col.iter_mut().zip(col_max.iter()) {
             if cm > 0.0 {
-                *dc /= cm.sqrt();
+                *dc = crate::scaling::kr_guarded_update(*dc, cm);
             }
         }
     }
@@ -199,12 +199,12 @@ fn compose_with_infnorm(b: &SparseColMatrix, mut scale: LuScale) -> LuScale {
         }
         for (dr, &rm) in scale.d_row.iter_mut().zip(row_max.iter()) {
             if rm > 0.0 {
-                *dr /= rm.sqrt();
+                *dr = crate::scaling::kr_guarded_update(*dr, rm);
             }
         }
         for (dc, &cm) in scale.d_col.iter_mut().zip(col_max.iter()) {
             if cm > 0.0 {
-                *dc /= cm.sqrt();
+                *dc = crate::scaling::kr_guarded_update(*dc, cm);
             }
         }
     }

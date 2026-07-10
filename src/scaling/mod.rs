@@ -56,6 +56,32 @@ pub fn mc64_matching(matrix: &CscMatrix) -> Result<(Vec<usize>, usize), FeralErr
     mc64::matching_perm(matrix)
 }
 
+/// One Knight–Ruiz equilibration step `d ← d / √m`, guarded against
+/// overflow/underflow (issue #119). Applies the update only when the result
+/// stays finite and strictly positive; otherwise `d` is held at its last good
+/// value. `m` is the row/column ∞-norm and is assumed `> 0` (the caller's
+/// existing `m > 0` guard).
+///
+/// On well-scaled matrices `d / √m` is always finite and positive, so this is
+/// **bit-identical** to the bare division — the guard bites only on extreme or
+/// subnormal couplings, where the unguarded `d` would reach `±Inf` (then `NaN`
+/// on the next sweep) or `0`. Such a value silently poisons every coupled row
+/// and the downstream factorization; the MC64 scaling path already rewrites
+/// non-finite/zero factors defensively (`scaling::mc64`), and this brings the
+/// Knight–Ruiz paths (`scaling::infnorm`, `lu::scaling`, `dense::equilibrate`)
+/// to the same safety. Keeping `d` finite each sweep — rather than only
+/// sanitizing at the end — also stops one overflowing row from dragging its
+/// neighbours to zero.
+#[inline]
+pub(crate) fn kr_guarded_update(d: f64, m: f64) -> f64 {
+    let cand = d / m.sqrt();
+    if cand.is_finite() && cand > 0.0 {
+        cand
+    } else {
+        d
+    }
+}
+
 /// Cached MC64 output: everything needed to both drive ordering
 /// compression (`perm`) and derive the symmetric scaling vector
 /// (`u`, `v`, `cmax`) without rerunning the expensive Hungarian
