@@ -895,6 +895,18 @@ pub struct SparseFactors {
     /// Concrete ordering preprocessor actually used. Mirrored
     /// from `SymbolicFactorization::resolved_preprocess`.
     pub resolved_preprocess: crate::symbolic::OrderingPreprocess,
+
+    /// Issue #131 Gap A: assembly-tree parent of each supernode, indexed
+    /// like `node_factors` (postorder). `node_parents[i] == Some(p)` iff
+    /// supernode `i`'s contribution block assembles into supernode `p`;
+    /// `None` for roots. Mirrored from `SymbolicFactorization` at factor
+    /// time (the symbolic analysis is not retained by `SparseFactors`).
+    /// The tree-parallel solve uses it to order forward substitution
+    /// (leaves-up: a node runs once all its children have) and backward
+    /// substitution (root-down: a node runs once its parent has). Empty
+    /// for ad-hoc `SparseFactors` built without a symbolic tree (the
+    /// serial postorder solve does not consult it).
+    pub node_parents: Vec<Option<usize>>,
 }
 
 /// A flat, factorization-order export of the LDLᵀ factors.
@@ -1637,6 +1649,8 @@ pub fn dense_fast_factor_with_workspace(
             resolved_method: crate::symbolic::OrderingMethod::Amd,
             resolved_amalgamation: crate::symbolic::AmalgamationStrategy::Adjacency,
             resolved_preprocess: crate::symbolic::OrderingPreprocess::None,
+            // Dense fast-path: a single supernode, no assembly tree.
+            node_parents: vec![None],
         },
         inertia,
     ))
@@ -1914,6 +1928,7 @@ fn factorize_multifrontal_with_schur_inner(
         resolved_method: symbolic.resolved_method.clone(),
         resolved_amalgamation: symbolic.resolved_amalgamation,
         resolved_preprocess: symbolic.resolved_preprocess,
+        node_parents: build_node_parents(symbolic),
     };
     let schur = SchurBlock {
         dim: n_schur,
@@ -2248,6 +2263,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
             resolved_method: symbolic.resolved_method.clone(),
             resolved_amalgamation: symbolic.resolved_amalgamation,
             resolved_preprocess: symbolic.resolved_preprocess,
+            node_parents: build_node_parents(symbolic),
         },
         total_inertia,
     ));
@@ -3276,6 +3292,7 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
             resolved_method: symbolic.resolved_method.clone(),
             resolved_amalgamation: symbolic.resolved_amalgamation,
             resolved_preprocess: symbolic.resolved_preprocess,
+            node_parents: build_node_parents(symbolic),
         },
         total_inertia,
     ))
@@ -3940,6 +3957,24 @@ fn build_permute_value_map(
 /// Trailing rows are deduplicated against the fully-summed set so a
 /// delayed column that also shows up as a pattern row of a parent
 /// column (via the full symmetric pattern) does not appear twice.
+/// Issue #131 Gap A: assembly-tree parent per supernode, indexed like
+/// `node_factors` (postorder). `parents[c] == Some(i)` iff supernode `i`
+/// lists `c` among its children. Mirrored into `SparseFactors` so the
+/// tree-parallel solve can order forward (leaves-up) and backward
+/// (root-down) substitution without retaining the symbolic analysis.
+fn build_node_parents(symbolic: &SymbolicFactorization) -> Vec<Option<usize>> {
+    let n_snodes = symbolic.supernodes.len();
+    let mut parents: Vec<Option<usize>> = vec![None; n_snodes];
+    for (i, snode) in symbolic.supernodes.iter().enumerate() {
+        for &c in &snode.children {
+            if c < n_snodes {
+                parents[c] = Some(i);
+            }
+        }
+    }
+    parents
+}
+
 fn build_row_indices(
     snode: &crate::symbolic::supernode::Supernode,
     full_pattern: &crate::sparse::csc::CscPattern,
