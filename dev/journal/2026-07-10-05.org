@@ -57,3 +57,31 @@ the authoritative proof.
 
 Full suite 76 binaries green, parallel_parity green, clippy --all-targets
 -D warnings + fmt clean.
+
+** 13:20 :issue-126:solve:fusion:bit-identical:
+Single-RHS sparse solve (solve_sparse_core_into) ran three separate
+postorder sweeps: forward L-solve, D-block solve, backward Lᵀ-solve. The
+forward and D sweeps each gather/scatter all nrow rows of every supernode.
+Fused the D-block solve into the forward pass (apply D⁻¹ to w[0..nelim]
+right after the within-node L-solve, before scatter-back), deleting the
+separate D sweep — one full gather/scatter round trip per solve removed.
+
+Correctness: a node's eliminated rows (0..nelim) are final once its
+forward-sub completes (ancestors touch only its separator rows nelim..nrow;
+siblings are disjoint), so D⁻¹ is applied exactly once per row by its owning
+node — identical row-by-row result to the two-pass version. The multi-RHS
+core (solve_sparse_core_many_into) has always fused this way. New test
+fused_single_rhs_matches_multi_rhs_k1_issue_126 pins single-RHS ==
+multi-RHS(k=1) bit-for-bit through 2×2 D-blocks on an indefinite KKT.
+multi_rhs suite (13) + full solve corpus green.
+
+Perf (warm solve, min_ns of 200-500 iters):
+- banded n=200000: 15.80 ms -> 13.58 ms (-14%)
+- cresc132 n=5314:  374.3 µs -> 265.7 µs (-29%)
+Consistent on median too (18.1->15.1 ms; 407->282 µs).
+
+Scoped this commit to the fusion (the algorithmic win). The issue's second
+half — pooling SolveWorkspace on the &self entry points — needs interior
+mutability and overlaps the #128 allocation bundle; deferred there.
+
+Full suite 76 binaries green, clippy --all-targets -D warnings + fmt clean.

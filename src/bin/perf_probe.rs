@@ -89,6 +89,22 @@ fn main() {
             .unwrap_or_else(|| "none".into()),
     );
 
+    // Solve timing: repeated single-RHS solves on the warm factor (the
+    // refinement/condition-estimation inner loop). Measures issue #126.
+    let rhs = vec![1.0f64; n];
+    let _ = solver.solve(&rhs); // warm
+    let mut solve_walls = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let t0 = Instant::now();
+        let _ = solver.solve(&rhs);
+        solve_walls.push(t0.elapsed().as_nanos());
+    }
+    let solve_min_ns = solve_walls.iter().min().copied().unwrap_or(0);
+    let mut sv: Vec<u128> = solve_walls;
+    sv.sort_unstable();
+    let solve_med_ns = sv.get(sv.len() / 2).copied().unwrap_or(0);
+    println!("  solve_min_ns={solve_min_ns} solve_median_ns={solve_med_ns}");
+
     // A separate profiled solver to attribute the prologue (profiling adds
     // overhead, so it is kept out of the timing number above).
     let mut prof = make_solver(sequential, true);

@@ -279,32 +279,14 @@ fn solve_sparse_core_into(
             }
         }
 
-        // Undo BK permutation and scatter back
-        for i in 0..nrow {
-            y[node.row_indices[ff.perm[i]]] = w[i];
-        }
-    }
-
-    // Phase 2: D-block solve
-    for node in &factors.node_factors {
-        let ff = &node.frontal_factors;
-        let nelim = ff.nelim;
-        let nrow = ff.nrow;
-        if nelim == 0 {
-            continue;
-        }
-
-        // Gather and apply BK permutation
-        let w = &mut w_buf[..nrow];
-        for i in 0..nrow {
-            w[i] = y[node.row_indices[ff.perm[i]]];
-        }
-
-        // D-block solve over the `nelim` eliminated pivots. `d_diag`
-        // and `d_subdiag` are sized `nelim`, so bounding by `ncol`
-        // would run off the end on any node that delayed columns.
-        // Pivots that were force-accepted as zero during factorization
-        // are skipped — see dev/plans/threshold-mismatch-fix.md.
+        // D-block solve, fused into the forward pass (issue #126). A
+        // node's eliminated rows (0..nelim) are final once its forward-sub
+        // completes — ancestors only ever touch its separator rows — so
+        // D⁻¹ can be applied here instead of in a second postorder pass,
+        // saving one full gather/scatter sweep per solve. This mirrors the
+        // multi-RHS core (`solve_sparse_core_many_into`), which has always
+        // fused these. `d_diag`/`d_subdiag` are sized `nelim`; pivots
+        // force-accepted as zero are skipped.
         let mut k = 0;
         while k < nelim {
             if k + 1 < nelim && ff.d_subdiag[k] != 0.0 {
@@ -1413,6 +1395,51 @@ mod tests {
             rel_res,
             tol
         );
+    }
+
+    /// Issue #126: the single-RHS core now fuses the D-block solve into
+    /// the forward pass (previously a separate second postorder sweep),
+    /// mirroring the multi-RHS core. The fused result must be bit-for-bit
+    /// identical to the multi-RHS core with `nrhs = 1` (which has always
+    /// fused), including through 2×2 D-blocks on an indefinite KKT. This
+    /// pins the fusion so a regression cannot silently change solutions.
+    #[test]
+    fn fused_single_rhs_matches_multi_rhs_k1_issue_126() {
+        // Indefinite saddle-point KKT with a zero-Hessian variable block,
+        // which forces 2×2 D-blocks in Bunch-Kaufman — the fusion's tricky
+        // case (2×2 pivot straddling the gather/scatter boundary).
+        //
+        //   [  1        1   ]
+        //   [     1     1   ]
+        //   [        1  1   ]
+        //   [  1  1  1  0   ]   (dual row: zero diagonal)
+        let m = CscMatrix::from_triplets(
+            4,
+            &[0, 1, 2, 3, 3, 3],
+            &[0, 1, 2, 0, 1, 2],
+            &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
+        let (factors, _) = factorize_multifrontal(&m, &sym, &make_params()).unwrap();
+
+        for rhs in [
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![-5.0, 0.0, 7.0, 1.0],
+            vec![1.0, 1.0, 1.0, 1.0],
+        ] {
+            let single = solve_sparse(&factors, &rhs).unwrap();
+            let many = solve_sparse_many(&factors, &rhs, 1).unwrap();
+            assert_eq!(single.len(), many.len());
+            for (i, (s, mny)) in single.iter().zip(many.iter()).enumerate() {
+                assert_eq!(
+                    s.to_bits(),
+                    mny.to_bits(),
+                    "issue #126: fused single-RHS diverged from multi-RHS(k=1) \
+                     at component {i} (rhs={rhs:?}): {s} vs {mny}"
+                );
+            }
+        }
     }
 
     #[test]
