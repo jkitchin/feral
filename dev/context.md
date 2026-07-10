@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-10T03:55:16Z
+Generated: 2026-07-10T10:32:51Z
 
 ## Latest Session
-File: dev/sessions/2026-07-10-01.md
+File: dev/sessions/2026-07-10-03.md
 ```
-# Session 2026-07-10-01
+# Session 2026-07-10-03
 
 ## Goal
-Issue #112: the sparse LU Forrest–Tomlin update fails with
-`RefactorCause::TinyPivot` at magnitude exactly `0.0` on provably nonsingular,
-well-conditioned bases (100% of FT failures in discopt's refactor storms).
-Requested: a pivot-searching (Bartels–Golub/Suhl–Suhl) update variant.
+Fix the six audit-confirmed correctness bugs #114–#119 (from the 2026-07-10
+six-agent audit), one at a time, each as its own tested commit.
 
 ## Accomplished
-- Research note `dev/research/issue-112-bg-update.md` + plan
-  `dev/plans/issue-112-bg-update.md` (branch `claude/issue-112-0885lr`).
-- **Disproof of the requested rescue design** (implemented first, then
-  removed on proof): any within-bump row-interchange order's working row is
-  exactly proportional to the fixed order's (`W'_k = λ_k·W_k`, λ resets to
-  `−piv/vrc` per swap), so the true final pivot is `λ·t_FT` (determinant
-  identity), skip patterns coincide, and FP absorption is scale-invariant —
-  a pivot the fixed order computed as exactly 0.0 by summation absorption is
-  unrecoverable by ANY pivot re-ordering. Verified numerically (float +
-  exact-Fraction sweep replays; on the regression basis the swap path's
-  final diag is `1.39e-17 = λ·2⁻³⁵`, correctly sub-ztol).
-- **Shipped the actual fix: Neumaier-compensated accumulation** in the bump
-  elimination's working-row scatter (always on; pooled `ft_rw_comp`;
-  branch-free two-sum). On the hand-traced m=4 regression basis the plain
-  sweep commits `0.0` exactly, the compensated sweep commits the true
-  diagonal `2⁻³⁵` **bit-for-bit** (oracle: hand calculation verified offline
-  in exact rational arithmetic; scipy's fresh LU sees only ε-noise). Classic
-  Kahan verified insufficient (its `y = v − c` re-absorbs the compensation).
-- **Shipped the pivot search as an opt-in always-on variant**:
-  `LuParams::update_pivot_search` (default `false`), Bartels–Golub
-  interchanges as physical row-content swaps (`FtOp::Swap` etas — symmetric
-  `uperm` invariant, diagonal-first storage, and prior etas untouched;
-  forward/transpose/spike replays; wholesale `u_above` rebuild and
-  swapped-row rollback snapshots on that path; `pivot_search_swaps()`
-  telemetry). Python bindings expose the keyword.
-- Tests: `tests/issue112_bg_update.rs` (5 tests) — bit-exact recovered
-  diagonal, backward-stable ftran/btran residuals (2.9e-11 vs bound
-  3.7e-10), genuine-singular rejection + clean rollback in both modes,
-  swap-mode factor validity incl. chained updates replaying Swap etas,
-  default path never swaps. Full suite green (395 lib + all integration),
-  clippy `--all-targets -D warnings` clean, fmt clean.
-- Test-design finding (documented): any single-shot absorption reproducer
-  has `σ_min(B') ⪅ δ·∏(retained diags)` — numerically singular to a
-  from-scratch factorization — so the issue's "residual ≤ refactor's"
-  acceptance can only be validated on discopt's captured corpus (whose
-  imbalance lives in chain-built factorization state, not in B').
+All six fixed, committed, full-suite + clippy green after each. Empirical
+reproduction confirmed before encoding every fix (issue-112 discipline).
+
+- **#114** (`90cb4fe`): finiteness validation in `update_sparse` +
+  `DenseLu::update`. NaN was silently committed → `Ok(NaN)` solve.
+- **#118** (`373264f`): store factor `a_max`; anchor update ztol to
+  `zero_pivot_tol·a_max`, not `u_max0`. Fixes spurious `TinyPivot` +
+  update→refactor **livelock** on high-growth bases.
+- **#115** (`ae13f27`): reworked `DenseLu::update` to an eta-based
+  Bartels–Golub update. **The issue's suggested "swap rows in U + fix L" does
+  not work** — a row swap of U forces a column swap of L that breaks its
+  unit-lower-triangular structure (worked the algebra). Correct fix mirrors
+  the sparse path: base `L` fixed, eliminations+interchanges recorded as
+  `DenseFtOp` etas replayed between the L- and U-solves; `ftran_partial` now
+  returns `G⁻¹L⁻¹Pa`. Partial pivoting bounds multipliers by 1 (growth `O(m)`
+  on the Hessenberg), superseding the sparse path's Neumaier need. New
+  `tests/lu_dense_update_bg.rs` (bump chains, slack bases, ftran+btran parity
+  vs fresh factor); all 10 adversarial tests now pass (0 ignored).
+- **#119** (`d7aafea`): `scaling::kr_guarded_update` applied to all 7
+  Knight–Ruiz update sites. Bit-identical on healthy matrices (KR
+  dense/sparse parity preserved); guards the `Inf→NaN→0` cascade on subnormal
+  couplings (confirmed the unguarded loop yields `[NaN, 0.0]`).
+- **#116** (`e5b6d4b`): chose the **solve-side** fix (skip iff
+  `d_diag == 0.0` exactly) over the audit's separate mask — safer for the hard
+  inertia rule because it changes **no** factorization (the force-accept-zero
+  path already sets `d = 0.0` exactly and is the only skip outcome). The
+  skip-iff-exactly-0.0 invariant was verified **empirically**: the whole
+  corpus (inertia oracles + threshold suites) stays green with the gate
+  change. Rook sub-floor accepts now set `needs_refinement`/`n_tiny`.
+- **#117** (`4a1d163`): blocked panel bails a rook-eligible below-threshold
+  1×1 pivot to the scalar (rook) path (the panel can't rook itself — its
+  trailing submatrix isn't Schur-updated yet). The 1×1-no-swap gate
+  (`akk ≥ α·gamma0`) means the bail only fires for near-zero columns (the
+  audit's case). `remaining==1` scalar site also routed through the rook
+  wrapper. Parity test: EPS-scale near-zero panel column → scalar==blocked
+  byte-identical with `n_rook_rescues > 0` (impossible pre-fix). Rook-disabled
+  default path byte-unchanged.
 
 ## Benchmark Results
 ```
-(this container has no oracle-timed corpus; the bench harness ran its
-in-tree matrices only — correctness gates, no perf partition)
+Dense KKT:  inertia match 1/1, residual pass 1/1, worst 1.14e-15
+Sparse KKT: inertia vs MUMPS 2/2, residual pass 2/2, worst 1.26e-16
+```
 ```
 
 ## Git Status
 ```
-82a81bd issue #112: compensated FT sweep + opt-in Bartels-Golub pivot search
-5794f0e issue #112: research note + plan for Bartels-Golub pivot-searching update
-9596472 docs: session checkpoint 2026-07-02-02 (v0.13.0 release)
-36da100 release: feral v0.13.0 (#109)
-9d05f75 issue #107: add OrderingMethod::External for user-supplied orderings (#108)
+4a1d163 issue #117: blocked/scalar rook parity — panel bails rook-eligible 1x1 to scalar
+e5b6d4b issue #116: divide by live tiny LDLT pivots at solve (rook factor/solve contract)
+d7aafea issue #119: guard Knight-Ruiz equilibration against non-finite scale factors
+ae13f27 issue #115: eta-based Bartels-Golub dense LU update (fix zero-superdiagonal landmine)
+373264f issue #118: anchor LU update ztol to a_max, not u_max0
 ```
 
 ## Test Status
@@ -86,24 +86,19 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 395 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.89s
+test result: ok. 398 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.55s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-10-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-10-03.md)
 
-(this container has no oracle-timed corpus; the bench harness ran its
-in-tree matrices only — correctness gates, no perf partition)
-KKT summary: 2 matrices — inertia match 1/1, residual pass 1/1,
-  worst residual 1.14e-15
-Sparse solver: 2/2 — inertia vs MUMPS 2/2, residual pass 2/2,
-  worst residual 1.26e-16
-Dense/Sparse exit partition: 0 matrices (corpus absent) — N/A
-No solver-perf-relevant kernels changed on the default path except the
-compensated scatter (~4 flops per scatter add in the update only; factor
-and solve paths untouched).
+Dense KKT:  inertia match 1/1, residual pass 1/1, worst 1.14e-15
+Sparse KKT: inertia vs MUMPS 2/2, residual pass 2/2, worst 1.26e-16
+No inertia or residual regression. (No perf-partition corpus in-container.)
+Full suite: **769 passed / 0 failed**; clippy `--all-targets -D warnings`
+clean; `cargo fmt --check` clean.
 
 ```
 
@@ -258,7 +253,9 @@ tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
+tests/lu_adversarial_inputs.rs
 tests/lu_dense.rs
+tests/lu_dense_update_bg.rs
 tests/lu_ft_widebump.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
