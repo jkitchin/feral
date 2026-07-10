@@ -1,0 +1,28 @@
+* 02:48 :lu:ft-update:issue-112:orientation:
+Oriented on issue #112: the FT bump update (src/lu/sparse_update.rs,
+eliminate_pivot_row) returns RefactorCause::TinyPivot with magnitude exactly
+0.0 on provably nonsingular, well-conditioned bases (discopt evidence: 11714
+events on st_e36, 100% of FT failures; 120/120 captured bases full-rank,
+cond <= 3.4e6; refactor with partial pivoting always succeeds). Request: a
+pivot-searching (Bartels-Golub/Suhl-Suhl) update variant.
+
+Key code findings:
+- The zero pivot fires at the *final* diagonal check (sparse_update.rs:498):
+  diag = rw[r] after the fixed-order sweep. Intermediate pivots are old U
+  diagonals, all nonzero (checked at factor/commit), so line 458 rarely fires.
+- Determinant argument: the bump block M is nonsingular whenever B' is
+  (spiked U is block upper triangular around M), and the final diagonal is
+  mathematically det(M)/prod(old bump diags) != 0. So an exact-0.0 computed
+  value on a nonsingular basis is *floating-point cancellation* driven by
+  element growth in the fixed pivot order - exactly the instability
+  threshold row-interchanges (Bartels-Golub) bound (|mult| <= 1 per step).
+- ft-row-elimination-design-2026-06-21.md already lists "in-bump stability
+  pivoting" as future work. Nothing in dev/tried-and-rejected.md rejects it.
+
+Design insight for keeping the symmetric uperm invariant: implement the BG
+row interchange as a *physical* row-content swap between u_rows[c] and the
+working row (destined for u_rows[r]), recorded as a new FtOp::Swap{a,b}
+eta op (solve vectors swap s[a],s[b]). Column ranks never change, the
+diagonal-first storage convention survives (the working row placed at
+position c has its diagonal at column c), and uperm/uperm_inv are untouched
+beyond the existing cyclic shift. L, P, Q stay fixed; G absorbs the swap.
