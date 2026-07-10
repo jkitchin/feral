@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-10T16:53:36Z
+Generated: 2026-07-10T17:13:00Z
 
 ## Latest Session
 File: dev/sessions/2026-07-10-06.md
@@ -54,39 +54,39 @@ first, then Gap B.
   (~2.0×); cb_serial 13.0 ms (no regression); arrow → serial fallback,
   near-neutral.**
 
-All commits: full suite green, `cargo fmt --check` + `clippy -D warnings` clean
+- **#131 Gap A (3/n) — pool the CB workspace + wire into `Solver`** (commit
 ```
 
 ## Git Status
 ```
+ab4b2fc #131 Gap A (3/n): pool the CB workspace and wire it into Solver
+3d91ffb session 2026-07-10-06 checkpoint: #125 + #131 Gap A/B
 d83ca3e #131 Gap A (2/n): contribution-block tree-parallel single-RHS solve
 c12a5d3 #131 Gap A (1/n): carry the assembly tree into SparseFactors
 93cf6ed research: #131 Gap B (parallel assembly) measured not justified
-efa1000 #125: precompute static assembly row maps at analysis time
-77df474 research+plan: #131 parallelism design and implementation plan
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_single_schur_index ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
 test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 405 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 3.01s
+test result: ok. 405 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.98s
 
 ```
 
