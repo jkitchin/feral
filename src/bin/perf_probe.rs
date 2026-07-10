@@ -137,6 +137,21 @@ fn main() {
                 rayon::current_num_threads()
             );
         }
+        // End-to-end refined solve via the wired Solver path
+        // (Solver::solve_refined dispatches to the parallel CB refinement
+        // when use_parallel). `sequential` selects the serial baseline.
+        let _ = solver.solve_refined(&csc, &rhs);
+        let mut rwalls = Vec::with_capacity(iters);
+        for _ in 0..iters {
+            let t0 = Instant::now();
+            let _ = solver.solve_refined(&csc, &rhs);
+            rwalls.push(t0.elapsed().as_nanos());
+        }
+        println!(
+            "  solve_refined_min_ns={} driver={}",
+            rwalls.into_iter().min().unwrap_or(0),
+            if sequential { "serial" } else { "parallel" }
+        );
     }
 
     // A separate profiled solver to attribute the prologue (profiling adds

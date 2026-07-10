@@ -283,3 +283,24 @@ fast-path (lone root). Full suite green; fmt + clippy -D warnings clean.
 Scope note: multi-RHS core (solve_sparse_core_many_into) still shared-vector
 serial — a documented follow-up; single-RHS is the IPM refinement/condition
 hot path #131 motivates.
+
+* 19:45 :issue-131:gapa:solve:pooling:solver-wiring:
+Wired the CB parallel solve into the Solver (follow-up 3/n). Refactored the CB
+cores to run against a pooled CbSolveWorkspace (caches RHS-independent children
+lists + coarsening plan + per-worker scratch + y; scaling fused into the
+entry-permute / exit-unpermute, dropped scaled_rhs). solve_sparse_refined_core
+gained a parallel_cb flag: when set AND the factor is worthwhile, it builds ONE
+CbSolveWorkspace and reuses it for the initial + up-to-10 correction solves
+(no per-solve alloc churn — the stated concern); else the proven shared-vector
+SolveWorkspace path runs bit-for-bit. New pub solve_sparse_refined_parallel.
+Solver::solve_refined + solve_many_refined (per-column) dispatch to it when
+use_parallel, installed on the solver's own rayon pool (same worker count as the
+factor, no oversubscription). Small/path trees self-gate to serial (exact
+current behavior); only bushy trees switch to CB.
+MEASURED end-to-end (perf_probe, grid220 n=48400, Solver::solve_refined, warm):
+serial 56.0ms → parallel 29.0ms = ~1.93x. Refinement runs ~11 solves; the
+pooled workspace parallelizes each with no churn.
+Tests: cb_solve_parity (6), sparse_refined (13), parity (21), multi_rhs (5) all
+green; full suite green; fmt + clippy -D warnings clean. No solve baseline
+changed (residual-based tests survive the CB reassociation; refinement
+converges either way). Remaining: multi-RHS CB core (4/n).
