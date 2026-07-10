@@ -158,7 +158,6 @@ fn sparse_update_handles_slack_basis_self_replacement() {
 /// (zero) superdiagonal and returns `NeedsRefactor(TinyPivot, 0.0)` even for an
 /// identity column replaced with itself.
 #[test]
-#[ignore = "issue #115 — dense update zero-superdiagonal landmine; fix pending"]
 fn dense_update_commits_on_slack_basis() {
     // Identity self-replacement at every slot must be a no-op commit.
     for slot in 0..3 {
@@ -290,7 +289,6 @@ fn sparse_update_commits_on_high_growth_basis() {
 /// since the Wilkinson basis has zero superdiagonals — both fixes are needed
 /// for this to pass.)
 #[test]
-#[ignore = "issue #118 (+#115) — dense update fails on high-growth basis; fix pending"]
 fn dense_update_commits_on_high_growth_basis() {
     let m = 50;
     let cols = wilkinson(m);

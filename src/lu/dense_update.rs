@@ -1,23 +1,35 @@
 //! Dense rank-1 column-replacement update (Bartels–Golub).
 //!
 //! Replacing basis slot `leaving_slot` by a new column whose spike is
-//! `s = L⁻¹ P aₙₑw` (from [`DenseLu::ftran_partial`]) maintains the invariant
-//! `P B Q = L U` in three steps.
+//! `s = G⁻¹ L⁻¹ P aₙₑw` (from [`DenseLu::ftran_partial`]) maintains the
+//! invariant `P B Q = L G U` in three steps.
 //!
 //! Step one overwrites column `q = qcol_inv[leaving_slot]` of `U` with the
 //! spike `s`; `U` is then upper triangular except column `q`, which has a spike
 //! below the diagonal. Step two cyclically shifts columns `q..m-1` of `U` left
 //! by one and moves the spike column to position `m-1` (updating `Q`), turning
 //! `U` into upper-Hessenberg with a single subdiagonal on positions `q..m-2`.
-//! Step three eliminates that subdiagonal with a Gauss sweep (no in-bump
-//! pivoting; the growth monitor and `NeedsRefactor` handle instability): each
-//! elimination is a row operation on `U` and the corresponding column operation
-//! on `L`, so `L` stays unit lower triangular and `U` upper triangular.
+//! Step three reduces that Hessenberg back to upper triangular by **Bartels–
+//! Golub elimination with partial pivoting**: at each subdiagonal it pivots on
+//! the larger of the diagonal and the subdiagonal, interchanging the two rows
+//! when the subdiagonal wins.
 //!
-//! The work is done on clones of `L`, `U`, and `Q`, committed only on success,
-//! so a `NeedsRefactor` return leaves `self` unchanged and recoverable.
+//! Each elimination (and interchange) is recorded as a [`DenseFtOp`] eta rather
+//! than folded into `L`: a row interchange is an *unsymmetric* row permutation
+//! of `U`, and absorbing it into `L` would require a column swap that destroys
+//! `L`'s unit-lower-triangular structure. So — exactly as on the sparse path —
+//! the base `L`, `P`, and prior etas stay fixed, and the solves replay the etas
+//! between the `L`-solve and the `U`-solve. Partial pivoting is what makes this
+//! robust: it dodges the zero-superdiagonal landmine of the old fixed-order
+//! sweep (which pivoted on the shifted-in old superdiagonal — structurally zero
+//! for slack/triangular bases, so it refactored on trivially valid updates,
+//! issue #115) and bounds every multiplier by 1, so element growth stays `O(m)`
+//! on the Hessenberg and no compensated accumulation is needed.
+//!
+//! The work is done on clones of `U` and `Q` plus a local eta list, committed
+//! only on success, so a `NeedsRefactor` return leaves `self` unchanged.
 
-use super::dense_factor::DenseLu;
+use super::dense_factor::{DenseFtOp, DenseLu};
 use super::RefactorCause;
 use crate::error::FeralError;
 
@@ -84,17 +96,23 @@ impl DenseLu {
         let ztol = self.params.zero_pivot_tol * self.a_max;
         let max_growth = self.params.max_growth;
 
-        // Work on clones; commit only on success.
+        // Work on clones of U and Q, and accumulate new eliminations in a local
+        // eta list; the base L, P, and the prior etas are never touched, so
+        // rollback is simply *not committing*. (Unlike the old scheme, L is not
+        // modified: a Bartels–Golub row interchange is an unsymmetric row
+        // permutation of U that cannot be absorbed into an explicit
+        // unit-lower-triangular L — see the module header.)
         let mut u = self.u.clone();
-        let mut l = self.l.clone();
         let mut qcol = self.qcol.clone();
+        let mut new_etas: Vec<DenseFtOp> = Vec::new();
 
-        // 1. Overwrite column q of U with the spike.
+        // 1. Overwrite column q of U with the spike (`G⁻¹ L⁻¹ P aₙₑw`).
         for i in 0..m {
             u[i + q * m] = spike[i];
         }
 
-        // 2. Cyclic column shift q..m-1: spike column moves to position m-1.
+        // 2. Cyclic column shift q..m-1: spike column moves to position m-1,
+        //    turning U into upper-Hessenberg with one subdiagonal on q..m-2.
         cyclic_shift_columns(&mut u, m, q);
         let leaving = qcol[q];
         for j in q..m - 1 {
@@ -102,27 +120,49 @@ impl DenseLu {
         }
         qcol[m - 1] = leaving;
 
-        // 3. Eliminate the Hessenberg subdiagonal on positions q..m-2.
+        // 3. Reduce the Hessenberg U to triangular by Bartels–Golub elimination
+        //    with partial pivoting: pivot on the larger of the diagonal and the
+        //    subdiagonal, interchanging the two rows when the subdiagonal wins.
+        //    This both dodges the zero-superdiagonal landmine (the old
+        //    fixed-order sweep pivoted on the shifted-in old superdiagonal,
+        //    structurally zero for slack/triangular bases → spurious
+        //    TinyPivot(0.0)) and bounds every multiplier by 1, keeping element
+        //    growth O(m) on the Hessenberg (issue #115). Each elimination is
+        //    recorded as an eta; the base L is untouched.
         for k in q..m.saturating_sub(1) {
-            let piv = u[k + k * m];
+            let mut piv = u[k + k * m];
+            let sub = u[k + 1 + k * m];
+            if sub.abs() > piv.abs() {
+                // Interchange rows k and k+1 of U (all columns; both rows are
+                // zero left of column k, so this only reorders columns ≥ k) and
+                // record the swap so the base L/P stay fixed.
+                for j in 0..m {
+                    u.swap(k + j * m, k + 1 + j * m);
+                }
+                new_etas.push(DenseFtOp::Swap { a: k, b: k + 1 });
+                piv = u[k + k * m];
+            }
             if piv.abs() <= ztol {
+                // Both diagonal and subdiagonal vanish ⇒ column k is negligible
+                // ⇒ singular replacement (reported as TinyPivot, as on the
+                // sparse path; the authoritative verdict is a fresh factor).
                 self.last_refactor = Some((RefactorCause::TinyPivot, piv.abs()));
                 return Err(FeralError::NeedsRefactor);
             }
             let sub = u[k + 1 + k * m];
             if sub == 0.0 {
-                continue;
+                continue; // subdiagonal already zero (no elimination needed)
             }
-            let mult = sub / piv;
-            // Row op on U: row_{k+1} -= mult · row_k, columns k..m-1.
+            let mult = sub / piv; // |mult| ≤ 1 by the interchange
             for j in k..m {
                 u[k + 1 + j * m] -= mult * u[k + j * m];
             }
             u[k + 1 + k * m] = 0.0; // enforce exact zero
-                                    // Column op on L: col_k += mult · col_{k+1} (keeps L unit lower).
-            for i in 0..m {
-                l[i + k * m] += mult * l[i + (k + 1) * m];
-            }
+            new_etas.push(DenseFtOp::Axpy {
+                target: k + 1,
+                src: k,
+                mult,
+            });
         }
 
         // L5 (dev/research/repo-review-2026-06-09.md): monitor element growth,
@@ -149,13 +189,13 @@ impl DenseLu {
             return Err(FeralError::NeedsRefactor);
         }
 
-        // Commit.
+        // Commit. The base L is unchanged; the new eliminations extend G.
         self.u = u;
-        self.l = l;
         self.qcol = qcol;
         for (k, &slot) in self.qcol.iter().enumerate() {
             self.qcol_inv[slot] = k;
         }
+        self.etas.extend(new_etas);
         self.growth = growth;
         self.updates_since_refactor += 1;
         Ok(())
