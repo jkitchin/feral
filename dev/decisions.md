@@ -5905,3 +5905,36 @@ integration, `feral-diagnostics` builds/tests, clippy `--all-targets` clean on b
 `cargo fmt --check` clean. Default (non-External) path unchanged. See
 `dev/research/issue-107-external-ordering.md` and
 `dev/plans/issue-107-external-ordering.md`.
+
+## 2026-07-10 — Issue #112: compensated FT sweep (always on) + opt-in BG pivot search
+
+**Decision.** Fix the exact-`0.0` `TinyPivot` failures of `SparseLu`'s
+Forrest–Tomlin update (issue #112) with **Neumaier (Kahan–Babuška)
+compensated accumulation** in the bump elimination's working-row scatter,
+always on; and ship Bartels–Golub row interchanges as an **opt-in, always-on
+variant** (`LuParams::update_pivot_search`, default `false`) rather than the
+issue's requested rescue-after-failure.
+
+**Why.** The exact-`0.0` on a nonsingular basis is summation absorption: the
+fixed-order sweep grows an intermediate past `|true pivot|/ε` and one rounded
+add destroys the pivot's bits. Re-selecting pivots afterwards provably cannot
+recover them (any interchange order's working row is exactly proportional to
+the fixed order's — see `dev/research/issue-112-bg-update.md` §UPDATE and the
+tried-and-rejected entry), while the compensated sum retains them: on the
+regression basis (`tests/issue112_bg_update.rs`) the committed diagonal
+equals the hand-computed true value `2⁻³⁵` bit-for-bit where the plain sweep
+returned `0.0` and scipy's fresh LU returns ε-noise. Cost: ~4 flops per
+scatter add + one pooled length-m `f64` buffer; no allocation, no API change.
+Pivot search remains valuable as a *trajectory* choice (multipliers bounded
+by 1 keep U balanced over long update chains, preventing the imbalance that
+makes absorption possible) — but it changes committed factors/etas wherever a
+working-row entry dominates a retained diagonal, so it defaults off pending
+discopt A/B on the captured corpus. New machinery: `FtOp::Swap` (physical
+row-content swap preserves the symmetric `uperm` invariant, diagonal-first
+storage, prior etas), `pivot_search_swaps()` telemetry, wholesale `u_above`
+rebuild on swap commits.
+
+**Contract note.** A compensated final diagonal at/below
+`zero_pivot_tol·u_max0` is now trustworthy evidence of a genuinely dependent
+replacement (not a summation artifact), strengthening the existing
+`NeedsRefactor` semantics. No tolerances changed.

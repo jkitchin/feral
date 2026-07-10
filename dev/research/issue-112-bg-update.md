@@ -200,3 +200,79 @@ residual matching the refactor's.
 `citep:reid1982sparsity`, `citep:suhl1990computing`,
 `citep:huangfu2015novel`, `citep:schork2017permuting` — all in
 `dev/references.bib`. BASICLU (GPL) not consulted; clean-room from papers.
+
+---
+
+## UPDATE 2026-07-10 (same session): the rescue design is impossible; the fix is compensated accumulation
+
+The plan above (§4.2, FT-first + BG-retry-on-TinyPivot) was implemented and
+then **rejected on proof**, before commit. Three findings, each verified
+numerically (float + exact-rational replays of the sweep on candidate
+matrices):
+
+### 1. Proportionality theorem: pivot re-ordering cannot recover an absorbed pivot
+
+In the row-spike form, let `W_k` be the fixed-order (FT) working row before
+step `k` and `W'_k` the working row of *any* interchange variant of the same
+sweep. Induction over the two step types gives `W'_k = λ_k·W_k` **exactly (in
+exact arithmetic)**: a no-swap step preserves `λ`, a swap at column `c`
+resets `λ ← −U[c,c]/W_k[c]`. Consequences:
+
+- the swapped path's **true** final diagonal is `λ_final · t_FT`, and under
+  domination-triggered swaps `|λ| ≤ 1` monotonically — pivot search can only
+  *shrink* the true final pivot (`∏(pivots)·final = det(bump)` makes this a
+  determinant identity);
+- both paths skip exactly the same columns (proportional zeros), so no
+  interchange schedule can "route around" a poisoned column;
+- FP absorption is **scale-invariant** (ulp is relative), so a λ-scaled
+  recomputation absorbs the same bit at the same step. The absorbed
+  information exists nowhere any within-bump row-operation order can reach.
+
+Hence a rescue pass run *after* the FT sweep produced an exact-`0.0` can
+never soundly commit: if the computed zero was absorption
+(`|t_FT| ≤ ε·I`, `I` = intermediate growth), every interchange order's
+signal-to-noise is the same `t_FT/(ε·I) ≤ 1`. The retry implementation was
+removed; `dev/tried-and-rejected.md` has the entry.
+
+### 2. The actual fix: Neumaier-compensated accumulation in the sweep
+
+The exact-`0.0` is a *summation* artifact: `rw[·]` accumulates hits whose
+intermediate magnitude exceeds `|true|/ε`, and one rounded add drops the true
+value's bits. Making every scatter add a Neumaier (Kahan–Babuška) two-sum —
+value carried as `rw[c] + comp[c]`, error of each add banked in `comp[c]`,
+collapsed once at each read — retains those bits: on the m=4 regression
+matrix the compensated sweep's final diagonal equals the true value `2⁻³⁵`
+**bit-for-bit** where the plain sweep returns `0.0` (and scipy's fresh LU
+returns ε-noise). The classic Kahan form does **not** work here: its
+`y = v − c` pre-subtraction re-absorbs the compensation into the next large
+addend (verified numerically). Cost: ~4 extra flops per scatter add,
+`O(bump)` extra memory (one pooled `f64` array), no allocation.
+
+This is always-on. It also sharpens the singular case: a compensated final
+diagonal of `0.0`/sub-ztol is now trustworthy evidence of a genuinely
+dependent replacement, not an artifact.
+
+### 3. What pivot search is still for — and the limits of a distilled reproducer
+
+`update_pivot_search` (default off) now runs the whole sweep with
+Bartels–Golub interchanges from the start: every multiplier bounded by 1,
+growth bounded across update chains — a *trajectory* choice that prevents the
+imbalance (`∏(retained diagonals) ≫ det`) from building up over long update
+chains, which is where the issue #112 storms come from in vivo. It is not,
+and provably cannot be, a cure after the fact (finding 1). The `FtOp::Swap`
+eta machinery (physical row-content swap keeps the symmetric `uperm`
+invariant, diagonal-first storage, and all prior etas intact) is exactly as
+designed in §4.1.
+
+Distillation limit (test design): any *single-shot* reproducer of an
+exact-absorption failure necessarily satisfies
+`σ_min(B') ⪅ δ·∏(retained diagonals)` with `δ ≤ ε·I` — the replacement basis
+is within `δ` of singular, so a from-scratch factorization of it sees an
+ε-relative pivot and cannot serve as the residual oracle. The discopt
+captures' healthy `σ_min ≥ 1.5e-4` coexists with the exact-`0.0` only because
+their retained-`U` imbalance was built by a long *chain* of updates (the
+`∏retained ≫ det` split lives in the factorization state, not in `B'`).
+The regression test therefore asserts (a) the committed diagonal equals the
+hand-computed true value exactly, and (b) backward-stable solve residuals —
+and validation on the real captures (issue acceptance) remains a discopt-side
+step, now with the compensated sweep expected to commit them.

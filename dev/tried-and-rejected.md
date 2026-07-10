@@ -4928,3 +4928,47 @@ hardware. Not a rejection — a correction of scope. See
 `dev/research/issue-99-dense-front-fma-gate.md` UPDATE 3 and `dev/decisions.md`
 2026-07-01 (packed BLAS-3). The B-1a *source-into-strided-kernel* variant remains
 rejected; the packed micro-kernel is the shipped design.
+
+## 2026-07-10 — BG rescue-after-TinyPivot for the FT update (issue #112)
+
+**Tried.** Implemented issue #112's requested design literally: run the plain
+Forrest–Tomlin bump sweep first; on `TinyPivot` (the exact-`0.0` class), roll
+back row `r` and re-run the sweep with Bartels–Golub row interchanges
+(`FtOp::Swap` physical row-content swaps; retry gated by
+`update_pivot_search`, default true), expecting the re-selected pivot order
+to commit where the fixed order cancelled.
+
+**Symptoms / why it cannot work.** Every candidate regression matrix had the
+rescue fail exactly like FT (computed `0.0` or sub-ztol), e.g. the m=4
+absorption basis: rescue's final diag `1.39e-17` = `λ·2⁻³⁵` with `λ ~ 2⁻²⁰`
+from the dominated-diagonal swaps. Root cause is a proved identity, not a
+bug: any interchange variant's working row is **exactly proportional**
+(`W'_k = λ_k·W_k`) to the fixed-order one — swaps only rescale the carried
+row (`λ` resets to `−piv/vrc` per swap, `|λ| ≤ 1` under domination swaps) —
+so (a) the true final pivot is `λ·t_FT ≤ t_FT` (determinant identity
+`∏pivots·final = det(bump)`), (b) skip patterns coincide (proportional
+zeros), and (c) FP absorption is scale-invariant (ulp is relative), so a
+rescue re-computation absorbs the same bit. A pivot the fixed order computed
+as exactly `0.0` by absorption is unrecoverable by ANY within-bump
+row-operation reordering; retry-commit values would be noise (signal/noise
+= `t_FT/(ε·I) ≤ 1` on every path). Numeric evidence: float + exact-Fraction
+sweep replays across four hand constructions (journal 2026-07-10-01,
+research note §UPDATE).
+
+Also rejected en route: classic **Kahan** compensation for the sweep
+accumulator (its `y = v − c` pre-subtraction re-absorbs the compensation
+into the next 2²⁰-scale addend — computed `0.0` again; verified
+numerically); the **Neumaier** two-sum variant works and shipped. And three
+regression-matrix constructions whose base or replacement was numerically
+singular for every path (±1 cascade to 2³⁴: `σ_min(B') = 1.5e-16`; diag-4
+cascade: rescue-true `4.5e-13 <` ztol; spike-poison m=6: fresh LU burns the
+4e6 spike entry and deflates its tail pivot to 0) — any single-shot
+absorption reproducer necessarily has `σ_min(B') ⪅ δ·∏retained`, so the
+"fresh factor succeeds" oracle is unsatisfiable without a multi-update
+imbalance history.
+
+**Shipped instead.** Always-on Neumaier-compensated scatter (recovers the
+true pivot bit-for-bit on the regression basis) + `update_pivot_search` as an
+always-on opt-in trajectory variant (bounded multipliers across chains),
+default false. See `dev/research/issue-112-bg-update.md` §UPDATE and
+`dev/decisions.md` 2026-07-10.

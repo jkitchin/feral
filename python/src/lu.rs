@@ -251,6 +251,7 @@ impl LuFactor {
         scaling: &str,
         refine_steps: usize,
         refine_tol: f64,
+        update_pivot_search: bool,
     ) -> PyResult<LuParams> {
         let on_singular = match on_singular {
             "fail" => LuSingularAction::Fail,
@@ -273,6 +274,7 @@ impl LuFactor {
             scaling: pick_lu_scaling(scaling)?,
             refine_steps,
             refine_tol,
+            update_pivot_search,
         })
     }
 }
@@ -296,6 +298,7 @@ impl LuFactor {
         scaling = "none",
         refine_steps = 0,
         refine_tol = 1e-12,
+        update_pivot_search = false,
         force_dense = None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -312,6 +315,7 @@ impl LuFactor {
         scaling: &str,
         refine_steps: usize,
         refine_tol: f64,
+        update_pivot_search: bool,
         force_dense: Option<bool>,
     ) -> PyResult<Self> {
         let params = Self::build_params(
@@ -325,6 +329,7 @@ impl LuFactor {
             scaling,
             refine_steps,
             refine_tol,
+            update_pivot_search,
         )?;
         let a = &matrix.inner;
         let m = a.m;
