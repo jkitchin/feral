@@ -140,3 +140,35 @@ replay primitive is NOT justified — deferred. Separate finding: ~87% of
 dense-front time is the small-front diagonal/scalar path, not the blocked
 panel/Schur machinery, so future dense-kernel effort should target that.
 Recorded in dev/research/panel-fragmentation-2026-07-10.md. Close #129.
+
+** 16:10 :issue-132:schork-gondzio:measure-first:not-justified:discopt:
+Measure-first for #132 (permute-only FT update), triggered by the discopt
+simplex question. Established via cloned discopt (/home/user/discopt) that its
+simplex drives feral's SparseLu (linsolve.rs) and that its measured bottleneck
+is update() (83% of the sc2000x800 root LP), "tracking factor fill."
+
+Built src/bin/probe_ft_eta.rs: replays real update traces through SparseLu and
+splits per-update cost into last_eta_ops (the eta #132 removes) vs
+last_update_work (build scatters, dominated by the compute_spike L-solve).
+
+Results:
+- casctanks (real, m=2169, 144 updates): eta total 1722, max 52, mean 12 —
+  only 4.9% of update work. Single-row elimination already yields trivial etas.
+- synthetic set-cover (dense B⁻¹, discopt's expensive shape): eta mean grows
+  372→902 with m (dense-spike phenomenon real) BUT eta is 0.1% of update work;
+  the other 99.9% is compute_spike (Gilbert-Peierls L-solve over the dense
+  factor) = the fill-tracking bulk #132 does NOT touch.
+
+Conclusion: #132 removes the eta/elimination = 0.1% (covering) to 5%
+(casctanks) of update work; it misses the spike-solve/fill bottleneck
+entirely. Structural tension too: the expensive-eta case is a DENSE bump →
+cyclic → #132 can't fire; it fires on sparse bumps whose eta is already cheap.
+So #132 is NOT the lever for discopt (or casctanks). The fill-tracking update
+cost is addressed by #133 (less fill) or more-frequent refactor / cheaper
+compute_spike. Recorded dev/research/ft-permute-only-132-measure-2026-07-10.md.
+Not implemented.
+
+Also confirmed (separate): discopt bumping its pinned feral rev 660224d ->
+current main is safe (discopt-core builds clean + all 430 tests pass, incl the
+10 linsolve LU-integration tests) but NOT a speedup (feral_update_cost A/B:
+identical per-update ms). Its value is correctness/robustness + the LDLᵀ side.
