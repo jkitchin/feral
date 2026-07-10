@@ -3972,7 +3972,18 @@ fn scalar_pivot_step(
     if use_maxfromm {
         if let Some(mf) = cached {
             let akk = a[k * nrow + k].abs();
-            if akk >= alpha * mf {
+            // Issue #123: a cached `mf == 0.0` (all-zero trailing column, e.g.
+            // exact fp cancellation from duplicate columns) is a cache MISS, not
+            // a hit. The gate `akk >= alpha * mf` is unconditionally true at
+            // `mf == 0.0` (`0 ≥ 0`), which would route a zero column through the
+            // rook-rescue path — but Plain's full scan hits `gamma0 == 0.0` and
+            // takes the dedicated zero-column branch (`count_1x1_inertia` +
+            // identity L column, below). Those differ under `may_delay` (Delayed
+            // vs counted-in-place) and `ForceAccept` (D zeroed vs tiny value
+            // kept), breaking the documented Plain/Maxfromm bit-parity. Falling
+            // through re-scans and lands in the same zero-column branch — the
+            // cache only ever accelerates the common nonzero case.
+            if mf != 0.0 && akk >= alpha * mf {
                 let outcome = try_reject_1x1_with_rook_rescue(
                     a,
                     nrow,
@@ -6045,6 +6056,39 @@ mod row_offdiag_tests {
             got, 7.0,
             "A(r, k) must be included in the row-r off-diagonal max (LAPACK ROWMAX)"
         );
+    }
+}
+
+#[cfg(test)]
+mod maxfromm_capture_tests {
+    use super::*;
+
+    /// Issue #123: `capture_maxfromm_col` returns `Some(0.0)` for an all-zero
+    /// trailing column (the exact-cancellation case). This is the value the
+    /// short-circuit consumer must treat as a cache MISS — pinning it here so
+    /// a refactor of the capture side can't silently change the precondition
+    /// the fix relies on. A nonzero column returns its off-diagonal max, and
+    /// the last-column case returns `None`.
+    #[test]
+    fn capture_maxfromm_col_zero_column_is_some_zero() {
+        let n = 4;
+        // Column 1's trailing rows (2, 3) are exactly zero → Some(0.0).
+        let mut a = vec![0.0f64; n * n];
+        // Column-major (row i, col j) lives at `j * n + i`.
+        // Leave column 1's tail (rows 2, 3) zero; put noise elsewhere to prove
+        // it is ignored: column 1's diagonal (n + 1) and column 0 row 3 (3).
+        a[n + 1] = 5.0; // col 1 diagonal — not scanned (scan starts at col+1)
+        a[3] = 9.0; // col 0 row 3 — a different column, not scanned
+        assert_eq!(capture_maxfromm_col(&a, n, 1), Some(0.0));
+
+        // Nonzero tail → its off-diagonal max. Column 1 rows 2 and 3.
+        let mut b = vec![0.0f64; n * n];
+        b[n + 2] = 3.0;
+        b[n + 3] = -7.0;
+        assert_eq!(capture_maxfromm_col(&b, n, 1), Some(7.0));
+
+        // Last column (no rows below) → None, never Some(0.0).
+        assert_eq!(capture_maxfromm_col(&a, n, n - 1), None);
     }
 }
 

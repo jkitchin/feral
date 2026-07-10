@@ -80,3 +80,33 @@ refine_tol>0, so no regression.
 Full suite 75 binaries green, clippy --all-targets -D warnings clean
 (fixed needless-Ok-? on the finish_1x1_outcome callers and the
 neg_cmp_op_on_partial_ord on the max_growth check), fmt clean.
+
+** 12:05 :issue-123:maxfromm:parity:bit-identical:
+MAXFROMM short-circuit broke the documented Plain/Maxfromm bit-parity on
+exact-cancellation fronts. capture_maxfromm_col returns Some(0.0) for an
+all-zero trailing column; the short-circuit gate `akk >= alpha*mf` is
+unconditionally true at mf==0.0 (0>=0), so Maxfromm routed a zero column
+through try_reject_1x1_with_rook_rescue — but Plain's full scan hits
+gamma0==0.0 and takes the dedicated zero-column branch (count_1x1_inertia
++ set_l_column_identity, factor.rs:4035). Divergences: (i) may_delay=true
+delays the rook path's zero pivot (different nelim/n_delayed) where the
+zero-column branch counts in place; (ii) ForceAccept zeroes d_diag in the
+rook path vs the branch's own accounting.
+
+Fix: one guard — `if mf != 0.0 && akk >= alpha * mf` — so a cached 0.0 is
+a cache MISS and falls through to the full scan (cache only ever
+accelerates the nonzero case). The remaining==1 path is already parity-safe
+(both Plain and Maxfromm call rook_rescue with col_max; all-zero -> 0.0
+either way, no gamma0==0 special branch there).
+
+Repro: zero_tail_front(n) = all-ones symmetric matrix with a dominant head
+(A[0,0]=n+2). After pivot 0 the trailing block is uniform 1-1/head; after
+pivot 1 it cancels to exactly 0.0, so capture stashes mf=0.0 for pivot 2.
+New test maxfromm_zero_tail_cache_miss_parity asserts byte-identical
+FrontalFactors (nelim, n_delayed, inertia, perm, d_diag, d_subdiag, l,
+contrib) between Plain and Maxfromm for n in {4,5,8,16,33,64,65,100},
+may_delay in {false,true}, scalar and blocked. Verified pre-fix FAILS:
+"zero-tail scalar n=4 delay=true nelim" left!=right. Unit test
+capture_maxfromm_col_zero_column_is_some_zero pins Some(0.0) for a zero
+column (the precondition the fix relies on), Some(max) for nonzero, None
+for the last column. Full suite 75 binaries green, clippy/fmt clean.

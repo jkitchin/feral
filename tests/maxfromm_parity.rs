@@ -9,7 +9,7 @@
 //! Phase 2 corpus validation in a separate diag binary.
 
 use feral::dense::factor::{factor_frontal, factor_frontal_blocked, FrontalFactors, TppMethod};
-use feral::{BunchKaufmanParams, SymmetricMatrix};
+use feral::{BunchKaufmanParams, SymmetricMatrix, ZeroPivotAction};
 
 fn rng_scalar(state: &mut u64, idx: usize) -> f64 {
     *state = state
@@ -142,6 +142,69 @@ fn maxfromm_indefinite_blocked_parity() {
         let a = factor_frontal_blocked(&mat, n, false, &plain).unwrap();
         let b = factor_frontal_blocked(&mat, n, false, &mfm).unwrap();
         assert_byte_identical(&a, &b, &format!("blocked indef n={n}"));
+    }
+}
+
+/// A front that drives a trailing column to *exactly* zero mid-elimination,
+/// so `capture_maxfromm_col` stashes `mf = 0.0`. Columns 1..n are all
+/// identical to column 0's tail, so eliminating the dominant pivot 0 and
+/// then pivot 1 cancels the whole trailing block to zero in fp.
+///
+///   A = [[k, 1, 1, ...],
+///        [1, 1, 1, ...],
+///        [1, 1, 1, ...],  (every trailing entry = 1)
+///        ...            ]
+///
+/// After pivot 0 the trailing block is uniform `1 - 1/k`; after pivot 1 it
+/// is uniform `0.0`, and the cache captures `mf = 0.0` for the next pivot.
+fn zero_tail_front(n: usize) -> SymmetricMatrix {
+    assert!(n >= 3);
+    let mut data = vec![1.0f64; n * n];
+    // Dominant head so pivot 0 is a clean 1×1.
+    data[0] = n as f64 + 2.0;
+    SymmetricMatrix { n, data }
+}
+
+fn params_zero(tpp: TppMethod) -> BunchKaufmanParams {
+    BunchKaufmanParams {
+        tpp_method: tpp,
+        pivot_threshold: 0.01,
+        // The reproduction hinges on the zero-column pivot being *accepted*
+        // rather than erroring, so the two paths' divergence (delay/inertia/D)
+        // is observable. ForceAccept exercises issue #123 divergence (ii);
+        // may_delay exercises (i).
+        on_zero_pivot: ZeroPivotAction::ForceAccept,
+        ..BunchKaufmanParams::default()
+    }
+}
+
+/// Issue #123: a cached `mf == 0.0` from an exact-cancellation trailing
+/// column must be treated as a cache MISS, so the Maxfromm short-circuit
+/// falls through to the same dedicated zero-column branch Plain's full scan
+/// takes. Pre-fix, `akk >= alpha * 0.0` is unconditionally true and Maxfromm
+/// routed a zero column through rook-rescue instead — diverging in
+/// `n_delayed` under `may_delay = true` and in `D.to_bits()` under
+/// `ForceAccept`. Asserts bit-identical `(nelim, n_delayed, inertia, L, D)`
+/// under both `may_delay` values, scalar and blocked.
+#[test]
+fn maxfromm_zero_tail_cache_miss_parity() {
+    let plain = params_zero(TppMethod::Plain);
+    let mfm = params_zero(TppMethod::Maxfromm);
+    for &n in &[4usize, 5, 8, 16, 33, 64, 65, 100] {
+        let mat = zero_tail_front(n);
+        for &may_delay in &[false, true] {
+            let a = factor_frontal(&mat, n, may_delay, &plain).unwrap();
+            let b = factor_frontal(&mat, n, may_delay, &mfm).unwrap();
+            assert_byte_identical(&a, &b, &format!("zero-tail scalar n={n} delay={may_delay}"));
+
+            let ab = factor_frontal_blocked(&mat, n, may_delay, &plain).unwrap();
+            let bb = factor_frontal_blocked(&mat, n, may_delay, &mfm).unwrap();
+            assert_byte_identical(
+                &ab,
+                &bb,
+                &format!("zero-tail blocked n={n} delay={may_delay}"),
+            );
+        }
     }
 }
 
