@@ -4,6 +4,25 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — sparse LU update: exact-zero bump pivots on nonsingular bases (issue #112)
+
+The Forrest–Tomlin column-replacement update could fail with
+`RefactorCause::TinyPivot` at magnitude exactly `0.0` on provably nonsingular
+bases — plain summation in the bump elimination absorbed the true pivot's
+bits once an intermediate grew past `|true pivot|/ε`, forcing a full
+refactorization per pivot on dense-bump problems. The working-row scatter is
+now a Neumaier-compensated sum, so the true diagonal survives and such
+updates commit. Committed values can differ from previous releases only in
+situations where the old sum had already lost low-order bits.
+
+### Added — opt-in Bartels–Golub pivot search for the sparse LU update (issue #112)
+
+`LuParams::update_pivot_search` (default `false`; also a `LuFactor` keyword
+in the Python bindings) runs the bump elimination with Bartels–Golub row
+interchanges: every multiplier is bounded by 1, keeping element growth
+bounded across long update chains. New `SparseLu::pivot_search_swaps()`
+exposes how often the interchanges deviated from the plain FT order.
+
 ## [0.13.0] - 2026-07-02
 
 ### Added — user-supplied fill-reducing ordering: `OrderingMethod::External` (issue #107)

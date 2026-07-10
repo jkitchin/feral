@@ -16,6 +16,23 @@
 //! records an `O(bump)` eta, not the `O(bump²)` of a full bump re-triangularization
 //! (`dev/research/ft-row-elimination-design-2026-06-21.md`, issue #87).
 //!
+//! FT never re-selects a pivot, and its fixed order can cancel the final bump
+//! diagonal to exactly `0.0` on a **nonsingular** basis when an intermediate
+//! grows past `|true pivot|/ε` (issue #112). Two defenses:
+//!
+//! - **Compensated accumulation (always on):** the working-row scatter is a
+//!   Neumaier (Kahan–Babuška) compensated sum ([`two_sum_add`]), so the bits a
+//!   plain sum would absorb survive to the final diagonal check. This is the
+//!   fix for the issue #112 exact-`0.0` class — re-ordering pivots cannot be,
+//!   because any interchange order's working row is exactly proportional to
+//!   the fixed order's (`dev/research/issue-112-bg-update.md` §UPDATE).
+//! - **Bartels–Golub interchanges (opt-in, [`super::LuParams::update_pivot_search`]):**
+//!   whenever the working row's entry strictly dominates the retained
+//!   diagonal, the two rows swap contents (recorded as an `FtOp::Swap` in the
+//!   eta, so `uperm`, `L`, `P`, `Q`, and prior etas still never change),
+//!   bounding every multiplier by 1 — the classic BG growth guarantee, which
+//!   keeps the factor balanced across long update chains.
+//!
 //! The work is otherwise bump-local: the spike is computed by a Gilbert–Peierls
 //! depth-first reach, and the "unchanged on failure" guarantee saves/restores only
 //! the changed rows and the bump's `uperm` range (no `O(nnz)` clone of `U`).
@@ -160,14 +177,37 @@ impl SparseLu {
         // row `r` to the bottom of the bump). Pure index bookkeeping, O(bump).
         self.shift_uperm(r, r_rank, h_rank);
 
-        // Eliminate the single pivotal row `r` (now at rank `h_rank`).
-        let result = self.eliminate_pivot_row(r, h_rank, w[r], &mut work);
+        // Eliminate the single pivotal row `r` (now at rank `h_rank`). With
+        // `update_pivot_search` off (the default) this is the plain fixed-order
+        // Forrest–Tomlin sweep, byte-identical to the pre-#112 behavior; with
+        // it on, the sweep performs Bartels–Golub row interchanges wherever the
+        // working row strictly dominates the retained diagonal. A retry-only
+        // rescue was tried and rejected: any interchange order's working row is
+        // exactly proportional to the fixed order's, so a pivot the FT sweep
+        // has already cancelled to zero is unrecoverable by re-ordering
+        // (dev/tried-and-rejected.md 2026-07-10); robustness must be always-on
+        // (bounded multipliers from the first update), not curative.
+        let diag0 = w[r];
+        let allow_swaps = self.params.update_pivot_search;
+        let result = self.eliminate_pivot_row(
+            r,
+            h_rank,
+            diag0,
+            &mut work,
+            allow_swaps,
+            &mut saved,
+            &changed,
+        );
 
         clear(&mut w, &touched);
         self.ft_work = w;
 
         match result {
-            Ok(ops) => {
+            Ok((ops, swapped)) => {
+                // Rows the pivot search displaced were rewritten wholesale:
+                // include them in the growth scan (duplicates with `changed`
+                // are harmless for a max) and rebuild the column index below.
+                changed.extend(swapped.iter().copied());
                 // Element-growth high-water over the changed rows (L5): only row
                 // `r` and the spike rows changed values, so this stays O(changed).
                 let mut changed_max = 0.0_f64;
@@ -182,37 +222,49 @@ impl SparseLu {
                     self.last_refactor = Some((RefactorCause::Growth, growth));
                     return Err(FeralError::NeedsRefactor);
                 }
-                // Commit: refresh the `u_above` column index *incrementally*. Only
-                // two things changed structurally (issue #89): `set_column_r`
-                // rewrote column `r` (its holders are now exactly the spike
-                // support), and `eliminate_pivot_row` rebuilt row `r`. Every other
-                // "changed" row only gained or lost its single column-`r` entry —
-                // already captured by column `r`'s holder list — so its membership
-                // in *other* columns is untouched and must NOT be re-indexed. The
-                // old code re-indexed every changed row wholesale, an
-                // `O(bump · rowlen · shift)` (≈ `O(m³)` on a dense bump) churn that
-                // dwarfed the elimination's `O(factor_nnz)` arithmetic.
-                //
-                // (a) Column `r`'s holders = spike support minus `r`. `supp` is
-                //     already sorted+deduped and `p != r` preserves order, so the
-                //     list stays sorted.
-                self.u_above[r].clear();
-                self.u_above[r].extend(supp.iter().copied().filter(|&p| p != r));
-                // (b) Row `r` changed its column set: drop `r` from its old
-                //     columns' holder lists and add it to the new ones. (Both skip
-                //     column `r` itself — that is the diagonal, not a `u_above`
-                //     entry — so this never touches the list rebuilt in (a).)
-                //     `saved` is a local moved out of `self`, so borrowing the
-                //     snapshot while mutating `self` is sound (no clone needed).
-                let old_row_r: &[(usize, f64)] = saved
-                    .iter()
-                    .find(|(i, _)| *i == r)
-                    .map(|(_, b)| b.as_slice())
-                    .unwrap_or(&[]);
-                self.unindex_above(r, old_row_r);
-                let new_row_r = std::mem::take(&mut self.u_rows[r]);
-                self.index_above(r, &new_row_r);
-                self.u_rows[r] = new_row_r;
+                if swapped.is_empty() {
+                    // Commit: refresh the `u_above` column index *incrementally*.
+                    // Only two things changed structurally (issue #89):
+                    // `set_column_r` rewrote column `r` (its holders are now
+                    // exactly the spike support), and `eliminate_pivot_row`
+                    // rebuilt row `r`. Every other "changed" row only gained or
+                    // lost its single column-`r` entry — already captured by
+                    // column `r`'s holder list — so its membership in *other*
+                    // columns is untouched and must NOT be re-indexed. The old
+                    // code re-indexed every changed row wholesale, an
+                    // `O(bump · rowlen · shift)` (≈ `O(m³)` on a dense bump)
+                    // churn that dwarfed the elimination's `O(factor_nnz)`
+                    // arithmetic.
+                    //
+                    // (a) Column `r`'s holders = spike support minus `r`. `supp`
+                    //     is already sorted+deduped and `p != r` preserves order,
+                    //     so the list stays sorted.
+                    self.u_above[r].clear();
+                    self.u_above[r].extend(supp.iter().copied().filter(|&p| p != r));
+                    // (b) Row `r` changed its column set: drop `r` from its old
+                    //     columns' holder lists and add it to the new ones. (Both
+                    //     skip column `r` itself — that is the diagonal, not a
+                    //     `u_above` entry — so this never touches the list
+                    //     rebuilt in (a).) `saved` is a local moved out of
+                    //     `self`, so borrowing the snapshot while mutating `self`
+                    //     is sound (no clone needed).
+                    let old_row_r: &[(usize, f64)] = saved
+                        .iter()
+                        .find(|(i, _)| *i == r)
+                        .map(|(_, b)| b.as_slice())
+                        .unwrap_or(&[]);
+                    self.unindex_above(r, old_row_r);
+                    let new_row_r = std::mem::take(&mut self.u_rows[r]);
+                    self.index_above(r, &new_row_r);
+                    self.u_rows[r] = new_row_r;
+                } else {
+                    // The pivot search rewrote the displaced rows' column sets
+                    // wholesale (each took the working row's full support), so
+                    // the incremental refresh above would leave stale holders.
+                    // Rebuild the index from `U` — O(nnz(U)); never taken on
+                    // the default (plain-FT) path.
+                    self.rebuild_u_above();
+                }
                 for (_, buf) in saved.drain(..) {
                     self.saved_pool.push(buf);
                 }
@@ -221,6 +273,7 @@ impl SparseLu {
                 self.growth = growth;
                 self.last_update_work = work;
                 self.update_work_total += work;
+                self.pivot_search_swaps += swapped.len();
                 #[cfg(feature = "lu-ft-invariant-check")]
                 self.debug_check_invariants();
                 Ok(())
@@ -340,6 +393,17 @@ impl SparseLu {
                             touched.push(target);
                         }
                     }
+                    FtOp::Swap { a, b } => {
+                        w.swap(a, b);
+                        if !mark[a] {
+                            mark[a] = true;
+                            touched.push(a);
+                        }
+                        if !mark[b] {
+                            mark[b] = true;
+                            touched.push(b);
+                        }
+                    }
                 }
             }
         }
@@ -383,31 +447,62 @@ impl SparseLu {
         self.uperm[r] = h_rank;
     }
 
-    /// Forrest–Tomlin elimination of the single pivotal row `r` (now at rank
-    /// `h_rank`, the bottom of the bump after [`Self::shift_uperm`]). Its
-    /// sub-diagonal entries — columns whose new rank is `< h_rank` — are cleared by
-    /// a sparse forward sweep against the (unmodified) upper-triangular bump rows,
-    /// in increasing rank order. Each eliminated column contributes one
-    /// `FtOp::Axpy{target: r, ..}` to the returned eta. Only row `r` is rewritten;
-    /// `diag0 = w[r]` seeds its column-`r` value.
+    /// Elimination of the single pivotal row `r` (now at rank `h_rank`, the
+    /// bottom of the bump after [`Self::shift_uperm`]). The working row's
+    /// sub-diagonal entries — columns whose new rank is `< h_rank` — are cleared
+    /// by a sparse forward sweep against the upper-triangular bump rows, in
+    /// increasing rank order. `diag0 = w[r]` seeds its column-`r` value.
+    ///
+    /// With `allow_swaps == false` this is the plain **Forrest–Tomlin** sweep:
+    /// the pivot at each step is the retained diagonal `U[c,c]`, only row `r`
+    /// is rewritten, and each step contributes one `FtOp::Axpy{target: r, ..}`
+    /// to the eta.
+    ///
+    /// With `allow_swaps == true` ([`super::LuParams::update_pivot_search`],
+    /// issue #112) each step performs a **Bartels–Golub row interchange**
+    /// whenever the working row's entry strictly dominates the retained
+    /// diagonal (`|U[c,c]| < |rw[c]|`): the working row is installed as the
+    /// new `u_rows[c]` (its column-`c` entry is the new rank-`k` diagonal,
+    /// every other entry has rank `> k`, so triangularity under the
+    /// *unchanged* `uperm` is preserved), the displaced row becomes the new
+    /// working row, and the eta gains `FtOp::Swap{a: c, b: r}` + the
+    /// elimination `Axpy`. Multipliers then satisfy `|mult| ≤ 1` — the classic
+    /// BG growth bound. Each displaced row is snapshotted into `saved` for
+    /// rollback (unless its position is already in the sorted pre-update
+    /// snapshot list `presaved`); the rewritten positions are returned so the
+    /// caller can extend its growth scan and rebuild the column index.
+    ///
+    /// In both modes the working-row scatter is **Neumaier-compensated**
+    /// ([`two_sum_add`]): the fixed pivot order can drive an intermediate past
+    /// `|true pivot|/ε` and a plain sum then cancels the final bump diagonal
+    /// to exactly `0.0` on a nonsingular basis — the issue #112 failure. The
+    /// compensation retains those bits, so the final diagonal check sees the
+    /// true value.
     ///
     /// Returns [`FeralError::NeedsRefactor`] if the resulting diagonal pivot
-    /// vanishes (singular replacement). `touched` accumulates the dense-scatter
-    /// positions so the caller clears them.
+    /// vanishes (singular replacement) or a retained pivot row is structurally
+    /// broken.
+    #[allow(clippy::too_many_arguments)]
     fn eliminate_pivot_row(
         &mut self,
         r: usize,
         h_rank: usize,
         diag0: f64,
         work: &mut usize,
-    ) -> Result<Vec<FtOp>, FeralError> {
+        allow_swaps: bool,
+        saved: &mut Vec<(usize, Vec<(usize, f64)>)>,
+        presaved: &[usize],
+    ) -> Result<(Vec<FtOp>, Vec<usize>), FeralError> {
         let ztol = self.params.zero_pivot_tol * self.u_max0;
         let mut ops: Vec<FtOp> = Vec::new();
+        let mut swapped: Vec<usize> = Vec::new();
 
         let mut rw = std::mem::take(&mut self.ft_rw); // dense scatter, zero on entry
+        let mut comp = std::mem::take(&mut self.ft_rw_comp); // its compensation terms
         let mut rw_touched = std::mem::take(&mut self.targets_scratch);
         rw_touched.clear();
         let mut queued = std::mem::take(&mut self.scratch_mark); // all-false on entry
+        let mut touch_mark = std::mem::take(&mut self.ft_touch_mark); // all-false on entry
         let mut heap: BinaryHeap<Reverse<usize>> = BinaryHeap::new();
 
         // Seed: row r off-diagonals (column `r` excluded — its value is `diag0`),
@@ -420,8 +515,10 @@ impl SparseLu {
             }
             scatter_into(
                 &mut rw,
+                &mut comp,
                 &mut rw_touched,
                 &mut queued,
+                &mut touch_mark,
                 &mut heap,
                 c,
                 v,
@@ -431,33 +528,112 @@ impl SparseLu {
         }
         // Column r is the bump diagonal (rank h_rank): never sub-diagonal, so it is
         // not pushed to the heap; just record its starting value.
-        if rw[r] == 0.0 {
+        if !touch_mark[r] {
+            touch_mark[r] = true;
             rw_touched.push(r);
         }
-        rw[r] += diag0;
+        two_sum_add(&mut rw, &mut comp, r, diag0);
         self.row_pool.push(row_r); // recycle the old row's buffer
 
-        // Sweep sub-diagonal columns of row r in increasing rank order.
+        // Sweep sub-diagonal columns of the working row in increasing rank order.
         while let Some(Reverse(rank)) = heap.pop() {
             let c = self.uperm_inv[rank];
             queued[c] = false;
-            let vrc = rw[c];
+            let vrc = rw[c] + comp[c];
             if vrc == 0.0 {
                 continue;
             }
-            let prow = &self.u_rows[c];
-            let &(dc, piv) = match prow.first() {
+            let &(dc, piv) = match self.u_rows[c].first() {
                 Some(p) => p,
                 None => {
-                    self.restore_elim_pools(rw, rw_touched, queued);
+                    self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark);
                     // No diagonal in the pivot column ⇒ effectively a zero pivot.
                     self.last_refactor = Some((RefactorCause::TinyPivot, 0.0));
                     return Err(FeralError::NeedsRefactor);
                 }
             };
-            if dc != c || piv == 0.0 || !piv.is_finite() {
-                self.restore_elim_pools(rw, rw_touched, queued);
+            if dc != c || !piv.is_finite() {
+                self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark);
                 self.last_refactor = Some((RefactorCause::TinyPivot, piv.abs()));
+                return Err(FeralError::NeedsRefactor);
+            }
+            if allow_swaps && piv.abs() < vrc.abs() {
+                // Bartels–Golub interchange: the working row strictly dominates
+                // the retained diagonal, so it becomes the pivot row for rank
+                // `rank`. Gather it out of the scatter as the new `u_rows[c]`:
+                // diagonal `(c, vrc)` first, then the column-sorted tail —
+                // every other entry has rank > `rank` (ranks below were
+                // eliminated exactly), so triangularity under `uperm` holds.
+                // `rw_touched` is duplicate-free (`touch_mark`), so the gather
+                // is exact.
+                let mut new_c = self.row_pool.pop().unwrap_or_default();
+                new_c.clear();
+                new_c.push((c, vrc));
+                for &cc in rw_touched.iter() {
+                    let val = rw[cc] + comp[cc];
+                    if cc != c && val != 0.0 {
+                        new_c.push((cc, val));
+                    }
+                }
+                new_c[1..].sort_unstable_by_key(|&(cc, _)| cc);
+                *work += new_c.len();
+
+                let mult = piv / vrc; // |mult| < 1 by the swap condition
+                ops.push(FtOp::Swap { a: c, b: r });
+                ops.push(FtOp::Axpy {
+                    target: r,
+                    src: c,
+                    mult,
+                });
+
+                // New working row = displaced_row_c − mult · W, formed in place
+                // in the scatter: scale W's support by −mult, clear column `c`
+                // exactly (`piv − mult·vrc` is 0 mathematically; the FP residual
+                // would re-enqueue `c` forever — the FT bring-up landmine), then
+                // scatter the displaced row, skipping its consumed diagonal. A
+                // scaled-to-zero entry (only possible when `piv == 0`) stays
+                // queued and is skipped on pop.
+                for &(cc, _) in new_c[1..].iter() {
+                    rw[cc] *= -mult;
+                    comp[cc] *= -mult;
+                }
+                rw[c] = 0.0;
+                comp[c] = 0.0;
+                let old_c = std::mem::replace(&mut self.u_rows[c], new_c);
+                *work += old_c.len();
+                for &(cc, v) in old_c.iter() {
+                    if cc == c {
+                        continue;
+                    }
+                    scatter_into(
+                        &mut rw,
+                        &mut comp,
+                        &mut rw_touched,
+                        &mut queued,
+                        &mut touch_mark,
+                        &mut heap,
+                        cc,
+                        v,
+                        &self.uperm,
+                        h_rank,
+                    );
+                }
+
+                // Snapshot the displaced row for rollback unless this position
+                // was already saved at update start (each rank pops once, so a
+                // position is displaced at most once; a later duplicate would
+                // shadow the true pre-update snapshot in `rollback`).
+                if presaved.binary_search(&c).is_err() {
+                    saved.push((c, old_c));
+                } else {
+                    self.saved_pool.push(old_c);
+                }
+                swapped.push(c);
+                continue;
+            }
+            if piv == 0.0 {
+                self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark);
+                self.last_refactor = Some((RefactorCause::TinyPivot, 0.0));
                 return Err(FeralError::NeedsRefactor);
             }
             let mult = vrc / piv;
@@ -472,6 +648,7 @@ impl SparseLu {
             // skip the pivot's own diagonal in the scatter accordingly. Fill at
             // strictly higher ranks may enqueue further sub-diagonal columns.
             rw[c] = 0.0;
+            comp[c] = 0.0;
             // One scatter per off-diagonal of the eliminated row — the
             // fill-proportional term that makes the update O(factor_nnz) on a
             // dense bump (issue #89).
@@ -482,8 +659,10 @@ impl SparseLu {
                 }
                 scatter_into(
                     &mut rw,
+                    &mut comp,
                     &mut rw_touched,
                     &mut queued,
+                    &mut touch_mark,
                     &mut heap,
                     cc,
                     -mult * v,
@@ -494,9 +673,10 @@ impl SparseLu {
         }
 
         // Diagonal pivot check, then gather the rebuilt row r (diagonal first).
-        let diag = rw[r];
+        // Reads collapse the compensated pair `(rw, comp)` with one rounding.
+        let diag = rw[r] + comp[r];
         if diag.abs() <= ztol || !diag.is_finite() {
-            self.restore_elim_pools(rw, rw_touched, queued);
+            self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark);
             self.last_refactor = Some((RefactorCause::TinyPivot, diag.abs()));
             return Err(FeralError::NeedsRefactor);
         }
@@ -505,41 +685,43 @@ impl SparseLu {
         new_row.push((r, diag));
         let mut offdiag: Vec<(usize, f64)> = rw_touched
             .iter()
-            .filter(|&&c| c != r && rw[c] != 0.0)
-            .map(|&c| (c, rw[c]))
+            .map(|&c| (c, rw[c] + comp[c]))
+            .filter(|&(c, v)| c != r && v != 0.0)
             .collect();
         offdiag.sort_unstable_by_key(|&(c, _)| c);
-        // `rw_touched` may list a column more than once (its scatter value crossed
-        // zero and back), so drop duplicate columns — each carries the same final
-        // `rw[c]`. Leaving them would put duplicate entries in the row and corrupt
-        // `U` / `u_above`.
-        offdiag.dedup_by_key(|&mut (c, _)| c);
         new_row.extend_from_slice(&offdiag);
         self.u_rows[r] = new_row;
 
         // Clear the dense scatter and hand the pools back.
-        self.restore_elim_pools(rw, rw_touched, queued);
-        Ok(ops)
+        self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark);
+        Ok((ops, swapped))
     }
 
-    /// Clear the dense scatter `rw` and the `queued` marker over their touched
-    /// positions (so both reach all-zero / all-false for the next update, on every
-    /// exit path — including a mid-sweep error where the heap still held columns)
-    /// and return the row-elimination churn buffers to their `SparseLu` pools.
+    /// Clear the dense scatter `rw` and the `queued`/`touch_mark` markers over
+    /// their touched positions (so all reach all-zero / all-false for the next
+    /// update, on every exit path — including a mid-sweep error where the heap
+    /// still held columns) and return the row-elimination churn buffers to
+    /// their `SparseLu` pools.
     fn restore_elim_pools(
         &mut self,
         mut rw: Vec<f64>,
+        mut comp: Vec<f64>,
         mut rw_touched: Vec<usize>,
         mut queued: Vec<bool>,
+        mut touch_mark: Vec<bool>,
     ) {
         for &c in rw_touched.iter() {
             rw[c] = 0.0;
+            comp[c] = 0.0;
             queued[c] = false;
+            touch_mark[c] = false;
         }
         rw_touched.clear();
         self.ft_rw = rw;
+        self.ft_rw_comp = comp;
         self.targets_scratch = rw_touched;
         self.scratch_mark = queued;
+        self.ft_touch_mark = touch_mark;
     }
 
     /// Structural self-check (opt-in via the `lu-ft-invariant-check` feature, off
@@ -601,6 +783,26 @@ impl SparseLu {
             }
         }
     }
+
+    /// Rebuild the `u_above` column index from `U` wholesale — used when a
+    /// pivot-searching rescue rewrote displaced rows' column sets, where the
+    /// incremental refresh would leave stale holders. Rows are walked in
+    /// ascending position, so each holder list comes out sorted (the
+    /// `unindex_above`/`index_above` binary-search invariant).
+    fn rebuild_u_above(&mut self) {
+        let mut above = std::mem::take(&mut self.u_above);
+        for col in above.iter_mut() {
+            col.clear();
+        }
+        for (i, row) in self.u_rows.iter().enumerate() {
+            for &(c, _) in row.iter() {
+                if c != i {
+                    above[c].push(i);
+                }
+            }
+        }
+        self.u_above = above;
+    }
 }
 
 fn clear(w: &mut [f64], touched: &[usize]) {
@@ -609,27 +811,51 @@ fn clear(w: &mut [f64], touched: &[usize]) {
     }
 }
 
-/// Add `v` to the dense scatter `rw[c]` of the pivotal row, recording `c` as
-/// touched on its first nonzero and enqueuing it (by triangular rank) when it is
-/// a not-yet-queued sub-diagonal column (`uperm[c] < h_rank`). `queued` dedups the
-/// heap; a column is re-enqueueable only after it is popped (rank order guarantees
-/// fill lands at strictly higher ranks, so no column is processed twice).
+/// Neumaier (Kahan–Babuška) compensated add into the working-row scatter:
+/// `(rw[c], comp[c]) += v`, with the rounding error of the add captured in
+/// `comp[c]` via a branch-free two-sum. The compensated value is
+/// `rw[c] + comp[c]`. This is what defeats the issue #112 cancellation: when
+/// an intermediate sum grows past `|true value|/ε`, a plain `+=` rounds the
+/// true value's bits away irrecoverably (the classic Kahan form fails here
+/// too — its `y = v − c` pre-subtraction re-absorbs the compensation into the
+/// next large addend), while the Neumaier form keeps them in `comp[c]` until
+/// the final read.
+#[inline]
+fn two_sum_add(rw: &mut [f64], comp: &mut [f64], c: usize, v: f64) {
+    let s = rw[c];
+    let t = s + v;
+    let z = t - s;
+    comp[c] += (s - (t - z)) + (v - z);
+    rw[c] = t;
+}
+
+/// Add `v` to the compensated dense scatter `(rw, comp)[c]` of the pivotal
+/// row, recording `c` as touched on first contact (`touch_mark` keeps
+/// `rw_touched` duplicate-free — the pivot-searching swap gathers the working
+/// row straight from the scatter) and enqueuing it (by triangular rank) when
+/// it is a not-yet-queued sub-diagonal column (`uperm[c] < h_rank`). `queued`
+/// dedups the heap; a column is re-enqueueable only after it is popped (rank
+/// order guarantees fill lands at strictly higher ranks, so no column is
+/// processed twice).
 #[allow(clippy::too_many_arguments)]
 fn scatter_into(
     rw: &mut [f64],
+    comp: &mut [f64],
     rw_touched: &mut Vec<usize>,
     queued: &mut [bool],
+    touch_mark: &mut [bool],
     heap: &mut BinaryHeap<Reverse<usize>>,
     c: usize,
     v: f64,
     uperm: &[usize],
     h_rank: usize,
 ) {
-    if rw[c] == 0.0 {
+    if !touch_mark[c] {
+        touch_mark[c] = true;
         rw_touched.push(c);
     }
-    rw[c] += v;
-    if uperm[c] < h_rank && !queued[c] && rw[c] != 0.0 {
+    two_sum_add(rw, comp, c, v);
+    if uperm[c] < h_rank && !queued[c] && rw[c] + comp[c] != 0.0 {
         queued[c] = true;
         heap.push(Reverse(uperm[c]));
     }

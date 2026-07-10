@@ -20,8 +20,9 @@ use crate::lu::sparse_matrix::SparseColMatrix;
 
 /// One elementary operation of a Forrest–Tomlin update's row elimination,
 /// recorded so it can be replayed on a solve vector (and transposed for btran).
-/// The logical permutation lives in `uperm`, not here, so the only operation is
-/// the row axpy that clears one sub-diagonal of the pivotal row.
+/// The logical permutation lives in `uperm`, not here. The plain FT pass emits
+/// only `Axpy`s; the pivot-searching rescue pass (issue #112) additionally
+/// emits `Swap`s for its Bartels–Golub row interchanges.
 #[derive(Debug, Clone)]
 pub(super) enum FtOp {
     /// `target_row -= mult · src_row` (Gauss elimination of a sub-diagonal).
@@ -30,6 +31,11 @@ pub(super) enum FtOp {
         src: usize,
         mult: f64,
     },
+    /// Rows `a` and `b` of `U` exchanged contents (a Bartels–Golub
+    /// interchange): the matching solve-vector entries swap with them. A
+    /// transposition is its own transpose, so `apply_transpose` performs the
+    /// same swap (in the reversed op walk).
+    Swap { a: usize, b: usize },
 }
 
 /// One Forrest–Tomlin column-replacement update: the sequence of elementary row
@@ -49,6 +55,7 @@ impl FtEta {
         for op in self.ops.iter() {
             match *op {
                 FtOp::Axpy { target, src, mult } => y[target] -= mult * y[src],
+                FtOp::Swap { a, b } => y.swap(a, b),
             }
         }
     }
@@ -58,6 +65,7 @@ impl FtEta {
         for op in self.ops.iter().rev() {
             match *op {
                 FtOp::Axpy { target, src, mult } => y[src] -= mult * y[target],
+                FtOp::Swap { a, b } => y.swap(a, b),
             }
         }
     }
@@ -153,7 +161,21 @@ pub struct SparseLu {
     /// restored on every return path; contents are cleared and refilled, never
     /// read across calls.
     pub(super) ft_rw: Vec<f64>,
+    /// Neumaier (Kahan–Babuška) compensation terms for `ft_rw`: `ft_rw[c] +
+    /// ft_rw_comp[c]` is the working-row value. The FT sweep's fixed pivot
+    /// order can cancel the bump diagonal to exactly `0.0` on a nonsingular
+    /// basis when an intermediate grows past `|true value|/ε` — the absorbed
+    /// low-order bits are unrecoverable by any pivot re-ordering (issue #112,
+    /// `dev/research/issue-112-bg-update.md` §UPDATE), so the scatter adds are
+    /// compensated instead. Kept zeroed between updates, like `ft_rw`.
+    pub(super) ft_rw_comp: Vec<f64>,
     pub(super) targets_scratch: Vec<usize>,
+    /// Length-`m` membership marker for `targets_scratch` (the `ft_rw` touched
+    /// list), keeping that list duplicate-free — the pivot-searching rescue
+    /// gathers the working row straight out of `ft_rw`, which a
+    /// duplicate-tolerant touched list would make ambiguous. All-false between
+    /// updates, like `scratch_mark`.
+    pub(super) ft_touch_mark: Vec<bool>,
     pub(super) row_pool: Vec<Vec<(usize, f64)>>,
     /// FT-update rollback/reindex snapshot pools. `saved_scratch` is the reused
     /// outer `(row, old_content)` vec; `saved_pool` is a free-list of the inner
@@ -181,6 +203,11 @@ pub struct SparseLu {
     /// untouched by a successful update (read only after an `Err`). The magnitude
     /// is a growth ratio, update count, or `|pivot|` per the cause. See issue #95.
     pub(super) last_refactor: Option<(RefactorCause, f64)>,
+    /// Total Bartels–Golub row interchanges performed by committed updates
+    /// since the last factor/refactor (only nonzero when
+    /// [`LuParams::update_pivot_search`] is enabled; issue #112). Zero after
+    /// factor/refactor.
+    pub(super) pivot_search_swaps: usize,
 }
 
 impl SparseLu {
@@ -500,13 +527,16 @@ impl SparseLu {
             scratch_c: vec![0.0; m],
             scratch_d: vec![0.0; m],
             ft_rw: vec![0.0; m],
+            ft_rw_comp: vec![0.0; m],
             targets_scratch: Vec::new(),
+            ft_touch_mark: vec![false; m],
             row_pool: Vec::new(),
             saved_scratch: Vec::new(),
             saved_pool: Vec::new(),
             last_update_work: 0,
             update_work_total: 0,
             last_refactor: None,
+            pivot_search_swaps: 0,
         })
     }
 
@@ -600,6 +630,17 @@ impl SparseLu {
     #[inline]
     pub fn last_refactor(&self) -> Option<(RefactorCause, f64)> {
         self.last_refactor
+    }
+
+    /// Total Bartels–Golub row interchanges performed by committed updates
+    /// since the last factor/refactor — the telemetry counterpart of
+    /// [`LuParams::update_pivot_search`] (issue #112). Always zero with the
+    /// pivot search disabled (the default) and after a fresh factor/refactor.
+    /// Lets a driver observe how often the threshold interchanges actually
+    /// deviate from the plain Forrest–Tomlin order.
+    #[inline]
+    pub fn pivot_search_swaps(&self) -> usize {
+        self.pivot_search_swaps
     }
 
     /// Advisory (growth-aware): is the element-growth high-water close enough to

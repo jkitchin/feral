@@ -103,9 +103,10 @@ pub struct LuParams {
     /// Governs the **initial factorization** (both the dense and sparse paths
     /// honor it: the sparse path prefers the within-threshold diagonal row,
     /// matching CSparse `cs_lu`). The Forrest–Tomlin bump elimination in
-    /// `update()` always uses strict partial pivoting (`u = 1`) for stability —
-    /// the bump's structure is already fixed there, so a relaxed threshold buys
-    /// no fill reduction and only trades away stability.
+    /// `update()` does not consult it: the default FT sweep keeps the retained
+    /// pivot order (there is no pivot choice to threshold), and the opt-in
+    /// pivot-searching variant ([`LuParams::update_pivot_search`]) uses
+    /// strict-larger interchanges (`u = 1`) for maximum stability.
     pub pivot_threshold: f64,
     /// A pivot column with all candidates `≤ zero_pivot_tol` is singular.
     pub zero_pivot_tol: f64,
@@ -124,6 +125,22 @@ pub struct LuParams {
     pub refine_steps: usize,
     /// Stop refinement when `‖r‖/‖a‖ < refine_tol`.
     pub refine_tol: f64,
+    /// Run the sparse `update()` bump elimination with Bartels–Golub row
+    /// interchanges (strict-larger pivot search) instead of the fixed
+    /// Forrest–Tomlin pivot order (issue #112). With it on, every elimination
+    /// multiplier is bounded by 1 (the classic BG stability guarantee), which
+    /// keeps element growth bounded across long update chains at the cost of
+    /// extra fill in the rows the interchanges rewrite. Off (the default),
+    /// updates keep the plain FT order — cheapest, and already protected
+    /// against the issue #112 cancellation-to-exact-zero by the always-on
+    /// compensated accumulation in the sweep. Note a pivot search can only
+    /// *prevent* instability from building up; it cannot recover a pivot the
+    /// fixed order has already cancelled (any interchange order's working row
+    /// is exactly proportional to the fixed order's — see
+    /// `dev/research/issue-112-bg-update.md`), which is why this is a
+    /// trajectory choice rather than a failure rescue. Sparse path only; the
+    /// dense update is unaffected.
+    pub update_pivot_search: bool,
 }
 
 impl LuParams {
@@ -165,6 +182,7 @@ impl Default for LuParams {
             scaling: LuScaling::None,
             refine_steps: 0,
             refine_tol: 1e-12,
+            update_pivot_search: false,
         }
     }
 }
