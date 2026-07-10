@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-10T11:40:42Z
+Generated: 2026-07-10T12:42:23Z
 
 ## Latest Session
-File: dev/sessions/2026-07-10-03.md
+File: dev/sessions/2026-07-10-04.md
 ```
-# Session 2026-07-10-03
+# Session 2026-07-10-04
 
 ## Goal
-Fix the six audit-confirmed correctness bugs #114–#119 (from the 2026-07-10
-six-agent audit), one at a time, each as its own tested commit.
+Fix the four correctness-edge issues #120–#123 (from the 2026-07-10 six-agent
+audit), one at a time, each as its own tested commit with an empirical
+reproduction before encoding the fix. Then one PR for the batch.
 
 ## Accomplished
-All six fixed, committed, full-suite + clippy green after each. Empirical
-reproduction confirmed before encoding every fix (issue-112 discipline).
+All four fixed, committed, full-suite (75 binaries) + clippy
+`--all-targets -D warnings` + fmt green after each. Every fix reproduced or
+guard-verified empirically before/after encoding (issue-112 discipline).
 
-- **#114** (`90cb4fe`): finiteness validation in `update_sparse` +
-  `DenseLu::update`. NaN was silently committed → `Ok(NaN)` solve.
-- **#118** (`373264f`): store factor `a_max`; anchor update ztol to
-  `zero_pivot_tol·a_max`, not `u_max0`. Fixes spurious `TinyPivot` +
-  update→refactor **livelock** on high-growth bases.
-- **#115** (`ae13f27`): reworked `DenseLu::update` to an eta-based
-  Bartels–Golub update. **The issue's suggested "swap rows in U + fix L" does
-  not work** — a row swap of U forces a column swap of L that breaks its
-  unit-lower-triangular structure (worked the algebra). Correct fix mirrors
-  the sparse path: base `L` fixed, eliminations+interchanges recorded as
-  `DenseFtOp` etas replayed between the L- and U-solves; `ftran_partial` now
-  returns `G⁻¹L⁻¹Pa`. Partial pivoting bounds multipliers by 1 (growth `O(m)`
-  on the Hessenberg), superseding the sparse path's Neumaier need. New
-  `tests/lu_dense_update_bg.rs` (bump chains, slack bases, ftran+btran parity
-  vs fresh factor); all 10 adversarial tests now pass (0 ignored).
-- **#119** (`d7aafea`): `scaling::kr_guarded_update` applied to all 7
-  Knight–Ruiz update sites. Bit-identical on healthy matrices (KR
-  dense/sparse parity preserved); guards the `Inf→NaN→0` cascade on subnormal
-  couplings (confirmed the unguarded loop yields `[NaN, 0.0]`).
-- **#116** (`e5b6d4b`): chose the **solve-side** fix (skip iff
-  `d_diag == 0.0` exactly) over the audit's separate mask — safer for the hard
-  inertia rule because it changes **no** factorization (the force-accept-zero
-  path already sets `d = 0.0` exactly and is the only skip outcome). The
-  skip-iff-exactly-0.0 invariant was verified **empirically**: the whole
-  corpus (inertia oracles + threshold suites) stays green with the gate
-  change. Rook sub-floor accepts now set `needs_refinement`/`n_tiny`.
-- **#117** (`4a1d163`): blocked panel bails a rook-eligible below-threshold
-  1×1 pivot to the scalar (rook) path (the panel can't rook itself — its
-  trailing submatrix isn't Schur-updated yet). The 1×1-no-swap gate
-  (`akk ≥ α·gamma0`) means the bail only fires for near-zero columns (the
-  audit's case). `remaining==1` scalar site also routed through the rook
-  wrapper. Parity test: EPS-scale near-zero panel column → scalar==blocked
-  byte-identical with `n_rook_rescues > 0` (impossible pre-fix). Rook-disabled
-  default path byte-unchanged.
+- **#120** (`d6f8ebd`): `apply_post_scaling_overrides` now scales
+  `cascade_break_eps` by `‖D·A·D‖∞` (like the N2 `static_pivot_floor` fix), so
+  the cascade-break `PerturbToEps` floor is RELATIVE to the scaled matrix the
+  BK kernel operates on. Root cause: the default-armed `1e-10` was an ABSOLUTE
+  per-pivot floor; under Identity scaling on `γ·K` (γ=1e-12) every pivot was
+  bent to ±1e-10 (~1e2·‖A‖ perturbation), silently returning the inertia of
+  `A+Δ` with `‖Δ‖ ≫ ‖A‖`. Test `cascade_break_eps_scaled_by_matrix_norm`.
+- **#121** (`f8d5f8a`): symbolic-cache hit was gated on the `PatternFingerprint`
+  (a u64 hash) alone. Added a `last_pattern: Option<(Vec<usize>, Vec<usize>)>`
+  field kept in lockstep with the fingerprint; `cache_valid` now requires the
+  fingerprint match AND an exact O(n+nnz) `(col_ptr, row_idx)` compare, so a
+  2⁻⁶⁴ hash collision can never reuse a stale symbolic (which would scatter new
+  values through the old `perm` and corrupt factor/inertia). Test forges a
+  collision deterministically; verified it fails pre-fix (call_count 1 vs 2).
+- **#122** (`cb96b6e`): three-part guard-hardening bundle.
+  - **A** — ordering results (`run_external_ordering`, `schur::run_amd`) were
+    range-checked but never bijectivity-checked; a dup/missing perm corrupts
+    `permute_pattern`'s per-column count assignment. `validate_external_perm`
+    promoted to `pub(crate)` and called on both internal ordering results.
+  - **B** — `classify_2x2_inertia` mapped a NaN block to certified `(0,0,2)`.
+    Now returns `Result<Inertia, FeralError>` with a release-mode `!is_finite`
+    guard; Result threaded through `count_2x2_inertia_val`, `finish_1x1_outcome`
+    (now `Result<PivotStepResult>`), and all six call sites via `?`. Backstops
+    the debug-only finite entry-scan at `factor.rs:1749` (the only such gate on
+    the inertia path — grep confirmed).
+  - **C** — `LuParams::validate` now rejects `max_growth` NaN/≤1.0 (a NaN
+    silently disabled the growth guard in the update paths) and non-finite/≤0
+    `refine_tol`. Both dense and sparse factor entries call `validate()`.
+- **#123** (`876cf72`): the MAXFROMM short-circuit gate `akk >= alpha * mf` is
+  unconditionally true at `mf == 0.0` (`capture_maxfromm_col` returns `Some(0.0)`
+  for an all-zero trailing column), routing a zero column through rook-rescue —
+  where Plain's full scan hits `gamma0 == 0.0` and takes the dedicated
+  zero-column branch. Broke the documented Plain/Maxfromm bit-parity (delay/
+  inertia under `may_delay`, D under ForceAccept). Fix: `mf != 0.0 && …` treats
+  `Some(0.0)` as a cache miss. New `maxfromm_zero_tail_cache_miss_parity` (both
+  `may_delay` values, scalar + blocked) verified failing pre-fix; unit test
+  pins `capture_maxfromm_col`'s `Some(0.0)` precondition.
 
-## Benchmark Results
-```
-Dense KKT:  inertia match 1/1, residual pass 1/1, worst 1.14e-15
-Sparse KKT: inertia vs MUMPS 2/2, residual pass 2/2, worst 1.26e-16
-```
 ```
 
 ## Git Status
 ```
-876cf72 issue #123: treat cached MAXFROMM mf == 0.0 as a cache miss (parity)
-cb96b6e issue #122: guard-hardening bundle (ordering bijectivity, NaN 2x2, LuParams)
-f8d5f8a issue #121: exact pattern compare on symbolic-cache hit, not hash-only
-d6f8ebd issue #120: scale cascade_break_eps by the scaled matrix norm
-8a980e4 Audit correctness fixes: LU update/solve + dense LDLᵀ rook (#135)
+cafa023 issue #129: measure panel fragmentation — not justified, close with data
+fc4e9b8 issue #128: skip the bpack1 alloc+zero-fill on all-1x1 dense Schur panels
+4124faf issue #126: fuse the D-block solve into the forward pass (single-RHS)
+164d201 issue #124: thread the permute cache through the parallel driver
+d9d5e86 session 2026-07-10-04: checkpoint, CHANGELOG, decisions for #120–#123
 ```
 
 ## Test Status
@@ -86,53 +86,58 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 403 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.45s
+test result: ok. 405 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.49s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-10-03.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-10-04.md)
 
-Dense KKT:  inertia match 1/1, residual pass 1/1, worst 1.14e-15
-Sparse KKT: inertia vs MUMPS 2/2, residual pass 2/2, worst 1.26e-16
-No inertia or residual regression. (No perf-partition corpus in-container.)
-Full suite: **769 passed / 0 failed**; clippy `--all-targets -D warnings`
-clean; `cargo fmt --check` clean.
+No regression vs 2026-07-10-03 (inertia 100%, same worst residuals).
+--- Dense solver validation ---
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+--- Sparse solver validation ---
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+Dense/Sparse failure analysis: no failures
 
 ```
 
 ## Recent Decisions
-**Decision.** Fix the exact-`0.0` `TinyPivot` failures of `SparseLu`'s
-Forrest–Tomlin update (issue #112) with **Neumaier (Kahan–Babuška)
-compensated accumulation** in the bump elimination's working-row scatter,
-always on; and ship Bartels–Golub row interchanges as an **opt-in, always-on
-variant** (`LuParams::update_pivot_search`, default `false`) rather than the
-issue's requested rescue-after-failure.
-
-**Why.** The exact-`0.0` on a nonsingular basis is summation absorption: the
-fixed-order sweep grows an intermediate past `|true pivot|/ε` and one rounded
-add destroys the pivot's bits. Re-selecting pivots afterwards provably cannot
-recover them (any interchange order's working row is exactly proportional to
-the fixed order's — see `dev/research/issue-112-bg-update.md` §UPDATE and the
-tried-and-rejected entry), while the compensated sum retains them: on the
-regression basis (`tests/issue112_bg_update.rs`) the committed diagonal
-equals the hand-computed true value `2⁻³⁵` bit-for-bit where the plain sweep
-returned `0.0` and scipy's fresh LU returns ε-noise. Cost: ~4 flops per
-scatter add + one pooled length-m `f64` buffer; no allocation, no API change.
-Pivot search remains valuable as a *trajectory* choice (multipliers bounded
-by 1 keep U balanced over long update chains, preventing the imbalance that
-makes absorption possible) — but it changes committed factors/etas wherever a
-working-row entry dominates a retained diagonal, so it defaults off pending
-discopt A/B on the captured corpus. New machinery: `FtOp::Swap` (physical
-row-content swap preserves the symmetric `uperm` invariant, diagonal-first
-storage, prior etas), `pivot_search_swaps()` telemetry, wholesale `u_above`
-rebuild on swap commits.
-
-**Contract note.** A compensated final diagonal at/below
-`zero_pivot_tol·u_max0` is now trustworthy evidence of a genuinely dependent
 replacement (not a summation artifact), strengthening the existing
 `NeedsRefactor` semantics. No tolerances changed.
+
+## 2026-07-10 — Issue #122: propagate `Result` from `classify_2x2_inertia`; `max_growth` semantics
+
+Two small design choices made while closing the #122 guard-hardening bundle.
+
+**2×2 non-finite guard is a `Result`, not an inline per-site check.**
+`classify_2x2_inertia` previously returned `Inertia` and a NaN `det`/`tr` fell
+through every ordered comparison to the `(0,0,2)` arm — certifying a NaN block
+as two *zero* eigenvalues. The fix changes the signature to
+`Result<Inertia, FeralError>` (release-mode `!is_finite` → `InvalidInput`) and
+threads the `Result` through `count_2x2_inertia_val`, `finish_1x1_outcome`
+(now `Result<PivotStepResult>`), and all six call sites via `?`. Chosen over a
+per-call-site guard because it is DRY (one guard, impossible to forget at a
+future site) and every caller already sits in a `Result`-returning frame, so
+the ripple is mechanical. This backstops the debug-only finite entry-scan at
+`factor.rs:1749` in release without a full-column scan on the hot path (the
+guard is O(1) at the pivot-block level).
+
+**`LuParams::max_growth` is `> 1.0` with `+∞` an explicit disable.**
+`validate()` now rejects `max_growth` that is `NaN` or `≤ 1.0` and accepts any
+finite `> 1.0` plus `+∞`. `+∞` is the documented "never trigger a refactor on
+growth" opt-out (`growth > +∞` is always false); `NaN` is rejected because it
+silently disabled the growth guard in the update paths (which — unlike
+`should_refactor_growth` — do not defend with `is_finite`). `refine_tol` must
+be finite and `> 0`. No tolerances changed; all existing `LuParams` in the
+tree already satisfy the bounds (min `max_growth` `1.0 + 1e-9`, all
+`refine_tol > 0`), so this is pure input validation with no behavior change on
+valid inputs.
 
 ## Recent Tried-and-Rejected
 sweep replays across four hand constructions (journal 2026-07-10-01,
@@ -159,6 +164,8 @@ default false. See `dev/research/issue-112-bg-update.md` §UPDATE and
 ## Source Files
 ```
 src/bin/bench.rs
+src/bin/perf_probe.rs
+src/bin/probe_panel_frag.rs
 src/capi.rs
 src/dense/block_ldlt32.rs
 src/dense/equilibrate.rs
