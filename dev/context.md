@@ -1,68 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-10T02:36:06Z
+Generated: 2026-07-10T03:55:16Z
 
 ## Latest Session
-File: dev/sessions/2026-07-02-02.md
+File: dev/sessions/2026-07-10-01.md
 ```
-# Session 2026-07-02-02
+# Session 2026-07-10-01
 
 ## Goal
-Cut and publish the **v0.13.0** release, shipping issue #107
-(`OrderingMethod::External`) landed since v0.12.0.
+Issue #112: the sparse LU Forrest–Tomlin update fails with
+`RefactorCause::TinyPivot` at magnitude exactly `0.0` on provably nonsingular,
+well-conditioned bases (100% of FT failures in discopt's refactor storms).
+Requested: a pivot-searching (Bartels–Golub/Suhl–Suhl) update variant.
 
 ## Accomplished
-- Bumped all six version strings `0.12.0` → `0.13.0` via
-  `scripts/release-checklist.sh bump 0.13.0` (root `Cargo.toml`/lock,
-  `python/Cargo.toml`/`pyproject.toml`/lock). `check` reports all six agree on
-  0.13.0; no ordering crate stale (all unchanged since v0.12.0 at v0.2.1).
-- Cut `CHANGELOG.md` `## [0.13.0] - 2026-07-02` from `[Unreleased]` (contents:
-  #107 `OrderingMethod::External`).
-- Re-executed all five example notebooks against the 0.13.0 wheel
-  (`maturin build --release` → `feral_solver-0.13.0` abi3): 0 error outputs,
-  version output `feral 0.12.0` → `feral 0.13.0`.
-- Root `cargo test --release` green (all binaries 0 failed).
-- PR #109 opened, all CI green (check, stress-smoke, linux wheel tests
-  py3.10/3.12/3.13), squash-merged to main as `36da100`.
-- Tagged `v0.13.0`, published the GitHub release. `release.yml` (crates.io)
-  and `python-wheels.yml` (PyPI) both completed **success**.
-- Verified live: crates.io `feral` = **0.13.0**; PyPI `feral-solver` = **0.13.0**.
+- Research note `dev/research/issue-112-bg-update.md` + plan
+  `dev/plans/issue-112-bg-update.md` (branch `claude/issue-112-0885lr`).
+- **Disproof of the requested rescue design** (implemented first, then
+  removed on proof): any within-bump row-interchange order's working row is
+  exactly proportional to the fixed order's (`W'_k = λ_k·W_k`, λ resets to
+  `−piv/vrc` per swap), so the true final pivot is `λ·t_FT` (determinant
+  identity), skip patterns coincide, and FP absorption is scale-invariant —
+  a pivot the fixed order computed as exactly 0.0 by summation absorption is
+  unrecoverable by ANY pivot re-ordering. Verified numerically (float +
+  exact-Fraction sweep replays; on the regression basis the swap path's
+  final diag is `1.39e-17 = λ·2⁻³⁵`, correctly sub-ztol).
+- **Shipped the actual fix: Neumaier-compensated accumulation** in the bump
+  elimination's working-row scatter (always on; pooled `ft_rw_comp`;
+  branch-free two-sum). On the hand-traced m=4 regression basis the plain
+  sweep commits `0.0` exactly, the compensated sweep commits the true
+  diagonal `2⁻³⁵` **bit-for-bit** (oracle: hand calculation verified offline
+  in exact rational arithmetic; scipy's fresh LU sees only ε-noise). Classic
+  Kahan verified insufficient (its `y = v − c` re-absorbs the compensation).
+- **Shipped the pivot search as an opt-in always-on variant**:
+  `LuParams::update_pivot_search` (default `false`), Bartels–Golub
+  interchanges as physical row-content swaps (`FtOp::Swap` etas — symmetric
+  `uperm` invariant, diagonal-first storage, and prior etas untouched;
+  forward/transpose/spike replays; wholesale `u_above` rebuild and
+  swapped-row rollback snapshots on that path; `pivot_search_swaps()`
+  telemetry). Python bindings expose the keyword.
+- Tests: `tests/issue112_bg_update.rs` (5 tests) — bit-exact recovered
+  diagonal, backward-stable ftran/btran residuals (2.9e-11 vs bound
+  3.7e-10), genuine-singular rejection + clean rollback in both modes,
+  swap-mode factor validity incl. chained updates replaying Swap etas,
+  default path never swaps. Full suite green (395 lib + all integration),
+  clippy `--all-targets -D warnings` clean, fmt clean.
+- Test-design finding (documented): any single-shot absorption reproducer
+  has `σ_min(B') ⪅ δ·∏(retained diags)` — numerically singular to a
+  from-scratch factorization — so the issue's "residual ≤ refactor's"
+  acceptance can only be validated on discopt's captured corpus (whose
+  imbalance lives in chain-built factorization state, not in B').
 
 ## Benchmark Results
-No solver code changed this session (release-only: version strings, CHANGELOG,
-re-executed notebooks), so numbers are unchanged from 2026-07-02-01. End-of-session
-run for the record:
 ```
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.71     <= 2.0     PASS
-medium (<500)            152145     2.09     <= 3.0     PASS
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.52     <= 2.0     PASS
-medium (<500)            153560     1.52     <= 3.0     PASS
-```
-All exit-partition buckets PASS, unchanged from the prior session.
-
-## Decisions Made
-- None (release-only session).
-
-## Abandoned Approaches
-- None.
-
-## Next Session Should
-- Return to the open engineering backlog (LU / ordering / dense-kernel follow-ups);
-  no release-blocking items outstanding.
+(this container has no oracle-timed corpus; the bench harness ran its
+in-tree matrices only — correctness gates, no perf partition)
 ```
 
 ## Git Status
 ```
+82a81bd issue #112: compensated FT sweep + opt-in Bartels-Golub pivot search
+5794f0e issue #112: research note + plan for Bartels-Golub pivot-searching update
 9596472 docs: session checkpoint 2026-07-02-02 (v0.13.0 release)
 36da100 release: feral v0.13.0 (#109)
 9d05f75 issue #107: add OrderingMethod::External for user-supplied orderings (#108)
-a1dd7b5 release: feral v0.12.0 (#106)
-1165d4d issue #102 follow-up: escalate ordering to LdltCompress on pivot growth (#105)
 ```
 
 ## Test Status
@@ -85,83 +86,80 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 395 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.51s
+test result: ok. 395 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.89s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-02-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-10-01.md)
 
-No solver code changed this session (release-only: version strings, CHANGELOG,
-re-executed notebooks), so numbers are unchanged from 2026-07-02-01. End-of-session
-run for the record:
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.71     <= 2.0     PASS
-medium (<500)            152145     2.09     <= 3.0     PASS
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.52     <= 2.0     PASS
-medium (<500)            153560     1.52     <= 3.0     PASS
-All exit-partition buckets PASS, unchanged from the prior session.
+(this container has no oracle-timed corpus; the bench harness ran its
+in-tree matrices only — correctness gates, no perf partition)
+KKT summary: 2 matrices — inertia match 1/1, residual pass 1/1,
+  worst residual 1.14e-15
+Sparse solver: 2/2 — inertia vs MUMPS 2/2, residual pass 2/2,
+  worst residual 1.26e-16
+Dense/Sparse exit partition: 0 matrices (corpus absent) — N/A
+No solver-perf-relevant kernels changed on the default path except the
+compensated scatter (~4 flops per scatter add in the update only; factor
+and solve paths untouched).
 
 ```
 
 ## Recent Decisions
-diverge from the scaling precedent. The `Copy` loss is mechanical (clone at the
-`AutoRace` race loop, the preprocess-`Auto` race, `Solver::factor`, the three
-numeric constructors, and the `feral-diagnostics` bins that reuse a `method`
-binding) and was absorbed.
+**Decision.** Fix the exact-`0.0` `TinyPivot` failures of `SparseLu`'s
+Forrest–Tomlin update (issue #112) with **Neumaier (Kahan–Babuška)
+compensated accumulation** in the bump elimination's working-row scatter,
+always on; and ship Bartels–Golub row interchanges as an **opt-in, always-on
+variant** (`LuParams::update_pivot_search`, default `false`) rather than the
+issue's requested rescue-after-failure.
 
-**Why `External` forces `OrderingPreprocess::None`.** `LdltCompress` reorders an
-MC64-compressed super-graph of dimension `ncmp ≤ n`; a full-length user permutation
-cannot be applied to it. So `External` bypasses the preprocess-`Auto` fill race and
-pins `resolved_preprocess = None`, regardless of the requested (or default `Auto`)
-preprocess. Scaling is unaffected — it is computed independently in the numeric
-phase from `ScalingStrategy`; only the MC64 *cache-reuse* symbolic-time shortcut is
-skipped, which is a performance optimization, not a correctness input.
+**Why.** The exact-`0.0` on a nonsingular basis is summation absorption: the
+fixed-order sweep grows an intermediate past `|true pivot|/ε` and one rounded
+add destroys the pivot's bits. Re-selecting pivots afterwards provably cannot
+recover them (any interchange order's working row is exactly proportional to
+the fixed order's — see `dev/research/issue-112-bg-update.md` §UPDATE and the
+tried-and-rejected entry), while the compensated sum retains them: on the
+regression basis (`tests/issue112_bg_update.rs`) the committed diagonal
+equals the hand-computed true value `2⁻³⁵` bit-for-bit where the plain sweep
+returned `0.0` and scipy's fresh LU returns ε-noise. Cost: ~4 flops per
+scatter add + one pooled length-m `f64` buffer; no allocation, no API change.
+Pivot search remains valuable as a *trajectory* choice (multipliers bounded
+by 1 keep U balanced over long update chains, preventing the imbalance that
+makes absorption possible) — but it changes committed factors/etas wherever a
+working-row entry dominates a retained diagonal, so it defaults off pending
+discopt A/B on the captured corpus. New machinery: `FtOp::Swap` (physical
+row-content swap preserves the symmetric `uperm` invariant, diagonal-first
+storage, prior etas), `pivot_search_swaps()` telemetry, wholesale `u_above`
+rebuild on swap commits.
 
-**Soundness.** Numeric factorization, pivoting, and inertia are untouched — a
-factorization under any valid ordering is exact. A bad user ordering only costs
-fill/time. The permutation is validated as a bijection of `0..n` up front
-(`validate_external_perm`): wrong length, out-of-range index, or duplicate returns
-`FeralError::InvalidInput` (never a panic, no `unwrap`). Programmatic-only: no
-string parsing, matching scaling's `External`.
-
-**Evidence.** `tests/issue107_external_ordering.rs` (identity + reversed orderings
-solve to the hand oracle with saddle-point inertia (2,1,0) and SPD inertia (n,0,0);
-validation rejects the three malformed inputs); `src/symbolic` units
-(`symbolic_factorize_external_produces_valid_perm` pins the bijection + forced
-`None` preprocess; `external_perm_validation_rejects_bad_input`;
-`ordering_method_external_debug_is_compact`). Full suite green: feral 395 lib + all
-integration, `feral-diagnostics` builds/tests, clippy `--all-targets` clean on both,
-`cargo fmt --check` clean. Default (non-External) path unchanged. See
-`dev/research/issue-107-external-ordering.md` and
-`dev/plans/issue-107-external-ordering.md`.
+**Contract note.** A compensated final diagonal at/below
+`zero_pivot_tol·u_max0` is now trustworthy evidence of a genuinely dependent
+replacement (not a summation artifact), strengthening the existing
+`NeedsRefactor` semantics. No tolerances changed.
 
 ## Recent Tried-and-Rejected
-+23% option but is a reproducibility-policy change (kept opt-in), not a
-bit-exact win.
+sweep replays across four hand constructions (journal 2026-07-10-01,
+research note §UPDATE).
 
-## 2026-07-01 — UPDATE: packed micro-kernel succeeds where B-1a source-pack failed (issue #99)
+Also rejected en route: classic **Kahan** compensation for the sweep
+accumulator (its `y = v − c` pre-subtraction re-absorbs the compensation
+into the next 2²⁰-scale addend — computed `0.0` again; verified
+numerically); the **Neumaier** two-sum variant works and shipped. And three
+regression-matrix constructions whose base or replacement was numerically
+singular for every path (±1 cascade to 2³⁴: `σ_min(B') = 1.5e-16`; diag-4
+cascade: rescue-true `4.5e-13 <` ztol; spike-poison m=6: fresh LU burns the
+4e6 spike entry and deflates its tail pivot to 0) — any single-shot
+absorption reproducer necessarily has `σ_min(B') ⪅ δ·∏retained`, so the
+"fresh factor succeeds" oracle is unsatisfiable without a multi-update
+imbalance history.
 
-The 2026-06-30 "B-1a panel packing" entry above rejected source-panel packing as a
-net slowdown and concluded the root front is DST-bandwidth-bound. That conclusion
-was **specific to the variant tried** — packing the source into a tighter stride
-but *feeding the same strided kernels*, which keep the per-`q` `as_simd` + strided
-access. It does **not** generalize to a proper packed micro-kernel.
-
-A different design — pack the panel into `q`-contiguous MR=8×NR=4 micro-panels and
-run a register-tiled kernel with a **contiguous inner `q`-loop**
-(`apply_schur_panel_range_packed`) — is **22–26× faster in isolation and
-byte-exact** (`examples/bench_schur_micro`), and gives 8–10× on real dense fronts.
-So the bottleneck was strided-`q` cache latency, not DST bandwidth, on this
-hardware. Not a rejection — a correction of scope. See
-`dev/research/issue-99-dense-front-fma-gate.md` UPDATE 3 and `dev/decisions.md`
-2026-07-01 (packed BLAS-3). The B-1a *source-into-strided-kernel* variant remains
-rejected; the packed micro-kernel is the shipped design.
+**Shipped instead.** Always-on Neumaier-compensated scatter (recovers the
+true pivot bit-for-bit on the regression basis) + `update_pivot_search` as an
+always-on opt-in trajectory variant (bounded multipliers across chains),
+default false. See `dev/research/issue-112-bg-update.md` §UPDATE and
+`dev/decisions.md` 2026-07-10.
 
 ## Source Files
 ```
@@ -241,6 +239,7 @@ tests/growth_flag.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
+tests/issue112_bg_update.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
