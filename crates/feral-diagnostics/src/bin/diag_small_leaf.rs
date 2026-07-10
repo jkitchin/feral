@@ -89,6 +89,7 @@ fn params_off() -> NumericParams {
         static_pivot_threshold: None,
         warn_partial_singular: false,
         pattern_reused_hint: false,
+        use_static_row_indices: true,
     }
 }
 

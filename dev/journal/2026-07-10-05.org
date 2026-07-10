@@ -200,3 +200,37 @@ Combined discopt-simplex verdict (#130/#132/#133 all measured, all
 not-justified): the compute_spike L-solve over an already-well-ordered factor
 is near the achievable floor. Remaining wins are simplex-algorithmic
 (pivots/pricing) or refactor cadence, not the LU kernels. discopt left pristine.
+
+* 15:40 :issue-131:issue-125:parallelism:design:
+User scoped #131 full implementation. Wrote code-level design +
+bit-exactness analysis (dev/research/issue-131-parallelism-design-2026-07-10.md).
+KEY FINDING: the SOLVE gap (Gap A) cannot be made bit-exact vs today's serial
+solve — it uses a shared global vector where sibling subtrees read-modify-write
+the same ancestor separator entries; naive tree-parallel races, and
+private-accumulation-then-merge violates the byte-identical contract (float
+non-associativity). Real bit-exact tree-parallel solve needs a
+contribution-block rewrite of both solve cores (arithmetic reorder → residual
+re-baseline). Assembly gap (Gap B) IS bit-exact-safe (disjoint-column partition)
+but second-order (O(nrow^2) behind already-parallel O(nrow^3) factor). Both are
+tree-shape dependent (bushy only; path-like KKT gets ~0).
+User decisions: Gap A → full contribution-block rewrite (accept residual
+re-baseline, show diffs first); assembly → #125 static maps first, then Gap B.
+
+* 16:20 :issue-125:factorize:prologue:
+Implemented #125 (static assembly maps). build_row_indices' output is a pure
+function of static structure when n_delayed_in==0 (trailing set is a sorted
+seen-dedup, numeric-pivot-order independent). Precompute per-supernode
+[own cols | sorted trailing] at symbolic time (compute_static_row_indices, one
+postorder pass), store CSR-flat on SymbolicFactorization
+(static_row_offsets/static_row_flat + static_rows() accessor). Numeric
+factor_one_supernode uses the static slice when n_delayed_in==0 &&
+use_static_row_indices (new NumericParams flag, default true); delayed fronts
+fall back to build_row_indices. Both drivers covered (shared factor_one_supernode).
+Tests (tests/static_assembly_maps.rs, 8 pass): (1) A/B byte-identical factor
+static-on vs static-off incl. KKT-with-delays (proves static==build_row_indices
+bit-for-bit on real matrices); (2) independent BTreeSet oracle over public
+symbolic data == static_rows(i). Full suite green; fmt/clippy clean.
+BENCH (perf_probe A/B via FERAL_STATIC_ROWS, sequential driver, grid220 n=48400
+bushy): per-supernode loop 164.8ms→151.6ms (~8%), total warm factor
+176.0ms→168.1ms (~4.5%). arrow (few fronts, delayed root): wash (noise). Win is
+concentrated on bushy trees with many small no-delay fronts, as expected.

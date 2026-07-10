@@ -1964,6 +1964,7 @@ mod tests {
             static_pivot_threshold: None,
             warn_partial_singular: false,
             pattern_reused_hint: false,
+            use_static_row_indices: true,
         };
         Solver::with_params(np, SupernodeParams::default())
     }

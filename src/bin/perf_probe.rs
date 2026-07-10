@@ -24,7 +24,17 @@ fn median(mut v: Vec<u128>) -> u128 {
 }
 
 fn make_solver(sequential: bool, profiling: bool) -> Solver {
-    Solver::with_params(NumericParams::default(), Default::default())
+    // Issue #125 A/B: `FERAL_STATIC_ROWS=0` forces the `build_row_indices`
+    // path (static assembly map disabled) so the prologue win is
+    // measurable against the default (static map on).
+    let mut np = NumericParams::default();
+    if matches!(
+        std::env::var("FERAL_STATIC_ROWS").as_deref(),
+        Ok("0") | Ok("off") | Ok("false") | Ok("no")
+    ) {
+        np.use_static_row_indices = false;
+    }
+    Solver::with_params(np, Default::default())
         .with_parallel(!sequential)
         .with_profiling(profiling)
 }
