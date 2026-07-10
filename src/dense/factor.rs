@@ -2979,7 +2979,28 @@ fn lblt_panel_frontal(
             continue;
         }
 
-        // 1×1 pivot at col, no swap. Try the column-relative threshold.
+        // 1×1 pivot at col, no swap.
+        //
+        // Issue #117: when rook rescue is enabled (`pivot_threshold > 0`, e.g.
+        // the multifrontal default `1e-8`), a below-threshold pivot is exactly
+        // where `scalar_pivot_step` would attempt a rook rescue and sign-count
+        // the pivot *live*, whereas the panel's non-rook `try_reject_1x1_frontal`
+        // would zero-count or delay it — so the blocked and scalar kernels can
+        // certify different inertia on the same front. The panel cannot run
+        // `rook_rescue` itself (its trailing submatrix is not yet Schur-updated,
+        // so the search would read stale entries), so it bails to the scalar
+        // path, which re-decides the pivot from up-to-date state. Column `col`
+        // is only read here (it is peek-ahead'd — pivots `0..c` applied — and
+        // unmutated), so bailing before `try_reject_1x1_frontal` mutates it
+        // preserves the `ScalarFallback` contract (`j_start = k+n_elim+1`, same
+        // as the `Delayed` return below). When rook is disabled the panel keeps
+        // its inline handling, so the default dense path is byte-unchanged.
+        let threshold = (params.pivot_threshold * gamma0).max(params.null_pivot_tol);
+        if params.pivot_threshold > 0.0 && a[col * nrow + col].abs() <= threshold {
+            return Ok((c, PanelStatus::ScalarFallback));
+        }
+
+        // Try the column-relative threshold.
         let outcome = try_reject_1x1_frontal(
             a,
             nrow,
@@ -3903,8 +3924,12 @@ fn scalar_pivot_step(
     if remaining == 1 {
         // Last eliminated pivot: always 1×1. Compute the column max
         // over rows (k+1..nrow) for the column-relative threshold.
-        // Rook rescue cannot fire here (needs ncol-k >= 2), so call
-        // the rejection routine directly.
+        // Issue #117: rook rescue CAN fire here — `rook_rescue` only requires
+        // `k < ncol` and can accept the 1×1 at `k` itself (`arr >= u*gamma_r`,
+        // no swap). Routing through the rook wrapper (like every other scalar
+        // 1×1 site) keeps the last pivot's accept/sign-count consistent with
+        // the rest of the front; the old direct `try_reject_1x1_frontal` call
+        // could zero-count or delay a pivot the wrapper would rook-accept.
         let col_max = if let Some(mf) = cached {
             mf
         } else {
@@ -3917,28 +3942,25 @@ fn scalar_pivot_step(
             }
             m
         };
-        let outcome = try_reject_1x1_frontal(
+        let outcome = try_reject_1x1_with_rook_rescue(
             a,
             nrow,
+            ncol,
             k,
             col_max,
             may_delay,
             params,
+            perm,
             pos,
             neg,
             zero,
             needs_refinement,
+            n_rook_rescues,
             n_tiny,
         )?;
-        match outcome {
-            PivotOutcome::Accepted => do_1x1_update(a, nrow, k, params.fma),
-            PivotOutcome::Rejected => {}
-            PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
-            PivotOutcome::AcceptedRook2x2 { .. } => {
-                unreachable!("remaining==1 never triggers rook rescue")
-            }
-        }
-        return Ok(PivotStepResult::Advanced(1));
+        return Ok(finish_1x1_outcome(
+            outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma, None,
+        ));
     }
 
     // MAXFROMM short-circuit: if the previous 1×1 stash gives a
