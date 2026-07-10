@@ -5966,3 +5966,35 @@ be finite and `> 0`. No tolerances changed; all existing `LuParams` in the
 tree already satisfy the bounds (min `max_growth` `1.0 + 1e-9`, all
 `refine_tol > 0`), so this is pure input validation with no behavior change on
 valid inputs.
+
+## 2026-07-10 — #131 Gap A: opt-in contribution-block tree-parallel solve (not a rewrite of the default path)
+
+The tree-parallel single-RHS solve (`solve_sparse_cb`) is a **separate,
+opt-in** path, not a replacement of `solve_sparse`. Rationale: a bit-exact
+tree-parallel forward substitution must use a contribution-block reduction
+(sum tree, fixed child order) rather than the default core's shared-global-
+vector left-fold. Those two accumulation orders are not float-bit-identical, so
+converting the default path in place would shift every ~1e-15 residual baseline
+(and the single-vs-many-core bit-parity test). Keeping the CB solve as its own
+path leaves the default `solve_sparse` — and every existing test/baseline —
+untouched, and the #131 "serial == parallel byte-identical" contract is
+satisfied within the CB path itself (serial-CB == parallel-CB by construction:
+the child-reduction order is fixed regardless of thread scheduling). The
+backward substitution keeps the default arithmetic unchanged (separator rows
+are read-only, eliminated rows disjoint), so only forward is contribution-block.
+Coarsening (subtree-cost task roots) and a `worthwhile` gate are required for a
+net win — per-node rayon tasks are far too fine for the tiny per-front solve
+work. Evidence: `dev/research/issue-131-parallelism-design-2026-07-10.md`,
+`tests/cb_solve_parity.rs`, ~2.0× on grid220 (n=48400) at 4 threads.
+
+## 2026-07-10 — #131 Gap B (parallel assembly): measured not justified, not built
+
+Per-front assembly is 8.3% of the factor on grid220 / 1.5% on dense1400, and in
+the parallel driver independent fronts' assembly already overlaps across
+threads (each front's assembly is part of its own tree task). The only assembly
+left on the critical path is the root/near-root fronts' O(nrow²), behind the
+root's O(nrow³) dense factor that intra-front parallelism (Lever 1.1) already
+targets — so column-partitioned parallel assembly would chase <1–3% of the
+factor. #125 already captured the tractable, bit-exact assembly win
+(`build_row_indices`). Not built. Evidence:
+`dev/research/issue-131-gapb-assembly-measure-2026-07-10.md`.
