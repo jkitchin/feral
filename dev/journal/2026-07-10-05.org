@@ -1,0 +1,59 @@
+#+TITLE: Session 2026-07-10-05 journal
+#+STARTUP: showall
+
+* Round: perf/sota issues #124–#134 (verify each improves performance)
+
+** 12:00 :perf-harness:tooling:
+Built src/bin/perf_probe.rs: loads an mtx, factors it repeatedly on a WARM
+Solver (symbolic + scaling + workspace hot — the IPM-host workload), reports
+min/median warm re-factor wall + the profiled prologue breakdown
+(permute_from_triplets_us etc.) + symbolic_reran/inertia_stable guards.
+Autodiscovered bin (autobins=true). This is the before/after instrument for
+the whole round. Env FERAL_PROBE_SEQUENTIAL forces the serial driver.
+
+Baselines (warm, parallel unless noted):
+- nuffield2 (26649, 72813nnz): median 6.36 s — NUMERIC-loop dominated
+  (loop_us 7.1 s; prologue negligible). Wrong matrix for prologue work.
+- cresc132 (5314): routes SEQUENTIAL inner (prologue_us populated); warm
+  from_triplets already 0 via the existing cache; scaling_us now dominates
+  the tiny prologue.
+- synthetic banded pentadiagonal (n=200000, 600k nnz): routes PARALLEL,
+  factors ~100-125 ms warm — prologue is a meaningful fraction here (cheap
+  numeric loop, large nnz to permute). The right shape for #124's parallel
+  path.
+
+** 12:30 :issue-124:prologue:permute-cache:parallel-driver:
+Root cause confirmed by reading: factorize_multifrontal_supernodal_parallel
+(the Solver default) called plain permute_csc_values and DROPPED the caller's
+FactorWorkspace — so the Lever-A.2 PermuteCache was dead code on the default
+path, re-sorting through CscMatrix::from_triplets every warm re-factor. The
+sequential and schur-inner drivers already thread the cache.
+
+Fix: split the parallel driver into a fresh-ws wrapper
+(factorize_multifrontal_supernodal_parallel, unchanged public 3-arg API for
+tests) + a new factorize_multifrontal_supernodal_parallel_with_workspace that
+takes ws; the dispatch wrapper now passes ws through; the permute step uses
+permute_csc_values_with_cache(..., params.pattern_reused_hint,
+&mut ws.permute_cache). On a warm hit this is an O(nnz) scatter instead of the
+O(nnz log nnz) triplet sort.
+
+Verification:
+- Noise-free structural proof (test parallel_driver_uses_permute_cache_issue_124):
+  the parallel driver now BUILDS the cache on a warm-reuse cold call
+  (ws.permute_cache.is_some()) and the warm cache-hit factor is BIT-IDENTICAL
+  to a fresh cache-less parallel factor (inertia, perm, per-node D/L/d_subdiag
+  bytes). Verified FAILS pre-fix (plain permute leaves the cache None).
+- Wall (banded, 20 warm iters, parallel): pre-fix min 104.7 ms / median
+  109.9 ms; post-fix min 86.9 ms / median 125.1 ms. Best-case (min, least
+  scheduling noise) improved ~17%; medians are within the parallel-loop
+  variance on this shared host (the ~20 ms from_triplets delta is small vs the
+  ~100 ms numeric loop). nuffield2 unchanged (6.36→6.42 s, within noise) as
+  expected — it is numeric-dominated, not prologue-dominated.
+
+Note: the parallel driver still does not populate the Profiler prologue_us
+fields (only the sequential driver does), so the parallel-path from_triplets
+saving is not separately attributed by the profiler — the structural test is
+the authoritative proof.
+
+Full suite 76 binaries green, parallel_parity green, clippy --all-targets
+-D warnings + fmt clean.
