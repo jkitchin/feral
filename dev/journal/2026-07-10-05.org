@@ -249,3 +249,37 @@ negative like #130/#132/#133. Recorded
 dev/research/issue-131-gapb-assembly-measure-2026-07-10.md. User: skip Gap B,
 proceed to Gap A (the high-value solve rewrite). Kept the assembly breakdown
 addition to probe_panel_frag (useful diagnostic).
+
+* 18:30 :issue-131:gapa:solve:contribution-block:parallel:
+Implemented the #131 Gap A contribution-block tree-parallel single-RHS solve
+(opt-in solve_sparse_cb; default solve_sparse untouched → zero risk to existing
+tests, no rebaseline). Forward = contribution-block (assemble b at eliminated
+rows + children contributions summed in ascending child order, the same
+deterministic reduction as the factor's extend_add), leaves-up. Backward =
+unchanged shared-vector arithmetic (separator rows read-only, eliminated rows
+disjoint), root-down. Global y written only at eliminated rows (disjoint across
+fronts); concurrent writes via a Send+Sync raw-pointer wrapper (YPtr) with a
+disjointness safety comment.
+Coarsening (CbTaskPlan): per-node rayon tasks were far too fine (grid220 = 48400
+tiny tasks → spawn/lock overhead swamped the tiny per-front solve work: NO
+speedup, cb_parallel 14.6ms vs cb_serial 10.7ms at 1t). Cut the tree at a
+subtree-cost threshold into "task roots"; each task root runs its contiguous
+postorder block of light descendants serially (postorder ⇒ contiguous ⇒ no
+recursion), only the top of the tree spawns tasks. Bit-exact preserved
+(coarsening changes which thread runs a front, never the reduction order).
+`worthwhile` gate: skip parallel (run serial) when <2 independent task roots, or
+one task root's serial share >70% of total (Amdahl — e.g. arrow's huge root
+front), or total < 1e6 flops (scratch-setup not amortized).
+MEASURED (grid220 n=48400 bushy, 30-iter min, warm factor): default solve
+13.5ms; cb_serial 13.0ms (≈default, no regression); cb_parallel 6.6ms at 4t =
+~2.0x. arrow (path+big root): gate → serial fallback, near-neutral (0.51 vs
+0.46ms). Solve is ~6-13% of factor so absolute win is a few ms/solve; matters
+cumulatively for IPM hosts (several refined solves per factor).
+TESTS (tests/cb_solve_parity.rs, 6 pass incl. n=9216 concurrent path, stable
+under RAYON_NUM_THREADS=8): serial-CB == parallel-CB byte-identical (to_bits);
+determinism across parallel runs; valid solve (residual <= 10x default);
+CB≈default within reassociation; KKT-with-delays (data-flow risk area); dense
+fast-path (lone root). Full suite green; fmt + clippy -D warnings clean.
+Scope note: multi-RHS core (solve_sparse_core_many_into) still shared-vector
+serial — a documented follow-up; single-RHS is the IPM refinement/condition
+hot path #131 motivates.

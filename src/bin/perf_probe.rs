@@ -115,6 +115,30 @@ fn main() {
     let solve_med_ns = sv.get(sv.len() / 2).copied().unwrap_or(0);
     println!("  solve_min_ns={solve_min_ns} solve_median_ns={solve_med_ns}");
 
+    // Issue #131 Gap A: contribution-block solve A/B. Times the CB solve
+    // serial vs tree-parallel (rayon pool = RAYON_NUM_THREADS) on the warm
+    // factor. Enabled with FERAL_PROBE_CB=1.
+    if std::env::var("FERAL_PROBE_CB").is_ok() {
+        if let Some(factors) = solver.factors() {
+            let bench_cb = |parallel: bool| -> u128 {
+                let _ = feral::numeric::solve::solve_sparse_cb(factors, &rhs, parallel);
+                let mut walls = Vec::with_capacity(iters);
+                for _ in 0..iters {
+                    let t0 = Instant::now();
+                    let _ = feral::numeric::solve::solve_sparse_cb(factors, &rhs, parallel);
+                    walls.push(t0.elapsed().as_nanos());
+                }
+                walls.into_iter().min().unwrap_or(0)
+            };
+            let cb_ser = bench_cb(false);
+            let cb_par = bench_cb(true);
+            println!(
+                "  cb_serial_min_ns={cb_ser} cb_parallel_min_ns={cb_par} threads={}",
+                rayon::current_num_threads()
+            );
+        }
+    }
+
     // A separate profiled solver to attribute the prologue (profiling adds
     // overhead, so it is kept out of the timing number above).
     let mut prof = make_solver(sequential, true);
