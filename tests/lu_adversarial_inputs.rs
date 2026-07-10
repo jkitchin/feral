@@ -88,7 +88,6 @@ fn factor_rejects_nonfinite_columns() {
 /// `Ok` with a NaN solution (confirmed: `x = [NaN, 1.0]`), a silent wrong
 /// answer.
 #[test]
-#[ignore = "issue #114 — sparse update commits NaN silently; fix pending"]
 fn sparse_update_rejects_nonfinite_column() {
     let cols = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
     let mut lu = SparseLu::factor_dense_columns(2, &cols, LuParams::default()).unwrap();
@@ -120,7 +119,6 @@ fn sparse_update_rejects_nonfinite_column() {
 /// `update(1, [NaN, 1.0])` on a 2×2 identity returns `Ok(())`, committing a
 /// NaN into `U`.
 #[test]
-#[ignore = "issue #114 — dense update commits NaN; fix pending"]
 fn dense_update_rejects_nonfinite_column() {
     let cols = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
     let mut lu = DenseLu::factor(&cols, 2, LuParams::default()).unwrap();

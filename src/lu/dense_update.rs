@@ -47,6 +47,15 @@ impl DenseLu {
                 leaving_slot, m
             )));
         }
+        // Reject non-finite entries up front, matching the factor path
+        // (`dense_factor.rs`): a NaN pivot passes `piv.abs() <= ztol` (NaN
+        // comparisons are false) and the `umax` fold ignores it, committing a
+        // corrupted factor after `Ok` (issue #114).
+        if entering_col.iter().any(|x| !x.is_finite()) {
+            return Err(FeralError::InvalidInput(
+                "LU entering column contains non-finite entries".to_string(),
+            ));
+        }
         // Update-count budget (checked before doing any work).
         if self.updates_since_refactor + 1 > self.params.max_updates {
             self.last_refactor =
