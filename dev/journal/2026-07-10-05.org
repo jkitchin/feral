@@ -172,3 +172,31 @@ Also confirmed (separate): discopt bumping its pinned feral rev 660224d ->
 current main is safe (discopt-core builds clean + all 430 tests pass, incl the
 10 linsolve LU-integration tests) but NOT a speedup (feral_update_cost A/B:
 identical per-update ms). Its value is correctness/robustness + the LDLᵀ side.
+
+** 16:45 :issue-133:markowitz:measure-first:external-oracle:not-justified:
+Measure-first for #133 (dynamic Markowitz LU factor), continuing the discopt
+simplex thread. Two stages assessed.
+
+Stage 1 (pivot_threshold flip, cheap): extended probe_ft_eta with FERAL_PIVTOL
++ factor_nnz + residual. casctanks: factor_nnz 19888->19897 across t=1.0/0.1/
+0.01 = NO change. Real sc2000x800 transient bases (patched discopt FeralLU
+params to read the env): noisy, no consistent reduction (depth 400 gets WORSE,
+6.7 vs 4.5). Update time flat. Stage 1 is not a win — threshold only affects
+within-column pivot choice.
+
+Stage 2 ceiling via EXTERNAL ORACLE (scipy 1.17.1 SuperLU/COLAMD): dumped the
+real transient covering bases and factored the identical matrix under several
+column orders. factor_nnz/m at depth 1600 (A_nnz/m=3.7): NATURAL 138.7,
+MMD_ATA 37.6, MMD_AT+A 33.8, feral AMD-on-AtA 31.1, COLAMD 25.5. So COLAMD is
++18% on the heaviest basis, +5% at depth 800, and -27% (WORSE) at depth 400.
+Net ~wash. feral's AMD-on-AtA is already competitive with SuperLU's COLAMD;
+the heavy transient fill is largely INHERENT to the covering structure, not a
+bad-ordering artifact.
+
+Conclusion: #133 not justified — no large fill headroom (feral ≈ COLAMD),
+Stage 1 gives nothing. Recorded dev/research/markowitz-133-measure-2026-07-10.md.
+
+Combined discopt-simplex verdict (#130/#132/#133 all measured, all
+not-justified): the compute_spike L-solve over an already-well-ordered factor
+is near the achievable floor. Remaining wins are simplex-algorithmic
+(pivots/pricing) or refactor cadence, not the LU kernels. discopt left pristine.

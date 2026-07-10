@@ -44,6 +44,34 @@ fn to_dense(col: &SparseCol, m: usize) -> Vec<f64> {
     d
 }
 
+/// Factor pivot threshold from `FERAL_PIVTOL` (default 1.0 = strict partial
+/// pivoting, feral's current default). Lower values (0.1, 0.01) enable the
+/// within-threshold diagonal/sparsity-preserving pivot — issue #133 Stage 1.
+fn pivtol_from_env() -> f64 {
+    std::env::var("FERAL_PIVTOL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0)
+}
+
+/// ‖B·x − rhs‖∞ / ‖rhs‖∞ for basis `b` (sparse columns) and solution `x`.
+fn residual(b: &[SparseCol], x: &[f64], rhs: &[f64]) -> f64 {
+    let mut r = vec![0.0; rhs.len()];
+    for (j, col) in b.iter().enumerate() {
+        let xj = x[j];
+        for &(i, v) in col {
+            r[i] += v * xj;
+        }
+    }
+    let num = r
+        .iter()
+        .zip(rhs)
+        .map(|(&ri, &bi)| (ri - bi).abs())
+        .fold(0.0, f64::max);
+    let den = rhs.iter().map(|v| v.abs()).fold(0.0, f64::max).max(1e-300);
+    num / den
+}
+
 /// Synthetic set-covering basis measurement (`--cover m per_col nupd`): build
 /// an m×m 0/1 covering-structured basis, factor it, and replay `nupd` random
 /// single-column replacements with sparse structural columns (~per_col
@@ -91,9 +119,11 @@ fn run_cover(m: usize, per_col: usize, nupd: usize) {
         })
         .collect();
 
+    let pivtol = pivtol_from_env();
     let params = LuParams {
         max_updates: 1_000_000,
         max_growth: 1e30,
+        pivot_threshold: pivtol,
         ..LuParams::default()
     };
     let factor = |basis: &[SparseCol]| -> Option<SparseLu> {
@@ -102,6 +132,10 @@ fn run_cover(m: usize, per_col: usize, nupd: usize) {
         SparseLu::factor(&a, &sym, params.clone()).ok()
     };
     let mut lu = factor(&basis).expect("cover factor");
+    let fnnz0 = lu.factor_nnz();
+    // Fixed RHS for a solve-accuracy (stability) check across the update chain.
+    let rhs: Vec<f64> = (0..m).map(|i| 1.0 + ((i % 7) as f64) * 0.5).collect();
+    let mut worst_resid = 0.0f64;
     let (mut sum_eta, mut sum_work, mut max_eta, mut n, mut refac) =
         (0u64, 0u64, 0usize, 0usize, 0usize);
     for _ in 0..nupd {
@@ -125,8 +159,17 @@ fn run_cover(m: usize, per_col: usize, nupd: usize) {
         sum_eta += lu.last_eta_ops() as u64;
         sum_work += lu.last_update_work() as u64;
         max_eta = max_eta.max(lu.last_eta_ops());
+        // Solve accuracy: ‖B x − rhs‖∞ / ‖rhs‖∞.
+        let mut x = rhs.clone();
+        if lu.ftran(&mut x).is_ok() {
+            worst_resid = worst_resid.max(residual(&basis, &x, &rhs));
+        }
     }
-    println!("synthetic set-cover m={m} per_col={per_col} nupd={n} refactor_signals={refac}");
+    println!(
+        "synthetic set-cover m={m} per_col={per_col} nupd={n} pivtol={pivtol} \
+         refactor_signals={refac}"
+    );
+    println!("factor_nnz(initial)={fnnz0}  worst_residual={worst_resid:.2e}");
     println!(
         "eta_ops: total={sum_eta} max={max_eta} mean={:.1}",
         if n > 0 {
@@ -193,14 +236,19 @@ fn main() {
         }
     }
 
+    let pivtol = pivtol_from_env();
     let params = LuParams {
         max_updates: 1_000_000,
         max_growth: 1e30,
+        pivot_threshold: pivtol,
         ..LuParams::default()
     };
 
     let mut n_updates = 0usize;
     let mut n_refactor_signals = 0usize;
+    let mut sum_fnnz0 = 0u64; // sum of initial factor_nnz across segments
+    let mut worst_resid = 0.0f64;
+    let rhs: Vec<f64> = (0..m).map(|i| 1.0 + ((i % 7) as f64) * 0.5).collect();
     let mut eta_zero = 0usize; // updates whose eta is trivial (ops == 0)
     let mut sum_eta = 0u64;
     let mut sum_work = 0u64;
@@ -223,6 +271,7 @@ fn main() {
             Some(l) => l,
             None => continue,
         };
+        sum_fnnz0 += lu.factor_nnz() as u64;
         for (slot, col) in &seg.updates {
             let dcol = to_dense(col, m);
             basis[*slot] = col.clone();
@@ -234,6 +283,10 @@ fn main() {
                     None => break,
                 };
                 continue;
+            }
+            let mut x = rhs.clone();
+            if lu.ftran(&mut x).is_ok() {
+                worst_resid = worst_resid.max(residual(&basis, &x, &rhs));
             }
             let e = lu.last_eta_ops();
             let w = lu.last_update_work();
@@ -252,8 +305,15 @@ fn main() {
         }
     }
 
-    println!("trace={} m={m} segments={}", path.display(), segments.len());
-    println!("updates_committed={n_updates}  refactor_signals={n_refactor_signals}");
+    println!(
+        "trace={} m={m} segments={} pivtol={pivtol}",
+        path.display(),
+        segments.len()
+    );
+    println!(
+        "updates_committed={n_updates}  refactor_signals={n_refactor_signals}  \
+         sum_factor_nnz(initial)={sum_fnnz0}  worst_residual={worst_resid:.2e}"
+    );
     println!(
         "eta_ops: total={sum_eta}  max={max_eta}  \
          mean={:.1}  committed-with-zero-eta={eta_zero} ({:.1}%)",
