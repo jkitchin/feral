@@ -905,12 +905,16 @@ pub struct Factors {
     /// growth flagging (`|L_ij| > L_GROWTH_THRESHOLD`). (D9,
     /// repo-review-2026-06-09.md: previously documented as ForceAccept-only.)
     pub needs_refinement: bool,
-    /// 1×1 pivot threshold copied from BunchKaufmanParams at factor time.
-    /// `solve` consults this to decide whether to divide by `d_diag[k]`:
-    /// pivots `|d| <= zero_tol` were force-accepted as numerically zero
-    /// during factorization and must be skipped (left as-is) by the
-    /// D-block solve. Otherwise dividing by a tiny pivot produces
-    /// catastrophic error. See dev/plans/threshold-mismatch-fix.md.
+    /// 1×1 pivot floor copied from BunchKaufmanParams at factor time.
+    ///
+    /// No longer gates the D-block solve (issue #116): the solve divides by
+    /// any nonzero `d_diag[k]` and skips only force-zeroed pivots, which the
+    /// factor marks by setting `d_diag[k]` to exactly `0.0` (and clearing the
+    /// L column). The old `|d| <= zero_tol` skip wrongly dropped *live*
+    /// small-but-nonzero pivots (rook rescue, static/PerturbToEps floor, F-01
+    /// band) whose L column is intact and which must be divided by. Retained
+    /// as an informational field for callers. See
+    /// dev/plans/threshold-mismatch-fix.md for the original (superseded) gate.
     pub zero_tol: f64,
     /// 2×2 pivot block threshold (matches BunchKaufmanParams::zero_tol_2x2).
     pub zero_tol_2x2: f64,
@@ -4579,6 +4583,16 @@ fn try_reject_1x1_with_rook_rescue(
         match pivot.kind {
             RookKind::Pivot1x1 => {
                 let d_new = a[k * nrow + k];
+                // A rook-accepted pivot below the rank-deficiency floor is
+                // *live* (its L column is kept and the solve now divides by it,
+                // issue #116) but ill-conditioned: flag iterative refinement
+                // and count it as a tiny pivot, matching the static-floor and
+                // F-01 accept paths (the rook path previously set neither).
+                // Inertia is unchanged — still counted by sign.
+                if d_new.abs() <= params.null_pivot_tol {
+                    *needs_refinement = true;
+                    *n_tiny += 1;
+                }
                 if d_new > 0.0 {
                     *pos += 1;
                 } else {
