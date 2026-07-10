@@ -180,9 +180,10 @@ impl core::fmt::Debug for OrderingMethod {
 
 /// Validate that `perm` is a bijection of `0..n` (a valid permutation).
 /// Used by [`symbolic_factorize_with_method`] for
-/// [`OrderingMethod::External`]. Returns [`FeralError::InvalidInput`] on any
-/// violation — never panics.
-fn validate_external_perm(perm: &[usize], n: usize) -> Result<(), FeralError> {
+/// [`OrderingMethod::External`], by [`run_external_ordering`] on every
+/// ordering-crate result (issue #122A), and by `ordering::schur::run_amd`.
+/// Returns [`FeralError::InvalidInput`] on any violation — never panics.
+pub(crate) fn validate_external_perm(perm: &[usize], n: usize) -> Result<(), FeralError> {
     if perm.len() != n {
         return Err(FeralError::InvalidInput(format!(
             "external ordering has length {} but matrix has n={}",
@@ -711,6 +712,14 @@ fn run_external_ordering(
         }
         out.push(u);
     }
+    // Bijectivity guard (issue #122A): the loop above range-checks each
+    // element but not "no duplicates". A duplicate/missing pair from a
+    // trusted ordering backend would flow into `permute_pattern`, whose
+    // count pass *assigns* per column, so one column's counts overwrite
+    // another's — a structurally wrong pattern, wrong etree, and possibly
+    // wrong inertia, silently. One O(n) seen-bitmap on an O(nnz·α) path
+    // closes it, matching the full check user-supplied `External` perms get.
+    validate_external_perm(&out, pattern.n)?;
     Ok((out, actual))
 }
 

@@ -1,0 +1,112 @@
+#+TITLE: Session 2026-07-10-04 journal
+#+STARTUP: showall
+
+* Round: correctness-edge issues #120–#123
+
+** 11:11 :issue-120:cascade-break:scaling:
+Committed d6f8ebd. apply_post_scaling_overrides now multiplies
+cascade_break_eps by ||D.A.D||_inf (mirroring the N2 static_pivot_floor
+fix), so the cascade-break supernode's PerturbToEps floor is RELATIVE to
+the scaled matrix the BK kernel operates on. Root cause: default-armed
+1e-10 was an ABSOLUTE per-pivot floor, but kernels work on D.A.D; under
+Identity scaling on gamma*K (gamma=1e-12) every pivot ~gamma*||K|| << 1e-10
+was bent to +/-1e-10 (~1e2*||A|| perturbation), silently returning the
+inertia of A+Delta with ||Delta|| >> ||A||. Unit test
+cascade_break_eps_scaled_by_matrix_norm guards the None-in/None-out and
+norm-tracking cases. Full suite green.
+
+** 11:21 :issue-121:symbolic-cache:hash-collision:
+Symbolic-cache hit was gated on the PatternFingerprint only — a u64 hash.
+Two distinct patterns sharing (n, nnz) collide with probability 2^-64;
+a hash-only check would then scatter the new values through the OLD
+pattern's perm, silently corrupting the factor and inertia with no error
+(same failure mode REG-1 closed for the permute cache with a stored
+pattern). Fix in Solver::factor: added a `last_pattern:
+Option<(Vec<usize>, Vec<usize>)>` field kept in lockstep with
+last_pattern_fingerprint; `cache_valid` now requires the fingerprint match
+AND an exact O(n+nnz) (col_ptr, row_idx) compare. Fingerprint stays the
+fast reject; the exact compare confirms. Stored only on a cache miss
+(clone cost paid exactly when symbolic is (re)built), cleared everywhere
+the fingerprint is cleared (invalidate path + invalidate_symbolic_cache).
+
+Test f4_forged_fingerprint_collision_does_not_reuse_stale_symbolic:
+reproduces the 2^-64 event DETERMINISTICALLY — factor A (SPD tridiag,
+inertia (3,0,0)), overwrite last_pattern_fingerprint with B's while
+last_pattern still holds A's exact pattern, then factor B (3x3 arrow,
+same (n,nnz)=(3,5) and same col_ptr as A but different row_idx; hand
+oracle: eigvals {0.1, 0.1+-sqrt2} = {0.1, 1.514, -1.314} -> (2,1,0)).
+Post-fix: symbolic_call_count 1->2 (fresh symbolic forced) and B's inertia
+== untainted-Solver oracle (2,1,0). Verified pre-fix FAILS: with the
+guard reverted to hash-only the count stays at 1 (stale reuse) —
+"left: 1, right: 2". Full suite (75 test binaries) green,
+clippy --all-targets -D warnings clean, fmt clean.
+
+** 11:40 :issue-122:guard-hardening:ordering:inertia:lu-params:
+Bundle of three "bad values corrupt silently" guard gaps.
+
+A. Ordering bijectivity. run_external_ordering (symbolic/mod.rs) and
+schur::run_amd (ordering/schur.rs) range-checked each ordering-crate
+result element but never "no duplicates" — a dup/missing pair flows into
+permute_pattern's per-column count *assignment* and overwrites a column's
+counts -> wrong pattern/etree/inertia silently. Promoted
+validate_external_perm to pub(crate) and call it on the built perm in both
+sites (matches the full check user External perms already get). Its
+dup-rejection is already unit-tested (mod.rs:2091 [0,1,1] -> Err). Backends
+are trusted; this is one O(n) check on an O(nnz.a) path.
+
+B. NaN 2x2 -> (0,0,2). classify_2x2_inertia: a NaN det/tr failed every
+ordered comparison and fell through to the zero-zero arm — certifying a
+NaN block as two ZERO eigenvalues, the worst shape for a hard inertia
+contract. Added a release-mode !is_finite guard returning
+InvalidInput; threaded Result<Inertia> through count_2x2_inertia_val,
+finish_1x1_outcome (now Result<PivotStepResult>) and all six call sites
+(? at the Result-returning frames). Backstops the debug_assert!-only
+finite entry-scan at factor.rs:1749 (the only such gate on the inertia
+path — grep confirmed). Test classify_2x2_non_finite_block_errors_not_
+double_zero: 6 non-finite slots (incl inf-inf) -> Err, never (0,0,2);
+finite (0,0,0) still classifies (0,0,2).
+
+C. LuParams::validate missed max_growth/refine_tol. max_growth=NaN makes
+`growth > max_growth` always false -> growth guard silently disabled in
+the update paths (which don't defend with is_finite like
+should_refactor_growth). Now reject NaN or <=1.0 (accept finite>1 and the
++inf opt-out); refine_tol must be finite and >0 (NaN/<=0/+inf break the
+||r||/||a|| < tol convergence check). Both dense (dense_factor.rs:128,168)
+and sparse (sparse_factor.rs:227) entries call validate(). Test
+validate_max_growth_and_refine_tol covers boundaries + defaults-valid.
+All existing LuParams in tree have max_growth>1 (min 1.0+1e-9, 5.0) and
+refine_tol>0, so no regression.
+
+Full suite 75 binaries green, clippy --all-targets -D warnings clean
+(fixed needless-Ok-? on the finish_1x1_outcome callers and the
+neg_cmp_op_on_partial_ord on the max_growth check), fmt clean.
+
+** 12:05 :issue-123:maxfromm:parity:bit-identical:
+MAXFROMM short-circuit broke the documented Plain/Maxfromm bit-parity on
+exact-cancellation fronts. capture_maxfromm_col returns Some(0.0) for an
+all-zero trailing column; the short-circuit gate `akk >= alpha*mf` is
+unconditionally true at mf==0.0 (0>=0), so Maxfromm routed a zero column
+through try_reject_1x1_with_rook_rescue — but Plain's full scan hits
+gamma0==0.0 and takes the dedicated zero-column branch (count_1x1_inertia
++ set_l_column_identity, factor.rs:4035). Divergences: (i) may_delay=true
+delays the rook path's zero pivot (different nelim/n_delayed) where the
+zero-column branch counts in place; (ii) ForceAccept zeroes d_diag in the
+rook path vs the branch's own accounting.
+
+Fix: one guard — `if mf != 0.0 && akk >= alpha * mf` — so a cached 0.0 is
+a cache MISS and falls through to the full scan (cache only ever
+accelerates the nonzero case). The remaining==1 path is already parity-safe
+(both Plain and Maxfromm call rook_rescue with col_max; all-zero -> 0.0
+either way, no gamma0==0 special branch there).
+
+Repro: zero_tail_front(n) = all-ones symmetric matrix with a dominant head
+(A[0,0]=n+2). After pivot 0 the trailing block is uniform 1-1/head; after
+pivot 1 it cancels to exactly 0.0, so capture stashes mf=0.0 for pivot 2.
+New test maxfromm_zero_tail_cache_miss_parity asserts byte-identical
+FrontalFactors (nelim, n_delayed, inertia, perm, d_diag, d_subdiag, l,
+contrib) between Plain and Maxfromm for n in {4,5,8,16,33,64,65,100},
+may_delay in {false,true}, scalar and blocked. Verified pre-fix FAILS:
+"zero-tail scalar n=4 delay=true nelim" left!=right. Unit test
+capture_maxfromm_col_zero_column_is_some_zero pins Some(0.0) for a zero
+column (the precondition the fix relies on), Some(max) for nonzero, None
+for the last column. Full suite 75 binaries green, clippy/fmt clean.

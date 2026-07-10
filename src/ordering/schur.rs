@@ -210,6 +210,12 @@ fn run_amd(pattern: &CscPattern) -> Result<Vec<usize>, FeralError> {
         }
         out.push(u);
     }
+    // Bijectivity guard (issue #122A): the loop range-checks each element
+    // but not "no duplicates". A duplicate/missing pair would corrupt
+    // `permute_pattern`'s per-column count assignment silently. One O(n)
+    // check on this O(nnz·α) path closes it, matching the full check that
+    // user-supplied `External` perms already receive.
+    crate::symbolic::validate_external_perm(&out, pattern.n)?;
     Ok(out)
 }
 

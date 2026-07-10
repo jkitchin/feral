@@ -157,20 +157,21 @@ pub struct NumericParams {
     /// `dev/research/issue-15-cascade-break-symbolic-arm.md`.
     pub cascade_break_ratio: Option<f64>,
 
-    /// Per-pivot perturbation floor for cascade-break supernodes.
-    /// When `cascade_break_ratio` fires AND this is `Some(eps)`, the
-    /// triggered supernode runs with
-    /// `on_zero_pivot = PerturbToEps { abs_floor: eps }`, replacing
-    /// each tiny pivot by `sign(d) * max(|d|, eps)` and counting it
-    /// by sign rather than zero. The factor then satisfies
-    /// `LDL^T = A + Δ` with `||Δ||_∞ <= eps` per perturbed pivot —
-    /// inertia is preserved provided every nonzero eigenvalue of
-    /// `A` exceeds the cumulative perturbation. Default `None`
-    /// keeps the legacy `ForceAccept` semantics (unbounded Δ,
-    /// counts perturbed pivots as zero). See
-    /// `dev/journal/2026-05-13-03.org` 01:15 for the matrix-specific
-    /// "sweet spot" pathology that motivates bounded-Δ
-    /// perturbation.
+    /// **Relative** per-pivot perturbation floor for cascade-break
+    /// supernodes. When `cascade_break_ratio` fires AND this is
+    /// `Some(eps)`, the triggered supernode runs with
+    /// `on_zero_pivot = PerturbToEps { abs_floor: eps · ‖D·A·D‖∞ }`
+    /// (the scaling is applied by `apply_post_scaling_overrides`, issue
+    /// #120), replacing each tiny pivot by `sign(d) · max(|d|, floor)`
+    /// and counting it by sign rather than zero. The factor then
+    /// satisfies `LDL^T = A + Δ` with `||Δ||_∞ <= eps · ‖D·A·D‖∞` per
+    /// perturbed pivot — inertia is preserved provided every nonzero
+    /// eigenvalue exceeds the cumulative perturbation. Because the floor
+    /// tracks the scaled matrix norm, the same `eps` behaves identically
+    /// on `A` and `γ·A`. Default `None` keeps the legacy `ForceAccept`
+    /// semantics (unbounded Δ, counts perturbed pivots as zero). See
+    /// `dev/journal/2026-05-13-03.org` 01:15 for the "sweet spot"
+    /// pathology that motivates bounded-Δ perturbation.
     pub cascade_break_eps: Option<f64>,
 
     /// Override the minimum estimated tree-flop count at which
@@ -2517,10 +2518,10 @@ fn factor_one_supernode(
     let bk_ref: &BunchKaufmanParams = if cascade_break {
         // When `cascade_break_eps` is set, use the bounded-Δ
         // perturbation path; otherwise fall back to the legacy
-        // unbounded `ForceAccept`. The eps is treated as an absolute
-        // floor per pivot — callers should pre-multiply by an
-        // estimate of `||A||_∞` when working with non-normalized
-        // matrices.
+        // unbounded `ForceAccept`. `cascade_break_eps` has already been
+        // scaled to `eps · ‖D·A·D‖∞` by `apply_post_scaling_overrides`
+        // (issue #120), so the floor here is relative to the scaled
+        // matrix the BK kernel operates on — no caller pre-multiply needed.
         let on_zero = match params.cascade_break_eps {
             Some(eps) => ZeroPivotAction::PerturbToEps { abs_floor: eps },
             None => ZeroPivotAction::ForceAccept,
@@ -3624,7 +3625,20 @@ fn apply_post_scaling_overrides(
         (floor > params.bk.null_pivot_tol).then_some(floor)
     };
 
-    if static_floor.is_none() && null_floor.is_none() {
+    // Issue #120: the cascade-break perturbation floor `cascade_break_eps` was
+    // fed to `ZeroPivotAction::PerturbToEps` as an *absolute* per-pivot floor,
+    // but the BK kernels operate on the scaled matrix `D·A·D`. So — exactly as
+    // N2 does for `static_pivot_floor` above — treat `cascade_break_eps` as a
+    // *relative* threshold and enforce `eps · ‖D·A·D‖∞`. Under Identity scaling
+    // this is `eps · ‖A‖∞`, so a matrix scaled by `γ` (e.g. ripopt's `γ·K`) gets
+    // a `γ`-scaled floor instead of a fixed `1e-10` that could be `10²·‖A‖`.
+    let cascade_floor = params
+        .cascade_break_eps
+        .filter(|e| *e > 0.0)
+        .map(|e| e * scaled_infnorm)
+        .filter(|f| f.is_finite() && *f > 0.0);
+
+    if static_floor.is_none() && null_floor.is_none() && cascade_floor.is_none() {
         return None;
     }
     let mut local = params.clone();
@@ -3634,6 +3648,9 @@ fn apply_post_scaling_overrides(
     if let Some(floor) = null_floor {
         local.bk.null_pivot_tol = floor;
         local.bk.null_pivot_tol_2x2 = (floor * scaled_infnorm).max(floor * floor);
+    }
+    if let Some(cf) = cascade_floor {
+        local.cascade_break_eps = Some(cf);
     }
     Some(local)
 }
@@ -4036,6 +4053,61 @@ mod tests {
             on_zero_pivot: ZeroPivotAction::ForceAccept,
             ..BunchKaufmanParams::default()
         })
+    }
+
+    /// Issue #120: `cascade_break_eps` is a *relative* floor —
+    /// `apply_post_scaling_overrides` must scale it by the scaled matrix
+    /// ∞-norm, so the same `eps` yields a floor that tracks the matrix scale
+    /// (identical behavior on `A` and `γ·A`). Pre-fix it was passed to
+    /// `PerturbToEps` as an absolute `1e-10`, so a `γ`-scaled matrix received a
+    /// floor that was `γ⁻¹`× too large/small relative to its own pivots.
+    #[test]
+    fn cascade_break_eps_scaled_by_matrix_norm() {
+        let mut params = make_params();
+        params.cascade_break_eps = Some(1e-10);
+
+        // Floor = eps · ‖D·A·D‖∞.
+        let f_hi = apply_post_scaling_overrides(&params, 1e6, 100)
+            .expect("override applied when cascade_break_eps set")
+            .cascade_break_eps
+            .unwrap();
+        assert!(
+            (f_hi - 1e-10 * 1e6).abs() <= 1e-20,
+            "floor must be eps·norm, got {f_hi}"
+        );
+
+        // Normalized matrix (‖·‖∞ = 1) leaves the raw eps as the floor.
+        let f_unit = apply_post_scaling_overrides(&params, 1.0, 100)
+            .unwrap()
+            .cascade_break_eps
+            .unwrap();
+        assert_eq!(f_unit, 1e-10);
+
+        // Scale invariance: the floor tracks the norm ratio exactly, so a
+        // `γ`-scaled matrix (norm `γ·base`) gets a `γ`× floor.
+        let base = apply_post_scaling_overrides(&params, 4.0, 100)
+            .unwrap()
+            .cascade_break_eps
+            .unwrap();
+        let scaled = apply_post_scaling_overrides(&params, 4.0e-6, 100)
+            .unwrap()
+            .cascade_break_eps
+            .unwrap();
+        assert!(
+            (scaled / base - 1e-6).abs() <= 1e-12,
+            "floor must scale with the matrix norm ratio: {scaled} / {base}"
+        );
+
+        // A `None` cascade_break_eps must never be invented by the override
+        // (other floors — e.g. the F-01 null-pivot floor — may still fire).
+        let mut off = make_params();
+        off.cascade_break_eps = None;
+        if let Some(local) = apply_post_scaling_overrides(&off, 1e6, 100) {
+            assert_eq!(
+                local.cascade_break_eps, None,
+                "override must not invent a cascade floor"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-10T10:32:51Z
+Generated: 2026-07-10T11:40:42Z
 
 ## Latest Session
 File: dev/sessions/2026-07-10-03.md
@@ -59,11 +59,11 @@ Sparse KKT: inertia vs MUMPS 2/2, residual pass 2/2, worst 1.26e-16
 
 ## Git Status
 ```
-4a1d163 issue #117: blocked/scalar rook parity — panel bails rook-eligible 1x1 to scalar
-e5b6d4b issue #116: divide by live tiny LDLT pivots at solve (rook factor/solve contract)
-d7aafea issue #119: guard Knight-Ruiz equilibration against non-finite scale factors
-ae13f27 issue #115: eta-based Bartels-Golub dense LU update (fix zero-superdiagonal landmine)
-373264f issue #118: anchor LU update ztol to a_max, not u_max0
+876cf72 issue #123: treat cached MAXFROMM mf == 0.0 as a cache miss (parity)
+cb96b6e issue #122: guard-hardening bundle (ordering bijectivity, NaN 2x2, LuParams)
+f8d5f8a issue #121: exact pattern compare on symbolic-cache hit, not hash-only
+d6f8ebd issue #120: scale cascade_break_eps by the scaled matrix norm
+8a980e4 Audit correctness fixes: LU update/solve + dense LDLᵀ rook (#135)
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 398 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.55s
+test result: ok. 403 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.45s
 
 ```
 

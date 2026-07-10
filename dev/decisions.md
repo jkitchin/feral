@@ -5938,3 +5938,31 @@ rebuild on swap commits.
 `zero_pivot_tol·u_max0` is now trustworthy evidence of a genuinely dependent
 replacement (not a summation artifact), strengthening the existing
 `NeedsRefactor` semantics. No tolerances changed.
+
+## 2026-07-10 — Issue #122: propagate `Result` from `classify_2x2_inertia`; `max_growth` semantics
+
+Two small design choices made while closing the #122 guard-hardening bundle.
+
+**2×2 non-finite guard is a `Result`, not an inline per-site check.**
+`classify_2x2_inertia` previously returned `Inertia` and a NaN `det`/`tr` fell
+through every ordered comparison to the `(0,0,2)` arm — certifying a NaN block
+as two *zero* eigenvalues. The fix changes the signature to
+`Result<Inertia, FeralError>` (release-mode `!is_finite` → `InvalidInput`) and
+threads the `Result` through `count_2x2_inertia_val`, `finish_1x1_outcome`
+(now `Result<PivotStepResult>`), and all six call sites via `?`. Chosen over a
+per-call-site guard because it is DRY (one guard, impossible to forget at a
+future site) and every caller already sits in a `Result`-returning frame, so
+the ripple is mechanical. This backstops the debug-only finite entry-scan at
+`factor.rs:1749` in release without a full-column scan on the hot path (the
+guard is O(1) at the pivot-block level).
+
+**`LuParams::max_growth` is `> 1.0` with `+∞` an explicit disable.**
+`validate()` now rejects `max_growth` that is `NaN` or `≤ 1.0` and accepts any
+finite `> 1.0` plus `+∞`. `+∞` is the documented "never trigger a refactor on
+growth" opt-out (`growth > +∞` is always false); `NaN` is rejected because it
+silently disabled the growth guard in the update paths (which — unlike
+`should_refactor_growth` — do not defend with `is_finite`). `refine_tol` must
+be finite and `> 0`. No tolerances changed; all existing `LuParams` in the
+tree already satisfy the bounds (min `max_growth` `1.0 + 1e-9`, all
+`refine_tol > 0`), so this is pure input validation with no behavior change on
+valid inputs.

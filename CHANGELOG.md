@@ -51,6 +51,34 @@ exposes how often the interchanges deviated from the plain FT order.
   `NaN`/`Inf`/`0.0` scale factors on finite input with extreme or subnormal
   couplings; the guarded update is bit-identical on well-scaled matrices.
 
+### Fixed — audit correctness-edge fixes across the LDLᵀ engine (issues #120–#123)
+
+- **#120** The cascade-break supernode's `PerturbToEps` floor
+  (`cascade_break_eps`, default-armed at `1e-10`) is now scaled by the scaled
+  matrix ∞-norm `‖D·A·D‖∞`, matching the static-pivot floor. Previously it was
+  an *absolute* per-pivot floor while the kernel operates on `D·A·D`, so under
+  Identity scaling on a small-magnitude system (e.g. `γ·K`, `γ = 1e-12`) every
+  pivot was perturbed by `~1e2·‖A‖` and the returned inertia was that of
+  `A+Δ` with `‖Δ‖ ≫ ‖A‖`, silently.
+- **#121** The symbolic-factorization cache now confirms a fingerprint hit with
+  an exact `(col_ptr, row_idx)` compare before reuse. The fingerprint is a
+  64-bit hash; a collision between two distinct patterns sharing `(n, nnz)`
+  would previously reuse a stale symbolic ordering and corrupt the factor and
+  inertia with no error.
+- **#122** Guard-hardening bundle: (A) internal fill-reducing ordering results
+  are now bijectivity-checked (not just range-checked), closing a silent
+  pattern-corruption path on a malformed backend perm; (B) a non-finite 2×2
+  pivot block is rejected with `InvalidInput` instead of being certified as
+  inertia `(0,0,2)`; (C) `LuParams::validate` now rejects `max_growth`
+  (`NaN`/`≤ 1.0`) and `refine_tol` (non-finite/`≤ 0`) values that silently
+  disabled the growth guard or the refinement convergence check.
+- **#123** The MAXFROMM triangular-pivot acceleration now treats a cached
+  column-max of exactly `0.0` (an all-zero trailing column from floating-point
+  cancellation) as a cache miss, restoring the documented bit-for-bit parity
+  with the plain pivot path — previously such a column was routed through the
+  rook-rescue path instead of the dedicated zero-column branch, diverging in
+  delayed-pivot count and D under `may_delay`/`ForceAccept`.
+
 ## [0.13.0] - 2026-07-02
 
 ### Added — user-supplied fill-reducing ordering: `OrderingMethod::External` (issue #107)
