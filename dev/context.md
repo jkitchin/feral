@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-10T10:32:51Z
+Generated: 2026-07-10T11:05:54Z
 
 ## Latest Session
 File: dev/sessions/2026-07-10-03.md
@@ -59,15 +59,16 @@ Sparse KKT: inertia vs MUMPS 2/2, residual pass 2/2, worst 1.26e-16
 
 ## Git Status
 ```
-4a1d163 issue #117: blocked/scalar rook parity — panel bails rook-eligible 1x1 to scalar
-e5b6d4b issue #116: divide by live tiny LDLT pivots at solve (rook factor/solve contract)
-d7aafea issue #119: guard Knight-Ruiz equilibration against non-finite scale factors
-ae13f27 issue #115: eta-based Bartels-Golub dense LU update (fix zero-superdiagonal landmine)
-373264f issue #118: anchor LU update ztol to a_max, not u_max0
+8a980e4 Audit correctness fixes: LU update/solve + dense LDLᵀ rook (#135)
+660224d issue #112: compensated FT sweep + opt-in Bartels-Golub pivot search (#113)
+9596472 docs: session checkpoint 2026-07-02-02 (v0.13.0 release)
+36da100 release: feral v0.13.0 (#109)
+9d05f75 issue #107: add OrderingMethod::External for user-supplied orderings (#108)
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_supernodes_cover_n ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
 test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
@@ -76,17 +77,16 @@ test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ...
 test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
+test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 398 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.55s
+test result: ok. 398 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.51s
 
 ```
 
