@@ -1,6 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 use super::condition::{estimate_inverse_norm_1, matrix_norm_1};
-use super::factorize::SparseFactors;
+use super::factorize::{NodeFactors, SparseFactors};
 use crate::error::FeralError;
 use crate::scaling::ScalingInfo;
 use crate::sparse::csc::CscMatrix;
@@ -360,6 +360,721 @@ fn solve_sparse_core_into(
     for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
         x_out[old_idx] = y[new_idx];
     }
+}
+
+/// Single-RHS D-block solve on `w[0..nelim]` in place — the 1×1 / 2×2
+/// disposition extracted from `solve_sparse_core_into` so the
+/// contribution-block core (issue #131 Gap A) applies byte-identical
+/// arithmetic. Force-accepted zero pivots and SSIDS-floor-rejected 2×2
+/// blocks are left untouched, matching the shared-vector core.
+#[inline]
+fn dsolve_single(w: &mut [f64], ff: &crate::dense::factor::FrontalFactors, nelim: usize) {
+    let mut k = 0;
+    while k < nelim {
+        if k + 1 < nelim && ff.d_subdiag[k] != 0.0 {
+            let a = ff.d_diag[k];
+            let b = ff.d_subdiag[k];
+            let c = ff.d_diag[k + 1];
+            if let Some((x0, x1)) = solve_2x2_dblock(a, b, c, w[k], w[k + 1]) {
+                w[k] = x0;
+                w[k + 1] = x1;
+            }
+            k += 2;
+        } else {
+            if ff.d_diag[k] != 0.0 {
+                w[k] /= ff.d_diag[k];
+            }
+            k += 1;
+        }
+    }
+}
+
+// === Issue #131 Gap A: contribution-block (tree-parallel) sparse solve ==
+//
+// The shared-global-vector core (`solve_sparse_core_into`) accumulates
+// each front's separator updates directly into a global `y`, so sibling
+// subtrees read-modify-write the same ancestor entries — not
+// tree-parallelisable, and a private-accumulation merge would break bit
+// exactness (float non-associativity). The contribution-block core below
+// instead assembles each front's RHS from `b` (at its eliminated rows)
+// plus its children's contribution blocks, summed in a fixed child order
+// — exactly the deterministic reduction the factor's `extend_add` uses.
+// The reduction order is independent of thread scheduling, so a serial
+// run and a tree-parallel run are byte-identical (the #131 contract).
+//
+// Forward substitution is leaves-up (a front assembles once all children
+// have produced their contribution blocks); backward is root-down and
+// keeps the shared-vector arithmetic unchanged (separator rows are
+// read-only there, eliminated rows disjoint). Because the forward
+// reduction groups contributions by subtree (a sum tree) rather than the
+// flat postorder left-fold of `solve_sparse_core_into`, the result
+// differs from that path only by floating-point reassociation (~κ·eps):
+// a valid solve, offered as an opt-in path; the default `solve_sparse`
+// is unchanged.
+
+/// One front's forward contribution: the `nrow - nelim` separator-row
+/// values (in frontal separator order) it passes to its parent. Boxed
+/// per node in a slot vector consumed leaves-up.
+type FwdContrib = Vec<f64>;
+
+/// Build per-node child lists (ascending node index) from the parent
+/// table, for a deterministic child-reduction order in the CB forward.
+fn build_children(node_parents: &[Option<usize>], n_nodes: usize) -> Vec<Vec<usize>> {
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n_nodes];
+    for (c, p) in node_parents.iter().enumerate() {
+        if let Some(p) = p {
+            if *p < n_nodes {
+                children[*p].push(c);
+            }
+        }
+    }
+    // node_parents is filled by ascending child index, so each list is
+    // already ascending; make it explicit for the determinism contract.
+    for cs in &mut children {
+        cs.sort_unstable();
+    }
+    children
+}
+
+/// Assemble + eliminate one front for the CB forward pass, writing the
+/// eliminated finals into `y` (at the front's own eliminated global rows,
+/// disjoint across fronts) and returning its contribution block (or
+/// `None` if it has no separator rows). `row_map` is caller-owned scratch
+/// (length `n`, all `usize::MAX` on entry and restored on exit); `w` is
+/// caller-owned scratch (length ≥ `nrow`). `take_child` yields each
+/// child's already-computed contribution in ascending child order.
+#[allow(clippy::too_many_arguments)]
+fn cb_forward_front(
+    node: &NodeFactors,
+    children: &[usize],
+    y: &mut [f64],
+    row_map: &mut [usize],
+    w: &mut [f64],
+    mut take_child: impl FnMut(usize) -> Option<FwdContrib>,
+    child_nodes: &[NodeFactors],
+) -> Option<FwdContrib> {
+    let ff = &node.frontal_factors;
+    let nrow = ff.nrow;
+    let nelim = ff.nelim;
+    if nrow == 0 {
+        return None;
+    }
+
+    // global -> local frontal index for this front.
+    for i in 0..nrow {
+        row_map[node.row_indices[ff.perm[i]]] = i;
+    }
+
+    let w = &mut w[..nrow];
+    // b at eliminated rows (still intact in `y` — each global row is
+    // eliminated at exactly one front, written only here); separators 0.
+    for i in 0..nrow {
+        w[i] = 0.0;
+    }
+    for i in 0..nelim {
+        w[i] = y[node.row_indices[ff.perm[i]]];
+    }
+
+    // Extend-add each child's contribution block in ascending order.
+    for &child in children {
+        if let Some(cc) = take_child(child) {
+            let cff = &child_nodes[child].frontal_factors;
+            let cnelim = cff.nelim;
+            let cnrow = cff.nrow;
+            for i in cnelim..cnrow {
+                let g = child_nodes[child].row_indices[cff.perm[i]];
+                let local = row_map[g];
+                debug_assert!(
+                    local != usize::MAX && local < nrow,
+                    "CB forward: child separator row {g} not in parent frontal"
+                );
+                w[local] += cc[i - cnelim];
+            }
+        }
+    }
+
+    // L-solve over all rows (uses pre-D eliminated values), then D-solve
+    // on the eliminated rows only — mirrors solve_sparse_core_into.
+    for j in 0..nelim {
+        let w_j = w[j];
+        for i in (j + 1)..nrow {
+            w[i] -= ff.l[j * nrow + i] * w_j;
+        }
+    }
+    dsolve_single(w, ff, nelim);
+
+    // Eliminated finals -> y (disjoint rows across fronts).
+    for i in 0..nelim {
+        y[node.row_indices[ff.perm[i]]] = w[i];
+    }
+
+    // Contribution block = separator rows after the L-update.
+    let contrib = if nrow > nelim {
+        Some(w[nelim..nrow].to_vec())
+    } else {
+        None
+    };
+
+    // Restore row_map.
+    for i in 0..nrow {
+        row_map[node.row_indices[ff.perm[i]]] = usize::MAX;
+    }
+
+    contrib
+}
+
+/// Backward substitution for one front, shared-vector arithmetic
+/// (unchanged from `solve_sparse_core_into`): gather from `y`, Lᵀ-solve
+/// the eliminated rows, scatter the eliminated rows back. Separator rows
+/// are read-only here (they hold ancestors' final values, written by the
+/// ancestors' backward step which runs first in root-down order), so
+/// concurrent fronts touch disjoint `y` entries.
+fn cb_backward_front(node: &NodeFactors, y: &mut [f64], w: &mut [f64]) {
+    let ff = &node.frontal_factors;
+    let nelim = ff.nelim;
+    let nrow = ff.nrow;
+    if nelim == 0 {
+        return;
+    }
+    let w = &mut w[..nrow];
+    for i in 0..nrow {
+        w[i] = y[node.row_indices[ff.perm[i]]];
+    }
+    for j in (0..nelim).rev() {
+        let mut sum = 0.0;
+        for i in (j + 1)..nrow {
+            sum += ff.l[j * nrow + i] * w[i];
+        }
+        w[j] -= sum;
+    }
+    // Only the eliminated rows changed; scatter just those (separators are
+    // read-only, so this keeps concurrent fronts' writes disjoint).
+    for i in 0..nelim {
+        y[node.row_indices[ff.perm[i]]] = w[i];
+    }
+}
+
+/// Serial contribution-block solve core (single RHS). Bit-identical to
+/// the parallel CB core; the default `solve_sparse` path is unaffected.
+/// Serial contribution-block forward+backward over `y` in place (`y`
+/// holds the permuted RHS on entry, the permuted solution on exit),
+/// against caller-owned workspace buffers. `contribs` must be all-`None`
+/// and `row_map` all-`usize::MAX` on entry (both restored on exit —
+/// `row_map` by each front, `contribs` by the parent that drains each
+/// child; roots' contributions are left behind, so callers reset
+/// `contribs` between solves).
+fn cb_run_serial(
+    nodes: &[NodeFactors],
+    children: &[Vec<usize>],
+    y: &mut [f64],
+    row_map: &mut [usize],
+    w: &mut [f64],
+    contribs: &mut [Option<FwdContrib>],
+) {
+    // Forward: postorder (node_factors order lists children before
+    // parents), so every child's contribution is ready at its parent.
+    for idx in 0..nodes.len() {
+        let contrib = cb_forward_front(
+            &nodes[idx],
+            &children[idx],
+            y,
+            row_map,
+            w,
+            |c| contribs[c].take(),
+            nodes,
+        );
+        contribs[idx] = contrib;
+    }
+    // Backward: reverse postorder (parents before children).
+    for node in nodes.iter().rev() {
+        cb_backward_front(node, y, w);
+    }
+}
+
+/// `*mut f64` wrapper that is `Send`+`Sync` so rayon tasks can write the
+/// shared global solution vector `y` at **disjoint** indices. Safety is
+/// established by the callers below, not by this type.
+#[derive(Clone, Copy)]
+struct YPtr(*mut f64);
+// SAFETY: `YPtr` only ever hands out writes to disjoint `y` indices
+// (each global row is eliminated at exactly one front, and a front writes
+// only its own eliminated rows) and reads that are ordered after the
+// writing front by the task-dependency graph, so no two threads touch the
+// same element concurrently.
+unsafe impl Send for YPtr {}
+unsafe impl Sync for YPtr {}
+
+/// Per-worker forward scratch: `row_map` (length `n`, all `usize::MAX`
+/// between fronts) and `w` (length `max_nrow`).
+struct CbScratch {
+    row_map: Vec<usize>,
+    w: Vec<f64>,
+}
+
+/// Parallel contribution-block forward+backward over `y` in place,
+/// against caller-owned pooled buffers (`scratch` per worker, `contribs`
+/// shared). Byte-identical to `cb_run_serial`: the child-reduction order
+/// is fixed (ascending child index) regardless of thread scheduling. The
+/// caller resets `contribs` to all-`None` and provides `scratch` with
+/// `row_map` all-`usize::MAX`; both are left in that state on exit.
+#[allow(clippy::too_many_arguments)]
+fn cb_run_parallel(
+    nodes: &[NodeFactors],
+    children: &[Vec<usize>],
+    parents: &[Option<usize>],
+    plan: &CbTaskPlan,
+    scratch: &[std::sync::Mutex<CbScratch>],
+    contribs: &std::sync::Mutex<Vec<Option<FwdContrib>>>,
+    y: &mut [f64],
+    n: usize,
+) {
+    use std::sync::atomic::AtomicUsize;
+    let num_threads = rayon::current_num_threads().max(1);
+
+    // ---- Forward: task roots processed leaves-up ----
+    let pending_fwd: Vec<AtomicUsize> = plan
+        .pending_fwd
+        .iter()
+        .map(|&c| AtomicUsize::new(c))
+        .collect();
+    {
+        let y_ptr = YPtr(y.as_mut_ptr());
+        let ctx = CbCtx {
+            nodes,
+            children,
+            parents,
+            plan,
+            contribs,
+            scratch,
+            y_ptr,
+            n,
+            num_threads,
+        };
+        rayon::scope(|scope| {
+            for &t in &plan.fwd_seeds {
+                cb_fwd_task(scope, t, &ctx, &pending_fwd);
+            }
+        });
+    }
+
+    // ---- Backward: task roots processed root-down ----
+    {
+        let y_ptr = YPtr(y.as_mut_ptr());
+        let ctx = CbCtx {
+            nodes,
+            children,
+            parents,
+            plan,
+            contribs,
+            scratch,
+            y_ptr,
+            n,
+            num_threads,
+        };
+        rayon::scope(|scope| {
+            for &t in &plan.bwd_seeds {
+                cb_bwd_task(scope, t, &ctx);
+            }
+        });
+    }
+}
+
+/// Coarsening plan: the top portion of the assembly tree is cut into
+/// "task roots"; each task root owns the contiguous postorder block of
+/// its light (below-threshold) descendants and runs them serially.
+struct CbTaskPlan {
+    /// `owned[t]` = node indices assigned to task root `t`, ascending
+    /// (postorder). Empty for non-task-root nodes.
+    owned: Vec<Vec<usize>>,
+    /// Task roots that have no task-root children (forward seeds).
+    fwd_seeds: Vec<usize>,
+    /// Task roots that have no parent (whole-tree roots; backward seeds).
+    bwd_seeds: Vec<usize>,
+    /// Direct task-root children of each task root (backward spawns).
+    tr_children: Vec<Vec<usize>>,
+    /// Forward pending count per task root = number of task-root children.
+    pending_fwd: Vec<usize>,
+    /// Whether each node is a task root.
+    is_task_root: Vec<bool>,
+    /// Whether tree-parallel execution is expected to beat the serial
+    /// core: at least two independent task roots, and no single task
+    /// root's serial share dominates (Amdahl), and enough total work to
+    /// amortize the O(threads·n) scratch setup. When false the caller
+    /// runs the serial core.
+    worthwhile: bool,
+}
+
+impl CbTaskPlan {
+    fn build(
+        children: &[Vec<usize>],
+        parents: &[Option<usize>],
+        nodes: &[NodeFactors],
+        n_nodes: usize,
+    ) -> Self {
+        // Per-front solve cost ~ nrow·(nelim+1) (forward L-solve +
+        // backward Lᵀ-solve are both O(nrow·nelim)); saturating.
+        let own_cost = |i: usize| -> u64 {
+            let ff = &nodes[i].frontal_factors;
+            (ff.nrow as u64).saturating_mul(ff.nelim as u64 + 1)
+        };
+        // Subtree cost bottom-up (node_factors is postorder ⇒ children
+        // precede parents).
+        let mut subtree_cost = vec![0u64; n_nodes];
+        let mut total = 0u64;
+        for i in 0..n_nodes {
+            let mut c = own_cost(i);
+            for &ch in &children[i] {
+                c = c.saturating_add(subtree_cost[ch]);
+            }
+            subtree_cost[i] = c;
+            total = total.saturating_add(own_cost(i));
+        }
+        // Threshold: aim for ~16 task roots per worker so the pool stays
+        // fed without per-node overhead. `FERAL_CB_THRESH` overrides.
+        let num_threads = rayon::current_num_threads().max(1);
+        let thresh: u64 = std::env::var("FERAL_CB_THRESH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| (total / (num_threads as u64 * 16)).max(1));
+
+        let is_task_root: Vec<bool> = (0..n_nodes)
+            .map(|i| parents[i].is_none() || subtree_cost[i] >= thresh)
+            .collect();
+
+        // Owner = nearest task-root ancestor (self if task root). Process
+        // descending idx so each parent (higher idx) is set first.
+        let mut owner = vec![0usize; n_nodes];
+        for i in (0..n_nodes).rev() {
+            // A non-task-root always has a parent (roots are forced task
+            // roots), whose owner is already computed (higher idx). The
+            // `unwrap_or(i)` is an unreachable belt-and-braces fallback
+            // that keeps this `unwrap`-free.
+            owner[i] = match (is_task_root[i], parents[i]) {
+                (true, _) => i,
+                (false, Some(p)) => owner[p],
+                (false, None) => i,
+            };
+        }
+        let mut owned: Vec<Vec<usize>> = vec![Vec::new(); n_nodes];
+        for i in 0..n_nodes {
+            owned[owner[i]].push(i);
+        }
+
+        // Task-root children (a task root's parent is always a task root,
+        // by subtree-cost monotonicity, so these are direct children).
+        let mut tr_children: Vec<Vec<usize>> = vec![Vec::new(); n_nodes];
+        let mut pending_fwd = vec![0usize; n_nodes];
+        for i in 0..n_nodes {
+            if !is_task_root[i] {
+                continue;
+            }
+            for &ch in &children[i] {
+                if is_task_root[ch] {
+                    tr_children[i].push(ch);
+                    pending_fwd[i] += 1;
+                }
+            }
+        }
+        let fwd_seeds: Vec<usize> = (0..n_nodes)
+            .filter(|&i| is_task_root[i] && pending_fwd[i] == 0)
+            .collect();
+        let bwd_seeds: Vec<usize> = (0..n_nodes)
+            .filter(|&i| is_task_root[i] && parents[i].is_none())
+            .collect();
+
+        // Worthwhile gate. `local_cost[t] = subtree_cost[t] − Σ task-root
+        // children subtree_cost` is the serial work task root `t` runs
+        // itself; if the largest such share is most of the total, Amdahl
+        // caps the speedup and the parallel overhead dominates (e.g. an
+        // arrow front whose huge root front is one serial task). Also
+        // require enough total work to amortize the scratch setup.
+        let mut max_local = 0u64;
+        for t in 0..n_nodes {
+            if !is_task_root[t] {
+                continue;
+            }
+            let mut local = subtree_cost[t];
+            for &c in &tr_children[t] {
+                local = local.saturating_sub(subtree_cost[c]);
+            }
+            max_local = max_local.max(local);
+        }
+        // ~1e6 flops ≈ tens of µs of solve, the floor below which the
+        // O(threads·n) scratch alloc + rayon scope is not amortized.
+        const MIN_TOTAL_COST: u64 = 1_000_000;
+        let worthwhile = fwd_seeds.len() >= 2
+            && total >= MIN_TOTAL_COST
+            && (max_local as f64) < 0.7 * (total as f64);
+
+        CbTaskPlan {
+            owned,
+            fwd_seeds,
+            bwd_seeds,
+            tr_children,
+            pending_fwd,
+            is_task_root,
+            worthwhile,
+        }
+    }
+}
+
+/// Shared, read-only context threaded through the CB solve tasks.
+#[derive(Clone, Copy)]
+struct CbCtx<'a> {
+    nodes: &'a [NodeFactors],
+    children: &'a [Vec<usize>],
+    parents: &'a [Option<usize>],
+    plan: &'a CbTaskPlan,
+    contribs: &'a std::sync::Mutex<Vec<Option<FwdContrib>>>,
+    scratch: &'a [std::sync::Mutex<CbScratch>],
+    y_ptr: YPtr,
+    n: usize,
+    num_threads: usize,
+}
+
+/// Pick a per-worker scratch slot: the rayon worker index, or the extra
+/// slot `num_threads` for the calling thread (`current_thread_index() ==
+/// None`).
+#[inline]
+fn cb_scratch_slot(num_threads: usize) -> usize {
+    rayon::current_thread_index().unwrap_or(num_threads)
+}
+
+fn cb_fwd_task<'a>(
+    scope: &rayon::Scope<'a>,
+    t: usize,
+    ctx: &CbCtx<'a>,
+    pending_fwd: &'a [std::sync::atomic::AtomicUsize],
+) {
+    use std::sync::atomic::Ordering;
+    let ctx = *ctx;
+    scope.spawn(move |s| {
+        {
+            let slot = cb_scratch_slot(ctx.num_threads);
+            let mut sc = ctx.scratch[slot].lock().unwrap_or_else(|p| p.into_inner());
+            let CbScratch { row_map, w } = &mut *sc;
+            // SAFETY: every front in this task writes only its own
+            // eliminated global rows — disjoint across all fronts (each row
+            // is eliminated once) — and reads `b` only at those same rows,
+            // which no other live task touches. Length `n`; row indices are
+            // in `[0, n)`.
+            let y: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(ctx.y_ptr.0, ctx.n) };
+            // Process this task root's owned subtree serially, leaves-up
+            // (owned is ascending = postorder), so every child's
+            // contribution — light (in `owned`, already processed) or a
+            // task-root child (done via the pending gate) — is ready.
+            for &j in &ctx.plan.owned[t] {
+                let contrib = cb_forward_front(
+                    &ctx.nodes[j],
+                    &ctx.children[j],
+                    y,
+                    row_map,
+                    w,
+                    |c| ctx.contribs.lock().unwrap_or_else(|p| p.into_inner())[c].take(),
+                    ctx.nodes,
+                );
+                ctx.contribs.lock().unwrap_or_else(|p| p.into_inner())[j] = contrib;
+            }
+        }
+        // Signal the parent task root; spawn it when all its task-root
+        // children are done.
+        if let Some(p) = ctx.parents[t] {
+            debug_assert!(ctx.plan.is_task_root[p]);
+            if pending_fwd[p].fetch_sub(1, Ordering::AcqRel) == 1 {
+                cb_fwd_task(s, p, &ctx, pending_fwd);
+            }
+        }
+    });
+}
+
+fn cb_bwd_task<'a>(scope: &rayon::Scope<'a>, t: usize, ctx: &CbCtx<'a>) {
+    let ctx = *ctx;
+    scope.spawn(move |s| {
+        {
+            let slot = cb_scratch_slot(ctx.num_threads);
+            let mut sc = ctx.scratch[slot].lock().unwrap_or_else(|p| p.into_inner());
+            // SAFETY: every front writes only its own eliminated global
+            // rows (disjoint across fronts) and reads separator rows
+            // written by ancestor fronts — those in this task's owned set
+            // (processed earlier, this task) or in the parent task root
+            // (completed before this task was spawned, root-down
+            // dependency). Length `n`; row indices in `[0, n)`.
+            let y: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(ctx.y_ptr.0, ctx.n) };
+            // Root-down within the owned subtree: descending idx = reverse
+            // postorder (parents before children).
+            for &j in ctx.plan.owned[t].iter().rev() {
+                cb_backward_front(&ctx.nodes[j], y, &mut sc.w);
+            }
+        }
+        // This task root is done ⇒ its task-root children may run.
+        for &c in &ctx.plan.tr_children[t] {
+            cb_bwd_task(s, c, &ctx);
+        }
+    });
+}
+
+/// Pooled workspace for the contribution-block solve (issue #131 Gap A).
+/// Caches the RHS-independent state — the assembly-tree child lists and
+/// the coarsening plan — plus the per-solve scratch, so a caller doing
+/// several solves against one factor (iterative refinement runs up to
+/// ~11) pays the `O(threads·n)` scratch and `O(n_nodes)` plan setup once.
+/// Build with [`CbSolveWorkspace::for_factors`]; reuse across solves.
+pub(crate) struct CbSolveWorkspace {
+    n: usize,
+    max_nrow: usize,
+    scaled: bool,
+    children: Vec<Vec<usize>>,
+    plan: CbTaskPlan,
+    y: Vec<f64>,
+    // Serial scratch.
+    row_map: Vec<usize>,
+    w: Vec<f64>,
+    contribs: Vec<Option<FwdContrib>>,
+    // Parallel scratch, built lazily on first parallel solve and rebuilt
+    // only if the worker count changes.
+    par_scratch: Vec<std::sync::Mutex<CbScratch>>,
+    par_contribs: std::sync::Mutex<Vec<Option<FwdContrib>>>,
+}
+
+impl CbSolveWorkspace {
+    pub(crate) fn for_factors(factors: &SparseFactors) -> Self {
+        let n = factors.n;
+        let nodes = &factors.node_factors;
+        let n_nodes = nodes.len();
+        let children = build_children(&factors.node_parents, n_nodes);
+        let plan = CbTaskPlan::build(&children, &factors.node_parents, nodes, n_nodes);
+        let max_nrow = nodes
+            .iter()
+            .map(|nd| nd.frontal_factors.nrow)
+            .max()
+            .unwrap_or(0);
+        let scaled = !matches!(factors.scaling_info, ScalingInfo::NotApplied);
+        Self {
+            n,
+            max_nrow,
+            scaled,
+            children,
+            plan,
+            y: vec![0.0; n],
+            row_map: vec![usize::MAX; n],
+            w: vec![0.0; max_nrow],
+            contribs: (0..n_nodes).map(|_| None).collect(),
+            par_scratch: Vec::new(),
+            par_contribs: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Whether the tree-parallel path is expected to beat the serial core
+    /// on this factor (see `CbTaskPlan::worthwhile`).
+    pub(crate) fn worthwhile(&self) -> bool {
+        self.plan.worthwhile
+    }
+
+    /// Solve `A x = b` into `x_out` using this workspace. `parallel`
+    /// requests tree-parallel execution, honoured only when the plan is
+    /// `worthwhile`; otherwise the byte-identical serial core runs. MC64
+    /// pre/post scaling is fused into the entry permute and exit unpermute.
+    pub(crate) fn solve_into(
+        &mut self,
+        factors: &SparseFactors,
+        rhs: &[f64],
+        x_out: &mut [f64],
+        parallel: bool,
+    ) {
+        let n = self.n;
+        // Permute the RHS into `y`, fusing MC64 scaling: y[new] =
+        // b[old]·D[old] (the same congruence solve_sparse applies).
+        if self.scaled {
+            for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
+                self.y[new_idx] = rhs[old_idx] * factors.scaling[old_idx];
+            }
+        } else {
+            for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
+                self.y[new_idx] = rhs[old_idx];
+            }
+        }
+
+        if parallel && self.plan.worthwhile {
+            let num_threads = rayon::current_num_threads().max(1);
+            if self.par_scratch.len() != num_threads + 1 {
+                let max_nrow = self.max_nrow;
+                self.par_scratch = (0..num_threads + 1)
+                    .map(|_| {
+                        std::sync::Mutex::new(CbScratch {
+                            row_map: vec![usize::MAX; n],
+                            w: vec![0.0; max_nrow],
+                        })
+                    })
+                    .collect();
+            }
+            {
+                let mut pc = self.par_contribs.lock().unwrap_or_else(|p| p.into_inner());
+                pc.clear();
+                pc.resize_with(factors.node_factors.len(), || None);
+            }
+            cb_run_parallel(
+                &factors.node_factors,
+                &self.children,
+                &factors.node_parents,
+                &self.plan,
+                &self.par_scratch,
+                &self.par_contribs,
+                &mut self.y,
+                n,
+            );
+        } else {
+            // Roots' contributions are never drained, so reset.
+            for c in self.contribs.iter_mut() {
+                *c = None;
+            }
+            cb_run_serial(
+                &factors.node_factors,
+                &self.children,
+                &mut self.y,
+                &mut self.row_map,
+                &mut self.w,
+                &mut self.contribs,
+            );
+        }
+
+        // Unpermute, fusing the MC64 post-scale: x[old] = y[new]·D[old].
+        if self.scaled {
+            for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
+                x_out[old_idx] = self.y[new_idx] * factors.scaling[old_idx];
+            }
+        } else {
+            for (new_idx, &old_idx) in factors.perm.iter().enumerate() {
+                x_out[old_idx] = self.y[new_idx];
+            }
+        }
+    }
+}
+
+/// Opt-in contribution-block sparse solve (issue #131 Gap A), single RHS.
+/// Applies the same MC64 pre/post scaling as `solve_sparse`. `parallel`
+/// selects the tree-parallel execution (honoured when the tree is
+/// `worthwhile`); serial and parallel are byte-identical. Allocates a
+/// one-shot [`CbSolveWorkspace`]; callers doing repeated solves against
+/// one factor should build and reuse a workspace instead.
+pub fn solve_sparse_cb(
+    factors: &SparseFactors,
+    rhs: &[f64],
+    parallel: bool,
+) -> Result<Vec<f64>, FeralError> {
+    let n = factors.n;
+    if rhs.len() != n {
+        return Err(FeralError::DimensionMismatch {
+            expected: n,
+            got: rhs.len(),
+        });
+    }
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut ws = CbSolveWorkspace::for_factors(factors);
+    let mut x = vec![0.0f64; n];
+    ws.solve_into(factors, rhs, &mut x, parallel);
+    Ok(x)
 }
 
 /// Workspace for `solve_sparse_many_into`. Sized for `nrhs` columns
@@ -976,7 +1691,24 @@ pub fn solve_sparse_refined(
     factors: &SparseFactors,
     rhs: &[f64],
 ) -> Result<Vec<f64>, FeralError> {
-    let (x, _) = solve_sparse_refined_core(matrix, factors, rhs, false)?;
+    let (x, _) = solve_sparse_refined_core(matrix, factors, rhs, false, false)?;
+    Ok(x)
+}
+
+/// Iterative refinement using the tree-parallel contribution-block solve
+/// (issue #131 Gap A) for the initial and correction solves, pooling one
+/// `CbSolveWorkspace` across them. Falls back per-solve to the serial
+/// path when the factor's assembly tree is not `worthwhile` (path-like /
+/// small trees), so it never regresses those; on bushy trees it runs the
+/// substitutions across the rayon pool. The refined result is a valid
+/// solution equal to `solve_sparse_refined`'s up to floating-point
+/// reassociation. Used by `Solver::solve_refined` when parallelism is on.
+pub fn solve_sparse_refined_parallel(
+    matrix: &CscMatrix,
+    factors: &SparseFactors,
+    rhs: &[f64],
+) -> Result<Vec<f64>, FeralError> {
+    let (x, _) = solve_sparse_refined_core(matrix, factors, rhs, false, true)?;
     Ok(x)
 }
 
@@ -1050,7 +1782,7 @@ pub fn solve_sparse_refined_with_diagnostics(
     factors: &SparseFactors,
     rhs: &[f64],
 ) -> Result<(Vec<f64>, RefinementDiagnostics), FeralError> {
-    let (x, diag) = solve_sparse_refined_core(matrix, factors, rhs, true)?;
+    let (x, diag) = solve_sparse_refined_core(matrix, factors, rhs, true, false)?;
     // `with_diagnostics = true` always yields `Some`; if it ever doesn't,
     // that's a logic bug — `expect` is fine in test code, but per CLAUDE.md
     // we use Result in src/. Return DimensionMismatch as a defensive
@@ -1067,6 +1799,7 @@ fn solve_sparse_refined_core(
     factors: &SparseFactors,
     rhs: &[f64],
     with_diagnostics: bool,
+    parallel_cb: bool,
 ) -> Result<(Vec<f64>, Option<RefinementDiagnostics>), FeralError> {
     let n = factors.n;
     if rhs.len() != n {
@@ -1088,9 +1821,28 @@ fn solve_sparse_refined_core(
         (0.0, 0.0)
     };
 
-    let mut ws = SolveWorkspace::for_factors(factors);
+    // Issue #131 Gap A: when the caller opts into the tree-parallel path
+    // and the factor's assembly tree is `worthwhile`, pool one
+    // contribution-block workspace across the initial + up-to-10
+    // correction solves (each reuses the plan + scratch). Otherwise keep
+    // the proven shared-vector `SolveWorkspace` path, bit-for-bit.
+    let mut cb_ws: Option<CbSolveWorkspace> = if parallel_cb && n > 0 {
+        let cb = CbSolveWorkspace::for_factors(factors);
+        cb.worthwhile().then_some(cb)
+    } else {
+        None
+    };
+    let mut ws: Option<SolveWorkspace> = if cb_ws.is_none() {
+        Some(SolveWorkspace::for_factors(factors))
+    } else {
+        None
+    };
     let mut x = vec![0.0; n];
-    solve_sparse_into_ws(factors, rhs, &mut x, &mut ws)?;
+    match (cb_ws.as_mut(), ws.as_mut()) {
+        (Some(cb), _) => cb.solve_into(factors, rhs, &mut x, true),
+        (None, Some(w)) => solve_sparse_into_ws(factors, rhs, &mut x, w)?,
+        (None, None) => unreachable!("exactly one solve workspace is built"),
+    }
 
     // Initial residual: compute A·x directly into r, then negate-add.
     let mut r = vec![0.0; n];
@@ -1156,7 +1908,11 @@ fn solve_sparse_refined_core(
             break;
         }
 
-        solve_sparse_into_ws(factors, &r, &mut dx, &mut ws)?;
+        match (cb_ws.as_mut(), ws.as_mut()) {
+            (Some(cb), _) => cb.solve_into(factors, &r, &mut dx, true),
+            (None, Some(w)) => solve_sparse_into_ws(factors, &r, &mut dx, w)?,
+            (None, None) => unreachable!("exactly one solve workspace is built"),
+        }
         for i in 0..n {
             x[i] += dx[i];
         }

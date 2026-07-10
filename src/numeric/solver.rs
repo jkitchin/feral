@@ -19,7 +19,7 @@ use crate::numeric::factorize::{
 };
 use crate::numeric::solve::{
     solve_sparse, solve_sparse_many, solve_sparse_many_refined, solve_sparse_refined,
-    BLAS3_REFINE_THRESHOLD,
+    solve_sparse_refined_parallel, BLAS3_REFINE_THRESHOLD,
 };
 use crate::scaling::{
     mc64_value_bound_passes, pick_scaling_strategy, precompute_mc64_validity, Mc64CacheValidity,
@@ -1525,9 +1525,25 @@ impl Solver {
     /// and the stored factor. Returns `FeralError::NoFactor` if no
     /// factor is stored.
     pub fn solve_refined(&self, matrix: &CscMatrix, rhs: &[f64]) -> Result<Vec<f64>, FeralError> {
-        match &self.last_factors {
-            Some(f) => solve_sparse_refined(matrix, f, rhs),
-            None => Err(FeralError::NoFactor),
+        let f = match &self.last_factors {
+            Some(f) => f,
+            None => return Err(FeralError::NoFactor),
+        };
+        // Issue #131 Gap A: when parallelism is on, refine through the
+        // tree-parallel contribution-block solve (pooled across the
+        // initial + correction solves). It self-gates per factor — on
+        // path-like / small trees it runs the serial core, matching the
+        // default path's behavior. Install on this solver's pool (built
+        // during the parallel factor) so the solve uses the same worker
+        // count and does not oversubscribe; fall through to the global
+        // pool if none was built.
+        if self.use_parallel {
+            match &self.parallel_pool {
+                Some(pool) => pool.install(|| solve_sparse_refined_parallel(matrix, f, rhs)),
+                None => solve_sparse_refined_parallel(matrix, f, rhs),
+            }
+        } else {
+            solve_sparse_refined(matrix, f, rhs)
         }
     }
 
@@ -1581,7 +1597,17 @@ impl Solver {
         let mut out = vec![0.0; n * nrhs];
         for c in 0..nrhs {
             let src = &rhs[c * n..(c + 1) * n];
-            let xc = solve_sparse_refined(matrix, factors, src)?;
+            // Same #131 Gap A dispatch as `solve_refined` (per column).
+            let xc = if self.use_parallel {
+                match &self.parallel_pool {
+                    Some(pool) => {
+                        pool.install(|| solve_sparse_refined_parallel(matrix, factors, src))
+                    }
+                    None => solve_sparse_refined_parallel(matrix, factors, src),
+                }
+            } else {
+                solve_sparse_refined(matrix, factors, src)
+            }?;
             out[c * n..(c + 1) * n].copy_from_slice(&xc);
         }
         Ok(out)
@@ -1964,6 +1990,7 @@ mod tests {
             static_pivot_threshold: None,
             warn_partial_singular: false,
             pattern_reused_hint: false,
+            use_static_row_indices: true,
         };
         Solver::with_params(np, SupernodeParams::default())
     }

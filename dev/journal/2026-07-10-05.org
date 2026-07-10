@@ -200,3 +200,107 @@ Combined discopt-simplex verdict (#130/#132/#133 all measured, all
 not-justified): the compute_spike L-solve over an already-well-ordered factor
 is near the achievable floor. Remaining wins are simplex-algorithmic
 (pivots/pricing) or refactor cadence, not the LU kernels. discopt left pristine.
+
+* 15:40 :issue-131:issue-125:parallelism:design:
+User scoped #131 full implementation. Wrote code-level design +
+bit-exactness analysis (dev/research/issue-131-parallelism-design-2026-07-10.md).
+KEY FINDING: the SOLVE gap (Gap A) cannot be made bit-exact vs today's serial
+solve — it uses a shared global vector where sibling subtrees read-modify-write
+the same ancestor separator entries; naive tree-parallel races, and
+private-accumulation-then-merge violates the byte-identical contract (float
+non-associativity). Real bit-exact tree-parallel solve needs a
+contribution-block rewrite of both solve cores (arithmetic reorder → residual
+re-baseline). Assembly gap (Gap B) IS bit-exact-safe (disjoint-column partition)
+but second-order (O(nrow^2) behind already-parallel O(nrow^3) factor). Both are
+tree-shape dependent (bushy only; path-like KKT gets ~0).
+User decisions: Gap A → full contribution-block rewrite (accept residual
+re-baseline, show diffs first); assembly → #125 static maps first, then Gap B.
+
+* 16:20 :issue-125:factorize:prologue:
+Implemented #125 (static assembly maps). build_row_indices' output is a pure
+function of static structure when n_delayed_in==0 (trailing set is a sorted
+seen-dedup, numeric-pivot-order independent). Precompute per-supernode
+[own cols | sorted trailing] at symbolic time (compute_static_row_indices, one
+postorder pass), store CSR-flat on SymbolicFactorization
+(static_row_offsets/static_row_flat + static_rows() accessor). Numeric
+factor_one_supernode uses the static slice when n_delayed_in==0 &&
+use_static_row_indices (new NumericParams flag, default true); delayed fronts
+fall back to build_row_indices. Both drivers covered (shared factor_one_supernode).
+Tests (tests/static_assembly_maps.rs, 8 pass): (1) A/B byte-identical factor
+static-on vs static-off incl. KKT-with-delays (proves static==build_row_indices
+bit-for-bit on real matrices); (2) independent BTreeSet oracle over public
+symbolic data == static_rows(i). Full suite green; fmt/clippy clean.
+BENCH (perf_probe A/B via FERAL_STATIC_ROWS, sequential driver, grid220 n=48400
+bushy): per-supernode loop 164.8ms→151.6ms (~8%), total warm factor
+176.0ms→168.1ms (~4.5%). arrow (few fronts, delayed root): wash (noise). Win is
+concentrated on bushy trees with many small no-delay fronts, as expected.
+
+* 16:55 :issue-131:gapb:assembly:measure:not-justified:
+Measured Gap B (parallel assembly) before building it. probe_panel_frag
+(phase_timing, sequential): grid220 assembly 14.0ms = 8.3% of assembly+densef
+(buildrow 1.0 [now cheap via #125] | scatter 1.3 | extendadd 7.5, summed over
+48400 fronts); dense1400 assembly 7.8ms = 1.5% (pure scatter, single front).
+DECISIVE: in the parallel driver, independent fronts' assembly already overlaps
+across threads (assembly is part of each front's tree task), so the only serial
+assembly on the critical path is the root/near-root fronts' O(nrow^2) — behind
+the root's O(nrow^3) dense factor that Lever 1.1 intra-front parallelism already
+targets. Column-partitioned assembly would chase <1-3% of factor. Measure-first
+negative like #130/#132/#133. Recorded
+dev/research/issue-131-gapb-assembly-measure-2026-07-10.md. User: skip Gap B,
+proceed to Gap A (the high-value solve rewrite). Kept the assembly breakdown
+addition to probe_panel_frag (useful diagnostic).
+
+* 18:30 :issue-131:gapa:solve:contribution-block:parallel:
+Implemented the #131 Gap A contribution-block tree-parallel single-RHS solve
+(opt-in solve_sparse_cb; default solve_sparse untouched → zero risk to existing
+tests, no rebaseline). Forward = contribution-block (assemble b at eliminated
+rows + children contributions summed in ascending child order, the same
+deterministic reduction as the factor's extend_add), leaves-up. Backward =
+unchanged shared-vector arithmetic (separator rows read-only, eliminated rows
+disjoint), root-down. Global y written only at eliminated rows (disjoint across
+fronts); concurrent writes via a Send+Sync raw-pointer wrapper (YPtr) with a
+disjointness safety comment.
+Coarsening (CbTaskPlan): per-node rayon tasks were far too fine (grid220 = 48400
+tiny tasks → spawn/lock overhead swamped the tiny per-front solve work: NO
+speedup, cb_parallel 14.6ms vs cb_serial 10.7ms at 1t). Cut the tree at a
+subtree-cost threshold into "task roots"; each task root runs its contiguous
+postorder block of light descendants serially (postorder ⇒ contiguous ⇒ no
+recursion), only the top of the tree spawns tasks. Bit-exact preserved
+(coarsening changes which thread runs a front, never the reduction order).
+`worthwhile` gate: skip parallel (run serial) when <2 independent task roots, or
+one task root's serial share >70% of total (Amdahl — e.g. arrow's huge root
+front), or total < 1e6 flops (scratch-setup not amortized).
+MEASURED (grid220 n=48400 bushy, 30-iter min, warm factor): default solve
+13.5ms; cb_serial 13.0ms (≈default, no regression); cb_parallel 6.6ms at 4t =
+~2.0x. arrow (path+big root): gate → serial fallback, near-neutral (0.51 vs
+0.46ms). Solve is ~6-13% of factor so absolute win is a few ms/solve; matters
+cumulatively for IPM hosts (several refined solves per factor).
+TESTS (tests/cb_solve_parity.rs, 6 pass incl. n=9216 concurrent path, stable
+under RAYON_NUM_THREADS=8): serial-CB == parallel-CB byte-identical (to_bits);
+determinism across parallel runs; valid solve (residual <= 10x default);
+CB≈default within reassociation; KKT-with-delays (data-flow risk area); dense
+fast-path (lone root). Full suite green; fmt + clippy -D warnings clean.
+Scope note: multi-RHS core (solve_sparse_core_many_into) still shared-vector
+serial — a documented follow-up; single-RHS is the IPM refinement/condition
+hot path #131 motivates.
+
+* 19:45 :issue-131:gapa:solve:pooling:solver-wiring:
+Wired the CB parallel solve into the Solver (follow-up 3/n). Refactored the CB
+cores to run against a pooled CbSolveWorkspace (caches RHS-independent children
+lists + coarsening plan + per-worker scratch + y; scaling fused into the
+entry-permute / exit-unpermute, dropped scaled_rhs). solve_sparse_refined_core
+gained a parallel_cb flag: when set AND the factor is worthwhile, it builds ONE
+CbSolveWorkspace and reuses it for the initial + up-to-10 correction solves
+(no per-solve alloc churn — the stated concern); else the proven shared-vector
+SolveWorkspace path runs bit-for-bit. New pub solve_sparse_refined_parallel.
+Solver::solve_refined + solve_many_refined (per-column) dispatch to it when
+use_parallel, installed on the solver's own rayon pool (same worker count as the
+factor, no oversubscription). Small/path trees self-gate to serial (exact
+current behavior); only bushy trees switch to CB.
+MEASURED end-to-end (perf_probe, grid220 n=48400, Solver::solve_refined, warm):
+serial 56.0ms → parallel 29.0ms = ~1.93x. Refinement runs ~11 solves; the
+pooled workspace parallelizes each with no churn.
+Tests: cb_solve_parity (6), sparse_refined (13), parity (21), multi_rhs (5) all
+green; full suite green; fmt + clippy -D warnings clean. No solve baseline
+changed (residual-based tests survive the CB reassociation; refinement
+converges either way). Remaining: multi-RHS CB core (4/n).

@@ -42,6 +42,10 @@ fn main() {
     let mut agg_schur = 0u64;
     let mut agg_panelf = 0u64;
     let mut agg_scalartail = 0u64;
+    let mut agg_assembly = 0u64;
+    let mut agg_buildrow = 0u64;
+    let mut agg_scatter = 0u64;
+    let mut agg_extendadd = 0u64;
 
     println!(
         "{:<24} {:>8} {:>6} {:>6} {:>7} {:>7} {:>8} {:>8} {:>9}",
@@ -73,7 +77,9 @@ fn main() {
         let delayed = get("panel_delayed");
         let pin = get("pivots_inline");
         let psc = get("pivots_scalar");
-        let (_assembly, densef, panelf, schur, scalartail) = phase_timing::snapshot();
+        let (assembly, densef, panelf, schur, scalartail) = phase_timing::snapshot();
+        let (buildrow, scatter, extendadd, _lextract, _contribextract) =
+            phase_timing::snapshot_detail();
 
         let panels = (full + partial + delayed).max(1);
         let pivots = (pin + psc).max(1);
@@ -111,6 +117,10 @@ fn main() {
         agg_schur += schur;
         agg_panelf += panelf;
         agg_scalartail += scalartail;
+        agg_assembly += assembly;
+        agg_buildrow += buildrow;
+        agg_scatter += scatter;
+        agg_extendadd += extendadd;
     }
 
     let panels = (agg_full + agg_partial + agg_delayed).max(1);
@@ -134,4 +144,14 @@ fn main() {
             agg_densef / 1000,
         );
     }
+    // #131 Gap B scoping: assembly cost vs the dense factor it feeds.
+    let total = (agg_assembly + agg_densef).max(1);
+    println!(
+        "assembly: {} us ({:.1}% of assembly+densefactor)  | buildrow={} us scatter={} us extendadd={} us",
+        agg_assembly / 1000,
+        100.0 * agg_assembly as f64 / total as f64,
+        agg_buildrow / 1000,
+        agg_scatter / 1000,
+        agg_extendadd / 1000,
+    );
 }

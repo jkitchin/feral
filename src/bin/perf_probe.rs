@@ -24,7 +24,17 @@ fn median(mut v: Vec<u128>) -> u128 {
 }
 
 fn make_solver(sequential: bool, profiling: bool) -> Solver {
-    Solver::with_params(NumericParams::default(), Default::default())
+    // Issue #125 A/B: `FERAL_STATIC_ROWS=0` forces the `build_row_indices`
+    // path (static assembly map disabled) so the prologue win is
+    // measurable against the default (static map on).
+    let mut np = NumericParams::default();
+    if matches!(
+        std::env::var("FERAL_STATIC_ROWS").as_deref(),
+        Ok("0") | Ok("off") | Ok("false") | Ok("no")
+    ) {
+        np.use_static_row_indices = false;
+    }
+    Solver::with_params(np, Default::default())
         .with_parallel(!sequential)
         .with_profiling(profiling)
 }
@@ -104,6 +114,45 @@ fn main() {
     sv.sort_unstable();
     let solve_med_ns = sv.get(sv.len() / 2).copied().unwrap_or(0);
     println!("  solve_min_ns={solve_min_ns} solve_median_ns={solve_med_ns}");
+
+    // Issue #131 Gap A: contribution-block solve A/B. Times the CB solve
+    // serial vs tree-parallel (rayon pool = RAYON_NUM_THREADS) on the warm
+    // factor. Enabled with FERAL_PROBE_CB=1.
+    if std::env::var("FERAL_PROBE_CB").is_ok() {
+        if let Some(factors) = solver.factors() {
+            let bench_cb = |parallel: bool| -> u128 {
+                let _ = feral::numeric::solve::solve_sparse_cb(factors, &rhs, parallel);
+                let mut walls = Vec::with_capacity(iters);
+                for _ in 0..iters {
+                    let t0 = Instant::now();
+                    let _ = feral::numeric::solve::solve_sparse_cb(factors, &rhs, parallel);
+                    walls.push(t0.elapsed().as_nanos());
+                }
+                walls.into_iter().min().unwrap_or(0)
+            };
+            let cb_ser = bench_cb(false);
+            let cb_par = bench_cb(true);
+            println!(
+                "  cb_serial_min_ns={cb_ser} cb_parallel_min_ns={cb_par} threads={}",
+                rayon::current_num_threads()
+            );
+        }
+        // End-to-end refined solve via the wired Solver path
+        // (Solver::solve_refined dispatches to the parallel CB refinement
+        // when use_parallel). `sequential` selects the serial baseline.
+        let _ = solver.solve_refined(&csc, &rhs);
+        let mut rwalls = Vec::with_capacity(iters);
+        for _ in 0..iters {
+            let t0 = Instant::now();
+            let _ = solver.solve_refined(&csc, &rhs);
+            rwalls.push(t0.elapsed().as_nanos());
+        }
+        println!(
+            "  solve_refined_min_ns={} driver={}",
+            rwalls.into_iter().min().unwrap_or(0),
+            if sequential { "serial" } else { "parallel" }
+        );
+    }
 
     // A separate profiled solver to attribute the prologue (profiling adds
     // overhead, so it is kept out of the timing number above).

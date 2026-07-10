@@ -1,143 +1,142 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-10T12:42:23Z
+Generated: 2026-07-10T17:13:00Z
 
 ## Latest Session
-File: dev/sessions/2026-07-10-04.md
+File: dev/sessions/2026-07-10-06.md
 ```
-# Session 2026-07-10-04
+# Session 2026-07-10-06
 
 ## Goal
-Fix the four correctness-edge issues #120–#123 (from the 2026-07-10 six-agent
-audit), one at a time, each as its own tested commit with an empirical
-reproduction before encoding the fix. Then one PR for the batch.
+
+Implement issue #131 (parallelism gaps) after the session-05 measure-first pass
+found it — unlike #130/#132/#133 — has genuine headroom. User scope: solve gap
+(Gap A) → full contribution-block rewrite; assembly gap → #125 static maps
+first, then Gap B.
 
 ## Accomplished
-All four fixed, committed, full-suite (75 binaries) + clippy
-`--all-targets -D warnings` + fmt green after each. Every fix reproduced or
-guard-verified empirically before/after encoding (issue-112 discipline).
 
-- **#120** (`d6f8ebd`): `apply_post_scaling_overrides` now scales
-  `cascade_break_eps` by `‖D·A·D‖∞` (like the N2 `static_pivot_floor` fix), so
-  the cascade-break `PerturbToEps` floor is RELATIVE to the scaled matrix the
-  BK kernel operates on. Root cause: the default-armed `1e-10` was an ABSOLUTE
-  per-pivot floor; under Identity scaling on `γ·K` (γ=1e-12) every pivot was
-  bent to ±1e-10 (~1e2·‖A‖ perturbation), silently returning the inertia of
-  `A+Δ` with `‖Δ‖ ≫ ‖A‖`. Test `cascade_break_eps_scaled_by_matrix_norm`.
-- **#121** (`f8d5f8a`): symbolic-cache hit was gated on the `PatternFingerprint`
-  (a u64 hash) alone. Added a `last_pattern: Option<(Vec<usize>, Vec<usize>)>`
-  field kept in lockstep with the fingerprint; `cache_valid` now requires the
-  fingerprint match AND an exact O(n+nnz) `(col_ptr, row_idx)` compare, so a
-  2⁻⁶⁴ hash collision can never reuse a stale symbolic (which would scatter new
-  values through the old `perm` and corrupt factor/inertia). Test forges a
-  collision deterministically; verified it fails pre-fix (call_count 1 vs 2).
-- **#122** (`cb96b6e`): three-part guard-hardening bundle.
-  - **A** — ordering results (`run_external_ordering`, `schur::run_amd`) were
-    range-checked but never bijectivity-checked; a dup/missing perm corrupts
-    `permute_pattern`'s per-column count assignment. `validate_external_perm`
-    promoted to `pub(crate)` and called on both internal ordering results.
-  - **B** — `classify_2x2_inertia` mapped a NaN block to certified `(0,0,2)`.
-    Now returns `Result<Inertia, FeralError>` with a release-mode `!is_finite`
-    guard; Result threaded through `count_2x2_inertia_val`, `finish_1x1_outcome`
-    (now `Result<PivotStepResult>`), and all six call sites via `?`. Backstops
-    the debug-only finite entry-scan at `factor.rs:1749` (the only such gate on
-    the inertia path — grep confirmed).
-  - **C** — `LuParams::validate` now rejects `max_growth` NaN/≤1.0 (a NaN
-    silently disabled the growth guard in the update paths) and non-finite/≤0
-    `refine_tol`. Both dense and sparse factor entries call `validate()`.
-- **#123** (`876cf72`): the MAXFROMM short-circuit gate `akk >= alpha * mf` is
-  unconditionally true at `mf == 0.0` (`capture_maxfromm_col` returns `Some(0.0)`
-  for an all-zero trailing column), routing a zero column through rook-rescue —
-  where Plain's full scan hits `gamma0 == 0.0` and takes the dedicated
-  zero-column branch. Broke the documented Plain/Maxfromm bit-parity (delay/
-  inertia under `may_delay`, D under ForceAccept). Fix: `mf != 0.0 && …` treats
-  `Some(0.0)` as a cache miss. New `maxfromm_zero_tail_cache_miss_parity` (both
-  `may_delay` values, scalar + blocked) verified failing pre-fix; unit test
-  pins `capture_maxfromm_col`'s `Some(0.0)` precondition.
+- **#125 — analysis-time static assembly maps** (commit `efa1000`).
+  Precompute each supernode's `[own cols | sorted trailing]` frontal row layout
+  at symbolic time (`compute_static_row_indices`, one postorder pass, CSR-flat
+  on `SymbolicFactorization`); the numeric factor reads it on the no-delay fast
+  path (`n_delayed_in == 0`) instead of recomputing with `build_row_indices`.
+  Bit-identical (delayed fronts fall back). Tests (`tests/static_assembly_maps.rs`,
+  8): A/B factor byte-identical static-on vs -off incl. KKT-with-delays; an
+  independent BTreeSet oracle == `static_rows(i)`. **Bench: grid220 (n=48400)
+  per-supernode loop 164.8→151.6 ms (~8%), warm factor 176.0→168.1 ms (~4.5%);
+  arrow wash.**
 
+- **#131 Gap B — measured not justified, not built** (commit `93cf6ed`).
+  Assembly is 8.3% of factor on grid220 / 1.5% on dense1400, and independent
+  fronts' assembly already overlaps in the parallel driver; only the serial
+  root-front O(nrow²) remains, behind the already-parallel O(nrow³) factor.
+  <1–3% ceiling → skipped with evidence (user agreed).
+  `dev/research/issue-131-gapb-assembly-measure-2026-07-10.md`.
+
+- **#131 Gap A (1/n) — carry the assembly tree into `SparseFactors`** (commit
+  `c12a5d3`). `node_parents: Vec<Option<usize>>` mirrored from symbolic in all
+  constructors. Behavior-neutral foundation for the tree-parallel solve.
+
+- **#131 Gap A (2/n) — contribution-block tree-parallel single-RHS solve**
+  (commit `d83ca3e`). Opt-in `solve_sparse_cb(factors, rhs, parallel)`; default
+  `solve_sparse` untouched (no rebaseline). Forward = contribution-block
+  (children summed in fixed ascending order → serial-CB == parallel-CB
+  byte-identical); backward = unchanged shared-vector arithmetic, root-down.
+  Global `y` written only at disjoint eliminated rows (concurrent via a
+  Send+Sync raw-pointer wrapper + disjointness safety comment). Subtree-cost
+  **coarsening** (`CbTaskPlan`) + a `worthwhile` gate (≥2 task roots, no
+  Amdahl-dominant front, total ≥ 1e6 flops) — per-node tasks were far too fine.
+  Tests (`tests/cb_solve_parity.rs`, 6, stable under RAYON_NUM_THREADS=8):
+  serial==parallel byte-identical incl. an n=9216 concurrent-path fixture,
+  KKT-with-delays, dense fast path; determinism; valid solve.
+  **Bench: grid220 default solve 13.5 ms → cb_parallel 6.6 ms at 4 threads
+  (~2.0×); cb_serial 13.0 ms (no regression); arrow → serial fallback,
+  near-neutral.**
+
+- **#131 Gap A (3/n) — pool the CB workspace + wire into `Solver`** (commit
 ```
 
 ## Git Status
 ```
-cafa023 issue #129: measure panel fragmentation — not justified, close with data
-fc4e9b8 issue #128: skip the bpack1 alloc+zero-fill on all-1x1 dense Schur panels
-4124faf issue #126: fuse the D-block solve into the forward pass (single-RHS)
-164d201 issue #124: thread the permute cache through the parallel driver
-d9d5e86 session 2026-07-10-04: checkpoint, CHANGELOG, decisions for #120–#123
+ab4b2fc #131 Gap A (3/n): pool the CB workspace and wire it into Solver
+3d91ffb session 2026-07-10-06 checkpoint: #125 + #131 Gap A/B
+d83ca3e #131 Gap A (2/n): contribution-block tree-parallel single-RHS solve
+c12a5d3 #131 Gap A (1/n): carry the assembly tree into SparseFactors
+93cf6ed research: #131 Gap B (parallel assembly) measured not justified
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_single_schur_index ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
 test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
 test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
-test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 405 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.49s
+test result: ok. 405 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.98s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-10-04.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-10-06.md)
 
-No regression vs 2026-07-10-03 (inertia 100%, same worst residuals).
---- Dense solver validation ---
-  Inertia match: 1/1 (100.0%)
-  Residual pass: 1/1 (100.0%)
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
---- Sparse solver validation ---
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-Dense/Sparse failure analysis: no failures
+
+cargo run --bin bench --release: no matrices in this container (corpus absent,
+all buckets count 0). Perf evidence is from src/bin/perf_probe.rs (warm factor +
+solve, RAYON_NUM_THREADS-aware) and src/bin/probe_panel_frag.rs (phase timing):
+
+#125   grid220 loop 164.8→151.6 ms (~8%), warm factor 176.0→168.1 ms (~4.5%)
+Gap B  grid220 assembly 8.3% of factor; dense1400 1.5%  (skipped)
+Gap A  grid220 solve 13.5 ms (default) → 6.6 ms (cb_parallel, 4t) = ~2.0×
+       arrow (path) → worthwhile gate → serial fallback, near-neutral
 
 ```
 
 ## Recent Decisions
-replacement (not a summation artifact), strengthening the existing
-`NeedsRefactor` semantics. No tolerances changed.
 
-## 2026-07-10 — Issue #122: propagate `Result` from `classify_2x2_inertia`; `max_growth` semantics
+The tree-parallel single-RHS solve (`solve_sparse_cb`) is a **separate,
+opt-in** path, not a replacement of `solve_sparse`. Rationale: a bit-exact
+tree-parallel forward substitution must use a contribution-block reduction
+(sum tree, fixed child order) rather than the default core's shared-global-
+vector left-fold. Those two accumulation orders are not float-bit-identical, so
+converting the default path in place would shift every ~1e-15 residual baseline
+(and the single-vs-many-core bit-parity test). Keeping the CB solve as its own
+path leaves the default `solve_sparse` — and every existing test/baseline —
+untouched, and the #131 "serial == parallel byte-identical" contract is
+satisfied within the CB path itself (serial-CB == parallel-CB by construction:
+the child-reduction order is fixed regardless of thread scheduling). The
+backward substitution keeps the default arithmetic unchanged (separator rows
+are read-only, eliminated rows disjoint), so only forward is contribution-block.
+Coarsening (subtree-cost task roots) and a `worthwhile` gate are required for a
+net win — per-node rayon tasks are far too fine for the tiny per-front solve
+work. Evidence: `dev/research/issue-131-parallelism-design-2026-07-10.md`,
+`tests/cb_solve_parity.rs`, ~2.0× on grid220 (n=48400) at 4 threads.
 
-Two small design choices made while closing the #122 guard-hardening bundle.
+## 2026-07-10 — #131 Gap B (parallel assembly): measured not justified, not built
 
-**2×2 non-finite guard is a `Result`, not an inline per-site check.**
-`classify_2x2_inertia` previously returned `Inertia` and a NaN `det`/`tr` fell
-through every ordered comparison to the `(0,0,2)` arm — certifying a NaN block
-as two *zero* eigenvalues. The fix changes the signature to
-`Result<Inertia, FeralError>` (release-mode `!is_finite` → `InvalidInput`) and
-threads the `Result` through `count_2x2_inertia_val`, `finish_1x1_outcome`
-(now `Result<PivotStepResult>`), and all six call sites via `?`. Chosen over a
-per-call-site guard because it is DRY (one guard, impossible to forget at a
-future site) and every caller already sits in a `Result`-returning frame, so
-the ripple is mechanical. This backstops the debug-only finite entry-scan at
-`factor.rs:1749` in release without a full-column scan on the hot path (the
-guard is O(1) at the pivot-block level).
-
-**`LuParams::max_growth` is `> 1.0` with `+∞` an explicit disable.**
-`validate()` now rejects `max_growth` that is `NaN` or `≤ 1.0` and accepts any
-finite `> 1.0` plus `+∞`. `+∞` is the documented "never trigger a refactor on
-growth" opt-out (`growth > +∞` is always false); `NaN` is rejected because it
-silently disabled the growth guard in the update paths (which — unlike
-`should_refactor_growth` — do not defend with `is_finite`). `refine_tol` must
-be finite and `> 0`. No tolerances changed; all existing `LuParams` in the
-tree already satisfy the bounds (min `max_growth` `1.0 + 1e-9`, all
-`refine_tol > 0`), so this is pure input validation with no behavior change on
-valid inputs.
+Per-front assembly is 8.3% of the factor on grid220 / 1.5% on dense1400, and in
+the parallel driver independent fronts' assembly already overlaps across
+threads (each front's assembly is part of its own tree task). The only assembly
+left on the critical path is the root/near-root fronts' O(nrow²), behind the
+root's O(nrow³) dense factor that intra-front parallelism (Lever 1.1) already
+targets — so column-partitioned parallel assembly would chase <1–3% of the
+factor. #125 already captured the tractable, bit-exact assembly win
+(`build_row_indices`). Not built. Evidence:
+`dev/research/issue-131-gapb-assembly-measure-2026-07-10.md`.
 
 ## Recent Tried-and-Rejected
 sweep replays across four hand constructions (journal 2026-07-10-01,
@@ -165,6 +164,8 @@ default false. See `dev/research/issue-112-bg-update.md` §UPDATE and
 ```
 src/bin/bench.rs
 src/bin/perf_probe.rs
+src/bin/probe_ft_eta.rs
+src/bin/probe_lu_phases.rs
 src/bin/probe_panel_frag.rs
 src/capi.rs
 src/dense/block_ldlt32.rs
@@ -224,6 +225,7 @@ tests/amf_corpus_oracle.rs
 tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
+tests/cb_solve_parity.rs
 tests/column_renumbering.rs
 tests/column_renumbering_parity.rs
 tests/d4_solve_2x2_gate.rs
@@ -288,6 +290,7 @@ tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
 tests/sparse_refined.rs
 tests/sqd_fast_path.rs
+tests/static_assembly_maps.rs
 tests/stress_tests.rs
 tests/symbolic_profiler.rs
 tests/threshold_consistency.rs

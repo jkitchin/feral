@@ -4,6 +4,29 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — tree-parallel sparse solve (issue #131 Gap A)
+
+- **`solve_sparse_cb(factors, rhs, parallel)`** — an opt-in contribution-block
+  single-RHS sparse solve. With `parallel = true` it runs forward and backward
+  substitution across the assembly tree on the rayon pool; forward assembles
+  each front's RHS from its children's contribution blocks in a fixed order
+  (mirroring the factor's `extend_add`), so a serial and a tree-parallel run
+  are **byte-identical**. A subtree-cost coarsening keeps rayon tasks coarse,
+  and a `worthwhile` gate falls back to the serial core on path-like /
+  single-front / small trees. Measured ~2.0× on a bushy grid (n=48400) at 4
+  threads; near-neutral on path-like trees. The default `solve_sparse` is
+  unchanged. The multi-RHS core remains serial (follow-up).
+
+### Performance — analysis-time assembly maps (issue #125)
+
+- **#125** Each supernode's static frontal row layout (`[own cols | sorted
+  trailing]`) is now precomputed at symbolic-analysis time and reused by the
+  numeric factorization on the no-delay fast path, instead of re-scanning the
+  pattern and re-sorting the trailing set every factorization. Bit-identical
+  factors (delayed-pivot fronts fall back to the dynamic path). Measured ~8%
+  off the per-supernode loop and ~4.5% off the warm factor on a bushy grid
+  (n=48400).
+
 ### Performance — warm-path prologue and solve speedups (issues #124, #126, #128)
 
 - **#124** The default (parallel) numeric driver now reuses the persistent

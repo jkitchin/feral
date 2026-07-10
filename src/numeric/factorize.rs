@@ -272,6 +272,18 @@ pub struct NumericParams {
     /// `permute_csc_values`; closing that gap is the open N3 facet tracked
     /// in `dev/decisions.md`.
     pub pattern_reused_hint: bool,
+
+    /// Issue #125: when `true` (default), `factor_one_supernode` reads
+    /// each front's row layout from the symbolic-time
+    /// `SymbolicFactorization::static_rows` on the no-delay fast path
+    /// (`n_delayed_in == 0`) instead of recomputing it with
+    /// `build_row_indices`. The static layout is bit-for-bit identical
+    /// to `build_row_indices`' output in that case, so factors are
+    /// unchanged. Setting `false` forces the `build_row_indices` path
+    /// unconditionally — used only for A/B benchmarking of the prologue
+    /// win and by the equivalence test in
+    /// `tests/static_assembly_maps.rs`. Default `true`.
+    pub use_static_row_indices: bool,
 }
 
 /// Gate for Phase 2.9 small-leaf-subtree batching.
@@ -609,6 +621,10 @@ impl Default for NumericParams {
             // this on per-call when the symbolic cache reports
             // `pattern_reused`.
             pattern_reused_hint: false,
+            // Issue #125: use the symbolic-time static row layout on the
+            // no-delay fast path by default (bit-identical to
+            // `build_row_indices`). Only tests / A/B benches set false.
+            use_static_row_indices: true,
         }
     }
 }
@@ -640,6 +656,8 @@ impl NumericParams {
             warn_partial_singular: false,
             // Issue #56 Lever A.2: opt-in permute cache.
             pattern_reused_hint: false,
+            // Issue #125: static row layout on by default.
+            use_static_row_indices: true,
         }
     }
 }
@@ -877,6 +895,18 @@ pub struct SparseFactors {
     /// Concrete ordering preprocessor actually used. Mirrored
     /// from `SymbolicFactorization::resolved_preprocess`.
     pub resolved_preprocess: crate::symbolic::OrderingPreprocess,
+
+    /// Issue #131 Gap A: assembly-tree parent of each supernode, indexed
+    /// like `node_factors` (postorder). `node_parents[i] == Some(p)` iff
+    /// supernode `i`'s contribution block assembles into supernode `p`;
+    /// `None` for roots. Mirrored from `SymbolicFactorization` at factor
+    /// time (the symbolic analysis is not retained by `SparseFactors`).
+    /// The tree-parallel solve uses it to order forward substitution
+    /// (leaves-up: a node runs once all its children have) and backward
+    /// substitution (root-down: a node runs once its parent has). Empty
+    /// for ad-hoc `SparseFactors` built without a symbolic tree (the
+    /// serial postorder solve does not consult it).
+    pub node_parents: Vec<Option<usize>>,
 }
 
 /// A flat, factorization-order export of the LDLᵀ factors.
@@ -1619,6 +1649,8 @@ pub fn dense_fast_factor_with_workspace(
             resolved_method: crate::symbolic::OrderingMethod::Amd,
             resolved_amalgamation: crate::symbolic::AmalgamationStrategy::Adjacency,
             resolved_preprocess: crate::symbolic::OrderingPreprocess::None,
+            // Dense fast-path: a single supernode, no assembly tree.
+            node_parents: vec![None],
         },
         inertia,
     ))
@@ -1896,6 +1928,7 @@ fn factorize_multifrontal_with_schur_inner(
         resolved_method: symbolic.resolved_method.clone(),
         resolved_amalgamation: symbolic.resolved_amalgamation,
         resolved_preprocess: symbolic.resolved_preprocess,
+        node_parents: build_node_parents(symbolic),
     };
     let schur = SchurBlock {
         dim: n_schur,
@@ -2230,6 +2263,7 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
             resolved_method: symbolic.resolved_method.clone(),
             resolved_amalgamation: symbolic.resolved_amalgamation,
             resolved_preprocess: symbolic.resolved_preprocess,
+            node_parents: build_node_parents(symbolic),
         },
         total_inertia,
     ));
@@ -2364,16 +2398,34 @@ fn factor_one_supernode(
 
     // Build the row indices for this frontal. The default layout is
     // [own native cols (own_ncol) | delayed cols from children (n_delayed_in) | trailing rows].
+    //
+    // Issue #125: on the no-delay fast path (`n_delayed_in == 0`, the
+    // common case) the layout is `[own cols | sorted trailing]` with no
+    // delayed block, which the symbolic phase already materialized in
+    // `symbolic.static_rows(snode_idx)` — bit-for-bit what
+    // `build_row_indices` would produce here (its trailing set is a
+    // sorted seen-dedup independent of numeric pivot order). Copy it
+    // directly and skip the pattern re-scan + sort. Delayed-pivot fronts
+    // (`n_delayed_in > 0`) still go through `build_row_indices`, which
+    // interleaves the child-order delayed columns. The static map may be
+    // absent for ad-hoc/stub `SymbolicFactorization`s (empty offsets);
+    // fall back to `build_row_indices` then.
     let _pt_asm = phase_timing::start();
     let _pt_br = phase_timing::start();
-    let mut row_indices = build_row_indices(
-        snode,
-        full_pattern,
-        contrib_blocks,
-        &mut ws.build_delayed,
-        &mut ws.build_trailing,
-        &mut ws.build_seen,
-    );
+    let static_rows = symbolic.static_rows(snode_idx);
+    let mut row_indices =
+        if params.use_static_row_indices && n_delayed_in == 0 && !static_rows.is_empty() {
+            static_rows.to_vec()
+        } else {
+            build_row_indices(
+                snode,
+                full_pattern,
+                contrib_blocks,
+                &mut ws.build_delayed,
+                &mut ws.build_trailing,
+                &mut ws.build_seen,
+            )
+        };
     phase_timing::stop(&phase_timing::BUILDROW_NS, _pt_br);
     let actual_nrow = row_indices.len();
     debug_assert!(
@@ -3240,6 +3292,7 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
             resolved_method: symbolic.resolved_method.clone(),
             resolved_amalgamation: symbolic.resolved_amalgamation,
             resolved_preprocess: symbolic.resolved_preprocess,
+            node_parents: build_node_parents(symbolic),
         },
         total_inertia,
     ))
@@ -3904,6 +3957,24 @@ fn build_permute_value_map(
 /// Trailing rows are deduplicated against the fully-summed set so a
 /// delayed column that also shows up as a pattern row of a parent
 /// column (via the full symmetric pattern) does not appear twice.
+/// Issue #131 Gap A: assembly-tree parent per supernode, indexed like
+/// `node_factors` (postorder). `parents[c] == Some(i)` iff supernode `i`
+/// lists `c` among its children. Mirrored into `SparseFactors` so the
+/// tree-parallel solve can order forward (leaves-up) and backward
+/// (root-down) substitution without retaining the symbolic analysis.
+fn build_node_parents(symbolic: &SymbolicFactorization) -> Vec<Option<usize>> {
+    let n_snodes = symbolic.supernodes.len();
+    let mut parents: Vec<Option<usize>> = vec![None; n_snodes];
+    for (i, snode) in symbolic.supernodes.iter().enumerate() {
+        for &c in &snode.children {
+            if c < n_snodes {
+                parents[c] = Some(i);
+            }
+        }
+    }
+    parents
+}
+
 fn build_row_indices(
     snode: &crate::symbolic::supernode::Supernode,
     full_pattern: &crate::sparse::csc::CscPattern,
@@ -4363,6 +4434,7 @@ mod tests {
             static_pivot_threshold: None,
             warn_partial_singular: false,
             pattern_reused_hint: false,
+            use_static_row_indices: true,
         };
         let identity = NumericParams {
             bk: infnorm.bk.clone(),
@@ -4379,6 +4451,7 @@ mod tests {
             static_pivot_threshold: None,
             warn_partial_singular: false,
             pattern_reused_hint: false,
+            use_static_row_indices: true,
         };
 
         let (_, i_inf) = factorize_multifrontal(&m, &sym, &infnorm).unwrap();
@@ -4438,6 +4511,7 @@ mod tests {
             static_pivot_threshold: None,
             warn_partial_singular: false,
             pattern_reused_hint: false,
+            use_static_row_indices: true,
         };
         let infnorm = NumericParams {
             scaling: ScalingStrategy::InfNorm,
@@ -4945,6 +5019,7 @@ mod tests {
             static_pivot_threshold: None,
             warn_partial_singular: false,
             pattern_reused_hint: false,
+            use_static_row_indices: true,
         };
 
         let deltas = [0.0, 1e-4, 1e-2, 1.0, 1e2, 1e4, 1e6, 1e8, 1e10, 1e12];
@@ -5171,6 +5246,8 @@ mod tests {
             col_counts: Vec::new(),
             small_leaf_groups: Vec::new(),
             snode_group: Vec::new(),
+            static_row_offsets: Vec::new(),
+            static_row_flat: Vec::new(),
             cached_mc64: None,
             resolved_method: crate::symbolic::OrderingMethod::Amd,
             resolved_amalgamation: crate::symbolic::AmalgamationStrategy::Adjacency,

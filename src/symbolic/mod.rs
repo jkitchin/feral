@@ -452,6 +452,22 @@ pub struct SymbolicFactorization {
     /// `supernodes.len()`.
     pub snode_group: Vec<Option<usize>>,
 
+    /// Issue #125: precomputed static frontal row layout per supernode,
+    /// stored CSR-style as `static_row_flat[static_row_offsets[i] ..
+    /// static_row_offsets[i + 1]]`. Each slice is `[own columns |
+    /// sorted trailing rows]` — bit-for-bit the output of the numeric
+    /// `build_row_indices` **when no pivots are delayed into this node**
+    /// (`n_delayed_in == 0`). The numeric phase reads these directly on
+    /// the no-delay fast path (the common case) instead of re-scanning
+    /// the pattern and re-sorting the trailing set every factorization;
+    /// delayed-pivot fronts fall back to `build_row_indices`. Computed
+    /// in one postorder pass (supernodes are child-before-parent). See
+    /// `dev/research/issue-131-parallelism-design-2026-07-10.md`.
+    pub static_row_offsets: Vec<usize>,
+    /// Flat backing store for [`Self::static_row_offsets`]; length
+    /// `static_row_offsets.last()`.
+    pub static_row_flat: Vec<usize>,
+
     /// Cached MC64 matching produced by the `LdltCompress`
     /// preprocessor. When `Some`, the numeric phase reuses it to
     /// derive the `Mc64Symmetric` scaling vector in O(n) instead of
@@ -484,6 +500,114 @@ pub struct SymbolicFactorization {
     /// to enforce the per-front NPIV ≤ NASS − NVSCHUR stopping rule
     /// (F3.2b).
     pub is_schur_tail: Option<usize>,
+}
+
+impl SymbolicFactorization {
+    /// Issue #125: the precomputed static frontal row layout for
+    /// supernode `i` (`[own columns | sorted trailing rows]`). Valid to
+    /// use directly at numeric time only when `n_delayed_in == 0` for
+    /// that node; see [`Self::static_row_offsets`]. Returns an empty
+    /// slice if the maps were not populated (older ad-hoc constructors).
+    #[inline]
+    pub fn static_rows(&self, i: usize) -> &[usize] {
+        if i + 1 < self.static_row_offsets.len() {
+            let start = self.static_row_offsets[i];
+            let end = self.static_row_offsets[i + 1];
+            &self.static_row_flat[start..end]
+        } else {
+            &[]
+        }
+    }
+}
+
+/// Issue #125: precompute each supernode's static frontal row layout —
+/// `[own columns | sorted trailing rows]` — matching the numeric
+/// `build_row_indices` output for the no-delay case bit-for-bit.
+///
+/// Runs one postorder pass over `supernodes` (already ordered
+/// child-before-parent). For each node the trailing set is the
+/// seen-deduped union of (a) the node's own columns' reach in the
+/// symmetric `permuted_pattern` and (b) each child's static separator
+/// (the child's own trailing slice), both filtered to rows `>= own_last`
+/// and then sorted — identical to `build_row_indices`, whose trailing
+/// set is likewise a sorted seen-dedup independent of numeric pivot
+/// order. Returned CSR-style as `(offsets, flat)`.
+fn compute_static_row_indices(
+    supernodes: &[Supernode],
+    permuted_pattern: &CscPattern,
+) -> (Vec<usize>, Vec<usize>) {
+    let n = permuted_pattern.n;
+    let n_snodes = supernodes.len();
+    let mut offsets: Vec<usize> = Vec::with_capacity(n_snodes + 1);
+    offsets.push(0);
+    let mut flat: Vec<usize> = Vec::new();
+    // Start of each node's trailing (separator) slice within `flat`, so a
+    // parent reads a child's separator without recomputing it.
+    let mut sep_start: Vec<usize> = vec![0; n_snodes];
+    // Shared seen-bitmap, maintained all-`false` between nodes (mirrors
+    // `build_seen` in `build_row_indices`).
+    let mut seen: Vec<bool> = vec![false; n];
+    let mut trailing: Vec<usize> = Vec::new();
+
+    for (idx, snode) in supernodes.iter().enumerate() {
+        let first_col = snode.first_col;
+        let own_ncol = snode.ncol();
+        let own_last = first_col + own_ncol;
+
+        // Mark own columns "fully summed" so the trailing scan skips them.
+        for seen_c in seen.iter_mut().skip(first_col).take(own_ncol) {
+            *seen_c = true;
+        }
+
+        trailing.clear();
+        // (a) Own columns' reach in the symmetric pattern.
+        for j in first_col..own_last {
+            for k in permuted_pattern.col_ptr[j]..permuted_pattern.col_ptr[j + 1] {
+                let r = permuted_pattern.row_idx[k];
+                if r < own_last {
+                    continue;
+                }
+                if !seen[r] {
+                    seen[r] = true;
+                    trailing.push(r);
+                }
+            }
+        }
+        // (b) Each child's static separator (its trailing slice).
+        for &child_idx in &snode.children {
+            if child_idx >= n_snodes {
+                continue;
+            }
+            let cs = sep_start[child_idx];
+            let ce = offsets[child_idx + 1];
+            for &r in &flat[cs..ce] {
+                if r < own_last {
+                    continue;
+                }
+                if !seen[r] {
+                    seen[r] = true;
+                    trailing.push(r);
+                }
+            }
+        }
+        trailing.sort_unstable();
+
+        // Emit `[own columns | sorted trailing]`.
+        flat.extend(first_col..own_last);
+        sep_start[idx] = flat.len();
+        flat.extend_from_slice(&trailing);
+        offsets.push(flat.len());
+
+        // Restore the all-`false` invariant on `seen`.
+        for seen_c in seen.iter_mut().skip(first_col).take(own_ncol) {
+            *seen_c = false;
+        }
+        for &r in &trailing {
+            seen[r] = false;
+        }
+    }
+
+    (offsets, flat)
 }
 
 /// Size-only base ordering rule from cheap matrix dimensions (no pattern
@@ -1245,6 +1369,14 @@ pub fn symbolic_factorize_with_method(
 
     let factor_slack = 1.2;
 
+    // Issue #125: static frontal row layout (numeric no-delay fast path).
+    let t_sr = prof.map(|_| std::time::Instant::now());
+    let (static_row_offsets, static_row_flat) =
+        compute_static_row_indices(&supernodes, &permuted_pattern);
+    if let Some(t) = t_sr {
+        record_stage(prof, "static_row_indices", t);
+    }
+
     if let (Some(arc), Some(t)) = (prof, t_total) {
         if let Ok(mut p) = arc.lock() {
             p.set_total(t.elapsed().as_micros() as u64);
@@ -1265,6 +1397,8 @@ pub fn symbolic_factorize_with_method(
         col_counts,
         small_leaf_groups,
         snode_group,
+        static_row_offsets,
+        static_row_flat,
         cached_mc64,
         resolved_method,
         resolved_amalgamation: snode_params.amalgamation_strategy,
@@ -1445,6 +1579,10 @@ pub fn symbolic_factorize_with_schur(
 
     let factor_slack = 1.2;
 
+    // Issue #125: static frontal row layout (numeric no-delay fast path).
+    let (static_row_offsets, static_row_flat) =
+        compute_static_row_indices(&supernodes, &permuted_pattern);
+
     Ok(SymbolicFactorization {
         n,
         perm,
@@ -1459,6 +1597,8 @@ pub fn symbolic_factorize_with_schur(
         col_counts,
         small_leaf_groups,
         snode_group,
+        static_row_offsets,
+        static_row_flat,
         cached_mc64: None,
         resolved_method: OrderingMethod::Amd,
         resolved_amalgamation: effective_params.amalgamation_strategy,
