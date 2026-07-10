@@ -4,7 +4,25 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
-### Fixed — sparse LU update: exact-zero bump pivots on nonsingular bases (issue #112)
+### Performance — warm-path prologue and solve speedups (issues #124, #126, #128)
+
+- **#124** The default (parallel) numeric driver now reuses the persistent
+  permute cache on a warm re-factor of an unchanged pattern, scattering values
+  in `O(nnz)` instead of rebuilding triplets and re-sorting through
+  `CscMatrix::from_triplets` every factorization. Previously the cache was
+  live only on the sequential/schur drivers, so the IPM-host workload (one
+  pattern, thousands of factorizations) re-paid the sort each iteration.
+- **#126** The single-RHS sparse solve fuses the D-block solve into the
+  forward substitution pass, removing one full gather/scatter sweep per solve
+  (bit-identical results). Measured ~14–29% faster warm solves — this path is
+  hit up to ~11× per iterative-refinement call and ~6–11× per condition
+  estimate.
+- **#128** The packed dense Schur trailing-update kernel no longer allocates
+  or zero-fills its `bpack1` buffer on all-1×1 pivot panels (every panel on an
+  SPD front), where it is never read.
+
+Bit-for-bit factorization/inertia and solutions are unchanged; these are
+warm-path/allocation optimizations only.
 
 The Forrest–Tomlin column-replacement update could fail with
 `RefactorCause::TinyPivot` at magnitude exactly `0.0` on provably nonsingular

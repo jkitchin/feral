@@ -2902,7 +2902,9 @@ pub fn factorize_multifrontal_parallel_with_workspace(
     }
     let threshold = params.min_parallel_flops.unwrap_or(PAR_MIN_FLOPS);
     if should_parallelize_assembly_with_threshold(symbolic, threshold) {
-        return factorize_multifrontal_supernodal_parallel(matrix, symbolic, params);
+        return factorize_multifrontal_supernodal_parallel_with_workspace(
+            matrix, symbolic, params, ws,
+        );
     }
     factorize_multifrontal_supernodal_with_workspace(matrix, symbolic, params, ws)
 }
@@ -2946,6 +2948,29 @@ pub fn factorize_multifrontal_supernodal_parallel(
     matrix: &CscMatrix,
     symbolic: &SymbolicFactorization,
     params: &NumericParams,
+) -> Result<(SparseFactors, Inertia), FeralError> {
+    // Fresh-workspace convenience wrapper (one-shot callers, tests). The
+    // permute cache lives on the workspace, so a fresh workspace means the
+    // cold `from_triplets` path runs once with nothing to reuse — correct
+    // for a caller that does not amortise across factorizations.
+    let mut ws = FactorWorkspace::new();
+    factorize_multifrontal_supernodal_parallel_with_workspace(matrix, symbolic, params, &mut ws)
+}
+
+/// Workspace-carrying parallel driver (issue #124). Threads the caller's
+/// persistent [`FactorWorkspace::permute_cache`] into the value-permute
+/// step so a warm re-factor on an unchanged pattern (the IPM-host
+/// workload) scatters values in `O(nnz)` instead of rebuilding triplets
+/// and re-sorting through `CscMatrix::from_triplets` — which the prologue
+/// instrumentation attributed at up to 99.5% of factor wall on
+/// `rocket_12800`. Previously the parallel driver (the `Solver` default)
+/// always called the plain `permute_csc_values`, leaving the cache dead
+/// code on the default path.
+pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
+    matrix: &CscMatrix,
+    symbolic: &SymbolicFactorization,
+    params: &NumericParams,
+    ws: &mut FactorWorkspace,
 ) -> Result<(SparseFactors, Inertia), FeralError> {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -3001,7 +3026,19 @@ pub fn factorize_multifrontal_supernodal_parallel(
     }
 
     let t_phase = telemetry.map(|_| std::time::Instant::now());
-    let (permuted, _) = permute_csc_values(matrix, &symbolic.perm, &symbolic.perm_inv, false)?;
+    // Issue #124: reuse the persistent permute cache when the Solver signals
+    // an unchanged pattern (`pattern_reused_hint`), scattering values in
+    // O(nnz) rather than re-sorting via `from_triplets`. On a cache miss
+    // (cold call or pattern change) this rebuilds and repopulates the cache,
+    // exactly as the sequential driver does.
+    let (permuted, _) = permute_csc_values_with_cache(
+        matrix,
+        &symbolic.perm,
+        &symbolic.perm_inv,
+        false,
+        params.pattern_reused_hint,
+        &mut ws.permute_cache,
+    )?;
     if let (Some(t), Some(start)) = (telemetry, t_phase) {
         t.phase_permute_ns
             .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -5399,6 +5436,88 @@ mod tests {
             warm_cache.is_some(),
             "warm-reuse caller (hint=true) should build the value-map cache on its cold call"
         );
+    }
+
+    /// Issue #124: the parallel supernodal driver must thread the
+    /// caller's persistent `permute_cache` — previously it called the
+    /// plain `permute_csc_values` and left the cache dead code on the
+    /// `Solver` default (parallel) path, re-sorting through
+    /// `from_triplets` on every warm re-factor. This asserts the parallel
+    /// driver (1) builds the cache on a warm-reuse cold call and (2)
+    /// produces a factorization bit-identical to a fresh (cache-less)
+    /// parallel factor on the warm call that hits the cache.
+    #[test]
+    fn parallel_driver_uses_permute_cache_issue_124() {
+        // Tridiagonal-ish indefinite front, n large enough for several
+        // supernodes. Small negative diagonal on a couple of rows so the
+        // inertia is non-trivial (exercises the value path, not just SPD).
+        let n = 48usize;
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(if i % 7 == 3 { -3.0 } else { 4.0 });
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).unwrap();
+        let sym = symbolic_factorize(&m, &SupernodeParams::default()).unwrap();
+
+        // Reference: fresh parallel factor, fresh workspace (cache-less).
+        let (ref_f, ref_inertia) =
+            factorize_multifrontal_supernodal_parallel(&m, &sym, &make_params()).unwrap();
+
+        // Warm-reuse path on a shared workspace with the reuse hint set.
+        let mut params = make_params();
+        params.pattern_reused_hint = true;
+        let mut ws = FactorWorkspace::new();
+
+        // Cold call on the shared workspace: builds the cache.
+        let (_c_f, _c_i) =
+            factorize_multifrontal_supernodal_parallel_with_workspace(&m, &sym, &params, &mut ws)
+                .unwrap();
+        assert!(
+            ws.permute_cache.is_some(),
+            "issue #124: the parallel driver must build the permute cache on \
+             a warm-reuse call (was dead code, always re-sorted via from_triplets)"
+        );
+
+        // Warm call: hits the cache (O(nnz) scatter, no from_triplets sort).
+        let (warm_f, warm_inertia) =
+            factorize_multifrontal_supernodal_parallel_with_workspace(&m, &sym, &params, &mut ws)
+                .unwrap();
+
+        // Bit-identical to the fresh factor: the cached scatter reproduces
+        // the exact permuted matrix, so the factorization is unchanged.
+        assert_eq!(warm_inertia, ref_inertia, "issue #124: inertia drift");
+        assert_eq!(warm_f.n, ref_f.n);
+        assert_eq!(warm_f.perm, ref_f.perm, "issue #124: perm drift");
+        assert_eq!(warm_f.perm_inv, ref_f.perm_inv);
+        assert_eq!(
+            warm_f.node_factors.len(),
+            ref_f.node_factors.len(),
+            "issue #124: supernode count drift"
+        );
+        // Compare every node's D and L bytes — the value path must be exact.
+        for (k, (wn, rn)) in warm_f
+            .node_factors
+            .iter()
+            .zip(ref_f.node_factors.iter())
+            .enumerate()
+        {
+            let (wf, rf) = (&wn.frontal_factors, &rn.frontal_factors);
+            assert_eq!(wf.d_diag, rf.d_diag, "issue #124: node {k} d_diag drift");
+            assert_eq!(wf.l, rf.l, "issue #124: node {k} l drift");
+            assert_eq!(
+                wf.d_subdiag, rf.d_subdiag,
+                "issue #124: node {k} d_subdiag drift"
+            );
+        }
     }
 
     /// REG-1 (repo-review-2026-06-09-verification.md): a stale

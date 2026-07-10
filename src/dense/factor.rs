@@ -3671,8 +3671,21 @@ fn apply_schur_panel_range_packed(
     // `B1 = dl1` (the block-scaled coefficients above). 2×2-second and
     // zero-d-1×1 positions carry a value that the accumulation walk
     // never reads.
+    // Issue #128A: `bpack1` carries the second column of each 2×2 block's
+    // D-scaled coefficients; it is written (below) and read (in the
+    // accumulation walk) ONLY under `is_2x2_start`. An all-1×1 panel — every
+    // panel on an SPD front, most on a well-conditioned indefinite one — never
+    // touches it, so allocating and zero-filling `npanels_j·n_elim·NR` f64 was
+    // pure waste on the common path. Allocate it lazily: empty when the panel
+    // has no 2×2 pivot start (the `is_2x2_start`-gated indexing is then never
+    // reached), full-sized otherwise.
+    let has_2x2 = (0..n_elim).any(is_2x2_start);
     let mut bpack0 = vec![0.0f64; npanels_j * n_elim * NR];
-    let mut bpack1 = vec![0.0f64; npanels_j * n_elim * NR];
+    let mut bpack1 = if has_2x2 {
+        vec![0.0f64; npanels_j * n_elim * NR]
+    } else {
+        Vec::new()
+    };
     for pj in 0..npanels_j {
         let j0 = col_start + pj * NR;
         for q in 0..n_elim {
