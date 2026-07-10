@@ -503,7 +503,11 @@ impl SparseLu {
         saved: &mut Vec<(usize, Vec<(usize, f64)>)>,
         presaved: &[usize],
     ) -> Result<(Vec<FtOp>, Vec<usize>), FeralError> {
-        let ztol = self.params.zero_pivot_tol * self.u_max0;
+        // Anchor the bump-pivot floor to the matrix magnitude `a_max` (as the
+        // factor does), not `u_max0`: on high-growth bases `u_max0 ≫ a_max`
+        // would reject healthy `O(a_max)` pivots and livelock the caller's
+        // update→refactor→retry loop (issue #118).
+        let ztol = self.params.zero_pivot_tol * self.a_max;
         let mut ops: Vec<FtOp> = Vec::new();
         let mut swapped: Vec<usize> = Vec::new();
 

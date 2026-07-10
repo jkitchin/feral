@@ -258,7 +258,6 @@ fn wilkinson_replacement_basis_is_nonsingular() {
 /// reproduces the identical high-growth factor, so update→refactor→retry
 /// **livelocks**. Correct behavior: the update commits and solves.
 #[test]
-#[ignore = "issue #118 — update ztol anchored to u_max0; fix pending"]
 fn sparse_update_commits_on_high_growth_basis() {
     let m = 50;
     let cols = wilkinson(m);
@@ -308,7 +307,6 @@ fn dense_update_commits_on_high_growth_basis() {
 /// reproduces the identical high-growth factor. Correct behavior: the first
 /// update commits (loop exits at attempt 0).
 #[test]
-#[ignore = "issue #118 — update/refactor livelock; fix pending"]
 fn high_growth_update_does_not_livelock() {
     let m = 50;
     let cols = wilkinson(m);

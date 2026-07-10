@@ -44,6 +44,11 @@ pub struct DenseLu {
     /// `max|U|` immediately after the last factor/refactor — the denominator of
     /// the element-growth monitor. Floored away from zero.
     pub(super) u_max0: f64,
+    /// `max|A|` of the (scaled) factored matrix — the singularity-tolerance
+    /// reference the factor uses. The update anchors its bump-pivot ztol here,
+    /// not to `u_max0`, so healthy `O(a_max)` pivots on high-growth bases are
+    /// not spuriously rejected (issue #118).
+    pub(super) a_max: f64,
     /// Cause + magnitude of the most recent [`Self::update`] that returned
     /// [`FeralError::NeedsRefactor`]. `None` after a fresh factor/refactor;
     /// untouched by a successful update (read only after an `Err`). See issue #95.
@@ -73,6 +78,8 @@ impl DenseLu {
         let factor_cols: &[Vec<f64>] = scaled.as_deref().unwrap_or(cols);
         let mut packed = vec![0.0; m * m];
         copy_columns_into(&mut packed, factor_cols, m)?;
+        // `max|A|` before `factorize_packed` overwrites `packed` in place.
+        let a_max = packed.iter().fold(0.0_f64, |a, &x| a.max(x.abs()));
         let mut perm: Vec<usize> = (0..m).collect();
         factorize_packed(&mut packed, &mut perm, m, &params)?;
         let (l, u) = split_packed(&packed, m);
@@ -92,6 +99,7 @@ impl DenseLu {
             updates_since_refactor: 0,
             growth: 1.0,
             u_max0,
+            a_max,
             last_refactor: None,
             params,
             scale,
@@ -111,6 +119,7 @@ impl DenseLu {
         let factor_cols: &[Vec<f64>] = scaled.as_deref().unwrap_or(cols);
         let mut packed = vec![0.0; m * m];
         copy_columns_into(&mut packed, factor_cols, m)?;
+        self.a_max = packed.iter().fold(0.0_f64, |a, &x| a.max(x.abs()));
         for (k, p) in self.perm.iter_mut().enumerate() {
             *p = k;
         }

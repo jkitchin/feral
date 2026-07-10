@@ -77,10 +77,11 @@ impl DenseLu {
         let q = self.qcol_inv[leaving_slot];
         // L6 (dev/research/repo-review-2026-06-09.md): the bump-pivot and
         // final-pivot zero tests must be relative to the basis magnitude, not an
-        // absolute 1e-13. `u_max0` (max|U| at the last factor, already floored
-        // away from zero for L5) is the natural scale reference, consistent with
-        // the factor path's `zero_pivot_tol · max|A|`.
-        let ztol = self.params.zero_pivot_tol * self.u_max0;
+        // absolute 1e-13. The reference is `max|A|` — matching the factor path's
+        // `zero_pivot_tol · max|A|`. Anchoring to `u_max0` instead (as before)
+        // rejected healthy `O(a_max)` pivots on high-growth bases where
+        // `u_max0 ≫ a_max`, livelocking update→refactor→retry (issue #118).
+        let ztol = self.params.zero_pivot_tol * self.a_max;
         let max_growth = self.params.max_growth;
 
         // Work on clones; commit only on success.
