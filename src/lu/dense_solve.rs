@@ -110,6 +110,11 @@ impl DenseLu {
             *sk = rhs[self.perm[k]];
         }
         lsolve(&self.l, m, &mut s);
+        // Replay the update etas forward (G⁻¹) between the L-solve and the
+        // U-solve; identity when no update has run (`etas` empty).
+        for op in self.etas.iter() {
+            op.apply_forward(&mut s);
+        }
         // Restore the scratch buffer on every path (it was `mem::take`n, so an
         // early `?` would otherwise leave `self.scratch_a` empty and panic the
         // next call). Only write `rhs` on success.
@@ -134,6 +139,11 @@ impl DenseLu {
         // Restore scratch on every path; only finish + write `rhs` on success.
         let res = ut_solve(&self.u, m, &mut s); // Uᵀ z = g
         if res.is_ok() {
+            // Replay the etas transposed, in reverse — `Gᵀ⁻¹` between the
+            // Uᵀ-solve and the Lᵀ-solve (the transpose of `ftran_core`).
+            for op in self.etas.iter().rev() {
+                op.apply_transpose(&mut s);
+            }
             lt_solve(&self.l, m, &mut s); // Lᵀ v = z
             for (k, &vk) in s.iter().enumerate() {
                 rhs[self.perm[k]] = vk;
@@ -143,9 +153,12 @@ impl DenseLu {
         res
     }
 
-    /// Compute the spike `L⁻¹ P a`, overwriting `rhs` (= `a`). This is `ftran`
-    /// stopped before the `U`-solve and column permutation; it is the input to
-    /// [`DenseLu::update`](crate::lu::DenseLu::update).
+    /// Compute the spike `G⁻¹ L⁻¹ P a`, overwriting `rhs` (= `a`). This is
+    /// `ftran` stopped before the `U`-solve and column permutation; it is the
+    /// input to [`DenseLu::update`](crate::lu::DenseLu::update). The eta replay
+    /// is essential: the spike is inserted into the *current* `U`'s column
+    /// space, which is `G⁻¹ L⁻¹ P a`, not merely `L⁻¹ P a` (they coincide only
+    /// before the first update, when `etas` is empty).
     pub fn ftran_partial(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
         let m = self.m;
         check_len(rhs.len(), m)?;
@@ -154,6 +167,9 @@ impl DenseLu {
             *sk = rhs[self.perm[k]];
         }
         lsolve(&self.l, m, &mut s);
+        for op in self.etas.iter() {
+            op.apply_forward(&mut s);
+        }
         rhs.copy_from_slice(&s);
         self.scratch_a = s;
         Ok(())

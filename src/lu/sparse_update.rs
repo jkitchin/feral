@@ -100,12 +100,22 @@ impl SparseLu {
                 leaving_slot, m
             )));
         }
-        for &(row, _) in entering.iter() {
+        for &(row, val) in entering.iter() {
             if row >= m {
                 return Err(FeralError::InvalidInput(format!(
                     "entering-column row {} out of range for dimension {}",
                     row, m
                 )));
+            }
+            // Reject non-finite entries up front, matching the factor path
+            // (`sparse_matrix.rs`): a NaN passes the `v != 0.0` scan in
+            // `update` and would otherwise be committed into `U` — where the
+            // growth scan's `f64::max` ignores it and the solves guard only
+            // the diagonal — yielding a silent NaN solution (issue #114).
+            if !val.is_finite() {
+                return Err(FeralError::InvalidInput(
+                    "LU entering column contains non-finite entries".to_string(),
+                ));
             }
         }
         if self.updates_since_refactor() + 1 > self.params.max_updates {
@@ -493,7 +503,11 @@ impl SparseLu {
         saved: &mut Vec<(usize, Vec<(usize, f64)>)>,
         presaved: &[usize],
     ) -> Result<(Vec<FtOp>, Vec<usize>), FeralError> {
-        let ztol = self.params.zero_pivot_tol * self.u_max0;
+        // Anchor the bump-pivot floor to the matrix magnitude `a_max` (as the
+        // factor does), not `u_max0`: on high-growth bases `u_max0 ≫ a_max`
+        // would reject healthy `O(a_max)` pivots and livelock the caller's
+        // update→refactor→retry loop (issue #118).
+        let ztol = self.params.zero_pivot_tol * self.a_max;
         let mut ops: Vec<FtOp> = Vec::new();
         let mut swapped: Vec<usize> = Vec::new();
 

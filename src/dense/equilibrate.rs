@@ -27,7 +27,7 @@ pub fn equilibrate_scaling(matrix: &SymmetricMatrix) -> Vec<f64> {
             }
 
             if max_entry > 0.0 {
-                d[i] /= max_entry.sqrt();
+                d[i] = crate::scaling::kr_guarded_update(d[i], max_entry);
                 let deviation = (1.0 - max_entry).abs();
                 if deviation > max_deviation {
                     max_deviation = deviation;

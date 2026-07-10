@@ -1,0 +1,88 @@
+* 09:20 :audit:lu:tests:issue-114:issue-115:issue-118:
+Built the shared adversarial-input test file (tests/lu_adversarial_inputs.rs)
+requested after the 2026-07-10 six-agent audit, covering the class "inputs the
+factor path validates/handles but the update()/solve paths do not guard."
+
+Verified each reproduction empirically before encoding (issue-112 discipline:
+plausible != confirmed). Scratch-probe findings:
+- #114 sparse: update(1,[NaN,1]) -> Ok, ftran -> Ok with x=[NaN,1.0].
+  SILENT wrong answer confirmed. Factor path rejects the same NaN column
+  (InvalidInput). Note: +Inf currently returns NeedsRefactor (not silent),
+  but wrong error type -> still needs the fix (correct = InvalidInput).
+- #114 dense: update(1,[NaN,1]) on 2x2 identity -> Ok (commits NaN input).
+  Confirmed. (3x3 variants: some positions error, some commit clean-looking;
+  the 2x2 slot-1 case is the clean silent-commit repro.)
+- #115 dense: identity self-replace col0 -> Err(TinyPivot,0.0). Confirmed;
+  sparse commits the same update fine.
+- #118: CONFIRMED genuine livelock. m=60 update(e0+e1) -> Err(TinyPivot,0.25)
+  three times with constant u_max0=5.765e17; fresh factor of B' succeeds.
+  ztol = 1e-13*u_max0 dwarfs the healthy 0.25 pivot.
+
+Test-vehicle sizing (measured residual of fresh factor of B' vs m):
+  m=24..50 residual EXACTLY 0.0 (growth < 2^53, +-1/integer arithmetic exact);
+  m=60 residual 59.0 (growth 1.44e17 > 2^53, genuine backward error).
+  Chose m=50: u_max0=1.4e14 -> ztol~14 (dwarfs 0.25 pivot, triggers bug) AND
+  residual 0 (tight accuracy oracle stays valid). Verified m=50 triggers the
+  spurious rejection on both paths (sparse TinyPivot 0.25, dense TinyPivot 0.0).
+
+File design: 6 desired-behavior tests #[ignore]'d with issue refs (executable
+acceptance criteria; delete #[ignore] when the fix lands) + 4 non-ignored
+tests that pass today and establish the setup is sound (factor rejects
+non-finite; B' nonsingular via independent fresh factor; sparse already
+handles the slack self-replace dense cannot; genuinely singular replacement
+stays rejected -- the over-correction guard). Confirmed all 6 ignored tests
+fail on their INTENDED assertion (checked panic messages), not setup errors.
+Full suite 0 failures; clippy --test -D warnings clean; fmt clean.
+
+#116/#117 (rook factor/solve contract, blocked/scalar inertia divergence)
+deliberately NOT in this file: they are frontal-kernel-internal, not black-box
+update/solve inputs; noted in the module header and their own issues.
+
+* 10:31 :lu:ldlt:scaling:issue-114:issue-115:issue-116:issue-117:issue-118:issue-119:fixes:
+Fixed all six audit-confirmed correctness bugs #114-#119, one commit each,
+each with tests + full-suite + clippy gate. Empirical-before-encoding
+discipline throughout (issue-112 lesson).
+
+#114 (90cb4fe): validate entering-column finiteness in update_sparse +
+  DenseLu::update. NaN was committed silently -> Ok(NaN) solve.
+#118 (373264f): store factor a_max on SparseLu/DenseLu; anchor update ztol
+  to zero_pivot_tol*a_max not u_max0. u_max0 >> a_max on growth bases caused
+  spurious TinyPivot + update->refactor livelock. Corpus 760 green.
+#115 (ae13f27): BIG. Reworked DenseLu::update to eta-based Bartels-Golub.
+  KEY FINDING: the issue's suggested "swap rows in U + fix L" does NOT work
+  - a row swap of U forces a column swap of L that breaks unit-lower-tri
+  (worked the algebra: L[k,k] becomes old L[k,k+1]=0). Correct fix mirrors
+  sparse: keep base L fixed, record eliminations+swaps as DenseFtOp etas,
+  replay between L-solve and U-solve (added etas to solves incl.
+  ftran_partial -> spike is G^-1 L^-1 P a). Partial pivoting bounds
+  multipliers by 1 (growth O(m) on Hessenberg) -> supersedes Neumaier need.
+  New tests/lu_dense_update_bg.rs: bump chains, slack bases, ftran+btran
+  parity vs fresh factor. All 10 adversarial tests now pass (0 ignored).
+#119 (d7aafea): scaling::kr_guarded_update applied to all 7 KR update sites
+  (infnorm sparse+dense, lu/scaling x4, dense/equilibrate). d/=sqrt(m) could
+  go Inf->NaN->0 on subnormal coupling. Guard is bit-identical on healthy
+  matrices (dense/sparse KR parity preserved). Confirmed unguarded produces
+  [nan,0.0] via Python replay.
+
+#116 (e5b6d4b): rook factor/solve contract. Chose the SOLVE-side fix (skip
+  iff d_diag==0.0 exactly) over the audit's separate mask - SAFER for the
+  inertia rule because it changes NO factorization (the force-accept-zero
+  path already sets d=0.0 exactly, line 4453, and it's the only skip
+  outcome). Verified the skip-iff-exactly-0.0 invariant EMPIRICALLY: full
+  corpus (768 incl. all inertia oracles + threshold suites) green with the
+  gate change. + needs_refinement/n_tiny on rook sub-floor accepts. Updated
+  now-vestigial zero_tol field doc.
+#117 (4a1d163): blocked/scalar rook parity. Panel's 1x1 no-swap path bails
+  ScalarFallback when pivot_threshold>0 && |d|<=threshold, so scalar
+  re-decides with rook (panel can't rook itself - trailing submatrix not yet
+  Schur-updated). KEY math: 1x1-no-swap requires akk>=alpha*gamma0, so the
+  bail only fires when gamma0 tiny (threshold floored by null_pivot_tol=EPS)
+  - i.e. near-zero columns, the audit's exact case. Also routed remaining==1
+  scalar site through the rook wrapper (its "rook can't fire" comment was
+  wrong). Test builds an EPS-scale near-zero panel column: scalar==blocked
+  byte-identical with n_rook_rescues>0 (a rescue the pre-fix blocked panel
+  literally could not produce). Rook-disabled default path byte-unchanged.
+
+End-of-session bench: inertia 100% (1/1 dense, 2/2 sparse vs MUMPS), worst
+residual 1.14e-15/1.26e-16 - no regression. Full suite 769 passed / 0 failed,
+clippy --all-targets -D warnings clean, fmt clean.

@@ -1,12 +1,21 @@
 //! Dense unsymmetric LU factorization with threshold partial pivoting.
 //!
-//! Maintains the invariant `P B Q = L U`, where `P` is the row permutation
+//! Maintains the invariant `P B Q = L G U`, where `P` is the row permutation
 //! from partial pivoting, `Q` is a column permutation (identity after a fresh
-//! factorization; a rank-1 update may permute columns), `L` is unit lower
-//! triangular, and `U` is upper triangular. `L` and `U` are stored as separate
-//! dense `m`×`m` column-major buffers so that the rank-1
-//! column-replacement update ([`super::dense_update`]) has a clean home for the
-//! spike column and the Hessenberg bump it eliminates.
+//! factorization; a rank-1 update permutes columns), `L` is unit lower
+//! triangular, `U` is upper triangular, and `G = E₁⁻¹…Eₜ⁻¹` is the product of
+//! the rank-1 updates' Hessenberg-reduction eliminations. `G` is identity after
+//! a fresh factorization (`etas` empty), so all one-shot factor/solve behavior
+//! is unchanged. `L` and `U` are stored as separate dense `m`×`m` column-major
+//! buffers.
+//!
+//! The update ([`super::dense_update`]) records its eliminations as `etas`
+//! rather than folding them into `L`: a Bartels–Golub row interchange (needed
+//! to dodge the zero-superdiagonal landmine and bound element growth) is an
+//! *unsymmetric* row permutation of `U` that cannot be absorbed into an
+//! explicit unit-lower-triangular `L`, so — exactly as on the sparse path
+//! ([`super::sparse_update`]) — the base `L` stays fixed and the solves replay
+//! the etas between the `L`-solve and the `U`-solve.
 //!
 //! The factorization kernel itself works in a packed buffer (the classic
 //! right-looking LAPACK layout) and is split into `L`/`U` at the end.
@@ -15,6 +24,44 @@ use super::scaling::{compute_lu_scale, LuScale};
 use super::sparse_matrix::SparseColMatrix;
 use super::{LuParams, LuScaling, LuSingularAction, RefactorCause};
 use crate::error::FeralError;
+
+/// One elementary operation of a dense rank-1 update's Hessenberg reduction,
+/// recorded so it can be replayed on a solve vector (and transposed for btran).
+/// Mirrors the sparse [`super::sparse_factor::FtOp`]; the base `L`, `P`, and the
+/// prior etas are never relabeled.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum DenseFtOp {
+    /// `s[target] -= mult · s[src]` (elimination of one Hessenberg subdiagonal).
+    Axpy {
+        target: usize,
+        src: usize,
+        mult: f64,
+    },
+    /// Rows `a` and `b` exchanged (a Bartels–Golub interchange); the matching
+    /// solve-vector entries swap with them. A transposition is its own
+    /// transpose, so btran replays the same swap in the reversed op walk.
+    Swap { a: usize, b: usize },
+}
+
+impl DenseFtOp {
+    /// Apply forward (`s ← Eᵢ s`): the row op exactly as performed on `U`.
+    #[inline]
+    pub(super) fn apply_forward(&self, s: &mut [f64]) {
+        match *self {
+            DenseFtOp::Axpy { target, src, mult } => s[target] -= mult * s[src],
+            DenseFtOp::Swap { a, b } => s.swap(a, b),
+        }
+    }
+
+    /// Apply transpose (`s ← Eᵢᵀ s`): axpy flips target/src; swap is unchanged.
+    #[inline]
+    pub(super) fn apply_transpose(&self, s: &mut [f64]) {
+        match *self {
+            DenseFtOp::Axpy { target, src, mult } => s[src] -= mult * s[target],
+            DenseFtOp::Swap { a, b } => s.swap(a, b),
+        }
+    }
+}
 
 /// Dense LU factorization of a square basis, with rank-1 update support.
 #[derive(Debug, Clone)]
@@ -34,6 +81,11 @@ pub struct DenseLu {
     pub(super) qcol: Vec<usize>,
     /// Inverse of `qcol`: `qcol_inv[slot] = column_position`.
     pub(super) qcol_inv: Vec<usize>,
+    /// Rank-1 update eliminations since the last factor/refactor (the `G`
+    /// factor of `P B Q = L G U`). Empty after a fresh factor; the solves
+    /// replay them between the `L`-solve and the `U`-solve so the base `L`
+    /// never needs the unsymmetric relabeling a row interchange would force.
+    pub(super) etas: Vec<DenseFtOp>,
     /// Updates applied since the last `factor`/`refactor`.
     pub(super) updates_since_refactor: usize,
     /// Running growth monitor; tripping `params.max_growth` forces a refactor.
@@ -44,6 +96,11 @@ pub struct DenseLu {
     /// `max|U|` immediately after the last factor/refactor — the denominator of
     /// the element-growth monitor. Floored away from zero.
     pub(super) u_max0: f64,
+    /// `max|A|` of the (scaled) factored matrix — the singularity-tolerance
+    /// reference the factor uses. The update anchors its bump-pivot ztol here,
+    /// not to `u_max0`, so healthy `O(a_max)` pivots on high-growth bases are
+    /// not spuriously rejected (issue #118).
+    pub(super) a_max: f64,
     /// Cause + magnitude of the most recent [`Self::update`] that returned
     /// [`FeralError::NeedsRefactor`]. `None` after a fresh factor/refactor;
     /// untouched by a successful update (read only after an `Err`). See issue #95.
@@ -73,6 +130,8 @@ impl DenseLu {
         let factor_cols: &[Vec<f64>] = scaled.as_deref().unwrap_or(cols);
         let mut packed = vec![0.0; m * m];
         copy_columns_into(&mut packed, factor_cols, m)?;
+        // `max|A|` before `factorize_packed` overwrites `packed` in place.
+        let a_max = packed.iter().fold(0.0_f64, |a, &x| a.max(x.abs()));
         let mut perm: Vec<usize> = (0..m).collect();
         factorize_packed(&mut packed, &mut perm, m, &params)?;
         let (l, u) = split_packed(&packed, m);
@@ -89,9 +148,11 @@ impl DenseLu {
             perm_inv,
             qcol: (0..m).collect(),
             qcol_inv: (0..m).collect(),
+            etas: Vec::new(),
             updates_since_refactor: 0,
             growth: 1.0,
             u_max0,
+            a_max,
             last_refactor: None,
             params,
             scale,
@@ -111,6 +172,7 @@ impl DenseLu {
         let factor_cols: &[Vec<f64>] = scaled.as_deref().unwrap_or(cols);
         let mut packed = vec![0.0; m * m];
         copy_columns_into(&mut packed, factor_cols, m)?;
+        self.a_max = packed.iter().fold(0.0_f64, |a, &x| a.max(x.abs()));
         for (k, p) in self.perm.iter_mut().enumerate() {
             *p = k;
         }
@@ -131,6 +193,7 @@ impl DenseLu {
             *q = k;
             *qi = k;
         }
+        self.etas.clear();
         self.updates_since_refactor = 0;
         self.growth = 1.0;
         self.last_refactor = None;

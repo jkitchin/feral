@@ -905,12 +905,16 @@ pub struct Factors {
     /// growth flagging (`|L_ij| > L_GROWTH_THRESHOLD`). (D9,
     /// repo-review-2026-06-09.md: previously documented as ForceAccept-only.)
     pub needs_refinement: bool,
-    /// 1×1 pivot threshold copied from BunchKaufmanParams at factor time.
-    /// `solve` consults this to decide whether to divide by `d_diag[k]`:
-    /// pivots `|d| <= zero_tol` were force-accepted as numerically zero
-    /// during factorization and must be skipped (left as-is) by the
-    /// D-block solve. Otherwise dividing by a tiny pivot produces
-    /// catastrophic error. See dev/plans/threshold-mismatch-fix.md.
+    /// 1×1 pivot floor copied from BunchKaufmanParams at factor time.
+    ///
+    /// No longer gates the D-block solve (issue #116): the solve divides by
+    /// any nonzero `d_diag[k]` and skips only force-zeroed pivots, which the
+    /// factor marks by setting `d_diag[k]` to exactly `0.0` (and clearing the
+    /// L column). The old `|d| <= zero_tol` skip wrongly dropped *live*
+    /// small-but-nonzero pivots (rook rescue, static/PerturbToEps floor, F-01
+    /// band) whose L column is intact and which must be divided by. Retained
+    /// as an informational field for callers. See
+    /// dev/plans/threshold-mismatch-fix.md for the original (superseded) gate.
     pub zero_tol: f64,
     /// 2×2 pivot block threshold (matches BunchKaufmanParams::zero_tol_2x2).
     pub zero_tol_2x2: f64,
@@ -2975,7 +2979,28 @@ fn lblt_panel_frontal(
             continue;
         }
 
-        // 1×1 pivot at col, no swap. Try the column-relative threshold.
+        // 1×1 pivot at col, no swap.
+        //
+        // Issue #117: when rook rescue is enabled (`pivot_threshold > 0`, e.g.
+        // the multifrontal default `1e-8`), a below-threshold pivot is exactly
+        // where `scalar_pivot_step` would attempt a rook rescue and sign-count
+        // the pivot *live*, whereas the panel's non-rook `try_reject_1x1_frontal`
+        // would zero-count or delay it — so the blocked and scalar kernels can
+        // certify different inertia on the same front. The panel cannot run
+        // `rook_rescue` itself (its trailing submatrix is not yet Schur-updated,
+        // so the search would read stale entries), so it bails to the scalar
+        // path, which re-decides the pivot from up-to-date state. Column `col`
+        // is only read here (it is peek-ahead'd — pivots `0..c` applied — and
+        // unmutated), so bailing before `try_reject_1x1_frontal` mutates it
+        // preserves the `ScalarFallback` contract (`j_start = k+n_elim+1`, same
+        // as the `Delayed` return below). When rook is disabled the panel keeps
+        // its inline handling, so the default dense path is byte-unchanged.
+        let threshold = (params.pivot_threshold * gamma0).max(params.null_pivot_tol);
+        if params.pivot_threshold > 0.0 && a[col * nrow + col].abs() <= threshold {
+            return Ok((c, PanelStatus::ScalarFallback));
+        }
+
+        // Try the column-relative threshold.
         let outcome = try_reject_1x1_frontal(
             a,
             nrow,
@@ -3899,8 +3924,12 @@ fn scalar_pivot_step(
     if remaining == 1 {
         // Last eliminated pivot: always 1×1. Compute the column max
         // over rows (k+1..nrow) for the column-relative threshold.
-        // Rook rescue cannot fire here (needs ncol-k >= 2), so call
-        // the rejection routine directly.
+        // Issue #117: rook rescue CAN fire here — `rook_rescue` only requires
+        // `k < ncol` and can accept the 1×1 at `k` itself (`arr >= u*gamma_r`,
+        // no swap). Routing through the rook wrapper (like every other scalar
+        // 1×1 site) keeps the last pivot's accept/sign-count consistent with
+        // the rest of the front; the old direct `try_reject_1x1_frontal` call
+        // could zero-count or delay a pivot the wrapper would rook-accept.
         let col_max = if let Some(mf) = cached {
             mf
         } else {
@@ -3913,28 +3942,25 @@ fn scalar_pivot_step(
             }
             m
         };
-        let outcome = try_reject_1x1_frontal(
+        let outcome = try_reject_1x1_with_rook_rescue(
             a,
             nrow,
+            ncol,
             k,
             col_max,
             may_delay,
             params,
+            perm,
             pos,
             neg,
             zero,
             needs_refinement,
+            n_rook_rescues,
             n_tiny,
         )?;
-        match outcome {
-            PivotOutcome::Accepted => do_1x1_update(a, nrow, k, params.fma),
-            PivotOutcome::Rejected => {}
-            PivotOutcome::Delayed => return Ok(PivotStepResult::Delayed),
-            PivotOutcome::AcceptedRook2x2 { .. } => {
-                unreachable!("remaining==1 never triggers rook rescue")
-            }
-        }
-        return Ok(PivotStepResult::Advanced(1));
+        return Ok(finish_1x1_outcome(
+            outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma, None,
+        ));
     }
 
     // MAXFROMM short-circuit: if the previous 1×1 stash gives a
@@ -4579,6 +4605,16 @@ fn try_reject_1x1_with_rook_rescue(
         match pivot.kind {
             RookKind::Pivot1x1 => {
                 let d_new = a[k * nrow + k];
+                // A rook-accepted pivot below the rank-deficiency floor is
+                // *live* (its L column is kept and the solve now divides by it,
+                // issue #116) but ill-conditioned: flag iterative refinement
+                // and count it as a tiny pivot, matching the static-floor and
+                // F-01 accept paths (the rook path previously set neither).
+                // Inertia is unchanged — still counted by sign.
+                if d_new.abs() <= params.null_pivot_tol {
+                    *needs_refinement = true;
+                    *n_tiny += 1;
+                }
                 if d_new > 0.0 {
                     *pos += 1;
                 } else {

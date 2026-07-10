@@ -255,6 +255,46 @@ fn test_rejection_fallback() {
     assert_frontals_byte_identical(&scalar, &blocked, "rejection_fallback");
 }
 
+/// Issue #117 — blocked/scalar rook parity. A near-zero column in the panel
+/// region (`gamma0` tiny, so `threshold` floored by `null_pivot_tol`) reaches
+/// the 1×1 no-swap path below threshold, where `scalar_pivot_step` rook-rescues
+/// and sign-counts the pivot *live*. Pre-fix the blocked panel's non-rook
+/// `try_reject_1x1_frontal` zero-counted or delayed it instead, so the two
+/// kernels certified different inertia. The panel now bails to the scalar path
+/// for such pivots, so both must be byte-identical — and the rook rescue must
+/// actually fire (`n_rook_rescues > 0`), which the pre-fix blocked panel could
+/// never do.
+#[test]
+fn test_issue117_blocked_scalar_rook_parity() {
+    let params = default_params(); // pivot_threshold = 0.01 → rook enabled
+    let n = 40;
+    let mut data = vec![0.0f64; n * n];
+    // Well-conditioned diagonal front, so max|A| ≈ 1 and null_pivot_tol ≈ 1e-13.
+    for j in 0..n {
+        data[j * n + j] = 1.0 + j as f64 * 0.01;
+    }
+    // Column 6 (inside the panel) is near-zero at the EPS scale: the diagonal
+    // dominates its (tinier) off-diagonals so it reaches the 1×1 no-swap path
+    // (akk ≥ α·gamma0), yet sits below `threshold = null_pivot_tol = EPS ≈
+    // 2.22e-16` — the rook-rescue zone. `factor_frontal` does not couple this
+    // column to earlier pivots, so the Schur updates leave it untouched.
+    let c0 = 6usize;
+    data[c0 * n + c0] = 1e-16; // α·gamma0 = 0.64·5e-17 ≈ 3.2e-17 ≤ 1e-16 ≤ EPS
+    for i in (c0 + 1)..n {
+        data[c0 * n + i] = 5e-17; // gamma0 = 5e-17 (symmetric column-c0 entries)
+    }
+    let mat = SymmetricMatrix { n, data };
+
+    let scalar = factor_frontal(&mat, n, false, &params).unwrap();
+    let blocked = factor_frontal_blocked(&mat, n, false, &params).unwrap();
+    assert_frontals_byte_identical(&scalar, &blocked, "issue117_rook_parity");
+    assert!(
+        scalar.n_rook_rescues > 0,
+        "test must exercise a rook rescue (got {})",
+        scalar.n_rook_rescues
+    );
+}
+
 /// Plan §6 — KKT regression spot-checks. We synthesize two tiny KKT
 /// blocks styled after the triage canaries (`ERRINBAR`, `ACOPP30`)
 /// and verify scalar/blocked byte-parity. These are not the literal

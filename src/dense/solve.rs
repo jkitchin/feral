@@ -175,22 +175,26 @@ fn backward_substitute(factors: &Factors, v: &mut [f64]) {
 /// D-block solve: solve D_bk · w = z.
 /// Handles both 1×1 and 2×2 blocks using the normalized formulation.
 ///
-/// Pivots that were force-accepted as numerically zero during factorization
-/// are skipped — `w[k]` is left untouched, producing a least-squares-like
-/// solution where the corresponding row was rank-deficient. Dividing by such
-/// pivots produces catastrophic error; see dev/plans/threshold-mismatch-fix.md.
+/// The skip decision must match the factor side exactly, otherwise a pivot the
+/// factorization validly accepted and stored is silently skipped at solve time
+/// (wrong solution, no error, no flag).
 ///
-/// **Finding D4:** the skip decision must match the factor side exactly,
-/// otherwise a 2×2 block the factorization validly accepted and stored can be
-/// silently skipped at solve time (wrong solution, no error, no flag). For
-/// 1×1 pivots the `|d| <= zero_tol` floor matches the scalar acceptance gate.
-/// For 2×2 pivots the gate previously used the *naive* `a*c - b*b` against the
-/// *absolute* `zero_tol_2x2 ≈ EPS²`, while the factor side accepts via the
-/// *scale-invariant* SSIDS floor (`ssids_det_floor_fail`) — so a
-/// well-conditioned block at small absolute scale (true `|det|` below `EPS²`)
-/// was accepted by the factor but skipped by the solve. Both sides now call
-/// the shared `ssids_det_floor_fail`, so a block the factor inverts the solve
-/// inverts. (`zero_tol_2x2` is retained on `Factors` for the legacy
+/// **1×1 pivots (issue #116):** skip iff the pivot was *force-zeroed* — the
+/// factor sets `d_diag[k]` to exactly `0.0` and clears the L column, the only
+/// path that produces a pivot the solve must leave untouched. Every other
+/// accepted pivot is *live* (its L column participates in the elimination) and
+/// must be divided by, including small-but-nonzero ones from rook rescue, the
+/// static/PerturbToEps floor, or the F-01 rank-deficiency band. The previous
+/// `|d| > zero_tol` gate skipped those live tiny pivots too, silently dropping
+/// an O(1/d) term (`needs_refinement` is set so refinement can recover it).
+///
+/// **Finding D4 (2×2 pivots):** the gate previously used the *naive*
+/// `a*c - b*b` against the *absolute* `zero_tol_2x2 ≈ EPS²`, while the factor
+/// side accepts via the *scale-invariant* SSIDS floor (`ssids_det_floor_fail`)
+/// — so a well-conditioned block at small absolute scale (true `|det|` below
+/// `EPS²`) was accepted by the factor but skipped by the solve. Both sides now
+/// call the shared `ssids_det_floor_fail`, so a block the factor inverts the
+/// solve inverts. (`zero_tol_2x2` is retained on `Factors` for the legacy
 /// `count_2x2_inertia` accounting but no longer gates the solve.)
 fn d_block_solve(factors: &Factors, w: &mut [f64]) {
     let n = factors.n;
@@ -218,12 +222,17 @@ fn d_block_solve(factors: &Factors, w: &mut [f64]) {
             // w[k], w[k+1] untouched.
             k += 2;
         } else {
-            // 1×1 block
+            // 1×1 block. Skip iff the pivot was force-zeroed (its L column
+            // cleared and `d_diag` set to exactly 0.0 — the only skip outcome
+            // the factor produces). A small-but-nonzero *live* pivot (rook
+            // rescue, static/PerturbToEps floor, F-01 band) keeps its L column
+            // and MUST be divided by — the old `|d| > zero_tol` gate wrongly
+            // skipped rook-accepted pivots with `|d| ≤ zero_tol`, silently
+            // dropping an O(1/d) term from the solution (issue #116).
             let d = factors.d_diag[k];
-            if d.abs() > factors.zero_tol {
+            if d != 0.0 {
                 w[k] /= d;
             }
-            // else: pivot was force-accepted as zero; leave w[k] alone
             k += 1;
         }
     }
@@ -232,4 +241,41 @@ fn d_block_solve(factors: &Factors, w: &mut [f64]) {
 /// L2 norm of a vector.
 fn norm2(v: &[f64]) -> f64 {
     v.iter().map(|x| x * x).sum::<f64>().sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #116: the D-block solve must divide by a *live* small-but-nonzero
+    /// 1×1 pivot (rook rescue / static floor / F-01 band keep the L column and
+    /// can leave `d_diag` below `zero_tol`), and skip only a *force-zeroed*
+    /// pivot (`d_diag == 0.0` exactly, L cleared). The old `|d| > zero_tol`
+    /// gate skipped the live tiny pivot too, silently dropping an O(1/d) term
+    /// from the solution.
+    #[test]
+    fn d_block_solve_divides_live_tiny_pivot_skips_forced_zero() {
+        // Position 0: live tiny pivot d = 1e-16 (< zero_tol = 1e-13) → divide.
+        // Position 1: force-zeroed d = 0.0 → skip (leave w unchanged).
+        let factors = Factors {
+            n: 2,
+            l: vec![1.0, 0.0, 0.0, 1.0], // d_block_solve ignores L
+            d_diag: vec![1e-16, 0.0],
+            d_subdiag: vec![0.0, 0.0],
+            perm: vec![0, 1],
+            perm_inv: vec![0, 1],
+            d_eq: vec![1.0, 1.0],
+            needs_refinement: true,
+            zero_tol: 1e-13,
+            zero_tol_2x2: 1e-26,
+        };
+        let mut w = vec![2.0, 5.0];
+        d_block_solve(&factors, &mut w);
+        assert_eq!(
+            w[0],
+            2.0 / 1e-16,
+            "live tiny pivot must be divided, not skipped"
+        );
+        assert_eq!(w[1], 5.0, "force-zeroed pivot (d == 0) must be skipped");
+    }
 }

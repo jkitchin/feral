@@ -23,6 +23,34 @@ interchanges: every multiplier is bounded by 1, keeping element growth
 bounded across long update chains. New `SparseLu::pivot_search_swaps()`
 exposes how often the interchanges deviated from the plain FT order.
 
+### Fixed — audit correctness fixes across the LU and LDLᵀ engines (issues #114–#119)
+
+- **#114** `SparseLu::update` / `DenseLu::update` now reject a non-finite
+  entering column with `InvalidInput` (matching the factor path) instead of
+  silently committing a NaN into `U` and returning `Ok` with a NaN solution.
+- **#115** The dense LU column-replacement update is reworked as an eta-based
+  Bartels–Golub update with partial pivoting: it no longer fails
+  `NeedsRefactor(TinyPivot, 0.0)` on trivially valid updates over
+  slack/triangular bases (the old column-shift scheme pivoted on a
+  structurally-zero superdiagonal). The base `L` is unchanged; the solves
+  replay the update etas.
+- **#116** The symmetric-indefinite D-block solve now divides by any *live*
+  small-but-nonzero 1×1 pivot (rook rescue / static floor / rank-deficiency
+  band) and skips only *force-zeroed* pivots, fixing a silent `O(1/d)` error
+  in the affected solution component; such rook pivots also set
+  `needs_refinement`.
+- **#117** The blocked and scalar dense-LDLᵀ frontal kernels no longer certify
+  different inertia: the blocked panel defers a rook-eligible below-threshold
+  1×1 pivot to the scalar (rook-capable) path instead of zero-counting it.
+- **#118** The LU update's tiny-pivot tolerance is anchored to the factored
+  matrix magnitude `max|A|` rather than `max|U|`, so a healthy pivot on a
+  high-growth (but well-conditioned) basis is no longer spuriously rejected —
+  removing an update→refactor livelock.
+- **#119** Knight–Ruiz ∞-norm equilibration (`ScalingStrategy::InfNorm`, the
+  LU-side equilibration, and the dense fast path) no longer returns
+  `NaN`/`Inf`/`0.0` scale factors on finite input with extreme or subnormal
+  couplings; the guarded update is bit-identical on well-scaled matrices.
+
 ## [0.13.0] - 2026-07-02
 
 ### Added — user-supplied fill-reducing ordering: `OrderingMethod::External` (issue #107)

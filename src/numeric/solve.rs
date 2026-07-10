@@ -323,10 +323,14 @@ fn solve_sparse_core_into(
                 // leave w[k], w[k + 1] untouched.
                 k += 2;
             } else {
-                if ff.d_diag[k].abs() > ff.zero_tol {
+                // Skip iff force-zeroed (`d_diag == 0.0` exactly, L cleared);
+                // divide by any live pivot, including a small-but-nonzero one
+                // from rook rescue / static floor / F-01 band (issue #116 — the
+                // old `|d| > zero_tol` gate silently dropped rook-accepted
+                // sub-`zero_tol` pivots from the solution).
+                if ff.d_diag[k] != 0.0 {
                     w[k] /= ff.d_diag[k];
                 }
-                // else: pivot force-accepted as zero; leave w[k] alone
                 k += 1;
             }
         }
@@ -831,7 +835,10 @@ fn dsolve_node(
                 // else: rejected by the shared SSIDS floor; leave as-is.
                 k += 2;
             } else {
-                if ff.d_diag[k].abs() > ff.zero_tol {
+                // Skip iff force-zeroed (`d_diag == 0.0` exactly); divide by
+                // any live pivot, including rook/static/F-01 sub-`zero_tol`
+                // ones (issue #116). Mirrors the single-RHS gate above.
+                if ff.d_diag[k] != 0.0 {
                     w[k * nrhs + c] /= ff.d_diag[k];
                 }
                 // else: pivot force-accepted as zero; leave as-is.

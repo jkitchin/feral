@@ -124,6 +124,13 @@ pub struct SparseLu {
     /// `max|U|` immediately after factor — denominator of the element-growth
     /// monitor. Floored away from zero.
     pub(super) u_max0: f64,
+    /// `max|A|` of the (scaled) factored matrix — the same singularity-tolerance
+    /// reference the factor uses (`zero_pivot_tol · a_max`). The update anchors
+    /// its bump-pivot ztol here, **not** to `u_max0`: on high-growth bases
+    /// `u_max0 ≫ a_max`, so a `u_max0`-anchored ztol spuriously rejects healthy
+    /// `O(a_max)` bump pivots — and since `refactor()` reproduces the same
+    /// high-growth factor, update→refactor→retry livelocks (issue #118).
+    pub(super) a_max: f64,
     /// Total Gilbert–Peierls reach nodes visited during the factor — a
     /// structural scalability witness (`O(nnz(U))`, not `O(n²)`).
     pub(super) reach_visits: usize,
@@ -516,6 +523,7 @@ impl SparseLu {
             etas: Vec::new(),
             growth: 1.0,
             u_max0,
+            a_max,
             reach_visits,
             params,
             scale,
