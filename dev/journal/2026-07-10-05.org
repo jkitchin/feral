@@ -85,3 +85,35 @@ half — pooling SolveWorkspace on the &self entry points — needs interior
 mutability and overlaps the #128 allocation bundle; deferred there.
 
 Full suite 76 binaries green, clippy --all-targets -D warnings + fmt clean.
+
+** 13:55 :issue-128:allocation:dense-schur:lazy-bpack1:
+#128 is a 5-part allocation-churn bundle (A dense Schur pack buffers, B
+SparseLu update allocs, C DenseLu update clones, D postorder Vecs, E
+supernode nrow estimate). Assessed each against the "contained + verifiable
+improvement" bar:
+- A-primary (pool apack/bpack0/bpack1): the pooling saves malloc/free but NOT
+  the zero-fill (buffers must stay zeroed for the out-of-range lanes), and it
+  needs &mut scratch threaded through apply_schur_panel_range + a per-thread
+  for_each_init on the parallel par_chunks_mut path. Malloc-only win,
+  unmeasurable wall-clock at corpus front sizes. Deferred.
+- A-lazy-bpack1: DONE. bpack1 (2nd column of each 2×2 block's D-scaled
+  coeffs) is written AND read ONLY under is_2x2_start (factor.rs:3692, :3747).
+  An all-1×1 panel — every panel on an SPD front, most on a well-conditioned
+  indefinite one — never touches it, yet we allocated + zero-filled
+  npanels_j·n_elim·NR f64 anyway. Now: has_2x2 = any is_2x2_start; bpack1 =
+  Vec::new() when false, full-sized otherwise. Saves BOTH the alloc AND the
+  memset on the common path. Bit-identical (the gated indexing is never
+  reached with no 2×2): full dense+maxfromm parity suite green.
+- B: pooling 9 SparseLu update allocs needs mem::take/restore on every
+  rollback exit path — fiddly, real regression risk. Deferred.
+- C: coordinate with the (already-shipped) #115 dense-update rework. Deferred.
+- D (postorder CSR arena): issue marks lowest-priority. Deferred.
+- E (merged-supernode nrow union): needs the row pattern, unavailable at
+  find_supernodes time (only etree + col_counts there); and its perf effect
+  is a dispatch-estimate change that can flip either way — poor fit for
+  "verify improves performance". Deferred.
+
+Verification: lazy-bpack1 is bit-identical (parity suite) and removes an
+allocation + O(len) zero-fill per all-1×1 packed panel — self-evident from
+the code (Vec::new() branch). Wall-clock unmeasurable at these front sizes
+(noise >> the saved memset). Full suite 76 binaries green, clippy/fmt clean.
