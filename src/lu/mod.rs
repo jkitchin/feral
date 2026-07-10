@@ -150,8 +150,10 @@ impl LuParams {
     /// diagonal), `> 1` is meaningless, and `NaN` poisons every threshold
     /// comparison. `zero_pivot_tol` is a relative floor and must be finite and
     /// in `[0, 1)`: negative is nonsensical and `≥ 1` would declare every
-    /// pivot singular. Validating here keeps the dense and sparse factor paths
-    /// from drifting on the same bad input.
+    /// pivot singular. `max_growth` must be `> 1.0` (finite or `+∞`; `NaN` or
+    /// `≤ 1.0` rejected) and `refine_tol` finite and `> 0` — both otherwise
+    /// silently disable a guard (issue #122C). Validating here keeps the dense
+    /// and sparse factor paths from drifting on the same bad input.
     pub(crate) fn validate(&self) -> Result<(), crate::error::FeralError> {
         use crate::error::FeralError;
         if !(self.pivot_threshold > 0.0 && self.pivot_threshold <= 1.0) {
@@ -164,6 +166,30 @@ impl LuParams {
             return Err(FeralError::InvalidInput(format!(
                 "LuParams::zero_pivot_tol must be in [0, 1), got {}",
                 self.zero_pivot_tol
+            )));
+        }
+        // `max_growth` gates the update refactor trigger (`growth > max_growth`).
+        // A `NaN` makes that comparison always false, silently disabling the
+        // growth guard in the update paths (which — unlike `should_refactor_growth`
+        // — do not defend with `is_finite`); `≤ 1.0` rejects every update since
+        // the monitored growth is ≥ 1. `+∞` is the documented "never trigger on
+        // growth" opt-out and passes (`+∞ > 1.0`); `NaN` does not (`NaN > 1.0`
+        // is false). Issue #122C.
+        if self.max_growth.is_nan() || self.max_growth <= 1.0 {
+            return Err(FeralError::InvalidInput(format!(
+                "LuParams::max_growth must be > 1.0 (finite or +inf), got {}",
+                self.max_growth
+            )));
+        }
+        // `refine_tol` is the relative-residual stop for iterative refinement.
+        // `NaN` breaks the `‖r‖/‖a‖ < refine_tol` convergence check (always
+        // false → refinement runs to `refine_steps` doing no useful work or
+        // spinning); `≤ 0` can never be met; `+∞` would accept any residual.
+        // Require finite and strictly positive. Issue #122C.
+        if !self.refine_tol.is_finite() || self.refine_tol <= 0.0 {
+            return Err(FeralError::InvalidInput(format!(
+                "LuParams::refine_tol must be finite and > 0, got {}",
+                self.refine_tol
             )));
         }
         Ok(())
@@ -233,5 +259,50 @@ mod tests {
         // 64x64 = 4096 cells; dense iff nnz >= 1024.
         assert!(!should_use_dense_lu(64, 1023, &p));
         assert!(should_use_dense_lu(64, 1024, &p));
+    }
+
+    /// Issue #122C: `validate()` must reject `max_growth` and `refine_tol`
+    /// values that silently disable a guard, and accept the documented
+    /// boundary/opt-out values. The default is valid.
+    #[test]
+    fn validate_max_growth_and_refine_tol() {
+        use crate::error::FeralError;
+        assert!(LuParams::default().validate().is_ok());
+
+        let bad_growth = |g: f64| LuParams {
+            max_growth: g,
+            ..LuParams::default()
+        };
+        // NaN disables `growth > max_growth` silently → reject.
+        assert!(matches!(
+            bad_growth(f64::NAN).validate(),
+            Err(FeralError::InvalidInput(_))
+        ));
+        // ≤ 1.0 rejects every update (growth ≥ 1) → reject.
+        assert!(matches!(
+            bad_growth(1.0).validate(),
+            Err(FeralError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            bad_growth(0.5).validate(),
+            Err(FeralError::InvalidInput(_))
+        ));
+        // Just past 1.0 and the +∞ opt-out are both documented-valid.
+        assert!(bad_growth(1.0 + 1e-12).validate().is_ok());
+        assert!(bad_growth(f64::INFINITY).validate().is_ok());
+
+        let bad_tol = |t: f64| LuParams {
+            refine_tol: t,
+            ..LuParams::default()
+        };
+        // NaN / ≤ 0 / +∞ all break the convergence check → reject.
+        for t in [f64::NAN, 0.0, -1e-12, f64::INFINITY] {
+            assert!(
+                matches!(bad_tol(t).validate(), Err(FeralError::InvalidInput(_))),
+                "refine_tol {t} must be rejected"
+            );
+        }
+        // A small positive finite tol is valid.
+        assert!(bad_tol(1e-14).validate().is_ok());
     }
 }

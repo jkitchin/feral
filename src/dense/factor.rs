@@ -2952,7 +2952,7 @@ fn lblt_panel_frontal(
             if need_swap {
                 diag_inc(&panel_diag::INLINE_2X2_SWAP_OK);
             }
-            let pivot_inertia = count_2x2_inertia_val(d11, d21, d22);
+            let pivot_inertia = count_2x2_inertia_val(d11, d21, d22)?;
             *pos += pivot_inertia.positive;
             *neg += pivot_inertia.negative;
             *zero += pivot_inertia.zero;
@@ -3851,29 +3851,29 @@ fn finish_1x1_outcome(
     zero: &mut usize,
     fma: bool,
     maxfromm: Option<&mut Option<f64>>,
-) -> PivotStepResult {
+) -> Result<PivotStepResult, FeralError> {
     match outcome {
         PivotOutcome::Accepted => {
             do_1x1_update(a, nrow, k, fma);
             if let Some(slot) = maxfromm {
                 *slot = capture_maxfromm_col(a, nrow, k + 1);
             }
-            PivotStepResult::Advanced(1)
+            Ok(PivotStepResult::Advanced(1))
         }
         PivotOutcome::Rejected => {
             if let Some(slot) = maxfromm {
                 *slot = None;
             }
-            PivotStepResult::Advanced(1)
+            Ok(PivotStepResult::Advanced(1))
         }
         PivotOutcome::Delayed => {
             if let Some(slot) = maxfromm {
                 *slot = None;
             }
-            PivotStepResult::Delayed
+            Ok(PivotStepResult::Delayed)
         }
         PivotOutcome::AcceptedRook2x2 { d11, d21, d22 } => {
-            let inertia = count_2x2_inertia_val(d11, d21, d22);
+            let inertia = count_2x2_inertia_val(d11, d21, d22)?;
             *pos += inertia.positive;
             *neg += inertia.negative;
             *zero += inertia.zero;
@@ -3882,7 +3882,7 @@ fn finish_1x1_outcome(
             if let Some(slot) = maxfromm {
                 *slot = None;
             }
-            PivotStepResult::Advanced(2)
+            Ok(PivotStepResult::Advanced(2))
         }
     }
 }
@@ -3958,9 +3958,9 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
         )?;
-        return Ok(finish_1x1_outcome(
+        return finish_1x1_outcome(
             outcome, a, nrow, k, subdiag, pos, neg, zero, params.fma, None,
-        ));
+        );
     }
 
     // MAXFROMM short-circuit: if the previous 1×1 stash gives a
@@ -3989,7 +3989,7 @@ fn scalar_pivot_step(
                     n_rook_rescues,
                     n_tiny,
                 )?;
-                return Ok(finish_1x1_outcome(
+                return finish_1x1_outcome(
                     outcome,
                     a,
                     nrow,
@@ -4000,7 +4000,7 @@ fn scalar_pivot_step(
                     zero,
                     params.fma,
                     Some(cached_maxfromm),
-                ));
+                );
             }
             // Diagonal too small relative to cached MAXFROMM — fall
             // through to full scan. `cached_maxfromm` is already
@@ -4058,7 +4058,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
         )?;
-        return Ok(finish_1x1_outcome(
+        return finish_1x1_outcome(
             outcome,
             a,
             nrow,
@@ -4073,7 +4073,7 @@ fn scalar_pivot_step(
             } else {
                 None
             },
-        ));
+        );
     }
 
     // gamma_r: max off-diagonal in symmetric row r
@@ -4102,7 +4102,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
         )?;
-        return Ok(finish_1x1_outcome(
+        return finish_1x1_outcome(
             outcome,
             a,
             nrow,
@@ -4117,7 +4117,7 @@ fn scalar_pivot_step(
             } else {
                 None
             },
-        ));
+        );
     }
 
     if akk * gamma_r >= alpha * gamma0 * gamma0 {
@@ -4138,7 +4138,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
         )?;
-        return Ok(finish_1x1_outcome(
+        return finish_1x1_outcome(
             outcome,
             a,
             nrow,
@@ -4153,7 +4153,7 @@ fn scalar_pivot_step(
             } else {
                 None
             },
-        ));
+        );
     }
 
     // 2×2 partner selection (issue #46). BK's magnitude-argmax `r` is
@@ -4302,7 +4302,7 @@ fn scalar_pivot_step(
                 n_rook_rescues,
                 n_tiny,
             )?;
-            return Ok(finish_1x1_outcome(
+            return finish_1x1_outcome(
                 outcome,
                 a,
                 nrow,
@@ -4317,10 +4317,10 @@ fn scalar_pivot_step(
                 } else {
                     None
                 },
-            ));
+            );
         }
 
-        let pivot_inertia = count_2x2_inertia_val(d11, d21, d22);
+        let pivot_inertia = count_2x2_inertia_val(d11, d21, d22)?;
         *pos += pivot_inertia.positive;
         *neg += pivot_inertia.negative;
         *zero += pivot_inertia.zero;
@@ -4352,7 +4352,7 @@ fn scalar_pivot_step(
             n_rook_rescues,
             n_tiny,
         )?;
-        Ok(finish_1x1_outcome(
+        finish_1x1_outcome(
             outcome,
             a,
             nrow,
@@ -4367,7 +4367,7 @@ fn scalar_pivot_step(
             } else {
                 None
             },
-        ))
+        )
     }
 }
 
@@ -4739,8 +4739,9 @@ pub(crate) fn do_2x2_update(
 }
 
 /// Count inertia of a 2×2 D block `[[d11, d21], [d21, d22]]`, returning
-/// an `Inertia` struct. Thin wrapper over [`classify_2x2_inertia`].
-fn count_2x2_inertia_val(d11: f64, d21: f64, d22: f64) -> Inertia {
+/// an `Inertia` struct. Thin wrapper over [`classify_2x2_inertia`];
+/// propagates the non-finite-block error (issue #122B).
+fn count_2x2_inertia_val(d11: f64, d21: f64, d22: f64) -> Result<Inertia, FeralError> {
     classify_2x2_inertia(d11, d21, d22)
 }
 
@@ -4794,10 +4795,23 @@ fn det_sym2x2(d11: f64, d21: f64, d22: f64) -> f64 {
 /// rounds a non-zero sum across zero. See journal 2026-05-21-03 §18:05
 /// and `dev/plans/kkt-cascade-fix2-2x2-inertia-cancellation.md`.
 #[inline]
-fn classify_2x2_inertia(d11: f64, d21: f64, d22: f64) -> Inertia {
+fn classify_2x2_inertia(d11: f64, d21: f64, d22: f64) -> Result<Inertia, FeralError> {
+    // Non-finite guard (issue #122B): a NaN `det`/`tr` fails every ordered
+    // comparison below and would fall through to the `(0, 0, 2)` arm —
+    // certifying a NaN block as two *zero* eigenvalues, the worst possible
+    // failure shape for a solver with a hard inertia contract. Block inputs
+    // are validated finite at factor entry, but an intermediate `inf − inf`
+    // in a release-mode Schur update is not excluded, so reject here rather
+    // than launder it into a certified inertia.
+    if !d11.is_finite() || !d21.is_finite() || !d22.is_finite() {
+        return Err(FeralError::InvalidInput(format!(
+            "non-finite 2x2 pivot block: d11={}, d21={}, d22={}",
+            d11, d21, d22
+        )));
+    }
     let det = det_sym2x2(d11, d21, d22);
     let tr = d11 + d22;
-    if det < 0.0 {
+    let inertia = if det < 0.0 {
         Inertia::new(1, 1, 0)
     } else if det > 0.0 {
         if tr > 0.0 {
@@ -4815,7 +4829,8 @@ fn classify_2x2_inertia(d11: f64, d21: f64, d22: f64) -> Inertia {
         } else {
             Inertia::new(0, 0, 2)
         }
-    }
+    };
+    Ok(inertia)
 }
 
 /// Closed-form eigenvalues of the symmetric 2×2 matrix
@@ -5484,7 +5499,7 @@ fn count_2x2_inertia(
                 // which is out of scope; it gets the same sign
                 // accounting and relies on iterative refinement.
                 *needs_refinement = true;
-                let inertia = classify_2x2_inertia(a00, a10, a11);
+                let inertia = classify_2x2_inertia(a00, a10, a11)?;
                 *pos += inertia.positive;
                 *neg += inertia.negative + inertia.zero;
                 Ok(())
@@ -5507,7 +5522,7 @@ fn count_2x2_inertia(
         // `factors.zero_tol_2x2`. See `dev/decisions.md` and
         // `dev/research/f01-rankdef-underreporting.md`.
         *needs_refinement = true;
-        let inertia = classify_2x2_inertia(a00, a10, a11);
+        let inertia = classify_2x2_inertia(a00, a10, a11)?;
         *pos += inertia.positive;
         *neg += inertia.negative + inertia.zero;
         Ok(())
@@ -5518,7 +5533,7 @@ fn count_2x2_inertia(
         // A `zero` is surfaced here only on the (effectively
         // unreachable) genuine exact singularity, in which case
         // reporting it honestly is correct.
-        let inertia = classify_2x2_inertia(a00, a10, a11);
+        let inertia = classify_2x2_inertia(a00, a10, a11)?;
         let _ = det; // det used only for the singularity gates above
         *pos += inertia.positive;
         *neg += inertia.negative;
@@ -5657,7 +5672,7 @@ mod sym2_inertia_tests {
 
     #[test]
     fn count_2x2_inertia_val_positive_definite() {
-        let inertia = count_2x2_inertia_val(2.0, 1.0, 2.0);
+        let inertia = count_2x2_inertia_val(2.0, 1.0, 2.0).unwrap();
         assert_eq!(inertia.positive, 2);
         assert_eq!(inertia.negative, 0);
         assert_eq!(inertia.zero, 0);
@@ -5665,7 +5680,7 @@ mod sym2_inertia_tests {
 
     #[test]
     fn count_2x2_inertia_val_negative_definite() {
-        let inertia = count_2x2_inertia_val(-2.0, 1.0, -2.0);
+        let inertia = count_2x2_inertia_val(-2.0, 1.0, -2.0).unwrap();
         assert_eq!(inertia.positive, 0);
         assert_eq!(inertia.negative, 2);
         assert_eq!(inertia.zero, 0);
@@ -5674,7 +5689,7 @@ mod sym2_inertia_tests {
     #[test]
     fn count_2x2_inertia_val_indefinite() {
         // [[1, 2], [2, 1]] eigs are 3, -1.
-        let inertia = count_2x2_inertia_val(1.0, 2.0, 1.0);
+        let inertia = count_2x2_inertia_val(1.0, 2.0, 1.0).unwrap();
         assert_eq!(inertia.positive, 1);
         assert_eq!(inertia.negative, 1);
         assert_eq!(inertia.zero, 0);
@@ -5696,7 +5711,7 @@ mod sym2_inertia_tests {
         // Either way: must not report any negative eigenvalues for a
         // matrix whose true spectrum is (+, +).
         let a = 1.0 + f64::EPSILON;
-        let inertia = count_2x2_inertia_val(a, 1.0, a);
+        let inertia = count_2x2_inertia_val(a, 1.0, a).unwrap();
         assert_eq!(inertia.negative, 0, "must not over-report negatives");
     }
 
@@ -5717,7 +5732,7 @@ mod sym2_inertia_tests {
         let a = 1.0;
         let c = 1.0 + 4.0 * f64::EPSILON;
         let b = (1.0 - f64::EPSILON).sqrt(); // b*b ≈ 1 - eps mathematically
-        let inertia = count_2x2_inertia_val(a, b, c);
+        let inertia = count_2x2_inertia_val(a, b, c).unwrap();
         // True det = (1)(1 + 4eps) - (1 - eps) = 5 eps > 0; (+,+).
         assert_eq!(inertia.negative, 0, "must not over-report negatives");
     }
@@ -5742,7 +5757,7 @@ mod sym2_inertia_tests {
     fn count_2x2_inertia_val_diagonal_tiny_huge_positive() {
         // [[1e-30, 0], [0, 1e30]] — eigenvalues 1e-30 and 1e30, both
         // strictly positive ⇒ inertia (2, 0, 0). det = 1e-30·1e30 = 1.0.
-        let inertia = count_2x2_inertia_val(1e-30, 0.0, 1e30);
+        let inertia = count_2x2_inertia_val(1e-30, 0.0, 1e30).unwrap();
         assert_eq!(inertia, Inertia::new(2, 0, 0), "got {inertia}");
     }
 
@@ -5750,7 +5765,7 @@ mod sym2_inertia_tests {
     fn count_2x2_inertia_val_diagonal_tiny_neg_huge_pos() {
         // [[-1e-30, 0], [0, 1e30]] — eigenvalues -1e-30 and 1e30,
         // opposite signs ⇒ straddle ⇒ inertia (1, 1, 0).
-        let inertia = count_2x2_inertia_val(-1e-30, 0.0, 1e30);
+        let inertia = count_2x2_inertia_val(-1e-30, 0.0, 1e30).unwrap();
         assert_eq!(inertia, Inertia::new(1, 1, 0), "got {inertia}");
     }
 
@@ -5758,7 +5773,7 @@ mod sym2_inertia_tests {
     fn count_2x2_inertia_val_diagonal_both_negative() {
         // [[-1e-30, 0], [0, -1e30]] — eigenvalues -1e-30 and -1e30,
         // both strictly negative ⇒ inertia (0, 2, 0).
-        let inertia = count_2x2_inertia_val(-1e-30, 0.0, -1e30);
+        let inertia = count_2x2_inertia_val(-1e-30, 0.0, -1e30).unwrap();
         assert_eq!(inertia, Inertia::new(0, 2, 0), "got {inertia}");
     }
 
@@ -5766,36 +5781,71 @@ mod sym2_inertia_tests {
     fn count_2x2_inertia_val_genuine_singular_positive() {
         // [[0, 0], [0, 5]] — eigenvalues 0 and 5 ⇒ inertia (1, 0, 1).
         // A genuine exact zero must still be reported as `zero`.
-        let inertia = count_2x2_inertia_val(0.0, 0.0, 5.0);
+        let inertia = count_2x2_inertia_val(0.0, 0.0, 5.0).unwrap();
         assert_eq!(inertia, Inertia::new(1, 0, 1), "got {inertia}");
     }
 
     #[test]
     fn count_2x2_inertia_val_genuine_singular_negative() {
         // [[0, 0], [0, -5]] — eigenvalues 0 and -5 ⇒ inertia (0, 1, 1).
-        let inertia = count_2x2_inertia_val(0.0, 0.0, -5.0);
+        let inertia = count_2x2_inertia_val(0.0, 0.0, -5.0).unwrap();
         assert_eq!(inertia, Inertia::new(0, 1, 1), "got {inertia}");
     }
 
     #[test]
     fn count_2x2_inertia_val_genuine_double_zero() {
         // [[0, 0], [0, 0]] — both eigenvalues 0 ⇒ inertia (0, 0, 2).
-        let inertia = count_2x2_inertia_val(0.0, 0.0, 0.0);
+        let inertia = count_2x2_inertia_val(0.0, 0.0, 0.0).unwrap();
         assert_eq!(inertia, Inertia::new(0, 0, 2), "got {inertia}");
     }
 
     #[test]
     fn count_2x2_inertia_val_off_diagonal_straddle() {
         // [[0, 1], [1, 0]] — eigenvalues ±1 ⇒ inertia (1, 1, 0).
-        let inertia = count_2x2_inertia_val(0.0, 1.0, 0.0);
+        let inertia = count_2x2_inertia_val(0.0, 1.0, 0.0).unwrap();
         assert_eq!(inertia, Inertia::new(1, 1, 0), "got {inertia}");
     }
 
     #[test]
     fn count_2x2_inertia_val_well_separated_pd() {
         // [[2, 1], [1, 2]] — eigenvalues 3 and 1 ⇒ inertia (2, 0, 0).
-        let inertia = count_2x2_inertia_val(2.0, 1.0, 2.0);
+        let inertia = count_2x2_inertia_val(2.0, 1.0, 2.0).unwrap();
         assert_eq!(inertia, Inertia::new(2, 0, 0), "got {inertia}");
+    }
+
+    /// Issue #122B: a non-finite 2×2 block must be rejected, never
+    /// laundered into a certified `(0, 0, 2)` (two *zero* eigenvalues).
+    /// Pre-fix, NaN `det`/`tr` failed every ordered comparison and fell
+    /// through to the zero-zero arm — the worst failure shape for a hard
+    /// inertia contract. This tests every non-finite argument slot.
+    #[test]
+    fn classify_2x2_non_finite_block_errors_not_double_zero() {
+        for (d11, d21, d22) in [
+            (f64::NAN, 1.0, 2.0),
+            (2.0, f64::NAN, 1.0),
+            (1.0, 2.0, f64::NAN),
+            (f64::INFINITY, 1.0, 2.0),
+            (1.0, 2.0, f64::NEG_INFINITY),
+            (f64::INFINITY, 1.0, f64::NEG_INFINITY),
+        ] {
+            let got = classify_2x2_inertia(d11, d21, d22);
+            assert!(
+                matches!(got, Err(FeralError::InvalidInput(_))),
+                "non-finite block ({d11}, {d21}, {d22}) must error, got {got:?}"
+            );
+            // Belt-and-suspenders: it must never come back as any inertia,
+            // least of all the certified double-zero.
+            assert_ne!(
+                got.ok(),
+                Some(Inertia::new(0, 0, 2)),
+                "non-finite block laundered into certified (0,0,2)"
+            );
+        }
+        // The finite path is unchanged: a genuine double-zero still classifies.
+        assert_eq!(
+            classify_2x2_inertia(0.0, 0.0, 0.0).unwrap(),
+            Inertia::new(0, 0, 2)
+        );
     }
 
     #[test]

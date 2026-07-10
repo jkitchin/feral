@@ -40,3 +40,43 @@ Post-fix: symbolic_call_count 1->2 (fresh symbolic forced) and B's inertia
 guard reverted to hash-only the count stays at 1 (stale reuse) —
 "left: 1, right: 2". Full suite (75 test binaries) green,
 clippy --all-targets -D warnings clean, fmt clean.
+
+** 11:40 :issue-122:guard-hardening:ordering:inertia:lu-params:
+Bundle of three "bad values corrupt silently" guard gaps.
+
+A. Ordering bijectivity. run_external_ordering (symbolic/mod.rs) and
+schur::run_amd (ordering/schur.rs) range-checked each ordering-crate
+result element but never "no duplicates" — a dup/missing pair flows into
+permute_pattern's per-column count *assignment* and overwrites a column's
+counts -> wrong pattern/etree/inertia silently. Promoted
+validate_external_perm to pub(crate) and call it on the built perm in both
+sites (matches the full check user External perms already get). Its
+dup-rejection is already unit-tested (mod.rs:2091 [0,1,1] -> Err). Backends
+are trusted; this is one O(n) check on an O(nnz.a) path.
+
+B. NaN 2x2 -> (0,0,2). classify_2x2_inertia: a NaN det/tr failed every
+ordered comparison and fell through to the zero-zero arm — certifying a
+NaN block as two ZERO eigenvalues, the worst shape for a hard inertia
+contract. Added a release-mode !is_finite guard returning
+InvalidInput; threaded Result<Inertia> through count_2x2_inertia_val,
+finish_1x1_outcome (now Result<PivotStepResult>) and all six call sites
+(? at the Result-returning frames). Backstops the debug_assert!-only
+finite entry-scan at factor.rs:1749 (the only such gate on the inertia
+path — grep confirmed). Test classify_2x2_non_finite_block_errors_not_
+double_zero: 6 non-finite slots (incl inf-inf) -> Err, never (0,0,2);
+finite (0,0,0) still classifies (0,0,2).
+
+C. LuParams::validate missed max_growth/refine_tol. max_growth=NaN makes
+`growth > max_growth` always false -> growth guard silently disabled in
+the update paths (which don't defend with is_finite like
+should_refactor_growth). Now reject NaN or <=1.0 (accept finite>1 and the
++inf opt-out); refine_tol must be finite and >0 (NaN/<=0/+inf break the
+||r||/||a|| < tol convergence check). Both dense (dense_factor.rs:128,168)
+and sparse (sparse_factor.rs:227) entries call validate(). Test
+validate_max_growth_and_refine_tol covers boundaries + defaults-valid.
+All existing LuParams in tree have max_growth>1 (min 1.0+1e-9, 5.0) and
+refine_tol>0, so no regression.
+
+Full suite 75 binaries green, clippy --all-targets -D warnings clean
+(fixed needless-Ok-? on the finish_1x1_outcome callers and the
+neg_cmp_op_on_partial_ord on the max_growth check), fmt clean.
