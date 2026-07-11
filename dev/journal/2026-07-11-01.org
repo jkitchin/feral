@@ -1,0 +1,48 @@
+* 09:00 :branches:cleanup:docs:
+Reviewed all open branches against origin/main. No open PRs; every
+branch-tied issue closed. Verified branch-by-branch that all code had
+landed (issue-112 tip byte-identical to main; #107 External ordering via
+PR #108; #99 packed-kernel via PR #103; four branches 0 ahead). Three
+branches held dev/ records existing nowhere else: issue-110's 545-line
+research note + 3 diagnostics study bins, issue-102's stall-verify note +
+a journal entry, issue-99's container-session checkpoint/journal (the
+latter renumbered 2026-07-01-03 -> -07: main already had a different
+session -03). Merged as PR #140 (squash, 805b85d; CI green, bins compile
+against current main), then deleted all nine branches. Local main
+fast-forwarded 9596472 -> dfae3c5 first.
+
+* 10:30 :issue65:regression:bisect:testing:
+cargo test on main failed locally:
+explicit_infnorm_is_respected_no_fallback expected (789,670,116), got
+(789,785,1). CI green on the same SHA proved nothing — the sawpath/
+twirism1 fixtures are gitignored and absent on CI, so the test SKIPs
+there; it only runs on this Mac. Fixtures unmodified since Jun 3 (test
+introduction, e15b525) => code drift. Bisected v0.13.0..main:
+9596472 ok, 660224d (#113) ok, 8a980e4 (#135) FAILED. Culprit: #135's
+rook fixes — #117 (blocked panel defers rook-eligible below-threshold
+1x1s to scalar; scalar last-pivot routes through
+try_reject_1x1_with_rook_rescue) and #116 (solve skips only exactly-
+zeroed pivots). Under explicit InfNorm on sawpath, 115 of the 116
+formerly force-zeroed pivots now rook-rescue and sign-count negative:
+(789,670,116) -> (789,785,1), i.e. CLOSER to the oracle (789,786,0).
+An improvement that invalidated a pinned misfactoring signature, not a
+correctness bug. Fallback-count assertion (==0) still held.
+
+* 11:15 :issue65:testing:ci:decisions:
+With owner approval, replaced the pinned inertia with the semantic
+contract (mc64_scaling_fallback_count()==0, inertia.zero>0 i.e. zeros
+kept un-rescued, components sum to n=1575) — the exact signature is a
+pivot-policy artifact and has now drifted once. Closed the
+fixture-gating blind spot that let #135 ship "full suite green" (769/0)
+from a fixture-less container while breaking this guard: (1) committed
+the two generated fixtures (~280 KB total; regen needs pounce + local
+.nl set, so CI can never rebuild them) via .gitignore negations
+(tests/data/large/* + !sawpath/!twirism1 — the dir-exclude form blocks
+negation), large fetchable SuiteSparse matrices stay ignored; (2) CI
+test step now runs --nocapture | tee (shell: bash for pipefail) and a
+follow-up step greps SKIP: lines into GITHUB_STEP_SUMMARY so remaining
+fixture-gated skips are visible, not silent. All 3 issue65 tests pass
+locally; CI will now exercise them on Linux/x86 for the first time —
+if the pinned (789,786,0)/(432,313,0) constants in the other two tests
+diverge there, that is new (wanted) platform information, not noise.
+Recorded in dev/decisions.md (2026-07-11 entry).

@@ -19,8 +19,18 @@ ref/
 # KKT matrices (regenerated from ripopt CUTEst runs)
 data/matrices/
 
-# Large SuiteSparse matrices (fetched via dev/scripts/fetch_large_matrices.sh)
-tests/data/large/
+# Large SuiteSparse matrices (fetched via dev/scripts/fetch_large_matrices.sh).
+# `/*` instead of `/` so the negations below can re-include files: git cannot
+# re-include a file whose parent directory is excluded.
+tests/data/large/*
+# ...except the issue-65 fixtures: small (~280 KB total) GENERATED matrices
+# (dev/scripts/regen_issue65_kkts.sh needs pounce + a local .nl set, so CI
+# can never regenerate them). Committing them closes the fixture-gating
+# blind spot where tests/issue65_mc64_fallback.rs silently SKIPs on CI and
+# in fixture-less containers — PR #135 changed rook pivoting and broke the
+# guard while every "full suite green" run had skipped it.
+!tests/data/large/sawpath_kkt.mtx
+!tests/data/large/twirism1_kkt.mtx
 
 # OS / editor / agent runtime junk
 .DS_Store

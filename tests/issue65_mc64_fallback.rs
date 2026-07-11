@@ -89,18 +89,38 @@ fn twirism1_iter0_auto_stays_infnorm_no_spurious_fallback() {
 #[test]
 fn explicit_infnorm_is_respected_no_fallback() {
     // The fallback is gated on `Auto`. An explicit InfNorm request must be
-    // honored as-is even when it force-accepts zeros (sawpath), so callers
-    // who deliberately pin a strategy get exactly what they asked for.
+    // honored as-is even when the factorization reports zero pivots
+    // (sawpath), so callers who deliberately pin a strategy get exactly
+    // what they asked for.
+    //
+    // Asserted semantically, not by pinned inertia: the exact InfNorm
+    // misfactoring signature is a pivot-policy artifact and has already
+    // drifted once — (789,670,116) before PR #135, (789,785,1) after its
+    // rook-rescue fixes (#116/#117) started sign-counting formerly
+    // force-zeroed pivots. What this test guards is the contract: the
+    // fallback must NOT fire, so the reported inertia keeps InfNorm's
+    // zero pivots (zero > 0) instead of being rescued to the true
+    // full-rank (789,786,0) the Auto path recovers via MC64.
     let Some(m) = load("sawpath_kkt") else {
         return;
     };
     let mut s = Solver::new().with_scaling(ScalingStrategy::InfNorm);
-    let _ = s.factor(&m, None);
+    let status = s.factor(&m, None);
     let inertia = s.inertia().cloned().expect("inertia");
     assert_eq!(
-        inertia,
-        Inertia::new(789, 670, 116),
-        "explicit InfNorm must be respected (no Auto fallback); got {inertia:?}",
+        s.mc64_scaling_fallback_count(),
+        0,
+        "explicit InfNorm must never trigger the Auto MC64 fallback",
     );
-    assert_eq!(s.mc64_scaling_fallback_count(), 0);
+    assert!(
+        inertia.zero > 0,
+        "explicit InfNorm must keep its zero pivots un-rescued (no fallback); \
+         got {inertia:?} (status {status:?}) — zero == 0 means something \
+         rescued the factorization despite the pinned strategy",
+    );
+    assert_eq!(
+        inertia.positive + inertia.negative + inertia.zero,
+        1575,
+        "inertia must account for the full dimension; got {inertia:?}",
+    );
 }
