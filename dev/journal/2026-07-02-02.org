@@ -1,0 +1,203 @@
+* 14:30 :release:
+Published v0.13.0 (issue #107 OrderingMethod::External). Bumped six version
+strings via scripts/release-checklist.sh bump 0.13.0, cut CHANGELOG
+[0.13.0] - 2026-07-02, re-executed five notebooks against the 0.13.0 wheel
+(0 errors, version output 0.12.0 -> 0.13.0). PR #109 merged, tag v0.13.0
+pushed, GitHub release published. release.yml + python-wheels.yml both
+success; crates.io feral = 0.13.0, PyPI feral-solver = 0.13.0 confirmed live.
+Closed issue #107 manually (PR #108 lacked a Closes keyword so it never
+auto-closed).
+
+* 15:10 :issue-110:investigation:tuner:
+Investigated issue #110 (learned auto-tuner for factorization). Branch
+investigate/issue-110-learned-tuner.
+
+Findings (two parallel agents + own repo scan):
+- rslab's tuner is a learned SURROGATE COST-MODEL + explicit knob-grid search,
+  NOT an end-to-end policy net. Two MLPs (one per path), LDLT is 37->64->32->2
+  ReLU predicting [log factor_ms, log peak_mb]. Pure-Rust hand-rolled inference
+  (Vec<Vec<f64>> matmul), serde_json + include_str!. Offline Python training,
+  weights ship embedded + runtime-swappable tuner_profile.json. Three
+  deterministic backstops: a-priori memory gate from EXACT symbolic fill (not
+  the MLP), OOD -> exact-fill ordering race, deviation hysteresis (MIN_GAIN 8%).
+- feral already has the deterministic-heuristic ancestor of this: choose_adaptive,
+  pick_scaling_strategy, pick_ordering_preprocess (verify-by-fill), AutoRace, and
+  runtime feedback loops (pivot-growth escalation #102, quality escalation). The
+  cheap feature vector (n, nnz, avg_deg, diag ratio, max_col_nnz, arrow signature)
+  + SymbolicFactorization (front shapes, factor_nnz_estimate, peak_contrib_bytes,
+  etree) covers ~all of rslab's 37 inputs. bench_orderings/bench_solver_corpus +
+  the 153k KKT corpus mean label generation is a sweep extension, not new infra.
+- Constraint mismatch: feral has NO memory-mode knob (rslab's has one), and the
+  public Solver is LDLT-only (no auto LDLT-vs-LU dispatch), so a first model is
+  single-path LDLT.
+- GOVERNING constraint: exact inertia. Scoped the knobs into inertia-neutral
+  (ordering, preprocess, amalgamation, kernel gates -- but even FMA/reduction
+  order can flip a borderline BK classification per tried-and-rejected, so gate
+  must be validated) vs inertia-sensitive (scaling, pivot-u -- keep under existing
+  deterministic escalation, ML must not own them).
+
+Conclusion: feasible and well-matched, but honest first increment is narrow.
+Recommended measurement-first: quantify how often choose_adaptive's cheap
+ordering pick differs from the AutoRace optimum and by how much, BEFORE committing
+to a model + trainer + weight-artifact maintenance surface. Lowest-risk slice is a
+learned surrogate for AutoRace ordering selection (strictly inertia-neutral,
+trivially backstopped by falling back to AutoRace on OOD). Wrote
+dev/research/issue-110-learned-tuner.md. No code change proposed.
+
+* 16:05 :issue-110:measurement:ordering:
+Ran the gating measurement (issue #110). Built
+crates/feral-diagnostics/src/bin/study_ordering_gap.rs: per family representative
+under data/matrices/kkt, measured factor_nnz_estimate under
+AMD/AMF/MetisND/ScotchND/KahipND/Auto/AutoRace (default preprocess, ordering the
+only variable). 568 families measured (705 dirs; 135 keep .mtx in nested subdirs
+the collector skips -- layout artifact, not bias).
+
+Results:
+- Auto == 5-method oracle on 489/568 = 86.1%. ratio_auto geomean 1.012, p90 1.014,
+  p99 1.287, max 1.608. Losses >2%/>10%/>50%: 56/22/4 families.
+- AutoRace == oracle on 546/568 = 96.1%. ratio_race geomean 1.0015, max 1.115.
+- AutoRace symbolic time 8.95x Auto (292ms vs 33ms total).
+
+Two decisive findings:
+1. Every one of the 22 families where Auto loses >10% has ratio_race=1.0000 --
+   AutoRace already hits the oracle on the ENTIRE meaningful tail. So a learned
+   model is not needed for reachable quality; it could only recover AutoRace's 9x
+   symbolic cost, which is amortized to ~0 across IPM pattern reuse (up to 3000
+   factors per symbolic). Weak motivation.
+2. AutoRace misses the oracle on exactly 22/568 (3.9%) -- the same families where
+   Auto beats the race -- because choose_adaptive knows AMF but the AutoRace set
+   {AMD,MetisND,ScotchND,KahipND} does NOT race AMF. {AutoRace + AMF} == oracle by
+   construction. So adding AMF to the race set makes the deterministic race
+   oracle-optimal on 100% of families -- one-line, no ML.
+
+Conclusion: recommend AGAINST a learned ordering tuner. The deterministic
+Auto+AutoRace pair already spans the quality/cost frontier; the one real gap
+(AMF missing from race) is ML-free. Updated dev/research/issue-110-learned-tuner.md
+(sections 5.5, 6, 7). Follow-up candidate: add Amf to AutoRace's race set.
+
+* 16:45 :issue-110:caveat:fill-vs-time:
+Recorded a correctness caveat on the #110 fill study (issue comment + note
+sections 5.5.1, 7, status header). The study optimizes FILL, a proxy that
+provably diverges from factor wall-clock / peak memory. feral's own nql180
+(src/symbolic/mod.rs:311, issue-73 note): MetisND has smaller fill (nnz_L 0.98x)
+AND smaller flop_proxy (0.86x) yet AMF is 2.05x faster on real factor+solve
+(1.90s vs 3.95s) -- "fill is NOT a reliable speed predictor". So "86% fill-optimal"
+does not imply time-optimal; the fill study is structurally blind to the
+nql180-type regime where a time/memory objective (hence a learned surrogate) could
+beat fill-based selection. Real design axis = HOW the time signal is injected:
+online per-matrix surrogate (rslab) vs offline-measured deterministic regime
+branches (feral). Correct gating experiment: predict factor wall-clock + peak
+memory from cheap features across a wider-than-KKT distribution. Next: gather that
+time/memory data.
+
+* 17:40 :issue-110:measurement:time-memory:
+Gathered the TIME/MEMORY data the #110 fill study called for. Built
+crates/feral-diagnostics/src/bin/study_ordering_timemem.rs: per ordering, measure
+numeric factor wall-clock (min-of-reps, symbolic reused = IPM per-iteration cost)
+and peak-memory model (16*nnz_l + peak_contrib_bytes). Three corpora, meaningful
+subset = time-best >= 50us.
+
+Results (fill-best=time-best agree | time-regret geo/max | mem-regret geo/max |
+oracle vs Auto | vs AutoRace):
+- KKT reps (33):   24% | 1.02/1.13 | 1.01/2.12 | 1.02x | 1.02x
+- large (10):      30% | 1.16/1.60 | 1.01/1.07 | 1.52x | 1.06x
+- mittelmann (41): 22% | 1.14/3.61 | 1.13/3.90 | 1.43x | 1.12x
+
+Key findings:
+- Fill is a bad speed predictor at scale: min-fill pick leaves ~14-16% factor time
+  on large/thin-large, up to 3.6x on svanberg n=100k (min-fill AMD 3.61x slower than
+  SCOTCH). Small KKT reps hid this (~2%) -- too small for front-shape/BLAS-3 effects.
+- The objective COMPOUNDS: numeric factor time is paid every IPM iteration (up to
+  3000), so a 10-15% better ordering saves 10-15% each time -- does NOT amortize away
+  (unlike selection cost). This reverses part of the earlier amortization argument.
+- Neither Auto nor AutoRace dominates: mittelmann head-to-head Auto 18 / AutoRace 22
+  / tie 1. AutoRace avoids ND-blowup disasters (qap15 9x, c-big metis 5x); Auto's
+  thin-large->AMF reroute helps elsewhere. Both jointly miss svanberg (min-fill=AMD,
+  both pick the 3.6x-slow one) -- only a time-aware selector escapes.
+- Memory a separate/larger opportunity on thin-large: min-fill uses up to 3.9x peak
+  mem of mem-best (dtoc2 n=104k AMF vs AMD), geo +13%. Fill & AutoRace ignore memory.
+- Time-oracle beats default Auto 1.43-1.52x, beats AutoRace 6-12%, on large matrices.
+
+Conclusion revised: not "don't build it." Fill selection is solved; time/memory
+selection has real non-amortizable headroom, concentrated on large matrices and
+MOSTLY reachable deterministically. Recommended next: a deterministic time/memory-
+AWARE race (select on measured/predicted factor time+peak mem, not fill) -- measure
+how close it gets to the oracle before reaching for a learned model. Updated note
+sections 5.6, 7, status.
+
+* 18:20 :issue-110:prototype:time-race:
+Prototyped the deterministic time-aware race (extended study_ordering_timemem with
+flop_proxy=Σncol·nrow² and max_front per ordering; race each cheap proxy, measure
+time-regret vs the oracle). DECISIVE NEGATIVE RESULT.
+
+Mittelmann (41 meaningful), per-matrix time-regret vs oracle (geo):
+- fill-race     1.134  (total 1.13x oracle)
+- flop-race     1.198  (total 1.26x oracle)
+- maxfront-race 1.208  (total 1.28x oracle)
+
+No cheap symbolic proxy reaches the time-oracle, and FILL is the BEST of the three --
+flop_proxy and max_front are WORSE time predictors than fill. Confirms issue-73's
+nql180 observation at corpus scale: symbolic structure -> numeric factor time is not
+captured by any single cheap scalar. (Large set totals c-big-dominated/noisy but same
+ranking: flop never beats fill.) Corollary: adding AMF to the race to minimize FILL
+(#111) is fill-optimal but slightly time-NEGATIVE on a few large matrices (c-big: AMF
+fill-min yet 1.6x slower than KaHIP) -- #111 stands as a fill/oracle fix, not a time win.
+
+Implication: cheap deterministic time-race is off the table. Two viable ways to capture
+the §5.6 headroom:
+1. ACTUAL-time race latched per pattern -- factor k candidates once, keep fastest,
+   latch (reuse feral's ordering_escalated latch). Reaches oracle by construction; cost
+   k-1 extra factors ONCE per pattern, amortized to ~0 over up-to-3000 IPM reuse iters.
+   No ML. RECOMMENDED.
+2. Learned multi-feature model -- only cheap way to beat single proxies; justified over
+   option 1 only when actual-time race is unaffordable (one-shot/non-reuse solves, NOT
+   feral's IPM core).
+Sharpens #110 to a crisp decision. Updated note §5.6/§5.7/§7/status. Posted time/memory
+data + prototype to issue #110.
+
+* 19:30 :issue-110:prototype:latched-race:
+Built the latched actual-time race end-to-end (study_latched_race.rs; drives public
+Solver API, no core change). Race candidate orderings on the first factor of a
+family's real IPM iterate sequence, latch the fastest, measure steady-state per
+iterate over PATTERN-REUSED iterates only (IPM changes pattern at iterate 0->1 as the
+active set settles -- nql180 nnz 874500->939300 -- then stable).
+
+Corrected results (29 mittelmann families, max-iters 10):
+- Steady-state: latched winner 9.3% faster/iter than Auto (geomean); up to 40% on
+  some (henon 0.59, optmass 0.72, cont5_2_2 0.61) but SLOWER on others (dtoc1nd 1.20,
+  lane_emden 1.27) where the pick was wrong. High variance.
+- vs AutoRace: 0.7% (essentially tied). AutoRace reuses its raced pick on the stable
+  tail. (An earlier draft saw AutoRace ~79% slower -- ARTIFACT of averaging in the one
+  iterate where the pattern changes and AutoRace re-runs its whole symbolic race.
+  Corrected by measuring steady state over reused iterates only.)
+- Representativeness only 38%: racing on the TRANSIENT first iterate picks the
+  steady-state-optimal ordering just 38% of the time (iterate 0 pattern != stable
+  pattern). A per-PATTERN latch would race on the stable pattern's first occurrence.
+- Break-even median 206 iterations; 11/29 never amortize. The 5-factor race overhead
+  needs ~200 same-pattern reuses to pay back at 9%/iter; typical IPM is 20-50. So the
+  "amortizes to ~0" claim in §5.7 was wrong for real single-solve sequences.
+
+Verdict: the actual-time race is NOT the free win §5.7 implied. Prize ~9% over the
+already-good Auto, only on large problems, amortizes over hundreds of same-pattern
+reuses, ties AutoRace on the stable tail. Reversal: since race OVERHEAD is the killer,
+a learned predictor (zero inference cost, picks on the stable pattern) is the MORE
+viable capture vehicle than a race -- opposite of §5.7. But ~9% on a subset is a modest
+prize; recommend NOT building a time-aware selector without a specific high-repeat
+large-matrix workload. One clear action stays: the ML-free fill fix (#111). Updated
+note §5.8/§7/status.
+
+* 20:10 :issue-111:review:reversal:
+Reviewed issue #111 (add AMF to AutoRace race set) against the #110 time/memory
+evidence that post-dates its filing. REVERSED it. AutoRace SELECTS BY FILL; adding
+AMF (low-fill-but-sometimes-slow) can only lower chosen fill but can RAISE chosen
+time. Measured across 51 large/thin-large matrices: adding AMF regresses AutoRace
+factor time on 8 (c-big 1.60x, dtoc2 1.43x, dirichlet120 1.12x, ex1/ex4/ex42_160
+1.11x, bcsstk38 1.09x, cont5_1_l 1.02x), improves 6 (r05 0.75x, rocket 0.78x, dtoc1nd
+0.80x, bratu3d 0.86x), 37 unchanged. c-big verified: AMF fill 78.3M < KaHIP 91.9M so
+race switches to AMF, but AMF time 20.9M vs KaHIP 13.1M = 1.60x slower. The worst
+regressions are the largest matrices (where AutoRace matters); #111's fill wins
+(VESUVIOU n=3083, GAUSS2 758, HAHN1 715) are small matrices where fill barely affects
+time. So #111 trades fill where irrelevant for time-regression where critical.
+Recommend CLOSING #111 -- the limitation is the fill SELECTION CRITERION, not the
+candidate set, and time-aware selection isn't worth building (§5.8). Updated note §5.7
+corollary + §7 (withdrew #111 from recommendations) + status. Posted review to #111.
