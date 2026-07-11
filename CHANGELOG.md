@@ -17,7 +17,7 @@ All notable changes to FERAL will be documented in this file.
   threads; near-neutral on path-like trees. The default `solve_sparse` is
   unchanged. The multi-RHS core remains serial (follow-up).
 
-### Performance — analysis-time assembly maps (issue #125)
+### Performance — analysis-time assembly maps (issue #125, partial)
 
 - **#125** Each supernode's static frontal row layout (`[own cols | sorted
   trailing]`) is now precomputed at symbolic-analysis time and reused by the
@@ -25,7 +25,8 @@ All notable changes to FERAL will be documented in this file.
   pattern and re-sorting the trailing set every factorization. Bit-identical
   factors (delayed-pivot fronts fall back to the dynamic path). Measured ~8%
   off the per-supernode loop and ~4.5% off the warm factor on a bushy grid
-  (n=48400).
+  (n=48400). Issue #125 stays open for the value-dependent delayed-column
+  splice (delayed fronts still take the full dynamic path).
 
 ### Performance — warm-path prologue and solve speedups (issues #124, #126, #128)
 
@@ -42,7 +43,10 @@ All notable changes to FERAL will be documented in this file.
   estimate.
 - **#128** The packed dense Schur trailing-update kernel no longer allocates
   or zero-fills its `bpack1` buffer on all-1×1 pivot panels (every panel on an
-  SPD front), where it is never read.
+  SPD front), where it is never read. (Item A of the #128 allocation-churn
+  bundle; the remaining items — `apack` pooling, the `SparseLu`/`DenseLu`
+  update allocations, postorder Vec churn, and the supernode-`nrow` estimate
+  — stay open in #128.)
 
 Bit-for-bit factorization/inertia and solutions are unchanged; these are
 warm-path/allocation optimizations only.
