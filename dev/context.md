@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-10T17:13:00Z
+Generated: 2026-07-11T14:11:46Z
 
 ## Latest Session
 File: dev/sessions/2026-07-10-06.md
@@ -59,34 +59,34 @@ first, then Gap B.
 
 ## Git Status
 ```
-ab4b2fc #131 Gap A (3/n): pool the CB workspace and wire it into Solver
-3d91ffb session 2026-07-10-06 checkpoint: #125 + #131 Gap A/B
-d83ca3e #131 Gap A (2/n): contribution-block tree-parallel single-RHS solve
-c12a5d3 #131 Gap A (1/n): carry the assembly tree into SparseFactors
-93cf6ed research: #131 Gap B (parallel assembly) measured not justified
+7c56427 test(issue65): semantic assertion + commit fixtures, surface CI skips (#141)
+805b85d docs: merge stranded dev/ records from closed-issue branches (#140)
+dfae3c5 Tree-parallel sparse solve + analysis-time assembly maps (#131 Gap A, #125) (#139)
+f59f666 Measure-first diagnostics + research: #130/#132/#133 not justified for discopt simplex (#138)
+58d0297 Perf: warm-path prologue + solve speedups; panel-fragmentation measurement (#124, #126, #128, #129) (#137)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_single_schur_index ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
-test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
-test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
+test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
+test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 405 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.98s
+test result: ok. 407 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.60s
 
 ```
 
@@ -107,36 +107,36 @@ Gap A  grid220 solve 13.5 ms (default) → 6.6 ms (cb_parallel, 4t) = ~2.0×
 ```
 
 ## Recent Decisions
-
-The tree-parallel single-RHS solve (`solve_sparse_cb`) is a **separate,
-opt-in** path, not a replacement of `solve_sparse`. Rationale: a bit-exact
-tree-parallel forward substitution must use a contribution-block reduction
-(sum tree, fixed child order) rather than the default core's shared-global-
-vector left-fold. Those two accumulation orders are not float-bit-identical, so
-converting the default path in place would shift every ~1e-15 residual baseline
-(and the single-vs-many-core bit-parity test). Keeping the CB solve as its own
-path leaves the default `solve_sparse` — and every existing test/baseline —
-untouched, and the #131 "serial == parallel byte-identical" contract is
-satisfied within the CB path itself (serial-CB == parallel-CB by construction:
-the child-reduction order is fixed regardless of thread scheduling). The
-backward substitution keeps the default arithmetic unchanged (separator rows
-are read-only, eliminated rows disjoint), so only forward is contribution-block.
-Coarsening (subtree-cost task roots) and a `worthwhile` gate are required for a
-net win — per-node rayon tasks are far too fine for the tiny per-front solve
-work. Evidence: `dev/research/issue-131-parallelism-design-2026-07-10.md`,
-`tests/cb_solve_parity.rs`, ~2.0× on grid220 (n=48400) at 4 threads.
-
-## 2026-07-10 — #131 Gap B (parallel assembly): measured not justified, not built
-
-Per-front assembly is 8.3% of the factor on grid220 / 1.5% on dense1400, and in
-the parallel driver independent fronts' assembly already overlaps across
-threads (each front's assembly is part of its own tree task). The only assembly
 left on the critical path is the root/near-root fronts' O(nrow²), behind the
 root's O(nrow³) dense factor that intra-front parallelism (Lever 1.1) already
 targets — so column-partitioned parallel assembly would chase <1–3% of the
 factor. #125 already captured the tractable, bit-exact assembly win
 (`build_row_indices`). Not built. Evidence:
 `dev/research/issue-131-gapb-assembly-measure-2026-07-10.md`.
+
+## 2026-07-11 — issue-65 guard: semantic assertion + committed fixtures (fixture-gating blind spot)
+
+Two decisions from the post-#135 breakage of
+`tests/issue65_mc64_fallback.rs::explicit_infnorm_is_respected_no_fallback`:
+
+1. **The explicit-InfNorm test asserts the contract, not a pinned inertia.**
+   The pinned `(789,670,116)` was InfNorm's misfactoring signature under the
+   pre-#135 pivot policy; #135's rook fixes (#116/#117) legitimately changed
+   it to `(789,785,1)` (closer to the oracle `(789,786,0)`). The signature is
+   a pivot-policy artifact and will drift again; the invariant the test
+   guards is "explicit strategy respected": `mc64_scaling_fallback_count()
+   == 0`, `inertia.zero > 0` (zeros kept, not rescued), components sum to n.
+   Human-approved (session 2026-07-11).
+
+2. **The two issue-65 fixtures are committed, not gitignored.** They are
+   small (~280 KB total) *generated* matrices that CI can never fetch or
+   regenerate (`regen_issue65_kkts.sh` needs pounce + a local .nl set), so
+   the SKIP-when-absent design made the guard local-only: PR #135 shipped
+   "full suite green" from a fixture-less container while breaking it.
+   `.gitignore` now uses `tests/data/large/*` with explicit negations;
+   large fetchable SuiteSparse matrices stay ignored. CI additionally
+   surfaces every remaining "SKIP:" line in the job summary
+   (`.github/workflows/ci.yml`) so skipped guards are visible, not silent.
 
 ## Recent Tried-and-Rejected
 sweep replays across four hand constructions (journal 2026-07-10-01,
@@ -226,8 +226,8 @@ tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering.rs
 tests/column_renumbering_parity.rs
+tests/column_renumbering.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -240,6 +240,14 @@ tests/factors_ld_export.rs
 tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/growth_flag.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -250,21 +258,13 @@ tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
-tests/lu_dense.rs
 tests/lu_dense_update_bg.rs
+tests/lu_dense.rs
 tests/lu_ft_widebump.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
@@ -283,8 +283,8 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/rook_rescue.rs
 tests/rook_rescue_kkt.rs
+tests/rook_rescue.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
