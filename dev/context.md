@@ -1,84 +1,84 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-11T14:11:46Z
+Generated: 2026-07-11T16:23:37Z
 
 ## Latest Session
-File: dev/sessions/2026-07-10-06.md
+File: dev/sessions/2026-07-11-01.md
 ```
-# Session 2026-07-10-06
+# Session 2026-07-11-01
 
 ## Goal
 
-Implement issue #131 (parallelism gaps) after the session-05 measure-first pass
-found it — unlike #130/#132/#133 — has genuine headroom. User scope: solve gap
-(Gap A) → full contribution-block rewrite; assembly gap → #125 static maps
-first, then Gap B.
+Review all open branches for up-to-dateness (user request). Two follow-on
+tasks emerged: (1) merge dev/ records stranded on closed-issue branches and
+delete the branches; (2) diagnose and fix a locally-failing test surfaced by
+the first task, and close the fixture-gating blind spot that hid it from CI.
+
+## Benchmark comparison to previous session
+
+**No regression.** This session changed **no solver code** — only a test
+assertion, CI config, `.gitignore`, committed fixtures, and docs — so the
+bench reflects main's unchanged code (`dfae3c5` → `7c56427`). Inertia gate
+holds at **100.0%** on both paths. The last full-corpus run was 2026-05-21-04
+(the intervening container sessions had no corpus); vs that baseline the
+corpus grew by 1–2 matrices, inertia stayed 100%, residual-pass stayed 99.8%
+on both paths. Any May→July residual drift spans dozens of intervening solver
+PRs and is not attributable to this session.
 
 ## Accomplished
 
-- **#125 — analysis-time static assembly maps** (commit `efa1000`).
-  Precompute each supernode's `[own cols | sorted trailing]` frontal row layout
-  at symbolic time (`compute_static_row_indices`, one postorder pass, CSR-flat
-  on `SymbolicFactorization`); the numeric factor reads it on the no-delay fast
-  path (`n_delayed_in == 0`) instead of recomputing with `build_row_indices`.
-  Bit-identical (delayed fronts fall back). Tests (`tests/static_assembly_maps.rs`,
-  8): A/B factor byte-identical static-on vs -off incl. KKT-with-delays; an
-  independent BTreeSet oracle == `static_rows(i)`. **Bench: grid220 (n=48400)
-  per-supernode loop 164.8→151.6 ms (~8%), warm factor 176.0→168.1 ms (~4.5%);
-  arrow wash.**
+- **Branch review + cleanup (PR #140, `805b85d`).** Verified branch-by-branch
+  that all *code* on every open branch had already landed on main (issue-112
+  tip byte-identical; #107 via PR #108; #99 packed-kernel via PR #103; four
+  branches 0 ahead). Three branches held dev/ records existing nowhere else;
+  merged them (issue-110's 545-line research note + 3 diagnostics study bins;
+  issue-102's stall-verify note + a journal entry; issue-99's container
+  checkpoint/journal renumbered `2026-07-01-03`→`-07` to avoid colliding with
+  main's different session -03). CI green, bins compile against main. Deleted
+  all nine stale branches; fast-forwarded local main `9596472`→`dfae3c5`.
 
-- **#131 Gap B — measured not justified, not built** (commit `93cf6ed`).
-  Assembly is 8.3% of factor on grid220 / 1.5% on dense1400, and independent
-  fronts' assembly already overlaps in the parallel driver; only the serial
-  root-front O(nrow²) remains, behind the already-parallel O(nrow³) factor.
-  <1–3% ceiling → skipped with evidence (user agreed).
-  `dev/research/issue-131-gapb-assembly-measure-2026-07-10.md`.
+- **Bisected the issue-65 test regression.** `cargo test` failed locally on
+  `issue65_mc64_fallback::explicit_infnorm_is_respected_no_fallback`
+  (expected `(789,670,116)`, got `(789,785,1)`) while CI was green on the
+  same SHA. Cause: the fixtures are gitignored + non-regenerable on CI, so
+  the guard SKIP-passed everywhere but this Mac. Bisect (fixtures unchanged
+  since Jun 3): `9596472` ok → `660224d`/#113 ok → **`8a980e4`/#135 FAILED**.
+  #135's rook fixes (#116 solve skips only exactly-zeroed pivots; #117 blocked
+  panel defers rook-eligible 1×1s to scalar) legitimately rescued 115 of 116
+  formerly force-zeroed pivots — moving the InfNorm signature *closer* to the
+  oracle `(789,786,0)`. An improvement that invalidated a pinned constant, not
+  a correctness bug.
 
-- **#131 Gap A (1/n) — carry the assembly tree into `SparseFactors`** (commit
-  `c12a5d3`). `node_parents: Vec<Option<usize>>` mirrored from symbolic in all
-  constructors. Behavior-neutral foundation for the tree-parallel solve.
-
-- **#131 Gap A (2/n) — contribution-block tree-parallel single-RHS solve**
-  (commit `d83ca3e`). Opt-in `solve_sparse_cb(factors, rhs, parallel)`; default
-  `solve_sparse` untouched (no rebaseline). Forward = contribution-block
-  (children summed in fixed ascending order → serial-CB == parallel-CB
-  byte-identical); backward = unchanged shared-vector arithmetic, root-down.
-  Global `y` written only at disjoint eliminated rows (concurrent via a
-  Send+Sync raw-pointer wrapper + disjointness safety comment). Subtree-cost
-  **coarsening** (`CbTaskPlan`) + a `worthwhile` gate (≥2 task roots, no
-  Amdahl-dominant front, total ≥ 1e6 flops) — per-node tasks were far too fine.
-  Tests (`tests/cb_solve_parity.rs`, 6, stable under RAYON_NUM_THREADS=8):
-  serial==parallel byte-identical incl. an n=9216 concurrent-path fixture,
-  KKT-with-delays, dense fast path; determinism; valid solve.
-  **Bench: grid220 default solve 13.5 ms → cb_parallel 6.6 ms at 4 threads
-  (~2.0×); cb_serial 13.0 ms (no regression); arrow → serial fallback,
-  near-neutral.**
-
-- **#131 Gap A (3/n) — pool the CB workspace + wire into `Solver`** (commit
+- **Fixed it + closed the blind spot (PR #141, `7c56427`).**
+  - Test now asserts the contract (`mc64_scaling_fallback_count()==0`,
+    `inertia.zero>0`, components sum to n=1575) instead of a pivot-policy
+    signature that has now drifted once. Human-approved.
+  - Committed the two generated fixtures (~280 KB) via `.gitignore` negation
+    (`tests/data/large/*` + `!sawpath`/`!twirism1`); large fetchable
 ```
 
 ## Git Status
 ```
+c05eb77 release: feral v0.14.0 (#145)
+8a6992e perf(symbolic): split pipeline so ordering-race losers skip the tail (#127) (#144)
+683933a docs(changelog): mark #125 and #128 as partial in Unreleased (#143)
+a0bf2db docs: session checkpoint 2026-07-11-01 (branch cleanup + issue-65 fix) (#142)
 7c56427 test(issue65): semantic assertion + commit fixtures, surface CI skips (#141)
-805b85d docs: merge stranded dev/ records from closed-issue branches (#140)
-dfae3c5 Tree-parallel sparse solve + analysis-time assembly maps (#131 Gap A, #125) (#139)
-f59f666 Measure-first diagnostics + research: #130/#132/#133 not justified for discopt simplex (#138)
-58d0297 Perf: warm-path prologue + solve speedups; panel-fragmentation measurement (#124, #126, #128, #129) (#137)
 ```
 
 ## Test Status
 ```
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
@@ -86,23 +86,37 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 407 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.60s
+test result: ok. 409 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.57s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-10-06.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-11-01.md)
 
 
-cargo run --bin bench --release: no matrices in this container (corpus absent,
-all buckets count 0). Perf evidence is from src/bin/perf_probe.rs (warm factor +
-solve, RAYON_NUM_THREADS-aware) and src/bin/probe_panel_frag.rs (phase timing):
+cargo run --bin bench --release  (full local corpus, aarch64 M-series)
 
-#125   grid220 loop 164.8→151.6 ms (~8%), warm factor 176.0→168.1 ms (~4.5%)
-Gap B  grid220 assembly 8.3% of factor; dense1400 1.5%  (skipped)
-Gap A  grid220 solve 13.5 ms (default) → 6.6 ms (cb_parallel, 4t) = ~2.0×
-       arrow (path) → worthwhile gate → serial fallback, near-neutral
+--- Dense solver validation ---
+  Inertia match:  154429/154482 (100.0%)   [53 consensus-excluded]
+  Residual pass:  154149/154482 (99.8%)
+  Worst residual: 2.46e-1 (POLAK6_0021)     # known residual-hard case
+
+--- Sparse solver validation ---
+  Inertia match vs MUMPS: 154531/154590 (100.0%)
+  Residual pass:          154258/154590 (99.8%)
+  Worst residual:         2.94e-4 (ERRINBAR_0824)
+
+--- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+  small-frontal (<200)  count 147982  p90 1.72  <= 2.0  PASS
+  medium       (<500)   count 152145  p90 2.13  <= 3.0  PASS
+
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+  small-frontal (<200)  count 153455  p90 1.61  <= 2.0  PASS
+  medium       (<500)   count 153560  p90 1.61  <= 3.0  PASS
+
+Worst factor-ratio vs MUMPS (dense): KIRBY2_0007 9.13×, HAHN1_0078 8.58×,
+CRESC132_0000 7.30× (n=5314) — the persistent small-n dense-front tail.
 
 ```
 
@@ -252,6 +266,7 @@ tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
 tests/issue112_bg_update.rs
+tests/issue127_pipeline_split.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
