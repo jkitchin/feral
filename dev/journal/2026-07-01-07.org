@@ -1,4 +1,7 @@
-* 2026-07-01-04 :issue99:dense-front:fma:performance:
+# Provenance: recorded as 2026-07-01-03 on branch claude/issue-99-b9zphx;
+# renumbered to -07 on merge to main to pair with dev/sessions/2026-07-01-07.md
+# (main's session -03 is a different session). Entries unchanged.
+* 2026-07-01-03 :issue99:dense-front:fma:performance:
 
 * 09:00 :orientation:blocker:
 Task: "loop over all levers until faer-level performance" on issue #99
@@ -161,41 +164,3 @@ at SAME inertia -> confirmed a matrix-specific BK pivoting interaction of
 fma rounding on the degenerate +-n-diagonal synthetic (both paths packed),
 not a kernel effect. Not a regression (fma was ~15s here at session start).
 Reinforces FMA opt-in.
-
-* 13:20 :issue-102:verify:ordering:parallel-dense-front:
-Verified issue #102 (PR #92 regresses cont5_2_4_l / dirichlet120 to a
-0%-CPU dense-front stall) at the code level — the matrices, the
-.sample.txt profiles, POUNCE/ripopt are all absent from this container,
-and the symptom is macOS-specific (__psynch_mutexwait) on 14 cores vs
-this 4-core Linux box, so no end-to-end repro is possible here.
-
-Key finding: PR #92 (d4502f1) changes TWO things, not one. Besides the
-OrderingPreprocess::Auto fill-verified race in src/symbolic/mod.rs, it
-also halves INTRAFRONT_MIN_AREA in src/dense/factor.rs:
-  git show d4502f1~1:src/dense/factor.rs -> `256 * 256` (65536)
-  main                                   -> `256 * 128` (32768)
-This lowers the trailing-update area floor above which a front's Schur
-update is dispatched to the nested rayon `par_chunks_mut` path
-(apply_blocked_schur_panel, factor.rs:3339) — the exact path the issue's
-profile shows stalled. The issue's bisection ("only the ordering change
-matters, #93/#94/#95 are getters") is under-specified: #92 bundles an
-ordering change AND a parallel-scheduling change, and both co-vary
-between v0.11.3 (healthy, floor 65536) and main (stalled, floor 32768).
-
-Argument that scheduling, not ordering, is the culprit: a bigger/denser
-front from a worse ordering would be slow at HIGH CPU; 0% CPU with
-workers in __psynch_mutexwait + main on LockLatch::wait_and_reset is a
-synchronization stall, and the only sync-path thing #92 changed is
-INTRAFRONT_MIN_AREA. Confirmed feral's own parallel path holds no
-explicit mutex (lock-free split_at_mut + par_chunks_mut, no alloc); the
-mutex samples are rayon injector/allocator under nested contention
-(tree-parallel scope.spawn of factor_one_supernode with inner
-par_chunks_mut nested inside).
-
-Clean isolating experiment for the reporter (byte-exact env knob,
-factor.rs:704): `FERAL_INTRAFRONT_MIN_AREA=65536 pounce cont5_2_4_l.nl`
-on main. Solves -> Lever B scheduling is the cause, not ordering.
-Still stalls -> ordering implicated, build the None-vs-LdltCompress
-front-dim harness (feral already loads symmetric mtx via read_mtx).
-
-Wrote dev/research/issue-102-pr92-dense-front-stall-verify.md.
