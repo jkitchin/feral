@@ -29,7 +29,24 @@ jobs:
       # the top of src/lib.rs, so the clippy step above catches it. No
       # separate grep rule needed.
       - name: test
-        run: cargo test
+        # --nocapture + tee so fixture-gated tests' "SKIP:" lines reach the
+        # log (libtest swallows passing-test stderr otherwise); the step
+        # below surfaces them in the job summary. `shell: bash` turns on
+        # pipefail so the tee cannot mask a test failure.
+        shell: bash
+        run: cargo test -- --nocapture 2>&1 | tee /tmp/cargo-test.log
+      - name: surface fixture-gated skips
+        # Fixture-gated tests SKIP-and-pass when their (gitignored, too big
+        # or non-regenerable to commit) fixtures are absent, so "suite
+        # green" can silently exclude regression guards — that is how PR
+        # #135 broke tests/issue65_mc64_fallback.rs unnoticed. This step
+        # makes every skip visible in the run summary. Informational only.
+        if: always()
+        run: |
+          {
+            echo "### Fixture-gated tests skipped (fixtures absent on CI)"
+            grep "SKIP:" /tmp/cargo-test.log | sort -u || echo "none — all fixture-gated tests ran"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: diagnostics lint + test
         # The feral-diagnostics crate (issue #71) is outside the root
         # build/test set, so the pre-commit clippy hook and `cargo test`

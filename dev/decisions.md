@@ -5998,3 +5998,27 @@ targets — so column-partitioned parallel assembly would chase <1–3% of the
 factor. #125 already captured the tractable, bit-exact assembly win
 (`build_row_indices`). Not built. Evidence:
 `dev/research/issue-131-gapb-assembly-measure-2026-07-10.md`.
+
+## 2026-07-11 — issue-65 guard: semantic assertion + committed fixtures (fixture-gating blind spot)
+
+Two decisions from the post-#135 breakage of
+`tests/issue65_mc64_fallback.rs::explicit_infnorm_is_respected_no_fallback`:
+
+1. **The explicit-InfNorm test asserts the contract, not a pinned inertia.**
+   The pinned `(789,670,116)` was InfNorm's misfactoring signature under the
+   pre-#135 pivot policy; #135's rook fixes (#116/#117) legitimately changed
+   it to `(789,785,1)` (closer to the oracle `(789,786,0)`). The signature is
+   a pivot-policy artifact and will drift again; the invariant the test
+   guards is "explicit strategy respected": `mc64_scaling_fallback_count()
+   == 0`, `inertia.zero > 0` (zeros kept, not rescued), components sum to n.
+   Human-approved (session 2026-07-11).
+
+2. **The two issue-65 fixtures are committed, not gitignored.** They are
+   small (~280 KB total) *generated* matrices that CI can never fetch or
+   regenerate (`regen_issue65_kkts.sh` needs pounce + a local .nl set), so
+   the SKIP-when-absent design made the guard local-only: PR #135 shipped
+   "full suite green" from a fixture-less container while breaking it.
+   `.gitignore` now uses `tests/data/large/*` with explicit negations;
+   large fetchable SuiteSparse matrices stay ignored. CI additionally
+   surfaces every remaining "SKIP:" line in the job summary
+   (`.github/workflows/ci.yml`) so skipped guards are visible, not silent.
