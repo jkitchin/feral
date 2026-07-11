@@ -867,16 +867,21 @@ fn symbolic_factorize_race(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
 ) -> Result<SymbolicFactorization, FeralError> {
-    let mut best: Option<SymbolicFactorization> = None;
+    // Issue #127: race only each candidate's *prefix* (through the
+    // `factor_nnz_estimate` the decision uses) and finish just the winner,
+    // so the losers never pay the tail (`find_supernodes`, small-leaf,
+    // peak-contrib, static rows). Selection is bit-identical to finishing
+    // every candidate: the same `factor_nnz_estimate` and the same `<`
+    // (first-wins on ties) as before.
+    let mut best: Option<SymbolicPrefix> = None;
     // S7: when a symbolic profiler is attached, give each candidate its
     // own fresh profiler instead of letting all RACE_CANDIDATES append
     // into the caller's shared one. Sharing accumulated one full stage
     // list per candidate (~4x) against a single candidate's `total_us`,
     // tripping the "stage sum exceeds total" warning and inflating every
-    // pct_of_total. We keep the winning candidate's profiler and copy it
-    // into the caller's shared profiler at the end, so the report
-    // reflects exactly one ordering run.
-    let mut best_prof: Option<SymbolicProfiler> = None;
+    // pct_of_total. The winner's profiler (with the tail appended by
+    // `finish_and_copy`) is copied into the caller's shared profiler, so
+    // the report reflects exactly one ordering run.
     let mut last_err: Option<FeralError> = None;
     for cand in RACE_CANDIDATES {
         let cand_prof = snode_params
@@ -884,21 +889,20 @@ fn symbolic_factorize_race(
             .as_ref()
             .map(|_| std::sync::Arc::new(std::sync::Mutex::new(SymbolicProfiler::new())));
         let cand_params = SupernodeParams {
-            symbolic_profiler: cand_prof.clone(),
+            symbolic_profiler: cand_prof,
             ..snode_params.clone()
         };
         // `cand: &OrderingMethod` — `OrderingMethod` is no longer `Copy`
         // (the `External` variant carries a `Vec`); clone the concrete
         // candidate (all `RACE_CANDIDATES` are payload-free unit variants).
-        match symbolic_factorize_with_method(matrix, &cand_params, cand.clone()) {
-            Ok(sym) => {
+        match resolve_prefix(matrix, &cand_params, cand.clone()) {
+            Ok(prefix) => {
                 let is_better = best
                     .as_ref()
-                    .map(|b| sym.factor_nnz_estimate < b.factor_nnz_estimate)
+                    .map(|b| prefix.factor_nnz_estimate < b.factor_nnz_estimate)
                     .unwrap_or(true);
                 if is_better {
-                    best = Some(sym);
-                    best_prof = cand_prof.and_then(|a| a.lock().ok().map(|g| g.clone()));
+                    best = Some(prefix);
                 }
             }
             Err(e) => {
@@ -906,18 +910,15 @@ fn symbolic_factorize_race(
             }
         }
     }
-    // Copy the winning candidate's stage timings into the caller's shared
-    // profiler so `report()` reflects one run, not all four concatenated.
-    if let (Some(shared), Some(winner)) = (snode_params.symbolic_profiler.as_ref(), best_prof) {
-        if let Ok(mut p) = shared.lock() {
-            *p = winner;
-        }
-    }
-    best.ok_or_else(|| {
+    let best = best.ok_or_else(|| {
         last_err.unwrap_or_else(|| {
             FeralError::InvalidInput("AutoRace: no candidates available".to_string())
         })
-    })
+    })?;
+    Ok(finish_and_copy(
+        best,
+        snode_params.symbolic_profiler.as_ref(),
+    ))
 }
 
 /// Resolve [`OrderingPreprocess::Auto`] by verifying fill rather than
@@ -940,52 +941,46 @@ fn symbolic_factorize_race(
 /// going to be applied anyway; its MC64 matching (the dominant cost)
 /// runs regardless.
 ///
-/// Profiler handling mirrors [`symbolic_factorize_race`]: each candidate
-/// gets a fresh profiler and the winner's is copied into the caller's
-/// shared one, so the report reflects exactly one run.
-fn symbolic_factorize_preprocess_auto(
+/// Profiler handling mirrors [`symbolic_factorize_race`]: each arm gets a
+/// fresh profiler carried in the returned prefix; [`finish_and_copy`] copies
+/// the winner's (with the tail appended) into the caller's shared profiler,
+/// so the report reflects exactly one run.
+///
+/// Issue #127: returns the winning *prefix* rather than a finished
+/// factorization, so the losing arm never pays the tail. Selection is
+/// bit-identical — same predicate, same `factor_nnz_estimate` comparison and
+/// `PREPROCESS_FILL_INFLATION_LIMIT` as before.
+fn symbolic_prefix_preprocess_auto(
     matrix: &CscMatrix,
     snode_params: &SupernodeParams,
     method: OrderingMethod,
-) -> Result<SymbolicFactorization, FeralError> {
+) -> Result<SymbolicPrefix, FeralError> {
     debug_assert_eq!(snode_params.preprocess, OrderingPreprocess::Auto);
 
-    // Run one concrete preprocessor with an isolated profiler. Returns
-    // `(symbolic, profiler-snapshot)` so the caller can keep the winner's.
-    let run = |pp: OrderingPreprocess| -> Result<(SymbolicFactorization, Option<SymbolicProfiler>), FeralError> {
+    // Run one concrete preprocessor's prefix with an isolated profiler
+    // (carried in the returned prefix's `effective_params`).
+    let run = |pp: OrderingPreprocess| -> Result<SymbolicPrefix, FeralError> {
         let cand_prof = snode_params
             .symbolic_profiler
             .as_ref()
             .map(|_| std::sync::Arc::new(std::sync::Mutex::new(SymbolicProfiler::new())));
         let cand_params = SupernodeParams {
             preprocess: pp,
-            symbolic_profiler: cand_prof.clone(),
+            symbolic_profiler: cand_prof,
             ..snode_params.clone()
         };
         // `method` is captured by this closure and used across up to two
         // runs (None vs LdltCompress); `OrderingMethod` is no longer `Copy`,
         // so clone. `External` never reaches here — it is guarded to
         // `OrderingPreprocess::None` before the preprocess-`Auto` race.
-        let sym = symbolic_factorize_with_method(matrix, &cand_params, method.clone())?;
-        let snap = cand_prof.and_then(|a| a.lock().ok().map(|g| g.clone()));
-        Ok((sym, snap))
-    };
-
-    let copy_profiler = |snap: Option<SymbolicProfiler>| {
-        if let (Some(shared), Some(winner)) = (snode_params.symbolic_profiler.as_ref(), snap) {
-            if let Ok(mut p) = shared.lock() {
-                *p = winner;
-            }
-        }
+        symbolic_prefix_concrete(matrix, &cand_params, method.clone())
     };
 
     // The predicate is the *only* thing that could recommend compression;
     // when it declines, `None` is the baseline and there is nothing to
     // verify against.
     if pick_ordering_preprocess(matrix) == OrderingPreprocess::None {
-        let (sym, snap) = run(OrderingPreprocess::None)?;
-        copy_profiler(snap);
-        return Ok(sym);
+        return run(OrderingPreprocess::None);
     }
 
     // Predicate recommends compression — honor it *unless* it inflates
@@ -1001,18 +996,12 @@ fn symbolic_factorize_preprocess_auto(
     // 6.3×. Validated by the full corpus suite (no inertia regression) plus
     // `tests/issue91_preprocess_misfire.rs`.
     let none = run(OrderingPreprocess::None)?;
-    let none_limit = (none.0.factor_nnz_estimate as f64) * PREPROCESS_FILL_INFLATION_LIMIT;
+    let none_limit = (none.factor_nnz_estimate as f64) * PREPROCESS_FILL_INFLATION_LIMIT;
     match run(OrderingPreprocess::LdltCompress) {
-        Ok((comp_sym, comp_snap)) if (comp_sym.factor_nnz_estimate as f64) <= none_limit => {
-            copy_profiler(comp_snap);
-            Ok(comp_sym)
-        }
+        Ok(comp) if (comp.factor_nnz_estimate as f64) <= none_limit => Ok(comp),
         // LdltCompress inflates fill past the catastrophe limit (or failed)
         // — use None.
-        _ => {
-            copy_profiler(none.1);
-            Ok(none.0)
-        }
+        _ => Ok(none),
     }
 }
 
@@ -1036,13 +1025,70 @@ pub fn symbolic_factorize_with_method(
     snode_params: &SupernodeParams,
     method: OrderingMethod,
 ) -> Result<SymbolicFactorization, FeralError> {
-    // AutoRace is resolved here by running each concrete candidate
-    // through this same function and picking the smallest
-    // `factor_nnz_estimate`. The recursive call passes a concrete
-    // `OrderingMethod`, so there is no infinite loop.
+    // AutoRace is resolved here by racing each concrete candidate's
+    // *prefix* (issue #127) and finishing only the winner. The recursive
+    // call passes a concrete `OrderingMethod`, so there is no infinite loop.
     if method == OrderingMethod::AutoRace {
         return symbolic_factorize_race(matrix, snode_params);
     }
+    // Issue #127: split the pipeline into a cheap "prefix" (ordering →
+    // column counts → `factor_nnz`) and the "finish" (supernodes, small-leaf,
+    // peak-contrib, static rows, struct assembly). The preprocess-`Auto` and
+    // `AutoRace` races decide on `factor_nnz_estimate` alone, so they race
+    // prefixes and finish only the winner — the losers never pay the tail.
+    let prefix = resolve_prefix(matrix, snode_params, method)?;
+    Ok(finish_and_copy(
+        prefix,
+        snode_params.symbolic_profiler.as_ref(),
+    ))
+}
+
+/// The intermediate produced by the symbolic pipeline *prefix* (issue
+/// #127): everything computed up to and including `factor_nnz`, i.e. all
+/// the state the `factor_nnz_estimate`-based races decide on, without any
+/// of the tail work ([`symbolic_finish`]). Carries the effective
+/// [`SupernodeParams`] it ran under (hence the profiler arc for its prefix
+/// stages) and `t_total`, so the finish records the tail into the same
+/// profiler and sets a total spanning prefix+finish.
+struct SymbolicPrefix {
+    n: usize,
+    perm: Vec<usize>,
+    perm_inv: Vec<usize>,
+    permuted_pattern: CscPattern,
+    etree: EliminationTree,
+    col_counts: Vec<usize>,
+    factor_nnz_estimate: usize,
+    factor_slack: f64,
+    cached_mc64: Option<crate::scaling::Mc64Cache>,
+    resolved_method: OrderingMethod,
+    resolved_preprocess: supernode::OrderingPreprocess,
+    /// The effective params (amalgamation `Auto` already resolved). Its
+    /// `symbolic_profiler` is the arc the prefix recorded stages into.
+    effective_params: SupernodeParams,
+    /// Wall-clock start captured at prefix entry (Some iff a profiler is
+    /// attached); [`symbolic_finish`] uses it for `set_total`.
+    t_total: Option<std::time::Instant>,
+}
+
+// Per-thread count of `symbolic_finish` calls — a `#[cfg(test)]` probe
+// proving the #127 property that race losers never reach the tail (exactly
+// one finish per top-level factorization regardless of candidate count).
+// Thread-local, not a global atomic: symbolic factorization runs
+// single-threaded per call, so a test resets and reads its own thread's
+// count without interference from other tests running concurrently.
+#[cfg(test)]
+thread_local! {
+    static FINISH_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Resolve external validation and the preprocess-`Auto` fill race into a
+/// [`SymbolicPrefix`] (no tail work). `method` must be concrete (the
+/// `AutoRace` sentinel is handled by [`symbolic_factorize_with_method`]).
+fn resolve_prefix(
+    matrix: &CscMatrix,
+    snode_params: &SupernodeParams,
+    method: OrderingMethod,
+) -> Result<SymbolicPrefix, FeralError> {
     // Issue #107: a caller-supplied external ordering. Validate the
     // permutation is a bijection of `0..n` up front (a wrong length /
     // out-of-range / duplicate is `InvalidInput`, never a panic). `External`
@@ -1063,8 +1109,21 @@ pub fn symbolic_factorize_with_method(
     // fill (issue #91: qap15 conic KKT, 7.16M → 45.4M, 0.77s → 15.4s).
     // Race None vs LdltCompress on symbolic fill and keep the smaller.
     if snode_params.preprocess == OrderingPreprocess::Auto && !is_external {
-        return symbolic_factorize_preprocess_auto(matrix, snode_params, method);
+        return symbolic_prefix_preprocess_auto(matrix, snode_params, method);
     }
+    symbolic_prefix_concrete(matrix, snode_params, method)
+}
+
+/// The concrete symbolic pipeline *prefix* (issue #127): runs ordering →
+/// column counts → `factor_nnz` and returns a [`SymbolicPrefix`], doing
+/// none of the tail work. `method` and `preprocess` are concrete here
+/// (`AutoRace` and preprocess-`Auto` are resolved by the callers above).
+fn symbolic_prefix_concrete(
+    matrix: &CscMatrix,
+    snode_params: &SupernodeParams,
+    method: OrderingMethod,
+) -> Result<SymbolicPrefix, FeralError> {
+    let is_external = matches!(method, OrderingMethod::External(_));
     let n = matrix.n;
 
     // Phase 2.13b per-stage profiler. Every timer is `Some` only when
@@ -1333,6 +1392,56 @@ pub fn symbolic_factorize_with_method(
         record_stage(prof, "renumber", t);
     }
     let factor_nnz = total_factor_nnz(&col_counts);
+    let factor_slack = 1.2;
+    let factor_nnz_estimate = (factor_nnz as f64 * factor_slack) as usize;
+
+    // `snode_params` here is `&effective_params` (amalgamation `Auto`
+    // resolved above). Move the owned `effective_params` into the prefix so
+    // the finish can consult its amalgamation strategy, small-leaf params,
+    // and profiler arc. This is the last use of the borrow.
+    Ok(SymbolicPrefix {
+        n,
+        perm,
+        perm_inv,
+        permuted_pattern,
+        etree,
+        col_counts,
+        factor_nnz_estimate,
+        factor_slack,
+        cached_mc64,
+        resolved_method,
+        resolved_preprocess,
+        effective_params,
+        t_total,
+    })
+}
+
+/// The symbolic pipeline *finish* (issue #127): the tail stages a race
+/// runs only for the winning [`SymbolicPrefix`] — supernode detection,
+/// small-leaf grouping, peak-memory accounting, static row indices (#125),
+/// and struct assembly. Records the tail stages into the prefix's profiler
+/// and sets the run total spanning prefix+finish.
+fn symbolic_finish(prefix: SymbolicPrefix) -> SymbolicFactorization {
+    #[cfg(test)]
+    FINISH_RUNS.with(|c| c.set(c.get() + 1));
+
+    let SymbolicPrefix {
+        n,
+        perm,
+        perm_inv,
+        permuted_pattern,
+        etree,
+        col_counts,
+        factor_nnz_estimate,
+        factor_slack,
+        cached_mc64,
+        resolved_method,
+        resolved_preprocess,
+        effective_params,
+        t_total,
+    } = prefix;
+    let snode_params = &effective_params;
+    let prof = snode_params.symbolic_profiler.as_ref();
 
     // Step 7: Supernode detection on the postordered etree
     let t_find = prof.map(|_| std::time::Instant::now());
@@ -1367,8 +1476,6 @@ pub fn symbolic_factorize_with_method(
         record_stage(prof, "peak_contrib", t);
     }
 
-    let factor_slack = 1.2;
-
     // Issue #125: static frontal row layout (numeric no-delay fast path).
     let t_sr = prof.map(|_| std::time::Instant::now());
     let (static_row_offsets, static_row_flat) =
@@ -1383,12 +1490,12 @@ pub fn symbolic_factorize_with_method(
         }
     }
 
-    Ok(SymbolicFactorization {
+    SymbolicFactorization {
         n,
         perm,
         perm_inv,
         supernodes,
-        factor_nnz_estimate: (factor_nnz as f64 * factor_slack) as usize,
+        factor_nnz_estimate,
         factor_slack,
         contrib_sizes,
         peak_contrib_bytes,
@@ -1404,7 +1511,29 @@ pub fn symbolic_factorize_with_method(
         resolved_amalgamation: snode_params.amalgamation_strategy,
         resolved_preprocess,
         is_schur_tail: None,
-    })
+    }
+}
+
+/// Finish the winning prefix and reconcile the profiler. When the prefix
+/// recorded into a *detached* profiler (a raced arm/candidate got its own
+/// fresh one so losers don't pollute the shared report), copy the winner's
+/// completed run into the caller's `shared` profiler; when the prefix
+/// already used the shared arc (the concrete top-level path), the arcs are
+/// identical and the copy is skipped.
+fn finish_and_copy(
+    prefix: SymbolicPrefix,
+    shared: Option<&std::sync::Arc<std::sync::Mutex<SymbolicProfiler>>>,
+) -> SymbolicFactorization {
+    let used = prefix.effective_params.symbolic_profiler.clone();
+    let sym = symbolic_finish(prefix);
+    if let (Some(shared), Some(used)) = (shared, used.as_ref()) {
+        if !std::sync::Arc::ptr_eq(shared, used) {
+            if let (Ok(u), Ok(mut s)) = (used.lock(), shared.lock()) {
+                *s = u.clone();
+            }
+        }
+    }
+    sym
 }
 
 /// Symbolic factorization with a user-supplied Schur tail (F3.2a).
@@ -1922,6 +2051,55 @@ fn compute_peak_contrib(supernodes: &[Supernode], contrib_sizes: &[usize]) -> us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A small tridiagonal SPD matrix for the finish-count probes.
+    fn tridiag(n: usize) -> CscMatrix {
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(4.0);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+        }
+        CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("tridiag")
+    }
+
+    /// Issue #127: the preprocess-`Auto` race finishes exactly one prefix
+    /// (the winner), never the losing arm.
+    #[test]
+    fn finish_runs_once_under_preprocess_auto() {
+        let m = tridiag(40);
+        // Default params → `Auto` preprocess, `Auto` (non-race) method.
+        FINISH_RUNS.with(|c| c.set(0));
+        let _ = symbolic_factorize(&m, &SupernodeParams::default()).expect("factor");
+        assert_eq!(
+            FINISH_RUNS.with(|c| c.get()),
+            1,
+            "preprocess-Auto must finish exactly one prefix",
+        );
+    }
+
+    /// Issue #127: `AutoRace` finishes exactly one prefix regardless of the
+    /// candidate count (4 ordering candidates × up to 2 preprocess arms).
+    #[test]
+    fn finish_runs_once_under_autorace() {
+        let m = tridiag(40);
+        let params = SupernodeParams::default();
+        FINISH_RUNS.with(|c| c.set(0));
+        let _ = symbolic_factorize_with_method(&m, &params, OrderingMethod::AutoRace)
+            .expect("autorace");
+        assert_eq!(
+            FINISH_RUNS.with(|c| c.get()),
+            1,
+            "AutoRace must finish exactly one prefix (the winner)",
+        );
+    }
 
     #[test]
     fn test_symbolic_factorize_basic() {

@@ -4,6 +4,21 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — split the symbolic pipeline for the ordering races (issue #127)
+
+- **#127** `OrderingPreprocess::Auto` and `OrderingMethod::AutoRace` previously
+  ran the **full** symbolic pipeline for every candidate (up to 2× and 4×
+  respectively, and ~8× when both nest) even though the winner is chosen on
+  `factor_nnz_estimate` alone. The pipeline is now split into a *prefix*
+  (ordering → column counts → `factor_nnz`) and a *finish* (supernode
+  detection, small-leaf grouping, peak-memory accounting, static row indices);
+  the races compare prefixes and run the finish only for the winner, so the
+  losing candidates never pay the tail. Winner selection is bit-identical
+  (same `factor_nnz_estimate`, same tie-break), and the produced
+  `SymbolicFactorization` is unchanged — this is purely *when* the tail work
+  happens. Benefits the IPM-host workload, whose slack-heavy KKTs fire the
+  preprocess race on every cache-miss factorization.
+
 ### Added — tree-parallel sparse solve (issue #131 Gap A)
 
 - **`solve_sparse_cb(factors, rhs, parallel)`** — an opt-in contribution-block
