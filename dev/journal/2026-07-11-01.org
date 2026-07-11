@@ -46,3 +46,44 @@ locally; CI will now exercise them on Linux/x86 for the first time —
 if the pinned (789,786,0)/(432,313,0) constants in the other two tests
 diverge there, that is new (wanted) platform information, not noise.
 Recorded in dev/decisions.md (2026-07-11 entry).
+
+* 12:30 :issue127:symbolic:refactor:performance:
+Implemented issue #127 — split symbolic_factorize_with_method into a
+cheap prefix (ordering -> col_counts -> factor_nnz) and a finish (tail:
+find_supernodes, small_leaf, peak_contrib, static rows, struct build).
+Both race dispatchers (preprocess-Auto: None vs LdltCompress;
+OrderingMethod::AutoRace: 4 ordering candidates) now race PREFIXES and
+run the finish only on the winner, so losers never pay the tail
+(previously up to ~8x symbolic when both races nest). Chose prefix/finish
+split over "estimate then recompute winner" because the latter would
+recompute the winner's ordering — doubling the LdltCompress MC64 matching
+(the dominant cost) when compression wins.
+
+Winner selection is bit-identical: same factor_nnz_estimate compare, same
+< / <= none_limit operators, same PREPROCESS_FILL_INFLATION_LIMIT. Verified
+by self-consistency tests (no golden constants): AutoRace result byte-matches
+the concrete resolved_method result and IS the argmin estimate;
+preprocess-Auto matches the concrete resolved_preprocess arm. Losers-skip-tail
+proven by a thread-local FINISH_RUNS cfg(test) counter (== 1 after both
+default-Auto and AutoRace factorizations) — thread-local not global atomic
+so parallel tests don't clobber it (symbolic runs single-threaded per call).
+
+Profiler "one run" behaviour preserved: raced arms/candidates use fresh
+profilers; the winner's prefix carries its profiler arc; finish appends the
+tail + set_total there; finish_and_copy copies to the shared profiler iff a
+different Arc (ptr_eq). tests/symbolic_profiler.rs green (5/5,
+accounted<=total, no warnings).
+
+Gates: cargo clippy --all-targets -D warnings clean; full suite green
+(82 test-result: ok, 0 failed); targeted issue127 (3) + finish_runs unit
+(2) + auto_strategy (7) + issue91_preprocess_misfire (1, qap15 fill guard)
++ symbolic_profiler (5) all pass. Bench numbers below.
+
+Bench (full corpus, bit-identical to the pre-#127 baseline — as designed):
+  Dense  inertia 154429/154482 (100.0%), residual 154149/154482 (99.8%),
+         worst 2.46e-1 POLAK6_0021.
+  Sparse inertia vs MUMPS 154531/154590 (100.0%), residual 154258/154590
+         (99.8%), worst 2.94e-4 ERRINBAR_0824.
+  Partition gates all PASS (dense p90 1.67/2.08; sparse 1.56/1.57).
+  Identical inertia AND residual counts confirm winner selection is
+  unchanged (same factors), the #127 correctness contract.
