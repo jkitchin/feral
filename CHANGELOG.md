@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-11
+
 ### Performance — split the symbolic pipeline for the ordering races (issue #127)
 
 - **#127** `OrderingPreprocess::Auto` and `OrderingMethod::AutoRace` previously
