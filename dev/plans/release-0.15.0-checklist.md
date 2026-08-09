@@ -83,12 +83,15 @@ conclusions.
 
 ## 2. ~~Optional~~ DONE: calibrate `FERAL_PAR_MIN_SEEDS` → keep the default (2)
 
-The serial-fallback threshold (issue #148) currently defaults to 2 —
-delegate to the sequential driver only when the task graph has *no*
-initial parallelism. The 2026-08-09 review showed this is **too
-conservative**: on six real KKT matrices the sequential driver beat the
-*tuned* parallel driver on 4 and the default pool on 5, by up to 1.99×
-(clnlbeam).
+**Answered: keep `PAR_MIN_SEEDS = 2`.** An earlier reading of the
+2026-08-09 review suggested the default was too conservative (the
+*pre-coarsening* driver lost to sequential on 4–5 of 6 real matrices).
+Calibration superseded that: coarsening collapses five of the six to a
+single task (`seeds = 1`), so they already take the sequential fallback
+and the threshold is a no-op on them at every setting. It only decides
+for trees with genuine parallelism, and there a low value wins —
+`marine_1600` loses **28%** at `min_seeds >= 4` (0.78×, 0/15 pairs,
+p = 1e-4). Forcing the task graph on (`=1`) costs 3–9% on the five.
 
 It is now runtime-tunable, and byte-identical at every setting
 (`tests/task_plan_parity.rs` sweeps 0/1/2/4/64/u64::MAX), so this is a
@@ -110,8 +113,18 @@ change `PAR_MIN_SEEDS` and record it in decisions.md.
 
 ## 3. Release
 
-- [ ] Version bump in `Cargo.toml` + `python/Cargo.toml`
+- [ ] Bump **all six** version strings (a `0.14.0` grep must come back
+      empty except for the unrelated `feral-*` ordering crates at 0.2.1):
+      `Cargo.toml:13`, `Cargo.lock:198`, `python/Cargo.toml:5`,
+      `python/Cargo.lock:62` (`feral`), `python/Cargo.lock:113`
+      (`feral-python`), `python/pyproject.toml:7`
+- [ ] Verify both lockfiles still resolve: `cargo metadata --locked` in
+      the root and in `python/`
 - [ ] `CHANGELOG.md`: move the Unreleased section under `[0.15.0]`
+- [ ] Publish a **GitHub Release** — `release.yml` fires on
+      `release: published` (not on tag push), and it verifies the tag
+      matches `Cargo.toml`. This is the irreversible step: crates.io
+      versions can be yanked but never re-published.
 - [ ] Tag + publish (crates.io, PyPI wheels via the existing workflow)
 - [ ] Notify pounce (issue #148 / pounce#552) so the factorization
       comparison can be re-run against a released feral
