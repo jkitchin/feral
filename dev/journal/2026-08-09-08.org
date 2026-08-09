@@ -449,3 +449,106 @@ here; the mechanism is that csp stays RINF while the search hunts for
 an unmatched row, so nothing prunes insertion. Whether that frontier
 can be bounded without changing the matching is open and needs its own
 research note before any code.
+
+* 20:40 :issue125:sizing:measurement:step2-rejected:
+Asked to implement #125 step 2 (delayed-column splice). Sized the
+ceiling before writing code, per spec 5.1. Built
+`diag_delayed_fronts` (fronts and frontal rows taking the dynamic
+`build_row_indices` path) and extended it with the `BUILDROW_NS`
+phase counter.
+
+Reach: 7 of 41 corpus matrices have ANY front with `n_delayed_in > 0`.
+Only 3 have material dynamic rows -- steering_12800 61.53%,
+robot_1600 28.86%, qcqp1500-1nc 25.04%. Five of the six chain KKTs
+that motivated the whole MA57 investigation (clnlbeam, dtoc1nd,
+dtoc2, marine_1600, rocket_12800) are at exactly 0.00%.
+
+Cost: `BUILDROW_NS` wraps BOTH arms of the #125 branch
+(factorize.rs:2491-2505), so buildrow/factor is a hard ceiling on
+step 2. Measured 0.21%-3.13% of factor wall (steering 3.13%,
+robot 1.97%, qcqp1500-1nc 0.21%, clnlbeam 1.65%). Step 2 removes
+only part of that -- it still has to splice delayed columns.
+
+Also checked whether the step-1 fast-path `.to_vec()` could become a
+borrow: no. `row_indices` is moved into `NodeFactors`
+(factorize.rs:2739), so ownership is required.
+
+Conclusion: ~1-2% on 3 of 41 matrices, paid for by touching the
+delayed-pivot path -- the highest-risk code in the solver. Step 2
+is not worth building. Recorded that my earlier characterization of
+#125 as "obvious work" was true of step 1 (landed, PR #139) and NOT
+of step 2.
+
+* 21:05 :profile:factorization:phase-timing:scaling:
+Ran the internal factorization profile previously offered but never
+done. Key methodological point: drove
+`factorize_multifrontal_supernodal_with_workspace` DIRECTLY rather
+than `Solver::factor`, because the `Solver` wall folds in symbolic
+reuse checks and scaling-cache lookups the phase counters do not
+cover. First attempt used the Solver wall and showed 18%-51%
+"outside" -- an artifact of exactly the timed-region mismatch that
+produced two retractions earlier this session. With the driver call
+the books close: prologue + loop + epilogue ~= 100%.
+
+Driver wall split (best of 3 warm reps, sequential):
+
+| matrix        | drv_us | prol% | scaling% | schur% | cbextr% | dense_o% | buildrow% |
+|---------------+--------+-------+----------+--------+---------+----------+-----------|
+| clnlbeam      |  26297 | 18.1% |    15.2% |  11.2% |    6.6% |    22.1% |      2.2% |
+| dtoc1nd       |  12540 | 25.0% |    19.5% |   8.2% |   12.0% |     9.6% |      0.8% |
+| dtoc2         |  76483 | 12.8% |     8.0% |   5.7% |   14.4% |    13.8% |      2.0% |
+| marine_1600   |  31271 | 22.4% |    18.9% |  15.7% |    5.7% |    19.3% |      1.2% |
+| rocket_12800  |  20461 | 34.7% |    29.3% |  11.3% |    1.8% |    24.5% |      0.9% |
+| steering_12800|  37880 | 17.5% |    14.6% |  15.3% |    5.7% |    19.8% |      3.7% |
+| robot_1600    |   8662 | 19.0% |    15.8% |  15.0% |    6.4% |    22.1% |      3.0% |
+
+`buildrow%` (#125's target) is the smallest column on the table.
+Two large unattributed buckets: `dense_o%` (9.6%-24.5%, inside the
+dense frontal factor but outside panel/Schur/tail/L-extract/
+contrib-extract) and prologue scaling.
+
+* 21:30 :bug:mc64:cache:value-bound:confirmed:
+Chased `scaling%` through `Solver` (which owns `mc64_scaling_cache`)
+with `mc64_cache_hit_count` printed alongside. The corpus splits
+exactly on cache hits: hits=3 -> scaling ~0.0%; hits=0 -> scaling
+6.6%-41.7%.
+
+**Confirmed bug on robot_1600_0001.** The cache IS populated
+correctly and is then REJECTED on every reuse of the bit-identical
+matrix. Instrumented `mc64_value_bound_passes` (temporary
+FERAL_VB_DEBUG patch, reverted):
+
+  vb: ratio true (6.111443e14 vs 1.222289e15) | count true (15410 vs
+      15410) | diag false (1.636275e-15 vs 4.177246e-13)
+
+`ratio` and `count` pass with numerically IDENTICAL stats -- proof
+of zero drift, it is literally the same matrix. `cond_diag`
+(value_bound.rs:237) fails: it tests
+`min_diag >= EPS_DIAG * mean_diag_0`, which is an ABSOLUTE property
+of the matrix, not a drift measure. Any matrix whose scaled diagonal
+spans more than ~1e12 can never reuse its own cache, so MC64 reruns
+and is discarded every factorization.
+
+Cost: 40.4% of the warm factor wall. Forcing
+`ScalingStrategy::InfNorm` on robot_1600_0001 takes the driver from
+10,662 us to 6,013 us -- 1.77x on the WHOLE factorization.
+
+It is a cliff, not a corner case. robot_1600_0000 passes with only
+5.6x margin (2.353320e-12 vs 4.213035e-13); WM_CFy_0000 by 3.2x
+(1.124683e-12 vs 3.565878e-13). An IPM trajectory walks off it
+mid-solve, which is the workload that matters. Same family, adjacent
+iterates, opposite verdicts.
+
+Scope limit, stated explicitly: at iterate _0000 NO corpus matrix is
+rejected -- all 31 misses there are "no-cache" (Auto picked InfNorm,
+nothing to cache by design). So the rejection is confirmed on
+robot_1600_0001 and its frequency across full trajectories is NOT
+established.
+
+Separate observation, measured but not shown to be reducible: on
+31 of 42 matrices Auto picks InfNorm and it is recomputed every
+factor at 3%-38% of the driver wall (elec_400 37.9%, ex8_2_2 26.2%,
+ex8_2_3 26.1%, gasoil_3200 23.1%, arki0003 23.5%, pinene_3200
+21.4%). Values change each IPM iterate so recomputation is
+legitimate; whether an O(nnz) scan should cost 20%-38% of a
+factorization is an open question.
