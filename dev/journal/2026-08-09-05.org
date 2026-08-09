@@ -97,3 +97,38 @@ amalgamation was aimed at a problem that has largely receded. Also note
 their other named upstream item, warm-path scaling, is the one we
 falsified this morning. Next target is the 33-64 column medium-front
 regime.
+
+* 22:10 :issue-153:dtoc1nd:medium-front:first-probe:
+jrk filed #153 tracking this. Ranking: (1) warm-path scaling, (2)
+dtoc1nd dense-front gap, (3) nemin. Answered (3) as a rejection on the
+issue, and split (1)'s premise: warm-STARTING the equilibration is
+falsified (this morning), but CACHING/reusing the scaling vector across
+factorizations — which is what #153 actually proposes — is untested and
+is the better lever precisely because the loop never converges and
+always burns all 10 passes, so reuse saves the whole cost.
+
+First probe on (2). My initial hypothesis was that 33-64 column fronts
+fall through the 0.15.0 gates. Checked before measuring: simd_work =
+n_elim * rowspan * ncol, so a 48-column front with rowspan ~150 gives
+~230k against PACKED_SIMD_MIN_WORK=1024. The gate passes by two orders
+of magnitude. Hypothesis refuted before writing any code.
+
+What the throughput curve says instead (bench_dense_front, nofma serial,
+30 reps, dense front of order n):
+
+  n=32    0.77 GFLOP/s      n=192   3.13
+  n=48    1.42             n=256   3.51
+  n=64    1.85             n=512   4.40
+  n=96    2.95             n=1024  5.05
+  n=128   3.45
+
+The dtoc1nd regime (33-64 columns) runs at 1.4-1.9 GFLOP/s, ~2.7x below
+the n=1024 rate and far below what AVX2 can do on the trailing update
+alone. So the medium-front deficit is real and local, but it is NOT the
+packed kernel being switched off — it is running, and the cost is
+elsewhere in the front (pivot search is O(n^2) scan per pivot, plus
+per-front fixed cost). Caveat: this bench factors a square front
+(nrow=ncol=n); real dtoc1nd fronts are trapezoidal, so the ncol axis
+matches but the rowspan does not. Asked jrk on #153 for dtoc1nd's
+loop-time-weighted front histogram bucketed 9-32/33-64/65-128/>128
+before committing to a mechanism.
