@@ -219,3 +219,102 @@ timing-only table.
 Also: #149's SIMD kernel is below 1.0 on all six, significantly on
 clnlbeam (0.966, 0/15, 0.0001) and rocket_12800 (0.979, 2/15, 0.0074).
 It helped on the proxies. Separate thread, worth its own bisect.
+
+* 17:05 :correction:ma57:oracle:methodology:
+Result 1 of this session is WRONG and has been retracted on PR #157.
+
+Asked whether any optimization work remained, pulled analyse_us
+alongside factor_us, and noticed feral's analysis was 5.0 s on
+clnlbeam against a 26 ms factorization. Chasing that led back through
+the oracle and exposed the error.
+
+`ma57_bench.F` sets ICNTL(15)=1. MA57 computes that scaling *inside
+MA57BD*, which is exactly the region the oracle times as factor_us.
+feral computes its MC64 during analysis, which its factor_us excludes.
+So the comparison charged MA57 per-factorization for work feral had
+already amortized and was not billed for.
+
+I had checked that factor_us covered MA57BD only and treated that as
+sufficient. The boundary of the timed region was verified; the
+contents were not.
+
+Corrected (ICNTL(15)=0, 15 pairs, min factor_us), feral vs ma57:
+  dtoc1nd        14050 /  2539  -> MA57 5.53x   0/15  p=0.0001
+  clnlbeam       21979 /  5384  -> MA57 4.08x   1/15  p=0.0010
+  rocket_12800   22266 /  5955  -> MA57 3.74x   0/15  p=0.0001
+  marine_1600    33131 / 10973  -> MA57 3.02x   0/15  p=0.0001
+  steering_12800 34517 / 17097  -> MA57 2.02x   0/15  p=0.0001
+  dtoc2          81725 / 51309  -> MA57 1.59x   0/15  p=0.0001
+
+MA57 faster on all six. Three independent confirmations:
+- issue #153 measured the same six through pounce: 1.29x-3.77x MA57.
+  Its MA57 times (clnlbeam 7.27 ms, rocket 8.79, steering 18.96) match
+  ICNTL(15)=0 (5.38, 5.96, 17.1), not the oracle's (201, 554, 292).
+- the proxy note I "superseded" said 1.4x-2.4x slower. Right direction,
+  close magnitude. I overturned a correct finding with a worse
+  measurement.
+- the steering accuracy caveat was the same artifact: scaling off gives
+  MA57 rel_res 1.59e-14, not 4.53e-08.
+
+Results 2 and 3 are untouched -- they compare feral builds to each
+other and never invoke the oracle.
+
+Oracle now defaults ICNTL(15)=0, takes MA57_SCALING to override, times
+MA57AD, and echoes both analyse_us and `scaling` into every sidecar so
+a result file can never again be ambiguous about which arm produced it.
+
+* 17:20 :analysis:mc64:ldlt_compress:target:
+The question that exposed the error also produced the clearest
+optimization target in the corpus.
+
+analyse_us vs factor_us for main, and per-stage via a new
+diag_symbolic_stages_argv:
+
+  matrix          analyse    factor   ldlt_compress  share   ordering
+  clnlbeam       5001272     26008        4515372    99.3%      3706
+  rocket_12800   2705801     29910        2289795    98.3%      3932
+  marine_1600    1048521     42817              -        -          -
+  steering_12800  130389     41795          23539    33.6%      6172
+  dtoc2           276116    101528              -        -          -
+  dtoc1nd          42464     19278           2834    23.1%      2118
+
+ldlt_compress is compute_mc64_cache (src/symbolic/mod.rs:1211). On
+clnlbeam it is 4.5 s while the fill-reducing ordering beside it is
+3.7 ms -- a factor of 1200. Every other symbolic stage is 1-15 ms.
+
+Not a size effect: clnlbeam has the FEWEST nonzeros of the large five
+(259,993) and the most expensive analysis; steering_12800 is larger
+(n=115,201, nnz=409,591) and analyses 38x faster. A 192x spread on
+comparable matrices points at an algorithmic pathology in the matching
+-- plausibly long augmenting paths on chain structure -- not uniform
+slowness.
+
+Against MA57's analysis, now that the oracle times MA57AD:
+  clnlbeam       feral 5001272 vs ma57   6298   -> 794x slower
+  rocket_12800         2705801     6426        -> 421x
+  marine_1600          1048521     7296        -> 144x
+  dtoc1nd                42464     2467        ->  17x
+  dtoc2                 276116   434101        -> feral 1.6x FASTER
+  steering_12800        130389   178776        -> feral 1.4x FASTER
+
+The two matrices where feral's analysis wins are exactly the two where
+ldlt_compress is a small share. Clean causal story: feral's analysis is
+competitive when MC64 does not blow up.
+
+End-to-end with both arms doing MC64 (feral total vs MA57 ICNTL(15)=1
+total) -- the only arm pairing where both solvers do the same work:
+  clnlbeam       5027280 /  240384 -> MA57 20.9x
+  marine_1600    1091338 /   54566 -> MA57 20.0x
+  dtoc1nd          61742 /    8086 -> MA57  7.6x
+  rocket_12800   2735711 /  602572 -> MA57  4.5x
+  dtoc2           377644 /  505747 -> feral 1.34x faster
+  steering_12800  172184 /  473026 -> feral 2.75x faster
+
+Issue #134 already carries "MC64 partial-matching two-pass" as a
+backlog item. This is the evidence for promoting it.
+
+Note this is a DIFFERENT cost from issue #153's "warm-path scaling
+never warms": that is the numeric scaling in the factor prologue
+(3.9-19.9 ms per call, 18-34% of factor time), paid every
+factorization. ldlt_compress is symbolic, paid once per analysis. Both
+are MC64. Whether one fix addresses both is unverified.

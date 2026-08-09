@@ -10,7 +10,29 @@ C
 C   Configuration (matches the comparison harness "best-effort" mode):
 C     * ICNTL(6) = 5  — automatic AMD / METIS ordering
 C     * ICNTL(7) = 1  — numerical pivoting with threshold (BK-style)
-C     * ICNTL(15) = 1 — automatic scaling on (MC64-equivalent)
+C     * ICNTL(15) — automatic MC64-equivalent scaling. DEFAULT 0 (OFF).
+C
+C       READ THIS BEFORE CHANGING IT. MA57 computes the ICNTL(15)
+C       scaling *inside MA57BD*, which is the region this harness
+C       times as `factor_us`. feral computes its MC64 during
+C       ANALYSIS, which its own `factor_us` excludes. Setting
+C       ICNTL(15)=1 therefore charges MA57 per-factorization for work
+C       feral has already amortized and is not billed for, and the
+C       resulting comparison is not apples-to-apples.
+C
+C       Measured cost of that mistake (chain KKTs, min over 15 pairs):
+C       ICNTL(15)=1 inflates MA57 `factor_us` by 37x on clnlbeam
+C       (200,662 vs 5,384 us) and 93x on rocket_12800 (554,339 vs
+C       5,955 us). It also made MA57 *less* accurate on
+C       steering_12800 (rel_res 4.53e-08 vs 1.59e-14). A run with
+C       ICNTL(15)=1 produced a published claim that feral was 8x-23x
+C       faster than MA57; corrected, MA57 is faster on all six by
+C       1.59x-5.53x. See dev/research/chain-kkt-corpus-2026-08-09.md.
+C
+C       Override with the MA57_SCALING environment variable
+C       (MA57_SCALING=1 restores the old behavior). The value used is
+C       always echoed into the sidecar as `scaling`, so a result file
+C       can never again be ambiguous about which arm it came from.
 C     * CNTL(1)  = 1e-8 — pivot threshold (matches MA27 / Ipopt default)
 C     * MA57DD JOB=2 with ICNTL(9)=10 — residual-based iterative
 C       refinement, up to 10 steps. Mirrors what MUMPS + ICNTL(10)=2
@@ -80,8 +102,11 @@ C     MA57 workspace
 
       DOUBLE PRECISION :: RES_NORM, RHS_NORM, REL_RES
       INTEGER(8) :: T_FAC_START, T_FAC_END, T_SOL_START, T_SOL_END
+      INTEGER(8) :: T_ANA_START, T_ANA_END
       INTEGER(8) :: CLOCK_RATE, CLOCK_MAX
-      INTEGER(8) :: FAC_US, SOL_US
+      INTEGER(8) :: FAC_US, SOL_US, ANA_US
+      INTEGER :: ISCALE, ENV_LEN, ENV_STAT
+      CHARACTER(LEN=32) :: ENV_VAL
       LOGICAL :: HAVE_FAILURE
 
       IF (COMMAND_ARGUMENT_COUNT() .LT. 1) THEN
@@ -91,6 +116,15 @@ C     MA57 workspace
       CALL GET_COMMAND_ARGUMENT(1, MANIFEST_PATH)
 
       CALL SYSTEM_CLOCK(COUNT_RATE=CLOCK_RATE, COUNT_MAX=CLOCK_MAX)
+
+C     ---- Resolve ICNTL(15) once, before the manifest loop ----
+      ISCALE = 0
+      CALL GET_ENVIRONMENT_VARIABLE("MA57_SCALING", ENV_VAL,
+     &                              ENV_LEN, ENV_STAT)
+      IF (ENV_STAT .EQ. 0 .AND. ENV_LEN .GT. 0) THEN
+        READ(ENV_VAL(1:ENV_LEN), *, IOSTAT=IOS) ISCALE
+        IF (IOS .NE. 0) ISCALE = 0
+      END IF
 
       OPEN(UNIT=10, FILE=TRIM(MANIFEST_PATH), STATUS='OLD',
      &     ACTION='READ', IOSTAT=IOS)
@@ -149,7 +183,7 @@ C     ---- MA57 init: defaults, then override with "best-effort" cfg ----
       ICNTL(6) = 5
       ICNTL(7) = 1
       ICNTL(9) = 1
-      ICNTL(15) = 1
+      ICNTL(15) = ISCALE
       CNTL(1)  = 1.0D-8
 
 C     ---- Analysis ----
@@ -157,8 +191,10 @@ C     ---- Analysis ----
       ALLOCATE(KEEP(LKEEP))
       ALLOCATE(IWORK(5 * MROWS))
 
+      CALL SYSTEM_CLOCK(T_ANA_START)
       CALL MA57AD(MROWS, MNNZ, IRA, JCA, LKEEP, KEEP, IWORK,
      &            ICNTL, INFO, RINFO)
+      CALL SYSTEM_CLOCK(T_ANA_END)
       IF (INFO(1) .LT. 0) THEN
         WRITE(0,'(A,A,A,I6)') "ma57ad failed on ", TRIM(MTX_PATH),
      &        " INFO(1)=", INFO(1)
@@ -242,6 +278,7 @@ C     ---- Compute residual ||A·x - b||_2 / ||b||_2 ----
         REL_RES = SQRT(RES_NORM)
       END IF
 
+      ANA_US = ((T_ANA_END - T_ANA_START) * 1000000_8) / CLOCK_RATE
       FAC_US = ((T_FAC_END - T_FAC_START) * 1000000_8) / CLOCK_RATE
       SOL_US = ((T_SOL_END - T_SOL_START) * 1000000_8) / CLOCK_RATE
 
@@ -264,12 +301,14 @@ C     ---- Write result ----
       WRITE(12,'(A,I0)') "inertia_pos ", INERT_POS
       WRITE(12,'(A,I0)') "inertia_neg ", INERT_NEG
       WRITE(12,'(A,I0)') "inertia_zero ", INERT_ZERO
+      WRITE(12,'(A,I0)') "analyse_us ", ANA_US
       WRITE(12,'(A,I0)') "factor_us ", FAC_US
       WRITE(12,'(A,I0)') "solve_us ", SOL_US
       WRITE(12,'(A,ES24.16E3)') "rel_res ", REL_RES
       WRITE(12,'(A,I0)') "info1 ", INFO(1)
       WRITE(12,'(A,I0)') "info24 ", INFO(24)
       WRITE(12,'(A,I0)') "info25 ", INFO(25)
+      WRITE(12,'(A,I0)') "scaling ", ISCALE
       WRITE(12,'(A)') "status ok"
       CLOSE(12)
       NDONE = NDONE + 1

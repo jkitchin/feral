@@ -2,16 +2,21 @@
 
 **Date:** 2026-08-09
 **Machine:** Apple M2, `Mac14,2`, 4 performance + 4 efficiency cores, macOS.
-**Status:** SUPERSEDED by `chain-kkt-corpus-2026-08-09.md`. Kept as the
-record of what the proxies said and why it was believed.
+**Status:** PARTIALLY SUPERSEDED by `chain-kkt-corpus-2026-08-09.md`.
+Result 1 of this note stands. Results 2 and 3 are superseded.
 
-> **Both headline conclusions below are contradicted by the real
-> corpus.** The three follow-ups this note asked for were run on
-> 2026-08-09 on an M4 Pro with `data/matrices/`, and:
+> **Result 1 of this note was right.** An earlier revision of this
+> banner said feral was 8x-23x *faster* than MA57 on chain KKTs. That
+> came from an oracle running `ICNTL(15) = 1`, which computes MC64
+> scaling inside the timed `MA57BD` region while feral's MC64 sits in
+> untimed analysis. Corrected (`ICNTL(15) = 0`, 15 pairs), MA57 is
+> faster on all six real matrices by 1.59x to 5.53x — the same
+> direction, and close to the magnitude, this note reported from the
+> proxies (1.4x-2.4x). The proxies were vindicated by the real corpus,
+> not contradicted by it.
 >
-> * feral is **not** slower than MA57 on chain KKTs — it is 8x to 23x
->   *faster* on `rocket_12800`, `clnlbeam` and `steering_12800`, and
->   loses only on `dtoc2` (1.3x) and `dtoc1nd`, the smallest matrix.
+> **What is genuinely superseded:**
+>
 > * the regression is **not** on the large chains — it is on `dtoc1nd`
 >   (n = 9,685), where #150 costs 25%. On the four largest matrices #150
 >   *gains* 1.20x to 2.05x.
@@ -19,9 +24,8 @@ record of what the proxies said and why it was believed.
 >   Thread count moves nothing on the real matrices, on hardware with
 >   more efficiency cores than the machine the hypothesis came from.
 >
-> The proxies got "something regressed after 0.14.0" right and its
-> location exactly backwards. Read them as a cautionary case for
-> geometry-matched synthetic stand-ins, not as a measurement.
+> So the proxies got the gap right and the regression's location
+> exactly backwards.
 
 ## Why
 

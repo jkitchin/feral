@@ -2,8 +2,49 @@
 
 **Date:** 2026-08-09
 **Machine:** Apple M4 Pro, `Mac16,11`, 10 performance + 4 efficiency cores, macOS.
-**Supersedes:** `chain-kkt-ma57-gap-2026-08-09.md`, whose two headline
-conclusions this run contradicts.
+**Supersedes:** `chain-kkt-ma57-gap-2026-08-09.md` in part — its
+Results 2 and 3 only. Its Result 1 (the MA57 gap) stands; see the
+correction below.
+
+> **CORRECTION (supersedes Result 1 below).** The "no gap" result
+> was produced with a misconfigured oracle and is wrong. `ma57_bench.F`
+> sets `ICNTL(15) = 1`, which makes MA57 compute MC64 scaling *inside*
+> `MA57BD` — the region the oracle times. feral computes its MC64 in
+> **analysis**, which `factor_us` excludes. The comparison charged MA57
+> per-factorization for work feral had already amortized and was not
+> being billed for.
+>
+> Re-run with `ICNTL(15) = 0`, 15 pairs, `min factor_us`:
+>
+> | matrix | feral | ma57 | MA57 faster by | wins | p |
+> |---|---|---|---|---|---|
+> | dtoc1nd | 14,050 | 2,539 | 5.53x | 0/15 | 0.0001 |
+> | clnlbeam | 21,979 | 5,384 | 4.08x | 1/15 | 0.0010 |
+> | rocket_12800 | 22,266 | 5,955 | 3.74x | 0/15 | 0.0001 |
+> | marine_1600 | 33,131 | 10,973 | 3.02x | 0/15 | 0.0001 |
+> | steering_12800 | 34,517 | 17,097 | 2.02x | 0/15 | 0.0001 |
+> | dtoc2 | 81,725 | 51,309 | 1.59x | 0/15 | 0.0001 |
+>
+> MA57 is faster on **all six**. Three independent checks say this is
+> the real number:
+>
+> - issue #153 measured the same six through pounce and got 1.29x-3.77x in
+>   MA57's favor. Its MA57 times (clnlbeam 7.27 ms, rocket 8.79,
+>   steering 18.96) match `ICNTL(15)=0` (5.38, 5.96, 17.1), not the
+>   oracle's (201, 554, 292).
+> - The proxy conclusion this note claimed to supersede — 1.4x-2.4x
+>   slower — was right in direction and close in magnitude. A correct
+>   finding was overturned by a worse measurement.
+> - The steering accuracy caveat was the same artifact. With scaling
+>   off MA57 gets `1.59e-14`, not `4.53e-08`.
+>
+> Results 2 and 3 are unaffected: they compare feral builds to each
+> other and never touch the oracle. The #150 attribution, the dtoc1nd
+> regression, and the refuted E-core hypothesis all stand.
+>
+> What the checking missed: `factor_us` was verified to cover `MA57BD`
+> only, and that was treated as sufficient. The boundary of the timed
+> region was checked; the contents were not.
 
 ## Why
 
@@ -197,3 +238,61 @@ harvested.
   directly answer the report.
 - The MA57 oracle does not do the iterative refinement feral does; see
   the `steering_12800` residual caveat under Result 1.
+
+## Result 4 — analysis dominates, and one stage is all of it
+
+Found while checking whether the corrected MA57 gap left any
+optimization work. `analyse_us` vs `factor_us` for `main`, same run:
+
+| matrix | n | nnz | analyse_us | factor_us | analyse/nnz |
+|---|---|---|---|---|---|
+| clnlbeam | 99,999 | 259,993 | 5,001,272 | 26,008 | 19.24 |
+| rocket_12800 | 89,601 | 435,190 | 2,705,801 | 29,910 | 6.22 |
+| marine_1600 | 76,807 | 414,399 | 1,048,521 | 42,817 | 2.53 |
+| steering_12800 | 115,201 | 409,591 | 130,389 | 41,795 | 0.32 |
+| dtoc2 | 103,920 | 961,230 | 276,116 | 101,528 | 0.29 |
+| dtoc1nd | 9,685 | 217,270 | 42,464 | 19,278 | 0.20 |
+
+A 60x spread in cost per nonzero across matrices of comparable size.
+`clnlbeam` has the *fewest* nonzeros of the large five and the most
+expensive analysis; `steering_12800` is larger (n = 115,201) with
+comparable nnz and analyses 38x faster. Not a constant factor.
+
+Per-stage breakdown via `diag_symbolic_stages_argv`:
+
+| matrix | `ldlt_compress` | share of symbolic | `ordering` |
+|---|---|---|---|
+| clnlbeam | 4,515,372 | 99.3% | 3,706 |
+| rocket_12800 | 2,289,795 | 98.3% | 3,932 |
+| steering_12800 | 23,539 | 33.6% | 6,172 |
+| dtoc1nd | 2,834 | 23.1% | 2,118 |
+
+`ldlt_compress` is `compute_mc64_cache` — the Duff-Pralet symmetric
+matching (`src/symbolic/mod.rs:1211`). On `clnlbeam` it takes 4.5 s
+while the fill-reducing ordering beside it takes 3.7 ms, a factor of
+1,200. Every other symbolic stage is 1-15 ms and scales sanely.
+
+`src/symbolic/mod.rs:1190` already records the same shape on the pf22
+powerflow KKT (MC64 ~53 s vs `amd_order` ~0.3 s, issue #80), so this is
+the second corpus where MC64 dominates analysis by three orders of
+magnitude.
+
+This also reframes Result 1 honestly: feral's MC64 is not free, it is
+billed to analysis, where `factor_us` does not see it. Whether
+amortizing it across an IPM's refactorizations is legitimate depends on
+the caller — but 4.5 s of analysis dominates any end-to-end number
+regardless of how fast the factorization becomes.
+
+## Limits on the corrected comparison
+
+Neither MA57 configuration is a clean apples-to-apples arm.
+`ICNTL(15) = 1` charges MA57 per-factorization for scaling feral
+amortizes into analysis. `ICNTL(15) = 0` gives feral MC64 scaling that
+MA57 does not get, so feral's arm is doing strictly more numerical
+work. The corrected table uses `ICNTL(15) = 0` because that matches
+what pounce measures through `SparseSymLinearSolverInterface` (issue
+#153) and agrees with it to within the harness difference.
+
+The clean experiment, not yet run: pre-scale each matrix with MC64
+offline and run both solvers with scaling off, so the two arms
+factorize identical numbers.
