@@ -3591,6 +3591,20 @@ fn packed_schur_enabled() -> bool {
     )
 }
 
+/// Whether the packed trailing update runs the explicit-SIMD pulp tile
+/// kernel (`schur_kernel::packed_schur_tiles_*`) or the scalar reference
+/// tile loop. Default `true`; `FERAL_PACKED_SIMD=0|off|false|no`
+/// restores the scalar loop for A/B benchmarking or as a safety
+/// override (e.g. while re-validating a new arch). Byte-exact either
+/// way — same per-element fold, lane width free.
+#[inline]
+fn packed_simd_enabled() -> bool {
+    !matches!(
+        std::env::var("FERAL_PACKED_SIMD").as_deref(),
+        Ok("0") | Ok("off") | Ok("false") | Ok("no")
+    )
+}
+
 /// Packed, register-tiled equivalent of [`apply_schur_panel_range`]
 /// (issue #99, BLAS-3 — Phase B-2). Computes the same lower-triangular
 /// rank-`n_elim` trailing update for `i >= j`, packing the panel into
@@ -3629,14 +3643,47 @@ fn apply_schur_panel_range_packed(
     subdiag: &[f64],
     fma: bool,
 ) {
+    apply_schur_panel_range_packed_impl(
+        head,
+        block,
+        col_start,
+        nrow,
+        k,
+        n_elim,
+        d_panel,
+        subdiag,
+        fma,
+        packed_simd_enabled(),
+    );
+}
+
+/// Implementation of the packed trailing update with an explicit
+/// `use_simd` switch so the parity test can pin the pulp tile kernel and
+/// the scalar reference tile loop against each other without touching
+/// process-global env state.
+#[allow(clippy::too_many_arguments)]
+fn apply_schur_panel_range_packed_impl(
+    head: &[f64],
+    block: &mut [f64],
+    col_start: usize,
+    nrow: usize,
+    k: usize,
+    n_elim: usize,
+    d_panel: &[f64],
+    subdiag: &[f64],
+    fma: bool,
+    use_simd: bool,
+) {
     let ncol = block.len() / nrow;
     if ncol == 0 || n_elim == 0 {
         return;
     }
     // Register-tile dimensions. MR rows × NR cols per tile; the MR (row)
-    // axis is the contiguous SIMD axis the compiler autovectorizes.
-    const MR: usize = 8;
-    const NR: usize = 4;
+    // axis is the contiguous SIMD axis (explicit pulp lanes on the
+    // default path, autovectorization on the scalar reference loop).
+    // Shared with `schur_kernel::packed_schur_tiles_*`.
+    const MR: usize = schur_kernel::PACKED_MR;
+    const NR: usize = schur_kernel::PACKED_NR;
 
     // A 2×2 pivot pair starts at `q` when `subdiag[k+q] != 0` and `q+1`
     // is still in-panel. Same predicate as the strided fallback; the
@@ -3717,7 +3764,37 @@ fn apply_schur_panel_range_packed(
         }
     }
 
-    // Tiled update over the lower triangle (i >= j).
+    // Tiled update over the lower triangle (i >= j): explicit-SIMD pulp
+    // tile kernel by default (one dispatch per panel; see
+    // `schur_kernel::packed_schur_tiles_nofma` for the bit-exactness
+    // contract), scalar reference tile loop below via
+    // `FERAL_PACKED_SIMD=0`. Byte-exact either way.
+    if use_simd {
+        if fma {
+            schur_kernel::packed_schur_tiles_fma(
+                block,
+                &apack,
+                &bpack0,
+                &bpack1,
+                &d_panel[..n_elim],
+                &subdiag[k..],
+                nrow,
+                col_start,
+            );
+        } else {
+            schur_kernel::packed_schur_tiles_nofma(
+                block,
+                &apack,
+                &bpack0,
+                &bpack1,
+                &d_panel[..n_elim],
+                &subdiag[k..],
+                nrow,
+                col_start,
+            );
+        }
+        return;
+    }
     for pj in 0..npanels_j {
         let j0 = col_start + pj * NR;
         let bbase = pj * (n_elim * NR);
@@ -6327,26 +6404,33 @@ mod packed_schur_tests {
                 scalar_ref(
                     &head, &mut b_ref, col_start, nrow, k, n_elim, &d_panel, &subdiag, fma,
                 );
-                let mut b_packed = block0.clone();
-                apply_schur_panel_range_packed(
-                    &head,
-                    &mut b_packed,
-                    col_start,
-                    nrow,
-                    k,
-                    n_elim,
-                    &d_panel,
-                    &subdiag,
-                    fma,
-                );
-                for lc in 0..ncol {
-                    let j = col_start + lc;
-                    for i in j..nrow {
-                        assert_eq!(
-                            b_packed[lc * nrow + i].to_bits(),
-                            b_ref[lc * nrow + i].to_bits(),
-                            "packed != scalar (fma={fma}, pat={pat}) at (i={i},j={j}) nrow={nrow} n_elim={n_elim}"
-                        );
+                // Both the explicit-SIMD pulp tile kernel (use_simd =
+                // true, the default) and the scalar reference tile loop
+                // (the `FERAL_PACKED_SIMD=0` fallback) must match the
+                // scalar per-column reference bit-for-bit.
+                for use_simd in [true, false] {
+                    let mut b_packed = block0.clone();
+                    apply_schur_panel_range_packed_impl(
+                        &head,
+                        &mut b_packed,
+                        col_start,
+                        nrow,
+                        k,
+                        n_elim,
+                        &d_panel,
+                        &subdiag,
+                        fma,
+                        use_simd,
+                    );
+                    for lc in 0..ncol {
+                        let j = col_start + lc;
+                        for i in j..nrow {
+                            assert_eq!(
+                                b_packed[lc * nrow + i].to_bits(),
+                                b_ref[lc * nrow + i].to_bits(),
+                                "packed != scalar (fma={fma}, simd={use_simd}, pat={pat}) at (i={i},j={j}) nrow={nrow} n_elim={n_elim}"
+                            );
+                        }
                     }
                 }
             }

@@ -2383,6 +2383,328 @@ pub fn schur_panel_minus_fma_strided_quad(
     });
 }
 
+// ---------------------------------------------------------------------
+// Packed BLAS-3 tile kernels (issue #99 follow-up, session 2026-08-09).
+//
+// `dense::factor::apply_schur_panel_range_packed` packs the eliminated
+// panel into `q`-contiguous MR×NR micro-panels and runs a register-tiled
+// accumulation walk. That walk previously lived in `factor.rs` as plain
+// scalar Rust relying on autovectorization — which, measured on x86
+// (objdump, dev/research/kernel-simd-x86-baseline-2026-08-09.md), never
+// happened: the inner loop compiled to scalar `mulsd`/`subsd` and ran at
+// ~6 GFLOP/s (scalar ILP peak) while pulp's strided kernels reach AVX2
+// through runtime dispatch. These kernels move the tile walk behind the
+// same `dispatch_nofma`/`dispatch_fma` helpers, one dispatch per panel.
+//
+// Bit-exactness contract (default nofma path): each C element (i, j) is
+// seeded from the trailing block and then folded over the pivot stream
+// in ascending `q` with per-step rounding
+//   1×1:  acc = round(acc − round(b·a))            (mul → sub)
+//   2×2:  acc = round(acc − round(round(d0·a0) + round(d1·a1)))
+// — exactly the scalar reference in `factor.rs` and the strided
+// `axpy_minus_unroll4_nofma` / `axpy2_minus_unroll4_nofma` shapes. SIMD
+// lanes run that identical per-element sequence on independent elements
+// (IEEE per-lane mul/add/sub ≡ scalar), so the result is bit-identical
+// to the scalar walk at every lane width (scalar, NEON f64x2, AVX2
+// f64x4, AVX-512 f64x8). The FMA variants chain `mul_add` per element
+// exactly like the scalar `f64::mul_add` opt-in path (both are
+// single-rounding fused ops). Gated by
+// `packed_matches_scalar_reference_bit_for_bit` and the byte-exact
+// factor-parity suite.
+
+/// Register-tile row count for the packed trailing update. The MR (row)
+/// axis is the contiguous SIMD axis. Shared with the packing code in
+/// `dense::factor`.
+pub const PACKED_MR: usize = 8;
+/// Register-tile column count for the packed trailing update.
+pub const PACKED_NR: usize = 4;
+
+struct PackedTiles<'a, const FMA: bool> {
+    block: &'a mut [f64],
+    apack: &'a [f64],
+    bpack0: &'a [f64],
+    bpack1: &'a [f64],
+    d_panel: &'a [f64],
+    subdiag_k: &'a [f64],
+    nrow: usize,
+    col_start: usize,
+}
+
+impl<const FMA: bool> pulp::WithSimd for PackedTiles<'_, FMA> {
+    type Output = ();
+
+    #[inline(always)]
+    fn with_simd<S: pulp::Simd>(self, simd: S) {
+        let Self {
+            block,
+            apack,
+            bpack0,
+            bpack1,
+            d_panel,
+            subdiag_k,
+            nrow,
+            col_start,
+        } = self;
+        let n_elim = d_panel.len();
+        let ncol = block.len() / nrow;
+        let row0 = col_start;
+        let rowspan = nrow - row0;
+        let col_end = col_start + ncol;
+        let npanels_i = rowspan.div_ceil(PACKED_MR);
+        let npanels_j = ncol.div_ceil(PACKED_NR);
+        // Same 2×2-start predicate as the packing code and the strided
+        // fallback: the second element of a pair is never re-entered.
+        let is_2x2_start = |q: usize| q + 1 < n_elim && subdiag_k[q] != 0.0;
+
+        for pj in 0..npanels_j {
+            let j0 = col_start + pj * PACKED_NR;
+            let bbase = pj * (n_elim * PACKED_NR);
+            for pi in 0..npanels_i {
+                let i0 = row0 + pi * PACKED_MR;
+                // Tiles entirely in the strict upper triangle have no
+                // element with i >= j.
+                if i0 + PACKED_MR <= j0 {
+                    continue;
+                }
+                let abase = pi * (n_elim * PACKED_MR);
+
+                // Seed the C tile (lower-triangle, in-range elements
+                // only; out-of-range/upper lanes stay 0 and are never
+                // stored). Scalar guarded copy, identical to the
+                // reference walk in `factor.rs`.
+                let mut acc = [[0.0f64; PACKED_MR]; PACKED_NR];
+                for (jr, accj) in acc.iter_mut().enumerate() {
+                    let j = j0 + jr;
+                    if j >= col_end {
+                        continue;
+                    }
+                    let colblk = (j - col_start) * nrow;
+                    for (ir, a) in accj.iter_mut().enumerate() {
+                        let i = i0 + ir;
+                        if i < nrow && i >= j {
+                            *a = block[colblk + i];
+                        }
+                    }
+                }
+
+                // Pivot-stream walk in ascending `q`; lane-parallel over
+                // the MR axis. PACKED_MR = 8 is a multiple of every lane
+                // width pulp instantiates (1/2/4/8), so `as_simd_f64s`
+                // never produces a tail here.
+                let mut q = 0usize;
+                while q < n_elim {
+                    if is_2x2_start(q) {
+                        let (a0v, _) =
+                            S::as_simd_f64s(&apack[abase + q * PACKED_MR..][..PACKED_MR]);
+                        let (a1v, _) =
+                            S::as_simd_f64s(&apack[abase + (q + 1) * PACKED_MR..][..PACKED_MR]);
+                        let b0 = &bpack0[bbase + q * PACKED_NR..][..PACKED_NR];
+                        let b1 = &bpack1[bbase + q * PACKED_NR..][..PACKED_NR];
+                        for (jr, accj) in acc.iter_mut().enumerate() {
+                            let (accv, _) = S::as_mut_simd_f64s(&mut accj[..]);
+                            if FMA {
+                                // Two chained FMAs, matching the scalar
+                                // opt-in path (`f64::mul_add`).
+                                let n0 = simd.splat_f64s(-b0[jr]);
+                                let n1 = simd.splat_f64s(-b1[jr]);
+                                for (accl, (av0, av1)) in
+                                    accv.iter_mut().zip(a0v.iter().zip(a1v.iter()))
+                                {
+                                    *accl = simd.mul_add_f64s(
+                                        n1,
+                                        *av1,
+                                        simd.mul_add_f64s(n0, *av0, *accl),
+                                    );
+                                }
+                            } else {
+                                // t = round(round(d0·a0) + round(d1·a1));
+                                // acc = round(acc − t) — the axpy2 nofma
+                                // shape.
+                                let d0 = simd.splat_f64s(b0[jr]);
+                                let d1 = simd.splat_f64s(b1[jr]);
+                                for (accl, (av0, av1)) in
+                                    accv.iter_mut().zip(a0v.iter().zip(a1v.iter()))
+                                {
+                                    let t = simd
+                                        .add_f64s(simd.mul_f64s(d0, *av0), simd.mul_f64s(d1, *av1));
+                                    *accl = simd.sub_f64s(*accl, t);
+                                }
+                            }
+                        }
+                        q += 2;
+                    } else {
+                        // 1×1; skip a zero pivot exactly as the
+                        // reference does.
+                        if d_panel[q] != 0.0 {
+                            let (a0v, _) =
+                                S::as_simd_f64s(&apack[abase + q * PACKED_MR..][..PACKED_MR]);
+                            let b0 = &bpack0[bbase + q * PACKED_NR..][..PACKED_NR];
+                            for (jr, accj) in acc.iter_mut().enumerate() {
+                                let (accv, _) = S::as_mut_simd_f64s(&mut accj[..]);
+                                if FMA {
+                                    let nb = simd.splat_f64s(-b0[jr]);
+                                    for (accl, av) in accv.iter_mut().zip(a0v.iter()) {
+                                        *accl = simd.mul_add_f64s(nb, *av, *accl);
+                                    }
+                                } else {
+                                    let bv = simd.splat_f64s(b0[jr]);
+                                    for (accl, av) in accv.iter_mut().zip(a0v.iter()) {
+                                        *accl = simd.sub_f64s(*accl, simd.mul_f64s(bv, *av));
+                                    }
+                                }
+                            }
+                        }
+                        q += 1;
+                    }
+                }
+
+                // Store back the lower-triangle, in-range elements.
+                for (jr, accj) in acc.iter().enumerate() {
+                    let j = j0 + jr;
+                    if j >= col_end {
+                        continue;
+                    }
+                    let colblk = (j - col_start) * nrow;
+                    for (ir, a) in accj.iter().enumerate() {
+                        let i = i0 + ir;
+                        if i < nrow && i >= j {
+                            block[colblk + i] = *a;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Validate the shared geometry/lengths of a packed tile call, then
+/// return `(ncol, npanels_i, npanels_j)`. Panics (like the other kernel
+/// entry asserts in this file) on malformed inputs so the SIMD body can
+/// index without per-access surprises.
+#[allow(clippy::too_many_arguments)]
+fn packed_tiles_checked_geom(
+    block_len: usize,
+    apack_len: usize,
+    bpack0_len: usize,
+    bpack1_len: usize,
+    d_panel_len: usize,
+    subdiag_k_len: usize,
+    nrow: usize,
+    col_start: usize,
+) -> (usize, usize, usize) {
+    assert!(nrow > 0, "packed_schur_tiles: nrow must be positive");
+    assert_eq!(
+        block_len % nrow,
+        0,
+        "packed_schur_tiles: block length must be a multiple of nrow"
+    );
+    let ncol = block_len / nrow;
+    assert!(
+        col_start + ncol <= nrow,
+        "packed_schur_tiles: columns exceed nrow"
+    );
+    let npanels_i = (nrow - col_start).div_ceil(PACKED_MR);
+    let npanels_j = ncol.div_ceil(PACKED_NR);
+    assert_eq!(
+        apack_len,
+        npanels_i * d_panel_len * PACKED_MR,
+        "packed_schur_tiles: apack length mismatch"
+    );
+    assert_eq!(
+        bpack0_len,
+        npanels_j * d_panel_len * PACKED_NR,
+        "packed_schur_tiles: bpack0 length mismatch"
+    );
+    assert!(
+        bpack1_len == 0 || bpack1_len == bpack0_len,
+        "packed_schur_tiles: bpack1 must be empty or match bpack0"
+    );
+    assert!(
+        subdiag_k_len >= d_panel_len,
+        "packed_schur_tiles: subdiag_k shorter than d_panel"
+    );
+    (ncol, npanels_i, npanels_j)
+}
+
+/// Packed register-tiled trailing update, **nofma** (default) rounding
+/// contract: per element `mul → sub` (1×1) / add-then-sub (2×2), two
+/// roundings per multiply-accumulate — bit-identical to the scalar
+/// reference walk at every lane width. `d_panel.len()` is `n_elim`;
+/// `subdiag_k` is the `subdiag` slice rebased at the panel (`[k..]`).
+/// `bpack1` may be empty when the panel has no 2×2 start (issue #128A).
+#[allow(clippy::too_many_arguments)]
+pub fn packed_schur_tiles_nofma(
+    block: &mut [f64],
+    apack: &[f64],
+    bpack0: &[f64],
+    bpack1: &[f64],
+    d_panel: &[f64],
+    subdiag_k: &[f64],
+    nrow: usize,
+    col_start: usize,
+) {
+    packed_tiles_checked_geom(
+        block.len(),
+        apack.len(),
+        bpack0.len(),
+        bpack1.len(),
+        d_panel.len(),
+        subdiag_k.len(),
+        nrow,
+        col_start,
+    );
+    dispatch_nofma(PackedTiles::<false> {
+        block,
+        apack,
+        bpack0,
+        bpack1,
+        d_panel,
+        subdiag_k,
+        nrow,
+        col_start,
+    });
+}
+
+/// Packed register-tiled trailing update, **FMA** (opt-in) rounding
+/// contract: one/two chained fused multiply-adds per element, matching
+/// the scalar `f64::mul_add` opt-in path bit-for-bit (both are
+/// single-rounding fused ops). Dispatching through pulp also restores
+/// real `vfmadd` codegen on x86, where the scalar `f64::mul_add` fallback
+/// lowers to a libm call at baseline codegen (measured ~3× slower than
+/// nofma; dev/research/kernel-simd-x86-baseline-2026-08-09.md Finding 2).
+#[allow(clippy::too_many_arguments)]
+pub fn packed_schur_tiles_fma(
+    block: &mut [f64],
+    apack: &[f64],
+    bpack0: &[f64],
+    bpack1: &[f64],
+    d_panel: &[f64],
+    subdiag_k: &[f64],
+    nrow: usize,
+    col_start: usize,
+) {
+    packed_tiles_checked_geom(
+        block.len(),
+        apack.len(),
+        bpack0.len(),
+        bpack1.len(),
+        d_panel.len(),
+        subdiag_k.len(),
+        nrow,
+        col_start,
+    );
+    dispatch_fma(PackedTiles::<true> {
+        block,
+        apack,
+        bpack0,
+        bpack1,
+        d_panel,
+        subdiag_k,
+        nrow,
+        col_start,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
