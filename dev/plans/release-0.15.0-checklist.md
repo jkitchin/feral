@@ -125,7 +125,6 @@ change `PAR_MIN_SEEDS` and record it in decisions.md.
       `release: published` (not on tag push), and it verifies the tag
       matches `Cargo.toml`. This is the irreversible step: crates.io
       versions can be yanked but never re-published.
-- [ ] Tag + publish (crates.io, PyPI wheels via the existing workflow)
 - [ ] Notify pounce (issue #148 / pounce#552) so the factorization
       comparison can be re-run against a released feral
 

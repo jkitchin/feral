@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-09
+
 ### Fixed — the profiler no longer reports small fronts as costless (issue #148)
 
 - **Breaking (diagnostic API).** `SupernodeTiming` now records **nanoseconds**:
