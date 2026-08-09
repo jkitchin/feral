@@ -5168,6 +5168,60 @@ fn swap_rows_cols(a: &mut [f64], n: usize, p: usize, q: usize, perm: &mut [usize
 /// MUMPS dfac_front_aux.F:1494-1495 and SSIDS options%u semantics:
 /// the pivot must dominate its column by at least 1/u, otherwise the
 /// rank-1 update would amplify rounding by ~1/|d| per position.
+/// Scale column `k` by `1/d`, apply the rank-1 trailing update to
+/// columns `k+1..n`, and return the fused `(gamma0, argmax-row)` of the
+/// updated column `k+1` — the shared tail of both `do_1x1_pivot`
+/// branches (main and static-floor, previously duplicated).
+///
+/// Deliberately scalar: an explicit pulp SIMD route (one dispatch per
+/// pivot step, byte-exact) was built and measured flat at every size —
+/// eager n=512: 11.21 vs 11.23 ms; n=200/96 identical; all warm fixture
+/// medians unchanged — because these plain loops already autovectorize
+/// and the eager path is pivot-search/bandwidth-bound. Reverted; see
+/// dev/tried-and-rejected.md 2026-08-09 and
+/// dev/research/small-front-eager-simd-2026-08-09.md before retrying.
+fn rank1_scale_update_argmax(a: &mut [f64], n: usize, k: usize, d: f64) -> (f64, usize) {
+    let d_inv = 1.0 / d;
+    for i in (k + 1)..n {
+        a[k * n + i] *= d_inv;
+    }
+
+    let mut next_gamma0 = 0.0;
+    let mut next_r = k + 2;
+
+    // Fused rank-1 update + argmax of column k+1.
+    // Column k+1 is only updated in the j=k+1 iteration, so it is
+    // handled separately to track the argmax during the same memory
+    // pass.
+    if k + 1 < n {
+        let j = k + 1;
+        let l_jk = a[k * n + j];
+        let l_jk_d = l_jk * d;
+        // Update diagonal
+        a[j * n + j] -= a[k * n + j] * l_jk_d;
+        // Update off-diagonal and track argmax
+        for i in (j + 1)..n {
+            a[j * n + i] -= a[k * n + i] * l_jk_d;
+            let val = a[j * n + i].abs();
+            if val > next_gamma0 {
+                next_gamma0 = val;
+                next_r = i;
+            }
+        }
+    }
+
+    // Remaining columns: plain update (no argmax tracking)
+    for j in (k + 2)..n {
+        let l_jk = a[k * n + j];
+        let l_jk_d = l_jk * d;
+        for i in j..n {
+            a[j * n + i] -= a[k * n + i] * l_jk_d;
+        }
+    }
+
+    (next_gamma0, next_r)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn do_1x1_pivot(
     a: &mut [f64],
@@ -5202,34 +5256,7 @@ fn do_1x1_pivot(
         } else {
             *neg += 1;
         }
-        let d_inv = 1.0 / d;
-        for i in (k + 1)..n {
-            a[k * n + i] *= d_inv;
-        }
-        let mut next_gamma0 = 0.0;
-        let mut next_r = k + 2;
-        if k + 1 < n {
-            let j = k + 1;
-            let l_jk = a[k * n + j];
-            let l_jk_d = l_jk * d;
-            a[j * n + j] -= a[k * n + j] * l_jk_d;
-            for i in (j + 1)..n {
-                a[j * n + i] -= a[k * n + i] * l_jk_d;
-                let val = a[j * n + i].abs();
-                if val > next_gamma0 {
-                    next_gamma0 = val;
-                    next_r = i;
-                }
-            }
-        }
-        for j in (k + 2)..n {
-            let l_jk = a[k * n + j];
-            let l_jk_d = l_jk * d;
-            for i in j..n {
-                a[j * n + i] -= a[k * n + i] * l_jk_d;
-            }
-        }
-        return Ok((next_gamma0, next_r));
+        return Ok(rank1_scale_update_argmax(a, n, k, d));
     }
 
     let threshold = (params.pivot_threshold * col_max).max(params.null_pivot_tol);
@@ -5328,46 +5355,7 @@ fn do_1x1_pivot(
         }
     }
 
-    let d_inv = 1.0 / d;
-
-    // Compute L column entries: L[i,k] = A[i,k] / d
-    for i in (k + 1)..n {
-        a[k * n + i] *= d_inv;
-    }
-
-    let mut next_gamma0 = 0.0;
-    let mut next_r = k + 2;
-
-    // Fused rank-1 update + argmax of next column (k+1).
-    // Column k+1 is only updated in the j=k+1 iteration, so we handle it
-    // separately to track the argmax during the same memory pass.
-    if k + 1 < n {
-        let j = k + 1;
-        let l_jk = a[k * n + j];
-        let l_jk_d = l_jk * d;
-        // Update diagonal
-        a[j * n + j] -= a[k * n + j] * l_jk_d;
-        // Update off-diagonal and track argmax
-        for i in (j + 1)..n {
-            a[j * n + i] -= a[k * n + i] * l_jk_d;
-            let val = a[j * n + i].abs();
-            if val > next_gamma0 {
-                next_gamma0 = val;
-                next_r = i;
-            }
-        }
-    }
-
-    // Remaining columns: plain update (no argmax tracking)
-    for j in (k + 2)..n {
-        let l_jk = a[k * n + j];
-        let l_jk_d = l_jk * d;
-        for i in j..n {
-            a[j * n + i] -= a[k * n + i] * l_jk_d;
-        }
-    }
-
-    Ok((next_gamma0, next_r))
+    Ok(rank1_scale_update_argmax(a, n, k, d))
 }
 
 /// Perform a 2×2 pivot at positions {k, k+1}.

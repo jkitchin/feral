@@ -131,3 +131,15 @@ jkitchin/pounce#552 (feral 3.5-4.8x vs MA27 on chain KKTs).
 (-12%), AVION2 36 -> 34 (-6%), twirism1 ~2270 -> 2066-2136 (-6%),
 HYDCAR20 ~220 -> 207-218 (-4%), VESUVIO ~1950 -> 1857-1931 (-4%),
 HAHN1 ~760 -> 739-746 (-2%). Acceptance (>=2% geomean small set) MET.
+
+* 06:20 :stage3:eager:simd:rejected:
+Stage 3 (eager rank-1 SIMD) implemented, measured FLAT, reverted same
+session per the pre-registered reject criterion. Fixture medians
+unchanged within noise; decisive A/B through the eager driver at
+n=512: 11.21 (simd) vs 11.23 ms (scalar) - the plain eager loops
+already autovectorize and the path is pivot-search/bandwidth-bound.
+Kept the byte-identical de-duplication of do_1x1_pivot's two fused
+loops (shared rank1_scale_update_argmax); removed the kernel, gate,
+env var, parity test, and A/B example. Full entry in
+tried-and-rejected.md. Small-front gap suspects now ranked: per-front
+overhead, pivot scans, scalar_pivot_step, delayed-pivot cascade.
