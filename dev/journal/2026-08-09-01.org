@@ -1,0 +1,19 @@
+#+TITLE: Session 2026-08-09-01 — kernel SIMD/vectorization perf pass
+#+DATE: 2026-08-09
+
+* 01:17 :orient:perf:kernel:
+Session goal: evidence-based kernel performance work per the staged plan
+(measure-first). Targets identified from dev/ history + code inspection:
+(1) packed trailing-update kernel (factor.rs apply_schur_panel_range_packed)
+relies on LLVM autovectorization only — on x86 that means SSE2 baseline
+codegen since no target-cpu and no pulp in that function; decisions.md
+2026-07-01 lists explicit-SIMD/pooling/tile-retune/cache-blocking as untuned
+headroom. (2) small-front eager scalar path (do_1x1_pivot) — ~87% of
+DENSEFACTOR_NS on the many-small-front corpus per
+dev/research/panel-fragmentation-2026-07-10.md, matching the feral/MA57
+small-bucket loss (4.23x geomean, external_benchmarks/comparison/REPORT.md).
+Environment: x86_64 container, 4 cores, AVX2+AVX512+FMA, corpus NOT present
+— evidence via parity suites + bench_schur_micro + bench_dense_front +
+perf_probe on tests/data fixtures. Hard rule for all stages: default path
+stays byte-exact vs scalar nofma reference (mul-then-sub, never mul_add);
+FMA remains opt-in.
