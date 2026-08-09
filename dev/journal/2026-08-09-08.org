@@ -353,3 +353,99 @@ Side observation: feral-default ran within 2-8% of feral-noscale on the
 pre-scaled inputs. Not in tension with #153's 18-34% warm-path scaling
 cost -- MC64 on an already-MC64-scaled matrix converges immediately --
 but it does mean this experiment cannot measure warm-path scaling.
+
+* 19:30 :correction:analysis:ma57:icntl15:
+Second instance of the same error, in my own Result 4. I compared
+feral's analyse_us (which includes MC64) against MA57's analyse_us at
+ICNTL(15)=0 (which includes no scaling at all) and reported feral's
+analysis as 794x slower on clnlbeam. That is the retracted result's
+mistake one level up: same asymmetry, different stage.
+
+Charging MA57 for its scaling (factor at ICNTL(15)=1 minus factor at
+ICNTL(15)=0, both already measured):
+
+  matrix          feral ana   MA57 ana+scal   as reported   corrected
+  clnlbeam         5001.3ms        201.6ms      794x slow   24.8x slow
+  rocket_12800     2705.8ms        554.8ms      421x slow    4.9x slow
+  marine_1600      1048.5ms         39.7ms      144x slow   26.4x slow
+  dtoc1nd            42.5ms          4.5ms       17x slow    9.4x slow
+  steering_12800    130.4ms        454.1ms     1.4x faster  3.5x faster
+  dtoc2             276.1ms        444.8ms     1.6x faster  1.6x faster
+
+MC64 head to head, both solvers doing the same job: feral 23.2x slower
+(clnlbeam), 25.1x (marine), 4.2x (rocket), 1.4x (dtoc2), 1.2x
+(dtoc1nd) -- and 13.3x FASTER on steering.
+
+Also established empirically: MA57ID sets ICNTL(15)=1. MA57's own
+default IS scaling-on. So ICNTL(15)=0 is not MA57's default
+configuration; it is the right setting for a factorization-only
+comparison (and the clean experiment, where both arms are scaling-free
+on pre-scaled input, is unaffected and stands), but it is the wrong
+baseline for anything end-to-end.
+
+Against MA57 in its default configuration, feral's once-per-analysis
+MC64 amortizes: crossover at 28 factorizations (clnlbeam), 5 (rocket),
+102 (marine), immediately (steering); MA57 wins always on dtoc1nd and
+after 8 on dtoc2. Caveat: this assumes the cache is actually reused
+across warm factorizations, which is exactly what #153 disputes.
+
+Lesson, second time: the asymmetry is not in the timer, it is in what
+each solver was configured to DO. Checking the timer boundary does not
+catch it. The check that does is "name the work each arm performs in
+the timed region, and diff the two lists."
+
+* 19:50 :mc64:scaling-law:measurement:dense-column-refuted:
+Profiled MC64 across the corpus (probe_mc64_hungarian, 41 matrices,
+one iterate per family) to find what actually drives its cost. The
+prior diagnosis -- dense coupling column, O(searches x dense_deg),
+mc64-dense-column-2026-06-06.md -- does not survive.
+
+clnlbeam has max_col_degree = 5 and is the second most expensive
+matrix in the corpus (4522 ms). steering_12800 has the LARGEST max_deg
+in the corpus (51202) and runs in 21 ms. gasoil_3200 (max_deg 41500)
+runs in 9.6 ms. Over the six chain KKTs, log(ms) vs log(max_deg) is
+r = -0.59 -- the wrong sign. Against touched_total it is r = +0.999.
+
+Cost is bimodal corpus-wide: 37 of 41 matrices run at 0.3-70 ms; four
+(clnlbeam 4522, nql180 2892, rocket 2279, marine 812) are 1-2 orders
+out. rocket is the dense-column class the prior note explains. clnlbeam
+and nql180 are not -- max_deg 5 and 182.
+
+The scaling law, from leading principal submatrices of clnlbeam
+(n = 80k..100k; not a true size ladder because clnlbeam is block
+ordered, but within this range searches is pinned at 5043):
+
+  n       touched      edge_scans     ms
+  90000   176356074    360898556     4080
+  93000   188383074    360895553     4232
+  96000   200410074    360892553     4351
+  98000   208428074    360890553     4421
+  99000   212437074    360889550     4450
+  99999   216406073    360922194     4525
+
+edge_scans is FLAT (3.609e8, varying <0.01%). touched grows exactly
++4009 per unit of n -- four independent deltas (3000/3000/2000/1000)
+all give 4009.0. So each augmenting search reaches Theta(n) distinct
+rows while the edge work does not grow at all. Growing the problem
+buys pure heap traffic and zero additional edge scanning. Wall time
+tracks touched, not edge_scans.
+
+touched is distinct rows: hungarian.rs:549 guards touched.push(i) with
+d[i] == RINF, so no double counting. heap_init_slots == touched_total
++ n exactly on every matrix, confirming the #80 incremental-reset fix
+is intact and heap init is NOT the cost.
+
+This is value-driven, not structural. Synthetic chain KKTs from
+gen_chain_kkt at the same geometry (nx=2, nc=1, n up to 384000) get
+searches=0 -- greedy init matches everything -- and run in 18 ms at
+n=384000. Same shape, no blowup. Consistent with issue #80's trap #2
+(MC64 needs real values), and one more instance of proxies not
+reproducing the real matrices.
+
+What this does NOT establish: a fix. The impossibility proof in
+mc64-dense-column-2026-06-06.md section 3.2 is specific to pruning the
+dense-column inner scan and does not cover the Theta(n) frontier seen
+here; the mechanism is that csp stays RINF while the search hunts for
+an unmatched row, so nothing prunes insertion. Whether that frontier
+can be bounded without changing the matching is open and needs its own
+research note before any code.

@@ -293,9 +293,20 @@ work. The corrected table uses `ICNTL(15) = 0` because that matches
 what pounce measures through `SparseSymLinearSolverInterface` (issue
 #153) and agrees with it to within the harness difference.
 
-The clean experiment, not yet run: pre-scale each matrix with MC64
-offline and run both solvers with scaling off, so the two arms
-factorize identical numbers.
+The clean experiment **has since been run** — see Result 5. Both arms
+factorize identical pre-scaled matrices with scaling off, and MA57 is
+still faster by 1.46x-4.72x.
+
+One further correction belongs here. An earlier revision of Result 4
+compared feral's `analyse_us` against MA57's `analyse_us` at
+`ICNTL(15) = 0` and reported feral's analysis as 794x slower on
+clnlbeam. That is the retracted result's error one level up: feral's
+analysis does MC64, MA57's analysis at `ICNTL(15) = 0` does no scaling
+at all. Charging MA57 for its scaling (its `factor` at `ICNTL(15) = 1`
+minus at `= 0`) gives 24.8x, not 794x. `MA57ID` sets `ICNTL(15) = 1`,
+confirmed by calling it directly — scaling-on is MA57's *own default*,
+so `ICNTL(15) = 0` is the right setting for a factorization-only
+comparison but the wrong baseline for anything end-to-end.
 
 ## Result 5 — the clean experiment: both arms on identical numbers
 
@@ -346,3 +357,91 @@ A secondary reading: `feral-default` (Auto scaling) ran within 2-8% of
 issue #153's 18-34% — MC64 on an already-MC64-scaled matrix converges
 almost immediately. It does mean this experiment says nothing about
 warm-path scaling cost, which needs an unscaled input to measure.
+
+## Result 6 — what actually drives MC64, and the dense-column diagnosis fails
+
+`ldlt_compress` being 99.3% of clnlbeam's symbolic made MC64 the
+obvious optimization target, so it was profiled properly before any
+work started. `probe_mc64_hungarian` over 41 corpus matrices (one
+iterate per family) reports algorithmic counters rather than wall
+clock.
+
+**First, the head-to-head.** feral's MC64 against MA57's, both doing
+the same job (MA57's = its `factor` at `ICNTL(15) = 1` minus at `= 0`):
+
+| matrix | feral MC64 | MA57 MC64 | |
+|---|---|---|---|
+| clnlbeam | 4,522 ms | 195 ms | feral 23.2x slower |
+| marine_1600 | 812 ms | 32 ms | feral 25.1x slower |
+| rocket_12800 | 2,279 ms | 548 ms | feral 4.2x slower |
+| dtoc2 | 14.6 ms | 10.7 ms | feral 1.4x slower |
+| dtoc1nd | 2.5 ms | 2.1 ms | feral 1.2x slower |
+| steering_12800 | 20.7 ms | 275 ms | **feral 13.3x faster** |
+
+A real gap on two matrices, near-parity on two, and a win on one. Not
+the uniform catastrophe the 794x number implied.
+
+**Second, the prior diagnosis does not explain the corpus.**
+`mc64-dense-column-2026-06-06.md` attributes the cost to a dense
+coupling column, `O(searches x dense_deg)`, and proves no
+behavior-preserving inner-loop fast path exists. That analysis is
+correct *for rocket_12800*. It is not the general law:
+
+| matrix | max_col_degree | ms |
+|---|---|---|
+| steering_12800 | **51,202** (largest in corpus) | 21 |
+| gasoil_3200 | 41,500 | 9.6 |
+| rocket_12800 | 38,401 | 2,279 |
+| nql180 | 182 | 2,892 |
+| clnlbeam | **5** | 4,522 |
+
+The two densest-column matrices in the corpus are among the fastest,
+and the most expensive one has `max_col_degree = 5`. Over the six chain
+KKTs, `log(ms)` against `log(max_col_degree)` gives r = **-0.59** — the
+wrong sign. Against `touched_total` it gives r = **+0.999**.
+
+Cost is bimodal: 37 of 41 matrices run in 0.3-70 ms; four (clnlbeam
+4,522, nql180 2,892, rocket 2,279, marine 812) are one to two orders
+out. Only rocket is the class the prior note covers.
+
+**Third, the scaling law.** From leading principal submatrices of
+clnlbeam. (Not a true size ladder — clnlbeam is block-ordered — but
+across this range `searches` is pinned at 5,043, which isolates
+per-search cost.)
+
+| n | touched | edge_scans | ms |
+|---|---|---|---|
+| 90,000 | 176,356,074 | 360,898,556 | 4,080 |
+| 93,000 | 188,383,074 | 360,895,553 | 4,232 |
+| 96,000 | 200,410,074 | 360,892,553 | 4,351 |
+| 98,000 | 208,428,074 | 360,890,553 | 4,421 |
+| 99,000 | 212,437,074 | 360,889,550 | 4,450 |
+| 99,999 | 216,406,073 | 360,922,194 | 4,525 |
+
+`edge_scans` is **flat** — 3.609e8, varying under 0.01% while `n` grows
+11%. `touched` grows exactly **+4,009 per unit of `n`**; the four
+independent deltas (Δn = 3000, 3000, 2000, 1000) all give 4009.0. Wall
+time tracks `touched`, not `edge_scans`.
+
+So each augmenting search reaches **Θ(n) distinct rows** while
+performing a *constant* amount of edge work. Growing the problem buys
+pure heap traffic and no additional edge scanning. `touched` counts
+distinct rows — `hungarian.rs:549` guards the push with `d[i] == RINF`
+— and `heap_init_slots == touched_total + n` holds exactly on every
+matrix, so issue #80's incremental-reset fix is intact and heap
+*initialization* is not the cost.
+
+**Fourth, it is value-driven, not structural.** Synthetic chain KKTs
+from `gen_chain_kkt` at the same geometry (`nx=2, nc=1`, n up to
+384,000) get `searches = 0` — greedy init matches everything — and run
+in 18 ms at n = 384,000. Same shape, no blowup. This matches issue
+#80's trap #2 ("MC64 needs real values") and is one more instance of
+the proxies failing to reproduce the real matrices.
+
+**What this does not establish.** A fix. The impossibility proof in
+`mc64-dense-column-2026-06-06.md` §3.2 is specific to pruning the
+dense-column inner scan and does not cover the Θ(n) frontier measured
+here. The likely mechanism is that `csp` stays `RINF` while the search
+hunts for an unmatched row, so nothing prunes insertion — but whether
+that frontier can be bounded without changing the matching is open, and
+needs its own research note before any code.
