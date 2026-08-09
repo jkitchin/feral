@@ -4,6 +4,19 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — parallel factorization no longer loses to serial (issue #148)
+
+- The parallel multifrontal driver now spawns one rayon task per *subtree*
+  (>= 1e6 estimated flops, `FERAL_PAR_TASK_MIN_FLOPS` override) instead of one
+  boxed task per supernode (~1.8M allocations per solve on chain-structured
+  problems, glibc arena contention growing with thread count). Chain-shaped
+  trees collapse to a single task and take the sequential driver outright.
+  Measured (4-core x86_64): the sparse-QP proxy that lost 15-25% to serial at
+  4 threads now matches serial; the grid/poisson-class proxy improves a
+  further 9-21% at 4 threads. Scheduling-only — factors are byte-identical
+  (new `tests/task_plan_parity.rs` gate). `FERAL_DEBUG_TASK_PLAN=1` dumps the
+  task-graph shape for diagnosing parallel-performance reports.
+
 ### Performance — x86 SIMD kernels actually reach AVX2 (session 2026-08-09)
 
 - The x86_64 branches of the pulp dispatch helpers now route through

@@ -6105,3 +6105,39 @@ block-tridiagonal synthetic, added after the pounce#552 chain-KKT
 report) 985 → 847-961 µs (−12%); AVION2 −6%; twirism1 −6%; HYDCAR20
 −4%; VESUVIO −4%; HAHN1 −2%. Byte-exact (dirty-pool parity sweep +
 golden digests unchanged).
+
+## 2026-08-09 — Parallel factor tasks are subtrees, not supernodes (issue #148)
+
+**Decision.** The parallel multifrontal driver partitions the supernode
+tree into subtree tasks (`TaskPlan`): task boundaries at tree roots and
+at children of nodes with >= 2 sibling subtrees each >=
+`FERAL_PAR_TASK_MIN_FLOPS` (default 1e6) estimated flops; a lone big
+child continues inline, so chain-shaped trees collapse to one task per
+root. One `scope.spawn` per task, owned nodes factored serially in
+postorder inside it, parent-task trampoline via task-children pending
+counters. Task graphs with < 2 seeds delegate to the sequential driver
+(with intrafront parallelism kept on).
+
+**Why.** Issue #148: one boxed spawn per supernode ⇒ ~1.8M allocations
+per POUNCE sparseqp solve, glibc arena contention growing with thread
+count, parallel slower than serial on 3 of 4 problems. Spawn counts:
+grid250 11171 → 51; chains → 1 (sequential path).
+
+**Evidence.** Interleaved old-vs-new, x86_64 4-core: sparseqpL par@4
+82-88 → 71.7-76.3 ms (old lost 15-25% to serial; new ≈ serial);
+grid250 par@4 78.8-92.7 → 71.4-73.4 ms; small fixtures noise-band.
+Byte-exact (scheduling only): tests/task_plan_parity.rs pins
+fine/default/fallback plans against the sequential driver bit-for-bit;
+84/84 suites green.
+
+**Documented open question.** On one synthetic proxy (chainW, wide-
+block chain) the OLD per-node-spawn driver beat both sequential
+drivers by ~20% — telemetry places the difference inside
+factor_one_supernode (912 vs 1276 ms per 9 factors), an unexplained
+workspace/allocator interaction, not driver overhead. Accepted as a
+proxy quirk (the issue's real chains lose under per-node spawning);
+full analysis in dev/research/issue-148-parallel-task-granularity.md.
+
+**Deferred.** Issue #148 suggestion 3 (collect() temporaries):
+re-profile after this lands. #128 nrow-underestimate still skews flop
+estimates; harmless for this gate.

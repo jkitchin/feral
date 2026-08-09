@@ -49,3 +49,11 @@ badly under per-node spawning, which is the case the fix targets —
 and document in the research note + PR. sparseqpL par4 old 87-90 ->
 new 74-79 ms (issue signature fixed); grid250 par4 old 84-87 -> new
 71-87 ms.
+
+* 06:00 :session-end:checkpoint:
+Session-end: bench run (synthetic only, all pass), decisions.md entry,
+CHANGELOG Unreleased entry, checkpoint 2026-08-09-02.md, worktree
+cleanup. Follow-ups recorded: validate on real POUNCE problems at 14
+threads (heaptrack should show the 1.8M-spawn stack gone), suggestion-3
+collect() temporaries re-profile, chainW anomaly if it ever appears on
+a real workload.
