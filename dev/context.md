@@ -1,124 +1,106 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-09T16:26:16Z
+Generated: 2026-08-09T19:45:39Z
 
 ## Latest Session
-File: dev/sessions/2026-08-09-04.md
+File: dev/sessions/2026-08-09-07.md
 ```
-# Session 2026-08-09-04
+# Session 2026-08-09-06
 
 ## Goal
 
-Review issue #154 ("default `use_parallel` from the platform instead of
-hardcoding `true`"), then implement it fully so the issue can be closed.
+Two halves. First: take PR #151 from green to shipped (merge, tag,
+publish, notify pounce). Second, once that was done: take the
+measurement the release was cut for, which is the factorization gap
+against Harwell on chain-structured KKTs.
 
-## Accomplished
+## Unfavorable result, stated first
 
-### Review
+**On the two largest chain-structured proxies, `main` is significantly
+slower than 0.14.0.** `prommis_sx_like` 0.833x (2/15 wins, p = 0.0074),
+`double_column_like` 0.914x (4/15, p = 0.1185). This contradicts the
+0.15.0 release note's "wins all twelve arms", which was measured on real
+matrices on a 4-core homogeneous x86_64 container. It also independently
+reproduces the `chainW` anomaly that session 2026-08-09-02 recorded and
+accepted as a proxy quirk, and that the pounce-side reviewer on PR #150
+flagged as a probable regression on exactly this geometry.
 
-Verified every claim in #154 against `808babb` (v0.15.0). The diagnosis is
-correct and all line references are exact: `solver.rs:430` (`use_parallel:
-true`), `:972` (unconditional `ensure_parallel_pool()`), `:1148`, `:1216`,
-`:1540`, and the quoted `ensure_parallel_pool` body. Three gaps in the
-proposal, all confirmed by measurement rather than reading:
+Caveats that keep this from being a verdict: these are synthetic
+proxies, the "new" arm is `main` at `7a31ff6` rather than the `v0.15.0`
+tag, and the bisect that would separate the two did not run. Full
+numbers, method and limits in
+`dev/research/chain-kkt-ma57-gap-2026-08-09.md`.
 
-1. **The test inventory was incomplete, and understated.** The issue names
-   one test and calls it a latent flake. Applying *only* the issue's
-   one-liner to a pristine tree and running under `taskset -c 0`:
+## Accomplished — release
 
-   ```
-   test result: FAILED. 404 passed; 3 failed; 6 ignored
-     solver_parallel_default_is_on             solver.rs:2825
-     solver_parallel_factor_matches_sequential solver.rs:3852
-       assertion failed: par.parallel()
-     solver_reuses_thread_pool_across_factors  solver.rs:2887
-       .expect("pool must be built after first parallel factor")
-   ```
+1. Verified #151 green, merged as `808babb`, waited for main CI on the
+   squash commit before tagging (a different SHA than the PR head).
+2. Tagged `v0.15.0` and published the GitHub Release. Release job: tag /
+   `Cargo.toml` check PASS, `cargo test` PASS, `cargo publish` PASS for
+   all seven crates. Wheels job: sdist + four wheels, PyPI publish, `uv
+   pip` smoke test PASS.
+3. Verified against the registries, not workflow exit codes: crates.io
+   `feral` 0.15.0; PyPI `feral-solver` 0.15.0 with macosx universal2,
+   manylinux x86_64, manylinux aarch64, win_amd64 and the sdist.
+4. Notified pounce ([pounce#552 comment 5232312068](https://github.com/jkitchin/pounce/issues/552#issuecomment-5232312068)).
+   Release checklist §3 complete.
 
-   `solver_parallel_factor_matches_sequential` is the #7 bit-exactness
-   regression test. Repairing only its assertion would leave it comparing
-   the sequential driver against itself — passing vacuously, with the
-   contract silently unchecked.
+## Accomplished — measurement
 
-2. **The "filed separately" fallback bug is not separable.** After the
-   default flips, `with_parallel(true)` — the escape hatch #154 recommends
-   for wasm — still reaches `ensure_parallel_pool()` and, on build failure,
-   falls to a `None` arm that runs the *parallel* driver bare, i.e. on
-   rayon's global pool. That is the failure being avoided, reintroduced
-   through the workaround prescribed for it. Shipping the default flip alone
-   would release a version whose documented wasm answer is a trap.
-
-3. **A fourth dispatch site the issue misses:** `solve_many_refined`
-   (`solver.rs:1601`) has the same `None`-arm shape as `solve_refined`.
-
-Adjacent sweep over every rayon entry point reachable from `Solver`:
-`intrafront_parallel` (Lever 1.1) is set only inside the parallel driver
-(`factorize.rs:3127`), so the sequential path never spawns nested rayon work
-— the pounce#79 oversubscription guarantee holds, not a bug. `solve.rs`
+5. Established what this machine can and cannot measure. It has the
+   CoinHSL v2023.11.17 bundle (so MA57 is available, oracle built and
+   linked) and Ipopt 3.13.2 with MA27/MA57/MUMPS all confirmed live. It
+   does **not** have `data/matrices/` at all, nor the Pyomo NMPC stack
+   for the five #552 models, nor CUTEst to regenerate the corpus.
+6. Built `external_benchmarks/chain_proxy/`: block-tridiagonal KKT
+   proxies at the reported #552 geometries, plus the paired A/B runner
+   and a mechanism probe. Portable (env-driven paths) so it runs on the
 ```
 
 ## Git Status
 ```
+f7a152a Merge pull request #156 from jkitchin/claude/review-issue-154-ukpt7t
+af73f63 Merge origin/main into claude/review-issue-154-ukpt7t
 6c87a0e docs: session checkpoint 2026-08-09-03 (issue #154 review + implementation)
 4f2fad6 fix(solver): derive use_parallel from the platform; fall back to sequential when the pool fails
-808babb release: feral v0.15.0 (#151)
-fad5670 perf(parallel): task-per-subtree coarsening + profiler nanoseconds (#150)
-e8e1c5a perf(kernel): explicit SIMD packed trailing update + x86 pulp dispatch fix (#149)
+7a31ff6 Merge pull request #155 from jkitchin/claude/feral-kernel-perf-dx0fkq
 ```
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
 test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 411 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.12s
+test result: ok. 413 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 6.00s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-04.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-07.md)
 
 
-No usable perf signal this session: the benchmark corpus is not present in
-this container, so the harness found 2 matrices. Reported as-is rather than
-omitted.
-
---- Dense solver validation ---
-  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
-
---- Sparse solver validation ---
-Sparse solver: 2/2 total
-  Inertia match vs MUMPS: 2/2 (100.0%)
-  Residual pass: 2/2 (100.0%)
-  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
-
-Dense failure analysis: no failures
-Sparse failure analysis: no failures
-
---- Dense perf vs oracles: no matrices have oracle timings ---
---- Sparse perf vs oracles: no matrices have oracle timings ---
-
-There is no reason to expect a perf delta on a multi-core host: the derived
-default is `true` there, and the pool-fallback change is unreachable unless
-`ThreadPoolBuilder::build()` fails. The one measurable change would be on a
-single-CPU host, where the sequential driver is now selected — that is the
-intended effect, not a regression.
+No corpus bench: this machine has no corpus, and the release half of the
+session changed zero lines of source. Numbers for the shipped code stand
+from session 03 and the aarch64 revalidation at `6fd12d4`. `cargo test`
+for the published SHA ran green inside the release job. The proxy
+measurements are tabulated in the research note rather than duplicated
+here.
 
 ```
 
@@ -242,8 +224,8 @@ tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering.rs
 tests/column_renumbering_parity.rs
+tests/column_renumbering.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -257,6 +239,14 @@ tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/golden_bits.rs
 tests/growth_flag.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -268,21 +258,13 @@ tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
-tests/lu_dense.rs
 tests/lu_dense_update_bg.rs
+tests/lu_dense.rs
 tests/lu_ft_widebump.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
@@ -301,8 +283,8 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/rook_rescue.rs
 tests/rook_rescue_kkt.rs
+tests/rook_rescue.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
