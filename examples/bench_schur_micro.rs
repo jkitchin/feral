@@ -23,6 +23,18 @@
 //! packed micro-kernel is worth wiring in; if not, the ceiling is DST
 //! bandwidth (→ Phase C cache-blocked factor).
 //!
+//! **This is NOT coverage of the shipped packed kernel.** The PACKED arm
+//! below is a *local reimplementation* (`pack_a` / `run_packed` in this
+//! file) written in issue #99 to justify the packed design before it
+//! existed in the library. Only the BASELINE arm calls into
+//! `feral::dense::schur_kernel`. Consequently `FERAL_PACKED_SIMD` and
+//! `FERAL_PACKED_SIMD_MIN_WORK` have no effect here, and this harness
+//! did not move when the real kernel became explicit-SIMD — an
+//! observation that cost a reviewer time on PR #150. For the shipped
+//! dense-front path use `examples/bench_dense_front.rs`; for the packed
+//! tile kernel itself the byte-exactness gate is
+//! `packed_matches_scalar_reference_bit_for_bit` in `src/dense/factor.rs`.
+//!
 //! Usage: cargo run --release --example bench_schur_micro [-- M N KE REPS]
 
 use feral::dense::schur_kernel::schur_panel_minus_nofma_strided;

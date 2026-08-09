@@ -139,3 +139,43 @@ corpus inertia + Phase 2.8.1 partitions are the MUST gates; the
 packed-SIMD-vs-autovectorized NEON A/B is informational with
 FERAL_PACKED_SIMD=0 as the documented mitigation), optional
 min_seeds calibration, release steps, and the post-release order.
+
+* 16:20 :pr150:review-round3:aarch64:release-unblocked:
+Reviewer posted three substantial comments. Digest:
+(1) RETRACTED their own claim that the SIMD work fixes pounce#552 -
+    built pounce against e8e1c5a vs 0.14.0, flat within +-1.5% on 8
+    models. My session-01 rejection entry was right: the chain gap is
+    small-front OVERHEAD, not lane width.
+(2) aarch64 revalidation DONE and PASSING: 84/84, 802 tests,
+    golden_bits 3/3 - the x86-recorded digests reproduce on M-series,
+    so cross-arch bit-identity is PROVEN. Corpus: 156929 matrices,
+    dense+sparse inertia 100.0%, Phase 2.8.1 4/4 PASS, and the worst
+    residuals reproduce TO THE DIGIT (2.46e-1 POLAK6_0021, 2.94e-4
+    ERRINBAR_0824). Release is UNBLOCKED, not gated.
+(3) NEON A/B: default packed SIMD wins 3.19x (n=2955) / 2.25x (n=512)
+    vs FERAL_PACKED_SIMD=0. My expectation that NEON might already be
+    autovectorized was WRONG - and on 0.14.0 aarch64 the FMA path was
+    buying nothing (11.3 vs 10.8 GF/s), now 34.1 vs 17.2. The scalar
+    tile-walk was never an x86-only story.
+(4) FERAL_PAR_MIN_SEEDS answer: KEEP 2. Five of six real matrices
+    collapse to seeds=1 after coarsening so the knob is a no-op on
+    them; marine_1600 (the one wide tree) loses 28% at ms>=4. My doc
+    comment calling the default "known to be too low" is superseded -
+    corrected.
+(5) #150 vs 0.14.0 paired: wins all 12 arms, clnlbeam parallel 2.29x,
+    steering 1.73x; solve-vector hashes identical -> bit-neutral on
+    real KKT.
+Actions taken: corrected the PAR_MIN_SEEDS doc and the fallback-branch
+comment (which still cited the withdrawn chainW anomaly); restructured
+build_task_plan to return Option and early-out BEFORE building `owned`,
+so the fallback path no longer constructs and discards a per-supernode
+map. My own paired A/B of that early-out is INCONCLUSIVE (7/10, 2/10,
+5/10) - the effect is ~1-3% on their 39.6k-supernode matrices and below
+my noise floor; reporting it as their measurement, not mine.
+Also confirmed their bench_schur_micro finding: its PACKED arm is a
+LOCAL reimplementation from issue #99, never a call into the library -
+documented in the example header so nobody mistakes it for coverage.
+Note: their "~39.6k short-lived Vecs" detail is not quite right -
+vec![Vec::new(); n] does not heap-allocate the inner Vecs; the real
+cost is the ~950 KB outer Vec plus the single owner vec. Waste is real,
+mechanism slightly different.

@@ -3145,19 +3145,21 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
     // per-supernode arithmetic and extend-add child order are
     // untouched, so factors are byte-identical. See
     // dev/research/issue-148-parallel-task-granularity.md.
-    let plan = build_task_plan(symbolic);
-    if plan.seeds.len() < par_min_seeds() {
-        // No initial task parallelism (chain-shaped task graph): the
-        // scope/pool machinery is pure overhead, so run the sequential
-        // driver — with `intrafront_parallel` still on, so wide fronts
-        // fork internally (Lever 1.1). See the research note for the
-        // one synthetic proxy (chainW) where the old per-supernode
-        // spawn graph oddly beat BOTH sequential drivers by ~30% in
-        // factor-body time; unexplained (allocator/workspace
-        // interaction), accepted as a proxy quirk — the issue's real
-        // chain problems lose under per-node spawning.
+    let Some(plan) = build_task_plan(symbolic, par_min_seeds()) else {
+        // Too little initial task parallelism: the scope/pool machinery
+        // is pure overhead, so run the sequential driver — with
+        // `intrafront_parallel` still on, so wide fronts fork
+        // internally (Lever 1.1).
+        //
+        // Measured worth (issue #148 calibration on six real KKT
+        // matrices, paired A/B): forcing the task graph on anyway
+        // (`FERAL_PAR_MIN_SEEDS=1`) costs 3-9% — clnlbeam 0.91×,
+        // steering_12800 0.95×, rocket_12800 0.96×, dtoc2 0.97×,
+        // dtoc1nd 0.97×, all significant. Five of those six collapse to
+        // a single task after coarsening, so this branch is the one
+        // they take.
         return factorize_multifrontal_supernodal_with_workspace(matrix, symbolic, params, ws);
-    }
+    };
 
     // Setup — mirrors the sequential driver. Reuse the symbolic-phase
     // MC64 cache if present (see the sequential driver for details).
@@ -3388,18 +3390,28 @@ pub const PAR_TASK_MIN_FLOPS: u64 = 1_000_000;
 /// driver delegates to the sequential path — which keeps
 /// `intrafront_parallel = true`, so wide fronts still fork internally.
 ///
-/// Default 2 (delegate only when there is *no* initial parallelism).
-/// This is deliberately conservative and is **known to be too low**:
-/// on six real KKT matrices the sequential driver beat the *tuned*
-/// parallel driver on four of them and the default pool on five, by up
-/// to 1.99× (issue #148, 2026-08-09 review). Raising it trades away
-/// genuine-but-small parallel wins for a large win on chain-shaped
-/// trees. `FERAL_PAR_MIN_SEEDS` overrides it so the threshold can be
-/// calibrated empirically on real hardware and real matrices without a
-/// rebuild; a value of 0 or 1 restores "always use the task graph".
+/// Default 2 — delegate only when there is *no* initial parallelism.
+/// **Calibrated and confirmed correct** on six real KKT matrices
+/// (issue #148, 2026-08-09, paired A/B with sign test on aarch64).
+///
+/// An earlier reading of that data suggested the default was too
+/// conservative, because the *pre-coarsening* driver lost to the
+/// sequential one on 4-5 of those 6. That is superseded: subtree
+/// coarsening collapses five of the six to a **single task**
+/// (`seeds = 1`), so they already take the sequential fallback here and
+/// the threshold is a no-op on them at every setting. It therefore only
+/// ever decides for trees that *do* have real parallelism — and for
+/// those a low value is right: on `marine_1600`, the one matrix in that
+/// set with a wide tree, raising the threshold to 4 or beyond costs
+/// **28%** (0.78×, 0/15 pairs, p = 1e-4) and buys nothing elsewhere.
+///
+/// `FERAL_PAR_MIN_SEEDS` overrides it for per-machine calibration
+/// without a rebuild; 0 or 1 restores "always use the task graph"
+/// (measured 3-9% *slower* on the five chain-shaped matrices).
 ///
 /// Scheduling-only: factors are byte-identical at every setting
-/// (`tests/task_plan_parity.rs`).
+/// (`tests/task_plan_parity.rs`, and verified on real KKTs across two
+/// architectures by identical solve-vector hashes).
 pub const PAR_MIN_SEEDS: usize = 2;
 
 /// Deliberately NOT cached in a `OnceLock`: this is read once per
@@ -3441,7 +3453,14 @@ struct TaskPlan {
     seeds: Vec<usize>,
 }
 
-fn build_task_plan(symbolic: &SymbolicFactorization) -> TaskPlan {
+/// Returns `None` when the tree yields fewer than `min_seeds` independent
+/// seed tasks — the caller then uses the sequential driver. The early
+/// return happens *before* `owned` is built, so a chain-shaped KKT (which
+/// always falls back) never pays to construct and discard a per-supernode
+/// ownership map: on a 39.6k-supernode chain that is ~1.2 MB of
+/// allocate-fill-drop per factorization, and the plan is rebuilt every
+/// call. Reported on PR #150 at 1.01-1.03x on chain KKTs.
+fn build_task_plan(symbolic: &SymbolicFactorization, min_seeds: usize) -> Option<TaskPlan> {
     let n_snodes = symbolic.supernodes.len();
     let cutoff = par_task_min_flops();
 
@@ -3515,15 +3534,6 @@ fn build_task_plan(symbolic: &SymbolicFactorization) -> TaskPlan {
         };
     }
 
-    // Inline nodes per task, grouped in ascending (= postorder) order,
-    // so within a task children still precede parents.
-    let mut owned: Vec<Vec<usize>> = vec![Vec::new(); n_snodes];
-    for i in 0..n_snodes {
-        if !task_root[i] {
-            owned[owner[i]].push(i);
-        }
-    }
-
     // Task-graph edges: a task's parent task owns its parent node.
     let mut parent_task: Vec<Option<usize>> = vec![None; n_snodes];
     let mut task_pending_init = vec![0usize; n_snodes];
@@ -3540,6 +3550,32 @@ fn build_task_plan(symbolic: &SymbolicFactorization) -> TaskPlan {
         .filter(|&i| task_root[i] && task_pending_init[i] == 0)
         .collect();
 
+    // Early out before the expensive step: too little initial
+    // parallelism to pay for the pool, so the caller runs sequentially
+    // and `owned` — the only per-supernode allocation in this function —
+    // is never built.
+    if seeds.len() < min_seeds {
+        if std::env::var("FERAL_DEBUG_TASK_PLAN").is_ok() {
+            eprintln!(
+                "task_plan: n_snodes={} seeds={} cutoff={} min_seeds={} -> sequential",
+                n_snodes,
+                seeds.len(),
+                cutoff,
+                min_seeds
+            );
+        }
+        return None;
+    }
+
+    // Inline nodes per task, grouped in ascending (= postorder) order,
+    // so within a task children still precede parents.
+    let mut owned: Vec<Vec<usize>> = vec![Vec::new(); n_snodes];
+    for i in 0..n_snodes {
+        if !task_root[i] {
+            owned[owner[i]].push(i);
+        }
+    }
+
     // Diagnostic affordance: dump the plan shape (issue #148 field
     // triage — lets a bug report show whether a slow parallel factor
     // is a spawn-storm, a chain that should have fallen back, or a
@@ -3552,16 +3588,16 @@ fn build_task_plan(symbolic: &SymbolicFactorization) -> TaskPlan {
             n_task,
             seeds.len(),
             cutoff,
-            par_min_seeds()
+            min_seeds
         );
     }
 
-    TaskPlan {
+    Some(TaskPlan {
         owned,
         parent_task,
         task_pending_init,
         seeds,
-    }
+    })
 }
 
 /// Spawn one *task* — a subtree of supernodes per [`TaskPlan`] — into
