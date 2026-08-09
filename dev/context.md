@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-09T03:25:16Z
+Generated: 2026-08-09T15:24:26Z
 
 ## Latest Session
 File: dev/sessions/2026-08-09-02.md
@@ -59,8 +59,8 @@ Interleaved old-vs-new (warm medians, default parallel config):
 
 ## Git Status
 ```
-7814bfe perf(parallel): coarsen factor tasks to subtrees; serial fallback for chains (#148)
-80f849f research: issue #148 reproduction + task-coarsening design note
+808babb release: feral v0.15.0 (#151)
+fad5670 perf(parallel): task-per-subtree coarsening + profiler nanoseconds (#150)
 e8e1c5a perf(kernel): explicit SIMD packed trailing update + x86 pulp dispatch fix (#149)
 6589570 docs: session checkpoint 2026-07-11-02 (issue triage, #127, release 0.14.0) (#146)
 c05eb77 release: feral v0.14.0 (#145)
@@ -68,25 +68,25 @@ c05eb77 release: feral v0.14.0 (#145)
 
 ## Test Status
 ```
-test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
-test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
-test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
+test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 407 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.99s
+test result: ok. 409 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 5.72s
 
 ```
 
@@ -115,36 +115,36 @@ serial there; new ≈ serial).
 ```
 
 ## Recent Decisions
-`FERAL_PAR_TASK_MIN_FLOPS` (default 1e6) estimated flops; a lone big
-child continues inline, so chain-shaped trees collapse to one task per
-root. One `scope.spawn` per task, owned nodes factored serially in
-postorder inside it, parent-task trampoline via task-children pending
-counters. Task graphs with < 2 seeds delegate to the sequential driver
-(with intrafront parallelism kept on).
+run medians. `min_us` per invocation is the preferred per-sample
+statistic (least interfered). Cross-time comparison of numbers taken in
+different sessions is not evidence at all.
 
-**Why.** Issue #148: one boxed spawn per supernode ⇒ ~1.8M allocations
-per POUNCE sparseqp solve, glibc arena contention growing with thread
-count, parallel slower than serial on 3 of 4 problems. Spawn counts:
-grid250 11171 → 51; chains → 1 (sequential path).
+**Why.** Measured on the issue-#148 chainW proxy (session 2026-08-09-03):
+three `FERAL_PAR_TASK_MIN_FLOPS` settings that produce *identical* task
+plans — same code path, byte-identical work — measured 139.6 / 259.1 /
+155.5 ms, a 1.9x spread. Eight invocations of one fixed config spanned
+min_us 124.7-163.2 ms (31%) and median_us 149.2-183.7 ms (23%). Two
+conclusions had already been drawn from inside that band and were both
+wrong: a claimed "chainW anomaly" (per-node spawning 20% faster than
+sequential) and a claimed 5-18% regression from PR #150. Paired
+re-measurement reversed both — 9/12 pairs favour the new code (median
+ratio 0.961) and 9/10 favour coarse over fine-grained tasks (median
+1.045, sign-test p~0.02).
 
-**Evidence.** Interleaved old-vs-new, x86_64 4-core: sparseqpL par@4
-82-88 → 71.7-76.3 ms (old lost 15-25% to serial; new ≈ serial);
-grid250 par@4 78.8-92.7 → 71.4-73.4 ms; small fixtures noise-band.
-Byte-exact (scheduling only): tests/task_plan_parity.rs pins
-fine/default/fallback plans against the sequential driver bit-for-bit;
-84/84 suites green.
+**Relationship to the existing rule.** The 2026-04-14 entry ("any
+bench-p90 delta smaller than ~5% must be confirmed with a 3-run
+median") is necessary but NOT sufficient: three consecutive medians can
+all land inside one drift excursion, which is exactly how both wrong
+conclusions above were reached. Paired A/B supersedes it for container
+measurement; the 3-run rule still applies to the corpus bench on a
+quiet machine.
 
-**Documented open question.** On one synthetic proxy (chainW, wide-
-block chain) the OLD per-node-spawn driver beat both sequential
-drivers by ~20% — telemetry places the difference inside
-factor_one_supernode (912 vs 1276 ms per 9 factors), an unexplained
-workspace/allocator interaction, not driver overhead. Accepted as a
-proxy quirk (the issue's real chains lose under per-node spawning);
-full analysis in dev/research/issue-148-parallel-task-granularity.md.
-
-**Deferred.** Issue #148 suggestion 3 (collect() temporaries):
-re-profile after this lands. #128 nrow-underestimate still skews flop
-estimates; harmless for this gate.
+**Consequence for prior sessions.** Numbers in
+dev/sessions/2026-08-09-01.md and -02.md were collected unpaired.
+Those with large effects (dense-front kernel 2.7-7x, grid250, sparseqpL
+- since re-confirmed paired at 10/10 and 9/10) stand; sub-10% fixture
+deltas in those checkpoints should be treated as unresolved rather than
+as measured wins until re-run paired.
 
 ## Recent Tried-and-Rejected
 plain `for i in j..n { a[j*n+i] -= a[k*n+i]*alpha }` loops are
@@ -234,8 +234,8 @@ tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering.rs
 tests/column_renumbering_parity.rs
+tests/column_renumbering.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -249,6 +249,14 @@ tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/golden_bits.rs
 tests/growth_flag.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -260,21 +268,13 @@ tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
-tests/lu_dense.rs
 tests/lu_dense_update_bg.rs
+tests/lu_dense.rs
 tests/lu_ft_widebump.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
@@ -293,8 +293,8 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/rook_rescue.rs
 tests/rook_rescue_kkt.rs
+tests/rook_rescue.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs

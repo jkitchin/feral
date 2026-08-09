@@ -111,22 +111,31 @@ one — on grid250 here, forcing `min_seeds=64` costs 1.85×, so the knob
 demonstrably routes both ways. If a single default serves the corpus,
 change `PAR_MIN_SEEDS` and record it in decisions.md.
 
-## 3. Release
+## 3. Release — **SHIPPED 2026-08-09**
 
-- [ ] Bump **all six** version strings (a `0.14.0` grep must come back
+- [x] Bump **all six** version strings (a `0.14.0` grep must come back
       empty except for the unrelated `feral-*` ordering crates at 0.2.1):
       `Cargo.toml:13`, `Cargo.lock:198`, `python/Cargo.toml:5`,
       `python/Cargo.lock:62` (`feral`), `python/Cargo.lock:113`
       (`feral-python`), `python/pyproject.toml:7`
-- [ ] Verify both lockfiles still resolve: `cargo metadata --locked` in
+- [x] Verify both lockfiles still resolve: `cargo metadata --locked` in
       the root and in `python/`
-- [ ] `CHANGELOG.md`: move the Unreleased section under `[0.15.0]`
-- [ ] Publish a **GitHub Release** — `release.yml` fires on
-      `release: published` (not on tag push), and it verifies the tag
-      matches `Cargo.toml`. This is the irreversible step: crates.io
-      versions can be yanked but never re-published.
+- [x] `CHANGELOG.md`: move the Unreleased section under `[0.15.0]`
+- [x] PR #151 merged as `808babb` (squash). Main CI green on the merge
+      commit: CI, Python wheels, Pages all success.
+- [x] Tag `v0.15.0` pushed at `808babb`; **GitHub Release published**
+      (`release.yml` fires on `release: published`, not on tag push, and
+      it verifies the tag matches `Cargo.toml`). Tag/version check
+      passed, `cargo test` green in the release job.
+- [x] Tag + publish: crates.io `feral 0.15.0` live (all seven crates in
+      dependency order); PyPI `feral-solver 0.15.0` live with four
+      wheels (macOS universal2, manylinux x86_64, manylinux aarch64,
+      win_amd64) plus the sdist. `uv pip` smoke test passed.
 - [ ] Notify pounce (issue #148 / pounce#552) so the factorization
-      comparison can be re-run against a released feral
+      comparison can be re-run against a released feral. **Comment
+      drafted but not posted** — the tool call was blocked by the
+      permission classifier, so this needs a human to post it or to
+      grant the permission.
 
 ## 4. After the release — the real next round
 
