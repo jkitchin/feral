@@ -6141,3 +6141,40 @@ full analysis in dev/research/issue-148-parallel-task-granularity.md.
 **Deferred.** Issue #148 suggestion 3 (collect() temporaries):
 re-profile after this lands. #128 nrow-underestimate still skews flop
 estimates; harmless for this gate.
+
+## 2026-08-09 — Perf claims on shared containers require paired A/B, not 3-run medians
+
+**Decision.** Any performance claim measured in a shared/cloud container
+must come from a **paired, alternating A/B** — configurations A and B
+run back-to-back within the same time window, >= 10 pairs, compared by
+the per-pair ratio and a sign test — not from separately-collected
+run medians. `min_us` per invocation is the preferred per-sample
+statistic (least interfered). Cross-time comparison of numbers taken in
+different sessions is not evidence at all.
+
+**Why.** Measured on the issue-#148 chainW proxy (session 2026-08-09-03):
+three `FERAL_PAR_TASK_MIN_FLOPS` settings that produce *identical* task
+plans — same code path, byte-identical work — measured 139.6 / 259.1 /
+155.5 ms, a 1.9x spread. Eight invocations of one fixed config spanned
+min_us 124.7-163.2 ms (31%) and median_us 149.2-183.7 ms (23%). Two
+conclusions had already been drawn from inside that band and were both
+wrong: a claimed "chainW anomaly" (per-node spawning 20% faster than
+sequential) and a claimed 5-18% regression from PR #150. Paired
+re-measurement reversed both — 9/12 pairs favour the new code (median
+ratio 0.961) and 9/10 favour coarse over fine-grained tasks (median
+1.045, sign-test p~0.02).
+
+**Relationship to the existing rule.** The 2026-04-14 entry ("any
+bench-p90 delta smaller than ~5% must be confirmed with a 3-run
+median") is necessary but NOT sufficient: three consecutive medians can
+all land inside one drift excursion, which is exactly how both wrong
+conclusions above were reached. Paired A/B supersedes it for container
+measurement; the 3-run rule still applies to the corpus bench on a
+quiet machine.
+
+**Consequence for prior sessions.** Numbers in
+dev/sessions/2026-08-09-01.md and -02.md were collected unpaired.
+Those with large effects (dense-front kernel 2.7-7x, grid250, sparseqpL
+- since re-confirmed paired at 10/10 and 9/10) stand; sub-10% fixture
+deltas in those checkpoints should be treated as unresolved rather than
+as measured wins until re-run paired.

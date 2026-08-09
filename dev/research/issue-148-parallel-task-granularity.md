@@ -93,7 +93,7 @@ factors bit-for-bit on the chain/grid proxies' patterns.
 - No small-fixture regression (>2%, 3-run medians).
 - Spawn count on grid250 reduced by >10× (log n_tasks via telemetry).
 
-## Measured result — ACCEPTED (with one documented proxy anomaly)
+## Measured result — ACCEPTED (chainW anomaly withdrawn; see CORRECTION)
 
 Implemented as designed, with one refinement: task boundaries sit at
 tree roots and at children of nodes with >= 2 big (subtree >= cutoff)
@@ -124,19 +124,45 @@ gone: old par@4 82-88 vs serial 70-75 (losing 15-25%); new par@4
 Parity: tests/task_plan_parity.rs pins fine/default/fallback plans
 byte-identical to the sequential driver; 84/84 suites green.
 
-**Open question (chainW proxy anomaly).** The OLD per-node-spawn
-driver at any thread count beats both sequential drivers on the chainW
-proxy (~170-195 vs ~210-230 ms). AtomicLockStats telemetry shows the
-difference is INSIDE `factor_one_supernode` (factor_body 912 ms old vs
-1276 ms new over 9 factors, identical nodes) — not spawn/lock/driver
-overhead, not intrafront (FERAL_INTRAFRONT=0 A/B), not tree
-parallelism (a chain has none). Some workspace/allocator interaction
-this container cannot profile further (no perf/heaptrack). Accepted as
-a synthetic-proxy quirk: the issue's real chain problems (POUNCE
-hicks/optcontrol/bratu, 14 threads, glibc) lose badly under per-node
-spawning — the exact case this fix removes. If a real workload ever
-shows the same signature, `FERAL_PAR_TASK_MIN_FLOPS` tuning and this
-note are the starting points.
+**CORRECTION 2026-08-09 (session 03): the chainW "anomaly" was
+measurement noise, and there is no regression.** A PR-#150 reviewer
+challenged the "synthetic-proxy quirk" framing, correctly noting that
+chainW's wide-block-chain geometry is the shape of `double_column`
+(n=25377) and `prommis_sx` (n=28313) — models pounce currently wins on
+— so a 40% kernel loss there would be a live risk, not a curiosity.
+Re-measuring with paired methodology refuted the anomaly itself:
+
+*Proof the earlier numbers were noise.* Three cutoffs (1e5, 1e6, 1e8)
+produce IDENTICAL task plans (n_tasks=1, seeds=1 — the same code path)
+yet measured 139.6 / 259.1 / 155.5 ms: a 1.9x spread on identical code.
+Eight invocations of one fixed config spanned min_us 124.7-163.2 ms
+(31%) and median_us 149.2-183.7 ms (23%). The claimed 5-18% regression
+sits well inside that band, as did the original 20% "anomaly".
+
+*Paired results* (alternating A/B within one time window, so slow
+drift cancels; min_us per invocation; ratio <1 means the new code is
+faster):
+
+| comparison | pairs favoring new/coarse | median ratio | reading |
+|---|---|---:|---|
+| chainW: new (PR150) vs old (main) | 9/12 | 0.961 | new ~4% FASTER |
+| chainW: coarse vs fine-grained, same binary | 9/10 (p~0.02) | 1.045 | per-node tasks ~4% SLOWER |
+| sparseqpL: new vs old | 9/10 (p~0.02) | 0.894 | new ~11% faster |
+| grid250: new vs old | 10/10 (p~0.002) | 0.762 | new ~24% faster |
+
+So the shipped coarsening is mildly BETTER than per-node spawning on
+the wide-block chain, not worse — the opposite of what the unpaired
+numbers suggested — and the reviewer's regression concern is resolved
+in the PR's favour. The earlier AtomicLockStats reading (factor_body
+912 vs 1276 ms) was likewise unpaired and is withdrawn; it should not
+be cited.
+
+*Methodological consequence.* The project rule "any bench claim below
+~5% needs a 3-run median" (tried-and-rejected 2026-04-14) is NOT
+sufficient on a shared container for multi-hundred-ms workloads: three
+consecutive medians can all sit inside a drift excursion. Claims must
+come from paired, alternating A/B with a sign test over >= 10 pairs.
+Recorded in decisions.md 2026-08-09.
 
 Deferred (issue suggestion 3): the 2.9M `collect()` temporaries —
 re-profile after this lands; coarsening may have subsumed most of it

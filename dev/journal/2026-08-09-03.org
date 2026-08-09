@@ -1,0 +1,43 @@
+#+TITLE: Session 2026-08-09-03 — chainW regression investigation (PR #150 blocker)
+#+DATE: 2026-08-09
+
+* 12:10 :orient:chainw:regression:pr150:
+Reviewer (pounce side, PR #150 comment) correctly reframes what I
+labelled a "synthetic-proxy quirk" as a probable REGRESSION in the
+shipped default path, on a shape that matters: chainW is a wide-block
+chain, the geometry of double_column (n=25377, 819 vars/time-point)
+and prommis_sx (n=28313, 913 vars/point) — the two models pounce is
+currently WINNING on. My own final sweep at default parallel settings:
+chainW par@4t old 186.7-216.6 ms vs new 221.1-223.9 ms (~5-18% worse).
+Treating this as a merge blocker for #150.
+Plan: (1) decisive bisect — run the NEW driver with
+FERAL_PAR_TASK_MIN_FLOPS=1 (maximal task graph ~ OLD granularity). If
+that recovers OLD speed, the effect is genuinely task granularity; if
+not, my rewrite slowed something else and the coarsening is exonerated.
+(2) then the reviewer's three hypotheses (workspace shape churn, pool
+coverage asymmetry, first-touch locality).
+
+* 12:55 :chainw:noise:correction:paired-methodology:
+Bisect result overrode the whole investigation. FERAL_PAR_TASK_MIN_FLOPS
+sweep on chainW: cutoffs 1e5/1e6/1e8 all yield IDENTICAL plans
+(n_tasks=1 seeds=1, same code path) yet measured 139.6/259.1/155.5 ms —
+1.9x spread on identical code. Noise check, 8 invocations of one fixed
+config: min_us 124.7-163.2 (31%), median_us 149.2-183.7 (23%). The
+claimed 5-18% "regression" and my original 20% "anomaly" both sit
+inside that band.
+Paired alternating A/B (drift cancels), min_us, ratio new/old:
+  chainW new-vs-old      9/12 favour new, median 0.961 (new ~4% FASTER)
+  chainW coarse-vs-fine  9/10 favour coarse, median 1.045 (p~0.02)
+  sparseqpL new-vs-old   9/10 favour new, median 0.894 (~11% faster)
+  grid250 new-vs-old    10/10 favour new, median 0.762 (~24% faster)
+Conclusions: (1) no chainW regression — shipped coarsening is mildly
+BETTER than per-node spawning on that shape; merge blocker cleared.
+(2) the "anomaly" and the factor_body telemetry claim (912 vs 1276 ms)
+are WITHDRAWN — unpaired. (3) PR headline claims survive and
+strengthen under paired testing. (4) absolute times this session are
+much lower than session 02 (sparseqpL old 46-55 vs 82-88 ms) — the host
+was simply quieter; that drift is exactly what broke cross-time
+comparison.
+Methodology: the 3-run-median rule is insufficient here; paired
+alternating A/B with a sign test over >=10 pairs is now required for
+this container. Recording in decisions.md.
