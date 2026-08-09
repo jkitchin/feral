@@ -41,3 +41,32 @@ comparison.
 Methodology: the 3-run-median rule is insufficient here; paired
 alternating A/B with a sign test over >=10 pairs is now required for
 this container. Recording in decisions.md.
+
+* 13:40 :issue-148:review:env-var:self-inflicted:
+Reviewer (issue #148 comment) reproduced the parallel-slower-than-serial
+effect on 6 REAL KKT matrices on aarch64/macOS with the system
+allocator, MA57 as control: serial driver beats default pool on 5/6, up
+to 1.99x (clnlbeam). Kills the glibc-arena hypothesis - effect survives
+a different allocator, kernel and ISA. Also: at best config the
+pounce#552 gaps drop 8.05x->3.86x (clnlbeam) and 1.70x->1.17x (dtoc2,
+FERAL-attributable 0.98x = TIES MA57). Their conclusion: "the arithmetic
+kernel is fine; everything left is fixed cost and small-front behaviour."
+Verified their three code claims against source:
+(1) env::var per panel - TRUE, and 2 of the 3 are MINE from PR #150
+    (FERAL_PACKED_SIMD :3638, FERAL_PACKED_SIMD_MIN_WORK :3849 which
+    also string-parses every panel); plus pre-existing FERAL_PACKED_SCHUR
+    :3624 and FERAL_INTRAFRONT_MIN_AREA :721. All four now OnceLock-cached.
+(2) SupernodeTiming.us truncated via as_micros() - TRUE (:2173,:2224,:3659).
+(3) IMPORTANT: probe_panel_frag reads the phase_timing NANOSECOND
+    atomics, not SupernodeTiming, so the session-01 small-front
+    attribution (schur 4.1% / scalar-tail 8.4%) is NOT affected by the
+    truncation bug and stands. Their profile_report() numbers are the
+    truncated ones.
+Paired A/B of the env caching (10 pairs, min_us): HYDCAR20 10/10 ratio
+0.943 (-5.7%), chain1200 10/10 ratio 0.912 (-9.0%), sawpath 4/10 no
+effect. Bigger than their ~1-2% estimate. Note small fast fixtures are
+LOW noise (HYDCAR20 min_us spread <1%) vs chainW's 31% - fixture size
+drives resolvability.
+Also noted: PR #150's seeds<2 fallback IS their item #1 (tree-shape-gated
+serial fallback); their data suggests my gate may be too conservative,
+since serial beat TUNED parallel on 4/6.
