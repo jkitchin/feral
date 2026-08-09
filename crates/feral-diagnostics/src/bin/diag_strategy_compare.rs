@@ -121,7 +121,14 @@ fn main() {
                 let ratio = r.total_us as f64 / a.total_us as f64;
                 println!(
                     "{:>16} | {:>10} {:>10} {:>10} | {:>10} {:>10} {:>10} | {:>8.3}",
-                    label, a_n, a.total_us, a.loop_us, r_n, r.total_us, r.loop_us, ratio
+                    label,
+                    a_n,
+                    a.total_us,
+                    a.loop_us(),
+                    r_n,
+                    r.total_us,
+                    r.loop_us(),
+                    ratio
                 );
             }
             _ => println!("{:>16} | run failed", label),

@@ -141,7 +141,7 @@ fn main() {
         total_us_runs.push(total_us);
         prologue_runs.push(report.prologue_us);
         epilogue_runs.push(report.epilogue_us);
-        loop_runs.push(report.loop_us);
+        loop_runs.push(report.loop_us());
 
         if rep == N_REPS - 1 {
             last_timings = p.timings().to_vec();
@@ -176,13 +176,13 @@ fn main() {
 
     // ===== Phase 1b: per-supernode time distribution =====
     println!("\n==== Phase 1b: per-supernode timing distribution ====");
-    let mut us_all: Vec<u64> = last_timings.iter().map(|t| t.us).collect();
+    let mut us_all: Vec<u64> = last_timings.iter().map(|t| t.us()).collect();
     let (us_min, us_p50, us_p90, us_p99, us_max) = percentiles(&mut us_all);
     println!(
         "  per-snode us:  min={}, p50={}, p90={}, p99={}, max={}",
         us_min, us_p50, us_p90, us_p99, us_max
     );
-    let total_loop: u64 = last_timings.iter().map(|t| t.us).sum();
+    let total_loop: u64 = last_timings.iter().map(|t| t.us()).sum();
     println!("  sum per-snode us = {}", total_loop);
 
     // Bucketed by ncol
@@ -190,7 +190,7 @@ fn main() {
     for t in &last_timings {
         let e = by_ncol.entry(t.ncol).or_insert((0, 0));
         e.0 += 1;
-        e.1 += t.us;
+        e.1 += t.us();
     }
     println!("  per-supernode time bucketed by ncol (top by total time):");
     let mut buckets: Vec<(usize, usize, u64)> =
@@ -211,7 +211,7 @@ fn main() {
     for t in &last_timings {
         let e = by_nrow.entry(t.nrow).or_insert((0, 0));
         e.0 += 1;
-        e.1 += t.us;
+        e.1 += t.us();
     }
     println!("  per-supernode time bucketed by nrow (top by total time):");
     let mut buckets: Vec<(usize, usize, u64)> =
@@ -361,7 +361,7 @@ fn main() {
     for t in &last_timings {
         if t.ncol <= 2 {
             tiny_count += 1;
-            tiny_us += t.us;
+            tiny_us += t.us();
         }
     }
     println!(
@@ -428,7 +428,7 @@ fn main() {
         .iter()
         .filter(|t| t.nrow == 32 && t.ncol == 32)
         .collect();
-    top.sort_by_key(|t| std::cmp::Reverse(t.us));
+    top.sort_by_key(|t| std::cmp::Reverse(t.us()));
     for (i, t) in top.iter().take(10).enumerate() {
         let snode = &symbolic.supernodes[t.snode_idx];
         let n_children = snode.children.len();
@@ -445,7 +445,11 @@ fn main() {
             .sum();
         println!(
             "    #{} snode={}: {} us, n_children={}, sum(child trailing rows)={}",
-            i, t.snode_idx, t.us, n_children, total_child_contrib_nrow
+            i,
+            t.snode_idx,
+            t.us(),
+            n_children,
+            total_child_contrib_nrow
         );
     }
 

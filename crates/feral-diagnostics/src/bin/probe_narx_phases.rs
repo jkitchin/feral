@@ -100,7 +100,7 @@ fn size_distribution(timings: &[SupernodeTiming]) {
         ("65-256", 65, 256),
         (">256", 257, usize::MAX),
     ];
-    let total_us: u64 = timings.iter().map(|t| t.us).sum();
+    let total_us: u64 = timings.iter().map(|t| t.us()).sum();
     println!(
         "    {:>8} {:>7} {:>10} {:>7} {:>9} {:>9}",
         "ncol", "count", "sum_us", "pct", "asm_us", "df_us"
@@ -111,9 +111,9 @@ fn size_distribution(timings: &[SupernodeTiming]) {
         for t in timings {
             if t.ncol >= lo && t.ncol <= hi {
                 count += 1;
-                sum += t.us;
-                asm += t.assembly_us;
-                df += t.densefactor_us;
+                sum += t.us();
+                asm += t.assembly_us();
+                df += t.densefactor_us();
             }
         }
         let pct = if total_us > 0 {
@@ -130,7 +130,7 @@ fn size_distribution(timings: &[SupernodeTiming]) {
 
 fn top_supernodes(timings: &[SupernodeTiming]) {
     let mut v: Vec<&SupernodeTiming> = timings.iter().collect();
-    v.sort_by_key(|t| std::cmp::Reverse(t.us));
+    v.sort_by_key(|t| std::cmp::Reverse(t.us()));
     println!(
         "    {:>6} {:>6} {:>6} {:>9} {:>8} {:>8} {:>8} {:>8} {:>8}",
         "snode", "nrow", "ncol", "us", "asm_us", "df_us", "panel", "schur", "tail"
@@ -141,12 +141,12 @@ fn top_supernodes(timings: &[SupernodeTiming]) {
             t.snode_idx,
             t.nrow,
             t.ncol,
-            t.us,
-            t.assembly_us,
-            t.densefactor_us,
-            t.panelfactor_us,
-            t.schur_us,
-            t.scalartail_us,
+            t.us(),
+            t.assembly_us(),
+            t.densefactor_us(),
+            t.panelfactor_us(),
+            t.schur_us(),
+            t.scalartail_us(),
         );
     }
 }
@@ -186,7 +186,7 @@ fn run(iter: usize) {
     let cold_phases = phase_timing::snapshot();
     let cold_detail = phase_timing::snapshot_detail();
     let cold_zerofill = phase_timing::snapshot_contrib_zerofill();
-    let cold_loop_us = prof.lock().map(|p| p.report().loop_us).unwrap_or(0);
+    let cold_loop_us = prof.lock().map(|p| p.report().loop_us()).unwrap_or(0);
 
     // Warm factor: numeric only (symbolic reused). Re-arm profiler and
     // reset counters.
@@ -224,7 +224,7 @@ fn run(iter: usize) {
     );
     report_loop(
         "WARM",
-        report.loop_us,
+        report.loop_us(),
         warm_phases,
         warm_detail,
         warm_zerofill,

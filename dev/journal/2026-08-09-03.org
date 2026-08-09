@@ -70,3 +70,26 @@ drives resolvability.
 Also noted: PR #150's seeds<2 fallback IS their item #1 (tree-shape-gated
 serial fallback); their data suggests my gate may be too conservative,
 since serial beat TUNED parallel on 4/6.
+
+* 14:30 :issue-148:profiler:nanoseconds:instrument-bug:
+Implemented the reviewer's item #2 (profiler to nanoseconds). Not the
+"one line" it looked like: SupernodeTiming.us -> .ns, the five phase
+fields -> *_ns (they were phase_timing NANOSECOND atomics divided by
+1000 - truncating twice over), BucketStats sum/avg -> _ns,
+ProfileReport.loop_us -> loop_ns, plus the warning check which now
+compares in ns (loop is ns, prologue/epilogue/total stay us - they are
+ms-scale and never truncated).
+Consumer strategy: kept us() accessors on all three types so the 17
+one-off feral-diagnostics probes migrate with .us -> .us() and keep
+their exact prior semantics; feral's own code (solver, perf_probe,
+profile_qap15, profiler_smoke) uses the precise ns fields. Patched the
+diagnostics crate by driving off compiler-message JSON spans after a
+naive regex over-reached into unrelated local structs (Metrics.loop_us,
+StagePct.us) - 11 rounds, precise.
+Measured recovery: grid250 5651/11171 supernodes (50.6%) recorded 0 us
+before, now 0 record zero; loop 145.4 -> 152.1 ms (+6.7 ms, 4.4%
+previously invisible). clnlbeam-like tridiagonal n=100000: 23.07 ->
+26.20 ms (+12.0%). grid250's <=8 bucket now reports 8156 fronts at
+1.47 us mean = 7.9% of loop - previously half of them were literally 0.
+Confirms the reviewer's finding (c) exactly. clippy clean on both
+crates, 84/84 suites green.

@@ -4,6 +4,26 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — the profiler no longer reports small fronts as costless (issue #148)
+
+- **Breaking (diagnostic API).** `SupernodeTiming` now records **nanoseconds**:
+  `us` → `ns`, and `assembly_us`/`densefactor_us`/`panelfactor_us`/`schur_us`/
+  `scalartail_us` → the matching `*_ns`. `BucketStats::sum_us`/`avg_us` →
+  `sum_ns`/`avg_ns`, and `ProfileReport::loop_us` is now `loop_ns`.
+  Microsecond accessors (`SupernodeTiming::us()`, `BucketStats::sum_us()`,
+  `ProfileReport::loop_us()`, …) are provided for existing consumers — the
+  migration is `.us` → `.us()`.
+- Why: the per-supernode timer used `Duration::as_micros()`, and the phase
+  deltas were divided by 1000, so every front costing under a microsecond
+  recorded **zero**. On a 250×250 grid Laplacian, **5651 of 11171 supernodes
+  (50.6%) recorded 0 µs**; the aggregate under-reported the inner loop by
+  6.7 ms of 152 ms (4.4%), and by 12.0% on a tridiagonal n=100000 chain. The
+  instrument reported exactly the population it was pointed at — the
+  small-front bucket — as free, which blocked any measurement of amalgamation
+  or per-front fixed-cost work. `loop_ns` now sums nanoseconds, so that
+  population is visible: the `<=8` bucket on grid250 shows 8156 fronts at
+  1.47 µs mean, 7.9% of loop time.
+
 ### Performance — parallel factorization no longer loses to serial (issue #148)
 
 - The parallel multifrontal driver now spawns one rayon task per *subtree*

@@ -509,12 +509,12 @@ fn per_phase_breakdown(matrix: &CscMatrix, bk: BunchKaufmanParams, sp: Supernode
         let prof_guard = prof.lock().expect("profiler poisoned");
         let report = prof_guard.report();
         let timings = prof_guard.timings();
-        let loop_us: u64 = timings.iter().map(|t| t.us).sum();
-        let assembly_us: u64 = timings.iter().map(|t| t.assembly_us).sum();
-        let densefactor_us: u64 = timings.iter().map(|t| t.densefactor_us).sum();
-        let panel_us: u64 = timings.iter().map(|t| t.panelfactor_us).sum();
-        let schur_us: u64 = timings.iter().map(|t| t.schur_us).sum();
-        let scalartail_us: u64 = timings.iter().map(|t| t.scalartail_us).sum();
+        let loop_us: u64 = timings.iter().map(|t| t.us()).sum();
+        let assembly_us: u64 = timings.iter().map(|t| t.assembly_us()).sum();
+        let densefactor_us: u64 = timings.iter().map(|t| t.densefactor_us()).sum();
+        let panel_us: u64 = timings.iter().map(|t| t.panelfactor_us()).sum();
+        let schur_us: u64 = timings.iter().map(|t| t.schur_us()).sum();
+        let scalartail_us: u64 = timings.iter().map(|t| t.scalartail_us()).sum();
 
         sum_total += total_us as u128;
         sum_prologue += report.prologue_us as u128;
@@ -666,7 +666,7 @@ fn per_phase_breakdown(matrix: &CscMatrix, bk: BunchKaufmanParams, sp: Supernode
     // dominated by one wide root supernode after AMD/METIS so this
     // typically prints one giant entry + tiny tail.
     let mut top: Vec<&SupernodeTiming> = last_timings.iter().collect();
-    top.sort_by_key(|t| std::cmp::Reverse(t.us));
+    top.sort_by_key(|t| std::cmp::Reverse(t.us()));
     println!("  top supernodes by wall (last rep):");
     println!(
         "    {:>5}  {:>5}  {:>5}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}",
@@ -678,11 +678,11 @@ fn per_phase_breakdown(matrix: &CscMatrix, bk: BunchKaufmanParams, sp: Supernode
             t.snode_idx,
             t.nrow,
             t.ncol,
-            t.us,
-            t.assembly_us,
-            t.panelfactor_us,
-            t.schur_us,
-            t.scalartail_us,
+            t.us(),
+            t.assembly_us(),
+            t.panelfactor_us(),
+            t.schur_us(),
+            t.scalartail_us(),
         );
     }
 }

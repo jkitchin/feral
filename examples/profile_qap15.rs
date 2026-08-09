@@ -82,7 +82,7 @@ fn profile_once(csc: &CscMatrix, fma: bool) {
     );
     println!(
         "  loop={:.1}ms  prologue={:.1}ms  epilogue={:.1}ms  overhead={:.1}%",
-        report.loop_us as f64 / 1e3,
+        report.loop_ns as f64 / 1e6,
         report.prologue_us as f64 / 1e3,
         report.epilogue_us as f64 / 1e3,
         report.overhead_pct
@@ -97,24 +97,24 @@ fn profile_once(csc: &CscMatrix, fma: bool) {
             "    {:>8}  {:>7}  {:>10.1}  {:>6.1}%  {:>10.1}",
             b.range,
             b.count,
-            b.sum_us as f64 / 1e3,
+            b.sum_ns as f64 / 1e6,
             b.pct_of_total,
-            b.avg_us
+            b.avg_ns / 1000.0
         );
     }
 
     // Top fronts by time — the concrete targets for a blocked kernel.
     let mut timings: Vec<SupernodeTiming> = p.timings().to_vec();
-    timings.sort_by_key(|b| std::cmp::Reverse(b.us));
+    timings.sort_by_key(|b| std::cmp::Reverse(b.ns));
     println!("  top fronts by time (nrow x ncol -> ms):");
-    let loop_us = report.loop_us.max(1) as f64;
+    let loop_us = report.loop_ns.max(1) as f64 / 1000.0;
     for t in timings.iter().take(10) {
         println!(
             "    {:>6} x {:<6} -> {:>8.2} ms  ({:>4.1}% of loop)",
             t.nrow,
             t.ncol,
-            t.us as f64 / 1e3,
-            t.us as f64 * 100.0 / loop_us
+            t.ns as f64 / 1e6,
+            t.ns as f64 / 1000.0 * 100.0 / loop_us
         );
     }
     if !report.validation_warnings.is_empty() {

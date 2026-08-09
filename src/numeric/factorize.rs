@@ -314,25 +314,91 @@ pub struct SupernodeTiming {
     pub snode_idx: usize,
     pub nrow: usize,
     pub ncol: usize,
-    pub us: u64,
-    /// Phase-breakdown deltas (issue #44 phase-probe). All zero unless
-    /// `dense::factor::PHASE_TIMING_ENABLED` is set. `assembly_us` covers
-    /// `build_row_indices` + original-entry scatter + child extend-add;
-    /// `densefactor_us` is the whole dense frontal factor and decomposes
-    /// into `panelfactor_us` (panel/diagonal BK) + `schur_us` (deferred
-    /// Schur trailing update) + `scalartail_us` (scalar pivot tail);
-    /// `densefactor_us - panel - schur - scalartail` is dense-factor
-    /// bookkeeping overhead.
+    /// Wallclock for this supernode, in **nanoseconds**.
+    ///
+    /// Nanoseconds, not microseconds: on chain-structured KKTs the vast
+    /// majority of supernodes cost well under 1 us each (measured
+    /// 0.21-0.74 us/supernode across six real matrices), so the previous
+    /// `as_micros()` field truncated them all to 0 and the aggregate
+    /// under-reported the small-front population by roughly an entire
+    /// MA57 factorization. The instrument reported the thing it was
+    /// pointed at as costless. See issue #148.
+    pub ns: u64,
+    /// Phase-breakdown deltas in **nanoseconds** (issue #44 phase-probe).
+    /// All zero unless `dense::factor::PHASE_TIMING_ENABLED` is set.
+    /// `assembly_ns` covers `build_row_indices`, the original-entry
+    /// scatter and the child extend-add. `densefactor_ns` is the whole
+    /// dense frontal factor, decomposing into `panelfactor_ns`
+    /// (panel/diagonal BK), `schur_ns` (deferred Schur trailing update)
+    /// and `scalartail_ns` (scalar pivot tail); the remainder
+    /// `densefactor_ns` minus those three is dense-factor bookkeeping
+    /// overhead. All are copied straight from the `phase_timing`
+    /// nanosecond atomics — they were previously divided by 1000,
+    /// truncating for the same reason as above.
     #[serde(default)]
-    pub assembly_us: u64,
+    pub assembly_ns: u64,
     #[serde(default)]
-    pub densefactor_us: u64,
+    pub densefactor_ns: u64,
     #[serde(default)]
-    pub panelfactor_us: u64,
+    pub panelfactor_ns: u64,
     #[serde(default)]
-    pub schur_us: u64,
+    pub schur_ns: u64,
     #[serde(default)]
-    pub scalartail_us: u64,
+    pub scalartail_ns: u64,
+}
+
+impl SupernodeTiming {
+    /// This supernode's wallclock in whole microseconds (truncating).
+    ///
+    /// Convenience for diagnostic probes written against the pre-issue-#148
+    /// microsecond field. **Prefer the `ns` field**: sub-microsecond
+    /// supernodes — the majority on chain-structured KKTs — truncate to 0
+    /// here, which is exactly the under-reporting that motivated the
+    /// nanosecond switch. Aggregates built from this accessor inherit that
+    /// error; aggregates built from `ns` do not.
+    pub fn us(&self) -> u64 {
+        self.ns / 1000
+    }
+    /// `assembly_ns` in whole microseconds (truncating; see [`Self::us`]).
+    pub fn assembly_us(&self) -> u64 {
+        self.assembly_ns / 1000
+    }
+    /// `densefactor_ns` in whole microseconds (truncating; see [`Self::us`]).
+    pub fn densefactor_us(&self) -> u64 {
+        self.densefactor_ns / 1000
+    }
+    /// `panelfactor_ns` in whole microseconds (truncating; see [`Self::us`]).
+    pub fn panelfactor_us(&self) -> u64 {
+        self.panelfactor_ns / 1000
+    }
+    /// `schur_ns` in whole microseconds (truncating; see [`Self::us`]).
+    pub fn schur_us(&self) -> u64 {
+        self.schur_ns / 1000
+    }
+    /// `scalartail_ns` in whole microseconds (truncating; see [`Self::us`]).
+    pub fn scalartail_us(&self) -> u64 {
+        self.scalartail_ns / 1000
+    }
+}
+
+impl BucketStats {
+    /// Bucket sum in whole microseconds (truncating; see [`SupernodeTiming::us`]).
+    pub fn sum_us(&self) -> u64 {
+        self.sum_ns / 1000
+    }
+    /// Bucket mean in microseconds.
+    pub fn avg_us(&self) -> f64 {
+        self.avg_ns / 1000.0
+    }
+}
+
+impl ProfileReport {
+    /// Inner-loop wallclock in whole microseconds (truncating; see
+    /// [`SupernodeTiming::us`]). Sums nanoseconds first, so unlike the
+    /// pre-#148 field this does NOT lose the sub-microsecond population.
+    pub fn loop_us(&self) -> u64 {
+        self.loop_ns / 1000
+    }
 }
 
 /// Per-sub-phase wallclock breakdown of the numeric prologue —
@@ -421,9 +487,9 @@ impl Profiler {
             .map(|&(range, _, _)| BucketStats {
                 range,
                 count: 0,
-                sum_us: 0,
+                sum_ns: 0,
                 pct_of_total: 0.0,
-                avg_us: 0.0,
+                avg_ns: 0.0,
             })
             .collect();
 
@@ -431,13 +497,13 @@ impl Profiler {
             for (i, &(_, lo, hi)) in RANGES.iter().enumerate() {
                 if t.nrow >= lo && t.nrow <= hi {
                     buckets[i].count += 1;
-                    buckets[i].sum_us += t.us;
+                    buckets[i].sum_ns += t.ns;
                     break;
                 }
             }
         }
 
-        let loop_us: u64 = buckets.iter().map(|b| b.sum_us).sum();
+        let loop_ns: u64 = buckets.iter().map(|b| b.sum_ns).sum();
 
         let mut warnings: Vec<String> = Vec::new();
         let count_sum: usize = buckets.iter().map(|b| b.count).sum();
@@ -448,20 +514,24 @@ impl Profiler {
                 self.timings.len()
             ));
         }
-        if self.total_us > 0 && loop_us + self.prologue_us + self.epilogue_us > self.total_us {
+        // Compare in nanoseconds: `loop_ns` is ns, the others are us.
+        let components_ns = loop_ns
+            .saturating_add(self.prologue_us.saturating_mul(1000))
+            .saturating_add(self.epilogue_us.saturating_mul(1000));
+        if self.total_us > 0 && components_ns > self.total_us.saturating_mul(1000) {
             warnings.push(format!(
-                "loop+prologue+epilogue ({}) exceeds total ({})",
-                loop_us + self.prologue_us + self.epilogue_us,
-                self.total_us
+                "loop+prologue+epilogue ({} ns) exceeds total ({} ns)",
+                components_ns,
+                self.total_us.saturating_mul(1000)
             ));
         }
 
         for b in &mut buckets {
-            if loop_us > 0 {
-                b.pct_of_total = (b.sum_us as f64) * 100.0 / (loop_us as f64);
+            if loop_ns > 0 {
+                b.pct_of_total = (b.sum_ns as f64) * 100.0 / (loop_ns as f64);
             }
             if b.count > 0 {
-                b.avg_us = (b.sum_us as f64) / (b.count as f64);
+                b.avg_ns = (b.sum_ns as f64) / (b.count as f64);
             }
         }
 
@@ -476,7 +546,7 @@ impl Profiler {
             prologue_us: self.prologue_us,
             prologue_breakdown: self.prologue_breakdown.clone(),
             epilogue_us: self.epilogue_us,
-            loop_us,
+            loop_ns,
             total_us: self.total_us,
             overhead_pct,
             buckets,
@@ -490,9 +560,11 @@ impl Profiler {
 pub struct BucketStats {
     pub range: &'static str,
     pub count: usize,
-    pub sum_us: u64,
+    /// Summed supernode wallclock for this bucket, in nanoseconds.
+    pub sum_ns: u64,
     pub pct_of_total: f64,
-    pub avg_us: f64,
+    /// Mean supernode wallclock for this bucket, in nanoseconds.
+    pub avg_ns: f64,
 }
 
 /// Aggregated profile report. Serializable for diagnostic dumps.
@@ -505,8 +577,12 @@ pub struct ProfileReport {
     /// `prologue_us` (a few un-timed O(1) checks are not attributed).
     pub prologue_breakdown: PrologueBreakdown,
     pub epilogue_us: u64,
-    /// Sum of per-supernode timings — the inner-loop wallclock.
-    pub loop_us: u64,
+    /// Sum of per-supernode timings — the inner-loop wallclock, in
+    /// **nanoseconds** (the per-supernode source is nanosecond-precise;
+    /// see `SupernodeTiming::ns`). Sibling `prologue_us`/`epilogue_us`/
+    /// `total_us` remain microseconds: they are millisecond-scale and
+    /// never truncated.
+    pub loop_ns: u64,
     /// Total wallclock for the entire driver call.
     pub total_us: u64,
     pub overhead_pct: f64,
@@ -2170,14 +2246,14 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
                             snode_idx: m,
                             nrow: snode.nrow,
                             ncol: snode.ncol,
-                            us: t.elapsed().as_micros() as u64,
+                            ns: t.elapsed().as_nanos() as u64,
                             // Phase breakdown is not instrumented on the
                             // small-leaf batch path (`factor_one_small_leaf`).
-                            assembly_us: 0,
-                            densefactor_us: 0,
-                            panelfactor_us: 0,
-                            schur_us: 0,
-                            scalartail_us: 0,
+                            assembly_ns: 0,
+                            densefactor_ns: 0,
+                            panelfactor_ns: 0,
+                            schur_ns: 0,
+                            scalartail_ns: 0,
                         };
                         if let Ok(mut prof) = arc.lock() {
                             prof.timings.push(timing);
@@ -2221,12 +2297,12 @@ pub fn factorize_multifrontal_supernodal_with_workspace(
                 snode_idx,
                 nrow: snode.nrow,
                 ncol: snode.ncol,
-                us: t.elapsed().as_micros() as u64,
-                assembly_us: (phase_after.0 - phase_before.0) / 1000,
-                densefactor_us: (phase_after.1 - phase_before.1) / 1000,
-                panelfactor_us: (phase_after.2 - phase_before.2) / 1000,
-                schur_us: (phase_after.3 - phase_before.3) / 1000,
-                scalartail_us: (phase_after.4 - phase_before.4) / 1000,
+                ns: t.elapsed().as_nanos() as u64,
+                assembly_ns: phase_after.0 - phase_before.0,
+                densefactor_ns: phase_after.1 - phase_before.1,
+                panelfactor_ns: phase_after.2 - phase_before.2,
+                schur_ns: phase_after.3 - phase_before.3,
+                scalartail_ns: phase_after.4 - phase_before.4,
             };
             if let Ok(mut prof) = arc.lock() {
                 prof.timings.push(timing);
@@ -3555,7 +3631,7 @@ fn run_parallel_task<'a>(
         // `params.profiler` recording so `Solver::with_profiling(true)`
         // yields a populated report on the parallel dispatch too. Set
         // inside the factor block, consumed in the `Ok` arm below.
-        let mut prof_us: Option<u64> = None;
+        let mut prof_ns: Option<u64> = None;
         let result = {
             let t_ws_wait = telemetry.map(|_| std::time::Instant::now());
             // Issue #102: `thread_ws[i]` is only ever locked by the rayon
@@ -3656,7 +3732,7 @@ fn run_parallel_task<'a>(
                         .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
                 if let Some(start) = prof_start {
-                    prof_us = Some(start.elapsed().as_micros() as u64);
+                    prof_ns = Some(start.elapsed().as_nanos() as u64);
                 }
 
                 let own = local_contribs[snode_idx].take();
@@ -3665,17 +3741,17 @@ fn run_parallel_task<'a>(
                         // N3: record this supernode's profiler timing
                         // (completion order; wall only — see the
                         // sequential driver note).
-                        if let (Some(arc), Some(us)) = (params.profiler.as_ref(), prof_us) {
+                        if let (Some(arc), Some(ns)) = (params.profiler.as_ref(), prof_ns) {
                             let timing = SupernodeTiming {
                                 snode_idx,
                                 nrow: snode.nrow,
                                 ncol: snode.ncol,
-                                us,
-                                assembly_us: 0,
-                                densefactor_us: 0,
-                                panelfactor_us: 0,
-                                schur_us: 0,
-                                scalartail_us: 0,
+                                ns,
+                                assembly_ns: 0,
+                                densefactor_ns: 0,
+                                panelfactor_ns: 0,
+                                schur_ns: 0,
+                                scalartail_ns: 0,
                             };
                             if let Ok(mut prof) = arc.lock() {
                                 prof.timings.push(timing);

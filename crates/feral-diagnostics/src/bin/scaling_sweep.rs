@@ -160,7 +160,7 @@ fn measure_one(solver: &mut Solver, csc: &CscMatrix) -> Option<Metrics> {
         m.pb_symmetric_pattern_us = bd.symmetric_pattern_us;
         m.pb_infnorm_tol_us = bd.infnorm_tol_us;
         m.pb_setup_us = bd.setup_us;
-        m.loop_us = rep.loop_us;
+        m.loop_us = rep.loop_us();
         m.epilogue_us = rep.epilogue_us;
         m.total_us = rep.total_us;
         m.n_supernodes = rep.n_supernodes as u64;

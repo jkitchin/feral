@@ -186,11 +186,11 @@ fn main() {
     if let Some(r) = prof.profile_report() {
         let b = &r.prologue_breakdown;
         println!(
-            "  prologue_us={} loop_us={} total_us={} | permute_us={} \
+            "  prologue_us={} loop_us={:.1} total_us={} | permute_us={} \
              permute_from_triplets_us={} scaling_us={} symmetric_pattern_us={} \
              setup_us={} row_map_us={} infnorm_tol_us={}",
             r.prologue_us,
-            r.loop_us,
+            r.loop_ns as f64 / 1000.0,
             r.total_us,
             b.permute_us,
             b.permute_from_triplets_us,
