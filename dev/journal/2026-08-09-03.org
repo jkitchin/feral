@@ -179,3 +179,23 @@ Note: their "~39.6k short-lived Vecs" detail is not quite right -
 vec![Vec::new(); n] does not heap-allocate the inner Vecs; the real
 cost is the ~950 KB outer Vec plus the single owner vec. Waste is real,
 mechanism slightly different.
+
+* 17:00 :release:changelog-audit:
+Pre-release audit of the checklist caught four CHANGELOG defects, the
+first of which would have shipped a false statement:
+(1) The trailing note still said aarch64 revalidation was "pending" -
+    it is complete and passing. Replaced with the actual results
+    (NEON 2.94x vs 0.14.0, 3.19x vs PACKED_SIMD=0, corpus 156929
+    matrices 100% inertia, golden_bits reproducing cross-arch).
+(2) FERAL_PAR_MIN_SEEDS / PAR_MIN_SEEDS undocumented - new public const
+    + env var.
+(3) The OnceLock per-panel env caching (-5.7%/-9.0% paired) undocumented.
+(4) The task-plan early-out undocumented; Python-binding compatibility
+    (fields unchanged + new _ns) not stated.
+Also generalized the section title from "x86 SIMD kernels" - the NEON
+data shows the packed kernel wins there too, so the x86 framing
+undersold it.
+Verified independently: single [Unreleased] heading, no stray 0.14.0
+refs beyond the six to bump, working tree clean and in sync with
+origin, 84 binaries / 800 passed / 0 failed / 21 ignored on the exact
+release tree.

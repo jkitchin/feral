@@ -13,12 +13,22 @@ guesswork. Cutting the release *is* the measurement.
 - [ ] Merge PR #150 (task coarsening, env caching, profiler ns, python
       bindings). CI green as of 7ef9e52.
 
-## 1. aarch64 (M-series) revalidation — **gates the release**
+## 1. aarch64 (M-series) revalidation — **COMPLETE, ALL GATES PASS** (2026-08-09)
 
 All 2026-08-09 performance numbers were taken on an x86_64 4-core AVX2
 container. The correctness argument is architecture-independent, but it
 must be *demonstrated* on aarch64 before shipping, because pounce
 publishes macOS arm64 wheels.
+
+> **Result (reported on PR #150):** 1a PASS — 84/84 binaries, 802 tests,
+> `golden_bits` 3/3 on aarch64 (x86-recorded digests reproduce → cross-arch
+> bit-identity demonstrated); corpus 156,929 matrices, dense + sparse inertia
+> both 100.0%, Phase 2.8.1 4/4 PASS, worst residuals identical to the x86
+> baseline to the digit. 1b PASS and then some — the packed SIMD default beats
+> `FERAL_PACKED_SIMD=0` by 3.19× (n=2955) / 2.25× (n=512) on NEON, so no
+> per-arch gate or `MIN_WORK` retune is needed. §2 answered: **keep
+> `PAR_MIN_SEEDS = 2`** — coarsening leaves chain KKTs at `seeds=1` so the
+> knob is a no-op there, and `marine_1600` loses 28% if it is raised.
 
 ### 1a. Correctness (MUST pass — blocks release)
 
@@ -71,7 +81,7 @@ compare medians collected at different times — on the container that
 produced a 1.9× spread on *identical* code and led to two wrong
 conclusions.
 
-## 2. Optional, ~30 min: calibrate `FERAL_PAR_MIN_SEEDS`
+## 2. ~~Optional~~ DONE: calibrate `FERAL_PAR_MIN_SEEDS` → keep the default (2)
 
 The serial-fallback threshold (issue #148) currently defaults to 2 —
 delegate to the sequential driver only when the task graph has *no*
