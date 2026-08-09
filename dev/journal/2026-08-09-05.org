@@ -1,0 +1,134 @@
+* 19:20 :branch:housekeeping:
+Restarted claude/feral-kernel-perf-dx0fkq from origin/main after #151
+(v0.15.0) merged; cherry-picked edd3260 (scaling-warm-start research,
+docs only) onto it as e2ba443. First attempt with `git cherry-pick -q`
+appeared to no-op (log showed only 808babb/fad5670 and files absent);
+re-running without -q applied it cleanly. Lesson: verify cherry-picks
+by file existence, not by the command's apparent success.
+
+* 19:35 :nemin:amalgamation:prior-art:
+Post-release queue item 2 is the `nemin` amalgamation sweep, motivated
+by the PR #150 review (90% of clnlbeam's supernodes are <=8 columns;
+35.9% of its loop time). Before writing any code, searched
+tried-and-rejected per CLAUDE.md. This lever has been swept THREE times
+already, and the most recent one targeted clnlbeam by name:
+
+- 2026-04-19: nemin in {1,5,32} on AVION2/BATCH. nemin=32 optimal;
+  nemin=1 regressed 30-40%.
+- 2026-05-03 (Phase A, decisions.md): {8,16,32,64} x {AMD,METIS-ND} on
+  PoissonControl -> default lowered 32 -> 16. nemin=8 recovers memory
+  but the wall regresses.
+- 2026-05-03 (Phase B): {8,16,24,32,48} on MUONSINE/KIRBY2/ACOPR30/
+  SWOPF. Shape-dispatched nemin abandoned: path-like factor_nnz is
+  invariant in nemin and the wall signal was pure noise (nemin=48 was
+  8% faster in run 1, 29% slower in run 2).
+- 2026-05-16 (issue #10 lever 5): {16,32,64,128} on the 4-family
+  Mittelmann panel. clnlbeam geomean vs nemin=16: 1.032 / 1.356 /
+  1.989. ncol_mean doubles at 64 but factor_nnz inflates 1.23-1.33x.
+  nemin in {256,MAX} HUNG on clnlbeam_0000 (one near-dense front of
+  order > n/2). Issue #10 closed as "hardware floor".
+
+So the reviewer's item 2, in the obvious direction (raise nemin to fuse
+the <=8-column supernodes), is already falsified ON THE EXACT MATRIX
+FAMILY, by a paired sweep, with fill numbers attached.
+
+One thing has genuinely changed since 2026-05-16, and it is the thing
+the rejection turned on. The May conclusion was "the wider panel cannot
+amortize the extra fill". That amortization rate is exactly what the
+0.15.0 kernel work altered: on x86 the trailing update went from an
+SSE2-baseline scalar walk to explicit AVX2 (n=2955: 4.24s -> 1.52s),
+and the aarch64 packed path is 2.25-3.19x its predecessor. Wide fronts
+are now several times cheaper per flop, while the fill penalty of a
+larger nemin is unchanged. The break-even therefore moved in favour of
+amalgamation, by a factor of the same order as the regression that
+sank it. That is a real reason to re-measure, not a re-litigation.
+Recording the pre-registered criterion BEFORE running, so a repeat of
+the 2026-05-16 result is reported as a confirmation, not buried.
+
+* 20:30 :nemin:sweep:measured:
+Ran the sweep. nemin=8 beats the shipped 16 on BOTH axes on structured
+KKTs (geomean 0.925 time / 0.678 nnz; clnlbeam_like 0.925/0.579,
+chain12000 0.815/0.640) and is neutral on 61 parity fixtures
+(0.986/0.89). Every arm ABOVE 16 loses everywhere — the 2026-05-16
+rejection survives the kernel rewrite intact, so the reviewer's stated
+direction is dead twice over. But nemin=8 fails my pre-registered
+criterion: parity geomean is 1.4% not 5%, and CERI651A_0000 regresses
+16% (2/15 wins, 178->207us, not noise), DEGENLPB_0046 12%, BQPGASIM 10%.
+Honoring the criterion: no default change.
+
+* 20:55 :amalgamation:cost-model:design:
+The real defect is that the merge rule is size-only and never asks what
+a merge COSTS. nrow = col_counts[first_col].max(ncol), so past the
+natural row count each extra column adds a triangle of pure fill.
+clnlbeam col_counts=2: 16 fronts of 4 flops become one of 1496 (23x)
+and the rule sees only "1 < 16". Added merge_flop_budget: Option<u128>,
+merge iff dflops <= budget, flops = S(nrow)-S(nrow-ncol). Default None
+= bit-identical to today.
+
+First probe (budgets 1000..1e6) was indistinguishable from off on every
+fixture. Diagnosis: the guard is per-merge but the damage is cumulative
+— growing a chain from width 15 to 16 costs only 252 flops, so every
+step passes individually. The useful range is two orders lower than a
+naive Omega/tau estimate. Re-swept 5..500: clean interior optimum at
+30-60, structured geomean 0.945/0.549 and 0.935/0.619, and it dominates
+nemin where it counts (sparseqp: 0.493x fill at the same 0.947x time
+nemin=8 needed 0.676x for). No speed regressions on parity.
+
+* 21:20 :amalgamation:accuracy:rejected:
+Killed it on the axis I had not thought to check. Residuals (single
+unrefined solve, b=1): HATFLDG_0003..0006 go 7.1e-15 -> up to 7.4e-08
+(seven digits), VESUVIOU_0030 1.9e-06 -> 5.4e-03 (2789x), MEYER3NE_0220
+30x. Inertia unchanged everywhere and on HATFLDG/VESUVIOU the fill is
+IDENTICAL to default — so it is not a fill effect. Thinner supernodes
+shrink Bunch-Kaufman's pivot candidate pool inside each front. Checked
+the nemin arms for the same defect and they have it (VESUVIOU 2789x at
+nemin=8, MEYER3NE 83x at nemin=4), so it is a property of the direction,
+not of my rule. 2-7% time + 11-45% fill does not buy seven digits.
+Rejected; knob stays default-off as reproduction apparatus.
+
+* 21:40 :pounce:redirect:priority:
+jrk pointed at pounce#552 comment 5232409020 — the MA57 table re-measured
+against released 0.15.0. clnlbeam 8.05x -> 3.54x and it is NO LONGER the
+worst case; dtoc1nd is, at 3.77x, and it is a DENSE-front matrix
+(nnz/dim 23.0, fronts of 33-64 columns). Ratio ordering is no longer the
+nnz/dim ordering, so "the gap tracks sparsity" is dead as an intuition.
+This retires the whole chain-KKT framing that queue item 2 sat inside —
+amalgamation was aimed at a problem that has largely receded. Also note
+their other named upstream item, warm-path scaling, is the one we
+falsified this morning. Next target is the 33-64 column medium-front
+regime.
+
+* 22:10 :issue-153:dtoc1nd:medium-front:first-probe:
+jrk filed #153 tracking this. Ranking: (1) warm-path scaling, (2)
+dtoc1nd dense-front gap, (3) nemin. Answered (3) as a rejection on the
+issue, and split (1)'s premise: warm-STARTING the equilibration is
+falsified (this morning), but CACHING/reusing the scaling vector across
+factorizations — which is what #153 actually proposes — is untested and
+is the better lever precisely because the loop never converges and
+always burns all 10 passes, so reuse saves the whole cost.
+
+First probe on (2). My initial hypothesis was that 33-64 column fronts
+fall through the 0.15.0 gates. Checked before measuring: simd_work =
+n_elim * rowspan * ncol, so a 48-column front with rowspan ~150 gives
+~230k against PACKED_SIMD_MIN_WORK=1024. The gate passes by two orders
+of magnitude. Hypothesis refuted before writing any code.
+
+What the throughput curve says instead (bench_dense_front, nofma serial,
+30 reps, dense front of order n):
+
+  n=32    0.77 GFLOP/s      n=192   3.13
+  n=48    1.42             n=256   3.51
+  n=64    1.85             n=512   4.40
+  n=96    2.95             n=1024  5.05
+  n=128   3.45
+
+The dtoc1nd regime (33-64 columns) runs at 1.4-1.9 GFLOP/s, ~2.7x below
+the n=1024 rate and far below what AVX2 can do on the trailing update
+alone. So the medium-front deficit is real and local, but it is NOT the
+packed kernel being switched off — it is running, and the cost is
+elsewhere in the front (pivot search is O(n^2) scan per pivot, plus
+per-front fixed cost). Caveat: this bench factors a square front
+(nrow=ncol=n); real dtoc1nd fronts are trapezoidal, so the ncol axis
+matches but the rowspan does not. Asked jrk on #153 for dtoc1nd's
+loop-time-weighted front histogram bucketed 9-32/33-64/65-128/>128
+before committing to a mechanism.

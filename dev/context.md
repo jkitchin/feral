@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-09T03:25:16Z
+Generated: 2026-08-09T16:11:10Z
 
 ## Latest Session
-File: dev/sessions/2026-08-09-02.md
+File: dev/sessions/2026-08-09-03.md
 ```
-# Session 2026-08-09-02
+# Session 2026-08-09-03
 
 ## Goal
 
-Issue #148: the default parallel multifrontal driver is slower than
-serial on 3 of 4 POUNCE problems (~1.8M `scope.spawn` boxed-closure
-allocations per solve, glibc arena contention growing with thread
-count). Fix via the issue's suggested directions 1+2: work-based task
-coarsening and a serial fallback. Environment: x86_64 4-core container
-(issue reproduces at 2-4 threads); POUNCE `.nl` problems unavailable —
-synthetic proxies (chain / grid / banded-QP KKT) built and measured
-with interleaved old-vs-new binaries (git worktree at e8e1c5a).
+Post-0.15.0 optimization queue item 2: the `nemin` amalgamation sweep
+(`dev/plans/release-0.15.0-checklist.md` §4.2), motivated by the PR #150
+review — 90% of clnlbeam's supernodes are ≤8 columns and they are 35.9%
+of its factorization loop.
 
 ## Accomplished
 
-1. **Reproduction** (research note): chain12000 parallel never beats
-   serial; sparseqp proxy degrades monotonically with threads; grid250
-   is the one winner but pays +19% single-thread driver overhead.
-2. **TaskPlan coarsening (7814bfe)**: one spawn per subtree task —
-   boundaries at tree roots and at children of nodes with >= 2 sibling
-   subtrees each >= `FERAL_PAR_TASK_MIN_FLOPS` (default 1e6); lone big
-   children continue inline (chains collapse to one task; the naive
-   subtree>=cutoff rule produced 6319 tasks of 6564 supernodes on the
-   banded-QP proxy, the sibling rule 1). Owned nodes factored serially
-   in postorder inside their task; parent-task trampoline via
-   task-children pending counters; `seeds < 2` delegates to the
-   sequential driver (intrafront parallelism kept on).
-   `FERAL_DEBUG_TASK_PLAN=1` dumps plan shapes.
-3. **Byte-exactness**: scheduling-only; new `tests/task_plan_parity.rs`
-   pins fine (cutoff=1: 153 tasks/132 seeds), default, and fallback
-   configurations bit-identical to the sequential driver; 84/84 test
-   binaries green.
-4. **chainW anomaly investigated and documented**: the old per-node
-   driver oddly beat both sequential drivers ~20% on one wide-block
-   chain proxy; AtomicLockStats telemetry located the difference
-   *inside* `factor_one_supernode` (912 vs 1276 ms per 9 factors) —
-   not spawn/lock overhead, not intrafront, not tree parallelism.
-   Unexplainable further without perf/heaptrack (absent here);
-   accepted as a proxy quirk since the issue's real chains lose under
-   per-node spawning. Full analysis in the research note.
+**Both amalgamation levers measured and rejected. Nothing ships; the
+default path is bit-identical to 0.15.0.**
 
-## Benchmark Results
+Harness: `crates/feral-diagnostics/src/bin/diag_nemin_post_simd.rs` —
+paired alternating A/B per `decisions.md` 2026-08-09 (all arms timed once
+per pair, `min_us`, sign test), symbolic computed once per arm so only
+the numeric phase is timed, inertia + true ∞-norm residual reported per
+arm. 61 CUTEst KKT parity fixtures (n = 3 … 5314) + 4 structured KKTs
+(clnlbeam_like n=100000, grid250, sparseqp_kkt, chain12000_kkt).
+x86_64, 4 cores, AVX2. Criterion pre-registered before the first run.
 
-Session bench (corpus absent): synthetic set + regression fixtures all
-inertia/residual pass; oracle partitions N/A in container.
+### 1. The queue item's direction is dead, and re-confirmed
 
-Interleaved old-vs-new (warm medians, default parallel config):
+Geomean vs shipped `nemin=16`, time / factor_nnz:
 
-| proxy | old par@4 | new par@4 | old serial | new serial |
-|---|---:|---:|---:|---:|
+| arm | 1 | 4 | 8 | 32 | 64 |
+|---|---|---|---|---|---|
+| 61 parity | 1.21/0.67 | 1.02/0.83 | 0.986/0.89 | 1.02/1.19 | 1.15/1.65 |
+| 4 structured | 1.33/0.37 | 0.99/0.51 | 0.925/0.68 | 1.13/1.60 | 1.53/2.74 |
+
+Every arm above 16 loses on time and inflates fill on every class. This
+re-confirms the 2026-05-16 rejection (issue #10 lever 5) after the one
+development that could have overturned it — that rejection turned
+entirely on "the wider panel cannot amortize the fill", and the 0.15.0
+kernel rewrite is exactly what changed the amortization rate. It did not
+buy the fill back.
+
+### 2. `nemin=8` wins but fails its pre-registered criterion
+
+Better on both axes on structured KKTs (clnlbeam_like 0.925× time at
+0.579× fill; chain12000 0.815/0.640). But the criterion was ≥5% geomean
+with ≥8/10 sign test on ≥2 classes and no fixture regressing >2%: parity
+geomean is 1.4%, and CERI651A_0000 regresses 16% (178→207 µs, 2/15 wins
+— an effect, not noise), DEGENLPB_0046 12%, BQPGASIM_0012 10%.
+
+### 3. Cost-model merge guard: implemented, works, rejected on accuracy
+
+The size rule (`child_ncol < nemin && parent_ncol < nemin`) never asks
+what a merge costs. Front height is `col_counts[first_col].max(ncol)`,
 ```
 
 ## Git Status
 ```
-7814bfe perf(parallel): coarsen factor tasks to subtrees; serial fallback for chains (#148)
-80f849f research: issue #148 reproduction + task-coarsening design note
+f39a5db perf(symbolic): amalgamation cost-model guard (opt-in) + nemin re-sweep
+e2ba443 research: falsify the scaling warm-start hypothesis (post-0.15.0 item 1)
+808babb release: feral v0.15.0 (#151)
+fad5670 perf(parallel): task-per-subtree coarsening + profiler nanoseconds (#150)
 e8e1c5a perf(kernel): explicit SIMD packed trailing update + x86 pulp dispatch fix (#149)
-6589570 docs: session checkpoint 2026-07-11-02 (issue triage, #127, release 0.14.0) (#146)
-c05eb77 release: feral v0.14.0 (#145)
 ```
 
 ## Test Status
@@ -86,87 +86,88 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 407 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.99s
+test result: ok. 409 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.89s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-03.md)
 
 
-Session bench (corpus absent): synthetic set + regression fixtures all
-inertia/residual pass; oracle partitions N/A in container.
+The corpus bench (`cargo run --bin bench --release`) is not runnable
+here — `data/matrices` holds 2 files in this container, not the 154k
+corpus. The default path is unchanged and bit-identical, so the release
+gates are unaffected by this session. Local suite:
 
-Interleaved old-vs-new (warm medians, default parallel config):
+cargo test --release
+84/84 test binaries, 802 passed, 0 failed
+cargo fmt --check / cargo clippy -- -D warnings / clippy -p feral-diagnostics: pass
 
-| proxy | old par@4 | new par@4 | old serial | new serial |
-|---|---:|---:|---:|---:|
-| sparseqpL (issue signature) | 82.4-88.0 ms | 71.7-76.3 ms | 69.9-74.6 | 70.7-72.2 |
-| grid250 | 78.8-92.7 ms | 71.4-73.4 ms | 123.0-128.7 | 122.0-128.0 |
-| chainW | 186.7-216.6 ms | 221.1-223.9 ms | 228.1-229.5 | 214.9-215.7 |
-| chain12000 | 12.0-12.5 ms | 11.9-12.5 ms | 11.3-11.7 | 10.9-11.0 |
+Medium-front throughput probe for the next item (`bench_dense_front`,
+nofma serial, 30 reps, dense front of order n):
 
-Spawn reduction: grid250 11171 → 51 tasks; chains → 1 (sequential
-path). Small fixtures in the noise band (−6%..+4%). The chainW par@4
-old-vs-new gap is the documented anomaly above (old-par was beating
-serial there; new ≈ serial).
+n=32   0.77 GFLOP/s     n=192   3.13
+n=48   1.42             n=256   3.51
+n=64   1.85             n=512   4.40
+n=96   2.95             n=1024  5.05
+n=128  3.45
 
 ```
 
 ## Recent Decisions
-`FERAL_PAR_TASK_MIN_FLOPS` (default 1e6) estimated flops; a lone big
-child continues inline, so chain-shaped trees collapse to one task per
-root. One `scope.spawn` per task, owned nodes factored serially in
-postorder inside it, parent-task trampoline via task-children pending
-counters. Task graphs with < 2 seeds delegate to the sequential driver
-(with intrafront parallelism kept on).
+run medians. `min_us` per invocation is the preferred per-sample
+statistic (least interfered). Cross-time comparison of numbers taken in
+different sessions is not evidence at all.
 
-**Why.** Issue #148: one boxed spawn per supernode ⇒ ~1.8M allocations
-per POUNCE sparseqp solve, glibc arena contention growing with thread
-count, parallel slower than serial on 3 of 4 problems. Spawn counts:
-grid250 11171 → 51; chains → 1 (sequential path).
+**Why.** Measured on the issue-#148 chainW proxy (session 2026-08-09-03):
+three `FERAL_PAR_TASK_MIN_FLOPS` settings that produce *identical* task
+plans — same code path, byte-identical work — measured 139.6 / 259.1 /
+155.5 ms, a 1.9x spread. Eight invocations of one fixed config spanned
+min_us 124.7-163.2 ms (31%) and median_us 149.2-183.7 ms (23%). Two
+conclusions had already been drawn from inside that band and were both
+wrong: a claimed "chainW anomaly" (per-node spawning 20% faster than
+sequential) and a claimed 5-18% regression from PR #150. Paired
+re-measurement reversed both — 9/12 pairs favour the new code (median
+ratio 0.961) and 9/10 favour coarse over fine-grained tasks (median
+1.045, sign-test p~0.02).
 
-**Evidence.** Interleaved old-vs-new, x86_64 4-core: sparseqpL par@4
-82-88 → 71.7-76.3 ms (old lost 15-25% to serial; new ≈ serial);
-grid250 par@4 78.8-92.7 → 71.4-73.4 ms; small fixtures noise-band.
-Byte-exact (scheduling only): tests/task_plan_parity.rs pins
-fine/default/fallback plans against the sequential driver bit-for-bit;
-84/84 suites green.
+**Relationship to the existing rule.** The 2026-04-14 entry ("any
+bench-p90 delta smaller than ~5% must be confirmed with a 3-run
+median") is necessary but NOT sufficient: three consecutive medians can
+all land inside one drift excursion, which is exactly how both wrong
+conclusions above were reached. Paired A/B supersedes it for container
+measurement; the 3-run rule still applies to the corpus bench on a
+quiet machine.
 
-**Documented open question.** On one synthetic proxy (chainW, wide-
-block chain) the OLD per-node-spawn driver beat both sequential
-drivers by ~20% — telemetry places the difference inside
-factor_one_supernode (912 vs 1276 ms per 9 factors), an unexplained
-workspace/allocator interaction, not driver overhead. Accepted as a
-proxy quirk (the issue's real chains lose under per-node spawning);
-full analysis in dev/research/issue-148-parallel-task-granularity.md.
-
-**Deferred.** Issue #148 suggestion 3 (collect() temporaries):
-re-profile after this lands. #128 nrow-underestimate still skews flop
-estimates; harmless for this gate.
+**Consequence for prior sessions.** Numbers in
+dev/sessions/2026-08-09-01.md and -02.md were collected unpaired.
+Those with large effects (dense-front kernel 2.7-7x, grid250, sparseqpL
+- since re-confirmed paired at 10/10 and 9/10) stand; sub-10% fixture
+deltas in those checkpoints should be treated as unresolved rather than
+as measured wins until re-run paired.
 
 ## Recent Tried-and-Rejected
-plain `for i in j..n { a[j*n+i] -= a[k*n+i]*alpha }` loops are
-textbook-autovectorizable, and the eager path's remaining time is
-pivot search + memory traffic, not multiply-subtract throughput.
-Explicit lanes duplicated what LLVM already did. This matches the
-2026-05-16 finding (pulp == scalar == manual unroll at lengths 3..128)
-at the whole-front scale.
+`nemin=8`, MEYER3NE 83× at `nemin=4`), which is what makes it a property
+of the direction rather than of this rule.
 
-**What was kept.** The de-duplication refactor (shared scalar
-`rank1_scale_update_argmax`, byte-identical, golden digests unchanged)
-stays; the pulp kernel, its gate/env var, the dedicated parity test,
-and the A/B example were removed.
+**Why rejected.** "Correctness before performance, always" is a hard
+constraint. 2–7% of factor time and 11–45% of fill does not buy seven
+digits of residual. Neither my pre-registered criterion nor the queue
+item thought to check the axis that decided it — recorded here because
+the next person to have this idea will not think to check it either.
 
-**Lesson.** The small-front/MA57 gap is NOT lane width in the eager
-update. Remaining suspects, in evidence order: per-front fixed
-overhead (assembly/scatter/build-row, 8.8-14.8% on the small
-fixtures), pivot-search scans, `scalar_pivot_step` in blocked fronts,
-and the delayed-pivot cascade (per-factor-cost-cluster mechanism A).
-Any retry of eager-path SIMD must first show a front-level profile
-where the update loops are >30% of eager time AND not already
-vectorized in the disassembly.
+The knob stays in-tree defaulting to `None` (bit-identical default path)
+as the reproduction apparatus, with the accuracy result in its doc
+comment. Research note:
+`dev/research/amalgamation-cost-model-2026-08-09.md`.
+
+**Also redirects the target.** pounce#552's re-measurement against a
+released 0.15.0 (comment 5232409020) shows clnlbeam more than halved
+(8.05× → 3.54× vs MA57) and **no longer the worst case** — `dtoc1nd` is,
+at 3.77×, and it is a dense-front matrix (nnz/dim 23.0, fronts of 33–64
+columns). Amalgamation is a chain-KKT lever aimed at a problem that has
+largely receded.
 
 ## Source Files
 ```

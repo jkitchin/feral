@@ -54,6 +54,50 @@ pub struct SupernodeParams {
     /// `core_analyse.f90:644-685` is the reference.
     pub amalgamation_strategy: AmalgamationStrategy,
 
+    /// Opt-in cost-model guard on amalgamation. `None` (the default)
+    /// reproduces the historical size-only merge rule exactly.
+    ///
+    /// The size rule (`child_ncol < nemin && parent_ncol < nemin`) asks
+    /// only whether two supernodes are *small*, never what merging them
+    /// costs. On chain-shaped KKTs that is badly wrong: a front's height
+    /// is `col_counts[first_col].max(ncol)`, so once the merged width
+    /// exceeds the natural row count every extra column adds a triangle
+    /// of pure fill. clnlbeam's chain links have `col_counts = 2`, so at
+    /// `nemin = 16` sixteen 4-flop fronts merge into one 1496-flop front
+    /// — a 23x inflation the size rule cannot see.
+    ///
+    /// When `Some(budget)`, a merge is additionally required to add no
+    /// more than `budget` flops to the factorization:
+    ///
+    /// ```text
+    ///   flops(ncol, nrow) = sum_{k<ncol} (nrow-k)^2
+    ///   dflops = flops(merged) - flops(child) - flops(parent) <= budget
+    /// ```
+    ///
+    /// `budget` is the flop-equivalent of one front's fixed overhead
+    /// (`Omega/tau` in `T ~ tau*flops + Omega*n_fronts`), so it is a
+    /// hardware constant rather than a per-matrix shape heuristic:
+    /// merging is worth it exactly when the flops it adds cost less than
+    /// the one front's overhead it removes. It subsumes the
+    /// `trivial_chain` rule, whose `dflops` is ~0 by construction.
+    ///
+    /// **Not recommended.** Measured (2026-08-09): budget 30–60 buys
+    /// 5.5–6.5% factor time and 38–45% fill on structured KKTs, and
+    /// costs up to **seven digits of residual** on ill-conditioned
+    /// fixtures — HATFLDG 7.1e-15 → 7.4e-08, VESUVIOU_0030 1.9e-06 →
+    /// 5.4e-03 — with fill and inertia *unchanged* on exactly those
+    /// matrices. Thinner supernodes give Bunch-Kaufman a smaller pivot
+    /// candidate pool inside each front. The same effect is present in
+    /// `nemin` at 4 and 8, so it is a property of the direction, not of
+    /// this rule.
+    ///
+    /// Kept as the reproduction apparatus for that result and as a
+    /// memory knob for callers who know their problems are well
+    /// conditioned. Changing it changes fill and numerics, so the
+    /// default stays `None`. See
+    /// `dev/research/amalgamation-cost-model-2026-08-09.md`.
+    pub merge_flop_budget: Option<u128>,
+
     /// Phase 2.13b per-stage symbolic profiler. When `Some`, the
     /// `symbolic_factorize_with_method` driver records elapsed time
     /// per stage (ordering, etree, postorder, col_counts, renumber,
@@ -114,6 +158,7 @@ impl Default for SupernodeParams {
         Self {
             nemin: 16,
             preprocess: OrderingPreprocess::Auto,
+            merge_flop_budget: None,
             small_leaf: SmallLeafParams::default(),
             amalgamation_strategy: AmalgamationStrategy::default(),
             symbolic_profiler: None,
@@ -371,7 +416,26 @@ pub fn find_supernodes(
             };
             let root_cap_exceeded = parent_is_root && merged_ncol > root_cap;
 
-            if (trivial_chain || size_based) && !root_cap_exceeded {
+            // Cost-model guard (opt-in; `None` leaves the historical
+            // rule bit-identical). Front heights follow the same model
+            // the rest of this function uses for `nrow`
+            // (`col_counts[first_col].max(ncol)`, see step 3), so the
+            // estimate is self-consistent with what the merge actually
+            // produces.
+            let budget_ok = match params.merge_flop_budget {
+                None => true,
+                Some(budget) => {
+                    let nrow_c = col_counts[s_first].max(child_ncol);
+                    let nrow_p = col_counts[p_first].max(parent_ncol);
+                    let nrow_m = col_counts[s_first].max(merged_ncol);
+                    let added = front_flops(merged_ncol, nrow_m)
+                        .saturating_sub(front_flops(child_ncol, nrow_c))
+                        .saturating_sub(front_flops(parent_ncol, nrow_p));
+                    added <= budget
+                }
+            };
+
+            if (trivial_chain || size_based) && budget_ok && !root_cap_exceeded {
                 merged_into[root_s] = Some(root_p);
                 // Transfer columns to parent and update first column.
                 // Adjacency invariant guarantees s_first < p_first,
@@ -609,6 +673,25 @@ pub(crate) fn find_fundamental_supernodes(
     }
 }
 
+/// Dense-LDLᵀ flop count for a trapezoidal front of `ncol` eliminated
+/// columns and `nrow` total rows:
+/// `Σ_{k=0}^{ncol-1} (nrow-k)² = S(nrow) - S(nrow-ncol)` with
+/// `S(x) = x(x+1)(2x+1)/6`.
+///
+/// Used only by the opt-in `SupernodeParams::merge_flop_budget` guard,
+/// where the absolute scale is irrelevant — only differences between
+/// candidate merges matter. `u128` because `S(x)` is cubic and `nrow`
+/// reaches the thousands on wide Schur complements.
+fn front_flops(ncol: usize, nrow: usize) -> u128 {
+    // `nrow >= ncol` holds for every front the caller constructs
+    // (`nrow` is built with `.max(ncol)`), but clamp rather than
+    // underflow if that ever stops being true.
+    let s = |x: u128| x * (x + 1) * (2 * x + 1) / 6;
+    let nrow = nrow as u128;
+    let ncol = (ncol as u128).min(nrow);
+    s(nrow) - s(nrow - ncol)
+}
+
 /// Predict desired merges (Phase 2.12) for the SSIDS-style column
 /// renumbering. Runs the same fundamental-supernode detection and
 /// SSIDS size rule as `find_supernodes`, but **does not enforce
@@ -657,7 +740,26 @@ pub(crate) fn predict_merges(
         // 2. Size-based: both < nemin
         let size_based = child_ncol < params.nemin && parent_ncol < params.nemin;
 
-        if trivial_chain || size_based {
+        // Same cost-model guard as `find_supernodes`. It has to be
+        // mirrored here or the `Renumber` strategy would bias the
+        // postorder towards merges that the guard then rejects,
+        // producing a column numbering optimized for a merge set that
+        // never happens.
+        let budget_ok = match params.merge_flop_budget {
+            None => true,
+            Some(budget) => {
+                let merged_ncol = child_ncol + parent_ncol;
+                let nrow_c = col_counts[s_first].max(child_ncol);
+                let nrow_p = col_counts[p_first].max(parent_ncol);
+                let nrow_m = col_counts[s_first].max(merged_ncol);
+                front_flops(merged_ncol, nrow_m)
+                    .saturating_sub(front_flops(child_ncol, nrow_c))
+                    .saturating_sub(front_flops(parent_ncol, nrow_p))
+                    <= budget
+            }
+        };
+
+        if (trivial_chain || size_based) && budget_ok {
             // Mark every column of this child supernode as "biased
             // late" — its subtree should be emitted adjacent to its
             // parent in the merge-biased postorder.
@@ -675,6 +777,102 @@ mod tests {
     use super::*;
     use crate::sparse::csc::CscMatrix;
     use crate::symbolic::column_counts::column_counts;
+
+    /// Oracle: hand-summed `Σ_{k=0}^{ncol-1} (nrow-k)²`. Written out
+    /// term by term so the closed form is checked against arithmetic
+    /// done independently of it.
+    #[test]
+    fn front_flops_matches_hand_summation() {
+        assert_eq!(front_flops(1, 2), 4); // 2²
+        assert_eq!(front_flops(2, 2), 5); // 2² + 1²
+        assert_eq!(front_flops(3, 5), 50); // 5² + 4² + 3²
+        assert_eq!(front_flops(4, 4), 30); // 4² + 3² + 2² + 1²
+                                           // Σ_{j=1}^{16} j² = 16·17·33/6 = 1496 — the clnlbeam case in
+                                           // dev/research/amalgamation-cost-model-2026-08-09.md §4.
+        assert_eq!(front_flops(16, 16), 1496);
+        assert_eq!(front_flops(0, 9), 0);
+        // Brute-force agreement over a range, independent of the closed form.
+        for nrow in 0..40usize {
+            for ncol in 0..=nrow {
+                let brute: u128 = (0..ncol).map(|k| ((nrow - k) as u128).pow(2)).sum();
+                assert_eq!(front_flops(ncol, nrow), brute, "ncol={ncol} nrow={nrow}");
+            }
+        }
+    }
+
+    /// The clnlbeam pathology in miniature: a chain whose `col_counts`
+    /// are 2, so amalgamating under the size rule builds fronts far
+    /// wider than the pattern justifies. `merge_flop_budget = Some(0)`
+    /// must reject exactly those merges, while `None` must reproduce
+    /// the historical rule bit-for-bit.
+    #[test]
+    fn merge_flop_budget_rejects_fill_inflating_chain_merges() {
+        let n = 12;
+        let mut rows = Vec::new();
+        let mut cols = Vec::new();
+        let mut vals = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(2.0);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("csc");
+        let pat = m.symmetric_pattern();
+        let etree = EliminationTree::from_pattern(&pat);
+        let counts = column_counts(&pat, &etree);
+
+        let base = SupernodeParams {
+            nemin: 16,
+            ..Default::default()
+        };
+        let guarded = SupernodeParams {
+            nemin: 16,
+            merge_flop_budget: Some(0),
+            ..Default::default()
+        };
+
+        let unguarded = find_supernodes(&etree, &counts, &base);
+        let capped = find_supernodes(&etree, &counts, &guarded);
+
+        // Column coverage is a conservation law: the guard changes how
+        // columns are grouped, never how many there are.
+        let total = |s: &[Supernode]| s.iter().map(|x| x.ncol).sum::<usize>();
+        assert_eq!(total(&unguarded), n);
+        assert_eq!(total(&capped), n);
+
+        // nemin=16 > n, so the size rule merges the whole chain into one
+        // wide front; the budget must refuse and leave it fragmented.
+        assert!(
+            capped.len() > unguarded.len(),
+            "budget=0 did not suppress any merge: {} vs {} supernodes",
+            capped.len(),
+            unguarded.len()
+        );
+        let widest_capped = capped.iter().map(|s| s.ncol).max().unwrap_or(0);
+        let widest_unguarded = unguarded.iter().map(|s| s.ncol).max().unwrap_or(0);
+        assert!(
+            widest_capped < widest_unguarded,
+            "budget=0 left a front as wide as the unguarded rule ({widest_capped})"
+        );
+
+        // A budget far above any merge this fixture can propose must be
+        // indistinguishable from the historical rule.
+        let generous = SupernodeParams {
+            nemin: 16,
+            merge_flop_budget: Some(u128::MAX),
+            ..Default::default()
+        };
+        let wide_open = find_supernodes(&etree, &counts, &generous);
+        assert_eq!(wide_open.len(), unguarded.len());
+        for (a, b) in wide_open.iter().zip(unguarded.iter()) {
+            assert_eq!((a.first_col, a.ncol, a.nrow), (b.first_col, b.ncol, b.nrow));
+        }
+    }
 
     #[test]
     fn test_supernodes_tridiagonal() {
