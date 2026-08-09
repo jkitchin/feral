@@ -93,6 +93,51 @@ factors bit-for-bit on the chain/grid proxies' patterns.
 - No small-fixture regression (>2%, 3-run medians).
 - Spawn count on grid250 reduced by >10× (log n_tasks via telemetry).
 
-## Measured result (filled after implementation)
+## Measured result — ACCEPTED (with one documented proxy anomaly)
 
-TBD
+Implemented as designed, with one refinement: task boundaries sit at
+tree roots and at children of nodes with >= 2 big (subtree >= cutoff)
+sibling subtrees — a lone big child continues inline in its parent's
+task. (The naive subtree>=cutoff rule made 6319 tasks of 6564
+supernodes on the banded-QP proxy; the sibling rule makes 1.)
+
+Plan shapes: grid250 11171 supernodes -> 51 tasks / 26 seeds (219×
+spawn reduction); chainW 18717 -> 1; sparseqpL 6564 -> 1 (both fall
+back to the sequential driver via seeds < 2).
+
+Interleaved old-vs-new (warm perf_probe medians, 10-12 iters, 2-3
+rounds, x86_64 4-core):
+
+| proxy | config | old | new |
+|---|---|---:|---:|
+| grid250 | par @4t | 78.8-92.7 ms | 71.4-73.4 ms (−9..−21%) |
+| sparseqpL | par @4t | 82.4-88.0 ms | 71.7-76.3 ms (−13%) |
+| sparseqpL | serial | 69.9-74.6 ms | 70.7-72.2 ms |
+| chainW | par @4t | 186.7-216.6 ms | 221.1-223.9 ms |
+| chainW | serial | 228.1-229.5 ms | 214.9-215.7 ms |
+| chain12000 | par @4t | 12.0-12.5 ms | 11.9-12.5 ms |
+
+The issue's signature (parallel worse than serial on sparseqp) is
+gone: old par@4 82-88 vs serial 70-75 (losing 15-25%); new par@4
+71.7-76.3 ≈ serial. Small fixtures show no systematic change
+(HYDCAR −6%, HAHN +3.6%, twirism +1.4%, sawpath −3.5% — noise band).
+Parity: tests/task_plan_parity.rs pins fine/default/fallback plans
+byte-identical to the sequential driver; 84/84 suites green.
+
+**Open question (chainW proxy anomaly).** The OLD per-node-spawn
+driver at any thread count beats both sequential drivers on the chainW
+proxy (~170-195 vs ~210-230 ms). AtomicLockStats telemetry shows the
+difference is INSIDE `factor_one_supernode` (factor_body 912 ms old vs
+1276 ms new over 9 factors, identical nodes) — not spawn/lock/driver
+overhead, not intrafront (FERAL_INTRAFRONT=0 A/B), not tree
+parallelism (a chain has none). Some workspace/allocator interaction
+this container cannot profile further (no perf/heaptrack). Accepted as
+a synthetic-proxy quirk: the issue's real chain problems (POUNCE
+hicks/optcontrol/bratu, 14 threads, glibc) lose badly under per-node
+spawning — the exact case this fix removes. If a real workload ever
+shows the same signature, `FERAL_PAR_TASK_MIN_FLOPS` tuning and this
+note are the starting points.
+
+Deferred (issue suggestion 3): the 2.9M `collect()` temporaries —
+re-profile after this lands; coarsening may have subsumed most of it
+(spawn boxing was the dominant stack).

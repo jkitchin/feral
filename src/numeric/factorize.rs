@@ -3056,6 +3056,32 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
     let n_snodes = symbolic.supernodes.len();
     let telemetry = params.parallel_telemetry.as_deref();
 
+    // Issue #148: partition the supernode tree into subtree tasks of
+    // at least `par_task_min_flops()` estimated flops (one rayon spawn
+    // per TASK, not per supernode — the per-supernode graph boxed ~1.8M
+    // closures per POUNCE sparseqp solve and lost to the sequential
+    // driver on chain-shaped trees). When the resulting task graph has
+    // no initial parallelism (fewer than two seed tasks), the tree is
+    // an effective chain of tasks: delegate to the sequential driver
+    // outright, keeping `intrafront_parallel = true` so wide fronts
+    // still fork internally (Lever 1.1). Scheduling-only either way —
+    // per-supernode arithmetic and extend-add child order are
+    // untouched, so factors are byte-identical. See
+    // dev/research/issue-148-parallel-task-granularity.md.
+    let plan = build_task_plan(symbolic);
+    if plan.seeds.len() < 2 {
+        // No initial task parallelism (chain-shaped task graph): the
+        // scope/pool machinery is pure overhead, so run the sequential
+        // driver — with `intrafront_parallel` still on, so wide fronts
+        // fork internally (Lever 1.1). See the research note for the
+        // one synthetic proxy (chainW) where the old per-supernode
+        // spawn graph oddly beat BOTH sequential drivers by ~30% in
+        // factor-body time; unexplained (allocator/workspace
+        // interaction), accepted as a proxy quirk — the issue's real
+        // chain problems lose under per-node spawning.
+        return factorize_multifrontal_supernodal_with_workspace(matrix, symbolic, params, ws);
+    }
+
     // Setup — mirrors the sequential driver. Reuse the symbolic-phase
     // MC64 cache if present (see the sequential driver for details).
     let t_phase = telemetry.map(|_| std::time::Instant::now());
@@ -3126,25 +3152,13 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
         }
     }
 
-    // Parent table: parents[c] == i iff i's children include c.
-    let mut parents: Vec<Option<usize>> = vec![None; n_snodes];
-    for (i, snode) in symbolic.supernodes.iter().enumerate() {
-        for &c in &snode.children {
-            if c < n_snodes {
-                parents[c] = Some(i);
-            }
-        }
-    }
-
-    // Pending-children atomic counter per supernode. A supernode is
-    // ready to process when its counter hits zero.
-    let pending: Vec<AtomicUsize> = symbolic
-        .supernodes
+    // Pending-children atomic counter per TASK node (issue #148):
+    // counts child tasks, not child supernodes. A task is ready when
+    // its counter hits zero. Non-task slots stay 0 and are never read.
+    let pending: Vec<AtomicUsize> = plan
+        .task_pending_init
         .iter()
-        .map(|s| {
-            let cnt = s.children.iter().filter(|&&c| c < n_snodes).count();
-            AtomicUsize::new(cnt)
-        })
+        .map(|&c| AtomicUsize::new(c))
         .collect();
 
     // Shared state: contrib blocks, result slots, first error.
@@ -3185,26 +3199,9 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
     }
 
     let t_phase = telemetry.map(|_| std::time::Instant::now());
-    // Collect the true leaves (supernodes with no children) BEFORE
-    // entering the scope. Using `pending[i].load() == 0` as the
-    // seeding predicate is unsound: once the scope is live, workers
-    // execute previously-spawned tasks concurrently with this loop
-    // and decrement parents' counters. A non-leaf whose pending
-    // counter just hit zero would then be spawned twice — once here
-    // by the caller, and again by the final child via the
-    // fetch_sub==1 trampoline in `run_parallel_task`.
-    let leaves: Vec<usize> = symbolic
-        .supernodes
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| {
-            if s.children.iter().all(|&c| c >= n_snodes) {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Seed tasks were computed in the plan BEFORE the scope goes live
+    // (seeding from live pending counters would race the trampoline
+    // and double-spawn; see the plan builder).
     if let (Some(t), Some(start)) = (telemetry, t_phase) {
         t.phase_leaves_ns
             .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -3212,17 +3209,17 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
 
     let t_phase = telemetry.map(|_| std::time::Instant::now());
     rayon::scope(|scope| {
-        for &leaf_idx in &leaves {
+        for &seed_idx in &plan.seeds {
             run_parallel_task(
                 scope,
-                leaf_idx,
+                seed_idx,
                 symbolic,
                 &permuted,
                 full_pattern,
                 &scaling_pivot_order,
                 &is_root,
                 params,
-                &parents,
+                &plan,
                 &pending,
                 &contrib_blocks,
                 &node_factors_out,
@@ -3298,11 +3295,178 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
     ))
 }
 
-/// Spawn a single supernode factorization task into the rayon scope.
+/// Default minimum estimated subtree flops for one parallel task
+/// (issue #148). Below this, a supernode's whole subtree is factored
+/// inline inside its nearest task ancestor's task instead of getting
+/// its own `scope.spawn` — one boxed closure per supernode measured as
+/// ~1.8M allocations per solve on POUNCE `sparseqp`, with glibc arena
+/// contention making the parallel driver slower than serial on 3 of 4
+/// problems. `FERAL_PAR_TASK_MIN_FLOPS` overrides for per-machine
+/// retuning. See dev/research/issue-148-parallel-task-granularity.md.
+pub const PAR_TASK_MIN_FLOPS: u64 = 1_000_000;
+
+#[inline]
+fn par_task_min_flops() -> u64 {
+    std::env::var("FERAL_PAR_TASK_MIN_FLOPS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(PAR_TASK_MIN_FLOPS)
+}
+
+/// Task partition of the supernode tree (issue #148): one rayon task
+/// per *subtree of at least `par_task_min_flops()` estimated flops*
+/// rather than one per supernode. Scheduling-only — each supernode's
+/// factor call and extend-add child order are unchanged, so factors
+/// are byte-identical to the per-supernode task graph and to the
+/// sequential driver (value-determinism argument: decisions.md
+/// 2026-05-22; gated by tests/parallel_parity.rs).
+struct TaskPlan {
+    /// Inline nodes factored by task `t` before `t` itself, in
+    /// postorder (children before parents). Empty for non-task nodes.
+    owned: Vec<Vec<usize>>,
+    /// For a task node: the task owning its parent supernode.
+    parent_task: Vec<Option<usize>>,
+    /// Initial pending count per task node = number of child tasks.
+    task_pending_init: Vec<usize>,
+    /// Task nodes with no child tasks — seeded into the scope.
+    seeds: Vec<usize>,
+}
+
+fn build_task_plan(symbolic: &SymbolicFactorization) -> TaskPlan {
+    let n_snodes = symbolic.supernodes.len();
+    let cutoff = par_task_min_flops();
+
+    let mut parents: Vec<Option<usize>> = vec![None; n_snodes];
+    for (i, snode) in symbolic.supernodes.iter().enumerate() {
+        for &c in &snode.children {
+            if c < n_snodes {
+                parents[c] = Some(i);
+            }
+        }
+    }
+
+    // Bottom-up subtree flop estimate. Supernodes are numbered in
+    // postorder (children before parents — the sequential driver
+    // iterates 0..n_snodes on that assumption), so one ascending pass
+    // suffices. Per-node cost is the `estimate_assembly_flops` term
+    // `ncol · nrow²`. Symbolic `nrow` underestimates fronts that
+    // receive delayed pivots (issue #128 sub-item) — acceptable for a
+    // scheduling gate, documented there.
+    let mut subtree_flops = vec![0u64; n_snodes];
+    for (i, snode) in symbolic.supernodes.iter().enumerate() {
+        let nrow = snode.nrow as u64;
+        let mut f = (snode.ncol as u64).saturating_mul(nrow.saturating_mul(nrow));
+        for &c in &snode.children {
+            if c < n_snodes {
+                f = f.saturating_add(subtree_flops[c]);
+            }
+        }
+        subtree_flops[i] = f;
+    }
+
+    // Task boundaries sit where parallelism actually arises: at tree
+    // roots, and at children of a node with >= 2 "big" child subtrees
+    // (each >= cutoff). A lone big child does NOT start a new task —
+    // it runs inline in its parent's task — so a chain-shaped tree
+    // collapses to a single task per root instead of one task per
+    // supernode along the chain (measured: a banded-KKT proxy produced
+    // 6319 tasks out of 6564 supernodes under the naive
+    // subtree>=cutoff rule; this rule yields 1).
+    let mut task_root = vec![false; n_snodes];
+    for i in 0..n_snodes {
+        if parents[i].is_none() {
+            task_root[i] = true;
+        }
+    }
+    for snode in symbolic.supernodes.iter() {
+        let big_children = snode
+            .children
+            .iter()
+            .filter(|&&c| c < n_snodes && subtree_flops[c] >= cutoff)
+            .count();
+        if big_children >= 2 {
+            for &c in &snode.children {
+                if c < n_snodes && subtree_flops[c] >= cutoff {
+                    task_root[c] = true;
+                }
+            }
+        }
+    }
+
+    // Nearest task ancestor, computed root-down. Postorder numbering
+    // means every parent index is larger than its children's, so a
+    // descending pass sees `owner[parent]` before any child needs it.
+    let mut owner = vec![0usize; n_snodes];
+    for i in (0..n_snodes).rev() {
+        owner[i] = if task_root[i] {
+            i
+        } else {
+            // Non-roots always have a parent (roots are task roots).
+            owner[parents[i].unwrap_or(i)]
+        };
+    }
+
+    // Inline nodes per task, grouped in ascending (= postorder) order,
+    // so within a task children still precede parents.
+    let mut owned: Vec<Vec<usize>> = vec![Vec::new(); n_snodes];
+    for i in 0..n_snodes {
+        if !task_root[i] {
+            owned[owner[i]].push(i);
+        }
+    }
+
+    // Task-graph edges: a task's parent task owns its parent node.
+    let mut parent_task: Vec<Option<usize>> = vec![None; n_snodes];
+    let mut task_pending_init = vec![0usize; n_snodes];
+    for i in 0..n_snodes {
+        if task_root[i] {
+            if let Some(p) = parents[i] {
+                let pt = owner[p];
+                parent_task[i] = Some(pt);
+                task_pending_init[pt] += 1;
+            }
+        }
+    }
+    let seeds: Vec<usize> = (0..n_snodes)
+        .filter(|&i| task_root[i] && task_pending_init[i] == 0)
+        .collect();
+
+    // Diagnostic affordance: dump the plan shape (issue #148 field
+    // triage — lets a bug report show whether a slow parallel factor
+    // is a spawn-storm, a chain that should have fallen back, or a
+    // genuinely wide tree).
+    if std::env::var("FERAL_DEBUG_TASK_PLAN").is_ok() {
+        let n_task = task_root.iter().filter(|&&b| b).count();
+        eprintln!(
+            "task_plan: n_snodes={} n_tasks={} seeds={} cutoff={}",
+            n_snodes,
+            n_task,
+            seeds.len(),
+            cutoff
+        );
+    }
+
+    TaskPlan {
+        owned,
+        parent_task,
+        task_pending_init,
+        seeds,
+    }
+}
+
+/// Spawn one *task* — a subtree of supernodes per [`TaskPlan`] — into
+/// the rayon scope (issue #148: task-per-subtree, not per-supernode).
 ///
-/// On completion, decrements the parent's pending counter and — if
-/// the parent becomes ready — recursively spawns the parent into the
-/// same scope. The top-level call seeds all leaf supernodes.
+/// The task factors its inline (owned) nodes serially in postorder and
+/// then its own node, using one workspace pick and one boxed closure
+/// for the whole subtree. On completion it decrements the parent
+/// task's pending counter and — if the parent becomes ready —
+/// recursively spawns it. The top-level call seeds the tasks with no
+/// child tasks.
+///
+/// (Original per-supernode notes follow; the stack-depth argument is
+/// unchanged — the leaf→root climb is still trampolined through
+/// rayon's task queue, one frame per task.)
 ///
 /// # Worker-stack depth is O(1) in tree height
 ///
@@ -3334,14 +3498,14 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
 #[allow(clippy::too_many_arguments)]
 fn run_parallel_task<'a>(
     scope: &rayon::Scope<'a>,
-    snode_idx: usize,
+    task_idx: usize,
     symbolic: &'a SymbolicFactorization,
     permuted: &'a CscMatrix,
     full_pattern: &'a crate::sparse::csc::CscPattern,
     scaling_pivot_order: &'a [f64],
     is_root: &'a [bool],
     params: &'a NumericParams,
-    parents: &'a [Option<usize>],
+    plan: &'a TaskPlan,
     pending: &'a [std::sync::atomic::AtomicUsize],
     contrib_blocks: &'a std::sync::Mutex<Vec<Option<ContribBlock>>>,
     node_factors_out: &'a std::sync::Mutex<Vec<Option<NodeFactors>>>,
@@ -3372,7 +3536,6 @@ fn run_parallel_task<'a>(
             }
         }
 
-        let snode = &symbolic.supernodes[snode_idx];
         let n_snodes = symbolic.supernodes.len();
 
         // Pick a per-thread workspace slot. `current_thread_index`
@@ -3393,7 +3556,7 @@ fn run_parallel_task<'a>(
         // yields a populated report on the parallel dispatch too. Set
         // inside the factor block, consumed in the `Ok` arm below.
         let mut prof_us: Option<u64> = None;
-        let (result, own_contrib) = {
+        let result = {
             let t_ws_wait = telemetry.map(|_| std::time::Instant::now());
             // Issue #102: `thread_ws[i]` is only ever locked by the rayon
             // worker whose `current_thread_index()` is `i` (or the donated
@@ -3437,86 +3600,21 @@ fn run_parallel_task<'a>(
             // own_contrib slot below).
             let mut local_contribs = std::mem::take(&mut ws.local_contribs);
 
-            // Stage child contributions: shared lock held only for
-            // the drain, not across the factor body.
+            // Issue #148: factor this task's inline subtree nodes in
+            // postorder, then the task node itself. Each iteration is
+            // the exact per-supernode body the per-supernode task graph
+            // ran — same staging order, same factor call, same deposit —
+            // so results are byte-identical; only the spawn/workspace
+            // amortisation changed. On error, stop the loop; the scope
+            // drains via the first_error fast-exit.
+            let mut task_res: Result<(), FeralError> = Ok(());
+            for &snode_idx in plan.owned[task_idx]
+                .iter()
+                .chain(std::iter::once(&task_idx))
             {
-                let t_wait_start = telemetry.map(|_| std::time::Instant::now());
-                let mut shared = match contrib_blocks.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                if let (Some(t), Some(start)) = (telemetry, t_wait_start) {
-                    t.contrib_wait_ns
-                        .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                }
-                let hold_start = telemetry.map(|_| std::time::Instant::now());
-                for &c in &snode.children {
-                    if c < n_snodes {
-                        local_contribs[c] = shared[c].take();
-                    }
-                }
-                if let (Some(t), Some(start)) = (telemetry, hold_start) {
-                    t.contrib_hold_ns
-                        .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                }
-            }
-
-            let factor_start = telemetry.map(|_| std::time::Instant::now());
-            let prof_start = params.profiler.as_ref().map(|_| std::time::Instant::now());
-            let res = factor_one_supernode(
-                snode_idx,
-                symbolic,
-                permuted,
-                full_pattern,
-                scaling_pivot_order,
-                is_root,
-                params,
-                ws,
-                &mut local_contribs,
-                0, // nvschur: parallel path is not used by Schur API
-            );
-            if let (Some(t), Some(start)) = (telemetry, factor_start) {
-                t.factor_body_ns
-                    .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            }
-            if let Some(start) = prof_start {
-                prof_us = Some(start.elapsed().as_micros() as u64);
-            }
-
-            let own = local_contribs[snode_idx].take();
-            // Return the pooled vec to the workspace. All slots are
-            // `None` (children were taken into us above; own was just
-            // taken out), so no clearing is needed. (On the issue-#102
-            // fallback path this writes into the throwaway workspace, which
-            // is then dropped — harmless.)
-            ws.local_contribs = local_contribs;
-            (res, own)
-        };
-
-        match result {
-            Ok(node) => {
-                // N3: record this supernode's profiler timing (completion
-                // order, not postorder — the bucketed `report()` is
-                // order-independent). The phase-breakdown fields are left
-                // zero: they are derived from process-global phase atomics
-                // that cannot be safely differenced across concurrent tasks
-                // (finding N9), so only the wall `us` is meaningful here.
-                if let (Some(arc), Some(us)) = (params.profiler.as_ref(), prof_us) {
-                    let timing = SupernodeTiming {
-                        snode_idx,
-                        nrow: snode.nrow,
-                        ncol: snode.ncol,
-                        us,
-                        assembly_us: 0,
-                        densefactor_us: 0,
-                        panelfactor_us: 0,
-                        schur_us: 0,
-                        scalartail_us: 0,
-                    };
-                    if let Ok(mut prof) = arc.lock() {
-                        prof.timings.push(timing);
-                    }
-                }
+                let snode = &symbolic.supernodes[snode_idx];
+                // Stage child contributions: shared lock held only for
+                // the drain, not across the factor body.
                 {
                     let t_wait_start = telemetry.map(|_| std::time::Instant::now());
                     let mut shared = match contrib_blocks.lock() {
@@ -3528,42 +3626,139 @@ fn run_parallel_task<'a>(
                             .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     }
                     let hold_start = telemetry.map(|_| std::time::Instant::now());
-                    shared[snode_idx] = own_contrib;
+                    for &c in &snode.children {
+                        if c < n_snodes {
+                            local_contribs[c] = shared[c].take();
+                        }
+                    }
                     if let (Some(t), Some(start)) = (telemetry, hold_start) {
                         t.contrib_hold_ns
                             .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     }
                 }
-                {
-                    let t_wait_start = telemetry.map(|_| std::time::Instant::now());
-                    let mut nf = match node_factors_out.lock() {
-                        Ok(g) => g,
-                        Err(p) => p.into_inner(),
-                    };
-                    if let (Some(t), Some(start)) = (telemetry, t_wait_start) {
-                        t.node_factors_wait_ns
-                            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+                let factor_start = telemetry.map(|_| std::time::Instant::now());
+                let prof_start = params.profiler.as_ref().map(|_| std::time::Instant::now());
+                let res = factor_one_supernode(
+                    snode_idx,
+                    symbolic,
+                    permuted,
+                    full_pattern,
+                    scaling_pivot_order,
+                    is_root,
+                    params,
+                    ws,
+                    &mut local_contribs,
+                    0, // nvschur: parallel path is not used by Schur API
+                );
+                if let (Some(t), Some(start)) = (telemetry, factor_start) {
+                    t.factor_body_ns
+                        .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                if let Some(start) = prof_start {
+                    prof_us = Some(start.elapsed().as_micros() as u64);
+                }
+
+                let own = local_contribs[snode_idx].take();
+                match res {
+                    Ok(node) => {
+                        // N3: record this supernode's profiler timing
+                        // (completion order; wall only — see the
+                        // sequential driver note).
+                        if let (Some(arc), Some(us)) = (params.profiler.as_ref(), prof_us) {
+                            let timing = SupernodeTiming {
+                                snode_idx,
+                                nrow: snode.nrow,
+                                ncol: snode.ncol,
+                                us,
+                                assembly_us: 0,
+                                densefactor_us: 0,
+                                panelfactor_us: 0,
+                                schur_us: 0,
+                                scalartail_us: 0,
+                            };
+                            if let Ok(mut prof) = arc.lock() {
+                                prof.timings.push(timing);
+                            }
+                        }
+                        {
+                            let t_wait_start = telemetry.map(|_| std::time::Instant::now());
+                            let mut shared = match contrib_blocks.lock() {
+                                Ok(g) => g,
+                                Err(p) => p.into_inner(),
+                            };
+                            if let (Some(t), Some(start)) = (telemetry, t_wait_start) {
+                                t.contrib_wait_ns.fetch_add(
+                                    start.elapsed().as_nanos() as u64,
+                                    Ordering::Relaxed,
+                                );
+                            }
+                            let hold_start = telemetry.map(|_| std::time::Instant::now());
+                            shared[snode_idx] = own;
+                            if let (Some(t), Some(start)) = (telemetry, hold_start) {
+                                t.contrib_hold_ns.fetch_add(
+                                    start.elapsed().as_nanos() as u64,
+                                    Ordering::Relaxed,
+                                );
+                            }
+                        }
+                        {
+                            let t_wait_start = telemetry.map(|_| std::time::Instant::now());
+                            let mut nf = match node_factors_out.lock() {
+                                Ok(g) => g,
+                                Err(p) => p.into_inner(),
+                            };
+                            if let (Some(t), Some(start)) = (telemetry, t_wait_start) {
+                                t.node_factors_wait_ns.fetch_add(
+                                    start.elapsed().as_nanos() as u64,
+                                    Ordering::Relaxed,
+                                );
+                            }
+                            let hold_start = telemetry.map(|_| std::time::Instant::now());
+                            nf[snode_idx] = Some(node);
+                            if let (Some(t), Some(start)) = (telemetry, hold_start) {
+                                t.node_factors_hold_ns.fetch_add(
+                                    start.elapsed().as_nanos() as u64,
+                                    Ordering::Relaxed,
+                                );
+                            }
+                        }
                     }
-                    let hold_start = telemetry.map(|_| std::time::Instant::now());
-                    nf[snode_idx] = Some(node);
-                    if let (Some(t), Some(start)) = (telemetry, hold_start) {
-                        t.node_factors_hold_ns
-                            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    Err(e) => {
+                        task_res = Err(e);
+                        break;
                     }
                 }
-                if let Some(parent_idx) = parents[snode_idx] {
-                    let prev = pending[parent_idx].fetch_sub(1, Ordering::AcqRel);
+            }
+
+            // Return the pooled vec to the workspace. On the success
+            // path all slots are `None` (children taken by their
+            // parents within this task; each own contrib deposited);
+            // on the error path stale slots are harmless — the whole
+            // factorization aborts and `thread_ws` does not outlive it.
+            ws.local_contribs = local_contribs;
+            task_res
+        };
+
+        match result {
+            Ok(()) => {
+                // Trampoline the parent TASK (issue #148): decrement its
+                // pending child-task counter; the last child task to
+                // finish enqueues it. Same acquire-release protocol as
+                // the per-supernode graph.
+                if let Some(parent_task) = plan.parent_task[task_idx] {
+                    let prev = pending[parent_task].fetch_sub(1, Ordering::AcqRel);
                     if prev == 1 {
                         run_parallel_task(
                             s,
-                            parent_idx,
+                            parent_task,
                             symbolic,
                             permuted,
                             full_pattern,
                             scaling_pivot_order,
                             is_root,
                             params,
-                            parents,
+                            plan,
                             pending,
                             contrib_blocks,
                             node_factors_out,
