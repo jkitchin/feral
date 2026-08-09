@@ -1,0 +1,201 @@
+#+TITLE: Session 2026-08-09-03 — chainW regression investigation (PR #150 blocker)
+#+DATE: 2026-08-09
+
+* 12:10 :orient:chainw:regression:pr150:
+Reviewer (pounce side, PR #150 comment) correctly reframes what I
+labelled a "synthetic-proxy quirk" as a probable REGRESSION in the
+shipped default path, on a shape that matters: chainW is a wide-block
+chain, the geometry of double_column (n=25377, 819 vars/time-point)
+and prommis_sx (n=28313, 913 vars/point) — the two models pounce is
+currently WINNING on. My own final sweep at default parallel settings:
+chainW par@4t old 186.7-216.6 ms vs new 221.1-223.9 ms (~5-18% worse).
+Treating this as a merge blocker for #150.
+Plan: (1) decisive bisect — run the NEW driver with
+FERAL_PAR_TASK_MIN_FLOPS=1 (maximal task graph ~ OLD granularity). If
+that recovers OLD speed, the effect is genuinely task granularity; if
+not, my rewrite slowed something else and the coarsening is exonerated.
+(2) then the reviewer's three hypotheses (workspace shape churn, pool
+coverage asymmetry, first-touch locality).
+
+* 12:55 :chainw:noise:correction:paired-methodology:
+Bisect result overrode the whole investigation. FERAL_PAR_TASK_MIN_FLOPS
+sweep on chainW: cutoffs 1e5/1e6/1e8 all yield IDENTICAL plans
+(n_tasks=1 seeds=1, same code path) yet measured 139.6/259.1/155.5 ms —
+1.9x spread on identical code. Noise check, 8 invocations of one fixed
+config: min_us 124.7-163.2 (31%), median_us 149.2-183.7 (23%). The
+claimed 5-18% "regression" and my original 20% "anomaly" both sit
+inside that band.
+Paired alternating A/B (drift cancels), min_us, ratio new/old:
+  chainW new-vs-old      9/12 favour new, median 0.961 (new ~4% FASTER)
+  chainW coarse-vs-fine  9/10 favour coarse, median 1.045 (p~0.02)
+  sparseqpL new-vs-old   9/10 favour new, median 0.894 (~11% faster)
+  grid250 new-vs-old    10/10 favour new, median 0.762 (~24% faster)
+Conclusions: (1) no chainW regression — shipped coarsening is mildly
+BETTER than per-node spawning on that shape; merge blocker cleared.
+(2) the "anomaly" and the factor_body telemetry claim (912 vs 1276 ms)
+are WITHDRAWN — unpaired. (3) PR headline claims survive and
+strengthen under paired testing. (4) absolute times this session are
+much lower than session 02 (sparseqpL old 46-55 vs 82-88 ms) — the host
+was simply quieter; that drift is exactly what broke cross-time
+comparison.
+Methodology: the 3-run-median rule is insufficient here; paired
+alternating A/B with a sign test over >=10 pairs is now required for
+this container. Recording in decisions.md.
+
+* 13:40 :issue-148:review:env-var:self-inflicted:
+Reviewer (issue #148 comment) reproduced the parallel-slower-than-serial
+effect on 6 REAL KKT matrices on aarch64/macOS with the system
+allocator, MA57 as control: serial driver beats default pool on 5/6, up
+to 1.99x (clnlbeam). Kills the glibc-arena hypothesis - effect survives
+a different allocator, kernel and ISA. Also: at best config the
+pounce#552 gaps drop 8.05x->3.86x (clnlbeam) and 1.70x->1.17x (dtoc2,
+FERAL-attributable 0.98x = TIES MA57). Their conclusion: "the arithmetic
+kernel is fine; everything left is fixed cost and small-front behaviour."
+Verified their three code claims against source:
+(1) env::var per panel - TRUE, and 2 of the 3 are MINE from PR #150
+    (FERAL_PACKED_SIMD :3638, FERAL_PACKED_SIMD_MIN_WORK :3849 which
+    also string-parses every panel); plus pre-existing FERAL_PACKED_SCHUR
+    :3624 and FERAL_INTRAFRONT_MIN_AREA :721. All four now OnceLock-cached.
+(2) SupernodeTiming.us truncated via as_micros() - TRUE (:2173,:2224,:3659).
+(3) IMPORTANT: probe_panel_frag reads the phase_timing NANOSECOND
+    atomics, not SupernodeTiming, so the session-01 small-front
+    attribution (schur 4.1% / scalar-tail 8.4%) is NOT affected by the
+    truncation bug and stands. Their profile_report() numbers are the
+    truncated ones.
+Paired A/B of the env caching (10 pairs, min_us): HYDCAR20 10/10 ratio
+0.943 (-5.7%), chain1200 10/10 ratio 0.912 (-9.0%), sawpath 4/10 no
+effect. Bigger than their ~1-2% estimate. Note small fast fixtures are
+LOW noise (HYDCAR20 min_us spread <1%) vs chainW's 31% - fixture size
+drives resolvability.
+Also noted: PR #150's seeds<2 fallback IS their item #1 (tree-shape-gated
+serial fallback); their data suggests my gate may be too conservative,
+since serial beat TUNED parallel on 4/6.
+
+* 14:30 :issue-148:profiler:nanoseconds:instrument-bug:
+Implemented the reviewer's item #2 (profiler to nanoseconds). Not the
+"one line" it looked like: SupernodeTiming.us -> .ns, the five phase
+fields -> *_ns (they were phase_timing NANOSECOND atomics divided by
+1000 - truncating twice over), BucketStats sum/avg -> _ns,
+ProfileReport.loop_us -> loop_ns, plus the warning check which now
+compares in ns (loop is ns, prologue/epilogue/total stay us - they are
+ms-scale and never truncated).
+Consumer strategy: kept us() accessors on all three types so the 17
+one-off feral-diagnostics probes migrate with .us -> .us() and keep
+their exact prior semantics; feral's own code (solver, perf_probe,
+profile_qap15, profiler_smoke) uses the precise ns fields. Patched the
+diagnostics crate by driving off compiler-message JSON spans after a
+naive regex over-reached into unrelated local structs (Metrics.loop_us,
+StagePct.us) - 11 rounds, precise.
+Measured recovery: grid250 5651/11171 supernodes (50.6%) recorded 0 us
+before, now 0 record zero; loop 145.4 -> 152.1 ms (+6.7 ms, 4.4%
+previously invisible). clnlbeam-like tridiagonal n=100000: 23.07 ->
+26.20 ms (+12.0%). grid250's <=8 bucket now reports 8156 fronts at
+1.47 us mean = 7.9% of loop - previously half of them were literally 0.
+Confirms the reviewer's finding (c) exactly. clippy clean on both
+crates, 84/84 suites green.
+
+* 15:05 :ci:python-bindings:miss:
+CI RED after be83cdb: 3 "Test wheel" jobs failed. Cause: python/ is a
+SEPARATE cargo workspace (own Cargo.toml/Cargo.lock), so neither
+`cargo build --all-targets` at the root nor the pre-commit hooks
+(which clippy feral + feral-diagnostics only) compile it. My profiler
+rename broke python/src/introspect.rs (b.sum_us, b.avg_us, r.loop_us).
+Genuine process gap on my side - the root-workspace build is NOT a
+sufficient pre-push check when touching public types.
+Fix made purely ADDITIVE at the Python layer since it is a published
+API: kept sum_us/avg_us/loop_us with their exact prior types and
+values (via the new us() accessors), ADDED sum_ns/avg_ns/loop_ns
+carrying full precision. No Python-visible breakage; precision
+available to anyone who wants it. python crate builds clean; the 46
+clippy errors there are pre-existing pyo3 create_exception! gil-refs
+cfg noise in src/errors.rs (untouched, and not gated by the wheel job).
+Lesson for the checklist: when a public type changes, build python/
+explicitly.
+
+* 15:40 :issue-148:calibration-knob:release-prep:
+Scoped the "one more optimization" question against the evidence and
+landed the single zero-risk item: FERAL_PAR_MIN_SEEDS makes the
+serial-fallback threshold (previously hardcoded seeds<2) tunable at
+runtime. Rationale: the reviewer's six real matrices show the default
+is too conservative (serial beat TUNED parallel on 4/6, up to 1.99x on
+clnlbeam), but calibrating it here would mean tuning on synthetics -
+which already burned this session once (chainW). Exposing the knob
+converts a guess I cannot validate into an experiment they can run on
+real hardware.
+Deliberately NOT OnceLock-cached (read once per factorization, unlike
+the dense-kernel knobs) so it is testable and calibratable in-process.
+tests/task_plan_parity.rs now sweeps 0/1/2/4/64/u64::MAX and asserts
+byte-identity at every setting - the knob is scheduling-only, zero
+numerical risk. Routing verified: grid250 (26 seeds, wide tree)
+min_seeds=2 -> 66.3 ms parallel, min_seeds=64 -> 122.7 ms sequential
+(1.85x), so the knob demonstrably routes both ways.
+Explicitly deferred past the release: scaling warm-start (11-20%
+ceiling but CHANGES NUMERICS) and amalgamation nemin (changes fill +
+numerics). Both need a corpus run this container does not have; rushing
+either into a 2-day release risks an inertia regression.
+Wrote dev/plans/release-0.15.0-checklist.md: aarch64 revalidation gates
+the release (golden_bits digests are the cross-arch bit-identity proof;
+corpus inertia + Phase 2.8.1 partitions are the MUST gates; the
+packed-SIMD-vs-autovectorized NEON A/B is informational with
+FERAL_PACKED_SIMD=0 as the documented mitigation), optional
+min_seeds calibration, release steps, and the post-release order.
+
+* 16:20 :pr150:review-round3:aarch64:release-unblocked:
+Reviewer posted three substantial comments. Digest:
+(1) RETRACTED their own claim that the SIMD work fixes pounce#552 -
+    built pounce against e8e1c5a vs 0.14.0, flat within +-1.5% on 8
+    models. My session-01 rejection entry was right: the chain gap is
+    small-front OVERHEAD, not lane width.
+(2) aarch64 revalidation DONE and PASSING: 84/84, 802 tests,
+    golden_bits 3/3 - the x86-recorded digests reproduce on M-series,
+    so cross-arch bit-identity is PROVEN. Corpus: 156929 matrices,
+    dense+sparse inertia 100.0%, Phase 2.8.1 4/4 PASS, and the worst
+    residuals reproduce TO THE DIGIT (2.46e-1 POLAK6_0021, 2.94e-4
+    ERRINBAR_0824). Release is UNBLOCKED, not gated.
+(3) NEON A/B: default packed SIMD wins 3.19x (n=2955) / 2.25x (n=512)
+    vs FERAL_PACKED_SIMD=0. My expectation that NEON might already be
+    autovectorized was WRONG - and on 0.14.0 aarch64 the FMA path was
+    buying nothing (11.3 vs 10.8 GF/s), now 34.1 vs 17.2. The scalar
+    tile-walk was never an x86-only story.
+(4) FERAL_PAR_MIN_SEEDS answer: KEEP 2. Five of six real matrices
+    collapse to seeds=1 after coarsening so the knob is a no-op on
+    them; marine_1600 (the one wide tree) loses 28% at ms>=4. My doc
+    comment calling the default "known to be too low" is superseded -
+    corrected.
+(5) #150 vs 0.14.0 paired: wins all 12 arms, clnlbeam parallel 2.29x,
+    steering 1.73x; solve-vector hashes identical -> bit-neutral on
+    real KKT.
+Actions taken: corrected the PAR_MIN_SEEDS doc and the fallback-branch
+comment (which still cited the withdrawn chainW anomaly); restructured
+build_task_plan to return Option and early-out BEFORE building `owned`,
+so the fallback path no longer constructs and discards a per-supernode
+map. My own paired A/B of that early-out is INCONCLUSIVE (7/10, 2/10,
+5/10) - the effect is ~1-3% on their 39.6k-supernode matrices and below
+my noise floor; reporting it as their measurement, not mine.
+Also confirmed their bench_schur_micro finding: its PACKED arm is a
+LOCAL reimplementation from issue #99, never a call into the library -
+documented in the example header so nobody mistakes it for coverage.
+Note: their "~39.6k short-lived Vecs" detail is not quite right -
+vec![Vec::new(); n] does not heap-allocate the inner Vecs; the real
+cost is the ~950 KB outer Vec plus the single owner vec. Waste is real,
+mechanism slightly different.
+
+* 17:00 :release:changelog-audit:
+Pre-release audit of the checklist caught four CHANGELOG defects, the
+first of which would have shipped a false statement:
+(1) The trailing note still said aarch64 revalidation was "pending" -
+    it is complete and passing. Replaced with the actual results
+    (NEON 2.94x vs 0.14.0, 3.19x vs PACKED_SIMD=0, corpus 156929
+    matrices 100% inertia, golden_bits reproducing cross-arch).
+(2) FERAL_PAR_MIN_SEEDS / PAR_MIN_SEEDS undocumented - new public const
+    + env var.
+(3) The OnceLock per-panel env caching (-5.7%/-9.0% paired) undocumented.
+(4) The task-plan early-out undocumented; Python-binding compatibility
+    (fields unchanged + new _ns) not stated.
+Also generalized the section title from "x86 SIMD kernels" - the NEON
+data shows the packed kernel wins there too, so the x86 framing
+undersold it.
+Verified independently: single [Unreleased] heading, no stray 0.14.0
+refs beyond the six to bump, working tree clean and in sync with
+origin, 84 binaries / 800 passed / 0 failed / 21 ignored on the exact
+release tree.

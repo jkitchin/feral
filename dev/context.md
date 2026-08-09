@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-09T02:38:45Z
+Generated: 2026-08-09T03:25:16Z
 
 ## Latest Session
-File: dev/sessions/2026-08-09-01.md
+File: dev/sessions/2026-08-09-02.md
 ```
-# Session 2026-08-09-01
+# Session 2026-08-09-02
 
 ## Goal
 
-Evidence-based kernel performance pass (user request: vectorization/SIMD
-opportunities, pure Rust, every change (1) correct, (2) faster,
-(3) bit-identical across platforms). Staged plan: measure-first, then
-packed-kernel SIMD, pack-buffer pooling, small-front eager-path SIMD.
-
-Environment caveat: x86_64 4-core AVX2+AVX512 container; the 154k-matrix
-corpus is NOT present, so evidence comes from parity suites +
-bench_schur_micro / bench_dense_front / perf_probe on tests/data
-fixtures + a new hicks-like chain fixture. **All perf numbers below are
-x86; aarch64 M-series revalidation is pending (see follow-ups).**
+Issue #148: the default parallel multifrontal driver is slower than
+serial on 3 of 4 POUNCE problems (~1.8M `scope.spawn` boxed-closure
+allocations per solve, glibc arena contention growing with thread
+count). Fix via the issue's suggested directions 1+2: work-based task
+coarsening and a serial fallback. Environment: x86_64 4-core container
+(issue reproduces at 2-4 threads); POUNCE `.nl` problems unavailable —
+synthetic proxies (chain / grid / banded-QP KKT) built and measured
+with interleaved old-vs-new binaries (git worktree at e8e1c5a).
 
 ## Accomplished
 
-1. **x86 pulp dispatch fix (f0be9fa)** — `dispatch_nofma`/`dispatch_fma`
-   called `k.with_simd(v3)` instead of `pulp::Simd::vectorize(v3, k)`,
-   so every pulp kernel on x86 ran its AVX intrinsics as outlined
-   function calls since Phase 2.4.2 (invisible on aarch64 where NEON is
-   baseline). Strided kernel: 0.45 → 4.69-7.00 GFLOP/s (~10×).
-   Bit-identical by construction; all suites + golden digests unchanged.
+1. **Reproduction** (research note): chain12000 parallel never beats
+   serial; sparseqp proxy degrades monotonically with threads; grid250
+   is the one winner but pays +19% single-thread driver overhead.
+2. **TaskPlan coarsening (7814bfe)**: one spawn per subtree task —
+   boundaries at tree roots and at children of nodes with >= 2 sibling
+   subtrees each >= `FERAL_PAR_TASK_MIN_FLOPS` (default 1e6); lone big
+   children continue inline (chains collapse to one task; the naive
+   subtree>=cutoff rule produced 6319 tasks of 6564 supernodes on the
+   banded-QP proxy, the sibling rule 1). Owned nodes factored serially
+   in postorder inside their task; parent-task trampoline via
+   task-children pending counters; `seeds < 2` delegates to the
+   sequential driver (intrafront parallelism kept on).
+   `FERAL_DEBUG_TASK_PLAN=1` dumps plan shapes.
+3. **Byte-exactness**: scheduling-only; new `tests/task_plan_parity.rs`
+   pins fine (cutoff=1: 153 tasks/132 seeds), default, and fallback
+   configurations bit-identical to the sequential driver; 84/84 test
+   binaries green.
+4. **chainW anomaly investigated and documented**: the old per-node
+   driver oddly beat both sequential drivers ~20% on one wide-block
+   chain proxy; AtomicLockStats telemetry located the difference
+   *inside* `factor_one_supernode` (912 vs 1276 ms per 9 factors) —
+   not spawn/lock overhead, not intrafront, not tree parallelism.
+   Unexplainable further without perf/heaptrack (absent here);
+   accepted as a proxy quirk since the issue's real chains lose under
+   per-node spawning. Full analysis in the research note.
 
-2. **Explicit pulp SIMD packed trailing update (41c35b5)** — the
-   default BLAS-3 tile walk had compiled fully scalar on x86 (objdump:
-   ymm=0, packed SSE=0). Moved into
-   `schur_kernel::packed_schur_tiles_{nofma,fma}`, one dispatch per
-   panel; scalar walk kept as `FERAL_PACKED_SIMD=0` fallback. Also
-   repairs the opt-in FMA path (scalar `f64::mul_add` → libm call, was
-   a 3× x86 slowdown since 2026-07-01). New `tests/golden_bits.rs`
-   hardcoded digests = cross-arch tripwire.
+## Benchmark Results
 
-3. **Work gate for degenerate panels (8358d1b)** — panels below 1024
-   multiply-subtracts stay on the inline scalar walk
-   (`FERAL_PACKED_SIMD_MIN_WORK` override): the ~100-200 ns dispatch
-   boundary can't be amortized there (`examples/bench_packed_tiny`),
-   and un-gated SIMD showed a warm-median artifact on HAHN1/AVION2
-   that in-kernel timing proved was not in-kernel cost (journal 04:10).
+Session bench (corpus absent): synthetic set + regression fixtures all
+inertia/residual pass; oracle partitions N/A in container.
 
-4. **Pack-buffer pooling, issue #128 rest (484bda7)** — `PackPool` on
-   `FactorScratch`, serial path only; dirty-pool byte-parity sweep in
-   the unit test.
+Interleaved old-vs-new (warm medians, default parallel config):
 
-5. **Eager-path SIMD tried and rejected (f509a18)** — full
-   implementation measured FLAT everywhere (eager n=512: 11.21 vs
-   11.23 ms) because the plain eager loops already autovectorize;
-   reverted same session per the pre-registered criterion, keeping the
-   byte-identical de-duplication of `do_1x1_pivot`'s twin loops.
-   Recorded in tried-and-rejected.
+| proxy | old par@4 | new par@4 | old serial | new serial |
+|---|---:|---:|---:|---:|
 ```
 
 ## Git Status
 ```
-f509a18 refactor(kernel): dedup do_1x1_pivot update loops; record eager-SIMD rejection
-484bda7 perf(kernel): pool packed-update A/B pack buffers in FactorScratch
-8358d1b perf(kernel): work-gate the packed SIMD tile kernel; add tiny-call probe
-41c35b5 perf(kernel): explicit pulp SIMD tile kernel for the packed trailing update
-f0be9fa perf(kernel): route x86 pulp dispatch through Simd::vectorize
+7814bfe perf(parallel): coarsen factor tasks to subtrees; serial fallback for chains (#148)
+80f849f research: issue #148 reproduction + task-coarsening design note
+e8e1c5a perf(kernel): explicit SIMD packed trailing update + x86 pulp dispatch fix (#149)
+6589570 docs: session checkpoint 2026-07-11-02 (issue triage, #127, release 0.14.0) (#146)
+c05eb77 release: feral v0.14.0 (#145)
 ```
 
 ## Test Status
@@ -86,75 +86,65 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 407 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.95s
+test result: ok. 407 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.99s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-02.md)
 
 
-`cargo run --bin bench --release` (corpus absent — synthetic + 2
-regression fixtures only): 8 synthetic matrices benchmarked; KKT
-fixtures 1/1 dense inertia+residual pass (worst 1.14e-15), sparse 2/2
-vs MUMPS (worst 1.26e-16). Phase 2.8.1 partitions N/A (no oracle
-timings in container).
+Session bench (corpus absent): synthetic set + regression fixtures all
+inertia/residual pass; oracle partitions N/A in container.
 
-Kernel/fixture evidence (3-run medians, sequential, this container):
+Interleaved old-vs-new (warm medians, default parallel config):
 
-| measure | session start | session end |
-|---|---:|---:|
-| bench_dense_front 2955 nofma serial | 4236 ms (2.0 GF/s) | 1517-1556 ms (5.6 GF/s) |
-| bench_dense_front 2955 nofma intrafront | 1798 ms (4.8 GF/s) | 637-679 ms (12.7-13.5 GF/s) |
-| bench_dense_front 2955 fma intrafront | 4214 ms | 572-609 ms (14-15 GF/s) |
-| bench_dense_front 512 nofma serial | 39.4 ms | 10.0-10.9 ms |
-| strided micro 2048²·64 | 0.45 GF/s | 4.69 GF/s |
-| twirism1 warm factor | 4176-4217 µs | 2066-2195 µs |
-| hydcar20 | 295-300 µs | 206-218 µs |
-| sawpath | 826-830 µs | 671-745 µs |
-| vesuvio | 2108-2284 µs | 1857-2071 µs |
-| chain1200 (new fixture) | 985 µs (post-Stage-1) | 847-961 µs |
-| hahn1 | 839-842 µs | 739-762 µs |
-| avion2 | 39 µs | 34-35 µs |
+| proxy | old par@4 | new par@4 | old serial | new serial |
+|---|---:|---:|---:|---:|
+| sparseqpL (issue signature) | 82.4-88.0 ms | 71.7-76.3 ms | 69.9-74.6 | 70.7-72.2 |
+| grid250 | 78.8-92.7 ms | 71.4-73.4 ms | 123.0-128.7 | 122.0-128.0 |
+| chainW | 186.7-216.6 ms | 221.1-223.9 ms | 228.1-229.5 | 214.9-215.7 |
+| chain12000 | 12.0-12.5 ms | 11.9-12.5 ms | 11.3-11.7 | 10.9-11.0 |
 
-No fixture worse than session start. All byte-exactness gates green
-throughout (407 lib tests, 83 test binaries, golden digests stable
-across default / FERAL_PACKED_SIMD=0 / FERAL_PACKED_SCHUR=0).
+Spawn reduction: grid250 11171 → 51 tasks; chains → 1 (sequential
+path). Small fixtures in the noise band (−6%..+4%). The chainW par@4
+old-vs-new gap is the documented anomaly above (old-par was beating
+serial there; new ≈ serial).
 
 ```
 
 ## Recent Decisions
-nofma-serial 4236 → 1517-1556 ms (2.7-2.8×, 2.0 → 5.6 GF/s);
-nofma-intrafront 1798 → 637-679 ms (12.7-13.5 GF/s); fma-intrafront
-4214 → 572-609 ms (14-15 GF/s, fastest config); n=512 3.9×. Warm
-fixtures: twirism1 −46%, hydcar20 −26%, sawpath −18%. Small fixtures
-restored to baseline-or-better by the work gate.
+`FERAL_PAR_TASK_MIN_FLOPS` (default 1e6) estimated flops; a lone big
+child continues inline, so chain-shaped trees collapse to one task per
+root. One `scope.spawn` per task, owned nodes factored serially in
+postorder inside it, parent-task trampoline via task-children pending
+counters. Task graphs with < 2 seeds delegate to the sequential driver
+(with intrafront parallelism kept on).
 
-**aarch64 status.** NOT yet measured on M-series (this container is
-x86). The structural bit-identity argument plus golden digests
-guarantee correctness there; performance must be re-validated —
-`FERAL_PACKED_SIMD=0` is the one-env-var mitigation if the NEON
-codegen regresses vs the old autovectorized walk.
+**Why.** Issue #148: one boxed spawn per supernode ⇒ ~1.8M allocations
+per POUNCE sparseqp solve, glibc arena contention growing with thread
+count, parallel slower than serial on 3 of 4 problems. Spawn counts:
+grid250 11171 → 51; chains → 1 (sequential path).
 
-## 2026-08-09 — Pack-buffer pooling on the serial packed path (issue #128 rest)
+**Evidence.** Interleaved old-vs-new, x86_64 4-core: sparseqpL par@4
+82-88 → 71.7-76.3 ms (old lost 15-25% to serial; new ≈ serial);
+grid250 par@4 78.8-92.7 → 71.4-73.4 ms; small fixtures noise-band.
+Byte-exact (scheduling only): tests/task_plan_parity.rs pins
+fine/default/fallback plans against the sequential driver bit-for-bit;
+84/84 suites green.
 
-**Decision.** `FactorScratch` carries a `PackPool {apack, bpack0,
-bpack1}`; the serial packed dispatch path reuses it (mem::take'd
-around the scratch borrows), the intra-front rayon path keeps
-per-range fresh allocations (a shared pool cannot cross the parallel
-split; multi-slot pooling is on the tried-and-rejected list).
-`bpack0`/`bpack1` re-zero on reuse via `clear()+resize` (their zeros
-are load-bearing for out-of-range column lanes); `apack` skips the
-re-zero only when its length matches (every slot including padding is
-overwritten). Parity test carries a deliberately dirty pool across all
-shapes.
+**Documented open question.** On one synthetic proxy (chainW, wide-
+block chain) the OLD per-node-spawn driver beat both sequential
+drivers by ~20% — telemetry places the difference inside
+factor_one_supernode (912 vs 1276 ms per 9 factors), an unexplained
+workspace/allocator interaction, not driver overhead. Accepted as a
+proxy quirk (the issue's real chains lose under per-node spawning);
+full analysis in dev/research/issue-148-parallel-task-granularity.md.
 
-**Evidence (3-run warm medians).** chain1200 (hicks-like
-block-tridiagonal synthetic, added after the pounce#552 chain-KKT
-report) 985 → 847-961 µs (−12%); AVION2 −6%; twirism1 −6%; HYDCAR20
-−4%; VESUVIO −4%; HAHN1 −2%. Byte-exact (dirty-pool parity sweep +
-golden digests unchanged).
+**Deferred.** Issue #148 suggestion 3 (collect() temporaries):
+re-profile after this lands. #128 nrow-underestimate still skews flop
+estimates; harmless for this gate.
 
 ## Recent Tried-and-Rejected
 plain `for i in j..n { a[j*n+i] -= a[k*n+i]*alpha }` loops are
@@ -313,6 +303,7 @@ tests/sqd_fast_path.rs
 tests/static_assembly_maps.rs
 tests/stress_tests.rs
 tests/symbolic_profiler.rs
+tests/task_plan_parity.rs
 tests/threshold_consistency.rs
 tests/tiny_fast_path.rs
 ```

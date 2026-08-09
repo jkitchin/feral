@@ -4,7 +4,52 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
-### Performance — x86 SIMD kernels actually reach AVX2 (session 2026-08-09)
+### Fixed — the profiler no longer reports small fronts as costless (issue #148)
+
+- **Breaking (diagnostic API).** `SupernodeTiming` now records **nanoseconds**:
+  `us` → `ns`, and `assembly_us`/`densefactor_us`/`panelfactor_us`/`schur_us`/
+  `scalartail_us` → the matching `*_ns`. `BucketStats::sum_us`/`avg_us` →
+  `sum_ns`/`avg_ns`, and `ProfileReport::loop_us` is now `loop_ns`.
+  Microsecond accessors (`SupernodeTiming::us()`, `BucketStats::sum_us()`,
+  `ProfileReport::loop_us()`, …) are provided for existing consumers — the
+  migration is `.us` → `.us()`. **The Python API is unchanged**: `sum_us`,
+  `avg_us` and `loop_us` keep their names, types and values, and new
+  `sum_ns`/`avg_ns`/`loop_ns` fields expose the full precision.
+- Why: the per-supernode timer used `Duration::as_micros()`, and the phase
+  deltas were divided by 1000, so every front costing under a microsecond
+  recorded **zero**. On a 250×250 grid Laplacian, **5651 of 11171 supernodes
+  (50.6%) recorded 0 µs**; the aggregate under-reported the inner loop by
+  6.7 ms of 152 ms (4.4%), and by 12.0% on a tridiagonal n=100000 chain. The
+  instrument reported exactly the population it was pointed at — the
+  small-front bucket — as free, which blocked any measurement of amalgamation
+  or per-front fixed-cost work. `loop_ns` now sums nanoseconds, so that
+  population is visible: the `<=8` bucket on grid250 shows 8156 fronts at
+  1.47 µs mean, 7.9% of loop time.
+
+### Performance — parallel factorization no longer loses to serial (issue #148)
+
+- The parallel multifrontal driver now spawns one rayon task per *subtree*
+  (>= 1e6 estimated flops, `FERAL_PAR_TASK_MIN_FLOPS` override) instead of one
+  boxed task per supernode (~1.8M allocations per solve on chain-structured
+  problems, glibc arena contention growing with thread count). Chain-shaped
+  trees collapse to a single task and take the sequential driver outright.
+  Measured (4-core x86_64): the sparse-QP proxy that lost 15-25% to serial at
+  4 threads now matches serial; the grid/poisson-class proxy improves a
+  further 9-21% at 4 threads. Scheduling-only — factors are byte-identical
+  (new `tests/task_plan_parity.rs` gate). `FERAL_DEBUG_TASK_PLAN=1` dumps the
+  task-graph shape for diagnosing parallel-performance reports.
+- New `PAR_MIN_SEEDS` (default 2, `FERAL_PAR_MIN_SEEDS` override): how many
+  independent seed tasks the tree must offer before the task graph is used at
+  all. Calibrated on six real KKT matrices — the default is correct, and
+  forcing the task graph on anyway (`=1`) costs 3–9% on chain-shaped trees,
+  while raising it to 4+ costs 28% on a wide tree. Byte-identical at every
+  setting.
+- The sequential-fallback path no longer builds a task plan it discards: a
+  chain-shaped KKT previously constructed a per-supernode ownership map on
+  every factorization before handing off to the sequential driver. Measured
+  at 1.01–1.03× on chain KKTs (clnlbeam, steering_12800, rocket_12800).
+
+### Performance — the dense SIMD kernels now actually vectorize (session 2026-08-09)
 
 - The x86_64 branches of the pulp dispatch helpers now route through
   `Simd::vectorize`, which supplies the `#[target_feature]` context the AVX
@@ -29,10 +74,28 @@ All notable changes to FERAL will be documented in this file.
 - The packed update's pack buffers are pooled in `FactorScratch` on the
   serial path (issue #128 rest): warm factor −12% on a chain-structured KKT
   proxy, −2..6% across the small parity fixtures.
+- Four tuning-knob `env::var` lookups that sat on the **per-panel** dispatch
+  path (one of which also parsed a string every panel) are now read once via
+  `OnceLock`. Measured −5.7% (HYDCAR20) and −9.0% (block-tridiagonal chain)
+  in paired A/B; this is per-front fixed cost, so it lands hardest on the
+  many-small-front matrices where it matters most.
 
-Note: aarch64 (M-series) performance revalidation of the new explicit-SIMD
-packed path is pending; correctness there is guarded by the golden digests,
-and `FERAL_PACKED_SIMD=0` restores the previous behavior if needed.
+aarch64 (M-series) revalidation is **complete and passing** — the packed SIMD
+path was not an x86-only win:
+
+- `bench_dense_front` n=2955 fma serial **2.94×** vs 0.14.0 (11.3 → 34.1
+  GFLOP/s); n=2955 nofma serial 1.55×, n=512 1.37×, n=128 1.13×. Against
+  `FERAL_PACKED_SIMD=0` on the same build the default wins **3.19×**
+  (n=2955) and **2.25×** (n=512), so no per-arch gate or mitigation is
+  needed. On 0.14.0 the aarch64 FMA path was buying nothing (11.3 vs 10.8
+  GFLOP/s); it now delivers.
+- Corpus (156,929 matrices): dense and sparse inertia both **100.0%**, all
+  four Phase 2.8.1 exit partitions PASS, and the worst residuals reproduce
+  *to the digit* against the x86_64 baseline (2.46e-1 `POLAK6_0021`,
+  2.94e-4 `ERRINBAR_0824`).
+- `tests/golden_bits.rs` — digests recorded on x86_64 — passes unmodified on
+  aarch64, so cross-platform bit-identity of the new kernels is demonstrated,
+  not merely argued.
 
 ## [0.14.0] - 2026-07-11
 

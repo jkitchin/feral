@@ -75,7 +75,7 @@ fn run(iter: usize) {
         (f64::INFINITY, None);
     for t in prof.timings() {
         let f = snode_flops(t.nrow, t.ncol);
-        let us = t.us as f64;
+        let us = t.us() as f64;
         flop_all += f;
         us_all += us;
         if t.nrow > 128 {
@@ -95,7 +95,7 @@ fn run(iter: usize) {
     println!(
         "NARX_CFy_{iter:04}  n={}  loop={:.1} ms  flops={:.3} GFLOP",
         csc.n,
-        report.loop_us as f64 / 1e3,
+        report.loop_us() as f64 / 1e3,
         flop_all / 1e9,
     );
     println!(
@@ -117,7 +117,7 @@ fn run(iter: usize) {
             w.nrow,
             w.ncol,
             snode_flops(w.nrow, w.ncol) / 1e9,
-            w.us as f64 / 1e3,
+            w.us() as f64 / 1e3,
             worst_gflops,
         );
     }

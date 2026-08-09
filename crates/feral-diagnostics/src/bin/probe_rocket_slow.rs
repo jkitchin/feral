@@ -99,7 +99,7 @@ fn profile_one(label: &str, csc: &CscMatrix, scaling: ScalingStrategy) {
     println!(
         "  prologue={:.1} ms  loop={:.1} ms  epilogue={:.1} ms  total={:.1} ms  overhead={:.1}%  n_snodes={}",
         report.prologue_us as f64 / 1e3,
-        report.loop_us as f64 / 1e3,
+        report.loop_us() as f64 / 1e3,
         report.epilogue_us as f64 / 1e3,
         report.total_us as f64 / 1e3,
         report.overhead_pct,
@@ -114,14 +114,14 @@ fn profile_one(label: &str, csc: &CscMatrix, scaling: ScalingStrategy) {
             "    nrow {:>7}  {:>6}  {:>8.1}  {:>5.1}%  {:>8.1}",
             b.range,
             b.count,
-            b.sum_us as f64 / 1e3,
+            b.sum_us() as f64 / 1e3,
             b.pct_of_total,
-            b.avg_us,
+            b.avg_us(),
         );
     }
     let top: Vec<_> = {
         let mut v: Vec<_> = prof.timings().iter().collect();
-        v.sort_by_key(|t| std::cmp::Reverse(t.us));
+        v.sort_by_key(|t| std::cmp::Reverse(t.us()));
         v.into_iter().take(10).collect()
     };
     println!("  top 10 supernodes:");
@@ -131,7 +131,7 @@ fn profile_one(label: &str, csc: &CscMatrix, scaling: ScalingStrategy) {
             t.snode_idx,
             t.nrow,
             t.ncol,
-            t.us as f64 / 1e3,
+            t.us() as f64 / 1e3,
         );
     }
 }

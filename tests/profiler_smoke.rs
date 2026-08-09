@@ -10,7 +10,7 @@
 //!     observable change to factorization output).
 //!   * Profiler records exactly one timing per supernode.
 //!   * Bucket counts sum to `n_supernodes`; bucket time sums to
-//!     `loop_us`; every supernode falls in exactly one bucket.
+//!     `loop_ns`; every supernode falls in exactly one bucket.
 
 use std::sync::{Arc, Mutex};
 
@@ -108,7 +108,7 @@ fn profiler_buckets_partition_supernodes() {
 }
 
 #[test]
-fn profiler_bucket_us_sum_equals_loop_us() {
+fn profiler_bucket_ns_sum_equals_loop_ns() {
     let csc = block_diag_spd(20);
     let sym = symbolic_factorize(&csc, &SupernodeParams::default()).expect("symbolic");
     let prof = Arc::new(Mutex::new(Profiler::new()));
@@ -116,10 +116,10 @@ fn profiler_bucket_us_sum_equals_loop_us() {
     factorize_multifrontal(&csc, &sym, &params).expect("factor");
     let report = prof.lock().expect("lock").report();
 
-    let bucket_us_sum: u64 = report.buckets.iter().map(|b| b.sum_us).sum();
+    let bucket_ns_sum: u64 = report.buckets.iter().map(|b| b.sum_ns).sum();
     assert_eq!(
-        bucket_us_sum, report.loop_us,
-        "sum of bucket sum_us must equal loop_us"
+        bucket_ns_sum, report.loop_ns,
+        "sum of bucket sum_ns must equal loop_ns"
     );
 }
 
@@ -132,13 +132,15 @@ fn profiler_total_bounds_components() {
     factorize_multifrontal(&csc, &sym, &params).expect("factor");
     let report = prof.lock().expect("lock").report();
 
-    // total_us must be at least as large as the sum of measured
-    // sub-phases; gap is timer/lock overhead.
-    let components = report.prologue_us + report.loop_us + report.epilogue_us;
+    // total must be at least as large as the sum of measured
+    // sub-phases; gap is timer/lock overhead. Compared in nanoseconds:
+    // `loop_ns` is ns while the prologue/epilogue/total fields are us.
+    let components_ns = report.loop_ns + (report.prologue_us + report.epilogue_us) * 1000;
+    let total_ns = report.total_us * 1000;
     assert!(
-        components <= report.total_us,
-        "components {} > total {}",
-        components,
-        report.total_us
+        components_ns <= total_ns,
+        "components {} ns > total {} ns",
+        components_ns,
+        total_ns
     );
 }

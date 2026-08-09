@@ -173,12 +173,21 @@ pub struct BucketStats {
     pub range: String,
     #[pyo3(get)]
     pub count: usize,
+    /// Bucket sum in whole microseconds. Truncating per supernode —
+    /// kept for backwards compatibility; prefer `sum_ns`.
     #[pyo3(get)]
     pub sum_us: u64,
+    /// Bucket sum in nanoseconds (precise; see feral issue #148).
+    #[pyo3(get)]
+    pub sum_ns: u64,
     #[pyo3(get)]
     pub pct_of_total: f64,
+    /// Bucket mean in microseconds.
     #[pyo3(get)]
     pub avg_us: f64,
+    /// Bucket mean in nanoseconds (precise; see feral issue #148).
+    #[pyo3(get)]
+    pub avg_ns: f64,
 }
 
 impl From<&RustBucketStats> for BucketStats {
@@ -186,9 +195,11 @@ impl From<&RustBucketStats> for BucketStats {
         Self {
             range: b.range.to_string(),
             count: b.count,
-            sum_us: b.sum_us,
+            sum_us: b.sum_us(),
+            sum_ns: b.sum_ns,
             pct_of_total: b.pct_of_total,
-            avg_us: b.avg_us,
+            avg_us: b.avg_us(),
+            avg_ns: b.avg_ns,
         }
     }
 }
@@ -205,8 +216,15 @@ pub struct ProfileReport {
     pub prologue_breakdown: PrologueBreakdown,
     #[pyo3(get)]
     pub epilogue_us: u64,
+    /// Inner-loop wallclock in whole microseconds. Kept for backwards
+    /// compatibility; prefer `loop_ns`.
     #[pyo3(get)]
     pub loop_us: u64,
+    /// Inner-loop wallclock in nanoseconds. Unlike the microsecond
+    /// field this does not lose the sub-microsecond supernode
+    /// population (feral issue #148).
+    #[pyo3(get)]
+    pub loop_ns: u64,
     #[pyo3(get)]
     pub total_us: u64,
     #[pyo3(get)]
@@ -224,7 +242,8 @@ impl From<&RustProfileReport> for ProfileReport {
             prologue_us: r.prologue_us,
             prologue_breakdown: (&r.prologue_breakdown).into(),
             epilogue_us: r.epilogue_us,
-            loop_us: r.loop_us,
+            loop_us: r.loop_us(),
+            loop_ns: r.loop_ns,
             total_us: r.total_us,
             overhead_pct: r.overhead_pct,
             buckets: r.buckets.iter().map(BucketStats::from).collect(),

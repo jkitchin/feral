@@ -3021,14 +3021,14 @@ mod tests {
             };
             let report = prof.report();
             let timings = prof.timings();
-            let max_us = timings.iter().map(|t| t.us).max().unwrap_or(0);
+            let max_ns = timings.iter().map(|t| t.ns).max().unwrap_or(0);
             let top: Vec<_> = {
                 let mut v: Vec<_> = timings.iter().collect();
-                v.sort_by_key(|t| std::cmp::Reverse(t.us));
+                v.sort_by_key(|t| std::cmp::Reverse(t.ns));
                 v.into_iter().take(5).collect()
             };
-            let amdahl_ceiling_ms = if max_us > 0 {
-                seq_ms / ((report.total_us as f64) / (max_us as f64))
+            let amdahl_ceiling_ms = if max_ns > 0 {
+                seq_ms / ((report.total_us as f64 * 1000.0) / (max_ns as f64))
             } else {
                 f64::INFINITY
             };
@@ -3052,24 +3052,24 @@ mod tests {
                 if par_ms > 0.0 { seq_ms / par_ms } else { 0.0 }
             );
             eprintln!(
-                "  n_supernodes:   {:>9}     loop_us: {} us   prologue: {} us   epilogue: {} us   overhead: {:.1}%",
+                "  n_supernodes:   {:>9}     loop: {:.1} us   prologue: {} us   epilogue: {} us   overhead: {:.1}%",
                 report.n_supernodes,
-                report.loop_us,
+                report.loop_ns as f64 / 1000.0,
                 report.prologue_us,
                 report.epilogue_us,
                 report.overhead_pct
             );
             eprintln!(
-                "  Amdahl ceiling: par >= {:>5.1} ms  ⇒ max speedup ≈ {:.2}×  (largest single snode = {} us = {:.1}% of total)",
+                "  Amdahl ceiling: par >= {:>5.1} ms  ⇒ max speedup ≈ {:.2}×  (largest single snode = {:.3} us = {:.1}% of total)",
                 amdahl_ceiling_ms,
-                if max_us > 0 {
-                    (report.total_us as f64) / (max_us as f64)
+                if max_ns > 0 {
+                    (report.total_us as f64 * 1000.0) / (max_ns as f64)
                 } else {
                     0.0
                 },
-                max_us,
+                max_ns as f64 / 1000.0,
                 if report.total_us > 0 {
-                    100.0 * (max_us as f64) / (report.total_us as f64)
+                    100.0 * (max_ns as f64) / (report.total_us as f64 * 1000.0)
                 } else {
                     0.0
                 }
@@ -3077,13 +3077,13 @@ mod tests {
             eprintln!("  top-5 supernodes by us:");
             for t in &top {
                 eprintln!(
-                    "      snode #{:6}  nrow={:6}  ncol={:6}  us={:>10}  ({:.1}% of total)",
+                    "      snode #{:6}  nrow={:6}  ncol={:6}  us={:>10.3}  ({:.1}% of total)",
                     t.snode_idx,
                     t.nrow,
                     t.ncol,
-                    t.us,
+                    t.ns as f64 / 1000.0,
                     if report.total_us > 0 {
-                        100.0 * (t.us as f64) / (report.total_us as f64)
+                        100.0 * (t.ns as f64) / (report.total_us as f64 * 1000.0)
                     } else {
                         0.0
                     }
@@ -3095,8 +3095,12 @@ mod tests {
                     continue;
                 }
                 eprintln!(
-                    "      nrow {:>6}   count={:>6}   sum_us={:>10}   {:5.1}% of loop   avg_us={:.0}",
-                    b.range, b.count, b.sum_us, b.pct_of_total, b.avg_us
+                    "      nrow {:>6}   count={:>6}   sum_us={:>10.1}   {:5.1}% of loop   avg_us={:.3}",
+                    b.range,
+                    b.count,
+                    b.sum_ns as f64 / 1000.0,
+                    b.pct_of_total,
+                    b.avg_ns / 1000.0
                 );
             }
 
@@ -3120,10 +3124,10 @@ mod tests {
                     }
                 };
             let n_snodes = symbolic.supernodes.len();
-            let mut work_us = vec![0u64; n_snodes];
+            let mut work_ns = vec![0u64; n_snodes];
             for t in timings {
                 if t.snode_idx < n_snodes {
-                    work_us[t.snode_idx] = t.us;
+                    work_ns[t.snode_idx] = t.ns;
                 }
             }
             // Postorder property: child indices < parent index, so a
@@ -3137,12 +3141,12 @@ mod tests {
                     .map(|&c| earliest_finish[c])
                     .max()
                     .unwrap_or(0);
-                earliest_finish[i] = max_child + work_us[i];
+                earliest_finish[i] = max_child + work_ns[i];
             }
-            let critical_path_us = earliest_finish.iter().max().copied().unwrap_or(0);
-            let total_us = work_us.iter().sum::<u64>();
-            let true_ceiling = if critical_path_us > 0 {
-                (total_us as f64) / (critical_path_us as f64)
+            let critical_path_ns = earliest_finish.iter().max().copied().unwrap_or(0);
+            let total_ns = work_ns.iter().sum::<u64>();
+            let true_ceiling = if critical_path_ns > 0 {
+                (total_ns as f64) / (critical_path_ns as f64)
             } else {
                 0.0
             };
@@ -3164,17 +3168,17 @@ mod tests {
             }
             let max_depth = *depth.iter().max().unwrap_or(&0);
             let mut level_count = vec![0usize; max_depth + 1];
-            let mut level_work_us = vec![0u64; max_depth + 1];
+            let mut level_work_ns = vec![0u64; max_depth + 1];
             for i in 0..n_snodes {
                 level_count[depth[i]] += 1;
-                level_work_us[depth[i]] += work_us[i];
+                level_work_ns[depth[i]] += work_ns[i];
             }
             eprintln!(
-                "  CRITICAL PATH: {} us = {:.1} ms   total_work: {} us = {:.1} ms",
-                critical_path_us,
-                (critical_path_us as f64) / 1000.0,
-                total_us,
-                (total_us as f64) / 1000.0
+                "  CRITICAL PATH: {:.1} us = {:.3} ms   total_work: {:.1} us = {:.3} ms",
+                critical_path_ns as f64 / 1000.0,
+                (critical_path_ns as f64) / 1e6,
+                total_ns as f64 / 1000.0,
+                (total_ns as f64) / 1e6
             );
             eprintln!(
                 "  TRUE parallel ceiling: {:.2}× (total_work / critical_path)",
@@ -3189,12 +3193,12 @@ mod tests {
                     continue;
                 }
                 eprintln!(
-                    "      depth {:>4}  count={:>6}  work_us={:>10}  ({:.1}% of total)",
+                    "      depth {:>4}  count={:>6}  work_us={:>10.1}  ({:.1}% of total)",
                     d,
                     level_count[d],
-                    level_work_us[d],
-                    if total_us > 0 {
-                        100.0 * (level_work_us[d] as f64) / (total_us as f64)
+                    level_work_ns[d] as f64 / 1000.0,
+                    if total_ns > 0 {
+                        100.0 * (level_work_ns[d] as f64) / (total_ns as f64)
                     } else {
                         0.0
                     }

@@ -1,0 +1,59 @@
+#+TITLE: Session 2026-08-09-02 — issue #148: parallel driver slower than serial
+#+DATE: 2026-08-09
+
+* 03:05 :orient:issue-148:parallel:
+Session goal: issue #148 — the default parallel multifrontal driver is
+slower than serial on 3/4 POUNCE problems (sparseqp 3.14x at 14
+threads, monotonic degradation with thread count), with ~1.8M
+scope.spawn boxed-closure allocations per solve (heaptrack), glibc
+arena contention confirmed by mimalloc A/B (masks, does not fix).
+Suggested directions from the issue: (1) work-based spawn cutoff
+(inline small subtrees), (2) serial fallback when the tree lacks
+parallel work, (3) reuse collect() temporaries. Folding in #128's
+"supernode nrow underestimate skews the parallel gate" sub-item.
+Branch restarted from merged main (PR #149 = e8e1c5a).
+Environment: same x86_64 4-core container; issue reproduces already at
+2-4 threads (sparseqp 5675 -> 6858 -> 8222 ms), so 4 cores suffice for
+A/B evidence. POUNCE .nl problems not available here — will build
+synthetic proxies (chain, grid/poisson-like, dense-heavy) and measure
+via perf_probe serial-vs-parallel with RAYON_NUM_THREADS sweeps.
+
+* 04:30 :issue-148:implement:task-plan:
+Implemented TaskPlan coarsening: bottom-up subtree flops (postorder
+pass), task boundaries at tree roots + children of nodes with >=2
+"big" (subtree >= cutoff) children — a lone big child continues
+inline, so chains collapse to one task (naive subtree>=cutoff rule
+produced 6319 tasks of 6564 snodes on the banded-QP proxy; sibling
+rule yields 1). run_parallel_task now loops the task's owned nodes in
+postorder + itself; parent-task trampoline via task-children pending
+counters. seeds<2 -> sequential delegation (intrafront kept on).
+Plan shapes: grid250 11171 snodes -> 51 tasks / 26 seeds; chainW and
+sparseqpL -> 1 task -> fallback. New tests/task_plan_parity.rs pins
+fine (cutoff=1: 153 tasks/132 seeds), default, and fallback configs
+byte-identical to the sequential driver. 84/84 suites green.
+
+* 05:10 :issue-148:chainw-anomaly:telemetry:
+Interleaved old-vs-new A/B exposed a chainW-proxy anomaly: OLD
+per-node-spawn driver at par1 beats BOTH sequential drivers (~170-195
+vs ~210-220 ms). AtomicLockStats telemetry (temporary probe bin, both
+worktrees): driver overheads negligible in both; the difference is
+INSIDE factor_one_supernode — factor_body_ns 912 ms (old, 168453
+tasks over 9 factors) vs 1276 ms (new, 9 tasks) for identical nodes.
+I.e. the old driver's per-node factor calls run ~30% faster on this
+one shape — unexplained workspace/allocator interaction (chain has no
+tree parallelism; intrafront ruled out by FERAL_INTRAFRONT=0 A/B; not
+lock waits). No allocator-level profiler in this container to chase
+further. Decision: accept as a synthetic-proxy quirk — the issue's
+REAL chain problems (POUNCE hicks/optcontrol/bratu, 14t glibc) lose
+badly under per-node spawning, which is the case the fix targets —
+and document in the research note + PR. sparseqpL par4 old 87-90 ->
+new 74-79 ms (issue signature fixed); grid250 par4 old 84-87 -> new
+71-87 ms.
+
+* 06:00 :session-end:checkpoint:
+Session-end: bench run (synthetic only, all pass), decisions.md entry,
+CHANGELOG Unreleased entry, checkpoint 2026-08-09-02.md, worktree
+cleanup. Follow-ups recorded: validate on real POUNCE problems at 14
+threads (heaptrack should show the 1.8M-spawn stack gone), suggestion-3
+collect() temporaries re-profile, chainW anomaly if it ever appears on
+a real workload.

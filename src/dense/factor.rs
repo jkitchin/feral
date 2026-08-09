@@ -718,10 +718,19 @@ pub const INTRAFRONT_MIN_AREA: usize = 256 * 128;
 /// scheduling). Read once per parallel dispatch — a relaxed env read is
 /// negligible beside the front's factor cost.
 fn intrafront_min_area() -> usize {
-    std::env::var("FERAL_INTRAFRONT_MIN_AREA")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(INTRAFRONT_MIN_AREA)
+    // Cached: this is read on the per-panel dispatch path, and an
+    // `env::var` lookup there is pure fixed cost on small fronts (issue
+    // #148 review measured the per-panel env reads at ~1-2% on n=128
+    // fronts). Tuning knobs are set before the process starts, so a
+    // one-shot read is the right semantics.
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("FERAL_INTRAFRONT_MIN_AREA")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(INTRAFRONT_MIN_AREA)
+    })
 }
 
 /// Issue #99 Lever 1 — shape-aware intra-front trigger for *tall, thin*
@@ -3620,10 +3629,14 @@ fn apply_schur_panel_range(
 /// relaxed env read, negligible beside the trailing-update cost).
 #[inline]
 fn packed_schur_enabled() -> bool {
-    !matches!(
-        std::env::var("FERAL_PACKED_SCHUR").as_deref(),
-        Ok("0") | Ok("off") | Ok("false") | Ok("no")
-    )
+    // Cached (per-panel path; see `intrafront_min_area`).
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        !matches!(
+            std::env::var("FERAL_PACKED_SCHUR").as_deref(),
+            Ok("0") | Ok("off") | Ok("false") | Ok("no")
+        )
+    })
 }
 
 /// Whether the packed trailing update runs the explicit-SIMD pulp tile
@@ -3634,10 +3647,14 @@ fn packed_schur_enabled() -> bool {
 /// way — same per-element fold, lane width free.
 #[inline]
 fn packed_simd_enabled() -> bool {
-    !matches!(
-        std::env::var("FERAL_PACKED_SIMD").as_deref(),
-        Ok("0") | Ok("off") | Ok("false") | Ok("no")
-    )
+    // Cached (per-panel path; see `intrafront_min_area`).
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        !matches!(
+            std::env::var("FERAL_PACKED_SIMD").as_deref(),
+            Ok("0") | Ok("off") | Ok("false") | Ok("no")
+        )
+    })
 }
 
 /// Packed, register-tiled equivalent of [`apply_schur_panel_range`]
@@ -3846,10 +3863,15 @@ fn apply_schur_panel_range_packed_impl(
     // pending).
     const PACKED_SIMD_MIN_WORK: usize = 1024;
     let simd_work = n_elim.saturating_mul(nrow - col_start).saturating_mul(ncol);
-    let min_work = std::env::var("FERAL_PACKED_SIMD_MIN_WORK")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(PACKED_SIMD_MIN_WORK);
+    // Cached: this ran an `env::var` lookup AND a string parse on every
+    // panel before issue #148's review caught it.
+    static MIN_WORK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let min_work = *MIN_WORK.get_or_init(|| {
+        std::env::var("FERAL_PACKED_SIMD_MIN_WORK")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(PACKED_SIMD_MIN_WORK)
+    });
     if use_simd && simd_work >= min_work {
         if fma {
             schur_kernel::packed_schur_tiles_fma(

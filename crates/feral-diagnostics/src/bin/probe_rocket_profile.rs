@@ -91,7 +91,7 @@ fn factor_with_profile(label: &str, csc: &feral::CscMatrix) {
         "  prologue={:.1} ms  epilogue={:.1} ms  loop={:.1} ms  total={:.1} ms  overhead={:.1}%",
         report.prologue_us as f64 / 1e3,
         report.epilogue_us as f64 / 1e3,
-        report.loop_us as f64 / 1e3,
+        report.loop_us() as f64 / 1e3,
         report.total_us as f64 / 1e3,
         report.overhead_pct,
     );
@@ -105,14 +105,14 @@ fn factor_with_profile(label: &str, csc: &feral::CscMatrix) {
             "    nrow {:>7}  {:>6}  {:>8.1}  {:>5.1}%  {:>8.1}",
             b.range,
             b.count,
-            b.sum_us as f64 / 1e3,
+            b.sum_us() as f64 / 1e3,
             b.pct_of_total,
-            b.avg_us,
+            b.avg_us(),
         );
     }
     let top: Vec<_> = {
         let mut v: Vec<_> = prof.timings().iter().collect();
-        v.sort_by_key(|t| std::cmp::Reverse(t.us));
+        v.sort_by_key(|t| std::cmp::Reverse(t.us()));
         v.into_iter().take(5).collect()
     };
     println!("  top 5 supernodes by time:");
@@ -122,7 +122,7 @@ fn factor_with_profile(label: &str, csc: &feral::CscMatrix) {
             t.snode_idx,
             t.nrow,
             t.ncol,
-            t.us as f64 / 1e3,
+            t.us() as f64 / 1e3,
         );
     }
 }

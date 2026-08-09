@@ -70,7 +70,7 @@ fn run(
         report.n_supernodes,
         factors.factor_nnz(),
         report.total_us,
-        report.loop_us,
+        report.loop_us(),
         report.prologue_us,
         report.epilogue_us,
     );
@@ -85,7 +85,11 @@ fn run(
     for b in &report.buckets {
         println!(
             "  {:<10} {:>8} {:>10} {:>7.1}% {:>8.1}",
-            b.range, b.count, b.sum_us, b.pct_of_total, b.avg_us
+            b.range,
+            b.count,
+            b.sum_us(),
+            b.pct_of_total,
+            b.avg_us()
         );
     }
 
@@ -94,11 +98,11 @@ fn run(
     let mut ncol_us = vec![0u64; NCOL_BUCKETS.len()];
     let mut sum_us_all = 0u64;
     for t in prof.timings() {
-        sum_us_all += t.us;
+        sum_us_all += t.us();
         for (i, &(_, lo, hi)) in NCOL_BUCKETS.iter().enumerate() {
             if t.ncol >= lo && t.ncol <= hi {
                 ncol_counts[i] += 1;
-                ncol_us[i] += t.us;
+                ncol_us[i] += t.us();
                 break;
             }
         }
@@ -127,7 +131,7 @@ fn run(
 
     // Top 5 hottest supernodes
     let mut sorted: Vec<_> = prof.timings().iter().collect();
-    sorted.sort_by_key(|t| std::cmp::Reverse(t.us));
+    sorted.sort_by_key(|t| std::cmp::Reverse(t.us()));
     println!("\ntop 5 hottest supernodes:");
     println!(
         "  {:>5} {:>6} {:>5} {:>5} {:>10}",
@@ -136,13 +140,17 @@ fn run(
     for (rank, t) in sorted.iter().take(5).enumerate() {
         println!(
             "  {:>5} {:>6} {:>5} {:>5} {:>10}",
-            rank, t.snode_idx, t.nrow, t.ncol, t.us
+            rank,
+            t.snode_idx,
+            t.nrow,
+            t.ncol,
+            t.us()
         );
     }
 
     // Cumulative-by-ncol: how much wall time comes from ncol<=K?
     let mut sorted_us_by_ncol: Vec<(usize, u64)> =
-        prof.timings().iter().map(|t| (t.ncol, t.us)).collect();
+        prof.timings().iter().map(|t| (t.ncol, t.us())).collect();
     sorted_us_by_ncol.sort_by_key(|&(c, _)| c);
     let mut cum_count = 0usize;
     let mut cum_us = 0u64;
