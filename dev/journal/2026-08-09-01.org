@@ -79,3 +79,36 @@ on M-series; NEON baseline makes with_simd(NEON) harmless) - flagged
 for M-series re-eval anyway. Bits identical by construction (same lane
 ops, only codegen context changes): golden_bits digests unchanged,
 blocked_ldlt + lib suites green. Re-measuring.
+
+* 04:10 :stage1:gate:anomaly:measurement:
+Post-Stage-1 fixture sweep showed hahn1/avion2 warm medians +15% with
+the SIMD tile kernel while minima stayed equal. Root-caused as far as
+this container allows: (1) all packed calls on those fixtures are
+degenerate (hahn1: nrow=10 ncol=1 n_elim=7, ~1 call/iter, 112-206
+ns/call vs 10 ns inline scalar - examples/bench_packed_tiny); (2) a
+temporary cumulative timer INSIDE the packed impl measured only ~92 us
+total difference across 1000 iterations, i.e. ~0.1% of the ~120
+us/iter median shift - the changed code does not contain the cost; (3)
+hypotheses tested and refuted: AVX frequency-license transitions (tiny
+ymm burst + scalar busywork combo shows NO inflation), missing
+vzeroupper (present at all imp exits), env-var read cost (set-vs-unset
+equal). The inflation is a warm-loop interaction artifact of this
+container correlated with executing the outlined kernel call; no perf
+counters available here to chase further.
+Resolution independent of mechanism: work gate. Tiny panels gain
+nothing from the SIMD call, so route n_elim*rowspan*ncol <
+PACKED_SIMD_MIN_WORK=1024 to the inline scalar walk
+(FERAL_PACKED_SIMD_MIN_WORK overrides for M-series retune). Gate is
+bit-neutral (both sides byte-exact, all parity+golden tests green).
+After gate: hahn1 754-770 us (scalar-tiles level), avion2 36 us
+(better than session baseline 39), dense_front 2955 nofma-serial
+1556 ms (win intact, 2.7x vs baseline 4236). Stage 1 ACCEPTED.
+
+* 04:15 :pounce:context:small-front:
+User pointed to jkitchin/pounce#552: pounce-vs-Ipopt benchmark report.
+Relevant: FERAL factorization 3.5-4.8x slower than MA27/MA57 on
+long-horizon CHAIN-structured KKTs ("very long chain of tiny blocks",
+hicks N=1200: 0.307 s vs MA27 0.092 s), localized by them to the
+numeric kernel, not ordering/heuristics. Corroborates the Stage 3
+target (small-front eager path) and argues for adding a
+block-tridiagonal chain fixture to the probe set.

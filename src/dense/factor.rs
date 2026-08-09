@@ -3769,7 +3769,23 @@ fn apply_schur_panel_range_packed_impl(
     // `schur_kernel::packed_schur_tiles_nofma` for the bit-exactness
     // contract), scalar reference tile loop below via
     // `FERAL_PACKED_SIMD=0`. Byte-exact either way.
-    if use_simd {
+    //
+    // Work gate: a panel's tile walk touches `rowspan × ncol` dst
+    // elements over `n_elim` pivots. Below ~1k multiply-subtracts the
+    // dispatch boundary (outlined `#[target_feature]` call, ~100-200 ns)
+    // costs more than the inline scalar walk (~10 ns on a degenerate
+    // HAHN1-shaped panel, `examples/bench_packed_tiny`), so tiny panels
+    // stay on the scalar walk. The gate is bit-neutral — both sides are
+    // byte-exact — and `FERAL_PACKED_SIMD_MIN_WORK` overrides the
+    // threshold for per-arch retuning (aarch64 M-series re-measure
+    // pending).
+    const PACKED_SIMD_MIN_WORK: usize = 1024;
+    let simd_work = n_elim.saturating_mul(nrow - col_start).saturating_mul(ncol);
+    let min_work = std::env::var("FERAL_PACKED_SIMD_MIN_WORK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(PACKED_SIMD_MIN_WORK);
+    if use_simd && simd_work >= min_work {
         if fma {
             schur_kernel::packed_schur_tiles_fma(
                 block,

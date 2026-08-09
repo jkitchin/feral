@@ -82,6 +82,26 @@ fn main() {
     let symbolic_reran = solver.symbolic_call_count() != calls_before;
     let inertia_stable = solver.inertia().cloned() == baseline_inertia;
 
+    // Optional full distribution dump (session 2026-08-09): median-vs-min
+    // gaps on warm loops turned out to hide bimodal iteration mixtures;
+    // the histogram disambiguates steady-state cost from periodic events.
+    if std::env::var("FERAL_PROBE_DUMP_WALLS").is_ok() {
+        let mut sorted = walls.clone();
+        sorted.sort_unstable();
+        let pct = |p: usize| sorted[(sorted.len() - 1) * p / 100];
+        eprintln!(
+            "walls_us p0={} p10={} p25={} p50={} p75={} p90={} p99={} p100={}",
+            pct(0),
+            pct(10),
+            pct(25),
+            pct(50),
+            pct(75),
+            pct(90),
+            pct(99),
+            pct(100)
+        );
+    }
+
     println!(
         "matrix={} n={} nnz={} driver={} iters={} min_us={} median_us={} \
          symbolic_reran={} inertia_stable={} inertia={}",
