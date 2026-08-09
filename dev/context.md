@@ -1,116 +1,116 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-09T15:24:26Z
+Generated: 2026-08-09T15:36:26Z
 
 ## Latest Session
-File: dev/sessions/2026-08-09-02.md
+File: dev/sessions/2026-08-09-04.md
 ```
-# Session 2026-08-09-02
+# Session 2026-08-09-04
 
 ## Goal
 
-Issue #148: the default parallel multifrontal driver is slower than
-serial on 3 of 4 POUNCE problems (~1.8M `scope.spawn` boxed-closure
-allocations per solve, glibc arena contention growing with thread
-count). Fix via the issue's suggested directions 1+2: work-based task
-coarsening and a serial fallback. Environment: x86_64 4-core container
-(issue reproduces at 2-4 threads); POUNCE `.nl` problems unavailable —
-synthetic proxies (chain / grid / banded-QP KKT) built and measured
-with interleaved old-vs-new binaries (git worktree at e8e1c5a).
+Take PR #151 (the 0.15.0 version bump, no code changes) from "green" to
+"shipped": verify CI, merge, tag, publish the GitHub Release, and work
+the remaining items in `dev/plans/release-0.15.0-checklist.md` §3.
+Session 03 deliberately stopped short of publishing because
+`release.yml` fires on `release: published` and pushes to crates.io,
+which cannot be un-published.
 
 ## Accomplished
 
-1. **Reproduction** (research note): chain12000 parallel never beats
-   serial; sparseqp proxy degrades monotonically with threads; grid250
-   is the one winner but pays +19% single-thread driver overhead.
-2. **TaskPlan coarsening (7814bfe)**: one spawn per subtree task —
-   boundaries at tree roots and at children of nodes with >= 2 sibling
-   subtrees each >= `FERAL_PAR_TASK_MIN_FLOPS` (default 1e6); lone big
-   children continue inline (chains collapse to one task; the naive
-   subtree>=cutoff rule produced 6319 tasks of 6564 supernodes on the
-   banded-QP proxy, the sibling rule 1). Owned nodes factored serially
-   in postorder inside their task; parent-task trampoline via
-   task-children pending counters; `seeds < 2` delegates to the
-   sequential driver (intrafront parallelism kept on).
-   `FERAL_DEBUG_TASK_PLAN=1` dumps plan shapes.
-3. **Byte-exactness**: scheduling-only; new `tests/task_plan_parity.rs`
-   pins fine (cutoff=1: 153 tasks/132 seeds), default, and fallback
-   configurations bit-identical to the sequential driver; 84/84 test
-   binaries green.
-4. **chainW anomaly investigated and documented**: the old per-node
-   driver oddly beat both sequential drivers ~20% on one wide-block
-   chain proxy; AtomicLockStats telemetry located the difference
-   *inside* `factor_one_supernode` (912 vs 1276 ms per 9 factors) —
-   not spawn/lock overhead, not intrafront, not tree parallelism.
-   Unexplainable further without perf/heaptrack (absent here);
-   accepted as a proxy quirk since the issue's real chains lose under
-   per-node spawning. Full analysis in the research note.
+1. **Verified #151 green before merging.** All checks pass: `check`
+   (1m51s), `stress-smoke` (42s), and wheel tests on py3.10/3.12/3.13
+   (56-60s). `mergeStateStatus: CLEAN`. The release-gated jobs showed
+   `skipping`, which is correct for a non-release event.
+2. **Merged as `808babb`** (squash, branch deleted), then re-verified on
+   the merged tree rather than trusting the PR: `Cargo.toml` = 0.15.0,
+   and a `0.14.0` grep across all five version-bearing files is empty.
+3. **Waited for main CI on the merge commit** before tagging, since the
+   squash produced a SHA no CI run had covered. CI, Python wheels and
+   Pages all success on `808babb`.
+4. **Tagged `v0.15.0` and published the GitHub Release.** Both gated
+   workflows fired and passed:
+   - Release job: tag/`Cargo.toml` version check PASS, `cargo test`
+     PASS, `cargo publish` PASS for all seven crates in dependency
+     order (feral-ordering-core, -amd, -amf, -metis, -scotch, -kahip,
+     feral).
+   - Python wheels job: sdist + four wheels, PyPI publish 23s, `uv pip`
+     smoke test PASS.
+5. **Verified against the registries directly**, not just workflow exit
+   codes: crates.io `feral` max_version = **0.15.0**; PyPI
+   **`feral-solver` 0.15.0** with macosx universal2,
+   manylinux_2_17_x86_64, manylinux_2_28_aarch64, win_amd64, and the
+   sdist.
+6. **Notified pounce** ([pounce#552 comment 5232312068](https://github.com/jkitchin/pounce/issues/552#issuecomment-5232312068)):
+   what changed in the two strands that bear on that report, that
+   defaults are bit-identical to 0.14.0 so nothing numerical should
+   move, and the pickup instructions — bump the pin at
+   `../pounce/Cargo.toml:127` from `feral = { version = "0.14.0" }` to
+   `"0.15.0"` and drop any uncommitted `[patch.crates-io]` git-rev
+   redirect. The first attempt was denied by the permission classifier;
+   posted after the maintainer granted permission.
+7. Checked off `release-0.15.0-checklist.md` §3 in full.
 
-## Benchmark Results
+## Not done
 
-Session bench (corpus absent): synthetic set + regression fixtures all
-inertia/residual pass; oracle partitions N/A in container.
+- Nothing outstanding from the release checklist. §3 is complete.
 
-Interleaved old-vs-new (warm medians, default parallel config):
-
-| proxy | old par@4 | new par@4 | old serial | new serial |
-|---|---:|---:|---:|---:|
 ```
 
 ## Git Status
 ```
+1227765 docs: session checkpoint 2026-08-09-04 (ship 0.15.0)
 808babb release: feral v0.15.0 (#151)
 fad5670 perf(parallel): task-per-subtree coarsening + profiler nanoseconds (#150)
 e8e1c5a perf(kernel): explicit SIMD packed trailing update + x86 pulp dispatch fix (#149)
 6589570 docs: session checkpoint 2026-07-11-02 (issue triage, #127, release 0.14.0) (#146)
-c05eb77 release: feral v0.14.0 (#145)
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test scaling::tests::auto_solves_below_guard_matrix_correctly ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 409 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 5.72s
+test result: ok. 409 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 14.10s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-04.md)
 
 
-Session bench (corpus absent): synthetic set + regression fixtures all
-inertia/residual pass; oracle partitions N/A in container.
+**Not run this session, deliberately.** Zero lines of source changed:
+`808babb` differs from `fad5670` only in six version strings and a
+CHANGELOG heading, so a corpus run would re-measure identical code. The
+numbers for this code stand from session 03 (x86_64) and the aarch64
+revalidation at `6fd12d4`:
 
-Interleaved old-vs-new (warm medians, default parallel config):
+Corpus: 156,929 matrices
+  dense inertia   100.0%
+  sparse inertia  100.0%
+  Phase 2.8.1 exit partitions: 4/4 PASS
+  worst residuals: 2.46e-1 POLAK6_0021, 2.94e-4 ERRINBAR_0824
+                   (identical to the x86_64 baseline to the digit)
+  tests/golden_bits.rs: x86-recorded digests reproduce on M-series
 
-| proxy | old par@4 | new par@4 | old serial | new serial |
-|---|---:|---:|---:|---:|
-| sparseqpL (issue signature) | 82.4-88.0 ms | 71.7-76.3 ms | 69.9-74.6 | 70.7-72.2 |
-| grid250 | 78.8-92.7 ms | 71.4-73.4 ms | 123.0-128.7 | 122.0-128.0 |
-| chainW | 186.7-216.6 ms | 221.1-223.9 ms | 228.1-229.5 | 214.9-215.7 |
-| chain12000 | 12.0-12.5 ms | 11.9-12.5 ms | 11.3-11.7 | 10.9-11.0 |
-
-Spawn reduction: grid250 11171 → 51 tasks; chains → 1 (sequential
-path). Small fixtures in the noise band (−6%..+4%). The chainW par@4
-old-vs-new gap is the documented anomaly above (old-par was beating
-serial there; new ≈ serial).
+Test evidence for the exact published SHA is the release job's own
+`cargo test`, which ran against the `v0.15.0` tag checkout and passed.
 
 ```
 

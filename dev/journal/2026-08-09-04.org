@@ -81,3 +81,19 @@ Noted a protocol gap, not caused by this session: `dev/sessions/`
 has no `2026-08-09-03.md`. Session 03 wrote its journal (merged in
 #151) but ended at the handoff without a checkpoint file. Recording it
 here instead of back-filling a checkpoint I did not live through.
+
+* 16:02 :release:pounce:unblocked:
+Maintainer granted the permission; comment posted to pounce#552 as
+comment 5232312068, so the 15:38 blocker is cleared. Content: the two
+strands that bear on that report (x86 pulp dispatch never inlining the
+AVX intrinsics, ~10x kernel slowdown, dense front n=2955 4.24 s ->
+1.52 s, aarch64 FMA 2.94x; task-per-subtree removing ~1.8M allocations
+per solve on exactly the chain-structured KKTs the ODE control models
+produce, twelve of twelve paired arms won), the fact that defaults are
+bit-identical so no solve trajectory should move, and the pickup
+instruction — one-line pin bump plus dropping any uncommitted
+[patch.crates-io] redirect. Flagged the chain-structured models as the
+ones to re-run first, since that is both where the Harwell gap was
+widest and where the coarsening lands hardest.
+
+Release checklist §3 is now complete: 0.15.0 shipped and announced.

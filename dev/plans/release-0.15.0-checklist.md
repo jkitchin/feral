@@ -131,11 +131,14 @@ change `PAR_MIN_SEEDS` and record it in decisions.md.
       dependency order); PyPI `feral-solver 0.15.0` live with four
       wheels (macOS universal2, manylinux x86_64, manylinux aarch64,
       win_amd64) plus the sdist. `uv pip` smoke test passed.
-- [ ] Notify pounce (issue #148 / pounce#552) so the factorization
-      comparison can be re-run against a released feral. **Comment
-      drafted but not posted** — the tool call was blocked by the
-      permission classifier, so this needs a human to post it or to
-      grant the permission.
+- [x] Notify pounce (issue #148 / pounce#552) so the factorization
+      comparison can be re-run against a released feral. Posted as
+      [pounce#552 comment 5232312068](https://github.com/jkitchin/pounce/issues/552#issuecomment-5232312068):
+      what changed, that defaults are bit-identical, and the one-line
+      pin bump at `Cargo.toml:127` plus dropping any uncommitted
+      `[patch.crates-io]` redirect.
+
+**§3 complete. 0.15.0 is fully shipped and announced.**
 
 ## 4. After the release — the real next round
 
