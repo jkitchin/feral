@@ -1,0 +1,39 @@
+#+TITLE: Session 2026-08-09-04 — scaling warm-start (post-0.15.0 item 1)
+#+DATE: 2026-08-09
+
+* 18:00 :orient:scaling:warm-start:
+Goal: the top post-release item. Reviewer's profile on six real KKT
+matrices (PR #150): the WARM prologue is 15-39% of factorization and
+Knight-Ruiz equilibration is 63-81% of that — re-derived from scratch on
+every call. On rocket_12800 scaling alone is 34% of the whole factor.
+Crucially they showed the prologue DOES warm for everything else
+(permute collapses 4443->539 us on clnlbeam, 25647->1584 on dtoc2 across
+calls 0->2) while scaling stays flat (3909 / 19850 us). Ceiling measured
+by POUNCE_FERAL_SCALING=none: clnlbeam 34.89->30.98 ms (-11%), dtoc2
+121.93->98.04 (-20%).
+CONSTRAINT: unlike everything in 0.15.0, this CHANGES NUMERICAL OUTPUT —
+different scaling => different pivots => different factors. Not
+byte-exact, so the golden_bits/parity apparatus does NOT gate it; the
+gate is a full corpus run (inertia 100% + Phase 2.8.1 partitions +
+residuals), which this container lacks. Plan accordingly: design +
+implement + local tests here, hand off corpus validation.
+
+* 18:45 :scaling:warm-start:falsified:convergence:
+Built examples/probe_kr_warmstart.rs to measure the headroom BEFORE
+implementing. Result: warm-start gives ZERO iteration reduction on 6/6
+fixtures (2->2 or 10->10). Diagnosis from the per-iteration trace:
+convergence is clean linear at ratio ~1/2 (Ruiz ∞-norm equilibration's
+known rate), and at the max_iter=10 cap max_dev is still ~1.4e-2 vs
+tol=1e-8 — ~30 iterations would be needed. The tolerance is unreachable
+by construction, so the loop ALWAYS runs 10 passes on the hard class and
+no starting point can reduce a fixed iteration count.
+4 of 6 fixtures hit the cap, contradicting the code comment ("a few
+pathological ones need all 10") — they are truncated, not converged.
+Consequence: the reviewer's item (3) as scoped does not exist as a free
+win. Cheapening scaling means fewer passes, which is a conditioning
+trade: cap 10 -> 5 takes max_dev 1.4e-2 -> 3.7e-1 (26x worse) for maybe
+5-15% of factor time. Recorded in tried-and-rejected + a research note
+with four ranked alternatives (do nothing / warm-start for QUALITY as a
+continued iteration across the IPM / faster-converging algorithm /
+lower cap). Not implementing any without a corpus gate — all of them
+change numerics, and golden_bits does NOT cover this.

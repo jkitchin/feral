@@ -1,11 +1,11 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-09T16:19:42Z
+Generated: 2026-08-09T16:26:16Z
 
 ## Latest Session
-File: dev/sessions/2026-08-09-03.md
+File: dev/sessions/2026-08-09-04.md
 ```
-# Session 2026-08-09-03
+# Session 2026-08-09-04
 
 ## Goal
 
@@ -59,11 +59,11 @@ Adjacent sweep over every rayon entry point reachable from `Solver`:
 
 ## Git Status
 ```
+6c87a0e docs: session checkpoint 2026-08-09-03 (issue #154 review + implementation)
+4f2fad6 fix(solver): derive use_parallel from the platform; fall back to sequential when the pool fails
 808babb release: feral v0.15.0 (#151)
 fad5670 perf(parallel): task-per-subtree coarsening + profiler nanoseconds (#150)
 e8e1c5a perf(kernel): explicit SIMD packed trailing update + x86 pulp dispatch fix (#149)
-6589570 docs: session checkpoint 2026-07-11-02 (issue triage, #127, release 0.14.0) (#146)
-c05eb77 release: feral v0.14.0 (#145)
 ```
 
 ## Test Status
@@ -86,13 +86,13 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 409 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.13s
+test result: ok. 411 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.12s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-03.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-04.md)
 
 
 No usable perf signal this session: the benchmark corpus is not present in
@@ -155,26 +155,26 @@ is a CPU spin, and occurs inside `pounce_load` — parsing, upstream of
 feral entirely.
 
 ## Recent Tried-and-Rejected
-plain `for i in j..n { a[j*n+i] -= a[k*n+i]*alpha }` loops are
-textbook-autovectorizable, and the eager path's remaining time is
-pivot search + memory traffic, not multiply-subtract throughput.
-Explicit lanes duplicated what LLVM already did. This matches the
-2026-05-16 finding (pulp == scalar == manual unroll at lengths 3..128)
-at the whole-front scale.
+`nemin=8`, MEYER3NE 83× at `nemin=4`), which is what makes it a property
+of the direction rather than of this rule.
 
-**What was kept.** The de-duplication refactor (shared scalar
-`rank1_scale_update_argmax`, byte-identical, golden digests unchanged)
-stays; the pulp kernel, its gate/env var, the dedicated parity test,
-and the A/B example were removed.
+**Why rejected.** "Correctness before performance, always" is a hard
+constraint. 2–7% of factor time and 11–45% of fill does not buy seven
+digits of residual. Neither my pre-registered criterion nor the queue
+item thought to check the axis that decided it — recorded here because
+the next person to have this idea will not think to check it either.
 
-**Lesson.** The small-front/MA57 gap is NOT lane width in the eager
-update. Remaining suspects, in evidence order: per-front fixed
-overhead (assembly/scatter/build-row, 8.8-14.8% on the small
-fixtures), pivot-search scans, `scalar_pivot_step` in blocked fronts,
-and the delayed-pivot cascade (per-factor-cost-cluster mechanism A).
-Any retry of eager-path SIMD must first show a front-level profile
-where the update loops are >30% of eager time AND not already
-vectorized in the disassembly.
+The knob stays in-tree defaulting to `None` (bit-identical default path)
+as the reproduction apparatus, with the accuracy result in its doc
+comment. Research note:
+`dev/research/amalgamation-cost-model-2026-08-09.md`.
+
+**Also redirects the target.** pounce#552's re-measurement against a
+released 0.15.0 (comment 5232409020) shows clnlbeam more than halved
+(8.05× → 3.54× vs MA57) and **no longer the worst case** — `dtoc1nd` is,
+at 3.77×, and it is a dense-front matrix (nnz/dim 23.0, fronts of 33–64
+columns). Amalgamation is a chain-KKT lever aimed at a problem that has
+largely receded.
 
 ## Source Files
 ```
