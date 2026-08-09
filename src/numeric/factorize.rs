@@ -3137,15 +3137,16 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
     // per TASK, not per supernode — the per-supernode graph boxed ~1.8M
     // closures per POUNCE sparseqp solve and lost to the sequential
     // driver on chain-shaped trees). When the resulting task graph has
-    // no initial parallelism (fewer than two seed tasks), the tree is
-    // an effective chain of tasks: delegate to the sequential driver
-    // outright, keeping `intrafront_parallel = true` so wide fronts
+    // fewer than `par_min_seeds()` seed tasks the tree offers too
+    // little initial parallelism to pay for the pool: delegate to the
+    // sequential driver outright, keeping `intrafront_parallel = true`
+    // so wide fronts
     // still fork internally (Lever 1.1). Scheduling-only either way —
     // per-supernode arithmetic and extend-add child order are
     // untouched, so factors are byte-identical. See
     // dev/research/issue-148-parallel-task-granularity.md.
     let plan = build_task_plan(symbolic);
-    if plan.seeds.len() < 2 {
+    if plan.seeds.len() < par_min_seeds() {
         // No initial task parallelism (chain-shaped task graph): the
         // scope/pool machinery is pure overhead, so run the sequential
         // driver — with `intrafront_parallel` still on, so wide fronts
@@ -3381,6 +3382,38 @@ pub fn factorize_multifrontal_supernodal_parallel_with_workspace(
 /// retuning. See dev/research/issue-148-parallel-task-granularity.md.
 pub const PAR_TASK_MIN_FLOPS: u64 = 1_000_000;
 
+/// Minimum number of independent seed tasks required before the
+/// rayon task graph is used at all (issue #148). Below this the tree
+/// offers too little initial parallelism to pay for the pool, and the
+/// driver delegates to the sequential path — which keeps
+/// `intrafront_parallel = true`, so wide fronts still fork internally.
+///
+/// Default 2 (delegate only when there is *no* initial parallelism).
+/// This is deliberately conservative and is **known to be too low**:
+/// on six real KKT matrices the sequential driver beat the *tuned*
+/// parallel driver on four of them and the default pool on five, by up
+/// to 1.99× (issue #148, 2026-08-09 review). Raising it trades away
+/// genuine-but-small parallel wins for a large win on chain-shaped
+/// trees. `FERAL_PAR_MIN_SEEDS` overrides it so the threshold can be
+/// calibrated empirically on real hardware and real matrices without a
+/// rebuild; a value of 0 or 1 restores "always use the task graph".
+///
+/// Scheduling-only: factors are byte-identical at every setting
+/// (`tests/task_plan_parity.rs`).
+pub const PAR_MIN_SEEDS: usize = 2;
+
+/// Deliberately NOT cached in a `OnceLock`: this is read once per
+/// factorization (not per panel, unlike the dense-kernel knobs), so
+/// caching buys nothing and would prevent in-process calibration and
+/// the parity sweep in `tests/task_plan_parity.rs`.
+#[inline]
+fn par_min_seeds() -> usize {
+    std::env::var("FERAL_PAR_MIN_SEEDS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(PAR_MIN_SEEDS)
+}
+
 #[inline]
 fn par_task_min_flops() -> u64 {
     std::env::var("FERAL_PAR_TASK_MIN_FLOPS")
@@ -3514,11 +3547,12 @@ fn build_task_plan(symbolic: &SymbolicFactorization) -> TaskPlan {
     if std::env::var("FERAL_DEBUG_TASK_PLAN").is_ok() {
         let n_task = task_root.iter().filter(|&&b| b).count();
         eprintln!(
-            "task_plan: n_snodes={} n_tasks={} seeds={} cutoff={}",
+            "task_plan: n_snodes={} n_tasks={} seeds={} cutoff={} min_seeds={}",
             n_snodes,
             n_task,
             seeds.len(),
-            cutoff
+            cutoff,
+            par_min_seeds()
         );
     }
 

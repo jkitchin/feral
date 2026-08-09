@@ -119,4 +119,20 @@ fn task_coarsened_parallel_is_byte_identical_to_serial() {
         coarse, reference,
         "serial-fallback path diverged from the sequential driver"
     );
+
+    // `FERAL_PAR_MIN_SEEDS` sweep (issue #148 calibration knob): the
+    // threshold decides how much initial parallelism is required before
+    // the task graph is used at all. 0/1 force the task graph on; a huge
+    // value forces the sequential delegation. Every setting must produce
+    // identical factors — the knob is scheduling-only, so it can be
+    // calibrated for speed on real hardware with no numerical risk.
+    for seeds in ["0", "1", "2", "4", "64", "18446744073709551615"] {
+        std::env::set_var("FERAL_PAR_MIN_SEEDS", seeds);
+        let swept = factor_bits(&matrix, true);
+        std::env::remove_var("FERAL_PAR_MIN_SEEDS");
+        assert_eq!(
+            swept, reference,
+            "FERAL_PAR_MIN_SEEDS={seeds} diverged from the sequential driver"
+        );
+    }
 }

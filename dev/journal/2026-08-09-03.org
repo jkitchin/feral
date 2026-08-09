@@ -111,3 +111,31 @@ clippy errors there are pre-existing pyo3 create_exception! gil-refs
 cfg noise in src/errors.rs (untouched, and not gated by the wheel job).
 Lesson for the checklist: when a public type changes, build python/
 explicitly.
+
+* 15:40 :issue-148:calibration-knob:release-prep:
+Scoped the "one more optimization" question against the evidence and
+landed the single zero-risk item: FERAL_PAR_MIN_SEEDS makes the
+serial-fallback threshold (previously hardcoded seeds<2) tunable at
+runtime. Rationale: the reviewer's six real matrices show the default
+is too conservative (serial beat TUNED parallel on 4/6, up to 1.99x on
+clnlbeam), but calibrating it here would mean tuning on synthetics -
+which already burned this session once (chainW). Exposing the knob
+converts a guess I cannot validate into an experiment they can run on
+real hardware.
+Deliberately NOT OnceLock-cached (read once per factorization, unlike
+the dense-kernel knobs) so it is testable and calibratable in-process.
+tests/task_plan_parity.rs now sweeps 0/1/2/4/64/u64::MAX and asserts
+byte-identity at every setting - the knob is scheduling-only, zero
+numerical risk. Routing verified: grid250 (26 seeds, wide tree)
+min_seeds=2 -> 66.3 ms parallel, min_seeds=64 -> 122.7 ms sequential
+(1.85x), so the knob demonstrably routes both ways.
+Explicitly deferred past the release: scaling warm-start (11-20%
+ceiling but CHANGES NUMERICS) and amalgamation nemin (changes fill +
+numerics). Both need a corpus run this container does not have; rushing
+either into a 2-day release risks an inertia regression.
+Wrote dev/plans/release-0.15.0-checklist.md: aarch64 revalidation gates
+the release (golden_bits digests are the cross-arch bit-identity proof;
+corpus inertia + Phase 2.8.1 partitions are the MUST gates; the
+packed-SIMD-vs-autovectorized NEON A/B is informational with
+FERAL_PACKED_SIMD=0 as the documented mitigation), optional
+min_seeds calibration, release steps, and the post-release order.
