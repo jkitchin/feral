@@ -127,6 +127,9 @@ name = "bench_schur_micro"
 name = "bench_packed_tiny"
 
 [[example]]
+name = "probe_kr_warmstart"
+
+[[example]]
 name = "bench_qap15"
 
 [[example]]

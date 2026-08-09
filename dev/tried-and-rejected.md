@@ -5018,3 +5018,53 @@ and the delayed-pivot cascade (per-factor-cost-cluster mechanism A).
 Any retry of eager-path SIMD must first show a front-level profile
 where the update loops are >30% of eager time AND not already
 vectorized in the disassembly.
+
+## 2026-08-09 — Warm-starting the ∞-norm scaling iteration across factorizations
+
+**What was tried.** The PR #150 review ranked "scaling warm-start" as the
+largest remaining line item: the warm prologue is 15-39% of
+factorization, ∞-norm equilibration is 63-81% of that, and it is the one
+prologue component that does NOT warm across calls (permute collapses
+4443->539 us on clnlbeam; scaling stays flat at 3909 us). Hypothesis:
+seed `compute_infnorm`'s iteration with the previous factorization's `d`
+instead of `1.0`, since IPM values drift smoothly, and cut the iteration
+count.
+
+**Symptoms / numbers.** Zero iteration reduction on every fixture
+measured (`examples/probe_kr_warmstart.rs`, ±5% value perturbation
+standing in for one IPM step):
+
+| fixture | cold iters | warm iters |
+|---|---:|---:|
+| clnlbeam-like n=100000 | 2 | 2 |
+| grid250 n=62500 | 2 | 2 |
+| chain12000 | 10 | 10 |
+| sparseqpL n=105000 | 10 | 10 |
+| HYDCAR20 | 10 | 10 |
+| twirism1_kkt | 10 | 10 |
+
+**Why it failed.** Two regimes, neither reachable by warm-starting.
+Matrices either converge in 2 iterations already (nothing to save), or
+they hit `max_iter = 10` WITHOUT converging. The per-iteration trace
+shows clean linear convergence at ratio ~1/2 — the known rate for
+Ruiz-style ∞-norm equilibration (`d <- d/sqrt(row_max)`), which is what
+`compute_infnorm` implements despite the "Knight-Ruiz" label. At the cap
+`max_dev` is still ~1.4e-2 against `tol = 1e-8`; reaching that tolerance
+needs ~30 iterations. So the tolerance is unreachable by construction and
+the loop always runs the full 10 passes — a fixed cost that no starting
+point can reduce. The 5e-2 cold-vs-warm spread on the same matrix
+confirms neither run is near a fixed point.
+
+**Correction to the code's own comment.** `compute_infnorm` says "Most
+matrices converge in 2-4 iterations; a few pathological ones need all
+10." On this fixture set 4 of 6 hit the cap, and they do not *need* 10 —
+they are *truncated* at 10 and never converge.
+
+**What was kept.** `examples/probe_kr_warmstart.rs` as the reproducer and
+the convergence-trace tool. No production code changed.
+
+**Lesson.** "Component X doesn't warm across calls" is not by itself
+evidence that a cache would help — the cost may be iteration-count-bound
+rather than starting-point-bound. Measure the iteration count before
+building the cache. Full analysis and the ranked alternatives:
+dev/research/scaling-warm-start-2026-08-09.md.
