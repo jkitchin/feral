@@ -93,3 +93,21 @@ previously invisible). clnlbeam-like tridiagonal n=100000: 23.07 ->
 1.47 us mean = 7.9% of loop - previously half of them were literally 0.
 Confirms the reviewer's finding (c) exactly. clippy clean on both
 crates, 84/84 suites green.
+
+* 15:05 :ci:python-bindings:miss:
+CI RED after be83cdb: 3 "Test wheel" jobs failed. Cause: python/ is a
+SEPARATE cargo workspace (own Cargo.toml/Cargo.lock), so neither
+`cargo build --all-targets` at the root nor the pre-commit hooks
+(which clippy feral + feral-diagnostics only) compile it. My profiler
+rename broke python/src/introspect.rs (b.sum_us, b.avg_us, r.loop_us).
+Genuine process gap on my side - the root-workspace build is NOT a
+sufficient pre-push check when touching public types.
+Fix made purely ADDITIVE at the Python layer since it is a published
+API: kept sum_us/avg_us/loop_us with their exact prior types and
+values (via the new us() accessors), ADDED sum_ns/avg_ns/loop_ns
+carrying full precision. No Python-visible breakage; precision
+available to anyone who wants it. python crate builds clean; the 46
+clippy errors there are pre-existing pyo3 create_exception! gil-refs
+cfg noise in src/errors.rs (untouched, and not gated by the wheel job).
+Lesson for the checklist: when a public type changes, build python/
+explicitly.
