@@ -6022,3 +6022,86 @@ Two decisions from the post-#135 breakage of
    large fetchable SuiteSparse matrices stay ignored. CI additionally
    surfaces every remaining "SKIP:" line in the job summary
    (`.github/workflows/ci.yml`) so skipped guards are visible, not silent.
+
+## 2026-08-09 — x86 pulp dispatch must go through Simd::vectorize (kernel-wide fix)
+
+**Decision.** The x86_64 branches of `dispatch_nofma`/`dispatch_fma`
+(src/dense/schur_kernel.rs) call `pulp::Simd::vectorize(v3, k)` instead
+of `k.with_simd(v3)`. Only `vectorize` wraps the kernel body in V3's
+`#[target_feature(enable = "avx,avx2,fma,…")]` shim; the direct call ran
+every kernel in a baseline-feature codegen context where each AVX
+intrinsic wrapper stayed an outlined function call (objdump: standalone
+`_mm256_mul_pd` symbols called per lane op). The bug was invisible on
+the aarch64 M-series dev machines — NEON is a baseline feature, so
+`with_simd(NEON)` inlines regardless — and has throttled every pulp
+kernel on x86 since Phase 2.4.2. The aarch64 branch is unchanged.
+
+**Evidence.** bench_schur_micro strided kernel on the x86_64 AVX2
+container: 0.45-0.46 → 4.69-7.00 GFLOP/s (~10×). Bit-identical by
+construction (same per-lane instructions; only the inlining context
+changes): golden digests, parity suites, 407 lib tests all unchanged.
+
+**Constraint for future kernels.** Any new pulp entry point on x86 must
+dispatch via `Simd::vectorize` (or `Arch::dispatch`); verify with
+objdump that no `core_arch` thunks appear as call targets.
+
+## 2026-08-09 — Packed trailing update: explicit pulp SIMD tiles + work gate
+
+**Decision.** The packed BLAS-3 trailing update's register-tile walk
+moved from autovectorized-in-theory scalar Rust (factor.rs) into
+`schur_kernel::packed_schur_tiles_{nofma,fma}` — explicit pulp lanes
+over the MR axis, one dispatch per panel, `PACKED_MR=8`/`PACKED_NR=4`
+shared consts. Two escape hatches ship: `FERAL_PACKED_SIMD=0` restores
+the scalar tile walk (kept in-tree as the reference), and panels with
+`n_elim·rowspan·ncol < 1024` (`FERAL_PACKED_SIMD_MIN_WORK` override)
+stay on the scalar walk — the ~100-200 ns dispatch boundary
+(examples/bench_packed_tiny) cannot be amortized by degenerate panels
+(HAHN1's are nrow=10/ncol=1), and un-gated SIMD showed a warm-median
+artifact on such fixtures that the in-kernel timer proved was NOT
+in-kernel cost (journal 2026-08-09 04:10).
+
+**Why.** objdump proved the old tile walk compiled fully scalar on x86
+(ymm=0, packed SSE=0, 187 mulsd/subsd — ~6 GFLOP/s scalar-ILP peak).
+The same move repairs the opt-in FMA path, whose scalar `f64::mul_add`
+lowered to a libm `fma()` call at baseline codegen (~3× slower than
+nofma since packed became default 2026-07-01).
+
+**Bit-exactness.** Per-element chain unchanged (seed-from-C,
+ascending-q fold, mul→sub / fused-2×2 nofma shapes; chained mul_add
+fma shapes); PACKED_MR=8 divides every pulp lane width (scalar, NEON
+f64x2, AVX2 f64x4, AVX-512 f64x8) so no tail exists. Enforced by the
+extended `packed_matches_scalar_reference_bit_for_bit` (SIMD × scalar
+× pool sweep) and the new `tests/golden_bits.rs` hardcoded digests
+(cross-arch tripwire for the next M-series run).
+
+**Evidence (x86_64 AVX2 container, 3-run).** bench_dense_front 2955
+nofma-serial 4236 → 1517-1556 ms (2.7-2.8×, 2.0 → 5.6 GF/s);
+nofma-intrafront 1798 → 637-679 ms (12.7-13.5 GF/s); fma-intrafront
+4214 → 572-609 ms (14-15 GF/s, fastest config); n=512 3.9×. Warm
+fixtures: twirism1 −46%, hydcar20 −26%, sawpath −18%. Small fixtures
+restored to baseline-or-better by the work gate.
+
+**aarch64 status.** NOT yet measured on M-series (this container is
+x86). The structural bit-identity argument plus golden digests
+guarantee correctness there; performance must be re-validated —
+`FERAL_PACKED_SIMD=0` is the one-env-var mitigation if the NEON
+codegen regresses vs the old autovectorized walk.
+
+## 2026-08-09 — Pack-buffer pooling on the serial packed path (issue #128 rest)
+
+**Decision.** `FactorScratch` carries a `PackPool {apack, bpack0,
+bpack1}`; the serial packed dispatch path reuses it (mem::take'd
+around the scratch borrows), the intra-front rayon path keeps
+per-range fresh allocations (a shared pool cannot cross the parallel
+split; multi-slot pooling is on the tried-and-rejected list).
+`bpack0`/`bpack1` re-zero on reuse via `clear()+resize` (their zeros
+are load-bearing for out-of-range column lanes); `apack` skips the
+re-zero only when its length matches (every slot including padding is
+overwritten). Parity test carries a deliberately dirty pool across all
+shapes.
+
+**Evidence (3-run warm medians).** chain1200 (hicks-like
+block-tridiagonal synthetic, added after the pounce#552 chain-KKT
+report) 985 → 847-961 µs (−12%); AVION2 −6%; twirism1 −6%; HYDCAR20
+−4%; VESUVIO −4%; HAHN1 −2%. Byte-exact (dirty-pool parity sweep +
+golden digests unchanged).

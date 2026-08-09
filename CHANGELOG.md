@@ -4,6 +4,36 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — x86 SIMD kernels actually reach AVX2 (session 2026-08-09)
+
+- The x86_64 branches of the pulp dispatch helpers now route through
+  `Simd::vectorize`, which supplies the `#[target_feature]` context the AVX
+  intrinsics need to inline. Previously every pulp kernel on x86 executed its
+  lane ops as outlined function calls (~10× kernel slowdown; invisible on
+  aarch64 where NEON is a baseline feature). Bit-identical results.
+- The packed BLAS-3 trailing update's register-tile walk is now an explicit
+  pulp SIMD kernel (`packed_schur_tiles_{nofma,fma}`), one dispatch per panel.
+  It previously relied on autovectorization that never fired on x86 (fully
+  scalar codegen). Dense-front factor (n=2955): 4.24 s → 1.52 s serial nofma,
+  0.57-0.61 s with intrafront parallelism + opt-in FMA (x86 4-core AVX2
+  container, 3-run). Byte-exact at every SIMD width; enforced by extended
+  parity tests plus new hardcoded golden bit-digests (`tests/golden_bits.rs`).
+- The opt-in FMA path is fast again on x86: the packed kernel's scalar
+  `f64::mul_add` lowered to a libm `fma()` call at baseline codegen (~3×
+  slower than nofma since 0.13.x); pulp's `mul_add_f64s` restores real
+  `vfmadd` through runtime dispatch, making FMA the fastest x86 config.
+- Degenerate panels (fewer than 1024 multiply-subtracts) stay on the inline
+  scalar tile walk — the dispatch boundary costs more than the work there.
+  New env overrides: `FERAL_PACKED_SIMD=0` (restore the scalar tile walk)
+  and `FERAL_PACKED_SIMD_MIN_WORK=<n>` (retune the gate per arch).
+- The packed update's pack buffers are pooled in `FactorScratch` on the
+  serial path (issue #128 rest): warm factor −12% on a chain-structured KKT
+  proxy, −2..6% across the small parity fixtures.
+
+Note: aarch64 (M-series) performance revalidation of the new explicit-SIMD
+packed path is pending; correctness there is guarded by the golden digests,
+and `FERAL_PACKED_SIMD=0` restores the previous behavior if needed.
+
 ## [0.14.0] - 2026-07-11
 
 ### Performance — split the symbolic pipeline for the ordering races (issue #127)

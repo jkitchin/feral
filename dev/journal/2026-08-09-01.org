@@ -143,3 +143,12 @@ loops (shared rank1_scale_update_argmax); removed the kernel, gate,
 env var, parity test, and A/B example. Full entry in
 tried-and-rejected.md. Small-front gap suspects now ranked: per-front
 overhead, pivot scans, scalar_pivot_step, delayed-pivot cascade.
+
+* 07:00 :session-end:checkpoint:
+Session-end protocol: bench run (corpus absent - synthetic + regression
+fixtures, all inertia/residual pass, worst residuals 1.14e-15 dense /
+1.26e-16 sparse), decisions.md x3, tried-and-rejected x1, CHANGELOG
+Unreleased entry, checkpoint dev/sessions/2026-08-09-01.md with the
+aarch64 revalidation list. Stages 4-6 (tile retune, L2 blocking,
+block32 quad) deferred with rationale - need M-series data and fresh
+profiles before more kernel surgery.
