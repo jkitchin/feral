@@ -1,0 +1,19 @@
+#+TITLE: Session 2026-08-09-02 — issue #148: parallel driver slower than serial
+#+DATE: 2026-08-09
+
+* 03:05 :orient:issue-148:parallel:
+Session goal: issue #148 — the default parallel multifrontal driver is
+slower than serial on 3/4 POUNCE problems (sparseqp 3.14x at 14
+threads, monotonic degradation with thread count), with ~1.8M
+scope.spawn boxed-closure allocations per solve (heaptrack), glibc
+arena contention confirmed by mimalloc A/B (masks, does not fix).
+Suggested directions from the issue: (1) work-based spawn cutoff
+(inline small subtrees), (2) serial fallback when the tree lacks
+parallel work, (3) reuse collect() temporaries. Folding in #128's
+"supernode nrow underestimate skews the parallel gate" sub-item.
+Branch restarted from merged main (PR #149 = e8e1c5a).
+Environment: same x86_64 4-core container; issue reproduces already at
+2-4 threads (sparseqp 5675 -> 6858 -> 8222 ms), so 4 cores suffice for
+A/B evidence. POUNCE .nl problems not available here — will build
+synthetic proxies (chain, grid/poisson-like, dense-heavy) and measure
+via perf_probe serial-vs-parallel with RAYON_NUM_THREADS sweeps.
