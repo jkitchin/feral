@@ -1,0 +1,221 @@
+#+TITLE: Session 2026-08-09-08 — PR #157 follow-through on the real corpus
+#+DATE: 2026-08-09
+
+* 15:45 :pr157:orientation:corpus:
+Picked up PR #157 (branch =docs/session-2026-08-09-05=, head 1833768).
+CI green (check + stress-smoke, both x2), no reviews, docs-and-harness
+only. The research note =dev/research/chain-kkt-ma57-gap-2026-08-09.md=
+lists three ordered next steps that need a machine with
+=data/matrices/=: bisect, thread sweep, re-run the gap on the real
+corpus. This machine has it.
+
+Inventory:
+- =data/matrices/kkt-mittelmann/= has clnlbeam, dtoc1nd, dtoc2,
+  marine_1600, rocket_12800. *steering_12800 has no =.mtx=* — only a
+  =steering_12800.solver.log=. The set is five families, not the six
+  the note names.
+- =external_benchmarks/ma57_oracle/ma57_bench= is a prebuilt arm64
+  binary and runs clean.
+- All five bisect commits resolve locally: c05eb77 (0.14.0), e8e1c5a
+  (#149 SIMD), fad5670 (#150 parallel), 808babb (v0.15.0), f7a152a
+  (main).
+- Machine: =Mac16,11=, Apple M4 Pro, 10 performance + 4 efficiency
+  cores. Different from the M2 (=Mac14,2=, 4P+4E) the note was measured
+  on, so this is an independent replication — but still heterogeneous,
+  so the homogeneous-core leg of the E-core hypothesis is not testable
+  here.
+
+* 15:50 :calibration:ma57:surprise:
+One untimed pass of current main and MA57 over the real matrices, to
+size the run. =factor_us=:
+
+| matrix           |      n | feral   | ma57    |
+|------------------+--------+---------+---------|
+| clnlbeam         |  99999 |  38,083 | 278,063 |
+| rocket_12800     |  89601 |  19,387 | 552,194 |
+| marine_1600      |  76807 | 120,462 |  44,303 |
+| dtoc1nd          |   9685 |  11,172 |   5,980 |
+
+The proxy conclusion — "feral slower than MA57 on all five, 1.4x to
+2.4x" — does *not* reproduce here. feral is 7x and 28x faster on the
+two largest. Single shot, not the paired protocol, so not quotable
+yet, but it is the number the note said the proxies could not settle,
+and it points the other way.
+
+Second observation: analysis dominates wall clock on these
+(clnlbeam =analyse_us= 4,593,570 vs =factor_us= 38,083). Run cost is
+set by analysis, ~9.3 s per feral pass over the five, 2.2 s for MA57.
+
+* 15:52 :correctness:dtoc2:singular:
+=dtoc2_0001= and =dtoc2_0002= are singular. feral reports
+=inertia_zero 4= with =rel_res NaN=; MA57 reports =inertia_zero 103=,
+also NaN. Two independent solvers agreeing on rank deficiency means
+the matrix, not the solver. =dtoc2_0000= factors clean
+(=inertia_zero 0=, =rel_res 3.08e-16=) and is what the run uses. Note
+this is a *different* dtoc2 from the =kkt= corpus DTOC2 (n=9990) in
+=dev/corpus-characterization/summary.csv=; the mittelmann one is
+n=103920.
+
+* 15:56 :harness:arm_run:
+=ab_run.py= hardcodes three arms (new/base/ma57); the bisect needs six
+and the thread sweep four. Wrote
+=external_benchmarks/chain_proxy/arm_run.py=, an N-arm generalization
+reusing =ab_run.py='s =read_mtx_lower=, =synth_rhs=, =parse_sidecar=
+and =sign_test_p= so the protocol is literally the same code. Arms are
+=NAME=BIN= or =NAME=BIN|K=V,K2=V2= for env overrides, which is what
+makes the thread sweep and the SIMD/seed probes a matter of arguments
+rather than another script. This is the =probe_bisect.py= the note
+recorded as written-but-never-run; it is committed this time.
+
+Added a correctness gate that prints before any timing table: any arm
+with =inertia_zero != 0= or NaN/>1e-8 =rel_res= is flagged and the
+matrix is called out as not trustworthy for timing.
+
+=real_corpus_mtx.py= builds the =--mtx-dir= as symlinks into
+=data/matrices/kkt-mittelmann=, one iterate per family, with the
+selection rules (and the dtoc2 and steering_12800 exceptions) in the
+module docstring.
+
+Baseline builds are cheap here: 6-7 s each for a cold release build of
+the four worktrees, which is a consequence of the zero-non-Rust-deps
+constraint keeping the dependency graph tiny.
+
+* 16:07 :bisect:result:regression:ma57:
+Bisect done: 15 pairs, 6 arms, 5 real matrices, correctness gate clean
+(=inertia_zero=0=, =rel_res <= 1e-8= on every arm and matrix).
+
+=min factor_us=:
+
+| matrix       |      n | v0.14.0 | #149 SIMD | #150 par | v0.15.0 |   main |    ma57 |
+|--------------+--------+---------+-----------+----------+---------+--------+---------|
+| clnlbeam     |  99999 |   43914 |     43338 |    21311 |   21417 |  21495 |  202278 |
+| dtoc1nd      |   9685 |   10856 |     11102 |    13696 |   13899 |  13980 |    4493 |
+| dtoc2        | 103920 |  115928 |    114206 |    80795 |   80732 |  80098 |   60283 |
+| marine_1600  |  76807 |   31127 |     33425 |    32195 |   32380 |  32086 |   40829 |
+| rocket_12800 |  89601 |   27602 |     28599 |    21935 |   22381 |  22091 |  534744 |
+
+*Both headline claims in the proxy note are contradicted.*
+
+1. The MA57 gap. main vs ma57 (>1 = feral faster): rocket_12800 24.21
+   (15/15, p=0.0001), clnlbeam 9.41 (15/15, 0.0001), marine_1600 1.27
+   (15/15, 0.0001), dtoc2 0.75 (0/15, 0.0001), dtoc1nd 0.32 (0/15,
+   0.0001). The proxies said "slower on all five, 1.4x-2.4x". On the
+   real matrices feral is faster on three of five, and the two losses
+   are the smallest matrix in the set and dtoc2.
+
+2. The regression. vs 0.14.0, #150 gives clnlbeam 2.061, dtoc2 1.435,
+   rocket_12800 1.258, all 15/15 at p=0.0001; marine_1600 0.967.
+   *dtoc1nd loses: 0.793 (0/15, p=0.0001)*, and v0.15.0 (0.781) and
+   main (0.777) hold that loss. #149 alone is flat to slightly negative
+   (marine 0.931, rocket 0.965, clnlbeam 1.013, dtoc2 1.015).
+
+So the regression is real and attributable to #150, but it is on the
+*smallest* matrix (n=9,685), not the large chains — which is the
+opposite of what =prommis_sx_like= (0.833) and =double_column_like=
+(0.914) predicted. The proxies got the sign right on "something
+regressed" and the location wrong.
+
+3. v0.15.0 vs main are indistinguishable (2.050/2.043, 1.233/1.249,
+   1.436/1.447, 0.961/0.970, 0.781/0.777). The tag-vs-post-tag
+   question the note left open is answered: the #155 amalgamation
+   guard and #156's parallel-default change move nothing here.
+
+* 16:10 :steering:blocked:ripopt:
+Tried to fill the =steering_12800= hole. The =.nl= is in
+=/Users/jkitchin/Dropbox/projects/pounce-bench-data/mittelmann/nl=, so
+re-ran =scripts/harvest-mittelmann-kkt.sh steering_12800= against it
+with =RIPOPT_BIN=/Users/jkitchin/projects/ripopt/target/release/ripopt=.
+
+ripopt solved it fine — "Optimal after 23 iterations", 60.8 s, final
+primal_inf 7.1e-15 — and wrote *zero* =.mtx= files.
+
+Cause: ripopt commit 76d3575 (2026-04-28, "A7.6 (set 2) delete dead
+condensed-path helpers") bulk-deleted the dump implementation —
+=collect_kkt_lower_triangle_entries=, =write_kkt_mtx_file=,
+=write_kkt_json_sidecar=, =dump_kkt_matrix= — plus the
+=if let Some(ref dump_dir) = options.kkt_dump_dir= call site. It left
+=SolverOptions::kkt_dump_dir= / =kkt_dump_name= (options.rs:714) and
+the CLI wiring (ripopt_ampl.rs:607) in place, so =kkt_dump_dir== is
+still accepted on the command line and now silently does nothing.
+
+That makes steering_12800 unavailable without restoring ~200 lines in
+another repo. Out of scope for this PR; leaving the set at five and
+recording it as a known hole. Worth an issue on ripopt: an option that
+parses and silently no-ops is worse than one that errors.
+
+* 16:25 :threads:ecores:refuted:
+Thread sweep, =RAYON_NUM_THREADS= = 1/2/4/8/10 vs default (14), 15
+pairs. *Nothing moves.* Every ratio vs =main-all= within 6% of 1.0;
+the only significant one is marine_1600 at t1 (0.961, 0/15, 0.0001),
+which is the wrong direction for the hypothesis. steering_12800 at one
+thread: 1.003 (9/15, p=0.6072).
+
+Verified the knob is live before believing the null: feral reads the
+global rayon pool (=rayon::current_num_threads()=,
+=src/numeric/factorize.rs:3262=, =src/numeric/solve.rs:632=), and the
+same env var moved the *proxies* by up to 65% (double_column_like
+40382 -> 66584). So the variable works; these matrices just do not
+care.
+
+E-core hypothesis refuted, on hardware with *more* E-cores than the
+machine that generated it. Recorded in =tried-and-rejected.md=.
+
+Bigger consequence: single-threaded main == all-threads main on every
+matrix, so *#150's 1.20x-2.05x gains are not parallelism gains*.
+Whatever task-per-subtree coarsening bought (spawn overhead, locality,
+traversal order), it is not multi-core execution. Any follow-up that
+tries to extend #150 by parallelizing harder starts from a false
+premise.
+
+* 16:30 :steering:pounce:harvest:
+pounce has what ripopt lost. =pounce <p>.nl --dump kkt:<spec>
+--dump-dir <d>= writes =iter_NNN/kkt_solve_NNN.jsonl=, one JSON object
+per line with =n=, =irn=, =jcn=, =vals=, =rhs=, =sol= and the inertia
+fields. Wrote =scripts/harvest-pounce-kkt.py= to convert that tree into
+the =<name>_<iter:04>.{mtx,json}= layout the corpus tooling reads.
+
+Two deliberate choices in the converter: entries are summed into a dict
+before writing the lower triangle (pounce emits the full symmetric
+structure as 1-based triplets — 422,392 triplets collapse to 409,591
+unique lower-triangle coordinates on steering, and Matrix Market has no
+defined semantics for a repeated coordinate); and only the first
+=kkt_solve_NNN= per iteration is kept, since later ones are
+inertia-correction retries of the same system and would over-weight
+hard iterations.
+
+Validated against an *external* oracle, not against itself: a
+synthesized =b = A x_true= cannot catch a mangled matrix because b is
+derived from the same file. Instead — pounce reports
+=num_neg_evals_actual = 51201=; feral and MA57 independently report
+=inertia_neg 51201=, =inertia_pos 64000=, =inertia_zero 0= on the
+converted =.mtx=. Three solvers agree. feral solves pounce's own dumped
+RHS to =rel_res 3.66e-14=.
+
+steering_12800_0001: n=115201, nnz=409591 — the largest matrix in the
+set.
+
+* 16:45 :bisect:six:gap:ma57accuracy:
+Re-ran bisect and thread sweep with all six. Both conclusions hold and
+strengthen.
+
+Gap, main vs ma57 (>1 = feral faster), all p=0.0001:
+rocket_12800 23.40, clnlbeam 9.68, *steering_12800 8.06*,
+marine_1600 1.27, dtoc2 0.755, dtoc1nd 0.319.
+
+#150 vs 0.14.0: steering 1.646, clnlbeam 2.048, dtoc2 1.401,
+rocket 1.200 (all 15/15); dtoc1nd 0.764. main holds all of it
+(steering 1.669, dtoc1nd 0.750).
+
+*The correctness gate fired, on MA57.* steering_12800: MA57
+=rel_res 4.53e-08= against feral =3.52e-14=, identical matrix and RHS.
+Everywhere else both are 1e-16..1e-14. feral's sidecar says
+=refined yes=, so part of it is iterative refinement the MA57 oracle
+does not do. =factor_us= is factorization only so the 8.06x stands,
+but it must be quoted with the caveat: feral is faster *and* more
+accurate there, against a looser MA57 solve. Writing the gate into
+=arm_run.py= is what surfaced this; it would have been invisible in a
+timing-only table.
+
+Also: #149's SIMD kernel is below 1.0 on all six, significantly on
+clnlbeam (0.966, 0/15, 0.0001) and rocket_12800 (0.979, 2/15, 0.0074).
+It helped on the proxies. Separate thread, worth its own bisect.

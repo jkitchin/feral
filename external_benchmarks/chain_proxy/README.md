@@ -1,4 +1,12 @@
-# chain_proxy — chain-structured KKT proxies vs HSL MA57
+# chain_proxy — chain-structured KKT harness vs HSL MA57
+
+> **The proxies have been superseded.** The same protocol now runs on
+> the real corpus (`real_corpus_mtx.py` + `arm_run.py`), and the real
+> matrices contradict both conclusions the proxies produced — see
+> `dev/research/chain-kkt-corpus-2026-08-09.md`. Prefer the real run.
+> The generated proxies are kept as the portable smoke version for
+> machines without `data/matrices/`, and as a worked example of
+> geometry-matched stand-ins giving the wrong answer.
 
 A paired A/B harness for the question behind [pounce#552]: how far is
 feral's factorization from Harwell's on the **chain-structured** KKT
@@ -113,11 +121,40 @@ Read these before quoting a ratio.
   solve are excluded, so this does not speak to end-to-end solve time,
   which is what pounce#552 actually reports.
 
-## Superseding it
+## Running it on the real corpus
 
-The real measurement is the same protocol on the real corpus
-(`clnlbeam`, `dtoc1nd`, `steering_12800`, `rocket_12800`, `marine_1600`,
-`dtoc2`), which needs a machine that has `data/matrices/`. When that run
-exists, prefer it and treat this harness as the portable smoke version.
+`real_corpus_mtx.py` builds the `--mtx-dir` as symlinks into
+`data/matrices/kkt-mittelmann`, one iterate per family, with the
+selection rules (and the `dtoc2` singularity exception) in its
+docstring:
+
+```sh
+python3 real_corpus_mtx.py --out $WORK/mtx
+```
+
+`arm_run.py` is `ab_run.py` generalized to any number of arms, reusing
+its protocol functions directly so the statistics are literally the
+same code. Arms are `NAME=BIN`, optionally with environment overrides
+after a `|`, which is what makes a thread sweep or a SIMD probe a
+matter of arguments rather than another script:
+
+```sh
+python3 arm_run.py --mtx-dir $WORK/mtx --pairs 15 --ref v0.14.0 \
+  --out $WORK/bisect.json \
+  --arm "v0.14.0=/tmp/wt/v0140/target/release/bench_one_matrix" \
+  --arm "main=target/release/bench_one_matrix" \
+  --arm "main-t1=target/release/bench_one_matrix|RAYON_NUM_THREADS=1" \
+  --arm "ma57=../ma57_oracle/ma57_bench"
+```
+
+It prints a correctness gate — any arm with `inertia_zero != 0` or a
+NaN / `> 1e-8` residual — *before* the timing tables, and says plainly
+that flagged matrices cannot carry a ratio. That gate is what caught
+`dtoc2_0001` (singular by both solvers) and MA57's `4.53e-08` residual
+on `steering_12800`.
+
+`steering_12800` has no `.mtx` in the corpus as shipped. Regenerate it
+with pounce (`--dump kkt:1-3`) and `scripts/harvest-pounce-kkt.py`; the
+ripopt harvest path silently writes nothing. See the research note.
 
 [pounce#552]: https://github.com/jkitchin/pounce/issues/552

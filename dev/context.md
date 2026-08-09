@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-09T19:46:37Z
+Generated: 2026-08-09T21:06:51Z
 
 ## Latest Session
 File: dev/sessions/2026-08-09-07.md
@@ -59,34 +59,34 @@ numbers, method and limits in
 
 ## Git Status
 ```
+1833768 docs: note that #156 changed the parallel default after the measurement
 14bbaa2 docs: ship 0.15.0, then measure the gap vs MA57 (chain proxies)
 f7a152a Merge pull request #156 from jkitchin/claude/review-issue-154-ukpt7t
 af73f63 Merge origin/main into claude/review-issue-154-ukpt7t
 6c87a0e docs: session checkpoint 2026-08-09-03 (issue #154 review + implementation)
-4f2fad6 fix(solver): derive use_parallel from the platform; fall back to sequential when the pool fails
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test symbolic::tests::choose_adaptive_rules ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
+test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
+test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
+test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 413 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 5.78s
+test result: ok. 413 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.53s
 
 ```
 
@@ -137,26 +137,26 @@ is a CPU spin, and occurs inside `pounce_load` — parsing, upstream of
 feral entirely.
 
 ## Recent Tried-and-Rejected
-`nemin=8`, MEYER3NE 83× at `nemin=4`), which is what makes it a property
-of the direction rather than of this rule.
+Swept `RAYON_NUM_THREADS` = 1, 2, 4, 8, 10 against the default on six
+real chain KKTs, 15 paired runs each, on an M4 Pro (10P + 4E — *more*
+efficiency cores than the 4P+4E M2 the hypothesis came from, so the
+predicted effect should be larger). Every ratio vs the default landed
+within 6% of 1.0; the only significant one was `marine_1600` at t1
+(0.961, 0/15, p = 0.0001), in the wrong direction to support the
+hypothesis. `steering_12800` at one thread: 1.003 (9/15, p = 0.6072).
+`dtoc1nd`, the matrix that actually regressed, at t4: 1.005 (7/15,
+p = 1.0000).
 
-**Why rejected.** "Correctness before performance, always" is a hard
-constraint. 2–7% of factor time and 11–45% of fill does not buy seven
-digits of residual. Neither my pre-registered criterion nor the queue
-item thought to check the axis that decided it — recorded here because
-the next person to have this idea will not think to check it either.
+The knob was verified live, not assumed: feral reads the global rayon
+pool (`rayon::current_num_threads()`, `src/numeric/factorize.rs:3262`),
+and the same variable moved the proxy matrices by up to 65%.
 
-The knob stays in-tree defaulting to `None` (bit-identical default path)
-as the reproduction apparatus, with the accuracy result in its doc
-comment. Research note:
-`dev/research/amalgamation-cost-model-2026-08-09.md`.
+Consequence worth carrying forward: single-threaded main matches
+all-threads main on every one of these matrices, so **#150's 1.20x to
+2.05x gains on the large chains are not parallelism gains**. Do not
+build on the assumption that they are.
 
-**Also redirects the target.** pounce#552's re-measurement against a
-released 0.15.0 (comment 5232409020) shows clnlbeam more than halved
-(8.05× → 3.54× vs MA57) and **no longer the worst case** — `dtoc1nd` is,
-at 3.77×, and it is a dense-front matrix (nnz/dim 23.0, fronts of 33–64
-columns). Amalgamation is a chain-KKT lever aimed at a problem that has
-largely receded.
+Full data: `dev/research/chain-kkt-corpus-2026-08-09.md`, Result 3.
 
 ## Source Files
 ```

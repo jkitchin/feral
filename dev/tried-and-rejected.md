@@ -5154,3 +5154,34 @@ released 0.15.0 (comment 5232409020) shows clnlbeam more than halved
 at 3.77×, and it is a dense-front matrix (nnz/dim 23.0, fronts of 33–64
 columns). Amalgamation is a chain-KKT lever aimed at a problem that has
 largely receded.
+
+## 2026-08-09 — efficiency cores as the explanation for the post-0.14.0 chain regression
+
+**Rejected.** The proxy note `chain-kkt-ma57-gap-2026-08-09.md`
+hypothesized that on Apple silicon rayon treats efficiency cores as
+equivalent to performance cores, so a coarse task from #150's
+task-per-subtree coarsening landing on an E-core stalls the whole
+factorization, where 0.14.0's per-supernode spawning let work-stealing
+rebalance. It predicted the regression "shrinks or inverts at
+`RAYON_NUM_THREADS=4`".
+
+Swept `RAYON_NUM_THREADS` = 1, 2, 4, 8, 10 against the default on six
+real chain KKTs, 15 paired runs each, on an M4 Pro (10P + 4E — *more*
+efficiency cores than the 4P+4E M2 the hypothesis came from, so the
+predicted effect should be larger). Every ratio vs the default landed
+within 6% of 1.0; the only significant one was `marine_1600` at t1
+(0.961, 0/15, p = 0.0001), in the wrong direction to support the
+hypothesis. `steering_12800` at one thread: 1.003 (9/15, p = 0.6072).
+`dtoc1nd`, the matrix that actually regressed, at t4: 1.005 (7/15,
+p = 1.0000).
+
+The knob was verified live, not assumed: feral reads the global rayon
+pool (`rayon::current_num_threads()`, `src/numeric/factorize.rs:3262`),
+and the same variable moved the proxy matrices by up to 65%.
+
+Consequence worth carrying forward: single-threaded main matches
+all-threads main on every one of these matrices, so **#150's 1.20x to
+2.05x gains on the large chains are not parallelism gains**. Do not
+build on the assumption that they are.
+
+Full data: `dev/research/chain-kkt-corpus-2026-08-09.md`, Result 3.

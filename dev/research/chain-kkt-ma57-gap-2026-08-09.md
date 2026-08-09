@@ -2,8 +2,26 @@
 
 **Date:** 2026-08-09
 **Machine:** Apple M2, `Mac14,2`, 4 performance + 4 efficiency cores, macOS.
-**Status:** proxy measurement. Needs re-running on the corpus machine
-before any of it is acted on.
+**Status:** SUPERSEDED by `chain-kkt-corpus-2026-08-09.md`. Kept as the
+record of what the proxies said and why it was believed.
+
+> **Both headline conclusions below are contradicted by the real
+> corpus.** The three follow-ups this note asked for were run on
+> 2026-08-09 on an M4 Pro with `data/matrices/`, and:
+>
+> * feral is **not** slower than MA57 on chain KKTs — it is 8x to 23x
+>   *faster* on `rocket_12800`, `clnlbeam` and `steering_12800`, and
+>   loses only on `dtoc2` (1.3x) and `dtoc1nd`, the smallest matrix.
+> * the regression is **not** on the large chains — it is on `dtoc1nd`
+>   (n = 9,685), where #150 costs 25%. On the four largest matrices #150
+>   *gains* 1.20x to 2.05x.
+> * the efficiency-core hypothesis in "Result 3" is **refuted**.
+>   Thread count moves nothing on the real matrices, on hardware with
+>   more efficiency cores than the machine the hypothesis came from.
+>
+> The proxies got "something regressed after 0.14.0" right and its
+> location exactly backwards. Read them as a cautionary case for
+> geometry-matched synthetic stand-ins, not as a measurement.
 
 ## Why
 
