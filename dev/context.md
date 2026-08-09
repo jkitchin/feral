@@ -1,66 +1,66 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-09T03:25:16Z
+Generated: 2026-08-09T16:19:42Z
 
 ## Latest Session
-File: dev/sessions/2026-08-09-02.md
+File: dev/sessions/2026-08-09-03.md
 ```
-# Session 2026-08-09-02
+# Session 2026-08-09-03
 
 ## Goal
 
-Issue #148: the default parallel multifrontal driver is slower than
-serial on 3 of 4 POUNCE problems (~1.8M `scope.spawn` boxed-closure
-allocations per solve, glibc arena contention growing with thread
-count). Fix via the issue's suggested directions 1+2: work-based task
-coarsening and a serial fallback. Environment: x86_64 4-core container
-(issue reproduces at 2-4 threads); POUNCE `.nl` problems unavailable —
-synthetic proxies (chain / grid / banded-QP KKT) built and measured
-with interleaved old-vs-new binaries (git worktree at e8e1c5a).
+Review issue #154 ("default `use_parallel` from the platform instead of
+hardcoding `true`"), then implement it fully so the issue can be closed.
 
 ## Accomplished
 
-1. **Reproduction** (research note): chain12000 parallel never beats
-   serial; sparseqp proxy degrades monotonically with threads; grid250
-   is the one winner but pays +19% single-thread driver overhead.
-2. **TaskPlan coarsening (7814bfe)**: one spawn per subtree task —
-   boundaries at tree roots and at children of nodes with >= 2 sibling
-   subtrees each >= `FERAL_PAR_TASK_MIN_FLOPS` (default 1e6); lone big
-   children continue inline (chains collapse to one task; the naive
-   subtree>=cutoff rule produced 6319 tasks of 6564 supernodes on the
-   banded-QP proxy, the sibling rule 1). Owned nodes factored serially
-   in postorder inside their task; parent-task trampoline via
-   task-children pending counters; `seeds < 2` delegates to the
-   sequential driver (intrafront parallelism kept on).
-   `FERAL_DEBUG_TASK_PLAN=1` dumps plan shapes.
-3. **Byte-exactness**: scheduling-only; new `tests/task_plan_parity.rs`
-   pins fine (cutoff=1: 153 tasks/132 seeds), default, and fallback
-   configurations bit-identical to the sequential driver; 84/84 test
-   binaries green.
-4. **chainW anomaly investigated and documented**: the old per-node
-   driver oddly beat both sequential drivers ~20% on one wide-block
-   chain proxy; AtomicLockStats telemetry located the difference
-   *inside* `factor_one_supernode` (912 vs 1276 ms per 9 factors) —
-   not spawn/lock overhead, not intrafront, not tree parallelism.
-   Unexplainable further without perf/heaptrack (absent here);
-   accepted as a proxy quirk since the issue's real chains lose under
-   per-node spawning. Full analysis in the research note.
+### Review
 
-## Benchmark Results
+Verified every claim in #154 against `808babb` (v0.15.0). The diagnosis is
+correct and all line references are exact: `solver.rs:430` (`use_parallel:
+true`), `:972` (unconditional `ensure_parallel_pool()`), `:1148`, `:1216`,
+`:1540`, and the quoted `ensure_parallel_pool` body. Three gaps in the
+proposal, all confirmed by measurement rather than reading:
 
-Session bench (corpus absent): synthetic set + regression fixtures all
-inertia/residual pass; oracle partitions N/A in container.
+1. **The test inventory was incomplete, and understated.** The issue names
+   one test and calls it a latent flake. Applying *only* the issue's
+   one-liner to a pristine tree and running under `taskset -c 0`:
 
-Interleaved old-vs-new (warm medians, default parallel config):
+   ```
+   test result: FAILED. 404 passed; 3 failed; 6 ignored
+     solver_parallel_default_is_on             solver.rs:2825
+     solver_parallel_factor_matches_sequential solver.rs:3852
+       assertion failed: par.parallel()
+     solver_reuses_thread_pool_across_factors  solver.rs:2887
+       .expect("pool must be built after first parallel factor")
+   ```
 
-| proxy | old par@4 | new par@4 | old serial | new serial |
-|---|---:|---:|---:|---:|
+   `solver_parallel_factor_matches_sequential` is the #7 bit-exactness
+   regression test. Repairing only its assertion would leave it comparing
+   the sequential driver against itself — passing vacuously, with the
+   contract silently unchecked.
+
+2. **The "filed separately" fallback bug is not separable.** After the
+   default flips, `with_parallel(true)` — the escape hatch #154 recommends
+   for wasm — still reaches `ensure_parallel_pool()` and, on build failure,
+   falls to a `None` arm that runs the *parallel* driver bare, i.e. on
+   rayon's global pool. That is the failure being avoided, reintroduced
+   through the workaround prescribed for it. Shipping the default flip alone
+   would release a version whose documented wasm answer is a trap.
+
+3. **A fourth dispatch site the issue misses:** `solve_many_refined`
+   (`solver.rs:1601`) has the same `None`-arm shape as `solve_refined`.
+
+Adjacent sweep over every rayon entry point reachable from `Solver`:
+`intrafront_parallel` (Lever 1.1) is set only inside the parallel driver
+(`factorize.rs:3127`), so the sequential path never spawns nested rayon work
+— the pounce#79 oversubscription guarantee holds, not a bug. `solve.rs`
 ```
 
 ## Git Status
 ```
-7814bfe perf(parallel): coarsen factor tasks to subtrees; serial fallback for chains (#148)
-80f849f research: issue #148 reproduction + task-coarsening design note
+808babb release: feral v0.15.0 (#151)
+fad5670 perf(parallel): task-per-subtree coarsening + profiler nanoseconds (#150)
 e8e1c5a perf(kernel): explicit SIMD packed trailing update + x86 pulp dispatch fix (#149)
 6589570 docs: session checkpoint 2026-07-11-02 (issue triage, #127, release 0.14.0) (#146)
 c05eb77 release: feral v0.14.0 (#145)
@@ -86,65 +86,73 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 407 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.99s
+test result: ok. 409 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.13s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-03.md)
 
 
-Session bench (corpus absent): synthetic set + regression fixtures all
-inertia/residual pass; oracle partitions N/A in container.
+No usable perf signal this session: the benchmark corpus is not present in
+this container, so the harness found 2 matrices. Reported as-is rather than
+omitted.
 
-Interleaved old-vs-new (warm medians, default parallel config):
+--- Dense solver validation ---
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
 
-| proxy | old par@4 | new par@4 | old serial | new serial |
-|---|---:|---:|---:|---:|
-| sparseqpL (issue signature) | 82.4-88.0 ms | 71.7-76.3 ms | 69.9-74.6 | 70.7-72.2 |
-| grid250 | 78.8-92.7 ms | 71.4-73.4 ms | 123.0-128.7 | 122.0-128.0 |
-| chainW | 186.7-216.6 ms | 221.1-223.9 ms | 228.1-229.5 | 214.9-215.7 |
-| chain12000 | 12.0-12.5 ms | 11.9-12.5 ms | 11.3-11.7 | 10.9-11.0 |
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 
-Spawn reduction: grid250 11171 → 51 tasks; chains → 1 (sequential
-path). Small fixtures in the noise band (−6%..+4%). The chainW par@4
-old-vs-new gap is the documented anomaly above (old-par was beating
-serial there; new ≈ serial).
+Dense failure analysis: no failures
+Sparse failure analysis: no failures
+
+--- Dense perf vs oracles: no matrices have oracle timings ---
+--- Sparse perf vs oracles: no matrices have oracle timings ---
+
+There is no reason to expect a perf delta on a multi-core host: the derived
+default is `true` there, and the pool-fallback change is unreachable unless
+`ThreadPoolBuilder::build()` fails. The one measurable change would be on a
+single-CPU host, where the sequential driver is now selected — that is the
+intended effect, not a regression.
 
 ```
 
 ## Recent Decisions
-`FERAL_PAR_TASK_MIN_FLOPS` (default 1e6) estimated flops; a lone big
-child continues inline, so chain-shaped trees collapse to one task per
-root. One `scope.spawn` per task, owned nodes factored serially in
-postorder inside it, parent-task trampoline via task-children pending
-counters. Task graphs with < 2 seeds delegate to the sequential driver
-(with intrafront parallelism kept on).
+`solver_parallel_factor_matches_sequential` is the #7 bit-exactness
+regression test; repairing only its assertion would leave it comparing
+the sequential driver against itself and passing vacuously. The rule
+adopted: any test that means "the parallel driver" constructs with an
+explicit `with_parallel(true)`, and only the default test asserts the
+derived value — against the same probe the constructor uses, so it
+cannot silently become environment-dependent again.
 
-**Why.** Issue #148: one boxed spawn per supernode ⇒ ~1.8M allocations
-per POUNCE sparseqp solve, glibc arena contention growing with thread
-count, parallel slower than serial on 3 of 4 problems. Spawn counts:
-grid250 11171 → 51; chains → 1 (sequential path).
+**New coverage.** `solver_parallel_default_follows_platform`,
+`pool_num_threads_precedence` (via a pure
+`pool_num_threads_from(env, hardware)` helper, so no test mutates
+process-global environment state), and
+`solver_parallel_without_pool_falls_back_to_serial_refine`, which
+reproduces the post-build-failure field state and asserts the refine
+output is bit-identical to the sequential solver.
 
-**Evidence.** Interleaved old-vs-new, x86_64 4-core: sparseqpL par@4
-82-88 → 71.7-76.3 ms (old lost 15-25% to serial; new ≈ serial);
-grid250 par@4 78.8-92.7 → 71.4-73.4 ms; small fixtures noise-band.
-Byte-exact (scheduling only): tests/task_plan_parity.rs pins
-fine/default/fallback plans against the sequential driver bit-for-bit;
-84/84 suites green.
+**Also changed.** `FERAL_PARALLEL` in the C ABI (`src/capi.rs`) was
+off-only; with a derived default it needs a force-on arm
+(`1`/`on`/`true`/`yes`), otherwise a wasm-bindgen-rayon embedder has
+no way to opt in without a rebuild. Unset or unrecognized values leave
+the derived default alone.
 
-**Documented open question.** On one synthetic proxy (chainW, wide-
-block chain) the OLD per-node-spawn driver beat both sequential
-drivers by ~20% — telemetry places the difference inside
-factor_one_supernode (912 vs 1276 ms per 9 factors), an unexplained
-workspace/allocator interaction, not driver overhead. Accepted as a
-proxy quirk (the issue's real chains lose under per-node spawning);
-full analysis in dev/research/issue-148-parallel-task-granularity.md.
+**Validation.** `taskset -c 0 cargo test --lib` → 409 passed, 0
+failed. Full `cargo test` on 4 cores → 0 failed across all binaries.
+`cargo clippy --all-targets -- -D warnings` → clean.
 
-**Deferred.** Issue #148 suggestion 3 (collect() temporaries):
-re-profile after this lands. #128 nrow-underestimate still skews flop
-estimates; harmless for this gate.
+**Out of scope.** This does not address the wasm hang in
+jkitchin/pounce#482. That reproduces only under `nightly-2026-08-02`,
+is a CPU spin, and occurs inside `pounce_load` — parsing, upstream of
+feral entirely.
 
 ## Recent Tried-and-Rejected
 plain `for i in j..n { a[j*n+i] -= a[k*n+i]*alpha }` loops are

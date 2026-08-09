@@ -4,6 +4,58 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `Solver` defaults `use_parallel` from the platform (issue #154)
+
+- `Solver::new()` and `Solver::with_params(...)` now derive `use_parallel` from
+  `std::thread::available_parallelism()` — `true` when the platform reports more
+  than one usable hardware thread — instead of hardcoding `true`. The new
+  `Solver::default_use_parallel()` exposes the same probe.
+- **Watch for this on single-CPU hosts.** `available_parallelism()` honors
+  `sched_getaffinity` and the cgroup CPU quota on Linux, so a container or CI
+  runner pinned to one CPU now defaults to the sequential driver. That is the
+  intended answer — the parallel driver on one core is scheduling overhead — but
+  it is a change in native behavior, not only a wasm one. `with_parallel(true)`
+  restores the previous unconditional default.
+- Why: the hardcoded `true` was wrong in a way the caller could not see on hosts
+  without working threads. `factor()` builds a rayon `ThreadPool` whenever the
+  flag is set; on `wasm32-wasip1` both `available_parallelism()` and
+  `thread::spawn` report `Unsupported` so construction cannot succeed, and on a
+  threads-enabled wasm host whose worker pool has not been stood up, `build()`
+  waits for workers that never arrive. Embedders had to carry target-specific
+  configuration for something the library can determine for itself.
+- `with_parallel(true)` remains the escape hatch for hosts whose threads std
+  cannot see — a `wasm32-unknown-unknown` + wasm-bindgen-rayon page that stood up
+  its own worker pool reports `Err` here and needs the explicit opt-in. Note the
+  derived default deliberately does not consult `RAYON_NUM_THREADS`: that
+  variable sizes the pool once we have decided to build one, and cannot vouch for
+  threads existing.
+
+### Fixed — a failed thread pool now falls back to the sequential driver, not the global pool (issue #154)
+
+- When `use_parallel` is on but the `Solver`-owned pool could not be built,
+  `factor()` (initial factor and MC64 retry), `solve_refined` and
+  `solve_many_refined` now run the **sequential** driver. Previously all four ran
+  the parallel driver with no `install`, i.e. on rayon's *global* pool — which
+  defeats the isolation the per-`Solver` pool exists to provide, and arrives
+  exactly when extra nesting is least welcome: `ThreadPoolBuilder::build()` fails
+  when threads cannot be spawned at all (`wasm32-wasip1`) or the host is already
+  out of them (`RLIMIT_NPROC`, cgroup `pids.max`). Compare the latent re-entrant
+  nested-rayon workspace-mutex self-deadlock in issue #102.
+- This matters most for `with_parallel(true)`, the documented workaround above:
+  before this fix it still reached pool construction and, on failure,
+  reintroduced the very behavior the new default avoids.
+- No numerical change. The two drivers carry a bit-exact per-supernode contract,
+  so this is a scheduling fallback only — asserted bit-identically in
+  `solver_parallel_without_pool_falls_back_to_serial_refine`.
+- `Solver` no longer initializes rayon's global registry on any path. The pool
+  worker count now comes from `RAYON_NUM_THREADS`, else
+  `available_parallelism()`, else 1 — reproducing rayon's own rule without
+  calling `rayon::current_num_threads()`, which spun up the global registry as a
+  side effect just to answer the question.
+- `FERAL_PARALLEL` (C ABI) gained a force-on arm: `1`/`on`/`true`/`yes` enable
+  the parallel driver, complementing the existing `0`/`off`/`false`/`no`. Unset
+  or unrecognized values leave the platform-derived default alone.
+
 ## [0.15.0] - 2026-08-09
 
 ### Fixed — the profiler no longer reports small fronts as costless (issue #148)

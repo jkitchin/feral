@@ -6178,3 +6178,122 @@ Those with large effects (dense-front kernel 2.7-7x, grid250, sparseqpL
 - since re-confirmed paired at 10/10 and 9/10) stand; sub-10% fixture
 deltas in those checkpoints should be treated as unresolved rather than
 as measured wins until re-run paired.
+
+---
+
+## 2026-08-09 — `Solver` derives `use_parallel` from the platform, and a failed pool falls back to sequential (issue #154)
+
+**Decision.** Two changes, taken together because either alone is
+incomplete.
+
+1. `Solver::new()` / `Solver::with_params(...)` set `use_parallel`
+   from `Solver::default_use_parallel()` —
+   `std::thread::available_parallelism().is_ok_and(|n| n.get() > 1)` —
+   instead of hardcoding `true`.
+2. Every `use_parallel` dispatch site now requires a *pool* as well as
+   the flag. When `use_parallel` is on but `ensure_parallel_pool()`
+   returned `None`, `factor()` (initial and MC64 retry), `solve_refined`
+   and `solve_many_refined` run the **sequential** driver. Previously
+   they ran the parallel driver with no `install`, i.e. on rayon's
+   global pool.
+
+This supersedes the 2026-05-12 decision's "initialization to `true` in
+`with_params`" only in how the default is *derived*. The intent of
+issue #7 — the public `Solver::factor` entry routes through the
+parallel driver on hosts that can run it — is unchanged, and on every
+ordinary multi-core host the observable default is identical.
+
+**Why the default was wrong.** A hardcoded `true` is wrong in a way
+the caller cannot see on any host without working threads. `factor()`
+calls `ensure_parallel_pool()` unconditionally when the flag is set;
+on `wasm32-wasip1` both `available_parallelism()` and `thread::spawn`
+report `Unsupported`, so pool construction cannot succeed, and on a
+threads-enabled wasm host whose worker pool has not been stood up the
+spawn succeeds and `build()` waits for workers that never arrive.
+Downstream this forced embedders to carry target-specific
+configuration for something the library can determine itself — pounce
+carried a `#[cfg(target_os = "wasi")]` block in
+`feral_config_from_options` for exactly this.
+
+**Why `available_parallelism()` and not `rayon::current_num_threads()`.**
+It is the only probe that answers the question without initializing
+rayon's global registry — which is the side effect being avoided. The
+same reasoning replaced `current_num_threads()` inside
+`ensure_parallel_pool` with `Solver::pool_num_threads()`, which
+reproduces rayon's own rule (`RAYON_NUM_THREADS`, else
+`available_parallelism()`, else 1). `Solver` now never touches the
+global registry on any path.
+
+**Why the fallback could not be deferred.** `with_parallel(true)` is
+the documented escape hatch for hosts whose threads std cannot see (a
+wasm-bindgen-rayon page that stood up its own workers). Before this
+change, that hatch still reached `ensure_parallel_pool()` and, on
+build failure, fell through to the parallel driver on the global pool
+— reintroducing the exact failure the default flip avoids, through
+the workaround recommended for it. `ThreadPoolBuilder::build()` also
+fails on ordinary Linux under thread exhaustion (`RLIMIT_NPROC`,
+cgroup `pids.max`), which is precisely when silently standing up a
+second pool is least welcome; compare issue #102's latent re-entrant
+nested-rayon workspace-mutex self-deadlock. The two drivers carry a
+bit-exact per-supernode contract, so the fallback is a scheduling
+decision with no numerical consequence.
+
+**Accepted trade-offs.**
+
+- *Native, single-CPU.* `available_parallelism()` honors
+  `sched_getaffinity` and the cgroup CPU quota on Linux, so a
+  container or CI runner pinned to one CPU now defaults to sequential.
+  This is a real native behavior change, not a wasm-only one. It is
+  the right answer on its own terms — the parallel driver on one core
+  is scheduling overhead — but it is the case users will notice, so it
+  is called out in the CHANGELOG rather than buried.
+- *`RAYON_NUM_THREADS` does not raise the default.* That variable
+  sizes the pool once we have decided to build one; it cannot vouch
+  for threads existing. A one-CPU-quota host that sets it high must
+  also call `with_parallel(true)`.
+- *wasm-bindgen-rayon needs the explicit opt-in.* Such a host does
+  have working threads but still reports `Err`, since std cannot see
+  JS-side workers. It already requires an explicit init call to stand
+  up its pool, and the failure mode it trades into is "slower than it
+  could be" rather than "hangs".
+
+**Test consequences (three sites, two of them hard failures).** The
+issue that prompted this identified one affected test and described it
+as a latent flake. Applying the default change alone to a pristine
+tree and running under `taskset -c 0` measured otherwise:
+
+    test result: FAILED. 404 passed; 3 failed
+      solver_parallel_default_is_on             (solver.rs:2825)
+      solver_parallel_factor_matches_sequential (3852)
+      solver_reuses_thread_pool_across_factors  (2887)
+
+`solver_parallel_factor_matches_sequential` is the #7 bit-exactness
+regression test; repairing only its assertion would leave it comparing
+the sequential driver against itself and passing vacuously. The rule
+adopted: any test that means "the parallel driver" constructs with an
+explicit `with_parallel(true)`, and only the default test asserts the
+derived value — against the same probe the constructor uses, so it
+cannot silently become environment-dependent again.
+
+**New coverage.** `solver_parallel_default_follows_platform`,
+`pool_num_threads_precedence` (via a pure
+`pool_num_threads_from(env, hardware)` helper, so no test mutates
+process-global environment state), and
+`solver_parallel_without_pool_falls_back_to_serial_refine`, which
+reproduces the post-build-failure field state and asserts the refine
+output is bit-identical to the sequential solver.
+
+**Also changed.** `FERAL_PARALLEL` in the C ABI (`src/capi.rs`) was
+off-only; with a derived default it needs a force-on arm
+(`1`/`on`/`true`/`yes`), otherwise a wasm-bindgen-rayon embedder has
+no way to opt in without a rebuild. Unset or unrecognized values leave
+the derived default alone.
+
+**Validation.** `taskset -c 0 cargo test --lib` → 409 passed, 0
+failed. Full `cargo test` on 4 cores → 0 failed across all binaries.
+`cargo clippy --all-targets -- -D warnings` → clean.
+
+**Out of scope.** This does not address the wasm hang in
+jkitchin/pounce#482. That reproduces only under `nightly-2026-08-02`,
+is a CPU spin, and occurs inside `pounce_load` — parsing, upstream of
+feral entirely.
