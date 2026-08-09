@@ -5068,3 +5068,89 @@ evidence that a cache would help — the cost may be iteration-count-bound
 rather than starting-point-bound. Measure the iteration count before
 building the cache. Full analysis and the ranked alternatives:
 dev/research/scaling-warm-start-2026-08-09.md.
+
+---
+
+## 2026-08-09 — Amalgamation retune after 0.15.0: `nemin` lower, and a cost-model merge guard
+
+**What.** Post-release queue item 2 (`dev/plans/release-0.15.0-checklist.md`
+§4.2), motivated by the PR #150 review: 90% of clnlbeam's supernodes are
+≤8 columns and they are 35.9% of its loop. Two levers measured, both
+rejected. Harness:
+`crates/feral-diagnostics/src/bin/diag_nemin_post_simd.rs` (paired
+alternating A/B per decisions.md 2026-08-09, `min_us`, sign test), 61
+parity fixtures + 4 structured KKTs, x86_64 AVX2.
+
+**Lever 1 — retune `nemin`. Rejected on its own pre-registered
+criterion.** The criterion, fixed before the first run: ships only if
+≥5% geomean with ≥8/10 sign test on ≥2 fixture classes and no fixture
+regressing >2%.
+
+Geomean vs `nemin=16`, time / nnz — 61 parity, then 4 structured:
+
+| arm | 1 | 4 | 8 | 32 | 64 |
+|---|---|---|---|---|---|
+| parity | 1.21/0.67 | 1.02/0.83 | 0.986/0.89 | 1.02/1.19 | 1.15/1.65 |
+| structured | 1.33/0.37 | 0.99/0.51 | 0.925/0.68 | 1.13/1.60 | 1.53/2.74 |
+
+`nemin=8` is genuinely better on both axes on the structured set, but
+the parity geomean is 1.4% (not 5%) and individual fixtures regress well
+past 2%: CERI651A_0000 1.163 (2/15 wins, 178→207 µs — an effect, not
+noise), DEGENLPB_0046 1.119, BQPGASIM_0012 1.100, HS85_0176 1.056.
+
+This also **re-confirms the 2026-05-16 rejection** (issue #10 lever 5)
+after the kernel rewrite that was its only plausible escape hatch: every
+arm above 16 loses on time and inflates fill on every class. The faster
+trailing update did not buy back the fill. The queue item's stated
+direction — raise `nemin` to fuse small supernodes — is dead twice over.
+
+**Lever 2 — cost-model merge guard. Implemented, measured, rejected on
+accuracy.** The size rule (`child_ncol < nemin && parent_ncol < nemin`)
+never asks what a merge costs. Front height is
+`col_counts[first_col].max(ncol)`, so past the natural row count every
+extra column is a triangle of pure fill; clnlbeam's `col_counts=2` chain
+links inflate 23× at `nemin=16` and the rule cannot see it. Added
+`SupernodeParams::merge_flop_budget: Option<u128>` — merge only if
+`Δflops ≤ budget`, with
+`flops(ncol,nrow) = Σ_{k<ncol}(nrow-k)² = S(nrow)-S(nrow-ncol)`.
+
+It works on the axes it was designed for. Clean interior optimum at
+budget 30–60 (structured geomean 0.945/0.549 and 0.935/0.619), no speed
+regressions on parity (0.980–0.997 time, 0.866–0.940 nnz), and it
+dominates `nemin` where it counts: sparseqp holds 0.493× fill at the
+same 0.947× time that `nemin=8` needed 0.676× fill for.
+
+**Then the residuals.** Single unrefined solve, `b=1`, so ∞-norm
+residual is also relative. Degradations >10× at budgets 15–125:
+
+| fixture | default | guarded |
+|---|---|---|
+| HATFLDG_0003..0006 | 7.1e-15 | up to 7.4e-08 |
+| VESUVIOU_0030 | 1.9e-06 | 5.4e-03 |
+| MEYER3NE_0220 | 2.7e-08 | 8.0e-07 |
+
+Seven digits on HATFLDG. Inertia unchanged everywhere, and on
+HATFLDG/VESUVIOU **the fill is identical to the default** — so this is
+not a fill effect. Thinner supernodes shrink Bunch-Kaufman's pivot
+candidate pool inside each front and it takes worse pivots on
+ill-conditioned matrices. `nemin` has the same defect (VESUVIOU 2789× at
+`nemin=8`, MEYER3NE 83× at `nemin=4`), which is what makes it a property
+of the direction rather than of this rule.
+
+**Why rejected.** "Correctness before performance, always" is a hard
+constraint. 2–7% of factor time and 11–45% of fill does not buy seven
+digits of residual. Neither my pre-registered criterion nor the queue
+item thought to check the axis that decided it — recorded here because
+the next person to have this idea will not think to check it either.
+
+The knob stays in-tree defaulting to `None` (bit-identical default path)
+as the reproduction apparatus, with the accuracy result in its doc
+comment. Research note:
+`dev/research/amalgamation-cost-model-2026-08-09.md`.
+
+**Also redirects the target.** pounce#552's re-measurement against a
+released 0.15.0 (comment 5232409020) shows clnlbeam more than halved
+(8.05× → 3.54× vs MA57) and **no longer the worst case** — `dtoc1nd` is,
+at 3.77×, and it is a dense-front matrix (nnz/dim 23.0, fronts of 33–64
+columns). Amalgamation is a chain-KKT lever aimed at a problem that has
+largely receded.
