@@ -4972,3 +4972,49 @@ true pivot bit-for-bit on the regression basis) + `update_pivot_search` as an
 always-on opt-in trajectory variant (bounded multipliers across chains),
 default false. See `dev/research/issue-112-bg-update.md` §UPDATE and
 `dev/decisions.md` 2026-07-10.
+
+## 2026-08-09 — Stage 3: explicit pulp SIMD for the eager rank-1 pivot update (reverted)
+
+**What was tried.** `do_1x1_pivot`'s fused scale + rank-1 trailing
+update + argmax (the small-front eager path's hot loop, duplicated in
+the static-floor branch) was refactored into a shared helper and given
+an explicit-SIMD route: one `schur_kernel::rank1_trailing_nofma` pulp
+dispatch per pivot step covering all trailing columns (per-element
+`mul → sub`, byte-exact — proven by an eager-path A/B parity test and
+the full 83-suite run incl. golden digests), with a work gate at
+1024 multiply-subtracts and a scalar argmax re-scan of column k+1.
+Motivation: the feral/MA57 small-bucket loss (4.23x geomean),
+panel-frag attribution (scal% up to 89.8% on sawpath), and the
+pounce#552 chain-KKT report.
+
+**Symptoms / numbers.** Perf was FLAT everywhere:
+- Warm fixture medians (3-run, sequential, x86_64 AVX2 container)
+  unchanged vs Stage-2 within noise: AVION2 34→34, SWOPF 152→153,
+  HYDCAR20 ~210→206-213, HAHN1 ~742→754-762, CRESC100 ~606→589-621,
+  chain1200 ~867→863-878, twirism1 ~2100→2138-2195, sawpath ~698→671-726.
+- Direct eager-driver A/B (gate default vs forced-off) on square
+  fronts where the gate demonstrably fires: n=512 11.21 vs 11.23 ms,
+  n=200 0.88 vs 0.89 ms, n=96 0.11 vs 0.11 ms. Zero effect at any size.
+
+**Why it failed.** Unlike the packed tile walk (whose guarded loop
+structure defeated autovectorization — Stage 1), the eager path's
+plain `for i in j..n { a[j*n+i] -= a[k*n+i]*alpha }` loops are
+textbook-autovectorizable, and the eager path's remaining time is
+pivot search + memory traffic, not multiply-subtract throughput.
+Explicit lanes duplicated what LLVM already did. This matches the
+2026-05-16 finding (pulp == scalar == manual unroll at lengths 3..128)
+at the whole-front scale.
+
+**What was kept.** The de-duplication refactor (shared scalar
+`rank1_scale_update_argmax`, byte-identical, golden digests unchanged)
+stays; the pulp kernel, its gate/env var, the dedicated parity test,
+and the A/B example were removed.
+
+**Lesson.** The small-front/MA57 gap is NOT lane width in the eager
+update. Remaining suspects, in evidence order: per-front fixed
+overhead (assembly/scatter/build-row, 8.8-14.8% on the small
+fixtures), pivot-search scans, `scalar_pivot_step` in blocked fronts,
+and the delayed-pivot cascade (per-factor-cost-cluster mechanism A).
+Any retry of eager-path SIMD must first show a front-level profile
+where the update loops are >30% of eager time AND not already
+vectorized in the disassembly.

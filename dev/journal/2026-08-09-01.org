@@ -1,0 +1,154 @@
+#+TITLE: Session 2026-08-09-01 — kernel SIMD/vectorization perf pass
+#+DATE: 2026-08-09
+
+* 01:17 :orient:perf:kernel:
+Session goal: evidence-based kernel performance work per the staged plan
+(measure-first). Targets identified from dev/ history + code inspection:
+(1) packed trailing-update kernel (factor.rs apply_schur_panel_range_packed)
+relies on LLVM autovectorization only — on x86 that means SSE2 baseline
+codegen since no target-cpu and no pulp in that function; decisions.md
+2026-07-01 lists explicit-SIMD/pooling/tile-retune/cache-blocking as untuned
+headroom. (2) small-front eager scalar path (do_1x1_pivot) — ~87% of
+DENSEFACTOR_NS on the many-small-front corpus per
+dev/research/panel-fragmentation-2026-07-10.md, matching the feral/MA57
+small-bucket loss (4.23x geomean, external_benchmarks/comparison/REPORT.md).
+Environment: x86_64 container, 4 cores, AVX2+AVX512+FMA, corpus NOT present
+— evidence via parity suites + bench_schur_micro + bench_dense_front +
+perf_probe on tests/data fixtures. Hard rule for all stages: default path
+stays byte-exact vs scalar nofma reference (mul-then-sub, never mul_add);
+FMA remains opt-in.
+
+* 01:35 :stage0:objdump:packed-kernel:premise:
+Premise check on the packed trailing-update kernel
+(apply_schur_panel_range_packed, inlined into apply_schur_panel_range at
+0x315b0 in bench_dense_front): objdump over the region shows ymm=0,
+mulpd/subpd/addpd=0, mulsd/subsd=187. LLVM did NOT autovectorize the MR
+axis at all on x86 — the production default trailing update is pure
+scalar f64 code. The pulp strided kernels DO reach AVX2 (110
+vmulpd/vsubpd in the binary via V3 dispatch). Conclusion: Stage 1
+(explicit pulp in the packed kernel) is a scalar->4-wide-AVX2 upgrade on
+x86, bigger headroom than the planned SSE2->AVX2 2x estimate.
+
+* 01:45 :stage0:bench:micro:baseline:
+bench_schur_micro 3-run baselines (all byte-exact checks pass):
+  2048x2048 ke=64: strided 0.45-0.46 GF/s; packed 6.04-6.18 GF/s (13.3-13.8x)
+  512x512  ke=64: strided 0.46;            packed 6.33-6.35 (13.7x)
+  96x96    ke=32: strided 0.47;            packed 6.03 (12.8x)
+Variance across runs <3%. 6 GFLOP/s = roughly scalar mul+sub ILP peak at
+2.8 GHz, consistent with scalar codegen; AVX2 lanes leave ~3-4x on the
+kernel.
+
+* 01:55 :stage0:bench:dense-front:baseline:fma-regression:
+bench_dense_front 3-run baselines (production path, rayon=4):
+  n=2955: nofma-serial 4236/4303/4244 ms (2.0 GF/s);
+          nofma-intrafront 1798-1801 ms (4.78 GF/s, 2.35x);
+          fma-serial 12825-12949 ms (0.66 GF/s) <- 3x SLOWER than nofma;
+          fma-intrafront 4214-4314 ms.
+  n=512:  nofma 39-40 ms; fma 71-72 ms (1.8x slower). Intrafront inert
+          (below gate).
+FINDING: the opt-in FMA path regressed badly on x86 when the packed
+kernel became default (2026-07-01): the packed FMA variant uses scalar
+f64::mul_add (factor.rs:3767,:3789), which at baseline codegen (no fma
+target feature) lowers to a libm fma() call per element. The 2026-07-01
+x86 numbers showing fma 1.66x faster were measured on the pre-packed
+pulp strided path (real vfmadd via V3). Default nofma path unaffected.
+Stage 1 fixes this as a side effect (pulp mul_add_f64s -> vfmadd via V3).
+
+* 02:40 :stage1:pulp:dispatch-bug:regression:fix:
+First Stage-1 attempt (packed tile walk moved into schur_kernel.rs
+behind dispatch_nofma/dispatch_fma) was a 5x REGRESSION on x86:
+bench_dense_front 2955 nofma-serial 21126/21272/21203 ms vs 4236 ms
+baseline; FERAL_PACKED_SIMD=0 (scalar tiles) ran 3176 ms. Parity and
+golden-bits tests all PASSED throughout - correct but slow.
+Root cause found in pulp source: dispatch helpers call
+`k.with_simd(v3)` directly on the V3 token. pulp's intended entry is
+`Simd::vectorize(v3, k)`, whose V3 impl routes through a
+#[target_feature(enable="avx,avx2,fma,...")] shim so the AVX intrinsic
+wrappers inline. Called outside that context, every mul_f64s/sub_f64s
+stays an outlined core_arch function call (objdump: standalone
+`_mm256_mul_pd` symbols at 0x3c190). aarch64 never saw this because
+NEON is a baseline feature there - intrinsics inline regardless; the
+dispatch helpers were written and only ever profiled on M-series.
+This bug has been throttling EVERY pulp kernel on x86 (strided panel
+kernels, axpy/axpy2) since Phase 2.4.2 - the 0.45 GF/s strided
+baseline measured this session includes call-per-lane-op overhead, not
+just cache striding.
+Fix: x86_64 branch of dispatch_nofma/dispatch_fma now calls
+pulp::Simd::vectorize(v3, k). aarch64 branch left as-is (measured-good
+on M-series; NEON baseline makes with_simd(NEON) harmless) - flagged
+for M-series re-eval anyway. Bits identical by construction (same lane
+ops, only codegen context changes): golden_bits digests unchanged,
+blocked_ldlt + lib suites green. Re-measuring.
+
+* 04:10 :stage1:gate:anomaly:measurement:
+Post-Stage-1 fixture sweep showed hahn1/avion2 warm medians +15% with
+the SIMD tile kernel while minima stayed equal. Root-caused as far as
+this container allows: (1) all packed calls on those fixtures are
+degenerate (hahn1: nrow=10 ncol=1 n_elim=7, ~1 call/iter, 112-206
+ns/call vs 10 ns inline scalar - examples/bench_packed_tiny); (2) a
+temporary cumulative timer INSIDE the packed impl measured only ~92 us
+total difference across 1000 iterations, i.e. ~0.1% of the ~120
+us/iter median shift - the changed code does not contain the cost; (3)
+hypotheses tested and refuted: AVX frequency-license transitions (tiny
+ymm burst + scalar busywork combo shows NO inflation), missing
+vzeroupper (present at all imp exits), env-var read cost (set-vs-unset
+equal). The inflation is a warm-loop interaction artifact of this
+container correlated with executing the outlined kernel call; no perf
+counters available here to chase further.
+Resolution independent of mechanism: work gate. Tiny panels gain
+nothing from the SIMD call, so route n_elim*rowspan*ncol <
+PACKED_SIMD_MIN_WORK=1024 to the inline scalar walk
+(FERAL_PACKED_SIMD_MIN_WORK overrides for M-series retune). Gate is
+bit-neutral (both sides byte-exact, all parity+golden tests green).
+After gate: hahn1 754-770 us (scalar-tiles level), avion2 36 us
+(better than session baseline 39), dense_front 2955 nofma-serial
+1556 ms (win intact, 2.7x vs baseline 4236). Stage 1 ACCEPTED.
+
+* 04:15 :pounce:context:small-front:
+User pointed to jkitchin/pounce#552: pounce-vs-Ipopt benchmark report.
+Relevant: FERAL factorization 3.5-4.8x slower than MA27/MA57 on
+long-horizon CHAIN-structured KKTs ("very long chain of tiny blocks",
+hicks N=1200: 0.307 s vs MA27 0.092 s), localized by them to the
+numeric kernel, not ordering/heuristics. Corroborates the Stage 3
+target (small-front eager path) and argues for adding a
+block-tridiagonal chain fixture to the probe set.
+
+* 05:10 :stage2:pooling:issue-128:chain:
+Stage 2 (pack-buffer pooling, issue #128 rest) implemented: PackPool
+{apack,bpack0,bpack1} on FactorScratch, mem::take'd around the borrow
+of subdiag/d_panel, threaded through
+apply_blocked_schur->..->apply_schur_panel_range_packed_impl on the
+serial path only (rayon ranges keep fresh vecs). apack skips re-zero
+when length matches (fully overwritten incl. padding); bpack0/1
+re-zero via clear+resize because their zeros are load-bearing for
+out-of-range column lanes. Parity test extended with a dirty pool
+carried across all shapes (use_pool sweep) - byte-exact, 83/83 suites
+green.
+Also added a hicks-like block-tridiagonal chain fixture (scratch
+chain1200_kkt.mtx, n=1200 6x6 blocks) after user pointer to
+jkitchin/pounce#552 (feral 3.5-4.8x vs MA27 on chain KKTs).
+3-run medians vs post-gate Stage-1: chain1200 985 -> 867/847/961
+(-12%), AVION2 36 -> 34 (-6%), twirism1 ~2270 -> 2066-2136 (-6%),
+HYDCAR20 ~220 -> 207-218 (-4%), VESUVIO ~1950 -> 1857-1931 (-4%),
+HAHN1 ~760 -> 739-746 (-2%). Acceptance (>=2% geomean small set) MET.
+
+* 06:20 :stage3:eager:simd:rejected:
+Stage 3 (eager rank-1 SIMD) implemented, measured FLAT, reverted same
+session per the pre-registered reject criterion. Fixture medians
+unchanged within noise; decisive A/B through the eager driver at
+n=512: 11.21 (simd) vs 11.23 ms (scalar) - the plain eager loops
+already autovectorize and the path is pivot-search/bandwidth-bound.
+Kept the byte-identical de-duplication of do_1x1_pivot's two fused
+loops (shared rank1_scale_update_argmax); removed the kernel, gate,
+env var, parity test, and A/B example. Full entry in
+tried-and-rejected.md. Small-front gap suspects now ranked: per-front
+overhead, pivot scans, scalar_pivot_step, delayed-pivot cascade.
+
+* 07:00 :session-end:checkpoint:
+Session-end protocol: bench run (corpus absent - synthetic + regression
+fixtures, all inertia/residual pass, worst residuals 1.14e-15 dense /
+1.26e-16 sparse), decisions.md x3, tried-and-rejected x1, CHANGELOG
+Unreleased entry, checkpoint dev/sessions/2026-08-09-01.md with the
+aarch64 revalidation list. Stages 4-6 (tile retune, L2 blocking,
+block32 quad) deferred with rationale - need M-series data and fresh
+profiles before more kernel surgery.
