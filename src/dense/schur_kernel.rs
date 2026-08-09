@@ -337,8 +337,17 @@ fn dispatch_fma<K: pulp::WithSimd>(k: K) -> K::Output {
     }
     #[cfg(target_arch = "x86_64")]
     {
+        // `Simd::vectorize`, NOT `k.with_simd(v3)`: vectorize wraps the
+        // body in V3's `#[target_feature(enable = "avx,avx2,fma,…")]`
+        // shim so the AVX intrinsics inline. Calling `with_simd`
+        // directly runs the body in a baseline-feature context where
+        // every lane op stays an outlined `core_arch` function call —
+        // measured ~7× slower on the packed tile kernel
+        // (dev/research/kernel-simd-x86-baseline-2026-08-09.md,
+        // Finding 3). Same instructions per lane either way, so results
+        // are bit-identical; only the codegen context changes.
         match pulp::x86::V3::try_new() {
-            Some(v3) => k.with_simd(v3),
+            Some(v3) => pulp::Simd::vectorize(v3, k),
             None => pulp::Arch::new().dispatch(k),
         }
     }
@@ -550,8 +559,13 @@ fn dispatch_nofma<K: pulp::WithSimd>(k: K) -> K::Output {
     }
     #[cfg(target_arch = "x86_64")]
     {
+        // `Simd::vectorize`, NOT `k.with_simd(v3)` — see the twin
+        // comment in `dispatch_fma`: vectorize supplies the
+        // `#[target_feature]` context that lets the AVX intrinsics
+        // inline; direct `with_simd` leaves them as outlined calls
+        // (~7× slower, bit-identical results).
         match pulp::x86::V3::try_new() {
-            Some(v3) => k.with_simd(v3),
+            Some(v3) => pulp::Simd::vectorize(v3, k),
             None => pulp::Arch::new().dispatch(k),
         }
     }

@@ -53,3 +53,29 @@ target feature) lowers to a libm fma() call per element. The 2026-07-01
 x86 numbers showing fma 1.66x faster were measured on the pre-packed
 pulp strided path (real vfmadd via V3). Default nofma path unaffected.
 Stage 1 fixes this as a side effect (pulp mul_add_f64s -> vfmadd via V3).
+
+* 02:40 :stage1:pulp:dispatch-bug:regression:fix:
+First Stage-1 attempt (packed tile walk moved into schur_kernel.rs
+behind dispatch_nofma/dispatch_fma) was a 5x REGRESSION on x86:
+bench_dense_front 2955 nofma-serial 21126/21272/21203 ms vs 4236 ms
+baseline; FERAL_PACKED_SIMD=0 (scalar tiles) ran 3176 ms. Parity and
+golden-bits tests all PASSED throughout - correct but slow.
+Root cause found in pulp source: dispatch helpers call
+`k.with_simd(v3)` directly on the V3 token. pulp's intended entry is
+`Simd::vectorize(v3, k)`, whose V3 impl routes through a
+#[target_feature(enable="avx,avx2,fma,...")] shim so the AVX intrinsic
+wrappers inline. Called outside that context, every mul_f64s/sub_f64s
+stays an outlined core_arch function call (objdump: standalone
+`_mm256_mul_pd` symbols at 0x3c190). aarch64 never saw this because
+NEON is a baseline feature there - intrinsics inline regardless; the
+dispatch helpers were written and only ever profiled on M-series.
+This bug has been throttling EVERY pulp kernel on x86 (strided panel
+kernels, axpy/axpy2) since Phase 2.4.2 - the 0.45 GF/s strided
+baseline measured this session includes call-per-lane-op overhead, not
+just cache striding.
+Fix: x86_64 branch of dispatch_nofma/dispatch_fma now calls
+pulp::Simd::vectorize(v3, k). aarch64 branch left as-is (measured-good
+on M-series; NEON baseline makes with_simd(NEON) harmless) - flagged
+for M-series re-eval anyway. Bits identical by construction (same lane
+ops, only codegen context changes): golden_bits digests unchanged,
+blocked_ldlt + lib suites green. Re-measuring.
