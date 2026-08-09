@@ -199,3 +199,16 @@ Verified independently: single [Unreleased] heading, no stray 0.14.0
 refs beyond the six to bump, working tree clean and in sync with
 origin, 84 binaries / 800 passed / 0 failed / 21 ignored on the exact
 release tree.
+
+* 17:30 :release:0.15.0:
+PR #150 merged as fad5670 (squash). Cut the release commit: all six
+version strings 0.14.0 -> 0.15.0 (root Cargo.toml/lock,
+python/Cargo.toml/lock x2, python/pyproject.toml), CHANGELOG
+[Unreleased] -> [0.15.0] - 2026-08-09. Verified: grep for 0.14.0 comes
+back empty across all five files; `cargo metadata --locked` passes in
+BOTH the root and python/ workspaces (the python one is a separate
+workspace with its own lockfile - the thing that broke CI earlier
+today); 84 binaries / 800 passed / 0 failed on the release tree.
+NOT publishing the GitHub Release - release.yml fires on
+`release: published` and pushes to crates.io, which cannot be
+un-published. That is the maintainer's call.
