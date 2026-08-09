@@ -310,6 +310,22 @@ pub struct FactorScratch {
     /// `Vec<Vec<f64>>` pool was tried and regressed bench p90 by ~0.2
     /// (small) / ~0.3 (medium) — see issue #13 Phase C investigation.
     pub contrib_pool: Option<Vec<f64>>,
+    /// Pooled pack buffers for the packed trailing update (issue #128
+    /// rest, session 2026-08-09). Reused across panels/fronts on the
+    /// serial dispatch path only — the intra-front rayon path keeps
+    /// per-range fresh allocations (a shared pool cannot cross the
+    /// parallel split). Byte-exact: reuse re-zeroes via
+    /// `clear()`+`resize(len, 0.0)`, so kernel inputs are identical to
+    /// fresh allocations.
+    pub pack_pool: PackPool,
+}
+
+/// Reusable buffers for the packed trailing update's A/B micro-panels.
+#[derive(Default, Debug, Clone)]
+pub struct PackPool {
+    apack: Vec<f64>,
+    bpack0: Vec<f64>,
+    bpack1: Vec<f64>,
 }
 
 impl FactorScratch {
@@ -2173,6 +2189,11 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     scratch.subdiag.resize(nrow, 0.0);
     scratch.d_panel.clear();
     scratch.d_panel.resize(bs, 0.0);
+    // Take the pack pool out of the scratch so it can be threaded down
+    // into the trailing update while `subdiag`/`d_panel` hold their own
+    // borrows of `scratch`. Restored at the end of the function; early
+    // error returns merely drop the pool (next call re-allocates once).
+    let mut pack_pool = std::mem::take(&mut scratch.pack_pool);
     let subdiag: &mut [f64] = scratch.subdiag.as_mut_slice();
     let d_panel: &mut [f64] = scratch.d_panel.as_mut_slice();
     let mut pos = 0usize;
@@ -2296,6 +2317,7 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
             &*subdiag,
             params.fma,
             params.intrafront_parallel,
+            Some(&mut pack_pool),
         );
         phase_timing::stop(&phase_timing::SCHUR_NS, _pt);
         k += n_elim;
@@ -2432,6 +2454,9 @@ pub fn factor_frontal_blocked_in_place_with_scratch(
     }
 
     flag_growth_for_refinement(&l, &mut needs_refinement);
+
+    // Return the pack pool to the scratch for the next front.
+    scratch.pack_pool = pack_pool;
 
     Ok(FrontalFactors {
         nrow,
@@ -3185,6 +3210,7 @@ fn apply_blocked_schur(
     subdiag: &[f64],
     fma: bool,
     intrafront_parallel: bool,
+    pool: Option<&mut PackPool>,
 ) {
     if n_elim == 0 || j_start >= nrow {
         return;
@@ -3210,6 +3236,7 @@ fn apply_blocked_schur(
             subdiag,
             fma,
             intrafront_parallel,
+            pool,
         );
         return;
     }
@@ -3238,6 +3265,7 @@ fn apply_blocked_schur(
             subdiag,
             fma,
             intrafront_parallel,
+            pool,
         );
         return;
     }
@@ -3330,6 +3358,7 @@ fn apply_blocked_schur_panel(
     subdiag: &[f64],
     fma: bool,
     intrafront_parallel: bool,
+    pool: Option<&mut PackPool>,
 ) {
     // Stack-friendly upper bound on n_elim. Sized at 128 to cover
     // the default `params.block_size = 64` and the larger panels
@@ -3375,12 +3404,17 @@ fn apply_blocked_schur_panel(
             .enumerate()
             .for_each(|(ci, block)| {
                 let col_start = j_start + ci * chunk_cols;
+                // Per-range fresh pack buffers: a shared pool cannot
+                // cross the parallel split (and multi-slot pooling is
+                // on the tried-and-rejected list).
                 apply_schur_panel_range(
-                    head, block, col_start, nrow, k, n_elim, d_panel, subdiag, fma,
+                    head, block, col_start, nrow, k, n_elim, d_panel, subdiag, fma, None,
                 );
             });
     } else {
-        apply_schur_panel_range(head, tail, j_start, nrow, k, n_elim, d_panel, subdiag, fma);
+        apply_schur_panel_range(
+            head, tail, j_start, nrow, k, n_elim, d_panel, subdiag, fma, pool,
+        );
     }
 }
 
@@ -3416,6 +3450,7 @@ fn apply_schur_panel_range(
     d_panel: &[f64],
     subdiag: &[f64],
     fma: bool,
+    pool: Option<&mut PackPool>,
 ) {
     const MAX_N_ELIM: usize = 128;
     assert!(
@@ -3437,7 +3472,7 @@ fn apply_schur_panel_range(
     // A/B benchmarking and as a safety override.
     if packed_schur_enabled() {
         apply_schur_panel_range_packed(
-            head, block, col_start, nrow, k, n_elim, d_panel, subdiag, fma,
+            head, block, col_start, nrow, k, n_elim, d_panel, subdiag, fma, pool,
         );
         return;
     }
@@ -3642,6 +3677,7 @@ fn apply_schur_panel_range_packed(
     d_panel: &[f64],
     subdiag: &[f64],
     fma: bool,
+    pool: Option<&mut PackPool>,
 ) {
     apply_schur_panel_range_packed_impl(
         head,
@@ -3654,6 +3690,7 @@ fn apply_schur_panel_range_packed(
         subdiag,
         fma,
         packed_simd_enabled(),
+        pool,
     );
 }
 
@@ -3673,11 +3710,21 @@ fn apply_schur_panel_range_packed_impl(
     subdiag: &[f64],
     fma: bool,
     use_simd: bool,
+    pool: Option<&mut PackPool>,
 ) {
     let ncol = block.len() / nrow;
     if ncol == 0 || n_elim == 0 {
         return;
     }
+    // Pooled or fresh pack buffers (issue #128 rest). Pooled reuse
+    // re-zeroes via `clear()` + `resize(len, 0.0)`, making the buffer
+    // contents identical to a fresh `vec![0.0; len]` — the packing
+    // loops below then see indistinguishable inputs, so pooling is
+    // byte-exact by construction. (`bpack0`'s zeros ARE load-bearing:
+    // out-of-range column lanes are only ever zero-filled, never
+    // written.)
+    let mut local = PackPool::default();
+    let pool = pool.unwrap_or(&mut local);
     // Register-tile dimensions. MR rows × NR cols per tile; the MR (row)
     // axis is the contiguous SIMD axis (explicit pulp lanes on the
     // default path, autovectorization on the scalar reference loop).
@@ -3700,8 +3747,15 @@ fn apply_schur_panel_range_packed_impl(
     let npanels_j = ncol.div_ceil(NR);
 
     // Pack A (source rows): `apack[pi][q][ir] = L[row0+pi*MR+ir, k+q]`,
-    // `L[x, k+q] = head[(k+q)*nrow + x]`.
-    let mut apack = vec![0.0f64; npanels_i * n_elim * MR];
+    // `L[x, k+q] = head[(k+q)*nrow + x]`. Every slot (including the
+    // past-`nrow` padding) is overwritten below, so pooled reuse skips
+    // the re-zero when the length already matches.
+    let alen = npanels_i * n_elim * MR;
+    let apack = &mut pool.apack;
+    if apack.len() != alen {
+        apack.clear();
+        apack.resize(alen, 0.0);
+    }
     for pi in 0..npanels_i {
         let i0 = row0 + pi * MR;
         for q in 0..n_elim {
@@ -3727,12 +3781,18 @@ fn apply_schur_panel_range_packed_impl(
     // has no 2×2 pivot start (the `is_2x2_start`-gated indexing is then never
     // reached), full-sized otherwise.
     let has_2x2 = (0..n_elim).any(is_2x2_start);
-    let mut bpack0 = vec![0.0f64; npanels_j * n_elim * NR];
-    let mut bpack1 = if has_2x2 {
-        vec![0.0f64; npanels_j * n_elim * NR]
-    } else {
-        Vec::new()
-    };
+    let blen = npanels_j * n_elim * NR;
+    // `bpack0`/`bpack1` zeros are load-bearing (out-of-range column
+    // lanes stay zero), so pooled reuse must re-zero: `clear()` +
+    // `resize(blen, 0.0)` memsets while preserving capacity.
+    let bpack0 = &mut pool.bpack0;
+    bpack0.clear();
+    bpack0.resize(blen, 0.0);
+    let bpack1 = &mut pool.bpack1;
+    bpack1.clear();
+    if has_2x2 {
+        bpack1.resize(blen, 0.0);
+    }
     for pj in 0..npanels_j {
         let j0 = col_start + pj * NR;
         for q in 0..n_elim {
@@ -3764,6 +3824,11 @@ fn apply_schur_panel_range_packed_impl(
         }
     }
 
+    // Packing complete — read-only from here.
+    let apack: &[f64] = apack;
+    let bpack0: &[f64] = bpack0;
+    let bpack1: &[f64] = bpack1;
+
     // Tiled update over the lower triangle (i >= j): explicit-SIMD pulp
     // tile kernel by default (one dispatch per panel; see
     // `schur_kernel::packed_schur_tiles_nofma` for the bit-exactness
@@ -3789,9 +3854,9 @@ fn apply_schur_panel_range_packed_impl(
         if fma {
             schur_kernel::packed_schur_tiles_fma(
                 block,
-                &apack,
-                &bpack0,
-                &bpack1,
+                apack,
+                bpack0,
+                bpack1,
                 &d_panel[..n_elim],
                 &subdiag[k..],
                 nrow,
@@ -3800,9 +3865,9 @@ fn apply_schur_panel_range_packed_impl(
         } else {
             schur_kernel::packed_schur_tiles_nofma(
                 block,
-                &apack,
-                &bpack0,
-                &bpack1,
+                apack,
+                bpack0,
+                bpack1,
                 &d_panel[..n_elim],
                 &subdiag[k..],
                 nrow,
@@ -6381,6 +6446,10 @@ mod packed_schur_tests {
                 .wrapping_add(1442695040888963407);
             ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
         };
+        // Pool carried dirty across every case/shape below, so pooled
+        // reuse exercises stale lengths and stale contents — the
+        // re-zero path must make it byte-identical to fresh buffers.
+        let mut pool = PackPool::default();
         // (nrow, k, n_elim, col_start, subdiag-pattern). Patterns:
         //   "1x1"  — all 1×1
         //   "2x2"  — 2×2 pairs at q = 2 and q = 5 (where they fit)
@@ -6425,27 +6494,30 @@ mod packed_schur_tests {
                 // (the `FERAL_PACKED_SIMD=0` fallback) must match the
                 // scalar per-column reference bit-for-bit.
                 for use_simd in [true, false] {
-                    let mut b_packed = block0.clone();
-                    apply_schur_panel_range_packed_impl(
-                        &head,
-                        &mut b_packed,
-                        col_start,
-                        nrow,
-                        k,
-                        n_elim,
-                        &d_panel,
-                        &subdiag,
-                        fma,
-                        use_simd,
-                    );
-                    for lc in 0..ncol {
-                        let j = col_start + lc;
-                        for i in j..nrow {
-                            assert_eq!(
-                                b_packed[lc * nrow + i].to_bits(),
-                                b_ref[lc * nrow + i].to_bits(),
-                                "packed != scalar (fma={fma}, simd={use_simd}, pat={pat}) at (i={i},j={j}) nrow={nrow} n_elim={n_elim}"
-                            );
+                    for use_pool in [false, true] {
+                        let mut b_packed = block0.clone();
+                        apply_schur_panel_range_packed_impl(
+                            &head,
+                            &mut b_packed,
+                            col_start,
+                            nrow,
+                            k,
+                            n_elim,
+                            &d_panel,
+                            &subdiag,
+                            fma,
+                            use_simd,
+                            if use_pool { Some(&mut pool) } else { None },
+                        );
+                        for lc in 0..ncol {
+                            let j = col_start + lc;
+                            for i in j..nrow {
+                                assert_eq!(
+                                    b_packed[lc * nrow + i].to_bits(),
+                                    b_ref[lc * nrow + i].to_bits(),
+                                    "packed != scalar (fma={fma}, simd={use_simd}, pool={use_pool}, pat={pat}) at (i={i},j={j}) nrow={nrow} n_elim={n_elim}"
+                                );
+                            }
                         }
                     }
                 }

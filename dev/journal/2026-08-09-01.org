@@ -112,3 +112,22 @@ hicks N=1200: 0.307 s vs MA27 0.092 s), localized by them to the
 numeric kernel, not ordering/heuristics. Corroborates the Stage 3
 target (small-front eager path) and argues for adding a
 block-tridiagonal chain fixture to the probe set.
+
+* 05:10 :stage2:pooling:issue-128:chain:
+Stage 2 (pack-buffer pooling, issue #128 rest) implemented: PackPool
+{apack,bpack0,bpack1} on FactorScratch, mem::take'd around the borrow
+of subdiag/d_panel, threaded through
+apply_blocked_schur->..->apply_schur_panel_range_packed_impl on the
+serial path only (rayon ranges keep fresh vecs). apack skips re-zero
+when length matches (fully overwritten incl. padding); bpack0/1
+re-zero via clear+resize because their zeros are load-bearing for
+out-of-range column lanes. Parity test extended with a dirty pool
+carried across all shapes (use_pool sweep) - byte-exact, 83/83 suites
+green.
+Also added a hicks-like block-tridiagonal chain fixture (scratch
+chain1200_kkt.mtx, n=1200 6x6 blocks) after user pointer to
+jkitchin/pounce#552 (feral 3.5-4.8x vs MA27 on chain KKTs).
+3-run medians vs post-gate Stage-1: chain1200 985 -> 867/847/961
+(-12%), AVION2 36 -> 34 (-6%), twirism1 ~2270 -> 2066-2136 (-6%),
+HYDCAR20 ~220 -> 207-218 (-4%), VESUVIO ~1950 -> 1857-1931 (-4%),
+HAHN1 ~760 -> 739-746 (-2%). Acceptance (>=2% geomean small set) MET.
