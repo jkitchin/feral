@@ -62,9 +62,15 @@ pub struct FeralSolver {
 ///     spelling measures the same configuration. Used for task #68
 ///     (clnlbeam IPM iter bloat investigation) to test whether
 ///     MC64-vs-other scaling changes the IPM trajectory.
-///   - `FERAL_PARALLEL` = `0`/`off`/`false` — disable parallel
+///   - `FERAL_PARALLEL` = `0`/`off`/`false`/`no` — disable parallel
 ///     multifrontal factorization (single-threaded). Used to test
 ///     parallel-reduction-order non-reproducibility.
+///     `1`/`on`/`true`/`yes` forces it *on*, overriding the
+///     platform-derived default (issue #154). Needed on hosts whose
+///     threads std cannot see — a wasm-bindgen-rayon page that stood
+///     up its own worker pool — where `available_parallelism()`
+///     reports `Err` and the default is therefore sequential. Unset
+///     leaves the default alone.
 ///   - `FERAL_PIVTOL` = `<float>` — override `pivot_threshold` (default
 ///     1e-8 matching MA27/ipopt's `ma27_pivtol`). Used to test
 ///     whether tighter pivots (e.g. 0.01 MA57-canonical) change the
@@ -155,11 +161,17 @@ pub extern "C" fn feral_new() -> *mut FeralSolver {
                 solver = solver.with_auto_cascade_break(beta);
             }
         }
-        if matches!(
-            std::env::var("FERAL_PARALLEL").as_deref(),
-            Ok("0") | Ok("off") | Ok("false") | Ok("no"),
-        ) {
-            solver = solver.with_parallel(false);
+        // Issue #154: two-sided now that the default is derived from
+        // the platform rather than hardcoded on. An unset (or
+        // unrecognized) value leaves the derived default in place.
+        match std::env::var("FERAL_PARALLEL").as_deref() {
+            Ok("0") | Ok("off") | Ok("false") | Ok("no") => {
+                solver = solver.with_parallel(false);
+            }
+            Ok("1") | Ok("on") | Ok("true") | Ok("yes") => {
+                solver = solver.with_parallel(true);
+            }
+            _ => {}
         }
 
         Box::into_raw(Box::new(FeralSolver {
