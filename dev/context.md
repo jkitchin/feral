@@ -1,122 +1,116 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-07-11T16:23:37Z
+Generated: 2026-08-09T01:16:25Z
 
 ## Latest Session
-File: dev/sessions/2026-07-11-01.md
+File: dev/sessions/2026-07-11-02.md
 ```
-# Session 2026-07-11-01
+# Session 2026-07-11-02
 
 ## Goal
 
-Review all open branches for up-to-dateness (user request). Two follow-on
-tasks emerged: (1) merge dev/ records stranded on closed-issue branches and
-delete the branches; (2) diagnose and fix a locally-failing test surfaced by
-the first task, and close the fixture-gating blind spot that hid it from CI.
+Continuation of 2026-07-11-01. Review the open issues for release-worthiness,
+do the pre-release housekeeping, implement the one issue worth doing first
+(#127), then cut and publish release 0.14.0.
 
 ## Benchmark comparison to previous session
 
-**No regression.** This session changed **no solver code** — only a test
-assertion, CI config, `.gitignore`, committed fixtures, and docs — so the
-bench reflects main's unchanged code (`dfae3c5` → `7c56427`). Inertia gate
-holds at **100.0%** on both paths. The last full-corpus run was 2026-05-21-04
-(the intervening container sessions had no corpus); vs that baseline the
-corpus grew by 1–2 matrices, inertia stayed 100%, residual-pass stayed 99.8%
-on both paths. Any May→July residual drift spans dozens of intervening solver
-PRs and is not attributable to this session.
+**No regression.** The only code change this session (#127) is a bit-identical
+refactor; the release commit changes no code. Full-corpus bench after #127 is
+identical to the 2026-07-11-01 baseline on both inertia (100%) and residual
+counts — see Benchmark Results.
 
 ## Accomplished
 
-- **Branch review + cleanup (PR #140, `805b85d`).** Verified branch-by-branch
-  that all *code* on every open branch had already landed on main (issue-112
-  tip byte-identical; #107 via PR #108; #99 packed-kernel via PR #103; four
-  branches 0 ahead). Three branches held dev/ records existing nowhere else;
-  merged them (issue-110's 545-line research note + 3 diagnostics study bins;
-  issue-102's stall-verify note + a journal entry; issue-99's container
-  checkpoint/journal renumbered `2026-07-01-03`→`-07` to avoid colliding with
-  main's different session -03). CI green, bins compile against main. Deleted
-  all nine stale branches; fast-forwarded local main `9596472`→`dfae3c5`.
+- **Issue triage → recommendation.** Reviewed all five open issues (#125,
+  #127, #128, #131, #134). Conclusion: all are deferred perf/robustness work,
+  none a correctness blocker; the strongest release argument is the ten
+  already-merged-but-unreleased correctness fixes (#114–#123). Recommended
+  releasing now and doing #127 first (highest value / lowest risk for the IPM
+  host workload). User agreed.
 
-- **Bisected the issue-65 test regression.** `cargo test` failed locally on
-  `issue65_mc64_fallback::explicit_infnorm_is_respected_no_fallback`
-  (expected `(789,670,116)`, got `(789,785,1)`) while CI was green on the
-  same SHA. Cause: the fixtures are gitignored + non-regenerable on CI, so
-  the guard SKIP-passed everywhere but this Mac. Bisect (fixtures unchanged
-  since Jun 3): `9596472` ok → `660224d`/#113 ok → **`8a980e4`/#135 FAILED**.
-  #135's rook fixes (#116 solve skips only exactly-zeroed pivots; #117 blocked
-  panel defers rook-eligible 1×1s to scalar) legitimately rescued 115 of 116
-  formerly force-zeroed pivots — moving the InfNorm signature *closer* to the
-  oracle `(789,786,0)`. An improvement that invalidated a pinned constant, not
-  a correctness bug.
+- **Housekeeping (PR #143, merged).** The Unreleased CHANGELOG credited #125
+  and #128 as done though only a slice of each had landed. Marked both as
+  partial and posted landed-vs-remaining status comments (with commit refs) on
+  issues #125 and #128; verified both new public surfaces (`solve_sparse_cb`,
+  `LuParams::update_pivot_search` + its Python keyword) are documented.
 
-- **Fixed it + closed the blind spot (PR #141, `7c56427`).**
-  - Test now asserts the contract (`mc64_scaling_fallback_count()==0`,
-    `inertia.zero>0`, components sum to n=1575) instead of a pivot-policy
-    signature that has now drifted once. Human-approved.
-  - Committed the two generated fixtures (~280 KB) via `.gitignore` negation
-    (`tests/data/large/*` + `!sawpath`/`!twirism1`); large fetchable
+- **Issue #127 (PR #144, merged; issue closed).** Split
+  `symbolic_factorize_with_method` into a cheap *prefix* (ordering → column
+  counts → `factor_nnz`) and a *finish* (supernodes, small-leaf, peak-contrib,
+  static rows, struct assembly). Both race dispatchers (preprocess-`Auto`,
+  `AutoRace`) now race prefixes and finish only the winner — previously each
+  candidate ran the full pipeline (up to ~8× symbolic when both races nest).
+  Chose prefix/finish over "estimate then recompute winner" (the latter would
+  double the LdltCompress MC64 matching when compression wins). Winner
+  selection bit-identical; produced `SymbolicFactorization` unchanged;
+  Schur-tail variant untouched; profiler "one run" behaviour preserved. New
+  self-consistency parity tests (`tests/issue127_pipeline_split.rs`) + a
+  thread-local `#[cfg(test)]` FINISH_RUNS counter proving losers never reach
+  the tail. Research/plan: `dev/research/issue-127-symbolic-pipeline-split.md`,
+  `dev/plans/issue-127-pipeline-split.md`.
+
+- **Release 0.14.0 (PR #145, merged; published).** Bumped all six version
+  strings 0.13.0 → 0.14.0 (root + python `Cargo.toml`/`Cargo.lock`,
+  `pyproject.toml`), cut the CHANGELOG `[0.14.0] - 2026-07-11` section, tagged
+  the `v0.14.0` GitHub Release. Both publish workflows succeeded:
+  `release.yml` → crates.io (cargo publish in dependency order),
 ```
 
 ## Git Status
 ```
+6589570 docs: session checkpoint 2026-07-11-02 (issue triage, #127, release 0.14.0) (#146)
 c05eb77 release: feral v0.14.0 (#145)
 8a6992e perf(symbolic): split pipeline so ordering-race losers skip the tail (#127) (#144)
 683933a docs(changelog): mark #125 and #128 as partial in Unreleased (#143)
 a0bf2db docs: session checkpoint 2026-07-11-01 (branch cleanup + issue-65 fix) (#142)
-7c56427 test(issue65): semantic assertion + commit fixtures, surface CI skips (#141)
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
-test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
-test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 409 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.57s
+test result: ok. 407 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.93s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-11-01.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-07-11-02.md)
 
 
-cargo run --bin bench --release  (full local corpus, aarch64 M-series)
+cargo run --bin bench --release  (full local corpus, aarch64 M-series; after #127)
 
 --- Dense solver validation ---
-  Inertia match:  154429/154482 (100.0%)   [53 consensus-excluded]
-  Residual pass:  154149/154482 (99.8%)
-  Worst residual: 2.46e-1 (POLAK6_0021)     # known residual-hard case
+  Inertia match:  154429/154482 (100.0%)
+  Residual pass:  154149/154482 (99.8%)   worst 2.46e-1 (POLAK6_0021)
 
 --- Sparse solver validation ---
   Inertia match vs MUMPS: 154531/154590 (100.0%)
-  Residual pass:          154258/154590 (99.8%)
-  Worst residual:         2.94e-4 (ERRINBAR_0824)
+  Residual pass:          154258/154590 (99.8%)   worst 2.94e-4 (ERRINBAR_0824)
 
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-  small-frontal (<200)  count 147982  p90 1.72  <= 2.0  PASS
-  medium       (<500)   count 152145  p90 2.13  <= 3.0  PASS
+--- exit partitions ---
+  Dense  small-frontal p90 1.67 (<=2.0) PASS ; medium p90 2.08 (<=3.0) PASS
+  Sparse small-frontal p90 1.56 (<=2.0) PASS ; medium p90 1.57 (<=3.0) PASS
 
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-  small-frontal (<200)  count 153455  p90 1.61  <= 2.0  PASS
-  medium       (<500)   count 153560  p90 1.61  <= 3.0  PASS
-
-Worst factor-ratio vs MUMPS (dense): KIRBY2_0007 9.13×, HAHN1_0078 8.58×,
-CRESC132_0000 7.30× (n=5314) — the persistent small-n dense-front tail.
+Inertia AND residual counts are identical to the pre-#127 baseline
+(2026-07-11-01), confirming winner selection is unchanged (same factors).
 
 ```
 
@@ -240,8 +234,8 @@ tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering_parity.rs
 tests/column_renumbering.rs
+tests/column_renumbering_parity.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -254,14 +248,6 @@ tests/factors_ld_export.rs
 tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/growth_flag.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -273,13 +259,21 @@ tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
-tests/lu_dense_update_bg.rs
 tests/lu_dense.rs
+tests/lu_dense_update_bg.rs
 tests/lu_ft_widebump.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
@@ -298,8 +292,8 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/rook_rescue_kkt.rs
 tests/rook_rescue.rs
+tests/rook_rescue_kkt.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
