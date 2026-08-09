@@ -1,0 +1,80 @@
+#+TITLE: Session journal 2026-08-09-06 (issue #154)
+# Session file: dev/sessions/2026-08-09-04.md. Journal numbers -04
+# and -05 were taken by the amalgamation session (PR #155) while
+# this work was in flight, so the numbers do not line up.
+
+* 16:20 :issue-154:parallel:wasm:review:
+Reviewed issue #154 ("default `use_parallel` from the platform").
+Verified every code claim against 808babb: line refs 430, 972, 1148,
+1216, 1540 and the quoted `ensure_parallel_pool` body are all exact.
+Diagnosis is correct and the direction is right.
+
+Three problems with the proposal as written:
+1. The test inventory is incomplete. The issue names one test
+   (`solver_parallel_default_is_on`) and calls it a latent flake.
+   There are three, and two are hard failures. Measured by applying
+   ONLY the issue's one-liner to a pristine tree and running under
+   `taskset -c 0`:
+     test result: FAILED. 404 passed; 3 failed
+     solver_parallel_default_is_on          FAILED (solver.rs:2825)
+     solver_parallel_factor_matches_sequential FAILED (3852,
+       `assertion failed: par.parallel()`)
+     solver_reuses_thread_pool_across_factors  FAILED (2887,
+       `.expect("pool must be built after first parallel factor")`)
+   The middle one is the #7 bit-exactness regression test. Fixing
+   only its assert would make it compare the sequential driver to
+   itself and pass vacuously — a silent loss of coverage.
+2. The "filed separately" fallback bug is not separable. After the
+   default flips, `with_parallel(true)` — the escape hatch the issue
+   leans on for wasm — still routes to `ensure_parallel_pool()`, and
+   on build failure falls to the `None` arm which runs the PARALLEL
+   driver bare, i.e. on the global rayon pool. That is the failure
+   the issue is avoiding, now reached through the documented
+   workaround. Shipping the default flip alone would release a
+   version whose documented wasm answer is a trap.
+3. The issue misses a fourth dispatch site: `solve_many_refined`
+   (solver.rs:1601) has the same `None`-arm shape as `solve_refined`.
+
+* 16:45 :issue-154:parallel:adjacent:
+Adjacent sweep before implementing. Checked every rayon entry point
+reachable from `Solver`:
+- `intrafront_parallel` (dense/factor.rs:3402, Lever 1.1) is set ONLY
+  inside `factorize_multifrontal_parallel_with_workspace`
+  (factorize.rs:3127), so the sequential driver never spawns nested
+  rayon work. Not a bug — the pounce#79 oversubscription guarantee
+  holds. Fixing the `None` arms to route sequential fixes the one
+  path where it leaked.
+- `solve.rs:632/734/998` rayon uses are all under
+  `solve_sparse_refined_parallel`, already gated by `use_parallel`.
+- Real adjacent find: `ensure_parallel_pool` sized its pool with
+  `rayon::current_num_threads()`, which INITIALIZES rayon's global
+  registry as a side effect — spawning a second set of workers we
+  never use, and on a host that cannot spawn, failing inside rayon
+  rather than at our own `build()` where we can handle it. Replaced
+  with `pool_num_threads()`, reproducing rayon's own rule
+  (RAYON_NUM_THREADS -> available_parallelism -> 1) without touching
+  the global registry. `Solver` now never initializes it.
+- Also fixed the `FERAL_PARALLEL` capi knob, which was off-only. With
+  a derived default it needs a force-on arm, otherwise a
+  wasm-bindgen-rayon embedder has no way to opt in without a rebuild.
+
+Also: `.git/hooks/pre-commit` was missing on this clone
+(assemble-context.sh warned). Installed pre-commit per CLAUDE.md.
+
+* 17:10 :issue-154:parallel:validation:
+Implemented and validated. Single-CPU host simulated with
+`taskset -c 0` (nproc reports 1), which is the case the issue's
+validation table omits and the one all three test failures need:
+  taskset -c 0 cargo test --lib -> 409 passed; 0 failed; 6 ignored
+  cargo test (4 cores, full suite) -> 0 failed across all binaries
+  cargo clippy --all-targets -D warnings -> clean
+New coverage: `solver_parallel_default_follows_platform` asserts
+against the same probe the constructor uses (not a hardcoded bool, so
+it cannot become environment-dependent again);
+`pool_num_threads_precedence` pins the RAYON_NUM_THREADS rule via a
+pure helper so no test mutates process-global env;
+`solver_parallel_without_pool_falls_back_to_serial_refine`
+reproduces the post-build-failure field state (factor with parallel
+off, then flip `use_parallel`) and asserts the refine output is
+BIT-IDENTICAL to the sequential solver — the fallback is a scheduling
+decision and must not perturb numerics.

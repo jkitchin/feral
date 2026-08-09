@@ -260,7 +260,10 @@ pub struct Solver {
     /// data cannot leak between factor attempts.
     workspace: FactorWorkspace,
     /// Route `factor()` through the rayon-parallel multifrontal
-    /// driver when `true`. Default `true`. The parallel driver is
+    /// driver when `true`. Defaults to whether the platform reports
+    /// more than one usable hardware thread — see
+    /// [`Solver::default_use_parallel`] and issue #154; on ordinary
+    /// multi-core native hosts that is `true`. The parallel driver is
     /// bit-exact with the sequential supernodal driver and falls
     /// through to the sequential path via
     /// `should_parallelize_assembly` when the supernode count is
@@ -279,9 +282,12 @@ pub struct Solver {
     /// parked between calls and resume on the next `install`
     /// without re-entering the kernel scheduler for each new task.
     ///
-    /// Thread count: matches `rayon::current_num_threads()` at
-    /// first build (honors `RAYON_NUM_THREADS` and the default
-    /// `num_cpus`). Wrapped in `Arc` so `install` can run inside
+    /// Thread count: `pool_num_threads()` at first build — the
+    /// `RAYON_NUM_THREADS` override if set and parseable, else
+    /// `available_parallelism()`, else 1. This mirrors rayon's own
+    /// default without calling `rayon::current_num_threads()`, which
+    /// would initialize the *global* registry as a side effect
+    /// (issue #154). Wrapped in `Arc` so `install` can run inside
     /// the same `&mut self` borrow that touches `numeric_params`
     /// and `workspace` — `install` only needs `&ThreadPool`.
     parallel_pool: Option<std::sync::Arc<rayon::ThreadPool>>,
@@ -427,7 +433,7 @@ impl Solver {
             mc64_retry_attempts: 0,
             mc64_retry_not_adopted: false,
             workspace: FactorWorkspace::new(),
-            use_parallel: true,
+            use_parallel: Self::default_use_parallel(),
             parallel_pool: None,
             ordering: OrderingMethod::Auto,
             ordering_escalation_growth: Some(1e24),
@@ -447,6 +453,72 @@ impl Solver {
         }
     }
 
+    /// The value `Solver::new()` / `Solver::with_params` give
+    /// `use_parallel`: `true` iff the platform reports more than one
+    /// usable hardware thread.
+    ///
+    /// Issue #154. The previous hardcoded `true` was wrong in a way
+    /// the caller could not see on any host that cannot run threads:
+    /// `factor()` would build a `ThreadPool` that either fails to
+    /// spawn (`wasm32-wasip1`, where `available_parallelism` and
+    /// `thread::spawn` are both `Unsupported`) or — on a
+    /// threads-enabled wasm host whose worker pool has not been
+    /// stood up — blocks waiting for workers that never arrive.
+    /// Deriving the default means embedders no longer carry
+    /// target-specific configuration for something the library can
+    /// see for itself.
+    ///
+    /// `available_parallelism()` is deliberate: it is the only probe
+    /// that answers this question *without* initializing rayon's
+    /// global registry, which is the side effect we are avoiding. On
+    /// Linux it honors `sched_getaffinity` and the cgroup CPU quota,
+    /// so a container pinned to one CPU also defaults to sequential —
+    /// correct on its own terms, since the parallel driver on one
+    /// core is pure scheduling overhead.
+    ///
+    /// Two hosts get the "wrong" answer conservatively, and
+    /// [`Solver::with_parallel(true)`](Solver::with_parallel) is the
+    /// escape hatch for both: a correctly-initialized
+    /// `wasm32-unknown-unknown` + wasm-bindgen-rayon page does have
+    /// working threads but still reports `Err` here (std cannot see
+    /// JS-side workers), and a single-CPU-quota host with
+    /// `RAYON_NUM_THREADS` set high is being told something std
+    /// cannot confirm. Both already require an explicit init step,
+    /// and the failure mode they trade into is "slower than it could
+    /// be" rather than "hangs".
+    pub fn default_use_parallel() -> bool {
+        std::thread::available_parallelism().is_ok_and(|n| n.get() > 1)
+    }
+
+    /// Worker count for the `Solver`-owned pool: `RAYON_NUM_THREADS`
+    /// if set and parseable as a non-zero count, else
+    /// `available_parallelism()`, else 1.
+    ///
+    /// This reproduces rayon's own default-thread-count rule rather
+    /// than asking rayon for it. `rayon::current_num_threads()`
+    /// answers the same question but initializes the global registry
+    /// to do so — spawning a second set of workers we never use, and
+    /// on a host that cannot spawn, failing inside rayon rather than
+    /// at our own `build()` call where we can handle it (issue #154).
+    fn pool_num_threads() -> usize {
+        Self::pool_num_threads_from(
+            std::env::var("RAYON_NUM_THREADS").ok().as_deref(),
+            std::thread::available_parallelism().ok().map(|n| n.get()),
+        )
+    }
+
+    /// Pure core of [`Solver::pool_num_threads`], split out so the
+    /// precedence rule is testable without mutating process-global
+    /// environment state from a threaded test runner.
+    fn pool_num_threads_from(rayon_num_threads: Option<&str>, hardware: Option<usize>) -> usize {
+        rayon_num_threads
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .or(hardware)
+            .unwrap_or(1)
+            .max(1)
+    }
+
     /// Build (lazily) the rayon `ThreadPool` that the parallel
     /// multifrontal driver will execute inside, and return an
     /// `Arc` to it. The pool is constructed on the first call and
@@ -454,13 +526,17 @@ impl Solver {
     /// `parallel_pool` for the issue #19 motivation.
     ///
     /// On `ThreadPoolBuilder::build` failure the caller is given
-    /// `None` so the dispatcher can fall through to the global
-    /// rayon pool. In practice the builder only fails on bad
-    /// `num_threads` configuration (e.g. zero) which we never
-    /// pass.
+    /// `None` and every dispatch site falls back to the *sequential*
+    /// driver — never to the global rayon pool. `build()` fails
+    /// whenever worker threads cannot be spawned: `wasm32-wasip1`
+    /// (`spawn` is `Unsupported`), and ordinary Linux under thread
+    /// exhaustion (`RLIMIT_NPROC`, cgroup `pids.max`). Both are
+    /// precisely the situations where silently escalating to a
+    /// second, global pool is least welcome — see issue #154 and
+    /// compare #102's nested-rayon workspace-mutex self-deadlock.
     fn ensure_parallel_pool(&mut self) -> Option<std::sync::Arc<rayon::ThreadPool>> {
         if self.parallel_pool.is_none() {
-            let n = rayon::current_num_threads().max(1);
+            let n = Self::pool_num_threads();
             match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
                 Ok(pool) => {
                     self.parallel_pool = Some(std::sync::Arc::new(pool));
@@ -471,12 +547,26 @@ impl Solver {
         self.parallel_pool.as_ref().map(std::sync::Arc::clone)
     }
 
-    /// Toggle the rayon-parallel multifrontal driver. Default is
-    /// `true`; pass `false` to force the sequential supernodal
-    /// driver (useful for determinism studies or single-threaded
-    /// benchmarks). The two drivers are bit-exact equal on every
-    /// supernode — flipping this only affects scheduling, not
-    /// numerics.
+    /// Toggle the rayon-parallel multifrontal driver. The default is
+    /// derived from the platform — see
+    /// [`Solver::default_use_parallel`] — and is `true` on an
+    /// ordinary multi-core native host.
+    ///
+    /// Pass `false` to force the sequential supernodal driver (useful
+    /// for determinism studies or single-threaded benchmarks). The
+    /// two drivers are bit-exact equal on every supernode — flipping
+    /// this only affects scheduling, not numerics.
+    ///
+    /// Pass `true` to force the parallel driver on a host whose
+    /// threads std cannot see: a wasm-bindgen-rayon page that stood
+    /// up its own worker pool, or a cgroup-pinned container where you
+    /// have set `RAYON_NUM_THREADS` yourself. Note that the derived
+    /// default deliberately does *not* consult `RAYON_NUM_THREADS` —
+    /// that variable sizes the pool once we have decided to build
+    /// one, and cannot vouch for threads existing. Forcing `true`
+    /// where threads genuinely cannot be spawned is safe but wasted:
+    /// pool construction fails and every dispatch falls back to the
+    /// sequential driver.
     pub fn with_parallel(mut self, parallel: bool) -> Self {
         self.use_parallel = parallel;
         self
@@ -1145,24 +1235,27 @@ impl Solver {
         // route to the sequential driver via
         // `should_parallelize_assembly`; in that case `install` is a
         // no-op on the inner code that doesn't touch rayon.
-        let result = if self.use_parallel {
-            if let Some(p) = pool.as_ref() {
-                p.install(|| {
-                    factorize_multifrontal_parallel_with_workspace(
-                        matrix,
-                        symbolic,
-                        &effective_params,
-                        &mut self.workspace,
-                    )
-                })
-            } else {
+        //
+        // Issue #154: when `use_parallel` is on but the pool could
+        // NOT be built, fall back to the *sequential* driver rather
+        // than running the parallel one bare. Running it bare means
+        // running it on the global rayon pool, which defeats the
+        // isolation this per-`Solver` pool exists to provide, and
+        // arrives exactly when nesting is least welcome — `build()`
+        // only fails when threads cannot be spawned at all
+        // (`wasm32-wasip1`) or the host is already out of them
+        // (`RLIMIT_NPROC`, cgroup `pids.max`). The two drivers are
+        // bit-exact, so this is a scheduling fallback, not a
+        // numerical one.
+        let result = if let (true, Some(p)) = (self.use_parallel, pool.as_ref()) {
+            p.install(|| {
                 factorize_multifrontal_parallel_with_workspace(
                     matrix,
                     symbolic,
                     &effective_params,
                     &mut self.workspace,
                 )
-            }
+            })
         } else {
             factorize_multifrontal_with_workspace(
                 matrix,
@@ -1213,24 +1306,17 @@ impl Solver {
                 if let Some(arc) = self.last_profiler.as_ref() {
                     retry_params.profiler = Some(Arc::clone(arc));
                 }
-                let retry = if self.use_parallel {
-                    if let Some(p) = pool.as_ref() {
-                        p.install(|| {
-                            factorize_multifrontal_parallel_with_workspace(
-                                matrix,
-                                symbolic,
-                                &retry_params,
-                                &mut self.workspace,
-                            )
-                        })
-                    } else {
+                // Same #154 pool-or-sequential dispatch as the initial
+                // factor above — never the parallel driver bare.
+                let retry = if let (true, Some(p)) = (self.use_parallel, pool.as_ref()) {
+                    p.install(|| {
                         factorize_multifrontal_parallel_with_workspace(
                             matrix,
                             symbolic,
                             &retry_params,
                             &mut self.workspace,
                         )
-                    }
+                    })
                 } else {
                     factorize_multifrontal_with_workspace(
                         matrix,
@@ -1535,15 +1621,19 @@ impl Solver {
         // path-like / small trees it runs the serial core, matching the
         // default path's behavior. Install on this solver's pool (built
         // during the parallel factor) so the solve uses the same worker
-        // count and does not oversubscribe; fall through to the global
-        // pool if none was built.
-        if self.use_parallel {
-            match &self.parallel_pool {
-                Some(pool) => pool.install(|| solve_sparse_refined_parallel(matrix, f, rhs)),
-                None => solve_sparse_refined_parallel(matrix, f, rhs),
-            }
-        } else {
-            solve_sparse_refined(matrix, f, rhs)
+        // count and does not oversubscribe.
+        //
+        // Issue #154: if no pool was built, run the serial refine
+        // rather than falling through to the global pool. The previous
+        // comment here stated the global-pool fall-through as
+        // intentional; it is not — no pool means threads were
+        // unavailable, and reaching for a different pool does not make
+        // them available. Serial refinement is bit-exact with the
+        // self-gated serial core the parallel path already takes on
+        // path-like trees.
+        match (self.use_parallel, &self.parallel_pool) {
+            (true, Some(pool)) => pool.install(|| solve_sparse_refined_parallel(matrix, f, rhs)),
+            _ => solve_sparse_refined(matrix, f, rhs),
         }
     }
 
@@ -1597,16 +1687,13 @@ impl Solver {
         let mut out = vec![0.0; n * nrhs];
         for c in 0..nrhs {
             let src = &rhs[c * n..(c + 1) * n];
-            // Same #131 Gap A dispatch as `solve_refined` (per column).
-            let xc = if self.use_parallel {
-                match &self.parallel_pool {
-                    Some(pool) => {
-                        pool.install(|| solve_sparse_refined_parallel(matrix, factors, src))
-                    }
-                    None => solve_sparse_refined_parallel(matrix, factors, src),
+            // Same #131 Gap A dispatch as `solve_refined` (per column),
+            // with the same #154 pool-or-serial fallback.
+            let xc = match (self.use_parallel, &self.parallel_pool) {
+                (true, Some(pool)) => {
+                    pool.install(|| solve_sparse_refined_parallel(matrix, factors, src))
                 }
-            } else {
-                solve_sparse_refined(matrix, factors, src)
+                _ => solve_sparse_refined(matrix, factors, src),
             }?;
             out[c * n..(c + 1) * n].copy_from_slice(&xc);
         }
@@ -1699,7 +1786,9 @@ impl Solver {
     }
 
     /// Whether `factor()` is configured to use the rayon-parallel
-    /// multifrontal driver. Default `true`. See `with_parallel`.
+    /// multifrontal driver. Defaults to
+    /// [`Solver::default_use_parallel`] — `true` on an ordinary
+    /// multi-core native host. See `with_parallel`.
     pub fn parallel(&self) -> bool {
         self.use_parallel
     }
@@ -2814,18 +2903,60 @@ mod tests {
 
     // -- Issue #7: parallel driver exposure on `Solver` -----------------
 
-    /// `Solver::new()` defaults to the rayon-parallel multifrontal
-    /// driver. The parallel driver internally falls through to the
-    /// sequential supernodal path on small problems via
-    /// `should_parallelize_assembly` so default-on does not regress
-    /// small-problem latency.
+    /// Issue #154: `Solver::new()` derives `use_parallel` from the
+    /// platform instead of hardcoding `true`. On any host that reports
+    /// more than one hardware thread — every ordinary multi-core
+    /// machine, including CI — that is still `true`, so the #7
+    /// default-on behavior is unchanged where it was ever meaningful.
+    /// On a host that cannot report threads (`wasm32-wasip1`) or is
+    /// pinned to one CPU, it is `false`.
+    ///
+    /// Asserted against the same probe the constructor uses rather
+    /// than a hardcoded `true`: the old test passed on a 4-core box
+    /// and would have failed on a single-core runner, which is a
+    /// latent environment dependence, not a check.
     #[test]
-    fn solver_parallel_default_is_on() {
-        let solver = Solver::new();
-        assert!(
-            solver.parallel(),
-            "Solver::new() should default to use_parallel = true"
+    fn solver_parallel_default_follows_platform() {
+        let expected = std::thread::available_parallelism().is_ok_and(|n| n.get() > 1);
+        assert_eq!(
+            Solver::default_use_parallel(),
+            expected,
+            "default_use_parallel() must be `available_parallelism() > 1`"
         );
+        assert_eq!(
+            Solver::new().parallel(),
+            expected,
+            "Solver::new() must adopt the platform-derived default"
+        );
+        assert_eq!(
+            Solver::default().parallel(),
+            expected,
+            "Solver::default() delegates to new() and must agree"
+        );
+    }
+
+    /// Issue #154: the pool worker count reproduces rayon's own rule —
+    /// `RAYON_NUM_THREADS` wins when it parses to a non-zero count,
+    /// otherwise the hardware count, otherwise 1 — without calling
+    /// `rayon::current_num_threads()` and initializing rayon's global
+    /// registry as a side effect.
+    #[test]
+    fn pool_num_threads_precedence() {
+        // RAYON_NUM_THREADS wins over the hardware count.
+        assert_eq!(Solver::pool_num_threads_from(Some("3"), Some(8)), 3);
+        assert_eq!(Solver::pool_num_threads_from(Some(" 3 "), Some(8)), 3);
+        // Unset falls back to the hardware count.
+        assert_eq!(Solver::pool_num_threads_from(None, Some(8)), 8);
+        // Garbage and zero are ignored, not propagated: a zero would
+        // make `ThreadPoolBuilder::build()` fail on an otherwise
+        // healthy host.
+        assert_eq!(Solver::pool_num_threads_from(Some("0"), Some(8)), 8);
+        assert_eq!(Solver::pool_num_threads_from(Some("many"), Some(8)), 8);
+        // Neither source available (the wasm32-wasip1 shape): 1, never 0.
+        assert_eq!(Solver::pool_num_threads_from(None, None), 1);
+        assert_eq!(Solver::pool_num_threads_from(Some("0"), None), 1);
+        // The live probe never returns a pool-invalid count.
+        assert!(Solver::pool_num_threads() >= 1);
     }
 
     /// `Solver::with_parallel` toggles the driver flag in both
@@ -2851,6 +2982,11 @@ mod tests {
     /// dispatching parallel for the inner driver, since `factor()`
     /// always calls `ensure_parallel_pool()` when `use_parallel`
     /// is on.
+    ///
+    /// Constructed with an explicit `with_parallel(true)` (issue
+    /// #154): the default is now platform-derived, and this test is
+    /// about pool reuse, not about what the default happens to be on
+    /// the runner. Left implicit it would panic on a single-CPU host.
     #[test]
     fn solver_reuses_thread_pool_across_factors() {
         // Indefinite tridiagonal: `2 -1 0 ... ; -1 2 -1 ... ; ...`
@@ -2872,7 +3008,7 @@ mod tests {
         }
         let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("matrix");
 
-        let mut s = Solver::new();
+        let mut s = Solver::new().with_parallel(true);
         assert!(s.parallel_pool.is_none(), "pool must be lazy");
 
         let r1 = s.factor(&m, None);
@@ -2927,6 +3063,91 @@ mod tests {
             s.parallel_pool.is_none(),
             "with_parallel(false) must not build a thread pool"
         );
+    }
+
+    /// Issue #154: `use_parallel` on with no pool built must run the
+    /// *sequential* refine, not the tree-parallel one on rayon's
+    /// global pool.
+    ///
+    /// That state is reachable in production whenever
+    /// `ThreadPoolBuilder::build()` fails — `wasm32-wasip1`, or an
+    /// ordinary Linux host out of threads (`RLIMIT_NPROC`, cgroup
+    /// `pids.max`). We cannot make `build()` fail from a test, so we
+    /// reproduce the resulting field state directly: factor with the
+    /// parallel driver off (so no pool is built), then flip the flag.
+    /// `solve_refined` and `solve_many_refined` read `parallel_pool`
+    /// without building one, so this exercises exactly the fallback
+    /// arm those two call sites take.
+    ///
+    /// Asserted bit-identically against a plain sequential solver:
+    /// the fallback is a scheduling decision and must not perturb
+    /// numerics.
+    #[test]
+    fn solver_parallel_without_pool_falls_back_to_serial_refine() {
+        let n = 64usize;
+        let mut rows: Vec<usize> = Vec::new();
+        let mut cols: Vec<usize> = Vec::new();
+        let mut vals: Vec<f64> = Vec::new();
+        for i in 0..n {
+            rows.push(i);
+            cols.push(i);
+            vals.push(2.0 - 2.5);
+            if i + 1 < n {
+                rows.push(i + 1);
+                cols.push(i);
+                vals.push(-1.0);
+            }
+        }
+        let m = CscMatrix::from_triplets(n, &rows, &cols, &vals).expect("matrix");
+        let rhs: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+
+        // Reference: sequential throughout.
+        let mut seq = Solver::new().with_parallel(false);
+        assert!(matches!(seq.factor(&m, None), FactorStatus::Success));
+        let seq_x = seq.solve_refined(&m, &rhs).expect("sequential refine");
+        let seq_many = seq
+            .solve_many_refined(&m, &rhs, 1)
+            .expect("sequential multi-refine");
+
+        // Same factor, then `use_parallel` flipped on with
+        // `parallel_pool` still `None` — the post-build-failure state.
+        let mut s = Solver::new().with_parallel(false);
+        assert!(matches!(s.factor(&m, None), FactorStatus::Success));
+        s.use_parallel = true;
+        assert!(
+            s.parallel_pool.is_none(),
+            "fixture must reproduce the pool-less state"
+        );
+
+        let x = s.solve_refined(&m, &rhs).expect("fallback refine");
+        assert!(
+            s.parallel_pool.is_none(),
+            "the refine fallback must not build a pool behind our back"
+        );
+        for (i, (a, b)) in x.iter().zip(seq_x.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "solve_refined[{}] differs: fallback = {}, sequential = {}",
+                i,
+                a,
+                b
+            );
+        }
+
+        let many = s
+            .solve_many_refined(&m, &rhs, 1)
+            .expect("fallback multi-refine");
+        for (i, (a, b)) in many.iter().zip(seq_many.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "solve_many_refined[{}] differs: fallback = {}, sequential = {}",
+                i,
+                a,
+                b
+            );
+        }
     }
 
     /// Amdahl-ceiling breakdown for the parallel driver. For each
@@ -3848,7 +4069,12 @@ mod tests {
         // Deterministic RHS: 1..=n as f64.
         let rhs: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
 
-        let mut par = Solver::new();
+        // Issue #154: `with_parallel(true)` explicitly. The default is
+        // platform-derived now, so `Solver::new()` on a single-CPU
+        // runner would make this test compare the sequential driver
+        // against itself and pass vacuously — the bit-exactness
+        // contract from #7 would stop being checked without failing.
+        let mut par = Solver::new().with_parallel(true);
         assert!(par.parallel());
         assert!(matches!(par.factor(&csc, None), FactorStatus::Success));
         let par_factors = par.factors().expect("parallel factors");

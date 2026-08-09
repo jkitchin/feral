@@ -1,66 +1,66 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-09T16:11:10Z
+Generated: 2026-08-09T16:26:16Z
 
 ## Latest Session
-File: dev/sessions/2026-08-09-03.md
+File: dev/sessions/2026-08-09-04.md
 ```
-# Session 2026-08-09-03
+# Session 2026-08-09-04
 
 ## Goal
 
-Post-0.15.0 optimization queue item 2: the `nemin` amalgamation sweep
-(`dev/plans/release-0.15.0-checklist.md` §4.2), motivated by the PR #150
-review — 90% of clnlbeam's supernodes are ≤8 columns and they are 35.9%
-of its factorization loop.
+Review issue #154 ("default `use_parallel` from the platform instead of
+hardcoding `true`"), then implement it fully so the issue can be closed.
 
 ## Accomplished
 
-**Both amalgamation levers measured and rejected. Nothing ships; the
-default path is bit-identical to 0.15.0.**
+### Review
 
-Harness: `crates/feral-diagnostics/src/bin/diag_nemin_post_simd.rs` —
-paired alternating A/B per `decisions.md` 2026-08-09 (all arms timed once
-per pair, `min_us`, sign test), symbolic computed once per arm so only
-the numeric phase is timed, inertia + true ∞-norm residual reported per
-arm. 61 CUTEst KKT parity fixtures (n = 3 … 5314) + 4 structured KKTs
-(clnlbeam_like n=100000, grid250, sparseqp_kkt, chain12000_kkt).
-x86_64, 4 cores, AVX2. Criterion pre-registered before the first run.
+Verified every claim in #154 against `808babb` (v0.15.0). The diagnosis is
+correct and all line references are exact: `solver.rs:430` (`use_parallel:
+true`), `:972` (unconditional `ensure_parallel_pool()`), `:1148`, `:1216`,
+`:1540`, and the quoted `ensure_parallel_pool` body. Three gaps in the
+proposal, all confirmed by measurement rather than reading:
 
-### 1. The queue item's direction is dead, and re-confirmed
+1. **The test inventory was incomplete, and understated.** The issue names
+   one test and calls it a latent flake. Applying *only* the issue's
+   one-liner to a pristine tree and running under `taskset -c 0`:
 
-Geomean vs shipped `nemin=16`, time / factor_nnz:
+   ```
+   test result: FAILED. 404 passed; 3 failed; 6 ignored
+     solver_parallel_default_is_on             solver.rs:2825
+     solver_parallel_factor_matches_sequential solver.rs:3852
+       assertion failed: par.parallel()
+     solver_reuses_thread_pool_across_factors  solver.rs:2887
+       .expect("pool must be built after first parallel factor")
+   ```
 
-| arm | 1 | 4 | 8 | 32 | 64 |
-|---|---|---|---|---|---|
-| 61 parity | 1.21/0.67 | 1.02/0.83 | 0.986/0.89 | 1.02/1.19 | 1.15/1.65 |
-| 4 structured | 1.33/0.37 | 0.99/0.51 | 0.925/0.68 | 1.13/1.60 | 1.53/2.74 |
+   `solver_parallel_factor_matches_sequential` is the #7 bit-exactness
+   regression test. Repairing only its assertion would leave it comparing
+   the sequential driver against itself — passing vacuously, with the
+   contract silently unchecked.
 
-Every arm above 16 loses on time and inflates fill on every class. This
-re-confirms the 2026-05-16 rejection (issue #10 lever 5) after the one
-development that could have overturned it — that rejection turned
-entirely on "the wider panel cannot amortize the fill", and the 0.15.0
-kernel rewrite is exactly what changed the amortization rate. It did not
-buy the fill back.
+2. **The "filed separately" fallback bug is not separable.** After the
+   default flips, `with_parallel(true)` — the escape hatch #154 recommends
+   for wasm — still reaches `ensure_parallel_pool()` and, on build failure,
+   falls to a `None` arm that runs the *parallel* driver bare, i.e. on
+   rayon's global pool. That is the failure being avoided, reintroduced
+   through the workaround prescribed for it. Shipping the default flip alone
+   would release a version whose documented wasm answer is a trap.
 
-### 2. `nemin=8` wins but fails its pre-registered criterion
+3. **A fourth dispatch site the issue misses:** `solve_many_refined`
+   (`solver.rs:1601`) has the same `None`-arm shape as `solve_refined`.
 
-Better on both axes on structured KKTs (clnlbeam_like 0.925× time at
-0.579× fill; chain12000 0.815/0.640). But the criterion was ≥5% geomean
-with ≥8/10 sign test on ≥2 classes and no fixture regressing >2%: parity
-geomean is 1.4%, and CERI651A_0000 regresses 16% (178→207 µs, 2/15 wins
-— an effect, not noise), DEGENLPB_0046 12%, BQPGASIM_0012 10%.
-
-### 3. Cost-model merge guard: implemented, works, rejected on accuracy
-
-The size rule (`child_ncol < nemin && parent_ncol < nemin`) never asks
-what a merge costs. Front height is `col_counts[first_col].max(ncol)`,
+Adjacent sweep over every rayon entry point reachable from `Solver`:
+`intrafront_parallel` (Lever 1.1) is set only inside the parallel driver
+(`factorize.rs:3127`), so the sequential path never spawns nested rayon work
+— the pounce#79 oversubscription guarantee holds, not a bug. `solve.rs`
 ```
 
 ## Git Status
 ```
-f39a5db perf(symbolic): amalgamation cost-model guard (opt-in) + nemin re-sweep
-e2ba443 research: falsify the scaling warm-start hypothesis (post-0.15.0 item 1)
+6c87a0e docs: session checkpoint 2026-08-09-03 (issue #154 review + implementation)
+4f2fad6 fix(solver): derive use_parallel from the platform; fall back to sequential when the pool fails
 808babb release: feral v0.15.0 (#151)
 fad5670 perf(parallel): task-per-subtree coarsening + profiler nanoseconds (#150)
 e8e1c5a perf(kernel): explicit SIMD packed trailing update + x86 pulp dispatch fix (#149)
@@ -86,66 +86,73 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 409 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.89s
+test result: ok. 411 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.12s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-03.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-04.md)
 
 
-The corpus bench (`cargo run --bin bench --release`) is not runnable
-here — `data/matrices` holds 2 files in this container, not the 154k
-corpus. The default path is unchanged and bit-identical, so the release
-gates are unaffected by this session. Local suite:
+No usable perf signal this session: the benchmark corpus is not present in
+this container, so the harness found 2 matrices. Reported as-is rather than
+omitted.
 
-cargo test --release
-84/84 test binaries, 802 passed, 0 failed
-cargo fmt --check / cargo clippy -- -D warnings / clippy -p feral-diagnostics: pass
+--- Dense solver validation ---
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
 
-Medium-front throughput probe for the next item (`bench_dense_front`,
-nofma serial, 30 reps, dense front of order n):
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 
-n=32   0.77 GFLOP/s     n=192   3.13
-n=48   1.42             n=256   3.51
-n=64   1.85             n=512   4.40
-n=96   2.95             n=1024  5.05
-n=128  3.45
+Dense failure analysis: no failures
+Sparse failure analysis: no failures
+
+--- Dense perf vs oracles: no matrices have oracle timings ---
+--- Sparse perf vs oracles: no matrices have oracle timings ---
+
+There is no reason to expect a perf delta on a multi-core host: the derived
+default is `true` there, and the pool-fallback change is unreachable unless
+`ThreadPoolBuilder::build()` fails. The one measurable change would be on a
+single-CPU host, where the sequential driver is now selected — that is the
+intended effect, not a regression.
 
 ```
 
 ## Recent Decisions
-run medians. `min_us` per invocation is the preferred per-sample
-statistic (least interfered). Cross-time comparison of numbers taken in
-different sessions is not evidence at all.
+`solver_parallel_factor_matches_sequential` is the #7 bit-exactness
+regression test; repairing only its assertion would leave it comparing
+the sequential driver against itself and passing vacuously. The rule
+adopted: any test that means "the parallel driver" constructs with an
+explicit `with_parallel(true)`, and only the default test asserts the
+derived value — against the same probe the constructor uses, so it
+cannot silently become environment-dependent again.
 
-**Why.** Measured on the issue-#148 chainW proxy (session 2026-08-09-03):
-three `FERAL_PAR_TASK_MIN_FLOPS` settings that produce *identical* task
-plans — same code path, byte-identical work — measured 139.6 / 259.1 /
-155.5 ms, a 1.9x spread. Eight invocations of one fixed config spanned
-min_us 124.7-163.2 ms (31%) and median_us 149.2-183.7 ms (23%). Two
-conclusions had already been drawn from inside that band and were both
-wrong: a claimed "chainW anomaly" (per-node spawning 20% faster than
-sequential) and a claimed 5-18% regression from PR #150. Paired
-re-measurement reversed both — 9/12 pairs favour the new code (median
-ratio 0.961) and 9/10 favour coarse over fine-grained tasks (median
-1.045, sign-test p~0.02).
+**New coverage.** `solver_parallel_default_follows_platform`,
+`pool_num_threads_precedence` (via a pure
+`pool_num_threads_from(env, hardware)` helper, so no test mutates
+process-global environment state), and
+`solver_parallel_without_pool_falls_back_to_serial_refine`, which
+reproduces the post-build-failure field state and asserts the refine
+output is bit-identical to the sequential solver.
 
-**Relationship to the existing rule.** The 2026-04-14 entry ("any
-bench-p90 delta smaller than ~5% must be confirmed with a 3-run
-median") is necessary but NOT sufficient: three consecutive medians can
-all land inside one drift excursion, which is exactly how both wrong
-conclusions above were reached. Paired A/B supersedes it for container
-measurement; the 3-run rule still applies to the corpus bench on a
-quiet machine.
+**Also changed.** `FERAL_PARALLEL` in the C ABI (`src/capi.rs`) was
+off-only; with a derived default it needs a force-on arm
+(`1`/`on`/`true`/`yes`), otherwise a wasm-bindgen-rayon embedder has
+no way to opt in without a rebuild. Unset or unrecognized values leave
+the derived default alone.
 
-**Consequence for prior sessions.** Numbers in
-dev/sessions/2026-08-09-01.md and -02.md were collected unpaired.
-Those with large effects (dense-front kernel 2.7-7x, grid250, sparseqpL
-- since re-confirmed paired at 10/10 and 9/10) stand; sub-10% fixture
-deltas in those checkpoints should be treated as unresolved rather than
-as measured wins until re-run paired.
+**Validation.** `taskset -c 0 cargo test --lib` → 409 passed, 0
+failed. Full `cargo test` on 4 cores → 0 failed across all binaries.
+`cargo clippy --all-targets -- -D warnings` → clean.
+
+**Out of scope.** This does not address the wasm hang in
+jkitchin/pounce#482. That reproduces only under `nightly-2026-08-02`,
+is a CPU spin, and occurs inside `pounce_load` — parsing, upstream of
+feral entirely.
 
 ## Recent Tried-and-Rejected
 `nemin=8`, MEYER3NE 83× at `nemin=4`), which is what makes it a property
