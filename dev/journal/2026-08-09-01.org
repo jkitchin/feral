@@ -17,3 +17,39 @@ Environment: x86_64 container, 4 cores, AVX2+AVX512+FMA, corpus NOT present
 perf_probe on tests/data fixtures. Hard rule for all stages: default path
 stays byte-exact vs scalar nofma reference (mul-then-sub, never mul_add);
 FMA remains opt-in.
+
+* 01:35 :stage0:objdump:packed-kernel:premise:
+Premise check on the packed trailing-update kernel
+(apply_schur_panel_range_packed, inlined into apply_schur_panel_range at
+0x315b0 in bench_dense_front): objdump over the region shows ymm=0,
+mulpd/subpd/addpd=0, mulsd/subsd=187. LLVM did NOT autovectorize the MR
+axis at all on x86 — the production default trailing update is pure
+scalar f64 code. The pulp strided kernels DO reach AVX2 (110
+vmulpd/vsubpd in the binary via V3 dispatch). Conclusion: Stage 1
+(explicit pulp in the packed kernel) is a scalar->4-wide-AVX2 upgrade on
+x86, bigger headroom than the planned SSE2->AVX2 2x estimate.
+
+* 01:45 :stage0:bench:micro:baseline:
+bench_schur_micro 3-run baselines (all byte-exact checks pass):
+  2048x2048 ke=64: strided 0.45-0.46 GF/s; packed 6.04-6.18 GF/s (13.3-13.8x)
+  512x512  ke=64: strided 0.46;            packed 6.33-6.35 (13.7x)
+  96x96    ke=32: strided 0.47;            packed 6.03 (12.8x)
+Variance across runs <3%. 6 GFLOP/s = roughly scalar mul+sub ILP peak at
+2.8 GHz, consistent with scalar codegen; AVX2 lanes leave ~3-4x on the
+kernel.
+
+* 01:55 :stage0:bench:dense-front:baseline:fma-regression:
+bench_dense_front 3-run baselines (production path, rayon=4):
+  n=2955: nofma-serial 4236/4303/4244 ms (2.0 GF/s);
+          nofma-intrafront 1798-1801 ms (4.78 GF/s, 2.35x);
+          fma-serial 12825-12949 ms (0.66 GF/s) <- 3x SLOWER than nofma;
+          fma-intrafront 4214-4314 ms.
+  n=512:  nofma 39-40 ms; fma 71-72 ms (1.8x slower). Intrafront inert
+          (below gate).
+FINDING: the opt-in FMA path regressed badly on x86 when the packed
+kernel became default (2026-07-01): the packed FMA variant uses scalar
+f64::mul_add (factor.rs:3767,:3789), which at baseline codegen (no fma
+target feature) lowers to a libm fma() call per element. The 2026-07-01
+x86 numbers showing fma 1.66x faster were measured on the pre-packed
+pulp strided path (real vfmadd via V3). Default nofma path unaffected.
+Stage 1 fixes this as a side effect (pulp mul_add_f64s -> vfmadd via V3).
