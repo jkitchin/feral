@@ -296,3 +296,53 @@ what pounce measures through `SparseSymLinearSolverInterface` (issue
 The clean experiment, not yet run: pre-scale each matrix with MC64
 offline and run both solvers with scaling off, so the two arms
 factorize identical numbers.
+
+## Result 5 — the clean experiment: both arms on identical numbers
+
+The corrected Result 1 still compared arms doing different work.
+`prescale_mtx` removes the asymmetry: it computes MC64 symmetric
+scaling once, writes `A' = D A D` to disk, and both solvers read that.
+feral runs with `FERAL_SCALING=identity` (`ScalingStrategy::Identity`,
+echoed into the sidecar as `scaling Identity`); MA57 runs with
+`ICNTL(15) = 0`. Neither does any scaling of its own, so `factor_us` is
+factorization and nothing else. All six pre-scaled with a real matching
+(`scaling_info=Applied`, no fall back to infinity-norm).
+
+15 pairs, `min factor_us`, ratio > 1 means feral faster:
+
+| matrix | feral | ma57 | MA57 faster by | wins | p |
+|---|---|---|---|---|---|
+| dtoc1nd | 12,061 | 2,555 | 4.72x | 0/15 | 0.0001 |
+| clnlbeam | 19,315 | 5,418 | 3.56x | 0/15 | 0.0001 |
+| marine_1600 | 28,949 | 9,924 | 2.92x | 0/15 | 0.0001 |
+| rocket_12800 | 16,332 | 6,184 | 2.64x | 0/15 | 0.0001 |
+| dtoc2 | 75,291 | 51,757 | 1.46x | 0/15 | 0.0001 |
+| ~~steering_12800~~ | 30,663 | 17,648 | ~~1.74x~~ | 0/15 | 0.0001 |
+
+`steering_12800` is **excluded**, not quoted. MA57's residual on the
+pre-scaled matrix is `2.12e-05` against feral's `1.62e-14` on the same
+input — MA57 does not solve it acceptably without its own scaling, so
+that row cannot carry a timing. The correctness gate caught this, as it
+caught the `4.53e-08` in the run before. Every other cell is `1e-16` to
+`6e-14` on both arms.
+
+Three protocols now agree on the same answer:
+
+| matrix | issue #153 (pounce) | ICNTL(15)=0, unscaled | clean, pre-scaled |
+|---|---|---|---|
+| dtoc1nd | 3.77x | 5.53x | 4.72x |
+| clnlbeam | 3.54x | 4.08x | 3.56x |
+| marine_1600 | 2.63x | 3.02x | 2.92x |
+| rocket_12800 | 2.17x | 3.74x | 2.64x |
+| dtoc2 | 1.29x | 1.59x | 1.46x |
+
+Different harnesses, different scaling handling, different machines,
+same conclusion: **MA57's numeric factorization is roughly 1.5x to 4.7x
+faster than feral's on these matrices.** The gap #148 and #153 have
+been tracking is real and did not close with 0.15.0.
+
+A secondary reading: `feral-default` (Auto scaling) ran within 2-8% of
+`feral-noscale` on the pre-scaled matrices. That is not in tension with
+issue #153's 18-34% — MC64 on an already-MC64-scaled matrix converges
+almost immediately. It does mean this experiment says nothing about
+warm-path scaling cost, which needs an unscaled input to measure.

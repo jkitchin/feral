@@ -318,3 +318,38 @@ never warms": that is the numeric scaling in the factor prologue
 (3.9-19.9 ms per call, 18-34% of factor time), paid every
 factorization. ldlt_compress is symbolic, paid once per analysis. Both
 are MC64. Whether one fix addresses both is unverified.
+
+* 18:40 :clean:prescale:ma57:confirmed:
+Ran the clean experiment. prescale_mtx writes A' = D A D once (MC64
+symmetric, scaling_info=Applied on all six, no infnorm fallback); feral
+runs FERAL_SCALING=identity and MA57 runs ICNTL(15)=0, so neither
+scales and both factorize identical numbers.
+
+MA57 faster on every matrix that can carry a timing, 15 pairs, all
+0/15 at p=0.0001: dtoc1nd 4.72x, clnlbeam 3.56x, marine_1600 2.92x,
+rocket_12800 2.64x, dtoc2 1.46x.
+
+steering_12800 EXCLUDED. MA57 rel_res 2.12e-05 on the pre-scaled matrix
+vs feral 1.62e-14 on the same input -- MA57 does not solve it
+acceptably without its own scaling. Second time the correctness gate
+has caught an MA57 accuracy problem a timing-only table would have
+published (first was 4.53e-08 on unscaled steering). Keeping the gate
+ahead of the timing table is earning its place.
+
+Convergence across three protocols (MA57 faster by):
+  matrix          #153/pounce   ICNTL(15)=0   clean pre-scaled
+  dtoc1nd            3.77x         5.53x          4.72x
+  clnlbeam           3.54x         4.08x          3.56x
+  marine_1600        2.63x         3.02x          2.92x
+  rocket_12800       2.17x         3.74x          2.64x
+  dtoc2              1.29x         1.59x          1.46x
+
+Different harnesses, different scaling handling, different machines,
+same answer. The factorization gap is real at roughly 1.5x-4.7x and
+0.15.0 did not close it. I am now confident in this; the retracted
+result was the only measurement that ever said otherwise.
+
+Side observation: feral-default ran within 2-8% of feral-noscale on the
+pre-scaled inputs. Not in tension with #153's 18-34% warm-path scaling
+cost -- MC64 on an already-MC64-scaled matrix converges immediately --
+but it does mean this experiment cannot measure warm-path scaling.

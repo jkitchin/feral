@@ -21,7 +21,7 @@ use std::time::Instant;
 use feral::numeric::factorize::factorize_multifrontal_parallel_with_workspace;
 use feral::numeric::factorize::FactorWorkspace;
 use feral::numeric::solve::solve_sparse_refined;
-use feral::scaling::{Mc64FallbackReason, ScalingInfo};
+use feral::scaling::{Mc64FallbackReason, ScalingInfo, ScalingStrategy};
 use feral::symbolic::{symbolic_factorize, SupernodeParams};
 use feral::{read_mtx, CscMatrix, NumericParams};
 
@@ -141,7 +141,15 @@ fn solve_one(mtx_path: &str, rhs_path: &str, out_path: &str) -> std::io::Result<
     // InfNorm picked by matrix shape) and BK pivot threshold = 1e-8.
     // This matches the high-level `Solver::new()` defaults; bench
     // measures what library users get out of the box.
-    let params = NumericParams::default();
+    let mut params = NumericParams::default();
+    // `FERAL_SCALING=identity` disables feral's own scaling so the
+    // factorization can be timed against a solver that is also doing
+    // none -- see `prescale_mtx`, which bakes `D A D` into the matrix
+    // so both arms factorize identical numbers. Anything else (or
+    // unset) leaves the out-of-the-box `Auto` default alone.
+    if env::var("FERAL_SCALING").as_deref() == Ok("identity") {
+        params.scaling = ScalingStrategy::Identity;
+    }
     let mut ws = FactorWorkspace::new();
     let t0 = Instant::now();
     let factor_res = factorize_multifrontal_parallel_with_workspace(&csc, &sym, &params, &mut ws);
@@ -188,6 +196,7 @@ fn solve_one(mtx_path: &str, rhs_path: &str, out_path: &str) -> std::io::Result<
     writeln!(out, "inertia_neg {}", inertia.negative)?;
     writeln!(out, "inertia_zero {}", inertia.zero)?;
     writeln!(out, "analyse_us {}", analyse_us)?;
+    writeln!(out, "scaling {:?}", params.scaling)?;
     writeln!(out, "factor_us {}", factor_us)?;
     writeln!(out, "solve_us {}", solve_us)?;
     writeln!(out, "rel_res {:.17e}", rel)?;
