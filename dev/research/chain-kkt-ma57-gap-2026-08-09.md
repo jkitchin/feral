@@ -39,6 +39,16 @@ bisect that would separate tag from main **did not run**. Everything
 below therefore says "main", not "0.15.0", and attributing the
 regression to a specific PR is still open.
 
+**Main has since moved, in a way that matters here.** #156 (issue #154,
+`4f2fad6`) landed after these runs: `Solver::with_params` no longer
+hardcodes `use_parallel: true` but derives it from
+`available_parallelism() > 1`, and all four dispatch sites now fall back
+to the sequential path when pool construction fails. That changes which
+driver a default-constructed solver takes, which is exactly the axis the
+regression sits on. `7a31ff6` (measured) predates it; `f7a152a` does
+not. The bisect below must therefore treat current main as its own
+point rather than assuming it behaves like the measured `7a31ff6`.
+
 ## Result 1 — the gap against MA57
 
 `min factor_us` over 15 pairs; ratio > 1 means feral is faster.

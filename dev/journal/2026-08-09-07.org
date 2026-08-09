@@ -78,3 +78,21 @@ reproduces the post-build-failure field state (factor with parallel
 off, then flip `use_parallel`) and asserts the refine output is
 BIT-IDENTICAL to the sequential solver — the fallback is a scheduling
 decision and must not perturb numerics.
+
+* 18:40 :handoff:rebase:main-moved:
+Rebased onto f7a152a. Main moved twice during this session: #155
+(amalgamation) and #156 (issue #154). Two consequences worth recording.
+(1) Journal numbering collided AGAIN — the container took -04, -05 and
+-06 while this session was live, so this journal is -07 and the session
+file is dev/sessions/2026-08-09-07.md. Check `git ls-tree origin/main
+dev/journal/` before picking a number; the local directory is not
+authoritative when work runs concurrently elsewhere.
+(2) More substantive: #156 (4f2fad6) stops Solver::with_params
+hardcoding use_parallel:true and derives it from
+available_parallelism() > 1, plus sequential fallback at all four
+dispatch sites when the pool fails. That changes WHICH DRIVER a
+default-constructed solver takes, which is precisely the axis the chain
+regression sits on. Everything measured here is 7a31ff6, which predates
+it. Added a note to the research note: the corpus-machine bisect must
+treat current main as its own point, not assume it matches the measured
+7a31ff6.

@@ -1,11 +1,11 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-09T19:45:39Z
+Generated: 2026-08-09T19:46:37Z
 
 ## Latest Session
 File: dev/sessions/2026-08-09-07.md
 ```
-# Session 2026-08-09-06
+# Session 2026-08-09-07
 
 ## Goal
 
@@ -59,34 +59,34 @@ numbers, method and limits in
 
 ## Git Status
 ```
+14bbaa2 docs: ship 0.15.0, then measure the gap vs MA57 (chain proxies)
 f7a152a Merge pull request #156 from jkitchin/claude/review-issue-154-ukpt7t
 af73f63 Merge origin/main into claude/review-issue-154-ukpt7t
 6c87a0e docs: session checkpoint 2026-08-09-03 (issue #154 review + implementation)
 4f2fad6 fix(solver): derive use_parallel from the platform; fall back to sequential when the pool fails
-7a31ff6 Merge pull request #155 from jkitchin/claude/feral-kernel-perf-dx0fkq
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 413 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 6.00s
+test result: ok. 413 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 5.78s
 
 ```
 
