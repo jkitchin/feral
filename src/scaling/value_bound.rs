@@ -40,6 +40,12 @@ const GROWTH_COUNT: f64 = 1.5;
 /// of the baseline mean scaled diagonal.
 const EPS_DIAG: f64 = 1e-12;
 
+/// Factor by which the minimum scaled diagonal may shrink from its
+/// baseline before the collapse check rejects. `1.0 / GROWTH_FACTOR`:
+/// the minimum diagonal is allowed to fall by the same factor the
+/// worst dominance ratio is allowed to rise.
+const DIAG_SHRINK: f64 = 1.0 / GROWTH_FACTOR;
+
 /// Diagonal-dominance summary of `D · A · D`, aggregated over the
 /// qualifying rows only. Produced by [`scaled_dominance_stats`].
 #[derive(Debug, Clone, Copy)]
@@ -76,6 +82,9 @@ pub(crate) struct Mc64CacheValidity {
     /// Baseline mean `|scaled diagonal|` — a fixed reference for the
     /// collapse check (does not drift with the current matrix).
     mean_diag_0: f64,
+    /// Baseline minimum `|scaled diagonal|` over qualifying rows — the
+    /// drift reference for the collapse check.
+    min_diag_0: f64,
 }
 
 /// One O(nnz) sweep of `D · A · D` producing the [`DominanceStats`]
@@ -186,9 +195,9 @@ pub(crate) fn precompute_mc64_validity(matrix: &CscMatrix, scaling: &[f64]) -> M
         // tests that *same* length mismatch first — its length gate
         // returns `false` before any condition is evaluated. The
         // fingerprint values do NOT by themselves force a reject: with
-        // `mean_diag_0 = 0` the diagonal-collapse threshold
-        // `EPS_DIAG * mean_diag_0` is `0`, so condition 3 becomes
-        // vacuous (it passes for any non-negative scaled diagonal), and
+        // `mean_diag_0 = 0` and `min_diag_0 = 0` both condition-3
+        // thresholds are `0`, so condition 3 becomes vacuous (it passes
+        // for any non-negative scaled diagonal), and
         // `r0 = 1` does not force condition 1 to fail either. Rejection
         // on a length mismatch comes from the length gate, not from
         // these values.
@@ -204,6 +213,7 @@ pub(crate) fn precompute_mc64_validity(matrix: &CscMatrix, scaling: &[f64]) -> M
         r0: stats.max_ratio.max(1.0),
         n_off_dominant_0: stats.n_off_dominant,
         mean_diag_0: stats.mean_diag,
+        min_diag_0: stats.min_diag,
     }
 }
 
@@ -215,8 +225,9 @@ pub(crate) fn precompute_mc64_validity(matrix: &CscMatrix, scaling: &[f64]) -> M
 /// Rejects (returns `false`) if any of:
 /// 1. the worst dominance ratio grew past `GROWTH_FACTOR · r0`;
 /// 2. the off-dominant row count grew past `GROWTH_COUNT · count₀`;
-/// 3. a qualifying scaled diagonal collapsed below
-///    `EPS_DIAG · mean_diag₀`.
+/// 3. a qualifying scaled diagonal collapsed — below *both* the
+///    absolute floor `EPS_DIAG · mean_diag₀` and the drift bound
+///    `DIAG_SHRINK · min_diag₀`.
 ///
 /// A length mismatch (`scaling` or the stored mask not `matrix.n`)
 /// also returns `false` — recompute fresh, never index out of
@@ -234,7 +245,16 @@ pub(crate) fn mc64_value_bound_passes(
     let cond_ratio = stats.max_ratio <= GROWTH_FACTOR * validity.r0;
     let cond_count =
         (stats.n_off_dominant as f64) <= GROWTH_COUNT * (validity.n_off_dominant_0 as f64);
-    let cond_diag = stats.min_diag >= EPS_DIAG * validity.mean_diag_0;
+    // Disjunction, not a single test: the first clause is an absolute
+    // floor on the scaled diagonal, the second a drift bound against
+    // the baseline. The floor alone compares the current *minimum*
+    // against the baseline *mean* — different statistics, so it can
+    // reject a matrix against its own fingerprint whenever the scaled
+    // diagonal spans more than `1/EPS_DIAG`. The drift clause is
+    // zero-drift-safe by construction: re-checking the baseline gives
+    // `min_diag == min_diag_0` exactly.
+    let cond_diag = stats.min_diag >= EPS_DIAG * validity.mean_diag_0
+        || stats.min_diag >= DIAG_SHRINK * validity.min_diag_0;
     cond_ratio && cond_count && cond_diag
 }
 
@@ -382,6 +402,7 @@ mod tests {
             r0: 2.0,
             n_off_dominant_0: 10,
             mean_diag_0: 1.0,
+            min_diag_0: 1.0,
         };
         assert!(
             !mc64_value_bound_passes(&m, &s, &v),
@@ -409,6 +430,7 @@ mod tests {
             r0: 2.0,
             n_off_dominant_0: 1,
             mean_diag_0: 1.0,
+            min_diag_0: 1.0,
         };
         assert!(
             !mc64_value_bound_passes(&m, &s, &v),
@@ -430,10 +452,84 @@ mod tests {
             r0: 1.0,
             n_off_dominant_0: 0,
             mean_diag_0: 1.0,
+            min_diag_0: 1.0,
         };
         assert!(
             !mc64_value_bound_passes(&m, &s, &v),
             "collapsed scaled diagonal 1e-20 < 1e-12 must reject"
+        );
+    }
+
+    /// Regression: the gate must accept a matrix against its own
+    /// fingerprint. `diag(1e-14, 1.0)` under identity scaling has no
+    /// off-diagonals, so by hand `max_ratio = 0`, `n_off_dominant = 0`,
+    /// `min_diag = 1e-14` and `mean_diag = (1e-14 + 1)/2 = 0.5`.
+    /// Conditions 1 and 2 pass by construction (zero drift). The
+    /// absolute floor `1e-14 >= EPS_DIAG · 0.5 = 5e-13` is **false** —
+    /// so before the drift clause existed this rejected a matrix that
+    /// had not moved at all. The drift clause
+    /// `1e-14 >= DIAG_SHRINK · 1e-14 = 5e-15` is true.
+    ///
+    /// Observed on `robot_1600` in the corpus: zero drift on conditions
+    /// 1 and 2, condition 3 rejecting anyway. See
+    /// `dev/research/mc64-value-bound-diag-drift-2026-08-09.md`.
+    #[test]
+    fn value_bound_passes_on_identical_matrix_with_wide_diagonal_range() {
+        let m = CscMatrix::from_triplets(2, &[0, 1], &[0, 1], &[1e-14, 1.0]).expect("valid CSC");
+        let s = [1.0, 1.0];
+        let v = precompute_mc64_validity(&m, &s);
+        assert_eq!(v.min_diag_0, 1e-14, "baseline min diagonal");
+        assert!(
+            mc64_value_bound_passes(&m, &s, &v),
+            "a matrix must pass the value bound against its own fingerprint"
+        );
+    }
+
+    /// The `arki0003` control: a genuine collapse whose baseline
+    /// minimum was already small must still reject, so the drift
+    /// clause is not a blanket loosening.
+    ///
+    /// Numbers from the instrumented corpus run, not from the code:
+    /// `min_diag_0 = 9.372359e-6`, `mean_diag_0 = 9.925188e-1`, and a
+    /// current `min_diag` of `1.984196e-13` — eight orders down.
+    /// Absolute floor: `1.984196e-13 >= 1e-12 · 9.925188e-1 =
+    /// 9.925188e-13` is false. Drift: `1.984196e-13 >= 0.5 ·
+    /// 9.372359e-6 = 4.686e-6` is false. Both fail → reject.
+    /// A_N is diagonal so conditions 1 and 2 stay satisfied.
+    #[test]
+    fn value_bound_rejects_collapse_from_tiny_baseline() {
+        let m =
+            CscMatrix::from_triplets(2, &[0, 1], &[0, 1], &[1.984196e-13, 1.0]).expect("valid CSC");
+        let s = [1.0, 1.0];
+        let v = Mc64CacheValidity {
+            qualifying: vec![true, true],
+            r0: 1.0,
+            n_off_dominant_0: 0,
+            mean_diag_0: 9.925188e-1,
+            min_diag_0: 9.372359e-6,
+        };
+        assert!(
+            !mc64_value_bound_passes(&m, &s, &v),
+            "an eight-order collapse must reject even from a small baseline"
+        );
+    }
+
+    /// With no qualifying rows both baselines are `0.0`, so condition 3
+    /// is `min_diag >= 0` on both clauses — vacuous, exactly as it is
+    /// today with `mean_diag_0` alone. Locks the edge case against the
+    /// added field.
+    #[test]
+    fn value_bound_vacuous_when_no_qualifying_rows() {
+        // Off-diagonal only: neither row has a stored diagonal, so
+        // `qualifying` is all-false and the stats sweep counts nothing.
+        let m = CscMatrix::from_triplets(2, &[1], &[0], &[3.0]).expect("valid CSC");
+        let s = [1.0, 1.0];
+        let v = precompute_mc64_validity(&m, &s);
+        assert_eq!(v.min_diag_0, 0.0, "no qualifying rows → zero baseline");
+        assert_eq!(v.mean_diag_0, 0.0, "no qualifying rows → zero baseline");
+        assert!(
+            mc64_value_bound_passes(&m, &s, &v),
+            "condition 3 is vacuous when no row qualifies"
         );
     }
 
@@ -449,6 +545,7 @@ mod tests {
             r0: 3.0,
             n_off_dominant_0: 10,
             mean_diag_0: 1.0,
+            min_diag_0: 1.0,
         };
         assert!(
             mc64_value_bound_passes(&m, &s, &v),

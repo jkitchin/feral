@@ -4,6 +4,25 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — MC64 scaling cache rejected matrices against their own fingerprint
+
+- The value-bound gate that decides whether a cached MC64 scaling may be reused
+  had three conditions, two of which measure how far the matrix has drifted from
+  the one the scaling was computed on. The third did not: it compared the
+  current **minimum** scaled diagonal against the baseline **mean**. Because
+  those are different statistics, it behaved as an absolute property of the
+  matrix rather than a drift measure, and rejected reuse even when the matrix
+  had not moved at all.
+- Condition 3 is now the disjunction of the original absolute floor and a drift
+  bound against the baseline minimum. This is a strict widening: nothing the
+  gate accepts today can start being rejected.
+- Effect is narrow and measured. Across 53 gate evaluations on the seven corpus
+  families that route to MC64, exactly two decisions change — both on
+  `robot_1600`, cutting that trajectory's factorization time 14.3% and its
+  scaling time 39.8%. Inertia is unchanged on every iterate of every family, and
+  a genuine diagonal collapse (`arki0003`, eight orders down) is still rejected.
+- No API change; the gate is internal.
+
 ### Changed — `Solver` defaults `use_parallel` from the platform (issue #154)
 
 - `Solver::new()` and `Solver::with_params(...)` now derive `use_parallel` from

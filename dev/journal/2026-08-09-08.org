@@ -552,3 +552,77 @@ ex8_2_3 26.1%, gasoil_3200 23.1%, arki0003 23.5%, pinene_3200
 21.4%). Values change each IPM iterate so recomputation is
 legitimate; whether an O(nnz) scan should cost 20%-38% of a
 factorization is an open question.
+
+* 22:15 :bug:mc64:cache:value-bound:fix:measurement:
+Instrumented =precompute_mc64_validity= and =mc64_value_bound_passes=
+behind =FERAL_VB_DEBUG= (backed up to /tmp/vb2.bak, reverted after) and
+drove =diag_trajectory_scaling= over 24 corpus families to size the
+=cond_diag= defect before fixing it.
+
+First correction to my own earlier reading: I had recorded "mean_diag_0
+4.213035e-13". That is the *threshold*, not the mean. =mean_diag= is
+4.213035e-1; the threshold is =EPS_DIAG * mean_diag= = 4.213035e-13.
+The conclusion (min compared against mean) is unchanged.
+
+Sizing, and it is far smaller than the 32.7% headline that motivated
+the work:
+- 17 of 24 families never run MC64 at all -- =pick_scaling_strategy=
+  routes them to InfNorm, =pre=0= in the debug log. That includes every
+  large-scaling% family from the phase profile (clnlbeam, dtoc2,
+  rocket_12800, steering_12800). No MC64 cache work can touch them.
+- 7 families route to MC64 -> 53 gate evaluations.
+- =cond_diag= is the *sole* blocker on 3 of 53. Two on robot_1600 with
+  drift 0.988 and 1.000 (false positives -- the min scaled diagonal did
+  not move). One on arki0003 with drift 2.1e-8, a genuine eight-order
+  collapse that any correct condition 3 must reject.
+
+Threshold sweep: DIAG_SHRINK from 0.5 down to 1e-6 all give the same 25
+accepts of 53. The constant is not load-bearing; picked 0.5 =
+1/GROWTH_FACTOR as the tightest defensible value.
+
+* 22:40 :mc64:value-bound:implemented:verified:
+Fix landed as a disjunction, not a replacement:
+=min_diag >= EPS_DIAG*mean_diag_0 || min_diag >= DIAG_SHRINK*min_diag_0=.
+Strict widening of the accept set, zero-drift-safe by construction
+(re-checking the baseline gives =min_diag == min_diag_0= exactly).
+
+Tests first, and the regression test did fail first. Added the
+=min_diag_0= field and its population *without* the =cond_diag= change,
+which made the new test fail at runtime rather than at compile time:
+
+: value_bound_passes_on_identical_matrix_with_wide_diagonal_range ... FAILED
+: panicked: a matrix must pass the value bound against its own fingerprint
+: test result: FAILED. 12 passed; 1 failed
+
+After the =cond_diag= change: 13 passed. Full =cargo test --release=
+exit 0.
+
+Verification against pre-fix and post-fix binaries built from the same
+tree, 7 families, 53 gate evaluations. The complete hit-pattern diff:
+
+: < robot_1600_0004 NO      > robot_1600_0004 yes
+: < robot_1600_0005 NO      > robot_1600_0005 yes
+
+Nothing else moved. Inertia byte-identical on every iterate of every
+family. robot_1600 trajectory 63560 -> 54445 us (14.3%), scaling 20721
+-> 12479 us (39.8%). Matches the 13.8% predicted from the gate log.
+
+* 23:00 :mc64:sizing:next-target:
+The trajectory totals reframe where the scaling mass actually is, and it
+is not where this fix helps:
+
+| family      | scaling share | helped |
+| nql180      |         66.2% | no     |
+| pinene_3200 |         79.4% | no     |
+| marine_1600 |         50.6% | no     |
+| robot_1600  | 32.6%->22.9%  | yes    |
+| dtoc1nd     |         10.4% | no     |
+| arki0003    |          3.5% | no     |
+| qcqp1000-2c |          0.5% | no     |
+
+nql180 spends 11.2 s of 17.0 s in scaling and gets nothing here -- it
+rejects on *condition 1*, as does pinene_3200 on all 8 of its checks.
+Condition 1 is exactly what tried-and-rejected.md:2087 (2026-05-21)
+found confounded by the IPM barrier trajectory. The prize there is an
+order of magnitude larger than condition 3 was worth, and that entry
+says why it is hard. Do not start it without reading it.
