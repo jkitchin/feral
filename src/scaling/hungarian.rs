@@ -118,13 +118,34 @@ const RINF: f64 = f64::MAX / 2.0;
 /// parent/child arithmetic trivial (`parent = pos / 2`); externally
 /// the type exposes 0-based row indices.
 struct IndexHeap {
-    /// `heap[1..=len]` contains row indices. `heap[0]` is a dummy.
-    heap: Vec<usize>,
+    /// `heap[1..=len]` contains live entries. `heap[0]` is a dummy.
+    ///
+    /// Each entry carries its own key. SPRAL keeps only the row index
+    /// here and re-reads `d(idx)` at every sift level, which costs a
+    /// dependent random load per level -- the dominant cost on
+    /// trajectories whose searches outgrow cache (nql180 touches
+    /// ~53k rows per search at 13.2 ns/edge-scan, versus pinene's ~87
+    /// rows at 2.94 ns). Storing the key inline keeps sifting entirely
+    /// within this array, which parent/child arithmetic already walks
+    /// with locality. The comparisons performed are unchanged, so the
+    /// resulting matching is bit-identical.
+    heap: Vec<HeapEntry>,
     /// `pos[i]` = 1-based position of `i` in `heap`, or `0` if not
     /// present. The SPRAL `l(i)` array.
     pos: Vec<usize>,
     /// Number of live entries in the heap.
     len: usize,
+}
+
+/// A heap slot: the row index plus a cached copy of its key `d[idx]`.
+///
+/// The cached key is kept current by construction -- `d[i]` is only
+/// ever lowered immediately before `insert`/`update`, both of which
+/// rewrite the entry -- so it never diverges from `d`.
+#[derive(Clone, Copy)]
+struct HeapEntry {
+    key: f64,
+    idx: usize,
 }
 
 impl IndexHeap {
@@ -134,7 +155,7 @@ impl IndexHeap {
         // `heap_init_slots` growth regardless of where `new` is called.
         stats.heap_init_slots += m as u64;
         IndexHeap {
-            heap: vec![0; m + 1],
+            heap: vec![HeapEntry { key: RINF, idx: 0 }; m + 1],
             pos: vec![0; m],
             len: 0,
         }
@@ -161,7 +182,13 @@ impl IndexHeap {
     }
 
     fn peek(&self) -> usize {
-        self.heap[1]
+        self.heap[1].idx
+    }
+
+    /// Key of the minimum entry. Lets the caller test the shortest-path
+    /// termination bound without a random read into `d`.
+    fn peek_key(&self) -> f64 {
+        self.heap[1].key
     }
 
     fn contains(&self, i: usize) -> bool {
@@ -170,66 +197,64 @@ impl IndexHeap {
 
     /// Called when `d[i]` has just been decreased (or `i` was just
     /// inserted with `pos[i] == len`). Sifts `i` upward in the heap.
-    fn update(&mut self, i: usize, d: &[f64]) {
+    fn update(&mut self, i: usize, key: f64) {
         let mut p = self.pos[i];
         if p <= 1 {
-            self.heap[p] = i;
+            self.heap[p] = HeapEntry { key, idx: i };
             return;
         }
-        let v = d[i];
         while p > 1 {
             let parent_pos = p / 2;
-            let parent_idx = self.heap[parent_pos];
-            if v >= d[parent_idx] {
+            let parent = self.heap[parent_pos];
+            if key >= parent.key {
                 break;
             }
-            self.heap[p] = parent_idx;
-            self.pos[parent_idx] = p;
+            self.heap[p] = parent;
+            self.pos[parent.idx] = p;
             p = parent_pos;
         }
-        self.heap[p] = i;
+        self.heap[p] = HeapEntry { key, idx: i };
         self.pos[i] = p;
     }
 
     /// Insert row `i` (assumes `!contains(i)` and `d[i]` is set).
-    fn insert(&mut self, i: usize, d: &[f64]) {
+    fn insert(&mut self, i: usize, key: f64) {
         self.len += 1;
         self.pos[i] = self.len;
-        self.update(i, d);
+        self.update(i, key);
     }
 
     /// Delete the entry at 1-based heap position `pos0`. Mirrors
     /// SPRAL's `heap_delete`.
-    fn delete(&mut self, pos0: usize, d: &[f64]) {
-        let removed = self.heap[pos0];
-        self.pos[removed] = 0;
+    fn delete(&mut self, pos0: usize) {
+        self.pos[self.heap[pos0].idx] = 0;
         if self.len == pos0 {
             self.len -= 1;
             return;
         }
-        let idx = self.heap[self.len];
-        let v = d[idx];
+        let moved = self.heap[self.len];
+        let v = moved.key;
         self.len -= 1;
         let mut p = pos0;
 
         // Sift up.
         if p > 1 {
             loop {
-                let parent = p / 2;
-                let pk = self.heap[parent];
-                if v >= d[pk] {
+                let parent_pos = p / 2;
+                let parent = self.heap[parent_pos];
+                if v >= parent.key {
                     break;
                 }
-                self.heap[p] = pk;
-                self.pos[pk] = p;
-                p = parent;
+                self.heap[p] = parent;
+                self.pos[parent.idx] = p;
+                p = parent_pos;
                 if p <= 1 {
                     break;
                 }
             }
         }
-        self.heap[p] = idx;
-        self.pos[idx] = p;
+        self.heap[p] = moved;
+        self.pos[moved.idx] = p;
         if p != pos0 {
             return;
         }
@@ -240,9 +265,9 @@ impl IndexHeap {
             if child > self.len {
                 break;
             }
-            let mut dk = d[self.heap[child]];
+            let mut dk = self.heap[child].key;
             if child < self.len {
-                let dr = d[self.heap[child + 1]];
+                let dr = self.heap[child + 1].key;
                 if dk > dr {
                     child += 1;
                     dk = dr;
@@ -251,19 +276,19 @@ impl IndexHeap {
             if v <= dk {
                 break;
             }
-            let qk = self.heap[child];
-            self.heap[p] = qk;
-            self.pos[qk] = p;
+            let promoted = self.heap[child];
+            self.heap[p] = promoted;
+            self.pos[promoted.idx] = p;
             p = child;
         }
-        self.heap[p] = idx;
-        self.pos[idx] = p;
+        self.heap[p] = moved;
+        self.pos[moved.idx] = p;
     }
 
     /// Pop and return the minimum-key row. Mirrors SPRAL's `heap_pop`.
-    fn pop(&mut self, d: &[f64]) -> usize {
-        let top = self.heap[1];
-        self.delete(1, d);
+    fn pop(&mut self) -> usize {
+        let top = self.heap[1].idx;
+        self.delete(1);
         top
     }
 }
@@ -554,9 +579,9 @@ pub(crate) fn hungarian_match_instrumented(cost: &CostGraph) -> (Matching, Hunga
                 out_idx[jj] = k;
                 pr[jj] = j;
                 if heap.contains(i) {
-                    heap.update(i, &d);
+                    heap.update(i, dnew);
                 } else {
-                    heap.insert(i, &d);
+                    heap.insert(i, dnew);
                 }
             }
         }
@@ -566,11 +591,10 @@ pub(crate) fn hungarian_match_instrumented(cost: &CostGraph) -> (Matching, Hunga
             if heap.is_empty() {
                 break;
             }
-            let top = heap.peek();
-            if d[top] >= csp {
+            if heap.peek_key() >= csp {
                 break;
             }
-            let q0 = heap.pop(&d);
+            let q0 = heap.pop();
             visited[q0] = true;
             visited_rows.push(q0);
             let dq0 = d[q0];
@@ -606,9 +630,9 @@ pub(crate) fn hungarian_match_instrumented(cost: &CostGraph) -> (Matching, Hunga
                     }
                     d[i] = dnew;
                     if heap.contains(i) {
-                        heap.update(i, &d);
+                        heap.update(i, dnew);
                     } else {
-                        heap.insert(i, &d);
+                        heap.insert(i, dnew);
                     }
                     let jj = iperm[i];
                     out_idx[jj] = k;

@@ -800,3 +800,89 @@ proxy, no numerical justification, and no new O(nnz) sweep. The
 "unsafe"; on this evidence the scaling-vector path has no unsafe
 side, and the quantity that actually needs separating is
 profitable from unprofitable.
+
+* 02:10 :mc64:hungarian:prior-art:correction:
+Took the "Hungarian search bound" lever recommended at the end of
+mc64-condition1-cost-share-2026-08-09.md. Prior-art check and code
+inspection killed it before any code was written, on two counts.
+
+(1) The classic csp shortest-augmenting-path bound is ALREADY
+implemented: hungarian.rs:541 prunes the root scan, :570 terminates
+the main loop, :591 prunes the inner column scan. Nothing standard is
+missing.
+
+(2) tried-and-rejected.md:2313 (2026-06-06-03) proves no per-column
+reduced-cost bound can ever prune the inner scan -- with
+vj + lb_tight = dq0, the skip fires iff dq0 >= csp, but q0 was popped
+only because dq0 < csp -- and explicitly instructs future sessions not
+to retry it.
+
+So my note's phrase "same-output-less-work, needs no gate and no
+residual argument" is WRONG. Any further truncation ends a search
+before its shortest path is proven -> suboptimal matching -> different
+scaling vector -> corpus study + human approval. Recorded the
+correction at the top of the new research note rather than editing the
+old one.
+
+* 02:25 :mc64:hungarian:measurement:
+Where the Hungarian time actually goes. Per-edge-scan cost differs
+4.5x between the two dominant families on IDENTICAL code:
+pinene_3200_0006 206,907 us / 70.3M scans = 2.94 ns/scan;
+nql180_0002 3,197,295 us / 222.1M scans = 14.4 ns/scan.
+
+The two are in opposite regimes. pinene: init heuristic leaves ~61% of
+columns unmatched (77,994 searches on n=127,995), so many tiny
+searches, 87 rows touched each -> L1-resident. nql180: init matches
+99.66% (893 searches on n=259,681), so a few enormous searches, 53,411
+rows touched each = 21% of all rows -> working set far past L1. The
+4.5x tracks working-set size, not algorithm.
+
+Also sized build_cost_graph via a temporary FERAL_BUILD_DEBUG timer
+(reverted): 8-12 ms/iterate = 20% of pinene's cheapest iterate but
+0.4% of nql180's. Not the lever.
+
+* 02:40 :mc64:hungarian:optimization:bit-identical:
+Implemented what the measurement pointed at instead. Every heap sift
+level did d[self.heap[parent]] -- a load from the heap array then a
+DEPENDENT random load into d. IndexHeap now stores the key inline
+(HeapEntry { key, idx }). Comparisons are unchanged, so the matching is
+bit-identical by construction. Side benefit: removes the heap's
+&[f64] borrow of d, which is what previously blocked fusing d with the
+other per-row arrays.
+
+Oracle: new diag_mc64_scaling_fingerprint hashes the raw IEEE bits of
+every entry of SparseFactors::scaling, so ANY matching deviation is
+caught, not just one big enough to move a residual. Verified
+deterministic across repeat runs before trusting it.
+
+51 matrices / 39 families: all fingerprints unchanged.
+
+Speed, median of 3: nql180_0000 1,174,045 -> 1,128,533 us (1.040x);
+nql180_0002 3,083,529 -> 2,917,491 us (1.057x); pinene_0001 44,381 ->
+45,279 (0.98x); pinene_0006 202,205 -> 202,969 (1.00x); marine_1600
+29,911 -> 29,820 (1.00x).
+
+4-5% on the family that dominates corpus MC64 time, nothing elsewhere
+-- exactly the predicted split, since pinene was already L1-resident.
+Smaller than I hoped; reporting it as such. cargo test --release exit
+0, clippy -D warnings clean.
+
+* 02:50 :mc64:hungarian:profile:next:
+sample(1) on nql180_0002: 100/108 samples in the inlined main loop, 7
+in IndexHeap::update. Decrease-key sift-UP is only ~6.5% (most
+sift-ups terminate immediately), so the gain came from the sift-DOWN
+path inside pop, as designed.
+
+Remaining lever, measured by a standalone microbenchmark of the access
+pattern (5 split arrays vs 1 fused struct, at nql180's n):
+ws=500 -> 0.99x (pinene regime), ws=50000 -> 1.90x, ws=259681 -> 1.68x.
+So fusing visited/u/iperm/d into one per-row struct is worth ~1.7x on
+the array-access portion ONLY, which is ~2.3 of nql180's ~13 ns/scan
+-> expect ~7% end-to-end. Bit-identical, now unblocked. Not done.
+
+Honest ceiling on this direction: nql180's 893 searches are long
+because the augmenting paths are long, which is a property of the
+matrix. Constant-factor memory work buys tens of percent, not
+multiples. A multiple requires changing the matching (auction /
+eps-optimal, or skipping MC64 on these KKTs) -- the gated,
+approval-requiring path, not this one.
