@@ -4,6 +4,45 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Performance — issue #128 allocation-churn bundle: items B, D, E
+
+The remaining actionable parts of the #128 bundle. Item A landed earlier
+(`fc4e9b8`, `484bda7`); item C stays deferred to the #115 dense-update rework,
+as the issue directs.
+
+- **#128 item B** — the Forrest–Tomlin sparse LU update no longer allocates
+  per call for its working buffers. The nine sites the issue names (`touched`,
+  `supp`, `changed`, `saved_uperm_inv`, the Gilbert–Peierls DFS stack and
+  reach, the column-`r` holder snapshot, the sub-diagonal heap, the rebuilt
+  pivot row's off-diagonal gather) are pooled on `SparseLu` under the existing
+  `mem::take`/restore discipline, as is the dense `SparseLu::update` wrapper's
+  entering-column conversion; the rollback path now recycles the discarded row
+  buffer instead of dropping it. **11.2 → 2.8 allocations per update** and
+  **5978 → 1521 bytes** on the in-tree casctanks trace. Factors and solves are
+  bit-identical, including across forced rollbacks. The remaining 2.8 is the
+  retained eta op list plus one-time working-set growth.
+
+- **#128 item E** *(behavior change: parallel dispatch)* — `Supernode.nrow`
+  was `col_counts[first_col].max(ncol)`, which is exact for a fundamental
+  supernode but **undercounts a merged one by up to 40%**. It is now the
+  union cardinality of the merged row sets, tracked during amalgamation.
+  Numeric factors and inertia are unaffected (`build_row_indices` always
+  recomputed the truth), but every consumer of `nrow` was skewed:
+  `estimate_assembly_flops` rises 2–3×, so **matrices near the
+  `PAR_MIN_FLOPS` threshold can now route to the parallel driver where they
+  previously fell to sequential**, and `peak_contrib_bytes` — the
+  contribution-block memory estimate — was understated by as much as 25× on
+  merged trees. Callers who calibrated `NumericParams::min_parallel_flops`
+  against the old estimate should re-check that value.
+
+- **#128 item D** — the three elimination-tree postorder traversals share a
+  CSR child arena instead of `EliminationTree::children()`'s per-node `Vec`s
+  plus a sorted `Vec` per stack push. **~2n → 8 allocations per call**
+  (16004 → 8 at n = 8000), flat in `n`. Symbolic factorization total time
+  falls 12–19% on the matrices measured. The emitted ordering is unchanged —
+  pinned by a digest over 12 matrices × 3 orderings × 3 amalgamation
+  strategies × 3 `nemin` values, plus the Schur-constrained variant.
+
 ### Changed — `Solver` defaults `use_parallel` from the platform (issue #154)
 
 - `Solver::new()` and `Solver::with_params(...)` now derive `use_parallel` from

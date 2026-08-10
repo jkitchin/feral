@@ -6297,3 +6297,67 @@ failed. Full `cargo test` on 4 cores → 0 failed across all binaries.
 jkitchin/pounce#482. That reproduces only under `nightly-2026-08-02`,
 is a CPU spin, and occurs inside `pounce_load` — parsing, upstream of
 feral entirely.
+
+## 2026-08-10 — `Supernode.nrow` is the exact merged union cardinality, computed in closed form (issue #128 item E)
+
+Issue #128 item E proposed computing the merged front height "as the union
+cardinality during amalgamation (seen-bitmap, as small_leaf does), or at
+minimum a documented upper bound." Neither was adopted, because a closed form
+turns out to be *exact*.
+
+`find_supernodes` has only `col_counts`, not the pattern, so a seen-bitmap
+union is not available there without threading the pattern through. Instead,
+by Liu's elimination-tree containment
+(`struct(L[*,j]) \ {j} ⊆ struct(L[*,parent(j)]) ∪ {parent(j)}`), a merged
+group's row set is exactly the child's own dense column block
+`[child_first, parent_first)` united with the parent group's row set, and
+those two are disjoint. Hence
+
+    merged_nrow = child_group_ncol + parent_group_nrow
+
+maintained as a running per-group value. This is the union *cardinality*, not
+a bound, and it composes for chains under both amalgamation iteration orders.
+
+Verified rather than assumed: compared against
+`SymbolicFactorization::static_rows(i).len()` (the issue #125 static frontal
+layout, an independent computation already pinned to both a from-scratch
+`BTreeSet` recompute and `build_row_indices`) across 7 matrix families x 3
+`nemin` values — **zero error on every supernode**. The pre-change proxy was
+wrong on up to 40% of summed `nrow`.
+
+**Accepted consequence.** `nrow` feeds `estimate_assembly_flops`, so the
+`PAR_MIN_FLOPS` gate now sees true costs and borderline matrices can flip
+from sequential to parallel (one flip recorded: a 60x60 grid Laplacian at
+`nemin = 32`, 4.3M -> 12.2M estimated flops). This is the correction, not a
+regression — the issue predicted exactly this. Numeric factors and inertia
+are byte-identical.
+
+The `merge_flop_budget` guard's merged-height model was corrected in lockstep
+at both of its sites. It shared the understatement, which made merges look
+cheaper than they are — the wrong direction for a guard meant to reject
+expensive merges. The knob defaults to `None`, so the default path is
+unaffected, but the sweep recorded in
+`dev/research/amalgamation-cost-model-2026-08-09.md` was taken under the old
+model and its numbers do not transfer.
+
+## 2026-08-10 — postorder child ordering must partition *stably* (issue #128 item D)
+
+The three postorder variants now order each node's children in place inside a
+CSR arena rather than building a fresh sorted `Vec` per node. The two
+partitioning rules (`merge_bias_partition`, `schur_partition_children`) use a
+stable partition with a reused scratch buffer, not the cheaper two-pointer
+swap.
+
+Reason: the code being replaced built each group with
+`iter().copied().filter(..).collect()`, which preserves input order, and the
+subsequent `sort_unstable_by_key` is only deterministic given a fixed input
+sequence. An unstable partition would feed the sorts a different permutation
+and could silently change the emitted postorder — and therefore the
+fill-reducing ordering and every downstream numeric result. The extra scratch
+buffer is one allocation per traversal, against ~2n removed.
+
+The hoist itself is safe because all three ordering rules are pure functions
+of `(slice, sizes, bias/is_schur)` with no dependence on traversal state, so
+ordering every slice before the walk cannot change the result. Pinned by a
+symbolic-output digest over 12 matrices x 3 orderings x 3 amalgamation
+strategies x 3 `nemin` values plus the Schur-constrained variant.

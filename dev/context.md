@@ -1,69 +1,69 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-09T16:26:16Z
+Generated: 2026-08-10T01:17:08Z
 
 ## Latest Session
-File: dev/sessions/2026-08-09-04.md
+File: dev/sessions/2026-08-10-01.md
 ```
-# Session 2026-08-09-04
+# Session 2026-08-10-01
 
 ## Goal
 
-Review issue #154 ("default `use_parallel` from the platform instead of
-hardcoding `true`"), then implement it fully so the issue can be closed.
+Fix issue #128 — the five-part allocation-churn bundle (A dense Schur pack
+buffers, B `SparseLu::update_sparse` residual allocations, C `DenseLu::update`
+clones, D postorder per-node `Vec`s, E post-amalgamation `Supernode.nrow`
+underestimate).
+
+## Benchmark Results
+
+**No usable corpus perf signal this session** — the benchmark corpus is not
+present in this container, so the harness found 2 matrices. Reported as-is
+rather than omitted, and identical to session 2026-08-09-04's numbers.
+
+```
+--- Dense solver validation ---
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
+
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
+
+Dense failure analysis: no failures
+Sparse failure analysis: no failures
+
+--- Dense perf vs oracles: no matrices have oracle timings ---
+--- Sparse perf vs oracles: no matrices have oracle timings ---
+```
+
+Nothing regressed against the prior session (both residuals identical to the
+digit, inertia 100%), but that is a 2-matrix sample and not evidence of a
+perf win either. The real evidence for this session is the targeted
+instrumentation below — allocation probes and the symbolic stage profiler —
+which does not depend on the corpus.
 
 ## Accomplished
 
-### Review
+### Scope triage
 
-Verified every claim in #154 against `808babb` (v0.15.0). The diagnosis is
-correct and all line references are exact: `solver.rs:430` (`use_parallel:
-true`), `:972` (unconditional `ensure_parallel_pool()`), `:1148`, `:1216`,
-`:1540`, and the quoted `ensure_parallel_pool` body. Three gaps in the
-proposal, all confirmed by measurement rather than reading:
+Checked every item against the tree at `f7a152a` rather than trusting the
+issue body (written against `660224d`):
 
-1. **The test inventory was incomplete, and understated.** The issue names
-   one test and calls it a latent flake. Applying *only* the issue's
-   one-liner to a pristine tree and running under `taskset -c 0`:
-
-   ```
-   test result: FAILED. 404 passed; 3 failed; 6 ignored
-     solver_parallel_default_is_on             solver.rs:2825
-     solver_parallel_factor_matches_sequential solver.rs:3852
-       assertion failed: par.parallel()
-     solver_reuses_thread_pool_across_factors  solver.rs:2887
-       .expect("pool must be built after first parallel factor")
-   ```
-
-   `solver_parallel_factor_matches_sequential` is the #7 bit-exactness
-   regression test. Repairing only its assertion would leave it comparing
-   the sequential driver against itself — passing vacuously, with the
-   contract silently unchecked.
-
-2. **The "filed separately" fallback bug is not separable.** After the
-   default flips, `with_parallel(true)` — the escape hatch #154 recommends
-   for wasm — still reaches `ensure_parallel_pool()` and, on build failure,
-   falls to a `None` arm that runs the *parallel* driver bare, i.e. on
-   rayon's global pool. That is the failure being avoided, reintroduced
-   through the workaround prescribed for it. Shipping the default flip alone
-   would release a version whose documented wasm answer is a trap.
-
-3. **A fourth dispatch site the issue misses:** `solve_many_refined`
-   (`solver.rs:1601`) has the same `None`-arm shape as `solve_refined`.
-
-Adjacent sweep over every rayon entry point reachable from `Solver`:
-`intrafront_parallel` (Lever 1.1) is set only inside the parallel driver
-(`factorize.rs:3127`), so the sequential path never spawns nested rayon work
-— the pounce#79 oversubscription guarantee holds, not a bug. `solve.rs`
+- **A — already landed.** `bpack1` laziness in `fc4e9b8`, `apack`/`bpack0`
+  pooling via `PackPool` on `FactorScratch` in `484bda7`. The intra-front
+  rayon path keeps per-range fresh allocations by design, recorded in the
+  `pack_pool` doc comment.
+- **C — out of scope by the issue's own instruction**: "do this as part of
 ```
 
 ## Git Status
 ```
-6c87a0e docs: session checkpoint 2026-08-09-03 (issue #154 review + implementation)
-4f2fad6 fix(solver): derive use_parallel from the platform; fall back to sequential when the pool fails
-808babb release: feral v0.15.0 (#151)
-fad5670 perf(parallel): task-per-subtree coarsening + profiler nanoseconds (#150)
-e8e1c5a perf(kernel): explicit SIMD packed trailing update + x86 pulp dispatch fix (#149)
+1a84b31 perf(ordering): CSR child arena for the postorder traversals (#128 item D)
+2484c27 fix(symbolic): correct post-amalgamation Supernode.nrow (#128 item E)
+c83bd0b perf(lu): pool the residual per-update allocations in the FT update (#128 item B)
+f7a152a Merge pull request #156 from jkitchin/claude/review-issue-154-ukpt7t
+af73f63 Merge origin/main into claude/review-issue-154-ukpt7t
 ```
 
 ## Test Status
@@ -86,18 +86,18 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 411 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.12s
+test result: ok. 407 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.99s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-04.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-10-01.md)
 
 
-No usable perf signal this session: the benchmark corpus is not present in
-this container, so the harness found 2 matrices. Reported as-is rather than
-omitted.
+**No usable corpus perf signal this session** — the benchmark corpus is not
+present in this container, so the harness found 2 matrices. Reported as-is
+rather than omitted, and identical to session 2026-08-09-04's numbers.
 
 --- Dense solver validation ---
   Worst residual: 1.14e-15 (densecol_kkt_300_0000)
@@ -114,45 +114,45 @@ Sparse failure analysis: no failures
 --- Dense perf vs oracles: no matrices have oracle timings ---
 --- Sparse perf vs oracles: no matrices have oracle timings ---
 
-There is no reason to expect a perf delta on a multi-core host: the derived
-default is `true` there, and the pool-fallback change is unreachable unless
-`ThreadPoolBuilder::build()` fails. The one measurable change would be on a
-single-CPU host, where the sequential driver is now selected — that is the
-intended effect, not a regression.
+Nothing regressed against the prior session (both residuals identical to the
+digit, inertia 100%), but that is a 2-matrix sample and not evidence of a
+perf win either. The real evidence for this session is the targeted
+instrumentation below — allocation probes and the symbolic stage profiler —
+which does not depend on the corpus.
 
 ```
 
 ## Recent Decisions
-`solver_parallel_factor_matches_sequential` is the #7 bit-exactness
-regression test; repairing only its assertion would leave it comparing
-the sequential driver against itself and passing vacuously. The rule
-adopted: any test that means "the parallel driver" constructs with an
-explicit `with_parallel(true)`, and only the default test asserts the
-derived value — against the same probe the constructor uses, so it
-cannot silently become environment-dependent again.
 
-**New coverage.** `solver_parallel_default_follows_platform`,
-`pool_num_threads_precedence` (via a pure
-`pool_num_threads_from(env, hardware)` helper, so no test mutates
-process-global environment state), and
-`solver_parallel_without_pool_falls_back_to_serial_refine`, which
-reproduces the post-build-failure field state and asserts the refine
-output is bit-identical to the sequential solver.
+The `merge_flop_budget` guard's merged-height model was corrected in lockstep
+at both of its sites. It shared the understatement, which made merges look
+cheaper than they are — the wrong direction for a guard meant to reject
+expensive merges. The knob defaults to `None`, so the default path is
+unaffected, but the sweep recorded in
+`dev/research/amalgamation-cost-model-2026-08-09.md` was taken under the old
+model and its numbers do not transfer.
 
-**Also changed.** `FERAL_PARALLEL` in the C ABI (`src/capi.rs`) was
-off-only; with a derived default it needs a force-on arm
-(`1`/`on`/`true`/`yes`), otherwise a wasm-bindgen-rayon embedder has
-no way to opt in without a rebuild. Unset or unrecognized values leave
-the derived default alone.
+## 2026-08-10 — postorder child ordering must partition *stably* (issue #128 item D)
 
-**Validation.** `taskset -c 0 cargo test --lib` → 409 passed, 0
-failed. Full `cargo test` on 4 cores → 0 failed across all binaries.
-`cargo clippy --all-targets -- -D warnings` → clean.
+The three postorder variants now order each node's children in place inside a
+CSR arena rather than building a fresh sorted `Vec` per node. The two
+partitioning rules (`merge_bias_partition`, `schur_partition_children`) use a
+stable partition with a reused scratch buffer, not the cheaper two-pointer
+swap.
 
-**Out of scope.** This does not address the wasm hang in
-jkitchin/pounce#482. That reproduces only under `nightly-2026-08-02`,
-is a CPU spin, and occurs inside `pounce_load` — parsing, upstream of
-feral entirely.
+Reason: the code being replaced built each group with
+`iter().copied().filter(..).collect()`, which preserves input order, and the
+subsequent `sort_unstable_by_key` is only deterministic given a fixed input
+sequence. An unstable partition would feed the sorts a different permutation
+and could silently change the emitted postorder — and therefore the
+fill-reducing ordering and every downstream numeric result. The extra scratch
+buffer is one allocation per traversal, against ~2n removed.
+
+The hoist itself is safe because all three ordering rules are pure functions
+of `(slice, sizes, bias/is_schur)` with no dependence on traversal state, so
+ordering every slice before the walk cannot change the result. Pinned by a
+symbolic-output digest over 12 matrices x 3 orderings x 3 amalgamation
+strategies x 3 `nemin` values plus the Schur-constrained variant.
 
 ## Recent Tried-and-Rejected
 `nemin=8`, MEYER3NE 83× at `nemin=4`), which is what makes it a property
@@ -262,6 +262,8 @@ tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
 tests/issue112_bg_update.rs
 tests/issue127_pipeline_split.rs
+tests/issue128_postorder_alloc.rs
+tests/issue128_supernode_nrow.rs
 tests/issue52_stats.rs
 tests/issue64_arrow_ordering.rs
 tests/issue65_mc64_fallback.rs
