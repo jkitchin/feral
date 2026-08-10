@@ -6339,3 +6339,53 @@ condition 1 being confounded by the IPM barrier trajectory. That finding still
 holds: `pinene_3200` rejects 8/8 on condition 1 after this change.
 
 Research note: `dev/research/mc64-value-bound-diag-drift-2026-08-09.md`.
+
+## 2026-08-10 — `Supernode.nrow` is the exact merged union cardinality, computed in closed form
+
+Context: extracted from issue #128, a 5-part allocation-churn bundle that was
+closed as *not planned*. This was item E of that bundle and the only part
+that was a correctness bug rather than a micro-optimization, so it is carried
+on its own branch.
+
+Issue #128 item E proposed computing the merged front height "as the union
+cardinality during amalgamation (seen-bitmap, as small_leaf does), or at
+minimum a documented upper bound." Neither was adopted, because a closed form
+turns out to be *exact*.
+
+`find_supernodes` has only `col_counts`, not the pattern, so a seen-bitmap
+union is not available there without threading the pattern through. Instead,
+by Liu's elimination-tree containment
+(`struct(L[*,j]) \ {j} ⊆ struct(L[*,parent(j)]) ∪ {parent(j)}`), a merged
+group's row set is exactly the child's own dense column block
+`[child_first, parent_first)` united with the parent group's row set, and
+those two are disjoint. Hence
+
+    merged_nrow = child_group_ncol + parent_group_nrow
+
+maintained as a running per-group value. This is the union *cardinality*, not
+a bound, and it composes for chains under both amalgamation iteration orders.
+
+Verified rather than assumed: compared against
+`SymbolicFactorization::static_rows(i).len()` (the issue #125 static frontal
+layout, an independent computation already pinned to both a from-scratch
+`BTreeSet` recompute and `build_row_indices`) across 7 matrix families x 3
+`nemin` values — **zero error on every supernode**. The pre-change proxy was
+wrong on up to 40% of summed `nrow`.
+
+**Accepted consequence, with a caveat.** `nrow` feeds
+`estimate_assembly_flops`, so the `PAR_MIN_FLOPS` gate now sees true costs
+and borderline matrices can flip from sequential to parallel (one flip
+recorded: a 60x60 grid Laplacian at `nemin = 32`, 4.3M -> 12.2M estimated
+flops). Numeric factors and inertia are byte-identical. The caveat is that
+`PAR_MIN_FLOPS` was calibrated against the *understated* estimate, so the
+constant itself may now be mis-placed; the flip is unverified on the real
+corpus (absent from the container this landed in). Re-deriving the threshold
+against corrected flops is open work, not something this change did.
+
+The `merge_flop_budget` guard's merged-height model was corrected in lockstep
+at both of its sites. It shared the understatement, which made merges look
+cheaper than they are — the wrong direction for a guard meant to reject
+expensive merges. The knob defaults to `None`, so the default path is
+unaffected, but the sweep recorded in
+`dev/research/amalgamation-cost-model-2026-08-09.md` was taken under the old
+model and its numbers do not transfer.

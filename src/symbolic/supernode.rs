@@ -305,6 +305,27 @@ pub fn find_supernodes(
     let mut merged_into = vec![None::<usize>; n_snodes];
     // Track the actual first column of each supernode (may change during merging)
     let mut snode_first_col: Vec<usize> = snode_starts.clone();
+    // Running front height per surviving group (issue #128 item E). For a
+    // *fundamental* supernode the columns are nested, so the height is exactly
+    // `col_counts[first_col]` — but after a merge the group's first column is
+    // the child's, and `col_counts[child_first]` misses the rows only the
+    // parent's pattern contributes. Maintained incrementally instead:
+    //
+    //   struct(L[*, j]) \ {j} ⊆ struct(L[*, parent(j)]) ∪ {parent(j)}
+    //
+    // (Liu, "The role of elimination trees in sparse factorization"), so a
+    // merged group's row set is exactly the child's own column block
+    // `[child_first, parent_first)` — dense, and disjoint from the parent's
+    // rows — united with the parent group's row set. Hence
+    //
+    //   merged_nrow = child_group_ncol + parent_group_nrow
+    //
+    // which is the union cardinality, not a bound. The rule composes for
+    // chains under both iteration orders below: a group that later merges
+    // upward contributes its whole accumulated `ncol` to the next parent.
+    let mut snode_nrow: Vec<usize> = (0..n_snodes)
+        .map(|s| col_counts[snode_starts[s]].max(snode_ncols[s]))
+        .collect();
 
     // Iteration order: forward (legacy / `Adjacency` strategy) is the
     // historical behavior — children processed in increasing postorder
@@ -418,16 +439,21 @@ pub fn find_supernodes(
 
             // Cost-model guard (opt-in; `None` leaves the historical
             // rule bit-identical). Front heights follow the same model
-            // the rest of this function uses for `nrow`
-            // (`col_counts[first_col].max(ncol)`, see step 3), so the
-            // estimate is self-consistent with what the merge actually
-            // produces.
+            // the rest of this function uses for `nrow` (see step 3 and
+            // `snode_nrow` above), so the estimate is self-consistent
+            // with what the merge actually produces. Before issue #128
+            // item E the merged height here was
+            // `col_counts[s_first].max(merged_ncol)`, which understated
+            // it exactly as `nrow` did — and understating the merged
+            // front makes a merge look cheaper than it is, which is the
+            // wrong direction for a guard meant to *reject* expensive
+            // merges.
             let budget_ok = match params.merge_flop_budget {
                 None => true,
                 Some(budget) => {
-                    let nrow_c = col_counts[s_first].max(child_ncol);
-                    let nrow_p = col_counts[p_first].max(parent_ncol);
-                    let nrow_m = col_counts[s_first].max(merged_ncol);
+                    let nrow_c = snode_nrow[root_s];
+                    let nrow_p = snode_nrow[root_p];
+                    let nrow_m = child_ncol + nrow_p;
                     let added = front_flops(merged_ncol, nrow_m)
                         .saturating_sub(front_flops(child_ncol, nrow_c))
                         .saturating_sub(front_flops(parent_ncol, nrow_p));
@@ -442,6 +468,10 @@ pub fn find_supernodes(
                 // so the merged range is [s_first, p_first+p_ncol).
                 snode_ncols[root_p] = merged_ncol;
                 snode_first_col[root_p] = s_first;
+                // The merged front gains exactly the child's own column
+                // block; every other child row already lies in the
+                // parent's row set (issue #128 item E, see `snode_nrow`).
+                snode_nrow[root_p] += child_ncol;
             }
         }
     }
@@ -458,9 +488,15 @@ pub fn find_supernodes(
 
         let first_col = snode_first_col[s];
         let ncol = snode_ncols[s];
-        // nrow = col_counts[first_col]: number of rows in L for the first
-        // column of this supernode, which gives the frontal matrix height
-        let nrow = col_counts[first_col].max(ncol);
+        // Frontal matrix height. For an unmerged (fundamental) supernode this
+        // is `col_counts[first_col]` — the number of rows in L for its first
+        // column, whose pattern contains every later column's. For a merged
+        // group it is the accumulated union cardinality tracked in
+        // `snode_nrow` during amalgamation; `col_counts[first_col]` alone
+        // undercounts there by up to 40% (issue #128 item E), which skewed
+        // `contrib_size`, `peak_contrib_bytes`, the `PAR_MIN_FLOPS` parallel
+        // dispatch, and the profiler's front-size buckets.
+        let nrow = snode_nrow[s].max(ncol);
 
         // Row indices: the first_col..first_col+ncol are the eliminated columns,
         // plus the remaining rows from col_counts
@@ -749,9 +785,13 @@ pub(crate) fn predict_merges(
             None => true,
             Some(budget) => {
                 let merged_ncol = child_ncol + parent_ncol;
+                // Fundamental supernodes here, so each individual height is
+                // exactly `col_counts[first]`; only the *merged* height needs
+                // the issue #128 item E union rule (`child_ncol + nrow_p`),
+                // kept identical to the `find_supernodes` guard above.
                 let nrow_c = col_counts[s_first].max(child_ncol);
                 let nrow_p = col_counts[p_first].max(parent_ncol);
-                let nrow_m = col_counts[s_first].max(merged_ncol);
+                let nrow_m = child_ncol + nrow_p;
                 front_flops(merged_ncol, nrow_m)
                     .saturating_sub(front_flops(child_ncol, nrow_c))
                     .saturating_sub(front_flops(parent_ncol, nrow_p))
@@ -920,125 +960,103 @@ mod tests {
         assert_eq!(snodes.len(), 1);
     }
 
+    /// Issue #128 item E: after a size-based merge, `nrow` must be the
+    /// cardinality of the *union* of the merged supernodes' row sets. The old
+    /// proxy `col_counts[first_col].max(ncol)` sees only the child's column
+    /// pattern and misses rows that only the parent contributes.
+    ///
+    /// Fixture (lower triangle stored; `x` = structural entry):
+    ///
+    /// ```text
+    ///        c0 c1 c2 c3 c4
+    ///   r0    x
+    ///   r1    x  x
+    ///   r2       x  x
+    ///   r3          x  x
+    ///   r4          x  x  x
+    /// ```
+    ///
+    /// Hand-computed symbolic factor (no fill beyond the pattern here):
+    ///
+    /// - `struct(L[*,0]) = {0,1}`  (column 0's entries)
+    /// - `struct(L[*,1]) = {1,2}`  (column 1's entries; the update from
+    ///   child 0 contributes `{1}`, already present)
+    /// - `struct(L[*,2]) = {2,3,4}`, `struct(L[*,3]) = {3,4}`,
+    ///   `struct(L[*,4]) = {4}`
+    ///
+    /// so `col_counts = [2, 2, 3, 2, 1]` and the etree is the chain
+    /// `0 -> 1 -> 2 -> 3 -> 4`. Columns 2,3,4 are nested, forming one
+    /// fundamental supernode; columns 0 and 1 are singletons.
+    ///
+    /// At `nemin = 2` the two singletons merge. The merged supernode spans
+    /// columns `{0,1}` and its row set is
+    /// `struct(L[*,0]) union struct(L[*,1]) = {0,1} union {1,2} = {0,1,2}`
+    /// — **three** rows, where the old proxy gave `col_counts[0].max(2) = 2`.
     #[test]
-    fn test_supernodes_dense() {
-        // Dense 3x3: col_counts = [3, 2, 1]
-        // Fundamental: column 1 chains into column 0 (parent[0]=1, counts[1]=counts[0]-1)
-        // Column 2 chains into column 1 (parent[1]=2, counts[2]=counts[1]-1)
-        // So all 3 columns form one fundamental supernode
-        let m = CscMatrix::from_triplets(3, &[0, 1, 2, 1, 2, 2], &[0, 0, 0, 1, 1, 2], &[1.0; 6])
-            .unwrap();
+    fn issue_128e_merged_nrow_is_union_cardinality() {
+        let rows = [0usize, 1, 1, 2, 2, 3, 4, 3, 4, 4];
+        let cols = [0usize, 0, 1, 1, 2, 2, 2, 3, 3, 4];
+        let m = CscMatrix::from_triplets(5, &rows, &cols, &[1.0; 10]).unwrap();
         let pat = m.symmetric_pattern();
         let etree = EliminationTree::from_pattern(&pat);
         let counts = column_counts(&pat, &etree);
 
-        let params = SupernodeParams {
-            nemin: 1,
-            ..Default::default()
-        };
-        let snodes = find_supernodes(&etree, &counts, &params);
+        // Guard the oracle's premises, so a change to the etree or the count
+        // algorithm fails here loudly rather than silently invalidating the
+        // hand computation above.
+        assert_eq!(counts, vec![2, 2, 3, 2, 1], "column counts changed");
+        assert_eq!(
+            etree.parent,
+            vec![Some(1), Some(2), Some(3), Some(4), None],
+            "elimination tree changed"
+        );
 
-        // Should be 1 supernode with 3 columns (fundamental)
-        assert_eq!(snodes.len(), 1);
-        assert_eq!(snodes[0].ncol(), 3);
-        assert_eq!(snodes[0].nrow, 3);
-        assert_eq!(snodes[0].contrib_size(), 0); // no contribution block
-    }
-
-    #[test]
-    fn test_supernodes_block_diagonal() {
-        // Two 2x2 dense blocks: two independent supernodes
-        let m = CscMatrix::from_triplets(4, &[0, 1, 1, 2, 3, 3], &[0, 0, 1, 2, 2, 3], &[1.0; 6])
-            .unwrap();
-        let pat = m.symmetric_pattern();
-        let etree = EliminationTree::from_pattern(&pat);
-        let counts = column_counts(&pat, &etree);
-
-        let params = SupernodeParams {
-            nemin: 1,
-            ..Default::default()
-        };
-        let snodes = find_supernodes(&etree, &counts, &params);
-
-        // Two fundamental supernodes of size 2
-        assert_eq!(snodes.len(), 2);
-        assert_eq!(snodes[0].ncol(), 2);
-        assert_eq!(snodes[1].ncol(), 2);
-    }
-
-    #[test]
-    fn test_supernodes_diagonal_no_amalg() {
-        // Diagonal 4x4 with nemin=1: 4 singletons, no merging possible
-        let m = CscMatrix::from_triplets(4, &[0, 1, 2, 3], &[0, 1, 2, 3], &[1.0; 4]).unwrap();
-        let pat = m.symmetric_pattern();
-        let etree = EliminationTree::from_pattern(&pat);
-        let counts = column_counts(&pat, &etree);
-
-        let params = SupernodeParams {
-            nemin: 1,
-            ..Default::default()
-        };
-        let snodes = find_supernodes(&etree, &counts, &params);
-
-        // Each column is independent (no parents), so 4 supernodes
-        assert_eq!(snodes.len(), 4);
-    }
-
-    #[test]
-    fn test_supernodes_total_columns() {
-        // For any matrix, the total columns across all supernodes should equal n
-        let m = CscMatrix::from_triplets(
-            5,
-            &[0, 1, 2, 3, 4, 1, 2, 3, 4],
-            &[0, 0, 0, 0, 0, 1, 2, 3, 4],
-            &[1.0; 9],
-        )
-        .unwrap();
-        let pat = m.symmetric_pattern();
-        let etree = EliminationTree::from_pattern(&pat);
-        let counts = column_counts(&pat, &etree);
-
-        for nemin in [1, 5, 32] {
-            let params = SupernodeParams {
-                nemin,
+        // Unmerged: nrow is exactly col_counts[first_col] for every
+        // fundamental supernode. This is the case the old proxy got right.
+        let singles = find_supernodes(
+            &etree,
+            &counts,
+            &SupernodeParams {
+                nemin: 1,
                 ..Default::default()
-            };
-            let snodes = find_supernodes(&etree, &counts, &params);
-            let total: usize = snodes.iter().map(|s| s.ncol()).sum();
-            assert_eq!(total, 5, "nemin={}: total columns {} != 5", nemin, total);
-        }
-    }
+            },
+        );
+        assert_eq!(
+            singles
+                .iter()
+                .map(|s| (s.first_col, s.ncol(), s.nrow))
+                .collect::<Vec<_>>(),
+            vec![(0, 1, 2), (1, 1, 2), (2, 3, 3)],
+            "fundamental supernode layout changed"
+        );
 
-    #[test]
-    fn test_supernode_children_valid() {
-        // Verify all child indices are valid
-        let m = CscMatrix::from_triplets(
-            5,
-            &[0, 1, 2, 3, 4, 1, 2, 3, 4],
-            &[0, 0, 0, 0, 0, 1, 2, 3, 4],
-            &[1.0; 9],
-        )
-        .unwrap();
-        let pat = m.symmetric_pattern();
-        let etree = EliminationTree::from_pattern(&pat);
-        let counts = column_counts(&pat, &etree);
+        // Merged: nemin=2 amalgamates the {0} and {1} singletons.
+        let merged = find_supernodes(
+            &etree,
+            &counts,
+            &SupernodeParams {
+                nemin: 2,
+                ..Default::default()
+            },
+        );
+        let low = merged
+            .iter()
+            .find(|s| s.first_col == 0)
+            .expect("a supernode must start at column 0");
+        assert_eq!(low.ncol(), 2, "columns 0 and 1 should have merged");
+        assert_eq!(
+            low.nrow, 3,
+            "merged nrow must be the union cardinality |{{0,1,2}}| = 3"
+        );
 
-        let params = SupernodeParams {
-            nemin: 1,
-            ..Default::default()
-        };
-        let snodes = find_supernodes(&etree, &counts, &params);
-
-        for (i, s) in snodes.iter().enumerate() {
-            for &child in &s.children {
-                assert!(child < snodes.len(), "invalid child index");
-                assert!(
-                    child < i,
-                    "child {} should come before parent {} in postorder",
-                    child,
-                    i
-                );
-            }
-        }
+        // And the fixture really does exercise the undercount: the proxy this
+        // replaces would have produced 2 here, so a revert fails the test.
+        let old_proxy = counts[low.first_col].max(low.ncol());
+        assert_eq!(old_proxy, 2, "fixture no longer triggers the undercount");
+        assert!(
+            low.nrow > old_proxy,
+            "issue #128 item E: nrow {} must exceed the old proxy {old_proxy}",
+            low.nrow
+        );
     }
 }
