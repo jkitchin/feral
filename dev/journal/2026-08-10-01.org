@@ -1,0 +1,111 @@
+#+TITLE: Session 2026-08-10-01 — Supernode.nrow underestimate
+#+STARTUP: showall
+
+* 00:40 :supernode:orientation:
+Extracted from a larger pass over issue #128 (a 5-part allocation-churn
+bundle). That issue was closed as *not planned* — the other parts were
+either already landed (item A), deferred to #115 by the issue's own
+instruction (item C), or measured out as marginal for this codebase's
+primary consumer (items B and D: an IPM refactorizes the same pattern every
+iteration, so per-update allocator traffic worth ~0.6us against an 85.8us
+budget, and a one-shot symbolic speedup, are both below the noise floor).
+
+This item is different in kind: it is a *bug*, not a speedup. The solver's
+own estimate of front height was wrong on any tree where amalgamation
+merged supernodes, i.e. the default. It is carried on its own branch so it
+is not lost with the rest of the bundle.
+
+* 02:10 :issue-128:item-e:supernode:measurement:
+Item E: =find_supernodes= sets =nrow = col_counts[first_col].max(ncol)=.
+Quantified the error before touching it, using
+=SymbolicFactorization::static_rows(i).len()= (issue #125's static frontal
+layout) as the truth oracle — an independent computation that
+=tests/static_assembly_maps.rs= already pins against both a from-scratch
+=BTreeSet= recompute and the numeric =build_row_indices= output:
+
+: matrix         nemin  under  worst   sum_nrow  sum_true
+: grid20x20        1       0      0       2254      2254
+: grid20x20        8      49    -16        646      1071
+: grid40x40       32      74    -41       1844      3083
+: banded800b12     8      99     -7       1299      1988
+: chainkkt1200     8      99     -2       2395      2593
+
+Exactly the predicted shape: *zero* error at nemin=1 (no amalgamation —
+fundamental supernodes have nested column patterns, so
+=col_counts[first_col]= is exact), and a systematic *undercount* once
+merging turns on, never an overcount. Worst summed case 1844 vs 3083, a
+40% underestimate.
+
+* 02:25 :issue-128:item-e:fix:
+The issue suggests a seen-bitmap union during amalgamation, but
+=find_supernodes= only has =col_counts=, not the pattern. Derived a closed
+form instead. By Liu's elimination-tree containment,
+
+:   struct(L[*,j]) \ {j}  subset of  struct(L[*,parent(j)]) union {parent(j)}
+
+a merged group's row set is exactly the child's own (dense) column block
+=[child_first, parent_first)= united with the parent group's row set, and
+those are disjoint. So
+
+:   merged_nrow = child_group_ncol + parent_group_nrow
+
+which is the union *cardinality*, not a bound, and composes for chains
+under both iteration orders. Implemented as a running =snode_nrow= vector
+updated at each merge (=snode_nrow[root_p] += child_ncol=).
+
+Re-ran the probe: *zero error on every supernode*, all 7 matrix families x
+3 nemin values. The closed form is exact, so the bitmap is unnecessary.
+
+Also updated the two =merge_flop_budget= guard sites (in =find_supernodes=
+and the mirrored merge-bias predicate) to the corrected merged height.
+They had the same understatement, which made merges look *cheaper* than
+they are — the wrong direction for a guard meant to reject expensive
+merges. The knob defaults to =None=, so the default path is unaffected.
+
+* 02:40 :issue-128:item-e:validation:dispatch-flip:
+Per the issue's instruction ("assert results identical while the
+parallel/sequential choice may differ, and record any flips"):
+
+*Numeric results identical.* Digested the raw IEEE-754 bits of every
+front's =l=/=d_diag=/=d_subdiag= plus inertia, 9 matrices x 2 nemin.
+All 18 =FACTOR= digests and all 18 inertias are byte-identical before and
+after. =nrow= never reaches the numeric kernels; =build_row_indices=
+recomputes the truth.
+
+*Consumers corrected, as intended:*
+
+: matrix          nemin   flops before -> after    par        peak before -> after
+: grid20x20         8        54760 ->  142009    false          6512 ->  13448
+: grid40x40        32      1389966 -> 3929494    false          3200 ->  81808
+: grid60x60        32      4310558 -> 12216885   false -> TRUE  42912 -> 218320
+: banded2000b6      8       129320 ->  391304    false           128 ->    864
+
+*One dispatch flip recorded:* grid60x60 at nemin=32 crosses
+=PAR_MIN_FLOPS= (1e7) and now routes to the parallel driver. That is
+precisely the failure mode the issue predicted ("an underestimate flips
+borderline matrices to sequential").
+
+=peak_contrib_bytes= was the worse offender — grid40x40 nemin=32 was
+underestimating contribution-block memory by *25x* (3200 vs 81808 bytes).
+
+* 02:55 :issue-128:item-e:tests:
+Two regression tests.
+
+1. =issue_128e_merged_nrow_is_union_cardinality= (unit, supernode.rs).
+   Hand-computed 5x5 fixture where the old proxy undercounts by one; the
+   oracle is the hand-derived symbolic factor in the doc comment, and the
+   test guards its own premises (=col_counts=, etree shape, fundamental
+   layout) so a change elsewhere fails loudly instead of silently
+   invalidating the hand computation. My first two attempts at this
+   fixture had wrong premises — I dumped the actual structure and rebuilt
+   the oracle from it rather than asserting what I assumed.
+2. =tests/issue128_supernode_nrow.rs= (integration). =nrow == static_rows(i).len()=
+   for every supernode across 14 fixtures x 3 orderings x 7 nemin values
+   (>5000 supernodes, >500 merged), plus =nrow >= ncol= and the
+   =row_indices.len() == nrow= invariant the F3.2b split asserts.
+
+Confirmed the integration test has teeth: reverted =supernode.rs= and it
+fails on the first merged front (=grid8x8 Amd nemin=2 supernode 2: nrow=3,
+true 5=).
+
+Full suite: 802 passed, 0 failed. Clippy clean.
