@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-08-10
+
 ### Changed — MC64 Hungarian matching is 4-5% faster on large matchings *(bit-identical)*
 
 - The Hungarian matching's binary min-heap stored only row indices and looked
