@@ -626,3 +626,177 @@ Condition 1 is exactly what tried-and-rejected.md:2087 (2026-05-21)
 found confounded by the IPM barrier trajectory. The prize there is an
 order of magnitude larger than condition 3 was worth, and that entry
 says why it is hard. Do not start it without reading it.
+
+* 23:40 :mc64:scaling:measurement:correction:
+Ran the untested half of issue #38's claim ("silently corrupts
+inertia *and explodes factor cost*") on the three high-scaling
+families. `diag_scaling_reuse_correctness` with per-arm timing
+columns, fresh solver per iterate, `with_parallel(false)`:
+
+pinene_3200 (10 iterates): reuse total is LOWER on every one --
+41787->33205, 43732->36618, ..., 49822->32868 us. The delta is
+approximately the scaling cost, so non-scaling work is unchanged.
+No cost explosion.
+
+nql180 (7 iterates): reuse is SLOWER on 5 of 7, substantially --
+697786->1156543 (+66%), 726355->1303582 (+79%), 710552->1195501
+(+68%), 690824->1396280 (+102%), 695627->1345981 (+94%). Fresh
+scaling there is only ~14.5 ms of ~700 ms (2%), so reuse buys
+nothing and costs a lot. This is the first positive instance of
+#38's cost claim on a real KKT. Inertia still "same" on all 17.
+
+* 23:55 :mc64:profiling:correction:
+CORRECTION to my own earlier reading. I reported pinene_3200's
+per-iterate `scal_us` growing 8500 -> 207611 (19.7x) and called it
+a value-dependent MC64 slowdown. Built `diag_mc64_warm_vs_cold` to
+compare a warm solver against a cold one on the same matrix in the
+same process:
+
+  iterate  warm_scal  warm_pivord  warm_tot  cold_scal  cold_tot
+  0000          8052           61     42582       8041     41283
+  0001          9472           55     45184      10052     44952
+  0002         57749           50     92557       9375     41917
+  0006        205611           50    234063       8432     41763
+  0007        214213           51    244975       9400     45886
+  0009        175500           57    208370       8526     49707
+
+Cold is flat, warm climbs 26.6x. `scaling_pivot_order_us` is ~50 us
+in both, so it is inside MC64 proper. But this is NOT a slowdown:
+`Solver::factor` clears `symbolic.cached_mc64` after every call
+(issue #38, src/numeric/solver.rs:1374, whose own comment predicts
+"one extra MC64 (~100-200 ms on n~1e5) per warm refactor"). The
+cold arm's Hungarian therefore ran inside `analyze()`, and
+`ProfileReport::total_us` is documented as "wallclock for the
+entire driver call" -- the numeric driver only. The two arms bill
+the same work to different phases. My 19.7x was a measurement
+artifact of comparing across two probes with different solver
+lifetimes.
+
+* 00:10 :mc64:hungarian:value-dependence:
+The warm/cold split cannot answer whether the Hungarian itself is
+value-dependent, so measured it standalone via
+`feral::scaling::diagnose_mc64_matching` (no solver, no cache, no
+scaling post-processing) -- `diag_mc64_work_trajectory`.
+
+pinene_3200, identical pattern (nnz 732976) from iterate 1 on:
+
+  iter  match_us  augment   touched   edge_scans
+  0001     46852    57426   1340479      8148431
+  0003    107582    70196   3651551     29912538
+  0006    229183    77994   6816372     70268885
+  0009    175882    77993   6201685     55972134
+
+4.9x in wallclock on a pattern that never changes, so the value
+dependence is real and independent of the #38 artifact above.
+`augment_searches` moves only 1.36x (57426 -> 77993); `touched`
+moves 5.1x and `main_loop_edge_scans` 8.6x. Per-search work goes
+from 142 edge scans to 900. The search COUNT is stable; each
+shortest-augmenting-path search wanders much further as delta->0.
+
+nql180 is the extreme: 895 augment searches doing 202-222M edge
+scans on n=259681, i.e. ~227,000 scans per search (~87% of n).
+1.17 s -> 3.12 s across the trajectory.
+
+marine_1600 spikes to 809 ms at iterate 1 (23.5M touched) and
+falls back to 32 ms at iterate 2; iterate 0 has a different nnz
+(342399 vs 414399), so the spike sits right at the pattern change.
+
+Implication: capping or reordering the augmenting-path search is a
+strictly-safe lever (same matching, less work) that helps every
+family, including the ones where scaling reuse is unsafe. It does
+not depend on resolving the condition-1 gate question at all.
+
+* 00:35 :mc64:reuse:economics:corpus:
+Built `diag_trajectory_reuse`: TWO warm solvers over the same
+trajectory in one process, one on `Auto`, one pinned to
+`External(d0)` where d0 is iterate 0's own MC64 vector. This is the
+arm the previous probes could not measure -- only a warm solver
+pays the Hungarian inside the timed driver, because
+`Solver::factor` clears `symbolic.cached_mc64` after every call.
+
+Whole kkt-mittelmann corpus, 37 families with >=2 iterates, 233
+iterates, <=10 iterates each:
+
+  corpus fresh 34.66 s -> reuse 24.47 s, aggregate 1.42x,
+  geomean 1.164x, inertia differs on 0 iterates
+
+Wins: pinene_3200 5.09x, nql180 2.10x, marine_1600 1.63x,
+robot_1600 1.42x, gasoil_3200 1.39x, rocket_12800 1.33x.
+Losses: ex4_2_160 0.75x, cont5_1_l 0.77x, arki0009 0.91x,
+qcqp1000-2c 0.99x.
+
+rocket_12800 -- the named #38 reproducer -- shows 1.25x/1.42x with
+inertia 51201/38400/0 on both iterates and both arms. CAVEAT: my
+probe's fingerprint check is `csc.n != d0.len()`, n only. rocket
+changes nnz between iterates (332793 -> 435190), so the External
+arm applied D0 across a PATTERN change that the real cache would
+reject outright. That makes rocket a harder correctness test than
+the design would ever attempt, and it also means rocket's 1.33x is
+not a payoff the real design could bank.
+
+* 00:50 :mc64:issue38:mechanism:
+Read the original #38 evidence (`dev/journal/2026-05-16-30.org`
+17:25). The corruption mechanism is explicitly structural:
+`pick_ordering_preprocess` triggers `LdltCompress`, `LdltCompress`
+populates `SymbolicFactorization::cached_mc64` via
+`mc64::compute_matching`, and the stale *matching* is applied to
+iter-N. The scaling vector is downstream of that. Reusing D0
+alone -- `ScalingStrategy::External` -- cannot reach
+`LdltCompress` and cannot change the elimination structure.
+
+That is a mechanism-level reason the 233-iterate agreement is not
+luck. It is still not a proof: absence of a counterexample on this
+corpus is not a safety argument, and every matrix here has a fixed
+pattern per family.
+
+* 01:05 :mc64:gate:metric:negative-result:
+Tested whether a diagonal-free value statistic can replace
+condition 1. `diag_scaled_entry_spread` computes, on the same
+scaled matrix, both today's `max_ratio` and entry-magnitude
+statistics of D0*A_N*D0 (max, 99.9th pct, fraction > 1) -- MC64's
+own objective is about entry magnitudes and never mentions the
+diagonal, so this was the natural candidate.
+
+It does not discriminate, and it fails in the informative
+direction:
+
+  family        speedup   max_ent drift   p999_ent
+  marine_1600     1.63x       5.2e12        1.030
+  nql180          2.10x       3.9e6         3.9e6
+  pinene_3200     5.09x       1.1e1         5.698
+  ex4_2_160       0.75x       1.0e4         1.0e4
+
+marine_1600 is a WIN with the worst entry drift in the set;
+ex4_2_160 is a LOSS with far milder drift. Entry magnitude is
+anti-correlated with whether reuse is a good idea. p999 separates
+marine (a few outlier entries, p999 ~ 1.0) from ex4_2_160 (a broad
+shift, p999 = max), but nql180 also has p999 = max and is a 2.10x
+win. No value proxy tried predicts the outcome.
+
+* 01:20 :mc64:gate:cost-share:
+The reason no value proxy predicts the outcome is that there is
+nothing numerical left to predict: inertia never changed. What
+varies across the corpus is only COST. Sorting the 37 families by
+the fraction of factor time fresh MC64 actually consumes gives a
+monotone relationship:
+
+  scal%   families                          speedup
+  <=5.4   all four losses                   0.75x - 1.08x
+  >=12.6  every family without exception    1.13x - 5.09x
+
+Every loss sits at scal% <= 5.4 (ex4_2_160 5.4, cont5_1_l 3.3,
+arki0009 3.0, qcqp1000-2c 0.6). Every family at scal% >= 12.6
+wins. The gap 5.4 -> 12.6 is empty, so the threshold is not
+load-bearing anywhere in 6-12%.
+
+Gating on measured cost share at 10%: 15 of 37 families reuse,
+corpus 34.66 s -> 24.32 s, 1.43x -- i.e. it banks essentially all
+of the unconditional 1.42x while dropping every regression.
+
+The significance is that `scaling_us / total_us` is already
+measured per factorization. A cost-share gate needs no value
+proxy, no numerical justification, and no new O(nnz) sweep. The
+2026-05-21 entry searched for a metric separating "safe" from
+"unsafe"; on this evidence the scaling-vector path has no unsafe
+side, and the quantity that actually needs separating is
+profitable from unprofitable.

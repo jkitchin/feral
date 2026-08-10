@@ -51,12 +51,14 @@ fn rel_res(a: &CscMatrix, x: &[f64], b: &[f64]) -> f64 {
 fn factor_once(
     csc: &CscMatrix,
     strategy: Option<ScalingStrategy>,
-) -> Option<(Inertia, f64, f64, Vec<f64>)> {
+) -> Option<(Inertia, f64, f64, Vec<f64>, u64, u64)> {
     let mut np = NumericParams::default();
     if let Some(s) = strategy {
         np.scaling = s;
     }
-    let mut solver = Solver::with_params(np, SupernodeParams::default()).with_parallel(false);
+    let mut solver = Solver::with_params(np, SupernodeParams::default())
+        .with_parallel(false)
+        .with_profiling(true);
     match solver.factor(csc, None) {
         FactorStatus::Success | FactorStatus::WrongInertia { .. } => {}
         other => {
@@ -75,7 +77,11 @@ fn factor_once(
         Ok(x) => rel_res(csc, &x, &b),
         Err(_) => f64::NAN,
     };
-    Some((inertia, res, res_ref, scaling))
+    let (total_us, scal_us) = match solver.profile_report() {
+        Some(r) => (r.total_us, r.prologue_breakdown.scaling_us),
+        None => (0, 0),
+    };
+    Some((inertia, res, res_ref, scaling, total_us, scal_us))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -86,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // Baseline scaling: the first iterate's own MC64 vector.
     let first = read_mtx(Path::new(&args[0])).and_then(|m| m.to_csc())?;
-    let (_, _, _, d0) = match factor_once(&first, None) {
+    let (_, _, _, d0, _, _) = match factor_once(&first, None) {
         Some(t) => t,
         None => {
             eprintln!("baseline factorization failed");
@@ -95,8 +101,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!("baseline scaling from {} (n={})", args[0], d0.len());
     println!(
-        "{:<26}{:>7}{:>12}{:>10}{:>10}{:>12}{:>10}{:>10}{:>8}",
-        "iterate", "nnz", "fresh(n,z)", "res", "res_ref", "reuse(n,z)", "res", "res_ref", "inertia"
+        "{:<24}{:>12}{:>10}{:>10}{:>10}{:>12}{:>10}{:>10}{:>10}{:>8}",
+        "iterate",
+        "fresh(n,z)",
+        "f_tot_us",
+        "f_scl_us",
+        "res_ref",
+        "reuse(n,z)",
+        "r_tot_us",
+        "r_scl_us",
+        "res_ref",
+        "inertia"
     );
     for a in &args {
         let csc = match read_mtx(Path::new(a)).and_then(|m| m.to_csc()) {
@@ -120,17 +135,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let fresh = factor_once(&csc, None);
         let reuse = factor_once(&csc, Some(ScalingStrategy::External(d0.clone())));
         match (fresh, reuse) {
-            (Some((fi, fr, frr, _)), Some((ri, rr, rrr, _))) => {
+            (Some((fi, _fr, frr, _, ftot, fscl)), Some((ri, _rr, rrr, _, rtot, rscl))) => {
                 let same = fi.negative == ri.negative && fi.zero == ri.zero;
                 println!(
-                    "{:<26}{:>7}{:>12}{:>10.1e}{:>10.1e}{:>12}{:>10.1e}{:>10.1e}{:>8}",
+                    "{:<24}{:>12}{:>10}{:>10}{:>10.1e}{:>12}{:>10}{:>10}{:>10.1e}{:>8}",
                     name,
-                    csc.nnz(),
                     format!("({},{})", fi.negative, fi.zero),
-                    fr,
+                    ftot,
+                    fscl,
                     frr,
                     format!("({},{})", ri.negative, ri.zero),
-                    rr,
+                    rtot,
+                    rscl,
                     rrr,
                     if same { "same" } else { "DIFFERS" }
                 );
