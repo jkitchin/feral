@@ -4,6 +4,40 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — MC64 Hungarian matching is 4-5% faster on large matchings *(bit-identical)*
+
+- The Hungarian matching's binary min-heap stored only row indices and looked
+  the key up through a random access into the distance array on every
+  comparison. It now stores the key inline alongside the index. Comparisons
+  and tie-breaking are unchanged, so the matching — and therefore the scaling
+  vector — is unchanged.
+- **Verified bit-identical on 51 matrices across 39 families**, by hashing the
+  raw bits of the scaling vector each factorization produces.
+- Measured (median of 3): `nql180_0000` 1.040x, `nql180_0002` 1.057x. Matrices
+  whose matchings are small and L1-resident (`pinene_3200`, `marine_1600`) are
+  unchanged, as expected — the win is in the sift-down path, which only
+  matters when the heap outgrows cache.
+- No API change.
+
+### Fixed — MC64 scaling cache rejected matrices against their own fingerprint
+
+- The value-bound gate that decides whether a cached MC64 scaling may be reused
+  had three conditions, two of which measure how far the matrix has drifted from
+  the one the scaling was computed on. The third did not: it compared the
+  current **minimum** scaled diagonal against the baseline **mean**. Because
+  those are different statistics, it behaved as an absolute property of the
+  matrix rather than a drift measure, and rejected reuse even when the matrix
+  had not moved at all.
+- Condition 3 is now the disjunction of the original absolute floor and a drift
+  bound against the baseline minimum. This is a strict widening: nothing the
+  gate accepts today can start being rejected.
+- Effect is narrow and measured. Across 53 gate evaluations on the seven corpus
+  families that route to MC64, exactly two decisions change — both on
+  `robot_1600`, cutting that trajectory's factorization time 14.3% and its
+  scaling time 39.8%. Inertia is unchanged on every iterate of every family, and
+  a genuine diagonal collapse (`arki0003`, eight orders down) is still rejected.
+- No API change; the gate is internal.
+
 ### Fixed — post-amalgamation `Supernode.nrow` underestimate *(behavior change: parallel dispatch)*
 
 `find_supernodes` set every supernode's frontal height to

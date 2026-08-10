@@ -6298,6 +6298,48 @@ jkitchin/pounce#482. That reproduces only under `nightly-2026-08-02`,
 is a CPU spin, and occurs inside `pounce_load` — parsing, upstream of
 feral entirely.
 
+## 2026-08-09 — MC64 value-bound condition 3 measures drift, not an absolute floor
+
+`mc64_value_bound_passes` decides whether a cached MC64 scaling may be reused
+on a new matrix. Conditions 1 and 2 compare a current statistic against the
+same statistic on the baseline matrix. Condition 3 did not: it compared the
+current **minimum** scaled diagonal against the baseline **mean**. Those are
+different statistics, so condition 3 was an absolute property of the matrix —
+"is the scaled diagonal's dynamic range wider than `1/EPS_DIAG`" — rather than
+a measure of how far the matrix had moved, and it could reject a matrix against
+its own fingerprint.
+
+**Decision:** `Mc64CacheValidity` gains `min_diag_0`, and condition 3 becomes a
+disjunction of the existing absolute floor and a new drift bound
+`min_diag >= DIAG_SHRINK * min_diag_0`, with `DIAG_SHRINK = 1.0 / GROWTH_FACTOR
+= 0.5`.
+
+**Why a disjunction rather than a replacement.** It is a strict widening of the
+accept set, so no matrix that the gate accepts today can start being rejected.
+And it is zero-drift-safe by construction: re-checking the baseline matrix
+gives `min_diag == min_diag_0` exactly, so the drift clause holds for any
+`DIAG_SHRINK <= 1`.
+
+**Why 0.5.** Symmetric with `GROWTH_FACTOR`: the minimum diagonal may shrink by
+the same factor the worst dominance ratio may grow. The constant is **not**
+load-bearing — every value swept from 0.5 to 1e-6 produces the same 25 accepts
+out of 53 corpus gate evaluations. 0.5 is the tightest defensible choice, not a
+tuned one.
+
+**Evidence.** 53 gate evaluations across the 7 corpus families that route to
+MC64. Condition 3 was the sole blocker on 3: two `robot_1600` checks at drift
+0.988 and 1.000 (false positives) and one `arki0003` check at drift 2.1e-08 (a
+genuine eight-order collapse, still rejected after the change). Pre/post-fix
+binaries give a complete hit-pattern diff of two flips, both `robot_1600`, with
+inertia byte-identical on every iterate of every family.
+
+**Scope.** This does not touch conditions 1 or 2, and does not revisit the
+2026-05-21 rejection of Track B2 (`tried-and-rejected.md:2087`), which turned on
+condition 1 being confounded by the IPM barrier trajectory. That finding still
+holds: `pinene_3200` rejects 8/8 on condition 1 after this change.
+
+Research note: `dev/research/mc64-value-bound-diag-drift-2026-08-09.md`.
+
 ## 2026-08-10 — `Supernode.nrow` is the exact merged union cardinality, computed in closed form
 
 Context: extracted from issue #128, a 5-part allocation-churn bundle that was

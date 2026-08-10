@@ -5154,3 +5154,82 @@ released 0.15.0 (comment 5232409020) shows clnlbeam more than halved
 at 3.77×, and it is a dense-front matrix (nnz/dim 23.0, fronts of 33–64
 columns). Amalgamation is a chain-KKT lever aimed at a problem that has
 largely receded.
+
+## 2026-08-09 — efficiency cores as the explanation for the post-0.14.0 chain regression
+
+**Rejected.** The proxy note `chain-kkt-ma57-gap-2026-08-09.md`
+hypothesized that on Apple silicon rayon treats efficiency cores as
+equivalent to performance cores, so a coarse task from #150's
+task-per-subtree coarsening landing on an E-core stalls the whole
+factorization, where 0.14.0's per-supernode spawning let work-stealing
+rebalance. It predicted the regression "shrinks or inverts at
+`RAYON_NUM_THREADS=4`".
+
+Swept `RAYON_NUM_THREADS` = 1, 2, 4, 8, 10 against the default on six
+real chain KKTs, 15 paired runs each, on an M4 Pro (10P + 4E — *more*
+efficiency cores than the 4P+4E M2 the hypothesis came from, so the
+predicted effect should be larger). Every ratio vs the default landed
+within 6% of 1.0; the only significant one was `marine_1600` at t1
+(0.961, 0/15, p = 0.0001), in the wrong direction to support the
+hypothesis. `steering_12800` at one thread: 1.003 (9/15, p = 0.6072).
+`dtoc1nd`, the matrix that actually regressed, at t4: 1.005 (7/15,
+p = 1.0000).
+
+The knob was verified live, not assumed: feral reads the global rayon
+pool (`rayon::current_num_threads()`, `src/numeric/factorize.rs:3262`),
+and the same variable moved the proxy matrices by up to 65%.
+
+Consequence worth carrying forward: single-threaded main matches
+all-threads main on every one of these matrices, so **#150's 1.20x to
+2.05x gains on the large chains are not parallelism gains**. Do not
+build on the assumption that they are.
+
+Full data: `dev/research/chain-kkt-corpus-2026-08-09.md`, Result 3.
+
+## 2026-08-09 — a tighter search bound as the MC64 Hungarian lever
+
+**Rejected: the lever does not exist.** `mc64-condition1-cost-share-2026-08-09.md`
+closed by recommending a Hungarian search bound and described it as
+"same-output-less-work, needs no gate and no residual argument". **That
+characterization is wrong.** Code inspection, before any code was written,
+found two independent reasons:
+
+1. The classic shortest-augmenting-path bound is **already implemented**.
+   `csp` — the cost of the best augmenting path found so far — prunes the
+   root scan (`src/scaling/hungarian.rs:541`), terminates the main loop
+   (`:570`), and prunes the inner column scan (`:591`). There is no missing
+   standard bound to add.
+2. Any *further* truncation ends a search before its shortest augmenting path
+   is proven, giving a suboptimal matching and therefore a different scaling
+   vector. That is a numerics change requiring a corpus inertia/residual study
+   and human approval — not a free win.
+
+See also the pre-existing entry 2026-06-06-03 (line ~2313), which proves no
+*per-column reduced-cost* bound can ever prune the inner scan (`vj + lb_tight
+= dq0`, and `q0` was popped only because `dq0 < csp`) and instructs future
+sessions not to retry it. That directive stands.
+
+What the measurement pointed at instead was memory layout, not fewer scans:
+per-edge-scan cost differs 4.5x between corpus families on identical code
+(pinene_3200_0006 2.94 ns/scan, 87 rows touched per search, L1-resident;
+nql180_0002 14.4 ns/scan, 53,411 rows touched per search, far past L1). The
+inline-key heap that followed is bit-identical and won 4-5% on nql180.
+
+Full data: `dev/research/mc64-hungarian-search-bound-2026-08-09.md`.
+
+## 2026-08-09 — `build_cost_graph` as an MC64 optimization target
+
+**Rejected on measurement.** Timed at 8-12 ms per iterate. That is ~20% of
+pinene's *cheapest* iterate but **0.4%** of nql180's — and nql180 is where the
+MC64 time actually is. Optimizing it cannot move the corpus. The instrumented
+timer was reverted and is not in any commit.
+
+## 2026-08-09 — array fusion projected from a microbenchmark
+
+**Not rejected, but the projection was wrong and is recorded so it is not
+reused.** A standalone microbenchmark of split-array vs fused-record reads
+predicted **1.68-1.9x**. The real end-to-end win from the inline-key heap was
+**4-5%**, because the split reads are only ~2.3 ns of nql180's ~13 ns/scan.
+Microbenchmarks of one memory access pattern do not predict a loop that also
+does heap sifting and comparison work; scale by the measured share of the loop
+before believing them.

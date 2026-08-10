@@ -1,0 +1,888 @@
+#+TITLE: Session 2026-08-09-08 — PR #157 follow-through on the real corpus
+#+DATE: 2026-08-09
+
+* 15:45 :pr157:orientation:corpus:
+Picked up PR #157 (branch =docs/session-2026-08-09-05=, head 1833768).
+CI green (check + stress-smoke, both x2), no reviews, docs-and-harness
+only. The research note =dev/research/chain-kkt-ma57-gap-2026-08-09.md=
+lists three ordered next steps that need a machine with
+=data/matrices/=: bisect, thread sweep, re-run the gap on the real
+corpus. This machine has it.
+
+Inventory:
+- =data/matrices/kkt-mittelmann/= has clnlbeam, dtoc1nd, dtoc2,
+  marine_1600, rocket_12800. *steering_12800 has no =.mtx=* — only a
+  =steering_12800.solver.log=. The set is five families, not the six
+  the note names.
+- =external_benchmarks/ma57_oracle/ma57_bench= is a prebuilt arm64
+  binary and runs clean.
+- All five bisect commits resolve locally: c05eb77 (0.14.0), e8e1c5a
+  (#149 SIMD), fad5670 (#150 parallel), 808babb (v0.15.0), f7a152a
+  (main).
+- Machine: =Mac16,11=, Apple M4 Pro, 10 performance + 4 efficiency
+  cores. Different from the M2 (=Mac14,2=, 4P+4E) the note was measured
+  on, so this is an independent replication — but still heterogeneous,
+  so the homogeneous-core leg of the E-core hypothesis is not testable
+  here.
+
+* 15:50 :calibration:ma57:surprise:
+One untimed pass of current main and MA57 over the real matrices, to
+size the run. =factor_us=:
+
+| matrix           |      n | feral   | ma57    |
+|------------------+--------+---------+---------|
+| clnlbeam         |  99999 |  38,083 | 278,063 |
+| rocket_12800     |  89601 |  19,387 | 552,194 |
+| marine_1600      |  76807 | 120,462 |  44,303 |
+| dtoc1nd          |   9685 |  11,172 |   5,980 |
+
+The proxy conclusion — "feral slower than MA57 on all five, 1.4x to
+2.4x" — does *not* reproduce here. feral is 7x and 28x faster on the
+two largest. Single shot, not the paired protocol, so not quotable
+yet, but it is the number the note said the proxies could not settle,
+and it points the other way.
+
+Second observation: analysis dominates wall clock on these
+(clnlbeam =analyse_us= 4,593,570 vs =factor_us= 38,083). Run cost is
+set by analysis, ~9.3 s per feral pass over the five, 2.2 s for MA57.
+
+* 15:52 :correctness:dtoc2:singular:
+=dtoc2_0001= and =dtoc2_0002= are singular. feral reports
+=inertia_zero 4= with =rel_res NaN=; MA57 reports =inertia_zero 103=,
+also NaN. Two independent solvers agreeing on rank deficiency means
+the matrix, not the solver. =dtoc2_0000= factors clean
+(=inertia_zero 0=, =rel_res 3.08e-16=) and is what the run uses. Note
+this is a *different* dtoc2 from the =kkt= corpus DTOC2 (n=9990) in
+=dev/corpus-characterization/summary.csv=; the mittelmann one is
+n=103920.
+
+* 15:56 :harness:arm_run:
+=ab_run.py= hardcodes three arms (new/base/ma57); the bisect needs six
+and the thread sweep four. Wrote
+=external_benchmarks/chain_proxy/arm_run.py=, an N-arm generalization
+reusing =ab_run.py='s =read_mtx_lower=, =synth_rhs=, =parse_sidecar=
+and =sign_test_p= so the protocol is literally the same code. Arms are
+=NAME=BIN= or =NAME=BIN|K=V,K2=V2= for env overrides, which is what
+makes the thread sweep and the SIMD/seed probes a matter of arguments
+rather than another script. This is the =probe_bisect.py= the note
+recorded as written-but-never-run; it is committed this time.
+
+Added a correctness gate that prints before any timing table: any arm
+with =inertia_zero != 0= or NaN/>1e-8 =rel_res= is flagged and the
+matrix is called out as not trustworthy for timing.
+
+=real_corpus_mtx.py= builds the =--mtx-dir= as symlinks into
+=data/matrices/kkt-mittelmann=, one iterate per family, with the
+selection rules (and the dtoc2 and steering_12800 exceptions) in the
+module docstring.
+
+Baseline builds are cheap here: 6-7 s each for a cold release build of
+the four worktrees, which is a consequence of the zero-non-Rust-deps
+constraint keeping the dependency graph tiny.
+
+* 16:07 :bisect:result:regression:ma57:
+Bisect done: 15 pairs, 6 arms, 5 real matrices, correctness gate clean
+(=inertia_zero=0=, =rel_res <= 1e-8= on every arm and matrix).
+
+=min factor_us=:
+
+| matrix       |      n | v0.14.0 | #149 SIMD | #150 par | v0.15.0 |   main |    ma57 |
+|--------------+--------+---------+-----------+----------+---------+--------+---------|
+| clnlbeam     |  99999 |   43914 |     43338 |    21311 |   21417 |  21495 |  202278 |
+| dtoc1nd      |   9685 |   10856 |     11102 |    13696 |   13899 |  13980 |    4493 |
+| dtoc2        | 103920 |  115928 |    114206 |    80795 |   80732 |  80098 |   60283 |
+| marine_1600  |  76807 |   31127 |     33425 |    32195 |   32380 |  32086 |   40829 |
+| rocket_12800 |  89601 |   27602 |     28599 |    21935 |   22381 |  22091 |  534744 |
+
+*Both headline claims in the proxy note are contradicted.*
+
+1. The MA57 gap. main vs ma57 (>1 = feral faster): rocket_12800 24.21
+   (15/15, p=0.0001), clnlbeam 9.41 (15/15, 0.0001), marine_1600 1.27
+   (15/15, 0.0001), dtoc2 0.75 (0/15, 0.0001), dtoc1nd 0.32 (0/15,
+   0.0001). The proxies said "slower on all five, 1.4x-2.4x". On the
+   real matrices feral is faster on three of five, and the two losses
+   are the smallest matrix in the set and dtoc2.
+
+2. The regression. vs 0.14.0, #150 gives clnlbeam 2.061, dtoc2 1.435,
+   rocket_12800 1.258, all 15/15 at p=0.0001; marine_1600 0.967.
+   *dtoc1nd loses: 0.793 (0/15, p=0.0001)*, and v0.15.0 (0.781) and
+   main (0.777) hold that loss. #149 alone is flat to slightly negative
+   (marine 0.931, rocket 0.965, clnlbeam 1.013, dtoc2 1.015).
+
+So the regression is real and attributable to #150, but it is on the
+*smallest* matrix (n=9,685), not the large chains — which is the
+opposite of what =prommis_sx_like= (0.833) and =double_column_like=
+(0.914) predicted. The proxies got the sign right on "something
+regressed" and the location wrong.
+
+3. v0.15.0 vs main are indistinguishable (2.050/2.043, 1.233/1.249,
+   1.436/1.447, 0.961/0.970, 0.781/0.777). The tag-vs-post-tag
+   question the note left open is answered: the #155 amalgamation
+   guard and #156's parallel-default change move nothing here.
+
+* 16:10 :steering:blocked:ripopt:
+Tried to fill the =steering_12800= hole. The =.nl= is in
+=/Users/jkitchin/Dropbox/projects/pounce-bench-data/mittelmann/nl=, so
+re-ran =scripts/harvest-mittelmann-kkt.sh steering_12800= against it
+with =RIPOPT_BIN=/Users/jkitchin/projects/ripopt/target/release/ripopt=.
+
+ripopt solved it fine — "Optimal after 23 iterations", 60.8 s, final
+primal_inf 7.1e-15 — and wrote *zero* =.mtx= files.
+
+Cause: ripopt commit 76d3575 (2026-04-28, "A7.6 (set 2) delete dead
+condensed-path helpers") bulk-deleted the dump implementation —
+=collect_kkt_lower_triangle_entries=, =write_kkt_mtx_file=,
+=write_kkt_json_sidecar=, =dump_kkt_matrix= — plus the
+=if let Some(ref dump_dir) = options.kkt_dump_dir= call site. It left
+=SolverOptions::kkt_dump_dir= / =kkt_dump_name= (options.rs:714) and
+the CLI wiring (ripopt_ampl.rs:607) in place, so =kkt_dump_dir== is
+still accepted on the command line and now silently does nothing.
+
+That makes steering_12800 unavailable without restoring ~200 lines in
+another repo. Out of scope for this PR; leaving the set at five and
+recording it as a known hole. Worth an issue on ripopt: an option that
+parses and silently no-ops is worse than one that errors.
+
+* 16:25 :threads:ecores:refuted:
+Thread sweep, =RAYON_NUM_THREADS= = 1/2/4/8/10 vs default (14), 15
+pairs. *Nothing moves.* Every ratio vs =main-all= within 6% of 1.0;
+the only significant one is marine_1600 at t1 (0.961, 0/15, 0.0001),
+which is the wrong direction for the hypothesis. steering_12800 at one
+thread: 1.003 (9/15, p=0.6072).
+
+Verified the knob is live before believing the null: feral reads the
+global rayon pool (=rayon::current_num_threads()=,
+=src/numeric/factorize.rs:3262=, =src/numeric/solve.rs:632=), and the
+same env var moved the *proxies* by up to 65% (double_column_like
+40382 -> 66584). So the variable works; these matrices just do not
+care.
+
+E-core hypothesis refuted, on hardware with *more* E-cores than the
+machine that generated it. Recorded in =tried-and-rejected.md=.
+
+Bigger consequence: single-threaded main == all-threads main on every
+matrix, so *#150's 1.20x-2.05x gains are not parallelism gains*.
+Whatever task-per-subtree coarsening bought (spawn overhead, locality,
+traversal order), it is not multi-core execution. Any follow-up that
+tries to extend #150 by parallelizing harder starts from a false
+premise.
+
+* 16:30 :steering:pounce:harvest:
+pounce has what ripopt lost. =pounce <p>.nl --dump kkt:<spec>
+--dump-dir <d>= writes =iter_NNN/kkt_solve_NNN.jsonl=, one JSON object
+per line with =n=, =irn=, =jcn=, =vals=, =rhs=, =sol= and the inertia
+fields. Wrote =scripts/harvest-pounce-kkt.py= to convert that tree into
+the =<name>_<iter:04>.{mtx,json}= layout the corpus tooling reads.
+
+Two deliberate choices in the converter: entries are summed into a dict
+before writing the lower triangle (pounce emits the full symmetric
+structure as 1-based triplets — 422,392 triplets collapse to 409,591
+unique lower-triangle coordinates on steering, and Matrix Market has no
+defined semantics for a repeated coordinate); and only the first
+=kkt_solve_NNN= per iteration is kept, since later ones are
+inertia-correction retries of the same system and would over-weight
+hard iterations.
+
+Validated against an *external* oracle, not against itself: a
+synthesized =b = A x_true= cannot catch a mangled matrix because b is
+derived from the same file. Instead — pounce reports
+=num_neg_evals_actual = 51201=; feral and MA57 independently report
+=inertia_neg 51201=, =inertia_pos 64000=, =inertia_zero 0= on the
+converted =.mtx=. Three solvers agree. feral solves pounce's own dumped
+RHS to =rel_res 3.66e-14=.
+
+steering_12800_0001: n=115201, nnz=409591 — the largest matrix in the
+set.
+
+* 16:45 :bisect:six:gap:ma57accuracy:
+Re-ran bisect and thread sweep with all six. Both conclusions hold and
+strengthen.
+
+Gap, main vs ma57 (>1 = feral faster), all p=0.0001:
+rocket_12800 23.40, clnlbeam 9.68, *steering_12800 8.06*,
+marine_1600 1.27, dtoc2 0.755, dtoc1nd 0.319.
+
+#150 vs 0.14.0: steering 1.646, clnlbeam 2.048, dtoc2 1.401,
+rocket 1.200 (all 15/15); dtoc1nd 0.764. main holds all of it
+(steering 1.669, dtoc1nd 0.750).
+
+*The correctness gate fired, on MA57.* steering_12800: MA57
+=rel_res 4.53e-08= against feral =3.52e-14=, identical matrix and RHS.
+Everywhere else both are 1e-16..1e-14. feral's sidecar says
+=refined yes=, so part of it is iterative refinement the MA57 oracle
+does not do. =factor_us= is factorization only so the 8.06x stands,
+but it must be quoted with the caveat: feral is faster *and* more
+accurate there, against a looser MA57 solve. Writing the gate into
+=arm_run.py= is what surfaced this; it would have been invisible in a
+timing-only table.
+
+Also: #149's SIMD kernel is below 1.0 on all six, significantly on
+clnlbeam (0.966, 0/15, 0.0001) and rocket_12800 (0.979, 2/15, 0.0074).
+It helped on the proxies. Separate thread, worth its own bisect.
+
+* 17:05 :correction:ma57:oracle:methodology:
+Result 1 of this session is WRONG and has been retracted on PR #157.
+
+Asked whether any optimization work remained, pulled analyse_us
+alongside factor_us, and noticed feral's analysis was 5.0 s on
+clnlbeam against a 26 ms factorization. Chasing that led back through
+the oracle and exposed the error.
+
+`ma57_bench.F` sets ICNTL(15)=1. MA57 computes that scaling *inside
+MA57BD*, which is exactly the region the oracle times as factor_us.
+feral computes its MC64 during analysis, which its factor_us excludes.
+So the comparison charged MA57 per-factorization for work feral had
+already amortized and was not billed for.
+
+I had checked that factor_us covered MA57BD only and treated that as
+sufficient. The boundary of the timed region was verified; the
+contents were not.
+
+Corrected (ICNTL(15)=0, 15 pairs, min factor_us), feral vs ma57:
+  dtoc1nd        14050 /  2539  -> MA57 5.53x   0/15  p=0.0001
+  clnlbeam       21979 /  5384  -> MA57 4.08x   1/15  p=0.0010
+  rocket_12800   22266 /  5955  -> MA57 3.74x   0/15  p=0.0001
+  marine_1600    33131 / 10973  -> MA57 3.02x   0/15  p=0.0001
+  steering_12800 34517 / 17097  -> MA57 2.02x   0/15  p=0.0001
+  dtoc2          81725 / 51309  -> MA57 1.59x   0/15  p=0.0001
+
+MA57 faster on all six. Three independent confirmations:
+- issue #153 measured the same six through pounce: 1.29x-3.77x MA57.
+  Its MA57 times (clnlbeam 7.27 ms, rocket 8.79, steering 18.96) match
+  ICNTL(15)=0 (5.38, 5.96, 17.1), not the oracle's (201, 554, 292).
+- the proxy note I "superseded" said 1.4x-2.4x slower. Right direction,
+  close magnitude. I overturned a correct finding with a worse
+  measurement.
+- the steering accuracy caveat was the same artifact: scaling off gives
+  MA57 rel_res 1.59e-14, not 4.53e-08.
+
+Results 2 and 3 are untouched -- they compare feral builds to each
+other and never invoke the oracle.
+
+Oracle now defaults ICNTL(15)=0, takes MA57_SCALING to override, times
+MA57AD, and echoes both analyse_us and `scaling` into every sidecar so
+a result file can never again be ambiguous about which arm produced it.
+
+* 17:20 :analysis:mc64:ldlt_compress:target:
+The question that exposed the error also produced the clearest
+optimization target in the corpus.
+
+analyse_us vs factor_us for main, and per-stage via a new
+diag_symbolic_stages_argv:
+
+  matrix          analyse    factor   ldlt_compress  share   ordering
+  clnlbeam       5001272     26008        4515372    99.3%      3706
+  rocket_12800   2705801     29910        2289795    98.3%      3932
+  marine_1600    1048521     42817              -        -          -
+  steering_12800  130389     41795          23539    33.6%      6172
+  dtoc2           276116    101528              -        -          -
+  dtoc1nd          42464     19278           2834    23.1%      2118
+
+ldlt_compress is compute_mc64_cache (src/symbolic/mod.rs:1211). On
+clnlbeam it is 4.5 s while the fill-reducing ordering beside it is
+3.7 ms -- a factor of 1200. Every other symbolic stage is 1-15 ms.
+
+Not a size effect: clnlbeam has the FEWEST nonzeros of the large five
+(259,993) and the most expensive analysis; steering_12800 is larger
+(n=115,201, nnz=409,591) and analyses 38x faster. A 192x spread on
+comparable matrices points at an algorithmic pathology in the matching
+-- plausibly long augmenting paths on chain structure -- not uniform
+slowness.
+
+Against MA57's analysis, now that the oracle times MA57AD:
+  clnlbeam       feral 5001272 vs ma57   6298   -> 794x slower
+  rocket_12800         2705801     6426        -> 421x
+  marine_1600          1048521     7296        -> 144x
+  dtoc1nd                42464     2467        ->  17x
+  dtoc2                 276116   434101        -> feral 1.6x FASTER
+  steering_12800        130389   178776        -> feral 1.4x FASTER
+
+The two matrices where feral's analysis wins are exactly the two where
+ldlt_compress is a small share. Clean causal story: feral's analysis is
+competitive when MC64 does not blow up.
+
+End-to-end with both arms doing MC64 (feral total vs MA57 ICNTL(15)=1
+total) -- the only arm pairing where both solvers do the same work:
+  clnlbeam       5027280 /  240384 -> MA57 20.9x
+  marine_1600    1091338 /   54566 -> MA57 20.0x
+  dtoc1nd          61742 /    8086 -> MA57  7.6x
+  rocket_12800   2735711 /  602572 -> MA57  4.5x
+  dtoc2           377644 /  505747 -> feral 1.34x faster
+  steering_12800  172184 /  473026 -> feral 2.75x faster
+
+Issue #134 already carries "MC64 partial-matching two-pass" as a
+backlog item. This is the evidence for promoting it.
+
+Note this is a DIFFERENT cost from issue #153's "warm-path scaling
+never warms": that is the numeric scaling in the factor prologue
+(3.9-19.9 ms per call, 18-34% of factor time), paid every
+factorization. ldlt_compress is symbolic, paid once per analysis. Both
+are MC64. Whether one fix addresses both is unverified.
+
+* 18:40 :clean:prescale:ma57:confirmed:
+Ran the clean experiment. prescale_mtx writes A' = D A D once (MC64
+symmetric, scaling_info=Applied on all six, no infnorm fallback); feral
+runs FERAL_SCALING=identity and MA57 runs ICNTL(15)=0, so neither
+scales and both factorize identical numbers.
+
+MA57 faster on every matrix that can carry a timing, 15 pairs, all
+0/15 at p=0.0001: dtoc1nd 4.72x, clnlbeam 3.56x, marine_1600 2.92x,
+rocket_12800 2.64x, dtoc2 1.46x.
+
+steering_12800 EXCLUDED. MA57 rel_res 2.12e-05 on the pre-scaled matrix
+vs feral 1.62e-14 on the same input -- MA57 does not solve it
+acceptably without its own scaling. Second time the correctness gate
+has caught an MA57 accuracy problem a timing-only table would have
+published (first was 4.53e-08 on unscaled steering). Keeping the gate
+ahead of the timing table is earning its place.
+
+Convergence across three protocols (MA57 faster by):
+  matrix          #153/pounce   ICNTL(15)=0   clean pre-scaled
+  dtoc1nd            3.77x         5.53x          4.72x
+  clnlbeam           3.54x         4.08x          3.56x
+  marine_1600        2.63x         3.02x          2.92x
+  rocket_12800       2.17x         3.74x          2.64x
+  dtoc2              1.29x         1.59x          1.46x
+
+Different harnesses, different scaling handling, different machines,
+same answer. The factorization gap is real at roughly 1.5x-4.7x and
+0.15.0 did not close it. I am now confident in this; the retracted
+result was the only measurement that ever said otherwise.
+
+Side observation: feral-default ran within 2-8% of feral-noscale on the
+pre-scaled inputs. Not in tension with #153's 18-34% warm-path scaling
+cost -- MC64 on an already-MC64-scaled matrix converges immediately --
+but it does mean this experiment cannot measure warm-path scaling.
+
+* 19:30 :correction:analysis:ma57:icntl15:
+Second instance of the same error, in my own Result 4. I compared
+feral's analyse_us (which includes MC64) against MA57's analyse_us at
+ICNTL(15)=0 (which includes no scaling at all) and reported feral's
+analysis as 794x slower on clnlbeam. That is the retracted result's
+mistake one level up: same asymmetry, different stage.
+
+Charging MA57 for its scaling (factor at ICNTL(15)=1 minus factor at
+ICNTL(15)=0, both already measured):
+
+  matrix          feral ana   MA57 ana+scal   as reported   corrected
+  clnlbeam         5001.3ms        201.6ms      794x slow   24.8x slow
+  rocket_12800     2705.8ms        554.8ms      421x slow    4.9x slow
+  marine_1600      1048.5ms         39.7ms      144x slow   26.4x slow
+  dtoc1nd            42.5ms          4.5ms       17x slow    9.4x slow
+  steering_12800    130.4ms        454.1ms     1.4x faster  3.5x faster
+  dtoc2             276.1ms        444.8ms     1.6x faster  1.6x faster
+
+MC64 head to head, both solvers doing the same job: feral 23.2x slower
+(clnlbeam), 25.1x (marine), 4.2x (rocket), 1.4x (dtoc2), 1.2x
+(dtoc1nd) -- and 13.3x FASTER on steering.
+
+Also established empirically: MA57ID sets ICNTL(15)=1. MA57's own
+default IS scaling-on. So ICNTL(15)=0 is not MA57's default
+configuration; it is the right setting for a factorization-only
+comparison (and the clean experiment, where both arms are scaling-free
+on pre-scaled input, is unaffected and stands), but it is the wrong
+baseline for anything end-to-end.
+
+Against MA57 in its default configuration, feral's once-per-analysis
+MC64 amortizes: crossover at 28 factorizations (clnlbeam), 5 (rocket),
+102 (marine), immediately (steering); MA57 wins always on dtoc1nd and
+after 8 on dtoc2. Caveat: this assumes the cache is actually reused
+across warm factorizations, which is exactly what #153 disputes.
+
+Lesson, second time: the asymmetry is not in the timer, it is in what
+each solver was configured to DO. Checking the timer boundary does not
+catch it. The check that does is "name the work each arm performs in
+the timed region, and diff the two lists."
+
+* 19:50 :mc64:scaling-law:measurement:dense-column-refuted:
+Profiled MC64 across the corpus (probe_mc64_hungarian, 41 matrices,
+one iterate per family) to find what actually drives its cost. The
+prior diagnosis -- dense coupling column, O(searches x dense_deg),
+mc64-dense-column-2026-06-06.md -- does not survive.
+
+clnlbeam has max_col_degree = 5 and is the second most expensive
+matrix in the corpus (4522 ms). steering_12800 has the LARGEST max_deg
+in the corpus (51202) and runs in 21 ms. gasoil_3200 (max_deg 41500)
+runs in 9.6 ms. Over the six chain KKTs, log(ms) vs log(max_deg) is
+r = -0.59 -- the wrong sign. Against touched_total it is r = +0.999.
+
+Cost is bimodal corpus-wide: 37 of 41 matrices run at 0.3-70 ms; four
+(clnlbeam 4522, nql180 2892, rocket 2279, marine 812) are 1-2 orders
+out. rocket is the dense-column class the prior note explains. clnlbeam
+and nql180 are not -- max_deg 5 and 182.
+
+The scaling law, from leading principal submatrices of clnlbeam
+(n = 80k..100k; not a true size ladder because clnlbeam is block
+ordered, but within this range searches is pinned at 5043):
+
+  n       touched      edge_scans     ms
+  90000   176356074    360898556     4080
+  93000   188383074    360895553     4232
+  96000   200410074    360892553     4351
+  98000   208428074    360890553     4421
+  99000   212437074    360889550     4450
+  99999   216406073    360922194     4525
+
+edge_scans is FLAT (3.609e8, varying <0.01%). touched grows exactly
++4009 per unit of n -- four independent deltas (3000/3000/2000/1000)
+all give 4009.0. So each augmenting search reaches Theta(n) distinct
+rows while the edge work does not grow at all. Growing the problem
+buys pure heap traffic and zero additional edge scanning. Wall time
+tracks touched, not edge_scans.
+
+touched is distinct rows: hungarian.rs:549 guards touched.push(i) with
+d[i] == RINF, so no double counting. heap_init_slots == touched_total
++ n exactly on every matrix, confirming the #80 incremental-reset fix
+is intact and heap init is NOT the cost.
+
+This is value-driven, not structural. Synthetic chain KKTs from
+gen_chain_kkt at the same geometry (nx=2, nc=1, n up to 384000) get
+searches=0 -- greedy init matches everything -- and run in 18 ms at
+n=384000. Same shape, no blowup. Consistent with issue #80's trap #2
+(MC64 needs real values), and one more instance of proxies not
+reproducing the real matrices.
+
+What this does NOT establish: a fix. The impossibility proof in
+mc64-dense-column-2026-06-06.md section 3.2 is specific to pruning the
+dense-column inner scan and does not cover the Theta(n) frontier seen
+here; the mechanism is that csp stays RINF while the search hunts for
+an unmatched row, so nothing prunes insertion. Whether that frontier
+can be bounded without changing the matching is open and needs its own
+research note before any code.
+
+* 20:40 :issue125:sizing:measurement:step2-rejected:
+Asked to implement #125 step 2 (delayed-column splice). Sized the
+ceiling before writing code, per spec 5.1. Built
+`diag_delayed_fronts` (fronts and frontal rows taking the dynamic
+`build_row_indices` path) and extended it with the `BUILDROW_NS`
+phase counter.
+
+Reach: 7 of 41 corpus matrices have ANY front with `n_delayed_in > 0`.
+Only 3 have material dynamic rows -- steering_12800 61.53%,
+robot_1600 28.86%, qcqp1500-1nc 25.04%. Five of the six chain KKTs
+that motivated the whole MA57 investigation (clnlbeam, dtoc1nd,
+dtoc2, marine_1600, rocket_12800) are at exactly 0.00%.
+
+Cost: `BUILDROW_NS` wraps BOTH arms of the #125 branch
+(factorize.rs:2491-2505), so buildrow/factor is a hard ceiling on
+step 2. Measured 0.21%-3.13% of factor wall (steering 3.13%,
+robot 1.97%, qcqp1500-1nc 0.21%, clnlbeam 1.65%). Step 2 removes
+only part of that -- it still has to splice delayed columns.
+
+Also checked whether the step-1 fast-path `.to_vec()` could become a
+borrow: no. `row_indices` is moved into `NodeFactors`
+(factorize.rs:2739), so ownership is required.
+
+Conclusion: ~1-2% on 3 of 41 matrices, paid for by touching the
+delayed-pivot path -- the highest-risk code in the solver. Step 2
+is not worth building. Recorded that my earlier characterization of
+#125 as "obvious work" was true of step 1 (landed, PR #139) and NOT
+of step 2.
+
+* 21:05 :profile:factorization:phase-timing:scaling:
+Ran the internal factorization profile previously offered but never
+done. Key methodological point: drove
+`factorize_multifrontal_supernodal_with_workspace` DIRECTLY rather
+than `Solver::factor`, because the `Solver` wall folds in symbolic
+reuse checks and scaling-cache lookups the phase counters do not
+cover. First attempt used the Solver wall and showed 18%-51%
+"outside" -- an artifact of exactly the timed-region mismatch that
+produced two retractions earlier this session. With the driver call
+the books close: prologue + loop + epilogue ~= 100%.
+
+Driver wall split (best of 3 warm reps, sequential):
+
+| matrix        | drv_us | prol% | scaling% | schur% | cbextr% | dense_o% | buildrow% |
+|---------------+--------+-------+----------+--------+---------+----------+-----------|
+| clnlbeam      |  26297 | 18.1% |    15.2% |  11.2% |    6.6% |    22.1% |      2.2% |
+| dtoc1nd       |  12540 | 25.0% |    19.5% |   8.2% |   12.0% |     9.6% |      0.8% |
+| dtoc2         |  76483 | 12.8% |     8.0% |   5.7% |   14.4% |    13.8% |      2.0% |
+| marine_1600   |  31271 | 22.4% |    18.9% |  15.7% |    5.7% |    19.3% |      1.2% |
+| rocket_12800  |  20461 | 34.7% |    29.3% |  11.3% |    1.8% |    24.5% |      0.9% |
+| steering_12800|  37880 | 17.5% |    14.6% |  15.3% |    5.7% |    19.8% |      3.7% |
+| robot_1600    |   8662 | 19.0% |    15.8% |  15.0% |    6.4% |    22.1% |      3.0% |
+
+`buildrow%` (#125's target) is the smallest column on the table.
+Two large unattributed buckets: `dense_o%` (9.6%-24.5%, inside the
+dense frontal factor but outside panel/Schur/tail/L-extract/
+contrib-extract) and prologue scaling.
+
+* 21:30 :bug:mc64:cache:value-bound:confirmed:
+Chased `scaling%` through `Solver` (which owns `mc64_scaling_cache`)
+with `mc64_cache_hit_count` printed alongside. The corpus splits
+exactly on cache hits: hits=3 -> scaling ~0.0%; hits=0 -> scaling
+6.6%-41.7%.
+
+**Confirmed bug on robot_1600_0001.** The cache IS populated
+correctly and is then REJECTED on every reuse of the bit-identical
+matrix. Instrumented `mc64_value_bound_passes` (temporary
+FERAL_VB_DEBUG patch, reverted):
+
+  vb: ratio true (6.111443e14 vs 1.222289e15) | count true (15410 vs
+      15410) | diag false (1.636275e-15 vs 4.177246e-13)
+
+`ratio` and `count` pass with numerically IDENTICAL stats -- proof
+of zero drift, it is literally the same matrix. `cond_diag`
+(value_bound.rs:237) fails: it tests
+`min_diag >= EPS_DIAG * mean_diag_0`, which is an ABSOLUTE property
+of the matrix, not a drift measure. Any matrix whose scaled diagonal
+spans more than ~1e12 can never reuse its own cache, so MC64 reruns
+and is discarded every factorization.
+
+Cost: 40.4% of the warm factor wall. Forcing
+`ScalingStrategy::InfNorm` on robot_1600_0001 takes the driver from
+10,662 us to 6,013 us -- 1.77x on the WHOLE factorization.
+
+It is a cliff, not a corner case. robot_1600_0000 passes with only
+5.6x margin (2.353320e-12 vs 4.213035e-13); WM_CFy_0000 by 3.2x
+(1.124683e-12 vs 3.565878e-13). An IPM trajectory walks off it
+mid-solve, which is the workload that matters. Same family, adjacent
+iterates, opposite verdicts.
+
+Scope limit, stated explicitly: at iterate _0000 NO corpus matrix is
+rejected -- all 31 misses there are "no-cache" (Auto picked InfNorm,
+nothing to cache by design). So the rejection is confirmed on
+robot_1600_0001 and its frequency across full trajectories is NOT
+established.
+
+Separate observation, measured but not shown to be reducible: on
+31 of 42 matrices Auto picks InfNorm and it is recomputed every
+factor at 3%-38% of the driver wall (elec_400 37.9%, ex8_2_2 26.2%,
+ex8_2_3 26.1%, gasoil_3200 23.1%, arki0003 23.5%, pinene_3200
+21.4%). Values change each IPM iterate so recomputation is
+legitimate; whether an O(nnz) scan should cost 20%-38% of a
+factorization is an open question.
+
+* 22:15 :bug:mc64:cache:value-bound:fix:measurement:
+Instrumented =precompute_mc64_validity= and =mc64_value_bound_passes=
+behind =FERAL_VB_DEBUG= (backed up to /tmp/vb2.bak, reverted after) and
+drove =diag_trajectory_scaling= over 24 corpus families to size the
+=cond_diag= defect before fixing it.
+
+First correction to my own earlier reading: I had recorded "mean_diag_0
+4.213035e-13". That is the *threshold*, not the mean. =mean_diag= is
+4.213035e-1; the threshold is =EPS_DIAG * mean_diag= = 4.213035e-13.
+The conclusion (min compared against mean) is unchanged.
+
+Sizing, and it is far smaller than the 32.7% headline that motivated
+the work:
+- 17 of 24 families never run MC64 at all -- =pick_scaling_strategy=
+  routes them to InfNorm, =pre=0= in the debug log. That includes every
+  large-scaling% family from the phase profile (clnlbeam, dtoc2,
+  rocket_12800, steering_12800). No MC64 cache work can touch them.
+- 7 families route to MC64 -> 53 gate evaluations.
+- =cond_diag= is the *sole* blocker on 3 of 53. Two on robot_1600 with
+  drift 0.988 and 1.000 (false positives -- the min scaled diagonal did
+  not move). One on arki0003 with drift 2.1e-8, a genuine eight-order
+  collapse that any correct condition 3 must reject.
+
+Threshold sweep: DIAG_SHRINK from 0.5 down to 1e-6 all give the same 25
+accepts of 53. The constant is not load-bearing; picked 0.5 =
+1/GROWTH_FACTOR as the tightest defensible value.
+
+* 22:40 :mc64:value-bound:implemented:verified:
+Fix landed as a disjunction, not a replacement:
+=min_diag >= EPS_DIAG*mean_diag_0 || min_diag >= DIAG_SHRINK*min_diag_0=.
+Strict widening of the accept set, zero-drift-safe by construction
+(re-checking the baseline gives =min_diag == min_diag_0= exactly).
+
+Tests first, and the regression test did fail first. Added the
+=min_diag_0= field and its population *without* the =cond_diag= change,
+which made the new test fail at runtime rather than at compile time:
+
+: value_bound_passes_on_identical_matrix_with_wide_diagonal_range ... FAILED
+: panicked: a matrix must pass the value bound against its own fingerprint
+: test result: FAILED. 12 passed; 1 failed
+
+After the =cond_diag= change: 13 passed. Full =cargo test --release=
+exit 0.
+
+Verification against pre-fix and post-fix binaries built from the same
+tree, 7 families, 53 gate evaluations. The complete hit-pattern diff:
+
+: < robot_1600_0004 NO      > robot_1600_0004 yes
+: < robot_1600_0005 NO      > robot_1600_0005 yes
+
+Nothing else moved. Inertia byte-identical on every iterate of every
+family. robot_1600 trajectory 63560 -> 54445 us (14.3%), scaling 20721
+-> 12479 us (39.8%). Matches the 13.8% predicted from the gate log.
+
+* 23:00 :mc64:sizing:next-target:
+The trajectory totals reframe where the scaling mass actually is, and it
+is not where this fix helps:
+
+| family      | scaling share | helped |
+| nql180      |         66.2% | no     |
+| pinene_3200 |         79.4% | no     |
+| marine_1600 |         50.6% | no     |
+| robot_1600  | 32.6%->22.9%  | yes    |
+| dtoc1nd     |         10.4% | no     |
+| arki0003    |          3.5% | no     |
+| qcqp1000-2c |          0.5% | no     |
+
+nql180 spends 11.2 s of 17.0 s in scaling and gets nothing here -- it
+rejects on *condition 1*, as does pinene_3200 on all 8 of its checks.
+Condition 1 is exactly what tried-and-rejected.md:2087 (2026-05-21)
+found confounded by the IPM barrier trajectory. The prize there is an
+order of magnitude larger than condition 3 was worth, and that entry
+says why it is hard. Do not start it without reading it.
+
+* 23:40 :mc64:scaling:measurement:correction:
+Ran the untested half of issue #38's claim ("silently corrupts
+inertia *and explodes factor cost*") on the three high-scaling
+families. `diag_scaling_reuse_correctness` with per-arm timing
+columns, fresh solver per iterate, `with_parallel(false)`:
+
+pinene_3200 (10 iterates): reuse total is LOWER on every one --
+41787->33205, 43732->36618, ..., 49822->32868 us. The delta is
+approximately the scaling cost, so non-scaling work is unchanged.
+No cost explosion.
+
+nql180 (7 iterates): reuse is SLOWER on 5 of 7, substantially --
+697786->1156543 (+66%), 726355->1303582 (+79%), 710552->1195501
+(+68%), 690824->1396280 (+102%), 695627->1345981 (+94%). Fresh
+scaling there is only ~14.5 ms of ~700 ms (2%), so reuse buys
+nothing and costs a lot. This is the first positive instance of
+#38's cost claim on a real KKT. Inertia still "same" on all 17.
+
+* 23:55 :mc64:profiling:correction:
+CORRECTION to my own earlier reading. I reported pinene_3200's
+per-iterate `scal_us` growing 8500 -> 207611 (19.7x) and called it
+a value-dependent MC64 slowdown. Built `diag_mc64_warm_vs_cold` to
+compare a warm solver against a cold one on the same matrix in the
+same process:
+
+  iterate  warm_scal  warm_pivord  warm_tot  cold_scal  cold_tot
+  0000          8052           61     42582       8041     41283
+  0001          9472           55     45184      10052     44952
+  0002         57749           50     92557       9375     41917
+  0006        205611           50    234063       8432     41763
+  0007        214213           51    244975       9400     45886
+  0009        175500           57    208370       8526     49707
+
+Cold is flat, warm climbs 26.6x. `scaling_pivot_order_us` is ~50 us
+in both, so it is inside MC64 proper. But this is NOT a slowdown:
+`Solver::factor` clears `symbolic.cached_mc64` after every call
+(issue #38, src/numeric/solver.rs:1374, whose own comment predicts
+"one extra MC64 (~100-200 ms on n~1e5) per warm refactor"). The
+cold arm's Hungarian therefore ran inside `analyze()`, and
+`ProfileReport::total_us` is documented as "wallclock for the
+entire driver call" -- the numeric driver only. The two arms bill
+the same work to different phases. My 19.7x was a measurement
+artifact of comparing across two probes with different solver
+lifetimes.
+
+* 00:10 :mc64:hungarian:value-dependence:
+The warm/cold split cannot answer whether the Hungarian itself is
+value-dependent, so measured it standalone via
+`feral::scaling::diagnose_mc64_matching` (no solver, no cache, no
+scaling post-processing) -- `diag_mc64_work_trajectory`.
+
+pinene_3200, identical pattern (nnz 732976) from iterate 1 on:
+
+  iter  match_us  augment   touched   edge_scans
+  0001     46852    57426   1340479      8148431
+  0003    107582    70196   3651551     29912538
+  0006    229183    77994   6816372     70268885
+  0009    175882    77993   6201685     55972134
+
+4.9x in wallclock on a pattern that never changes, so the value
+dependence is real and independent of the #38 artifact above.
+`augment_searches` moves only 1.36x (57426 -> 77993); `touched`
+moves 5.1x and `main_loop_edge_scans` 8.6x. Per-search work goes
+from 142 edge scans to 900. The search COUNT is stable; each
+shortest-augmenting-path search wanders much further as delta->0.
+
+nql180 is the extreme: 895 augment searches doing 202-222M edge
+scans on n=259681, i.e. ~227,000 scans per search (~87% of n).
+1.17 s -> 3.12 s across the trajectory.
+
+marine_1600 spikes to 809 ms at iterate 1 (23.5M touched) and
+falls back to 32 ms at iterate 2; iterate 0 has a different nnz
+(342399 vs 414399), so the spike sits right at the pattern change.
+
+Implication: capping or reordering the augmenting-path search is a
+strictly-safe lever (same matching, less work) that helps every
+family, including the ones where scaling reuse is unsafe. It does
+not depend on resolving the condition-1 gate question at all.
+
+* 00:35 :mc64:reuse:economics:corpus:
+Built `diag_trajectory_reuse`: TWO warm solvers over the same
+trajectory in one process, one on `Auto`, one pinned to
+`External(d0)` where d0 is iterate 0's own MC64 vector. This is the
+arm the previous probes could not measure -- only a warm solver
+pays the Hungarian inside the timed driver, because
+`Solver::factor` clears `symbolic.cached_mc64` after every call.
+
+Whole kkt-mittelmann corpus, 37 families with >=2 iterates, 233
+iterates, <=10 iterates each:
+
+  corpus fresh 34.66 s -> reuse 24.47 s, aggregate 1.42x,
+  geomean 1.164x, inertia differs on 0 iterates
+
+Wins: pinene_3200 5.09x, nql180 2.10x, marine_1600 1.63x,
+robot_1600 1.42x, gasoil_3200 1.39x, rocket_12800 1.33x.
+Losses: ex4_2_160 0.75x, cont5_1_l 0.77x, arki0009 0.91x,
+qcqp1000-2c 0.99x.
+
+rocket_12800 -- the named #38 reproducer -- shows 1.25x/1.42x with
+inertia 51201/38400/0 on both iterates and both arms. CAVEAT: my
+probe's fingerprint check is `csc.n != d0.len()`, n only. rocket
+changes nnz between iterates (332793 -> 435190), so the External
+arm applied D0 across a PATTERN change that the real cache would
+reject outright. That makes rocket a harder correctness test than
+the design would ever attempt, and it also means rocket's 1.33x is
+not a payoff the real design could bank.
+
+* 00:50 :mc64:issue38:mechanism:
+Read the original #38 evidence (`dev/journal/2026-05-16-30.org`
+17:25). The corruption mechanism is explicitly structural:
+`pick_ordering_preprocess` triggers `LdltCompress`, `LdltCompress`
+populates `SymbolicFactorization::cached_mc64` via
+`mc64::compute_matching`, and the stale *matching* is applied to
+iter-N. The scaling vector is downstream of that. Reusing D0
+alone -- `ScalingStrategy::External` -- cannot reach
+`LdltCompress` and cannot change the elimination structure.
+
+That is a mechanism-level reason the 233-iterate agreement is not
+luck. It is still not a proof: absence of a counterexample on this
+corpus is not a safety argument, and every matrix here has a fixed
+pattern per family.
+
+* 01:05 :mc64:gate:metric:negative-result:
+Tested whether a diagonal-free value statistic can replace
+condition 1. `diag_scaled_entry_spread` computes, on the same
+scaled matrix, both today's `max_ratio` and entry-magnitude
+statistics of D0*A_N*D0 (max, 99.9th pct, fraction > 1) -- MC64's
+own objective is about entry magnitudes and never mentions the
+diagonal, so this was the natural candidate.
+
+It does not discriminate, and it fails in the informative
+direction:
+
+  family        speedup   max_ent drift   p999_ent
+  marine_1600     1.63x       5.2e12        1.030
+  nql180          2.10x       3.9e6         3.9e6
+  pinene_3200     5.09x       1.1e1         5.698
+  ex4_2_160       0.75x       1.0e4         1.0e4
+
+marine_1600 is a WIN with the worst entry drift in the set;
+ex4_2_160 is a LOSS with far milder drift. Entry magnitude is
+anti-correlated with whether reuse is a good idea. p999 separates
+marine (a few outlier entries, p999 ~ 1.0) from ex4_2_160 (a broad
+shift, p999 = max), but nql180 also has p999 = max and is a 2.10x
+win. No value proxy tried predicts the outcome.
+
+* 01:20 :mc64:gate:cost-share:
+The reason no value proxy predicts the outcome is that there is
+nothing numerical left to predict: inertia never changed. What
+varies across the corpus is only COST. Sorting the 37 families by
+the fraction of factor time fresh MC64 actually consumes gives a
+monotone relationship:
+
+  scal%   families                          speedup
+  <=5.4   all four losses                   0.75x - 1.08x
+  >=12.6  every family without exception    1.13x - 5.09x
+
+Every loss sits at scal% <= 5.4 (ex4_2_160 5.4, cont5_1_l 3.3,
+arki0009 3.0, qcqp1000-2c 0.6). Every family at scal% >= 12.6
+wins. The gap 5.4 -> 12.6 is empty, so the threshold is not
+load-bearing anywhere in 6-12%.
+
+Gating on measured cost share at 10%: 15 of 37 families reuse,
+corpus 34.66 s -> 24.32 s, 1.43x -- i.e. it banks essentially all
+of the unconditional 1.42x while dropping every regression.
+
+The significance is that `scaling_us / total_us` is already
+measured per factorization. A cost-share gate needs no value
+proxy, no numerical justification, and no new O(nnz) sweep. The
+2026-05-21 entry searched for a metric separating "safe" from
+"unsafe"; on this evidence the scaling-vector path has no unsafe
+side, and the quantity that actually needs separating is
+profitable from unprofitable.
+
+* 02:10 :mc64:hungarian:prior-art:correction:
+Took the "Hungarian search bound" lever recommended at the end of
+mc64-condition1-cost-share-2026-08-09.md. Prior-art check and code
+inspection killed it before any code was written, on two counts.
+
+(1) The classic csp shortest-augmenting-path bound is ALREADY
+implemented: hungarian.rs:541 prunes the root scan, :570 terminates
+the main loop, :591 prunes the inner column scan. Nothing standard is
+missing.
+
+(2) tried-and-rejected.md:2313 (2026-06-06-03) proves no per-column
+reduced-cost bound can ever prune the inner scan -- with
+vj + lb_tight = dq0, the skip fires iff dq0 >= csp, but q0 was popped
+only because dq0 < csp -- and explicitly instructs future sessions not
+to retry it.
+
+So my note's phrase "same-output-less-work, needs no gate and no
+residual argument" is WRONG. Any further truncation ends a search
+before its shortest path is proven -> suboptimal matching -> different
+scaling vector -> corpus study + human approval. Recorded the
+correction at the top of the new research note rather than editing the
+old one.
+
+* 02:25 :mc64:hungarian:measurement:
+Where the Hungarian time actually goes. Per-edge-scan cost differs
+4.5x between the two dominant families on IDENTICAL code:
+pinene_3200_0006 206,907 us / 70.3M scans = 2.94 ns/scan;
+nql180_0002 3,197,295 us / 222.1M scans = 14.4 ns/scan.
+
+The two are in opposite regimes. pinene: init heuristic leaves ~61% of
+columns unmatched (77,994 searches on n=127,995), so many tiny
+searches, 87 rows touched each -> L1-resident. nql180: init matches
+99.66% (893 searches on n=259,681), so a few enormous searches, 53,411
+rows touched each = 21% of all rows -> working set far past L1. The
+4.5x tracks working-set size, not algorithm.
+
+Also sized build_cost_graph via a temporary FERAL_BUILD_DEBUG timer
+(reverted): 8-12 ms/iterate = 20% of pinene's cheapest iterate but
+0.4% of nql180's. Not the lever.
+
+* 02:40 :mc64:hungarian:optimization:bit-identical:
+Implemented what the measurement pointed at instead. Every heap sift
+level did d[self.heap[parent]] -- a load from the heap array then a
+DEPENDENT random load into d. IndexHeap now stores the key inline
+(HeapEntry { key, idx }). Comparisons are unchanged, so the matching is
+bit-identical by construction. Side benefit: removes the heap's
+&[f64] borrow of d, which is what previously blocked fusing d with the
+other per-row arrays.
+
+Oracle: new diag_mc64_scaling_fingerprint hashes the raw IEEE bits of
+every entry of SparseFactors::scaling, so ANY matching deviation is
+caught, not just one big enough to move a residual. Verified
+deterministic across repeat runs before trusting it.
+
+51 matrices / 39 families: all fingerprints unchanged.
+
+Speed, median of 3: nql180_0000 1,174,045 -> 1,128,533 us (1.040x);
+nql180_0002 3,083,529 -> 2,917,491 us (1.057x); pinene_0001 44,381 ->
+45,279 (0.98x); pinene_0006 202,205 -> 202,969 (1.00x); marine_1600
+29,911 -> 29,820 (1.00x).
+
+4-5% on the family that dominates corpus MC64 time, nothing elsewhere
+-- exactly the predicted split, since pinene was already L1-resident.
+Smaller than I hoped; reporting it as such. cargo test --release exit
+0, clippy -D warnings clean.
+
+* 02:50 :mc64:hungarian:profile:next:
+sample(1) on nql180_0002: 100/108 samples in the inlined main loop, 7
+in IndexHeap::update. Decrease-key sift-UP is only ~6.5% (most
+sift-ups terminate immediately), so the gain came from the sift-DOWN
+path inside pop, as designed.
+
+Remaining lever, measured by a standalone microbenchmark of the access
+pattern (5 split arrays vs 1 fused struct, at nql180's n):
+ws=500 -> 0.99x (pinene regime), ws=50000 -> 1.90x, ws=259681 -> 1.68x.
+So fusing visited/u/iperm/d into one per-row struct is worth ~1.7x on
+the array-access portion ONLY, which is ~2.3 of nql180's ~13 ns/scan
+-> expect ~7% end-to-end. Bit-identical, now unblocked. Not done.
+
+Honest ceiling on this direction: nql180's 893 searches are long
+because the augmenting paths are long, which is a property of the
+matrix. Constant-factor memory work buys tens of percent, not
+multiples. A multiple requires changing the matching (auction /
+eps-optimal, or skipping MC64 on these KKTs) -- the gated,
+approval-requiring path, not this one.
