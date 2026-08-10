@@ -73,13 +73,18 @@ impl SparseLu {
                 got: entering_col.len(),
             });
         }
-        let sparse: Vec<(usize, f64)> = entering_col
-            .iter()
-            .enumerate()
-            .filter(|&(_, &v)| v != 0.0)
-            .map(|(i, &v)| (i, v))
-            .collect();
-        self.update_sparse(leaving_slot, &sparse)
+        let mut sparse = std::mem::take(&mut self.entering_scratch);
+        sparse.clear();
+        sparse.extend(
+            entering_col
+                .iter()
+                .enumerate()
+                .filter(|&(_, &v)| v != 0.0)
+                .map(|(i, &v)| (i, v)),
+        );
+        let out = self.update_sparse(leaving_slot, &sparse);
+        self.entering_scratch = sparse;
+        out
     }
 
     /// Replace basis slot `leaving_slot` with the entering column given by its
@@ -131,7 +136,8 @@ impl SparseLu {
 
         // --- Sparse spike ρ = G⁻¹ L⁻¹ P (scaled aₙₑw) via Gilbert–Peierls reach ---
         let mut w = std::mem::take(&mut self.ft_work); // dedicated buffer, zero on entry
-        let mut touched: Vec<usize> = Vec::new(); // positions made nonzero in w
+        let mut touched = std::mem::take(&mut self.upd_touched); // positions made nonzero in w
+        touched.clear();
         self.compute_spike(entering, leaving_slot, &mut w, &mut touched, &mut work);
 
         let r = self.qcol_inv[leaving_slot];
@@ -141,7 +147,9 @@ impl SparseLu {
         // rank at which the spike has an entry. The bump is the rank range
         // `[r_rank, h_rank]`; `h_rank < r_rank` means the new column has nothing at
         // or below its own diagonal in rank order ⇒ singular replacement.
-        let mut supp: Vec<usize> = touched.iter().copied().filter(|&k| w[k] != 0.0).collect();
+        let mut supp = std::mem::take(&mut self.upd_supp);
+        supp.clear();
+        supp.extend(touched.iter().copied().filter(|&k| w[k] != 0.0));
         supp.sort_unstable();
         supp.dedup();
         let h_rank = supp.iter().map(|&p| self.uperm[p]).max();
@@ -150,6 +158,8 @@ impl SparseLu {
             _ => {
                 clear(&mut w, &touched);
                 self.ft_work = w;
+                self.upd_touched = touched;
+                self.upd_supp = supp;
                 // Singular as far as the incremental update can tell; refactor
                 // from scratch for the authoritative verdict (see DenseLu::update).
                 self.last_refactor = Some((RefactorCause::Singular, 0.0));
@@ -161,7 +171,9 @@ impl SparseLu {
         // the spike support (gains a column-`r` entry), and the old column-`r`
         // holders (lose theirs). The other bump rows are NOT touched — that is the
         // Forrest–Tomlin win. ---
-        let mut changed: Vec<usize> = Vec::with_capacity(1 + supp.len() + self.u_above[r].len());
+        let mut changed = std::mem::take(&mut self.upd_changed);
+        changed.clear();
+        changed.reserve(1 + supp.len() + self.u_above[r].len());
         changed.push(r);
         changed.extend(supp.iter().copied());
         changed.extend(self.u_above[r].iter().copied());
@@ -178,7 +190,9 @@ impl SparseLu {
             saved.push((i, buf));
         }
         // Save the bump's `uperm` range so the cyclic shift can be rolled back.
-        let saved_uperm_inv: Vec<usize> = self.uperm_inv[r_rank..=h_rank].to_vec();
+        let mut saved_uperm_inv = std::mem::take(&mut self.upd_saved_uperm_inv);
+        saved_uperm_inv.clear();
+        saved_uperm_inv.extend_from_slice(&self.uperm_inv[r_rank..=h_rank]);
 
         // Replace column `r` of U with the spike in every row but `r` (row `r`'s
         // column-`r` value is the spike diagonal `w[r]`, handled by the elimination).
@@ -229,6 +243,7 @@ impl SparseLu {
                 let growth = self.growth.max(changed_max / self.u_max0);
                 if growth > self.params.max_growth {
                     self.rollback(saved, &saved_uperm_inv, r_rank);
+                    self.restore_update_pools(touched, supp, changed, saved_uperm_inv);
                     self.last_refactor = Some((RefactorCause::Growth, growth));
                     return Err(FeralError::NeedsRefactor);
                 }
@@ -284,15 +299,35 @@ impl SparseLu {
                 self.last_update_work = work;
                 self.update_work_total += work;
                 self.pivot_search_swaps += swapped.len();
+                self.restore_update_pools(touched, supp, changed, saved_uperm_inv);
                 #[cfg(feature = "lu-ft-invariant-check")]
                 self.debug_check_invariants();
                 Ok(())
             }
             Err(e) => {
                 self.rollback(saved, &saved_uperm_inv, r_rank);
+                self.restore_update_pools(touched, supp, changed, saved_uperm_inv);
                 Err(e)
             }
         }
+    }
+
+    /// Return the four `update_sparse`-scoped churn buffers to their pools
+    /// (issue #128 item B), mirroring [`Self::restore_elim_pools`] for the
+    /// row-elimination buffers. Called on every exit path past their creation;
+    /// contents are irrelevant (each is cleared before its next use), only the
+    /// capacity is being kept.
+    fn restore_update_pools(
+        &mut self,
+        touched: Vec<usize>,
+        supp: Vec<usize>,
+        changed: Vec<usize>,
+        saved_uperm_inv: Vec<usize>,
+    ) {
+        self.upd_touched = touched;
+        self.upd_supp = supp;
+        self.upd_changed = changed;
+        self.upd_saved_uperm_inv = saved_uperm_inv;
     }
 
     /// Restore `u_rows` (from the saved snapshots) and the bump's `uperm` range
@@ -305,7 +340,13 @@ impl SparseLu {
         r_rank: usize,
     ) {
         for (i, row) in saved.drain(..) {
-            self.u_rows[i] = row;
+            // Recycle the discarded post-update row instead of dropping it
+            // (issue #128 item B): for row `r` and any Bartels–Golub-displaced
+            // row this is a buffer that came out of `row_pool`, and for the
+            // rest it is the original row buffer `set_column_r` mutated in
+            // place. All are interchangeable free-list entries.
+            let stale = std::mem::replace(&mut self.u_rows[i], row);
+            self.row_pool.push(stale);
         }
         self.saved_scratch = saved;
         for (off, &pos) in saved_uperm_inv.iter().enumerate() {
@@ -341,7 +382,8 @@ impl SparseLu {
     ) {
         let dcol = self.scale.d_col[leaving_slot];
         let mut mark = std::mem::take(&mut self.scratch_mark);
-        let mut stack: Vec<usize> = Vec::new();
+        let mut stack = std::mem::take(&mut self.spike_stack);
+        stack.clear();
 
         // Scatter the scaled entering column into w (pivot-position space) and
         // seed the reach. An original-row entry `o` scales to scaled row
@@ -363,7 +405,9 @@ impl SparseLu {
         }
 
         // Depth-first reach over the graph of L (column k -> its rows).
-        let mut reach: Vec<usize> = touched.clone();
+        let mut reach = std::mem::take(&mut self.spike_reach);
+        reach.clear();
+        reach.extend_from_slice(touched);
         while let Some(k) = stack.pop() {
             let (lo, hi) = (self.l_col_ptr[k], self.l_col_ptr[k + 1]);
             for idx in lo..hi {
@@ -423,6 +467,8 @@ impl SparseLu {
             mark[k] = false;
         }
         self.scratch_mark = mark;
+        self.spike_stack = stack;
+        self.spike_reach = reach;
     }
 
     /// Replace column `r` of `U` with the spike (`w` at positions `supp`) in every
@@ -432,7 +478,9 @@ impl SparseLu {
     /// `r`'s own column-`r` value is the spike diagonal `w[r]`, consumed directly
     /// by [`Self::eliminate_pivot_row`], so row `r` is not touched here.
     fn set_column_r(&mut self, r: usize, w: &[f64], supp: &[usize]) {
-        let old_holders = self.u_above[r].clone();
+        let mut old_holders = std::mem::take(&mut self.col_r_holders);
+        old_holders.clear();
+        old_holders.extend_from_slice(&self.u_above[r]);
         for &i in old_holders.iter() {
             remove_offdiag(&mut self.u_rows[i], r);
         }
@@ -441,6 +489,7 @@ impl SparseLu {
                 insert_offdiag(&mut self.u_rows[p], r, w[p]);
             }
         }
+        self.col_r_holders = old_holders;
     }
 
     /// Symmetric cyclic shift of the rank range `[r_rank, h_rank]`: move the
@@ -517,7 +566,9 @@ impl SparseLu {
         rw_touched.clear();
         let mut queued = std::mem::take(&mut self.scratch_mark); // all-false on entry
         let mut touch_mark = std::mem::take(&mut self.ft_touch_mark); // all-false on entry
-        let mut heap: BinaryHeap<Reverse<usize>> = BinaryHeap::new();
+                                                                      // Pooled; cleared on restore rather than here, because an early
+                                                                      // `NeedsRefactor` exit can leave ranks queued (issue #128 item B).
+        let mut heap = std::mem::take(&mut self.elim_heap);
 
         // Seed: row r off-diagonals (column `r` excluded — its value is `diag0`),
         // pushing the sub-diagonal columns onto the heap.
@@ -560,14 +611,14 @@ impl SparseLu {
             let &(dc, piv) = match self.u_rows[c].first() {
                 Some(p) => p,
                 None => {
-                    self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark);
+                    self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark, heap);
                     // No diagonal in the pivot column ⇒ effectively a zero pivot.
                     self.last_refactor = Some((RefactorCause::TinyPivot, 0.0));
                     return Err(FeralError::NeedsRefactor);
                 }
             };
             if dc != c || !piv.is_finite() {
-                self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark);
+                self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark, heap);
                 self.last_refactor = Some((RefactorCause::TinyPivot, piv.abs()));
                 return Err(FeralError::NeedsRefactor);
             }
@@ -646,7 +697,7 @@ impl SparseLu {
                 continue;
             }
             if piv == 0.0 {
-                self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark);
+                self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark, heap);
                 self.last_refactor = Some((RefactorCause::TinyPivot, 0.0));
                 return Err(FeralError::NeedsRefactor);
             }
@@ -690,24 +741,28 @@ impl SparseLu {
         // Reads collapse the compensated pair `(rw, comp)` with one rounding.
         let diag = rw[r] + comp[r];
         if diag.abs() <= ztol || !diag.is_finite() {
-            self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark);
+            self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark, heap);
             self.last_refactor = Some((RefactorCause::TinyPivot, diag.abs()));
             return Err(FeralError::NeedsRefactor);
         }
         let mut new_row = self.row_pool.pop().unwrap_or_default();
         new_row.clear();
         new_row.push((r, diag));
-        let mut offdiag: Vec<(usize, f64)> = rw_touched
-            .iter()
-            .map(|&c| (c, rw[c] + comp[c]))
-            .filter(|&(c, v)| c != r && v != 0.0)
-            .collect();
+        let mut offdiag = std::mem::take(&mut self.elim_offdiag);
+        offdiag.clear();
+        offdiag.extend(
+            rw_touched
+                .iter()
+                .map(|&c| (c, rw[c] + comp[c]))
+                .filter(|&(c, v)| c != r && v != 0.0),
+        );
         offdiag.sort_unstable_by_key(|&(c, _)| c);
         new_row.extend_from_slice(&offdiag);
+        self.elim_offdiag = offdiag;
         self.u_rows[r] = new_row;
 
         // Clear the dense scatter and hand the pools back.
-        self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark);
+        self.restore_elim_pools(rw, comp, rw_touched, queued, touch_mark, heap);
         Ok((ops, swapped))
     }
 
@@ -716,6 +771,10 @@ impl SparseLu {
     /// update, on every exit path — including a mid-sweep error where the heap
     /// still held columns) and return the row-elimination churn buffers to
     /// their `SparseLu` pools.
+    ///
+    /// `heap` is drained here for the same reason: an early `NeedsRefactor`
+    /// exit leaves ranks queued, and the next update must start empty.
+    #[allow(clippy::too_many_arguments)]
     fn restore_elim_pools(
         &mut self,
         mut rw: Vec<f64>,
@@ -723,6 +782,7 @@ impl SparseLu {
         mut rw_touched: Vec<usize>,
         mut queued: Vec<bool>,
         mut touch_mark: Vec<bool>,
+        mut heap: BinaryHeap<Reverse<usize>>,
     ) {
         for &c in rw_touched.iter() {
             rw[c] = 0.0;
@@ -731,11 +791,13 @@ impl SparseLu {
             touch_mark[c] = false;
         }
         rw_touched.clear();
+        heap.clear();
         self.ft_rw = rw;
         self.ft_rw_comp = comp;
         self.targets_scratch = rw_touched;
         self.scratch_mark = queued;
         self.ft_touch_mark = touch_mark;
+        self.elim_heap = heap;
     }
 
     /// Structural self-check (opt-in via the `lu-ft-invariant-check` feature, off

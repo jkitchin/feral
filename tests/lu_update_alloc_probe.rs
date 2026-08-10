@@ -6,14 +6,31 @@
 //! alloc / realloc / byte counts in a window around *only the update loop* — the
 //! per-segment factorization is excluded. It began as the Phase-0 gate
 //! instrument (`dev/research/lu-update-alloc-pooling-2026-06-19.md`): baseline
-//! was ~1804 allocs/update against an 85.8 µs/update budget. After pooling the
-//! bump-loop buffers and the `saved` snapshot, it is ~82 allocs/update.
+//! was ~1804 allocs/update against an 85.8 µs/update budget. Pooling the
+//! bump-loop buffers and the `saved` snapshot brought it to ~82, and issue #128
+//! item B — pooling the last nine per-update buffers (`touched`, `supp`,
+//! `changed`, `saved_uperm_inv`, the spike DFS `stack`/`reach`, the column-`r`
+//! holder snapshot, the sub-diagonal `heap`, the rebuilt row's `offdiag`) plus
+//! the dense wrapper's entering-column `collect()` — brought it to **2.8**.
 //!
 //! It now also *guards* that gain: the bump elimination must not re-introduce
 //! per-pivot / per-axpy / per-changed-row allocation (which would push the count
-//! back into the hundreds–thousands). The bound below is generous — the residual
-//! ~82 is the irreducible floor (the retained `ops`→`etas` growth plus the
-//! handful of O(1) spike buffers left unpooled), not zero.
+//! back into the hundreds–thousands).
+//!
+//! What the residual ~2.8 is, measured by backtrace attribution (issue #128
+//! item B session, three sites and nothing else):
+//!
+//! - `ops.push(FtOp::…)` — the eta's op list, which is *retained* in
+//!   `SparseLu::etas`, so it cannot be pooled. ~1/update, and the issue names
+//!   it as legitimate.
+//! - `saved_pool.pop().unwrap_or_default()` + `extend_from_slice` — a *new*
+//!   free-list buffer, allocated only when this update's changed-row count
+//!   exceeds the pool's high-water mark. Each buffer is allocated once ever;
+//!   the count is nonzero across the chain only because FT fill grows.
+//! - `u_above[r].extend(…)` — growth of a retained index, not churn.
+//!
+//! In other words the churn floor is reached: what remains is the retained eta
+//! plus one-time working-set growth.
 //!
 //! Default fixture: the in-tree reduced `casctanks.txt` (3 widest-bump segments,
 //! 144 updates). Point `FERAL_LU_TRACE` at the full extracted trace for the
@@ -229,15 +246,33 @@ fn casctanks_update_chain_alloc_probe() {
 
     assert!(applied > 0, "no updates applied");
 
-    // Regression guard. Measured ~82 allocs/update after pooling (down from
-    // ~1804); the bound is generous so it tolerates fixture/allocator variation
-    // while still failing loudly if a future change re-introduces the per-pivot
-    // `pivot_data` clone, per-axpy `row_sub` allocation, or per-changed-row
-    // `saved` clone (each of which would push the count back into the hundreds).
+    // Coarse regression guard, valid for any trace: catches a re-introduced
+    // per-pivot `pivot_data` clone, per-axpy `row_sub` allocation, or
+    // per-changed-row `saved` clone (each pushes the count into the hundreds).
     let allocs_per_update = da as f64 / n;
     assert!(
         allocs_per_update < 250.0,
         "per-update allocations regressed to {allocs_per_update:.1} (was ~82 after \
-         pooling, ~1804 before); the FT-update buffer pools may have been broken"
+         the first pooling round, ~1804 before); the FT-update buffer pools may \
+         have been broken"
     );
+
+    // Tight guard, default in-tree fixture only. The counts are deterministic
+    // there (single-threaded, `System` allocator, fixed trace), so this can sit
+    // close to the measured 2.8 without flaking. A custom `FERAL_LU_TRACE` has
+    // its own per-update profile, so the tight bound is skipped rather than
+    // re-baselined blindly.
+    //
+    // 8.0 is ~3x the measured value and still below the 11.2 that the
+    // pre-issue-#128-item-B code produced on this same fixture, so a
+    // regression that un-pools any of those nine buffers fails here.
+    if std::env::var_os("FERAL_LU_TRACE").is_none() {
+        assert!(
+            allocs_per_update < 8.0,
+            "per-update allocations on the in-tree casctanks fixture regressed to \
+             {allocs_per_update:.1} (issue #128 item B measured 2.8; the code \
+             before it measured 11.2). A `mem::take`/restore pair in the update \
+             path was probably dropped."
+        );
+    }
 }

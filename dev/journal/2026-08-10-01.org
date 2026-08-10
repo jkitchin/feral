@@ -1,0 +1,98 @@
+#+TITLE: Session 2026-08-10-01 — issue #128 remaining bundle
+#+STARTUP: showall
+
+* 00:40 :issue-128:orientation:
+Issue #128 is a 5-part allocation-churn bundle. Checked each part against
+the tree at =f7a152a= rather than trusting the issue body (written against
+=660224d=):
+
+- Item A (dense Schur pack buffers): *already landed*. =bpack1= laziness in
+  =fc4e9b8= (session 2026-07-10-05), =apack=/=bpack0= pooling via =PackPool=
+  on =FactorScratch= in =484bda7= (session 2026-08-09-01). The intra-front
+  rayon path deliberately keeps per-range fresh allocations — recorded in
+  the =pack_pool= doc comment, not an oversight.
+- Item C (=DenseLu::update= clones): issue itself says to do it as part of
+  the #115 dense-update rework, "not before". Out of scope here.
+- Item D (postorder per-node Vecs): issue says lowest priority, "only if
+  symbolic profiling still shows it after #124/#127".
+- Items B and E: unaddressed. Those are this session's scope.
+
+* 00:45 :issue-128:item-b:allocation:baseline:
+Baseline from =tests/lu_update_alloc_probe.rs= (in-tree casctanks fixture,
+m=2169, 3 segments, 144 updates):
+
+: total: allocs=1610  reallocs=1190  bytes=860888
+: per-update: allocs=11.2  reallocs=8.3  bytes=5978
+
+The probe's own doc comment claimed "~82 allocs/update", which is stale —
+later pooling rounds already brought it to 11.2. Corrected in the header.
+11.2 is consistent with the issue's "~9 residual per-update allocations"
+claim, so item B is real.
+
+* 01:05 :issue-128:item-b:pooling:
+Pooled all nine sites named in the issue, following the existing
+=mem::take= / restore-on-every-exit-path discipline (=ft_rw=,
+=saved_scratch=): =touched=, =supp=, =changed=, =saved_uperm_inv=,
+=spike_stack=, =spike_reach=, =col_r_holders=, =elim_heap=, =elim_offdiag=.
+Added =restore_update_pools= as the sibling of the existing
+=restore_elim_pools=, and threaded =heap= through the latter — the heap
+must be cleared on *restore*, not on entry, because a mid-sweep
+=NeedsRefactor= exit leaves ranks queued.
+
+Also fixed the rollback leak the issue mentions: =rollback= overwrote
+=u_rows[i]= and dropped the post-update buffer. Now =mem::replace= + push
+to =row_pool=.
+
+Result: 11.2 -> 3.8 allocs/update.
+
+* 01:15 :issue-128:item-b:allocation:measurement:
+3.8 was higher than the ~1 the retained eta =ops= Vec should cost, so I
+wrote a throwaway backtrace-attributing global allocator to name the rest
+rather than guess. Three sites, nothing else:
+
+: 225  sparse_update.rs:189  saved_pool.pop().unwrap_or_default() + extend
+: 143  sparse_update.rs:705  ops.push(FtOp::Axpy{..})
+:   6  sparse_update.rs:268  u_above[r].extend(..)
+
+=ops= is retained in =self.etas= — unpoolable, and the issue names it as
+legitimate. The other two are *working-set growth*, not churn: each
+=saved_pool= buffer is allocated once ever and only when the changed-row
+count passes the pool's high-water mark, which keeps rising because FT
+fill grows along the chain. Per-segment first-half vs last-half confirms
+the shape (seg2: 3.96 -> 1.96/update).
+
+Attribution also caught a site the issue's list misses: the dense
+=SparseLu::update= wrapper =collect()=s a fresh sparse entering column on
+every call, and that wrapper is what the probe (and dense-column callers)
+actually invoke. Pooled as =entering_scratch=. 3.8 -> 2.8.
+
+Final: *11.2 -> 2.8 allocs/update (-75%), bytes 5978 -> 1521 (-75%)*,
+reallocs 8.3 -> 6.3.
+
+* 01:30 :issue-128:item-b:bit-exactness:validation:
+The suite has no hardcoded bit oracle for the *LU update* path
+(=golden_bits.rs= covers the dense symmetric factor only), so I built a
+temporary before/after harness: replay the casctanks trace, digest the
+raw IEEE-754 bits of =ftran= and =btran= solutions after every update, and
+compare against the same run with =src/lu/{sparse_update,sparse_factor}.rs=
+stashed.
+
+: 1008 digest steps  OVERALL_DIGEST=496c17cb930c9e11  (identical)
+
+The trace applies 144 updates with zero =NeedsRefactor=, so the rollback
+change was uncovered by that alone. Added a strict-budget second pass
+(=max_growth: 1.5=) to force it:
+
+: strict seg0: rollbacks=0
+: strict seg1: rollbacks=16
+: strict seg2: rollbacks=3
+: 1584 digest steps  OVERALL_DIGEST=12eb7d4263be3473  (identical)
+
+Bit-identical on both passes, 19 rollbacks exercised. Full =cargo test=:
+411 lib + all integration binaries, 0 failed. Clippy clean.
+
+Tightened the probe's regression guard: the blanket bound stays at 250 for
+any trace, plus a new 8.0 bound gated on the default in-tree fixture
+(deterministic there). 8.0 is ~3x the measured 2.8 and below the 11.2 the
+pre-change code produced on the same fixture, so un-pooling any of the
+buffers fails the test.

@@ -17,6 +17,8 @@ use super::sparse_symbolic::SparseLuSymbolic;
 use super::{LuParams, LuScaling, LuSingularAction, RefactorCause};
 use crate::error::FeralError;
 use crate::lu::sparse_matrix::SparseColMatrix;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 /// One elementary operation of a Forrest–Tomlin update's row elimination,
 /// recorded so it can be replayed on a solve vector (and transposed for btran).
@@ -193,6 +195,41 @@ pub struct SparseLu {
     /// rebuilds the whole `SparseLu` (pools included), so no leak accumulates.
     pub(super) saved_scratch: Vec<(usize, Vec<(usize, f64)>)>,
     pub(super) saved_pool: Vec<Vec<(usize, f64)>>,
+    /// Residual per-update churn buffers, pooled under the same `mem::take` /
+    /// restore-on-every-exit-path discipline as `ft_rw` and `saved_scratch`
+    /// (issue #128 item B). Each is cleared before use and refilled from
+    /// scratch, so only the heap *capacity* survives a call — contents are
+    /// never read across updates and the factors stay bit-identical.
+    ///
+    /// `upd_touched` is the spike's touched-position list; `upd_supp` its
+    /// sorted/deduped support; `upd_changed` the rows whose `U` content the
+    /// update rewrites; `upd_saved_uperm_inv` the bump's pre-shift `uperm_inv`
+    /// range (live across the elimination, so it cannot share with the
+    /// others); `spike_stack` / `spike_reach` the Gilbert–Peierls DFS stack and
+    /// reach in [`super::SparseLu::compute_spike`]; `col_r_holders` the old
+    /// column-`r` holder snapshot `set_column_r` reads while mutating
+    /// `u_rows`; `elim_heap` the rank-ordered sub-diagonal queue and
+    /// `elim_offdiag` the gathered off-diagonal tail of the rebuilt pivot row,
+    /// both in [`super::SparseLu::eliminate_pivot_row`].
+    ///
+    /// `elim_heap` may still hold entries when the sweep exits early on a
+    /// `NeedsRefactor`, so it is cleared on restore rather than on entry.
+    pub(super) upd_touched: Vec<usize>,
+    pub(super) upd_supp: Vec<usize>,
+    pub(super) upd_changed: Vec<usize>,
+    pub(super) upd_saved_uperm_inv: Vec<usize>,
+    pub(super) spike_stack: Vec<usize>,
+    pub(super) spike_reach: Vec<usize>,
+    pub(super) col_r_holders: Vec<usize>,
+    pub(super) elim_heap: BinaryHeap<Reverse<usize>>,
+    pub(super) elim_offdiag: Vec<(usize, f64)>,
+    /// Sparse form of the entering column, built by the dense
+    /// [`SparseLu::update`] wrapper before it delegates to
+    /// [`SparseLu::update_sparse`]. Pooled for the same reason as the buffers
+    /// above: the wrapper is the hot entry point for callers that hold dense
+    /// columns, and its `collect()` was one allocation plus its growth
+    /// reallocations per update.
+    pub(super) entering_scratch: Vec<(usize, f64)>,
     /// True per-update **build** cost (scalar multiply-adds) of the most recent
     /// committed column-replacement update: the spike solve (`compute_spike`)
     /// plus the row-elimination scatters (`eliminate_pivot_row`). Unlike
@@ -541,6 +578,16 @@ impl SparseLu {
             row_pool: Vec::new(),
             saved_scratch: Vec::new(),
             saved_pool: Vec::new(),
+            upd_touched: Vec::new(),
+            upd_supp: Vec::new(),
+            upd_changed: Vec::new(),
+            upd_saved_uperm_inv: Vec::new(),
+            spike_stack: Vec::new(),
+            spike_reach: Vec::new(),
+            col_r_holders: Vec::new(),
+            elim_heap: BinaryHeap::new(),
+            elim_offdiag: Vec::new(),
+            entering_scratch: Vec::new(),
             last_update_work: 0,
             update_work_total: 0,
             last_refactor: None,
