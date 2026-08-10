@@ -1,5 +1,92 @@
 use super::elimination_tree::EliminationTree;
 
+/// CSR-style child arena: node `j`'s children are `idx[ptr[j]..ptr[j + 1]]`.
+///
+/// Replaces [`EliminationTree::children`]'s `Vec<Vec<usize>>` inside the
+/// postorder traversals (issue #128 item D). That allocated `n` separate
+/// `Vec`s per call and each traversal then cloned-and-sorted a fresh `Vec`
+/// per node on top — `2n+` allocations for a pass the pipeline can run twice
+/// per factorization. Here the whole child structure is two `Vec`s, each
+/// node's slice is ordered **once in place** before the walk, and the DFS
+/// stack carries only `(node, cursor)`.
+///
+/// Ordering is identical to the old code by construction: the arena is built
+/// by a counting sort over ascending `j`, so each parent's slice starts in
+/// ascending child-index order — exactly what `children()` produced — and
+/// the same sort routine is then applied to the same input sequence.
+struct ChildArena {
+    ptr: Vec<usize>,
+    idx: Vec<usize>,
+}
+
+impl ChildArena {
+    fn from_etree(etree: &EliminationTree) -> Self {
+        let n = etree.n;
+        // ptr[j + 1] accumulates the child count of j, then prefix-sums.
+        let mut ptr = vec![0usize; n + 1];
+        for j in 0..n {
+            if let Some(p) = etree.parent[j] {
+                ptr[p + 1] += 1;
+            }
+        }
+        for j in 0..n {
+            ptr[j + 1] += ptr[j];
+        }
+        let mut idx = vec![0usize; ptr[n]];
+        // Per-parent write cursor. Scanning `j` upward makes each parent's
+        // slice ascending, matching `EliminationTree::children`.
+        let mut fill = ptr[..n].to_vec();
+        for j in 0..n {
+            if let Some(p) = etree.parent[j] {
+                idx[fill[p]] = j;
+                fill[p] += 1;
+            }
+        }
+        ChildArena { ptr, idx }
+    }
+
+    #[inline]
+    fn children(&self, j: usize) -> &[usize] {
+        &self.idx[self.ptr[j]..self.ptr[j + 1]]
+    }
+
+    /// Apply `order_children` to every node's slice, once. The ordering
+    /// rules are pure functions of `(slice, sizes, ...)` — they never depend
+    /// on traversal state — so hoisting them out of the DFS is behavior
+    /// preserving.
+    fn order_all(&mut self, mut order_children: impl FnMut(&mut [usize])) {
+        for j in 0..self.ptr.len() - 1 {
+            let (lo, hi) = (self.ptr[j], self.ptr[j + 1]);
+            if hi - lo > 1 {
+                order_children(&mut self.idx[lo..hi]);
+            }
+        }
+    }
+}
+
+/// Depth-first walk of the arena from `root`, calling `emit` on each node in
+/// postorder. The stack holds `(node, cursor)` — no per-node allocation.
+fn dfs_postorder(
+    arena: &ChildArena,
+    root: usize,
+    stack: &mut Vec<(usize, usize)>,
+    mut emit: impl FnMut(usize),
+) {
+    stack.clear();
+    stack.push((root, 0));
+    while let Some(&mut (node, ref mut cursor)) = stack.last_mut() {
+        let kids = arena.children(node);
+        if *cursor < kids.len() {
+            let child = kids[*cursor];
+            *cursor += 1;
+            stack.push((child, 0));
+        } else {
+            emit(node);
+            stack.pop();
+        }
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// S1 (dev/research/repo-review-2026-06-09.md) work counter: total
@@ -25,47 +112,33 @@ pub fn postorder(etree: &EliminationTree) -> (Vec<usize>, Vec<usize>) {
         return (Vec::new(), Vec::new());
     }
 
-    let children = etree.children();
     let sizes = etree.subtree_sizes();
     let roots = etree.roots();
 
     let mut order = Vec::with_capacity(n);
 
-    // DFS stack carries each node's already-sorted child list plus a cursor:
-    // `(node, sorted_children, child_idx)`. The sort runs exactly once per
-    // node — when the node is first pushed — not once per stack visit.
+    // Each node's children are sorted exactly once, in place in the arena,
+    // before the walk; the DFS stack then carries only `(node, cursor)`.
     //
-    // The previous version stored only `(node, child_idx)` and re-cloned and
-    // re-sorted `children[node]` on every `stack.last_mut()` iteration. A node
-    // with `c` children sits on top of the stack `c+1` times (once per child
-    // push + once for the final pop), so it paid `O(c²·log c)`. On a star
-    // etree (one root with `n-1` children — the arrow/bordered-KKT shape AMD
-    // produces for a dense trailing border) that made the default symbolic
-    // pipeline `O(n²·log n)`. See S1, dev/research/repo-review-2026-06-09.md,
-    // and the matching cursor layout in `biased_postorder` /
-    // `EliminationTree::postorder`.
-    let mut stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
+    // Two earlier shapes are pinned against here. The original stored
+    // `(node, child_idx)` and re-cloned and re-sorted `children[node]` on
+    // every `stack.last_mut()` iteration; a node with `c` children sits on
+    // top of the stack `c+1` times, so it paid `O(c²·log c)` — `O(n²·log n)`
+    // on a star etree (the arrow/bordered-KKT shape AMD produces for a dense
+    // trailing border). See S1, dev/research/repo-review-2026-06-09.md. The
+    // fix for that carried a freshly sorted `Vec` per stack entry, which is
+    // linear in work but still allocates once per node; issue #128 item D
+    // removes those allocations without changing the emitted order.
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut arena = ChildArena::from_etree(etree);
+    arena.order_all(|kids| sort_children_by_size(kids, &sizes));
 
     // Process roots in ascending subtree size order
     let mut sorted_roots = roots;
     sorted_roots.sort_unstable_by_key(|&r| sizes[r]);
 
     for &root in &sorted_roots {
-        stack.push((root, sorted_children_by_size(&children[root], &sizes), 0));
-
-        while let Some((node, sorted_children, child_idx)) = stack.last_mut() {
-            let node_id = *node;
-            if *child_idx < sorted_children.len() {
-                let child = sorted_children[*child_idx];
-                *child_idx += 1;
-                let next = sorted_children_by_size(&children[child], &sizes);
-                stack.push((child, next, 0));
-            } else {
-                // All children visited — emit this node (postorder)
-                order.push(node_id);
-                stack.pop();
-            }
-        }
+        dfs_postorder(&arena, root, &mut stack, |node| order.push(node));
     }
 
     // Compute inverse
@@ -106,12 +179,14 @@ pub fn biased_postorder(etree: &EliminationTree, bias: &[bool]) -> (Vec<usize>, 
         return (Vec::new(), Vec::new());
     }
 
-    let children = etree.children();
     let sizes = etree.subtree_sizes();
     let roots = etree.roots();
 
     let mut order = Vec::with_capacity(n);
-    let mut stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut scratch: Vec<usize> = Vec::new();
+    let mut arena = ChildArena::from_etree(etree);
+    arena.order_all(|kids| merge_bias_partition(kids, &sizes, bias, &mut scratch));
 
     // Roots are not biased (no parent to be adjacent to). Use the
     // unbiased subtree-size order.
@@ -119,21 +194,7 @@ pub fn biased_postorder(etree: &EliminationTree, bias: &[bool]) -> (Vec<usize>, 
     sorted_roots.sort_unstable_by_key(|&r| sizes[r]);
 
     for &root in &sorted_roots {
-        let merged = merge_bias_partition(&children[root], &sizes, bias);
-        stack.push((root, merged, 0));
-
-        while let Some((node, sorted_children, child_idx)) = stack.last_mut() {
-            let node_id = *node;
-            if *child_idx < sorted_children.len() {
-                let child = sorted_children[*child_idx];
-                *child_idx += 1;
-                let next_children = merge_bias_partition(&children[child], &sizes, bias);
-                stack.push((child, next_children, 0));
-            } else {
-                order.push(node_id);
-                stack.pop();
-            }
-        }
+        dfs_postorder(&arena, root, &mut stack, |node| order.push(node));
     }
 
     let mut inv = vec![0usize; n];
@@ -185,7 +246,6 @@ pub fn schur_constrained_postorder(
         return (Vec::new(), Vec::new());
     }
 
-    let children = etree.children();
     let sizes = etree.subtree_sizes();
     let roots = etree.roots();
 
@@ -198,26 +258,19 @@ pub fn schur_constrained_postorder(
     // every non-Schur node sits at some position in `[0, n_f)` in a
     // valid postorder of the non-Schur subgraph (where each non-Schur's
     // sub-parent is its nearest non-Schur ancestor, or None).
-    let sorted_roots = schur_partition_children(&roots, &sizes, is_schur);
-    let mut stack: Vec<(usize, Vec<usize>, usize)> = Vec::new();
-    for &root in sorted_roots.iter() {
-        let merged = schur_partition_children(&children[root], &sizes, is_schur);
-        stack.push((root, merged, 0));
+    let mut scratch: Vec<usize> = Vec::new();
+    let mut sorted_roots = roots;
+    schur_partition_children(&mut sorted_roots, &sizes, is_schur, &mut scratch);
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut arena = ChildArena::from_etree(etree);
+    arena.order_all(|kids| schur_partition_children(kids, &sizes, is_schur, &mut scratch));
 
-        while let Some((node, sorted_children, child_idx)) = stack.last_mut() {
-            let node_id = *node;
-            if *child_idx < sorted_children.len() {
-                let child = sorted_children[*child_idx];
-                *child_idx += 1;
-                let next_children = schur_partition_children(&children[child], &sizes, is_schur);
-                stack.push((child, next_children, 0));
-            } else {
-                if !is_schur[node_id] {
-                    order.push(node_id);
-                }
-                stack.pop();
+    for &root in sorted_roots.iter() {
+        dfs_postorder(&arena, root, &mut stack, |node| {
+            if !is_schur[node] {
+                order.push(node);
             }
-        }
+        });
     }
 
     // Phase 2: emit Schur nodes in ascending etree-index order. The
@@ -253,25 +306,27 @@ pub fn schur_constrained_postorder(
 /// Non-Schur children first, ascending by subtree size. Schur children
 /// second, ascending by etree index (preserves input order across the
 /// Schur tail).
-fn schur_partition_children(children: &[usize], sizes: &[usize], is_schur: &[bool]) -> Vec<usize> {
-    let mut nonschur: Vec<usize> = children.iter().copied().filter(|&c| !is_schur[c]).collect();
-    let mut schur: Vec<usize> = children.iter().copied().filter(|&c| is_schur[c]).collect();
-    nonschur.sort_unstable_by_key(|&c| sizes[c]);
-    schur.sort_unstable();
-    nonschur.extend(schur);
-    nonschur
+/// In place; `scratch` is a reusable buffer so the partition costs no
+/// allocation per node (issue #128 item D).
+fn schur_partition_children(
+    children: &mut [usize],
+    sizes: &[usize],
+    is_schur: &[bool],
+    scratch: &mut Vec<usize>,
+) {
+    let split = stable_partition(children, scratch, |c| !is_schur[c]);
+    children[..split].sort_unstable_by_key(|&c| sizes[c]);
+    children[split..].sort_unstable();
 }
 
 /// Sort a node's children by ascending subtree size (smallest first), the
-/// peak-memory-minimizing visit order used by [`postorder`]. Factored out so
-/// the clone+sort runs exactly once per node (see S1,
-/// `dev/research/repo-review-2026-06-09.md`).
-fn sorted_children_by_size(children: &[usize], sizes: &[usize]) -> Vec<usize> {
+/// peak-memory-minimizing visit order used by [`postorder`]. Applied once
+/// per node, in place in the [`ChildArena`] (see S1,
+/// `dev/research/repo-review-2026-06-09.md`, and issue #128 item D).
+fn sort_children_by_size(children: &mut [usize], sizes: &[usize]) {
     #[cfg(test)]
     SORT_WORK.with(|w| w.set(w.get() + children.len()));
-    let mut v = children.to_vec();
-    v.sort_unstable_by_key(|&c| sizes[c]);
-    v
+    children.sort_unstable_by_key(|&c| sizes[c]);
 }
 
 /// Order a parent's children for the merge-biased postorder.
@@ -280,13 +335,46 @@ fn sorted_children_by_size(children: &[usize], sizes: &[usize]) -> Vec<usize> {
 /// `bias[child] == true` (emit late, adjacent to the parent). Within
 /// each partition, ascending subtree size — the same heuristic as
 /// the unbiased postorder, applied independently to each partition.
-fn merge_bias_partition(children: &[usize], sizes: &[usize], bias: &[bool]) -> Vec<usize> {
-    let mut early: Vec<usize> = children.iter().copied().filter(|&c| !bias[c]).collect();
-    let mut late: Vec<usize> = children.iter().copied().filter(|&c| bias[c]).collect();
-    early.sort_unstable_by_key(|&c| sizes[c]);
-    late.sort_unstable_by_key(|&c| sizes[c]);
-    early.extend(late);
-    early
+///
+/// In place; `scratch` is reused across nodes (issue #128 item D).
+fn merge_bias_partition(
+    children: &mut [usize],
+    sizes: &[usize],
+    bias: &[bool],
+    scratch: &mut Vec<usize>,
+) {
+    let split = stable_partition(children, scratch, |c| !bias[c]);
+    children[..split].sort_unstable_by_key(|&c| sizes[c]);
+    children[split..].sort_unstable_by_key(|&c| sizes[c]);
+}
+
+/// Move every element satisfying `pred` to the front of `v`, preserving the
+/// relative order **within each** group, and return the length of the front
+/// group. `scratch` is reused across calls.
+///
+/// Stability matters: the code this replaces built each group with
+/// `iter().copied().filter(..).collect()`, which preserves input order, and
+/// the subsequent `sort_unstable_by_key` is only deterministic given a fixed
+/// input sequence. An unstable partition here could feed the sorts a
+/// different permutation and silently change the emitted postorder — and
+/// hence the fill-reducing ordering.
+fn stable_partition(
+    v: &mut [usize],
+    scratch: &mut Vec<usize>,
+    mut pred: impl FnMut(usize) -> bool,
+) -> usize {
+    scratch.clear();
+    let mut split = 0usize;
+    for i in 0..v.len() {
+        if pred(v[i]) {
+            v[split] = v[i];
+            split += 1;
+        } else {
+            scratch.push(v[i]);
+        }
+    }
+    v[split..].copy_from_slice(scratch);
+    split
 }
 
 #[cfg(test)]

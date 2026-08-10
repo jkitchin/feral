@@ -191,3 +191,71 @@ fails on the first merged front (=grid8x8 Amd nemin=2 supernode 2: nrow=3,
 true 5=).
 
 Full suite: 802 passed, 0 failed. Clippy clean.
+
+* 03:15 :issue-128:item-d:profiling:gate:
+Item D is gated by the issue on "only if symbolic profiling still shows it
+after #124/#127". Measured before deciding, via
+=SupernodeParams::symbolic_profiler= (best of 7 runs):
+
+: matrix          n       total    postorder   renumber   share
+: grid60x60      3600    3011us      205us      912us     37%
+: grid120x120   14400   10286us      725us     3169us     38%
+: chainkkt6000   6000    4125us      421us     1299us     42%
+: chainkkt30000 30000   21182us     2291us     6590us     42%
+
+Gate met: the postorder-bearing stages are 32-44% of symbolic time.
+(=renumber= is not pure postorder — it re-permutes the pattern and rebuilds
+etree+col_counts — but the merge-biased postorder is inside it.)
+
+* 03:35 :issue-128:item-d:arena:
+Replaced =EliminationTree::children()='s =Vec<Vec<usize>>= inside the three
+postorder variants with a CSR child arena (=ChildArena=: =ptr= + =idx=,
+built by counting sort over ascending j, so each parent's slice starts
+ascending — identical to what =children()= produced).
+
+The key observation making this safe: all three ordering rules
+(=sort_children_by_size=, =merge_bias_partition=,
+=schur_partition_children=) are pure functions of
+=(slice, sizes, bias/is_schur)= and never depend on traversal state. So
+every node's slice can be ordered *once, in place*, before the walk, and
+the DFS stack collapses to =(node, cursor)=.
+
+One subtlety worth recording: the two partitioning rules previously built
+their groups with =iter().copied().filter(..).collect()=, which preserves
+input order, and =sort_unstable_by_key= is only deterministic given a
+fixed input sequence. An in-place *unstable* partition would feed the
+sorts a different permutation and could silently change the emitted
+postorder — i.e. the fill-reducing ordering. Implemented
+=stable_partition= (with a reused scratch buffer) rather than the cheaper
+two-pointer swap.
+
+* 03:45 :issue-128:item-d:validation:
+*Order identity.* Digested =perm=, =perm_inv=, every supernode's
+=(first_col, ncol, nrow)=, =static_row_flat=, and =peak_contrib_bytes=
+over 12 matrices x 3 orderings x 3 amalgamation strategies x 3 nemin,
+plus the Schur-constrained variant:
+
+: SYMBOLIC_IDENTITY_DIGEST=bd7e8146fbb6b0a0   (identical before and after)
+
+*Allocations* (=tests/issue128_postorder_alloc.rs=, new):
+
+: chain n=2000    before 4004    after 8
+: chain n=4000    before 8004    after 8
+: chain n=8000    before 16004   after 8
+
+Exactly the predicted =2n= (one =children()= row per node + one sorted Vec
+per stack push), now flat at 8. The star fixture was already 8 before —
+=vec![Vec::new(); n]= does not allocate for empty rows, so only the chain
+shape exposed the 2n. Worth knowing: a star-only probe would have measured
+nothing.
+
+*Timing* (best of 9):
+
+: grid120x120    total 9800 -> 8621us (-12%)   postorder 843 -> 228us (-73%)
+: chainkkt30000  total 20709 -> 16719us (-19%) postorder 2131 -> 519us (-76%)
+:                                              renumber 6870 -> 4339us (-37%)
+
+Confirmed the new probe fails on the pre-change code (chain n=8000: 16004
+allocations vs the bound of 64).
+
+Full suite: 803 passed, 0 failed. Clippy clean.
