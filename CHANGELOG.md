@@ -4,6 +4,39 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — post-amalgamation `Supernode.nrow` underestimate *(behavior change: parallel dispatch)*
+
+`find_supernodes` set every supernode's frontal height to
+`col_counts[first_col].max(ncol)`. That is exact for a *fundamental* supernode
+— its columns are nested, so the first column's pattern contains every later
+one's — but wrong after a size-based merge: the merged group's first column is
+the child's, whose pattern misses the rows only the parent contributes.
+Measured undercounts reached **40%** of summed `nrow` (a 40x40 grid Laplacian
+at `nemin = 32`: 1844 vs 3083 true). It is now the exact union cardinality of
+the merged row sets, tracked during amalgamation.
+
+**Numeric factors and inertia are unaffected** — `build_row_indices` always
+recomputed the true row set, so the kernels never saw the bad value. What was
+skewed is everything that *estimates* from it:
+
+- `peak_contrib_bytes`, the contribution-block memory estimate, was
+  understated by as much as **25x** on merged trees (grid40x40 at
+  `nemin = 32`: 3200 vs 81808 bytes). Anything sizing a buffer or making an
+  admission decision from it was working from a wrong number.
+- `estimate_assembly_flops` rises 2-3x, so **matrices near the
+  `PAR_MIN_FLOPS` threshold can now route to the parallel driver where they
+  previously fell to sequential.** Note that `PAR_MIN_FLOPS` was itself
+  calibrated against the understated estimate, so the threshold may now sit in
+  the wrong place; callers who tuned `NumericParams::min_parallel_flops`
+  should re-check that value.
+- The symbolic profiler's front-size buckets.
+
+The `merge_flop_budget` guard's merged-height model is corrected in lockstep at
+both of its sites. It shared the understatement, which made a merge look
+*cheaper* than it is — the wrong direction for a guard meant to reject
+expensive merges. That knob defaults to `None`, so the default path is
+unaffected.
+
 ### Changed — `Solver` defaults `use_parallel` from the platform (issue #154)
 
 - `Solver::new()` and `Solver::with_params(...)` now derive `use_parallel` from
