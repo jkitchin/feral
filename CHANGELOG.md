@@ -4,6 +4,21 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — MC64 Hungarian matching is 4-5% faster on large matchings *(bit-identical)*
+
+- The Hungarian matching's binary min-heap stored only row indices and looked
+  the key up through a random access into the distance array on every
+  comparison. It now stores the key inline alongside the index. Comparisons
+  and tie-breaking are unchanged, so the matching — and therefore the scaling
+  vector — is unchanged.
+- **Verified bit-identical on 51 matrices across 39 families**, by hashing the
+  raw bits of the scaling vector each factorization produces.
+- Measured (median of 3): `nql180_0000` 1.040x, `nql180_0002` 1.057x. Matrices
+  whose matchings are small and L1-resident (`pinene_3200`, `marine_1600`) are
+  unchanged, as expected — the win is in the sift-down path, which only
+  matters when the heap outgrows cache.
+- No API change.
+
 ### Fixed — MC64 scaling cache rejected matrices against their own fingerprint
 
 - The value-bound gate that decides whether a cached MC64 scaling may be reused
