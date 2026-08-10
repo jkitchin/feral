@@ -1,84 +1,84 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-09T21:06:51Z
+Generated: 2026-08-10T00:14:28Z
 
 ## Latest Session
-File: dev/sessions/2026-08-09-07.md
+File: dev/sessions/2026-08-09-09.md
 ```
-# Session 2026-08-09-07
+# Session 2026-08-09-09
 
 ## Goal
 
-Two halves. First: take PR #151 from green to shipped (merge, tag,
-publish, notify pounce). Second, once that was done: take the
-measurement the release was cut for, which is the factorization gap
-against Harwell on chain-structured KKTs.
+Size issue #125 step 2 before building it. That measurement said not to
+build it, and pointed at the MC64 scaling cache instead — so the second
+half of the session went there: find why the value-bound gate never
+hits on warm iterates, and fix it.
 
-## Unfavorable result, stated first
+## Accomplished
 
-**On the two largest chain-structured proxies, `main` is significantly
-slower than 0.14.0.** `prommis_sx_like` 0.833x (2/15 wins, p = 0.0074),
-`double_column_like` 0.914x (4/15, p = 0.1185). This contradicts the
-0.15.0 release note's "wins all twelve arms", which was measured on real
-matrices on a 4-core homogeneous x86_64 container. It also independently
-reproduces the `chainW` anomaly that session 2026-08-09-02 recorded and
-accepted as a proxy quirk, and that the pounce-side reviewer on PR #150
-flagged as a probable regression on exactly this geometry.
+### Issue #125 step 2 — measured, recommended against
 
-Caveats that keep this from being a verdict: these are synthetic
-proxies, the "new" arm is `main` at `7a31ff6` rather than the `v0.15.0`
-tag, and the bisect that would separate the two did not run. Full
-numbers, method and limits in
-`dev/research/chain-kkt-ma57-gap-2026-08-09.md`.
+Static frontal row layout for fronts that receive delayed columns. Step 1
+landed in PR #139; step 2 would extend it past `n_delayed_in == 0`.
 
-## Accomplished — release
+- **Reach:** 7 of 41 corpus matrices have any front with `n_delayed_in > 0`.
+  Material dynamic rows on 3: steering_12800 61.53%, robot_1600 28.86%,
+  qcqp1500-1nc 25.04%. clnlbeam, dtoc1nd, dtoc2, marine_1600 and
+  rocket_12800 are all at **0.00%**.
+- **Cost ceiling** (`BUILDROW_NS / factor`): **0.21%–3.13%**. It is the
+  smallest column in the phase profile.
+- The fast-path `.to_vec()` cannot become a borrow — `row_indices` is
+  moved into `NodeFactors` at `factorize.rs:2739`, so the copy is a
+  genuine ownership requirement.
 
-1. Verified #151 green, merged as `808babb`, waited for main CI on the
-   squash commit before tagging (a different SHA than the PR head).
-2. Tagged `v0.15.0` and published the GitHub Release. Release job: tag /
-   `Cargo.toml` check PASS, `cargo test` PASS, `cargo publish` PASS for
-   all seven crates. Wheels job: sdist + four wheels, PyPI publish, `uv
-   pip` smoke test PASS.
-3. Verified against the registries, not workflow exit codes: crates.io
-   `feral` 0.15.0; PyPI `feral-solver` 0.15.0 with macosx universal2,
-   manylinux x86_64, manylinux aarch64, win_amd64 and the sdist.
-4. Notified pounce ([pounce#552 comment 5232312068](https://github.com/jkitchin/pounce/issues/552#issuecomment-5232312068)).
-   Release checklist §3 complete.
+~1–2% on 3 of 41 matrices, paid for by touching the delayed-pivot path.
+I explicitly retract my earlier characterization of #125 as "obvious
+work" — that was true of step 1, not step 2.
 
-## Accomplished — measurement
+### Factorization phase profile
 
-5. Established what this machine can and cannot measure. It has the
-   CoinHSL v2023.11.17 bundle (so MA57 is available, oracle built and
-   linked) and Ipopt 3.13.2 with MA27/MA57/MUMPS all confirmed live. It
-   does **not** have `data/matrices/` at all, nor the Pyomo NMPC stack
-   for the five #552 models, nor CUTEst to regenerate the corpus.
-6. Built `external_benchmarks/chain_proxy/`: block-tridiagonal KKT
-   proxies at the reported #552 geometries, plus the paired A/B runner
-   and a mechanism probe. Portable (env-driven paths) so it runs on the
+Driver wall, best of 3 warm sequential reps. **Methodology correction
+made mid-session:** the first version measured against the
+`Solver::factor` wall, which folds in work the phase counters do not
+cover, and showed 18.5%–50.9% "outside" assembly+dense. Rewritten to
+drive `factorize_multifrontal_supernodal_with_workspace` directly; the
+books then close (prologue + epilogue + loop ≈ 100%). Same
+timed-region-mismatch error class that caused two retractions earlier
+in the day.
+
+| matrix | drv_us | prol% | scaling% | schur% | cbextr% | dense_o% | buildrow% |
+|---|---|---|---|---|---|---|---|
+| clnlbeam | 26297 | 18.1% | 15.2% | 11.2% | 6.6% | 22.1% | 2.2% |
+| dtoc1nd | 12540 | 25.0% | 19.5% | 8.2% | 12.0% | 9.6% | 0.8% |
+| dtoc2 | 76483 | 12.8% | 8.0% | 5.7% | 14.4% | 13.8% | 2.0% |
+| marine_1600 | 31271 | 22.4% | 18.9% | 15.7% | 5.7% | 19.3% | 1.2% |
+| rocket_12800 | 20461 | 34.7% | 29.3% | 11.3% | 1.8% | 24.5% | 0.9% |
+| steering_12800 | 37880 | 17.5% | 14.6% | 15.3% | 5.7% | 19.8% | 3.7% |
+| robot_1600 | 8662 | 19.0% | 15.8% | 15.0% | 6.4% | 22.1% | 3.0% |
 ```
 
 ## Git Status
 ```
-1833768 docs: note that #156 changed the parallel default after the measurement
-14bbaa2 docs: ship 0.15.0, then measure the gap vs MA57 (chain proxies)
-f7a152a Merge pull request #156 from jkitchin/claude/review-issue-154-ukpt7t
-af73f63 Merge origin/main into claude/review-issue-154-ukpt7t
-6c87a0e docs: session checkpoint 2026-08-09-03 (issue #154 review + implementation)
+bd1bc26 fix(scaling): make MC64 value-bound condition 3 a drift measure
+8f8aa8c feat(diag): trajectory-level scaling profile and a scaling-reuse safety check
+16b423c feat(diag): size issue #125 step 2 before building it -- and find a bigger target
+7d9812d docs(research): profile MC64 before optimizing it — dense-column diagnosis fails
+197c7be feat(bench): pre-scale offline so both solvers factorize identical numbers
 ```
 
 ## Test Status
 ```
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
@@ -86,55 +86,91 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 413 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.53s
+test result: ok. 416 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.50s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-07.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-09-09.md)
 
 
-No corpus bench: this machine has no corpus, and the release half of the
-session changed zero lines of source. Numbers for the shipped code stand
-from session 03 and the aarch64 revalidation at `6fd12d4`. `cargo test`
-for the published SHA ran green inside the release job. The proxy
-measurements are tabulated in the research note rather than duplicated
-here.
+`cargo run --bin bench --release`, post-fix. Both exit partitions PASS.
+
+=== Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
+ratio               count    geomean        p50        p90        p99        max
+factor/MUMPS       153560       0.43       0.30       1.54       3.30       8.70
+solve/MUMPS        153560       0.07       0.08       0.14       0.68       3.04
+factor/SSIDS       154500       0.04       0.03       0.32       0.96       2.03
+solve/SSIDS        154500       0.93       1.00       2.44       8.35      36.50
+nnzL/MUMPS         153560       0.61       0.58       0.75       4.50      23.11
+nnzL/SSIDS         154500       0.88       1.00       1.00       4.50       5.00
+
+--- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     147982     1.58     <= 2.0     PASS
+medium (<500)            152145     2.00     <= 3.0     PASS
+
+--- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
+bucket                    count      p90     target  verdict
+small-frontal (<200)     153455     1.54     <= 2.0     PASS
+medium (<500)            153560     1.54     <= 3.0     PASS
+
+Against the earlier run in this session (pre-fix):
+
+| partition | before | after |
+|---|---|---|
+| dense small-frontal p90 | 1.62 | 1.58 |
+| dense medium p90 | 2.04 | 2.00 |
+| sparse small-frontal p90 | 1.57 | 1.54 |
+| sparse medium p90 | 1.57 | 1.54 |
+
+**Do not read this as a win from the fix.** The bench factors each
+matrix once with a fresh solver, so the value-bound gate is never
+consulted and the change should be a no-op here — which is what "no
+regression" means in this table. The p90 movement is run-to-run noise;
+the worst-ratio top 10 turned over completely between the two runs
+(SWOPF/QPNBLEND before, KIRBY2 after) on matrices of n = 157–458 where
+absolute times are sub-millisecond.
+
+The bench corpus is also a different population from the seven
+kkt-mittelmann families the fix was measured on. It is a regression
+control, not evidence for the change.
+
 
 ```
 
 ## Recent Decisions
-`solver_parallel_factor_matches_sequential` is the #7 bit-exactness
-regression test; repairing only its assertion would leave it comparing
-the sequential driver against itself and passing vacuously. The rule
-adopted: any test that means "the parallel driver" constructs with an
-explicit `with_parallel(true)`, and only the default test asserts the
-derived value — against the same probe the constructor uses, so it
-cannot silently become environment-dependent again.
+**Decision:** `Mc64CacheValidity` gains `min_diag_0`, and condition 3 becomes a
+disjunction of the existing absolute floor and a new drift bound
+`min_diag >= DIAG_SHRINK * min_diag_0`, with `DIAG_SHRINK = 1.0 / GROWTH_FACTOR
+= 0.5`.
 
-**New coverage.** `solver_parallel_default_follows_platform`,
-`pool_num_threads_precedence` (via a pure
-`pool_num_threads_from(env, hardware)` helper, so no test mutates
-process-global environment state), and
-`solver_parallel_without_pool_falls_back_to_serial_refine`, which
-reproduces the post-build-failure field state and asserts the refine
-output is bit-identical to the sequential solver.
+**Why a disjunction rather than a replacement.** It is a strict widening of the
+accept set, so no matrix that the gate accepts today can start being rejected.
+And it is zero-drift-safe by construction: re-checking the baseline matrix
+gives `min_diag == min_diag_0` exactly, so the drift clause holds for any
+`DIAG_SHRINK <= 1`.
 
-**Also changed.** `FERAL_PARALLEL` in the C ABI (`src/capi.rs`) was
-off-only; with a derived default it needs a force-on arm
-(`1`/`on`/`true`/`yes`), otherwise a wasm-bindgen-rayon embedder has
-no way to opt in without a rebuild. Unset or unrecognized values leave
-the derived default alone.
+**Why 0.5.** Symmetric with `GROWTH_FACTOR`: the minimum diagonal may shrink by
+the same factor the worst dominance ratio may grow. The constant is **not**
+load-bearing — every value swept from 0.5 to 1e-6 produces the same 25 accepts
+out of 53 corpus gate evaluations. 0.5 is the tightest defensible choice, not a
+tuned one.
 
-**Validation.** `taskset -c 0 cargo test --lib` → 409 passed, 0
-failed. Full `cargo test` on 4 cores → 0 failed across all binaries.
-`cargo clippy --all-targets -- -D warnings` → clean.
+**Evidence.** 53 gate evaluations across the 7 corpus families that route to
+MC64. Condition 3 was the sole blocker on 3: two `robot_1600` checks at drift
+0.988 and 1.000 (false positives) and one `arki0003` check at drift 2.1e-08 (a
+genuine eight-order collapse, still rejected after the change). Pre/post-fix
+binaries give a complete hit-pattern diff of two flips, both `robot_1600`, with
+inertia byte-identical on every iterate of every family.
 
-**Out of scope.** This does not address the wasm hang in
-jkitchin/pounce#482. That reproduces only under `nightly-2026-08-02`,
-is a CPU spin, and occurs inside `pounce_load` — parsing, upstream of
-feral entirely.
+**Scope.** This does not touch conditions 1 or 2, and does not revisit the
+2026-05-21 rejection of Track B2 (`tried-and-rejected.md:2087`), which turned on
+condition 1 being confounded by the IPM barrier trajectory. That finding still
+holds: `pinene_3200` rejects 8/8 on condition 1 after this change.
+
+Research note: `dev/research/mc64-value-bound-diag-drift-2026-08-09.md`.
 
 ## Recent Tried-and-Rejected
 Swept `RAYON_NUM_THREADS` = 1, 2, 4, 8, 10 against the default on six
