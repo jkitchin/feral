@@ -4,6 +4,70 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — Suhl–Suhl basis triangularization in the sparse LU's symbolic analysis
+
+- `SparseLuSymbolic::analyze` now peels column and row singletons to fixpoint
+  (Suhl & Suhl, *ORSA J. Computing* **2**(4), 325–335, 1990) and runs the
+  fill-reducing ordering on only the residual **bump**. Peeled pivots are
+  structurally forced and both peeled blocks are upper triangular, so `L` is the
+  identity there — a peeled pivot performs no elimination and introduces no
+  rounding. The numeric factor loop is unchanged: partial pivoting discovers the
+  forced pivot on its own.
+- The pass is purely structural, so the symbolic-reuse contract is unchanged — a
+  handle built from one basis stays valid for any numerically different basis
+  with the same pattern.
+- New: `SparseLuSymbolic::{bump_lo, bump_hi}`, `with_order`, and
+  `analyze_amd_only` (the pre-0.16 whole-basis ordering, retained for A/B).
+- On a real simplex basis (`m = 3937`, `nnz = 28204`) the peel removes 85.6% of
+  the columns in 0.148 ms, cutting the ordering from 9.837 ± 0.285 ms to
+  0.851 ± 0.036 ms. Across a sampled class of LP bases (`m` 102 → 34,065) it
+  removes 84.8–100% of columns (median 94.6%) and the bump never exceeds 15.2%
+  of `m`.
+- **The peel alone is roughly break-even end to end** (1.06x on that basis):
+  ordering the isolated bump gives worse fill than ordering the whole basis, and
+  the numeric step regresses ~29% in compensation. Recorded here because it is
+  what motivates the next entry.
+
+### Added — `LuParams::dense_bump_max_dim`, an opt-in dense route for the bump *(default 0 = off)*
+
+- A simplex basis's residual bump is small but its **factor** is dense — 42% on
+  the basis above, against 2.2% input density — which is the worst case for a
+  scalar sparse scatter kernel. `should_use_dense_lu` cannot express this: it
+  keys on input density and on the dimension of the whole basis. Setting
+  `dense_bump_max_dim` routes a bump at or below that dimension through the
+  existing dense kernel instead.
+- **3.39x** on the full factorization of that basis (32.91 ms → 9.71 ms),
+  and **1.64x** on the whole simplex solve downstream (jkitchin/discopt#1008),
+  with the objective identical to 6.6e-15.
+- The cap is a memory bound: the route packs a `b²` f64 buffer (`b = 1024` →
+  8 MB, `b = 4096` → 134 MB).
+- The splice is **checked, never assumed**. It is taken only if the front block
+  really emitted an empty `L` column, so a numerically singular singleton routed
+  through `LuSingularAction::PerturbToEps` falls back to the sparse path rather
+  than producing a wrong factorization. Singularity verdicts match the sparse
+  path (`zero_pivot_tol` is rescaled to the bump's magnitude).
+- New: `SparseLu::{used_dense_bump, bump_dim}`. Because the fallback is silent,
+  `used_dense_bump()` is what keeps a benchmark or differential test from passing
+  vacuously against a fallback; the in-tree ones assert on it.
+- The route requires a symbolic that actually triangularized, and never applies
+  to a bump that is the whole basis unless it also fits `dense_threshold`.
+  `natural`, `with_order` and `analyze_amd_only` report `(bump_lo, bump_hi) =
+  (0, m)` because they never look for structure, and `analyze` reports it when a
+  basis has nothing to peel; without both guards a tridiagonal `m = 3000` under
+  the cap was packed into a 72 MB `m²` buffer and factored densely, at 181 ms
+  (`natural`) / 297 ms (`analyze`) against 1.5 ms on the sparse path. The case
+  for the dense kernel rests on the peel having stripped the structure and left
+  an irreducible core; with nothing stripped, whole-basis dense is
+  `dense_threshold`'s decision, and it weighs density rather than dimension
+  alone.
+- New: `SparseLuSymbolic::triangularized`, which distinguishes a *measured*
+  `(0, m)` bump from a constructor default. The two need opposite answers from
+  `dense_bump_max_dim` and are indistinguishable from the indices alone.
+- On a singular basis the dense route now reports the **original basis column**
+  in `FeralError::SingularBasis`, matching the sparse path. It previously
+  surfaced the block-local index from the packed kernel (column 7 where the
+  sparse path said 11), which is not a column a simplex driver can act on.
+
 ### Added — sparse-in / sparse-out `ftran_sparse` / `btran_sparse` *(issue #161B)*
 
 - `SparseLu::ftran`/`btran` take a dense `&mut [f64]`, which forces `Omega(m)`

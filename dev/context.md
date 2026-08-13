@@ -1,13 +1,13 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-13T16:01:47Z
+Generated: 2026-08-13T16:16:12Z
 
 ## Latest Session
-File: dev/sessions/2026-08-13-01.md
+File: dev/sessions/2026-08-13-02.md
 ```
-# Session 2026-08-13-01
+# Session 2026-08-13-02
 
-Journal: `dev/journal/2026-08-13-01.org`
+Journal: `dev/journal/2026-08-13-02.org`
 Research note: `dev/research/hyper-sparse-solves-2026-08-13.md`
 
 ## Goal
@@ -59,11 +59,11 @@ it moves the sparse-rhs case and leaves the dense-rhs case alone.
 
 ## Git Status
 ```
+10476c0 docs: renumber this session to 2026-08-13-02
+71468d6 feat(lu): sparse-in/sparse-out ftran_sparse/btran_sparse (#161B)
 06fd5ba feat(lu): reach-limited hyper-sparse triangular solves (#161B)
 0bc77b8 Merge pull request #159 from jkitchin/release/0.15.1
 5fa2c38 release: feral v0.15.1
-93abaa3 Merge pull request #157 from jkitchin/docs/session-2026-08-09-05
-5cc64a8 docs: session checkpoint 2026-08-10-02 (MC64 Hungarian bound + merge + CI)
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 410 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.97s
+test result: ok. 420 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.83s
 
 ```
 
@@ -183,6 +183,7 @@ src/lu/sparse_hyper.rs
 src/lu/sparse_matrix.rs
 src/lu/sparse_solve.rs
 src/lu/sparse_symbolic.rs
+src/lu/sparse_triangular.rs
 src/lu/sparse_update.rs
 src/numeric/condition.rs
 src/numeric/factorize.rs
@@ -257,6 +258,7 @@ tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
 tests/lu_dense.rs
+tests/lu_dense_bump.rs
 tests/lu_dense_update_bg.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs

@@ -284,6 +284,7 @@ impl LuFactor {
         refine_steps: usize,
         refine_tol: f64,
         update_pivot_search: bool,
+        dense_bump_max_dim: usize,
         hyper_sparse_max_density: f64,
     ) -> PyResult<LuParams> {
         let on_singular = match on_singular {
@@ -308,6 +309,7 @@ impl LuFactor {
             refine_steps,
             refine_tol,
             update_pivot_search,
+            dense_bump_max_dim,
             hyper_sparse_max_density,
         })
     }
@@ -318,6 +320,14 @@ impl LuFactor {
     /// Factor `matrix`. Routing: if `force_dense` is `None` (default),
     /// `should_use_dense_lu(n, nnz, params)` decides; `force_dense=True`
     /// forces the dense engine, `False` the sparse engine.
+    ///
+    /// `dense_bump_max_dim` (default 0 = off) is a second, independent routing
+    /// knob that applies only on the sparse path: a post-triangularization bump
+    /// at or below that dimension is factored with the dense kernel and spliced
+    /// back into the sparse factor. It exists because an LP basis's bump is
+    /// small but its *factor* is dense, which `should_use_dense_lu` cannot see —
+    /// that predicate keys on input density and on the whole basis's dimension.
+    /// The cap is a memory bound: the route packs a `dim²` f64 buffer.
     #[new]
     #[pyo3(signature = (
         matrix,
@@ -333,6 +343,7 @@ impl LuFactor {
         refine_steps = 0,
         refine_tol = 1e-12,
         update_pivot_search = false,
+        dense_bump_max_dim = 0,
         hyper_sparse_max_density = 0.25,
         force_dense = None,
     ))]
@@ -351,6 +362,7 @@ impl LuFactor {
         refine_steps: usize,
         refine_tol: f64,
         update_pivot_search: bool,
+        dense_bump_max_dim: usize,
         hyper_sparse_max_density: f64,
         force_dense: Option<bool>,
     ) -> PyResult<Self> {
@@ -366,6 +378,7 @@ impl LuFactor {
             refine_steps,
             refine_tol,
             update_pivot_search,
+            dense_bump_max_dim,
             hyper_sparse_max_density,
         )?;
         let a = &matrix.inner;

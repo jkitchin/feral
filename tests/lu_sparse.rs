@@ -231,11 +231,7 @@ fn singular_basis_reports_original_column_not_factorization_position() {
     let m = 3;
     let a = SparseColMatrix::from_dense_columns(m, &cols).expect("matrix");
     // Explicit non-identity column order: position k -> original column qcol[k].
-    let symbolic = SparseLuSymbolic {
-        m,
-        qcol: vec![2, 1, 0],
-        qcol_inv: vec![2, 1, 0],
-    };
+    let symbolic = SparseLuSymbolic::with_order(m, vec![2, 1, 0]).expect("order");
     let params = LuParams {
         on_singular: LuSingularAction::Fail,
         ..LuParams::default()

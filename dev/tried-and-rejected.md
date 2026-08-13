@@ -5234,6 +5234,32 @@ Microbenchmarks of one memory access pattern do not predict a loop that also
 does heap sifting and comparison work; scale by the measured share of the loop
 before believing them.
 
+## 2026-08-13 — gating the dense-bump route on `bump_lo > 0 || bump_hi < m` alone
+
+**Rejected on a broken test.** Reviewing PR #160, the dense-bump route was found
+to fire on symbolics that never triangularized (`natural`, `with_order`,
+`analyze_amd_only` all report `(0, m)`), packing a whole sparse basis into an
+`m²` f64 buffer. The first fix gated on "the bump is a proper sub-block":
+
+```rust
+let peeled = bump_lo > 0 || bump_hi < m;
+```
+
+This broke the PR's own `(0, 16, 0)` differential case in
+`tests/lu_dense_bump.rs` — a genuinely dense 16x16 basis with no triangular
+border, which peels to nothing and so reports `(0, m)`, but for which the dense
+kernel is exactly right. Failure was
+`the dense arm fell back to sparse (seed 5) - test is vacuous`.
+
+The distinction the index test cannot make is *why* the bump is the whole basis:
+a default from a constructor that never looked, or a measurement from a peel
+that found nothing. Those want opposite answers. Replaced with a
+`SparseLuSymbolic::triangularized` provenance flag plus a `bump_dim <=
+dense_threshold` allowance for the unpeelable case.
+
+Note the provenance flag *alone* was also insufficient — `analyze` on a
+tridiagonal m=3000 peels nothing, sets `triangularized = true`, and hit the same
+cliff at 297 ms vs 1.5 ms sparse. Both guards are load-bearing.
 ## 2026-08-13 — sparse permuted marshalling around the LU triangular solves
 
 **Rejected on measurement (issue #161B).** Having made the gather-form

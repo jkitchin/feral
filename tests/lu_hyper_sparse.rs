@@ -474,3 +474,58 @@ fn unit_rhs_solutions_are_sparse_enough_to_route() {
         on.hyper_sparse_sweeps()
     );
 }
+
+/// **Composition with the dense-bump route (issue #161 part A, PR #160).**
+///
+/// The reach-limited sweeps walk `u_above` and the row-wise index of `L`. The
+/// dense-bump route rebuilds part of both by splicing a dense factorization
+/// into them. This checks the reach-limited route against the dense sweep on
+/// such a factor, with both `used_dense_bump()` and `hyper_sparse_sweeps()`
+/// asserted so neither half can be silently absent.
+#[test]
+fn reach_route_composes_with_the_dense_bump_route() {
+    let m = 400;
+    let cols = lp_basis(m, 40, 6, 0xB0BA);
+    let a = SparseColMatrix::from_sparse_columns(m, &cols).expect("basis");
+    let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+    let mk = |d: f64| LuParams {
+        dense_bump_max_dim: 512,
+        hyper_sparse_max_density: d,
+        ..LuParams::default()
+    };
+    let mut off = SparseLu::factor(&a, &sym, mk(0.0)).expect("factor off");
+    let mut on = SparseLu::factor(&a, &sym, mk(0.25)).expect("factor on");
+    assert!(
+        off.used_dense_bump() && on.used_dense_bump(),
+        "the dense-bump route did not fire on both arms"
+    );
+    assert_eq!(
+        off.factor_nnz(),
+        on.factor_nnz(),
+        "the reach route must not change the factor the bump route produced"
+    );
+
+    let mut worst = 0.0_f64;
+    for k in 0..m {
+        let mut e = vec![0.0; m];
+        e[k] = 1.0;
+        let (mut f_off, mut f_on) = (e.clone(), e.clone());
+        off.ftran(&mut f_off).expect("ftran off");
+        on.ftran(&mut f_on).expect("ftran on");
+        worst = worst.max(max_abs_diff(&f_off, &f_on));
+        let (mut b_off, mut b_on) = (e.clone(), e.clone());
+        off.btran(&mut b_off).expect("btran off");
+        on.btran(&mut b_on).expect("btran on");
+        worst = worst.max(max_abs_diff(&b_off, &b_on));
+    }
+    assert_eq!(off.hyper_sparse_sweeps(), 0);
+    assert!(
+        on.hyper_sparse_sweeps() > m,
+        "the reach route fired only {} times on a dense-bump factor",
+        on.hyper_sparse_sweeps()
+    );
+    assert!(
+        worst < 1e-11,
+        "routes diverged on a dense-bump factor: {worst:e}"
+    );
+}

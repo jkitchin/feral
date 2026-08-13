@@ -151,6 +151,14 @@ pub struct SparseLu {
     /// Total Gilbert–Peierls reach nodes visited during the factor — a
     /// structural scalability witness (`O(nnz(U))`, not `O(n²)`).
     pub(super) reach_visits: usize,
+    /// True when the post-triangularization bump was factored by the dense
+    /// kernel (`LuParams::dense_bump_max_dim`). The route falls back to the
+    /// sparse kernel silently whenever its structural preconditions do not
+    /// hold, so a caller measuring it must read this rather than infer it from
+    /// the parameter.
+    pub(super) used_dense_bump: bool,
+    /// Dimension of the residual bump after triangularization.
+    pub(super) bump_dim: usize,
     pub(super) params: LuParams,
     /// Two-sided scaling of the factored matrix (identity when unscaled).
     pub(super) scale: LuScale,
@@ -295,7 +303,105 @@ impl SparseLu {
         let ztol = params.zero_pivot_tol * a_max;
         let mut reach_visits = 0usize;
 
-        for k in 0..m {
+        // Post-triangularization dense-bump route (opt-in via
+        // `dense_bump_max_dim`). The peel leaves a small bump whose *factor* is
+        // dense even when its input is sparse; a blocked dense kernel beats the
+        // sparse scatter kernel there by a wide margin. Taken only if the front
+        // block really did emit an empty `L` — see `bump_dense_ok` below.
+        let bump_lo = symbolic.bump_lo;
+        let bump_hi = symbolic.bump_hi;
+        let bump_dim = bump_hi.saturating_sub(bump_lo);
+        // Two guards, because "bump == whole basis" arises two ways and only one
+        // of them is a bump.
+        //
+        // 1. `natural`, `with_order` and `analyze_amd_only` claim `(0, m)`
+        //    without ever triangularizing. Their "bump" is a default, not a
+        //    measurement, so they are never eligible.
+        // 2. `analyze` reports `(0, m)` when a basis has nothing to peel. That
+        //    *is* a measurement, but it says the peel failed to expose anything
+        //    — so the argument for the dense kernel does not apply. The reason a
+        //    peeled bump's factor is dense is that the peel already stripped the
+        //    structure and left the irreducible core; with nothing stripped,
+        //    ordinary sparsity still governs. Such a basis may go dense only
+        //    within `dense_threshold`, the bound that governs whole-basis dense
+        //    decisions (and which weighs density, not just dimension).
+        //
+        // Without guard 2 a `natural`-ordered *or* unpeelable tridiagonal
+        // 3000x3000 under the cap goes 1.06 ms -> 100.1 ms and allocates a
+        // 72 MB `m²` buffer.
+        let peeled = bump_lo > 0 || bump_hi < m;
+        let want_dense_bump = symbolic.triangularized
+            && (peeled || bump_dim <= params.dense_threshold)
+            && bump_dim >= 2
+            && params.dense_bump_max_dim > 0
+            && bump_dim <= params.dense_bump_max_dim
+            && bump_hi <= m;
+        // Bump rows, ascending — the complement of the peeled rows. Only needed
+        // on the dense route.
+        let mut bump_rows: Vec<usize> = Vec::new();
+        let mut dense_done = false;
+
+        let mut k = 0usize;
+        while k < m {
+            // --- dense bump splice -------------------------------------------
+            // At the first bump position, factor the whole block at once and
+            // emit every bump column's L/U, then jump past the block.
+            if want_dense_bump && k == bump_lo && !dense_done {
+                // The splice is valid only if every peeled position ahead of the
+                // bump produced an EMPTY L column: that is the structural claim
+                // that makes the bump block of `A` equal to the bump block of
+                // `L^-1 A` (Suhl & Suhl). It holds for a correct peel, but a
+                // numerically singular singleton routed through
+                // `LuSingularAction::PerturbToEps` can pivot on some other row
+                // and break it, so it is checked, never assumed.
+                let front_l_empty = l_col_ptr.last() == Some(&0);
+                if front_l_empty {
+                    bump_rows = (0..m).filter(|&i| pinv[i] < 0).collect();
+                    debug_assert_eq!(bump_rows.len(), m - bump_lo);
+                    // Rows still unpivoted include the back block; keep only the
+                    // ones whose column position lands in the bump. A back row's
+                    // sole entry is in its own back column, so it is exactly the
+                    // rows appearing in bump columns that matter — but the
+                    // cheapest exact test is structural: a bump row is one with
+                    // an entry in some bump column.
+                    let mut in_bump = vec![false; m];
+                    for &qj in &qcol[bump_lo..bump_hi] {
+                        let (rows, _) = a.column(qj);
+                        for &i in rows.iter() {
+                            if pinv[i] < 0 {
+                                in_bump[i] = true;
+                            }
+                        }
+                    }
+                    bump_rows.retain(|&i| in_bump[i]);
+                }
+                if front_l_empty && bump_rows.len() == bump_dim {
+                    factor_bump_dense(
+                        a,
+                        &qcol,
+                        &bump_rows,
+                        bump_lo,
+                        bump_hi,
+                        &mut pinv,
+                        &mut perm,
+                        &mut u_diag,
+                        &mut u_col_ptr,
+                        &mut u_row_idx,
+                        &mut u_val,
+                        &mut l_col_ptr,
+                        &mut l_row_idx,
+                        &mut l_val,
+                        a_max,
+                        &params,
+                    )?;
+                    reach_visits += bump_dim * (bump_dim - 1) / 2;
+                    dense_done = true;
+                    k = bump_hi;
+                    continue;
+                }
+                // Otherwise fall through to the sparse path for the whole bump.
+            }
+
             // Scatter A(:, qcol[k]) into w.
             let (rows, vals) = a.column(qcol[k]);
             for (&i, &v) in rows.iter().zip(vals.iter()) {
@@ -477,6 +583,7 @@ impl SparseLu {
                 mark[i] = false;
             }
             touched.clear();
+            k += 1;
         }
 
         // Remap L's stored original rows to pivot positions, then sort columns.
@@ -560,6 +667,8 @@ impl SparseLu {
             u_max0,
             a_max,
             reach_visits,
+            used_dense_bump: dense_done,
+            bump_dim,
             params,
             scale,
             scale_rperm_inv,
@@ -613,6 +722,16 @@ impl SparseLu {
     }
 
     /// Total stored nonzeros in `L` and `U` (including the `U` diagonal).
+    /// Whether the bump was factored by the dense kernel on this call.
+    pub fn used_dense_bump(&self) -> bool {
+        self.used_dense_bump
+    }
+
+    /// Dimension of the residual bump left by triangularization.
+    pub fn bump_dim(&self) -> usize {
+        self.bump_dim
+    }
+
     pub fn factor_nnz(&self) -> usize {
         self.l_val.len() + self.u_rows.iter().map(|r| r.len()).sum::<usize>()
     }
@@ -872,4 +991,130 @@ fn remap_and_sort_l(
         row_idx[s..e].copy_from_slice(&rows);
         val[s..e].copy_from_slice(&vals);
     }
+}
+
+/// Factor the post-triangularization bump with the dense kernel and emit its
+/// `L`/`U` into the sparse builders, in pivot-position order.
+///
+/// Preconditions (checked by the caller): every position `< bump_lo` is a peeled
+/// singleton that produced an empty `L` column, so `L` is the identity above the
+/// bump and the bump block of `L⁻¹A` equals the bump block of `A`. That is what
+/// lets the block be factored in isolation.
+///
+/// `a` is the already-scaled matrix; `factorize_packed` does no scaling of its
+/// own, so the two paths stay in the same units.
+#[allow(clippy::too_many_arguments)]
+fn factor_bump_dense(
+    a: &SparseColMatrix,
+    qcol: &[usize],
+    bump_rows: &[usize],
+    bump_lo: usize,
+    bump_hi: usize,
+    pinv: &mut [isize],
+    perm: &mut [usize],
+    u_diag: &mut [f64],
+    u_col_ptr: &mut Vec<usize>,
+    u_row_idx: &mut Vec<usize>,
+    u_val: &mut Vec<f64>,
+    l_col_ptr: &mut Vec<usize>,
+    l_row_idx: &mut Vec<usize>,
+    l_val: &mut Vec<f64>,
+    a_max: f64,
+    params: &LuParams,
+) -> Result<(), FeralError> {
+    let m = a.m;
+    let b = bump_hi - bump_lo;
+
+    // Local row coordinates for the block.
+    let mut local = vec![usize::MAX; m];
+    for (n, &i) in bump_rows.iter().enumerate() {
+        local[i] = n;
+    }
+
+    // Pack the block column-major, and stash each bump column's entries that
+    // live in already-pivoted (front) rows — those are `U` entries above the
+    // bump and are copied straight through, since `L` is the identity there.
+    let mut packed = vec![0.0_f64; b * b];
+    let mut above: Vec<Vec<(usize, f64)>> = vec![Vec::new(); b];
+    let mut bump_a_max = 0.0_f64;
+    for jj in 0..b {
+        let (rows, vals) = a.column(qcol[bump_lo + jj]);
+        for (&i, &v) in rows.iter().zip(vals.iter()) {
+            let li = local[i];
+            if li != usize::MAX {
+                packed[li + jj * b] = v;
+                bump_a_max = bump_a_max.max(v.abs());
+            } else {
+                let p = pinv[i];
+                debug_assert!(p >= 0, "bump column touches an unpivoted non-bump row");
+                if p >= 0 {
+                    above[jj].push((p as usize, v));
+                }
+            }
+        }
+        // The sparse path emits each column's `U` entries in ascending pivot
+        // position; front pivot positions come out of `pinv` unordered.
+        above[jj].sort_unstable_by_key(|&(p, _)| p);
+    }
+
+    // Keep singularity detection identical to the sparse path, which measures
+    // `ztol` against the whole matrix: `factorize_packed` scales `zero_pivot_tol`
+    // by the *block's* max, so pre-divide to cancel that out.
+    let mut bparams = params.clone();
+    if bump_a_max > 0.0 {
+        bparams.zero_pivot_tol = params.zero_pivot_tol * a_max / bump_a_max;
+    }
+    let mut dperm: Vec<usize> = (0..b).collect();
+    // `factorize_packed` names the *block-local* column in `SingularBasis`;
+    // local column `jj` is basis column `qcol[bump_lo + jj]`. Without this remap
+    // the two routes report different columns for the same singular basis (the
+    // sparse path emits `qcol[k]` throughout), and a simplex driver — which
+    // knows original basis columns, not internal positions — would repair the
+    // wrong one. Same contract as
+    // `tests/lu_sparse.rs::singular_basis_reports_original_column_not_factorization_position`.
+    super::dense_factor::factorize_packed(&mut packed, &mut dperm, b, &bparams).map_err(
+        |e| match e {
+            FeralError::SingularBasis { column } if column < b => FeralError::SingularBasis {
+                column: qcol[bump_lo + column],
+            },
+            other => other,
+        },
+    )?;
+
+    // `dperm[n]` is the local row now in local pivot position `n`.
+    for n in 0..b {
+        let orig = bump_rows[dperm[n]];
+        perm[bump_lo + n] = orig;
+        pinv[orig] = (bump_lo + n) as isize;
+    }
+
+    // Emit column by column, in pivot-position order. `packed[i + j*b]` holds
+    // `U` for `i <= j` and strict `L` for `i > j` (unit diagonal implicit) — the
+    // same in-place convention `split_packed` reads.
+    for jj in 0..b {
+        for &(p, v) in above[jj].iter() {
+            u_row_idx.push(p);
+            u_val.push(v);
+        }
+        for n in 0..jj {
+            let v = packed[n + jj * b];
+            if v != 0.0 {
+                u_row_idx.push(bump_lo + n);
+                u_val.push(v);
+            }
+        }
+        u_col_ptr.push(u_row_idx.len());
+        u_diag[bump_lo + jj] = packed[jj + jj * b];
+
+        for n in (jj + 1)..b {
+            let v = packed[n + jj * b];
+            if v != 0.0 {
+                // Original row: remapped to a pivot position after the loop.
+                l_row_idx.push(bump_rows[dperm[n]]);
+                l_val.push(v);
+            }
+        }
+        l_col_ptr.push(l_row_idx.len());
+    }
+    Ok(())
 }

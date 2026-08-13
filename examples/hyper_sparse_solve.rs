@@ -14,7 +14,7 @@
 //! fired — a silent fallback would otherwise let this report a flattering 1.00x
 //! against itself.
 //!
-//! Usage: cargo run --release --example hyper_sparse_solve -- [m] [bump] [band] [density]
+//! Usage: cargo run --release --example hyper_sparse_solve -- [m] [bump] [band] [density] [bump_cap]
 
 use std::time::Instant;
 
@@ -107,8 +107,16 @@ fn main() {
     let a = SparseColMatrix::from_sparse_columns(m, &cols).expect("basis");
     let nnz = a.nnz();
     let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+    // Part A (PR #160) is on for both arms: the dense-bump route changes the
+    // *factor*, and the point of this harness is to isolate what the solve-side
+    // change does to a given factor. `bump_cap = 0` turns it off for comparison.
+    let bump_cap: usize = args
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4 * bump + 64);
     let mk = |d: f64| LuParams {
         hyper_sparse_max_density: d,
+        dense_bump_max_dim: bump_cap,
         ..LuParams::default()
     };
 
@@ -134,9 +142,11 @@ fn main() {
     );
 
     println!(
-        "m={m} nnz(A)={nnz} ({:.2}/col)  nnz(LU)={fnnz}  fill={:.2}x  bump={bump} band={band} density={density}",
+        "m={m} nnz(A)={nnz} ({:.2}/col)  nnz(LU)={fnnz}  fill={:.2}x  bump={bump} band={band} \
+density={density} dense_bump_max_dim={bump_cap} (fired={})",
         nnz as f64 / m as f64,
         fnnz as f64 / nnz as f64,
+        on.lu.used_dense_bump(),
     );
 
     // Solution density of a unit-vector rhs — the quantity the route is keyed on.

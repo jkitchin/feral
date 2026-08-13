@@ -479,3 +479,62 @@ fn sparse_entry_points_work_with_the_dense_route_disabled() {
          built L row index is missing and the Lᵀ reach silently degenerated"
     );
 }
+
+/// **Composition with the dense-bump route (issue #161 part A, PR #160).**
+///
+/// That route factors the post-triangularization bump with the *dense* kernel
+/// and splices the result back into the sparse `L`/`U`. The sparse solves here
+/// navigate those same structures by reach — `u_above` for the `U` sweep, the
+/// row-wise index of `L` for the `Lᵀ` sweep — so a splice that produced entries
+/// those indices did not describe would give a silently truncated reach and a
+/// wrong answer.
+///
+/// Neither branch could test this: part A predates the reach work and part B
+/// was written against a tree without the splice. It is the merge's risk
+/// surface, so it is the merge's test. `used_dense_bump()` is asserted so the
+/// test cannot pass vacuously against the sparse fallback the route takes when
+/// the peel does not hold.
+#[test]
+fn sparse_solves_compose_with_the_dense_bump_route() {
+    let m = 400;
+    let cols = lp_basis(m, 40, 6, 0xB0BA);
+    let a = SparseColMatrix::from_sparse_columns(m, &cols).expect("basis");
+    let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+    let mut lu = SparseLu::factor(
+        &a,
+        &sym,
+        LuParams {
+            dense_bump_max_dim: 512,
+            ..LuParams::default()
+        },
+    )
+    .expect("factor");
+    assert!(
+        lu.used_dense_bump(),
+        "the dense-bump route did not fire — this test would pass vacuously \
+         against the plain sparse factorization"
+    );
+
+    let mut out = Vec::new();
+    let mut worst = 0.0_f64;
+    for k in 0..m {
+        let mut expect = vec![0.0; m];
+        expect[k] = 1.0;
+        lu.ftran(&mut expect).expect("ftran");
+        lu.ftran_sparse(&[(k, 1.0)], &mut out)
+            .expect("ftran_sparse");
+        worst = worst.max(max_abs_diff(&expect, &densify(&out, m)));
+
+        let mut expect = vec![0.0; m];
+        expect[k] = 1.0;
+        lu.btran(&mut expect).expect("btran");
+        lu.btran_sparse(&[(k, 1.0)], &mut out)
+            .expect("btran_sparse");
+        worst = worst.max(max_abs_diff(&expect, &densify(&out, m)));
+    }
+    assert!(
+        worst < 1e-10,
+        "sparse solves diverged from the dense entry point on a dense-bump \
+         factor: {worst:e}"
+    );
+}

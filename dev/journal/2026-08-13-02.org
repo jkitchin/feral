@@ -214,3 +214,62 @@ fmt clean on both crates.
 (The "40 binaries" figure in the 17:50 entry above was wrong — that count came
 off a =head -40='d log, not off the suite. Left in place; this journal is
 append-only.)
+
+* 20:10 :issue161:merge:
+PR #160 (issue #161 part A) landed on main as b071d54, with two follow-up fixes
+and its own session checkpoint at =dev/sessions/2026-08-13-01.md=. Merged
+origin/main into this branch.
+
+Renamed this session's files to -02 *before* merging, since #160 took the -01
+slot. Did that as its own commit so the rename is not tangled with conflict
+resolution.
+
+Chose merge over rebase. A rebase replays my two feature commits first and the
+rename last, so the add/add collision on the session files reappears on the
+first commit and has to be resolved against a tree where the rename has not
+happened yet. A merge resolves everything once against the final content.
+
+Conflicts and how they were resolved:
+
+- =src/lu/mod.rs=, =src/lu/sparse_factor.rs= — *auto-merged*. Both sides add a
+  =LuParams= field and =SparseLu= fields; the additions are disjoint.
+- =python/src/lu.rs= (5 hunks) — all the same shape: both sides add one
+  parameter to =build_params= / the constructor signature. Kept both.
+- =CHANGELOG.md=, =dev/decisions.md=, =dev/tried-and-rejected.md= — kept both
+  sides, main's entry first. The latter two are append-only logs, so ordering
+  by landing time is the correct resolution rather than a judgement call.
+- =dev/context.md= — regenerated with =assemble-context.sh=, not hand-merged.
+
+* 20:25 :issue161:merge:tests:composition:
+A clean textual merge is not evidence of a clean semantic one, and there is a
+real interaction here: #160's dense-bump route *splices a dense factorization
+into the sparse L and U*, and my reach-limited sweeps navigate exactly those
+structures (=u_above= for the U sweep, the row-wise L index for the L^T sweep).
+A splice producing entries those indices did not describe would truncate a reach
+and return a wrong answer.
+
+Neither branch could have tested this — part A predates the reach work, part B
+was written against a tree without the splice. So it is the merge's test:
+
+- =reach_route_composes_with_the_dense_bump_route= (lu_hyper_sparse.rs)
+- =sparse_solves_compose_with_the_dense_bump_route= (lu_sparse_rhs.rs)
+
+Both assert =used_dense_bump()= as well as their own route's counter, so neither
+half can be silently absent. Both pass.
+
+End-to-end with part A on (m=4000, bump=400, dense_bump_max_dim=1664, route
+confirmed fired):
+
+  dense sweep     ftran mean 83.2 p50 75.4 us | btran mean 44.8 p50 39.9 us
+  reach-limited   ftran mean 36.6 p50 24.3 us | btran mean 33.6 p50 23.9 us
+  sparse API      ftran mean 11.8 p50  1.55 us | btran mean 11.2 us
+  --> sparse API vs dense sweep: ftran 7.1x  btran 4.0x
+
+Note nnz(LU) goes 30778 -> 35250 (fill 4.05x -> 4.64x) with the bump route on:
+part A trades fill for factorization speed, exactly as PR #160 documented
+(147,796 -> 172,449 on its own basis). That makes each solve slightly more
+expensive in absolute terms; the solve-side ratios hold.
+
+* 20:35 :issue161:merge:tests:
+Post-merge: 840 tests across 88 binaries, 0 failures. Python rebuilt with
+maturin: 68 passed, 1 skipped. clippy -D warnings and fmt clean on both crates.
