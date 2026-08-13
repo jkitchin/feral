@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-13T18:28:58Z
+Generated: 2026-08-13T19:36:58Z
 
 ## Latest Session
 File: dev/sessions/2026-08-13-02.md
@@ -59,11 +59,11 @@ it moves the sparse-rhs case and leaves the dense-rhs case alone.
 
 ## Git Status
 ```
+83dd752 fix(lu): make the Suhl-Suhl peel opt-in; analyze stays whole-basis AMD (#163)
+ce61e9e probe(lu): ordering vs kernel on the real bases — two unused levers
 f008f5f test(lu): carry the real QPLIB bases; the cap mechanism was not the sort
 5c1d537 fix(lu): default hyper_sparse_max_density 0.25 -> 0.10 (btran regression)
 bd8a0f7 docs(lu): sparse_hyper module doc named a test that does not exist
-6682f48 fix(lu,python): clippy 1.97 lint and scipy index-order assumption
-c546165 fix(bench,docs): sample stddev in basis_refactor; swapped LU doc comments
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 420 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.02s
+test result: ok. 420 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.87s
 
 ```
 
@@ -96,36 +96,36 @@ test result: ok. 420 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; fi
 ```
 
 ## Recent Decisions
-**Decision: the guard is evaluated on the rows the solution depends on.**
-`ut_solve` skips rows where `s[i] == 0.0` (unconditionally, matching what
-`lsolve` has always done); `usolve` on the reach-limited route skips rows
-outside the reach. The dense fallback route keeps the full every-row check.
+orderings. Backward error is ~1e-16 under both on all of them; forward error
+against a known solution reaches 2.6e-11 — the basis genuinely being
+ill-conditioned — and the peel is *never the worse of the two*, with ratios
+0.0x–1.0x across all 30 bases of the failing run. The peel does not produce a
+worse factorization. It produces a different rounding trajectory, which that LP
+was sensitive enough to diverge on.
 
-**Why this is sound and not merely cheaper.** A row `k` that is skipped has
-`s[k] == 0` and no reached predecessor, so back substitution would assign it
-`0 / U[k,k]`. If `U[k,k]` is healthy that is `0`, which is what leaving the
-position alone already gives. If `U[k,k]` is zero the row states `0 = 0`: the
-system is consistent and underdetermined there, and `0` remains *a* correct
-solution component. No solve returns a different or wrong answer.
+**The decision rests on cost-benefit, not correctness.** The peel's standalone
+result on a real QPLIB simplex basis is *more fill* (197,937 vs 190,654) for
+1.04x on time. A change that buys ~nothing does not get to perturb a downstream
+solver's arithmetic. Its real payoff — 4.28x — is the dense-bump route, which is
+off by default, so a caller taking `..LuParams::default()` was paying the
+trajectory change and receiving none of the speed. Making both opt-in puts the
+cost and the benefit behind the same door.
 
-**What is genuinely given up.** The *diagnostic* that the factor is degenerate
-somewhere the caller's right-hand side never touched. That was always incidental
-— a solve is not a factor validity check — and the primary detection remains
-where it belongs: at factor and update time, against the pivot tolerance, where
-singularity is decided rather than stumbled over. A caller who wants the strict
-old behavior sets `hyper_sparse_max_density = 0.0`, which restores the previous
-solve exactly.
+**What this deliberately does not claim.** That whole-basis AMD is the better
+trajectory in general. It is the ordering that was in place when the downstream
+regression was green, and no measurement here distinguishes the two on accuracy.
+A different ill-conditioned LP could prefer the peel; that is what
+trajectory-sensitivity means. If a future panel shows the peel winning broadly on
+speed, this decision should be revisited on that evidence — but it should be
+revisited together with `dense_bump_max_dim`'s default, not separately.
 
-This is recorded as a decision rather than an implementation detail because it
-narrows an always-on guard that an earlier repo review (L10) deliberately made
-always-on. The narrowing is in *coverage per solve*, not in the guard itself:
-a row that is reached is still checked in every build mode, and the two tests
-that pin L10 (`zero_u_diagonal_errors_instead_of_inf`,
-`misplaced_u_diagonal_errors_instead_of_silent_wrong_pivot`) still pass
-unchanged, because a corrupted row that the solution depends on is still hit.
+**Consequence for the Python bindings.** `feral.LuFactor` exposes no symbolic
+handle, so `dense_bump_max_dim > 0` selects `analyze_triangularized` there. The
+coupling is implicit but documented; the alternative was a parameter that
+silently did nothing.
 
-Full reasoning: `dev/research/hyper-sparse-solves-2026-08-13.md` § Semantics
-that change.
+Evidence: `dev/research/lu-ordering-and-kernel-2026-08-13.md` § Issue #163.
+Contract test: `tests/lu_default_ordering.rs`.
 
 ## Recent Tried-and-Rejected
                      ftran mean   btran mean   dense-rhs fallback
@@ -257,6 +257,7 @@ tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
+tests/lu_default_ordering.rs
 tests/lu_dense.rs
 tests/lu_dense_bump.rs
 tests/lu_dense_update_bg.rs
