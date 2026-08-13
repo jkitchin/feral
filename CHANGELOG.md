@@ -4,6 +4,28 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — the basis-refactor harness reported population, not sample, standard deviation
+
+- `examples/basis_refactor.rs` divided the sum of squared deviations by
+  `n.max(2.0 - 1.0)`. That parses as `n.max(1.0)` — i.e. `n` for every real
+  input — so the Bessel correction was absent and every `±` the harness printed
+  was understated by `sqrt(n / (n - 1))`.
+- **The already-published numbers are affected.** The `±` figures in the entry
+  below, and the matching table in PR #160, came from the broken version at
+  `n = 15` reps, so they are understated by a factor of 1.0351. The changelog
+  figures have been corrected by that factor; the PR body is immutable history
+  and is not. Only the `±` move — the means, the speedups, and every conclusion
+  drawn from them are unaffected, because the divisor never touched them.
+- The correction is exact rather than a re-measurement: the harness computed
+  `sqrt(Σ/n)` where it should have computed `sqrt(Σ/(n-1))`, so the true value
+  is the reported one times `sqrt(n/(n-1))`. The QPLIB basis those runs used is
+  not in this repository, so re-running was not an option.
+- `mean_sd` now has unit tests against a textbook sample whose population and
+  sample standard deviations differ (2.0 vs `sqrt(32/7)`), so the two cannot be
+  confused again, and CI gained a `cargo test --examples` step — plain
+  `cargo test` compiles examples but never runs `#[test]`s inside them, which is
+  why a bench harness's own arithmetic was unguarded in the first place.
+
 ### Added — Suhl–Suhl basis triangularization in the sparse LU's symbolic analysis
 
 - `SparseLuSymbolic::analyze` now peels column and row singletons to fixpoint
@@ -19,8 +41,9 @@ All notable changes to FERAL will be documented in this file.
 - New: `SparseLuSymbolic::{bump_lo, bump_hi}`, `with_order`, and
   `analyze_amd_only` (the pre-0.16 whole-basis ordering, retained for A/B).
 - On a real simplex basis (`m = 3937`, `nnz = 28204`) the peel removes 85.6% of
-  the columns in 0.148 ms, cutting the ordering from 9.837 ± 0.285 ms to
-  0.851 ± 0.036 ms. Across a sampled class of LP bases (`m` 102 → 34,065) it
+  the columns in 0.148 ms, cutting the ordering from 9.837 ± 0.295 ms to
+  0.851 ± 0.037 ms (the `±` were first published as 0.285 and 0.036; see the
+  `Fixed` entry below). Across a sampled class of LP bases (`m` 102 → 34,065) it
   removes 84.8–100% of columns (median 94.6%) and the bump never exceeds 15.2%
   of `m`.
 - **The peel alone is roughly break-even end to end** (1.06x on that basis):

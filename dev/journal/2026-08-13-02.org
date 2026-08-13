@@ -273,3 +273,53 @@ expensive in absolute terms; the solve-side ratios hold.
 * 20:35 :issue161:merge:tests:
 Post-merge: 840 tests across 88 binaries, 0 failures. Python rebuilt with
 maturin: 68 passed, 1 skipped. clippy -D warnings and fmt clean on both crates.
+
+* 20:55 :issue161:review:statistics:
+Two loose ends carried out of the #160 review, both now on main.
+
+*1. =examples/basis_refactor.rs:69= — population vs sample standard deviation.*
+
+  let var = ... .sum::<f64>() / n.max(2.0 - 1.0);
+
+=2.0 - 1.0= is evaluated first, so this is =n.max(1.0)=, which is =n= for every
+real input. The Bessel correction was simply absent: the harness reported the
+*population* standard deviation. Every ± it printed is understated by
+sqrt(n/(n-1)).
+
+This matters beyond the harness because those ± are published — in the merged
+#160 body and in CHANGELOG.md. At the 15 reps that run used the factor is
+1.035098, so 9.837 ± 0.285 is really 9.837 ± 0.295, and 0.851 ± 0.036 is
+0.851 ± 0.037.
+
+Corrected the changelog analytically rather than by re-measuring, and said so.
+The correction is *exact*: the code computed sqrt(Sum/n) where it should have
+computed sqrt(Sum/(n-1)), so true = reported * sqrt(n/(n-1)). Re-running was not
+available anyway — the QPLIB basis those numbers came from is not in this repo.
+Only the ± move; means, speedups and every conclusion are untouched, because the
+divisor never entered them.
+
+Checked whether the typo was copy-pasted elsewhere: it is not. The nine other
+=2.0 - 1.0= hits in the tree are all legitimate =rng.unit() * 2.0 - 1.0= range
+scalings to [-1, 1].
+
+*Why it could ship, and the actual fix.* =cargo test= compiles examples but does
+not run =#[test]=s inside them, so a benchmark harness's own arithmetic was
+unguarded. Added =cargo test --examples= to CI and two unit tests for =mean_sd=
+against the textbook sample [2,4,4,4,5,5,7,9], whose population sd is exactly
+2.0 and sample sd is sqrt(32/7) = 2.1381 — the two differ by precisely the error
+in question, so the test fails against the pre-fix code. Verified
+=cargo test --examples= was already clean (0 tests, 0 failures) before adding
+the step, so the CI addition is not smuggling in a broken gate.
+
+*2. =used_dense_bump= carried =factor_nnz='s doc comment.*
+
+  /// Total stored nonzeros in `L` and `U` (including the `U` diagonal).
+  /// Whether the bump was factored by the dense kernel on this call.
+  pub fn used_dense_bump(&self) -> bool
+
+...and =factor_nnz= had none. A stray line, but it ships in the public rustdoc,
+where the first line is the summary shown in the method list — so
+=used_dense_bump= was advertised as returning a nonzero count. Moved the line to
+=factor_nnz= and gave both real doc comments. =cargo doc --no-deps= produces no
+warnings for any lu/ file (the two it does emit are pre-existing, in
+=src/dense/factor.rs=).

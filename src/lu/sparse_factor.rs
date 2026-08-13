@@ -721,8 +721,12 @@ impl SparseLu {
         &self.qcol
     }
 
-    /// Total stored nonzeros in `L` and `U` (including the `U` diagonal).
     /// Whether the bump was factored by the dense kernel on this call.
+    ///
+    /// The [`LuParams::dense_bump_max_dim`] route falls back to the sparse path
+    /// silently when the peel's structural precondition does not hold, so this
+    /// is what a benchmark or differential test must assert on to avoid passing
+    /// vacuously against the fallback.
     pub fn used_dense_bump(&self) -> bool {
         self.used_dense_bump
     }
@@ -732,6 +736,11 @@ impl SparseLu {
         self.bump_dim
     }
 
+    /// Total stored nonzeros in `L` and `U` (including the `U` diagonal).
+    ///
+    /// The fill measure: `factor_nnz() / nnz(basis)`. Grows across
+    /// Forrest–Tomlin updates only through the `U` rows they rewrite — the base
+    /// `L` is never touched.
     pub fn factor_nnz(&self) -> usize {
         self.l_val.len() + self.u_rows.iter().map(|r| r.len()).sum::<usize>()
     }
