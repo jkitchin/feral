@@ -5295,3 +5295,30 @@ point**, not a cheaper way to walk a dense one.
 
 The code was reverted. `dev/research/hyper-sparse-solves-2026-08-13.md` records
 the floor and names the API change that would lift it.
+
+## 2026-08-13 — caching `SparseLuSymbolic` across refactorizations in a simplex
+
+**Rejected on measurement.** While attributing discopt issue #1008, the analysis
+phase turned out to dominate: on QPLIB_3775, `LuSymbolic` was **1048.5 ms across
+64 factorizations** against `LuNumeric` **184.6 ms** — 5.7x the numeric
+factorization spent choosing a column order. Since `SparseLu::factor` only
+validates `symbolic.m == a.m`, a stale ordering is *legal*, so the obvious fix
+was to compute the ordering once and reuse the handle on every refactorization.
+
+Probed in discopt behind `DISCOPT_LU_SYM_REUSE` (a `sym_cache: Option<SparseLuSymbolic>`
+on `FeralLU`, never merged). On QPLIB_3775 with `analyze_triangularized`:
+
+| arm | factorizations | LuNumeric | wall |
+|---|---|---|---|
+| tri=1, reuse=0 | 64 | 184.6 ms | **1.193 s** |
+| tri=1, reuse=1 | 1112 | 18381 ms | **137.835 s** |
+
+**115x slower.** tri=0 reuse=1 did not finish inside a 300 s timeout. A simplex
+basis is not structurally stable across 64 pivots: the stale ordering explodes
+fill, the fill blows the numeric factorization, and the resulting instability
+triggers a refactorization storm (64 → 1112) that feeds back on itself.
+
+The conclusion is not "reuse harder" — it is that the ordering **must** be
+recomputed on every refactorization, and therefore must be cheap. That is what
+makes the `analyze` vs `analyze_triangularized` cost (4.3-12.4x, measured
+standalone) a first-order effect rather than an amortizable one.
