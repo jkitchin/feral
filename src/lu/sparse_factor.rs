@@ -141,6 +141,10 @@ pub struct SparseLu {
     /// the feature-off path allocates nothing for it.
     pub(super) l_row_ptr: Vec<usize>,
     pub(super) l_row_cols: Vec<usize>,
+    /// Workspace for the sparse-in / sparse-out solves
+    /// ([`SparseLu::ftran_sparse`]). Allocated lazily on first use, so a caller
+    /// that only uses the dense entry points never pays for it.
+    pub(super) hyper: super::sparse_hyper::HyperWork,
     /// Scratch for the reach-limited triangular sweeps. Empty (and unusable,
     /// which [`SparseLu::reach_cap`] detects) unless the route is enabled.
     pub(super) reach: super::sparse_solve::ReachWork,
@@ -550,6 +554,7 @@ impl SparseLu {
             l_row_ptr,
             l_row_cols,
             reach,
+            hyper: super::sparse_hyper::HyperWork::default(),
             etas: Vec::new(),
             growth: 1.0,
             u_max0,
@@ -713,6 +718,23 @@ impl SparseLu {
     /// the route is disabled, and zero after a fresh factor or `refactor`.
     pub fn hyper_sparse_sweeps(&self) -> usize {
         self.reach.sweeps()
+    }
+
+    /// Build the row-wise index of `L` if it is not already present.
+    ///
+    /// The eager build at factor time is gated on
+    /// [`LuParams::hyper_sparse_max_density`], because that is what decides
+    /// whether the *dense* `btran` will ever want it. The sparse entry points
+    /// want it unconditionally, and they have `&mut self`, so they call this
+    /// instead of forcing every factor to carry the index. `L` never changes
+    /// after the factor, so building it late is as valid as building it early.
+    pub(super) fn ensure_l_row_index(&mut self) {
+        if self.l_row_ptr.len() == self.m + 1 {
+            return;
+        }
+        let (ptr, cols) = build_l_row_index(&self.l_col_ptr, &self.l_row_idx, self.m);
+        self.l_row_ptr = ptr;
+        self.l_row_cols = cols;
     }
 
     /// Total positions visited by those reach-limited sweeps. Divided by

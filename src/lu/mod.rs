@@ -18,6 +18,7 @@ pub mod dense_solve;
 pub mod dense_update;
 pub mod scaling;
 pub mod sparse_factor;
+pub(crate) mod sparse_hyper;
 pub mod sparse_matrix;
 pub mod sparse_solve;
 pub mod sparse_symbolic;

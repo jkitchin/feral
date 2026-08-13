@@ -139,3 +139,78 @@ every partition reports N/A / "no matrices have oracle timings", same as
 session 2026-08-10-01. No LDLT regression comparison is possible here. The
 change is confined to =src/lu/=, which the LDLT corpus does not exercise, but
 that is an argument for low risk, not evidence of no regression.
+
+* 18:40 :issue161:lu:api:design:
+Follow-up requested: remove the O(m) floor, adding an API if that is what it
+takes. It is: the floor is the =ftran(&mut [f64])= signature, not the kernels.
+
+Added =ftran_sparse= / =btran_sparse=: rhs as (index, value) pairs, solution
+appended to a caller-owned =Vec<(usize, f64)>=. Every step is proportional to
+nnz or to the reach — scatter O(nnz(rhs)), L-solve over the GP reach, etas
+O(ops), U-solve over the reach, gather O(nnz(x) log nnz(x)).
+
+The delicate part is the dense accumulator that must be all-zero between calls
+and restored in O(touched). A leak corrupts the *next* solve, not the one that
+leaked, so the reset runs on every exit path including the error path out of the
+U-solve, and the test interleaves failing solves with good ones rather than
+batching them.
+
+Deliberately did NOT skip zero-source eta ops. It would be O(ops) either way,
+and skipping diverges from =FtEta::apply_forward= when mult is non-finite
+(mult * 0.0 = NaN, not 0.0). Bit parity with the dense path is worth more than
+a branch that changes no asymptotics.
+
+* 19:05 :issue161:lu:measurement:scalability:
+Measured, bump=0 band=3, unit-vector rhs, ftran p50:
+
+  m       dense sweep   reach-limited   sparse API   work (scalar ops)
+  1000       7.8 us        4.7 us        0.30 us     12.5
+  4000      40.8 us       20.3 us        1.07 us     12.1
+  16000    183.4 us       89.6 us        2.47 us     13.1
+  64000   1251.0 us      616.7 us        3.34 us     11.0
+
+*The work column is the result.* m grows 64x, the operation count does not move.
+The dense sweep grows 160x, which is what O(m) looks like. At m=64000 the sparse
+API is 277x the dense sweep on ftran, 234x on btran.
+
+Time still grows 11x over that 64x range. That is NOT a residual O(m) term — it
+decelerates (4x in m buys 2.3x in time from 4k->16k, 1.35x from 16k->64k), which
+is a cache/TLB plateau. The accumulator is 512 KB at m=64000, past L2, so each
+of the ~12 scattered accesses is a miss. O(work x miss cost), not O(m).
+
+This is exactly why =last_sparse_solve_work()= is asserted on instead of a
+timing. A reintroduced O(m) term at these sizes would look like a constant
+factor, indistinguishable from noise. The counter is deterministic.
+
+* 19:20 :issue161:lu:measurement:honest:
+On the *bump* fixture the sparse API is ftran p50 0.83 us vs 57.3 us dense
+sweep (69x) but *mean* 9.6 us vs 62.8 (6.5x). The minority of solves that reach
+through the whole bump dominate the mean, and there the sparse API does the same
+work as the dense sweep plus a sort.
+
+That is the honest shape: enormous where the solution is genuinely sparse,
+roughly neutral where it is not. Callers with dense solutions should keep using
+=ftran=; the doc comments say so explicitly rather than leaving it to be
+discovered.
+
+* 19:35 :issue161:python:tests:
+Added the Python bindings — issue #161's own reproducer is Python, so a
+Rust-only fix is not reachable from it. =ftran_sparse(rows, vals) -> (rows,
+vals)=, =btran_sparse=, =last_sparse_solve_work=, and
+=hyper_sparse_max_density= threaded through the constructor.
+
+Built with maturin and ran the suite against the installed wheel: 68 passed,
+1 skipped, including three new tests (dense-oracle agreement, the
+work-does-not-grow-with-n assertion through the binding, and dense-engine
+rejection).
+
+Note for future sessions: =python -m pytest= must be run from *outside*
+=python/=, since the source =feral/= directory shadows the installed package
+(ImportError: cannot import name '_feral' from partially initialized module).
+
+Rust suite: 823 tests across 87 binaries, 0 failures. clippy -D warnings and
+fmt clean on both crates.
+
+(The "40 binaries" figure in the 17:50 entry above was wrong — that count came
+off a =head -40='d log, not off the suite. Left in place; this journal is
+append-only.)

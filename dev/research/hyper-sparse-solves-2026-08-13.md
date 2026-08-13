@@ -258,3 +258,116 @@ two of the four kernels already skipped zeros, two did not. After this change th
 same measurement on the in-tree fixture is 0.97x dense-rhs vs 2.56x p50 on a
 sparse rhs — i.e. the sparse case moved and the dense case did not, which is the
 signature of having fixed the gather halves specifically.
+
+---
+
+# Part 2: removing the `O(m)` floor
+
+The section above closes with "the floor is not one removable term, it is the
+dense-vector API itself" and names `ftran_sparse` as the follow-up. This is that
+follow-up, measured.
+
+## What the floor actually was
+
+The phase probe showed 22 us on a 3.4-position reach at `m = 4000`, spread over
+~6 linear passes with no dominant term. Each of those passes exists because
+`ftran(&mut self, rhs: &mut [f64])` hands the solve a dense vector: the `P`
+gather, the source scan, the `Q` scatter, and `lsolve`'s sweep all walk `0..m`
+because that is the only description of the input they have.
+
+No amount of work inside the kernels removes that. The signature has to change.
+
+## The new entry points
+
+```rust
+pub fn ftran_sparse(&mut self, rhs: &[(usize, f64)], out: &mut Vec<(usize, f64)>)
+    -> Result<(), FeralError>;
+pub fn btran_sparse(&mut self, rhs: &[(usize, f64)], out: &mut Vec<(usize, f64)>)
+    -> Result<(), FeralError>;
+```
+
+| step | cost |
+|---|---|
+| scatter the rhs (with row scaling) into pivot-position space | `O(nnz(rhs))` |
+| `L`-solve over the Gilbert–Peierls reach | `O(reach work)` |
+| replay the Forrest–Tomlin etas | `O(eta ops)` |
+| `U`-solve over the reach | `O(reach work)` |
+| gather the solution (with column scaling), sorted | `O(nnz(x) log nnz(x))` |
+
+Nothing is proportional to `m`. The eta term is proportional to the update
+chain, which is what `compute_spike` in the Forrest–Tomlin update already pays.
+
+The design rests on a dense accumulator that is **all zero between calls** and is
+restored in `O(touched)`, never `O(m)` — the same `ft_work`/`scratch_mark`
+convention the FT update uses. That invariant is the one genuinely dangerous
+thing here: a leak does not corrupt the solve that caused it, it corrupts the
+*next* one. So the reset runs on every exit path including the error paths, and
+`failed_solves_leave_the_accumulator_clean` interleaves failing solves with
+succeeding ones and checks the succeeding ones against the dense oracle.
+
+## Measured: the operation count is flat in `m`
+
+Same fixture generator, `bump = 0`, `band = 3`, unit-vector right-hand sides.
+"work" is `last_sparse_solve_work()` — positions swept plus factor entries
+traversed:
+
+| `m` | dense sweep ftran (p50) | reach-limited (p50) | **sparse API (p50)** | sparse work |
+|---|---|---|---|---|
+| 1,000 | 7.8 us | 4.7 us | **0.30 us** | 12.5 |
+| 4,000 | 40.8 us | 20.3 us | **1.07 us** | 12.1 |
+| 16,000 | 183.4 us | 89.6 us | **2.47 us** | 13.1 |
+| 64,000 | 1251.0 us | 616.7 us | **3.34 us** | 11.0 |
+
+**The work column is the result.** `m` grows 64x; the operation count does not
+move (12.5 → 11.0). The dense sweep grows 160x over the same range, which is
+what an `O(m)` term looks like.
+
+Against the dense sweep at `m = 64000`: **277x on ftran, 234x on btran**.
+
+## Why the *time* still grows a little, and why that is not an `O(m)` term
+
+Time goes 0.30 → 3.34 us (11x) while `m` goes 64x and the work count stays flat.
+An `O(m)` term would give 64x. The growth is also decelerating — 4x in `m` buys
+2.3x in time from 4k to 16k but only 1.35x from 16k to 64k — which is the shape
+of a cache/TLB effect reaching its plateau, not of a linear term.
+
+The mechanism is the dense accumulator: at `m = 64000` it is 512 KB, past L2, so
+each of the ~12 scattered accesses is a miss. That is `O(work × miss cost)`, not
+`O(m)`. It is inherent to the scatter/gather sparse-solver design and is the
+standard trade; the alternative (a hash or a compacted workspace) costs more per
+access than it saves.
+
+This is exactly why `last_sparse_solve_work()` exists and is asserted on rather
+than a timing. An asymptotic claim cannot be pinned by a wall clock: a
+reintroduced `O(m)` term at these sizes would look like a constant factor, which
+is indistinguishable from machine noise. The counter is deterministic, so
+`sparse_solve_work_does_not_grow_with_m` can pin it directly across an 8x range,
+and the Python suite pins it again through the binding.
+
+## On the mixed-density case
+
+On the bump fixture (`m = 4000`, solution density bimodal at p50 = 3 / p90 = 366)
+the sparse API measures ftran p50 **0.83 us** against 57.3 us for the dense
+sweep, but its *mean* is 9.6 us — 6.5x rather than 69x. The minority of solves
+that reach through the whole bump dominate the mean, and for those the sparse API
+is doing the same work as the dense sweep plus a sort. That is the honest shape
+of the win: enormous where the solution is genuinely sparse, roughly neutral
+where it is not.
+
+Callers with dense solutions should keep using `ftran`. The doc comments say so.
+
+## What is still not done
+
+- **The etas are `O(eta ops)`, not `O(work)`.** Every op is walked whether or not
+  its source is nonzero. Skipping zero sources is a two-line change and was
+  deliberately not made: it would diverge from `FtEta::apply_forward` on a
+  non-finite multiplier (`mult * 0.0` is `NaN`, not `0.0`), and bit-for-bit
+  agreement with the dense path is worth more than a branch that does not change
+  the asymptotics. An indexed eta structure would, but that is a different piece
+  of work.
+- **The reach is sorted, not merged.** A dense-solution sparse solve pays
+  `O(r log r)` where the dense sweep pays `O(r)`. Bounded and only bites the case
+  the caller should not have used this API for.
+- **Still unverified on the real QPLIB bases** (they are `.npz` in the discopt
+  tree, not in this repo). The fixture reproduces the structural signature; the
+  transfer is untested from here.

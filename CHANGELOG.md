@@ -4,6 +4,43 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — sparse-in / sparse-out `ftran_sparse` / `btran_sparse` *(issue #161B)*
+
+- `SparseLu::ftran`/`btran` take a dense `&mut [f64]`, which forces `Omega(m)`
+  per solve however little of the factor the answer depends on. Making the
+  triangular sweeps reach-limited (below) took a solve from `O(nnz(factor))` to
+  `O(m + reach work)` and then stopped at that floor. The floor is the
+  signature, so this changes the signature.
+- `SparseLu::ftran_sparse(rhs, out)` and `btran_sparse(rhs, out)` take the
+  right-hand side as `(index, value)` pairs and append the solution's nonzeros
+  to a caller-owned buffer, sorted by index. **No step is proportional to `m`**:
+  scatter is `O(nnz(rhs))`, both triangular solves are `O(reach work)`, the eta
+  replay is `O(eta ops)` (proportional to the update chain, not to `m`), and the
+  gather is `O(nnz(x) log nnz(x))`.
+- Measured on a triangular LP-shaped basis with unit-vector right-hand sides,
+  `ftran` p50, alongside the deterministic operation count:
+
+  | `m` | dense sweep | reach-limited | **sparse API** | sparse work |
+  |---|---|---|---|---|
+  | 1,000 | 7.8 us | 4.7 us | **0.30 us** | 12.5 |
+  | 4,000 | 40.8 us | 20.3 us | **1.07 us** | 12.1 |
+  | 16,000 | 183.4 us | 89.6 us | **2.47 us** | 13.1 |
+  | 64,000 | 1251.0 us | 616.7 us | **3.34 us** | 11.0 |
+
+  `m` grows 64x and the operation count does not move. At `m = 64000` this is
+  **277x the dense sweep on ftran, 234x on btran**.
+- `SparseLu::last_sparse_solve_work()` reports that operation count. It exists to
+  be asserted on: an asymptotic claim cannot be pinned by a wall clock, since a
+  reintroduced `O(m)` term would look like a constant factor at these sizes.
+- **When the solution is dense, keep using `ftran`.** The sparse path sorts its
+  reach where the dense sweep just walks the factor in order, so it is roughly
+  neutral-to-slower there. On the mixed-density bump fixture the sparse API is
+  69x on the median solve but 6.5x on the mean, and the doc comments say so.
+- Python: `LuFactor.ftran_sparse(rows, vals) -> (rows, vals)`,
+  `btran_sparse`, `last_sparse_solve_work`, and a `hyper_sparse_max_density`
+  constructor argument. Issue #161's reproducer is Python, so the fix is
+  reachable from it.
+
 ### Added — reach-limited ("hyper-sparse") sparse-LU triangular solves *(issue #161B)*
 
 - `SparseLu::ftran`/`btran` cost the same whether the solution had one nonzero

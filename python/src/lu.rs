@@ -21,6 +21,38 @@ use pyo3::types::PyType;
 use crate::common::{array1_i64_to_vec_usize, array1_to_vec};
 use crate::errors::map_feral_err;
 
+/// Zip a `(rows, vals)` pair into the `(index, value)` form the sparse
+/// solves take. Out-of-range indices are left to the Rust side, which
+/// reports them as a dimension mismatch.
+fn sparse_rhs(
+    rows: &PyReadonlyArray1<'_, i64>,
+    vals: &PyReadonlyArray1<'_, f64>,
+) -> PyResult<Vec<(usize, f64)>> {
+    let r = array1_i64_to_vec_usize(rows)?;
+    let v = array1_to_vec(vals);
+    if r.len() != v.len() {
+        return Err(PyValueError::new_err(
+            "rows and vals must have the same length",
+        ));
+    }
+    Ok(r.into_iter().zip(v).collect())
+}
+
+/// The `(rows, vals)` array pair a sparse solve hands back to Python.
+type SparseVecPy<'py> = (Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<f64>>);
+
+/// Split an `(index, value)` solution back into the `(rows, vals)` array
+/// pair Python callers expect.
+fn split_sparse<'py>(py: Python<'py>, out: Vec<(usize, f64)>) -> SparseVecPy<'py> {
+    let mut idx: Vec<i64> = Vec::with_capacity(out.len());
+    let mut val: Vec<f64> = Vec::with_capacity(out.len());
+    for (i, v) in out {
+        idx.push(i as i64);
+        val.push(v);
+    }
+    (idx.into_pyarray_bound(py), val.into_pyarray_bound(py))
+}
+
 /// Reconstruct the dense column list (`cols[j]` length `m`) of a sparse
 /// basis. Used to feed the dense LU engine and the dense `refactor`.
 fn dense_columns(a: &RustSparseColMatrix) -> Vec<Vec<f64>> {
@@ -252,6 +284,7 @@ impl LuFactor {
         refine_steps: usize,
         refine_tol: f64,
         update_pivot_search: bool,
+        hyper_sparse_max_density: f64,
     ) -> PyResult<LuParams> {
         let on_singular = match on_singular {
             "fail" => LuSingularAction::Fail,
@@ -275,6 +308,7 @@ impl LuFactor {
             refine_steps,
             refine_tol,
             update_pivot_search,
+            hyper_sparse_max_density,
         })
     }
 }
@@ -299,6 +333,7 @@ impl LuFactor {
         refine_steps = 0,
         refine_tol = 1e-12,
         update_pivot_search = false,
+        hyper_sparse_max_density = 0.25,
         force_dense = None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -316,6 +351,7 @@ impl LuFactor {
         refine_steps: usize,
         refine_tol: f64,
         update_pivot_search: bool,
+        hyper_sparse_max_density: f64,
         force_dense: Option<bool>,
     ) -> PyResult<Self> {
         let params = Self::build_params(
@@ -330,6 +366,7 @@ impl LuFactor {
             refine_steps,
             refine_tol,
             update_pivot_search,
+            hyper_sparse_max_density,
         )?;
         let a = &matrix.inner;
         let m = a.m;
@@ -390,6 +427,76 @@ impl LuFactor {
             LuInner::Sparse { lu, .. } => lu.btran(&mut rhs).map_err(map_feral_err)?,
         }
         Ok(rhs.into_pyarray_bound(py))
+    }
+
+    /// Solve `B x = b` with both sides sparse: `rows`/`vals` give the
+    /// nonzeros of `b`, and the nonzeros of `x` come back as a
+    /// `(rows, vals)` pair sorted by row.
+    ///
+    /// This is the work-proportional entry point (issue #161B). `ftran`
+    /// takes and returns dense length-`n` arrays, which forces `O(n)`
+    /// work per solve no matter how few nonzeros the answer has; this
+    /// one costs only the reach of `b`'s pattern through the factor. On
+    /// a simplex `ftran` against a near-unit-vector column that is the
+    /// difference between touching the whole basis and touching the
+    /// handful of positions the answer depends on.
+    ///
+    /// Sparse engine only — the dense engine has no sparse factor to
+    /// walk, so use `ftran` there. When the solution is *dense* prefer
+    /// `ftran` here too: this path sorts its reach, which the dense
+    /// sweep does not need to do.
+    fn ftran_sparse<'py>(
+        &mut self,
+        py: Python<'py>,
+        rows: PyReadonlyArray1<'py, i64>,
+        vals: PyReadonlyArray1<'py, f64>,
+    ) -> PyResult<SparseVecPy<'py>> {
+        let rhs = sparse_rhs(&rows, &vals)?;
+        let mut out: Vec<(usize, f64)> = Vec::new();
+        match &mut self.inner {
+            LuInner::Sparse { lu, .. } => lu.ftran_sparse(&rhs, &mut out).map_err(map_feral_err)?,
+            LuInner::Dense(_) => {
+                return Err(PyValueError::new_err(
+                    "ftran_sparse is only available on the sparse LU engine; \
+                     use ftran(b) for the dense engine",
+                ))
+            }
+        }
+        Ok(split_sparse(py, out))
+    }
+
+    /// Solve `Bᵀ x = c` with both sides sparse. The transpose twin of
+    /// `ftran_sparse`: `rows` indexes columns of `B`, the result indexes
+    /// rows, matching `btran`.
+    fn btran_sparse<'py>(
+        &mut self,
+        py: Python<'py>,
+        rows: PyReadonlyArray1<'py, i64>,
+        vals: PyReadonlyArray1<'py, f64>,
+    ) -> PyResult<SparseVecPy<'py>> {
+        let rhs = sparse_rhs(&rows, &vals)?;
+        let mut out: Vec<(usize, f64)> = Vec::new();
+        match &mut self.inner {
+            LuInner::Sparse { lu, .. } => lu.btran_sparse(&rhs, &mut out).map_err(map_feral_err)?,
+            LuInner::Dense(_) => {
+                return Err(PyValueError::new_err(
+                    "btran_sparse is only available on the sparse LU engine; \
+                     use btran(c) for the dense engine",
+                ))
+            }
+        }
+        Ok(split_sparse(py, out))
+    }
+
+    /// Scalar work of the most recent `ftran_sparse`/`btran_sparse`:
+    /// positions swept plus factor entries traversed. Holding the basis
+    /// structure fixed and growing `n`, this stays flat — which is the
+    /// checkable form of "work-proportional". `None` on the dense engine.
+    fn last_sparse_solve_work(&self) -> Option<usize> {
+        match &self.inner {
+            LuInner::Sparse { lu, .. } => Some(lu.last_sparse_solve_work()),
+            LuInner::Dense(_) => None,
+        }
     }
 
     /// Replace basis column `slot` with the dense `col` (length `n`)

@@ -311,6 +311,72 @@ btran mean={:8.3} p50={:8.3} p90={:8.3} us",
         on.lu.hyper_sparse_nodes() as f64 / on.lu.hyper_sparse_sweeps().max(1) as f64,
     );
 
+    // Third arm: the sparse-in / sparse-out entry point, which has no term
+    // proportional to `m` at all. Timed against the same probes and the same
+    // factor as the reach-limited dense arm, so the difference between them is
+    // exactly the `O(m)` marshalling the signature change removes.
+    let mut sp_ftran = 0u128;
+    let mut sp_btran = 0u128;
+    let mut sp_each: Vec<u128> = Vec::new();
+    let mut sp_work = 0usize;
+    let mut sp_worst = 0.0_f64;
+    let mut out: Vec<(usize, f64)> = Vec::new();
+    let mut dense_check = vec![0.0; m];
+    for _ in 0..reps {
+        for &k in probes.iter() {
+            let t = Instant::now();
+            on.lu
+                .ftran_sparse(&[(k, 1.0)], &mut out)
+                .expect("ftran_sparse");
+            let ns = t.elapsed().as_nanos();
+            sp_ftran += ns;
+            sp_each.push(ns);
+            sp_work += on.lu.last_sparse_solve_work();
+
+            // Correctness against the dense entry point on the same factor.
+            dense_check.fill(0.0);
+            dense_check[k] = 1.0;
+            off.lu.ftran(&mut dense_check[..]).expect("ftran");
+            let mut got = vec![0.0; m];
+            for &(i, v) in out.iter() {
+                got[i] = v;
+            }
+            sp_worst = sp_worst.max(
+                got.iter()
+                    .zip(dense_check.iter())
+                    .fold(0.0_f64, |a, (p, q)| a.max((p - q).abs())),
+            );
+
+            let t = Instant::now();
+            on.lu
+                .btran_sparse(&[(k, 1.0)], &mut out)
+                .expect("btran_sparse");
+            sp_btran += t.elapsed().as_nanos();
+        }
+    }
+    sp_each.sort_unstable();
+    println!(
+        "    sparse rhs/sol  ftran mean={:8.3} p50={:8.3} us | btran mean={:8.3} us  \
+(mean work={:.1} scalar ops)",
+        sp_ftran as f64 / 1000.0 / calls,
+        sp_each[sp_each.len() / 2] as f64 / 1000.0,
+        sp_btran as f64 / 1000.0 / calls,
+        sp_work as f64 / calls,
+    );
+    println!(
+        "    --> vs dense sweep: ftran {:.1}x  btran {:.1}x   |   vs reach-limited: \
+ftran {:.1}x  btran {:.1}x   (max |diff| = {:.3e})",
+        off.ftran_ns as f64 / sp_ftran.max(1) as f64,
+        off.btran_ns as f64 / sp_btran.max(1) as f64,
+        on.ftran_ns as f64 / sp_ftran.max(1) as f64,
+        on.btran_ns as f64 / sp_btran.max(1) as f64,
+        sp_worst,
+    );
+    if sp_worst > 1e-9 {
+        eprintln!("FAIL: the sparse entry point disagrees with the dense one by {sp_worst:e}");
+        std::process::exit(1);
+    }
+
     // Guard against a vacuous pass: a silent fallback would report ~1.00x and
     // look like an honest null result.
     if on.lu.hyper_sparse_sweeps() == 0 {

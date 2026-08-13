@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-13T15:26:45Z
+Generated: 2026-08-13T16:01:47Z
 
 ## Latest Session
 File: dev/sessions/2026-08-13-01.md
@@ -59,11 +59,11 @@ it moves the sparse-rhs case and leaves the dense-rhs case alone.
 
 ## Git Status
 ```
+06fd5ba feat(lu): reach-limited hyper-sparse triangular solves (#161B)
 0bc77b8 Merge pull request #159 from jkitchin/release/0.15.1
 5fa2c38 release: feral v0.15.1
 93abaa3 Merge pull request #157 from jkitchin/docs/session-2026-08-09-05
 5cc64a8 docs: session checkpoint 2026-08-10-02 (MC64 Hungarian bound + merge + CI)
-5a9150d Merge origin/main into docs/session-2026-08-09-05
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 410 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.84s
+test result: ok. 410 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.97s
 
 ```
 
@@ -179,6 +179,7 @@ src/lu/dense_update.rs
 src/lu/mod.rs
 src/lu/scaling.rs
 src/lu/sparse_factor.rs
+src/lu/sparse_hyper.rs
 src/lu/sparse_matrix.rs
 src/lu/sparse_solve.rs
 src/lu/sparse_symbolic.rs
@@ -261,6 +262,7 @@ tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
+tests/lu_sparse_rhs.rs
 tests/lu_update_alloc_probe.rs
 tests/lu_update_casctanks.rs
 tests/maxfromm_parity.rs
