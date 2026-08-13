@@ -462,3 +462,72 @@ reproduced in-tree**. It is the conservative direction — a smaller cap strictl
 reduces the population taking the new route — but until those two files are in
 the repository as fixtures, no in-tree test can catch a regression of this kind.
 Carrying them is the single highest-value follow-up in this note.
+
+
+---
+
+# Part 4: reproduced in-tree, and the stated mechanism was wrong
+
+The bases arrived. Both `.mtx` and `.npz` were checked to describe the same
+matrix (`max|npz − mtx| = 0.0`, dimensions and nnz as documented), and the two
+`.mtx` now live in `tests/data/lu_bases/`.
+
+## The cap finding reproduces exactly
+
+Re-running the sweep here, on a different machine:
+
+| cap | `ftran` | `btran` | fired |
+|---|---|---|---|
+| 0.02 | 7.68x | 0.96x | 1195 |
+| 0.05 | 7.44x | 0.97x | 1195 |
+| **0.10** | 7.18x | **0.96x** | 1195 |
+| 0.25 | 7.84x | **0.62x** | 2370 |
+| 0.50 | 7.50x | **0.62x** | 2370 |
+| 1.00 | 7.95x | **0.61x** | 2560 |
+
+The fired counts are identical to the maintainer's (1195 / 2370 / 2560) — they
+are deterministic. The solution-density profile matches to the digit (p50 = 1,
+p90 = 3593, max = 3621, mean = 580.4, 14.7% of `m`). The wall-clock ratios differ
+(this machine is slower on `ftran`, and the `btran` regression is *worse* here:
+0.62x, i.e. 1.6x) but the cliff is in the same place.
+
+## The mechanism I gave was wrong
+
+Both the PR and this note blamed the `O(r log r)` sort. That is not what costs.
+Sorting 400 / 1000 / 2000 positions measures **2.8 / 9.0 / 18.3 us**, against a
+regression of ~105 us per solve. The sort is at most a sixth of it.
+
+Instrumenting the reach to count graph edges walked, on QPLIB_1157 `btran`:
+
+| cap | fired | reach nodes/sweep | **DFS edges/sweep** | vs `nnz(L) = 75,084` |
+|---|---|---|---|---|
+| 0.10 | 21/256 | 2 | 3,662 | **5%** |
+| 0.25 | 256/256 | 584 | 68,925 | **92%** |
+
+**The reach DFS traverses the same factor entries the numeric sweep then
+traverses again.** At 0.25 it walks 92% of `nnz(L)` just to decide which columns
+to visit, and then visits them. The route pays ~1.9x to avoid 1x, which predicts
+~0.53x and measures 0.62x.
+
+That reframes the cap. It is not a workaround for an implementation detail that
+a cleverer sweep could remove — it is intrinsic to reach-based solving: finding
+the reach is the same order of work as the solve, so the route can only win when
+the reach is a small fraction of the whole. Replacing the sort would not have
+helped, and the "known limit" this note listed pointed at the wrong thing.
+
+Corrected in the parameter's doc comment, the changelog, the PR body, and above.
+
+## What is now guarded in-tree
+
+`tests/lu_real_bases.rs`:
+
+- `default_cap_excludes_the_band_where_btran_reaches_are_near_dense` — asserts on
+  *reach sizes*, which are deterministic, not on timings. Verified to fail with
+  the intended message when the default is put back to 0.25.
+- `sparse_entry_points_agree_with_dense_on_real_bases` — `ftran_sparse` /
+  `btran_sparse` over every column of both bases against the dense entry point.
+  This was the one piece neither party had run on real data.
+- `reach_route_is_bit_identical_to_the_dense_sweep_on_real_bases` — `assert_eq!`
+  on the `f64` vectors, not a tolerance.
+
+The standing gap from Part 3 is closed.

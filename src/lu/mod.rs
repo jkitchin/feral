@@ -199,10 +199,18 @@ pub struct LuParams {
     ///
     /// # Why the default is 0.10 and not higher
     ///
-    /// The reach-limited sweep sorts its reach, so it is `O(r log r)` where the
-    /// dense sweep is `O(r)`. For a small reach that overhead is irrelevant
-    /// against the `nnz(factor)` it avoids; for a reach that is a *sizeable
-    /// fraction* of `m` it is not, and the route loses.
+    /// **The reach DFS costs about what the sweep it replaces costs.** Walking
+    /// the graph to find the reach traverses the same factor entries the numeric
+    /// sweep then traverses again, so the route pays roughly twice to avoid
+    /// paying once. That is a fine trade when the reach is small and a losing
+    /// one when it is a sizeable fraction of `m`.
+    ///
+    /// Measured on QPLIB_1157 (`tests/data/lu_bases/`): at a cap of 0.25 the
+    /// `btran` reach walks **68,925 graph edges per sweep against
+    /// `nnz(L) = 75,084`** — 92% of what the dense `Lᵀ` sweep traverses — and
+    /// the numeric sweep then walks the reached columns on top of that. At 0.10
+    /// the same figure is 5%. (The `O(r log r)` sort is *not* the cost: sorting
+    /// even 2000 positions is ~18 us against a ~105 us per-solve regression.)
     ///
     /// Measured on the real QPLIB_1157 simplex basis (`m = 3937`, 7.46 nnz/col,
     /// fill 6.76x), sweeping only this cap:

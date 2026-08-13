@@ -535,15 +535,17 @@ fn reach_route_composes_with_the_dense_bump_route() {
 /// This PR originally shipped `0.25`, chosen from a sweep on the in-tree
 /// synthetic fixture where "the win is flat from 0.05 to 1.00". That was true
 /// for `ftran` and false for `btran`: on the real QPLIB_1157 basis, `0.25`
-/// admits `btran` reaches sitting between 10% and 25% of `m`, which the sorted
-/// sweep loses on — a **1.45x regression** for no `ftran` gain.
+/// admits `btran` reaches sitting between 10% and 25% of `m`, where the reach
+/// DFS walks 92% of `nnz(L)` just to decide which columns to visit and the
+/// numeric sweep then visits them — a **1.45x regression** for no `ftran`
+/// gain.
 ///
 /// The fixture could not show it. The effect only appears when a basis's
 /// solution-density profile straddles the cap, and `lp_basis()` produces
 /// solutions that are either tiny or nearly `m`, never in that band. So this
-/// test cannot re-derive the right value either — it just pins it, so that
-/// raising it again is a deliberate act that has to come with evidence from a
-/// basis whose solutions live in the admitted band and *win* there.
+/// test cannot re-derive the right value either — it just pins it. The real
+/// guard is `tests/lu_real_bases.rs`, which measures reach sizes on the actual
+/// QPLIB bases and is verified to fail if this value goes back to 0.25.
 #[test]
 fn default_density_cap_is_pinned_to_the_measured_value() {
     let d = LuParams::default().hyper_sparse_max_density;

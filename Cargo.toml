@@ -121,6 +121,9 @@ name = "ft_dense_bump"
 name = "hyper_sparse_solve"
 
 [[example]]
+name = "real_basis_hyper"
+
+[[example]]
 name = "bench_dense_front"
 
 [[example]]

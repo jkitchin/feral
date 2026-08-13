@@ -158,10 +158,14 @@ All notable changes to FERAL will be documented in this file.
 - **The default is 0.10 because 0.25 was measured wrong.** A sweep on the
   in-tree synthetic fixture said the win was flat from 0.05 to 1.00 — true for
   `ftran`, false for `btran`. On the real QPLIB_1157 basis a cap of 0.25 admits
-  `btran` reaches sitting between 10% and 25% of `m`, which the sorted sweep
-  loses on: **0.69x, a 1.45x regression**, for no `ftran` gain (11.01x at 0.25
-  vs 10.81x at 0.10). The effect is invisible unless a basis's solution-density
-  profile straddles the cap, which the generator's does not.
+  `btran` reaches sitting between 10% and 25% of `m`, which the route loses on:
+  **0.69x, a 1.45x regression**, for no `ftran` gain (11.01x at 0.25 vs 10.81x
+  at 0.10). The mechanism is that the reach DFS traverses the same factor
+  entries the numeric sweep then traverses again — at 0.25 it walks 92% of
+  `nnz(L)` per `btran` sweep, so the route pays ~1.9x to avoid 1x. The effect is
+  invisible unless a basis's solution-density profile straddles the cap, which
+  the synthetic generator's does not; both bases are now carried in
+  `tests/data/lu_bases/` with a deterministic regression guard.
 - Measured (interleaved A/B on one basis, `m = 4000`, fill 4.05x, unit-vector
   right-hand sides): **ftran 1.95x mean / 2.56x median, btran 1.72x mean / 2.15x
   median**, with the two routes agreeing bit for bit. A dense right-hand side —

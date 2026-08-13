@@ -452,3 +452,71 @@ via the git proxy). They are not:
 
 Recorded as the top follow-up: until those two files are in-tree as fixtures, no
 test here can catch a cap regression of the kind just found.
+
+* 23:05 :issue161:pr162:fixtures:reproduced:
+The zip arrived. Verified both formats describe the same matrices
+(max|npz - mtx| = 0.0, dims and nnz as documented), wired up
+=real_basis_hyper.rs= + Cargo stanza, and reproduced the maintainer's sweep on
+this machine:
+
+  cap    ftran   btran   fired
+  0.02   7.68    0.96    1195
+  0.05   7.44    0.97    1195
+  0.10   7.18    0.96    1195
+  0.25   7.84    0.62    2370
+  0.50   7.50    0.62    2370
+  1.00   7.95    0.61    2560
+
+Fired counts identical to his (deterministic). Solution-density profile matches
+to the digit: p50=1 p90=3593 max=3621 mean=580.4 = 14.7% of m. Wall-clock ratios
+differ (this box is slower on ftran; the btran regression is *worse* here, 0.62x
+= 1.6x) but the cliff is in the same place. The 0.10 default is confirmed.
+
+* 23:20 :issue161:mechanism:wrong:
+*The mechanism I gave for the regression was wrong, in my PR and in the research
+note.* Both blamed the O(r log r) sort.
+
+Sorting 400/1000/2000 usizes measures 2.8/9.0/18.3 us. The regression is ~105 us
+per solve. The sort is at most a sixth of it.
+
+Instrumented the reach to count graph edges walked (temporary; reverted).
+QPLIB_1157 btran:
+
+  cap    fired     nodes/sweep   DFS edges/sweep   vs nnz(L)=75084
+  0.10   21/256    2             3662              5%
+  0.25   256/256   584           68925             92%
+
+*The reach DFS traverses the same factor entries the numeric sweep then
+traverses again.* At 0.25 it walks 92% of nnz(L) just to decide which columns to
+visit, then visits them. ~1.9x to avoid 1x, predicting ~0.53x against a measured
+0.62x.
+
+This reframes the cap and I had it backwards. It is not a workaround for an
+implementation detail a cleverer sweep could remove — it is intrinsic to
+reach-based solving: *finding* the reach is the same order of work as the solve,
+so the route can only win when the reach is a small fraction of the whole.
+Replacing the sort would not have helped, and the "known limit" I listed pointed
+at the wrong thing. Corrected in the param doc, CHANGELOG, PR body, research
+note, and the pinning test's comment.
+
+Worth keeping: I had a plausible mechanism, it was in my own "known limits"
+list, and it was wrong. Cost 20 minutes to actually measure and it changed the
+conclusion from "a lower cap is a workaround" to "a lower cap is the design".
+
+* 23:35 :issue161:tests:closed:
+=tests/lu_real_bases.rs= (3 tests), fixtures in =tests/data/lu_bases/= (496K,
+two .mtx; the .npz omitted as verified-identical and unreadable from Rust):
+
+- =default_cap_excludes_the_band_where_btran_reaches_are_near_dense= — asserts
+  on *reach sizes*, deterministic, not timings. Reference caps 0.02/0.25 are
+  fixed rather than derived from the default, so raising the default fails the
+  assertion about the default and not the fixture-sanity one. *Verified it fails
+  with the intended message* when the default is put back to 0.25.
+- =sparse_entry_points_agree_with_dense_on_real_bases= — ftran_sparse /
+  btran_sparse over *every* column of both bases against the dense oracle. This
+  was the one piece neither of us had run on real data. Passes.
+- =reach_route_is_bit_identical_to_the_dense_sweep_on_real_bases= —
+  =assert_eq!= on the f64 vectors, not a tolerance. Passes.
+
+Suite 844 tests / 89 binaries / 0 failures. The standing "no real bases in-tree"
+gap is closed.

@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-13T17:53:15Z
+Generated: 2026-08-13T18:09:12Z
 
 ## Latest Session
 File: dev/sessions/2026-08-13-02.md
@@ -59,11 +59,11 @@ it moves the sparse-rhs case and leaves the dense-rhs case alone.
 
 ## Git Status
 ```
+5c1d537 fix(lu): default hyper_sparse_max_density 0.25 -> 0.10 (btran regression)
 bd8a0f7 docs(lu): sparse_hyper module doc named a test that does not exist
 6682f48 fix(lu,python): clippy 1.97 lint and scipy index-order assumption
 c546165 fix(bench,docs): sample stddev in basis_refactor; swapped LU doc comments
 d3f110b Merge origin/main (PR #160, issue #161 part A) into the part-B branch
-10476c0 docs: renumber this session to 2026-08-13-02
 ```
 
 ## Test Status
@@ -262,6 +262,7 @@ tests/lu_dense_bump.rs
 tests/lu_dense_update_bg.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
+tests/lu_real_bases.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
 tests/lu_sparse_rhs.rs
