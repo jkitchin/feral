@@ -520,3 +520,62 @@ two .mtx; the .npz omitted as verified-identical and unreadable from Rust):
 
 Suite 844 tests / 89 binaries / 0 failures. The standing "no real bases in-tree"
 gap is closed.
+
+* 23:55 :issue161:ordering:fill:finding:
+With the real bases in-tree, the reframed issue #161 question ("is the fill
+itself the cost, i.e. a pivot-ordering question?") is answerable. Wrote
+=examples/lu_fill_orderings.rs= — holds basis, pivot rule and kernel fixed,
+varies only the column permutation via =with_order= (which reports whole-basis
+bump, so the dense route cannot fire on any ordering arm).
+
+QPLIB_1157 (m=3937, 7.46/col):
+
+  ordering        nnz(LU)     fill   numeric(ms)   ns/factor-nnz
+  natural          913860    31.11x      630.21       689.6
+  AMD              190654     6.49x       74.82       392.4
+  AMF              150001     5.11x       35.70       238.0
+  METIS            195068     6.64x       83.33       427.2
+  peel+sparse      197937     6.74x       90.81       458.8
+  peel+denseBump   198702     6.76x       20.23       101.8
+
+*Two findings, independent.*
+
+1. *AMF beats AMD by 21% fill and 2.10x time* on this basis. feral ships AMF
+   (crates/feral-amf, used by the LDLT side as OrderingMethod::Amf); the LU
+   symbolic hardcodes =feral_amd::amd_order=. Costs no more to compute
+   (21.16 vs 21.32 ms). METIS is slightly worse than AMD.
+
+2. *The kernel matters more than the fill.* At essentially identical fill
+   (197,937 vs 198,702) the dense-bump route is 4.5x faster than the sparse
+   scatter — 101.8 vs 458.8 ns per factor-nnz. Same arithmetic, different
+   kernel.
+
+My first read was wrong and worth recording: =basis_refactor= alone compares
+AMD(full) vs AMD(bump), a 4% fill spread, and I nearly concluded "ordering is
+not the lever". Adding AMF to the comparison inverted that. Comparing a method
+only against itself is the same error as the blended ftran/btran sweep earlier
+today — twice in one session.
+
+* 00:10 :issue161:ordering:compound:
+Patched the bump ordering to AMF behind an env var (temporary, reverted) and
+re-ran the three-arm A/B:
+
+  arm                     AMD                    AMF
+  whole-basis, sparse     101.40 ms / 190,654    59.43 ms / 150,001
+  peel + sparse bump       97.45 ms / 197,937    54.36 ms / 165,559
+  peel + dense bump        23.72 ms / 198,702    21.97 ms / 167,682
+
+Both levers are already implemented in this repo and both are off:
+
+  dense_bump_max_dim > 0    4.28x   merged in #160, defaults to 0
+  AMD -> AMF for LU         1.79x   not wired up at all
+
+Today's shipped default costs 97.45 ms; both levers together, 21.97 ms = *4.44x*
+on numeric factorization, which is >=41% of that LP's wall.
+
+Deliberately did NOT change either default. Two bases is not a panel, and the
+maintainer has already measured dense_bump_max_dim=4096 regressing QPLIB_2017 to
+0.80x — exactly the instance-dependence that makes a two-point sample useless
+for a default. Written up in
+=dev/research/lu-ordering-and-kernel-2026-08-13.md= with what it does and does
+not establish.

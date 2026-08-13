@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-13T18:09:12Z
+Generated: 2026-08-13T18:28:58Z
 
 ## Latest Session
 File: dev/sessions/2026-08-13-02.md
@@ -59,11 +59,11 @@ it moves the sparse-rhs case and leaves the dense-rhs case alone.
 
 ## Git Status
 ```
+f008f5f test(lu): carry the real QPLIB bases; the cap mechanism was not the sort
 5c1d537 fix(lu): default hyper_sparse_max_density 0.25 -> 0.10 (btran regression)
 bd8a0f7 docs(lu): sparse_hyper module doc named a test that does not exist
 6682f48 fix(lu,python): clippy 1.97 lint and scipy index-order assumption
 c546165 fix(bench,docs): sample stddev in basis_refactor; swapped LU doc comments
-d3f110b Merge origin/main (PR #160, issue #161 part A) into the part-B branch
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 420 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.08s
+test result: ok. 420 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.02s
 
 ```
 
