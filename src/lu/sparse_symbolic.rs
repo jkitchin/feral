@@ -13,8 +13,11 @@
 //!   85–100% peelable), and the peel leaves the bump *contiguous*, which is what
 //!   [`super::LuParams::dense_bump_max_dim`] needs.
 //!
-//! The peel was briefly the default and was reverted to opt-in by issue #163;
-//! see [`SparseLuSymbolic::analyze`] for the evidence and the reasoning.
+//! The peel was briefly the default and was reverted to opt-in by issue #163.
+//! It is the **faster** of the two — 4.2–9.8x on this step, which a simplex pays
+//! on every refactorization — and also a rounding-trajectory change that cost one
+//! ill-conditioned LP its dual bound. Neither ordering dominates; see
+//! [`SparseLuSymbolic::analyze`] for the measurements on both sides.
 //!
 //! The resulting permutation is the reusable symbolic handle: across numerically
 //! different but structurally identical bases, only the numeric factor is
@@ -84,38 +87,72 @@ impl SparseLuSymbolic {
     /// sequences, and this LP is conditioned badly enough that one path
     /// certifies and the other trips the caller's numerical guard.
     ///
-    /// So the argument for reverting is not stability, it is that the peel was
-    /// **a trajectory-perturbing change with no standalone payoff**. On a real
-    /// simplex basis it is *slower to no purpose*: QPLIB_1157 gives 190,654
-    /// nonzeros and 101.40 ms whole-basis against 197,937 and 97.45 ms peeled —
-    /// more fill, 1.04x on time, which is not a result worth perturbing a
-    /// downstream solver's arithmetic for. The peel's real payoff is that it
-    /// makes the bump contiguous, so [`LuParams::dense_bump_max_dim`] can route
-    /// it to the dense kernel, and that *is* worth 4.28x. Pair the two, or
-    /// take neither.
+    /// # What this default costs, and why it is still the default
     ///
-    /// A caveat this does not cover: nothing here says whole-basis AMD is the
-    /// better trajectory in general. It is the one that was in place when the
-    /// downstream regression was green, and the peel bought nothing to justify
-    /// leaving it.
+    /// **This ordering is substantially slower than the peel, and the cost is
+    /// paid on every refactorization.** A simplex re-runs `analyze` each time it
+    /// refactorizes, so the symbolic cost is multiplied by the refactorization
+    /// count rather than amortized across it. On the in-tree fixtures
+    /// (`tests/data/lu_bases`, 20 reps, release, `examples/basis_refactor.rs`):
+    ///
+    /// | basis | `analyze` | `analyze_triangularized` | symbolic | total |
+    /// |---|---|---|---|---|
+    /// | QPLIB_1157 (m=3937) | 21.28 ms | 2.17 ms | **9.8x** | 1.03x |
+    /// | QPLIB_3852 (m=1760) | 0.86 ms | 0.13 ms | **6.6x** | 2.73x |
+    /// | bchoco06 (m=833) | 0.54 ms | 0.13 ms | **4.2x** | 2.26x |
+    ///
+    /// Measured end to end by the maintainer across 14 QPLIB relaxations under a
+    /// dual simplex, switching only the constructor is **1.306x geomean** (max
+    /// 1.674x) — the largest single effect on the PR that made this change.
+    ///
+    /// **An earlier version of this comment claimed the peel had "no standalone
+    /// payoff", from the numeric-factorization column alone (97.45 vs 101.40 ms
+    /// on QPLIB_1157). That was wrong**: it ignored the symbolic column, where
+    /// the peel wins by 4–10x, and generalized a 1.03x total from the one
+    /// fixture where the peel's total advantage is smallest. The evidence was
+    /// already in this repository — `CHANGELOG.md` records #160 cutting the
+    /// ordering from 9.837 ms to 0.851 ms on a real basis.
+    ///
+    /// So this is a **genuine tradeoff, not a free revert**, and the peel is
+    /// opt-in because the caller has to make it — not because it costs nothing
+    /// to give up. Against the speedup: the peel is a different rounding
+    /// trajectory, it lost an ill-conditioned LP its dual bound (above), and on
+    /// QPLIB_2055 it is **0.389x** — a 2.6x *slowdown* — with the objective
+    /// moving in the 9th significant figure, so it changed that pivot path too.
+    /// Whole-basis AMD is the default because it is the trajectory that was in
+    /// place when the downstream suite was green, not because it is faster or
+    /// more accurate. It is neither, reliably.
+    ///
+    /// Take [`Self::analyze_triangularized`] if you can afford to qualify your
+    /// own instances against it — and take it together with
+    /// [`LuParams::dense_bump_max_dim`], which needs it and is worth a further
+    /// 4.28x on the numeric side.
     pub fn analyze(a: &SparseColMatrix) -> Result<Self, FeralError> {
         Self::analyze_amd_only(a)
     }
 
     /// Triangularize (Suhl–Suhl peel), then order the residual bump with AMD.
     ///
-    /// This is the ordering [`LuParams::dense_bump_max_dim`] requires: it makes
-    /// the bump a contiguous block that the dense kernel can be handed. Pair
-    /// the two, or neither — on its own the peel is roughly break-even on speed
-    /// and slightly worse on fill.
+    /// **Usually much faster than [`Self::analyze`]**, because AMD is
+    /// superlinear in the matrix it is handed and this hands it only the bump:
+    /// 4.2–9.8x on the symbolic step across the in-tree fixtures, 1.03–2.73x on
+    /// symbolic + numeric together, and 1.306x geomean end to end across 14
+    /// QPLIB relaxations under a dual simplex. A simplex pays the symbolic cost
+    /// on every refactorization, so that is not amortized away. See
+    /// [`Self::analyze`] for the table.
     ///
-    /// **Caveat, and the reason this is not the default.** This is a different
-    /// ordering, so it is a different rounding trajectory. Measured, it is not a
-    /// *worse* one — see [`Self::analyze`] — but on an ill-conditioned LP the
-    /// difference was enough to change which pivots a downstream simplex chose,
-    /// and it lost that solve's dual bound (issue #163). Switch to it together
-    /// with [`LuParams::dense_bump_max_dim`], where the 4.28x pays for the
-    /// change; prefer [`Self::analyze`] otherwise.
+    /// It is also the ordering [`LuParams::dense_bump_max_dim`] requires: it
+    /// makes the bump a contiguous block the dense kernel can be handed, worth a
+    /// further 4.28x on the numeric side. Take both.
+    ///
+    /// **Why it is nonetheless not the default.** It is a different rounding
+    /// trajectory, and that is not free even though it is not less *accurate*
+    /// (see [`Self::analyze`] for the error measurements). On an ill-conditioned
+    /// LP it changed a downstream simplex's pivot choices and lost that solve's
+    /// dual bound (issue #163), and on QPLIB_2055 it is **0.389x** — a 2.6x
+    /// slowdown — because the path it took was longer. Use it when you can
+    /// qualify your own instances against it; that is a real prerequisite, not
+    /// boilerplate.
     pub fn analyze_triangularized(a: &SparseColMatrix) -> Result<Self, FeralError> {
         let m = a.m;
         if m == 0 {

@@ -146,11 +146,13 @@ pub struct LuParams {
     /// because they never looked for structure, so setting this cap alongside
     /// any of them is a no-op however large it is.
     ///
-    /// Opting into the peel changes the rounding trajectory, not just the speed.
-    /// It is not measurably *less* accurate — see [`SparseLuSymbolic::analyze`]
-    /// for the numbers — but on an ill-conditioned LP the difference was enough
-    /// to change a downstream simplex's pivot choices and lose it a dual bound
-    /// (issue #163). Take the pair when the 4.28x is what you are buying.
+    /// Opting into the peel is worth having on its own — it is 4.2–9.8x on the
+    /// symbolic step, which a simplex pays on every refactorization — but it
+    /// also changes the rounding trajectory, and that is not free: see
+    /// [`SparseLuSymbolic::analyze`] for both halves, including the
+    /// ill-conditioned LP where it cost a downstream simplex its dual bound
+    /// (issue #163) and the instance where it is a 2.6x slowdown. This cap is
+    /// the other 4.28x, on the numeric side, and it needs the peel to fire.
     ///
     /// When `analyze_triangularized` peels nothing and the bump *is* the whole
     /// basis, this cap does not apply either — such a basis is bounded by

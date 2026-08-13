@@ -330,11 +330,13 @@ impl LuFactor {
     /// The cap is a memory bound: the route packs a `dim²` f64 buffer.
     ///
     /// Setting it above 0 also switches the column ordering from whole-basis
-    /// AMD to a Suhl–Suhl peel plus AMD over the bump, because the route needs
-    /// the contiguous bump the peel produces. That peel decides some pivots
-    /// structurally rather than by magnitude, which on an ill-conditioned basis
-    /// can cost the factorization (issue #163) — so leave this at 0 unless the
-    /// bases are well-conditioned enough that the speedup is worth it.
+    /// AMD to a Suhl-Suhl peel plus AMD over the bump, because the route needs
+    /// the contiguous bump the peel produces. That is a second speedup in its
+    /// own right — the peel is 4.2-9.8x on the symbolic analysis, which a
+    /// simplex pays on every refactorization — but it is also a different
+    /// rounding trajectory, which on an ill-conditioned LP cost a downstream
+    /// simplex its dual bound (issue #163) and on one QPLIB instance is a 2.6x
+    /// slowdown. Neither setting dominates; measure on your own matrices.
     #[new]
     #[pyo3(signature = (
         matrix,

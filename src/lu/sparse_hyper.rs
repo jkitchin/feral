@@ -153,11 +153,44 @@ impl SparseLu {
     /// Errors with [`FeralError::DimensionMismatch`] on an out-of-range index
     /// and [`FeralError::SingularBasis`] on a degenerate `U` diagonal that the
     /// solution depends on — the same narrowed guard the reach-limited dense
-    /// route uses, documented in `dev/decisions.md` (2026-08-13).
+    /// route uses, documented in `dev/decisions.md` (2026-08-13). Its `column`
+    /// is the **original basis column**, matching the factor path, not the
+    /// internal pivot position.
     ///
-    /// When the solution is *dense* this is slower than [`SparseLu::ftran`]:
-    /// it sorts a length-`m` reach where the dense sweep just walks the factor
-    /// in order. Route on what the caller knows about its right-hand sides.
+    /// # This is not bit-identical to [`SparseLu::ftran`]
+    ///
+    /// It sums the same terms in a different order, so results agree to
+    /// rounding (the in-tree differential tests use `< 1e-9`) rather than
+    /// exactly — unlike the reach-limited route behind the dense entry points,
+    /// which *is* pinned with `assert_eq!` on real bases. Migrating a solver
+    /// from `ftran` to `ftran_sparse` is therefore a rounding-trajectory change,
+    /// and on an ill-conditioned problem that is not free: issue #163 is a case
+    /// where a change of that kind cost a downstream simplex its dual bound. If
+    /// you need the speedup without the trajectory change, the dense entry
+    /// points already carry the reach-limited route.
+    ///
+    /// # There is no density guard — route deliberately
+    ///
+    /// When the solution is *dense* this is slower than [`SparseLu::ftran`]: it
+    /// sorts a length-`m` reach where the dense sweep just walks the factor in
+    /// order. Nothing here falls back;
+    /// [`LuParams::hyper_sparse_max_density`](super::LuParams::hyper_sparse_max_density)
+    /// governs only the dense entry points' route.
+    ///
+    /// Measured across 14 QPLIB relaxations driven by a dual simplex, against
+    /// the dense entry points, by mean density of the solution:
+    ///
+    /// | solution density | speedup (geomean) |
+    /// |---|---|
+    /// | under 10% | **1.167x** (n = 10, best 1.359x) |
+    /// | 10% and over | **0.837x** (n = 4, worst 0.711x) |
+    ///
+    /// log-log `r(density, speedup) = -0.944`. **Route on what the caller knows
+    /// about its right-hand sides** — and note that a dual simplex does *not*
+    /// know: the density of `B⁻¹A_q` is not available until the solve that
+    /// produces it has run. For that caller the honest answer today is to
+    /// measure on its own instances. Adding an internal fallback at the cap is
+    /// tracked as a follow-up; it would recover roughly half the gap.
     pub fn ftran_sparse(
         &mut self,
         rhs: &[(usize, f64)],
@@ -386,9 +419,13 @@ impl SparseLu {
         let HyperWork { w, order, work, .. } = hw;
         for &k in order.iter() {
             let row = &self.u_rows[k];
-            let &(dc, d) = row.first().ok_or(FeralError::SingularBasis { column: k })?;
+            let &(dc, d) = row.first().ok_or(FeralError::SingularBasis {
+                column: self.qcol[k],
+            })?;
             if dc != k || d == 0.0 || !d.is_finite() {
-                return Err(FeralError::SingularBasis { column: k });
+                return Err(FeralError::SingularBasis {
+                    column: self.qcol[k],
+                });
             }
             *work += row.len();
             let mut acc = w[k];
@@ -417,9 +454,13 @@ impl SparseLu {
         let HyperWork { w, order, work, .. } = hw;
         for &i in order.iter() {
             let row = &self.u_rows[i];
-            let &(dc, d) = row.first().ok_or(FeralError::SingularBasis { column: i })?;
+            let &(dc, d) = row.first().ok_or(FeralError::SingularBasis {
+                column: self.qcol[i],
+            })?;
             if dc != i || d == 0.0 || !d.is_finite() {
-                return Err(FeralError::SingularBasis { column: i });
+                return Err(FeralError::SingularBasis {
+                    column: self.qcol[i],
+                });
             }
             let si = w[i] / d;
             w[i] = si;

@@ -703,3 +703,67 @@ established as the better trajectory, only as the one that was green.
 
 Trees restored to committed state (feral and the discopt scratch clone both
 =git status= clean) — the params change was never committed.
+
+* 22:10 :review:issue162:correction:measurement:
+Maintainer review of #162 landed at 895ef65. Verdict approve+merge, five findings.
+Finding 4 is a straight refutation of my central #163 claim and I verified it
+before writing anything.
+
+Ran =examples/basis_refactor.rs= (in this repo, used earlier today) on all three
+in-tree fixtures, 20 reps, release:
+
+  basis         analyze    peel     symbolic  total
+  QPLIB_1157    21.280 ms  2.166 ms  9.83x    1.03x
+  QPLIB_3852     0.857 ms  0.130 ms  6.61x    2.73x
+  bchoco06       0.536 ms  0.127 ms  4.22x    2.26x
+
+Their ratios reproduce (they report 12.4/6.6/4.3). *The peel is 4-10x faster on
+symbolic analysis*, and =analyze= re-runs on every refactorization so it is
+multiplied, not amortized. End-to-end across 14 QPLIB relaxations they measure
+=tri= at 1.306x geomean — the largest single effect on this branch.
+
+My claim "the peel has no standalone payoff" is wrong. Two compounding errors:
+measured only the numeric column (=lu_fill_orderings= does not time symbolic),
+then generalized 1.03x from the one fixture where the peel's total edge is
+smallest, while the other two give 2.73x and 2.26x.
+
+The disconfirming evidence was *in CHANGELOG.md, in the #160 entry I edited this
+session*: "cutting the ordering from 9.837 +- 0.295 ms to 0.851 +- 0.037 ms".
+Fourth instance today of asserting a mechanism/magnitude that fits without
+testing it, and the worst — I was writing to the file that refuted me.
+
+Decision survives on a weaker argument: neither ordering dominates. For the peel,
+the speedups above; against it, #163's lost dual bound and QPLIB_2055 at 0.389x
+(2.6x slowdown, objective moving in the 9th sig fig). =analyze= stays AMD because
+that is the trajectory the downstream suite was green against — not because it is
+better. Corrected rustdoc (analyze, analyze_triangularized, dense_bump_max_dim,
+module header, python), CHANGELOG, research note, and appended a correcting entry
+to decisions.md (append-only, so not an edit).
+
+* 22:25 :review:issue162:finding3:
+Finding 3 fixed: =SingularBasis { column }= from the solve path reported the
+internal pivot position where the factor path reports =qcol[k]= (fixed there in
+a91519d). Mapped all four sites — =usolve=, =ut_solve= in sparse_solve.rs and the
+two in sparse_hyper.rs.
+
+The existing L10 tests are 2x2 with an identity ordering, so they could not see
+it. New test uses a 6x6 whose AMD gives qcol=[5,4,0,1,2,3] — every position maps
+elsewhere — asserts its own non-vacuity (=assert_ne!(want, pos)=), and covers all
+four entry points. Verified it fails without the fix:
+
+  ftran must name original column 4, got Err(SingularBasis { column: 1 })
+
+* 22:35 :review:issue162:finding1:finding2:scope:
+Finding 2 (sparse API not bit-identical to the dense entry points, undocumented):
+added, with the #163 trajectory risk named explicitly, since that is the concrete
+version of the hazard.
+
+Finding 1 (no density guard on =ftran_sparse=/=btran_sparse=): *not implemented
+here.* Their data is decisive — under 10% solution density 1.167x geomean (n=10),
+at/above 10% 0.837x (n=4, worst 0.711x), log-log r = -0.944 — and the guard would
+recover about half the gap. But it changes documented semantics of the new API
+("works regardless of =hyper_sparse_max_density=") and the test that pins that,
+they explicitly scoped it as follow-up-issue-worthy, and the maintainer is away.
+Put the full table in the =ftran_sparse= rustdoc instead, including the point that
+a dual simplex *cannot* route on density because =B^-1 A_q='s density is not known
+until the solve produces it. Filed as an issue.

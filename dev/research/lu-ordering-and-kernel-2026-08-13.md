@@ -268,3 +268,86 @@ cargo run --release --example probe_illcond_ordering -- <dir>
 The worst basis of that set is carried in-tree as
 `tests/data/lu_bases/bchoco06_illcond_basis.mtx`, so the scorer runs on
 `tests/data/lu_bases` with no discopt checkout at all.
+
+---
+
+# Correction: the peel's payoff is in the *symbolic* step, which I never measured
+
+Date: 2026-08-13, after the maintainer's review of PR #162.
+
+Everything above about the peel's cost-benefit is wrong in one specific,
+consequential way, and the corrected numbers change the argument (though not the
+decision).
+
+## What I measured, and what I should have
+
+The whole "Result: QPLIB_1157" table at the top of this note is **numeric
+factorization only**. `examples/lu_fill_orderings.rs` times `SparseLu::factor` and
+reports ns per factor-nonzero; the symbolic step is not in it. I then wrote "the
+peel is roughly break-even on speed" and later "no standalone payoff" from that
+column alone.
+
+`examples/basis_refactor.rs` — in this repository, and used earlier in the same
+session — times *both* phases separately. Running it on all three in-tree fixtures
+(20 reps, release):
+
+| basis | m | nnz | symbolic `analyze` | symbolic peel | ratio | total ratio |
+|---|---|---|---|---|---|---|
+| QPLIB_1157 | 3937 | 29376 | 21.280 ± 0.895 ms | 2.166 ± 0.176 ms | **9.83x** | 1.03x |
+| QPLIB_3852 | 1760 | 4003 | 0.857 ± 0.083 ms | 0.130 ± 0.018 ms | **6.61x** | **2.73x** |
+| bchoco06 | 833 | 2404 | 0.536 ± 0.044 ms | 0.127 ± 0.014 ms | **4.22x** | **2.26x** |
+
+This is not subtle and it is not new information. `CHANGELOG.md`'s #160 entry —
+which I edited in this session — already said the peel cuts the ordering "from
+9.837 ± 0.295 ms to 0.851 ± 0.037 ms". That is the same 9.8x.
+
+## Why it matters more than the numeric column
+
+`analyze` is re-run on **every refactorization**, so its cost multiplies by the
+refactorization count instead of amortizing. The maintainer's end-to-end run, 14
+QPLIB relaxations, four arms in one binary:
+
+| arm | geomean | median | max |
+|---|---|---|---|
+| `api` (sparse-rhs entry points) | 1.067x | 1.090x | 1.363x |
+| `tri` (constructor switch only) | **1.306x** | 1.469x | 1.674x |
+| `all` | **1.497x** | 1.729x | 2.584x |
+
+On QPLIB_3775: `LuSymbolic` 1048.5 ms across 64 factorizations against
+`LuNumeric` 184.6 ms — 5.7x the numeric factorization spent choosing a column
+order, 64 times over.
+
+## Two compounding errors, and the pattern
+
+1. **Measured one phase and reported it as the total.** The harness that reports
+   both was already written and already used.
+2. **Generalized from the fixture with the smallest effect.** QPLIB_1157's total
+   ratio is 1.03x; I quoted it as "1.04x" and stopped. The other two fixtures are
+   2.73x and 2.26x and were sitting in the same directory.
+
+That is the fourth instance of the same failure mode in one session — asserting a
+mechanism or a magnitude that fits the observation without testing it — and the
+worst of the four, because the disconfirming evidence was in a file I was editing.
+
+## The decision survives, on a different argument
+
+Not "the peel is free to give up" — it is not — but "neither ordering dominates,
+so the caller must choose". Against the speedup:
+
+- issue #163: the peel is a different rounding trajectory and it cost an
+  ill-conditioned LP its dual bound;
+- QPLIB_2055 under `tri` is **0.389x**, a 2.6x slowdown, objective moving in the
+  9th significant figure — a longer pivot path, not a slower kernel.
+
+`analyze` stays whole-basis AMD because it is the trajectory the downstream suite
+was green against. The rustdoc now states the cost of that choice next to the
+accuracy argument, in both directions, which is what the review asked for.
+
+## Still open
+
+- Make the ordering a parameter with a documented default rather than two
+  separately named constructors, so it is A/B-able without a code change. Filed
+  as a follow-up; it is an API-shape call.
+- QPLIB_3225 solves under `main` but fails under the #162 branch in all three
+  solve arms, which points at the #163 ordering revert. Not isolated under a
+  controlled arm=main/arm=branch rerun. Filed.

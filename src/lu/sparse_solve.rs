@@ -374,6 +374,12 @@ impl SparseLu {
     /// invariant (L10): without it, a violated invariant would make release-mode
     /// solves silently take an off-diagonal as the pivot.
     ///
+    /// `column` is the **original basis column** `qcol[k]`, not the pivot
+    /// position `k`. Those are the same number only when the fill-reducing
+    /// ordering happens to be the identity, so a caller that reported `k` would
+    /// name an unrelated column on any real basis. This matches the factor path
+    /// (`sparse_factor.rs`), which was corrected the same way in a91519d.
+    ///
     /// Takes the reach-limited route when [`LuParams::hyper_sparse_max_density`]
     /// admits it (issue #161B). On that route the diagonal guard is evaluated on
     /// the rows the solution depends on rather than on all `m`; see
@@ -414,9 +420,13 @@ impl SparseLu {
     ) -> Result<(), FeralError> {
         for k in order {
             let row = &self.u_rows[k];
-            let &(dc, d) = row.first().ok_or(FeralError::SingularBasis { column: k })?;
+            let &(dc, d) = row.first().ok_or(FeralError::SingularBasis {
+                column: self.qcol[k],
+            })?;
             if dc != k || d == 0.0 || !d.is_finite() {
-                return Err(FeralError::SingularBasis { column: k });
+                return Err(FeralError::SingularBasis {
+                    column: self.qcol[k],
+                });
             }
             let mut acc = s[k];
             for &(c, v) in row[1..].iter() {
@@ -482,9 +492,13 @@ impl SparseLu {
                 continue;
             }
             let row = &self.u_rows[i];
-            let &(dc, d) = row.first().ok_or(FeralError::SingularBasis { column: i })?;
+            let &(dc, d) = row.first().ok_or(FeralError::SingularBasis {
+                column: self.qcol[i],
+            })?;
             if dc != i || d == 0.0 || !d.is_finite() {
-                return Err(FeralError::SingularBasis { column: i });
+                return Err(FeralError::SingularBasis {
+                    column: self.qcol[i],
+                });
             }
             let si = s[i] / d;
             s[i] = si;
@@ -624,7 +638,7 @@ fn inf_norm(v: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lu::{LuParams, LuScaling};
+    use crate::lu::{LuParams, LuScaling, SparseLuSymbolic};
 
     /// L3 (dev/research/repo-review-2026-06-09.md): the sparse twin of the dense
     /// pooling guard. With scaling enabled the `ftran`/`btran` wrappers and the
@@ -874,6 +888,86 @@ mod tests {
         };
         assert!(SparseLu::factor(&a, &symbolic, ok.clone()).is_ok());
         assert!(DenseLu::factor(&cols, 2, ok).is_ok());
+    }
+
+    /// PR #162 review, finding 3: the solve path reported the internal pivot
+    /// position in `SingularBasis { column }` where the factor path reports the
+    /// original basis column (fixed there in a91519d). The two agree only when
+    /// the fill-reducing ordering is the identity — which is exactly why the
+    /// 2x2 L10 tests below could not catch it, and why this one uses a basis
+    /// whose `qcol` maps *every* position to a different column.
+    ///
+    /// Covers all four entry points, because `ftran_sparse`/`btran_sparse` are
+    /// new public API that inherited the defect from the dense kernels.
+    #[test]
+    fn solve_path_singular_basis_names_the_original_column_not_the_pivot_position() {
+        // Diagonal with two dense columns; AMD reorders it.
+        let m = 6;
+        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+        for (j, col) in cols.iter_mut().enumerate() {
+            col.push((j, 4.0 + j as f64));
+        }
+        for i in 0..m {
+            if i != 2 {
+                cols[2].push((i, 0.7));
+            }
+            if i != 3 {
+                cols[3].push((i, 0.6));
+            }
+        }
+        for c in cols.iter_mut() {
+            c.sort_by_key(|&(i, _)| i);
+        }
+        let a = SparseColMatrix::from_sparse_columns(m, &cols).expect("basis");
+        let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+
+        // Non-vacuity: the position we corrupt must not be its own column, or
+        // the assertion below passes against the unfixed code.
+        let pos = 1usize;
+        let want = sym.qcol[pos];
+        assert_ne!(
+            want, pos,
+            "fixture has an identity ordering at position {pos}; this test \
+             cannot distinguish the position from the column"
+        );
+
+        let corrupt = |lu: &mut SparseLu| lu.u_rows[pos][0].1 = 0.0;
+
+        let mut lu = SparseLu::factor(&a, &sym, LuParams::default()).expect("factor");
+        corrupt(&mut lu);
+        let mut rhs = vec![1.0; m];
+        assert!(
+            matches!(lu.ftran(&mut rhs), Err(FeralError::SingularBasis { column }) if column == want),
+            "ftran must name original column {want}, got {:?}",
+            lu.ftran(&mut vec![1.0; m])
+        );
+
+        let mut lu = SparseLu::factor(&a, &sym, LuParams::default()).expect("factor");
+        corrupt(&mut lu);
+        let mut rhs = vec![1.0; m];
+        assert!(
+            matches!(lu.btran(&mut rhs), Err(FeralError::SingularBasis { column }) if column == want),
+            "btran must name original column {want}"
+        );
+
+        // The sparse entry points reach only what the solution depends on, so
+        // the rhs must be dense enough to reach the corrupted row.
+        let dense_rhs: Vec<(usize, f64)> = (0..m).map(|i| (i, 1.0)).collect();
+        let mut out = Vec::new();
+
+        let mut lu = SparseLu::factor(&a, &sym, LuParams::default()).expect("factor");
+        corrupt(&mut lu);
+        assert!(
+            matches!(lu.ftran_sparse(&dense_rhs, &mut out), Err(FeralError::SingularBasis { column }) if column == want),
+            "ftran_sparse must name original column {want}"
+        );
+
+        let mut lu = SparseLu::factor(&a, &sym, LuParams::default()).expect("factor");
+        corrupt(&mut lu);
+        assert!(
+            matches!(lu.btran_sparse(&dense_rhs, &mut out), Err(FeralError::SingularBasis { column }) if column == want),
+            "btran_sparse must name original column {want}"
+        );
     }
 
     /// A zero `U` diagonal (as a degenerate post-update bump pivot could leave)

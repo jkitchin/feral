@@ -6514,3 +6514,61 @@ silently did nothing.
 
 Evidence: `dev/research/lu-ordering-and-kernel-2026-08-13.md` § Issue #163.
 Contract test: `tests/lu_default_ordering.rs`.
+
+## 2026-08-13 (later) — Correction: the peel does have a standalone payoff, and it is large
+
+The entry above ("The Suhl–Suhl peel is opt-in, and is paired with the dense-bump
+route") argued the revert from **cost-benefit**, on the claim that the peel is "a
+trajectory-perturbing change with no standalone payoff". **That claim was wrong.**
+Recorded here rather than by editing the entry above, which is append-only.
+
+The maintainer's review of PR #162 measured what I did not: `analyze` is re-run on
+**every refactorization** by a simplex, so its cost is multiplied by the
+refactorization count rather than amortized. Reproduced in-tree
+(`examples/basis_refactor.rs`, 20 reps, release):
+
+| basis | `analyze` | `analyze_triangularized` | symbolic | total |
+|---|---|---|---|---|
+| QPLIB_1157 (m=3937) | 21.28 ms | 2.17 ms | **9.8x** | 1.03x |
+| QPLIB_3852 (m=1760) | 0.86 ms | 0.13 ms | **6.6x** | 2.73x |
+| bchoco06 (m=833) | 0.54 ms | 0.13 ms | **4.2x** | 2.26x |
+
+End to end, across 14 QPLIB relaxations under a dual simplex, switching only the
+constructor is **1.306x geomean** (max 1.674x) — the largest single effect on that
+PR, in either direction.
+
+**How the error was made.** I measured only the numeric-factorization column
+(97.45 ms peeled vs 101.40 ms whole-basis on QPLIB_1157) and reported its 1.04x as
+"the peel's standalone payoff". Two compounding mistakes: I ignored the symbolic
+column entirely, and I generalized from the single fixture where the peel's *total*
+advantage is smallest (1.03x) while the other two in-tree fixtures give 2.73x and
+2.26x. The evidence was already in this repository — `CHANGELOG.md`'s #160 entry,
+which I edited in the same session, records the peel "cutting the ordering from
+9.837 ± 0.295 ms to 0.851 ± 0.037 ms" on a real basis. That is the 9.8x, in front
+of me, in a file I was writing to.
+
+**Does the decision survive?** Yes, but on a different and weaker argument, and the
+documents now say so. The peel is a genuine **tradeoff**, not a free revert:
+
+- *For it:* 4.2–9.8x on symbolic, 1.03–2.73x on symbolic+numeric, 1.306x
+  end-to-end geomean, plus it is the precondition for `dense_bump_max_dim`'s
+  further 4.28x.
+- *Against it:* it is a different rounding trajectory. It cost one ill-conditioned
+  LP its dual bound (issue #163), and on QPLIB_2055 it is **0.389x** — a 2.6x
+  slowdown — with the objective moving in the 9th significant figure, so it changed
+  that pivot path too.
+
+Neither ordering dominates. `analyze` stays whole-basis AMD because that is the
+trajectory the downstream suite was green against and a caller must consciously
+take on the other one — **not** because it is faster or more accurate. It is
+neither, reliably. That is the honest statement of the decision and it is now what
+`SparseLuSymbolic::analyze`'s rustdoc says.
+
+**Open, and deliberately not decided here:** the maintainer's suggestion that the
+ordering become a parameter with a documented default rather than two separately
+named constructors, so callers can A/B it without a code change — which is how
+they had to measure the above. Filed as a follow-up rather than done in the PR
+under review; it is an API-shape decision and the constructor pair is not wrong,
+only inconvenient.
+
+Evidence: `dev/research/lu-ordering-and-kernel-2026-08-13.md` § Correction.

@@ -4,6 +4,18 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — `SingularBasis { column }` from the solve path named an internal pivot position
+
+- `usolve`, `ut_solve` and the new `ftran_sparse`/`btran_sparse` reported the
+  permuted pivot position `k` where the factor path reports `qcol[k]`, the
+  original basis column (corrected there in a91519d). The two agree only when the
+  fill-reducing ordering is the identity, so on any real basis the error named an
+  unrelated column. All four now map through the permutation.
+- The existing 2x2 regression tests could not catch this — their ordering *is* the
+  identity. `solve_path_singular_basis_names_the_original_column_not_the_pivot_position`
+  uses a basis whose `qcol` maps every position to a different column, asserts its
+  own non-vacuity, and covers all four entry points.
+
 ### Changed — `SparseLuSymbolic::analyze` stays whole-basis AMD; the peel is opt-in (issue #163)
 
 - The Suhl–Suhl peel added below was briefly the behavior of
@@ -29,12 +41,21 @@ All notable changes to FERAL will be documented in this file.
   solves disagree in the bits the simplex's ratio test reads, the runs diverge
   onto different pivot sequences, and this LP is conditioned badly enough that
   one path certifies and the other trips the caller's numerical guard.
-- **So the revert rests on the peel having no standalone payoff**, not on a
-  stability argument. On a real QPLIB simplex basis it gives *more* fill (197,937
-  vs 190,654) for 1.04x on time — not a result worth perturbing a downstream
-  solver's arithmetic for. Nothing here says whole-basis AMD is the better
-  trajectory in general; it is the one that was in place when the downstream test
-  was green.
+- **Neither ordering dominates, so the caller chooses.** The peel is
+  substantially *faster*: 4.2–9.8x on the symbolic step across the in-tree
+  fixtures, 1.03–2.73x on symbolic + numeric together, and 1.306x geomean across
+  14 QPLIB relaxations end to end — `analyze` re-runs on every refactorization,
+  so that cost is multiplied rather than amortized. Against it: the trajectory
+  change above, and QPLIB_2055, where the peel is **0.389x** (a 2.6x slowdown)
+  with the objective moving in the 9th significant figure. `analyze` stays
+  whole-basis AMD because that is the trajectory the downstream suite was green
+  against — not because it is faster or more accurate, which it is not.
+  - *An earlier draft of this entry said the peel had "no standalone payoff",
+    from the numeric-factorization column alone (97.45 vs 101.40 ms on
+    QPLIB_1157). That was wrong — it ignored the symbolic column and generalized
+    from the one fixture where the peel's total advantage is smallest. The
+    contradicting measurement was already in this file, in the #160 entry below
+    ("cutting the ordering from 9.837 ± 0.295 ms to 0.851 ± 0.037 ms").*
 - New in-tree: `tests/lu_default_ordering.rs` (a contract test — the measurement
   above says there is no numerical difference to assert),
   `tests/data/lu_bases/bchoco06_illcond_basis.mtx` (the worst-conditioned basis
