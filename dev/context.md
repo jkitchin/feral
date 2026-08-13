@@ -1,216 +1,185 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-10T12:00:56Z
+Generated: 2026-08-13T16:04:18Z
 
 ## Latest Session
-File: dev/sessions/2026-08-10-02.md
+File: dev/sessions/2026-08-13-01.md
 ```
-# Session 2026-08-10-02
-
-Journal: `dev/journal/2026-08-09-08.org` (the work began late on 2026-08-09;
-the file number follows the journal, the session number follows
-`dev/sessions/` which main had already advanced to `2026-08-10-01`).
+# Session 2026-08-13-01
 
 ## Goal
 
-Take the MC64 Hungarian search bound — the lever recommended at the close of
-the condition-1 dig-in (`dev/research/mc64-condition1-cost-share-2026-08-09.md`).
-Then resolve the merge conflicts blocking PR #157 and get remote CI green.
-
-## Benchmark comparison to previous session — TAIL IS SLIGHTLY WORSE
-
-Reported first, per protocol. Against the last full-corpus bench
-(`2026-08-09-09`; `2026-08-10-01` had no corpus in its container):
-
-| factor/MUMPS | 2026-08-09-09 | this session | direction |
-|---|---|---|---|
-| geomean | 0.43 | **0.44** | worse |
-| p50     | 0.30 | 0.30       | flat  |
-| p90     | 1.54 | **1.57**   | worse |
-| p99     | 3.30 | **3.45**   | worse |
-| max     | 8.70 | **12.40**  | worse |
-
-`solve/SSIDS` p90 also moved 2.44 → 2.50; `factor/SSIDS` geomean and both
-`nnzL` rows are unchanged. All Phase 2.8.1 exit partitions still PASS.
-
-I do not have an attributed cause, and I am not claiming one. What can be said:
-
-- **Not the MC64 change.** `509f0ce` is verified bit-identical on 51 matrices,
-  and it only touches the Hungarian heap, which does not run at all on the
-  small CUTEst matrices that set these tails. The worst ratios are `KIRBY2`
-  (n = 458) and `GROUPING` (n = 225).
-- The merge brought in main's `Supernode.nrow` fix (`2026-08-10-01`), which is
-  explicitly flagged there as a *behavior change to parallel dispatch*. That is
-  the one plausible candidate in the diff, but it is unverified — nobody has
-  re-benched main alone since it landed.
-- Sub-millisecond matrices on a laptop are noisy; a single-matrix `max` moving
-  8.70 → 12.40 on `KIRBY2_0007` (1476 us vs 1298-1142 us on its siblings) is
-  within what this harness swings run to run.
-
-Next session should re-run the bench on `origin/main` alone before spending
-effort here, to separate main's change from noise.
+Review the open PRs on jkitchin/feral, then fix the findings the user selected.
+One PR was open: **#160**, "feat(lu): Suhl-Suhl basis triangularization +
+optional dense-bump route" (3 commits, 11 files, +1376/-40). The user scoped the
+fix to findings 1 and 2.
 
 ## Accomplished
 
-### The recommended lever does not exist (negative result)
+### Review of #160
 
-My own prior note called the Hungarian search bound
+The PR's core math holds up. Verified that the Suhl–Suhl peel yields the claimed
+block structure, and that the dense splice is exact given the two structural
+checks the caller makes: every bump-column entry lands either in `above`
+(already-pivoted front row, copied straight through to `U` because `L` is the
+identity there) or in `packed`, so no entry can be dropped. Worst dense-route
+residual over randomized differential probes: **7.9e-16**. The `zero_pivot_tol`
+rescale by `a_max / bump_a_max` is correct — it exactly cancels
+`factorize_packed`'s own block-local scaling, so both routes reach the same
+singularity verdict.
+
+Four findings. Two fixed this session, two left open at the user's scoping.
+
+### Fixed — finding 1: dense route named the wrong singular column (a91519d)
+
+`factor_bump_dense` propagated `factorize_packed`'s error with `?`, and that
+error carries the **block-local** column index (`dense_factor.rs:411`). Every
+site on the sparse path emits `qcol[k]`, the original basis column.
+
+Evidence on the PR's own fixture: sparse reports `SingularBasis { column: 11 }`,
+dense reports `column: 7`. Columns 10 and 11 are the identical (singular) pair;
+7 is unrelated. This is exactly the defect
+`tests/lu_sparse.rs::singular_basis_reports_original_column_not_factorization_position`
+already pins for the sparse path, and for the same reason — a simplex driver
+knows original basis columns, not internal positions.
+
+The PR's own `singular_bump_is_reported_on_both_routes` matched
+`Err(SingularBasis { .. })` only, so it passed against the wrong column.
+Strengthened to compare the two routes' columns and pin the answer to the
+duplicated pair.
+
+### Fixed — finding 2: dense route fired on bumps that were never peeled (21f5e74)
+
+`want_dense_bump` keyed only on `bump_hi - bump_lo` fitting the cap. A bump equal
+to the whole basis satisfies that trivially, so a whole sparse basis was packed
+into an `m²` f64 buffer and factored densely.
+
+Measured on tridiagonal `m = 3000`, `cap = 4096`, release, this machine:
 ```
 
 ## Git Status
 ```
-5a9150d Merge origin/main into docs/session-2026-08-09-05
-509f0ce perf(mc64): store the key inline in the Hungarian heap; bit-identical
-fe8cc64 Merge pull request #158 from jkitchin/claude/fix-supernode-nrow
-32d90ee docs: session checkpoint 2026-08-10-01 (Supernode.nrow fix)
-fc84eb3 fix(symbolic): correct post-amalgamation Supernode.nrow (#128 item E)
+21f5e74 fix(lu): gate the dense-bump route on a bump that was actually peeled
+a91519d fix(lu): report the original basis column when the dense bump is singular
+bdbdec7 fix(python): thread dense_bump_max_dim through the LuFactor binding
+5246727 docs(changelog): triangularization + dense-bump route
+1217992 feat(lu): Suhl-Suhl basis triangularization + optional dense-bump route
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
-test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
-test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 412 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.42s
+test result: ok. 420 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.96s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-10-02.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-13-01.md)
 
 
-=== Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
+8 matrices benchmarked
+2 KKT matrices total
 
-ratio               count    geomean        p50        p90        p99        max
-factor/MUMPS       153560       0.44       0.30       1.57       3.45      12.40
-solve/MUMPS        153560       0.07       0.08       0.14       0.66       2.78
-factor/SSIDS       154500       0.04       0.03       0.32       1.01       2.49
-solve/SSIDS        154500       0.93       1.00       2.50       8.33      30.25
-nnzL/MUMPS         153560       0.61       0.58       0.75       4.50      23.11
-nnzL/SSIDS         154500       0.88       1.00       1.00       4.50       5.00
+KKT summary: 2 matrices (1 dense-eligible n <= 1000, 1 skipped n > 1000, 0 parse-skipped)
+  Inertia match: 1/1 (100.0%)
+  Residual pass: 1/1 (100.0%)
+  Worst residual: 1.14e-15 (densecol_kkt_300_0000)
 
-Per-family factor geomean vs MUMPS (top 25 families by count):
-family                  count    geomean        p50        max
-HS118                    3000       0.91       0.94       1.60
-BIGGSC4                  3000       0.42       0.45       0.60
-MGH10LS                  3000       0.20       0.22       0.44
-PALMER7A                 3000       0.28       0.30       0.70
-ALLINITA                 3000       0.41       0.40       0.85
-HS13                     3000       0.17       0.20       0.56
-ALLINITC                 3000       0.19       0.20       0.30
-HS89                     3000       0.20       0.20       0.30
-HATFLDH                  3000       0.42       0.45       0.55
-MCONCON                  3000       0.90       0.94       1.97
-HS92                     3000       0.35       0.36       0.82
-SSINE                    3000       0.27       0.27       0.33
-HATFLDBNE                3000       0.39       0.40       0.83
-HS90                     3000       0.20       0.20       0.33
-DJTL                     3000       0.09       0.10       0.22
-SSI                      3000       0.21       0.22       0.33
-CONCON                   3000       0.86       0.89       1.72
-HS91                     3000       0.25       0.27       0.40
-PALMER5A                 3000       0.29       0.30       0.44
-AVION2                   2682       1.48       1.52       2.11
-CERI651ALS               2331       0.27       0.27       0.33
-PFIT4                    2286       0.25       0.27       0.30
-CERI651C                 2233       0.28       0.30       0.33
-CERI651CLS               2227       0.27       0.27       0.40
-BATCH                    2054       1.35       1.41       1.98
+--- Sparse solver validation ---
+Sparse solver: 2/2 total
+  Inertia match vs MUMPS: 2/2 (100.0%)
+  Residual pass: 2/2 (100.0%)
+  Worst residual: 1.26e-16 (densecol_kkt_300_0000)
 
-Top 10 worst factor-ratio vs MUMPS:
-name                             n    feral(μs)    mumps(μs)      ratio
-KIRBY2_0007                    458         1476          119      12.40
-KIRBY2_0006                    458         1298          127      10.22
-KIRBY2_0008                    458         1142          122       9.36
-KIRBY2_0011                    458          932          120       7.77
-KIRBY2_0009                    458          990          128       7.73
-KIRBY2_0010                    458          987          133       7.42
-GROUPING_0059                  225          725          116       6.25
-GROUPING_0139                  225          701          113       6.20
-GROUPING_0033                  225          692          112       6.18
-GROUPING_0137                  225          674          111       6.07
+Dense failure analysis: no failures
+Sparse failure analysis: no failures
 
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.58     <= 2.0     PASS
-medium (<500)            152145     2.00     <= 3.0     PASS
+--- Dense perf vs oracles: no matrices have oracle timings ---
+--- Sparse perf vs oracles: no matrices have oracle timings ---
 
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.57     <= 2.0     PASS
-medium (<500)            153560     1.57     <= 3.0     PASS
+**Not a meaningful comparison to prior sessions.** This container carries only
+the 2 synthetic KKT fixtures the bench generates itself; the real corpus is
+absent, so the Phase 2.8.1 partitions are all `N/A` and there are no oracle
+timings. It is reported for completeness, not as a regression check. These
+changes touch only the LU family (a separate factorization from the LDLᵀ solver
+the bench exercises), so no movement was expected there either way.
+
+The numbers that matter for this session are the tridiagonal timings in the
+table above, taken directly.
 
 ```
 
 ## Recent Decisions
+   sets it; `natural`, `with_order` and `analyze_amd_only` do not. Those three
+   report `(bump_lo, bump_hi) = (0, m)` because they never looked for structure,
+   which is not the same claim as having looked and found the basis irreducible.
+   The indices cannot distinguish the two and they warrant opposite answers, so
+   the provenance is recorded explicitly rather than inferred.
 
-    merged_nrow = child_group_ncol + parent_group_nrow
+2. When the bump *is* the whole basis (a measured `(0, m)` from `analyze` on a
+   basis with nothing to peel), `dense_bump_max_dim` does not apply; such a basis
+   is bounded by `dense_threshold` instead.
 
-maintained as a running per-group value. This is the union *cardinality*, not
-a bound, and it composes for chains under both amalgamation iteration orders.
+The rationale for (2) is that the empirical case for the dense kernel — a bump at
+2.2% input density whose *factor* is 42% dense — depends on the peel having
+already stripped the easy structure and left the irreducible core. That is why
+the PR is right that input density is a bad predictor *for a peeled bump*. With
+nothing stripped, the premise is absent and ordinary sparsity still governs, so
+the decision belongs to `dense_threshold`, which weighs density rather than
+dimension alone.
 
-Verified rather than assumed: compared against
-`SymbolicFactorization::static_rows(i).len()` (the issue #125 static frontal
-layout, an independent computation already pinned to both a from-scratch
-`BTreeSet` recompute and `build_row_indices`) across 7 matrix families x 3
-`nemin` values — **zero error on every supernode**. The pre-change proxy was
-wrong on up to 40% of summed `nrow`.
+**Both guards are load-bearing.** Provenance alone leaves the `analyze`
+-on-unpeelable case at 199x (the 297 ms row above); the `dense_threshold`
+allowance alone would still admit the `natural` constructors. Guard 2 is also
+what keeps the legitimate small-dense case working: the `(0, 16, 0)` no-border
+basis in `tests/lu_dense_bump.rs` peels to nothing but is genuinely dense at
+`m = 16 <= 128`, and stays on the dense route.
 
-**Accepted consequence, with a caveat.** `nrow` feeds
-`estimate_assembly_flops`, so the `PAR_MIN_FLOPS` gate now sees true costs
-and borderline matrices can flip from sequential to parallel (one flip
-recorded: a 60x60 grid Laplacian at `nemin = 32`, 4.3M -> 12.2M estimated
-flops). Numeric factors and inertia are byte-identical. The caveat is that
-`PAR_MIN_FLOPS` was calibrated against the *understated* estimate, so the
-constant itself may now be mis-placed; the flip is unverified on the real
-corpus (absent from the container this landed in). Re-deriving the threshold
-against corrected flops is open work, not something this change did.
-
-The `merge_flop_budget` guard's merged-height model was corrected in lockstep
-at both of its sites. It shared the understatement, which made merges look
-cheaper than they are — the wrong direction for a guard meant to reject
-expensive merges. The knob defaults to `None`, so the default path is
-unaffected, but the sweep recorded in
-`dev/research/amalgamation-cost-model-2026-08-09.md` was taken under the old
-model and its numbers do not transfer.
+**Cost.** A new public field on `SparseLuSymbolic`, and callers constructing that
+struct by literal must now supply it. Consistent with `bump_lo`/`bump_hi`, added
+by the same unreleased change. `analyze` on a large sparse basis that peels to
+nothing can no longer opt into the dense route at all; if that case ever matters,
+the right lever is a density test on the bump, not a dimension cap.
 
 ## Recent Tried-and-Rejected
-inline-key heap that followed is bit-identical and won 4-5% on nql180.
 
-Full data: `dev/research/mc64-hungarian-search-bound-2026-08-09.md`.
+```rust
+let peeled = bump_lo > 0 || bump_hi < m;
+```
 
-## 2026-08-09 — `build_cost_graph` as an MC64 optimization target
+This broke the PR's own `(0, 16, 0)` differential case in
+`tests/lu_dense_bump.rs` — a genuinely dense 16x16 basis with no triangular
+border, which peels to nothing and so reports `(0, m)`, but for which the dense
+kernel is exactly right. Failure was
+`the dense arm fell back to sparse (seed 5) - test is vacuous`.
 
-**Rejected on measurement.** Timed at 8-12 ms per iterate. That is ~20% of
-pinene's *cheapest* iterate but **0.4%** of nql180's — and nql180 is where the
-MC64 time actually is. Optimizing it cannot move the corpus. The instrumented
-timer was reverted and is not in any commit.
+The distinction the index test cannot make is *why* the bump is the whole basis:
+a default from a constructor that never looked, or a measurement from a peel
+that found nothing. Those want opposite answers. Replaced with a
+`SparseLuSymbolic::triangularized` provenance flag plus a `bump_dim <=
+dense_threshold` allowance for the unpeelable case.
 
-## 2026-08-09 — array fusion projected from a microbenchmark
-
-**Not rejected, but the projection was wrong and is recorded so it is not
-reused.** A standalone microbenchmark of split-array vs fused-record reads
-predicted **1.68-1.9x**. The real end-to-end win from the inline-key heap was
-**4-5%**, because the split reads are only ~2.3 ns of nql180's ~13 ns/scan.
-Microbenchmarks of one memory access pattern do not predict a loop that also
-does heap sifting and comparison work; scale by the measured share of the loop
-before believing them.
+Note the provenance flag *alone* was also insufficient — `analyze` on a
+tridiagonal m=3000 peels nothing, sets `triangularized = true`, and hit the same
+cliff at 297 ms vs 1.5 ms sparse. Both guards are load-bearing.
 
 ## Source Files
 ```
@@ -245,6 +214,7 @@ src/lu/sparse_factor.rs
 src/lu/sparse_matrix.rs
 src/lu/sparse_solve.rs
 src/lu/sparse_symbolic.rs
+src/lu/sparse_triangular.rs
 src/lu/sparse_update.rs
 src/numeric/condition.rs
 src/numeric/factorize.rs
@@ -278,8 +248,8 @@ tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering_parity.rs
 tests/column_renumbering.rs
+tests/column_renumbering_parity.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -293,14 +263,6 @@ tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/golden_bits.rs
 tests/growth_flag.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -313,13 +275,22 @@ tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
-tests/lu_dense_update_bg.rs
 tests/lu_dense.rs
+tests/lu_dense_bump.rs
+tests/lu_dense_update_bg.rs
 tests/lu_ft_widebump.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
@@ -338,8 +309,8 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/rook_rescue_kkt.rs
 tests/rook_rescue.rs
+tests/rook_rescue_kkt.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
@@ -348,5 +319,7 @@ tests/sqd_fast_path.rs
 tests/static_assembly_maps.rs
 tests/stress_tests.rs
 tests/symbolic_profiler.rs
-
-(truncated from      354 lines to 350 line budget)
+tests/task_plan_parity.rs
+tests/threshold_consistency.rs
+tests/tiny_fast_path.rs
+```

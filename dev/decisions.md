@@ -6389,3 +6389,45 @@ expensive merges. The knob defaults to `None`, so the default path is
 unaffected, but the sweep recorded in
 `dev/research/amalgamation-cost-model-2026-08-09.md` was taken under the old
 model and its numbers do not transfer.
+
+## 2026-08-13 — `dense_bump_max_dim` requires a *measured* bump, and an unpeeled one is bounded by `dense_threshold`
+
+Reviewing #160 found the opt-in dense-bump route firing whenever
+`bump_hi - bump_lo` fit the cap. A bump equal to the whole basis satisfies that
+trivially, so a whole sparse basis could be packed into an `m²` f64 buffer and
+factored densely: tridiagonal `m = 3000` at `cap = 4096` went 1.49 ms → 181.11 ms
+under `natural` and → 297.28 ms under `analyze`, allocating 72 MB.
+
+**Decision: the route is gated on two conditions, not one.**
+
+1. `SparseLuSymbolic::triangularized` (new public field) must be set. `analyze`
+   sets it; `natural`, `with_order` and `analyze_amd_only` do not. Those three
+   report `(bump_lo, bump_hi) = (0, m)` because they never looked for structure,
+   which is not the same claim as having looked and found the basis irreducible.
+   The indices cannot distinguish the two and they warrant opposite answers, so
+   the provenance is recorded explicitly rather than inferred.
+
+2. When the bump *is* the whole basis (a measured `(0, m)` from `analyze` on a
+   basis with nothing to peel), `dense_bump_max_dim` does not apply; such a basis
+   is bounded by `dense_threshold` instead.
+
+The rationale for (2) is that the empirical case for the dense kernel — a bump at
+2.2% input density whose *factor* is 42% dense — depends on the peel having
+already stripped the easy structure and left the irreducible core. That is why
+the PR is right that input density is a bad predictor *for a peeled bump*. With
+nothing stripped, the premise is absent and ordinary sparsity still governs, so
+the decision belongs to `dense_threshold`, which weighs density rather than
+dimension alone.
+
+**Both guards are load-bearing.** Provenance alone leaves the `analyze`
+-on-unpeelable case at 199x (the 297 ms row above); the `dense_threshold`
+allowance alone would still admit the `natural` constructors. Guard 2 is also
+what keeps the legitimate small-dense case working: the `(0, 16, 0)` no-border
+basis in `tests/lu_dense_bump.rs` peels to nothing but is genuinely dense at
+`m = 16 <= 128`, and stays on the dense route.
+
+**Cost.** A new public field on `SparseLuSymbolic`, and callers constructing that
+struct by literal must now supply it. Consistent with `bump_lo`/`bump_hi`, added
+by the same unreleased change. `analyze` on a large sparse basis that peels to
+nothing can no longer opt into the dense route at all; if that case ever matters,
+the right lever is a density test on the bump, not a dimension cap.
