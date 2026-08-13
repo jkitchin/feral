@@ -328,6 +328,13 @@ impl LuFactor {
     /// small but its *factor* is dense, which `should_use_dense_lu` cannot see —
     /// that predicate keys on input density and on the whole basis's dimension.
     /// The cap is a memory bound: the route packs a `dim²` f64 buffer.
+    ///
+    /// Setting it above 0 also switches the column ordering from whole-basis
+    /// AMD to a Suhl–Suhl peel plus AMD over the bump, because the route needs
+    /// the contiguous bump the peel produces. That peel decides some pivots
+    /// structurally rather than by magnitude, which on an ill-conditioned basis
+    /// can cost the factorization (issue #163) — so leave this at 0 unless the
+    /// bases are well-conditioned enough that the speedup is worth it.
     #[new]
     #[pyo3(signature = (
         matrix,
@@ -391,7 +398,18 @@ impl LuFactor {
                 .map_err(map_feral_err)?;
             LuInner::Dense(Box::new(lu))
         } else {
-            let sym = SparseLuSymbolic::analyze(a).map_err(map_feral_err)?;
+            // The peel and the dense-bump route are opted into together (issue
+            // #163): `dense_bump_max_dim` only applies to a triangularized
+            // symbolic, and the peel's structural pivot choice is worth its
+            // numerical cost only when that route is what you are buying. The
+            // Rust API makes the caller pick the symbolic; Python exposes no
+            // symbolic handle, so the cap is the opt-in.
+            let sym = if dense_bump_max_dim > 0 {
+                SparseLuSymbolic::analyze_triangularized(a)
+            } else {
+                SparseLuSymbolic::analyze(a)
+            }
+            .map_err(map_feral_err)?;
             let lu = py
                 .allow_threads(|| SparseLu::factor(a, &sym, params))
                 .map_err(map_feral_err)?;

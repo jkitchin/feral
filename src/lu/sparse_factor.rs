@@ -314,10 +314,11 @@ impl SparseLu {
         // Two guards, because "bump == whole basis" arises two ways and only one
         // of them is a bump.
         //
-        // 1. `natural`, `with_order` and `analyze_amd_only` claim `(0, m)`
-        //    without ever triangularizing. Their "bump" is a default, not a
-        //    measurement, so they are never eligible.
-        // 2. `analyze` reports `(0, m)` when a basis has nothing to peel. That
+        // 1. `natural`, `with_order`, `analyze` and `analyze_amd_only` claim
+        //    `(0, m)` without ever triangularizing. Their "bump" is a default,
+        //    not a measurement, so they are never eligible.
+        // 2. `analyze_triangularized` reports `(0, m)` when a basis has nothing
+        //    to peel. That
         //    *is* a measurement, but it says the peel failed to expose anything
         //    — so the argument for the dense kernel does not apply. The reason a
         //    peeled bump's factor is dense is that the peel already stripped the

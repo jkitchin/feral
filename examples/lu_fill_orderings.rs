@@ -137,9 +137,10 @@ fn main() {
     }
 
     // The other half of the question: at a fixed ordering, what does the
-    // *kernel* choice do? `analyze` + the dense-bump route factors the same
-    // basis with the same fill class through a blocked dense kernel.
-    let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+    // *kernel* choice do? `analyze_triangularized` + the dense-bump route
+    // factors the same basis with the same fill class through a blocked dense
+    // kernel.
+    let sym = SparseLuSymbolic::analyze_triangularized(&a).expect("analyze");
     for (label, cap) in [("peel+sparse", 0usize), ("peel+denseBump", 4096)] {
         let p = LuParams {
             dense_bump_max_dim: cap,

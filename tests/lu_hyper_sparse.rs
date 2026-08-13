@@ -487,7 +487,9 @@ fn reach_route_composes_with_the_dense_bump_route() {
     let m = 400;
     let cols = lp_basis(m, 40, 6, 0xB0BA);
     let a = SparseColMatrix::from_sparse_columns(m, &cols).expect("basis");
-    let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+    // `analyze_triangularized`, not `analyze`: since issue #163 the peel is
+    // opt-in, and `dense_bump_max_dim` only applies to a symbolic that peeled.
+    let sym = SparseLuSymbolic::analyze_triangularized(&a).expect("analyze");
     let mk = |d: f64| LuParams {
         dense_bump_max_dim: 512,
         hyper_sparse_max_density: d,

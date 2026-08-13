@@ -579,3 +579,99 @@ maintainer has already measured dense_bump_max_dim=4096 regressing QPLIB_2017 to
 for a default. Written up in
 =dev/research/lu-ordering-and-kernel-2026-08-13.md= with what it does and does
 not establish.
+
+* 19:05 :issue163:lu:ordering:bisect:
+Issue #163 filed: discopt's =bchoco06_illcond_scaled_path_recovers_bound_649= —
+an ill-conditioned root LP that had certified =Optimal= — returns =Numerical=
+against a feral carrying #160. Dual bound lost. =dense_bump_max_dim= at its
+default 0, so the route the peel exists to enable was OFF.
+
+Reproduced by cloning discopt (8513cfa) and adding
+=[patch.crates-io] feral = { path = "/home/user/feral" }=. Bisected with
+temporary env vars in feral:
+
+  A. peel + AMD on bump (#160 analyze)   FAILED  left: Numerical, right: Optimal
+  B. peel, bump left in peel order       FAILED
+  C. no peel, whole-basis AMD            PASSED
+
+The peel, not the bump AMD. Confirmed in both directions after the fix:
+flipping =analyze= back to =analyze_triangularized= reproduces the exact
+failure; flipping to =analyze_amd_only= passes.
+
+* 19:22 :issue163:negativeresult:measurement:
+*The mechanism I assumed is wrong, and I had already written it into three
+files.* I documented the failure as the peel forcing structural pivots that
+threshold partial pivoting would have chosen by magnitude — plausible, and
+untested.
+
+Tested it. Instrumented =analyze= to dump every basis as Matrix Market, ran the
+discopt test under both orderings (46 bases on the passing trajectory, 30 on the
+failing one), re-factored each both ways in feral, scored backward AND forward
+error (=examples/probe_illcond_ordering.rs=).
+
+Failing trajectory, tail:
+
+  basis          amd_resid  amd_fwderr  peel_resid  peel_fwderr  fwd_x  nnz amd/peel
+  basis_000025    1.93e-16    4.55e-13    1.82e-16    9.94e-15   0.0x   2496/2494
+  basis_000026    9.65e-17    2.58e-11    1.82e-16    2.59e-11   1.0x   2588/2519
+  basis_000029    1.82e-16    5.53e-12    1.82e-16    2.08e-12   0.4x   2730/2683
+
+Backward error ~1e-16 under both on every basis. Forward error reaches 2.6e-11
+(the LP really is ill-conditioned) and the peel's ratio to AMD is *0.0x-1.0x,
+never above 1.0x, on all 30*. The peel is not the less accurate ordering. Fill is
+even slightly better under the peel here (2519 vs 2588) — opposite of QPLIB_1157.
+
+So it is trajectory sensitivity: at ~1e-11 forward error the two orderings
+disagree in the bits discopt's ratio test reads, the runs diverge (46 vs 30
+refactorizations), and this LP is bad enough that one path certifies and the
+other trips discopt's guard.
+
+Rewrote the =analyze= rustdoc, =analyze_triangularized= rustdoc,
+=dense_bump_max_dim= rustdoc and the research note to say this instead. Same
+class of error as the blended ftran/btran sweep and the "ordering isn't the
+lever" near-miss earlier today: a mechanism that explains the symptom is not
+evidence that it is the mechanism.
+
+* 19:40 :issue163:decision:
+Reverted the peel to opt-in anyway, on a different argument than the one I
+started with. Not "the peel is unstable" — refuted above — but "the peel has no
+standalone payoff": on QPLIB_1157 it is *worse on fill* (197,937 vs 190,654) for
+1.04x on time, its real 4.28x needs =dense_bump_max_dim=, and that is off by
+default. A change worth ~nothing that cost a green downstream regression should
+be opt-in, paired with the route that makes it worth having.
+
+=analyze= -> whole-basis AMD (== =analyze_amd_only=).
+=analyze_triangularized= -> the peel. Python's =LuFactor= has no symbolic handle,
+so =dense_bump_max_dim > 0= selects the peel there, documented.
+
+Stated explicitly in the note and the changelog: nothing here says whole-basis
+AMD is the better trajectory in general. It is the one that was in place when the
+downstream test was green.
+
+* 19:52 :issue163:tests:
+Regression coverage is a *contract* test (=tests/lu_default_ordering.rs=), not a
+numerical one, because the measurement above says there is no numerical
+difference to assert. Two tests: =analyze= must not triangularize and must equal
+=analyze_amd_only= exactly (with =analyze_triangularized= on the same fixture as
+the non-vacuity witness), and =dense_bump_max_dim= must be inert under the
+default ordering while firing under the peel. Both fail with their intended
+messages when =analyze= is flipped back:
+
+  issue #163: `analyze` must not triangularize — the peel is opt-in via `analyze_triangularized`
+  `dense_bump_max_dim` must be inert under the default ordering
+
+Carried the worst basis of the failing run in-tree as
+=tests/data/lu_bases/bchoco06_illcond_basis.mtx= (833x833, 2404 nnz, 74 KB) so
+=probe_illcond_ordering= runs on =tests/data/lu_bases= with no discopt checkout.
+The dump instrumentation is NOT in the tree; the snippet to restore it is in the
+research note.
+
+Full suite: 90 test binaries green, =cargo clippy --all-targets -- -D warnings=
+clean, =cargo test --examples= green. One pre-existing unit test needed
+updating: =sparse_symbolic::tests::triangular_basis_has_an_empty_bump= asserted
+=analyze= peels; now calls =analyze_triangularized=.
+
+Note: =python/= has 48 pre-existing =cargo clippy -D warnings= failures
+(=useless_conversion= etc. from pyo3 under clippy 1.97). Not introduced here, and
+not a CI gate — python is outside the root workspace and is covered by
+=python-wheels.yml=, not the clippy hook. =cargo check= is clean.

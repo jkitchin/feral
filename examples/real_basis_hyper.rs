@@ -64,7 +64,9 @@ fn main() {
     let a = read_mtx(&path);
     let m = a.m;
     let nnz = a.nnz();
-    let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+    // `analyze_triangularized` (not `analyze`): `bump_cap` below needs a peeled
+    // symbolic, and since issue #163 `analyze` no longer peels.
+    let sym = SparseLuSymbolic::analyze_triangularized(&a).expect("analyze");
     let bump_cap: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(4096);
 
     let mk = |d: f64| LuParams {

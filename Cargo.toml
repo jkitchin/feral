@@ -127,6 +127,9 @@ name = "real_basis_hyper"
 name = "lu_fill_orderings"
 
 [[example]]
+name = "probe_illcond_ordering"
+
+[[example]]
 name = "bench_dense_front"
 
 [[example]]

@@ -138,3 +138,34 @@ Matrix Market directly (`scipy.io.mmread`).
 
 Consumed by `tests/lu_real_bases.rs` (deterministic regression guards) and
 `examples/real_basis_hyper.rs` (the A/B harness these numbers come from).
+
+---
+
+## `bchoco06_illcond_basis.mtx` — the issue #163 basis
+
+| file | m | nnz | nnz/col | density |
+|---|---:|---:|---:|---:|
+| `bchoco06_illcond_basis` | 833 | 2,404 | **2.89** | 0.347% |
+
+Added in PR #162 for issue #163, which is about *ordering*, not the solve-side
+work the two QPLIB bases above are for.
+
+Provenance: the most ill-conditioned basis of the 30 that discopt's primal
+simplex handed feral while failing `bchoco06_illcond_scaled_path_recovers_bound_649`
+(discopt `crates/discopt-core/src/lp/simplex/primal.rs`) against a feral whose
+`SparseLuSymbolic::analyze` peeled. Dumped by temporarily instrumenting `analyze`
+to write every basis it was handed as Matrix Market; that instrumentation is not
+in the tree — the snippet to restore it is in
+`dev/research/lu-ordering-and-kernel-2026-08-13.md`.
+
+Scored by `examples/probe_illcond_ordering.rs`:
+
+```
+cargo run --release --example probe_illcond_ordering -- tests/data/lu_bases
+```
+
+On this basis both orderings are backward stable to ~1e-16 and the **forward**
+error is 2.6e-11 under both — the number that makes it worth carrying. It is the
+counter-evidence to the natural reading of #163: the peel is not the less
+accurate ordering, so the revert is justified by the peel having no standalone
+payoff, not by a stability defect. See `SparseLuSymbolic::analyze`'s rustdoc.

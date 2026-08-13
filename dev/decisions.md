@@ -6468,3 +6468,49 @@ unchanged, because a corrupted row that the solution depends on is still hit.
 
 Full reasoning: `dev/research/hyper-sparse-solves-2026-08-13.md` § Semantics
 that change.
+
+## 2026-08-13 — The Suhl–Suhl peel is opt-in, and is paired with the dense-bump route
+
+`SparseLuSymbolic::analyze` is AMD over the whole basis. The peel added in PR
+#160 lives in `analyze_triangularized`, and callers who want it should also set
+`LuParams::dense_bump_max_dim` — the route that requires a triangularized
+symbolic, and the only place the peel earns its keep.
+
+**The trigger** was issue #163: an ill-conditioned LP downstream (discopt,
+`bchoco06` root relaxation) that had certified `Optimal` began returning
+`Numerical`, losing its dual bound, with `dense_bump_max_dim` at its default of
+`0`. Bisected to the peel — whole-basis AMD passes, both peel variants fail,
+reproduced in both directions.
+
+**The reason is not stability, and it is worth being precise about that.** Every
+basis that LP's simplex handed feral was dumped and re-factored under both
+orderings. Backward error is ~1e-16 under both on all of them; forward error
+against a known solution reaches 2.6e-11 — the basis genuinely being
+ill-conditioned — and the peel is *never the worse of the two*, with ratios
+0.0x–1.0x across all 30 bases of the failing run. The peel does not produce a
+worse factorization. It produces a different rounding trajectory, which that LP
+was sensitive enough to diverge on.
+
+**The decision rests on cost-benefit, not correctness.** The peel's standalone
+result on a real QPLIB simplex basis is *more fill* (197,937 vs 190,654) for
+1.04x on time. A change that buys ~nothing does not get to perturb a downstream
+solver's arithmetic. Its real payoff — 4.28x — is the dense-bump route, which is
+off by default, so a caller taking `..LuParams::default()` was paying the
+trajectory change and receiving none of the speed. Making both opt-in puts the
+cost and the benefit behind the same door.
+
+**What this deliberately does not claim.** That whole-basis AMD is the better
+trajectory in general. It is the ordering that was in place when the downstream
+regression was green, and no measurement here distinguishes the two on accuracy.
+A different ill-conditioned LP could prefer the peel; that is what
+trajectory-sensitivity means. If a future panel shows the peel winning broadly on
+speed, this decision should be revisited on that evidence — but it should be
+revisited together with `dense_bump_max_dim`'s default, not separately.
+
+**Consequence for the Python bindings.** `feral.LuFactor` exposes no symbolic
+handle, so `dense_bump_max_dim > 0` selects `analyze_triangularized` there. The
+coupling is implicit but documented; the alternative was a parameter that
+silently did nothing.
+
+Evidence: `dev/research/lu-ordering-and-kernel-2026-08-13.md` § Issue #163.
+Contract test: `tests/lu_default_ordering.rs`.

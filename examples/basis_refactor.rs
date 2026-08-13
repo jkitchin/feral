@@ -121,7 +121,7 @@ fn main() {
             let sym = if arm == 1 {
                 SparseLuSymbolic::analyze_amd_only(&a).expect("analyze")
             } else {
-                SparseLuSymbolic::analyze(&a).expect("analyze")
+                SparseLuSymbolic::analyze_triangularized(&a).expect("analyze")
             };
             s.sym.push(t0.elapsed().as_secs_f64() * 1e3);
             let t1 = Instant::now();

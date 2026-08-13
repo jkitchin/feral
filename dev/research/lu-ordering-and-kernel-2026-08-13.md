@@ -106,3 +106,140 @@ A QPLIB-basis panel — more dumped bases across instances — measuring the 2x2
 {AMD, AMF} x {sparse bump, dense bump}, reporting fill and numeric time per
 instance. That is the evidence needed to set both defaults, and it needs data
 this repository does not have rather than code it does not have.
+
+---
+
+# Issue #163: the peel is reverted to opt-in
+
+Date: 2026-08-13 (same session, after the above)
+
+## The report
+
+discopt's `bchoco06_illcond_scaled_path_recovers_bound_649` — an ill-conditioned
+root LP that had been certifying `Optimal` — started returning `Numerical`, i.e.
+losing its dual bound, against a feral carrying PR #160. `dense_bump_max_dim` was
+at its default of `0`, so the route the peel exists to enable was switched off.
+
+## Bisect
+
+discopt held at `8513cfa` with `[patch.crates-io] feral = { path = ... }`, three
+arms, temporary env vars in feral:
+
+| arm | ordering | result |
+|---|---|---|
+| A | peel + AMD on bump (#160 `analyze`) | **FAILED** — `Numerical` |
+| B | peel, bump left in peel order | **FAILED** — `Numerical` |
+| C | whole-basis AMD (pre-#160) | **PASSED** — `Optimal` |
+
+The bump's AMD is not the lever. **The peel is.** Reproduced in both directions
+after the fix landed: `analyze → analyze_amd_only` passes, flipping it back to
+`analyze_triangularized` fails, same message.
+
+## The mechanism is *not* stability — measured
+
+The obvious reading ("the peel decides pivots structurally, so it takes a bad
+pivot") is wrong, and it was worth an hour to find that out.
+
+Method: `analyze` was temporarily instrumented to dump every basis it was handed
+as Matrix Market, and the discopt test run under both orderings — 46 bases on the
+passing (AMD) trajectory, 30 on the failing (peel) one. Each basis was then
+re-factored both ways in feral and scored on backward error (relative residual of
+`A x = b` and `Aᵀ y = c`) and forward error (against a known `x_ref`), by
+`examples/probe_illcond_ordering.rs`.
+
+**Result: the peel is never the worse ordering.** On the 30 bases of the failing
+trajectory:
+
+- backward error ~1e-16 under both orderings, on every basis;
+- forward error rises to 2.6e-11 (the LP really is ill-conditioned) — and the
+  peel's ratio to whole-basis AMD is **0.0x–1.0x, never above 1.0x**;
+- fill is slightly *better* under the peel here (2519 vs 2588 on the worst basis),
+  the opposite of QPLIB_1157 above.
+
+Sample (failing trajectory, tail):
+
+```
+  basis          amd_resid  amd_fwderr  peel_resid  peel_fwderr  resid_x  fwd_x   nnz amd/peel
+  basis_000025    1.93e-16    4.55e-13    1.82e-16    9.94e-15     0.9x    0.0x   2496/2494
+  basis_000026    9.65e-17    2.58e-11    1.82e-16    2.59e-11     1.9x    1.0x   2588/2519
+  basis_000029    1.82e-16    5.53e-12    1.82e-16    2.08e-12     1.0x    0.4x   2730/2683
+```
+
+So what changes is the **trajectory**, not the accuracy. At forward errors of
+~1e-11 the two orderings' solves disagree in exactly the bits discopt's ratio
+test reads; the two runs then take different pivot sequences (46 refactorizations
+against 30), and this LP is conditioned badly enough that one path certifies and
+the other trips discopt's numerical guard.
+
+## Why revert anyway
+
+Not "the peel is unstable" — that claim is refuted above. The argument is:
+
+1. **The peel has no standalone payoff.** On the real QPLIB_1157 basis it is
+   *worse on fill* (197,937 vs 190,654) and 1.04x on time. That is not a result
+   worth perturbing a downstream solver's arithmetic for.
+2. **Its real payoff, 4.28x, is the dense-bump route** — and that route is off by
+   default, so nobody taking `..LuParams::default()` was getting any of it.
+3. **It cost a downstream regression that had been green.** Against a benefit of
+   ~nothing, that settles it.
+
+So `analyze` returns to whole-basis AMD and the peel becomes
+`analyze_triangularized`, to be opted into *together with* `dense_bump_max_dim`
+— which is the only configuration where it pays for itself.
+
+**What this does not establish:** nothing here says whole-basis AMD is the better
+trajectory in general. It is the one that was in place when the downstream test
+was green. A different ill-conditioned LP could just as easily prefer the peel;
+that is the nature of a trajectory-sensitivity result, and it is the honest
+reading.
+
+## Regression coverage
+
+`tests/lu_default_ordering.rs` — a *contract* test, since the measurement above
+says there is no numerical difference to assert:
+
+- `analyze` must not triangularize and must equal `analyze_amd_only` exactly,
+  with `analyze_triangularized` on the same fixture as the non-vacuity witness;
+- `dense_bump_max_dim` must be inert under the default ordering and must fire
+  under `analyze_triangularized`, pinning the two as a pair.
+
+Both fail with their intended messages if `analyze` is flipped back to the peel.
+End-to-end behavior stays pinned downstream, by the discopt test that reported it.
+
+## Reproducing the dump
+
+Not in the tree — restore it temporarily at the top of
+`SparseLuSymbolic::analyze` (and/or `analyze_triangularized`):
+
+```rust
+if let Ok(dir) = std::env::var("FERAL_DUMP_BASES") {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let k = N.fetch_add(1, Ordering::Relaxed);
+    if let Ok(f) = std::fs::File::create(format!("{dir}/basis_{k:06}.mtx")) {
+        let mut w = std::io::BufWriter::new(f);
+        let _ = writeln!(w, "%%MatrixMarket matrix coordinate real general");
+        let _ = writeln!(w, "{} {} {}", a.m, a.col_ptr.len() - 1, a.nnz());
+        for j in 0..a.col_ptr.len() - 1 {
+            for idx in a.col_ptr[j]..a.col_ptr[j + 1] {
+                let _ = writeln!(
+                    w, "{} {} {:.17e}", a.row_idx[idx] + 1, j + 1, a.values[idx]
+                );
+            }
+        }
+    }
+}
+```
+
+Then, from a discopt checkout with `[patch.crates-io] feral = { path = ... }`:
+
+```
+FERAL_DUMP_BASES=<dir> cargo test -p discopt-core --release \
+    bchoco06_illcond_scaled_path_recovers_bound_649
+cargo run --release --example probe_illcond_ordering -- <dir>
+```
+
+The worst basis of that set is carried in-tree as
+`tests/data/lu_bases/bchoco06_illcond_basis.mtx`, so the scorer runs on
+`tests/data/lu_bases` with no discopt checkout at all.

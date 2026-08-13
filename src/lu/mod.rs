@@ -137,16 +137,23 @@ pub struct LuParams {
     /// `f64` buffer, so `b = 1024` is 8 MB and `b = 4096` is 134 MB. Set this
     /// to the largest bump worth that allocation, or `0` to stay sparse.
     ///
-    /// Applies only to a symbolic that actually triangularized, i.e. one built
-    /// by [`SparseLuSymbolic::analyze`]
-    /// ([`triangularized`](super::SparseLuSymbolic::triangularized)).
+    /// **Requires [`SparseLuSymbolic::analyze_triangularized`].** Only a
+    /// symbolic that actually peeled
+    /// ([`triangularized`](super::SparseLuSymbolic::triangularized)) can take
+    /// this route. [`SparseLuSymbolic::analyze`] (the default),
     /// [`SparseLuSymbolic::natural`], [`SparseLuSymbolic::with_order`] and
     /// [`SparseLuSymbolic::analyze_amd_only`] report the whole basis as bump
-    /// because they never looked for structure, so they never take this route
-    /// however large the cap.
+    /// because they never looked for structure, so setting this cap alongside
+    /// any of them is a no-op however large it is.
     ///
-    /// When `analyze` peels nothing and the bump *is* the whole basis, this cap
-    /// does not apply either — such a basis is bounded by
+    /// Opting into the peel changes the rounding trajectory, not just the speed.
+    /// It is not measurably *less* accurate — see [`SparseLuSymbolic::analyze`]
+    /// for the numbers — but on an ill-conditioned LP the difference was enough
+    /// to change a downstream simplex's pivot choices and lose it a dual bound
+    /// (issue #163). Take the pair when the 4.28x is what you are buying.
+    ///
+    /// When `analyze_triangularized` peels nothing and the bump *is* the whole
+    /// basis, this cap does not apply either — such a basis is bounded by
     /// [`Self::dense_threshold`] instead. The case for the dense kernel rests on
     /// the peel having stripped the structure and left an irreducible core; with
     /// nothing stripped, whole-basis dense is `dense_threshold`'s call, and it
@@ -156,6 +163,7 @@ pub struct LuParams {
     /// [`SparseLuSymbolic::with_order`]: super::SparseLuSymbolic::with_order
     /// [`SparseLuSymbolic::analyze_amd_only`]: super::SparseLuSymbolic::analyze_amd_only
     /// [`SparseLuSymbolic::analyze`]: super::SparseLuSymbolic::analyze
+    /// [`SparseLuSymbolic::analyze_triangularized`]: super::SparseLuSymbolic::analyze_triangularized
     pub dense_bump_max_dim: usize,
     /// Scaling strategy applied before factorization.
     pub scaling: LuScaling,

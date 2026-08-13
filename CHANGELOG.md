@@ -4,6 +4,46 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `SparseLuSymbolic::analyze` stays whole-basis AMD; the peel is opt-in (issue #163)
+
+- The Suhl–Suhl peel added below was briefly the behavior of
+  `SparseLuSymbolic::analyze`. It now lives in its own constructor,
+  `analyze_triangularized`, and `analyze` is what it was in 0.15.x: AMD over the
+  whole basis. Callers wanting the peel must ask for it, and should ask for
+  `LuParams::dense_bump_max_dim` in the same breath — that route is the peel's
+  only real payoff, and it requires a triangularized symbolic to fire at all.
+  Setting the cap alongside any other constructor is now documented, and tested,
+  as an inert no-op.
+- **Why.** An ill-conditioned LP downstream (jkitchin/discopt, `bchoco06` root
+  relaxation) that had been certifying `Optimal` began returning `Numerical` —
+  a lost dual bound — with `dense_bump_max_dim` at its default of `0`, i.e. with
+  the route the peel exists to enable switched off. Bisected to the peel itself:
+  whole-basis AMD passes, peel-with-AMD-on-bump fails, peel-with-no-bump-ordering
+  fails.
+- **Not a stability defect, and the difference matters.** Every basis that LP's
+  simplex handed feral was dumped and re-factored both ways. Backward error is
+  ~1e-16 under both orderings on all of them, and forward error against a known
+  solution — which reaches 2.6e-11, the basis genuinely being ill-conditioned —
+  is **never worse** under the peel (ratios 0.0x–1.0x across all 30 bases of the
+  failing run). What changes is the rounding *trajectory*: the two orderings'
+  solves disagree in the bits the simplex's ratio test reads, the runs diverge
+  onto different pivot sequences, and this LP is conditioned badly enough that
+  one path certifies and the other trips the caller's numerical guard.
+- **So the revert rests on the peel having no standalone payoff**, not on a
+  stability argument. On a real QPLIB simplex basis it gives *more* fill (197,937
+  vs 190,654) for 1.04x on time — not a result worth perturbing a downstream
+  solver's arithmetic for. Nothing here says whole-basis AMD is the better
+  trajectory in general; it is the one that was in place when the downstream test
+  was green.
+- New in-tree: `tests/lu_default_ordering.rs` (a contract test — the measurement
+  above says there is no numerical difference to assert),
+  `tests/data/lu_bases/bchoco06_illcond_basis.mtx` (the worst-conditioned basis
+  of that run), and `examples/probe_illcond_ordering.rs` (the scorer that
+  produced the numbers, runnable on `tests/data/lu_bases` with no discopt
+  checkout).
+- Full reasoning and reproduction:
+  `dev/research/lu-ordering-and-kernel-2026-08-13.md` § Issue #163.
+
 ### Fixed — the basis-refactor harness reported population, not sample, standard deviation
 
 - `examples/basis_refactor.rs` divided the sum of squared deviations by
@@ -26,9 +66,10 @@ All notable changes to FERAL will be documented in this file.
   `cargo test` compiles examples but never runs `#[test]`s inside them, which is
   why a bench harness's own arithmetic was unguarded in the first place.
 
-### Added — Suhl–Suhl basis triangularization in the sparse LU's symbolic analysis
+### Added — Suhl–Suhl basis triangularization in the sparse LU's symbolic analysis *(opt-in)*
 
-- `SparseLuSymbolic::analyze` now peels column and row singletons to fixpoint
+- New `SparseLuSymbolic::analyze_triangularized` peels column and row singletons
+  to fixpoint
   (Suhl & Suhl, *ORSA J. Computing* **2**(4), 325–335, 1990) and runs the
   fill-reducing ordering on only the residual **bump**. Peeled pivots are
   structurally forced and both peeled blocks are upper triangular, so `L` is the
@@ -38,8 +79,12 @@ All notable changes to FERAL will be documented in this file.
 - The pass is purely structural, so the symbolic-reuse contract is unchanged — a
   handle built from one basis stays valid for any numerically different basis
   with the same pattern.
+- This shipped briefly as the behavior of `SparseLuSymbolic::analyze` itself and
+  was moved behind its own constructor before release; see the `Changed` entry
+  for issue #163 below. `analyze` is unchanged from 0.15.x: whole-basis AMD.
 - New: `SparseLuSymbolic::{bump_lo, bump_hi}`, `with_order`, and
-  `analyze_amd_only` (the pre-0.16 whole-basis ordering, retained for A/B).
+  `analyze_amd_only` (an explicit name for what `analyze` does, retained so
+  benchmark arms can name the two orderings side by side).
 - On a real simplex basis (`m = 3937`, `nnz = 28204`) the peel removes 85.6% of
   the columns in 0.148 ms, cutting the ordering from 9.837 ± 0.295 ms to
   0.851 ± 0.037 ms (the `±` were first published as 0.285 and 0.036; see the
@@ -74,11 +119,12 @@ All notable changes to FERAL will be documented in this file.
   vacuously against a fallback; the in-tree ones assert on it.
 - The route requires a symbolic that actually triangularized, and never applies
   to a bump that is the whole basis unless it also fits `dense_threshold`.
-  `natural`, `with_order` and `analyze_amd_only` report `(bump_lo, bump_hi) =
-  (0, m)` because they never look for structure, and `analyze` reports it when a
+  `natural`, `with_order`, `analyze` and `analyze_amd_only` report
+  `(bump_lo, bump_hi) = (0, m)` because they never look for structure, and
+  `analyze_triangularized` reports it when a
   basis has nothing to peel; without both guards a tridiagonal `m = 3000` under
   the cap was packed into a 72 MB `m²` buffer and factored densely, at 181 ms
-  (`natural`) / 297 ms (`analyze`) against 1.5 ms on the sparse path. The case
+  (`natural`) / 297 ms (peeled) against 1.5 ms on the sparse path. The case
   for the dense kernel rests on the peel having stripped the structure and left
   an irreducible core; with nothing stripped, whole-basis dense is
   `dense_threshold`'s decision, and it weighs density rather than dimension

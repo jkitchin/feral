@@ -106,7 +106,9 @@ fn main() {
     let cols = lp_basis(m, bump, band, 0xC0FFEE);
     let a = SparseColMatrix::from_sparse_columns(m, &cols).expect("basis");
     let nnz = a.nnz();
-    let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+    // `analyze_triangularized` (not `analyze`): the dense-bump arm below needs a
+    // peeled symbolic, and since issue #163 `analyze` no longer peels.
+    let sym = SparseLuSymbolic::analyze_triangularized(&a).expect("analyze");
     // Part A (PR #160) is on for both arms: the dense-bump route changes the
     // *factor*, and the point of this harness is to isolate what the solve-side
     // change does to a given factor. `bump_cap = 0` turns it off for comparison.
