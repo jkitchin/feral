@@ -1,0 +1,101 @@
+#+TITLE: Session 2026-08-13-01 — review of PR #160 (dense-bump route)
+#+STARTUP: showall
+
+* 13:05 :review:lu:pr160:
+Reviewed PR #160 (Suhl–Suhl triangularization + optional dense-bump route,
+3 commits, 11 files, +1376/-40) at high effort.
+
+First review pass ran against a stale =origin/main= (65895704 vs the PR base
+0bc77b8), so =git diff main...branch= spanned 101 files of already-merged work
+and every finding landed in code #160 never touched. Re-fetched and re-ran.
+Lesson: verify =git merge-base <base> <head>= equals the PR's base SHA before
+trusting a three-dot diff in a fresh clone.
+
+Core math of the PR checks out: the peel yields the claimed block structure, and
+the dense splice is exact given the caller's two structural checks — every
+bump-column entry lands either in =above= (already-pivoted front row, straight
+through to =U= because =L= is identity there) or in =packed=. Worst dense-route
+residual over randomized differential probes: 7.9e-16.
+
+Four findings; the user scoped the fix to the first two.
+
+* 13:40 :lu:bug:pr160:singular:
+*Finding 1 — dense route named the wrong column on a singular basis.*
+
+=factor_bump_dense= propagated =factorize_packed='s error with =?=, and
+=dense_factor.rs:411= constructs =SingularBasis { column: k }= with =k= the
+*block-local* column index. The sparse path emits =qcol[k]= (the original basis
+column) at all three of its sites.
+
+Evidence on the PR's own singular fixture: sparse reports =column: 11=, dense
+reports =column: 7=. This contradicts
+=tests/lu_sparse.rs::singular_basis_reports_original_column_not_factorization_position=,
+which exists precisely because a simplex driver knows original basis columns,
+not internal positions. The PR's new =singular_bump_is_reported_on_both_routes=
+matched =Err(SingularBasis { .. })= only, so it passed vacuously.
+
+Fix: =map_err= remapping =column= through =qcol[bump_lo + column]=, guarded by
+=column < b=. Strengthened the existing test to compare the two routes' columns
+rather than just their variants, and to pin the answer to the duplicated pair.
+
+* 14:10 :lu:bug:pr160:perf:gating:
+*Finding 2 — the dense route fired on symbolics that never triangularized.*
+
+=want_dense_bump= keyed only on =bump_hi - bump_lo= fitting the cap. But
+=natural=, =with_order= and =analyze_amd_only= all set =(bump_lo, bump_hi) =
+(0, m)= — "no structure known, treat the whole basis as bump" — so any basis
+under the cap had its *entire* basis packed into an =m²= f64 buffer and run
+through the dense kernel.
+
+First attempted fix was a =peeled = bump_lo > 0 || bump_hi < m= gate. It broke
+the PR's own =(0, 16, 0)= differential case (a genuinely dense 16x16 basis with
+no border, where the route legitimately wins) — recorded in tried-and-rejected.
+
+Measured on tridiagonal m=3000, cap=4096, release, this machine:
+
+| arm     | cap=0   | cap=4096 (before) | cap=4096 (after) |
+|---------+---------+-------------------+------------------|
+| natural | 1.49 ms | 181.11 ms (dense) | 1.30 ms (sparse) |
+| analyze | 1.49 ms | 297.28 ms (dense) | 1.26 ms (sparse) |
+
+The =analyze= row is the finding the review did *not* report and the reason
+provenance alone was insufficient: a tridiagonal has no singletons, so =analyze=
+peels nothing, reports =(0, m)= as a genuine measurement, and hit the same cliff
+at 297 ms. Gating on provenance alone would have left that at 200x.
+
+Shipped gate is two guards:
+1. =symbolic.triangularized= (new field; set by =analyze= only) — a default
+   =(0, m)= is not a measurement.
+2. =peeled || bump_dim <= params.dense_threshold= — an =analyze=d basis that
+   peels to nothing has had no structure stripped, so the argument for the dense
+   kernel (the peel leaves an irreducible core whose factor is dense) does not
+   apply; ordinary sparsity still governs and =dense_threshold= owns that call.
+
+Guard 2 keeps the =(0, 16, 0)= case working: 16 <= 128 = default
+=dense_threshold=.
+
+* 14:35 :lu:pr160:verified:
+Both new/strengthened tests fail against the unfixed source and pass with it —
+checked by stashing the =src/= changes and re-running:
+=2 failed= before, =5 passed= after. Full suite green (420 unit + all
+integration), =cargo fmt --check= clean, =cargo clippy --all-targets -D warnings=
+clean.
+
+Note: =pre-commit= is not installed in this container (=command not found=), so
+fmt/clippy were run manually per CLAUDE.md.
+
+* 14:40 :review:pr160:deferred:
+Two findings left unfixed, per the user's scoping to 1 and 2:
+- =src/lu/sparse_factor.rs= — =used_dense_bump=/=bump_dim= were spliced between
+  =factor_nnz='s doc comment and its signature, so =used_dense_bump= is
+  documented as "Total stored nonzeros in L and U" and =factor_nnz= is
+  undocumented.
+- =examples/basis_refactor.rs:69= — =mean_sd= divides by =n.max(2.0 - 1.0)=,
+  i.e. =n.max(1.0)=; clearly a typo for =(n - 1.0).max(1.0)=. Population rather
+  than sample SD, and the +/- figures in the PR body and CHANGELOG come from it.
+
+Also worth a maintainer's judgment (not a defect, and disclosed in the PR body):
+with the shipped default =dense_bump_max_dim: 0=, the peel alone regresses the
+numeric step 29% and fill 13% on the PR's own basis. Since a symbolic handle is
+reused across many refactorizations, the numeric step is the amortized steady
+state, so the default arm is the one the PR's data shows losing.

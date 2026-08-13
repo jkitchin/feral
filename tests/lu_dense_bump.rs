@@ -297,12 +297,30 @@ fn singular_bump_is_reported_on_both_routes() {
             ..base
         },
     );
-    assert!(
-        matches!(sparse, Err(FeralError::SingularBasis { .. })),
-        "sparse route missed a singular bump"
+    // Matching on `SingularBasis { .. }` alone passes vacuously against a route
+    // that names the wrong column, so compare the columns themselves. Both must
+    // report the *original basis column*, the contract
+    // `tests/lu_sparse.rs::singular_basis_reports_original_column_not_factorization_position`
+    // pins for the sparse path: `factorize_packed` names a block-local index,
+    // which is only the same number by accident.
+    let sparse_col = match sparse {
+        Err(FeralError::SingularBasis { column }) => column,
+        other => panic!("sparse route missed a singular bump: {other:?}"),
+    };
+    let dense_col = match dense {
+        Err(FeralError::SingularBasis { column }) => column,
+        other => panic!("dense route missed a singular bump: {other:?}"),
+    };
+    assert_eq!(
+        sparse_col, dense_col,
+        "routes disagree on which basis column is singular \
+         (sparse={sparse_col}, dense={dense_col}); the dense route must remap \
+         the block-local column through `qcol[bump_lo + k]`"
     );
+    // Columns 10 and 11 are the identical pair, so the singularity must be
+    // pinned to one of them and not to some unrelated position.
     assert!(
-        matches!(dense, Err(FeralError::SingularBasis { .. })),
-        "dense route missed a singular bump: {dense:?}"
+        sparse_col == 10 || sparse_col == 11,
+        "expected the duplicated column (10 or 11), got {sparse_col}"
     );
 }

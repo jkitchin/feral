@@ -941,7 +941,21 @@ fn factor_bump_dense(
         bparams.zero_pivot_tol = params.zero_pivot_tol * a_max / bump_a_max;
     }
     let mut dperm: Vec<usize> = (0..b).collect();
-    super::dense_factor::factorize_packed(&mut packed, &mut dperm, b, &bparams)?;
+    // `factorize_packed` names the *block-local* column in `SingularBasis`;
+    // local column `jj` is basis column `qcol[bump_lo + jj]`. Without this remap
+    // the two routes report different columns for the same singular basis (the
+    // sparse path emits `qcol[k]` throughout), and a simplex driver — which
+    // knows original basis columns, not internal positions — would repair the
+    // wrong one. Same contract as
+    // `tests/lu_sparse.rs::singular_basis_reports_original_column_not_factorization_position`.
+    super::dense_factor::factorize_packed(&mut packed, &mut dperm, b, &bparams).map_err(
+        |e| match e {
+            FeralError::SingularBasis { column } if column < b => FeralError::SingularBasis {
+                column: qcol[bump_lo + column],
+            },
+            other => other,
+        },
+    )?;
 
     // `dperm[n]` is the local row now in local pivot position `n`.
     for n in 0..b {
