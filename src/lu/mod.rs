@@ -135,6 +135,26 @@ pub struct LuParams {
     /// Cost of being wrong is bounded by memory: the route packs a `b*b`
     /// `f64` buffer, so `b = 1024` is 8 MB and `b = 4096` is 134 MB. Set this
     /// to the largest bump worth that allocation, or `0` to stay sparse.
+    ///
+    /// Applies only to a symbolic that actually triangularized, i.e. one built
+    /// by [`SparseLuSymbolic::analyze`]
+    /// ([`triangularized`](super::SparseLuSymbolic::triangularized)).
+    /// [`SparseLuSymbolic::natural`], [`SparseLuSymbolic::with_order`] and
+    /// [`SparseLuSymbolic::analyze_amd_only`] report the whole basis as bump
+    /// because they never looked for structure, so they never take this route
+    /// however large the cap.
+    ///
+    /// When `analyze` peels nothing and the bump *is* the whole basis, this cap
+    /// does not apply either — such a basis is bounded by
+    /// [`Self::dense_threshold`] instead. The case for the dense kernel rests on
+    /// the peel having stripped the structure and left an irreducible core; with
+    /// nothing stripped, whole-basis dense is `dense_threshold`'s call, and it
+    /// weighs density rather than dimension alone.
+    ///
+    /// [`SparseLuSymbolic::natural`]: super::SparseLuSymbolic::natural
+    /// [`SparseLuSymbolic::with_order`]: super::SparseLuSymbolic::with_order
+    /// [`SparseLuSymbolic::analyze_amd_only`]: super::SparseLuSymbolic::analyze_amd_only
+    /// [`SparseLuSymbolic::analyze`]: super::SparseLuSymbolic::analyze
     pub dense_bump_max_dim: usize,
     /// Scaling strategy applied before factorization.
     pub scaling: LuScaling,

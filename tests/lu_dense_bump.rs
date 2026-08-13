@@ -324,3 +324,74 @@ fn singular_bump_is_reported_on_both_routes() {
         "expected the duplicated column (10 or 11), got {sparse_col}"
     );
 }
+
+#[test]
+fn an_unpeeled_whole_basis_stays_on_the_sparse_route() {
+    // `dense_bump_max_dim` bounds a *residual bump*. A bump equal to the whole
+    // basis is not that, and it arises two ways: `natural`/`with_order`/
+    // `analyze_amd_only` report `(0, m)` without ever triangularizing, and
+    // `analyze` reports it when there is nothing to peel. Neither may route a
+    // whole sparse basis through the dense kernel — that would allocate an
+    // `m*m` f64 buffer and run the dense kernel over a tridiagonal.
+    //
+    // A tridiagonal has no row or column singletons, so it is unpeelable under
+    // every constructor, and `m` here is above the default `dense_threshold`
+    // (128) so the small-basis allowance does not apply either.
+    let m = 300;
+    let mut trip: Vec<(usize, usize, f64)> = Vec::new();
+    for i in 0..m {
+        trip.push((i, i, 4.0));
+        if i + 1 < m {
+            trip.push((i, i + 1, -1.0));
+            trip.push((i + 1, i, -1.0));
+        }
+    }
+    let a = build(m, &mut trip);
+    let params = LuParams {
+        // Far above `m`: if the gate keyed on dimension alone, every arm below
+        // would take the dense route.
+        dense_bump_max_dim: 4096,
+        ..LuParams::default()
+    };
+    assert!(
+        m > params.dense_threshold,
+        "test needs m above dense_threshold to exercise the guard"
+    );
+
+    let rev: Vec<usize> = (0..m).rev().collect();
+    let arms: Vec<(&str, SparseLuSymbolic)> = vec![
+        ("natural", SparseLuSymbolic::natural(m)),
+        (
+            "with_order",
+            SparseLuSymbolic::with_order(m, rev).expect("order"),
+        ),
+        (
+            "analyze_amd_only",
+            SparseLuSymbolic::analyze_amd_only(&a).expect("amd_only"),
+        ),
+        ("analyze", SparseLuSymbolic::analyze(&a).expect("analyze")),
+    ];
+
+    let x_ref: Vec<f64> = (0..m).map(|i| 1.0 + (i % 7) as f64).collect();
+    let b = matvec(&a, &x_ref);
+
+    for (name, sym) in arms {
+        assert_eq!(
+            (sym.bump_lo, sym.bump_hi),
+            (0, m),
+            "{name}: expected an unpeeled whole-basis bump"
+        );
+        let mut lu = SparseLu::factor(&a, &sym, params.clone()).expect("factor");
+        assert!(
+            !lu.used_dense_bump(),
+            "{name}: took the dense route on an unpeeled whole-basis bump"
+        );
+        // And it still solves — the gate must not have broken the sparse path.
+        let mut x = b.clone();
+        lu.ftran(&mut x).expect("ftran");
+        let ax = matvec(&a, &x);
+        let r: Vec<f64> = ax.iter().zip(b.iter()).map(|(p, q)| p - q).collect();
+        let resid = rel_resid(&r, &b);
+        assert!(resid < 1e-12, "{name}: residual {resid:e}");
+    }
+}

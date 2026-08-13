@@ -49,6 +49,24 @@ All notable changes to FERAL will be documented in this file.
 - New: `SparseLu::{used_dense_bump, bump_dim}`. Because the fallback is silent,
   `used_dense_bump()` is what keeps a benchmark or differential test from passing
   vacuously against a fallback; the in-tree ones assert on it.
+- The route requires a symbolic that actually triangularized, and never applies
+  to a bump that is the whole basis unless it also fits `dense_threshold`.
+  `natural`, `with_order` and `analyze_amd_only` report `(bump_lo, bump_hi) =
+  (0, m)` because they never look for structure, and `analyze` reports it when a
+  basis has nothing to peel; without both guards a tridiagonal `m = 3000` under
+  the cap was packed into a 72 MB `m²` buffer and factored densely, at 181 ms
+  (`natural`) / 297 ms (`analyze`) against 1.5 ms on the sparse path. The case
+  for the dense kernel rests on the peel having stripped the structure and left
+  an irreducible core; with nothing stripped, whole-basis dense is
+  `dense_threshold`'s decision, and it weighs density rather than dimension
+  alone.
+- New: `SparseLuSymbolic::triangularized`, which distinguishes a *measured*
+  `(0, m)` bump from a constructor default. The two need opposite answers from
+  `dense_bump_max_dim` and are indistinguishable from the indices alone.
+- On a singular basis the dense route now reports the **original basis column**
+  in `FeralError::SingularBasis`, matching the sparse path. It previously
+  surfaced the block-local index from the packed kernel (column 7 where the
+  sparse path said 11), which is not a column a simplex driver can act on.
 
 ## [0.15.1] - 2026-08-10
 

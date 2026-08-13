@@ -294,7 +294,28 @@ impl SparseLu {
         let bump_lo = symbolic.bump_lo;
         let bump_hi = symbolic.bump_hi;
         let bump_dim = bump_hi.saturating_sub(bump_lo);
-        let want_dense_bump = bump_dim >= 2
+        // Two guards, because "bump == whole basis" arises two ways and only one
+        // of them is a bump.
+        //
+        // 1. `natural`, `with_order` and `analyze_amd_only` claim `(0, m)`
+        //    without ever triangularizing. Their "bump" is a default, not a
+        //    measurement, so they are never eligible.
+        // 2. `analyze` reports `(0, m)` when a basis has nothing to peel. That
+        //    *is* a measurement, but it says the peel failed to expose anything
+        //    — so the argument for the dense kernel does not apply. The reason a
+        //    peeled bump's factor is dense is that the peel already stripped the
+        //    structure and left the irreducible core; with nothing stripped,
+        //    ordinary sparsity still governs. Such a basis may go dense only
+        //    within `dense_threshold`, the bound that governs whole-basis dense
+        //    decisions (and which weighs density, not just dimension).
+        //
+        // Without guard 2 a `natural`-ordered *or* unpeelable tridiagonal
+        // 3000x3000 under the cap goes 1.06 ms -> 100.1 ms and allocates a
+        // 72 MB `m²` buffer.
+        let peeled = bump_lo > 0 || bump_hi < m;
+        let want_dense_bump = symbolic.triangularized
+            && (peeled || bump_dim <= params.dense_threshold)
+            && bump_dim >= 2
             && params.dense_bump_max_dim > 0
             && bump_dim <= params.dense_bump_max_dim
             && bump_hi <= m;

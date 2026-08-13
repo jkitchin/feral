@@ -38,6 +38,19 @@ pub struct SparseLuSymbolic {
     pub bump_lo: usize,
     /// One past the last pivot position of the residual bump.
     pub bump_hi: usize,
+    /// Whether triangularization actually ran, i.e. whether `bump_lo`/`bump_hi`
+    /// are a *measured* peel rather than the "no structure known" default.
+    ///
+    /// [`Self::analyze`] sets this; [`Self::natural`], [`Self::with_order`] and
+    /// [`Self::analyze_amd_only`] do not — they claim `(0, m)` because they
+    /// never looked, not because they looked and found the whole basis
+    /// irreducible. The two cases are indistinguishable from the indices alone,
+    /// and they warrant opposite answers from
+    /// [`LuParams::dense_bump_max_dim`](super::LuParams::dense_bump_max_dim):
+    /// an `analyze`d basis that peels to nothing really is a dense block worth
+    /// the dense kernel, while an unpeeled `natural` ordering of a large sparse
+    /// basis is the pathological case that route must never take.
+    pub triangularized: bool,
 }
 
 impl SparseLuSymbolic {
@@ -62,7 +75,7 @@ impl SparseLuSymbolic {
             }
         }
 
-        Ok(Self::from_qcol(m, qcol, t.bump_lo, t.bump_hi))
+        Ok(Self::from_qcol(m, qcol, t.bump_lo, t.bump_hi, true))
     }
 
     /// AMD over the whole basis, with no triangularization — feral's pre-0.16
@@ -74,12 +87,12 @@ impl SparseLuSymbolic {
             return Ok(Self::empty());
         }
         let qcol = amd_permutation(a)?;
-        Ok(Self::from_qcol(m, qcol, 0, m))
+        Ok(Self::from_qcol(m, qcol, 0, m, false))
     }
 
     /// Identity column ordering (natural order) — for testing and as a fallback.
     pub fn natural(m: usize) -> Self {
-        Self::from_qcol(m, (0..m).collect(), 0, m)
+        Self::from_qcol(m, (0..m).collect(), 0, m, false)
     }
 
     /// Build a handle from an explicit column order, claiming no triangular
@@ -101,7 +114,7 @@ impl SparseLuSymbolic {
             }
             seen[q] = true;
         }
-        Ok(Self::from_qcol(m, qcol, 0, m))
+        Ok(Self::from_qcol(m, qcol, 0, m, false))
     }
 
     fn empty() -> Self {
@@ -111,10 +124,17 @@ impl SparseLuSymbolic {
             qcol_inv: Vec::new(),
             bump_lo: 0,
             bump_hi: 0,
+            triangularized: true,
         }
     }
 
-    fn from_qcol(m: usize, qcol: Vec<usize>, bump_lo: usize, bump_hi: usize) -> Self {
+    fn from_qcol(
+        m: usize,
+        qcol: Vec<usize>,
+        bump_lo: usize,
+        bump_hi: usize,
+        triangularized: bool,
+    ) -> Self {
         let mut qcol_inv = vec![0usize; m];
         for (k, &q) in qcol.iter().enumerate() {
             qcol_inv[q] = k;
@@ -125,6 +145,7 @@ impl SparseLuSymbolic {
             qcol_inv,
             bump_lo,
             bump_hi,
+            triangularized,
         }
     }
 }
