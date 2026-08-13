@@ -554,7 +554,7 @@ impl SparseLu {
             }
         }
         rw.close();
-        rw.list.sort_unstable_by(|&a, &b| b.cmp(&a));
+        rw.list.sort_unstable_by_key(|&k| std::cmp::Reverse(k));
         rw.sweeps += 1;
         rw.nodes += rw.list.len();
         true

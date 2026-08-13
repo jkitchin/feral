@@ -347,7 +347,7 @@ impl SparseLu {
             }
         }
         hw.finish_reach();
-        hw.order.sort_unstable_by(|&a, &b| b.cmp(&a));
+        hw.order.sort_unstable_by_key(|&k| std::cmp::Reverse(k));
         let HyperWork { w, order, work, .. } = hw;
         for &k in order.iter() {
             let (lo, hi) = (self.l_col_ptr[k], self.l_col_ptr[k + 1]);

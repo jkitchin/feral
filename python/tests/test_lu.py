@@ -21,6 +21,26 @@ def _dense_basis(n: int, seed: int) -> np.ndarray:
     return A
 
 
+def _lu_matrix_from_scipy(S):
+    """Build an ``LuMatrix`` from a scipy sparse matrix.
+
+    ``LuMatrix`` requires strictly ascending row indices per column. scipy's
+    sparse *arithmetic* (``A + B``) makes no such guarantee about its output and
+    which versions happen to sort differs, so normalize rather than assume —
+    that difference is why ``test_sparse_rhs_solve_work_does_not_grow_with_n``
+    passed locally and failed on CI.
+    """
+    S = S.tocsc()
+    S.sum_duplicates()
+    S.sort_indices()
+    return feral.LuMatrix(
+        S.shape[0],
+        S.indptr.astype(np.int64),
+        S.indices.astype(np.int64),
+        S.data,
+    )
+
+
 def test_dense_ftran_btran_residual():
     A = _dense_basis(8, 0)
     lu = feral.LuFactor(feral.LuMatrix.from_dense(A), force_dense=True)
@@ -139,11 +159,8 @@ def test_sparse_rhs_ftran_btran_match_dense_entry_point():
     """
     sp = pytest.importorskip("scipy.sparse")
     n = 200
-    S = (sp.random(n, n, density=0.01, random_state=11) + sp.eye(n) * 6).tocsc()
-    lu = feral.LuFactor(
-        feral.LuMatrix(n, S.indptr.astype(np.int64), S.indices.astype(np.int64), S.data),
-        force_dense=False,
-    )
+    S = sp.random(n, n, density=0.01, random_state=11) + sp.eye(n) * 6
+    lu = feral.LuFactor(_lu_matrix_from_scipy(S), force_dense=False)
     for k in (0, 1, n // 3, n - 1):
         e = np.zeros(n)
         e[k] = 1.0
@@ -174,11 +191,8 @@ def test_sparse_rhs_solve_work_does_not_grow_with_n():
     def median_work(n: int) -> int:
         # Bidiagonal: the reach out of a unit vector is a short path whose
         # length does not depend on n.
-        S = (sp.eye(n) * 5 + sp.eye(n, k=-1)).tocsc()
-        lu = feral.LuFactor(
-            feral.LuMatrix(n, S.indptr.astype(np.int64), S.indices.astype(np.int64), S.data),
-            force_dense=False,
-        )
+        S = sp.eye(n) * 5 + sp.eye(n, k=-1)
+        lu = feral.LuFactor(_lu_matrix_from_scipy(S), force_dense=False)
         work = []
         for k in range(n - 8, n):  # near the end: the shortest reaches
             lu.ftran_sparse(np.array([k], dtype=np.int64), np.array([1.0]))

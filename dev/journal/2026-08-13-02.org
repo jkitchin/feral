@@ -323,3 +323,49 @@ where the first line is the summary shown in the method list — so
 =factor_nnz= and gave both real doc comments. =cargo doc --no-deps= produces no
 warnings for any lu/ file (the two it does emit are pre-existing, in
 =src/dense/factor.rs=).
+
+* 21:15 :issue161:ci:pr162:
+Opened PR #162. CI red on two jobs, both real, both caused by *my local
+environment being weaker than CI's*.
+
+*1. clippy =unnecessary_sort_by= (job "check").*
+
+  src/lu/sparse_hyper.rs:350  hw.order.sort_unstable_by(|&a, &b| b.cmp(&a));
+  src/lu/sparse_solve.rs:557  rw.list.sort_unstable_by(|&a, &b| b.cmp(&a));
+
+Both fixed to =sort_unstable_by_key(|&k| std::cmp::Reverse(k))= per clippy's own
+suggestion.
+
+*Root cause of the miss, which matters more than the fix.* This container had
+=cargo 1.94.1 / clippy 0.1.94=; CI uses =dtolnay/rust-toolchain@stable=, which is
+=1.97=. The lint fires in 1.97 and not in 1.94, so "clippy -D warnings clean"
+locally was never the same gate CI runs. Ran =rustup update stable= (now
+=clippy 0.1.97 (8bab26f4f6)=) and re-ran the whole gate: lib, =--all-targets=,
+and =-p feral-diagnostics --all-targets= all clean, fmt clean, 88 binaries 0
+failures under the new compiler.
+
+Lesson for future sessions in a fresh container: check =cargo --version= against
+=dtolnay/rust-toolchain@stable= before trusting a local clippy pass. The repo
+pins no toolchain file, so the container's rust is whatever the image shipped.
+
+*2. Python =test_sparse_rhs_solve_work_does_not_grow_with_n= (wheel jobs).*
+
+  ValueError: row indices not strictly ascending
+
+=LuMatrix= requires strictly ascending row indices per column. My test built its
+fixture with scipy sparse *arithmetic* (=sp.eye(n)*5 + sp.eye(n,k=-1)=), and
+scipy makes no guarantee about the index ordering of an arithmetic result —
+which versions happen to sort differs. Local scipy is 1.17.1, where
+=has_sorted_indices=True= on that expression; CI's does not sort it. That is
+exactly why it passed here and failed there.
+
+Fixed with a =_lu_matrix_from_scipy= helper that calls =sum_duplicates()= +
+=sort_indices()= before handing the arrays over, applied to both new tests (the
+=sp.random(...) + sp.eye(...)= one had the same latent hazard and only passed by
+luck).
+
+*Verified rather than assumed.* Since local scipy sorts, a green local run would
+not have proven anything. Reproduced the failure directly by taking the same
+matrix and reversing the indices within each column: =LuMatrix= rejects it with
+the identical message, and the normalized copy is accepted. So the fix addresses
+the CI failure, not a coincidence.
