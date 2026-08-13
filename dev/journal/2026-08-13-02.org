@@ -675,3 +675,31 @@ Note: =python/= has 48 pre-existing =cargo clippy -D warnings= failures
 (=useless_conversion= etc. from pyo3 under clippy 1.97). Not introduced here, and
 not a CI gate — python is outside the root workspace and is covered by
 =python-wheels.yml=, not the clippy hook. =cargo check= is clean.
+
+* 20:05 :issue163:measurement:trajectory:
+Asked whether the fix actually unblocks what #163 wants — the issue's stated
+motivation is taking =dense_bump_max_dim = 4096= (1.71x on a discopt root LP),
+which under the new pairing also means taking the peel. So: does peel + cap
+reproduce the failure?
+
+Tested. Temporarily set feral's =LuParams::default()= to
+=dense_bump_max_dim: 4096= AND =analyze= to =analyze_triangularized= — i.e. a
+caller opting into both — and ran the discopt test:
+
+  AMD only, no cap (shipped default)   PASSED
+  peel, no cap                         FAILED  left: Numerical
+  peel + cap 4096                      PASSED
+
+*The combination worth 1.71x passes.* The pairing does not strand the caller: they
+can ship #160 and take the speedup.
+
+It also settles what kind of result this is. Three configurations, three
+arithmetic trajectories, and the failing one is the middle — not an endpoint. The
+dense-bump route reorders the bump's arithmetic again and lands back on a
+certifying path. Nothing about "less accurate" survives this; it is coin-flip
+sensitivity of one ill-conditioned LP to any perturbation of the bits its ratio
+test reads. Reinforces the caveat already in the docs: whole-basis AMD is not
+established as the better trajectory, only as the one that was green.
+
+Trees restored to committed state (feral and the discopt scratch clone both
+=git status= clean) — the params change was never committed.

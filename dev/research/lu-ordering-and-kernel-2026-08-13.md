@@ -193,6 +193,31 @@ was green. A different ill-conditioned LP could just as easily prefer the peel;
 that is the nature of a trajectory-sensitivity result, and it is the honest
 reading.
 
+## Does the fix strand the 1.71x?
+
+No. #163's stated motivation is taking `dense_bump_max_dim = 4096`, which under
+the new pairing also means taking the peel — so the obvious worry is that the
+configuration worth 1.71x is exactly the one that fails. Tested by temporarily
+setting `LuParams::default()` to `dense_bump_max_dim: 4096` *and* `analyze` to
+`analyze_triangularized`, i.e. a caller opting into both:
+
+| configuration | `bchoco06_illcond_scaled_path_recovers_bound_649` |
+|---|---|
+| whole-basis AMD, no cap (shipped default) | **PASSED** |
+| peel, no cap (#160 as merged) | **FAILED** — `Numerical` |
+| **peel + cap 4096** | **PASSED** |
+
+The combination worth 1.71x passes. #160 can ship and the speedup can be taken.
+
+This also settles what kind of result the whole issue is. Three configurations,
+three arithmetic trajectories, and the failing one is the *middle*, not an
+endpoint — the dense-bump route reorders the bump's arithmetic again and lands
+back on a certifying path. No ordering-quality story survives that. It is
+coin-flip sensitivity of one ill-conditioned LP to any perturbation of the bits
+its ratio test reads, which is exactly why the revert is argued from cost-benefit
+above and why the caveat about whole-basis AMD not being established as *better*
+is stated as strongly as it is.
+
 ## Regression coverage
 
 `tests/lu_default_ordering.rs` — a *contract* test, since the measurement above
