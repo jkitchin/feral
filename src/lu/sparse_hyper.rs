@@ -41,9 +41,16 @@
 //! explicit stack, `sort_unstable`, clear over the touched list) comes from.
 //! The two are deliberately parallel but not shared: `compute_spike` fuses its
 //! scatter with the update's work accounting and the leaving column's scale
-//! factor. `sparse_spike_matches_dense_ftran_partial` in the test file pins
-//! this module's `L`-solve-plus-etas against the dense `ftran_partial` so the
-//! two cannot drift apart unnoticed.
+//! factor, so extracting a common helper would have meant reshaping a delicate,
+//! well-tested path for the benefit of a new one.
+//!
+//! That duplication is a real maintenance hazard and is guarded end to end
+//! rather than at the seam: every test in `tests/lu_sparse_rhs.rs` compares this
+//! module against the dense entry point on the same factor, and
+//! `sparse_solves_track_forrest_tomlin_updates` does so across an update chain —
+//! which is the case where the `L`-solve and the eta replay actually have to
+//! agree with `spike_space`. A divergence shows up there as a numeric
+//! disagreement, not as a silent drift.
 
 use super::sparse_factor::{FtOp, SparseLu};
 use crate::error::FeralError;
