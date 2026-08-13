@@ -362,7 +362,7 @@ fn umax(u: &[f64]) -> f64 {
 
 /// Right-looking outer-product LU with threshold partial pivoting, in place on
 /// the packed buffer. `perm` starts as identity and accumulates row swaps.
-fn factorize_packed(
+pub(super) fn factorize_packed(
     packed: &mut [f64],
     perm: &mut [usize],
     m: usize,

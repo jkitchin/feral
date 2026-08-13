@@ -140,3 +140,6 @@ debug = true
 
 [[example]]
 name = "cmp_ordering_accuracy"
+
+[[example]]
+name = "basis_refactor"

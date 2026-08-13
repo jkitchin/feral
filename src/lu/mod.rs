@@ -21,6 +21,7 @@ pub mod sparse_factor;
 pub mod sparse_matrix;
 pub mod sparse_solve;
 pub mod sparse_symbolic;
+pub(crate) mod sparse_triangular;
 pub mod sparse_update;
 
 pub use dense_factor::DenseLu;
@@ -119,6 +120,42 @@ pub struct LuParams {
     pub max_updates: usize,
     /// Bases with `m` at or below this use the dense path unconditionally.
     pub dense_threshold: usize,
+    /// Maximum dimension of a post-triangularization **bump** that
+    /// [`SparseLu::factor`](super::SparseLu::factor) routes through the dense
+    /// kernel instead of the sparse scatter kernel. `0` (the default) disables
+    /// the route entirely.
+    ///
+    /// After a Suhl–Suhl peel the residual bump is small but its *factor* is
+    /// dense — 42% on a measured QPLIB simplex basis whose bump was 566x566 at
+    /// 2.2% **input** density — which is the worst case for a scalar sparse
+    /// scatter kernel and the best case for a blocked dense one (6.05 ms vs
+    /// 27.3 ms on that block). [`Self::dense_threshold`] cannot express this:
+    /// it keys on input density and on the dimension of the *whole* basis.
+    ///
+    /// Cost of being wrong is bounded by memory: the route packs a `b*b`
+    /// `f64` buffer, so `b = 1024` is 8 MB and `b = 4096` is 134 MB. Set this
+    /// to the largest bump worth that allocation, or `0` to stay sparse.
+    ///
+    /// Applies only to a symbolic that actually triangularized, i.e. one built
+    /// by [`SparseLuSymbolic::analyze`]
+    /// ([`triangularized`](super::SparseLuSymbolic::triangularized)).
+    /// [`SparseLuSymbolic::natural`], [`SparseLuSymbolic::with_order`] and
+    /// [`SparseLuSymbolic::analyze_amd_only`] report the whole basis as bump
+    /// because they never looked for structure, so they never take this route
+    /// however large the cap.
+    ///
+    /// When `analyze` peels nothing and the bump *is* the whole basis, this cap
+    /// does not apply either — such a basis is bounded by
+    /// [`Self::dense_threshold`] instead. The case for the dense kernel rests on
+    /// the peel having stripped the structure and left an irreducible core; with
+    /// nothing stripped, whole-basis dense is `dense_threshold`'s call, and it
+    /// weighs density rather than dimension alone.
+    ///
+    /// [`SparseLuSymbolic::natural`]: super::SparseLuSymbolic::natural
+    /// [`SparseLuSymbolic::with_order`]: super::SparseLuSymbolic::with_order
+    /// [`SparseLuSymbolic::analyze_amd_only`]: super::SparseLuSymbolic::analyze_amd_only
+    /// [`SparseLuSymbolic::analyze`]: super::SparseLuSymbolic::analyze
+    pub dense_bump_max_dim: usize,
     /// Scaling strategy applied before factorization.
     pub scaling: LuScaling,
     /// Maximum iterative-refinement steps in `ftran_refined`/`btran_refined`.
@@ -205,6 +242,7 @@ impl Default for LuParams {
             max_growth: 1e8,
             max_updates: 64,
             dense_threshold: 128,
+            dense_bump_max_dim: 0,
             scaling: LuScaling::None,
             refine_steps: 0,
             refine_tol: 1e-12,
