@@ -6389,3 +6389,41 @@ expensive merges. The knob defaults to `None`, so the default path is
 unaffected, but the sweep recorded in
 `dev/research/amalgamation-cost-model-2026-08-09.md` was taken under the old
 model and its numbers do not transfer.
+
+## 2026-08-13 — the LU solve's singularity guard covers the reached rows, not all rows
+
+Issue #161B made the sparse LU's gather-form triangular sweeps reach-limited.
+That required deciding what happens to the `SingularBasis` guard on `U`'s stored
+diagonal (absent / zero / non-finite / not stored diagonal-first — the L10
+hardening), which until now ran on **every row of `U` on every solve**.
+
+**Decision: the guard is evaluated on the rows the solution depends on.**
+`ut_solve` skips rows where `s[i] == 0.0` (unconditionally, matching what
+`lsolve` has always done); `usolve` on the reach-limited route skips rows
+outside the reach. The dense fallback route keeps the full every-row check.
+
+**Why this is sound and not merely cheaper.** A row `k` that is skipped has
+`s[k] == 0` and no reached predecessor, so back substitution would assign it
+`0 / U[k,k]`. If `U[k,k]` is healthy that is `0`, which is what leaving the
+position alone already gives. If `U[k,k]` is zero the row states `0 = 0`: the
+system is consistent and underdetermined there, and `0` remains *a* correct
+solution component. No solve returns a different or wrong answer.
+
+**What is genuinely given up.** The *diagnostic* that the factor is degenerate
+somewhere the caller's right-hand side never touched. That was always incidental
+— a solve is not a factor validity check — and the primary detection remains
+where it belongs: at factor and update time, against the pivot tolerance, where
+singularity is decided rather than stumbled over. A caller who wants the strict
+old behavior sets `hyper_sparse_max_density = 0.0`, which restores the previous
+solve exactly.
+
+This is recorded as a decision rather than an implementation detail because it
+narrows an always-on guard that an earlier repo review (L10) deliberately made
+always-on. The narrowing is in *coverage per solve*, not in the guard itself:
+a row that is reached is still checked in every build mode, and the two tests
+that pin L10 (`zero_u_diagonal_errors_instead_of_inf`,
+`misplaced_u_diagonal_errors_instead_of_silent_wrong_pivot`) still pass
+unchanged, because a corrupted row that the solution depends on is still hit.
+
+Full reasoning: `dev/research/hyper-sparse-solves-2026-08-13.md` § Semantics
+that change.

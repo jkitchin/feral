@@ -1,0 +1,141 @@
+#+TITLE: Journal 2026-08-13-01
+#+STARTUP: showall
+
+* 15:05 :issue161:lu:orient:
+Goal for this session: issue #161 part B — hyper-sparse triangular solves.
+
+Issue #161 has two halves. Part A (numeric factorization 1.6-3.9x SuperLU on
+real LP bases) is already implemented and measured in PR #160
+(Suhl-Suhl triangularization + dense-bump splice, open against main, 3.39x on
+the bump-heavy class). Part B (triangular solves not work-proportional) is
+filed as "described, not implemented" — the issue explicitly says the numbers
+size the prize but do not demonstrate a fix. That is the gap to close.
+
+Not touching part A: PR #160 is open and measured; duplicating it here would
+conflict.
+
+* 15:20 :issue161:lu:codeinspection:
+Read the four triangular kernels in =src/lu/sparse_solve.rs=. They split into
+two shapes, and the split explains the issue's headline number exactly:
+
+- =lsolve= (L y = s) and =ut_solve= (U^T z = s) are *scatter* form. They test
+  =s[k] == 0.0= and skip, so their flop count is already proportional to the
+  solution.
+- =usolve= (U w = s) and =lt_solve= (L^T v = s) are *gather* form. Every row
+  of U / every column of L is read regardless of what is nonzero:
+  =O(nnz(U))= and =O(nnz(L))= on every call.
+
+Issue #161 measured "0.74x the cost for 0.0003x the output". Half the solve
+going to ~0 and half staying at full cost predicts ~0.5x-0.75x. Consistent.
+The gather halves are the target.
+
+Third finding, not in the issue: =ut_solve= dereferences =u_rows[i]= (one heap
+allocation per row) to read =row.first()= *before* testing =s[i]=. So although
+its flops are proportional, it pays m cache misses per call regardless of
+sparsity. =lsolve= already hoists its zero test; =ut_solve= does not. That is a
+one-line fix independent of everything else.
+
+* 15:35 :issue161:lu:design:
+The predecessor graphs the reach needs:
+
+- =usolve=: edges =c -> {k : U[k,c] != 0}=. That is exactly =u_above[c]=,
+  which already exists (built at =sparse_factor.rs:486=, maintained
+  incrementally across FT updates at =sparse_update.rs:236=, and invariant-
+  checked in =verify=). Nothing to build.
+- =lt_solve=: edges =i -> {k : L[i,k] != 0}= — the row-wise structure of L.
+  L is stored CSC only. Must be built. Safe to build once at factor time
+  because the FT update never touches the base L (documented at
+  =sparse_factor.rs:41=).
+
+Topological order: descending =uperm[k]= (triangular rank) for usolve —
+*not* position index, since U is upper triangular in uperm order after an FT
+update — and descending position for lt_solve.
+
+=compute_spike= (=sparse_update.rs:335=) already does this exact shape for the
+L graph: mark array, explicit stack, =sort_unstable=, clear marks over the
+touched list. Following that idiom rather than inventing a second one.
+
+Research note written to =dev/research/hyper-sparse-solves-2026-08-13.md=
+before touching any code, per protocol.
+
+* 16:40 :issue161:lu:bug:tests:
+The sweep counter earned its keep on the first run. All nine differential
+tests passed on correctness and =reach_route_agrees_with_dense_route_on_unit_rhs=
+failed on the vacuity assertion:
+
+  the reach route must have fired on most of the 400 ftran + 400 btran
+  sweeps, got 0
+
+Cause: =reach_cap()= tested =self.reach.mark_len() != self.m= to decide whether
+the workspace was live — but =ftran_core= =mem::take=s the workspace out of
+=self= for the duration of the call, so =self.reach= is the empty =Default= at
+exactly the moment the test runs. The route was disabled on every solve and
+every correctness test still passed, because the dense fallback is correct.
+
+That is the whole argument for =hyper_sparse_sweeps()= existing. Without it
+this ships as a no-op with a green suite.
+
+Fixed by testing the taken-out =rw= instead.
+
+* 16:55 :issue161:lu:measurement:
+First interleaved A/B, m=4000, 400-col bump, unit-vector rhs (1280 calls/arm):
+
+  dense sweep     ftran mean 68.3  p50 60.1 us | btran mean 57.5  p50 51.3 us
+  reach-limited   ftran mean 35.0  p50 23.5 us | btran mean 33.5  p50 23.9 us
+  -->             ftran 1.95x mean / 2.56x p50 | btran 1.72x / 2.15x
+  dense-rhs fallback 0.97x   max |diff| = 0.000e0
+
+Bit-identical between routes, which is expected: the omitted terms are exactly
+=v * 0.0=.
+
+Solution density is bimodal on this fixture — ftran(e_i) has p50=3 nonzeros and
+p90=366 — so the mean is set by the minority that reach through the bump and
+understates the hyper-sparse case. Reporting both, not the flattering one.
+
+* 17:10 :issue161:lu:measurement:threshold:
+Swept =hyper_sparse_max_density= to choose the default rather than guessing:
+
+  0.05  2.08x   3.1 nodes/sweep   fallback 0.98x
+  0.10  2.06x  32.8               0.97x
+  0.25  2.04x  39.5               0.98x
+  0.50  2.04x  39.5               0.93x
+  1.00  1.98x 133.8               0.67x
+
+The win is flat — the solves that matter have reaches far below any of these.
+What the cap controls is the *downside*, and 1.00 (where nothing can ever abort)
+shows what that is worth: 0.67x on a dense rhs. Shipping 0.25.
+
+* 17:30 :issue161:lu:negative:
+Chased the residual O(m). A hyper-sparse ftran at m=4000 still costs ~22 us with
+a reach of 3.4 positions, so I hypothesised the four permuted gather/scatters
+around the core solve (all m accesses are random through a permutation) and
+replaced them with fill + sequential scan + one random access per nonzero.
+
+It does nothing. A/B toggling only that gate:
+
+  sparse marshal   ftran 33.6  btran 31.6  fallback 0.90x
+  dense  marshal   ftran 31.3  btran 33.0  fallback 0.93x
+
+The arms straddle each other. Reverted; written up in tried-and-rejected.md.
+
+The hypothesis was wrong because the permuted access is random *within 32 KB*,
+which is L1/L2-resident — it was never paying the misses I assumed. A phase
+probe shows the residual spread evenly over ~6 linear passes:
+
+  loop base (fill)                 0.2 us
+  ftran_partial (P-gather+lsolve) 10.3 us
+  ftran - ftran_partial           13.2 us
+  full ftran                      22.1 us
+
+There is no single term left. Getting under the O(m) floor needs a sparse-rhs
+entry point, i.e. an API addition, not a cheaper walk of a dense one.
+
+* 17:50 :issue161:session:tests:
+Full suite green: 40 test binaries, 0 failures, =cargo test --release=.
+=cargo clippy --all-targets -- -D warnings= clean, =cargo fmt= clean.
+
+=cargo run --bin bench --release= runs but the container has **no corpus** —
+every partition reports N/A / "no matrices have oracle timings", same as
+session 2026-08-10-01. No LDLT regression comparison is possible here. The
+change is confined to =src/lu/=, which the LDLT corpus does not exercise, but
+that is an argument for low risk, not evidence of no regression.

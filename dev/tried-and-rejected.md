@@ -5233,3 +5233,39 @@ predicted **1.68-1.9x**. The real end-to-end win from the inline-key heap was
 Microbenchmarks of one memory access pattern do not predict a loop that also
 does heap sifting and comparison work; scale by the measured share of the loop
 before believing them.
+
+## 2026-08-13 — sparse permuted marshalling around the LU triangular solves
+
+**Rejected on measurement (issue #161B).** Having made the gather-form
+triangular sweeps reach-limited, a hyper-sparse `ftran` on `m = 4000` still cost
+~20 us for a solution with a p50 of 3 nonzeros, so I looked for the next `O(m)`
+term. The hypothesis was the four permuted gather/scatters around the core solve
+(`out[k] = rhs[perm[k]]`, `rhs[qcol[k]] = s[k]`, and their `btran` mirrors):
+each reads or writes through a permutation, so all `m` accesses are random. The
+replacement was a `fill(0.0)` plus a *sequential* scan plus one random access
+per nonzero, gated on the same switch as the reach route so the feature-off path
+stayed byte-identical.
+
+It does nothing. Interleaved A/B on the same basis, toggling only that gate:
+
+```
+                     ftran mean   btran mean   dense-rhs fallback
+  sparse marshal      33.6 us      31.6 us        0.90x
+  dense marshal       31.3 us      33.0 us        0.93x
+```
+
+The two arms straddle each other (ftran favours dense marshalling, btran favours
+sparse) — that is noise, not a signal, and the dense-rhs fallback is if anything
+slightly worse with it.
+
+**Why the hypothesis was wrong.** The permuted access is random but it is random
+*within a 32 KB buffer*, which sits in L1/L2 — so it was never paying the cache
+misses the reasoning assumed. What the phase probe actually showed is that the
+residual cost is spread evenly across all ~6 `O(m)` linear passes
+(`ftran_partial` alone, which is just the `P`-gather plus `lsolve`, was 10.3 of
+the 22.1 us), at roughly 2-3 us per pass on this machine. There is no single
+term left to remove: getting below the `O(m)` floor needs a **sparse-rhs entry
+point**, not a cheaper way to walk a dense one.
+
+The code was reverted. `dev/research/hyper-sparse-solves-2026-08-13.md` records
+the floor and names the API change that would lift it.

@@ -131,6 +131,19 @@ pub struct SparseLu {
     /// `O(a_max)` bump pivots — and since `refactor()` reproduces the same
     /// high-growth factor, update→refactor→retry livelocks (issue #118).
     pub(super) a_max: f64,
+    /// Row-wise column index of `L`: `l_row_cols[l_row_ptr[i]..l_row_ptr[i+1]]`
+    /// lists the columns `k` with `L[i,k] != 0`. `L` is stored CSC, which gives
+    /// the rows of a column but not the columns of a row — and the columns of a
+    /// row are exactly the edges the reach-limited `Lᵀ` solve walks
+    /// (issue #161B). Built once at factor time and valid for the life of the
+    /// factor, because the Forrest–Tomlin update never touches the base `L`.
+    /// **Empty** unless [`LuParams::hyper_sparse_max_density`] is nonzero, so
+    /// the feature-off path allocates nothing for it.
+    pub(super) l_row_ptr: Vec<usize>,
+    pub(super) l_row_cols: Vec<usize>,
+    /// Scratch for the reach-limited triangular sweeps. Empty (and unusable,
+    /// which [`SparseLu::reach_cap`] detects) unless the route is enabled.
+    pub(super) reach: super::sparse_solve::ReachWork,
     /// Total Gilbert–Peierls reach nodes visited during the factor — a
     /// structural scalability witness (`O(nnz(U))`, not `O(n²)`).
     pub(super) reach_visits: usize,
@@ -466,6 +479,20 @@ impl SparseLu {
         let perm_inv: Vec<usize> = pinv.iter().map(|&p| p as usize).collect();
         remap_and_sort_l(&l_col_ptr, &mut l_row_idx, &mut l_val, &perm_inv, m);
 
+        // Row-wise index of L and the reach workspace: built only when the
+        // reach-limited solve route is enabled, so the off path is byte-for-byte
+        // the pre-#161 allocation profile.
+        let (l_row_ptr, l_row_cols, reach) = if params.hyper_sparse_max_density > 0.0 {
+            let (ptr, cols) = build_l_row_index(&l_col_ptr, &l_row_idx, m);
+            (ptr, cols, super::sparse_solve::ReachWork::new(m))
+        } else {
+            (
+                Vec::new(),
+                Vec::new(),
+                super::sparse_solve::ReachWork::disabled(),
+            )
+        };
+
         // Transpose U from column-wise (built above) to row-wise CSR, then into
         // per-row vectors with the diagonal entry first. Columns were emitted in
         // increasing order, so each row's strict-upper entries are sorted.
@@ -520,6 +547,9 @@ impl SparseLu {
             qcol,
             qcol_inv,
             u_above,
+            l_row_ptr,
+            l_row_cols,
+            reach,
             etas: Vec::new(),
             growth: 1.0,
             u_max0,
@@ -671,6 +701,29 @@ impl SparseLu {
         self.reach_visits
     }
 
+    /// How many gather-form triangular sweeps have taken the reach-limited
+    /// ("hyper-sparse") route since this factor was built — one per `U`-solve in
+    /// `ftran` and one per `Lᵀ`-solve in `btran` that stayed under
+    /// [`LuParams::hyper_sparse_max_density`] (issue #161B).
+    ///
+    /// The route is a silent fallback: a solve whose reach overruns the cap
+    /// produces exactly the same answer by the dense sweep. So a benchmark or
+    /// differential test that does not assert on this counter can pass
+    /// vacuously, having never exercised the code it means to test. Zero when
+    /// the route is disabled, and zero after a fresh factor or `refactor`.
+    pub fn hyper_sparse_sweeps(&self) -> usize {
+        self.reach.sweeps()
+    }
+
+    /// Total positions visited by those reach-limited sweeps. Divided by
+    /// [`Self::hyper_sparse_sweeps`] this is the average solution support the
+    /// route actually swept — the quantity that says whether a basis is
+    /// hyper-sparse at all, and the one to look at first when the route is on
+    /// but the solves have not got faster.
+    pub fn hyper_sparse_nodes(&self) -> usize {
+        self.reach.nodes()
+    }
+
     /// Current ‖U‖∞ element-growth high-water ratio since the last factorize:
     /// the largest `max|U|` seen across all updates divided by [`Self::u_max0`].
     /// A continuous conditioning signal (`1.0` on a fresh factor); tripping
@@ -745,6 +798,34 @@ fn transpose_to_csr(
         }
     }
     (row_ptr, col_idx, out_val)
+}
+
+/// Build the row-wise column index of the strict-lower `L` from its CSC
+/// storage (`col_ptr` over columns, `row_idx` = pivot-row positions, already
+/// remapped). Only the indices are transposed — the reach-limited `Lᵀ` sweep
+/// walks this for its edges but reads its *values* out of the CSC, so a second
+/// copy of `l_val` would be dead weight.
+///
+/// Counting sort, the same shape as [`transpose_to_csr`]: count per row, prefix
+/// sum, then place with a per-row cursor. Columns are emitted in ascending `k`,
+/// so each output row comes out sorted.
+fn build_l_row_index(col_ptr: &[usize], row_idx: &[usize], m: usize) -> (Vec<usize>, Vec<usize>) {
+    let mut row_ptr = vec![0usize; m + 1];
+    for &i in row_idx.iter() {
+        row_ptr[i + 1] += 1;
+    }
+    for i in 0..m {
+        row_ptr[i + 1] += row_ptr[i];
+    }
+    let mut cols = vec![0usize; row_idx.len()];
+    let mut next: Vec<usize> = row_ptr[..m].to_vec();
+    for k in 0..m {
+        for &i in row_idx[col_ptr[k]..col_ptr[k + 1]].iter() {
+            cols[next[i]] = k;
+            next[i] += 1;
+        }
+    }
+    (row_ptr, cols)
 }
 
 /// Remap L's original row indices to pivot positions and sort each column.

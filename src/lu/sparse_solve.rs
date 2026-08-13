@@ -11,6 +11,128 @@ use super::sparse_factor::SparseLu;
 use super::sparse_matrix::SparseColMatrix;
 use crate::error::FeralError;
 
+/// Scratch for the reach-limited ("hyper-sparse") triangular sweeps
+/// (issue #161B). Owned by [`SparseLu`] and taken out with `mem::take` for the
+/// duration of a solve, so the sweep can borrow the factor immutably while
+/// mutating the workspace.
+///
+/// `mark` is all-false between calls and is cleared over `list` — never over
+/// `0..m` — so a solve that touches `r` positions pays `O(r)`, not `O(m)`, for
+/// its bookkeeping. This is the same convention as `scratch_mark` in the
+/// Forrest–Tomlin update. Empty (`mark.len() != m`) when the route is disabled.
+#[derive(Debug, Clone, Default)]
+pub(super) struct ReachWork {
+    mark: Vec<bool>,
+    stack: Vec<usize>,
+    /// The reached positions; after a successful reach, in topological order
+    /// for the sweep that asked for it.
+    list: Vec<usize>,
+    /// How many sweeps the reach-limited route has actually served since the
+    /// factor, and how many positions they swept in total.
+    ///
+    /// The route is a silent fallback, so a benchmark or differential test that
+    /// does not assert on `sweeps` can pass vacuously having never run the code
+    /// it means to test. Both are observable through
+    /// [`SparseLu::hyper_sparse_sweeps`] and [`SparseLu::hyper_sparse_nodes`].
+    sweeps: usize,
+    nodes: usize,
+}
+
+impl ReachWork {
+    /// Workspace for an `m`-sided factor. `disabled()` when the route is off.
+    pub(super) fn new(m: usize) -> Self {
+        ReachWork {
+            mark: vec![false; m],
+            stack: Vec::new(),
+            list: Vec::new(),
+            sweeps: 0,
+            nodes: 0,
+        }
+    }
+
+    /// The zero-allocation workspace used when the route is disabled.
+    pub(super) fn disabled() -> Self {
+        ReachWork::default()
+    }
+
+    /// Length of the membership marker — `m` when the route is live, `0` when
+    /// it was never built.
+    #[inline]
+    fn mark_len(&self) -> usize {
+        self.mark.len()
+    }
+
+    /// Abandon a partial reach, restoring the all-false `mark` invariant.
+    fn abandon(&mut self) {
+        for &k in self.list.iter() {
+            self.mark[k] = false;
+        }
+        self.list.clear();
+        self.stack.clear();
+    }
+
+    /// Seed the reach from the nonzeros of `s`. Returns `false` (workspace
+    /// restored) if the sources alone already exceed `cap`.
+    ///
+    /// This is not a second heuristic layered on `cap`: a reach always contains
+    /// its own sources, so an rhs denser than `cap` could only abort later
+    /// anyway. Testing it here just moves the inevitable abort earlier, before
+    /// any edge is walked.
+    fn seed(&mut self, s: &[f64], cap: usize) -> bool {
+        debug_assert!(self.list.is_empty() && self.stack.is_empty());
+        for (k, &sk) in s.iter().enumerate() {
+            if sk == 0.0 {
+                continue;
+            }
+            if self.list.len() >= cap {
+                self.abandon();
+                return false;
+            }
+            self.mark[k] = true;
+            self.list.push(k);
+            self.stack.push(k);
+        }
+        true
+    }
+
+    /// Discover `k` as reachable. Returns `false` if that would exceed `cap`.
+    #[inline]
+    fn push(&mut self, k: usize, cap: usize) -> bool {
+        if self.mark[k] {
+            return true;
+        }
+        if self.list.len() >= cap {
+            return false;
+        }
+        self.mark[k] = true;
+        self.list.push(k);
+        self.stack.push(k);
+        true
+    }
+
+    /// Close a completed reach: the marks are dead once no more edges will be
+    /// walked, and clearing them here means every later return path — including
+    /// an error out of the numeric sweep — leaves the workspace clean.
+    fn close(&mut self) {
+        for &k in self.list.iter() {
+            self.mark[k] = false;
+        }
+        self.stack.clear();
+    }
+
+    /// Count of reach-limited sweeps this workspace has served.
+    #[inline]
+    pub(super) fn sweeps(&self) -> usize {
+        self.sweeps
+    }
+
+    /// Total positions swept by those sweeps.
+    #[inline]
+    pub(super) fn nodes(&self) -> usize {
+        self.nodes
+    }
+}
+
 // Test-only: counts heap (re)allocations of the pooled scaled-solve / refine
 // scratch buffers on the calling thread. Proves the buffers reach steady state
 // with zero per-call allocation (L3, dev/research/repo-review-2026-06-09.md).
@@ -102,12 +224,14 @@ impl SparseLu {
     /// Core `ftran` on the (scaled) factored matrix, ignoring outer scaling.
     pub(super) fn ftran_core(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
         let mut s = std::mem::take(&mut self.scratch);
-        let res = self.solve_colspace(rhs, &mut s);
+        let mut rw = std::mem::take(&mut self.reach);
+        let res = self.solve_colspace(rhs, &mut s, &mut rw);
         if res.is_ok() {
             for (k, &wk) in s.iter().enumerate() {
                 rhs[self.qcol[k]] = wk;
             }
         }
+        self.reach = rw;
         self.scratch = s;
         res
     }
@@ -117,6 +241,7 @@ impl SparseLu {
     /// transposed in reverse, `Lᵀ`-solve, scatter P.
     pub(super) fn btran_core(&mut self, rhs: &mut [f64]) -> Result<(), FeralError> {
         let mut s = std::mem::take(&mut self.scratch);
+        let mut rw = std::mem::take(&mut self.reach);
         for (k, sk) in s.iter_mut().enumerate() {
             *sk = rhs[self.qcol[k]];
         }
@@ -125,11 +250,12 @@ impl SparseLu {
             for eta in self.etas.iter().rev() {
                 eta.apply_transpose(&mut s);
             }
-            self.lt_solve(&mut s);
+            self.lt_solve(&mut s, &mut rw);
             for (k, &vk) in s.iter().enumerate() {
                 rhs[self.perm[k]] = vk;
             }
         }
+        self.reach = rw;
         self.scratch = s;
         res
     }
@@ -195,9 +321,32 @@ impl SparseLu {
 
     /// Solve into column-position space: `out = U⁻¹ G⁻¹ L⁻¹ P · rhs` (the
     /// `ftran` result before the final `Q` scatter).
-    pub(super) fn solve_colspace(&self, rhs: &[f64], out: &mut [f64]) -> Result<(), FeralError> {
+    pub(super) fn solve_colspace(
+        &self,
+        rhs: &[f64],
+        out: &mut [f64],
+        rw: &mut ReachWork,
+    ) -> Result<(), FeralError> {
         self.spike_space(rhs, out);
-        self.usolve(out)
+        self.usolve(out, rw)
+    }
+
+    /// Node budget for the reach-limited route, or `None` when it is disabled
+    /// (`hyper_sparse_max_density == 0`) or its workspace was never built —
+    /// which is the same condition, since the workspace is only allocated when
+    /// the route is on. A cap of `0` (a small `m` against a small density) is
+    /// legal and simply routes every nonempty rhs to the dense sweep.
+    #[inline]
+    fn reach_cap(&self, rw: &ReachWork) -> Option<usize> {
+        let d = self.params.hyper_sparse_max_density;
+        // The liveness test reads `rw`, not `self.reach`: the solve entry points
+        // `mem::take` the workspace out of the factor for the duration of the
+        // call, so `self.reach` is the empty `Default` right now and testing it
+        // here would disable the route on every solve.
+        if d <= 0.0 || rw.mark_len() != self.m {
+            return None;
+        }
+        Some((self.m as f64 * d) as usize)
     }
 
     /// Forward solve `L y = s` (unit lower), in place.
@@ -224,14 +373,46 @@ impl SparseLu {
     /// path.) The `dc != k` check is an always-on hardening of the diagonal-first
     /// invariant (L10): without it, a violated invariant would make release-mode
     /// solves silently take an off-diagonal as the pivot.
-    fn usolve(&self, s: &mut [f64]) -> Result<(), FeralError> {
-        // Back-substitution in `uperm` order: process positions by *decreasing*
-        // triangular rank. Each row's pivot is its diagonal entry (column == its
-        // own position, stored first); its off-diagonal columns all have strictly
-        // greater rank, so they are already solved. At identity `uperm`
-        // (`uperm_inv[rank] == rank`) this is the plain reverse-position sweep.
-        for rank in (0..self.m).rev() {
-            let k = self.uperm_inv[rank];
+    ///
+    /// Takes the reach-limited route when [`LuParams::hyper_sparse_max_density`]
+    /// admits it (issue #161B). On that route the diagonal guard is evaluated on
+    /// the rows the solution depends on rather than on all `m`; see
+    /// [`SparseLu::usolve_over`].
+    fn usolve(&self, s: &mut [f64], rw: &mut ReachWork) -> Result<(), FeralError> {
+        if let Some(cap) = self.reach_cap(rw) {
+            if self.u_reach(s, rw, cap) {
+                let res = self.usolve_over(s, rw.list.iter().copied());
+                rw.list.clear();
+                return res;
+            }
+        }
+        // Dense back-substitution in `uperm` order: process positions by
+        // *decreasing* triangular rank. Each row's pivot is its diagonal entry
+        // (column == its own position, stored first); its off-diagonal columns
+        // all have strictly greater rank, so they are already solved. At
+        // identity `uperm` (`uperm_inv[rank] == rank`) this is the plain
+        // reverse-position sweep.
+        self.usolve_over(s, (0..self.m).rev().map(|rank| self.uperm_inv[rank]))
+    }
+
+    /// The `U` back substitution over `order`, which must list the positions to
+    /// solve in decreasing triangular rank.
+    ///
+    /// Positions absent from `order` are left untouched. On the reach-limited
+    /// route that is exactly right: a position outside the reach has `s[k] == 0`
+    /// and no reached predecessor, so back substitution would assign it
+    /// `0 / U[k,k] == 0`, which is what leaving it alone already gives. It does
+    /// mean the diagonal guard below is not evaluated for those rows — a
+    /// deliberate narrowing recorded in
+    /// `dev/research/hyper-sparse-solves-2026-08-13.md`. Degeneracy the caller
+    /// did not ask about is caught at factor and update time, against the pivot
+    /// tolerance, rather than incidentally during an unrelated solve.
+    fn usolve_over(
+        &self,
+        s: &mut [f64],
+        order: impl Iterator<Item = usize>,
+    ) -> Result<(), FeralError> {
+        for k in order {
             let row = &self.u_rows[k];
             let &(dc, d) = row.first().ok_or(FeralError::SingularBasis { column: k })?;
             if dc != k || d == 0.0 || !d.is_finite() {
@@ -246,17 +427,60 @@ impl SparseLu {
         Ok(())
     }
 
+    /// Reach of `s`'s nonzeros in `U`'s predecessor graph, into `rw.list` in
+    /// decreasing triangular rank. `false` (workspace clean) if it exceeds `cap`.
+    ///
+    /// `w[k]` can be nonzero only if `s[k] != 0` or `U[k,c] != 0` for some
+    /// already-nonzero `w[c]`, so the edges out of `c` are the off-diagonal
+    /// holders of column `c` — exactly `u_above[c]`, which the Forrest–Tomlin
+    /// update already builds and maintains. Every such edge runs from higher to
+    /// lower triangular rank (`U` is upper triangular *in `uperm` order*), so
+    /// sorting by decreasing `uperm` is a valid topological order. It must be
+    /// the rank and not the position index: after an update a column can hold
+    /// entries at positions whose index is below it but whose rank is above.
+    fn u_reach(&self, s: &[f64], rw: &mut ReachWork, cap: usize) -> bool {
+        if !rw.seed(s, cap) {
+            return false;
+        }
+        while let Some(c) = rw.stack.pop() {
+            for &k in self.u_above[c].iter() {
+                if !rw.push(k, cap) {
+                    rw.abandon();
+                    return false;
+                }
+            }
+        }
+        rw.close();
+        let uperm = &self.uperm;
+        rw.list.sort_unstable_by(|&a, &b| uperm[b].cmp(&uperm[a]));
+        rw.sweeps += 1;
+        rw.nodes += rw.list.len();
+        true
+    }
+
     /// Forward solve `Uᵀ z = s` (`Uᵀ` lower; scatter form on per-row U).
     ///
     /// Errors with [`FeralError::SingularBasis`] on an absent/zero/non-finite
     /// or out-of-order stored diagonal, for the same reason as
     /// [`SparseLu::usolve`].
+    ///
+    /// The `s[i] == 0.0` test is hoisted *above* the `u_rows[i]` access, which
+    /// is what makes this kernel work-proportional in cache traffic and not just
+    /// in flops: `u_rows` is one heap allocation per row, so reading
+    /// `row.first()` on a row that contributes nothing still costs a cache miss,
+    /// `m` times per solve (issue #161B). A zero entry scatters nothing, so
+    /// skipping it changes no arithmetic — only, as on the reach-limited `usolve`
+    /// route, which rows the diagonal guard sees. `lsolve` has always hoisted
+    /// its zero test the same way.
     fn ut_solve(&self, s: &mut [f64]) -> Result<(), FeralError> {
         // Forward solve in `uperm` order: process positions by *increasing*
         // triangular rank (the transpose of `usolve`). At identity `uperm` this
         // is the plain ascending-position sweep.
         for rank in 0..self.m {
             let i = self.uperm_inv[rank];
+            if s[i] == 0.0 {
+                continue;
+            }
             let row = &self.u_rows[i];
             let &(dc, d) = row.first().ok_or(FeralError::SingularBasis { column: i })?;
             if dc != i || d == 0.0 || !d.is_finite() {
@@ -274,8 +498,23 @@ impl SparseLu {
         Ok(())
     }
 
-    /// Back solve `Lᵀ v = s` (`Lᵀ` unit upper), in place.
-    fn lt_solve(&self, s: &mut [f64]) {
+    /// Back solve `Lᵀ v = s` (`Lᵀ` unit upper), in place. Reach-limited when
+    /// [`LuParams::hyper_sparse_max_density`] admits it (issue #161B).
+    fn lt_solve(&self, s: &mut [f64], rw: &mut ReachWork) {
+        if let Some(cap) = self.reach_cap(rw) {
+            if self.lt_reach(s, rw, cap) {
+                for &k in rw.list.iter() {
+                    let mut acc = s[k];
+                    let (lo, hi) = (self.l_col_ptr[k], self.l_col_ptr[k + 1]);
+                    for idx in lo..hi {
+                        acc -= self.l_val[idx] * s[self.l_row_idx[idx]];
+                    }
+                    s[k] = acc;
+                }
+                rw.list.clear();
+                return;
+            }
+        }
         for k in (0..self.m).rev() {
             let mut acc = s[k];
             let (lo, hi) = (self.l_col_ptr[k], self.l_col_ptr[k + 1]);
@@ -284,6 +523,41 @@ impl SparseLu {
             }
             s[k] = acc;
         }
+    }
+
+    /// Reach of `s`'s nonzeros in `Lᵀ`'s predecessor graph, into `rw.list` in
+    /// decreasing pivot position. `false` (workspace clean) if it exceeds `cap`,
+    /// or if the `L` row index was not built (the route is off).
+    ///
+    /// `v[k]` can be nonzero only if `s[k] != 0` or `L[i,k] != 0` for some
+    /// already-nonzero `v[i]`, so the edges out of `i` are the columns in which
+    /// row `i` appears — the *row*-wise structure of `L`, which `L`'s CSC
+    /// storage does not give directly and which
+    /// `build_l_row_index` therefore materializes at factor time.
+    /// `L` is strictly lower triangular in fixed pivot-position coordinates and
+    /// the Forrest–Tomlin update never touches it, so every edge runs from a
+    /// higher to a lower position for the whole life of the factor, and sorting
+    /// by decreasing position is a valid topological order.
+    fn lt_reach(&self, s: &[f64], rw: &mut ReachWork, cap: usize) -> bool {
+        if self.l_row_ptr.len() != self.m + 1 {
+            return false;
+        }
+        if !rw.seed(s, cap) {
+            return false;
+        }
+        while let Some(i) = rw.stack.pop() {
+            for idx in self.l_row_ptr[i]..self.l_row_ptr[i + 1] {
+                if !rw.push(self.l_row_cols[idx], cap) {
+                    rw.abandon();
+                    return false;
+                }
+            }
+        }
+        rw.close();
+        rw.list.sort_unstable_by(|&a, &b| b.cmp(&a));
+        rw.sweeps += 1;
+        rw.nodes += rw.list.len();
+        true
     }
 
     fn refine(

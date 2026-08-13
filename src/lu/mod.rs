@@ -141,6 +141,28 @@ pub struct LuParams {
     /// trajectory choice rather than a failure rescue. Sparse path only; the
     /// dense update is unaffected.
     pub update_pivot_search: bool,
+    /// Density cap for the reach-limited ("hyper-sparse") triangular solves in
+    /// the sparse `ftran`/`btran` (issue #161B, Hall & McKinnon 2005).
+    ///
+    /// The gather-form halves of the solve (`U w = s` in `ftran`, `Lᵀ v = s` in
+    /// `btran`) read every row of `U` / every column of `L` on every call, so
+    /// their cost tracks `nnz(factor)` rather than the number of nonzeros the
+    /// solution actually has. With this set, a solve first computes the reach
+    /// of the right-hand side's pattern in the factor's DAG and sweeps only
+    /// those positions — the work a simplex `ftran`/`btran` against a
+    /// near-unit-vector rhs actually needs.
+    ///
+    /// The value is the fraction of `m` at or below which the reach-limited
+    /// route is taken; a reach larger than `hyper_sparse_max_density · m`
+    /// aborts back to the dense sweep, so a *sparse rhs whose solution fills
+    /// in* pays up to this fraction of a wasted sweep on top of the dense one.
+    /// That bounded downside is the price of routing on solution density, which
+    /// cannot be known without computing part of the reach.
+    ///
+    /// `0.0` disables the route entirely — every solve takes the dense sweep,
+    /// exactly as before issue #161, and the `L` row index and reach workspace
+    /// are not even allocated. Valid range `[0, 1]`.
+    pub hyper_sparse_max_density: f64,
 }
 
 impl LuParams {
@@ -192,6 +214,17 @@ impl LuParams {
                 self.refine_tol
             )));
         }
+        // `hyper_sparse_max_density` scales to a node budget `d·m`. A negative
+        // or `NaN` value makes that budget meaningless (`NaN as usize` is 0 in
+        // Rust, which would silently disable the route rather than error);
+        // above 1.0 the cap exceeds `m` and can never abort, which defeats the
+        // fallback the route relies on. `0.0` is the documented off switch.
+        if !(self.hyper_sparse_max_density >= 0.0 && self.hyper_sparse_max_density <= 1.0) {
+            return Err(FeralError::InvalidInput(format!(
+                "LuParams::hyper_sparse_max_density must be in [0, 1], got {}",
+                self.hyper_sparse_max_density
+            )));
+        }
         Ok(())
     }
 }
@@ -209,6 +242,7 @@ impl Default for LuParams {
             refine_steps: 0,
             refine_tol: 1e-12,
             update_pivot_search: false,
+            hyper_sparse_max_density: 0.25,
         }
     }
 }

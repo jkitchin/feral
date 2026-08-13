@@ -4,6 +4,50 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — reach-limited ("hyper-sparse") sparse-LU triangular solves *(issue #161B)*
+
+- `SparseLu::ftran`/`btran` cost the same whether the solution had one nonzero
+  or `m`. Issue #161 measured a unit-vector `ftran` at **0.74x** the cost of a
+  fully dense one on a real QPLIB simplex basis — "2918x more work than it
+  performs". The cause is that two of the four triangular kernels are *scatter*
+  form and already skip zeros, while the other two (`U w = s` in `ftran`,
+  `Lᵀ v = s` in `btran`) are *gather* form and read the whole factor regardless.
+- Those two now compute the reach of the right-hand side's pattern in the
+  factor's DAG (Hall & McKinnon) and sweep only the positions the solution
+  depends on. `usolve` walks the existing `u_above` column index; `lt_solve`
+  walks a new row-wise index of `L`, built at factor time and valid for the life
+  of the factor because the Forrest–Tomlin update never touches the base `L`.
+- New `LuParams::hyper_sparse_max_density` (default `0.25`) caps the reach as a
+  fraction of `m`. A reach that overruns it aborts back to the dense sweep, so a
+  sparse right-hand side whose solution *fills in* pays a bounded overhead
+  rather than an unbounded one. **`0.0` disables the route entirely**, restoring
+  the previous solve exactly and allocating none of its state.
+- Measured (interleaved A/B on one basis, `m = 4000`, fill 4.05x, unit-vector
+  right-hand sides): **ftran 1.95x mean / 2.56x median, btran 1.72x mean / 2.15x
+  median**, with the two routes agreeing bit for bit. A dense right-hand side —
+  the case the route can only lose on — measures 0.97x. Full data and the
+  threshold sweep behind the default:
+  `dev/research/hyper-sparse-solves-2026-08-13.md`.
+- `SparseLu::hyper_sparse_sweeps()` and `hyper_sparse_nodes()` report how many
+  sweeps took the route and how many positions they swept, so a benchmark or
+  test cannot pass vacuously against the silent dense fallback.
+
+### Changed — `Uᵀ` solve no longer touches rows that contribute nothing
+
+- `ut_solve` tested `s[i] == 0.0` only *after* dereferencing `u_rows[i]`, one
+  heap allocation per row, so it paid `m` cache misses per solve even though its
+  flop count was already proportional to the solution. The test is now hoisted
+  above the access, matching what `lsolve` has always done. No arithmetic
+  changes.
+- **Behavior note.** The `SingularBasis` guard on `U`'s stored diagonal is now
+  evaluated on the rows a solution depends on rather than on all `m` rows of
+  every solve — in `ut_solve` unconditionally, and in `usolve` on the
+  reach-limited route. Skipped rows are ones where the substitution would assign
+  `0 / U[k,k]`, so no answer changes; what narrows is the incidental *diagnostic*
+  that some unrelated part of the factor is degenerate, which factor and update
+  time still report against the pivot tolerance. The dense fallback route keeps
+  the full every-row check.
+
 ## [0.15.1] - 2026-08-10
 
 ### Changed — MC64 Hungarian matching is 4-5% faster on large matchings *(bit-identical)*

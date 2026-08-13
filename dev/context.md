@@ -1,216 +1,153 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-10T12:00:56Z
+Generated: 2026-08-13T15:26:45Z
 
 ## Latest Session
-File: dev/sessions/2026-08-10-02.md
+File: dev/sessions/2026-08-13-01.md
 ```
-# Session 2026-08-10-02
+# Session 2026-08-13-01
 
-Journal: `dev/journal/2026-08-09-08.org` (the work began late on 2026-08-09;
-the file number follows the journal, the session number follows
-`dev/sessions/` which main had already advanced to `2026-08-10-01`).
+Journal: `dev/journal/2026-08-13-01.org`
+Research note: `dev/research/hyper-sparse-solves-2026-08-13.md`
 
 ## Goal
 
-Take the MC64 Hungarian search bound — the lever recommended at the close of
-the condition-1 dig-in (`dev/research/mc64-condition1-cost-share-2026-08-09.md`).
-Then resolve the merge conflicts blocking PR #157 and get remote CI green.
+Issue #161 part B — "triangular solves are not work-proportional". Filed as
+*described, not implemented*: the issue's numbers size the prize but do not
+demonstrate a fix. Part A of the same issue is already implemented and measured
+in open PR #160 and was deliberately not touched here.
 
-## Benchmark comparison to previous session — TAIL IS SLIGHTLY WORSE
+## Benchmark comparison to previous session — NOT AVAILABLE
 
-Reported first, per protocol. Against the last full-corpus bench
-(`2026-08-09-09`; `2026-08-10-01` had no corpus in its container):
+Reported first, per protocol. `cargo run --bin bench --release` runs to
+completion and exits 0, but **this container has no corpus**: every partition
+reports `N/A` and "no matrices have oracle timings". This is the same situation
+as session 2026-08-10-01, and it means **no LDLᵀ regression comparison against
+2026-08-09-09 was possible.**
 
-| factor/MUMPS | 2026-08-09-09 | this session | direction |
-|---|---|---|---|
-| geomean | 0.43 | **0.44** | worse |
-| p50     | 0.30 | 0.30       | flat  |
-| p90     | 1.54 | **1.57**   | worse |
-| p99     | 3.30 | **3.45**   | worse |
-| max     | 8.70 | **12.40**  | worse |
-
-`solve/SSIDS` p90 also moved 2.44 → 2.50; `factor/SSIDS` geomean and both
-`nnzL` rows are unchanged. All Phase 2.8.1 exit partitions still PASS.
-
-I do not have an attributed cause, and I am not claiming one. What can be said:
-
-- **Not the MC64 change.** `509f0ce` is verified bit-identical on 51 matrices,
-  and it only touches the Hungarian heap, which does not run at all on the
-  small CUTEst matrices that set these tails. The worst ratios are `KIRBY2`
-  (n = 458) and `GROUPING` (n = 225).
-- The merge brought in main's `Supernode.nrow` fix (`2026-08-10-01`), which is
-  explicitly flagged there as a *behavior change to parallel dispatch*. That is
-  the one plausible candidate in the diff, but it is unverified — nobody has
-  re-benched main alone since it landed.
-- Sub-millisecond matrices on a laptop are noisy; a single-matrix `max` moving
-  8.70 → 12.40 on `KIRBY2_0007` (1476 us vs 1298-1142 us on its siblings) is
-  within what this harness swings run to run.
-
-Next session should re-run the bench on `origin/main` alone before spending
-effort here, to separate main's change from noise.
+The change is confined to `src/lu/`, a separate factorization family that the
+LDLᵀ corpus does not exercise, so the expected corpus effect is nil. That is an
+argument for low risk, not evidence of no regression, and the next session with
+a corpus should re-run before assuming otherwise. The open item from
+2026-08-10-02 — re-bench `origin/main` alone to separate main's `Supernode.nrow`
+change from noise — is still open and still blocked on the same missing corpus.
 
 ## Accomplished
 
-### The recommended lever does not exist (negative result)
+### The gather/scatter split, which is the whole of issue #161B
 
-My own prior note called the Hungarian search bound
+Code inspection of the four sparse triangular kernels explains the issue's
+headline number exactly. Two are **scatter** form (`L y = s`, `Uᵀ z = s`) and
+already test for zero before doing work; two are **gather** form (`U w = s`,
+`Lᵀ v = s`) and read every row of `U` / every column of `L` regardless. Issue
+#161 measured a one-nonzero solution costing **0.74x** a fully dense one — half
+the solve going to ~0 and half staying at full cost is what predicts a number
+between 0.5x and 1.0x rather than 1.0x.
+
+So the fix is specifically to the two gather kernels, and the prediction is that
+it moves the sparse-rhs case and leaves the dense-rhs case alone.
+
+### What landed
+
+- `usolve` and `lt_solve` now compute the reach of the right-hand side's pattern
+  in the factor's DAG and sweep only those positions, behind a density cap.
+  `usolve` walks `u_above`, which the Forrest–Tomlin update already builds and
+  maintains — nothing new was needed. `lt_solve` needed a row-wise index of `L`,
+  built at factor time and valid for the life of the factor because the FT
+  update never touches the base `L`.
 ```
 
 ## Git Status
 ```
+0bc77b8 Merge pull request #159 from jkitchin/release/0.15.1
+5fa2c38 release: feral v0.15.1
+93abaa3 Merge pull request #157 from jkitchin/docs/session-2026-08-09-05
+5cc64a8 docs: session checkpoint 2026-08-10-02 (MC64 Hungarian bound + merge + CI)
 5a9150d Merge origin/main into docs/session-2026-08-09-05
-509f0ce perf(mc64): store the key inline in the Hungarian heap; bit-identical
-fe8cc64 Merge pull request #158 from jkitchin/claude/fix-supernode-nrow
-32d90ee docs: session checkpoint 2026-08-10-01 (Supernode.nrow fix)
-fc84eb3 fix(symbolic): correct post-amalgamation Supernode.nrow (#128 item E)
 ```
 
 ## Test Status
 ```
+test symbolic::tests::schur_symbolic_tail_invariant_reversed_user_order ... ok
+test symbolic::tests::schur_symbolic_tail_invariant_user_order ... ok
+test symbolic::tests::symbolic_factorize_amf_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_auto_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_default_uses_amf_for_small_matrices ... ok
+test symbolic::tests::symbolic_factorize_external_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_kahip_produces_valid_perm ... ok
+test symbolic::tests::symbolic_factorize_metis_produces_valid_perm ... ok
 test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
+test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
-test symbolic::tests::choose_adaptive_rules ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
-test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
-test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ... ok
-test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 412 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.42s
+test result: ok. 410 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.84s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-10-02.md)
-
-
-=== Sparse perf vs canonical oracles (154588 matrices with oracle timings) ===
-
-ratio               count    geomean        p50        p90        p99        max
-factor/MUMPS       153560       0.44       0.30       1.57       3.45      12.40
-solve/MUMPS        153560       0.07       0.08       0.14       0.66       2.78
-factor/SSIDS       154500       0.04       0.03       0.32       1.01       2.49
-solve/SSIDS        154500       0.93       1.00       2.50       8.33      30.25
-nnzL/MUMPS         153560       0.61       0.58       0.75       4.50      23.11
-nnzL/SSIDS         154500       0.88       1.00       1.00       4.50       5.00
-
-Per-family factor geomean vs MUMPS (top 25 families by count):
-family                  count    geomean        p50        max
-HS118                    3000       0.91       0.94       1.60
-BIGGSC4                  3000       0.42       0.45       0.60
-MGH10LS                  3000       0.20       0.22       0.44
-PALMER7A                 3000       0.28       0.30       0.70
-ALLINITA                 3000       0.41       0.40       0.85
-HS13                     3000       0.17       0.20       0.56
-ALLINITC                 3000       0.19       0.20       0.30
-HS89                     3000       0.20       0.20       0.30
-HATFLDH                  3000       0.42       0.45       0.55
-MCONCON                  3000       0.90       0.94       1.97
-HS92                     3000       0.35       0.36       0.82
-SSINE                    3000       0.27       0.27       0.33
-HATFLDBNE                3000       0.39       0.40       0.83
-HS90                     3000       0.20       0.20       0.33
-DJTL                     3000       0.09       0.10       0.22
-SSI                      3000       0.21       0.22       0.33
-CONCON                   3000       0.86       0.89       1.72
-HS91                     3000       0.25       0.27       0.40
-PALMER5A                 3000       0.29       0.30       0.44
-AVION2                   2682       1.48       1.52       2.11
-CERI651ALS               2331       0.27       0.27       0.33
-PFIT4                    2286       0.25       0.27       0.30
-CERI651C                 2233       0.28       0.30       0.33
-CERI651CLS               2227       0.27       0.27       0.40
-BATCH                    2054       1.35       1.41       1.98
-
-Top 10 worst factor-ratio vs MUMPS:
-name                             n    feral(μs)    mumps(μs)      ratio
-KIRBY2_0007                    458         1476          119      12.40
-KIRBY2_0006                    458         1298          127      10.22
-KIRBY2_0008                    458         1142          122       9.36
-KIRBY2_0011                    458          932          120       7.77
-KIRBY2_0009                    458          990          128       7.73
-KIRBY2_0010                    458          987          133       7.42
-GROUPING_0059                  225          725          116       6.25
-GROUPING_0139                  225          701          113       6.20
-GROUPING_0033                  225          692          112       6.18
-GROUPING_0137                  225          674          111       6.07
-
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.58     <= 2.0     PASS
-medium (<500)            152145     2.00     <= 3.0     PASS
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.57     <= 2.0     PASS
-medium (<500)            153560     1.57     <= 3.0     PASS
-
+(skipped: pass --with-bench to re-run; no session checkpoint with bench)
 ```
 
 ## Recent Decisions
+**Decision: the guard is evaluated on the rows the solution depends on.**
+`ut_solve` skips rows where `s[i] == 0.0` (unconditionally, matching what
+`lsolve` has always done); `usolve` on the reach-limited route skips rows
+outside the reach. The dense fallback route keeps the full every-row check.
 
-    merged_nrow = child_group_ncol + parent_group_nrow
+**Why this is sound and not merely cheaper.** A row `k` that is skipped has
+`s[k] == 0` and no reached predecessor, so back substitution would assign it
+`0 / U[k,k]`. If `U[k,k]` is healthy that is `0`, which is what leaving the
+position alone already gives. If `U[k,k]` is zero the row states `0 = 0`: the
+system is consistent and underdetermined there, and `0` remains *a* correct
+solution component. No solve returns a different or wrong answer.
 
-maintained as a running per-group value. This is the union *cardinality*, not
-a bound, and it composes for chains under both amalgamation iteration orders.
+**What is genuinely given up.** The *diagnostic* that the factor is degenerate
+somewhere the caller's right-hand side never touched. That was always incidental
+— a solve is not a factor validity check — and the primary detection remains
+where it belongs: at factor and update time, against the pivot tolerance, where
+singularity is decided rather than stumbled over. A caller who wants the strict
+old behavior sets `hyper_sparse_max_density = 0.0`, which restores the previous
+solve exactly.
 
-Verified rather than assumed: compared against
-`SymbolicFactorization::static_rows(i).len()` (the issue #125 static frontal
-layout, an independent computation already pinned to both a from-scratch
-`BTreeSet` recompute and `build_row_indices`) across 7 matrix families x 3
-`nemin` values — **zero error on every supernode**. The pre-change proxy was
-wrong on up to 40% of summed `nrow`.
+This is recorded as a decision rather than an implementation detail because it
+narrows an always-on guard that an earlier repo review (L10) deliberately made
+always-on. The narrowing is in *coverage per solve*, not in the guard itself:
+a row that is reached is still checked in every build mode, and the two tests
+that pin L10 (`zero_u_diagonal_errors_instead_of_inf`,
+`misplaced_u_diagonal_errors_instead_of_silent_wrong_pivot`) still pass
+unchanged, because a corrupted row that the solution depends on is still hit.
 
-**Accepted consequence, with a caveat.** `nrow` feeds
-`estimate_assembly_flops`, so the `PAR_MIN_FLOPS` gate now sees true costs
-and borderline matrices can flip from sequential to parallel (one flip
-recorded: a 60x60 grid Laplacian at `nemin = 32`, 4.3M -> 12.2M estimated
-flops). Numeric factors and inertia are byte-identical. The caveat is that
-`PAR_MIN_FLOPS` was calibrated against the *understated* estimate, so the
-constant itself may now be mis-placed; the flip is unverified on the real
-corpus (absent from the container this landed in). Re-deriving the threshold
-against corrected flops is open work, not something this change did.
-
-The `merge_flop_budget` guard's merged-height model was corrected in lockstep
-at both of its sites. It shared the understatement, which made merges look
-cheaper than they are — the wrong direction for a guard meant to reject
-expensive merges. The knob defaults to `None`, so the default path is
-unaffected, but the sweep recorded in
-`dev/research/amalgamation-cost-model-2026-08-09.md` was taken under the old
-model and its numbers do not transfer.
+Full reasoning: `dev/research/hyper-sparse-solves-2026-08-13.md` § Semantics
+that change.
 
 ## Recent Tried-and-Rejected
-inline-key heap that followed is bit-identical and won 4-5% on nql180.
+                     ftran mean   btran mean   dense-rhs fallback
+  sparse marshal      33.6 us      31.6 us        0.90x
+  dense marshal       31.3 us      33.0 us        0.93x
+```
 
-Full data: `dev/research/mc64-hungarian-search-bound-2026-08-09.md`.
+The two arms straddle each other (ftran favours dense marshalling, btran favours
+sparse) — that is noise, not a signal, and the dense-rhs fallback is if anything
+slightly worse with it.
 
-## 2026-08-09 — `build_cost_graph` as an MC64 optimization target
+**Why the hypothesis was wrong.** The permuted access is random but it is random
+*within a 32 KB buffer*, which sits in L1/L2 — so it was never paying the cache
+misses the reasoning assumed. What the phase probe actually showed is that the
+residual cost is spread evenly across all ~6 `O(m)` linear passes
+(`ftran_partial` alone, which is just the `P`-gather plus `lsolve`, was 10.3 of
+the 22.1 us), at roughly 2-3 us per pass on this machine. There is no single
+term left to remove: getting below the `O(m)` floor needs a **sparse-rhs entry
+point**, not a cheaper way to walk a dense one.
 
-**Rejected on measurement.** Timed at 8-12 ms per iterate. That is ~20% of
-pinene's *cheapest* iterate but **0.4%** of nql180's — and nql180 is where the
-MC64 time actually is. Optimizing it cannot move the corpus. The instrumented
-timer was reverted and is not in any commit.
-
-## 2026-08-09 — array fusion projected from a microbenchmark
-
-**Not rejected, but the projection was wrong and is recorded so it is not
-reused.** A standalone microbenchmark of split-array vs fused-record reads
-predicted **1.68-1.9x**. The real end-to-end win from the inline-key heap was
-**4-5%**, because the split reads are only ~2.3 ns of nql180's ~13 ns/scan.
-Microbenchmarks of one memory access pattern do not predict a loop that also
-does heap sifting and comparison work; scale by the measured share of the loop
-before believing them.
+The code was reverted. `dev/research/hyper-sparse-solves-2026-08-13.md` records
+the floor and names the API change that would lift it.
 
 ## Source Files
 ```
@@ -278,8 +215,8 @@ tests/auto_strategy.rs
 tests/blocked_ldlt.rs
 tests/build_row_indices_trailing_invariant.rs
 tests/cb_solve_parity.rs
-tests/column_renumbering_parity.rs
 tests/column_renumbering.rs
+tests/column_renumbering_parity.rs
 tests/d4_solve_2x2_gate.rs
 tests/d6_contrib_uninit.rs
 tests/d7_block32_dispatch_pooled.rs
@@ -293,14 +230,6 @@ tests/fine_grained_delay.rs
 tests/fma_opt_in_roundtrip.rs
 tests/golden_bits.rs
 tests/growth_flag.rs
-tests/issue_15_cascade_arm_gate.rs
-tests/issue_17_robot_1600_cascade_off.rs
-tests/issue_18_narx_cfy_cascade_off.rs
-tests/issue_2_kkt_ls_init.rs
-tests/issue_38_static_pivot.rs
-tests/issue_46_saddle_kkt_cascade.rs
-tests/issue_55_delay_budget.rs
-tests/issue_55_n_tiny_counter.rs
 tests/issue102_intrafront_deadlock.rs
 tests/issue102_ordering_escalation.rs
 tests/issue107_external_ordering.rs
@@ -313,14 +242,23 @@ tests/issue65_mc64_fallback.rs
 tests/issue67_thin_ordering.rs
 tests/issue91_preprocess_misfire.rs
 tests/issue99_fma_front_gate.rs
+tests/issue_15_cascade_arm_gate.rs
+tests/issue_17_robot_1600_cascade_off.rs
+tests/issue_18_narx_cfy_cascade_off.rs
+tests/issue_2_kkt_ls_init.rs
+tests/issue_38_static_pivot.rs
+tests/issue_46_saddle_kkt_cascade.rs
+tests/issue_55_delay_budget.rs
+tests/issue_55_n_tiny_counter.rs
 tests/kkt_hardening.rs
 tests/kkt_matrices.rs
 tests/large_matrix_smoke.rs
 tests/ldlt_compress.rs
 tests/lu_adversarial_inputs.rs
-tests/lu_dense_update_bg.rs
 tests/lu_dense.rs
+tests/lu_dense_update_bg.rs
 tests/lu_ft_widebump.rs
+tests/lu_hyper_sparse.rs
 tests/lu_scaling.rs
 tests/lu_sparse.rs
 tests/lu_update_alloc_probe.rs
@@ -338,8 +276,8 @@ tests/pivot_rejection.rs
 tests/pounce_interface.rs
 tests/profiler_smoke.rs
 tests/property_tests.rs
-tests/rook_rescue_kkt.rs
 tests/rook_rescue.rs
+tests/rook_rescue_kkt.rs
 tests/small_leaf_parity.rs
 tests/solver_with_ordering.rs
 tests/sparse_postorder.rs
@@ -348,5 +286,7 @@ tests/sqd_fast_path.rs
 tests/static_assembly_maps.rs
 tests/stress_tests.rs
 tests/symbolic_profiler.rs
-
-(truncated from      354 lines to 350 line budget)
+tests/task_plan_parity.rs
+tests/threshold_consistency.rs
+tests/tiny_fast_path.rs
+```
