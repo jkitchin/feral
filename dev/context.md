@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-13T16:21:13Z
+Generated: 2026-08-13T17:53:15Z
 
 ## Latest Session
 File: dev/sessions/2026-08-13-02.md
@@ -59,11 +59,11 @@ it moves the sparse-rhs case and leaves the dense-rhs case alone.
 
 ## Git Status
 ```
+bd8a0f7 docs(lu): sparse_hyper module doc named a test that does not exist
+6682f48 fix(lu,python): clippy 1.97 lint and scipy index-order assumption
+c546165 fix(bench,docs): sample stddev in basis_refactor; swapped LU doc comments
 d3f110b Merge origin/main (PR #160, issue #161 part A) into the part-B branch
 10476c0 docs: renumber this session to 2026-08-13-02
-b071d54 Merge pull request #160 from jkitchin/feat/lp-basis-triangularization
-9ed8907 docs: session checkpoint 2026-08-13-01 (review of #160 + two fixes)
-21f5e74 fix(lu): gate the dense-bump route on a bump that was actually peeled
 ```
 
 ## Test Status
@@ -86,7 +86,7 @@ test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 420 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.88s
+test result: ok. 420 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 2.08s
 
 ```
 

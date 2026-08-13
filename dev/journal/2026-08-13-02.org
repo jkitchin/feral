@@ -369,3 +369,86 @@ not have proven anything. Reproduced the failure directly by taking the same
 matrix and reversing the indices within each column: =LuMatrix= rejects it with
 the identical message, and the normalized copy is accepted. So the fix addresses
 the CI failure, not a coincidence.
+
+* 22:10 :issue161:pr162:review:defect:
+Maintainer review on #162 ran the transfer test I could not (real QPLIB bases)
+and found a defect in my shipped default. Two findings, one of them mine.
+
+*1. =hyper_sparse_max_density = 0.25= is a btran regression on QPLIB_1157.*
+
+  cap     ftran    btran   fired
+  0.05   10.59x    0.98x    1195
+  0.10   10.81x    0.97x    1195
+  0.25   11.01x    0.69x    2370   <- shipped
+  1.00   10.75x    0.69x    2560
+
+My Part 1 sweep said "the win is flat from 0.05 to 1.00". That was blended over
+ftran and btran and reported as one number. It is true for ftran alone. btran
+falls off a cliff between 0.10 and 0.25 — precisely where the fired count
+doubles. The extra ~1175 solves are btran reaches in the 10-25% band taking the
+route and losing 1.45x to the O(r log r) sort I had listed as a known limit.
+
+*Why my fixture could not show it.* =lp_basis()= gives solutions that are either
+tiny (p50=3) or ~9% of m — bimodal with nothing in 10-25%. QPLIB_1157's mean is
+14.7% of m, right inside. I tuned the generator to QPLIB_3852's 2.27 nnz/col,
+where btran is 1.02x and the cap never bites.
+
+Lowered the default to 0.10 and pinned it with a test that says raising it needs
+a basis whose solutions live in the admitted band and *win* there.
+
+The two lessons, which generalize past this parameter: *sweep each direction
+separately when they can diverge* (one blended ratio hid a regression in half of
+it), and *a threshold measured only on generated data is a guess wearing a
+table*.
+
+Adopted on his measurement, not reproduced — the bases did not arrive (see
+below). It is the conservative direction: a smaller cap strictly reduces the
+population taking the new route, so the worst case is giving up a win, not
+introducing a loss.
+
+* 22:25 :issue161:framing:retraction:
+*2. End-to-end this work is ~1.00x, and issue #161's premise was retracted.*
+
+  feral arm                              wall     vs crates.io
+  0.15.1                                6.088 s      1.00x
+  main + dense_bump_max_dim=4096        3.567 s      1.71x
+  this PR + bump + cap 0.10             3.607 s      1.69x
+
+10.6x on ftran on that instance's real bases; ~1.00x on the LP. The maintainer
+has retracted "93.1% of wall in the LU layer" from #161 as a profile-attribution
+artifact — triangular solves are ~1% of that solve. 4-13% on three other QPLIB
+instances.
+
+A 10.6x speedup that moves the total by 1% *is* a measurement that the component
+was 1% of the total. My PR body quoted the 93.1% figure in its Downstream
+section as motivation; corrected there and in CHANGELOG and the research note.
+
+This is the more important of the two findings and it is not a defect in the
+code — the code does what it claims. It is a defect in *what I let the issue's
+framing justify*. I sized the sparse-rhs API half of this work off "93.1% of
+wall", never questioned that number, and had no way to check it from here. The
+right instinct would have been to treat an unvalidated profile attribution as a
+hypothesis and say so, rather than as the premise.
+
+On this evidence the LU cost that matters for the consumer is *numeric
+factorization* (dense_bump_max_dim, >=41% of that solve's wall), not the solves.
+
+* 22:35 :issue161:pr162:fixtures:missing:
+The bases were offered as an attachment (=feral-bases-1008.zip=) and did not
+arrive. Checked: neither the #162 comment nor the #161 comment body carries an
+attachment link (fetched via API, not just the wake payload); no review threads;
+no new branch in feral.
+
+Also checked whether they are recoverable from discopt — cloned it (public, read
+via the git proxy). They are not:
+- The path #161 names, =scratchpad/issue1008/=, does not exist. The real
+  directory is =scratchpad/i1008/= and holds 18 .py harnesses + HYPOTHESIS.md,
+  no .npz and no =feral_repro.py=.
+- Not on =perf/1008-lp-simplex-throughput= either. The only .npz in discopt are
+  three unrelated ones. No .gitignore rule excludes them — never committed.
+- =scratchpad/i1008/capture.py= cannot regenerate them: it asserts a hardcoded
+  macOS worktree path, reads a QPLIB corpus from =~/Dropbox=, and captures LP
+  *relaxations* rather than simplex bases.
+
+Recorded as the top follow-up: until those two files are in-tree as fixtures, no
+test here can catch a cap regression of the kind just found.

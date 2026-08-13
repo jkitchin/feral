@@ -197,6 +197,36 @@ pub struct LuParams {
     /// That bounded downside is the price of routing on solution density, which
     /// cannot be known without computing part of the reach.
     ///
+    /// # Why the default is 0.10 and not higher
+    ///
+    /// The reach-limited sweep sorts its reach, so it is `O(r log r)` where the
+    /// dense sweep is `O(r)`. For a small reach that overhead is irrelevant
+    /// against the `nnz(factor)` it avoids; for a reach that is a *sizeable
+    /// fraction* of `m` it is not, and the route loses.
+    ///
+    /// Measured on the real QPLIB_1157 simplex basis (`m = 3937`, 7.46 nnz/col,
+    /// fill 6.76x), sweeping only this cap:
+    ///
+    /// | cap | `ftran` | `btran` | route fired |
+    /// |---|---|---|---|
+    /// | 0.05 | 10.59x | 0.98x | 1195 |
+    /// | **0.10** | **10.81x** | **0.97x** | **1195** |
+    /// | 0.25 | 11.01x | **0.69x** | 2370 |
+    /// | 1.00 | 10.75x | **0.69x** | 2560 |
+    ///
+    /// `ftran` is flat across the whole range; `btran` falls off a cliff
+    /// between 0.10 and 0.25, and the fired count nearly doubles over the same
+    /// step. That basis's `btran` reaches sit between 10% and 25% of `m`, so a
+    /// cap of 0.25 admits exactly the population the sort loses on — a 1.45x
+    /// regression bought for no `ftran` gain.
+    ///
+    /// 0.10 is therefore the largest cap measured that still excludes that
+    /// band. Raising it needs evidence from a basis whose solutions actually
+    /// live there and *win*, not a synthetic fixture: this effect is invisible
+    /// unless the solution-density profile straddles the cap, which is why the
+    /// in-tree generator could not show it and the shipped default was wrong
+    /// until real bases were measured.
+    ///
     /// `0.0` disables the route entirely — every solve takes the dense sweep,
     /// exactly as before issue #161, and the `L` row index and reach workspace
     /// are not even allocated. Valid range `[0, 1]`.
@@ -281,7 +311,7 @@ impl Default for LuParams {
             refine_steps: 0,
             refine_tol: 1e-12,
             update_pivot_search: false,
-            hyper_sparse_max_density: 0.25,
+            hyper_sparse_max_density: 0.10,
         }
     }
 }

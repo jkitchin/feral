@@ -344,7 +344,7 @@ impl LuFactor {
         refine_tol = 1e-12,
         update_pivot_search = false,
         dense_bump_max_dim = 0,
-        hyper_sparse_max_density = 0.25,
+        hyper_sparse_max_density = 0.10,
         force_dense = None,
     ))]
     #[allow(clippy::too_many_arguments)]

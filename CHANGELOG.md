@@ -104,8 +104,10 @@ All notable changes to FERAL will be documented in this file.
   scatter is `O(nnz(rhs))`, both triangular solves are `O(reach work)`, the eta
   replay is `O(eta ops)` (proportional to the update chain, not to `m`), and the
   gather is `O(nnz(x) log nnz(x))`.
-- Measured on a triangular LP-shaped basis with unit-vector right-hand sides,
-  `ftran` p50, alongside the deterministic operation count:
+- Measured on a triangular LP-shaped **synthetic** basis with unit-vector
+  right-hand sides, `ftran` p50, alongside the deterministic operation count.
+  **These are component timings, not an end-to-end prediction** — see the note
+  below:
 
   | `m` | dense sweep | reach-limited | **sparse API** | sparse work |
   |---|---|---|---|---|
@@ -127,6 +129,13 @@ All notable changes to FERAL will be documented in this file.
   `btran_sparse`, `last_sparse_solve_work`, and a `hyper_sparse_max_density`
   constructor argument. Issue #161's reproducer is Python, so the fix is
   reachable from it.
+- **Do not read these ratios as an end-to-end speedup.** Measured downstream in
+  discopt on the root LP of QPLIB_1157, this change is **~1.00x** on total wall
+  even though `ftran` on that instance's real bases is 10.6x faster: triangular
+  solves turn out to be ~1% of that solve, not the 93% issue #161 originally
+  attributed to the LU layer (a figure since retracted by its author). Three
+  other QPLIB instances gain 4–13%. The cost that *does* move that LP is numeric
+  factorization, via `dense_bump_max_dim` — a different knob, added in 0.15.2.
 
 ### Added — reach-limited ("hyper-sparse") sparse-LU triangular solves *(issue #161B)*
 
@@ -141,11 +150,18 @@ All notable changes to FERAL will be documented in this file.
   depends on. `usolve` walks the existing `u_above` column index; `lt_solve`
   walks a new row-wise index of `L`, built at factor time and valid for the life
   of the factor because the Forrest–Tomlin update never touches the base `L`.
-- New `LuParams::hyper_sparse_max_density` (default `0.25`) caps the reach as a
+- New `LuParams::hyper_sparse_max_density` (default `0.10`) caps the reach as a
   fraction of `m`. A reach that overruns it aborts back to the dense sweep, so a
   sparse right-hand side whose solution *fills in* pays a bounded overhead
   rather than an unbounded one. **`0.0` disables the route entirely**, restoring
   the previous solve exactly and allocating none of its state.
+- **The default is 0.10 because 0.25 was measured wrong.** A sweep on the
+  in-tree synthetic fixture said the win was flat from 0.05 to 1.00 — true for
+  `ftran`, false for `btran`. On the real QPLIB_1157 basis a cap of 0.25 admits
+  `btran` reaches sitting between 10% and 25% of `m`, which the sorted sweep
+  loses on: **0.69x, a 1.45x regression**, for no `ftran` gain (11.01x at 0.25
+  vs 10.81x at 0.10). The effect is invisible unless a basis's solution-density
+  profile straddles the cap, which the generator's does not.
 - Measured (interleaved A/B on one basis, `m = 4000`, fill 4.05x, unit-vector
   right-hand sides): **ftran 1.95x mean / 2.56x median, btran 1.72x mean / 2.15x
   median**, with the two routes agreeing bit for bit. A dense right-hand side —

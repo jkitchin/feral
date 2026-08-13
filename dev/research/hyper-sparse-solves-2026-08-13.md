@@ -371,3 +371,94 @@ Callers with dense solutions should keep using `ftran`. The doc comments say so.
 - **Still unverified on the real QPLIB bases** (they are `.npz` in the discopt
   tree, not in this repo). The fixture reproduces the structural signature; the
   transfer is untested from here.
+
+---
+
+# Part 3: the transfer test, run by the maintainer on real bases
+
+Everything above was measured on a synthetic fixture, with the transfer to real
+QPLIB bases flagged as unverified. The maintainer ran that test (PR #162 review)
+and it changed two conclusions. Recorded here rather than in a reply, because
+one of them is a defect in what this note recommended.
+
+## What held
+
+The mechanism transfers. On both real bases the route fired (2370–2550 of 2560
+solves, asserted), `max |off − on| = 0.000e0`, `factor_nnz()` identical across
+arms. `ftran` improved 1.74x on QPLIB_3852 and 10.60x on QPLIB_1157 — the latter
+well above anything the fixture predicted.
+
+## What did not: the 0.25 default was wrong
+
+| cap | `ftran` | `btran` | route fired |
+|---|---|---|---|
+| 0.05 | 10.59x | 0.98x | 1195 |
+| **0.10** | **10.81x** | **0.97x** | **1195** |
+| 0.25 (shipped) | 11.01x | **0.69x** | 2370 |
+| 1.00 | 10.75x | **0.69x** | 2560 |
+
+The sweep in Part 1 concluded "the win is flat from 0.05 to 1.00". That was
+measured on `ftran` and `btran` together and reported as one number, and it is
+true for `ftran` alone. `btran` is not flat: it falls off a cliff between 0.10
+and 0.25, exactly where the fired count doubles. Those extra ~1175 solves are
+`btran` reaches sitting in the 10–25% band, taking the route and losing 1.45x to
+it — the `O(r log r)` sort this note listed under "what is still not done",
+biting a population the fixture does not contain.
+
+**Why the fixture could not show it.** `lp_basis()` produces solutions that are
+either tiny (p50 = 3) or nearly `m` (p90 = 366 of 4000, ~9%) — bimodal, with
+nothing in the 10–25% band. QPLIB_1157's mean solution density is 14.7% of `m`,
+squarely inside it. A cap can only be validated against a basis whose solution
+density straddles it, and the generator was tuned to QPLIB_3852's 2.27 nnz/col,
+where `btran` is 1.02x and the cap never bites at all.
+
+This is the concrete failure of the "measure the threshold, don't guess it"
+discipline in Part 1: the sweep was real, the fixture was not representative,
+and reporting one blended ratio hid a regression in half of it. **Two lessons
+worth carrying: sweep each direction separately when they can diverge, and a
+threshold measured only on generated data is a guess wearing a table.**
+
+Default lowered to **0.10** — the largest measured cap that still excludes the
+losing band — and pinned by
+`default_density_cap_is_pinned_to_the_measured_value`, which explains that
+raising it requires a basis whose solutions live in the admitted band and win
+there.
+
+## The end-to-end result, which reframes the whole issue
+
+Measured through discopt on the root LP of QPLIB_1157, discopt held fixed and
+only feral varied:
+
+| feral arm | wall | vs crates.io |
+|---|---|---|
+| 0.15.1 | 6.088 s | 1.00x |
+| `main` + `dense_bump_max_dim = 4096` | 3.567 s | 1.71x |
+| this work + bump + cap 0.10 | 3.607 s | 1.69x |
+
+**~1.00x end-to-end**, against 10.6x on the component. The maintainer has
+retracted issue #161's "93.1% of wall in the LU layer" as a profile-attribution
+artifact; triangular solves are ~1% of that solve. Four other QPLIB instances
+show 4–13%.
+
+A 10.6x speedup that moves the total by 1% is a direct measurement that the
+component was 1% of the total. The work here is sound and free, but **the 476x
+in Part 2 is a component ratio and must not be quoted as a downstream
+prediction** — and the `ftran_sparse`/`btran_sparse` follow-up in particular
+should not be sized off it. On this evidence the LU cost that matters is numeric
+factorization (`dense_bump_max_dim`, ≥41% of that solve's wall), not the solves.
+
+## Standing gap
+
+The two `.npz`/`.mtx` bases and the `real_basis_hyper.rs` harness were offered
+as a PR attachment but did not arrive — neither comment body carries an
+attachment link, and they are not in discopt's git history (the directory issue
+#161 names, `scratchpad/issue1008/`, does not exist; `scratchpad/i1008/` holds
+only Python harnesses). `capture.py` there cannot regenerate them either: it
+needs a QPLIB corpus under `~/Dropbox` and a hardcoded macOS worktree path, and
+it captures LP relaxations rather than simplex bases.
+
+So the cap change here is adopted **on the maintainer's measurement, not
+reproduced in-tree**. It is the conservative direction — a smaller cap strictly
+reduces the population taking the new route — but until those two files are in
+the repository as fixtures, no in-tree test can catch a regression of this kind.
+Carrying them is the single highest-value follow-up in this note.
