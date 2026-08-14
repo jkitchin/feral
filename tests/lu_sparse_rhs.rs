@@ -686,20 +686,27 @@ fn the_density_fallback_restores_the_zeroed_accumulator() {
 
         // Then a solve whose answer is tiny: it must not see a scrap of the
         // dense one left behind in the accumulator.
-        let k = (t * 37 + 5) % m;
-        for forward in [true, false] {
-            let mut expect = vec![0.0; m];
-            expect[k] = 1.0;
-            if forward {
-                oracle.ftran(&mut expect).expect("ftran");
-                lu.ftran_sparse(&[(k, 1.0)], &mut out)
-                    .expect("ftran_sparse");
-            } else {
-                oracle.btran(&mut expect).expect("btran");
-                lu.btran_sparse(&[(k, 1.0)], &mut out)
-                    .expect("btran_sparse");
+        //
+        // Sweeping *every* column rather than one per round is deliberate. With
+        // one probe column this test passed even when the fallback's marking was
+        // removed — the stale entries happened to miss that column's reach, and
+        // a sibling test caught the corruption instead. A contract test that
+        // depends on which column it picks is not guarding the contract.
+        for k in (0..m).filter(|k| (k + t) % 4 == 0) {
+            for forward in [true, false] {
+                let mut expect = vec![0.0; m];
+                expect[k] = 1.0;
+                if forward {
+                    oracle.ftran(&mut expect).expect("ftran");
+                    lu.ftran_sparse(&[(k, 1.0)], &mut out)
+                        .expect("ftran_sparse");
+                } else {
+                    oracle.btran(&mut expect).expect("btran");
+                    lu.btran_sparse(&[(k, 1.0)], &mut out)
+                        .expect("btran_sparse");
+                }
+                worst = worst.max(max_abs_diff(&expect, &densify(&out, m)));
             }
-            worst = worst.max(max_abs_diff(&expect, &densify(&out, m)));
         }
     }
     assert!(
