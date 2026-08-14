@@ -4,6 +4,37 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — threshold-Markowitz LU factorization (issue #167)
+
+- `SparseLu::factor_markowitz(&a, params)`, a second entry point that picks each
+  pivot `(i,j)` to minimise the Markowitz count `(r_i-1)(c_j-1)` subject to
+  `|a_ij| >= u * max_k|a_kj|`, instead of fixing the column order up front with
+  AMD and then running Gilbert-Peierls. Two new `LuParams` fields:
+  `markowitz_threshold` (default `0.1`) and `markowitz_max_search` (default `8`).
+  `SparseLu::factor` is unchanged; both paths now share one `assemble()` so they
+  cannot drift in what they hand downstream, and the solves, the hyper-sparse
+  route and the Forrest-Tomlin update work through either.
+- **Why.** The shipped path is AMD on the A^T A column-intersection pattern
+  followed by partial pivoting — the same algorithm class as SuperLU/COLAMD,
+  which is why comparing against SuperLU could not detect the headroom. The
+  Suhl-Suhl peel is subsumed rather than reimplemented: a column singleton has
+  Markowitz cost 0 and is taken first, so a triangularizable basis triangularizes
+  with no peel code.
+- **Fill.** On 16 preserved LP bases, `factor_nnz()/nnz(B)` geomean
+  **2.77x → 1.06x** (AMD-full → Markowitz; the triangularizing peel gets 1.38x),
+  with zero fill on ten of the sixteen.
+- **Wall-clock is mixed and is reported as such.** Markowitz is the fastest arm
+  on bump-heavy bases — QPLIB_1143_rlt1 (bump 624) 4.87ms vs dense-bump 8.09,
+  peel 31.77, AMD-full 56.72 — and loses to the cheap peel on near-triangular
+  ones — QPLIB_0911_rlt0 (bump 29) peel 1.10ms vs 4.32ms. Geomean speedup vs
+  AMD-full: peel 9.68x, dense-bump 10.99x, Markowitz 4.92x, dominated by the
+  many near-triangular bases in this corpus.
+- **Stability is the cost.** Less fill is bought with more growth: at `u = 0.1`
+  on QPLIB_1157_rlt1, `max|U|/max|B| = 81.8` and `max|L| = 9.70`, against
+  SuperLU's 2.56 and 1.00. Lower `u` buys little further fill for large growth
+  (0.4% fill for 353x growth at `u = 0.01`). See
+  `dev/research/markowitz-fill-measurement.md`.
+
 ### Added — a density guard on `ftran_sparse`/`btran_sparse` (issue #164)
 
 - `LuParams::sparse_rhs_max_density` (default `0.10`). When a sparse-rhs solve's

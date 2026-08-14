@@ -57,3 +57,47 @@ evidence unless the arm also shows the path fired.
 Recorded in dev/research/lu-ordering-and-kernel-2026-08-13.md (section rewritten),
 dev/tried-and-rejected.md, CHANGELOG.md, and the doc comment on
 `LuParams::dense_bump_max_dim`.
+
+* 09:40 :markowitz:lu:fill:167:
+Implemented threshold-Markowitz LU end to end (src/lu/markowitz.rs,
+SparseLu::factor_markowitz, LuParams::{markowitz_threshold=0.1,
+markowitz_max_search=8}, tests/lu_markowitz.rs with 8 tests, a 4th
+arm in examples/basis_refactor). Measured on the 16-basis corpus:
+geomean fill 2.77x (AMDfull) -> 1.38x (peel) -> 1.06x (Markowitz),
+zero fill on 10 of 16. The Python oracle from the #167 investigation
+predicted 1.11x; the Rust implementation lands at or slightly under
+it, so the two independent implementations agree.
+
+* 09:45 :markowitz:performance:negative-result:
+Added the Suhl-Suhl singleton fast path (cost-0 column singletons and
+threshold-passing row singletons off a stack instead of through the
+count heaps) specifically to close the wall-clock gap on
+near-triangular bases. It did not: fill 1.07x -> 1.06x, wall geomean
+3.43x -> 3.50x vs AMDfull. Kept because it is free and slightly
+improves fill, but it failed at its stated purpose. The heap traffic
+was not the bottleneck.
+
+* 10:05 :markowitz:performance:allocation:
+Found the actual bottleneck by inspection rather than profiling: the
+rank-1 update rebuilt every touched column into a fresh Vec, i.e. one
+allocation per (pivot, column) pair -- millions of them on a
+5150-column basis. Rewrote it to walk each column once in place:
+update entries the pivot column touches, swap_remove exact
+cancellations and the consumed pivot-row entry, append unmet L rows as
+fill, with a seen-mark list reset per column. Wall geomean vs AMDfull
+3.50x -> 4.92x, fill unchanged at 1.06x, all 8 tests still pass.
+Lesson: on this workload allocation dominated the pivot search.
+
+* 10:10 :markowitz:167:honest-reporting:
+The wall-clock story is mixed and the checkpoint must say so. Markowitz
+is the FASTEST arm on the bump-heavy bases discopt #1008 is written
+around -- QPLIB_1143_rlt1 (bump 624) 4.87ms vs denseBump 8.09, peel
+31.77, AMDfull 56.72; QPLIB_1157_rlt1 (bump 584) 6.94 vs 11.43/31.16/
+45.13; QPLIB_1451_cap100000 (bump 1350) 10.98 vs peel 12.08. It LOSES
+to the peel on near-triangular bases -- QPLIB_0911_rlt0 (bump 29) peel
+1.10ms vs markowitz 4.32ms -- because running the general pivot search
+5150 times is more expensive than a linear triangularization scan. The
+geomean favours the peel (9.68x vs 4.92x) only because this corpus is
+mostly near-triangular. Implication: peel-then-Markowitz-on-the-bump is
+the shape the data argues for, but it is a separate issue with its own
+measurement, not a quiet scope extension of #167.
