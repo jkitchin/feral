@@ -154,6 +154,15 @@ pub struct LuParams {
     /// (issue #163) and the instance where it is a 2.6x slowdown. This cap is
     /// the other 4.28x, on the numeric side, and it needs the peel to fire.
     ///
+    /// **Setting this cap does not buy that dual bound back.** Because the route
+    /// reorders the bump's arithmetic again, it is tempting to assume it lands
+    /// back on a certifying path; it does not. With the cap at `4096` and the
+    /// peel on, that LP still returns `Numerical`, in an arm where the route is
+    /// instrumented and proven to have fired 26 times (issue #168). There is no
+    /// cap-without-peel configuration either — `want_dense_bump` is gated on a
+    /// triangularized symbolic — so the speedup and the trajectory change are
+    /// one lever, not two.
+    ///
     /// When `analyze_triangularized` peels nothing and the bump *is* the whole
     /// basis, this cap does not apply either — such a basis is bounded by
     /// [`Self::dense_threshold`] instead. The case for the dense kernel rests on

@@ -435,6 +435,12 @@ only feral varied:
 | `main` + `dense_bump_max_dim = 4096` | 3.567 s | 1.71x |
 | this work + bump + cap 0.10 | 3.607 s | 1.69x |
 
+*(The 1.71x row is the cap's value and stands. What it costs is settled
+elsewhere: the cap only fires on a triangularized symbolic, so taking it means
+taking the peel, and on the bchoco06 root LP that loses a dual bound — issue
+#163, and issue #168 for the retracted claim that the dense route escaped it.
+Speedup and trajectory change are one lever.)*
+
 **~1.00x end-to-end**, against 10.6x on the component. The maintainer has
 retracted issue #161's "93.1% of wall in the LU layer" as a profile-attribution
 artifact; triangular solves are ~1% of that solve. Four other QPLIB instances

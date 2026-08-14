@@ -195,28 +195,83 @@ reading.
 
 ## Does the fix strand the 1.71x?
 
-No. #163's stated motivation is taking `dense_bump_max_dim = 4096`, which under
-the new pairing also means taking the peel — so the obvious worry is that the
-configuration worth 1.71x is exactly the one that fails. Tested by temporarily
-setting `LuParams::default()` to `dense_bump_max_dim: 4096` *and* `analyze` to
-`analyze_triangularized`, i.e. a caller opting into both:
+**Yes. Corrected 2026-08-14 — the original answer here was "No", and it was
+wrong.** See issue #168, filed from the discopt side, and the independent
+re-measurement below which reproduces it.
 
-| configuration | `bchoco06_illcond_scaled_path_recovers_bound_649` |
-|---|---|
-| whole-basis AMD, no cap (shipped default) | **PASSED** |
-| peel, no cap (#160 as merged) | **FAILED** — `Numerical` |
-| **peel + cap 4096** | **PASSED** |
+#163's stated motivation is taking `dense_bump_max_dim = 4096`, which under the
+new pairing also means taking the peel — so the worry was that the configuration
+worth 1.71x is exactly the one that fails. It is.
 
-The combination worth 1.71x passes. #160 can ship and the speedup can be taken.
+Held fixed: discopt at `bce881ff`, unmodified, `cargo test -p discopt-core --lib
+bchoco06`. Only feral varies, via `[patch.crates-io] feral = { path = … }`. Each
+arm patches `LuParams::default()`'s `dense_bump_max_dim` and redirects
+`SparseLuSymbolic::analyze` to the triangularizing path.
 
-This also settles what kind of result the whole issue is. Three configurations,
-three arithmetic trajectories, and the failing one is the *middle*, not an
-endpoint — the dense-bump route reorders the bump's arithmetic again and lands
-back on a certifying path. No ordering-quality story survives that. It is
-coin-flip sensitivity of one ill-conditioned LP to any perturbation of the bits
-its ratio test reads, which is exactly why the revert is argued from cost-benefit
-above and why the caveat about whole-basis AMD not being established as *better*
-is stated as strongly as it is.
+| feral rev | ordering | cap | `bchoco06_..._recovers_bound_649` | dense-bump firings |
+|---|---|---|---|---|
+| `e00aa70` | whole-basis AMD | 0 | **ok** | 0 |
+| `e00aa70` | peel | 0 | **FAILED** — `Numerical` | 0 |
+| `e00aa70` | peel | 4096 | **FAILED** — `Numerical` | **26** |
+| `895ef65` | peel | 4096 | **FAILED** — `Numerical` | **26** |
+
+All three failures are the same assertion — the test's ground truth, not its
+subject:
+
+```
+assertion `left == right` failed: unscaled cold solve of the bchoco06 root LP must be Optimal
+  left: Numerical
+ right: Optimal
+```
+
+**The arm is not vacuous.** Both routes are silent fallbacks, so a test that only
+checks the answer passes whether or not the new code ran. A counter patched into
+`sparse_factor.rs` immediately after `want_dense_bump` is computed —
+
+```rust
+if want_dense_bump { eprintln!("PROBE_DENSE_BUMP bump_dim={}", bump_dim); }
+```
+
+— fires **26 times** in both cap-4096 arms and **0 times** in both cap-0 arms.
+The failing configuration is one where the dense route demonstrably ran, and a
+patch that silently failed to apply would have made the cap-4096 arm identical to
+peel-no-cap, which it is not.
+
+Row 4 is the same claim at the commit it was authored on, so this is not a
+regression introduced by anything that landed after it. Why the original run
+reported `PASSED` is undetermined; vacuity is ruled out, and stale build
+artifacts or an arm mix-up are the two candidates that cannot be distinguished
+after the fact. The measurement was recorded without a firing counter, which is
+what made it unfalsifiable at the time — the counter above is the practice that
+should have been in place.
+
+**What follows.** `sparse_factor.rs` makes the peel a hard precondition for the
+route:
+
+```rust
+let want_dense_bump = symbolic.triangularized
+    && (peeled || bump_dim <= params.dense_threshold)
+    && ...
+```
+
+so there is no cap-without-peel configuration to retreat to. The 1.71x and the
+bchoco06 bound loss are the same lever, and #163's original coupling argument
+stands unchanged: on this LP, opting into the speedup means opting into the lost
+bound. Nothing downstream is exposed — `dense_bump_max_dim` defaults to `0` and
+`analyze` is whole-basis AMD, so both halves of the lever are off unless a caller
+asks — but a caller who does ask should not expect the dense route to recover the
+bound, and the doc comment on `LuParams::dense_bump_max_dim` now says so.
+
+**What this retracts.** The paragraph that used to follow this table argued that
+because the failing configuration was the *middle* of three, "no ordering-quality
+story survives that", and the result was coin-flip sensitivity to any
+perturbation of the bits the ratio test reads. That argument was built entirely
+on the third row. With the corrected table there is no middle: both peel arms
+fail and only whole-basis AMD passes, and the failure tracks the ordering. That
+is *not* a demonstration that whole-basis AMD is the better trajectory in general
+— #166 has QPLIB_3225 apparently going the other way, and the caveat two sections
+above still holds — but the specific "reordering the bump again lands back on a
+certifying path" claim is withdrawn.
 
 ## Regression coverage
 

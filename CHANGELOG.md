@@ -105,6 +105,18 @@ All notable changes to FERAL will be documented in this file.
     from the one fixture where the peel's total advantage is smallest. The
     contradicting measurement was already in this file, in the #160 entry below
     ("cutting the ordering from 9.837 ± 0.295 ms to 0.851 ± 0.037 ms").*
+- **The dense-bump route does not recover that bound.** Because
+  `dense_bump_max_dim` reorders the bump's arithmetic again, it was recorded
+  during development as escaping the regression — peel alone failing that LP,
+  peel + cap `4096` passing it. That does not reproduce (issue #168). Re-measured
+  with the downstream solver held fixed and the route instrumented, peel + cap
+  `4096` returns `Numerical` in an arm where the dense path provably fired 26
+  times, identically at the commit the original claim was authored on. Since
+  `want_dense_bump` is gated on a triangularized symbolic, there is no
+  cap-without-peel configuration either: the speedup and the trajectory change
+  are one lever. Shipped defaults are unaffected — the cap is `0` and `analyze`
+  is whole-basis AMD — but a caller opting into both should expect the
+  trajectory change to come with them.
 - New in-tree: `tests/lu_default_ordering.rs` (a contract test — the measurement
   above says there is no numerical difference to assert),
   `tests/data/lu_bases/bchoco06_illcond_basis.mtx` (the worst-conditioned basis

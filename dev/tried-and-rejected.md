@@ -5322,3 +5322,49 @@ The conclusion is not "reuse harder" — it is that the ordering **must** be
 recomputed on every refactorization, and therefore must be cheap. That is what
 makes the `analyze` vs `analyze_triangularized` cost (4.3-12.4x, measured
 standalone) a first-order effect rather than an amortizable one.
+
+## 2026-08-14 — "the dense-bump route escapes the #163 bound loss" (retracted measurement)
+
+**Rejected on re-measurement; the original result does not reproduce.** Commit
+`895ef65` recorded that `dense_bump_max_dim = 4096` *plus* the peel — the
+configuration worth 1.71x, and the one #163 was worried about stranding — passed
+the downstream `bchoco06_illcond_scaled_path_recovers_bound_649`, while the peel
+alone failed it. That underwrote the conclusion "#160 can ship and the speedup
+can be taken."
+
+It fails. Re-run under issue #168 with discopt held fixed at `bce881ff` and only
+feral varying via `[patch.crates-io]`:
+
+| feral rev | ordering | cap | result | dense-bump firings |
+|---|---|---|---|---|
+| `e00aa70` | whole-basis AMD | 0 | ok | 0 |
+| `e00aa70` | peel | 0 | **FAILED** — `Numerical` | 0 |
+| `e00aa70` | peel | 4096 | **FAILED** — `Numerical` | **26** |
+| `895ef65` | peel | 4096 | **FAILED** — `Numerical` | **26** |
+
+Rows 1 and 2 reproduce `895ef65` exactly; row 3 contradicts it; row 4 shows the
+behavior is identical at the commit the claim was authored on, so nothing that
+landed afterwards caused it. The failure is the same assertion every time —
+`left: Numerical, right: Optimal`, the test's ground truth rather than its
+subject.
+
+**The arm is not vacuous**, which is the failure mode that would have made this
+uninteresting: a counter printed immediately after `want_dense_bump` is computed
+fires 26 times in both cap-4096 arms and 0 times in both cap-0 arms. The dense
+route demonstrably ran in the configurations that failed.
+
+Why the original run passed is undetermined. Vacuity is ruled out — a patch that
+failed to apply would have reproduced peel-no-cap, which fails. Stale build
+artifacts and an arm mix-up are the two candidates that cannot be separated after
+the fact.
+
+**Consequence.** `sparse_factor.rs` gates `want_dense_bump` on
+`symbolic.triangularized`, so there is no cap-without-peel fallback: the 1.71x
+and the lost dual bound are the same lever. #163's coupling argument stands, and
+`895ef65` was the only evidence against it.
+
+**Practice this changes.** The retracted measurement was recorded without any
+proof that the code path under test had executed, on a route that is a *silent
+fallback* — exactly the condition #162 already argued required `used_dense_bump()`
+for its own tests. A pass/fail on a silent-fallback path is not evidence unless
+the arm also shows the path fired. Instrument first, then measure.

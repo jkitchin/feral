@@ -1,0 +1,59 @@
+* 12:40 :lu:issue-168:regression:measurement-hygiene:discopt:
+Issue #168 (filed from the discopt side) claims that `895ef65`'s third row —
+"peel + dense_bump_max_dim 4096 PASSES bchoco06" — does not reproduce.
+Re-measured independently before touching the record. It is right.
+
+Harness: discopt worktree at `bce881ff` unmodified, two feral worktrees
+(`e00aa70`, `895ef65`), `[patch.crates-io] feral = { path = ... }`, one arm per
+run, `cargo test -p discopt-core --lib bchoco06`. Both feral revs are version
+0.15.1 so the patch applies without a version override.
+
+| feral    | ordering | cap  | result                    | PROBE firings |
+|----------+----------+------+---------------------------+---------------|
+| e00aa70  | AMD      |    0 | ok                        |             0 |
+| e00aa70  | peel     |    0 | FAILED -- Numerical       |             0 |
+| e00aa70  | peel     | 4096 | FAILED -- Numerical       |            26 |
+| 895ef65  | peel     | 4096 | FAILED -- Numerical       |            26 |
+
+All failures are the same assertion, and it is the test's ground truth rather
+than its subject:
+
+  assertion `left == right` failed: unscaled cold solve of the bchoco06 root LP
+  must be Optimal
+    left: Numerical
+   right: Optimal
+
+Firing counts come from `eprintln!("PROBE_DENSE_BUMP bump_dim={}", bump_dim)`
+inserted immediately after `want_dense_bump` in `sparse_factor.rs`. 26 in both
+cap-4096 arms, 0 in both cap-0 arms — so the failing configuration is one where
+the dense route provably ran, and a no-op patch is ruled out (it would have made
+the cap-4096 arm identical to peel-no-cap, which it is not). My numbers match
+#168's exactly, including the 26.
+
+Row 4 matters: the behaviour is identical at the commit the claim was authored
+on, so nothing that landed after `895ef65` caused this. Why the original run
+reported PASSED is undetermined — stale artifacts or an arm mix-up, and I cannot
+separate them after the fact.
+
+Consequence: `want_dense_bump` is gated on `symbolic.triangularized`, so there is
+no cap-without-peel fallback. The 1.71x and the bchoco06 bound loss are one
+lever. #163's coupling argument stands; `895ef65` was the only evidence against
+it. Shipped defaults are unaffected (`dense_bump_max_dim: 0`, `analyze` =
+whole-basis AMD), so nothing downstream is exposed.
+
+The retracted paragraph is the wider damage: it argued that because the failing
+configuration was the *middle* of three, no ordering-quality story survives and
+this is coin-flip sensitivity to any perturbation. That rested entirely on the
+false row. Corrected table has no middle — both peel arms fail, only AMD passes,
+and the failure tracks the ordering. Not evidence that AMD is better in general
+(#166 has QPLIB_3225 going the other way), but the "reordering the bump lands
+back on a certifying path" claim is withdrawn.
+
+Practice: the retracted measurement was taken on a *silent fallback* route with
+no proof the path executed — the exact condition #162 already argued required
+`used_dense_bump()` for its own tests. Pass/fail on a silent-fallback path is not
+evidence unless the arm also shows the path fired.
+
+Recorded in dev/research/lu-ordering-and-kernel-2026-08-13.md (section rewritten),
+dev/tried-and-rejected.md, CHANGELOG.md, and the doc comment on
+`LuParams::dense_bump_max_dim`.
