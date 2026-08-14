@@ -41,10 +41,12 @@ n=16  geomean fill:  AMDfull 3.00x  peel 1.52x  COLAMD 3.24x  MARKOWITZ 1.11x
 geomean Markowitz advantage over feral's best ordering: 1.37x  (min 1.00x, max 4.30x)
 ```
 
-`AMDfull` = `SparseLuSymbolic::analyze_amd_only`, which is what
-`SparseLuSymbolic::analyze` does today (`LuOrderingParams::default()` is
-`triangularize: false`) and therefore what discopt runs. `peel` =
-`analyze_triangularized` (#160, merged, **unreleased**). `COLAMD` =
+`AMDfull` = `SparseLuSymbolic::analyze_amd_only`, which is what discopt runs,
+because it pins crates.io `feral 0.15.1` and that predates #160. `peel` =
+the peel-then-AMD ordering of #160 — on `main` (b071d54) that *is* what plain
+`analyze` does; on the unmerged PR #162 branch it moves to
+`analyze_triangularized` and plain `analyze` reverts to AMD-full (see the
+correction note below). `COLAMD` =
 `scipy.sparse.linalg.splu(permc_spec="COLAMD", diag_pivot_thresh=0.1)`. `MARKOW` =
 `dev/probes/markowitz-fill/markowitz.py` at `u = 0.1`. All four count strict-lower
 `L` plus `U` including the diagonal, matching `SparseLu::factor_nnz()`.
@@ -58,11 +60,31 @@ triangular it closes the gap outright: `QPLIB_0911` 12.92x → 1.00x (5150 colum
 peeling to a bump of 29), `QPLIB_1451_rlt0` at 3000 iterations 7.86x → 1.01x.
 
 discopt does not get this. It pins crates.io `feral 0.15.1`, which predates #160,
-and even on current `main` the default ordering is whole-basis AMD. So discopt's
-statement that "feral's `analyze` already triangularizes and runs AMD on the
-residual bump, so 19.1x fill is *after* a fill-reducing ordering" is **wrong on
-both halves**: the version it links has no peel, and the entry point it calls does
-not select one.
+and #160 is merged to `main` but has never been released. So discopt's statement
+that "feral's `analyze` already triangularizes and runs AMD on the residual bump,
+so 19.1x fill is *after* a fill-reducing ordering" is **wrong about the code it is
+actually running**: the version it links has no peel at all.
+
+**Correction (this note's first revision was wrong about the second half).** I
+originally added that "even on current `main` the default ordering is whole-basis
+AMD". That is false. On `main` at b071d54, `SparseLuSymbolic::analyze` calls
+`triangularize(a)` directly (`src/lu/sparse_symbolic.rs:57`) and then runs AMD on
+the bump — the peel *is* the default there. `LuOrderingParams` does not exist on
+`main`; it is introduced by the unmerged PR #162, which reverts `analyze` to
+AMD-full and makes the peel opt-in via `analyze_triangularized`, because of the
+trajectory regression in #163. I read the PR #162 worktree and reported it as
+`main`.
+
+The practical consequence, and it is the one that matters: **discopt needs no
+source change to get the peel today.** Repointing its `feral` dependency at
+`main` (b071d54) — a path or git dep under `[patch.crates-io]`, which is the
+mechanism #1008 already used for its probe branch — is sufficient, because the
+two `SparseLuSymbolic::analyze` call sites in `linsolve.rs` pick up the peel as
+the default. A release is not the gate. If PR #162 lands, that flips: a consumer
+pinned past #162 silently loses the peel and has to call
+`analyze_triangularized` (or `analyze_with(.., LuOrderingParams { triangularize:
+true })`) explicitly. That is the concrete consumer stake in the ordering-default
+question of #165.
 
 ### 2. The residual bump is where Markowitz is actually needed
 

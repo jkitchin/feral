@@ -71,3 +71,34 @@ finding 1 vs finding 2: releasing #160 buys less than the shallow sample implied
 answer than the first pass said.
 
 Note and issue #167 updated.
+
+* 00:20 :lu:ordering:discopt-1008:correction:api:
+Second self-correction, and this one changes the recommendation. I claimed in
+the research note and in the discopt #1008 comment that "even on current `main`,
+`LuOrderingParams::default()` is `triangularize: false`, so the
+`SparseLuSymbolic::analyze` discopt calls does not select the peel." That is a
+description of the **unmerged PR #162 branch**, which I had checked out at
+/private/tmp/feral-pr162 and read as if it were `main`.
+
+Evidence — `git show origin/main:src/lu/sparse_symbolic.rs`:
+
+    55: impl SparseLuSymbolic {
+    56:     /// Triangularize, then order the residual bump with AMD.
+    57:     pub fn analyze(a: &SparseColMatrix) -> Result<Self, FeralError> {
+    62:         let t = triangularize(a);
+
+`grep "pub fn analyze"` on `main` returns only `analyze` and `analyze_amd_only`;
+there is no `analyze_triangularized` and no `LuOrderingParams` on `main` at all.
+Both are introduced by PR #162, which reverts `analyze` to AMD-full and makes the
+peel opt-in, because of the #163 trajectory regression.
+
+Consequence: discopt needs **no source change** to get the peel — repointing its
+`feral` dep at `main` (b071d54) via `[patch.crates-io]` is sufficient, since its
+two `analyze` call sites in `linsolve.rs` (:382, :615) get the peel as the
+default. This also lands the ordering-default question (#165) on a concrete
+consumer: if #162 merges as written, anyone pinned past it silently loses the
+peel. The first half of Withdrawal 1 is unaffected — discopt pins crates.io
+0.15.1, which predates #160 entirely, so what it runs today is still AMD-full and
+the whole fill table stands unchanged.
+
+Note, journal, feral #167 and discopt #1008 all corrected.
