@@ -741,12 +741,17 @@ mod tests {
         let a = SparseColMatrix::from_dense_columns(2, &cols).expect("matrix");
         let symbolic = SparseLuSymbolic::natural(2);
 
+        // Both arms pin `GilbertPeierls`: this test is about that route's
+        // `pivot_threshold` rule inside a caller-supplied (natural) column
+        // order, and the `Markowitz` default (#171) uses neither -- it picks its
+        // own order and reads `markowitz_threshold`.
         // Strict partial pivoting (u = 1.0): the max-magnitude row wins.
         let strict = SparseLu::factor(
             &a,
             &symbolic,
             LuParams {
                 pivot_threshold: 1.0,
+                pivoting: crate::lu::LuPivoting::GilbertPeierls,
                 ..LuParams::default()
             },
         )
@@ -760,6 +765,7 @@ mod tests {
             &symbolic,
             LuParams {
                 pivot_threshold: 0.5,
+                pivoting: crate::lu::LuPivoting::GilbertPeierls,
                 ..LuParams::default()
             },
         )

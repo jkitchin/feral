@@ -6628,3 +6628,66 @@ which exceeds `m` on the reach path too. Without a dedicated counter the tests
 could not tell an inert guard from a working one.
 
 Evidence: PR #162 review, findings 1 and 4; `dev/journal/2026-08-13-04.org`.
+
+
+## 2026-08-14 — LU defaults: Markowitz on, triangularization and the dense bump off (issue #171)
+
+`LuParams::pivoting` is added and defaults to `LuPivoting::Markowitz`.
+`triangularize` and `dense_bump_max_dim` stay off. AMF stays off. Each of the
+four levers was decided separately, on downstream evidence rather than on the
+corpus alone.
+
+**Markowitz becomes the default.** Against the previously shipped route
+(AMD on AᵀA + Gilbert–Peierls) on the 16-basis LP corpus: `factor_nnz()/nnz(B)`
+geomean 2.77x → 1.06x, never worse on any basis, and faster on 15 of 16. The one
+loss is `QPLIB_0343_rlt1`, 0.97 ms vs 0.92 ms — 5% on the second-cheapest basis
+in the corpus. On the expensive end it is not close: `QPLIB_1451_rlt0_cap100000`
+goes 1066.64 ms → 10.98 ms with fill 24.90x → 1.14x.
+
+Corpus fill was not treated as sufficient. The rule was also run downstream,
+through discopt's `[patch.crates-io]`, with `SparseLu::factor` routed to
+`factor_markowitz`: the full `discopt-core` LP suite passes **112/112**, and
+`bchoco06_illcond_scaled_path_recovers_bound_649` — the test that disqualifies
+the peel — passes with the probe firing **46** times, so the route demonstrably
+ran. That last point is the #168 rule applied: pass/fail on a silently
+substitutable route is not evidence unless the arm also shows the route fired.
+
+**Triangularization stays off.** The peel loses the dual bound on bchoco06
+(`Numerical` where `Optimal` is required) at `dense_bump_max_dim` 0 and 4096
+alike, with whole-basis AMD the only passing arm (#168). A controlled two-arm
+A/B on QPLIB_3225 through discopt (#166) found the peel *neutral* there — both
+arms reach the published optimum 511.52671247757985 — so the cost is
+instance-dependent, not universal. One instance where it is neutral does not
+outweigh one where it loses a bound.
+
+**The dense bump stays off, and could not have been turned on separately.** The
+route is gated on a bump that was actually peeled (21f5e74), so it is
+unreachable unless triangularization is on. It is one lever, not two.
+
+**AMF stays off** because no downstream measurement was taken this session. That
+is an absence of evidence, not a finding against it.
+
+**Known cost of this decision.** `Markowitz` ignores `factor`'s `symbolic`
+argument, because it does not use a precomputed column order. That is a silent
+semantic change for any caller that carefully chose an ordering and passed it in
+— exactly the silent-fallback shape #168 warned about. Three mitigations, and no
+claim that they eliminate it: the selector is an explicit enum rather than a
+bool, `SparseLu::used_markowitz()` makes the executed route observable so a
+measurement can assert instead of infer, and every in-repo ordering comparison
+(`examples/lu_fill_orderings.rs`, `src/bin/probe_lu_phases.rs`,
+`src/bin/probe_ft_eta.rs`) is pinned to `GilbertPeierls` in this change. An
+out-of-tree caller comparing orderings against `LuParams::default()` will
+silently compare nothing until it pins the rule. Seven in-repo test sites
+across five files failed on this change — `sparse_lu_honors_pivot_threshold`,
+`dense_bump_route_needs_the_peel_and_the_cap_together`, the whole
+`lu_dense_bump` suite, `reach_route_composes_with_the_dense_bump_route`,
+`perturb_chooses_largest_magnitude_row_matching_dense`,
+`factor_traversal_is_subquadratic`, and
+`sparse_solves_compose_with_the_dense_bump_route` — and every one was fixed by
+pinning `GilbertPeierls`, never by weakening an assertion. That seven
+independent tests failed is corroboration that the hazard is real, not
+hypothetical, and it is a fair estimate of what a downstream suite should
+expect to have to pin.
+
+Evidence: issue #171; `dev/research/markowitz-fill-measurement.md`;
+`dev/journal/2026-08-14-01.org`; the #166 and #168 arm harnesses.

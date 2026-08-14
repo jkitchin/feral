@@ -19,7 +19,7 @@
 
 use std::time::Instant;
 
-use feral::{LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{LuParams, LuPivoting, SparseColMatrix, SparseLu, SparseLuSymbolic};
 
 fn read_mtx(path: &str) -> SparseColMatrix {
     let text = std::fs::read_to_string(path).expect("read mtx");
@@ -107,7 +107,13 @@ fn main() {
         // never fires here (it requires a symbolic that triangularized). Every
         // arm therefore runs the same sparse scatter kernel and the comparison
         // is ordering against ordering, nothing else.
-        let p = LuParams::default();
+        // Pinned: `LuParams::pivoting` defaults to `Markowitz`, which ignores
+        // `sym` entirely -- leaving the default here would make every arm of an
+        // ordering comparison measure the same thing.
+        let p = LuParams {
+            pivoting: LuPivoting::GilbertPeierls,
+            ..LuParams::default()
+        };
         let mut times = Vec::with_capacity(reps);
         let mut fnnz = 0usize;
         for _ in 0..reps {
@@ -144,6 +150,7 @@ fn main() {
     for (label, cap) in [("peel+sparse", 0usize), ("peel+denseBump", 4096)] {
         let p = LuParams {
             dense_bump_max_dim: cap,
+            pivoting: LuPivoting::GilbertPeierls,
             ..LuParams::default()
         };
         let mut times = Vec::with_capacity(reps);

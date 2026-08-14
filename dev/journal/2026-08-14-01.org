@@ -101,3 +101,126 @@ geomean favours the peel (9.68x vs 4.92x) only because this corpus is
 mostly near-triangular. Implication: peel-then-Markowitz-on-the-bump is
 the shape the data argues for, but it is a separate issue with its own
 measurement, not a quiet scope extension of #167.
+
+* 11:20 :161:superlu:measurement:
+Re-measured #161's two claims on merged main (+#167). SuperLU reproduces
+its original numbers exactly on this machine (213,132 factor-nnz, 7.26x
+fill, 11.13 ms on QPLIB_1157), so old and new numbers are comparable.
+Part A: shipped defaults 44.89 ms = 4.03x SuperLU; peel+denseBump 10.91
+ms = parity; Markowitz 6.73 ms at fill 1.74x = 1.65x FASTER than SuperLU
+at 4.2x less fill. On QPLIB_3852: SuperLU 0.21, defaults 0.60,
+denseBump 0.21, markowitz 0.42 ms.
+Part B at the SHIPPED hyper_sparse_max_density=0.10: ftran p50 88.42us
+-> 7.92us (11.17x), btran 0.98x (neutral), ftran_sparse p50 0.04us.
+My first run used the example's own default 0.25 and showed btran 0.67x
+-- that is the known regression that drove the default down to 0.10
+(dev/sessions/2026-08-13-02.md), not a new finding. Re-ran at 0.10
+before reporting.
+
+* 11:25 :161:premise:superlu:
+The finding that matters: SuperLU is NOT work-proportional either. Same
+factor, same basis: unit rhs (solution nnz=1) 107.2us, dense rhs
+(solution nnz=3937) 106.0us. #161 measured feral against ITSELF on this
+axis and called it a defect. Against the reference it was never
+feral-specific -- and at 7.92us it is now a feral advantage.
+Also: #161's premise "the ordering is not the problem, our fill matches
+COLAMD" was a true observation with a false conclusion. AMD-on-A^T A and
+COLAMD are the same class; matching the reference inside a class cannot
+detect that the class is leaving 4x on the table. #167 measured it:
+6.49x -> 1.74x fill on that exact basis.
+Closed #161 with the full table; opened #171 for the defaults decision
+(all three levers -- dense bump, Markowitz, AMF -- are off by default,
+and the shipped config is 4.03x SuperLU).
+
+* 11:50 :166:scoping:correction:
+Two of my assumptions about the #166 A/B were wrong, found by checking
+rather than by reasoning.
+1. I planned to dump QPLIB_3225's LP from Python and replay it in Rust.
+   Dead: solver.py:1473 calls solve_spatial_tree_py, so the whole B&B
+   tree runs INSIDE Rust and node LPs never surface to Python. The
+   wrapper I installed on solve_milp_csc_py logged 0 calls, which is how
+   I found out.
+2. More important: main today does NOT peel. LuOrderingParams uses
+   #[derive(Default)] so triangularize=false, and released 0.15.1's
+   analyze is plain AMD on A^T A (grep: 0 occurrences of "triangularize"
+   in the tag). So main == 0.15.1 in ordering behaviour, and the
+   extension in the shared venv -- which links feral 0.15.1 from
+   crates.io -- IS the amd_only arm.
+That extension solved QPLIB_3225: objective 511.52671247757985 against
+the published reference 511.5267124, bound 508.875, 4480 nodes,
+status=time_limit at TL=120s. So the amd_only arm finds the optimum, and
+main is not in the failing configuration. The failing arm must be the
+peel.
+
+* 11:55 :166:harness:
+Building the decisive flip properly: two feral worktrees off today's
+main differing in exactly one line (analyze -> analyze_with(default)
+vs analyze -> analyze_triangularized), two discopt worktrees pinned at
+bce881ff with [patch.crates-io] feral = <arm path>, maturin build per
+arm into /private/tmp/i166/wheels-<arm>. Nothing is installed into the
+user's shared venv; the extension .so is loaded via PYTHONPATH. Both
+arms are built from the SAME feral source so the flip is the only
+difference -- the released-0.15.1 run above is a reference point, not
+one of the two arms.
+
+* 13:10 :166:result:ab:
+Both #166 arms finished. amd: objective 511.52671247757985, bound
+508.88462071047877, 4625 nodes, time_limit. peel: objective
+511.52671247757985, bound 508.88769205717875, 5357 nodes, time_limit.
+Arm identity verified two ways -- the two .so files have distinct md5s,
+and run_arm.py asserts the loaded module path starts with its own arm
+prefix before solving. Conclusion: QPLIB_3225 does NOT track the
+ordering flip; both arms reach the published optimum 511.5267124. #166
+closed as not reproducible, with the two scoping corrections recorded
+(main does not peel; Python-side LP extraction is impossible because the
+spatial tree runs in Rust). This does NOT clear the peel in general --
+#168's bchoco06 conviction stands. The two results are not in tension:
+the peel's cost is instance-dependent.
+
+* 13:35 :171:markowitz:downstream:decision:
+The lever #171 was missing was Markowitz measured DOWNSTREAM, so I took
+it. Patched a throwaway feral worktree so SparseLu::factor returns
+Self::factor_markowitz unconditionally, with eprintln!("PROBE_MARKOWITZ")
+so the route cannot be silently absent (#168's rule). Through discopt's
+[patch.crates-io]: the full discopt-core LP suite passes 112/112, and
+bchoco06_illcond_scaled_path_recovers_bound_649 -- the exact test the
+peel FAILS -- passes with 46 PROBE_MARKOWITZ firings. Combined with the
+corpus (fill geomean 2.77x -> 1.06x, never worse on any of 16 bases,
+faster on 15/16), that is enough to flip the default. Decision: Markowitz
+on, triangularize off (bchoco06), dense bump off (it is gated on a peeled
+bump since 21f5e74, so it is not a separate lever), AMF off (no
+downstream measurement taken -- absence of evidence, not evidence
+against).
+
+* 14:20 :171:implementation:silent-substitution:
+Implemented as an explicit enum LuPivoting {GilbertPeierls, Markowitz}
+on LuParams rather than a bool, defaulting to Markowitz, with
+SparseLu::used_markowitz() so any measurement can assert which rule ran.
+Known cost, stated not buried: Markowitz ignores factor's `symbolic`
+argument, so an out-of-tree caller that carefully chose an ordering and
+passed LuParams::default() silently gets Markowitz instead. Four in-repo
+tests caught exactly this hazard and all four were fixed by pinning
+GilbertPeierls, never by weakening an assertion:
+- lu::sparse_solve::tests::sparse_lu_honors_pivot_threshold (asserts the
+  GP threshold rule against a `natural` symbolic; Markowitz ignores both)
+- tests/lu_default_ordering.rs dense_bump_route_needs_the_peel_and_the_cap_together
+- tests/lu_dense_bump.rs (whole file, via a gp() helper)
+- tests/lu_hyper_sparse.rs reach_route_composes_with_the_dense_bump_route
+  ("the dense-bump route did not fire on both arms")
+Four independent tests failing is corroboration that the hazard is real.
+Self-inflicted bug worth recording: my file-wide sed on lu_dense_bump.rs
+rewrote the gp() helper's OWN body to ..gp(), making it infinitely
+recursive -- "has overflowed its stack", SIGABRT. Fixed by restoring
+..LuParams::default() inside the helper.
+
+* 14:55 :testing:process:fail-fast:
+Process error worth recording: I ran `cargo test` (no flags) four times
+in a row and each run reported exactly ONE failing test binary, so I
+"fixed the last failure" three times over. cargo test stops after the
+first failing test target -- run 5's log has zero occurrences of
+`lu_sparse_rhs`, meaning that binary never executed. Every "the suite is
+green except X" read was wrong by construction. Switched to
+`cargo test --no-fail-fast`, which surfaces all failing targets in one
+pass. Lesson: for a change that touches a default shared by every test,
+fail-fast turns one measurement into N sequential ones and hides the
+true blast radius.

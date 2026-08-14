@@ -18,7 +18,9 @@
 //!   wall-clock benchmark cannot pin an asymptote. `last_sparse_solve_work()`
 //!   is asserted to stay flat while `m` grows 8x.
 
-use feral::{FeralError, LuParams, LuScaling, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{
+    FeralError, LuParams, LuPivoting, LuScaling, SparseColMatrix, SparseLu, SparseLuSymbolic,
+};
 
 struct Rng(u64);
 impl Rng {
@@ -526,7 +528,12 @@ fn sparse_solves_compose_with_the_dense_bump_route() {
     let mut lu = SparseLu::factor(
         &a,
         &sym,
+        // The dense-bump route lives on the Gilbert-Peierls path: it splices
+        // into the factor built from `sym`'s peel, and threshold-Markowitz (the
+        // default since #171) chooses its own column order and never peels.
+        // Leaving the default here would make `used_dense_bump()` false.
         LuParams {
+            pivoting: LuPivoting::GilbertPeierls,
             dense_bump_max_dim: 512,
             ..LuParams::default()
         },

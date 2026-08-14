@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 
-use feral::{LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{LuParams, LuPivoting, SparseColMatrix, SparseLu, SparseLuSymbolic};
 
 type SparseCol = Vec<(usize, f64)>;
 
@@ -124,6 +124,7 @@ fn run_cover(m: usize, per_col: usize, nupd: usize) {
         max_updates: 1_000_000,
         max_growth: 1e30,
         pivot_threshold: pivtol,
+        pivoting: LuPivoting::GilbertPeierls,
         ..LuParams::default()
     };
     let factor = |basis: &[SparseCol]| -> Option<SparseLu> {
@@ -241,6 +242,7 @@ fn main() {
         max_updates: 1_000_000,
         max_growth: 1e30,
         pivot_threshold: pivtol,
+        pivoting: LuPivoting::GilbertPeierls,
         ..LuParams::default()
     };
 

@@ -4,6 +4,42 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — `SparseLu::factor` now defaults to threshold-Markowitz pivoting (issue #171)
+
+- New `LuParams::pivoting: LuPivoting`, defaulting to `LuPivoting::Markowitz`.
+  `LuPivoting::GilbertPeierls` selects the previous behaviour (factor in the
+  column order carried by the caller's `SparseLuSymbolic`).
+- **Breaking behaviour change for callers that pass a chosen ordering.**
+  `Markowitz` picks its column order during the factorization, so it *ignores*
+  `factor`'s `symbolic` argument. Code that compares orderings — or that relies
+  on AMD/METIS/AMF/`analyze_triangularized` being honoured — must now set
+  `pivoting: LuPivoting::GilbertPeierls` explicitly, or it will silently
+  factor something else. `SparseLu::used_markowitz()` reports which rule ran.
+- **Why.** On the 16-basis LP corpus, against the previous default:
+  `factor_nnz()/nnz(B)` geomean **2.77x → 1.06x**, never worse on any basis,
+  faster on 15 of 16. Worst case `QPLIB_0343_rlt1` 0.92 → 0.97 ms (+5% on the
+  second-cheapest basis); best case `QPLIB_1451_rlt0_cap100000` 1066.64 → 10.98
+  ms with fill 24.90x → 1.14x.
+- **Downstream evidence, not just corpus fill.** With `SparseLu::factor` routed
+  through Markowitz, discopt's `discopt-core` LP suite passes 112/112, and
+  `bchoco06_illcond_scaled_path_recovers_bound_649` passes with the route
+  firing 46 times — the test that fails under the triangularizing peel.
+- `dense_bump_max_dim` and `analyze`'s ordering are **unchanged** (both still
+  off): the peel loses bchoco06's dual bound (#168), and the dense-bump route is
+  gated on a peeled bump, so it cannot be enabled independently. Note the new
+  interaction: because the dense bump factors the residual bump left by a
+  *peeling symbolic*, and `Markowitz` has no symbolic at all, under the shipped
+  defaults `dense_bump_max_dim` is now inert twice over. Reaching that route
+  requires `pivoting: GilbertPeierls` **and** `analyze_triangularized` **and**
+  a non-zero cap.
+- Migration note for downstream test suites: seven in-repo test sites across
+  five files asserted Gilbert-Peierls-specific behaviour under
+  `LuParams::default()` and had to pin `GilbertPeierls`. If your tests assert
+  on `reach_visits()`, `used_dense_bump()`, a specific pivot row, or a supplied
+  ordering, expect the same. Note also that plain `cargo test` stops at the
+  first failing test *binary*: use `--no-fail-fast` when auditing, or you will
+  see one failure per run instead of all of them.
+
 ### Added — threshold-Markowitz LU factorization (issue #167)
 
 - `SparseLu::factor_markowitz(&a, params)`, a second entry point that picks each
