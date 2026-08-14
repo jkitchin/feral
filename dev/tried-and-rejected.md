@@ -5368,3 +5368,38 @@ proof that the code path under test had executed, on a route that is a *silent
 fallback* — exactly the condition #162 already argued required `used_dense_bump()`
 for its own tests. A pass/fail on a silent-fallback path is not evidence unless
 the arm also shows the path fired. Instrument first, then measure.
+
+## 2026-08-14 — #166: intercepting discopt's node LPs from Python
+
+**Tried.** To A/B the two LU orderings on QPLIB_3225 without rebuilding
+feral twice, the plan was to wrap discopt's Python entry point, capture the
+node LPs it hands to feral, and replay each one under both orderings.
+
+**Why it failed.** discopt's spatial branch-and-bound runs entirely inside
+Rust (`solve_spatial_tree_py`, `solver.py:1473`). Node LPs never surface to
+Python. The wrapper installed on `solve_milp_csc_py` logged **0** calls
+across a full 120s solve — that is how the dead end was found, not by
+reading the source first.
+
+**Replaced with.** A full two-arm end-to-end A/B: two feral worktrees off
+`3209fad` differing in exactly one line (verified by `diff -r --brief`),
+two discopt worktrees pinned at `bce881ff` via `[patch.crates-io]`, two
+extension `.so`s with distinct md5s loaded by `PYTHONPATH`, each arm
+asserting its own module path before solving. Slower to build, but it
+measures the thing the issue is about.
+
+## 2026-08-14 — #171: plain `cargo test` as the verification gate
+
+**Tried.** Verifying the Markowitz-default change with `cargo test`.
+
+**Why it failed.** `cargo test` stops after the first failing test *target*.
+Four consecutive runs each reported exactly one failing binary, so the same
+"the suite is green except X" conclusion was drawn — and was wrong — three
+times. Run 5's log contains zero occurrences of `lu_sparse_rhs`: that binary
+never executed. The true blast radius was seven test sites across five
+files.
+
+**Replaced with.** `cargo test --no-fail-fast`, which surfaced all of them
+in one pass (864 passed, 0 failed). For any change to a default that every
+test inherits, fail-fast turns one measurement into N sequential ones and
+hides the scope.

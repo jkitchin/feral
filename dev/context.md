@@ -1,6 +1,6 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-14T12:01:35Z
+Generated: 2026-08-14T15:58:08Z
 
 ## Latest Session
 File: dev/sessions/2026-08-14-01.md
@@ -59,26 +59,26 @@ Record corrected in four places:
 
 ## Git Status
 ```
-51f87ec Merge pull request #162 from jkitchin/claude/issue-161-w05b75
-e00aa70 test(lu): make the density-fallback contract test depend on the contract, not the fixture
-55c0ff4 docs: session checkpoint 2026-08-13-04 (issues #164 and #165)
-255e2b7 docs: record what the #164 guard actually recovers
-b8906a6 docs: session checkpoint 2026-08-13-03 (PR #162 review + #1008 verdict)
+ec67e85 Merge pull request #172 from jkitchin/feat/171-lu-defaults
+d5048b9 feat(lu)!: default SparseLu::factor to threshold-Markowitz pivoting
+bd78bad Merge pull request #170 from jkitchin/feat/167-threshold-markowitz
+0e8e976 fix(python): add the new LuParams fields to the binding's initializer
+48382c7 docs(167): plan, corpus measurement, and the two cost experiments
 ```
 
 ## Test Status
 ```
-test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
+test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test dense::schur_kernel::tests::schur_panel_minus_nofma_strided_quad_is_bit_exact_vs_four_singles ... ok
-test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
 test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
 test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
+test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
 test symbolic::tests::issue_3_auto_on_kkt_routes_via_pick_default_method ... ok
@@ -86,7 +86,7 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 423 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.72s
+test result: ok. 423 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.42s
 
 ```
 
@@ -106,36 +106,36 @@ unfavourable comparison on record.
 ```
 
 ## Recent Decisions
+route is gated on a bump that was actually peeled (21f5e74), so it is
+unreachable unless triangularization is on. It is one lever, not two.
 
-- A dense sweep writes nonzeros into positions that are not in `pattern`, and
-  `pattern` *is* the O(touched) reset list that restores `HyperWork`'s
-  all-zero-between-calls contract. A nonzero left outside it silently seeds the
-  next solve.
-- `u_solve_sparse`'s `SingularBasis` guard is deliberately narrowed to the rows
-  the solution depends on (decisions.md, earlier today). Sweeping all `m` rows
-  widens it, so whether a basis is reported singular would depend on an
-  unrelated right-hand side's density. Preserving the narrowing needs a per-row
-  "does this position matter" test, which is the reach being abandoned.
+**AMF stays off** because no downstream measurement was taken this session. That
+is an absence of evidence, not a finding against it.
 
-So the fallback marks the whole accumulator (making the reset list cover the
-sweep) and fills `order` with the natural topological order over `0..m`. The four
-kernels are untouched — they sweep whatever is in `order` — and the fallen-back
-solve is then bit-for-bit the dense entry point it is falling back to, guard
-width included. That is the right semantics for a fallback: it should be
-indistinguishable from the thing it falls back to, not a third behavior.
+**Known cost of this decision.** `Markowitz` ignores `factor`'s `symbolic`
+argument, because it does not use a precomputed column order. That is a silent
+semantic change for any caller that carefully chose an ordering and passed it in
+— exactly the silent-fallback shape #168 warned about. Three mitigations, and no
+claim that they eliminate it: the selector is an explicit enum rather than a
+bool, `SparseLu::used_markowitz()` makes the executed route observable so a
+measurement can assert instead of infer, and every in-repo ordering comparison
+(`examples/lu_fill_orderings.rs`, `src/bin/probe_lu_phases.rs`,
+`src/bin/probe_ft_eta.rs`) is pinned to `GilbertPeierls` in this change. An
+out-of-tree caller comparing orderings against `LuParams::default()` will
+silently compare nothing until it pins the rule. Seven in-repo test sites
+across five files failed on this change — `sparse_lu_honors_pivot_threshold`,
+`dense_bump_route_needs_the_peel_and_the_cap_together`, the whole
+`lu_dense_bump` suite, `reach_route_composes_with_the_dense_bump_route`,
+`perturb_chooses_largest_magnitude_row_matching_dense`,
+`factor_traversal_is_subquadratic`, and
+`sparse_solves_compose_with_the_dense_bump_route` — and every one was fixed by
+pinning `GilbertPeierls`, never by weakening an assertion. That seven
+independent tests failed is corroboration that the hazard is real, not
+hypothetical, and it is a fair estimate of what a downstream suite should
+expect to have to pin.
 
-The DFS is abandoned mid-walk rather than completed and then discarded, mirroring
-`ReachWork::push`'s early abort on the dense route, so an over-cap solve pays a
-bounded fraction of the reach. `over_cap` is monotone within a solve (`pattern`
-only grows), so the second and later kernels of a fallen-back solve cost one
-`pop`, not a re-walk.
-
-`SparseLu::sparse_rhs_fallbacks()` exists because there was no valid witness that
-the guard fired: `last_sparse_solve_work()` counts factor entries traversed,
-which exceeds `m` on the reach path too. Without a dedicated counter the tests
-could not tell an inert guard from a working one.
-
-Evidence: PR #162 review, findings 1 and 4; `dev/journal/2026-08-13-04.org`.
+Evidence: issue #171; `dev/research/markowitz-fill-measurement.md`;
+`dev/journal/2026-08-14-01.org`; the #166 and #168 arm harnesses.
 
 ## Recent Tried-and-Rejected
 **The arm is not vacuous**, which is the failure mode that would have made this
@@ -186,6 +186,7 @@ src/lu/dense_factor.rs
 src/lu/dense_matrix.rs
 src/lu/dense_solve.rs
 src/lu/dense_update.rs
+src/lu/markowitz.rs
 src/lu/mod.rs
 src/lu/scaling.rs
 src/lu/sparse_factor.rs
@@ -273,6 +274,7 @@ tests/lu_dense_update_bg.rs
 tests/lu_dense.rs
 tests/lu_ft_widebump.rs
 tests/lu_hyper_sparse.rs
+tests/lu_markowitz.rs
 tests/lu_real_bases.rs
 tests/lu_scaling.rs
 tests/lu_sparse_rhs.rs
