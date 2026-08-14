@@ -1,0 +1,99 @@
+#+TITLE: Session journal 2026-08-14-03 (release 0.16.0)
+
+* 13:30 :release:triage:
+Reviewed the five remaining open issues (#153, #147, #134, #131, #125)
+before deciding whether the LU enhancement arc was finished. Verdict:
+the arc (#161-#168 + #171) is complete and merged, but NOT delivered --
+crates.io still served 0.15.1, so nothing had reached discopt. Cutting
+0.16.0 is the one genuinely unfinished piece.
+
+Triage recorded here so the next session does not re-derive it:
+- #153 -- worth doing. "Warm-path scaling never warms" reads like a bug
+  (dead code path), not a tuning gap, and is worth a look independent of
+  the perf argument. The perf half is confounded: the issue itself flags
+  3.77x vs 3.54x as inside harness drift, and the harness includes
+  pounce's own CSC rebuild.
+- #134 item B -- worth splitting out. The scaling router's gates count
+  stored lower-triangle columns only, so a TRAILING dense border dodges
+  the >32 gate and routes to InfNorm, forfeiting the documented 6x-243x
+  MC64 wins. Duals-last is the IPOPT convention, i.e. exactly what
+  pounce and discopt feed us. Mis-filed inside a "smaller audit items"
+  grab-bag.
+- #134 item F -- 20-minute doc task. Either reorder the 1x1 sub-tests
+  for LAPACK parity or record the deviation. Undocumented is the worst
+  of the three states.
+- #147 -- do it AFTER the release, not before: one PR across all 8
+  crates. Real win is the 11 #[no_mangle] C-ABI sites becoming
+  unsafe(no_mangle).
+- #131 -- park. Premise is n >= 1e5 with a dominant root front; our
+  bench exit partition is the <200 and <500 frontal buckets and the
+  workload is IPM hosts doing many small factorizations.
+- #125 -- uncertain. Workload match is exact (repeated factorization of
+  an identical pattern IS the IPM inner loop) but it is invasive surgery
+  on the assembly path with delayed-pivot splicing as the risk area.
+  Let #153's profiling say whether assembly is where the time goes.
+
+* 13:40 :release:docs:
+Found a real docs defect while preparing the release, not a cosmetic
+one. The SparseLuSymbolic module header and all four constructors
+(analyze, analyze_with, analyze_triangularized, analyze_amd_only) argue
+at length about which ordering to prefer and what the default costs.
+Every one of those comments was written when the ordering computed there
+was the one SparseLu::factor used. Under the #171 default it is not read
+at all beyond a dimension check. Shipping 0.16.0 with those comments
+unchanged would document a decision the library no longer makes.
+
+Added the note to all five sites plus LuParams::dense_bump_max_dim (now
+gated on GilbertPeierls AND analyze_triangularized AND a non-zero cap --
+inert twice over under the shipped defaults).
+
+Verified I added no new broken intra-doc links by diffing cargo doc
+warnings against a stashed baseline: same three warnings in the touched
+files, at shifted line numbers (159->189, 190->225, 9->18).
+
+Also fixed: the [Unreleased] changelog described dense_bump_max_dim as
+"added in 0.15.2". No such version exists -- it ships in 0.16.0.
+
+* 13:41 :testing:release-gate:
+Full gate green before the commit:
+- cargo test --release --no-fail-fast: 91 test binaries, 864 passed,
+  0 failed, 21 ignored, golden_bits 3/3.
+- cargo test --release --examples: 2 passed (the mean_sd guards).
+- cargo test --manifest-path python/Cargo.toml: compiles and runs; the
+  binding's exhaustive LuParams literal builds against the new field.
+- cargo fmt --check, cargo clippy -- -D warnings, cargo clippy -p
+  feral-diagnostics --all-targets -- -D warnings: all clean (the
+  diagnostics pass takes 10m05s on ~144 binaries).
+- cargo metadata --locked passes on both workspaces.
+- scripts/release-checklist.sh check clean.
+
+Process note: I first captured the test run through `tail -200`, which
+threw away the beginning of the log AND took its exit code from tail
+rather than cargo. The summary it produced (17 binaries, 98 tests) was
+an artifact of the truncation, not a result. Re-ran redirecting the full
+log with `set -o pipefail` and a real rc. Do not summarize a release
+gate from a truncated log.
+
+* 13:56 :release:packaging:
+cargo publish --dry-run -p feral clean before the irreversible trigger:
+packages and compiles from target/package/feral-0.16.0 against the
+already-published ordering crates at 0.2.1. Warnings are only the
+expected "ignoring binary/example/test as not included in the published
+package" notices from the `exclude` list.
+
+* 14:00 :release:shipped:
+0.16.0 shipped. c681c2a -> PR #173 (all checks pass) -> merge 6fc92d6 ->
+tag v0.16.0 -> GitHub release.
+
+Verified published (with a User-Agent, sanity-checked against serde
+returning 1.0.229):
+- crates.io feral max_version 0.16.0, newest_version 0.16.0
+- the six ordering crates correctly stayed at 0.2.1 -- unchanged since
+  v0.15.1, so release.yml's "already exists" path treated them as
+  success. The checklist's staleness guard confirmed none had changed.
+- PyPI feral-solver 0.16.0, 5 files (macos universal2, manylinux
+  x86_64, manylinux aarch64, win_amd64, sdist).
+
+Consequence for downstream: discopt no longer needs the
+[patch.crates-io] git pin recipe from the previous session. It can bump
+feral = "0.16.0" in crates/discopt-core/Cargo.toml directly.
