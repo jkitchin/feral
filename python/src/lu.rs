@@ -300,6 +300,7 @@ impl LuFactor {
                 )));
             }
         };
+        let defaults = LuParams::default();
         Ok(LuParams {
             pivot_threshold,
             zero_pivot_tol,
@@ -314,6 +315,13 @@ impl LuFactor {
             dense_bump_max_dim,
             hyper_sparse_max_density,
             sparse_rhs_max_density,
+            // The threshold-Markowitz path (`SparseLu::factor_markowitz`) has no
+            // Python entry point yet, so these carry the Rust defaults rather
+            // than becoming keyword arguments for a route Python cannot take.
+            // The literal stays exhaustive on purpose: that is what made adding
+            // these two fields fail loudly here instead of silently defaulting.
+            markowitz_threshold: defaults.markowitz_threshold,
+            markowitz_max_search: defaults.markowitz_max_search,
         })
     }
 }
