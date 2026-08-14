@@ -19,6 +19,12 @@
 //! ill-conditioned LP its dual bound. Neither ordering dominates; see
 //! [`SparseLuSymbolic::analyze`] for the measurements on both sides.
 //!
+//! Both are reachable as one call — [`SparseLuSymbolic::analyze_with`] taking
+//! [`LuOrderingParams`] — so a caller can carry the choice in its own config and
+//! A/B it on its own instances, which is the only way to settle a tradeoff this
+//! instance-dependent (issue #165). The two constructors remain as names for the
+//! two settings.
+//!
 //! The resulting permutation is the reusable symbolic handle: across numerically
 //! different but structurally identical bases, only the numeric factor is
 //! recomputed. Every stage above reads only the pattern, so that contract holds
@@ -27,6 +33,31 @@
 use super::sparse_matrix::SparseColMatrix;
 use super::sparse_triangular::triangularize;
 use crate::error::FeralError;
+
+/// Which fill-reducing column ordering [`SparseLuSymbolic::analyze_with`]
+/// computes (issue #165).
+///
+/// The ordering is chosen at *symbolic* time, so it cannot live in
+/// [`super::LuParams`], which is consumed at factor time. It gets its own
+/// struct rather than a second constructor name because the right setting
+/// varies by instance — it is worth 1.306x geomean across 14 QPLIB relaxations
+/// under a dual simplex and 0.389x on one of them — and a choice that has to be
+/// measured per caller has to be reachable as a value, not only as a call site.
+///
+/// [`Default`] is whole-basis AMD, matching [`SparseLuSymbolic::analyze`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LuOrderingParams {
+    /// Peel the triangular border (Suhl–Suhl) before ordering, and hand AMD only
+    /// the residual bump.
+    ///
+    /// Much cheaper — 4.2–9.8x on this step across the in-tree fixtures, which a
+    /// simplex pays on *every* refactorization — and the precondition for
+    /// [`super::LuParams::dense_bump_max_dim`]. It is also a different rounding
+    /// trajectory, which cost an ill-conditioned LP its dual bound (issue #163)
+    /// and one QPLIB relaxation a 2.6x slowdown. Neither setting dominates; see
+    /// [`SparseLuSymbolic::analyze`] for the measurements on both sides.
+    pub triangularize: bool,
+}
 
 /// Reusable symbolic factorization: the column permutation `Q`.
 #[derive(Debug, Clone)]
@@ -127,8 +158,23 @@ impl SparseLuSymbolic {
     /// own instances against it — and take it together with
     /// [`LuParams::dense_bump_max_dim`], which needs it and is worth a further
     /// 4.28x on the numeric side.
+    /// Equivalent to [`Self::analyze_with`] at [`LuOrderingParams::default`].
     pub fn analyze(a: &SparseColMatrix) -> Result<Self, FeralError> {
-        Self::analyze_amd_only(a)
+        Self::analyze_with(a, LuOrderingParams::default())
+    }
+
+    /// Analyze under an explicit [`LuOrderingParams`] (issue #165).
+    ///
+    /// The parameter form of [`Self::analyze`] / [`Self::analyze_triangularized`],
+    /// for callers that want the ordering to be a setting they can flip and
+    /// measure rather than a constructor they have to choose at the call site.
+    /// Both of those are thin wrappers over this.
+    pub fn analyze_with(a: &SparseColMatrix, params: LuOrderingParams) -> Result<Self, FeralError> {
+        if params.triangularize {
+            Self::analyze_triangularized(a)
+        } else {
+            Self::analyze_amd_only(a)
+        }
     }
 
     /// Triangularize (Suhl–Suhl peel), then order the residual bump with AMD.
@@ -153,6 +199,9 @@ impl SparseLuSymbolic {
     /// slowdown — because the path it took was longer. Use it when you can
     /// qualify your own instances against it; that is a real prerequisite, not
     /// boilerplate.
+    ///
+    /// Equivalent to [`Self::analyze_with`] at
+    /// `LuOrderingParams { triangularize: true }`.
     pub fn analyze_triangularized(a: &SparseColMatrix) -> Result<Self, FeralError> {
         let m = a.m;
         if m == 0 {

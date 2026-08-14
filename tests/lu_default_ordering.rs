@@ -23,7 +23,7 @@
 //!
 //! See `dev/research/lu-ordering-and-kernel-2026-08-13.md`.
 
-use feral::{LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{LuOrderingParams, LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
 
 /// An LP-shaped basis: a triangular border the peel can strip, wrapped around a
 /// bump it cannot. `nfront` column singletons, then a `bump`x`bump` dense block,
@@ -121,5 +121,60 @@ fn dense_bump_route_needs_the_peel_and_the_cap_together() {
     assert!(
         !lu.used_dense_bump(),
         "`dense_bump_max_dim` must be inert under the default ordering"
+    );
+}
+
+/// **Issue #165 — the ordering is reachable as a parameter.**
+///
+/// `analyze_with` is the form a caller can carry in its own config and A/B
+/// without a code change, which is the whole point: the right ordering varies by
+/// instance (1.306x geomean across 14 QPLIB relaxations, 0.389x on one of them),
+/// and the maintainer had to patch a downstream solver to find that out.
+///
+/// So the contract is that it is not a *third* ordering. Both settings must
+/// reproduce the corresponding constructor exactly — same permutation, same
+/// bump, same `triangularized` provenance flag, which is what
+/// `LuParams::dense_bump_max_dim` gates on — and the default must be the
+/// non-peeling one, matching `analyze`.
+#[test]
+fn analyze_with_reproduces_both_constructors_exactly() {
+    let a = lp_like_basis(40, 12, 25);
+
+    let same = |x: &SparseLuSymbolic, y: &SparseLuSymbolic| {
+        x.qcol == y.qcol
+            && (x.bump_lo, x.bump_hi) == (y.bump_lo, y.bump_hi)
+            && x.triangularized == y.triangularized
+    };
+
+    let plain = SparseLuSymbolic::analyze(&a).expect("analyze");
+    let peeled = SparseLuSymbolic::analyze_triangularized(&a).expect("triangularized");
+    // Non-vacuity: the two constructors must actually differ on this fixture,
+    // or "reproduces both" is one claim, not two.
+    assert!(
+        !same(&plain, &peeled),
+        "fixture is useless: the two orderings agree on it"
+    );
+
+    let default = LuOrderingParams::default();
+    assert!(
+        !default.triangularize,
+        "the default must be whole-basis AMD (issue #163)"
+    );
+    let via_default = SparseLuSymbolic::analyze_with(&a, default).expect("analyze_with default");
+    assert!(
+        same(&via_default, &plain),
+        "analyze_with(default) must be exactly `analyze`"
+    );
+
+    let via_peel = SparseLuSymbolic::analyze_with(
+        &a,
+        LuOrderingParams {
+            triangularize: true,
+        },
+    )
+    .expect("analyze_with peel");
+    assert!(
+        same(&via_peel, &peeled),
+        "analyze_with(triangularize: true) must be exactly `analyze_triangularized`"
     );
 }

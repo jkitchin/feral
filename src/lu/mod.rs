@@ -29,7 +29,7 @@ pub use dense_factor::DenseLu;
 pub use dense_matrix::GeneralMatrix;
 pub use sparse_factor::SparseLu;
 pub use sparse_matrix::SparseColMatrix;
-pub use sparse_symbolic::SparseLuSymbolic;
+pub use sparse_symbolic::{LuOrderingParams, SparseLuSymbolic};
 
 /// What to do when the LU factorization hits a numerically null pivot column.
 ///

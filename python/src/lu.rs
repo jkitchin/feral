@@ -10,7 +10,8 @@
 
 use feral::lu::sparse_matrix::SparseColMatrix as RustSparseColMatrix;
 use feral::{
-    should_use_dense_lu, DenseLu, LuParams, LuScaling, LuSingularAction, SparseLu, SparseLuSymbolic,
+    should_use_dense_lu, DenseLu, LuOrderingParams, LuParams, LuScaling, LuSingularAction,
+    SparseLu, SparseLuSymbolic,
 };
 
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
@@ -340,6 +341,12 @@ impl LuFactor {
     /// simplex its dual bound (issue #163) and on one QPLIB instance is a 2.6x
     /// slowdown. Neither setting dominates; measure on your own matrices.
     ///
+    /// `triangularize` (default `None`) separates those two: it selects the
+    /// column ordering on its own, so the peel can be measured without the dense
+    /// bump route and vice versa (issue #165). Left `None` it follows
+    /// `dense_bump_max_dim > 0`, which is what this binding did before the knob
+    /// existed.
+    ///
     /// `sparse_rhs_max_density` (default 0.10) caps the solution density at
     /// which the Rust-side sparse-rhs solves keep using their reach; past it
     /// they sweep the whole basis instead (issue #164). It has no effect through
@@ -364,6 +371,7 @@ impl LuFactor {
         dense_bump_max_dim = 0,
         hyper_sparse_max_density = 0.10,
         sparse_rhs_max_density = 0.10,
+        triangularize = None,
         force_dense = None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -384,6 +392,7 @@ impl LuFactor {
         dense_bump_max_dim: usize,
         hyper_sparse_max_density: f64,
         sparse_rhs_max_density: f64,
+        triangularize: Option<bool>,
         force_dense: Option<bool>,
     ) -> PyResult<Self> {
         let params = Self::build_params(
@@ -412,17 +421,18 @@ impl LuFactor {
                 .map_err(map_feral_err)?;
             LuInner::Dense(Box::new(lu))
         } else {
-            // The peel and the dense-bump route are opted into together (issue
+            // The peel and the dense-bump route were opted into together (issue
             // #163): `dense_bump_max_dim` only applies to a triangularized
-            // symbolic, and the peel's structural pivot choice is worth its
-            // numerical cost only when that route is what you are buying. The
-            // Rust API makes the caller pick the symbolic; Python exposes no
-            // symbolic handle, so the cap is the opt-in.
-            let sym = if dense_bump_max_dim > 0 {
-                SparseLuSymbolic::analyze_triangularized(a)
-            } else {
-                SparseLuSymbolic::analyze(a)
-            }
+            // symbolic, and Python exposes no symbolic handle, so the cap was
+            // the only opt-in available. `triangularize` unbundles them (issue
+            // #165) — the peel is worth 4.2-9.8x on the analysis whether or not
+            // the bump route is on — while defaulting to the old coupling.
+            let sym = SparseLuSymbolic::analyze_with(
+                a,
+                LuOrderingParams {
+                    triangularize: triangularize.unwrap_or(dense_bump_max_dim > 0),
+                },
+            )
             .map_err(map_feral_err)?;
             let lu = py
                 .allow_threads(|| SparseLu::factor(a, &sym, params))
