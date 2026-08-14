@@ -1,0 +1,46 @@
+#+TITLE: Session 2026-08-13-05 — discopt #1008 fill question (feral side)
+
+* 23:10 :lu:fill:markowitz:discopt-1008:ordering:
+discopt handed back the last open piece of #1008: "the lever is fill, not
+frequency ... whether the 19x fill is intrinsic or an artifact of static ordering
+under partial pivoting is a feral-side question."
+
+Built a threshold-Markowitz LU as a fill oracle (dev/probes/markowitz-fill/),
+gated on ||PBQ-LU||inf/||B||inf < 1e-10 per factorization, and ran it against
+feral's two orderings and SuperLU COLAMD on 15 real discopt bases.
+
+Answer: ARTIFACT. geomean fill AMDfull 2.60x, peel 1.45x, COLAMD 2.88x,
+MARKOWITZ 1.11x (n=15). Markowitz never exceeds 1.89x; AMDfull tails to 12.92x.
+
+Two things fell out that were not expected:
+
+1. discopt's premise is wrong. It says feral's analyze "already triangularizes",
+   but it pins crates.io 0.15.1 (predates #160) AND LuOrderingParams::default()
+   is triangularize:false, so analyze() = analyze_amd_only. The 19x was measured
+   on the un-peeled path. The peel alone takes QPLIB_0911 12.92x -> 1.00x and
+   QPLIB_1451_rlt0 7.86x -> 1.01x (5150 cols peeling to a bump of 29).
+
+2. The earlier "fill theory dead" result in #1008 (SuperLU median 0.94x on 12
+   bases) could not have detected the headroom: SuperLU is the SAME class as
+   feral, static column order + partial pivoting. Here it is worse than feral
+   (2.88x vs 2.60x) and both are ~2.5x off the achievable. Corroborating: inside
+   the SuperLU arm, diag_pivot_thresh 0.1 vs 1.0 moves fill <2% on every basis
+   (QPLIB_1157 7.26x vs 7.50x). The threshold is not what sets the fill.
+
+Where Markowitz actually matters is the residual bump. On the three bases with
+bump > 500 (QPLIB_1157 611, QPLIB_1157_rlt1 584, QPLIB_1143_rlt1 624) the peel
+leaves 5.66-6.74x and Markowitz gets 1.32-1.89x, i.e. 3.15-4.30x. Those are the
+instances #1008 is written around, and the peel does NOTHING for them
+(QPLIB_1157: 6.49x -> 6.74x, slightly worse).
+
+Cost side, measured not assumed: Markowitz u=0.1 on QPLIB_1157 gives
+max|U|/max|B| = 81.8 and max|L| = 9.70 (at its 1/u bound) against SuperLU partial
+pivoting's 2.56 / 1.00. u=0.01 buys 0.4% of fill for 353x growth - not worth it.
+Architecturally it does not fit analyze-then-factor at all: pivots come from
+numeric values, so the symbolic phase dissolves into the numeric one.
+
+Not reproduced: the literal 19.1x. That is a mean over ~600 factorizations of one
+full solve; the worst AMD-only fill in this corpus is 12.92x. Direction and order
+of magnitude agree, the exact number is not claimed.
+
+Note written to dev/research/lu-fill-markowitz-2026-08-13.md.
