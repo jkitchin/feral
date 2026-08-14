@@ -591,20 +591,6 @@ impl SparseLu {
         let perm_inv: Vec<usize> = pinv.iter().map(|&p| p as usize).collect();
         remap_and_sort_l(&l_col_ptr, &mut l_row_idx, &mut l_val, &perm_inv, m);
 
-        // Row-wise index of L and the reach workspace: built only when the
-        // reach-limited solve route is enabled, so the off path is byte-for-byte
-        // the pre-#161 allocation profile.
-        let (l_row_ptr, l_row_cols, reach) = if params.hyper_sparse_max_density > 0.0 {
-            let (ptr, cols) = build_l_row_index(&l_col_ptr, &l_row_idx, m);
-            (ptr, cols, super::sparse_solve::ReachWork::new(m))
-        } else {
-            (
-                Vec::new(),
-                Vec::new(),
-                super::sparse_solve::ReachWork::disabled(),
-            )
-        };
-
         // Transpose U from column-wise (built above) to row-wise CSR, then into
         // per-row vectors with the diagonal entry first. Columns were emitted in
         // increasing order, so each row's strict-upper entries are sorted.
@@ -618,35 +604,7 @@ impl SparseLu {
             }
             u_rows.push(row);
         }
-        // Column-wise index of U's off-diagonal entries (rows added in
-        // increasing order, so each `u_above[c]` is sorted ascending). At factor
-        // time U is upper triangular, so this is exactly the strict-upper rows;
-        // it widens to all off-diagonal holders only as FT updates permute U.
-        let mut u_above: Vec<Vec<usize>> = vec![Vec::new(); m];
-        for (i, row) in u_rows.iter().enumerate() {
-            for &(c, _) in row.iter() {
-                if c != i {
-                    u_above[c].push(i);
-                }
-            }
-        }
-
-        // Inverse of the scaling row permutation, for sparse-spike seeding.
-        let mut scale_rperm_inv = vec![0usize; m];
-        for (i, &o) in scale.rperm.iter().enumerate() {
-            scale_rperm_inv[o] = i;
-        }
-
-        // `max|U|` at factor: denominator of the element-growth monitor (L5).
-        let mut u_max0 = 0.0_f64;
-        for row in u_rows.iter() {
-            for &(_, v) in row.iter() {
-                u_max0 = u_max0.max(v.abs());
-            }
-        }
-        let u_max0 = u_max0.max(f64::MIN_POSITIVE);
-
-        Ok(SparseLu {
+        Ok(assemble(
             m,
             l_col_ptr,
             l_row_idx,
@@ -654,43 +612,109 @@ impl SparseLu {
             u_rows,
             perm,
             perm_inv,
-            uperm_inv: (0..m).collect(),
-            uperm: (0..m).collect(),
             qcol,
             qcol_inv,
-            u_above,
-            l_row_ptr,
-            l_row_cols,
-            reach,
-            hyper: super::sparse_hyper::HyperWork::default(),
-            etas: Vec::new(),
-            growth: 1.0,
-            u_max0,
-            a_max,
-            reach_visits,
-            used_dense_bump: dense_done,
-            bump_dim,
             params,
             scale,
-            scale_rperm_inv,
-            scratch: vec![0.0; m],
-            scratch_mark: vec![false; m],
-            ft_work: vec![0.0; m],
-            scratch_b: vec![0.0; m],
-            scratch_c: vec![0.0; m],
-            scratch_d: vec![0.0; m],
-            ft_rw: vec![0.0; m],
-            ft_rw_comp: vec![0.0; m],
-            targets_scratch: Vec::new(),
-            ft_touch_mark: vec![false; m],
-            row_pool: Vec::new(),
-            saved_scratch: Vec::new(),
-            saved_pool: Vec::new(),
-            last_update_work: 0,
-            update_work_total: 0,
-            last_refactor: None,
-            pivot_search_swaps: 0,
-        })
+            a_max,
+            bump_dim,
+            dense_done,
+            reach_visits,
+        ))
+    }
+
+    /// Factor `a` with **threshold-Markowitz** pivoting: no symbolic phase, no
+    /// static column order (issue #167).
+    ///
+    /// [`Self::factor`] takes a column order fixed ahead of the numbers and
+    /// pivots for stability inside it. This picks each pivot `(i, j)` from the
+    /// active submatrix to minimise `(r_i - 1)(c_j - 1)` subject to
+    /// `|a_ij| >= LuParams::markowitz_threshold * max_k |a_kj|`. On 16 real
+    /// discopt LP bases the static path reaches geomean fill 3.00x and a
+    /// Markowitz order reaches 1.11x — and SuperLU/COLAMD, the same algorithm
+    /// class as the static path, is 3.24x, which is why a SuperLU comparison
+    /// could not detect the headroom
+    /// (`dev/research/lu-fill-markowitz-2026-08-13.md`).
+    ///
+    /// The result is an ordinary [`SparseLu`]: same `L`/`U`/`P`/`Q` coordinates,
+    /// so the solves, the hyper-sparse route, and the Forrest–Tomlin update work
+    /// on it unchanged.
+    ///
+    /// **What it costs.** A non-maximal pivot is accepted, so the `max|L| <= 1/u`
+    /// bound replaces partial pivoting's `max|L| <= 1`, and element growth is
+    /// bounded far more weakly. Measured on QPLIB_1157 at `u = 0.1`:
+    /// `max|U|/max|B| = 81.8` against SuperLU's 2.56. Callers that cannot absorb
+    /// that should stay on [`Self::factor`] or watch
+    /// [`Self::should_refactor_growth`].
+    ///
+    /// The Suhl-Suhl peel ([`SparseLuSymbolic::analyze_triangularized`]) is a
+    /// special case of this rule rather than a preliminary step: a column
+    /// singleton has cost 0 and is taken first.
+    pub fn factor_markowitz(a: &SparseColMatrix, params: LuParams) -> Result<Self, FeralError> {
+        params.validate()?;
+        let m = a.m;
+
+        // Same scaling contract as `factor`: factor D_row Pi A D_col.
+        let (scale, scaled) = if params.scaling == LuScaling::None {
+            (LuScale::identity(m), None)
+        } else {
+            let scale = compute_lu_scale(a, params.scaling)?;
+            let mat = scale.apply_sparse(a)?;
+            (scale, Some(mat))
+        };
+        let a: &SparseColMatrix = scaled.as_ref().unwrap_or(a);
+
+        let mk = super::markowitz::markowitz_factor(
+            a,
+            params.markowitz_threshold,
+            params.markowitz_max_search,
+            params.zero_pivot_tol,
+            params.on_singular,
+        )?;
+
+        let mut perm_inv = vec![0usize; m];
+        for (k, &i) in mk.perm.iter().enumerate() {
+            perm_inv[i] = k;
+        }
+        let mut qcol_inv = vec![0usize; m];
+        for (k, &j) in mk.qcol.iter().enumerate() {
+            qcol_inv[j] = k;
+        }
+
+        let mut l_row_idx = mk.l_row_idx;
+        let mut l_val = mk.l_val;
+        remap_and_sort_l(&mk.l_col_ptr, &mut l_row_idx, &mut l_val, &perm_inv, m);
+
+        // U rows carry original column indices; remap to positions and sort. A
+        // pivot's own column is eliminated at its own step and every other entry
+        // in the row sits in a column eliminated later, so position `k` is the
+        // smallest in row `k` and sorting puts the diagonal first — which is the
+        // storage contract the Forrest-Tomlin update reads.
+        let mut u_rows: Vec<Vec<(usize, f64)>> = Vec::with_capacity(m);
+        for (k, row) in mk.u_rows_orig.into_iter().enumerate() {
+            let mut r: Vec<(usize, f64)> = row.into_iter().map(|(j, v)| (qcol_inv[j], v)).collect();
+            r.sort_unstable_by_key(|&(c, _)| c);
+            debug_assert_eq!(r.first().map(|&(c, _)| c), Some(k));
+            u_rows.push(r);
+        }
+
+        Ok(assemble(
+            m,
+            mk.l_col_ptr,
+            l_row_idx,
+            l_val,
+            u_rows,
+            mk.perm,
+            perm_inv,
+            mk.qcol,
+            qcol_inv,
+            params,
+            scale,
+            mk.a_max,
+            0,
+            false,
+            0,
+        ))
     }
 
     /// Convenience: analyze + factor from dense columns.
@@ -915,6 +939,119 @@ impl SparseLu {
             }
         }
         0.0
+    }
+}
+
+/// Assemble the finished [`SparseLu`] from the pieces every factorization path
+/// produces: `L` in CSC over pivot positions (already remapped and sorted), `U`
+/// as per-row `(column position, value)` with the diagonal first, and the two
+/// permutations. Shared by the Gilbert–Peierls path and the threshold-Markowitz
+/// path (issue #167) so the two cannot drift in what they hand downstream — the
+/// solves, the hyper-sparse route, and the Forrest–Tomlin update all read these
+/// fields and none of them knows which path built them.
+#[allow(clippy::too_many_arguments)]
+fn assemble(
+    m: usize,
+    l_col_ptr: Vec<usize>,
+    l_row_idx: Vec<usize>,
+    l_val: Vec<f64>,
+    u_rows: Vec<Vec<(usize, f64)>>,
+    perm: Vec<usize>,
+    perm_inv: Vec<usize>,
+    qcol: Vec<usize>,
+    qcol_inv: Vec<usize>,
+    params: LuParams,
+    scale: LuScale,
+    a_max: f64,
+    bump_dim: usize,
+    used_dense_bump: bool,
+    reach_visits: usize,
+) -> SparseLu {
+    // Row-wise index of L and the reach workspace: built only when the
+    // reach-limited solve route is enabled, so the off path is byte-for-byte
+    // the pre-#161 allocation profile.
+    let (l_row_ptr, l_row_cols, reach) = if params.hyper_sparse_max_density > 0.0 {
+        let (ptr, cols) = build_l_row_index(&l_col_ptr, &l_row_idx, m);
+        (ptr, cols, super::sparse_solve::ReachWork::new(m))
+    } else {
+        (
+            Vec::new(),
+            Vec::new(),
+            super::sparse_solve::ReachWork::disabled(),
+        )
+    };
+    // Column-wise index of U's off-diagonal entries (rows added in
+    // increasing order, so each `u_above[c]` is sorted ascending). At factor
+    // time U is upper triangular, so this is exactly the strict-upper rows;
+    // it widens to all off-diagonal holders only as FT updates permute U.
+    let mut u_above: Vec<Vec<usize>> = vec![Vec::new(); m];
+    for (i, row) in u_rows.iter().enumerate() {
+        for &(c, _) in row.iter() {
+            if c != i {
+                u_above[c].push(i);
+            }
+        }
+    }
+
+    // Inverse of the scaling row permutation, for sparse-spike seeding.
+    let mut scale_rperm_inv = vec![0usize; m];
+    for (i, &o) in scale.rperm.iter().enumerate() {
+        scale_rperm_inv[o] = i;
+    }
+
+    // `max|U|` at factor: denominator of the element-growth monitor (L5).
+    let mut u_max0 = 0.0_f64;
+    for row in u_rows.iter() {
+        for &(_, v) in row.iter() {
+            u_max0 = u_max0.max(v.abs());
+        }
+    }
+    let u_max0 = u_max0.max(f64::MIN_POSITIVE);
+
+    SparseLu {
+        m,
+        l_col_ptr,
+        l_row_idx,
+        l_val,
+        u_rows,
+        perm,
+        perm_inv,
+        uperm_inv: (0..m).collect(),
+        uperm: (0..m).collect(),
+        qcol,
+        qcol_inv,
+        u_above,
+        l_row_ptr,
+        l_row_cols,
+        reach,
+        hyper: super::sparse_hyper::HyperWork::default(),
+        etas: Vec::new(),
+        growth: 1.0,
+        u_max0,
+        a_max,
+        reach_visits,
+        used_dense_bump,
+        bump_dim,
+        params,
+        scale,
+        scale_rperm_inv,
+        scratch: vec![0.0; m],
+        scratch_mark: vec![false; m],
+        ft_work: vec![0.0; m],
+        scratch_b: vec![0.0; m],
+        scratch_c: vec![0.0; m],
+        scratch_d: vec![0.0; m],
+        ft_rw: vec![0.0; m],
+        ft_rw_comp: vec![0.0; m],
+        targets_scratch: Vec::new(),
+        ft_touch_mark: vec![false; m],
+        row_pool: Vec::new(),
+        saved_scratch: Vec::new(),
+        saved_pool: Vec::new(),
+        last_update_work: 0,
+        update_work_total: 0,
+        last_refactor: None,
+        pivot_search_swaps: 0,
     }
 }
 
