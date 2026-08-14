@@ -16,6 +16,7 @@ pub mod dense_factor;
 pub mod dense_matrix;
 pub mod dense_solve;
 pub mod dense_update;
+pub(crate) mod markowitz;
 pub mod scaling;
 pub mod sparse_factor;
 pub(crate) mod sparse_hyper;
@@ -295,6 +296,28 @@ pub struct LuParams {
     /// shipped. `0.0` forces the dense sweep on every nonempty right-hand side.
     /// Valid range `[0, 1]`.
     pub sparse_rhs_max_density: f64,
+
+    /// Relative pivot threshold for the threshold-Markowitz path
+    /// ([`SparseLu::factor_markowitz`], issue #167). A pivot is admissible when
+    /// `|a_ij| >= markowitz_threshold * max_k |a_kj|`, which bounds `max|L|` by
+    /// its reciprocal. It does **not** affect [`SparseLu::factor`], which pivots
+    /// with [`LuParams::pivot_threshold`] inside a static column order.
+    ///
+    /// Default `0.1`, the value the fill measurement was taken at. Loosening it
+    /// to `0.01` bought 0.4% of fill for 353x element growth on QPLIB_1157 and is
+    /// not worth taking; `1.0` degenerates to partial pivoting within the chosen
+    /// column and gives most of the fill back.
+    pub markowitz_threshold: f64,
+
+    /// Suhl search cutoff: stop examining candidate columns once this many have
+    /// been examined *and* an admissible pivot is in hand.
+    ///
+    /// Markowitz's cost is the search, not the arithmetic — an exhaustive scan of
+    /// the active submatrix at every step is quadratic. Columns are examined in
+    /// increasing count order and the scan also stops on the valid lower bound
+    /// `(c-1)(min_i r_i - 1) > best`, so this cutoff only binds when many columns
+    /// tie. Default `8`.
+    pub markowitz_max_search: usize,
 }
 
 impl LuParams {
@@ -315,6 +338,23 @@ impl LuParams {
                 "LuParams::pivot_threshold must be in (0, 1], got {}",
                 self.pivot_threshold
             )));
+        }
+        // Same interval as `pivot_threshold`, and for the same reason: the
+        // reciprocal is the `max|L|` bound, so `0` gives no bound at all and a
+        // value above `1` can reject every entry in a column and report a healthy
+        // basis singular.
+        if !(self.markowitz_threshold > 0.0 && self.markowitz_threshold <= 1.0) {
+            return Err(FeralError::InvalidInput(format!(
+                "LuParams::markowitz_threshold must be in (0, 1], got {}",
+                self.markowitz_threshold
+            )));
+        }
+        // A zero cutoff would stop the search before it examined anything, so the
+        // path would report every basis singular.
+        if self.markowitz_max_search == 0 {
+            return Err(FeralError::InvalidInput(
+                "LuParams::markowitz_max_search must be >= 1".to_string(),
+            ));
         }
         if !(self.zero_pivot_tol >= 0.0 && self.zero_pivot_tol < 1.0) {
             return Err(FeralError::InvalidInput(format!(
@@ -388,6 +428,8 @@ impl Default for LuParams {
             update_pivot_search: false,
             hyper_sparse_max_density: 0.10,
             sparse_rhs_max_density: 0.10,
+            markowitz_threshold: 0.1,
+            markowitz_max_search: 8,
         }
     }
 }

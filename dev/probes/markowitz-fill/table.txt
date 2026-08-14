@@ -1,0 +1,36 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+basis                         m   nnz(B)   bump |  AMDfull     peel   COLAMD   MARKOW | M vs best feral
+QPLIB_1157                 3937    29376    611 |    6.49x    6.74x    7.26x    1.79x |           3.64x
+QPLIB_3852                 1760     4003     45 |    1.08x    1.01x    1.07x    1.01x |           1.00x
+QPLIB_1451_rlt0_cap100000   7392    63720   1350 |   24.90x    3.21x   19.44x    1.14x |           2.82x
+QPLIB_1451_rlt0_cap3000    7392    56213     67 |    7.86x    1.01x   14.95x    1.00x |           1.01x
+QPLIB_0343_rlt0            5102    12752     99 |    1.03x    1.03x    1.02x    1.00x |           1.03x
+QPLIB_0343_rlt1            5202     7868     18 |    1.01x    1.00x    1.01x    1.01x |           1.00x
+QPLIB_0911_rlt0            5150    37133     29 |   12.92x    1.00x    8.59x    1.00x |           1.00x
+QPLIB_0911_rlt1            5150    37133     29 |   12.92x    1.00x    8.59x    1.00x |           1.00x
+QPLIB_0975_rlt0            5110    17330     14 |    1.39x    1.00x    1.24x    1.00x |           1.00x
+QPLIB_0975_rlt1            5110    17330     14 |    1.39x    1.00x    1.24x    1.00x |           1.00x
+QPLIB_1055_rlt0            3300    20617     18 |    1.10x    1.00x    1.10x    1.00x |           1.00x
+QPLIB_1055_rlt1            3300    20617     18 |    1.10x    1.00x    1.10x    1.00x |           1.00x
+QPLIB_1143_rlt0            3308    19355     50 |    1.43x    1.01x    7.12x    1.00x |           1.01x
+QPLIB_1143_rlt1            3628    30315    624 |    8.33x    5.66x    9.60x    1.32x |           4.30x
+QPLIB_1157_rlt0            3273     9197     41 |    1.03x    1.03x    1.04x    1.00x |           1.03x
+QPLIB_1157_rlt1            3937    29085    584 |    6.28x    5.97x    6.51x    1.89x |           3.15x
+
+n=16  geomean fill:  AMDfull 3.00x  peel 1.52x  COLAMD 3.24x  MARKOWITZ 1.11x
+geomean Markowitz advantage over feral's best ordering: 1.37x  (min 1.00x, max 4.30x)

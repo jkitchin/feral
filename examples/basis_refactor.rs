@@ -94,6 +94,7 @@ fn main() {
     let mut peel = Stat::new();
     let mut full = Stat::new();
     let mut dense = Stat::new();
+    let mut mark = Stat::new();
     let mut dense_fired = 0usize;
     let dense_cap: usize = std::env::var("FERAL_DENSE_BUMP_MAX")
         .ok()
@@ -103,12 +104,27 @@ fn main() {
     // Interleaved A/B (discopt CLAUDE.md rule 9): alternate arms so any drift in
     // machine state hits both equally.
     for _ in 0..reps {
-        for arm in 0..3 {
+        for arm in 0..4 {
             let s = match arm {
                 0 => &mut peel,
                 1 => &mut full,
-                _ => &mut dense,
+                2 => &mut dense,
+                _ => &mut mark,
             };
+            // Arm 3 has no symbolic phase at all: threshold-Markowitz picks its
+            // pivots from the numbers, so the analysis dissolves into the
+            // factorization (issue #167). Its `symbolic` column is 0 by
+            // construction, not by omission.
+            if arm == 3 {
+                let t0 = Instant::now();
+                let lu = SparseLu::factor_markowitz(&a, params.clone()).expect("markowitz");
+                s.sym.push(0.0);
+                s.num.push(t0.elapsed().as_secs_f64() * 1e3);
+                s.nnz_lu = lu.factor_nnz();
+                s.bump = 0;
+                s.runs += 1;
+                continue;
+            }
             let p = if arm == 2 {
                 LuParams {
                     dense_bump_max_dim: dense_cap,
@@ -140,6 +156,7 @@ fn main() {
         ("peel+AMD(bump)", &peel),
         ("AMD(full)", &full),
         ("peel+denseBump", &dense),
+        ("markowitz", &mark),
     ] {
         let (ms, ss) = mean_sd(&s.sym);
         let (mn, sn) = mean_sd(&s.num);
