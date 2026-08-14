@@ -35,6 +35,14 @@ jobs:
         # pipefail so the tee cannot mask a test failure.
         shell: bash
         run: cargo test -- --nocapture 2>&1 | tee /tmp/cargo-test.log
+      - name: test examples
+        # `cargo test` compiles examples but does not run `#[test]`s inside
+        # them, so a bench harness's own arithmetic was unguarded — which is how
+        # the `mean_sd` divisor typo in examples/basis_refactor.rs shipped in
+        # PR #160 and produced understated `±` figures in the changelog. The
+        # harnesses that produce published numbers need their statistics tested
+        # like anything else.
+        run: cargo test --examples
       - name: surface fixture-gated skips
         # Fixture-gated tests SKIP-and-pass when their (gitignored, too big
         # or non-regenerable to commit) fixtures are absent, so "suite

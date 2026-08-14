@@ -63,10 +63,21 @@ impl Stat {
     }
 }
 
+/// Mean and **sample** standard deviation (Bessel-corrected, `n - 1`).
+///
+/// The divisor was written `n.max(2.0 - 1.0)`, which parses as `n.max(1.0)` —
+/// i.e. `n` for every real input — so this returned the *population* standard
+/// deviation and understated every `±` this harness printed by
+/// `sqrt(n / (n - 1))`. The `±` figures quoted in PR #160 and in `CHANGELOG.md`
+/// came from the broken version and were corrected by that factor when this was
+/// found; see the `Fixed` entry in the changelog.
 fn mean_sd(v: &[f64]) -> (f64, f64) {
+    if v.is_empty() {
+        return (0.0, 0.0);
+    }
     let n = v.len() as f64;
     let m = v.iter().sum::<f64>() / n;
-    let var = v.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / n.max(2.0 - 1.0);
+    let var = v.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (n - 1.0).max(1.0);
     (m, var.sqrt())
 }
 
@@ -110,7 +121,7 @@ fn main() {
             let sym = if arm == 1 {
                 SparseLuSymbolic::analyze_amd_only(&a).expect("analyze")
             } else {
-                SparseLuSymbolic::analyze(&a).expect("analyze")
+                SparseLuSymbolic::analyze_triangularized(&a).expect("analyze")
             };
             s.sym.push(t0.elapsed().as_secs_f64() * 1e3);
             let t1 = Instant::now();
@@ -171,5 +182,39 @@ fn main() {
     if peel.runs == 0 || full.runs == 0 || dense_fired == 0 {
         eprintln!("ERROR: an arm never ran (dense route may have fallen back)");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mean_sd;
+
+    /// External oracle: the textbook sample `[2, 4, 4, 4, 5, 5, 7, 9]`, whose
+    /// mean is 5, **population** standard deviation is exactly 2, and **sample**
+    /// standard deviation is `sqrt(32/7) = 2.138089...`. The two differ by
+    /// `sqrt(n/(n-1))`, which is precisely the error this guards.
+    ///
+    /// The pre-fix divisor `n.max(2.0 - 1.0)` parses as `n.max(1.0)` — `n` for
+    /// any real input — so it returned 2.0 here. This test fails against it.
+    #[test]
+    fn mean_sd_is_the_sample_standard_deviation() {
+        let (m, sd) = mean_sd(&[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]);
+        assert!((m - 5.0).abs() < 1e-12, "mean {m}");
+        let expect = (32.0_f64 / 7.0).sqrt();
+        assert!(
+            (sd - expect).abs() < 1e-12,
+            "sample sd {sd}, expected {expect} (population sd 2.0 means the \
+             Bessel correction is missing)"
+        );
+    }
+
+    /// Degenerate inputs must not produce `NaN` or divide by zero: a single
+    /// observation has no spread to report, and an empty run has nothing at all.
+    #[test]
+    fn mean_sd_handles_degenerate_inputs() {
+        let (m, sd) = mean_sd(&[3.5]);
+        assert_eq!((m, sd), (3.5, 0.0));
+        let (m, sd) = mean_sd(&[]);
+        assert_eq!((m, sd), (0.0, 0.0));
     }
 }

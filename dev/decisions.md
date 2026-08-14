@@ -6431,3 +6431,200 @@ struct by literal must now supply it. Consistent with `bump_lo`/`bump_hi`, added
 by the same unreleased change. `analyze` on a large sparse basis that peels to
 nothing can no longer opt into the dense route at all; if that case ever matters,
 the right lever is a density test on the bump, not a dimension cap.
+## 2026-08-13 — the LU solve's singularity guard covers the reached rows, not all rows
+
+Issue #161B made the sparse LU's gather-form triangular sweeps reach-limited.
+That required deciding what happens to the `SingularBasis` guard on `U`'s stored
+diagonal (absent / zero / non-finite / not stored diagonal-first — the L10
+hardening), which until now ran on **every row of `U` on every solve**.
+
+**Decision: the guard is evaluated on the rows the solution depends on.**
+`ut_solve` skips rows where `s[i] == 0.0` (unconditionally, matching what
+`lsolve` has always done); `usolve` on the reach-limited route skips rows
+outside the reach. The dense fallback route keeps the full every-row check.
+
+**Why this is sound and not merely cheaper.** A row `k` that is skipped has
+`s[k] == 0` and no reached predecessor, so back substitution would assign it
+`0 / U[k,k]`. If `U[k,k]` is healthy that is `0`, which is what leaving the
+position alone already gives. If `U[k,k]` is zero the row states `0 = 0`: the
+system is consistent and underdetermined there, and `0` remains *a* correct
+solution component. No solve returns a different or wrong answer.
+
+**What is genuinely given up.** The *diagnostic* that the factor is degenerate
+somewhere the caller's right-hand side never touched. That was always incidental
+— a solve is not a factor validity check — and the primary detection remains
+where it belongs: at factor and update time, against the pivot tolerance, where
+singularity is decided rather than stumbled over. A caller who wants the strict
+old behavior sets `hyper_sparse_max_density = 0.0`, which restores the previous
+solve exactly.
+
+This is recorded as a decision rather than an implementation detail because it
+narrows an always-on guard that an earlier repo review (L10) deliberately made
+always-on. The narrowing is in *coverage per solve*, not in the guard itself:
+a row that is reached is still checked in every build mode, and the two tests
+that pin L10 (`zero_u_diagonal_errors_instead_of_inf`,
+`misplaced_u_diagonal_errors_instead_of_silent_wrong_pivot`) still pass
+unchanged, because a corrupted row that the solution depends on is still hit.
+
+Full reasoning: `dev/research/hyper-sparse-solves-2026-08-13.md` § Semantics
+that change.
+
+## 2026-08-13 — The Suhl–Suhl peel is opt-in, and is paired with the dense-bump route
+
+`SparseLuSymbolic::analyze` is AMD over the whole basis. The peel added in PR
+#160 lives in `analyze_triangularized`, and callers who want it should also set
+`LuParams::dense_bump_max_dim` — the route that requires a triangularized
+symbolic, and the only place the peel earns its keep.
+
+**The trigger** was issue #163: an ill-conditioned LP downstream (discopt,
+`bchoco06` root relaxation) that had certified `Optimal` began returning
+`Numerical`, losing its dual bound, with `dense_bump_max_dim` at its default of
+`0`. Bisected to the peel — whole-basis AMD passes, both peel variants fail,
+reproduced in both directions.
+
+**The reason is not stability, and it is worth being precise about that.** Every
+basis that LP's simplex handed feral was dumped and re-factored under both
+orderings. Backward error is ~1e-16 under both on all of them; forward error
+against a known solution reaches 2.6e-11 — the basis genuinely being
+ill-conditioned — and the peel is *never the worse of the two*, with ratios
+0.0x–1.0x across all 30 bases of the failing run. The peel does not produce a
+worse factorization. It produces a different rounding trajectory, which that LP
+was sensitive enough to diverge on.
+
+**The decision rests on cost-benefit, not correctness.** The peel's standalone
+result on a real QPLIB simplex basis is *more fill* (197,937 vs 190,654) for
+1.04x on time. A change that buys ~nothing does not get to perturb a downstream
+solver's arithmetic. Its real payoff — 4.28x — is the dense-bump route, which is
+off by default, so a caller taking `..LuParams::default()` was paying the
+trajectory change and receiving none of the speed. Making both opt-in puts the
+cost and the benefit behind the same door.
+
+**What this deliberately does not claim.** That whole-basis AMD is the better
+trajectory in general. It is the ordering that was in place when the downstream
+regression was green, and no measurement here distinguishes the two on accuracy.
+A different ill-conditioned LP could prefer the peel; that is what
+trajectory-sensitivity means. If a future panel shows the peel winning broadly on
+speed, this decision should be revisited on that evidence — but it should be
+revisited together with `dense_bump_max_dim`'s default, not separately.
+
+**Consequence for the Python bindings.** `feral.LuFactor` exposes no symbolic
+handle, so `dense_bump_max_dim > 0` selects `analyze_triangularized` there. The
+coupling is implicit but documented; the alternative was a parameter that
+silently did nothing.
+
+Evidence: `dev/research/lu-ordering-and-kernel-2026-08-13.md` § Issue #163.
+Contract test: `tests/lu_default_ordering.rs`.
+
+## 2026-08-13 (later) — Correction: the peel does have a standalone payoff, and it is large
+
+The entry above ("The Suhl–Suhl peel is opt-in, and is paired with the dense-bump
+route") argued the revert from **cost-benefit**, on the claim that the peel is "a
+trajectory-perturbing change with no standalone payoff". **That claim was wrong.**
+Recorded here rather than by editing the entry above, which is append-only.
+
+The maintainer's review of PR #162 measured what I did not: `analyze` is re-run on
+**every refactorization** by a simplex, so its cost is multiplied by the
+refactorization count rather than amortized. Reproduced in-tree
+(`examples/basis_refactor.rs`, 20 reps, release):
+
+| basis | `analyze` | `analyze_triangularized` | symbolic | total |
+|---|---|---|---|---|
+| QPLIB_1157 (m=3937) | 21.28 ms | 2.17 ms | **9.8x** | 1.03x |
+| QPLIB_3852 (m=1760) | 0.86 ms | 0.13 ms | **6.6x** | 2.73x |
+| bchoco06 (m=833) | 0.54 ms | 0.13 ms | **4.2x** | 2.26x |
+
+End to end, across 14 QPLIB relaxations under a dual simplex, switching only the
+constructor is **1.306x geomean** (max 1.674x) — the largest single effect on that
+PR, in either direction.
+
+**How the error was made.** I measured only the numeric-factorization column
+(97.45 ms peeled vs 101.40 ms whole-basis on QPLIB_1157) and reported its 1.04x as
+"the peel's standalone payoff". Two compounding mistakes: I ignored the symbolic
+column entirely, and I generalized from the single fixture where the peel's *total*
+advantage is smallest (1.03x) while the other two in-tree fixtures give 2.73x and
+2.26x. The evidence was already in this repository — `CHANGELOG.md`'s #160 entry,
+which I edited in the same session, records the peel "cutting the ordering from
+9.837 ± 0.295 ms to 0.851 ± 0.037 ms" on a real basis. That is the 9.8x, in front
+of me, in a file I was writing to.
+
+**Does the decision survive?** Yes, but on a different and weaker argument, and the
+documents now say so. The peel is a genuine **tradeoff**, not a free revert:
+
+- *For it:* 4.2–9.8x on symbolic, 1.03–2.73x on symbolic+numeric, 1.306x
+  end-to-end geomean, plus it is the precondition for `dense_bump_max_dim`'s
+  further 4.28x.
+- *Against it:* it is a different rounding trajectory. It cost one ill-conditioned
+  LP its dual bound (issue #163), and on QPLIB_2055 it is **0.389x** — a 2.6x
+  slowdown — with the objective moving in the 9th significant figure, so it changed
+  that pivot path too.
+
+Neither ordering dominates. `analyze` stays whole-basis AMD because that is the
+trajectory the downstream suite was green against and a caller must consciously
+take on the other one — **not** because it is faster or more accurate. It is
+neither, reliably. That is the honest statement of the decision and it is now what
+`SparseLuSymbolic::analyze`'s rustdoc says.
+
+**Open, and deliberately not decided here:** the maintainer's suggestion that the
+ordering become a parameter with a documented default rather than two separately
+named constructors, so callers can A/B it without a code change — which is how
+they had to measure the above. Filed as a follow-up rather than done in the PR
+under review; it is an API-shape decision and the constructor pair is not wrong,
+only inconvenient.
+
+Evidence: `dev/research/lu-ordering-and-kernel-2026-08-13.md` § Correction.
+
+## 2026-08-13 — The sparse-rhs density guard is its own knob, and it falls back to the dense route wholesale (issue #164)
+
+`ftran_sparse`/`btran_sparse` shipped with no density guard, documented as
+"route on what the caller knows about its right-hand sides". A dual simplex
+cannot: the density of `alpha = B^-1 A_q` is a property of the answer, not of the
+question. Measured over 14 QPLIB relaxations, the sparse API is 1.167x geomean
+where the answer is under 10% dense (n=10) and 0.837x where it is denser (n=4),
+log-log r = -0.944. So the guard is needed. Two decisions about its shape:
+
+**1. `sparse_rhs_max_density` is a separate parameter from
+`hyper_sparse_max_density`, even though both default to 0.10.** They answer
+different questions. `hyper_sparse_max_density` asks whether a caller holding a
+*dense* vector should pay for a reach at all — the reach's own cost is the
+thing being capped. `sparse_rhs_max_density` asks whether a caller who has
+already committed to the sparse signature should keep using the reach when the
+answer turns out dense. Tying them together would have made
+`sparse_entry_points_work_with_the_dense_route_disabled` — which sets
+`hyper_sparse_max_density = 0` precisely to prove the sparse path does not
+depend on the dense route — assert the opposite of the new behavior. With two
+knobs that test survives as a parameterization over both caps instead of an
+assertion flip, and it still tests what it was written to test.
+
+**2. The fallback sweeps the whole basis rather than "skipping the sort".** The
+issue's literal suggestion — emit the reach unsorted and sweep `0..m` — does not
+survive contact with the code, for two reasons:
+
+- A dense sweep writes nonzeros into positions that are not in `pattern`, and
+  `pattern` *is* the O(touched) reset list that restores `HyperWork`'s
+  all-zero-between-calls contract. A nonzero left outside it silently seeds the
+  next solve.
+- `u_solve_sparse`'s `SingularBasis` guard is deliberately narrowed to the rows
+  the solution depends on (decisions.md, earlier today). Sweeping all `m` rows
+  widens it, so whether a basis is reported singular would depend on an
+  unrelated right-hand side's density. Preserving the narrowing needs a per-row
+  "does this position matter" test, which is the reach being abandoned.
+
+So the fallback marks the whole accumulator (making the reset list cover the
+sweep) and fills `order` with the natural topological order over `0..m`. The four
+kernels are untouched — they sweep whatever is in `order` — and the fallen-back
+solve is then bit-for-bit the dense entry point it is falling back to, guard
+width included. That is the right semantics for a fallback: it should be
+indistinguishable from the thing it falls back to, not a third behavior.
+
+The DFS is abandoned mid-walk rather than completed and then discarded, mirroring
+`ReachWork::push`'s early abort on the dense route, so an over-cap solve pays a
+bounded fraction of the reach. `over_cap` is monotone within a solve (`pattern`
+only grows), so the second and later kernels of a fallen-back solve cost one
+`pop`, not a re-walk.
+
+`SparseLu::sparse_rhs_fallbacks()` exists because there was no valid witness that
+the guard fired: `last_sparse_solve_work()` counts factor entries traversed,
+which exceeds `m` on the reach path too. Without a dedicated counter the tests
+could not tell an inert guard from a working one.
+
+Evidence: PR #162 review, findings 1 and 4; `dev/journal/2026-08-13-04.org`.

@@ -10,7 +10,8 @@
 
 use feral::lu::sparse_matrix::SparseColMatrix as RustSparseColMatrix;
 use feral::{
-    should_use_dense_lu, DenseLu, LuParams, LuScaling, LuSingularAction, SparseLu, SparseLuSymbolic,
+    should_use_dense_lu, DenseLu, LuOrderingParams, LuParams, LuScaling, LuSingularAction,
+    SparseLu, SparseLuSymbolic,
 };
 
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
@@ -20,6 +21,38 @@ use pyo3::types::PyType;
 
 use crate::common::{array1_i64_to_vec_usize, array1_to_vec};
 use crate::errors::map_feral_err;
+
+/// Zip a `(rows, vals)` pair into the `(index, value)` form the sparse
+/// solves take. Out-of-range indices are left to the Rust side, which
+/// reports them as a dimension mismatch.
+fn sparse_rhs(
+    rows: &PyReadonlyArray1<'_, i64>,
+    vals: &PyReadonlyArray1<'_, f64>,
+) -> PyResult<Vec<(usize, f64)>> {
+    let r = array1_i64_to_vec_usize(rows)?;
+    let v = array1_to_vec(vals);
+    if r.len() != v.len() {
+        return Err(PyValueError::new_err(
+            "rows and vals must have the same length",
+        ));
+    }
+    Ok(r.into_iter().zip(v).collect())
+}
+
+/// The `(rows, vals)` array pair a sparse solve hands back to Python.
+type SparseVecPy<'py> = (Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<f64>>);
+
+/// Split an `(index, value)` solution back into the `(rows, vals)` array
+/// pair Python callers expect.
+fn split_sparse<'py>(py: Python<'py>, out: Vec<(usize, f64)>) -> SparseVecPy<'py> {
+    let mut idx: Vec<i64> = Vec::with_capacity(out.len());
+    let mut val: Vec<f64> = Vec::with_capacity(out.len());
+    for (i, v) in out {
+        idx.push(i as i64);
+        val.push(v);
+    }
+    (idx.into_pyarray_bound(py), val.into_pyarray_bound(py))
+}
 
 /// Reconstruct the dense column list (`cols[j]` length `m`) of a sparse
 /// basis. Used to feed the dense LU engine and the dense `refactor`.
@@ -253,6 +286,8 @@ impl LuFactor {
         refine_tol: f64,
         update_pivot_search: bool,
         dense_bump_max_dim: usize,
+        hyper_sparse_max_density: f64,
+        sparse_rhs_max_density: f64,
     ) -> PyResult<LuParams> {
         let on_singular = match on_singular {
             "fail" => LuSingularAction::Fail,
@@ -277,6 +312,8 @@ impl LuFactor {
             refine_tol,
             update_pivot_search,
             dense_bump_max_dim,
+            hyper_sparse_max_density,
+            sparse_rhs_max_density,
         })
     }
 }
@@ -294,6 +331,28 @@ impl LuFactor {
     /// small but its *factor* is dense, which `should_use_dense_lu` cannot see —
     /// that predicate keys on input density and on the whole basis's dimension.
     /// The cap is a memory bound: the route packs a `dim²` f64 buffer.
+    ///
+    /// Setting it above 0 also switches the column ordering from whole-basis
+    /// AMD to a Suhl-Suhl peel plus AMD over the bump, because the route needs
+    /// the contiguous bump the peel produces. That is a second speedup in its
+    /// own right — the peel is 4.2-9.8x on the symbolic analysis, which a
+    /// simplex pays on every refactorization — but it is also a different
+    /// rounding trajectory, which on an ill-conditioned LP cost a downstream
+    /// simplex its dual bound (issue #163) and on one QPLIB instance is a 2.6x
+    /// slowdown. Neither setting dominates; measure on your own matrices.
+    ///
+    /// `triangularize` (default `None`) separates those two: it selects the
+    /// column ordering on its own, so the peel can be measured without the dense
+    /// bump route and vice versa (issue #165). Left `None` it follows
+    /// `dense_bump_max_dim > 0`, which is what this binding did before the knob
+    /// existed.
+    ///
+    /// `sparse_rhs_max_density` (default 0.10) caps the solution density at
+    /// which the Rust-side sparse-rhs solves keep using their reach; past it
+    /// they sweep the whole basis instead (issue #164). It has no effect through
+    /// this class, whose `ftran`/`btran` take dense vectors — it is here so a
+    /// `LuFactor` built in Python carries the same parameters as one built in
+    /// Rust.
     #[new]
     #[pyo3(signature = (
         matrix,
@@ -310,6 +369,9 @@ impl LuFactor {
         refine_tol = 1e-12,
         update_pivot_search = false,
         dense_bump_max_dim = 0,
+        hyper_sparse_max_density = 0.10,
+        sparse_rhs_max_density = 0.10,
+        triangularize = None,
         force_dense = None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -328,6 +390,9 @@ impl LuFactor {
         refine_tol: f64,
         update_pivot_search: bool,
         dense_bump_max_dim: usize,
+        hyper_sparse_max_density: f64,
+        sparse_rhs_max_density: f64,
+        triangularize: Option<bool>,
         force_dense: Option<bool>,
     ) -> PyResult<Self> {
         let params = Self::build_params(
@@ -343,6 +408,8 @@ impl LuFactor {
             refine_tol,
             update_pivot_search,
             dense_bump_max_dim,
+            hyper_sparse_max_density,
+            sparse_rhs_max_density,
         )?;
         let a = &matrix.inner;
         let m = a.m;
@@ -354,7 +421,19 @@ impl LuFactor {
                 .map_err(map_feral_err)?;
             LuInner::Dense(Box::new(lu))
         } else {
-            let sym = SparseLuSymbolic::analyze(a).map_err(map_feral_err)?;
+            // The peel and the dense-bump route were opted into together (issue
+            // #163): `dense_bump_max_dim` only applies to a triangularized
+            // symbolic, and Python exposes no symbolic handle, so the cap was
+            // the only opt-in available. `triangularize` unbundles them (issue
+            // #165) — the peel is worth 4.2-9.8x on the analysis whether or not
+            // the bump route is on — while defaulting to the old coupling.
+            let sym = SparseLuSymbolic::analyze_with(
+                a,
+                LuOrderingParams {
+                    triangularize: triangularize.unwrap_or(dense_bump_max_dim > 0),
+                },
+            )
+            .map_err(map_feral_err)?;
             let lu = py
                 .allow_threads(|| SparseLu::factor(a, &sym, params))
                 .map_err(map_feral_err)?;
@@ -403,6 +482,76 @@ impl LuFactor {
             LuInner::Sparse { lu, .. } => lu.btran(&mut rhs).map_err(map_feral_err)?,
         }
         Ok(rhs.into_pyarray_bound(py))
+    }
+
+    /// Solve `B x = b` with both sides sparse: `rows`/`vals` give the
+    /// nonzeros of `b`, and the nonzeros of `x` come back as a
+    /// `(rows, vals)` pair sorted by row.
+    ///
+    /// This is the work-proportional entry point (issue #161B). `ftran`
+    /// takes and returns dense length-`n` arrays, which forces `O(n)`
+    /// work per solve no matter how few nonzeros the answer has; this
+    /// one costs only the reach of `b`'s pattern through the factor. On
+    /// a simplex `ftran` against a near-unit-vector column that is the
+    /// difference between touching the whole basis and touching the
+    /// handful of positions the answer depends on.
+    ///
+    /// Sparse engine only — the dense engine has no sparse factor to
+    /// walk, so use `ftran` there. When the solution is *dense* prefer
+    /// `ftran` here too: this path sorts its reach, which the dense
+    /// sweep does not need to do.
+    fn ftran_sparse<'py>(
+        &mut self,
+        py: Python<'py>,
+        rows: PyReadonlyArray1<'py, i64>,
+        vals: PyReadonlyArray1<'py, f64>,
+    ) -> PyResult<SparseVecPy<'py>> {
+        let rhs = sparse_rhs(&rows, &vals)?;
+        let mut out: Vec<(usize, f64)> = Vec::new();
+        match &mut self.inner {
+            LuInner::Sparse { lu, .. } => lu.ftran_sparse(&rhs, &mut out).map_err(map_feral_err)?,
+            LuInner::Dense(_) => {
+                return Err(PyValueError::new_err(
+                    "ftran_sparse is only available on the sparse LU engine; \
+                     use ftran(b) for the dense engine",
+                ))
+            }
+        }
+        Ok(split_sparse(py, out))
+    }
+
+    /// Solve `Bᵀ x = c` with both sides sparse. The transpose twin of
+    /// `ftran_sparse`: `rows` indexes columns of `B`, the result indexes
+    /// rows, matching `btran`.
+    fn btran_sparse<'py>(
+        &mut self,
+        py: Python<'py>,
+        rows: PyReadonlyArray1<'py, i64>,
+        vals: PyReadonlyArray1<'py, f64>,
+    ) -> PyResult<SparseVecPy<'py>> {
+        let rhs = sparse_rhs(&rows, &vals)?;
+        let mut out: Vec<(usize, f64)> = Vec::new();
+        match &mut self.inner {
+            LuInner::Sparse { lu, .. } => lu.btran_sparse(&rhs, &mut out).map_err(map_feral_err)?,
+            LuInner::Dense(_) => {
+                return Err(PyValueError::new_err(
+                    "btran_sparse is only available on the sparse LU engine; \
+                     use btran(c) for the dense engine",
+                ))
+            }
+        }
+        Ok(split_sparse(py, out))
+    }
+
+    /// Scalar work of the most recent `ftran_sparse`/`btran_sparse`:
+    /// positions swept plus factor entries traversed. Holding the basis
+    /// structure fixed and growing `n`, this stays flat — which is the
+    /// checkable form of "work-proportional". `None` on the dense engine.
+    fn last_sparse_solve_work(&self) -> Option<usize> {
+        match &self.inner {
+            LuInner::Sparse { lu, .. } => Some(lu.last_sparse_solve_work()),
+            LuInner::Dense(_) => None,
+        }
     }
 
     /// Replace basis column `slot` with the dense `col` (length `n`)

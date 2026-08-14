@@ -5260,3 +5260,65 @@ dense_threshold` allowance for the unpeelable case.
 Note the provenance flag *alone* was also insufficient — `analyze` on a
 tridiagonal m=3000 peels nothing, sets `triangularized = true`, and hit the same
 cliff at 297 ms vs 1.5 ms sparse. Both guards are load-bearing.
+## 2026-08-13 — sparse permuted marshalling around the LU triangular solves
+
+**Rejected on measurement (issue #161B).** Having made the gather-form
+triangular sweeps reach-limited, a hyper-sparse `ftran` on `m = 4000` still cost
+~20 us for a solution with a p50 of 3 nonzeros, so I looked for the next `O(m)`
+term. The hypothesis was the four permuted gather/scatters around the core solve
+(`out[k] = rhs[perm[k]]`, `rhs[qcol[k]] = s[k]`, and their `btran` mirrors):
+each reads or writes through a permutation, so all `m` accesses are random. The
+replacement was a `fill(0.0)` plus a *sequential* scan plus one random access
+per nonzero, gated on the same switch as the reach route so the feature-off path
+stayed byte-identical.
+
+It does nothing. Interleaved A/B on the same basis, toggling only that gate:
+
+```
+                     ftran mean   btran mean   dense-rhs fallback
+  sparse marshal      33.6 us      31.6 us        0.90x
+  dense marshal       31.3 us      33.0 us        0.93x
+```
+
+The two arms straddle each other (ftran favours dense marshalling, btran favours
+sparse) — that is noise, not a signal, and the dense-rhs fallback is if anything
+slightly worse with it.
+
+**Why the hypothesis was wrong.** The permuted access is random but it is random
+*within a 32 KB buffer*, which sits in L1/L2 — so it was never paying the cache
+misses the reasoning assumed. What the phase probe actually showed is that the
+residual cost is spread evenly across all ~6 `O(m)` linear passes
+(`ftran_partial` alone, which is just the `P`-gather plus `lsolve`, was 10.3 of
+the 22.1 us), at roughly 2-3 us per pass on this machine. There is no single
+term left to remove: getting below the `O(m)` floor needs a **sparse-rhs entry
+point**, not a cheaper way to walk a dense one.
+
+The code was reverted. `dev/research/hyper-sparse-solves-2026-08-13.md` records
+the floor and names the API change that would lift it.
+
+## 2026-08-13 — caching `SparseLuSymbolic` across refactorizations in a simplex
+
+**Rejected on measurement.** While attributing discopt issue #1008, the analysis
+phase turned out to dominate: on QPLIB_3775, `LuSymbolic` was **1048.5 ms across
+64 factorizations** against `LuNumeric` **184.6 ms** — 5.7x the numeric
+factorization spent choosing a column order. Since `SparseLu::factor` only
+validates `symbolic.m == a.m`, a stale ordering is *legal*, so the obvious fix
+was to compute the ordering once and reuse the handle on every refactorization.
+
+Probed in discopt behind `DISCOPT_LU_SYM_REUSE` (a `sym_cache: Option<SparseLuSymbolic>`
+on `FeralLU`, never merged). On QPLIB_3775 with `analyze_triangularized`:
+
+| arm | factorizations | LuNumeric | wall |
+|---|---|---|---|
+| tri=1, reuse=0 | 64 | 184.6 ms | **1.193 s** |
+| tri=1, reuse=1 | 1112 | 18381 ms | **137.835 s** |
+
+**115x slower.** tri=0 reuse=1 did not finish inside a 300 s timeout. A simplex
+basis is not structurally stable across 64 pivots: the stale ordering explodes
+fill, the fill blows the numeric factorization, and the resulting instability
+triggers a refactorization storm (64 → 1112) that feeds back on itself.
+
+The conclusion is not "reuse harder" — it is that the ordering **must** be
+recomputed on every refactorization, and therefore must be cheap. That is what
+makes the `analyze` vs `analyze_triangularized` cost (4.3-12.4x, measured
+standalone) a first-order effect rather than an amortizable one.

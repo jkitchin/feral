@@ -7,6 +7,10 @@
 //! same residuals, same singularity verdicts. These tests build matrices with a
 //! genuine triangular border around a dense bump — the LP-basis shape the route
 //! exists for — and check `A x = b` and `Aᵀ y = c` both ways.
+//!
+//! Every arm builds its symbolic with `analyze_triangularized`, not `analyze`.
+//! Since issue #163 the peel is opt-in and `analyze` is whole-basis AMD, which
+//! reports no bump and so can never take this route.
 
 use feral::{FeralError, LuParams, LuSingularAction, SparseColMatrix, SparseLu, SparseLuSymbolic};
 
@@ -132,7 +136,7 @@ fn both_routes(
     seed: u64,
 ) -> (f64, f64, usize, Vec<f64>, bool) {
     let m = a.m;
-    let sym = SparseLuSymbolic::analyze(a).expect("analyze");
+    let sym = SparseLuSymbolic::analyze_triangularized(a).expect("analyze");
     let params = LuParams {
         dense_bump_max_dim: max_dim,
         ..LuParams::default()
@@ -221,7 +225,7 @@ fn dense_bump_route_is_off_by_default() {
         0,
         "the route must be opt-in"
     );
-    let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+    let sym = SparseLuSymbolic::analyze_triangularized(&a).expect("analyze");
     let lu = SparseLu::factor(&a, &sym, LuParams::default()).expect("factor");
     assert!(lu.factor_nnz() > 0);
 }
@@ -229,7 +233,7 @@ fn dense_bump_route_is_off_by_default() {
 #[test]
 fn bump_above_the_cap_stays_on_the_sparse_route() {
     let a = lp_like_basis(20, 30, 10, 8);
-    let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+    let sym = SparseLuSymbolic::analyze_triangularized(&a).expect("analyze");
     let bump = sym.bump_hi - sym.bump_lo;
     assert!(bump > 4, "test needs a real bump, got {bump}");
     // A cap below the bump must not take the route; the factorization must
@@ -283,7 +287,7 @@ fn singular_bump_is_reported_on_both_routes() {
         }
     }
     let a = build(m, &mut trip);
-    let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+    let sym = SparseLuSymbolic::analyze_triangularized(&a).expect("analyze");
     let base = LuParams {
         on_singular: LuSingularAction::Fail,
         ..LuParams::default()
@@ -329,10 +333,11 @@ fn singular_bump_is_reported_on_both_routes() {
 fn an_unpeeled_whole_basis_stays_on_the_sparse_route() {
     // `dense_bump_max_dim` bounds a *residual bump*. A bump equal to the whole
     // basis is not that, and it arises two ways: `natural`/`with_order`/
-    // `analyze_amd_only` report `(0, m)` without ever triangularizing, and
-    // `analyze` reports it when there is nothing to peel. Neither may route a
-    // whole sparse basis through the dense kernel — that would allocate an
-    // `m*m` f64 buffer and run the dense kernel over a tridiagonal.
+    // `analyze`/`analyze_amd_only` report `(0, m)` without ever
+    // triangularizing, and `analyze_triangularized` reports it when there is
+    // nothing to peel. Neither may route a whole sparse basis through the dense
+    // kernel — that would allocate an `m*m` f64 buffer and run the dense kernel
+    // over a tridiagonal.
     //
     // A tridiagonal has no row or column singletons, so it is unpeelable under
     // every constructor, and `m` here is above the default `dense_threshold`
@@ -370,6 +375,10 @@ fn an_unpeeled_whole_basis_stays_on_the_sparse_route() {
             SparseLuSymbolic::analyze_amd_only(&a).expect("amd_only"),
         ),
         ("analyze", SparseLuSymbolic::analyze(&a).expect("analyze")),
+        (
+            "analyze_triangularized",
+            SparseLuSymbolic::analyze_triangularized(&a).expect("triangularized"),
+        ),
     ];
 
     let x_ref: Vec<f64> = (0..m).map(|i| 1.0 + (i % 7) as f64).collect();

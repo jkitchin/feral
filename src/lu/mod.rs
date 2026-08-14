@@ -18,6 +18,7 @@ pub mod dense_solve;
 pub mod dense_update;
 pub mod scaling;
 pub mod sparse_factor;
+pub(crate) mod sparse_hyper;
 pub mod sparse_matrix;
 pub mod sparse_solve;
 pub mod sparse_symbolic;
@@ -28,7 +29,7 @@ pub use dense_factor::DenseLu;
 pub use dense_matrix::GeneralMatrix;
 pub use sparse_factor::SparseLu;
 pub use sparse_matrix::SparseColMatrix;
-pub use sparse_symbolic::SparseLuSymbolic;
+pub use sparse_symbolic::{LuOrderingParams, SparseLuSymbolic};
 
 /// What to do when the LU factorization hits a numerically null pivot column.
 ///
@@ -136,16 +137,25 @@ pub struct LuParams {
     /// `f64` buffer, so `b = 1024` is 8 MB and `b = 4096` is 134 MB. Set this
     /// to the largest bump worth that allocation, or `0` to stay sparse.
     ///
-    /// Applies only to a symbolic that actually triangularized, i.e. one built
-    /// by [`SparseLuSymbolic::analyze`]
-    /// ([`triangularized`](super::SparseLuSymbolic::triangularized)).
+    /// **Requires [`SparseLuSymbolic::analyze_triangularized`].** Only a
+    /// symbolic that actually peeled
+    /// ([`triangularized`](super::SparseLuSymbolic::triangularized)) can take
+    /// this route. [`SparseLuSymbolic::analyze`] (the default),
     /// [`SparseLuSymbolic::natural`], [`SparseLuSymbolic::with_order`] and
     /// [`SparseLuSymbolic::analyze_amd_only`] report the whole basis as bump
-    /// because they never looked for structure, so they never take this route
-    /// however large the cap.
+    /// because they never looked for structure, so setting this cap alongside
+    /// any of them is a no-op however large it is.
     ///
-    /// When `analyze` peels nothing and the bump *is* the whole basis, this cap
-    /// does not apply either — such a basis is bounded by
+    /// Opting into the peel is worth having on its own — it is 4.2–9.8x on the
+    /// symbolic step, which a simplex pays on every refactorization — but it
+    /// also changes the rounding trajectory, and that is not free: see
+    /// [`SparseLuSymbolic::analyze`] for both halves, including the
+    /// ill-conditioned LP where it cost a downstream simplex its dual bound
+    /// (issue #163) and the instance where it is a 2.6x slowdown. This cap is
+    /// the other 4.28x, on the numeric side, and it needs the peel to fire.
+    ///
+    /// When `analyze_triangularized` peels nothing and the bump *is* the whole
+    /// basis, this cap does not apply either — such a basis is bounded by
     /// [`Self::dense_threshold`] instead. The case for the dense kernel rests on
     /// the peel having stripped the structure and left an irreducible core; with
     /// nothing stripped, whole-basis dense is `dense_threshold`'s call, and it
@@ -155,6 +165,7 @@ pub struct LuParams {
     /// [`SparseLuSymbolic::with_order`]: super::SparseLuSymbolic::with_order
     /// [`SparseLuSymbolic::analyze_amd_only`]: super::SparseLuSymbolic::analyze_amd_only
     /// [`SparseLuSymbolic::analyze`]: super::SparseLuSymbolic::analyze
+    /// [`SparseLuSymbolic::analyze_triangularized`]: super::SparseLuSymbolic::analyze_triangularized
     pub dense_bump_max_dim: usize,
     /// Scaling strategy applied before factorization.
     pub scaling: LuScaling,
@@ -178,6 +189,103 @@ pub struct LuParams {
     /// trajectory choice rather than a failure rescue. Sparse path only; the
     /// dense update is unaffected.
     pub update_pivot_search: bool,
+    /// Density cap for the reach-limited ("hyper-sparse") triangular solves in
+    /// the sparse `ftran`/`btran` (issue #161B, Hall & McKinnon 2005).
+    ///
+    /// The gather-form halves of the solve (`U w = s` in `ftran`, `Lᵀ v = s` in
+    /// `btran`) read every row of `U` / every column of `L` on every call, so
+    /// their cost tracks `nnz(factor)` rather than the number of nonzeros the
+    /// solution actually has. With this set, a solve first computes the reach
+    /// of the right-hand side's pattern in the factor's DAG and sweeps only
+    /// those positions — the work a simplex `ftran`/`btran` against a
+    /// near-unit-vector rhs actually needs.
+    ///
+    /// The value is the fraction of `m` at or below which the reach-limited
+    /// route is taken; a reach larger than `hyper_sparse_max_density · m`
+    /// aborts back to the dense sweep, so a *sparse rhs whose solution fills
+    /// in* pays up to this fraction of a wasted sweep on top of the dense one.
+    /// That bounded downside is the price of routing on solution density, which
+    /// cannot be known without computing part of the reach.
+    ///
+    /// # Why the default is 0.10 and not higher
+    ///
+    /// **The reach DFS costs about what the sweep it replaces costs.** Walking
+    /// the graph to find the reach traverses the same factor entries the numeric
+    /// sweep then traverses again, so the route pays roughly twice to avoid
+    /// paying once. That is a fine trade when the reach is small and a losing
+    /// one when it is a sizeable fraction of `m`.
+    ///
+    /// Measured on QPLIB_1157 (`tests/data/lu_bases/`): at a cap of 0.25 the
+    /// `btran` reach walks **68,925 graph edges per sweep against
+    /// `nnz(L) = 75,084`** — 92% of what the dense `Lᵀ` sweep traverses — and
+    /// the numeric sweep then walks the reached columns on top of that. At 0.10
+    /// the same figure is 5%. (The `O(r log r)` sort is *not* the cost: sorting
+    /// even 2000 positions is ~18 us against a ~105 us per-solve regression.)
+    ///
+    /// Measured on the real QPLIB_1157 simplex basis (`m = 3937`, 7.46 nnz/col,
+    /// fill 6.76x), sweeping only this cap:
+    ///
+    /// | cap | `ftran` | `btran` | route fired |
+    /// |---|---|---|---|
+    /// | 0.05 | 10.59x | 0.98x | 1195 |
+    /// | **0.10** | **10.81x** | **0.97x** | **1195** |
+    /// | 0.25 | 11.01x | **0.69x** | 2370 |
+    /// | 1.00 | 10.75x | **0.69x** | 2560 |
+    ///
+    /// `ftran` is flat across the whole range; `btran` falls off a cliff
+    /// between 0.10 and 0.25, and the fired count nearly doubles over the same
+    /// step. That basis's `btran` reaches sit between 10% and 25% of `m`, so a
+    /// cap of 0.25 admits exactly the population the sort loses on — a 1.45x
+    /// regression bought for no `ftran` gain.
+    ///
+    /// 0.10 is therefore the largest cap measured that still excludes that
+    /// band. Raising it needs evidence from a basis whose solutions actually
+    /// live there and *win*, not a synthetic fixture: this effect is invisible
+    /// unless the solution-density profile straddles the cap, which is why the
+    /// in-tree generator could not show it and the shipped default was wrong
+    /// until real bases were measured.
+    ///
+    /// `0.0` disables the route entirely — every solve takes the dense sweep,
+    /// exactly as before issue #161, and the `L` row index and reach workspace
+    /// are not even allocated. Valid range `[0, 1]`.
+    pub hyper_sparse_max_density: f64,
+
+    /// Density cap for the **sparse-in / sparse-out** entry points
+    /// [`SparseLu::ftran_sparse`] / [`SparseLu::btran_sparse`] (issue #164).
+    ///
+    /// Those solves are reach-based by construction, which is a win only while
+    /// the solution stays sparse: a reach that covers most of the basis still
+    /// has to be built by a depth-first walk and sorted into topological order,
+    /// where the dense sweep just walks the factor as stored. Once the pattern
+    /// grows past `sparse_rhs_max_density · m` the walk is abandoned and the
+    /// sweep runs over the whole basis in natural order — the same work the
+    /// dense entry points would have done, with the sparse signature preserved.
+    ///
+    /// This is a **separate knob from [`Self::hyper_sparse_max_density`]** even
+    /// though both default to `0.10`, because they answer different questions.
+    /// That one asks whether a caller holding a dense vector should pay for a
+    /// reach at all; this one asks whether a caller who has already committed to
+    /// the sparse signature should keep using it for an answer that turned out
+    /// dense. A caller can want the reach route off and this on, or the reverse.
+    ///
+    /// The default comes from 14 QPLIB relaxations driven by a dual simplex,
+    /// comparing the sparse entry points against the dense ones by the mean
+    /// density of the solution: under 10% dense the sparse API is **1.167x**
+    /// (n = 10), at or above 10% it is **0.837x** (n = 4, worst 0.711x), with
+    /// log-log `r(density, speedup) = -0.944`. Every instance that regressed sat
+    /// above this cap. It is deliberately the same 0.10 that the dense route
+    /// uses, from the same measurement.
+    ///
+    /// The fallback exists because the caller that needs it *cannot supply it*:
+    /// a dual simplex does not know the density of `B⁻¹A_q` until the solve that
+    /// produces it has run, so "route on what you know about your right-hand
+    /// sides" is not advice it can take.
+    ///
+    /// `1.0` disables the fallback — the solves stay strictly work-proportional
+    /// no matter how dense the answer, which is the behaviour issue #161B
+    /// shipped. `0.0` forces the dense sweep on every nonempty right-hand side.
+    /// Valid range `[0, 1]`.
+    pub sparse_rhs_max_density: f64,
 }
 
 impl LuParams {
@@ -229,6 +337,28 @@ impl LuParams {
                 self.refine_tol
             )));
         }
+        // `hyper_sparse_max_density` scales to a node budget `d·m`. A negative
+        // or `NaN` value makes that budget meaningless (`NaN as usize` is 0 in
+        // Rust, which would silently disable the route rather than error);
+        // above 1.0 the cap exceeds `m` and can never abort, which defeats the
+        // fallback the route relies on. `0.0` is the documented off switch.
+        if !(self.hyper_sparse_max_density >= 0.0 && self.hyper_sparse_max_density <= 1.0) {
+            return Err(FeralError::InvalidInput(format!(
+                "LuParams::hyper_sparse_max_density must be in [0, 1], got {}",
+                self.hyper_sparse_max_density
+            )));
+        }
+        // `sparse_rhs_max_density` scales to the same kind of node budget, with
+        // the same `NaN as usize == 0` hazard — except here a silent `0` would
+        // route *every* sparse solve to the dense sweep, turning the
+        // work-proportional entry points into `O(m)` ones without a word.
+        // `1.0` (no fallback) and `0.0` (always fall back) are both documented.
+        if !(self.sparse_rhs_max_density >= 0.0 && self.sparse_rhs_max_density <= 1.0) {
+            return Err(FeralError::InvalidInput(format!(
+                "LuParams::sparse_rhs_max_density must be in [0, 1], got {}",
+                self.sparse_rhs_max_density
+            )));
+        }
         Ok(())
     }
 }
@@ -247,6 +377,8 @@ impl Default for LuParams {
             refine_steps: 0,
             refine_tol: 1e-12,
             update_pivot_search: false,
+            hyper_sparse_max_density: 0.10,
+            sparse_rhs_max_density: 0.10,
         }
     }
 }

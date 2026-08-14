@@ -1,0 +1,769 @@
+#+TITLE: Journal 2026-08-13-02
+#+STARTUP: showall
+
+* 15:05 :issue161:lu:orient:
+Goal for this session: issue #161 part B — hyper-sparse triangular solves.
+
+Issue #161 has two halves. Part A (numeric factorization 1.6-3.9x SuperLU on
+real LP bases) is already implemented and measured in PR #160
+(Suhl-Suhl triangularization + dense-bump splice, open against main, 3.39x on
+the bump-heavy class). Part B (triangular solves not work-proportional) is
+filed as "described, not implemented" — the issue explicitly says the numbers
+size the prize but do not demonstrate a fix. That is the gap to close.
+
+Not touching part A: PR #160 is open and measured; duplicating it here would
+conflict.
+
+* 15:20 :issue161:lu:codeinspection:
+Read the four triangular kernels in =src/lu/sparse_solve.rs=. They split into
+two shapes, and the split explains the issue's headline number exactly:
+
+- =lsolve= (L y = s) and =ut_solve= (U^T z = s) are *scatter* form. They test
+  =s[k] == 0.0= and skip, so their flop count is already proportional to the
+  solution.
+- =usolve= (U w = s) and =lt_solve= (L^T v = s) are *gather* form. Every row
+  of U / every column of L is read regardless of what is nonzero:
+  =O(nnz(U))= and =O(nnz(L))= on every call.
+
+Issue #161 measured "0.74x the cost for 0.0003x the output". Half the solve
+going to ~0 and half staying at full cost predicts ~0.5x-0.75x. Consistent.
+The gather halves are the target.
+
+Third finding, not in the issue: =ut_solve= dereferences =u_rows[i]= (one heap
+allocation per row) to read =row.first()= *before* testing =s[i]=. So although
+its flops are proportional, it pays m cache misses per call regardless of
+sparsity. =lsolve= already hoists its zero test; =ut_solve= does not. That is a
+one-line fix independent of everything else.
+
+* 15:35 :issue161:lu:design:
+The predecessor graphs the reach needs:
+
+- =usolve=: edges =c -> {k : U[k,c] != 0}=. That is exactly =u_above[c]=,
+  which already exists (built at =sparse_factor.rs:486=, maintained
+  incrementally across FT updates at =sparse_update.rs:236=, and invariant-
+  checked in =verify=). Nothing to build.
+- =lt_solve=: edges =i -> {k : L[i,k] != 0}= — the row-wise structure of L.
+  L is stored CSC only. Must be built. Safe to build once at factor time
+  because the FT update never touches the base L (documented at
+  =sparse_factor.rs:41=).
+
+Topological order: descending =uperm[k]= (triangular rank) for usolve —
+*not* position index, since U is upper triangular in uperm order after an FT
+update — and descending position for lt_solve.
+
+=compute_spike= (=sparse_update.rs:335=) already does this exact shape for the
+L graph: mark array, explicit stack, =sort_unstable=, clear marks over the
+touched list. Following that idiom rather than inventing a second one.
+
+Research note written to =dev/research/hyper-sparse-solves-2026-08-13.md=
+before touching any code, per protocol.
+
+* 16:40 :issue161:lu:bug:tests:
+The sweep counter earned its keep on the first run. All nine differential
+tests passed on correctness and =reach_route_agrees_with_dense_route_on_unit_rhs=
+failed on the vacuity assertion:
+
+  the reach route must have fired on most of the 400 ftran + 400 btran
+  sweeps, got 0
+
+Cause: =reach_cap()= tested =self.reach.mark_len() != self.m= to decide whether
+the workspace was live — but =ftran_core= =mem::take=s the workspace out of
+=self= for the duration of the call, so =self.reach= is the empty =Default= at
+exactly the moment the test runs. The route was disabled on every solve and
+every correctness test still passed, because the dense fallback is correct.
+
+That is the whole argument for =hyper_sparse_sweeps()= existing. Without it
+this ships as a no-op with a green suite.
+
+Fixed by testing the taken-out =rw= instead.
+
+* 16:55 :issue161:lu:measurement:
+First interleaved A/B, m=4000, 400-col bump, unit-vector rhs (1280 calls/arm):
+
+  dense sweep     ftran mean 68.3  p50 60.1 us | btran mean 57.5  p50 51.3 us
+  reach-limited   ftran mean 35.0  p50 23.5 us | btran mean 33.5  p50 23.9 us
+  -->             ftran 1.95x mean / 2.56x p50 | btran 1.72x / 2.15x
+  dense-rhs fallback 0.97x   max |diff| = 0.000e0
+
+Bit-identical between routes, which is expected: the omitted terms are exactly
+=v * 0.0=.
+
+Solution density is bimodal on this fixture — ftran(e_i) has p50=3 nonzeros and
+p90=366 — so the mean is set by the minority that reach through the bump and
+understates the hyper-sparse case. Reporting both, not the flattering one.
+
+* 17:10 :issue161:lu:measurement:threshold:
+Swept =hyper_sparse_max_density= to choose the default rather than guessing:
+
+  0.05  2.08x   3.1 nodes/sweep   fallback 0.98x
+  0.10  2.06x  32.8               0.97x
+  0.25  2.04x  39.5               0.98x
+  0.50  2.04x  39.5               0.93x
+  1.00  1.98x 133.8               0.67x
+
+The win is flat — the solves that matter have reaches far below any of these.
+What the cap controls is the *downside*, and 1.00 (where nothing can ever abort)
+shows what that is worth: 0.67x on a dense rhs. Shipping 0.25.
+
+* 17:30 :issue161:lu:negative:
+Chased the residual O(m). A hyper-sparse ftran at m=4000 still costs ~22 us with
+a reach of 3.4 positions, so I hypothesised the four permuted gather/scatters
+around the core solve (all m accesses are random through a permutation) and
+replaced them with fill + sequential scan + one random access per nonzero.
+
+It does nothing. A/B toggling only that gate:
+
+  sparse marshal   ftran 33.6  btran 31.6  fallback 0.90x
+  dense  marshal   ftran 31.3  btran 33.0  fallback 0.93x
+
+The arms straddle each other. Reverted; written up in tried-and-rejected.md.
+
+The hypothesis was wrong because the permuted access is random *within 32 KB*,
+which is L1/L2-resident — it was never paying the misses I assumed. A phase
+probe shows the residual spread evenly over ~6 linear passes:
+
+  loop base (fill)                 0.2 us
+  ftran_partial (P-gather+lsolve) 10.3 us
+  ftran - ftran_partial           13.2 us
+  full ftran                      22.1 us
+
+There is no single term left. Getting under the O(m) floor needs a sparse-rhs
+entry point, i.e. an API addition, not a cheaper walk of a dense one.
+
+* 17:50 :issue161:session:tests:
+Full suite green: 40 test binaries, 0 failures, =cargo test --release=.
+=cargo clippy --all-targets -- -D warnings= clean, =cargo fmt= clean.
+
+=cargo run --bin bench --release= runs but the container has **no corpus** —
+every partition reports N/A / "no matrices have oracle timings", same as
+session 2026-08-10-01. No LDLT regression comparison is possible here. The
+change is confined to =src/lu/=, which the LDLT corpus does not exercise, but
+that is an argument for low risk, not evidence of no regression.
+
+* 18:40 :issue161:lu:api:design:
+Follow-up requested: remove the O(m) floor, adding an API if that is what it
+takes. It is: the floor is the =ftran(&mut [f64])= signature, not the kernels.
+
+Added =ftran_sparse= / =btran_sparse=: rhs as (index, value) pairs, solution
+appended to a caller-owned =Vec<(usize, f64)>=. Every step is proportional to
+nnz or to the reach — scatter O(nnz(rhs)), L-solve over the GP reach, etas
+O(ops), U-solve over the reach, gather O(nnz(x) log nnz(x)).
+
+The delicate part is the dense accumulator that must be all-zero between calls
+and restored in O(touched). A leak corrupts the *next* solve, not the one that
+leaked, so the reset runs on every exit path including the error path out of the
+U-solve, and the test interleaves failing solves with good ones rather than
+batching them.
+
+Deliberately did NOT skip zero-source eta ops. It would be O(ops) either way,
+and skipping diverges from =FtEta::apply_forward= when mult is non-finite
+(mult * 0.0 = NaN, not 0.0). Bit parity with the dense path is worth more than
+a branch that changes no asymptotics.
+
+* 19:05 :issue161:lu:measurement:scalability:
+Measured, bump=0 band=3, unit-vector rhs, ftran p50:
+
+  m       dense sweep   reach-limited   sparse API   work (scalar ops)
+  1000       7.8 us        4.7 us        0.30 us     12.5
+  4000      40.8 us       20.3 us        1.07 us     12.1
+  16000    183.4 us       89.6 us        2.47 us     13.1
+  64000   1251.0 us      616.7 us        3.34 us     11.0
+
+*The work column is the result.* m grows 64x, the operation count does not move.
+The dense sweep grows 160x, which is what O(m) looks like. At m=64000 the sparse
+API is 277x the dense sweep on ftran, 234x on btran.
+
+Time still grows 11x over that 64x range. That is NOT a residual O(m) term — it
+decelerates (4x in m buys 2.3x in time from 4k->16k, 1.35x from 16k->64k), which
+is a cache/TLB plateau. The accumulator is 512 KB at m=64000, past L2, so each
+of the ~12 scattered accesses is a miss. O(work x miss cost), not O(m).
+
+This is exactly why =last_sparse_solve_work()= is asserted on instead of a
+timing. A reintroduced O(m) term at these sizes would look like a constant
+factor, indistinguishable from noise. The counter is deterministic.
+
+* 19:20 :issue161:lu:measurement:honest:
+On the *bump* fixture the sparse API is ftran p50 0.83 us vs 57.3 us dense
+sweep (69x) but *mean* 9.6 us vs 62.8 (6.5x). The minority of solves that reach
+through the whole bump dominate the mean, and there the sparse API does the same
+work as the dense sweep plus a sort.
+
+That is the honest shape: enormous where the solution is genuinely sparse,
+roughly neutral where it is not. Callers with dense solutions should keep using
+=ftran=; the doc comments say so explicitly rather than leaving it to be
+discovered.
+
+* 19:35 :issue161:python:tests:
+Added the Python bindings — issue #161's own reproducer is Python, so a
+Rust-only fix is not reachable from it. =ftran_sparse(rows, vals) -> (rows,
+vals)=, =btran_sparse=, =last_sparse_solve_work=, and
+=hyper_sparse_max_density= threaded through the constructor.
+
+Built with maturin and ran the suite against the installed wheel: 68 passed,
+1 skipped, including three new tests (dense-oracle agreement, the
+work-does-not-grow-with-n assertion through the binding, and dense-engine
+rejection).
+
+Note for future sessions: =python -m pytest= must be run from *outside*
+=python/=, since the source =feral/= directory shadows the installed package
+(ImportError: cannot import name '_feral' from partially initialized module).
+
+Rust suite: 823 tests across 87 binaries, 0 failures. clippy -D warnings and
+fmt clean on both crates.
+
+(The "40 binaries" figure in the 17:50 entry above was wrong — that count came
+off a =head -40='d log, not off the suite. Left in place; this journal is
+append-only.)
+
+* 20:10 :issue161:merge:
+PR #160 (issue #161 part A) landed on main as b071d54, with two follow-up fixes
+and its own session checkpoint at =dev/sessions/2026-08-13-01.md=. Merged
+origin/main into this branch.
+
+Renamed this session's files to -02 *before* merging, since #160 took the -01
+slot. Did that as its own commit so the rename is not tangled with conflict
+resolution.
+
+Chose merge over rebase. A rebase replays my two feature commits first and the
+rename last, so the add/add collision on the session files reappears on the
+first commit and has to be resolved against a tree where the rename has not
+happened yet. A merge resolves everything once against the final content.
+
+Conflicts and how they were resolved:
+
+- =src/lu/mod.rs=, =src/lu/sparse_factor.rs= — *auto-merged*. Both sides add a
+  =LuParams= field and =SparseLu= fields; the additions are disjoint.
+- =python/src/lu.rs= (5 hunks) — all the same shape: both sides add one
+  parameter to =build_params= / the constructor signature. Kept both.
+- =CHANGELOG.md=, =dev/decisions.md=, =dev/tried-and-rejected.md= — kept both
+  sides, main's entry first. The latter two are append-only logs, so ordering
+  by landing time is the correct resolution rather than a judgement call.
+- =dev/context.md= — regenerated with =assemble-context.sh=, not hand-merged.
+
+* 20:25 :issue161:merge:tests:composition:
+A clean textual merge is not evidence of a clean semantic one, and there is a
+real interaction here: #160's dense-bump route *splices a dense factorization
+into the sparse L and U*, and my reach-limited sweeps navigate exactly those
+structures (=u_above= for the U sweep, the row-wise L index for the L^T sweep).
+A splice producing entries those indices did not describe would truncate a reach
+and return a wrong answer.
+
+Neither branch could have tested this — part A predates the reach work, part B
+was written against a tree without the splice. So it is the merge's test:
+
+- =reach_route_composes_with_the_dense_bump_route= (lu_hyper_sparse.rs)
+- =sparse_solves_compose_with_the_dense_bump_route= (lu_sparse_rhs.rs)
+
+Both assert =used_dense_bump()= as well as their own route's counter, so neither
+half can be silently absent. Both pass.
+
+End-to-end with part A on (m=4000, bump=400, dense_bump_max_dim=1664, route
+confirmed fired):
+
+  dense sweep     ftran mean 83.2 p50 75.4 us | btran mean 44.8 p50 39.9 us
+  reach-limited   ftran mean 36.6 p50 24.3 us | btran mean 33.6 p50 23.9 us
+  sparse API      ftran mean 11.8 p50  1.55 us | btran mean 11.2 us
+  --> sparse API vs dense sweep: ftran 7.1x  btran 4.0x
+
+Note nnz(LU) goes 30778 -> 35250 (fill 4.05x -> 4.64x) with the bump route on:
+part A trades fill for factorization speed, exactly as PR #160 documented
+(147,796 -> 172,449 on its own basis). That makes each solve slightly more
+expensive in absolute terms; the solve-side ratios hold.
+
+* 20:35 :issue161:merge:tests:
+Post-merge: 840 tests across 88 binaries, 0 failures. Python rebuilt with
+maturin: 68 passed, 1 skipped. clippy -D warnings and fmt clean on both crates.
+
+* 20:55 :issue161:review:statistics:
+Two loose ends carried out of the #160 review, both now on main.
+
+*1. =examples/basis_refactor.rs:69= — population vs sample standard deviation.*
+
+  let var = ... .sum::<f64>() / n.max(2.0 - 1.0);
+
+=2.0 - 1.0= is evaluated first, so this is =n.max(1.0)=, which is =n= for every
+real input. The Bessel correction was simply absent: the harness reported the
+*population* standard deviation. Every ± it printed is understated by
+sqrt(n/(n-1)).
+
+This matters beyond the harness because those ± are published — in the merged
+#160 body and in CHANGELOG.md. At the 15 reps that run used the factor is
+1.035098, so 9.837 ± 0.285 is really 9.837 ± 0.295, and 0.851 ± 0.036 is
+0.851 ± 0.037.
+
+Corrected the changelog analytically rather than by re-measuring, and said so.
+The correction is *exact*: the code computed sqrt(Sum/n) where it should have
+computed sqrt(Sum/(n-1)), so true = reported * sqrt(n/(n-1)). Re-running was not
+available anyway — the QPLIB basis those numbers came from is not in this repo.
+Only the ± move; means, speedups and every conclusion are untouched, because the
+divisor never entered them.
+
+Checked whether the typo was copy-pasted elsewhere: it is not. The nine other
+=2.0 - 1.0= hits in the tree are all legitimate =rng.unit() * 2.0 - 1.0= range
+scalings to [-1, 1].
+
+*Why it could ship, and the actual fix.* =cargo test= compiles examples but does
+not run =#[test]=s inside them, so a benchmark harness's own arithmetic was
+unguarded. Added =cargo test --examples= to CI and two unit tests for =mean_sd=
+against the textbook sample [2,4,4,4,5,5,7,9], whose population sd is exactly
+2.0 and sample sd is sqrt(32/7) = 2.1381 — the two differ by precisely the error
+in question, so the test fails against the pre-fix code. Verified
+=cargo test --examples= was already clean (0 tests, 0 failures) before adding
+the step, so the CI addition is not smuggling in a broken gate.
+
+*2. =used_dense_bump= carried =factor_nnz='s doc comment.*
+
+  /// Total stored nonzeros in `L` and `U` (including the `U` diagonal).
+  /// Whether the bump was factored by the dense kernel on this call.
+  pub fn used_dense_bump(&self) -> bool
+
+...and =factor_nnz= had none. A stray line, but it ships in the public rustdoc,
+where the first line is the summary shown in the method list — so
+=used_dense_bump= was advertised as returning a nonzero count. Moved the line to
+=factor_nnz= and gave both real doc comments. =cargo doc --no-deps= produces no
+warnings for any lu/ file (the two it does emit are pre-existing, in
+=src/dense/factor.rs=).
+
+* 21:15 :issue161:ci:pr162:
+Opened PR #162. CI red on two jobs, both real, both caused by *my local
+environment being weaker than CI's*.
+
+*1. clippy =unnecessary_sort_by= (job "check").*
+
+  src/lu/sparse_hyper.rs:350  hw.order.sort_unstable_by(|&a, &b| b.cmp(&a));
+  src/lu/sparse_solve.rs:557  rw.list.sort_unstable_by(|&a, &b| b.cmp(&a));
+
+Both fixed to =sort_unstable_by_key(|&k| std::cmp::Reverse(k))= per clippy's own
+suggestion.
+
+*Root cause of the miss, which matters more than the fix.* This container had
+=cargo 1.94.1 / clippy 0.1.94=; CI uses =dtolnay/rust-toolchain@stable=, which is
+=1.97=. The lint fires in 1.97 and not in 1.94, so "clippy -D warnings clean"
+locally was never the same gate CI runs. Ran =rustup update stable= (now
+=clippy 0.1.97 (8bab26f4f6)=) and re-ran the whole gate: lib, =--all-targets=,
+and =-p feral-diagnostics --all-targets= all clean, fmt clean, 88 binaries 0
+failures under the new compiler.
+
+Lesson for future sessions in a fresh container: check =cargo --version= against
+=dtolnay/rust-toolchain@stable= before trusting a local clippy pass. The repo
+pins no toolchain file, so the container's rust is whatever the image shipped.
+
+*2. Python =test_sparse_rhs_solve_work_does_not_grow_with_n= (wheel jobs).*
+
+  ValueError: row indices not strictly ascending
+
+=LuMatrix= requires strictly ascending row indices per column. My test built its
+fixture with scipy sparse *arithmetic* (=sp.eye(n)*5 + sp.eye(n,k=-1)=), and
+scipy makes no guarantee about the index ordering of an arithmetic result —
+which versions happen to sort differs. Local scipy is 1.17.1, where
+=has_sorted_indices=True= on that expression; CI's does not sort it. That is
+exactly why it passed here and failed there.
+
+Fixed with a =_lu_matrix_from_scipy= helper that calls =sum_duplicates()= +
+=sort_indices()= before handing the arrays over, applied to both new tests (the
+=sp.random(...) + sp.eye(...)= one had the same latent hazard and only passed by
+luck).
+
+*Verified rather than assumed.* Since local scipy sorts, a green local run would
+not have proven anything. Reproduced the failure directly by taking the same
+matrix and reversing the indices within each column: =LuMatrix= rejects it with
+the identical message, and the normalized copy is accepted. So the fix addresses
+the CI failure, not a coincidence.
+
+* 22:10 :issue161:pr162:review:defect:
+Maintainer review on #162 ran the transfer test I could not (real QPLIB bases)
+and found a defect in my shipped default. Two findings, one of them mine.
+
+*1. =hyper_sparse_max_density = 0.25= is a btran regression on QPLIB_1157.*
+
+  cap     ftran    btran   fired
+  0.05   10.59x    0.98x    1195
+  0.10   10.81x    0.97x    1195
+  0.25   11.01x    0.69x    2370   <- shipped
+  1.00   10.75x    0.69x    2560
+
+My Part 1 sweep said "the win is flat from 0.05 to 1.00". That was blended over
+ftran and btran and reported as one number. It is true for ftran alone. btran
+falls off a cliff between 0.10 and 0.25 — precisely where the fired count
+doubles. The extra ~1175 solves are btran reaches in the 10-25% band taking the
+route and losing 1.45x to the O(r log r) sort I had listed as a known limit.
+
+*Why my fixture could not show it.* =lp_basis()= gives solutions that are either
+tiny (p50=3) or ~9% of m — bimodal with nothing in 10-25%. QPLIB_1157's mean is
+14.7% of m, right inside. I tuned the generator to QPLIB_3852's 2.27 nnz/col,
+where btran is 1.02x and the cap never bites.
+
+Lowered the default to 0.10 and pinned it with a test that says raising it needs
+a basis whose solutions live in the admitted band and *win* there.
+
+The two lessons, which generalize past this parameter: *sweep each direction
+separately when they can diverge* (one blended ratio hid a regression in half of
+it), and *a threshold measured only on generated data is a guess wearing a
+table*.
+
+Adopted on his measurement, not reproduced — the bases did not arrive (see
+below). It is the conservative direction: a smaller cap strictly reduces the
+population taking the new route, so the worst case is giving up a win, not
+introducing a loss.
+
+* 22:25 :issue161:framing:retraction:
+*2. End-to-end this work is ~1.00x, and issue #161's premise was retracted.*
+
+  feral arm                              wall     vs crates.io
+  0.15.1                                6.088 s      1.00x
+  main + dense_bump_max_dim=4096        3.567 s      1.71x
+  this PR + bump + cap 0.10             3.607 s      1.69x
+
+10.6x on ftran on that instance's real bases; ~1.00x on the LP. The maintainer
+has retracted "93.1% of wall in the LU layer" from #161 as a profile-attribution
+artifact — triangular solves are ~1% of that solve. 4-13% on three other QPLIB
+instances.
+
+A 10.6x speedup that moves the total by 1% *is* a measurement that the component
+was 1% of the total. My PR body quoted the 93.1% figure in its Downstream
+section as motivation; corrected there and in CHANGELOG and the research note.
+
+This is the more important of the two findings and it is not a defect in the
+code — the code does what it claims. It is a defect in *what I let the issue's
+framing justify*. I sized the sparse-rhs API half of this work off "93.1% of
+wall", never questioned that number, and had no way to check it from here. The
+right instinct would have been to treat an unvalidated profile attribution as a
+hypothesis and say so, rather than as the premise.
+
+On this evidence the LU cost that matters for the consumer is *numeric
+factorization* (dense_bump_max_dim, >=41% of that solve's wall), not the solves.
+
+* 22:35 :issue161:pr162:fixtures:missing:
+The bases were offered as an attachment (=feral-bases-1008.zip=) and did not
+arrive. Checked: neither the #162 comment nor the #161 comment body carries an
+attachment link (fetched via API, not just the wake payload); no review threads;
+no new branch in feral.
+
+Also checked whether they are recoverable from discopt — cloned it (public, read
+via the git proxy). They are not:
+- The path #161 names, =scratchpad/issue1008/=, does not exist. The real
+  directory is =scratchpad/i1008/= and holds 18 .py harnesses + HYPOTHESIS.md,
+  no .npz and no =feral_repro.py=.
+- Not on =perf/1008-lp-simplex-throughput= either. The only .npz in discopt are
+  three unrelated ones. No .gitignore rule excludes them — never committed.
+- =scratchpad/i1008/capture.py= cannot regenerate them: it asserts a hardcoded
+  macOS worktree path, reads a QPLIB corpus from =~/Dropbox=, and captures LP
+  *relaxations* rather than simplex bases.
+
+Recorded as the top follow-up: until those two files are in-tree as fixtures, no
+test here can catch a cap regression of the kind just found.
+
+* 23:05 :issue161:pr162:fixtures:reproduced:
+The zip arrived. Verified both formats describe the same matrices
+(max|npz - mtx| = 0.0, dims and nnz as documented), wired up
+=real_basis_hyper.rs= + Cargo stanza, and reproduced the maintainer's sweep on
+this machine:
+
+  cap    ftran   btran   fired
+  0.02   7.68    0.96    1195
+  0.05   7.44    0.97    1195
+  0.10   7.18    0.96    1195
+  0.25   7.84    0.62    2370
+  0.50   7.50    0.62    2370
+  1.00   7.95    0.61    2560
+
+Fired counts identical to his (deterministic). Solution-density profile matches
+to the digit: p50=1 p90=3593 max=3621 mean=580.4 = 14.7% of m. Wall-clock ratios
+differ (this box is slower on ftran; the btran regression is *worse* here, 0.62x
+= 1.6x) but the cliff is in the same place. The 0.10 default is confirmed.
+
+* 23:20 :issue161:mechanism:wrong:
+*The mechanism I gave for the regression was wrong, in my PR and in the research
+note.* Both blamed the O(r log r) sort.
+
+Sorting 400/1000/2000 usizes measures 2.8/9.0/18.3 us. The regression is ~105 us
+per solve. The sort is at most a sixth of it.
+
+Instrumented the reach to count graph edges walked (temporary; reverted).
+QPLIB_1157 btran:
+
+  cap    fired     nodes/sweep   DFS edges/sweep   vs nnz(L)=75084
+  0.10   21/256    2             3662              5%
+  0.25   256/256   584           68925             92%
+
+*The reach DFS traverses the same factor entries the numeric sweep then
+traverses again.* At 0.25 it walks 92% of nnz(L) just to decide which columns to
+visit, then visits them. ~1.9x to avoid 1x, predicting ~0.53x against a measured
+0.62x.
+
+This reframes the cap and I had it backwards. It is not a workaround for an
+implementation detail a cleverer sweep could remove — it is intrinsic to
+reach-based solving: *finding* the reach is the same order of work as the solve,
+so the route can only win when the reach is a small fraction of the whole.
+Replacing the sort would not have helped, and the "known limit" I listed pointed
+at the wrong thing. Corrected in the param doc, CHANGELOG, PR body, research
+note, and the pinning test's comment.
+
+Worth keeping: I had a plausible mechanism, it was in my own "known limits"
+list, and it was wrong. Cost 20 minutes to actually measure and it changed the
+conclusion from "a lower cap is a workaround" to "a lower cap is the design".
+
+* 23:35 :issue161:tests:closed:
+=tests/lu_real_bases.rs= (3 tests), fixtures in =tests/data/lu_bases/= (496K,
+two .mtx; the .npz omitted as verified-identical and unreadable from Rust):
+
+- =default_cap_excludes_the_band_where_btran_reaches_are_near_dense= — asserts
+  on *reach sizes*, deterministic, not timings. Reference caps 0.02/0.25 are
+  fixed rather than derived from the default, so raising the default fails the
+  assertion about the default and not the fixture-sanity one. *Verified it fails
+  with the intended message* when the default is put back to 0.25.
+- =sparse_entry_points_agree_with_dense_on_real_bases= — ftran_sparse /
+  btran_sparse over *every* column of both bases against the dense oracle. This
+  was the one piece neither of us had run on real data. Passes.
+- =reach_route_is_bit_identical_to_the_dense_sweep_on_real_bases= —
+  =assert_eq!= on the f64 vectors, not a tolerance. Passes.
+
+Suite 844 tests / 89 binaries / 0 failures. The standing "no real bases in-tree"
+gap is closed.
+
+* 23:55 :issue161:ordering:fill:finding:
+With the real bases in-tree, the reframed issue #161 question ("is the fill
+itself the cost, i.e. a pivot-ordering question?") is answerable. Wrote
+=examples/lu_fill_orderings.rs= — holds basis, pivot rule and kernel fixed,
+varies only the column permutation via =with_order= (which reports whole-basis
+bump, so the dense route cannot fire on any ordering arm).
+
+QPLIB_1157 (m=3937, 7.46/col):
+
+  ordering        nnz(LU)     fill   numeric(ms)   ns/factor-nnz
+  natural          913860    31.11x      630.21       689.6
+  AMD              190654     6.49x       74.82       392.4
+  AMF              150001     5.11x       35.70       238.0
+  METIS            195068     6.64x       83.33       427.2
+  peel+sparse      197937     6.74x       90.81       458.8
+  peel+denseBump   198702     6.76x       20.23       101.8
+
+*Two findings, independent.*
+
+1. *AMF beats AMD by 21% fill and 2.10x time* on this basis. feral ships AMF
+   (crates/feral-amf, used by the LDLT side as OrderingMethod::Amf); the LU
+   symbolic hardcodes =feral_amd::amd_order=. Costs no more to compute
+   (21.16 vs 21.32 ms). METIS is slightly worse than AMD.
+
+2. *The kernel matters more than the fill.* At essentially identical fill
+   (197,937 vs 198,702) the dense-bump route is 4.5x faster than the sparse
+   scatter — 101.8 vs 458.8 ns per factor-nnz. Same arithmetic, different
+   kernel.
+
+My first read was wrong and worth recording: =basis_refactor= alone compares
+AMD(full) vs AMD(bump), a 4% fill spread, and I nearly concluded "ordering is
+not the lever". Adding AMF to the comparison inverted that. Comparing a method
+only against itself is the same error as the blended ftran/btran sweep earlier
+today — twice in one session.
+
+* 00:10 :issue161:ordering:compound:
+Patched the bump ordering to AMF behind an env var (temporary, reverted) and
+re-ran the three-arm A/B:
+
+  arm                     AMD                    AMF
+  whole-basis, sparse     101.40 ms / 190,654    59.43 ms / 150,001
+  peel + sparse bump       97.45 ms / 197,937    54.36 ms / 165,559
+  peel + dense bump        23.72 ms / 198,702    21.97 ms / 167,682
+
+Both levers are already implemented in this repo and both are off:
+
+  dense_bump_max_dim > 0    4.28x   merged in #160, defaults to 0
+  AMD -> AMF for LU         1.79x   not wired up at all
+
+Today's shipped default costs 97.45 ms; both levers together, 21.97 ms = *4.44x*
+on numeric factorization, which is >=41% of that LP's wall.
+
+Deliberately did NOT change either default. Two bases is not a panel, and the
+maintainer has already measured dense_bump_max_dim=4096 regressing QPLIB_2017 to
+0.80x — exactly the instance-dependence that makes a two-point sample useless
+for a default. Written up in
+=dev/research/lu-ordering-and-kernel-2026-08-13.md= with what it does and does
+not establish.
+
+* 19:05 :issue163:lu:ordering:bisect:
+Issue #163 filed: discopt's =bchoco06_illcond_scaled_path_recovers_bound_649= —
+an ill-conditioned root LP that had certified =Optimal= — returns =Numerical=
+against a feral carrying #160. Dual bound lost. =dense_bump_max_dim= at its
+default 0, so the route the peel exists to enable was OFF.
+
+Reproduced by cloning discopt (8513cfa) and adding
+=[patch.crates-io] feral = { path = "/home/user/feral" }=. Bisected with
+temporary env vars in feral:
+
+  A. peel + AMD on bump (#160 analyze)   FAILED  left: Numerical, right: Optimal
+  B. peel, bump left in peel order       FAILED
+  C. no peel, whole-basis AMD            PASSED
+
+The peel, not the bump AMD. Confirmed in both directions after the fix:
+flipping =analyze= back to =analyze_triangularized= reproduces the exact
+failure; flipping to =analyze_amd_only= passes.
+
+* 19:22 :issue163:negativeresult:measurement:
+*The mechanism I assumed is wrong, and I had already written it into three
+files.* I documented the failure as the peel forcing structural pivots that
+threshold partial pivoting would have chosen by magnitude — plausible, and
+untested.
+
+Tested it. Instrumented =analyze= to dump every basis as Matrix Market, ran the
+discopt test under both orderings (46 bases on the passing trajectory, 30 on the
+failing one), re-factored each both ways in feral, scored backward AND forward
+error (=examples/probe_illcond_ordering.rs=).
+
+Failing trajectory, tail:
+
+  basis          amd_resid  amd_fwderr  peel_resid  peel_fwderr  fwd_x  nnz amd/peel
+  basis_000025    1.93e-16    4.55e-13    1.82e-16    9.94e-15   0.0x   2496/2494
+  basis_000026    9.65e-17    2.58e-11    1.82e-16    2.59e-11   1.0x   2588/2519
+  basis_000029    1.82e-16    5.53e-12    1.82e-16    2.08e-12   0.4x   2730/2683
+
+Backward error ~1e-16 under both on every basis. Forward error reaches 2.6e-11
+(the LP really is ill-conditioned) and the peel's ratio to AMD is *0.0x-1.0x,
+never above 1.0x, on all 30*. The peel is not the less accurate ordering. Fill is
+even slightly better under the peel here (2519 vs 2588) — opposite of QPLIB_1157.
+
+So it is trajectory sensitivity: at ~1e-11 forward error the two orderings
+disagree in the bits discopt's ratio test reads, the runs diverge (46 vs 30
+refactorizations), and this LP is bad enough that one path certifies and the
+other trips discopt's guard.
+
+Rewrote the =analyze= rustdoc, =analyze_triangularized= rustdoc,
+=dense_bump_max_dim= rustdoc and the research note to say this instead. Same
+class of error as the blended ftran/btran sweep and the "ordering isn't the
+lever" near-miss earlier today: a mechanism that explains the symptom is not
+evidence that it is the mechanism.
+
+* 19:40 :issue163:decision:
+Reverted the peel to opt-in anyway, on a different argument than the one I
+started with. Not "the peel is unstable" — refuted above — but "the peel has no
+standalone payoff": on QPLIB_1157 it is *worse on fill* (197,937 vs 190,654) for
+1.04x on time, its real 4.28x needs =dense_bump_max_dim=, and that is off by
+default. A change worth ~nothing that cost a green downstream regression should
+be opt-in, paired with the route that makes it worth having.
+
+=analyze= -> whole-basis AMD (== =analyze_amd_only=).
+=analyze_triangularized= -> the peel. Python's =LuFactor= has no symbolic handle,
+so =dense_bump_max_dim > 0= selects the peel there, documented.
+
+Stated explicitly in the note and the changelog: nothing here says whole-basis
+AMD is the better trajectory in general. It is the one that was in place when the
+downstream test was green.
+
+* 19:52 :issue163:tests:
+Regression coverage is a *contract* test (=tests/lu_default_ordering.rs=), not a
+numerical one, because the measurement above says there is no numerical
+difference to assert. Two tests: =analyze= must not triangularize and must equal
+=analyze_amd_only= exactly (with =analyze_triangularized= on the same fixture as
+the non-vacuity witness), and =dense_bump_max_dim= must be inert under the
+default ordering while firing under the peel. Both fail with their intended
+messages when =analyze= is flipped back:
+
+  issue #163: `analyze` must not triangularize — the peel is opt-in via `analyze_triangularized`
+  `dense_bump_max_dim` must be inert under the default ordering
+
+Carried the worst basis of the failing run in-tree as
+=tests/data/lu_bases/bchoco06_illcond_basis.mtx= (833x833, 2404 nnz, 74 KB) so
+=probe_illcond_ordering= runs on =tests/data/lu_bases= with no discopt checkout.
+The dump instrumentation is NOT in the tree; the snippet to restore it is in the
+research note.
+
+Full suite: 90 test binaries green, =cargo clippy --all-targets -- -D warnings=
+clean, =cargo test --examples= green. One pre-existing unit test needed
+updating: =sparse_symbolic::tests::triangular_basis_has_an_empty_bump= asserted
+=analyze= peels; now calls =analyze_triangularized=.
+
+Note: =python/= has 48 pre-existing =cargo clippy -D warnings= failures
+(=useless_conversion= etc. from pyo3 under clippy 1.97). Not introduced here, and
+not a CI gate — python is outside the root workspace and is covered by
+=python-wheels.yml=, not the clippy hook. =cargo check= is clean.
+
+* 20:05 :issue163:measurement:trajectory:
+Asked whether the fix actually unblocks what #163 wants — the issue's stated
+motivation is taking =dense_bump_max_dim = 4096= (1.71x on a discopt root LP),
+which under the new pairing also means taking the peel. So: does peel + cap
+reproduce the failure?
+
+Tested. Temporarily set feral's =LuParams::default()= to
+=dense_bump_max_dim: 4096= AND =analyze= to =analyze_triangularized= — i.e. a
+caller opting into both — and ran the discopt test:
+
+  AMD only, no cap (shipped default)   PASSED
+  peel, no cap                         FAILED  left: Numerical
+  peel + cap 4096                      PASSED
+
+*The combination worth 1.71x passes.* The pairing does not strand the caller: they
+can ship #160 and take the speedup.
+
+It also settles what kind of result this is. Three configurations, three
+arithmetic trajectories, and the failing one is the middle — not an endpoint. The
+dense-bump route reorders the bump's arithmetic again and lands back on a
+certifying path. Nothing about "less accurate" survives this; it is coin-flip
+sensitivity of one ill-conditioned LP to any perturbation of the bits its ratio
+test reads. Reinforces the caveat already in the docs: whole-basis AMD is not
+established as the better trajectory, only as the one that was green.
+
+Trees restored to committed state (feral and the discopt scratch clone both
+=git status= clean) — the params change was never committed.
+
+* 22:10 :review:issue162:correction:measurement:
+Maintainer review of #162 landed at 895ef65. Verdict approve+merge, five findings.
+Finding 4 is a straight refutation of my central #163 claim and I verified it
+before writing anything.
+
+Ran =examples/basis_refactor.rs= (in this repo, used earlier today) on all three
+in-tree fixtures, 20 reps, release:
+
+  basis         analyze    peel     symbolic  total
+  QPLIB_1157    21.280 ms  2.166 ms  9.83x    1.03x
+  QPLIB_3852     0.857 ms  0.130 ms  6.61x    2.73x
+  bchoco06       0.536 ms  0.127 ms  4.22x    2.26x
+
+Their ratios reproduce (they report 12.4/6.6/4.3). *The peel is 4-10x faster on
+symbolic analysis*, and =analyze= re-runs on every refactorization so it is
+multiplied, not amortized. End-to-end across 14 QPLIB relaxations they measure
+=tri= at 1.306x geomean — the largest single effect on this branch.
+
+My claim "the peel has no standalone payoff" is wrong. Two compounding errors:
+measured only the numeric column (=lu_fill_orderings= does not time symbolic),
+then generalized 1.03x from the one fixture where the peel's total edge is
+smallest, while the other two give 2.73x and 2.26x.
+
+The disconfirming evidence was *in CHANGELOG.md, in the #160 entry I edited this
+session*: "cutting the ordering from 9.837 +- 0.295 ms to 0.851 +- 0.037 ms".
+Fourth instance today of asserting a mechanism/magnitude that fits without
+testing it, and the worst — I was writing to the file that refuted me.
+
+Decision survives on a weaker argument: neither ordering dominates. For the peel,
+the speedups above; against it, #163's lost dual bound and QPLIB_2055 at 0.389x
+(2.6x slowdown, objective moving in the 9th sig fig). =analyze= stays AMD because
+that is the trajectory the downstream suite was green against — not because it is
+better. Corrected rustdoc (analyze, analyze_triangularized, dense_bump_max_dim,
+module header, python), CHANGELOG, research note, and appended a correcting entry
+to decisions.md (append-only, so not an edit).
+
+* 22:25 :review:issue162:finding3:
+Finding 3 fixed: =SingularBasis { column }= from the solve path reported the
+internal pivot position where the factor path reports =qcol[k]= (fixed there in
+a91519d). Mapped all four sites — =usolve=, =ut_solve= in sparse_solve.rs and the
+two in sparse_hyper.rs.
+
+The existing L10 tests are 2x2 with an identity ordering, so they could not see
+it. New test uses a 6x6 whose AMD gives qcol=[5,4,0,1,2,3] — every position maps
+elsewhere — asserts its own non-vacuity (=assert_ne!(want, pos)=), and covers all
+four entry points. Verified it fails without the fix:
+
+  ftran must name original column 4, got Err(SingularBasis { column: 1 })
+
+* 22:35 :review:issue162:finding1:finding2:scope:
+Finding 2 (sparse API not bit-identical to the dense entry points, undocumented):
+added, with the #163 trajectory risk named explicitly, since that is the concrete
+version of the hazard.
+
+Finding 1 (no density guard on =ftran_sparse=/=btran_sparse=): *not implemented
+here.* Their data is decisive — under 10% solution density 1.167x geomean (n=10),
+at/above 10% 0.837x (n=4, worst 0.711x), log-log r = -0.944 — and the guard would
+recover about half the gap. But it changes documented semantics of the new API
+("works regardless of =hyper_sparse_max_density=") and the test that pins that,
+they explicitly scoped it as follow-up-issue-worthy, and the maintainer is away.
+Put the full table in the =ftran_sparse= rustdoc instead, including the point that
+a dual simplex *cannot* route on density because =B^-1 A_q='s density is not known
+until the solve produces it. Filed as an issue.

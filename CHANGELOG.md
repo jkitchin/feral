@@ -4,9 +4,142 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
-### Added — Suhl–Suhl basis triangularization in the sparse LU's symbolic analysis
+### Added — a density guard on `ftran_sparse`/`btran_sparse` (issue #164)
 
-- `SparseLuSymbolic::analyze` now peels column and row singletons to fixpoint
+- `LuParams::sparse_rhs_max_density` (default `0.10`). When a sparse-rhs solve's
+  reach exceeds that fraction of `m`, the depth-first search is abandoned and the
+  kernel sweeps the whole basis in natural topological order instead — exactly
+  what `SparseLu::ftran`/`btran` do. The four kernels are unchanged; the fallback
+  only changes what fills the sweep order, so a fallen-back solve *is* the dense
+  route, `SingularBasis` guard width included.
+- **Why.** The sparse entry points shipped in 0.15.1 with the density tradeoff
+  documented but unguarded, on the reasoning that the caller knows its
+  right-hand sides. A dual simplex does not: the density of `alpha = B^-1 A_q` is
+  not knowable until the solve that produces it has run. Measured on a downstream
+  dual simplex over 14 QPLIB relaxations, migrating to the sparse API was
+  **1.167x** geomean where `alpha` was under 10% dense (n=10) and **0.837x** where
+  it was denser (n=4) — log-log r(density, speedup) = **-0.944**. The reach is
+  computed inside the solve, so the information needed to route arrives before
+  the cost is paid.
+- **What it recovers.** Same 14 instances, four arms interleaved in one binary so
+  the guard is the only difference between two of them: the sparse API is
+  **1.066x** geomean with the guard off (min 0.735x) and **1.197x** with it on
+  (min 0.998x). The guard alone is 1.122x geomean, 1.393x on the densest
+  instance, and no instance regresses below parity any more. The dense bucket
+  goes 0.839x -> 1.067x. Objectives are bit-identical across all three arms on
+  all 14 instances, so this is speed and not a trajectory change — though the
+  unit tests assert `< 1e-9` rather than equality between the routes, which is
+  the guarantee actually being made.
+- `SparseLu::sparse_rhs_fallbacks()` counts how many solves took the fallback, so
+  a caller can tell an inert guard from a working one. `1.0` disables the
+  fallback (always reach), `0.0` forces it (always sweep).
+
+### Added — `SparseLuSymbolic::analyze_with` and `LuOrderingParams` (issue #165)
+
+- The column ordering is now a parameter rather than a choice of constructor:
+  `analyze_with(a, LuOrderingParams { triangularize })`. `analyze` and
+  `analyze_triangularized` remain, as the two thin wrappers over it, so nothing
+  changes for existing callers.
+- **Why.** #163's revert made the peel opt-in, which is right, but it left the
+  ordering A/B-able only by editing the call site — which is how the cost of the
+  default had to be measured. It is large: `analyze_triangularized` is
+  **4.2-9.8x** faster than `analyze` on the symbolic step across the in-tree
+  fixtures (21.28 ms vs 2.17 ms on QPLIB_1157, m=3937), and **1.306x geomean**
+  end to end across 14 QPLIB relaxations under a dual simplex. A simplex re-runs
+  the analysis on every refactorization, so that cost is multiplied by the
+  refactorization count, not amortized across it. `analyze`'s doc comment states
+  this next to the accuracy argument; the parameter makes it flippable without a
+  code change.
+- The Python binding gains a `triangularize` keyword (default `None` = follow
+  `dense_bump_max_dim > 0`, today's behaviour) and `sparse_rhs_max_density`.
+
+### Fixed — `SingularBasis { column }` from the solve path named an internal pivot position
+
+- `usolve`, `ut_solve` and the new `ftran_sparse`/`btran_sparse` reported the
+  permuted pivot position `k` where the factor path reports `qcol[k]`, the
+  original basis column (corrected there in a91519d). The two agree only when the
+  fill-reducing ordering is the identity, so on any real basis the error named an
+  unrelated column. All four now map through the permutation.
+- The existing 2x2 regression tests could not catch this — their ordering *is* the
+  identity. `solve_path_singular_basis_names_the_original_column_not_the_pivot_position`
+  uses a basis whose `qcol` maps every position to a different column, asserts its
+  own non-vacuity, and covers all four entry points.
+
+### Changed — `SparseLuSymbolic::analyze` stays whole-basis AMD; the peel is opt-in (issue #163)
+
+- The Suhl–Suhl peel added below was briefly the behavior of
+  `SparseLuSymbolic::analyze`. It now lives in its own constructor,
+  `analyze_triangularized`, and `analyze` is what it was in 0.15.x: AMD over the
+  whole basis. Callers wanting the peel must ask for it, and should ask for
+  `LuParams::dense_bump_max_dim` in the same breath — that route is the peel's
+  only real payoff, and it requires a triangularized symbolic to fire at all.
+  Setting the cap alongside any other constructor is now documented, and tested,
+  as an inert no-op.
+- **Why.** An ill-conditioned LP downstream (jkitchin/discopt, `bchoco06` root
+  relaxation) that had been certifying `Optimal` began returning `Numerical` —
+  a lost dual bound — with `dense_bump_max_dim` at its default of `0`, i.e. with
+  the route the peel exists to enable switched off. Bisected to the peel itself:
+  whole-basis AMD passes, peel-with-AMD-on-bump fails, peel-with-no-bump-ordering
+  fails.
+- **Not a stability defect, and the difference matters.** Every basis that LP's
+  simplex handed feral was dumped and re-factored both ways. Backward error is
+  ~1e-16 under both orderings on all of them, and forward error against a known
+  solution — which reaches 2.6e-11, the basis genuinely being ill-conditioned —
+  is **never worse** under the peel (ratios 0.0x–1.0x across all 30 bases of the
+  failing run). What changes is the rounding *trajectory*: the two orderings'
+  solves disagree in the bits the simplex's ratio test reads, the runs diverge
+  onto different pivot sequences, and this LP is conditioned badly enough that
+  one path certifies and the other trips the caller's numerical guard.
+- **Neither ordering dominates, so the caller chooses.** The peel is
+  substantially *faster*: 4.2–9.8x on the symbolic step across the in-tree
+  fixtures, 1.03–2.73x on symbolic + numeric together, and 1.306x geomean across
+  14 QPLIB relaxations end to end — `analyze` re-runs on every refactorization,
+  so that cost is multiplied rather than amortized. Against it: the trajectory
+  change above, and QPLIB_2055, where the peel is **0.389x** (a 2.6x slowdown)
+  with the objective moving in the 9th significant figure. `analyze` stays
+  whole-basis AMD because that is the trajectory the downstream suite was green
+  against — not because it is faster or more accurate, which it is not.
+  - *An earlier draft of this entry said the peel had "no standalone payoff",
+    from the numeric-factorization column alone (97.45 vs 101.40 ms on
+    QPLIB_1157). That was wrong — it ignored the symbolic column and generalized
+    from the one fixture where the peel's total advantage is smallest. The
+    contradicting measurement was already in this file, in the #160 entry below
+    ("cutting the ordering from 9.837 ± 0.295 ms to 0.851 ± 0.037 ms").*
+- New in-tree: `tests/lu_default_ordering.rs` (a contract test — the measurement
+  above says there is no numerical difference to assert),
+  `tests/data/lu_bases/bchoco06_illcond_basis.mtx` (the worst-conditioned basis
+  of that run), and `examples/probe_illcond_ordering.rs` (the scorer that
+  produced the numbers, runnable on `tests/data/lu_bases` with no discopt
+  checkout).
+- Full reasoning and reproduction:
+  `dev/research/lu-ordering-and-kernel-2026-08-13.md` § Issue #163.
+
+### Fixed — the basis-refactor harness reported population, not sample, standard deviation
+
+- `examples/basis_refactor.rs` divided the sum of squared deviations by
+  `n.max(2.0 - 1.0)`. That parses as `n.max(1.0)` — i.e. `n` for every real
+  input — so the Bessel correction was absent and every `±` the harness printed
+  was understated by `sqrt(n / (n - 1))`.
+- **The already-published numbers are affected.** The `±` figures in the entry
+  below, and the matching table in PR #160, came from the broken version at
+  `n = 15` reps, so they are understated by a factor of 1.0351. The changelog
+  figures have been corrected by that factor; the PR body is immutable history
+  and is not. Only the `±` move — the means, the speedups, and every conclusion
+  drawn from them are unaffected, because the divisor never touched them.
+- The correction is exact rather than a re-measurement: the harness computed
+  `sqrt(Σ/n)` where it should have computed `sqrt(Σ/(n-1))`, so the true value
+  is the reported one times `sqrt(n/(n-1))`. The QPLIB basis those runs used is
+  not in this repository, so re-running was not an option.
+- `mean_sd` now has unit tests against a textbook sample whose population and
+  sample standard deviations differ (2.0 vs `sqrt(32/7)`), so the two cannot be
+  confused again, and CI gained a `cargo test --examples` step — plain
+  `cargo test` compiles examples but never runs `#[test]`s inside them, which is
+  why a bench harness's own arithmetic was unguarded in the first place.
+
+### Added — Suhl–Suhl basis triangularization in the sparse LU's symbolic analysis *(opt-in)*
+
+- New `SparseLuSymbolic::analyze_triangularized` peels column and row singletons
+  to fixpoint
   (Suhl & Suhl, *ORSA J. Computing* **2**(4), 325–335, 1990) and runs the
   fill-reducing ordering on only the residual **bump**. Peeled pivots are
   structurally forced and both peeled blocks are upper triangular, so `L` is the
@@ -16,11 +149,16 @@ All notable changes to FERAL will be documented in this file.
 - The pass is purely structural, so the symbolic-reuse contract is unchanged — a
   handle built from one basis stays valid for any numerically different basis
   with the same pattern.
+- This shipped briefly as the behavior of `SparseLuSymbolic::analyze` itself and
+  was moved behind its own constructor before release; see the `Changed` entry
+  for issue #163 below. `analyze` is unchanged from 0.15.x: whole-basis AMD.
 - New: `SparseLuSymbolic::{bump_lo, bump_hi}`, `with_order`, and
-  `analyze_amd_only` (the pre-0.16 whole-basis ordering, retained for A/B).
+  `analyze_amd_only` (an explicit name for what `analyze` does, retained so
+  benchmark arms can name the two orderings side by side).
 - On a real simplex basis (`m = 3937`, `nnz = 28204`) the peel removes 85.6% of
-  the columns in 0.148 ms, cutting the ordering from 9.837 ± 0.285 ms to
-  0.851 ± 0.036 ms. Across a sampled class of LP bases (`m` 102 → 34,065) it
+  the columns in 0.148 ms, cutting the ordering from 9.837 ± 0.295 ms to
+  0.851 ± 0.037 ms (the `±` were first published as 0.285 and 0.036; see the
+  `Fixed` entry below). Across a sampled class of LP bases (`m` 102 → 34,065) it
   removes 84.8–100% of columns (median 94.6%) and the bump never exceeds 15.2%
   of `m`.
 - **The peel alone is roughly break-even end to end** (1.06x on that basis):
@@ -51,11 +189,12 @@ All notable changes to FERAL will be documented in this file.
   vacuously against a fallback; the in-tree ones assert on it.
 - The route requires a symbolic that actually triangularized, and never applies
   to a bump that is the whole basis unless it also fits `dense_threshold`.
-  `natural`, `with_order` and `analyze_amd_only` report `(bump_lo, bump_hi) =
-  (0, m)` because they never look for structure, and `analyze` reports it when a
+  `natural`, `with_order`, `analyze` and `analyze_amd_only` report
+  `(bump_lo, bump_hi) = (0, m)` because they never look for structure, and
+  `analyze_triangularized` reports it when a
   basis has nothing to peel; without both guards a tridiagonal `m = 3000` under
   the cap was packed into a 72 MB `m²` buffer and factored densely, at 181 ms
-  (`natural`) / 297 ms (`analyze`) against 1.5 ms on the sparse path. The case
+  (`natural`) / 297 ms (peeled) against 1.5 ms on the sparse path. The case
   for the dense kernel rests on the peel having stripped the structure and left
   an irreducible core; with nothing stripped, whole-basis dense is
   `dense_threshold`'s decision, and it weighs density rather than dimension
@@ -67,6 +206,107 @@ All notable changes to FERAL will be documented in this file.
   in `FeralError::SingularBasis`, matching the sparse path. It previously
   surfaced the block-local index from the packed kernel (column 7 where the
   sparse path said 11), which is not a column a simplex driver can act on.
+
+### Added — sparse-in / sparse-out `ftran_sparse` / `btran_sparse` *(issue #161B)*
+
+- `SparseLu::ftran`/`btran` take a dense `&mut [f64]`, which forces `Omega(m)`
+  per solve however little of the factor the answer depends on. Making the
+  triangular sweeps reach-limited (below) took a solve from `O(nnz(factor))` to
+  `O(m + reach work)` and then stopped at that floor. The floor is the
+  signature, so this changes the signature.
+- `SparseLu::ftran_sparse(rhs, out)` and `btran_sparse(rhs, out)` take the
+  right-hand side as `(index, value)` pairs and append the solution's nonzeros
+  to a caller-owned buffer, sorted by index. **No step is proportional to `m`**:
+  scatter is `O(nnz(rhs))`, both triangular solves are `O(reach work)`, the eta
+  replay is `O(eta ops)` (proportional to the update chain, not to `m`), and the
+  gather is `O(nnz(x) log nnz(x))`.
+- Measured on a triangular LP-shaped **synthetic** basis with unit-vector
+  right-hand sides, `ftran` p50, alongside the deterministic operation count.
+  **These are component timings, not an end-to-end prediction** — see the note
+  below:
+
+  | `m` | dense sweep | reach-limited | **sparse API** | sparse work |
+  |---|---|---|---|---|
+  | 1,000 | 7.8 us | 4.7 us | **0.30 us** | 12.5 |
+  | 4,000 | 40.8 us | 20.3 us | **1.07 us** | 12.1 |
+  | 16,000 | 183.4 us | 89.6 us | **2.47 us** | 13.1 |
+  | 64,000 | 1251.0 us | 616.7 us | **3.34 us** | 11.0 |
+
+  `m` grows 64x and the operation count does not move. At `m = 64000` this is
+  **277x the dense sweep on ftran, 234x on btran**.
+- `SparseLu::last_sparse_solve_work()` reports that operation count. It exists to
+  be asserted on: an asymptotic claim cannot be pinned by a wall clock, since a
+  reintroduced `O(m)` term would look like a constant factor at these sizes.
+- **When the solution is dense, keep using `ftran`.** The sparse path sorts its
+  reach where the dense sweep just walks the factor in order, so it is roughly
+  neutral-to-slower there. On the mixed-density bump fixture the sparse API is
+  69x on the median solve but 6.5x on the mean, and the doc comments say so.
+- Python: `LuFactor.ftran_sparse(rows, vals) -> (rows, vals)`,
+  `btran_sparse`, `last_sparse_solve_work`, and a `hyper_sparse_max_density`
+  constructor argument. Issue #161's reproducer is Python, so the fix is
+  reachable from it.
+- **Do not read these ratios as an end-to-end speedup.** Measured downstream in
+  discopt on the root LP of QPLIB_1157, this change is **~1.00x** on total wall
+  even though `ftran` on that instance's real bases is 10.6x faster: triangular
+  solves turn out to be ~1% of that solve, not the 93% issue #161 originally
+  attributed to the LU layer (a figure since retracted by its author). Three
+  other QPLIB instances gain 4–13%. The cost that *does* move that LP is numeric
+  factorization, via `dense_bump_max_dim` — a different knob, added in 0.15.2.
+
+### Added — reach-limited ("hyper-sparse") sparse-LU triangular solves *(issue #161B)*
+
+- `SparseLu::ftran`/`btran` cost the same whether the solution had one nonzero
+  or `m`. Issue #161 measured a unit-vector `ftran` at **0.74x** the cost of a
+  fully dense one on a real QPLIB simplex basis — "2918x more work than it
+  performs". The cause is that two of the four triangular kernels are *scatter*
+  form and already skip zeros, while the other two (`U w = s` in `ftran`,
+  `Lᵀ v = s` in `btran`) are *gather* form and read the whole factor regardless.
+- Those two now compute the reach of the right-hand side's pattern in the
+  factor's DAG (Hall & McKinnon) and sweep only the positions the solution
+  depends on. `usolve` walks the existing `u_above` column index; `lt_solve`
+  walks a new row-wise index of `L`, built at factor time and valid for the life
+  of the factor because the Forrest–Tomlin update never touches the base `L`.
+- New `LuParams::hyper_sparse_max_density` (default `0.10`) caps the reach as a
+  fraction of `m`. A reach that overruns it aborts back to the dense sweep, so a
+  sparse right-hand side whose solution *fills in* pays a bounded overhead
+  rather than an unbounded one. **`0.0` disables the route entirely**, restoring
+  the previous solve exactly and allocating none of its state.
+- **The default is 0.10 because 0.25 was measured wrong.** A sweep on the
+  in-tree synthetic fixture said the win was flat from 0.05 to 1.00 — true for
+  `ftran`, false for `btran`. On the real QPLIB_1157 basis a cap of 0.25 admits
+  `btran` reaches sitting between 10% and 25% of `m`, which the route loses on:
+  **0.69x, a 1.45x regression**, for no `ftran` gain (11.01x at 0.25 vs 10.81x
+  at 0.10). The mechanism is that the reach DFS traverses the same factor
+  entries the numeric sweep then traverses again — at 0.25 it walks 92% of
+  `nnz(L)` per `btran` sweep, so the route pays ~1.9x to avoid 1x. The effect is
+  invisible unless a basis's solution-density profile straddles the cap, which
+  the synthetic generator's does not; both bases are now carried in
+  `tests/data/lu_bases/` with a deterministic regression guard.
+- Measured (interleaved A/B on one basis, `m = 4000`, fill 4.05x, unit-vector
+  right-hand sides): **ftran 1.95x mean / 2.56x median, btran 1.72x mean / 2.15x
+  median**, with the two routes agreeing bit for bit. A dense right-hand side —
+  the case the route can only lose on — measures 0.97x. Full data and the
+  threshold sweep behind the default:
+  `dev/research/hyper-sparse-solves-2026-08-13.md`.
+- `SparseLu::hyper_sparse_sweeps()` and `hyper_sparse_nodes()` report how many
+  sweeps took the route and how many positions they swept, so a benchmark or
+  test cannot pass vacuously against the silent dense fallback.
+
+### Changed — `Uᵀ` solve no longer touches rows that contribute nothing
+
+- `ut_solve` tested `s[i] == 0.0` only *after* dereferencing `u_rows[i]`, one
+  heap allocation per row, so it paid `m` cache misses per solve even though its
+  flop count was already proportional to the solution. The test is now hoisted
+  above the access, matching what `lsolve` has always done. No arithmetic
+  changes.
+- **Behavior note.** The `SingularBasis` guard on `U`'s stored diagonal is now
+  evaluated on the rows a solution depends on rather than on all `m` rows of
+  every solve — in `ut_solve` unconditionally, and in `usolve` on the
+  reach-limited route. Skipped rows are ones where the substitution would assign
+  `0 / U[k,k]`, so no answer changes; what narrows is the incidental *diagnostic*
+  that some unrelated part of the factor is degenerate, which factor and update
+  time still report against the pivot tolerance. The dense fallback route keeps
+  the full every-row check.
 
 ## [0.15.1] - 2026-08-10
 

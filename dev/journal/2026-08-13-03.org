@@ -1,0 +1,367 @@
+#+TITLE: Session 2026-08-13-03 — review of PR #162 and the definitive #1008 verdict
+
+* 17:05 :pr162:review:setup:
+Picked up the PR #162 review. The local review worktree =/private/tmp/feral-pr162=
+was STALE: it sat at 6682f48 while the PR head (=claude/issue-161-w05b75=) had moved
+to 895ef65 — 27 files, +38262/-105, including the whole of issue #163 (the
+Suhl–Suhl peel reverted to opt-in), the real-basis fixtures
+(=tests/data/lu_bases/=) and =tests/lu_real_bases.rs=. Everything reviewed before
+this point was reviewed against the wrong tree. Reset the worktree to 895ef65.
+
+Consequence for the record: an earlier note in this review claimed the Python
+=LuParams.__new__= signature change was a positional break. It is not — the pyo3
+signature has a =*= right after =matrix=, so every parameter including the new
+=hyper_sparse_max_density= is keyword-only. Claim withdrawn.
+
+* 17:12 :pr162:tests:
+=cargo test --release= at 895ef65: *90 test binaries, 848 passed, 0 failed, 21
+ignored*, exit 0. =gh pr checks 162=: check / stress-smoke / wheel tests (py3.10,
+3.12, 3.13) all pass at 895ef65. Mergeable.
+
+* 17:20 :issue1008:census:measurement:
+Added a =DualAlphaNnz= / =DualAlphaDim= counter pair to discopt (fixed at
+bce881ff in =/private/tmp/wt1008ab=) and re-ran =loop_anatomy.py= over the
+15-instance keep set. The =rho= (BTRAN result) census already existed; =alpha=
+(the FTRAN result) did not, so "the solves are work-disproportionate" was a
+claim about one of the two solves.
+
+Result — density of the SOLUTION vectors, mean over all pivots of a solve:
+
+| quantity           | median |    min |    max |
+|--------------------+--------+--------+--------|
+| rho   = e_rᵀB⁻¹    | 0.150% | 0.008% | 14.46% |
+| alpha = B⁻¹A_q     | 6.565% | 1.211% | 61.95% |
+| alpha_r = rho·A    | 0.156% | 0.011% | 12.04% |
+
+Both hot solves are hyper-sparse on the median instance, and =alpha= sits under
+feral's shipped =hyper_sparse_max_density= default of 0.10 on 11 of 15.
+
+* 17:24 :issue1008:attribution:
+Kernel shares of the warm dual pivot loop, median over the panel (QPLIB_3225
+dropped: its =loop_ms= is smaller than the LU time inside it, so its shares are
+not meaningful):
+
+| kernel                      | median share |
+|-----------------------------+--------------|
+| DualFtranAlpha  (feral)     |       21.53% |
+| DualBtranRho    (feral)     |       18.81% |
+| LuNumeric       (feral)     |        7.82% |
+| LuSymbolic      (feral)     |        2.97% |
+| DualPrice       (discopt)   |        7.78% |
+| DualRcUpdate    (discopt)   |        6.29% |
+| DualRatio       (discopt)   |        4.72% |
+| DualDevex       (discopt)   |        3.50% |
+| other / untimed             |       25.17% |
+
+*feral-owned kernels are 51.1% of the loop; discopt's own are 22.3%.* The
+untimed 25% contains the Forrest–Tomlin update (~14% in the earlier samply
+profile), which is also feral. So feral is roughly 60–65% of the dual loop.
+
+This contradicts the prior conclusion — reached on QPLIB_1157 alone — that PRICE
+is the loop's largest kernel and hyper-sparse solves are worth ~1.01x.
+QPLIB_1157 is the outlier of this panel, not its representative.
+
+* 17:40 :issue1008:experiment:design:
+First attempt at the decisive A/B was wrong and was killed after two instances.
+I built discopt against PR #162 and compared "shipped dense =ftran=/=btran=" vs
+"feral's sparse-rhs API". But PR #162 changes the *dense* entry points too — the
+reach-limited sweeps — so that A/B had the reach route on in BOTH arms and
+measured only the marginal value of the API. QPLIB_10063 read 33.56 s vs 33.41 s
+and would have been reported as "the API is worth nothing".
+
+Redesigned as a *three*-arm panel inside ONE binary (one feral, one discopt, one
+md5), selected by env so the arms are seconds apart rather than separate builds:
+
+- =off=   =DISCOPT_LU_HYPER_MAX_DENSITY=0=, dense entry points → feral's
+  pre-#161 dense sweeps
+- =reach= =...=0.10=, dense entry points → PR #162 change 1, no caller change
+- =api=   =...=0.10=, sparse-rhs API → PR #162 change 2, caller changed
+
+The cap knob is a new probe in discopt's =params()=. Proved it is actually read,
+§6-style, rather than assumed: =DISCOPT_LU_HYPER_MAX_DENSITY=abc= panics with
+"must be a float in [0, 1], got \"abc\"" out of the solver, so an arm cannot
+silently degrade to the default.
+
+The =api= arm is a genuine prototype of the caller change: =rho= comes from
+=btran_sparse(&[(r, 1.0)])= and =alpha= from =ftran_sparse(sp.col(q))=, each
+scattered into the same dense buffer the loop already allocated. The column-wise
+PRICE and the Devex loop are untouched, so the delta is the solve and nothing
+else — and it is a *lower* bound on a full hyper-sparse caller, which would also
+drop the two =vec![0.0; m]= allocations and price row-wise.
+
+* 18:05 :issue1008:pr162:regression:
+QPLIB_3225 *fails to solve at all* under the PR #162 binary — in every arm,
+including =off= (reach route disabled), so it is not the reach route. Under the
+=main= arm the same instance solved and matched HiGHS in =loop_anatomy2=. The
+only other feral difference between those two trees is issue #163: =analyze=
+reverted from Suhl–Suhl peel + AMD-on-bump back to whole-basis AMD. If that
+holds up under a controlled re-check, #163's revert *bought* bchoco06 and *lost*
+QPLIB_3225 — the trajectory hazard cuts both ways. Flagged for a controlled
+arm=main / arm=crates re-run once the timing panel is off the machine.
+
+* 18:30 :issue1008:pr162:finding:
+Partial panel (10 of 14 instances, 3 reps, best-of-reps): the reach route alone
+(=off= → =reach=, no caller change) is *1.02x geomean*; switching the caller to
+the sparse-rhs API (=off= → =api=) is *1.11x geomean, 1.37x best*. Objectives
+identical to 9 decimal places in every arm on every instance, so the arms solve
+the same pivot sequence and the comparison is apples to apples.
+
+One instance goes the wrong way. QPLIB_3413 is *0.85x* under =api=. Its FTRAN
+solutions average *38.9%* dense — far above the 0.10 cap — and =ftran_sparse=
+has no density guard: the cap governs only whether the *dense* entry points take
+the reach route. So the caller pays the sort and the reach walk and then gets a
+near-dense answer anyway. The dense entry points self-route; the sparse ones make
+that the caller's problem. Worth a review comment: the reach is already computed
+by the time the cost is knowable, so the fallback is nearly free.
+
+* 18:50 :issue1008:measurement:invalidated:
+*Discarded the first 3-arm panel.* A launch of the form =nohup ... & sleep 45=
+failed on the =sleep= (foreground sleep is blocked in this harness) but the
+=nohup= child survived, so when I relaunched the same script through the task
+runner *two panel processes ran concurrently and wrote the same log file*. The
+tell was in the log all along and I read past it: a run of NUL bytes between two
+records, which is what two writers at two file offsets produce. Every timing in
+it was taken under 2x load.
+
+Quarantined as =env_ab3_CONTAMINATED.log= with a README saying why, rather than
+deleted — the numbers already quoted from it (reach 1.02x, api 1.11x geomean)
+have to be re-earned, not silently replaced. Relaunched clean, one process,
+=pgrep -c -f env_ab.py= = 1, REPS=2, 14 instances.
+
+* 19:20 :attribution:profiling:
+Re-ran the kernel attribution off =loop_anatomy2.log= (15 instances,
+QPLIB_3225 dropped because its =loop_ms= 233 ms is smaller than the LU
+time inside it -- the counters do not nest sanely there).  Two views,
+both computed:
+
+  per-instance MEDIAN share of loop   pooled (sum ms / sum loop_ms)
+    DualFtranAlpha  21.53%              19.84%
+    DualBtranRho    18.81%              16.97%
+    LuNumeric        7.82%              13.44%
+    LuSymbolic       2.97%               3.21%
+    DualPrice        7.78%               7.11%
+    DualRcUpdate     6.29%               6.67%
+    DualRatio        4.72%               5.25%
+    DualDevex        3.50%               3.01%
+    other/untimed   25.17%              24.51%
+    feral-owned     52.81%              53.45%
+    discopt-owned   21.93%              22.04%
+
+The two views agree, so the split is not an artifact of weighting.
+feral-owned work (two triangular solves + refactorization) is ~53% of
+the dual loop; discopt-owned pricing/ratio/update is ~22%; ~25% is
+untimed (dominated by the Forrest-Tomlin update, which has no counter).
+This is the number that contradicts the earlier "PRICE dominates"
+conclusion -- that came from QPLIB_1157 alone.
+
+Density census over all 15: rho median 0.150% dense (0.008%-14.46%),
+alpha median 6.57% (1.21%-61.95%).  alpha is above feral's 0.10 default
+cap on 4 of 15 (QPLIB_2055 61.9%, 3413 38.9%, 2022 21.2%, 10054 14.4%).
+Those four are exactly where an unguarded =ftran_sparse= should hurt.
+
+* 19:35 :ab:clean-run:confirmation:
+=env_ab4.log= (clean, single driver, REPS=2) at 9 of 14 instances
+reproduces the contaminated run's shape, so the qualitative findings
+survive re-earning:
+
+  reach geomean 1.024x, api geomean 1.154x, api-over-reach 1.126x
+  best   QPLIB_3775 api 1.359x
+  worst  QPLIB_3413 api 0.850x  (predicted: alpha 38.9% dense)
+
+The QPLIB_3413 regression is the load-bearing datum for review finding
+2 -- it was predicted from the density census *before* the clean run
+measured it, and the clean run lands on 0.850x versus 0.85x in the
+contaminated run.  Objectives agree to 9 dp in every arm on every
+instance so far (OK column), i.e. all three arms walk the same pivot
+path and the wall-clock comparison is apples to apples.
+
+Still outstanding: QPLIB_2055 (alpha 61.9% dense) is the strongest test
+of the missing density guard and has not finished yet.
+
+* 17:27 :meta:correction:
+Timestamp drift: the headers on the entries from =17:40= onward
+(=18:05=, =18:30=, =18:50=, =19:20=, =19:35=) are wrong -- I wrote them
+from an estimate rather than the clock.  Real wall time when this note
+was written is 17:27 EDT, and =date= confirms it; the corroborating
+mtimes are =env_ab3_CONTAMINATED.log= 17:20:47 and =env_ab4.log= first
+written 17:21.  The journal is append-only within a session so I am not
+editing those headers; read them as ordered but not as clock times.
+Correct order and approximate real times:
+  17:40 -> ~17:00 (experiment design, env_ab.py written 17:03)
+  18:05 -> ~17:10 (QPLIB_3225 regression)
+  18:30 -> ~17:15 (partial panel findings, contaminated)
+  18:50 -> ~17:21 (contamination found, clean run relaunched)
+  19:20 -> ~17:24 (attribution recomputation)
+  19:35 -> ~17:26 (clean-run interim at 9 of 14)
+The session actually began ~13:00 (earliest scratchpad artifacts
+13:03), so the 17:05/17:12 headers on the first two entries are also
+too late by several hours.  Nothing downstream depends on these times;
+the measurements are all timestamped by their own log files.
+
+* 17:47 :issue1008:pr162:ab:decisive:
+Clean 3-arm panel finished, all 14 instances, REPS=2, best-of-reps,
+single driver process (=env_ab4.log=).  Objectives agree to 9 dp in
+every arm on every instance, so all three arms walk the same pivot
+path.
+
+  n=14  geomean vs off:  reach *1.020x*   api *1.061x*
+        median:          reach  1.018x    api  1.083x
+        max:             reach  1.065x    api  1.359x
+
+The interim numbers I quoted from the first 5-9 instances (api 1.27x,
+then 1.15x) were biased -- the panel runs smallest-first and the small
+instances are the sparse ones.  The full panel is *1.061x*.  Both the
+contaminated run's 1.11x and the interim 1.27x are withdrawn.
+
+The reason is the density guard, and it is now measured rather than
+argued.  Sorting by the mean density of =alpha = B^-1 A_q=:
+
+  | inst        | alpha% | api/off |
+  | QPLIB_3775  |   1.21 |   1.359 |
+  | QPLIB_3650  |   1.55 |   1.336 |
+  | QPLIB_3642  |   1.24 |   1.329 |
+  | QPLIB_3525  |   2.21 |   1.269 |
+  | QPLIB_0752  |   4.13 |   1.108 |
+  | QPLIB_2353  |   6.35 |   1.106 |
+  | QPLIB_3841  |   9.18 |   1.089 |
+  | QPLIB_10044 |   6.57 |   1.076 |
+  | QPLIB_2738  |   7.53 |   1.043 |
+  | QPLIB_10063 |   2.45 |   1.019 |
+  | QPLIB_10054 |  14.40 |   0.962 |
+  | QPLIB_3413  |  38.94 |   0.850 |
+  | QPLIB_2022  |  21.20 |   0.845 |
+  | QPLIB_2055  |  61.95 |   0.711 |
+
+log-log Pearson r(alpha density, api speedup) = *-0.944*, n=14.  Split
+at feral's own shipped cap: alpha < 10% dense -> *1.167x* geomean
+(n=10); alpha >= 10% -> *0.837x* geomean (n=4).  Every instance that
+loses is an instance feral's own =hyper_sparse_max_density= default
+would have routed to the dense sweep, if the cap applied to the sparse
+entry points.  It does not; the docs say "route on what the caller
+knows about its right-hand sides", but a simplex cannot know the
+density of =B^-1 A_q= before it computes it.
+
+Ideal-guard bound (take max(1, speedup) per instance, i.e. never worse
+than the dense route): *1.116x* geomean.  So the missing guard is
+costing roughly half of what the API is worth.  This promotes review
+finding 2 from a footnote to the main finding.
+
+* 18:05 :issue1008:feral:deficiency:ordering:
+*Found the remaining feral deficiency, and it is not the solves.*
+
+Ran =loop_anatomy.py= a second time under the =api= arm to see the
+post-fix kernel shares.  Two things jumped out:
+
+  kernel            off med%   api med%
+  DualBtranRho        18.81       0.97
+  DualFtranAlpha      21.53      20.72
+  LuNumeric            7.82       7.93
+  LuSymbolic           2.97      32.59   <-- ???
+
+=DualBtranRho= going 18.8% -> 1.0% is the sparse API doing exactly what
+it says: =rho= is 0.15% dense and the sparse entry point makes BTRAN
+essentially free.  That half of PR #162 is finished work.
+
+=LuSymbolic= at 32.6% was not credible, so I dumped the raw profile
+block with call counts (=raw_profile.py=, QPLIB_3775, both arms).  The
+call count is *identical* -- 64 factorizations in both arms.  What
+changed is the per-call cost, and it did not change between =off= and
+=api= at all: it is 1052 ms in *both*.  The 43.7 ms in
+=loop_anatomy2.log= came from a *different binary* (md5 92bc887, the
+=main= arm).
+
+So the delta is feral main vs this branch, i.e. issue #163.  Measured
+directly in feral, no discopt in the loop
+(=tests/zz_symbolic_arms.rs=, 20 reps, release):
+
+  | basis            |    m |   nnz | analyze (AMD) | analyze_triangularized | ratio |
+  | QPLIB_1157       | 3937 | 29376 |     10.329 ms |               0.834 ms | 12.39 |
+  | QPLIB_3852       | 1760 |  4003 |      0.247 ms |               0.038 ms |  6.57 |
+  | bchoco06_illcond |  833 |  2404 |      0.148 ms |               0.034 ms |  4.33 |
+
+#163 reverted =analyze= from peel+AMD-on-bump to whole-basis AMD for a
+trajectory reason, and gave back a 4.3x-12.4x factor on the analysis --
+which a simplex re-runs on *every* refactorization, so it is multiplied
+by the refactorization count, not amortized.
+
+End to end, one probe knob (=DISCOPT_LU_TRIANGULARIZE=1= -> discopt
+calls =analyze_triangularized=), QPLIB_3775, same binary, same 64
+factorizations, same objective:
+
+  tri=0   wall 2.215 s   LuSymbolic 1048.5 ms   LuNumeric 184.6 ms
+  tri=1   wall 1.193 s   LuSymbolic   44.1 ms   LuNumeric 164.7 ms
+
+*1.86x on total LP wall from the ordering alone* -- versus 1.06x
+geomean for everything PR #162 does to the solves.  And 44.1 ms lines
+up with =loop_anatomy2='s 43.7 ms, which independently confirms that
+log was the =main= arm.
+
+Note the shape of this: on this instance =LuSymbolic= (1048 ms) is
+*5.7x* =LuNumeric= (185 ms).  Spending six times the numeric
+factorization on choosing a column order, 64 times over, is the
+deficiency.
+
+* 18:20 :issue1008:tried-and-rejected:symbolic-reuse:
+Tried the obvious cheap fix for a 32%-of-loop symbolic analysis:
+*cache the ordering and reuse it across refactorizations.*  feral
+permits it -- =SparseLu::factor= validates only =symbolic.m=, not the
+pattern, so a stale ordering is a legal column order for a later basis
+-- and the docs advertise reuse "across numerically different but
+structurally identical bases".
+
+It is catastrophic.  QPLIB_3775, =DISCOPT_LU_SYM_REUSE=1= on top of
+=tri=1=:
+
+  tri=1 reuse=0   wall   1.193 s     64 factorizations, LuNumeric   164.7 ms
+  tri=1 reuse=1   wall 137.835 s   1112 factorizations, LuNumeric 18381.3 ms
+  tri=0 reuse=1   did not finish within a 300 s timeout
+
+=LuSymbolic= does drop to 0.82 ms total, exactly as intended, and it
+buys a *115x slowdown*.  A simplex basis is not structurally stable
+across 64 pivots: the stale ordering produces enough extra fill that
+the Forrest-Tomlin update stops holding and the loop refactorizes 17x
+more often, at 111x the numeric cost.  The reuse contract in the feral
+docs is real but its precondition ("structurally identical") is exactly
+what a simplex violates.
+
+Rejected.  The ordering has to be *recomputed* every refactorization;
+what it must not be is *expensive*.  That points at the ordering choice
+(#163's revert), not at caching.
+
+* 18:52 :issue1008:verdict:panel:
+Four-arm panel finished (=env_ab5.log=, 14 instances, REPS=2,
+best-of-reps, ONE binary md5 cc1e146, single driver process 96891).
+Arms: =off= (dense entry points + whole-basis AMD), =api= (sparse-rhs
+API), =tri= (=analyze_triangularized=), =all= (both).
+
+  n=14  speedup vs off:
+    api   geomean *1.067x*  median 1.090x  min 0.726  max 1.363
+    tri   geomean *1.306x*  median 1.469x  min 0.389  max 1.674
+    all   geomean *1.497x*  median 1.729x  min 0.307  max 2.584
+
+  excluding QPLIB_2055 (n=13, see below):
+    api 1.099x, tri 1.433x, all *1.691x*
+
+  gap vs HiGHS, geomean: 14.4x (off) -> *9.6x* (all); 14.9x -> 8.8x
+  excluding QPLIB_2055.
+
+So the ordering is worth *4.5x more* than everything PR #162 does to
+the solves (1.306 vs 1.067), and the two compose (1.497x).  Neither is
+a feral code change: both orderings and both solve paths ship in the
+branch under review.
+
+QPLIB_2055 is the counterexample and it must not be buried.  Under
+=tri= it is *0.389x* -- a 2.6x slowdown -- and its objective moves in
+the 9th significant figure (2314023.629152459 vs ...471), i.e. the peel
+changed the pivot trajectory.  That is the #163 hazard reproducing on a
+second instance, in the *other* direction from bchoco06: here the peel
+costs time rather than a bound.  QPLIB_2055 is also the panel's densest
+=alpha= (61.9%), so it is the instance where every hyper-sparse
+assumption in this stack is false.  This is exactly why =tri= must be a
+*caller* decision and why #163's revert to opt-in was the right call --
+the argument here is not "revert the revert", it is "discopt should opt
+in, per-LP, and needs a fallback for the QPLIB_2055 class".
+
+Ideal density guard on the sparse API (per-instance best of tri/all,
+i.e. what feral would deliver if =ftran_sparse= self-routed on
+=hyper_sparse_max_density=): geomean *1.571x* vs 1.497x.

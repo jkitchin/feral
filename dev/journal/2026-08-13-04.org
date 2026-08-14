@@ -1,0 +1,171 @@
+#+TITLE: Session 2026-08-13-04 journal
+
+* 19:45 :issue164:issue165:setup:
+Picking up the two PR #162 review findings that the branch's own author
+session filed rather than fixed: #164 (no density guard on
+=ftran_sparse=/=btran_sparse=) and #165 (ordering reachable only as a second
+constructor name, not A/B-able as a parameter).
+
+Checked first whether this was already in flight. =origin/claude/issue-161-w05b75=
+moved 895ef65 -> 8c2326f at 22:23-22:25 UTC (cloud session "Issue 161", now
+idle): 12d1fcc fixed finding 3 in code, documented finding 2, and corrected
+finding 4's rationale across rustdoc/CHANGELOG/decisions. Its commit body says
+"NOT DONE HERE -- finding 1 ... Filed separately". Branch has not moved since;
+=gh pr list= shows only #162. So both fixes are mine to write.
+
+Working on branch =pr162-fixes= off 8c2326f in the =/private/tmp/feral-pr162=
+worktree -- which is also what =/private/tmp/wt1008ab= (discopt) patches
+=[patch.crates-io]= at, so the A/B panel can measure the fix directly.
+
+* 20:00 :issue164:design:
+Read both solve paths before designing. The dense route
+(=sparse_solve.rs=) already has the shape the sparse route needs: =reach_cap()=
+turns =hyper_sparse_max_density= into a node budget, and =ReachWork::push=
+*abandons the DFS the moment it exceeds the budget* rather than completing a
+reach it is going to throw away. The sparse route (=sparse_hyper.rs=) has no
+such bound anywhere.
+
+First design (issue #164's suggestion, "skip the sort and sweep 0..m") does not
+survive contact with the code:
+
+- the sweep must not write nonzeros into positions absent from =pattern= --
+  that is the =O(touched)= reset list, and a nonzero outside it silently seeds
+  the *next* solve. So a dense sweep has to mark as it writes, or mark
+  everything up front.
+- =u_solve_sparse='s singular guard is deliberately *narrowed* to rows the
+  solution depends on (decisions.md 2026-08-13). Sweeping all =m= rows widens
+  it, which would make =SingularBasis= fire or not depending on the density of
+  an unrelated right-hand side. Trying to keep the narrowing meant a per-row
+  "does this position matter" test that needs the reach I just abandoned.
+
+Settled on a smaller shape instead: the four kernels already sweep whatever is
+in =hw.order=, so the fallback only has to *fill =order= differently* -- natural
+topological order over =0..m= (ascending for =L=, descending for =Lt=,
+descending/ascending =uperm_inv= rank for =U=/=Ut=) instead of the sorted
+reach -- and mark the whole accumulator so the reset list covers the sweep.
+The kernels themselves are untouched, and the fallback's behaviour is then
+*exactly* the dense entry points', guard width included, which is the thing it
+is falling back to.
+
+Cost of marking everything: reset becomes O(m) and the next kernel's DFS
+trips the cap immediately. Both are O(m) in a regime where the answer is
+already dense, and =over_cap= is monotone within a solve so it costs one
+pop, not a re-walk.
+
+* 20:20 :issue164:issue165:tests:
+Both fixes implemented and green. =cargo test --release= at the working
+tree: 90 binaries, 855 passed, 0 failed, 21 ignored (was 848 passed at
+895ef65 — the +7 are the new tests). =cargo clippy --all-targets -D
+warnings= clean, =cargo fmt --check= clean in both the root crate and
+=python/=.
+
+The python crate does not link on macOS (=ld: symbol(s) not found for
+architecture arm64=, =__Py_NotImplementedStruct= etc.) — that is the
+usual pyo3 cdylib-without-maturin failure, not the change; =cargo check
+--release= on =python/= is clean, which is what the =LuParams= struct
+literal needed proving. Its 24 warnings are all pre-existing
+=unexpected cfg condition value: gil-refs=.
+
+Threading =sparse_rhs_max_density= through =build_params= was mandatory
+(struct literal). =triangularize: Option<bool>= defaults to =None= =
+follow =dense_bump_max_dim > 0=, which preserves exactly what the
+binding did before, while unbundling the peel from the dense-bump cap
+per issue #165.
+
+* 20:22 :issue165:doc:correction:
+The =analyze= doc comment already carried the ordering cost — the cloud
+session added it in 8c2326f while correcting review finding 4's
+rationale. My first CHANGELOG draft cited my own review numbers
+(4.3-12.4x, 10.329 vs 0.834 ms on QPLIB_1157) against a doc comment that
+cites the in-tree =examples/basis_refactor.rs= harness (4.2-9.8x, 21.28
+vs 2.17 ms on the same basis). Different harnesses, same conclusion, but
+two different numbers for one fact in one repo is a trap for the next
+reader. Rewrote the CHANGELOG onto the in-tree numbers so the doc
+comment is the single source, and dropped "now states" — it already did.
+
+* 22:05 :issue164:benchmark:discopt:
+Measured what the #164 guard actually recovers, end to end. Four arms
+interleaved in ONE binary (one feral =b8860331=, one discopt), the =api=
+arm split so the guard is the only difference between two of them:
+
+| arm  | sparse API | =sparse_rhs_max_density= | ordering |
+| off  | no         | n/a                      | AMD      |
+| apiX | yes        | 1.0 (guard off)          | AMD      |
+| api  | yes        | 0.10 (guard on)          | AMD      |
+| all  | yes        | 0.10                     | peel     |
+
+14 QPLIB relaxation LPs, 2 reps, best-of. Added
+=DISCOPT_LU_SPARSE_RHS_MAX_DENSITY= to
+=crates/discopt-core/src/lp/simplex/linsolve.rs= as a probe (uncommitted
+in =/private/tmp/wt1008ab=, alongside the existing
+=DISCOPT_LU_HYPER_MAX_DENSITY= probe).
+
+|                              | geomean | median | min   | max   |
+| apiX/off (PR162 as reviewed) | 1.066x  | 1.083x | 0.735x| 1.405x|
+| api/off  (with the guard)    | 1.197x  | 1.196x | 0.998x| 1.408x|
+| api/apiX (the guard alone)   | 1.122x  | 1.122x | 0.929x| 1.393x|
+
+The review's =apiX= number reproduces (1.066x now vs 1.061x then, same
+binary design, different day). **The guard beats the review's own
+prediction.** The review computed an "ideal guard" bound of 1.116x by
+taking max(1, speedup) per instance — i.e. assuming the best a guard can
+do is claw the regressing instances back to parity. Actual: 1.197x.
+
+The bound was too low because the review's density column is the *mean*
+density of alpha over the solve, and the guard routes per solve. Even on
+instances whose mean alpha is nominally sparse, individual solves are
+dense and the guard catches them; the <10% bucket went 1.174x -> 1.253x.
+Nor does the mean-alpha column say anything about the btran side
+(=rho = e_r^T B^-1=), which the guard covers too.
+
+Dense bucket (alpha >= 10%), n=4: 0.839x -> 1.067x. Every regression is
+gone; the worst instance on the whole panel is now 0.998x, i.e. parity.
+QPLIB_2055, the extreme at 61.95% dense, goes 0.735x -> 1.024x, with the
+guard alone worth 1.393x on it.
+
+* 22:08 :issue164:correctness:
+Objective check across the panel: =off=, =apiX= and =api= agree
+**bit-for-bit on all 14 instances**. So the guard changes speed and not
+the answer, and the sparse API's trajectory coincided with the dense
+route's on every instance here.
+
+That is an observation, not a guarantee, and it must not be written down
+as one. The unit test asserts =< 1e-9= between the routes, not
+=assert_eq!=, deliberately (review finding 2) — the two routes accumulate
+in different orders and are entitled to differ in the last bits. What
+this panel shows is that on these 14 they did not.
+
+The only arm that moves an objective is =all= — the peel ordering, on 8
+of 14 instances, the known #163 trajectory effect. On QPLIB_2055 that is
+2314023.629152459 vs ...471 (~5e-15 relative) and the peel is 0.387x
+there, a 2.6x slowdown, consistent with the review. Nothing in the
+default path is affected: =LuOrderingParams::default()= is
+=triangularize: false=.
+
+* 20:46 :tooling:bug:context:
+=./dev/assemble-context.sh= has been silently failing in this worktree,
+and =dev/context.md= was stale: it was stamped
+=Generated: 2026-08-13T22:25:41Z= and named =2026-08-13-02.md= as the
+latest session while 03 and 04 both existed on disk.
+
+Cause: the hook sanity check tests =[ ! -x .git/hooks/pre-commit ]=. In a
+*linked worktree* =.git= is a file, not a directory, so that path never
+resolves and the branch always fires. It then runs =pre-commit install=,
+which refuses ("Cowardly refusing to install hooks with =core.hooksPath=
+set" -- correctly, since =core.hooksPath= points at the main clone's
+hooks, which is exactly how this worktree's commits were getting
+fmt/clippy-checked all session). Under =set -e= that non-zero exit killed
+the script at line 31, before =OUT= is even assigned on line 37 -- so it
+never wrote a byte and left the old file in place. Exit code 1, and the
+only visible symptom is a WARNING that reads like advice rather than a
+failure.
+
+Fixed by resolving the hook directory properly: =core.hooksPath= when
+set, else =git rev-parse --git-path hooks=, which handles both layouts;
+and =pre-commit install= failures no longer abort the script. Now exits 0
+and writes 352 lines naming session 04.
+
+Worth noting the blast radius: any session run from a worktree since this
+guard was added has been orienting off a stale =context.md= without any
+signal that it was stale. The "Generated" timestamp is the tell -- it
+should be checked against =date -u=, not trusted.
