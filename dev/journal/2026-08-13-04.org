@@ -141,3 +141,31 @@ of 14 instances, the known #163 trajectory effect. On QPLIB_2055 that is
 there, a 2.6x slowdown, consistent with the review. Nothing in the
 default path is affected: =LuOrderingParams::default()= is
 =triangularize: false=.
+
+* 20:46 :tooling:bug:context:
+=./dev/assemble-context.sh= has been silently failing in this worktree,
+and =dev/context.md= was stale: it was stamped
+=Generated: 2026-08-13T22:25:41Z= and named =2026-08-13-02.md= as the
+latest session while 03 and 04 both existed on disk.
+
+Cause: the hook sanity check tests =[ ! -x .git/hooks/pre-commit ]=. In a
+*linked worktree* =.git= is a file, not a directory, so that path never
+resolves and the branch always fires. It then runs =pre-commit install=,
+which refuses ("Cowardly refusing to install hooks with =core.hooksPath=
+set" -- correctly, since =core.hooksPath= points at the main clone's
+hooks, which is exactly how this worktree's commits were getting
+fmt/clippy-checked all session). Under =set -e= that non-zero exit killed
+the script at line 31, before =OUT= is even assigned on line 37 -- so it
+never wrote a byte and left the old file in place. Exit code 1, and the
+only visible symptom is a WARNING that reads like advice rather than a
+failure.
+
+Fixed by resolving the hook directory properly: =core.hooksPath= when
+set, else =git rev-parse --git-path hooks=, which handles both layouts;
+and =pre-commit install= failures no longer abort the script. Now exits 0
+and writes 352 lines naming session 04.
+
+Worth noting the blast radius: any session run from a worktree since this
+guard was added has been orienting off a stale =context.md= without any
+signal that it was stale. The "Generated" timestamp is the tell -- it
+should be checked against =date -u=, not trusted.

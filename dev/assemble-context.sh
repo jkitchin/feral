@@ -24,11 +24,22 @@ if [ -n "$HOOKS_PATH" ] && [ ! -e "$HOOKS_PATH/pre-commit" ]; then
         echo "  pre-commit not on PATH; install it then run: pre-commit install" >&2
     fi
 fi
-if [ ! -x .git/hooks/pre-commit ]; then
-    echo "WARNING: .git/hooks/pre-commit missing." >&2
+# Where git will actually look for the hook. `.git` is a *file* in a linked
+# worktree, so a literal `.git/hooks/...` test is always false there -- and
+# under `set -e` a failed `pre-commit install` then aborted this script before
+# it wrote a single line of context.md, silently leaving a stale file behind.
+# `git rev-parse --git-path` resolves both layouts; `core.hooksPath` wins when
+# set, which is how a worktree shares the main clone's installed hooks.
+if [ -n "$HOOKS_PATH" ]; then
+    HOOK_DIR="$HOOKS_PATH"
+else
+    HOOK_DIR=$(git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)
+fi
+if [ ! -x "$HOOK_DIR/pre-commit" ]; then
+    echo "WARNING: $HOOK_DIR/pre-commit missing." >&2
     if command -v pre-commit >/dev/null 2>&1; then
         echo "  Running: pre-commit install" >&2
-        pre-commit install >&2
+        pre-commit install >&2 || echo "  pre-commit install failed; fix before committing." >&2
     else
         echo "  pre-commit not on PATH; CI will fail on fmt/clippy without it." >&2
     fi
