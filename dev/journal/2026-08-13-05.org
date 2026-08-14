@@ -44,3 +44,30 @@ full solve; the worst AMD-only fill in this corpus is 12.92x. Direction and orde
 of magnitude agree, the exact number is not claimed.
 
 Note written to dev/research/lu-fill-markowitz-2026-08-13.md.
+
+* 23:40 :lu:fill:markowitz:discopt-1008:correction:
+The full-solve dump of QPLIB_1451_rlt0 finished (600s TL, 25088 iterations) and
+it corrects two claims in the 23:10 entry and the research note.
+
+  basis                        m   nnz(B)  bump | AMDfull   peel  COLAMD  MARKOW
+  QPLIB_1451_rlt0_cap100000 7392    63720  1350 |  24.90x  3.21x  19.44x   1.14x
+
+1. #1008's 19.1x IS reproduced, as a range. Sampling the same trajectory at 3000
+   and 25088 iterations gives AMD-only 7.86x and 24.90x, which brackets 19.1x.
+   The "not reproduced / worst seen is 12.92x" caveat is withdrawn.
+
+2. The peel does NOT close QPLIB_1451_rlt0 outright, which is what the shallow
+   sample showed. The bump grows along the trajectory: 67 columns at 3000
+   iterations, 1350 at 25088. The peel goes from 7.86x -> 1.01x (gap closed) to
+   24.90x -> 3.21x (2.82x still on the table). Methodological point worth
+   keeping: bases sampled early in a solve are not evidence about the bases a
+   solve spends its time on, and my first corpus was mostly early/final bases.
+
+Corpus now n=16: geomean AMDfull 3.00x, peel 1.52x, COLAMD 3.24x, MARKOWITZ
+1.11x. The verdict is unchanged and slightly stronger -- Markowitz still never
+exceeds 1.89x while feral's shipped path now tails to 24.90x. What changes is
+finding 1 vs finding 2: releasing #160 buys less than the shallow sample implied
+(4 of 16 bases keep a bump > 500, not 3), so Markowitz-on-the-bump is more of the
+answer than the first pass said.
+
+Note and issue #167 updated.
