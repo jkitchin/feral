@@ -249,6 +249,43 @@ pub struct LuParams {
     /// exactly as before issue #161, and the `L` row index and reach workspace
     /// are not even allocated. Valid range `[0, 1]`.
     pub hyper_sparse_max_density: f64,
+
+    /// Density cap for the **sparse-in / sparse-out** entry points
+    /// [`SparseLu::ftran_sparse`] / [`SparseLu::btran_sparse`] (issue #164).
+    ///
+    /// Those solves are reach-based by construction, which is a win only while
+    /// the solution stays sparse: a reach that covers most of the basis still
+    /// has to be built by a depth-first walk and sorted into topological order,
+    /// where the dense sweep just walks the factor as stored. Once the pattern
+    /// grows past `sparse_rhs_max_density · m` the walk is abandoned and the
+    /// sweep runs over the whole basis in natural order — the same work the
+    /// dense entry points would have done, with the sparse signature preserved.
+    ///
+    /// This is a **separate knob from [`Self::hyper_sparse_max_density`]** even
+    /// though both default to `0.10`, because they answer different questions.
+    /// That one asks whether a caller holding a dense vector should pay for a
+    /// reach at all; this one asks whether a caller who has already committed to
+    /// the sparse signature should keep using it for an answer that turned out
+    /// dense. A caller can want the reach route off and this on, or the reverse.
+    ///
+    /// The default comes from 14 QPLIB relaxations driven by a dual simplex,
+    /// comparing the sparse entry points against the dense ones by the mean
+    /// density of the solution: under 10% dense the sparse API is **1.167x**
+    /// (n = 10), at or above 10% it is **0.837x** (n = 4, worst 0.711x), with
+    /// log-log `r(density, speedup) = -0.944`. Every instance that regressed sat
+    /// above this cap. It is deliberately the same 0.10 that the dense route
+    /// uses, from the same measurement.
+    ///
+    /// The fallback exists because the caller that needs it *cannot supply it*:
+    /// a dual simplex does not know the density of `B⁻¹A_q` until the solve that
+    /// produces it has run, so "route on what you know about your right-hand
+    /// sides" is not advice it can take.
+    ///
+    /// `1.0` disables the fallback — the solves stay strictly work-proportional
+    /// no matter how dense the answer, which is the behaviour issue #161B
+    /// shipped. `0.0` forces the dense sweep on every nonempty right-hand side.
+    /// Valid range `[0, 1]`.
+    pub sparse_rhs_max_density: f64,
 }
 
 impl LuParams {
@@ -311,6 +348,17 @@ impl LuParams {
                 self.hyper_sparse_max_density
             )));
         }
+        // `sparse_rhs_max_density` scales to the same kind of node budget, with
+        // the same `NaN as usize == 0` hazard — except here a silent `0` would
+        // route *every* sparse solve to the dense sweep, turning the
+        // work-proportional entry points into `O(m)` ones without a word.
+        // `1.0` (no fallback) and `0.0` (always fall back) are both documented.
+        if !(self.sparse_rhs_max_density >= 0.0 && self.sparse_rhs_max_density <= 1.0) {
+            return Err(FeralError::InvalidInput(format!(
+                "LuParams::sparse_rhs_max_density must be in [0, 1], got {}",
+                self.sparse_rhs_max_density
+            )));
+        }
         Ok(())
     }
 }
@@ -330,6 +378,7 @@ impl Default for LuParams {
             refine_tol: 1e-12,
             update_pivot_search: false,
             hyper_sparse_max_density: 0.10,
+            sparse_rhs_max_density: 0.10,
         }
     }
 }

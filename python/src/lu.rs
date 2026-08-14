@@ -286,6 +286,7 @@ impl LuFactor {
         update_pivot_search: bool,
         dense_bump_max_dim: usize,
         hyper_sparse_max_density: f64,
+        sparse_rhs_max_density: f64,
     ) -> PyResult<LuParams> {
         let on_singular = match on_singular {
             "fail" => LuSingularAction::Fail,
@@ -311,6 +312,7 @@ impl LuFactor {
             update_pivot_search,
             dense_bump_max_dim,
             hyper_sparse_max_density,
+            sparse_rhs_max_density,
         })
     }
 }
@@ -337,6 +339,13 @@ impl LuFactor {
     /// rounding trajectory, which on an ill-conditioned LP cost a downstream
     /// simplex its dual bound (issue #163) and on one QPLIB instance is a 2.6x
     /// slowdown. Neither setting dominates; measure on your own matrices.
+    ///
+    /// `sparse_rhs_max_density` (default 0.10) caps the solution density at
+    /// which the Rust-side sparse-rhs solves keep using their reach; past it
+    /// they sweep the whole basis instead (issue #164). It has no effect through
+    /// this class, whose `ftran`/`btran` take dense vectors — it is here so a
+    /// `LuFactor` built in Python carries the same parameters as one built in
+    /// Rust.
     #[new]
     #[pyo3(signature = (
         matrix,
@@ -354,6 +363,7 @@ impl LuFactor {
         update_pivot_search = false,
         dense_bump_max_dim = 0,
         hyper_sparse_max_density = 0.10,
+        sparse_rhs_max_density = 0.10,
         force_dense = None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -373,6 +383,7 @@ impl LuFactor {
         update_pivot_search: bool,
         dense_bump_max_dim: usize,
         hyper_sparse_max_density: f64,
+        sparse_rhs_max_density: f64,
         force_dense: Option<bool>,
     ) -> PyResult<Self> {
         let params = Self::build_params(
@@ -389,6 +400,7 @@ impl LuFactor {
             update_pivot_search,
             dense_bump_max_dim,
             hyper_sparse_max_density,
+            sparse_rhs_max_density,
         )?;
         let a = &matrix.inner;
         let m = a.m;

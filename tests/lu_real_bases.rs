@@ -241,3 +241,90 @@ fn reach_route_is_bit_identical_to_the_dense_sweep_on_real_bases() {
         );
     }
 }
+
+/// **Issue #164 on real data.** The whole-basis fallback and the pure reach
+/// route must return the same solution on the bases the cap was measured on.
+///
+/// The synthetic fixture in `tests/lu_sparse_rhs.rs` pins the contract; this
+/// pins it where it matters. These bases are the ones whose solution-density
+/// profile straddles the cap — that is why they are in the tree at all — so
+/// this is the only place the fallback runs against real fill.
+///
+/// Right-hand sides span the cap deliberately: unit vectors (the simplex's own,
+/// almost always under it) and blocks of 64 adjacent columns (reliably over).
+/// The fallback counter is asserted in both directions so neither arm can pass
+/// having tested nothing.
+#[test]
+fn the_density_fallback_agrees_with_the_reach_route_on_real_bases() {
+    for name in ["QPLIB_3852_basis.mtx", "QPLIB_1157_basis.mtx"] {
+        let Some(path) = fixture(name) else {
+            continue;
+        };
+        let a = read_mtx(&path);
+        let m = a.m;
+        let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+        let mk = |cap: f64| {
+            SparseLu::factor(
+                &a,
+                &sym,
+                LuParams {
+                    sparse_rhs_max_density: cap,
+                    ..LuParams::default()
+                },
+            )
+            .expect("factor")
+        };
+        let mut never = mk(1.0);
+        let mut capped = mk(LuParams::default().sparse_rhs_max_density);
+
+        let mut rhss: Vec<Vec<(usize, f64)>> = (0..m).step_by(7).map(|k| vec![(k, 1.0)]).collect();
+        for lo in (0..m).step_by(m / 8 + 1) {
+            let hi = (lo + 64).min(m);
+            rhss.push((lo..hi).map(|i| (i, 1.0 + (i % 5) as f64)).collect());
+        }
+
+        let mut a_out = Vec::new();
+        let mut b_out = Vec::new();
+        let mut worst = 0.0_f64;
+        for rhs in rhss.iter() {
+            for forward in [true, false] {
+                if forward {
+                    never.ftran_sparse(rhs, &mut a_out).expect("ftran_sparse");
+                    capped.ftran_sparse(rhs, &mut b_out).expect("ftran_sparse");
+                } else {
+                    never.btran_sparse(rhs, &mut a_out).expect("btran_sparse");
+                    capped.btran_sparse(rhs, &mut b_out).expect("btran_sparse");
+                }
+                let (mut x, mut y) = (vec![0.0; m], vec![0.0; m]);
+                for &(i, v) in a_out.iter() {
+                    x[i] = v;
+                }
+                for &(i, v) in b_out.iter() {
+                    y[i] = v;
+                }
+                worst = worst.max(
+                    x.iter()
+                        .zip(y.iter())
+                        .fold(0.0_f64, |acc, (p, q)| acc.max((p - q).abs())),
+                );
+            }
+        }
+
+        let fired = capped.sparse_rhs_fallbacks();
+        let solves = rhss.len() * 2;
+        assert_eq!(
+            never.sparse_rhs_fallbacks(),
+            0,
+            "{name}: a cap of 1.0 must never fall back"
+        );
+        assert!(
+            fired > 0 && fired < solves,
+            "{name}: the fallback fired on {fired}/{solves} solves; this fixture \
+             is supposed to straddle the cap, so 0 and {solves} are both vacuous"
+        );
+        assert!(
+            worst < 1e-9,
+            "{name}: the fallback and the reach route disagree by {worst:e}"
+        );
+    }
+}

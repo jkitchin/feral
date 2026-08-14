@@ -22,6 +22,14 @@
 //! | `U`-solve over the reach | `O(reach work)` |
 //! | gather the solution (with column scaling) | `O(nnz(x) log nnz(x))` |
 //!
+//! ...*while the answer stays sparse*. Reach-building and sorting are only
+//! worth it below a solution density of about 10%, measured under a real dual
+//! simplex, so past `LuParams::sparse_rhs_max_density · m` the reach is
+//! abandoned mid-walk and the sweep runs over the whole basis in natural order
+//! — the dense entry points' work, reached through the sparse signature (issue
+//! #164). The kernels are the same either way; only what lands in
+//! `HyperWork::order` differs.
+//!
 //! The eta term is proportional to the update chain, not to `m`, and is what
 //! `compute_spike` in the Forrest–Tomlin update already pays.
 //!
@@ -77,6 +85,16 @@ pub(super) struct HyperWork {
     /// traversed. The scalability witness — see
     /// [`SparseLu::last_sparse_solve_work`].
     work: usize,
+    /// Pattern size past which this solve abandons the reach and sweeps the
+    /// whole basis instead: `LuParams::sparse_rhs_max_density · m`, refreshed
+    /// on every entry. `m` disables the fallback (a pattern can never exceed
+    /// `m`), which is how a cap of `1.0` reads.
+    cap: usize,
+    /// Has *this* solve switched to whole-basis sweeps? Cleared by `reset()`.
+    dense: bool,
+    /// Cumulative count of solves that did — the non-vacuity witness behind
+    /// [`SparseLu::sparse_rhs_fallbacks`].
+    fallbacks: usize,
 }
 
 impl HyperWork {
@@ -92,6 +110,9 @@ impl HyperWork {
             stack: Vec::new(),
             order: Vec::new(),
             work: 0,
+            cap: usize::MAX,
+            dense: false,
+            fallbacks: 0,
         }
     }
 
@@ -118,6 +139,7 @@ impl HyperWork {
         self.pattern.clear();
         self.stack.clear();
         self.order.clear();
+        self.dense = false;
     }
 
     /// Seed the depth-first stack with everything touched so far, then load
@@ -131,6 +153,38 @@ impl HyperWork {
         self.order.clear();
         self.order.extend_from_slice(&self.pattern);
         self.work += self.order.len();
+    }
+
+    /// Has the pattern outgrown the fallback cap? Monotone within a solve —
+    /// `pattern` accumulates across the three sweeps and is never shortened —
+    /// so once this is true the rest of the solve is dense too, and each
+    /// remaining reach costs one `pop` rather than a re-walk.
+    #[inline]
+    fn over_cap(&self) -> bool {
+        self.pattern.len() > self.cap
+    }
+
+    /// Switch this solve to whole-basis sweeps: mark every position and clear
+    /// `order` for the caller to fill with its own natural topological order.
+    ///
+    /// Marking all of `mark`/`pattern` is what keeps the zeroed-accumulator
+    /// contract intact. The sweep about to run writes across the whole
+    /// accumulator, so the reset list has to cover the whole accumulator; a
+    /// nonzero left outside `pattern` would not corrupt this solve but the
+    /// *next* one. That makes `reset()` `O(m)` here, which is the right price
+    /// in a regime where the answer itself is `Theta(m)`.
+    fn go_dense(&mut self, m: usize) {
+        if !self.dense {
+            self.dense = true;
+            self.fallbacks += 1;
+        }
+        if self.pattern.len() < m {
+            self.mark.fill(true);
+            self.pattern.clear();
+            self.pattern.extend(0..m);
+        }
+        self.order.clear();
+        self.work += m;
     }
 }
 
@@ -169,28 +223,40 @@ impl SparseLu {
     /// you need the speedup without the trajectory change, the dense entry
     /// points already carry the reach-limited route.
     ///
-    /// # There is no density guard — route deliberately
+    /// # A dense answer falls back to a whole-basis sweep
     ///
-    /// When the solution is *dense* this is slower than [`SparseLu::ftran`]: it
-    /// sorts a length-`m` reach where the dense sweep just walks the factor in
-    /// order. Nothing here falls back;
-    /// [`LuParams::hyper_sparse_max_density`](super::LuParams::hyper_sparse_max_density)
-    /// governs only the dense entry points' route.
-    ///
-    /// Measured across 14 QPLIB relaxations driven by a dual simplex, against
-    /// the dense entry points, by mean density of the solution:
+    /// When the solution is dense, the reach machinery costs more than it saves:
+    /// it walks and sorts a length-`m` reach where the dense sweep just walks
+    /// the factor as stored. Measured across 14 QPLIB relaxations driven by a
+    /// dual simplex, against the dense entry points, by mean density of the
+    /// solution:
     ///
     /// | solution density | speedup (geomean) |
     /// |---|---|
     /// | under 10% | **1.167x** (n = 10, best 1.359x) |
     /// | 10% and over | **0.837x** (n = 4, worst 0.711x) |
     ///
-    /// log-log `r(density, speedup) = -0.944`. **Route on what the caller knows
-    /// about its right-hand sides** — and note that a dual simplex does *not*
-    /// know: the density of `B⁻¹A_q` is not available until the solve that
-    /// produces it has run. For that caller the honest answer today is to
-    /// measure on its own instances. Adding an internal fallback at the cap is
-    /// tracked as a follow-up; it would recover roughly half the gap.
+    /// log-log `r(density, speedup) = -0.944`. So once the pattern outgrows
+    /// [`LuParams::sparse_rhs_max_density`](super::LuParams::sparse_rhs_max_density)
+    /// · `m` (0.10 by default, the same cap and the same measurement as the
+    /// dense route's) this abandons the reach mid-walk and sweeps the whole
+    /// basis in natural order instead. The signature does not change: the
+    /// right-hand side is still read sparsely and only the nonzeros of `x` are
+    /// emitted, still sorted.
+    ///
+    /// The fallback is internal rather than the caller's to route because **the
+    /// caller that needs it cannot supply it**: a dual simplex does not know the
+    /// density of `B⁻¹A_q` until the solve that produces it has run. Set the cap
+    /// to `1.0` if you know your right-hand sides are sparse and want the solves
+    /// strictly work-proportional; [`SparseLu::sparse_rhs_fallbacks`] reports how
+    /// often it fired.
+    ///
+    /// One consequence worth knowing: on the fallback the `U` diagonal guard is
+    /// evaluated on every row, exactly as on [`SparseLu::ftran`], rather than
+    /// narrowed to the rows the solution depends on. A degenerate pivot the
+    /// answer does not depend on can therefore surface as
+    /// [`FeralError::SingularBasis`] on a dense right-hand side and not on a
+    /// sparse one — the same width the dense entry points have always had.
     pub fn ftran_sparse(
         &mut self,
         rhs: &[(usize, f64)],
@@ -242,15 +308,39 @@ impl SparseLu {
         self.hyper.work
     }
 
-    /// Size the sparse-solve workspace and make sure the `L` row index the
-    /// `Lᵀ` reach walks exists. Both are lazy: the sparse entry points work
+    /// Sparse solves that abandoned the reach and swept the whole basis because
+    /// the pattern outgrew
+    /// [`LuParams::sparse_rhs_max_density`](super::LuParams::sparse_rhs_max_density)
+    /// (issue #164).
+    ///
+    /// Like [`Self::hyper_sparse_sweeps`] on the dense route, this exists
+    /// because the fallback is *silent* — it returns the same answer either way,
+    /// so a differential test that does not assert on this counter can pass
+    /// having never run the path it means to test. Cumulative over the life of
+    /// the factor; reset when the workspace is resized.
+    pub fn sparse_rhs_fallbacks(&self) -> usize {
+        self.hyper.fallbacks
+    }
+
+    /// Size the sparse-solve workspace, refresh the fallback cap, and make sure
+    /// the `L` row index the `Lᵀ` reach walks exists.
+    ///
+    /// The workspace and the index are lazy, and the sparse entry points work
     /// regardless of [`LuParams::hyper_sparse_max_density`], which governs only
-    /// whether the *dense* entry points take their reach-limited route.
+    /// whether the *dense* entry points take their reach-limited route. The cap
+    /// they *do* read is
+    /// [`LuParams::sparse_rhs_max_density`](super::LuParams::sparse_rhs_max_density)
+    /// (issue #164), which is a separate knob.
     fn prepare_sparse_solve(&mut self) -> Result<(), FeralError> {
         let m = self.m;
         if !self.hyper.is_sized(m) {
             self.hyper = HyperWork::new(m);
         }
+        // Read the cap on every entry rather than caching it at factor time:
+        // `params` is owned by the factor and a caller may swap it between
+        // solves. `d = 1.0` gives `cap = m`, which no pattern can exceed.
+        let d = self.params.sparse_rhs_max_density.clamp(0.0, 1.0);
+        self.hyper.cap = (m as f64 * d) as usize;
         self.ensure_l_row_index();
         Ok(())
     }
@@ -289,6 +379,20 @@ impl SparseLu {
 
         // Gather, applying the column scaling: position `k` is original column
         // `qcol[k]`, and `ftran` finishes with `x[j] = d_col[j]·bt[j]`.
+        if hw.dense {
+            // The whole-basis fallback fired, so walk output indices instead:
+            // that emits in sorted order for free, where gathering by position
+            // would then have to sort `Theta(m)` pairs — the cost the fallback
+            // exists to avoid, reintroduced at the last step.
+            for j in 0..self.m {
+                let v = hw.w[self.qcol_inv[j]];
+                if v == 0.0 {
+                    continue;
+                }
+                out.push((j, self.scale.d_col[j] * v));
+            }
+            return Ok(());
+        }
         for &k in hw.pattern.iter() {
             let v = hw.w[k];
             if v == 0.0 {
@@ -332,6 +436,19 @@ impl SparseLu {
 
         // Position `k` is scaled row `perm[k]`, which is original row
         // `rperm[perm[k]]`; `btran` finishes with `x[rperm[i]] = d_row[i]·bt[i]`.
+        if hw.dense {
+            // Whole-basis fallback: walk original rows, inverting the same
+            // mapping the scatter uses. Sorted for free — see `ftran_sparse`.
+            for o in 0..self.m {
+                let i = self.scale_rperm_inv[o];
+                let v = hw.w[self.perm_inv[i]];
+                if v == 0.0 {
+                    continue;
+                }
+                out.push((o, self.scale.d_row[i] * v));
+            }
+            return Ok(());
+        }
         for &k in hw.pattern.iter() {
             let v = hw.w[k];
             if v == 0.0 {
@@ -344,10 +461,17 @@ impl SparseLu {
         Ok(())
     }
 
-    /// Sparse forward solve `L y = w` over the Gilbert–Peierls reach of the
-    /// current pattern. `L` is strictly lower triangular in fixed pivot-position
-    /// coordinates, so ascending position is a valid topological order.
-    fn l_solve_sparse(&self, hw: &mut HyperWork) {
+    /// Reach of the current pattern in `L`'s successor graph.
+    ///
+    /// `false` means the pattern outgrew [`HyperWork::cap`] and the caller must
+    /// sweep the whole basis instead (issue #164). The walk is abandoned the
+    /// moment that happens rather than completed and thrown away — the same
+    /// early-abort `ReachWork::push` does on the dense route — so an over-cap
+    /// solve pays a bounded fraction of the DFS, not all of it.
+    fn l_reach_sparse(&self, hw: &mut HyperWork) -> bool {
+        if hw.over_cap() {
+            return false;
+        }
         hw.begin_reach();
         while let Some(k) = hw.stack.pop() {
             for idx in self.l_col_ptr[k]..self.l_col_ptr[k + 1] {
@@ -356,9 +480,88 @@ impl SparseLu {
                     hw.stack.push(i);
                 }
             }
+            if hw.over_cap() {
+                return false;
+            }
         }
         hw.finish_reach();
-        hw.order.sort_unstable();
+        true
+    }
+
+    /// Reach in `Lᵀ`'s predecessor graph (row `i` feeds every column it appears
+    /// in). `false` when over cap; see [`SparseLu::l_reach_sparse`].
+    fn lt_reach_sparse(&self, hw: &mut HyperWork) -> bool {
+        if hw.over_cap() {
+            return false;
+        }
+        hw.begin_reach();
+        while let Some(i) = hw.stack.pop() {
+            for idx in self.l_row_ptr[i]..self.l_row_ptr[i + 1] {
+                let k = self.l_row_cols[idx];
+                if hw.touch(k) {
+                    hw.stack.push(k);
+                }
+            }
+            if hw.over_cap() {
+                return false;
+            }
+        }
+        hw.finish_reach();
+        true
+    }
+
+    /// Reach in `U`'s predecessor graph (`u_above[c]` holds the rows with an
+    /// entry in column `c`). `false` when over cap; see [`SparseLu::l_reach_sparse`].
+    fn u_reach_sparse(&self, hw: &mut HyperWork) -> bool {
+        if hw.over_cap() {
+            return false;
+        }
+        hw.begin_reach();
+        while let Some(c) = hw.stack.pop() {
+            for &k in self.u_above[c].iter() {
+                if hw.touch(k) {
+                    hw.stack.push(k);
+                }
+            }
+            if hw.over_cap() {
+                return false;
+            }
+        }
+        hw.finish_reach();
+        true
+    }
+
+    /// Reach in `Uᵀ`'s predecessor graph (row `i` feeds every column it holds).
+    /// `false` when over cap; see [`SparseLu::l_reach_sparse`].
+    fn ut_reach_sparse(&self, hw: &mut HyperWork) -> bool {
+        if hw.over_cap() {
+            return false;
+        }
+        hw.begin_reach();
+        while let Some(i) = hw.stack.pop() {
+            for &(c, _) in self.u_rows[i].iter().skip(1) {
+                if hw.touch(c) {
+                    hw.stack.push(c);
+                }
+            }
+            if hw.over_cap() {
+                return false;
+            }
+        }
+        hw.finish_reach();
+        true
+    }
+
+    /// Sparse forward solve `L y = w` over the Gilbert–Peierls reach of the
+    /// current pattern. `L` is strictly lower triangular in fixed pivot-position
+    /// coordinates, so ascending position is a valid topological order.
+    fn l_solve_sparse(&self, hw: &mut HyperWork) {
+        if self.l_reach_sparse(hw) {
+            hw.order.sort_unstable();
+        } else {
+            hw.go_dense(self.m);
+            hw.order.extend(0..self.m);
+        }
         let HyperWork { w, order, work, .. } = hw;
         for &k in order.iter() {
             let yk = w[k];
@@ -377,17 +580,12 @@ impl SparseLu {
     /// (row `i` feeds every column it appears in). Descending position is the
     /// topological order.
     fn lt_solve_sparse(&self, hw: &mut HyperWork) {
-        hw.begin_reach();
-        while let Some(i) = hw.stack.pop() {
-            for idx in self.l_row_ptr[i]..self.l_row_ptr[i + 1] {
-                let k = self.l_row_cols[idx];
-                if hw.touch(k) {
-                    hw.stack.push(k);
-                }
-            }
+        if self.lt_reach_sparse(hw) {
+            hw.order.sort_unstable_by_key(|&k| std::cmp::Reverse(k));
+        } else {
+            hw.go_dense(self.m);
+            hw.order.extend((0..self.m).rev());
         }
-        hw.finish_reach();
-        hw.order.sort_unstable_by_key(|&k| std::cmp::Reverse(k));
         let HyperWork { w, order, work, .. } = hw;
         for &k in order.iter() {
             let (lo, hi) = (self.l_col_ptr[k], self.l_col_ptr[k + 1]);
@@ -405,17 +603,14 @@ impl SparseLu {
     /// triangular *rank* — not position index — is the topological order, since
     /// `U` is upper triangular in `uperm` order once an update has permuted it.
     fn u_solve_sparse(&self, hw: &mut HyperWork) -> Result<(), FeralError> {
-        hw.begin_reach();
-        while let Some(c) = hw.stack.pop() {
-            for &k in self.u_above[c].iter() {
-                if hw.touch(k) {
-                    hw.stack.push(k);
-                }
-            }
+        if self.u_reach_sparse(hw) {
+            let uperm = &self.uperm;
+            hw.order.sort_unstable_by(|&a, &b| uperm[b].cmp(&uperm[a]));
+        } else {
+            hw.go_dense(self.m);
+            hw.order
+                .extend((0..self.m).rev().map(|rank| self.uperm_inv[rank]));
         }
-        hw.finish_reach();
-        let uperm = &self.uperm;
-        hw.order.sort_unstable_by(|&a, &b| uperm[b].cmp(&uperm[a]));
         let HyperWork { w, order, work, .. } = hw;
         for &k in order.iter() {
             let row = &self.u_rows[k];
@@ -440,19 +635,24 @@ impl SparseLu {
     /// Sparse forward solve `Uᵀ z = w` over the reach in `Uᵀ`'s predecessor
     /// graph (row `i` feeds every column it holds). Increasing triangular rank.
     fn ut_solve_sparse(&self, hw: &mut HyperWork) -> Result<(), FeralError> {
-        hw.begin_reach();
-        while let Some(i) = hw.stack.pop() {
-            for &(c, _) in self.u_rows[i].iter().skip(1) {
-                if hw.touch(c) {
-                    hw.stack.push(c);
-                }
-            }
+        if self.ut_reach_sparse(hw) {
+            let uperm = &self.uperm;
+            hw.order.sort_unstable_by(|&a, &b| uperm[a].cmp(&uperm[b]));
+        } else {
+            hw.go_dense(self.m);
+            hw.order
+                .extend((0..self.m).map(|rank| self.uperm_inv[rank]));
         }
-        hw.finish_reach();
-        let uperm = &self.uperm;
-        hw.order.sort_unstable_by(|&a, &b| uperm[a].cmp(&uperm[b]));
         let HyperWork { w, order, work, .. } = hw;
         for &i in order.iter() {
+            // Hoisted above the `u_rows[i]` access for the same reason the dense
+            // `ut_solve` hoists it: one heap allocation per row, so touching a
+            // row that scatters nothing still costs a cache miss — `m` of them
+            // once the whole-basis fallback fires. A zero scatters nothing, and
+            // `si = 0/d` would write back the zero already there.
+            if w[i] == 0.0 {
+                continue;
+            }
             let row = &self.u_rows[i];
             let &(dc, d) = row.first().ok_or(FeralError::SingularBasis {
                 column: self.qcol[i],

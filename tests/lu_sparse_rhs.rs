@@ -432,8 +432,21 @@ fn empty_rhs_gives_empty_solution() {
 /// parameter governs whether the *dense* entry points take their reach-limited
 /// route. A sparse-in/sparse-out solve is reach-based by construction, and must
 /// work — and be work-proportional — even with the dense route switched off.
+///
+/// The two knobs are independent, so both settings of the *other* one
+/// (`sparse_rhs_max_density`, issue #164) are run here. The work bound is
+/// asserted only with the fallback off: with it on, a reach that outgrows the
+/// cap deliberately spends `O(m)`, which is the one thing this assertion was
+/// written to catch in the case where it is a bug (a missing `L` row index
+/// degenerating the `Lᵀ` reach). Correctness is asserted for both.
 #[test]
 fn sparse_entry_points_work_with_the_dense_route_disabled() {
+    for sparse_cap in [1.0, LuParams::default().sparse_rhs_max_density] {
+        sparse_entry_points_with_dense_route_off(sparse_cap);
+    }
+}
+
+fn sparse_entry_points_with_dense_route_off(sparse_cap: f64) {
     let m = 200;
     let cols = lp_basis(m, 20, 4, 0x77);
     let a = SparseColMatrix::from_sparse_columns(m, &cols).expect("basis");
@@ -443,6 +456,7 @@ fn sparse_entry_points_work_with_the_dense_route_disabled() {
         &sym,
         LuParams {
             hyper_sparse_max_density: 0.0,
+            sparse_rhs_max_density: sparse_cap,
             ..LuParams::default()
         },
     )
@@ -473,11 +487,18 @@ fn sparse_entry_points_work_with_the_dense_route_disabled() {
         "the dense route must still be off"
     );
     assert!(worst < 1e-12, "diverged by {worst:e}");
-    assert!(
-        worst_work < m,
-        "worst-case work {worst_work} should stay under m={m} — the lazily \
-         built L row index is missing and the Lᵀ reach silently degenerated"
-    );
+    if sparse_cap >= 1.0 {
+        assert_eq!(
+            lu.sparse_rhs_fallbacks(),
+            0,
+            "a cap of 1.0 must never fall back"
+        );
+        assert!(
+            worst_work < m,
+            "worst-case work {worst_work} should stay under m={m} — the lazily \
+             built L row index is missing and the Lᵀ reach silently degenerated"
+        );
+    }
 }
 
 /// **Composition with the dense-bump route (issue #161 part A, PR #160).**
@@ -538,5 +559,201 @@ fn sparse_solves_compose_with_the_dense_bump_route() {
         worst < 1e-10,
         "sparse solves diverged from the dense entry point on a dense-bump \
          factor: {worst:e}"
+    );
+}
+
+/// Build a factor with an explicit sparse-rhs density cap (issue #164).
+fn factor_capped(cols: &[Vec<(usize, f64)>], m: usize, cap: f64) -> SparseLu {
+    let a = SparseColMatrix::from_sparse_columns(m, cols).expect("basis");
+    let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+    SparseLu::factor(
+        &a,
+        &sym,
+        LuParams {
+            sparse_rhs_max_density: cap,
+            ..LuParams::default()
+        },
+    )
+    .expect("factor")
+}
+
+/// **Issue #164 — the whole-basis fallback returns the same solution.**
+///
+/// Once the pattern outgrows `sparse_rhs_max_density · m` the solve abandons
+/// its reach and sweeps the basis in natural order instead. That is a different
+/// summation order over the same substitution, so the contract is agreement to
+/// round-off with *both* the un-capped sparse route and the dense entry point —
+/// three routes, one answer.
+///
+/// The right-hand sides deliberately span the cap: 1 nonzero (nothing near it),
+/// up to 32 (well past it on this basis, which is the regime the fallback is
+/// for). `sparse_rhs_fallbacks()` is asserted in both directions so the test
+/// cannot pass vacuously — neither by never firing the fallback nor by firing
+/// it in the arm that is supposed to have it switched off.
+#[test]
+fn the_density_fallback_agrees_with_the_reach_route_and_the_dense_api() {
+    let m = 300;
+    let cols = lp_basis(m, 60, 4, 0x164);
+    let mut never = factor_capped(&cols, m, 1.0);
+    let mut always = factor_capped(&cols, m, 0.0);
+    let mut capped = factor_capped(&cols, m, 0.10);
+    let mut oracle = factor_capped(&cols, m, 1.0);
+
+    let mut rng = Rng(0xD0D0_1640);
+    let mut out = Vec::new();
+    let mut worst = 0.0_f64;
+    for t in 0..48 {
+        let nnz = 1usize << (t % 6);
+        let mut rhs: Vec<(usize, f64)> = Vec::new();
+        let mut seen = vec![false; m];
+        while rhs.len() < nnz {
+            let i = rng.below(m);
+            if !seen[i] {
+                seen[i] = true;
+                rhs.push((i, rng.unit() * 2.0 - 1.0));
+            }
+        }
+        rhs.sort_unstable_by_key(|&(i, _)| i);
+
+        for forward in [true, false] {
+            let mut expect = vec![0.0; m];
+            for &(i, v) in rhs.iter() {
+                expect[i] = v;
+            }
+            if forward {
+                oracle.ftran(&mut expect).expect("ftran");
+            } else {
+                oracle.btran(&mut expect).expect("btran");
+            }
+
+            for lu in [&mut never, &mut always, &mut capped] {
+                if forward {
+                    lu.ftran_sparse(&rhs, &mut out).expect("ftran_sparse");
+                } else {
+                    lu.btran_sparse(&rhs, &mut out).expect("btran_sparse");
+                }
+                assert!(
+                    out.windows(2).all(|w| w[0].0 < w[1].0),
+                    "the solution must come back sorted by index and deduplicated"
+                );
+                worst = worst.max(max_abs_diff(&expect, &densify(&out, m)));
+            }
+        }
+    }
+
+    assert!(worst < 1e-9, "the three routes diverged by {worst:e}");
+    assert_eq!(
+        never.sparse_rhs_fallbacks(),
+        0,
+        "a cap of 1.0 must never fall back — no pattern can exceed m"
+    );
+    assert_eq!(
+        always.sparse_rhs_fallbacks(),
+        96,
+        "a cap of 0.0 must fall back on every one of the 96 nonempty solves"
+    );
+    let fired = capped.sparse_rhs_fallbacks();
+    assert!(
+        fired > 0 && fired < 96,
+        "the shipped cap fired on {fired}/96 solves; the fixture is supposed to \
+         straddle it, so 0 (fallback never tested) and 96 (reach never tested) \
+         are both vacuous"
+    );
+}
+
+/// The fallback must leave the accumulator all-zero like every other exit path.
+///
+/// It is the one path that writes *outside* the reach, so its reset list has to
+/// cover the whole basis rather than the touched positions — get that wrong and
+/// the damage lands on the next solve, not this one. So the dense-answer solves
+/// that trip the fallback are interleaved with unit-vector solves that do not,
+/// and the sparse ones are checked against the dense oracle every time.
+#[test]
+fn the_density_fallback_restores_the_zeroed_accumulator() {
+    let m = 240;
+    let cols = lp_basis(m, 48, 4, 0xC1EA);
+    let mut lu = factor_capped(&cols, m, 0.10);
+    let mut oracle = factor_capped(&cols, m, 1.0);
+
+    let mut rng = Rng(0xC1EA_1640);
+    let mut out = Vec::new();
+    let mut worst = 0.0_f64;
+    for t in 0..32 {
+        // A dense right-hand side, to trip the fallback.
+        let dense_rhs: Vec<(usize, f64)> = (0..m).map(|i| (i, rng.unit() + 0.5)).collect();
+        lu.ftran_sparse(&dense_rhs, &mut out).expect("ftran_sparse");
+        lu.btran_sparse(&dense_rhs, &mut out).expect("btran_sparse");
+
+        // Then a solve whose answer is tiny: it must not see a scrap of the
+        // dense one left behind in the accumulator.
+        let k = (t * 37 + 5) % m;
+        for forward in [true, false] {
+            let mut expect = vec![0.0; m];
+            expect[k] = 1.0;
+            if forward {
+                oracle.ftran(&mut expect).expect("ftran");
+                lu.ftran_sparse(&[(k, 1.0)], &mut out)
+                    .expect("ftran_sparse");
+            } else {
+                oracle.btran(&mut expect).expect("btran");
+                lu.btran_sparse(&[(k, 1.0)], &mut out)
+                    .expect("btran_sparse");
+            }
+            worst = worst.max(max_abs_diff(&expect, &densify(&out, m)));
+        }
+    }
+    assert!(
+        lu.sparse_rhs_fallbacks() >= 64,
+        "the dense right-hand sides were supposed to trip the fallback on every \
+         one of the 64 solves, got {}",
+        lu.sparse_rhs_fallbacks()
+    );
+    assert!(
+        worst < 1e-9,
+        "a solve after a whole-basis sweep diverged by {worst:e} — the \
+         accumulator was not restored"
+    );
+}
+
+/// `sparse_rhs_max_density` outside `[0, 1]` is rejected before any
+/// factorization consumes it. `NaN` matters most: `NaN as usize` is `0` in Rust,
+/// so a silent accept would route *every* sparse solve to the whole-basis sweep
+/// and quietly turn the work-proportional entry points into `O(m)` ones.
+#[test]
+fn out_of_range_sparse_rhs_density_is_rejected() {
+    let m = 32;
+    let cols = lp_basis(m, 4, 3, 0x1640);
+    let a = SparseColMatrix::from_sparse_columns(m, &cols).expect("basis");
+    let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+    let params = |d: f64| LuParams {
+        sparse_rhs_max_density: d,
+        ..LuParams::default()
+    };
+    for bad in [-0.1, 1.5, f64::NAN, f64::INFINITY] {
+        assert!(
+            matches!(
+                SparseLu::factor(&a, &sym, params(bad)),
+                Err(FeralError::InvalidInput(_))
+            ),
+            "sparse_rhs_max_density = {bad} must be rejected"
+        );
+    }
+    for ok in [0.0, 0.25, 1.0] {
+        assert!(SparseLu::factor(&a, &sym, params(ok)).is_ok());
+    }
+}
+
+/// The default is pinned to the same 0.10 the dense route uses, from the same
+/// measurement: across 14 QPLIB relaxations under a dual simplex, the sparse
+/// entry points were 1.167x geomean below 10% solution density and 0.837x at or
+/// above it. Changing it needs a real-basis measurement — see the parameter's
+/// doc comment.
+#[test]
+fn default_sparse_rhs_density_cap_is_pinned_to_the_measured_value() {
+    let p = LuParams::default();
+    assert!(
+        (p.sparse_rhs_max_density - 0.10).abs() < 1e-12,
+        "default sparse_rhs_max_density is {}, expected 0.10",
+        p.sparse_rhs_max_density
     );
 }
