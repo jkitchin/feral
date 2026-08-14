@@ -21,6 +21,15 @@ All notable changes to FERAL will be documented in this file.
   it was denser (n=4) — log-log r(density, speedup) = **-0.944**. The reach is
   computed inside the solve, so the information needed to route arrives before
   the cost is paid.
+- **What it recovers.** Same 14 instances, four arms interleaved in one binary so
+  the guard is the only difference between two of them: the sparse API is
+  **1.066x** geomean with the guard off (min 0.735x) and **1.197x** with it on
+  (min 0.998x). The guard alone is 1.122x geomean, 1.393x on the densest
+  instance, and no instance regresses below parity any more. The dense bucket
+  goes 0.839x -> 1.067x. Objectives are bit-identical across all three arms on
+  all 14 instances, so this is speed and not a trajectory change — though the
+  unit tests assert `< 1e-9` rather than equality between the routes, which is
+  the guarantee actually being made.
 - `SparseLu::sparse_rhs_fallbacks()` counts how many solves took the fallback, so
   a caller can tell an inert guard from a working one. `1.0` disables the
   fallback (always reach), `0.0` forces it (always sweep).

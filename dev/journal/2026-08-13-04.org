@@ -82,3 +82,62 @@ vs 2.17 ms on the same basis). Different harnesses, same conclusion, but
 two different numbers for one fact in one repo is a trap for the next
 reader. Rewrote the CHANGELOG onto the in-tree numbers so the doc
 comment is the single source, and dropped "now states" — it already did.
+
+* 22:05 :issue164:benchmark:discopt:
+Measured what the #164 guard actually recovers, end to end. Four arms
+interleaved in ONE binary (one feral =b8860331=, one discopt), the =api=
+arm split so the guard is the only difference between two of them:
+
+| arm  | sparse API | =sparse_rhs_max_density= | ordering |
+| off  | no         | n/a                      | AMD      |
+| apiX | yes        | 1.0 (guard off)          | AMD      |
+| api  | yes        | 0.10 (guard on)          | AMD      |
+| all  | yes        | 0.10                     | peel     |
+
+14 QPLIB relaxation LPs, 2 reps, best-of. Added
+=DISCOPT_LU_SPARSE_RHS_MAX_DENSITY= to
+=crates/discopt-core/src/lp/simplex/linsolve.rs= as a probe (uncommitted
+in =/private/tmp/wt1008ab=, alongside the existing
+=DISCOPT_LU_HYPER_MAX_DENSITY= probe).
+
+|                              | geomean | median | min   | max   |
+| apiX/off (PR162 as reviewed) | 1.066x  | 1.083x | 0.735x| 1.405x|
+| api/off  (with the guard)    | 1.197x  | 1.196x | 0.998x| 1.408x|
+| api/apiX (the guard alone)   | 1.122x  | 1.122x | 0.929x| 1.393x|
+
+The review's =apiX= number reproduces (1.066x now vs 1.061x then, same
+binary design, different day). **The guard beats the review's own
+prediction.** The review computed an "ideal guard" bound of 1.116x by
+taking max(1, speedup) per instance — i.e. assuming the best a guard can
+do is claw the regressing instances back to parity. Actual: 1.197x.
+
+The bound was too low because the review's density column is the *mean*
+density of alpha over the solve, and the guard routes per solve. Even on
+instances whose mean alpha is nominally sparse, individual solves are
+dense and the guard catches them; the <10% bucket went 1.174x -> 1.253x.
+Nor does the mean-alpha column say anything about the btran side
+(=rho = e_r^T B^-1=), which the guard covers too.
+
+Dense bucket (alpha >= 10%), n=4: 0.839x -> 1.067x. Every regression is
+gone; the worst instance on the whole panel is now 0.998x, i.e. parity.
+QPLIB_2055, the extreme at 61.95% dense, goes 0.735x -> 1.024x, with the
+guard alone worth 1.393x on it.
+
+* 22:08 :issue164:correctness:
+Objective check across the panel: =off=, =apiX= and =api= agree
+**bit-for-bit on all 14 instances**. So the guard changes speed and not
+the answer, and the sparse API's trajectory coincided with the dense
+route's on every instance here.
+
+That is an observation, not a guarantee, and it must not be written down
+as one. The unit test asserts =< 1e-9= between the routes, not
+=assert_eq!=, deliberately (review finding 2) — the two routes accumulate
+in different orders and are entitled to differ in the last bits. What
+this panel shows is that on these 14 they did not.
+
+The only arm that moves an objective is =all= — the peel ordering, on 8
+of 14 instances, the known #163 trajectory effect. On QPLIB_2055 that is
+2314023.629152459 vs ...471 (~5e-15 relative) and the peel is 0.387x
+there, a 2.6x slowdown, consistent with the review. Nothing in the
+default path is affected: =LuOrderingParams::default()= is
+=triangularize: false=.
