@@ -12,7 +12,23 @@
 //! Since issue #163 the peel is opt-in and `analyze` is whole-basis AMD, which
 //! reports no bump and so can never take this route.
 
-use feral::{FeralError, LuParams, LuSingularAction, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{
+    FeralError, LuParams, LuPivoting, LuSingularAction, SparseColMatrix, SparseLu, SparseLuSymbolic,
+};
+
+/// Defaults with the pivot rule pinned to `GilbertPeierls`.
+///
+/// Every test in this file is about the dense-bump route, which factors the
+/// residual bump left by a peeling symbolic. The shipped default is `Markowitz`
+/// (#171), which has no symbolic and no peel, so it cannot reach that route at
+/// all — leaving the default here would make the whole file pass vacuously
+/// against a factorization that never ran the code under test.
+fn gp() -> LuParams {
+    LuParams {
+        pivoting: LuPivoting::GilbertPeierls,
+        ..LuParams::default()
+    }
+}
 
 /// Deterministic LCG — no rand dependency, and reproducible failures.
 struct Rng(u64);
@@ -139,7 +155,7 @@ fn both_routes(
     let sym = SparseLuSymbolic::analyze_triangularized(a).expect("analyze");
     let params = LuParams {
         dense_bump_max_dim: max_dim,
-        ..LuParams::default()
+        ..gp()
     };
     let mut lu = SparseLu::factor(a, &sym, params).expect("factor");
 
@@ -226,7 +242,7 @@ fn dense_bump_route_is_off_by_default() {
         "the route must be opt-in"
     );
     let sym = SparseLuSymbolic::analyze_triangularized(&a).expect("analyze");
-    let lu = SparseLu::factor(&a, &sym, LuParams::default()).expect("factor");
+    let lu = SparseLu::factor(&a, &sym, gp()).expect("factor");
     assert!(lu.factor_nnz() > 0);
 }
 
@@ -240,10 +256,10 @@ fn bump_above_the_cap_stays_on_the_sparse_route() {
     // still be correct and identical to the plain sparse one.
     let small = LuParams {
         dense_bump_max_dim: bump - 1,
-        ..LuParams::default()
+        ..gp()
     };
     let a_lu = SparseLu::factor(&a, &sym, small).expect("factor");
-    let b_lu = SparseLu::factor(&a, &sym, LuParams::default()).expect("factor");
+    let b_lu = SparseLu::factor(&a, &sym, gp()).expect("factor");
     assert!(
         !a_lu.used_dense_bump(),
         "cap below the bump must not take the route"
@@ -290,7 +306,7 @@ fn singular_bump_is_reported_on_both_routes() {
     let sym = SparseLuSymbolic::analyze_triangularized(&a).expect("analyze");
     let base = LuParams {
         on_singular: LuSingularAction::Fail,
-        ..LuParams::default()
+        ..gp()
     };
     let sparse = SparseLu::factor(&a, &sym, base.clone());
     let dense = SparseLu::factor(
@@ -356,7 +372,7 @@ fn an_unpeeled_whole_basis_stays_on_the_sparse_route() {
         // Far above `m`: if the gate keyed on dimension alone, every arm below
         // would take the dense route.
         dense_bump_max_dim: 4096,
-        ..LuParams::default()
+        ..gp()
     };
     assert!(
         m > params.dense_threshold,

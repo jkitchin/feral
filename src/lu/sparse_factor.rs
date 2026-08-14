@@ -14,7 +14,7 @@
 
 use super::scaling::{compute_lu_scale, LuScale};
 use super::sparse_symbolic::SparseLuSymbolic;
-use super::{LuParams, LuScaling, LuSingularAction, RefactorCause};
+use super::{LuParams, LuPivoting, LuScaling, LuSingularAction, RefactorCause};
 use crate::error::FeralError;
 use crate::lu::sparse_matrix::SparseColMatrix;
 
@@ -157,6 +157,11 @@ pub struct SparseLu {
     /// hold, so a caller measuring it must read this rather than infer it from
     /// the parameter.
     pub(super) used_dense_bump: bool,
+    /// True when the factorization used threshold-Markowitz pivoting rather
+    /// than the caller's column order. Like `used_dense_bump`, this exists so
+    /// a measurement can assert which route ran instead of inferring it from
+    /// the parameter.
+    pub(super) used_markowitz: bool,
     /// Dimension of the residual bump after triangularization.
     pub(super) bump_dim: usize,
     pub(super) params: LuParams,
@@ -251,11 +256,23 @@ impl SparseLu {
     ) -> Result<Self, FeralError> {
         params.validate()?;
         let m = a.m;
+        // Checked before the dispatch below, not after: `Markowitz` ignores
+        // `symbolic`, but a caller who hands us a symbolic for the wrong
+        // dimension has a bug either way and should hear about it on both
+        // routes rather than only on one.
         if symbolic.m != m {
             return Err(FeralError::DimensionMismatch {
                 expected: m,
                 got: symbolic.m,
             });
+        }
+        // `Markowitz` chooses its own column order, so `symbolic` carries no
+        // ordering information on that route and is deliberately unused beyond
+        // the dimension check. The default is `Markowitz` (#171); callers
+        // comparing orderings must pin `GilbertPeierls`. `used_markowitz()`
+        // reports which rule ran.
+        if params.pivoting == LuPivoting::Markowitz {
+            return Self::factor_markowitz(a, params);
         }
         // Scaling: factor Ã = D_row Π A D_col (pattern is invariant under row
         // permutation/scaling, so the column ordering `symbolic` still applies).
@@ -619,6 +636,7 @@ impl SparseLu {
             a_max,
             bump_dim,
             dense_done,
+            false,
             reach_visits,
         ))
     }
@@ -713,6 +731,7 @@ impl SparseLu {
             mk.a_max,
             0,
             false,
+            true,
             0,
         ))
     }
@@ -754,6 +773,16 @@ impl SparseLu {
     /// vacuously against the fallback.
     pub fn used_dense_bump(&self) -> bool {
         self.used_dense_bump
+    }
+
+    /// True when threshold-Markowitz pivoting produced this factorization.
+    ///
+    /// [`LuParams::pivoting`] defaults to [`LuPivoting::Markowitz`], and the
+    /// `GilbertPeierls` route is also reachable by explicit request, so a
+    /// measurement that cares which rule ran must read this rather than infer
+    /// it from the parameter it passed.
+    pub fn used_markowitz(&self) -> bool {
+        self.used_markowitz
     }
 
     /// Dimension of the residual bump left by triangularization.
@@ -965,6 +994,7 @@ fn assemble(
     a_max: f64,
     bump_dim: usize,
     used_dense_bump: bool,
+    used_markowitz: bool,
     reach_visits: usize,
 ) -> SparseLu {
     // Row-wise index of L and the reach workspace: built only when the
@@ -1031,6 +1061,7 @@ fn assemble(
         a_max,
         reach_visits,
         used_dense_bump,
+        used_markowitz,
         bump_dim,
         params,
         scale,

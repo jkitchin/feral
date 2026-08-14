@@ -9,7 +9,7 @@
 
 use std::time::Instant;
 
-use feral::{LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{LuParams, LuPivoting, SparseColMatrix, SparseLu, SparseLuSymbolic};
 
 // Deterministic LCG (no Instant/rand needed for reproducibility).
 struct Rng(u64);
@@ -50,7 +50,12 @@ fn main() {
     let cols = random_basis(m, density, 0xC0FFEE);
     let a = SparseColMatrix::from_sparse_columns(m, &cols).expect("valid basis");
     let nnz: usize = cols.iter().map(|c| c.len()).sum();
-    let params = LuParams::default();
+    // Pinned: this probe attributes time to the symbolic/numeric phases of the
+    // Gilbert-Peierls route, which the `Markowitz` default does not have.
+    let params = LuParams {
+        pivoting: LuPivoting::GilbertPeierls,
+        ..LuParams::default()
+    };
 
     // Warm + time each phase separately. Analyze and factor are the
     // per-refactorization costs; ftran/btran are the per-pivot solve costs.

@@ -94,6 +94,32 @@ pub enum LuScaling {
     Mc64ThenInfNorm,
 }
 
+/// Which pivot rule [`SparseLu::factor`](super::SparseLu::factor) uses.
+///
+/// The two rules differ in *when* the column order is chosen, which is why
+/// they are a parameter rather than two unrelated entry points:
+///
+/// - [`GilbertPeierls`](LuPivoting::GilbertPeierls) fixes the column order up
+///   front from the caller's [`SparseLuSymbolic`](super::SparseLuSymbolic) and
+///   then pivots for stability within it. This is the same algorithm class as
+///   SuperLU/COLAMD.
+/// - [`Markowitz`](LuPivoting::Markowitz) chooses each pivot `(i, j)` during
+///   the factorization to minimise `(r_i - 1) * (c_j - 1)` subject to
+///   `|a_ij| >= markowitz_threshold * max_k |a_kj|`, so the ordering responds
+///   to the fill the factorization actually creates.
+///
+/// **`Markowitz` ignores the `symbolic` argument**, because it does not use a
+/// precomputed column order. Code that compares orderings must therefore pin
+/// `GilbertPeierls` explicitly, and [`SparseLu::used_markowitz`] reports which
+/// rule actually ran so a measurement can assert on it rather than infer it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LuPivoting {
+    /// Caller-supplied column order (AMD/METIS/AMF/...) + partial pivoting.
+    GilbertPeierls,
+    /// Threshold-Markowitz: the column order is chosen during factorization.
+    Markowitz,
+}
+
 /// Tuning parameters for the LU factorization and its updates.
 ///
 /// Mirrors the shape of [`crate::dense::factor::BunchKaufmanParams`].
@@ -122,6 +148,13 @@ pub struct LuParams {
     pub max_updates: usize,
     /// Bases with `m` at or below this use the dense path unconditionally.
     pub dense_threshold: usize,
+    /// Pivot rule for [`SparseLu::factor`](super::SparseLu::factor).
+    ///
+    /// Defaults to [`LuPivoting::Markowitz`] (issue #171). On the 16-basis LP
+    /// corpus that default gives `factor_nnz()/nnz(B)` geomean 1.06x against
+    /// 2.77x for `GilbertPeierls` on AMD, and is faster on 15 of the 16.
+    /// Set `GilbertPeierls` to factor in a caller-chosen column order.
+    pub pivoting: LuPivoting,
     /// Maximum dimension of a post-triangularization **bump** that
     /// [`SparseLu::factor`](super::SparseLu::factor) routes through the dense
     /// kernel instead of the sparse scatter kernel. `0` (the default) disables
@@ -421,6 +454,7 @@ impl Default for LuParams {
             max_growth: 1e8,
             max_updates: 64,
             dense_threshold: 128,
+            pivoting: LuPivoting::Markowitz,
             dense_bump_max_dim: 0,
             scaling: LuScaling::None,
             refine_steps: 0,

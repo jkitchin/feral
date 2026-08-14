@@ -5,7 +5,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use feral::lu::sparse_matrix::SparseColMatrix;
-use feral::lu::{DenseLu, LuParams, LuSingularAction, SparseLu, SparseLuSymbolic};
+use feral::lu::{DenseLu, LuParams, LuPivoting, LuSingularAction, SparseLu, SparseLuSymbolic};
 use feral::FeralError;
 
 fn cols_from_rows(rows: &[&[f64]]) -> (Vec<Vec<f64>>, usize) {
@@ -262,7 +262,12 @@ fn perturb_chooses_largest_magnitude_row_matching_dense() {
         vec![1.0, 0.0, 0.0],   // col 2: e_0
     ];
     let m = 3;
+    // L13 is a *Gilbert-Peierls* contract: it pins the sparse GP pivot choice
+    // to the dense path's. Threshold-Markowitz (the default since #171) picks
+    // its own row and column order, so under the default this test would
+    // compare two different factorizations and say nothing about L13.
     let params = LuParams {
+        pivoting: LuPivoting::GilbertPeierls,
         on_singular: LuSingularAction::PerturbToEps { abs_floor: 1e-10 },
         ..LuParams::default()
     };
@@ -555,7 +560,14 @@ fn factor_traversal_is_subquadratic() {
     let work = |n: usize| -> usize {
         let a = tridiagonal(n);
         let sym = SparseLuSymbolic::natural(n);
-        let lu = SparseLu::factor(&a, &sym, LuParams::default()).expect("factor");
+        // `reach_visits()` counts the Gilbert-Peierls symbolic reach, which the
+        // Markowitz route (the default since #171) does not run — under the
+        // default the counter is 0 and the comparison below is vacuous.
+        let params = LuParams {
+            pivoting: LuPivoting::GilbertPeierls,
+            ..LuParams::default()
+        };
+        let lu = SparseLu::factor(&a, &sym, params).expect("factor");
         // Sanity: tridiagonal has no fill.
         assert_eq!(lu.factor_nnz(), a.nnz());
         lu.reach_visits()

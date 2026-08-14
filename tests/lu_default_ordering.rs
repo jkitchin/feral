@@ -23,7 +23,7 @@
 //!
 //! See `dev/research/lu-ordering-and-kernel-2026-08-13.md`.
 
-use feral::{LuOrderingParams, LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{LuOrderingParams, LuParams, LuPivoting, SparseColMatrix, SparseLu, SparseLuSymbolic};
 
 /// An LP-shaped basis: a triangular border the peel can strip, wrapped around a
 /// bump it cannot. `nfront` column singletons, then a `bump`x`bump` dense block,
@@ -103,8 +103,14 @@ fn dense_bump_route_needs_the_peel_and_the_cap_together() {
     // The two are opted into as a pair (issue #163). Setting the cap without
     // the peeling constructor must be an inert no-op, not a partial opt-in.
     let a = lp_like_basis(40, 12, 25);
+    // `GilbertPeierls` is pinned because the dense-bump route lives on that
+    // route only: it factors the residual bump left by a peeling symbolic, and
+    // the `Markowitz` default (#171) has no symbolic and no peel. So under the
+    // shipped defaults `dense_bump_max_dim` is now inert twice over — this test
+    // is about the inner gate, and pinning is what keeps it testing that.
     let params = LuParams {
         dense_bump_max_dim: 4096,
+        pivoting: LuPivoting::GilbertPeierls,
         ..LuParams::default()
     };
 

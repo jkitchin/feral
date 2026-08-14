@@ -15,7 +15,7 @@
 //! threshold bound on `max|L|` holds, and that on structures where the dynamic
 //! choice is provably better it actually finds it.
 
-use feral::{FeralError, LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{FeralError, LuParams, LuPivoting, SparseColMatrix, SparseLu, SparseLuSymbolic};
 
 /// Deterministic LCG — no rand dependency, and reproducible failures.
 struct Rng(u64);
@@ -396,4 +396,76 @@ fn exact_cancellation_is_dropped_not_stored() {
         lu.factor_nnz(),
         nonzero
     );
+}
+
+/// `LuParams::pivoting` defaults to `Markowitz` (issue #171), and the choice is
+/// observable rather than inferred.
+///
+/// Both routes are silent — `factor` returns the same type either way — so a
+/// test that only checked the answer would pass whichever rule ran. That is the
+/// failure mode #168 recorded, hence the `used_markowitz()` assertions and the
+/// arrow-matrix fill witness: the two rules must disagree on this matrix, or the
+/// routing assertions would be vacuous.
+#[test]
+fn default_params_route_through_markowitz_and_the_choice_is_observable() {
+    // Arrow with the dense row/column first: a static order that eliminates the
+    // tip first fills in completely, Markowitz takes it last and fills nothing.
+    let m = 40;
+    let mut t: Vec<(usize, usize, f64)> = Vec::new();
+    for i in 0..m {
+        t.push((i, 0, if i == 0 { 4.0 } else { 1.0 }));
+    }
+    for j in 1..m {
+        t.push((0, j, 1.0));
+        t.push((j, j, 3.0));
+    }
+    let a = build(m, &mut t);
+    let sym = SparseLuSymbolic::analyze(&a).expect("analyze");
+
+    let dflt = SparseLu::factor(&a, &sym, LuParams::default()).expect("factor default");
+    assert!(
+        dflt.used_markowitz(),
+        "LuParams::default() must route through Markowitz (#171)"
+    );
+
+    let gp = SparseLu::factor(
+        &a,
+        &sym,
+        LuParams {
+            pivoting: LuPivoting::GilbertPeierls,
+            ..Default::default()
+        },
+    )
+    .expect("factor gilbert-peierls");
+    assert!(
+        !gp.used_markowitz(),
+        "an explicit GilbertPeierls request must not silently take the Markowitz route"
+    );
+
+    // The witness: without a fill gap the two assertions above could hold on a
+    // factorization that ignored the rule entirely.
+    assert!(
+        dflt.factor_nnz() < gp.factor_nnz(),
+        "the two rules must produce different fill on this arrow matrix, else the \
+         routing assertions are vacuous (markowitz {} vs gilbert-peierls {})",
+        dflt.factor_nnz(),
+        gp.factor_nnz()
+    );
+
+    // Routing is not allowed to cost correctness: both must still solve.
+    let d = dense_of(&a);
+    let x_true: Vec<f64> = (0..m).map(|i| 1.0 + i as f64).collect();
+    let b: Vec<f64> = (0..m)
+        .map(|i| (0..m).map(|j| d[i][j] * x_true[j]).sum())
+        .collect();
+    for lu in [dflt, gp].iter_mut() {
+        let mut x = b.clone();
+        lu.ftran(&mut x).expect("ftran");
+        let err = x
+            .iter()
+            .zip(x_true.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(err < 1e-9, "solve error {err}");
+    }
 }

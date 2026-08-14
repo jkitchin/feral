@@ -14,7 +14,7 @@
 //! `‖Bx − a‖∞` against the original basis is asserted too, so a bug that
 //! corrupts both routes identically cannot hide.
 
-use feral::{FeralError, LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{FeralError, LuParams, LuPivoting, SparseColMatrix, SparseLu, SparseLuSymbolic};
 
 /// Deterministic LCG — same generator as `src/bin/probe_lu_phases.rs`, so a
 /// failing seed can be replayed there.
@@ -490,7 +490,12 @@ fn reach_route_composes_with_the_dense_bump_route() {
     // `analyze_triangularized`, not `analyze`: since issue #163 the peel is
     // opt-in, and `dense_bump_max_dim` only applies to a symbolic that peeled.
     let sym = SparseLuSymbolic::analyze_triangularized(&a).expect("analyze");
+    // The dense-bump route lives on the Gilbert-Peierls path: it splices into
+    // the factor built from `sym`'s peel, and threshold-Markowitz (the default
+    // since #171) chooses its own column order and never peels. Leaving the
+    // default here would make `used_dense_bump()` false and this test vacuous.
     let mk = |d: f64| LuParams {
+        pivoting: LuPivoting::GilbertPeierls,
         dense_bump_max_dim: 512,
         hyper_sparse_max_density: d,
         ..LuParams::default()
