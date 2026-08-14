@@ -6572,3 +6572,59 @@ under review; it is an API-shape decision and the constructor pair is not wrong,
 only inconvenient.
 
 Evidence: `dev/research/lu-ordering-and-kernel-2026-08-13.md` § Correction.
+
+## 2026-08-13 — The sparse-rhs density guard is its own knob, and it falls back to the dense route wholesale (issue #164)
+
+`ftran_sparse`/`btran_sparse` shipped with no density guard, documented as
+"route on what the caller knows about its right-hand sides". A dual simplex
+cannot: the density of `alpha = B^-1 A_q` is a property of the answer, not of the
+question. Measured over 14 QPLIB relaxations, the sparse API is 1.167x geomean
+where the answer is under 10% dense (n=10) and 0.837x where it is denser (n=4),
+log-log r = -0.944. So the guard is needed. Two decisions about its shape:
+
+**1. `sparse_rhs_max_density` is a separate parameter from
+`hyper_sparse_max_density`, even though both default to 0.10.** They answer
+different questions. `hyper_sparse_max_density` asks whether a caller holding a
+*dense* vector should pay for a reach at all — the reach's own cost is the
+thing being capped. `sparse_rhs_max_density` asks whether a caller who has
+already committed to the sparse signature should keep using the reach when the
+answer turns out dense. Tying them together would have made
+`sparse_entry_points_work_with_the_dense_route_disabled` — which sets
+`hyper_sparse_max_density = 0` precisely to prove the sparse path does not
+depend on the dense route — assert the opposite of the new behavior. With two
+knobs that test survives as a parameterization over both caps instead of an
+assertion flip, and it still tests what it was written to test.
+
+**2. The fallback sweeps the whole basis rather than "skipping the sort".** The
+issue's literal suggestion — emit the reach unsorted and sweep `0..m` — does not
+survive contact with the code, for two reasons:
+
+- A dense sweep writes nonzeros into positions that are not in `pattern`, and
+  `pattern` *is* the O(touched) reset list that restores `HyperWork`'s
+  all-zero-between-calls contract. A nonzero left outside it silently seeds the
+  next solve.
+- `u_solve_sparse`'s `SingularBasis` guard is deliberately narrowed to the rows
+  the solution depends on (decisions.md, earlier today). Sweeping all `m` rows
+  widens it, so whether a basis is reported singular would depend on an
+  unrelated right-hand side's density. Preserving the narrowing needs a per-row
+  "does this position matter" test, which is the reach being abandoned.
+
+So the fallback marks the whole accumulator (making the reset list cover the
+sweep) and fills `order` with the natural topological order over `0..m`. The four
+kernels are untouched — they sweep whatever is in `order` — and the fallen-back
+solve is then bit-for-bit the dense entry point it is falling back to, guard
+width included. That is the right semantics for a fallback: it should be
+indistinguishable from the thing it falls back to, not a third behavior.
+
+The DFS is abandoned mid-walk rather than completed and then discarded, mirroring
+`ReachWork::push`'s early abort on the dense route, so an over-cap solve pays a
+bounded fraction of the reach. `over_cap` is monotone within a solve (`pattern`
+only grows), so the second and later kernels of a fallen-back solve cost one
+`pop`, not a re-walk.
+
+`SparseLu::sparse_rhs_fallbacks()` exists because there was no valid witness that
+the guard fired: `last_sparse_solve_work()` counts factor entries traversed,
+which exceeds `m` on the reach path too. Without a dedicated counter the tests
+could not tell an inert guard from a working one.
+
+Evidence: PR #162 review, findings 1 and 4; `dev/journal/2026-08-13-04.org`.

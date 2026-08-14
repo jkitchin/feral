@@ -4,6 +4,46 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+### Added — a density guard on `ftran_sparse`/`btran_sparse` (issue #164)
+
+- `LuParams::sparse_rhs_max_density` (default `0.10`). When a sparse-rhs solve's
+  reach exceeds that fraction of `m`, the depth-first search is abandoned and the
+  kernel sweeps the whole basis in natural topological order instead — exactly
+  what `SparseLu::ftran`/`btran` do. The four kernels are unchanged; the fallback
+  only changes what fills the sweep order, so a fallen-back solve *is* the dense
+  route, `SingularBasis` guard width included.
+- **Why.** The sparse entry points shipped in 0.15.1 with the density tradeoff
+  documented but unguarded, on the reasoning that the caller knows its
+  right-hand sides. A dual simplex does not: the density of `alpha = B^-1 A_q` is
+  not knowable until the solve that produces it has run. Measured on a downstream
+  dual simplex over 14 QPLIB relaxations, migrating to the sparse API was
+  **1.167x** geomean where `alpha` was under 10% dense (n=10) and **0.837x** where
+  it was denser (n=4) — log-log r(density, speedup) = **-0.944**. The reach is
+  computed inside the solve, so the information needed to route arrives before
+  the cost is paid.
+- `SparseLu::sparse_rhs_fallbacks()` counts how many solves took the fallback, so
+  a caller can tell an inert guard from a working one. `1.0` disables the
+  fallback (always reach), `0.0` forces it (always sweep).
+
+### Added — `SparseLuSymbolic::analyze_with` and `LuOrderingParams` (issue #165)
+
+- The column ordering is now a parameter rather than a choice of constructor:
+  `analyze_with(a, LuOrderingParams { triangularize })`. `analyze` and
+  `analyze_triangularized` remain, as the two thin wrappers over it, so nothing
+  changes for existing callers.
+- **Why.** #163's revert made the peel opt-in, which is right, but it left the
+  ordering A/B-able only by editing the call site — which is how the cost of the
+  default had to be measured. It is large: `analyze_triangularized` is
+  **4.2-9.8x** faster than `analyze` on the symbolic step across the in-tree
+  fixtures (21.28 ms vs 2.17 ms on QPLIB_1157, m=3937), and **1.306x geomean**
+  end to end across 14 QPLIB relaxations under a dual simplex. A simplex re-runs
+  the analysis on every refactorization, so that cost is multiplied by the
+  refactorization count, not amortized across it. `analyze`'s doc comment states
+  this next to the accuracy argument; the parameter makes it flippable without a
+  code change.
+- The Python binding gains a `triangularize` keyword (default `None` = follow
+  `dense_bump_max_dim > 0`, today's behaviour) and `sparse_rhs_max_density`.
+
 ### Fixed — `SingularBasis { column }` from the solve path named an internal pivot position
 
 - `usolve`, `ut_solve` and the new `ftran_sparse`/`btran_sparse` reported the

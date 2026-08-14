@@ -1,0 +1,84 @@
+#+TITLE: Session 2026-08-13-04 journal
+
+* 19:45 :issue164:issue165:setup:
+Picking up the two PR #162 review findings that the branch's own author
+session filed rather than fixed: #164 (no density guard on
+=ftran_sparse=/=btran_sparse=) and #165 (ordering reachable only as a second
+constructor name, not A/B-able as a parameter).
+
+Checked first whether this was already in flight. =origin/claude/issue-161-w05b75=
+moved 895ef65 -> 8c2326f at 22:23-22:25 UTC (cloud session "Issue 161", now
+idle): 12d1fcc fixed finding 3 in code, documented finding 2, and corrected
+finding 4's rationale across rustdoc/CHANGELOG/decisions. Its commit body says
+"NOT DONE HERE -- finding 1 ... Filed separately". Branch has not moved since;
+=gh pr list= shows only #162. So both fixes are mine to write.
+
+Working on branch =pr162-fixes= off 8c2326f in the =/private/tmp/feral-pr162=
+worktree -- which is also what =/private/tmp/wt1008ab= (discopt) patches
+=[patch.crates-io]= at, so the A/B panel can measure the fix directly.
+
+* 20:00 :issue164:design:
+Read both solve paths before designing. The dense route
+(=sparse_solve.rs=) already has the shape the sparse route needs: =reach_cap()=
+turns =hyper_sparse_max_density= into a node budget, and =ReachWork::push=
+*abandons the DFS the moment it exceeds the budget* rather than completing a
+reach it is going to throw away. The sparse route (=sparse_hyper.rs=) has no
+such bound anywhere.
+
+First design (issue #164's suggestion, "skip the sort and sweep 0..m") does not
+survive contact with the code:
+
+- the sweep must not write nonzeros into positions absent from =pattern= --
+  that is the =O(touched)= reset list, and a nonzero outside it silently seeds
+  the *next* solve. So a dense sweep has to mark as it writes, or mark
+  everything up front.
+- =u_solve_sparse='s singular guard is deliberately *narrowed* to rows the
+  solution depends on (decisions.md 2026-08-13). Sweeping all =m= rows widens
+  it, which would make =SingularBasis= fire or not depending on the density of
+  an unrelated right-hand side. Trying to keep the narrowing meant a per-row
+  "does this position matter" test that needs the reach I just abandoned.
+
+Settled on a smaller shape instead: the four kernels already sweep whatever is
+in =hw.order=, so the fallback only has to *fill =order= differently* -- natural
+topological order over =0..m= (ascending for =L=, descending for =Lt=,
+descending/ascending =uperm_inv= rank for =U=/=Ut=) instead of the sorted
+reach -- and mark the whole accumulator so the reset list covers the sweep.
+The kernels themselves are untouched, and the fallback's behaviour is then
+*exactly* the dense entry points', guard width included, which is the thing it
+is falling back to.
+
+Cost of marking everything: reset becomes O(m) and the next kernel's DFS
+trips the cap immediately. Both are O(m) in a regime where the answer is
+already dense, and =over_cap= is monotone within a solve so it costs one
+pop, not a re-walk.
+
+* 20:20 :issue164:issue165:tests:
+Both fixes implemented and green. =cargo test --release= at the working
+tree: 90 binaries, 855 passed, 0 failed, 21 ignored (was 848 passed at
+895ef65 — the +7 are the new tests). =cargo clippy --all-targets -D
+warnings= clean, =cargo fmt --check= clean in both the root crate and
+=python/=.
+
+The python crate does not link on macOS (=ld: symbol(s) not found for
+architecture arm64=, =__Py_NotImplementedStruct= etc.) — that is the
+usual pyo3 cdylib-without-maturin failure, not the change; =cargo check
+--release= on =python/= is clean, which is what the =LuParams= struct
+literal needed proving. Its 24 warnings are all pre-existing
+=unexpected cfg condition value: gil-refs=.
+
+Threading =sparse_rhs_max_density= through =build_params= was mandatory
+(struct literal). =triangularize: Option<bool>= defaults to =None= =
+follow =dense_bump_max_dim > 0=, which preserves exactly what the
+binding did before, while unbundling the peel from the dense-bump cap
+per issue #165.
+
+* 20:22 :issue165:doc:correction:
+The =analyze= doc comment already carried the ordering cost — the cloud
+session added it in 8c2326f while correcting review finding 4's
+rationale. My first CHANGELOG draft cited my own review numbers
+(4.3-12.4x, 10.329 vs 0.834 ms on QPLIB_1157) against a doc comment that
+cites the in-tree =examples/basis_refactor.rs= harness (4.2-9.8x, 21.28
+vs 2.17 ms on the same basis). Different harnesses, same conclusion, but
+two different numbers for one fact in one repo is a trap for the next
+reader. Rewrote the CHANGELOG onto the in-tree numbers so the doc
+comment is the single source, and dropped "now states" — it already did.
