@@ -1,83 +1,83 @@
 # FERAL Context (auto-generated)
 
-Generated: 2026-08-14T00:46:26Z
+Generated: 2026-08-14T12:01:35Z
 
 ## Latest Session
-File: dev/sessions/2026-08-13-04.md
+File: dev/sessions/2026-08-14-01.md
 ```
-# Session 2026-08-13-04
-
-## Benchmark regression, reported first per protocol
-
-The dense KKT p90 factor ratio vs MUMPS is **worse** than session 03:
-
-| bucket | session 03 | this session |
-|---|---|---|
-| dense small-frontal (<200) | 1.57 | **1.61** |
-| dense medium (<500) | 1.96 | **2.09** |
-| sparse small-frontal (<200) | 1.55 | 1.54 |
-| sparse medium (<500) | 1.55 | 1.54 |
-
-Both buckets still PASS their targets. Nothing this session touched the LDL^T
-KKT path — the changes are in the LU sparse-rhs solves and the LU symbolic — and
-the sparse side is flat to slightly better, so this reads as run-to-run
-variation: the run was in a different worktree (corpus symlinked in) and followed
-a 90-minute discopt panel on the same machine. The tail moved the other way, and
-by a lot more: session 03's worst factor ratio was CHWIRUT1_0216 at **76.18x**
-and this run's is KIRBY2_0007 at **8.93x**, with CHWIRUT1 and CRESC entirely
-absent from the top 10. That asymmetry is itself evidence the p90 delta is noise
-rather than a change in the code. Not asserted as proven; a clean re-run on an
-idle machine would settle it.
+# Session 2026-08-14-01
 
 ## Goal
 
-Fix the two follow-ups the PR #162 review filed against feral: the missing
-density guard on `ftran_sparse`/`btran_sparse` (issue #164) and the LU column
-ordering not being a parameter (issue #165). The review's verdict on discopt
-#1008 was that feral's remaining deficiency is the ordering cost, not the solves;
-these are the two changes that close it out.
-
-A cloud session had already responded to the review (12d1fcc, 8c2326f) but
-explicitly deferred both of these — its commit body says "NOT DONE HERE".
+Fix issue #168 — the claim recorded at `895ef65` that `peel + dense_bump_max_dim
+4096` passes the downstream `bchoco06_illcond_scaled_path_recovers_bound_649`,
+reported from the discopt side as not reproducing.
 
 ## Accomplished
 
-### Issue #164 — density guard on the sparse-rhs entry points (7f1682e)
+**The issue is right. The claim does not reproduce, and I reproduced the
+non-reproduction independently before touching the record.**
 
-`LuParams::sparse_rhs_max_density`, default `0.10`. Past that fraction of `m` the
-reach DFS is abandoned mid-walk and the kernel sweeps the whole basis in natural
-topological order. `1.0` disables the fallback, `0.0` forces it.
-`SparseLu::sparse_rhs_fallbacks()` counts how often it fired.
+Harness: discopt worktree at `bce881ff` unmodified, feral worktrees at `e00aa70`
+and `895ef65`, `[patch.crates-io] feral = { path = … }`, one arm per run,
+`cargo test -p discopt-core --lib bchoco06`. Both feral revs are version
+`0.15.1`, so the patch applies with no version override.
 
-Not the shape the issue suggested. "Skip the sort and sweep `0..m`" breaks two
-invariants: `pattern` is the `O(touched)` reset list restoring `HyperWork`'s
-all-zero-between-calls contract (a nonzero written outside it seeds the *next*
-solve), and `u_solve_sparse`'s `SingularBasis` guard is deliberately narrowed to
-the rows the solution depends on (widening it makes singularity depend on an
-unrelated right-hand side's density). So the fallback marks the whole accumulator
+| feral rev | ordering | cap | result | `PROBE_DENSE_BUMP` firings |
+|---|---|---|---|---|
+| `e00aa70` | whole-basis AMD | 0 | **ok** | 0 |
+| `e00aa70` | peel | 0 | **FAILED** — `Numerical` | 0 |
+| `e00aa70` | peel | 4096 | **FAILED** — `Numerical` | **26** |
+| `895ef65` | peel | 4096 | **FAILED** — `Numerical` | **26** |
+
+Same assertion in every failure, and it is the test's ground truth rather than
+its subject:
+
+```
+assertion `left == right` failed: unscaled cold solve of the bchoco06 root LP must be Optimal
+  left: Numerical
+ right: Optimal
+```
+
+Firing counts come from `eprintln!("PROBE_DENSE_BUMP bump_dim={}", bump_dim)`
+inserted immediately after `want_dense_bump` in `sparse_factor.rs`: 26 in both
+cap-4096 arms, 0 in both cap-0 arms. The failing configuration is therefore one
+where the dense route provably ran, and a silently-unapplied patch is ruled out —
+it would have made the cap-4096 arm identical to peel-no-cap, which it is not.
+My numbers match #168's exactly, including the 26. Row 4 shows the behaviour is
+identical at the commit the claim was authored on, so nothing that landed
+afterwards caused it.
+
+Record corrected in four places:
+
+- `dev/research/lu-ordering-and-kernel-2026-08-13.md` — § "Does the fix strand
+  the 1.71x?" rewritten; the answer is now **yes**.
+- `src/lu/mod.rs` — `LuParams::dense_bump_max_dim` doc now states the cap does
+  not recover the bound and why there is no cap-without-peel fallback.
+- `CHANGELOG.md` — recorded under 0.16.0.
 ```
 
 ## Git Status
 ```
+51f87ec Merge pull request #162 from jkitchin/claude/issue-161-w05b75
+e00aa70 test(lu): make the density-fallback contract test depend on the contract, not the fixture
+55c0ff4 docs: session checkpoint 2026-08-13-04 (issues #164 and #165)
 255e2b7 docs: record what the #164 guard actually recovers
 b8906a6 docs: session checkpoint 2026-08-13-03 (PR #162 review + #1008 verdict)
-37df6df docs: record the #164 guard and the #165 ordering parameter
-4a83bab feat(lu): make the column ordering a parameter, not a choice of constructor
-7f1682e feat(lu): guard the sparse-rhs entry points on solution density
 ```
 
 ## Test Status
 ```
-test symbolic::tests::symbolic_factorize_scotch_produces_valid_perm ... ok
 test symbolic::tests::test_contrib_sizes_nonnegative ... ok
 test symbolic::tests::test_perm_inverse_consistency ... ok
 test symbolic::tests::test_symbolic_factorize_basic ... ok
 test symbolic::tests::test_symbolic_factorize_dense ... ok
 test symbolic::tests::test_symbolic_factorize_kkt ... ok
-test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
-test symbolic::tests::choose_adaptive_routes_arrow_to_amf ... ok
-test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test dense::schur_kernel::tests::schur_panel_minus_nofma_strided_quad_is_bit_exact_vs_four_singles ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuvia_0000 ... ok
+test symbolic::tests::issue_3_scotchnd_on_kkt_recurses_after_o13 ... ok
+test symbolic::tests::is_arrow_bordered_rejects_many_hubs ... ok
+test numeric::factorize::tests::issue_5_mss1_iter0_inertia_wanders_under_delta_w_sweep ... ok
 test symbolic::tests::choose_adaptive_rules ... ok
 test scaling::tests::auto_keeps_mc64_on_vesuviou_0000 ... ok
 test numeric::factorize::tests::issue_5_mss1_zero_tol_sweep_diagnostic ... ok
@@ -86,70 +86,22 @@ test numeric::factorize::tests::issue_5_mss1_pivot_threshold_sweep_diagnostic ..
 test scaling::tests::pick_scaling_strategy_routes_clnlbeam_to_infnorm ... ok
 test scaling::hungarian::tests::mc64_hungarian_no_quadratic_heap_realloc_regression ... ok
 
-test result: ok. 423 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.42s
+test result: ok. 423 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 1.72s
 
 ```
 
 ## Benchmark
 ```
-(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-13-04.md)
+(skipped: pass --with-bench to re-run; sourced from dev/sessions/2026-08-14-01.md)
 
 
-factor/SSIDS       154500       0.04       0.03       0.32       0.94       2.13
-solve/SSIDS        154500       0.92       1.00       2.29       8.00      39.75
-nnzL/MUMPS         153560       0.61       0.58       0.75       4.50      23.11
-nnzL/SSIDS         154500       0.88       1.00       1.00       4.50       5.00
-
-Per-family factor geomean vs MUMPS (top 25 families by count):
-family                  count    geomean        p50        max
-HS118                    3000       0.92       0.95       1.13
-ALLINITC                 3000       0.19       0.20       0.33
-HS91                     3000       0.27       0.30       0.40
-HATFLDBNE                3000       0.41       0.40       0.83
-HS92                     3000       0.35       0.40       0.44
-ALLINITA                 3000       0.41       0.40       0.92
-CONCON                   3000       0.87       0.94       1.75
-MGH10LS                  3000       0.21       0.22       0.25
-HS90                     3000       0.20       0.20       0.33
-DJTL                     3000       0.09       0.10       0.22
-HS89                     3000       0.20       0.20       0.40
-MCONCON                  3000       0.89       0.94       1.72
-PALMER7A                 3000       0.29       0.30       0.33
-PALMER5A                 3000       0.29       0.30       0.89
-SSINE                    3000       0.27       0.27       0.40
-HS13                     3000       0.17       0.20       0.70
-HATFLDH                  3000       0.43       0.45       0.55
-BIGGSC4                  3000       0.43       0.45       0.60
-SSI                      3000       0.21       0.22       0.38
-AVION2                   2682       1.46       1.50       2.07
-CERI651ALS               2331       0.27       0.27       0.40
-PFIT4                    2286       0.25       0.27       0.30
-CERI651C                 2233       0.28       0.30       0.90
-CERI651CLS               2227       0.27       0.27       0.40
-BATCH                    2054       1.32       1.38       1.77
-
-Top 10 worst factor-ratio vs MUMPS:
-name                             n    feral(μs)    mumps(μs)      ratio
-KIRBY2_0007                    458         1063          119       8.93
-KIRBY2_0006                    458         1008          127       7.94
-KIRBY2_0008                    458          903          122       7.40
-KIRBY2_0009                    458          904          128       7.06
-CHWIRUT2_0144                  159          303           43       7.05
-ACOPP30_0090                   209          549           84       6.54
-KIRBY2_0010                    458          784          133       5.89
-KIRBY2_0011                    458          677          120       5.64
-CHWIRUT2_0141                  159          235           43       5.47
-MUONSINE_0000                 1537         1883          376       5.01
-
---- Dense Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     147982     1.61     <= 2.0     PASS
-medium (<500)            152145     2.09     <= 3.0     PASS
-
---- Sparse Phase 2.8.1 exit partition (factor ratio vs MUMPS) ---
-bucket                    count      p90     target  verdict
-small-frontal (<200)     153455     1.54     <= 2.0     PASS
-medium (<500)            153560     1.54     <= 3.0     PASS
+Not re-run. This session changed one doc comment in `src/lu/mod.rs` and
+otherwise only `dev/` and `CHANGELOG.md`; no executable code path was touched, so
+the LDLᵀ bench measures the same binary behaviour as session 2026-08-13-04.
+Session 04's numbers stand, including its dense-KKT p90 regression — small-frontal
+1.57 → **1.61** (target ≤ 2.0, PASS) and medium 1.96 → **2.09** (target ≤ 3.0,
+PASS) — which is reported here rather than omitted because it is the most recent
+unfavourable comparison on record.
 
 ```
 
@@ -186,26 +138,26 @@ could not tell an inert guard from a working one.
 Evidence: PR #162 review, findings 1 and 4; `dev/journal/2026-08-13-04.org`.
 
 ## Recent Tried-and-Rejected
-validates `symbolic.m == a.m`, a stale ordering is *legal*, so the obvious fix
-was to compute the ordering once and reuse the handle on every refactorization.
+**The arm is not vacuous**, which is the failure mode that would have made this
+uninteresting: a counter printed immediately after `want_dense_bump` is computed
+fires 26 times in both cap-4096 arms and 0 times in both cap-0 arms. The dense
+route demonstrably ran in the configurations that failed.
 
-Probed in discopt behind `DISCOPT_LU_SYM_REUSE` (a `sym_cache: Option<SparseLuSymbolic>`
-on `FeralLU`, never merged). On QPLIB_3775 with `analyze_triangularized`:
+Why the original run passed is undetermined. Vacuity is ruled out — a patch that
+failed to apply would have reproduced peel-no-cap, which fails. Stale build
+artifacts and an arm mix-up are the two candidates that cannot be separated after
+the fact.
 
-| arm | factorizations | LuNumeric | wall |
-|---|---|---|---|
-| tri=1, reuse=0 | 64 | 184.6 ms | **1.193 s** |
-| tri=1, reuse=1 | 1112 | 18381 ms | **137.835 s** |
+**Consequence.** `sparse_factor.rs` gates `want_dense_bump` on
+`symbolic.triangularized`, so there is no cap-without-peel fallback: the 1.71x
+and the lost dual bound are the same lever. #163's coupling argument stands, and
+`895ef65` was the only evidence against it.
 
-**115x slower.** tri=0 reuse=1 did not finish inside a 300 s timeout. A simplex
-basis is not structurally stable across 64 pivots: the stale ordering explodes
-fill, the fill blows the numeric factorization, and the resulting instability
-triggers a refactorization storm (64 → 1112) that feeds back on itself.
-
-The conclusion is not "reuse harder" — it is that the ordering **must** be
-recomputed on every refactorization, and therefore must be cheap. That is what
-makes the `analyze` vs `analyze_triangularized` cost (4.3-12.4x, measured
-standalone) a first-order effect rather than an amortizable one.
+**Practice this changes.** The retracted measurement was recorded without any
+proof that the code path under test had executed, on a route that is a *silent
+fallback* — exactly the condition #162 already argued required `used_dense_bump()`
+for its own tests. A pass/fail on a silent-fallback path is not evidence unless
+the arm also shows the path fired. Instrument first, then measure.
 
 ## Source Files
 ```
@@ -348,5 +300,9 @@ tests/sparse_postorder.rs
 tests/sparse_refined.rs
 tests/sqd_fast_path.rs
 tests/static_assembly_maps.rs
-
-(truncated from      356 lines to 350 line budget)
+tests/stress_tests.rs
+tests/symbolic_profiler.rs
+tests/task_plan_parity.rs
+tests/threshold_consistency.rs
+tests/tiny_fast_path.rs
+```
