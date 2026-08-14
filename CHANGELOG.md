@@ -4,6 +4,8 @@ All notable changes to FERAL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-14
+
 ### Changed — `SparseLu::factor` now defaults to threshold-Markowitz pivoting (issue #171)
 
 - New `LuParams::pivoting: LuPivoting`, defaulting to `LuPivoting::Markowitz`.
@@ -330,7 +332,7 @@ All notable changes to FERAL will be documented in this file.
   solves turn out to be ~1% of that solve, not the 93% issue #161 originally
   attributed to the LU layer (a figure since retracted by its author). Three
   other QPLIB instances gain 4–13%. The cost that *does* move that LP is numeric
-  factorization, via `dense_bump_max_dim` — a different knob, added in 0.15.2.
+  factorization, via `dense_bump_max_dim` — a different knob, added below.
 
 ### Added — reach-limited ("hyper-sparse") sparse-LU triangular solves *(issue #161B)*
 

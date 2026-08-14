@@ -180,6 +180,15 @@ pub struct LuParams {
     /// because they never looked for structure, so setting this cap alongside
     /// any of them is a no-op however large it is.
     ///
+    /// **And since 0.16.0 it requires [`Self::pivoting`] pinned to
+    /// [`LuPivoting::GilbertPeierls`].** The default
+    /// [`LuPivoting::Markowitz`] chooses its own column order and never reads
+    /// the symbolic, so there is no peeled bump for this route to pack — under
+    /// the shipped defaults the cap is inert twice over. Reaching it takes all
+    /// three: `GilbertPeierls`, `analyze_triangularized`, and a non-zero cap
+    /// (issue #171). [`used_dense_bump`](super::SparseLu::used_dense_bump)
+    /// reports whether it fired.
+    ///
     /// Opting into the peel is worth having on its own — it is 4.2–9.8x on the
     /// symbolic step, which a simplex pays on every refactorization — but it
     /// also changes the rounding trajectory, and that is not free: see

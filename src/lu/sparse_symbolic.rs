@@ -1,8 +1,17 @@
 //! Symbolic analysis for the sparse LU: the fill-reducing column ordering `Q`.
 //!
+//! **Since 0.16.0 nothing in this module is on the default factorization path.**
+//! [`super::LuParams::pivoting`] defaults to [`super::LuPivoting::Markowitz`],
+//! which chooses its column order *during* the numeric factorization and reads
+//! the symbolic it is handed only to check its dimension. Everything below —
+//! both orderings and the tradeoff between them — applies to
+//! [`super::SparseLu::factor`] only under
+//! `LuParams { pivoting: LuPivoting::GilbertPeierls, ..Default::default() }`
+//! (issue #171). [`super::SparseLu::used_markowitz`] reports which rule ran.
+//!
 //! Two orderings, and the caller picks:
 //!
-//! - [`SparseLuSymbolic::analyze`] — the **default**: feral's in-tree AMD
+//! - [`SparseLuSymbolic::analyze`] — the **default of the two**: feral's in-tree AMD
 //!   (`feral_amd`) on the whole basis's `AᵀA` (column-intersection) pattern, a
 //!   stand-in for COLAMD that needs no new ordering algorithm.
 //! - [`SparseLuSymbolic::analyze_triangularized`] — **opt-in**: first peel
@@ -93,8 +102,29 @@ pub struct SparseLuSymbolic {
 }
 
 impl SparseLuSymbolic {
-    /// AMD over the whole basis. The default ordering, and the one to use
-    /// unless you are opting into the dense-bump route.
+    /// AMD over the whole basis. The default ordering of the two this module
+    /// offers, and the one to use unless you are opting into the dense-bump
+    /// route.
+    ///
+    /// # Since 0.16.0 this is not what `SparseLu::factor` does by default
+    ///
+    /// [`super::LuParams::pivoting`] defaults to
+    /// [`super::LuPivoting::Markowitz`], which picks each pivot column during
+    /// the factorization and never consults the ordering computed here. Under
+    /// the shipped defaults, calling `analyze` and passing the result to
+    /// [`super::SparseLu::factor`] costs the AMD run and changes nothing about
+    /// the factor produced. To get this ordering, ask for it:
+    /// `LuParams { pivoting: LuPivoting::GilbertPeierls, ..Default::default() }`.
+    /// [`super::SparseLu::used_markowitz`] reports which rule actually ran, so a
+    /// caller need not infer it.
+    ///
+    /// The rest of this comment weighs whole-basis AMD against the peel. That
+    /// comparison is unchanged and still decides
+    /// [`Self::analyze`]-vs-[`Self::analyze_triangularized`] — but it is a
+    /// comparison *within* the Gilbert-Peierls route, not a description of what
+    /// feral does out of the box. On the 16-basis LP corpus Markowitz beat
+    /// whole-basis AMD on fill by 2.77x -> 1.06x geomean, which is why the
+    /// default moved (issue #171, `CHANGELOG.md` 0.16.0).
     ///
     /// # Why this does not triangularize
     ///
@@ -169,6 +199,11 @@ impl SparseLuSymbolic {
     /// for callers that want the ordering to be a setting they can flip and
     /// measure rather than a constructor they have to choose at the call site.
     /// Both of those are thin wrappers over this.
+    ///
+    /// Since 0.16.0 this setting is only observable under
+    /// `LuParams { pivoting: LuPivoting::GilbertPeierls, .. }`; the default
+    /// [`super::LuPivoting::Markowitz`] orders columns itself. See
+    /// [`Self::analyze`].
     pub fn analyze_with(a: &SparseColMatrix, params: LuOrderingParams) -> Result<Self, FeralError> {
         if params.triangularize {
             Self::analyze_triangularized(a)
@@ -200,6 +235,12 @@ impl SparseLuSymbolic {
     /// qualify your own instances against it; that is a real prerequisite, not
     /// boilerplate.
     ///
+    /// Since 0.16.0 this ordering reaches the factor only under
+    /// `LuParams { pivoting: LuPivoting::GilbertPeierls, .. }` — the default
+    /// [`super::LuPivoting::Markowitz`] ignores the symbolic, which also makes
+    /// [`super::LuParams::dense_bump_max_dim`] unreachable without that pin.
+    /// See [`Self::analyze`].
+    ///
     /// Equivalent to [`Self::analyze_with`] at
     /// `LuOrderingParams { triangularize: true }`.
     pub fn analyze_triangularized(a: &SparseColMatrix) -> Result<Self, FeralError> {
@@ -227,7 +268,10 @@ impl SparseLuSymbolic {
 
     /// AMD over the whole basis, with no triangularization. Identical to
     /// [`Self::analyze`]; retained as an explicit name for benchmark arms that
-    /// compare the two orderings side by side.
+    /// compare the two orderings side by side. Such an arm must pin
+    /// `LuParams { pivoting: LuPivoting::GilbertPeierls, .. }` since 0.16.0, or
+    /// both arms factor the same Markowitz ordering and the comparison is
+    /// vacuous — see [`Self::analyze`].
     pub fn analyze_amd_only(a: &SparseColMatrix) -> Result<Self, FeralError> {
         let m = a.m;
         if m == 0 {
