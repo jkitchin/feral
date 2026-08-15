@@ -418,7 +418,14 @@ fn cache_hits() {
         "\n\n=== #153: does the MC64 warm scaling cache hit across an iterate sequence? ===\n"
     );
     let base = Path::new("data/matrices/kkt-mittelmann");
-    for prob in ["marine_1600", "dtoc1nd", "rocket_12800"] {
+    for prob in [
+        "clnlbeam",
+        "dtoc1nd",
+        "steering_12800",
+        "rocket_12800",
+        "marine_1600",
+        "dtoc2",
+    ] {
         let its = iterates(&base.join(prob), 20);
         if its.is_empty() {
             continue;

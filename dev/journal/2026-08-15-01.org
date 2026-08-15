@@ -129,3 +129,43 @@ KKTs, quantified above); #153's MC64 half is a guard-tuning question with a
 correctness cost; #134B is a real bug with no measured payoff and a
 recalibration dependency. Reporting all three to the user before writing
 any implementation.
+
+* 11:40 :issue-153:sizing:correction:
+Followed up on the open question I flagged: which strategy each of the six
+actually *runs* at steady state, not which one the picker returns at
+iterate 0. A cache hit is only possible if MC64 ran (the =mc64_ran= gate
+requires it), so the hit counter is a sufficient probe. Ran all six:
+
+: matrix          picker@0        hits      steady-state route
+: clnlbeam        InfNorm         0 / 2     InfNorm  (pattern stable, so 0 is real)
+: steering_12800  InfNorm         0 / 3     InfNorm  (pattern stable, so 0 is real)
+: dtoc1nd         InfNorm        14 / 20    MC64     (sticky-Auto pin moved it)
+: rocket_12800    Mc64Symmetric   0 / 2     MC64     (pattern changes between the only 2 dumps)
+: marine_1600     Mc64Symmetric  12 / 18    MC64
+: dtoc2           InfNorm         0 / 1     unknown -- only one usable dump
+
+So the InfNorm-routed set is *two* of the six, not four. dtoc1nd looked
+like an InfNorm matrix from the picker and is not: its 14 cache hits prove
+the Hungarian ran, so the sticky-Auto pin (#65 fallback or #51) moved it
+onto MC64 after the first factor. My earlier sizing of the KR warm-start
+lever assumed four InfNorm matrices and is therefore too generous.
+
+Corrected sizing, using the same warm sequences:
+
+: matrix          warm factor   KR (10 sweeps)   KR share   halved -> saves
+: clnlbeam           30.2 ms        4.1 ms        13.6%       ~7% of factor
+: steering_12800     25.5 ms        6.0 ms        23.5%      ~12% of factor
+
+~7-12% on the two matrices that actually run InfNorm, not 10-20% across
+four. The lever is real but narrower than I reported.
+
+* 11:50 :corpus:data-quality:
+=dtoc2_0001.mtx= and =dtoc2_0002.mtx= fail to load:
+
+: read_mtx failed: IoError("... line 849754: non-finite value 'inf'")
+
+The reader is correct to reject them -- the dumps contain a literal =inf=.
+dtoc2 therefore has exactly one usable iterate in the repo, so every dtoc2
+claim in #153 (including its 1.29x ratio and its 21.0% scaling share) rests
+on a single matrix. Not a feral bug; a corpus gap to note before anyone
+uses dtoc2 as a fixture.
